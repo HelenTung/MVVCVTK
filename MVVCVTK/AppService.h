@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 #include "AppInterfaces.h"
 #include <vtkCubeAxesActor.h>
 #include <map>
@@ -8,24 +8,24 @@ private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
 public:
-    MedicalVizService();
+    MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr);
 
-    // ÒµÎñÈë¿Ú£º¼ÓÔØÎÄ¼ş
+    // ä¸šåŠ¡å…¥å£ï¼šåŠ è½½æ–‡ä»¶
     void LoadFile(const std::string& path);
 
-    // ÒµÎñ¹¦ÄÜ£ºÇĞ»»µ½ÌåäÖÈ¾
+    // ä¸šåŠ¡åŠŸèƒ½ï¼šåˆ‡æ¢åˆ°ä½“æ¸²æŸ“
     void ShowVolume();
 
-    // ÒµÎñ¹¦ÄÜ£ºÇĞ»»µ½µÈÖµÃæ
+    // ä¸šåŠ¡åŠŸèƒ½ï¼šåˆ‡æ¢åˆ°ç­‰å€¼é¢
     void ShowIsoSurface();
 
-    // ÒµÎñ¹¦ÄÜ£ºÇĞ»»µ½ Z ÖáÇĞÆ¬
+	// ä¸šåŠ¡åŠŸèƒ½ï¼šåˆ‡æ¢åˆ°2dè½´åˆ‡ç‰‡
     void ShowSliceAxial();
 
 private:
     void UpdateAxes();
 
-	// »ñÈ¡»ò´´½¨²ßÂÔ
+    // è·å–æˆ–åˆ›å»ºç­–ç•¥
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ClearCache();
 };

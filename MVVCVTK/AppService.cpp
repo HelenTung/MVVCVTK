@@ -25,9 +25,9 @@ void AbstractAppService::SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> 
 }
 
 // --- 具体服务实现 ---
-MedicalVizService::MedicalVizService() {
+MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr) {
     // 实例化具体的 DataManager
-    m_dataManager = std::make_shared<RawVolumeDataManager>();
+    m_dataManager = dataMgr;
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
@@ -110,4 +110,4 @@ void MedicalVizService::ClearCache()
     }
 }
 
-// vtk vtkrenderwindows? 
+// vtk vtkren
