@@ -129,10 +129,10 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     plane->SetOrigin(center);
 
     // 设置法线 (Normal)：决定切片的方向
-    if (m_orientation == AXIAL) {
+    if (m_orientation == Orientation::AXIAL) {
         plane->SetNormal(0, 0, 1); // Z轴法线
     }
-    else if (m_orientation == CORONAL) {
+    else if (m_orientation == Orientation::CORONAL) {
         plane->SetNormal(0, 1, 0); // Y轴法线
     }
     else {
@@ -147,10 +147,10 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     img->GetDimensions(dims);
 
     // 根据方向决定最大索引
-    if (m_orientation == AXIAL) {
+    if (m_orientation == Orientation::AXIAL) {
         m_maxIndex = dims[2] - 1; // Z轴
     }
-    else if (m_orientation == CORONAL) {
+    else if (m_orientation == Orientation::CORONAL) {
         m_maxIndex = dims[1] - 1; // Y轴
     }
     else {
@@ -185,25 +185,38 @@ void SliceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 }
 
 void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
+    if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影
 
-    // 强制相机视角
-    if (m_orientation == AXIAL) {
+	double imgCenter[3];
+    if (m_mapper && m_mapper->GetInput()) {
+        m_mapper->GetInput()->GetCenter(imgCenter);
+    }
+
+    // 初次设置
+    cam->SetFocalPoint(imgCenter);
+    double distance = 1000.0; 
+    
+    switch (m_orientation) {
+    case Orientation::AXIAL:
+        // AXIAL (轴状位): 从头顶往下看
+        cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
         cam->SetViewUp(0, 1, 0);
-        cam->SetPosition(0, 0, 1000); // 放在Z轴远处
-        cam->SetFocalPoint(0, 0, 0);
+        break;
+
+    case Orientation::CORONAL:
+        // CORONAL (冠状位): 从前面往后看
+        cam->SetPosition(imgCenter[0], imgCenter[1] + distance, imgCenter[2]);
+        cam->SetViewUp(0, 0, 1); // Z轴是向上的
+        break;
+
+    case Orientation::SAGITTAL:
+        // SAGITTAL (矢状位): 从侧面看
+        cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
+        cam->SetViewUp(0, 0, 1); // Z轴是向上的
+        break;
     }
-    else if (m_orientation == CORONAL) {
-        cam->SetViewUp(0, 0, 1);
-        cam->SetPosition(0, 1000, 0); // 放在Y轴远处
-        cam->SetFocalPoint(0, 0, 0);
-    }
-    else { // SAGITTAL
-        cam->SetViewUp(0, 0, 1);
-        cam->SetPosition(1000, 0, 0);
-        cam->SetFocalPoint(0, 0, 0);
-    } // 放在X轴远处
 
 	ren->ResetCamera(); 
     ren->ResetCameraClippingRange();
@@ -220,6 +233,49 @@ void SliceStrategy::SetInteractionValue(int delta) {
     UpdatePlanePosition();
 }
 
+void SliceStrategy::SetOrientation(Orientation orient)
+{
+    if (m_orientation == orient) return;
+    m_orientation = orient;
+
+    // 获取当前数据和 Mapper 中的平面
+    if (!m_mapper) return;
+    vtkImageData* input = m_mapper->GetInput();
+    vtkPlane* plane = m_mapper->GetSlicePlane();
+    if (!input || !plane) return;
+
+    // 更新切片法线
+    if (m_orientation == Orientation::AXIAL) {
+        plane->SetNormal(0, 0, 1);
+    }
+    else if (m_orientation == Orientation::CORONAL) {
+        plane->SetNormal(0, 1, 0);
+    }
+    else { // SAGITTAL
+        plane->SetNormal(1, 0, 0);
+    }
+
+    // 更新最大索引 (因为不同轴向的维度不同)
+    int dims[3];
+    input->GetDimensions(dims);
+
+    if (m_orientation == Orientation::AXIAL) {
+        m_maxIndex = dims[2] - 1;
+    }
+    else if (m_orientation == Orientation::CORONAL) {
+        m_maxIndex = dims[1] - 1;
+    }
+    else {
+        m_maxIndex = dims[0] - 1;
+    }
+
+    // 重置当前索引到中间，防止越界或黑屏
+    m_currentIndex = m_maxIndex / 2;
+
+    // 应用新的位置
+    UpdatePlanePosition();
+}
+
 void SliceStrategy::UpdatePlanePosition() {
     vtkImageData* input = m_mapper->GetInput();
     vtkPlane* plane = m_mapper->GetSlicePlane();
@@ -233,10 +289,10 @@ void SliceStrategy::UpdatePlanePosition() {
     plane->GetOrigin(planeOrigin); // 获取当前平面的其他轴坐标
 
     // 计算公式：物理位置 = 数据原点 + (层数 * 层厚)
-    if (m_orientation == AXIAL) {
+    if (m_orientation == Orientation::AXIAL) {
         planeOrigin[2] = origin[2] + (m_currentIndex * spacing[2]);
     }
-    else if (m_orientation == CORONAL) {
+    else if (m_orientation == Orientation::CORONAL) {
         planeOrigin[1] = origin[1] + (m_currentIndex * spacing[1]);
     }
     else { // SAGITTAL

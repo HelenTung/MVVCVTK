@@ -24,6 +24,10 @@ public:
 
 	// 更新交互值 (如切片位置)
     void UpdateInteraction(int value);
+
+	// 更新切片朝向
+    void UpdateSliceOrientation(Orientation orient);
+
 private:
     void UpdateAxes();
 

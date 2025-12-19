@@ -70,6 +70,16 @@ void MedicalVizService::UpdateInteraction(int value)
     }
 }
 
+void MedicalVizService::UpdateSliceOrientation(Orientation orient)
+{
+    auto strategy = GetStrategy(VizMode::AxialSlice);
+    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(strategy);
+    if (sliceStrategy) {
+        sliceStrategy->SetOrientation(orient);
+		SwitchStrategy(sliceStrategy);
+    }
+}
+
 void MedicalVizService::UpdateAxes() {
     if (m_renderer && m_dataManager->GetVtkImage()) {
         m_cubeAxes->SetBounds(m_dataManager->GetVtkImage()->GetBounds());

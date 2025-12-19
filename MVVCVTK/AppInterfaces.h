@@ -11,6 +11,8 @@
 
 // --- 可视化模式枚举 ---
 enum class VizMode { Volume, IsoSurface, AxialSlice };
+// 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
+enum class Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
 
 // --- 数据管理抽象类 ---
 class AbstractDataManager {

@@ -32,8 +32,6 @@ public:
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
 class SliceStrategy : public AbstractVisualStrategy {
-public:
-    enum Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
 private:
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
@@ -51,6 +49,9 @@ public:
 
     // 调整切片位置
     void SetInteractionValue(int delta) override;
+
+    // 设置切片朝向
+    void SetOrientation(Orientation orient);
 
 private:
     void UpdatePlanePosition();
