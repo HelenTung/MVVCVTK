@@ -65,9 +65,14 @@ void MedicalVizService::ShowSliceAxial() {
 
 void MedicalVizService::UpdateInteraction(int value)
 {
-    if (m_currentStrategy) {
-        m_currentStrategy->SetInteractionValue(value);
-    }
+	auto it = m_strategyCache.find(VizMode::AxialSlice);
+    if (it != m_strategyCache.end()) {
+        auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(it->second);
+        if (sliceStrategy) {
+            sliceStrategy->SetInteractionValue(value);
+            SwitchStrategy(sliceStrategy);
+        }
+	}
 }
 
 void MedicalVizService::UpdateSliceOrientation(Orientation orient)

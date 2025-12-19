@@ -42,10 +42,8 @@ public:
     virtual void Attach(vtkSmartPointer<vtkRenderer> renderer) = 0;
     // 原子操作：下台 (从 Renderer 移除)
     virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // 视图专属的相机配置 (不做改变)
+    // 视图专属的相机配置 
     virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
-    // 扩展：处理交互 (如切片索引)
-    virtual void SetInteractionValue(int value) {}
 };
 
 // --- 服务集成抽象类 ---

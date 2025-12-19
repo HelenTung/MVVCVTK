@@ -48,7 +48,7 @@ public:
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override; // 关键：平行投影
 
     // 调整切片位置
-    void SetInteractionValue(int delta) override;
+    void SetInteractionValue(int delta);
 
     // 设置切片朝向
     void SetOrientation(Orientation orient);
