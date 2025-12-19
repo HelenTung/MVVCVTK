@@ -133,6 +133,7 @@
     <ClInclude Include="AppService.h" />
     <ClInclude Include="DataConverters.h" />
     <ClInclude Include="DataManager.h" />
+    <ClInclude Include="StdRenderContext.h" />
     <ClInclude Include="StrategyFactory.h" />
     <ClInclude Include="VisualStrategies.h" />
   </ItemGroup>
@@ -141,6 +142,7 @@
     <ClCompile Include="DataConverters.cpp" />
     <ClCompile Include="DataManager.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="StdRenderContext.cpp" />
     <ClCompile Include="VisualStrategies.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

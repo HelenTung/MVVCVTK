@@ -38,7 +38,10 @@ private:
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     Orientation m_orientation;
-
+    
+    // 状态记录
+    int m_currentIndex = 0;
+    int m_maxIndex = 0;
 public:
     SliceStrategy(Orientation orient);
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
@@ -47,5 +50,8 @@ public:
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override; // 关键：平行投影
 
     // 调整切片位置
-    void SetInteractionValue(int value) override;
+    void SetInteractionValue(int delta) override;
+
+private:
+    void UpdatePlanePosition();
 };

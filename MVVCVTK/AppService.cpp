@@ -63,6 +63,13 @@ void MedicalVizService::ShowSliceAxial() {
     if (m_renderer) m_renderer->RemoveActor(m_cubeAxes);
 }
 
+void MedicalVizService::UpdateInteraction(int value)
+{
+    if (m_currentStrategy) {
+        m_currentStrategy->SetInteractionValue(value);
+    }
+}
+
 void MedicalVizService::UpdateAxes() {
     if (m_renderer && m_dataManager->GetVtkImage()) {
         m_cubeAxes->SetBounds(m_dataManager->GetVtkImage()->GetBounds());

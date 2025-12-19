@@ -143,11 +143,36 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_mapper->SetSlicePlane(plane);
     m_slice->SetMapper(m_mapper);
 
+    int dims[3];
+    img->GetDimensions(dims);
+
+    // 根据方向决定最大索引
+    if (m_orientation == AXIAL) {
+        m_maxIndex = dims[2] - 1; // Z轴
+    }
+    else if (m_orientation == CORONAL) {
+        m_maxIndex = dims[1] - 1; // Y轴
+    }
+    else {
+        m_maxIndex = dims[0] - 1; // X轴
+    }
+
+    // 重置当前索引为中间位置，保证一开始能看到图
+    m_currentIndex = m_maxIndex / 2;
+
+    // 强制更新一次位置，确保画面同步
+    UpdatePlanePosition();
+
     // 自动对比度
     double range[2];
     img->GetScalarRange(range);
-    m_slice->GetProperty()->SetColorWindow(range[1] - range[0]);
-    m_slice->GetProperty()->SetColorLevel((range[1] + range[0]) / 2.0);
+    double window = range[1] - range[0];
+    double level = (range[1] + range[0]) / 2.0;
+
+    if (window < 1.0) window = 1.0;
+
+    m_slice->GetProperty()->SetColorWindow(window);
+    m_slice->GetProperty()->SetColorLevel(level);
 }
 
 void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
@@ -177,40 +202,46 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     else { // SAGITTAL
         cam->SetViewUp(0, 0, 1);
         cam->SetPosition(1000, 0, 0);
+        cam->SetFocalPoint(0, 0, 0);
     } // 放在X轴远处
+
 	ren->ResetCamera(); 
+    ren->ResetCameraClippingRange();
 }
 
-void SliceStrategy::SetInteractionValue(int value) {
-    vtkPlane* plane = m_mapper->GetSlicePlane();
-    if (!plane) return;
 
+void SliceStrategy::SetInteractionValue(int delta) {
+
+    m_currentIndex += delta;
+
+    if (m_currentIndex < 0) m_currentIndex = 0;
+    if (m_currentIndex > m_maxIndex) m_currentIndex = m_maxIndex;
+
+    UpdatePlanePosition();
+}
+
+void SliceStrategy::UpdatePlanePosition() {
     vtkImageData* input = m_mapper->GetInput();
-    if (!input) return;
+    vtkPlane* plane = m_mapper->GetSlicePlane();
 
-    double spacing[3]; // 层厚 (比如 0.5mm)
-    double origin[3];  // 数据原本的起始坐标 (比如 -100.0mm)
-    input->GetSpacing(spacing);
+    double origin[3];  // 数据的世界坐标原点
+    double spacing[3]; // 像素间距
     input->GetOrigin(origin);
+    input->GetSpacing(spacing);
 
-    // 获取当前平面的原点，准备修改它
     double planeOrigin[3];
-    plane->GetOrigin(planeOrigin);
+    plane->GetOrigin(planeOrigin); // 获取当前平面的其他轴坐标
 
-    // 计算物理坐标： 物理位置 = 起始点 + (层数 * 层厚)
+    // 计算公式：物理位置 = 数据原点 + (层数 * 层厚)
     if (m_orientation == AXIAL) {
-        // 修改 Z 轴高度
-        planeOrigin[2] = origin[2] + (value * spacing[2]);
+        planeOrigin[2] = origin[2] + (m_currentIndex * spacing[2]);
     }
     else if (m_orientation == CORONAL) {
-        // 修改 Y 轴深度
-        planeOrigin[1] = origin[1] + (value * spacing[1]);
+        planeOrigin[1] = origin[1] + (m_currentIndex * spacing[1]);
     }
     else { // SAGITTAL
-        // 修改 X 轴水平位置
-        planeOrigin[0] = origin[0] + (value * spacing[0]);
+        planeOrigin[0] = origin[0] + (m_currentIndex * spacing[0]);
     }
 
-    // 应用新的位置
     plane->SetOrigin(planeOrigin);
 }

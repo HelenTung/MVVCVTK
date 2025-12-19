@@ -65,3 +65,58 @@ public:
     // 核心调度逻辑 (在 .cpp 中实现)
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
+
+// --- 抽象控制层接口 ---
+class AbstractRenderContext {
+protected:
+    // VTK 核心渲染管线
+    vtkSmartPointer<vtkRenderer> m_renderer;
+    vtkSmartPointer<vtkRenderWindow> m_renderWindow;
+
+    // 持有业务服务的基类指针 (多态)
+    std::shared_ptr<AbstractAppService> m_service;
+
+public:
+    virtual ~AbstractRenderContext() = default;
+    AbstractRenderContext() {
+        m_renderer = vtkSmartPointer<vtkRenderer>::New();
+        m_renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+        m_renderWindow->AddRenderer(m_renderer);
+    }
+
+    // 绑定业务服务
+    virtual void BindService(std::shared_ptr<AbstractAppService> service) {
+        m_service = service;
+        // 初始化 Service 内部的 VTK 对象
+        if (m_service) {
+            m_service->Initialize(m_renderWindow, m_renderer);
+        }
+    }
+
+    // 核心渲染接口
+    virtual void Render() {
+        if (m_renderWindow) m_renderWindow->Render();
+    }
+
+    virtual void ResetCamera() {
+        if (m_renderer) m_renderer->ResetCamera();
+    }
+
+    // 抽象交互接口 (子类需实现具体的交互器逻辑) mode: 告知 Context 当前进入了什么模式，Context 决定切换什么动作
+    virtual void SetInteractionMode(VizMode mode) = 0;
+    // 启动视窗 (Qt 模式下可能为空实现，因为 Qt 主循环接管)
+    virtual void Start() = 0;
+
+protected:
+    // 静态回调函数转发器 (用于 VTK C-Style 回调)
+    static void DispatchVTKEvent(vtkObject* caller, long unsigned int eventId,
+        void* clientData, void* callData) {
+        auto* context = static_cast<AbstractRenderContext*>(clientData);
+        if (context) {
+            context->HandleVTKEvent(caller, eventId, callData);
+        }
+    }
+
+    // 子类重写此方法处理具体事件
+    virtual void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) {}
+};

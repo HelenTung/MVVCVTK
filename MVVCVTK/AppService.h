@@ -22,6 +22,8 @@ public:
 	// 业务功能：切换到2d轴切片
     void ShowSliceAxial();
 
+	// 更新交互值 (如切片位置)
+    void UpdateInteraction(int value);
 private:
     void UpdateAxes();
 

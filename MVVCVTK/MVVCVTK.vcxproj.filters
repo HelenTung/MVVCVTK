@@ -36,6 +36,9 @@
     <ClInclude Include="StrategyFactory.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="StdRenderContext.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">
@@ -52,6 +55,9 @@
     </ClCompile>
     <ClCompile Include="main.cpp">
       <Filter>源文件\main</Filter>
+    </ClCompile>
+    <ClCompile Include="StdRenderContext.cpp">
+      <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
