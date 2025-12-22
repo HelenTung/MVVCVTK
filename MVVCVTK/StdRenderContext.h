@@ -14,6 +14,7 @@ private:
     VizMode m_currentMode = VizMode::Volume;
 
 public:
+    void InitInteractor();
     StdRenderContext();
     void Start() override;
     void SetInteractionMode(VizMode mode) override;

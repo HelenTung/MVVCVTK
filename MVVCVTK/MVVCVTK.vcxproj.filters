@@ -39,6 +39,9 @@
     <ClInclude Include="StdRenderContext.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="AppState.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">

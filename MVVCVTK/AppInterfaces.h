@@ -10,7 +10,14 @@
 #include <string>
 
 // --- 可视化模式枚举 ---
-enum class VizMode { Volume, IsoSurface, AxialSlice };
+enum class VizMode { 
+    Volume, 
+    IsoSurface, 
+    AxialSlice, 
+	CompositeVolume, // 3D 体渲染 + 切片平面
+	CompositeIsoSurface  // 3D 等值面 + 切片平面
+};
+
 // 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
 enum class Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
 
@@ -42,7 +49,7 @@ public:
     virtual void Attach(vtkSmartPointer<vtkRenderer> renderer) = 0;
     // 原子操作：下台 (从 Renderer 移除)
     virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // 视图专属的相机配置 
+    // 视图专属的相机配置 (不做改变)
     virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
 };
 

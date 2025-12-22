@@ -131,6 +131,7 @@
   <ItemGroup>
     <ClInclude Include="AppInterfaces.h" />
     <ClInclude Include="AppService.h" />
+    <ClInclude Include="AppState.h" />
     <ClInclude Include="DataConverters.h" />
     <ClInclude Include="DataManager.h" />
     <ClInclude Include="StdRenderContext.h" />

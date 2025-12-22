@@ -14,58 +14,71 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 int main() {
     // 数据是唯一的，加载一次内存
+    auto sharedState = std::make_shared<SharedInteractionState>();
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    if (!sharedDataMgr->LoadData("D:\\CT-1209\\data\\465x428x452_clod-negative-electrode.raw")) {
+    if (!sharedDataMgr->LoadData("D:\\CT-1209\\data\\1000X1000X1000.raw")) {
         return -1;
     }
+    else
+    {
+        int dims[3];
+        sharedDataMgr->GetVtkImage()->GetDimensions(dims);
+        // 强制初始化共享状态到中心
+        sharedState->SetCursorPosition(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+    }
 
-    // ================= 窗口 A：显示 3D 体渲染 =================
-    auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr);
+    // --- 窗口 A ---
+    auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextA = std::make_shared<StdRenderContext>();
-
     contextA->BindService(serviceA);
-    serviceA->ShowIsoSurface(); // 业务操作
-    contextA->SetInteractionMode(VizMode::IsoSurface); // 交互操作
+    serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
+    sharedState->AddObserver([serviceA]() { serviceA->OnStateChanged(); });
 
-    // contextA->GetRenderWindow()->SetWindowName("Window A - 3D Volume");
-
-    // ================= 窗口 B：显示 2D 轴状位切片 =================
-    auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr);
+    // --- 窗口 B ---
+    auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextB = std::make_shared<StdRenderContext>();
-
     contextB->BindService(serviceB);
-    serviceB->ShowSliceAxial(); // 业务操作
-	serviceB->UpdateSliceOrientation(Orientation::CORONAL); // 设置轴状位
-    contextB->SetInteractionMode(VizMode::AxialSlice); // 交互操作
-    // contextB->GetRenderWindow()->SetWindowName("Window B - Axial Slice");
+    serviceB->ShowSliceAxial();
+    serviceB->UpdateSliceOrientation(Orientation::AXIAL);
+    contextB->SetInteractionMode(VizMode::AxialSlice);
+    sharedState->AddObserver([serviceB]() { serviceB->OnStateChanged(); });
 
-    // ================= 窗口 c：显示 2D 轴状位切片 =================
-    auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr);
+    // --- 窗口 C ---
+    auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextC = std::make_shared<StdRenderContext>();
-
     contextC->BindService(serviceC);
-    serviceC->ShowSliceAxial(); // 业务操作
-    serviceC->UpdateSliceOrientation(Orientation::SAGITTAL); // 设置轴状位
-    contextC->SetInteractionMode(VizMode::AxialSlice); // 交互操作
-    // contextB->GetRenderWindow()->SetWindowName("Window B - Axial Slice");
+    serviceC->ShowSliceAxial();
+    serviceC->UpdateSliceOrientation(Orientation::CORONAL);
+    contextC->SetInteractionMode(VizMode::AxialSlice);
+    sharedState->AddObserver([serviceC]() { serviceC->OnStateChanged(); });
 
-
-    // ================= 窗口 D：显示 2D AxialSlice =================
-    auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr);
+    // --- 窗口 D ---
+    auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextD = std::make_shared<StdRenderContext>();
-
     contextD->BindService(serviceD);
-    serviceD->ShowSliceAxial(); // 业务操作
-    serviceD->UpdateSliceOrientation(Orientation::AXIAL); // 设置轴状位
-    contextD->SetInteractionMode(VizMode::AxialSlice); // 交互操作
-    // contextB->GetRenderWindow()->SetWindowName("Window B - Axial Slice");
+    serviceD->ShowSliceAxial();
+    serviceD->UpdateSliceOrientation(Orientation::SAGITTAL);
+    contextD->SetInteractionMode(VizMode::AxialSlice);
+    sharedState->AddObserver([serviceD]() { serviceD->OnStateChanged(); });
 
-
-    // ================= 启动 =================
-    contextA->Render(); // 现刷一下
+    // 先把所有窗口都渲染一次
+    contextA->Render();
+    contextB->Render();
     contextC->Render();
     contextD->Render();
-    contextB->Start();  // 阻塞在这里，开启事件循环
+
+    // 初始化所有的交互器
+    contextA->InitInteractor();
+    contextB->InitInteractor();
+    contextC->InitInteractor();
+    contextD->InitInteractor();
+
+    // 只启动一个主循环 (通常选主窗口)
+    // 在 Windows 环境下，同一个线程的 Initialize 过的 Interactor 通常能共享消息泵
+    // 所以滚动 B，C 和 D 应该也能被动刷新。
+    // 但是滚动 C，可能无法触发事件（取决于具体的 VTK 版本和 OS）
+    std::cout << "Starting Main Loop..." << std::endl;
+    contextB->Start();
 
     return 0;
 }

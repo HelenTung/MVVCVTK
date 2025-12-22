@@ -2,13 +2,17 @@
 #include "AppInterfaces.h"
 #include <vtkCubeAxesActor.h>
 #include <map>
+#include "AppState.h"
 
 class MedicalVizService : public AbstractAppService {
 private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
+    // 引用共享状态
+    std::shared_ptr<SharedInteractionState> m_sharedState;
 public:
-    MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr);
+    MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
+        std::shared_ptr<SharedInteractionState> state);
 
     // 业务入口：加载文件
     void LoadFile(const std::string& path);
@@ -22,16 +26,24 @@ public:
 	// 业务功能：切换到2d轴切片
     void ShowSliceAxial();
 
+    // 切换到 3D 多切面模式
+    void Show3DPlanes(VizMode renderMode);
+
 	// 更新交互值 (如切片位置)
     void UpdateInteraction(int value);
 
 	// 更新切片朝向
     void UpdateSliceOrientation(Orientation orient);
 
+	// 状态变更通知回调
+    void OnStateChanged();
 private:
+	// 更新坐标轴显示
     void UpdateAxes();
-
+    // 将全局坐标重置为图像中心
+    void ResetCursorCenter();
     // 获取或创建策略
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ClearCache();
+
 };

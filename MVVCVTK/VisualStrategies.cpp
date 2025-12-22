@@ -1,4 +1,4 @@
-#include "VisualStrategies.h"
+ï»¿#include "VisualStrategies.h"
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkSmartVolumeMapper.h>
@@ -25,17 +25,17 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     // VG Style
     auto prop = m_actor->GetProperty();
-    prop->SetColor(0.75, 0.75, 0.75); // VG »Ò
+    prop->SetColor(0.75, 0.75, 0.75); // VG ç°
     prop->SetAmbient(0.2);
     prop->SetDiffuse(0.8);
-    prop->SetSpecular(0.15);      // ÉÔÎ¢Ôö¼ÓÒ»µã¸ß¹â
+    prop->SetSpecular(0.15);      // ç¨å¾®å¢åŠ ä¸€ç‚¹é«˜å…‰
     prop->SetSpecularPower(15.0);
     prop->SetInterpolationToGouraud();
 }
 
 void IsoSurfaceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddActor(m_actor);
-    ren->SetBackground(0.1, 0.15, 0.2); // À¶É«µ÷±³¾°
+    ren->SetBackground(0.1, 0.15, 0.2); // è“è‰²è°ƒèƒŒæ™¯
 }
 
 void IsoSurfaceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
@@ -43,7 +43,7 @@ void IsoSurfaceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 }
 
 void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
-    // 3D Ä£Ê½±ØĞëÊÇÍ¸ÊÓÍ¶Ó°
+    // 3D æ¨¡å¼å¿…é¡»æ˜¯é€è§†æŠ•å½±
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
@@ -65,20 +65,20 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     double maxVal = range[1];
     double diff = maxVal - minVal;
 
-    // Í¸Ã÷¶Èº¯Êı (Opacity)
+    // é€æ˜åº¦å‡½æ•° (Opacity)
     auto opacityTF = vtkSmartPointer<vtkPiecewiseFunction>::New();
     opacityTF->AddPoint(minVal, 0.0);
-    opacityTF->AddPoint(minVal + diff * 0.35, 0.0); // ¹ıÂËµÍÃÜ¶ÈÔëµã
+    opacityTF->AddPoint(minVal + diff * 0.35, 0.0); // è¿‡æ»¤ä½å¯†åº¦å™ªç‚¹
     opacityTF->AddPoint(minVal + diff * 0.60, 0.6);
     opacityTF->AddPoint(maxVal, 1.0);
 
-    // ÑÕÉ«´«µİº¯Êı (Color)
+    // é¢œè‰²ä¼ é€’å‡½æ•° (Color)
     auto colorTF = vtkSmartPointer<vtkColorTransferFunction>::New();
     colorTF->AddRGBPoint(minVal, 0.0, 0.0, 0.0);
-    colorTF->AddRGBPoint(minVal + diff * 0.40, 0.75, 0.75, 0.75); // »ÒÉ«»ùµ÷
-    colorTF->AddRGBPoint(maxVal, 0.95, 0.95, 0.95); // ¸ßÁÁ²¿·ÖÆ«°×
+    colorTF->AddRGBPoint(minVal + diff * 0.40, 0.75, 0.75, 0.75); // ç°è‰²åŸºè°ƒ
+    colorTF->AddRGBPoint(maxVal, 0.95, 0.95, 0.95); // é«˜äº®éƒ¨åˆ†åç™½
 
-    // ÊôĞÔÉèÖÃ (Property)
+    // å±æ€§è®¾ç½® (Property)
     auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
     volumeProperty->SetColor(colorTF);
     volumeProperty->SetScalarOpacity(opacityTF);
@@ -94,7 +94,7 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
 void VolumeStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddVolume(m_volume);
-    ren->SetBackground(0.05, 0.05, 0.05); // ºÚÉ«±³¾°
+    ren->SetBackground(0.05, 0.05, 0.05); // é»‘è‰²èƒŒæ™¯
 }
 
 void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
@@ -119,51 +119,51 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_mapper->SliceFacesCameraOff();
     m_mapper->SliceAtFocalPointOff();
 
-    // ´´½¨ vtkPlane ¶ÔÏó
+    // åˆ›å»º vtkPlane å¯¹è±¡
     auto plane = vtkSmartPointer<vtkPlane>::New();
 
-    // ÉèÖÃÔ­µã (Origin)£ºÈÃÇĞÆ¬Ä¬ÈÏÎ»ÓÚÍ¼ÏñÊı¾İµÄ¼¸ºÎÖĞĞÄ
-    // Èç¹û²»ÉèÖÃ£¬Ä¬ÈÏÎª (0,0,0)£¬Õâ¿ÉÄÜ»áµ¼ÖÂÇĞÆ¬ÏÔÊ¾ÔÚÊı¾İ·¶Î§Ö®Íâ£¨ºÚÆÁ£©
+    // è®¾ç½®åŸç‚¹ (Origin)ï¼šè®©åˆ‡ç‰‡é»˜è®¤ä½äºå›¾åƒæ•°æ®çš„å‡ ä½•ä¸­å¿ƒ
+    // å¦‚æœä¸è®¾ç½®ï¼Œé»˜è®¤ä¸º (0,0,0)ï¼Œè¿™å¯èƒ½ä¼šå¯¼è‡´åˆ‡ç‰‡æ˜¾ç¤ºåœ¨æ•°æ®èŒƒå›´ä¹‹å¤–ï¼ˆé»‘å±ï¼‰
     double center[3];
     img->GetCenter(center);
     plane->SetOrigin(center);
 
-    // ÉèÖÃ·¨Ïß (Normal)£º¾ö¶¨ÇĞÆ¬µÄ·½Ïò
+    // è®¾ç½®æ³•çº¿ (Normal)ï¼šå†³å®šåˆ‡ç‰‡çš„æ–¹å‘
     if (m_orientation == Orientation::AXIAL) {
-        plane->SetNormal(0, 0, 1); // ZÖá·¨Ïß
+        plane->SetNormal(0, 0, 1); // Zè½´æ³•çº¿
     }
     else if (m_orientation == Orientation::CORONAL) {
-        plane->SetNormal(0, 1, 0); // YÖá·¨Ïß
+        plane->SetNormal(0, 1, 0); // Yè½´æ³•çº¿
     }
     else {
-        plane->SetNormal(1, 0, 0); // XÖá·¨Ïß
+        plane->SetNormal(1, 0, 0); // Xè½´æ³•çº¿
     }
 
-    // ½« Plane ¶ÔÏó´«µİ¸ø Mapper
+    // å°† Plane å¯¹è±¡ä¼ é€’ç»™ Mapper
     m_mapper->SetSlicePlane(plane);
     m_slice->SetMapper(m_mapper);
 
     int dims[3];
     img->GetDimensions(dims);
 
-    // ¸ù¾İ·½Ïò¾ö¶¨×î´óË÷Òı
+    // æ ¹æ®æ–¹å‘å†³å®šæœ€å¤§ç´¢å¼•
     if (m_orientation == Orientation::AXIAL) {
-        m_maxIndex = dims[2] - 1; // ZÖá
+        m_maxIndex = dims[2] - 1; // Zè½´
     }
     else if (m_orientation == Orientation::CORONAL) {
-        m_maxIndex = dims[1] - 1; // YÖá
+        m_maxIndex = dims[1] - 1; // Yè½´
     }
     else {
-        m_maxIndex = dims[0] - 1; // XÖá
+        m_maxIndex = dims[0] - 1; // Xè½´
     }
 
-    // ÖØÖÃµ±Ç°Ë÷ÒıÎªÖĞ¼äÎ»ÖÃ£¬±£Ö¤Ò»¿ªÊ¼ÄÜ¿´µ½Í¼
+    // é‡ç½®å½“å‰ç´¢å¼•ä¸ºä¸­é—´ä½ç½®ï¼Œä¿è¯ä¸€å¼€å§‹èƒ½çœ‹åˆ°å›¾
     m_currentIndex = m_maxIndex / 2;
 
-    // Ç¿ÖÆ¸üĞÂÒ»´ÎÎ»ÖÃ£¬È·±£»­ÃæÍ¬²½
+    // å¼ºåˆ¶æ›´æ–°ä¸€æ¬¡ä½ç½®ï¼Œç¡®ä¿ç”»é¢åŒæ­¥
     UpdatePlanePosition();
 
-    // ×Ô¶¯¶Ô±È¶È
+    // è‡ªåŠ¨å¯¹æ¯”åº¦
     double range[2];
     img->GetScalarRange(range);
     double window = range[1] - range[0];
@@ -187,34 +187,34 @@ void SliceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
-    cam->ParallelProjectionOn(); // ¿ªÆôÆ½ĞĞÍ¶Ó°
+    cam->ParallelProjectionOn(); // å¼€å¯å¹³è¡ŒæŠ•å½±
 
 	double imgCenter[3];
     if (m_mapper && m_mapper->GetInput()) {
         m_mapper->GetInput()->GetCenter(imgCenter);
     }
 
-    // ³õ´ÎÉèÖÃ
+    // åˆæ¬¡è®¾ç½®
     cam->SetFocalPoint(imgCenter);
     double distance = 1000.0; 
     
     switch (m_orientation) {
     case Orientation::AXIAL:
-        // AXIAL (Öá×´Î»): ´ÓÍ·¶¥ÍùÏÂ¿´
+        // AXIAL (è½´çŠ¶ä½): ä»å¤´é¡¶å¾€ä¸‹çœ‹
         cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
         cam->SetViewUp(0, 1, 0);
         break;
 
     case Orientation::CORONAL:
-        // CORONAL (¹Ú×´Î»): ´ÓÇ°ÃæÍùºó¿´
+        // CORONAL (å† çŠ¶ä½): ä»å‰é¢å¾€åçœ‹
         cam->SetPosition(imgCenter[0], imgCenter[1] + distance, imgCenter[2]);
-        cam->SetViewUp(0, 0, 1); // ZÖáÊÇÏòÉÏµÄ
+        cam->SetViewUp(0, 0, 1); // Zè½´æ˜¯å‘ä¸Šçš„
         break;
 
     case Orientation::SAGITTAL:
-        // SAGITTAL (Ê¸×´Î»): ´Ó²àÃæ¿´
+        // SAGITTAL (çŸ¢çŠ¶ä½): ä»ä¾§é¢çœ‹
         cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
-        cam->SetViewUp(0, 0, 1); // ZÖáÊÇÏòÉÏµÄ
+        cam->SetViewUp(0, 0, 1); // Zè½´æ˜¯å‘ä¸Šçš„
         break;
     }
 
@@ -223,13 +223,15 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 }
 
 
-void SliceStrategy::SetInteractionValue(int delta) {
+void SliceStrategy::SetSliceIndex(int index) {
+    // æ›´æ–°å†…éƒ¨è®°å½•
+    m_currentIndex = index;
 
-    m_currentIndex += delta;
-
+    // å®‰å…¨æ£€æŸ¥
     if (m_currentIndex < 0) m_currentIndex = 0;
     if (m_currentIndex > m_maxIndex) m_currentIndex = m_maxIndex;
 
+    // æ‰§è¡Œ VTK æ¸²æŸ“æ›´æ–°
     UpdatePlanePosition();
 }
 
@@ -238,13 +240,13 @@ void SliceStrategy::SetOrientation(Orientation orient)
     if (m_orientation == orient) return;
     m_orientation = orient;
 
-    // »ñÈ¡µ±Ç°Êı¾İºÍ Mapper ÖĞµÄÆ½Ãæ
+    // è·å–å½“å‰æ•°æ®å’Œ Mapper ä¸­çš„å¹³é¢
     if (!m_mapper) return;
     vtkImageData* input = m_mapper->GetInput();
     vtkPlane* plane = m_mapper->GetSlicePlane();
     if (!input || !plane) return;
 
-    // ¸üĞÂÇĞÆ¬·¨Ïß
+    // æ›´æ–°åˆ‡ç‰‡æ³•çº¿
     if (m_orientation == Orientation::AXIAL) {
         plane->SetNormal(0, 0, 1);
     }
@@ -255,7 +257,7 @@ void SliceStrategy::SetOrientation(Orientation orient)
         plane->SetNormal(1, 0, 0);
     }
 
-    // ¸üĞÂ×î´óË÷Òı (ÒòÎª²»Í¬ÖáÏòµÄÎ¬¶È²»Í¬)
+    // æ›´æ–°æœ€å¤§ç´¢å¼• (å› ä¸ºä¸åŒè½´å‘çš„ç»´åº¦ä¸åŒ)
     int dims[3];
     input->GetDimensions(dims);
 
@@ -269,10 +271,10 @@ void SliceStrategy::SetOrientation(Orientation orient)
         m_maxIndex = dims[0] - 1;
     }
 
-    // ÖØÖÃµ±Ç°Ë÷Òıµ½ÖĞ¼ä£¬·ÀÖ¹Ô½½ç»òºÚÆÁ
+    // é‡ç½®å½“å‰ç´¢å¼•åˆ°ä¸­é—´ï¼Œé˜²æ­¢è¶Šç•Œæˆ–é»‘å±
     m_currentIndex = m_maxIndex / 2;
 
-    // Ó¦ÓÃĞÂµÄÎ»ÖÃ
+    // åº”ç”¨æ–°çš„ä½ç½®
     UpdatePlanePosition();
 }
 
@@ -280,15 +282,15 @@ void SliceStrategy::UpdatePlanePosition() {
     vtkImageData* input = m_mapper->GetInput();
     vtkPlane* plane = m_mapper->GetSlicePlane();
 
-    double origin[3];  // Êı¾İµÄÊÀ½ç×ø±êÔ­µã
-    double spacing[3]; // ÏñËØ¼ä¾à
+    double origin[3];  // æ•°æ®çš„ä¸–ç•Œåæ ‡åŸç‚¹
+    double spacing[3]; // åƒç´ é—´è·
     input->GetOrigin(origin);
     input->GetSpacing(spacing);
 
     double planeOrigin[3];
-    plane->GetOrigin(planeOrigin); // »ñÈ¡µ±Ç°Æ½ÃæµÄÆäËûÖá×ø±ê
+    plane->GetOrigin(planeOrigin); // è·å–å½“å‰å¹³é¢çš„å…¶ä»–è½´åæ ‡
 
-    // ¼ÆËã¹«Ê½£ºÎïÀíÎ»ÖÃ = Êı¾İÔ­µã + (²ãÊı * ²ãºñ)
+    // è®¡ç®—å…¬å¼ï¼šç‰©ç†ä½ç½® = æ•°æ®åŸç‚¹ + (å±‚æ•° * å±‚åš)
     if (m_orientation == Orientation::AXIAL) {
         planeOrigin[2] = origin[2] + (m_currentIndex * spacing[2]);
     }
@@ -300,4 +302,136 @@ void SliceStrategy::UpdatePlanePosition() {
     }
 
     plane->SetOrigin(planeOrigin);
+}
+
+// ================= MultiSliceStrategy (MPR) =================
+MultiSliceStrategy::MultiSliceStrategy() {
+    for (int i = 0; i < 3; i++) {
+        m_slices[i] = vtkSmartPointer<vtkImageSlice>::New();
+        m_mappers[i] = vtkSmartPointer<vtkImageResliceMapper>::New();
+        m_slices[i]->SetMapper(m_mappers[i]);
+    }
+}
+
+void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
+    auto img = vtkImageData::SafeDownCast(data);
+    if (!img) return;
+
+    // è®¾ç½®ä¸‰ä¸ªåˆ‡ç‰‡çš„æ–¹å‘
+    // 0: Sagittal (X normal)
+    // 1: Coronal (Y normal)
+    // 2: Axial (Z normal)
+
+    // åˆå§‹åŒ– Plane å’Œ Mapper
+    for (int i = 0; i < 3; i++) {
+        m_mappers[i]->SetInputData(img);
+        auto plane = vtkSmartPointer<vtkPlane>::New();
+
+        double center[3];
+        img->GetCenter(center);
+        plane->SetOrigin(center);
+
+        if (i == 0) plane->SetNormal(1, 0, 0); // X
+        else if (i == 1) plane->SetNormal(0, 1, 0); // Y
+        else plane->SetNormal(0, 0, 1); // Z
+
+        m_mappers[i]->SetSlicePlane(plane);
+
+        // è°ƒæ•´å¯¹æ¯”åº¦
+        double range[2];
+        img->GetScalarRange(range);
+        m_slices[i]->GetProperty()->SetColorWindow(range[1] - range[0]);
+        m_slices[i]->GetProperty()->SetColorLevel((range[1] + range[0]) * 0.5);
+    }
+}
+
+void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
+    m_indices[0] = x;
+    m_indices[1] = y;
+    m_indices[2] = z;
+
+    // éå†ä¸‰ä¸ª Mapper æ›´æ–°ä½ç½®
+    for (int i = 0; i < 3; i++) {
+        auto plane = m_mappers[i]->GetSlicePlane();
+        auto input = m_mappers[i]->GetInput();
+        if (!input) continue;
+
+        double origin[3], spacing[3];
+        input->GetOrigin(origin);
+        input->GetSpacing(spacing);
+
+        double planeOrigin[3];
+        plane->GetOrigin(planeOrigin);
+
+        // è®¡ç®—ç‰©ç†åæ ‡: Origin + Index * Spacing
+        planeOrigin[i] = origin[i] + (m_indices[i] * spacing[i]);
+
+        plane->SetOrigin(planeOrigin);
+    }
+}
+
+void MultiSliceStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
+    for (int i = 0; i < 3; i++) renderer->AddViewProp(m_slices[i]);
+    renderer->SetBackground(0.1, 0.1, 0.1); // æ·±ç°èƒŒæ™¯
+}
+
+void MultiSliceStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
+    for (int i = 0; i < 3; i++) renderer->RemoveViewProp(m_slices[i]);
+}
+
+
+// ================= CompositeStrategy =================
+
+CompositeStrategy::CompositeStrategy(VizMode mode) : m_mode(mode) {
+    // å§‹ç»ˆåˆ›å»ºå‚è€ƒå¹³é¢
+    m_referencePlanes = std::make_shared<MultiSliceStrategy>();
+
+    // æ ¹æ®æ¨¡å¼åˆ›å»ºä¸»ç­–ç•¥
+    if (m_mode == VizMode::CompositeVolume) {
+        m_mainStrategy = std::make_shared<VolumeStrategy>();
+    }
+    else if (m_mode == VizMode::CompositeIsoSurface) {
+        m_mainStrategy = std::make_shared<IsoSurfaceStrategy>();
+    }
+}
+
+void CompositeStrategy::SetReferenceData(vtkSmartPointer<vtkImageData> img)
+{
+    if (m_referencePlanes && img) {
+        m_referencePlanes->SetInputData(img);
+    }
+}
+
+void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
+    if (m_mainStrategy) {
+        // å¦‚æœæ˜¯ç­‰å€¼é¢æ¨¡å¼ï¼Œè¿™é‡Œè¿›æ¥çš„å°±æ˜¯ Service è½¬å¥½çš„ PolyData
+        // å¦‚æœæ˜¯ä½“æ¸²æŸ“æ¨¡å¼ï¼Œè¿™é‡Œè¿›æ¥çš„å°±æ˜¯ ImageData
+        m_mainStrategy->SetInputData(data);
+    }
+}
+
+void CompositeStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->Attach(renderer);
+    if (m_referencePlanes) m_referencePlanes->Attach(renderer);
+    renderer->SetBackground(0.05, 0.05, 0.05);
+}
+
+void CompositeStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->Detach(renderer);
+    if (m_referencePlanes) m_referencePlanes->Detach(renderer);
+}
+
+void CompositeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {
+    // é€šå¸¸ 3D è§†å›¾ä½¿ç”¨é€è§†æŠ•å½±
+    if (renderer && renderer->GetActiveCamera()) {
+        renderer->GetActiveCamera()->ParallelProjectionOff();
+    }
+}
+
+void CompositeStrategy::UpdateReferencePlanes(int x, int y, int z) {
+    // éœ€è¦è½¬å‹å› MultiSliceStrategy æ‰èƒ½è°ƒç”¨ç‰¹å®šæ¥å£
+    auto multiSlice = std::dynamic_pointer_cast<MultiSliceStrategy>(m_referencePlanes);
+    if (multiSlice) {
+        multiSlice->UpdateAllPositions(x, y, z);
+    }
 }

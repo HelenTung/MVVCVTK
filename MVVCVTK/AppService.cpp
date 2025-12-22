@@ -25,15 +25,18 @@ void AbstractAppService::SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> 
 }
 
 // --- 具体服务实现 ---
-MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr) {
+MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
+    std::shared_ptr<SharedInteractionState> state){
     // 实例化具体的 DataManager
     m_dataManager = dataMgr;
+    m_sharedState = state; // 保存引用
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
 void MedicalVizService::LoadFile(const std::string& path) {
     if (m_dataManager->LoadData(path)) {
 		ClearCache(); // 数据变更，清空缓存
+        ResetCursorCenter(); // 加载新数据时，重置坐标到中心
         UpdateAxes();
         ShowIsoSurface(); // 默认显示
     }
@@ -63,16 +66,34 @@ void MedicalVizService::ShowSliceAxial() {
     if (m_renderer) m_renderer->RemoveActor(m_cubeAxes);
 }
 
+void MedicalVizService::Show3DPlanes(VizMode renderMode) 
+{
+    if (!m_dataManager->GetVtkImage()) return;
+
+    // 使用 Converter 进行数据处理 (Model -> Logic -> New Model)
+    auto strategy = GetStrategy(renderMode);
+    SwitchStrategy(strategy);
+    UpdateAxes();
+}
+
 void MedicalVizService::UpdateInteraction(int value)
 {
-	auto it = m_strategyCache.find(VizMode::AxialSlice);
-    if (it != m_strategyCache.end()) {
-        auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(it->second);
-        if (sliceStrategy) {
-            sliceStrategy->SetInteractionValue(value);
-            SwitchStrategy(sliceStrategy);
-        }
-	}
+    if (!m_currentStrategy) return;
+
+    // 获取当前图像维度用于边界检查
+    int dims[3];
+    m_dataManager->GetVtkImage()->GetDimensions(dims);
+
+    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
+    if (sliceStrategy) {
+        Orientation orient = sliceStrategy->GetOrientation();
+        int axisIndex = (int)orient;
+
+        // 调用共享状态的更新方法
+        // 这里更新 state 会触发 NotifyObservers，
+        // 从而导致所有窗口（包括自己）重绘
+        m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
+    }
 }
 
 void MedicalVizService::UpdateSliceOrientation(Orientation orient)
@@ -83,6 +104,8 @@ void MedicalVizService::UpdateSliceOrientation(Orientation orient)
         sliceStrategy->SetOrientation(orient);
 		SwitchStrategy(sliceStrategy);
     }
+
+
 }
 
 void MedicalVizService::UpdateAxes() {
@@ -93,6 +116,14 @@ void MedicalVizService::UpdateAxes() {
     }
 }
 
+void MedicalVizService::ResetCursorCenter()
+{
+    auto img = m_dataManager->GetVtkImage();
+    if (!img) return;
+    int dims[3];
+    m_sharedState->SetCursorPosition(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+}
+
 std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode mode)
 {
     // 检查cache
@@ -101,7 +132,10 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
 		return it->second;
 
 	auto strategy = StrategyFactory::CreateStrategy(mode);
-    if (mode == VizMode::IsoSurface) {
+	// 原始数据接口
+    vtkSmartPointer<vtkImageData> rawImage = m_dataManager->GetVtkImage();
+
+    if (mode == VizMode::IsoSurface || mode == VizMode::CompositeIsoSurface) {
         if (m_dataManager->GetVtkImage()) {
             auto converter = std::make_shared<IsoSurfaceConverter>();
             double range[2];
@@ -112,10 +146,36 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
         }
     }
     else {
-        // Volume 和 Slice 直接吃 vtkImage
+        // CompositeVolume、Volume 和 Slice 直接吃 vtkImage
         if (m_dataManager->GetVtkImage()) {
             strategy->SetInputData(m_dataManager->GetVtkImage());
         }
+    }
+    
+	// 如果是 CompositeStrategy，还需要设置原始image作为参考
+    auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(strategy);
+    if (mode == VizMode::CompositeVolume || mode == VizMode::CompositeIsoSurface)
+    {
+        if (compositeStrategy && rawImage) {
+            // 无论主视图显示什么，背景切片永远需要原始 Image
+            compositeStrategy->SetReferenceData(rawImage);
+        }
+    }
+
+	// 如果是 SliceStrategy，需要从共享状态获取位置
+    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(strategy);
+    // 从共享状态获取位置
+    int* pos = m_sharedState->GetCursorPosition();
+    if (sliceStrategy) {
+        Orientation orient = sliceStrategy->GetOrientation();
+        int axisIndex = (int)orient;
+
+        // 设置到策略中
+        sliceStrategy->SetSliceIndex(pos[axisIndex]);
+    }
+
+    if (compositeStrategy) {
+        compositeStrategy->UpdateReferencePlanes(pos[0], pos[1], pos[2]);
     }
 
     // 存入缓存
@@ -132,4 +192,24 @@ void MedicalVizService::ClearCache()
     }
 }
 
-// vtk vtkren
+void MedicalVizService::OnStateChanged() {
+    // 重新把共享状态里的新位置，应用到当前策略上
+    if (m_currentStrategy) {
+         int* pos = m_sharedState->GetCursorPosition();
+         
+         auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
+         if (sliceStrategy) {
+             int axisIndex = (int)sliceStrategy->GetOrientation();
+             sliceStrategy->SetSliceIndex(pos[axisIndex]);
+         }
+         
+         // 如果有 MultiSliceStrategy 或 3D 里的 Crosshair，也要在这里更新
+         auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
+         if (compositeStrategy) {
+             compositeStrategy->UpdateReferencePlanes(pos[0], pos[1], pos[2]);
+         }
+    }
+    
+    // 触发渲染
+    if (m_renderWindow) m_renderWindow->Render();
+}
