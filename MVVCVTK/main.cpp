@@ -31,7 +31,8 @@ int main() {
     auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextA = std::make_shared<StdRenderContext>();
     contextA->BindService(serviceA);
-    serviceA->Show3DPlanes(VizMode::IsoSurface);
+    contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
+    serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
     sharedState->AddObserver([serviceA]() { serviceA->OnStateChanged(); });
 
     // --- 窗口 B ---
@@ -76,7 +77,7 @@ int main() {
     // 只启动一个主循环 (通常选主窗口)
     // 在 Windows 环境下，同一个线程的 Initialize 过的 Interactor 通常能共享消息泵
     // 所以滚动 B，C 和 D 应该也能被动刷新。
-    // 但是滚动 C，可能无法触发事件（取决于具体的 VTK 版本和 OS）
+    // 但是滚动 C，可能无法触发事件
     std::cout << "Starting Main Loop..." << std::endl;
     contextB->Start();
 

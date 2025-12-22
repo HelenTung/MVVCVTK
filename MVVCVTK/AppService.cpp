@@ -172,6 +172,9 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
 
         // 设置到策略中
         sliceStrategy->SetSliceIndex(pos[axisIndex]);
+
+        // 初始化时立即更新十字线位置，否则十字线是乱的或不可见的
+        sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]);
     }
 
     if (compositeStrategy) {
