@@ -200,7 +200,8 @@ void MedicalVizService::OnStateChanged() {
          auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
          if (sliceStrategy) {
              int axisIndex = (int)sliceStrategy->GetOrientation();
-             sliceStrategy->SetSliceIndex(pos[axisIndex]);
+			 sliceStrategy->SetSliceIndex(pos[axisIndex]); // 更新切片位置
+			 sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]); // 更新十字线
          }
          
          // 如果有 MultiSliceStrategy 或 3D 里的 Crosshair，也要在这里更新

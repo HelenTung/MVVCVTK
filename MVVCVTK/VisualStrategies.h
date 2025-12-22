@@ -4,6 +4,7 @@
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
 #include <vtkImageResliceMapper.h>
+#include <vtkLineSource.h>
 
 // --- 策略 A: 等值面渲染 ---
 class IsoSurfaceStrategy : public AbstractVisualStrategy {
@@ -40,6 +41,13 @@ private:
     // 状态记录
     int m_currentIndex = 0;
     int m_maxIndex = 0;
+
+    // --- 十字线相关 ---
+    vtkSmartPointer<vtkActor> m_vLineActor; // 垂直线
+    vtkSmartPointer<vtkActor> m_hLineActor; // 水平线
+    vtkSmartPointer<vtkLineSource> m_vLineSource;
+    vtkSmartPointer<vtkLineSource> m_hLineSource;
+
 public:
     SliceStrategy(Orientation orient);
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
@@ -56,6 +64,8 @@ public:
     // 设置切片朝向
     void SetOrientation(Orientation orient);
 
+    // 更新十字线位置 (传入全局 x, y, z)
+    void UpdateCrosshair(int x, int y, int z);
 private:
     void UpdatePlanePosition();
 };

@@ -11,19 +11,26 @@ void StdRenderContext::InitInteractor()
 
 StdRenderContext::StdRenderContext()
 {
+	// 初始化交互器
     m_interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
     m_interactor->SetRenderWindow(m_renderWindow);
 
+	// 初始化拾取器
+    m_picker = vtkSmartPointer<vtkCellPicker>::New();
+    m_picker->SetTolerance(0.005); // 设置拾取精度
+    
     // 初始化回调命令
     m_eventCallback = vtkSmartPointer<vtkCallbackCommand>::New();
-
     m_eventCallback->SetCallback(AbstractRenderContext::DispatchVTKEvent);
     m_eventCallback->SetClientData(this);
 
     // 监听滚轮事件
     m_interactor->AddObserver(vtkCommand::MouseWheelForwardEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::MouseWheelBackwardEvent, m_eventCallback, 1.0);
-
+    // 监听鼠标左键按下、移动、抬起
+    m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 1.0);
+    m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 1.0);
+    m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 1.0);
 }
 
 void StdRenderContext::Start()
@@ -78,4 +85,58 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             m_eventCallback->SetAbortFlag(1);
         }
     }
+
+     if (m_currentMode == VizMode::CompositeVolume || m_currentMode == VizMode::CompositeIsoSurface) 
+    {
+        vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
+        int* eventPos = iren->GetEventPosition();
+
+        if (eventId == vtkCommand::LeftButtonPressEvent) 
+        {
+            // 尝试拾取
+            if (m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer)) {
+                // 如果点到了东西 (切片)，开始拖拽
+                // 为了体验更好，你可以检查 m_picker->GetActor() 是否是你那个切片 Actor
+                // 但在这里简单的全场景拾取通常足够
+                m_isDragging = true;
+                
+                // 此时通常需要禁止默认的旋转操作 (这也是为什么通常要自定义 InteractorStyle)
+                // 这里简单粗暴地拦截事件：
+                m_eventCallback->SetAbortFlag(1); 
+            }
+        }
+        else if (eventId == vtkCommand::MouseMoveEvent) 
+        {
+            if (m_isDragging) {
+                // 持续拾取，获取新的世界坐标
+                m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
+                double* worldPos = m_picker->GetPickPosition();
+
+                // 将世界坐标转换为图像索引 (IJK)
+                auto img = medService->GetDataManager()->GetVtkImage();
+                if (img) {
+                    double origin[3], spacing[3];
+                    img->GetOrigin(origin);
+                    img->GetSpacing(spacing);
+                    
+                    int i = (worldPos[0] - origin[0]) / spacing[0];
+                    int j = (worldPos[1] - origin[1]) / spacing[1];
+                    int k = (worldPos[2] - origin[2]) / spacing[2];
+
+                    // 调用 Service 更新状态 -> 触发所有 2D 视图联动
+                    // 注意：这会反过来调用 OnStateChanged，更新 3D 切片位置
+                    // 形成闭环
+                    auto state = medService->GetSharedState(); // 你需要在 Service 加个 GetState 接口
+                    if(state) state->SetCursorPosition(i, j, k);
+                }
+
+                // 阻止默认的旋转行为
+                m_eventCallback->SetAbortFlag(1); 
+            }
+        }
+        else if (eventId == vtkCommand::LeftButtonReleaseEvent) 
+        {
+            m_isDragging = false;
+        }
+     }
 }

@@ -37,6 +37,11 @@ public:
 
 	// 状态变更通知回调
     void OnStateChanged();
+
+	// 访问共享状态
+    std::shared_ptr<SharedInteractionState> GetSharedState() {
+        return m_sharedState;
+    }
 private:
 	// 更新坐标轴显示
     void UpdateAxes();

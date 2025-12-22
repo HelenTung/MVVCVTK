@@ -109,6 +109,32 @@ void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
     m_mapper = vtkSmartPointer<vtkImageResliceMapper>::New();
+
+    // --- 初始化十字线资源 ---
+    m_vLineSource = vtkSmartPointer<vtkLineSource>::New();
+    m_hLineSource = vtkSmartPointer<vtkLineSource>::New();
+
+    m_vLineActor = vtkSmartPointer<vtkActor>::New();
+    m_hLineActor = vtkSmartPointer<vtkActor>::New();
+
+    // 设置 Mapper
+    auto vMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    vMapper->SetInputConnection(m_vLineSource->GetOutputPort());
+    m_vLineActor->SetMapper(vMapper);
+
+    auto hMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    hMapper->SetInputConnection(m_hLineSource->GetOutputPort());
+    m_hLineActor->SetMapper(hMapper);
+
+    // 设置颜色 (例如黄色) 和线宽
+    m_vLineActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
+    m_vLineActor->GetProperty()->SetLineWidth(1.5);
+    // 为了防止遮挡，可以关闭深度测试或者稍微抬高一点 Z 值，但 VTK RendererLayer 更好
+    m_vLineActor->GetProperty()->SetLighting(false); // 关闭光照，纯色显示
+
+    m_hLineActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
+    m_hLineActor->GetProperty()->SetLineWidth(1.5);
+    m_hLineActor->GetProperty()->SetLighting(false);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -177,11 +203,15 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
 void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddViewProp(m_slice);
+    ren->AddActor(m_vLineActor);
+    ren->AddActor(m_hLineActor);
     ren->SetBackground(0, 0, 0);
 }
 
 void SliceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
     ren->RemoveViewProp(m_slice);
+    ren->RemoveActor(m_vLineActor);
+    ren->RemoveActor(m_hLineActor);
 }
 
 void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
@@ -276,6 +306,64 @@ void SliceStrategy::SetOrientation(Orientation orient)
 
     // 应用新的位置
     UpdatePlanePosition();
+}
+
+void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
+
+    
+    if (!m_mapper->GetInput()) return;
+
+    vtkImageData* img = m_mapper->GetInput();
+    double origin[3], spacing[3];
+    int dims[3];
+    img->GetOrigin(origin);
+    img->GetSpacing(spacing);
+    img->GetDimensions(dims);
+    double bounds[6];
+    img->GetBounds(bounds);
+
+    // 计算物理坐标
+    double physX = origin[0] + x * spacing[0];
+    double physY = origin[1] + y * spacing[1];
+    double physZ = origin[2] + z * spacing[2];
+
+    // 为了防止线穿插，稍微给一点偏移，或者利用 Layer
+    double layerOffset = 0.1;
+
+    if (m_orientation == Orientation::AXIAL) { // Z轴切片，看 XY 平面
+        // 当前切片的 Z 高度
+        double currentZ = origin[2] + m_currentIndex * spacing[2] + layerOffset;
+
+        // 垂直线 (固定 X，画 Y 的范围)
+        m_vLineSource->SetPoint1(physX, bounds[2], currentZ);
+        m_vLineSource->SetPoint2(physX, bounds[3], currentZ);
+
+        // 水平线 (固定 Y，画 X 的范围)
+        m_hLineSource->SetPoint1(bounds[0], physY, currentZ);
+        m_hLineSource->SetPoint2(bounds[1], physY, currentZ);
+    }
+    else if (m_orientation == Orientation::CORONAL) { // Y轴切片，看 XZ 平面
+        double currentY = origin[1] + m_currentIndex * spacing[1] + layerOffset;
+
+        // 垂直线 (固定 X，画 Z 的范围)
+        m_vLineSource->SetPoint1(physX, currentY, bounds[4]);
+        m_vLineSource->SetPoint2(physX, currentY, bounds[5]);
+
+        // 水平线 (固定 Z，画 X 的范围)
+        m_hLineSource->SetPoint1(bounds[0], currentY, physZ);
+        m_hLineSource->SetPoint2(bounds[1], currentY, physZ);
+    }
+    else { // SAGITTAL, X轴切片，看 YZ 平面
+        double currentX = origin[0] + m_currentIndex * spacing[0] + layerOffset;
+
+        // 垂直线 (固定 Y，画 Z 的范围)
+        m_vLineSource->SetPoint1(currentX, physY, bounds[4]);
+        m_vLineSource->SetPoint2(currentX, physY, bounds[5]);
+
+        // 水平线 (固定 Z，画 Y 的范围)
+        m_hLineSource->SetPoint1(currentX, bounds[2], physZ);
+        m_hLineSource->SetPoint2(currentX, bounds[3], physZ);
+    }
 }
 
 void SliceStrategy::UpdatePlanePosition() {

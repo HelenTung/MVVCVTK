@@ -125,7 +125,7 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>D:\git\vcpkg-master\installed\x64-windows\lib;D:\CT-1209\VTK\lib\vtk_install\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>vtkCommonCore-9.4.lib;vtksys-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkFiltersCore-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingFreeType-9.4.lib;vtkRenderingAnnotation-9.4.lib;vtkRenderingImage-9.4.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>vtkCommonCore-9.4.lib;vtksys-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkFiltersCore-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingFreeType-9.4.lib;vtkRenderingAnnotation-9.4.lib;vtkRenderingImage-9.4.lib;vtkFiltersSources-9.4.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

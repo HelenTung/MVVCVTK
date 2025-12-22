@@ -68,7 +68,10 @@ public:
         m_renderWindow = win;
         m_renderer = ren;
     }
-
+	// 访问数据管理器
+    std::shared_ptr<AbstractDataManager> GetDataManager() {
+        return m_dataManager;
+    }
     // 核心调度逻辑 (在 .cpp 中实现)
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
