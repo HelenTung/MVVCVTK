@@ -105,6 +105,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateAllPositions(int x, int y, int z);
+    int GetPlaneAxis(vtkActor* actor);
 };
 
 // --- 组合策略: 体渲染/等值面 + 切片平面 ---
@@ -128,5 +129,6 @@ public:
 
     // 专门用于更新参考平面的接口
     void UpdateReferencePlanes(int x, int y, int z);
+    int GetPlaneAxis(vtkActor* actor);
 };
 

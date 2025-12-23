@@ -16,8 +16,7 @@ StdRenderContext::StdRenderContext()
     m_interactor->SetRenderWindow(m_renderWindow);
 
 	// 初始化拾取器
-    m_picker = vtkSmartPointer<vtkCellPicker>::New();
-    m_picker->SetTolerance(0.005); // 设置拾取精度
+    m_picker = vtkSmartPointer<vtkPropPicker>::New();
     
     // 初始化回调命令
     m_eventCallback = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -96,50 +95,63 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
         if (eventId == vtkCommand::LeftButtonPressEvent) 
         {
-            // 尝试拾取
+            // 使用 vtkPropPicker 进行拾取
             if (m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer)) {
-                // 如果点到了东西 (切片)，开始拖拽
-                // 为了体验更好，你可以检查 m_picker->GetActor() 是否是你那个切片 Actor
-                // 但在这里简单的全场景拾取通常足够
-                m_isDragging = true;
-                
-                // 此时通常需要禁止默认的旋转操作 (这也是为什么通常要自定义 InteractorStyle)
-                // 这里简单粗暴地拦截事件：
-                m_eventCallback->SetAbortFlag(1); 
+                // 获取拾取到的 Actor
+                auto pickedActor = m_picker->GetActor();
+
+                // 使用新的识别机制判断是否为平面
+                m_dragAxis = medService->GetPlaneAxis(pickedActor);
+
+                if (m_dragAxis != -1) {
+                    // 确认拾取到的是我们的一个平面
+                    m_isDragging = true;
+                    m_eventCallback->SetAbortFlag(1); // 阻止相机转动
+                }
+                // 如果 m_dragAxis == -1，说明点到的是主模型或空白处
+                // 此时 m_isDragging 保持 false，不中止事件，相机可以正常交互
             }
         }
         else if (eventId == vtkCommand::MouseMoveEvent) 
         {
-            if (m_isDragging) {
-                // 持续拾取，获取新的世界坐标
+            // 拖拽逻辑和之前一样，但现在它只在拾取到平面时才会触发
+            if (m_isDragging && m_dragAxis != -1) {
+                // 这里我们用 Pick 来持续获取鼠标下的3D坐标
+                // vtkPropPicker 同样返回准确的 PickPosition
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
 
-                // 将世界坐标转换为图像索引 (IJK)
                 auto img = medService->GetDataManager()->GetVtkImage();
-                if (img) {
+                if (img && worldPos) {
                     double origin[3], spacing[3];
                     img->GetOrigin(origin);
                     img->GetSpacing(spacing);
-                    
-                    int i = (worldPos[0] - origin[0]) / spacing[0];
-                    int j = (worldPos[1] - origin[1]) / spacing[1];
-                    int k = (worldPos[2] - origin[2]) / spacing[2];
 
-                    // 调用 Service 更新状态 -> 触发所有 2D 视图联动
-                    // 注意：这会反过来调用 OnStateChanged，更新 3D 切片位置
-                    // 形成闭环
-                    auto state = medService->GetSharedState(); // 你需要在 Service 加个 GetState 接口
-                    if(state) state->SetCursorPosition(i, j, k);
+                    auto state = medService->GetSharedState();
+                    if (state) {
+                        int* currentPos = state->GetCursorPosition();
+                        int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
+
+                        // 计算新坐标
+                        int i = (worldPos[0] - origin[0]) / spacing[0];
+                        int j = (worldPos[1] - origin[1]) / spacing[1];
+                        int k = (worldPos[2] - origin[2]) / spacing[2];
+
+                        // 只更新锁定的轴
+                        if (m_dragAxis == 0) newPos[0] = i;
+                        else if (m_dragAxis == 1) newPos[1] = j;
+                        else if (m_dragAxis == 2) newPos[2] = k;
+
+                        state->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
+                    }
                 }
-
-                // 阻止默认的旋转行为
-                m_eventCallback->SetAbortFlag(1); 
+                m_eventCallback->SetAbortFlag(1);
             }
         }
         else if (eventId == vtkCommand::LeftButtonReleaseEvent) 
         {
             m_isDragging = false;
+            m_dragAxis = -1;
         }
      }
 }

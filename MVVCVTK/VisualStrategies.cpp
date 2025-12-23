@@ -524,6 +524,15 @@ void CompositeStrategy::UpdateReferencePlanes(int x, int y, int z) {
     }
 }
 
+int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
+    // 将请求转发给内部的参考平面策略
+    auto coloredPlanes = std::dynamic_pointer_cast<ColoredPlanesStrategy>(m_referencePlanes);
+    if (coloredPlanes) {
+        return coloredPlanes->GetPlaneAxis(actor);
+    }
+    return -1;
+}
+
 // ================= ColoredPlanesStrategy =================
 ColoredPlanesStrategy::ColoredPlanesStrategy() {
     double colors[3][3] = {
@@ -600,4 +609,13 @@ void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
 
 void ColoredPlanesStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
     for (int i = 0; i < 3; i++) renderer->RemoveActor(m_planeActors[i]);
+}
+
+int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
+    for (int i = 0; i < 3; ++i) {
+        if (m_planeActors[i] == actor) {
+            return i; // 0 for X, 1 for Y, 2 for Z
+        }
+    }
+    return -1; // 未匹配
 }

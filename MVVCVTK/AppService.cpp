@@ -191,3 +191,12 @@ void MedicalVizService::OnStateChanged() {
     // 触发渲染
     if (m_renderWindow) m_renderWindow->Render();
 }
+
+int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
+    if (m_currentStrategy) {
+        // 利用多态调用当前策略的接口
+        auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
+        return compositeStrategy->GetPlaneAxis(actor);
+    }
+    return -1;
+}

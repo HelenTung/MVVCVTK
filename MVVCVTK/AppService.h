@@ -39,6 +39,9 @@ public:
     std::shared_ptr<SharedInteractionState> GetSharedState() {
         return m_sharedState;
     }
+
+    // 返回轴向
+    int GetPlaneAxis(vtkActor* actor); 
 private:
 	// 更新坐标轴显示
     void UpdateAxes();
