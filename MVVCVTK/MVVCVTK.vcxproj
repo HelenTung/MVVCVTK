@@ -73,6 +73,9 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>D:\git\vcpkg-master\installed\x64-windows\include;D:\CT-1209\VTK\lib\vtk_install\include\vtk-9.4;$(IncludePath)</IncludePath>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <IncludePath>D:\CT-1209\VTK\lib\vtk_install\include\vtk-9.4;D:\CT-1209\VTK\lib\vtk_install\include;D:\git\vcpkg-master\installed\x64-windows\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -105,10 +108,27 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>D:\CT-1209\VTK\lib\vtk_install\lib;D:\git\vcpkg-master\installed\x64-windows\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>vtkCommonCore-9.4.lib;
+vtkCommonDataModel-9.4.lib;
+vtkCommonExecutionModel-9.4.lib;
+vtksys-9.4.lib;
+vtkRenderingCore-9.4.lib;
+vtkRenderingOpenGL2-9.4.lib;
+vtkRenderingFreeType-9.4.lib;
+vtkRenderingImage-9.4.lib
+;vtkFiltersCore-9.4.lib;
+vtkFiltersSources-9.4.lib;
+vtkRenderingAnnotation-9.4.lib
+;vtkRenderingVolume-9.4.lib;
+vtkRenderingVolumeOpenGL2-9.4.lib;
+vtkInteractionStyle-9.4.lib
+;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
