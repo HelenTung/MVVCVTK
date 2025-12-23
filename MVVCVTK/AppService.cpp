@@ -1,22 +1,22 @@
-#include "AppService.h"
+ï»¿#include "AppService.h"
 #include "DataManager.h"
 #include "DataConverters.h"
 #include "StrategyFactory.h"
 
-// --- »ùÀà·½·¨ÊµÏÖ ---
+// --- åŸºç±»æ–¹æ³•å®ç° ---
 void AbstractAppService::SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy) {
     if (!m_renderer || !m_renderWindow) return;
 
-    // ¾É²ßÂÔÏÂÌ¨
+    // æ—§ç­–ç•¥ä¸‹å°
     if (m_currentStrategy) {
         m_currentStrategy->Detach(m_renderer);
     }
 
-    // ĞÂ²ßÂÔÉÏÌ¨
+    // æ–°ç­–ç•¥ä¸Šå°
     m_currentStrategy = newStrategy;
     if (m_currentStrategy) {
         m_currentStrategy->Attach(m_renderer);
-        // ÈÃ²ßÂÔ×Ô¼º¾ö¶¨Ïà»úµÄĞĞÎª (2DÆ½ĞĞ vs 3DÍ¸ÊÓ)
+        // è®©ç­–ç•¥è‡ªå·±å†³å®šç›¸æœºçš„è¡Œä¸º (2Då¹³è¡Œ vs 3Dé€è§†)
         m_currentStrategy->SetupCamera(m_renderer);
     }
 
@@ -24,21 +24,21 @@ void AbstractAppService::SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> 
     m_renderWindow->Render();
 }
 
-// --- ¾ßÌå·şÎñÊµÏÖ ---
+// --- å…·ä½“æœåŠ¡å®ç° ---
 MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state){
-    // ÊµÀı»¯¾ßÌåµÄ DataManager
+    // å®ä¾‹åŒ–å…·ä½“çš„ DataManager
     m_dataManager = dataMgr;
-    m_sharedState = state; // ±£´æÒıÓÃ
+    m_sharedState = state; // ä¿å­˜å¼•ç”¨
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
 void MedicalVizService::LoadFile(const std::string& path) {
     if (m_dataManager->LoadData(path)) {
-		ClearCache(); // Êı¾İ±ä¸ü£¬Çå¿Õ»º´æ
-        ResetCursorCenter(); // ¼ÓÔØĞÂÊı¾İÊ±£¬ÖØÖÃ×ø±êµ½ÖĞĞÄ
+		ClearCache(); // æ•°æ®å˜æ›´ï¼Œæ¸…ç©ºç¼“å­˜
+        ResetCursorCenter(); // åŠ è½½æ–°æ•°æ®æ—¶ï¼Œé‡ç½®åæ ‡åˆ°ä¸­å¿ƒ
         UpdateAxes();
-        ShowIsoSurface(); // Ä¬ÈÏÏÔÊ¾
+        ShowIsoSurface(); // é»˜è®¤æ˜¾ç¤º
     }
 }
 
@@ -53,7 +53,7 @@ void MedicalVizService::ShowVolume() {
 void MedicalVizService::ShowIsoSurface() {
     if (!m_dataManager->GetVtkImage()) return;
 
-    // Ê¹ÓÃ Converter ½øĞĞÊı¾İ´¦Àí (Model -> Logic -> New Model)
+    // ä½¿ç”¨ Converter è¿›è¡Œæ•°æ®å¤„ç† (Model -> Logic -> New Model)
     auto strategy = GetStrategy(VizMode::IsoSurface);
     SwitchStrategy(strategy);
     UpdateAxes();
@@ -64,7 +64,7 @@ void MedicalVizService::ShowSlice(VizMode sliceMode) {
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(sliceMode);
     SwitchStrategy(strategy);
-    // 2D Ä£Ê½ Òş²Ø 3D ×ø±êÖá
+    // 2D æ¨¡å¼ éšè— 3D åæ ‡è½´
     if (m_renderer) m_renderer->RemoveActor(m_cubeAxes);
     OnStateChanged();
 }
@@ -73,7 +73,7 @@ void MedicalVizService::Show3DPlanes(VizMode renderMode)
 {
     if (!m_dataManager->GetVtkImage()) return;
 
-    // Ê¹ÓÃ Converter ½øĞĞÊı¾İ´¦Àí (Model -> Logic -> New Model)
+    // ä½¿ç”¨ Converter è¿›è¡Œæ•°æ®å¤„ç† (Model -> Logic -> New Model)
     auto strategy = GetStrategy(renderMode);
     SwitchStrategy(strategy);
     UpdateAxes();
@@ -84,7 +84,7 @@ void MedicalVizService::UpdateInteraction(int value)
 {
     if (!m_currentStrategy) return;
 
-    // »ñÈ¡µ±Ç°Í¼ÏñÎ¬¶ÈÓÃÓÚ±ß½ç¼ì²é
+    // è·å–å½“å‰å›¾åƒç»´åº¦ç”¨äºè¾¹ç•Œæ£€æŸ¥
     int dims[3];
     m_dataManager->GetVtkImage()->GetDimensions(dims);
 
@@ -93,9 +93,9 @@ void MedicalVizService::UpdateInteraction(int value)
         Orientation orient = sliceStrategy->GetOrientation();
         int axisIndex = (int)orient;
 
-        // µ÷ÓÃ¹²Ïí×´Ì¬µÄ¸üĞÂ·½·¨
-        // ÕâÀï¸üĞÂ state »á´¥·¢ NotifyObservers£¬
-        // ´Ó¶øµ¼ÖÂËùÓĞ´°¿Ú£¨°üÀ¨×Ô¼º£©ÖØ»æ
+        // è°ƒç”¨å…±äº«çŠ¶æ€çš„æ›´æ–°æ–¹æ³•
+        // è¿™é‡Œæ›´æ–° state ä¼šè§¦å‘ NotifyObserversï¼Œ
+        // ä»è€Œå¯¼è‡´æ‰€æœ‰çª—å£ï¼ˆåŒ…æ‹¬è‡ªå·±ï¼‰é‡ç»˜
         m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
     }
 }
@@ -119,13 +119,13 @@ void MedicalVizService::ResetCursorCenter()
 
 std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode mode)
 {
-    // ¼ì²écache
+    // æ£€æŸ¥cache
 	auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end())
 		return it->second;
 
 	auto strategy = StrategyFactory::CreateStrategy(mode);
-	// Ô­Ê¼Êı¾İ½Ó¿Ú
+	// åŸå§‹æ•°æ®æ¥å£
     vtkSmartPointer<vtkImageData> rawImage = m_dataManager->GetVtkImage();
 
     if (mode == VizMode::IsoSurface || mode == VizMode::CompositeIsoSurface) {
@@ -139,23 +139,23 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
         }
     }
     else {
-        // CompositeVolume¡¢Volume ºÍ Slice Ö±½Ó³Ô vtkImage
+        // CompositeVolumeã€Volume å’Œ Slice ç›´æ¥åƒ vtkImage
         if (m_dataManager->GetVtkImage()) {
             strategy->SetInputData(m_dataManager->GetVtkImage());
         }
     }
     
-	// Èç¹ûÊÇ CompositeStrategy£¬»¹ĞèÒªÉèÖÃÔ­Ê¼image×÷Îª²Î¿¼
+	// å¦‚æœæ˜¯ CompositeStrategyï¼Œè¿˜éœ€è¦è®¾ç½®åŸå§‹imageä½œä¸ºå‚è€ƒ
     auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(strategy);
     if (mode == VizMode::CompositeVolume || mode == VizMode::CompositeIsoSurface)
     {
         if (compositeStrategy && rawImage) {
-            // ÎŞÂÛÖ÷ÊÓÍ¼ÏÔÊ¾Ê²Ã´£¬±³¾°ÇĞÆ¬ÓÀÔ¶ĞèÒªÔ­Ê¼ Image
+            // æ— è®ºä¸»è§†å›¾æ˜¾ç¤ºä»€ä¹ˆï¼ŒèƒŒæ™¯åˆ‡ç‰‡æ°¸è¿œéœ€è¦åŸå§‹ Image
             compositeStrategy->SetReferenceData(rawImage);
         }
     }
 
-    // ´æÈë»º´æ
+    // å­˜å…¥ç¼“å­˜
     m_strategyCache[mode] = strategy;
     return strategy;
 }
@@ -170,32 +170,33 @@ void MedicalVizService::ClearCache()
 }
 
 void MedicalVizService::OnStateChanged() {
-    // ÖØĞÂ°Ñ¹²Ïí×´Ì¬ÀïµÄĞÂÎ»ÖÃ£¬Ó¦ÓÃµ½µ±Ç°²ßÂÔÉÏ
+    // é‡æ–°æŠŠå…±äº«çŠ¶æ€é‡Œçš„æ–°ä½ç½®ï¼Œåº”ç”¨åˆ°å½“å‰ç­–ç•¥ä¸Š
     if (m_currentStrategy) {
          int* pos = m_sharedState->GetCursorPosition();
          
+		 // é€šè¿‡ dynamic_pointer_cast æ¥åˆ¤æ–­å½“å‰å¤„äºå“ªç§æ¨¡å¼ æ´¾ç”Ÿç±»->åŸºç±» åä¹‹åˆ™ç”¨ static_pointer_cast
          auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
          if (sliceStrategy) {
              int axisIndex = (int)sliceStrategy->GetOrientation();
-			 sliceStrategy->SetSliceIndex(pos[axisIndex]); // ¸üĞÂÇĞÆ¬Î»ÖÃ
-			 sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]); // ¸üĞÂÊ®×ÖÏß
+			 sliceStrategy->SetSliceIndex(pos[axisIndex]); // æ›´æ–°åˆ‡ç‰‡ä½ç½®
+			 sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]); // æ›´æ–°åå­—çº¿
          }
          
-         // Èç¹ûÓĞ MultiSliceStrategy »ò 3D ÀïµÄ Crosshair£¬Ò²ÒªÔÚÕâÀï¸üĞÂ
+         // å¦‚æœæœ‰ MultiSliceStrategy æˆ– 3D é‡Œçš„ Crosshairï¼Œä¹Ÿè¦åœ¨è¿™é‡Œæ›´æ–°
          auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
          if (compositeStrategy) {
              compositeStrategy->UpdateReferencePlanes(pos[0], pos[1], pos[2]);
          }
     }
     
-    // ´¥·¢äÖÈ¾
+    // è§¦å‘æ¸²æŸ“
     if (m_renderWindow) m_renderWindow->Render();
 }
 
 int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
+    // åˆ©ç”¨å¤šæ€è°ƒç”¨å½“å‰ç­–ç•¥çš„æ¥å£
+    auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
     if (m_currentStrategy) {
-        // ÀûÓÃ¶àÌ¬µ÷ÓÃµ±Ç°²ßÂÔµÄ½Ó¿Ú
-        auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
         return compositeStrategy->GetPlaneAxis(actor);
     }
     return -1;

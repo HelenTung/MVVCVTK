@@ -31,8 +31,8 @@ int main() {
     auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextA = std::make_shared<StdRenderContext>();
     contextA->BindService(serviceA);
-    contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
-    serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
+    contextA->SetInteractionMode(VizMode::CompositeVolume);
+    serviceA->Show3DPlanes(VizMode::CompositeVolume);
     sharedState->AddObserver([serviceA]() { serviceA->OnStateChanged(); });
 
     // --- 窗口 B ---

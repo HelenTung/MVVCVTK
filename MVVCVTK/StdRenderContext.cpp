@@ -1,4 +1,4 @@
-#include "StdRenderContext.h"
+ï»¿#include "StdRenderContext.h"
 #include <vtkCallbackCommand.h>
 #include <vtkInteractorStyleImage.h>
 
@@ -11,22 +11,22 @@ void StdRenderContext::InitInteractor()
 
 StdRenderContext::StdRenderContext()
 {
-	// ³õÊ¼»¯½»»¥Æ÷
+	// åˆå§‹åŒ–äº¤äº’å™¨
     m_interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
     m_interactor->SetRenderWindow(m_renderWindow);
 
-	// ³õÊ¼»¯Ê°È¡Æ÷
+	// åˆå§‹åŒ–æ‹¾å–å™¨
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
     
-    // ³õÊ¼»¯»Øµ÷ÃüÁî
+    // åˆå§‹åŒ–å›è°ƒå‘½ä»¤
     m_eventCallback = vtkSmartPointer<vtkCallbackCommand>::New();
     m_eventCallback->SetCallback(AbstractRenderContext::DispatchVTKEvent);
     m_eventCallback->SetClientData(this);
 
-    // ¼àÌı¹öÂÖÊÂ¼ş
+    // ç›‘å¬æ»šè½®äº‹ä»¶
     m_interactor->AddObserver(vtkCommand::MouseWheelForwardEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::MouseWheelBackwardEvent, m_eventCallback, 1.0);
-    // ¼àÌıÊó±ê×ó¼ü°´ÏÂ¡¢ÒÆ¶¯¡¢Ì§Æğ
+    // ç›‘å¬é¼ æ ‡å·¦é”®æŒ‰ä¸‹ã€ç§»åŠ¨ã€æŠ¬èµ·
     m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 1.0);
@@ -36,7 +36,7 @@ void StdRenderContext::Start()
 {
     if (m_renderWindow) m_renderWindow->Render();
     if (m_interactor) {
-        //·ÀÖ¹»¹Ã»Init¾ÍStart
+        //é˜²æ­¢è¿˜æ²¡Initå°±Start
         if (!m_interactor->GetInitialized()) {
             m_interactor->Initialize();
         }
@@ -50,14 +50,14 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
 
     if (mode == VizMode::SliceAxial || mode == VizMode::SliceCoronal || 
         mode == VizMode::SliceSagittal) {
-        // 2D Ä£Ê½£ºÊ¹ÓÃÍ¼Ïñ½»»¥·ç¸ñ (Ö§³Ö´°¿í´°Î»µ÷Õû)
+        // 2D æ¨¡å¼ï¼šä½¿ç”¨å›¾åƒäº¤äº’é£æ ¼ (æ”¯æŒçª—å®½çª—ä½è°ƒæ•´)
         auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
-        style->SetInteractionModeToImage2D(); // Ç¿ÖÆÎª 2D Í¼ÏñÄ£Ê½
+        style->SetInteractionModeToImage2D(); // å¼ºåˆ¶ä¸º 2D å›¾åƒæ¨¡å¼
         m_interactor->SetInteractorStyle(style);
 
     }
     else {
-        // 3D Ä£Ê½£ºÊ¹ÓÃ¹ì¼£Çò·ç¸ñ (Ö§³ÖĞı×ªËõ·Å)
+        // 3D æ¨¡å¼ï¼šä½¿ç”¨è½¨è¿¹çƒé£æ ¼ (æ”¯æŒæ—‹è½¬ç¼©æ”¾)
         auto style = vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New();
         m_interactor->SetInteractorStyle(style);
     }
@@ -65,11 +65,11 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
 
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
 {
-    // ½«»ùÀà Service ×ª»»Îª¾ßÌåµÄ MedicalService ÒÔ·ÃÎÊ GetStrategy
+    // å°†åŸºç±» Service è½¬æ¢ä¸ºå…·ä½“çš„ MedicalService ä»¥è®¿é—® GetStrategy
     auto medService = std::dynamic_pointer_cast<MedicalVizService>(m_service);
     if (!medService) return;
 
-    // ´¦Àí¹öÂÖÇĞÆ¬Âß¼­
+    // å¤„ç†æ»šè½®åˆ‡ç‰‡é€»è¾‘
     if (m_currentMode == VizMode::SliceAxial ||
         m_currentMode == VizMode::SliceCoronal ||
         m_currentMode == VizMode::SliceSagittal)
@@ -77,47 +77,47 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         if (eventId == vtkCommand::MouseWheelForwardEvent ||
             eventId == vtkCommand::MouseWheelBackwardEvent) {
 
-            // ¼ÆËã½»»¥Öµ
+            // è®¡ç®—äº¤äº’å€¼
             int delta = (eventId == vtkCommand::MouseWheelForwardEvent) ? 1 : -1;
             medService->UpdateInteraction(delta);
-            // ´¥·¢äÖÈ¾ÒÔ¸üĞÂ»­Ãæ
+            // è§¦å‘æ¸²æŸ“ä»¥æ›´æ–°ç”»é¢
             this->Render();
 
-			// ÖĞÖ¹ºóĞøÄ¬ÈÏ´¦Àí
+			// ä¸­æ­¢åç»­é»˜è®¤å¤„ç†
             m_eventCallback->SetAbortFlag(1);
         }
     }
 
-     if (m_currentMode == VizMode::CompositeVolume || m_currentMode == VizMode::CompositeIsoSurface) 
+    if (m_currentMode == VizMode::CompositeVolume || m_currentMode == VizMode::CompositeIsoSurface) 
     {
         vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
         int* eventPos = iren->GetEventPosition();
 
         if (eventId == vtkCommand::LeftButtonPressEvent) 
         {
-            // Ê¹ÓÃ vtkPropPicker ½øĞĞÊ°È¡
+            // ä½¿ç”¨ vtkPropPicker è¿›è¡Œæ‹¾å–
             if (m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer)) {
-                // »ñÈ¡Ê°È¡µ½µÄ Actor
+                // è·å–æ‹¾å–åˆ°çš„ Actor
                 auto pickedActor = m_picker->GetActor();
 
-                // Ê¹ÓÃĞÂµÄÊ¶±ğ»úÖÆÅĞ¶ÏÊÇ·ñÎªÆ½Ãæ
+                // åˆ¤æ–­æ˜¯å¦ä¸ºå¹³é¢
                 m_dragAxis = medService->GetPlaneAxis(pickedActor);
 
                 if (m_dragAxis != -1) {
-                    // È·ÈÏÊ°È¡µ½µÄÊÇÎÒÃÇµÄÒ»¸öÆ½Ãæ
+                    // ç¡®è®¤æ‹¾å–åˆ°çš„æ˜¯æˆ‘ä»¬çš„ä¸€ä¸ªå¹³é¢
                     m_isDragging = true;
-                    m_eventCallback->SetAbortFlag(1); // ×èÖ¹Ïà»ú×ª¶¯
+                    m_eventCallback->SetAbortFlag(1); // é˜»æ­¢ç›¸æœºè½¬åŠ¨
                 }
-                // Èç¹û m_dragAxis == -1£¬ËµÃ÷µãµ½µÄÊÇÖ÷Ä£ĞÍ»ò¿Õ°×´¦
-                // ´ËÊ± m_isDragging ±£³Ö false£¬²»ÖĞÖ¹ÊÂ¼ş£¬Ïà»ú¿ÉÒÔÕı³£½»»¥
+                // å¦‚æœ m_dragAxis == -1ï¼Œè¯´æ˜ç‚¹åˆ°çš„æ˜¯ä¸»æ¨¡å‹æˆ–ç©ºç™½å¤„
+                // æ­¤æ—¶ m_isDragging ä¿æŒ falseï¼Œä¸ä¸­æ­¢äº‹ä»¶ï¼Œç›¸æœºå¯ä»¥æ­£å¸¸äº¤äº’
             }
         }
         else if (eventId == vtkCommand::MouseMoveEvent) 
         {
-            // ÍÏ×§Âß¼­ºÍÖ®Ç°Ò»Ñù£¬µ«ÏÖÔÚËüÖ»ÔÚÊ°È¡µ½Æ½ÃæÊ±²Å»á´¥·¢
+            // æ‹–æ‹½é€»è¾‘å’Œä¹‹å‰ä¸€æ ·ï¼Œä½†ç°åœ¨å®ƒåªåœ¨æ‹¾å–åˆ°å¹³é¢æ—¶æ‰ä¼šè§¦å‘
             if (m_isDragging && m_dragAxis != -1) {
-                // ÕâÀïÎÒÃÇÓÃ Pick À´³ÖĞø»ñÈ¡Êó±êÏÂµÄ3D×ø±ê
-                // vtkPropPicker Í¬Ñù·µ»Ø×¼È·µÄ PickPosition
+                // è¿™é‡Œæˆ‘ä»¬ç”¨ Pick æ¥æŒç»­è·å–é¼ æ ‡ä¸‹çš„3Dåæ ‡
+                // vtkPropPicker åŒæ ·è¿”å›å‡†ç¡®çš„ PickPosition
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
 
@@ -132,12 +132,12 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
                         int* currentPos = state->GetCursorPosition();
                         int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
 
-                        // ¼ÆËãĞÂ×ø±ê
+                        // è®¡ç®—æ–°åæ ‡
                         int i = (worldPos[0] - origin[0]) / spacing[0];
                         int j = (worldPos[1] - origin[1]) / spacing[1];
                         int k = (worldPos[2] - origin[2]) / spacing[2];
 
-                        // Ö»¸üĞÂËø¶¨µÄÖá
+                        // åªæ›´æ–°é”å®šçš„è½´
                         if (m_dragAxis == 0) newPos[0] = i;
                         else if (m_dragAxis == 1) newPos[1] = j;
                         else if (m_dragAxis == 2) newPos[2] = k;
@@ -153,5 +153,5 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             m_isDragging = false;
             m_dragAxis = -1;
         }
-     }
+    }
 }
