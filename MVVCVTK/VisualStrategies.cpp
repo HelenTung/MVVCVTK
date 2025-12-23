@@ -328,11 +328,11 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
     double physZ = origin[2] + z * spacing[2];
 
     // 为了防止线穿插，稍微给一点偏移，或者利用 Layer
-    // double layerOffset = 1.0;
+    double layerOffset = 0.05;
 
     if (m_orientation == Orientation::AXIAL) { // Z轴切片，看 XY 平面
         // 当前切片的 Z 高度
-        double currentZ = origin[2] + m_currentIndex * spacing[2];
+        double currentZ = origin[2] + m_currentIndex * spacing[2] + layerOffset;
 
         // 垂直线 (固定 X，画 Y 的范围)
         m_vLineSource->SetPoint1(physX, bounds[2], currentZ);
@@ -343,7 +343,7 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
         m_hLineSource->SetPoint2(bounds[1], physY, currentZ);
     }
     else if (m_orientation == Orientation::CORONAL) { // Y轴切片，看 XZ 平面
-        double currentY = origin[1] + m_currentIndex * spacing[1];
+        double currentY = origin[1] + m_currentIndex * spacing[1] + layerOffset;
 
         // 垂直线 (固定 X，画 Z 的范围)
         m_vLineSource->SetPoint1(physX, currentY, bounds[4]);
@@ -354,7 +354,7 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
         m_hLineSource->SetPoint2(bounds[1], currentY, physZ);
     }
     else { // SAGITTAL, X轴切片，看 YZ 平面
-        double currentX = origin[0] + m_currentIndex * spacing[0];
+        double currentX = origin[0] + m_currentIndex * spacing[0] + layerOffset;
 
         // 垂直线 (固定 Y，画 Z 的范围)
         m_vLineSource->SetPoint1(currentX, physY, bounds[4]);
