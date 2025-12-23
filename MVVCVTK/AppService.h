@@ -24,16 +24,13 @@ public:
     void ShowIsoSurface();
 
 	// 业务功能：切换到2d轴切片
-    void ShowSliceAxial();
+    void ShowSlice(VizMode sliceMode);
 
     // 切换到 3D 多切面模式
     void Show3DPlanes(VizMode renderMode);
 
 	// 更新交互值 (如切片位置)
     void UpdateInteraction(int value);
-
-	// 更新切片朝向
-    void UpdateSliceOrientation(Orientation orient);
 
 	// 状态变更通知回调
     void OnStateChanged();

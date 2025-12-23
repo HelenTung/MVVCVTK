@@ -13,7 +13,9 @@
 enum class VizMode { 
     Volume, 
     IsoSurface, 
-    AxialSlice, 
+    SliceAxial,
+    SliceCoronal,
+    SliceSagittal,
 	CompositeVolume, // 3D 体渲染 + 切片平面
 	CompositeIsoSurface  // 3D 等值面 + 切片平面
 };

@@ -49,7 +49,8 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
 {
     m_currentMode = mode;
 
-    if (mode == VizMode::AxialSlice) {
+    if (mode == VizMode::SliceAxial || mode == VizMode::SliceCoronal || 
+        mode == VizMode::SliceSagittal) {
         // 2D 模式：使用图像交互风格 (支持窗宽窗位调整)
         auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
         style->SetInteractionModeToImage2D(); // 强制为 2D 图像模式
@@ -70,7 +71,9 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     if (!medService) return;
 
     // 处理滚轮切片逻辑
-    if (m_currentMode == VizMode::AxialSlice) 
+    if (m_currentMode == VizMode::SliceAxial ||
+        m_currentMode == VizMode::SliceCoronal ||
+        m_currentMode == VizMode::SliceSagittal)
     {
         if (eventId == vtkCommand::MouseWheelForwardEvent ||
             eventId == vtkCommand::MouseWheelBackwardEvent) {

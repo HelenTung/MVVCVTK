@@ -39,27 +39,24 @@ int main() {
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextB = std::make_shared<StdRenderContext>();
     contextB->BindService(serviceB);
-    serviceB->ShowSliceAxial();
-    serviceB->UpdateSliceOrientation(Orientation::AXIAL);
-    contextB->SetInteractionMode(VizMode::AxialSlice);
+    serviceB->ShowSlice(VizMode::SliceAxial);
+    contextB->SetInteractionMode(VizMode::SliceAxial);
     sharedState->AddObserver([serviceB]() { serviceB->OnStateChanged(); });
 
     // --- 窗口 C ---
     auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextC = std::make_shared<StdRenderContext>();
     contextC->BindService(serviceC);
-    serviceC->ShowSliceAxial();
-    serviceC->UpdateSliceOrientation(Orientation::CORONAL);
-    contextC->SetInteractionMode(VizMode::AxialSlice);
+    serviceC->ShowSlice(VizMode::SliceCoronal);
+    contextC->SetInteractionMode(VizMode::SliceCoronal);
     sharedState->AddObserver([serviceC]() { serviceC->OnStateChanged(); });
 
     // --- 窗口 D ---
     auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextD = std::make_shared<StdRenderContext>();
     contextD->BindService(serviceD);
-    serviceD->ShowSliceAxial();
-    serviceD->UpdateSliceOrientation(Orientation::SAGITTAL);
-    contextD->SetInteractionMode(VizMode::AxialSlice);
+    serviceD->ShowSlice(VizMode::SliceSagittal);
+    contextD->SetInteractionMode(VizMode::SliceSagittal);
     sharedState->AddObserver([serviceD]() { serviceD->OnStateChanged(); });
 
     // 先把所有窗口都渲染一次

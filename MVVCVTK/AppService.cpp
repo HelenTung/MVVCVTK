@@ -47,6 +47,7 @@ void MedicalVizService::ShowVolume() {
     auto strategy = GetStrategy(VizMode::Volume);
     SwitchStrategy(strategy);
     UpdateAxes();
+	OnStateChanged();
 }
 
 void MedicalVizService::ShowIsoSurface() {
@@ -56,14 +57,16 @@ void MedicalVizService::ShowIsoSurface() {
     auto strategy = GetStrategy(VizMode::IsoSurface);
     SwitchStrategy(strategy);
     UpdateAxes();
+    OnStateChanged();
 }
 
-void MedicalVizService::ShowSliceAxial() {
+void MedicalVizService::ShowSlice(VizMode sliceMode) {
     if (!m_dataManager->GetVtkImage()) return;
-    auto strategy = GetStrategy(VizMode::AxialSlice);
+    auto strategy = GetStrategy(sliceMode);
     SwitchStrategy(strategy);
     // 2D 模式 隐藏 3D 坐标轴
     if (m_renderer) m_renderer->RemoveActor(m_cubeAxes);
+    OnStateChanged();
 }
 
 void MedicalVizService::Show3DPlanes(VizMode renderMode) 
@@ -74,6 +77,7 @@ void MedicalVizService::Show3DPlanes(VizMode renderMode)
     auto strategy = GetStrategy(renderMode);
     SwitchStrategy(strategy);
     UpdateAxes();
+    OnStateChanged();
 }
 
 void MedicalVizService::UpdateInteraction(int value)
@@ -96,18 +100,6 @@ void MedicalVizService::UpdateInteraction(int value)
     }
 }
 
-void MedicalVizService::UpdateSliceOrientation(Orientation orient)
-{
-    auto strategy = GetStrategy(VizMode::AxialSlice);
-    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(strategy);
-    if (sliceStrategy) {
-        sliceStrategy->SetOrientation(orient);
-		SwitchStrategy(sliceStrategy);
-    }
-
-
-}
-
 void MedicalVizService::UpdateAxes() {
     if (m_renderer && m_dataManager->GetVtkImage()) {
         m_cubeAxes->SetBounds(m_dataManager->GetVtkImage()->GetBounds());
@@ -121,6 +113,7 @@ void MedicalVizService::ResetCursorCenter()
     auto img = m_dataManager->GetVtkImage();
     if (!img) return;
     int dims[3];
+    img->GetDimensions(dims);
     m_sharedState->SetCursorPosition(dims[0] / 2, dims[1] / 2, dims[2] / 2);
 }
 
@@ -160,25 +153,6 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
             // 无论主视图显示什么，背景切片永远需要原始 Image
             compositeStrategy->SetReferenceData(rawImage);
         }
-    }
-
-	// 如果是 SliceStrategy，需要从共享状态获取位置
-    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(strategy);
-    // 从共享状态获取位置
-    int* pos = m_sharedState->GetCursorPosition();
-    if (sliceStrategy) {
-        Orientation orient = sliceStrategy->GetOrientation();
-        int axisIndex = (int)orient;
-
-        // 设置到策略中
-        sliceStrategy->SetSliceIndex(pos[axisIndex]);
-
-        // 初始化时立即更新十字线位置，否则十字线是乱的或不可见的
-        sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]);
-    }
-
-    if (compositeStrategy) {
-        compositeStrategy->UpdateReferencePlanes(pos[0], pos[1], pos[2]);
     }
 
     // 存入缓存

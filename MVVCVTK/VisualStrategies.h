@@ -53,7 +53,7 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override; // 关键：平行投影
+    void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override; // 平行投影
 
     //  获取当前朝向，供 Service 查询以决定更新 x, y 还是 z
     Orientation GetOrientation() const { return m_orientation; }
