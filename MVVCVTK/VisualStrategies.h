@@ -5,6 +5,8 @@
 #include <vtkImageSlice.h>
 #include <vtkImageResliceMapper.h>
 #include <vtkLineSource.h>
+#include <vtkPlane.h>
+#include <vtkPlaneSource.h>
 
 // --- 策略 A: 等值面渲染 ---
 class IsoSurfaceStrategy : public AbstractVisualStrategy {
@@ -70,7 +72,7 @@ private:
     void UpdatePlanePosition();
 };
 
-
+// --- 策略 D: 三面切片 (MPR) ---
 class MultiSliceStrategy : public AbstractVisualStrategy {
 private:
     vtkSmartPointer<vtkImageSlice> m_slices[3];
@@ -90,7 +92,22 @@ public:
     void UpdateAllPositions(int x, int y, int z);
 };
 
+// --- 策略 E: 彩色切片平面 (红绿蓝) ---
+class ColoredPlanesStrategy : public AbstractVisualStrategy {
+private:
+    vtkSmartPointer<vtkActor> m_planeActors[3];
+    vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
+    vtkSmartPointer<vtkImageData> m_imageData; // 用于存储边界和间距信息
 
+public:
+    ColoredPlanesStrategy();
+    void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
+    void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
+    void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
+    void UpdateAllPositions(int x, int y, int z);
+};
+
+// --- 组合策略: 体渲染/等值面 + 切片平面 ---
 class CompositeStrategy : public AbstractVisualStrategy {
 private:
     // 主视图策略 (VolumeStrategy 或 IsoSurfaceStrategy)
@@ -112,3 +129,4 @@ public:
     // 专门用于更新参考平面的接口
     void UpdateReferencePlanes(int x, int y, int z);
 };
+

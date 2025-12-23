@@ -7,7 +7,7 @@
 #include <vtkPiecewiseFunction.h>
 #include <vtkCamera.h>
 #include <vtkImageProperty.h>
-#include <vtkPlane.h>
+
 
 // ================= IsoSurfaceStrategy =================
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
@@ -472,7 +472,7 @@ void MultiSliceStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
 
 CompositeStrategy::CompositeStrategy(VizMode mode) : m_mode(mode) {
     // 始终创建参考平面
-    m_referencePlanes = std::make_shared<MultiSliceStrategy>();
+    m_referencePlanes = std::make_shared<ColoredPlanesStrategy>();
 
     // 根据模式创建主策略
     if (m_mode == VizMode::CompositeVolume) {
@@ -518,8 +518,86 @@ void CompositeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {
 
 void CompositeStrategy::UpdateReferencePlanes(int x, int y, int z) {
     // 需要转型回 MultiSliceStrategy 才能调用特定接口
-    auto multiSlice = std::dynamic_pointer_cast<MultiSliceStrategy>(m_referencePlanes);
+    auto multiSlice = std::dynamic_pointer_cast<ColoredPlanesStrategy>(m_referencePlanes);
     if (multiSlice) {
         multiSlice->UpdateAllPositions(x, y, z);
     }
+}
+
+// ================= ColoredPlanesStrategy =================
+ColoredPlanesStrategy::ColoredPlanesStrategy() {
+    double colors[3][3] = {
+        {1.0, 0.0, 0.0}, // 红色: 矢状面 (Sagittal)
+        {0.0, 1.0, 0.0}, // 绿色: 冠状面 (Coronal)
+        {0.0, 0.0, 1.0}  // 蓝色: 轴状面 (Axial)
+    };
+
+    for (int i = 0; i < 3; i++) {
+        m_planeSources[i] = vtkSmartPointer<vtkPlaneSource>::New();
+
+        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputConnection(m_planeSources[i]->GetOutputPort());
+
+        m_planeActors[i] = vtkSmartPointer<vtkActor>::New();
+        m_planeActors[i]->SetMapper(mapper);
+        m_planeActors[i]->GetProperty()->SetColor(colors[i]);
+        m_planeActors[i]->GetProperty()->SetOpacity(0.2); // 设置半透明
+        m_planeActors[i]->GetProperty()->SetLighting(false); // 关闭光照，显示纯色
+    }
+
+    // 设置每个平面的法线方向
+    m_planeSources[0]->SetNormal(1.0, 0.0, 0.0); // X-axis normal (Sagittal)
+    m_planeSources[1]->SetNormal(0.0, 1.0, 0.0); // Y-axis normal (Coronal)
+    m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z-axis normal (Axial)
+}
+
+void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
+    m_imageData = vtkImageData::SafeDownCast(data);
+    if (!m_imageData) return;
+
+    double bounds[6];
+    m_imageData->GetBounds(bounds);
+
+    // 根据数据边界定义每个平面的大小
+    // Sagittal Plane (YZ)
+    m_planeSources[0]->SetOrigin(0, bounds[2], bounds[4]);
+    m_planeSources[0]->SetPoint1(0, bounds[3], bounds[4]);
+    m_planeSources[0]->SetPoint2(0, bounds[2], bounds[5]);
+
+    // Coronal Plane (XZ)
+    m_planeSources[1]->SetOrigin(bounds[0], 0, bounds[4]);
+    m_planeSources[1]->SetPoint1(bounds[1], 0, bounds[4]);
+    m_planeSources[1]->SetPoint2(bounds[0], 0, bounds[5]);
+
+    // Axial Plane (XY)
+    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], 0);
+    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], 0);
+    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], 0);
+}
+
+void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
+    if (!m_imageData) return;
+
+    double origin[3], spacing[3];
+    m_imageData->GetOrigin(origin);
+    m_imageData->GetSpacing(spacing);
+
+    // 将索引坐标转换为物理世界坐标
+    double physPos[3];
+    physPos[0] = origin[0] + x * spacing[0];
+    physPos[1] = origin[1] + y * spacing[1];
+    physPos[2] = origin[2] + z * spacing[2];
+
+    // 移动每个平面的中心点到新的物理坐标
+    m_planeSources[0]->SetCenter(physPos[0], m_planeSources[0]->GetCenter()[1], m_planeSources[0]->GetCenter()[2]);
+    m_planeSources[1]->SetCenter(m_planeSources[1]->GetCenter()[0], physPos[1], m_planeSources[1]->GetCenter()[2]);
+    m_planeSources[2]->SetCenter(m_planeSources[2]->GetCenter()[0], m_planeSources[2]->GetCenter()[1], physPos[2]);
+}
+
+void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
+    for (int i = 0; i < 3; i++) renderer->AddActor(m_planeActors[i]);
+}
+
+void ColoredPlanesStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
+    for (int i = 0; i < 3; i++) renderer->RemoveActor(m_planeActors[i]);
 }
