@@ -31,14 +31,17 @@ int main() {
     auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextA = std::make_shared<StdRenderContext>();
     contextA->BindService(serviceA);
-    contextA->SetInteractionMode(VizMode::CompositeVolume);
-    serviceA->Show3DPlanes(VizMode::CompositeVolume);
+    contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
+    serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
     std::weak_ptr<MedicalVizService> weakServiceA = serviceA;
     sharedState->AddObserver([weakServiceA]() {
         if (auto ptr = weakServiceA.lock()) {
             ptr->OnStateChanged();
         }
     });
+
+	// 保存直方图图片
+	// serviceA->SaveHistogramImage("D:\\CT-1209\\data\\histogram.png", 2048);
 
     // --- 窗口 B ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);

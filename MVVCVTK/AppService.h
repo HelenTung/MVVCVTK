@@ -3,6 +3,7 @@
 #include <vtkCubeAxesActor.h>
 #include <map>
 #include "AppState.h"
+#include <vtkTable.h>
 
 class MedicalVizService : public AbstractAppService {
 private:
@@ -42,6 +43,12 @@ public:
 
     // 返回轴向
     int GetPlaneAxis(vtkActor* actor); 
+
+    // 业务功能：获取当前数据的直方图统计
+    vtkSmartPointer<vtkTable> GetHistogramData(int binCount = 2048);
+
+	// 业务功能：保存当前数据的直方图为图片
+	void SaveHistogramImage(const std::string& filePath, int binCount = 2048);
 private:
 	// 更新坐标轴显示
     void UpdateAxes();

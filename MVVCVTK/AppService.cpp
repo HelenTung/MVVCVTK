@@ -201,3 +201,32 @@ int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
     }
     return -1;
 }
+
+vtkSmartPointer<vtkTable> MedicalVizService::GetHistogramData(int binCount) {
+    if (!m_dataManager || !m_dataManager->GetVtkImage()) return nullptr;
+
+    // 实例化转换器
+    auto converter = std::make_shared<HistogramConverter>();
+
+    // 设置参数
+    converter->SetParameter("BinCount", (double)binCount);
+
+    // 执行处理 (Model -> Logic -> Output Model)
+    auto table = converter->Process(m_dataManager->GetVtkImage());
+
+    return table;
+}
+
+void MedicalVizService::SaveHistogramImage(const std::string& filePath, int binCount)
+{
+    if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
+
+    // 实例化转换器
+    auto converter = std::make_shared<HistogramConverter>();
+
+    // 设置参数
+    converter->SetParameter("BinCount", (double)binCount);
+
+    // 设置参数
+    converter->SaveHistogramImage(m_dataManager->GetVtkImage(),filePath);
+}
