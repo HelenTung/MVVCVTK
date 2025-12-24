@@ -58,6 +58,7 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     mapper->SetInputData(img);
+	mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离 ?
 
     double range[2];
     img->GetScalarRange(range);

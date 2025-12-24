@@ -116,7 +116,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     // 将基类 Service 转换为具体的 MedicalService 以访问 GetStrategy
     auto medService = std::dynamic_pointer_cast<MedicalVizService>(m_service);
     if (!medService) return;
-
+    
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
 
