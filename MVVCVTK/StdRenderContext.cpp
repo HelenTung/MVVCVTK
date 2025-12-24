@@ -121,7 +121,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     int* eventPos = iren->GetEventPosition();
 
 
-    // [新增] 键盘快捷键处理
+    // 键盘快捷键处理
     if (eventId == vtkCommand::KeyPressEvent) {
         char key = iren->GetKeyCode();
         std::string keySym = iren->GetKeySym();
