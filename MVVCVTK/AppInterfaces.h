@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <atomic>
 
 // --- 可视化模式枚举 ---
 enum class VizMode { 
@@ -69,6 +70,7 @@ protected:
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
     vtkSmartPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
+    std::atomic<bool> m_isDirty{ false }; // 脏数据
 
 public:
     virtual ~AbstractAppService() = default;
@@ -77,6 +79,16 @@ public:
         m_renderWindow = win;
         m_renderer = ren;
     }
+
+    // 供 Context 查询状态
+    bool IsDirty() const { return m_isDirty; }
+
+    // 供 Context 重置状态
+    void SetDirty(bool val) { m_isDirty = val; }
+
+	// 供 context 标记脏数据
+    void MarkDirty() { m_isDirty = true; }
+
 	// 访问数据管理器
     std::shared_ptr<AbstractDataManager> GetDataManager() {
         return m_dataManager;

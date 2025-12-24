@@ -40,6 +40,20 @@ int main() {
         }
     });
 
+
+    // --- 窗口E  ---
+    auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
+    auto contextE = std::make_shared<StdRenderContext>();
+    contextE->BindService(serviceE);
+    contextE->SetInteractionMode(VizMode::CompositeVolume);
+    serviceE->Show3DPlanes(VizMode::CompositeVolume);
+    std::weak_ptr<MedicalVizService> weakServiceE = serviceE;
+    sharedState->AddObserver([weakServiceE]() {
+        if (auto ptr = weakServiceE.lock()) {
+            ptr->OnStateChanged();
+        }
+    });
+
 	// 保存直方图图片
 	// serviceA->SaveHistogramImage("D:\\CT-1209\\data\\histogram.png", 2048);
 
@@ -87,12 +101,14 @@ int main() {
     contextB->Render();
     contextC->Render();
     contextD->Render();
+	contextE->Render();
 
     // 初始化所有的交互器
     contextA->InitInteractor();
     contextB->InitInteractor();
     contextC->InitInteractor();
     contextD->InitInteractor();
+    contextE->InitInteractor();
 
     // 只启动一个主循环 (通常选主窗口)
     // 在 Windows 环境下，同一个线程的 Initialize 过的 Interactor 通常能共享消息泵

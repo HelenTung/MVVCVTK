@@ -9,6 +9,13 @@ void StdRenderContext::InitInteractor()
         m_interactor->Initialize();
     }
 
+    if (m_interactor)
+    {
+        // CreateRepeatingTimer定时器 间隔 33ms (约 30FPS) 或 16ms (60FPS)
+        m_interactor->CreateRepeatingTimer(33);
+        m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, 1.0);
+    }
+
     // 初始化距离测量 Widget
     if (!m_distanceWidget) {
         m_distanceWidget = vtkSmartPointer<vtkDistanceWidget>::New();
@@ -62,6 +69,7 @@ void StdRenderContext::Start()
         }
         m_interactor->Start();
     }
+    m_interactor->Start();
 }
 
 void StdRenderContext::SetInteractionMode(VizMode mode)
@@ -120,6 +128,18 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
 
+	// 心跳定时器处理
+    if (eventId == vtkCommand::TimerEvent) {
+        // 检查 Service 是否有数据更新
+        if (m_service && m_service->IsDirty()) {
+            // 执行真正的渲染
+            if (m_renderWindow) m_renderWindow->Render();
+            // 重置标记
+            m_service->SetDirty(false);
+        }
+        // 处理完心跳直接返回，不干扰后续逻辑
+        return;
+    }
 
     // 键盘快捷键处理
     if (eventId == vtkCommand::KeyPressEvent) {

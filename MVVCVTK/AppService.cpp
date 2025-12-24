@@ -21,7 +21,8 @@ void AbstractAppService::SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> 
     }
 
     m_renderer->ResetCamera();
-    m_renderWindow->Render();
+    // m_renderWindow->Render();
+    m_isDirty = true;
 }
 
 // --- 具体服务实现 ---
@@ -190,7 +191,8 @@ void MedicalVizService::OnStateChanged() {
     }
     
     // 触发渲染
-    if (m_renderWindow) m_renderWindow->Render();
+    //if (m_renderWindow) m_renderWindow->Render();
+    m_isDirty = true;
 }
 
 int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
