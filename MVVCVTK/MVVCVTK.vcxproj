@@ -127,8 +127,8 @@ vtkFiltersSources-9.4.lib;
 vtkRenderingAnnotation-9.4.lib
 ;vtkRenderingVolume-9.4.lib;
 vtkRenderingVolumeOpenGL2-9.4.lib;
-vtkInteractionStyle-9.4.lib
-;%(AdditionalDependencies)</AdditionalDependencies>
+vtkInteractionStyle-9.4.lib;
+vtkInteractionWidgets-9.4.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">

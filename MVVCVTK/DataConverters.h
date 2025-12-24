@@ -1,7 +1,7 @@
-#pragma once
+ï»¿#pragma once
 #include "AppInterfaces.h"
 
-// ½« ImageData ×ª»»Îª PolyData (µÈÖµÃæÌáÈ¡)
+// å°† ImageData è½¬æ¢ä¸º PolyData (ç­‰å€¼é¢æå–)
 class IsoSurfaceConverter : public AbstractDataConverter<vtkImageData, vtkPolyData> {
 private:
     double m_isoValue = 0.0;

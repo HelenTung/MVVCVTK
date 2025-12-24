@@ -2,10 +2,28 @@
 #include <vtkCallbackCommand.h>
 #include <vtkInteractorStyleImage.h>
 
+
 void StdRenderContext::InitInteractor()
 {
     if (m_interactor) {
         m_interactor->Initialize();
+    }
+
+    // 初始化距离测量 Widget
+    if (!m_distanceWidget) {
+        m_distanceWidget = vtkSmartPointer<vtkDistanceWidget>::New();
+        m_distanceWidget->SetInteractor(m_interactor);
+        m_distanceWidget->CreateDefaultRepresentation();
+        // 设置高优先级，确保它能拦截点击事件
+        m_distanceWidget->SetPriority(1.0);
+    }
+
+    // 初始化角度测量 Widget
+    if (!m_angleWidget) {
+        m_angleWidget = vtkSmartPointer<vtkAngleWidget>::New();
+        m_angleWidget->SetInteractor(m_interactor);
+        m_angleWidget->CreateDefaultRepresentation();
+        m_angleWidget->SetPriority(1.0);
     }
 }
 
@@ -30,6 +48,8 @@ StdRenderContext::StdRenderContext()
     m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 1.0);
     m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 1.0);
+	// 监听键盘按键事件
+    m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 1.0);
 }
 
 void StdRenderContext::Start()
@@ -63,6 +83,34 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
     }
 }
 
+void StdRenderContext::SetToolMode(ToolMode mode)
+{
+    m_toolMode = mode;
+
+    // 根据模式开关 Widget
+    // Widget->On() 激活其内部的交互机制
+    if (m_distanceWidget) {
+        if (mode == ToolMode::DistanceMeasure) {
+            m_distanceWidget->On();
+        }
+        else {
+            m_distanceWidget->Off();
+        }
+    }
+
+    if (m_angleWidget) {
+        if (mode == ToolMode::AngleMeasure) {
+            m_angleWidget->On();
+        }
+        else {
+            m_angleWidget->Off();
+        }
+    }
+
+    // 触发渲染刷新 UI
+    this->Render();
+}
+
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
 {
     // 将基类 Service 转换为具体的 MedicalService 以访问 GetStrategy
@@ -71,6 +119,38 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
+
+
+    // [新增] 键盘快捷键处理
+    if (eventId == vtkCommand::KeyPressEvent) {
+        char key = iren->GetKeyCode();
+        std::string keySym = iren->GetKeySym();
+
+        // 按 'd' 开启距离测量，'a' 开启角度测量，'Esc' 退出测量
+        if (key == 'd' || key == 'D') {
+            SetToolMode(ToolMode::DistanceMeasure);
+            std::cout << "Mode: Distance Measurement" << std::endl;
+        }
+        else if (key == 'a' || key == 'A') {
+            SetToolMode(ToolMode::AngleMeasure);
+            std::cout << "Mode: Angle Measurement" << std::endl;
+        }
+        else if (keySym == "Escape") {
+            SetToolMode(ToolMode::Navigation);
+            std::cout << "Mode: Navigation" << std::endl;
+        }
+    }
+
+    // 如果当前处于测量模式，屏蔽原有的鼠标左键逻辑（如窗宽窗位调节、十字线拖拽）
+    // 让 Widget 能够独占左键点击用于放置测量点
+    if (m_toolMode != ToolMode::Navigation) {
+        // 允许滚轮切片，但屏蔽左键操作
+        if (eventId == vtkCommand::LeftButtonPressEvent ||
+            eventId == vtkCommand::MouseMoveEvent ||
+            eventId == vtkCommand::LeftButtonReleaseEvent) {
+            return;
+        }
+    }
 
     // 处理滚轮切片逻辑
     if (m_currentMode == VizMode::SliceAxial ||
@@ -93,14 +173,14 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         {
             // 检查 Shift 键状态
             if (iren->GetShiftKey()) {
-                m_isDragging = true;
+                m_enableDragCrosshair = true;
                 // 设为 1 阻止 VTK 默认的 Window/Level 调整
                 m_eventCallback->SetAbortFlag(1);
             }
         }
         else if (eventId == vtkCommand::MouseMoveEvent)
         {
-            if (m_isDragging)
+            if (m_enableDragCrosshair)
             {
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
@@ -143,8 +223,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         }
         else if (eventId == vtkCommand::LeftButtonReleaseEvent)
         {
-            if (m_isDragging) {
-                m_isDragging = false;
+            if (m_enableDragCrosshair) {
+                m_enableDragCrosshair = false;
                 // 这里通常不需要 Abort，让 Interactor 恢复内部状态
             }
         }

@@ -1,10 +1,10 @@
-#pragma once
+ï»¿#pragma once
 #include "AppInterfaces.h"
 #include <vector>
 
 class RawVolumeDataManager : public AbstractDataManager {
 private:
-    vtkSmartPointer<vtkImageData> m_vtkImage;      // VTK °ü×°¶ÔÏó
+    vtkSmartPointer<vtkImageData> m_vtkImage;      // VTK åŒ…è£…å¯¹è±¡
     int m_dims[3] = { 0, 0, 0 };
     double m_spacing = 0.02125;
 

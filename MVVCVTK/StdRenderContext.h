@@ -1,34 +1,45 @@
-#pragma once
+ï»¿#pragma once
 
 #include "AppInterfaces.h"
 #include "AppService.h"
 #include <vtkRenderWindowInteractor.h>
 #include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkInteractorStyleImage.h>
-//#include <vtkCellPicker.h>
 #include <vtkPropPicker.h>
+#include <vtkDistanceWidget.h>
+#include <vtkAngleWidget.h>
+#include <vtkDistanceRepresentation2D.h>
+#include <vtkAngleRepresentation2D.h>
+
 class StdRenderContext : public AbstractRenderContext {
 private:
     vtkSmartPointer<vtkRenderWindowInteractor> m_interactor;
     vtkSmartPointer<vtkCallbackCommand> m_eventCallback;
-    // µ±Ç°ÉÏÏÂÎÄ¼ÇÂ¼µÄÄ£Ê½£¬ÓÃÓÚ¾ö¶¨¹öÂÖĞĞÎª
+    // å½“å‰ä¸Šä¸‹æ–‡è®°å½•çš„æ¨¡å¼ï¼Œç”¨äºå†³å®šæ»šè½®è¡Œä¸º
     VizMode m_currentMode = VizMode::Volume;
-
-    //// Ê°È¡Æ÷
-    //vtkSmartPointer<vtkCellPicker> m_picker;
     
-    vtkSmartPointer<vtkPropPicker> m_picker; 
-    int m_dragAxis = -1; //
-    // ±ê¼ÇÊÇ·ñÕıÔÚÍÏ×§
+    vtkSmartPointer<vtkPropPicker> m_picker;
+	// è®°å½•å½“å‰æ‹–æ‹½çš„è½´å‘
+    int m_dragAxis = -1;
+    // æ ‡è®°æ˜¯å¦æ­£åœ¨æ‹–æ‹½
     bool m_isDragging = false;
+    // åå­—çº¿æ‹–æ‹½
+	bool m_enableDragCrosshair = false;
+
+    // --- æµ‹é‡ç»„ä»¶ ---
+    vtkSmartPointer<vtkDistanceWidget> m_distanceWidget;
+    vtkSmartPointer<vtkAngleWidget> m_angleWidget;
+    ToolMode m_toolMode = ToolMode::Navigation;
 
 public:
     void InitInteractor();
     StdRenderContext();
     void Start() override;
     void SetInteractionMode(VizMode mode) override;
-
+    
+	// æµ‹é‡å·¥å…·æ¨¡å¼åˆ‡æ¢
+    void SetToolMode(ToolMode mode);
 protected:
-    // ´¦Àí´Ó»ùÀà×ª·¢¹ıÀ´µÄ VTK ÊÂ¼ş
+    // å¤„ç†ä»åŸºç±»è½¬å‘è¿‡æ¥çš„ VTK äº‹ä»¶
     void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) override;
 };

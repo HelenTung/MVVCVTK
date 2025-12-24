@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
@@ -9,21 +9,28 @@
 #include <memory>
 #include <string>
 
-// --- ¿ÉÊÓ»¯Ä£Ê½Ã¶¾Ù ---
+// --- å¯è§†åŒ–æ¨¡å¼æšä¸¾ ---
 enum class VizMode { 
     Volume, 
     IsoSurface, 
     SliceAxial,
     SliceCoronal,
     SliceSagittal,
-	CompositeVolume, // 3D ÌåäÖÈ¾ + ÇĞÆ¬Æ½Ãæ
-	CompositeIsoSurface  // 3D µÈÖµÃæ + ÇĞÆ¬Æ½Ãæ
+	CompositeVolume, // 3D ä½“æ¸²æŸ“ + åˆ‡ç‰‡å¹³é¢
+	CompositeIsoSurface  // 3D ç­‰å€¼é¢ + åˆ‡ç‰‡å¹³é¢
+};
+
+// --- äº¤äº’å·¥å…·æšä¸¾ ---
+enum class ToolMode {
+    Navigation,         // é»˜è®¤æ¼«æ¸¸/åˆ‡ç‰‡æµè§ˆ
+    DistanceMeasure,    // è·ç¦»æµ‹é‡
+    AngleMeasure        // è§’åº¦æµ‹é‡
 };
 
 // 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
 enum class Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
 
-// --- Êı¾İ¹ÜÀí³éÏóÀà ---
+// --- æ•°æ®ç®¡ç†æŠ½è±¡ç±» ---
 class AbstractDataManager {
 public:
     virtual ~AbstractDataManager() = default;
@@ -31,7 +38,7 @@ public:
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
 };
 
-// --- Êı¾İ×ª»»³éÏóÀà (Template) ---
+// --- æ•°æ®è½¬æ¢æŠ½è±¡ç±» (Template) ---
 template <typename InputT, typename OutputT>
 class AbstractDataConverter {
 public:
@@ -40,22 +47,22 @@ public:
     virtual void SetParameter(const std::string& key, double value) {}
 };
 
-// --- ÊÓÍ¼Ô­×Ó²Ù×÷³éÏóÀà ---
+// --- è§†å›¾åŸå­æ“ä½œæŠ½è±¡ç±» ---
 class AbstractVisualStrategy {
 public:
     virtual ~AbstractVisualStrategy() = default;
 
-    // ×¢ÈëÊı¾İ (Í¨ÓÃ½Ó¿Ú)
+    // æ³¨å…¥æ•°æ® (é€šç”¨æ¥å£)
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
-    // Ô­×Ó²Ù×÷£ºÉÏÌ¨ (¹ÒÔØµ½ Renderer)
+    // åŸå­æ“ä½œï¼šä¸Šå° (æŒ‚è½½åˆ° Renderer)
     virtual void Attach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // Ô­×Ó²Ù×÷£ºÏÂÌ¨ (´Ó Renderer ÒÆ³ı)
+    // åŸå­æ“ä½œï¼šä¸‹å° (ä» Renderer ç§»é™¤)
     virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // ÊÓÍ¼×¨ÊôµÄÏà»úÅäÖÃ (²»×ö¸Ä±ä)
+    // è§†å›¾ä¸“å±çš„ç›¸æœºé…ç½® (ä¸åšæ”¹å˜)
     virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
 };
 
-// --- ·şÎñ¼¯³É³éÏóÀà ---
+// --- æœåŠ¡é›†æˆæŠ½è±¡ç±» ---
 class AbstractAppService {
 protected:
     std::shared_ptr<AbstractDataManager> m_dataManager;
@@ -70,22 +77,22 @@ public:
         m_renderWindow = win;
         m_renderer = ren;
     }
-	// ·ÃÎÊÊı¾İ¹ÜÀíÆ÷
+	// è®¿é—®æ•°æ®ç®¡ç†å™¨
     std::shared_ptr<AbstractDataManager> GetDataManager() {
         return m_dataManager;
     }
-    // ºËĞÄµ÷¶ÈÂß¼­ (ÔÚ .cpp ÖĞÊµÏÖ)
+    // æ ¸å¿ƒè°ƒåº¦é€»è¾‘ (åœ¨ .cpp ä¸­å®ç°)
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
 
-// --- ³éÏó¿ØÖÆ²ã½Ó¿Ú ---
+// --- æŠ½è±¡æ§åˆ¶å±‚æ¥å£ ---
 class AbstractRenderContext {
 protected:
-    // VTK ºËĞÄäÖÈ¾¹ÜÏß
+    // VTK æ ¸å¿ƒæ¸²æŸ“ç®¡çº¿
     vtkSmartPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
 
-    // ³ÖÓĞÒµÎñ·şÎñµÄ»ùÀàÖ¸Õë (¶àÌ¬)
+    // æŒæœ‰ä¸šåŠ¡æœåŠ¡çš„åŸºç±»æŒ‡é’ˆ (å¤šæ€)
     std::shared_ptr<AbstractAppService> m_service;
 
 public:
@@ -96,16 +103,16 @@ public:
         m_renderWindow->AddRenderer(m_renderer);
     }
 
-    // °ó¶¨ÒµÎñ·şÎñ
+    // ç»‘å®šä¸šåŠ¡æœåŠ¡
     virtual void BindService(std::shared_ptr<AbstractAppService> service) {
         m_service = service;
-        // ³õÊ¼»¯ Service ÄÚ²¿µÄ VTK ¶ÔÏó
+        // åˆå§‹åŒ– Service å†…éƒ¨çš„ VTK å¯¹è±¡
         if (m_service) {
             m_service->Initialize(m_renderWindow, m_renderer);
         }
     }
 
-    // ºËĞÄäÖÈ¾½Ó¿Ú
+    // æ ¸å¿ƒæ¸²æŸ“æ¥å£
     virtual void Render() {
         if (m_renderWindow) m_renderWindow->Render();
     }
@@ -114,13 +121,14 @@ public:
         if (m_renderer) m_renderer->ResetCamera();
     }
 
-    // ³éÏó½»»¥½Ó¿Ú (×ÓÀàĞèÊµÏÖ¾ßÌåµÄ½»»¥Æ÷Âß¼­) mode: ¸æÖª Context µ±Ç°½øÈëÁËÊ²Ã´Ä£Ê½£¬Context ¾ö¶¨ÇĞ»»Ê²Ã´¶¯×÷
+    // æŠ½è±¡äº¤äº’æ¥å£ (å­ç±»éœ€å®ç°å…·ä½“çš„äº¤äº’å™¨é€»è¾‘) mode: å‘ŠçŸ¥ Context å½“å‰è¿›å…¥äº†ä»€ä¹ˆæ¨¡å¼ï¼ŒContext å†³å®šåˆ‡æ¢ä»€ä¹ˆåŠ¨ä½œ
     virtual void SetInteractionMode(VizMode mode) = 0;
-    // Æô¶¯ÊÓ´° (Qt Ä£Ê½ÏÂ¿ÉÄÜÎª¿ÕÊµÏÖ£¬ÒòÎª Qt Ö÷Ñ­»·½Ó¹Ü)
+    // å¯åŠ¨è§†çª— (Qt æ¨¡å¼ä¸‹å¯èƒ½ä¸ºç©ºå®ç°ï¼Œå› ä¸º Qt ä¸»å¾ªç¯æ¥ç®¡)
     virtual void Start() = 0;
 
 protected:
-    // ¾²Ì¬»Øµ÷º¯Êı×ª·¢Æ÷ (ÓÃÓÚ VTK C-Style »Øµ÷)
+    // é™æ€å›è°ƒå‡½æ•°è½¬å‘å™¨ (ç”¨äº VTK C-Style å›è°ƒ)
+    // clientData å°±æ˜¯åœ¨æ„é€ å‡½æ•°é‡Œ SetClientData(this) ä¼ è¿›å»çš„æŒ‡é’ˆ
     static void DispatchVTKEvent(vtkObject* caller, long unsigned int eventId,
         void* clientData, void* callData) {
         auto* context = static_cast<AbstractRenderContext*>(clientData);
@@ -129,6 +137,6 @@ protected:
         }
     }
 
-    // ×ÓÀàÖØĞ´´Ë·½·¨´¦Àí¾ßÌåÊÂ¼ş
+    // å­ç±»é‡å†™æ­¤æ–¹æ³•å¤„ç†å…·ä½“äº‹ä»¶
     virtual void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) {}
 };

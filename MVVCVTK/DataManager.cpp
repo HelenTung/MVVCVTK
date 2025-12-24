@@ -1,4 +1,4 @@
-#include "DataManager.h"
+ï»¿#include "DataManager.h"
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
 #include <fstream>
@@ -10,7 +10,7 @@ RawVolumeDataManager::RawVolumeDataManager() {
 }
 
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
-    // ½âÎöÎÄ¼şÃûÖĞµÄ³ß´ç (ÀıÈç data_512x512x200.raw)
+    // è§£ææ–‡ä»¶åä¸­çš„å°ºå¯¸ (ä¾‹å¦‚ data_512x512x200.raw)
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
     std::regex pattern(R"((\d+)[xX](\d+)[xX](\d+))");
@@ -22,19 +22,19 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
         m_dims[2] = std::stoi(matches[3].str());
     }
     else {
-        return false; // ÎÄ¼şÃû¸ñÊ½²»¶Ô
+        return false; // æ–‡ä»¶åæ ¼å¼ä¸å¯¹
     }
 
-    // ¶ÁÈ¡¶ş½øÖÆÊı¾İ
+    // è¯»å–äºŒè¿›åˆ¶æ•°æ®
     size_t totalVoxels = m_dims[0] * m_dims[1] * m_dims[2];
 
-    // ¹¹½¨ VTK ImageData (Zero-Copy)
+    // æ„å»º VTK ImageData (Zero-Copy)
     m_vtkImage->SetDimensions(m_dims[0], m_dims[1], m_dims[2]);
     m_vtkImage->SetSpacing(m_spacing, m_spacing, m_spacing);
     m_vtkImage->SetOrigin(0, 0, 0);
-    m_vtkImage->AllocateScalars(VTK_FLOAT, 1); // ÉêÇëÄÚ´æ£¬ÀàĞÍÎªfloat£¬Á¬ĞøÒ»Î¬
+    m_vtkImage->AllocateScalars(VTK_FLOAT, 1); // ç”³è¯·å†…å­˜ï¼Œç±»å‹ä¸ºfloatï¼Œè¿ç»­ä¸€ç»´
 
-    // ÎÄ¼şÁ÷²Ù×÷
+    // æ–‡ä»¶æµæ“ä½œ
     float* vtkDataPtr = static_cast<float*>(m_vtkImage->GetScalarPointer());
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) return false;

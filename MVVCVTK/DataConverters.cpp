@@ -1,4 +1,4 @@
-#include "DataConverters.h"
+ï»¿#include "DataConverters.h"
 #include <vtkMarchingCubes.h>
 
 void IsoSurfaceConverter::SetParameter(const std::string& key, double value) {
@@ -10,6 +10,6 @@ vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkIma
     mc->SetInputData(input);
     mc->ComputeNormalsOn();
     mc->SetValue(0, m_isoValue);
-    mc->Update(); // Á¢¼´Ö´ÐÐ¼ÆËã
+    mc->Update(); // ç«‹å³æ‰§è¡Œè®¡ç®—
     return mc->GetOutput();
 }
