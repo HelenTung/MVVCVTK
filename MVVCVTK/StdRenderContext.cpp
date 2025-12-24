@@ -69,6 +69,9 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     auto medService = std::dynamic_pointer_cast<MedicalVizService>(m_service);
     if (!medService) return;
 
+    vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
+    int* eventPos = iren->GetEventPosition();
+
     // 处理滚轮切片逻辑
     if (m_currentMode == VizMode::SliceAxial ||
         m_currentMode == VizMode::SliceCoronal ||
@@ -83,15 +86,74 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             // 触发渲染以更新画面
             this->Render();
 
-			// 中止后续默认处理
+            // 中止后续默认处理
             m_eventCallback->SetAbortFlag(1);
+        }
+        else if (eventId == vtkCommand::LeftButtonPressEvent)
+        {
+            // 检查 Shift 键状态
+            if (iren->GetShiftKey()) {
+                m_isDragging = true;
+                // 设为 1 阻止 VTK 默认的 Window/Level 调整
+                m_eventCallback->SetAbortFlag(1);
+            }
+        }
+        else if (eventId == vtkCommand::MouseMoveEvent)
+        {
+            if (m_isDragging)
+            {
+                m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
+                double* worldPos = m_picker->GetPickPosition();
+
+                auto img = medService->GetDataManager()->GetVtkImage();
+                if (img && worldPos) {
+                    double origin[3], spacing[3];
+                    img->GetOrigin(origin);
+                    img->GetSpacing(spacing);
+
+                    auto state = medService->GetSharedState();
+                    if (state) {
+                        int* currentPos = state->GetCursorPosition();
+                        int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
+
+                        // 计算新坐标
+                        int i = (worldPos[0] - origin[0]) / spacing[0];
+                        int j = (worldPos[1] - origin[1]) / spacing[1];
+                        int k = (worldPos[2] - origin[2]) / spacing[2];
+
+                        newPos[0] = i;
+                        newPos[1] = j;
+                        newPos[2] = k;
+
+                        if (m_currentMode == VizMode::SliceAxial) {
+                            newPos[2] = currentPos[2]; // 轴状位：锁定 Z，只更新 XY
+                        }
+                        else if (m_currentMode == VizMode::SliceCoronal) {
+                            newPos[1] = currentPos[1]; // 冠状位：锁定 Y，只更新 XZ
+                        }
+                        else if (m_currentMode == VizMode::SliceSagittal) {
+                            newPos[0] = currentPos[0]; // 矢状位：锁定 X，只更新 YZ
+                        }
+                        medService->GetSharedState()->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
+                        m_eventCallback->SetAbortFlag(1);
+                    }
+                }
+            }
+           
+        }
+        else if (eventId == vtkCommand::LeftButtonReleaseEvent)
+        {
+            if (m_isDragging) {
+                m_isDragging = false;
+                // 这里通常不需要 Abort，让 Interactor 恢复内部状态
+            }
         }
     }
 
     if (m_currentMode == VizMode::CompositeVolume || m_currentMode == VizMode::CompositeIsoSurface) 
     {
-        vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
-        int* eventPos = iren->GetEventPosition();
+        //vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
+        //int* eventPos = iren->GetEventPosition();
 
         if (eventId == vtkCommand::LeftButtonPressEvent) 
         {
@@ -114,7 +176,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         }
         else if (eventId == vtkCommand::MouseMoveEvent) 
         {
-            // 拖拽逻辑和之前一样，但现在它只在拾取到平面时才会触发
+            //只在拾取到平面时才会触发
             if (m_isDragging && m_dragAxis != -1) {
                 // 这里我们用 Pick 来持续获取鼠标下的3D坐标
                 // vtkPropPicker 同样返回准确的 PickPosition

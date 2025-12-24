@@ -1,19 +1,19 @@
-#pragma once
+ï»¿#pragma once
 #include <vector>
 #include <functional>
 #include <memory>
 
-// ¶¨ÒåÒ»¸ö¼òµ¥µÄ¹Û²ìÕß»Øµ÷ÀàĞÍ
+// å®šä¹‰ä¸€ä¸ªç®€å•çš„è§‚å¯Ÿè€…å›è°ƒç±»å‹
 using ObserverCallback = std::function<void()>;
 
 class SharedInteractionState {
 private:
     int m_cursorPosition[3] = { 0, 0, 0 };
-    // ¹Û²ìÕßÁĞ±í£º´æ·ÅËùÓĞĞèÒªË¢ĞÂµÄ´°¿ÚµÄ»Øµ÷º¯Êı
+    // è§‚å¯Ÿè€…åˆ—è¡¨ï¼šå­˜æ”¾æ‰€æœ‰éœ€è¦åˆ·æ–°çš„çª—å£çš„å›è°ƒå‡½æ•°
     std::vector<ObserverCallback> m_observers;
 
 public:
-    // ÉèÖÃÎ»ÖÃ£¬²¢Í¨ÖªËùÓĞÈË
+    // è®¾ç½®ä½ç½®ï¼Œå¹¶é€šçŸ¥æ‰€æœ‰äºº
     void SetCursorPosition(int x, int y, int z) {
         if (m_cursorPosition[0] == x && m_cursorPosition[1] == y && m_cursorPosition[2] == z)
             return;
@@ -25,7 +25,7 @@ public:
         NotifyObservers();
     }
 
-    // ¸üĞÂÄ³¸öÖá
+    // æ›´æ–°æŸä¸ªè½´
     void UpdateAxis(int axisIndex, int delta, int maxDim) {
         m_cursorPosition[axisIndex] += delta;
         if (m_cursorPosition[axisIndex] < 0) m_cursorPosition[axisIndex] = 0;
@@ -36,7 +36,7 @@ public:
 
     int* GetCursorPosition() { return m_cursorPosition; }
 
-    // ×¢²á¹Û²ìÕß
+    // æ³¨å†Œè§‚å¯Ÿè€…
     void AddObserver(ObserverCallback cb) {
         m_observers.push_back(cb);
     }
@@ -44,7 +44,7 @@ public:
 private:
     void NotifyObservers() {
         for (auto& cb : m_observers) {
-            cb(); // µ÷ÓÃ»Øµ÷£¬Í¨³£ÊÇ renderWindow->Render()
+            cb(); // è°ƒç”¨å›è°ƒï¼Œé€šå¸¸æ˜¯ renderWindow->Render()
         }
     }
 };
