@@ -363,3 +363,6 @@ MigrationBackup/
 FodyWeavers.xsd
 *.bat
 *.txt
+
+Local.props
+**/Local.props
