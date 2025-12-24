@@ -5,7 +5,7 @@
 
 void StdRenderContext::InitInteractor()
 {
-    if (m_interactor) {
+    if (m_interactor && !m_interactor->GetInitialized()) {
         m_interactor->Initialize();
     }
 
@@ -69,7 +69,6 @@ void StdRenderContext::Start()
         }
         m_interactor->Start();
     }
-    m_interactor->Start();
 }
 
 void StdRenderContext::SetInteractionMode(VizMode mode)
@@ -116,7 +115,8 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     }
 
     // 触发渲染刷新 UI
-    this->Render();
+    // this->Render();
+	m_service->SetDirty(true);
 }
 
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
@@ -184,7 +184,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             int delta = (eventId == vtkCommand::MouseWheelForwardEvent) ? 1 : -1;
             medService->UpdateInteraction(delta);
             // 触发渲染以更新画面
-            this->Render();
+            // this->Render();
+			m_service->SetDirty(true);
 
             // 中止后续默认处理
             m_eventCallback->SetAbortFlag(1);
