@@ -60,37 +60,13 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     mapper->SetInputData(img);
 	mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离 ?
 
-    double range[2];
-    img->GetScalarRange(range);
-    double minVal = range[0];
-    double maxVal = range[1];
-    double diff = maxVal - minVal;
-
-    // 透明度函数 (Opacity)
-    auto opacityTF = vtkSmartPointer<vtkPiecewiseFunction>::New();
-    opacityTF->AddPoint(minVal, 0.0);
-    opacityTF->AddPoint(minVal + diff * 0.35, 0.0); // 过滤低密度噪点
-    opacityTF->AddPoint(minVal + diff * 0.60, 0.6);
-    opacityTF->AddPoint(maxVal, 1.0);
-
-    // 颜色传递函数 (Color)
-    auto colorTF = vtkSmartPointer<vtkColorTransferFunction>::New();
-    colorTF->AddRGBPoint(minVal, 0.0, 0.0, 0.0);
-    colorTF->AddRGBPoint(minVal + diff * 0.40, 0.75, 0.75, 0.75); // 灰色基调
-    colorTF->AddRGBPoint(maxVal, 0.95, 0.95, 0.95); // 高亮部分偏白
-
-    // 属性设置 (Property)
-    auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
-    volumeProperty->SetColor(colorTF);
-    volumeProperty->SetScalarOpacity(opacityTF);
-    volumeProperty->ShadeOn();
-    volumeProperty->SetInterpolationTypeToLinear();
-    volumeProperty->SetAmbient(0.2);
-    volumeProperty->SetDiffuse(0.9);
-    volumeProperty->SetSpecular(0.2);
-
     m_volume->SetMapper(mapper);
-    m_volume->SetProperty(volumeProperty);
+    if (!m_volume->GetProperty()) {
+        auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
+        volumeProperty->ShadeOn();
+        volumeProperty->SetInterpolationTypeToLinear();
+        m_volume->SetProperty(volumeProperty);
+    }
 }
 
 void VolumeStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
@@ -104,6 +80,13 @@ void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 
 void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
+}
+
+void VolumeStrategy::ApplyTransferParams(vtkSmartPointer<vtkColorTransferFunction> ctf, vtkSmartPointer<vtkPiecewiseFunction> otf)
+{
+    if (!m_volume->GetProperty()) return;
+    m_volume->GetProperty()->SetColor(ctf);
+	m_volume->GetProperty()->SetScalarOpacity(otf);
 }
 
 // ================= SliceStrategy (2D) =================
@@ -189,17 +172,6 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     // 强制更新一次位置，确保画面同步
     UpdatePlanePosition();
-
-    // 自动对比度
-    double range[2];
-    img->GetScalarRange(range);
-    double window = range[1] - range[0];
-    double level = (range[1] + range[0]) / 2.0;
-
-    if (window < 1.0) window = 1.0;
-
-    m_slice->GetProperty()->SetColorWindow(window);
-    m_slice->GetProperty()->SetColorLevel(level);
 }
 
 void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
@@ -365,6 +337,13 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
         m_hLineSource->SetPoint1(currentX, bounds[2], physZ);
         m_hLineSource->SetPoint2(currentX, bounds[3], physZ);
     }
+}
+
+void SliceStrategy::ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf)
+{
+    if (!m_slice || !ctf) return;
+    // 将 2D 切片的属性设置为使用 LookupTable
+    m_slice->GetProperty()->SetLookupTable(ctf);
 }
 
 void SliceStrategy::UpdatePlanePosition() {

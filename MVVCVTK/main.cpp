@@ -16,19 +16,10 @@ int main() {
     // 数据是唯一的，加载一次内存
     auto sharedState = std::make_shared<SharedInteractionState>();
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    if (!sharedDataMgr->LoadData("D:\\CT-1209\\data\\1000X1000X1000.raw")) {
-        return -1;
-    }
-    else
-    {
-        int dims[3];
-        sharedDataMgr->GetVtkImage()->GetDimensions(dims);
-        // 强制初始化共享状态到中心
-        sharedState->SetCursorPosition(dims[0] / 2, dims[1] / 2, dims[2] / 2);
-    }
 
     // --- 窗口 A ---
     auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
+    serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
     auto contextA = std::make_shared<StdRenderContext>();
     contextA->BindService(serviceA);
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);

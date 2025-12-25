@@ -39,6 +39,13 @@ void MedicalVizService::LoadFile(const std::string& path) {
 		ClearCache(); // 数据变更，清空缓存
         ResetCursorCenter(); // 加载新数据时，重置坐标到中心
         UpdateAxes();
+        
+        if (m_dataManager->GetVtkImage()) {
+            double range[2];
+            m_dataManager->GetVtkImage()->GetScalarRange(range);
+            m_sharedState->SetScalarRange(range[0], range[1]);
+        }
+
         ShowIsoSurface(); // 默认显示
     }
 }
@@ -181,12 +188,26 @@ void MedicalVizService::OnStateChanged() {
              int axisIndex = (int)sliceStrategy->GetOrientation();
 			 sliceStrategy->SetSliceIndex(pos[axisIndex]); // 更新切片位置
 			 sliceStrategy->UpdateCrosshair(pos[0], pos[1], pos[2]); // 更新十字线
+			 sliceStrategy->ApplyColorMap(m_sharedState->GetColorTF());  // 同步颜色映射
          }
          
          // 如果有 MultiSliceStrategy 或 3D 里的 Crosshair，也要在这里更新
          auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
          if (compositeStrategy) {
              compositeStrategy->UpdateReferencePlanes(pos[0], pos[1], pos[2]);
+
+			 // 当是体渲染模式时，也要同步 Transfer Function
+             auto mainStrat = compositeStrategy->GetMainStrategy();
+             auto volStrat = std::dynamic_pointer_cast<VolumeStrategy>(mainStrat);
+             if (volStrat) {
+                 volStrat->ApplyTransferParams(m_sharedState->GetColorTF(), m_sharedState->GetOpacityTF());
+             }
+         }
+
+		 // 单独处理 3D 体渲染模式的 Transfer Function 同步
+         auto volStrategy = std::dynamic_pointer_cast<VolumeStrategy>(m_currentStrategy);
+         if (volStrategy) {
+             volStrategy->ApplyTransferParams(m_sharedState->GetColorTF(), m_sharedState->GetOpacityTF());
          }
     }
     
