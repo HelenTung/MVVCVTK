@@ -85,6 +85,7 @@ void MedicalVizService::Show3DPlanes(VizMode renderMode)
     auto strategy = GetStrategy(renderMode);
     SwitchStrategy(strategy);
     UpdateAxes();
+    UpdateAxes();
     OnStateChanged();
 }
 
@@ -153,16 +154,13 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
         }
     }
     
-	// 如果是 CompositeStrategy，还需要设置原始image作为参考
-    auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(strategy);
-    if (mode == VizMode::CompositeVolume || mode == VizMode::CompositeIsoSurface)
-    {
-        if (compositeStrategy && rawImage) {
-            // 无论主视图显示什么，背景切片永远需要原始 Image
-            compositeStrategy->SetReferenceData(rawImage);
-        }
-    }
 
+    if (mode == VizMode::CompositeVolume || mode == VizMode::CompositeIsoSurface)
+    {   
+        // 多态方法
+		strategy->SetInputData(rawImage);
+    }
+    
     // 存入缓存
     m_strategyCache[mode] = strategy;
     return strategy;
@@ -201,10 +199,8 @@ void MedicalVizService::OnStateChanged() {
 }
 
 int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
-    // 利用多态调用当前策略的接口
-    auto compositeStrategy = std::dynamic_pointer_cast<CompositeStrategy>(m_currentStrategy);
     if (m_currentStrategy) {
-        return compositeStrategy->GetPlaneAxis(actor);
+        return m_currentStrategy->GetPlaneAxis(actor);
     }
     return -1;
 }

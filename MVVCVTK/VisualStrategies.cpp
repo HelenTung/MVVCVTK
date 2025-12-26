@@ -499,18 +499,15 @@ CompositeStrategy::CompositeStrategy(VizMode mode) : m_mode(mode) {
     }
 }
 
-void CompositeStrategy::SetReferenceData(vtkSmartPointer<vtkImageData> img)
-{
-    if (m_referencePlanes && img) {
-        m_referencePlanes->SetInputData(img);
-    }
-}
-
 void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (m_mainStrategy) {
         // 如果是等值面模式，这里进来的就是 Service 转好的 PolyData
         // 如果是体渲染模式，这里进来的就是 ImageData
         m_mainStrategy->SetInputData(data);
+    }
+
+    if (m_referencePlanes) {
+        m_referencePlanes->SetInputData(data);
     }
 }
 
@@ -533,18 +530,12 @@ void CompositeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {
 }
 
 int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
-    // 将请求转发给内部的参考平面策略
-    auto coloredPlanes = std::dynamic_pointer_cast<ColoredPlanesStrategy>(m_referencePlanes);
-    if (coloredPlanes) {
-        return coloredPlanes->GetPlaneAxis(actor);
-    }
-    return -1;
+    return m_referencePlanes->GetPlaneAxis(actor);
 }
 
 void CompositeStrategy::UpdateVisuals(const RenderParams& params)
 {
     if (m_referencePlanes) {
-        // 多态调用！不再需要 dynamic_cast 强转为 ColoredPlanesStrategy
         m_referencePlanes->UpdateVisuals(params);
     }
 

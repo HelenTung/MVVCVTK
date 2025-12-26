@@ -115,9 +115,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params) override;
-
-    // [Public] 业务必需接口：供 CompositeStrategy 查询拖拽轴
-    int GetPlaneAxis(vtkActor* actor);
+    int GetPlaneAxis(vtkActor* actor) override;
 
 private:
     // [Private] 内部实现
@@ -139,11 +137,7 @@ public:
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params) override;
-
-    // [Public] 业务必需接口：设置背景参考图
-    void SetReferenceData(vtkSmartPointer<vtkImageData> img);
-    // [Public] 业务必需接口：判定拖拽轴
-    int GetPlaneAxis(vtkActor* actor);
+    int GetPlaneAxis(vtkActor* actor) override;
 
 private:
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }

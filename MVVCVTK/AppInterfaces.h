@@ -75,6 +75,7 @@ public:
     // --- 通用更新接口 ---
     // 策略根据 Params 自行决定是否更新、更新哪里
     virtual void UpdateVisuals(const RenderParams& params) {}
+    virtual int GetPlaneAxis(vtkActor* actor) { return -1; };
 };
 
 // --- 服务集成抽象类 ---
