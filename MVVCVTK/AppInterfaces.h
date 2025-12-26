@@ -167,3 +167,19 @@ protected:
     // 子类重写此方法处理具体事件
     virtual void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) {}
 };
+
+// --- 抽象交互服务接口 (继承自 AbstractAppService) ---
+class AbstractInteractiveService : public AbstractAppService {
+public:
+    virtual ~AbstractInteractiveService() = default;
+
+    // 这里放那些“污染”接口，默认空实现
+    virtual void UpdateInteraction(int value) {}
+    virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
+
+    // Context 不需要自己算坐标，直接把拾取到的世界坐标扔给 Service
+    virtual void SyncCursorToWorldPosition(double worldPos[3]) {}
+
+    // 返回标准类型，而不是具体 State 对象
+    virtual std::array<int, 3> GetCursorPosition() { return { 0,0,0 }; }
+};

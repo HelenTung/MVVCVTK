@@ -90,6 +90,12 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
     }
 }
 
+void StdRenderContext::BindService(std::shared_ptr<AbstractAppService> service)
+{   
+    AbstractRenderContext::BindService(service);
+    m_interactiveService = std::dynamic_pointer_cast<AbstractInteractiveService>(service);
+}
+
 void StdRenderContext::SetToolMode(ToolMode mode)
 {
     m_toolMode = mode;
@@ -116,26 +122,22 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 
     // 触发渲染刷新 UI
     // this->Render();
-	m_service->SetDirty(true);
+    m_interactiveService->SetDirty(true);
 }
 
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
 {
-    // 将基类 Service 转换为具体的 MedicalService 以访问 GetStrategy
-    auto medService = std::dynamic_pointer_cast<MedicalVizService>(m_service);
-    if (!medService) return;
-    
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
 
 	// 心跳定时器处理
     if (eventId == vtkCommand::TimerEvent) {
         // 检查 Service 是否有数据更新
-        if (m_service && m_service->IsDirty()) {
+        if (m_interactiveService && m_interactiveService->IsDirty()) {
             // 执行真正的渲染
             if (m_renderWindow) m_renderWindow->Render();
             // 重置标记
-            m_service->SetDirty(false);
+            m_interactiveService->SetDirty(false);
         }
         // 处理完心跳直接返回，不干扰后续逻辑
         return;
@@ -183,10 +185,10 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
             // 计算交互值
             int delta = (eventId == vtkCommand::MouseWheelForwardEvent) ? 1 : -1;
-            medService->UpdateInteraction(delta);
+            m_interactiveService->UpdateInteraction(delta);
             // 触发渲染以更新画面
             // this->Render();
-			m_service->SetDirty(true);
+            m_interactiveService->SetDirty(true);
 
             // 中止后续默认处理
             m_eventCallback->SetAbortFlag(1);
@@ -202,44 +204,12 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         }
         else if (eventId == vtkCommand::MouseMoveEvent)
         {
-            if (m_enableDragCrosshair)
+            if (m_enableDragCrosshair && m_interactiveService)
             {
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
-
-                auto img = medService->GetDataManager()->GetVtkImage();
-                if (img && worldPos) {
-                    double origin[3], spacing[3];
-                    img->GetOrigin(origin);
-                    img->GetSpacing(spacing);
-
-                    auto state = medService->GetSharedState();
-                    if (state) {
-                        int* currentPos = state->GetCursorPosition();
-                        int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
-
-                        // 计算新坐标
-                        int i = (worldPos[0] - origin[0]) / spacing[0];
-                        int j = (worldPos[1] - origin[1]) / spacing[1];
-                        int k = (worldPos[2] - origin[2]) / spacing[2];
-
-                        newPos[0] = i;
-                        newPos[1] = j;
-                        newPos[2] = k;
-
-                        if (m_currentMode == VizMode::SliceAxial) {
-                            newPos[2] = currentPos[2]; // 轴状位：锁定 Z，只更新 XY
-                        }
-                        else if (m_currentMode == VizMode::SliceCoronal) {
-                            newPos[1] = currentPos[1]; // 冠状位：锁定 Y，只更新 XZ
-                        }
-                        else if (m_currentMode == VizMode::SliceSagittal) {
-                            newPos[0] = currentPos[0]; // 矢状位：锁定 X，只更新 YZ
-                        }
-                        medService->GetSharedState()->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
-                        m_eventCallback->SetAbortFlag(1);
-                    }
-                }
+                m_interactiveService->SyncCursorToWorldPosition(worldPos);
+                m_eventCallback->SetAbortFlag(1);
             }
            
         }
@@ -265,7 +235,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
                 auto pickedActor = m_picker->GetActor();
 
                 // 判断是否为平面
-                m_dragAxis = medService->GetPlaneAxis(pickedActor);
+                m_dragAxis = m_interactiveService->GetPlaneAxis(pickedActor);
 
                 if (m_dragAxis != -1) {
                     // 确认拾取到的是我们的一个平面
@@ -284,31 +254,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
                 // vtkPropPicker 同样返回准确的 PickPosition
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
-
-                auto img = medService->GetDataManager()->GetVtkImage();
-                if (img && worldPos) {
-                    double origin[3], spacing[3];
-                    img->GetOrigin(origin);
-                    img->GetSpacing(spacing);
-
-                    auto state = medService->GetSharedState();
-                    if (state) {
-                        int* currentPos = state->GetCursorPosition();
-                        int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
-
-                        // 计算新坐标
-                        int i = (worldPos[0] - origin[0]) / spacing[0];
-                        int j = (worldPos[1] - origin[1]) / spacing[1];
-                        int k = (worldPos[2] - origin[2]) / spacing[2];
-
-                        // 只更新锁定的轴
-                        if (m_dragAxis == 0) newPos[0] = i;
-                        else if (m_dragAxis == 1) newPos[1] = j;
-                        else if (m_dragAxis == 2) newPos[2] = k;
-
-                        state->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
-                    }
-                }
+				m_interactiveService->SyncCursorToWorldPosition(worldPos);
                 m_eventCallback->SetAbortFlag(1);
             }
         }

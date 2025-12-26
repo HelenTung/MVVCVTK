@@ -1,7 +1,6 @@
 ﻿#pragma once
 
 #include "AppInterfaces.h"
-#include "AppService.h"
 #include <vtkRenderWindowInteractor.h>
 #include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkInteractorStyleImage.h>
@@ -13,6 +12,7 @@
 
 class StdRenderContext : public AbstractRenderContext {
 private:
+    std::shared_ptr<AbstractInteractiveService> m_interactiveService;
     vtkSmartPointer<vtkRenderWindowInteractor> m_interactor;
     vtkSmartPointer<vtkCallbackCommand> m_eventCallback;
     // 当前上下文记录的模式，用于决定滚轮行为
@@ -36,7 +36,8 @@ public:
     StdRenderContext();
     void Start() override;
     void SetInteractionMode(VizMode mode) override;
-    
+    void BindService(std::shared_ptr<AbstractAppService> service) override;
+
 	// 测量工具模式切换
     void SetToolMode(ToolMode mode);
 protected:

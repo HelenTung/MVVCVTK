@@ -204,3 +204,33 @@ int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
     }
     return -1;
 }
+
+void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3]) {
+    // 获取数据元信息
+    auto img = m_dataManager->GetVtkImage();
+    if (!img) return;
+
+    double origin[3], spacing[3];
+    img->GetOrigin(origin);
+    img->GetSpacing(spacing);
+    int dims[3];
+    img->GetDimensions(dims);
+
+    // 执行坐标转换逻辑 (原本在 Context 里的代码挪到这里)
+    int i = std::round((worldPos[0] - origin[0]) / spacing[0]);
+    int j = std::round((worldPos[1] - origin[1]) / spacing[1]);
+    int k = std::round((worldPos[2] - origin[2]) / spacing[2]);
+
+    // 边界检查
+    if (i < 0) i = 0; if (i >= dims[0]) i = dims[0] - 1;
+    if (j < 0) j = 0; if (j >= dims[1]) j = dims[1] - 1;
+    if (k < 0) k = 0; if (k >= dims[2]) k = dims[2] - 1;
+
+    // 更新内部 State
+    m_sharedState->SetCursorPosition(i, j, k);
+}
+
+std::array<int, 3> MedicalVizService::GetCursorPosition() {
+    int* pos = m_sharedState->GetCursorPosition();
+    return { pos[0], pos[1], pos[2] };
+}

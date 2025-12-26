@@ -39,7 +39,7 @@ public:
     }
 };
 
-class MedicalVizService : public AbstractAppService {
+class MedicalVizService : public AbstractInteractiveService {
 private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
@@ -57,9 +57,11 @@ public:
     void Show3DPlanes(VizMode renderMode);
 
     // --- 交互业务 ---
-    void UpdateInteraction(int delta);
     void OnStateChanged();
-    int GetPlaneAxis(vtkActor* actor);
+    int GetPlaneAxis(vtkActor* actor) override;
+    void UpdateInteraction(int delta) override;
+    virtual void SyncCursorToWorldPosition(double worldPos[3]) override;
+    virtual std::array<int, 3> GetCursorPosition() override;
 
     std::shared_ptr<SharedInteractionState> GetSharedState() {
         return m_sharedState;
