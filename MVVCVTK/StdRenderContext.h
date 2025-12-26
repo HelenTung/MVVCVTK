@@ -1,5 +1,4 @@
 ﻿#pragma once
-
 #include "AppInterfaces.h"
 #include <vtkRenderWindowInteractor.h>
 #include <vtkInteractorStyleTrackballCamera.h>

@@ -34,6 +34,24 @@ MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMg
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
+void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) {
+    // 初始化
+    AbstractAppService::Initialize(win, ren);
+
+    // 注册到 SharedState shared_from_this() 作为存活凭证 Lambda 回调
+    if (m_sharedState) {
+        // 获取 weak_ptr 供 Lambda 内部安全使用
+        std::weak_ptr<MedicalVizService> weakSelf = std::static_pointer_cast<MedicalVizService>(shared_from_this());
+
+        m_sharedState->AddObserver(shared_from_this(), [weakSelf]() {
+            // Lambda 内部标准写法：先 lock 再用
+            if (auto self = weakSelf.lock()) {
+                self->OnStateChanged();
+            }
+        });
+    }
+}
+
 void MedicalVizService::LoadFile(const std::string& path) {
     if (m_dataManager->LoadData(path)) {
 		ClearCache(); // 数据变更，清空缓存

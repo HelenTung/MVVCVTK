@@ -24,13 +24,6 @@ int main() {
     contextA->BindService(serviceA);
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
-    std::weak_ptr<MedicalVizService> weakServiceA = serviceA;
-    sharedState->AddObserver([weakServiceA]() {
-        if (auto ptr = weakServiceA.lock()) {
-            ptr->OnStateChanged();
-        }
-    });
-
 
     // --- 窗口E  ---
     auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -38,12 +31,7 @@ int main() {
     contextE->BindService(serviceE);
     contextE->SetInteractionMode(VizMode::CompositeVolume);
     serviceE->Show3DPlanes(VizMode::CompositeVolume);
-    std::weak_ptr<MedicalVizService> weakServiceE = serviceE;
-    sharedState->AddObserver([weakServiceE]() {
-        if (auto ptr = weakServiceE.lock()) {
-            ptr->OnStateChanged();
-        }
-    });
+
 
     // --- 窗口 B ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -51,12 +39,6 @@ int main() {
     contextB->BindService(serviceB);
     serviceB->ShowSlice(VizMode::SliceAxial);
     contextB->SetInteractionMode(VizMode::SliceAxial);
-    std::weak_ptr<MedicalVizService> weakServiceB = serviceB;
-    sharedState->AddObserver([weakServiceB]() {
-        if (auto ptr = weakServiceB.lock()) {
-            ptr->OnStateChanged();
-        }
-    });
 
     // --- 窗口 C ---
     auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -64,12 +46,6 @@ int main() {
     contextC->BindService(serviceC);
     serviceC->ShowSlice(VizMode::SliceCoronal);
     contextC->SetInteractionMode(VizMode::SliceCoronal);
-    std::weak_ptr<MedicalVizService> weakServiceC = serviceC;
-    sharedState->AddObserver([weakServiceC]() {
-        if (auto ptr = weakServiceC.lock()) {
-            ptr->OnStateChanged();
-        }
-    });
 
     // --- 窗口 D ---
     auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -77,12 +53,6 @@ int main() {
     contextD->BindService(serviceD);
     serviceD->ShowSlice(VizMode::SliceSagittal);
     contextD->SetInteractionMode(VizMode::SliceSagittal);
-    std::weak_ptr<MedicalVizService> weakServiceD = serviceD;
-    sharedState->AddObserver([weakServiceD]() {
-        if (auto ptr = weakServiceD.lock()) {
-            ptr->OnStateChanged();
-        }
-    });
 
     // 先把所有窗口都渲染一次
     contextA->Render();

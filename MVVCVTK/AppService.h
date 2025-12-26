@@ -39,7 +39,8 @@ public:
     }
 };
 
-class MedicalVizService : public AbstractInteractiveService {
+class MedicalVizService : public AbstractInteractiveService,
+public std::enable_shared_from_this<MedicalVizService>{
 private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
@@ -48,6 +49,7 @@ private:
 public:
     MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state);
+    void Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) override;
 
     // --- 核心渲染业务 ---
     void LoadFile(const std::string& path);
@@ -56,7 +58,7 @@ public:
     void ShowSlice(VizMode sliceMode);
     void Show3DPlanes(VizMode renderMode);
 
-    // --- 交互业务 ---
+    // --- 交互业务,具体实现 ---
     void OnStateChanged();
     int GetPlaneAxis(vtkActor* actor) override;
     void UpdateInteraction(int delta) override;

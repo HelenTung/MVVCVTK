@@ -16,11 +16,17 @@ struct RenderNode {
 // 定义观察者回调类型
 using ObserverCallback = std::function<void()>;
 
+// [新增] 内部结构体，保存“凭证”和“回调”
+struct ObserverEntry {
+    std::weak_ptr<void> owner;      // 存活凭证 (不增加引用计数)
+    ObserverCallback callback; // 执行逻辑
+};
+
 class SharedInteractionState {
 private:
     int m_cursorPosition[3] = { 0, 0, 0 };
     // 观察者列表：存放所有需要刷新的窗口的回调函数
-    std::vector<ObserverCallback> m_observers;
+    std::vector<ObserverEntry> m_observers;
     // --- 渲染状态数据 ---
     std::vector<RenderNode> m_nodes;
     vtkSmartPointer<vtkColorTransferFunction> m_colorTF;
@@ -43,6 +49,11 @@ public:
         m_nodes.push_back({ 1.0, 1.0, 0.95, 0.95, 0.95 });
     }
 
+
+    SharedInteractionState(const SharedInteractionState&) = delete;
+    SharedInteractionState& operator=(const SharedInteractionState&) = delete;
+    SharedInteractionState(SharedInteractionState&&) = delete;
+    SharedInteractionState& operator=(SharedInteractionState&&) = delete;
 
     // 设置数据范围 (用于将归一化节点映射到真实标量)
     void SetScalarRange(double min, double max) {
@@ -101,14 +112,22 @@ public:
     int* GetCursorPosition() { return m_cursorPosition; }
 
     // 注册观察者
-    void AddObserver(ObserverCallback cb) {
-        m_observers.push_back(cb);
+    void AddObserver(std::shared_ptr<void> owner, std::function<void()> cb) {
+        if (!owner) return;
+		m_observers.push_back({ owner, cb });
     }
 
 private:
     void NotifyObservers() {
-        for (auto& cb : m_observers) {
-            cb(); // 调用回调，通常是 renderWindow->Render()
-        }
+        for (auto it = m_observers.begin(); it != m_observers.end(); it++ ) {
+            if (it->owner.expired())
+            {
+                m_observers.erase(it);
+            }
+            else
+            {
+                if (it->callback) it->callback();
+            }
+		}
     }
 };
