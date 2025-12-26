@@ -47,6 +47,11 @@ void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
+void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params)
+{
+	return; // 等值面不需要更新
+}
+
 // ================= VolumeStrategy =================
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
@@ -80,6 +85,11 @@ void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 
 void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
+}
+
+void VolumeStrategy::UpdateVisuals(const RenderParams& params)
+{
+	ApplyTransferParams(params.colorTF, params.opacityTF);
 }
 
 void VolumeStrategy::ApplyTransferParams(vtkSmartPointer<vtkColorTransferFunction> ctf, vtkSmartPointer<vtkPiecewiseFunction> otf)
@@ -346,6 +356,27 @@ void SliceStrategy::ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf)
     m_slice->GetProperty()->SetLookupTable(ctf);
 }
 
+void SliceStrategy::UpdateVisuals(const RenderParams& params)
+{
+    int x = params.cursor[0];
+    int y = params.cursor[1];
+    int z = params.cursor[2];
+    if (Orientation::AXIAL == m_orientation) {
+        SetSliceIndex(x);
+    }
+    else if (Orientation::CORONAL == m_orientation) {
+        SetSliceIndex(y);
+    }
+    else if (Orientation::SAGITTAL == m_orientation) {
+        SetSliceIndex(z);
+	}
+    UpdateCrosshair(x, y, z);
+
+    if (params.colorTF) {
+        ApplyColorMap(params.colorTF);
+    }
+}
+
 void SliceStrategy::UpdatePlanePosition() {
     vtkImageData* input = m_mapper->GetInput();
     vtkPlane* plane = m_mapper->GetSlicePlane();
@@ -438,6 +469,11 @@ void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
     }
 }
 
+void MultiSliceStrategy::UpdateVisuals(const RenderParams& params)
+{
+    UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+}
+
 void MultiSliceStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
     for (int i = 0; i < 3; i++) renderer->AddViewProp(m_slices[i]);
     renderer->SetBackground(0.1, 0.1, 0.1); // 深灰背景
@@ -496,14 +532,6 @@ void CompositeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {
     }
 }
 
-void CompositeStrategy::UpdateReferencePlanes(int x, int y, int z) {
-    // 需要转型回 MultiSliceStrategy 才能调用特定接口
-    auto multiSlice = std::dynamic_pointer_cast<ColoredPlanesStrategy>(m_referencePlanes);
-    if (multiSlice) {
-        multiSlice->UpdateAllPositions(x, y, z);
-    }
-}
-
 int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
     // 将请求转发给内部的参考平面策略
     auto coloredPlanes = std::dynamic_pointer_cast<ColoredPlanesStrategy>(m_referencePlanes);
@@ -511,6 +539,20 @@ int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
         return coloredPlanes->GetPlaneAxis(actor);
     }
     return -1;
+}
+
+void CompositeStrategy::UpdateVisuals(const RenderParams& params)
+{
+    if (m_referencePlanes) {
+        // 多态调用！不再需要 dynamic_cast 强转为 ColoredPlanesStrategy
+        m_referencePlanes->UpdateVisuals(params);
+    }
+
+    // 2. 更新主视图 (体渲染或等值面)
+    if (m_mainStrategy) {
+        // 多态调用！如果是 VolumeStrategy，它会自动更新 TF；如果是 IsoSurface，则什么都不做
+        m_mainStrategy->UpdateVisuals(params);
+    }
 }
 
 // ================= ColoredPlanesStrategy =================
@@ -598,4 +640,9 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
         }
     }
     return -1; // 未匹配
+}
+
+void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params)
+{
+    UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
 }

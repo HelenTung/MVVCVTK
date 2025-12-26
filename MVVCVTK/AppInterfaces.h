@@ -5,10 +5,13 @@
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
+#include <vtkColorTransferFunction.h>
+#include <vtkPiecewiseFunction.h>
 #include <vector>
 #include <memory>
 #include <string>
 #include <atomic>
+#include <array>
 
 // --- 可视化模式枚举 ---
 enum class VizMode { 
@@ -26,6 +29,13 @@ enum class ToolMode {
     Navigation,         // 默认漫游/切片浏览
     DistanceMeasure,    // 距离测量
     AngleMeasure        // 角度测量
+};
+
+// --- 渲染参数结构体 ---
+struct RenderParams {
+    std::array<int, 3> cursor; // x, y, z
+    vtkSmartPointer<vtkColorTransferFunction> colorTF;
+    vtkSmartPointer<vtkPiecewiseFunction> opacityTF;
 };
 
 // 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
@@ -61,6 +71,10 @@ public:
     virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
     // 视图专属的相机配置 (不做改变)
     virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
+
+    // --- 通用更新接口 ---
+    // 策略根据 Params 自行决定是否更新、更新哪里
+    virtual void UpdateVisuals(const RenderParams& params) {}
 };
 
 // --- 服务集成抽象类 ---

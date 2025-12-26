@@ -168,6 +168,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         if (eventId == vtkCommand::LeftButtonPressEvent ||
             eventId == vtkCommand::MouseMoveEvent ||
             eventId == vtkCommand::LeftButtonReleaseEvent) {
+            m_eventCallback->SetAbortFlag(1);
             return;
         }
     }
