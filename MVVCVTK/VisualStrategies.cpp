@@ -362,13 +362,13 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params)
     int y = params.cursor[1];
     int z = params.cursor[2];
     if (Orientation::AXIAL == m_orientation) {
-        SetSliceIndex(x);
+        SetSliceIndex(z);
     }
     else if (Orientation::CORONAL == m_orientation) {
         SetSliceIndex(y);
     }
     else if (Orientation::SAGITTAL == m_orientation) {
-        SetSliceIndex(z);
+        SetSliceIndex(x);
 	}
     UpdateCrosshair(x, y, z);
 
