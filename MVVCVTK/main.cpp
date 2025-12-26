@@ -45,9 +45,6 @@ int main() {
         }
     });
 
-	// 保存直方图图片
-	// serviceA->SaveHistogramImage("D:\\CT-1209\\data\\histogram.png", 2048);
-
     // --- 窗口 B ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextB = std::make_shared<StdRenderContext>();
