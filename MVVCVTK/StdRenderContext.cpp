@@ -132,13 +132,20 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
 	// 心跳定时器处理
     if (eventId == vtkCommand::TimerEvent) {
-        // 检查 Service 是否有数据更新
-        if (m_interactiveService && m_interactiveService->IsDirty()) {
-            // 执行真正的渲染
-            if (m_renderWindow) m_renderWindow->Render();
-            // 重置标记
-            m_interactiveService->SetDirty(false);
+
+        // 检查并处理挂起的逻辑更新,同步数据
+        if (m_interactiveService) {
+            m_interactiveService->ProcessPendingUpdates();
+            
+            // 检查 Service 检查渲染脏标记
+            if (m_interactiveService && m_interactiveService->IsDirty()) {
+                // 执行真正的渲染
+                if (m_renderWindow) m_renderWindow->Render();
+                // 重置标记
+                m_interactiveService->SetDirty(false);
+            }
         }
+
         // 处理完心跳直接返回，不干扰后续逻辑
         return;
     }

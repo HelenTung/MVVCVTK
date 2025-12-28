@@ -107,17 +107,6 @@ void MedicalVizService::UpdateInteraction(int value)
     int dims[3];
     m_dataManager->GetVtkImage()->GetDimensions(dims);
 
-    //auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
-    //if (sliceStrategy) {
-    //    Orientation orient = sliceStrategy->GetOrientation();
-    //    int axisIndex = (int)orient;
-
-    //    // 调用共享状态的更新方法
-    //    // 这里更新 state 会触发 NotifyObservers，
-    //    // 从而导致所有窗口（包括自己）重绘
-    //    m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
-    //}
-
     int axisIndex = m_currentStrategy->GetNavigationAxis();
     if (axisIndex != -1)
         m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
@@ -182,30 +171,8 @@ void MedicalVizService::ClearCache()
     }
 }
 
-void MedicalVizService::OnStateChanged() {
-    // 只有当有策略时才执行
-    if (!m_currentStrategy) return;
-
-    // 将 SharedState业务对象转换为 RenderParams纯数据对象
-	// 避免持有复杂的业务逻辑引用
-    RenderParams params;
-
-    // 获取位置
-    int* pos = m_sharedState->GetCursorPosition();
-    params.cursor = { pos[0], pos[1], pos[2] }; // std::array 赋值
-
-    // 获取 TF
-    params.tfNodes = m_sharedState->GetTFNodes();
-	auto *range = m_sharedState->GetDataRange();
-    params.scalarRange[0] = range[0];
-	params.scalarRange[1] = range[1];
-
-    // 泛型调用
-    m_currentStrategy->UpdateVisuals(params);
-    
-    // 触发渲染
-    //if (m_renderWindow) m_renderWindow->Render();
-    m_isDirty = true;
+void MedicalVizService::OnStateChanged() {    
+	m_needsSync = true;
 }
 
 int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
@@ -238,6 +205,32 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3]) {
 
     // 更新内部 State
     m_sharedState->SetCursorPosition(i, j, k);
+}
+
+void MedicalVizService::ProcessPendingUpdates()
+{
+    if (!m_needsSync || !m_currentStrategy) return;
+
+    // 将 SharedState业务对象转换为 RenderParams纯数据对象
+    // 避免持有复杂的业务逻辑引用
+    RenderParams params;
+
+    // 获取位置
+    int* pos = m_sharedState->GetCursorPosition();
+    params.cursor = { pos[0], pos[1], pos[2] }; // std::array 赋值
+
+    // 获取 TF
+    params.tfNodes = m_sharedState->GetTFNodes();
+    auto* range = m_sharedState->GetDataRange();
+    params.scalarRange[0] = range[0];
+    params.scalarRange[1] = range[1];
+
+    // 泛型调用
+    m_currentStrategy->UpdateVisuals(params);
+
+    // 逻辑同步完成，现在标记渲染层脏了
+    m_isDirty = true;
+	m_needsSync = false;
 }
 
 std::array<int, 3> MedicalVizService::GetCursorPosition() {

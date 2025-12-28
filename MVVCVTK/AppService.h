@@ -60,7 +60,8 @@ public:
     void OnStateChanged();
     int GetPlaneAxis(vtkActor* actor) override;
     void UpdateInteraction(int delta) override;
-    virtual void SyncCursorToWorldPosition(double worldPos[3]) override;
+    void SyncCursorToWorldPosition(double worldPos[3]) override;
+	void ProcessPendingUpdates() override;
     virtual std::array<int, 3> GetCursorPosition() override;
 
     std::shared_ptr<SharedInteractionState> GetSharedState() {

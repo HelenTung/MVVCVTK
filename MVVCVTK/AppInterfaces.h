@@ -96,7 +96,7 @@ protected:
     vtkSmartPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
     std::atomic<bool> m_isDirty{ false }; // 脏数据
-
+	std::atomic<bool> m_needsSync{ false }; //  逻辑脏标记：表示 sharedState 变了，但还没同步给 strategy
 public:
     virtual ~AbstractAppService() = default;
 
@@ -104,6 +104,8 @@ public:
         m_renderWindow = win;
         m_renderer = ren;
     }
+    // 允许Context在渲染循环中调用此方法来同步业务逻辑,处理挂起的逻辑更新 (Lazy Update 接口)
+    virtual void ProcessPendingUpdates() {};
 
     // 供 Context 查询状态
     bool IsDirty() const { return m_isDirty; }
@@ -183,7 +185,7 @@ class AbstractInteractiveService : public AbstractAppService {
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    // 这里放那些“污染”接口，默认空实现
+    // 这里放那些交互接口，默认空实现
     virtual void UpdateInteraction(int value) {}
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
 
