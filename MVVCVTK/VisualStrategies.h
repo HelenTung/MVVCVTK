@@ -85,6 +85,9 @@ private:
     vtkSmartPointer<vtkActor> m_hLineActor; // 水平线
     vtkSmartPointer<vtkLineSource> m_vLineSource;
     vtkSmartPointer<vtkLineSource> m_hLineSource;
+
+	// 颜色映射缓存LUT
+    vtkSmartPointer<vtkColorTransferFunction> m_lut;
 };
 
 // --- 策略 D: 三面切片 (MPR) ---

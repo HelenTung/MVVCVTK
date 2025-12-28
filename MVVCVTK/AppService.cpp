@@ -189,8 +189,10 @@ void MedicalVizService::OnStateChanged() {
     params.cursor = { pos[0], pos[1], pos[2] }; // std::array 赋值
 
     // 获取 TF
-    params.colorTF = m_sharedState->GetColorTF();
-    params.opacityTF = m_sharedState->GetOpacityTF();
+    params.tfNodes = m_sharedState->GetTFNodes();
+	auto *range = m_sharedState->GetDataRange();
+    params.scalarRange[0] = range[0];
+	params.scalarRange[1] = range[1];
 
     // 泛型调用
     m_currentStrategy->UpdateVisuals(params);

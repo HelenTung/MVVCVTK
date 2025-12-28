@@ -31,11 +31,20 @@ enum class ToolMode {
     AngleMeasure        // 角度测量
 };
 
+// 数据节点结构
+struct TFNode {
+    double position; // 0.0 - 1.0 (相对位置)
+    double opacity;  // 0.0 - 1.0
+    double r, g, b;  // 颜色
+};
+
 // --- 渲染参数结构体 ---
 struct RenderParams {
     std::array<int, 3> cursor; // x, y, z
-    vtkSmartPointer<vtkColorTransferFunction> colorTF;
-    vtkSmartPointer<vtkPiecewiseFunction> opacityTF;
+    // 传输函数纯数据
+    std::vector<TFNode> tfNodes;
+    // 数据标量范围 (用于将相对位置映射为真实值)
+    double scalarRange[2];
 };
 
 // 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)

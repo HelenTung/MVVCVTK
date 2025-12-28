@@ -99,7 +99,28 @@ void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 
 void VolumeStrategy::UpdateVisuals(const RenderParams& params)
 {
-	ApplyTransferParams(params.colorTF, params.opacityTF);
+    if (!m_volume || !m_volume->GetProperty()) return;
+
+	// 获取当前传输函数
+	auto prop = m_volume->GetProperty();
+	auto opacityFunc = prop->GetScalarOpacity();
+	auto colorFunc = prop->GetRGBTransferFunction();
+
+	if (!opacityFunc || !colorFunc) return;
+
+	opacityFunc->RemoveAllPoints();
+	colorFunc->RemoveAllPoints();
+
+	double min = params.scalarRange[0];
+	double max = params.scalarRange[1];
+
+    for(const auto& node : params.tfNodes) {
+        double realPos = min + node.position * (max - min);
+        colorFunc->AddRGBPoint(realPos, node.r, node.g, node.b);
+        opacityFunc->AddPoint(realPos, node.opacity);
+	}
+
+	ApplyTransferParams(colorFunc, opacityFunc);
 }
 
 void VolumeStrategy::ApplyTransferParams(vtkSmartPointer<vtkColorTransferFunction> ctf, vtkSmartPointer<vtkPiecewiseFunction> otf)
@@ -139,6 +160,10 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_hLineActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
     m_hLineActor->GetProperty()->SetLineWidth(1.5);
     m_hLineActor->GetProperty()->SetLighting(false);
+
+	// 初始化颜色映射表
+    m_lut = vtkSmartPointer<vtkColorTransferFunction>::New();
+    m_slice->GetProperty()->SetLookupTable(m_lut);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -381,9 +406,17 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params)
         SetSliceIndex(x);
 	}
     UpdateCrosshair(x, y, z);
+    
+	// 更新颜色映射表
+    if (!params.tfNodes.empty()) {
+        m_lut->RemoveAllPoints();
+        double min = params.scalarRange[0];
+        double diff = params.scalarRange[1] - min;
 
-    if (params.colorTF) {
-        ApplyColorMap(params.colorTF);
+        for (const auto& node : params.tfNodes) {
+            double scalarVal = min + diff * node.position;
+            m_lut->AddRGBPoint(scalarVal, node.r, node.g, node.b);
+        }
     }
 }
 
