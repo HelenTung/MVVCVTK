@@ -90,14 +90,16 @@ public:
 
 private:
     void NotifyObservers() {
-        for (auto it = m_observers.begin(); it != m_observers.end(); it++ ) {
+        for (auto it = m_observers.begin(); it != m_observers.end();) {
             if (it->owner.expired())
             {
+                // erase 返回下一个有效的迭代器，不要再自增
                 m_observers.erase(it);
             }
             else
             {
                 if (it->callback) it->callback();
+                ++it;
             }
 		}
     }

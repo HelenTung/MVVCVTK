@@ -107,16 +107,21 @@ void MedicalVizService::UpdateInteraction(int value)
     int dims[3];
     m_dataManager->GetVtkImage()->GetDimensions(dims);
 
-    auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
-    if (sliceStrategy) {
-        Orientation orient = sliceStrategy->GetOrientation();
-        int axisIndex = (int)orient;
+    //auto sliceStrategy = std::dynamic_pointer_cast<SliceStrategy>(m_currentStrategy);
+    //if (sliceStrategy) {
+    //    Orientation orient = sliceStrategy->GetOrientation();
+    //    int axisIndex = (int)orient;
 
-        // 调用共享状态的更新方法
-        // 这里更新 state 会触发 NotifyObservers，
-        // 从而导致所有窗口（包括自己）重绘
+    //    // 调用共享状态的更新方法
+    //    // 这里更新 state 会触发 NotifyObservers，
+    //    // 从而导致所有窗口（包括自己）重绘
+    //    m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
+    //}
+
+    int axisIndex = m_currentStrategy->GetNavigationAxis();
+    if (axisIndex != -1)
         m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
-    }
+
 }
 
 void MedicalVizService::ResetCursorCenter()
@@ -181,7 +186,8 @@ void MedicalVizService::OnStateChanged() {
     // 只有当有策略时才执行
     if (!m_currentStrategy) return;
 
-    // 将 SharedState (业务对象) 转换为 RenderParams (纯数据对象)
+    // 将 SharedState业务对象转换为 RenderParams纯数据对象
+	// 避免持有复杂的业务逻辑引用
     RenderParams params;
 
     // 获取位置

@@ -60,9 +60,8 @@ public:
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params) override;
-
+    int GetNavigationAxis() const override { return (int)GetOrientation(); }
     // [Public] 业务必需接口：供 Service 查询交互轴向
-    Orientation GetOrientation() const { return m_orientation; }
 
 private:
     // [Private] 内部实现：这些方法仅由 UpdateVisuals 内部驱动
@@ -71,6 +70,7 @@ private:
     void UpdateCrosshair(int x, int y, int z);
     void ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf);
     void UpdatePlanePosition();
+    Orientation GetOrientation() const { return m_orientation; }
 
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
