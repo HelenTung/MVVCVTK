@@ -21,7 +21,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:
     vtkSmartPointer<vtkActor> m_actor;
@@ -38,7 +38,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:
     // [Private] 内部辅助：应用传输函数
@@ -59,7 +59,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     int GetNavigationAxis() const override { return (int)GetOrientation(); }
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
@@ -99,7 +99,7 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:
     // [Private] 内部实现：由 UpdateVisuals 统一调用
@@ -119,7 +119,7 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     int GetPlaneAxis(vtkActor* actor) override;
 
 private:
@@ -141,7 +141,7 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params) override;
+    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     int GetPlaneAxis(vtkActor* actor) override;
 
 private:

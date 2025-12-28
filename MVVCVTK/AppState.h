@@ -10,10 +10,12 @@ struct RenderNode {
     double r, g, b;  // 颜色
 };
 
-// 定义观察者回调类型
-using ObserverCallback = std::function<void()>;
 
-// [新增] 内部结构体，保存“凭证”和“回调”
+
+// 定义观察者回调类型
+using ObserverCallback = std::function<void(UpdateFlags)>;
+
+// 内部结构体，保存自有指针和回调
 struct ObserverEntry {
     std::weak_ptr<void> owner;      // 存活凭证 (不增加引用计数)
     ObserverCallback callback; // 执行逻辑
@@ -52,7 +54,7 @@ public:
         if (index < 0 || index >= m_nodes.size()) return;
         m_nodes[index].position = relativePos;
         m_nodes[index].opacity = opacity;
-        NotifyObservers();
+        NotifyObservers(UpdateFlags::TF);
     }
 
 	// 获取节点列表
@@ -68,7 +70,7 @@ public:
         m_cursorPosition[1] = y;
         m_cursorPosition[2] = z;
 
-        NotifyObservers();
+        NotifyObservers(UpdateFlags::Cursor);
     }
 
     // 更新某个轴
@@ -77,19 +79,19 @@ public:
         if (m_cursorPosition[axisIndex] < 0) m_cursorPosition[axisIndex] = 0;
         if (m_cursorPosition[axisIndex] >= maxDim) m_cursorPosition[axisIndex] = maxDim - 1;
 
-        NotifyObservers();
+        NotifyObservers(UpdateFlags::Cursor);
     }
 
     int* GetCursorPosition() { return m_cursorPosition; }
 
     // 注册观察者
-    void AddObserver(std::shared_ptr<void> owner, std::function<void()> cb) {
+    void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
         if (!owner) return;
-		m_observers.push_back({ owner, cb });
+        m_observers.push_back({ owner, cb });
     }
 
 private:
-    void NotifyObservers() {
+    void NotifyObservers(UpdateFlags flags) {
         for (auto it = m_observers.begin(); it != m_observers.end();) {
             if (it->owner.expired())
             {
@@ -98,7 +100,7 @@ private:
             }
             else
             {
-                if (it->callback) it->callback();
+                if (it->callback) it->callback(flags);
                 ++it;
             }
 		}

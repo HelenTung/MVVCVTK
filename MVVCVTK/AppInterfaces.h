@@ -38,6 +38,14 @@ struct TFNode {
     double r, g, b;  // 颜色
 };
 
+// 定义更新类型枚举
+enum class UpdateFlags : int {
+    None = 0,
+    Cursor = 1 << 0,  // 仅位置改变 (0x01) 1 
+    TF = 1 << 1,      // 仅颜色/透明度改变 (0x02) 2
+    All = Cursor | TF // 全部改变  3
+};
+
 // --- 渲染参数结构体 ---
 struct RenderParams {
     std::array<int, 3> cursor; // x, y, z
@@ -83,7 +91,7 @@ public:
 
     // --- 通用更新接口 ---
     // 策略根据 Params 自行决定是否更新、更新哪里
-    virtual void UpdateVisuals(const RenderParams& params) {}
+    virtual void UpdateVisuals(const RenderParams& params, UpdateFlags flags = UpdateFlags::All) {}
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; };
     virtual int GetNavigationAxis() const { return -1; }
 };
@@ -97,6 +105,8 @@ protected:
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
     std::atomic<bool> m_isDirty{ false }; // 脏数据
 	std::atomic<bool> m_needsSync{ false }; //  逻辑脏标记：表示 sharedState 变了，但还没同步给 strategy
+	std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 待处理的更新类型
+
 public:
     virtual ~AbstractAppService() = default;
 

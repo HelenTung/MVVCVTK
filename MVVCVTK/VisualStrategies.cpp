@@ -52,7 +52,7 @@ void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
-void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params)
+void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
 	return; // 等值面不需要更新
 }
@@ -97,8 +97,9 @@ void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
-void VolumeStrategy::UpdateVisuals(const RenderParams& params)
+void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
+    if (!((int)flags & (int)UpdateFlags::TF)) return;
     if (!m_volume || !m_volume->GetProperty()) return;
 
 	// 获取当前传输函数
@@ -391,31 +392,37 @@ void SliceStrategy::ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf)
     m_slice->GetProperty()->SetLookupTable(ctf);
 }
 
-void SliceStrategy::UpdateVisuals(const RenderParams& params)
+void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    int x = params.cursor[0];
-    int y = params.cursor[1];
-    int z = params.cursor[2];
-    if (Orientation::AXIAL == m_orientation) {
-        SetSliceIndex(z);
+    if (((int)flags & (int)UpdateFlags::Cursor))
+    {
+        int x = params.cursor[0];
+        int y = params.cursor[1];
+        int z = params.cursor[2];
+        if (Orientation::AXIAL == m_orientation) {
+            SetSliceIndex(z);
+        }
+        else if (Orientation::CORONAL == m_orientation) {
+            SetSliceIndex(y);
+        }
+        else if (Orientation::SAGITTAL == m_orientation) {
+            SetSliceIndex(x);
+        }
+        UpdateCrosshair(x, y, z);
     }
-    else if (Orientation::CORONAL == m_orientation) {
-        SetSliceIndex(y);
-    }
-    else if (Orientation::SAGITTAL == m_orientation) {
-        SetSliceIndex(x);
-	}
-    UpdateCrosshair(x, y, z);
-    
-	// 更新颜色映射表
-    if (!params.tfNodes.empty()) {
-        m_lut->RemoveAllPoints();
-        double min = params.scalarRange[0];
-        double diff = params.scalarRange[1] - min;
 
-        for (const auto& node : params.tfNodes) {
-            double scalarVal = min + diff * node.position;
-            m_lut->AddRGBPoint(scalarVal, node.r, node.g, node.b);
+	// 更新颜色映射表
+    if (((int)flags & (int)UpdateFlags::TF))
+    {
+        if (!params.tfNodes.empty()) {
+            m_lut->RemoveAllPoints();
+            double min = params.scalarRange[0];
+            double diff = params.scalarRange[1] - min;
+
+            for (const auto& node : params.tfNodes) {
+                double scalarVal = min + diff * node.position;
+                m_lut->AddRGBPoint(scalarVal, node.r, node.g, node.b);
+            }
         }
     }
 }
@@ -512,8 +519,9 @@ void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
     }
 }
 
-void MultiSliceStrategy::UpdateVisuals(const RenderParams& params)
+void MultiSliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
+	if (!((int)flags & (int)UpdateFlags::Cursor)) return;
     UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
 }
 
@@ -576,16 +584,16 @@ int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
     return m_referencePlanes->GetPlaneAxis(actor);
 }
 
-void CompositeStrategy::UpdateVisuals(const RenderParams& params)
+void CompositeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
     if (m_referencePlanes) {
-        m_referencePlanes->UpdateVisuals(params);
+        m_referencePlanes->UpdateVisuals(params,flags);
     }
 
     // 2. 更新主视图 (体渲染或等值面)
     if (m_mainStrategy) {
         // 多态调用！如果是 VolumeStrategy，它会自动更新 TF；如果是 IsoSurface，则什么都不做
-        m_mainStrategy->UpdateVisuals(params);
+        m_mainStrategy->UpdateVisuals(params,flags);
     }
 }
 
@@ -676,7 +684,8 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
     return -1; // 未匹配
 }
 
-void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params)
+void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
+	if (!((int)flags & (int)UpdateFlags::Cursor)) return;
     UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
 }

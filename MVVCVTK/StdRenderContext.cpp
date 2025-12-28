@@ -49,14 +49,14 @@ StdRenderContext::StdRenderContext()
     m_eventCallback->SetClientData(this);
 
     // 监听滚轮事件
-    m_interactor->AddObserver(vtkCommand::MouseWheelForwardEvent, m_eventCallback, 1.0);
-    m_interactor->AddObserver(vtkCommand::MouseWheelBackwardEvent, m_eventCallback, 1.0);
+    m_interactor->AddObserver(vtkCommand::MouseWheelForwardEvent, m_eventCallback, 0.5);
+    m_interactor->AddObserver(vtkCommand::MouseWheelBackwardEvent, m_eventCallback, 0.5);
     // 监听鼠标左键按下、移动、抬起
-    m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 1.0);
-    m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 1.0);
-    m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 1.0);
+    m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 0.5);
+    m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 0.5);
+    m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 0.5);
 	// 监听键盘按键事件
-    m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 1.0);
+    m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 0.5);
 }
 
 void StdRenderContext::Start()
@@ -127,6 +127,9 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
 {
+    if (m_eventCallback)
+        m_eventCallback->SetAbortFlag(0);
+
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
 

@@ -42,9 +42,11 @@ void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmar
         // 获取 weak_ptr 供 Lambda 内部安全使用
         std::weak_ptr<MedicalVizService> weakSelf = std::static_pointer_cast<MedicalVizService>(shared_from_this());
 
-        m_sharedState->AddObserver(shared_from_this(), [weakSelf]() {
+        m_sharedState->AddObserver(shared_from_this(), [weakSelf](UpdateFlags flags) {
             // Lambda 内部标准写法：先 lock 再用
             if (auto self = weakSelf.lock()) {
+                int oldVal = self->m_pendingFlags.load();
+				while (!self->m_pendingFlags.compare_exchange_weak(oldVal, oldVal | static_cast<int>(flags))); // 位或更新待处理标记
                 self->OnStateChanged();
             }
         });
@@ -211,6 +213,16 @@ void MedicalVizService::ProcessPendingUpdates()
 {
     if (!m_needsSync || !m_currentStrategy) return;
 
+	// 获取并清空待处理标记
+    int flagsInt = m_pendingFlags.exchange(0);
+    UpdateFlags flags = static_cast<UpdateFlags>(flagsInt);
+
+    // 如果没有任何更新标志,直接返回
+    if (flags == UpdateFlags::None) {
+        m_needsSync = false;
+        return;
+    }
+
     // 将 SharedState业务对象转换为 RenderParams纯数据对象
     // 避免持有复杂的业务逻辑引用
     RenderParams params;
@@ -226,7 +238,7 @@ void MedicalVizService::ProcessPendingUpdates()
     params.scalarRange[1] = range[1];
 
     // 泛型调用
-    m_currentStrategy->UpdateVisuals(params);
+    m_currentStrategy->UpdateVisuals(params, flags);
 
     // 逻辑同步完成，现在标记渲染层脏了
     m_isDirty = true;
