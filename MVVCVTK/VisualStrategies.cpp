@@ -12,6 +12,7 @@
 // ================= IsoSurfaceStrategy =================
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
+    m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -23,6 +24,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     mapper->ScalarVisibilityOff();
     m_actor->SetMapper(mapper);
 
+    m_cubeAxes->SetBounds(poly->GetBounds());
     // VG Style
     auto prop = m_actor->GetProperty();
     prop->SetColor(0.75, 0.75, 0.75); // VG 灰
@@ -35,11 +37,14 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
 void IsoSurfaceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddActor(m_actor);
+    ren->AddActor(m_cubeAxes);
+    m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.1, 0.15, 0.2); // 蓝色调背景
 }
 
 void IsoSurfaceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
     ren->RemoveActor(m_actor);
+	ren->RemoveActor(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
@@ -55,6 +60,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params)
 // ================= VolumeStrategy =================
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
+    m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -64,6 +70,7 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     mapper->SetInputData(img);
 	mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离 ?
+	m_cubeAxes->SetBounds(img->GetBounds()); // 更新坐标轴范围
 
     m_volume->SetMapper(mapper);
     if (!m_volume->GetProperty()) {
@@ -76,11 +83,14 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
 void VolumeStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddVolume(m_volume);
+	ren->AddActor(m_cubeAxes);
+    m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.05, 0.05, 0.05); // 黑色背景
 }
 
 void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
     ren->RemoveVolume(m_volume);
+	ren->RemoveActor(m_cubeAxes);
 }
 
 void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {

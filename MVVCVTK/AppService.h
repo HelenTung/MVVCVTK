@@ -4,7 +4,6 @@
 #include "AppState.h"
 #include "DataConverters.h"
 #include <vtkTable.h>
-#include <vtkCubeAxesActor.h>
 #include <map>
 
 /**
@@ -42,7 +41,6 @@ public:
 class MedicalVizService : public AbstractInteractiveService,
 public std::enable_shared_from_this<MedicalVizService>{
 private:
-    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
     std::shared_ptr<SharedInteractionState> m_sharedState;
 
@@ -71,7 +69,6 @@ public:
 
 private:
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
-    void UpdateAxes();
     void ResetCursorCenter();
     void ClearCache();
 };

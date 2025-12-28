@@ -31,7 +31,6 @@ MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMg
     // 实例化具体的 DataManager
     m_dataManager = dataMgr;
     m_sharedState = state; // 保存引用
-    m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 }
 
 void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) {
@@ -56,7 +55,6 @@ void MedicalVizService::LoadFile(const std::string& path) {
     if (m_dataManager->LoadData(path)) {
 		ClearCache(); // 数据变更，清空缓存
         ResetCursorCenter(); // 加载新数据时，重置坐标到中心
-        UpdateAxes();
         
         if (m_dataManager->GetVtkImage()) {
             double range[2];
@@ -72,7 +70,6 @@ void MedicalVizService::ShowVolume() {
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(VizMode::Volume);
     SwitchStrategy(strategy);
-    UpdateAxes();
 	OnStateChanged();
 }
 
@@ -82,7 +79,6 @@ void MedicalVizService::ShowIsoSurface() {
     // 使用 Converter 进行数据处理 (Model -> Logic -> New Model)
     auto strategy = GetStrategy(VizMode::IsoSurface);
     SwitchStrategy(strategy);
-    UpdateAxes();
     OnStateChanged();
 }
 
@@ -90,8 +86,6 @@ void MedicalVizService::ShowSlice(VizMode sliceMode) {
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(sliceMode);
     SwitchStrategy(strategy);
-    // 2D 模式 隐藏 3D 坐标轴
-    if (m_renderer) m_renderer->RemoveActor(m_cubeAxes);
     OnStateChanged();
 }
 
@@ -102,8 +96,6 @@ void MedicalVizService::Show3DPlanes(VizMode renderMode)
     // 使用 Converter 进行数据处理 (Model -> Logic -> New Model)
     auto strategy = GetStrategy(renderMode);
     SwitchStrategy(strategy);
-    UpdateAxes();
-    UpdateAxes();
     OnStateChanged();
 }
 
@@ -124,14 +116,6 @@ void MedicalVizService::UpdateInteraction(int value)
         // 这里更新 state 会触发 NotifyObservers，
         // 从而导致所有窗口（包括自己）重绘
         m_sharedState->UpdateAxis(axisIndex, value, dims[axisIndex]);
-    }
-}
-
-void MedicalVizService::UpdateAxes() {
-    if (m_renderer && m_dataManager->GetVtkImage()) {
-        m_cubeAxes->SetBounds(m_dataManager->GetVtkImage()->GetBounds());
-        m_cubeAxes->SetCamera(m_renderer->GetActiveCamera());
-        m_renderer->AddActor(m_cubeAxes);
     }
 }
 
