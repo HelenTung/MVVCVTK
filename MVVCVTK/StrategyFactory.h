@@ -1,7 +1,7 @@
-#pragma once
+ï»¿#pragma once
 #include "VisualStrategies.h" 
 #include "AppInterfaces.h"
-// ¹¤³§ÒıÓÃËùÓĞ²ßÂÔ
+// å·¥å‚å¼•ç”¨æ‰€æœ‰ç­–ç•¥
 
 class StrategyFactory {
 public:

@@ -10,8 +10,6 @@ struct RenderNode {
     double r, g, b;  // 颜色
 };
 
-
-
 // 定义观察者回调类型
 using ObserverCallback = std::function<void(UpdateFlags)>;
 
@@ -26,6 +24,8 @@ private:
     int m_cursorPosition[3] = { 0, 0, 0 };
     // 观察者列表：存放所有需要刷新的窗口的回调函数
     std::vector<ObserverEntry> m_observers;
+    double m_isoValue = 0.0;   // 等值面提取阈值
+    MaterialParams m_material; // 材质与光照状态
     // --- 渲染状态数据 ---
     std::vector<TFNode> m_nodes;
     double m_dataRange[2] = { 0.0, 255.0 }; // 数据标量范围
@@ -49,17 +49,32 @@ public:
         m_dataRange[1] = max;
     }
 
+    const double* GetDataRange() const { return m_dataRange; }
+
+
     // 修改节点参数
-    void SetNodeParameter(int index, double relativePos, double opacity) {
-        if (index < 0 || index >= m_nodes.size()) return;
-        m_nodes[index].position = relativePos;
-        m_nodes[index].opacity = opacity;
+    void SetTFNodes(const std::vector<TFNode>& nodes) {
+        m_nodes = nodes;
         NotifyObservers(UpdateFlags::TF);
     }
-
 	// 获取节点列表
     const std::vector<TFNode>& GetTFNodes() const { return m_nodes; }
-    const double* GetDataRange() const { return m_dataRange; }
+
+    // 阈值接口
+    void SetIsoValue(double val) {
+        if (std::abs(m_isoValue - val) > 0.0001) {
+            m_isoValue = val;
+            NotifyObservers(UpdateFlags::IsoValue);
+        }
+    }
+    double GetIsoValue() const { return m_isoValue; }
+
+	// 材质接口
+    void SetMaterial(const MaterialParams& mat) {
+        m_material = mat;
+        NotifyObservers(UpdateFlags::Material);
+    }
+    const MaterialParams& GetMaterial() const { return m_material; }
 
     // 设置位置，并通知所有人
     void SetCursorPosition(int x, int y, int z) {

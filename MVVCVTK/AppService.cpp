@@ -134,31 +134,12 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
 	auto strategy = StrategyFactory::CreateStrategy(mode);
 	// 原始数据接口
     vtkSmartPointer<vtkImageData> rawImage = m_dataManager->GetVtkImage();
-
-    if (mode == VizMode::IsoSurface || mode == VizMode::CompositeIsoSurface) {
-        if (m_dataManager->GetVtkImage()) {
-            auto converter = std::make_shared<IsoSurfaceConverter>();
-            double range[2];
-            m_dataManager->GetVtkImage()->GetScalarRange(range);
-            converter->SetParameter("IsoValue", range[0] + (range[1] - range[0]) * 0.4);
-            auto polyMesh = converter->Process(m_dataManager->GetVtkImage());
-            strategy->SetInputData(polyMesh);
-        }
-    }
-    else {
-        // CompositeVolume、Volume 和 Slice 直接吃 vtkImage
-        if (m_dataManager->GetVtkImage()) {
-            strategy->SetInputData(m_dataManager->GetVtkImage());
-        }
-    }
     
-
-    if (mode == VizMode::CompositeVolume || mode == VizMode::CompositeIsoSurface)
-    {   
-        // 多态方法
-		strategy->SetInputData(rawImage);
+	// 数据处理移到策略内部
+    if (rawImage) {
+        strategy->SetInputData(rawImage);
     }
-    
+
     // 存入缓存
     m_strategyCache[mode] = strategy;
     return strategy;
@@ -236,10 +217,11 @@ void MedicalVizService::ProcessPendingUpdates()
     auto* range = m_sharedState->GetDataRange();
     params.scalarRange[0] = range[0];
     params.scalarRange[1] = range[1];
-
+    params.material = m_sharedState->GetMaterial();
+    params.isoValue = m_sharedState->GetIsoValue(); // 传递阈值
+    
     // 泛型调用
     m_currentStrategy->UpdateVisuals(params, flags);
-
     // 逻辑同步完成，现在标记渲染层脏了
     m_isDirty = true;
 	m_needsSync = false;
@@ -248,4 +230,28 @@ void MedicalVizService::ProcessPendingUpdates()
 std::array<int, 3> MedicalVizService::GetCursorPosition() {
     int* pos = m_sharedState->GetCursorPosition();
     return { pos[0], pos[1], pos[2] };
+}
+
+void MedicalVizService::SetLuxParams(double ambient, double diffuse, double specular, double power, bool shadeOn) {
+    auto mat = m_sharedState->GetMaterial();
+    mat.ambient = ambient;
+    mat.diffuse = diffuse;
+    mat.specular = specular;
+    mat.specularPower = power;
+	mat.shadeOn = shadeOn;
+    m_sharedState->SetMaterial(mat); // 触发 UpdateFlags::Material
+}
+
+void MedicalVizService::SetOpacity(double opacity) {
+    auto mat = m_sharedState->GetMaterial();
+    mat.opacity = opacity;
+    m_sharedState->SetMaterial(mat); // 触发 UpdateFlags::Material
+}
+
+void MedicalVizService::SetIsoThreshold(double val) {
+    m_sharedState->SetIsoValue(val); // 触发 UpdateFlags::IsoValue
+}
+
+void MedicalVizService::SetTransferFunction(const std::vector<TFNode>& nodes) {
+    m_sharedState->SetTFNodes(nodes); // 触发 UpdateFlags::TF
 }

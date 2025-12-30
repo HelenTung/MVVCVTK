@@ -13,66 +13,130 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "StdRenderContext.h"
 
 int main() {
-    // 数据是唯一的，加载一次内存
-    auto sharedState = std::make_shared<SharedInteractionState>();
+    // 创建共享资源 (仅作为依赖注入传递，不直接操作)
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedState = std::make_shared<SharedInteractionState>();
 
-    // --- 窗口 A ---
+    // --- 窗口 A: 复合视图 (等值面 + 切片平面) ---
+    // Service 是操作数据的唯一入口
     auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
     auto contextA = std::make_shared<StdRenderContext>();
     contextA->BindService(serviceA);
+
+    // 初始化光照 (Lux)
+    serviceA->SetLuxParams(0.3, 0.6, 0.2, 15.0);
+    // 初始化全局透明度
+    serviceA->SetOpacity(1.0);
+    // 初始化等值面阈值
+    //serviceA->SetIsoThreshold(300.0);
+
+    // 窗口设置
+    contextA->SetWindowTitle("Window A: Composite IsoSurface");
+    contextA->SetWindowSize(600, 600);
+    contextA->SetWindowPosition(50, 50);
+
+    // 加载数据
+    serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
+
+    // 设置模式
+    serviceA->SetIsoThreshold(0.2);
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
+   
 
-    // --- 窗口E  ---
+    // --- 窗口 E: 复合视图 (体渲染 + 切片平面) ---
     auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextE = std::make_shared<StdRenderContext>();
     contextE->BindService(serviceE);
+
+    contextE->SetWindowTitle("Window E: Composite Volume");
+    contextE->SetWindowSize(600, 600);
+    contextE->SetWindowPosition(660, 50);
+
+    // 因为 State 是共享的，这里设置会影响所有使用该 State 的体渲染窗口
+    std::vector<TFNode> volTF = {
+        {0.0, 0.0, 0,0,0},    // 背景透明
+        {0.1, 0.0, 0,0,0},    // 空气
+        {0.3, 0.3, 0.8,0.5,0.3}, // 软组织 (半透, 肉色)
+        {1.0, 1.0, 1.0,1.0,1.0}  // 骨骼 (不透, 白色)
+    };
+    serviceE->SetTransferFunction(volTF);
     contextE->SetInteractionMode(VizMode::CompositeVolume);
     serviceE->Show3DPlanes(VizMode::CompositeVolume);
 
 
-    // --- 窗口 B ---
+    // --- 窗口 B: 轴状位切片 ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextB = std::make_shared<StdRenderContext>();
     contextB->BindService(serviceB);
+
+    contextB->SetWindowTitle("Window B: Axial Slice");
+    contextB->SetWindowSize(400, 400);
+    contextB->SetWindowPosition(50, 660);
+
     serviceB->ShowSlice(VizMode::SliceAxial);
     contextB->SetInteractionMode(VizMode::SliceAxial);
 
-    // --- 窗口 C ---
+
+    // --- 窗口 C: 冠状位切片 ---
     auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextC = std::make_shared<StdRenderContext>();
     contextC->BindService(serviceC);
+
+    contextC->SetWindowTitle("Window C: Coronal Slice");
+    contextC->SetWindowSize(400, 400);
+    contextC->SetWindowPosition(460, 660);
+
     serviceC->ShowSlice(VizMode::SliceCoronal);
     contextC->SetInteractionMode(VizMode::SliceCoronal);
 
-    // --- 窗口 D ---
+
+    // --- 窗口 D: 矢状位切片 ---
     auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextD = std::make_shared<StdRenderContext>();
     contextD->BindService(serviceD);
+
+    contextD->SetWindowTitle("Window D: Sagittal Slice");
+    contextD->SetWindowSize(400, 400);
+    contextD->SetWindowPosition(870, 660);
+
     serviceD->ShowSlice(VizMode::SliceSagittal);
     contextD->SetInteractionMode(VizMode::SliceSagittal);
 
-    // 先把所有窗口都渲染一次
+
+    // --- 启动流程 ---
+
+    // 此时所有参数都已经通过 Service 同步到了 State 中
+    // 各个 Context Render 时会从 State 拉取最新参数
+
+    serviceA->ProcessPendingUpdates();
+    serviceB->ProcessPendingUpdates();
+    serviceC->ProcessPendingUpdates();
+    serviceD->ProcessPendingUpdates();
+    serviceE->ProcessPendingUpdates();
+
     contextA->Render();
     contextB->Render();
     contextC->Render();
     contextD->Render();
-	contextE->Render();
+    contextE->Render();
 
-    // 初始化所有的交互器
     contextA->InitInteractor();
     contextB->InitInteractor();
     contextC->InitInteractor();
     contextD->InitInteractor();
     contextE->InitInteractor();
 
-    // 只启动一个主循环 (通常选主窗口)
-    // 在 Windows 环境下，同一个线程的 Initialize 过的 Interactor 通常能共享消息泵
-    // 所以滚动 B，C 和 D 应该也能被动刷新。
-    // 但是滚动 C，可能无法触发事件
+    serviceA.reset();
+    serviceB.reset();
+    serviceC.reset();
+    serviceD.reset();
+    serviceE.reset();
+
     std::cout << "Starting Main Loop..." << std::endl;
+    std::cout << "Use 'A'/'D' for measurements." << std::endl;
+
+    // 启动消息循环
     contextB->Start();
 
     return 0;

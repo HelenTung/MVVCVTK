@@ -2,7 +2,6 @@
 #include <vtkCallbackCommand.h>
 #include <vtkInteractorStyleImage.h>
 
-
 void StdRenderContext::InitInteractor()
 {
     if (m_interactor && !m_interactor->GetInitialized()) {
@@ -57,6 +56,8 @@ StdRenderContext::StdRenderContext()
     m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 0.5);
 	// 监听键盘按键事件
     m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 0.5);
+	// 监听exit事件
+	m_interactor->AddObserver(vtkCommand::ExitEvent, m_eventCallback, 0.5);
 }
 
 void StdRenderContext::Start()
@@ -133,6 +134,14 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
     int* eventPos = iren->GetEventPosition();
 
+    if (eventId == vtkCommand::ExitEvent) {
+        // 销毁定时器，彻底停止心跳
+        if (m_interactor) {
+            m_interactor->DestroyTimer();
+        }
+        return;
+    }
+
 	// 心跳定时器处理
     if (eventId == vtkCommand::TimerEvent) {
 
@@ -140,10 +149,17 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         if (m_interactiveService) {
             m_interactiveService->ProcessPendingUpdates();
             
+			// 检查窗口状态，确保窗口存在且已映射，否则跳过渲染
+            if (!m_renderWindow || !m_renderWindow->GetMapped()) {
+                return;
+            }
+
             // 检查 Service 检查渲染脏标记
             if (m_interactiveService && m_interactiveService->IsDirty()) {
-                // 执行真正的渲染
-                if (m_renderWindow) m_renderWindow->Render();
+				// 触发渲染更新,窗口存在且有效时才渲染
+                if (m_renderWindow && m_renderWindow->GetGenericWindowId()) {
+                    m_renderWindow->Render();
+                }
                 // 重置标记
                 m_interactiveService->SetDirty(false);
             }

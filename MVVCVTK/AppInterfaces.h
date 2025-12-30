@@ -31,11 +31,26 @@ enum class ToolMode {
     AngleMeasure        // 角度测量
 };
 
-// 数据节点结构
+// --- 传输函数节点结构体 ---
 struct TFNode {
     double position; // 0.0 - 1.0 (相对位置)
     double opacity;  // 0.0 - 1.0
     double r, g, b;  // 颜色
+};
+
+struct MaterialParams {
+    // 环境光系数 (0.0~1.0): 决定阴影区域的最低亮度，值越大阴影越亮
+    double ambient = 0.1;
+    // 漫反射系数 (0.0~1.0): 决定物体接受光照后的固有颜色亮度，主要受光照角度影响
+    double diffuse = 0.7;
+    // 镜面反射系数 (0.0~1.0): 决定高光的亮度，值越大物体越像金属/塑料
+    double specular = 0.2;
+    // 高光强度 (1.0~100.0): 决定高光点的聚焦程度。值越大，光斑越小越锋利；值越小，光斑越散
+    double specularPower = 10.0;
+    // 全局透明度 (0.0~1.0): 0.0为全透，1.0为不透。主要用于等值面(皮肤/骨骼)的半透明效果
+    double opacity = 1.0;
+    // 阴影开关: true 开启
+    bool shadeOn = false;
 };
 
 // 定义更新类型枚举
@@ -43,7 +58,9 @@ enum class UpdateFlags : int {
     None = 0,
     Cursor = 1 << 0,  // 仅位置改变 (0x01) 1 
     TF = 1 << 1,      // 仅颜色/透明度改变 (0x02) 2
-    All = Cursor | TF // 全部改变  3
+    IsoValue = 1 << 2, // 仅阈值改变 0x04 4 
+	Material = 1 << 3, // 仅材质参数改变 (0x08) 8
+	All = Cursor | TF | IsoValue | Material // 全部改变  1 2 4 8 = 15
 };
 
 // --- 渲染参数结构体 ---
@@ -53,6 +70,10 @@ struct RenderParams {
     std::vector<TFNode> tfNodes;
     // 数据标量范围 (用于将相对位置映射为真实值)
     double scalarRange[2];
+    // 材质
+    MaterialParams material;
+    // 阈值
+	double isoValue;
 };
 
 // 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
@@ -133,7 +154,7 @@ public:
     // 核心调度逻辑 (在 .cpp 中实现)
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
-
+    
 // --- 抽象控制层接口 ---
 class AbstractRenderContext {
 protected:
@@ -170,10 +191,26 @@ public:
         if (m_renderer) m_renderer->ResetCamera();
     }
 
-    // 抽象交互接口 (子类需实现具体的交互器逻辑) mode: 告知 Context 当前进入了什么模式，Context 决定切换什么动作
+    // 抽象交互接口 mode: 告知 Context 当前进入了什么模式，Context 决定切换什么动作
     virtual void SetInteractionMode(VizMode mode) = 0;
     // 启动视窗 (Qt 模式下可能为空实现，因为 Qt 主循环接管)
     virtual void Start() = 0;
+
+public:
+    // 设置窗口大小 (像素)
+    virtual void SetWindowSize(int width, int height) {
+        if (m_renderWindow) m_renderWindow->SetSize(width, height);
+    }
+
+    // 设置窗口屏幕坐标 (左上角为原点)
+    virtual void SetWindowPosition(int x, int y) {
+        if (m_renderWindow) m_renderWindow->SetPosition(x, y);
+    }
+
+    // 设置窗口标题
+    virtual void SetWindowTitle(const std::string& title) {
+        if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
+    }
 
 protected:
     // 静态回调函数转发器 (用于 VTK C-Style 回调)

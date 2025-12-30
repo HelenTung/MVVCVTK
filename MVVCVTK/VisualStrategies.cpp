@@ -17,22 +17,36 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto poly = vtkPolyData::SafeDownCast(data);
-    if (!poly) return;
+    if (poly) {
+        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputData(poly);
+        mapper->ScalarVisibilityOff();
+        m_actor->SetMapper(mapper);
+        m_cubeAxes->SetBounds(poly->GetBounds());
+		
+        // VG Style
+        auto prop = m_actor->GetProperty();
+        prop->SetColor(0.75, 0.75, 0.75); // VG 灰
+        prop->SetAmbient(0.2);
+        prop->SetDiffuse(0.8);
+        prop->SetSpecular(0.15);      // 稍微增加一点高光
+        prop->SetSpecularPower(15.0);
+        prop->SetInterpolationToGouraud();
+        return;
+    }
 
-    auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-    mapper->SetInputData(poly);
-    mapper->ScalarVisibilityOff();
-    m_actor->SetMapper(mapper);
+    // 作为 ImageData (需要实时计算)
+    auto img = vtkImageData::SafeDownCast(data);
+    if (img) {
+        m_sourceImage = img; // 保存引用
+        m_cubeAxes->SetBounds(img->GetBounds());
 
-    m_cubeAxes->SetBounds(poly->GetBounds());
-    // VG Style
-    auto prop = m_actor->GetProperty();
-    prop->SetColor(0.75, 0.75, 0.75); // VG 灰
-    prop->SetAmbient(0.2);
-    prop->SetDiffuse(0.8);
-    prop->SetSpecular(0.15);      // 稍微增加一点高光
-    prop->SetSpecularPower(15.0);
-    prop->SetInterpolationToGouraud();
+        // 触发一次初始计算
+        RenderParams dummy;
+        double range[2]; img->GetScalarRange(range);
+        dummy.isoValue = range[0] + (range[1] - range[0]) * 0.2; // 默认阈值
+        UpdateVisuals(dummy, UpdateFlags::IsoValue);
+    }
 }
 
 void IsoSurfaceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
@@ -54,13 +68,46 @@ void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 
 void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-	return; // 等值面不需要更新
+    if (!m_actor) return;
+    auto prop = m_actor->GetProperty();
+
+    // 响应 UpdateFlags::Material
+    if ((int)flags & (int)UpdateFlags::Material) {
+        
+        // 设置光照参数
+        prop->SetAmbient(params.material.ambient);
+        prop->SetDiffuse(params.material.diffuse);
+        prop->SetSpecular(params.material.specular);
+        prop->SetSpecularPower(params.material.specularPower);
+        
+        // 设置几何体透明度
+        prop->SetOpacity(params.material.opacity);
+        // 设置着色方式,开启光照
+        if (params.material.shadeOn) prop->SetInterpolationToPhong();
+        else prop->SetInterpolationToFlat();
+    }
+
+	// 响应 UpdateFlags::IsoValue
+    if (((int)flags & (int)UpdateFlags::IsoValue) && m_sourceImage) {
+        // 使用 FlyingEdges3D 快速提取
+        auto iso = vtkSmartPointer<vtkFlyingEdges3D>::New();
+        iso->SetInputData(m_sourceImage);
+        iso->SetValue(0, params.isoValue);
+        iso->ComputeNormalsOn();
+        iso->Update();
+
+        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+        mapper->SetInputData(iso->GetOutput());
+        mapper->ScalarVisibilityOff();
+        m_actor->SetMapper(mapper);
+    }
 }
 
 // ================= VolumeStrategy =================
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
+	m_volume->SetPickable(false); // 体渲染不可拾取
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -70,6 +117,7 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     mapper->SetInputData(img);
 	mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离 ?
+    mapper->SetInteractiveUpdateRate(10.0);
 	m_cubeAxes->SetBounds(img->GetBounds()); // 更新坐标轴范围
 
     m_volume->SetMapper(mapper);
@@ -99,36 +147,52 @@ void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 
 void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if (!((int)flags & (int)UpdateFlags::TF)) return;
     if (!m_volume || !m_volume->GetProperty()) return;
+    
+	// 响应 UpdateFlags::TF
+    auto prop = m_volume->GetProperty();
+    if ((int)flags & (int)UpdateFlags::TF) {
+        // 构建 VTK 函数
+		auto ctf = prop->GetRGBTransferFunction();
+		auto otf = prop->GetScalarOpacity();
 
-	// 获取当前传输函数
-	auto prop = m_volume->GetProperty();
-	auto opacityFunc = prop->GetScalarOpacity();
-	auto colorFunc = prop->GetRGBTransferFunction();
+        if (!ctf)
+        {
+            ctf = vtkSmartPointer<vtkColorTransferFunction>::New();
+            prop->SetColor(ctf);
+        }
 
-	if (!opacityFunc || !colorFunc) return;
+        if (!otf)
+        {
+            otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
+            prop->SetScalarOpacity(otf);
+        }
+        ctf->RemoveAllPoints();
+        otf->RemoveAllPoints();
 
-	opacityFunc->RemoveAllPoints();
-	colorFunc->RemoveAllPoints();
+        double min = params.scalarRange[0];
+        double max = params.scalarRange[1];
 
-	double min = params.scalarRange[0];
-	double max = params.scalarRange[1];
+        for (const auto& node : params.tfNodes) {
+            double val = min + node.position * (max - min);
+            ctf->AddRGBPoint(val, node.r, node.g, node.b);
+            otf->AddPoint(val, node.opacity);
+        }
+        // 应用到底层
+        prop->SetColor(ctf);
+        prop->SetScalarOpacity(otf);
+    }
 
-    for(const auto& node : params.tfNodes) {
-        double realPos = min + node.position * (max - min);
-        colorFunc->AddRGBPoint(realPos, node.r, node.g, node.b);
-        opacityFunc->AddPoint(realPos, node.opacity);
-	}
+	// 响应 UpdateFlags::Material
+    if ((int)flags & (int)UpdateFlags::Material) {
+        prop->SetAmbient(params.material.ambient);
+        prop->SetDiffuse(params.material.diffuse);
+        prop->SetSpecular(params.material.specular);
+        prop->SetSpecularPower(params.material.specularPower);
 
-	ApplyTransferParams(colorFunc, opacityFunc);
-}
-
-void VolumeStrategy::ApplyTransferParams(vtkSmartPointer<vtkColorTransferFunction> ctf, vtkSmartPointer<vtkPiecewiseFunction> otf)
-{
-    if (!m_volume->GetProperty()) return;
-    m_volume->GetProperty()->SetColor(ctf);
-	m_volume->GetProperty()->SetScalarOpacity(otf);
+        if (params.material.shadeOn) prop->ShadeOn();
+        else prop->ShadeOff();
+    }
 }
 
 // ================= SliceStrategy (2D) =================
@@ -425,6 +489,27 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
             }
         }
     }
+
+	// 响应材质参数更新
+    if (((int)flags & (int)UpdateFlags::Material))
+    {
+        if (m_slice && m_slice->GetProperty())
+        {
+            auto imgProp = m_slice->GetProperty(); // 返回 vtkImageProperty
+
+            // --- 设置透明度 ---
+            // 允许切片半透明
+            imgProp->SetOpacity(params.material.opacity);
+
+            // --- 设置基础光照 ---
+            // vtkImageProperty 仅支持 Ambient 和 Diffuse
+            // 它可以让切片在 3D 环境中受光照变暗/变亮，或者完全自发光(Ambient=1)
+            imgProp->SetAmbient(params.material.ambient);
+            imgProp->SetDiffuse(params.material.diffuse);
+
+            // vtkImageProperty 没有 SetSpecular() 和 SetSpecularPower(),切片视为图片，不产生金属高光
+        }
+    }
 }
 
 void SliceStrategy::UpdatePlanePosition() {
@@ -625,8 +710,9 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
 }
 
 void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
-    m_imageData = vtkImageData::SafeDownCast(data);
-    if (!m_imageData) return;
+    auto img = vtkImageData::SafeDownCast(data);    
+    if (!img) return;
+	m_imageData = img;
 
     double bounds[6];
     m_imageData->GetBounds(bounds);
@@ -651,20 +737,43 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     if (!m_imageData) return;
 
+    // 1. 获取数据的物理边界和间距
+    double bounds[6];
+    m_imageData->GetBounds(bounds);
+
     double origin[3], spacing[3];
     m_imageData->GetOrigin(origin);
     m_imageData->GetSpacing(spacing);
 
-    // 将索引坐标转换为物理世界坐标
-    double physPos[3];
-    physPos[0] = origin[0] + x * spacing[0];
-    physPos[1] = origin[1] + y * spacing[1];
-    physPos[2] = origin[2] + z * spacing[2];
+    // 2. 计算当前光标(x,y,z)对应的物理世界坐标
+    double physX = origin[0] + x * spacing[0];
+    double physY = origin[1] + y * spacing[1];
+    double physZ = origin[2] + z * spacing[2];
 
-    // 移动每个平面的中心点到新的物理坐标
-    m_planeSources[0]->SetCenter(physPos[0], m_planeSources[0]->GetCenter()[1], m_planeSources[0]->GetCenter()[2]);
-    m_planeSources[1]->SetCenter(m_planeSources[1]->GetCenter()[0], physPos[1], m_planeSources[1]->GetCenter()[2]);
-    m_planeSources[2]->SetCenter(m_planeSources[2]->GetCenter()[0], m_planeSources[2]->GetCenter()[1], physPos[2]);
+    // 3. 显式更新每个平面的三个关键点 (Origin, Point1, Point2)
+
+    // --- 平面 0: 矢状面 (Sagittal, 法线 X) ---
+    // X 固定为 physX，Y 范围 bounds[2]~bounds[3]，Z 范围 bounds[4]~bounds[5]
+    m_planeSources[0]->SetOrigin(physX, bounds[2], bounds[4]); // 左下角
+    m_planeSources[0]->SetPoint1(physX, bounds[3], bounds[4]); // 右下角 (Y轴方向)
+    m_planeSources[0]->SetPoint2(physX, bounds[2], bounds[5]); // 左上角 (Z轴方向)
+
+    // --- 平面 1: 冠状面 (Coronal, 法线 Y) ---
+    // Y 固定为 physY，X 范围 bounds[0]~bounds[1]，Z 范围 bounds[4]~bounds[5]
+    m_planeSources[1]->SetOrigin(bounds[0], physY, bounds[4]);
+    m_planeSources[1]->SetPoint1(bounds[1], physY, bounds[4]);
+    m_planeSources[1]->SetPoint2(bounds[0], physY, bounds[5]);
+
+    // --- 平面 2: 轴状面 (Axial, 法线 Z) ---
+    // Z 固定为 physZ，X 范围 bounds[0]~bounds[1]，Y 范围 bounds[2]~bounds[3]
+    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], physZ);
+    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], physZ);
+    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], physZ);
+
+    // 4. 通知管线更新
+    for (int i = 0; i < 3; i++) {
+        m_planeSources[i]->Modified();
+    }
 }
 
 void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {

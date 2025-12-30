@@ -68,6 +68,13 @@ public:
         return m_sharedState;
     }
 
+public:
+	// 参数设置接口
+    void SetLuxParams(double ambient, double diffuse, double specular, double power, bool shadeOn = false);
+    void SetOpacity(double opacity);
+    void SetIsoThreshold(double val);
+    void SetTransferFunction(const std::vector<TFNode>& nodes);
+
 private:
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ResetCursorCenter();

@@ -10,6 +10,7 @@
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkCubeAxesActor.h>
+#include <vtkFlyingEdges3D.h>
 
 // --- 策略 A: 等值面渲染 ---
 class IsoSurfaceStrategy : public AbstractVisualStrategy {
@@ -26,6 +27,7 @@ public:
 private:
     vtkSmartPointer<vtkActor> m_actor;
 	vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
+	vtkSmartPointer<vtkImageData> m_sourceImage;  // 原始数据引用
 };
 
 // --- 策略 B: 体渲染 ---
@@ -41,9 +43,6 @@ public:
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:
-    // [Private] 内部辅助：应用传输函数
-    void ApplyTransferParams(vtkSmartPointer<vtkColorTransferFunction> ctf,
-        vtkSmartPointer<vtkPiecewiseFunction> otf);
 	vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume;
 };
