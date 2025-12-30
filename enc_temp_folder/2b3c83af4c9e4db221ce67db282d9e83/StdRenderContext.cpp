@@ -250,6 +250,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
     if (m_currentMode == VizMode::CompositeVolume || m_currentMode == VizMode::CompositeIsoSurface) 
     {
+        //vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
+        //int* eventPos = iren->GetEventPosition();
 
         if (eventId == vtkCommand::LeftButtonPressEvent) 
         {
@@ -279,7 +281,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         {
             //只在拾取到平面时才会触发
             if (m_isDragging && m_dragAxis != -1) {
-                // 用 Pick 来持续获取鼠标下的3D坐标
+                // 这里我们用 Pick 来持续获取鼠标下的3D坐标
                 // vtkPropPicker 同样返回准确的 PickPosition
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
