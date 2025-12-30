@@ -60,7 +60,8 @@ enum class UpdateFlags : int {
     TF = 1 << 1,      // 仅颜色/透明度改变 (0x02) 2
     IsoValue = 1 << 2, // 仅阈值改变 0x04 4 
 	Material = 1 << 3, // 仅材质参数改变 (0x08) 8
-	All = Cursor | TF | IsoValue | Material // 全部改变  1 2 4 8 = 15
+    Interaction = 1 << 4, // 仅交互状态改变 0x16 16
+	All = Cursor | TF | IsoValue | Material // 全部改变  1 2 4 8 16 = 31
 };
 
 // --- 渲染参数结构体 ---
@@ -241,4 +242,7 @@ public:
 
     // 返回标准类型，而不是具体 State 对象
     virtual std::array<int, 3> GetCursorPosition() { return { 0,0,0 }; }
+
+    // 状态交互接口
+    virtual void SetInteracting(bool val) {};
 };

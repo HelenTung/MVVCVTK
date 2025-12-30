@@ -204,6 +204,15 @@ void MedicalVizService::ProcessPendingUpdates()
         return;
     }
 
+    if ((int)flags & (int)UpdateFlags::Interaction) {
+        if (m_renderWindow) {
+            bool interacting = m_sharedState->IsInteracting();
+            // 如果正在交互（拖拽中），要求 15 FPS -> 触发降采样
+            // 如果停止交互，要求 0.001 FPS -> 恢复高质量
+            m_renderWindow->SetDesiredUpdateRate(interacting ? 15.0 : 0.001);
+        }
+    }
+
     // 将 SharedState业务对象转换为 RenderParams纯数据对象
     // 避免持有复杂的业务逻辑引用
     RenderParams params;
@@ -254,4 +263,8 @@ void MedicalVizService::SetIsoThreshold(double val) {
 
 void MedicalVizService::SetTransferFunction(const std::vector<TFNode>& nodes) {
     m_sharedState->SetTFNodes(nodes); // 触发 UpdateFlags::TF
+}
+
+void MedicalVizService::SetInteracting(bool val) {
+    m_sharedState->SetInteracting(val);
 }

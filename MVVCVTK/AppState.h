@@ -29,7 +29,7 @@ private:
     // --- 渲染状态数据 ---
     std::vector<TFNode> m_nodes;
     double m_dataRange[2] = { 0.0, 255.0 }; // 数据标量范围
-
+    bool m_isInteracting = false; // 状态接口
 public:
     SharedInteractionState(){
         // 初始化默认的4个节点
@@ -75,6 +75,17 @@ public:
         NotifyObservers(UpdateFlags::Material);
     }
     const MaterialParams& GetMaterial() const { return m_material; }
+
+    // 修改状态接口
+    void SetInteracting(bool val)
+    {
+        if (m_isInteracting != val) {
+            m_isInteracting = val;
+            NotifyObservers(UpdateFlags::Interaction);
+        }
+    }
+
+    bool IsInteracting() const { return m_isInteracting; }
 
     // 设置位置，并通知所有人
     void SetCursorPosition(int x, int y, int z) {

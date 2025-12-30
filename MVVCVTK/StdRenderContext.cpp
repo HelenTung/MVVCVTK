@@ -224,6 +224,10 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             // 检查 Shift 键状态
             if (iren->GetShiftKey()) {
                 m_enableDragCrosshair = true;
+                // 开始拖拽，进入低性能模式
+                if (m_interactiveService) {
+                    m_interactiveService->SetInteracting(true);
+                }
                 // 设为 1 阻止 VTK 默认的 Window/Level 调整
                 m_eventCallback->SetAbortFlag(1);
             }
@@ -244,6 +248,11 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
             if (m_enableDragCrosshair) {
                 m_enableDragCrosshair = false;
                 // 这里通常不需要 Abort，让 Interactor 恢复内部状态
+
+                // 结束拖拽，通知全局退出交互模式
+                if (m_interactiveService) {
+                    m_interactiveService->SetInteracting(false);
+                }
             }
         }
     }

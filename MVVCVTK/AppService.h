@@ -62,7 +62,8 @@ public:
     void UpdateInteraction(int delta) override;
     void SyncCursorToWorldPosition(double worldPos[3]) override;
 	void ProcessPendingUpdates() override;
-    virtual std::array<int, 3> GetCursorPosition() override;
+    std::array<int, 3> GetCursorPosition() override;
+    void SetInteracting(bool val) override;
 
     std::shared_ptr<SharedInteractionState> GetSharedState() {
         return m_sharedState;
@@ -74,6 +75,7 @@ public:
     void SetOpacity(double opacity);
     void SetIsoThreshold(double val);
     void SetTransferFunction(const std::vector<TFNode>& nodes);
+
 
 private:
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
