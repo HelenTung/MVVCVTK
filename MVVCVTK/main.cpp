@@ -16,6 +16,7 @@ int main() {
     // 创建共享资源 (仅作为依赖注入传递，不直接操作)
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedState = std::make_shared<SharedInteractionState>();
+    auto image = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
 
     // --- 窗口 A: 复合视图 (等值面 + 切片平面) ---
     // Service 是操作数据的唯一入口
@@ -27,8 +28,7 @@ int main() {
     serviceA->SetLuxParams(0.3, 0.6, 0.2, 15.0);
     // 初始化全局透明度
     serviceA->SetOpacity(1.0);
-    // 初始化等值面阈值
-    //serviceA->SetIsoThreshold(300.0);
+
 
     // 窗口设置
     contextA->SetWindowTitle("Window A: Composite IsoSurface");
@@ -39,7 +39,11 @@ int main() {
     serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
 
     // 设置模式
-    serviceA->SetIsoThreshold(0.2);
+    const double* range = sharedState->GetDataRange();
+    auto val = (-range[0]  + range[1]) * 0.5;
+    serviceA->SetIsoThreshold(val + range[0]);
+    //serviceA->SetIsoThreshold(0.1);
+    image->SaveHistogramImage("1.png");
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
    
@@ -57,8 +61,8 @@ int main() {
     std::vector<TFNode> volTF = {
         {0.0, 0.0, 0,0,0},    // 背景透明
         {0.1, 0.0, 0,0,0},    // 空气
-        {0.3, 0.3, 0.8,0.5,0.3}, // 软组织 (半透, 肉色)
-        {1.0, 1.0, 1.0,1.0,1.0}  // 骨骼 (不透, 白色)
+        {0.6, 0.0, 1,0,0}, // 软组织 (半透, 肉色)
+        {1.0, 1.0, 0,0,1.0}  // 骨骼 (不透, 白色)
     };
     serviceE->SetTransferFunction(volTF);
     contextE->SetInteractionMode(VizMode::CompositeVolume);

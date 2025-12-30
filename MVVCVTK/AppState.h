@@ -5,9 +5,9 @@
 
 // 定义控制节点结构
 struct RenderNode {
-    double position; // 0.0 - 1.0 (归一化位置)
-    double opacity;  // 0.0 - 1.0
-    double r, g, b;  // 颜色
+    double position; // 0.0 - 1.0 (归一化位置) 阈值
+    double opacity;  // 0.0 - 1.0 透明度
+    double r, g, b;  // 颜色 lux
 };
 
 // 定义观察者回调类型
