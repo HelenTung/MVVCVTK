@@ -29,7 +29,6 @@ int main() {
     // 初始化全局透明度
     serviceA->SetOpacity(1.0);
 
-
     // 窗口设置
     contextA->SetWindowTitle("Window A: Composite IsoSurface");
     contextA->SetWindowSize(600, 600);
@@ -39,11 +38,11 @@ int main() {
     serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
 
     // 设置模式
-    const double* range = sharedState->GetDataRange();
-    auto val = (-range[0]  + range[1]) * 0.5;
+    auto range = sharedState->GetDataRange();
+    auto val = (-range[0]  + range[1]) * 0.4;
     serviceA->SetIsoThreshold(val + range[0]);
     //serviceA->SetIsoThreshold(0.1);
-    image->SaveHistogramImage("1.png");
+    //image->SaveHistogramImage("1.png");
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
    
@@ -59,15 +58,14 @@ int main() {
 
     // 因为 State 是共享的，这里设置会影响所有使用该 State 的体渲染窗口
     std::vector<TFNode> volTF = {
-        {0.0, 0.0, 0,0,0},    // 背景透明
-        {0.1, 0.0, 0,0,0},    // 空气
-        {0.6, 0.0, 1,0,0}, // 软组织 (半透, 肉色)
-        {1.0, 1.0, 0,0,1.0}  // 骨骼 (不透, 白色)
+        {0.0, 0.0, 0,0,0},
+        {0.1, 0.0, 0,0,0},
+        {0.8, 0, 0,1,0}, 
+        {1.0, 1.0, 0,0,1}  
     };
     serviceE->SetTransferFunction(volTF);
     contextE->SetInteractionMode(VizMode::CompositeVolume);
     serviceE->Show3DPlanes(VizMode::CompositeVolume);
-
 
     // --- 窗口 B: 轴状位切片 ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -106,7 +104,6 @@ int main() {
 
     serviceD->ShowSlice(VizMode::SliceSagittal);
     contextD->SetInteractionMode(VizMode::SliceSagittal);
-
 
     // --- 启动流程 ---
 

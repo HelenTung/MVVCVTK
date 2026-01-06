@@ -1,9 +1,11 @@
 ﻿#pragma once
 #include "AppInterfaces.h"
 #include <vector>
+#include <mutex>
 
 class RawVolumeDataManager : public AbstractDataManager {
 private:
+    mutable std::mutex m_mutex;
     vtkSmartPointer<vtkImageData> m_vtkImage;      // VTK 包装对象
     int m_dims[3] = { 0, 0, 0 };
     double m_spacing = 0.02125;

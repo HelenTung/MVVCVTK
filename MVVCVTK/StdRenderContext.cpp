@@ -275,6 +275,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
                     m_isDragging = true;
                     m_eventCallback->SetAbortFlag(1); // 阻止相机转动
 
+
+
 					// 告诉vtk交互器，已经开始拖拽，可以适当降低更新率
                     if (m_renderWindow) {
                         m_renderWindow->SetDesiredUpdateRate(15.0);

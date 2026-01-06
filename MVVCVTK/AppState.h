@@ -2,6 +2,8 @@
 #include <vector>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <array>
 
 // 定义控制节点结构
 struct RenderNode {
@@ -21,6 +23,7 @@ struct ObserverEntry {
 
 class SharedInteractionState {
 private:
+    mutable std::mutex m_mutex; // 保护多线程访问
     int m_cursorPosition[3] = { 0, 0, 0 };
     // 观察者列表：存放所有需要刷新的窗口的回调函数
     std::vector<ObserverEntry> m_observers;
@@ -45,33 +48,51 @@ public:
 
     // 设置数据范围 (用于将归一化节点映射到真实标量)
     void SetScalarRange(double min, double max) {
+        std::lock_guard<std::mutex> lock(m_mutex);
         m_dataRange[0] = min;
         m_dataRange[1] = max;
     }
 
-    const double* GetDataRange() const { return m_dataRange; }
-
+    std::array<double, 2> GetDataRange() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return { m_dataRange[0], m_dataRange[1] };
+    }
 
     // 修改节点参数
     void SetTFNodes(const std::vector<TFNode>& nodes) {
-        m_nodes = nodes;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_nodes = nodes;
+        }
         NotifyObservers(UpdateFlags::TF);
     }
 	// 获取节点列表
-    const std::vector<TFNode>& GetTFNodes() const { return m_nodes; }
+    const std::vector<TFNode> GetTFNodes() const { 
+        std::lock_guard<std::mutex> lock(m_mutex); 
+        return m_nodes; 
+    }
 
     // 阈值接口
     void SetIsoValue(double val) {
         if (std::abs(m_isoValue - val) > 0.0001) {
-            m_isoValue = val;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_isoValue = val;
+            }
             NotifyObservers(UpdateFlags::IsoValue);
         }
     }
-    double GetIsoValue() const { return m_isoValue; }
+    double GetIsoValue() const { 
+        std::lock_guard<std::mutex> lock(m_mutex); 
+        return m_isoValue; 
+    }
 
 	// 材质接口
     void SetMaterial(const MaterialParams& mat) {
-        m_material = mat;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_material = mat;
+        }
         NotifyObservers(UpdateFlags::Material);
     }
     const MaterialParams& GetMaterial() const { return m_material; }
@@ -79,56 +100,86 @@ public:
     // 修改状态接口
     void SetInteracting(bool val)
     {
-        if (m_isInteracting != val) {
-            m_isInteracting = val;
-            NotifyObservers(UpdateFlags::Interaction);
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_isInteracting != val) {
+                m_isInteracting = val;
+                changed = true;
+            }
         }
+        if (changed) NotifyObservers(UpdateFlags::Interaction);
     }
 
-    bool IsInteracting() const { return m_isInteracting; }
+    bool IsInteracting() const { 
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_isInteracting; 
+    }
 
     // 设置位置，并通知所有人
     void SetCursorPosition(int x, int y, int z) {
-        if (m_cursorPosition[0] == x && m_cursorPosition[1] == y && m_cursorPosition[2] == z)
-            return;
-
-        m_cursorPosition[0] = x;
-        m_cursorPosition[1] = y;
-        m_cursorPosition[2] = z;
-
-        NotifyObservers(UpdateFlags::Cursor);
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_cursorPosition[0] != x || m_cursorPosition[1] != y || m_cursorPosition[2] != z) {
+                m_cursorPosition[0] = x;
+                m_cursorPosition[1] = y;
+                m_cursorPosition[2] = z;
+                changed = true;
+            }
+        }
+        if (changed) NotifyObservers(UpdateFlags::Cursor);
     }
 
     // 更新某个轴
     void UpdateAxis(int axisIndex, int delta, int maxDim) {
-        m_cursorPosition[axisIndex] += delta;
-        if (m_cursorPosition[axisIndex] < 0) m_cursorPosition[axisIndex] = 0;
-        if (m_cursorPosition[axisIndex] >= maxDim) m_cursorPosition[axisIndex] = maxDim - 1;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            int newVal = m_cursorPosition[axisIndex] + delta;
+            if (newVal < 0) newVal = 0;
+            if (newVal >= maxDim) newVal = maxDim - 1;
 
-        NotifyObservers(UpdateFlags::Cursor);
+            if (m_cursorPosition[axisIndex] != newVal) {
+                m_cursorPosition[axisIndex] = newVal;
+                changed = true;
+            }
+        }
+        if (changed) NotifyObservers(UpdateFlags::Cursor);
     }
 
-    int* GetCursorPosition() { return m_cursorPosition; }
+    std::array<int, 3> GetCursorPosition() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return { m_cursorPosition[0], m_cursorPosition[1], m_cursorPosition[2] };
+    }
 
     // 注册观察者
     void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!owner) return;
         m_observers.push_back({ owner, cb });
     }
 
 private:
     void NotifyObservers(UpdateFlags flags) {
-        for (auto it = m_observers.begin(); it != m_observers.end();) {
-            if (it->owner.expired())
-            {
-                // erase 返回下一个有效的迭代器，不要再自增
-                m_observers.erase(it);
+        std::vector<ObserverCallback> callbacksToRun;
+
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            //清理无效观察者
+            for (auto it = m_observers.begin(); it != m_observers.end();) {
+                if (it->owner.expired()) {
+                    it = m_observers.erase(it); // 返回下一个有效迭代器
+                }
+                else {
+                    // 复制回调到局部列表
+                    callbacksToRun.push_back(it->callback);
+                    ++it;
+                }
             }
-            else
-            {
-                if (it->callback) it->callback(flags);
-                ++it;
-            }
-		}
+        }
+        for (const auto& cb : callbacksToRun) {
+            if (cb) cb(flags);
+        }
     }
 };

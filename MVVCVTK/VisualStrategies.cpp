@@ -13,6 +13,9 @@
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
+
+	m_actor->SetPickable(false); // 等值面不可拾取
+	m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -108,6 +111,7 @@ VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 	m_volume->SetPickable(false); // 体渲染不可拾取
+	m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -309,7 +313,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 
     // 初次设置
     cam->SetFocalPoint(imgCenter);
-    double distance = 1000.0; 
+    double distance = 0.1; 
     
     switch (m_orientation) {
     case Orientation::AXIAL:
@@ -737,7 +741,7 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     if (!m_imageData) return;
 
-    // 1. 获取数据的物理边界和间距
+    // 获取数据的物理边界和间距
     double bounds[6];
     m_imageData->GetBounds(bounds);
 
@@ -745,12 +749,12 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_imageData->GetOrigin(origin);
     m_imageData->GetSpacing(spacing);
 
-    // 2. 计算当前光标(x,y,z)对应的物理世界坐标
+    // 计算当前光标(x,y,z)对应的物理世界坐标
     double physX = origin[0] + x * spacing[0];
     double physY = origin[1] + y * spacing[1];
     double physZ = origin[2] + z * spacing[2];
 
-    // 3. 显式更新每个平面的三个关键点 (Origin, Point1, Point2)
+    // 显式更新每个平面的三个关键点 (Origin, Point1, Point2)
 
     // --- 平面 0: 矢状面 (Sagittal, 法线 X) ---
     // X 固定为 physX，Y 范围 bounds[2]~bounds[3]，Z 范围 bounds[4]~bounds[5]
@@ -770,7 +774,7 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_planeSources[2]->SetPoint1(bounds[1], bounds[2], physZ);
     m_planeSources[2]->SetPoint2(bounds[0], bounds[3], physZ);
 
-    // 4. 通知管线更新
+    // 通知管线更新
     for (int i = 0; i < 3; i++) {
         m_planeSources[i]->Modified();
     }

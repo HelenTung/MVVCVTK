@@ -42,14 +42,16 @@ void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmar
         // 获取 weak_ptr 供 Lambda 内部安全使用
         std::weak_ptr<MedicalVizService> weakSelf = std::static_pointer_cast<MedicalVizService>(shared_from_this());
 
-        m_sharedState->AddObserver(shared_from_this(), [weakSelf](UpdateFlags flags) {
+        auto func = [weakSelf](UpdateFlags flags) {
             // Lambda 内部标准写法：先 lock 再用
             if (auto self = weakSelf.lock()) {
                 int oldVal = self->m_pendingFlags.load();
-				while (!self->m_pendingFlags.compare_exchange_weak(oldVal, oldVal | static_cast<int>(flags))); // 位或更新待处理标记
-                self->OnStateChanged();
+                while (!self->m_pendingFlags.compare_exchange_weak(oldVal, oldVal | static_cast<int>(flags))); // 位或更新待处理标记
+                self->OnStateChanged(); // 执行下层方法时，自动调用 OnStateChanged 标记脏数据
             }
-        });
+        };
+
+        m_sharedState->AddObserver(shared_from_this(), func);
     }
 }
 
@@ -155,7 +157,7 @@ void MedicalVizService::ClearCache()
 }
 
 void MedicalVizService::OnStateChanged() {    
-	m_needsSync = true;
+	m_needsSync = true; // 联通窗口同步状态标记位
 }
 
 int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
@@ -218,12 +220,12 @@ void MedicalVizService::ProcessPendingUpdates()
     RenderParams params;
 
     // 获取位置
-    int* pos = m_sharedState->GetCursorPosition();
+    auto pos = m_sharedState->GetCursorPosition();
     params.cursor = { pos[0], pos[1], pos[2] }; // std::array 赋值
 
     // 获取 TF
     params.tfNodes = m_sharedState->GetTFNodes();
-    auto* range = m_sharedState->GetDataRange();
+    auto range = m_sharedState->GetDataRange();
     params.scalarRange[0] = range[0];
     params.scalarRange[1] = range[1];
     params.material = m_sharedState->GetMaterial();
@@ -237,8 +239,7 @@ void MedicalVizService::ProcessPendingUpdates()
 }
 
 std::array<int, 3> MedicalVizService::GetCursorPosition() {
-    int* pos = m_sharedState->GetCursorPosition();
-    return { pos[0], pos[1], pos[2] };
+	return m_sharedState->GetCursorPosition();
 }
 
 void MedicalVizService::SetLuxParams(double ambient, double diffuse, double specular, double power, bool shadeOn) {

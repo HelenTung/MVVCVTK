@@ -10,40 +10,54 @@ RawVolumeDataManager::RawVolumeDataManager() {
 }
 
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
-    // 解析文件名中的尺寸 (例如 data_512x512x200.raw)
+    // 解析文件名
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
     std::regex pattern(R"((\d+)[xX](\d+)[xX](\d+))");
     std::smatch matches;
 
+    int newDims[3] = { 0, 0, 0 };
+
     if (std::regex_search(name, matches, pattern) && matches.size() > 3) {
-        m_dims[0] = std::stoi(matches[1].str());
-        m_dims[1] = std::stoi(matches[2].str());
-        m_dims[2] = std::stoi(matches[3].str());
+        newDims[0] = std::stoi(matches[1].str());
+        newDims[1] = std::stoi(matches[2].str());
+        newDims[2] = std::stoi(matches[3].str());
     }
     else {
-        return false; // 文件名格式不对
+        return false;
     }
 
-    // 读取二进制数据
-    size_t totalVoxels = m_dims[0] * m_dims[1] * m_dims[2];
+    // 创建全新的 vtkImageData 对象 (Back Buffer)
+    auto newImage = vtkSmartPointer<vtkImageData>::New();
+    newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
+    newImage->SetSpacing(m_spacing, m_spacing, m_spacing);
+    newImage->SetOrigin(0, 0, 0);
+    newImage->AllocateScalars(VTK_FLOAT, 1);
 
-    // 构建 VTK ImageData (Zero-Copy)
-    m_vtkImage->SetDimensions(m_dims[0], m_dims[1], m_dims[2]);
-    m_vtkImage->SetSpacing(m_spacing, m_spacing, m_spacing);
-    m_vtkImage->SetOrigin(0, 0, 0);
-    m_vtkImage->AllocateScalars(VTK_FLOAT, 1); // 申请内存，类型为float，连续一维
+    // 读取数据到新内存
+    size_t totalVoxels = (size_t)newDims[0] * newDims[1] * newDims[2];
+    float* vtkDataPtr = static_cast<float*>(newImage->GetScalarPointer());
 
-    // 文件流操作
-    float* vtkDataPtr = static_cast<float*>(m_vtkImage->GetScalarPointer());
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) return false;
     file.read(reinterpret_cast<char*>(vtkDataPtr), totalVoxels * sizeof(float));
     file.close();
 
-    m_vtkImage->Modified();
+    newImage->Modified();
+
+    // --- 提交  ---
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_vtkImage = newImage; // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
+        m_dims[0] = newDims[0];
+        m_dims[1] = newDims[1];
+        m_dims[2] = newDims[2];
+    }
 
     return true;
 }
 
-vtkSmartPointer<vtkImageData> RawVolumeDataManager::GetVtkImage() const { return m_vtkImage; }
+vtkSmartPointer<vtkImageData> RawVolumeDataManager::GetVtkImage() const { 
+       std::lock_guard<std::mutex> lock(m_mutex);
+    return m_vtkImage; // 返回副本，线程安全
+}

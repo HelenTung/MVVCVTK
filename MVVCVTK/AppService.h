@@ -57,7 +57,6 @@ public:
     void Show3DPlanes(VizMode renderMode);
 
     // --- 交互业务,具体实现 ---
-    void OnStateChanged();
     int GetPlaneAxis(vtkActor* actor) override;
     void UpdateInteraction(int delta) override;
     void SyncCursorToWorldPosition(double worldPos[3]) override;
@@ -78,6 +77,7 @@ public:
 
 
 private:
+    void OnStateChanged();
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ResetCursorCenter();
     void ClearCache();
