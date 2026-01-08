@@ -214,7 +214,7 @@ public:
     }
 
 protected:
-    // 静态回调函数转发器 (用于 VTK C-Style 回调)
+    // 静态回调函数转发器
     // clientData 就是在构造函数里 SetClientData(this) 传进去的指针
     static void DispatchVTKEvent(vtkObject* caller, long unsigned int eventId,
         void* clientData, void* callData) {

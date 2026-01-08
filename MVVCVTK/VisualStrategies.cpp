@@ -14,6 +14,13 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
 
+	m_isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
+	m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+
+	// 初始绑定
+    m_actor->SetMapper(m_mapper);
+    m_actor->GetProperty()->SetInterpolationToPhong();
+
 	m_actor->SetPickable(false); // 等值面不可拾取
 	m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 }
@@ -21,10 +28,9 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto poly = vtkPolyData::SafeDownCast(data);
     if (poly) {
-        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-        mapper->SetInputData(poly);
-        mapper->ScalarVisibilityOff();
-        m_actor->SetMapper(mapper);
+        m_mapper->SetInputData(poly);
+        m_mapper->ScalarVisibilityOff();
+        m_actor->SetMapper(m_mapper);
         m_cubeAxes->SetBounds(poly->GetBounds());
 		
         // VG Style
@@ -41,14 +47,22 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     // 作为 ImageData (需要实时计算)
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
-        m_sourceImage = img; // 保存引用
+        m_isoFilter->SetInputData(img);
+        m_isoFilter->ComputeNormalsOn(); // 开启法线计算
+
+        // 使用 Connection，VTK 会自动管理更新
+        m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
+        m_mapper->ScalarVisibilityOff();
+
         m_cubeAxes->SetBounds(img->GetBounds());
 
-        // 触发一次初始计算
-        RenderParams dummy;
-        double range[2]; img->GetScalarRange(range);
-        dummy.isoValue = range[0] + (range[1] - range[0]) * 0.2; // 默认阈值
-        UpdateVisuals(dummy, UpdateFlags::IsoValue);
+        // 计算初始阈值
+        double range[2];
+        img->GetScalarRange(range);
+        double initialVal = range[0] + (range[1] - range[0]) * 0.2; // 默认阈值
+
+        // 设置初始参数
+        m_isoFilter->SetValue(0, initialVal);
     }
 }
 
@@ -91,18 +105,11 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
     }
 
 	// 响应 UpdateFlags::IsoValue
-    if (((int)flags & (int)UpdateFlags::IsoValue) && m_sourceImage) {
-        // 使用 FlyingEdges3D 快速提取
-        auto iso = vtkSmartPointer<vtkFlyingEdges3D>::New();
-        iso->SetInputData(m_sourceImage);
-        iso->SetValue(0, params.isoValue);
-        iso->ComputeNormalsOn();
-        iso->Update();
-
-        auto mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-        mapper->SetInputData(iso->GetOutput());
-        mapper->ScalarVisibilityOff();
-        m_actor->SetMapper(mapper);
+    if (((int)flags & (int)UpdateFlags::IsoValue)) {
+        // 使用 conection自动管理更新
+        if (m_isoFilter && m_isoFilter->GetInput()) {
+            m_isoFilter->SetValue(0, params.isoValue);
+        }
     }
 }
 

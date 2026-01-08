@@ -16,7 +16,7 @@ private:
     vtkSmartPointer<vtkCallbackCommand> m_eventCallback;
     // 当前上下文记录的模式，用于决定滚轮行为
     VizMode m_currentMode = VizMode::Volume;
-    // 体渲染切片还要经过处理，volume使用 vtkCellPicker 类型，这个类型会消耗gpu资源，不如深度缓冲来的快
+    // 体渲染切片还要经过处理，volume使用 vtkCellPicker 类型
     vtkSmartPointer<vtkPropPicker> m_picker;
 	// 记录当前拖拽的轴向
     int m_dragAxis = -1;

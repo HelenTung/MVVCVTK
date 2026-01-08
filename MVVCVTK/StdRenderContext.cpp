@@ -78,14 +78,14 @@ void StdRenderContext::SetInteractionMode(VizMode mode)
 
     if (mode == VizMode::SliceAxial || mode == VizMode::SliceCoronal || 
         mode == VizMode::SliceSagittal) {
-        // 2D 模式：使用图像交互风格 (支持窗宽窗位调整)
+        // 2D 模式 (窗宽窗位调整)
         auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
         style->SetInteractionModeToImage2D(); // 强制为 2D 图像模式
         m_interactor->SetInteractorStyle(style);
 
     }
     else {
-        // 3D 模式：使用轨迹球风格 (支持旋转缩放)
+        // 3D 模式 (旋转缩放)
         auto style = vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New();
         m_interactor->SetInteractorStyle(style);
     }
@@ -269,14 +269,17 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
                 // 判断是否为平面
                 m_dragAxis = m_interactiveService->GetPlaneAxis(pickedActor);
-
+  
                 if (m_dragAxis != -1) {
                     // 确认拾取到的是我们的一个平面
                     m_isDragging = true;
                     m_eventCallback->SetAbortFlag(1); // 阻止相机转动
 
-
-
+					// 切换不同视窗时，降低渲染更新率
+                    if (m_interactiveService) {
+                        m_interactiveService->SetInteracting(true);
+                    }
+                        
 					// 告诉vtk交互器，已经开始拖拽，可以适当降低更新率
                     if (m_renderWindow) {
                         m_renderWindow->SetDesiredUpdateRate(15.0);
@@ -305,6 +308,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
 
                 // 强制触发一次最终的高质量渲染
                 if (m_interactiveService) {
+                    m_interactiveService->SetInteracting(false);
                     m_interactiveService->MarkDirty();
                 }
             }

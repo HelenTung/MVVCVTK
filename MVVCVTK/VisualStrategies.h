@@ -11,6 +11,7 @@
 #include <vtkPiecewiseFunction.h>
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
+#include <vtkPolyDataMapper.h>
 
 // --- 策略 A: 等值面渲染 ---
 class IsoSurfaceStrategy : public AbstractVisualStrategy {
@@ -27,7 +28,8 @@ public:
 private:
     vtkSmartPointer<vtkActor> m_actor;
 	vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
-	vtkSmartPointer<vtkImageData> m_sourceImage;  // 原始数据引用
+	vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter; // 等值面过滤器
+	vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
 };
 
 // --- 策略 B: 体渲染 ---
@@ -74,7 +76,7 @@ private:
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     Orientation m_orientation;
-
+    
     // 状态记录
     int m_currentIndex = 0;
     int m_maxIndex = 0;
