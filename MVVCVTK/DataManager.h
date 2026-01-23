@@ -15,3 +15,17 @@ public:
     bool LoadData(const std::string& filePath) override;
     vtkSmartPointer<vtkImageData> GetVtkImage() const override;
 };
+
+
+class TiffVolumeDataManager : public AbstractDataManager {
+private:
+    mutable std::mutex m_mutex;
+    vtkSmartPointer<vtkImageData> m_vtkImage;
+
+public:
+    TiffVolumeDataManager();
+    // 实现加载接口
+    bool LoadData(const std::string& filePath) override;
+    // 实现数据获取接口
+    vtkSmartPointer<vtkImageData> GetVtkImage() const override;
+};

@@ -1,9 +1,13 @@
 ﻿#include "DataConverters.h"
 //#include <vtkMarchingCubes.h>
 #include <vtkFlyingEdges3D.h>
-#include <opencv2/opencv.hpp>
+#include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
 #include <vtkIntArray.h>
+#include <filesystem>
+#include <vtkImageWriter.h>
+#include <vtkJPEGWriter.h>
+#include <vtkPNGWriter.h>
 
 void IsoSurfaceConverter::SetParameter(const std::string& key, double value) {
     if (key == "IsoValue") m_isoValue = value;
@@ -15,7 +19,6 @@ vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkIma
     mc->SetInputData(input);
     mc->ComputeNormalsOn();
     mc->SetValue(0, m_isoValue);
-    // 是否做简化三角面片？
 
     mc->Update(); // 立即执行计算
     return mc->GetOutput();
@@ -26,147 +29,88 @@ void HistogramConverter::SetParameter(const std::string& key, double value)
     if (key == "BinCount") m_binCount = static_cast<int>(value);
 }
 
-vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageData> input)
-{
-	if (!input) return nullptr;
+vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageData> input) {
+    if (!input) return nullptr;
+    double range[2];
+    input->GetScalarRange(range);
 
-	// 获取图像数据的维度
-    int dims[3] = { 0 };
-	input->GetDimensions(dims);
+    auto accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
+    accumulate->SetInputData(input);
+    accumulate->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
+    accumulate->SetComponentOrigin(range[0], 0, 0);
+    double binWidth = (range[1] - range[0]) / static_cast<double>(m_binCount);
+    accumulate->SetComponentSpacing(binWidth > 0 ? binWidth : 1.0, 0, 0);
+    accumulate->Update();
 
-	// 计算总体素数
-    size_t totalVoxels = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
+    vtkImageData* output = accumulate->GetOutput();
+    long long* frequencies = static_cast<long long*>(output->GetScalarPointer());
 
-	// 获取指向图像数据的指针
-    float* rawData = static_cast<float*>(input->GetScalarPointer());
-    if (!rawData) return nullptr;
-
-	// 将数据转换为 OpenCV Mat 格式 (1行，totalVoxels列)
-    cv::Mat src(1, totalVoxels, CV_32F, rawData);
-
-	// 获取数据范围
-    int histSize = m_binCount;
-    double value[2];
-    input->GetScalarRange(value);
-    float range[] = { (float)value[0], (float)value[1]}; // 动态范围
-    const float* histRange = { range };
-
-	// 计算直方图的区间范围
-    cv::Mat cvHist;
-    cv::calcHist(&src, 1, 0, cv::Mat(), cvHist, 1, &histSize, &histRange, true, false);
-    
-	// 构建 VTK Table 对象
     auto table = vtkSmartPointer<vtkTable>::New();
-	auto maxVal = static_cast<float>(value[1]);
-	auto minVal = static_cast<float>(value[0]);
-    
-    // 创建两列：X轴 (Intensity/Density), Y轴 (Frequency)
-    auto colX = vtkSmartPointer<vtkFloatArray>::New();
-    colX->SetName("Intensity");
-    colX->SetNumberOfValues(histSize);
+    auto colX = vtkSmartPointer<vtkFloatArray>::New(); colX->SetName("Intensity");
+    auto colY = vtkSmartPointer<vtkFloatArray>::New(); colY->SetName("Frequency");
+    auto colLogY = vtkSmartPointer<vtkFloatArray>::New(); colLogY->SetName("LogFrequency");
 
-    auto colY = vtkSmartPointer<vtkFloatArray>::New(); // 原始频率
-    colY->SetName("Frequency");
-    colY->SetNumberOfValues(histSize);
-
-    auto colLogY = vtkSmartPointer<vtkFloatArray>::New(); // 对数频率 (方便 UI 绘图)
-    colLogY->SetName("LogFrequency");
-    colLogY->SetNumberOfValues(histSize);
-
-    float step = (maxVal - minVal) / histSize;
-
-    for (int i = 0; i < histSize; i++) {
-        float binVal = cvHist.at<float>(i);
-
-        // 填充 X 轴数值
-        colX->SetValue(i, minVal + i * step);
-
-        // 填充 Y 轴频率
-        colY->SetValue(i, binVal);
-
-        // 填充 Log Y (避免 log(0))
-        colLogY->SetValue(i, std::log(binVal + 1.0f));
+    for (int i = 0; i < m_binCount; i++) {
+        float val = static_cast<float>(frequencies[i]);
+        colX->InsertNextValue(range[0] + i * binWidth);
+        colY->InsertNextValue(val);
+        colLogY->InsertNextValue(std::log(val + 1.0f));
     }
-
-    table->AddColumn(colX);
-    table->AddColumn(colY);
-    table->AddColumn(colLogY);
-
+    table->AddColumn(colX); table->AddColumn(colY); table->AddColumn(colLogY);
     return table;
 }
 
 
-void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath)
-{
+void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
 
-    // 1. 准备数据
-    int dims[3] = { 0 };
-    input->GetDimensions(dims);
-    size_t totalVoxels = static_cast<size_t>(dims[0]) * dims[1] * dims[2];
-    float* rawData = static_cast<float*>(input->GetScalarPointer());
-    if (!rawData) return;
+    // 直方图频率
+    double range[2];
+    input->GetScalarRange(range);
+    auto acc = vtkSmartPointer<vtkImageAccumulate>::New();
+    acc->SetInputData(input);
+    acc->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
+    acc->SetComponentOrigin(range[0], 0, 0);
+    double binWidth = (range[1] - range[0]) / static_cast<double>(m_binCount);
+    acc->SetComponentSpacing(binWidth > 0 ? binWidth : 1.0, 0, 0);
+    acc->Update();
 
-    // 2. 计算直方图 (使用 OpenCV)
-    cv::Mat src(1, totalVoxels, CV_32F, rawData);
-    int histSize = m_binCount; // 默认 2048
-    double rangeVal[2];
-    input->GetScalarRange(rangeVal);
-    float range[] = { (float)rangeVal[0], (float)rangeVal[1] };
-    const float* histRange = { range };
+    long long* freqs = static_cast<long long*>(acc->GetOutput()->GetScalarPointer());
+    std::vector<float> logHist(m_binCount);
+    float maxLog = 0.0f;
+    for (int i = 0; i < m_binCount; ++i) {
+        logHist[i] = std::log(static_cast<float>(freqs[i]) + 1.0f);
+        if (logHist[i] > maxLog) maxLog = logHist[i];
+    }
 
-    cv::Mat cvHist;
-    cv::calcHist(&src, 1, 0, cv::Mat(), cvHist, 1, &histSize, &histRange, true, false);
+    //  800x600 绘图画布大小
+    int W = 800, H = 600;
+    auto canvas = vtkSmartPointer<vtkImageData>::New();
+    canvas->SetDimensions(W, H, 1);
+    canvas->AllocateScalars(VTK_UNSIGNED_CHAR, 3);
+    unsigned char* ptr = static_cast<unsigned char*>(canvas->GetScalarPointer());
 
-    // --- 对数变换 ---
-    std::vector<float> logHist(histSize);
-    float maxLogVal = 0.0f;
-    // 记录最大值的索引，用于辅助定位红线
-    int maxIdx = 0;
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            int binIdx = (x * m_binCount) / W;
+            int h_limit = static_cast<int>((logHist[binIdx] / (maxLog > 0 ? maxLog : 1.0f)) * H * 0.9);
+            unsigned char* pix = ptr + (y * W + x) * 3;
 
-    for (int i = 0; i < histSize; ++i) {
-        float val = cvHist.at<float>(i);
-        float logVal = std::log(val + 1.0f);
-        logHist[i] = logVal;
-        if (logVal > maxLogVal) {
-            maxLogVal = logVal;
-            maxIdx = i;
+            if (y < h_limit) { // 填充直方图 (y=0在底部)
+                pix[0] = pix[1] = pix[2] = 128;
+            }
+            else { // 背景渐变
+                pix[0] = pix[1] = pix[2] = static_cast<unsigned char>((x * 255) / W);
+            }
         }
     }
 
-    // 创建画布 (800x600)
-    int imgW = 800;
-    int imgH = 600;
-    cv::Mat histImage(imgH, imgW, CV_8UC3);
+    std::string ext = std::filesystem::path(filePath).extension().string();
+    vtkSmartPointer<vtkImageWriter> writer;
+    if (ext == ".png" || ext == ".PNG") writer = vtkSmartPointer<vtkPNGWriter>::New();
+    else writer = vtkSmartPointer<vtkJPEGWriter>::New();
 
-    // --- 绘制背景渐变 (保持 VG 的 X 轴灰度映射感) ---
-    cv::Mat gradientRow(1, imgW, CV_8UC3);
-    for (int i = 0; i < imgW; ++i) {
-        int v = (i * 255) / imgW;
-        gradientRow.at<cv::Vec3b>(0, i) = cv::Vec3b(v, v, v);
-    }
-    cv::repeat(gradientRow, imgH, 1, histImage);
-
-    // --- 构建填充多边形 ---
-    std::vector<cv::Point> points;
-    points.push_back(cv::Point(0, imgH)); // 起点左下
-
-    for (int i = 0; i < histSize; i++)
-    {
-        int x = (int)((double)i / histSize * imgW);
-        // Y 坐标映射: 留出顶部 10% 边距
-        int y_height = (int)(logHist[i] / maxLogVal * (imgH * 0.9));
-        int y = imgH - y_height;
-        points.push_back(cv::Point(x, y));
-    }
-    points.push_back(cv::Point(imgW, imgH)); // 终点右下
-
-    // --- 填充直方图 (VG 风格: 浅中灰色) ---
-    std::vector<std::vector<cv::Point>> polys = { points };
-    // 使用 (128, 128, 128) 灰色，比之前的深灰更像 VG
-    cv::fillPoly(histImage, polys, cv::Scalar(128, 128, 128));
-
-    // 保存
-    cv::imwrite(filePath, histImage);
-    std::cout << "VG-Style Histogram saved to: " << filePath << std::endl;
+    writer->SetFileName(filePath.c_str());
+    writer->SetInputData(canvas);
+    writer->Write();
 }

@@ -65,7 +65,7 @@ public:
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
 private:
-    // [Private] 内部实现：这些方法仅由 UpdateVisuals 内部驱动
+    // [Private] 内部实现：由 UpdateVisuals 内部驱动
     void SetSliceIndex(int delta);
     void SetOrientation(Orientation orient);
     void UpdateCrosshair(int x, int y, int z);
@@ -116,7 +116,7 @@ class ColoredPlanesStrategy : public AbstractVisualStrategy {
 public:
     ColoredPlanesStrategy();
 
-    // [Public] 抽象接口实现
+    // [Public] 抽象接口实现  
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
@@ -126,7 +126,6 @@ public:
 private:
     // [Private] 内部实现
     void UpdateAllPositions(int x, int y, int z);
-
     vtkSmartPointer<vtkActor> m_planeActors[3];
     vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
     vtkSmartPointer<vtkImageData> m_imageData;

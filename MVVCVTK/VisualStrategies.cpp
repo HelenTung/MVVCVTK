@@ -60,7 +60,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         double range[2];
         img->GetScalarRange(range);
         double initialVal = range[0] + (range[1] - range[0]) * 0.2; // 默认阈值
-
+        
         // 设置初始参数
         m_isoFilter->SetValue(0, initialVal);
     }
@@ -686,9 +686,9 @@ void CompositeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags fl
         m_referencePlanes->UpdateVisuals(params,flags);
     }
 
-    // 2. 更新主视图 (体渲染或等值面)
+    // 更新主视图
     if (m_mainStrategy) {
-        // 多态调用！如果是 VolumeStrategy，它会自动更新 TF；如果是 IsoSurface，则什么都不做
+        // 多态调用
         m_mainStrategy->UpdateVisuals(params,flags);
     }
 }
@@ -696,9 +696,9 @@ void CompositeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags fl
 // ================= ColoredPlanesStrategy =================
 ColoredPlanesStrategy::ColoredPlanesStrategy() {
     double colors[3][3] = {
-        {1.0, 0.0, 0.0}, // 红色: 矢状面 (Sagittal)
-        {0.0, 1.0, 0.0}, // 绿色: 冠状面 (Coronal)
-        {0.0, 0.0, 1.0}  // 蓝色: 轴状面 (Axial)
+        {1.0, 0.0, 0.0}, // Sagittal
+        {0.0, 1.0, 0.0}, // Coronal
+        {0.0, 0.0, 1.0}  // Axial
     };
 
     for (int i = 0; i < 3; i++) {
@@ -750,8 +750,8 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
 
     // 获取数据的物理边界和间距
     double bounds[6];
-    m_imageData->GetBounds(bounds);
-
+       m_imageData->GetBounds(bounds);
+    
     double origin[3], spacing[3];
     m_imageData->GetOrigin(origin);
     m_imageData->GetSpacing(spacing);
@@ -760,7 +760,7 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     double physX = origin[0] + x * spacing[0];
     double physY = origin[1] + y * spacing[1];
     double physZ = origin[2] + z * spacing[2];
-
+    
     // 显式更新每个平面的三个关键点 (Origin, Point1, Point2)
 
     // --- 平面 0: 矢状面 (Sagittal, 法线 X) ---
@@ -769,7 +769,7 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_planeSources[0]->SetPoint1(physX, bounds[3], bounds[4]); // 右下角 (Y轴方向)
     m_planeSources[0]->SetPoint2(physX, bounds[2], bounds[5]); // 左上角 (Z轴方向)
 
-    // --- 平面 1: 冠状面 (Coronal, 法线 Y) ---
+    // --- 平面 1: 冠状面 (Coronal, 法线 Y) ---    
     // Y 固定为 physY，X 范围 bounds[0]~bounds[1]，Z 范围 bounds[4]~bounds[5]
     m_planeSources[1]->SetOrigin(bounds[0], physY, bounds[4]);
     m_planeSources[1]->SetPoint1(bounds[1], physY, bounds[4]);
@@ -780,7 +780,7 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_planeSources[2]->SetOrigin(bounds[0], bounds[2], physZ);
     m_planeSources[2]->SetPoint1(bounds[1], bounds[2], physZ);
     m_planeSources[2]->SetPoint2(bounds[0], bounds[3], physZ);
-
+    
     // 通知管线更新
     for (int i = 0; i < 3; i++) {
         m_planeSources[i]->Modified();
@@ -793,7 +793,7 @@ void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
 
 void ColoredPlanesStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
     for (int i = 0; i < 3; i++) renderer->RemoveActor(m_planeActors[i]);
-}
+} 
 
 int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
     for (int i = 0; i < 3; ++i) {

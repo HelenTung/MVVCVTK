@@ -57,7 +57,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         return { m_dataRange[0], m_dataRange[1] };
     }
-
+    
     // 修改节点参数
     void SetTFNodes(const std::vector<TFNode>& nodes) {
         {
@@ -163,10 +163,9 @@ public:
 private:
     void NotifyObservers(UpdateFlags flags) {
         std::vector<ObserverCallback> callbacksToRun;
-
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            //清理无效观察者
+            // 清理无效观察者
             for (auto it = m_observers.begin(); it != m_observers.end();) {
                 if (it->owner.expired()) {
                     it = m_observers.erase(it); // 返回下一个有效迭代器

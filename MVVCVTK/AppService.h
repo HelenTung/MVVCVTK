@@ -76,7 +76,7 @@ public:
     void SetTransferFunction(const std::vector<TFNode>& nodes);
 
 
-private:
+    private:
     void OnStateChanged();
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ResetCursorCenter();

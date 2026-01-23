@@ -14,7 +14,8 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 int main() {
     // 创建共享资源 (仅作为依赖注入传递，不直接操作)
-    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    //auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedDataMgr = std::make_shared<TiffVolumeDataManager>(); // 使用 Tiff
     auto sharedState = std::make_shared<SharedInteractionState>();
     auto image = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
 
@@ -35,7 +36,7 @@ int main() {
     contextA->SetWindowPosition(50, 50);
 
     // 加载数据
-    serviceA->LoadFile("D:\\CT-1209\\data\\1000X1000X1000.raw");
+    serviceA->LoadFile("D:\\CT-1209\\data\\1440");
 
     // 设置模式
     auto range = sharedState->GetDataRange();
@@ -45,7 +46,7 @@ int main() {
     //image->SaveHistogramImage("1.png");
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
-   
+    
 
     // --- 窗口 E: 复合视图 (体渲染 + 切片平面) ---
     auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
@@ -79,7 +80,6 @@ int main() {
     serviceB->ShowSlice(VizMode::SliceAxial);
     contextB->SetInteractionMode(VizMode::SliceAxial);
 
-
     // --- 窗口 C: 冠状位切片 ---
     auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextC = std::make_shared<StdRenderContext>();
@@ -92,7 +92,6 @@ int main() {
     serviceC->ShowSlice(VizMode::SliceCoronal);
     contextC->SetInteractionMode(VizMode::SliceCoronal);
 
-
     // --- 窗口 D: 矢状位切片 ---
     auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextD = std::make_shared<StdRenderContext>();
@@ -104,8 +103,6 @@ int main() {
 
     serviceD->ShowSlice(VizMode::SliceSagittal);
     contextD->SetInteractionMode(VizMode::SliceSagittal);
-
-    // --- 启动流程 ---
 
     // 此时所有参数都已经通过 Service 同步到了 State 中
     // 各个 Context Render 时会从 State 拉取最新参数
@@ -127,12 +124,6 @@ int main() {
     contextC->InitInteractor();
     contextD->InitInteractor();
     contextE->InitInteractor();
-
-    serviceA.reset();
-    serviceB.reset();
-    serviceC.reset();
-    serviceD.reset();
-    serviceE.reset();
 
     std::cout << "Starting Main Loop..." << std::endl;
     std::cout << "Use 'A'/'D' for measurements." << std::endl;
