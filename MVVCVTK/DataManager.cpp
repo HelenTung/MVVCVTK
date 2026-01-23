@@ -105,8 +105,47 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
             return false;
         }
 
+        auto naturalSort = [](const std::string& s1, const std::string& s2) {
+            size_t i = 0, j = 0;
+            while (i < s1.size() && j < s2.size()) {
+                // 如果两边当前字符都是数字，提取整个数字进行数值比较
+                if (std::isdigit(s1[i]) && std::isdigit(s2[j])) {
+                    unsigned long long n1 = 0;
+                    unsigned long long n2 = 0;
+                    
+                    // 解析 s1 中的数字
+                    while (i < s1.size() && std::isdigit(s1[i])) {
+                        n1 = n1 * 10 + (s1[i] - '0');
+                        i++;
+                    }
+                    // 解析 s2 中的数字
+                    while (j < s2.size() && std::isdigit(s2[j])) {
+                        n2 = n2 * 10 + (s2[j] - '0');
+                        j++;
+                    }
+
+                    if (n1 != n2) {
+                        return n1 < n2; // 数值小的在前
+                    }
+                    // 如果数值相等 (例如 01 和 1)，继续比较后续字符
+                }
+                else {
+                    // 非数字字符，按标准 ASCII 比较
+                    // (如果需要忽略大小写，可在此处转 tolower)
+                    if (s1[i] != s2[j]) {
+                        return s1[i] < s2[j];
+                    }
+                    i++;
+                    j++;
+                }
+            }
+            // 如果一个字符串是另一个的前缀，短的在前
+            return s1.size() < s2.size();
+            };
+
+
         // 排序
-        std::sort(fileList.begin(), fileList.end());
+        std::sort(fileList.begin(), fileList.end(), naturalSort);
 
         // 构造 VTK 字符串数组
         auto vtkFiles = vtkSmartPointer<vtkStringArray>::New();
