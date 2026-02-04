@@ -34,6 +34,7 @@ int main() {
     contextA->SetWindowTitle("Window A: Composite IsoSurface");
     contextA->SetWindowSize(600, 600);
     contextA->SetWindowPosition(50, 50);
+    contextA->ToggleOrientationAxes(true);
 
     // 加载数据
     serviceA->LoadFile("D:\\CT-1209\\data\\1536X1536X1536.raw");

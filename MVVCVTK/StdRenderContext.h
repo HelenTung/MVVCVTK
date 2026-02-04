@@ -8,6 +8,8 @@
 #include <vtkDistanceRepresentation2D.h>
 #include <vtkAngleRepresentation2D.h>
 #include <vtkPropPicker.h>
+#include <vtkOrientationMarkerWidget.h>
+#include <vtkAxesActor.h>
 
 class StdRenderContext : public AbstractRenderContext {
 private:
@@ -28,6 +30,7 @@ private:
     // --- 测量组件 ---
     vtkSmartPointer<vtkDistanceWidget> m_distanceWidget;
     vtkSmartPointer<vtkAngleWidget> m_angleWidget;
+    vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
     ToolMode m_toolMode = ToolMode::Navigation;
 
 public:
@@ -36,6 +39,9 @@ public:
     void Start() override;
     void SetInteractionMode(VizMode mode) override;
     void BindService(std::shared_ptr<AbstractAppService> service) override;
+
+	// 显示或隐藏坐标轴
+    void ToggleOrientationAxes(bool show) override;
 
 	// 测量工具模式切换
     void SetToolMode(ToolMode mode);

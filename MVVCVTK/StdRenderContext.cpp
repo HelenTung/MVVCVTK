@@ -97,6 +97,40 @@ void StdRenderContext::BindService(std::shared_ptr<AbstractAppService> service)
     m_interactiveService = std::dynamic_pointer_cast<AbstractInteractiveService>(service);
 }
 
+void StdRenderContext::ToggleOrientationAxes(bool show)
+{
+    if (show) {
+        if (!m_axesWidget) {
+            // 创建坐标轴 Actor
+            auto axes = vtkSmartPointer<vtkAxesActor>::New();
+
+            // 创建 Widget
+            m_axesWidget = vtkSmartPointer<vtkOrientationMarkerWidget>::New();
+            m_axesWidget->SetOrientationMarker(axes);
+
+            // 确保 Interactor 已经存在
+            if (m_interactor) {
+                m_axesWidget->SetInteractor(m_interactor);
+            }
+
+            // 设置位置：左下角，占用窗口 20% 大小
+            m_axesWidget->SetViewport(0.0, 0.0, 0.2, 0.2);
+
+            m_axesWidget->SetEnabled(1);
+            m_axesWidget->InteractiveOff();
+        }
+        else {
+            // 如果 Widget 已存在但被隐藏，重新显示
+            m_axesWidget->SetEnabled(1);
+        }
+    }
+    else {
+        if (m_axesWidget) {
+            m_axesWidget->SetEnabled(0);
+        }
+    }
+}
+
 void StdRenderContext::SetToolMode(ToolMode mode)
 {
     m_toolMode = mode;

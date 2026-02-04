@@ -213,6 +213,8 @@ public:
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
 
+    // 开关世界坐标系显示接口
+    virtual void ToggleOrientationAxes(bool show) {}
 protected:
     // 静态回调函数转发器
     // clientData 就是在构造函数里 SetClientData(this) 传进去的指针
