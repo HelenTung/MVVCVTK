@@ -38,7 +38,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
     // 读取数据到新内存
-    size_t totalVoxels = (size_t)newDims[0] * newDims[1] * newDims[2];
+    size_t totalVoxels = static_cast<size_t>(newDims[0]) * static_cast<size_t>(newDims[1]) * static_cast<size_t>(newDims[2]);
     float* vtkDataPtr = static_cast<float*>(newImage->GetScalarPointer());
 
     std::ifstream file(filePath, std::ios::binary);
@@ -47,7 +47,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     file.close();
 
     newImage->Modified();
-
+ 
     // --- 提交  ---
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -141,7 +141,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
             }
             // 如果一个字符串是另一个的前缀，短的在前
             return s1.size() < s2.size();
-            };
+        };
 
 
         // 排序
@@ -171,7 +171,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     // 如果是序列图片，Reader 会根据文件数量自动设置 Z 轴维度
     try {
         reader->Update();
-    }
+    }   
     catch (...) {
         std::cerr << "[Error] Exception during TIFF reading." << std::endl;
         return false;

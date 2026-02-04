@@ -94,7 +94,7 @@ private:
 // --- 策略 D: 三面切片 (MPR) ---
 class MultiSliceStrategy : public AbstractVisualStrategy {
 public:
-    MultiSliceStrategy();
+    MultiSliceStrategy();   
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;

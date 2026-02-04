@@ -14,8 +14,8 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 int main() {
     // 创建共享资源 (仅作为依赖注入传递，不直接操作)
-    //auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    auto sharedDataMgr = std::make_shared<TiffVolumeDataManager>(); // 使用 Tiff
+    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    //auto sharedDataMgr = std::make_shared<TiffVolumeDataManager>(); // 使用 Tiff
     auto sharedState = std::make_shared<SharedInteractionState>();
     auto image = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
 
@@ -36,7 +36,7 @@ int main() {
     contextA->SetWindowPosition(50, 50);
 
     // 加载数据
-    serviceA->LoadFile("D:\\CT-1209\\data\\1440");
+    serviceA->LoadFile("D:\\CT-1209\\data\\1536X1536X1536.raw");
 
     // 设置模式
     auto range = sharedState->GetDataRange();
@@ -47,7 +47,6 @@ int main() {
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
     
-
     // --- 窗口 E: 复合视图 (体渲染 + 切片平面) ---
     auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextE = std::make_shared<StdRenderContext>();
@@ -59,14 +58,16 @@ int main() {
 
     // 因为 State 是共享的，这里设置会影响所有使用该 State 的体渲染窗口
     std::vector<TFNode> volTF = {
-        {0.0, 0.0, 0,0,0},
-        {0.1, 0.0, 0,0,0},
-        {0.8, 0, 0,1,0}, 
-        {1.0, 1.0, 0,0,1}  
+        // 位置(0.0-1.0), 透明度,  R,   G,   B
+           {0.0,            0.0,  0.0, 0.0, 0.0}, // [修正] 0.0 表示完全透明，隐藏背景
+           {0.5,            0.1,  0.0, 1.0, 0.0}, // [修正] 0.0 表示完全透明，过滤噪声
+           {0.85,            0.8,  0, 1.0, 0}, // 中间部分
+           {1.0,            1.0,  0, 1.0, 0}  // 高亮部分不透明
     };
-    serviceE->SetTransferFunction(volTF);
+    
     contextE->SetInteractionMode(VizMode::CompositeVolume);
     serviceE->Show3DPlanes(VizMode::CompositeVolume);
+    serviceE->SetTransferFunction(volTF);
 
     // --- 窗口 B: 轴状位切片 ---
     auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
