@@ -1,4 +1,5 @@
 ﻿#include "VolumeStrategy.h"
+#include "ImageProcessor.h"
 #include <vtkSmartVolumeMapper.h>
 #include <vtkVolumeProperty.h>
 #include <vtkColorTransferFunction.h>
@@ -18,35 +19,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
-    // --- 降采样逻辑开始 ---
-    vtkSmartPointer<vtkImageData> inputForMapper = img;
-    int dims[3];
-    img->GetDimensions(dims);
-
-    // 目标最大分辨率
-    const int targetDim = 766;
-
-    // 仅当任意维度超过目标分辨率时才进行降采样
-    if (dims[0] > targetDim || dims[1] > targetDim || dims[2] > targetDim) {
-        auto resample = vtkSmartPointer<vtkImageResample>::New();
-        resample->SetInputData(img);
-
-        // 计算各轴缩放因子，将维度降至 766
-        // vtkImageResample 会自动调整 Spacing，确保物理空间 Bounds 不变
-        double factorX = static_cast<double>(targetDim) / static_cast<double>(dims[0]);
-        double factorY = static_cast<double>(targetDim) / static_cast<double>(dims[1]);
-        double factorZ = static_cast<double>(targetDim) / static_cast<double>(dims[2]);
-
-        // 降采样到 766*766*766对所有轴进行映射
-        resample->SetAxisMagnificationFactor(0, factorX);
-        resample->SetAxisMagnificationFactor(1, factorY);
-        resample->SetAxisMagnificationFactor(2, factorZ);
-
-        resample->SetInterpolationModeToLinear(); // 使用线性插值平衡性能与质量
-        resample->Update(); // 执行重采样
-
-        inputForMapper = resample->GetOutput();
-    }
+    //  降采样逻辑
+    vtkSmartPointer<vtkImageData> inputForMapper = ImageProcessor::ApplyDownsampling(img, 766);
 
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     mapper->SetInputData(inputForMapper); // 使用处理后(或原始)的数据

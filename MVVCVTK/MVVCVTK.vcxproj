@@ -156,12 +156,12 @@ vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</A
     <ClInclude Include="CompositeStrategy.h" />
     <ClInclude Include="DataConverters.h" />
     <ClInclude Include="DataManager.h" />
+    <ClInclude Include="ImageProcessor.h" />
     <ClInclude Include="IsoSurfaceStrategy.h" />
     <ClInclude Include="MultiSliceStrategy.h" />
     <ClInclude Include="SliceStrategy.h" />
     <ClInclude Include="StdRenderContext.h" />
     <ClInclude Include="StrategyFactory.h" />
-    <ClInclude Include="VisualStrategies.h" />
     <ClInclude Include="VolumeStrategy.h" />
   </ItemGroup>
   <ItemGroup>
@@ -170,12 +170,12 @@ vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</A
     <ClCompile Include="CompositeStrategy.cpp" />
     <ClCompile Include="DataConverters.cpp" />
     <ClCompile Include="DataManager.cpp" />
+    <ClCompile Include="ImageProcessor.cpp" />
     <ClCompile Include="IsoSurfaceStrategy.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="MultiSliceStrategy.cpp" />
     <ClCompile Include="SliceStrategy.cpp" />
     <ClCompile Include="StdRenderContext.cpp" />
-    <ClCompile Include="VisualStrategies.cpp" />
     <ClCompile Include="VolumeStrategy.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

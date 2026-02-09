@@ -22,6 +22,12 @@
     <Filter Include="源文件\Strategies">
       <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Utils">
+      <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Utils">
+      <UniqueIdentifier>{a5f21c88-3127-4ee9-9c77-05fe2058cc3f}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AppInterfaces.h">
@@ -31,9 +37,6 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="DataConverters.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="VisualStrategies.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="AppService.h">
@@ -66,15 +69,15 @@
     <ClInclude Include="ColoredPlanesStrategy.h">
       <Filter>头文件\Strategies</Filter>
     </ClInclude>
+    <ClInclude Include="ImageProcessor.h">
+      <Filter>头文件\Utils</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="DataConverters.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="VisualStrategies.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="AppService.cpp">
@@ -103,6 +106,9 @@
     </ClCompile>
     <ClCompile Include="ColoredPlanesStrategy.cpp">
       <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="ImageProcessor.cpp">
+      <Filter>源文件\Utils</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
