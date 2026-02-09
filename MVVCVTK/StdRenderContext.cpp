@@ -393,7 +393,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
                 // vtkPropPicker 同样返回准确的 PickPosition
                 m_picker->Pick(eventPos[0], eventPos[1], 0, m_renderer);
                 double* worldPos = m_picker->GetPickPosition();
-				m_interactiveService->SyncCursorToWorldPosition(worldPos);
+				m_interactiveService->SyncCursorToWorldPosition(worldPos, m_dragAxis);
                 m_eventCallback->SetAbortFlag(1);
             }
         }

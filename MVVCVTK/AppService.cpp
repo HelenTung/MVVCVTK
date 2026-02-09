@@ -167,7 +167,7 @@ int MedicalVizService::GetPlaneAxis(vtkActor* actor) {
     return -1;
 }
 
-void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3]) {
+void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis) {
     // 获取数据元信息
     auto img = m_dataManager->GetVtkImage();
     if (!img) return;
@@ -193,7 +193,26 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3]) {
     if (k < 0) k = 0; if (k >= dims[2]) k = dims[2] - 1;
 
     // 更新内部 State
-    m_sharedState->SetCursorPosition(i, j, k);
+    // 获取当前坐标，用于保持不变的轴
+    auto currentPos = m_sharedState->GetCursorPosition();
+
+    // 根据 axis 决定如何更新
+    if (axis == 0) {
+        // 只更新 X (Sagittal)
+        m_sharedState->SetCursorPosition(i, currentPos[1], currentPos[2]);
+    }
+    else if (axis == 1) {
+        // 只更新 Y (Coronal)
+        m_sharedState->SetCursorPosition(currentPos[0], j, currentPos[2]);
+    }
+    else if (axis == 2) {
+        // 只更新 Z (Axial)
+        m_sharedState->SetCursorPosition(currentPos[0], currentPos[1], k);
+    }
+    else {
+        // 全部更新 (默认行为，如十字线拖拽)
+        m_sharedState->SetCursorPosition(i, j, k);
+    }
 }
 
 void MedicalVizService::ProcessPendingUpdates()

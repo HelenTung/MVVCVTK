@@ -245,8 +245,8 @@ public:
     virtual void UpdateInteraction(int value) {}
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
 
-    // Context 不需要自己算坐标，直接把拾取到的世界坐标扔给 Service
-    virtual void SyncCursorToWorldPosition(double worldPos[3]) {}
+    // Context 不需要自己算坐标，直接把拾取到的世界坐标扔给 Service,axis 参数，-1 表示更新所有轴，0/1/2 表示只更新特定轴
+    virtual void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) {}
 
     // 返回标准类型，而不是具体 State 对象
     virtual std::array<int, 3> GetCursorPosition() { return { 0,0,0 }; }
