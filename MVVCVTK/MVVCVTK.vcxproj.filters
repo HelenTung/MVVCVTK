@@ -16,6 +16,12 @@
     <Filter Include="源文件\main">
       <UniqueIdentifier>{b4a2b4ac-7c20-4fd8-a3fa-d6df8e5d82a8}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Strategies">
+      <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Strategies">
+      <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AppInterfaces.h">
@@ -42,6 +48,24 @@
     <ClInclude Include="AppState.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="IsoSurfaceStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="VolumeStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="SliceStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="CompositeStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="MultiSliceStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="ColoredPlanesStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">
@@ -61,6 +85,24 @@
     </ClCompile>
     <ClCompile Include="StdRenderContext.cpp">
       <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="CompositeStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="SliceStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="VolumeStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="IsoSurfaceStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="MultiSliceStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="ColoredPlanesStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

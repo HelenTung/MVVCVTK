@@ -1,5 +1,10 @@
 ﻿#pragma once
-#include "VisualStrategies.h" 
+#include "IsoSurfaceStrategy.h"
+#include "VolumeStrategy.h"
+#include "SliceStrategy.h"
+#include "MultiSliceStrategy.h"
+#include "ColoredPlanesStrategy.h"
+#include "CompositeStrategy.h"
 #include "AppInterfaces.h"
 // 工厂引用所有策略
 
