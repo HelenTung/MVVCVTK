@@ -172,6 +172,10 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3]) {
     auto img = m_dataManager->GetVtkImage();
     if (!img) return;
 
+    // 先把世界坐标转回模型相对坐标
+    double modelPos[3];
+    WorldToModel(worldPos, modelPos);
+
     double origin[3], spacing[3];
     img->GetOrigin(origin);
     img->GetSpacing(spacing);
@@ -231,6 +235,9 @@ void MedicalVizService::ProcessPendingUpdates()
     params.material = m_sharedState->GetMaterial();
     params.isoValue = m_sharedState->GetIsoValue(); // 传递阈值
     
+    auto matArray = m_sharedState->GetModelMatrix();
+    params.modelMatrix = matArray;
+
     // 泛型调用
     m_currentStrategy->UpdateVisuals(params, flags);
     // 逻辑同步完成，现在标记渲染层脏了
@@ -268,4 +275,106 @@ void MedicalVizService::SetTransferFunction(const std::vector<TFNode>& nodes) {
 
 void MedicalVizService::SetInteracting(bool val) {
     m_sharedState->SetInteracting(val);
+}
+
+void MedicalVizService::TransformModel(double translate[3], double rotate[3], double scale[3])
+{
+    // 使用 vtkTransform 构建矩阵
+    auto transform = vtkSmartPointer<vtkTransform>::New();
+    transform->PostMultiply(); // 使用后乘，符合常规思维（先旋转再平移等）
+
+    transform->RotateX(rotate[0]);
+    transform->RotateY(rotate[1]);
+    transform->RotateZ(rotate[2]);
+
+    transform->Scale(scale[0], scale[1], scale[2]);
+
+    transform->Translate(translate[0], translate[1], translate[2]);
+
+    vtkMatrix4x4* vtkMat = transform->GetMatrix();
+
+    // 转换为 std::array 存入 State
+    std::array<double, 16> matData;
+    for (int i = 0; i < 16; i++) {
+        matData[i] = vtkMat->GetData()[i];
+    }
+    m_sharedState->SetModelMatrix(matData);
+}
+
+void MedicalVizService::ResetModelTransform()
+{
+    std::array<double, 16> identity = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1
+    };
+    m_sharedState->SetModelMatrix(identity);
+}
+
+// 世界坐标 -> 模型坐标
+// 如果要做“在移动后的模型上切片”，必须把切片平面的世界坐标通过此逆变换转回模型空间
+//  P w o r l d = M m o d e l × P m o d e l 
+//  P c a m e r a = M v i e w × P w o r l d 
+//  P c a m e r a = M v i e w × M m o d e l × P m o d e l 
+void MedicalVizService::WorldToModel(const double worldPos[3], double modelPos[3])
+{
+    // 获取当前的模型矩阵
+    auto matData = m_sharedState->GetModelMatrix();
+    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New(); 
+	matrix->Identity();
+    matrix->DeepCopy(matData.data());
+
+    // 求逆矩阵
+    matrix->Invert();
+
+    // 变换坐标 (Homogeneous coordinate multiplication)
+    double inPos[4] = { worldPos[0], worldPos[1], worldPos[2], 1.0 };
+    double outPos[4];
+    matrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = InverseMatrix * inPos
+
+    // 归一化 (通常刚体变换 w 会保持 1，在缩放后最好除一下)
+    if (outPos[3] != 0.0) {
+        modelPos[0] = outPos[0] / outPos[3];
+        modelPos[1] = outPos[1] / outPos[3];
+        modelPos[2] = outPos[2] / outPos[3];
+    }
+}
+
+// 模型坐标 -> 世界坐标
+void MedicalVizService::ModelToWorld(const double modelPos[3], double worldPos[3])
+{
+    auto matData = m_sharedState->GetModelMatrix();
+    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    matrix->DeepCopy(matData.data());
+
+    double inPos[4] = { modelPos[0], modelPos[1], modelPos[2], 1.0 };
+    double outPos[4];
+    matrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = Matrix * inPos
+
+    if (outPos[3] != 0.0) {
+        worldPos[0] = outPos[0] / outPos[3];
+        worldPos[1] = outPos[1] / outPos[3];
+        worldPos[2] = outPos[2] / outPos[3];
+    }
+}
+
+vtkProp3D* MedicalVizService::GetMainProp()
+{
+    if (m_currentStrategy) {
+        return m_currentStrategy->GetMainProp();
+    }
+    return nullptr;
+}
+
+void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat) {
+    if (!mat) return;
+    std::array<double, 16> matData;
+    // DeepCopy: vtkMatrix4x4 数据布局与 OpenGL/std::array 兼容 (Row-major vs Col-major 
+    // VTK是Row-major, 但GetData直接给出的数组通常可直接用于glLoadMatrix)
+    // 这里直接拷贝元素
+    for (int i = 0; i < 16; i++) {
+        matData[i] = mat->GetData()[i];
+    }
+    m_sharedState->SetModelMatrix(matData);
 }

@@ -1,7 +1,7 @@
 ﻿#include "StdRenderContext.h"
 #include <vtkCallbackCommand.h>
 #include <vtkInteractorStyleImage.h>
-
+#include <vtkInteractorStyleTrackballActor.h>
 void StdRenderContext::InitInteractor()
 {
     if (m_interactor && !m_interactor->GetInitialized()) {
@@ -58,6 +58,8 @@ StdRenderContext::StdRenderContext()
     m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 0.5);
 	// 监听exit事件
 	m_interactor->AddObserver(vtkCommand::ExitEvent, m_eventCallback, 0.5);
+    // 监听 InteractionEvent，用于在拖拽过程中同步矩阵
+    m_interactor->AddObserver(vtkCommand::InteractionEvent, m_eventCallback, 0.5);
 }
 
 void StdRenderContext::Start()
@@ -133,6 +135,12 @@ void StdRenderContext::ToggleOrientationAxes(bool show)
 
 void StdRenderContext::SetToolMode(ToolMode mode)
 {
+    if (m_toolMode == ToolMode::ModelTransform && m_interactiveService) {
+        vtkProp3D* mainProp = m_interactiveService->GetMainProp();
+        if (mainProp) {
+            mainProp->SetPickable(false); // 还原为不可拾取，避免干扰切片交互
+        }
+    }
     m_toolMode = mode;
 
     // 根据模式开关 Widget
@@ -154,10 +162,32 @@ void StdRenderContext::SetToolMode(ToolMode mode)
             m_angleWidget->Off();
         }
     }
+    if (mode == ToolMode::ModelTransform) {
+        // 切换到 ModelTransform 时，强制开启 Pickable
+        if (m_interactiveService) {
+            vtkProp3D* mainProp = m_interactiveService->GetMainProp();
+            if (mainProp) {
+                mainProp->SetPickable(true); //让 Actor 可被抓取
+            }
+        }
 
-    // 触发渲染刷新 UI
-    // this->Render();
-    m_interactiveService->SetDirty(true);
+        // 切换到“操纵 Actor”的交互风格
+        auto style = vtkSmartPointer<vtkInteractorStyleTrackballActor>::New();
+        m_interactor->SetInteractorStyle(style);
+
+        // TrackballActor 默认是点击哪个 Prop 动哪个。
+        // 或者未来在这里强制指定 Prop。
+        // 目前架构下，IsoSurfaceStrategy 和 VolumeStrategy 的坐标轴(CubeAxes)是不可拾取的，
+        std::cout << "Mode: Model Transform (Rotate/Scale/Translate Model)" << std::endl;
+    }
+    else if (mode == ToolMode::Navigation || mode == ToolMode::DistanceMeasure || mode == ToolMode::AngleMeasure) {
+        // 恢复原来的交互模式 (Camera Trackball 或 Image Slice 2D)
+        // 调用既有的 SetInteractionMode 来复位 Style
+        SetInteractionMode(m_currentMode);
+    }
+
+    // 标记脏状态以刷新 UI
+    if (m_interactiveService) m_interactiveService->SetDirty(true);
 }
 
 void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData)
@@ -203,6 +233,35 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
         return;
     }
 
+    // 快捷键 'M' 切换模型变换模式 
+    if (eventId == vtkCommand::KeyPressEvent) {
+        vtkRenderWindowInteractor* iren = static_cast<vtkRenderWindowInteractor*>(caller);
+        char key = iren->GetKeyCode();
+        if (key == 'm' || key == 'M') {
+            if (m_toolMode == ToolMode::ModelTransform)
+                SetToolMode(ToolMode::Navigation);
+            else
+                SetToolMode(ToolMode::ModelTransform);
+            return; // 处理完毕
+        }
+    }
+
+    // 在模型变换模式下，处理矩阵同步
+    // InteractionEvent 在拖拽过程中持续触发，保证流畅度
+    if (m_toolMode == ToolMode::ModelTransform && eventId == vtkCommand::InteractionEvent) {
+        if (m_interactiveService) {
+            // 获取主模型 (Actor 或 Volume)
+            vtkProp3D* prop = m_interactiveService->GetMainProp();
+            if (prop && prop->GetUserMatrix()) {
+                // 将交互修改后的 UserMatrix 同步回 SharedState
+                m_interactiveService->SyncModelMatrix(prop->GetUserMatrix());
+
+                // 强制标记脏，触发其他窗口（如果有）同步
+                m_interactiveService->MarkDirty();
+            }
+        }
+    }
+
     // 键盘快捷键处理
     if (eventId == vtkCommand::KeyPressEvent) {
         char key = iren->GetKeyCode();
@@ -226,12 +285,15 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller, long unsigned int event
     // 如果当前处于测量模式，屏蔽原有的鼠标左键逻辑（如窗宽窗位调节、十字线拖拽）
     // 让 Widget 能够独占左键点击用于放置测量点
     if (m_toolMode != ToolMode::Navigation) {
-        // 允许滚轮切片，但屏蔽左键操作
-        if (eventId == vtkCommand::LeftButtonPressEvent ||
-            eventId == vtkCommand::MouseMoveEvent ||
-            eventId == vtkCommand::LeftButtonReleaseEvent) {
-            m_eventCallback->SetAbortFlag(1);
-            return;
+        if (m_toolMode != ToolMode::ModelTransform)
+        {
+            // 允许滚轮切片，但屏蔽左键操作
+            if (eventId == vtkCommand::LeftButtonPressEvent ||
+                eventId == vtkCommand::MouseMoveEvent ||
+                eventId == vtkCommand::LeftButtonReleaseEvent) {
+                m_eventCallback->SetAbortFlag(1);
+                return;
+            }
         }
     }
 

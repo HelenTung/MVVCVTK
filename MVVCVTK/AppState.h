@@ -33,7 +33,29 @@ private:
     std::vector<TFNode> m_nodes;
     double m_dataRange[2] = { 0.0, 255.0 }; // 数据标量范围
     bool m_isInteracting = false; // 状态接口
+	// 模型变换矩阵 (4x4 flat array)
+    std::array<double, 16> m_modelMatrix = {
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,1
+    };
 public:
+	// 设置矩阵
+    void SetModelMatrix(const std::array<double, 16>& mat) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_modelMatrix = mat;
+        }
+        NotifyObservers(UpdateFlags::Transform);
+    }
+
+    // 获取矩阵
+    std::array<double, 16> GetModelMatrix() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_modelMatrix;
+    }
+
     SharedInteractionState(){
         // 初始化默认的4个节点
         // Point 0: Min

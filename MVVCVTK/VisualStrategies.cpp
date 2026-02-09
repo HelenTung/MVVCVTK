@@ -9,6 +9,7 @@
 #include <vtkImageProperty.h>
 #include <vtkExtractVOI.h>
 #include <vtkImageResample.h>
+#include <vtkMatrix4x4.h>
 
 // ================= IsoSurfaceStrategy =================
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
@@ -112,6 +113,27 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
             m_isoFilter->SetValue(0, params.isoValue);
         }
     }
+
+	// 响应 UpdateFlags::Transform
+    if ((int)flags & (int)UpdateFlags::Transform) {
+        vtkMatrix4x4* currentMat = m_actor->GetUserMatrix();
+        if (!currentMat) {
+            // 如果本来没有矩阵，才创建新的
+            auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
+            vtkMat->DeepCopy(params.modelMatrix.data());
+            m_actor->SetUserMatrix(vtkMat);
+        }
+        else {
+            // 如果已有矩阵，直接覆写数据，保持指针地址不变
+            currentMat->DeepCopy(params.modelMatrix.data());
+        }
+    }
+}
+
+vtkProp3D* IsoSurfaceStrategy::GetMainProp()
+{
+	if (!m_actor) return m_actor;
+    else return m_actor;
 }
 
 // ================= VolumeStrategy =================
@@ -239,6 +261,25 @@ void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags
         if (params.material.shadeOn) prop->ShadeOn();
         else prop->ShadeOff();
     }
+
+    // 响应变换矩阵
+    if ((int)flags & (int)UpdateFlags::Transform) {
+        vtkMatrix4x4* currentMat = m_volume->GetUserMatrix();
+        if (!currentMat) {
+            auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
+            vtkMat->DeepCopy(params.modelMatrix.data());
+            m_volume->SetUserMatrix(vtkMat);
+        }
+        else {
+            currentMat->DeepCopy(params.modelMatrix.data());
+        }
+        // m_cubeAxes 保持不变
+    }
+}
+
+vtkProp3D* VolumeStrategy::GetMainProp()
+{
+    return m_volume;
 }
 
 // ================= SliceStrategy (2D) =================
@@ -715,6 +756,12 @@ int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {
     return m_referencePlanes->GetPlaneAxis(actor);
 }
 
+vtkProp3D* CompositeStrategy::GetMainProp()
+{
+    if (m_mainStrategy) return m_mainStrategy->GetMainProp();
+	else return nullptr;
+}
+
 void CompositeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
     if (m_referencePlanes) {
@@ -841,6 +888,22 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
 
 void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-	if (!((int)flags & (int)UpdateFlags::Cursor)) return;
-    UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+    if ((int)flags & (int)UpdateFlags::Cursor) {
+        UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+    }
+
+    if ((int)flags & (int)UpdateFlags::Transform) {
+
+        // 从参数中提取矩阵
+        auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
+        vtkMat->DeepCopy(params.modelMatrix.data());
+
+        // 遍历红绿蓝三个平面，应用变换
+        for (int i = 0; i < 3; i++) {
+            if (m_planeActors[i]) {
+                // SetUserMatrix 是 VTK 中将物体从 Model Space 变换到 World Space 的标准方法
+                m_planeActors[i]->SetUserMatrix(vtkMat);
+            }
+        }
+    }
 }

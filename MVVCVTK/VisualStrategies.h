@@ -24,7 +24,7 @@ public:
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
-
+    vtkProp3D* GetMainProp() override;
 private:
     vtkSmartPointer<vtkActor> m_actor;
 	vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
@@ -43,7 +43,7 @@ public:
     void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
-
+    vtkProp3D* GetMainProp() override; //
 private:
 	vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume;
@@ -143,7 +143,7 @@ public:
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     int GetPlaneAxis(vtkActor* actor) override;
-
+    vtkProp3D* GetMainProp() override; //
 private:
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }
 

@@ -5,6 +5,7 @@
 #include "DataConverters.h"
 #include <vtkTable.h>
 #include <map>
+#include <vtkTransform.h>
 
 /**
  * @class VolumeAnalysisService
@@ -68,6 +69,17 @@ public:
         return m_sharedState;
     }
 
+    // 设置模型的位置、旋转、缩放
+    void TransformModel(double translate[3], double rotate[3], double scale[3]);
+    // 重置模型变换
+    void ResetModelTransform();
+    // 坐标转换核心功能
+    // 世界坐标 (渲染窗口中的坐标) -> 模型坐标 (原始数据的物理坐标)
+    void WorldToModel(const double worldPos[3], double modelPos[3]);
+    // 模型坐标 -> 世界坐标
+    void ModelToWorld(const double modelPos[3], double worldPos[3]);
+    vtkProp3D* GetMainProp() override;
+    void SyncModelMatrix(vtkMatrix4x4* mat) override;
 public:
 	// 参数设置接口
     void SetLuxParams(double ambient, double diffuse, double specular, double power, bool shadeOn = false);
