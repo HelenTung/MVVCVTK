@@ -35,10 +35,10 @@ private:
     bool m_isInteracting = false; // 状态接口
 	// 模型变换矩阵 (4x4 flat array)
     std::array<double, 16> m_modelMatrix = {
-    1,0,0,0,
-    0,1,0,0,
-    0,0,1,0,
-    0,0,0,1
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1
     };
 public:
 	// 设置矩阵

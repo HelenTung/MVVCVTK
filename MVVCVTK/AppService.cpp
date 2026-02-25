@@ -31,6 +31,11 @@ MedicalVizService::MedicalVizService(std::shared_ptr<AbstractDataManager> dataMg
     // 实例化具体的 DataManager
     m_dataManager = dataMgr;
     m_sharedState = state; // 保存引用
+
+    m_cachedModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    m_cachedInverseModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    m_cachedModelMatrix->Identity();
+    m_cachedInverseModelMatrix->Identity();
 }
 
 void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) {
@@ -247,15 +252,24 @@ void MedicalVizService::ProcessPendingUpdates()
     params.cursor = { pos[0], pos[1], pos[2] }; // std::array 赋值
 
     // 获取 TF
-    params.tfNodes = m_sharedState->GetTFNodes();
+    if ((int)flags & (int)UpdateFlags::TF) {
+        params.tfNodes = m_sharedState->GetTFNodes();
+    }
+    
+    if ((int)flags & (int)UpdateFlags::IsoValue) {
+        params.isoValue = m_sharedState->GetIsoValue();
+    }
+
     auto range = m_sharedState->GetDataRange();
+    params.material = m_sharedState->GetMaterial();
     params.scalarRange[0] = range[0];
     params.scalarRange[1] = range[1];
-    params.material = m_sharedState->GetMaterial();
-    params.isoValue = m_sharedState->GetIsoValue(); // 传递阈值
-    
-    auto matArray = m_sharedState->GetModelMatrix();
-    params.modelMatrix = matArray;
+
+    if ((int)flags & (int)UpdateFlags::Transform) {
+        params.modelMatrix = m_sharedState->GetModelMatrix();
+        // 确保本地缓存是最新的
+        // 这里可以选择性再刷新一次缓存，或者信任 SyncModelMatrix
+    }
 
     // 泛型调用
     m_currentStrategy->UpdateVisuals(params, flags);
@@ -329,6 +343,9 @@ void MedicalVizService::ResetModelTransform()
         0,0,0,1
     };
     m_sharedState->SetModelMatrix(identity);
+
+	m_cachedModelMatrix->Identity();
+	m_cachedInverseModelMatrix->Identity();
 }
 
 // 世界坐标 -> 模型坐标
@@ -338,19 +355,10 @@ void MedicalVizService::ResetModelTransform()
 //  P c a m e r a = M v i e w × M m o d e l × P m o d e l 
 void MedicalVizService::WorldToModel(const double worldPos[3], double modelPos[3])
 {
-    // 获取当前的模型矩阵
-    auto matData = m_sharedState->GetModelMatrix();
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New(); 
-	matrix->Identity();
-    matrix->DeepCopy(matData.data());
-
-    // 求逆矩阵
-    matrix->Invert();
-
     // 变换坐标 (Homogeneous coordinate multiplication)
     double inPos[4] = { worldPos[0], worldPos[1], worldPos[2], 1.0 };
     double outPos[4];
-    matrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = InverseMatrix * inPos
+    m_cachedInverseModelMatrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = InverseMatrix * inPos
 
     // 归一化 (通常刚体变换 w 会保持 1，在缩放后最好除一下)
     if (outPos[3] != 0.0) {
@@ -363,13 +371,9 @@ void MedicalVizService::WorldToModel(const double worldPos[3], double modelPos[3
 // 模型坐标 -> 世界坐标
 void MedicalVizService::ModelToWorld(const double modelPos[3], double worldPos[3])
 {
-    auto matData = m_sharedState->GetModelMatrix();
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(matData.data());
-
     double inPos[4] = { modelPos[0], modelPos[1], modelPos[2], 1.0 };
     double outPos[4];
-    matrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = Matrix * inPos
+    m_cachedModelMatrix->MultiplyPoint(inPos, outPos); // 执行乘法: outPos = Matrix * inPos
 
     if (outPos[3] != 0.0) {
         worldPos[0] = outPos[0] / outPos[3];
@@ -396,4 +400,9 @@ void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat) {
         matData[i] = mat->GetData()[i];
     }
     m_sharedState->SetModelMatrix(matData);
+
+	// 更新数据后，更新缓存矩阵
+    m_cachedModelMatrix->DeepCopy(mat);
+    m_cachedInverseModelMatrix->DeepCopy(mat);
+    m_cachedInverseModelMatrix->Invert();
 }

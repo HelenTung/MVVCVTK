@@ -48,7 +48,7 @@ struct MaterialParams {
     double specular = 0.2;
     // 高光强度 (1.0~100.0): 决定高光点的聚焦程度。值越大，光斑越小越锋利；值越小，光斑越散
     double specularPower = 10.0;
-    // 全局透明度 (0.0~1.0): 0.0为全透，1.0为不透。主要用于等值面(皮肤/骨骼)的半透明效果
+    // 全局透明度 (0.0~1.0): 0.0为全透，1.0为不透
     double opacity = 1.0;
     // 阴影开关: true 开启
     bool shadeOn = false;
@@ -197,7 +197,7 @@ public:
     virtual void ResetCamera() {
         if (m_renderer) m_renderer->ResetCamera();
     }
-
+        
     // 抽象交互接口 mode: 告知 Context 当前进入了什么模式，Context 决定切换什么动作
     virtual void SetInteractionMode(VizMode mode) = 0;
     // 启动视窗 (Qt 模式下可能为空实现，因为 Qt 主循环接管)
