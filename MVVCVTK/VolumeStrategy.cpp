@@ -19,6 +19,11 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
+    if (m_lastInput == data && m_volume->GetMapper()) {
+        return;
+    }
+    m_lastInput = data;
+
     //  降采样逻辑
     vtkSmartPointer<vtkImageData> inputForMapper = ImageProcessor::ApplyDownsampling(img, 766);
 

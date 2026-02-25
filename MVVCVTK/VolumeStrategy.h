@@ -28,4 +28,5 @@ public:
 private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume;
+    vtkSmartPointer<vtkDataObject> m_lastInput;
 };

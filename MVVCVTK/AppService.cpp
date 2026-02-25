@@ -314,7 +314,7 @@ void MedicalVizService::TransformModel(double translate[3], double rotate[3], do
 {
     // 使用 vtkTransform 构建矩阵
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->PostMultiply(); // 使用后乘，符合常规思维（先旋转再平移等）
+    transform->PostMultiply(); // 使用后乘
 
     transform->RotateX(rotate[0]);
     transform->RotateY(rotate[1]);
