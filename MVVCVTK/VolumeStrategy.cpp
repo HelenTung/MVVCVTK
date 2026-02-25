@@ -56,7 +56,7 @@ void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
 
 void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
-}
+}   
 
 void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {

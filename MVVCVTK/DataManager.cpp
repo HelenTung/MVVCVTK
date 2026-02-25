@@ -30,6 +30,15 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
         return false;
     }
 
+    // --- 先释放旧内存，再分配新内存 ---
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_vtkImage) {
+            m_vtkImage->Initialize(); // 彻底释放旧数据的内存块
+            m_vtkImage = nullptr;     // 置空防止悬垂指针
+        }
+    }
+
     // 创建全新的 vtkImageData 对象 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
