@@ -1,4 +1,5 @@
 ﻿#include <vtkAutoInit.h>
+#include <vtkSMPTools.h>
 
 // 注册核心渲染模块
 VTK_MODULE_INIT(vtkRenderingOpenGL2);
@@ -13,6 +14,8 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "StdRenderContext.h"
 
 int main() {
+	// 初始化 VTK 多线程环境
+    vtkSMPTools::Initialize();
     // 创建共享资源 (仅作为依赖注入传递，不直接操作)
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     //auto sharedDataMgr = std::make_shared<TiffVolumeDataManager>(); // 使用 Tiff

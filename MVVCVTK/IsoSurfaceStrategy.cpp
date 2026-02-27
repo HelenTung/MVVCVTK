@@ -2,9 +2,11 @@
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPolyDataNormals.h>
+#include <thread>
 
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
-    m_actor = vtkSmartPointer<vtkActor>::New();
+    m_actor = vtkSmartPointer<vtkLODActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
@@ -17,7 +19,8 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
     // 静态数据
-    // m_mapper->SetStatic(1);
+    m_actor->SetNumberOfCloudPoints(50000);
+    m_actor->GetProperty()->SetInterpolationToPhong();
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -43,21 +46,31 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
         m_isoFilter->SetInputData(img);
-        m_isoFilter->ComputeNormalsOn(); // 开启法线计算
+        m_isoFilter->ComputeNormalsOff();
+        m_isoFilter->ComputeGradientsOff(); 
 
         // 使用 Connection，VTK 会自动管理更新
         m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
         m_mapper->ScalarVisibilityOff();
 
-        m_cubeAxes->SetBounds(img->GetBounds());
-
-        // 计算初始阈值
+        // 设定初始阈值
         double range[2];
         img->GetScalarRange(range);
-        double initialVal = range[0] + (range[1] - range[0]) * 0.2; // 默认阈值
-
-        // 设置初始参数
+        double initialVal = range[0] + (range[1] - range[0]) * 0.2;
         m_isoFilter->SetValue(0, initialVal);
+
+        // 强制执行一次同步更新
+        m_isoFilter->Update();
+
+        // 切断管线：将结果深拷贝到独立的 PolyData 中
+        auto staticPolyData = vtkSmartPointer<vtkPolyData>::New();
+        staticPolyData->DeepCopy(m_isoFilter->GetOutput());
+
+        // 让 Mapper 直接绑定静态的 PolyData
+        m_mapper->SetInputData(staticPolyData);
+        m_mapper->ScalarVisibilityOff();
+        m_cubeAxes->SetBounds(img->GetBounds());
+
     }
 }
 
@@ -99,11 +112,20 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
         else prop->SetInterpolationToFlat();
     }
 
-    // 响应 UpdateFlags::IsoValue
     if (((int)flags & (int)UpdateFlags::IsoValue)) {
-        // 使用 connection 自动管理更新
         if (m_isoFilter && m_isoFilter->GetInput()) {
-            m_isoFilter->SetValue(0, params.isoValue);
+            // 只有当阈值真的改变时才重新计算
+            if (m_isoFilter->GetValue(0) != params.isoValue) {
+                m_isoFilter->SetValue(0, params.isoValue);
+
+                // 同步执行提取算法
+                m_isoFilter->Update();
+
+                // 将新的结果深拷贝给 Mapper 的静态数据
+                auto staticPolyData = vtkSmartPointer<vtkPolyData>::New();
+                staticPolyData->DeepCopy(m_isoFilter->GetOutput());
+                m_mapper->SetInputData(staticPolyData);
+            }
         }
     }
 

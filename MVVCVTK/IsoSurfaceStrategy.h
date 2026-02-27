@@ -1,6 +1,6 @@
 ﻿#pragma once
 #include "AppInterfaces.h"
-#include <vtkActor.h>
+#include <vtkLODActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
 #include <vtkImageResliceMapper.h>
@@ -26,7 +26,7 @@ public:
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     vtkProp3D* GetMainProp() override;
 private:
-    vtkSmartPointer<vtkActor> m_actor;
+    vtkSmartPointer<vtkLODActor> m_actor;
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter; // 等值面过滤器
     vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
