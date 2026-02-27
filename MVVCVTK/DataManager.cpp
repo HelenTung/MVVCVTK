@@ -34,7 +34,6 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_vtkImage) {
-            m_vtkImage->Initialize(); // 彻底释放旧数据的内存块
             m_vtkImage = nullptr;     // 置空防止悬垂指针
         }
     }
