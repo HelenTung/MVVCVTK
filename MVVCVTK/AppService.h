@@ -17,7 +17,7 @@ private:
 
 public:
     explicit VolumeAnalysisService(std::shared_ptr<AbstractDataManager> dataMgr)
-        : m_dataManager(dataMgr) {
+        : m_dataManager(std::move(dataMgr)) {
     }
 
     // 计算直方图数据

@@ -17,7 +17,7 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
     // 静态数据
-    m_mapper->SetStatic(1);
+    // m_mapper->SetStatic(1);
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
