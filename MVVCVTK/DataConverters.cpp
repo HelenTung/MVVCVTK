@@ -26,30 +26,24 @@ void HistogramConverter::SetParameter(const std::string& key, double value)
 
 vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageData> input) {
     if (!input) return nullptr;
-    double range[2];
-    input->GetScalarRange(range);
-
-    auto accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
-    accumulate->SetInputData(input);
-    accumulate->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
-    accumulate->SetComponentOrigin(range[0], 0, 0);
-    double binWidth = (range[1] - range[0]) / static_cast<double>(m_binCount);
-    accumulate->SetComponentSpacing(binWidth > 0 ? binWidth : 1.0, 0, 0);
-    accumulate->Update();
-
-    vtkImageData* output = accumulate->GetOutput();
-    long long* frequencies = static_cast<long long*>(output->GetScalarPointer());
+    double range[2], binWidth;
+    long long* frequencies = ComputeHistogram(input, range, binWidth);
 
     auto table = vtkSmartPointer<vtkTable>::New();
     auto colX = vtkSmartPointer<vtkFloatArray>::New(); colX->SetName("Intensity");
     auto colY = vtkSmartPointer<vtkFloatArray>::New(); colY->SetName("Frequency");
     auto colLogY = vtkSmartPointer<vtkFloatArray>::New(); colLogY->SetName("LogFrequency");
 
+    // 预分配避免 InsertNextValue 反复扩容
+    colX->SetNumberOfTuples(m_binCount);
+    colY->SetNumberOfTuples(m_binCount);
+    colLogY->SetNumberOfTuples(m_binCount);
+
     for (int i = 0; i < m_binCount; i++) {
         float val = static_cast<float>(frequencies[i]);
-        colX->InsertNextValue(range[0] + i * binWidth);
-        colY->InsertNextValue(val);
-        colLogY->InsertNextValue(std::log(val + 1.0f));
+        colX->SetValue(i, static_cast<float>(range[0] + i * binWidth));
+        colY->SetValue(i, val);
+        colLogY->SetValue(i, std::log(val + 1.0f));
     }
     table->AddColumn(colX); table->AddColumn(colY); table->AddColumn(colLogY);
     return table;
@@ -58,19 +52,10 @@ vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageDa
 
 void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
+    double range[2], binWidth;
+    // 复用 ComputeHistogram，不重复计算
+    long long* freqs = ComputeHistogram(input, range, binWidth);
 
-    // 直方图频率
-    double range[2];
-    input->GetScalarRange(range);
-    auto acc = vtkSmartPointer<vtkImageAccumulate>::New();
-    acc->SetInputData(input);
-    acc->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
-    acc->SetComponentOrigin(range[0], 0, 0);
-    double binWidth = (range[1] - range[0]) / static_cast<double>(m_binCount);
-    acc->SetComponentSpacing(binWidth > 0 ? binWidth : 1.0, 0, 0);
-    acc->Update();
-
-    long long* freqs = static_cast<long long*>(acc->GetOutput()->GetScalarPointer());
     std::vector<float> logHist(m_binCount);
     float maxLog = 0.0f;
     for (int i = 0; i < m_binCount; ++i) {
@@ -108,4 +93,19 @@ void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input,
     writer->SetFileName(filePath.c_str());
     writer->SetInputData(canvas);
     writer->Write();
+}
+
+long long* HistogramConverter::ComputeHistogram(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
+{
+    input->GetScalarRange(outRange);
+    // 流式连接：input 没变时 VTK pipeline 不会重复计算
+    if (!m_accumulate)
+		m_accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
+    m_accumulate->SetInputData(input);
+    m_accumulate->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
+    m_accumulate->SetComponentOrigin(outRange[0], 0, 0);
+    outBinWidth = (outRange[1] - outRange[0]) / static_cast<double>(m_binCount);
+    m_accumulate->SetComponentSpacing(outBinWidth > 0 ? outBinWidth : 1.0, 0, 0);
+    m_accumulate->Update();
+    return static_cast<long long*>(m_accumulate->GetOutput()->GetScalarPointer());
 }

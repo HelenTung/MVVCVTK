@@ -46,8 +46,8 @@ int main() {
     auto range = sharedState->GetDataRange();
     auto val = (-range[0]  + range[1]) * 0.6;
     serviceA->SetIsoThreshold(val + range[0]);
-    //serviceA->SetIsoThreshold(0.1);
-    //image->SaveHistogramImage("1.png");
+    // serviceA->SetIsoThreshold(0.1);
+    // image->SaveHistogramImage("1.png");
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
     
