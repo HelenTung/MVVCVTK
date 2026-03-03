@@ -6,7 +6,7 @@
 #include <vtkTable.h>
 #include <map>
 #include <vtkTransform.h>
-
+#include <mutex>
 /**
  * @class VolumeAnalysisService
  * @brief 专注于数据分析的服务，负责直方图计算、统计导出等，与渲染解耦。
@@ -43,6 +43,7 @@ class MedicalVizService : public AbstractInteractiveService,
 public std::enable_shared_from_this<MedicalVizService>{
 private:
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
+    std::mutex m_strategyCacheMutex;
     std::shared_ptr<SharedInteractionState> m_sharedState;
     // 矩阵缓存，避免高频分配内存
     vtkSmartPointer<vtkMatrix4x4> m_cachedModelMatrix;
