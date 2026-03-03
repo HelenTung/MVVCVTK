@@ -102,16 +102,6 @@ void MedicalVizService::LoadFileAsync(const std::string& path, std::function<voi
                 if (auto img = self->m_dataManager->GetVtkImage()) {
                     double range[2];
                     img->GetScalarRange(range);
-
-                    auto strategy = StrategyFactory::CreateStrategy(self->m_pendingVizMode);
-                    strategy->SetInputData(img);  // 预热 Pipeline（不触发渲染）
-
-                    // 存入 prefetch cache（需要加锁保护）
-                    {
-                        std::lock_guard<std::mutex> lk(self->m_strategyCacheMutex);
-                        self->m_strategyCache[self->m_pendingVizMode] = strategy;
-                    }
-
                     self->m_sharedState->NotifyDataReady(range[0], range[1]);
                 }
             }
@@ -181,8 +171,6 @@ void MedicalVizService::ResetCursorCenter()
 
 std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode mode)
 {
-    std::lock_guard<std::mutex> lk(m_strategyCacheMutex);  // 加锁
-
     // 检查cache
 	auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end())
@@ -204,7 +192,6 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
 
 void MedicalVizService::ClearCache()
 {
-    std::lock_guard<std::mutex> lk(m_strategyCacheMutex);  // 加锁
     m_strategyCache.clear();
     m_currentStrategy = nullptr;
 }
