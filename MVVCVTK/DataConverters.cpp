@@ -16,7 +16,6 @@ vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkIma
     m_filter->ComputeNormalsOn();
     m_filter->SetValue(0, m_isoValue);
     m_filter->Update();
-    // 共享数组内存，仅复制元数据，代价远小于 DeepCopy
     auto result = vtkSmartPointer<vtkPolyData>::New();
     result->ShallowCopy(m_filter->GetOutput());
     return result;
