@@ -16,9 +16,7 @@ vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkIma
     m_filter->ComputeNormalsOn();
     m_filter->SetValue(0, m_isoValue);
     m_filter->Update();
-    auto result = vtkSmartPointer<vtkPolyData>::New();
-    result->ShallowCopy(m_filter->GetOutput());
-    return result;
+    return m_filter->GetOutput();
 }
 
 void HistogramConverter::SetParameter(const std::string& key, double value)

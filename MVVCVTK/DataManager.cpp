@@ -192,7 +192,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
 
     // --- 数据提交 (Back Buffer 策略) ---
     auto newImage = vtkSmartPointer<vtkImageData>::New();
-    newImage->DeepCopy(output); // 深拷贝，断开与 Reader 的连接
+    newImage->ShallowCopy(output);
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
