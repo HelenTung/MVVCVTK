@@ -75,6 +75,37 @@ void MedicalVizService::LoadFile(const std::string& path) {
     }
 }
 
+void MedicalVizService::LoadFileAsync(const std::string& path, std::function<void(bool success)> onComplete)
+{
+    // 获取 weak_ptr，防止 Service 在加载完成前被销毁
+    std::weak_ptr<MedicalVizService> weakSelf =
+        std::static_pointer_cast<MedicalVizService>(shared_from_this());
+
+    // 异步执行 I/O
+    m_dataManager->AsyncLoadData(path, [weakSelf, onComplete](bool success) {
+
+        // 只做线程安全的状态修改，不碰 VTK 渲染管线
+        if (auto self = weakSelf.lock()) {
+            if (success) {
+                // 更新标量范围（GetVtkImage 内有 mutex 保护，线程安全）
+                if (self->m_dataManager->GetVtkImage()) {
+                    double range[2];
+                    self->m_dataManager->GetVtkImage()->GetScalarRange(range);
+                    self->m_sharedState->SetScalarRange(range[0], range[1]);
+                }
+                // 清除旧缓存
+                self->ClearCache();
+                self->ResetCursorCenter();
+                // 标记 dirty，通知主线程渲染循环：数据已就绪，需要 ShowIsoSurface
+                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
+                self->m_needsDataRefresh = true;
+            }
+        }
+        // 通知调用方
+        if (onComplete) onComplete(success);
+        });
+}
+
 void MedicalVizService::ShowVolume() {
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(VizMode::Volume);
@@ -222,6 +253,11 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis) 
 
 void MedicalVizService::ProcessPendingUpdates()
 {
+    if (m_needsDataRefresh.exchange(false)) {
+        ShowIsoSurface(); // 在主线程构建 VTK 管线，安全
+        return;
+    }
+
     if (!m_needsSync || !m_currentStrategy) return;
 
 	// 获取并清空待处理标记

@@ -47,6 +47,7 @@ private:
     // 矩阵缓存，避免高频分配内存
     vtkSmartPointer<vtkMatrix4x4> m_cachedModelMatrix;
     vtkSmartPointer<vtkMatrix4x4> m_cachedInverseModelMatrix;
+    std::atomic<bool> m_needsDataRefresh{ false };
 
 public:
     MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
@@ -55,6 +56,7 @@ public:
 
     // --- 核心渲染业务 ---
     void LoadFile(const std::string& path);
+    void LoadFileAsync(const std::string& path,std::function<void(bool success)> onComplete = nullptr); 
     void ShowVolume();
     void ShowIsoSurface();
     void ShowSlice(VizMode sliceMode);
@@ -91,7 +93,7 @@ public:
     void SetTransferFunction(const std::vector<TFNode>& nodes);
 
 
-    private:
+private:
     void OnStateChanged();
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void ResetCursorCenter();

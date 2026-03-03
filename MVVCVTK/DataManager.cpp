@@ -14,6 +14,7 @@ RawVolumeDataManager::RawVolumeDataManager() {
 }
 
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
+    m_isLoading = true;
     // 解析文件名
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
@@ -64,7 +65,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
     }
-
+    m_isLoading = false;
     return true;
 }
 
@@ -79,6 +80,7 @@ TiffVolumeDataManager::TiffVolumeDataManager() {
 }
 
 bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
+	m_isLoading = true;
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
@@ -200,7 +202,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     int dims[3];
     m_vtkImage->GetDimensions(dims);
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
-
+	m_isLoading = false;
     return true;
 }
 

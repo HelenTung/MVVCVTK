@@ -12,6 +12,7 @@
 #include <string>
 #include <atomic>
 #include <array>
+#include <thread>
 
 // --- 可视化模式枚举 ---
 enum class VizMode { 
@@ -90,6 +91,21 @@ public:
     virtual ~AbstractDataManager() = default;
     virtual bool LoadData(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
+    
+    // callback(success) 在后台线程回调，调用方需自行做线程安全处理
+    virtual void AsyncLoadData(const std::string& filePath,
+        std::function<void(bool success)> callback) {
+        std::thread([this, filePath, callback]() {
+            bool ok = this->LoadData(filePath);
+            if (callback) callback(ok);
+            }).detach();
+    }
+
+    // 查询是否正在加载
+    bool IsLoading() const { return m_isLoading.load(); }
+
+protected:
+    std::atomic<bool> m_isLoading{ false };
 };
 
 // --- 数据转换抽象类 (Template) ---
