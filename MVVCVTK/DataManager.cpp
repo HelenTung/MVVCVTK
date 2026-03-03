@@ -7,7 +7,7 @@
 #include <vtkTIFFReader.h>
 #include <algorithm>
 #include <iostream>
-#include <vtkStringArray.h>
+#include <vtkStringArray.h> 
 
 RawVolumeDataManager::RawVolumeDataManager() {
     m_vtkImage = vtkSmartPointer<vtkImageData>::New();

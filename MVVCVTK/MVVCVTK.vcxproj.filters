@@ -72,6 +72,9 @@
     <ClInclude Include="ImageProcessor.h">
       <Filter>头文件\Utils</Filter>
     </ClInclude>
+    <ClInclude Include="MemMappedFile.h">
+      <Filter>头文件\Utils</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">
@@ -108,6 +111,9 @@
       <Filter>源文件\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="ImageProcessor.cpp">
+      <Filter>源文件\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="MemMappedFile.cpp">
       <Filter>源文件\Utils</Filter>
     </ClCompile>
   </ItemGroup>
