@@ -1,6 +1,4 @@
 ﻿#include "DataConverters.h"
-//#include <vtkMarchingCubes.h>
-#include <vtkFlyingEdges3D.h>
 #include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
 #include <vtkIntArray.h>
@@ -14,14 +12,14 @@ void IsoSurfaceConverter::SetParameter(const std::string& key, double value) {
 }
 
 vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkImageData> input) {
-	// 使用 FlyingEdges3D 算法提取等值面
-    auto mc = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    mc->SetInputData(input);
-    mc->ComputeNormalsOn();
-    mc->SetValue(0, m_isoValue);
-
-    mc->Update(); // 立即执行计算
-    return mc->GetOutput();
+    m_filter->SetInputData(input);
+    m_filter->ComputeNormalsOn();
+    m_filter->SetValue(0, m_isoValue);
+    m_filter->Update();
+    // 共享数组内存，仅复制元数据，代价远小于 DeepCopy
+    auto result = vtkSmartPointer<vtkPolyData>::New();
+    result->ShallowCopy(m_filter->GetOutput());
+    return result;
 }
 
 void HistogramConverter::SetParameter(const std::string& key, double value)
