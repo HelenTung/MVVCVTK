@@ -62,12 +62,6 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         // 强制执行一次同步更新
         m_isoFilter->Update();
 
-        // 切断管线：将结果深拷贝到独立的 PolyData 中
-        auto staticPolyData = vtkSmartPointer<vtkPolyData>::New();
-        staticPolyData->DeepCopy(m_isoFilter->GetOutput());
-
-        // 让 Mapper 直接绑定静态的 PolyData
-        m_mapper->SetInputData(staticPolyData);
         m_mapper->ScalarVisibilityOff();
         m_cubeAxes->SetBounds(img->GetBounds());
 
