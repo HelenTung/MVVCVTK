@@ -5,13 +5,6 @@
 #include <mutex>
 #include <array>
 
-// 定义控制节点结构
-struct RenderNode {
-    double position; // 0.0 - 1.0 (归一化位置) 阈值
-    double opacity;  // 0.0 - 1.0 透明度
-    double r, g, b;  // 颜色 lux
-};
-
 // 定义观察者回调类型
 using ObserverCallback = std::function<void(UpdateFlags)>;
 
@@ -82,9 +75,12 @@ public:
 
     // 设置数据范围 (用于将归一化节点映射到真实标量)
     void SetScalarRange(double min, double max) {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_dataRange[0] = min;
-        m_dataRange[1] = max;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_dataRange[0] = min;
+            m_dataRange[1] = max;
+        }
+		NotifyObservers(UpdateFlags::TF); // 数据范围改变，可能需要更新 TF 映射
     }
 
     std::array<double, 2> GetDataRange() const {
