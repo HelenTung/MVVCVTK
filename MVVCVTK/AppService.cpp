@@ -289,7 +289,7 @@ void MedicalVizService::ProcessPendingUpdates()
 
     // 获取 TF
     if ((int)flags & (int)UpdateFlags::TF) {
-        params.tfNodes = m_sharedState->GetTFNodes();
+        m_sharedState->GetTFNodes(params.tfNodes); // 单次拷贝到目标
     }
     
     if ((int)flags & (int)UpdateFlags::IsoValue) {
@@ -364,9 +364,7 @@ void MedicalVizService::TransformModel(double translate[3], double rotate[3], do
 
     // 转换为 std::array 存入 State
     std::array<double, 16> matData;
-    for (int i = 0; i < 16; i++) {
-        matData[i] = vtkMat->GetData()[i];
-    }
+    std::memcpy(matData.data(), vtkMat->GetData(), 16 * sizeof(double));
     m_sharedState->SetModelMatrix(matData);
 }
 
@@ -429,12 +427,7 @@ vtkProp3D* MedicalVizService::GetMainProp()
 void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat) {
     if (!mat) return;
     std::array<double, 16> matData;
-    // DeepCopy: vtkMatrix4x4 数据布局与 OpenGL/std::array 兼容 (Row-major vs Col-major 
-    // VTK是Row-major, 但GetData直接给出的数组通常可直接用于glLoadMatrix)
-    // 这里直接拷贝元素
-    for (int i = 0; i < 16; i++) {
-        matData[i] = mat->GetData()[i];
-    }
+    std::memcpy(matData.data(), mat->GetData(), 16 * sizeof(double));
     m_sharedState->SetModelMatrix(matData);
 
 	// 更新数据后，更新缓存矩阵

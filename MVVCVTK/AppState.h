@@ -89,9 +89,9 @@ public:
         NotifyObservers(UpdateFlags::TF);
     }
 	// 获取节点列表
-    const std::vector<TFNode> GetTFNodes() const { 
+    void GetTFNodes(std::vector<TFNode>& dest) const {
         std::lock_guard<std::mutex> lock(m_mutex); 
-        return m_nodes; 
+		dest = m_nodes;
     }
 
     // 阈值接口

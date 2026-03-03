@@ -49,22 +49,16 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_isoFilter->ComputeNormalsOff();
         m_isoFilter->ComputeGradientsOff(); 
 
-        // 使用 Connection，VTK 会自动管理更新
-        m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
-        m_mapper->ScalarVisibilityOff();
-
         // 设定初始阈值
         double range[2];
         img->GetScalarRange(range);
         double initialVal = range[0] + (range[1] - range[0]) * 0.2;
         m_isoFilter->SetValue(0, initialVal);
 
-        // 强制执行一次同步更新
-        m_isoFilter->Update();
-
+        // 使用 Connection，VTK 会自动管理更新
+        m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
         m_mapper->ScalarVisibilityOff();
         m_cubeAxes->SetBounds(img->GetBounds());
-
     }
 }
 
@@ -111,14 +105,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
             // 只有当阈值真的改变时才重新计算
             if (m_isoFilter->GetValue(0) != params.isoValue) {
                 m_isoFilter->SetValue(0, params.isoValue);
-
-                // 同步执行提取算法
-                m_isoFilter->Update();
-
-                // 将新的结果深拷贝给 Mapper 的静态数据
-                auto staticPolyData = vtkSmartPointer<vtkPolyData>::New();
-                staticPolyData->DeepCopy(m_isoFilter->GetOutput());
-                m_mapper->SetInputData(staticPolyData);
+				m_mapper->Modified(); // 标记 Mapper 需要更新
             }
         }
     }
