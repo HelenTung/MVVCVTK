@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iostream>
 #include <vtkStringArray.h> 
+#include "MemMappedFile.h"
 
 RawVolumeDataManager::RawVolumeDataManager() {
     m_vtkImage = vtkSmartPointer<vtkImageData>::New();
@@ -48,12 +49,40 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
 
     // 读取数据到新内存
     size_t totalVoxels = static_cast<size_t>(newDims[0]) * static_cast<size_t>(newDims[1]) * static_cast<size_t>(newDims[2]);
-    float* vtkDataPtr = static_cast<float*>(newImage->GetScalarPointer());
+    // float* vtkDataPtr = static_cast<float*>(newImage->GetScalarPointer());
+    size_t expectedBytes = totalVoxels * sizeof(float);
+    float* dst = static_cast<float*>(newImage->GetScalarPointer());
 
-    std::ifstream file(filePath, std::ios::binary);
-    if (!file.is_open()) return false;
-    file.read(reinterpret_cast<char*>(vtkDataPtr), totalVoxels * sizeof(float));
-    file.close();
+    // 使用 MemMappedFile 替代 std::ifstream读取
+    MemMappedFile mmf;
+    if (mmf.open(filePath)) {
+        //   - 文件够大 → 只取前 expectedBytes
+        //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
+        size_t copyBytes = (mmf.size() < expectedBytes) ? mmf.size() : expectedBytes;
+
+        if (mmf.size() < expectedBytes) {
+            std::cerr << "[Warn] File size (" << mmf.size()
+                << ") < expected (" << expectedBytes
+                << "). Partial load, remainder zeroed." << std::endl;
+        }
+
+        std::memcpy(dst, mmf.data(), copyBytes);
+        // mmf 析构时自动 close()
+    }
+    else {
+        // mmap 打开失败，fallback 到原始 ifstream
+        std::cerr << "[Warn] MemMappedFile open failed, fallback to ifstream: "
+            << filePath << std::endl;
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file.is_open()) {
+            m_isLoading = false;
+            return false;
+        }
+        file.read(reinterpret_cast<char*>(dst),
+            static_cast<std::streamsize>(expectedBytes));
+        file.close();
+    }
+
 
     newImage->Modified();
  
