@@ -14,7 +14,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "StdRenderContext.h"
 
 int main() {
-	// 初始化 VTK 多线程环境
+    // 初始化 VTK 多线程环境
     vtkSMPTools::Initialize();
     // 创建共享资源 (仅作为依赖注入传递，不直接操作)
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
@@ -39,18 +39,28 @@ int main() {
     contextA->SetWindowPosition(50, 50);
     contextA->ToggleOrientationAxes(true);
 
-    // 加载数据
-    serviceA->LoadFile("D:\\CT-1209\\data\\1536X1536X1536.raw");
+    // [CHANGED] 异步加载数据，不阻塞主线程，窗口立即弹出
+    // 原始：serviceA->LoadFile("D:\\CT-1209\\data\\1536X1536X1536.raw");
+    serviceA->LoadFileAsync(
+        "D:\\CT-1209\\data\\1536X1536X1536.raw",
+        [&sharedState, serviceA](bool success) {
+            // !! 后台线程 !! 
+            // B/C/D/E 的刷新已由 State 广播自动处理，这里只处理 A 的个性化设置
+            if (success) {
+                auto range = sharedState->GetDataRange(); // 有锁，线程安全
+                serviceA->SetIsoThreshold((-range[0] + range[1]) * 0.6 + range[0]);
+            }
+        }
+    );
 
-    // 设置模式
-    auto range = sharedState->GetDataRange();
-    auto val = (-range[0]  + range[1]) * 0.6;
-    serviceA->SetIsoThreshold(val + range[0]);
-    // serviceA->SetIsoThreshold(0.1);
-    // image->SaveHistogramImage("1.png");
+    // [CHANGED] 阈值设置移入异步回调，此处删除原来的 3 行：
+    // auto range = sharedState->GetDataRange();
+    // auto val = (-range[0] + range[1]) * 0.6;
+    // serviceA->SetIsoThreshold(val + range[0]);
+
     contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
     serviceA->Show3DPlanes(VizMode::CompositeIsoSurface);
-    
+
     // --- 窗口 E: 复合视图 (体渲染 + 切片平面) ---
     auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
     auto contextE = std::make_shared<StdRenderContext>();
@@ -65,10 +75,10 @@ int main() {
         // 位置(0.0-1.0), 透明度,  R,   G,   B
            {0.0,            0.0,  0.0, 0.0, 0.0}, // 0.0 表示完全透明，隐藏背景
            {0.5,            0.0,  0.0, 0.5, 0.0}, // 0.0 表示完全透明，过滤噪声
-           {0.85,            0.8,  0, 0.5, 0}, // 中间部分
-           {1.0,            1.0,  0, 0.5, 0}  // 高亮部分不透明
+           {0.85,           0.8,    0, 0.5, 0  }, // 中间部分
+           {1.0,            1.0,    0, 0.5, 0  }  // 高亮部分不透明
     };
-    
+
     contextE->SetInteractionMode(VizMode::CompositeVolume);
     serviceE->Show3DPlanes(VizMode::CompositeVolume);
     serviceE->SetTransferFunction(volTF);

@@ -64,7 +64,8 @@ enum class UpdateFlags : int {
 	Material = 1 << 3, // 仅材质参数改变 (0x08) 8
     Interaction = 1 << 4, // 仅交互状态改变 0x16 16
     Transform = 1 << 5, // 变换矩阵改变 32
-	All = Cursor | TF | IsoValue | Material | Interaction | Transform// 全部改变  1 2 4 8 16 = 31
+    DataReady = 1 << 6,   // 数据加载完成，需要重建渲染管线
+	All = Cursor | TF | IsoValue | Material | Interaction | Transform // 全部改变  1 2 4 8 16 = 31
 };
 
 // --- 渲染参数结构体 ---

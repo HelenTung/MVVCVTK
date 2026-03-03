@@ -41,6 +41,18 @@ private:
         0,0,0,1
     };
 public:
+    // 通知数据已经准备完毕
+    void NotifyDataReady(double rangeMin, double rangeMax) {
+        // 更新数据范围（这本来就是 State 该存的数据）
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_dataRange[0] = rangeMin;
+            m_dataRange[1] = rangeMax;
+        }
+        // 复用现有的广播链路，通知所有 Service
+        NotifyObservers(UpdateFlags::DataReady);
+    }
+
 	// 设置矩阵
     void SetModelMatrix(const std::array<double, 16>& mat) {
         {

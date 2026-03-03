@@ -48,6 +48,7 @@ private:
     vtkSmartPointer<vtkMatrix4x4> m_cachedModelMatrix;
     vtkSmartPointer<vtkMatrix4x4> m_cachedInverseModelMatrix;
     std::atomic<bool> m_needsDataRefresh{ false };
+	VizMode m_pendingVizMode = VizMode::IsoSurface;  // 默认等值面，记录当前模式位，避免重复设置同一模式
 
 public:
     MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,

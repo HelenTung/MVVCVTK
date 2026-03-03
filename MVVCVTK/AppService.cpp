@@ -50,6 +50,17 @@ void MedicalVizService::Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmar
         auto func = [weakSelf](UpdateFlags flags) {
             // Lambda 内部标准写法：先 lock 再用
             if (auto self = weakSelf.lock()) {
+				// 响应数据就绪事件，强制全量更新并刷新数据
+                if ((int)flags & (int)UpdateFlags::DataReady) {
+                    self->ClearCache();
+                    self->ResetCursorCenter();
+                    self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
+                    self->m_needsDataRefresh = true;
+                    // 注意：不调 OnStateChanged()，避免与 m_needsDataRefresh 路径冲突
+                    return;
+                }
+
+				// 其他事件（交互、位置等）只标记对应的更新类型，等待主线程渲染循环处理
                 int oldVal = self->m_pendingFlags.load();
                 while (!self->m_pendingFlags.compare_exchange_weak(oldVal, oldVal | static_cast<int>(flags))); // 位或更新待处理标记
                 self->OnStateChanged(); // 执行下层方法时，自动调用 OnStateChanged 标记脏数据
@@ -88,17 +99,11 @@ void MedicalVizService::LoadFileAsync(const std::string& path, std::function<voi
         if (auto self = weakSelf.lock()) {
             if (success) {
                 // 更新标量范围（GetVtkImage 内有 mutex 保护，线程安全）
-                if (self->m_dataManager->GetVtkImage()) {
+                if (auto img = self->m_dataManager->GetVtkImage()) {
                     double range[2];
-                    self->m_dataManager->GetVtkImage()->GetScalarRange(range);
-                    self->m_sharedState->SetScalarRange(range[0], range[1]);
+                    img->GetScalarRange(range);
+                    self->m_sharedState->NotifyDataReady(range[0], range[1]);
                 }
-                // 清除旧缓存
-                self->ClearCache();
-                self->ResetCursorCenter();
-                // 标记 dirty，通知主线程渲染循环：数据已就绪，需要 ShowIsoSurface
-                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
-                self->m_needsDataRefresh = true;
             }
         }
         // 通知调用方
@@ -107,6 +112,7 @@ void MedicalVizService::LoadFileAsync(const std::string& path, std::function<voi
 }
 
 void MedicalVizService::ShowVolume() {
+    m_pendingVizMode = VizMode::Volume;
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(VizMode::Volume);
     SwitchStrategy(strategy);
@@ -114,8 +120,8 @@ void MedicalVizService::ShowVolume() {
 }
 
 void MedicalVizService::ShowIsoSurface() {
+    m_pendingVizMode = VizMode::IsoSurface;
     if (!m_dataManager->GetVtkImage()) return;
-
     // 使用 Converter 进行数据处理 (Model -> Logic -> New Model)
     auto strategy = GetStrategy(VizMode::IsoSurface);
     SwitchStrategy(strategy);
@@ -123,6 +129,7 @@ void MedicalVizService::ShowIsoSurface() {
 }
 
 void MedicalVizService::ShowSlice(VizMode sliceMode) {
+    m_pendingVizMode = sliceMode;
     if (!m_dataManager->GetVtkImage()) return;
     auto strategy = GetStrategy(sliceMode);
     SwitchStrategy(strategy);
@@ -131,8 +138,8 @@ void MedicalVizService::ShowSlice(VizMode sliceMode) {
 
 void MedicalVizService::Show3DPlanes(VizMode renderMode) 
 {
+    m_pendingVizMode = renderMode;
     if (!m_dataManager->GetVtkImage()) return;
-
     // 使用 Converter 进行数据处理 (Model -> Logic -> New Model)
     auto strategy = GetStrategy(renderMode);
     SwitchStrategy(strategy);
@@ -187,9 +194,6 @@ void MedicalVizService::ClearCache()
 {
     m_strategyCache.clear();
     m_currentStrategy = nullptr;
-    if (m_renderer) {
-        m_renderer->RemoveAllViewProps();
-    }
 }
 
 void MedicalVizService::OnStateChanged() {    
@@ -254,7 +258,20 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis) 
 void MedicalVizService::ProcessPendingUpdates()
 {
     if (m_needsDataRefresh.exchange(false)) {
-        ShowIsoSurface(); // 在主线程构建 VTK 管线，安全
+        // 按各自记录的模式恢复
+        switch (m_pendingVizMode) {
+        case VizMode::IsoSurface:
+            ShowIsoSurface(); break;
+        case VizMode::Volume:
+            ShowVolume(); break;
+        case VizMode::SliceAxial:
+        case VizMode::SliceCoronal:
+        case VizMode::SliceSagittal:
+            ShowSlice(m_pendingVizMode); break;
+        case VizMode::CompositeVolume:
+        case VizMode::CompositeIsoSurface:
+            Show3DPlanes(m_pendingVizMode); break;
+        }
         return;
     }
 
