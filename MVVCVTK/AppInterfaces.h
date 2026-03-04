@@ -181,6 +181,10 @@ public:
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
     virtual void SyncModelMatrix(vtkMatrix4x4* mat) {}
+
+    // ── 渲染外观配置（运行时，与事件驱动类同级）────────────────────────
+    // 写 SharedState → Observer 广播 Visibility → ProcessPendingUpdates 执行
+    virtual void SetElementVisible(uint32_t flagBit, bool show) {}
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -229,6 +233,7 @@ public:
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
     virtual void ToggleOrientationAxes(bool show) {}
+    virtual void SetElementVisible(uint32_t flagBit, bool show) {}
     virtual void SetRendererBackground(const BackgroundColor& bg) {
         if (m_renderer)
             m_renderer->SetBackground(bg.r, bg.g, bg.b);

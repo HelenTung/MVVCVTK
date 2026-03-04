@@ -76,6 +76,7 @@ enum class UpdateFlags : int {
     DataReady = 1 << 6,  // 数据加载成功    (0x40)
     LoadFailed = 1 << 7,  // 数据加载失败    (0x80)
     Background = 1 << 8,  // 背景色改变      (0x100)
+	Visibility = 1 << 9,  // 可见性改变      (0x200)
     All = Cursor | TF | IsoValue | Material | Interaction | Transform
 };
 
@@ -93,6 +94,13 @@ inline bool HasFlag(UpdateFlags flags, UpdateFlags bit) {
     return (static_cast<int>(flags) & static_cast<int>(bit)) != 0;
 }
 
+// 可视元素位定义
+namespace VisFlags {
+    constexpr uint32_t ClipPlanes = 1 << 0;
+    constexpr uint32_t Crosshair = 1 << 1;
+    constexpr uint32_t RulerAxes = 1 << 2;
+}
+
 // --- 渲染参数结构体（Strategy 的唯一输入，不含 VTK 指针）---
 struct RenderParams {
     std::array<int, 3>     cursor = { 0, 0, 0 };
@@ -104,6 +112,10 @@ struct RenderParams {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };
     BackgroundColor        background;
+    uint32_t visibilityMask = 
+        VisFlags::ClipPlanes
+        | VisFlags::Crosshair
+        | VisFlags::RulerAxes; // 默认全部显示
 };
 
 // --- 切片朝向枚举 ---

@@ -243,6 +243,26 @@ public:
         return { m_cursorPos[0], m_cursorPos[1], m_cursorPos[2] };
     }
 
+    // ── 显隐状态 ──────────────────────────────────────────────────────────
+    void SetElementVisible(uint32_t flagBit, bool show) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            const uint32_t oldMask = m_visibilityMask;
+            if (show)
+                m_visibilityMask |= flagBit;
+            else
+                m_visibilityMask &= ~flagBit;
+            changed = (m_visibilityMask != oldMask);
+        }
+        if (changed) NotifyObservers(UpdateFlags::Visibility);
+    }
+
+    uint32_t GetVisibilityMask() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_visibilityMask;
+    }
+
     // ── Observer 管理 ─────────────────────────────────────────────
     void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
         if (!owner || !cb) return;
@@ -269,6 +289,9 @@ private:
     std::array<double, 16> m_modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };
+    uint32_t m_visibilityMask = VisFlags::ClipPlanes
+        | VisFlags::Crosshair
+        | VisFlags::RulerAxes; // 默认全部可见
     std::vector<ObserverEntry> m_observers;
 
     // ── NotifyObservers：先快照回调列表（持锁），再无锁调用 ──

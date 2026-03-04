@@ -107,11 +107,11 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
 
 void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if ((int)flags & (int)UpdateFlags::Cursor) {
+    if (HasFlag(flags, UpdateFlags::Cursor)) {
         UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
     }
 
-    if ((int)flags & (int)UpdateFlags::Transform) {
+    if (HasFlag(flags, UpdateFlags::Transform)) {
         auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
         vtkMat->DeepCopy(params.modelMatrix.data());
 
@@ -119,6 +119,13 @@ void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlag
             if (m_planeActors[i]) {
                 m_planeActors[i]->SetUserMatrix(vtkMat);
             }
+        }
+    }
+
+    if (HasFlag(flags, UpdateFlags::Visibility)) {
+        const int vis = (params.visibilityMask & VisFlags::ClipPlanes) ? 1 : 0;
+        for (int i = 0; i < 3; i++) {
+            if (m_planeActors[i]) m_planeActors[i]->SetVisibility(vis);
         }
     }
 }

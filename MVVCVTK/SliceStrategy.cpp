@@ -279,6 +279,12 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
             imgProp->SetDiffuse(params.material.diffuse);
         }
     }
+
+    if (HasFlag(flags, UpdateFlags::Visibility)) {
+        const int vis = (params.visibilityMask & VisFlags::Crosshair) ? 1 : 0;
+        if (m_vLineActor) m_vLineActor->SetVisibility(vis);
+        if (m_hLineActor) m_hLineActor->SetVisibility(vis);
+    }
 }
 
 void SliceStrategy::UpdatePlanePosition() {

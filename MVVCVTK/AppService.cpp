@@ -409,6 +409,8 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
     if (HasFlag(flags, UpdateFlags::Background))
         p.background = m_sharedState->GetBackground();
 
+    if (HasFlag(flags, UpdateFlags::Visibility))
+		p.visibilityMask = m_sharedState->GetVisibilityMask();
     return p;
 }
 
@@ -525,6 +527,11 @@ vtkProp3D* MedicalVizService::GetMainProp()
 void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat)
 {
     m_transformService->SyncModelMatrix(mat);
+}
+
+void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
+{
+    m_sharedState->SetElementVisible(flagBit, show);
 }
 
 void MedicalVizService::TransformModel(

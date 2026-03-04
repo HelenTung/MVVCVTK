@@ -41,7 +41,7 @@ public:
     void BindService(std::shared_ptr<AbstractAppService> service) override;
     void ToggleOrientationAxes(bool show) override;
     void SetToolMode(ToolMode mode);
-
+	void SetElementVisible(uint32_t flagBit, bool show) override;
 protected:
     void HandleVTKEvent(vtkObject* caller,
         long unsigned int eventId,

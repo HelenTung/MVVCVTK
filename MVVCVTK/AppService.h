@@ -81,6 +81,7 @@ public:
     int  GetPlaneAxis(vtkActor* actor)                              override;
     vtkProp3D* GetMainProp()                                        override;
     void SyncModelMatrix(vtkMatrix4x4* mat)                         override;
+    void SetElementVisible(uint32_t flagBit, bool show)             override;
 
     // 模型变换扩展（委托 VolumeTransformService）
     void TransformModel(double translate[3], double rotate[3], double scale[3]);

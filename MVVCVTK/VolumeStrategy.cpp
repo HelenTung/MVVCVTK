@@ -121,6 +121,12 @@ void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags
             currentMat->DeepCopy(params.modelMatrix.data());
         }
     }
+
+    if (HasFlag(flags, UpdateFlags::Visibility)) {
+        if (m_cubeAxes)
+            m_cubeAxes->SetVisibility(
+                (params.visibilityMask & VisFlags::RulerAxes) ? 1 : 0);
+    }
 }
 
 vtkProp3D* VolumeStrategy::GetMainProp()
