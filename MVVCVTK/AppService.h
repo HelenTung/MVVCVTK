@@ -1,16 +1,25 @@
 ﻿#pragma once
+// =====================================================================
+// AppService.h
+//
+//   MedicalVizService 是"渲染业务调度层"，职责为：
+//     【前处理】BindService 之后、数据到达之前：登记配置意图
+//     【后处理-重建】DataReady 到达后：重建 VTK 渲染管线
+//     【后处理-同步】普通交互事件：增量同步参数到 Strategy
+//
+//   坐标变换职责已拆出到 VolumeTransformService。
+//   分析职责已有 VolumeAnalysisService。
+//
+// =====================================================================
 
 #include "AppInterfaces.h"
 #include "AppState.h"
 #include "DataConverters.h"
+#include "VolumeTransformService.h"
 #include <vtkTable.h>
 #include <map>
 #include <vtkTransform.h>
 #include <mutex>
-/**
- * @class VolumeAnalysisService
- * @brief 专注于数据分析的服务，负责直方图计算、统计导出等，与渲染解耦。
- */
 class VolumeAnalysisService {
 private:
     std::shared_ptr<AbstractDataManager> m_dataManager;
@@ -20,83 +29,130 @@ public:
         : m_dataManager(std::move(dataMgr)) {
     }
 
-    // 计算直方图数据
     vtkSmartPointer<vtkTable> GetHistogramData(int binCount = 2048) {
         if (!m_dataManager || !m_dataManager->GetVtkImage()) return nullptr;
-
         auto converter = std::make_shared<HistogramConverter>();
         converter->SetParameter("BinCount", (double)binCount);
         return converter->Process(m_dataManager->GetVtkImage());
     }
 
-    // 保存直方图图片
     void SaveHistogramImage(const std::string& filePath, int binCount = 2048) {
         if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
-
         auto converter = std::make_shared<HistogramConverter>();
         converter->SetParameter("BinCount", (double)binCount);
         converter->SaveHistogramImage(m_dataManager->GetVtkImage(), filePath);
     }
 };
 
-class MedicalVizService : public AbstractInteractiveService,
-public std::enable_shared_from_this<MedicalVizService>{
+// ─────────────────────────────────────────────────────────────────────
+// MedicalVizService
+// ─────────────────────────────────────────────────────────────────────
+class MedicalVizService
+    : public AbstractInteractiveService
+    , public std::enable_shared_from_this<MedicalVizService>
+{
+    // ================================================================
+    // 【私有成员】
+    // ================================================================
 private:
+    // 策略缓存：key = VizMode，value = 已构建的策略实例
+    //  策略构建（含 VTK pipeline 初始化）开销较大，
+    //   同一模式切换回来时直接复用，避免重建。
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    // 矩阵缓存，避免高频分配内存
-    vtkSmartPointer<vtkMatrix4x4> m_cachedModelMatrix;
-    vtkSmartPointer<vtkMatrix4x4> m_cachedInverseModelMatrix;
+    // 坐标变换子服务（依赖注入，单一职责）
+    std::unique_ptr<VolumeTransformService> m_transformService;
+    VizMode m_pendingVizMode = VizMode::IsoSurface;
     std::atomic<bool> m_needsDataRefresh{ false };
-	VizMode m_pendingVizMode = VizMode::IsoSurface;  // 默认等值面，记录当前模式位，避免重复设置同一模式
 
+    // ================================================================
+    // 【公共接口】
+    // ================================================================
 public:
     MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state);
-    void Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) override;
 
-    // --- 核心渲染业务 ---
-    void LoadFile(const std::string& path);
-    void LoadFileAsync(const std::string& path,std::function<void(bool success)> onComplete = nullptr); 
-    void ShowVolume();
-    void ShowIsoSurface();
-    void ShowSlice(VizMode sliceMode);
-    void Show3DPlanes(VizMode renderMode);
+    // ── 初始化（由 BindService 触发，必须在 shared_ptr 完全构建后调用）──
+    void Initialize(vtkSmartPointer<vtkRenderWindow> win,
+        vtkSmartPointer<vtkRenderer> ren) override;
 
-    // --- 交互业务,具体实现 ---
-    int GetPlaneAxis(vtkActor* actor) override;
+    void PreInit_SetVizMode(VizMode mode);
+
+    // 设置光照参数（写入 SharedState::Material，DataReady 后 Strategy 会读取）
+    void PreInit_SetLuxParams(double ambient, double diffuse,
+        double specular, double power, bool shadeOn = false);
+
+    // 设置全局透明度
+    void PreInit_SetOpacity(double opacity);
+
+    // 设置传输函数节点（体渲染颜色映射）
+    void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes);
+
+    // 设置等值面阈值
+    void PreInit_SetIsoThreshold(double val);
+
+    void LoadFileAsync(const std::string& path,
+        std::function<void(bool success)> onComplete = nullptr);
+
+    // ================================================================
+    // 【交互接口实现】（AbstractInteractiveService 虚函数实现）
+    //
+    // 这些方法仍然保留，供 StdRenderContext 在事件处理中调用
+    // ================================================================
     void UpdateInteraction(int delta) override;
     void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) override;
-	void ProcessPendingUpdates() override;
+    void ProcessPendingUpdates() override;
     std::array<int, 3> GetCursorPosition() override;
     void SetInteracting(bool val) override;
+    int  GetPlaneAxis(vtkActor* actor) override;
 
-    std::shared_ptr<SharedInteractionState> GetSharedState() {
-        return m_sharedState;
-    }
-
-    // 设置模型的位置、旋转、缩放
-    void TransformModel(double translate[3], double rotate[3], double scale[3]);
-    // 重置模型变换
-    void ResetModelTransform();
-    // 坐标转换核心功能
-    // 世界坐标 (渲染窗口中的坐标) -> 模型坐标 (原始数据的物理坐标)
-    void WorldToModel(const double worldPos[3], double modelPos[3]);
-    // 模型坐标 -> 世界坐标
-    void ModelToWorld(const double modelPos[3], double worldPos[3]);
+    // ── 模型变换（委托给 VolumeTransformService）──────────────────
     vtkProp3D* GetMainProp() override;
     void SyncModelMatrix(vtkMatrix4x4* mat) override;
-public:
-	// 参数设置接口
-    void SetLuxParams(double ambient, double diffuse, double specular, double power, bool shadeOn = false);
-    void SetOpacity(double opacity);
-    void SetIsoThreshold(double val);
-    void SetTransferFunction(const std::vector<TFNode>& nodes);
+    void TransformModel(double translate[3], double rotate[3], double scale[3]);
+    void ResetModelTransform();
+    void WorldToModel(const double worldPos[3], double modelPos[3]);
+    void ModelToWorld(const double modelPos[3], double worldPos[3]);
 
+    // 获取共享状态（供 main.cpp 在回调中安全访问）
+    std::shared_ptr<SharedInteractionState> GetSharedState() { return m_sharedState; }
 
+    // ================================================================
+    // 【后向兼容别名】
+    //   保留原始名称作为 PreInit_* 的转发，避免大规模修改调用方。
+    //   新代码应使用 PreInit_* 版本，旧代码仍然可用。
+    // ================================================================
+    void SetLuxParams(double a, double d, double s, double p, bool sh = false) {
+        PreInit_SetLuxParams(a, d, s, p, sh);
+    }
+    void SetOpacity(double o) { PreInit_SetOpacity(o); }
+    void SetIsoThreshold(double v) { PreInit_SetIsoThreshold(v); }
+    void SetTransferFunction(const std::vector<TFNode>& n) { PreInit_SetTransferFunction(n); }
+    // Show* 系列：仅登记模式，不立即重建管线
+    void ShowIsoSurface() { PreInit_SetVizMode(VizMode::IsoSurface); }
+    void ShowVolume() { PreInit_SetVizMode(VizMode::Volume); }
+    void ShowSlice(VizMode m) { PreInit_SetVizMode(m); }
+    void Show3DPlanes(VizMode m) { PreInit_SetVizMode(m); }
+
+    // ================================================================
+    // 【私有方法】
+    // ================================================================
 private:
-    void OnStateChanged();
-    std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
-    void ResetCursorCenter();
-    void ClearCache();
+    // ── 后处理路径 A：数据到达后重建渲染管线 ──────────────────────
+    void PostData_RebuildPipeline();
+
+    // ── 后处理路径 B：普通状态增量同步到 Strategy ─────────────────
+    void PostData_SyncStateToStrategy();
+
+    // ── 构建 RenderParams 纯数据对象 ──────────────────────────────
+    RenderParams BuildRenderParams(UpdateFlags flags) const;
+
+    // ── Strategy 管理 ──────────────────────────────────────────────
+    std::shared_ptr<AbstractVisualStrategy> GetOrCreateStrategy(VizMode mode);
+    void ClearStrategyCache();
+
+    // ── 辅助 ───────────────────────────────────────────────────────
+    void ResetCursorToCenter();
+    // 标记"State 已变更，需要在下一帧同步到 Strategy"
+    void MarkNeedsSync();
 };
