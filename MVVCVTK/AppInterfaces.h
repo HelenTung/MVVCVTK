@@ -13,24 +13,25 @@
 #include <atomic>
 #include <array>
 #include <thread>
+#include <functional>
 
 // --- 可视化模式枚举 ---
-enum class VizMode { 
-    Volume, 
-    IsoSurface, 
+enum class VizMode {
+    Volume,
+    IsoSurface,
     SliceAxial,
     SliceCoronal,
     SliceSagittal,
-	CompositeVolume, // 3D 体渲染 + 切片平面
-	CompositeIsoSurface  // 3D 等值面 + 切片平面
+    CompositeVolume,        // 3D 体渲染 + 切片平面
+    CompositeIsoSurface     // 3D 等值面 + 切片平面
 };
 
 // --- 交互工具枚举 ---
 enum class ToolMode {
     Navigation,         // 默认漫游/切片浏览
     DistanceMeasure,    // 距离测量
-    AngleMeasure,        // 角度测量
-	ModelTransform      // 模型变换（旋转/缩放/平移）  
+    AngleMeasure,       // 角度测量
+    ModelTransform      // 模型变换（旋转/缩放/平移）
 };
 
 // --- 传输函数节点结构体 ---
@@ -43,56 +44,53 @@ struct TFNode {
 struct MaterialParams {
     // 环境光系数 (0.0~1.0): 决定阴影区域的最低亮度，值越大阴影越亮
     double ambient = 0.1;
-    // 漫反射系数 (0.0~1.0): 决定物体接受光照后的固有颜色亮度，主要受光照角度影响
+    // 漫反射系数 (0.0~1.0): 决定物体接受光照后的固有颜色亮度
     double diffuse = 0.7;
-    // 镜面反射系数 (0.0~1.0): 决定高光的亮度，值越大物体越像金属/塑料
+    // 镜面反射系数 (0.0~1.0): 决定高光的亮度
     double specular = 0.2;
-    // 高光强度 (1.0~100.0): 决定高光点的聚焦程度。值越大，光斑越小越锋利；值越小，光斑越散
+    // 高光强度 (1.0~100.0): 决定高光点的聚焦程度
     double specularPower = 10.0;
-    // 全局透明度 (0.0~1.0): 0.0为全透，1.0为不透
+    // 全局透明度 (0.0~1.0): 0.0 为全透，1.0 为不透
     double opacity = 1.0;
-    // 阴影开关: true 开启
-    bool shadeOn = false;
+    // 阴影开关
+    bool   shadeOn = false;
 };
 
-// 定义更新类型枚举
+// --- 更新类型位掩码（可组合）---
 enum class UpdateFlags : int {
     None = 0,
-    Cursor = 1 << 0,  // 仅位置改变 (0x01) 1 
-    TF = 1 << 1,      // 仅颜色/透明度改变 (0x02) 2
-    IsoValue = 1 << 2, // 仅阈值改变 0x04 4 
-	Material = 1 << 3, // 仅材质参数改变 (0x08) 8
-    Interaction = 1 << 4, // 仅交互状态改变 0x16 16
-    Transform = 1 << 5, // 变换矩阵改变 32
-    DataReady = 1 << 6,   // 数据加载完成，需要重建渲染管线
-	All = Cursor | TF | IsoValue | Material | Interaction | Transform // 全部改变  1 2 4 8 16 = 31
+    Cursor = 1 << 0,  // 仅位置改变 (0x01)
+    TF = 1 << 1,  // 仅颜色/透明度改变 (0x02)
+    IsoValue = 1 << 2,  // 仅阈值改变 (0x04)
+    Material = 1 << 3,  // 仅材质参数改变 (0x08)
+    Interaction = 1 << 4,  // 仅交互状态改变 (0x10)
+    Transform = 1 << 5,  // 变换矩阵改变 (0x20)
+    DataReady = 1 << 6,  // 数据加载完成，需要重建渲染管线
+    All = Cursor | TF | IsoValue | Material | Interaction | Transform
 };
 
-// --- 渲染参数结构体 ---
+// --- 渲染参数结构体（Strategy 的唯一输入，不含 VTK 指针）---
 struct RenderParams {
-    std::array<int, 3> cursor; // x, y, z
-    // 传输函数纯数据
-    std::vector<TFNode> tfNodes;
-    // 数据标量范围 (用于将相对位置映射为真实值)
-    double scalarRange[2];
-    // 材质
-    MaterialParams material;
-    // 阈值
-	double isoValue;
-    // 模型变换矩阵 (4x4 flat array)
-    std::array<double, 16> modelMatrix;
+    std::array<int, 3>     cursor = { 0, 0, 0 };  // 光标体素坐标
+    std::vector<TFNode>    tfNodes;                      // 传输函数节点
+    double                 scalarRange[2] = { 0, 255 }; // 数据标量范围
+    MaterialParams         material;                     // 材质参数
+    double                 isoValue = 0.0;            // 等值面阈值
+    std::array<double, 16> modelMatrix = {               // 模型变换矩阵
+        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
+    };
 };
 
-// 	AXIAL(0, 0, 1)  CORONAL(0, 1, 0)  SAGITTAL(1, 0, 0)
+// 切片朝向枚举（AXIAL=2/Z, CORONAL=1/Y, SAGITTAL=0/X）
+// AXIAL(0,0,1)  CORONAL(0,1,0)  SAGITTAL(1,0,0)
 enum class Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
 
-// --- 数据管理抽象类 ---
 class AbstractDataManager {
 public:
     virtual ~AbstractDataManager() = default;
     virtual bool LoadData(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
-    
+
     // callback(success) 在后台线程回调，调用方需自行做线程安全处理
     virtual void AsyncLoadData(const std::string& filePath,
         std::function<void(bool success)> callback) {
@@ -109,7 +107,6 @@ protected:
     std::atomic<bool> m_isLoading{ false };
 };
 
-// --- 数据转换抽象类 (Template) ---
 template <typename InputT, typename OutputT>
 class AbstractDataConverter {
 public:
@@ -118,75 +115,107 @@ public:
     virtual void SetParameter(const std::string& key, double value) {}
 };
 
-// --- 视图原子操作抽象类 ---
 class AbstractVisualStrategy {
 public:
     virtual ~AbstractVisualStrategy() = default;
 
-    // 注入数据 (通用接口)
+    // 注入数据（通用接口）
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
-    // 原子操作：上台 (挂载到 Renderer)
+    // 原子操作：上台（挂载到 Renderer）
     virtual void Attach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // 原子操作：下台 (从 Renderer 移除)
+    // 原子操作：下台（从 Renderer 移除）
     virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    // 视图专属的相机配置 (不做改变)
+    // 视图专属的相机配置（默认空实现）
     virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
 
-    // --- 通用更新接口 ---
     // 策略根据 Params 自行决定是否更新、更新哪里
-    virtual void UpdateVisuals(const RenderParams& params, UpdateFlags flags = UpdateFlags::All) {}
-    virtual int GetPlaneAxis(vtkActor* actor) { return -1; };
+    virtual void UpdateVisuals(const RenderParams& params,
+        UpdateFlags flags = UpdateFlags::All) {
+    }
+    virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
     virtual int GetNavigationAxis() const { return -1; }
-    // 获取当前策略的主渲染对象 (用于模型变换)
+    // 获取当前策略的主渲染对象（用于模型变换）
     virtual vtkProp3D* GetMainProp() { return nullptr; }
 };
 
-// --- 服务集成抽象类 ---
+
 class AbstractAppService {
 protected:
-    std::shared_ptr<AbstractDataManager> m_dataManager;
+    std::shared_ptr<AbstractDataManager>    m_dataManager;
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
-    vtkSmartPointer<vtkRenderer> m_renderer;
-    vtkSmartPointer<vtkRenderWindow> m_renderWindow;
-    std::atomic<bool> m_isDirty{ false }; // 脏数据
-	std::atomic<bool> m_needsSync{ false }; //  逻辑脏标记：表示 sharedState 变了，但还没同步给 strategy
-	std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 待处理的更新类型
+    vtkSmartPointer<vtkRenderer>            m_renderer;
+    vtkSmartPointer<vtkRenderWindow>        m_renderWindow;
+    std::atomic<bool> m_isDirty{ false };                              // 渲染脏标记
+    std::atomic<bool> m_needsSync{ false };                              // 逻辑脏标记
+    std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 待处理更新类型
 
 public:
     virtual ~AbstractAppService() = default;
 
-    virtual void Initialize(vtkSmartPointer<vtkRenderWindow> win, vtkSmartPointer<vtkRenderer> ren) {
+    virtual void Initialize(vtkSmartPointer<vtkRenderWindow> win,
+        vtkSmartPointer<vtkRenderer> ren)
+    {
         m_renderWindow = win;
         m_renderer = ren;
     }
-    // 允许Context在渲染循环中调用此方法来同步业务逻辑,处理挂起的逻辑更新 (Lazy Update 接口)
-    virtual void ProcessPendingUpdates() {};
 
-    // 供 Context 查询状态
+    // 允许 Context 在渲染循环中调用此方法同步业务逻辑（Lazy Update 入口）
+    virtual void ProcessPendingUpdates() {}
+
+    // 供 Context 查询渲染脏标记
     bool IsDirty() const { return m_isDirty; }
 
-    // 供 Context 重置状态
+    // 供 Context 重置渲染脏标记（与原版保持一致，StdRenderContext 使用 SetDirty(false)）
     void SetDirty(bool val) { m_isDirty = val; }
 
-	// 供 context 标记脏数据
+    // 供 Context / Service 内部标记需要渲染
     void MarkDirty() { m_isDirty = true; }
 
-	// 访问数据管理器
-    std::shared_ptr<AbstractDataManager> GetDataManager() {
-        return m_dataManager;
-    }
-    // 核心调度逻辑 (在 .cpp 中实现)
+    // 供 Context 访问数据管理器
+    std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
+
+    // 核心 Strategy 切换（在 AppService.cpp 中实现）
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
-    
-// --- 抽象控制层接口 ---
+
+// ─────────────────────────────────────────────────────────────────────
+// IPreInitService — 前处理接口
+//
+// 职责：数据到达之前，登记所有与数据无关的配置意图。
+//   • 所有方法只写 SharedState（内部有 mutex），零 VTK 操作
+//   • 可在 BindService 之后、LoadFileAsync 之前的任意时刻调用
+//   • MedicalVizService 同时继承此接口和 AbstractInteractiveService
+//
+// 设计原则：
+//   • 纯虚接口，不引入任何成员变量，不影响现有继承链
+//   • 调用方可通过 IPreInitService* 使用前处理接口，
+//     与 AbstractInteractiveService* 的交互接口完全分离
+// ─────────────────────────────────────────────────────────────────────
+class IPreInitService {
+public:
+    virtual ~IPreInitService() = default;
+
+    // 登记目标可视化模式（DataReady 后按此模式重建 VTK 管线）
+    virtual void PreInit_SetVizMode(VizMode mode) = 0;
+
+    // 写入光照/材质参数 → SharedState::Material（触发 UpdateFlags::Material）
+    virtual void PreInit_SetLuxParams(double ambient, double diffuse,
+        double specular, double power, bool shadeOn = false) = 0;
+
+    // 写入全局透明度 → MaterialParams.opacity
+    virtual void PreInit_SetOpacity(double opacity) = 0;
+
+    // 写入体渲染传输函数节点（触发 UpdateFlags::TF）
+    virtual void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
+
+    // 写入等值面阈值（触发 UpdateFlags::IsoValue，含微小变化检测）
+    virtual void PreInit_SetIsoThreshold(double val) = 0;
+};
+
 class AbstractRenderContext {
 protected:
-    // VTK 核心渲染管线
-    vtkSmartPointer<vtkRenderer> m_renderer;
+    vtkSmartPointer<vtkRenderer>     m_renderer;
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
-
-    // 持有业务服务的基类指针 (多态)
     std::shared_ptr<AbstractAppService> m_service;
 
 public:
@@ -197,10 +226,9 @@ public:
         m_renderWindow->AddRenderer(m_renderer);
     }
 
-    // 绑定业务服务
+    // 绑定业务服务，触发 Initialize
     virtual void BindService(std::shared_ptr<AbstractAppService> service) {
         m_service = service;
-        // 初始化 Service 内部的 VTK 对象
         if (m_service) {
             m_service->Initialize(m_renderWindow, m_renderer);
         }
@@ -214,19 +242,19 @@ public:
     virtual void ResetCamera() {
         if (m_renderer) m_renderer->ResetCamera();
     }
-        
-    // 抽象交互接口 mode: 告知 Context 当前进入了什么模式，Context 决定切换什么动作
+
+    // 告知 Context 当前进入了什么模式，Context 决定切换什么交互器
     virtual void SetInteractionMode(VizMode mode) = 0;
-    // 启动视窗 (Qt 模式下可能为空实现，因为 Qt 主循环接管)
+
+    // 启动视窗消息循环
     virtual void Start() = 0;
 
-public:
-    // 设置窗口大小 (像素)
+    // 设置窗口大小（像素）
     virtual void SetWindowSize(int width, int height) {
         if (m_renderWindow) m_renderWindow->SetSize(width, height);
     }
 
-    // 设置窗口屏幕坐标 (左上角为原点)
+    // 设置窗口屏幕坐标（左上角为原点）
     virtual void SetWindowPosition(int x, int y) {
         if (m_renderWindow) m_renderWindow->SetPosition(x, y);
     }
@@ -236,44 +264,47 @@ public:
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
 
-    // 开关世界坐标系显示接口
+    // 开关世界坐标系显示
     virtual void ToggleOrientationAxes(bool show) {}
+
 protected:
-    // 静态回调函数转发器
-    // clientData 就是在构造函数里 SetClientData(this) 传进去的指针
+    // 静态 VTK 事件转发器（clientData = this 指针）
+    // StdRenderContext 构造函数中用 SetClientData(this) 注册
     static void DispatchVTKEvent(vtkObject* caller, long unsigned int eventId,
-        void* clientData, void* callData) {
+        void* clientData, void* callData)
+    {
         auto* context = static_cast<AbstractRenderContext*>(clientData);
-        if (context) {
-            context->HandleVTKEvent(caller, eventId, callData);
-        }
+        if (context) context->HandleVTKEvent(caller, eventId, callData);
     }
 
-    // 子类重写此方法处理具体事件
-    virtual void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) {}
+    // 子类重写此方法处理具体 VTK 事件（StdRenderContext 覆盖）
+    virtual void HandleVTKEvent(vtkObject* caller,
+        long unsigned int eventId, void* callData) {
+    }
 };
 
-// --- 抽象交互服务接口 (继承自 AbstractAppService) ---
 class AbstractInteractiveService : public AbstractAppService {
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    // 这里放那些交互接口，默认空实现
+    // 滚轮/键盘切片导航
     virtual void UpdateInteraction(int value) {}
+
+    // 获取切片平面轴（Context 拾取 Actor 后调用）
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
 
-    // Context 不需要自己算坐标，直接把拾取到的世界坐标扔给 Service,axis 参数，-1 表示更新所有轴，0/1/2 表示只更新特定轴
+    // 将世界坐标同步为光标位置（axis=-1 全轴更新，0/1/2 单轴更新）
     virtual void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) {}
 
-    // 返回标准类型，而不是具体 State 对象
-    virtual std::array<int, 3> GetCursorPosition() { return { 0,0,0 }; }
+    // 获取当前光标体素坐标
+    virtual std::array<int, 3> GetCursorPosition() { return { 0, 0, 0 }; }
 
-    // 状态交互接口
-    virtual void SetInteracting(bool val) {};
+    // 设置交互状态（拖拽中 = true，停止 = false）
+    virtual void SetInteracting(bool val) {}
 
-    // 获取主渲染对象
+    // 获取主渲染 Prop（供坐标变换使用）
     virtual vtkProp3D* GetMainProp() { return nullptr; }
 
-    // 将 VTK 的变换矩阵同步回业务 State
+    // 将 VTK 变换矩阵回写到 SharedState
     virtual void SyncModelMatrix(vtkMatrix4x4* mat) {}
 };
