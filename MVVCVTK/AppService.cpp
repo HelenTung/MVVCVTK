@@ -32,8 +32,9 @@ void AbstractAppService::SwitchStrategy(
 MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager>    dataMgr,
     std::shared_ptr<SharedInteractionState> state)
-    : m_sharedState(state)
-    , m_transformService(std::make_unique<VolumeTransformService>(state))
+    : m_sharedState(std::move(state))
+    , m_transformService(std::make_unique<VolumeTransformService>(m_sharedState))
+    , m_cancelFlag(std::make_shared<std::atomic<bool>>(false))
 {
     m_dataManager = std::move(dataMgr);
 }
@@ -41,7 +42,8 @@ MedicalVizService::MedicalVizService(
 MedicalVizService::~MedicalVizService()
 {
     // 通知加载线程尽快退出
-    m_cancelRequested = true;
+    if (m_cancelFlag)
+        m_cancelFlag->store(true);
 
     // 等待加载线程完成，避免 detach 导致的 UB
     std::lock_guard<std::mutex> lk(m_loadMutex);
@@ -80,14 +82,14 @@ void MedicalVizService::Initialize(
                 return;
             }
 
-            // ── LoadFailed（NEW）：后台线程，只设标记 ──────────────
+            // ── LoadFailed：后台线程，只设标记 ──────────────
             if (HasFlag(flags, UpdateFlags::LoadFailed)) {
                 self->m_needsLoadFailed = true;
                 self->m_isDirty = true;
                 return;
             }
 
-            // ── Background（NEW）：直接写渲染器（无 pipeline 操作）──
+            // ── Background：直接写渲染器（无 pipeline 操作）──
             // 背景色写渲染器本身是线程安全的（VTK 渲染器内部有锁），
             // 但为一致性仍通过标记延迟到主线程
             if (HasFlag(flags, UpdateFlags::Background)) {
@@ -179,7 +181,7 @@ LoadState MedicalVizService::GetLoadState() const
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::CancelLoad()
 {
-    m_cancelRequested = true;
+    m_cancelFlag->store(true);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -187,7 +189,7 @@ void MedicalVizService::CancelLoad()
 //
 // 【线程安全】
 //   - 加载在独立线程执行；通过 std::packaged_task + future 管理生命周期
-//   - m_cancelRequested 是 atomic<bool>，加载函数内部可自检退出
+//   - m_cancelFlag 是 share 类型的 atomic<bool>，加载函数内部可自检退出
 //   - dataMgr / sharedState 值捕获保证生命周期（shared_ptr 引用计数）
 //   - onComplete 在后台线程调用，只允许操作 SharedState
 //   - 加载成功 → NotifyDataReady；失败 → NotifyLoadFailed
@@ -202,13 +204,12 @@ void MedicalVizService::LoadFileAsync(
         return;
     }
 
-    m_cancelRequested = false;
+    m_cancelFlag->store(false);
     m_sharedState->SetLoadState(LoadState::Loading);
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
-    auto cancelFlag = std::shared_ptr<std::atomic<bool>>(
-        &m_cancelRequested, [](std::atomic<bool>*) {});  // non-owning alias
+    auto cancelFlag = m_cancelFlag;
 
     // 用 packaged_task 包装，future 用于析构等待
     std::packaged_task<void()> task([dataMgr, sharedState, path, onComplete,
@@ -239,12 +240,12 @@ void MedicalVizService::LoadFileAsync(
                 }
                 else {
                     std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
-                    sharedState->NotifyLoadFailed();  // ← NEW
+                    sharedState->NotifyLoadFailed();  
                 }
             }
             else {
                 std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
-                sharedState->NotifyLoadFailed();  // ← NEW
+                sharedState->NotifyLoadFailed();  
             }
 
             if (onComplete) onComplete(ok);
@@ -286,7 +287,7 @@ void MedicalVizService::ProcessPendingUpdates()
         return; // 本帧只做重建，同步留到下帧
     }
 
-    // 4. 普通事件增量同步
+    // 普通事件增量同步
     PostData_SyncStateToStrategy();
 }
 
@@ -368,7 +369,7 @@ void MedicalVizService::PostData_HandleLoadFailed()
     // 重置刷新标记，防止残留 DataReady 触发错误重建
     m_needsDataRefresh = false;
 
-    // 通知渲染器刷新（显示空场景或占位符背景）
+    // 标脏使渲染器刷新空场景
     m_isDirty = true;
 }
 
@@ -379,15 +380,15 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
-    // cursor、scalarRange、material 几乎每帧都需要，统一读取成本低
-    {
+    if (HasFlag(flags, UpdateFlags::Cursor)) {
         auto pos = m_sharedState->GetCursorPosition();
         p.cursor = { pos[0], pos[1], pos[2] };
     }
-    {
+    if (HasFlag(flags, UpdateFlags::TF)) {
         auto range = m_sharedState->GetDataRange();
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
+        m_sharedState->GetTFNodes(p.tfNodes);
     }
 
     if (HasFlag(flags, UpdateFlags::Material))

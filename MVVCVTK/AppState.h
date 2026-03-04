@@ -49,7 +49,7 @@ public:
         NotifyObservers(UpdateFlags::LoadFailed);
     }
 
-    // ── 加载状态 (LoadState 枚举，NEW) ────────────────────────────
+    // ── 加载状态 (LoadState 枚举，) ────────────────────────────
     void SetLoadState(LoadState s) {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_loadState = s;
@@ -90,7 +90,7 @@ public:
                 flags |= UpdateFlags::IsoValue;
             }
 
-            // 背景色（NEW）
+            // 背景色
             if (cfg.hasBgColor &&
                 (std::abs(m_background.r - cfg.bgColor.r) > 1e-6 ||
                     std::abs(m_background.g - cfg.bgColor.g) > 1e-6 ||
@@ -261,11 +261,11 @@ private:
     int                    m_cursorPos[3] = { 0, 0, 0 };
     double                 m_isoValue = 0.0;
     MaterialParams         m_material;
-    BackgroundColor        m_background;                   // ← NEW
+    BackgroundColor        m_background;                   
     std::vector<TFNode>    m_nodes;
     double                 m_dataRange[2] = { 0.0, 255.0 };
     bool                   m_isInteracting = false;
-    LoadState              m_loadState = LoadState::Idle; // ← NEW
+    LoadState              m_loadState = LoadState::Idle; 
     std::array<double, 16> m_modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };

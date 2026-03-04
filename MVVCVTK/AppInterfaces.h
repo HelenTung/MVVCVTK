@@ -11,7 +11,7 @@
 //   AbstractVisualStrategy     — 渲染策略
 //   AbstractAppService         — 基础服务
 //   IPreInitService            — 前处理配置
-//   IDataLoaderService         — 数据加载（NEW: 解耦加载职责）
+//   IDataLoaderService         — 数据加载
 //   AbstractInteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
 // =====================================================================
@@ -144,7 +144,7 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// IDataLoaderService — 数据加载接口（NEW）
+// IDataLoaderService — 数据加载接口
 //
 // 将加载职责从 MedicalVizService 中分离，加载与渲染解耦。
 // 任意持有此接口的调用方均可发起加载，无需关心渲染细节。

@@ -33,7 +33,6 @@ public:
     MedicalVizService(std::shared_ptr<AbstractDataManager>    dataMgr,
         std::shared_ptr<SharedInteractionState> state);
     ~MedicalVizService();
-
     void Initialize(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer>     ren) override;
 
@@ -125,7 +124,7 @@ private:
     std::atomic<bool> m_needsDataRefresh{ false };
     std::atomic<bool> m_needsCacheClear{ false };
     std::atomic<bool> m_needsLoadFailed{ false };   // 
-    std::atomic<bool> m_cancelRequested{ false };   // 尽力取消标记
+    std::shared_ptr<std::atomic<bool>> m_cancelFlag;   // 尽力取消标记
 
     // 加载线程 future（用于析构时 join，避免 detach UB）
     std::future<void>  m_loadFuture;                //
