@@ -32,7 +32,7 @@ void AbstractAppService::SwitchStrategy(
 MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager>    dataMgr,
     std::shared_ptr<SharedInteractionState> state)
-    : m_sharedState(std::move(state))
+    : m_sharedState(state)
     , m_transformService(std::make_unique<VolumeTransformService>(state))
 {
     m_dataManager = std::move(dataMgr);
