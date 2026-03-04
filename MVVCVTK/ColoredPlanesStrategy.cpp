@@ -34,7 +34,7 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (!img) return;
     m_imageData = img;
 
-    double bounds[6];
+    double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     m_imageData->GetBounds(bounds);
 
     // 根据数据边界定义每个平面的大小
@@ -57,10 +57,10 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     if (!m_imageData) return;
 
-    double bounds[6];
+    double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    double origin[3] = { 0.0, 0.0, 0.0 };
+    double spacing[3] = { 1.0, 1.0, 1.0 };
     m_imageData->GetBounds(bounds);
-
-    double origin[3], spacing[3];
     m_imageData->GetOrigin(origin);
     m_imageData->GetSpacing(spacing);
 

@@ -1,17 +1,19 @@
 ﻿// =====================================================================
-// main.cpp
+// main.cpp  v2
 //
 // 三阶段结构：
-//   Phase 1 【前处理】  创建共享资源 + 配置所有数据无关参数
-//   Phase 2 【加载】    由 DataLoader（SharedState）统一发起异步加载
-//   Phase 3 【渲染骨架】初始化渲染骨架 + 进入消息循环
+//   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / PreInit_CommitConfig
+//                       批量配置所有与数据无关的参数
+//   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载（与渲染解耦）
+//   Phase 3 【渲染骨架】InitInteractor + Start 进入消息循环
 //
-// 关键改进（相比旧版本）：
-//   • 彻底删除 Show* / SetLuxParams 等旧接口调用，全部使用 PreInit_*
-//   • 加载由 serviceA 的 LoadFileAsync 发起，解耦加载与特定 service 的关联
-//   • 回调用值捕获 [sharedState, serviceA]，避免后台线程引用悬空指针
-//   • ProcessPendingUpdates 由心跳 Timer 自动驱动，不再手动调用
+//   • 新增 AppTypes.h：公共数据结构零依赖
+//   • PreInit_CommitConfig：批量提交，一次锁 + 一次广播
+//   • LoadFileAsync 通过 IDataLoaderService* 调用，与 MedicalVizService 解耦
+//   • 引入 WindowConfig + BuildWindow 辅助函数消除5窗口重复样板
+//   • 修复ClearStrategyCache 中 VTK Detach 延迟到主线程执行
 // =====================================================================
+
 #include <vtkAutoInit.h>
 #include <vtkSMPTools.h>
 
@@ -20,105 +22,137 @@ VTK_MODULE_INIT(vtkInteractionStyle);
 VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 VTK_MODULE_INIT(vtkRenderingFreeType);
 
-#include "DataManager.h"
+#include "AppTypes.h"
+#include "AppInterfaces.h"
+#include "AppState.h"
 #include "AppService.h"
+#include "DataManager.h"
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
+
+#include <iostream>
+#include <vector>
+
+// ─────────────────────────────────────────────────────────────────────
+// BuildWindow：根据 WindowConfig 创建 Service + Context，完成前处理配置
+// 返回 {service, context} pair
+// ─────────────────────────────────────────────────────────────────────
+static std::pair<
+    std::shared_ptr<MedicalVizService>,
+    std::shared_ptr<StdRenderContext>>
+    BuildWindow(
+        const WindowConfig& cfg,
+        std::shared_ptr<AbstractDataManager>    dataMgr,
+        std::shared_ptr<SharedInteractionState> sharedState)
+{
+    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+    auto context = std::make_shared<StdRenderContext>();
+
+    // 绑定触发 Initialize（注册 Observer���
+    context->BindService(service);
+
+    // 批量提交前处理配置（一次锁 + 一次广播）
+    service->PreInit_CommitConfig(cfg.preInitCfg);
+    // VizMode 在 CommitConfig 内部已通过 m_pendingVizModeInt 记录
+
+    // 窗口属性
+    context->SetWindowTitle(cfg.title);
+    context->SetWindowSize(cfg.width, cfg.height);
+    context->SetWindowPosition(cfg.posX, cfg.posY);
+    context->SetInteractionMode(cfg.vizMode);
+    if (cfg.showAxes) context->ToggleOrientationAxes(true);
+
+    return { service, context };
+}
 
 int main()
 {
     vtkSMPTools::Initialize();
 
-    // 共享数据管理器：5 个窗口零拷贝共享同一份体数据
+    // ── Phase 1：共享资源 ──────────────────────────────────────────
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-
-    // 共享交互状态：光标、材质、传输函数、模型矩阵等全局状态中枢
     auto sharedState = std::make_shared<SharedInteractionState>();
-
-    // 分析服务（独立于渲染，可随时按需使用）
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
 
-    // ── 窗口 A：等值面 + 切片参考平面复合视图 ───────────────────────
-    auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    auto contextA = std::make_shared<StdRenderContext>();
-    contextA->BindService(serviceA);    // 触发 Initialize，注册 Observer
-
-    serviceA->PreInit_SetLuxParams(0.3, 0.6, 0.2, 15.0);   // 光照参数
-    serviceA->PreInit_SetOpacity(1.0);                       // 透明度
-    serviceA->PreInit_SetVizMode(VizMode::CompositeIsoSurface);
-
-    contextA->SetWindowTitle("Window A: Composite IsoSurface");
-    contextA->SetWindowSize(600, 600);
-    contextA->SetWindowPosition(50, 50);
-    contextA->ToggleOrientationAxes(true);
-    contextA->SetInteractionMode(VizMode::CompositeIsoSurface);
-
-    // ── 窗口 E：体渲染 + 切片参考平面复合视图 ───────────────────────
-    auto serviceE = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    auto contextE = std::make_shared<StdRenderContext>();
-    contextE->BindService(serviceE);
-
-    // 体渲染传输函数（颜色映射完全与数据无关，前处理阶段安全）
+    // ── Phase 1：传输函数（数据无关，前处理阶段安全）────────────────
     std::vector<TFNode> volTF = {
-        { 0.00, 0.0, 0.0, 0.0, 0.0 },  // 背景完全透明
-        { 0.50, 0.0, 0.0, 0.5, 0.0 },  // 低值透明（过滤噪声）
-        { 0.85, 0.8, 0.0, 0.5, 0.0 },  // 中间值半透
-        { 1.00, 1.0, 0.0, 0.5, 0.0 },  // 高值不透明
+        { 0.00, 0.0, 0.0, 0.0, 0.0 },
+        { 0.50, 0.0, 0.0, 0.5, 0.0 },
+        { 0.85, 0.8, 0.0, 0.5, 0.0 },
+        { 1.00, 1.0, 0.0, 0.5, 0.0 },
     };
-    serviceE->PreInit_SetTransferFunction(volTF);
-    serviceE->PreInit_SetVizMode(VizMode::CompositeVolume);
 
-    contextE->SetWindowTitle("Window E: Composite Volume");
-    contextE->SetWindowSize(600, 600);
-    contextE->SetWindowPosition(660, 50);
-    contextE->SetInteractionMode(VizMode::CompositeVolume);
+    // ── Phase 1：窗口配置表（前处理参数全部在此集中声明）────────────
+    // 窗口 A：等值面 + 切片参考平面
+    WindowConfig cfgA;
+    cfgA.title = "Window A: Composite IsoSurface";
+    cfgA.width = 600; cfgA.height = 600;
+    cfgA.posX = 50;  cfgA.posY = 50;
+    cfgA.vizMode = VizMode::CompositeIsoSurface;
+    cfgA.showAxes = true;
+    cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
+    cfgA.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, false };
 
-    // ── 窗口 B：轴状位（Axial）切片 ─────────────────────────────────
-    auto serviceB = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    auto contextB = std::make_shared<StdRenderContext>();
-    contextB->BindService(serviceB);
-    serviceB->PreInit_SetVizMode(VizMode::SliceAxial);
-    contextB->SetWindowTitle("Window B: Axial Slice");
-    contextB->SetWindowSize(400, 400);
-    contextB->SetWindowPosition(50, 660);
-    contextB->SetInteractionMode(VizMode::SliceAxial);
+    // 窗口 E：体渲染 + 切片参考平面
+    WindowConfig cfgE;
+    cfgE.title = "Window E: Composite Volume";
+    cfgE.width = 600; cfgE.height = 600;
+    cfgE.posX = 660; cfgE.posY = 50;
+    cfgE.vizMode = VizMode::CompositeVolume;
+    cfgE.preInitCfg.vizMode = VizMode::CompositeVolume;
+    cfgE.preInitCfg.tfNodes = volTF;
+    cfgE.preInitCfg.hasTF = true;
 
-    // ── 窗口 C：冠状位（Coronal）切片 ───────────────────────────────
-    auto serviceC = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    auto contextC = std::make_shared<StdRenderContext>();
-    contextC->BindService(serviceC);
-    serviceC->PreInit_SetVizMode(VizMode::SliceCoronal);
-    contextC->SetWindowTitle("Window C: Coronal Slice");
-    contextC->SetWindowSize(400, 400);
-    contextC->SetWindowPosition(460, 660);
-    contextC->SetInteractionMode(VizMode::SliceCoronal);
+    // 窗口 B：Axial 切片
+    WindowConfig cfgB;
+    cfgB.title = "Window B: Axial Slice";
+    cfgB.width = 400; cfgB.height = 400;
+    cfgB.posX = 50;  cfgB.posY = 660;
+    cfgB.vizMode = VizMode::SliceAxial;
+    cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
 
-    // ── 窗口 D：矢状位（Sagittal）切片 ──────────────────────────────
-    auto serviceD = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
-    auto contextD = std::make_shared<StdRenderContext>();
-    contextD->BindService(serviceD);
-    serviceD->PreInit_SetVizMode(VizMode::SliceSagittal);
-    contextD->SetWindowTitle("Window D: Sagittal Slice");
-    contextD->SetWindowSize(400, 400);
-    contextD->SetWindowPosition(870, 660);
-    contextD->SetInteractionMode(VizMode::SliceSagittal);
+    // 窗口 C：Coronal 切片
+    WindowConfig cfgC;
+    cfgC.title = "Window C: Coronal Slice";
+    cfgC.width = 400; cfgC.height = 400;
+    cfgC.posX = 460; cfgC.posY = 660;
+    cfgC.vizMode = VizMode::SliceCoronal;
+    cfgC.preInitCfg.vizMode = VizMode::SliceCoronal;
 
-    serviceA->LoadFileAsync(
+    // 窗口 D：Sagittal 切片
+    WindowConfig cfgD;
+    cfgD.title = "Window D: Sagittal Slice";
+    cfgD.width = 400; cfgD.height = 400;
+    cfgD.posX = 870; cfgD.posY = 660;
+    cfgD.vizMode = VizMode::SliceSagittal;
+    cfgD.preInitCfg.vizMode = VizMode::SliceSagittal;
+
+    // ── Phase 1：批量建窗 ──────────────────────────────────────────
+    auto [serviceA, contextA] = BuildWindow(cfgA, sharedDataMgr, sharedState);
+    auto [serviceE, contextE] = BuildWindow(cfgE, sharedDataMgr, sharedState);
+    auto [serviceB, contextB] = BuildWindow(cfgB, sharedDataMgr, sharedState);
+    auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
+    auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
+
+    // ── Phase 2：异步加载（通过 IDataLoaderService 接口，与渲染解耦）
+    // 加载完成后，在后台线程基于实际数据范围设置等值面阈值
+    IDataLoaderService* loader = serviceA.get();
+    loader->LoadFileAsync(
         "D:\\CT-1209\\data\\1536X1536X1536.raw",
         [sharedState, serviceA](bool success) {
             if (!success) {
-                std::cerr << "[Error] Failed to load volume data." << std::endl;
+                std::cerr << "[Error] Failed to load volume data.\n";
                 return;
             }
             // !! 后台线程 !! 只操作 SharedState（内部有 mutex）
-            // 基于实际数据范围设置等值面阈值（60% 处）
             auto range = sharedState->GetDataRange();
-            serviceA->PreInit_SetIsoThreshold(
-                range[0] + (range[1] - range[0]) * 0.6
-            );
+            double isoVal = range[0] + (range[1] - range[0]) * 0.6;
+            // 使用逐项接口设置（数据相关，后处理阶段）
+            serviceA->PreInit_SetIsoThreshold(isoVal);
         }
     );
 
+    // ── Phase 3：初始化渲染骨架 + 进入消息循环 ────────────────────
     contextA->Render();
     contextB->Render();
     contextC->Render();
@@ -131,8 +165,8 @@ int main()
     contextD->InitInteractor();
     contextE->InitInteractor();
 
-    std::cout << "Application started. Loading data in background...\n";
-    std::cout << "Controls: A/D = navigate slices | M = toggle model transform\n";
+    std::cout << "Application started. Loading data in background...\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
     contextB->Start();

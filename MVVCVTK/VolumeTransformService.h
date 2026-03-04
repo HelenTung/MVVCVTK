@@ -64,7 +64,7 @@ public:
         if (!mat) return;
 
         // 写入 SharedState（内部有 mutex，线程安全）
-        std::array<double, 16> matData;
+        std::array<double, 16> matData = {0};
         std::memcpy(matData.data(), mat->GetData(), 16 * sizeof(double));
         m_sharedState->SetModelMatrix(matData);
 
@@ -87,7 +87,7 @@ public:
         transform->Scale(scale[0], scale[1], scale[2]);
         transform->Translate(translate[0], translate[1], translate[2]);
 
-        std::array<double, 16> matData;
+        std::array<double, 16> matData = {0};
         std::memcpy(matData.data(),
             transform->GetMatrix()->GetData(),
             16 * sizeof(double));
