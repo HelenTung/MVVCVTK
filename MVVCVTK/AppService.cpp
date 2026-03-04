@@ -369,6 +369,9 @@ void MedicalVizService::PostData_HandleLoadFailed()
     // 重置刷新标记，防止残留 DataReady 触发错误重建
     m_needsDataRefresh = false;
 
+	// 重置交互状态
+    m_pendingFlags = 0;
+
     // 标脏使渲染器刷新空场景
     m_isDirty = true;
 }
