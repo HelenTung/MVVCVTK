@@ -169,7 +169,7 @@ int main()
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
-        "D:\\CT-1209\\data\\1536X1536X1536.raw",
+        "D:\\CT-1209\\data\\1000X1000X1000.raw",
         [sharedState, serviceA](bool success)
         {
             // !! 后台线程 !! 只操作 SharedState��内部有 mutex）

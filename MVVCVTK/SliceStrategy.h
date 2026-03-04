@@ -7,7 +7,7 @@
 #include <vtkLineSource.h>
 #include <vtkPlane.h>
 #include <vtkPlaneSource.h>
-#include <vtkColorTransferFunction.h>
+#include <vtkLookupTable.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
@@ -33,8 +33,8 @@ private:
     void SetSliceIndex(int delta);
     void SetOrientation(Orientation orient);
     void UpdateCrosshair(int x, int y, int z);
-    void ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf);
     void UpdatePlanePosition();
+    void RebuildLUT(const RenderParams& params);
     Orientation GetOrientation() const { return m_orientation; }
 
     vtkSmartPointer<vtkImageSlice> m_slice;
@@ -52,5 +52,5 @@ private:
     vtkSmartPointer<vtkLineSource> m_hLineSource;
 
     // 颜色映射缓存LUT
-    vtkSmartPointer<vtkColorTransferFunction> m_lut;
+    vtkSmartPointer<vtkLookupTable> m_lut;
 };

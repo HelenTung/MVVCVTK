@@ -36,8 +36,82 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_hLineActor->GetProperty()->SetLighting(false);
 
     // 初始化颜色映射表
-    m_lut = vtkSmartPointer<vtkColorTransferFunction>::New();
+    m_lut = vtkSmartPointer<vtkLookupTable>::New();
     m_slice->GetProperty()->SetLookupTable(m_lut);
+    m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
+}
+
+
+void SliceStrategy::RebuildLUT(const RenderParams& params)
+{
+    const double minVal = params.scalarRange[0];
+    const double maxVal = params.scalarRange[1];
+    const double range = maxVal - minVal;
+    if (range <= 0.0) return;
+
+    const double globalOpacity = params.material.opacity;
+    const int    nTable = 256;
+
+    m_lut->SetNumberOfTableValues(nTable);
+    m_lut->SetTableRange(minVal, maxVal);
+
+    // 用 isoValue 做阈值：低于阈值 → 完全透明，高于阈值 → 按 tfNodes 着色
+    // 归一化的阈值位置
+    const double isoT = (range > 0.0)
+        ? (params.isoValue - minVal) / range
+        : 0.5;
+
+    for (int i = 0; i < nTable; i++)
+    {
+        const double t = static_cast<double>(i) / static_cast<double>(nTable - 1);
+
+        if (t < isoT)
+        {
+            // 背景区域：完全透明
+            m_lut->SetTableValue(i, 0.0, 0.0, 0.0, 0.0);
+        }
+        else
+        {
+            // 模型区域：从 tfNodes 取颜色，但 alpha 强制不透明
+            double r = 1.0, g = 1.0, b = 1.0; // 默认白色
+            const auto& nodes = params.tfNodes;
+            if (!nodes.empty())
+            {
+                if (t >= nodes.back().position)
+                {
+                    r = nodes.back().r;
+                    g = nodes.back().g;
+                    b = nodes.back().b;
+                }
+                else
+                {
+                    for (size_t k = 0; k + 1 < nodes.size(); ++k)
+                    {
+                        if (t >= nodes[k].position && t <= nodes[k + 1].position)
+                        {
+                            const double span = nodes[k + 1].position - nodes[k].position;
+                            const double alpha = (span > 0.0)
+                                ? (t - nodes[k].position) / span : 0.0;
+                            r = nodes[k].r + alpha * (nodes[k + 1].r - nodes[k].r);
+                            g = nodes[k].g + alpha * (nodes[k + 1].g - nodes[k].g);
+                            b = nodes[k].b + alpha * (nodes[k + 1].b - nodes[k].b);
+                            break;
+                        }
+                    }
+                }
+            }
+            // alpha 不从 tfNodes 取，直接用 globalOpacity，保证实心填充
+            m_lut->SetTableValue(i, r, g, b, 1.0);
+        }
+    }
+
+    m_lut->Modified();
+
+    auto imgProp = m_slice->GetProperty();
+    imgProp->SetOpacity(globalOpacity);
+    imgProp->SetAmbient(params.material.ambient);
+    imgProp->SetDiffuse(params.material.diffuse);
+
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -71,6 +145,10 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_mapper->SetSlicePlane(plane);
     m_slice->SetMapper(m_mapper);
 
+    // 重建 mapper 后重新绑定 LUT 通道
+    m_slice->GetProperty()->SetLookupTable(m_lut);
+    m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
+
     int dims[3];
     img->GetDimensions(dims);
 
@@ -97,6 +175,10 @@ void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->AddActor(m_vLineActor);
     ren->AddActor(m_hLineActor);
     ren->SetBackground(0, 0, 0);
+    // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
+    ren->SetUseDepthPeeling(1);
+    ren->SetMaximumNumberOfPeels(4);
+    ren->SetOcclusionRatio(0.0);
 }
 
 void SliceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
@@ -228,12 +310,6 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
     }
 }
 
-void SliceStrategy::ApplyColorMap(vtkSmartPointer<vtkColorTransferFunction> ctf)
-{
-    if (!m_slice || !ctf) return;
-    m_slice->GetProperty()->SetLookupTable(ctf);
-}
-
 void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
     if (((int)flags & (int)UpdateFlags::Cursor))
@@ -253,24 +329,12 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         UpdateCrosshair(x, y, z);
     }
 
-    // 更新颜色映射表
-    if (((int)flags & (int)UpdateFlags::TF))
+	// 颜色映射和材质参数改变都可能影响最终的视觉效果，所以放在一起处理
+    if (HasFlag(flags, UpdateFlags::TF) || HasFlag(flags, UpdateFlags::Material))
     {
-        if (!params.tfNodes.empty()) {
-            m_lut->RemoveAllPoints();
-            double min = params.scalarRange[0];
-            double diff = params.scalarRange[1] - min;
+        RebuildLUT(params);  // 内部依赖 tfNodes + scalarRange + material.opacity
 
-            for (const auto& node : params.tfNodes) {
-                double scalarVal = min + diff * node.position;
-                m_lut->AddRGBPoint(scalarVal, node.r, node.g, node.b);
-            }
-        }
-    }
-
-    // 响应材质参数更新 (仅透明度/环境光)
-    if (((int)flags & (int)UpdateFlags::Material))
-    {
+        // 同步 vtkImageProperty 的整体透明度（架构保持一致）
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();
