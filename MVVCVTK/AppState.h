@@ -1,12 +1,4 @@
 ﻿#pragma once
-// =====================================================================
-// AppState.h — SharedInteractionState（共享交互状态中枢）
-//
-// 依赖：AppTypes.h（UpdateFlags / TFNode / MaterialParams）
-//
-// 线程安全：所有 Set*/Get*/Notify* 均通过 m_mutex 保护。
-// =====================================================================
-
 #include "AppTypes.h"
 #include <vector>
 #include <functional>
@@ -14,19 +6,19 @@
 #include <mutex>
 #include <array>
 #include <cmath>
+#include <atomic>
 
 // 观察者回调类型
 using ObserverCallback = std::function<void(UpdateFlags)>;
 
 struct ObserverEntry {
-    std::weak_ptr<void> owner;     // 存活凭证（不增加引用计数）
+    std::weak_ptr<void> owner;    // 存活凭证（weak_ptr 不增加引用计数）
     ObserverCallback    callback;
 };
 
 class SharedInteractionState {
 public:
     SharedInteractionState() {
-        // 默认 4 个传输函数节点
         m_nodes = {
             { 0.00, 0.0, 0.00, 0.00, 0.00 },
             { 0.35, 0.0, 0.75, 0.75, 0.75 },
@@ -36,30 +28,76 @@ public:
     }
 
     // ── 数据就绪广播 ──────────────────────────────────────────────
+    // 仅后台加载线程调用；写 range 后广播 DataReady
     void NotifyDataReady(double rangeMin, double rangeMax) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             m_dataRange[0] = rangeMin;
             m_dataRange[1] = rangeMax;
+            m_loadState = LoadState::Succeeded;
         }
         NotifyObservers(UpdateFlags::DataReady);
     }
 
-    // ── 批量提交前处理配置（仅一次加锁 + 一次广播）───────────────
+    // ── 加载失败广播 ────────────────────────────────────────
+    // 仅后台加载线程调用；设状态后广播 LoadFailed
+    void NotifyLoadFailed() {
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_loadState = LoadState::Failed;
+        }
+        NotifyObservers(UpdateFlags::LoadFailed);
+    }
+
+    // ── 加载状态 (LoadState 枚举，NEW) ────────────────────────────
+    void SetLoadState(LoadState s) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_loadState = s;
+    }
+    LoadState GetLoadState() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_loadState;
+    }
+
+    // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
     // 对应 IPreInitService::PreInit_CommitConfig
     void CommitPreInitConfig(const PreInitConfig& cfg) {
         UpdateFlags flags = UpdateFlags::None;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_material = cfg.material;
-            flags = flags | UpdateFlags::Material;
+
+            // 材质逐字段比较，有变化才累加 Material 标志
+            if (m_material.ambient != cfg.material.ambient ||
+                m_material.diffuse != cfg.material.diffuse ||
+                m_material.specular != cfg.material.specular ||
+                m_material.specularPower != cfg.material.specularPower ||
+                m_material.opacity != cfg.material.opacity ||
+                m_material.shadeOn != cfg.material.shadeOn)
+            {
+                m_material = cfg.material;
+                flags |= UpdateFlags::Material;
+            }
+
+            // 传输函数
             if (cfg.hasTF) {
                 m_nodes = cfg.tfNodes;
-                flags = flags | UpdateFlags::TF;
+                flags |= UpdateFlags::TF;
             }
-            if (cfg.hasIso && std::abs(m_isoValue - cfg.isoThreshold) > 0.0001) {
+
+            // 等值面阈值
+            if (cfg.hasIso && std::abs(m_isoValue - cfg.isoThreshold) > 1e-6) {
                 m_isoValue = cfg.isoThreshold;
-                flags = flags | UpdateFlags::IsoValue;
+                flags |= UpdateFlags::IsoValue;
+            }
+
+            // 背景色（NEW）
+            if (cfg.hasBgColor &&
+                (std::abs(m_background.r - cfg.bgColor.r) > 1e-6 ||
+                    std::abs(m_background.g - cfg.bgColor.g) > 1e-6 ||
+                    std::abs(m_background.b - cfg.bgColor.b) > 1e-6))
+            {
+                m_background = cfg.bgColor;
+                flags |= UpdateFlags::Background;
             }
         }
         if (flags != UpdateFlags::None)
@@ -111,7 +149,7 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_isoValue - val) > 0.0001) {
+            if (std::abs(m_isoValue - val) > 1e-6) {
                 m_isoValue = val;
                 changed = true;
             }
@@ -123,7 +161,7 @@ public:
         return m_isoValue;
     }
 
-    // ── 材质参数 ─────��────────────────────────────────────────────
+    // ── 材质参数 ──────────────────────────────────────────────────
     void SetMaterial(const MaterialParams& mat) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
@@ -131,10 +169,29 @@ public:
         }
         NotifyObservers(UpdateFlags::Material);
     }
-    // 返回值拷贝而非 const&，避免未加锁的数据竞争
     MaterialParams GetMaterial() const {
         std::lock_guard<std::mutex> lk(m_mutex);
         return m_material;
+    }
+
+    // ── 背景色 ──────────────────────────────────────────────
+    void SetBackground(const BackgroundColor& bg) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            if (std::abs(m_background.r - bg.r) > 1e-6 ||
+                std::abs(m_background.g - bg.g) > 1e-6 ||
+                std::abs(m_background.b - bg.b) > 1e-6)
+            {
+                m_background = bg;
+                changed = true;
+            }
+        }
+        if (changed) NotifyObservers(UpdateFlags::Background);
+    }
+    BackgroundColor GetBackground() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_background;
     }
 
     // ── 交互状态 ──────────────────────────────────────────────────
@@ -188,8 +245,14 @@ public:
 
     // ── Observer 管理 ─────────────────────────────────────────────
     void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
+        if (!owner || !cb) return;
         std::lock_guard<std::mutex> lk(m_mutex);
-        if (owner) m_observers.push_back({ std::move(owner), std::move(cb) });
+        // 清理已过期条目，避免列表膨胀
+        m_observers.erase(
+            std::remove_if(m_observers.begin(), m_observers.end(),
+                [](const ObserverEntry& e) { return e.owner.expired(); }),
+            m_observers.end());
+        m_observers.push_back({ std::move(owner), std::move(cb) });
     }
 
 private:
@@ -198,15 +261,20 @@ private:
     int                    m_cursorPos[3] = { 0, 0, 0 };
     double                 m_isoValue = 0.0;
     MaterialParams         m_material;
+    BackgroundColor        m_background;                   // ← NEW
     std::vector<TFNode>    m_nodes;
     double                 m_dataRange[2] = { 0.0, 255.0 };
     bool                   m_isInteracting = false;
+    LoadState              m_loadState = LoadState::Idle; // ← NEW
     std::array<double, 16> m_modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };
     std::vector<ObserverEntry> m_observers;
 
+    // ── NotifyObservers：先快照回调列表（持锁），再无锁调用 ──
+    // 彻底消除回调中调用 Set* → 重入加锁 → 死锁风险
     void NotifyObservers(UpdateFlags flags) {
+        // 持锁扫描，快照存活回调并清理过期条目
         std::vector<ObserverCallback> toRun;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
@@ -220,6 +288,7 @@ private:
                 }
             }
         }
+        // 无锁调用（允许回调中再次调用 Set*，不再死锁）
         for (auto& cb : toRun)
             if (cb) cb(flags);
     }

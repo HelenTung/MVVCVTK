@@ -21,6 +21,7 @@
 #include <vtkTable.h>
 #include <map>
 #include <mutex>
+#include <future>
 
 class MedicalVizService
     : public AbstractInteractiveService
@@ -31,8 +32,8 @@ class MedicalVizService
 public:
     MedicalVizService(std::shared_ptr<AbstractDataManager>    dataMgr,
         std::shared_ptr<SharedInteractionState> state);
+    ~MedicalVizService();
 
-    // 由 BindService 触发（shared_ptr 完全构建后，shared_from_this() 安全）
     void Initialize(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer>     ren) override;
 
@@ -46,6 +47,7 @@ public:
     void PreInit_SetOpacity(double opacity)                             override;
     void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes)  override;
     void PreInit_SetIsoThreshold(double val)                            override;
+    void PreInit_SetBackground(const BackgroundColor& bg)               override;
     void PreInit_CommitConfig(const PreInitConfig& cfg)                 override; // 批量提交
 
     // ================================================================
@@ -54,11 +56,19 @@ public:
     // ================================================================
     void LoadFileAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
+    
+    LoadState GetLoadState() const override;
+
+    // 尽力取消：设标记，加载函数内部自检后提前退出
+    void CancelLoad() override;
 
     // ================================================================
     // AbstractAppService — 后处理入口（主线程 Timer 驱动）
-    // 路径 A：m_needsDataRefresh=true → PostData_RebuildPipeline
-    // 路径 B：m_needsSync=true        → PostData_SyncStateToStrategy
+    // 路由优先级：
+    //   1. m_needsCacheClear  → ExecuteClearStrategyCache
+    //   2. m_needsLoadFailed  → PostData_HandleLoadFailed  
+    //   3. m_needsDataRefresh → PostData_RebuildPipeline
+    //   4. m_needsSync        → PostData_SyncStateToStrategy
     // ================================================================
     void ProcessPendingUpdates() override;
 
@@ -86,10 +96,13 @@ private:
     // ── 后处理路径 A：DataReady → 重建 VTK 渲染管线（仅主线程）
     void PostData_RebuildPipeline();
 
-    // ── ���处理路径 B：普通事件 → 增量同步参数到 Strategy（仅主线程）
+    // ── 后处理路径 B：普通事件 → 增量同步参数到 Strategy（仅主线程）
     void PostData_SyncStateToStrategy();
 
-    // ── 构建 RenderParams（只读 SharedState，无 VTK 操作）
+    // ── 后处理路径 C：LoadFailed → 清理状态 + 显示占位符（仅主线程）
+    void PostData_HandleLoadFailed();
+
+    // ── 构建 RenderParams（只读 SharedState，按 flags 精确读取）
     RenderParams BuildRenderParams(UpdateFlags flags) const;
 
     // ── Strategy 缓存管理
@@ -107,7 +120,14 @@ private:
     std::shared_ptr<SharedInteractionState>    m_sharedState;
     std::unique_ptr<VolumeTransformService>    m_transformService;
 
+    // 原子标记
     std::atomic<int>  m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     std::atomic<bool> m_needsDataRefresh{ false };
-    std::atomic<bool> m_needsCacheClear{ false }; // 新增：安全延迟清除缓存
+    std::atomic<bool> m_needsCacheClear{ false };
+    std::atomic<bool> m_needsLoadFailed{ false };   // 
+    std::atomic<bool> m_cancelRequested{ false };   // 尽力取消标记
+
+    // 加载线程 future（用于析构时 join，避免 detach UB）
+    std::future<void>  m_loadFuture;                //
+    mutable std::mutex m_loadMutex;                 //保护 m_loadFuture
 };

@@ -33,6 +33,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <mutex>
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
@@ -42,10 +43,15 @@ public:
     virtual ~AbstractDataManager() = default;
     virtual bool LoadData(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
-
+    LoadState GetLoadState() const {
+        std::lock_guard<std::mutex> lk(m_stateMutex);
+        return m_loadState;
+    }
     bool IsLoading() const { return m_isLoading.load(); }
 
 protected:
+    mutable std::mutex m_stateMutex;
+    LoadState          m_loadState{ LoadState::Idle };
     std::atomic<bool> m_isLoading{ false };
 };
 
@@ -111,7 +117,7 @@ public:
 
     std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
 
-    // Strategy 切换（主线程专属）—— 实现在 AppService.cpp
+    // Strategy 切换,实现在 AppService.cpp
     void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
 
@@ -133,9 +139,7 @@ public:
     virtual void PreInit_SetOpacity(double opacity) = 0;
     virtual void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
     virtual void PreInit_SetIsoThreshold(double val) = 0;
-
-    // 【新增】批量提交：一次性写入所有配置，只加一次锁 + 只广播一次
-    // 推荐在前处理阶段使用此接口，减少锁争用
+    virtual void PreInit_SetBackground(const BackgroundColor& bg) = 0;
     virtual void PreInit_CommitConfig(const PreInitConfig& cfg) = 0;
 };
 
@@ -152,6 +156,13 @@ public:
     // 异步加载：onComplete 在后台线程回调，只允许操作 SharedState
     virtual void LoadFileAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
+
+    // 查询当前加载状态（可从主线程轮询）
+    virtual LoadState GetLoadState() const = 0;
+
+    // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
+    // 默认空实现，派生类按需覆盖
+    virtual void CancelLoad() {}
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -205,6 +216,7 @@ public:
     }
 
     virtual void SetInteractionMode(VizMode mode) = 0;
+    virtual void InitInteractor() = 0;  // 显式分离，避免 Start() 混乱
     virtual void Start() = 0;
 
     virtual void SetWindowSize(int w, int h) {
@@ -217,7 +229,10 @@ public:
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
     virtual void ToggleOrientationAxes(bool show) {}
-
+    virtual void SetRendererBackground(const BackgroundColor& bg) {
+        if (m_renderer)
+            m_renderer->SetBackground(bg.r, bg.g, bg.b);
+    }
 protected:
     static void DispatchVTKEvent(vtkObject* caller,
         long unsigned int eventId,

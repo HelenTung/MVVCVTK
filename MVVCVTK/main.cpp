@@ -1,17 +1,17 @@
 ﻿// =====================================================================
-// main.cpp  v2
 //
-// 三阶段结构：
+// 三阶段结构（保持不变）：
 //   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / PreInit_CommitConfig
-//                       批量配置所有与数据无关的参数
-//   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载（与渲染解耦）
+//                       批量配置所有与数据无关的参数（含背景色）
+//   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载
 //   Phase 3 【渲染骨架】InitInteractor + Start 进入消息循环
 //
-//   • 新增 AppTypes.h：公共数据结构零依赖
-//   • PreInit_CommitConfig：批量提交，一次锁 + 一次广播
-//   • LoadFileAsync 通过 IDataLoaderService* 调用，与 MedicalVizService 解耦
-//   • 引入 WindowConfig + BuildWindow 辅助函数消除5窗口重复样板
-//   • 修复ClearStrategyCache 中 VTK Detach 延迟到主线程执行
+//   • PreInitConfig 增加 bgColor / hasBgColor（前处理背景色）
+//   • LoadFileAsync 回调改为数据相关的后处理业务（等值面阈值推算）
+//   • 回调内明确注释：在后台线程，只允许操作 SharedState
+//   • 加载失败时通过 NotifyLoadFailed → PostData_HandleLoadFailed 处理
+//   • IDataLoaderService 增加 GetLoadState() 可用于主线程状态查询
+//   • main.cpp 中的 InitInteractor() 调用方式明确分离（接口显式）
 // =====================================================================
 
 #include <vtkAutoInit.h>
@@ -35,8 +35,15 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 // ─────────────────────────────────────────────────────────────────────
 // BuildWindow：根据 WindowConfig 创建 Service + Context，完成前处理配置
+//
+// 前处理职责（数据无关，Phase 1 调用）：
+//   1. BindService → Initialize → 注册 Observer
+//   2. PreInit_CommitConfig → 批量写 SharedState（材质/TF/等值面/背景色）
+//   3. 设置窗口属性（标题/尺寸/位置/交互模式/坐标轴）
+//   4. PreInit_SetBackground → 直接写渲染器背景色
+//
 // 返回 {service, context} pair
-// ─────────────────────────────────────────────────────────────────────
+// ──────────────────────────���──────────────────────────────────────────
 static std::pair<
     std::shared_ptr<MedicalVizService>,
     std::shared_ptr<StdRenderContext>>
@@ -48,19 +55,23 @@ static std::pair<
     auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
     auto context = std::make_shared<StdRenderContext>();
 
-    // 绑定触发 Initialize（注册 Observer���
+    // ── 步骤1：BindService（触发 Initialize → 注册 Observer）──────
     context->BindService(service);
 
-    // 批量提交前处理配置（一次锁 + 一次广播）
+    // ── 步骤2：批量提交前处理配置（一次锁 + 一次广播）────────────
     service->PreInit_CommitConfig(cfg.preInitCfg);
-    // VizMode 在 CommitConfig 内部已通过 m_pendingVizModeInt 记录
 
-    // 窗口属性
+    // ── 步骤3：窗口属性（纯渲染上下文配置，数据无关）─────────────
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
     context->SetInteractionMode(cfg.vizMode);
-    if (cfg.showAxes) context->ToggleOrientationAxes(true);
+    if (cfg.showAxes)
+        context->ToggleOrientationAxes(true);
+
+    // ── 步骤4：背景色（前处理：直接应用到渲染器，数据无关）───────
+    if (cfg.preInitCfg.hasBgColor)
+        service->PreInit_SetBackground(cfg.preInitCfg.bgColor);
 
     return { service, context };
 }
@@ -68,13 +79,12 @@ static std::pair<
 int main()
 {
     vtkSMPTools::Initialize();
-
-    // ── Phase 1：共享资源 ──────────────────────────────────────────
+    // ── 共享资源 ──────────────────────────────────────────────────
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedState = std::make_shared<SharedInteractionState>();
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
 
-    // ── Phase 1：传输函数（数据无关，前处理阶段安全）────────────────
+    // ── 传输函数（数据无关，前处理阶段安全）──────────────────────
     std::vector<TFNode> volTF = {
         { 0.00, 0.0, 0.0, 0.0, 0.0 },
         { 0.50, 0.0, 0.0, 0.5, 0.0 },
@@ -82,7 +92,8 @@ int main()
         { 1.00, 1.0, 0.0, 0.5, 0.0 },
     };
 
-    // ── Phase 1：窗口配置表（前处理参数全部在此集中声明）────────────
+    // ── 窗口配置表（前处理参数全部在此集中声明）──────────────────
+
     // 窗口 A：等值面 + 切片参考平面
     WindowConfig cfgA;
     cfgA.title = "Window A: Composite IsoSurface";
@@ -92,6 +103,8 @@ int main()
     cfgA.showAxes = true;
     cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     cfgA.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, false };
+    cfgA.preInitCfg.bgColor = { 0.05, 0.05, 0.05 }; // 深灰背景
+    cfgA.preInitCfg.hasBgColor = true;
 
     // 窗口 E：体渲染 + 切片参考平面
     WindowConfig cfgE;
@@ -102,6 +115,8 @@ int main()
     cfgE.preInitCfg.vizMode = VizMode::CompositeVolume;
     cfgE.preInitCfg.tfNodes = volTF;
     cfgE.preInitCfg.hasTF = true;
+    cfgE.preInitCfg.bgColor = { 0.08, 0.08, 0.12 }; // 深蓝背景
+    cfgE.preInitCfg.hasBgColor = true;
 
     // 窗口 B：Axial 切片
     WindowConfig cfgB;
@@ -110,6 +125,8 @@ int main()
     cfgB.posX = 50;  cfgB.posY = 660;
     cfgB.vizMode = VizMode::SliceAxial;
     cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
+    cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    cfgB.preInitCfg.hasBgColor = true;
 
     // 窗口 C：Coronal 切片
     WindowConfig cfgC;
@@ -118,6 +135,8 @@ int main()
     cfgC.posX = 460; cfgC.posY = 660;
     cfgC.vizMode = VizMode::SliceCoronal;
     cfgC.preInitCfg.vizMode = VizMode::SliceCoronal;
+    cfgC.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    cfgC.preInitCfg.hasBgColor = true;
 
     // 窗口 D：Sagittal 切片
     WindowConfig cfgD;
@@ -126,33 +145,40 @@ int main()
     cfgD.posX = 870; cfgD.posY = 660;
     cfgD.vizMode = VizMode::SliceSagittal;
     cfgD.preInitCfg.vizMode = VizMode::SliceSagittal;
+    cfgD.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    cfgD.preInitCfg.hasBgColor = true;
 
-    // ── Phase 1：批量建窗 ──────────────────────────────────────────
+    // ── 批量建窗（前处理完成）────────────────────────────────────
     auto [serviceA, contextA] = BuildWindow(cfgA, sharedDataMgr, sharedState);
     auto [serviceE, contextE] = BuildWindow(cfgE, sharedDataMgr, sharedState);
     auto [serviceB, contextB] = BuildWindow(cfgB, sharedDataMgr, sharedState);
     auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
-    // ── Phase 2：异步加载（通过 IDataLoaderService 接口，与渲染解耦）
-    // 加载完成后，在后台线程基于实际数据范围设置等值面阈值
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
         "D:\\CT-1209\\data\\1536X1536X1536.raw",
-        [sharedState, serviceA](bool success) {
+        [sharedState, serviceA](bool success)
+        {
+            // !! 后台线程 !! 只操作 SharedState��内部有 mutex）
             if (!success) {
-                std::cerr << "[Error] Failed to load volume data.\n";
+                // 加载失败由 NotifyLoadFailed 广播，
+                // PostData_HandleLoadFailed 在主线程处理，此处仅记录日志
+                std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
             }
-            // !! 后台线程 !! 只操作 SharedState（内部有 mutex）
+
+            // 后处理业务：数据就绪后，基于实际数据范围推算等值面阈值
+            // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
             auto range = sharedState->GetDataRange();
             double isoVal = range[0] + (range[1] - range[0]) * 0.6;
-            // 使用逐项接口设置（数据相关，后处理阶段）
-            serviceA->PreInit_SetIsoThreshold(isoVal);
+            serviceA->PreInit_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
+
+            std::cout << "[onComplete] Data loaded. IsoThreshold set to "
+                << isoVal << "\n";
         }
     );
 
-    // ── Phase 3：初始化渲染骨架 + 进入消息循环 ────────────────────
     contextA->Render();
     contextB->Render();
     contextC->Render();

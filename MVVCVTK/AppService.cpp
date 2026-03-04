@@ -1,7 +1,4 @@
-﻿// =====================================================================
-// AppService.cpp  v2
-// =====================================================================
-#include "AppService.h"
+﻿#include "AppService.h"
 #include "DataManager.h"
 #include "DataConverters.h"
 #include "StrategyFactory.h"
@@ -30,22 +27,33 @@ void AbstractAppService::SwitchStrategy(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// 构造
+// 构造 / 析构
 // ─────────────────────────────────────────────────────────────────────
 MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager>    dataMgr,
     std::shared_ptr<SharedInteractionState> state)
-    : m_sharedState(state)
+    : m_sharedState(std::move(state))
     , m_transformService(std::make_unique<VolumeTransformService>(state))
 {
     m_dataManager = std::move(dataMgr);
 }
 
+MedicalVizService::~MedicalVizService()
+{
+    // 通知加载线程尽快退出
+    m_cancelRequested = true;
+
+    // 等待加载线程完成，避免 detach 导致的 UB
+    std::lock_guard<std::mutex> lk(m_loadMutex);
+    if (m_loadFuture.valid())
+        m_loadFuture.wait();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Initialize（由 BindService 触发，shared_from_this() 已安全）
 //
-// Observer 回调中不再直接调用 ClearStrategyCache()（有 VTK Detach）
-//         改为只设 m_needsCacheClear=true，主线程 ProcessPendingUpdates 执行
+// Observer 回调中不直接调用有 VTK 操作的函数；
+// 所有 VTK 操作通过标记延迟到主线程 ProcessPendingUpdates 执行。
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::Initialize(
     vtkSmartPointer<vtkRenderWindow> win,
@@ -63,17 +71,32 @@ void MedicalVizService::Initialize(
             auto self = weakSelf.lock();
             if (!self) return;
 
+            // ── DataReady：后台线程，只设标记，禁止任何 VTK 操作 ──
             if (HasFlag(flags, UpdateFlags::DataReady)) {
-                // 后台线程：只设标记，禁止任何 VTK 操作
-                self->RequestClearStrategyCache(); // 只设 m_needsCacheClear
+                self->RequestClearStrategyCache();
                 self->ResetCursorToCenter();
                 self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
                 self->m_needsDataRefresh = true;
-                // 不调 MarkNeedsSync()，DataReady 走独立路径
                 return;
             }
 
-            // 普通事件：原子位或 + 标记需要同步
+            // ── LoadFailed（NEW）：后台线程，只设标记 ──────────────
+            if (HasFlag(flags, UpdateFlags::LoadFailed)) {
+                self->m_needsLoadFailed = true;
+                self->m_isDirty = true;
+                return;
+            }
+
+            // ── Background（NEW）：直接写渲染器（无 pipeline 操作）──
+            // 背景色写渲染器本身是线程安全的（VTK 渲染器内部有锁），
+            // 但为一致性仍通过标记延迟到主线程
+            if (HasFlag(flags, UpdateFlags::Background)) {
+                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::Background));
+                self->MarkNeedsSync();
+                return;
+            }
+
+            // ── 普通事件：原子位或 + 标记需要同步 ────────────────
             int old = self->m_pendingFlags.load();
             while (!self->m_pendingFlags.compare_exchange_weak(
                 old, old | static_cast<int>(flags)));
@@ -83,7 +106,7 @@ void MedicalVizService::Initialize(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IPreInitService — 逐项设置（向后兼容）
+// IPreInitService — 前处理：逐项设置（向后兼容）
 // ─────────────────────────────────────────────────────────────────────
 
 void MedicalVizService::PreInit_SetVizMode(VizMode mode)
@@ -113,66 +136,149 @@ void MedicalVizService::PreInit_SetIsoThreshold(double val)
     m_sharedState->SetIsoValue(val);
 }
 
+// 【前处理：数据无关】背景色直接写渲染器（可在加载前随时调用）
+void MedicalVizService::PreInit_SetBackground(const BackgroundColor& bg)
+{
+    // 同步写 SharedState（供后续 RenderParams 填充）
+    m_sharedState->SetBackground(bg);
+
+    // 直接更新渲染器（前处理阶段，主线程调用，无 VTK 线程问题）
+    if (m_renderer)
+        m_renderer->SetBackground(bg.r, bg.g, bg.b);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // IPreInitService::PreInit_CommitConfig（批量提交）
 //
-// SharedState 只加一次锁，只广播一次，减少多次逐项设置的开销
+// 一次锁 + 一次广播；VizMode 仅写原子变量（无需进 SharedState）
+// 背景色在此同步应用到渲染器（前处理阶段，主线程）
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::PreInit_CommitConfig(const PreInitConfig& cfg)
 {
-    // VizMode 只需记录意图，无需写 SharedState
+    // VizMode：只记录意图，无需写 SharedState，也不触发广播
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
-    // 其余参数批量写入 SharedState（内部一次锁 + 一次广播）
+
+    // 其余参数批量写入 SharedState（内部精确 diff + 一次锁 + 一次广播）
     m_sharedState->CommitPreInitConfig(cfg);
+
+    // 背景色：前处理阶段直接应用到渲染器（数据无关，主线程安全）
+    if (cfg.hasBgColor && m_renderer)
+        m_renderer->SetBackground(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// IDataLoaderService::GetLoadState
+// ─────────────────────────────────────────────────────────────────────
+LoadState MedicalVizService::GetLoadState() const
+{
+    return m_sharedState->GetLoadState();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// IDataLoaderService::CancelLoad（尽力取消）
+// ─────────────────────────────────────────────────────────────────────
+void MedicalVizService::CancelLoad()
+{
+    m_cancelRequested = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // IDataLoaderService::LoadFileAsync
 //
 // 【线程安全】
-//   - 加载在 detach 线程执行，dataMgr / sharedState 值捕获保生命周期
-//   - onComplete 在后台线程，只允许操作 SharedState
-//   - 通知通过 NotifyDataReady 广播，服务通过 Observer 回调接收
+//   - 加载在独立线程执行；通过 std::packaged_task + future 管理生命周期
+//   - m_cancelRequested 是 atomic<bool>，加载函数内部可自检退出
+//   - dataMgr / sharedState 值捕获保证生命周期（shared_ptr 引用计数）
+//   - onComplete 在后台线程调用，只允许操作 SharedState
+//   - 加载成功 → NotifyDataReady；失败 → NotifyLoadFailed
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::LoadFileAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
+    // 防止重复加载（加载中状态直接返回）
+    if (m_sharedState->GetLoadState() == LoadState::Loading) {
+        std::cerr << "[LoadFileAsync] Already loading, ignoring duplicate call.\n";
+        return;
+    }
+
+    m_cancelRequested = false;
+    m_sharedState->SetLoadState(LoadState::Loading);
+
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
+    auto cancelFlag = std::shared_ptr<std::atomic<bool>>(
+        &m_cancelRequested, [](std::atomic<bool>*) {});  // non-owning alias
 
-    std::thread([dataMgr, sharedState, path, onComplete]() {
-        bool ok = dataMgr->LoadData(path);
-
-        if (ok) {
-            auto img = dataMgr->GetVtkImage();
-            if (img) {
-                double range[2];
-                img->GetScalarRange(range);
-                sharedState->NotifyDataReady(range[0], range[1]);
+    // 用 packaged_task 包装，future 用于析构等待
+    std::packaged_task<void()> task([dataMgr, sharedState, path, onComplete,
+        cancelFlag]() mutable
+        {
+            // 加载前检查取消标记
+            if (cancelFlag->load()) {
+                sharedState->SetLoadState(LoadState::Idle);
+                if (onComplete) onComplete(false);
+                return;
             }
-        }
-        else {
-            std::cerr << "[LoadFileAsync] Failed: " << path << "\n";
-        }
 
-        if (onComplete) onComplete(ok);
-        }).detach();
+            bool ok = dataMgr->LoadData(path);
+
+            // 加载后再次检查取消标记
+            if (cancelFlag->load()) {
+                sharedState->SetLoadState(LoadState::Idle);
+                if (onComplete) onComplete(false);
+                return;
+            }
+
+            if (ok) {
+                auto img = dataMgr->GetVtkImage();
+                if (img) {
+                    double range[2];
+                    img->GetScalarRange(range);
+                    sharedState->NotifyDataReady(range[0], range[1]);  // 设 Succeeded
+                }
+                else {
+                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
+                    sharedState->NotifyLoadFailed();  // ← NEW
+                }
+            }
+            else {
+                std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
+                sharedState->NotifyLoadFailed();  // ← NEW
+            }
+
+            if (onComplete) onComplete(ok);
+        });
+
+    // 保存 future 用于析构 join
+    {
+        std::lock_guard<std::mutex> lk(m_loadMutex);
+        m_loadFuture = task.get_future();
+    }
+
+    std::thread(std::move(task)).detach();
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // ProcessPendingUpdates（主线程 Timer 驱动）
 //
 // 路由优先级：
-//   1. m_needsCacheClear  → ExecuteClearStrategyCache（VTK Detach 在主线程）
-//   2. m_needsDataRefresh → PostData_RebuildPipeline
-//   3. m_needsSync        → PostData_SyncStateToStrategy
+//   1. m_needsCacheClear  → ExecuteClearStrategyCache（Detach 在主线程）
+//   2. m_needsLoadFailed  → PostData_HandleLoadFailed
+//   3. m_needsDataRefresh → PostData_RebuildPipeline
+//   4. m_needsSync        → PostData_SyncStateToStrategy
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::ProcessPendingUpdates()
 {
-    // 执行延迟缓存清理（修复：Detach 必须在主线程）
+    // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
         ExecuteClearStrategyCache();
+
+    // 加载失败处理
+    if (m_needsLoadFailed.exchange(false)) {
+        PostData_HandleLoadFailed();
+        return;
+    }
 
     // DataReady → 重建管线（优先于增量同步）
     if (m_needsDataRefresh.exchange(false)) {
@@ -180,7 +286,7 @@ void MedicalVizService::ProcessPendingUpdates()
         return; // 本帧只做重建，同步留到下帧
     }
 
-    // 普通事件增量同步
+    // 4. 普通事件增量同步
     PostData_SyncStateToStrategy();
 }
 
@@ -191,21 +297,34 @@ void MedicalVizService::PostData_RebuildPipeline()
 {
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto    strategy = GetOrCreateStrategy(mode);
-    if (!strategy) return;
+    if (!strategy) {
+        std::cerr << "[RebuildPipeline] StrategyFactory returned null for mode "
+            << static_cast<int>(mode) << "\n";
+        return;
+    }
 
-    auto img = m_dataManager->GetVtkImage();
+    auto img = m_dataManager ? m_dataManager->GetVtkImage() : nullptr;
     if (img) {
         int dims[3] = { 0, 0, 0 };
         img->GetDimensions(dims);
-        if (dims[0] > 0 && dims[1] > 0 && dims[2] > 0)
+        if (dims[0] > 0 && dims[1] > 0 && dims[2] > 0) {
             strategy->SetInputData(img);
+        }
+        else {
+            std::cerr << "[RebuildPipeline] Image has zero dimension, skipping SetInputData.\n";
+            return;
+        }
+    }
+    else {
+        std::cerr << "[RebuildPipeline] DataManager has no valid image.\n";
+        return;
     }
 
     SwitchStrategy(strategy);
     MarkNeedsSync(); // 重建后触发一次全量参数同步
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────��────────────────────────
 // PostData_SyncStateToStrategy（后处理路径 B，主线程）
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::PostData_SyncStateToStrategy()
@@ -226,6 +345,12 @@ void MedicalVizService::PostData_SyncStateToStrategy()
         m_renderWindow->SetDesiredUpdateRate(interacting ? 15.0 : 0.001);
     }
 
+    // 背景色同步（数据无关，直接写渲染器）
+    if (HasFlag(flags, UpdateFlags::Background) && m_renderer) {
+        auto bg = m_sharedState->GetBackground();
+        m_renderer->SetBackground(bg.r, bg.g, bg.b);
+    }
+
     RenderParams params = BuildRenderParams(flags);
     m_currentStrategy->UpdateVisuals(params, flags);
 
@@ -233,19 +358,40 @@ void MedicalVizService::PostData_SyncStateToStrategy()
     m_needsSync = false;
 }
 
+void MedicalVizService::PostData_HandleLoadFailed()
+{
+    std::cerr << "[PostData_HandleLoadFailed] Load failed; clearing pipeline state.\n";
+
+    // 清理策略缓存（无有效数据，不应保留旧 Strategy）
+    ExecuteClearStrategyCache();
+
+    // 重置刷新标记，防止残留 DataReady 触发错误重建
+    m_needsDataRefresh = false;
+
+    // 通知渲染器刷新（显示空场景或占位符背景）
+    m_isDirty = true;
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// BuildRenderParams（私有，只读 SharedState）
+// BuildRenderParams（私有，按 flags 精确读取 SharedState，减少锁调用）
 // ─────────────────────────────────────────────────────────────────────
 RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
-    auto pos = m_sharedState->GetCursorPosition();
-    p.cursor = { pos[0], pos[1], pos[2] };
-    auto range = m_sharedState->GetDataRange();
-    p.scalarRange[0] = range[0];
-    p.scalarRange[1] = range[1];
-    p.material = m_sharedState->GetMaterial();
+    // cursor、scalarRange、material 几乎每帧都需要，统一读取成本低
+    {
+        auto pos = m_sharedState->GetCursorPosition();
+        p.cursor = { pos[0], pos[1], pos[2] };
+    }
+    {
+        auto range = m_sharedState->GetDataRange();
+        p.scalarRange[0] = range[0];
+        p.scalarRange[1] = range[1];
+    }
+
+    if (HasFlag(flags, UpdateFlags::Material))
+        p.material = m_sharedState->GetMaterial();
 
     if (HasFlag(flags, UpdateFlags::TF))
         m_sharedState->GetTFNodes(p.tfNodes);
@@ -255,6 +401,9 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 
     if (HasFlag(flags, UpdateFlags::Transform))
         p.modelMatrix = m_sharedState->GetModelMatrix();
+
+    if (HasFlag(flags, UpdateFlags::Background))
+        p.background = m_sharedState->GetBackground();
 
     return p;
 }
@@ -273,13 +422,11 @@ MedicalVizService::GetOrCreateStrategy(VizMode mode)
     return s;
 }
 
-// 后台线程调用：只设标记，不碰 VTK
 void MedicalVizService::RequestClearStrategyCache()
 {
     m_needsCacheClear = true;
 }
 
-// 主线程调用：真正执行 Detach + clear
 void MedicalVizService::ExecuteClearStrategyCache()
 {
     if (m_currentStrategy && m_renderer) {
@@ -309,7 +456,6 @@ void MedicalVizService::MarkNeedsSync()
 // ─────────────────────────────────────────────────────────────────────
 // 交互接口实现
 // ─────────────────────────────────────────────────────────────────────
-
 void MedicalVizService::UpdateInteraction(int delta)
 {
     if (!m_sharedState) return;
