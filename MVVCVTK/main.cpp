@@ -118,7 +118,7 @@ int main()
     cfgE.preInitCfg.bgColor = { 0.08, 0.08, 0.12 }; // 深蓝背景
     cfgE.preInitCfg.hasBgColor = true;
 
-    // 窗口 B：Axial 切片
+    // ── 窗口 B：Axial 切片（2D，默认软组织窗）────────────────────
     WindowConfig cfgB;
     cfgB.title = "Window B: Axial Slice";
     cfgB.width = 400; cfgB.height = 400;
@@ -127,8 +127,10 @@ int main()
     cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
     cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgB.preInitCfg.hasBgColor = true;
+    cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★ WW=400, WC=40 软组织窗
+    cfgB.preInitCfg.hasWindowLevel = true;
 
-    // 窗口 C：Coronal 切片
+    // ── 窗口 C：Coronal 切片 ─────────────────────────────────────
     WindowConfig cfgC;
     cfgC.title = "Window C: Coronal Slice";
     cfgC.width = 400; cfgC.height = 400;
@@ -137,8 +139,10 @@ int main()
     cfgC.preInitCfg.vizMode = VizMode::SliceCoronal;
     cfgC.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgC.preInitCfg.hasBgColor = true;
+    cfgC.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★
+    cfgC.preInitCfg.hasWindowLevel = true;
 
-    // 窗口 D：Sagittal 切片
+    // ── 窗口 D：Sagittal 切片 ────────────────────────────────────
     WindowConfig cfgD;
     cfgD.title = "Window D: Sagittal Slice";
     cfgD.width = 400; cfgD.height = 400;
@@ -147,6 +151,8 @@ int main()
     cfgD.preInitCfg.vizMode = VizMode::SliceSagittal;
     cfgD.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgD.preInitCfg.hasBgColor = true;
+    cfgD.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★
+    cfgD.preInitCfg.hasWindowLevel = true;
 
     // ── 批量建窗（前处理完成）────────────────────────────────────
     auto [serviceA, contextA] = BuildWindow(cfgA, sharedDataMgr, sharedState);
@@ -186,8 +192,16 @@ int main()
             double isoVal = range[0] + (range[1] - range[0]) * 0.6;
             serviceA->PreInit_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
 
-            std::cout << "[onComplete] Data loaded. IsoThreshold set to "
-                << isoVal << "\n";
+            // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）
+                        // 取数据范围中央 60% 作为窗口宽度，中点为窗位
+                        // 若已知是 HU 数据，可直接使用固定预设（软组织/肺/骨窗）
+            double ww = (range[1] - range[0]) * 0.6;
+            double wc = range[0] + (range[1] - range[0]) * 0.5;
+            sharedState->SetWindowLevel(ww, wc);  // 线程安全：写 SharedState
+
+            std::cout << "[onComplete] Data loaded."
+                << " IsoThreshold=" << isoVal
+                << " WW=" << ww << " WC=" << wc << "\n";
         }
     );
 

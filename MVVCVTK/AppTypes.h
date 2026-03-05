@@ -64,6 +64,12 @@ struct BackgroundColor {
     double r = 0.1, g = 0.1, b = 0.1;
 };
 
+// -- 切片窗宽窗位参数 ---
+struct WindowLevelParams {
+    double windowWidth = 400.0;  // WW 默认：软组织窗
+    double windowCenter = 40.0;   // WC 默认：软组织窗
+};
+
 // --- 更新类型位掩码（可组合）---
 enum class UpdateFlags : int {
     None = 0,
@@ -77,6 +83,7 @@ enum class UpdateFlags : int {
     LoadFailed = 1 << 7,  // 数据加载失败    (0x80)
     Background = 1 << 8,  // 背景色改变      (0x100)
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
+    WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
     All = Cursor | TF | IsoValue | Material | Interaction | Transform
 };
 
@@ -108,6 +115,7 @@ struct RenderParams {
     double                 scalarRange[2] = { 0.0, 255.0 };
     MaterialParams         material;
     double                 isoValue = 0.0;
+    WindowLevelParams      windowLevel;
     std::array<double, 16> modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };
@@ -128,10 +136,12 @@ struct PreInitConfig {
     MaterialParams      material;
     std::vector<TFNode> tfNodes;
     double              isoThreshold = 0.0;
-    BackgroundColor     bgColor;         
+    BackgroundColor     bgColor;
+    WindowLevelParams   windowLevel;              
     bool                hasTF = false;
     bool                hasIso = false;
-    bool                hasBgColor = false; 
+    bool                hasBgColor = false;
+    bool                hasWindowLevel = false;    
 };
 
 // --- 窗口配置（用于批量建窗）---

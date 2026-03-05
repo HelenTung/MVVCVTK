@@ -140,6 +140,7 @@ public:
     virtual void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
     virtual void PreInit_SetIsoThreshold(double val) = 0;
     virtual void PreInit_SetBackground(const BackgroundColor& bg) = 0;
+    virtual void PreInit_SetWindowLevel(double ww, double wc) = 0;
     virtual void PreInit_CommitConfig(const PreInitConfig& cfg) = 0;
 };
 

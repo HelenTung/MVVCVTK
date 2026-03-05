@@ -45,74 +45,36 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
 
 void SliceStrategy::RebuildLUT(const RenderParams& params)
 {
+    // WW/WC 线性灰阶映射（DICOM PS3.3 C.7.6.3）
+    // 公式：gray = clamp((scalar - WC + WW/2) / WW, 0, 1)
+    const double ww = params.windowLevel.windowWidth;
+    const double wc = params.windowLevel.windowCenter;
+    const double lo = wc - ww * 0.5;   // 窗下界：低于此值 → 纯黑
+    const double hi = wc + ww * 0.5;   // 窗上界：高于此值 → 纯白
+
     const double minVal = params.scalarRange[0];
     const double maxVal = params.scalarRange[1];
-    const double range = maxVal - minVal;
-    if (range <= 0.0) return;
+    if (maxVal - minVal <= 0.0) return;
 
-    const double globalOpacity = params.material.opacity;
-    const int    nTable = 256;
-
+    // CT 用 4096 级，匹配 12-bit 精度
+    const int nTable = 256;
     m_lut->SetNumberOfTableValues(nTable);
     m_lut->SetTableRange(minVal, maxVal);
 
-    // 用 isoValue 做阈值：低于阈值 → 完全透明，高于阈值 → 按 tfNodes 着色
-    // 归一化的阈值位置
-    const double isoT = (range > 0.0)
-        ? (params.isoValue - minVal) / range
-        : 0.5;
-
     for (int i = 0; i < nTable; i++)
     {
-        const double t = static_cast<double>(i) / static_cast<double>(nTable - 1);
+        const double scalar = minVal + (maxVal - minVal) * (double(i) / (nTable - 1));
 
-        if (t < isoT)
-        {
-            // 背景区域：完全透明
-            m_lut->SetTableValue(i, 0.0, 0.0, 0.0, 0.0);
-        }
-        else
-        {
-            // 模型区域：从 tfNodes 取颜色，但 alpha 强制不透明
-            double r = 1.0, g = 1.0, b = 1.0; // 默认白色
-            const auto& nodes = params.tfNodes;
-            if (!nodes.empty())
-            {
-                if (t >= nodes.back().position)
-                {
-                    r = nodes.back().r;
-                    g = nodes.back().g;
-                    b = nodes.back().b;
-                }
-                else
-                {
-                    for (size_t k = 0; k + 1 < nodes.size(); ++k)
-                    {
-                        if (t >= nodes[k].position && t <= nodes[k + 1].position)
-                        {
-                            const double span = nodes[k + 1].position - nodes[k].position;
-                            const double alpha = (span > 0.0)
-                                ? (t - nodes[k].position) / span : 0.0;
-                            r = nodes[k].r + alpha * (nodes[k + 1].r - nodes[k].r);
-                            g = nodes[k].g + alpha * (nodes[k + 1].g - nodes[k].g);
-                            b = nodes[k].b + alpha * (nodes[k + 1].b - nodes[k].b);
-                            break;
-                        }
-                    }
-                }
-            }
-            // alpha 不从 tfNodes 取，直接用 globalOpacity，保证实心填充
-            m_lut->SetTableValue(i, r, g, b, 1.0);
-        }
+        double gray;
+        if (scalar <= lo) gray = 0.0;
+        else if (scalar >= hi) gray = 1.0;
+        else                   gray = (scalar - lo) / ww;
+
+        // 切片为纯灰阶，opacity 由材质全局控制
+        m_lut->SetTableValue(i, gray, gray, gray, params.material.opacity);
     }
 
-    m_lut->Modified();
-
-    auto imgProp = m_slice->GetProperty();
-    imgProp->SetOpacity(globalOpacity);
-    imgProp->SetAmbient(params.material.ambient);
-    imgProp->SetDiffuse(params.material.diffuse);
-
+    m_lut->Build();
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -337,18 +299,16 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         UpdateCrosshair(x, y, z);
     }
 
-	// 颜色映射和材质参数改变都可能影响最终的视觉效果，所以放在一起处理
-    if (HasFlag(flags, UpdateFlags::TF) || HasFlag(flags, UpdateFlags::Material))
+    // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
+    if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
     {
-        RebuildLUT(params);  // 内部依赖 tfNodes + scalarRange + material.opacity
+        RebuildLUT(params);
 
-        // 同步 vtkImageProperty 的整体透明度（架构保持一致）
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();
             imgProp->SetOpacity(params.material.opacity);
-            imgProp->SetAmbient(params.material.ambient);
-            imgProp->SetDiffuse(params.material.diffuse);
+            // 切片无光照，不设 ambient/diffuse（与 vtkImageProperty 语义一致）
         }
     }
 

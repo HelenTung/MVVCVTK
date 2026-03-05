@@ -99,6 +99,15 @@ public:
                 m_background = cfg.bgColor;
                 flags |= UpdateFlags::Background;
             }
+
+			// 切片窗宽/窗位
+            if (cfg.hasWindowLevel &&
+                (std::abs(m_windowLevel.windowWidth - cfg.windowLevel.windowWidth) > 1e-6 ||
+                    std::abs(m_windowLevel.windowCenter - cfg.windowLevel.windowCenter) > 1e-6))
+            {
+                m_windowLevel = cfg.windowLevel;
+                flags |= UpdateFlags::WindowLevel;
+            }
         }
         if (flags != UpdateFlags::None)
             NotifyObservers(flags);
@@ -194,6 +203,27 @@ public:
         return m_background;
     }
 
+    // ── 切片窗宽/窗位（WW/WC，工业 CT 标准）─────────────────────
+    void SetWindowLevel(double ww, double wc) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            if (std::abs(m_windowLevel.windowWidth - ww) > 1e-6 ||
+                std::abs(m_windowLevel.windowCenter - wc) > 1e-6)
+            {
+                m_windowLevel.windowWidth = ww;
+                m_windowLevel.windowCenter = wc;
+                changed = true;
+            }
+        }
+        if (changed) NotifyObservers(UpdateFlags::WindowLevel);
+    }
+    WindowLevelParams GetWindowLevel() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_windowLevel;
+    }
+
+
     // ── 交互状态 ──────────────────────────────────────────────────
     void SetInteracting(bool val) {
         bool changed = false;
@@ -281,7 +311,8 @@ private:
     int                    m_cursorPos[3] = { 0, 0, 0 };
     double                 m_isoValue = 0.0;
     MaterialParams         m_material;
-    BackgroundColor        m_background;                   
+    BackgroundColor        m_background;         
+    WindowLevelParams      m_windowLevel;
     std::vector<TFNode>    m_nodes;
     double                 m_dataRange[2] = { 0.0, 255.0 };
     bool                   m_isInteracting = false;

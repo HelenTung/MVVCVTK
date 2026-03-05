@@ -47,6 +47,7 @@ public:
     void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes)  override;
     void PreInit_SetIsoThreshold(double val)                            override;
     void PreInit_SetBackground(const BackgroundColor& bg)               override;
+    void PreInit_SetWindowLevel(double ww, double wc)                   override;
     void PreInit_CommitConfig(const PreInitConfig& cfg)                 override; // 批量提交
 
     // ================================================================
