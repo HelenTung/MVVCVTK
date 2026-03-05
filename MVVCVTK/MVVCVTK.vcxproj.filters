@@ -75,6 +75,36 @@
     <ClInclude Include="MemMappedFile.h">
       <Filter>头文件\Utils</Filter>
     </ClInclude>
+    <ClInclude Include="AppTypes.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="IInteractionHandler.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionEvent.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionResult.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionRouter.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="TimeUpdateHandler.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Viewer2DHandler.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Viewer3DHandler.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="VolumeAnalysisService.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="VolumeTransformService.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DataManager.cpp">
@@ -115,6 +145,21 @@
     </ClCompile>
     <ClCompile Include="MemMappedFile.cpp">
       <Filter>源文件\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="InteractionRouter.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="TimeUpdateHandler.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="Viewer2DHandler.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="Viewer3DHandler.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="example.cpp">
+      <Filter>源文件\main</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
