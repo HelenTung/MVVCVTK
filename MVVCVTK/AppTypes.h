@@ -84,7 +84,7 @@ enum class UpdateFlags : int {
     Background = 1 << 8,  // 背景色改变      (0x100)
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
     WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
-    All = Cursor | TF | IsoValue | Material | Interaction | Transform
+    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel
 };
 
 // 位运算辅助
