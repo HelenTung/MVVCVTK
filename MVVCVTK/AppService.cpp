@@ -399,8 +399,12 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
         m_sharedState->GetTFNodes(p.tfNodes);
     }
 
-    if (HasFlag(flags, UpdateFlags::Material))
+    if (HasFlag(flags, UpdateFlags::Material)) {
+        auto range = m_sharedState->GetDataRange();
+        p.scalarRange[0] = range[0];
+        p.scalarRange[1] = range[1];
         p.material = m_sharedState->GetMaterial();
+    }
 
     if (HasFlag(flags, UpdateFlags::IsoValue))
         p.isoValue = m_sharedState->GetIsoValue();
@@ -411,8 +415,12 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
     if (HasFlag(flags, UpdateFlags::Background))
         p.background = m_sharedState->GetBackground();
 
-    if (HasFlag(flags, UpdateFlags::WindowLevel))
+    if (HasFlag(flags, UpdateFlags::WindowLevel)) {
+        auto range = m_sharedState->GetDataRange();
+        p.scalarRange[0] = range[0];
+        p.scalarRange[1] = range[1];
         p.windowLevel = m_sharedState->GetWindowLevel();
+    }
 
     if (HasFlag(flags, UpdateFlags::Visibility))
 		p.visibilityMask = m_sharedState->GetVisibilityMask();
@@ -537,6 +545,21 @@ void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat)
 void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 {
     m_sharedState->SetElementVisible(flagBit, show);
+}
+
+// 运行时交互兼容层
+void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
+{
+    auto cur = m_sharedState->GetWindowLevel();
+
+    // WW 不允许小于最小有效值（防止 LUT 除以零）
+    constexpr double kMinWW = 1.0;
+    const double newWW = std::max(kMinWW, cur.windowWidth + deltaWW);
+    const double newWC = cur.windowCenter + deltaWC;
+
+    // SetWindowLevel 内部有 diff 检测 + mutex + NotifyObservers
+    m_sharedState->SetWindowLevel(newWW, newWC);
+    MarkNeedsSync();  // 与其他交互（SyncCursorToWorldPosition 等）保持一致
 }
 
 void MedicalVizService::TransformModel(

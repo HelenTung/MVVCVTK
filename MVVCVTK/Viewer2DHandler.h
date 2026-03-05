@@ -27,4 +27,7 @@ private:
     vtkRenderer* m_renderer = nullptr;
 
     bool m_enableDragCrosshair = false;  // 是否正在拖拽十字线
+    bool m_enableDragWindowLevel = false; // 右键：拖拽调窗
+    int  m_lastDragX = 0;                 // 上一帧鼠标 X（用于计算 delta）
+    int  m_lastDragY = 0;                 // 上一帧鼠标 Y
 };

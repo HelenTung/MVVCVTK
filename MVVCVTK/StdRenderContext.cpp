@@ -30,6 +30,8 @@ StdRenderContext::StdRenderContext()
     m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 0.5);
     m_interactor->AddObserver(vtkCommand::ExitEvent, m_eventCallback, 0.5);
     m_interactor->AddObserver(vtkCommand::InteractionEvent, m_eventCallback, 0.5);
+    m_interactor->AddObserver(vtkCommand::RightButtonPressEvent, m_eventCallback, 0.5);
+    m_interactor->AddObserver(vtkCommand::RightButtonReleaseEvent, m_eventCallback, 0.5);
 }
 
 // ─────────────────────────────────────────────────────────────────────
