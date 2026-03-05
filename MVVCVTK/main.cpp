@@ -127,7 +127,7 @@ int main()
     cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
     cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgB.preInitCfg.hasBgColor = true;
-    cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★ WW=400, WC=40 软组织窗
+    cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★ WW=400, WC=40
     cfgB.preInitCfg.hasWindowLevel = true;
 
     // ── 窗口 C：Coronal 切片 ─────────────────────────────────────
@@ -161,6 +161,7 @@ int main()
     auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
+	// 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
     contextA->SetElementVisible(VisFlags::ClipPlanes, false);
     contextE->SetElementVisible(VisFlags::ClipPlanes, false);
 
