@@ -25,10 +25,10 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_lastInput = data;
 
     //  降采样逻辑
-    vtkSmartPointer<vtkImageData> inputForMapper = ImageProcessor::ApplyDownsampling(img, 766);
+    //vtkSmartPointer<vtkImageData> inputForMapper = ImageProcessor::ApplyDownsampling(img, 766);
 
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-    mapper->SetInputData(inputForMapper); // 使用处理后(或原始)的数据
+    mapper->SetInputData(img); // 使用处理后(或原始)的数据
     mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
     mapper->SetInteractiveUpdateRate(10.0);
 

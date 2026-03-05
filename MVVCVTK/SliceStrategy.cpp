@@ -4,6 +4,7 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkImageProperty.h>
+#include <algorithm>
 
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
@@ -192,32 +193,39 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影
 
-    double imgCenter[3];
+    double imgCenter[3] = { 0.0, 0.0, 0.0 };
+    double bounds[6] = { 0.0, 1.0, 0.0, 1.0, 0.0, 1.0 };
     if (m_mapper && m_mapper->GetInput()) {
         m_mapper->GetInput()->GetCenter(imgCenter);
+        m_mapper->GetInput()->GetBounds(bounds);
     }
+
+    // 用数据最大尺寸作为偏移基准，确保相机方向向量精度
+    double sizeX = bounds[1] - bounds[0];
+    double sizeY = bounds[3] - bounds[2];
+    double sizeZ = bounds[5] - bounds[4];
+    double distance = std::max({ sizeX, sizeY, sizeZ }) * 2.0 + 1.0;
 
     // 初次设置
     cam->SetFocalPoint(imgCenter);
-    double distance = 0.1;
 
     switch (m_orientation) {
     case Orientation::AXIAL:
-        // AXIAL (轴状位): 从头顶往下看
+        // AXIAL: 从 Z+ 往 -Z 看，屏幕水平=X，屏幕垂直=Y
         cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
         cam->SetViewUp(0, 1, 0);
         break;
 
     case Orientation::CORONAL:
-        // CORONAL (冠状位): 从前面往后看
+        // CORONAL: 从 Y+ 往 -Y 看，屏幕水平=X，屏幕垂直=Z
         cam->SetPosition(imgCenter[0], imgCenter[1] + distance, imgCenter[2]);
-        cam->SetViewUp(0, 0, 1); // Z轴是向上的
+        cam->SetViewUp(0, 0, 1);
         break;
 
     case Orientation::SAGITTAL:
-        // SAGITTAL (矢状位): 从侧面看
+        // SAGITTAL: 从 X+ 往 -X 看，屏幕水平=Y，屏幕垂直=Z
         cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
-        cam->SetViewUp(0, 0, 1); // Z轴是向上的
+        cam->SetViewUp(0, 0, 1);
         break;
     }
 

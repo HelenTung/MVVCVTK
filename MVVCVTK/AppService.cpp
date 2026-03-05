@@ -22,7 +22,7 @@ void AbstractAppService::SwitchStrategy(
         m_currentStrategy->Attach(m_renderer);
         m_currentStrategy->SetupCamera(m_renderer);
     }
-    m_renderer->ResetCamera();
+     m_renderer->ResetCamera();
     m_isDirty = true;
 }
 
