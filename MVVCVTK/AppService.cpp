@@ -402,9 +402,6 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
     if (HasFlag(flags, UpdateFlags::Material))
         p.material = m_sharedState->GetMaterial();
 
-    if (HasFlag(flags, UpdateFlags::TF))
-        m_sharedState->GetTFNodes(p.tfNodes);
-
     if (HasFlag(flags, UpdateFlags::IsoValue))
         p.isoValue = m_sharedState->GetIsoValue();
 
