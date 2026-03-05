@@ -36,22 +36,27 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     m_imageData->GetBounds(bounds);
+    
+    // 取各轴的中心值作为初始平面位置
+    double centerX = (bounds[0] + bounds[1]) * 0.5;
+    double centerY = (bounds[2] + bounds[3]) * 0.5;
+    double centerZ = (bounds[4] + bounds[5]) * 0.5;
 
     // 根据数据边界定义每个平面的大小
-    // Sagittal Plane (YZ)
-    m_planeSources[0]->SetOrigin(0, bounds[2], bounds[4]);
-    m_planeSources[0]->SetPoint1(0, bounds[3], bounds[4]);
-    m_planeSources[0]->SetPoint2(0, bounds[2], bounds[5]);
+    // Sagittal Plane (YZ)，法线 X，初始位于 X 中心
+    m_planeSources[0]->SetOrigin(centerX, bounds[2], bounds[4]);
+    m_planeSources[0]->SetPoint1(centerX, bounds[3], bounds[4]);
+    m_planeSources[0]->SetPoint2(centerX, bounds[2], bounds[5]);
 
-    // Coronal Plane (XZ)
-    m_planeSources[1]->SetOrigin(bounds[0], 0, bounds[4]);
-    m_planeSources[1]->SetPoint1(bounds[1], 0, bounds[4]);
-    m_planeSources[1]->SetPoint2(bounds[0], 0, bounds[5]);
+    // Coronal Plane (XZ)，法线 Y，初始位于 Y 中心
+    m_planeSources[1]->SetOrigin(bounds[0], centerY, bounds[4]);
+    m_planeSources[1]->SetPoint1(bounds[1], centerY, bounds[4]);
+    m_planeSources[1]->SetPoint2(bounds[0], centerY, bounds[5]);
 
-    // Axial Plane (XY)
-    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], 0);
-    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], 0);
-    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], 0);
+    // Axial Plane (XY)，法线 Z，初始位于 Z 中心
+    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], centerZ);
+    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], centerZ);
+    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], centerZ);
 }
 
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {

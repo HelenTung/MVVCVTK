@@ -155,17 +155,17 @@ int main()
     auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
-    contextA->SetElementVisible(VisFlags::ClipPlanes, false);
-    contextE->SetElementVisible(VisFlags::ClipPlanes, false);
+    //contextA->SetElementVisible(VisFlags::ClipPlanes, false);
+    //contextE->SetElementVisible(VisFlags::ClipPlanes, false);
 
-    // 3D 窗口：隐藏标尺
-    contextA->SetElementVisible(VisFlags::RulerAxes, false);
-    contextE->SetElementVisible(VisFlags::RulerAxes, false);
+    //// 3D 窗口：隐藏标尺
+    //contextA->SetElementVisible(VisFlags::RulerAxes, false);
+    //contextE->SetElementVisible(VisFlags::RulerAxes, false);
 
-    // 2D 窗口：隐藏十字测量线
-    contextB->SetElementVisible(VisFlags::Crosshair, false);
-    contextC->SetElementVisible(VisFlags::Crosshair, false);
-    contextD->SetElementVisible(VisFlags::Crosshair, false);
+    //// 2D 窗口：隐藏十字测量线
+    //contextB->SetElementVisible(VisFlags::Crosshair, false);
+    //contextC->SetElementVisible(VisFlags::Crosshair, false);
+    //contextD->SetElementVisible(VisFlags::Crosshair, false);
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
