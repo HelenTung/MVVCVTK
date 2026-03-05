@@ -32,7 +32,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
     mapper->SetInteractiveUpdateRate(10.0);
 
-    m_cubeAxes->SetBounds(inputForMapper->GetBounds());
+	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
+    m_cubeAxes->SetBounds(img->GetBounds());
     m_volume->SetMapper(mapper);
     if (!m_volume->GetProperty()) {
         auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();

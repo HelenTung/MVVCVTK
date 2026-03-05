@@ -7,25 +7,22 @@ vtkSmartPointer<vtkImageData> ImageProcessor::ApplyDownsampling(vtkImageData* in
 
     int dims[3];
     input->GetDimensions(dims);
+    int maxDim = std::max({ dims[0], dims[1], dims[2] });
 
     // 检查是否需要降采样
-    if (dims[0] <= targetDim && dims[1] <= targetDim && dims[2] <= targetDim) {
+    if (maxDim <= targetDim) {
         return input; // 不需要处理，直接返回原指针
     }
+
+    // 以最大轴为基准，三轴等比例缩放，保持物理 Bounds 不变
+    double factor = static_cast<double>(targetDim) / static_cast<double>(maxDim);
 
     // --- 执行降采样逻辑 ---
     auto resample = vtkSmartPointer<vtkImageResample>::New();
     resample->SetInputData(input);
-
-    // 计算各轴缩放因子
-    // vtkImageResample 会自动调整 Spacing，确保物理空间 Bounds 不变
-    double factorX = static_cast<double>(targetDim) / static_cast<double>(dims[0]);
-    double factorY = static_cast<double>(targetDim) / static_cast<double>(dims[1]);
-    double factorZ = static_cast<double>(targetDim) / static_cast<double>(dims[2]);
-
-    resample->SetAxisMagnificationFactor(0, factorX);
-    resample->SetAxisMagnificationFactor(1, factorY);
-    resample->SetAxisMagnificationFactor(2, factorZ);
+    resample->SetAxisMagnificationFactor(0, factor);
+    resample->SetAxisMagnificationFactor(1, factor);
+    resample->SetAxisMagnificationFactor(2, factor);
 
     resample->SetInterpolationModeToLinear(); // 线性插值平衡性能与质量
     resample->Update();
