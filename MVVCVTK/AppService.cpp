@@ -399,6 +399,13 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
         m_sharedState->GetTFNodes(p.tfNodes);
     }
 
+    if (HasFlag(flags, UpdateFlags::WindowLevel)) {
+        auto range = m_sharedState->GetDataRange();
+        p.scalarRange[0] = range[0];
+        p.scalarRange[1] = range[1];
+        p.windowLevel = m_sharedState->GetWindowLevel();
+    }
+
     if (HasFlag(flags, UpdateFlags::Material)) {
         auto range = m_sharedState->GetDataRange();
         p.scalarRange[0] = range[0];
@@ -414,13 +421,6 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 
     if (HasFlag(flags, UpdateFlags::Background))
         p.background = m_sharedState->GetBackground();
-
-    if (HasFlag(flags, UpdateFlags::WindowLevel)) {
-        auto range = m_sharedState->GetDataRange();
-        p.scalarRange[0] = range[0];
-        p.scalarRange[1] = range[1];
-        p.windowLevel = m_sharedState->GetWindowLevel();
-    }
 
     if (HasFlag(flags, UpdateFlags::Visibility))
 		p.visibilityMask = m_sharedState->GetVisibilityMask();
