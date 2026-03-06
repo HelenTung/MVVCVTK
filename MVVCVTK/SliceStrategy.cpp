@@ -56,7 +56,7 @@ void SliceStrategy::RebuildLUT(const RenderParams& params)
     const double maxVal = params.scalarRange[1];
     if (maxVal - minVal <= 0.0) return;
 
-    // CT 用 4096 级，匹配 12-bit 精度
+    // CT 用 256 
     const int nTable = 256;
     m_lut->SetNumberOfTableValues(nTable);
     m_lut->SetTableRange(minVal, maxVal);

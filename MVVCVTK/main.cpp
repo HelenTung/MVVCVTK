@@ -190,7 +190,7 @@ int main()
             // 后处理业务：数据就绪后，基于实际数据范围推算等值面阈值
             // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
             auto range = sharedState->GetDataRange();
-            double isoVal = range[0] + (range[1] - range[0]) * 0.6;
+            double isoVal = range[0] + (range[1] - range[0]) * 0.35;
             serviceA->PreInit_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
 
             // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）

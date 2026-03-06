@@ -77,7 +77,7 @@ void MedicalVizService::Initialize(
             if (HasFlag(flags, UpdateFlags::DataReady)) {
                 self->RequestClearStrategyCache();
                 self->ResetCursorToCenter();
-                self->m_pendingFlags.fetch_or(static_cast< int>(UpdateFlags::All));
+                self->m_pendingFlags.fetch_or(static_cast<  int>(UpdateFlags::All));
                 self->m_needsDataRefresh = true;
                 return;
             }

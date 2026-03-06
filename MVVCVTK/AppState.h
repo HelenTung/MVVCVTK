@@ -297,8 +297,12 @@ public:
     void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
         if (!owner || !cb) return;
         std::lock_guard<std::mutex> lk(m_mutex);
-        // 清理已过期条目，避免列表膨胀
+		// 先清理再放入，保持列表干净（不保留过期条目）
+        // 清理已过期条目，避免列表膨胀，"erase-remove 惯用法"
         m_observers.erase(
+            // vec.erase(std::remove_if(vec.begin(), vec.end(), 条件谓词), vec.end());
+			// 条件谓词返回 true 的元素会被移除，返回 false 的元素会被保留
+            // 把谓词理解成 "是垃圾吗？"
             std::remove_if(m_observers.begin(), m_observers.end(),
                 [](const ObserverEntry& e) { return e.owner.expired(); }),
             m_observers.end());
