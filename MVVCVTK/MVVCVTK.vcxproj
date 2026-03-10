@@ -157,6 +157,8 @@ vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</A
     <ClInclude Include="CompositeStrategy.h" />
     <ClInclude Include="DataConverters.h" />
     <ClInclude Include="DataManager.h" />
+    <ClInclude Include="GapAnalysisService.h" />
+    <ClInclude Include="GapAnalysisTypes.h" />
     <ClInclude Include="IInteractionHandler.h" />
     <ClInclude Include="ImageProcessor.h" />
     <ClInclude Include="InteractionEvent.h" />
@@ -168,10 +170,13 @@ vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</A
     <ClInclude Include="SliceStrategy.h" />
     <ClInclude Include="StdRenderContext.h" />
     <ClInclude Include="StrategyFactory.h" />
+    <ClInclude Include="SurfaceRefiner.h" />
     <ClInclude Include="TimeUpdateHandler.h" />
     <ClInclude Include="Viewer2DHandler.h" />
     <ClInclude Include="Viewer3DHandler.h" />
+    <ClInclude Include="VoidDetector.h" />
     <ClInclude Include="VolumeAnalysisService.h" />
+    <ClInclude Include="VolumeBuffer.h" />
     <ClInclude Include="VolumeStrategy.h" />
     <ClInclude Include="VolumeTransformService.h" />
   </ItemGroup>

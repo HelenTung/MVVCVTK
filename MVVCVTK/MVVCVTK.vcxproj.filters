@@ -28,29 +28,41 @@
     <Filter Include="源文件\Utils">
       <UniqueIdentifier>{a5f21c88-3127-4ee9-9c77-05fe2058cc3f}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Math">
+      <UniqueIdentifier>{daf8e20e-8217-4b2c-87ab-8ad66f8d5a02}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Math\GapAnalysis">
+      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Interaction">
+      <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Interaction">
+      <UniqueIdentifier>{b373314f-cec2-47e7-a3d9-cf2379287f0e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Render">
+      <UniqueIdentifier>{f0303deb-b2f1-437d-b276-6b51b7f6ac6b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Render">
+      <UniqueIdentifier>{cec7be8b-9c99-4ae3-83f3-d789f49f5ff8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Service">
+      <UniqueIdentifier>{bc41cad7-f141-4d16-a4a6-700e21a5e52c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Service">
+      <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Data">
+      <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\Data">
+      <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\App">
+      <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="AppInterfaces.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="DataManager.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="DataConverters.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="AppService.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="StrategyFactory.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="StdRenderContext.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="AppState.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="IsoSurfaceStrategy.h">
       <Filter>头文件\Strategies</Filter>
     </ClInclude>
@@ -75,52 +87,76 @@
     <ClInclude Include="MemMappedFile.h">
       <Filter>头文件\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="AppTypes.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="GapAnalysisTypes.h">
+      <Filter>头文件\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="IInteractionHandler.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="VolumeBuffer.h">
+      <Filter>头文件\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionEvent.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="SurfaceRefiner.h">
+      <Filter>头文件\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionResult.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="InteractionRouter.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="TimeUpdateHandler.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
-    <ClInclude Include="Viewer2DHandler.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="VoidDetector.h">
+      <Filter>头文件\Math\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="Viewer3DHandler.h">
-      <Filter>头文件</Filter>
+      <Filter>头文件\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="VolumeAnalysisService.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="Viewer2DHandler.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="TimeUpdateHandler.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionRouter.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionResult.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionEvent.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="IInteractionHandler.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="StrategyFactory.h">
+      <Filter>头文件\Render</Filter>
+    </ClInclude>
+    <ClInclude Include="StdRenderContext.h">
+      <Filter>头文件\Render</Filter>
     </ClInclude>
     <ClInclude Include="VolumeTransformService.h">
-      <Filter>头文件</Filter>
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="VolumeAnalysisService.h">
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="GapAnalysisService.h">
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="AppService.h">
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="DataManager.h">
+      <Filter>头文件\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="DataConverters.h">
+      <Filter>头文件\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="AppTypes.h">
+      <Filter>头文件\App</Filter>
+    </ClInclude>
+    <ClInclude Include="AppState.h">
+      <Filter>头文件\App</Filter>
+    </ClInclude>
+    <ClInclude Include="AppInterfaces.h">
+      <Filter>头文件\App</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="DataManager.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="DataConverters.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="AppService.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
       <Filter>源文件\main</Filter>
-    </ClCompile>
-    <ClCompile Include="StdRenderContext.cpp">
-      <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="CompositeStrategy.cpp">
       <Filter>源文件\Strategies</Filter>
@@ -146,20 +182,32 @@
     <ClCompile Include="MemMappedFile.cpp">
       <Filter>源文件\Utils</Filter>
     </ClCompile>
-    <ClCompile Include="InteractionRouter.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="TimeUpdateHandler.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="Viewer2DHandler.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
-    <ClCompile Include="Viewer3DHandler.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="example.cpp">
       <Filter>源文件\main</Filter>
+    </ClCompile>
+    <ClCompile Include="Viewer3DHandler.cpp">
+      <Filter>源文件\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="Viewer2DHandler.cpp">
+      <Filter>源文件\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="TimeUpdateHandler.cpp">
+      <Filter>源文件\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="InteractionRouter.cpp">
+      <Filter>源文件\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="StdRenderContext.cpp">
+      <Filter>源文件\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="AppService.cpp">
+      <Filter>源文件\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="DataManager.cpp">
+      <Filter>源文件\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="DataConverters.cpp">
+      <Filter>源文件\Data</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
