@@ -19,7 +19,7 @@
 #include "VolumeBuffer.h"
 #include "VoidDetector.h"
 #include "SurfaceRefiner.h"
-#include "../AppInterfaces.h"
+#include "AppInterfaces.h"
 
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
