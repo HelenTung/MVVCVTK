@@ -562,7 +562,7 @@ void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
     constexpr double kMinWW = 1.0;
     const double newWW = std::max(kMinWW, cur.windowWidth + scaledWW);
     const double newWC = (dataSpan > 0.0)
-        ? std::max(range[0], std::min(range[1], cur.windowCenter + scaledWC))
+        ? std::max(range[0] - dataSpan, std::min(range[1] + dataSpan, cur.windowCenter + scaledWC))
         : cur.windowCenter + scaledWC;
 
 

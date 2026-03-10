@@ -35,6 +35,8 @@ public:
             m_dataRange[0] = rangeMin;
             m_dataRange[1] = rangeMax;
             m_loadState = LoadState::Succeeded;
+            m_windowLevel.windowWidth = rangeMax - rangeMin;
+            m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
         NotifyObservers(UpdateFlags::DataReady);
     }
