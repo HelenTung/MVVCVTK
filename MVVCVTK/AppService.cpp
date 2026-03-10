@@ -555,12 +555,15 @@ void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
     auto range = m_sharedState->GetDataRange();
     const double dataSpan = range[1] - range[0];
 
+    const double scaledWW = (dataSpan > 0.0) ? deltaWW * dataSpan * 0.005 : deltaWW;
+    const double scaledWC = (dataSpan > 0.0) ? deltaWC * dataSpan * 0.003 : deltaWC;
+
     // WW 不允许小于最小有效值（防止 LUT 除以零）
     constexpr double kMinWW = 1.0;
-    const double newWW = std::max(kMinWW, cur.windowWidth + deltaWW);
+    const double newWW = std::max(kMinWW, cur.windowWidth + scaledWW);
     const double newWC = (dataSpan > 0.0)
-        ? std::max(range[0], std::min(range[1], cur.windowCenter + deltaWC))
-        : cur.windowCenter + deltaWC;
+        ? std::max(range[0], std::min(range[1], cur.windowCenter + scaledWC))
+        : cur.windowCenter + scaledWC;
 
 
     // SetWindowLevel 内部有 diff 检测 + mutex + NotifyObservers
