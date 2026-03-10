@@ -492,6 +492,7 @@ void MedicalVizService::UpdateInteraction(int delta)
         pos[axis] = std::max(0, std::min(pos[axis], dims[axis] - 1));
     }
     m_sharedState->SetCursorPosition(pos[0], pos[1], pos[2]);
+    MarkNeedsSync();
 }
 
 void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
@@ -551,11 +552,16 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
 {
     auto cur = m_sharedState->GetWindowLevel();
+    auto range = m_sharedState->GetDataRange();
+    const double dataSpan = range[1] - range[0];
 
     // WW 不允许小于最小有效值（防止 LUT 除以零）
     constexpr double kMinWW = 1.0;
     const double newWW = std::max(kMinWW, cur.windowWidth + deltaWW);
-    const double newWC = cur.windowCenter + deltaWC;
+    const double newWC = (dataSpan > 0.0)
+        ? std::max(range[0], std::min(range[1], cur.windowCenter + deltaWC))
+        : cur.windowCenter + deltaWC;
+
 
     // SetWindowLevel 内部有 diff 检测 + mutex + NotifyObservers
     m_sharedState->SetWindowLevel(newWW, newWC);

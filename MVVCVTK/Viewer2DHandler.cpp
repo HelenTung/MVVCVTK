@@ -15,7 +15,7 @@ namespace {
 
     // 窗宽/窗位灵敏度系数（每像素对应的 WW/WC 变化量）
     // 可根据数据范围动态缩放，此处使用固定系数作为合理默认值
-    constexpr double kWWSensitivity = 4.0;   // 水平拖动 → ΔWW（对比度）
+    constexpr double kWWSensitivity = 2.0;   // 水平拖动 → ΔWW（对比度）
     constexpr double kWCSensitivity = 2.0;   // 垂直拖动 → ΔWC（亮度/窗位）
 
 } // namespace
@@ -43,7 +43,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
         m_service->UpdateInteraction(delta);
-        m_service->MarkDirty();
+        // m_service->MarkDirty();
         return { true, true };  // abortVtk=true：阻止 VTK 默认滚轮相机缩放
     }
 
@@ -117,7 +117,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_lastDragY = eve.y;
 
             const double deltaWW = dx * kWWSensitivity;
-            const double deltaWC = -dy * kWCSensitivity;  // VTK Y 轴向上，取反
+            const double deltaWC = dy * kWCSensitivity;  // VTK Y 轴向上，不取反
 
             m_service->AdjustWindowLevel(deltaWW, deltaWC);
             // AdjustWindowLevel 内部已调 MarkNeedsSync，此处无需重复 MarkDirty
