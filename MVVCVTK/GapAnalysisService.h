@@ -1,18 +1,6 @@
 ﻿#pragma once
 // =====================================================================
-// GapAnalysisService.h — 间隙分析接入层
-//
-// 职责：桥接 MVVCVTK 数据层与 GapAnalysis 算法层。
-//   【前处理】SetParams()：仅写参数，无 VTK 操作
-//   【计算】  Run()：纯同步计算，由外部（后台线程）调用
-//   【后处理】GetResult()：主线程消费结果，生成 vtkPolyData 供 Strategy 使用
-//
-// 层次：
-//   AbstractDataManager（DataManager 层）
-//        ↓ GetVtkImage()
-//   GapAnalysisService（算法调度层，无渲染）
-//        ↓ GapAnalysisResult
-//   MedicalVizService::PostData_RebuildPipeline（渲染层消费）
+// GapAnalysisService.h — IGapAnalysisService 实现
 // =====================================================================
 
 #include "GapAnalysisTypes.h"
@@ -24,48 +12,63 @@
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
-#include <vtkImageImport.h>
-#include <vtkFlyingEdges3D.h>  // 与项目统一，用 FlyingEdges 替代 MarchingCubes
-#include <mutex>
-#include <memory>
-#include <atomic>
+#include <vtkIntArray.h>
+#include <vtkPointData.h>
+#include <vtkFlyingEdges3D.h>
 
-class GapAnalysisService {
+#include <mutex>
+#include <future>
+#include <thread>
+#include <atomic>
+#include <memory>
+#include <functional>
+
+class GapAnalysisService : public IGapAnalysisService {
 public:
     explicit GapAnalysisService(std::shared_ptr<AbstractDataManager> dataMgr)
-        : m_dataMgr(std::move(dataMgr))
-    {
+        : m_dataMgr(std::move(dataMgr)) {
+    }
+
+    ~GapAnalysisService() {
+        m_cancelFlag.store(true);
+        std::lock_guard<std::mutex> lk(m_futureMutex);
     }
 
     // ================================================================
-    // 【前处理】— 仅写参数，零 VTK 操作，线程安全
-    // 调用时机：数据加载之前或之后均可（与 PreInit_* 同期调用）
+    // 【前处理】— 只写参数，零计算，线程安全
     // ================================================================
-    void PreInit_SetSurfaceParams(const SurfaceParams& p) {
+    void GapPreInit_SetSurfaceParams(const SurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_surfParams = p;
     }
-    void PreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) {
+    void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_advParams = p;
     }
-    void PreInit_SetVoidDetectionParams(const VoidDetectionParams& p) {
+    void GapPreInit_SetVoidParams(const VoidDetectionParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_voidParams = p;
     }
 
     // ================================================================
-    // 【计算】— 纯同步，在后台线程中调用
-    // 由 MedicalVizService::LoadFileAsync 的 onComplete 回调触发
+    // 【触发】— 主动发起后台计算，对齐 LoadFileAsync 线程模式
     // ================================================================
-    bool Run() {
+    void RunAsync( // MAIN
+        std::function<void(bool success)> onComplete = nullptr) override
+    {
+        if (m_analysisState.load() == static_cast<int>(GapAnalysisState::Running))
+            return;
+
         auto img = m_dataMgr ? m_dataMgr->GetVtkImage() : nullptr;
-        if (!img) return false;
+        if (!img) {
+            m_analysisState.store(static_cast<int>(GapAnalysisState::Failed));
+            if (onComplete) onComplete(false);
+            return;
+        }
 
-        // 将 vtkImageData 转换为 VolumeBuffer（前处理数据桥接）
-        if (!BuildVolumeBuffer(img)) return false;
+        m_cancelFlag.store(false);
+        m_analysisState.store(static_cast<int>(GapAnalysisState::Running));
 
-        // 取快照（避免计算期间参数被改写）
         SurfaceParams         surfP;
         AdvancedSurfaceParams advP;
         VoidDetectionParams   voidP;
@@ -76,105 +79,172 @@ public:
             voidP = m_voidParams;
         }
 
-        // Step 1: 内部掩码
-        auto interior = VoidDetector::CreateInteriorMask(m_volBuf, surfP.isoValue);
-        if (m_cancelFlag.load()) return false;
+        std::packaged_task<void()> task(
+            [this, img, surfP, advP, voidP, onComplete]() mutable
+            {
+                bool ok = false;
+                if (m_cancelFlag.load()) {
+                    m_analysisState.store(static_cast<int>(GapAnalysisState::Idle));
+                    if (onComplete) onComplete(false);
+                    return;
+                }
 
-        // Step 2: 候选空洞
-        auto candidates = VoidDetector::ExtractCandidates(m_volBuf, interior, voidP);
-        if (m_cancelFlag.load()) return false;
+                VolumeBuffer volBuf;
+                if (BuildVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
+                    auto interior = VoidDetector::CreateInteriorMask(volBuf, surfP.isoValue);
+                    if (!m_cancelFlag.load()) {
+                        auto candidates = VoidDetector::ExtractCandidates(volBuf, interior, voidP);
+                        if (!m_cancelFlag.load()) {
+                            GapAnalysisResult result;
+                            result.voids = VoidDetector::LabelAndAnalyze(
+                                volBuf, candidates, voidP, result.labelVolume);
+                            result.succeeded = true;
+                            {
+                                std::lock_guard<std::mutex> lk(m_resultMutex);
+                                m_result = std::move(result);
+                                m_volBufSnap = std::move(volBuf);
+                            }
+                            ok = true;
+                        }
+                    }
+                }
 
-        // Step 3: 连通域分析
-        GapAnalysisResult result;
-        result.voids = VoidDetector::LabelAndAnalyze(
-            m_volBuf, candidates, voidP, result.labelVolume);
-        result.succeeded = true;
+                m_analysisState.store(ok
+                    ? static_cast<int>(GapAnalysisState::Succeeded)
+                    : static_cast<int>(GapAnalysisState::Failed));
+                if (onComplete) onComplete(ok);
+            });
 
-        std::lock_guard<std::mutex> lk(m_resultMutex);
-        m_result = std::move(result);
-        return true;
+        {
+            std::lock_guard<std::mutex> lk(m_futureMutex);
+            m_future = task.get_future();
+        }
+        std::thread(std::move(task)).detach();
     }
 
-    void RequestCancel() { m_cancelFlag.store(true); }
-    void ResetCancel() { m_cancelFlag.store(false); }
+    void CancelRun() override { m_cancelFlag.store(true); }
 
     // ================================================================
-    // 【后处理】— 主线程消费，生成 vtkPolyData 供 Strategy 使用
+    // 【查询】
     // ================================================================
+    GapAnalysisState GetAnalysisState() const override {
+        return static_cast<GapAnalysisState>(m_analysisState.load());
+    }
 
-    // 获取空洞统计列表（供 UI 显示）
-    std::vector<VoidRegion> GetVoidRegions() const {
+    // ================================================================
+    // 【后处理】— 主线程消费，在 PostData 阶段调用
+    // ================================================================
+    std::vector<VoidRegion> GetVoidRegions() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         return m_result.voids;
     }
 
-    // 生成空洞 Mesh（vtkPolyData），供 IsoSurfaceStrategy::SetInputData 消费
-    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const {
+    // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
+    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        if (!m_result.succeeded || m_result.labelVolume.empty()) return nullptr;
+        if (!m_result.succeeded || m_result.labelVolume.empty())
+            return nullptr;
 
-        auto importer = vtkSmartPointer<vtkImageImport>::New();
-        importer->SetDataScalarTypeToInt();
-        importer->SetNumberOfScalarComponents(1);
-        importer->SetWholeExtent(0, m_volBuf.dims[0] - 1,
-            0, m_volBuf.dims[1] - 1,
-            0, m_volBuf.dims[2] - 1);
-        importer->SetDataExtentToWholeExtent();
-        importer->SetDataSpacing(m_volBuf.spacing[0], m_volBuf.spacing[1], m_volBuf.spacing[2]);
-        importer->SetDataOrigin(m_volBuf.origin[0], m_volBuf.origin[1], m_volBuf.origin[2]);
-        importer->SetImportVoidPointer(
-            const_cast<int*>(m_result.labelVolume.data()));
-        importer->Update();
+        auto img = BuildLabelImageInternal();
+        if (!img) return nullptr;
 
-        // 与项目统一使用 vtkFlyingEdges3D（替代 vtkMarchingCubes）
         auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
-        fe->SetInputConnection(importer->GetOutputPort());
-        fe->SetValue(0, 0.5);
+        fe->SetInputData(img);
+        fe->SetValue(0, 0.5);   // label > 0 即为空洞区域
         fe->ComputeNormalsOff();
         fe->Update();
         return fe->GetOutput();
     }
 
-    bool HasResult() const {
+    // ── 2D：标签体 vtkImageData（喂给 SliceStrategy）───────────────
+    // label=0 → 背景（透明）；label>0 → 空洞编号
+    // SliceStrategy::SetInputData 接受 vtkImageData，直接传入即可。
+    // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
+    vtkSmartPointer<vtkImageData> BuildLabelImage() const {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        return m_result.succeeded;
+        return BuildLabelImageInternal();
     }
 
 private:
     std::shared_ptr<AbstractDataManager> m_dataMgr;
 
-    mutable std::mutex  m_paramsMutex;
+    mutable std::mutex    m_paramsMutex;
     SurfaceParams         m_surfParams;
     AdvancedSurfaceParams m_advParams;
     VoidDetectionParams   m_voidParams;
 
     mutable std::mutex  m_resultMutex;
     GapAnalysisResult   m_result;
+    VolumeBuffer        m_volBufSnap;
 
+    std::atomic<int>    m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
     std::atomic<bool>   m_cancelFlag{ false };
-    VolumeBuffer        m_volBuf;
+    mutable std::mutex  m_futureMutex;
+    std::future<void>   m_future;
 
-    // 桥接：从 vtkImageData 填充 VolumeBuffer
-    bool BuildVolumeBuffer(vtkSmartPointer<vtkImageData> img) {
+    // ── 内部辅助：labelVolume → vtkImageData（调用方持有 m_resultMutex）
+    vtkSmartPointer<vtkImageData> BuildLabelImageInternal() const {
+        if (!m_result.succeeded || m_result.labelVolume.empty())
+            return nullptr;
+
+        const auto& b = m_volBufSnap;
+        auto img = vtkSmartPointer<vtkImageData>::New();
+        img->SetDimensions(b.dims[0], b.dims[1], b.dims[2]);
+        img->SetSpacing(b.spacing[0], b.spacing[1], b.spacing[2]);
+        img->SetOrigin(b.origin[0], b.origin[1], b.origin[2]);
+        img->AllocateScalars(VTK_INT, 1);
+
+        int* ptr = static_cast<int*>(img->GetScalarPointer());
+        const size_t total = (size_t)b.dims[0] * b.dims[1] * b.dims[2];
+        std::copy(m_result.labelVolume.begin(),
+            m_result.labelVolume.begin() + (std::ptrdiff_t)total,
+            ptr);
+        img->Modified();
+        return img;
+    }
+
+	// ── 内部辅助：vtkImageData → VolumeBuffer（调用方持有 m_resultMutex）
+    static bool BuildVolumeBuffer(
+        vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
+    {
         if (!img) return false;
-        int dims[3]; img->GetDimensions(dims);
-        m_volBuf.dims = { dims[0], dims[1], dims[2] };
-        double sp[3];    img->GetSpacing(sp);
-        m_volBuf.spacing = { sp[0], sp[1], sp[2] };
-        double og[3];    img->GetOrigin(og);
-        m_volBuf.origin = { og[0], og[1], og[2] };
+        int d[3]; img->GetDimensions(d);
+        out.dims = { d[0], d[1], d[2] };
+        double sp[3]; img->GetSpacing(sp);
+        out.spacing = { sp[0], sp[1], sp[2] };
+        double og[3]; img->GetOrigin(og);
+        out.origin = { og[0], og[1], og[2] };
 
-        size_t total = (size_t)dims[0] * dims[1] * dims[2];
-        m_volBuf.voxels.resize(total);
+        const size_t total = (size_t)d[0] * d[1] * d[2];
+        out.voxels.resize(total);
         for (size_t i = 0; i < total; ++i) {
-            int x = (int)(i % dims[0]);
-            int y = (int)((i / dims[0]) % dims[1]);
-            int z = (int)(i / ((size_t)dims[0] * dims[1]));
-            m_volBuf.voxels[i] = img->GetScalarComponentAsFloat(x, y, z, 0);
+            const int x = (int)(i % d[0]);
+            const int y = (int)((i / d[0]) % d[1]);
+            const int z = (int)(i / ((size_t)d[0] * d[1]));
+            out.voxels[i] = img->GetScalarComponentAsFloat(x, y, z, 0);
         }
-        auto [mn, mx] = std::minmax_element(m_volBuf.voxels.begin(), m_volBuf.voxels.end());
-        m_volBuf.minVal = *mn;
-        m_volBuf.maxVal = *mx;
+        auto [mn, mx] = std::minmax_element(out.voxels.begin(), out.voxels.end());
+        out.minVal = *mn;
+        out.maxVal = *mx;
+        return true;
+    }
+
+public:
+	// ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
+    bool saveResults(const std::string& baseName) {
+        std::string csvPath = baseName + "_voids.csv";
+        FILE* fp = fopen(csvPath.c_str(), "w");
+        if (fp) {
+           
+            fprintf(fp, "ID,VoxelCount,Volume(mm3),EquivDiameter(mm)\n");
+            for (const auto& v : m_result.voids)
+                fprintf(fp, "%d,%llu,%.4f,%.4f\n", v.id, (unsigned long long)v.voxelCount, v.volumeMM3, v.equivalentDiameterMM); 
+            fclose(fp);
+        }
+
+        std::string rawPath = baseName + "_label.raw";
+        FILE* fr = fopen(rawPath.c_str(), "wb");
+        if (fr) { fwrite(m_result.labelVolume.data(), sizeof(int), m_result.labelVolume.size(), fr); fclose(fr); }
         return true;
     }
 };

@@ -16,6 +16,8 @@
 *.userprefs
 *.txt
 *.png
+*.csv
+*.raw
 
 # Mono auto generated files
 mono_crash.*

@@ -161,7 +161,7 @@ int main()
     auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
-	// 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
+    // 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
     contextA->SetElementVisible(VisFlags::ClipPlanes, false);
     contextE->SetElementVisible(VisFlags::ClipPlanes, false);
 
