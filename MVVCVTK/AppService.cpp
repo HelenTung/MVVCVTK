@@ -88,7 +88,7 @@ void MedicalVizService::Initialize(
                 self->m_isDirty = true;
                 return;
             }
-
+                
             // ── Background：直接写渲染器（无 pipeline 操作）──
             // 背景色写渲染器本身是线程安全的（VTK 渲染器内部有锁），
             // 但为一致性仍通过标记延迟到主线程
