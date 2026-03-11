@@ -194,10 +194,10 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
         {0,-1,-1},{0,-1,1},
         {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1}
     };
-    for (int z = 0; z < dz; ++z)
-        for (int y = 0; y < dy; ++y)
-            for (int x = 0; x < dx; ++x) {
-                const size_t curr = (size_t)x + (size_t)y * dx + (size_t)z * dx * dy;
+    for (size_t z = 0; z < dz; ++z)
+        for (size_t y = 0; y < dy; ++y)
+            for (size_t x = 0; x < dx; ++x) {
+                const size_t curr = x + y * dx + z * dx * dy;
                 if (mask[curr] == 0) continue;
                 outLabelVol[curr] = (int)curr;
 

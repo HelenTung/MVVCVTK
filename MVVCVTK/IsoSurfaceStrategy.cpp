@@ -1,4 +1,5 @@
 ﻿#include "IsoSurfaceStrategy.h"
+#include "ImageProcessor.h"
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
@@ -45,7 +46,10 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     // 作为 ImageData (需要��时计算)
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
-        m_isoFilter->SetInputData(img);
+
+        auto imgDown = ImageProcessor::ApplyDownsampling(img, 756);
+
+        m_isoFilter->SetInputData(imgDown);
         m_isoFilter->ComputeNormalsOff();
         m_isoFilter->ComputeGradientsOff(); 
 
