@@ -500,6 +500,15 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     auto img = m_dataManager->GetVtkImage();
+    
+    double bounds[6] = {0};
+    img->GetBounds(bounds);
+    if (worldPos[0] < bounds[0] || worldPos[0] > bounds[1] ||
+        worldPos[1] < bounds[2] || worldPos[1] > bounds[3] ||
+        worldPos[2] < bounds[4] || worldPos[2] > bounds[5]) {
+        return; // 拾取越界，保持当前位置，不更新，防止闪回
+    }
+    
     double sp[3], orig[3];
     int    dims[3];
     img->GetSpacing(sp);

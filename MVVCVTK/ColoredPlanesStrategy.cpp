@@ -34,63 +34,50 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (!img) return;
     m_imageData = img;
 
-    double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    m_imageData->GetBounds(bounds);
-    
-    // 取各轴的中心值作为初始平面位置
-    double centerX = (bounds[0] + bounds[1]) * 0.5;
-    double centerY = (bounds[2] + bounds[3]) * 0.5;
-    double centerZ = (bounds[4] + bounds[5]) * 0.5;
+    // 获取物理边界
+    double b[6];
+    m_imageData->GetBounds(b);
 
-    // 根据数据边界定义每个平面的大小
-    // Sagittal Plane (YZ)，法线 X，初始位于 X 中心
-    m_planeSources[0]->SetOrigin(centerX, bounds[2], bounds[4]);
-    m_planeSources[0]->SetPoint1(centerX, bounds[3], bounds[4]);
-    m_planeSources[0]->SetPoint2(centerX, bounds[2], bounds[5]);
+    // ── 关键点 1：将几何定义在相对 bounds 的基准位置 ──
+    // Sagittal (YZ): 定义在 X 轴最小边界处
+    m_planeSources[0]->SetOrigin(b[0], b[2], b[4]);
+    m_planeSources[0]->SetPoint1(b[0], b[3], b[4]);
+    m_planeSources[0]->SetPoint2(b[0], b[2], b[5]);
 
-    // Coronal Plane (XZ)，法线 Y，初始位于 Y 中心
-    m_planeSources[1]->SetOrigin(bounds[0], centerY, bounds[4]);
-    m_planeSources[1]->SetPoint1(bounds[1], centerY, bounds[4]);
-    m_planeSources[1]->SetPoint2(bounds[0], centerY, bounds[5]);
+    // Coronal (XZ): 定义在 Y 轴最小边界处
+    m_planeSources[1]->SetOrigin(b[0], b[2], b[4]);
+    m_planeSources[1]->SetPoint1(b[1], b[2], b[4]);
+    m_planeSources[1]->SetPoint2(b[0], b[2], b[5]);
 
-    // Axial Plane (XY)，法线 Z，初始位于 Z 中心
-    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], centerZ);
-    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], centerZ);
-    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], centerZ);
+    // Axial (XY): 定义在 Z 轴最小边界处
+    m_planeSources[2]->SetOrigin(b[0], b[2], b[4]);
+    m_planeSources[2]->SetPoint1(b[1], b[2], b[4]);
+    m_planeSources[2]->SetPoint2(b[0], b[3], b[4]);
+
+    // 缓存最大索引用于 UpdateAllPositions 内部校验
+    int dims[3];
+    m_imageData->GetDimensions(dims);
+    for (int i = 0; i < 3; ++i) m_maxIndices[i] = dims[i] - 1;
 }
 
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     if (!m_imageData) return;
 
-    double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    double origin[3] = { 0.0, 0.0, 0.0 };
-    double spacing[3] = { 1.0, 1.0, 1.0 };
-    m_imageData->GetBounds(bounds);
-    m_imageData->GetOrigin(origin);
+    // 边界裁剪
+    int cx = std::max(0, std::min(x, m_maxIndices[0]));
+    int cy = std::max(0, std::min(y, m_maxIndices[1]));
+    int cz = std::max(0, std::min(z, m_maxIndices[2]));
+
+    double spacing[3];
     m_imageData->GetSpacing(spacing);
 
-    double physX = origin[0] + x * spacing[0];
-    double physY = origin[1] + y * spacing[1];
-    double physZ = origin[2] + z * spacing[2];
+    double shiftX = cx * spacing[0];
+    double shiftY = cy * spacing[1];
+    double shiftZ = cz * spacing[2];
 
-    // Sagittal
-    m_planeSources[0]->SetOrigin(physX, bounds[2], bounds[4]);
-    m_planeSources[0]->SetPoint1(physX, bounds[3], bounds[4]);
-    m_planeSources[0]->SetPoint2(physX, bounds[2], bounds[5]);
-
-    // Coronal   
-    m_planeSources[1]->SetOrigin(bounds[0], physY, bounds[4]);
-    m_planeSources[1]->SetPoint1(bounds[1], physY, bounds[4]);
-    m_planeSources[1]->SetPoint2(bounds[0], physY, bounds[5]);
-
-    // Axial
-    m_planeSources[2]->SetOrigin(bounds[0], bounds[2], physZ);
-    m_planeSources[2]->SetPoint1(bounds[1], bounds[2], physZ);
-    m_planeSources[2]->SetPoint2(bounds[0], bounds[3], physZ);
-
-    for (int i = 0; i < 3; i++) {
-        m_planeSources[i]->Modified();
-    }
+    m_planeActors[0]->SetPosition(shiftX, 0, 0);
+    m_planeActors[1]->SetPosition(0, shiftY, 0);
+    m_planeActors[2]->SetPosition(0, 0, shiftZ);
 }
 
 void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
