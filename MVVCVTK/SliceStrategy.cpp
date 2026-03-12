@@ -196,9 +196,9 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 }
 
 void SliceStrategy::SetSliceIndex(int index) {
-    m_currentIndex = index;
-    if (m_currentIndex < 0) m_currentIndex = 0;
-    if (m_currentIndex > m_maxIndex) m_currentIndex = m_maxIndex;
+	int valindex = std::max(0, std::min(index, m_maxIndex));
+	if (valindex == m_currentIndex) return;
+	m_currentIndex = valindex;
     UpdatePlanePosition();
 }
 

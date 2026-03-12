@@ -38,9 +38,15 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
-    m_indices[0] = x;
-    m_indices[1] = y;
-    m_indices[2] = z;
+    int dims[3] = { 0, 0, 0 };
+    if (auto input = m_mappers[0]->GetInput()) {
+        input->GetDimensions(dims);
+    }
+
+    // 边界保护：确保索引在 [0, dims[i]-1] 之间
+    m_indices[0] = std::max(0, std::min(x, dims[0] - 1));
+    m_indices[1] = std::max(0, std::min(y, dims[1] - 1));
+    m_indices[2] = std::max(0, std::min(z, dims[2] - 1));
 
     for (int i = 0; i < 3; i++) {
         auto plane = m_mappers[i]->GetSlicePlane();

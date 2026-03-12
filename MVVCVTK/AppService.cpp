@@ -67,6 +67,7 @@ void MedicalVizService::Initialize(
     std::weak_ptr<MedicalVizService> weakSelf =
         std::static_pointer_cast<MedicalVizService>(shared_from_this());
 
+	// 注册 SharedState 观察者，响应数据和配置变化事件
     m_sharedState->AddObserver(shared_from_this(),
         [weakSelf](UpdateFlags flags)
         {
