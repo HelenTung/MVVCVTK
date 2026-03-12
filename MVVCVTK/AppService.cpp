@@ -501,31 +501,44 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     auto img = m_dataManager->GetVtkImage();
     
-    double bounds[6] = {0};
-    img->GetBounds(bounds);
-    if (worldPos[0] < bounds[0] || worldPos[0] > bounds[1] ||
-        worldPos[1] < bounds[2] || worldPos[1] > bounds[3] ||
-        worldPos[2] < bounds[4] || worldPos[2] > bounds[5]) {
-        return; // 拾取越界，保持当前位置，不更新，防止闪回
-    }
-    
     double sp[3], orig[3];
     int    dims[3];
+    auto currentPos = m_sharedState->GetCursorPosition(); // 上一帧的位置索引
     img->GetSpacing(sp);
     img->GetOrigin(orig);
     img->GetDimensions(dims);
 
-    auto clamp = [](int v, int lo, int hi) { return std::max(lo, std::min(v, hi)); };
-    auto pos = m_sharedState->GetCursorPosition();
+    auto calcIndex = [&](double w, double o, double s, int maxIdx) {
+        return std::max(0, std::min(int((w - o) / s + 0.5), maxIdx));
+        };
+
+    int targetPos[3] = {
+        calcIndex(worldPos[0], orig[0], sp[0], dims[0] - 1),
+        calcIndex(worldPos[1], orig[1], sp[1], dims[1] - 1),
+        calcIndex(worldPos[2], orig[2], sp[2], dims[2] - 1)
+    };
+
+    if (m_sharedState->IsInteracting()) {
+        for (int i = 0; i < 3; ++i) {
+            // 如果只指定了某轴更新，则跳过其他轴
+            if (axis != -1 && axis != i) continue;
+
+            int delta = std::abs(targetPos[i] - currentPos[i]);
+            // 阈值判定：单帧跳变超过图像维度的 1/3 通常被视为拾取异常或数值跳变
+            if (delta > dims[i] / 3 && currentPos[i] != 0) {
+                // std::cout << "Detected abnormal jump on axis " << i << ", blocking update.\n";
+                return;
+            }
+        }
+    }
 
     if (axis == -1 || axis == 0)
-        pos[0] = clamp(int((worldPos[0] - orig[0]) / sp[0]), 0, dims[0] - 1);
-    if (axis == -1 || axis == 1)
-        pos[1] = clamp(int((worldPos[1] - orig[1]) / sp[1]), 0, dims[1] - 1);
-    if (axis == -1 || axis == 2)
-        pos[2] = clamp(int((worldPos[2] - orig[2]) / sp[2]), 0, dims[2] - 1);
+        m_sharedState->SetCursorPosition(targetPos[0], currentPos[1], currentPos[2]);
+    if (axis == -1 || axis == 1) 
+        m_sharedState->SetCursorPosition(currentPos[0], targetPos[1], currentPos[2]);
+    if (axis == -1 || axis == 2) 
+        m_sharedState->SetCursorPosition(currentPos[0], currentPos[1], targetPos[2]);
 
-    m_sharedState->SetCursorPosition(pos[0], pos[1], pos[2]);
 }
 
 std::array<int, 3> MedicalVizService::GetCursorPosition()
