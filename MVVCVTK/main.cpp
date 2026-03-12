@@ -155,8 +155,8 @@ int main()
     contextE->SetElementVisible(VisFlags::ClipPlanes, true);
 
     // 3D 窗口：隐藏标尺
-    contextA->SetElementVisible(VisFlags::RulerAxes, true);
-    contextE->SetElementVisible(VisFlags::RulerAxes, true);
+    contextA->SetElementVisible(VisFlags::RulerAxes, false);
+    contextE->SetElementVisible(VisFlags::RulerAxes, false);
 
     // 2D 窗口：隐藏十字测量线
     contextB->SetElementVisible(VisFlags::Crosshair, true);

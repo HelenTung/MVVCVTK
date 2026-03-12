@@ -29,4 +29,6 @@ private:
     vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
     vtkSmartPointer<vtkImageData> m_imageData;
     int m_maxIndices[3] = { 0, 0, 0 }; // 缓存最大索引，避免重复计算
+	vtkSmartPointer<vtkMatrix4x4> m_cachedModelMatrix; // 缓存模型矩阵，避免重复转换
+
 };
