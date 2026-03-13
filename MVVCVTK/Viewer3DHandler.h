@@ -26,6 +26,8 @@ private:
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
 
-    bool m_isDragging = false;  // 是否正在拖拽平面
-    int  m_dragAxis = -1;     // 当前拖拽的轴向（0/1/2 = X/Y/Z）
+    bool m_isDragging = false; // 是否正在拖拽平面
+    int  m_dragAxis = -1;    // 当前拖拽的轴向（0/1/2 = X/Y/Z）
+    int  m_lastMouseX = 0;     // 上一帧鼠标 X（屏幕像素）
+    int  m_lastMouseY = 0;     // 上一帧鼠标 Y（屏幕像素）
 };

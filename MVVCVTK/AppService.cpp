@@ -593,8 +593,8 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
             int delta = std::abs(targetPos[i] - currentPos[i]);
             // 阈值判定：单帧跳变超过图像维度的 1/3 通常被视为拾取异常或数值跳变
             if (delta > dims[i] / 3 && currentPos[i] != 0) {
-                // std::cout << "Detected abnormal jump on axis " << i << ", blocking update.\n";
-                return;
+                // 只把该轴的 targetPos 回退，不影响其他轴，也不整帧丢弃
+                targetPos[i] = currentPos[i];
             }
         }
     }
