@@ -41,6 +41,10 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     double b[6];
     m_imageData->GetBounds(b);
 
+	// 获取原点和间距
+    m_imageData->GetOrigin(m_origin);
+    m_imageData->GetSpacing(m_spacing);
+
     // ── 关键点 1：将几何定义在相对 bounds 的基准位置 ──
     // Sagittal (YZ): 定义在 X 轴最小边界处
     m_planeSources[0]->SetOrigin(b[0], b[2], b[4]);
@@ -61,6 +65,8 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     int dims[3];
     m_imageData->GetDimensions(dims);
     for (int i = 0; i < 3; ++i) m_maxIndices[i] = dims[i] - 1;
+
+    for (int i = 0; i < 3; i++) m_planeSources[i]->Update();
 }
 
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
