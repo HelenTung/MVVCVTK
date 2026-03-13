@@ -599,13 +599,12 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
         }
     }
 
-    if (axis == -1 || axis == 0)
-        m_sharedState->SetCursorPosition(targetPos[0], currentPos[1], currentPos[2]);
-    if (axis == -1 || axis == 1) 
-        m_sharedState->SetCursorPosition(currentPos[0], targetPos[1], currentPos[2]);
-    if (axis == -1 || axis == 2) 
-        m_sharedState->SetCursorPosition(currentPos[0], currentPos[1], targetPos[2]);
+    int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
+    if (axis == -1 || axis == 0) newPos[0] = targetPos[0];
+    if (axis == -1 || axis == 1) newPos[1] = targetPos[1];
+    if (axis == -1 || axis == 2) newPos[2] = targetPos[2];
 
+    m_sharedState->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
 }
 
 std::array<int, 3> MedicalVizService::GetCursorPosition()

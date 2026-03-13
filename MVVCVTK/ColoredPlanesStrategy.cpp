@@ -41,32 +41,35 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     double b[6];
     m_imageData->GetBounds(b);
 
-	// 获取原点和间距
-    m_imageData->GetOrigin(m_origin);
-    m_imageData->GetSpacing(m_spacing);
-
-    // ── 关键点 1：将几何定义在相对 bounds 的基准位置 ──
-    // Sagittal (YZ): 定义在 X 轴最小边界处
-    m_planeSources[0]->SetOrigin(b[0], b[2], b[4]);
-    m_planeSources[0]->SetPoint1(b[0], b[3], b[4]);
-    m_planeSources[0]->SetPoint2(b[0], b[2], b[5]);
-
-    // Coronal (XZ): 定义在 Y 轴最小边界处
-    m_planeSources[1]->SetOrigin(b[0], b[2], b[4]);
-    m_planeSources[1]->SetPoint1(b[1], b[2], b[4]);
-    m_planeSources[1]->SetPoint2(b[0], b[2], b[5]);
-
-    // Axial (XY): 定义在 Z 轴最小边界处
-    m_planeSources[2]->SetOrigin(b[0], b[2], b[4]);
-    m_planeSources[2]->SetPoint1(b[1], b[2], b[4]);
-    m_planeSources[2]->SetPoint2(b[0], b[3], b[4]);
-
     // 缓存最大索引用于 UpdateAllPositions 内部校验
     int dims[3];
     m_imageData->GetDimensions(dims);
     for (int i = 0; i < 3; ++i) m_maxIndices[i] = dims[i] - 1;
 
-    for (int i = 0; i < 3; i++) m_planeSources[i]->Update();
+	// 获取原点和间距
+    m_imageData->GetOrigin(m_origin);
+    m_imageData->GetSpacing(m_spacing);
+
+	// Sagittal (YZ面): 平面固定在 X = origin[0]，YZ 跨度为完整边界
+    m_planeSources[0]->SetOrigin(m_origin[0], b[2], b[4]);
+    m_planeSources[0]->SetPoint1(m_origin[0], b[3], b[4]);
+    m_planeSources[0]->SetPoint2(m_origin[0], b[2], b[5]);
+
+    // Coronal (XZ面): 平面固定在 Y = origin[1]，XZ 跨度为完整边界
+    m_planeSources[1]->SetOrigin(b[0], m_origin[1], b[4]);
+    m_planeSources[1]->SetPoint1(b[1], m_origin[1], b[4]);
+    m_planeSources[1]->SetPoint2(b[0], m_origin[1], b[5]);
+
+    // Axial (XY面): 平面固定在 Z = origin[2]，XY 跨度为完整边界
+    m_planeSources[2]->SetOrigin(b[0], b[2], m_origin[2]);
+    m_planeSources[2]->SetPoint1(b[1], b[2], m_origin[2]);
+    m_planeSources[2]->SetPoint2(b[0], b[3], m_origin[2]);
+
+    for (int i = 0; i < 3; i++) {
+        // 确保 Actor 无额外位置偏移，平面位置完全由 PlaneSource 几何决定
+        m_planeActors[i]->SetPosition(0.0, 0.0, 0.0);
+        m_planeSources[i]->Update();
+    }
 }
 
 void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
@@ -80,13 +83,30 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     double spacing[3];
     m_imageData->GetSpacing(spacing);
 
-    double shiftX = cx * spacing[0];
-    double shiftY = cy * spacing[1];
-    double shiftZ = cz * spacing[2];
+    double physX = cx * spacing[0] + m_origin[0];
+    double physY = cy * spacing[1] + m_origin[1];
+    double physZ = cz * spacing[2] + m_origin[2];
 
-    m_planeActors[0]->SetPosition(shiftX, 0, 0);
-    m_planeActors[1]->SetPosition(0, shiftY, 0);
-    m_planeActors[2]->SetPosition(0, 0, shiftZ);
+    double b[6];
+    m_imageData->GetBounds(b);
+
+    // Sagittal: 移动 X 轴
+    m_planeSources[0]->SetOrigin(physX, b[2], b[4]);
+    m_planeSources[0]->SetPoint1(physX, b[3], b[4]);
+    m_planeSources[0]->SetPoint2(physX, b[2], b[5]);
+    m_planeSources[0]->Update();
+
+    // Coronal: 移动 Y 轴
+    m_planeSources[1]->SetOrigin(b[0], physY, b[4]);
+    m_planeSources[1]->SetPoint1(b[1], physY, b[4]);
+    m_planeSources[1]->SetPoint2(b[0], physY, b[5]);
+    m_planeSources[1]->Update();
+
+    // Axial: 移动 Z 轴
+    m_planeSources[2]->SetOrigin(b[0], b[2], physZ);
+    m_planeSources[2]->SetPoint1(b[1], b[2], physZ);
+    m_planeSources[2]->SetPoint2(b[0], b[3], physZ);
+    m_planeSources[2]->Update();
 }
 
 void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {

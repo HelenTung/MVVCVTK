@@ -82,7 +82,11 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
             return {};
         }
 
-        m_picker->Pick(eve.x, eve.y, 0, m_renderer);
+        auto picked = m_picker->Pick(eve.x, eve.y, 0, m_renderer);
+        if (picked == 0) {
+            return { true, true };  // 消费事件（阻止相机），但不更新位置
+        }
+
         double* worldPos = m_picker->GetPickPosition();
         if (worldPos) {
             m_service->SyncCursorToWorldPosition(worldPos, m_dragAxis);
