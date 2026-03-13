@@ -89,7 +89,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     // --- 提交  ---
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_vtkImage = newImage; // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
+        m_vtkImage = std::move(newImage); // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
         m_dims[0] = newDims[0];
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
