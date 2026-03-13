@@ -57,6 +57,14 @@ public:
     void LoadFileAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
     
+    // 重建注入异步接口：将 SetFromBuffer 的耗时操作投递到后台线程
+    void SetFromBufferAsync(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
+        std::function<void(bool success)> onComplete = nullptr);
+
     LoadState GetLoadState() const override;
 
     // 尽力取消：设标记，加载函数内部自检后提前退出

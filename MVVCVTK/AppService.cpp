@@ -266,6 +266,58 @@ void MedicalVizService::LoadFileAsync(
     std::thread(std::move(task)).detach();
 }
 
+void MedicalVizService::SetFromBufferAsync(
+    const float* data,
+    const std::array<int, 3>& dims,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
+    std::function<void(bool success)> onComplete)
+{
+    if (m_sharedState->GetLoadState() == LoadState::Loading) {
+        std::cerr << "[SetFromBufferAsync] Already loading, ignoring.\n";
+        return;
+    }
+
+    m_sharedState->SetLoadState(LoadState::Loading);
+
+    auto dataMgr = m_dataManager;
+    auto sharedState = m_sharedState;
+
+    std::packaged_task<void()> task(
+        [dataMgr, sharedState, data, dims, spacing, origin, onComplete]() mutable
+        {
+            // 在后台线程
+            bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
+
+            // ── 结果通知：只写 SharedState，不碰任何 VTK 渲染对象 ────
+            // DataReady/LoadFailed → Observer → m_needsDataRefresh
+            // 主线程 ProcessPendingUpdates → PostData_RebuildPipeline
+            if (ok) {
+                auto img = dataMgr->GetVtkImage();
+                if (img) {
+                    double range[2];
+                    img->GetScalarRange(range);
+                    sharedState->NotifyDataReady(range[0], range[1]);
+                }
+                else {
+                    sharedState->NotifyLoadFailed();
+                }
+            }
+            else {
+                sharedState->NotifyLoadFailed();
+            }
+
+            if (onComplete) onComplete(ok);
+        });
+
+    {
+        std::lock_guard<std::mutex> lk(m_loadMutex);
+        m_loadFuture = task.get_future();
+    }
+
+    std::thread(std::move(task)).detach();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // ProcessPendingUpdates（主线程 Timer 驱动）
 //
@@ -277,6 +329,20 @@ void MedicalVizService::LoadFileAsync(
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::ProcessPendingUpdates()
 {
+    // 消费来自第三方重建的 ReconBuffer
+    // 必须在 m_needsDataRefresh 检查前，因为 ConsumeReconBuffer 成功后 会设 LoadState::Succeeded，下面的逻辑再据此驱动管线重建。
+    if (auto* rawMgr = dynamic_cast<RawVolumeDataManager*>(m_dataManager.get())) {
+        if (rawMgr->ConsumeReconImage()) {
+            // 走和文件加载成功相同的后处理路径
+            auto img = m_dataManager->GetVtkImage();
+            if (img) {
+                double range[2];
+                img->GetScalarRange(range);
+                m_sharedState->NotifyDataReady(range[0], range[1]);
+            }
+        }
+    }
+
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
         ExecuteClearStrategyCache();

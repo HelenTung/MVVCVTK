@@ -43,6 +43,13 @@ public:
     virtual ~AbstractDataManager() = default;
     virtual bool LoadData(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
+    virtual bool SetFromBuffer(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin) {
+        return false;
+    }
     LoadState GetLoadState() const {
         std::lock_guard<std::mutex> lk(m_stateMutex);
         return m_loadState;

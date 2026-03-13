@@ -98,6 +98,88 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     return true;
 }
 
+bool RawVolumeDataManager::SetFromBuffer(
+    const float* data,
+    const std::array<int, 3>& dims,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin)
+{
+    auto setState = [this](LoadState state, bool isLoading) {
+        {
+            std::lock_guard<std::mutex> lock(m_stateMutex);
+            m_loadState = state;
+        }
+        m_isLoading.store(isLoading);
+        };
+
+    if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        setState(LoadState::Failed, false);
+        return false;
+    }
+
+    setState(LoadState::Loading, true);
+
+    // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
+    auto newImage = vtkSmartPointer<vtkImageData>::New();
+    newImage->SetDimensions(dims[0], dims[1], dims[2]);
+    newImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
+    newImage->SetOrigin(origin[0], origin[1], origin[2]);
+    newImage->AllocateScalars(VTK_FLOAT, 1);   // 分配（page-fault 在此触发）
+
+    const size_t total =
+        static_cast<size_t>(dims[0]) *
+        static_cast<size_t>(dims[1]) *
+        static_cast<size_t>(dims[2]);
+    float* dst = static_cast<float*>(newImage->GetScalarPointer());
+    std::memcpy(dst, data, total * sizeof(float));  // 唯一一次拷贝
+
+    // Modified() 暂不调用——留到主线程 ConsumeReconImage() 中调用，
+    // 确保 VTK pipeline 脏标记传播在正确线程触发。
+
+    {
+        std::lock_guard<std::mutex> lock(m_reconMutex);
+        m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
+    }
+    m_hasPendingImage.store(true);
+
+    // LoadState::Succeeded 延迟到主线程 ConsumeReconImage() 设置，
+    // 防止调用方在 vtkImage 还未提交时就查询到 Succeeded 状态。
+    return true;
+}
+
+bool RawVolumeDataManager::ConsumeReconImage()
+{
+    if (!m_hasPendingImage.load()) return false;
+
+    vtkSmartPointer<vtkImageData> incoming;
+    {
+        std::lock_guard<std::mutex> lock(m_reconMutex);
+        if (!m_pendingImage) return false;
+        incoming = std::move(m_pendingImage);
+        m_hasPendingImage.store(false);
+    }
+
+    // Modified() 在主线程调用（VTK pipeline 脏传播安全）
+    incoming->Modified();
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_vtkImage = incoming;
+        m_dims[0] = incoming->GetDimensions()[0];
+        m_dims[1] = incoming->GetDimensions()[1];
+        m_dims[2] = incoming->GetDimensions()[2];
+        m_spacing = incoming->GetSpacing()[0];
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_stateMutex);
+        m_loadState = LoadState::Succeeded;
+    }
+    m_isLoading.store(false);
+
+    return true;
+}
+
 vtkSmartPointer<vtkImageData> RawVolumeDataManager::GetVtkImage() const { 
        std::lock_guard<std::mutex> lock(m_mutex);
     return m_vtkImage; // 返回副本，线程安全
