@@ -266,7 +266,7 @@ void MedicalVizService::LoadFileAsync(
     std::thread(std::move(task)).detach();
 }
 
-void MedicalVizService::SetFromBufferAsync(
+bool MedicalVizService::SetFromBufferAsync(
     const float* data,
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
@@ -275,7 +275,7 @@ void MedicalVizService::SetFromBufferAsync(
 {
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
         std::cerr << "[SetFromBufferAsync] Already loading, ignoring.\n";
-        return;
+        return false;
     }
 
     m_sharedState->SetLoadState(LoadState::Loading);
@@ -316,6 +316,7 @@ void MedicalVizService::SetFromBufferAsync(
     }
 
     std::thread(std::move(task)).detach();
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────

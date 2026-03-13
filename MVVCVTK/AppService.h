@@ -58,7 +58,7 @@ public:
         std::function<void(bool success)> onComplete = nullptr) override;
     
     // 重建注入异步接口：将 SetFromBuffer 的耗时操作投递到后台线程
-    void SetFromBufferAsync(
+    bool SetFromBufferAsync(
         const float* data,
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
