@@ -102,23 +102,29 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
         cam->GetViewUp(up);
         cam->GetDirectionOfProjection(forward);
 
-        // right = forward × up
-        right[0] = forward[1] * up[2] - forward[2] * up[1];
-        right[1] = forward[2] * up[0] - forward[0] * up[2];
-        right[2] = forward[0] * up[1] - forward[1] * up[0];
+        // right = forward × up 等价于以下方程式
+         vtkMath::Cross(forward, up, right);
+        // right[0] = forward[1] * up[2] - forward[2] * up[1];
+        // right[1] = forward[2] * up[0] - forward[0] * up[2];
+        // right[2] = forward[0] * up[1] - forward[1] * up[0];
 
         // 目标轴单位向量（0→X, 1→Y, 2→Z）
         double axisVec[3] = { 0.0, 0.0, 0.0 };
         axisVec[m_dragAxis] = 1.0;
 
+        auto projr = vtkMath::Dot(right, axisVec);
+        auto proju = vtkMath::Dot(up, axisVec);
+
         // 屏幕位移在目标轴上的投影（dx 对应 right，dy 对应 up）
-        const double proj =
-            (right[0] * axisVec[0] + right[1] * axisVec[1] + right[2] * axisVec[2]) * dx +
-            (up[0] * axisVec[0] + up[1] * axisVec[1] + up[2] * axisVec[2]) * dy;
+        double proj =
+            projr * dx +
+            proju * dy;
 
         // 每像素对应的世界单位：camDist × 2tan(fov/2) / viewportHeight
+        // winSize[0] 是窗口宽度（Width）。winSize[1] 是窗口高度（Height)
+        //worldPerPx=物理总高度屏幕总像素高度/worldwinSize[1] 
         const double camDist = cam->GetDistance();
-        const double viewAngle = cam->GetViewAngle() * (3.14159265358979 / 180.0);
+		const double viewAngle = cam->GetViewAngle() * (3.14159265358979 / 180.0); // 转换为弧度
         int* winSize = m_renderer->GetRenderWindow()->GetSize();
         const int    vpH = (winSize && winSize[1] > 0) ? winSize[1] : 1;
         const double worldPerPx = 2.0 * camDist * std::tan(viewAngle * 0.5) / vpH;
