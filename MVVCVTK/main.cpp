@@ -151,17 +151,17 @@ int main()
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
     // 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
-    contextA->SetElementVisible(VisFlags::ClipPlanes, true);
-    contextE->SetElementVisible(VisFlags::ClipPlanes, true);
+    serviceA->SetElementVisible(VisFlags::ClipPlanes, true);
+    serviceE->SetElementVisible(VisFlags::ClipPlanes, true);
 
     // 3D 窗口：隐藏标尺
-    contextA->SetElementVisible(VisFlags::RulerAxes, false);
-    contextE->SetElementVisible(VisFlags::RulerAxes, false);
+    serviceA->SetElementVisible(VisFlags::RulerAxes, false);
+    serviceE->SetElementVisible(VisFlags::RulerAxes, false);
 
     // 2D 窗口：隐藏十字测量线
-    contextB->SetElementVisible(VisFlags::Crosshair, true);
-    contextC->SetElementVisible(VisFlags::Crosshair, true);
-    contextD->SetElementVisible(VisFlags::Crosshair, true);
+    serviceB->SetElementVisible(VisFlags::Crosshair, true);
+    serviceC->SetElementVisible(VisFlags::Crosshair, true);
+    serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(

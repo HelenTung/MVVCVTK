@@ -208,12 +208,6 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     if (m_interactiveService) m_interactiveService->SetDirty(true);
 }
 
-void StdRenderContext::SetElementVisible(uint32_t flagBit, bool show)
-{
-    if (m_interactiveService) {
-        m_interactiveService->SetElementVisible(flagBit, show);
-    }
-}
 // ─────────────────────────────────────────────────────────────────────
 // HandleVTKEvent —— 统一入口，委托给 Router
 //
