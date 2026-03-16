@@ -245,7 +245,7 @@ public:
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
     virtual void ToggleOrientationAxes(bool show) {}
-    virtual void SetElementVisible(uint32_t flagBit, bool show) {}
+
     virtual void SetRendererBackground(const BackgroundColor& bg) {
         if (m_renderer)
             m_renderer->SetBackground(bg.r, bg.g, bg.b);
