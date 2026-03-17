@@ -5,6 +5,7 @@
 #include <vtkProperty.h>
 #include <vtkImageProperty.h>
 #include <algorithm>
+#include <vtkTransform.h>
 
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
@@ -87,7 +88,6 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     // 创建 vtkPlane 对象
     auto plane = vtkSmartPointer<vtkPlane>::New();
-
     // 设置原点 (Origin)：让切片默认位于图像数据的几何中心
     double center[3];
     img->GetCenter(center);
@@ -103,7 +103,6 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     else {
         plane->SetNormal(1, 0, 0); // X轴法线
     }
-
     // 将 Plane 对象传递给 Mapper
     m_mapper->SetSlicePlane(plane);
     m_slice->SetMapper(m_mapper);
@@ -176,6 +175,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
         // AXIAL: 从 Z+ 往 -Z 看，屏幕水平=X，屏幕垂直=Y
         cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
         cam->SetViewUp(0, 1, 0);
+        //cam->Roll(180.0);
         break;
 
     case Orientation::CORONAL:
@@ -188,6 +188,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
         // SAGITTAL: 从 X+ 往 -X 看，屏幕水平=Y，屏幕垂直=Z
         cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
         cam->SetViewUp(0, 0, 1);
+        //cam->Roll(180.0);
         break;
     }
 
