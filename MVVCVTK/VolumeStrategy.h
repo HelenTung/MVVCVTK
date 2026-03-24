@@ -12,6 +12,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkImageResample.h>
 
 // --- 策略 B: 体渲染 ---
 class VolumeStrategy : public AbstractVisualStrategy {
@@ -29,4 +30,5 @@ private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume;
     vtkSmartPointer<vtkDataObject> m_lastInput;
+	vtkSmartPointer<vtkImageResample> m_resample;
 };

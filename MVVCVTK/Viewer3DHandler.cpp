@@ -138,7 +138,7 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
         // 注意：SyncCursorToWorldPosition 内部用 axis 过滤，只更新 m_dragAxis 轴
         // 因此其他两轴传什么值无所谓，直接传 0 即可
         double fakeWorldPos[3] = { 0.0, 0.0, 0.0 };
-
+        
         // 用当前光标索引换算回当前物理坐标，再叠加增量
         // Service 层 SyncCursorToWorldPosition 会把世界坐标转回索引，只写 m_dragAxis 轴
         if (auto* img = m_service->GetDataManager()

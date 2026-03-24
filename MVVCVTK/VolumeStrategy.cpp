@@ -13,6 +13,7 @@ VolumeStrategy::VolumeStrategy() {
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
+	m_resample = vtkSmartPointer<vtkImageResample>::New();
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -25,10 +26,10 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_lastInput = data;
 
     //  降采样逻辑
-    vtkSmartPointer<vtkImageData> inputForMapper = ImageProcessor::ApplyDownsampling(img, 766);
+    m_resample = ImageProcessor::ApplyDownsampling(img, 766);
 
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-    mapper->SetInputData(inputForMapper); // 使用处理后(或原始)的数据
+    mapper->SetInputConnection(m_resample->GetOutputPort()); // 使用处理后(或原始)的数据
     mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
     mapper->SetInteractiveUpdateRate(10.0);
 
@@ -60,7 +61,7 @@ void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 }   
 
 void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
-{
+{   
     if (!m_volume || !m_volume->GetProperty()) return;
 
     // 响应 UpdateFlags::TF
