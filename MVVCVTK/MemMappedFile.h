@@ -4,7 +4,7 @@
 
 class MemMappedFile {
 public:
-    MemMappedFile() = default;
+    MemMappedFile() = default;  
     ~MemMappedFile() { close(); }
     MemMappedFile(const MemMappedFile&) = delete;
     MemMappedFile& operator=(const MemMappedFile&) = delete;
@@ -27,4 +27,4 @@ private:
 #else
     int   m_fd = -1;
 #endif
-};
+};  

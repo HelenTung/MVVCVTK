@@ -11,10 +11,25 @@ struct ReconBuffer {
     std::array<float, 3>  origin = { 0.f, 0.f, 0.f };
 };
 
-class RawVolumeDataManager : public AbstractDataManager {
+
+class BaseDataManager : public AbstractDataManager
+{
+protected:
+	mutable std::mutex m_dataMutex;
+	vtkSmartPointer<vtkImageData> m_vtkImage;
+public:
+    BaseDataManager() {
+        m_vtkImage = vtkSmartPointer<vtkImageData>::New();
+    }
+
+    vtkSmartPointer<vtkImageData> GetVtkImage() const override {
+        std::lock_guard<std::mutex> lk(m_dataMutex);
+        return m_vtkImage;
+	}
+};
+
+class RawVolumeDataManager : public BaseDataManager {
 private:
-    mutable std::mutex m_mutex;
-    vtkSmartPointer<vtkImageData> m_vtkImage;      // VTK 包装对象
     int m_dims[3] = { 0, 0, 0 };
     double m_spacing = 0.02125;
 
@@ -24,7 +39,7 @@ private:
     std::atomic<bool>             m_hasPendingImage{ false };
 
 public:
-    RawVolumeDataManager();
+    RawVolumeDataManager() = default;
     bool LoadData(const std::string& filePath) override;
     bool SetFromBuffer(
         const float* data,
@@ -32,19 +47,12 @@ public:
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
     bool ConsumeReconImage();
-    vtkSmartPointer<vtkImageData> GetVtkImage() const override;
 };
 
 
-class TiffVolumeDataManager : public AbstractDataManager {
-private:
-    mutable std::mutex m_mutex;
-    vtkSmartPointer<vtkImageData> m_vtkImage;
-
+class TiffVolumeDataManager : public BaseDataManager {
 public:
-    TiffVolumeDataManager();
+    TiffVolumeDataManager() = default;
     // 实现加载接口
     bool LoadData(const std::string& filePath) override;
-    // 实现数据获取接口
-    vtkSmartPointer<vtkImageData> GetVtkImage() const override;
 };

@@ -10,10 +10,6 @@
 #include <vtkStringArray.h> 
 #include "MemMappedFile.h"
 
-RawVolumeDataManager::RawVolumeDataManager() {
-    m_vtkImage = vtkSmartPointer<vtkImageData>::New();
-}
-
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
     m_isLoading = true;
     // 解析文件名
@@ -34,7 +30,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
 
     // --- 先释放旧内存，再分配新内存 ---
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_dataMutex);
         if (m_vtkImage) {
             m_vtkImage = nullptr;     // 置空防止悬垂指针
         }
@@ -88,7 +84,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
  
     // --- 提交  ---
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_dataMutex);
         m_vtkImage = std::move(newImage); // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
         m_dims[0] = newDims[0];
         m_dims[1] = newDims[1];
@@ -163,7 +159,7 @@ bool RawVolumeDataManager::ConsumeReconImage()
     incoming->Modified();
 
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_dataMutex);
         m_vtkImage = incoming;
         m_dims[0] = incoming->GetDimensions()[0];
         m_dims[1] = incoming->GetDimensions()[1];
@@ -178,16 +174,6 @@ bool RawVolumeDataManager::ConsumeReconImage()
     m_isLoading.store(false);
 
     return true;
-}
-
-vtkSmartPointer<vtkImageData> RawVolumeDataManager::GetVtkImage() const { 
-       std::lock_guard<std::mutex> lock(m_mutex);
-    return m_vtkImage; // 返回副本，线程安全
-}
-
-TiffVolumeDataManager::TiffVolumeDataManager() {
-    // 初始化一个空的 ImageData 防止空指针访问
-    m_vtkImage = vtkSmartPointer<vtkImageData>::New();
 }
 
 bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
@@ -306,7 +292,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     newImage->ShallowCopy(output);
 
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_dataMutex);
         m_vtkImage = newImage;
     }
 
@@ -315,10 +301,4 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
 	m_isLoading = false;
     return true;
-}
-
-vtkSmartPointer<vtkImageData> TiffVolumeDataManager::GetVtkImage() const {
-    // 线程安全获取
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_vtkImage;
 }
