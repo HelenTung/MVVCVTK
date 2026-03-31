@@ -12,7 +12,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
-#include <vtkImageResample.h>
+
 
 // --- 策略 A: 等值面渲染 ---
 class IsoSurfaceStrategy : public BaseVisualStrategy {
@@ -30,5 +30,4 @@ private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter; // 等值面过滤器
     vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
-    vtkSmartPointer<vtkImageResample> m_resample;
 };

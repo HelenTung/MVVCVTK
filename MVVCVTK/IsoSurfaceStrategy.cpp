@@ -1,5 +1,4 @@
 ﻿#include "IsoSurfaceStrategy.h"
-#include "ImageProcessor.h"
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
@@ -11,7 +10,6 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-	m_resample = vtkSmartPointer<vtkImageResample>::New();
     // 初始绑定
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetInterpolationToPhong();
@@ -50,9 +48,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
 
-        m_resample = ImageProcessor::ApplyDownsampling(img, 756);
-
-        m_isoFilter->SetInputConnection(m_resample->GetOutputPort());
+        m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         m_isoFilter->ComputeNormalsOff();
         m_isoFilter->ComputeGradientsOff(); 
 

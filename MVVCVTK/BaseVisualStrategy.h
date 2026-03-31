@@ -86,7 +86,7 @@ protected:
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }
 
-    void ClampToImageBounds(int& x, int& y, int& z, const int dims[3]) {
+    void JungeToImageBounds(int& x, int& y, int& z, const int dims[3]) {
         if (!dims) return;
         x = std::max(0, std::min(x, dims[0] - 1));
         y = std::max(0, std::min(y, dims[1] - 1));
