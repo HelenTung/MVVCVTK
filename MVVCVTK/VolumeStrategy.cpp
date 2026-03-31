@@ -1,5 +1,4 @@
 ﻿#include "VolumeStrategy.h"
-#include "ImageProcessor.h"
 #include <vtkSmartVolumeMapper.h>
 #include <vtkVolumeProperty.h>
 #include <vtkColorTransferFunction.h>
@@ -13,7 +12,6 @@ VolumeStrategy::VolumeStrategy() {
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
-	m_resample = vtkSmartPointer<vtkImageResample>::New();
 
 	RegisterProp(m_volume);
 	RegisterProp(m_cubeAxes);
@@ -28,11 +26,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
-    //  降采样逻辑
-    m_resample = ImageProcessor::ApplyDownsampling(img, 766);
-
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-    mapper->SetInputConnection(m_resample->GetOutputPort()); // 使用处理后(或原始)的数据
+    mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
     mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
     mapper->SetInteractiveUpdateRate(10.0);
 
