@@ -39,8 +39,8 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
 
     // 初始化颜色映射表
     m_lut = vtkSmartPointer<vtkLookupTable>::New();
-    m_slice->GetProperty()->SetLookupTable(m_lut);
-    m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
+    //m_slice->GetProperty()->SetLookupTable(m_lut);
+    //m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
 
     RegisterProp(m_slice);
     RegisterProp(m_vLineActor);
@@ -77,8 +77,8 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_slice->SetMapper(m_mapper);
 
     // 重建 mapper 后重新绑定 LUT 通道
-    m_slice->GetProperty()->SetLookupTable(m_lut);
-    m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
+    //m_slice->GetProperty()->SetLookupTable(m_lut);
+    //m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
 
     int dims[3];
     img->GetDimensions(dims);
@@ -102,7 +102,7 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::Attach(ren); // ✅ 调用父类挂载
+    BaseVisualStrategy::Attach(ren); // 
     ren->SetBackground(0, 0, 0);
     // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
     ren->SetUseDepthPeeling(1);
@@ -264,11 +264,13 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
     {
-		RebuildGrayscaleLUT(m_lut,params);
+		// RebuildGrayscaleLUT(m_lut,params);
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();
             imgProp->SetOpacity(params.material.opacity);
+            imgProp->SetColorWindow(params.windowLevel.windowWidth);
+            imgProp->SetColorLevel(params.windowLevel.windowCenter);
             // 切片无光照，不设 ambient/diffuse（与 vtkImageProperty 语义一致）
         }
     }
