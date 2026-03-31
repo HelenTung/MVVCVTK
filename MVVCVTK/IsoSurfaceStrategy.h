@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "AppInterfaces.h"
+#include "BaseVisualStrategy.h"
 #include <vtkLODActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -15,14 +15,13 @@
 #include <vtkImageResample.h>
 
 // --- 策略 A: 等值面渲染 ---
-class IsoSurfaceStrategy : public AbstractVisualStrategy {
+class IsoSurfaceStrategy : public BaseVisualStrategy {
 public:
     IsoSurfaceStrategy();
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     vtkProp3D* GetMainProp() override;

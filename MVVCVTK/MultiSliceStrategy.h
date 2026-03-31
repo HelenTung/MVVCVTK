@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "AppInterfaces.h"
+#include "BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -14,13 +14,12 @@
 #include <vtkPolyDataMapper.h>
 
 
-class MultiSliceStrategy : public AbstractVisualStrategy {
+class MultiSliceStrategy : public BaseVisualStrategy {
 public:
     MultiSliceStrategy();
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:

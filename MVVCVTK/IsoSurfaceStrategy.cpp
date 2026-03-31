@@ -22,6 +22,9 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     // 静态数据
     m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
+
+	RegisterProp(m_actor);
+	RegisterProp(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -67,15 +70,9 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void IsoSurfaceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->AddActor(m_actor);
-    ren->AddActor(m_cubeAxes);
+	BaseVisualStrategy::Attach(ren);
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.1, 0.15, 0.2); // 蓝色调背景
-}
-
-void IsoSurfaceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->RemoveActor(m_actor);
-    ren->RemoveActor(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
@@ -89,7 +86,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
     auto prop = m_actor->GetProperty();
 
     // 响应 UpdateFlags::Material
-    if ((int)flags & (int)UpdateFlags::Material) {
+    if (HasFlag(flags, UpdateFlags::Material)) {
 
         // 设置光照参数
         prop->SetAmbient(params.material.ambient);
@@ -104,7 +101,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
         else prop->SetInterpolationToFlat();
     }
 
-    if (((int)flags & (int)UpdateFlags::IsoValue)) {
+    if (HasFlag(flags, UpdateFlags::IsoValue)) {
         if (m_isoFilter && m_isoFilter->GetInput()) {
             // 只有当阈值真的改变时才重新计算
             if (m_isoFilter->GetValue(0) != params.isoValue) {
@@ -115,18 +112,8 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
     }
 
     // 响应 UpdateFlags::Transform
-    if ((int)flags & (int)UpdateFlags::Transform) {
-        vtkMatrix4x4* currentMat = m_actor->GetUserMatrix();
-        if (!currentMat) {
-            // 如果本来没有矩阵，才创建新的
-            auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
-            vtkMat->DeepCopy(params.modelMatrix.data());
-            m_actor->SetUserMatrix(vtkMat);
-        }
-        else {
-            // 如果已有矩阵，直接覆写数据，保持指针地址不变
-            currentMat->DeepCopy(params.modelMatrix.data());
-        }
+    if (HasFlag(flags, UpdateFlags::Transform)) {
+		ApplyTransformTo3DProps(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

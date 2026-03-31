@@ -153,6 +153,9 @@
     <ClInclude Include="AppInterfaces.h">
       <Filter>头文件\App</Filter>
     </ClInclude>
+    <ClInclude Include="BaseVisualStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">

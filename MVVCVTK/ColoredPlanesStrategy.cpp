@@ -28,8 +28,9 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
     m_planeSources[1]->SetNormal(0.0, 1.0, 0.0); // Y-axis normal (Coronal)
     m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z-axis normal (Axial)
 
-	// 初始时模型矩阵为单位矩阵，避免空指针
-	m_cachedModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    for (int i = 0; i < 3; i++) {
+        RegisterProp(m_planeActors[i]); 
+    }
 }
 
 void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -109,14 +110,6 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_planeSources[2]->Update();
 }
 
-void ColoredPlanesStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
-    for (int i = 0; i < 3; i++) renderer->AddActor(m_planeActors[i]);
-}
-
-void ColoredPlanesStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
-    for (int i = 0; i < 3; i++) renderer->RemoveActor(m_planeActors[i]);
-}
-
 int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
     for (int i = 0; i < 3; ++i) {
         if (m_planeActors[i] == actor) {
@@ -133,12 +126,7 @@ void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlag
     }
 
     if (HasFlag(flags, UpdateFlags::Transform)) {
-        m_cachedModelMatrix->DeepCopy(params.modelMatrix.data());
-        for (int i = 0; i < 3; i++) {
-            if (m_planeActors[i]) {
-                m_planeActors[i]->SetUserMatrix(m_cachedModelMatrix);
-            }
-        }
+        ApplyTransformTo3DProps(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

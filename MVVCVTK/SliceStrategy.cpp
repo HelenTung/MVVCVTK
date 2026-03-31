@@ -41,41 +41,10 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_lut = vtkSmartPointer<vtkLookupTable>::New();
     m_slice->GetProperty()->SetLookupTable(m_lut);
     m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
-}
 
-
-void SliceStrategy::RebuildLUT(const RenderParams& params)
-{
-    // WW/WC 线性灰阶映射（DICOM PS3.3 C.7.6.3）
-    // 公式：gray = clamp((scalar - WC + WW/2) / WW, 0, 1)
-    const double ww = params.windowLevel.windowWidth;
-    const double wc = params.windowLevel.windowCenter;
-    const double lo = wc - ww * 0.5;   // 窗下界：低于此值 → 纯黑
-    const double hi = wc + ww * 0.5;   // 窗上界：高于此值 → 纯白
-
-    const double minVal = params.scalarRange[0];
-    const double maxVal = params.scalarRange[1];
-    if (maxVal - minVal <= 0.0) return;
-
-    // CT 用 256 
-    const int nTable = 256;
-    m_lut->SetNumberOfTableValues(nTable);
-    m_lut->SetTableRange(minVal, maxVal);
-
-    for (int i = 0; i < nTable; i++)
-    {
-        const double scalar = minVal + (maxVal - minVal) * (double(i) / (nTable - 1));
-
-        double gray;
-        if (scalar <= lo) gray = 0.0;
-        else if (scalar >= hi) gray = 1.0;
-        else                   gray = (scalar - lo) / ww;
-
-        // 切片为纯灰阶，opacity 由材质全局控制
-        m_lut->SetTableValue(i, gray, gray, gray, params.material.opacity);
-    }
-
-    m_lut->Build();
+    RegisterProp(m_slice);
+    RegisterProp(m_vLineActor);
+    RegisterProp(m_hLineActor);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -133,20 +102,12 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->AddViewProp(m_slice);
-    ren->AddActor(m_vLineActor);
-    ren->AddActor(m_hLineActor);
+    BaseVisualStrategy::Attach(ren); // ✅ 调用父类挂载
     ren->SetBackground(0, 0, 0);
     // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
     ren->SetUseDepthPeeling(1);
     ren->SetMaximumNumberOfPeels(4);
     ren->SetOcclusionRatio(0.0);
-}
-
-void SliceStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->RemoveViewProp(m_slice);
-    ren->RemoveActor(m_vLineActor);
-    ren->RemoveActor(m_hLineActor);
 }
 
 void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
@@ -283,7 +244,7 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
 
 void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if (((int)flags & (int)UpdateFlags::Cursor))
+    if (HasFlag(flags, UpdateFlags::Cursor))
     {
         int x = params.cursor[0];
         int y = params.cursor[1];
@@ -303,8 +264,7 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
     {
-        RebuildLUT(params);
-
+		RebuildGrayscaleLUT(m_lut,params);
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();

@@ -7,6 +7,7 @@ MultiSliceStrategy::MultiSliceStrategy() {
         m_slices[i] = vtkSmartPointer<vtkImageSlice>::New();
         m_mappers[i] = vtkSmartPointer<vtkImageResliceMapper>::New();
         m_slices[i]->SetMapper(m_mappers[i]);
+		RegisterProp(m_slices[i]);
     }
 }
 
@@ -67,15 +68,28 @@ void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
 
 void MultiSliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if (!((int)flags & (int)UpdateFlags::Cursor)) return;
+    if (HasFlag(flags , UpdateFlags::Cursor)) return;
     UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+
+    if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material)) {
+        for (int i = 0; i < 3; i++) {
+            if (m_slices[i] && m_slices[i]->GetProperty()) {
+                m_slices[i]->GetProperty()->SetColorWindow(params.windowLevel.windowWidth);
+                m_slices[i]->GetProperty()->SetColorLevel(params.windowLevel.windowCenter);
+                m_slices[i]->GetProperty()->SetOpacity(params.material.opacity);
+            }
+        }
+    }
+
+    if (HasFlag(flags, UpdateFlags::Visibility)) {
+        const int vis = (params.visibilityMask & VisFlags::ClipPlanes) ? 1 : 0;
+        for (int i = 0; i < 3; i++) {
+            if (m_slices[i]) m_slices[i]->SetVisibility(vis);
+        }
+    }
 }
 
 void MultiSliceStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
-    for (int i = 0; i < 3; i++) renderer->AddViewProp(m_slices[i]);
+    BaseVisualStrategy::Attach(renderer);
     renderer->SetBackground(0.1, 0.1, 0.1);
-}
-
-void MultiSliceStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
-    for (int i = 0; i < 3; i++) renderer->RemoveViewProp(m_slices[i]);
 }

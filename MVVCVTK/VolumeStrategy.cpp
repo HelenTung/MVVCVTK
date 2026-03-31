@@ -14,6 +14,9 @@ VolumeStrategy::VolumeStrategy() {
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 	m_resample = vtkSmartPointer<vtkImageResample>::New();
+
+	RegisterProp(m_volume);
+	RegisterProp(m_cubeAxes);
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -45,15 +48,9 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void VolumeStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->AddVolume(m_volume);
-    ren->AddActor(m_cubeAxes);
+	BaseVisualStrategy::Attach(ren);
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.05, 0.05, 0.05); // 黑色背景
-}
-
-void VolumeStrategy::Detach(vtkSmartPointer<vtkRenderer> ren) {
-    ren->RemoveVolume(m_volume);
-    ren->RemoveActor(m_cubeAxes);
 }
 
 void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
@@ -112,16 +109,8 @@ void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags
     }
 
     // 响应变换矩阵
-    if ((int)flags & (int)UpdateFlags::Transform) {
-        vtkMatrix4x4* currentMat = m_volume->GetUserMatrix();
-        if (!currentMat) {
-            auto vtkMat = vtkSmartPointer<vtkMatrix4x4>::New();
-            vtkMat->DeepCopy(params.modelMatrix.data());
-            m_volume->SetUserMatrix(vtkMat);
-        }
-        else {
-            currentMat->DeepCopy(params.modelMatrix.data());
-        }
+    if (HasFlag(flags,UpdateFlags::Transform)) {
+		ApplyTransformTo3DProps(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

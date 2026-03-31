@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "AppInterfaces.h"
+#include "BaseVisualStrategy.h" 
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -15,7 +15,7 @@
 
 
 // --- 组合策略: 体渲染/等值面 + 切片平面 ---
-class CompositeStrategy : public AbstractVisualStrategy {
+class CompositeStrategy : public BaseVisualStrategy {
 public:
     CompositeStrategy(VizMode mode);
 

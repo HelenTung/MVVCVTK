@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "AppInterfaces.h"
+#include "BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -15,14 +15,13 @@
 
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
-class SliceStrategy : public AbstractVisualStrategy {
+class SliceStrategy : public BaseVisualStrategy {
 public:
     SliceStrategy(Orientation orient);
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
     int GetNavigationAxis() const override { return (int)GetOrientation(); }
@@ -34,7 +33,6 @@ private:
     void SetOrientation(Orientation orient);
     void UpdateCrosshair(int x, int y, int z);
     void UpdatePlanePosition();
-    void RebuildLUT(const RenderParams& params);
     Orientation GetOrientation() const { return m_orientation; }
 
     vtkSmartPointer<vtkImageSlice> m_slice;
