@@ -288,22 +288,9 @@ bool MedicalVizService::SetFromBufferAsync(
         {
             // 在后台线程
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
-
-            // ── 结果通知：只写 SharedState，不碰任何 VTK 渲染对象 ────
-            // DataReady/LoadFailed → Observer → m_needsDataRefresh
-            // 主线程 ProcessPendingUpdates → PostData_RebuildPipeline
-            if (ok) {
-                auto img = dataMgr->GetVtkImage();
-                if (img) {
-                    double range[2];
-                    img->GetScalarRange(range);
-                    sharedState->NotifyDataReady(range[0], range[1]);
-                }
-                else {
-                    sharedState->NotifyLoadFailed();
-                }
-            }
-            else {
+            
+            if (!ok)
+            {
                 sharedState->NotifyLoadFailed();
             }
 
