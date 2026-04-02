@@ -80,11 +80,12 @@ public:
     void TransformModel(double translate[3], double rotate[3], double scale[3])
     {
         auto transform = vtkSmartPointer<vtkTransform>::New();
+        // PostMultiply() 实际上执行的是左乘（把新的变换操作乘在总矩阵的左边），而它默认的 PreMultiply() 才是右乘（把新操作乘在右边）
         transform->PostMultiply();
+        transform->Scale(scale[0], scale[1], scale[2]);
         transform->RotateX(rotate[0]);
         transform->RotateY(rotate[1]);
         transform->RotateZ(rotate[2]);
-        transform->Scale(scale[0], scale[1], scale[2]);
         transform->Translate(translate[0], translate[1], translate[2]);
 
         std::array<double, 16> matData = {0};
