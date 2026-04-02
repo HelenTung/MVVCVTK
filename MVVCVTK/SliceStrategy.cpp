@@ -233,6 +233,9 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
         m_hLineSource->SetPoint1(currentX, bounds[2], physZ);
         m_hLineSource->SetPoint2(currentX, bounds[3], physZ);
     }
+
+    m_vLineSource->Modified();
+	m_hLineSource->Modified();
 }
 
 void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
