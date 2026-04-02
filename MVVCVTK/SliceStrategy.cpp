@@ -114,19 +114,12 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影
+    double distance = cam->GetDistance();
 
     double imgCenter[3] = { 0.0, 0.0, 0.0 };
-    double bounds[6] = { 0.0, 1.0, 0.0, 1.0, 0.0, 1.0 };
     if (m_mapper && m_mapper->GetInput()) {
         m_mapper->GetInput()->GetCenter(imgCenter);
-        m_mapper->GetInput()->GetBounds(bounds);
     }
-
-    // 用数据最大尺寸作为偏移基准，确保相机方向向量精度
-    double sizeX = bounds[1] - bounds[0];
-    double sizeY = bounds[3] - bounds[2];
-    double sizeZ = bounds[5] - bounds[4];
-    double distance = std::max({ sizeX, sizeY, sizeZ }) * 2.0 + 1.0;
 
     // 初次设置
     cam->SetFocalPoint(imgCenter);
@@ -141,7 +134,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
 
     case Orientation::CORONAL:
         // CORONAL: 从 Y+ 往 -Y 看，屏幕水平=X，屏幕垂直=Z
-        cam->SetPosition(imgCenter[0], imgCenter[1] - distance, imgCenter[2]);
+        cam->SetPosition(imgCenter[0], imgCenter[1] + distance, imgCenter[2]);
         cam->SetViewUp(0, 0, 1);
         break;
 
@@ -227,7 +220,7 @@ void SliceStrategy::UpdateCrosshair(int x, int y, int z) {
         m_hLineSource->SetPoint2(bounds[1], physY, currentZ);
     }
     else if (m_orientation == Orientation::CORONAL) {
-        double currentY = origin[1] + m_currentIndex * spacing[1] - layerOffset;
+        double currentY = origin[1] + m_currentIndex * spacing[1] + layerOffset;
         m_vLineSource->SetPoint1(physX, currentY, bounds[4]);
         m_vLineSource->SetPoint2(physX, currentY, bounds[5]);
         m_hLineSource->SetPoint1(bounds[0], currentY, physZ);
