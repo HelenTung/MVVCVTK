@@ -80,7 +80,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
 {
     if (!m_actor) return;
     auto prop = m_actor->GetProperty();
-
+    
     // 响应 UpdateFlags::Material
     if (HasFlag(flags, UpdateFlags::Material)) {
 

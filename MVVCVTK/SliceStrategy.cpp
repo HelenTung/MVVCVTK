@@ -124,6 +124,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     // 初次设置
     cam->SetFocalPoint(imgCenter);
 
+    // 同一个物理坐标系下
     switch (m_orientation) {
     case Orientation::AXIAL:
         // AXIAL: 从 Z+ 往 -Z 看，屏幕水平=X，屏幕垂直=Y

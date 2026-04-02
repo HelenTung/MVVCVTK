@@ -37,7 +37,7 @@ protected:
     void RebuildGrayscaleLUT(vtkLookupTable* lut, const RenderParams& params) {
         if (!lut) return;
 
-        const double ww = params.windowLevel.windowWidth;
+        const double ww = params.windowLevel.windowWidth; if (ww <= 1e-6) return;
         const double wc = params.windowLevel.windowCenter;
         const double lo = wc - ww * 0.5;
         const double hi = wc + ww * 0.5;

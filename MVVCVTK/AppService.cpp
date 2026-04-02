@@ -144,10 +144,6 @@ void MedicalVizService::PreInit_SetBackground(const BackgroundColor& bg)
 {
     // 同步写 SharedState（供后续 RenderParams 填充）
     m_sharedState->SetBackground(bg);
-
-    // 直接更新渲染器（前处理阶段，主线程调用，无 VTK 线程问题）
-    if (m_renderer)
-        m_renderer->SetBackground(bg.r, bg.g, bg.b);
 }
 
 void MedicalVizService::PreInit_SetWindowLevel(double ww, double wc)
@@ -168,10 +164,6 @@ void MedicalVizService::PreInit_CommitConfig(const PreInitConfig& cfg)
 
     // 其余参数批量写入 SharedState（内部精确 diff + 一次锁 + 一次广播）
     m_sharedState->CommitPreInitConfig(cfg);
-
-    // 背景色：前处理阶段直接应用到渲染器（数据无关，主线程安全）
-    if (cfg.hasBgColor && m_renderer)
-        m_renderer->SetBackground(cfg.bgColor.r, cfg.bgColor.g, cfg.bgColor.b);
 }
 
 // ─────────────────────────────────────────────────────────────────────

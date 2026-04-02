@@ -32,6 +32,9 @@ public:
     ~GapAnalysisService() {
         m_cancelFlag.store(true);
         std::lock_guard<std::mutex> lk(m_futureMutex);
+        if (m_future.valid()) {
+            m_future.wait(); // 必须阻塞等待后台线程安全退出
+        }
     }
 
     // ================================================================
