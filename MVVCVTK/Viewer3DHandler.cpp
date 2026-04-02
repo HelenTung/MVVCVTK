@@ -101,46 +101,42 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
         double up[3], forward[3], right[3];
         cam->GetViewUp(up);
         cam->GetDirectionOfProjection(forward);
+        vtkMath::Cross(forward, up, right);
 
-        // right = forward × up 等价于以下方程式
-         vtkMath::Cross(forward, up, right);
-        // right[0] = forward[1] * up[2] - forward[2] * up[1];
-        // right[1] = forward[2] * up[0] - forward[0] * up[2];
-        // right[2] = forward[0] * up[1] - forward[1] * up[0];
+        const auto distance = cam->GetDistance();
+        const auto angle = cam->GetViewAngle() * (3.14159265358979 / 180.0);;
+        const auto winsize = m_renderer->GetRenderWindow()->GetSize();
+        const auto vph = (winsize && winsize[1] > 0) ? winsize[1] : 1;
+        auto piepx = 2 * distance * std::tan(angle * 0.5) / vph;
 
-        // 目标轴单位向量（0→X, 1→Y, 2→Z）
-        double axisVec[3] = { 0.0, 0.0, 0.0 };
-        axisVec[m_dragAxis] = 1.0;
+        double dx_W = dx * piepx;
+        double dy_W = dy * piepx;
 
-        auto projr = vtkMath::Dot(right, axisVec);
-        auto proju = vtkMath::Dot(up, axisVec);
+        // 构造世界空间位移向量 (w=0)
+        double delta_W[4] = {
+            right[0] * dx_W + up[0] * dy_W,
+            right[1] * dx_W + up[1] * dy_W,
+            right[2] * dx_W + up[2] * dy_W,
+            0.0
+        };
 
-        // 屏幕位移在目标轴上的投影（dx 对应 right，dy 对应 up）
-        double proj =
-            projr * dx +
-            proju * dy;
+        // 获取 World -> Model 的逆变换矩阵
+        auto matData = m_service->GetModelMatrix();
+        auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+        mat->DeepCopy(matData.data());
+        mat->Invert(); // 反转矩阵，用于将世界位移映射回模型空间
 
-        // 每像素对应的世界单位：camDist × 2tan(fov/2) / viewportHeight
-        // winSize[0] 是窗口宽度（Width）。winSize[1] 是窗口高度（Height)
-        //worldPerPx=物理总高度屏幕总像素高度/worldwinSize[1] 
-        const double camDist = cam->GetDistance();
-		const double viewAngle = cam->GetViewAngle() * (3.14159265358979 / 180.0); // 转换为弧度
-        int* winSize = m_renderer->GetRenderWindow()->GetSize();
-        const int    vpH = (winSize && winSize[1] > 0) ? winSize[1] : 1;
-        const double worldPerPx = 2.0 * camDist * std::tan(viewAngle * 0.5) / vpH;
+        // 将世界空间的位移向量转换到模型空间
+        double delta_M[4] = { 0.0, 0.0, 0.0, 0.0 };
+        mat->MultiplyPoint(delta_W, delta_M);
 
-        // 构造目标世界坐标：只修改目标轴分量，其余轴取当前光标对应物理坐标
-        // 这样 SyncCursorToWorldPosition(pos, axis) 只更新一个轴，其余不变
-        const double worldDelta = proj * worldPerPx;
+        // 提取对应目标轴的增量（模型空间中，切片平面的移动刚好就是坐标轴方向）
+        double axisDelta = delta_M[m_dragAxis];
 
+        // 构造目标物理坐标：SyncCursorToWorldPosition 实际上接收的是 Model Space 坐标
+        double fakeModelPos[3] = { 0.0, 0.0, 0.0 };
         auto curIdx = m_service->GetCursorPosition();
-        // 取当前光标的世界坐标作为基础，只叠加目标轴增量
-        // 注意：SyncCursorToWorldPosition 内部用 axis 过滤，只更新 m_dragAxis 轴
-        // 因此其他两轴传什么值无所谓，直接传 0 即可
-        double fakeWorldPos[3] = { 0.0, 0.0, 0.0 };
-        
-        // 用当前光标索引换算回当前物理坐标，再叠加增量
-        // Service 层 SyncCursorToWorldPosition 会把世界坐标转回索引，只写 m_dragAxis 轴
+
         if (auto* img = m_service->GetDataManager()
             ? m_service->GetDataManager()->GetVtkImage().Get()
             : nullptr)
@@ -148,13 +144,15 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
             double sp[3], orig[3];
             img->GetSpacing(sp);
             img->GetOrigin(orig);
-            fakeWorldPos[m_dragAxis] =
+
+            // 当前切片所在的模型空间物理坐标 + 鼠标拖拽对应的模型空间增量
+            fakeModelPos[m_dragAxis] =
                 orig[m_dragAxis] +
                 curIdx[m_dragAxis] * sp[m_dragAxis] +
-                worldDelta;
+                axisDelta;
         }
 
-        m_service->SyncCursorToWorldPosition(fakeWorldPos, m_dragAxis);
+        m_service->SyncCursorToWorldPosition(fakeModelPos, m_dragAxis);
 
         return { true, true };
     }

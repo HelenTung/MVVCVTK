@@ -189,13 +189,10 @@ public:
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
     virtual void SyncModelMatrix(vtkMatrix4x4* mat) {}
-
-    // ── 渲染外观配置（运行时，与事件驱动类同级）────────────────────────
-    // 写 SharedState → Observer 广播 Visibility → ProcessPendingUpdates 执行
+    virtual std::array<double, 16> GetModelMatrix() {
+        return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+    }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
-
-    // ── 运行时窗宽/窗位调整（鼠标交互驱动）───────────────────
-    // 写 SharedState → Observer 广播 WindowLevel → ProcessPendingUpdates 执行
     virtual void AdjustWindowLevel(double deltaWW, double deltaWC) {}
 };
 

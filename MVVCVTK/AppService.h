@@ -92,6 +92,9 @@ public:
     void SyncModelMatrix(vtkMatrix4x4* mat)                         override;
     void SetElementVisible(uint32_t flagBit, bool show)             override;
     void AdjustWindowLevel(double deltaWW, double deltaWC)          override;
+    std::array<double, 16> GetModelMatrix() override {
+        return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
+    }
 
     // 模型变换扩展（委托 VolumeTransformService）
     void TransformModel(double translate[3], double rotate[3], double scale[3]);
