@@ -55,6 +55,7 @@ public:
         return m_loadState;
     }
     bool IsLoading() const { return m_isLoading.load(); }
+    virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
 
 protected:
     mutable std::mutex m_stateMutex;
@@ -171,6 +172,17 @@ public:
     // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
     // 默认空实现，派生类按需覆盖
     virtual void CancelLoad() {}
+};
+
+
+class IDataExportService {
+public:
+    virtual ~IDataExportService() = default;
+
+    // 异步保存：在后台线程进行重采样和 I/O，onComplete 只允许操作状态或 UI
+    virtual void SaveTransformedDataAsync(
+        const std::string& path,
+        std::function<void(bool success)> onComplete = nullptr) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────

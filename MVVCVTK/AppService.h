@@ -27,6 +27,7 @@ class MedicalVizService
     : public AbstractInteractiveService
     , public IPreInitService
     , public IDataLoaderService
+    , public IDataExportService
     , public std::enable_shared_from_this<MedicalVizService>
 {
 public:
@@ -67,6 +68,13 @@ public:
 
     LoadState GetLoadState() const override;
 
+	// ================================================================
+	// IDataExportService — 数据导出接口
+	// 线程安全：读取 SharedState（内部 mutex 保护），不操作 VTK
+	// ================================================================
+    void SaveTransformedDataAsync(const std::string& path,
+        std::function<void(bool success)> onComplete = nullptr) override;
+    
     // 尽力取消：设标记，加载函数内部自检后提前退出
     void CancelLoad() override;
 

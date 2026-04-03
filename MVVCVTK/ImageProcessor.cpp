@@ -10,6 +10,7 @@ vtkSmartPointer<vtkImageResample> ImageProcessor::ApplyDownsampling(vtkImageData
     auto resample = vtkSmartPointer<vtkImageResample>::New();
     // 检查是否需要降采样
     if (maxDim <= targetDim) {
+        resample->SetInputData(input);
 		resample->SetAxisMagnificationFactor(0, 1.0);
 		resample->SetAxisMagnificationFactor(1, 1.0);
         resample->SetAxisMagnificationFactor(2, 1.0);

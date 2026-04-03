@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <iostream>
 #include <vtkStringArray.h> 
+#include <vtkTransform.h>
+#include <vtkImageReslice.h>
+#include <vtkImageChangeInformation.h>
 #include "MemMappedFile.h"
 
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
@@ -300,5 +303,101 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     m_vtkImage->GetDimensions(dims);
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
 	m_isLoading = false;
+    return true;
+}
+
+bool BaseDataManager::SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix)
+{
+    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        if (!m_vtkImage) return false;
+        // 浅拷贝数据指针，避免在主线程引发锁竞争
+        imageCopy->ShallowCopy(m_vtkImage);
+    }
+
+    //  VTK 逆变换矩阵
+    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    matrix->DeepCopy(transformMatrix.data());
+    matrix->Invert();
+
+    auto transform = vtkSmartPointer<vtkTransform>::New();
+    transform->SetMatrix(matrix);
+
+    // 利用 vtkImageReslice 进行核心插值运算
+    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
+    reslice->SetInputData(imageCopy);
+    reslice->SetResliceTransform(transform);
+    reslice->SetInterpolationModeToLinear();
+
+    // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。
+    // 这会导致输出的数据维度（Dimensions）发生变化。
+    reslice->SetAutoCropOutput(true);
+
+    reslice->SetOutputDimensionality(3);
+    //double range[2];
+    //imageCopy->GetScalarRange(range);
+    int ext[6];
+    imageCopy->GetExtent(ext);
+    // 吸取原图最边缘的颜色
+    double realAirValue = imageCopy->GetScalarComponentAsDouble(ext[0], ext[2], ext[4], 0);
+    // 用吸取到的真实空气值去填充扩充出来的三角形区域
+    reslice->SetBackgroundLevel(realAirValue);
+
+    try {
+        // 更新管线，触发计算
+        reslice->Update();
+    }
+    catch (...) {
+        std::cerr << "[Error] Exception during image reslicing/changing info." << std::endl;
+        return false;
+    }
+
+    auto outputImage = reslice->GetOutput();
+    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
+        std::cerr << "[Error] Reslice produced an empty image!" << std::endl;
+        return false;
+    }
+
+    // 提取维度大小和内存指针
+    int newDims[3];
+    outputImage->GetDimensions(newDims);
+    float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
+
+    if (!outDataPtr) {
+        return false;
+    }
+
+    vtkIdType incs[3];
+    outputImage->GetIncrements(incs);
+
+    std::filesystem::path pathObj(filePath);
+    std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
+    // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
+    std::filesystem::path finalPath = pathObj.parent_path() / (pathObj.stem().string() + "_" + dimStr + pathObj.extension().string());
+    
+    // 使用 C++ 标准库直接持久化写入裸 raw 数据
+    std::ofstream rawFile(finalPath, std::ios::binary);
+    if (!rawFile.is_open()) {
+        std::cerr << "[Error] Failed to open RAW file for writing: " << filePath << std::endl;
+        return false;
+    }
+
+	// 由于旋转后行尾可能有 Padding（根据 VTK 内部内存布局），不能直接写入整块内存。
+    size_t rowBytes = static_cast<size_t>(newDims[0]) * sizeof(float);
+    for (int z = 0; z < newDims[2]; ++z) {
+        for (int y = 0; y < newDims[1]; ++y) {
+            // 利用真实步长计算出当前行准确的内存起始地址
+            float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
+            // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
+            rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
+        }
+    }
+
+    rawFile.close();
+    std::cout << "[Export] Successfully saved transformed RAW to: " << filePath << "\n"
+        << "[Export] IMPORTANT: New Dimensions are "
+        << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
+
     return true;
 }

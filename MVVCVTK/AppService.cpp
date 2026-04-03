@@ -174,6 +174,34 @@ LoadState MedicalVizService::GetLoadState() const
     return m_sharedState->GetLoadState();
 }
 
+void MedicalVizService::SaveTransformedDataAsync(const std::string& path, std::function<void(bool success)> onComplete)
+{
+    // 捕获必要的资源，确保在后台线程中的生命周期安全
+    auto dataMgr = m_dataManager;
+    auto sharedState = m_sharedState;
+
+    if (!dataMgr || !sharedState) {
+        if (onComplete) onComplete(false);
+        return;
+    }
+
+    // 提取当前的变换矩阵 (主线程/调度线程同步获取，不再传入后台)
+    std::array<double, 16> currentMatrix = sharedState->GetModelMatrix();
+
+    // 封装异步任务
+    std::packaged_task<void()> task([dataMgr, path, currentMatrix, onComplete]() mutable {
+        // 进入后台线程，执行沉重的重采样和保存操作
+        bool ok = dataMgr->SaveTransformedData(path, currentMatrix);
+
+        // 完成回调，调用方可在此处抛出 UI 通知
+        if (onComplete) {
+            onComplete(ok);
+        }
+        });
+
+    std::thread(std::move(task)).detach();
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // IDataLoaderService::CancelLoad（尽力取消）
 // ─────────────────────────────────────────────────────────────────────

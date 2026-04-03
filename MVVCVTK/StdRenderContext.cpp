@@ -244,6 +244,27 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
             }
             if (key == 'd' || key == 'D') { SetToolMode(ToolMode::DistanceMeasure); return; }
             if (key == 'a' || key == 'A') { SetToolMode(ToolMode::AngleMeasure);    return; }
+            //if (key == 's' || key == 'S') {
+            //    if (m_interactiveService) {
+            //        // 使用 dynamic_cast 获取导出接口
+            //        if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) 
+            //        {
+            //            std::cout << "[Export] Starting async export..." << std::endl;
+            //            
+            //            auto omcomplete = [](bool success) {
+            //                // 这是在后台线程的回调
+            //                if (success) {
+            //                    std::cout << "[Export] Successfully saved raw" << std::endl;
+            //                }
+            //                else {
+            //                    std::cerr << "[Export] Failed to save transformed model." << std::endl;
+            //                }
+            //            };
+            //            exporter->SaveTransformedDataAsync("D:\\CT-1209\\data\\out.raw", omcomplete);
+            //        }
+            //    }
+            //    return;
+            //}
             if (s == "Escape") { SetToolMode(ToolMode::Navigation);      return; }
         }
     }

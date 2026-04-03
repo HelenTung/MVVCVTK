@@ -26,6 +26,8 @@ public:
         std::lock_guard<std::mutex> lk(m_dataMutex);
         return m_vtkImage;
 	}
+
+    bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
 };
 
 class RawVolumeDataManager : public BaseDataManager {
