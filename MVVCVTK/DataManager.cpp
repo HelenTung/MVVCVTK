@@ -332,17 +332,12 @@ bool BaseDataManager::SaveTransformedData(const std::string& filePath, const std
 
     // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。
     // 这会导致输出的数据维度（Dimensions）发生变化。
-    reslice->SetAutoCropOutput(true);
-
     reslice->SetOutputDimensionality(3);
-    //double range[2];
-    //imageCopy->GetScalarRange(range);
-    int ext[6];
-    imageCopy->GetExtent(ext);
-    // 吸取原图最边缘的颜色
-    double realAirValue = imageCopy->GetScalarComponentAsDouble(ext[0], ext[2], ext[4], 0);
-    // 用吸取到的真实空气值去填充扩充出来的三角形区域
-    reslice->SetBackgroundLevel(realAirValue);
+    
+    reslice->SetAutoCropOutput(true);
+    double range[2];
+    imageCopy->GetScalarRange(range);
+    reslice->SetBackgroundLevel(range[0]); // 取真实的最小标量值
 
     try {
         // 更新管线，触发计算

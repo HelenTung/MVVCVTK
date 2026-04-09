@@ -151,21 +151,21 @@ int main()
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
     // 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
-    serviceA->SetElementVisible(VisFlags::ClipPlanes, true);
-    serviceE->SetElementVisible(VisFlags::ClipPlanes, true);
+    serviceA->SetElementVisible(VisFlags::ClipPlanes, false);
+    serviceE->SetElementVisible(VisFlags::ClipPlanes, false);
 
     // 3D 窗口：隐藏标尺
     serviceA->SetElementVisible(VisFlags::RulerAxes, false);
     serviceE->SetElementVisible(VisFlags::RulerAxes, false);
 
     // 2D 窗口：隐藏十字测量线
-    serviceB->SetElementVisible(VisFlags::Crosshair, true);
-    serviceC->SetElementVisible(VisFlags::Crosshair, true);
-    serviceD->SetElementVisible(VisFlags::Crosshair, true);
+    serviceB->SetElementVisible(VisFlags::Crosshair, false);
+    serviceC->SetElementVisible(VisFlags::Crosshair, false);
+    serviceD->SetElementVisible(VisFlags::Crosshair, false);
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
-        "D:\\CT-1209\\data\\out_1467X1691X1595.raw",
+        "D:\\CT-1209\\data\\out_1637X1704X1488.raw",
         [sharedState, serviceA](bool success)
         {
             // !! 后台线程 !! 只操作 SharedState��内部有 mutex）

@@ -39,8 +39,8 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
 
     // 初始化颜色映射表
     m_lut = vtkSmartPointer<vtkLookupTable>::New();
-    //m_slice->GetProperty()->SetLookupTable(m_lut);
-    //m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
+    m_slice->GetProperty()->SetLookupTable(m_lut);
+    m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
 
     RegisterProp(m_slice);
     RegisterProp(m_vLineActor);
@@ -261,13 +261,13 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
     {
-		// RebuildGrayscaleLUT(m_lut,params);
+		 RebuildGrayscaleLUT(m_lut,params);
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();
             imgProp->SetOpacity(params.material.opacity);
-            imgProp->SetColorWindow(params.windowLevel.windowWidth);
-            imgProp->SetColorLevel(params.windowLevel.windowCenter);
+            //imgProp->SetColorWindow(params.windowLevel.windowWidth);
+            //imgProp->SetColorLevel(params.windowLevel.windowCenter);
             // 切片无光照，不设 ambient/diffuse（与 vtkImageProperty 语义一致）
         }
     }
