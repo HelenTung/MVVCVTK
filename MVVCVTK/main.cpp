@@ -165,10 +165,10 @@ int main()
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
-        "D:\\CT-1209\\data\\out_1637X1704X1488.raw",
+        "E:\\data\\ct\\1000X1000X1000.raw",
         [sharedState, serviceA](bool success)
         {
-            // !! 后台线程 !! 只操作 SharedState��内部有 mutex）
+            // !! 后台线程 !! 只操作 SharedState内部有 mutex）
             if (!success) {
                 // 加载失败由 NotifyLoadFailed 广播，
                 // PostData_HandleLoadFailed 在主线程处理，此处仅记录日志
