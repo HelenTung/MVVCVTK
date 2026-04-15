@@ -74,7 +74,7 @@
     <IncludePath>E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;E:\CT-1209\DLL\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\CT-1209\VTK\lib\vtk_install\include\vtk-9.4;D:\CT-1209\VTK\lib\vtk_install\include;D:\git\vcpkg-master\installed\x64-windows\include;D:\cv\opencv\build\include;$(IncludePath)</IncludePath>
+    <IncludePath>E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -113,22 +113,8 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>D:\CT-1209\VTK\lib\vtk_install\lib;D:\git\vcpkg-master\installed\x64-windows\lib;D:\cv\opencv\build\x64\vc16\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>vtkCommonCore-9.4.lib;
-vtkCommonDataModel-9.4.lib;
-vtkCommonExecutionModel-9.4.lib;
-vtksys-9.4.lib;
-vtkRenderingCore-9.4.lib;
-vtkRenderingOpenGL2-9.4.lib;
-vtkRenderingFreeType-9.4.lib;
-vtkRenderingImage-9.4.lib
-;vtkFiltersCore-9.4.lib;
-vtkFiltersSources-9.4.lib;
-vtkRenderingAnnotation-9.4.lib
-;vtkRenderingVolume-9.4.lib;
-vtkRenderingVolumeOpenGL2-9.4.lib;
-vtkInteractionStyle-9.4.lib;
-vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>E:\lib_cv\VTK\lib\vtk_install\lib;E:\lib_cv\cv\opencv\build\x64\vc16\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>vtkImagingCore-9.4.lib;vtkRenderingLOD-9.4.lib;vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtksys-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingFreeType-9.4.lib;vtkRenderingImage-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersSources-9.4.lib;vtkRenderingAnnotation-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkInteractionWidgets-9.4.lib;opencv_world4120d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
