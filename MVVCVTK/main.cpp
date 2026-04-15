@@ -54,7 +54,7 @@ static std::pair<
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->SetInteractionMode(cfg.vizMode);
+    context->ApplyCameraStyleByVizMode(cfg.vizMode);
     if (cfg.showAxes)
         context->ToggleOrientationAxes(true);
 

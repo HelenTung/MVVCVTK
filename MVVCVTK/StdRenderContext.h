@@ -37,7 +37,7 @@ public:
     void InitInteractor() override;
     StdRenderContext();
     void Start() override;
-    void SetInteractionMode(VizMode mode) override;
+    void ApplyCameraStyleByVizMode(VizMode mode) override;
     void BindService(std::shared_ptr<AbstractAppService> service) override;
     void ToggleOrientationAxes(bool show) override;
     void SetToolMode(ToolMode mode);

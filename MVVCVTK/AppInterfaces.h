@@ -240,7 +240,7 @@ public:
         if (m_renderer) m_renderer->ResetCamera();
     }
 
-    virtual void SetInteractionMode(VizMode mode) = 0;
+    virtual void ApplyCameraStyleByVizMode(VizMode mode) = 0;
     virtual void InitInteractor() = 0;  // 显式分离，避免 Start() 混乱
     virtual void Start() = 0;
 

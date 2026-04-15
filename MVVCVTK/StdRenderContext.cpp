@@ -124,9 +124,9 @@ void StdRenderContext::Start()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetInteractionMode
+// ApplyCameraStyleByVizMode
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetInteractionMode(VizMode mode)
+void StdRenderContext::ApplyCameraStyleByVizMode(VizMode mode)
 {
     m_currentMode = mode;
 
@@ -202,7 +202,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
         m_interactor->SetInteractorStyle(style);
     }
     else {
-        SetInteractionMode(m_currentMode);
+        ApplyCameraStyleByVizMode(m_currentMode);
     }
 
     if (m_interactiveService) m_interactiveService->SetDirty(true);
