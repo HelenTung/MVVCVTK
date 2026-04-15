@@ -253,13 +253,12 @@ void MedicalVizService::LoadFileAsync(
     auto cancelFlag = m_cancelFlag;
 
     // 用 packaged_task 包装，future 用于析构等待
-    std::packaged_task<void()> task([dataMgr, sharedState, path, onComplete,
+    std::packaged_task<void()> task([dataMgr, sharedState, path,
         cancelFlag]() mutable
         {
             // 加载前检查取消标记
             if (cancelFlag->load()) {
-                sharedState->SetLoadState(LoadState::Idle);
-                if (onComplete) onComplete(false);
+                sharedState->NotifyLoadFailed();
                 return;
             }
 
@@ -267,8 +266,7 @@ void MedicalVizService::LoadFileAsync(
 
             // 加载后再次检查取消标记
             if (cancelFlag->load()) {
-                sharedState->SetLoadState(LoadState::Idle);
-                if (onComplete) onComplete(false);
+                sharedState->NotifyLoadFailed();
                 return;
             }
 
@@ -323,7 +321,7 @@ bool MedicalVizService::SetFromBufferAsync(
     auto sharedState = m_sharedState;
 
     std::packaged_task<void()> task(
-        [dataMgr, sharedState, data, dims, spacing, origin, onComplete]() mutable
+        [dataMgr, sharedState, data, dims, spacing, origin]() mutable
         {
 			// 在后台线程,注意此时状态还是loading，禁止任何VTK操作
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
@@ -332,8 +330,6 @@ bool MedicalVizService::SetFromBufferAsync(
             {
                 sharedState->NotifyLoadFailed();
             }
-
-            if (onComplete) onComplete(ok);
         });
 
     {
