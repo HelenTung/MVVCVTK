@@ -4,12 +4,12 @@
 //
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
-//   IPreInitService             — 前处理接口（main.cpp 配置阶段调用）
+//   IVisualConfigService             — 前处理接口（main.cpp 配置阶段调用）
 //   IDataLoaderService          — 数据加载接口（与渲染解耦）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
 // 三阶段职责：
-//   【前处理】  PreInit_* / PreInit_CommitConfig：只写 SharedState，零 VTK 操作
+//   【前处理】  PreInit_* / CommitVisualConfig：只写 SharedState，零 VTK 操作
 //   【后处理-重建】 ProcessPendingUpdates → PostData_RebuildPipeline
 //   【后处理-同步】 ProcessPendingUpdates → PostData_SyncStateToStrategy
 // =====================================================================
@@ -25,7 +25,7 @@
 
 class MedicalVizService
     : public AbstractInteractiveService
-    , public IPreInitService
+    , public IVisualConfigService
     , public IDataLoaderService
     , public IDataExportService
     , public std::enable_shared_from_this<MedicalVizService>
@@ -38,18 +38,18 @@ public:
         vtkSmartPointer<vtkRenderer>     ren) override;
 
     // ================================================================
-    // IPreInitService — 前处理接口
+    // IVisualConfigService — 前处理接口
     // 调用时机：BindService 之后，LoadFileAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // ================================================================
-    void PreInit_SetVizMode(VizMode mode)                               override;
-    void PreInit_SetMaterial(const MaterialParams& mat)                 override;
-    void PreInit_SetOpacity(double opacity)                             override;
-    void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes)  override;
-    void PreInit_SetIsoThreshold(double val)                            override;
-    void PreInit_SetBackground(const BackgroundColor& bg)               override;
-    void PreInit_SetWindowLevel(double ww, double wc)                   override;
-    void PreInit_CommitConfig(const PreInitConfig& cfg)                 override; // 批量提交
+    void Config_SetVizMode(VizMode mode)                               override;
+    void Config_SetMaterial(const MaterialParams& mat)                 override;
+    void Config_SetOpacity(double opacity)                             override;
+    void Config_SetTransferFunction(const std::vector<TFNode>& nodes)  override;
+    void Config_SetIsoThreshold(double val)                            override;
+    void Config_SetBackground(const BackgroundColor& bg)               override;
+    void Config_SetWindowLevel(double ww, double wc)                   override;
+    void CommitVisualConfig(const PreInitConfig& cfg)                 override; // 批量提交
 
     // ================================================================
     // IDataLoaderService — 数据加载接口

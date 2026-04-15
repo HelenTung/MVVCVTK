@@ -109,55 +109,55 @@ void MedicalVizService::Initialize(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IPreInitService — 前处理：逐项设置（向后兼容）
+// IVisualConfigService — 前处理：逐项设置（向后兼容）
 // ─────────────────────────────────────────────────────────────────────
 
-void MedicalVizService::PreInit_SetVizMode(VizMode mode)
+void MedicalVizService::Config_SetVizMode(VizMode mode)
 {
     m_pendingVizModeInt.store(static_cast<int>(mode));
 }
 
-void MedicalVizService::PreInit_SetMaterial(const MaterialParams& mat)
+void MedicalVizService::Config_SetMaterial(const MaterialParams& mat)
 {
     m_sharedState->SetMaterial(mat);
 }
 
-void MedicalVizService::PreInit_SetOpacity(double opacity)
+void MedicalVizService::Config_SetOpacity(double opacity)
 {
     auto mat = m_sharedState->GetMaterial();
     mat.opacity = opacity;
     m_sharedState->SetMaterial(mat);
 }
 
-void MedicalVizService::PreInit_SetTransferFunction(const std::vector<TFNode>& nodes)
+void MedicalVizService::Config_SetTransferFunction(const std::vector<TFNode>& nodes)
 {
     m_sharedState->SetTFNodes(nodes);
 }
 
-void MedicalVizService::PreInit_SetIsoThreshold(double val)
+void MedicalVizService::Config_SetIsoThreshold(double val)
 {
     m_sharedState->SetIsoValue(val);
 }
 
 // 【前处理：数据无关】背景色直接写渲染器（可在加载前随时调用）
-void MedicalVizService::PreInit_SetBackground(const BackgroundColor& bg)
+void MedicalVizService::Config_SetBackground(const BackgroundColor& bg)
 {
     // 同步写 SharedState（供后续 RenderParams 填充）
     m_sharedState->SetBackground(bg);
 }
 
-void MedicalVizService::PreInit_SetWindowLevel(double ww, double wc)
+void MedicalVizService::Config_SetWindowLevel(double ww, double wc)
 {
     m_sharedState->SetWindowLevel(ww, wc);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IPreInitService::PreInit_CommitConfig（批量提交）
+// IVisualConfigService::CommitVisualConfig（批量提交）
 //
 // 一次锁 + 一次广播；VizMode 仅写原子变量（无需进 SharedState）
 // 背景色在此同步应用到渲染器（前处理阶段，主线程）
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::PreInit_CommitConfig(const PreInitConfig& cfg)
+void MedicalVizService::CommitVisualConfig(const PreInitConfig& cfg)
 {
     // VizMode：只记录意图，无需写 SharedState，也不触发广播
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));

@@ -1,7 +1,7 @@
 ﻿// =====================================================================
 //
 // 三阶段结构（保持不变）：
-//   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / PreInit_CommitConfig
+//   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / CommitVisualConfig
 //                       批量配置所有与数据无关的参数（含背景色）
 //   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载
 //   Phase 3 【渲染骨架】InitInteractor + Start 进入消息循环
@@ -48,7 +48,7 @@ static std::pair<
     context->BindService(service);
 
     // ── 步骤2：批量提交前处理配置（一次锁 + 一次广播）────────────
-    service->PreInit_CommitConfig(cfg.preInitCfg);
+    service->CommitVisualConfig(cfg.preInitCfg);
 
     // ── 步骤3：窗口属性（纯渲染上下文配置，数据无关）─────────────
     context->SetWindowTitle(cfg.title);
@@ -60,7 +60,7 @@ static std::pair<
 
     // ── 步骤4：背景色（前处理：直接应用到渲染器，数据无关）───────
     if (cfg.preInitCfg.hasBgColor)
-        service->PreInit_SetBackground(cfg.preInitCfg.bgColor);
+        service->Config_SetBackground(cfg.preInitCfg.bgColor);
 
     return { service, context };
 }
@@ -180,13 +180,13 @@ int main()
             // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
             auto range = sharedState->GetDataRange();
             double isoVal = range[0] + (range[1] - range[0]) * 0.35;
-            serviceA->PreInit_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
+            serviceA->Config_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
 
             // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）
                         // 取数据范围中央 60% 作为窗口宽度，中点为窗位
             double ww = (range[1] - range[0]) * 0.6;
             double wc = range[0] + (range[1] - range[0]) * 0.5;
-            serviceA->PreInit_SetWindowLevel(ww, wc);
+            serviceA->Config_SetWindowLevel(ww, wc);
 
             std::cout << "[onComplete] Data loaded."
                 << " IsoThreshold=" << isoVal

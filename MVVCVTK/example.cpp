@@ -50,7 +50,7 @@ std::atomic<int>  m_pendingFlags   // "哪些参数发生了变化"（UpdateFlag
 
 
 std::atomic<int>  m_pendingVizModeInt  // "用户意图切换到哪个可视化模式"
-// 写：PreInit_SetVizMode（前处理阶段）
+// 写：Config_SetVizMode（前处理阶段）
 // 读：PostData_RebuildPipeline 取出后创建对应 Strategy
 // 用 int 而非 enum 是因为 atomic 不直接支持 enum class
 

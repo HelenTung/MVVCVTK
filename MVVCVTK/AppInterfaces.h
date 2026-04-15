@@ -10,7 +10,7 @@
 //   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
 //   AbstractAppService         — 基础服务
-//   IPreInitService            — 前处理配置
+//   IVisualConfigService            — 前处理配置
 //   IDataLoaderService         — 数据加载
 //   AbstractInteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
@@ -130,26 +130,26 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// IPreInitService — 前处理接口
+// IVisualConfigService — 前处理接口
 //
 // 职责：数据到达之前，登记所有与数据无关的配置意图。
 //   • 所有方法只写 SharedState（内部有 mutex），零 VTK 操作
 //   • 可在 BindService 之后、异步加载之前的任意时刻调用
 //   • 支持逐项设置 OR 批量提交（CommitConfig）
 // ─────────────────────────────────────────────────────────────────────
-class IPreInitService {
+class IVisualConfigService {
 public:
-    virtual ~IPreInitService() = default;
+    virtual ~IVisualConfigService() = default;
 
     // 逐项设置（向后兼容）
-    virtual void PreInit_SetVizMode(VizMode mode) = 0;
-    virtual void PreInit_SetMaterial(const MaterialParams& mat) = 0;
-    virtual void PreInit_SetOpacity(double opacity) = 0;
-    virtual void PreInit_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
-    virtual void PreInit_SetIsoThreshold(double val) = 0;
-    virtual void PreInit_SetBackground(const BackgroundColor& bg) = 0;
-    virtual void PreInit_SetWindowLevel(double ww, double wc) = 0;
-    virtual void PreInit_CommitConfig(const PreInitConfig& cfg) = 0;
+    virtual void Config_SetVizMode(VizMode mode) = 0;
+    virtual void Config_SetMaterial(const MaterialParams& mat) = 0;
+    virtual void Config_SetOpacity(double opacity) = 0;
+    virtual void Config_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
+    virtual void Config_SetIsoThreshold(double val) = 0;
+    virtual void Config_SetBackground(const BackgroundColor& bg) = 0;
+    virtual void Config_SetWindowLevel(double ww, double wc) = 0;
+    virtual void CommitVisualConfig(const PreInitConfig& cfg) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────

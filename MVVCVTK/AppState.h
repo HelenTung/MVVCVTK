@@ -62,7 +62,7 @@ public:
     }
 
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
-    // 对应 IPreInitService::PreInit_CommitConfig
+    // 对应 IVisualConfigService::CommitVisualConfig
     void CommitPreInitConfig(const PreInitConfig& cfg) {
         UpdateFlags flags = UpdateFlags::None;
         {
