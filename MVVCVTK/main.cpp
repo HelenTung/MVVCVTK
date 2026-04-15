@@ -54,7 +54,7 @@ static std::pair<
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->ApplyCameraStyleByVizMode(cfg.vizMode);
+    context->ApplyCameraStyleByVizMode(cfg.preInitCfg.vizMode);
     if (cfg.showAxes)
         context->ToggleOrientationAxes(true);
 
@@ -88,7 +88,7 @@ int main()
     cfgA.title = "Window A: Composite IsoSurface";
     cfgA.width = 600; cfgA.height = 600;
     cfgA.posX = 50;  cfgA.posY = 50;
-    cfgA.vizMode = VizMode::CompositeIsoSurface;
+    cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     cfgA.showAxes = true;
     cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     cfgA.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, false };
@@ -100,7 +100,6 @@ int main()
     cfgE.title = "Window E: Composite Volume";
     cfgE.width = 600; cfgE.height = 600;
     cfgE.posX = 660; cfgE.posY = 50;
-    cfgE.vizMode = VizMode::CompositeVolume;
     cfgE.preInitCfg.vizMode = VizMode::CompositeVolume;
     cfgE.preInitCfg.tfNodes = volTF;
     cfgE.preInitCfg.hasTF = true;
@@ -112,7 +111,6 @@ int main()
     cfgB.title = "Window B: Axial Slice";
     cfgB.width = 400; cfgB.height = 400;
     cfgB.posX = 50;  cfgB.posY = 660;
-    cfgB.vizMode = VizMode::SliceAxial;
     cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
     cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgB.preInitCfg.hasBgColor = true;
@@ -124,7 +122,6 @@ int main()
     cfgC.title = "Window C: Coronal Slice";
     cfgC.width = 400; cfgC.height = 400;
     cfgC.posX = 460; cfgC.posY = 660;
-    cfgC.vizMode = VizMode::SliceCoronal;
     cfgC.preInitCfg.vizMode = VizMode::SliceCoronal;
     cfgC.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgC.preInitCfg.hasBgColor = true;
@@ -136,7 +133,6 @@ int main()
     cfgD.title = "Window D: Sagittal Slice";
     cfgD.width = 400; cfgD.height = 400;
     cfgD.posX = 870; cfgD.posY = 660;
-    cfgD.vizMode = VizMode::SliceSagittal;
     cfgD.preInitCfg.vizMode = VizMode::SliceSagittal;
     cfgD.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgD.preInitCfg.hasBgColor = true;
