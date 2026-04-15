@@ -54,13 +54,15 @@ public:
         std::lock_guard<std::mutex> lk(m_stateMutex);
         return m_loadState;
     }
-    bool IsLoading() const { return m_isLoading.load(); }
+    void SetLoadState(const LoadState state) {
+		std::lock_guard<std::mutex> lk(m_stateMutex);
+		m_loadState = state;
+    }
     virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
 
 protected:
     mutable std::mutex m_stateMutex;
     LoadState          m_loadState{ LoadState::Idle };
-    std::atomic<bool> m_isLoading{ false };
 };
 
 // ─────────────────────────────────────────────────────────────────────

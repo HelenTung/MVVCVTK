@@ -14,7 +14,7 @@
 #include "MemMappedFile.h"
 
 bool RawVolumeDataManager::LoadData(const std::string& filePath) {
-    m_isLoading = true;
+    SetLoadState(LoadState::Loading);
     // 解析文件名
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
@@ -74,7 +74,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
             << filePath << std::endl;
         std::ifstream file(filePath, std::ios::binary);
         if (!file.is_open()) {
-            m_isLoading = false;
+            SetLoadState(LoadState::Failed);
             return false;
         }
         file.read(reinterpret_cast<char*>(dst),
@@ -93,7 +93,7 @@ bool RawVolumeDataManager::LoadData(const std::string& filePath) {
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
     }
-    m_isLoading = false;
+	SetLoadState(LoadState::Succeeded);
     return true;
 }
 
@@ -103,20 +103,13 @@ bool RawVolumeDataManager::SetFromBuffer(
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin)
 {
-    auto setState = [this](LoadState state, bool isLoading) {
-        {
-            std::lock_guard<std::mutex> lock(m_stateMutex);
-            m_loadState = state;
-        }
-        m_isLoading.store(isLoading);
-        };
 
     if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        setState(LoadState::Failed, false);
+        SetLoadState(LoadState::Failed);
         return false;
     }
 
-    setState(LoadState::Loading, true);
+    SetLoadState(LoadState::Loading);
 
     // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
     auto newImage = vtkSmartPointer<vtkImageData>::New();
@@ -169,21 +162,17 @@ bool RawVolumeDataManager::ConsumeReconImage()
         m_dims[2] = incoming->GetDimensions()[2];
         m_spacing = incoming->GetSpacing()[0];
     }
-
-    {
-        std::lock_guard<std::mutex> lock(m_stateMutex);
-        m_loadState = LoadState::Succeeded;
-    }
-    m_isLoading.store(false);
+    SetLoadState(LoadState::Succeeded);
 
     return true;
 }
 
 bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
-	m_isLoading = true;
+    SetLoadState(LoadState::Loading);
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
+        SetLoadState(LoadState::Failed);
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
         return false;
     }
@@ -211,6 +200,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
         }
 
         if (fileList.empty()) {
+            SetLoadState(LoadState::Failed);
             std::cerr << "[Error] No .tif files found in folder." << std::endl;
             return false;
         }
@@ -272,6 +262,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
         reader->SetFileName(inputPath.c_str());
 
         if (!reader->CanReadFile(inputPath.c_str())) {
+            SetLoadState(LoadState::Failed);
             std::cerr << "[Error] VTK cannot read this TIFF file." << std::endl;
             return false;
         }
@@ -283,6 +274,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
         reader->Update();
     }   
     catch (...) {
+        SetLoadState(LoadState::Failed);
         std::cerr << "[Error] Exception during TIFF reading." << std::endl;
         return false;
     }
@@ -302,7 +294,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     int dims[3];
     m_vtkImage->GetDimensions(dims);
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
-	m_isLoading = false;
+    SetLoadState(LoadState::Succeeded);
     return true;
 }
 

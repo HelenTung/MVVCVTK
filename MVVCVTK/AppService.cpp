@@ -176,28 +176,37 @@ LoadState MedicalVizService::GetLoadState() const
 
 void MedicalVizService::SaveTransformedDataAsync(const std::string& path, std::function<void(bool success)> onComplete)
 {
+
+    {
+        std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
+        m_SaveCallbackFunc = std::move(onComplete);
+    }
+
     // 捕获必要的资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
 
     if (!dataMgr || !sharedState) {
-        if (onComplete) onComplete(false);
+        m_lastSaveResult = false;
+        m_needsSaveTrigger = true;
         return;
     }
 
     // 提取当前的变换矩阵 (主线程/调度线程同步获取，不再传入后台)
     std::array<double, 16> currentMatrix = sharedState->GetModelMatrix();
-
+    std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
+    
     // 封装异步任务
-    std::packaged_task<void()> task([dataMgr, path, currentMatrix, onComplete]() mutable {
+    std::packaged_task<void()> task([dataMgr, path, currentMatrix, weakSelf]() mutable {
         // 进入后台线程，执行沉重的重采样和保存操作
         bool ok = dataMgr->SaveTransformedData(path, currentMatrix);
 
-        // 完成回调，调用方可在此处抛出 UI 通知
-        if (onComplete) {
-            onComplete(ok);
+        auto self = weakSelf.lock();
+        if (self) {
+            self->m_lastSaveResult = ok;
+            self->m_needsSaveTrigger = true; // 发出完成信号
         }
-        });
+    });
 
     std::thread(std::move(task)).detach();
 }
@@ -227,7 +236,13 @@ void MedicalVizService::LoadFileAsync(
     // 防止重复加载（加载中状态直接返回）
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
         std::cerr << "[LoadFileAsync] Already loading, ignoring duplicate call.\n";
+        if (onComplete) onComplete(false); // 拒绝重入，直接返回
         return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+        m_LoadCallbackFunc = std::move(onComplete);
     }
 
     m_cancelFlag->store(false);
@@ -273,8 +288,6 @@ void MedicalVizService::LoadFileAsync(
                 std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
                 sharedState->NotifyLoadFailed();  
             }
-
-            if (onComplete) onComplete(ok);
         });
 
     // 保存 future 用于析构 join
@@ -295,7 +308,13 @@ bool MedicalVizService::SetFromBufferAsync(
 {
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
         std::cerr << "[SetFromBufferAsync] Already loading, ignoring.\n";
+		if (onComplete) onComplete(false); // 拒绝重入，直接返回
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+        m_LoadCallbackFunc = std::move(onComplete);
     }
 
     m_sharedState->SetLoadState(LoadState::Loading);
@@ -306,7 +325,7 @@ bool MedicalVizService::SetFromBufferAsync(
     std::packaged_task<void()> task(
         [dataMgr, sharedState, data, dims, spacing, origin, onComplete]() mutable
         {
-            // 在后台线程
+			// 在后台线程,注意此时状态还是loading，禁止任何VTK操作
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
             
             if (!ok)
@@ -351,6 +370,11 @@ void MedicalVizService::ProcessPendingUpdates()
         }
     }
 
+    // 导出异步任务回调触发
+    if (m_needsSaveTrigger.exchange(false)) {
+        ExecutePendingSaveCallback(m_lastSaveResult.load());
+    }
+
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
         ExecuteClearStrategyCache();
@@ -358,12 +382,14 @@ void MedicalVizService::ProcessPendingUpdates()
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
         PostData_HandleLoadFailed();
+        ExecutePendingLoadCallback(false);
         return;
     }
 
     // DataReady → 重建管线（优先于增量同步）
     if (m_needsDataRefresh.exchange(false)) {
         PostData_RebuildPipeline();
+        ExecutePendingLoadCallback(true);
         return; // 本帧只做重建，同步留到下帧
     }
 

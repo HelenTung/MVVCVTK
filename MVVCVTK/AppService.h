@@ -129,14 +129,45 @@ private:
     // ── Strategy 缓存管理
     std::shared_ptr<AbstractVisualStrategy> GetOrCreateStrategy(VizMode mode);
 
-    // ── 仅设标记，主线程统一执行 Detach（修复：不在后台线程调 VTK）
+    // ── 仅设标记，主线程统一执行 Detach   （不在后台线程调 VTK）
     void RequestClearStrategyCache();   // 后台线程安全：只设标记
     void ExecuteClearStrategyCache();   // 主线程：真正执行 Detach + clear
 
     void ResetCursorToCenter();
     void MarkNeedsSync();
 
-    // ── 成员 ────────────────────────────────────────────���────────
+    // ————— 异步加载回调管理（LoadFile / SetFromBuffer）——————————
+    void ExecutePendingLoadCallback(bool success) {
+        std::function<void(bool)> cb;
+		{
+			std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+			cb = std::move(m_LoadCallbackFunc);
+            m_LoadCallbackFunc = nullptr;
+		}
+        if (cb) cb(success);
+    }
+
+    mutable std::mutex m_LoadCallbackMutex;
+    std::function<void(bool)> m_LoadCallbackFunc;
+
+
+    // ————— 异步保存回调管理（SaveTransformedData）——————————
+    void ExecutePendingSaveCallback(bool success) {
+        std::function<void(bool)> cb;
+        {
+            std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
+            cb = std::move(m_SaveCallbackFunc);
+            m_SaveCallbackFunc = nullptr;
+        }
+        if (cb) cb(success);
+    }
+
+    mutable std::mutex        m_SaveCallbackMutex;
+    std::function<void(bool)> m_SaveCallbackFunc;
+    std::atomic<bool>         m_needsSaveTrigger{ false }; // 是一个触发信号，放进去数据就准备就绪后
+    std::atomic<bool>         m_lastSaveResult{ false };// 存储后台任务执行的最终结果
+
+    // ── 成员 ────────────────────────────────────────────────────
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
     std::shared_ptr<SharedInteractionState>    m_sharedState;
     std::unique_ptr<VolumeTransformService>    m_transformService;
