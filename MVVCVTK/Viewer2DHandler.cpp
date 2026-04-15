@@ -42,7 +42,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
         const int step = eve.ctrl ? 5 : 1;
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
-        m_service->UpdateInteraction(delta);
+        m_service->ScrollSlice(delta);
         // m_service->MarkDirty();
         return { true, true };  // abortVtk=true：阻止 VTK 默认滚轮相机缩放
     }

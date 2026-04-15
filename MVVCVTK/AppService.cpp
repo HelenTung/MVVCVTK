@@ -550,7 +550,7 @@ void MedicalVizService::MarkNeedsSync()
 // ─────────────────────────────────────────────────────────────────────
 // 交互接口实现
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::UpdateInteraction(int delta)
+void MedicalVizService::ScrollSlice(int delta)
 {
     if (!m_sharedState) return;
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());

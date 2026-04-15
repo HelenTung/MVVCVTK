@@ -194,7 +194,7 @@ class AbstractInteractiveService
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    virtual void UpdateInteraction(int delta) {}
+    virtual void ScrollSlice(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
     virtual void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) {}
     virtual std::array<int, 3> GetCursorPosition() { return { 0, 0, 0 }; }

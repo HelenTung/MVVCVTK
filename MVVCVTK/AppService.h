@@ -91,7 +91,7 @@ public:
     // ================================================================
     // AbstractInteractiveService — 交互接口
     // ================================================================
-    void UpdateInteraction(int delta)                               override;
+    void ScrollSlice(int delta)                               override;
     void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) override;
     std::array<int, 3> GetCursorPosition()                         override;
     void SetInteracting(bool val)                                   override;
