@@ -106,34 +106,34 @@ int main()
     cfgE.preInitCfg.bgColor = { 0.08, 0.08, 0.12 }; // 深蓝背景
     cfgE.preInitCfg.hasBgColor = true;
 
-    // ── 窗口 B：Axial 切片（2D，默认软组织窗）────────────────────
+    // ── 窗口 B：Top_down 切片（2D，默认软组织窗）────────────────────
     WindowConfig cfgB;
-    cfgB.title = "Window B: Axial Slice";
+    cfgB.title = "Window B: Top_down Slice";
     cfgB.width = 400; cfgB.height = 400;
     cfgB.posX = 50;  cfgB.posY = 660;
-    cfgB.preInitCfg.vizMode = VizMode::SliceAxial;
+    cfgB.preInitCfg.vizMode = VizMode::SliceTop_down;
     cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgB.preInitCfg.hasBgColor = true;
     cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★ WW=400, WC=40
     cfgB.preInitCfg.hasWindowLevel = true;
 
-    // ── 窗口 C：Coronal 切片 ─────────────────────────────────────
+    // ── 窗口 C：Front_back 切片 ─────────────────────────────────────
     WindowConfig cfgC;
-    cfgC.title = "Window C: Coronal Slice";
+    cfgC.title = "Window C: Front_back Slice";
     cfgC.width = 400; cfgC.height = 400;
     cfgC.posX = 460; cfgC.posY = 660;
-    cfgC.preInitCfg.vizMode = VizMode::SliceCoronal;
+    cfgC.preInitCfg.vizMode = VizMode::SliceFront_back;
     cfgC.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgC.preInitCfg.hasBgColor = true;
     cfgC.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★
     cfgC.preInitCfg.hasWindowLevel = true;
 
-    // ── 窗口 D：Sagittal 切片 ────────────────────────────────────
+    // ── 窗口 D：Left_right 切片 ────────────────────────────────────
     WindowConfig cfgD;
-    cfgD.title = "Window D: Sagittal Slice";
+    cfgD.title = "Window D: Left_right Slice";
     cfgD.width = 400; cfgD.height = 400;
     cfgD.posX = 870; cfgD.posY = 660;
-    cfgD.preInitCfg.vizMode = VizMode::SliceSagittal;
+    cfgD.preInitCfg.vizMode = VizMode::SliceLeft_right;
     cfgD.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
     cfgD.preInitCfg.hasBgColor = true;
     cfgD.preInitCfg.windowLevel = { 400.0, 40.0 };   // ★
@@ -147,17 +147,17 @@ int main()
     auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
 
     // 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
-    serviceA->SetElementVisible(VisFlags::ClipPlanes, false);
-    serviceE->SetElementVisible(VisFlags::ClipPlanes, false);
+    serviceA->SetElementVisible(VisFlags::ClipPlanes, true);
+    serviceE->SetElementVisible(VisFlags::ClipPlanes, true);
 
     // 3D 窗口：隐藏标尺
     serviceA->SetElementVisible(VisFlags::RulerAxes, false);
     serviceE->SetElementVisible(VisFlags::RulerAxes, false);
 
     // 2D 窗口：隐藏十字测量线
-    serviceB->SetElementVisible(VisFlags::Crosshair, false);
-    serviceC->SetElementVisible(VisFlags::Crosshair, false);
-    serviceD->SetElementVisible(VisFlags::Crosshair, false);
+    serviceB->SetElementVisible(VisFlags::Crosshair, true);
+    serviceC->SetElementVisible(VisFlags::Crosshair, true);
+    serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     IDataLoaderService* loader = serviceA.get();
     loader->LoadFileAsync(
@@ -210,3 +210,7 @@ int main()
 
     return 0;
 }
+
+// TODO:
+// 修正坐标同步问题，解决切片下的2d坐标系和3d空间坐标系不同步导致的光标位置不准确问题
+// 修正可见性没有区分标尺，十字绣，彩色切平面的问题，使得用户可以单独控制它们的显示隐藏

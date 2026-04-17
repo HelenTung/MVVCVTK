@@ -15,7 +15,8 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
-    // 0: Sagittal (X normal), 1: Coronal (Y normal), 2: Axial (Z normal)
+    // 0: 
+    // (X normal), 1: Front_back (Y normal), 2: Top_down (Z normal)
     for (int i = 0; i < 3; i++) {
         m_mappers[i]->SetInputData(img);
         auto plane = vtkSmartPointer<vtkPlane>::New();

@@ -92,7 +92,7 @@ public:
     // AbstractInteractiveService — 交互接口
     // ================================================================
     void ScrollSlice(int delta)                               override;
-    void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) override;
+    void UpdateCursorFromModelPosition(double modelPos[3], int axis = -1) override;
     std::array<int, 3> GetCursorPosition()                         override;
     void SetInteracting(bool val)                                   override;
     int  GetPlaneAxis(vtkActor* actor)                              override;
@@ -107,8 +107,8 @@ public:
     // 模型变换扩展（委托 VolumeTransformService）
     void TransformModel(double translate[3], double rotate[3], double scale[3]);
     void ResetModelTransform();
-    void WorldToModel(const double worldPos[3], double modelPos[3]);
-    void ModelToWorld(const double modelPos[3], double worldPos[3]);
+    void WorldToModel(const double worldPos[3], double modelPos[3]) const override;
+    void ModelToWorld(const double modelPos[3], double worldPos[3]) const override;
 
     // 供 main.cpp / 回调安全访问 SharedState
     std::shared_ptr<SharedInteractionState> GetSharedState() const { return m_sharedState; }

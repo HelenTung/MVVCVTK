@@ -9,7 +9,7 @@ class vtkRenderer;
 // Viewer3DHandler — 处理 CompositeVolume / CompositeIsoSurface 模式下的交互
 //
 // 支持的交互：
-//   左键拾取切片平面 → 拖拽平面（SyncCursorToWorldPosition + dragAxis）
+//   左键拾取切片平面 → 拖拽平面（UpdateCursorFromModelPosition + dragAxis）
 //   拖拽期间降低渲染更新率（15 fps），释放后恢复静态高精度（0.001）
 // ─────────────────────────────────────────────────────────────────────
 class Viewer3DHandler : public IInteractionHandler

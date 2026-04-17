@@ -82,7 +82,14 @@ public:
         auto transform = vtkSmartPointer<vtkTransform>::New();
         // PostMultiply() 实际上执行的是左乘（把新的变换操作乘在总矩阵的左边），而它默认的 PreMultiply() 才是右乘（把新操作乘在右边）
         transform->PostMultiply();
-        transform->Scale(scale[0], scale[1], scale[2]);
+
+		// 从当前模型矩阵开始累积变换，保持连续交互的平滑性（而不是每次都从单位矩阵开始）
+        transform->SetMatrix(m_cachedModelMatrix);
+		// Pw = T * Rz * Ry * Rx * S * C * Pm，其中 Pm 是模型坐标，Pw 是世界坐标,C是之前的变换，S/R/T 是本次交互的缩放/旋转/平移
+        double sx = (scale[0] == 0.0) ? 1.0 : scale[0];
+        double sy = (scale[1] == 0.0) ? 1.0 : scale[1];
+        double sz = (scale[2] == 0.0) ? 1.0 : scale[2];
+		transform->Scale(sx, sy, sz);
         transform->RotateX(rotate[0]);
         transform->RotateY(rotate[1]);
         transform->RotateZ(rotate[2]);

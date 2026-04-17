@@ -198,7 +198,7 @@ public:
 
     virtual void ScrollSlice(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
-    virtual void SyncCursorToWorldPosition(double worldPos[3], int axis = -1) {}
+    virtual void UpdateCursorFromModelPosition(double worldPos[3], int axis = -1) {}
     virtual std::array<int, 3> GetCursorPosition() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
@@ -208,6 +208,8 @@ public:
     }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
     virtual void AdjustWindowLevel(double deltaWW, double deltaWC) {}
+    virtual void WorldToModel(const double worldPos[3], double modelPos[3]) const = 0;
+    virtual void ModelToWorld(const double modelPos[3], double worldPos[3]) const = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────

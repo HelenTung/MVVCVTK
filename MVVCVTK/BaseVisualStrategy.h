@@ -34,34 +34,6 @@ public:
 	}
 
 protected:
-    void RebuildGrayscaleLUT(vtkLookupTable* lut, const RenderParams& params) {
-        if (!lut) return;
-
-        const double ww = params.windowLevel.windowWidth; if (ww <= 1e-6) return;
-        const double wc = params.windowLevel.windowCenter;
-        const double lo = wc - ww * 0.5;
-        const double hi = wc + ww * 0.5;
-
-        const double minVal = params.scalarRange[0];
-        const double maxVal = params.scalarRange[1];
-        if (maxVal - minVal <= 0.0) return;
-
-        const int nTable = 256;
-        lut->SetNumberOfTableValues(nTable);
-        lut->SetTableRange(minVal, maxVal);
-
-        for (int i = 0; i < nTable; i++) {
-            const double scalar = minVal + (maxVal - minVal) * (double(i) / (nTable - 1));
-            double gray;
-            if (scalar <= lo) gray = 0.0;
-            else if (scalar >= hi) gray = 1.0;
-            else              gray = (scalar - lo) / ww;
-
-            lut->SetTableValue(i, gray, gray, gray, params.material.opacity);
-        }
-        lut->Build();
-    }
-
     void ApplyTransformTo3DProps(const std::array<double, 16>& matrixData) {
         for (auto prop : m_managedProps) {
             auto prop3D = vtkProp3D::SafeDownCast(prop);

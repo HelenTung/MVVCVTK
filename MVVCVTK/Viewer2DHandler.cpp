@@ -8,9 +8,9 @@ namespace {
 
     bool IsSliceMode(VizMode mode)
     {
-        return mode == VizMode::SliceAxial
-            || mode == VizMode::SliceCoronal
-            || mode == VizMode::SliceSagittal;
+        return mode == VizMode::SliceTop_down
+            || mode == VizMode::SliceFront_back
+            || mode == VizMode::SliceLeft_right;
     }
 
     // 窗宽/窗位灵敏度系数（每像素对应的 WW/WC 变化量）
@@ -100,7 +100,9 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
             if (worldPos) {
-                m_service->SyncCursorToWorldPosition(worldPos);
+                double modelPos[3];
+                m_service->WorldToModel(worldPos, modelPos);
+                m_service->UpdateCursorFromModelPosition(modelPos);
                 m_service->MarkDirty();
             }
             return { true, true };

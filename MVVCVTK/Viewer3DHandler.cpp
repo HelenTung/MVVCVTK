@@ -6,7 +6,7 @@
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
-
+#include <vtkTransform.h>
 namespace {
 
     bool IsCompositeMode(VizMode mode)
@@ -112,47 +112,79 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
         double dx_W = dx * piepx;
         double dy_W = dy * piepx;
 
-        // 构造世界空间位移向量 (w=0)
+        // 构造世界空间位移向量增量 (w=0)
         double delta_W[4] = {
             right[0] * dx_W + up[0] * dy_W,
             right[1] * dx_W + up[1] * dy_W,
             right[2] * dx_W + up[2] * dy_W,
-            0.0
+            0
         };
 
         // 获取 World -> Model 的逆变换矩阵
         auto matData = m_service->GetModelMatrix();
         auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+		auto transform = vtkSmartPointer<vtkTransform>::New();
         mat->DeepCopy(matData.data());
-        mat->Invert(); // 反转矩阵，用于将世界位移映射回模型空间
+        //mat->Invert(); // 反转矩阵，用于将世界位移映射回模型空间
+		transform->SetMatrix(mat);
+		transform->Inverse();// 反转变换
 
-        // 将世界空间的位移向量转换到模型空间
-        double delta_M[4] = { 0.0, 0.0, 0.0, 0.0 };
-        mat->MultiplyPoint(delta_W, delta_M);
+        // 求法线并作归一化,求出真实位移量
+        double normal_m[4] = { 0.0, 0.0, 0.0, 0.0 };
+        normal_m[m_dragAxis] = 1.0;
+        double normal_w[4];
+        mat->MultiplyPoint(normal_m, normal_w);
 
-        // 提取对应目标轴的增量（模型空间中，切片平面的移动刚好就是坐标轴方向）
-        double axisDelta = delta_M[m_dragAxis];
-
-        // 构造目标物理坐标：SyncCursorToWorldPosition 实际上接收的是 Model Space 坐标
-        double fakeModelPos[3] = { 0.0, 0.0, 0.0 };
-        auto curIdx = m_service->GetCursorPosition();
-
-        if (auto* img = m_service->GetDataManager()
-            ? m_service->GetDataManager()->GetVtkImage().Get()
-            : nullptr)
-        {
-            double sp[3], orig[3];
-            img->GetSpacing(sp);
-            img->GetOrigin(orig);
-
-            // 当前切片所在的模型空间物理坐标 + 鼠标拖拽对应的模型空间增量
-            fakeModelPos[m_dragAxis] =
-                orig[m_dragAxis] +
-                curIdx[m_dragAxis] * sp[m_dragAxis] +
-                axisDelta;
+        double len = std::sqrt(normal_w[0] * normal_w[0] + normal_w[1] * normal_w[1] + normal_w[2] * normal_w[2]);
+        if (len > 1e-6) {
+            normal_w[0] /= len; normal_w[1] /= len; normal_w[2] /= len;
         }
+        double dist = delta_W[0] * normal_w[0] + delta_W[1] * normal_w[1] + delta_W[2] * normal_w[2];
 
-        m_service->SyncCursorToWorldPosition(fakeModelPos, m_dragAxis);
+        // 构造真正有意义的受约束位移
+        double pure_delta_W[4] = {
+            dist * normal_w[0],
+            dist * normal_w[1],
+            dist * normal_w[2],
+            0.0 // 向量 w=0
+        };
+
+		// 现在mat是模型矩阵，模型到世界的变换，，transform是世界到模型的变换
+		auto img = m_service->GetDataManager()->GetVtkImage();
+        if (!img) return { true,true };
+
+        // 反推模型坐标
+        double origin[3] = {0}, spacing[3] = { 0 };
+		img->GetOrigin(origin);
+		img->GetSpacing(spacing);
+
+		auto curIndex = m_service->GetCursorPosition();
+		// 上一帧的模型坐标位置（增量计算基于此）
+		double LastIndex_M[4] = { 
+			origin[0] + curIndex[0] * spacing[0],
+            origin[1] + curIndex[1] * spacing[1],
+            origin[2] + curIndex[2] * spacing[2],
+            1.0
+        };
+        double LastIndex_W[4] = {0};
+        mat->MultiplyPoint(LastIndex_M, LastIndex_W);
+        double curIndex_W[4] = {
+            LastIndex_W[0] + pure_delta_W[0],
+            LastIndex_W[1] + pure_delta_W[1],
+            LastIndex_W[2] + pure_delta_W[2],
+            LastIndex_W[3] + pure_delta_W[3],
+        };
+        double curIndex_M[4] = { 0 };
+        transform->MultiplyPoint(curIndex_W, curIndex_M);
+
+        double curModelPos[3] = {
+                curIndex_M[0],
+                curIndex_M[1],
+                curIndex_M[2],
+        };
+
+        // 全量更新
+        m_service->UpdateCursorFromModelPosition(curModelPos, -1);
 
         return { true, true };
     }

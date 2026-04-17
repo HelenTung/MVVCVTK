@@ -6,11 +6,11 @@ class vtkPropPicker;
 class vtkRenderer;
 
 // ─────────────────────────────────────────────────────────────────────
-// Viewer2DHandler — 处理 SliceAxial / SliceCoronal / SliceSagittal 模式下的交互
+// Viewer2DHandler — 处理 SliceTop_down / SliceFront_back / SliceLeft_right 模式下的交互
 //
 // 支持的交互：
 //   滚轮前/后         → 切片步进 ±1（Ctrl 修饰时 ±5）
-//   Shift + 左键拖拽  → 拖拽十字线定位（SyncCursorToWorldPosition）
+//   Shift + 左键拖拽  → 拖拽十字线定位（UpdateCursorFromModelPosition）
 // ─────────────────────────────────────────────────────────────────────
 class Viewer2DHandler : public IInteractionHandler
 {

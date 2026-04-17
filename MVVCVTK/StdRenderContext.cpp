@@ -130,9 +130,9 @@ void StdRenderContext::ApplyCameraStyleByVizMode(VizMode mode)
 {
     m_currentMode = mode;
 
-    if (mode == VizMode::SliceAxial
-        || mode == VizMode::SliceCoronal
-        || mode == VizMode::SliceSagittal)
+    if (mode == VizMode::SliceTop_down
+        || mode == VizMode::SliceFront_back
+        || mode == VizMode::SliceLeft_right)
     {
         auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
         style->SetInteractionModeToImage2D();
@@ -275,7 +275,7 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
         && m_interactiveService)
     {
         vtkProp3D* prop = m_interactiveService->GetMainProp();
-        if (prop && prop->GetUserMatrix()) {
+        if (prop && prop->GetMatrix()) {
             m_interactiveService->SyncModelMatrix(prop->GetUserMatrix());
             m_interactiveService->MarkDirty();
         }

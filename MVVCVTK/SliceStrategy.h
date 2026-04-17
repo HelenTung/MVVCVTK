@@ -12,6 +12,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkRenderer.h>
 
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
@@ -24,31 +25,32 @@ public:
     void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
     void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
-    int GetNavigationAxis() const override { return (int)GetOrientation(); }
+    int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
 private:
-    // [Private] 内部实现：由 UpdateVisuals 内部驱动
-    void SetSliceIndex(int delta);
-    void SetOrientation(Orientation orient);
-    void UpdateCrosshair(int x, int y, int z);
-    void UpdatePlanePosition();
-    Orientation GetOrientation() const { return m_orientation; }
+    //    Transform 支持：4 个局部端点经 M 变换到世界空间后提交。
+    //
+    //  cx/cy/cz  — 游标索引（数据空间）
+    //  bounds    — 数据在局部空间的包围盒 [xMin,xMax, yMin,yMax, zMin,zMax]
+    //  origin    — 数据原点
+    //  spacing   — 数据间距
+    //  mat       — 当前模型矩阵 M（局部→世界）
+    //  safeOffset— 沿法线微量偏移，防穿模闪烁
+    void UpdateCrosshair(int cx, int cy, int cz,
+        const double bounds[6],
+        const double origin[3],
+        const double spacing[3],
+        double safeOffset);
 
+    vtkWeakPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     Orientation m_orientation;
-
-    // 状态记录
-    int m_currentIndex = 0;
-    int m_maxIndex = 0;
 
     // --- 十字线相关 ---
     vtkSmartPointer<vtkActor> m_vLineActor; // 垂直线
     vtkSmartPointer<vtkActor> m_hLineActor; // 水平线
     vtkSmartPointer<vtkLineSource> m_vLineSource;
     vtkSmartPointer<vtkLineSource> m_hLineSource;
-  
-    // 颜色映射缓存LUT
-    vtkSmartPointer<vtkLookupTable> m_lut;
 };

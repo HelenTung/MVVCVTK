@@ -14,9 +14,9 @@ public:
         switch (mode) {
         case VizMode::Volume: return std::make_shared<VolumeStrategy>();
         case VizMode::IsoSurface: return std::make_shared<IsoSurfaceStrategy>();
-        case VizMode::SliceAxial: return std::make_shared<SliceStrategy>(Orientation::AXIAL);
-        case VizMode::SliceCoronal: return std::make_shared<SliceStrategy>(Orientation::CORONAL);
-        case VizMode::SliceSagittal: return std::make_shared<SliceStrategy>(Orientation::SAGITTAL);
+        case VizMode::SliceTop_down: return std::make_shared<SliceStrategy>(Orientation::Top_down);
+        case VizMode::SliceFront_back: return std::make_shared<SliceStrategy>(Orientation::Front_back);
+        case VizMode::SliceLeft_right: return std::make_shared<SliceStrategy>(Orientation::Left_right);
         case VizMode::CompositeVolume: return std::make_shared<CompositeStrategy>(VizMode::CompositeVolume);
         case VizMode::CompositeIsoSurface: return std::make_shared<CompositeStrategy>(VizMode::CompositeIsoSurface);
         default: return nullptr;

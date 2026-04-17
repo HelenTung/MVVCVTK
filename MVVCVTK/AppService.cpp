@@ -363,6 +363,9 @@ void MedicalVizService::ProcessPendingUpdates()
                 img->GetScalarRange(range);
                 m_sharedState->NotifyDataReady(range[0], range[1]);
             }
+            else {
+                m_sharedState->NotifyLoadFailed();
+            }
         }
     }
 
@@ -386,7 +389,7 @@ void MedicalVizService::ProcessPendingUpdates()
     if (m_needsDataRefresh.exchange(false)) {
         PostData_RebuildPipeline();
         ExecutePendingLoadCallback(true);
-        return; // 本帧只做重建，同步留到下帧
+        // return; // 本帧只做重建，同步留到下帧
     }
 
     // 普通事件增量同步
@@ -432,7 +435,9 @@ void MedicalVizService::PostData_RebuildPipeline()
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::PostData_SyncStateToStrategy()
 {
-    if (!m_needsSync.load() || !m_currentStrategy) return;
+    bool expected = true;
+    if (!m_needsSync.compare_exchange_strong(expected, false)) return;
+    if (!m_currentStrategy) return;
 
     int flagsInt = m_pendingFlags.exchange(0);
     UpdateFlags flags = static_cast<UpdateFlags>(flagsInt);
@@ -458,7 +463,7 @@ void MedicalVizService::PostData_SyncStateToStrategy()
     m_currentStrategy->UpdateVisuals(params, flags);
 
     m_isDirty = true;
-    m_needsSync = false;
+    // m_needsSync = false;
 }
 
 void MedicalVizService::PostData_HandleLoadFailed()
@@ -488,6 +493,7 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
     if (HasFlag(flags, UpdateFlags::Cursor)) {
         auto pos = m_sharedState->GetCursorPosition();
         p.cursor = { pos[0], pos[1], pos[2] };
+        p.modelMatrix = m_sharedState->GetModelMatrix();
     }
     if (HasFlag(flags, UpdateFlags::TF)) {
         auto range = m_sharedState->GetDataRange();
@@ -512,9 +518,6 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 
     if (HasFlag(flags, UpdateFlags::IsoValue))
         p.isoValue = m_sharedState->GetIsoValue();
-
-    if (HasFlag(flags, UpdateFlags::Transform))
-        p.modelMatrix = m_sharedState->GetModelMatrix();
 
     if (HasFlag(flags, UpdateFlags::Background))
         p.background = m_sharedState->GetBackground();
@@ -576,9 +579,9 @@ void MedicalVizService::ScrollSlice(int delta)
 {
     if (!m_sharedState) return;
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    int axis = 2; // 默认 Z（Axial）
-    if (mode == VizMode::SliceCoronal)  axis = 1;
-    if (mode == VizMode::SliceSagittal) axis = 0;
+    int axis = 2; // 默认 Z（Top_down）
+    if (mode == VizMode::SliceFront_back)  axis = 1;
+    if (mode == VizMode::SliceLeft_right) axis = 0;
 
     auto pos = m_sharedState->GetCursorPosition();
     pos[axis] += delta;
@@ -592,7 +595,7 @@ void MedicalVizService::ScrollSlice(int delta)
     MarkNeedsSync();
 }
 
-void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
+void MedicalVizService::UpdateCursorFromModelPosition(double modelPos[3], int axis)
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     auto img = m_dataManager->GetVtkImage();
@@ -604,29 +607,16 @@ void MedicalVizService::SyncCursorToWorldPosition(double worldPos[3], int axis)
     img->GetOrigin(orig);
     img->GetDimensions(dims);
 
+    // 离散空间坐标网格化,连续物理坐标转离散索引
     auto calcIndex = [&](double w, double o, double s, int maxIdx) {
         return std::max(0, std::min(int((w - o) / s + 0.5), maxIdx));
         };
 
     int targetPos[3] = {
-        calcIndex(worldPos[0], orig[0], sp[0], dims[0] - 1),
-        calcIndex(worldPos[1], orig[1], sp[1], dims[1] - 1),
-        calcIndex(worldPos[2], orig[2], sp[2], dims[2] - 1)
+        calcIndex(modelPos[0], orig[0], sp[0], dims[0] - 1),
+        calcIndex(modelPos[1], orig[1], sp[1], dims[1] - 1),
+        calcIndex(modelPos[2], orig[2], sp[2], dims[2] - 1)
     };
-
-    if (m_sharedState->IsInteracting()) {
-        for (int i = 0; i < 3; ++i) {
-            // 如果只指定了某轴更新，则跳过其他轴
-            if (axis != -1 && axis != i) continue;
-
-            int delta = std::abs(targetPos[i] - currentPos[i]);
-            // 阈值判定：单帧跳变超过图像维度的 1/3 通常被视为拾取异常或数值跳变
-            if (delta > dims[i] / 3 && currentPos[i] != 0) {
-                // 只把该轴的 targetPos 回退，不影响其他轴，也不整帧丢弃
-                targetPos[i] = currentPos[i];
-            }
-        }
-    }
 
     int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
     if (axis == -1 || axis == 0) newPos[0] = targetPos[0];
@@ -686,7 +676,7 @@ void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
 
     // SetWindowLevel 内部有 diff 检测 + mutex + NotifyObservers
     m_sharedState->SetWindowLevel(newWW, newWC);
-    MarkNeedsSync();  // 与其他交互（SyncCursorToWorldPosition 等）保持一致
+    MarkNeedsSync();  // 与其他交互（UpdateCursorFromModelPosition 等）保持一致
 }
 
 void MedicalVizService::TransformModel(
@@ -700,12 +690,12 @@ void MedicalVizService::ResetModelTransform()
     m_transformService->ResetModelTransform();
 }
 
-void MedicalVizService::WorldToModel(const double w[3], double m[3])
+void MedicalVizService::WorldToModel(const double w[3], double m[3]) const
 {
     m_transformService->WorldToModel(w, m);
 }
 
-void MedicalVizService::ModelToWorld(const double m[3], double w[3])
+void MedicalVizService::ModelToWorld(const double m[3], double w[3]) const
 {
     m_transformService->ModelToWorld(m, w);
 }

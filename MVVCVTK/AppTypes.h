@@ -19,9 +19,9 @@
 enum class VizMode {
     Volume,
     IsoSurface,
-    SliceAxial,
-    SliceCoronal,
-    SliceSagittal,
+    SliceTop_down,
+    SliceFront_back,
+    SliceLeft_right,
     CompositeVolume,        // 3D 体渲染 + 切片平面
     CompositeIsoSurface     // 3D 等值面 + 切片平面
 };
@@ -84,7 +84,7 @@ enum class UpdateFlags : int {
     Background = 1 << 8,  // 背景色改变      (0x100)
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
     WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
-    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel
+    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background
 };
 
 // 位运算辅助
@@ -127,8 +127,8 @@ struct RenderParams {
 };
 
 // --- 切片朝向枚举 ---
-// AXIAL(0,0,1)  CORONAL(0,1,0)  SAGITTAL(1,0,0)
-enum class Orientation { AXIAL = 2, CORONAL = 1, SAGITTAL = 0 };
+// Top_down(0,0,1)  Front_back(0,1,0)  Left_right(1,0,0)
+enum class Orientation { Top_down = 2, Front_back = 1, Left_right = 0 };
 
 // --- 前处理配置快照（批量提交，减少锁争用和广播次数）---
 struct PreInitConfig {
