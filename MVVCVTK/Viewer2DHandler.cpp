@@ -3,6 +3,7 @@
 #include <vtkCommand.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
+#include <vtkCamera.h>
 
 namespace {
 
@@ -55,7 +56,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_service->SetInteracting(true);
             return { true, true };  // abortVtk=true：阻止 VTK 默认 Window/Level
         }
-        return {};
+        return { true, true };
     }
 
     // ── 左键抬起：结束十字线拖拽 ─────────────────────────────────────
@@ -64,9 +65,9 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
         if (m_enableDragCrosshair) {
             m_enableDragCrosshair = false;
             m_service->SetInteracting(false);
-            return { true, false };
+            return { true, true };
         }
-        return {};
+        return { true, true };
     }
 
     // ── 右键按下：开始拖拽调窗 ─────────────────────────────────────
@@ -75,6 +76,15 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
         m_enableDragWindowLevel = true;
         m_lastDragX = eve.x;
         m_lastDragY = eve.y;
+
+        m_startDragX = eve.x;
+        m_startDragY = eve.y;
+
+        // 获取当前状态作为静态常数 W_start
+        auto wl = m_service->GetWindowLevel();
+        m_startWW = wl.windowWidth;
+        m_startWC = wl.windowCenter;
+
         m_service->SetInteracting(true);
         return { true, true };  // abortVtk=true：阻止 VTK 默认右键菜单/操作
     }
@@ -117,12 +127,21 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             const int dy = eve.y - m_lastDragY;
             m_lastDragX = eve.x;
             m_lastDragY = eve.y;
+            const int totalDx = eve.x - m_startDragX;
+            // VTK 坐标系 Y 轴向上。向上拖 (eve.y变大) totalDy < 0，向下拖 (eve.y变小) totalDy > 0
+            const int totalDy = m_startDragY - eve.y;
 
-            const double deltaWW = dx * kWWSensitivity;
-            const double deltaWC = dy * kWCSensitivity;  // VTK Y 轴向上，不取反
+            // 提取视口分辨率以执行归一化
+            int viewWidth = 600, viewHeight = 600;
+            if (m_renderer && m_renderer->GetRenderWindow()) {
+                int* size = m_renderer->GetRenderWindow()->GetSize();
+                if (size && size[0] > 0 && size[1] > 0) {
+                    viewWidth = size[0];
+                    viewHeight = size[1];
+                }   
+            }
 
-            m_service->AdjustWindowLevel(deltaWW, deltaWC);
-            // AdjustWindowLevel 内部已调 MarkNeedsSync，此处无需重复 MarkDirty
+            m_service->AdjustWindowLevel(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
 

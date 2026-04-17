@@ -206,8 +206,9 @@ public:
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }
+    virtual WindowLevelParams GetWindowLevel() const { return {}; }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
-    virtual void AdjustWindowLevel(double deltaWW, double deltaWC) {}
+    virtual void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
     virtual void WorldToModel(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void ModelToWorld(const double modelPos[3], double worldPos[3]) const = 0;
 };

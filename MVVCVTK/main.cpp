@@ -180,13 +180,13 @@ int main()
 
             // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）
                         // 取数据范围中央 60% 作为窗口宽度，中点为窗位
-            double ww = (range[1] - range[0]) * 0.6;
-            double wc = range[0] + (range[1] - range[0]) * 0.5;
-            serviceA->Config_SetWindowLevel(ww, wc);
+            //double ww = (range[1] - range[0]) * 0.6;
+            //double wc = range[0] + (range[1] - range[0]) * 0.5;
+            //serviceA->Config_SetWindowLevel(ww, wc);
 
-            std::cout << "[onComplete] Data loaded."
-                << " IsoThreshold=" << isoVal
-                << " WW=" << ww << " WC=" << wc << "\n";
+            //std::cout << "[onComplete] Data loaded."
+            //    << " IsoThreshold=" << isoVal
+            //    << " WW=" << ww << " WC=" << wc << "\n";
         }
     );
 

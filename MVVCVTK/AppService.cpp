@@ -657,26 +657,47 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 }
 
 // 运行时交互兼容层
-void MedicalVizService::AdjustWindowLevel(double deltaWW, double deltaWC)
+void MedicalVizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
-    auto cur = m_sharedState->GetWindowLevel();
-    auto range = m_sharedState->GetDataRange();
-    const double dataSpan = range[1] - range[0];
 
-    const double scaledWW = (dataSpan > 0.0) ? deltaWW * dataSpan * 0.005 : deltaWW;
-    const double scaledWC = (dataSpan > 0.0) ? deltaWC * dataSpan * 0.003 : deltaWC;
+    double dx = 4.0 * totalDx / static_cast<double>(viewWidth);
+    double dy = 4.0 * totalDy / static_cast<double>(viewHeight);
 
-    // WW 不允许小于最小有效值（防止 LUT 除以零）
-    constexpr double kMinWW = 1.0;
-    const double newWW = std::max(kMinWW, cur.windowWidth + scaledWW);
-    const double newWC = (dataSpan > 0.0)
-        ? std::max(range[0] - dataSpan, std::min(range[1] + dataSpan, cur.windowCenter + scaledWC))
-        : cur.windowCenter + scaledWC;
+    // 2. 独立的基准缩放 (VTK 核心：X用窗宽缩放，Y用窗位缩放！)
+    if (std::abs(startWW) > 0.01) {
+        dx = dx * startWW;
+    }
+    else {
+        dx = dx * (startWW < 0.0 ? -0.01 : 0.01);
+    }
 
+    if (std::abs(startWC) > 0.01) {
+        dy = dy * startWC;
+    }
+    else {
+        dy = dy * (startWC < 0.0 ? -0.01 : 0.01);
+    }
 
-    // SetWindowLevel 内部有 diff 检测 + mutex + NotifyObservers
+    // 绝对值保护 (防止当参数为负时，拖拽方向反转)
+    if (startWW < 0.0) {
+        dx = -1.0 * dx;
+    }
+    if (startWC < 0.0) {
+        dy = -1.0 * dy;
+    }
+
+    // 计算新值 (注意 VTK 源码中 Y 是减法)
+    double newWW = startWW + dx;
+    double newWC = startWC - dy;
+
+    // 极小值钳制
+    if (newWW < 0.01) {
+        newWW = 0.01;
+    }
+
+    // 写入 SharedState 触发单向数据流更新
     m_sharedState->SetWindowLevel(newWW, newWC);
-    MarkNeedsSync();  // 与其他交互（UpdateCursorFromModelPosition 等）保持一致
+    MarkNeedsSync();
 }
 
 void MedicalVizService::TransformModel(

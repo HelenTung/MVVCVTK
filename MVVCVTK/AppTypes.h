@@ -66,8 +66,8 @@ struct BackgroundColor {
 
 // -- 切片窗宽窗位参数 ---
 struct WindowLevelParams {
-    double windowWidth = 400.0;  // WW 默认：软组织窗
-    double windowCenter = 40.0;   // WC 默认：软组织窗
+    double windowWidth = 400.0;  // WW 默认
+    double windowCenter = 40.0;   // WC 默认
 };
 
 // --- 更新类型位掩码（可组合）---

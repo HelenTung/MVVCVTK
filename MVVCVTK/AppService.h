@@ -99,9 +99,17 @@ public:
     vtkProp3D* GetMainProp()                                        override;
     void SyncModelMatrix(vtkMatrix4x4* mat)                         override;
     void SetElementVisible(uint32_t flagBit, bool show)             override;
-    void AdjustWindowLevel(double deltaWW, double deltaWC)          override;
+
+    void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
+
     std::array<double, 16> GetModelMatrix() override {
         return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
+    }
+    WindowLevelParams GetWindowLevel() const override {
+        if (m_sharedState)
+            return m_sharedState->GetWindowLevel();
+        WindowLevelParams p = {};
+        return p;
     }
 
     // 模型变换扩展（委托 VolumeTransformService）
@@ -109,9 +117,6 @@ public:
     void ResetModelTransform();
     void WorldToModel(const double worldPos[3], double modelPos[3]) const override;
     void ModelToWorld(const double modelPos[3], double worldPos[3]) const override;
-
-    // 供 main.cpp / 回调安全访问 SharedState
-    std::shared_ptr<SharedInteractionState> GetSharedState() const { return m_sharedState; }
 
 private:
     // ── 后处理路径 A：DataReady → 重建 VTK 渲染管线（仅主线程）

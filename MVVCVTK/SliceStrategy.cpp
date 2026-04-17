@@ -209,7 +209,7 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);  // 与切片共用 M
 
         // ── 局部空间固定轴法线（数据空间，与模型旋转无关）────────────
-        double localNormal4[4] = { 0, 0, 0, 1.0 };
+        double localNormal4[4] = { 0, 0, 0, 0 };
         if (m_orientation == Orientation::Top_down)   localNormal4[2] = 1.0;
         else if (m_orientation == Orientation::Front_back) localNormal4[1] = 1.0;
         else if  (m_orientation == Orientation::Left_right) localNormal4[0] = 1.0;
@@ -245,7 +245,7 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 
         // ── 十字线
         const double safeOffset =
-            std::min({ spacing[0], spacing[1], spacing[2] }) * 0.1;
+            std::min({ spacing[0], spacing[1], spacing[2] });
         UpdateCrosshair(
             params.cursor[0], params.cursor[1], params.cursor[2],
             bounds, origin, spacing, safeOffset);

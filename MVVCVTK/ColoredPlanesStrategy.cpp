@@ -125,7 +125,6 @@ void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlag
         UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
     }
 
-
     if (HasFlag(flags, UpdateFlags::Visibility)) {
         const int vis = (params.visibilityMask & VisFlags::ClipPlanes) ? 1 : 0;
         for (int i = 0; i < 3; i++) {
