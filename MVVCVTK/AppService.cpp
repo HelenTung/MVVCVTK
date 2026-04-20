@@ -491,7 +491,7 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
     RenderParams p;
 
     if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
-        auto pos = m_sharedState->GetCursorPosition();
+        auto pos = m_sharedState->GetCursorWorld();
         p.cursor = { pos[0], pos[1], pos[2] };
         p.modelMatrix = m_sharedState->GetModelMatrix();
     }
@@ -561,9 +561,13 @@ void MedicalVizService::ExecuteClearStrategyCache()
 void MedicalVizService::ResetCursorToCenter()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
-    int dims[3];
-    m_dataManager->GetVtkImage()->GetDimensions(dims);
-    m_sharedState->SetCursorPosition(dims[0] / 2, dims[1] / 2, dims[2] / 2);
+    double imgcenter[3] = {0.0};
+	auto img = m_dataManager->GetVtkImage();
+	img->GetCenter(imgcenter);
+
+	double imgcenterWorld[3];
+    ModelToWorld(imgcenter, imgcenterWorld);
+	m_sharedState->SetCursorWorld(imgcenterWorld[0], imgcenterWorld[1], imgcenterWorld[2]);
 }
 
 void MedicalVizService::MarkNeedsSync()
@@ -582,53 +586,47 @@ void MedicalVizService::ScrollSlice(int delta)
     int axis = 2; // 默认 Z（Top_down）
     if (mode == VizMode::SliceFront_back)  axis = 1;
     if (mode == VizMode::SliceLeft_right) axis = 0;
+    
+    // 取间距
+    double space[3] = { 0.0 };
+    auto img = m_dataManager->GetVtkImage();
+	img->GetSpacing(space);
 
-    auto pos = m_sharedState->GetCursorPosition();
-    pos[axis] += delta;
+    auto cursorWorld = m_sharedState->GetCursorWorld();
+	double cursorModel[3] = { 0.0 };
+	WorldToModel(cursorWorld.data(), cursorModel);
+    cursorModel[axis] += static_cast<double>(delta)* space[axis];
 
-    if (m_dataManager && m_dataManager->GetVtkImage()) {
-        int dims[3];
-        m_dataManager->GetVtkImage()->GetDimensions(dims);
-        pos[axis] = std::max(0, std::min(pos[axis], dims[axis] - 1));
-    }
-    m_sharedState->SetCursorPosition(pos[0], pos[1], pos[2]);
+	// 边界检查
+    double bounds[6] = { 0.0 };
+    img->GetBounds(bounds);
+    cursorModel[0] = std::max(bounds[0], std::min(cursorModel[0], bounds[1]));
+    cursorModel[1] = std::max(bounds[2], std::min(cursorModel[1], bounds[3]));
+    cursorModel[2] = std::max(bounds[4], std::min(cursorModel[2], bounds[5]));
+    
+	// 模型坐标转世界坐标，更新 SharedState
+    double newCursorWorld[3] = { 0.0, 0.0, 0.0 };
+    ModelToWorld(cursorModel, newCursorWorld);
+    m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     MarkNeedsSync();
 }
 
-void MedicalVizService::UpdateCursorFromModelPosition(double modelPos[3], int axis)
+void MedicalVizService::UpdateCursorFromWorldPosition(double worldpos[3], int axis)
 {
-    if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
-    auto img = m_dataManager->GetVtkImage();
-    
-    double sp[3], orig[3];
-    int    dims[3];
-    auto currentPos = m_sharedState->GetCursorPosition(); // 上一帧的位置索引
-    img->GetSpacing(sp);
-    img->GetOrigin(orig);
-    img->GetDimensions(dims);
+    if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
+    auto currentPos = m_sharedState->GetCursorWorld(); // 上一帧的位置索引
 
-    // 离散空间坐标网格化,连续物理坐标转离散索引
-    auto calcIndex = [&](double w, double o, double s, int maxIdx) {
-        return std::max(0, std::min(int((w - o) / s + 0.5), maxIdx));
-        };
+    double newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
+    if (axis == -1 || axis == 0) newPos[0] = worldpos[0];
+    if (axis == -1 || axis == 1) newPos[1] = worldpos[1];
+    if (axis == -1 || axis == 2) newPos[2] = worldpos[2];
 
-    int targetPos[3] = {
-        calcIndex(modelPos[0], orig[0], sp[0], dims[0] - 1),
-        calcIndex(modelPos[1], orig[1], sp[1], dims[1] - 1),
-        calcIndex(modelPos[2], orig[2], sp[2], dims[2] - 1)
-    };
-
-    int newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
-    if (axis == -1 || axis == 0) newPos[0] = targetPos[0];
-    if (axis == -1 || axis == 1) newPos[1] = targetPos[1];
-    if (axis == -1 || axis == 2) newPos[2] = targetPos[2];
-
-    m_sharedState->SetCursorPosition(newPos[0], newPos[1], newPos[2]);
+    m_sharedState->SetCursorWorld(newPos[0], newPos[1], newPos[2]);
 }
 
-std::array<int, 3> MedicalVizService::GetCursorPosition()
+std::array<double, 3> MedicalVizService::GetCursorWorld()
 {
-    return m_sharedState->GetCursorPosition();
+    return m_sharedState->GetCursorWorld();
 }
 
 void MedicalVizService::SetInteracting(bool val)

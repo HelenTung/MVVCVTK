@@ -1,7 +1,7 @@
 ﻿#include "MultiSliceStrategy.h"
 #include <vtkPlane.h>
 #include <vtkImageProperty.h>
-
+#include <vtkTransform.h>
 MultiSliceStrategy::MultiSliceStrategy() {
     for (int i = 0; i < 3; i++) {
         m_slices[i] = vtkSmartPointer<vtkImageSlice>::New();
@@ -39,38 +39,40 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void MultiSliceStrategy::UpdateAllPositions(int x, int y, int z) {
-    int dims[3] = { 0, 0, 0 };
-    if (auto input = m_mappers[0]->GetInput()) {
-        input->GetDimensions(dims);
-    }
+void MultiSliceStrategy::UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
+    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+    mat->DeepCopy(modelMatrix.data());
 
-    // 边界保护：确保索引在 [0, dims[i]-1] 之间
-    m_indices[0] = std::max(0, std::min(x, dims[0] - 1));
-    m_indices[1] = std::max(0, std::min(y, dims[1] - 1));
-    m_indices[2] = std::max(0, std::min(z, dims[2] - 1));
+    auto inv = vtkSmartPointer<vtkTransform>::New();
+    inv->SetMatrix(mat);
+    inv->Inverse();
+
+    double cursorWorld4[4] = { cursorWorld[0], cursorWorld[1], cursorWorld[2], 1.0 };
+    double cursorModel4[4] = { 0.0, 0.0, 0.0, 1.0 };
+    inv->MultiplyPoint(cursorWorld4, cursorModel4);
 
     for (int i = 0; i < 3; i++) {
         auto plane = m_mappers[i]->GetSlicePlane();
         auto input = m_mappers[i]->GetInput();
-        if (!input) continue;
-
-        double origin[3], spacing[3];
-        input->GetOrigin(origin);
-        input->GetSpacing(spacing);
+        if (!plane || !input) continue;
 
         double planeOrigin[3];
         plane->GetOrigin(planeOrigin);
 
-        planeOrigin[i] = origin[i] + (m_indices[i] * spacing[i]);
+        double bounds[6];
+        input->GetBounds(bounds);
+
+        planeOrigin[0] = std::max(bounds[0], std::min(cursorModel4[0], bounds[1]));
+        planeOrigin[1] = std::max(bounds[2], std::min(cursorModel4[1], bounds[3]));
+        planeOrigin[2] = std::max(bounds[4], std::min(cursorModel4[2], bounds[5]));
         plane->SetOrigin(planeOrigin);
     }
 }
 
 void MultiSliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if (HasFlag(flags , UpdateFlags::Cursor)) return;
-    UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+    if (HasFlag(flags , UpdateFlags::Cursor) || HasFlag(flags, UpdateFlags::Transform)) return;
+    UpdateAllPositions(params.cursor.data(), params.modelMatrix);
 
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material)) {
         for (int i = 0; i < 3; i++) {

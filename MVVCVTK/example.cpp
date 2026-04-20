@@ -227,7 +227,7 @@ void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
      时机：用户在视图中按住右键拖拽鼠标时，根据鼠标移动的像素差（dx, dy）换算为 delta 后调用。
      onComplete：无。
 
-   - UpdateCursorFromModelPosition(double worldPos[3], int axis = -1)
+   - UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1)
      说明：三视图与十字准星联动的核心接口。将鼠标在某一个视图中点击的物理坐标（世界坐标）同步到系统，底层会自动驱动其他所有视图的切片跳转到该位置。
      时机：Shift+左键拖拽十字准星，或在 3D 视图中拖拽参考切面时调用。
      onComplete：无。

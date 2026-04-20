@@ -22,7 +22,7 @@ public:
     int GetPlaneAxis(vtkActor* actor) override;
 
 private:
-    void UpdateAllPositions(int x, int y, int z);
+    void UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
     vtkSmartPointer<vtkActor> m_planeActors[3];
     vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
     vtkSmartPointer<vtkImageData> m_imageData;

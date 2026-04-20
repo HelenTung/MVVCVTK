@@ -37,10 +37,8 @@ private:
     //  spacing   — 数据间距
     //  mat       — 当前模型矩阵 M（局部→世界）
     //  safeOffset— 沿法线微量偏移，防穿模闪烁
-    void UpdateCrosshair(int cx, int cy, int cz,
+    void UpdateCrosshair(const double focusModel[3],
         const double bounds[6],
-        const double origin[3],
-        const double spacing[3],
         double safeOffset);
 
     vtkWeakPointer<vtkRenderer> m_renderer;

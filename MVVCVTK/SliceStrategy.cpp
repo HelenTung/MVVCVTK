@@ -127,20 +127,15 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->ResetCameraClippingRange();
 }
 
-void SliceStrategy::UpdateCrosshair(int cx, int cy, int cz,
+void SliceStrategy::UpdateCrosshair(const double focusModel[3],
     const double bounds[6],
-    const double origin[3],
-    const double spacing[3],
-    double safeOffset)
+    double safeOffset) 
 {
     if (!m_hLineSource || !m_vLineSource) return;
-
-    const double physX = origin[0] + cx * spacing[0];
-    const double physY = origin[1] + cy * spacing[1];
-    const double physZ = origin[2] + cz * spacing[2];
-
+    const double physX = focusModel[0];
+    const double physY = focusModel[1];
+    const double physZ = focusModel[2];
     if (m_orientation == Orientation::Top_down) {
-        // 切片平面 Z = physZ；safeOffset 沿局部 Z 轴偏移防穿模
         const double z = physZ + safeOffset;
         m_vLineSource->SetPoint1(physX, bounds[2], z);
         m_vLineSource->SetPoint2(physX, bounds[3], z);
@@ -148,15 +143,13 @@ void SliceStrategy::UpdateCrosshair(int cx, int cy, int cz,
         m_hLineSource->SetPoint2(bounds[1], physY, z);
     }
     else if (m_orientation == Orientation::Front_back) {
-        // 切片平面 Y = physY；safeOffset 沿局部 Y 轴偏移
         const double y = physY + safeOffset;
         m_vLineSource->SetPoint1(physX, y, bounds[4]);
         m_vLineSource->SetPoint2(physX, y, bounds[5]);
         m_hLineSource->SetPoint1(bounds[0], y, physZ);
         m_hLineSource->SetPoint2(bounds[1], y, physZ);
     }
-    else {  // Left_right
-        // 切片平面 X = physX；safeOffset 沿局部 X 轴偏移
+    else {
         const double x = physX + safeOffset;
         m_vLineSource->SetPoint1(x, physY, bounds[4]);
         m_vLineSource->SetPoint2(x, physY, bounds[5]);
@@ -198,6 +191,9 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 
         auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
         mat->DeepCopy(params.modelMatrix.data());
+		auto inv = vtkSmartPointer<vtkTransform>::New();
+		inv->SetMatrix(mat);
+		inv->Inverse();
 
         // ── 三个 Actor 共用同一个 UserMatrix = M ──────────
         //
@@ -225,14 +221,19 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         mat->MultiplyPoint(localNormal4, worldNormal4);
 
         // ── 游标局部坐标 → 世界坐标（SlicePlane 原点）───────────────
-        double localFocus4[4] = {
-            origin[0] + params.cursor[0] * spacing[0],
-            origin[1] + params.cursor[1] * spacing[1],
-            origin[2] + params.cursor[2] * spacing[2],
+        double worldFocus[4] = {
+            params.cursor[0],
+            params.cursor[1],
+            params.cursor[2],
             1.0
         };
-        double worldFocus4[4];
-        mat->MultiplyPoint(localFocus4, worldFocus4);
+
+        double modelFocus[4] = { 0 };
+        inv->MultiplyPoint(worldFocus, modelFocus);
+        // 连续转离散
+        modelFocus[0] = std::max(bounds[0], std::min(modelFocus[0], bounds[1]));
+        modelFocus[1] = std::max(bounds[2], std::min(modelFocus[1], bounds[3]));
+        modelFocus[2] = std::max(bounds[4], std::min(modelFocus[2], bounds[5]));
 
         //// ── 切割平面（世界坐标，VTK 自动转换到数据空间）─────────────
         auto slicePlane = resliceMapper->GetSlicePlane();
@@ -240,15 +241,18 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
             slicePlane = vtkSmartPointer<vtkPlane>::New();
             resliceMapper->SetSlicePlane(slicePlane);
         }
-        slicePlane->SetOrigin(worldFocus4[0], worldFocus4[1], worldFocus4[2]);
+        slicePlane->SetOrigin(worldFocus[0], worldFocus[1], worldFocus[2]);
         slicePlane->SetNormal(worldNormal4[0], worldNormal4[1], worldNormal4[2]);
 
         // ── 十字线
         const double safeOffset =
             std::min({ spacing[0], spacing[1], spacing[2] });
-        UpdateCrosshair(
-            params.cursor[0], params.cursor[1], params.cursor[2],
-            bounds, origin, spacing, safeOffset);
+        double newmodelFocus[3] = {
+            modelFocus[0],
+            modelFocus[1],
+            modelFocus[2]
+		};
+        UpdateCrosshair(newmodelFocus,bounds,safeOffset);
 
         // 法线和相机向量
         // 想让相机能“正面”看到一个物体，这个物体的法线（正脸）必须迎着相机的视线，两者是方向相反的。

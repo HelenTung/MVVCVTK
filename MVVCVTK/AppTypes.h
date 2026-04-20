@@ -110,7 +110,7 @@ namespace VisFlags {
 
 // --- 渲染参数结构体（Strategy 的唯一输入，不含 VTK 指针）---
 struct RenderParams {
-    std::array<int, 3>     cursor = { 0, 0, 0 };
+    std::array<double, 3>  cursor = { 0, 0, 0 };
     std::vector<TFNode>    tfNodes;
     double                 scalarRange[2] = { 0.0, 255.0 };
     MaterialParams         material;

@@ -110,9 +110,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
             if (worldPos) {
-                double modelPos[3];
-                m_service->WorldToModel(worldPos, modelPos);
-                m_service->UpdateCursorFromModelPosition(modelPos);
+                m_service->UpdateCursorFromWorldPosition(worldPos);
                 m_service->MarkDirty();
             }
             return { true, true };

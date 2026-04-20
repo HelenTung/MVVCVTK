@@ -5,7 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <array>
-#include <cmath>
+#include <cmath> 
 #include <atomic>
 
 // 观察者回调类型
@@ -244,36 +244,42 @@ public:
     }
 
     // ── 光标位置 ──────────────────────────────────────────────────
-    void SetCursorPosition(int x, int y, int z) {
+    void SetCursorWorld(double x, double y, double z) {
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (m_cursorPos[0] != x || m_cursorPos[1] != y || m_cursorPos[2] != z) {
-                m_cursorPos[0] = x;
-                m_cursorPos[1] = y;
-                m_cursorPos[2] = z;
+            const double eps = 1e-9;
+            if (std::abs(m_cursorWorld[0] - x) > eps ||
+                std::abs(m_cursorWorld[1] - y) > eps ||
+                std::abs(m_cursorWorld[2] - z) > eps) {
+                m_cursorWorld[0] = x;
+                m_cursorWorld[1] = y;
+                m_cursorWorld[2] = z;
                 changed = true;
             }
         }
         if (changed) NotifyObservers(UpdateFlags::Cursor);
     }
+
+    std::array<double, 3> GetCursorWorld() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return { m_cursorWorld[0], m_cursorWorld[1], m_cursorWorld[2] };
+    }
+
     void UpdateAxis(int axisIndex, int delta, int maxDim) {
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            int nv = m_cursorPos[axisIndex] + delta;
+            int nv = m_cursorWorld[axisIndex] + delta;
             nv = nv < 0 ? 0 : (nv >= maxDim ? maxDim - 1 : nv);
-            if (m_cursorPos[axisIndex] != nv) {
-                m_cursorPos[axisIndex] = nv;
+            if (m_cursorWorld[axisIndex] != nv) {
+                m_cursorWorld[axisIndex] = nv;
                 changed = true;
             }
         }
         if (changed) NotifyObservers(UpdateFlags::Cursor);
     }
-    std::array<int, 3> GetCursorPosition() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return { m_cursorPos[0], m_cursorPos[1], m_cursorPos[2] };
-    }
+
 
     // ── 显隐状态 ──────────────────────────────────────────────────────────
     void SetElementVisible(uint32_t flagBit, bool show) {
@@ -314,7 +320,7 @@ public:
 private:
     mutable std::mutex m_mutex;
 
-    int                    m_cursorPos[3] = { 0, 0, 0 };
+    double                 m_cursorWorld[3] = { 0, 0, 0 };
     double                 m_isoValue = 0.0;
     MaterialParams         m_material;
     BackgroundColor        m_background;         

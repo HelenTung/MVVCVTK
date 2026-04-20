@@ -2,6 +2,7 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkMatrix4x4.h>
+#include <vtkTransform.h>
 
 ColoredPlanesStrategy::ColoredPlanesStrategy() {
     double colors[3][3] = {
@@ -73,23 +74,25 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
+void ColoredPlanesStrategy::UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
     if (!m_imageData) return;
 
-    // 边界裁剪
-    int cx = std::max(0, std::min(x, m_maxIndices[0]));
-    int cy = std::max(0, std::min(y, m_maxIndices[1]));
-    int cz = std::max(0, std::min(z, m_maxIndices[2]));
+	vtkSmartPointer<vtkMatrix4x4> mat = vtkSmartPointer<vtkMatrix4x4>::New();
+	mat->DeepCopy(modelMatrix.data());
+	vtkSmartPointer<vtkTransform> inv = vtkSmartPointer<vtkTransform>::New();
+	inv->SetMatrix(mat);
+	inv->Inverse();
 
-    double spacing[3];
-    m_imageData->GetSpacing(spacing);
-
-    double physX = cx * spacing[0] + m_origin[0];
-    double physY = cy * spacing[1] + m_origin[1];
-    double physZ = cz * spacing[2] + m_origin[2];
+	double newWorldCursor[4] = { cursorWorld[0], cursorWorld[1], cursorWorld[2], 1.0 };
+    double cursorModel[4] = {0};
+	inv->TransformPoint(newWorldCursor, cursorModel);
 
     double b[6];
     m_imageData->GetBounds(b);
+
+    const double physX = std::max(b[0], std::min(cursorModel[0], b[1]));
+    const double physY = std::max(b[2], std::min(cursorModel[1], b[3]));
+    const double physZ = std::max(b[4], std::min(cursorModel[2], b[5]));
 
     // Left_right: 移动 X 轴
     m_planeSources[0]->SetOrigin(physX, b[2], b[4]);
@@ -108,6 +111,12 @@ void ColoredPlanesStrategy::UpdateAllPositions(int x, int y, int z) {
     m_planeSources[2]->SetPoint1(b[1], b[2], physZ);
     m_planeSources[2]->SetPoint2(b[0], b[3], physZ);
     m_planeSources[2]->Update();
+
+    //for (int i = 0; i < 3; ++i) {
+    //    if (m_planeActors[i]) {
+    //        m_planeActors[i]->SetUserMatrix(mat);
+    //    }
+    //}
 }
 
 int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
@@ -121,8 +130,8 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
 
 void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
 {
-    if (HasFlag(flags, UpdateFlags::Cursor)) {
-        UpdateAllPositions(params.cursor[0], params.cursor[1], params.cursor[2]);
+    if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
+        UpdateAllPositions(params.cursor.data(), params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

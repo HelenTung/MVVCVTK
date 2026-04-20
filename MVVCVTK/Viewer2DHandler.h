@@ -10,7 +10,7 @@ class vtkRenderer;
 //
 // 支持的交互：
 //   滚轮前/后         → 切片步进 ±1（Ctrl 修饰时 ±5）
-//   Shift + 左键拖拽  → 拖拽十字线定位（UpdateCursorFromModelPosition）
+//   Shift + 左键拖拽  → 拖拽十字线定位（UpdateCursorFromWorldPosition）
 // ─────────────────────────────────────────────────────────────────────
 class Viewer2DHandler : public IInteractionHandler
 {

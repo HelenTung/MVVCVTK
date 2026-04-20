@@ -23,7 +23,7 @@ public:
     void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
 
 private:
-    void UpdateAllPositions(int x, int y, int z);
+    void UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
 
     vtkSmartPointer<vtkImageSlice> m_slices[3];
     vtkSmartPointer<vtkImageResliceMapper> m_mappers[3];

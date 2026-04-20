@@ -91,9 +91,9 @@ public:
     // ================================================================
     // AbstractInteractiveService — 交互接口
     // ================================================================
-    void ScrollSlice(int delta)                               override;
-    void UpdateCursorFromModelPosition(double modelPos[3], int axis = -1) override;
-    std::array<int, 3> GetCursorPosition()                         override;
+    void ScrollSlice(int delta)                                     override;
+    void UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1) override;
+    std::array<double, 3> GetCursorWorld()                          override;
     void SetInteracting(bool val)                                   override;
     int  GetPlaneAxis(vtkActor* actor)                              override;
     vtkProp3D* GetMainProp()                                        override;

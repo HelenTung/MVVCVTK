@@ -198,8 +198,8 @@ public:
 
     virtual void ScrollSlice(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
-    virtual void UpdateCursorFromModelPosition(double worldPos[3], int axis = -1) {}
-    virtual std::array<int, 3> GetCursorPosition() { return { 0, 0, 0 }; }
+    virtual void UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1) {}
+    virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
     virtual void SyncModelMatrix(vtkMatrix4x4* mat) {}
