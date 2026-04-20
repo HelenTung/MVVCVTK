@@ -101,7 +101,10 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
         double up[3], forward[3], right[3];
         cam->GetViewUp(up);
         cam->GetDirectionOfProjection(forward);
+		vtkMath::Normalize(up);
+		vtkMath::Normalize(forward);
         vtkMath::Cross(forward, up, right);
+        vtkMath::Normalize(right);
 
         const auto distance = cam->GetDistance();
         const auto angle = cam->GetViewAngle() * (3.14159265358979 / 180.0);;
