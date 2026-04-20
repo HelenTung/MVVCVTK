@@ -128,8 +128,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_lastDragX = eve.x;
             m_lastDragY = eve.y;
             const int totalDx = eve.x - m_startDragX;
-            // VTK 坐标系 Y 轴向上。向上拖 (eve.y变大) totalDy < 0，向下拖 (eve.y变小) totalDy > 0
-            const int totalDy = m_startDragY - eve.y;
+            const int totalDy = eve.y - m_startDragY;
 
             // 提取视口分辨率以执行归一化
             int viewWidth = 600, viewHeight = 600;

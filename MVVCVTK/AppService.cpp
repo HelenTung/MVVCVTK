@@ -490,7 +490,7 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
-    if (HasFlag(flags, UpdateFlags::Cursor)) {
+    if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
         auto pos = m_sharedState->GetCursorPosition();
         p.cursor = { pos[0], pos[1], pos[2] };
         p.modelMatrix = m_sharedState->GetModelMatrix();
@@ -660,8 +660,8 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 void MedicalVizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
 
-    double dx = 4.0 * totalDx / static_cast<double>(viewWidth);
-    double dy = 4.0 * totalDy / static_cast<double>(viewHeight);
+    double dx = 3.0 * totalDx / static_cast<double>(viewWidth);
+    double dy = 3.0 * totalDy / static_cast<double>(viewHeight);
 
     // 2. 独立的基准缩放 (VTK 核心：X用窗宽缩放，Y用窗位缩放！)
     if (std::abs(startWW) > 0.01) {
