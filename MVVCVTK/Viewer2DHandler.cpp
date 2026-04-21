@@ -40,7 +40,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
     if (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent
         || eve.vtkEventId == vtkCommand::MouseWheelBackwardEvent)
     {
-        const int step = eve.ctrl ? 5 : 1;
+        const int step = eve.ctrl ? 10 : 5;
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
         m_service->SetSliceScrolled(delta);
