@@ -6,8 +6,8 @@
 //   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载
 //   Phase 3 【渲染骨架】SetInteractorInitialized + SetStarted 进入消息循环
 //
-//   • PreInitConfig 增加 bgColor / hasBgColor（前处理背景色）
-//   • SetFileLoadedAsync 回调改为数据相关的后处理业务（等值面阈值推算）
+//   • PreInitConfig 中统一携带 bgColor / hasBgColor（前处理背景色）
+//   • SetFileLoadedAsync 回调中执行数据相关的后处理业务（等值面阈值推算）
 //   • 回调内明确注释：在后台线程，只允许操作 SharedState
 //   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
 //   • IDataLoaderService 增加 GetLoadState() 可用于主线程状态查询
@@ -36,7 +36,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 static std::pair<
     std::shared_ptr<MedicalVizService>,
     std::shared_ptr<StdRenderContext>>
-    BuildWindow(
+    GetWindowPair(
         const WindowConfig& cfg,
         std::shared_ptr<AbstractDataManager>    dataMgr,
         std::shared_ptr<SharedInteractionState> sharedState)
@@ -47,7 +47,7 @@ static std::pair<
     // ── 步骤1：SetServiceBound（触发 SetRenderContext → 注册 Observer）──────
     context->SetServiceBound(service);
 
-    // ── 步骤2：批量提交前处理配置（一次锁 + 一次广播）────────────
+    // ── 步骤2：通过 SetVisualConfig 批量提交前处理配置（一次锁 + 一次广播）────
     service->SetVisualConfig(cfg.preInitCfg);
 
     // ── 步骤3：窗口属性（纯渲染上下文配置，数据无关）─────────────
@@ -140,13 +140,13 @@ int main()
     cfgD.preInitCfg.hasWindowLevel = true;
 
     // ── 批量建窗（前处理完成）────────────────────────────────────
-    auto [serviceA, contextA] = BuildWindow(cfgA, sharedDataMgr, sharedState);
-    auto [serviceE, contextE] = BuildWindow(cfgE, sharedDataMgr, sharedState);
-    auto [serviceB, contextB] = BuildWindow(cfgB, sharedDataMgr, sharedState);
-    auto [serviceC, contextC] = BuildWindow(cfgC, sharedDataMgr, sharedState);
-    auto [serviceD, contextD] = BuildWindow(cfgD, sharedDataMgr, sharedState);
+    auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState);
+    auto [serviceE, contextE] = GetWindowPair(cfgE, sharedDataMgr, sharedState);
+    auto [serviceB, contextB] = GetWindowPair(cfgB, sharedDataMgr, sharedState);
+    auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState);
+    auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
 
-    // 3D窗口：隐藏剪切平面（Composite 模式默认显示，等值面/体渲染模式无剪切平面）
+    // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::ClipPlanes, true);
     serviceE->SetElementVisible(VisFlags::ClipPlanes, true);
 
@@ -172,7 +172,7 @@ int main()
                 return;
             }
 
-            // 后处理业务：数据就绪后，基于实际数据范围推算等值面阈值
+            // 后处理业务：SetDataReady 之后，基于实际数据范围推算等值面阈值
             // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
             auto range = sharedState->GetDataRange();
             double isoVal = range[0] + (range[1] - range[0]) * 0.35;

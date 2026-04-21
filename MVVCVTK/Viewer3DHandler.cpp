@@ -11,7 +11,7 @@
 
 namespace {
 
-    bool IsCompositeMode(VizMode mode)
+    bool GetIsCompositeMode(VizMode mode)
     {
         return mode == VizMode::CompositeVolume
             || mode == VizMode::CompositeIsoSurface;
@@ -30,7 +30,7 @@ Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
 
 InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
 {
-    if (!m_service || !IsCompositeMode(eve.vizMode)) {
+    if (!m_service || !GetIsCompositeMode(eve.vizMode)) {
         return {};
     }
 

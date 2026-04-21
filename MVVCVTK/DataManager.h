@@ -48,7 +48,7 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
-    bool ConsumeReconImage();
+    bool SetReconImageConsumed();
 };
 
 

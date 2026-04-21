@@ -134,12 +134,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     }
     m_hasPendingImage.store(true);
 
-    // LoadState::Succeeded 延迟到主线程 ConsumeReconImage() 设置，
+    // LoadState::Succeeded 延迟到主线程 SetReconImageConsumed() 设置，
     // 防止调用方在 vtkImage 还未提交时就查询到 Succeeded 状态。
     return true;
 }
 
-bool RawVolumeDataManager::ConsumeReconImage()
+bool RawVolumeDataManager::SetReconImageConsumed()
 {
     if (!m_hasPendingImage.load()) return false;
 

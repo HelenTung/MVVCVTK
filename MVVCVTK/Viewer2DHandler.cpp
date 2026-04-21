@@ -7,7 +7,7 @@
 
 namespace {
 
-    bool IsSliceMode(VizMode mode)
+    bool GetIsSliceMode(VizMode mode)
     {
         return mode == VizMode::SliceTop_down
             || mode == VizMode::SliceFront_back
@@ -32,7 +32,7 @@ Viewer2DHandler::Viewer2DHandler(AbstractInteractiveService* service,
 
 InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 {
-    if (!m_service || !IsSliceMode(eve.vizMode)) {
+    if (!m_service || !GetIsSliceMode(eve.vizMode)) {
         return {};
     }
 

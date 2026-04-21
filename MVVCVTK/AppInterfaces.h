@@ -96,7 +96,7 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService — 基础服务（渲染脏标记 + 更新入口）
+// AbstractAppService — 基础服务（渲染脏标记 + SetPendingUpdatesProcessed 更新入口）
 // ─────────────────────────────────────────────────────────────────────
 class AbstractAppService {
 protected:
@@ -157,8 +157,8 @@ public:
 // ─────────────────────────────────────────────────────────────────────
 // IDataLoaderService — 数据加载接口
 //
-// 将加载职责从 MedicalVizService 中分离，加载与渲染解耦。
-// 任意持有此接口的调用方均可发起加载，无需关心渲染细节。
+// 将加载职责从 MedicalVizService 中分离，数据加载与渲染解耦。
+// 任意持有此接口的调用方均可发起 SetFileLoadedAsync，无需关心渲染细节。
 // ─────────────────────────────────────────────────────────────────────
 class IDataLoaderService {
 public:

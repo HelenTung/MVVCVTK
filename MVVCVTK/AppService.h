@@ -79,7 +79,7 @@ public:
     void SetLoadCanceled() override;
 
     // ================================================================
-    // AbstractAppService — 后处理入口（主线程 Timer 驱动）
+    // AbstractAppService — 后处理入口（主线程 Timer 驱动，调用 SetPendingUpdatesProcessed）
     // 路由优先级：
     //   1. m_needsCacheClear  → ExecuteClearStrategyCache
     //   2. m_needsLoadFailed  → PostData_HandleLoadFailed  
@@ -112,37 +112,37 @@ public:
         return p;
     }
 
-    // 模型变换扩展（委托 VolumeTransformService）
-    void TransformModel(double translate[3], double rotate[3], double scale[3]);
-    void ResetModelTransform();
+    // 模型变换扩展（委托 VolumeTransformService，统一走 Set/Get 语义）
+    void SetModelTransform(double translate[3], double rotate[3], double scale[3]);
+    void SetModelTransformReset();
     void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const override;
     void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const override;
 
 private:
-    // ── 后处理路径 A：DataReady → 重建 VTK 渲染管线（仅主线程）
-    void PostData_RebuildPipeline();
+    // ── 后处理路径 A：SetDataReady → 重建 VTK 渲染管线（仅主线程）
+    void SetPipelineRebuilt();
 
-    // ── 后处理路径 B：普通事件 → 增量同步参数到 Strategy（仅主线程）
-    void PostData_SyncStateToStrategy();
+    // ── 后处理路径 B：普通事件 → 增量同步参数到当前可视化策略（仅主线程）
+    void SetStrategyStateSynced();
 
-    // ── 后处理路径 C：LoadFailed → 清理状态 + 显示占位符（仅主线程）
-    void PostData_HandleLoadFailed();
+    // ── 后处理路径 C：SetLoadFailed → 清理状态 + 显示占位符（仅主线程）
+    void SetLoadFailedHandled();
 
-    // ── 构建 RenderParams（只读 SharedState，按 flags 精确读取）
-    RenderParams BuildRenderParams(UpdateFlags flags) const;
+    // ── 获取 RenderParams（只读 SharedState，按 flags 精确读取）
+    RenderParams GetRenderParams(UpdateFlags flags) const;
 
-    // ── Strategy 缓存管理
-    std::shared_ptr<AbstractVisualStrategy> GetOrCreateStrategy(VizMode mode);
+    // ── 可视化策略缓存管理
+    std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
 
-    // ── 仅设标记，主线程统一执行 Detach   （不在后台线程调 VTK）
-    void RequestClearStrategyCache();   // 后台线程安全：只设标记
-    void ExecuteClearStrategyCache();   // 主线程：真正执行 Detach + clear
+    // ── 仅设标记，主线程统一执行 SetRendererDetached（不在后台线程调 VTK）
+    void SetStrategyCacheClearRequested();   // 后台线程安全：只设标记
+    void SetStrategyCacheCleared();          // 主线程：真正执行 SetRendererDetached + clear
 
-    void ResetCursorToCenter();
-    void MarkNeedsSync();
+    void SetCursorCentered();
+    void SetSyncRequested();
 
     // ————— 异步加载回调管理（SetFileLoadedAsync / SetFromBuffer）——————————
-    void ExecutePendingLoadCallback(bool success) {
+    void SetPendingLoadCallbackExecuted(bool success) {
         std::function<void(bool)> cb;
 		{
 			std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
@@ -157,7 +157,7 @@ private:
 
 
     // ————— 异步保存回调管理（SetTransformedDataSaved）——————————
-    void ExecutePendingSaveCallback(bool success) {
+    void SetPendingSaveCallbackExecuted(bool success) {
         std::function<void(bool)> cb;
         {
             std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
@@ -169,8 +169,8 @@ private:
 
     mutable std::mutex        m_SaveCallbackMutex;
     std::function<void(bool)> m_SaveCallbackFunc;
-    std::atomic<bool>         m_needsSaveTrigger{ false }; // 是一个触发信号，放进去数据就准备就绪后
-    std::atomic<bool>         m_lastSaveResult{ false };// 存储后台任务执行的最终结果
+    std::atomic<bool>         m_needsSaveTrigger{ false }; // 保存完成触发信号，供主线程执行回调
+    std::atomic<bool>         m_lastSaveResult{ false };   // 后台保存任务的最终结果
 
     // ── 成员 ────────────────────────────────────────────────────
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;

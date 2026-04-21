@@ -76,8 +76,8 @@ void MedicalVizService::SetRenderContext(
 
             // ── DataReady：后台线程，只设标记，禁止任何 VTK 操作 ──
             if (HasFlag(flags, UpdateFlags::DataReady)) {
-                self->RequestClearStrategyCache();
-                self->ResetCursorToCenter();
+                self->SetStrategyCacheClearRequested();
+                self->SetCursorCentered();
                 self->m_pendingFlags.fetch_or(static_cast< int>(UpdateFlags::All));
                 self->m_needsDataRefresh = true;
                 return;
@@ -95,7 +95,7 @@ void MedicalVizService::SetRenderContext(
             // 但为一致性仍通过标记延迟到主线程
             if (HasFlag(flags, UpdateFlags::Background)) {
                 self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::Background));
-                self->MarkNeedsSync();
+                self->SetSyncRequested();
                 return;
             }
 
@@ -103,7 +103,7 @@ void MedicalVizService::SetRenderContext(
             int old = self->m_pendingFlags.load();
             while (!self->m_pendingFlags.compare_exchange_weak(
                 old, old | static_cast<int>(flags)));
-            self->MarkNeedsSync();
+            self->SetSyncRequested();
         }
     );
 }
@@ -162,7 +162,7 @@ void MedicalVizService::SetVisualConfig(const PreInitConfig& cfg)
     // VizMode：只记录意图，无需写 SharedState，也不触发广播
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
 
-    // 其余参数批量写入 SharedState（内部精确 diff + 一次锁 + 一次广播）
+    // 其余参数批量写入 SharedState（内部通过 SetPreInitConfig 做精确 diff + 一次锁 + 一次广播）
     m_sharedState->SetPreInitConfig(cfg);
 }
 
@@ -182,7 +182,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
         m_SaveCallbackFunc = std::move(onComplete);
     }
 
-    // 捕获必要的资源，确保在后台线程中的生命周期安全
+    // 捕获必要资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
 
@@ -192,13 +192,13 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
         return;
     }
 
-    // 提取当前的变换矩阵 (主线程/调度线程同步获取，不再传入后台)
+    // 获取当前模型矩阵（主线程/调度线程同步读取，不再传入后台）
     std::array<double, 16> currentMatrix = sharedState->GetModelMatrix();
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
     
     // 封装异步任务
     std::packaged_task<void()> task([dataMgr, path, currentMatrix, weakSelf]() mutable {
-        // 进入后台线程，执行沉重的重采样和保存操作
+        // 进入后台线程，执行重采样和保存操作
         bool ok = dataMgr->SetTransformedDataSaved(path, currentMatrix);
 
         auto self = weakSelf.lock();
@@ -342,20 +342,20 @@ bool MedicalVizService::SetFromBufferAsync(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ProcessPendingUpdates（主线程 Timer 驱动）
+// SetPendingUpdatesProcessed（主线程 Timer 驱动）
 //
 // 路由优先级：
-//   1. m_needsCacheClear  → ExecuteClearStrategyCache（Detach 在主线程）
-//   2. m_needsLoadFailed  → PostData_HandleLoadFailed
-//   3. m_needsDataRefresh → PostData_RebuildPipeline
-//   4. m_needsSync        → PostData_SyncStateToStrategy
+//   1. m_needsCacheClear  → SetStrategyCacheCleared（SetRendererDetached 在主线程）
+//   2. m_needsLoadFailed  → SetLoadFailedHandled
+//   3. m_needsDataRefresh → SetPipelineRebuilt
+//   4. m_needsSync        → SetStrategyStateSynced
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetPendingUpdatesProcessed()
 {
     // 消费来自第三方重建的 ReconBuffer
-    // 必须在 m_needsDataRefresh 检查前，因为 ConsumeReconBuffer 成功后 会设 LoadState::Succeeded，下面的逻辑再据此驱动管线重建。
+    // 必须在 m_needsDataRefresh 检查前，因为 SetReconImageConsumed 成功后会设 LoadState::Succeeded，下面的逻辑再据此驱动管线重建。
     if (auto* rawMgr = dynamic_cast<RawVolumeDataManager*>(m_dataManager.get())) {
-        if (rawMgr->ConsumeReconImage()) {
+        if (rawMgr->SetReconImageConsumed()) {
             // 走和文件加载成功相同的后处理路径
             auto img = m_dataManager->GetVtkImage();
             if (img) {
@@ -371,38 +371,38 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 
     // 导出异步任务回调触发
     if (m_needsSaveTrigger.exchange(false)) {
-        ExecutePendingSaveCallback(m_lastSaveResult.load());
+        SetPendingSaveCallbackExecuted(m_lastSaveResult.load());
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
-        ExecuteClearStrategyCache();
+        SetStrategyCacheCleared();
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
-        PostData_HandleLoadFailed();
-        ExecutePendingLoadCallback(false);
+        SetLoadFailedHandled();
+        SetPendingLoadCallbackExecuted(false);
         return;
     }
 
     // DataReady → 重建管线（优先于增量同步）
     if (m_needsDataRefresh.exchange(false)) {
-        PostData_RebuildPipeline();
-        ExecutePendingLoadCallback(true);
+        SetPipelineRebuilt();
+        SetPendingLoadCallbackExecuted(true);
         // return; // 本帧只做重建，同步留到下帧
     }
 
     // 普通事件增量同步
-    PostData_SyncStateToStrategy();
+    SetStrategyStateSynced();
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// PostData_RebuildPipeline（后处理路径 A，主线程）
+// SetPipelineRebuilt（后处理路径 A，主线程）
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::PostData_RebuildPipeline()
+void MedicalVizService::SetPipelineRebuilt()
 {
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    auto    strategy = GetOrCreateStrategy(mode);
+    auto    strategy = GetStrategy(mode);
     if (!strategy) {
         std::cerr << "[RebuildPipeline] StrategyFactory returned null for mode "
             << static_cast<int>(mode) << "\n";
@@ -427,13 +427,13 @@ void MedicalVizService::PostData_RebuildPipeline()
     }
 
     SetCurrentStrategy(strategy);
-    MarkNeedsSync(); // 重建后触发一次全量参数同步
+    SetSyncRequested(); // 重建后触发一次全量参数同步
 }
 
 // ────────────────────────────────────────────��────────────────────────
-// PostData_SyncStateToStrategy（后处理路径 B，主线程）
+// SetStrategyStateSynced（后处理路径 B，主线程）
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::PostData_SyncStateToStrategy()
+void MedicalVizService::SetStrategyStateSynced()
 {
     bool expected = true;
     if (!m_needsSync.compare_exchange_strong(expected, false)) return;
@@ -459,19 +459,19 @@ void MedicalVizService::PostData_SyncStateToStrategy()
         m_renderer->SetBackground(bg.r, bg.g, bg.b);
     }
 
-    RenderParams params = BuildRenderParams(flags);
+    RenderParams params = GetRenderParams(flags);
     m_currentStrategy->SetVisualState(params, flags);
 
     m_isDirty = true;
     // m_needsSync = false;
 }
 
-void MedicalVizService::PostData_HandleLoadFailed()
+void MedicalVizService::SetLoadFailedHandled()
 {
-    std::cerr << "[PostData_HandleLoadFailed] Load failed; clearing pipeline state.\n";
+    std::cerr << "[SetLoadFailedHandled] Load failed; clearing pipeline state.\n";
 
     // 清理策略缓存（无有效数据，不应保留旧 Strategy）
-    ExecuteClearStrategyCache();
+    SetStrategyCacheCleared();
 
     // 重置刷新标记，防止残留 DataReady 触发错误重建
     m_needsDataRefresh = false;
@@ -484,9 +484,9 @@ void MedicalVizService::PostData_HandleLoadFailed()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// BuildRenderParams（私有，按 flags 精确读取 SharedState，减少锁调用）
+// GetRenderParams（私有，按 flags 精确读取 SharedState，减少锁调用）
 // ─────────────────────────────────────────────────────────────────────
-RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
+RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
@@ -528,10 +528,10 @@ RenderParams MedicalVizService::BuildRenderParams(UpdateFlags flags) const
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Strategy 缓存管理
+// 可视化策略缓存管理
 // ─────────────────────────────────────────────────────────────────────
 std::shared_ptr<AbstractVisualStrategy>
-MedicalVizService::GetOrCreateStrategy(VizMode mode)
+MedicalVizService::GetStrategy(VizMode mode)
 {
     auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end()) return it->second;
@@ -541,12 +541,12 @@ MedicalVizService::GetOrCreateStrategy(VizMode mode)
     return s;
 }
 
-void MedicalVizService::RequestClearStrategyCache()
+void MedicalVizService::SetStrategyCacheClearRequested()
 {
     m_needsCacheClear = true;
 }
 
-void MedicalVizService::ExecuteClearStrategyCache()
+void MedicalVizService::SetStrategyCacheCleared()
 {
     if (m_currentStrategy && m_renderer) {
         m_currentStrategy->SetRendererDetached(m_renderer);
@@ -558,7 +558,7 @@ void MedicalVizService::ExecuteClearStrategyCache()
 // ─────────────────────────────────────────────────────────────────────
 // 辅助
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::ResetCursorToCenter()
+void MedicalVizService::SetCursorCentered()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     double imgcenter[3] = {0.0};
@@ -570,7 +570,7 @@ void MedicalVizService::ResetCursorToCenter()
 	m_sharedState->SetCursorWorld(imgcenterWorld[0], imgcenterWorld[1], imgcenterWorld[2]);
 }
 
-void MedicalVizService::MarkNeedsSync()
+void MedicalVizService::SetSyncRequested()
 {
     m_needsSync = true;
     m_isDirty = true;
@@ -608,7 +608,7 @@ void MedicalVizService::SetSliceScrolled(int delta)
     double newCursorWorld[3] = { 0.0, 0.0, 0.0 };
     GetWorldPositionFromModel(cursorModel, newCursorWorld);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
-    MarkNeedsSync();
+    SetSyncRequested();
 }
 
 void MedicalVizService::SetCursorWorldPosition(double worldpos[3], int axis)
@@ -695,16 +695,16 @@ void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int vie
 
     // 写入 SharedState 触发单向数据流更新
     m_sharedState->SetWindowLevel(newWW, newWC);
-    MarkNeedsSync();
+    SetSyncRequested();
 }
 
-void MedicalVizService::TransformModel(
+void MedicalVizService::SetModelTransform(
     double translate[3], double rotate[3], double scale[3])
 {
     m_transformService->SetModelTransform(translate, rotate, scale);
 }
 
-void MedicalVizService::ResetModelTransform()
+void MedicalVizService::SetModelTransformReset()
 {
     m_transformService->SetModelTransformReset();
 }

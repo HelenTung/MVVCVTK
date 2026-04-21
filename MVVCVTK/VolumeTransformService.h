@@ -26,7 +26,7 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // WorldToModel：世界坐标 → 模型坐标
+    // GetModelPositionFromWorld：世界坐标 → 模型坐标
     // ----------------------------------------------------------------
     void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const
     {
@@ -42,7 +42,7 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // ModelToWorld：模型坐标 → 世界坐标
+    // GetWorldPositionFromModel：模型坐标 → 世界坐标
     // ----------------------------------------------------------------
     void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const
     {
@@ -57,7 +57,7 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // SyncModelMatrix：把 VTK Actor 的 UserMatrix 同步回 SharedState
+    // SetModelMatrix：把 VTK Actor 的 UserMatrix 同步回 SharedState
     // ----------------------------------------------------------------
     void SetModelMatrix(vtkMatrix4x4* mat)
     {
@@ -68,14 +68,14 @@ public:
         std::memcpy(matData.data(), mat->GetData(), 16 * sizeof(double));
         m_sharedState->SetModelMatrix(matData);
 
-        // 更新本地缓存，供 WorldToModel / ModelToWorld 高频调用
+        // 更新本地缓存，供 GetModelPositionFromWorld / GetWorldPositionFromModel 高频调用
         m_cachedModelMatrix->DeepCopy(mat);
         m_cachedInverseModelMatrix->DeepCopy(mat);
         m_cachedInverseModelMatrix->Invert();
     }
 
     // ----------------------------------------------------------------
-    // TransformModel：通过 平移/旋转/缩放 参数构建矩阵并写入 State
+    // SetModelTransform：通过 平移/旋转/缩放 参数构建矩阵并写入 SharedState
     // ----------------------------------------------------------------
     void SetModelTransform(double translate[3], double rotate[3], double scale[3])
     {
@@ -107,7 +107,7 @@ public:
     }
 
     // ----------------------------------------------------------------
-    // ResetModelTransform：回到单位矩阵（不做任何变换）
+    // SetModelTransformReset：回到单位矩阵（不做任何变换）
     // ----------------------------------------------------------------
     void SetModelTransformReset()
     {

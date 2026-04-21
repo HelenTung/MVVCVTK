@@ -54,7 +54,7 @@ public:
     }
 
     // ================================================================
-    // 【触发】— 主动发起后台计算，对齐 SetFileLoadedAsync 线程模式
+    // 【触发】— 主动发起后台计算，对齐 SetFileLoadedAsync 的异步调用语义
     // ================================================================
     void SetAnalysisAsync( // MAIN
         std::function<void(bool success)> onComplete = nullptr) override
@@ -135,14 +135,14 @@ public:
     }
 
     // ================================================================
-    // 【后处理】— 主线程消费，在 PostData 阶段调用
+    // 【后处理】— 主线程消费，在后处理阶段调用
     // ================================================================
     std::vector<VoidRegion> GetVoidRegions() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         return m_result.voids;
     }
 
-    // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
+    // ── 3D：空洞等值面 Mesh（供可视化策略读取）──────────────────────
     vtkSmartPointer<vtkPolyData> GetVoidMesh() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         if (!m_result.succeeded || m_result.labelVolume.empty())
@@ -159,7 +159,7 @@ public:
         return fe->GetOutput();
     }
 
-    // ── 2D：标签体 vtkImageData（喂给 SliceStrategy）───────────────
+    // ── 2D：标签体 vtkImageData（供切片策略读取）───────────────────
     // label=0 → 背景（透明）；label>0 → 空洞编号
     // SliceStrategy::SetInputData 接受 vtkImageData，直接传入即可。
     // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
@@ -233,8 +233,8 @@ private:
     }
 
 public:
-	// ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
-    bool saveResults(const std::string& baseName) {
+   // ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
+    bool SetResultsSaved(const std::string& baseName) {
         std::string csvPath = baseName + "_voids.csv";
         FILE* fp = fopen(csvPath.c_str(), "w");
         if (fp) {
