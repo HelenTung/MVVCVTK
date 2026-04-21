@@ -151,6 +151,7 @@ public:
     virtual void SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
     virtual void SetIsoThreshold(double val) = 0;
     virtual void SetBackground(const BackgroundColor& bg) = 0;
+    virtual void SetSpacing(double sx, double sy, double sz) = 0;
     virtual void SetWindowLevel(double ww, double wc) = 0;
     virtual void SetVisualConfig(const PreInitConfig& cfg) = 0;
 };

@@ -28,12 +28,14 @@ public:
     }
 
     // ── 数据就绪广播 ──────────────────────────────────────────────
-    // 仅后台加载线程调用；写 range 后广播 DataReady
-    void SetDataReady(double rangeMin, double rangeMax) {
+    // 仅后台加载线程调用；写 range / spacing 后广播 DataReady
+    void SetDataReady(double rangeMin, double rangeMax,
+        const std::array<double, 3>& spacing) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             m_dataRange[0] = rangeMin;
             m_dataRange[1] = rangeMax;
+            m_spacing = spacing;
             m_loadState = LoadState::Succeeded;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
@@ -100,6 +102,16 @@ public:
             {
                 m_background = cfg.bgColor;
                 flags |= UpdateFlags::Background;
+            }
+
+            // spacing
+            if (cfg.hasSpacing &&
+                (std::abs(m_spacing[0] - cfg.spacing[0]) > 1e-6 ||
+                    std::abs(m_spacing[1] - cfg.spacing[1]) > 1e-6 ||
+                    std::abs(m_spacing[2] - cfg.spacing[2]) > 1e-6))
+            {
+                m_spacing = cfg.spacing;
+                flags |= UpdateFlags::Spacing;
             }
 
 			// 切片窗宽/窗位
@@ -203,6 +215,27 @@ public:
     BackgroundColor GetBackground() const {
         std::lock_guard<std::mutex> lk(m_mutex);
         return m_background;
+    }
+
+    // ── 体数据 spacing ──────────────────────────────────────────────
+    void SetSpacing(double sx, double sy, double sz) {
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            if (std::abs(m_spacing[0] - sx) > 1e-6 ||
+                std::abs(m_spacing[1] - sy) > 1e-6 ||
+                std::abs(m_spacing[2] - sz) > 1e-6)
+            {
+                m_spacing = { sx, sy, sz };
+                changed = true;
+            }
+        }
+        if (changed) SetObserversNotified(UpdateFlags::Spacing);
+    }
+
+    std::array<double, 3> GetSpacing() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_spacing;
     }
 
     // ── 切片窗宽/窗位（WW/WC，工业 CT 标准）─────────────────────
@@ -327,24 +360,34 @@ public:
 private:
     mutable std::mutex m_mutex;
 
-    double                 m_cursorWorld[3] = { 0, 0, 0 };
-    double                 m_cursorRawWorld[3] = { 0, 0, 0 };
-    int                    m_cursorAxis = -1;
-    double                 m_isoValue = 0.0;
-    MaterialParams         m_material;
-    BackgroundColor        m_background;         
-    WindowLevelParams      m_windowLevel;
-    std::vector<TFNode>    m_nodes;
-    double                 m_dataRange[2] = { 0.0, 255.0 };
-    bool                   m_isInteracting = false;
-    LoadState              m_loadState = LoadState::Idle; 
-    std::array<double, 16> m_modelMatrix = {
-        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
-    };
+    // 数据生命周期状态
+    LoadState m_loadState = LoadState::Idle;                    // 当前加载状态（Idle / Loading / Succeeded / Failed）
+    double m_dataRange[2] = { 0.0, 255.0 };                    // 当前体数据标量范围
+    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // 当前体数据 spacing（RAS 世界坐标系）
+
+    // 渲染配置状态
+    std::vector<TFNode> m_nodes;                                // 当前体渲染传输函数节点
+    double m_isoValue = 0.0;                                    // 当前等值面阈值
+    MaterialParams m_material;                                  // 当前材质参数
+    BackgroundColor m_background;                               // 当前背景色
+    WindowLevelParams m_windowLevel;                            // 当前切片窗宽/窗位
     uint32_t m_visibilityMask = VisFlags::ClipPlanes
         | VisFlags::Crosshair
-        | VisFlags::RulerAxes; // 默认全部可见
-    std::vector<ObserverEntry> m_observers;
+        | VisFlags::RulerAxes;                                  // 当前辅助元素可见性掩码
+
+    // 交互状态
+    bool m_isInteracting = false;                               // 当前是否处于高频交互中
+    double m_cursorWorld[3] = { 0, 0, 0 };                      // 当前联动光标世界坐标
+    double m_cursorRawWorld[3] = { 0, 0, 0 };                   // 原始拾取得到的世界坐标
+    int m_cursorAxis = -1;                                      // 当前光标来源轴（-1 表示自由点）
+
+    // 模型状态
+    std::array<double, 16> m_modelMatrix = {
+        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
+    };                                                         // 当前模型矩阵（列主序 4x4）
+
+    // 观察者
+    std::vector<ObserverEntry> m_observers;                     // 当前已注册的观察者列表
 
     // ── NotifyObservers：先快照回调列表（持锁），再无锁调用 ──
     // 彻底消除回调中调用 Set* → 重入加锁 → 死锁风险

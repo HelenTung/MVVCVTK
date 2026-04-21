@@ -4,14 +4,17 @@
 //
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
-//   IVisualConfigService             — 前处理接口（main.cpp 配置阶段调用）
+//   IVisualConfigService        — 前处理接口（main.cpp 配置阶段调用）
 //   IDataLoaderService          — 数据加载接口（与渲染解耦）
+//   IDataExportService          — 数据导出接口（与渲染解耦）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
-// 三阶段职责：
-//   【前处理】  SetXxx / SetVisualConfig：只写 SharedState，零 VTK 操作
-//   【后处理-重建】 SetPendingUpdatesProcessed → PostData_RebuildPipeline
-//   【后处理-同步】 SetPendingUpdatesProcessed → PostData_SyncStateToStrategy
+// 主线职责：
+//   1. 构造 / 绑定渲染上下文
+//   2. 前处理配置：只写 SharedState，零 VTK 操作
+//   3. 加载 / 导出：后台处理，主线程统一回调
+//   4. 交互：更新状态或委托变换服务
+//   5. 主线程后处理：统一重建 / 同步 / 分发回调
 // =====================================================================
 
 #include "AppInterfaces.h"
@@ -31,34 +34,41 @@ class MedicalVizService
     , public std::enable_shared_from_this<MedicalVizService>
 {
 public:
-    MedicalVizService(std::shared_ptr<AbstractDataManager>    dataMgr,
+    // ================================================================
+    // 构造 / 析构
+    // ================================================================
+    MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state);
     ~MedicalVizService();
-    void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
-        vtkSmartPointer<vtkRenderer>     ren) override;
 
     // ================================================================
-    // IVisualConfigService — 前处理接口
+    // RenderContext 绑定
+    // ================================================================
+    void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
+        vtkSmartPointer<vtkRenderer> ren) override;
+
+    // ================================================================
+    // IVisualConfigService — 前处理配置
     // 调用时机：SetServiceBound 之后，SetFileLoadedAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // ================================================================
-    void SetVizMode(VizMode mode)                               override;
-    void SetMaterial(const MaterialParams& mat)                 override;
-    void SetOpacity(double opacity)                             override;
-    void SetTransferFunction(const std::vector<TFNode>& nodes)  override;
-    void SetIsoThreshold(double val)                            override;
-    void SetBackground(const BackgroundColor& bg)               override;
-    void SetWindowLevel(double ww, double wc)                   override;
-    void SetVisualConfig(const PreInitConfig& cfg)              override; // 批量提交
+    void SetVizMode(VizMode mode) override;
+    void SetMaterial(const MaterialParams& mat) override;
+    void SetOpacity(double opacity) override;
+    void SetTransferFunction(const std::vector<TFNode>& nodes) override;
+    void SetIsoThreshold(double val) override;
+    void SetBackground(const BackgroundColor& bg) override;
+    void SetSpacing(double sx, double sy, double sz) override;
+    void SetWindowLevel(double ww, double wc) override;
+    void SetVisualConfig(const PreInitConfig& cfg) override;
 
     // ================================================================
-    // IDataLoaderService — 数据加载接口
+    // 数据加载 / 数据导出
     // onComplete 由主线程延迟执行，只允许操作状态或 UI
     // ================================================================
     void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
-    
-    // 重建注入异步接口：将 SetFromBuffer 的耗时操作投递到后台线程
+
     bool SetFromBufferAsync(
         const float* data,
         const std::array<int, 3>& dims,
@@ -67,44 +77,27 @@ public:
         std::function<void(bool success)> onComplete = nullptr);
 
     LoadState GetLoadState() const override;
-
-	// ================================================================
-	// IDataExportService — 数据导出接口
-	// 线程安全：读取 SharedState（内部 mutex 保护），不操作 VTK
-	// ================================================================
     void SetTransformedDataSavedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
-    
-    // 尽力取消：设标记，加载函数内部自检后提前退出
     void SetLoadCanceled() override;
-
-    // ================================================================
-    // AbstractAppService — 后处理入口（主线程 Timer 驱动，调用 SetPendingUpdatesProcessed）
-    // 路由优先级：
-    //   1. m_needsCacheClear  → ExecuteClearStrategyCache
-    //   2. m_needsLoadFailed  → PostData_HandleLoadFailed  
-    //   3. m_needsDataRefresh → PostData_RebuildPipeline
-    //   4. m_needsSync        → PostData_SyncStateToStrategy
-    // ================================================================
-    void SetPendingUpdatesProcessed() override;
 
     // ================================================================
     // AbstractInteractiveService — 交互接口
     // ================================================================
-    void SetSliceScrolled(int delta)                                     override;
+    void SetSliceScrolled(int delta) override;
     void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
-    std::array<double, 3> GetCursorWorld()                          override;
-    void SetInteracting(bool val)                                   override;
-    int  GetPlaneAxis(vtkActor* actor)                              override;
-    vtkProp3D* GetMainProp()                                        override;
-    void SetModelMatrixSynced(vtkMatrix4x4* mat)                    override;
-    void SetElementVisible(uint32_t flagBit, bool show)             override;
-
+    std::array<double, 3> GetCursorWorld() override;
+    void SetInteracting(bool val) override;
+    int GetPlaneAxis(vtkActor* actor) override;
+    vtkProp3D* GetMainProp() override;
+    void SetModelMatrixSynced(vtkMatrix4x4* mat) override;
+    void SetElementVisible(uint32_t flagBit, bool show) override;
     void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override {
         return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
     }
+
     WindowLevelParams GetWindowLevel() const override {
         if (m_sharedState)
             return m_sharedState->GetWindowLevel();
@@ -118,30 +111,33 @@ public:
     void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const override;
     void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const override;
 
+    // ================================================================
+    // AbstractAppService — 主线程后处理入口
+    // 路由优先级：
+    //   1. m_needsCacheClear  → SetStrategyCacheCleared
+    //   2. m_needsLoadFailed  → SetLoadFailedHandled
+    //   3. m_needsDataRefresh → SetPipelineRebuilt
+    //   4. m_needsSync        → SetStrategyStateSynced
+    // ================================================================
+    void SetPendingUpdatesProcessed() override;
+
 private:
-    // ── 后处理路径 A：SetDataReady → 重建 VTK 渲染管线（仅主线程）
+    // ================================================================
+    // 渲染后处理 / 策略辅助
+    // ================================================================
     void SetPipelineRebuilt();
-
-    // ── 后处理路径 B：普通事件 → 增量同步参数到当前可视化策略（仅主线程）
     void SetStrategyStateSynced();
-
-    // ── 后处理路径 C：SetLoadFailed → 清理状态 + 显示占位符（仅主线程）
     void SetLoadFailedHandled();
-
-    // ── 获取 RenderParams（只读 SharedState，按 flags 精确读取）
     RenderParams GetRenderParams(UpdateFlags flags) const;
-
-    // ── 可视化策略缓存管理
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
-
-    // ── 仅设标记，主线程统一执行 SetRendererDetached（不在后台线程调 VTK）
-    void SetStrategyCacheClearRequested();   // 后台线程安全：只设标记
-    void SetStrategyCacheCleared();          // 主线程：真正执行 SetRendererDetached + clear
-
+    void SetStrategyCacheClearRequested();
+    void SetStrategyCacheCleared();
     void SetCursorCentered();
     void SetSyncRequested();
 
-private:
+    // ================================================================
+    // 异步回调辅助
+    // ================================================================
     // 保存当前加载请求绑定的回调
     void SetLoadCallback(std::function<void(bool)> callback) {
         std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
@@ -220,31 +216,31 @@ private:
         if (callback) callback(success);
     }
 
-    mutable std::mutex m_LoadCallbackMutex;           // 保护加载回调状态
-    std::function<void(bool)> m_LoadCallback;         // 当前加载请求绑定的回调
-    std::function<void(bool)> m_PendingLoadCallback;  // 待主线程执行的加载回调
-    bool m_PendingLoadResult{ false };                // 待执行加载回调对应的结果
+    // ================================================================
+    // 成员变量
+    // ================================================================
+    mutable std::mutex m_LoadCallbackMutex;              // 保护加载回调状态
+    std::function<void(bool)> m_LoadCallback;            // 当前加载请求绑定的回调
+    std::function<void(bool)> m_PendingLoadCallback;     // 待主线程执行的加载回调
+    bool m_PendingLoadResult{ false };                   // 待执行加载回调对应的结果
     std::atomic<bool> m_HasPendingLoadCallback{ false }; // 是否存在待执行加载回调
 
-    mutable std::mutex m_SaveCallbackMutex;           // 保护保存回调状态
-    std::function<void(bool)> m_SaveCallback;         // 当前保存请求绑定的回调
-    std::function<void(bool)> m_PendingSaveCallback;  // 待主线程执行的保存回调
-    bool m_PendingSaveResult{ false };                // 待执行保存回调对应的结果
+    mutable std::mutex m_SaveCallbackMutex;              // 保护保存回调状态
+    std::function<void(bool)> m_SaveCallback;            // 当前保存请求绑定的回调
+    std::function<void(bool)> m_PendingSaveCallback;     // 待主线程执行的保存回调
+    bool m_PendingSaveResult{ false };                   // 待执行保存回调对应的结果
     std::atomic<bool> m_HasPendingSaveCallback{ false }; // 是否存在待执行保存回调
 
-    // ── 成员 ────────────────────────────────────────────────────
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
-    std::shared_ptr<SharedInteractionState>    m_sharedState;
-    std::unique_ptr<VolumeTransformService>    m_transformService;
+    std::shared_ptr<SharedInteractionState> m_sharedState;
+    std::unique_ptr<VolumeTransformService> m_transformService;
 
-    // 原子标记
-    std::atomic<int>  m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
+    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     std::atomic<bool> m_needsDataRefresh{ false };
     std::atomic<bool> m_needsCacheClear{ false };
-    std::atomic<bool> m_needsLoadFailed{ false };   // 
-    std::shared_ptr<std::atomic<bool>> m_cancelFlag;   // 尽力取消标记
+    std::atomic<bool> m_needsLoadFailed{ false };
+    std::shared_ptr<std::atomic<bool>> m_cancelFlag; // 尽力取消标记
 
-    // 加载线程 future（用于析构时 join，避免 detach UB）
-    std::future<void>  m_loadFuture;                //
-    mutable std::mutex m_loadMutex;                 //保护 m_loadFuture
+    std::future<void> m_loadFuture; // 加载线程 future（用于析构时等待）
+    mutable std::mutex m_loadMutex; // 保护 m_loadFuture
 };

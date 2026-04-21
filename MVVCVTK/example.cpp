@@ -1,291 +1,504 @@
-﻿//#pragma once
-//#include "AppInterfaces.h"
-//#include "InteractionRouter.h"
-//#include <QObject>
-//#include <QTimer>
-//// 引入 QtVTK 相关的头文件，例如 QVTKOpenGLNativeWidget 提供的 renderWindow
-//
-//class QtRenderContext : public QObject, public AbstractRenderContext {
-//    Q_OBJECT
-//private:
-//    std::shared_ptr<AbstractInteractiveService> m_interactiveService;
-//    vtkSmartPointer<vtkRenderWindowInteractor>  m_interactor;
-//    vtkSmartPointer<vtkCallbackCommand>         m_eventCallback;
-//    vtkSmartPointer<vtkPropPicker>              m_picker;
-//
-//    // Qt 的定时器，用于替代 VTK Timer
-//    QTimer* m_heartbeatTimer;
-//
-//    VizMode  m_currentMode = VizMode::Volume;
-//    ToolMode m_toolMode = ToolMode::Navigation;
-//    InteractionRouter m_interactionRouter;
-//
-//    void SetInteractionRouter();
-//
-//public:
-//    // 构造函数不再创建 RenderWindow，而是由外部（Qt Widget）注入
-//    explicit QtRenderContext(vtkSmartPointer<vtkRenderWindow> qtRenderWindow, QObject* parent = nullptr);
-//    ~QtRenderContext() override;
-//
-//    void SetInteractorInitialized() override;
-//    void SetStarted() override; // 在 Qt 中可能为空实现，或者只做初始化标志位
-//    void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
-//    void SetCameraStyleByVizMode(VizMode mode) override;
-//
-//private slots:
-//    // 专门用于处理 Qt Timer 触发的更新
-//    void OnQtTimerTick();
-//
-//protected:
-//    void SetVTKEventHandled(vtkObject* caller, long unsigned int eventId, void* callData) override;
-//};
+﻿/*
+=====================================================================
+example.cpp — 前端调用说明（MedicalVizService / RenderContext）
 
+用途：
+- 给前端/界面层一个统一的接入说明。
+- 汇总现有功能、核心接口、调用顺序与典型伪代码。
+- 作为 Qt / C# / WebView 宿主封装时的参考文档。
 
-/*
-─────────────────────────────────────────────────────────────────────
-一、前处理与系统配置（IVisualConfigService）接口文档
-─────────────────────────────────────────────────────────────────────
-
-1. 调用时机
-   - 绑定服务（SetServiceBound）后，数据加载（SetFileLoadedAsync）前或后均可。
-   - 时机为 Qt 窗口/Widget 刚创建且尚未加载任何数据时。
-   - 仅修改 SharedState 或原子变量，不涉及底层 VTK 渲染计算，线程绝对安全。
-
-2. 需要用到的类对象
-   - 调用方持有：std::shared_ptr<MedicalVizService> (向上转型为 IVisualConfigService)
-   - 参数载体：PreInitConfig 结构体 (位于 AppTypes.h，纯数据结构，利用 hasXXX 标志位控制有效字段)
-
-3. 功能与调用流程
-
-   - SetVisualConfig(const PreInitConfig& cfg)
-     说明：批量提交前处理配置（视图模式、背景色、材质、传输函数等）。采用一次锁+一次广播，VizMode 仅写原子变量，极大减少锁争用。
-     时机：建议在所有初始参数组装完毕后统一调用。
-     onComplete：无（同步极速完成）。
-
-   - SetVizMode(VizMode mode)
-     说明：设置可视化模式（如体渲染/等值面/切片等），仅记录意图，实际管线重建在主线程处理。
-     时机：随时调用（单项修改）。
-     onComplete：无。
-
-   - SetBackground(const BackgroundColor& bg)
-     说明：设置背景色，写入 SharedState（前处理阶段会同步直接写渲染器）。
-     时机：随时调用。
-     onComplete：无。
-
-   - SetMaterial / SetOpacity / SetWindowLevel / SetIsoThreshold / SetTransferFunction
-     说明：分别设置材质、透明度、窗宽窗位、等值面阈值、传输函数，写入 SharedState。
-     时机：随时调用。
-     onComplete：无。
-
-4. 典型调用流程示例（伪代码）
-────────────────────────────
-// 1. 实例化底层基建 (数据与状态隔离)
-auto dataMgr = std::make_shared<RawVolumeDataManager>();
-auto sharedState = std::make_shared<SharedInteractionState>();
-
-// 2. 实例化业务调度器
-auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
-
-// 3. 上下文绑定
-auto context = std::make_shared<StdRenderContext>();
-context->SetServiceBound(service);
-
-// 4. 组装批量前处理参数
-PreInitConfig cfg;
-cfg.vizMode = VizMode::CompositeVolume; // 意图：体渲染+切片参考面
-cfg.hasBgColor = true;
-cfg.bgColor = { 0.08, 0.08, 0.12 };     // 深蓝色背景
-cfg.hasWindowLevel = true;
-cfg.windowLevel = { 400.0, 40.0 };      // 初始窗宽窗位
-cfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, true }; // 材质参数
-
-// 5. 提交配置
-service->SetVisualConfig(cfg);
-
-// 6. 执行纯 UI 视角配置
-context->SetCameraStyleByVizMode(cfg.vizMode);
-context->SetOrientationAxesVisible(true);
-─────────────────────────────────────────────────────────────────────
+重要约定：
+1. 前后处理分离：
+   - 前端只发“配置 / 加载 / 导出 / 交互”指令。
+   - 真正的渲染重建与参数同步由主线程统一处理。
+2. 数据类与状态类分离：
+   - DataManager 负责数据加载与导出。
+   - SharedInteractionState 负责共享状态。
+3. 回调时机：
+   - SetFileLoadedAsync / SetFromBufferAsync / SetTransformedDataSavedAsync 的 onComplete
+     均为【主线程延迟回调】。
+   - 回调统一在 MedicalVizService::SetPendingUpdatesProcessed() 中分发。
+4. Context 职责：
+   - RenderContext 只负责事件接入、窗口管理、相机风格与启动渲染循环。
+   - 不在 Context 中承载业务回调。
+=====================================================================
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-二、数据加载、导入与导出（IDataLoaderService & IDataExportService）接口文档
+一、系统角色与前端应持有的对象
 ─────────────────────────────────────────────────────────────────────
 
-1. 调用时机与设计规范
-   - 必须在主线程（或 Qt 调度线程）发起异步调用，防止重入（内部状态为 Loading 时会拒绝新请求）。
-   - 警告：所有的 onComplete 回调均在【后台工作线程】执行！
-   - 在 onComplete 中：
-     允许：读写 SharedState（内部自带锁）、通过 Qt 的线程安全机制（如 queued 信号槽、QMetaObject::invokeMethod）通知主线程更新 UI。
-     禁止：直接调用任何 VTK 渲染接口（Render/Update/Modified）或直接修改 Qt 控件状态。
+一条标准主线如下：
 
-2. 需要用到的类对象
-   - 调用方持有：std::shared_ptr<MedicalVizService> (向上转型为 IDataLoaderService 或 IDataExportService)
-   - 状态查询：std::shared_ptr<SharedInteractionState>
+前端 UI
+  ├─ 持有 MedicalVizService                -> 业务调度层
+  ├─ 持有 StdRenderContext / 自定义 Context -> 渲染上下文
+  ├─ 可读取 SharedInteractionState         -> 查询共享状态
+  └─ 可持有 DataManager                    -> 选择 RAW / TIFF / Buffer 数据来源
 
-3. 功能与调用流程
+推荐前端持有对象：
 
-   - SetFileLoadedAsync(const std::string& path, std::function<void(bool success)> onComplete)
-     说明：异步从磁盘加载 RAW 或 TIFF 序列文件。
-     时机：用户通过 UI 选择文件后调用。
-     onComplete 可写内容：
-       - 调用 SharedState 获取实际数据极值（GetDataRange），推算并设置等值面阈值或窗宽窗位。
-       - 发射信号通知主线程隐藏 Loading 动画。
+    auto dataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedState = std::make_shared<SharedInteractionState>();
+    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+    auto context = std::make_shared<StdRenderContext>();
 
-   - SetFromBufferAsync(const float* data, const std::array<int, 3>& dims,
-                        const std::array<float, 3>& spacing, const std::array<float, 3>& origin,
-                        std::function<void(bool success)> onComplete)
-     说明：异步从内存 Buffer 导入数据（用于工业 CT 算法直连，后台执行分配与拷贝）。
-     时机：上游重建算法产生结果内存块后调用。
-     onComplete 可写内容：同上。
+角色说明：
+- RawVolumeDataManager / TiffVolumeDataManager
+  负责加载原始体数据、导出变换后体数据。
 
-   - SetTransformedDataSavedAsync(const std::string& path, std::function<void(bool success)> onComplete)
-     说明：异步保存当前经过模型仿射变换（旋转/平移/缩放）后的体数据（重新采样并裁剪对齐），导出为 RAW 文件。
-     时机：用户调整好模型姿态，点击“导出”后调用。
-     onComplete 可写内容：发信号通知主线程弹窗提示“保存成功/失败”。
+- SharedInteractionState
+  负责保存：
+  * 光标位置
+  * 窗宽窗位
+  * 传输函数
+  * 材质
+  * 可见性
+  * 模型矩阵
+  * 加载状态
 
-   - SetLoadCanceled()
-     说明：请求取消当前加载任务（设置原子标记，底层尽力取消）。
-     时机：用户主动点击“取消加载”时调用。
-     onComplete：无。
+- MedicalVizService
+  负责：
+  * 接收前端调用
+  * 写 SharedState
+  * 发起异步加载 / 导出
+  * 主线程统一重建管线 / 同步策略 / 分发回调
 
-   - GetLoadState() const
-     说明：获取当前加载状态（Idle/Loading/Succeeded/Failed）。
-     时机：随时调用，用于 UI 状态判断（如正在 Loading 时禁用其他按钮）。
-     onComplete：无。
+- StdRenderContext
+  负责：
+  * 绑定 renderWindow / renderer / interactor
+  * 处理鼠标 / 键盘 / 定时器事件
+  * 设置相机风格
+  * 启动渲染循环
+*/
 
-4. 典型调用流程示例（伪代码）
-────────────────────────────
-// 假设在 Qt 的某个槽函数中
-void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
-{
-    // 更新 UI 状态（主线程）
-    ui->loadingOverlay->show();
-    ui->btnLoad->setEnabled(false);
+/*
+─────────────────────────────────────────────────────────────────────
+二、前端初始化调用顺序（必须先有这条主线）
+─────────────────────────────────────────────────────────────────────
 
-    // 转换为抽象接口
-    IDataLoaderService* loader = m_vizService.get();
+标准顺序：
 
-    // 捕获必要的指针，发起异步加载
-    auto sharedState = m_sharedState;
-    auto vizService = m_vizService;
+1. 创建 DataManager
+2. 创建 SharedInteractionState
+3. 创建 MedicalVizService
+4. 创建 RenderContext
+5. context->SetServiceBound(service)
+6. 先做前处理配置（可批量或单项）
+7. 配置窗口 / 相机 / 坐标轴
+8. context->SetInteractorInitialized()
+9. 发起数据加载
+10. context->SetStarted()
 
-    loader->SetFileLoadedAsync(
-        filePath.toStdString(),
-        [this, sharedState, vizService](bool success) {
-            // 警告：当前处于后台加载线程！
+伪代码：
 
-            if (success) {
-                // 根据实际数据范围，自动推算最佳窗宽窗位
-                auto range = sharedState->GetDataRange();
-                double ww = (range[1] - range[0]) * 0.6;
-                double wc = range[0] + (range[1] - range[0]) * 0.5;
+    auto dataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedState = std::make_shared<SharedInteractionState>();
+    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+    auto context = std::make_shared<StdRenderContext>();
 
-                // 线程安全：只写 SharedState
-                vizService->SetWindowLevel(ww, wc);
+    // 1) 绑定服务与渲染上下文
+    context->SetServiceBound(service);
+
+    // 2) 前处理配置（数据无关）
+    PreInitConfig cfg;
+    cfg.vizMode = VizMode::CompositeVolume;
+    cfg.hasBgColor = true;
+    cfg.bgColor = { 0.08, 0.08, 0.12 };
+    cfg.hasWindowLevel = true;
+    cfg.windowLevel = { 400.0, 40.0 };
+    cfg.hasTF = true;
+    cfg.tfNodes = {
+        { 0.00, 0.0, 0.0, 0.0, 0.0 },
+        { 0.50, 0.0, 0.0, 0.5, 0.0 },
+        { 0.85, 0.8, 0.0, 0.5, 0.0 },
+        { 1.00, 1.0, 0.0, 0.5, 0.0 },
+    };
+    service->SetVisualConfig(cfg);
+
+    // 3) 纯窗口/上下文配置
+    context->SetWindowTitle("CT Viewer");
+    context->SetWindowSize(1200, 900);
+    context->SetWindowPosition(50, 50);
+    context->SetCameraStyleByVizMode(cfg.vizMode);
+    context->SetOrientationAxesVisible(true);
+
+    // 4) 初始化交互器
+    context->SetInteractorInitialized();
+
+    // 5) 异步加载数据
+    service->SetFileLoadedAsync("E:/data/ct/1000X1000X1000.raw",
+        [service, sharedState](bool success)
+        {
+            // 注意：这是主线程延迟回调，不是后台线程回调
+            if (!success) {
+                // 这里只做 UI / 状态处理
+                return;
             }
 
-            // 安全地通知主线程更新 UI
-            QMetaObject::invokeMethod(this, [this, success]() {
+            // 可根据实际数据范围补充业务参数
+            auto range = sharedState->GetDataRange();
+            double iso = range[0] + (range[1] - range[0]) * 0.35;
+            service->SetIsoThreshold(iso);
+        });
+
+    // 6) 启动渲染循环
+    context->SetStarted();
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+三、前处理配置接口（IVisualConfigService）
+─────────────────────────────────────────────────────────────────────
+
+这些接口只表达“配置意图”，不直接做耗时渲染。
+适合：
+- 窗口刚建立时设置默认参数
+- 前端参数面板修改后同步到底层
+
+1) SetVisualConfig(const PreInitConfig& cfg)
+   功能：
+   - 批量提交前处理配置
+   - 推荐作为前端初始化默认入口
+   典型字段：
+   - cfg.vizMode
+   - cfg.bgColor / cfg.hasBgColor
+   - cfg.material
+   - cfg.tfNodes / cfg.hasTF
+   - cfg.windowLevel / cfg.hasWindowLevel
+   - cfg.isoThreshold / cfg.hasIso
+
+2) SetVizMode(VizMode mode)
+   功能：
+   - 切换显示模式
+   - 例如：CompositeVolume / CompositeIsoSurface / SliceTop_down
+
+3) SetBackground(const BackgroundColor& bg)
+   功能：
+   - 设置背景色
+
+4) SetMaterial(const MaterialParams& mat)
+   功能：
+   - 设置材质（环境光/漫反射/高光/透明度等）
+
+5) SetOpacity(double opacity)
+   功能：
+   - 单独调整透明度
+
+6) SetWindowLevel(double ww, double wc)
+   功能：
+   - 设置窗宽窗位
+
+7) SetIsoThreshold(double val)
+   功能：
+   - 设置等值面阈值
+
+8) SetTransferFunction(const std::vector<TFNode>& nodes)
+   功能：
+   - 设置体渲染传输函数
+
+前端伪代码：
+
+    void UiController::ApplyDefaultConfig()
+    {
+        PreInitConfig cfg;
+        cfg.vizMode = VizMode::CompositeIsoSurface;
+        cfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, false };
+        cfg.hasBgColor = true;
+        cfg.bgColor = { 0.05, 0.05, 0.05 };
+        cfg.hasIso = true;
+        cfg.isoThreshold = 1800.0;
+        m_service->SetVisualConfig(cfg);
+    }
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+四、数据加载与导出接口（IDataLoaderService / IDataExportService）
+─────────────────────────────────────────────────────────────────────
+
+【线程模型】
+- 前端在主线程发起请求。
+- 实际加载/导出在后台线程执行。
+- onComplete 在主线程延迟回调。
+- 回调中适合做：
+  * UI 状态切换
+  * 业务状态记录
+  * 继续调用 service 的轻量接口
+- 回调中不建议直接承载底层渲染细节。
+
+A. 加载接口
+
+1) SetFileLoadedAsync(const std::string& path, std::function<void(bool)> onComplete)
+   功能：
+   - 从磁盘加载 RAW 或 TIFF 序列
+   - 内部防重入：Loading 状态下会拒绝新请求
+
+2) SetFromBufferAsync(...)
+   功能：
+   - 从上游算法给出的内存块导入体数据
+   - 适合工业 CT 重建算法直接对接
+
+3) GetLoadState() const
+   功能：
+   - 查询当前加载状态
+   - Idle / Loading / Succeeded / Failed
+
+4) SetLoadCanceled()
+   功能：
+   - 请求尽力取消当前加载
+
+B. 导出接口
+
+5) SetTransformedDataSavedAsync(const std::string& path = {}, std::function<void(bool)> onComplete = nullptr)
+   功能：
+   - 导出当前模型变换后的体数据
+   - path 为空时，内部会根据当前已加载源路径推导默认导出路径
+   - 常用于姿态校正后保存 RAW
+
+前端加载伪代码：
+
+    void MainWindow::OnLoadClicked(const QString& path)
+    {
+        ui->loadingOverlay->show();
+        ui->btnLoad->setEnabled(false);
+
+        m_service->SetFileLoadedAsync(path.toStdString(),
+            [this, service = m_service, state = m_sharedState](bool success)
+            {
                 ui->loadingOverlay->hide();
                 ui->btnLoad->setEnabled(true);
 
                 if (!success) {
-                    QMessageBox::warning(this, "错误", "数据加载失败！");
+                    QMessageBox::warning(this, "错误", "数据加载失败");
+                    return;
                 }
-            }, Qt::QueuedConnection);
-        }
-    );
-}
-─────────────────────────────────────────────────────────────────────
+
+                auto range = state->GetDataRange();
+                double ww = range[1] - range[0];
+                double wc = (range[0] + range[1]) * 0.5;
+                service->SetWindowLevel(ww, wc);
+            });
+    }
+
+前端导出伔代码：
+
+    void MainWindow::OnExportClicked()
+    {
+        ui->btnExport->setEnabled(false);
+
+        // 不传路径：走默认导出路径策略
+        m_service->SetTransformedDataSavedAsync({ },
+            [this](bool success)
+            {
+                ui->btnExport->setEnabled(true);
+                QMessageBox::information(this,
+                    success ? "提示" : "错误",
+                    success ? "导出成功" : "导出失败");
+            });
+    }
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-三、核心交互与多视图联动（AbstractInteractiveService）接口文档
+五、交互接口（AbstractInteractiveService）
 ─────────────────────────────────────────────────────────────────────
 
-1. 调用时机与设计规范
-   - 时机：数据加载完成且初始画面渲染出后，在软件运行的全生命周期内，响应用户的鼠标、键盘、滚轮或 UI 控件操作时随时调用。
-   - 规范：所有的交互接口均为【同步、非阻塞】的极速调用。它们仅仅修改 SharedState 中的数值并打上脏标记（UpdateFlags），绝对不会直接触发耗时的 Render()。
-   - 渲染机制：真正的视图更新由主线程定时器（如 Qt 的 QTimer 每 30ms 滴答一次，或底层 TimeUpdateHandler）捕获脏标记后统一执行。前端只管“疯狂发指令”，底层自动做“节流渲染”。
+这些接口都是“轻量同步调用”：
+- 只更新状态或写脏标记
+- 不直接在前端调用处做 Render()
+- 画面刷新由主线程统一节流处理
 
-2. 需要用到的类对象
-   - 调用方持有：std::shared_ptr<MedicalVizService> (向上转型为 AbstractInteractiveService)
-   - 交互参数：通常来自 Qt 的 QMouseEvent、QWheelEvent 提取的坐标/增量，或 UI 面板滑块的数值。
+1) SetSliceScrolled(int delta)
+   功能：
+   - 在 2D 切片视图中切换切片层
 
-3. 功能与调用流程
+2) SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight,
+                          double startWW, double startWC)
+   功能：
+   - 根据鼠标拖拽增量调整窗宽窗位
 
-    - SetSliceScrolled(int delta)
-     说明：滚动 2D MPR 视图（轴状/冠状/矢状）的切片位置。底层会自动判断当前视图方向并对最大/最小层数进行钳制。
-     时机：在切片视图中滚动鼠标滚轮时调用。
-     onComplete：无。
+3) SetCursorWorldPosition(double worldPos[3], int axis = -1)
+   功能：
+   - 更新十字光标世界坐标
+   - 驱动多视图联动
 
-    - SetWindowLevelAdjusted(...)
-     说明：动态调整图像的窗宽（对比度）和窗位（亮度）。接收的是【增量】而非绝对值。
-     时机：用户在视图中按住右键拖拽鼠标时，根据鼠标移动的像素差（dx, dy）换算为 delta 后调用。
-     onComplete：无。
+4) SetElementVisible(uint32_t flagBit, bool show)
+   功能：
+   - 控制辅助元素显隐
+   - 常用标志位：
+     * VisFlags::Crosshair
+     * VisFlags::ClipPlanes
+     * VisFlags::RulerAxes
 
-    - SetCursorWorldPosition(double worldPos[3], int axis = -1)
-     说明：三视图与十字准星联动的核心接口。将鼠标在某一个视图中点击的物理坐标（世界坐标）同步到系统，底层会自动驱动其他所有视图的切片跳转到该位置。
-     时机：Shift+左键拖拽十字准星，或在 3D 视图中拖拽参考切面时调用。
-     onComplete：无。
+5) SetInteracting(bool val)
+   功能：
+   - 告知系统当前是否处于高频交互状态
+   - 影响渲染更新速率
 
-   - SetElementVisible(uint32_t flagBit, bool show)
-     说明：控制场景中辅助元素的显隐。flagBit 使用 VisFlags 枚举（如 VisFlags::Crosshair 十字准星，VisFlags::ClipPlanes 3D参考面）。
-     时机：用户勾选 UI 面板上的 CheckBox 时调用。
-     onComplete：无。
+6) SetModelTransform(double translate[3], double rotate[3], double scale[3])
+   功能：
+   - 通过数值方式设置模型仿射变换
 
-    - SetModelTransform(...)
-     说明：通过数值对 3D 模型进行精确的仿射变换（常用于工业 CT 姿态校正）。
-     时机：用户在 UI 面板的 SpinBox 中输入旋转/平移数值后调用。
-     onComplete：无。
+7) SetModelTransformReset()
+   功能：
+   - 重置模型变换
 
-4. 典型调用流程示例（伪代码）
-────────────────────────────
-// 示例 A：响应滚轮滚动 -> 切换切片
-void SliceRenderWidget::wheelEvent(QWheelEvent *event)
-{
-    // 1. 判断滚轮方向（上滚 +1，下滚 -1）
-    int delta = event->angleDelta().y() > 0 ? 1 : -1;
+8) GetCursorWorld() / GetModelMatrix() / GetWindowLevel()
+   功能：
+   - 给前端读取当前关键状态
 
-    // 2. Ctrl 键加速大步进翻页
-    if (event->modifiers() & Qt::ControlModifier) {
-        delta *= 5;
-    }
+前端交互伪代码：
 
-    // 3. 抽象调用：底层自动处理越界钳制并通知所有相关视图
-    m_vizService->SetSliceScrolled(delta);
-
-    event->accept();
-}
-
-// 示例 B：响应鼠标右键拖拽 -> 动态调整窗宽窗位
-void SliceRenderWidget::mouseMoveEvent(QMouseEvent *event)
-{
-    if (event->buttons() & Qt::RightButton)
+    void SliceWidget::wheelEvent(QWheelEvent* event)
     {
-        // 1. 获取鼠标物理像素偏移量
-        int dx = event->pos().x() - m_lastMousePos.x();
-        int dy = event->pos().y() - m_lastMousePos.y();
-        m_lastMousePos = event->pos();
-
-        // 2. 转换像素偏移为 WW/WC 增量 (可配置灵敏度系数)
-        double sensitivity = 2.0;
-        double deltaWW = dx * sensitivity;
-        double deltaWC = dy * sensitivity;
-
-        // 3. 抽象调用：底层处理修改与脏标记分发
-        m_vizService->SetWindowLevelAdjusted(...);
+        int delta = event->angleDelta().y() > 0 ? 1 : -1;
+        if (event->modifiers() & Qt::ControlModifier) {
+            delta *= 5;
+        }
+        m_service->SetSliceScrolled(delta);
+        event->accept();
     }
-}
 
-// 示例 C：响应 UI 面板 CheckBox -> 显隐 3D 参考切面
-void MainWindow::on_checkBoxShowPlanes_toggled(bool checked)
-{
-    // 纯状态写入，底层通过 UpdateFlags::Visibility 安全同步
-    m_vizService->SetElementVisible(VisFlags::ClipPlanes, checked);
-}
+    void SliceWidget::mouseMoveEvent(QMouseEvent* event)
+    {
+        if (event->buttons() & Qt::RightButton) {
+            int dx = event->pos().x() - m_lastMousePos.x();
+            int dy = event->pos().y() - m_lastMousePos.y();
+            m_lastMousePos = event->pos();
+
+            auto wl = m_service->GetWindowLevel();
+            m_service->SetWindowLevelAdjusted(
+                dx,
+                dy,
+                width(),
+                height(),
+                wl.windowWidth,
+                wl.windowCenter);
+        }
+    }
+
+    void MainWindow::OnShowPlanesChanged(bool checked)
+    {
+        m_service->SetElementVisible(VisFlags::ClipPlanes, checked);
+    }
+
+    void MainWindow::OnTransformChanged()
+    {
+        double t[3] = { ui->tx->value(), ui->ty->value(), ui->tz->value() };
+        double r[3] = { ui->rx->value(), ui->ry->value(), ui->rz->value() };
+        double s[3] = { 1.0, 1.0, 1.0 };
+        m_service->SetModelTransform(t, r, s);
+    }
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+六、RenderContext 侧常用能力
+─────────────────────────────────────────────────────────────────────
+
+StdRenderContext 主要给前端提供：
+
+1) SetServiceBound(service)
+   - 绑定业务服务与渲染上下文
+
+2) SetWindowTitle / SetWindowSize / SetWindowPosition
+   - 设置窗口属性
+
+3) SetCameraStyleByVizMode(mode)
+   - 根据显示模式切换 2D / 3D 交互风格
+
+4) SetOrientationAxesVisible(show)
+   - 显示或隐藏方向轴
+
+5) SetInteractorInitialized()
+   - 初始化 interactor / timer / widget / 路由
+
+6) SetStarted()
+   - 启动渲染循环
+
+7) SetToolMode(mode)
+   - 切换工具模式
+   - 例如：Navigation / DistanceMeasure / AngleMeasure / ModelTransform
+
+补充：
+- 默认键盘中已接入部分快捷键：
+  * M：切换模型变换模式
+  * D：距离测量模式
+  * A：角度测量模式
+  * S：导出变换后体数据
+  * Esc：回到导航模式
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+七、前端推荐封装方式
+─────────────────────────────────────────────────────────────────────
+
+建议前端不要到处散着直接调底层接口，而是做一层薄封装：
+
+    class VizFacade {
+    public:
+        void Init();
+        void LoadFile(const std::string& path);
+        void ImportBuffer(...);
+        void ExportCurrent();
+        void SetMode(VizMode mode);
+        void SetCrosshairVisible(bool show);
+        void SetClipPlanesVisible(bool show);
+        void SetWindowLevel(double ww, double wc);
+        void SetTransform(...);
+    };
+
+好处：
+- 前端按钮 / 面板 / 鼠标事件不直接依赖过多底层细节
+- 后续切换 StdRenderContext / QtRenderContext / 多窗口布局更容易
+- 业务调用顺序可以在 Facade 中统一收口
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+八、最小前端接入清单
+─────────────────────────────────────────────────────────────────────
+
+如果只做一个最小可用前端，至少接这几条：
+
+1. 初始化：
+   - DataManager
+   - SharedInteractionState
+   - MedicalVizService
+   - StdRenderContext
+   - SetServiceBound
+   - SetInteractorInitialized
+
+2. 首次配置：
+   - SetVisualConfig
+   - SetCameraStyleByVizMode
+   - SetOrientationAxesVisible
+
+3. 加载：
+   - SetFileLoadedAsync
+   - 回调里做 UI 状态恢复
+
+4. 基础交互：
+   - SetSliceScrolled
+   - SetWindowLevelAdjusted
+   - SetCursorWorldPosition
+   - SetElementVisible
+
+5. 导出：
+   - SetTransformedDataSavedAsync
+
+6. 启动：
+   - SetStarted
+
+这样即可完成：
+- 数据加载
+- 3D / 2D 显示
+- 切片滚动
+- 窗宽窗位调节
+- 参考线/参考面显隐
+- 模型变换后导出
 ─────────────────────────────────────────────────────────────────────
 */

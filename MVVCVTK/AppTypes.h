@@ -84,7 +84,8 @@ enum class UpdateFlags : int {
     Background = 1 << 8,  // 背景色改变      (0x100)
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
     WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
-    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background
+    Spacing = 1 << 11,  // 体数据 spacing 改变 (0x800)
+    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background | Spacing
 };
 
 // 位运算辅助
@@ -139,10 +140,12 @@ struct PreInitConfig {
     std::vector<TFNode> tfNodes;
     double              isoThreshold = 0.0;
     BackgroundColor     bgColor;
+    std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
     WindowLevelParams   windowLevel;              
     bool                hasTF = false;
     bool                hasIso = false;
     bool                hasBgColor = false;
+    bool                hasSpacing = false;
     bool                hasWindowLevel = false;    
 };
 
