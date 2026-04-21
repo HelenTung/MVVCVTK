@@ -165,7 +165,7 @@ class IDataLoaderService {
 public:
     virtual ~IDataLoaderService() = default;
 
-    // 异步加载：onComplete 在后台线程回调，只允许操作 SharedState
+    // 异步加载：onComplete 由主线程延迟回调，只允许操作状态或 UI
     virtual void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
@@ -182,7 +182,7 @@ class IDataExportService {
 public:
     virtual ~IDataExportService() = default;
 
-    // 异步保存：在后台线程进行重采样和 I/O，onComplete 只允许操作状态或 UI
+    // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调
     virtual void SetTransformedDataSavedAsync(
         const std::string& path = {},
         std::function<void(bool success)> onComplete = nullptr) = 0;

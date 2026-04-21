@@ -176,11 +176,7 @@ LoadState MedicalVizService::GetLoadState() const
 
 void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, std::function<void(bool success)> onComplete)
 {
-
-    {
-        std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
-        m_SaveCallbackFunc = std::move(onComplete);
-    }
+    SetSaveCallback(std::move(onComplete));
 
     // 捕获必要资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
@@ -190,14 +186,12 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
         : path;
 
     if (!dataMgr || !sharedState) {
-        m_lastSaveResult = false;
-        m_needsSaveTrigger = true;
+        SetSaveCallbackReady(false);
         return;
     }
 
     if (resolvedPath.empty()) {
-        m_lastSaveResult = false;
-        m_needsSaveTrigger = true;
+        SetSaveCallbackReady(false);
         return;
     }
 
@@ -212,8 +206,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
 
         auto self = weakSelf.lock();
         if (self) {
-            self->m_lastSaveResult = ok;
-            self->m_needsSaveTrigger = true; // 发出完成信号
+            self->SetSaveCallbackReady(ok);
         }
     });
 
@@ -235,7 +228,7 @@ void MedicalVizService::SetLoadCanceled()
 //   - 加载在独立线程执行；通过 std::packaged_task + future 管理生命周期
 //   - m_cancelFlag 是 share 类型的 atomic<bool>，加载函数内部可自检退出
 //   - dataMgr / sharedState 值捕获保证生命周期（shared_ptr 引用计数）
-//   - onComplete 在后台线程调用，只允许操作 SharedState
+//   - onComplete 统一延迟到主线程 SetPendingUpdatesProcessed 调用
 //   - 加载成功 → SetDataReady；失败 → SetLoadFailed
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetFileLoadedAsync(
@@ -245,14 +238,11 @@ void MedicalVizService::SetFileLoadedAsync(
     // 防止重复加载（加载中状态直接返回）
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
         std::cerr << "[SetFileLoadedAsync] Already loading, ignoring duplicate call.\n";
-        if (onComplete) onComplete(false); // 拒绝重入，直接返回
+        SetLoadCallbackReady(false, std::move(onComplete));
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
-        m_LoadCallbackFunc = std::move(onComplete);
-    }
+    SetLoadCallback(std::move(onComplete));
 
     m_cancelFlag->store(false);
     m_sharedState->SetLoadState(LoadState::Loading);
@@ -315,14 +305,11 @@ bool MedicalVizService::SetFromBufferAsync(
 {
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
         std::cerr << "[SetFromBufferAsync] Already loading, ignoring.\n";
-		if (onComplete) onComplete(false); // 拒绝重入，直接返回
+        SetLoadCallbackReady(false, std::move(onComplete));
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
-        m_LoadCallbackFunc = std::move(onComplete);
-    }
+    SetLoadCallback(std::move(onComplete));
 
     m_sharedState->SetLoadState(LoadState::Loading);
 
@@ -379,26 +366,37 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     }
 
     // 导出异步任务回调触发
-    if (m_needsSaveTrigger.exchange(false)) {
-        SetPendingSaveCallbackExecuted(m_lastSaveResult.load());
+    if (m_HasPendingSaveCallback.exchange(false)) {
+        SetPendingSaveCallbackExecuted();
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
         SetStrategyCacheCleared();
 
+    bool shouldReturnAfterLoadFailure = false;
+
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
         SetLoadFailedHandled();
-        SetPendingLoadCallbackExecuted(false);
-        return;
+        SetLoadCallbackReady(false);
+        shouldReturnAfterLoadFailure = true;
     }
 
     // DataReady → 重建管线（优先于增量同步）
-    if (m_needsDataRefresh.exchange(false)) {
+    if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         SetPipelineRebuilt();
-        SetPendingLoadCallbackExecuted(true);
+        SetLoadCallbackReady(true);
         // return; // 本帧只做重建，同步留到下帧
+    }
+
+	// 加载成功但未重建（如 SetFromBufferAsync 失败），也要执行回调以通知 UI
+    if (m_HasPendingLoadCallback.exchange(false)) {
+        SetPendingLoadCallbackExecuted();
+    }
+
+    if (shouldReturnAfterLoadFailure) {
+        return;
     }
 
     // 普通事件增量同步

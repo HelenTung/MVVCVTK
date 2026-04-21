@@ -164,7 +164,7 @@ int main()
         "E:\\data\\ct\\1000X1000X1000.raw",
         [sharedState, serviceA](bool success)
         {
-            // !! 后台线程 !! 只操作 SharedState内部有 mutex）
+            // !! 主线程延迟回调 !! 只操作状态或业务，不直接承载底层加载细节
             if (!success) {
                 // 加载失败由 SetLoadFailed 广播，
                 // PostData_HandleLoadFailed 在主线程处理，此处仅记录日志

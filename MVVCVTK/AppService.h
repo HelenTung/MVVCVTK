@@ -53,7 +53,7 @@ public:
 
     // ================================================================
     // IDataLoaderService — 数据加载接口
-    // onComplete 在后台线程执行，只允许操作 SharedState
+    // onComplete 由主线程延迟执行，只允许操作状态或 UI
     // ================================================================
     void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
@@ -141,36 +141,96 @@ private:
     void SetCursorCentered();
     void SetSyncRequested();
 
-    // ————— 异步加载回调管理（SetFileLoadedAsync / SetFromBuffer）——————————
-    void SetPendingLoadCallbackExecuted(bool success) {
-        std::function<void(bool)> cb;
-		{
-			std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
-			cb = std::move(m_LoadCallbackFunc);
-            m_LoadCallbackFunc = nullptr;
-		}
-        if (cb) cb(success);
+private:
+    // 保存当前加载请求绑定的回调
+    void SetLoadCallback(std::function<void(bool)> callback) {
+        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+        m_LoadCallback = std::move(callback);
     }
 
-    mutable std::mutex m_LoadCallbackMutex;
-    std::function<void(bool)> m_LoadCallbackFunc;
+    // 将加载回调标记为完成，等待主线程统一执行
+    void SetLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+        {
+            std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+            if (callback) {
+                m_PendingLoadCallback = std::move(callback);
+            }
+            else if (m_LoadCallback) {
+                callback = std::move(m_LoadCallback);
+                m_LoadCallback = nullptr;
+                m_PendingLoadCallback = std::move(callback);
+            }
+            else {
+                return;
+            }
+            m_PendingLoadResult = success;
+            m_HasPendingLoadCallback = true;
+        }
+    }
 
+    // 在主线程执行待处理的加载回调
+    void SetPendingLoadCallbackExecuted() {
+        std::function<void(bool)> callback;
+        bool success = false;
+        {
+            std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+            callback = std::move(m_PendingLoadCallback);
+            m_PendingLoadCallback = nullptr;
+            success = m_PendingLoadResult;
+        }
+        if (callback) callback(success);
+    }
 
-    // ————— 异步保存回调管理（SetTransformedDataSaved）——————————
-    void SetPendingSaveCallbackExecuted(bool success) {
-        std::function<void(bool)> cb;
+    // 保存当前保存请求绑定的回调
+    void SetSaveCallback(std::function<void(bool)> callback) {
+        std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
+        m_SaveCallback = std::move(callback);
+    }
+
+    // 将保存回调标记为完成，等待主线程统一执行
+    void SetSaveCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
         {
             std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
-            cb = std::move(m_SaveCallbackFunc);
-            m_SaveCallbackFunc = nullptr;
+            if (callback) {
+                m_PendingSaveCallback = std::move(callback);
+            }
+            else if (m_SaveCallback) {
+                callback = std::move(m_SaveCallback);
+                m_SaveCallback = nullptr;
+                m_PendingSaveCallback = std::move(callback);
+            }
+            else {
+                return;
+            }
+            m_PendingSaveResult = success;
+            m_HasPendingSaveCallback = true;
         }
-        if (cb) cb(success);
     }
 
-    mutable std::mutex        m_SaveCallbackMutex;
-    std::function<void(bool)> m_SaveCallbackFunc;
-    std::atomic<bool>         m_needsSaveTrigger{ false }; // 保存完成触发信号，供主线程执行回调
-    std::atomic<bool>         m_lastSaveResult{ false };   // 后台保存任务的最终结果
+    // 在主线程执行待处理的保存回调
+    void SetPendingSaveCallbackExecuted() {
+        std::function<void(bool)> callback;
+        bool success = false;
+        {
+            std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
+            callback = std::move(m_PendingSaveCallback);
+            m_PendingSaveCallback = nullptr;
+            success = m_PendingSaveResult;
+        }
+        if (callback) callback(success);
+    }
+
+    mutable std::mutex m_LoadCallbackMutex;           // 保护加载回调状态
+    std::function<void(bool)> m_LoadCallback;         // 当前加载请求绑定的回调
+    std::function<void(bool)> m_PendingLoadCallback;  // 待主线程执行的加载回调
+    bool m_PendingLoadResult{ false };                // 待执行加载回调对应的结果
+    std::atomic<bool> m_HasPendingLoadCallback{ false }; // 是否存在待执行加载回调
+
+    mutable std::mutex m_SaveCallbackMutex;           // 保护保存回调状态
+    std::function<void(bool)> m_SaveCallback;         // 当前保存请求绑定的回调
+    std::function<void(bool)> m_PendingSaveCallback;  // 待主线程执行的保存回调
+    bool m_PendingSaveResult{ false };                // 待执行保存回调对应的结果
+    std::atomic<bool> m_HasPendingSaveCallback{ false }; // 是否存在待执行保存回调
 
     // ── 成员 ────────────────────────────────────────────────────
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
