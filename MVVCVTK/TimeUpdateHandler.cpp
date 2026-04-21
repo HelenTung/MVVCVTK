@@ -22,7 +22,7 @@ InteractionResult TimeUpdateHandler::Handle(const InteractionEvent& eve)
     }
 
     // 1. 驱动数据同步（后台线程写入的脏标记在此主线程消费）
-    m_service->ProcessPendingUpdates();
+    m_service->SetPendingUpdatesProcessed();
 
     // 2. 检查渲染脏标记，仅在窗口有效时渲染
     if (m_service->IsDirty()) {

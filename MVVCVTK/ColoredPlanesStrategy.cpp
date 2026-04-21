@@ -30,7 +30,7 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
     m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z-axis normal (Top_down)
 
     for (int i = 0; i < 3; i++) {
-        RegisterProp(m_planeActors[i]); 
+        SetManagedProp(m_planeActors[i]); 
     }
 }
 
@@ -74,7 +74,7 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void ColoredPlanesStrategy::UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
+void ColoredPlanesStrategy::SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
     if (!m_imageData) return;
 
 	vtkSmartPointer<vtkMatrix4x4> mat = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -128,10 +128,10 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
     return -1; // 未匹配
 }
 
-void ColoredPlanesStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
-        UpdateAllPositions(params.cursor.data(), params.modelMatrix);
+        SetAllPositions(params.cursor.data(), params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

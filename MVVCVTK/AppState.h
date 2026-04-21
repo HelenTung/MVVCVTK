@@ -29,7 +29,7 @@ public:
 
     // ── 数据就绪广播 ──────────────────────────────────────────────
     // 仅后台加载线程调用；写 range 后广播 DataReady
-    void NotifyDataReady(double rangeMin, double rangeMax) {
+    void SetDataReady(double rangeMin, double rangeMax) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             m_dataRange[0] = rangeMin;
@@ -38,17 +38,17 @@ public:
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
-        NotifyObservers(UpdateFlags::DataReady);
+        SetObserversNotified(UpdateFlags::DataReady);
     }
 
     // ── 加载失败广播 ────────────────────────────────────────
     // 仅后台加载线程调用；设状态后广播 LoadFailed
-    void NotifyLoadFailed() {
+    void SetLoadFailed() {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             m_loadState = LoadState::Failed;
         }
-        NotifyObservers(UpdateFlags::LoadFailed);
+        SetObserversNotified(UpdateFlags::LoadFailed);
     }
 
     // ── 加载状态 (LoadState 枚举，) ────────────────────────────
@@ -63,7 +63,7 @@ public:
 
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
     // 对应 IVisualConfigService::CommitVisualConfig
-    void CommitPreInitConfig(const PreInitConfig& cfg) {
+    void SetPreInitConfig(const PreInitConfig& cfg) {
         UpdateFlags flags = UpdateFlags::None;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
@@ -112,7 +112,7 @@ public:
             }
         }
         if (flags != UpdateFlags::None)
-            NotifyObservers(flags);
+            SetObserversNotified(flags);
     }
 
     // ── 模型变换矩阵 ──────────────────────────────────────────────
@@ -121,7 +121,7 @@ public:
             std::lock_guard<std::mutex> lk(m_mutex);
             m_modelMatrix = mat;
         }
-        NotifyObservers(UpdateFlags::Transform);
+        SetObserversNotified(UpdateFlags::Transform);
     }
     std::array<double, 16> GetModelMatrix() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -135,7 +135,7 @@ public:
             m_dataRange[0] = minv;
             m_dataRange[1] = maxv;
         }
-        NotifyObservers(UpdateFlags::TF);
+        SetObserversNotified(UpdateFlags::TF);
     }
     std::array<double, 2> GetDataRange() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -148,7 +148,7 @@ public:
             std::lock_guard<std::mutex> lk(m_mutex);
             m_nodes = nodes;
         }
-        NotifyObservers(UpdateFlags::TF);
+        SetObserversNotified(UpdateFlags::TF);
     }
     void GetTFNodes(std::vector<TFNode>& dest) const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -165,7 +165,7 @@ public:
                 changed = true;
             }
         }
-        if (changed) NotifyObservers(UpdateFlags::IsoValue);
+        if (changed) SetObserversNotified(UpdateFlags::IsoValue);
     }
     double GetIsoValue() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -178,7 +178,7 @@ public:
             std::lock_guard<std::mutex> lk(m_mutex);
             m_material = mat;
         }
-        NotifyObservers(UpdateFlags::Material);
+        SetObserversNotified(UpdateFlags::Material);
     }
     MaterialParams GetMaterial() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -198,7 +198,7 @@ public:
                 changed = true;
             }
         }
-        if (changed) NotifyObservers(UpdateFlags::Background);
+        if (changed) SetObserversNotified(UpdateFlags::Background);
     }
     BackgroundColor GetBackground() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -218,7 +218,7 @@ public:
                 changed = true;
             }
         }
-        if (changed) NotifyObservers(UpdateFlags::WindowLevel);
+        if (changed) SetObserversNotified(UpdateFlags::WindowLevel);
     }
     WindowLevelParams GetWindowLevel() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -236,9 +236,9 @@ public:
                 changed = true;
             }
         }
-        if (changed) NotifyObservers(UpdateFlags::Interaction);
+        if (changed) SetObserversNotified(UpdateFlags::Interaction);
     }
-    bool IsInteracting() const {
+    bool GetIsInteracting() const {
         std::lock_guard<std::mutex> lk(m_mutex);
         return m_isInteracting;
     }
@@ -258,7 +258,7 @@ public:
                 changed = true;
             }
         }
-        if (changed) NotifyObservers(UpdateFlags::Cursor);
+        if (changed) SetObserversNotified(UpdateFlags::Cursor);
     }
 
     std::array<double, 3> GetCursorWorld() const {
@@ -278,7 +278,7 @@ public:
                 m_visibilityMask &= ~flagBit;
             changed = (m_visibilityMask != oldMask);
         }
-        if (changed) NotifyObservers(UpdateFlags::Visibility);
+        if (changed) SetObserversNotified(UpdateFlags::Visibility);
     }
 
     uint32_t GetVisibilityMask() const {
@@ -287,7 +287,7 @@ public:
     }
 
     // ── Observer 管理 ─────────────────────────────────────────────
-    void AddObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
+    void SetObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
         if (!owner || !cb) return;
         std::lock_guard<std::mutex> lk(m_mutex);
 		// 先清理再放入，保持列表干净（不保留过期条目）
@@ -324,7 +324,7 @@ private:
 
     // ── NotifyObservers：先快照回调列表（持锁），再无锁调用 ──
     // 彻底消除回调中调用 Set* → 重入加锁 → 死锁风险
-    void NotifyObservers(UpdateFlags flags) {
+    void SetObserversNotified(UpdateFlags flags) {
         // 持锁扫描，快照存活回调并清理过期条目
         std::vector<ObserverCallback> toRun;
         {

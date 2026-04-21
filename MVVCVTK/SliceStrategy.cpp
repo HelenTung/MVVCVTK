@@ -41,9 +41,9 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     // 禁用 LUT 映射，交由 UpdateVisuals 动态更新原生 WindowLevel
     m_slice->GetProperty()->SetUseLookupTableScalarRange(0);
 
-    RegisterProp(m_slice);
-    RegisterProp(m_vLineActor);
-    RegisterProp(m_hLineActor);
+    SetManagedProp(m_slice);
+    SetManagedProp(m_vLineActor);
+    SetManagedProp(m_hLineActor);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -76,8 +76,8 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_slice->SetMapper(m_mapper);
 }
 
-void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::Attach(ren); // 
+void SliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::SetRendererAttached(ren); // 
     m_renderer = ren;
     ren->SetBackground(0, 0, 0);
     // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
@@ -86,7 +86,7 @@ void SliceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
     ren->SetOcclusionRatio(0.0);
 }
 
-void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
+void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
     if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影
@@ -127,7 +127,7 @@ void SliceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->ResetCameraClippingRange();
 }
 
-void SliceStrategy::UpdateCrosshair(const double focusModel[3],
+void SliceStrategy::SetCrosshair(const double focusModel[3],
     const double bounds[6],
     double safeOffset) 
 {
@@ -161,7 +161,7 @@ void SliceStrategy::UpdateCrosshair(const double focusModel[3],
     m_hLineSource->Modified();
 }
 
-void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
@@ -252,7 +252,7 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
             modelFocus[1],
             modelFocus[2]
 		};
-        UpdateCrosshair(newmodelFocus,bounds,safeOffset);
+        SetCrosshair(newmodelFocus,bounds,safeOffset);
 
         // 法线和相机向量
         // 想让相机能“正面”看到一个物体，这个物体的法线（正脸）必须迎着相机的视线，两者是方向相反的。

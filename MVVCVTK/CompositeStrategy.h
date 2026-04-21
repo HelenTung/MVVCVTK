@@ -21,10 +21,10 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void Detach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
+    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
+    void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer);
+    void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer);
+    void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //
 private:

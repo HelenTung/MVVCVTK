@@ -72,7 +72,7 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
                 rw->SetDesiredUpdateRate(0.001);
             }
             m_service->SetInteracting(false);
-            m_service->MarkDirty();
+            m_service->SetDirtyMarked();
             m_isDragging = false;
             m_dragAxis = -1;
             return { true, false };
@@ -162,7 +162,7 @@ InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
 		};
 
         // 全量更新
-        m_service->UpdateCursorFromWorldPosition(newWorldPos, -1);
+        m_service->SetCursorWorldPosition(newWorldPos, -1);
 
         return { true, true };
     }

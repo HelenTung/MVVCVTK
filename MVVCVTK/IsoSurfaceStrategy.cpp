@@ -21,8 +21,8 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
 
-	RegisterProp(m_actor);
-	RegisterProp(m_cubeAxes);
+  SetManagedProp(m_actor);
+    SetManagedProp(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -65,18 +65,18 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void IsoSurfaceStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-	BaseVisualStrategy::Attach(ren);
+void IsoSurfaceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::SetRendererAttached(ren);
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.1, 0.15, 0.2); // 蓝色调背景
 }
 
-void IsoSurfaceStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
+void IsoSurfaceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
     // 3D 模式必须是透视投影
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
-void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (!m_actor) return;
     auto prop = m_actor->GetProperty();
@@ -109,7 +109,7 @@ void IsoSurfaceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
 
     // 响应 UpdateFlags::Transform
     if (HasFlag(flags, UpdateFlags::Transform)) {
-		ApplyTransformTo3DProps(params.modelMatrix);
+        Set3DPropsTransform(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

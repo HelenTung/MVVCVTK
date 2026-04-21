@@ -45,22 +45,22 @@ static std::pair<
     auto context = std::make_shared<StdRenderContext>();
 
     // ── 步骤1：BindService（触发 Initialize → 注册 Observer）──────
-    context->BindService(service);
+    context->SetServiceBound(service);
 
     // ── 步骤2：批量提交前处理配置（一次锁 + 一次广播）────────────
-    service->CommitVisualConfig(cfg.preInitCfg);
+    service->SetVisualConfig(cfg.preInitCfg);
 
     // ── 步骤3：窗口属性（纯渲染上下文配置，数据无关）─────────────
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->ApplyCameraStyleByVizMode(cfg.preInitCfg.vizMode);
+    context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode);
     if (cfg.showAxes)
-        context->ToggleOrientationAxes(true);
+        context->SetOrientationAxesVisible(true);
 
     // ── 步骤4：背景色（前处理：直接应用到渲染器，数据无关）───────
     if (cfg.preInitCfg.hasBgColor)
-        service->Config_SetBackground(cfg.preInitCfg.bgColor);
+        service->SetBackground(cfg.preInitCfg.bgColor);
 
     return { service, context };
 }
@@ -160,7 +160,7 @@ int main()
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     IDataLoaderService* loader = serviceA.get();
-    loader->LoadFileAsync(
+    loader->SetFileLoadedAsync(
         "E:\\data\\ct\\1000X1000X1000.raw",
         [sharedState, serviceA](bool success)
         {
@@ -176,7 +176,7 @@ int main()
             // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
             auto range = sharedState->GetDataRange();
             double isoVal = range[0] + (range[1] - range[0]) * 0.35;
-            serviceA->Config_SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
+            serviceA->SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
 
             // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）
                         // 取数据范围中央 60% 作为窗口宽度，中点为窗位
@@ -190,23 +190,23 @@ int main()
         }
     );
 
-    contextA->Render();
-    contextB->Render();
-    contextC->Render();
-    contextD->Render();
-    contextE->Render();
+    contextA->SetRendered();
+    contextB->SetRendered();
+    contextC->SetRendered();
+    contextD->SetRendered();
+    contextE->SetRendered();
 
-    contextA->InitInteractor();
-    contextB->InitInteractor();
-    contextC->InitInteractor();
-    contextD->InitInteractor();
-    contextE->InitInteractor();
+    contextA->SetInteractorInitialized();
+    contextB->SetInteractorInitialized();
+    contextC->SetInteractorInitialized();
+    contextD->SetInteractorInitialized();
+    contextE->SetInteractorInitialized();
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
-    contextB->Start();
+    contextB->SetStarted();
 
     return 0;
 }

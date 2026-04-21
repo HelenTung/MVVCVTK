@@ -41,7 +41,7 @@
 class AbstractDataManager {
 public:
     virtual ~AbstractDataManager() = default;
-    virtual bool LoadData(const std::string& filePath) = 0;
+    virtual bool SetDataLoaded(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual bool SetFromBuffer(
         const float* data,
@@ -58,7 +58,7 @@ public:
 		std::lock_guard<std::mutex> lk(m_stateMutex);
 		m_loadState = state;
     }
-    virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
+    virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
 
 protected:
     mutable std::mutex m_stateMutex;
@@ -84,10 +84,10 @@ public:
     virtual ~AbstractVisualStrategy() = default;
 
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
-    virtual void Attach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void Detach(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {}
-    virtual void UpdateVisuals(const RenderParams& params,
+    virtual void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) = 0;
+    virtual void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) = 0;
+    virtual void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer) {}
+    virtual void SetVisualState(const RenderParams& params,
         UpdateFlags flags = UpdateFlags::All) {
     }
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
@@ -111,7 +111,7 @@ protected:
 public:
     virtual ~AbstractAppService() = default;
 
-    virtual void Initialize(vtkSmartPointer<vtkRenderWindow> win,
+    virtual void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer>     ren)
     {
         m_renderWindow = win;
@@ -119,16 +119,16 @@ public:
     }
 
     // 主线程 Timer 心跳驱动的更新入口
-    virtual void ProcessPendingUpdates() {}
+    virtual void SetPendingUpdatesProcessed() {}
 
     bool IsDirty()      const { return m_isDirty; }
     void SetDirty(bool val) { m_isDirty = val; }
-    void MarkDirty() { m_isDirty = true; }
+    void SetDirtyMarked() { m_isDirty = true; }
 
     std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
 
     // Strategy 切换,实现在 AppService.cpp
-    void SwitchStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
+    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -144,14 +144,14 @@ public:
     virtual ~IVisualConfigService() = default;
 
     // 逐项设置（向后兼容）
-    virtual void Config_SetVizMode(VizMode mode) = 0;
-    virtual void Config_SetMaterial(const MaterialParams& mat) = 0;
-    virtual void Config_SetOpacity(double opacity) = 0;
-    virtual void Config_SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
-    virtual void Config_SetIsoThreshold(double val) = 0;
-    virtual void Config_SetBackground(const BackgroundColor& bg) = 0;
-    virtual void Config_SetWindowLevel(double ww, double wc) = 0;
-    virtual void CommitVisualConfig(const PreInitConfig& cfg) = 0;
+    virtual void SetVizMode(VizMode mode) = 0;
+    virtual void SetMaterial(const MaterialParams& mat) = 0;
+    virtual void SetOpacity(double opacity) = 0;
+    virtual void SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
+    virtual void SetIsoThreshold(double val) = 0;
+    virtual void SetBackground(const BackgroundColor& bg) = 0;
+    virtual void SetWindowLevel(double ww, double wc) = 0;
+    virtual void SetVisualConfig(const PreInitConfig& cfg) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -165,7 +165,7 @@ public:
     virtual ~IDataLoaderService() = default;
 
     // 异步加载：onComplete 在后台线程回调，只允许操作 SharedState
-    virtual void LoadFileAsync(const std::string& path,
+    virtual void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // 查询当前加载状态（可从主线程轮询）
@@ -173,7 +173,7 @@ public:
 
     // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
     // 默认空实现，派生类按需覆盖
-    virtual void CancelLoad() {}
+    virtual void SetLoadCanceled() {}
 };
 
 
@@ -182,7 +182,7 @@ public:
     virtual ~IDataExportService() = default;
 
     // 异步保存：在后台线程进行重采样和 I/O，onComplete 只允许操作状态或 UI
-    virtual void SaveTransformedDataAsync(
+    virtual void SetTransformedDataSavedAsync(
         const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };
@@ -196,21 +196,21 @@ class AbstractInteractiveService
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    virtual void ScrollSlice(int delta) {}
+    virtual void SetSliceScrolled(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
-    virtual void UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1) {}
+    virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) {}
     virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
-    virtual void SyncModelMatrix(vtkMatrix4x4* mat) {}
+    virtual void SetModelMatrixSynced(vtkMatrix4x4* mat) {}
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }
     virtual WindowLevelParams GetWindowLevel() const { return {}; }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
-    virtual void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
-    virtual void WorldToModel(const double worldPos[3], double modelPos[3]) const = 0;
-    virtual void ModelToWorld(const double modelPos[3], double worldPos[3]) const = 0;
+    virtual void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
+    virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
+    virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -231,23 +231,23 @@ public:
         m_renderWindow->AddRenderer(m_renderer);
     }
 
-    virtual void BindService(std::shared_ptr<AbstractAppService> service) {
+    virtual void SetServiceBound(std::shared_ptr<AbstractAppService> service) {
         m_service = service;
         if (m_service)
-            m_service->Initialize(m_renderWindow, m_renderer);
+            m_service->SetRenderContext(m_renderWindow, m_renderer);
     }
 
-    virtual void Render() {
+    virtual void SetRendered() {
         if (m_renderWindow) m_renderWindow->Render();
     }
 
-    virtual void ResetCamera() {
+    virtual void SetCameraReset() {
         if (m_renderer) m_renderer->ResetCamera();
     }
 
-    virtual void ApplyCameraStyleByVizMode(VizMode mode) = 0;
-    virtual void InitInteractor() = 0;  // 显式分离，避免 Start() 混乱
-    virtual void Start() = 0;
+    virtual void SetCameraStyleByVizMode(VizMode mode) = 0;
+    virtual void SetInteractorInitialized() = 0;  // 显式分离，避免 Start() 混乱
+    virtual void SetStarted() = 0;
 
     virtual void SetWindowSize(int w, int h) {
         if (m_renderWindow) m_renderWindow->SetSize(w, h);
@@ -258,23 +258,23 @@ public:
     virtual void SetWindowTitle(const std::string& title) {
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
-    virtual void ToggleOrientationAxes(bool show) {}
+    virtual void SetOrientationAxesVisible(bool show) {}
 
     virtual void SetRendererBackground(const BackgroundColor& bg) {
         if (m_renderer)
             m_renderer->SetBackground(bg.r, bg.g, bg.b);
     }
 protected:
-    static void DispatchVTKEvent(vtkObject* caller,
+    static void SetVTKEventDispatched(vtkObject* caller,
         long unsigned int eventId,
         void* clientData,
         void* callData)
     {
         auto* ctx = static_cast<AbstractRenderContext*>(clientData);
-        if (ctx) ctx->HandleVTKEvent(caller, eventId, callData);
+        if (ctx) ctx->SetVTKEventHandled(caller, eventId, callData);
     }
 
-    virtual void HandleVTKEvent(vtkObject* caller,
+    virtual void SetVTKEventHandled(vtkObject* caller,
         long unsigned int eventId,
         void* callData) {
     }

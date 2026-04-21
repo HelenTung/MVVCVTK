@@ -13,8 +13,8 @@ VolumeStrategy::VolumeStrategy() {
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
-	RegisterProp(m_volume);
-	RegisterProp(m_cubeAxes);
+ SetManagedProp(m_volume);
+    SetManagedProp(m_cubeAxes);
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -42,17 +42,17 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void VolumeStrategy::Attach(vtkSmartPointer<vtkRenderer> ren) {
-	BaseVisualStrategy::Attach(ren);
+void VolumeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::SetRendererAttached(ren);
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.05, 0.05, 0.05); // 黑色背景
 }
 
-void VolumeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> ren) {
+void VolumeStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }   
 
-void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {   
     if (!m_volume || !m_volume->GetProperty()) return;
 
@@ -105,7 +105,7 @@ void VolumeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags
 
     // 响应变换矩阵
     if (HasFlag(flags,UpdateFlags::Transform)) {
-		ApplyTransformTo3DProps(params.modelMatrix);
+        Set3DPropsTransform(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

@@ -31,19 +31,19 @@ private:
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
 
     // 构建/重建路由表（BindService 和 InitInteractor 后调用）
-    void BuildInteractionRouter();
+    void SetInteractionRouter();
 
 public:
-    void InitInteractor() override;
+    void SetInteractorInitialized() override;
     StdRenderContext();
-    void Start() override;
-    void ApplyCameraStyleByVizMode(VizMode mode) override;
-    void BindService(std::shared_ptr<AbstractAppService> service) override;
-    void ToggleOrientationAxes(bool show) override;
+    void SetStarted() override;
+    void SetCameraStyleByVizMode(VizMode mode) override;
+    void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
+    void SetOrientationAxesVisible(bool show) override;
     void SetToolMode(ToolMode mode);
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }
 protected:
-    void HandleVTKEvent(vtkObject* caller,
+    void SetVTKEventHandled(vtkObject* caller,
         long unsigned int eventId,
         void* callData) override;
 };

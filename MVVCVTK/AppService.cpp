@@ -6,21 +6,21 @@
 #include <thread>
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService::SwitchStrategy（主线程专属）
+// AbstractAppService::SetCurrentStrategy（主线程专属）
 // ─────────────────────────────────────────────────────────────────────
-void AbstractAppService::SwitchStrategy(
+void AbstractAppService::SetCurrentStrategy(
     std::shared_ptr<AbstractVisualStrategy> newStrategy)
 {
     if (!m_renderer || !m_renderWindow) return;
 
     if (m_currentStrategy)
-        m_currentStrategy->Detach(m_renderer);
+        m_currentStrategy->SetRendererDetached(m_renderer);
 
     m_currentStrategy = newStrategy;
 
     if (m_currentStrategy) {
-        m_currentStrategy->Attach(m_renderer);
-        m_currentStrategy->SetupCamera(m_renderer);
+        m_currentStrategy->SetRendererAttached(m_renderer);
+        m_currentStrategy->SetCameraConfigured(m_renderer);
     }
      m_renderer->ResetCamera();
     m_isDirty = true;
@@ -57,18 +57,18 @@ MedicalVizService::~MedicalVizService()
 // Observer 回调中不直接调用有 VTK 操作的函数；
 // 所有 VTK 操作通过标记延迟到主线程 ProcessPendingUpdates 执行。
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::Initialize(
+void MedicalVizService::SetRenderContext(
     vtkSmartPointer<vtkRenderWindow> win,
     vtkSmartPointer<vtkRenderer>     ren)
 {
-    AbstractAppService::Initialize(win, ren);
+    AbstractAppService::SetRenderContext(win, ren);
     if (!m_sharedState) return;
 
     std::weak_ptr<MedicalVizService> weakSelf =
         std::static_pointer_cast<MedicalVizService>(shared_from_this());
 
 	// 注册 SharedState 观察者，响应数据和配置变化事件
-    m_sharedState->AddObserver(shared_from_this(),
+    m_sharedState->SetObserver(shared_from_this(),
         [weakSelf](UpdateFlags flags)
         {
             auto self = weakSelf.lock();
@@ -112,41 +112,41 @@ void MedicalVizService::Initialize(
 // IVisualConfigService — 前处理：逐项设置（向后兼容）
 // ─────────────────────────────────────────────────────────────────────
 
-void MedicalVizService::Config_SetVizMode(VizMode mode)
+void MedicalVizService::SetVizMode(VizMode mode)
 {
     m_pendingVizModeInt.store(static_cast<int>(mode));
 }
 
-void MedicalVizService::Config_SetMaterial(const MaterialParams& mat)
+void MedicalVizService::SetMaterial(const MaterialParams& mat)
 {
     m_sharedState->SetMaterial(mat);
 }
 
-void MedicalVizService::Config_SetOpacity(double opacity)
+void MedicalVizService::SetOpacity(double opacity)
 {
     auto mat = m_sharedState->GetMaterial();
     mat.opacity = opacity;
     m_sharedState->SetMaterial(mat);
 }
 
-void MedicalVizService::Config_SetTransferFunction(const std::vector<TFNode>& nodes)
+void MedicalVizService::SetTransferFunction(const std::vector<TFNode>& nodes)
 {
     m_sharedState->SetTFNodes(nodes);
 }
 
-void MedicalVizService::Config_SetIsoThreshold(double val)
+void MedicalVizService::SetIsoThreshold(double val)
 {
     m_sharedState->SetIsoValue(val);
 }
 
 // 【前处理：数据无关】背景色直接写渲染器（可在加载前随时调用）
-void MedicalVizService::Config_SetBackground(const BackgroundColor& bg)
+void MedicalVizService::SetBackground(const BackgroundColor& bg)
 {
     // 同步写 SharedState（供后续 RenderParams 填充）
     m_sharedState->SetBackground(bg);
 }
 
-void MedicalVizService::Config_SetWindowLevel(double ww, double wc)
+void MedicalVizService::SetWindowLevel(double ww, double wc)
 {
     m_sharedState->SetWindowLevel(ww, wc);
 }
@@ -157,13 +157,13 @@ void MedicalVizService::Config_SetWindowLevel(double ww, double wc)
 // 一次锁 + 一次广播；VizMode 仅写原子变量（无需进 SharedState）
 // 背景色在此同步应用到渲染器（前处理阶段，主线程）
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::CommitVisualConfig(const PreInitConfig& cfg)
+void MedicalVizService::SetVisualConfig(const PreInitConfig& cfg)
 {
     // VizMode：只记录意图，无需写 SharedState，也不触发广播
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
 
     // 其余参数批量写入 SharedState（内部精确 diff + 一次锁 + 一次广播）
-    m_sharedState->CommitPreInitConfig(cfg);
+    m_sharedState->SetPreInitConfig(cfg);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ LoadState MedicalVizService::GetLoadState() const
     return m_sharedState->GetLoadState();
 }
 
-void MedicalVizService::SaveTransformedDataAsync(const std::string& path, std::function<void(bool success)> onComplete)
+void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, std::function<void(bool success)> onComplete)
 {
 
     {
@@ -199,7 +199,7 @@ void MedicalVizService::SaveTransformedDataAsync(const std::string& path, std::f
     // 封装异步任务
     std::packaged_task<void()> task([dataMgr, path, currentMatrix, weakSelf]() mutable {
         // 进入后台线程，执行沉重的重采样和保存操作
-        bool ok = dataMgr->SaveTransformedData(path, currentMatrix);
+        bool ok = dataMgr->SetTransformedDataSaved(path, currentMatrix);
 
         auto self = weakSelf.lock();
         if (self) {
@@ -214,7 +214,7 @@ void MedicalVizService::SaveTransformedDataAsync(const std::string& path, std::f
 // ─────────────────────────────────────────────────────────────────────
 // IDataLoaderService::CancelLoad（尽力取消）
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::CancelLoad()
+void MedicalVizService::SetLoadCanceled()
 {
     m_cancelFlag->store(true);
 }
@@ -229,7 +229,7 @@ void MedicalVizService::CancelLoad()
 //   - onComplete 在后台线程调用，只允许操作 SharedState
 //   - 加载成功 → NotifyDataReady；失败 → NotifyLoadFailed
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::LoadFileAsync(
+void MedicalVizService::SetFileLoadedAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
@@ -258,15 +258,15 @@ void MedicalVizService::LoadFileAsync(
         {
             // 加载前检查取消标记
             if (cancelFlag->load()) {
-                sharedState->NotifyLoadFailed();
+                sharedState->SetLoadFailed();
                 return;
             }
 
-            bool ok = dataMgr->LoadData(path);
+            bool ok = dataMgr->SetDataLoaded(path);
 
             // 加载后再次检查取消标记
             if (cancelFlag->load()) {
-                sharedState->NotifyLoadFailed();
+                sharedState->SetLoadFailed();
                 return;
             }
 
@@ -275,16 +275,16 @@ void MedicalVizService::LoadFileAsync(
                 if (img) {
                     double range[2];
                     img->GetScalarRange(range);
-                    sharedState->NotifyDataReady(range[0], range[1]);  // 设 Succeeded
+                    sharedState->SetDataReady(range[0], range[1]);  // 设 Succeeded
                 }
                 else {
                     std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
-                    sharedState->NotifyLoadFailed();  
+                    sharedState->SetLoadFailed();  
                 }
             }
             else {
                 std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
-                sharedState->NotifyLoadFailed();  
+                sharedState->SetLoadFailed();
             }
         });
 
@@ -328,7 +328,7 @@ bool MedicalVizService::SetFromBufferAsync(
             
             if (!ok)
             {
-                sharedState->NotifyLoadFailed();
+                sharedState->SetLoadFailed();
             }
         });
 
@@ -350,7 +350,7 @@ bool MedicalVizService::SetFromBufferAsync(
 //   3. m_needsDataRefresh → PostData_RebuildPipeline
 //   4. m_needsSync        → PostData_SyncStateToStrategy
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::ProcessPendingUpdates()
+void MedicalVizService::SetPendingUpdatesProcessed()
 {
     // 消费来自第三方重建的 ReconBuffer
     // 必须在 m_needsDataRefresh 检查前，因为 ConsumeReconBuffer 成功后 会设 LoadState::Succeeded，下面的逻辑再据此驱动管线重建。
@@ -361,10 +361,10 @@ void MedicalVizService::ProcessPendingUpdates()
             if (img) {
                 double range[2];
                 img->GetScalarRange(range);
-                m_sharedState->NotifyDataReady(range[0], range[1]);
+                m_sharedState->SetDataReady(range[0], range[1]);
             }
             else {
-                m_sharedState->NotifyLoadFailed();
+                m_sharedState->SetLoadFailed();
             }
         }
     }
@@ -426,7 +426,7 @@ void MedicalVizService::PostData_RebuildPipeline()
         return;
     }
 
-    SwitchStrategy(strategy);
+    SetCurrentStrategy(strategy);
     MarkNeedsSync(); // 重建后触发一次全量参数同步
 }
 
@@ -449,7 +449,7 @@ void MedicalVizService::PostData_SyncStateToStrategy()
 
     // 交互状态控制帧率
     if (HasFlag(flags, UpdateFlags::Interaction) && m_renderWindow) {
-        bool interacting = m_sharedState->IsInteracting();
+        bool interacting = m_sharedState->GetIsInteracting();
         m_renderWindow->SetDesiredUpdateRate(interacting ? 15.0 : 0.001);
     }
 
@@ -460,7 +460,7 @@ void MedicalVizService::PostData_SyncStateToStrategy()
     }
 
     RenderParams params = BuildRenderParams(flags);
-    m_currentStrategy->UpdateVisuals(params, flags);
+    m_currentStrategy->SetVisualState(params, flags);
 
     m_isDirty = true;
     // m_needsSync = false;
@@ -549,7 +549,7 @@ void MedicalVizService::RequestClearStrategyCache()
 void MedicalVizService::ExecuteClearStrategyCache()
 {
     if (m_currentStrategy && m_renderer) {
-        m_currentStrategy->Detach(m_renderer);
+        m_currentStrategy->SetRendererDetached(m_renderer);
         m_currentStrategy = nullptr;
     }
     m_strategyCache.clear();
@@ -566,7 +566,7 @@ void MedicalVizService::ResetCursorToCenter()
 	img->GetCenter(imgcenter);
 
 	double imgcenterWorld[3];
-    ModelToWorld(imgcenter, imgcenterWorld);
+    GetWorldPositionFromModel(imgcenter, imgcenterWorld);
 	m_sharedState->SetCursorWorld(imgcenterWorld[0], imgcenterWorld[1], imgcenterWorld[2]);
 }
 
@@ -579,7 +579,7 @@ void MedicalVizService::MarkNeedsSync()
 // ─────────────────────────────────────────────────────────────────────
 // 交互接口实现
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::ScrollSlice(int delta)
+void MedicalVizService::SetSliceScrolled(int delta)
 {
     if (!m_sharedState) return;
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
@@ -594,7 +594,7 @@ void MedicalVizService::ScrollSlice(int delta)
 
     auto cursorWorld = m_sharedState->GetCursorWorld();
 	double cursorModel[3] = { 0.0 };
-	WorldToModel(cursorWorld.data(), cursorModel);
+  GetModelPositionFromWorld(cursorWorld.data(), cursorModel);
     cursorModel[axis] += static_cast<double>(delta)* space[axis];
 
 	// 边界检查
@@ -606,12 +606,12 @@ void MedicalVizService::ScrollSlice(int delta)
     
 	// 模型坐标转世界坐标，更新 SharedState
     double newCursorWorld[3] = { 0.0, 0.0, 0.0 };
-    ModelToWorld(cursorModel, newCursorWorld);
+    GetWorldPositionFromModel(cursorModel, newCursorWorld);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     MarkNeedsSync();
 }
 
-void MedicalVizService::UpdateCursorFromWorldPosition(double worldpos[3], int axis)
+void MedicalVizService::SetCursorWorldPosition(double worldpos[3], int axis)
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
     auto currentPos = m_sharedState->GetCursorWorld(); // 上一帧的位置索引
@@ -644,7 +644,7 @@ vtkProp3D* MedicalVizService::GetMainProp()
     return m_currentStrategy ? m_currentStrategy->GetMainProp() : nullptr;
 }
 
-void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* mat)
+void MedicalVizService::SetModelMatrixSynced(vtkMatrix4x4* mat)
 {
     m_transformService->SyncModelMatrix(mat);
 }
@@ -655,7 +655,7 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 }
 
 // 运行时交互兼容层
-void MedicalVizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
+void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
 
     double dx = 3.0 * totalDx / static_cast<double>(viewWidth);
@@ -709,12 +709,12 @@ void MedicalVizService::ResetModelTransform()
     m_transformService->ResetModelTransform();
 }
 
-void MedicalVizService::WorldToModel(const double w[3], double m[3]) const
+void MedicalVizService::GetModelPositionFromWorld(const double w[3], double m[3]) const
 {
     m_transformService->WorldToModel(w, m);
 }
 
-void MedicalVizService::ModelToWorld(const double m[3], double w[3]) const
+void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]) const
 {
     m_transformService->ModelToWorld(m, w);
 }

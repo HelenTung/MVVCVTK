@@ -19,11 +19,11 @@ public:
     MultiSliceStrategy();
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void Attach(vtkSmartPointer<vtkRenderer> renderer) override;
-    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
+    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
+    void SetVisualState(const RenderParams& params, UpdateFlags flags);
 
 private:
-    void UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
+    void SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
 
     vtkSmartPointer<vtkImageSlice> m_slices[3];
     vtkSmartPointer<vtkImageResliceMapper> m_mappers[3];

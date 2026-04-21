@@ -18,11 +18,11 @@ public:
     ColoredPlanesStrategy();
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void UpdateVisuals(const RenderParams& params, UpdateFlags flags) override;
+    void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetPlaneAxis(vtkActor* actor) override;
 
 private:
-    void UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
+    void SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
     vtkSmartPointer<vtkActor> m_planeActors[3];
     vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
     vtkSmartPointer<vtkImageData> m_imageData;

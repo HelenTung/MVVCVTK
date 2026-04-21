@@ -14,7 +14,7 @@ class BaseVisualStrategy :public AbstractVisualStrategy
 protected:
 	std::vector<vtkSmartPointer<vtkProp>> m_managedProps; // 当前策略管理的 VTK 组件列表，供 Attach/Detach 统一处理
     vtkSmartPointer<vtkImageResample> m_resampleFilter;
-	void RegisterProp(vtkSmartPointer<vtkProp> prop)
+    void SetManagedProp(vtkSmartPointer<vtkProp> prop)
 	{
 		if (prop)
 			m_managedProps.push_back(prop);
@@ -22,19 +22,19 @@ protected:
 
 public:
 	virtual ~BaseVisualStrategy() = default;
-	void Attach(vtkSmartPointer<vtkRenderer> renderer) {
+    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) override {
 		if (!renderer) return;
 		for (auto& prop : m_managedProps) 
 				renderer->AddViewProp(prop);
 	}
-	void Detach(vtkSmartPointer<vtkRenderer> renderer) {
+    void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) override {
 		if (!renderer) return;
 		for (auto& prop : m_managedProps)
 			renderer->RemoveViewProp(prop);
 	}
 
 protected:
-    void ApplyTransformTo3DProps(const std::array<double, 16>& matrixData) {
+    void Set3DPropsTransform(const std::array<double, 16>& matrixData) {
         for (auto prop : m_managedProps) {
             auto prop3D = vtkProp3D::SafeDownCast(prop);
 			auto matrix = prop3D->GetUserMatrix();
@@ -58,7 +58,7 @@ protected:
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }
 
-    void JungeToImageBounds(int& x, int& y, int& z, const int dims[3]) {
+    void SetImageBoundsClamped(int& x, int& y, int& z, const int dims[3]) {
         if (!dims) return;
         x = std::max(0, std::min(x, dims[0] - 1));
         y = std::max(0, std::min(y, dims[1] - 1));

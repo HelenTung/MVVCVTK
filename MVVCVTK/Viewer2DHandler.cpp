@@ -43,7 +43,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
         const int step = eve.ctrl ? 5 : 1;
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
-        m_service->ScrollSlice(delta);
+        m_service->SetSliceScrolled(delta);
         // m_service->MarkDirty();
         return { true, true };  // abortVtk=true：阻止 VTK 默认滚轮相机缩放
     }
@@ -110,8 +110,8 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
             if (worldPos) {
-                m_service->UpdateCursorFromWorldPosition(worldPos);
-                m_service->MarkDirty();
+                m_service->SetCursorWorldPosition(worldPos);
+                m_service->SetDirtyMarked();
             }
             return { true, true };
         }
@@ -138,7 +138,7 @@ InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
                 }   
             }
 
-            m_service->AdjustWindowLevel(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
+            m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
 

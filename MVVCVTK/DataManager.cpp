@@ -13,7 +13,7 @@
 #include <vtkImageChangeInformation.h>
 #include "MemMappedFile.h"
 
-bool RawVolumeDataManager::LoadData(const std::string& filePath) {
+bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
     SetLoadState(LoadState::Loading);
     // 解析文件名
     std::filesystem::path pathObj(filePath);
@@ -167,7 +167,7 @@ bool RawVolumeDataManager::ConsumeReconImage()
     return true;
 }
 
-bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
+bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
     SetLoadState(LoadState::Loading);
     // 路径检查
     std::filesystem::path pathObj(inputPath);
@@ -298,7 +298,7 @@ bool TiffVolumeDataManager::LoadData(const std::string& inputPath) {
     return true;
 }
 
-bool BaseDataManager::SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix)
+bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix)
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {

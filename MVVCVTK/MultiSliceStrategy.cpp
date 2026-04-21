@@ -7,7 +7,7 @@ MultiSliceStrategy::MultiSliceStrategy() {
         m_slices[i] = vtkSmartPointer<vtkImageSlice>::New();
         m_mappers[i] = vtkSmartPointer<vtkImageResliceMapper>::New();
         m_slices[i]->SetMapper(m_mappers[i]);
-		RegisterProp(m_slices[i]);
+      SetManagedProp(m_slices[i]);
     }
 }
 
@@ -39,7 +39,7 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void MultiSliceStrategy::UpdateAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
+void MultiSliceStrategy::SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
 
@@ -69,10 +69,10 @@ void MultiSliceStrategy::UpdateAllPositions(const double cursorWorld[3], const s
     }
 }
 
-void MultiSliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (HasFlag(flags , UpdateFlags::Cursor) || HasFlag(flags, UpdateFlags::Transform)) return;
-    UpdateAllPositions(params.cursor.data(), params.modelMatrix);
+    SetAllPositions(params.cursor.data(), params.modelMatrix);
 
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material)) {
         for (int i = 0; i < 3; i++) {
@@ -92,7 +92,7 @@ void MultiSliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags f
     }
 }
 
-void MultiSliceStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
-    BaseVisualStrategy::Attach(renderer);
+void MultiSliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
+    BaseVisualStrategy::SetRendererAttached(renderer);
     renderer->SetBackground(0.1, 0.1, 0.1);
 }

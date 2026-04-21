@@ -27,7 +27,7 @@ public:
         return m_vtkImage;
 	}
 
-    bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
+    bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
 };
 
 class RawVolumeDataManager : public BaseDataManager {
@@ -42,7 +42,7 @@ private:
 
 public:
     RawVolumeDataManager() = default;
-    bool LoadData(const std::string& filePath) override;
+    bool SetDataLoaded(const std::string& filePath) override;
     bool SetFromBuffer(
         const float* data,
         const std::array<int, 3>& dims,
@@ -56,5 +56,5 @@ class TiffVolumeDataManager : public BaseDataManager {
 public:
     TiffVolumeDataManager() = default;
     // 实现加载接口
-    bool LoadData(const std::string& filePath) override;
+    bool SetDataLoaded(const std::string& filePath) override;
 };

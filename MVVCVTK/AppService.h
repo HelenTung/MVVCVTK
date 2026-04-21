@@ -34,7 +34,7 @@ public:
     MedicalVizService(std::shared_ptr<AbstractDataManager>    dataMgr,
         std::shared_ptr<SharedInteractionState> state);
     ~MedicalVizService();
-    void Initialize(vtkSmartPointer<vtkRenderWindow> win,
+    void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer>     ren) override;
 
     // ================================================================
@@ -42,20 +42,20 @@ public:
     // 调用时机：BindService 之后，LoadFileAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // ================================================================
-    void Config_SetVizMode(VizMode mode)                               override;
-    void Config_SetMaterial(const MaterialParams& mat)                 override;
-    void Config_SetOpacity(double opacity)                             override;
-    void Config_SetTransferFunction(const std::vector<TFNode>& nodes)  override;
-    void Config_SetIsoThreshold(double val)                            override;
-    void Config_SetBackground(const BackgroundColor& bg)               override;
-    void Config_SetWindowLevel(double ww, double wc)                   override;
-    void CommitVisualConfig(const PreInitConfig& cfg)                 override; // 批量提交
+    void SetVizMode(VizMode mode)                               override;
+    void SetMaterial(const MaterialParams& mat)                 override;
+    void SetOpacity(double opacity)                             override;
+    void SetTransferFunction(const std::vector<TFNode>& nodes)  override;
+    void SetIsoThreshold(double val)                            override;
+    void SetBackground(const BackgroundColor& bg)               override;
+    void SetWindowLevel(double ww, double wc)                   override;
+    void SetVisualConfig(const PreInitConfig& cfg)              override; // 批量提交
 
     // ================================================================
     // IDataLoaderService — 数据加载接口
     // onComplete 在后台线程执行，只允许操作 SharedState
     // ================================================================
-    void LoadFileAsync(const std::string& path,
+    void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
     
     // 重建注入异步接口：将 SetFromBuffer 的耗时操作投递到后台线程
@@ -72,11 +72,11 @@ public:
 	// IDataExportService — 数据导出接口
 	// 线程安全：读取 SharedState（内部 mutex 保护），不操作 VTK
 	// ================================================================
-    void SaveTransformedDataAsync(const std::string& path,
+    void SetTransformedDataSavedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
     
     // 尽力取消：设标记，加载函数内部自检后提前退出
-    void CancelLoad() override;
+    void SetLoadCanceled() override;
 
     // ================================================================
     // AbstractAppService — 后处理入口（主线程 Timer 驱动）
@@ -86,21 +86,21 @@ public:
     //   3. m_needsDataRefresh → PostData_RebuildPipeline
     //   4. m_needsSync        → PostData_SyncStateToStrategy
     // ================================================================
-    void ProcessPendingUpdates() override;
+    void SetPendingUpdatesProcessed() override;
 
     // ================================================================
     // AbstractInteractiveService — 交互接口
     // ================================================================
-    void ScrollSlice(int delta)                                     override;
-    void UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1) override;
+    void SetSliceScrolled(int delta)                                     override;
+    void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
     std::array<double, 3> GetCursorWorld()                          override;
     void SetInteracting(bool val)                                   override;
     int  GetPlaneAxis(vtkActor* actor)                              override;
     vtkProp3D* GetMainProp()                                        override;
-    void SyncModelMatrix(vtkMatrix4x4* mat)                         override;
+    void SetModelMatrixSynced(vtkMatrix4x4* mat)                    override;
     void SetElementVisible(uint32_t flagBit, bool show)             override;
 
-    void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
+    void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override {
         return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
@@ -115,8 +115,8 @@ public:
     // 模型变换扩展（委托 VolumeTransformService）
     void TransformModel(double translate[3], double rotate[3], double scale[3]);
     void ResetModelTransform();
-    void WorldToModel(const double worldPos[3], double modelPos[3]) const override;
-    void ModelToWorld(const double modelPos[3], double worldPos[3]) const override;
+    void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const override;
+    void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const override;
 
 private:
     // ── 后处理路径 A：DataReady → 重建 VTK 渲染管线（仅主线程）

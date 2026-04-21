@@ -27,18 +27,18 @@ void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void CompositeStrategy::Attach(vtkSmartPointer<vtkRenderer> renderer) {
-    if (m_mainStrategy) m_mainStrategy->Attach(renderer);
-    if (m_referencePlanes) m_referencePlanes->Attach(renderer);
+void CompositeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->SetRendererAttached(renderer);
+    if (m_referencePlanes) m_referencePlanes->SetRendererAttached(renderer);
     renderer->SetBackground(0.05, 0.05, 0.05);
 }
 
-void CompositeStrategy::Detach(vtkSmartPointer<vtkRenderer> renderer) {
-    if (m_mainStrategy) m_mainStrategy->Detach(renderer);
-    if (m_referencePlanes) m_referencePlanes->Detach(renderer);
+void CompositeStrategy::SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->SetRendererDetached(renderer);
+    if (m_referencePlanes) m_referencePlanes->SetRendererDetached(renderer);
 }
 
-void CompositeStrategy::SetupCamera(vtkSmartPointer<vtkRenderer> renderer) {
+void CompositeStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer) {
     // 通常 3D 视图使用透视投影
     if (renderer && renderer->GetActiveCamera()) {
         renderer->GetActiveCamera()->ParallelProjectionOff();
@@ -55,14 +55,14 @@ vtkProp3D* CompositeStrategy::GetMainProp()
     else return nullptr;
 }
 
-void CompositeStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
+void CompositeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (m_referencePlanes) {
-        m_referencePlanes->UpdateVisuals(params, flags);
+        m_referencePlanes->SetVisualState(params, flags);
     }
 
     // 更新主视图
     if (m_mainStrategy) {
-        m_mainStrategy->UpdateVisuals(params, flags);
+        m_mainStrategy->SetVisualState(params, flags);
     }
 }

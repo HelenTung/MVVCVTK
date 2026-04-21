@@ -18,7 +18,7 @@ StdRenderContext::StdRenderContext()
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
 
     m_eventCallback = vtkSmartPointer<vtkCallbackCommand>::New();
-    m_eventCallback->SetCallback(AbstractRenderContext::DispatchVTKEvent);
+    m_eventCallback->SetCallback(AbstractRenderContext::SetVTKEventDispatched);
     m_eventCallback->SetClientData(this);
 
     // 监听所有需要路由的 VTK 事件
@@ -37,7 +37,7 @@ StdRenderContext::StdRenderContext()
 // ─────────────────────────────────────────────────────────────────────
 // InitInteractor —— 初始化定时器 + 测量 Widget
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::InitInteractor()
+void StdRenderContext::SetInteractorInitialized()
 {
     if (m_interactor && !m_interactor->GetInitialized()) {
         m_interactor->Initialize();
@@ -63,7 +63,7 @@ void StdRenderContext::InitInteractor()
     }
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
-    BuildInteractionRouter();
+    SetInteractionRouter();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -74,7 +74,7 @@ void StdRenderContext::InitInteractor()
 //   2. Viewer2DHandler    → SliceXxx 模式下的滚轮/十字线
 //   3. Viewer3DHandler    → CompositeXxx 模式下的平面拖拽
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::BuildInteractionRouter()
+void StdRenderContext::SetInteractionRouter()
 {
     m_interactionRouter.Clear();
 
@@ -99,20 +99,20 @@ void StdRenderContext::BuildInteractionRouter()
 // ─────────────────────────────────────────────────────────────────────
 // BindService
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::BindService(std::shared_ptr<AbstractAppService> service)
+void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> service)
 {
-    AbstractRenderContext::BindService(service);
+    AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
 
     // Service 就位后重建 Router
-    BuildInteractionRouter();
+    SetInteractionRouter();
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Start
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::Start()
+void StdRenderContext::SetStarted()
 {
     if (m_renderWindow) m_renderWindow->Render();
     if (m_interactor) {
@@ -126,7 +126,7 @@ void StdRenderContext::Start()
 // ─────────────────────────────────────────────────────────────────────
 // ApplyCameraStyleByVizMode
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::ApplyCameraStyleByVizMode(VizMode mode)
+void StdRenderContext::SetCameraStyleByVizMode(VizMode mode)
 {
     m_currentMode = mode;
 
@@ -147,7 +147,7 @@ void StdRenderContext::ApplyCameraStyleByVizMode(VizMode mode)
 // ─────────────────────────────────────────────────────────────────────
 // ToggleOrientationAxes
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::ToggleOrientationAxes(bool show)
+void StdRenderContext::SetOrientationAxesVisible(bool show)
 {
     if (show) {
         if (!m_axesWidget) {
@@ -202,7 +202,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
         m_interactor->SetInteractorStyle(style);
     }
     else {
-        ApplyCameraStyleByVizMode(m_currentMode);
+        SetCameraStyleByVizMode(m_currentMode);
     }
 
     if (m_interactiveService) m_interactiveService->SetDirty(true);
@@ -216,7 +216,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 //   2. 测量模式下屏蔽左键（让 Widget 独占）
 //   3. 填充 InteractionEvent → Dispatch → 处理 abortVtk
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::HandleVTKEvent(vtkObject* caller,
+void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     long unsigned int eventId,
     void* callData)
 {
@@ -276,8 +276,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
     {
         vtkProp3D* prop = m_interactiveService->GetMainProp();
         if (prop && prop->GetMatrix()) {
-            m_interactiveService->SyncModelMatrix(prop->GetUserMatrix());
-            m_interactiveService->MarkDirty();
+            m_interactiveService->SetModelMatrixSynced(prop->GetUserMatrix());
+            m_interactiveService->SetDirtyMarked();
         }
         return;
     }
