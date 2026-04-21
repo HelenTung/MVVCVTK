@@ -37,9 +37,14 @@ private:
     //  spacing   — 数据间距
     //  mat       — 当前模型矩阵 M（局部→世界）
     //  safeOffset— 沿法线微量偏移，防穿模闪烁
-    void SetCrosshair(const double focusModel[3],
-        const double bounds[6],
+    void SetCrosshair(const double focusWorld[3],
+        const double worldBounds[6],
         double safeOffset);
+    void SetCameraAligned(const std::array<double, 16>& modelMatrix,
+        const double bounds[6]);
+    void SetWorldBounds(const double bounds[6],
+        const std::array<double, 16>& modelMatrix,
+        double worldBounds[6]) const;
 
     vtkWeakPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkImageSlice> m_slice;

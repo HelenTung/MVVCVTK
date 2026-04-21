@@ -23,6 +23,7 @@ public:
 
 private:
     void SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
+    void SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const;
     vtkSmartPointer<vtkActor> m_planeActors[3];
     vtkSmartPointer<vtkPlaneSource> m_planeSources[3];
     vtkSmartPointer<vtkImageData> m_imageData;

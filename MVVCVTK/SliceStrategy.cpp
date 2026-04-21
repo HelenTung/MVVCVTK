@@ -7,6 +7,86 @@
 #include <algorithm>
 #include <vtkTransform.h>
 #include <vtkImageResliceMapper.h>
+#include <limits>
+
+void SliceStrategy::SetWorldBounds(const double bounds[6],
+    const std::array<double, 16>& modelMatrix,
+    double worldBounds[6]) const
+{
+    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+    mat->DeepCopy(modelMatrix.data());
+
+    worldBounds[0] = worldBounds[2] = worldBounds[4] = std::numeric_limits<double>::max();
+    worldBounds[1] = worldBounds[3] = worldBounds[5] = std::numeric_limits<double>::lowest();
+
+    for (int ix = 0; ix < 2; ++ix) {
+        for (int iy = 0; iy < 2; ++iy) {
+            for (int iz = 0; iz < 2; ++iz) {
+                double localPoint[4] = {
+                    ix == 0 ? bounds[0] : bounds[1],
+                    iy == 0 ? bounds[2] : bounds[3],
+                    iz == 0 ? bounds[4] : bounds[5],
+                    1.0
+                };
+                double worldPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+                mat->MultiplyPoint(localPoint, worldPoint);
+
+                const double invW = std::abs(worldPoint[3]) > 1e-12 ? 1.0 / worldPoint[3] : 1.0;
+                const double x = worldPoint[0] * invW;
+                const double y = worldPoint[1] * invW;
+                const double z = worldPoint[2] * invW;
+
+                worldBounds[0] = std::min(worldBounds[0], x);
+                worldBounds[1] = std::max(worldBounds[1], x);
+                worldBounds[2] = std::min(worldBounds[2], y);
+                worldBounds[3] = std::max(worldBounds[3], y);
+                worldBounds[4] = std::min(worldBounds[4], z);
+                worldBounds[5] = std::max(worldBounds[5], z);
+            }
+        }
+    }
+}
+
+void SliceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix,
+    const double bounds[6])
+{
+    if (!m_renderer || !m_renderer->GetActiveCamera()) return;
+
+    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+    mat->DeepCopy(modelMatrix.data());
+
+    double modelCenter[4] = {
+        (bounds[0] + bounds[1]) * 0.5,
+        (bounds[2] + bounds[3]) * 0.5,
+        (bounds[4] + bounds[5]) * 0.5,
+        1.0
+    };
+    double worldCenter4[4] = { 0.0, 0.0, 0.0, 1.0 };
+    mat->MultiplyPoint(modelCenter, worldCenter4);
+
+    const double invW = std::abs(worldCenter4[3]) > 1e-12 ? 1.0 / worldCenter4[3] : 1.0;
+    double worldCenter[3] = {
+        worldCenter4[0] * invW,
+        worldCenter4[1] * invW,
+        worldCenter4[2] * invW
+    };
+
+    vtkCamera* cam = m_renderer->GetActiveCamera();
+    double oldFocal[3] = { 0.0, 0.0, 0.0 };
+    double oldPosition[3] = { 0.0, 0.0, 0.0 };
+    cam->GetFocalPoint(oldFocal);
+    cam->GetPosition(oldPosition);
+
+    double offset[3] = {
+        oldPosition[0] - oldFocal[0],
+        oldPosition[1] - oldFocal[1],
+        oldPosition[2] - oldFocal[2]
+    };
+
+    cam->SetFocalPoint(worldCenter);
+    cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
+    m_renderer->ResetCameraClippingRange();
+}
 
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
@@ -127,34 +207,34 @@ void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
     ren->ResetCameraClippingRange();
 }
 
-void SliceStrategy::SetCrosshair(const double focusModel[3],
-    const double bounds[6],
+void SliceStrategy::SetCrosshair(const double focusWorld[3],
+    const double worldBounds[6],
     double safeOffset) 
 {
     if (!m_hLineSource || !m_vLineSource) return;
-    const double physX = focusModel[0];
-    const double physY = focusModel[1];
-    const double physZ = focusModel[2];
+    const double physX = focusWorld[0];
+    const double physY = focusWorld[1];
+    const double physZ = focusWorld[2];
     if (m_orientation == Orientation::Top_down) {
         const double z = physZ + safeOffset;
-        m_vLineSource->SetPoint1(physX, bounds[2], z);
-        m_vLineSource->SetPoint2(physX, bounds[3], z);
-        m_hLineSource->SetPoint1(bounds[0], physY, z);
-        m_hLineSource->SetPoint2(bounds[1], physY, z);
+        m_vLineSource->SetPoint1(physX, worldBounds[2], z);
+        m_vLineSource->SetPoint2(physX, worldBounds[3], z);
+        m_hLineSource->SetPoint1(worldBounds[0], physY, z);
+        m_hLineSource->SetPoint2(worldBounds[1], physY, z);
     }
     else if (m_orientation == Orientation::Front_back) {
         const double y = physY + safeOffset;
-        m_vLineSource->SetPoint1(physX, y, bounds[4]);
-        m_vLineSource->SetPoint2(physX, y, bounds[5]);
-        m_hLineSource->SetPoint1(bounds[0], y, physZ);
-        m_hLineSource->SetPoint2(bounds[1], y, physZ);
+        m_vLineSource->SetPoint1(physX, y, worldBounds[4]);
+        m_vLineSource->SetPoint2(physX, y, worldBounds[5]);
+        m_hLineSource->SetPoint1(worldBounds[0], y, physZ);
+        m_hLineSource->SetPoint2(worldBounds[1], y, physZ);
     }
     else {
         const double x = physX + safeOffset;
-        m_vLineSource->SetPoint1(x, physY, bounds[4]);
-        m_vLineSource->SetPoint2(x, physY, bounds[5]);
-        m_hLineSource->SetPoint1(x, bounds[2], physZ);
-        m_hLineSource->SetPoint2(x, bounds[3], physZ);
+        m_vLineSource->SetPoint1(x, physY, worldBounds[4]);
+        m_vLineSource->SetPoint2(x, physY, worldBounds[5]);
+        m_hLineSource->SetPoint1(x, worldBounds[2], physZ);
+        m_hLineSource->SetPoint2(x, worldBounds[3], physZ);
     }
 
     m_vLineSource->Modified();
@@ -178,91 +258,41 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
 
 	if (HasFlag(flags, UpdateFlags::Transform) || HasFlag(flags, UpdateFlags::Cursor))
     {
-        // 调用更新cursor
-        // 切面逆向，Actor 正向
-        // Pw =  M X Pm
         auto resliceMapper = vtkImageResliceMapper::SafeDownCast(m_mapper);
         if (!resliceMapper || !resliceMapper->GetInput()) return;
 
-        double origin[3], spacing[3], bounds[6];
-        resliceMapper->GetInput()->GetOrigin(origin);
+        double spacing[3], bounds[6];
         resliceMapper->GetInput()->GetSpacing(spacing);
         resliceMapper->GetInput()->GetBounds(bounds);
+        double worldBounds[6] = { 0.0 };
+        SetWorldBounds(bounds, params.modelMatrix, worldBounds);
 
         auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
         mat->DeepCopy(params.modelMatrix.data());
-		auto inv = vtkSmartPointer<vtkTransform>::New();
-		inv->SetMatrix(mat);
-		inv->Inverse();
-
-        // ── 三个 Actor 共用同一个 UserMatrix = M ──────────
-        //
-        // 线 Actor 与切片 Actor 共用 M，所有坐标在局部空间计算，
-        // VTK 统一将局部坐标变换到世界空间。
-        // 绝对不能给切片 Actor 挂载 UserMatrix，否则会引发二次变换和裁剪面错位畸变。
         if (m_slice)      m_slice->SetUserMatrix(mat); 
-        if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);  // 与切片共用 M
-        if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);  // 与切片共用 M
+        if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
+        if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
 
-        // ── 局部空间固定轴法线（数据空间，与模型旋转无关）────────────
-        double localNormal4[4] = { 0, 0, 0, 0 };
-        if (m_orientation == Orientation::Top_down)   localNormal4[2] = 1.0;
-        else if (m_orientation == Orientation::Front_back) localNormal4[1] = 1.0;
-        else if  (m_orientation == Orientation::Left_right) localNormal4[0] = 1.0;
+        double worldNormal[3] = { 0.0, 0.0, 0.0 };
+        if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
+        else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
+        else worldNormal[0] = 1.0;
 
-        // ── 世界法线 = M × localNormal（用于 SlicePlane）─────────────
-        //
-        // VTK 接受世界坐标的 SlicePlane，内部乘 M⁻¹ 换回局部坐标：
-        //   localNormal = M⁻¹ × (M × localNormal) = localNormal ✓
-        //
-        // 原代码直接用固定世界轴 (0,0,1)，VTK 换回局部后得到斜切法线，
-        // 导致切面倾斜变形为三角形。
-        double worldNormal4[4];
-        mat->MultiplyPoint(localNormal4, worldNormal4);
+        auto slicePlane = resliceMapper->GetSlicePlane();
+        if (!slicePlane) {
+            slicePlane = vtkSmartPointer<vtkPlane>::New();
+            resliceMapper->SetSlicePlane(slicePlane);
+        }
+        slicePlane->SetOrigin(params.cursor[0], params.cursor[1], params.cursor[2]);
+        slicePlane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
 
-        // ── 游标局部坐标 → 世界坐标（SlicePlane 原点）───────────────
-        double worldFocus[4] = {
-            params.cursor[0],
-            params.cursor[1],
-            params.cursor[2],
-            1.0
-        };
-
-        double modelFocus[4] = { 0 };
-        inv->MultiplyPoint(worldFocus, modelFocus);
-        // 连续转离散
-        modelFocus[0] = std::max(bounds[0], std::min(modelFocus[0], bounds[1]));
-        modelFocus[1] = std::max(bounds[2], std::min(modelFocus[1], bounds[3]));
-        modelFocus[2] = std::max(bounds[4], std::min(modelFocus[2], bounds[5]));
-
-        //// ── 切割平面（世界坐标，VTK 自动转换到数据空间）─────────────
-        //auto slicePlane = resliceMapper->GetSlicePlane();
-        //if (!slicePlane) {
-        //    slicePlane = vtkSmartPointer<vtkPlane>::New();
-        //    resliceMapper->SetSlicePlane(slicePlane);
-        //}
-        //slicePlane->SetOrigin(worldFocus[0], worldFocus[1], worldFocus[2]);
-        //slicePlane->SetNormal(worldNormal4[0], worldNormal4[1], worldNormal4[2]);
-
-        // ── 十字线
         const double safeOffset =
             std::min({ spacing[0], spacing[1], spacing[2] });
-        double newmodelFocus[3] = {
-            modelFocus[0],
-            modelFocus[1],
-            modelFocus[2]
-		};
-        SetCrosshair(newmodelFocus,bounds,safeOffset);
+        SetCrosshair(params.cursor.data(), worldBounds, safeOffset);
 
-        // 法线和相机向量
-        // 想让相机能“正面”看到一个物体，这个物体的法线（正脸）必须迎着相机的视线，两者是方向相反的。
-        // 切点确定，法线确定，确定平面位置，提交给切割器重采样切片
-        // 这里设置了model矩阵为nullptr，所以切割器会直接把这个点当成世界坐标来用（不经过变换），
-        // 所以我们在这里就要把模型坐标系下的切点转换成世界坐标系下的切点。
-
-        // 对于 vtkProp3D 来说，传给它的 UserMatrix，其实就是直接喂给显卡 Shader 的 ModelMatrix（模型矩阵）。
-        // 显卡天生就是吃 4*4 矩阵的，
-        // 不需要 vtkTransform 这种高级 C++ 封装，它只需要那 16 个双精度浮点数（double[16]）
+        if (HasFlag(flags, UpdateFlags::Transform)) {
+            SetCameraAligned(params.modelMatrix, bounds);
+        }
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

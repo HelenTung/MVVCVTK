@@ -3,6 +3,47 @@
 #include <vtkProperty.h>
 #include <vtkMatrix4x4.h>
 #include <vtkTransform.h>
+#include <limits>
+
+void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const {
+    if (!m_imageData) return;
+
+    double localBounds[6] = { 0.0 };
+    m_imageData->GetBounds(localBounds);
+
+    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+    mat->DeepCopy(modelMatrix.data());
+
+    worldBounds[0] = worldBounds[2] = worldBounds[4] = std::numeric_limits<double>::max();
+    worldBounds[1] = worldBounds[3] = worldBounds[5] = std::numeric_limits<double>::lowest();
+
+    for (int ix = 0; ix < 2; ++ix) {
+        for (int iy = 0; iy < 2; ++iy) {
+            for (int iz = 0; iz < 2; ++iz) {
+                double localPoint[4] = {
+                    ix == 0 ? localBounds[0] : localBounds[1],
+                    iy == 0 ? localBounds[2] : localBounds[3],
+                    iz == 0 ? localBounds[4] : localBounds[5],
+                    1.0
+                };
+                double worldPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+                mat->MultiplyPoint(localPoint, worldPoint);
+
+                const double invW = std::abs(worldPoint[3]) > 1e-12 ? 1.0 / worldPoint[3] : 1.0;
+                const double x = worldPoint[0] * invW;
+                const double y = worldPoint[1] * invW;
+                const double z = worldPoint[2] * invW;
+
+                worldBounds[0] = std::min(worldBounds[0], x);
+                worldBounds[1] = std::max(worldBounds[1], x);
+                worldBounds[2] = std::min(worldBounds[2], y);
+                worldBounds[3] = std::max(worldBounds[3], y);
+                worldBounds[4] = std::min(worldBounds[4], z);
+                worldBounds[5] = std::max(worldBounds[5], z);
+            }
+        }
+    }
+}
 
 ColoredPlanesStrategy::ColoredPlanesStrategy() {
     double colors[3][3] = {
@@ -77,39 +118,29 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void ColoredPlanesStrategy::SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
     if (!m_imageData) return;
 
-	vtkSmartPointer<vtkMatrix4x4> mat = vtkSmartPointer<vtkMatrix4x4>::New();
-	mat->DeepCopy(modelMatrix.data());
-	vtkSmartPointer<vtkTransform> inv = vtkSmartPointer<vtkTransform>::New();
-	inv->SetMatrix(mat);
-	inv->Inverse();
+    double worldBounds[6] = { 0.0 };
+    SetWorldBounds(modelMatrix, worldBounds);
 
-	double newWorldCursor[4] = { cursorWorld[0], cursorWorld[1], cursorWorld[2], 1.0 };
-    double cursorModel[4] = {0};
-	inv->TransformPoint(newWorldCursor, cursorModel);
-
-    double b[6];
-    m_imageData->GetBounds(b);
-
-    const double physX = std::max(b[0], std::min(cursorModel[0], b[1]));
-    const double physY = std::max(b[2], std::min(cursorModel[1], b[3]));
-    const double physZ = std::max(b[4], std::min(cursorModel[2], b[5]));
+    const double physX = std::max(worldBounds[0], std::min(cursorWorld[0], worldBounds[1]));
+    const double physY = std::max(worldBounds[2], std::min(cursorWorld[1], worldBounds[3]));
+    const double physZ = std::max(worldBounds[4], std::min(cursorWorld[2], worldBounds[5]));
 
     // Left_right: 移动 X 轴
-    m_planeSources[0]->SetOrigin(physX, b[2], b[4]);
-    m_planeSources[0]->SetPoint1(physX, b[3], b[4]);
-    m_planeSources[0]->SetPoint2(physX, b[2], b[5]);
+    m_planeSources[0]->SetOrigin(physX, worldBounds[2], worldBounds[4]);
+    m_planeSources[0]->SetPoint1(physX, worldBounds[3], worldBounds[4]);
+    m_planeSources[0]->SetPoint2(physX, worldBounds[2], worldBounds[5]);
     m_planeSources[0]->Update();
 
     // Front_back: 移动 Y 轴
-    m_planeSources[1]->SetOrigin(b[0], physY, b[4]);
-    m_planeSources[1]->SetPoint1(b[1], physY, b[4]);
-    m_planeSources[1]->SetPoint2(b[0], physY, b[5]);
+    m_planeSources[1]->SetOrigin(worldBounds[0], physY, worldBounds[4]);
+    m_planeSources[1]->SetPoint1(worldBounds[1], physY, worldBounds[4]);
+    m_planeSources[1]->SetPoint2(worldBounds[0], physY, worldBounds[5]);
     m_planeSources[1]->Update();
 
     // Top_down: 移动 Z 轴
-    m_planeSources[2]->SetOrigin(b[0], b[2], physZ);
-    m_planeSources[2]->SetPoint1(b[1], b[2], physZ);
-    m_planeSources[2]->SetPoint2(b[0], b[3], physZ);
+    m_planeSources[2]->SetOrigin(worldBounds[0], worldBounds[2], physZ);
+    m_planeSources[2]->SetPoint1(worldBounds[1], worldBounds[2], physZ);
+    m_planeSources[2]->SetPoint2(worldBounds[0], worldBounds[3], physZ);
     m_planeSources[2]->Update();
 
     for (int i = 0; i < 3; ++i) {

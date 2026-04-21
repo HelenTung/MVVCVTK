@@ -261,6 +261,28 @@ public:
         if (changed) SetObserversNotified(UpdateFlags::Cursor);
     }
 
+    void SetCursorRawWorld(double x, double y, double z) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_cursorRawWorld[0] = x;
+        m_cursorRawWorld[1] = y;
+        m_cursorRawWorld[2] = z;
+    }
+
+    std::array<double, 3> GetCursorRawWorld() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return { m_cursorRawWorld[0], m_cursorRawWorld[1], m_cursorRawWorld[2] };
+    }
+
+    void SetCursorAxis(int axis) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_cursorAxis = axis;
+    }
+
+    int GetCursorAxis() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_cursorAxis;
+    }
+
     std::array<double, 3> GetCursorWorld() const {
         std::lock_guard<std::mutex> lk(m_mutex);
         return { m_cursorWorld[0], m_cursorWorld[1], m_cursorWorld[2] };
@@ -306,6 +328,8 @@ private:
     mutable std::mutex m_mutex;
 
     double                 m_cursorWorld[3] = { 0, 0, 0 };
+    double                 m_cursorRawWorld[3] = { 0, 0, 0 };
+    int                    m_cursorAxis = -1;
     double                 m_isoValue = 0.0;
     MaterialParams         m_material;
     BackgroundColor        m_background;         

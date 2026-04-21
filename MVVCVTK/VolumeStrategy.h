@@ -12,6 +12,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkRenderer.h>
 
 // --- 策略 B: 体渲染 ---
 class VolumeStrategy : public BaseVisualStrategy {
@@ -25,7 +26,10 @@ public:
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override; //
 private:
+    void SetCameraAligned(const std::array<double, 16>& modelMatrix);
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume;
     vtkSmartPointer<vtkDataObject> m_lastInput;
+    vtkWeakPointer<vtkRenderer> m_renderer;
+    double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
 };

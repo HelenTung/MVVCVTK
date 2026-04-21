@@ -5,6 +5,41 @@
 #include <vtkPolyDataNormals.h>
 #include <thread>
 
+void IsoSurfaceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
+{
+    if (!m_renderer || !m_renderer->GetActiveCamera()) return;
+
+    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+    mat->DeepCopy(modelMatrix.data());
+
+    double modelCenter[4] = { m_dataCenter[0], m_dataCenter[1], m_dataCenter[2], 1.0 };
+    double worldCenter4[4] = { 0.0, 0.0, 0.0, 1.0 };
+    mat->MultiplyPoint(modelCenter, worldCenter4);
+
+    const double invW = std::abs(worldCenter4[3]) > 1e-12 ? 1.0 / worldCenter4[3] : 1.0;
+    double worldCenter[3] = {
+        worldCenter4[0] * invW,
+        worldCenter4[1] * invW,
+        worldCenter4[2] * invW
+    };
+
+    vtkCamera* cam = m_renderer->GetActiveCamera();
+    double oldFocal[3] = { 0.0, 0.0, 0.0 };
+    double oldPosition[3] = { 0.0, 0.0, 0.0 };
+    cam->GetFocalPoint(oldFocal);
+    cam->GetPosition(oldPosition);
+
+    double offset[3] = {
+        oldPosition[0] - oldFocal[0],
+        oldPosition[1] - oldFocal[1],
+        oldPosition[2] - oldFocal[2]
+    };
+
+    cam->SetFocalPoint(worldCenter);
+    cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
+    m_renderer->ResetCameraClippingRange();
+}
+
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkLODActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
@@ -28,6 +63,7 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto poly = vtkPolyData::SafeDownCast(data);
     if (poly) {
+        poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
         m_mapper->ScalarVisibilityOff();
         m_actor->SetMapper(m_mapper);
@@ -47,6 +83,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     // 作为 ImageData (需要��时计算)
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
+        img->GetCenter(m_dataCenter);
 
         m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         m_isoFilter->ComputeNormalsOff();
@@ -67,6 +104,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
 void IsoSurfaceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
     BaseVisualStrategy::SetRendererAttached(ren);
+    m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
     ren->SetBackground(0.1, 0.15, 0.2); // 蓝色调背景
 }
@@ -110,6 +148,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // 响应 UpdateFlags::Transform
     if (HasFlag(flags, UpdateFlags::Transform)) {
         Set3DPropsTransform(params.modelMatrix);
+        SetCameraAligned(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

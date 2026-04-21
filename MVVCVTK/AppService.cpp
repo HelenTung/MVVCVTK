@@ -492,7 +492,10 @@ RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
 
     if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
         auto pos = m_sharedState->GetCursorWorld();
+        auto rawPos = m_sharedState->GetCursorRawWorld();
         p.cursor = { pos[0], pos[1], pos[2] };
+        p.cursorRaw = { rawPos[0], rawPos[1], rawPos[2] };
+        p.cursorAxis = m_sharedState->GetCursorAxis();
         p.modelMatrix = m_sharedState->GetModelMatrix();
     }
     if (HasFlag(flags, UpdateFlags::TF)) {
@@ -567,6 +570,8 @@ void MedicalVizService::SetCursorCentered()
 
 	double imgcenterWorld[3];
     GetWorldPositionFromModel(imgcenter, imgcenterWorld);
+ m_sharedState->SetCursorRawWorld(imgcenterWorld[0], imgcenterWorld[1], imgcenterWorld[2]);
+    m_sharedState->SetCursorAxis(-1);
 	m_sharedState->SetCursorWorld(imgcenterWorld[0], imgcenterWorld[1], imgcenterWorld[2]);
 }
 
@@ -607,6 +612,8 @@ void MedicalVizService::SetSliceScrolled(int delta)
 	// 模型坐标转世界坐标，更新 SharedState
     double newCursorWorld[3] = { 0.0, 0.0, 0.0 };
     GetWorldPositionFromModel(cursorModel, newCursorWorld);
+    m_sharedState->SetCursorRawWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
+    m_sharedState->SetCursorAxis(axis);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     SetSyncRequested();
 }
@@ -615,6 +622,8 @@ void MedicalVizService::SetCursorWorldPosition(double worldpos[3], int axis)
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
     auto currentPos = m_sharedState->GetCursorWorld(); // 上一帧的位置索引
+    m_sharedState->SetCursorRawWorld(worldpos[0], worldpos[1], worldpos[2]);
+    m_sharedState->SetCursorAxis(axis);
 
     double newPos[3] = { currentPos[0], currentPos[1], currentPos[2] };
     if (axis == -1 || axis == 0) newPos[0] = worldpos[0];

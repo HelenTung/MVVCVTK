@@ -6,7 +6,6 @@
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
-#include <vtkTransform.h>
 #include <vtkMath.h>
 
 namespace {
@@ -125,25 +124,8 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
             0
         };
 
-        // 获取 World -> Model 的逆变换矩阵
-        auto matData = m_service->GetModelMatrix();
-        auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-		auto transform = vtkSmartPointer<vtkTransform>::New();
-        mat->DeepCopy(matData.data());
-        //mat->Invert(); // 反转矩阵，用于将世界位移映射回模型空间
-		transform->SetMatrix(mat);
-		transform->Inverse();// 反转变换
-
-        // 求法线并作归一化,求出真实位移量
-        double normal_m[4] = { 0.0, 0.0, 0.0, 0.0 };
-        normal_m[m_dragAxis] = 1.0;
-        double normal_w[4];
-        mat->MultiplyPoint(normal_m, normal_w);
-
-        double len = std::sqrt(normal_w[0] * normal_w[0] + normal_w[1] * normal_w[1] + normal_w[2] * normal_w[2]);
-        if (len > 1e-6) {
-            normal_w[0] /= len; normal_w[1] /= len; normal_w[2] /= len;
-        }
+        double normal_w[4] = { 0.0, 0.0, 0.0, 0.0 };
+        normal_w[m_dragAxis] = 1.0;
         double dist = delta_W[0] * normal_w[0] + delta_W[1] * normal_w[1] + delta_W[2] * normal_w[2];
 
         // 构造真正有意义的受约束位移

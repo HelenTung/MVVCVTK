@@ -12,6 +12,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkRenderer.h>
 
 
 // --- 策略 A: 等值面渲染 ---
@@ -26,8 +27,11 @@ public:
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override;
 private:
+    void SetCameraAligned(const std::array<double, 16>& modelMatrix);
     vtkSmartPointer<vtkLODActor> m_actor;
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter; // 等值面过滤器
     vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
+    vtkWeakPointer<vtkRenderer> m_renderer;
+    double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
 };
