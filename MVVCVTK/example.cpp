@@ -1,11 +1,11 @@
 ﻿/*
 =====================================================================
-example.cpp — 前端调用说明（MedicalVizService / RenderContext）
+example.cpp — 前端调用说明（MedicalVizService / StdRenderContext）
 
 用途：
 - 给前端/界面层一个统一的接入说明。
-- 汇总现有功能、核心接口、调用顺序与典型伪代码。
-- 作为 Qt / C# / WebView 宿主封装时的参考文档。
+- 汇总当前已有功能、核心接口、调用顺序与典型伪代码。
+- 作为 main.cpp 当前接入方式的说明文档。
 
 重要约定：
 1. 前后处理分离：
@@ -13,13 +13,14 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
    - 真正的渲染重建与参数同步由主线程统一处理。
 2. 数据类与状态类分离：
    - DataManager 负责数据加载与导出。
-   - SharedInteractionState 负责共享状态。
+   - SharedInteractionState 负责共享数据状态。
+   - 窗口实例自己的辅助元素显隐由各自 MedicalVizService 管理。
 3. 回调时机：
    - SetFileLoadedAsync / SetFromBufferAsync / SetTransformedDataSavedAsync 的 onComplete
      均为【主线程延迟回调】。
    - 回调统一在 MedicalVizService::SetPendingUpdatesProcessed() 中分发。
 4. Context 职责：
-   - RenderContext 只负责事件接入、窗口管理、相机风格与启动渲染循环。
+   - StdRenderContext 负责窗口、交互器、方向轴、相机风格与启动渲染循环。
    - 不在 Context 中承载业务回调。
 =====================================================================
 */
@@ -32,17 +33,18 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
 一条标准主线如下：
 
 前端 UI
-  ├─ 持有 MedicalVizService                -> 业务调度层
-  ├─ 持有 StdRenderContext / 自定义 Context -> 渲染上下文
-  ├─ 可读取 SharedInteractionState         -> 查询共享状态
-  └─ 可持有 DataManager                    -> 选择 RAW / TIFF / Buffer 数据来源
+  ├─ 持有 MedicalVizService                 -> 业务调度层（每个窗口一份）
+  ├─ 持有 StdRenderContext                  -> 渲染上下文（每个窗口一份）
+  ├─ 共享 SharedInteractionState           -> 多窗口共享数据状态
+  └─ 共享 DataManager                      -> 多窗口共享体数据来源
 
 推荐前端持有对象：
 
-    auto dataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedState = std::make_shared<SharedInteractionState>();
-    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
-    auto context = std::make_shared<StdRenderContext>();
+
+    auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
+    auto contextA = std::make_shared<StdRenderContext>();
 
 角色说明：
 - RawVolumeDataManager / TiffVolumeDataManager
@@ -54,9 +56,9 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
   * 窗宽窗位
   * 传输函数
   * 材质
-  * 可见性
   * 模型矩阵
   * 加载状态
+  * spacing
 
 - MedicalVizService
   负责：
@@ -64,92 +66,150 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
   * 写 SharedState
   * 发起异步加载 / 导出
   * 主线程统一重建管线 / 同步策略 / 分发回调
+  * 管理当前窗口实例自己的辅助元素显隐（3D 彩色平面 / 2D 十字线 / 3D 标尺）
 
 - StdRenderContext
   负责：
   * 绑定 renderWindow / renderer / interactor
   * 处理鼠标 / 键盘 / 定时器事件
   * 设置相机风格
+  * 控制方向轴 / 朝向标记显隐
   * 启动渲染循环
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-二、前端初始化调用顺序（必须先有这条主线）
+二、按 main.cpp 的标准建窗顺序
 ─────────────────────────────────────────────────────────────────────
+
+main.cpp 当前采用：
+- 共享一份 DataManager
+- 共享一份 SharedInteractionState
+- 为每个窗口创建单独的 MedicalVizService + StdRenderContext
+- 通过 WindowConfig + GetWindowPair(...) 批量建窗
 
 标准顺序：
 
-1. 创建 DataManager
-2. 创建 SharedInteractionState
-3. 创建 MedicalVizService
-4. 创建 RenderContext
-5. context->SetServiceBound(service)
-6. 先做前处理配置（可批量或单项）
-7. 配置窗口 / 相机 / 坐标轴
-8. context->SetInteractorInitialized()
-9. 发起数据加载
-10. context->SetStarted()
+1. 创建共享 DataManager
+2. 创建共享 SharedInteractionState
+3. 组装每个窗口的 WindowConfig
+4. 为每个窗口创建一对 service/context
+5. 设置每个窗口自己的辅助元素显隐
+6. 由一个主窗口发起异步加载
+7. 所有窗口先 Render 一次
+8. 所有窗口 SetInteractorInitialized()
+9. 选一个窗口进入 Start() 消息循环
 
 伪代码：
 
-    auto dataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedState = std::make_shared<SharedInteractionState>();
-    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
-    auto context = std::make_shared<StdRenderContext>();
 
-    // 1) 绑定服务与渲染上下文
-    context->SetServiceBound(service);
+    WindowConfig cfgA;
+    cfgA.title = "Window A: Composite IsoSurface";
+    cfgA.width = 600;
+    cfgA.height = 600;
+    cfgA.posX = 50;
+    cfgA.posY = 50;
+    cfgA.showAxes = true;
+    cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
+    cfgA.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, false };
+    cfgA.preInitCfg.bgColor = { 0.05, 0.05, 0.05 };
+    cfgA.preInitCfg.hasBgColor = true;
 
-    // 2) 前处理配置（数据无关）
-    PreInitConfig cfg;
-    cfg.vizMode = VizMode::CompositeVolume;
-    cfg.hasBgColor = true;
-    cfg.bgColor = { 0.08, 0.08, 0.12 };
-    cfg.hasWindowLevel = true;
-    cfg.windowLevel = { 400.0, 40.0 };
-    cfg.hasTF = true;
-    cfg.tfNodes = {
-        { 0.00, 0.0, 0.0, 0.0, 0.0 },
-        { 0.50, 0.0, 0.0, 0.5, 0.0 },
-        { 0.85, 0.8, 0.0, 0.5, 0.0 },
-        { 1.00, 1.0, 0.0, 0.5, 0.0 },
-    };
-    service->SetVisualConfig(cfg);
+    WindowConfig cfgB;
+    cfgB.title = "Window B: Top_down Slice";
+    cfgB.width = 400;
+    cfgB.height = 400;
+    cfgB.posX = 50;
+    cfgB.posY = 660;
+    cfgB.preInitCfg.vizMode = VizMode::SliceTop_down;
+    cfgB.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    cfgB.preInitCfg.hasBgColor = true;
+    cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };
+    cfgB.preInitCfg.hasWindowLevel = true;
 
-    // 3) 纯窗口/上下文配置
-    context->SetWindowTitle("CT Viewer");
-    context->SetWindowSize(1200, 900);
-    context->SetWindowPosition(50, 50);
-    context->SetCameraStyleByVizMode(cfg.vizMode);
-    context->SetOrientationAxesVisible(true);
+    auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState);
+    auto [serviceB, contextB] = GetWindowPair(cfgB, sharedDataMgr, sharedState);
 
-    // 4) 初始化交互器
-    context->SetInteractorInitialized();
+    // 每个窗口单独控制自己的辅助元素显隐
+    serviceA->SetElementVisible(VisFlags::Planes3D, true);
+    serviceA->SetElementVisible(VisFlags::Ruler, false);
+    serviceB->SetElementVisible(VisFlags::Crosshair, true);
 
-    // 5) 异步加载数据
-    service->SetFileLoadedAsync("E:/data/ct/1000X1000X1000.raw",
-        [service, sharedState](bool success)
+    IDataLoaderService* loader = serviceA.get();
+    loader->SetFileLoadedAsync(
+        "E:/data/ct/1000X1000X1000.raw",
+        [sharedState, serviceA](bool success)
         {
-            // 注意：这是主线程延迟回调，不是后台线程回调
             if (!success) {
-                // 这里只做 UI / 状态处理
+                std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
             }
 
-            // 可根据实际数据范围补充业务参数
             auto range = sharedState->GetDataRange();
-            double iso = range[0] + (range[1] - range[0]) * 0.35;
-            service->SetIsoThreshold(iso);
+            double isoVal = range[0] + (range[1] - range[0]) * 0.35;
+            serviceA->SetIsoThreshold(isoVal);
         });
 
-    // 6) 启动渲染循环
-    context->SetStarted();
+    contextA->SetRendered();
+    contextB->SetRendered();
+
+    contextA->SetInteractorInitialized();
+    contextB->SetInteractorInitialized();
+
+    // 任选一个窗口进入消息循环
+    contextB->SetStarted();
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-三、前处理配置接口（IVisualConfigService）
+三、WindowConfig / GetWindowPair 当前调用方式
+─────────────────────────────────────────────────────────────────────
+
+main.cpp 当前通过 GetWindowPair(...) 统一完成建窗。
+逻辑顺序如下：
+
+    static std::pair<std::shared_ptr<MedicalVizService>,
+                     std::shared_ptr<StdRenderContext>>
+    GetWindowPair(const WindowConfig& cfg,
+                  std::shared_ptr<AbstractDataManager> dataMgr,
+                  std::shared_ptr<SharedInteractionState> sharedState)
+    {
+        auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+        auto context = std::make_shared<StdRenderContext>();
+
+        // 1) 绑定 service/context
+        context->SetServiceBound(service);
+
+        // 2) 批量提交前处理配置
+        service->SetVisualConfig(cfg.preInitCfg);
+
+        // 3) 设置窗口属性和相机风格
+        context->SetWindowTitle(cfg.title);
+        context->SetWindowSize(cfg.width, cfg.height);
+        context->SetWindowPosition(cfg.posX, cfg.posY);
+        context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode);
+        if (cfg.showAxes)
+            context->SetOrientationAxesVisible(true);
+
+        // 4) 背景色由 service 同步到 renderer
+        if (cfg.preInitCfg.hasBgColor)
+            service->SetBackground(cfg.preInitCfg.bgColor);
+
+        return { service, context };
+    }
+
+说明：
+- showAxes 只控制当前 context 的方向轴 / 朝向标记。
+- 不同窗口是否显示方向轴，可单独配置。
+- 十字线 / 3D 彩色平面 / 3D 标尺，不由 WindowConfig 控制，
+  而是由每个窗口自己的 service 在建窗后单独调用 SetElementVisible(...) 控制。
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+四、前处理配置接口（IVisualConfigService）
 ─────────────────────────────────────────────────────────────────────
 
 这些接口只表达“配置意图”，不直接做耗时渲染。
@@ -160,7 +220,7 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
 1) SetVisualConfig(const PreInitConfig& cfg)
    功能：
    - 批量提交前处理配置
-   - 推荐作为前端初始化默认入口
+   - 推荐作为窗口初始化默认入口
    典型字段：
    - cfg.vizMode
    - cfg.bgColor / cfg.hasBgColor
@@ -168,6 +228,7 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
    - cfg.tfNodes / cfg.hasTF
    - cfg.windowLevel / cfg.hasWindowLevel
    - cfg.isoThreshold / cfg.hasIso
+   - cfg.spacing / cfg.hasSpacing
 
 2) SetVizMode(VizMode mode)
    功能：
@@ -198,9 +259,14 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
    功能：
    - 设置体渲染传输函数
 
+9) SetSpacing(double sx, double sy, double sz)
+   功能：
+   - 设置当前体数据 spacing
+   - 适合在导入 Buffer 数据后补充体素尺度
+
 前端伪代码：
 
-    void UiController::ApplyDefaultConfig()
+    void UiController::ApplyDefaultConfig(MedicalVizService* service)
     {
         PreInitConfig cfg;
         cfg.vizMode = VizMode::CompositeIsoSurface;
@@ -209,13 +275,13 @@ example.cpp — 前端调用说明（MedicalVizService / RenderContext）
         cfg.bgColor = { 0.05, 0.05, 0.05 };
         cfg.hasIso = true;
         cfg.isoThreshold = 1800.0;
-        m_service->SetVisualConfig(cfg);
+        service->SetVisualConfig(cfg);
     }
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-四、数据加载与导出接口（IDataLoaderService / IDataExportService）
+五、数据加载与导出接口（IDataLoaderService / IDataExportService）
 ─────────────────────────────────────────────────────────────────────
 
 【线程模型】
@@ -282,14 +348,13 @@ B. 导出接口
             });
     }
 
-前端导出伔代码：
+前端导出伪代码：
 
     void MainWindow::OnExportClicked()
     {
         ui->btnExport->setEnabled(false);
 
-        // 不传路径：走默认导出路径策略
-        m_service->SetTransformedDataSavedAsync({ },
+        m_service->SetTransformedDataSavedAsync({},
             [this](bool success)
             {
                 ui->btnExport->setEnabled(true);
@@ -302,7 +367,7 @@ B. 导出接口
 
 /*
 ─────────────────────────────────────────────────────────────────────
-五、交互接口（AbstractInteractiveService）
+六、交互接口（AbstractInteractiveService）
 ─────────────────────────────────────────────────────────────────────
 
 这些接口都是“轻量同步调用”：
@@ -326,11 +391,11 @@ B. 导出接口
 
 4) SetElementVisible(uint32_t flagBit, bool show)
    功能：
-   - 控制辅助元素显隐
+   - 控制当前窗口实例的辅助元素显隐
    - 常用标志位：
+     * VisFlags::Planes3D
      * VisFlags::Crosshair
-     * VisFlags::ClipPlanes
-     * VisFlags::RulerAxes
+     * VisFlags::Ruler
 
 5) SetInteracting(bool val)
    功能：
@@ -381,7 +446,17 @@ B. 导出接口
 
     void MainWindow::OnShowPlanesChanged(bool checked)
     {
-        m_service->SetElementVisible(VisFlags::ClipPlanes, checked);
+        m_service->SetElementVisible(VisFlags::Planes3D, checked);
+    }
+
+    void MainWindow::OnShowCrosshairChanged(bool checked)
+    {
+        m_service->SetElementVisible(VisFlags::Crosshair, checked);
+    }
+
+    void MainWindow::OnShowRulerChanged(bool checked)
+    {
+        m_service->SetElementVisible(VisFlags::Ruler, checked);
     }
 
     void MainWindow::OnTransformChanged()
@@ -395,7 +470,7 @@ B. 导出接口
 
 /*
 ─────────────────────────────────────────────────────────────────────
-六、RenderContext 侧常用能力
+七、RenderContext 侧常用能力
 ─────────────────────────────────────────────────────────────────────
 
 StdRenderContext 主要给前端提供：
@@ -410,7 +485,7 @@ StdRenderContext 主要给前端提供：
    - 根据显示模式切换 2D / 3D 交互风格
 
 4) SetOrientationAxesVisible(show)
-   - 显示或隐藏方向轴
+   - 控制当前窗口自己的方向轴 / 朝向标记
 
 5) SetInteractorInitialized()
    - 初始化 interactor / timer / widget / 路由
@@ -433,33 +508,36 @@ StdRenderContext 主要给前端提供：
 
 /*
 ─────────────────────────────────────────────────────────────────────
-七、前端推荐封装方式
+八、前端推荐封装方式
 ─────────────────────────────────────────────────────────────────────
 
 建议前端不要到处散着直接调底层接口，而是做一层薄封装：
 
-    class VizFacade {
+    class VizWindowFacade {
     public:
-        void Init();
+        void Init(const WindowConfig& cfg);
         void LoadFile(const std::string& path);
         void ImportBuffer(...);
         void ExportCurrent();
         void SetMode(VizMode mode);
+        void SetPlanesVisible(bool show);
         void SetCrosshairVisible(bool show);
-        void SetClipPlanesVisible(bool show);
+        void SetRulerVisible(bool show);
+        void SetOrientationAxesVisible(bool show);
         void SetWindowLevel(double ww, double wc);
         void SetTransform(...);
     };
 
 好处：
 - 前端按钮 / 面板 / 鼠标事件不直接依赖过多底层细节
+- 每个窗口实例自己的显隐控制可以集中封装
 - 后续切换 StdRenderContext / QtRenderContext / 多窗口布局更容易
-- 业务调用顺序可以在 Facade 中统一收口
+- 业务调用顺序可以在 facade 中统一收口
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-八、最小前端接入清单
+九、最小前端接入清单
 ─────────────────────────────────────────────────────────────────────
 
 如果只做一个最小可用前端，至少接这几条：
@@ -467,15 +545,15 @@ StdRenderContext 主要给前端提供：
 1. 初始化：
    - DataManager
    - SharedInteractionState
-   - MedicalVizService
-   - StdRenderContext
+   - MedicalVizService（每个窗口一份）
+   - StdRenderContext（每个窗口一份）
    - SetServiceBound
    - SetInteractorInitialized
 
 2. 首次配置：
    - SetVisualConfig
    - SetCameraStyleByVizMode
-   - SetOrientationAxesVisible
+   - 按窗口选择是否 SetOrientationAxesVisible
 
 3. 加载：
    - SetFileLoadedAsync
@@ -498,7 +576,7 @@ StdRenderContext 主要给前端提供：
 - 3D / 2D 显示
 - 切片滚动
 - 窗宽窗位调节
-- 参考线/参考面显隐
+- 当前窗口实例的十字线 / 彩色平面 / 标尺显隐
 - 模型变换后导出
 ─────────────────────────────────────────────────────────────────────
 */

@@ -106,7 +106,7 @@ int main()
     cfgE.preInitCfg.bgColor = { 0.08, 0.08, 0.12 }; // 深蓝背景
     cfgE.preInitCfg.hasBgColor = true;
 
-    // ── 窗口 B：Top_down 切片（2D，默认软组织窗）────────────────────
+    // ── 窗口 B：Top_down 切片（2D，默认窗）────────────────────
     WindowConfig cfgB;
     cfgB.title = "Window B: Top_down Slice";
     cfgB.width = 400; cfgB.height = 400;
