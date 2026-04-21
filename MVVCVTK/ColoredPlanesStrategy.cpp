@@ -166,7 +166,7 @@ void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFla
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {
-        const int vis = (params.visibilityMask & VisFlags::ClipPlanes) ? 1 : 0;
+        const int vis = (params.visibilityMask & VisFlags::Planes3D) ? 1 : 0;
         for (int i = 0; i < 3; i++) {
             if (m_planeActors[i]) m_planeActors[i]->SetVisibility(vis);
         }

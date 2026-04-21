@@ -85,7 +85,7 @@ void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {
-        const int vis = (params.visibilityMask & VisFlags::ClipPlanes) ? 1 : 0;
+        const int vis = (params.visibilityMask & VisFlags::Planes3D) ? 1 : 0;
         for (int i = 0; i < 3; i++) {
             if (m_slices[i]) m_slices[i]->SetVisibility(vis);
         }

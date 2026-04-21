@@ -104,9 +104,9 @@ inline bool HasFlag(UpdateFlags flags, UpdateFlags bit) {
 
 // 可视元素位定义
 namespace VisFlags {
-    constexpr uint32_t ClipPlanes = 1 << 0;
-    constexpr uint32_t Crosshair = 1 << 1;
-    constexpr uint32_t RulerAxes = 1 << 2;
+    constexpr uint32_t Planes3D = 1 << 0;   // 3D 彩色切平面
+    constexpr uint32_t Crosshair = 1 << 1;  // 2D 十字线
+    constexpr uint32_t Ruler = 1 << 2;      // 3D 标尺
 }
 
 // --- 渲染参数结构体（Strategy 的唯一输入，不含 VTK 指针）---
@@ -124,9 +124,9 @@ struct RenderParams {
     };
     BackgroundColor        background;
     uint32_t visibilityMask = 
-        VisFlags::ClipPlanes
+        VisFlags::Planes3D
         | VisFlags::Crosshair
-        | VisFlags::RulerAxes; // 默认全部显示
+        | VisFlags::Ruler; // 默认全部显示
 };
 
 // --- 切片朝向枚举 ---

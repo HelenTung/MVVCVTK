@@ -56,7 +56,7 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
 
-  SetManagedProp(m_actor);
+    SetManagedProp(m_actor);
     SetManagedProp(m_cubeAxes);
 }
 
@@ -154,7 +154,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     if (HasFlag(flags, UpdateFlags::Visibility)) {
         if (m_cubeAxes)
             m_cubeAxes->SetVisibility(
-                (params.visibilityMask & VisFlags::RulerAxes) ? 1 : 0);
+                (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
 }
 

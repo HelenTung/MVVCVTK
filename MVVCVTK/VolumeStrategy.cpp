@@ -48,7 +48,7 @@ VolumeStrategy::VolumeStrategy() {
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
- SetManagedProp(m_volume);
+    SetManagedProp(m_volume);
     SetManagedProp(m_cubeAxes);
 }
 
@@ -150,7 +150,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     if (HasFlag(flags, UpdateFlags::Visibility)) {
         if (m_cubeAxes)
             m_cubeAxes->SetVisibility(
-                (params.visibilityMask & VisFlags::RulerAxes) ? 1 : 0);
+                (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
 }
 

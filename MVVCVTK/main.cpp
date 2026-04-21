@@ -147,12 +147,12 @@ int main()
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
-    serviceA->SetElementVisible(VisFlags::ClipPlanes, true);
-    serviceE->SetElementVisible(VisFlags::ClipPlanes, true);
+    serviceA->SetElementVisible(VisFlags::Planes3D, true);
+    serviceE->SetElementVisible(VisFlags::Planes3D, false);
 
     // 3D 窗口：隐藏标尺
-    serviceA->SetElementVisible(VisFlags::RulerAxes, false);
-    serviceE->SetElementVisible(VisFlags::RulerAxes, false);
+    serviceA->SetElementVisible(VisFlags::Ruler, false);
+    serviceE->SetElementVisible(VisFlags::Ruler, false);
 
     // 2D 窗口：隐藏十字测量线
     serviceB->SetElementVisible(VisFlags::Crosshair, true);

@@ -37,6 +37,7 @@ protected:
     void Set3DPropsTransform(const std::array<double, 16>& matrixData) {
         for (auto prop : m_managedProps) {
             auto prop3D = vtkProp3D::SafeDownCast(prop);
+          if (!prop3D) continue; // 仅对 3D prop 应用模型矩阵，跳过文本等 2D prop
 			auto matrix = prop3D->GetUserMatrix();
             if (!matrix)
             {
@@ -54,7 +55,7 @@ protected:
     vtkAlgorithmOutput* GetDownsampledOutputPort(vtkImageData* input, int targetDim = 766)
     {
 		if (!input) return nullptr;
- m_resampleFilter = ImageProcessor::GetDownsampledImage(input, targetDim);
+        m_resampleFilter = ImageProcessor::GetDownsampledImage(input, targetDim);
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }
 

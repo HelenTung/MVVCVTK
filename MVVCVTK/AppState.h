@@ -371,9 +371,9 @@ private:
     MaterialParams m_material;                                  // 当前材质参数
     BackgroundColor m_background;                               // 当前背景色
     WindowLevelParams m_windowLevel;                            // 当前切片窗宽/窗位
-    uint32_t m_visibilityMask = VisFlags::ClipPlanes
+    uint32_t m_visibilityMask = VisFlags::Planes3D
         | VisFlags::Crosshair
-        | VisFlags::RulerAxes;                                  // 当前辅助元素可见性掩码
+        | VisFlags::Ruler;                                      // 当前辅助元素可见性掩码
 
     // 交互状态
     bool m_isInteracting = false;                               // 当前是否处于高频交互中
