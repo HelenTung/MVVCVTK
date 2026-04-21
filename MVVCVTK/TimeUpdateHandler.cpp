@@ -10,7 +10,7 @@ TimeUpdateHandler::TimeUpdateHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult TimeUpdateHandler::Handle(const InteractionEvent& eve)
+InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve)
 {
     if (eve.vtkEventId != vtkCommand::TimerEvent) {
         return {};

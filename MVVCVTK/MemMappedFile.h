@@ -5,17 +5,17 @@
 class MemMappedFile {
 public:
     MemMappedFile() = default;  
-    ~MemMappedFile() { close(); }
+    ~MemMappedFile() { SetClosed(); }
     MemMappedFile(const MemMappedFile&) = delete;
     MemMappedFile& operator=(const MemMappedFile&) = delete;
 
     /// @param length 0 = 映射整个文件
-    bool open(const std::string& path, size_t length = 0);
-    void close();
+    bool SetOpened(const std::string& path, size_t length = 0);
+    void SetClosed();
 
-    const void* data() const { return m_data; }
-    size_t      size() const { return m_size; }
-    bool     is_open() const { return m_data != nullptr; }
+    const void* GetData() const { return m_data; }
+    size_t      GetSize() const { return m_size; }
+    bool        GetIsOpen() const { return m_data != nullptr; }
 
 private:
     const void* m_data = nullptr;

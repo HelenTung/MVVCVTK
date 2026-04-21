@@ -52,10 +52,10 @@ MedicalVizService::~MedicalVizService()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Initialize（由 BindService 触发，shared_from_this() 已安全）
+// SetRenderContext（由 SetServiceBound 触发，shared_from_this() 已安全）
 //
 // Observer 回调中不直接调用有 VTK 操作的函数；
-// 所有 VTK 操作通过标记延迟到主线程 ProcessPendingUpdates 执行。
+// 所有 VTK 操作通过标记延迟到主线程 SetPendingUpdatesProcessed 执行。
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetRenderContext(
     vtkSmartPointer<vtkRenderWindow> win,
@@ -152,7 +152,7 @@ void MedicalVizService::SetWindowLevel(double ww, double wc)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IVisualConfigService::CommitVisualConfig（批量提交）
+// IVisualConfigService::SetVisualConfig（批量提交）
 //
 // 一次锁 + 一次广播；VizMode 仅写原子变量（无需进 SharedState）
 // 背景色在此同步应用到渲染器（前处理阶段，主线程）
@@ -212,7 +212,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IDataLoaderService::CancelLoad（尽力取消）
+// IDataLoaderService::SetLoadCanceled（尽力取消）
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetLoadCanceled()
 {
@@ -220,14 +220,14 @@ void MedicalVizService::SetLoadCanceled()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IDataLoaderService::LoadFileAsync
+// IDataLoaderService::SetFileLoadedAsync
 //
 // 【线程安全】
 //   - 加载在独立线程执行；通过 std::packaged_task + future 管理生命周期
 //   - m_cancelFlag 是 share 类型的 atomic<bool>，加载函数内部可自检退出
 //   - dataMgr / sharedState 值捕获保证生命周期（shared_ptr 引用计数）
 //   - onComplete 在后台线程调用，只允许操作 SharedState
-//   - 加载成功 → NotifyDataReady；失败 → NotifyLoadFailed
+//   - 加载成功 → SetDataReady；失败 → SetLoadFailed
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetFileLoadedAsync(
     const std::string& path,
@@ -235,7 +235,7 @@ void MedicalVizService::SetFileLoadedAsync(
 {
     // 防止重复加载（加载中状态直接返回）
     if (m_sharedState->GetLoadState() == LoadState::Loading) {
-        std::cerr << "[LoadFileAsync] Already loading, ignoring duplicate call.\n";
+        std::cerr << "[SetFileLoadedAsync] Already loading, ignoring duplicate call.\n";
         if (onComplete) onComplete(false); // 拒绝重入，直接返回
         return;
     }
@@ -278,12 +278,12 @@ void MedicalVizService::SetFileLoadedAsync(
                     sharedState->SetDataReady(range[0], range[1]);  // 设 Succeeded
                 }
                 else {
-                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
+                    std::cerr << "[SetFileLoadedAsync] GetVtkImage() returned null after load.\n";
                     sharedState->SetLoadFailed();  
                 }
             }
             else {
-                std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
+                std::cerr << "[SetFileLoadedAsync] Failed to load: " << path << "\n";
                 sharedState->SetLoadFailed();
             }
         });
@@ -536,7 +536,7 @@ MedicalVizService::GetOrCreateStrategy(VizMode mode)
     auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end()) return it->second;
 
-    auto s = StrategyFactory::CreateStrategy(mode);
+    auto s = StrategyFactory::GetStrategy(mode);
     if (s) m_strategyCache[mode] = s;
     return s;
 }
@@ -646,7 +646,7 @@ vtkProp3D* MedicalVizService::GetMainProp()
 
 void MedicalVizService::SetModelMatrixSynced(vtkMatrix4x4* mat)
 {
-    m_transformService->SyncModelMatrix(mat);
+    m_transformService->SetModelMatrix(mat);
 }
 
 void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
@@ -701,20 +701,20 @@ void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int vie
 void MedicalVizService::TransformModel(
     double translate[3], double rotate[3], double scale[3])
 {
-    m_transformService->TransformModel(translate, rotate, scale);
+    m_transformService->SetModelTransform(translate, rotate, scale);
 }
 
 void MedicalVizService::ResetModelTransform()
 {
-    m_transformService->ResetModelTransform();
+    m_transformService->SetModelTransformReset();
 }
 
 void MedicalVizService::GetModelPositionFromWorld(const double w[3], double m[3]) const
 {
-    m_transformService->WorldToModel(w, m);
+    m_transformService->GetModelPositionFromWorld(w, m);
 }
 
 void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]) const
 {
-    m_transformService->ModelToWorld(m, w);
+    m_transformService->GetWorldPositionFromModel(m, w);
 }

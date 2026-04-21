@@ -11,7 +11,7 @@ void IsoSurfaceConverter::SetParameter(const std::string& key, double value) {
     if (key == "IsoValue") m_isoValue = value;
 }
 
-vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::Process(vtkSmartPointer<vtkImageData> input) {
+vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {
     m_filter->SetInputData(input);
     m_filter->ComputeNormalsOn();
     m_filter->SetValue(0, m_isoValue);
@@ -24,10 +24,10 @@ void HistogramConverter::SetParameter(const std::string& key, double value)
     if (key == "BinCount") m_binCount = static_cast<int>(value);
 }
 
-vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageData> input) {
+vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {
     if (!input) return nullptr;
     double range[2], binWidth;
-    long long* frequencies = ComputeHistogram(input, range, binWidth);
+    long long* frequencies = GetHistogramBuffer(input, range, binWidth);
 
     auto table = vtkSmartPointer<vtkTable>::New();
     auto colX = vtkSmartPointer<vtkFloatArray>::New(); colX->SetName("Intensity");
@@ -50,11 +50,11 @@ vtkSmartPointer<vtkTable> HistogramConverter::Process(vtkSmartPointer<vtkImageDa
 }
 
 
-void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
+void HistogramConverter::SetHistogramImageSaved(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
     double range[2], binWidth;
     // 复用 ComputeHistogram，不重复计算
-    long long* freqs = ComputeHistogram(input, range, binWidth);
+    long long* freqs = GetHistogramBuffer(input, range, binWidth);
 
     std::vector<float> logHist(m_binCount);
     float maxLog = 0.0f;
@@ -95,7 +95,7 @@ void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input,
     writer->Write();
 }
 
-long long* HistogramConverter::ComputeHistogram(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
+long long* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
 {
     input->GetScalarRange(outRange);
     // 流式连接：input 没变时 VTK pipeline 不会重复计算

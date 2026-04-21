@@ -28,14 +28,14 @@ public:
         if (!m_dataManager || !m_dataManager->GetVtkImage()) return nullptr;
         auto converter = std::make_shared<HistogramConverter>();
         converter->SetParameter("BinCount", static_cast<double>(binCount));
-        return converter->Process(m_dataManager->GetVtkImage());
+        return converter->GetOutputData(m_dataManager->GetVtkImage());
     }
 
     // 保存直方图为 PNG 图片
-    void SaveHistogramImage(const std::string& filePath, int binCount = 2048) const {
+    void SetHistogramImageSaved(const std::string& filePath, int binCount = 2048) const {
         if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
         auto converter = std::make_shared<HistogramConverter>();
         converter->SetParameter("BinCount", static_cast<double>(binCount));
-        converter->SaveHistogramImage(m_dataManager->GetVtkImage(), filePath);
+        converter->SetHistogramImageSaved(m_dataManager->GetVtkImage(), filePath);
     }
 };

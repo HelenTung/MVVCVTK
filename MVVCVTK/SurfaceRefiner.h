@@ -16,7 +16,7 @@
 class SurfaceRefiner {
 public:
     // ── 主入口：沿法向搜索优化顶点边界位置 ─────────────────────────
-    static vtkSmartPointer<vtkPolyData> RefineSurfaceAlongNormals(
+    static vtkSmartPointer<vtkPolyData> GetRefinedSurface(
         const VolumeBuffer& vol,
         vtkSmartPointer<vtkPolyData> surface,
         const SurfaceParams& surfParams,
@@ -24,7 +24,7 @@ public:
 
 private:
     // ── 核心内核：在采样序列中寻找最优边界偏移（梯度最大穿越点）───
-    static bool FindBestOffsetAlongNormal(
+    static bool GetBestOffsetAlongNormal(
         const std::vector<float>& vals,
         const std::vector<double>& ts,
         float                      iso,
@@ -34,7 +34,7 @@ private:
 
 // ─────────────────────────────────────────────────────────────────────
 
-inline bool SurfaceRefiner::FindBestOffsetAlongNormal(
+inline bool SurfaceRefiner::GetBestOffsetAlongNormal(
     const std::vector<float>& vals,
     const std::vector<double>& ts,
     float                      iso,
@@ -63,7 +63,7 @@ inline bool SurfaceRefiner::FindBestOffsetAlongNormal(
     return false;
 }
 
-inline vtkSmartPointer<vtkPolyData> SurfaceRefiner::RefineSurfaceAlongNormals(
+inline vtkSmartPointer<vtkPolyData> SurfaceRefiner::GetRefinedSurface(
     const VolumeBuffer& vol,
     vtkSmartPointer<vtkPolyData> surface,
     const SurfaceParams& surfParams,
@@ -121,12 +121,12 @@ inline vtkSmartPointer<vtkPolyData> SurfaceRefiner::RefineSurfaceAlongNormals(
                     t += searchStepWorld)
                 {
                     ts.push_back(t);
-                    svals.push_back(vol.sampleTrilinearWorld(
+                    svals.push_back(vol.GetTrilinearValueByWorld(
                         p[0] + t * n[0], p[1] + t * n[1], p[2] + t * n[2]));
                 }
 
                 double tBest = 0.0;
-                if (FindBestOffsetAlongNormal(svals, ts, iso, gradThresh, tBest)) {
+                if (GetBestOffsetAlongNormal(svals, ts, iso, gradThresh, tBest)) {
                     if (std::abs(tBest) > maxShiftWorld)
                         tBest = tBest > 0 ? maxShiftWorld : -maxShiftWorld;
                     const double newP[3] = {

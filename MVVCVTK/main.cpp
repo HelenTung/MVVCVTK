@@ -1,17 +1,17 @@
 ﻿// =====================================================================
 //
 // 三阶段结构（保持不变）：
-//   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / CommitVisualConfig
+//   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / SetVisualConfig
 //                       批量配置所有与数据无关的参数（含背景色）
 //   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载
-//   Phase 3 【渲染骨架】InitInteractor + Start 进入消息循环
+//   Phase 3 【渲染骨架】SetInteractorInitialized + SetStarted 进入消息循环
 //
 //   • PreInitConfig 增加 bgColor / hasBgColor（前处理背景色）
-//   • LoadFileAsync 回调改为数据相关的后处理业务（等值面阈值推算）
+//   • SetFileLoadedAsync 回调改为数据相关的后处理业务（等值面阈值推算）
 //   • 回调内明确注释：在后台线程，只允许操作 SharedState
-//   • 加载失败时通过 NotifyLoadFailed → PostData_HandleLoadFailed 处理
+//   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
 //   • IDataLoaderService 增加 GetLoadState() 可用于主线程状态查询
-//   • main.cpp 中的 InitInteractor() 调用方式明确分离（接口显式）
+//   • main.cpp 中的 SetInteractorInitialized() 调用方式明确分离（接口显式）
 // =====================================================================
 
 #include <vtkAutoInit.h>
@@ -44,7 +44,7 @@ static std::pair<
     auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
     auto context = std::make_shared<StdRenderContext>();
 
-    // ── 步骤1：BindService（触发 Initialize → 注册 Observer）──────
+    // ── 步骤1：SetServiceBound（触发 SetRenderContext → 注册 Observer）──────
     context->SetServiceBound(service);
 
     // ── 步骤2：批量提交前处理配置（一次锁 + 一次广播）────────────
@@ -166,7 +166,7 @@ int main()
         {
             // !! 后台线程 !! 只操作 SharedState内部有 mutex）
             if (!success) {
-                // 加载失败由 NotifyLoadFailed 广播，
+                // 加载失败由 SetLoadFailed 广播，
                 // PostData_HandleLoadFailed 在主线程处理，此处仅记录日志
                 std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
@@ -182,7 +182,7 @@ int main()
                         // 取数据范围中央 60% 作为窗口宽度，中点为窗位
             //double ww = (range[1] - range[0]) * 0.6;
             //double wc = range[0] + (range[1] - range[0]) * 0.5;
-            //serviceA->Config_SetWindowLevel(ww, wc);
+            //serviceA->SetWindowLevel(ww, wc);
 
             //std::cout << "[onComplete] Data loaded."
             //    << " IsoThreshold=" << isoVal

@@ -54,7 +54,7 @@ protected:
     vtkAlgorithmOutput* GetDownsampledOutputPort(vtkImageData* input, int targetDim = 766)
     {
 		if (!input) return nullptr;
-		m_resampleFilter = ImageProcessor::ApplyDownsampling(input, targetDim);
+ m_resampleFilter = ImageProcessor::GetDownsampledImage(input, targetDim);
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }
 

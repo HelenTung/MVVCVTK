@@ -20,24 +20,24 @@
 //    ToolMode m_toolMode = ToolMode::Navigation;
 //    InteractionRouter m_interactionRouter;
 //
-//    void BuildInteractionRouter();
+//    void SetInteractionRouter();
 //
 //public:
 //    // 构造函数不再创建 RenderWindow，而是由外部（Qt Widget）注入
 //    explicit QtRenderContext(vtkSmartPointer<vtkRenderWindow> qtRenderWindow, QObject* parent = nullptr);
 //    ~QtRenderContext() override;
 //
-//    void InitInteractor() override;
-//    void Start() override; // 在 Qt 中可能为空实现，或者只做初始化标志位
-//    void BindService(std::shared_ptr<AbstractAppService> service) override;
-//    void ApplyCameraStyleByVizMode(VizMode mode) override;
+//    void SetInteractorInitialized() override;
+//    void SetStarted() override; // 在 Qt 中可能为空实现，或者只做初始化标志位
+//    void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
+//    void SetCameraStyleByVizMode(VizMode mode) override;
 //
 //private slots:
 //    // 专门用于处理 Qt Timer 触发的更新
 //    void OnQtTimerTick();
 //
 //protected:
-//    void HandleVTKEvent(vtkObject* caller, long unsigned int eventId, void* callData) override;
+//    void SetVTKEventHandled(vtkObject* caller, long unsigned int eventId, void* callData) override;
 //};
 
 
@@ -47,7 +47,7 @@
 ─────────────────────────────────────────────────────────────────────
 
 1. 调用时机
-   - 绑定服务（BindService）后，数据加载（LoadFileAsync）前或后均可。
+   - 绑定服务（SetServiceBound）后，数据加载（SetFileLoadedAsync）前或后均可。
    - 时机为 Qt 窗口/Widget 刚创建且尚未加载任何数据时。
    - 仅修改 SharedState 或原子变量，不涉及底层 VTK 渲染计算，线程绝对安全。
 
@@ -57,22 +57,22 @@
 
 3. 功能与调用流程
 
-   - CommitVisualConfig(const PreInitConfig& cfg)
+   - SetVisualConfig(const PreInitConfig& cfg)
      说明：批量提交前处理配置（视图模式、背景色、材质、传输函数等）。采用一次锁+一次广播，VizMode 仅写原子变量，极大减少锁争用。
      时机：建议在所有初始参数组装完毕后统一调用。
      onComplete：无（同步极速完成）。
 
-   - Config_SetVizMode(VizMode mode)
+   - SetVizMode(VizMode mode)
      说明：设置可视化模式（如体渲染/等值面/切片等），仅记录意图，实际管线重建在主线程处理。
      时机：随时调用（单项修改）。
      onComplete：无。
 
-   - Config_SetBackground(const BackgroundColor& bg)
+   - SetBackground(const BackgroundColor& bg)
      说明：设置背景色，写入 SharedState（前处理阶段会同步直接写渲染器）。
      时机：随时调用。
      onComplete：无。
 
-   - Config_SetMaterial / Config_SetOpacity / Config_SetWindowLevel / Config_SetIsoThreshold / Config_SetTransferFunction
+   - SetMaterial / SetOpacity / SetWindowLevel / SetIsoThreshold / SetTransferFunction
      说明：分别设置材质、透明度、窗宽窗位、等值面阈值、传输函数，写入 SharedState。
      时机：随时调用。
      onComplete：无。
@@ -88,7 +88,7 @@ auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
 
 // 3. 上下文绑定
 auto context = std::make_shared<StdRenderContext>();
-context->BindService(service);
+context->SetServiceBound(service);
 
 // 4. 组装批量前处理参数
 PreInitConfig cfg;
@@ -100,11 +100,11 @@ cfg.windowLevel = { 400.0, 40.0 };      // 初始窗宽窗位
 cfg.material = { 0.3, 0.6, 0.2, 15.0, 1.0, true }; // 材质参数
 
 // 5. 提交配置
-service->CommitVisualConfig(cfg);
+service->SetVisualConfig(cfg);
 
 // 6. 执行纯 UI 视角配置
-context->ApplyCameraStyleByVizMode(cfg.vizMode);
-context->ToggleOrientationAxes(true);
+context->SetCameraStyleByVizMode(cfg.vizMode);
+context->SetOrientationAxesVisible(true);
 ─────────────────────────────────────────────────────────────────────
 */
 
@@ -126,7 +126,7 @@ context->ToggleOrientationAxes(true);
 
 3. 功能与调用流程
 
-   - LoadFileAsync(const std::string& path, std::function<void(bool success)> onComplete)
+   - SetFileLoadedAsync(const std::string& path, std::function<void(bool success)> onComplete)
      说明：异步从磁盘加载 RAW 或 TIFF 序列文件。
      时机：用户通过 UI 选择文件后调用。
      onComplete 可写内容：
@@ -140,12 +140,12 @@ context->ToggleOrientationAxes(true);
      时机：上游重建算法产生结果内存块后调用。
      onComplete 可写内容：同上。
 
-   - SaveTransformedDataAsync(const std::string& path, std::function<void(bool success)> onComplete)
+   - SetTransformedDataSavedAsync(const std::string& path, std::function<void(bool success)> onComplete)
      说明：异步保存当前经过模型仿射变换（旋转/平移/缩放）后的体数据（重新采样并裁剪对齐），导出为 RAW 文件。
      时机：用户调整好模型姿态，点击“导出”后调用。
      onComplete 可写内容：发信号通知主线程弹窗提示“保存成功/失败”。
 
-   - CancelLoad()
+   - SetLoadCanceled()
      说明：请求取消当前加载任务（设置原子标记，底层尽力取消）。
      时机：用户主动点击“取消加载”时调用。
      onComplete：无。
@@ -171,7 +171,7 @@ void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
     auto sharedState = m_sharedState;
     auto vizService = m_vizService;
 
-    loader->LoadFileAsync(
+    loader->SetFileLoadedAsync(
         filePath.toStdString(),
         [this, sharedState, vizService](bool success) {
             // 警告：当前处于后台加载线程！
@@ -183,7 +183,7 @@ void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
                 double wc = range[0] + (range[1] - range[0]) * 0.5;
 
                 // 线程安全：只写 SharedState
-                vizService->Config_SetWindowLevel(ww, wc);
+                vizService->SetWindowLevel(ww, wc);
             }
 
             // 安全地通知主线程更新 UI
@@ -217,17 +217,17 @@ void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
 
 3. 功能与调用流程
 
-   - ScrollSlice(int delta)
+    - SetSliceScrolled(int delta)
      说明：滚动 2D MPR 视图（轴状/冠状/矢状）的切片位置。底层会自动判断当前视图方向并对最大/最小层数进行钳制。
      时机：在切片视图中滚动鼠标滚轮时调用。
      onComplete：无。
 
-   - AdjustWindowLevel(double deltaWW, double deltaWC)
+    - SetWindowLevelAdjusted(...)
      说明：动态调整图像的窗宽（对比度）和窗位（亮度）。接收的是【增量】而非绝对值。
      时机：用户在视图中按住右键拖拽鼠标时，根据鼠标移动的像素差（dx, dy）换算为 delta 后调用。
      onComplete：无。
 
-   - UpdateCursorFromWorldPosition(double worldPos[3], int axis = -1)
+    - SetCursorWorldPosition(double worldPos[3], int axis = -1)
      说明：三视图与十字准星联动的核心接口。将鼠标在某一个视图中点击的物理坐标（世界坐标）同步到系统，底层会自动驱动其他所有视图的切片跳转到该位置。
      时机：Shift+左键拖拽十字准星，或在 3D 视图中拖拽参考切面时调用。
      onComplete：无。
@@ -237,7 +237,7 @@ void VolumeRenderWidget::OnLoadDataRequested(const QString& filePath)
      时机：用户勾选 UI 面板上的 CheckBox 时调用。
      onComplete：无。
 
-   - TransformModel(double translate[3], double rotate[3], double scale[3])
+    - SetModelTransform(...)
      说明：通过数值对 3D 模型进行精确的仿射变换（常用于工业 CT 姿态校正）。
      时机：用户在 UI 面板的 SpinBox 中输入旋转/平移数值后调用。
      onComplete：无。
@@ -256,7 +256,7 @@ void SliceRenderWidget::wheelEvent(QWheelEvent *event)
     }
 
     // 3. 抽象调用：底层自动处理越界钳制并通知所有相关视图
-    m_vizService->ScrollSlice(delta);
+    m_vizService->SetSliceScrolled(delta);
 
     event->accept();
 }
@@ -277,7 +277,7 @@ void SliceRenderWidget::mouseMoveEvent(QMouseEvent *event)
         double deltaWC = dy * sensitivity;
 
         // 3. 抽象调用：底层处理修改与脏标记分发
-        m_vizService->AdjustWindowLevel(deltaWW, deltaWC);
+        m_vizService->SetWindowLevelAdjusted(...);
     }
 }
 

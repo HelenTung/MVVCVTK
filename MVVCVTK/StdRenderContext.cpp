@@ -35,7 +35,7 @@ StdRenderContext::StdRenderContext()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// InitInteractor —— 初始化定时器 + 测量 Widget
+// SetInteractorInitialized —— 初始化定时器 + 测量 Widget
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetInteractorInitialized()
 {
@@ -67,7 +67,7 @@ void StdRenderContext::SetInteractorInitialized()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// BuildInteractionRouter —— 装配 Handler
+// SetInteractionRouter —— 装配 Handler
 //
 // 顺序决定 FirstMatch 优先级（越前越优先）：
 //   1. TimeUpdateHandler  → Timer 心跳，使用 Broadcast 模式单独处理
@@ -76,28 +76,28 @@ void StdRenderContext::SetInteractorInitialized()
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetInteractionRouter()
 {
-    m_interactionRouter.Clear();
+    m_interactionRouter.SetHandlersCleared();
 
     if (!m_interactiveService) {
         return;
     }
 
-    m_interactionRouter.Add(std::make_unique<TimeUpdateHandler>(
+    m_interactionRouter.SetHandlerAdded(std::make_unique<TimeUpdateHandler>(
         m_interactiveService.get(), m_renderWindow.GetPointer()));
 
-    m_interactionRouter.Add(std::make_unique<Viewer2DHandler>(
+    m_interactionRouter.SetHandlerAdded(std::make_unique<Viewer2DHandler>(
         m_interactiveService.get(),
         m_picker.GetPointer(),
         m_renderer.GetPointer()));
 
-    m_interactionRouter.Add(std::make_unique<Viewer3DHandler>(
+    m_interactionRouter.SetHandlerAdded(std::make_unique<Viewer3DHandler>(
         m_interactiveService.get(),
         m_picker.GetPointer(),
         m_renderer.GetPointer()));
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// BindService
+// SetServiceBound
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> service)
 {
@@ -110,7 +110,7 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Start
+// SetStarted
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetStarted()
 {
@@ -124,7 +124,7 @@ void StdRenderContext::SetStarted()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ApplyCameraStyleByVizMode
+// SetCameraStyleByVizMode
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetCameraStyleByVizMode(VizMode mode)
 {
@@ -145,7 +145,7 @@ void StdRenderContext::SetCameraStyleByVizMode(VizMode mode)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ToggleOrientationAxes
+// SetOrientationAxesVisible
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetOrientationAxesVisible(bool show)
 {
@@ -209,7 +209,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// HandleVTKEvent —— 统一入口，委托给 Router
+// SetVTKEventHandled —— 统一入口，委托给 Router
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
@@ -260,7 +260,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
             //                    std::cerr << "[Export] Failed to save transformed model." << std::endl;
             //                }
             //            };
-            //            exporter->SaveTransformedDataAsync("D:\\CT-1209\\data\\out.raw", omcomplete);
+//            exporter->SetTransformedDataSavedAsync("D:\\CT-1209\\data\\out.raw", omcomplete);
             //        }
             //    }
             //    return;
@@ -319,7 +319,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         : RouterDispatchMode::FirstMatch;
 
     const InteractionResult result =
-        m_interactionRouter.Dispatch(eve, dispatchMode);
+        m_interactionRouter.GetDispatchResult(eve, dispatchMode);
 
     if (result.abortVtk && m_eventCallback) {
         m_eventCallback->SetAbortFlag(1);

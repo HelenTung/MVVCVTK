@@ -72,7 +72,7 @@ template <typename InputT, typename OutputT>
 class AbstractDataConverter {
 public:
     virtual ~AbstractDataConverter() = default;
-    virtual vtkSmartPointer<OutputT> Process(vtkSmartPointer<InputT> input) = 0;
+    virtual vtkSmartPointer<OutputT> GetOutputData(vtkSmartPointer<InputT> input) = 0;
     virtual void SetParameter(const std::string& key, double value) {}
 };
 
@@ -127,7 +127,7 @@ public:
 
     std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
 
-    // Strategy 切换,实现在 AppService.cpp
+    // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 };
 
@@ -136,8 +136,8 @@ public:
 //
 // 职责：数据到达之前，登记所有与数据无关的配置意图。
 //   • 所有方法只写 SharedState（内部有 mutex），零 VTK 操作
-//   • 可在 BindService 之后、异步加载之前的任意时刻调用
-//   • 支持逐项设置 OR 批量提交（CommitConfig）
+//   • 可在 SetServiceBound 之后、异步加载之前的任意时刻调用
+//   • 支持逐项设置 OR 批量提交（SetVisualConfig）
 // ─────────────────────────────────────────────────────────────────────
 class IVisualConfigService {
 public:

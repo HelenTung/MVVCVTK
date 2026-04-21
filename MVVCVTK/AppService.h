@@ -9,9 +9,9 @@
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
 // 三阶段职责：
-//   【前处理】  PreInit_* / CommitVisualConfig：只写 SharedState，零 VTK 操作
-//   【后处理-重建】 ProcessPendingUpdates → PostData_RebuildPipeline
-//   【后处理-同步】 ProcessPendingUpdates → PostData_SyncStateToStrategy
+//   【前处理】  SetXxx / SetVisualConfig：只写 SharedState，零 VTK 操作
+//   【后处理-重建】 SetPendingUpdatesProcessed → PostData_RebuildPipeline
+//   【后处理-同步】 SetPendingUpdatesProcessed → PostData_SyncStateToStrategy
 // =====================================================================
 
 #include "AppInterfaces.h"
@@ -39,7 +39,7 @@ public:
 
     // ================================================================
     // IVisualConfigService — 前处理接口
-    // 调用时机：BindService 之后，LoadFileAsync 之前（或之后均可）
+    // 调用时机：SetServiceBound 之后，SetFileLoadedAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // ================================================================
     void SetVizMode(VizMode mode)                               override;
@@ -141,7 +141,7 @@ private:
     void ResetCursorToCenter();
     void MarkNeedsSync();
 
-    // ————— 异步加载回调管理（LoadFile / SetFromBuffer）——————————
+    // ————— 异步加载回调管理（SetFileLoadedAsync / SetFromBuffer）——————————
     void ExecutePendingLoadCallback(bool success) {
         std::function<void(bool)> cb;
 		{
@@ -156,7 +156,7 @@ private:
     std::function<void(bool)> m_LoadCallbackFunc;
 
 
-    // ————— 异步保存回调管理（SaveTransformedData）——————————
+    // ————— 异步保存回调管理（SetTransformedDataSaved）——————————
     void ExecutePendingSaveCallback(bool success) {
         std::function<void(bool)> cb;
         {

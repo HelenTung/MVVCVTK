@@ -19,7 +19,7 @@ public:
         vtkPropPicker* picker,
         vtkRenderer* renderer);
 
-    InteractionResult Handle(const InteractionEvent& eve) override;
+    InteractionResult GetHandleResult(const InteractionEvent& eve) override;
 
 private:
     AbstractInteractiveService* m_service = nullptr;

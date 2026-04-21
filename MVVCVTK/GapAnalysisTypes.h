@@ -64,25 +64,25 @@ public:
     virtual ~IGapAnalysisService() = default;
 
     // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
-    virtual void GapPreInit_SetSurfaceParams(const SurfaceParams& p) = 0;
-    virtual void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
-    virtual void GapPreInit_SetVoidParams(const VoidDetectionParams& p) = 0;
+    virtual void SetSurfaceParams(const SurfaceParams& p) = 0;
+    virtual void SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
+    virtual void SetVoidParams(const VoidDetectionParams& p) = 0;
 
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
     // onComplete 在后台线程回调，只允许写原子标记
-    virtual void RunAsync(
+    virtual void SetAnalysisAsync(
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // ── 查询：主线程轮询（对齐 GetLoadState 风格）────────────────────
     virtual GapAnalysisState GetAnalysisState() const = 0;
 
     // ── 取消（尽力，对齐 CancelLoad 语义）────────────────────────────
-    virtual void CancelRun() {}
+    virtual void SetAnalysisCanceled() {}
 
     // ── 后处理：主线程消费结果（对齐 PostData_RebuildPipeline 调用点）
     // 返回空洞区域列表（供 UI 展示）
     virtual std::vector<VoidRegion> GetVoidRegions() const = 0;
 
     // 生成空洞 Mesh，供 IsoSurfaceStrategy::SetInputData 消费
-    virtual vtkSmartPointer<vtkPolyData> BuildVoidMesh() const = 0;
+    virtual vtkSmartPointer<vtkPolyData> GetVoidMesh() const = 0;
 };

@@ -54,18 +54,18 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
 
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
-    if (mmf.open(filePath)) {
+    if (mmf.SetOpened(filePath)) {
         //   - 文件够大 → 只取前 expectedBytes
         //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
-        size_t copyBytes = (mmf.size() < expectedBytes) ? mmf.size() : expectedBytes;
+        size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
 
-        if (mmf.size() < expectedBytes) {
-            std::cerr << "[Warn] File size (" << mmf.size()
+        if (mmf.GetSize() < expectedBytes) {
+            std::cerr << "[Warn] File size (" << mmf.GetSize()
                 << ") < expected (" << expectedBytes
                 << "). Partial load, remainder zeroed." << std::endl;
         }
 
-        std::memcpy(dst, mmf.data(), copyBytes);
+        std::memcpy(dst, mmf.GetData(), copyBytes);
         // mmf 析构时自动 close()
     }
     else {

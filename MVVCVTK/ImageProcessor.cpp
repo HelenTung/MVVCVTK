@@ -1,6 +1,6 @@
 ﻿#include "ImageProcessor.h"
 
-vtkSmartPointer<vtkImageResample> ImageProcessor::ApplyDownsampling(vtkImageData* input, int targetDim)
+vtkSmartPointer<vtkImageResample> ImageProcessor::GetDownsampledImage(vtkImageData* input, int targetDim)
 {
     if (!input) return nullptr;
 

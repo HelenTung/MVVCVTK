@@ -40,23 +40,23 @@ public:
     // ================================================================
     // 【前处理】— 只写参数，零计算，线程安全
     // ================================================================
-    void GapPreInit_SetSurfaceParams(const SurfaceParams& p) override {
+    void SetSurfaceParams(const SurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_surfParams = p;
     }
-    void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) override {
+    void SetAdvancedParams(const AdvancedSurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_advParams = p;
     }
-    void GapPreInit_SetVoidParams(const VoidDetectionParams& p) override {
+    void SetVoidParams(const VoidDetectionParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_voidParams = p;
     }
 
     // ================================================================
-    // 【触发】— 主动发起后台计算，对齐 LoadFileAsync 线程模式
+    // 【触发】— 主动发起后台计算，对齐 SetFileLoadedAsync 线程模式
     // ================================================================
-    void RunAsync( // MAIN
+    void SetAnalysisAsync( // MAIN
         std::function<void(bool success)> onComplete = nullptr) override
     {
         if (m_analysisState.load() == static_cast<int>(GapAnalysisState::Running))
@@ -93,13 +93,13 @@ public:
                 }
 
                 VolumeBuffer volBuf;
-                if (BuildVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
-                    auto interior = VoidDetector::CreateInteriorMask(volBuf, surfP.isoValue);
+                if (SetVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
+                    auto interior = VoidDetector::GetInteriorMask(volBuf, surfP.isoValue);
                     if (!m_cancelFlag.load()) {
-                        auto candidates = VoidDetector::ExtractCandidates(volBuf, interior, voidP);
+                        auto candidates = VoidDetector::GetCandidateMask(volBuf, interior, voidP);
                         if (!m_cancelFlag.load()) {
                             GapAnalysisResult result;
-                            result.voids = VoidDetector::LabelAndAnalyze(
+                            result.voids = VoidDetector::GetVoidRegions(
                                 volBuf, candidates, voidP, result.labelVolume);
                             result.succeeded = true;
                             {
@@ -125,7 +125,7 @@ public:
         std::thread(std::move(task)).detach();
     }
 
-    void CancelRun() override { m_cancelFlag.store(true); }
+    void SetAnalysisCanceled() override { m_cancelFlag.store(true); }
 
     // ================================================================
     // 【查询】
@@ -143,12 +143,12 @@ public:
     }
 
     // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
-    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override {
+    vtkSmartPointer<vtkPolyData> GetVoidMesh() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         if (!m_result.succeeded || m_result.labelVolume.empty())
             return nullptr;
 
-        auto img = BuildLabelImageInternal();
+        auto img = GetLabelImageData();
         if (!img) return nullptr;
 
         auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
@@ -163,9 +163,9 @@ public:
     // label=0 → 背景（透明）；label>0 → 空洞编号
     // SliceStrategy::SetInputData 接受 vtkImageData，直接传入即可。
     // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
-    vtkSmartPointer<vtkImageData> BuildLabelImage() const {
+    vtkSmartPointer<vtkImageData> GetLabelImage() const {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        return BuildLabelImageInternal();
+        return GetLabelImageData();
     }
 
 private:
@@ -186,7 +186,7 @@ private:
     std::future<void>   m_future;
 
     // ── 内部辅助：labelVolume → vtkImageData（调用方持有 m_resultMutex）
-    vtkSmartPointer<vtkImageData> BuildLabelImageInternal() const {
+    vtkSmartPointer<vtkImageData> GetLabelImageData() const {
         if (!m_result.succeeded || m_result.labelVolume.empty())
             return nullptr;
 
@@ -207,7 +207,7 @@ private:
     }
 
 	// ── 内部辅助：vtkImageData → VolumeBuffer（调用方持有 m_resultMutex）
-    static bool BuildVolumeBuffer(
+    static bool SetVolumeBuffer(
         vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
     {
         if (!img) return false;

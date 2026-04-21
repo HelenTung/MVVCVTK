@@ -10,7 +10,7 @@
 
 class StrategyFactory {
 public:
-    static std::shared_ptr<AbstractVisualStrategy> CreateStrategy(VizMode mode) {
+    static std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode) {
         switch (mode) {
         case VizMode::Volume: return std::make_shared<VolumeStrategy>();
         case VizMode::IsoSurface: return std::make_shared<IsoSurfaceStrategy>();

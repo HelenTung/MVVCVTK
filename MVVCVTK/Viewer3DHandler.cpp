@@ -28,7 +28,7 @@ Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
+InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
 {
     if (!m_service || !IsCompositeMode(eve.vizMode)) {
         return {};

@@ -28,7 +28,7 @@ public:
     // ----------------------------------------------------------------
     // WorldToModel：世界坐标 → 模型坐标
     // ----------------------------------------------------------------
-    void WorldToModel(const double worldPos[3], double modelPos[3]) const
+    void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const
     {
         double inPos[4] = { worldPos[0], worldPos[1], worldPos[2], 1.0 };
         double outPos[4] = { 0, 0, 0, 1 };
@@ -44,7 +44,7 @@ public:
     // ----------------------------------------------------------------
     // ModelToWorld：模型坐标 → 世界坐标
     // ----------------------------------------------------------------
-    void ModelToWorld(const double modelPos[3], double worldPos[3]) const
+    void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const
     {
         double inPos[4] = { modelPos[0], modelPos[1], modelPos[2], 1.0 };
         double outPos[4] = { 0, 0, 0, 1 };
@@ -59,7 +59,7 @@ public:
     // ----------------------------------------------------------------
     // SyncModelMatrix：把 VTK Actor 的 UserMatrix 同步回 SharedState
     // ----------------------------------------------------------------
-    void SyncModelMatrix(vtkMatrix4x4* mat)
+    void SetModelMatrix(vtkMatrix4x4* mat)
     {
         if (!mat) return;
 
@@ -77,7 +77,7 @@ public:
     // ----------------------------------------------------------------
     // TransformModel：通过 平移/旋转/缩放 参数构建矩阵并写入 State
     // ----------------------------------------------------------------
-    void TransformModel(double translate[3], double rotate[3], double scale[3])
+    void SetModelTransform(double translate[3], double rotate[3], double scale[3])
     {
         auto transform = vtkSmartPointer<vtkTransform>::New();
         // PostMultiply() 实际上执行的是左乘（把新的变换操作乘在总矩阵的左边），而它默认的 PreMultiply() 才是右乘（把新操作乘在右边）
@@ -109,7 +109,7 @@ public:
     // ----------------------------------------------------------------
     // ResetModelTransform：回到单位矩阵（不做任何变换）
     // ----------------------------------------------------------------
-    void ResetModelTransform()
+    void SetModelTransformReset()
     {
         std::array<double, 16> identity = {
             1,0,0,0,

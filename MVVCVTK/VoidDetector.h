@@ -20,15 +20,15 @@
 
 // ── 增强型并查集（路径压缩）─────────────────────────────────────────
 struct UnionFind {
-    static int find(int* parent, int i) noexcept {
+    static int GetRoot(int* parent, int i) noexcept {
         while (parent[i] != i) {
             parent[i] = parent[parent[i]]; // 路径减半
             i = parent[i];
         }
         return i;
     }
-    static void unite(int* parent, int i, int j) noexcept {
-        int ri = find(parent, i), rj = find(parent, j);
+    static void SetUnion(int* parent, int i, int j) noexcept {
+        int ri = GetRoot(parent, i), rj = GetRoot(parent, j);
         if (ri != rj) parent[ri] = rj;
     }
 };
@@ -36,18 +36,18 @@ struct UnionFind {
 class VoidDetector {
 public:
     // ── Step 1：泛洪填充构建内部掩码 ───────────────────────────────
-    static std::vector<uint8_t> CreateInteriorMask(
+    static std::vector<uint8_t> GetInteriorMask(
         const VolumeBuffer& vol,
         float               isoValue);
 
     // ── Step 2：候选空洞提取（灰度阈值筛选）────────────────────────
-    static std::vector<uint8_t> ExtractCandidates(
+    static std::vector<uint8_t> GetCandidateMask(
         const VolumeBuffer& vol,
         const std::vector<uint8_t>& interiorMask,
         const VoidDetectionParams& params);
 
     // ── Step 3：结构张量场驱动的连通域分析 ─────────────────────────
-    static std::vector<VoidRegion> LabelAndAnalyze(
+    static std::vector<VoidRegion> GetVoidRegions(
         const VolumeBuffer& vol,
         std::vector<uint8_t>& candidateMask,
         const VoidDetectionParams& params,
@@ -68,18 +68,18 @@ inline std::array<float, 3> VoidDetector::GetPrincipalDirection(
         for (int dy = -window; dy <= window; ++dy)
             for (int dx = -window; dx <= window; ++dx) {
                 const float gx =
-                    (vol.at(x + dx + 1, y + dy, z + dz) - vol.at(x + dx - 1, y + dy, z + dz)) * 0.5f;
+                    (vol.GetVoxelValue(x + dx + 1, y + dy, z + dz) - vol.GetVoxelValue(x + dx - 1, y + dy, z + dz)) * 0.5f;
                 const float gy =
-                    (vol.at(x + dx, y + dy + 1, z + dz) - vol.at(x + dx, y + dy - 1, z + dz)) * 0.5f;
+                    (vol.GetVoxelValue(x + dx, y + dy + 1, z + dz) - vol.GetVoxelValue(x + dx, y + dy - 1, z + dz)) * 0.5f;
                 const float gz =
-                    (vol.at(x + dx, y + dy, z + dz + 1) - vol.at(x + dx, y + dy, z + dz - 1)) * 0.5f;
+                    (vol.GetVoxelValue(x + dx, y + dy, z + dz + 1) - vol.GetVoxelValue(x + dx, y + dy, z + dz - 1)) * 0.5f;
                 m11 += gx * gx; m22 += gy * gy; m33 += gz * gz;
             }
     const float len = std::sqrt(m11 + m22 + m33 + 1e-9f);
     return { std::sqrt(m11) / len, std::sqrt(m22) / len, std::sqrt(m33) / len };
 }
 
-inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
+inline std::vector<uint8_t> VoidDetector::GetInteriorMask(
     const VolumeBuffer& vol, float isoValue)
 {
     const int    dx = vol.dims[0];
@@ -93,7 +93,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     // 泛洪：从六面边界向内填充外部低密度区域
     auto addSeed = [&](int x, int y, int z) {
         const size_t idx = (size_t)x + (size_t)y * dx + (size_t)z * dx * dy;
-        if (vol.at(x, y, z) < isoValue && mask[idx] == 0) {
+        if (vol.GetVoxelValue(x, y, z) < isoValue && mask[idx] == 0) {
             mask[idx] = 1;
             q.push(idx);
         }
@@ -114,7 +114,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
             const int nx = cx + nb[i][0], ny = cy + nb[i][1], nz = cz + nb[i][2];
             if (nx >= 0 && nx < dx && ny >= 0 && ny < dy && nz >= 0 && nz < dz) {
                 const size_t ni = (size_t)nx + (size_t)ny * dx + (size_t)nz * dx * dy;
-                if (mask[ni] == 0 && vol.at(nx, ny, nz) < isoValue) {
+                if (mask[ni] == 0 && vol.GetVoxelValue(nx, ny, nz) < isoValue) {
                     mask[ni] = 1; q.push(ni);
                 }
             }
@@ -132,7 +132,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     return mask;
 }
 
-inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
+inline std::vector<uint8_t> VoidDetector::GetCandidateMask(
     const VolumeBuffer& vol,
     const std::vector<uint8_t>& interiorMask,
     const VoidDetectionParams& params)
@@ -154,7 +154,7 @@ inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
     return out;
 }
 
-inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
+inline std::vector<VoidRegion> VoidDetector::GetVoidRegions(
     const VolumeBuffer& vol,
     std::vector<uint8_t>& mask,
     const VoidDetectionParams& params,
@@ -215,7 +215,7 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
                                 dirCurr[1] * dirNi[1] +
                                 dirCurr[2] * dirNi[2]);
                             if (dot >= cosThresh)
-                                UnionFind::unite(outLabelVol.data(),
+                                UnionFind::SetUnion(outLabelVol.data(),
                                     (int)curr, (int)ni);
                         }
                     }
@@ -229,7 +229,7 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
 
     for (size_t i = 0; i < total; ++i) {
         if (outLabelVol[i] == -1) { outLabelVol[i] = 0; continue; }
-        const int root = UnionFind::find(outLabelVol.data(), (int)i);
+        const int root = UnionFind::GetRoot(outLabelVol.data(), (int)i);
         if (rootMap.find(root) == rootMap.end()) {
             rootMap[root] = nextId++;
             VoidRegion r; r.id = rootMap[root];

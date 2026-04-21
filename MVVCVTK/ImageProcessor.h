@@ -10,5 +10,5 @@ public:
      * @param targetDim 目标最大维度的体素数量（默认 766）
      * @return 处理后的图像（如果是原图则引用计数+1，如果是新图则是新对象）
      */
-    static vtkSmartPointer<vtkImageResample> ApplyDownsampling(vtkImageData* input, int targetDim = 766);
+    static vtkSmartPointer<vtkImageResample> GetDownsampledImage(vtkImageData* input, int targetDim = 766);
 };
