@@ -7,6 +7,8 @@
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
 #include <vtkTransform.h>
+#include <vtkMath.h>
+
 namespace {
 
     bool IsCompositeMode(VizMode mode)

@@ -200,7 +200,7 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         // 线 Actor 与切片 Actor 共用 M，所有坐标在局部空间计算，
         // VTK 统一将局部坐标变换到世界空间。
         // 绝对不能给切片 Actor 挂载 UserMatrix，否则会引发二次变换和裁剪面错位畸变。
-        if (m_slice)      m_slice->SetUserMatrix(nullptr); 
+        if (m_slice)      m_slice->SetUserMatrix(mat); 
         if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);  // 与切片共用 M
         if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);  // 与切片共用 M
 
@@ -236,13 +236,13 @@ void SliceStrategy::UpdateVisuals(const RenderParams& params, UpdateFlags flags)
         modelFocus[2] = std::max(bounds[4], std::min(modelFocus[2], bounds[5]));
 
         //// ── 切割平面（世界坐标，VTK 自动转换到数据空间）─────────────
-        auto slicePlane = resliceMapper->GetSlicePlane();
-        if (!slicePlane) {
-            slicePlane = vtkSmartPointer<vtkPlane>::New();
-            resliceMapper->SetSlicePlane(slicePlane);
-        }
-        slicePlane->SetOrigin(worldFocus[0], worldFocus[1], worldFocus[2]);
-        slicePlane->SetNormal(worldNormal4[0], worldNormal4[1], worldNormal4[2]);
+        //auto slicePlane = resliceMapper->GetSlicePlane();
+        //if (!slicePlane) {
+        //    slicePlane = vtkSmartPointer<vtkPlane>::New();
+        //    resliceMapper->SetSlicePlane(slicePlane);
+        //}
+        //slicePlane->SetOrigin(worldFocus[0], worldFocus[1], worldFocus[2]);
+        //slicePlane->SetNormal(worldNormal4[0], worldNormal4[1], worldNormal4[2]);
 
         // ── 十字线
         const double safeOffset =

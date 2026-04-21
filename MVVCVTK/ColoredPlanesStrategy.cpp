@@ -112,11 +112,11 @@ void ColoredPlanesStrategy::UpdateAllPositions(const double cursorWorld[3], cons
     m_planeSources[2]->SetPoint2(b[0], b[3], physZ);
     m_planeSources[2]->Update();
 
-    //for (int i = 0; i < 3; ++i) {
-    //    if (m_planeActors[i]) {
-    //        m_planeActors[i]->SetUserMatrix(mat);
-    //    }
-    //}
+    for (int i = 0; i < 3; ++i) {
+        if (m_planeActors[i]) {
+            m_planeActors[i]->SetUserMatrix(nullptr);
+        }
+    }
 }
 
 int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {

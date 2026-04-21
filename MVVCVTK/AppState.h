@@ -266,21 +266,6 @@ public:
         return { m_cursorWorld[0], m_cursorWorld[1], m_cursorWorld[2] };
     }
 
-    void UpdateAxis(int axisIndex, int delta, int maxDim) {
-        bool changed = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            int nv = m_cursorWorld[axisIndex] + delta;
-            nv = nv < 0 ? 0 : (nv >= maxDim ? maxDim - 1 : nv);
-            if (m_cursorWorld[axisIndex] != nv) {
-                m_cursorWorld[axisIndex] = nv;
-                changed = true;
-            }
-        }
-        if (changed) NotifyObservers(UpdateFlags::Cursor);
-    }
-
-
     // ── 显隐状态 ──────────────────────────────────────────────────────────
     void SetElementVisible(uint32_t flagBit, bool show) {
         bool changed = false;
