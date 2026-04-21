@@ -185,8 +185,17 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
     // 捕获必要资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
+    const std::string resolvedPath = path.empty() && dataMgr
+        ? dataMgr->GetDefaultTransformedDataPath()
+        : path;
 
     if (!dataMgr || !sharedState) {
+        m_lastSaveResult = false;
+        m_needsSaveTrigger = true;
+        return;
+    }
+
+    if (resolvedPath.empty()) {
         m_lastSaveResult = false;
         m_needsSaveTrigger = true;
         return;
@@ -197,9 +206,9 @@ void MedicalVizService::SetTransformedDataSavedAsync(const std::string& path, st
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
     
     // 封装异步任务
-    std::packaged_task<void()> task([dataMgr, path, currentMatrix, weakSelf]() mutable {
+    std::packaged_task<void()> task([dataMgr, resolvedPath, currentMatrix, weakSelf]() mutable {
         // 进入后台线程，执行重采样和保存操作
-        bool ok = dataMgr->SetTransformedDataSaved(path, currentMatrix);
+        bool ok = dataMgr->SetTransformedDataSaved(resolvedPath, currentMatrix);
 
         auto self = weakSelf.lock();
         if (self) {
@@ -599,7 +608,7 @@ void MedicalVizService::SetSliceScrolled(int delta)
 
     auto cursorWorld = m_sharedState->GetCursorWorld();
 	double cursorModel[3] = { 0.0 };
-  GetModelPositionFromWorld(cursorWorld.data(), cursorModel);
+    GetModelPositionFromWorld(cursorWorld.data(), cursorModel);
     cursorModel[axis] += static_cast<double>(delta)* space[axis];
 
 	// 边界检查

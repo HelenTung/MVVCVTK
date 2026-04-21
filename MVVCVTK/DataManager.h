@@ -17,6 +17,9 @@ class BaseDataManager : public AbstractDataManager
 protected:
 	mutable std::mutex m_dataMutex;
 	vtkSmartPointer<vtkImageData> m_vtkImage;
+    std::string m_loadedFilePath;
+
+    void SetLoadedFilePath(const std::string& filePath);
 public:
     BaseDataManager() {
         m_vtkImage = vtkSmartPointer<vtkImageData>::New();
@@ -28,6 +31,7 @@ public:
 	}
 
     bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
+    std::string GetDefaultTransformedDataPath() const override;
 };
 
 class RawVolumeDataManager : public BaseDataManager {

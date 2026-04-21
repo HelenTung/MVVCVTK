@@ -59,6 +59,7 @@ public:
 		m_loadState = state;
     }
     virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
+    virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 
 protected:
     mutable std::mutex m_stateMutex;
@@ -183,7 +184,7 @@ public:
 
     // 异步保存：在后台线程进行重采样和 I/O，onComplete 只允许操作状态或 UI
     virtual void SetTransformedDataSavedAsync(
-        const std::string& path,
+        const std::string& path = {},
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };
 

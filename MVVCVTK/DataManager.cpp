@@ -13,8 +13,21 @@
 #include <vtkImageChangeInformation.h>
 #include "MemMappedFile.h"
 
+void BaseDataManager::SetLoadedFilePath(const std::string& filePath)
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    m_loadedFilePath = filePath;
+}
+
+std::string BaseDataManager::GetDefaultTransformedDataPath() const
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return m_loadedFilePath;
+}
+
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
     SetLoadState(LoadState::Loading);
+    SetLoadedFilePath({});
     // 解析文件名
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
@@ -94,6 +107,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         m_dims[2] = newDims[2];
     }
 	SetLoadState(LoadState::Succeeded);
+    SetLoadedFilePath(filePath);
     return true;
 }
 
@@ -103,6 +117,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin)
 {
+    SetLoadedFilePath({});
 
     if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
         SetLoadState(LoadState::Failed);
@@ -169,6 +184,7 @@ bool RawVolumeDataManager::SetReconImageConsumed()
 
 bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
     SetLoadState(LoadState::Loading);
+    SetLoadedFilePath({});
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
@@ -295,6 +311,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
     m_vtkImage->GetDimensions(dims);
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
     SetLoadState(LoadState::Succeeded);
+    SetLoadedFilePath(inputPath);
     return true;
 }
 
