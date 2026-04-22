@@ -94,57 +94,45 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
         if (dx == 0 && dy == 0) {
             return { true, true };
         }
+        
+        // 获取屏幕二维坐标
+        auto lastworldpos = m_service->GetCursorWorld();
+        m_renderer->SetWorldPoint(lastworldpos[0], lastworldpos[1], lastworldpos[2],1.0);
+        m_renderer->WorldToDisplay();
+        auto lastdisplay = m_renderer->GetDisplayPoint();
 
-        vtkCamera* cam = m_renderer->GetActiveCamera();
-        if (!cam) return { true, true };
-
-        // 相机的 up 和 right 方向（世界空间，已归一化）
-        double up[3], forward[3], right[3];
-        cam->GetViewUp(up);
-        cam->GetDirectionOfProjection(forward);
-		vtkMath::Normalize(up);
-		vtkMath::Normalize(forward);
-        vtkMath::Cross(forward, up, right);
-        vtkMath::Normalize(right);
-
-        const auto distance = cam->GetDistance();
-        const auto angle = cam->GetViewAngle() * (3.14159265358979 / 180.0);;
-        const auto winsize = m_renderer->GetRenderWindow()->GetSize();
-        const auto vph = (winsize && winsize[1] > 0) ? winsize[1] : 1;
-        auto piepx = 2 * distance * std::tan(angle * 0.5) / vph;
-
-        double dx_W = dx * piepx;
-        double dy_W = dy * piepx;
-
-        // 构造世界空间位移向量增量 (w=0)
-        double delta_W[4] = {
-            right[0] * dx_W + up[0] * dy_W,
-            right[1] * dx_W + up[1] * dy_W,
-            right[2] * dx_W + up[2] * dy_W,
-            0
+        // 新的屏幕二维坐标，深度保持不变，确保深度关系正常
+        double curdisplay[3] =
+        {
+            lastdisplay[0] + static_cast<double>(dx),
+            lastdisplay[1] + static_cast<double>(dy),
+            lastdisplay[2]
         };
 
-        double normal_w[4] = { 0.0, 0.0, 0.0, 0.0 };
-        normal_w[m_dragAxis] = 1.0;
-        double dist = delta_W[0] * normal_w[0] + delta_W[1] * normal_w[1] + delta_W[2] * normal_w[2];
-
-        // 构造真正有意义的受约束位移
-        double pure_delta_W[4] = {
-            dist * normal_w[0],
-            dist * normal_w[1],
-            dist * normal_w[2],
-            0.0 // 向量 w=0
-        };
-
-		auto LastWorldPos = m_service->GetCursorWorld();
+        // 将新的屏幕坐标反投影回世界空间
+        m_renderer->SetDisplayPoint(curdisplay);
+        m_renderer->DisplayToWorld();
+        auto curworldpos = m_renderer->GetWorldPoint();
+        
+        // 齐次坐标除法，还原为 3D 世界坐标
+        double invW = (curworldpos[3] != 0.0) ? (1.0 / curworldpos[3]) : 1.0;
         double newWorldPos[3] = {
-            LastWorldPos[0] + pure_delta_W[0],
-            LastWorldPos[1] + pure_delta_W[1],
-            LastWorldPos[2] + pure_delta_W[2],
-		};
-
+            curworldpos[0] * invW,
+            curworldpos[1] * invW,
+            curworldpos[2] * invW
+        };
+        
+        // 增量约束更新
+        auto deltaAxis = newWorldPos[m_dragAxis] - lastworldpos[m_dragAxis];
+        double finalyworld[3] = {
+            lastworldpos[0],
+            lastworldpos[1],
+            lastworldpos[2]
+        };
+        finalyworld[m_dragAxis] += deltaAxis;
+        
         // 全量更新
-        m_service->SetCursorWorldPosition(newWorldPos, -1);
+        m_service->SetCursorWorldPosition(finalyworld, -1);
 
         return { true, true };
     }

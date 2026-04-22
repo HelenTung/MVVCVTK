@@ -148,7 +148,7 @@ int main()
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, true);
-    serviceE->SetElementVisible(VisFlags::Planes3D, false);
+    serviceE->SetElementVisible(VisFlags::Planes3D, true);
 
     // 3D 窗口：隐藏标尺
     serviceA->SetElementVisible(VisFlags::Ruler, false);
@@ -210,7 +210,3 @@ int main()
 
     return 0;
 }
-
-// TODO:
-// 修正坐标同步问题，解决切片下的2d坐标系和3d空间坐标系不同步导致的光标位置不准确问题
-// 修正可见性没有区分标尺，十字绣，彩色切平面的问题，使得用户可以单独控制它们的显示隐藏

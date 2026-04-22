@@ -4,6 +4,8 @@
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkCamera.h>
+#include <vtkTransform.h>
+#include <vtkMatrix4x4.h>
 
 namespace {
 
@@ -51,6 +53,14 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
     // ── 左键按下：Shift → 开始拖拽十字线 ────────────────────────────
     if (eve.vtkEventId == vtkCommand::LeftButtonPressEvent)
     {
+        if (eve.ctrl)
+        {
+            m_enableDragSlice = true;
+            m_lastRotateX = eve.x;
+            m_lastRotateY = eve.y;
+			m_service->SetInteracting(true);
+			return { true, true };  // abortVtk=true：阻止 VTK 默认 Window/Level
+        }
         if (eve.shift) {
             m_enableDragCrosshair = true;
             m_service->SetInteracting(true);
@@ -66,6 +76,12 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             m_enableDragCrosshair = false;
             m_service->SetInteracting(false);
             return { true, true };
+        }
+        if (m_enableDragSlice)
+        {
+            m_enableDragSlice = false;
+			m_service->SetInteracting(false);
+			return { true, true };
         }
         return { true, true };
     }
@@ -140,6 +156,65 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 
             m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
+        }
+        // 路径C：定轴旋转
+        if (m_enableDragSlice)
+        {
+            if (!m_renderer)
+                return{true,true};
+			auto cursor = m_service->GetCursorWorld();
+			// 将十字线世界坐标转换为显示坐标，以便计算旋转中心,显示坐标用render取得,故cx，cy为显示坐标系下的十字线相交位置
+			m_renderer->SetWorldPoint(cursor[0], cursor[1], cursor[2], 1.0);
+            auto pos = m_renderer->GetDisplayPoint();
+			double cx = pos[0];
+			double cy = pos[1];
+
+			// 当鼠标太靠近中心点时忽略以免发生抖动跳跃
+            double distSq = (eve.x - cx) * (eve.x - cx) + (eve.y - cy) * (eve.y - cy);
+            if (distSq < 25)
+				return { true, true };
+
+			// 计算旋转增量（单位度）
+			double v2x = eve.x - cx;
+			double v2y = eve.y - cy;
+			double v1x = m_lastRotateX - cx;
+			double v1y = m_lastRotateY - cy;
+			double cross = v1x * v2y - v1y * v2x; // 叉积（判断旋转方向）v1v2sinθ
+			double proj = v1x * v2x + v1y * v2y;   // 点积（计算旋转幅度）v1v2cosθ
+
+            //所有 sin/cos/tan 的输入参数必须是弧度。
+            //所有 asin / acos / atan / atan2 的输出结果必须是弧度
+			double deltaAngleRadians = std::atan2(cross, proj);
+            double deltaAngleDeg = vtkMath::DegreesFromRadians(deltaAngleRadians);
+
+			auto cam = m_renderer->GetActiveCamera();
+            double focous[3], campos[3];
+			cam->GetPosition(campos);
+			cam->GetFocalPoint(focous);
+
+            // 是为了提取出正确的旋转轴（Rotation Axis）
+			double viewDir[3] = { focous[0] - campos[0], focous[1] - campos[1], focous[2] - campos[2] };
+			double RotationAxis[3] = { -viewDir[0], -viewDir[1], -viewDir[2] };
+			vtkMath::Normalize(viewDir);
+			vtkMath::Normalize(RotationAxis);
+
+			// 构建旋转变换
+			auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+            auto lastmat = m_service->GetModelMatrix();
+			mat->DeepCopy(lastmat.data());
+
+			auto transform = vtkSmartPointer<vtkTransform>::New();
+			transform->SetMatrix(mat);
+			transform->PostMultiply(); // 左乘
+			transform->Translate(-cursor[0], -cursor[1], -cursor[2]); // 平移到旋转中心
+			transform->RotateWXYZ(deltaAngleDeg, RotationAxis); // 旋转
+            transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点
+
+			// 将旋转后的矩阵同步回服务，触发模型更新
+			m_service->SetModelMatrixSynced(transform->GetMatrix());
+            m_lastRotateX = eve.x;
+            m_lastRotateY = eve.y;
+			return { true, true };
         }
 
         return {};

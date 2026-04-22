@@ -27,10 +27,13 @@ private:
     vtkRenderer* m_renderer = nullptr;
 
     bool m_enableDragCrosshair = false;  // 是否正在拖拽十字线
+	bool m_enableDragSlice = false;      // 是否正在拖拽切片
     bool m_enableDragWindowLevel = false; // 右键：拖拽调窗
+	int  m_lastRotateX = 0;            // 上一帧旋转角度（用于计算 delta，单位度）
+	int  m_lastRotateY = 0;            // 上一帧旋转角度（用于计算 delta，单位度）
     int  m_lastDragX = 0;                 // 上一帧鼠标 X（用于计算 delta）
     int  m_lastDragY = 0;                 // 上一帧鼠标 Y
-
+    
     int m_startDragX = 0;
     int m_startDragY = 0;
     double m_startWW = 0.0;
