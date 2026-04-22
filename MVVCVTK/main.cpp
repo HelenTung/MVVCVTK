@@ -13,7 +13,8 @@
 //   • IDataLoaderService 增加 GetLoadState() 可用于主线程状态查询
 //   • main.cpp 中的 SetInteractorInitialized() 调用方式明确分离（接口显式）
 // =====================================================================
-
+#pragma once
+#define _CRT_SECURE_NO_WARNINGS
 #include <vtkAutoInit.h>
 #include <vtkSMPTools.h>
 
@@ -30,8 +31,86 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
 
+// 融合算法孔隙分析
+#include "GapAnalysisService.h"
+#include "GapAlgorithmOverlayStrategies.h"
+#include <vtkCommand.h>
+
 #include <iostream>
 #include <vector>
+
+//class GapOverlayKeyTrigger : public vtkCommand {
+//public:
+//    static GapOverlayKeyTrigger* New() { return new GapOverlayKeyTrigger; }
+//
+//    std::shared_ptr<GapAnalysisService> gapAnalysis;
+//    std::shared_ptr<MedicalVizService> srvA, srvB, srvC, srvD, srvE;
+//    bool isApplied = false;
+//
+//    void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
+//        // 1. 只响应键盘按下事件
+//        if (eventId != vtkCommand::KeyPressEvent) return;
+//
+//        // 2. 获取交互器并提取按键
+//        auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
+//        if (!iren) return;
+//
+//        char key = iren->GetKeyCode();
+//        // 如果按下的不是 j 或 J，直接忽略
+//        if (key != 'j' && key != 'J') return;
+//
+//        // 如果已经加载过图层，就不重复加载了
+//        if (isApplied || !gapAnalysis) return;
+//
+//        auto state = gapAnalysis->GetAnalysisState();
+//
+//        // 3. 状态分支判断
+//        if (state == GapAnalysisState::Running) {
+//            std::cout << "[Key Trigger] Algorithm is still running... Please wait." << std::endl;
+//            return;
+//        }
+//        else if (state == GapAnalysisState::Succeeded) {
+//            isApplied = true;
+//            std::cout << "\n[Main] Gap Analysis completed! Applying overlays to UI...\n";
+//
+//            // 获取算法产物（此时仍在主线程）
+//            auto voidMesh = gapAnalysis->BuildVoidMesh();
+//            auto labelImg = gapAnalysis->BuildLabelImage();
+//
+//            // 为 3D 窗口配置网格融合图层 (Window A, E)
+//            auto meshOverlayA = std::make_shared<GapMeshOverlayStrategy>();
+//            meshOverlayA->SetInputData(voidMesh);
+//            srvA->SetOverlayStrategyAdded(meshOverlayA);
+//
+//            auto meshOverlayE = std::make_shared<GapMeshOverlayStrategy>();
+//            meshOverlayE->SetInputData(voidMesh);
+//            srvE->SetOverlayStrategyAdded(meshOverlayE);
+//
+//            // 为 2D 窗口配置标签切片融合图层 (Window B, C, D)
+//            auto sliceOverlayB = std::make_shared<GapSliceOverlayStrategy>(Orientation::Top_down);
+//            sliceOverlayB->SetInputData(labelImg);
+//            srvB->SetOverlayStrategyAdded(sliceOverlayB);
+//
+//            auto sliceOverlayC = std::make_shared<GapSliceOverlayStrategy>(Orientation::Front_back);
+//            sliceOverlayC->SetInputData(labelImg);
+//            srvC->SetOverlayStrategyAdded(sliceOverlayC);
+//
+//            auto sliceOverlayD = std::make_shared<GapSliceOverlayStrategy>(Orientation::Left_right);
+//            sliceOverlayD->SetInputData(labelImg);
+//            srvD->SetOverlayStrategyAdded(sliceOverlayD);
+//
+//            gapAnalysis->saveResults("E:\\data\\ct\\out");
+//            
+//            // 通知所有窗口画面标脏，触发重绘
+//            srvA->SetDirtyMarked(); srvB->SetDirtyMarked();
+//            srvC->SetDirtyMarked(); srvD->SetDirtyMarked(); srvE->SetDirtyMarked();
+//        }
+//        else if (state == GapAnalysisState::Failed) {
+//            isApplied = true;
+//            std::cerr << "\n[Main] Gap Analysis failed to process.\n";
+//        }
+//    }
+//};
 
 static std::pair<
     std::shared_ptr<MedicalVizService>,
@@ -72,6 +151,7 @@ int main()
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedState = std::make_shared<SharedInteractionState>();
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
+    auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
 
     // ── 传输函数（数据无关，前处理阶段安全）──────────────────────
     std::vector<TFNode> volTF = {
@@ -147,8 +227,8 @@ int main()
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
-    serviceA->SetElementVisible(VisFlags::Planes3D, true);
-    serviceE->SetElementVisible(VisFlags::Planes3D, true);
+    serviceA->SetElementVisible(VisFlags::Planes3D, false);
+    serviceE->SetElementVisible(VisFlags::Planes3D, false);
 
     // 3D 窗口：隐藏标尺
     serviceA->SetElementVisible(VisFlags::Ruler, false);
@@ -161,32 +241,37 @@ int main()
 
     IDataLoaderService* loader = serviceA.get();
     loader->SetFileLoadedAsync(
-        "E:\\data\\ct\\1000X1000X1000.raw",
-        [sharedState, serviceA](bool success)
+        "E:\\data\\ct\\700x1358x1252.raw",
+        [sharedState, serviceA,gapAnalysis](bool success)
         {
-            // !! 主线程延迟回调 !! 只操作状态或业务，不直接承载底层加载细节
             if (!success) {
-                // 加载失败由 SetLoadFailed 广播，
-                // PostData_HandleLoadFailed 在主线程处理，此处仅记录日志
                 std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
             }
 
-            // 后处理业务：SetDataReady 之后，基于实际数据范围推算等值面阈值
-            // 此操作数据相关，必须在加载完成后执行（不能在前处理阶段）
+            // 设置等值面等常规数据
             auto range = sharedState->GetDataRange();
-            double isoVal = range[0] + (range[1] - range[0]) * 0.35;
-            serviceA->SetIsoThreshold(isoVal);  // 线程安全：写 SharedState
+            double isoVal = range[0] + (range[1] - range[0]) * 0.593999972;
+            serviceA->SetIsoThreshold(isoVal);
 
-            // ── 后处理 B：★ 切片 WW/WC 自动推算（基于实际数据范围）
-                        // 取数据范围中央 60% 作为窗口宽度，中点为窗位
-            //double ww = (range[1] - range[0]) * 0.6;
-            //double wc = range[0] + (range[1] - range[0]) * 0.5;
-            //serviceA->SetWindowLevel(ww, wc);
+            //// 触发孔隙分析算法
+            //SurfaceParams surfP;
+            //surfP.isoValue = static_cast<float>(isoVal); // 使用自动推算的阈值
+            //gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
 
-            //std::cout << "[onComplete] Data loaded."
-            //    << " IsoThreshold=" << isoVal
-            //    << " WW=" << ww << " WC=" << wc << "\n";
+            //VoidDetectionParams voidP;
+            //voidP.grayMin = -0.2262536138296127f;
+            //voidP.grayMax = 0.15f;
+            ////voidP.minVolumeMM3 = 3;
+            //voidP.minVolumeMM3 = 0.0001;
+            //voidP.angleThresholdDeg = 30.0f;
+            //voidP.tensorWindowSize = 1;
+            //voidP.erosionIterations = 2;
+            //gapAnalysis->GapPreInit_SetVoidParams(voidP);
+
+            //std::cout << "[Main] Triggering background Gap Analysis...\n";
+            //// 发起后台计算，不阻塞当前 UI
+            //gapAnalysis->RunAsync();
         }
     );
 
@@ -201,6 +286,18 @@ int main()
     contextC->SetInteractorInitialized();
     contextD->SetInteractorInitialized();
     contextE->SetInteractorInitialized();
+
+    //auto trigger = vtkSmartPointer<GapOverlayKeyTrigger>::New();
+    //trigger->gapAnalysis = gapAnalysis;
+    //trigger->srvA = serviceA; trigger->srvB = serviceB;
+    //trigger->srvC = serviceC; trigger->srvD = serviceD; trigger->srvE = serviceE;
+
+    //contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    //contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    //contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    //contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    //contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform\n";

@@ -6,6 +6,7 @@
 #include "VolumeBuffer.h"
 #include "GapAnalysisTypes.h"
 #include <vtkSMPTools.h>
+#include <vtkMath.h>
 #include <vector>
 #include <cstdint>
 #include <queue>
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <array>
 #include <mutex>
+#include <deque>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -20,15 +22,15 @@
 
 // ── 增强型并查集（路径压缩）─────────────────────────────────────────
 struct UnionFind {
-    static int GetRoot(int* parent, int i) noexcept {
+    static int find(int* parent, int i) noexcept {
         while (parent[i] != i) {
             parent[i] = parent[parent[i]]; // 路径减半
             i = parent[i];
         }
         return i;
     }
-    static void SetUnion(int* parent, int i, int j) noexcept {
-        int ri = GetRoot(parent, i), rj = GetRoot(parent, j);
+    static void unite(int* parent, int i, int j) noexcept {
+        int ri = find(parent, i), rj = find(parent, j);
         if (ri != rj) parent[ri] = rj;
     }
 };
@@ -36,18 +38,18 @@ struct UnionFind {
 class VoidDetector {
 public:
     // ── Step 1：泛洪填充构建内部掩码 ───────────────────────────────
-    static std::vector<uint8_t> GetInteriorMask(
+    static std::vector<uint8_t> CreateInteriorMask(
         const VolumeBuffer& vol,
         float               isoValue);
 
     // ── Step 2：候选空洞提取（灰度阈值筛选）────────────────────────
-    static std::vector<uint8_t> GetCandidateMask(
+    static std::vector<uint8_t> ExtractCandidates(
         const VolumeBuffer& vol,
         const std::vector<uint8_t>& interiorMask,
         const VoidDetectionParams& params);
 
     // ── Step 3：结构张量场驱动的连通域分析 ─────────────────────────
-    static std::vector<VoidRegion> GetVoidRegions(
+    static std::vector<VoidRegion> LabelAndAnalyze(
         const VolumeBuffer& vol,
         std::vector<uint8_t>& candidateMask,
         const VoidDetectionParams& params,
@@ -79,176 +81,402 @@ inline std::array<float, 3> VoidDetector::GetPrincipalDirection(
     return { std::sqrt(m11) / len, std::sqrt(m22) / len, std::sqrt(m33) / len };
 }
 
-inline std::vector<uint8_t> VoidDetector::GetInteriorMask(
+inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     const VolumeBuffer& vol, float isoValue)
 {
     const int    dx = vol.dims[0];
     const int    dy = vol.dims[1];
     const int    dz = vol.dims[2];
-    const size_t total = (size_t)dx * dy * dz;
 
-    std::vector<uint8_t> mask(total, 0);
-    std::queue<size_t>   q;
+    const size_t slice = (size_t)dx * dy;
+    const size_t total = slice * dz;
+    const float* data = vol.voxels.data();
 
-    // 泛洪：从六面边界向内填充外部低密度区域
-    auto addSeed = [&](int x, int y, int z) {
-        const size_t idx = (size_t)x + (size_t)y * dx + (size_t)z * dx * dy;
-        if (vol.GetVoxelValue(x, y, z) < isoValue && mask[idx] == 0) {
-            mask[idx] = 1;
-            q.push(idx);
+    std::vector<uint8_t> exterior(total, 0);
+
+    struct QNode {
+        size_t idx;
+        int x, y, z;
+    };
+
+    std::deque<QNode> q;
+
+    auto push_node = [&](int x, int y, int z) {
+        size_t idx = (size_t)x + (size_t)y * dx + (size_t)z * slice;
+        if (data[idx] < isoValue && exterior[idx] == 0) {
+            exterior[idx] = 1;
+            q.push_back({ idx, x, y, z });
         }
         };
-    for (int z : {0, dz - 1}) for (int y = 0; y < dy; ++y) for (int x = 0; x < dx; ++x) addSeed(x, y, z);
-    for (int y : {0, dy - 1}) for (int z = 0; z < dz; ++z) for (int x = 0; x < dx; ++x) addSeed(x, y, z);
-    for (int x : {0, dx - 1}) for (int z = 0; z < dz; ++z) for (int y = 0; y < dy; ++y) addSeed(x, y, z);
 
-    constexpr int nb[6][3] = {
-        {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}
+    // 1. 初始化种子：完全对齐原版边界逻辑
+    for (int y = 0; y < dy; ++y) {
+        for (int x = 0; x < dx; ++x) {
+            push_node(x, y, 0);
+            push_node(x, y, dz - 1);
+        }
+    }
+    for (int z = 1; z < dz - 1; ++z) {
+        for (int y = 0; y < dy; ++y) {
+            push_node(0, y, z);
+            push_node(dx - 1, y, z);
+        }
+    }
+    for (int z = 1; z < dz - 1; ++z) {
+        for (int x = 1; x < dx - 1; ++x) {
+            push_node(x, 0, z);
+            push_node(x, dy - 1, z);
+        }
+    }
+
+    const size_t off[6] = { 1,static_cast<size_t>(0) - 1,          // 代替 (size_t)-1
+    static_cast<size_t>(dx),
+    static_cast<size_t>(0) - static_cast<size_t>(dx),   // 代替 (size_t)-dx
+    slice,
+    static_cast<size_t>(0) - slice       // 代替 (size_t)-slice
     };
+    const int dxs[6] = { 1, -1, 0, 0, 0, 0 };
+    const int dys[6] = { 0, 0, 1, -1, 0, 0 };
+    const int dzs[6] = { 0, 0, 0, 0, 1, -1 };
+
     while (!q.empty()) {
-        const size_t ci = q.front(); q.pop();
-        const int cz = (int)(ci / (dx * dy));
-        const int cy = (int)((ci / dx) % dy);
-        const int cx = (int)(ci % dx);
-        for (int i = 0; i < 6; ++i) {
-            const int nx = cx + nb[i][0], ny = cy + nb[i][1], nz = cz + nb[i][2];
-            if (nx >= 0 && nx < dx && ny >= 0 && ny < dy && nz >= 0 && nz < dz) {
-                const size_t ni = (size_t)nx + (size_t)ny * dx + (size_t)nz * dx * dy;
-                if (mask[ni] == 0 && vol.GetVoxelValue(nx, ny, nz) < isoValue) {
-                    mask[ni] = 1; q.push(ni);
+        QNode curr = q.front();
+        q.pop_front();
+
+        if (curr.x > 0 && curr.x < dx - 1 && curr.y > 0 && curr.y < dy - 1 && curr.z > 0 && curr.z < dz - 1) {
+            for (int k = 0; k < 6; ++k) {
+                size_t nidx = curr.idx + off[k];
+                if (exterior[nidx] == 0 && data[nidx] < isoValue) {
+                    exterior[nidx] = 1;
+                    q.push_back({ nidx, curr.x + dxs[k], curr.y + dys[k], curr.z + dzs[k] });
+                }
+            }
+        }
+        else {
+            for (int k = 0; k < 6; ++k) {
+                int nx = curr.x + dxs[k];
+                int ny = curr.y + dys[k];
+                int nz = curr.z + dzs[k];
+                if (nx >= 0 && nx < dx && ny >= 0 && ny < dy && nz >= 0 && nz < dz) {
+                    size_t nidx = (size_t)nx + (size_t)ny * dx + (size_t)nz * slice;
+                    if (exterior[nidx] == 0 && data[nidx] < isoValue) {
+                        exterior[nidx] = 1;
+                        q.push_back({ nidx, nx, ny, nz });
+                    }
                 }
             }
         }
     }
 
-    // 取反：外部=0，内部=1
-    // 用 vtkSMPTools::For 替代 #pragma omp parallel for
-    vtkSMPTools::For(0, static_cast<vtkIdType>(total),
-        [&](vtkIdType begin, vtkIdType end) {
-            for (vtkIdType i = begin; i < end; ++i)
-                mask[i] = (mask[i] == 1) ? 0 : 1;
+    for (long long i = 0; i < (long long)total; ++i) {
+        if (data[i] < isoValue && exterior[i] == 0) {
+            exterior[i] = 1; // 内部孔隙
         }
-    );
-    return mask;
+        else {
+            exterior[i] = 0; // 固体或外部空气
+        }
+    }
+
+    return exterior;
 }
 
-inline std::vector<uint8_t> VoidDetector::GetCandidateMask(
+inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
     const VolumeBuffer& vol,
     const std::vector<uint8_t>& interiorMask,
     const VoidDetectionParams& params)
 {
-    const size_t total = (size_t)vol.dims[0] * vol.dims[1] * vol.dims[2];
-    std::vector<uint8_t> out(total, 0);
+    const int dx = vol.dims[0];
+    const int dy = vol.dims[1];
+    const int dz = vol.dims[2];
+    const size_t slice = (size_t)dx * dy;
+    const size_t total = slice * dz;
 
-    // 用 vtkSMPTools::For 替代 #pragma omp parallel for
+    std::vector<uint8_t> raw_mask(total, 0);
+
     vtkSMPTools::For(0, static_cast<vtkIdType>(total),
         [&](vtkIdType begin, vtkIdType end) {
             for (vtkIdType i = begin; i < end; ++i) {
-                if (interiorMask[i] > 0
-                    && vol.voxels[i] >= params.grayMin
-                    && vol.voxels[i] <= params.grayMax)
-                    out[i] = 1;
+                if (interiorMask[i] > 0 && vol.voxels[i] <= params.grayMax) {
+                    raw_mask[i] = 1;
+                }
             }
-        }
-    );
-    return out;
-}
+        });
 
-inline std::vector<VoidRegion> VoidDetector::GetVoidRegions(
-    const VolumeBuffer& vol,
-    std::vector<uint8_t>& mask,
-    const VoidDetectionParams& params,
-    std::vector<int>& outLabelVol)
-{
-    const int    dx = vol.dims[0];
-    const int    dy = vol.dims[1];
-    const int    dz = vol.dims[2];
-    const size_t total = (size_t)dx * dy * dz;
-    outLabelVol.assign(total, -1);
+    const int erosionIterations = params.erosionIterations;
+    std::vector<uint8_t> eroded = raw_mask;
+    std::vector<uint8_t> eroded_next(total, 0);
 
-    const float cosThresh =
-        std::cos(params.angleThresholdDeg * (float)M_PI / 180.f);
-
-    // ── Step A：预计算结构张量向量场 ─────────────────────────────────
-    // 用 vtkSMPTools::For 替代 #pragma omp parallel for
-    std::vector<std::array<float, 3>> dirs(total);
-    vtkSMPTools::For(0, static_cast<vtkIdType>(total),
-        [&](vtkIdType begin, vtkIdType end) {
-            for (vtkIdType i = begin; i < end; ++i) {
-                if (mask[i] == 0) continue;
-                const int cz = (int)(i / (dx * dy));
-                const int cy = (int)((i / dx) % dy);
-                const int cx = (int)(i % dx);
-                dirs[i] = GetPrincipalDirection(
-                    vol, cx, cy, cz, params.tensorWindowSize);
-            }
-        }
-    );
-
-    // ── Step B：场驱动并查集合并（扫描线，单线程，数据依赖顺序敏感）─
-    // 注意：并查集扫描线本身存在前向依赖（当前体素需要引用已处理的邻居），
-    // 不适合并行化，保持单线程顺序扫描。
-    constexpr int nOff[13][3] = {
-        {-1,0,0},{0,-1,0},{0,0,-1},
-        {-1,-1,0},{-1,1,0},{-1,0,-1},{-1,0,1},
-        {0,-1,-1},{0,-1,1},
-        {-1,-1,-1},{-1,-1,1},{-1,1,-1},{-1,1,1}
-    };
-    for (size_t z = 0; z < dz; ++z)
-        for (size_t y = 0; y < dy; ++y)
-            for (size_t x = 0; x < dx; ++x) {
-                const size_t curr = x + y * dx + z * dx * dy;
-                if (mask[curr] == 0) continue;
-                outLabelVol[curr] = (int)curr;
-
-                const auto& dirCurr = dirs[curr];
-                for (int i = 0; i < 13; ++i) {
-                    const int nx = x + nOff[i][0];
-                    const int ny = y + nOff[i][1];
-                    const int nz = z + nOff[i][2];
-                    if (nx >= 0 && nx < dx && ny >= 0 && ny < dy && nz >= 0 && nz < dz) {
-                        const size_t ni = (size_t)nx + (size_t)ny * dx + (size_t)nz * dx * dy;
-                        if (outLabelVol[ni] != -1) {
-                            const auto& dirNi = dirs[ni];
-                            const float dot = std::abs(
-                                dirCurr[0] * dirNi[0] +
-                                dirCurr[1] * dirNi[1] +
-                                dirCurr[2] * dirNi[2]);
-                            if (dot >= cosThresh)
-                                UnionFind::SetUnion(outLabelVol.data(),
-                                    (int)curr, (int)ni);
+    for (int iter = 0; iter < erosionIterations; ++iter) {
+        std::fill(eroded_next.begin(), eroded_next.end(), 0);
+        vtkSMPTools::For(1, dz - 1, [&](vtkIdType begin, vtkIdType end) {
+            for (int z = begin; z < end; ++z) {
+                for (int y = 1; y < dy - 1; ++y) {
+                    for (int x = 1; x < dx - 1; ++x) {
+                        size_t idx = (size_t)z * slice + (size_t)y * dx + (size_t)x;
+                        if (eroded[idx] &&
+                            eroded[idx + 1] && eroded[idx - 1] &&
+                            eroded[idx + dx] && eroded[idx - dx] &&
+                            eroded[idx + slice] && eroded[idx - slice]) {
+                            eroded_next[idx] = 1;
                         }
                     }
                 }
             }
+            });
+        std::swap(eroded, eroded_next);
+    }
 
-    // ── Step C：ID 扁平化 + 体积统计（单线程，依赖前一步结果）──────
-    std::map<int, int>       rootMap;
-    std::vector<VoidRegion> regions;
-    int nextId = 1;
+    std::vector<uint8_t> candidates(total, 0);
+    std::queue<size_t> bfsQueue;
 
     for (size_t i = 0; i < total; ++i) {
-        if (outLabelVol[i] == -1) { outLabelVol[i] = 0; continue; }
-        const int root = UnionFind::GetRoot(outLabelVol.data(), (int)i);
-        if (rootMap.find(root) == rootMap.end()) {
-            rootMap[root] = nextId++;
-            VoidRegion r; r.id = rootMap[root];
-            regions.push_back(r);
+        if (eroded[i]) {
+            bfsQueue.push(i);
+            candidates[i] = 1;
         }
-        const int fid = rootMap[root];
-        outLabelVol[i] = fid;
-        regions[fid - 1].voxelCount++;
     }
 
-    const double vVol = vol.spacing[0] * vol.spacing[1] * vol.spacing[2];
-    std::vector<VoidRegion> filtered;
-    for (auto& r : regions) {
-        r.volumeMM3 = r.voxelCount * vVol;
-        if (r.volumeMM3 >= params.minVolumeMM3) {
-            r.equivalentDiameterMM =
-                std::pow(6.0 * r.volumeMM3 / M_PI, 1.0 / 3.0);
-            filtered.push_back(r);
+    const std::array<long long, 6> offsets = { 1, -1, (long long)dx, -(long long)dx,
+                                               (long long)slice, -(long long)slice };
+    while (!bfsQueue.empty()) {
+        size_t cur = bfsQueue.front();
+        bfsQueue.pop();
+        for (long long off : offsets) {
+            size_t nb = (size_t)((long long)cur + off);
+            if (nb < total && raw_mask[nb] && !candidates[nb]) {
+                candidates[nb] = 1;
+                bfsQueue.push(nb);
+            }
         }
     }
-    return filtered;
+    return candidates;
+}
+
+inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
+    const VolumeBuffer& vol,
+    std::vector<uint8_t>& candidateMask,
+    const VoidDetectionParams& params,
+    std::vector<int>& outLabelVol)
+{
+    const int dx = vol.dims[0];
+    const int dy = vol.dims[1];
+    const int dz = vol.dims[2];
+    const size_t slice = (size_t)dx * dy;
+    const size_t total = slice * dz;
+
+    const double voxelVol = vol.spacing[0] * vol.spacing[1] * vol.spacing[2];
+    outLabelVol.assign(total, 0);
+
+    std::vector<VoidRegion> regions;
+    int currentID = 1;
+
+    const std::array<long long, 6> offsets6 = { 1, -1, (long long)dx, -(long long)dx, (long long)slice, -(long long)slice };
+
+    // 13个独立方向 (用于表面积计算)
+    const std::vector<std::array<int, 3>> directions13 = {
+        {1,0,0}, {0,1,0}, {0,0,1},
+        {1,1,0}, {1,-1,0}, {1,0,1}, {1,0,-1}, {0,1,1}, {0,1,-1},
+        {1,1,1}, {1,1,-1}, {1,-1,1}, {1,-1,-1}
+    };
+
+    std::queue<size_t> q;
+
+    for (size_t i = 0; i < total; ++i) {
+        if (candidateMask[i] > 0 && outLabelVol[i] == 0) {
+
+            VoidRegion region;
+            region.id = currentID;
+
+            // 初始化统计变量
+            double sumGray = 0;
+            double sumGraySq = 0;
+            region.minGray = 1e9;
+            region.maxGray = -1e9;
+
+            int sz0 = (int)(i / slice);
+            int sy0 = (int)((i / dx) % dy);
+            int sx0 = (int)(i % dx);
+            region.seedVoxel = { sx0, sy0, sz0 };
+            region.bbox = { sx0, sx0, sy0, sy0, sz0, sz0 };
+
+            double sumX = 0, sumY = 0, sumZ = 0;
+            double sumXX = 0, sumYY = 0, sumZZ = 0;
+            double sumXY = 0, sumXZ = 0, sumYZ = 0;
+
+            std::vector<size_t> regionVoxels;
+            q.push(i);
+            outLabelVol[i] = currentID;
+
+            while (!q.empty()) {
+                size_t curr = q.front();
+                q.pop();
+                regionVoxels.push_back(curr);
+
+                int cz = (int)(curr / slice);
+                int cy = (int)((curr / dx) % dy);
+                int cx = (int)(curr % dx);
+
+                // --- 基础统计 ---
+                region.voxelCount++;
+                double px = (double)cx * vol.spacing[0];
+                double py = (double)cy * vol.spacing[1];
+                double pz = (double)cz * vol.spacing[2];
+
+                sumX += px; sumY += py; sumZ += pz;
+                sumXX += px * px; sumYY += py * py; sumZZ += pz * pz;
+                sumXY += px * py; sumXZ += px * pz; sumYZ += py * pz;
+
+                // --- 灰度统计 ---
+                double val = static_cast<double>(vol.voxels[curr]);
+                sumGray += val;
+                sumGraySq += val * val;
+                region.minGray = std::min(region.minGray, val);
+                region.maxGray = std::max(region.maxGray, val);
+
+                // --- 边界框更新 ---
+                region.bbox[0] = std::min(region.bbox[0], cx);
+                region.bbox[1] = std::max(region.bbox[1], cx);
+                region.bbox[2] = std::min(region.bbox[2], cy);
+                region.bbox[3] = std::max(region.bbox[3], cy);
+                region.bbox[4] = std::min(region.bbox[4], cz);
+                region.bbox[5] = std::max(region.bbox[5], cz);
+
+                for (long long off : offsets6) {
+                    size_t nb = (size_t)((long long)curr + off);
+                    if (nb < total && candidateMask[nb] > 0 && outLabelVol[nb] == 0) {
+                        outLabelVol[nb] = currentID;
+                        q.push(nb);
+                    }
+                }
+            }
+
+            region.volumeMM3 = region.voxelCount * voxelVol;
+
+            if (region.volumeMM3 >= params.minVolumeMM3) {
+                // 1. 重心
+                region.centroidMM[0] = sumX / region.voxelCount + vol.origin[0];
+                region.centroidMM[1] = sumY / region.voxelCount + vol.origin[1];
+                region.centroidMM[2] = sumZ / region.voxelCount + vol.origin[2];
+
+                // 2. 等效直径与半径
+                region.equivalentDiameterMM = pow((6.0 * region.volumeMM3) / M_PI, 1.0 / 3.0);
+                region.radius = region.equivalentDiameterMM / 2.0;
+
+                // 3. 灰度统计
+                region.meanGray = sumGray / region.voxelCount;
+                double variance = (sumGraySq / region.voxelCount) - (region.meanGray * region.meanGray);
+                region.stdDevGray = std::sqrt(std::max(0.0, variance));
+
+                // 4. 投影尺寸 (mm)
+                region.xProjection = (region.bbox[1] - region.bbox[0] + 1) * vol.spacing[0];
+                region.yProjection = (region.bbox[3] - region.bbox[2] + 1) * vol.spacing[1];
+                region.zProjection = (region.bbox[5] - region.bbox[4] + 1) * vol.spacing[2];
+
+                // 5. PCA 分析
+                double cov[3][3];
+                cov[0][0] = sumXX / region.voxelCount - (sumX / region.voxelCount) * (sumX / region.voxelCount);
+                cov[1][1] = sumYY / region.voxelCount - (sumY / region.voxelCount) * (sumY / region.voxelCount);
+                cov[2][2] = sumZZ / region.voxelCount - (sumZ / region.voxelCount) * (sumZ / region.voxelCount);
+                cov[0][1] = cov[1][0] = sumXY / region.voxelCount - (sumX / region.voxelCount) * (sumY / region.voxelCount);
+                cov[0][2] = cov[2][0] = sumXZ / region.voxelCount - (sumX / region.voxelCount) * (sumZ / region.voxelCount);
+                cov[1][2] = cov[2][1] = sumYZ / region.voxelCount - (sumY / region.voxelCount) * (sumZ / region.voxelCount);
+
+                double* covPtr[3] = { cov[0], cov[1], cov[2] };
+                double eigenVals[3], eigenVecs[3][3];
+                double* vecPtr[3] = { eigenVecs[0], eigenVecs[1], eigenVecs[2] };
+                vtkMath::Jacobi(covPtr, eigenVals, vecPtr);
+
+                // 排序特征值 (vtkMath::Jacobi 已经按降序排序)
+                region.pcaAxes = { eigenVals[0], eigenVals[1], eigenVals[2] };
+                if (eigenVals[0] > 1e-9) {
+                    region.elongation = std::sqrt(std::max(0.0, eigenVals[1] / eigenVals[0]));
+                    if (eigenVals[1] > 1e-9)
+                        region.flatness = std::sqrt(std::max(0.0, eigenVals[2] / eigenVals[1]));
+                    region.pcaDeviation1 = eigenVals[0] / (eigenVals[0] + eigenVals[1] + eigenVals[2]);
+                    region.pcaMaxDeviationRatio = (eigenVals[2] > 1e-9) ? (eigenVals[0] / eigenVals[2]) : 0.0;
+                }
+
+                // 6. 投影面积与表面积 (13方向)
+                std::vector<uint8_t> projXY((size_t)(region.bbox[1] - region.bbox[0] + 1) * (region.bbox[3] - region.bbox[2] + 1), 0);
+                std::vector<uint8_t> projXZ((size_t)(region.bbox[1] - region.bbox[0] + 1) * (region.bbox[5] - region.bbox[4] + 1), 0);
+                std::vector<uint8_t> projYZ((size_t)(region.bbox[3] - region.bbox[2] + 1) * (region.bbox[5] - region.bbox[4] + 1), 0);
+
+                int w = region.bbox[1] - region.bbox[0] + 1;
+                int h = region.bbox[3] - region.bbox[2] + 1;
+                int d = region.bbox[5] - region.bbox[4] + 1;
+
+                size_t crossCount13 = 0;
+                std::vector<float> dists;
+                std::vector<size_t> boundaryVoxels;
+
+                for (size_t vIdx : regionVoxels) {
+                    int cz = (int)(vIdx / slice);
+                    int cy = (int)((vIdx / dx) % dy);
+                    int cx = (int)(vIdx % dx);
+
+                    projXY[(size_t)(cx - region.bbox[0]) + (size_t)(cy - region.bbox[2]) * w] = 1;
+                    projXZ[(size_t)(cx - region.bbox[0]) + (size_t)(cz - region.bbox[4]) * w] = 1;
+                    projYZ[(size_t)(cy - region.bbox[2]) + (size_t)(cz - region.bbox[4]) * h] = 1;
+
+                    bool isBoundary = false;
+                    for (const auto& dir : directions13) {
+                        int nx = cx + dir[0]; int ny = cy + dir[1]; int nz = cz + dir[2];
+                        if (nx < 0 || ny < 0 || nz < 0 || nx >= dx || ny >= dy || nz >= dz) {
+                            crossCount13++; isBoundary = true;
+                        }
+                        else {
+                            size_t nIdx = (size_t)nx + (size_t)ny * dx + (size_t)nz * slice;
+                            if (outLabelVol[nIdx] != currentID) { crossCount13++; isBoundary = true; }
+                        }
+                        // 反向也要查，或者遍历完后乘以2，这里我们查全部13个方向的邻居
+                        int mx = cx - dir[0]; int my = cy - dir[1]; int mz = cz - dir[2];
+                        if (mx < 0 || my < 0 || mz < 0 || mx >= dx || my >= dy || mz >= dz) {
+                            crossCount13++; isBoundary = true;
+                        }
+                        else {
+                            size_t mIdx = (size_t)mx + (size_t)my * dx + (size_t)mz * slice;
+                            if (outLabelVol[mIdx] != currentID) { crossCount13++; isBoundary = true; }
+                        }
+                    }
+                    if (isBoundary) boundaryVoxels.push_back(vIdx);
+                }
+
+                size_t cXY = 0; for (uint8_t v : projXY) if (v) cXY++;
+                size_t cXZ = 0; for (uint8_t v : projXZ) if (v) cXZ++;
+                size_t cYZ = 0; for (uint8_t v : projYZ) if (v) cYZ++;
+
+                region.projectedAreaXYMM2 = cXY * vol.spacing[0] * vol.spacing[1];
+                region.projectedAreaXZMM2 = cXZ * vol.spacing[0] * vol.spacing[2];
+                region.projectedAreaYZMM2 = cYZ * vol.spacing[1] * vol.spacing[2];
+
+                // 表面积估算 (简化的13方向权重)
+                // 为简化，使用平均投影面积权重
+                double avgCrossArea = (vol.spacing[0] * vol.spacing[1] + vol.spacing[0] * vol.spacing[2] + vol.spacing[1] * vol.spacing[2]) / 3.0;
+                region.surfaceAreaMM2 = (double)crossCount13 * avgCrossArea / 13.0;
+
+                // 7. Compactness & Sphericity
+                if (region.surfaceAreaMM2 > 1e-9) {
+                    region.compactness = (36.0 * M_PI * region.volumeMM3 * region.volumeMM3) / std::pow(region.surfaceAreaMM2, 3.0);
+                    region.sphericity = std::pow(std::max(0.0, region.compactness), 1.0 / 3.0);
+                }
+
+                // 8. Gap (Characteristic thickness)
+                // 粗略估计：使用体积/表面积比率 (V/S) 的两倍
+                if (region.surfaceAreaMM2 > 1e-9)
+                    region.gapMM = 2.0 * (region.volumeMM3 / region.surfaceAreaMM2);
+
+                regions.push_back(region);
+                currentID++;
+            }
+            else
+            {
+                for (size_t vIdx : regionVoxels) {
+                    outLabelVol[vIdx] = 0;
+                }
+            }
+
+        }
+    }
+
+    return regions;
 }

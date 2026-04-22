@@ -146,6 +146,7 @@
     <ClInclude Include="DataManager.h" />
     <ClInclude Include="GapAnalysisService.h" />
     <ClInclude Include="GapAnalysisTypes.h" />
+    <ClInclude Include="GapAlgorithmOverlayStrategies.h" />
     <ClInclude Include="IInteractionHandler.h" />
     <ClInclude Include="ImageProcessor.h" />
     <ClInclude Include="InteractionEvent.h" />

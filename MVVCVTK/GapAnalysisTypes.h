@@ -6,6 +6,9 @@
 #include <vector>
 #include <array>
 #include <cstddef>
+#include <functional>
+#include <vtkSmartPointer.h>
+#include <vtkPolyData.h>
 
 // ── 分析任务状态（对齐 LoadState 风格）──────────────────────────────
 enum class GapAnalysisState {
@@ -24,8 +27,8 @@ struct SurfaceParams {
 
 // ── 高级法向精化参数 ──────────────────────────────────────────────────
 struct AdvancedSurfaceParams {
-    bool  enabled = false;
-    float normalSearchDistance = 0.0f;
+    bool  enabled = true;
+    float normalSearchDistance = 2.0f;
     bool  useMillimeter = false;
     float searchStep = 0.5f;
     float maxVertexShift = 2.0f;
@@ -37,9 +40,10 @@ struct AdvancedSurfaceParams {
 struct VoidDetectionParams {
     float  grayMin = 0.0f;
     float  grayMax = 0.0f;
-    double minVolumeMM3 = 0.01;
-    float  angleThresholdDeg = 30.0f;
+    double minVolumeMM3 = 0.00;
+    float  angleThresholdDeg = 40.0f;
     int    tensorWindowSize = 1;
+    int    erosionIterations = 2;
 };
 
 // ── 空洞区域统计结果 ──────────────────────────────────────────────────
@@ -50,6 +54,39 @@ struct VoidRegion {
     double               equivalentDiameterMM = 0.0;
     std::array<double, 3> centroidMM = { 0, 0, 0 };
     std::array<int, 6>    bbox = { 0, 0, 0, 0, 0, 0 };
+
+    std::array<int, 3> seedVoxel = { 0, 0, 0 };
+
+    double minGray = 0.0;
+    double maxGray = 0.0;
+    double meanGray = 0.0;
+    double stdDevGray = 0.0;
+    double contrastDeviation = 0.0; //对比偏差
+
+    double radius = 0.0;
+    double gapMM = 0.0;
+    double compactness = 0.0;
+
+    double surfaceAreaMM2 = 0.0;
+    double sphericity = 0.0;
+    std::array<double, 3> pcaAxes = { 0, 0, 0 }; // 长、中、短轴长度 (特征值)
+    double elongation = 0.0; // 伸长率
+    double flatness = 0.0;   // 扁平率
+
+    //投影尺寸 [mm]
+    float xProjection = 0.0f;
+    float yProjection = 0.0f;
+    float zProjection = 0.0f;
+
+    //主分量分析 (PCA) 偏差
+    double pcaDeviation1 = 0.0;
+    double pcaMaxDeviationRatio = 0.0;
+
+    //投影区域 [mm²]
+    double projectedAreaYZMM2 = 0.0;
+    double projectedAreaXZMM2 = 0.0;
+    double projectedAreaXYMM2 = 0.0;
+
 };
 
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
@@ -64,25 +101,25 @@ public:
     virtual ~IGapAnalysisService() = default;
 
     // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
-    virtual void SetSurfaceParams(const SurfaceParams& p) = 0;
-    virtual void SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
-    virtual void SetVoidParams(const VoidDetectionParams& p) = 0;
+    virtual void GapPreInit_SetSurfaceParams(const SurfaceParams& p) = 0;
+    virtual void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
+    virtual void GapPreInit_SetVoidParams(const VoidDetectionParams& p) = 0;
 
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
     // onComplete 在后台线程回调，只允许写原子标记
-    virtual void SetAnalysisAsync(
+    virtual void RunAsync(
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // ── 查询：主线程轮询（对齐 GetLoadState 风格）────────────────────
     virtual GapAnalysisState GetAnalysisState() const = 0;
 
     // ── 取消（尽力，对齐 CancelLoad 语义）────────────────────────────
-    virtual void SetAnalysisCanceled() {}
+    virtual void CancelRun() {}
 
     // ── 后处理：主线程消费结果（对齐 PostData_RebuildPipeline 调用点）
     // 返回空洞区域列表（供 UI 展示）
     virtual std::vector<VoidRegion> GetVoidRegions() const = 0;
 
     // 生成空洞 Mesh，供 IsoSurfaceStrategy::SetInputData 消费
-    virtual vtkSmartPointer<vtkPolyData> GetVoidMesh() const = 0;
+    virtual vtkSmartPointer<vtkPolyData> BuildVoidMesh() const = 0;
 };

@@ -109,6 +109,8 @@ protected:
     std::atomic<bool> m_needsSync{ false };
     std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
 
+    // 图层叠加策略列表（泛型支持任意算法）
+    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;
 public:
     virtual ~AbstractAppService() = default;
 
@@ -130,6 +132,10 @@ public:
 
     // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
+
+	// 图层叠加管理接口
+    virtual void SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy);
+    virtual void SetOverlayStrategiesCleared();
 };
 
 // ─────────────────────────────────────────────────────────────────────

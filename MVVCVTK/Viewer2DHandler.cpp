@@ -183,7 +183,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 			double proj = v1x * v2x + v1y * v2y;   // 点积（计算旋转幅度）v1v2cosθ
 
             //所有 sin/cos/tan 的输入参数必须是弧度。
-            //所有 asin / acos / atan / atan2 的输出结果必须是弧度
+			//所有 asin / acos / atan / atan2 的输出结果必须是弧度，atan2 比 atan 更适合计算两向量之间的夹角，因为它考虑了象限信息，可以正确处理所有情况（包括 v1 或 v2 之一为零的情况）。
 			double deltaAngleRadians = std::atan2(cross, proj);
             double deltaAngleDeg = vtkMath::DegreesFromRadians(deltaAngleRadians);
 

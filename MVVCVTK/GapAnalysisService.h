@@ -32,31 +32,28 @@ public:
     ~GapAnalysisService() {
         m_cancelFlag.store(true);
         std::lock_guard<std::mutex> lk(m_futureMutex);
-        if (m_future.valid()) {
-            m_future.wait(); // 必须阻塞等待后台线程安全退出
-        }
     }
 
     // ================================================================
     // 【前处理】— 只写参数，零计算，线程安全
     // ================================================================
-    void SetSurfaceParams(const SurfaceParams& p) override {
+    void GapPreInit_SetSurfaceParams(const SurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_surfParams = p;
     }
-    void SetAdvancedParams(const AdvancedSurfaceParams& p) override {
+    void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_advParams = p;
     }
-    void SetVoidParams(const VoidDetectionParams& p) override {
+    void GapPreInit_SetVoidParams(const VoidDetectionParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_voidParams = p;
     }
 
     // ================================================================
-    // 【触发】— 主动发起后台计算，对齐 SetFileLoadedAsync 的异步调用语义
+    // 【触发】— 主动发起后台计算，对齐 LoadFileAsync 线程模式
     // ================================================================
-    void SetAnalysisAsync( // MAIN
+    void RunAsync( // MAIN
         std::function<void(bool success)> onComplete = nullptr) override
     {
         if (m_analysisState.load() == static_cast<int>(GapAnalysisState::Running))
@@ -93,13 +90,13 @@ public:
                 }
 
                 VolumeBuffer volBuf;
-                if (SetVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
-                    auto interior = VoidDetector::GetInteriorMask(volBuf, surfP.isoValue);
+                if (BuildVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
+                    auto interior = VoidDetector::CreateInteriorMask(volBuf, surfP.isoValue);
                     if (!m_cancelFlag.load()) {
-                        auto candidates = VoidDetector::GetCandidateMask(volBuf, interior, voidP);
+                        auto candidates = VoidDetector::ExtractCandidates(volBuf, interior, voidP);
                         if (!m_cancelFlag.load()) {
                             GapAnalysisResult result;
-                            result.voids = VoidDetector::GetVoidRegions(
+                            result.voids = VoidDetector::LabelAndAnalyze(
                                 volBuf, candidates, voidP, result.labelVolume);
                             result.succeeded = true;
                             {
@@ -125,7 +122,7 @@ public:
         std::thread(std::move(task)).detach();
     }
 
-    void SetAnalysisCanceled() override { m_cancelFlag.store(true); }
+    void CancelRun() override { m_cancelFlag.store(true); }
 
     // ================================================================
     // 【查询】
@@ -135,20 +132,20 @@ public:
     }
 
     // ================================================================
-    // 【后处理】— 主线程消费，在后处理阶段调用
+    // 【后处理】— 主线程消费，在 PostData 阶段调用
     // ================================================================
     std::vector<VoidRegion> GetVoidRegions() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         return m_result.voids;
     }
 
-    // ── 3D：空洞等值面 Mesh（供可视化策略读取）──────────────────────
-    vtkSmartPointer<vtkPolyData> GetVoidMesh() const override {
+    // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
+    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         if (!m_result.succeeded || m_result.labelVolume.empty())
             return nullptr;
 
-        auto img = GetLabelImageData();
+        auto img = BuildLabelImageInternal();
         if (!img) return nullptr;
 
         auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
@@ -159,13 +156,13 @@ public:
         return fe->GetOutput();
     }
 
-    // ── 2D：标签体 vtkImageData（供切片策略读取）───────────────────
+    // ── 2D：标签体 vtkImageData（喂给 SliceStrategy）───────────────
     // label=0 → 背景（透明）；label>0 → 空洞编号
     // SliceStrategy::SetInputData 接受 vtkImageData，直接传入即可。
     // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
-    vtkSmartPointer<vtkImageData> GetLabelImage() const {
+    vtkSmartPointer<vtkImageData> BuildLabelImage() const {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        return GetLabelImageData();
+        return BuildLabelImageInternal();
     }
 
 private:
@@ -186,7 +183,7 @@ private:
     std::future<void>   m_future;
 
     // ── 内部辅助：labelVolume → vtkImageData（调用方持有 m_resultMutex）
-    vtkSmartPointer<vtkImageData> GetLabelImageData() const {
+    vtkSmartPointer<vtkImageData> BuildLabelImageInternal() const {
         if (!m_result.succeeded || m_result.labelVolume.empty())
             return nullptr;
 
@@ -206,8 +203,8 @@ private:
         return img;
     }
 
-	// ── 内部辅助：vtkImageData → VolumeBuffer（调用方持有 m_resultMutex）
-    static bool SetVolumeBuffer(
+    // ── 内部辅助：vtkImageData → VolumeBuffer（调用方持有 m_resultMutex）
+    static bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
     {
         if (!img) return false;
@@ -224,6 +221,7 @@ private:
             const int x = (int)(i % d[0]);
             const int y = (int)((i / d[0]) % d[1]);
             const int z = (int)(i / ((size_t)d[0] * d[1]));
+            // 并行
             out.voxels[i] = img->GetScalarComponentAsFloat(x, y, z, 0);
         }
         auto [mn, mx] = std::minmax_element(out.voxels.begin(), out.voxels.end());
@@ -233,21 +231,47 @@ private:
     }
 
 public:
-   // ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
-    bool SetResultsSaved(const std::string& baseName) {
-        std::string csvPath = baseName + "_voids.csv";
-        FILE* fp = fopen(csvPath.c_str(), "w");
-        if (fp) {
-           
-            fprintf(fp, "ID,VoxelCount,Volume(mm3),EquivDiameter(mm)\n");
-            for (const auto& v : m_result.voids)
-                fprintf(fp, "%d,%llu,%.4f,%.4f\n", v.id, (unsigned long long)v.voxelCount, v.volumeMM3, v.equivalentDiameterMM); 
-            fclose(fp);
+    // ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
+    bool saveResults(const std::string& baseName) {
+        std::vector<VoidRegion> voids;
+        {
+            // ★ 修复：加锁后将数据拷贝出来，确保在多线程轮询机制中是安全的
+            std::lock_guard<std::mutex> lk(m_resultMutex);
+            voids = m_result.voids;
         }
 
-        std::string rawPath = baseName + "_label.raw";
-        FILE* fr = fopen(rawPath.c_str(), "wb");
-        if (fr) { fwrite(m_result.labelVolume.data(), sizeof(int), m_result.labelVolume.size(), fr); fclose(fr); }
+        std::string csvPath = baseName + "_voids.csv";
+        FILE* fp = fopen(csvPath.c_str(), "w+");
+        if (!fp) return false;
+
+        // 1. 写入表头
+        fprintf(fp, "ID,VoxelCount,Volume(mm3),EquivDiameter(mm),Radius(mm),Gap(mm),Compactness,Sphericity,"
+            "CentroidX(mm),CentroidY(mm),CentroidZ(mm),"
+            "MinGray,MaxGray,MeanGray,StdDevGray,"
+            "X_Projection(mm),Y_Projection(mm),Z_Projection(mm),"
+            "PCA_Axis1,PCA_Axis2,PCA_Axis3,Elongation,Flatness,PCA_Deviation1,PCA_MaxDevRatio,"
+            "ProjAreaYZ(mm2),ProjAreaXZ(mm2),ProjAreaXY(mm2),SurfaceArea(mm2),"
+            "BBox_Xmin,BBox_Xmax,BBox_Ymin,BBox_Ymax,BBox_Zmin,BBox_Zmax\n");
+
+        // 2. 遍历写入每一行数据
+        for (const auto& v : voids) {
+            fprintf(fp, "%d,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,%.4f,"
+                "%d,%d,%d,%d,%d,%d\n",
+                v.id, (unsigned long long)v.voxelCount, v.volumeMM3, v.equivalentDiameterMM, v.radius, v.gapMM, v.compactness, v.sphericity,
+                v.centroidMM[0], v.centroidMM[1], v.centroidMM[2],
+                v.minGray, v.maxGray, v.meanGray, v.stdDevGray,
+                v.xProjection, v.yProjection, v.zProjection,
+                v.pcaAxes[0], v.pcaAxes[1], v.pcaAxes[2], v.elongation, v.flatness, v.pcaDeviation1, v.pcaMaxDeviationRatio,
+                v.projectedAreaYZMM2, v.projectedAreaXZMM2, v.projectedAreaXYMM2, v.surfaceAreaMM2,
+                v.bbox[0], v.bbox[1], v.bbox[2], v.bbox[3], v.bbox[4], v.bbox[5]);
+        }
+
+        fclose(fp);
         return true;
     }
 };

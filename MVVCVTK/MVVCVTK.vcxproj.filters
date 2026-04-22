@@ -61,6 +61,9 @@
     <Filter Include="头文件\App">
       <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Strategies\GapMeshOverlayStrategy">
+      <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="IsoSurfaceStrategy.h">
@@ -155,6 +158,9 @@
     </ClInclude>
     <ClInclude Include="BaseVisualStrategy.h">
       <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="GapAlgorithmOverlayStrategies.h">
+      <Filter>头文件\Strategies\GapMeshOverlayStrategy</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -64,7 +64,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_lastInput = data;
 
     auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-    mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
+    // mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
+	mapper->SetInputData(img); // 使用原始数据
     mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
     mapper->SetInteractiveUpdateRate(10.0);
 

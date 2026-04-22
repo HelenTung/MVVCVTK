@@ -26,6 +26,28 @@ void AbstractAppService::SetCurrentStrategy(
     m_isDirty = true;
 }
 
+void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy) {
+    if (!strategy) return;
+    m_overlayStrategies.push_back(strategy);
+    if (m_renderer) {
+        strategy->SetRendererAttached(m_renderer);
+    }
+
+    m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
+    m_needsSync = true;
+    m_isDirty = true;
+}
+
+void AbstractAppService::SetOverlayStrategiesCleared() {
+    if (m_renderer) {
+        for (auto& s : m_overlayStrategies) {
+            s->SetRendererDetached(m_renderer);
+        }
+    }
+    m_overlayStrategies.clear();
+    m_isDirty = true;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 构造 / 析构
 // ─────────────────────────────────────────────────────────────────────
@@ -578,6 +600,10 @@ void MedicalVizService::SetStrategyStateSynced()
 
     RenderParams params = GetRenderParams(flags);
     m_currentStrategy->SetVisualState(params, flags);
+
+    for (auto& overlay : m_overlayStrategies) {
+        overlay->SetVisualState(params, flags);
+    }
 
     m_isDirty = true;
     // m_needsSync = false;
