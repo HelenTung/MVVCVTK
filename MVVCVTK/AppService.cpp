@@ -11,23 +11,39 @@
 void AbstractAppService::SetCurrentStrategy(
     std::shared_ptr<AbstractVisualStrategy> newStrategy)
 {
-    if (!m_renderer || !m_renderWindow) return;
+    if (m_currentStrategy == newStrategy) {
+        if (m_currentStrategy && m_renderer) {
+            m_currentStrategy->SetCameraConfigured(m_renderer);
+            m_isDirty = true;
+        }
+        return;
+    }
 
-    if (m_currentStrategy)
+    if (m_currentStrategy && m_renderer)
         m_currentStrategy->SetRendererDetached(m_renderer);
 
     m_currentStrategy = newStrategy;
 
-    if (m_currentStrategy) {
+    if (m_currentStrategy && m_renderer) {
         m_currentStrategy->SetRendererAttached(m_renderer);
         m_currentStrategy->SetCameraConfigured(m_renderer);
     }
-    m_renderer->ResetCamera();
+    if (m_renderer)
+        m_renderer->ResetCamera();
     m_isDirty = true;
 }
 
 void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy) {
     if (!strategy) return;
+
+    const auto sameStrategy = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
+        [strategy](const std::shared_ptr<AbstractVisualStrategy>& current) {
+            return current.get() == strategy.get();
+        });
+    if (sameStrategy != m_overlayStrategies.end()) {
+        return;
+    }
+
     m_overlayStrategies.push_back(strategy);
     if (m_renderer) {
         strategy->SetRendererAttached(m_renderer);
@@ -697,6 +713,8 @@ void MedicalVizService::SetStrategyCacheCleared()
         m_currentStrategy->SetRendererDetached(m_renderer);
         m_currentStrategy = nullptr;
     }
+
+    SetOverlayStrategiesCleared();
     m_strategyCache.clear();
 }
 

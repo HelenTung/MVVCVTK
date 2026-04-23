@@ -119,8 +119,29 @@ public:
     virtual void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer>     ren)
     {
+        auto oldRenderer = m_renderer;
+        if (oldRenderer && oldRenderer != ren) {
+            if (m_currentStrategy) {
+                m_currentStrategy->SetRendererDetached(oldRenderer);
+            }
+            for (auto& overlay : m_overlayStrategies) {
+                if (overlay) overlay->SetRendererDetached(oldRenderer);
+            }
+        }
+
         m_renderWindow = win;
         m_renderer = ren;
+
+        if (!m_renderer) return;
+
+        if (m_currentStrategy) {
+            m_currentStrategy->SetRendererAttached(m_renderer);
+            m_currentStrategy->SetCameraConfigured(m_renderer);
+        }
+        for (auto& overlay : m_overlayStrategies) {
+            if (overlay) overlay->SetRendererAttached(m_renderer);
+        }
+        m_isDirty = true;
     }
 
     // 主线程 Timer 心跳驱动的更新入口
