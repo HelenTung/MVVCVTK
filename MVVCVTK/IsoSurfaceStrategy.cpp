@@ -55,14 +55,21 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     // 静态数据
     m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
+    m_isoFilter->ComputeNormalsOff();
+    m_isoFilter->ComputeGradientsOff();
 
     SetManagedProp(m_actor);
     SetManagedProp(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
+    if (m_lastInput == data) {
+        return;
+    }
+
     auto poly = vtkPolyData::SafeDownCast(data);
     if (poly) {
+        m_lastInput = data;
         poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
         m_mapper->ScalarVisibilityOff();
@@ -83,12 +90,11 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     // 作为 ImageData (需要��时计算)
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
+        m_lastInput = data;
         img->GetCenter(m_dataCenter);
 
         //m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         m_isoFilter->SetInputData(img);
-        m_isoFilter->ComputeNormalsOff();
-        m_isoFilter->ComputeGradientsOff(); 
 
         // 初始阈值保持轻量默认值，真实阈值由后续状态同步统一下发
         m_isoFilter->SetValue(0, 0.0);
@@ -138,7 +144,6 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
             // 只有当阈值真的改变时才重新计算
             if (m_isoFilter->GetValue(0) != params.isoValue) {
                 m_isoFilter->SetValue(0, params.isoValue);
-				m_mapper->Modified(); // 标记 Mapper 需要更新
             }
         }
     }

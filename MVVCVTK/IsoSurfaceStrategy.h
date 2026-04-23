@@ -32,6 +32,7 @@ private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter; // 等值面过滤器
     vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
+    vtkSmartPointer<vtkDataObject> m_lastInput; // 缓存当前输入，避免重复绑定相同数据触发额外管线更新
     vtkWeakPointer<vtkRenderer> m_renderer;
     double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
 };

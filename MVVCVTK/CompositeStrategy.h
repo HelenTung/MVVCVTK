@@ -32,5 +32,6 @@ private:
 
     std::shared_ptr<AbstractVisualStrategy> m_mainStrategy;
     std::shared_ptr<AbstractVisualStrategy> m_referencePlanes;
+    vtkSmartPointer<vtkDataObject> m_lastInput; // 缓存当前组合输入，避免主策略与参考平面重复接收相同数据
     VizMode m_mode;
 };

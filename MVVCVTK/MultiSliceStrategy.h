@@ -27,5 +27,7 @@ private:
 
     vtkSmartPointer<vtkImageSlice> m_slices[3];
     vtkSmartPointer<vtkImageResliceMapper> m_mappers[3];
+    vtkSmartPointer<vtkPlane> m_slicePlanes[3];      // 持久切片平面，避免重复创建切片节点导致管线抖动
+    vtkSmartPointer<vtkDataObject> m_lastInput;      // 缓存当前输入，重复数据不再重新绑定 mapper
     int m_indices[3] = { 0, 0, 0 };
 };

@@ -18,6 +18,11 @@ CompositeStrategy::CompositeStrategy(VizMode mode) : m_mode(mode) {
 }
 
 void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
+    if (m_lastInput == data) {
+        return;
+    }
+    m_lastInput = data;
+
     if (m_mainStrategy) {
         m_mainStrategy->SetInputData(data);
     }

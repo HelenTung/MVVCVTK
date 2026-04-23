@@ -71,8 +71,18 @@ void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
+    m_mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
+    m_mapper->SetRequestedRenderModeToGPU(); // 优先走 GPU 体渲染管线，避免大体数据退回 CPU 路径
+    m_mapper->SetAutoAdjustSampleDistances(0); // 采样步长由业务状态控制，避免自动策略频繁波动
+    m_mapper->SetInteractiveUpdateRate(10.0);
+    m_volume->SetMapper(m_mapper);
+
+    auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
+    volumeProperty->ShadeOn();
+    volumeProperty->SetInterpolationTypeToLinear();
+    m_volume->SetProperty(volumeProperty);
 
     SetManagedProp(m_volume);
     SetManagedProp(m_cubeAxes);
@@ -84,16 +94,13 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     img->GetCenter(m_dataCenter);
 
-    if (m_lastInput == data && m_volume->GetMapper()) {
+    if (m_lastInput == data && m_mapper && m_mapper->GetInput() == img) {
         return;
     }
     m_lastInput = data;
 
-    m_mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-	// mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
+    // mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
     m_mapper->SetInputData(img); // 使用原始数据
-    m_mapper->SetRequestedRenderModeToGPU(); // 优先走 GPU 体渲染管线，避免大体数据退回 CPU 路径
-    m_mapper->SetAutoAdjustSampleDistances(0); // 采样步长由业务状态控制，避免自动策略频繁波动
 
 	double spacing[3];
 	img->GetSpacing(spacing);
@@ -101,17 +108,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_interactionSampleDistance = std::max(m_staticSampleDistance * 2.0, m_staticSampleDistance + 1e-6);
     SetSampleDistance(false);
 
- m_mapper->SetInteractiveUpdateRate(10.0);
-
 	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
     m_cubeAxes->SetBounds(img->GetBounds());
-    m_volume->SetMapper(m_mapper);
-    if (!m_volume->GetProperty()) {
-        auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
-        volumeProperty->ShadeOn();
-        volumeProperty->SetInterpolationTypeToLinear();
-        m_volume->SetProperty(volumeProperty);
-    }
 }
 
 void VolumeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {

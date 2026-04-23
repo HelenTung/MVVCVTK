@@ -49,6 +49,8 @@ private:
     vtkWeakPointer<vtkRenderer> m_renderer;
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
+    vtkSmartPointer<vtkPlane> m_slicePlane;           // 持久切片平面，保持 mapper 输入关系稳定，仅更新原点与法线
+    vtkSmartPointer<vtkDataObject> m_lastInput;       // 缓存当前输入，避免重复绑定相同数据触发额外管线更新
     Orientation m_orientation;
 
     // --- 十字线相关 ---

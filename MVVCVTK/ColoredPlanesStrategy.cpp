@@ -6,11 +6,6 @@
 #include <limits>
 
 void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const {
-    if (!m_imageData) return;
-
-    double localBounds[6] = { 0.0 };
-    m_imageData->GetBounds(localBounds);
-
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
 
@@ -21,9 +16,9 @@ void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMa
         for (int iy = 0; iy < 2; ++iy) {
             for (int iz = 0; iz < 2; ++iz) {
                 double localPoint[4] = {
-                    ix == 0 ? localBounds[0] : localBounds[1],
-                    iy == 0 ? localBounds[2] : localBounds[3],
-                    iz == 0 ? localBounds[4] : localBounds[5],
+                    ix == 0 ? m_bounds[0] : m_bounds[1],
+                    iy == 0 ? m_bounds[2] : m_bounds[3],
+                    iz == 0 ? m_bounds[4] : m_bounds[5],
                     1.0
                 };
                 double worldPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
@@ -78,35 +73,38 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
 void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
-    m_imageData = img;
+
+    if (m_lastInput == data) {
+        return;
+    }
+    m_lastInput = data;
 
     // 获取物理边界
-    double b[6];
-    m_imageData->GetBounds(b);
+    img->GetBounds(m_bounds);
 
     // 缓存最大索引用于 UpdateAllPositions 内部校验
     int dims[3];
-    m_imageData->GetDimensions(dims);
+    img->GetDimensions(dims);
     for (int i = 0; i < 3; ++i) m_maxIndices[i] = dims[i] - 1;
 
 	// 获取原点和间距
-    m_imageData->GetOrigin(m_origin);
-    m_imageData->GetSpacing(m_spacing);
+    img->GetOrigin(m_origin);
+    img->GetSpacing(m_spacing);
 
 	// Left_right (YZ面): 平面固定在 X = origin[0]，YZ 跨度为完整边界
-    m_planeSources[0]->SetOrigin(m_origin[0], b[2], b[4]);
-    m_planeSources[0]->SetPoint1(m_origin[0], b[3], b[4]);
-    m_planeSources[0]->SetPoint2(m_origin[0], b[2], b[5]);
+    m_planeSources[0]->SetOrigin(m_origin[0], m_bounds[2], m_bounds[4]);
+    m_planeSources[0]->SetPoint1(m_origin[0], m_bounds[3], m_bounds[4]);
+    m_planeSources[0]->SetPoint2(m_origin[0], m_bounds[2], m_bounds[5]);
 
     // Front_back (XZ面): 平面固定在 Y = origin[1]，XZ 跨度为完整边界
-    m_planeSources[1]->SetOrigin(b[0], m_origin[1], b[4]);
-    m_planeSources[1]->SetPoint1(b[1], m_origin[1], b[4]);
-    m_planeSources[1]->SetPoint2(b[0], m_origin[1], b[5]);
+    m_planeSources[1]->SetOrigin(m_bounds[0], m_origin[1], m_bounds[4]);
+    m_planeSources[1]->SetPoint1(m_bounds[1], m_origin[1], m_bounds[4]);
+    m_planeSources[1]->SetPoint2(m_bounds[0], m_origin[1], m_bounds[5]);
 
     // Top_down (XY面): 平面固定在 Z = origin[2]，XY 跨度为完整边界
-    m_planeSources[2]->SetOrigin(b[0], b[2], m_origin[2]);
-    m_planeSources[2]->SetPoint1(b[1], b[2], m_origin[2]);
-    m_planeSources[2]->SetPoint2(b[0], b[3], m_origin[2]);
+    m_planeSources[2]->SetOrigin(m_bounds[0], m_bounds[2], m_origin[2]);
+    m_planeSources[2]->SetPoint1(m_bounds[1], m_bounds[2], m_origin[2]);
+    m_planeSources[2]->SetPoint2(m_bounds[0], m_bounds[3], m_origin[2]);
 
     for (int i = 0; i < 3; i++) {
         // 确保 Actor 无额外位置偏移，平面位置完全由 PlaneSource 几何决定
@@ -116,7 +114,7 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void ColoredPlanesStrategy::SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
-    if (!m_imageData) return;
+    if (!m_lastInput) return;
 
     double worldBounds[6] = { 0.0 };
     SetWorldBounds(modelMatrix, worldBounds);

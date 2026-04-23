@@ -91,6 +91,8 @@ void SliceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix,
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
     m_mapper = vtkSmartPointer<vtkImageResliceMapper>::New();
+    m_slicePlane = vtkSmartPointer<vtkPlane>::New();
+    m_mapper->SetSlicePlane(m_slicePlane);
 
     // --- 初始化十字线资源 ---
     m_vLineSource = vtkSmartPointer<vtkLineSource>::New();
@@ -120,6 +122,18 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
 
     // 禁用 LUT 映射，交由 UpdateVisuals 动态更新原生 WindowLevel
     m_slice->GetProperty()->SetUseLookupTableScalarRange(0);
+    m_mapper->SliceFacesCameraOff(); // 截面永远绝对平行于相机屏幕
+    m_mapper->SliceAtFocalPointOff(); // 截面不强制穿过相机焦点，由状态统一驱动
+
+    if (m_orientation == Orientation::Top_down) {
+        m_slicePlane->SetNormal(0, 0, 1); // Z轴法线
+    }
+    else if (m_orientation == Orientation::Front_back) {
+        m_slicePlane->SetNormal(0, 1, 0); // Y轴法线
+    }
+    else {
+        m_slicePlane->SetNormal(1, 0, 0); // X轴法线
+    }
 
     SetManagedProp(m_slice);
     SetManagedProp(m_vLineActor);
@@ -130,29 +144,17 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
-    m_mapper->SetInputData(img);
-    m_mapper->SliceFacesCameraOff(); // 截面永远绝对平行于相机屏幕
-    m_mapper->SliceAtFocalPointOff(); // // 截面永远穿过相机焦点
+    if (m_lastInput == data && m_mapper->GetInput()) {
+        return;
+    }
+    m_lastInput = data;
 
-    // 创建 vtkPlane 对象
-    auto plane = vtkSmartPointer<vtkPlane>::New();
+    m_mapper->SetInputData(img);
+
     // 设置原点 (Origin)：让切片默认位于图像数据的几何中心
     double center[3];
     img->GetCenter(center);
-    plane->SetOrigin(center);
-
-    // 设置法线 (Normal)：决定切片的方向
-    if (m_orientation == Orientation::Top_down) {
-        plane->SetNormal(0, 0, 1); // Z轴法线
-    }
-    else if (m_orientation == Orientation::Front_back) {
-        plane->SetNormal(0, 1, 0); // Y轴法线
-    }
-    else {
-        plane->SetNormal(1, 0, 0); // X轴法线
-    }
-    // 将 Plane 对象传递给 Mapper
-    m_mapper->SetSlicePlane(plane);
+    m_slicePlane->SetOrigin(center);
     m_slice->SetMapper(m_mapper);
 }
 
@@ -268,11 +270,13 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         double worldBounds[6] = { 0.0 };
         SetWorldBounds(bounds, params.modelMatrix, worldBounds);
 
-        auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-        mat->DeepCopy(params.modelMatrix.data());
-        if (m_slice)      m_slice->SetUserMatrix(mat); 
-        if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
-        if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
+        if (HasFlag(flags, UpdateFlags::Transform)) {
+            auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
+            mat->DeepCopy(params.modelMatrix.data());
+            if (m_slice)      m_slice->SetUserMatrix(mat);
+            if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
+            if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
+        }
 
         double worldNormal[3] = { 0.0, 0.0, 0.0 };
         if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
