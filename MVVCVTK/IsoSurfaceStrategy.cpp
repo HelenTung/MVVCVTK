@@ -90,11 +90,8 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_isoFilter->ComputeNormalsOff();
         m_isoFilter->ComputeGradientsOff(); 
 
-        // 设定初始阈值
-        double range[2];
-        img->GetScalarRange(range);
-        double initialVal = range[0] + (range[1] - range[0]) * 0.2;
-        m_isoFilter->SetValue(0, initialVal);
+        // 初始阈值保持轻量默认值，真实阈值由后续状态同步统一下发
+        m_isoFilter->SetValue(0, 0.0);
 
         // 使用 Connection，VTK 会自动管理更新
         m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());

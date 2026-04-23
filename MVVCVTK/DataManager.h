@@ -17,6 +17,8 @@ class BaseDataManager : public AbstractDataManager
 protected:
 	mutable std::mutex m_dataMutex;
 	vtkSmartPointer<vtkImageData> m_vtkImage;
+    std::array<double, 2> m_scalarRange = { 0.0, 0.0 };      // 缓存当前体数据标量范围，避免重复全量扫描
+    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // 缓存当前体数据 spacing，加载后优先复用
     std::string m_loadedFilePath;
 
     void SetLoadedFilePath(const std::string& filePath);
@@ -30,6 +32,9 @@ public:
         return m_vtkImage;
 	}
 
+    std::array<double, 2> GetScalarRange() const override;
+    std::array<double, 3> GetSpacing() const override;
+
     bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
     std::string GetDefaultTransformedDataPath() const override;
 };
@@ -42,6 +47,8 @@ private:
     // ── 重建注入路径（前后处理分离）──────────────────────────────────
     mutable std::mutex            m_reconMutex;
     vtkSmartPointer<vtkImageData> m_pendingImage;   // 后台线程写，主线程读
+    std::array<double, 2>         m_pendingScalarRange = { 0.0, 0.0 }; // 缓存待提交重建数据范围，主线程消费时直接复用
+    std::array<double, 3>         m_pendingSpacing = { 1.0, 1.0, 1.0 }; // 缓存待提交重建数据 spacing，避免再次访问 VTK
     std::atomic<bool>             m_hasPendingImage{ false };
 
 public:

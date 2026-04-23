@@ -6,6 +6,32 @@
 #include <vtkImageResample.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <algorithm>
+#include <cmath>
+
+double VolumeStrategy::GetSampleDistance(const double spacing[3]) const
+{
+    double minSpacing = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double axisSpacing = spacing[i];
+        if (axisSpacing <= 0.0) continue;
+        if (minSpacing <= 0.0 || axisSpacing < minSpacing)
+            minSpacing = axisSpacing;
+    }
+
+    return minSpacing > 0.0 ? minSpacing : 1.0;
+}
+
+void VolumeStrategy::SetSampleDistance(bool isInteracting)
+{
+    if (!m_mapper) return;
+    m_mapper->SetSampleDistance(isInteracting ? m_interactionSampleDistance : m_staticSampleDistance);
+}
+
+bool VolumeStrategy::GetOpacityChanged(double opacity) const
+{
+    return std::abs(m_opacity - opacity) > 1e-6;
+}
 
 void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
 {
@@ -63,15 +89,23 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
-    auto mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
-    // mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
-	mapper->SetInputData(img); // 使用原始数据
-    mapper->SetAutoAdjustSampleDistances(1); // 自动调整采样距离
-    mapper->SetInteractiveUpdateRate(10.0);
+    m_mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
+	// mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
+    m_mapper->SetInputData(img); // 使用原始数据
+    m_mapper->SetRequestedRenderModeToGPU(); // 优先走 GPU 体渲染管线，避免大体数据退回 CPU 路径
+    m_mapper->SetAutoAdjustSampleDistances(0); // 采样步长由业务状态控制，避免自动策略频繁波动
+
+	double spacing[3];
+	img->GetSpacing(spacing);
+    m_staticSampleDistance = GetSampleDistance(spacing);
+    m_interactionSampleDistance = std::max(m_staticSampleDistance * 2.0, m_staticSampleDistance + 1e-6);
+    SetSampleDistance(false);
+
+ m_mapper->SetInteractiveUpdateRate(10.0);
 
 	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
     m_cubeAxes->SetBounds(img->GetBounds());
-    m_volume->SetMapper(mapper);
+    m_volume->SetMapper(m_mapper);
     if (!m_volume->GetProperty()) {
         auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
         volumeProperty->ShadeOn();
@@ -95,26 +129,13 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
 {   
     if (!m_volume || !m_volume->GetProperty()) return;
 
-    // 响应 UpdateFlags::TF
     auto prop = m_volume->GetProperty();
-    if ((int)flags & (int)UpdateFlags::TF || ((int)flags & (int)UpdateFlags::Material)) {
-        // 构建 VTK 函数
-        auto ctf = prop->GetRGBTransferFunction();
-        auto otf = prop->GetScalarOpacity();
-
-        if (!ctf)
-        {
-            ctf = vtkSmartPointer<vtkColorTransferFunction>::New();
-            prop->SetColor(ctf);
-        }
-
-        if (!otf)
-        {
-            otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
-            prop->SetScalarOpacity(otf);
-        }
-        ctf->RemoveAllPoints();
-        otf->RemoveAllPoints();
+    const bool isTfChanged = HasFlag(flags, UpdateFlags::TF);
+    const bool isMaterialChanged = HasFlag(flags, UpdateFlags::Material);
+    if (HasFlag(flags, UpdateFlags::TF)) {
+        // 遵循数据类与状态类分离、前后处理分离的思想，离线组装 VTK 函数，避免高频 Modified 触发重新渲染
+        auto newCtf = vtkSmartPointer<vtkColorTransferFunction>::New();
+        auto newOtf = vtkSmartPointer<vtkPiecewiseFunction>::New();
 
         double min = params.scalarRange[0];
         double max = params.scalarRange[1];
@@ -122,17 +143,29 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
 
         for (const auto& node : params.tfNodes) {
             double val = min + node.position * (max - min);
-            ctf->AddRGBPoint(val, node.r, node.g, node.b);
-            otf->AddPoint(val, node.opacity * globalOpacity);
+            newCtf->AddRGBPoint(val, node.r, node.g, node.b);
+            newOtf->AddPoint(val, node.opacity * globalOpacity);
         }
-        // 应用到底层
-        prop->SetColor(ctf);
-        prop->SetScalarOpacity(otf);
-        prop->Modified();
+
+        // 单次应用到底层，避免多次触发重管线
+        prop->SetColor(newCtf);
+        prop->SetScalarOpacity(newOtf);
+        m_opacity = params.material.opacity;
     }
 
-    // 响应 UpdateFlags::Material
-    if ((int)flags & (int)UpdateFlags::Material) {
+    if (isMaterialChanged && !isTfChanged && GetOpacityChanged(params.material.opacity)) {
+        auto otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
+        const double min = params.scalarRange[0];
+        const double max = params.scalarRange[1];
+        for (const auto& node : params.tfNodes) {
+            const double val = min + node.position * (max - min);
+            otf->AddPoint(val, node.opacity * params.material.opacity);
+        }
+        prop->SetScalarOpacity(otf);
+        m_opacity = params.material.opacity;
+    }
+
+    if (isMaterialChanged) {
         prop->SetAmbient(params.material.ambient);
         prop->SetDiffuse(params.material.diffuse);
         prop->SetSpecular(params.material.specular);
@@ -140,6 +173,10 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
 
         if (params.material.shadeOn) prop->ShadeOn();
         else prop->ShadeOff();
+    }
+
+    if (HasFlag(flags, UpdateFlags::Interaction)) {
+        SetSampleDistance(params.isInteracting);
     }
 
     // 响应变换矩阵

@@ -223,12 +223,9 @@ void MedicalVizService::SetFileLoadedAsync(
             if (ok) {
                 auto img = dataMgr->GetVtkImage();
                 if (img) {
-                    double range[2];
-                    double spacing[3];
-                    img->GetScalarRange(range);
-                    img->GetSpacing(spacing);
-                    sharedState->SetDataReady(range[0], range[1],
-                        { spacing[0], spacing[1], spacing[2] });
+                    const auto range = dataMgr->GetScalarRange();
+                    const auto spacing = dataMgr->GetSpacing();
+                    sharedState->SetDataReady(range[0], range[1], spacing);
                 }
                 else {
                     std::cerr << "[SetFileLoadedAsync] GetVtkImage() returned null after load.\n";
@@ -484,12 +481,9 @@ void MedicalVizService::SetPendingUpdatesProcessed()
             // 走和文件加载成功相同的后处理路径
             auto img = m_dataManager->GetVtkImage();
             if (img) {
-                double range[2];
-                double spacing[3];
-                img->GetScalarRange(range);
-                img->GetSpacing(spacing);
-                m_sharedState->SetDataReady(range[0], range[1],
-                    { spacing[0], spacing[1], spacing[2] });
+                const auto range = m_dataManager->GetScalarRange();
+                const auto spacing = m_dataManager->GetSpacing();
+                m_sharedState->SetDataReady(range[0], range[1], spacing);
             }
             else {
                 m_sharedState->SetLoadFailed();
@@ -551,7 +545,14 @@ void MedicalVizService::SetPipelineRebuilt()
     auto img = m_dataManager ? m_dataManager->GetVtkImage() : nullptr;
     if (img) {
         const auto spacing = m_sharedState->GetSpacing();
-        img->SetSpacing(spacing[0], spacing[1], spacing[2]);
+        double currentSpacing[3] = { 1.0, 1.0, 1.0 };
+        img->GetSpacing(currentSpacing);
+        if (std::abs(currentSpacing[0] - spacing[0]) > 1e-6 ||
+            std::abs(currentSpacing[1] - spacing[1]) > 1e-6 ||
+            std::abs(currentSpacing[2] - spacing[2]) > 1e-6)
+        {
+            img->SetSpacing(spacing[0], spacing[1], spacing[2]);
+        }
 
         int dims[3] = { 0, 0, 0 };
         img->GetDimensions(dims);
@@ -657,7 +658,11 @@ RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
         p.material = m_sharedState->GetMaterial();
+        m_sharedState->GetTFNodes(p.tfNodes);
     }
+
+    if (HasFlag(flags, UpdateFlags::Interaction))
+        p.isInteracting = m_sharedState->GetIsInteracting();
 
     if (HasFlag(flags, UpdateFlags::IsoValue))
         p.isoValue = m_sharedState->GetIsoValue();

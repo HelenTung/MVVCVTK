@@ -13,10 +13,59 @@
 #include <vtkImageChangeInformation.h>
 #include "MemMappedFile.h"
 
+namespace {
+std::array<double, 2> GetBufferScalarRange(const float* data, size_t count)
+{
+    if (!data || count == 0) {
+        return { 0.0, 0.0 };
+    }
+
+    float minValue = data[0];
+    float maxValue = data[0];
+    for (size_t i = 1; i < count; ++i) {
+        const float value = data[i];
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+    }
+
+    return { static_cast<double>(minValue), static_cast<double>(maxValue) };
+}
+
+std::array<double, 2> GetCopiedScalarRange(const float* src, float* dst, size_t count)
+{
+    if (!src || !dst || count == 0) {
+        return { 0.0, 0.0 };
+    }
+
+    float minValue = src[0];
+    float maxValue = src[0];
+    for (size_t i = 0; i < count; ++i) {
+        const float value = src[i];
+        dst[i] = value;
+        if (value < minValue) minValue = value;
+        if (value > maxValue) maxValue = value;
+    }
+
+    return { static_cast<double>(minValue), static_cast<double>(maxValue) };
+}
+}
+
 void BaseDataManager::SetLoadedFilePath(const std::string& filePath)
 {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     m_loadedFilePath = filePath;
+}
+
+std::array<double, 2> BaseDataManager::GetScalarRange() const
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return m_scalarRange;
+}
+
+std::array<double, 3> BaseDataManager::GetSpacing() const
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return m_imageSpacing;
 }
 
 std::string BaseDataManager::GetDefaultTransformedDataPath() const
@@ -67,10 +116,12 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
 
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
+    std::array<double, 2> scalarRange = { 0.0, 0.0 };
     if (mmf.SetOpened(filePath)) {
         //   - 文件够大 → 只取前 expectedBytes
         //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
         size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
+        const size_t copyCount = copyBytes / sizeof(float);
 
         if (mmf.GetSize() < expectedBytes) {
             std::cerr << "[Warn] File size (" << mmf.GetSize()
@@ -78,7 +129,15 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
                 << "). Partial load, remainder zeroed." << std::endl;
         }
 
-        std::memcpy(dst, mmf.GetData(), copyBytes);
+        scalarRange = GetCopiedScalarRange(
+            reinterpret_cast<const float*>(mmf.GetData()),
+            dst,
+            copyCount);
+        if (copyCount < totalVoxels) {
+            std::fill(dst + copyCount, dst + totalVoxels, 0.0f);
+            scalarRange[0] = std::min(scalarRange[0], 0.0);
+            scalarRange[1] = std::max(scalarRange[1], 0.0);
+        }
         // mmf 析构时自动 close()
     }
     else {
@@ -92,6 +151,14 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         }
         file.read(reinterpret_cast<char*>(dst),
             static_cast<std::streamsize>(expectedBytes));
+        const size_t readBytes = static_cast<size_t>(file.gcount());
+        const size_t readCount = readBytes / sizeof(float);
+        scalarRange = GetBufferScalarRange(dst, readCount);
+        if (readCount < totalVoxels) {
+            std::fill(dst + readCount, dst + totalVoxels, 0.0f);
+            scalarRange[0] = std::min(scalarRange[0], 0.0);
+            scalarRange[1] = std::max(scalarRange[1], 0.0);
+        }
         file.close();
     }
 
@@ -105,6 +172,8 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         m_dims[0] = newDims[0];
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
+        m_scalarRange = scalarRange;
+        m_imageSpacing = { m_spacing, m_spacing, m_spacing };
     }
 	SetLoadState(LoadState::Succeeded);
     SetLoadedFilePath(filePath);
@@ -138,7 +207,7 @@ bool RawVolumeDataManager::SetFromBuffer(
         static_cast<size_t>(dims[1]) *
         static_cast<size_t>(dims[2]);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-    std::memcpy(dst, data, total * sizeof(float));  // 唯一一次拷贝
+    const auto scalarRange = GetCopiedScalarRange(data, dst, total);  // 唯一一次拷贝，同时缓存范围
 
     // Modified() 暂不调用——留到主线程 ConsumeReconImage() 中调用，
     // 确保 VTK pipeline 脏标记传播在正确线程触发。
@@ -146,6 +215,8 @@ bool RawVolumeDataManager::SetFromBuffer(
     {
         std::lock_guard<std::mutex> lock(m_reconMutex);
         m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
+        m_pendingScalarRange = scalarRange;
+        m_pendingSpacing = { spacing[0], spacing[1], spacing[2] };
     }
     m_hasPendingImage.store(true);
 
@@ -176,6 +247,8 @@ bool RawVolumeDataManager::SetReconImageConsumed()
         m_dims[1] = incoming->GetDimensions()[1];
         m_dims[2] = incoming->GetDimensions()[2];
         m_spacing = incoming->GetSpacing()[0];
+        m_scalarRange = m_pendingScalarRange;
+        m_imageSpacing = m_pendingSpacing;
     }
     SetLoadState(LoadState::Succeeded);
 
@@ -305,6 +378,12 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         m_vtkImage = newImage;
+        double range[2] = { 0.0, 0.0 };
+        double spacing[3] = { 1.0, 1.0, 1.0 };
+        m_vtkImage->GetScalarRange(range);
+        m_vtkImage->GetSpacing(spacing);
+        m_scalarRange = { range[0], range[1] };
+        m_imageSpacing = { spacing[0], spacing[1], spacing[2] };
     }
 
     int dims[3];

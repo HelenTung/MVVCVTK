@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <array>
+#include <algorithm>
 #include <cmath> 
 #include <atomic>
 
@@ -156,11 +157,29 @@ public:
 
     // ── 传输函数节点 ──────────────────────────────────────────────
     void SetTFNodes(const std::vector<TFNode>& nodes) {
+        bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_nodes = nodes;
+            if (m_nodes.size() != nodes.size()) {
+                m_nodes = nodes;
+                changed = true;
+            }
+            else {
+                const bool same = std::equal(m_nodes.begin(), m_nodes.end(), nodes.begin(),
+                    [](const TFNode& a, const TFNode& b) {
+                        return std::abs(a.position - b.position) <= 1e-6 &&
+                            std::abs(a.opacity - b.opacity) <= 1e-6 &&
+                            std::abs(a.r - b.r) <= 1e-6 &&
+                            std::abs(a.g - b.g) <= 1e-6 &&
+                            std::abs(a.b - b.b) <= 1e-6;
+                    });
+                if (!same) {
+                    m_nodes = nodes;
+                    changed = true;
+                }
+            }
         }
-        SetObserversNotified(UpdateFlags::TF);
+        if (changed) SetObserversNotified(UpdateFlags::TF);
     }
     void GetTFNodes(std::vector<TFNode>& dest) const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -186,11 +205,21 @@ public:
 
     // ── 材质参数 ──────────────────────────────────────────────────
     void SetMaterial(const MaterialParams& mat) {
+        bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_material = mat;
+            if (std::abs(m_material.ambient - mat.ambient) > 1e-6 ||
+                std::abs(m_material.diffuse - mat.diffuse) > 1e-6 ||
+                std::abs(m_material.specular - mat.specular) > 1e-6 ||
+                std::abs(m_material.specularPower - mat.specularPower) > 1e-6 ||
+                std::abs(m_material.opacity - mat.opacity) > 1e-6 ||
+                m_material.shadeOn != mat.shadeOn)
+            {
+                m_material = mat;
+                changed = true;
+            }
         }
-        SetObserversNotified(UpdateFlags::Material);
+        if (changed) SetObserversNotified(UpdateFlags::Material);
     }
     MaterialParams GetMaterial() const {
         std::lock_guard<std::mutex> lk(m_mutex);

@@ -43,6 +43,8 @@ public:
     virtual ~AbstractDataManager() = default;
     virtual bool SetDataLoaded(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
+    virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
+    virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
     virtual bool SetFromBuffer(
         const float* data,
         const std::array<int, 3>& dims,

@@ -114,6 +114,7 @@ struct RenderParams {
     std::array<double, 3>  cursor = { 0, 0, 0 };
     std::array<double, 3>  cursorRaw = { 0, 0, 0 };
     int                    cursorAxis = -1;
+    bool                   isInteracting = false; // 当前是否处于高频交互，用于切换轻量渲染参数
     std::vector<TFNode>    tfNodes;
     double                 scalarRange[2] = { 0.0, 255.0 };
     MaterialParams         material;
