@@ -209,7 +209,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
         SetCameraStyleByVizMode(m_currentMode);
     }
 
-    if (m_interactiveService) m_interactiveService->SetDirty(true);
+    if (m_interactiveService) m_interactiveService->SetDirtyMarked();
 }
 
 // ─────────────────────────────────────────────────────────────────────

@@ -127,8 +127,8 @@ public:
     virtual void SetPendingUpdatesProcessed() {}
 
     bool IsDirty()      const { return m_isDirty; }
-    void SetDirty(bool val) { m_isDirty = val; }
     void SetDirtyMarked() { m_isDirty = true; }
+    bool SetDirtyConsumed() { return m_isDirty.exchange(false); }
 
     std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
 
