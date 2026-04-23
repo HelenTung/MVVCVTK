@@ -249,7 +249,8 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         if (m_slice && m_slice->GetProperty())
         {
             auto imgProp = m_slice->GetProperty();
-            imgProp->SetOpacity(params.material.opacity);
+            imgProp->SetOpacity(1.0);
+            // imgProp->SetOpacity(params.material.opacity);
             imgProp->SetColorWindow(params.windowLevel.windowWidth);
             imgProp->SetColorLevel(params.windowLevel.windowCenter);
             // 切片无光照，不设 ambient/diffuse（与 vtkImageProperty 语义一致）

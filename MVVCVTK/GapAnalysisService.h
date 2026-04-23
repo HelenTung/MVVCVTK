@@ -235,7 +235,6 @@ public:
     bool saveResults(const std::string& baseName) {
         std::vector<VoidRegion> voids;
         {
-            // ★ 修复：加锁后将数据拷贝出来，确保在多线程轮询机制中是安全的
             std::lock_guard<std::mutex> lk(m_resultMutex);
             voids = m_result.voids;
         }

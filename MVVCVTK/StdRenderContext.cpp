@@ -14,6 +14,10 @@ StdRenderContext::StdRenderContext()
 {
     m_interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
     m_interactor->SetRenderWindow(m_renderWindow);
+    // 强制向系统申请 Alpha 缓冲区，以支持深度剥离（透明度透视）
+    m_renderWindow->SetAlphaBitPlanes(1);
+    // 关闭多重采样，某些显卡下 MSAA 会导致深度剥离彻底失效
+    m_renderWindow->SetMultiSamples(0);
 
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
 

@@ -24,9 +24,13 @@ public:
         m_actor->SetMapper(m_mapper);
 
         m_actor->GetProperty()->SetColor(1.0, 0.0, 0.0); // 红色
-        m_actor->GetProperty()->SetOpacity(0.6);         // 半透明
+        m_actor->GetProperty()->SetOpacity(1.0);         // 半透明
         m_actor->GetProperty()->SetLighting(false);      //
         m_actor->SetPickable(false);
+        
+		// 多边形偏移设置，防止在极少数重合表面发生 Z-Fighting
+        m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
+
         SetManagedProp(m_actor);
     }
 
@@ -54,7 +58,7 @@ private:
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
     Orientation m_orientation;
-
+    double m_safeOffset[3] = {0}; // 沿法线微量偏移，防止穿模闪烁
 public:
     GapSliceOverlayStrategy(Orientation orient) : m_orientation(orient) {
         m_slice = vtkSmartPointer<vtkImageSlice>::New();
@@ -67,22 +71,26 @@ public:
         m_lut->SetTableRange(0, 255);
         m_lut->SetTableValue(0, 0.0, 0.0, 0.0, 0.0); // 0 为完全透明
         for (int i = 1; i < 256; ++i) {
-            m_lut->SetTableValue(i, 1.0, 0.0, 0.0, 0.5); // 算法结果半透明红色
+            m_lut->SetTableValue(i, 1.0, 0.0, 0.0, 1.0); // 算法结果半透明红色
         }
+        m_lut->Build(); // 生效
 
         m_slice->GetProperty()->SetLookupTable(m_lut);
         m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
         m_slice->GetProperty()->SetLayerNumber(1); // 提高层级防止 Z-fighting
+		m_slice->GetProperty()->SetInterpolationTypeToNearest(); // 最近邻插值，保持标签边界清晰
         SetManagedProp(m_slice);
     }
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto img = vtkImageData::SafeDownCast(data);
         if (!img) return;
+        img->GetSpacing(m_safeOffset);
+
         m_mapper->SetInputData(img);
         m_mapper->SliceFacesCameraOff();
         m_mapper->SliceAtFocalPointOff();
-
+        
         auto plane = vtkSmartPointer<vtkPlane>::New();
         double center[3]; img->GetCenter(center);
         plane->SetOrigin(center);
@@ -105,8 +113,14 @@ public:
                 if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
                 else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
                 else worldNormal[0] = 1.0;
+				//auto dis = std::max({ m_safeOffset[0], m_safeOffset[1], m_safeOffset[2] });
+                double offsetOrigin[3] = {
+                    params.cursor[0] + worldNormal[0] * 0.001,
+                    params.cursor[1] + worldNormal[1] * 0.001,
+                    params.cursor[2] + worldNormal[2] * 0.001
+                };
 
-                plane->SetOrigin(params.cursor[0], params.cursor[1], params.cursor[2]);
+                plane->SetOrigin(offsetOrigin[0], offsetOrigin[1], offsetOrigin[2]);
                 plane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
             }
         }
