@@ -93,8 +93,8 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_lastInput = data;
         img->GetCenter(m_dataCenter);
 
-        //m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
-        m_isoFilter->SetInputData(img);
+        m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
+        //m_isoFilter->SetInputData(img);
 
         // 初始阈值保持轻量默认值，真实阈值由后续状态同步统一下发
         m_isoFilter->SetValue(0, 0.0);

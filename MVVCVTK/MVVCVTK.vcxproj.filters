@@ -64,6 +64,9 @@
     <Filter Include="头文件\Strategies\GapMeshOverlayStrategy">
       <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Service\GapMeshOverlayService">
+      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="IsoSurfaceStrategy.h">
@@ -135,9 +138,6 @@
     <ClInclude Include="VolumeAnalysisService.h">
       <Filter>头文件\Service</Filter>
     </ClInclude>
-    <ClInclude Include="GapAnalysisService.h">
-      <Filter>头文件\Service</Filter>
-    </ClInclude>
     <ClInclude Include="AppService.h">
       <Filter>头文件\Service</Filter>
     </ClInclude>
@@ -161,6 +161,9 @@
     </ClInclude>
     <ClInclude Include="GapAlgorithmOverlayStrategies.h">
       <Filter>头文件\Strategies\GapMeshOverlayStrategy</Filter>
+    </ClInclude>
+    <ClInclude Include="GapAnalysisService.h">
+      <Filter>头文件\Service\GapMeshOverlayService</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

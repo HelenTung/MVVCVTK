@@ -8,22 +8,29 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <vtkSmartPointer.h>
+#include <vtkImageData.h>
 
 class VolumeBuffer {
 public:
-    std::vector<float>    voxels;
+
+    vtkSmartPointer<vtkImageData> m_imgData;
+    // 零拷贝指针，直接指向 vtkImageData 的底层数据
+    float* voxelsPtr = nullptr;
+
     std::array<int, 3>     dims = { 0, 0, 0 };
     std::array<double, 3>  spacing = { 1.0, 1.0, 1.0 };
     std::array<double, 3>  origin = { 0.0, 0.0, 0.0 };
     float                 minVal = 0.f;
     float                 maxVal = 0.f;
 
+
     // ── 安全取值（含边界检查）───────────────────────────────────────
     inline float GetVoxelValue(int x, int y, int z) const noexcept {
-        if (x < 0 || x >= dims[0] ||
+        if (!voxelsPtr || x < 0 || x >= dims[0] ||
             y < 0 || y >= dims[1] ||
             z < 0 || z >= dims[2]) return 0.f;
-        return voxels[(size_t)x + (size_t)y * dims[0] + (size_t)z * dims[0] * dims[1]];
+        return voxelsPtr[(size_t)x + (size_t)y * dims[0] + (size_t)z * (size_t)dims[0] * dims[1]];
     }
 
     // ── 三线性插值：体素索引坐标 ─────────────────────────────────────

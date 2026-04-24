@@ -99,8 +99,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
-    // mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
-    m_mapper->SetInputData(img); // 使用原始数据
+    m_mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
+    // m_mapper->SetInputData(img); // 使用原始数据
 
 	double spacing[3];
 	img->GetSpacing(spacing);

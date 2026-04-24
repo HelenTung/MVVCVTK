@@ -6,9 +6,8 @@
 #include <vector>
 #include <array>
 #include <cstddef>
-#include <functional>
 #include <vtkSmartPointer.h>
-#include <vtkPolyData.h>
+#include <vtkImageData.h>
 
 // ── 分析任务状态（对齐 LoadState 风格）──────────────────────────────
 enum class GapAnalysisState {
@@ -43,7 +42,7 @@ struct VoidDetectionParams {
     double minVolumeMM3 = 0.00;
     float  angleThresholdDeg = 40.0f;
     int    tensorWindowSize = 1;
-    int    erosionIterations = 2;
+    int erosionIterations = 2;
 };
 
 // ── 空洞区域统计结果 ──────────────────────────────────────────────────
@@ -93,6 +92,7 @@ struct VoidRegion {
 struct GapAnalysisResult {
     std::vector<VoidRegion> voids;
     std::vector<int>        labelVolume;  // 与体素一一对应，0 = 非空洞
+    vtkSmartPointer<vtkImageData> labelImage; // 标签体缓存，分析完成后构建一次，供 2D/3D 后处理复用
     bool                    succeeded = false;
 };
 

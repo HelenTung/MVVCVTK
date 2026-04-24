@@ -212,7 +212,7 @@ int main()
     cfgA.title = "Window A: Composite IsoSurface";
     cfgA.width = 600; cfgA.height = 600;
     cfgA.posX = 50;  cfgA.posY = 50;
-    cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
+        cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     cfgA.showAxes = true;
     cfgA.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     cfgA.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
@@ -249,30 +249,30 @@ int main()
                 return;
             }
 
-            //// 设置等值面等常规数据
-            //auto range = sharedState->GetDataRange();
-            //double isoVal = range[0] + (range[1] - range[0]) * 0.55;
-            //serviceA->SetIsoThreshold(isoVal);
+            // 设置等值面等常规数据
+            auto range = sharedState->GetDataRange();
+            double isoVal = range[0] + (range[1] - range[0]) * 0.55;
+            serviceA->SetIsoThreshold(isoVal);
 
-            //// 触发孔隙分析算法
-            //SurfaceParams surfP;
-            //surfP.isoValue = static_cast<float>(isoVal); // 使用自动推算的阈值
-            //gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
+            // 触发孔隙分析算法
+            SurfaceParams surfP;
+            surfP.isoValue = static_cast<float>(isoVal); // 使用自动推算的阈值
+            gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
 
-            //VoidDetectionParams voidP;
-            //voidP.grayMin = -0.2262536138296127f;
-            //voidP.grayMax = 0.15f;
-            ////voidP.minVolumeMM3 = 3;
-            //// 0.000009595703125
-            //voidP.minVolumeMM3 = 0.0001;
-            //voidP.angleThresholdDeg = 30.0f;
-            //voidP.tensorWindowSize = 1;
-            //voidP.erosionIterations = 2;
-            //gapAnalysis->GapPreInit_SetVoidParams(voidP);
+            VoidDetectionParams voidP;
+            voidP.grayMin = -0.2262536138296127f;
+            voidP.grayMax = 0.15f;
+            //voidP.minVolumeMM3 = 3;
+            // 0.000009595703125
+            voidP.minVolumeMM3 = 0.0001;
+            voidP.angleThresholdDeg = 30.0f;
+            voidP.tensorWindowSize = 1;
+            voidP.erosionIterations = 2;
+            gapAnalysis->GapPreInit_SetVoidParams(voidP);
 
-            //std::cout << "[Main] Triggering background Gap Analysis...\n";
-            //// 发起后台计算，不阻塞当前 UI
-            //gapAnalysis->RunAsync();
+            std::cout << "[Main] Triggering background Gap Analysis...\n";
+            // 发起后台计算，不阻塞当前 UI
+            gapAnalysis->RunAsync();
         }
     );
 
@@ -288,17 +288,16 @@ int main()
     contextD->SetInteractorInitialized();
     contextE->SetInteractorInitialized();
 
-    //auto trigger = vtkSmartPointer<GapOverlayKeyTrigger>::New();
-    //trigger->gapAnalysis = gapAnalysis;
-    //trigger->srvA = serviceA; trigger->srvB = serviceB;
-    //trigger->srvC = serviceC; trigger->srvD = serviceD; trigger->srvE = serviceE;
+    auto trigger = vtkSmartPointer<GapOverlayKeyTrigger>::New();
+    trigger->gapAnalysis = gapAnalysis;
+    trigger->srvA = serviceA; trigger->srvB = serviceB;
+    trigger->srvC = serviceC; trigger->srvD = serviceD; trigger->srvE = serviceE;
 
-    //contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform\n";

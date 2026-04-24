@@ -98,10 +98,11 @@ public:
                             GapAnalysisResult result;
                             result.voids = VoidDetector::LabelAndAnalyze(
                                 volBuf, candidates, voidP, result.labelVolume);
+                            result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
                             result.succeeded = true;
                             {
                                 std::lock_guard<std::mutex> lk(m_resultMutex);
-                                m_result = std::move(result);
+                                m_result = std::move(result); // 当前分析快照，供主线程后处理阶段统一消费
                                 m_volBufSnap = std::move(volBuf);
                             }
                             ok = true;
@@ -142,10 +143,10 @@ public:
     // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        if (!m_result.succeeded || m_result.labelVolume.empty())
+        if (!m_result.succeeded || !m_result.labelImage)
             return nullptr;
 
-        auto img = BuildLabelImageInternal();
+        auto img = m_result.labelImage;
         if (!img) return nullptr;
 
         auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
@@ -162,7 +163,7 @@ public:
     // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
     vtkSmartPointer<vtkImageData> BuildLabelImage() const {
         std::lock_guard<std::mutex> lk(m_resultMutex);
-        return BuildLabelImageInternal();
+        return m_result.labelImage;
     }
 
 private:
@@ -182,30 +183,31 @@ private:
     mutable std::mutex  m_futureMutex;
     std::future<void>   m_future;
 
-    // ── 内部辅助：labelVolume → vtkImageData（调用方持有 m_resultMutex）
-    vtkSmartPointer<vtkImageData> BuildLabelImageInternal() const {
-        if (!m_result.succeeded || m_result.labelVolume.empty())
+    // ── 内部辅助：labelVolume → vtkImageData，分析完成时构建一次标签缓存 ──
+    static vtkSmartPointer<vtkImageData> BuildLabelImage(
+        const std::vector<int>& labelVolume,
+        const VolumeBuffer& volBuf) {
+        if (labelVolume.empty())
             return nullptr;
 
-        const auto& b = m_volBufSnap;
         auto img = vtkSmartPointer<vtkImageData>::New();
-        img->SetDimensions(b.dims[0], b.dims[1], b.dims[2]);
-        img->SetSpacing(b.spacing[0], b.spacing[1], b.spacing[2]);
-        img->SetOrigin(b.origin[0], b.origin[1], b.origin[2]);
+        img->SetDimensions(volBuf.dims[0], volBuf.dims[1], volBuf.dims[2]);
+        img->SetSpacing(volBuf.spacing[0], volBuf.spacing[1], volBuf.spacing[2]);
+        img->SetOrigin(volBuf.origin[0], volBuf.origin[1], volBuf.origin[2]);
         img->AllocateScalars(VTK_INT, 1);
 
-        int* ptr = static_cast<int*>(img->GetScalarPointer());
-        const size_t total = (size_t)b.dims[0] * b.dims[1] * b.dims[2];
-        std::copy(m_result.labelVolume.begin(),
-            m_result.labelVolume.begin() + (std::ptrdiff_t)total,
-            ptr);
+        int* labelPtr = static_cast<int*>(img->GetScalarPointer()); // 标签缓存底层指针，供一次性拷贝 labelVolume
+        const size_t total = static_cast<size_t>(volBuf.dims[0]) * volBuf.dims[1] * volBuf.dims[2];
+        std::copy(labelVolume.begin(),
+            labelVolume.begin() + static_cast<std::ptrdiff_t>(total),
+            labelPtr);
         img->Modified();
         return img;
     }
 
-    // ── 内部辅助：vtkImageData → VolumeBuffer（调用方持有 m_resultMutex）
+    // ── 内部辅助：vtkImageData → VolumeBuffer（零拷贝，调用方持有 m_resultMutex）
     static bool BuildVolumeBuffer(
-        vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
+        const vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
     {
         if (!img) return false;
         int d[3]; img->GetDimensions(d);
@@ -215,18 +217,15 @@ private:
         double og[3]; img->GetOrigin(og);
         out.origin = { og[0], og[1], og[2] };
 
-        const size_t total = (size_t)d[0] * d[1] * d[2];
-        out.voxels.resize(total);
-        for (size_t i = 0; i < total; ++i) {
-            const int x = (int)(i % d[0]);
-            const int y = (int)((i / d[0]) % d[1]);
-            const int z = (int)(i / ((size_t)d[0] * d[1]));
-            // 并行
-            out.voxels[i] = img->GetScalarComponentAsFloat(x, y, z, 0);
-        }
-        auto [mn, mx] = std::minmax_element(out.voxels.begin(), out.voxels.end());
-        out.minVal = *mn;
-        out.maxVal = *mx;
+        // 零拷贝：直接获取底层数据指针
+        out.voxelsPtr = static_cast<float*>(img->GetScalarPointer());
+
+		// 直接调用 VTK 内置方法获取标量范围，避免手动遍历
+        double range[2];
+		img->GetScalarRange(range);
+		out.minVal = static_cast<float>(range[0]);
+		out.maxVal = static_cast<float>(range[1]);
+
         return true;
     }
 

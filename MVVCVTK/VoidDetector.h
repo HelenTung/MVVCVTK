@@ -56,30 +56,30 @@ public:
         std::vector<int>& outLabelVol);
 
 private:
-    static std::array<float, 3> GetPrincipalDirection(
-        const VolumeBuffer& vol, int x, int y, int z, int window) noexcept;
+    /*static std::array<float, 3> GetPrincipalDirection(
+        const VolumeBuffer& vol, int x, int y, int z, int window) noexcept;*/
 };
 
 // ─────────────────────────────────────────────────────────────────────
 
-inline std::array<float, 3> VoidDetector::GetPrincipalDirection(
-    const VolumeBuffer& vol, int x, int y, int z, int window) noexcept
-{
-    float m11 = 0, m22 = 0, m33 = 0;
-    for (int dz = -window; dz <= window; ++dz)
-        for (int dy = -window; dy <= window; ++dy)
-            for (int dx = -window; dx <= window; ++dx) {
-                const float gx =
-                    (vol.GetVoxelValue(x + dx + 1, y + dy, z + dz) - vol.GetVoxelValue(x + dx - 1, y + dy, z + dz)) * 0.5f;
-                const float gy =
-                    (vol.GetVoxelValue(x + dx, y + dy + 1, z + dz) - vol.GetVoxelValue(x + dx, y + dy - 1, z + dz)) * 0.5f;
-                const float gz =
-                    (vol.GetVoxelValue(x + dx, y + dy, z + dz + 1) - vol.GetVoxelValue(x + dx, y + dy, z + dz - 1)) * 0.5f;
-                m11 += gx * gx; m22 += gy * gy; m33 += gz * gz;
-            }
-    const float len = std::sqrt(m11 + m22 + m33 + 1e-9f);
-    return { std::sqrt(m11) / len, std::sqrt(m22) / len, std::sqrt(m33) / len };
-}
+//inline std::array<float, 3> VoidDetector::GetPrincipalDirection(
+//    const VolumeBuffer& vol, int x, int y, int z, int window) noexcept
+//{
+//    float m11 = 0, m22 = 0, m33 = 0;
+//    for (int dz = -window; dz <= window; ++dz)
+//        for (int dy = -window; dy <= window; ++dy)
+//            for (int dx = -window; dx <= window; ++dx) {
+//                const float gx =
+//                    (vol.GetVoxelValue(x + dx + 1, y + dy, z + dz) - vol.GetVoxelValue(x + dx - 1, y + dy, z + dz)) * 0.5f;
+//                const float gy =
+//                    (vol.GetVoxelValue(x + dx, y + dy + 1, z + dz) - vol.GetVoxelValue(x + dx, y + dy - 1, z + dz)) * 0.5f;
+//                const float gz =
+//                    (vol.GetVoxelValue(x + dx, y + dy, z + dz + 1) - vol.GetVoxelValue(x + dx, y + dy, z + dz - 1)) * 0.5f;
+//                m11 += gx * gx; m22 += gy * gy; m33 += gz * gz;
+//            }
+//    const float len = std::sqrt(m11 + m22 + m33 + 1e-9f);
+//    return { std::sqrt(m11) / len, std::sqrt(m22) / len, std::sqrt(m33) / len };
+//}
 
 inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     const VolumeBuffer& vol, float isoValue)
@@ -90,7 +90,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
 
     const size_t slice = (size_t)dx * dy;
     const size_t total = slice * dz;
-    const float* data = vol.voxels.data();
+    const float* data = vol.voxelsPtr;
 
     std::vector<uint8_t> exterior(total, 0);
 
@@ -196,7 +196,7 @@ inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
     vtkSMPTools::For(0, static_cast<vtkIdType>(total),
         [&](vtkIdType begin, vtkIdType end) {
             for (vtkIdType i = begin; i < end; ++i) {
-                if (interiorMask[i] > 0 && vol.voxels[i] <= params.grayMax) {
+                if (interiorMask[i] > 0 && vol.voxelsPtr[i] <= params.grayMax) {
                     raw_mask[i] = 1;
                 }
             }
@@ -327,7 +327,7 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
                 sumXY += px * py; sumXZ += px * pz; sumYZ += py * pz;
 
                 // --- 灰度统计 ---
-                double val = static_cast<double>(vol.voxels[curr]);
+                double val = static_cast<double>(vol.voxelsPtr[curr]);
                 sumGray += val;
                 sumGraySq += val * val;
                 region.minGray = std::min(region.minGray, val);
