@@ -7,10 +7,13 @@
 #include <vtkTIFFReader.h>
 #include <algorithm>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <vtkStringArray.h> 
 #include <vtkTransform.h>
 #include <vtkImageReslice.h>
 #include <vtkImageChangeInformation.h>
+#include <vtkPNGWriter.h>
 #include "MemMappedFile.h"
 
 namespace {
@@ -47,6 +50,63 @@ std::array<double, 2> GetCopiedScalarRange(const float* src, float* dst, size_t 
     }
 
     return { static_cast<double>(minValue), static_cast<double>(maxValue) };
+}
+
+std::string GetOrientationName(const Orientation orientation)
+{
+    switch (orientation) {
+    case Orientation::Front_back:
+        return "Front_back";
+    case Orientation::Left_right:
+        return "Left_right";
+    case Orientation::Top_down:
+    default:
+        return "Top_down";
+    }
+}
+
+std::array<int, 2> GetSliceImageSize(const int dims[3], const Orientation orientation)
+{
+    switch (orientation) {
+    case Orientation::Front_back:
+        return { dims[0], dims[2] };
+    case Orientation::Left_right:
+        return { dims[1], dims[2] };
+    case Orientation::Top_down:
+    default:
+        return { dims[0], dims[1] };
+    }
+}
+
+unsigned char GetWindowLevelGray(const double value, const WindowLevelParams& windowLevel)
+{
+    const double safeWindowWidth = std::max(windowLevel.windowWidth, 1e-6); // 当前导出使用的窗宽，避免除零
+    const double windowMin = windowLevel.windowCenter - safeWindowWidth * 0.5; // 当前灰度映射下限
+    const double normalized = (value - windowMin) / safeWindowWidth;
+    const double clamped = std::clamp(normalized, 0.0, 1.0);
+    return static_cast<unsigned char>(clamped * 255.0 + 0.5);
+}
+
+std::filesystem::path GetDefaultSliceDir(const std::string& loadedFilePath, const Orientation orientation)
+{
+    const std::string orientationName = GetOrientationName(orientation);
+    if (loadedFilePath.empty()) {
+        return std::filesystem::current_path() / (std::string("SliceExport_") + orientationName);
+    }
+
+    std::filesystem::path loadedPath = std::filesystem::path(loadedFilePath).lexically_normal();
+    std::filesystem::path parentPath = loadedPath.has_parent_path()
+        ? loadedPath.parent_path()
+        : std::filesystem::current_path();
+
+    std::string sourceName = loadedPath.has_extension()
+        ? loadedPath.stem().string()
+        : loadedPath.filename().string();
+    if (sourceName.empty()) {
+        sourceName = "Volume";
+    }
+
+    return parentPath / (sourceName + "_" + orientationName + "_Slices");
 }
 }
 
@@ -251,6 +311,131 @@ bool RawVolumeDataManager::SetReconImageConsumed()
         m_imageSpacing = m_pendingSpacing;
     }
     SetLoadState(LoadState::Succeeded);
+
+    return true;
+}
+
+bool BaseDataManager::SetSliceImagesSaved(
+    const std::string& dirPath,
+    Orientation orientation,
+    const WindowLevelParams& windowLevel,
+    const std::array<double, 16>& transformMatrix)
+{
+    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    std::string loadedFilePath;
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        if (!m_vtkImage) return false;
+        imageCopy->ShallowCopy(m_vtkImage);
+        loadedFilePath = m_loadedFilePath;
+    }
+
+    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    matrix->DeepCopy(transformMatrix.data());
+    matrix->Invert();
+
+    auto transform = vtkSmartPointer<vtkTransform>::New();
+    transform->SetMatrix(matrix);
+
+    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
+    reslice->SetInputData(imageCopy);
+    reslice->SetResliceTransform(transform);
+    reslice->SetInterpolationModeToLinear();
+    reslice->SetOutputDimensionality(3);
+    reslice->SetAutoCropOutput(true);
+
+    double range[2] = { 0.0, 0.0 };
+    imageCopy->GetScalarRange(range);
+    reslice->SetBackgroundLevel(range[0]);
+
+    try {
+        reslice->Update();
+    }
+    catch (...) {
+        return false;
+    }
+
+    auto outputImage = reslice->GetOutput();
+    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    outputImage->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        return false;
+    }
+
+    std::filesystem::path outputDir = dirPath.empty()
+        ? GetDefaultSliceDir(loadedFilePath, orientation)
+        : std::filesystem::path(dirPath);
+    if (outputDir.has_extension()) {
+        outputDir = outputDir.parent_path() / outputDir.stem();
+    }
+
+    try {
+        std::filesystem::create_directories(outputDir);
+    }
+    catch (...) {
+        return false;
+    }
+
+    const int sliceAxis = static_cast<int>(orientation); // 与 Orientation 枚举值保持一致
+    const int sliceCount = dims[sliceAxis];
+    const std::array<int, 2> sliceSize = GetSliceImageSize(dims, orientation); // 当前导出图片宽高
+    const int width = sliceSize[0];
+    const int height = sliceSize[1];
+    const int digits = std::max(4, static_cast<int>(std::to_string(std::max(sliceCount - 1, 0)).size()));
+    const std::string orientationName = GetOrientationName(orientation);
+
+    for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
+        auto sliceImage = vtkSmartPointer<vtkImageData>::New();
+        sliceImage->SetDimensions(width, height, 1);
+        sliceImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+
+        auto* dst = static_cast<unsigned char*>(sliceImage->GetScalarPointer());
+        if (!dst) {
+            return false;
+        }
+
+        for (int py = 0; py < height; ++py) {
+            for (int px = 0; px < width; ++px) {
+                int x = 0;
+                int y = 0;
+                int z = 0;
+
+                if (orientation == Orientation::Top_down) {
+                    x = px;
+                    y = py;
+                    z = sliceIndex;
+                }
+                else if (orientation == Orientation::Front_back) {
+                    x = px;
+                    y = sliceIndex;
+                    z = py;
+                }
+                else {
+                    x = sliceIndex;
+                    y = px;
+                    z = py;
+                }
+
+                const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
+                dst[py * width + px] = GetWindowLevelGray(value, windowLevel);
+            }
+        }
+
+        std::ostringstream fileName;
+        fileName << orientationName << "_"
+            << std::setw(digits) << std::setfill('0') << sliceIndex
+            << ".png";
+
+        auto writer = vtkSmartPointer<vtkPNGWriter>::New();
+        const std::filesystem::path outputFilePath = outputDir / fileName.str();
+        writer->SetFileName(outputFilePath.string().c_str());
+        writer->SetInputData(sliceImage);
+        writer->Write();
+    }
 
     return true;
 }

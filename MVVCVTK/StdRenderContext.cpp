@@ -251,7 +251,8 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
             if (key == 's' || key == 'S') {
                 if (m_interactiveService) {
                     if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                        exporter->SetTransformedDataSavedAsync();
+                        // exporter->SetTransformedDataSavedAsync();
+                        exporter->SetSliceImagesSavedAsync({});
                     }
                 }
                 return;

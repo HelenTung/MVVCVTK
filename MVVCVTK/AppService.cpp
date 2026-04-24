@@ -343,6 +343,46 @@ void MedicalVizService::SetTransformedDataSavedAsync(
     std::thread(std::move(task)).detach();
 }
 
+void MedicalVizService::SetSliceImagesSavedAsync(
+    const std::string& path,
+    std::function<void(bool success)> onComplete)
+{
+    SetSaveCallback(std::move(onComplete));
+
+    auto dataMgr = m_dataManager;
+    auto sharedState = m_sharedState;
+    const std::string resolvedPath = path;
+
+    if (!dataMgr || !sharedState) {
+        SetSaveCallbackReady(false);
+        return;
+    }
+
+    const WindowLevelParams currentWindowLevel = sharedState->GetWindowLevel();
+    const std::array<double, 16> currentMatrix = sharedState->GetModelMatrix(); // 当前姿态矩阵，导出切片前需要先应用
+    const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
+
+    Orientation currentOrientation = Orientation::Top_down;
+    if (currentMode == VizMode::SliceFront_back) {
+        currentOrientation = Orientation::Front_back;
+    }
+    else if (currentMode == VizMode::SliceLeft_right) {
+        currentOrientation = Orientation::Left_right;
+    }
+
+    std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
+    std::packaged_task<void()> task([dataMgr, resolvedPath, currentOrientation, currentWindowLevel, currentMatrix, weakSelf]() mutable {
+        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, currentOrientation, currentWindowLevel, currentMatrix);
+
+        auto self = weakSelf.lock();
+        if (self) {
+            self->SetSaveCallbackReady(ok);
+        }
+    });
+
+    std::thread(std::move(task)).detach();
+}
+
 void MedicalVizService::SetLoadCanceled()
 {
     m_cancelFlag->store(true);

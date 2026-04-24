@@ -61,6 +61,7 @@ public:
 		m_loadState = state;
     }
     virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
+    virtual bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& transformMatrix) { return false; }
     virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 
 protected:
@@ -214,6 +215,11 @@ public:
 
     // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调
     virtual void SetTransformedDataSavedAsync(
+        const std::string& path = {},
+        std::function<void(bool success)> onComplete = nullptr) = 0;
+
+    // 异步保存：按当前切片方向导出原始体数据全部切片图，窗宽窗位沿用当前状态
+    virtual void SetSliceImagesSavedAsync(
         const std::string& path = {},
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };

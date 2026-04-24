@@ -92,7 +92,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (img) {
         m_lastInput = data;
         img->GetCenter(m_dataCenter);
-
+            
         m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         //m_isoFilter->SetInputData(img);
 

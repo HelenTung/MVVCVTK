@@ -197,7 +197,6 @@ void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
         // Top_down: 从 Z+ 往 -Z 看，屏幕水平=X，屏幕垂直=Y
         cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
         cam->SetViewUp(0, 1, 0);
-        //cam->Roll(180.0);
         break;
 
     case Orientation::Front_back:
@@ -210,7 +209,6 @@ void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
         // Left_right: 从 X+ 往 -X 看，屏幕水平=Y，屏幕垂直=Z
         cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
         cam->SetViewUp(0, 0, 1);
-        //cam->Roll(180.0);
         break;
     }
 
@@ -226,6 +224,7 @@ void SliceStrategy::SetCrosshair(const double focusWorld[3],
     const double physX = focusWorld[0];
     const double physY = focusWorld[1];
     const double physZ = focusWorld[2];
+	
     if (m_orientation == Orientation::Top_down) {
         const double z = physZ + safeOffset;
         m_vLineSource->SetPoint1(physX, worldBounds[2], z);

@@ -36,6 +36,7 @@ public:
     std::array<double, 3> GetSpacing() const override;
 
     bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) override;
+    bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& transformMatrix) override;
     std::string GetDefaultTransformedDataPath() const override;
 };
 

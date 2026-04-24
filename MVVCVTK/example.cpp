@@ -323,6 +323,12 @@ B. 导出接口
    - path 为空时，内部会根据当前已加载源路径推导默认导出路径
    - 常用于姿态校正后保存 RAW
 
+6) SetSliceImagesSavedAsync(const std::string& path = {}, std::function<void(bool)> onComplete = nullptr)
+   功能：
+   - 按当前切片方向导出原始体数据的全部切片图
+   - 灰度映射直接沿用当前窗宽窗位
+   - path 为空时，内部会根据当前已加载源路径推导默认导出目录
+
 前端加载伪代码：
 
     void MainWindow::OnLoadClicked(const QString& path)
@@ -361,6 +367,20 @@ B. 导出接口
                 QMessageBox::information(this,
                     success ? "提示" : "错误",
                     success ? "导出成功" : "导出失败");
+            });
+    }
+
+    void MainWindow::OnExportSlicesClicked()
+    {
+        ui->btnExportSlices->setEnabled(false);
+
+        m_service->SetSliceImagesSavedAsync({},
+            [this](bool success)
+            {
+                ui->btnExportSlices->setEnabled(true);
+                QMessageBox::information(this,
+                    success ? "提示" : "错误",
+                    success ? "切片导出成功" : "切片导出失败");
             });
     }
 */
