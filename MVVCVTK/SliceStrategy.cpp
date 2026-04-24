@@ -110,13 +110,10 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     hMapper->SetInputConnection(m_hLineSource->GetOutputPort());
     m_hLineActor->SetMapper(hMapper);
 
-    // 设置颜色 (例如黄色) 和线宽
-    m_vLineActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
     m_vLineActor->GetProperty()->SetLineWidth(1.5);
     // 为了防止遮挡，可以关闭深度测试或者稍微抬高一点 Z 值，但 VTK RendererLayer 更好
     m_vLineActor->GetProperty()->SetLighting(false); // 关闭光照，纯色显示
 
-    m_hLineActor->GetProperty()->SetColor(1.0, 1.0, 0.0);
     m_hLineActor->GetProperty()->SetLineWidth(1.5);
     m_hLineActor->GetProperty()->SetLighting(false);
 
@@ -127,12 +124,24 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
 
     if (m_orientation == Orientation::Top_down) {
         m_slicePlane->SetNormal(0, 0, 1); // Z轴法线
+        m_vLineActor->GetProperty()->SetColor(1, 0, 0);
+        m_hLineActor->GetProperty()->SetColor(0, 1, 0);
+        m_hLineActor->GetProperty()->SetOpacity(0.4);
+        m_vLineActor->GetProperty()->SetOpacity(0.4);
     }
     else if (m_orientation == Orientation::Front_back) {
         m_slicePlane->SetNormal(0, 1, 0); // Y轴法线
+        m_vLineActor->GetProperty()->SetColor(1, 0, 0);
+        m_hLineActor->GetProperty()->SetColor(0, 0, 1);
+        m_hLineActor->GetProperty()->SetOpacity(0.4);
+        m_vLineActor->GetProperty()->SetOpacity(0.4);
     }
     else {
         m_slicePlane->SetNormal(1, 0, 0); // X轴法线
+        m_vLineActor->GetProperty()->SetColor(0, 1, 0);
+        m_hLineActor->GetProperty()->SetColor(0, 0, 1);
+        m_vLineActor->GetProperty()->SetOpacity(0.4);
+        m_hLineActor->GetProperty()->SetOpacity(0.4);
     }
 
     SetManagedProp(m_slice);

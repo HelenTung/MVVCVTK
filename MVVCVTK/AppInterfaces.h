@@ -117,7 +117,7 @@ public:
     virtual ~AbstractAppService() = default;
 
     virtual void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
-        vtkSmartPointer<vtkRenderer>     ren)
+        vtkSmartPointer<vtkRenderer>     ren)   
     {
         auto oldRenderer = m_renderer;
         if (oldRenderer && oldRenderer != ren) {
