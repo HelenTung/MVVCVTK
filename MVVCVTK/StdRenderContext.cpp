@@ -1,4 +1,5 @@
 ﻿#include "StdRenderContext.h"
+#include "MeasurementService.h"
 #include "TimeUpdateHandler.h"   // 新增
 #include "Viewer2DHandler.h"     // 新增
 #include "Viewer3DHandler.h"     // 新增
@@ -39,7 +40,7 @@ StdRenderContext::StdRenderContext()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetInteractorInitialized —— 初始化定时器 + 测量 Widget
+// SetInteractorInitialized —— 初始化定时器
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetInteractorInitialized()
 {
@@ -50,20 +51,6 @@ void StdRenderContext::SetInteractorInitialized()
     if (m_interactor) {
         m_interactor->CreateRepeatingTimer(33);  // ~30 FPS
         m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, 1.0);
-    }
-
-    if (!m_distanceWidget) {
-        m_distanceWidget = vtkSmartPointer<vtkDistanceWidget>::New();
-        m_distanceWidget->SetInteractor(m_interactor);
-        m_distanceWidget->CreateDefaultRepresentation();
-        m_distanceWidget->SetPriority(1.0);
-    }
-
-    if (!m_angleWidget) {
-        m_angleWidget = vtkSmartPointer<vtkAngleWidget>::New();
-        m_angleWidget->SetInteractor(m_interactor);
-        m_angleWidget->CreateDefaultRepresentation();
-        m_angleWidget->SetPriority(1.0);
     }
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
@@ -108,9 +95,23 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
     AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
+    if (m_measurementService) {
+        m_measurementService->SetInteractiveService(m_interactiveService.get());
+        m_measurementService->SetRenderContext(m_renderer.GetPointer(), m_picker.GetPointer());
+    }
 
     // Service 就位后重建 Router
     SetInteractionRouter();
+}
+
+void StdRenderContext::SetMeasurementService(std::shared_ptr<IMeasurementService> service)
+{
+    m_measurementFacade = std::move(service);
+    m_measurementService = std::dynamic_pointer_cast<MeasurementService>(m_measurementFacade);
+    if (m_measurementService) {
+        m_measurementService->SetInteractiveService(m_interactiveService.get());
+        m_measurementService->SetRenderContext(m_renderer.GetPointer(), m_picker.GetPointer());
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -173,8 +174,7 @@ void StdRenderContext::SetOrientationAxesVisible(bool show)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetToolMode —— 测量 Widget 开关 + 交互风格切换
-// （与路由无关，保持原有逻辑）
+// SetToolMode —— 测量服务模式切换 + 交互风格切换
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetToolMode(ToolMode mode)
 {
@@ -185,16 +185,8 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     }
 
     m_toolMode = mode;
-
-    if (m_distanceWidget) {
-        (mode == ToolMode::DistanceMeasure)
-            ? m_distanceWidget->On()
-            : m_distanceWidget->Off();
-    }
-    if (m_angleWidget) {
-        (mode == ToolMode::AngleMeasure)
-            ? m_angleWidget->On()
-            : m_angleWidget->Off();
+    if (m_measurementFacade) {
+        m_measurementFacade->SetToolMode(mode);
     }
 
     if (mode == ToolMode::ModelTransform) {
@@ -217,7 +209,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
-//   2. 测量模式下屏蔽左键（让 Widget 独占）
+//   2. 测量模式下拦截左键并委托测量服务
 //   3. 填充 InteractionEvent → Dispatch → 处理 abortVtk
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
@@ -279,15 +271,44 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         return;
     }
 
-    // ── 测量模式：屏蔽左键，让 Widget 独占 ───────────────────────────
+    // ── 测量模式：只允许点击到实际对象的拾取结果进入测量服务 ──────────
     if (m_toolMode == ToolMode::DistanceMeasure
         || m_toolMode == ToolMode::AngleMeasure)
     {
-        if (eventId == vtkCommand::LeftButtonPressEvent
-            || eventId == vtkCommand::LeftButtonReleaseEvent
-            || eventId == vtkCommand::MouseMoveEvent)
+        if (eventId == vtkCommand::LeftButtonPressEvent)
         {
-            return;  // 不中止 VTK，让 Widget 正常接收
+            auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
+            const int* pos = iren ? iren->GetEventPosition() : nullptr;
+            if (m_measurementService) {
+                m_measurementService->GetClickHandled(
+                    pos ? pos[0] : 0,
+                    pos ? pos[1] : 0);
+            }
+            if (m_eventCallback) {
+                m_eventCallback->SetAbortFlag(1);
+            }
+            return;
+        }
+        if (eventId == vtkCommand::MouseMoveEvent)
+        {
+            auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
+            const int* pos = iren ? iren->GetEventPosition() : nullptr;
+            if (m_measurementService) {
+                m_measurementService->GetMouseMoveHandled(
+                    pos ? pos[0] : 0,
+                    pos ? pos[1] : 0);
+            }
+            if (m_eventCallback) {
+                m_eventCallback->SetAbortFlag(1);
+            }
+            return;
+        }
+        if (eventId == vtkCommand::LeftButtonReleaseEvent)
+        {
+            if (m_eventCallback) {
+                m_eventCallback->SetAbortFlag(1);
+            }
+            return;
         }
     }
 

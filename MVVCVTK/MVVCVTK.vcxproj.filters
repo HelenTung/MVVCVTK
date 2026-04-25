@@ -67,6 +67,9 @@
     <Filter Include="头文件\Service\GapMeshOverlayService">
       <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\MeasurementAlgo">
+      <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="IsoSurfaceStrategy.h">
@@ -165,6 +168,27 @@
     <ClInclude Include="InteractionComputeService.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="IMeasurementStrategy.h">
+      <Filter>头文件\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementCsvExporter.h">
+      <Filter>头文件\Utils</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementComputeService.h">
+      <Filter>头文件\Utils</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementService.h">
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="LengthMeasurementStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="AngleMeasurementStrategy.h">
+      <Filter>头文件\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementTypes.h">
+      <Filter>头文件\MeasurementAlgo</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -220,6 +244,15 @@
     </ClCompile>
     <ClCompile Include="DataConverters.cpp">
       <Filter>源文件\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="AngleMeasurementStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="MeasurementService.cpp">
+      <Filter>源文件\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="LengthMeasurementStrategy.cpp">
+      <Filter>源文件\Strategies</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

@@ -17,6 +17,7 @@
 // =====================================================================
 
 #include "AppTypes.h"
+#include "MeasurementTypes.h"
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -159,6 +160,7 @@ public:
 
 	// 图层叠加管理接口
     virtual void SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy);
+    virtual void SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void SetOverlayStrategiesCleared();
 };
 
@@ -226,6 +228,18 @@ public:
         const std::string& path = {},
         const double angle = 0.0,
         std::function<void(bool success)> onComplete = nullptr) = 0;
+};
+
+class IMeasurementService {
+public:
+    virtual ~IMeasurementService() = default;
+
+    virtual void SetToolMode(ToolMode mode) = 0;
+    virtual void SetResultCallback(std::function<void(const MeasurementResult&)> callback) = 0;
+    virtual std::vector<MeasurementResult> GetResults() const = 0;
+    virtual bool SetResultVisible(uint64_t id, bool show) = 0;
+    virtual bool SetResultsFileSaved(const std::string& path = {}) const = 0;
+    virtual void SetResultsCleared() = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────

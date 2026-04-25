@@ -12,6 +12,7 @@
 
 #include <vector>
 #include <array>
+#include <cstdint>
 #include <string>
 #include <functional>
 

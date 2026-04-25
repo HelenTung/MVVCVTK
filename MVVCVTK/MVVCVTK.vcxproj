@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -168,6 +168,13 @@
     <ClInclude Include="VolumeAnalysisService.h" />
     <ClInclude Include="VolumeBuffer.h" />
     <ClInclude Include="VolumeStrategy.h" />
+    <ClInclude Include="AngleMeasurementStrategy.h" />
+    <ClInclude Include="IMeasurementStrategy.h" />
+    <ClInclude Include="LengthMeasurementStrategy.h" />
+    <ClInclude Include="MeasurementComputeService.h" />
+    <ClInclude Include="MeasurementCsvExporter.h" />
+    <ClInclude Include="MeasurementService.h" />
+    <ClInclude Include="MeasurementTypes.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AppService.cpp" />
@@ -188,6 +195,9 @@
     <ClCompile Include="Viewer2DHandler.cpp" />
     <ClCompile Include="Viewer3DHandler.cpp" />
     <ClCompile Include="VolumeStrategy.cpp" />
+    <ClCompile Include="AngleMeasurementStrategy.cpp" />
+    <ClCompile Include="LengthMeasurementStrategy.cpp" />
+    <ClCompile Include="MeasurementService.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

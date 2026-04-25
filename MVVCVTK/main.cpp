@@ -28,6 +28,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "AppState.h"
 #include "AppService.h"
 #include "DataManager.h"
+#include "MeasurementService.h"
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
 
@@ -226,6 +227,42 @@ int main()
     auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
 
+    // 窗口 E 的独立测量服务，由业务层显式创建并绑定到渲染上下文
+    std::shared_ptr<IMeasurementService> measurementE = std::make_shared<MeasurementService>();
+    contextE->SetMeasurementService(measurementE);
+    if (measurementE) {
+        measurementE->SetResultCallback([](const MeasurementResult& result) {
+            const char* typeText = "None"; // 当前测量结果对应的类型文本
+            if (result.type == MeasurementType::Length) typeText = "Length";
+            else if (result.type == MeasurementType::Angle) typeText = "Angle";
+
+            const char* statusText = "Idle"; // 当前测量结果对应的状态文本
+            if (result.status == MeasurementStatus::InProgress) statusText = "InProgress";
+            else if (result.status == MeasurementStatus::Succeeded) statusText = "Succeeded";
+            else if (result.status == MeasurementStatus::Invalid) statusText = "Invalid";
+
+            std::cout
+                << "[Measurement][Window E] id=" << result.id
+                << ", type=" << typeText
+                << ", value=" << result.value
+                << ", unit=" << result.unit
+                << ", status=" << statusText
+                << ", visible=" << (result.visible ? "true" : "false")
+                << ", historical=" << (result.isHistorical ? "true" : "false")
+                << std::endl;
+            });
+
+        // 示例：如需启动后默认进入长度测量，可取消下一行注释
+        // contextE->SetToolMode(ToolMode::DistanceMeasure);
+
+        // 示例：如需导出全部测量结果 CSV，可在合适时机调用
+        // measurementE->SetResultsFileSaved("E:\\data\\ct\\measurement_results.csv");
+
+        // 示例：如需控制某条历史结果显隐，可在拿到结果列表后按 id 调用
+        // auto results = measurementE->GetResults();
+        // if (!results.empty()) measurementE->SetResultVisible(results.front().id, false);
+    }
+
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, true);
     serviceE->SetElementVisible(VisFlags::Planes3D, true);
@@ -300,7 +337,7 @@ int main()
     //contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform\n";
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
     contextB->SetStarted();

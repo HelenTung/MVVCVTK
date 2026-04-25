@@ -54,6 +54,24 @@ void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualS
     m_isDirty = true;
 }
 
+void AbstractAppService::SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisualStrategy> strategy) {
+    if (!strategy) return;
+
+    const auto it = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
+        [strategy](const std::shared_ptr<AbstractVisualStrategy>& current) {
+            return current.get() == strategy.get();
+        });
+    if (it == m_overlayStrategies.end()) {
+        return;
+    }
+
+    if (m_renderer) {
+        strategy->SetRendererDetached(m_renderer);
+    }
+    m_overlayStrategies.erase(it);
+    m_isDirty = true;
+}
+
 void AbstractAppService::SetOverlayStrategiesCleared() {
     if (m_renderer) {
         for (auto& s : m_overlayStrategies) {
