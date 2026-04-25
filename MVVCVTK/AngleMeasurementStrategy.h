@@ -38,18 +38,18 @@ private:
     void SetStyleUpdated();
     void SetWorldPointsSynced(const std::array<double, 16>& modelMatrix);
 
-    vtkSmartPointer<vtkLineSource> m_firstLineSource;
-    vtkSmartPointer<vtkLineSource> m_secondLineSource;
+    vtkSmartPointer<vtkLineSource> m_firstLineSource;        // 当前角度测量第一条边的数据源，连接首点与顶点
+    vtkSmartPointer<vtkLineSource> m_secondLineSource;       // 当前角度测量第二条边的数据源，预览阶段只更新末端点
     vtkSmartPointer<vtkPolyDataMapper> m_firstLineMapper;
     vtkSmartPointer<vtkPolyDataMapper> m_secondLineMapper;
     vtkSmartPointer<vtkActor> m_firstLineActor;
     vtkSmartPointer<vtkActor> m_secondLineActor;
-    vtkSmartPointer<vtkPoints> m_pointPositions;
+    vtkSmartPointer<vtkPoints> m_pointPositions;             // 当前已确认落点对应的静态点集，只有落点变化时才重建
     vtkSmartPointer<vtkPolyData> m_pointPolyData;
     vtkSmartPointer<vtkPolyDataMapper> m_pointMapper;
     vtkSmartPointer<vtkActor> m_pointActor;
-    vtkSmartPointer<vtkBillboardTextActor3D> m_textActor;
-    MeasurementResult m_result;
+    vtkSmartPointer<vtkBillboardTextActor3D> m_textActor;    // 当前角度值对应的 3D 文字标注
+    MeasurementResult m_result;                              // 当前角度测量对外暴露的统一结果快照
     std::array<double, 3> m_previewWorldPoint = { 0.0, 0.0, 0.0 }; // 当前角度测量尚未确认的预览世界端点
     std::array<double, 3> m_previewModelPoint = { 0.0, 0.0, 0.0 }; // 当前角度测量预览端点对应的模型坐标
     bool m_hasPreviewPoint = false;
