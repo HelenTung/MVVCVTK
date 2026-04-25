@@ -345,6 +345,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(
 
 void MedicalVizService::SetSliceImagesSavedAsync(
     const std::string& path,
+    const double angle,
     std::function<void(bool success)> onComplete)
 {
     SetSaveCallback(std::move(onComplete));
@@ -362,17 +363,40 @@ void MedicalVizService::SetSliceImagesSavedAsync(
     const std::array<double, 16> currentMatrix = sharedState->GetModelMatrix(); // 当前姿态矩阵，导出切片前需要先应用
     const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
 
+    // 算旋转角度
+	auto anglematrix = vtkSmartPointer<vtkMatrix4x4>::New();
+	auto angletransform = vtkSmartPointer<vtkTransform>::New();
+	anglematrix->DeepCopy(currentMatrix.data());
+    angletransform->PostMultiply();
+    angletransform->SetMatrix(anglematrix);
+
     Orientation currentOrientation = Orientation::Top_down;
+	auto curworld = sharedState->GetCursorWorld();
+	angletransform->Translate(-curworld[0], -curworld[1], -curworld[2]);
     if (currentMode == VizMode::SliceFront_back) {
         currentOrientation = Orientation::Front_back;
+        angletransform->RotateY(angle);
     }
     else if (currentMode == VizMode::SliceLeft_right) {
         currentOrientation = Orientation::Left_right;
+        angletransform->RotateX(angle);
+    }
+    else if (currentMode == VizMode::SliceTop_down)
+    {
+        angletransform->RotateZ(angle);
+    }
+	angletransform->Translate(curworld[0], curworld[1], curworld[2]);
+
+    std::array<double, 16> angleMatrixArr = { 0.0 };
+    auto data = angletransform->GetMatrix()->GetData();
+    for (size_t i = 0; i < 16; i++)
+    {
+        angleMatrixArr[i] = data[i];
     }
 
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
-    std::packaged_task<void()> task([dataMgr, resolvedPath, currentOrientation, currentWindowLevel, currentMatrix, weakSelf]() mutable {
-        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, currentOrientation, currentWindowLevel, currentMatrix);
+    std::packaged_task<void()> task([dataMgr, resolvedPath, currentOrientation, currentWindowLevel, angleMatrixArr, weakSelf]() mutable {
+        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, currentOrientation, currentWindowLevel, angleMatrixArr);
 
         auto self = weakSelf.lock();
         if (self) {

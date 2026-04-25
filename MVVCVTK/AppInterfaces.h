@@ -221,6 +221,7 @@ public:
     // 异步保存：按当前切片方向导出原始体数据全部切片图，窗宽窗位沿用当前状态
     virtual void SetSliceImagesSavedAsync(
         const std::string& path = {},
+        const double angle = 0.0,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };
 

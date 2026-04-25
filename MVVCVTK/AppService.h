@@ -79,7 +79,7 @@ public:
     LoadState GetLoadState() const override;
     void SetTransformedDataSavedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
-    void SetSliceImagesSavedAsync(const std::string& path,
+    void SetSliceImagesSavedAsync(const std::string& path, const double angle,
         std::function<void(bool success)> onComplete = nullptr) override;
     void SetLoadCanceled() override;
 

@@ -251,11 +251,16 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
             if (key == 's' || key == 'S') {
                 if (m_interactiveService) {
                     if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                        // exporter->SetTransformedDataSavedAsync();
-                        exporter->SetSliceImagesSavedAsync({});
+                        exporter->SetTransformedDataSavedAsync();
                     }
                 }
                 return;
+            }
+            if (key == 't' || key == 'T')
+            {
+                if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
+                    exporter->SetSliceImagesSavedAsync({}, m_angle);
+                }
             }
             if (s == "Escape") { SetToolMode(ToolMode::Navigation);      return; }
         }

@@ -21,7 +21,8 @@ private:
 
     VizMode  m_currentMode = VizMode::Volume;
     ToolMode m_toolMode = ToolMode::Navigation;
-
+    
+    double m_angle = 0.0;   // 旋转角度
     // ── 路由器（替代原来 HandleVTKEvent 里的手写 if-else） ──────────
     InteractionRouter m_interactionRouter;
 
@@ -41,6 +42,7 @@ public:
     void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
     void SetOrientationAxesVisible(bool show) override;
     void SetToolMode(ToolMode mode);
+    void SetAngle(double angle = 0) { m_angle = angle; };
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }
 protected:
     void SetVTKEventHandled(vtkObject* caller,
