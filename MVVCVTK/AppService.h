@@ -170,7 +170,7 @@ private:
     // ================================================================
     // 异步任务启动辅助
     // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
-    // 原生依赖对象：m_sharedState、m_cancelFlag、m_loadFuture。
+    // 原生依赖对象：m_sharedState、m_ActiveLoadFuture。
     // ================================================================
     bool SetFileLoadStarted(std::function<void(bool)> callback);
     bool SetReloadLoadStarted(std::function<void(bool)> callback);
@@ -344,7 +344,6 @@ private:
     std::atomic<bool> m_needsDataRefresh{ false };
     std::atomic<bool> m_needsCacheClear{ false };
     std::atomic<bool> m_needsLoadFailed{ false };
-    std::shared_ptr<std::atomic<bool>> m_cancelFlag; // 尽力取消标记
 
     std::future<void> m_ActiveLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
     mutable std::mutex m_ActiveLoadMutex; // 保护 m_ActiveLoadFuture

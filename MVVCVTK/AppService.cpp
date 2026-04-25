@@ -71,16 +71,12 @@ MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state)
     : m_sharedState(std::move(state))
-    , m_cancelFlag(std::make_shared<std::atomic<bool>>(false))
 {
     m_dataManager = std::move(dataMgr);
 }
 
 MedicalVizService::~MedicalVizService()
 {
-    if (m_cancelFlag)
-        m_cancelFlag->store(true);
-
     std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
     if (m_ActiveLoadFuture.valid())
         m_ActiveLoadFuture.wait();
@@ -221,9 +217,6 @@ bool MedicalVizService::SetFileLoadStarted(
     }
 
     SetFileLoadCallback(std::move(callback));
-    if (m_cancelFlag) {
-        m_cancelFlag->store(false);
-    }
     m_sharedState->SetFileLoadStarted();
     return true;
 }
@@ -268,23 +261,10 @@ void MedicalVizService::SetFileLoadedAsync(
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
-    auto cancelFlag = m_cancelFlag;
 
-    std::packaged_task<void()> task([dataMgr, sharedState, path, cancelFlag]() mutable
+    std::packaged_task<void()> task([dataMgr, sharedState, path]() mutable
         {
-            // 加载前检查取消标记
-            if (cancelFlag->load()) {
-                sharedState->SetFileLoadFailed();
-                return;
-            }
-
             bool ok = dataMgr->SetDataLoaded(path);
-
-            // 加载后再次检查取消标记
-            if (cancelFlag->load()) {
-                sharedState->SetFileLoadFailed();
-                return;
-            }
 
             if (ok) {
                 auto img = dataMgr->GetVtkImage();
@@ -418,7 +398,7 @@ void MedicalVizService::SetSliceImagesSavedAsync(
 
 void MedicalVizService::SetLoadCanceled()
 {
-    m_cancelFlag->store(true);
+    // 当前未实现可中断加载，接口保留仅为兼容 IDataLoaderService。
 }
 
 // ─────────────────────────────────────────────────────────────────────
