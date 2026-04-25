@@ -35,6 +35,8 @@ class MedicalVizService
 public:
     // ================================================================
     // 构造 / 析构
+    // 功能：绑定 DataManager 与 SharedInteractionState 两个核心原生成员对象。
+    // 作用：建立 MedicalVizService 作为“状态调度中枢”的运行基础。
     // ================================================================
     MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state);
@@ -42,6 +44,8 @@ public:
 
     // ================================================================
     // RenderContext 绑定
+    // 功能：接入 renderer / renderWindow，并注册 SharedState 观察回调。
+    // 作用：把状态广播和渲染后处理主循环连起来。
     // ================================================================
     void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer> ren) override;
@@ -50,6 +54,8 @@ public:
     // IVisualConfigService — 前处理配置
     // 调用时机：SetServiceBound 之后，SetFileLoadedAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
+    // 这一组方法只做“配置意图登记”，不直接操作 VTK 原生对象。
+    // 原生依赖对象：m_sharedState。
     // ================================================================
     void SetVizMode(VizMode mode) override;
     void SetMaterial(const MaterialParams& mat) override;
@@ -62,28 +68,47 @@ public:
     void SetVisualConfig(const PreInitConfig& cfg) override;
 
     // ================================================================
-    // 数据加载 / 数据导出
-    // onComplete 由主线程延迟执行，只允许操作状态或 UI
+    // IDataLoaderService — 文件流加载 / 重载加载 / 状态查询
+    // 功能：发起后台加载任务，并通过主线程回调把结果返回给 UI / 上层。
+    // 作用：把文件流加载、重载加载与渲染同步解耦。
+    // 原生依赖对象：m_dataManager、m_sharedState、m_cancelFlag、m_ActiveLoadFuture。
     // ================================================================
     void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
 
-    bool SetFromBufferAsync(
+    // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。
+    bool SetReloadFromBufferAsync(
         const float* data,
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
         std::function<void(bool success)> onComplete = nullptr);
 
-    LoadState GetLoadState() const override;
+    // 状态查询：当前只对外暴露 File / Reload 两组状态。
+    LoadState GetFileLoadState() const override;
+    LoadState GetReloadLoadState() const override;
+
+    // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
+    // 原生依赖对象：m_cancelFlag。
+    void SetLoadCanceled() override;
+
+    // ================================================================
+    // IDataExportService — 导出任务
+    // 功能：发起后台保存任务，并把保存完成结果延迟回到主线程。
+    // 作用：把导出 I/O 与当前渲染线程解耦。
+    // 原生依赖对象：m_dataManager、m_sharedState。
+    // ================================================================
     void SetTransformedDataSavedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
     void SetSliceImagesSavedAsync(const std::string& path, const double angle,
         std::function<void(bool success)> onComplete = nullptr) override;
-    void SetLoadCanceled() override;
 
     // ================================================================
     // AbstractInteractiveService — 交互接口
+    // 功能：处理切片滚动、光标联动、模型矩阵同步、显隐切换等交互入口。
+    // 作用：读取 SharedState / 当前策略 / 交互计算服务，并回写状态。
+    // 原生依赖对象：m_sharedState、m_currentStrategy、m_dataManager。
+    // 说明：这一组是交互主线，已尽量保持“读状态 → 算结果 → 回状态”的单一路径。
     // ================================================================
     void SetSliceScrolled(int delta) override;
     void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
@@ -106,7 +131,8 @@ public:
         return p;
     }
 
-    // 模型变换扩展（委托交互计算服务，统一走 Set/Get 语义）
+    // 模型变换扩展：统一走 InteractionComputeService 的静态计算逻辑。
+    // 原生依赖对象：m_sharedState。
     void SetModelTransform(double translate[3], double rotate[3], double scale[3]);
     void SetModelTransformReset();
     void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const override;
@@ -114,6 +140,9 @@ public:
 
     // ================================================================
     // AbstractAppService — 主线程后处理入口
+    // 功能：Timer 心跳驱动的统一后处理入口。
+    // 作用：按下面优先级处理缓存清理、加载失败、数据重建和增量同步。
+    // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // 路由优先级：
     //   1. m_needsCacheClear  → SetStrategyCacheCleared
     //   2. m_needsLoadFailed  → SetLoadFailedHandled
@@ -125,6 +154,8 @@ public:
 private:
     // ================================================================
     // 渲染后处理 / 策略辅助
+    // 功能：服务主线程渲染骨架，负责重建、同步、失败清理和参数快照组装。
+    // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // ================================================================
     void SetPipelineRebuilt();
     void SetStrategyStateSynced();
@@ -137,100 +168,176 @@ private:
     void SetSyncRequested();
 
     // ================================================================
-    // 异步回调辅助
+    // 异步任务启动辅助
+    // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
+    // 原生依赖对象：m_sharedState、m_cancelFlag、m_loadFuture。
     // ================================================================
-    // 保存当前加载请求绑定的回调
-    void SetLoadCallback(std::function<void(bool)> callback) {
-        std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
-        m_LoadCallback = std::move(callback);
+    bool SetFileLoadStarted(std::function<void(bool)> callback,
+        const char* source);
+    bool SetReloadLoadStarted(std::function<void(bool)> callback,
+        const char* source);
+    void SetTaskStarted(std::packaged_task<void()> task,
+        bool keepActiveLoadFuture);
+
+    // ================================================================
+    // 文件流加载回调队列
+    // 功能：缓存文件流加载请求的完成回调，并把后台结果延迟到主线程执行。
+    // 原生依赖对象：m_FileLoadCallbackMutex 及其配套状态字段。
+    // ================================================================
+
+    // 保存当前文件加载请求绑定的回调
+    void SetFileLoadCallback(std::function<void(bool)> callback) {
+        std::lock_guard<std::mutex> lk(m_FileLoadCallbackMutex);
+        m_FileLoadCallback = std::move(callback);
     }
 
-    // 将加载回调标记为完成，等待主线程统一执行
-    void SetLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+    // 将文件加载回调标记为完成，等待主线程统一执行
+    void SetFileLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
         {
-            std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
+            std::lock_guard<std::mutex> lk(m_FileLoadCallbackMutex);
             if (callback) {
-                m_PendingLoadCallback = std::move(callback);
+                m_PendingFileLoadCallback = std::move(callback);
             }
-            else if (m_LoadCallback) {
-                callback = std::move(m_LoadCallback);
-                m_LoadCallback = nullptr;
-                m_PendingLoadCallback = std::move(callback);
+            else if (m_FileLoadCallback) {
+                callback = std::move(m_FileLoadCallback);
+                m_FileLoadCallback = nullptr;
+                m_PendingFileLoadCallback = std::move(callback);
             }
             else {
                 return;
             }
-            m_PendingLoadResult = success;
-            m_HasPendingLoadCallback = true;
+            m_PendingFileLoadResult = success;
+            m_HasPendingFileLoadCallback = true;
         }
     }
 
-    // 在主线程执行待处理的加载回调
-    void SetPendingLoadCallbackExecuted() {
+    // 在主线程执行待处理的文件加载回调
+    void SetPendingFileLoadCallbackExecuted() {
         std::function<void(bool)> callback;
         bool success = false;
         {
-            std::lock_guard<std::mutex> lk(m_LoadCallbackMutex);
-            callback = std::move(m_PendingLoadCallback);
-            m_PendingLoadCallback = nullptr;
-            success = m_PendingLoadResult;
-        }
-        if (callback) callback(success);
-    }
-
-    // 保存当前保存请求绑定的回调
-    void SetSaveCallback(std::function<void(bool)> callback) {
-        std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
-        m_SaveCallback = std::move(callback);
-    }
-
-    // 将保存回调标记为完成，等待主线程统一执行
-    void SetSaveCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-        {
-            std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
-            if (callback) {
-                m_PendingSaveCallback = std::move(callback);
-            }
-            else if (m_SaveCallback) {
-                callback = std::move(m_SaveCallback);
-                m_SaveCallback = nullptr;
-                m_PendingSaveCallback = std::move(callback);
-            }
-            else {
-                return;
-            }
-            m_PendingSaveResult = success;
-            m_HasPendingSaveCallback = true;
-        }
-    }
-
-    // 在主线程执行待处理的保存回调
-    void SetPendingSaveCallbackExecuted() {
-        std::function<void(bool)> callback;
-        bool success = false;
-        {
-            std::lock_guard<std::mutex> lk(m_SaveCallbackMutex);
-            callback = std::move(m_PendingSaveCallback);
-            m_PendingSaveCallback = nullptr;
-            success = m_PendingSaveResult;
+            std::lock_guard<std::mutex> lk(m_FileLoadCallbackMutex);
+            callback = std::move(m_PendingFileLoadCallback);
+            m_PendingFileLoadCallback = nullptr;
+            success = m_PendingFileLoadResult;
         }
         if (callback) callback(success);
     }
 
     // ================================================================
-    // 成员变量
+    // 重载回调队列
+    // 功能：缓存重载请求的完成回调，并把后台结果延迟到主线程执行。
+    // 原生依赖对象：m_ReloadLoadCallbackMutex 及其配套状态字段。
     // ================================================================
-    mutable std::mutex m_LoadCallbackMutex;              // 保护加载回调状态
-    std::function<void(bool)> m_LoadCallback;            // 当前加载请求绑定的回调
-    std::function<void(bool)> m_PendingLoadCallback;     // 待主线程执行的加载回调
-    bool m_PendingLoadResult{ false };                   // 待执行加载回调对应的结果
-    std::atomic<bool> m_HasPendingLoadCallback{ false }; // 是否存在待执行加载回调
 
-    mutable std::mutex m_SaveCallbackMutex;              // 保护保存回调状态
-    std::function<void(bool)> m_SaveCallback;            // 当前保存请求绑定的回调
-    std::function<void(bool)> m_PendingSaveCallback;     // 待主线程执行的保存回调
-    bool m_PendingSaveResult{ false };                   // 待执行保存回调对应的结果
-    std::atomic<bool> m_HasPendingSaveCallback{ false }; // 是否存在待执行保存回调
+    // 保存当前重载请求绑定的回调
+    void SetReloadLoadCallback(std::function<void(bool)> callback) {
+        std::lock_guard<std::mutex> lk(m_ReloadLoadCallbackMutex);
+        m_ReloadLoadCallback = std::move(callback);
+    }
+
+    // 将重载回调标记为完成，等待主线程统一执行
+    void SetReloadLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+        {
+            std::lock_guard<std::mutex> lk(m_ReloadLoadCallbackMutex);
+            if (callback) {
+                m_PendingReloadLoadCallback = std::move(callback);
+            }
+            else if (m_ReloadLoadCallback) {
+                callback = std::move(m_ReloadLoadCallback);
+                m_ReloadLoadCallback = nullptr;
+                m_PendingReloadLoadCallback = std::move(callback);
+            }
+            else {
+                return;
+            }
+            m_PendingReloadLoadResult = success;
+            m_HasPendingReloadLoadCallback = true;
+        }
+    }
+
+    // 在主线程执行待处理的重载回调
+    void SetPendingReloadLoadCallbackExecuted() {
+        std::function<void(bool)> callback;
+        bool success = false;
+        {
+            std::lock_guard<std::mutex> lk(m_ReloadLoadCallbackMutex);
+            callback = std::move(m_PendingReloadLoadCallback);
+            m_PendingReloadLoadCallback = nullptr;
+            success = m_PendingReloadLoadResult;
+        }
+        if (callback) callback(success);
+    }
+
+    // ================================================================
+    // 保存完成回调队列
+    // 功能：缓存导出请求的完成回调，并把后台保存结果延迟到主线程执行。
+    // 原生依赖对象：m_SaveCompletionCallbackMutex 及其配套状态字段。
+    // ================================================================
+
+    // 保存当前保存请求绑定的完成回调
+    void SetSaveCompletionCallback(std::function<void(bool)> callback) {
+        std::lock_guard<std::mutex> lk(m_SaveCompletionCallbackMutex);
+        m_SaveCompletionCallback = std::move(callback);
+    }
+
+    // 将保存完成回调标记为就绪，等待主线程统一执行
+    void SetSaveCompletionCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+        {
+            std::lock_guard<std::mutex> lk(m_SaveCompletionCallbackMutex);
+            if (callback) {
+                m_PendingSaveCompletionCallback = std::move(callback);
+            }
+            else if (m_SaveCompletionCallback) {
+                callback = std::move(m_SaveCompletionCallback);
+                m_SaveCompletionCallback = nullptr;
+                m_PendingSaveCompletionCallback = std::move(callback);
+            }
+            else {
+                return;
+            }
+            m_PendingSaveCompletionResult = success;
+            m_HasPendingSaveCompletionCallback = true;
+        }
+    }
+
+    // 在主线程执行待处理的保存完成回调
+    void SetPendingSaveCompletionCallbackExecuted() {
+        std::function<void(bool)> callback;
+        bool success = false;
+        {
+            std::lock_guard<std::mutex> lk(m_SaveCompletionCallbackMutex);
+            callback = std::move(m_PendingSaveCompletionCallback);
+            m_PendingSaveCompletionCallback = nullptr;
+            success = m_PendingSaveCompletionResult;
+        }
+        if (callback) callback(success);
+    }
+
+    // ================================================================
+    // 成员变量（按职责分组）
+    // 1. 文件流加载回调状态
+    // 2. 重载回调状态
+    // 3. 保存完成回调状态
+    // 4. 运行期原生成员对象 / 标志位
+    // ================================================================
+    mutable std::mutex m_FileLoadCallbackMutex;              // 保护文件加载回调状态
+    std::function<void(bool)> m_FileLoadCallback;            // 当前文件加载请求绑定的回调
+    std::function<void(bool)> m_PendingFileLoadCallback;     // 待主线程执行的文件加载回调
+    bool m_PendingFileLoadResult{ false };                   // 待执行文件加载回调对应的结果
+    std::atomic<bool> m_HasPendingFileLoadCallback{ false }; // 是否存在待执行文件加载回调
+
+    mutable std::mutex m_ReloadLoadCallbackMutex;              // 保护重载回调状态
+    std::function<void(bool)> m_ReloadLoadCallback;            // 当前重载请求绑定的回调
+    std::function<void(bool)> m_PendingReloadLoadCallback;     // 待主线程执行的重载回调
+    bool m_PendingReloadLoadResult{ false };                   // 待执行重载回调对应的结果
+    std::atomic<bool> m_HasPendingReloadLoadCallback{ false }; // 是否存在待执行重载回调
+
+    mutable std::mutex m_SaveCompletionCallbackMutex;              // 保护保存完成回调状态
+    std::function<void(bool)> m_SaveCompletionCallback;            // 当前保存请求绑定的完成回调
+    std::function<void(bool)> m_PendingSaveCompletionCallback;     // 待主线程执行的保存完成回调
+    bool m_PendingSaveCompletionResult{ false };                   // 待执行保存完成回调对应的结果
+    std::atomic<bool> m_HasPendingSaveCompletionCallback{ false }; // 是否存在待执行保存完成回调
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
     std::shared_ptr<SharedInteractionState> m_sharedState;
@@ -241,6 +348,6 @@ private:
     std::atomic<bool> m_needsLoadFailed{ false };
     std::shared_ptr<std::atomic<bool>> m_cancelFlag; // 尽力取消标记
 
-    std::future<void> m_loadFuture; // 加载线程 future（用于析构时等待）
-    mutable std::mutex m_loadMutex; // 保护 m_loadFuture
+    std::future<void> m_ActiveLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
+    mutable std::mutex m_ActiveLoadMutex; // 保护 m_ActiveLoadFuture
 };

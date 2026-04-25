@@ -200,8 +200,11 @@ public:
     virtual void SetFileLoadedAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
-    // 查询当前加载状态（可从主线程轮询）
-    virtual LoadState GetLoadState() const = 0;
+    // 查询文件流加载状态（推荐 UI / 上层按需读取）
+    virtual LoadState GetFileLoadState() const = 0;
+
+    // 查询重载加载状态（推荐 UI / 上层按需读取）
+    virtual LoadState GetReloadLoadState() const = 0;
 
     // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
     // 默认空实现，派生类按需覆盖

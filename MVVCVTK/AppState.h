@@ -28,40 +28,131 @@ public:
         };
     }
 
-    // ── 数据就绪广播 ──────────────────────────────────────────────
-    // 仅后台加载线程调用；写 range / spacing 后广播 DataReady
-    void SetDataReady(double rangeMin, double rangeMax,
+    // ── 文件流加载状态 ────────────────────────────────────────────
+    void SetFileLoadState(LoadState s) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_fileLoadState = s;
+    }
+    LoadState GetFileLoadState() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_fileLoadState;
+    }
+
+    // ── 重载加载状态 ──────────────────────────────────────────────
+    void SetReloadLoadState(LoadState s) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_reloadLoadState = s;
+    }
+    LoadState GetReloadLoadState() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_reloadLoadState;
+    }
+
+    // ── 数据可信状态 ──────────────────────────────────────────────
+    void SetDataTrustedState(LoadState s) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_dataTrustedState = s;
+    }
+    LoadState GetDataTrustedState() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_dataTrustedState;
+    }
+
+    // ── 文件流加载开始 ────────────────────────────────────────────
+    void SetFileLoadStarted() {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_fileLoadState = LoadState::Loading;
+        m_dataTrustedState = LoadState::Loading;
+    }
+
+    // ── 重载加载开始 ──────────────────────────────────────────────
+    void SetReloadLoadStarted() {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_reloadLoadState = LoadState::Loading;
+    }
+
+    // ── 文件流数据就绪广播 ────────────────────────────────────────
+    // 仅后台文件加载线程调用；写 range / spacing 后广播 DataReady
+    void SetFileDataReady(double rangeMin, double rangeMax,
         const std::array<double, 3>& spacing) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             m_dataRange[0] = rangeMin;
             m_dataRange[1] = rangeMax;
             m_spacing = spacing;
-            m_loadState = LoadState::Succeeded;
+            m_fileLoadState = LoadState::Succeeded;
+            m_dataTrustedState = LoadState::Succeeded;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
         SetObserversNotified(UpdateFlags::DataReady);
     }
 
-    // ── 加载失败广播 ────────────────────────────────────────
-    // 仅后台加载线程调用；设状态后广播 LoadFailed
-    void SetLoadFailed() {
+    // ── 重载数据就绪广播 ──────────────────────────────────────────
+    // 仅后台重载主线程提交调用；写 range / spacing 后广播 DataReady
+    void SetReloadDataReady(double rangeMin, double rangeMax,
+        const std::array<double, 3>& spacing) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_loadState = LoadState::Failed;
+            m_dataRange[0] = rangeMin;
+            m_dataRange[1] = rangeMax;
+            m_spacing = spacing;
+            m_reloadLoadState = LoadState::Succeeded;
+            m_dataTrustedState = LoadState::Succeeded;
+            m_windowLevel.windowWidth = rangeMax - rangeMin;
+            m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
+        }
+        SetObserversNotified(UpdateFlags::DataReady);
+    }
+
+    // ── 文件流加载失败广播 ────────────────────────────────────────
+    // 仅后台文件加载线程调用；设状态后广播 LoadFailed
+    void SetFileLoadFailed() {
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_fileLoadState = LoadState::Failed;
+            m_dataTrustedState = LoadState::Failed;
         }
         SetObserversNotified(UpdateFlags::LoadFailed);
     }
 
-    // ── 加载状态 (LoadState 枚举，) ────────────────────────────
-    void SetLoadState(LoadState s) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_loadState = s;
+    // ── 重载加载失败广播 ──────────────────────────────────────────
+    // 仅后台重载线程调用；设状态后广播 LoadFailed
+    void SetReloadLoadFailed() {
+        {
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_reloadLoadState = LoadState::Failed;
+            if (m_dataTrustedState != LoadState::Succeeded) {
+                m_dataTrustedState = LoadState::Failed;
+            }
+        }
+        SetObserversNotified(UpdateFlags::LoadFailed);
     }
+
+    // ── 聚合加载状态（兼容现有接口） ─────────────────────────────
     LoadState GetLoadState() const {
         std::lock_guard<std::mutex> lk(m_mutex);
-        return m_loadState;
+        if (m_fileLoadState == LoadState::Loading
+            || m_reloadLoadState == LoadState::Loading
+            || m_dataTrustedState == LoadState::Loading)
+        {
+            return LoadState::Loading;
+        }
+        if (m_dataTrustedState == LoadState::Succeeded) {
+            return LoadState::Succeeded;
+        }
+        if (m_fileLoadState == LoadState::Failed
+            || m_reloadLoadState == LoadState::Failed
+            || m_dataTrustedState == LoadState::Failed)
+        {
+            return LoadState::Failed;
+        }
+        if (m_fileLoadState == LoadState::Succeeded
+            || m_reloadLoadState == LoadState::Succeeded)
+        {
+            return LoadState::Succeeded;
+        }
+        return LoadState::Idle;
     }
 
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
@@ -390,7 +481,9 @@ private:
     mutable std::mutex m_mutex;
 
     // 数据生命周期状态
-    LoadState m_loadState = LoadState::Idle;                    // 当前加载状态（Idle / Loading / Succeeded / Failed）
+    LoadState m_dataTrustedState = LoadState::Idle;            // 当前数据可信状态（Idle / Loading / Succeeded / Failed）
+    LoadState m_fileLoadState = LoadState::Idle;               // 当前文件流加载状态（Idle / Loading / Succeeded / Failed）
+    LoadState m_reloadLoadState = LoadState::Idle;             // 当前重载加载状态（Idle / Loading / Succeeded / Failed）
     double m_dataRange[2] = { 0.0, 255.0 };                    // 当前体数据标量范围
     std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // 当前体数据 spacing（RAS 世界坐标系）
 

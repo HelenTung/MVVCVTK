@@ -301,14 +301,14 @@ A. 加载接口
    - 从磁盘加载 RAW 或 TIFF 序列
    - 内部防重入：Loading 状态下会拒绝新请求
 
-2) SetFromBufferAsync(...)
+2) SetReloadFromBufferAsync(...)
    功能：
    - 从上游算法给出的内存块导入体数据
    - 适合工业 CT 重建算法直接对接
 
-3) GetLoadState() const
+3) GetFileLoadState() const / GetReloadLoadState() const
    功能：
-   - 查询当前加载状态
+   - 按需查询文件流加载状态、重载加载状态
    - Idle / Loading / Succeeded / Failed
 
 4) SetLoadCanceled()

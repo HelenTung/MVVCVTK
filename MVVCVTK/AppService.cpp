@@ -81,9 +81,9 @@ MedicalVizService::~MedicalVizService()
     if (m_cancelFlag)
         m_cancelFlag->store(true);
 
-    std::lock_guard<std::mutex> lk(m_loadMutex);
-    if (m_loadFuture.valid())
-        m_loadFuture.wait();
+    std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
+    if (m_ActiveLoadFuture.valid())
+        m_ActiveLoadFuture.wait();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -194,26 +194,81 @@ void MedicalVizService::SetVisualConfig(const PreInitConfig& cfg)
 // ─────────────────────────────────────────────────────────────────────
 // 数据加载 / 数据导出
 // ─────────────────────────────────────────────────────────────────────
-LoadState MedicalVizService::GetLoadState() const
+LoadState MedicalVizService::GetFileLoadState() const
 {
-    return m_sharedState->GetLoadState();
+    return m_sharedState ? m_sharedState->GetFileLoadState() : LoadState::Idle;
+}
+
+LoadState MedicalVizService::GetReloadLoadState() const
+{
+    return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
+}
+
+bool MedicalVizService::SetFileLoadStarted(
+    std::function<void(bool)> callback,
+    const char* source)
+{
+    if (!m_sharedState) {
+        SetFileLoadCallbackReady(false, std::move(callback));
+        return false;
+    }
+
+    if (m_sharedState->GetFileLoadState() == LoadState::Loading
+        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
+    {
+        std::cerr << "[" << (source ? source : "SetFileLoadStarted")
+            << "] Already loading, ignoring duplicate call.\n";
+        SetFileLoadCallbackReady(false, std::move(callback));
+        return false;
+    }
+
+    SetFileLoadCallback(std::move(callback));
+    if (m_cancelFlag) {
+        m_cancelFlag->store(false);
+    }
+    m_sharedState->SetFileLoadStarted();
+    return true;
+}
+
+bool MedicalVizService::SetReloadLoadStarted(
+    std::function<void(bool)> callback,
+    const char* source)
+{
+    if (!m_sharedState) {
+        SetReloadLoadCallbackReady(false, std::move(callback));
+        return false;
+    }
+
+    if (m_sharedState->GetFileLoadState() == LoadState::Loading
+        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
+    {
+        std::cerr << "[" << (source ? source : "SetReloadLoadStarted")
+            << "] Already loading, ignoring duplicate call.\n";
+        SetReloadLoadCallbackReady(false, std::move(callback));
+        return false;
+    }
+
+    SetReloadLoadCallback(std::move(callback));
+    m_sharedState->SetReloadLoadStarted();
+    return true;
+}
+
+void MedicalVizService::SetTaskStarted(
+    std::packaged_task<void()> task,
+    bool keepActiveLoadFuture)
+{
+    if (keepActiveLoadFuture) {
+        std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
+        m_ActiveLoadFuture = task.get_future(); // 当前活动加载任务的 future，用于析构时等待后台线程结束
+    }
+    std::thread(std::move(task)).detach();
 }
 
 void MedicalVizService::SetFileLoadedAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
-    // 防止重复加载（加载中状态直接返回）
-    if (m_sharedState->GetLoadState() == LoadState::Loading) {
-        std::cerr << "[SetFileLoadedAsync] Already loading, ignoring duplicate call.\n";
-        SetLoadCallbackReady(false, std::move(onComplete));
-        return;
-    }
-
-    SetLoadCallback(std::move(onComplete));
-
-    m_cancelFlag->store(false);
-    m_sharedState->SetLoadState(LoadState::Loading);
+    if (!SetFileLoadStarted(std::move(onComplete), "SetFileLoadedAsync")) return;
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
@@ -223,7 +278,7 @@ void MedicalVizService::SetFileLoadedAsync(
         {
             // 加载前检查取消标记
             if (cancelFlag->load()) {
-                sharedState->SetLoadFailed();
+                sharedState->SetFileLoadFailed();
                 return;
             }
 
@@ -231,7 +286,7 @@ void MedicalVizService::SetFileLoadedAsync(
 
             // 加载后再次检查取消标记
             if (cancelFlag->load()) {
-                sharedState->SetLoadFailed();
+                sharedState->SetFileLoadFailed();
                 return;
             }
 
@@ -240,42 +295,32 @@ void MedicalVizService::SetFileLoadedAsync(
                 if (img) {
                     const auto range = dataMgr->GetScalarRange();
                     const auto spacing = dataMgr->GetSpacing();
-                    sharedState->SetDataReady(range[0], range[1], spacing);
+                    sharedState->SetFileDataReady(range[0], range[1], spacing);
                 }
                 else {
                     std::cerr << "[SetFileLoadedAsync] GetVtkImage() returned null after load.\n";
-                    sharedState->SetLoadFailed();  
+                    sharedState->SetFileLoadFailed();
                 }
             }
             else {
                 std::cerr << "[SetFileLoadedAsync] Failed to load: " << path << "\n";
-                sharedState->SetLoadFailed();
+                sharedState->SetFileLoadFailed();
             }
         });
 
-    {
-        std::lock_guard<std::mutex> lk(m_loadMutex);
-        m_loadFuture = task.get_future();
-    }
-
-    std::thread(std::move(task)).detach();
+    SetTaskStarted(std::move(task), true);
 }
 
-bool MedicalVizService::SetFromBufferAsync(
+bool MedicalVizService::SetReloadFromBufferAsync(
     const float* data,
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (m_sharedState->GetLoadState() == LoadState::Loading) {
-        std::cerr << "[SetFromBufferAsync] Already loading, ignoring.\n";
-        SetLoadCallbackReady(false, std::move(onComplete));
+    if (!SetReloadLoadStarted(std::move(onComplete), "SetReloadFromBufferAsync")) {
         return false;
     }
-
-    SetLoadCallback(std::move(onComplete));
-    m_sharedState->SetLoadState(LoadState::Loading);
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
@@ -288,16 +333,11 @@ bool MedicalVizService::SetFromBufferAsync(
             
             if (!ok)
             {
-                sharedState->SetLoadFailed();
+                sharedState->SetReloadLoadFailed();
             }
         });
 
-    {
-        std::lock_guard<std::mutex> lk(m_loadMutex);
-        m_loadFuture = task.get_future();
-    }
-
-    std::thread(std::move(task)).detach();
+    SetTaskStarted(std::move(task), true);
     return true;
 }
 
@@ -305,7 +345,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
-    SetSaveCallback(std::move(onComplete));
+    SetSaveCompletionCallback(std::move(onComplete));
 
     // 捕获必要资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
@@ -315,12 +355,12 @@ void MedicalVizService::SetTransformedDataSavedAsync(
         : path;
 
     if (!dataMgr || !sharedState) {
-        SetSaveCallbackReady(false);
+        SetSaveCompletionCallbackReady(false);
         return;
     }
 
     if (resolvedPath.empty()) {
-        SetSaveCallbackReady(false);
+        SetSaveCompletionCallbackReady(false);
         return;
     }
 
@@ -335,11 +375,11 @@ void MedicalVizService::SetTransformedDataSavedAsync(
 
         auto self = weakSelf.lock();
         if (self) {
-            self->SetSaveCallbackReady(ok);
+            self->SetSaveCompletionCallbackReady(ok);
         }
     });
 
-    std::thread(std::move(task)).detach();
+    SetTaskStarted(std::move(task), false);
 }
 
 void MedicalVizService::SetSliceImagesSavedAsync(
@@ -347,14 +387,14 @@ void MedicalVizService::SetSliceImagesSavedAsync(
     const double angle,
     std::function<void(bool success)> onComplete)
 {
-    SetSaveCallback(std::move(onComplete));
+    SetSaveCompletionCallback(std::move(onComplete));
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
     const std::string resolvedPath = path;
 
     if (!dataMgr || !sharedState) {
-        SetSaveCallbackReady(false);
+        SetSaveCompletionCallbackReady(false);
         return;
     }
 
@@ -373,11 +413,11 @@ void MedicalVizService::SetSliceImagesSavedAsync(
 
         auto self = weakSelf.lock();
         if (self) {
-            self->SetSaveCallbackReady(ok);
+            self->SetSaveCompletionCallbackReady(ok);
         }
     });
 
-    std::thread(std::move(task)).detach();
+    SetTaskStarted(std::move(task), false);
 }
 
 void MedicalVizService::SetLoadCanceled()
@@ -545,7 +585,7 @@ void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]
 void MedicalVizService::SetPendingUpdatesProcessed()
 {
     // 消费来自第三方重建的 ReconBuffer
-    // 必须在 m_needsDataRefresh 检查前，因为 SetReconImageConsumed 成功后会设 LoadState::Succeeded，下面的逻辑再据此驱动管线重建。
+    // 必须在 m_needsDataRefresh 检查前，因为 SetReconImageConsumed 成功后会更新 SharedState 的重载状态与数据可信状态，下面的逻辑再据此驱动管线重建。
     if (auto* rawMgr = dynamic_cast<RawVolumeDataManager*>(m_dataManager.get())) {
         if (rawMgr->SetReconImageConsumed()) {
             // 走和文件加载成功相同的后处理路径
@@ -553,17 +593,17 @@ void MedicalVizService::SetPendingUpdatesProcessed()
             if (img) {
                 const auto range = m_dataManager->GetScalarRange();
                 const auto spacing = m_dataManager->GetSpacing();
-                m_sharedState->SetDataReady(range[0], range[1], spacing);
+                m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
             }
             else {
-                m_sharedState->SetLoadFailed();
+                m_sharedState->SetReloadLoadFailed();
             }
         }
     }
 
     // 导出异步任务回调触发
-    if (m_HasPendingSaveCallback.exchange(false)) {
-        SetPendingSaveCallbackExecuted();
+    if (m_HasPendingSaveCompletionCallback.exchange(false)) {
+        SetPendingSaveCompletionCallbackExecuted();
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
@@ -575,20 +615,33 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
         SetLoadFailedHandled();
-        SetLoadCallbackReady(false);
+        if (m_FileLoadCallback) {
+            SetFileLoadCallbackReady(false);
+        }
+        else {
+            SetReloadLoadCallbackReady(false);
+        }
         shouldReturnAfterLoadFailure = true;
     }
 
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         SetPipelineRebuilt();
-        SetLoadCallbackReady(true);
+        if (m_FileLoadCallback) {
+            SetFileLoadCallbackReady(true);
+        }
+        else {
+            SetReloadLoadCallbackReady(true);
+        }
         // return; // 本帧只做重建，同步留到下帧
     }
 
-	// 加载成功但未重建（如 SetFromBufferAsync 失败），也要执行回调以通知 UI
-    if (m_HasPendingLoadCallback.exchange(false)) {
-        SetPendingLoadCallbackExecuted();
+   // 文件加载/重载完成后，都要执行对应回调以通知 UI
+    if (m_HasPendingFileLoadCallback.exchange(false)) {
+        SetPendingFileLoadCallbackExecuted();
+    }
+    if (m_HasPendingReloadLoadCallback.exchange(false)) {
+        SetPendingReloadLoadCallbackExecuted();
     }
 
     if (shouldReturnAfterLoadFailure) {

@@ -10,7 +10,7 @@
 //   • SetFileLoadedAsync 回调中执行数据相关的后处理业务（等值面阈值推算）
 //   • 回调内明确注释：在后台线程，只允许操作 SharedState
 //   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
-//   • IDataLoaderService 增加 GetLoadState() 可用于主线程状态查询
+//   • IDataLoaderService 通过 GetFileLoadState / GetReloadLoadState 做主线程状态查询
 //   • main.cpp 中的 SetInteractorInitialized() 调用方式明确分离（接口显式）
 // =====================================================================
 #pragma once

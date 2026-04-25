@@ -34,7 +34,7 @@ enum class ToolMode {
     ModelTransform      // 模型变换（旋转/缩放/平移）
 };
 
-// --- 数据加载状态枚举（替代裸 bool，区分"未加载/加载中/成功/失败"）---
+// --- 通用状态枚举（用于数据可信、文件流加载、重载加载等状态）---
 enum class LoadState {
     Idle,       // 未发起加载
     Loading,    // 加载中（后台线程运行）
