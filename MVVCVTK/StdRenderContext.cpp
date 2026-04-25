@@ -273,7 +273,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     {
         vtkProp3D* prop = m_interactiveService->GetMainProp();
         if (prop && prop->GetMatrix()) {
-            m_interactiveService->SetModelMatrixSynced(prop->GetUserMatrix());
+            m_interactiveService->SetModelMatrixSynced(prop->GetMatrix());
             m_interactiveService->SetDirtyMarked();
         }
         return;

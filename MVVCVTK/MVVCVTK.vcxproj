@@ -150,6 +150,7 @@
     <ClInclude Include="GapAlgorithmOverlayStrategies.h" />
     <ClInclude Include="IInteractionHandler.h" />
     <ClInclude Include="ImageProcessor.h" />
+    <ClInclude Include="InteractionComputeService.h" />
     <ClInclude Include="InteractionEvent.h" />
     <ClInclude Include="InteractionResult.h" />
     <ClInclude Include="InteractionRouter.h" />
@@ -167,7 +168,6 @@
     <ClInclude Include="VolumeAnalysisService.h" />
     <ClInclude Include="VolumeBuffer.h" />
     <ClInclude Include="VolumeStrategy.h" />
-    <ClInclude Include="VolumeTransformService.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AppService.cpp" />

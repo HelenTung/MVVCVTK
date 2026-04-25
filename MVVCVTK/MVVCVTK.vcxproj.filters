@@ -132,9 +132,6 @@
     <ClInclude Include="StdRenderContext.h">
       <Filter>头文件\Render</Filter>
     </ClInclude>
-    <ClInclude Include="VolumeTransformService.h">
-      <Filter>头文件\Service</Filter>
-    </ClInclude>
     <ClInclude Include="VolumeAnalysisService.h">
       <Filter>头文件\Service</Filter>
     </ClInclude>
@@ -164,6 +161,9 @@
     </ClInclude>
     <ClInclude Include="GapAnalysisService.h">
       <Filter>头文件\Service\GapMeshOverlayService</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionComputeService.h">
+      <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -1,7 +1,7 @@
 ﻿#include "AppService.h"
 #include "DataManager.h"
-#include "DataConverters.h"
 #include "StrategyFactory.h"
+#include <vtkSmartPointer.h>
 #include <iostream>
 #include <thread>
 
@@ -71,7 +71,6 @@ MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state)
     : m_sharedState(std::move(state))
-    , m_transformService(std::make_unique<VolumeTransformService>(m_sharedState))
     , m_cancelFlag(std::make_shared<std::atomic<bool>>(false))
 {
     m_dataManager = std::move(dataMgr);
@@ -362,41 +361,15 @@ void MedicalVizService::SetSliceImagesSavedAsync(
     const WindowLevelParams currentWindowLevel = sharedState->GetWindowLevel();
     const std::array<double, 16> currentMatrix = sharedState->GetModelMatrix(); // 当前姿态矩阵，导出切片前需要先应用
     const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
-
-    // 算旋转角度
-	auto anglematrix = vtkSmartPointer<vtkMatrix4x4>::New();
-	auto angletransform = vtkSmartPointer<vtkTransform>::New();
-	anglematrix->DeepCopy(currentMatrix.data());
-    angletransform->PostMultiply();
-    angletransform->SetMatrix(anglematrix);
-
-    Orientation currentOrientation = Orientation::Top_down;
-	auto curworld = sharedState->GetCursorWorld();
-	angletransform->Translate(-curworld[0], -curworld[1], -curworld[2]);
-    if (currentMode == VizMode::SliceFront_back) {
-        currentOrientation = Orientation::Front_back;
-        angletransform->RotateY(angle);
-    }
-    else if (currentMode == VizMode::SliceLeft_right) {
-        currentOrientation = Orientation::Left_right;
-        angletransform->RotateX(angle);
-    }
-    else if (currentMode == VizMode::SliceTop_down)
-    {
-        angletransform->RotateZ(angle);
-    }
-	angletransform->Translate(curworld[0], curworld[1], curworld[2]);
-
-    std::array<double, 16> angleMatrixArr = { 0.0 };
-    auto data = angletransform->GetMatrix()->GetData();
-    for (size_t i = 0; i < 16; i++)
-    {
-        angleMatrixArr[i] = data[i];
-    }
+    const SliceExportData exportData = InteractionComputeService::GetSliceExportData(
+        currentMatrix,
+        currentMode,
+        sharedState->GetCursorWorld(),
+        angle); // 当前切片导出任务的朝向与姿态矩阵
 
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
-    std::packaged_task<void()> task([dataMgr, resolvedPath, currentOrientation, currentWindowLevel, angleMatrixArr, weakSelf]() mutable {
-        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, currentOrientation, currentWindowLevel, angleMatrixArr);
+    std::packaged_task<void()> task([dataMgr, resolvedPath, exportData, currentWindowLevel, weakSelf]() mutable {
+        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, exportData.orientation, currentWindowLevel, exportData.matrix);
 
         auto self = weakSelf.lock();
         if (self) {
@@ -417,11 +390,9 @@ void MedicalVizService::SetLoadCanceled()
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetSliceScrolled(int delta)
 {
-    if (!m_sharedState) return;
-    VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    int axis = 2;
-    if (mode == VizMode::SliceFront_back) axis = 1;
-    if (mode == VizMode::SliceLeft_right) axis = 0;
+    if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
+    const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+    const int axis = InteractionComputeService::GetSliceAxis(mode); // 当前切片滚动应推进的模型坐标轴
 
     double space[3] = { 0.0 };
     auto img = m_dataManager->GetVtkImage();
@@ -430,16 +401,14 @@ void MedicalVizService::SetSliceScrolled(int delta)
     auto cursorWorld = m_sharedState->GetCursorWorld();
     double cursorModel[3] = { 0.0 };
     GetModelPositionFromWorld(cursorWorld.data(), cursorModel);
-    cursorModel[axis] += static_cast<double>(delta) * space[axis];
 
     double bounds[6] = { 0.0 };
     img->GetBounds(bounds);
-    cursorModel[0] = std::max(bounds[0], std::min(cursorModel[0], bounds[1]));
-    cursorModel[1] = std::max(bounds[2], std::min(cursorModel[1], bounds[3]));
-    cursorModel[2] = std::max(bounds[4], std::min(cursorModel[2], bounds[5]));
+    double nextModel[3] = { 0.0, 0.0, 0.0 }; // 滚轮推进并钳制后的模型坐标
+    InteractionComputeService::GetScrolledModelPosition(cursorModel, axis, delta, space, bounds, nextModel);
 
     double newCursorWorld[3] = { 0.0, 0.0, 0.0 };
-    GetWorldPositionFromModel(cursorModel, newCursorWorld);
+    GetWorldPositionFromModel(nextModel, newCursorWorld);
     m_sharedState->SetCursorRawWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     m_sharedState->SetCursorAxis(axis);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
@@ -483,7 +452,13 @@ vtkProp3D* MedicalVizService::GetMainProp()
 
 void MedicalVizService::SetModelMatrixSynced(vtkMatrix4x4* mat)
 {
-    m_transformService->SetModelMatrix(mat);
+    if (!mat) return;
+
+    std::array<double, 16> matData = { 0 }; // 当前模型矩阵快照，回写 SharedState 使用
+    std::memcpy(matData.data(), mat->GetData(), 16 * sizeof(double));
+    if (m_sharedState) {
+        m_sharedState->SetModelMatrix(matData);
+    }
 }
 
 void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
@@ -493,60 +468,75 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
 
 void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
-    double dx = 3.0 * totalDx / static_cast<double>(viewWidth);
-    double dy = 3.0 * totalDy / static_cast<double>(viewHeight);
+    if (!m_sharedState) return;
 
-    if (std::abs(startWW) > 0.01) {
-        dx = dx * startWW;
-    }
-    else {
-        dx = dx * (startWW < 0.0 ? -0.01 : 0.01);
-    }
+    const WindowLevelParams windowLevel = InteractionComputeService::GetWindowLevel(
+        totalDx,
+        totalDy,
+        viewWidth,
+        viewHeight,
+        startWW,
+        startWC); // 当前拖拽结束后应写回状态的窗宽窗位
 
-    if (std::abs(startWC) > 0.01) {
-        dy = dy * startWC;
-    }
-    else {
-        dy = dy * (startWC < 0.0 ? -0.01 : 0.01);
-    }
-
-    if (startWW < 0.0) {
-        dx = -1.0 * dx;
-    }
-    if (startWC < 0.0) {
-        dy = -1.0 * dy;
-    }
-
-    double newWW = startWW + dx;
-    double newWC = startWC - dy;
-
-    if (newWW < 0.01) {
-        newWW = 0.01;
-    }
-
-    m_sharedState->SetWindowLevel(newWW, newWC);
+    m_sharedState->SetWindowLevel(windowLevel.windowWidth, windowLevel.windowCenter);
     SetSyncRequested();
 }
 
 void MedicalVizService::SetModelTransform(
     double translate[3], double rotate[3], double scale[3])
 {
-    m_transformService->SetModelTransform(translate, rotate, scale);
+    auto currentMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // SharedState 当前模型矩阵快照，作为 TRS 叠加基准
+    currentMatrix->Identity();
+    if (m_sharedState) {
+        const auto matrixData = m_sharedState->GetModelMatrix();
+        currentMatrix->DeepCopy(matrixData.data());
+    }
+
+    auto matrix = InteractionComputeService::GetModelMatrix(
+        currentMatrix, translate, rotate, scale);
+    std::array<double, 16> matData = { 0 }; // TRS 叠加后的模型矩阵快照，供状态同步使用
+    std::memcpy(matData.data(), matrix->GetData(), 16 * sizeof(double));
+    if (m_sharedState) {
+        m_sharedState->SetModelMatrix(matData);
+    }
 }
 
 void MedicalVizService::SetModelTransformReset()
 {
-    m_transformService->SetModelTransformReset();
+    std::array<double, 16> identity = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1
+    }; // 模型重置后的单位矩阵
+    if (m_sharedState) {
+        m_sharedState->SetModelMatrix(identity);
+    }
 }
 
 void MedicalVizService::GetModelPositionFromWorld(const double w[3], double m[3]) const
 {
-    m_transformService->GetModelPositionFromWorld(w, m);
+    auto inverseMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // 由 SharedState 现算的逆矩阵，避免维护第二份真相
+    inverseMatrix->Identity();
+    if (m_sharedState) {
+        const auto matrixData = m_sharedState->GetModelMatrix();
+        inverseMatrix->DeepCopy(matrixData.data());
+        inverseMatrix->Invert();
+    }
+
+    InteractionComputeService::GetModelPositionFromWorld(inverseMatrix, w, m);
 }
 
 void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]) const
 {
-    m_transformService->GetWorldPositionFromModel(m, w);
+    auto modelMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // SharedState 当前模型矩阵快照，保证 world/model 换算只依赖单一真源
+    modelMatrix->Identity();
+    if (m_sharedState) {
+        const auto matrixData = m_sharedState->GetModelMatrix();
+        modelMatrix->DeepCopy(matrixData.data());
+    }
+
+    InteractionComputeService::GetWorldPositionFromModel(modelMatrix, m, w);
 }
 
 // ─────────────────────────────────────────────────────────────────────

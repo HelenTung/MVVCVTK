@@ -19,9 +19,8 @@
 
 #include "AppInterfaces.h"
 #include "AppState.h"
-#include "DataConverters.h"
-#include "VolumeTransformService.h"
-#include <vtkTable.h>
+#include "InteractionComputeService.h"
+#include <vtkMatrix4x4.h>
 #include <map>
 #include <mutex>
 #include <future>
@@ -107,7 +106,7 @@ public:
         return p;
     }
 
-    // 模型变换扩展（委托 VolumeTransformService，统一走 Set/Get 语义）
+    // 模型变换扩展（委托交互计算服务，统一走 Set/Get 语义）
     void SetModelTransform(double translate[3], double rotate[3], double scale[3]);
     void SetModelTransformReset();
     void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const override;
@@ -235,7 +234,6 @@ private:
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    std::unique_ptr<VolumeTransformService> m_transformService;
 
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     std::atomic<bool> m_needsDataRefresh{ false };

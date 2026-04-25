@@ -1,23 +1,10 @@
 ﻿#include "DataConverters.h"
 #include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
-#include <vtkIntArray.h>
 #include <filesystem>
 #include <vtkImageWriter.h>
 #include <vtkJPEGWriter.h>
 #include <vtkPNGWriter.h>
-
-void IsoSurfaceConverter::SetParameter(const std::string& key, double value) {
-    if (key == "IsoValue") m_isoValue = value;
-}
-
-vtkSmartPointer<vtkPolyData> IsoSurfaceConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {
-    m_filter->SetInputData(input);
-    m_filter->ComputeNormalsOn();
-    m_filter->SetValue(0, m_isoValue);
-    m_filter->Update();
-    return m_filter->GetOutput();
-}
 
 void HistogramConverter::SetParameter(const std::string& key, double value)
 {
