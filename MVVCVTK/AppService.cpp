@@ -205,8 +205,7 @@ LoadState MedicalVizService::GetReloadLoadState() const
 }
 
 bool MedicalVizService::SetFileLoadStarted(
-    std::function<void(bool)> callback,
-    const char* source)
+    std::function<void(bool)> callback)
 {
     if (!m_sharedState) {
         SetFileLoadCallbackReady(false, std::move(callback));
@@ -216,8 +215,7 @@ bool MedicalVizService::SetFileLoadStarted(
     if (m_sharedState->GetFileLoadState() == LoadState::Loading
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
-        std::cerr << "[" << (source ? source : "SetFileLoadStarted")
-            << "] Already loading, ignoring duplicate call.\n";
+        std::cerr << "[SetFileLoadStarted] Already loading, ignoring duplicate call.\n";
         SetFileLoadCallbackReady(false, std::move(callback));
         return false;
     }
@@ -231,8 +229,7 @@ bool MedicalVizService::SetFileLoadStarted(
 }
 
 bool MedicalVizService::SetReloadLoadStarted(
-    std::function<void(bool)> callback,
-    const char* source)
+    std::function<void(bool)> callback)
 {
     if (!m_sharedState) {
         SetReloadLoadCallbackReady(false, std::move(callback));
@@ -242,8 +239,7 @@ bool MedicalVizService::SetReloadLoadStarted(
     if (m_sharedState->GetFileLoadState() == LoadState::Loading
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
-        std::cerr << "[" << (source ? source : "SetReloadLoadStarted")
-            << "] Already loading, ignoring duplicate call.\n";
+        std::cerr << "[SetReloadLoadStarted] Already loading, ignoring duplicate call.\n";
         SetReloadLoadCallbackReady(false, std::move(callback));
         return false;
     }
@@ -268,7 +264,7 @@ void MedicalVizService::SetFileLoadedAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
-    if (!SetFileLoadStarted(std::move(onComplete), "SetFileLoadedAsync")) return;
+    if (!SetFileLoadStarted(std::move(onComplete))) return;
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
@@ -318,7 +314,7 @@ bool MedicalVizService::SetReloadFromBufferAsync(
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (!SetReloadLoadStarted(std::move(onComplete), "SetReloadFromBufferAsync")) {
+    if (!SetReloadLoadStarted(std::move(onComplete))) {
         return false;
     }
 

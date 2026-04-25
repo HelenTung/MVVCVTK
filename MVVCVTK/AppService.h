@@ -172,10 +172,8 @@ private:
     // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
     // 原生依赖对象：m_sharedState、m_cancelFlag、m_loadFuture。
     // ================================================================
-    bool SetFileLoadStarted(std::function<void(bool)> callback,
-        const char* source);
-    bool SetReloadLoadStarted(std::function<void(bool)> callback,
-        const char* source);
+    bool SetFileLoadStarted(std::function<void(bool)> callback);
+    bool SetReloadLoadStarted(std::function<void(bool)> callback);
     void SetTaskStarted(std::packaged_task<void()> task,
         bool keepActiveLoadFuture);
 
