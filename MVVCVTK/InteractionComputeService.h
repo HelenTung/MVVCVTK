@@ -130,7 +130,7 @@ public:
             exportData.orientation = Orientation::Left_right;
             transform->RotateX(angle);
         }
-        else {
+        else if (mode == VizMode::SliceTop_down) {
             exportData.orientation = Orientation::Top_down;
             transform->RotateZ(angle);
         }

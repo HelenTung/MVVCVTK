@@ -6,6 +6,7 @@ public:
     virtual ~IMeasurementStrategy() = default;
 
     virtual MeasurementType GetMeasurementType() const = 0;
+    virtual void SetSessionStateSynced(const MeasurementSessionState& state) = 0;
     virtual MeasurementStatus SetPointAdded(const double worldPos[3],
         const double modelPos[3]) = 0;
     virtual void SetPreviewPointUpdated(const double worldPos[3],

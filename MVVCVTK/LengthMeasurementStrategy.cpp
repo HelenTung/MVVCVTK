@@ -43,6 +43,18 @@ LengthMeasurementStrategy::LengthMeasurementStrategy(uint64_t id)
     SetVisible(true);
 }
 
+void LengthMeasurementStrategy::SetSessionStateSynced(const MeasurementSessionState& state)
+{
+    m_result = state.result;
+    m_worldPoints = state.result.worldPoints;
+    m_modelPoints = state.result.modelPoints;
+    m_previewWorldPoint = state.previewWorldPoint;
+    m_previewModelPoint = state.previewModelPoint;
+    m_hasPreviewPoint = state.hasPreviewPoint;
+    SetStyleUpdated();
+    SetVisualUpdated();
+}
+
 MeasurementStatus LengthMeasurementStrategy::SetPointAdded(const double worldPos[3],
     const double modelPos[3])
 {

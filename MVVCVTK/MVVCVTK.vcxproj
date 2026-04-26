@@ -175,6 +175,7 @@
     <ClInclude Include="MeasurementCsvExporter.h" />
     <ClInclude Include="MeasurementService.h" />
     <ClInclude Include="MeasurementTypes.h" />
+    <ClInclude Include="MeasurementInteractionHost.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AppService.cpp" />
@@ -198,6 +199,7 @@
     <ClCompile Include="AngleMeasurementStrategy.cpp" />
     <ClCompile Include="LengthMeasurementStrategy.cpp" />
     <ClCompile Include="MeasurementService.cpp" />
+    <ClCompile Include="MeasurementInteractionHost.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -16,6 +16,7 @@ public:
     explicit AngleMeasurementStrategy(uint64_t id);
 
     MeasurementType GetMeasurementType() const override { return MeasurementType::Angle; }
+    void SetSessionStateSynced(const MeasurementSessionState& state) override;
     MeasurementStatus SetPointAdded(const double worldPos[3],
         const double modelPos[3]) override;
     void SetPreviewPointUpdated(const double worldPos[3],

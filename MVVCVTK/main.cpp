@@ -227,11 +227,15 @@ int main()
     auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState);
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
 
-    // 窗口 E 的独立测量服务，由业务层显式创建并绑定到渲染上下文
-    std::shared_ptr<IMeasurementService> measurementE = std::make_shared<MeasurementService>();
-    contextE->SetMeasurementService(measurementE);
-    if (measurementE) {
-        measurementE->SetResultCallback([](const MeasurementResult& result) {
+    // 所有窗口共享同一套测量会话池，业务层只持有统一测量服务接口
+    std::shared_ptr<IMeasurementService> measurement = std::make_shared<MeasurementService>();
+    contextA->SetMeasurementService(measurement);
+    contextE->SetMeasurementService(measurement);
+    contextB->SetMeasurementService(measurement);
+    contextC->SetMeasurementService(measurement);
+    contextD->SetMeasurementService(measurement);
+    if (measurement) {
+        measurement->SetResultCallback([](const MeasurementResult& result) {
             const char* typeText = "None"; // 当前测量结果对应的类型文本
             if (result.type == MeasurementType::Length) typeText = "Length";
             else if (result.type == MeasurementType::Angle) typeText = "Angle";
@@ -256,11 +260,11 @@ int main()
         // contextE->SetToolMode(ToolMode::DistanceMeasure);
 
         // 示例：如需导出全部测量结果 CSV，可在合适时机调用
-        // measurementE->SetResultsFileSaved("E:\\data\\ct\\measurement_results.csv");
+        // measurement->SetResultsFileSaved("E:\\data\\ct\\measurement_results.csv");
 
         // 示例：如需控制某条历史结果显隐，可在拿到结果列表后按 id 调用
-        // auto results = measurementE->GetResults();
-        // if (!results.empty()) measurementE->SetResultVisible(results.front().id, false);
+        // auto results = measurement->GetResults();
+        // if (!results.empty()) measurement->SetResultVisible(results.front().id, false);
     }
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）

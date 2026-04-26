@@ -508,15 +508,38 @@ StdRenderContext 主要给前端提供：
 4) SetOrientationAxesVisible(show)
    - 控制当前窗口自己的方向轴 / 朝向标记
 
-5) SetInteractorInitialized()
-   - 初始化 interactor / timer / widget / 路由
+5) SetMeasurementService(service)
+   - 绑定业务层创建的测量服务
+   - RenderContext 只负责把鼠标事件转给测量服务，不拥有测量业务
 
-6) SetStarted()
+6) SetInteractorInitialized()
+   - 初始化 interactor / timer / 路由
+
+7) SetStarted()
    - 启动渲染循环
 
-7) SetToolMode(mode)
+8) SetToolMode(mode)
    - 切换工具模式
    - 例如：Navigation / DistanceMeasure / AngleMeasure / ModelTransform
+
+测量接入方式：
+
+    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+    auto context = std::make_shared<StdRenderContext>();
+    std::shared_ptr<IMeasurementService> measurement =
+        std::make_shared<MeasurementService>();
+
+    context->SetServiceBound(service);
+    context->SetMeasurementService(measurement);
+
+    measurement->SetResultCallback([](const MeasurementResult& result) {
+        // 业务层在这里接收长度/角度、单位、状态等结果
+    });
+
+说明：
+- 测量服务由业务层创建并持有
+- RenderContext 只负责事件转发与拾取命中校验
+- 具体显示由测量 overlay strategy 进入现有数据驱动显示管线
 
 补充：
 - 默认键盘中已接入部分快捷键：
@@ -540,7 +563,9 @@ StdRenderContext 主要给前端提供：
         void LoadFile(const std::string& path);
         void ImportBuffer(...);
         void ExportCurrent();
+        void BindMeasurementService(std::shared_ptr<IMeasurementService> service);
         void SetMode(VizMode mode);
+        void SetToolMode(ToolMode mode);
         void SetPlanesVisible(bool show);
         void SetCrosshairVisible(bool show);
         void SetRulerVisible(bool show);
@@ -567,8 +592,10 @@ StdRenderContext 主要给前端提供：
    - DataManager
    - SharedInteractionState
    - MedicalVizService（每个窗口一份）
+   - MeasurementService（需要测量的窗口按实例创建）
    - StdRenderContext（每个窗口一份）
    - SetServiceBound
+   - SetMeasurementService
    - SetInteractorInitialized
 
 2. 首次配置：
@@ -585,11 +612,18 @@ StdRenderContext 主要给前端提供：
    - SetWindowLevelAdjusted
    - SetCursorWorldPosition
    - SetElementVisible
+    - SetToolMode
 
-5. 导出：
+5. 测量回调：
+   - SetResultCallback
+   - GetResults
+   - SetResultVisible
+   - SetResultsFileSaved
+
+6. 导出：
    - SetTransformedDataSavedAsync
 
-6. 启动：
+7. 启动：
    - SetStarted
 
 这样即可完成：
@@ -598,6 +632,7 @@ StdRenderContext 主要给前端提供：
 - 切片滚动
 - 窗宽窗位调节
 - 当前窗口实例的十字线 / 彩色平面 / 标尺显隐
+- 独立测量实例的创建 / 预览 / 历史显示 / CSV 导出
 - 模型变换后导出
 ─────────────────────────────────────────────────────────────────────
 */

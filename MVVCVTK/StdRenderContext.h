@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "AppInterfaces.h"
 #include "InteractionRouter.h"   
+#include "MeasurementInteractionHost.h"
 #include <memory>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkPropPicker.h>
@@ -21,7 +22,7 @@ private:
     // ── 路由器（替代原来 HandleVTKEvent 里的手写 if-else） ──────────
     InteractionRouter m_interactionRouter;
     std::shared_ptr<IMeasurementService> m_measurementFacade;      // 业务层持有的统一测量服务接口
-    std::shared_ptr<class MeasurementService> m_measurementService; // 当前渲染上下文实际绑定的测量服务实现
+    std::shared_ptr<MeasurementInteractionHost> m_measurementHost; // 当前渲染上下文绑定的 VTK 测量交互宿主适配器
 
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;

@@ -189,6 +189,9 @@
     <ClInclude Include="MeasurementTypes.h">
       <Filter>头文件\MeasurementAlgo</Filter>
     </ClInclude>
+    <ClInclude Include="MeasurementInteractionHost.h">
+      <Filter>头文件\Service</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -253,6 +256,9 @@
     </ClCompile>
     <ClCompile Include="LengthMeasurementStrategy.cpp">
       <Filter>源文件\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="MeasurementInteractionHost.cpp">
+      <Filter>源文件\Service</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

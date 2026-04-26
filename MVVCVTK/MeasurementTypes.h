@@ -28,3 +28,10 @@ struct MeasurementResult {
     std::vector<std::array<double, 3>> worldPoints; // 当前测量结果对应的世界坐标点击点
     std::vector<std::array<double, 3>> modelPoints; // 当前测量结果对应的模型坐标点击点
 };
+
+struct MeasurementSessionState {
+    MeasurementResult result;
+    std::array<double, 3> previewWorldPoint = { 0.0, 0.0, 0.0 }; // 当前测量会话尚未确认的预览世界端点
+    std::array<double, 3> previewModelPoint = { 0.0, 0.0, 0.0 }; // 当前测量会话尚未确认的预览模型端点
+    bool hasPreviewPoint = false;
+};

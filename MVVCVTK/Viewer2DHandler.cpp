@@ -165,6 +165,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 			auto cursor = m_service->GetCursorWorld();
 			// 将十字线世界坐标转换为显示坐标，以便计算旋转中心,显示坐标用render取得,故cx，cy为显示坐标系下的十字线相交位置
 			m_renderer->SetWorldPoint(cursor[0], cursor[1], cursor[2], 1.0);
+            m_renderer->WorldToDisplay();
             auto pos = m_renderer->GetDisplayPoint();
 			double cx = pos[0];
 			double cy = pos[1];
@@ -205,7 +206,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 
 			auto transform = vtkSmartPointer<vtkTransform>::New();
 			transform->SetMatrix(mat);
-			transform->PostMultiply(); // 左乘
+			transform->PostMultiply();
 			transform->Translate(-cursor[0], -cursor[1], -cursor[2]); // 平移到旋转中心
 			transform->RotateWXYZ(deltaAngleDeg, RotationAxis); // 旋转
             transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点

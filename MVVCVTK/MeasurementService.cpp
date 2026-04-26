@@ -1,67 +1,199 @@
 #include "MeasurementService.h"
 #include "MeasurementCsvExporter.h"
-#include <vtkProp.h>
-
-namespace {
-
-bool GetIsMeasureMode(ToolMode mode)
-{
-    return mode == ToolMode::DistanceMeasure || mode == ToolMode::AngleMeasure;
-}
-
-std::shared_ptr<AbstractVisualStrategy> GetOverlayStrategy(const std::shared_ptr<IMeasurementStrategy>& strategy)
-{
-    return std::dynamic_pointer_cast<AbstractVisualStrategy>(strategy);
-}
-
-} // namespace
+#include <algorithm>
 
 void MeasurementService::SetToolMode(ToolMode mode)
 {
-    if (m_toolMode == mode) {
-        return;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (m_toolMode == mode) {
+            return;
+        }
+
+        const bool shouldClearPending = !GetIsMeasureMode(mode)
+            || !GetIsMeasureMode(m_toolMode)
+            || mode != m_toolMode;
+        if (shouldClearPending) {
+            const int activeIndex = GetActiveSessionIndex();
+            if (activeIndex >= 0) {
+                m_sessions.erase(m_sessions.begin() + activeIndex);
+            }
+        }
+
+        m_toolMode = mode;
+        changed = true;
+    }
+    if (changed) {
+        SetObserversNotified();
+    }
+}
+
+bool MeasurementService::SetMeasurementPointAdded(const double worldPos[3], const double modelPos[3])
+{
+    MeasurementResult completedResult;
+    bool hasCompletedResult = false;
+    bool changed = false;
+
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (!GetIsMeasureMode(m_toolMode) || !worldPos || !modelPos) {
+            return false;
+        }
+
+        int activeIndex = GetActiveSessionIndex();
+        if (activeIndex < 0) {
+            m_sessions.push_back(GetSessionCreated());
+            activeIndex = static_cast<int>(m_sessions.size()) - 1;
+            SetHistoryStyleUpdated(m_sessions[activeIndex].result.type);
+        }
+
+        auto& session = m_sessions[activeIndex];
+        session.result.worldPoints.push_back({ worldPos[0], worldPos[1], worldPos[2] });
+        session.result.modelPoints.push_back({ modelPos[0], modelPos[1], modelPos[2] });
+        session.previewWorldPoint = session.result.worldPoints.back();
+        session.previewModelPoint = session.result.modelPoints.back();
+        session.hasPreviewPoint = true;
+        session.result.status = MeasurementStatus::InProgress;
+
+        const size_t pointCount = session.result.worldPoints.size();
+        if (session.result.type == MeasurementType::Length && pointCount >= 2) {
+            session.result.value = MeasurementComputeService::GetLength(
+                session.result.worldPoints[0], session.result.worldPoints[1]);
+            session.result.status = MeasurementStatus::Succeeded;
+            session.hasPreviewPoint = false;
+            completedResult = session.result;
+            hasCompletedResult = true;
+        }
+        else if (session.result.type == MeasurementType::Angle && pointCount >= 3) {
+            session.result.value = MeasurementComputeService::GetAngle(
+                session.result.worldPoints[0],
+                session.result.worldPoints[1],
+                session.result.worldPoints[2]);
+            session.result.status = MeasurementStatus::Succeeded;
+            session.hasPreviewPoint = false;
+            completedResult = session.result;
+            hasCompletedResult = true;
+        }
+
+        changed = true;
     }
 
-    const bool shouldClearPending = !GetIsMeasureMode(mode)
-        || !GetIsMeasureMode(m_toolMode)
-        || mode != m_toolMode;
-    if (shouldClearPending) {
-        SetPendingStrategyCleared();
+    if (changed) {
+        SetObserversNotified();
+    }
+    if (hasCompletedResult && m_resultCallback) {
+        m_resultCallback(completedResult);
+    }
+    return true;
+}
+
+bool MeasurementService::SetMeasurementPreviewPointUpdated(const double worldPos[3], const double modelPos[3])
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        const int activeIndex = GetActiveSessionIndex();
+        if (activeIndex < 0 || !worldPos || !modelPos) {
+            return false;
+        }
+
+        auto& session = m_sessions[activeIndex];
+        session.previewWorldPoint = { worldPos[0], worldPos[1], worldPos[2] };
+        session.previewModelPoint = { modelPos[0], modelPos[1], modelPos[2] };
+        session.hasPreviewPoint = true;
+
+        if (session.result.type == MeasurementType::Length && !session.result.worldPoints.empty()) {
+            session.result.value = MeasurementComputeService::GetLength(
+                session.result.worldPoints[0],
+                session.previewWorldPoint);
+        }
+        else if (session.result.type == MeasurementType::Angle) {
+            if (session.result.worldPoints.size() >= 2) {
+                session.result.value = MeasurementComputeService::GetAngle(
+                    session.result.worldPoints[0],
+                    session.result.worldPoints[1],
+                    session.previewWorldPoint);
+            }
+            else if (session.result.worldPoints.size() == 1) {
+                session.result.value = MeasurementComputeService::GetLength(
+                    session.result.worldPoints[0],
+                    session.previewWorldPoint);
+            }
+        }
+        changed = true;
     }
 
-    m_toolMode = mode;
-    m_lastPreviewX = -1;
-    m_lastPreviewY = -1;
+    if (changed) {
+        SetObserversNotified();
+    }
+    return true;
+}
+
+void MeasurementService::SetMeasurementPreviewCleared()
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        const int activeIndex = GetActiveSessionIndex();
+        if (activeIndex < 0) {
+            return;
+        }
+        m_sessions.erase(m_sessions.begin() + activeIndex);
+        changed = true;
+    }
+
+    if (changed) {
+        SetObserversNotified();
+    }
 }
 
 void MeasurementService::SetResultCallback(std::function<void(const MeasurementResult&)> callback)
 {
+    std::lock_guard<std::mutex> lk(m_mutex);
     m_resultCallback = std::move(callback);
 }
 
 std::vector<MeasurementResult> MeasurementService::GetResults() const
 {
+    std::lock_guard<std::mutex> lk(m_mutex);
     std::vector<MeasurementResult> results;
-    results.reserve(m_finishedStrategies.size());
-    for (const auto& strategy : m_finishedStrategies) {
-        if (strategy) {
-            results.push_back(strategy->GetResult());
+    results.reserve(m_sessions.size());
+    for (const auto& session : m_sessions) {
+        if (session.result.status == MeasurementStatus::Succeeded) {
+            results.push_back(session.result);
         }
     }
     return results;
 }
 
+std::vector<MeasurementSessionState> MeasurementService::GetSessionStates() const
+{
+    std::lock_guard<std::mutex> lk(m_mutex);
+    return m_sessions;
+}
+
 bool MeasurementService::SetResultVisible(uint64_t id, bool show)
 {
-    for (const auto& strategy : m_finishedStrategies) {
-        if (!strategy || strategy->GetId() != id) {
-            continue;
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        for (auto& session : m_sessions) {
+            if (session.result.id != id || session.result.status != MeasurementStatus::Succeeded) {
+                continue;
+            }
+            if (session.result.visible != show) {
+                session.result.visible = show;
+                changed = true;
+            }
+            break;
         }
-        strategy->SetVisible(show);
-        SetRenderRequested();
-        return true;
     }
-    return false;
+
+    if (changed) {
+        SetObserversNotified();
+    }
+    return changed;
 }
 
 bool MeasurementService::SetResultsFileSaved(const std::string& path) const
@@ -71,167 +203,87 @@ bool MeasurementService::SetResultsFileSaved(const std::string& path) const
 
 void MeasurementService::SetResultsCleared()
 {
-    SetPendingStrategyCleared();
-    if (m_interactiveService) {
-        for (auto& strategy : m_finishedStrategies) {
-            auto overlay = GetOverlayStrategy(strategy);
-            if (overlay) {
-                m_interactiveService->SetOverlayStrategyRemoved(overlay);
-            }
-        }
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_sessions.clear();
     }
-    m_finishedStrategies.clear();
-    SetRenderRequested();
+    SetObserversNotified();
 }
 
-void MeasurementService::SetRenderContext(vtkRenderer* renderer, vtkPropPicker* picker)
+void MeasurementService::SetMeasurementObserver(std::shared_ptr<void> owner,
+    std::function<void()> callback)
 {
-    m_renderer = renderer;
-    m_picker = picker;
+    if (!owner || !callback) return;
+
+    std::lock_guard<std::mutex> lk(m_mutex);
+    m_observers.erase(
+        std::remove_if(m_observers.begin(), m_observers.end(),
+            [&owner](const MeasurementObserverEntry& entry) {
+                auto current = entry.owner.lock();
+                return !current || current.get() == owner.get();
+            }),
+        m_observers.end());
+    m_observers.push_back({ std::move(owner), std::move(callback) });
 }
 
-void MeasurementService::SetInteractiveService(AbstractInteractiveService* service)
+int MeasurementService::GetActiveSessionIndex() const
 {
-    m_interactiveService = service;
+    for (int i = 0; i < static_cast<int>(m_sessions.size()); ++i) {
+        if (m_sessions[i].result.status == MeasurementStatus::InProgress) {
+            return i;
+        }
+    }
+    return -1;
 }
 
-bool MeasurementService::GetClickHandled(int x, int y)
+MeasurementSessionState MeasurementService::GetSessionCreated()
 {
-    if (!GetIsMeasureMode(m_toolMode)) {
-        return false;
-    }
-    if (!m_picker || !m_renderer || !m_interactiveService) {
-        return true;
-    }
-    if (!m_picker->Pick(x, y, 0, m_renderer)) {
-        return true;
-    }
-
-    vtkProp* pickedProp = m_picker->GetViewProp();
-    double* worldPos = m_picker->GetPickPosition();
-    if (!pickedProp || !worldPos) {
-        return true;
-    }
-
-    auto strategy = m_activeStrategy;
-    if (!strategy) {
-        strategy = GetStrategyCreated();
-        if (!strategy) {
-            return true;
-        }
-        auto overlay = GetOverlayStrategy(strategy);
-        if (overlay) {
-            m_interactiveService->SetOverlayStrategyAdded(overlay);
-        }
-        m_interactiveService->SetInteracting(true);
-        m_activeStrategy = strategy;
-    }
-
-    double modelPos[3] = { 0.0, 0.0, 0.0 }; // 当前有效拾取点对应的模型坐标
-    m_interactiveService->GetModelPositionFromWorld(worldPos, modelPos);
-    const MeasurementStatus status = strategy->SetPointAdded(worldPos, modelPos);
-    if (status == MeasurementStatus::Succeeded) {
-        SetHistoryStyleUpdated(strategy->GetMeasurementType());
-        strategy->SetLatest(true);
-        m_finishedStrategies.push_back(strategy);
-        m_activeStrategy.reset();
-        if (m_resultCallback) {
-            m_resultCallback(strategy->GetResult());
-        }
-        if (m_interactiveService) {
-            m_interactiveService->SetInteracting(false);
-        }
-    }
-    SetRenderRequested(true);
-    return true;
-}
-
-bool MeasurementService::GetMouseMoveHandled(int x, int y)
-{
-    if (!GetIsMeasureMode(m_toolMode)) {
-        return false;
-    }
-    if (!m_picker || !m_renderer || !m_interactiveService || !m_activeStrategy) {
-        return true;
-    }
-    if (m_lastPreviewX == x && m_lastPreviewY == y) {
-        return true;
-    }
-    m_lastPreviewX = x;
-    m_lastPreviewY = y;
-    if (!m_picker->Pick(x, y, 0, m_renderer)) {
-        return true;
-    }
-
-    vtkProp* pickedProp = m_picker->GetViewProp();
-    double* worldPos = m_picker->GetPickPosition();
-    if (!pickedProp || !worldPos) {
-        return true;
-    }
-
-    double modelPos[3] = { 0.0, 0.0, 0.0 }; // 当前鼠标命中点对应的模型坐标预览端点
-    m_interactiveService->GetModelPositionFromWorld(worldPos, modelPos);
-    m_activeStrategy->SetPreviewPointUpdated(worldPos, modelPos);
-    SetRenderRequested(true);
-    return true;
-}
-
-std::shared_ptr<IMeasurementStrategy> MeasurementService::GetStrategyCreated()
-{
-    if (m_toolMode == ToolMode::DistanceMeasure) {
-        return std::make_shared<LengthMeasurementStrategy>(m_nextId++);
-    }
-    if (m_toolMode == ToolMode::AngleMeasure) {
-        return std::make_shared<AngleMeasurementStrategy>(m_nextId++);
-    }
-    return nullptr;
-}
-
-void MeasurementService::SetPendingStrategyCleared()
-{
-    if (!m_activeStrategy) {
-        return;
-    }
-    m_activeStrategy->SetPreviewCleared();
-    if (m_interactiveService) {
-        m_interactiveService->SetInteracting(false);
-    }
-    if (m_interactiveService) {
-        auto overlay = GetOverlayStrategy(m_activeStrategy);
-        if (overlay) {
-            m_interactiveService->SetOverlayStrategyRemoved(overlay);
-        }
-    }
-    m_activeStrategy.reset();
-    m_lastPreviewX = -1;
-    m_lastPreviewY = -1;
-    SetRenderRequested();
+    MeasurementSessionState session;
+    session.result.id = m_nextId++;
+    session.result.type = (m_toolMode == ToolMode::AngleMeasure)
+        ? MeasurementType::Angle
+        : MeasurementType::Length;
+    session.result.status = MeasurementStatus::InProgress;
+    session.result.unit = (session.result.type == MeasurementType::Angle) ? "deg" : "mm";
+    session.result.visible = true;
+    session.result.isHistorical = false;
+    return session;
 }
 
 void MeasurementService::SetHistoryStyleUpdated(MeasurementType type)
 {
-    for (auto& strategy : m_finishedStrategies) {
-        if (!strategy || strategy->GetMeasurementType() != type) {
-            continue;
+    for (auto& session : m_sessions) {
+        if (session.result.type == type && session.result.status == MeasurementStatus::Succeeded) {
+            session.result.isHistorical = true;
         }
-        strategy->SetLatest(false);
     }
 }
 
-void MeasurementService::SetRenderRequested(bool immediate) const
+void MeasurementService::SetObserversNotified()
 {
-    if (m_interactiveService) {
-        m_interactiveService->SetDirtyMarked();
-    }
-    if (!immediate || !m_renderer) {
-        return;
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_observers.erase(
+            std::remove_if(m_observers.begin(), m_observers.end(),
+                [](const MeasurementObserverEntry& entry) {
+                    return entry.owner.expired();
+                }),
+            m_observers.end());
+        callbacks.reserve(m_observers.size());
+        for (const auto& entry : m_observers) {
+            callbacks.push_back(entry.callback);
+        }
     }
 
-    vtkRenderWindow* renderWindow = m_renderer->GetRenderWindow();
-    if (renderWindow
-        && renderWindow->GetMapped()
-        && renderWindow->GetGenericWindowId())
-    {
-        renderWindow->Render();
+    for (const auto& callback : callbacks) {
+        if (callback) {
+            callback();
+        }
     }
+}
+
+bool MeasurementService::GetIsMeasureMode(ToolMode mode)
+{
+    return mode == ToolMode::DistanceMeasure || mode == ToolMode::AngleMeasure;
 }

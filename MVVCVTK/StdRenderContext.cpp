@@ -1,5 +1,4 @@
 ﻿#include "StdRenderContext.h"
-#include "MeasurementService.h"
 #include "TimeUpdateHandler.h"   // 新增
 #include "Viewer2DHandler.h"     // 新增
 #include "Viewer3DHandler.h"     // 新增
@@ -95,9 +94,11 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
     AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
-    if (m_measurementService) {
-        m_measurementService->SetInteractiveService(m_interactiveService.get());
-        m_measurementService->SetRenderContext(m_renderer.GetPointer(), m_picker.GetPointer());
+    if (m_measurementHost) {
+        m_measurementHost->SetContext(
+            m_renderer.GetPointer(),
+            m_picker.GetPointer(),
+            m_interactiveService.get());
     }
 
     // Service 就位后重建 Router
@@ -107,10 +108,15 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
 void StdRenderContext::SetMeasurementService(std::shared_ptr<IMeasurementService> service)
 {
     m_measurementFacade = std::move(service);
-    m_measurementService = std::dynamic_pointer_cast<MeasurementService>(m_measurementFacade);
-    if (m_measurementService) {
-        m_measurementService->SetInteractiveService(m_interactiveService.get());
-        m_measurementService->SetRenderContext(m_renderer.GetPointer(), m_picker.GetPointer());
+    if (m_measurementFacade) {
+        m_measurementHost = std::make_shared<MeasurementInteractionHost>(m_measurementFacade);
+        m_measurementHost->SetContext(
+            m_renderer.GetPointer(),
+            m_picker.GetPointer(),
+            m_interactiveService.get());
+    }
+    else {
+        m_measurementHost.reset();
     }
 }
 
@@ -279,8 +285,8 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         {
             auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
             const int* pos = iren ? iren->GetEventPosition() : nullptr;
-            if (m_measurementService) {
-                m_measurementService->GetClickHandled(
+            if (m_measurementHost) {
+                m_measurementHost->GetClickHandled(
                     pos ? pos[0] : 0,
                     pos ? pos[1] : 0);
             }
@@ -293,8 +299,8 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         {
             auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
             const int* pos = iren ? iren->GetEventPosition() : nullptr;
-            if (m_measurementService) {
-                m_measurementService->GetMouseMoveHandled(
+            if (m_measurementHost) {
+                m_measurementHost->GetMouseMoveHandled(
                     pos ? pos[0] : 0,
                     pos ? pos[1] : 0);
             }
