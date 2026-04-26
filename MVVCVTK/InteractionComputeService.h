@@ -121,18 +121,23 @@ public:
         transform->PostMultiply();
         transform->SetMatrix(baseMatrix);
 
+		double camNormal[3] = { 0.0, 0.0, 0.0 }; // 默认切片法线朝向，后续会被旋转到正确位置
+        //vtkTransform::Concatenate 把一个新变换矩阵 A 拼接到当前变换 M 上
         transform->Translate(-cursorWorld[0], -cursorWorld[1], -cursorWorld[2]); // 当前切片旋转中心，对应联动光标世界坐标
         if (mode == VizMode::SliceFront_back) {
             exportData.orientation = Orientation::Front_back;
-            transform->RotateY(angle);
+			camNormal[1] = -1.0;
+            transform->RotateWXYZ(angle, camNormal);
         }
         else if (mode == VizMode::SliceLeft_right) {
             exportData.orientation = Orientation::Left_right;
-            transform->RotateX(angle);
+            camNormal[0] = 1.0;
+            transform->RotateWXYZ(angle,camNormal);
         }
         else if (mode == VizMode::SliceTop_down) {
             exportData.orientation = Orientation::Top_down;
-            transform->RotateZ(angle);
+            camNormal[2] = -1.0;
+            transform->RotateWXYZ(angle,camNormal);
         }
         transform->Translate(cursorWorld[0], cursorWorld[1], cursorWorld[2]);
 
