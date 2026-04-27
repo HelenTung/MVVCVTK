@@ -14,7 +14,9 @@
 #include <vtkImageReslice.h>
 #include <vtkImageChangeInformation.h>
 #include <vtkPNGWriter.h>
+#include <vtkImageImport.h>
 #include "MemMappedFile.h"
+
 
 namespace {
 std::array<double, 2> GetBufferScalarRange(const float* data, size_t count)
@@ -256,12 +258,14 @@ bool RawVolumeDataManager::SetFromBuffer(
     SetLoadState(LoadState::Loading);
 
     // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
+	// 在坐这里做itk转vtk坐标系的统一,LPS 转 RAS（VTK 默认）坐标系，确保后续处理和渲染的一致性。
+    // 后面就用TransformIndexToPhysicalPoint这个接口去调用，不要自己算了
+    // vtkImageImport 解决少一次拷贝的问题，更快的读取速度，更快的读取效率
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
     newImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
     newImage->SetOrigin(origin[0], origin[1], origin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);   // 分配（page-fault 在此触发）
-
     const size_t total =
         static_cast<size_t>(dims[0]) *
         static_cast<size_t>(dims[1]) *
