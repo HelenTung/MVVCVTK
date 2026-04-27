@@ -5,7 +5,6 @@
 #include <vtkSmartPointer.h>
 #include <algorithm>
 #include <array>
-#include <cmath>
 
 struct SliceExportData {
     Orientation orientation = Orientation::Top_down;
@@ -115,7 +114,7 @@ public:
         double angle)
     {
         SliceExportData exportData;
-        auto baseMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        auto baseMatrix = vtkSmartPointer<vtkMatrix4x4>::New(   );
         auto transform = vtkSmartPointer<vtkTransform>::New();
         baseMatrix->DeepCopy(currentMatrix.data());
         transform->PostMultiply();

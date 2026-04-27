@@ -108,7 +108,7 @@ public:
         const double dirLen = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
         if (dirLen <= 1e-6) {
             dir = { dir0[0], dir0[1], dir0[2] };
-        }
+        }   
         else {
             dir[0] /= dirLen;
             dir[1] /= dirLen;
@@ -118,12 +118,12 @@ public:
         const double radius = std::max(MeasurementComputeService::GetLength(vertex, p0),
             MeasurementComputeService::GetLength(vertex, p2)) * 0.25;
         return {
-            vertex[0] + dir[0] * radius,
+            vertex[0] + dir[0] * radius,    
             vertex[1] + dir[1] * radius,
             vertex[2] + dir[2] * radius
         };
     }
-
+    
     static std::string GetValueText(double value, const std::string& unit)
     {
         std::ostringstream oss;
