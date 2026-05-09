@@ -67,7 +67,7 @@
     <Filter Include="头文件\Service\GapMeshOverlayService">
       <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
     </Filter>
-    <Filter Include="头文件\MeasurementAlgo">
+    <Filter Include="头文件\Math\MeasurementAlgo">
       <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
@@ -165,9 +165,6 @@
     <ClInclude Include="GapAnalysisService.h">
       <Filter>头文件\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionComputeService.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
     <ClInclude Include="IMeasurementStrategy.h">
       <Filter>头文件\Interaction</Filter>
     </ClInclude>
@@ -187,10 +184,13 @@
       <Filter>头文件\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementTypes.h">
-      <Filter>头文件\MeasurementAlgo</Filter>
+      <Filter>头文件\Math\MeasurementAlgo</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementInteractionHost.h">
       <Filter>头文件\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="InteractionComputeService.h">
+      <Filter>头文件\Utils</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

@@ -636,3 +636,141 @@ StdRenderContext 主要给前端提供：
 - 模型变换后导出
 ─────────────────────────────────────────────────────────────────────
 */
+
+/*
+─────────────────────────────────────────────────────────────────────
+十、核心 UML 类图与接口设计模式
+─────────────────────────────────────────────────────────────────────
+
+以下类图使用 PlantUML 文本表达，可直接复制到 PlantUML 工具中渲染：
+
+@startuml
+skinparam classAttributeIconSize 0
+
+interface AbstractDataManager
+class BaseDataManager
+class RawVolumeDataManager
+class TiffVolumeDataManager
+
+abstract class AbstractAppService
+abstract class AbstractInteractiveService
+class MedicalVizService
+
+interface IVisualConfigService
+interface IDataLoaderService
+interface IDataExportService
+
+abstract class AbstractRenderContext
+class StdRenderContext
+
+abstract class AbstractVisualStrategy
+class BaseVisualStrategy
+class VolumeStrategy
+class IsoSurfaceStrategy
+class SliceStrategy
+class MultiSliceStrategy
+class ColoredPlanesStrategy
+class CompositeStrategy
+class GapMeshOverlayStrategy
+class GapSliceOverlayStrategy
+class StrategyFactory
+
+class InteractionRouter
+interface IInteractionHandler
+class TimeUpdateHandler
+class Viewer2DHandler
+class Viewer3DHandler
+
+interface IMeasurementService
+class MeasurementService
+class MeasurementInteractionHost
+interface IMeasurementStrategy
+class LengthMeasurementStrategy
+class AngleMeasurementStrategy
+
+AbstractDataManager <|-- BaseDataManager
+BaseDataManager <|-- RawVolumeDataManager
+BaseDataManager <|-- TiffVolumeDataManager
+
+AbstractAppService <|-- AbstractInteractiveService
+AbstractInteractiveService <|-- MedicalVizService
+IVisualConfigService <|.. MedicalVizService
+IDataLoaderService <|.. MedicalVizService
+IDataExportService <|.. MedicalVizService
+
+AbstractRenderContext <|-- StdRenderContext
+AbstractRenderContext o--> AbstractAppService : bind service
+StdRenderContext --> AbstractInteractiveService : hold interactive service
+StdRenderContext o--> InteractionRouter
+StdRenderContext o--> IMeasurementService
+StdRenderContext o--> MeasurementInteractionHost
+
+AbstractVisualStrategy <|-- BaseVisualStrategy
+BaseVisualStrategy <|-- VolumeStrategy
+BaseVisualStrategy <|-- IsoSurfaceStrategy
+BaseVisualStrategy <|-- SliceStrategy
+BaseVisualStrategy <|-- MultiSliceStrategy
+BaseVisualStrategy <|-- ColoredPlanesStrategy
+BaseVisualStrategy <|-- CompositeStrategy
+BaseVisualStrategy <|-- GapMeshOverlayStrategy
+BaseVisualStrategy <|-- GapSliceOverlayStrategy
+BaseVisualStrategy <|-- LengthMeasurementStrategy
+BaseVisualStrategy <|-- AngleMeasurementStrategy
+StrategyFactory ..> AbstractVisualStrategy : create by VizMode
+
+InteractionRouter o--> IInteractionHandler
+IInteractionHandler <|.. TimeUpdateHandler
+IInteractionHandler <|.. Viewer2DHandler
+IInteractionHandler <|.. Viewer3DHandler
+
+IMeasurementService <|.. MeasurementService
+MeasurementInteractionHost --> IMeasurementService
+MeasurementInteractionHost --> AbstractInteractiveService
+MeasurementInteractionHost o--> IMeasurementStrategy
+IMeasurementStrategy <|.. LengthMeasurementStrategy
+IMeasurementStrategy <|.. AngleMeasurementStrategy
+@enduml
+
+接口与设计模式对应：
+
+1) AbstractVisualStrategy / IMeasurementStrategy / AbstractDataConverter<InputT, OutputT>
+   - Strategy 模式
+   - 说明：把渲染算法、测量算法、数据变换算法抽象成可替换实现，前端或业务层只依赖抽象。
+
+2) IInteractionHandler + InteractionRouter
+   - Chain of Responsibility + Strategy 模式
+   - 说明：各个 Handler 独立处理事件，Router 依据 FirstMatch / Broadcast 策略完成责任链式分发。
+
+3) IVisualConfigService / IDataLoaderService / IDataExportService / AbstractInteractiveService
+   - Facade 模式（按职责拆分的门面接口）
+   - 说明：界面层只面向配置、加载、导出、交互这几组入口调用，底层状态同步、线程切换与 VTK 管线更新由 MedicalVizService 收口。
+
+4) AbstractRenderContext
+   - Template Method + Bridge 模式
+   - 说明：抽象层固定 renderer / renderWindow 绑定流程，并把相机风格、交互器初始化、事件处理等步骤留给 StdRenderContext 落地。
+
+5) IMeasurementService
+   - Observer 模式
+   - 说明：MeasurementService 内部维护观察者列表，MeasurementInteractionHost 通过回调接收测量状态变化并同步 overlay。
+
+6) MeasurementInteractionHost
+   - Adapter 模式
+   - 说明：把 VTK 拾取、鼠标坐标和交互服务转换成 IMeasurementService 可理解的测量输入，再把业务结果映射回本地 overlay strategy。
+
+7) AbstractDataManager
+   - Strategy 模式
+   - 说明：RawVolumeDataManager / TiffVolumeDataManager 提供可切换的数据加载实现，业务层始终依赖统一数据管理抽象。
+
+8) StrategyFactory
+   - Simple Factory 模式
+   - 说明：根据 VizMode 统一创建具体 AbstractVisualStrategy，隔离对象创建细节。
+
+9) CompositeStrategy
+   - Composite 模式
+   - 说明：内部组合主显示策略与参考平面策略，对外仍以单个 AbstractVisualStrategy 参与管线。
+
+阅读建议：
+- 前端主接入点优先看 MedicalVizService、StdRenderContext、MeasurementService。
+- 新增显示模式时，优先新增 AbstractVisualStrategy 派生类并接入 StrategyFactory。
+- 新增交互行为时，优先新增 IInteractionHandler 派生类并接入 InteractionRouter。
+*/

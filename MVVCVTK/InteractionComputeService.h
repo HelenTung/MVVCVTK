@@ -152,7 +152,7 @@ public:
         int viewHeight,
         double startWW,
         double startWC)
-    {
+    {   
         WindowLevelParams windowLevel = { startWW, startWC }; // 当前交互结束后应写回状态的窗宽窗位结果
         if (viewWidth == 0 || viewHeight == 0) {
             return windowLevel;

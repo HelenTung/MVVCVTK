@@ -401,7 +401,8 @@ bool BaseDataManager::SetSliceImagesSaved(
         if (!dst) {
             return false;
         }
-
+		// 取裸指针，然后做eigen优化库运算，或者集合openmp 开启 avx2编译指令集加速，以及cuda做并行运算也可以
+		// 现在这里做的是最简单的三重循环，效率不高，后续可以优化
         for (int py = 0; py < height; ++py) {
             for (int px = 0; px < width; ++px) {
                 int x = 0;
@@ -423,7 +424,6 @@ bool BaseDataManager::SetSliceImagesSaved(
                     y = px;
                     z = py;
                 }
-
                 const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
                 dst[py * width + px] = GetWindowLevelGray(value, windowLevel);
             }
