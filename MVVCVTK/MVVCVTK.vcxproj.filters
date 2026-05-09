@@ -70,6 +70,12 @@
     <Filter Include="头文件\Math\MeasurementAlgo">
       <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
     </Filter>
+    <Filter Include="头文件\Strategies\MeasureAlgoStrategy">
+      <UniqueIdentifier>{c9baf437-6d6d-437a-91a9-db84555b986a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\Service\MeasureAlgoService">
+      <UniqueIdentifier>{71ea4766-7611-4e38-bfd4-aae8ba33f07f}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="IsoSurfaceStrategy.h">
@@ -165,20 +171,11 @@
     <ClInclude Include="GapAnalysisService.h">
       <Filter>头文件\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="IMeasurementStrategy.h">
-      <Filter>头文件\Interaction</Filter>
-    </ClInclude>
     <ClInclude Include="MeasurementCsvExporter.h">
       <Filter>头文件\Utils</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementComputeService.h">
       <Filter>头文件\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="MeasurementService.h">
-      <Filter>头文件\Service</Filter>
-    </ClInclude>
-    <ClInclude Include="LengthMeasurementStrategy.h">
-      <Filter>头文件\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="AngleMeasurementStrategy.h">
       <Filter>头文件\Strategies</Filter>
@@ -186,11 +183,20 @@
     <ClInclude Include="MeasurementTypes.h">
       <Filter>头文件\Math\MeasurementAlgo</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementInteractionHost.h">
-      <Filter>头文件\Service</Filter>
-    </ClInclude>
     <ClInclude Include="InteractionComputeService.h">
       <Filter>头文件\Utils</Filter>
+    </ClInclude>
+    <ClInclude Include="IMeasurementStrategy.h">
+      <Filter>头文件\Strategies\MeasureAlgoStrategy</Filter>
+    </ClInclude>
+    <ClInclude Include="LengthMeasurementStrategy.h">
+      <Filter>头文件\Strategies\MeasureAlgoStrategy</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementService.h">
+      <Filter>头文件\Service\MeasureAlgoService</Filter>
+    </ClInclude>
+    <ClInclude Include="MeasurementInteractionHost.h">
+      <Filter>头文件\Service\MeasureAlgoService</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
