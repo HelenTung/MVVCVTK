@@ -1,270 +1,270 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="源文件">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
-    </Filter>
-    <Filter Include="头文件">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
-    </Filter>
     <Filter Include="资源文件">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
-    <Filter Include="源文件\main">
-      <UniqueIdentifier>{b4a2b4ac-7c20-4fd8-a3fa-d6df8e5d82a8}</UniqueIdentifier>
+    <Filter Include="include">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="头文件\Strategies">
+    <Filter Include="include\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
-    <Filter Include="源文件\Strategies">
-      <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Utils">
-      <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="源文件\Utils">
-      <UniqueIdentifier>{a5f21c88-3127-4ee9-9c77-05fe2058cc3f}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Math">
-      <UniqueIdentifier>{daf8e20e-8217-4b2c-87ab-8ad66f8d5a02}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Math\GapAnalysis">
-      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Interaction">
-      <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="源文件\Interaction">
-      <UniqueIdentifier>{b373314f-cec2-47e7-a3d9-cf2379287f0e}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Render">
-      <UniqueIdentifier>{f0303deb-b2f1-437d-b276-6b51b7f6ac6b}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="源文件\Render">
-      <UniqueIdentifier>{cec7be8b-9c99-4ae3-83f3-d789f49f5ff8}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Service">
-      <UniqueIdentifier>{bc41cad7-f141-4d16-a4a6-700e21a5e52c}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="源文件\Service">
-      <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Data">
-      <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="源文件\Data">
-      <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\App">
-      <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Strategies\GapMeshOverlayStrategy">
+    <Filter Include="include\Strategies\GapMeshOverlayStrategy">
       <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="头文件\Service\GapMeshOverlayService">
-      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Math\MeasurementAlgo">
-      <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="头文件\Strategies\MeasureAlgoStrategy">
+    <Filter Include="include\Strategies\MeasureAlgoStrategy">
       <UniqueIdentifier>{c9baf437-6d6d-437a-91a9-db84555b986a}</UniqueIdentifier>
     </Filter>
-    <Filter Include="头文件\Service\MeasureAlgoService">
+    <Filter Include="include\Utils">
+      <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Math">
+      <UniqueIdentifier>{daf8e20e-8217-4b2c-87ab-8ad66f8d5a02}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Math\GapAnalysis">
+      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Math\MeasurementAlgo">
+      <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Interaction">
+      <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Render">
+      <UniqueIdentifier>{f0303deb-b2f1-437d-b276-6b51b7f6ac6b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Service">
+      <UniqueIdentifier>{bc41cad7-f141-4d16-a4a6-700e21a5e52c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Service\GapMeshOverlayService">
+      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Service\MeasureAlgoService">
       <UniqueIdentifier>{71ea4766-7611-4e38-bfd4-aae8ba33f07f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Data">
+      <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\App">
+      <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="src\main">
+      <UniqueIdentifier>{b4a2b4ac-7c20-4fd8-a3fa-d6df8e5d82a8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Strategies">
+      <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Utils">
+      <UniqueIdentifier>{a5f21c88-3127-4ee9-9c77-05fe2058cc3f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Interaction">
+      <UniqueIdentifier>{b373314f-cec2-47e7-a3d9-cf2379287f0e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Render">
+      <UniqueIdentifier>{cec7be8b-9c99-4ae3-83f3-d789f49f5ff8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Service">
+      <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Data">
+      <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="IsoSurfaceStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="VolumeStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="SliceStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="CompositeStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="MultiSliceStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="ColoredPlanesStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="ImageProcessor.h">
-      <Filter>头文件\Utils</Filter>
+      <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="MemMappedFile.h">
-      <Filter>头文件\Utils</Filter>
+      <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="GapAnalysisTypes.h">
-      <Filter>头文件\Math\GapAnalysis</Filter>
+      <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="VolumeBuffer.h">
-      <Filter>头文件\Math\GapAnalysis</Filter>
+      <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="SurfaceRefiner.h">
-      <Filter>头文件\Math\GapAnalysis</Filter>
+      <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="VoidDetector.h">
-      <Filter>头文件\Math\GapAnalysis</Filter>
+      <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="Viewer3DHandler.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="Viewer2DHandler.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="TimeUpdateHandler.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="InteractionRouter.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="InteractionResult.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="InteractionEvent.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="IInteractionHandler.h">
-      <Filter>头文件\Interaction</Filter>
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="StrategyFactory.h">
-      <Filter>头文件\Render</Filter>
+      <Filter>include\Render</Filter>
     </ClInclude>
     <ClInclude Include="StdRenderContext.h">
-      <Filter>头文件\Render</Filter>
+      <Filter>include\Render</Filter>
     </ClInclude>
     <ClInclude Include="VolumeAnalysisService.h">
-      <Filter>头文件\Service</Filter>
+      <Filter>include\Service</Filter>
     </ClInclude>
     <ClInclude Include="AppService.h">
-      <Filter>头文件\Service</Filter>
+      <Filter>include\Service</Filter>
     </ClInclude>
     <ClInclude Include="DataManager.h">
-      <Filter>头文件\Data</Filter>
+      <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="DataConverters.h">
-      <Filter>头文件\Data</Filter>
+      <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="AppTypes.h">
-      <Filter>头文件\App</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="AppState.h">
-      <Filter>头文件\App</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="AppInterfaces.h">
-      <Filter>头文件\App</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="BaseVisualStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="GapAlgorithmOverlayStrategies.h">
-      <Filter>头文件\Strategies\GapMeshOverlayStrategy</Filter>
+      <Filter>include\Strategies\GapMeshOverlayStrategy</Filter>
     </ClInclude>
     <ClInclude Include="GapAnalysisService.h">
-      <Filter>头文件\Service\GapMeshOverlayService</Filter>
+      <Filter>include\Service\GapMeshOverlayService</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementCsvExporter.h">
-      <Filter>头文件\Utils</Filter>
+      <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementComputeService.h">
-      <Filter>头文件\Utils</Filter>
+      <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="AngleMeasurementStrategy.h">
-      <Filter>头文件\Strategies</Filter>
+      <Filter>include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementTypes.h">
-      <Filter>头文件\Math\MeasurementAlgo</Filter>
+      <Filter>include\Math\MeasurementAlgo</Filter>
     </ClInclude>
     <ClInclude Include="InteractionComputeService.h">
-      <Filter>头文件\Utils</Filter>
+      <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="IMeasurementStrategy.h">
-      <Filter>头文件\Strategies\MeasureAlgoStrategy</Filter>
+      <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
     </ClInclude>
     <ClInclude Include="LengthMeasurementStrategy.h">
-      <Filter>头文件\Strategies\MeasureAlgoStrategy</Filter>
+      <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementService.h">
-      <Filter>头文件\Service\MeasureAlgoService</Filter>
+      <Filter>include\Service\MeasureAlgoService</Filter>
     </ClInclude>
     <ClInclude Include="MeasurementInteractionHost.h">
-      <Filter>头文件\Service\MeasureAlgoService</Filter>
+      <Filter>include\Service\MeasureAlgoService</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
-      <Filter>源文件\main</Filter>
+      <Filter>src\main</Filter>
     </ClCompile>
     <ClCompile Include="CompositeStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="SliceStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="VolumeStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="IsoSurfaceStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="MultiSliceStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="ColoredPlanesStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="ImageProcessor.cpp">
-      <Filter>源文件\Utils</Filter>
+      <Filter>src\Utils</Filter>
     </ClCompile>
     <ClCompile Include="MemMappedFile.cpp">
-      <Filter>源文件\Utils</Filter>
+      <Filter>src\Utils</Filter>
     </ClCompile>
     <ClCompile Include="example.cpp">
-      <Filter>源文件\main</Filter>
+      <Filter>src\main</Filter>
     </ClCompile>
     <ClCompile Include="Viewer3DHandler.cpp">
-      <Filter>源文件\Interaction</Filter>
+      <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="Viewer2DHandler.cpp">
-      <Filter>源文件\Interaction</Filter>
+      <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="TimeUpdateHandler.cpp">
-      <Filter>源文件\Interaction</Filter>
+      <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="InteractionRouter.cpp">
-      <Filter>源文件\Interaction</Filter>
+      <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="StdRenderContext.cpp">
-      <Filter>源文件\Render</Filter>
+      <Filter>src\Render</Filter>
     </ClCompile>
     <ClCompile Include="AppService.cpp">
-      <Filter>源文件\Service</Filter>
+      <Filter>src\Service</Filter>
     </ClCompile>
     <ClCompile Include="DataManager.cpp">
-      <Filter>源文件\Data</Filter>
+      <Filter>src\Data</Filter>
     </ClCompile>
     <ClCompile Include="DataConverters.cpp">
-      <Filter>源文件\Data</Filter>
+      <Filter>src\Data</Filter>
     </ClCompile>
     <ClCompile Include="AngleMeasurementStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="MeasurementService.cpp">
-      <Filter>源文件\Service</Filter>
+      <Filter>src\Service</Filter>
     </ClCompile>
     <ClCompile Include="LengthMeasurementStrategy.cpp">
-      <Filter>源文件\Strategies</Filter>
+      <Filter>src\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="MeasurementInteractionHost.cpp">
-      <Filter>源文件\Service</Filter>
+      <Filter>src\Service</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
