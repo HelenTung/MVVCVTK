@@ -78,192 +78,192 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="IsoSurfaceStrategy.h">
+    <ClInclude Include="include\Strategies\IsoSurfaceStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="VolumeStrategy.h">
+    <ClInclude Include="include\Strategies\VolumeStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="SliceStrategy.h">
+    <ClInclude Include="include\Strategies\SliceStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="CompositeStrategy.h">
+    <ClInclude Include="include\Strategies\CompositeStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="MultiSliceStrategy.h">
+    <ClInclude Include="include\Strategies\MultiSliceStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="ColoredPlanesStrategy.h">
+    <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="ImageProcessor.h">
+    <ClInclude Include="include\Utils\ImageProcessor.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="MemMappedFile.h">
+    <ClInclude Include="include\Utils\MemMappedFile.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="GapAnalysisTypes.h">
+    <ClInclude Include="include\Math\GapAnalysis\GapAnalysisTypes.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="VolumeBuffer.h">
+    <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="SurfaceRefiner.h">
+    <ClInclude Include="include\Math\GapAnalysis\SurfaceRefiner.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="VoidDetector.h">
+    <ClInclude Include="include\Math\GapAnalysis\VoidDetector.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="Viewer3DHandler.h">
+    <ClInclude Include="include\Interaction\Viewer3DHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="Viewer2DHandler.h">
+    <ClInclude Include="include\Interaction\Viewer2DHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="TimeUpdateHandler.h">
+    <ClInclude Include="include\Interaction\TimeUpdateHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionRouter.h">
+    <ClInclude Include="include\Interaction\InteractionRouter.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionResult.h">
+    <ClInclude Include="include\Interaction\InteractionResult.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionEvent.h">
+    <ClInclude Include="include\Interaction\InteractionEvent.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="IInteractionHandler.h">
+    <ClInclude Include="include\Interaction\IInteractionHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="StrategyFactory.h">
+    <ClInclude Include="include\Render\StrategyFactory.h">
       <Filter>include\Render</Filter>
     </ClInclude>
-    <ClInclude Include="StdRenderContext.h">
+    <ClInclude Include="include\Render\StdRenderContext.h">
       <Filter>include\Render</Filter>
     </ClInclude>
-    <ClInclude Include="VolumeAnalysisService.h">
+    <ClInclude Include="include\Service\VolumeAnalysisService.h">
       <Filter>include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="AppService.h">
+    <ClInclude Include="include\Service\AppService.h">
       <Filter>include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="DataManager.h">
+    <ClInclude Include="include\Data\DataManager.h">
       <Filter>include\Data</Filter>
     </ClInclude>
-    <ClInclude Include="DataConverters.h">
+    <ClInclude Include="include\Data\DataConverters.h">
       <Filter>include\Data</Filter>
     </ClInclude>
-    <ClInclude Include="AppTypes.h">
+    <ClInclude Include="include\App\AppTypes.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="AppState.h">
+    <ClInclude Include="include\App\AppState.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="AppInterfaces.h">
+    <ClInclude Include="include\App\AppInterfaces.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="BaseVisualStrategy.h">
+    <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="GapAlgorithmOverlayStrategies.h">
+    <ClInclude Include="include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h">
       <Filter>include\Strategies\GapMeshOverlayStrategy</Filter>
     </ClInclude>
-    <ClInclude Include="GapAnalysisService.h">
+    <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h">
       <Filter>include\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementCsvExporter.h">
+    <ClInclude Include="include\Utils\MeasurementCsvExporter.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementComputeService.h">
+    <ClInclude Include="include\Utils\MeasurementComputeService.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="AngleMeasurementStrategy.h">
+    <ClInclude Include="include\Strategies\AngleMeasurementStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementTypes.h">
+    <ClInclude Include="include\Math\MeasurementAlgo\MeasurementTypes.h">
       <Filter>include\Math\MeasurementAlgo</Filter>
     </ClInclude>
-    <ClInclude Include="InteractionComputeService.h">
+    <ClInclude Include="include\Utils\InteractionComputeService.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="IMeasurementStrategy.h">
+    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\IMeasurementStrategy.h">
       <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
     </ClInclude>
-    <ClInclude Include="LengthMeasurementStrategy.h">
+    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\LengthMeasurementStrategy.h">
       <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementService.h">
+    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementService.h">
       <Filter>include\Service\MeasureAlgoService</Filter>
     </ClInclude>
-    <ClInclude Include="MeasurementInteractionHost.h">
+    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementInteractionHost.h">
       <Filter>include\Service\MeasureAlgoService</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
+    <ClCompile Include="src\main\main.cpp">
       <Filter>src\main</Filter>
     </ClCompile>
-    <ClCompile Include="CompositeStrategy.cpp">
+    <ClCompile Include="src\Strategies\CompositeStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="SliceStrategy.cpp">
+    <ClCompile Include="src\Strategies\SliceStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="VolumeStrategy.cpp">
+    <ClCompile Include="src\Strategies\VolumeStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="IsoSurfaceStrategy.cpp">
+    <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="MultiSliceStrategy.cpp">
+    <ClCompile Include="src\Strategies\MultiSliceStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="ColoredPlanesStrategy.cpp">
+    <ClCompile Include="src\Strategies\ColoredPlanesStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="ImageProcessor.cpp">
+    <ClCompile Include="src\Utils\ImageProcessor.cpp">
       <Filter>src\Utils</Filter>
     </ClCompile>
-    <ClCompile Include="MemMappedFile.cpp">
+    <ClCompile Include="src\Utils\MemMappedFile.cpp">
       <Filter>src\Utils</Filter>
     </ClCompile>
-    <ClCompile Include="example.cpp">
+    <ClCompile Include="src\main\example.cpp">
       <Filter>src\main</Filter>
     </ClCompile>
-    <ClCompile Include="Viewer3DHandler.cpp">
+    <ClCompile Include="src\Interaction\Viewer3DHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="Viewer2DHandler.cpp">
+    <ClCompile Include="src\Interaction\Viewer2DHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="TimeUpdateHandler.cpp">
+    <ClCompile Include="src\Interaction\TimeUpdateHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="InteractionRouter.cpp">
+    <ClCompile Include="src\Interaction\InteractionRouter.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="StdRenderContext.cpp">
+    <ClCompile Include="src\Render\StdRenderContext.cpp">
       <Filter>src\Render</Filter>
     </ClCompile>
-    <ClCompile Include="AppService.cpp">
+    <ClCompile Include="src\Service\AppService.cpp">
       <Filter>src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="DataManager.cpp">
+    <ClCompile Include="src\Data\DataManager.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="DataConverters.cpp">
+    <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="AngleMeasurementStrategy.cpp">
+    <ClCompile Include="src\Strategies\AngleMeasurementStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="MeasurementService.cpp">
+    <ClCompile Include="src\Service\MeasurementService.cpp">
       <Filter>src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="LengthMeasurementStrategy.cpp">
+    <ClCompile Include="src\Strategies\LengthMeasurementStrategy.cpp">
       <Filter>src\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="MeasurementInteractionHost.cpp">
+    <ClCompile Include="src\Service\MeasurementInteractionHost.cpp">
       <Filter>src\Service</Filter>
     </ClCompile>
   </ItemGroup>

@@ -71,11 +71,20 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math\GapAnalysis;$(ProjectDir)include\Math\MeasurementAlgo;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Service\GapMeshOverlayService;$(ProjectDir)include\Service\MeasureAlgoService;$(ProjectDir)include\Strategies;$(ProjectDir)include\Strategies\GapMeshOverlayStrategy;$(ProjectDir)include\Strategies\MeasureAlgoStrategy;$(ProjectDir)include\Utils</ProjectIncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;E:\CT-1209\DLL\include;E:\code\vs\MVVCVTK\MVVCVTK\vcpkg_installed\x64-windows\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectIncludePath);E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;E:\CT-1209\DLL\include;E:\code\vs\MVVCVTK\MVVCVTK\vcpkg_installed\x64-windows\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectIncludePath);E:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;E:\lib_cv\cv\opencv\build\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -137,70 +146,70 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="AppInterfaces.h" />
-    <ClInclude Include="AppService.h" />
-    <ClInclude Include="AppState.h" />
-    <ClInclude Include="AppTypes.h" />
-    <ClInclude Include="BaseVisualStrategy.h" />
-    <ClInclude Include="ColoredPlanesStrategy.h" />
-    <ClInclude Include="CompositeStrategy.h" />
-    <ClInclude Include="DataConverters.h" />
-    <ClInclude Include="DataManager.h" />
-    <ClInclude Include="GapAnalysisService.h" />
-    <ClInclude Include="GapAnalysisTypes.h" />
-    <ClInclude Include="GapAlgorithmOverlayStrategies.h" />
-    <ClInclude Include="IInteractionHandler.h" />
-    <ClInclude Include="ImageProcessor.h" />
-    <ClInclude Include="InteractionComputeService.h" />
-    <ClInclude Include="InteractionEvent.h" />
-    <ClInclude Include="InteractionResult.h" />
-    <ClInclude Include="InteractionRouter.h" />
-    <ClInclude Include="IsoSurfaceStrategy.h" />
-    <ClInclude Include="MemMappedFile.h" />
-    <ClInclude Include="MultiSliceStrategy.h" />
-    <ClInclude Include="SliceStrategy.h" />
-    <ClInclude Include="StdRenderContext.h" />
-    <ClInclude Include="StrategyFactory.h" />
-    <ClInclude Include="SurfaceRefiner.h" />
-    <ClInclude Include="TimeUpdateHandler.h" />
-    <ClInclude Include="Viewer2DHandler.h" />
-    <ClInclude Include="Viewer3DHandler.h" />
-    <ClInclude Include="VoidDetector.h" />
-    <ClInclude Include="VolumeAnalysisService.h" />
-    <ClInclude Include="VolumeBuffer.h" />
-    <ClInclude Include="VolumeStrategy.h" />
-    <ClInclude Include="AngleMeasurementStrategy.h" />
-    <ClInclude Include="IMeasurementStrategy.h" />
-    <ClInclude Include="LengthMeasurementStrategy.h" />
-    <ClInclude Include="MeasurementComputeService.h" />
-    <ClInclude Include="MeasurementCsvExporter.h" />
-    <ClInclude Include="MeasurementService.h" />
-    <ClInclude Include="MeasurementTypes.h" />
-    <ClInclude Include="MeasurementInteractionHost.h" />
+    <ClInclude Include="include\App\AppInterfaces.h" />
+    <ClInclude Include="include\Service\AppService.h" />
+    <ClInclude Include="include\App\AppState.h" />
+    <ClInclude Include="include\App\AppTypes.h" />
+    <ClInclude Include="include\Strategies\BaseVisualStrategy.h" />
+    <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h" />
+    <ClInclude Include="include\Strategies\CompositeStrategy.h" />
+    <ClInclude Include="include\Data\DataConverters.h" />
+    <ClInclude Include="include\Data\DataManager.h" />
+    <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h" />
+    <ClInclude Include="include\Math\GapAnalysis\GapAnalysisTypes.h" />
+    <ClInclude Include="include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h" />
+    <ClInclude Include="include\Interaction\IInteractionHandler.h" />
+    <ClInclude Include="include\Utils\ImageProcessor.h" />
+    <ClInclude Include="include\Utils\InteractionComputeService.h" />
+    <ClInclude Include="include\Interaction\InteractionEvent.h" />
+    <ClInclude Include="include\Interaction\InteractionResult.h" />
+    <ClInclude Include="include\Interaction\InteractionRouter.h" />
+    <ClInclude Include="include\Strategies\IsoSurfaceStrategy.h" />
+    <ClInclude Include="include\Utils\MemMappedFile.h" />
+    <ClInclude Include="include\Strategies\MultiSliceStrategy.h" />
+    <ClInclude Include="include\Strategies\SliceStrategy.h" />
+    <ClInclude Include="include\Render\StdRenderContext.h" />
+    <ClInclude Include="include\Render\StrategyFactory.h" />
+    <ClInclude Include="include\Math\GapAnalysis\SurfaceRefiner.h" />
+    <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
+    <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
+    <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
+    <ClInclude Include="include\Math\GapAnalysis\VoidDetector.h" />
+    <ClInclude Include="include\Service\VolumeAnalysisService.h" />
+    <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h" />
+    <ClInclude Include="include\Strategies\VolumeStrategy.h" />
+    <ClInclude Include="include\Strategies\AngleMeasurementStrategy.h" />
+    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\IMeasurementStrategy.h" />
+    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\LengthMeasurementStrategy.h" />
+    <ClInclude Include="include\Utils\MeasurementComputeService.h" />
+    <ClInclude Include="include\Utils\MeasurementCsvExporter.h" />
+    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementService.h" />
+    <ClInclude Include="include\Math\MeasurementAlgo\MeasurementTypes.h" />
+    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementInteractionHost.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="AppService.cpp" />
-    <ClCompile Include="ColoredPlanesStrategy.cpp" />
-    <ClCompile Include="CompositeStrategy.cpp" />
-    <ClCompile Include="DataConverters.cpp" />
-    <ClCompile Include="DataManager.cpp" />
-    <ClCompile Include="example.cpp" />
-    <ClCompile Include="ImageProcessor.cpp" />
-    <ClCompile Include="InteractionRouter.cpp" />
-    <ClCompile Include="IsoSurfaceStrategy.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="MemMappedFile.cpp" />
-    <ClCompile Include="MultiSliceStrategy.cpp" />
-    <ClCompile Include="SliceStrategy.cpp" />
-    <ClCompile Include="StdRenderContext.cpp" />
-    <ClCompile Include="TimeUpdateHandler.cpp" />
-    <ClCompile Include="Viewer2DHandler.cpp" />
-    <ClCompile Include="Viewer3DHandler.cpp" />
-    <ClCompile Include="VolumeStrategy.cpp" />
-    <ClCompile Include="AngleMeasurementStrategy.cpp" />
-    <ClCompile Include="LengthMeasurementStrategy.cpp" />
-    <ClCompile Include="MeasurementService.cpp" />
-    <ClCompile Include="MeasurementInteractionHost.cpp" />
+    <ClCompile Include="src\Service\AppService.cpp" />
+    <ClCompile Include="src\Strategies\ColoredPlanesStrategy.cpp" />
+    <ClCompile Include="src\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="src\Data\DataConverters.cpp" />
+    <ClCompile Include="src\Data\DataManager.cpp" />
+    <ClCompile Include="src\main\example.cpp" />
+    <ClCompile Include="src\Utils\ImageProcessor.cpp" />
+    <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
+    <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp" />
+    <ClCompile Include="src\main\main.cpp" />
+    <ClCompile Include="src\Utils\MemMappedFile.cpp" />
+    <ClCompile Include="src\Strategies\MultiSliceStrategy.cpp" />
+    <ClCompile Include="src\Strategies\SliceStrategy.cpp" />
+    <ClCompile Include="src\Render\StdRenderContext.cpp" />
+    <ClCompile Include="src\Interaction\TimeUpdateHandler.cpp" />
+    <ClCompile Include="src\Interaction\Viewer2DHandler.cpp" />
+    <ClCompile Include="src\Interaction\Viewer3DHandler.cpp" />
+    <ClCompile Include="src\Strategies\VolumeStrategy.cpp" />
+    <ClCompile Include="src\Strategies\AngleMeasurementStrategy.cpp" />
+    <ClCompile Include="src\Strategies\LengthMeasurementStrategy.cpp" />
+    <ClCompile Include="src\Service\MeasurementService.cpp" />
+    <ClCompile Include="src\Service\MeasurementInteractionHost.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
