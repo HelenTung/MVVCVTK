@@ -283,7 +283,7 @@ int main()
     IDataLoaderService* loader = serviceA.get();
     loader->SetFileLoadedAsync(
         "E:\\data\\ct\\700x1358x1252.raw",
-        [sharedState, serviceA,gapAnalysis](bool success)
+        [sharedState, serviceA, imageAnalysis, gapAnalysis](bool success)
         {
             if (!success) {
                 std::cerr << "[onComplete] Volume data load failed.\n";
@@ -294,6 +294,16 @@ int main()
             auto range = sharedState->GetDataRange();
             double isoVal = range[0] + (range[1] - range[0]) * 0.55;
             serviceA->SetIsoThreshold(isoVal);
+
+            const int histogramBinCount = 2048; // 直方图统计使用的 bin 数量
+            const std::string histogramFilePath = "E:\\data\\ct\\histogram.png"; // 直方图导出图片路径
+            auto histogramTable = imageAnalysis->GetHistogramData(histogramBinCount);
+            if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
+                imageAnalysis->SetHistogramImageSaved(histogramFilePath, histogramBinCount);
+            }
+            else {
+                std::cerr << "[Main] Histogram generation failed.\n";
+            }
 
             //// 触发孔隙分析算法
             //SurfaceParams surfP;

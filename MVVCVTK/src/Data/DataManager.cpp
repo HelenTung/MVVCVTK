@@ -344,14 +344,14 @@ bool BaseDataManager::SetSliceImagesSaved(
     auto reslice = vtkSmartPointer<vtkImageReslice>::New();
     reslice->SetInputData(imageCopy);
     reslice->SetResliceTransform(transform);
-    reslice->SetInterpolationModeToLinear();
+    reslice->SetInterpolationModeToLinear(); 
     reslice->SetOutputDimensionality(3);
     reslice->SetAutoCropOutput(true);
 
     double range[2] = { 0.0, 0.0 };
     imageCopy->GetScalarRange(range);
     reslice->SetBackgroundLevel(range[0]);
-
+    
     try {
         reslice->Update();
     }

@@ -4,6 +4,7 @@
 #include <vtkImageData.h>
 #include <vtkSmartPointer.h>
 #include <vtkImageAccumulate.h>
+#include <vtkType.h>
 
 // 数据分析转换图表对象
 class HistogramConverter : public AbstractDataConverter<vtkImageData, vtkTable> {
@@ -19,5 +20,5 @@ public:
 
 private:
     // 内部复用：执行 accumulate 并返回频率指针，避免 Process 与 SaveHistogramImage 重复计算
-    long long* GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth);
+    vtkIdType* GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth);
 };

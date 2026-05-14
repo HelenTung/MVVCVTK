@@ -16,10 +16,6 @@
 #include <mutex>
 #include <deque>
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
 // ── 增强型并查集（路径压缩）─────────────────────────────────────────
 struct UnionFind {
     static int find(int* parent, int i) noexcept {
@@ -359,7 +355,8 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
                 region.centroidMM[2] = sumZ / region.voxelCount + vol.origin[2];
 
                 // 2. 等效直径与半径
-                region.equivalentDiameterMM = pow((6.0 * region.volumeMM3) / M_PI, 1.0 / 3.0);
+                auto pi = std::acos(-1);
+                region.equivalentDiameterMM = pow((6.0 * region.volumeMM3) / pi, 1.0 / 3.0);
                 region.radius = region.equivalentDiameterMM / 2.0;
 
                 // 3. 灰度统计
@@ -456,7 +453,7 @@ inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
 
                 // 7. Compactness & Sphericity
                 if (region.surfaceAreaMM2 > 1e-9) {
-                    region.compactness = (36.0 * M_PI * region.volumeMM3 * region.volumeMM3) / std::pow(region.surfaceAreaMM2, 3.0);
+                    region.compactness = (36.0 * pi * region.volumeMM3 * region.volumeMM3) / std::pow(region.surfaceAreaMM2, 3.0);
                     region.sphericity = std::pow(std::max(0.0, region.compactness), 1.0 / 3.0);
                 }
 

@@ -40,7 +40,7 @@ public:
 
         const double dot = v0[0] * v1[0] + v0[1] * v1[1] + v0[2] * v1[2];
         const double cosValue = std::clamp(dot / (len0 * len1), -1.0, 1.0);
-        return std::acos(cosValue) * 180.0 / 3.14159265358979323846;
+        return std::acos(cosValue) * 180.0 / std::acos(-1);
     }
 
     static std::array<double, 3> GetMidPoint(const std::array<double, 3>& p0,

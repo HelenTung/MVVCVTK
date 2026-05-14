@@ -1,6 +1,7 @@
 ﻿#include "DataConverters.h"
 #include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
+#include <vtkPointData.h>
 #include <filesystem>
 #include <vtkImageWriter.h>
 #include <vtkJPEGWriter.h>
@@ -8,13 +9,14 @@
 
 void HistogramConverter::SetParameter(const std::string& key, double value)
 {
-    if (key == "BinCount") m_binCount = static_cast<int>(value);
+    if (key == "BinCount" && value > 0.0) m_binCount = static_cast<int>(value);
 }
 
 vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {
     if (!input) return nullptr;
     double range[2], binWidth;
-    long long* frequencies = GetHistogramBuffer(input, range, binWidth);
+    vtkIdType* frequencies = GetHistogramBuffer(input, range, binWidth);
+    if (!frequencies) return nullptr;
 
     auto table = vtkSmartPointer<vtkTable>::New();
     auto colX = vtkSmartPointer<vtkFloatArray>::New(); colX->SetName("Intensity");
@@ -41,7 +43,8 @@ void HistogramConverter::SetHistogramImageSaved(vtkSmartPointer<vtkImageData> in
     if (!input) return;
     double range[2], binWidth;
     // 复用 ComputeHistogram，不重复计算
-    long long* freqs = GetHistogramBuffer(input, range, binWidth);
+    vtkIdType* freqs = GetHistogramBuffer(input, range, binWidth);
+    if (!freqs) return;
 
     std::vector<float> logHist(m_binCount);
     float maxLog = 0.0f;
@@ -82,8 +85,15 @@ void HistogramConverter::SetHistogramImageSaved(vtkSmartPointer<vtkImageData> in
     writer->Write();
 }
 
-long long* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
+vtkIdType* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
 {
+    if (!input || !input->GetPointData() || !input->GetPointData()->GetScalars() || m_binCount <= 0) {
+        outRange[0] = 0.0;
+        outRange[1] = 0.0;
+        outBinWidth = 0.0;
+        return nullptr;
+    }
+
     input->GetScalarRange(outRange);
     // 流式连接：input 没变时 VTK pipeline 不会重复计算
     if (!m_accumulate)
@@ -94,5 +104,10 @@ long long* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> 
     outBinWidth = (outRange[1] - outRange[0]) / static_cast<double>(m_binCount);
     m_accumulate->SetComponentSpacing(outBinWidth > 0 ? outBinWidth : 1.0, 0, 0);
     m_accumulate->Update();
-    return static_cast<long long*>(m_accumulate->GetOutput()->GetScalarPointer());
+
+    if (!m_accumulate->GetOutput() || !m_accumulate->GetOutput()->GetPointData() || !m_accumulate->GetOutput()->GetPointData()->GetScalars()) {
+        return nullptr;
+    }
+
+    return static_cast<vtkIdType*>(m_accumulate->GetOutput()->GetScalarPointer());
 }

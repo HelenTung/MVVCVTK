@@ -63,10 +63,9 @@ public:
     bool SetReconImageConsumed();
 };
 
-
 class TiffVolumeDataManager : public BaseDataManager {
 public:
-    TiffVolumeDataManager() = default;
+    TiffVolumeDataManager() = default;  
     // 实现加载接口
     bool SetDataLoaded(const std::string& filePath) override;
 };
