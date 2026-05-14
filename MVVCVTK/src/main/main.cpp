@@ -280,8 +280,7 @@ int main()
     serviceC->SetElementVisible(VisFlags::Crosshair, true);
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
-    IDataLoaderService* loader = serviceA.get();
-    loader->SetFileLoadedAsync(
+    serviceA->SetFileLoadedAsync(
         "E:\\data\\ct\\700x1358x1252.raw",
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},

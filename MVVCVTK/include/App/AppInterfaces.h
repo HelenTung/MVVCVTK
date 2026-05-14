@@ -200,12 +200,6 @@ class IDataLoaderService {
 public:
     virtual ~IDataLoaderService() = default;
 
-    // 异步加载：onComplete 由主线程延迟回调，只允许操作状态或 UI
-    virtual void SetFileLoadedAsync(const std::string& path,
-        const std::array<float, 3>& spacing = {0},
-        const std::array<float, 3>& origin = {0},
-        std::function<void(bool success)> onComplete = nullptr) = 0;
-
     // 查询文件流加载状态（推荐 UI / 上层按需读取）
     virtual LoadState GetFileLoadState() const = 0;
 

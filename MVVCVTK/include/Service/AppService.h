@@ -76,7 +76,7 @@ public:
     void SetFileLoadedAsync(const std::string& path,
         const std::array<float, 3>& spacing = {0.02125,0.02125,0.02125},
         const std::array<float, 3>& origin = {0,0,0},
-        std::function<void(bool success)> onComplete = nullptr) override;
+        std::function<void(bool success)> onComplete = nullptr);
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。
     bool SetReloadFromBufferAsync(
