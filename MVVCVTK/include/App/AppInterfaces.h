@@ -10,8 +10,8 @@
 //   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
 //   AbstractAppService         — 基础服务
-//   IVisualConfigService            — 前处理配置
-//   IDataLoaderService         — 数据加载
+//   IVisualConfigService       — 前处理配置
+//   IFileLoadControlService    — 文件加载状态/控制
 //   AbstractInteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
 // =====================================================================
@@ -191,14 +191,14 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// IDataLoaderService — 数据加载接口
+// IFileLoadControlService — 文件加载状态/控制接口
 //
-// 将加载职责从 MedicalVizService 中分离，数据加载与渲染解耦。
-// 任意持有此接口的调用方均可发起 SetFileLoadedAsync，无需关心渲染细节。
+// 只暴露文件流/重载流程的状态读取与取消控制。
+// 文件流加载入口与回调广播由独立流程对象负责，不再耦合到该接口。
 // ─────────────────────────────────────────────────────────────────────
-class IDataLoaderService {
+class IFileLoadControlService {
 public:
-    virtual ~IDataLoaderService() = default;
+    virtual ~IFileLoadControlService() = default;
 
     // 查询文件流加载状态（推荐 UI / 上层按需读取）
     virtual LoadState GetFileLoadState() const = 0;
@@ -208,9 +208,8 @@ public:
 
     // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
     // 默认空实现，派生类按需覆盖
-    virtual void SetLoadCanceled() {}
+    virtual void SetFileLoadCanceled() {}
 };
-
 
 class IDataExportService {
 public:

@@ -5,7 +5,7 @@
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
 //   IVisualConfigService        — 前处理接口（main.cpp 配置阶段调用）
-//   IDataLoaderService          — 数据加载接口（与渲染解耦）
+//   IFileLoadControlService     — 文件加载状态/控制接口（与渲染解耦）
 //   IDataExportService          — 数据导出接口（与渲染解耦）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
@@ -28,7 +28,7 @@
 class MedicalVizService
     : public AbstractInteractiveService
     , public IVisualConfigService
-    , public IDataLoaderService
+    , public IFileLoadControlService
     , public IDataExportService
     , public std::enable_shared_from_this<MedicalVizService>
 {
@@ -68,10 +68,10 @@ public:
     void SetVisualConfig(const PreInitConfig& cfg) override;
 
     // ================================================================
-    // IDataLoaderService — 文件流加载 / 重载加载 / 状态查询
+    // 文件流加载 / 重载加载入口
     // 功能：发起后台加载任务，并通过主线程回调把结果返回给 UI / 上层。
     // 作用：把文件流加载、重载加载与渲染同步解耦。
-    // 原生依赖对象：m_dataManager、m_sharedState、m_cancelFlag、m_ActiveLoadFuture。
+    // 原生依赖对象：m_dataManager、m_sharedState、m_ActiveLoadFuture。
     // ================================================================
     void SetFileLoadedAsync(const std::string& path,
         const std::array<float, 3>& spacing = {0.02125,0.02125,0.02125},
@@ -92,7 +92,7 @@ public:
 
     // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
     // 原生依赖对象：m_cancelFlag。
-    void SetLoadCanceled() override;
+    void SetFileLoadCanceled() override;
 
     // ================================================================
     // IDataExportService — 导出任务

@@ -416,9 +416,9 @@ void MedicalVizService::SetSliceImagesSavedAsync(
     SetTaskStarted(std::move(task), false);
 }
 
-void MedicalVizService::SetLoadCanceled()
+void MedicalVizService::SetFileLoadCanceled()
 {
-    // 当前未实现可中断加载，接口保留仅为兼容 IDataLoaderService。
+    // 当前未实现可中断加载，接口保留仅为兼容 IFileLoadControlService。
 }
 
 // ─────────────────────────────────────────────────────────────────────
