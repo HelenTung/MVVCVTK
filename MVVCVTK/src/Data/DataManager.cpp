@@ -80,6 +80,13 @@ std::array<int, 2> GetSliceImageSize(const int dims[3], const Orientation orient
     }
 }
 
+bool HasExplicitValue(const std::array<float, 3>& values)
+{
+    return std::any_of(values.begin(), values.end(), [](const float value) {
+        return value != 0.0f;
+    });
+}
+
 unsigned char GetWindowLevelGray(const double value, const WindowLevelParams& windowLevel)
 {
     const double safeWindowWidth = std::max(windowLevel.windowWidth, 1e-6); // 当前导出使用的窗宽，避免除零
@@ -136,7 +143,9 @@ std::string BaseDataManager::GetDefaultTransformedDataPath() const
     return m_loadedFilePath;
 }
 
-bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
+bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath, 
+    const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
+
     SetLoadState(LoadState::Loading);
     SetLoadedFilePath({});
     // 解析文件名
@@ -152,6 +161,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         newDims[2] = std::stoi(matches[3].str());
     }
     else {
+        SetLoadState(LoadState::Failed);
         return false;
     }
 
@@ -163,11 +173,22 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         }
     }
 
+	// 更新 spacing 和 origin，确保后续重建和渲染使用最新的空间信息
+    for (size_t i = 0; i < spacing.size(); i++)
+    {
+		m_spacing[i] = static_cast<double>(spacing[i]);
+    }
+
+    for (size_t i = 0; i < origin.size(); i++)
+    {
+        m_origin[i] = static_cast<double>(origin[i]);
+    }
+
     // 创建全新的 vtkImageData 对象 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
-    newImage->SetSpacing(m_spacing, m_spacing, m_spacing);
-    newImage->SetOrigin(0, 0, 0);
+    newImage->SetSpacing(m_spacing[0], m_spacing[1], m_spacing[2]);
+    newImage->SetOrigin(m_origin[0], m_origin[1], m_origin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
     // 读取数据到新内存
@@ -235,7 +256,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath) {
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
         m_scalarRange = scalarRange;
-        m_imageSpacing = { m_spacing, m_spacing, m_spacing };
+        m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
     }
 	SetLoadState(LoadState::Succeeded);
     SetLoadedFilePath(filePath);
@@ -280,6 +301,7 @@ bool RawVolumeDataManager::SetFromBuffer(
         std::lock_guard<std::mutex> lock(m_reconMutex);
         m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
         m_pendingScalarRange = scalarRange;
+		m_spacing = { spacing[0], spacing[1], spacing[2] };
         m_pendingSpacing = { spacing[0], spacing[1], spacing[2] };
     }
     m_hasPendingImage.store(true);
@@ -310,7 +332,7 @@ bool RawVolumeDataManager::SetReconImageConsumed()
         m_dims[0] = incoming->GetDimensions()[0];
         m_dims[1] = incoming->GetDimensions()[1];
         m_dims[2] = incoming->GetDimensions()[2];
-        m_spacing = incoming->GetSpacing()[0];
+        m_spacing = { incoming->GetSpacing()[0], incoming->GetSpacing()[1], incoming->GetSpacing()[2] };
         m_scalarRange = m_pendingScalarRange;
         m_imageSpacing = m_pendingSpacing;
     }
@@ -444,7 +466,9 @@ bool BaseDataManager::SetSliceImagesSaved(
     return true;
 }
 
-bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
+bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath, 
+    const std::array<float, 3>& spacing, 
+    const std::array<float, 3>& origin) {
     SetLoadState(LoadState::Loading);
     SetLoadedFilePath({});
     // 路径检查
@@ -558,25 +582,35 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath) {
     }
 
     auto output = reader->GetOutput();
-    if (!output || output->GetDimensions()[0] == 0) return false;
+    if (!output || output->GetDimensions()[0] == 0) {
+        SetLoadState(LoadState::Failed);
+        return false;
+    }
 
     // --- 数据提交 (Back Buffer 策略) ---
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->ShallowCopy(output);
+    if (HasExplicitValue(spacing)) {
+        newImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
+    }
+    if (HasExplicitValue(origin)) {
+        newImage->SetOrigin(origin[0], origin[1], origin[2]);
+    }
+
+    double range[2] = { 0.0, 0.0 };
+    double imageSpacing[3] = { 1.0, 1.0, 1.0 };
+    newImage->GetScalarRange(range);
+    newImage->GetSpacing(imageSpacing);
+    int dims[3] = { 0, 0, 0 };
+    newImage->GetDimensions(dims);
 
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         m_vtkImage = newImage;
-        double range[2] = { 0.0, 0.0 };
-        double spacing[3] = { 1.0, 1.0, 1.0 };
-        m_vtkImage->GetScalarRange(range);
-        m_vtkImage->GetSpacing(spacing);
         m_scalarRange = { range[0], range[1] };
-        m_imageSpacing = { spacing[0], spacing[1], spacing[2] };
+        m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
     }
 
-    int dims[3];
-    m_vtkImage->GetDimensions(dims);
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
     SetLoadState(LoadState::Succeeded);
     SetLoadedFilePath(inputPath);

@@ -6,6 +6,7 @@
 #include <vtkImageWriter.h>
 #include <vtkJPEGWriter.h>
 #include <vtkPNGWriter.h>
+#include <vtkImageData.h>
 
 void HistogramConverter::SetParameter(const std::string& key, double value)
 {

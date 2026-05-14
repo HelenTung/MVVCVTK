@@ -273,6 +273,8 @@ void MedicalVizService::SetTaskStarted(
 
 void MedicalVizService::SetFileLoadedAsync(
     const std::string& path,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
     if (!SetFileLoadStarted(std::move(onComplete))) return;
@@ -280,9 +282,9 @@ void MedicalVizService::SetFileLoadedAsync(
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
 
-    std::packaged_task<void()> task([dataMgr, sharedState, path]() mutable
+    std::packaged_task<void()> task([dataMgr, sharedState, path, spacing, origin]() mutable
         {
-            bool ok = dataMgr->SetDataLoaded(path);
+            bool ok = dataMgr->SetDataLoaded(path,spacing,origin);
 
             if (ok) {
                 auto img = dataMgr->GetVtkImage();

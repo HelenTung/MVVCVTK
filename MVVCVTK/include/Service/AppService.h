@@ -74,6 +74,8 @@ public:
     // 原生依赖对象：m_dataManager、m_sharedState、m_cancelFlag、m_ActiveLoadFuture。
     // ================================================================
     void SetFileLoadedAsync(const std::string& path,
+        const std::array<float, 3>& spacing = {0.02125,0.02125,0.02125},
+        const std::array<float, 3>& origin = {0,0,0},
         std::function<void(bool success)> onComplete = nullptr) override;
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。

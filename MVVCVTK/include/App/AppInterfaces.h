@@ -42,10 +42,12 @@
 class AbstractDataManager {
 public:
     virtual ~AbstractDataManager() = default;
-    virtual bool SetDataLoaded(const std::string& filePath) = 0;
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
     virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
+    virtual bool SetDataLoaded(const std::string& filePath,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin) = 0;
     virtual bool SetFromBuffer(
         const float* data,
         const std::array<int, 3>& dims,
@@ -200,6 +202,8 @@ public:
 
     // 异步加载：onComplete 由主线程延迟回调，只允许操作状态或 UI
     virtual void SetFileLoadedAsync(const std::string& path,
+        const std::array<float, 3>& spacing = {0},
+        const std::array<float, 3>& origin = {0},
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // 查询文件流加载状态（推荐 UI / 上层按需读取）

@@ -296,9 +296,14 @@ main.cpp 当前通过 GetWindowPair(...) 统一完成建窗。
 
 A. 加载接口
 
-1) SetFileLoadedAsync(const std::string& path, std::function<void(bool)> onComplete)
+1) SetFileLoadedAsync(
+      const std::string& path,
+      const std::array<float, 3>& spacing,
+      const std::array<float, 3>& origin,
+      std::function<void(bool)> onComplete)
    功能：
    - 从磁盘加载 RAW 或 TIFF 序列
+    - RAW 建议显式传入 spacing / origin；TIFF 若希望沿用文件元数据可传 {0,0,0}
    - 内部防重入：Loading 状态下会拒绝新请求
 
 2) SetReloadFromBufferAsync(...)

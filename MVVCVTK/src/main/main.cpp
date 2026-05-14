@@ -283,6 +283,8 @@ int main()
     IDataLoaderService* loader = serviceA.get();
     loader->SetFileLoadedAsync(
         "E:\\data\\ct\\700x1358x1252.raw",
+        {0.02125, 0.02125, 0.02125},
+        {0.0, 0.0, 0.0},
         [sharedState, serviceA, imageAnalysis, gapAnalysis](bool success)
         {
             if (!success) {

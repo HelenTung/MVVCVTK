@@ -3,6 +3,7 @@
 #include <vector>
 #include <mutex>
 #include <array>
+#include <atomic>
 
 struct ReconBuffer {
     std::vector<float>    data;                // 拷贝自重建输出的体素数据
@@ -43,7 +44,8 @@ public:
 class RawVolumeDataManager : public BaseDataManager {
 private:
     int m_dims[3] = { 0, 0, 0 };
-    double m_spacing = 0.02125;
+	std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 };
+	std::array<double, 3> m_spacing = { 0.02125, 0.02125, 0.02125 };
 
     // ── 重建注入路径（前后处理分离）──────────────────────────────────
     mutable std::mutex            m_reconMutex;
@@ -54,7 +56,9 @@ private:
 
 public:
     RawVolumeDataManager() = default;
-    bool SetDataLoaded(const std::string& filePath) override;
+    bool SetDataLoaded(const std::string& filePath,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin) override;
     bool SetFromBuffer(
         const float* data,
         const std::array<int, 3>& dims,
@@ -67,5 +71,7 @@ class TiffVolumeDataManager : public BaseDataManager {
 public:
     TiffVolumeDataManager() = default;  
     // 实现加载接口
-    bool SetDataLoaded(const std::string& filePath) override;
+    bool SetDataLoaded(const std::string& filePath,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin) override;
 };
