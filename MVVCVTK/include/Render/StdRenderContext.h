@@ -1,7 +1,6 @@
 ﻿#pragma once
 #include "AppInterfaces.h"
 #include "InteractionRouter.h"   
-#include "MeasurementInteractionHost.h"
 #include <memory>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkPropPicker.h>
@@ -21,8 +20,6 @@ private:
     double m_angle = 0.0;   // 旋转角度
     // ── 路由器（替代原来 HandleVTKEvent 里的手写 if-else） ──────────
     InteractionRouter m_interactionRouter;
-    std::shared_ptr<IMeasurementService> m_measurementFacade;      // 业务层持有的统一测量服务接口
-    std::shared_ptr<MeasurementInteractionHost> m_measurementHost; // 当前渲染上下文绑定的 VTK 测量交互宿主适配器
 
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
@@ -38,9 +35,7 @@ public:
     void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
     void SetOrientationAxesVisible(bool show) override;
     void SetToolMode(ToolMode mode);
-    void SetMeasurementService(std::shared_ptr<IMeasurementService> service);
     void SetAngle(double angle = 0) { m_angle = angle; };
-    std::shared_ptr<IMeasurementService> GetMeasurementService() const { return m_measurementFacade; }
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }
 protected:
     void SetVTKEventHandled(vtkObject* caller,

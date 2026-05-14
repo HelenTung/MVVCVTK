@@ -178,14 +178,6 @@
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
     <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h" />
     <ClInclude Include="include\Strategies\VolumeStrategy.h" />
-    <ClInclude Include="include\Strategies\AngleMeasurementStrategy.h" />
-    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\IMeasurementStrategy.h" />
-    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\LengthMeasurementStrategy.h" />
-    <ClInclude Include="include\Utils\MeasurementComputeService.h" />
-    <ClInclude Include="include\Utils\MeasurementCsvExporter.h" />
-    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementService.h" />
-    <ClInclude Include="include\Math\MeasurementAlgo\MeasurementTypes.h" />
-    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementInteractionHost.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Service\AppService.cpp" />
@@ -206,10 +198,6 @@
     <ClCompile Include="src\Interaction\Viewer2DHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp" />
     <ClCompile Include="src\Strategies\VolumeStrategy.cpp" />
-    <ClCompile Include="src\Strategies\AngleMeasurementStrategy.cpp" />
-    <ClCompile Include="src\Strategies\LengthMeasurementStrategy.cpp" />
-    <ClCompile Include="src\Service\MeasurementService.cpp" />
-    <ClCompile Include="src\Service\MeasurementInteractionHost.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

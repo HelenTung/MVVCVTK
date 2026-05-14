@@ -30,8 +30,6 @@ enum class VizMode {
 // --- 交互工具枚举 ---
 enum class ToolMode {
     Navigation,         // 默认漫游/切片浏览
-    DistanceMeasure,    // 距离测量
-    AngleMeasure,       // 角度测量
     ModelTransform      // 模型变换（旋转/缩放/平移）
 };
 

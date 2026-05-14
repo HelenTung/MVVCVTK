@@ -94,30 +94,9 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
     AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
-    if (m_measurementHost) {
-        m_measurementHost->SetContext(
-            m_renderer.GetPointer(),
-            m_picker.GetPointer(),
-            m_interactiveService.get());
-    }
 
     // Service 就位后重建 Router
     SetInteractionRouter();
-}
-
-void StdRenderContext::SetMeasurementService(std::shared_ptr<IMeasurementService> service)
-{
-    m_measurementFacade = std::move(service);
-    if (m_measurementFacade) {
-        m_measurementHost = std::make_shared<MeasurementInteractionHost>(m_measurementFacade);
-        m_measurementHost->SetContext(
-            m_renderer.GetPointer(),
-            m_picker.GetPointer(),
-            m_interactiveService.get());
-    }
-    else {
-        m_measurementHost.reset();
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -180,7 +159,7 @@ void StdRenderContext::SetOrientationAxesVisible(bool show)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetToolMode —— 测量服务模式切换 + 交互风格切换
+// SetToolMode —— 工具模式切换 + 交互风格切换
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetToolMode(ToolMode mode)
 {
@@ -191,10 +170,6 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     }
 
     m_toolMode = mode;
-    if (m_measurementFacade) {
-        m_measurementFacade->SetToolMode(mode);
-    }
-
     if (mode == ToolMode::ModelTransform) {
         if (m_interactiveService) {
             vtkProp3D* mainProp = m_interactiveService->GetMainProp();
@@ -215,8 +190,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
-//   2. 测量模式下拦截左键并委托测量服务
-//   3. 填充 InteractionEvent → Dispatch → 处理 abortVtk
+//   2. 填充 InteractionEvent → Dispatch → 处理 abortVtk
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     long unsigned int eventId,
@@ -230,7 +204,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         return;
     }
 
-    // ── 键盘：ModelTransform 切换 & 测量模式切换 ─────────────────────
+    // ── 键盘：工具模式切换与导出快捷键 ───────────────────────────────
     // （这部分与路由解耦，StdRenderContext 自身处理快捷键）
     if (eventId == vtkCommand::KeyPressEvent) {
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
@@ -244,8 +218,6 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
                     : ToolMode::ModelTransform);
                 return;
             }
-            if (key == 'd' || key == 'D') { SetToolMode(ToolMode::DistanceMeasure); return; }
-            if (key == 'a' || key == 'A') { SetToolMode(ToolMode::AngleMeasure);    return; }
             if (key == 's' || key == 'S') {
                 if (m_interactiveService) {
                     if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
@@ -275,47 +247,6 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
             m_interactiveService->SetDirtyMarked();
         }
         return;
-    }
-
-    // ── 测量模式：只允许点击到实际对象的拾取结果进入测量服务 ──────────
-    if (m_toolMode == ToolMode::DistanceMeasure
-        || m_toolMode == ToolMode::AngleMeasure)
-    {
-        if (eventId == vtkCommand::LeftButtonPressEvent)
-        {
-            auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-            const int* pos = iren ? iren->GetEventPosition() : nullptr;
-            if (m_measurementHost) {
-                m_measurementHost->GetClickHandled(
-                    pos ? pos[0] : 0,
-                    pos ? pos[1] : 0);
-            }
-            if (m_eventCallback) {
-                m_eventCallback->SetAbortFlag(1);
-            }
-            return;
-        }
-        if (eventId == vtkCommand::MouseMoveEvent)
-        {
-            auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-            const int* pos = iren ? iren->GetEventPosition() : nullptr;
-            if (m_measurementHost) {
-                m_measurementHost->GetMouseMoveHandled(
-                    pos ? pos[0] : 0,
-                    pos ? pos[1] : 0);
-            }
-            if (m_eventCallback) {
-                m_eventCallback->SetAbortFlag(1);
-            }
-            return;
-        }
-        if (eventId == vtkCommand::LeftButtonReleaseEvent)
-        {
-            if (m_eventCallback) {
-                m_eventCallback->SetAbortFlag(1);
-            }
-            return;
-        }
     }
 
     // ── 通用鼠标/Timer 事件 → 交给 Router ────────────────────────────
