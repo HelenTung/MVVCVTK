@@ -7,22 +7,24 @@
 #include <mutex>
 #include <vector>
 
-using ObserverCallback = std::function<void(UpdateFlags)>;
+using ObserverCallback = std::function<void(UpdateFlags)>; // 状态广播回调：只传递增量标志，不直接暴露 SharedState 内部数据
 
 struct ObserverEntry {
-    std::weak_ptr<void> owner;
+    std::weak_ptr<void> owner; // 观察者生命周期锚点，owner 失效后对应回调自动清理
     ObserverCallback callback;
 };
 
 class IStateEventSink {
 public:
     virtual ~IStateEventSink() = default;
+    // SharedInteractionState 通过该接口向外发布“有哪些状态发生了变化”。
     virtual void SetFlagsPublished(UpdateFlags flags) = 0;
 };
 
 class IStateEventSource {
 public:
     virtual ~IStateEventSource() = default;
+    // Service / 其他观察者通过该接口订阅状态变化，不直接依赖 SharedInteractionState 具体实现。
     virtual void SetObserver(std::shared_ptr<void> owner, ObserverCallback callback) = 0;
 };
 
@@ -71,5 +73,5 @@ public:
 
 private:
     mutable std::mutex m_mutex;
-    std::vector<ObserverEntry> m_observers;
+    std::vector<ObserverEntry> m_observers; // 当前活动观察者表，只在广播层维护，不进入业务状态对象
 };

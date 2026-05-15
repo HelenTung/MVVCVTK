@@ -159,9 +159,9 @@ public:
 private:
     struct CallbackState {
         mutable std::mutex m_Mutex;
-        std::function<void(bool)> m_Callback;
-        std::function<void(bool)> m_PendingCallback;
-        bool m_PendingResult{ false };
+        std::function<void(bool)> m_Callback; // 当前业务方注册但尚未触发的回调
+        std::function<void(bool)> m_PendingCallback; // 已由后台任务准备好、等待主线程执行的回调
+        bool m_PendingResult{ false }; // 与 PendingCallback 对应的任务结果快照
         std::atomic<bool> m_HasPendingCallback{ false }; // 回调就绪位：后台线程只投递结果，主线程在心跳阶段统一执行 UI/业务回调
 
         void SetCallback(std::function<void(bool)> callback) {
@@ -330,10 +330,10 @@ private:
     CallbackState m_ReloadLoadCallbackState;     // 重载回调状态
     CallbackState m_SaveCompletionCallbackState; // 保存完成回调状态
 
-    std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
-    AppStateSyncStrategy m_stateSyncStrategy;
-    std::shared_ptr<SharedInteractionState> m_sharedState;
-    std::shared_ptr<IStateEventSource> m_stateEventSource;
+    std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
+    AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
+    std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
+    std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
 
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) }; // 模式切换快照：前处理阶段可先写入，主线程重建管线时再一次性读取
     std::atomic<bool> m_needsDataRefresh{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建

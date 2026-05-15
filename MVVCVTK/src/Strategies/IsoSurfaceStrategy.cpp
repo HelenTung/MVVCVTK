@@ -9,6 +9,9 @@ void IsoSurfaceStrategy::SetCameraAligned(const std::array<double, 16>& modelMat
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
 
+    // 与 VolumeStrategy 保持一致：模型变换后相机只跟着焦点中心平移，
+    // 这样 3D 视角感知稳定，不会因为对象移动而瞬间“跳镜头”。
+
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
 
@@ -69,6 +72,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     auto poly = vtkPolyData::SafeDownCast(data);
     if (poly) {
+        // 如果上游已经给的是 mesh，则直接走 PolyData 路径，不再重复提等值面。
         m_lastInput = data;
         poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
@@ -93,6 +97,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_lastInput = data;
         img->GetCenter(m_dataCenter);
             
+        // 如果输入还是体数据，则本策略内部持有 FlyingEdges3D，把等值面提取延迟到阈值状态同步阶段驱动。
         m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         //m_isoFilter->SetInputData(img);
 
@@ -122,6 +127,11 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
 {
     if (!m_actor) return;
     auto prop = m_actor->GetProperty();
+
+    // 等值面策略主要消费三类状态：
+    // 1. Material 控制表面光照和透明度
+    // 2. IsoValue 控制几何提取阈值
+    // 3. Transform / Visibility 控制空间摆放与辅助元素显隐
     
     // 响应 UpdateFlags::Material
     if (HasFlag(flags, UpdateFlags::Material)) {

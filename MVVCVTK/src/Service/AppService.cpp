@@ -195,6 +195,8 @@ LoadState MedicalVizService::GetReloadLoadState() const
 bool MedicalVizService::SetFileLoadStarted(
     std::function<void(bool)> callback)
 {
+    // 文件流加载和重载加载共用同一份底层数据真源，因此这里先做互斥检查，
+    // 避免两个后台任务同时写 DataManager / SharedState，导致生命周期状态交叉污染。
     if (!m_sharedState) {
         SetFileLoadCallbackReady(false, std::move(callback));
         return false;
@@ -216,6 +218,8 @@ bool MedicalVizService::SetFileLoadStarted(
 bool MedicalVizService::SetReloadLoadStarted(
     std::function<void(bool)> callback)
 {
+    // 重载与文件流加载走同一套后处理链路，只是数据来源不同；
+    // 因此启动约束与回调队列管理保持一致，减少两条链路行为漂移。
     if (!m_sharedState) {
         SetReloadLoadCallbackReady(false, std::move(callback));
         return false;
@@ -242,6 +246,7 @@ void MedicalVizService::SetTaskStarted(
         std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
         m_ActiveLoadFuture = task.get_future(); // 当前活动加载任务的 future，用于析构时等待后台线程结束
     }
+    // 线程统一 detach，说明 Service 只关心生命周期托管和结果回收，不在调用点阻塞等待后台任务。
     std::thread(std::move(task)).detach();
 }
 
@@ -258,6 +263,8 @@ void MedicalVizService::SetFileLoadedAsync(
 
     std::packaged_task<void()> task([dataMgr, sharedState, path, spacing, origin]() mutable
         {
+            // 后台任务只负责 I/O 和基础数据快照准备；
+            // 一旦成功，就通过 SharedState 发出 DataReady，让主线程后续统一重建渲染管线。
             bool ok = dataMgr->SetDataLoaded(path,spacing,origin);
 
             if (ok) {
@@ -298,7 +305,7 @@ bool MedicalVizService::SetReloadFromBufferAsync(
     std::packaged_task<void()> task(
         [dataMgr, sharedState, data, dims, spacing, origin]() mutable
         {
-            // 在后台线程,注意此时状态还是loading，禁止任何VTK操作
+            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换要等主线程在 SetPendingUpdatesProcessed 中消费。
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
 
             if (!ok)
@@ -631,6 +638,8 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetPipelineRebuilt()
 {
+    // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
+    // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto strategy = GetStrategy(mode);
     if (!strategy) {
@@ -730,6 +739,9 @@ RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
+    // RenderParams 是当前这一帧需要下发给 Strategy 的“最小快照”，
+    // 只按 flags 拿必要字段，避免每次同步都把全部状态搬运一遍。
+
     if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags, UpdateFlags::Transform)) {
         auto pos = m_sharedState->GetCursorWorld();
         auto rawPos = m_sharedState->GetCursorRawWorld();
@@ -777,6 +789,7 @@ RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
 
 std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode mode)
 {
+    // Strategy 以 VizMode 为键缓存，说明模式切换是“复用既有渲染对象”而不是“每次全新构建”。
     auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end()) return it->second;
 
@@ -813,6 +826,8 @@ void MedicalVizService::SetStrategyCacheClearRequested()
 
 void MedicalVizService::SetStrategyCacheCleared()
 {
+    // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
+    // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
     if (m_currentStrategy && m_renderer) {
         m_currentStrategy->SetRendererDetached(m_renderer);
         m_currentStrategy = nullptr;
@@ -825,6 +840,7 @@ void MedicalVizService::SetStrategyCacheCleared()
 void MedicalVizService::SetCursorCentered()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
+    // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
     double imgCenter[3] = { 0.0 };
     auto img = m_dataManager->GetVtkImage();
     img->GetCenter(imgCenter);
@@ -838,6 +854,7 @@ void MedicalVizService::SetCursorCentered()
 
 void MedicalVizService::SetSyncRequested()
 {
+    // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
     m_needsSync = true;
     m_isDirty = true;
 }

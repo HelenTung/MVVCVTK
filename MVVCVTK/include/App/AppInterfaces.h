@@ -54,6 +54,7 @@ public:
         const std::array<float, 3>& origin) {
         return false;
     }
+    // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
     virtual bool SetPendingImageConsumed() {
         return false;
     }
@@ -70,8 +71,8 @@ public:
     virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 
 protected:
-    mutable std::mutex m_stateMutex;
-    LoadState          m_loadState{ LoadState::Idle };
+    mutable std::mutex m_stateMutex; // 保护通用加载状态，避免不同数据实现各自重复维护状态锁
+    LoadState          m_loadState{ LoadState::Idle }; // DataManager 对外暴露的基础生命周期状态
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -155,6 +156,7 @@ public:
 
     bool IsDirty()      const { return m_isDirty; }
     void SetDirtyMarked() { m_isDirty = true; }
+    // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
     bool SetDirtyConsumed() { return m_isDirty.exchange(false); }
 
     std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
@@ -162,7 +164,7 @@ public:
     // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 
-	// 图层叠加管理接口
+	// 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
     virtual void SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void SetOverlayStrategiesCleared();

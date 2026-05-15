@@ -11,6 +11,7 @@
 
 double VolumeStrategy::GetSampleDistance(const double spacing[3]) const
 {
+    // 采样步长以最小 spacing 为基准，保证各向异性数据下不会因为某一轴 spacing 较大而采样过粗。
     double minSpacing = 0.0;
     for (int i = 0; i < 3; ++i) {
         const double axisSpacing = spacing[i];
@@ -36,6 +37,9 @@ bool VolumeStrategy::GetOpacityChanged(double opacity) const
 void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
+
+    // 体对象经过模型矩阵变换后，保持相机到焦点的相对偏移不变，
+    // 只把焦点整体搬到新的世界中心，避免用户视角在 Transform 后突然跳变。
 
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
@@ -99,6 +103,8 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
+    // 3D 体渲染优先走降采样输出端口，把大体数据的交互成本压下来；
+    // 真实体素数据仍保留在 DataManager 中，必要时可以切回原始输入路径。
     m_mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
     // m_mapper->SetInputData(img); // 使用原始数据
 
@@ -130,6 +136,10 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     auto prop = m_volume->GetProperty();
     const bool isTfChanged = HasFlag(flags, UpdateFlags::TF);
     const bool isMaterialChanged = HasFlag(flags, UpdateFlags::Material);
+
+    // TF 与 Material 分开处理的原因是：
+    // TF 变更通常意味着整条颜色/透明度曲线要重建；
+    // 单纯材质变化则尽量只更新光照或全局 opacity，避免重复构造整套传输函数。
     if (HasFlag(flags, UpdateFlags::TF)) {
         // 遵循数据类与状态类分离、前后处理分离的思想，离线组装 VTK 函数，避免高频 Modified 触发重新渲染
         auto newCtf = vtkSmartPointer<vtkColorTransferFunction>::New();
@@ -174,6 +184,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     }
 
     if (HasFlag(flags, UpdateFlags::Interaction)) {
+        // 交互期切大采样步长，停止交互后恢复精细采样，这是体渲染流畅度的关键开销控制点。
         SetSampleDistance(params.isInteracting);
     }
 

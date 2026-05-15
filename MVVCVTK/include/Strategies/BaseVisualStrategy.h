@@ -13,7 +13,7 @@ class BaseVisualStrategy :public AbstractVisualStrategy
 {
 protected:
 	std::vector<vtkSmartPointer<vtkProp>> m_managedProps; // 当前策略管理的 VTK 组件列表，供 Attach/Detach 统一处理
-    vtkSmartPointer<vtkImageResample> m_resampleFilter;
+    vtkSmartPointer<vtkImageResample> m_resampleFilter; // 需要降采样时缓存 filter，保证输出端口生命周期稳定
     void SetManagedProp(vtkSmartPointer<vtkProp> prop)
 	{
 		if (prop)
@@ -24,6 +24,8 @@ public:
 	virtual ~BaseVisualStrategy() = default;
     void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) override {
 		if (!renderer) return;
+        // 基类只处理“把当前策略拥有的 prop 全部挂到 renderer 上”，
+        // 具体背景色、相机或附加 VTK 关系由派生类继续补充。
 		for (auto& prop : m_managedProps) 
 				renderer->AddViewProp(prop);
 	}
@@ -35,6 +37,8 @@ public:
 
 protected:
     void Set3DPropsTransform(const std::array<double, 16>& matrixData) {
+		// 对策略拥有的 3D prop 批量下发同一份模型矩阵，
+		// 保证 actor、axes 等附属对象始终跟随同一个世界变换。
         for (auto prop : m_managedProps) {
             auto prop3D = vtkProp3D::SafeDownCast(prop);
           if (!prop3D) continue; // 仅对 3D prop 应用模型矩阵，跳过文本等 2D prop
@@ -55,6 +59,7 @@ protected:
     vtkAlgorithmOutput* GetDownsampledOutputPort(vtkImageData* input, int targetDim = 766)
     {
 		if (!input) return nullptr;
+                // 降采样集中放在基类，避免 3D 策略各自复制同样的数据降采样逻辑。
         m_resampleFilter = ImageProcessor::GetDownsampledImage(input, targetDim);
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }

@@ -30,8 +30,8 @@ public:
 private:
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }
 
-    std::shared_ptr<AbstractVisualStrategy> m_mainStrategy;
-    std::shared_ptr<AbstractVisualStrategy> m_referencePlanes;
+    std::shared_ptr<AbstractVisualStrategy> m_mainStrategy; // 主 3D 内容：Volume 或 IsoSurface 二选一
+    std::shared_ptr<AbstractVisualStrategy> m_referencePlanes; // 叠加在主内容上的三向参考平面
     vtkSmartPointer<vtkDataObject> m_lastInput; // 缓存当前组合输入，避免主策略与参考平面重复接收相同数据
-    VizMode m_mode;
+    VizMode m_mode; // 决定主策略究竟是体渲染还是等值面
 };

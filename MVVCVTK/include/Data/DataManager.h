@@ -43,12 +43,12 @@ public:
 
 class RawVolumeDataManager : public BaseDataManager {
 private:
-    int m_dims[3] = { 0, 0, 0 };
-	std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 };
-	std::array<double, 3> m_spacing = { 0.02125, 0.02125, 0.02125 };
+    int m_dims[3] = { 0, 0, 0 }; // 当前已提交体数据的体素维度
+	std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 }; // 当前体数据原点，和 spacing 一起定义世界坐标映射
+	std::array<double, 3> m_spacing = { 0.02125, 0.02125, 0.02125 }; // 当前生效 spacing，供导出与交互换算复用
 
     // ── 重建注入路径（前后处理分离）──────────────────────────────────
-    mutable std::mutex            m_reconMutex;
+    mutable std::mutex            m_reconMutex; // 保护“后台准备中但尚未提交”的重建快照
     vtkSmartPointer<vtkImageData> m_pendingImage;   // 后台线程写，主线程读
     std::array<double, 2>         m_pendingScalarRange = { 0.0, 0.0 }; // 缓存待提交重建数据范围，主线程消费时直接复用
     std::array<double, 3>         m_pendingSpacing = { 1.0, 1.0, 1.0 }; // 缓存待提交重建数据 spacing，避免再次访问 VTK

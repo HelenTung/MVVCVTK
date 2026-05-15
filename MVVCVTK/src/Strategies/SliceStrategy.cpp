@@ -13,6 +13,8 @@ void SliceStrategy::SetWorldBounds(const double bounds[6],
     const std::array<double, 16>& modelMatrix,
     double worldBounds[6]) const
 {
+    // 把局部轴对齐包围盒的 8 个顶点全部变换到世界空间，
+    // 重新求 min/max，避免模型旋转后仍沿用旧的局部 bounds。
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
 
@@ -51,6 +53,9 @@ void SliceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix,
     const double bounds[6])
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
+
+    // 切片模式下也沿用“保持相机相对偏移、只更新焦点中心”的策略，
+    // 这样模型旋转或重置后，用户视角不会突然改变观察距离。
 
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
@@ -94,7 +99,8 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slicePlane = vtkSmartPointer<vtkPlane>::New();
     m_mapper->SetSlicePlane(m_slicePlane);
 
-    // --- 初始化十字线资源 ---
+    // 十字线与切片主图像分开建模，这样 Cursor 更新只需改 line source，
+    // 不会触发切片图像自身的 reslice 管线重建。
     m_vLineSource = vtkSmartPointer<vtkLineSource>::New();
     m_hLineSource = vtkSmartPointer<vtkLineSource>::New();
 
@@ -160,7 +166,7 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     m_mapper->SetInputData(img);
 
-    // 设置原点 (Origin)：让切片默认位于图像数据的几何中心
+    // 初次绑定数据时，把切片平面放到图像中心，后续真正的位置再由 Cursor 状态驱动。
     double center[3];
     img->GetCenter(center);
     m_slicePlane->SetOrigin(center);
@@ -224,7 +230,8 @@ void SliceStrategy::SetCrosshair(const double focusWorld[3],
     const double physX = focusWorld[0];
     const double physY = focusWorld[1];
     const double physZ = focusWorld[2];
-	
+
+    // 十字线直接使用世界坐标构造，这样在模型矩阵变化后仍能与其它 3D/2D 视图保持同一套空间语义。
     if (m_orientation == Orientation::Top_down) {
         const double z = physZ + safeOffset;
         m_vLineSource->SetPoint1(physX, worldBounds[2], z);
@@ -253,6 +260,11 @@ void SliceStrategy::SetCrosshair(const double focusWorld[3],
 
 void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
+    // SliceStrategy 的状态同步核心分三段：
+    // 1. WindowLevel/Material 更新图像显示参数
+    // 2. Cursor/Transform 更新切片平面和十字线几何
+    // 3. Visibility 控制十字线显隐
+
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
     if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
     {
@@ -286,6 +298,8 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
             if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
         }
 
+        // 切片法线始终固定在视图朝向轴上；
+        // 交互移动的是切片平面原点，不是法线方向本身。
         double worldNormal[3] = { 0.0, 0.0, 0.0 };
         if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
         else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;

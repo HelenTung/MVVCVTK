@@ -6,6 +6,8 @@
 #include <limits>
 
 void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const {
+    // 与 SliceStrategy 一样，把局部包围盒角点映射到世界空间，
+    // 这样参考平面在模型旋转后依旧沿当前世界包围盒正确铺开。
     auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
     mat->DeepCopy(modelMatrix.data());
 
@@ -87,7 +89,7 @@ void ColoredPlanesStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     img->GetDimensions(dims);
     for (int i = 0; i < 3; ++i) m_maxIndices[i] = dims[i] - 1;
 
-	// 获取原点和间距
+	// 保存 origin/spacing 后，三张参考平面的初始几何就可以完全由数据空间定义。
     img->GetOrigin(m_origin);
     img->GetSpacing(m_spacing);
 
@@ -119,6 +121,8 @@ void ColoredPlanesStrategy::SetAllPositions(const double cursorWorld[3], const s
     double worldBounds[6] = { 0.0 };
     SetWorldBounds(modelMatrix, worldBounds);
 
+    // 参考平面在世界空间里沿三个主轴穿过当前 cursor，
+    // 本质上是在 3D 视图中把三个切片位置可视化出来。
     const double physX = std::max(worldBounds[0], std::min(cursorWorld[0], worldBounds[1]));
     const double physY = std::max(worldBounds[2], std::min(cursorWorld[1], worldBounds[3]));
     const double physZ = std::max(worldBounds[4], std::min(cursorWorld[2], worldBounds[5]));
@@ -160,6 +164,7 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
 void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
+        // Cursor 与 Transform 任一变化，都需要重新把三张平面放到正确世界位置。
         SetAllPositions(params.cursor.data(), params.modelMatrix);
     }
 

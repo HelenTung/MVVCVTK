@@ -23,6 +23,8 @@ void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
+    // 组合策略本身不产生新 VTK 对象，它只是把同一份输入同时分发给主内容和参考平面两部分。
+
     if (m_mainStrategy) {
         m_mainStrategy->SetInputData(data);
     }
@@ -62,6 +64,7 @@ vtkProp3D* CompositeStrategy::GetMainProp()
 
 void CompositeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
+    // 参考平面先同步，这样 3D 主内容与切片参照在同一帧里看到的是一致状态。
     if (m_referencePlanes) {
         m_referencePlanes->SetVisualState(params, flags);
     }

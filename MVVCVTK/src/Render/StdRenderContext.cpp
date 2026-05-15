@@ -54,6 +54,8 @@ void StdRenderContext::SetInteractionObserversAdded()
         vtkCommand::RightButtonReleaseEvent
     };
 
+    // 所有业务关心的交互事件都先汇入同一个 callback，
+    // 后面再由 RenderContext 按工具模式和 Router 规则细分处理路径。
     for (const auto eventId : events) {
         m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority);
     }
@@ -127,6 +129,8 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::SetStarted()
 {
+    // 先触发一次 Render，保证窗口初始内容与后续交互状态一致，
+    // 然后再进入 interactor 主循环。
     if (m_renderWindow) m_renderWindow->Render();
     if (m_interactor) {
         if (!m_interactor->GetInitialized()) {
@@ -147,11 +151,13 @@ void StdRenderContext::SetCameraStyleByVizMode(VizMode mode)
         || mode == VizMode::SliceFront_back
         || mode == VizMode::SliceLeft_right)
     {
+        // 切片模式要求屏幕坐标与切片平面交互稳定对应，因此使用 Image2D 风格。
         auto style = vtkSmartPointer<vtkInteractorStyleImage>::New();
         style->SetInteractionModeToImage2D();
         m_interactor->SetInteractorStyle(style);
     }
     else {
+        // 3D 模式保留相机轨道球交互；ModelTransform 工具模式会再覆盖成 Actor 交互风格。
         auto style = vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New();
         m_interactor->SetInteractorStyle(style);
     }
@@ -164,6 +170,7 @@ void StdRenderContext::SetOrientationAxesVisible(bool show)
 {
     if (show) {
         if (!m_axesWidget) {
+            // 坐标轴 widget 延迟初始化，避免在不需要时创建额外的 VTK 组件。
             auto axes = vtkSmartPointer<vtkAxesActor>::New();
             m_axesWidget = vtkSmartPointer<vtkOrientationMarkerWidget>::New();
             m_axesWidget->SetOrientationMarker(axes);
@@ -218,12 +225,14 @@ bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
     const std::string keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
 
     if (key == 'm' || key == 'M') {
+        // m: 导航模式与模型变换模式切换，直接影响后续交互风格与事件分流。
         SetToolMode(m_toolMode == ToolMode::ModelTransform
             ? ToolMode::Navigation
             : ToolMode::ModelTransform);
         return true;
     }
     if (key == 's' || key == 'S') {
+        // s: 触发整体变换后的体数据导出。
         if (m_interactiveService) {
             if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
                 exporter->SetTransformedDataSavedAsync();
@@ -232,6 +241,7 @@ bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
         return true;
     }
     if (key == 't' || key == 'T') {
+        // t: 触发当前角度下的切片导出。
         if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
             exporter->SetSliceImagesSavedAsync({}, m_angle);
         }
@@ -266,6 +276,8 @@ void StdRenderContext::SetInteractionEventBuilt(
     eve.keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
     eve.vizMode = m_currentMode;
     eve.toolMode = m_toolMode;
+    // 到这里 InteractionEvent 就成为跨 Handler 共享的统一输入模型，
+    // 后续 2D/3D/Timer 处理器都不再直接依赖 VTK interactor 原始查询接口。
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -325,6 +337,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         m_interactionRouter.GetDispatchResult(eve, dispatchMode);
 
     if (result.abortVtk && m_eventCallback) {
+        // 业务层已经完整消费该事件时，阻止 VTK 默认相机/窗口行为继续处理，避免双重响应。
         m_eventCallback->SetAbortFlag(1);
     }
 }
