@@ -54,6 +54,9 @@ public:
         const std::array<float, 3>& origin) {
         return false;
     }
+    virtual bool SetPendingImageConsumed() {
+        return false;
+    }
     LoadState GetLoadState() const {
         std::lock_guard<std::mutex> lk(m_stateMutex);
         return m_loadState;
@@ -120,7 +123,7 @@ public:
     virtual ~AbstractAppService() = default;
 
     virtual void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
-        vtkSmartPointer<vtkRenderer>     ren)   
+        vtkSmartPointer<vtkRenderer>     ren)
     {
         auto oldRenderer = m_renderer;
         if (oldRenderer && oldRenderer != ren) {

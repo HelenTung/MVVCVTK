@@ -9,7 +9,7 @@
 #include <iostream>
 #include <iomanip>
 #include <sstream>
-#include <vtkStringArray.h> 
+#include <vtkStringArray.h>
 #include <vtkTransform.h>
 #include <vtkImageReslice.h>
 #include <vtkImageChangeInformation.h>
@@ -143,7 +143,7 @@ std::string BaseDataManager::GetDefaultTransformedDataPath() const
     return m_loadedFilePath;
 }
 
-bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath, 
+bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
 
     SetLoadState(LoadState::Loading);
@@ -184,7 +184,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         m_origin[i] = static_cast<double>(origin[i]);
     }
 
-    // 创建全新的 vtkImageData 对象 
+    // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
     newImage->SetSpacing(m_spacing[0], m_spacing[1], m_spacing[2]);
@@ -247,7 +247,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
 
     newImage->Modified();
- 
+
     // --- 提交  ---
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
@@ -306,12 +306,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     }
     m_hasPendingImage.store(true);
 
-    // LoadState::Succeeded 延迟到主线程 SetReconImageConsumed() 设置，
+    // LoadState::Succeeded 延迟到主线程 SetPendingImageConsumed() 设置，
     // 防止调用方在 vtkImage 还未提交时就查询到 Succeeded 状态。
     return true;
 }
 
-bool RawVolumeDataManager::SetReconImageConsumed()
+bool RawVolumeDataManager::SetPendingImageConsumed()
 {
     if (!m_hasPendingImage.load()) return false;
 
@@ -366,14 +366,14 @@ bool BaseDataManager::SetSliceImagesSaved(
     auto reslice = vtkSmartPointer<vtkImageReslice>::New();
     reslice->SetInputData(imageCopy);
     reslice->SetResliceTransform(transform);
-    reslice->SetInterpolationModeToLinear(); 
+    reslice->SetInterpolationModeToLinear();
     reslice->SetOutputDimensionality(3);
     reslice->SetAutoCropOutput(true);
 
     double range[2] = { 0.0, 0.0 };
     imageCopy->GetScalarRange(range);
     reslice->SetBackgroundLevel(range[0]);
-    
+
     try {
         reslice->Update();
     }
@@ -466,8 +466,8 @@ bool BaseDataManager::SetSliceImagesSaved(
     return true;
 }
 
-bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath, 
-    const std::array<float, 3>& spacing, 
+bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
+    const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin) {
     SetLoadState(LoadState::Loading);
     SetLoadedFilePath({});
@@ -483,7 +483,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
 
 
     if (std::filesystem::is_directory(pathObj)) {
-        // 
+        //
         std::cout << "[Info] Loading TIFF series from folder: " << inputPath << std::endl;
 
         std::vector<std::string> fileList;
@@ -514,7 +514,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
                 if (std::isdigit(s1[i]) && std::isdigit(s2[j])) {
                     unsigned long long n1 = 0;
                     unsigned long long n2 = 0;
-                    
+
                     // 解析 s1 中的数字
                     while (i < s1.size() && std::isdigit(s1[i])) {
                         n1 = n1 * 10 + (s1[i] - '0');
@@ -574,7 +574,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     // 如果是序列图片，Reader 会根据文件数量自动设置 Z 轴维度
     try {
         reader->Update();
-    }   
+    }
     catch (...) {
         SetLoadState(LoadState::Failed);
         std::cerr << "[Error] Exception during TIFF reading." << std::endl;
@@ -644,7 +644,7 @@ bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const
     // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。
     // 这会导致输出的数据维度（Dimensions）发生变化。
     reslice->SetOutputDimensionality(3);
-    
+
     reslice->SetAutoCropOutput(true);
     double range[2];
     imageCopy->GetScalarRange(range);
@@ -681,7 +681,7 @@ bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const
     std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
     // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
     std::filesystem::path finalPath = pathObj.parent_path() / (pathObj.stem().string() + "_" + dimStr + pathObj.extension().string());
-    
+
     // 使用 C++ 标准库直接持久化写入裸 raw 数据
     std::ofstream rawFile(finalPath, std::ios::binary);
     if (!rawFile.is_open()) {

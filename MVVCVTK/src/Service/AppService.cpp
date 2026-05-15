@@ -87,8 +87,10 @@ void AbstractAppService::SetOverlayStrategiesCleared() {
 // ─────────────────────────────────────────────────────────────────────
 MedicalVizService::MedicalVizService(
     std::shared_ptr<AbstractDataManager> dataMgr,
-    std::shared_ptr<SharedInteractionState> state)
+    std::shared_ptr<SharedInteractionState> state,
+    std::shared_ptr<IStateEventSource> stateEventSource)
     : m_sharedState(std::move(state))
+    , m_stateEventSource(std::move(stateEventSource))
 {
     m_dataManager = std::move(dataMgr);
 }
@@ -108,48 +110,18 @@ void MedicalVizService::SetRenderContext(
     vtkSmartPointer<vtkRenderer> ren)
 {
     AbstractAppService::SetRenderContext(win, ren);
-    if (!m_sharedState) return;
+    if (!m_stateEventSource) return;
 
     std::weak_ptr<MedicalVizService> weakSelf =
         std::static_pointer_cast<MedicalVizService>(shared_from_this());
 
-    m_sharedState->SetObserver(shared_from_this(),
+    m_stateEventSource->SetObserver(shared_from_this(),
         [weakSelf](UpdateFlags flags)
         {
             auto self = weakSelf.lock();
             if (!self) return;
 
-            if (HasFlag(flags, UpdateFlags::DataReady)) {
-                self->SetStrategyCacheClearRequested();
-                self->SetCursorCentered();
-                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
-                self->m_needsDataRefresh = true;
-                return;
-            }
-
-            if (HasFlag(flags, UpdateFlags::Spacing)) {
-                self->SetStrategyCacheClearRequested();
-                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
-                self->m_needsDataRefresh = true;
-                return;
-            }
-
-            if (HasFlag(flags, UpdateFlags::LoadFailed)) {
-                self->m_needsLoadFailed = true;
-                self->m_isDirty = true;
-                return;
-            }
-
-            if (HasFlag(flags, UpdateFlags::Background)) {
-                self->m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::Background));
-                self->SetSyncRequested();
-                return;
-            }
-
-            int old = self->m_pendingFlags.load();
-            while (!self->m_pendingFlags.compare_exchange_weak(
-                old, old | static_cast<int>(flags)));
-            self->SetSyncRequested();
+            self->m_stateSyncStrategy.SetFlagsHandled(flags, *self);
         }
     );
 }
@@ -326,7 +298,7 @@ bool MedicalVizService::SetReloadFromBufferAsync(
         {
             // 在后台线程,注意此时状态还是loading，禁止任何VTK操作
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
-            
+
             if (!ok)
             {
                 sharedState->SetReloadLoadFailed();
@@ -363,7 +335,7 @@ void MedicalVizService::SetTransformedDataSavedAsync(
     // 获取当前模型矩阵（主线程/调度线程同步读取，不再传入后台）
     std::array<double, 16> currentMatrix = sharedState->GetModelMatrix();
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
-    
+
     // 封装异步任务
     std::packaged_task<void()> task([dataMgr, resolvedPath, currentMatrix, weakSelf]() mutable {
         // 进入后台线程，执行重采样和保存操作
@@ -581,24 +553,22 @@ void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]
 void MedicalVizService::SetPendingUpdatesProcessed()
 {
     // 消费来自第三方重建的 ReconBuffer
-    // 必须在 m_needsDataRefresh 检查前，因为 SetReconImageConsumed 成功后会更新 SharedState 的重载状态与数据可信状态，下面的逻辑再据此驱动管线重建。
-    if (auto* rawMgr = dynamic_cast<RawVolumeDataManager*>(m_dataManager.get())) {
-        if (rawMgr->SetReconImageConsumed()) {
-            // 走和文件加载成功相同的后处理路径
-            auto img = m_dataManager->GetVtkImage();
-            if (img) {
-                const auto range = m_dataManager->GetScalarRange();
-                const auto spacing = m_dataManager->GetSpacing();
-                m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
-            }
-            else {
-                m_sharedState->SetReloadLoadFailed();
-            }
+    // 必须在 m_needsDataRefresh 检查前，因为 SetPendingImageConsumed 成功后会更新 SharedState 的重载状态与数据可信状态，下面的逻辑再据此驱动管线重建。
+    if (m_dataManager && m_dataManager->SetPendingImageConsumed()) {
+        // 走和文件加载成功相同的后处理路径
+        auto img = m_dataManager->GetVtkImage();
+        if (img) {
+            const auto range = m_dataManager->GetScalarRange();
+            const auto spacing = m_dataManager->GetSpacing();
+            m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
+        }
+        else {
+            m_sharedState->SetReloadLoadFailed();
         }
     }
 
     // 导出异步任务回调触发
-    if (m_HasPendingSaveCompletionCallback.exchange(false)) {
+    if (GetPendingSaveCompletionCallbackConsumed()) {
         SetPendingSaveCompletionCallbackExecuted();
     }
 
@@ -611,7 +581,7 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
         SetLoadFailedHandled();
-        if (m_FileLoadCallback) {
+        if (GetFileLoadCallbackBound()) {
             SetFileLoadCallbackReady(false);
         }
         else {
@@ -623,7 +593,7 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         SetPipelineRebuilt();
-        if (m_FileLoadCallback) {
+        if (GetFileLoadCallbackBound()) {
             SetFileLoadCallbackReady(true);
         }
         else {
@@ -633,10 +603,10 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     }
 
    // 文件加载/重载完成后，都要执行对应回调以通知 UI
-    if (m_HasPendingFileLoadCallback.exchange(false)) {
+    if (GetPendingFileLoadCallbackConsumed()) {
         SetPendingFileLoadCallbackExecuted();
     }
-    if (m_HasPendingReloadLoadCallback.exchange(false)) {
+    if (GetPendingReloadLoadCallbackConsumed()) {
         SetPendingReloadLoadCallbackExecuted();
     }
 
@@ -803,6 +773,25 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
     auto s = StrategyFactory::GetStrategy(mode);
     if (s) m_strategyCache[mode] = s;
     return s;
+}
+
+void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)
+{
+    int old = m_pendingFlags.load();
+    while (!m_pendingFlags.compare_exchange_weak(
+        old, old | static_cast<int>(flags))) {
+    }
+}
+
+void MedicalVizService::SetDataRefreshRequested()
+{
+    m_needsDataRefresh = true;
+}
+
+void MedicalVizService::SetLoadFailedRequested()
+{
+    m_needsLoadFailed = true;
+    m_isDirty = true;
 }
 
 void MedicalVizService::SetStrategyCacheClearRequested()

@@ -6,6 +6,13 @@
 #include <vtkCommand.h>
 #include <vtkInteractorStyleImage.h>
 #include <vtkInteractorStyleTrackballActor.h>
+#include <array>
+
+namespace {
+constexpr double kDefaultObserverPriority = 0.5;
+constexpr double kTimerObserverPriority = 1.0;
+constexpr int kTimerIntervalMs = 33;
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // 构造
@@ -25,17 +32,31 @@ StdRenderContext::StdRenderContext()
     m_eventCallback->SetCallback(AbstractRenderContext::SetVTKEventDispatched);
     m_eventCallback->SetClientData(this);
 
-    // 监听所有需要路由的 VTK 事件
-    m_interactor->AddObserver(vtkCommand::MouseWheelForwardEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::MouseWheelBackwardEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::LeftButtonPressEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::MouseMoveEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::LeftButtonReleaseEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::KeyPressEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::ExitEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::InteractionEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::RightButtonPressEvent, m_eventCallback, 0.5);
-    m_interactor->AddObserver(vtkCommand::RightButtonReleaseEvent, m_eventCallback, 0.5);
+    SetInteractionObserversAdded();
+}
+
+void StdRenderContext::SetInteractionObserversAdded()
+{
+    if (!m_interactor || !m_eventCallback) {
+        return;
+    }
+
+    const std::array<unsigned long, 10> events = {
+        vtkCommand::MouseWheelForwardEvent,
+        vtkCommand::MouseWheelBackwardEvent,
+        vtkCommand::LeftButtonPressEvent,
+        vtkCommand::MouseMoveEvent,
+        vtkCommand::LeftButtonReleaseEvent,
+        vtkCommand::KeyPressEvent,
+        vtkCommand::ExitEvent,
+        vtkCommand::InteractionEvent,
+        vtkCommand::RightButtonPressEvent,
+        vtkCommand::RightButtonReleaseEvent
+    };
+
+    for (const auto eventId : events) {
+        m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -48,8 +69,8 @@ void StdRenderContext::SetInteractorInitialized()
     }
 
     if (m_interactor) {
-        m_interactor->CreateRepeatingTimer(33);  // ~30 FPS
-        m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, 1.0);
+        m_interactor->CreateRepeatingTimer(kTimerIntervalMs);  // ~30 FPS
+        m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, kTimerObserverPriority);
     }
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
@@ -185,6 +206,66 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     if (m_interactiveService) m_interactiveService->SetDirtyMarked();
 }
 
+bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
+{
+    if (!interactor) {
+        return false;
+    }
+
+    const char key = interactor->GetKeyCode();
+    const std::string keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
+
+    if (key == 'm' || key == 'M') {
+        SetToolMode(m_toolMode == ToolMode::ModelTransform
+            ? ToolMode::Navigation
+            : ToolMode::ModelTransform);
+        return true;
+    }
+    if (key == 's' || key == 'S') {
+        if (m_interactiveService) {
+            if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
+                exporter->SetTransformedDataSavedAsync();
+            }
+        }
+        return true;
+    }
+    if (key == 't' || key == 'T') {
+        if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
+            exporter->SetSliceImagesSavedAsync({}, m_angle);
+        }
+        return true;
+    }
+    if (keySym == "Escape") {
+        SetToolMode(ToolMode::Navigation);
+        return true;
+    }
+
+    return false;
+}
+
+void StdRenderContext::SetInteractionEventBuilt(
+    InteractionEvent& eve,
+    vtkRenderWindowInteractor* interactor,
+    long unsigned int eventId) const
+{
+    eve.vtkEventId = eventId;
+    eve.iren = interactor;
+
+    const int* pos = interactor->GetEventPosition();
+    if (pos) {
+        eve.x = pos[0];
+        eve.y = pos[1];
+    }
+
+    eve.shift = interactor->GetShiftKey() != 0;
+    eve.ctrl = interactor->GetControlKey() != 0;
+    eve.alt = interactor->GetAltKey() != 0;
+    eve.keyCode = interactor->GetKeyCode();
+    eve.keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
+    eve.vizMode = m_currentMode;
+    eve.toolMode = m_toolMode;
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // SetVTKEventHandled —— 统一入口，委托给 Router
 //
@@ -208,31 +289,8 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     // （这部分与路由解耦，StdRenderContext 自身处理快捷键）
     if (eventId == vtkCommand::KeyPressEvent) {
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-        if (iren) {
-            const char key = iren->GetKeyCode();
-            const std::string s = iren->GetKeySym() ? iren->GetKeySym() : "";
-
-            if (key == 'm' || key == 'M') {
-                SetToolMode(m_toolMode == ToolMode::ModelTransform
-                    ? ToolMode::Navigation
-                    : ToolMode::ModelTransform);
-                return;
-            }
-            if (key == 's' || key == 'S') {
-                if (m_interactiveService) {
-                    if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                        exporter->SetTransformedDataSavedAsync();
-                    }
-                }
-                return;
-            }
-            if (key == 't' || key == 'T')
-            {
-                if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                    exporter->SetSliceImagesSavedAsync({}, m_angle);
-                }
-            }
-            if (s == "Escape") { SetToolMode(ToolMode::Navigation);      return; }
+        if (SetKeyEventHandled(iren)) {
+            return;
         }
     }
 
@@ -254,19 +312,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     if (!iren) return;
 
     InteractionEvent eve;
-    eve.vtkEventId = eventId;
-    eve.iren = iren;
-
-    const int* pos = iren->GetEventPosition();
-    if (pos) { eve.x = pos[0]; eve.y = pos[1]; }
-
-    eve.shift = iren->GetShiftKey() != 0;
-    eve.ctrl = iren->GetControlKey() != 0;
-    eve.alt = iren->GetAltKey() != 0;
-    eve.keyCode = iren->GetKeyCode();
-    eve.keySym = iren->GetKeySym() ? iren->GetKeySym() : "";
-    eve.vizMode = m_currentMode;
-    eve.toolMode = m_toolMode;
+    SetInteractionEventBuilt(eve, iren, eventId);
 
     // Timer → Broadcast（所有 Handler 均需执行）；其余 → FirstMatch
     const auto dispatchMode = (eventId == vtkCommand::TimerEvent)

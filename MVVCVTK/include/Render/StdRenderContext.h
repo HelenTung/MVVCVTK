@@ -1,6 +1,6 @@
 ﻿#pragma once
 #include "AppInterfaces.h"
-#include "InteractionRouter.h"   
+#include "InteractionRouter.h"
 #include <memory>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkPropPicker.h>
@@ -16,7 +16,7 @@ private:
 
     VizMode  m_currentMode = VizMode::Volume;
     ToolMode m_toolMode = ToolMode::Navigation;
-    
+
     double m_angle = 0.0;   // 旋转角度
     // ── 路由器（替代原来 HandleVTKEvent 里的手写 if-else） ──────────
     InteractionRouter m_interactionRouter;
@@ -24,8 +24,13 @@ private:
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
 
+    void SetInteractionObserversAdded();
     // 构建/重建路由表（BindService 和 InitInteractor 后调用）
     void SetInteractionRouter();
+    bool SetKeyEventHandled(vtkRenderWindowInteractor* interactor);
+    void SetInteractionEventBuilt(InteractionEvent& eve,
+        vtkRenderWindowInteractor* interactor,
+        long unsigned int eventId) const;
 
 public:
     void SetInteractorInitialized() override;

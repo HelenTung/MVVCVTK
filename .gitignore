@@ -374,3 +374,4 @@ FodyWeavers.xsd
 Local.props
 **/Local.props
 *.md
+*.patch

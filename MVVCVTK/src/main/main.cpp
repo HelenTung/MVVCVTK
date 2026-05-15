@@ -100,7 +100,7 @@ public:
             srvD->SetOverlayStrategyAdded(sliceOverlayD);
 
             gapAnalysis->saveResults("E:\\data\\ct\\out");
-            
+
             // 通知所有窗口画面标脏，触发重绘
             srvA->SetDirtyMarked(); srvB->SetDirtyMarked();
             srvC->SetDirtyMarked(); srvD->SetDirtyMarked(); srvE->SetDirtyMarked();
@@ -118,9 +118,10 @@ static std::pair<
     GetWindowPair(
         const WindowConfig& cfg,
         std::shared_ptr<AbstractDataManager>    dataMgr,
-        std::shared_ptr<SharedInteractionState> sharedState)
+        std::shared_ptr<SharedInteractionState> sharedState,
+        std::shared_ptr<IStateEventSource> stateEventSource)
 {
-    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+    auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState, stateEventSource);
     auto context = std::make_shared<StdRenderContext>();
 
     // ── 步骤1：SetServiceBound（触发 SetRenderContext → 注册 Observer）──────
@@ -149,7 +150,8 @@ int main()
     vtkSMPTools::Initialize();
     // ── 共享资源 ──────────────────────────────────────────────────
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
+    auto sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
     auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
 
@@ -220,11 +222,11 @@ int main()
     cfgA.preInitCfg.hasBgColor = true;
 
     // ── 批量建窗（前处理完成）────────────────────────────────────
-    auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState);
-    auto [serviceE, contextE] = GetWindowPair(cfgE, sharedDataMgr, sharedState);
-    auto [serviceB, contextB] = GetWindowPair(cfgB, sharedDataMgr, sharedState);
-    auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState);
-    auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState);
+    auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceE, contextE] = GetWindowPair(cfgE, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceB, contextB] = GetWindowPair(cfgB, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState, sharedStateBroadcaster);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, true);
@@ -317,4 +319,4 @@ int main()
     contextB->SetStarted();
 
     return 0;
-}   
+}

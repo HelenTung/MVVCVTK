@@ -1,31 +1,30 @@
 ﻿#pragma once
 #include "AppTypes.h"
+#include "AppStateCommands.h"
+#include "AppStateEvents.h"
 #include <vector>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <array>
 #include <algorithm>
-#include <cmath> 
+#include <cmath>
 #include <atomic>
-
-// 观察者回调类型
-using ObserverCallback = std::function<void(UpdateFlags)>;
-
-struct ObserverEntry {
-    std::weak_ptr<void> owner;    // 存活凭证（weak_ptr 不增加引用计数）
-    ObserverCallback    callback;
-};
 
 class SharedInteractionState {
 public:
-    SharedInteractionState() {
+    explicit SharedInteractionState(std::shared_ptr<IStateEventSink> eventSink = nullptr)
+        : m_eventSink(std::move(eventSink)) {
         m_nodes = {
             { 0.00, 0.0, 0.00, 0.00, 0.00 },
             { 0.35, 0.0, 0.75, 0.75, 0.75 },
             { 0.60, 0.6, 0.85, 0.85, 0.85 },
             { 1.00, 1.0, 0.95, 0.95, 0.95 },
         };
+    }
+
+    void SetEventSink(std::shared_ptr<IStateEventSink> eventSink) {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        m_eventSink = std::move(eventSink);
     }
 
     // ── 文件流加载状态 ────────────────────────────────────────────
@@ -77,15 +76,14 @@ public:
         const std::array<double, 3>& spacing) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_dataRange[0] = rangeMin;
-            m_dataRange[1] = rangeMax;
+            m_dataRange = { rangeMin, rangeMax };
             m_spacing = spacing;
             m_fileLoadState = LoadState::Succeeded;
             m_dataTrustedState = LoadState::Succeeded;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
-        SetObserversNotified(UpdateFlags::DataReady);
+        SetFlagsPublished(UpdateFlags::DataReady);
     }
 
     // ── 重载数据就绪广播 ──────────────────────────────────────────
@@ -94,15 +92,14 @@ public:
         const std::array<double, 3>& spacing) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_dataRange[0] = rangeMin;
-            m_dataRange[1] = rangeMax;
+            m_dataRange = { rangeMin, rangeMax };
             m_spacing = spacing;
             m_reloadLoadState = LoadState::Succeeded;
             m_dataTrustedState = LoadState::Succeeded;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
-        SetObserversNotified(UpdateFlags::DataReady);
+        SetFlagsPublished(UpdateFlags::DataReady);
     }
 
     // ── 文件流加载失败广播 ────────────────────────────────────────
@@ -113,7 +110,7 @@ public:
             m_fileLoadState = LoadState::Failed;
             m_dataTrustedState = LoadState::Failed;
         }
-        SetObserversNotified(UpdateFlags::LoadFailed);
+        SetFlagsPublished(UpdateFlags::LoadFailed);
     }
 
     // ── 重载加载失败广播 ──────────────────────────────────────────
@@ -126,7 +123,7 @@ public:
                 m_dataTrustedState = LoadState::Failed;
             }
         }
-        SetObserversNotified(UpdateFlags::LoadFailed);
+        SetFlagsPublished(UpdateFlags::LoadFailed);
     }
 
     // ── 聚合加载状态（兼容现有接口） ─────────────────────────────
@@ -162,70 +159,42 @@ public:
         {
             std::lock_guard<std::mutex> lk(m_mutex);
 
-            // 材质逐字段比较，有变化才累加 Material 标志
-            if (m_material.ambient != cfg.material.ambient ||
-                m_material.diffuse != cfg.material.diffuse ||
-                m_material.specular != cfg.material.specular ||
-                m_material.specularPower != cfg.material.specularPower ||
-                m_material.opacity != cfg.material.opacity ||
-                m_material.shadeOn != cfg.material.shadeOn)
-            {
-                m_material = cfg.material;
-                flags |= UpdateFlags::Material;
+            if (AppStateCommands::SetMaterial(m_material, cfg.material)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Material);
             }
 
-            // 传输函数
-            if (cfg.hasTF) {
-                m_nodes = cfg.tfNodes;
-                flags |= UpdateFlags::TF;
+            if (cfg.hasTF && AppStateCommands::SetTFNodes(m_nodes, cfg.tfNodes)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::TF);
             }
 
-            // 等值面阈值
-            if (cfg.hasIso && std::abs(m_isoValue - cfg.isoThreshold) > 1e-6) {
-                m_isoValue = cfg.isoThreshold;
-                flags |= UpdateFlags::IsoValue;
+            if (cfg.hasIso && AppStateCommands::SetScalar(m_isoValue, cfg.isoThreshold)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::IsoValue);
             }
 
-            // 背景色
-            if (cfg.hasBgColor &&
-                (std::abs(m_background.r - cfg.bgColor.r) > 1e-6 ||
-                    std::abs(m_background.g - cfg.bgColor.g) > 1e-6 ||
-                    std::abs(m_background.b - cfg.bgColor.b) > 1e-6))
-            {
-                m_background = cfg.bgColor;
-                flags |= UpdateFlags::Background;
+            if (cfg.hasBgColor && AppStateCommands::SetBackground(m_background, cfg.bgColor)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Background);
             }
 
-            // spacing
-            if (cfg.hasSpacing &&
-                (std::abs(m_spacing[0] - cfg.spacing[0]) > 1e-6 ||
-                    std::abs(m_spacing[1] - cfg.spacing[1]) > 1e-6 ||
-                    std::abs(m_spacing[2] - cfg.spacing[2]) > 1e-6))
-            {
-                m_spacing = cfg.spacing;
-                flags |= UpdateFlags::Spacing;
+            if (cfg.hasSpacing && AppStateCommands::SetArray(m_spacing, cfg.spacing)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Spacing);
             }
 
-			// 切片窗宽/窗位
-            if (cfg.hasWindowLevel &&
-                (std::abs(m_windowLevel.windowWidth - cfg.windowLevel.windowWidth) > 1e-6 ||
-                    std::abs(m_windowLevel.windowCenter - cfg.windowLevel.windowCenter) > 1e-6))
-            {
-                m_windowLevel = cfg.windowLevel;
-                flags |= UpdateFlags::WindowLevel;
+            if (cfg.hasWindowLevel && AppStateCommands::SetWindowLevel(m_windowLevel, cfg.windowLevel)) {
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::WindowLevel);
             }
         }
         if (flags != UpdateFlags::None)
-            SetObserversNotified(flags);
+            SetFlagsPublished(flags);
     }
 
     // ── 模型变换矩阵 ──────────────────────────────────────────────
     void SetModelMatrix(const std::array<double, 16>& mat) {
+        bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_modelMatrix = mat;
+            changed = AppStateCommands::SetArray(m_modelMatrix, mat, 1e-9);
         }
-        SetObserversNotified(UpdateFlags::Transform);
+        if (changed) SetFlagsPublished(UpdateFlags::Transform);
     }
     std::array<double, 16> GetModelMatrix() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -234,16 +203,16 @@ public:
 
     // ── 标量范围 ──────────────────────────────────────────────────
     void SetScalarRange(double minv, double maxv) {
+        bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            m_dataRange[0] = minv;
-            m_dataRange[1] = maxv;
+            changed = AppStateCommands::SetArray(m_dataRange, { minv, maxv });
         }
-        SetObserversNotified(UpdateFlags::TF);
+        if (changed) SetFlagsPublished(UpdateFlags::TF);
     }
     std::array<double, 2> GetDataRange() const {
         std::lock_guard<std::mutex> lk(m_mutex);
-        return { m_dataRange[0], m_dataRange[1] };
+        return m_dataRange;
     }
 
     // ── 传输函数节点 ──────────────────────────────────────────────
@@ -251,26 +220,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (m_nodes.size() != nodes.size()) {
-                m_nodes = nodes;
-                changed = true;
-            }
-            else {
-                const bool same = std::equal(m_nodes.begin(), m_nodes.end(), nodes.begin(),
-                    [](const TFNode& a, const TFNode& b) {
-                        return std::abs(a.position - b.position) <= 1e-6 &&
-                            std::abs(a.opacity - b.opacity) <= 1e-6 &&
-                            std::abs(a.r - b.r) <= 1e-6 &&
-                            std::abs(a.g - b.g) <= 1e-6 &&
-                            std::abs(a.b - b.b) <= 1e-6;
-                    });
-                if (!same) {
-                    m_nodes = nodes;
-                    changed = true;
-                }
-            }
+            changed = AppStateCommands::SetTFNodes(m_nodes, nodes);
         }
-        if (changed) SetObserversNotified(UpdateFlags::TF);
+        if (changed) SetFlagsPublished(UpdateFlags::TF);
     }
     void GetTFNodes(std::vector<TFNode>& dest) const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -282,12 +234,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_isoValue - val) > 1e-6) {
-                m_isoValue = val;
-                changed = true;
-            }
+            changed = AppStateCommands::SetScalar(m_isoValue, val);
         }
-        if (changed) SetObserversNotified(UpdateFlags::IsoValue);
+        if (changed) SetFlagsPublished(UpdateFlags::IsoValue);
     }
     double GetIsoValue() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -299,18 +248,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_material.ambient - mat.ambient) > 1e-6 ||
-                std::abs(m_material.diffuse - mat.diffuse) > 1e-6 ||
-                std::abs(m_material.specular - mat.specular) > 1e-6 ||
-                std::abs(m_material.specularPower - mat.specularPower) > 1e-6 ||
-                std::abs(m_material.opacity - mat.opacity) > 1e-6 ||
-                m_material.shadeOn != mat.shadeOn)
-            {
-                m_material = mat;
-                changed = true;
-            }
+            changed = AppStateCommands::SetMaterial(m_material, mat);
         }
-        if (changed) SetObserversNotified(UpdateFlags::Material);
+        if (changed) SetFlagsPublished(UpdateFlags::Material);
     }
     MaterialParams GetMaterial() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -322,15 +262,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_background.r - bg.r) > 1e-6 ||
-                std::abs(m_background.g - bg.g) > 1e-6 ||
-                std::abs(m_background.b - bg.b) > 1e-6)
-            {
-                m_background = bg;
-                changed = true;
-            }
+            changed = AppStateCommands::SetBackground(m_background, bg);
         }
-        if (changed) SetObserversNotified(UpdateFlags::Background);
+        if (changed) SetFlagsPublished(UpdateFlags::Background);
     }
     BackgroundColor GetBackground() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -342,15 +276,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_spacing[0] - sx) > 1e-6 ||
-                std::abs(m_spacing[1] - sy) > 1e-6 ||
-                std::abs(m_spacing[2] - sz) > 1e-6)
-            {
-                m_spacing = { sx, sy, sz };
-                changed = true;
-            }
+            changed = AppStateCommands::SetArray(m_spacing, { sx, sy, sz });
         }
-        if (changed) SetObserversNotified(UpdateFlags::Spacing);
+        if (changed) SetFlagsPublished(UpdateFlags::Spacing);
     }
 
     std::array<double, 3> GetSpacing() const {
@@ -363,15 +291,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (std::abs(m_windowLevel.windowWidth - ww) > 1e-6 ||
-                std::abs(m_windowLevel.windowCenter - wc) > 1e-6)
-            {
-                m_windowLevel.windowWidth = ww;
-                m_windowLevel.windowCenter = wc;
-                changed = true;
-            }
+            changed = AppStateCommands::SetWindowLevel(m_windowLevel, { ww, wc });
         }
-        if (changed) SetObserversNotified(UpdateFlags::WindowLevel);
+        if (changed) SetFlagsPublished(UpdateFlags::WindowLevel);
     }
     WindowLevelParams GetWindowLevel() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -384,12 +306,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            if (m_isInteracting != val) {
-                m_isInteracting = val;
-                changed = true;
-            }
+            changed = AppStateCommands::SetValue(m_isInteracting, val);
         }
-        if (changed) SetObserversNotified(UpdateFlags::Interaction);
+        if (changed) SetFlagsPublished(UpdateFlags::Interaction);
     }
     bool GetIsInteracting() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -401,29 +320,19 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            const double eps = 1e-9;
-            if (std::abs(m_cursorWorld[0] - x) > eps ||
-                std::abs(m_cursorWorld[1] - y) > eps ||
-                std::abs(m_cursorWorld[2] - z) > eps) {
-                m_cursorWorld[0] = x;
-                m_cursorWorld[1] = y;
-                m_cursorWorld[2] = z;
-                changed = true;
-            }
+            changed = AppStateCommands::SetArray(m_cursorWorld, { x, y, z }, 1e-9);
         }
-        if (changed) SetObserversNotified(UpdateFlags::Cursor);
+        if (changed) SetFlagsPublished(UpdateFlags::Cursor);
     }
 
     void SetCursorRawWorld(double x, double y, double z) {
         std::lock_guard<std::mutex> lk(m_mutex);
-        m_cursorRawWorld[0] = x;
-        m_cursorRawWorld[1] = y;
-        m_cursorRawWorld[2] = z;
+        m_cursorRawWorld = { x, y, z };
     }
 
     std::array<double, 3> GetCursorRawWorld() const {
         std::lock_guard<std::mutex> lk(m_mutex);
-        return { m_cursorRawWorld[0], m_cursorRawWorld[1], m_cursorRawWorld[2] };
+        return m_cursorRawWorld;
     }
 
     void SetCursorAxis(int axis) {
@@ -438,7 +347,7 @@ public:
 
     std::array<double, 3> GetCursorWorld() const {
         std::lock_guard<std::mutex> lk(m_mutex);
-        return { m_cursorWorld[0], m_cursorWorld[1], m_cursorWorld[2] };
+        return m_cursorWorld;
     }
 
     // ── 显隐状态 ──────────────────────────────────────────────────────────
@@ -446,14 +355,9 @@ public:
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            const uint32_t oldMask = m_visibilityMask;
-            if (show)
-                m_visibilityMask |= flagBit;
-            else
-                m_visibilityMask &= ~flagBit;
-            changed = (m_visibilityMask != oldMask);
+            changed = AppStateCommands::SetVisibilityMask(m_visibilityMask, flagBit, show);
         }
-        if (changed) SetObserversNotified(UpdateFlags::Visibility);
+        if (changed) SetFlagsPublished(UpdateFlags::Visibility);
     }
 
     uint32_t GetVisibilityMask() const {
@@ -461,30 +365,15 @@ public:
         return m_visibilityMask;
     }
 
-    // ── Observer 管理 ─────────────────────────────────────────────
-    void SetObserver(std::shared_ptr<void> owner, ObserverCallback cb) {
-        if (!owner || !cb) return;
-        std::lock_guard<std::mutex> lk(m_mutex);
-		// 先清理再放入，保持列表干净（不保留过期条目）
-        // 清理已过期条目，避免列表膨胀，"erase-remove 惯用法"
-        m_observers.erase(
-            // vec.erase(std::remove_if(vec.begin(), vec.end(), 条件谓词), vec.end());
-			// 条件谓词返回 true 的元素会被移除，返回 false 的元素会被保留
-            // 把谓词理解成 "是垃圾吗？"
-            std::remove_if(m_observers.begin(), m_observers.end(),
-                [](const ObserverEntry& e) { return e.owner.expired(); }),
-            m_observers.end());
-        m_observers.push_back({ std::move(owner), std::move(cb) });
-    }
-
 private:
     mutable std::mutex m_mutex;
+    std::shared_ptr<IStateEventSink> m_eventSink;
 
     // 数据生命周期状态
     LoadState m_dataTrustedState = LoadState::Idle;            // 当前数据可信状态（Idle / Loading / Succeeded / Failed）
     LoadState m_fileLoadState = LoadState::Idle;               // 当前文件流加载状态（Idle / Loading / Succeeded / Failed）
     LoadState m_reloadLoadState = LoadState::Idle;             // 当前重载加载状态（Idle / Loading / Succeeded / Failed）
-    double m_dataRange[2] = { 0.0, 255.0 };                    // 当前体数据标量范围
+    std::array<double, 2> m_dataRange = { 0.0, 255.0 };        // 当前体数据标量范围
     std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // 当前体数据 spacing（RAS 世界坐标系）
 
     // 渲染配置状态
@@ -499,8 +388,8 @@ private:
 
     // 交互状态
     bool m_isInteracting = false;                               // 当前是否处于高频交互中
-    double m_cursorWorld[3] = { 0, 0, 0 };                      // 当前联动光标世界坐标
-    double m_cursorRawWorld[3] = { 0, 0, 0 };                   // 原始拾取得到的世界坐标
+    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 };    // 当前联动光标世界坐标
+    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 原始拾取得到的世界坐标
     int m_cursorAxis = -1;                                      // 当前光标来源轴（-1 表示自由点）
 
     // 模型状态
@@ -508,28 +397,15 @@ private:
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };                                                         // 当前模型矩阵（列主序 4x4）
 
-    // 观察者
-    std::vector<ObserverEntry> m_observers;                     // 当前已注册的观察者列表
-
-    // ── NotifyObservers：先快照回调列表（持锁），再无锁调用 ──
-    // 彻底消除回调中调用 Set* → 重入加锁 → 死锁风险
-    void SetObserversNotified(UpdateFlags flags) {
-        // 持锁扫描，快照存活回调并清理过期条目
-        std::vector<ObserverCallback> toRun;
+    void SetFlagsPublished(UpdateFlags flags) {
+        std::shared_ptr<IStateEventSink> eventSink;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            for (auto it = m_observers.begin(); it != m_observers.end(); ) {
-                if (it->owner.expired()) {
-                    it = m_observers.erase(it);
-                }
-                else {
-                    toRun.push_back(it->callback);
-                    ++it;
-                }
-            }
+            eventSink = m_eventSink;
         }
-        // 无锁调用（允许回调中再次调用 Set*，不再死锁）
-        for (auto& cb : toRun)
-            if (cb) cb(flags);
+
+        if (eventSink) {
+            eventSink->SetFlagsPublished(flags);
+        }
     }
 };

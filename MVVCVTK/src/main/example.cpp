@@ -40,10 +40,11 @@ example.cpp — 前端调用说明（MedicalVizService / StdRenderContext）
 
 推荐前端持有对象：
 
-    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
+   auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+   auto sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
+   auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
 
-    auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState);
+   auto serviceA = std::make_shared<MedicalVizService>(sharedDataMgr, sharedState, sharedStateBroadcaster);
     auto contextA = std::make_shared<StdRenderContext>();
 
 角色说明：
@@ -173,10 +174,11 @@ main.cpp 当前通过 GetWindowPair(...) 统一完成建窗。
     static std::pair<std::shared_ptr<MedicalVizService>,
                      std::shared_ptr<StdRenderContext>>
     GetWindowPair(const WindowConfig& cfg,
-                  std::shared_ptr<AbstractDataManager> dataMgr,
-                  std::shared_ptr<SharedInteractionState> sharedState)
+                    std::shared_ptr<AbstractDataManager> dataMgr,
+                    std::shared_ptr<SharedInteractionState> sharedState,
+                    std::shared_ptr<IStateEventSource> stateEventSource)
     {
-        auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState);
+            auto service = std::make_shared<MedicalVizService>(dataMgr, sharedState, stateEventSource);
         auto context = std::make_shared<StdRenderContext>();
 
         // 1) 绑定 service/context
