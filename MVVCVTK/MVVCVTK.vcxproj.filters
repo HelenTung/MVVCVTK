@@ -15,9 +15,6 @@
     <Filter Include="include\Strategies\GapMeshOverlayStrategy">
       <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Strategies\MeasureAlgoStrategy">
-      <UniqueIdentifier>{c9baf437-6d6d-437a-91a9-db84555b986a}</UniqueIdentifier>
-    </Filter>
     <Filter Include="include\Utils">
       <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
     </Filter>
@@ -26,9 +23,6 @@
     </Filter>
     <Filter Include="include\Math\GapAnalysis">
       <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Math\MeasurementAlgo">
-      <UniqueIdentifier>{7F7A5F18-2A0B-4E49-A6C2-9C0D6092A001}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Interaction">
       <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
@@ -41,9 +35,6 @@
     </Filter>
     <Filter Include="include\Service\GapMeshOverlayService">
       <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Service\MeasureAlgoService">
-      <UniqueIdentifier>{71ea4766-7611-4e38-bfd4-aae8ba33f07f}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Data">
       <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
@@ -173,6 +164,15 @@
     </ClInclude>
     <ClInclude Include="include\Utils\InteractionComputeService.h">
       <Filter>include\Utils</Filter>
+    </ClInclude>
+    <ClInclude Include="include\App\AppStateEvents.h">
+      <Filter>include\Type</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Service\AppStateSyncStrategy.h">
+      <Filter>include\Service</Filter>
+    </ClInclude>
+    <ClInclude Include="include\App\AppStateCommands.h">
+      <Filter>include\Type</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

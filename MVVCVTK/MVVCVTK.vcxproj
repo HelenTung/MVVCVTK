@@ -72,7 +72,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math\GapAnalysis;$(ProjectDir)include\Math\MeasurementAlgo;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Service\GapMeshOverlayService;$(ProjectDir)include\Service\MeasureAlgoService;$(ProjectDir)include\Strategies;$(ProjectDir)include\Strategies\GapMeshOverlayStrategy;$(ProjectDir)include\Strategies\MeasureAlgoStrategy;$(ProjectDir)include\Utils</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math\GapAnalysis;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Service\GapMeshOverlayService;$(ProjectDir)include\Strategies;$(ProjectDir)include\Strategies\GapMeshOverlayStrategy;$(ProjectDir)include\Utils</ProjectIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
