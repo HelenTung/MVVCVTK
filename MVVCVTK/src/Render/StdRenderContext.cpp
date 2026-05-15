@@ -10,7 +10,7 @@
 
 namespace {
 constexpr double kDefaultObserverPriority = 0.5;
-constexpr double kTimerObserverPriority = 1.0;
+constexpr double kTimerObserverPriority = 1.0; // Timer 事件优先级更高，确保主线程后处理先于同帧普通交互事件收敛
 constexpr int kTimerIntervalMs = 33;
 }
 
@@ -93,6 +93,8 @@ void StdRenderContext::SetInteractionRouter()
         return;
     }
 
+    // 这里的装配顺序就是交互链路优先级：Timer 负责统一收口状态推进，
+    // 2D/3D Handler 再分别处理各自模式下的输入命中，避免同一事件被多个处理器重复消费。
     m_interactionRouter.SetHandlerAdded(std::make_unique<TimeUpdateHandler>(
         m_interactiveService.get(), m_renderWindow.GetPointer()));
 

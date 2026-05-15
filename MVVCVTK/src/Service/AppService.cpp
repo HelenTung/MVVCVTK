@@ -121,6 +121,8 @@ void MedicalVizService::SetRenderContext(
             auto self = weakSelf.lock();
             if (!self) return;
 
+            // 广播回调只做“事件翻译”为主线程可消费的原子标志，
+            // 不在这里直接碰 VTK/Strategy，避免后台线程或任意调用线程破坏渲染线程边界。
             self->m_stateSyncStrategy.SetFlagsHandled(flags, *self);
         }
     );
@@ -552,6 +554,12 @@ void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]
 // ─────────────────────────────────────────────────────────────────────
 void MedicalVizService::SetPendingUpdatesProcessed()
 {
+    // 统一主线程后处理链路：
+    // 1. 消费后台提交的新 vtkImageData
+    // 2. 执行异步导出/加载完成回调
+    // 3. 处理失败与重建请求
+    // 4. 最后再做普通增量同步
+
     // 消费来自第三方重建的 ReconBuffer
     // 必须在 m_needsDataRefresh 检查前，因为 SetPendingImageConsumed 成功后会更新 SharedState 的重载状态与数据可信状态，下面的逻辑再据此驱动管线重建。
     if (m_dataManager && m_dataManager->SetPendingImageConsumed()) {
@@ -602,7 +610,7 @@ void MedicalVizService::SetPendingUpdatesProcessed()
         // return; // 本帧只做重建，同步留到下帧
     }
 
-   // 文件加载/重载完成后，都要执行对应回调以通知 UI
+    // 文件加载/重载回调延后到这里统一执行，保证 UI 看到的已经是主线程收敛后的最终状态。
     if (GetPendingFileLoadCallbackConsumed()) {
         SetPendingFileLoadCallbackExecuted();
     }
@@ -668,6 +676,8 @@ void MedicalVizService::SetStrategyStateSynced()
     if (!m_needsSync.compare_exchange_strong(expected, false)) return;
     if (!m_currentStrategy) return;
 
+    // 用 exchange(0) 取走当前整包增量标志，相当于把这一帧前累计的状态改动做一次原子快照。
+    // 后续新来的事件会写入新的 m_pendingFlags，留到下一帧继续消费，不会和本次同步互相覆盖。
     int flagsInt = m_pendingFlags.exchange(0);
     UpdateFlags flags = static_cast<UpdateFlags>(flagsInt);
 
@@ -778,6 +788,8 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
 void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)
 {
     int old = m_pendingFlags.load();
+    // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
+    // 这样多个线程/回调同时上报更新时，只会不断把新位并进同一个原子整数，不会丢标志。
     while (!m_pendingFlags.compare_exchange_weak(
         old, old | static_cast<int>(flags))) {
     }

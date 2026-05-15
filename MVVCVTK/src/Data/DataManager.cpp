@@ -320,6 +320,7 @@ bool RawVolumeDataManager::SetPendingImageConsumed()
         std::lock_guard<std::mutex> lock(m_reconMutex);
         if (!m_pendingImage) return false;
         incoming = std::move(m_pendingImage);
+        // 先在互斥区内拿走所有权，再清掉原子门铃，保证主线程这一帧只消费一次这批重建结果。
         m_hasPendingImage.store(false);
     }
 
@@ -336,6 +337,8 @@ bool RawVolumeDataManager::SetPendingImageConsumed()
         m_scalarRange = m_pendingScalarRange;
         m_imageSpacing = m_pendingSpacing;
     }
+    // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
+    // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。
     SetLoadState(LoadState::Succeeded);
 
     return true;

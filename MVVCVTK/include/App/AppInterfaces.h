@@ -113,9 +113,9 @@ protected:
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
     vtkSmartPointer<vtkRenderer>            m_renderer;
     vtkSmartPointer<vtkRenderWindow>        m_renderWindow;
-    std::atomic<bool> m_isDirty{ false };
-    std::atomic<bool> m_needsSync{ false };
-    std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
+    std::atomic<bool> m_isDirty{ false }; // 渲染脏位：只负责驱动下一帧 Render，不承载具体业务语义
+    std::atomic<bool> m_needsSync{ false }; // 同步闸门：后台/回调线程只置位，真正的策略同步统一留给主线程 Timer 心跳执行
+    std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 增量更新位图：把多次状态改动折叠成一次主线程消费
 
     // 图层叠加策略列表（泛型支持任意算法）
     std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;

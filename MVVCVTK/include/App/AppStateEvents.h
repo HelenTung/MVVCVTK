@@ -49,6 +49,8 @@ public:
         std::vector<ObserverCallback> callbacks;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
+            // 先在锁内清理失效观察者并复制回调，再在锁外执行回调。
+            // 这样可以避免观察者在回调里继续写 SharedState / 重新订阅时造成锁递归或长时间持锁。
             for (auto it = m_observers.begin(); it != m_observers.end(); ) {
                 if (it->owner.expired()) {
                     it = m_observers.erase(it);

@@ -178,8 +178,8 @@ private:
     GapAnalysisResult   m_result;
     VolumeBuffer        m_volBufSnap;
 
-    std::atomic<int>    m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
-    std::atomic<bool>   m_cancelFlag{ false };
+    std::atomic<int>    m_analysisState{ static_cast<int>(GapAnalysisState::Idle) }; // 跨线程阶段机：UI 轮询与后台任务都只通过枚举态沟通分析生命周期
+    std::atomic<bool>   m_cancelFlag{ false }; // 取消令牌：后台循环主动轮询，避免从外部粗暴终止线程或打断 VTK/算法对象状态
     mutable std::mutex  m_futureMutex;
     std::future<void>   m_future;
 

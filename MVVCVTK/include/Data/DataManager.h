@@ -52,7 +52,7 @@ private:
     vtkSmartPointer<vtkImageData> m_pendingImage;   // 后台线程写，主线程读
     std::array<double, 2>         m_pendingScalarRange = { 0.0, 0.0 }; // 缓存待提交重建数据范围，主线程消费时直接复用
     std::array<double, 3>         m_pendingSpacing = { 1.0, 1.0, 1.0 }; // 缓存待提交重建数据 spacing，避免再次访问 VTK
-    std::atomic<bool>             m_hasPendingImage{ false };
+    std::atomic<bool>             m_hasPendingImage{ false }; // 单比特提交门铃：后台线程只声明“有新镜像可切换”，主线程据此安全接管 vtkImageData
 
 public:
     RawVolumeDataManager() = default;

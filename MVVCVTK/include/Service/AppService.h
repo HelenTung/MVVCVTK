@@ -162,7 +162,7 @@ private:
         std::function<void(bool)> m_Callback;
         std::function<void(bool)> m_PendingCallback;
         bool m_PendingResult{ false };
-        std::atomic<bool> m_HasPendingCallback{ false };
+        std::atomic<bool> m_HasPendingCallback{ false }; // 回调就绪位：后台线程只投递结果，主线程在心跳阶段统一执行 UI/业务回调
 
         void SetCallback(std::function<void(bool)> callback) {
             std::lock_guard<std::mutex> lk(m_Mutex);
@@ -335,10 +335,10 @@ private:
     std::shared_ptr<SharedInteractionState> m_sharedState;
     std::shared_ptr<IStateEventSource> m_stateEventSource;
 
-    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
-    std::atomic<bool> m_needsDataRefresh{ false };
-    std::atomic<bool> m_needsCacheClear{ false };
-    std::atomic<bool> m_needsLoadFailed{ false };
+    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) }; // 模式切换快照：前处理阶段可先写入，主线程重建管线时再一次性读取
+    std::atomic<bool> m_needsDataRefresh{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建
+    std::atomic<bool> m_needsCacheClear{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
+    std::atomic<bool> m_needsLoadFailed{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
 
     std::future<void> m_ActiveLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
     mutable std::mutex m_ActiveLoadMutex; // 保护 m_ActiveLoadFuture
