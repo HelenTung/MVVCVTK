@@ -73,6 +73,8 @@ public:
         AdvancedSurfaceParams advP;
         VoidDetectionParams   voidP;
         {
+            // 后台任务启动前先拍一份参数快照，保证这次分析过程使用的是同一组配置，
+            // 不会被 UI 后续继续修改参数打断到“半旧半新”的状态。
             std::lock_guard<std::mutex> lk(m_paramsMutex);
             surfP = m_surfParams;
             advP = m_advParams;
@@ -91,6 +93,8 @@ public:
 
                 VolumeBuffer volBuf;
                 if (BuildVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
+                    // 整条分析链按“体数据快照 -> 内部区域 -> 候选空洞 -> 标记/统计结果”的顺序推进；
+                    // 每一段之间都插入取消检查，保证长任务能在安全边界上尽快退出。
                     auto interior = VoidDetector::CreateInteriorMask(volBuf, surfP.isoValue);
                     if (!m_cancelFlag.load()) {
                         auto candidates = VoidDetector::ExtractCandidates(volBuf, interior, voidP);
@@ -118,6 +122,8 @@ public:
 
         {
             std::lock_guard<std::mutex> lk(m_futureMutex);
+            // 保留 future 主要是为了让对象析构阶段能够感知后台任务生命周期，
+            // 线程本身仍然 detach，避免把分析任务绑死在调用线程上。
             m_future = task.get_future();
         }
         std::thread(std::move(task)).detach();

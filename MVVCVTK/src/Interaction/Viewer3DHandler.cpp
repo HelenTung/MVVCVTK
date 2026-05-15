@@ -33,6 +33,9 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
         return {};
     }
 
+    // 3D 模式只处理“参考切片平面拖拽”这一类交互；
+    // 其他鼠标事件继续交给 VTK 默认相机控制，避免把 3D 浏览手感全部吞掉。
+
     // ── 左键按下：拾取切片平面 ────────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::LeftButtonPressEvent)
     {
@@ -94,7 +97,7 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
         if (dx == 0 && dy == 0) {
             return { true, true };
         }
-        
+
         // 获取屏幕二维坐标
         auto lastworldpos = m_service->GetCursorWorld();
         m_renderer->SetWorldPoint(lastworldpos[0], lastworldpos[1], lastworldpos[2],1.0);
@@ -113,7 +116,7 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
         m_renderer->SetDisplayPoint(curdisplay);
         m_renderer->DisplayToWorld();
         auto curworldpos = m_renderer->GetWorldPoint();
-        
+
         // 齐次坐标除法，还原为 3D 世界坐标
         double invW = (curworldpos[3] != 0.0) ? (1.0 / curworldpos[3]) : 1.0;
         double newWorldPos[3] = {
@@ -121,8 +124,9 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
             curworldpos[1] * invW,
             curworldpos[2] * invW
         };
-        
-        // 增量约束更新
+
+        // 增量约束更新：只放开当前拖拽轴，其余轴保持不变，
+        // 这样 2D 参考平面在 3D 视图中的拖动仍然遵守单轴切片语义。
         auto deltaAxis = newWorldPos[m_dragAxis] - lastworldpos[m_dragAxis];
         double finalyworld[3] = {
             lastworldpos[0],
@@ -130,7 +134,7 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
             lastworldpos[2]
         };
         finalyworld[m_dragAxis] += deltaAxis;
-        
+
         // 全量更新
         m_service->SetCursorWorldPosition(finalyworld, -1);
 

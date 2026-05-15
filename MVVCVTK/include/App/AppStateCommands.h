@@ -8,6 +8,8 @@
 
 class AppStateCommands {
 public:
+    // 这组 helper 的目标只有一个：在 SharedState 内把“比较 + 写入 + 是否变更”标准化，
+    // 这样状态对象只关注字段语义，观察者只关注 UpdateFlags，不必在每个 setter 中重复手写 diff 逻辑。
     static bool SetScalar(double& current,
         const double next,
         const double epsilon = 1e-6) {
@@ -102,6 +104,7 @@ public:
     }
 
     static bool SetVisibilityMask(uint32_t& current, uint32_t flagBit, bool show) {
+        // 可见性统一用位掩码增删，便于多个 UI 开关合并到同一个 Visibility 更新域内。
         const uint32_t next = show ? (current | flagBit) : (current & ~flagBit);
         if (next == current) {
             return false;
@@ -112,6 +115,7 @@ public:
     }
 
     static void SetFlagsMerged(UpdateFlags& current, UpdateFlags next) {
+        // 这里只做位并集，不做覆盖，保证同一批事务内多个字段变化都能保留下来。
         current |= next;
     }
 };

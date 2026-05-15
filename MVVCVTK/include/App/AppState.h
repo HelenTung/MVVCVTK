@@ -129,6 +129,9 @@ public:
     // ── 聚合加载状态（兼容现有接口） ─────────────────────────────
     LoadState GetLoadState() const {
         std::lock_guard<std::mutex> lk(m_mutex);
+        // 这里返回的是给上层 UI / 服务层看的“聚合态”，不是某一个子流程的原始状态。
+        // 优先级按使用风险排序：只要任一链路仍在 Loading，就先暴露 Loading；
+        // 只有当当前数据真源已经成功时，才对外暴露 Succeeded。
         if (m_fileLoadState == LoadState::Loading
             || m_reloadLoadState == LoadState::Loading
             || m_dataTrustedState == LoadState::Loading)
@@ -157,6 +160,8 @@ public:
     void SetPreInitConfig(const PreInitConfig& cfg) {
         UpdateFlags flags = UpdateFlags::None;
         {
+            // 先在锁内把本次前处理配置对应的变更位一次性归并出来，
+            // 锁外只做一次广播，避免同一批配置写入触发多次观察者回调。
             std::lock_guard<std::mutex> lk(m_mutex);
 
             if (AppStateCommands::SetMaterial(m_material, cfg.material)) {
@@ -326,6 +331,8 @@ public:
     }
 
     void SetCursorRawWorld(double x, double y, double z) {
+        // Raw 光标保留拾取命中的原始世界点，不主动广播；
+        // 它通常作为交互链路中的中间量，等到 CursorWorld 被约束/修正后再统一发布 Cursor 事件。
         std::lock_guard<std::mutex> lk(m_mutex);
         m_cursorRawWorld = { x, y, z };
     }
@@ -404,6 +411,7 @@ private:
             eventSink = m_eventSink;
         }
 
+        // 先复制 sink 再在锁外广播，避免观察者回调重新进入 SharedInteractionState 时形成锁嵌套。
         if (eventSink) {
             eventSink->SetFlagsPublished(flags);
         }

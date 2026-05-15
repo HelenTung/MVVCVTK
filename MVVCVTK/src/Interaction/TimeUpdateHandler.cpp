@@ -16,6 +16,9 @@ InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve
         return {};
     }
 
+    // TimerEvent 是整套前后处理分离链路的“主线程心跳”：
+    // 所有后台线程只负责写状态/置脏，真正消费这些状态并决定是否渲染都在这里统一收口。
+
     if (!m_service) {
         // Timer 已处理，无业务操作
         return { true, false };

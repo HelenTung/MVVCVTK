@@ -38,6 +38,9 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
         return {};
     }
 
+    // 2D 模式下同一时刻只允许一种主交互语义成立：
+    // 滚轮切片、Shift 左键拖十字线、Ctrl 左键定轴旋转、右键调窗彼此互斥。
+
     // ── 滚轮切片 ──────────────────────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent
         || eve.vtkEventId == vtkCommand::MouseWheelBackwardEvent)
@@ -126,6 +129,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
             if (worldPos) {
+                // 这里直接写 CursorWorldPosition，让服务层统一完成轴约束、状态广播和后续渲染刷新。
                 m_service->SetCursorWorldPosition(worldPos);
                 m_service->SetDirtyMarked();
             }
@@ -151,7 +155,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
                 if (size && size[0] > 0 && size[1] > 0) {
                     viewWidth = size[0];
                     viewHeight = size[1];
-                }   
+                }
             }
 
             m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
@@ -163,7 +167,8 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             if (!m_renderer)
                 return{true,true};
 			auto cursor = m_service->GetCursorWorld();
-			// 将十字线世界坐标转换为显示坐标，以便计算旋转中心,显示坐标用render取得,故cx，cy为显示坐标系下的十字线相交位置
+			// 旋转中心固定取当前十字线位置：先从世界坐标投到屏幕坐标，
+			// 后续鼠标轨迹就能在同一显示平面内稳定计算角度增量。
 			m_renderer->SetWorldPoint(cursor[0], cursor[1], cursor[2], 1.0);
             m_renderer->WorldToDisplay();
             auto pos = m_renderer->GetDisplayPoint();
@@ -199,7 +204,8 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 			vtkMath::Normalize(viewDir);
 			vtkMath::Normalize(RotationAxis);
 
-			// 构建旋转变换
+            // 构建“绕十字线中心、沿当前视线法向”的增量旋转，
+            // 然后把结果矩阵整包回写给服务层，由服务层继续触发 Transform 链路。
 			auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
             auto lastmat = m_service->GetModelMatrix();
 			mat->DeepCopy(lastmat.data());
