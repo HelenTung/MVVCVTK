@@ -64,7 +64,7 @@
     <Filter Include="src\Data">
       <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Type">
+    <Filter Include="include\App">
       <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
@@ -145,13 +145,13 @@
       <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppTypes.h">
-      <Filter>include\Type</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppState.h">
-      <Filter>include\Type</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppInterfaces.h">
-      <Filter>include\Type</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
       <Filter>include\Strategies</Filter>
@@ -166,13 +166,13 @@
       <Filter>include\Utils</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppStateEvents.h">
-      <Filter>include\Type</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\Service\AppStateSyncStrategy.h">
       <Filter>include\Service</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppStateCommands.h">
-      <Filter>include\Type</Filter>
+      <Filter>include\App</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
