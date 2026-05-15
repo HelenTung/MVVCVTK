@@ -48,9 +48,6 @@
     <Filter Include="include\Data">
       <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\App">
-      <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
-    </Filter>
     <Filter Include="src">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
@@ -75,6 +72,9 @@
     </Filter>
     <Filter Include="src\Data">
       <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Type">
+      <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -154,13 +154,13 @@
       <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppTypes.h">
-      <Filter>include\App</Filter>
+      <Filter>include\Type</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppState.h">
-      <Filter>include\App</Filter>
+      <Filter>include\Type</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppInterfaces.h">
-      <Filter>include\App</Filter>
+      <Filter>include\Type</Filter>
     </ClInclude>
     <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
       <Filter>include\Strategies</Filter>
@@ -171,32 +171,8 @@
     <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h">
       <Filter>include\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="include\Utils\MeasurementCsvExporter.h">
-      <Filter>include\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Utils\MeasurementComputeService.h">
-      <Filter>include\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Strategies\AngleMeasurementStrategy.h">
-      <Filter>include\Strategies</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Math\MeasurementAlgo\MeasurementTypes.h">
-      <Filter>include\Math\MeasurementAlgo</Filter>
-    </ClInclude>
     <ClInclude Include="include\Utils\InteractionComputeService.h">
       <Filter>include\Utils</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\IMeasurementStrategy.h">
-      <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Strategies\MeasureAlgoStrategy\LengthMeasurementStrategy.h">
-      <Filter>include\Strategies\MeasureAlgoStrategy</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementService.h">
-      <Filter>include\Service\MeasureAlgoService</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Service\MeasureAlgoService\MeasurementInteractionHost.h">
-      <Filter>include\Service\MeasureAlgoService</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -253,18 +229,6 @@
     </ClCompile>
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Strategies\AngleMeasurementStrategy.cpp">
-      <Filter>src\Strategies</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Service\MeasurementService.cpp">
-      <Filter>src\Service</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Strategies\LengthMeasurementStrategy.cpp">
-      <Filter>src\Strategies</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Service\MeasurementInteractionHost.cpp">
-      <Filter>src\Service</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

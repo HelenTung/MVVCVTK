@@ -178,6 +178,9 @@
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
     <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h" />
     <ClInclude Include="include\Strategies\VolumeStrategy.h" />
+    <ClInclude Include="include\App\AppStateCommands.h" />
+    <ClInclude Include="include\App\AppStateEvents.h" />
+    <ClInclude Include="include\Service\AppStateSyncStrategy.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Service\AppService.cpp" />
