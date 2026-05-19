@@ -410,6 +410,8 @@ void MedicalVizService::SetSliceScrolled(int delta)
     if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
     const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     const int axis = InteractionComputeService::GetSliceAxis(mode); // 当前切片滚动应推进的模型坐标轴
+    if (axis < 0)
+		return;
 
     double space[3] = { 0.0 };
     auto img = m_dataManager->GetVtkImage();

@@ -83,7 +83,8 @@ public:
     {
         if (mode == VizMode::SliceFront_back) return 1;
         if (mode == VizMode::SliceLeft_right) return 0;
-        return 2;
+        if (mode == VizMode::SliceTop_down) return 2;
+        return -1; // 默认返回无效轴
     }
 
     static void GetScrolledModelPosition(
