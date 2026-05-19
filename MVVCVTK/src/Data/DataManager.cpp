@@ -15,45 +15,11 @@
 #include <vtkImageChangeInformation.h>
 #include <vtkPNGWriter.h>
 #include <vtkImageImport.h>
+#include <cstring>
 #include "MemMappedFile.h"
 
 
 namespace {
-std::array<double, 2> GetBufferScalarRange(const float* data, size_t count)
-{
-    if (!data || count == 0) {
-        return { 0.0, 0.0 };
-    }
-
-    float minValue = data[0];
-    float maxValue = data[0];
-    for (size_t i = 1; i < count; ++i) {
-        const float value = data[i];
-        if (value < minValue) minValue = value;
-        if (value > maxValue) maxValue = value;
-    }
-
-    return { static_cast<double>(minValue), static_cast<double>(maxValue) };
-}
-
-std::array<double, 2> GetCopiedScalarRange(const float* src, float* dst, size_t count)
-{
-    if (!src || !dst || count == 0) {
-        return { 0.0, 0.0 };
-    }
-
-    float minValue = src[0];
-    float maxValue = src[0];
-    for (size_t i = 0; i < count; ++i) {
-        const float value = src[i];
-        dst[i] = value;
-        if (value < minValue) minValue = value;
-        if (value > maxValue) maxValue = value;
-    }
-
-    return { static_cast<double>(minValue), static_cast<double>(maxValue) };
-}
-
 std::string GetOrientationName(const Orientation orientation)
 {
     switch (orientation) {
@@ -85,6 +51,136 @@ bool HasExplicitValue(const std::array<float, 3>& values)
     return std::any_of(values.begin(), values.end(), [](const float value) {
         return value != 0.0f;
     });
+}
+
+std::array<double, 3> GetRasOriginFromLps(
+    const std::array<double, 3>& lpsOrigin,
+    const int dims[3],
+    const std::array<double, 3>& spacing)
+{
+    std::array<double, 3> rasOrigin = {
+        -lpsOrigin[0],
+        -lpsOrigin[1],
+        lpsOrigin[2]
+    };
+
+    if (dims[0] > 0) {
+        rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
+    }
+    if (dims[1] > 0) {
+        rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
+    }
+
+    return rasOrigin;
+}
+
+void SetLpsToRasScalarsCopied(
+    const float* src,
+    float* dst,
+    const int dims[3],
+    size_t availableCount)
+{
+    const size_t nx = dims[0] > 0 ? static_cast<size_t>(dims[0]) : 0;
+    const size_t ny = dims[1] > 0 ? static_cast<size_t>(dims[1]) : 0;
+    const size_t nz = dims[2] > 0 ? static_cast<size_t>(dims[2]) : 0;
+    const size_t sliceSize = nx * ny;
+    const size_t totalCount = sliceSize * nz;
+
+    if (!dst || totalCount == 0) {
+        return;
+    }
+
+    if (!src || availableCount == 0) {
+        std::fill(dst, dst + totalCount, 0.0f);
+        return;
+    }
+
+    if (availableCount == totalCount) {
+        for (size_t z = 0; z < nz; ++z) {
+            const size_t srcSliceOffset = z * sliceSize;
+            const size_t dstSliceOffset = z * sliceSize;
+            for (size_t y = 0; y < ny; ++y) {
+                const float* srcRow = src + srcSliceOffset + y * nx;
+                float* dstRow = dst + dstSliceOffset + (ny - 1 - y) * nx;
+                for (size_t x = 0; x < nx; ++x) {
+                    dstRow[nx - 1 - x] = srcRow[x];
+                }
+            }
+        }
+        return;
+    }
+
+    std::fill(dst, dst + totalCount, 0.0f);
+    for (size_t srcIndex = 0; srcIndex < availableCount; ++srcIndex) {
+        const size_t z = srcIndex / sliceSize;
+        const size_t rem = srcIndex % sliceSize;
+        const size_t y = rem / nx;
+        const size_t x = rem % nx;
+        const size_t dstIndex = z * sliceSize + (ny - 1 - y) * nx + (nx - 1 - x);
+        dst[dstIndex] = src[srcIndex];
+    }
+}
+
+void SetLpsToRasImageCopied(vtkImageData* source, vtkImageData* target)
+{
+    if (!source || !target) {
+        return;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    source->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        return;
+    }
+
+    double spacingRaw[3] = { 1.0, 1.0, 1.0 };
+    double originRaw[3] = { 0.0, 0.0, 0.0 };
+    source->GetSpacing(spacingRaw);
+    source->GetOrigin(originRaw);
+
+    const std::array<double, 3> spacing = {
+        spacingRaw[0], spacingRaw[1], spacingRaw[2]
+    };
+    const std::array<double, 3> lpsOrigin = {
+        originRaw[0], originRaw[1], originRaw[2]
+    };
+    const std::array<double, 3> rasOrigin = GetRasOriginFromLps(lpsOrigin, dims, spacing);
+
+    target->SetDimensions(dims[0], dims[1], dims[2]);
+    target->SetSpacing(spacing[0], spacing[1], spacing[2]);
+    target->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
+    target->AllocateScalars(source->GetScalarType(), source->GetNumberOfScalarComponents());
+
+    const int componentCount = source->GetNumberOfScalarComponents();
+    const int scalarSize = source->GetScalarSize();
+    const size_t pixelBytes = static_cast<size_t>(componentCount) * static_cast<size_t>(scalarSize);
+    const size_t nx = static_cast<size_t>(dims[0]);
+    const size_t ny = static_cast<size_t>(dims[1]);
+    const size_t rowBytes = nx * pixelBytes;
+    const size_t sliceBytes = ny * rowBytes;
+
+    const char* srcBase = static_cast<const char*>(source->GetScalarPointer());
+    char* dstBase = static_cast<char*>(target->GetScalarPointer());
+    if (!srcBase || !dstBase) {
+        return;
+    }
+
+    for (size_t z = 0; z < static_cast<size_t>(dims[2]); ++z) {
+        const size_t srcSliceOffset = z * sliceBytes;
+        const size_t dstSliceOffset = z * sliceBytes;
+        for (size_t y = 0; y < ny; ++y) {
+            const char* srcRow = srcBase + srcSliceOffset + y * rowBytes;
+            char* dstRow = dstBase + dstSliceOffset + (ny - 1 - y) * rowBytes;
+            for (size_t x = 0; x < nx; ++x) {
+                std::memcpy(
+                    dstRow + (nx - 1 - x) * pixelBytes,
+                    srcRow + x * pixelBytes,
+                    pixelBytes);
+            }
+        }
+    }
+
+    target->Modified();
 }
 
 unsigned char GetWindowLevelGray(const double value, const WindowLevelParams& windowLevel)
@@ -173,16 +269,19 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         }
     }
 
-	// 更新 spacing 和 origin，确保后续重建和渲染使用最新的空间信息
-    for (size_t i = 0; i < spacing.size(); i++)
-    {
-		m_spacing[i] = static_cast<double>(spacing[i]);
-    }
-
-    for (size_t i = 0; i < origin.size(); i++)
-    {
-        m_origin[i] = static_cast<double>(origin[i]);
-    }
+	// 打开文件统一把 ITK/LPS 物理坐标转换成 VTK 侧统一使用的 RAS 物理坐标。
+    const std::array<double, 3> lpsSpacing = {
+        static_cast<double>(spacing[0]),
+        static_cast<double>(spacing[1]),
+        static_cast<double>(spacing[2])
+    };
+    const std::array<double, 3> lpsOrigin = {
+        static_cast<double>(origin[0]),
+        static_cast<double>(origin[1]),
+        static_cast<double>(origin[2])
+    };
+    m_spacing = lpsSpacing;
+    m_origin = GetRasOriginFromLps(lpsOrigin, newDims, m_spacing);
 
     // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
@@ -199,7 +298,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
-    std::array<double, 2> scalarRange = { 0.0, 0.0 };
     if (mmf.SetOpened(filePath)) {
         //   - 文件够大 → 只取前 expectedBytes
         //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
@@ -212,15 +310,11 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
                 << "). Partial load, remainder zeroed." << std::endl;
         }
 
-        scalarRange = GetCopiedScalarRange(
+        SetLpsToRasScalarsCopied(
             reinterpret_cast<const float*>(mmf.GetData()),
             dst,
+            newDims,
             copyCount);
-        if (copyCount < totalVoxels) {
-            std::fill(dst + copyCount, dst + totalVoxels, 0.0f);
-            scalarRange[0] = std::min(scalarRange[0], 0.0);
-            scalarRange[1] = std::max(scalarRange[1], 0.0);
-        }
         // mmf 析构时自动 close()
     }
     else {
@@ -232,21 +326,19 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
             SetLoadState(LoadState::Failed);
             return false;
         }
-        file.read(reinterpret_cast<char*>(dst),
+        std::vector<float> srcBuffer(totalVoxels, 0.0f);
+        file.read(reinterpret_cast<char*>(srcBuffer.data()),
             static_cast<std::streamsize>(expectedBytes));
         const size_t readBytes = static_cast<size_t>(file.gcount());
         const size_t readCount = readBytes / sizeof(float);
-        scalarRange = GetBufferScalarRange(dst, readCount);
-        if (readCount < totalVoxels) {
-            std::fill(dst + readCount, dst + totalVoxels, 0.0f);
-            scalarRange[0] = std::min(scalarRange[0], 0.0);
-            scalarRange[1] = std::max(scalarRange[1], 0.0);
-        }
+        SetLpsToRasScalarsCopied(srcBuffer.data(), dst, newDims, readCount);
         file.close();
     }
 
 
     newImage->Modified();
+    double range[2] = { 0.0, 0.0 };
+    newImage->GetScalarRange(range);
 
     // --- 提交  ---
     {
@@ -255,7 +347,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         m_dims[0] = newDims[0];
         m_dims[1] = newDims[1];
         m_dims[2] = newDims[2];
-        m_scalarRange = scalarRange;
+        m_scalarRange = { range[0], range[1] };
         m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
     }
 	SetLoadState(LoadState::Succeeded);
@@ -279,20 +371,33 @@ bool RawVolumeDataManager::SetFromBuffer(
     SetLoadState(LoadState::Loading);
 
     // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
-	// 在坐这里做itk转vtk坐标系的统一,LPS 转 RAS（VTK 默认）坐标系，确保后续处理和渲染的一致性。
-    // 后面就用TransformIndexToPhysicalPoint这个接口去调用，不要自己算了
+	// 重建注入路径与文件打开路径保持一致：统一在这里完成 LPS -> RAS 物理坐标转换。
     // vtkImageImport 解决少一次拷贝的问题，更快的读取速度，更快的读取效率
+    const int rasDims[3] = { dims[0], dims[1], dims[2] };
+    const std::array<double, 3> rasSpacing = {
+        static_cast<double>(spacing[0]),
+        static_cast<double>(spacing[1]),
+        static_cast<double>(spacing[2])
+    };
+    const std::array<double, 3> lpsOrigin = {
+        static_cast<double>(origin[0]),
+        static_cast<double>(origin[1]),
+        static_cast<double>(origin[2])
+    };
+    const std::array<double, 3> rasOrigin = GetRasOriginFromLps(lpsOrigin, rasDims, rasSpacing);
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
-    newImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
-    newImage->SetOrigin(origin[0], origin[1], origin[2]);
+    newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
+    newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);   // 分配（page-fault 在此触发）
     const size_t total =
         static_cast<size_t>(dims[0]) *
         static_cast<size_t>(dims[1]) *
         static_cast<size_t>(dims[2]);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-    const auto scalarRange = GetCopiedScalarRange(data, dst, total);  // 唯一一次拷贝，同时缓存范围
+    SetLpsToRasScalarsCopied(data, dst, rasDims, total);  // 唯一一次拷贝，同时完成 LPS->RAS 轴翻转
+    double range[2] = { 0.0, 0.0 };
+    newImage->GetScalarRange(range);
 
     // Modified() 暂不调用——留到主线程 ConsumeReconImage() 中调用，
     // 确保 VTK pipeline 脏标记传播在正确线程触发。
@@ -300,9 +405,10 @@ bool RawVolumeDataManager::SetFromBuffer(
     {
         std::lock_guard<std::mutex> lock(m_reconMutex);
         m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
-        m_pendingScalarRange = scalarRange;
-		m_spacing = { spacing[0], spacing[1], spacing[2] };
-        m_pendingSpacing = { spacing[0], spacing[1], spacing[2] };
+		m_pendingScalarRange = { range[0], range[1] };
+		m_spacing = rasSpacing;
+		m_origin = rasOrigin;
+        m_pendingSpacing = rasSpacing;
     }
     m_hasPendingImage.store(true);
 
@@ -334,6 +440,7 @@ bool RawVolumeDataManager::SetPendingImageConsumed()
         m_dims[1] = incoming->GetDimensions()[1];
         m_dims[2] = incoming->GetDimensions()[2];
         m_spacing = { incoming->GetSpacing()[0], incoming->GetSpacing()[1], incoming->GetSpacing()[2] };
+        m_origin = { incoming->GetOrigin()[0], incoming->GetOrigin()[1], incoming->GetOrigin()[2] };
         m_scalarRange = m_pendingScalarRange;
         m_imageSpacing = m_pendingSpacing;
     }
@@ -591,14 +698,17 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     }
 
     // --- 数据提交 (Back Buffer 策略) ---
-    auto newImage = vtkSmartPointer<vtkImageData>::New();
-    newImage->ShallowCopy(output);
+    auto lpsImage = vtkSmartPointer<vtkImageData>::New();
+    lpsImage->ShallowCopy(output);
     if (HasExplicitValue(spacing)) {
-        newImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
+        lpsImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
     }
     if (HasExplicitValue(origin)) {
-        newImage->SetOrigin(origin[0], origin[1], origin[2]);
+        lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
     }
+
+    auto newImage = vtkSmartPointer<vtkImageData>::New();
+    SetLpsToRasImageCopied(lpsImage, newImage);
 
     double range[2] = { 0.0, 0.0 };
     double imageSpacing[3] = { 1.0, 1.0, 1.0 };

@@ -9,7 +9,7 @@ struct ReconBuffer {
     std::vector<float>    data;                // 拷贝自重建输出的体素数据
     std::array<int, 3>    dims = { 0, 0, 0 };
     std::array<float, 3>  spacing = { 1.f, 1.f, 1.f };
-    std::array<float, 3>  origin = { 0.f, 0.f, 0.f };
+    std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // 上游 ITK/LPS 物理原点，提交到 VTK 前统一转 RAS
 };
 
 
@@ -44,7 +44,7 @@ public:
 class RawVolumeDataManager : public BaseDataManager {
 private:
     int m_dims[3] = { 0, 0, 0 }; // 当前已提交体数据的体素维度
-	std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 }; // 当前体数据原点，和 spacing 一起定义世界坐标映射
+    std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 }; // 当前体数据 RAS 原点，和 spacing 一起定义统一世界坐标映射
 	std::array<double, 3> m_spacing = { 0.02125, 0.02125, 0.02125 }; // 当前生效 spacing，供导出与交互换算复用
 
     // ── 重建注入路径（前后处理分离）──────────────────────────────────
