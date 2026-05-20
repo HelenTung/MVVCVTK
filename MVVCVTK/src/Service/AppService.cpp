@@ -193,54 +193,6 @@ LoadState MedicalVizService::GetReloadLoadState() const
     return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
 }
 
-bool MedicalVizService::SetFileLoadStarted(
-    std::function<void(bool)> callback)
-{
-    // 文件流加载和重载加载共用同一份底层数据真源，因此这里先做互斥检查，
-    // 避免两个后台任务同时写 DataManager / SharedState，导致生命周期状态交叉污染。
-    if (!m_sharedState) {
-        SetFileLoadCallbackReady(false, std::move(callback));
-        return false;
-    }
-
-    if (m_sharedState->GetFileLoadState() == LoadState::Loading
-        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
-    {
-        std::cerr << "[SetFileLoadStarted] Already loading, ignoring duplicate call.\n";
-        SetFileLoadCallbackReady(false, std::move(callback));
-        return false;
-    }
-
-    SetFileLoadCallback(std::move(callback));
-    SetLoadRequestKind(LoadRequestKind::File);
-    m_sharedState->SetFileLoadStarted();
-    return true;
-}
-
-bool MedicalVizService::SetReloadLoadStarted(
-    std::function<void(bool)> callback)
-{
-    // 重载与文件流加载走同一套后处理链路，只是数据来源不同；
-    // 因此启动约束与回调队列管理保持一致，减少两条链路行为漂移。
-    if (!m_sharedState) {
-        SetReloadLoadCallbackReady(false, std::move(callback));
-        return false;
-    }
-
-    if (m_sharedState->GetFileLoadState() == LoadState::Loading
-        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
-    {
-        std::cerr << "[SetReloadLoadStarted] Already loading, ignoring duplicate call.\n";
-        SetReloadLoadCallbackReady(false, std::move(callback));
-        return false;
-    }
-
-    SetReloadLoadCallback(std::move(callback));
-    SetLoadRequestKind(LoadRequestKind::Reload);
-    m_sharedState->SetReloadLoadStarted();
-    return true;
-}
-
 void MedicalVizService::SetTaskStarted(
     std::packaged_task<void()> task,
     bool keepActiveLoadFuture)
@@ -259,7 +211,22 @@ void MedicalVizService::SetFileLoadedAsync(
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (!SetFileLoadStarted(std::move(onComplete))) return;
+    if (!m_sharedState) {
+        m_FileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return;
+    }
+
+    if (m_sharedState->GetPendingLoadEventKind() != LoadEventKind::None
+        || m_sharedState->GetFileLoadState() == LoadState::Loading
+        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
+    {
+        std::cerr << "[SetFileLoadedAsync] Previous load result is still pending or loading is in progress.\n";
+        m_FileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return;
+    }
+
+    m_FileLoadCallbackState.SetCallback(std::move(onComplete));
+    m_sharedState->SetFileLoadStarted();
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
@@ -298,9 +265,22 @@ bool MedicalVizService::SetReloadFromBufferAsync(
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (!SetReloadLoadStarted(std::move(onComplete))) {
+    if (!m_sharedState) {
+        m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return false;
     }
+
+    if (m_sharedState->GetPendingLoadEventKind() != LoadEventKind::None
+        || m_sharedState->GetFileLoadState() == LoadState::Loading
+        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
+    {
+        std::cerr << "[SetReloadFromBufferAsync] Previous load result is still pending or loading is in progress.\n";
+        m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return false;
+    }
+
+    m_ReloadLoadCallbackState.SetCallback(std::move(onComplete));
+    m_sharedState->SetReloadLoadStarted();
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
@@ -600,36 +580,40 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
-        const LoadRequestKind loadRequestKind = GetLoadRequestKindConsumed();
+        const LoadEventKind loadEventKind = m_sharedState
+            ? m_sharedState->GetPendingLoadEventKindConsumed()
+            : LoadEventKind::None;
         SetLoadFailedHandled();
-        if (loadRequestKind == LoadRequestKind::File) {
-            SetFileLoadCallbackReady(false);
+        if (loadEventKind == LoadEventKind::File) {
+            m_FileLoadCallbackState.SetCallbackReady(false);
         }
-        else if (loadRequestKind == LoadRequestKind::Reload) {
-            SetReloadLoadCallbackReady(false);
+        else if (loadEventKind == LoadEventKind::Reload) {
+            m_ReloadLoadCallbackState.SetCallbackReady(false);
         }
         shouldReturnAfterLoadFailure = true;
     }
 
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
-        const LoadRequestKind loadRequestKind = GetLoadRequestKindConsumed();
+        const LoadEventKind loadEventKind = m_sharedState
+            ? m_sharedState->GetPendingLoadEventKindConsumed()
+            : LoadEventKind::None;
         SetPipelineRebuilt();
-        if (loadRequestKind == LoadRequestKind::File) {
-            SetFileLoadCallbackReady(true);
+        if (loadEventKind == LoadEventKind::File) {
+            m_FileLoadCallbackState.SetCallbackReady(true);
         }
-        else if (loadRequestKind == LoadRequestKind::Reload) {
-            SetReloadLoadCallbackReady(true);
+        else if (loadEventKind == LoadEventKind::Reload) {
+            m_ReloadLoadCallbackState.SetCallbackReady(true);
         }
         // return; // 本帧只做重建，同步留到下帧
     }
 
     // 文件加载/重载回调延后到这里统一执行，保证 UI 看到的已经是主线程收敛后的最终状态。
-    if (GetPendingFileLoadCallbackConsumed()) {
-        SetPendingFileLoadCallbackExecuted();
+    if (m_FileLoadCallbackState.GetPendingCallbackConsumed()) {
+        m_FileLoadCallbackState.SetPendingCallbackExecuted();
     }
-    if (GetPendingReloadLoadCallbackConsumed()) {
-        SetPendingReloadLoadCallbackExecuted();
+    if (m_ReloadLoadCallbackState.GetPendingCallbackConsumed()) {
+        m_ReloadLoadCallbackState.SetPendingCallbackExecuted();
     }
 
     if (shouldReturnAfterLoadFailure) {

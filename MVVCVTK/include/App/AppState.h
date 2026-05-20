@@ -57,6 +57,18 @@ public:
         return m_dataTrustedState;
     }
 
+    LoadEventKind GetPendingLoadEventKind() const {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        return m_pendingLoadEventKind;
+    }
+
+    LoadEventKind GetPendingLoadEventKindConsumed() {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        const LoadEventKind eventKind = m_pendingLoadEventKind;
+        m_pendingLoadEventKind = LoadEventKind::None;
+        return eventKind;
+    }
+
     // ── 文件流加载开始 ────────────────────────────────────────────
     void SetFileLoadStarted() {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -80,6 +92,7 @@ public:
             m_spacing = spacing;
             m_fileLoadState = LoadState::Succeeded;
             m_dataTrustedState = LoadState::Succeeded;
+            m_pendingLoadEventKind = LoadEventKind::File;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
@@ -96,6 +109,7 @@ public:
             m_spacing = spacing;
             m_reloadLoadState = LoadState::Succeeded;
             m_dataTrustedState = LoadState::Succeeded;
+            m_pendingLoadEventKind = LoadEventKind::Reload;
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
@@ -109,6 +123,7 @@ public:
             std::lock_guard<std::mutex> lk(m_mutex);
             m_fileLoadState = LoadState::Failed;
             m_dataTrustedState = LoadState::Failed;
+            m_pendingLoadEventKind = LoadEventKind::File;
         }
         SetFlagsPublished(UpdateFlags::LoadFailed);
     }
@@ -122,6 +137,7 @@ public:
             if (m_dataTrustedState != LoadState::Succeeded) {
                 m_dataTrustedState = LoadState::Failed;
             }
+            m_pendingLoadEventKind = LoadEventKind::Reload;
         }
         SetFlagsPublished(UpdateFlags::LoadFailed);
     }
@@ -351,6 +367,7 @@ private:
     LoadState m_dataTrustedState = LoadState::Idle;            // 当前数据可信状态（Idle / Loading / Succeeded / Failed）
     LoadState m_fileLoadState = LoadState::Idle;               // 当前文件流加载状态（Idle / Loading / Succeeded / Failed）
     LoadState m_reloadLoadState = LoadState::Idle;             // 当前重载加载状态（Idle / Loading / Succeeded / Failed）
+    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 最近一次待主线程收敛的 load 事件来源
     std::array<double, 2> m_dataRange = { 0.0, 255.0 };        // 当前体数据标量范围
     std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // 当前体数据 spacing（RAS 世界坐标系）
 

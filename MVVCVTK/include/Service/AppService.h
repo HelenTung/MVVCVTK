@@ -157,12 +157,6 @@ public:
     void SetPendingUpdatesProcessed() override;
 
 private:
-    enum class LoadRequestKind {
-        None = 0,
-        File = 1,
-        Reload = 2,
-    };
-
     struct CallbackState {
         mutable std::mutex m_Mutex;
         std::function<void(bool)> m_Callback; // 当前业务方注册但尚未触发的回调
@@ -211,7 +205,6 @@ private:
         bool GetPendingCallbackConsumed() {
             return m_HasPendingCallback.exchange(false);
         }
-
     };
 
     // ================================================================
@@ -238,70 +231,8 @@ private:
     // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
     // 原生依赖对象：m_sharedState、m_ActiveLoadFuture。
     // ================================================================
-    bool SetFileLoadStarted(std::function<void(bool)> callback);
-    bool SetReloadLoadStarted(std::function<void(bool)> callback);
     void SetTaskStarted(std::packaged_task<void()> task,
-        bool keepActiveLoadFuture); 
-    
-    // 设置数据流状态位
-    void SetLoadRequestKind(LoadRequestKind kind) {
-        m_LoadRequestKindInt.store(static_cast<int>(kind));
-    }
-
-    LoadRequestKind GetLoadRequestKindConsumed() {
-        return static_cast<LoadRequestKind>(
-            m_LoadRequestKindInt.exchange(static_cast<int>(LoadRequestKind::None)));
-    }
-
-    // ================================================================
-    // 文件流加载回调队列
-    // 功能：缓存文件流加载请求的完成回调，并把后台结果延迟到主线程执行。
-    // 原生依赖对象：m_FileLoadCallbackState。
-    // ================================================================
-
-    // 保存当前文件加载请求绑定的回调
-    void SetFileLoadCallback(std::function<void(bool)> callback) {
-        m_FileLoadCallbackState.SetCallback(std::move(callback));
-    }
-
-    // 将文件加载回调标记为完成，等待主线程统一执行
-    void SetFileLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-        m_FileLoadCallbackState.SetCallbackReady(success, std::move(callback));
-    }
-
-    // 在主线程执行待处理的文件加载回调
-    void SetPendingFileLoadCallbackExecuted() {
-        m_FileLoadCallbackState.SetPendingCallbackExecuted();
-    }
-
-    bool GetPendingFileLoadCallbackConsumed() {
-        return m_FileLoadCallbackState.GetPendingCallbackConsumed();
-    }
-
-    // ================================================================
-    // 重载回调队列
-    // 功能：缓存重载请求的完成回调，并把后台结果延迟到主线程执行。
-    // 原生依赖对象：m_ReloadLoadCallbackState。
-    // ================================================================
-
-    // 保存当前重载请求绑定的回调
-    void SetReloadLoadCallback(std::function<void(bool)> callback) {
-        m_ReloadLoadCallbackState.SetCallback(std::move(callback));
-    }
-
-    // 将重载回调标记为完成，等待主线程统一执行
-    void SetReloadLoadCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-        m_ReloadLoadCallbackState.SetCallbackReady(success, std::move(callback));
-    }
-
-    // 在主线程执行待处理的重载回调
-    void SetPendingReloadLoadCallbackExecuted() {
-        m_ReloadLoadCallbackState.SetPendingCallbackExecuted();
-    }
-
-    bool GetPendingReloadLoadCallbackConsumed() {
-        return m_ReloadLoadCallbackState.GetPendingCallbackConsumed();
-    }
+        bool keepActiveLoadFuture);
 
     // ================================================================
     // 保存完成回调队列
@@ -335,10 +266,9 @@ private:
     // 3. 保存完成回调状态
     // 4. 运行期原生成员对象 / 标志位
     // ================================================================
-    CallbackState m_FileLoadCallbackState;       // 文件流加载回调状态
-    CallbackState m_ReloadLoadCallbackState;     // 重载回调状态
+    CallbackState m_FileLoadCallbackState; // 文件流加载回调状态
+    CallbackState m_ReloadLoadCallbackState; // 重载回调状态
     CallbackState m_SaveCompletionCallbackState; // 保存完成回调状态
-    std::atomic<int> m_LoadRequestKindInt{ static_cast<int>(LoadRequestKind::None) }; // 当前正在等待主线程收敛结果的加载来源，用于精确分流 file/reload 回调
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
