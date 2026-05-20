@@ -33,7 +33,6 @@
 #include <atomic>
 #include <thread>
 #include <functional>
-#include <mutex>
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
@@ -58,21 +57,9 @@ public:
     virtual bool SetPendingImageConsumed() {
         return false;
     }
-    LoadState GetLoadState() const {
-        std::lock_guard<std::mutex> lk(m_stateMutex);
-        return m_loadState;
-    }
-    void SetLoadState(const LoadState state) {
-		std::lock_guard<std::mutex> lk(m_stateMutex);
-		m_loadState = state;
-    }
     virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
     virtual bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& transformMatrix) { return false; }
     virtual std::string GetDefaultTransformedDataPath() const { return {}; }
-
-protected:
-    mutable std::mutex m_stateMutex; // 保护通用加载状态，避免不同数据实现各自重复维护状态锁
-    LoadState          m_loadState{ LoadState::Idle }; // DataManager 对外暴露的基础生命周期状态
 };
 
 // ─────────────────────────────────────────────────────────────────────

@@ -126,35 +126,6 @@ public:
         SetFlagsPublished(UpdateFlags::LoadFailed);
     }
 
-    // ── 聚合加载状态（兼容现有接口） ─────────────────────────────
-    LoadState GetLoadState() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        // 这里返回的是给上层 UI / 服务层看的“聚合态”，不是某一个子流程的原始状态。
-        // 优先级按使用风险排序：只要任一链路仍在 Loading，就先暴露 Loading；
-        // 只有当当前数据真源已经成功时，才对外暴露 Succeeded。
-        if (m_fileLoadState == LoadState::Loading
-            || m_reloadLoadState == LoadState::Loading
-            || m_dataTrustedState == LoadState::Loading)
-        {
-            return LoadState::Loading;
-        }
-        if (m_dataTrustedState == LoadState::Succeeded) {
-            return LoadState::Succeeded;
-        }
-        if (m_fileLoadState == LoadState::Failed
-            || m_reloadLoadState == LoadState::Failed
-            || m_dataTrustedState == LoadState::Failed)
-        {
-            return LoadState::Failed;
-        }
-        if (m_fileLoadState == LoadState::Succeeded
-            || m_reloadLoadState == LoadState::Succeeded)
-        {
-            return LoadState::Succeeded;
-        }
-        return LoadState::Idle;
-    }
-
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
     // 对应 IVisualConfigService::CommitVisualConfig
     void SetPreInitConfig(const PreInitConfig& cfg) {

@@ -241,8 +241,6 @@ std::string BaseDataManager::GetDefaultTransformedDataPath() const
 
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
-
-    SetLoadState(LoadState::Loading);
     SetLoadedFilePath({});
     // 解析文件名
     std::filesystem::path pathObj(filePath);
@@ -257,7 +255,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         newDims[2] = std::stoi(matches[3].str());
     }
     else {
-        SetLoadState(LoadState::Failed);
         return false;
     }
 
@@ -323,7 +320,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
             << filePath << std::endl;
         std::ifstream file(filePath, std::ios::binary);
         if (!file.is_open()) {
-            SetLoadState(LoadState::Failed);
             return false;
         }
         std::vector<float> srcBuffer(totalVoxels, 0.0f);
@@ -350,7 +346,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         m_scalarRange = { range[0], range[1] };
         m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
     }
-	SetLoadState(LoadState::Succeeded);
     SetLoadedFilePath(filePath);
     return true;
 }
@@ -364,11 +359,8 @@ bool RawVolumeDataManager::SetFromBuffer(
     SetLoadedFilePath({});
 
     if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        SetLoadState(LoadState::Failed);
         return false;
     }
-
-    SetLoadState(LoadState::Loading);
 
     // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
 	// 重建注入路径与文件打开路径保持一致：统一在这里完成 LPS -> RAS 物理坐标转换。
@@ -412,8 +404,6 @@ bool RawVolumeDataManager::SetFromBuffer(
     }
     m_hasPendingImage.store(true);
 
-    // LoadState::Succeeded 延迟到主线程 SetPendingImageConsumed() 设置，
-    // 防止调用方在 vtkImage 还未提交时就查询到 Succeeded 状态。
     return true;
 }
 
@@ -446,8 +436,6 @@ bool RawVolumeDataManager::SetPendingImageConsumed()
     }
     // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
     // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。
-    SetLoadState(LoadState::Succeeded);
-
     return true;
 }
 
@@ -579,12 +567,10 @@ bool BaseDataManager::SetSliceImagesSaved(
 bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin) {
-    SetLoadState(LoadState::Loading);
     SetLoadedFilePath({});
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
-        SetLoadState(LoadState::Failed);
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
         return false;
     }
@@ -612,7 +598,6 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
         }
 
         if (fileList.empty()) {
-            SetLoadState(LoadState::Failed);
             std::cerr << "[Error] No .tif files found in folder." << std::endl;
             return false;
         }
@@ -674,7 +659,6 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
         reader->SetFileName(inputPath.c_str());
 
         if (!reader->CanReadFile(inputPath.c_str())) {
-            SetLoadState(LoadState::Failed);
             std::cerr << "[Error] VTK cannot read this TIFF file." << std::endl;
             return false;
         }
@@ -686,14 +670,12 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
         reader->Update();
     }
     catch (...) {
-        SetLoadState(LoadState::Failed);
         std::cerr << "[Error] Exception during TIFF reading." << std::endl;
         return false;
     }
 
     auto output = reader->GetOutput();
     if (!output || output->GetDimensions()[0] == 0) {
-        SetLoadState(LoadState::Failed);
         return false;
     }
 
@@ -725,7 +707,6 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     }
 
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
-    SetLoadState(LoadState::Succeeded);
     SetLoadedFilePath(inputPath);
     return true;
 }
