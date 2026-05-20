@@ -712,6 +712,14 @@ void MedicalVizService::SetStrategyStateSynced()
     // 背景色同步（数据无关，直接写渲染器）
     if (HasFlag(flags, UpdateFlags::Background) && m_renderer) {
         SetRendererBackgroundApplied();
+        flags = static_cast<UpdateFlags>(
+            static_cast<int>(flags) & ~static_cast<int>(UpdateFlags::Background));
+    }
+	// 判断取了背景色标志后剩下的位，如果没有了才标脏，否则继续走 Strategy 同步剩余状态
+    // 避免每次背景色改动都重置全局脏标志导致不必要的渲染刷新。
+    if (flags == UpdateFlags::None) {
+        m_isDirty = true;
+        return;
     }
 
     RenderParams params = GetRenderParams(flags);
