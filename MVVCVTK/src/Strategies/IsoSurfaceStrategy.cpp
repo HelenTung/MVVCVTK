@@ -3,7 +3,13 @@
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPolyDataNormals.h>
-#include <thread>
+
+namespace {
+
+constexpr int kInteractionIsoTargetDim = 256;
+constexpr int kQualityIsoTargetDim = 766;
+
+}
 
 void IsoSurfaceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
 {
@@ -46,7 +52,8 @@ void IsoSurfaceStrategy::SetCameraAligned(const std::array<double, 16>& modelMat
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkLODActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
-    m_isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
+    m_qualityIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
+    m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     // 初始绑定
     m_actor->SetMapper(m_mapper);
@@ -58,8 +65,10 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     // 静态数据
     m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
-    m_isoFilter->ComputeNormalsOff();
-    m_isoFilter->ComputeGradientsOff();
+    m_qualityIsoFilter->ComputeNormalsOff();
+    m_qualityIsoFilter->ComputeGradientsOff();
+    m_interactionIsoFilter->ComputeNormalsOff();
+    m_interactionIsoFilter->ComputeGradientsOff();
 
     SetManagedProp(m_actor);
     SetManagedProp(m_cubeAxes);
@@ -97,15 +106,20 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_lastInput = data;
         img->GetCenter(m_dataCenter);
 
-        // 如果输入还是体数据，则本策略内部持有 FlyingEdges3D，把等值面提取延迟到阈值状态同步阶段驱动。
-        m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
-        //m_isoFilter->SetInputData(img);
+        m_qualityResample = ImageProcessor::GetDownsampledImage(img, kQualityIsoTargetDim);
+        m_interactionResample = ImageProcessor::GetDownsampledImage(img, kInteractionIsoTargetDim);
+        if (m_qualityResample) {
+            m_qualityIsoFilter->SetInputConnection(m_qualityResample->GetOutputPort());
+        }
+        if (m_interactionResample) {
+            m_interactionIsoFilter->SetInputConnection(m_interactionResample->GetOutputPort());
+        }
 
-        // 初始阈值保持轻量默认值，真实阈值由后续状态同步统一下发
-        m_isoFilter->SetValue(0, 0.0);
-
-        // 使用 Connection，VTK 会自动管理更新
-        m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
+        m_currentIsoValue = 0.0;
+        m_qualityIsoFilter->SetValue(0, m_currentIsoValue);
+        m_interactionIsoFilter->SetValue(0, m_currentIsoValue);
+        m_isInteracting = false;
+        m_mapper->SetInputConnection(m_qualityIsoFilter->GetOutputPort());
         m_mapper->ScalarVisibilityOff();
         m_cubeAxes->SetBounds(img->GetBounds());
     }
@@ -148,11 +162,28 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         else prop->SetInterpolationToFlat();
     }
 
-    if (HasFlag(flags, UpdateFlags::IsoValue)) {
-        if (m_isoFilter && m_isoFilter->GetInput()) {
-            // 只有当阈值真的改变时才重新计算
-            if (m_isoFilter->GetValue(0) != params.isoValue) {
-                m_isoFilter->SetValue(0, params.isoValue);
+    if (HasFlag(flags, UpdateFlags::Interaction) || HasFlag(flags, UpdateFlags::IsoValue)) {
+        const bool nextIsInteracting = HasFlag(flags, UpdateFlags::Interaction)
+            ? params.isInteracting
+            : m_isInteracting;
+        const double nextIsoValue = HasFlag(flags, UpdateFlags::IsoValue)
+            ? params.isoValue
+            : m_currentIsoValue;
+        const bool interactionChanged = (m_isInteracting != nextIsInteracting);
+        const bool isoValueChanged = (m_currentIsoValue != nextIsoValue);
+
+        m_isInteracting = nextIsInteracting;
+        m_currentIsoValue = nextIsoValue;
+
+        auto activeIsoFilter = m_isInteracting ? m_interactionIsoFilter : m_qualityIsoFilter;
+        if (activeIsoFilter && activeIsoFilter->GetInput()) {
+            if ((interactionChanged || isoValueChanged)
+                && activeIsoFilter->GetValue(0) != m_currentIsoValue) {
+                activeIsoFilter->SetValue(0, m_currentIsoValue);
+            }
+
+            if (interactionChanged) {
+                m_mapper->SetInputConnection(activeIsoFilter->GetOutputPort());
             }
         }
     }
