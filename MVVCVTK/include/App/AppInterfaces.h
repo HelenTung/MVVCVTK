@@ -159,8 +159,6 @@ public:
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
     bool SetDirtyConsumed() { return m_isDirty.exchange(false); }
 
-    std::shared_ptr<AbstractDataManager> GetDataManager() { return m_dataManager; }
-
     // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 

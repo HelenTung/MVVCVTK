@@ -157,6 +157,12 @@ public:
     void SetPendingUpdatesProcessed() override;
 
 private:
+    enum class LoadRequestKind {
+        None = 0,
+        File = 1,
+        Reload = 2,
+    };
+
     struct CallbackState {
         mutable std::mutex m_Mutex;
         std::function<void(bool)> m_Callback; // 当前业务方注册但尚未触发的回调
@@ -206,10 +212,6 @@ private:
             return m_HasPendingCallback.exchange(false);
         }
 
-        bool GetCallbackBound() const {
-            std::lock_guard<std::mutex> lk(m_Mutex);
-            return static_cast<bool>(m_Callback);
-        }
     };
 
     // ================================================================
@@ -222,6 +224,7 @@ private:
     void SetLoadFailedHandled();
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
+    void SetRendererBackgroundApplied();
     void SetStrategyCacheClearRequested();
     void SetStrategyCacheCleared();
     void SetCursorCentered();
@@ -238,7 +241,17 @@ private:
     bool SetFileLoadStarted(std::function<void(bool)> callback);
     bool SetReloadLoadStarted(std::function<void(bool)> callback);
     void SetTaskStarted(std::packaged_task<void()> task,
-        bool keepActiveLoadFuture);
+        bool keepActiveLoadFuture); 
+    
+    // 设置数据流状态位
+    void SetLoadRequestKind(LoadRequestKind kind) {
+        m_LoadRequestKindInt.store(static_cast<int>(kind));
+    }
+
+    LoadRequestKind GetLoadRequestKindConsumed() {
+        return static_cast<LoadRequestKind>(
+            m_LoadRequestKindInt.exchange(static_cast<int>(LoadRequestKind::None)));
+    }
 
     // ================================================================
     // 文件流加载回调队列
@@ -263,10 +276,6 @@ private:
 
     bool GetPendingFileLoadCallbackConsumed() {
         return m_FileLoadCallbackState.GetPendingCallbackConsumed();
-    }
-
-    bool GetFileLoadCallbackBound() const {
-        return m_FileLoadCallbackState.GetCallbackBound();
     }
 
     // ================================================================
@@ -329,6 +338,7 @@ private:
     CallbackState m_FileLoadCallbackState;       // 文件流加载回调状态
     CallbackState m_ReloadLoadCallbackState;     // 重载回调状态
     CallbackState m_SaveCompletionCallbackState; // 保存完成回调状态
+    std::atomic<int> m_LoadRequestKindInt{ static_cast<int>(LoadRequestKind::None) }; // 当前正在等待主线程收敛结果的加载来源，用于精确分流 file/reload 回调
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象

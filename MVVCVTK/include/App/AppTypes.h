@@ -122,8 +122,7 @@ struct RenderParams {
     std::array<double, 16> modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };
-    BackgroundColor        background;
-    uint32_t visibilityMask = 
+    uint32_t visibilityMask =
         VisFlags::Planes3D
         | VisFlags::Crosshair
         | VisFlags::Ruler; // 默认全部显示
@@ -141,12 +140,12 @@ struct PreInitConfig {
     double              isoThreshold = 0.0;
     BackgroundColor     bgColor;
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
-    WindowLevelParams   windowLevel;              
+    WindowLevelParams   windowLevel;
     bool                hasTF = false;
     bool                hasIso = false;
     bool                hasBgColor = false;
     bool                hasSpacing = false;
-    bool                hasWindowLevel = false;    
+    bool                hasWindowLevel = false;
 };
 
 // --- 窗口配置（用于批量建窗）---

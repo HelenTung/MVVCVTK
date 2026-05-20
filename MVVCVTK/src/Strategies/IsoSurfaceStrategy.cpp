@@ -96,7 +96,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (img) {
         m_lastInput = data;
         img->GetCenter(m_dataCenter);
-            
+
         // 如果输入还是体数据，则本策略内部持有 FlyingEdges3D，把等值面提取延迟到阈值状态同步阶段驱动。
         m_isoFilter->SetInputConnection(GetDownsampledOutputPort(img,766));
         //m_isoFilter->SetInputData(img);
@@ -115,7 +115,6 @@ void IsoSurfaceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
     BaseVisualStrategy::SetRendererAttached(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
-    ren->SetBackground(0.1, 0.15, 0.2); // 蓝色调背景
 }
 
 void IsoSurfaceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
@@ -132,7 +131,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // 1. Material 控制表面光照和透明度
     // 2. IsoValue 控制几何提取阈值
     // 3. Transform / Visibility 控制空间摆放与辅助元素显隐
-    
+
     // 响应 UpdateFlags::Material
     if (HasFlag(flags, UpdateFlags::Material)) {
 

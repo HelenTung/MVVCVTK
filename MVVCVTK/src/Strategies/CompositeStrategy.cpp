@@ -37,7 +37,6 @@ void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void CompositeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
     if (m_mainStrategy) m_mainStrategy->SetRendererAttached(renderer);
     if (m_referencePlanes) m_referencePlanes->SetRendererAttached(renderer);
-    renderer->SetBackground(0.05, 0.05, 0.05);
 }
 
 void CompositeStrategy::SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) {

@@ -28,7 +28,7 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
-    // 0: 
+    // 0:
     // (X normal), 1: Front_back (Y normal), 2: Top_down (Z normal)
     for (int i = 0; i < 3; i++) {
         m_mappers[i]->SetInputData(img);
@@ -101,5 +101,4 @@ void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
 
 void MultiSliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
     BaseVisualStrategy::SetRendererAttached(renderer);
-    renderer->SetBackground(0.1, 0.1, 0.1);
 }

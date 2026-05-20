@@ -174,9 +174,8 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void SliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::SetRendererAttached(ren); // 
+    BaseVisualStrategy::SetRendererAttached(ren); //
     m_renderer = ren;
-    ren->SetBackground(0, 0, 0);
     // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
     ren->SetUseDepthPeeling(1);
     ren->SetMaximumNumberOfPeels(4);
@@ -224,7 +223,7 @@ void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
 
 void SliceStrategy::SetCrosshair(const double focusWorld[3],
     const double worldBounds[6],
-    double safeOffset) 
+    double safeOffset)
 {
     if (!m_hLineSource || !m_vLineSource) return;
     const double physX = focusWorld[0];

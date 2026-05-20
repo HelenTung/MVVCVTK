@@ -110,6 +110,7 @@ void MedicalVizService::SetRenderContext(
     vtkSmartPointer<vtkRenderer> ren)
 {
     AbstractAppService::SetRenderContext(win, ren);
+    SetRendererBackgroundApplied();
     if (!m_stateEventSource) return;
 
     std::weak_ptr<MedicalVizService> weakSelf =
@@ -211,6 +212,7 @@ bool MedicalVizService::SetFileLoadStarted(
     }
 
     SetFileLoadCallback(std::move(callback));
+    SetLoadRequestKind(LoadRequestKind::File);
     m_sharedState->SetFileLoadStarted();
     return true;
 }
@@ -234,6 +236,7 @@ bool MedicalVizService::SetReloadLoadStarted(
     }
 
     SetReloadLoadCallback(std::move(callback));
+    SetLoadRequestKind(LoadRequestKind::Reload);
     m_sharedState->SetReloadLoadStarted();
     return true;
 }
@@ -597,11 +600,12 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
+        const LoadRequestKind loadRequestKind = GetLoadRequestKindConsumed();
         SetLoadFailedHandled();
-        if (GetFileLoadCallbackBound()) {
+        if (loadRequestKind == LoadRequestKind::File) {
             SetFileLoadCallbackReady(false);
         }
-        else {
+        else if (loadRequestKind == LoadRequestKind::Reload) {
             SetReloadLoadCallbackReady(false);
         }
         shouldReturnAfterLoadFailure = true;
@@ -609,11 +613,12 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
+        const LoadRequestKind loadRequestKind = GetLoadRequestKindConsumed();
         SetPipelineRebuilt();
-        if (GetFileLoadCallbackBound()) {
+        if (loadRequestKind == LoadRequestKind::File) {
             SetFileLoadCallbackReady(true);
         }
-        else {
+        else if (loadRequestKind == LoadRequestKind::Reload) {
             SetReloadLoadCallbackReady(true);
         }
         // return; // 本帧只做重建，同步留到下帧
@@ -678,6 +683,7 @@ void MedicalVizService::SetPipelineRebuilt()
     }
 
     SetCurrentStrategy(strategy);
+    SetRendererBackgroundApplied();
     SetSyncRequested(); // 重建后触发一次全量参数同步
 }
 
@@ -705,8 +711,7 @@ void MedicalVizService::SetStrategyStateSynced()
 
     // 背景色同步（数据无关，直接写渲染器）
     if (HasFlag(flags, UpdateFlags::Background) && m_renderer) {
-        auto bg = m_sharedState->GetBackground();
-        m_renderer->SetBackground(bg.r, bg.g, bg.b);
+        SetRendererBackgroundApplied();
     }
 
     RenderParams params = GetRenderParams(flags);
@@ -780,9 +785,6 @@ RenderParams MedicalVizService::GetRenderParams(UpdateFlags flags) const
     if (HasFlag(flags, UpdateFlags::IsoValue))
         p.isoValue = m_sharedState->GetIsoValue();
 
-    if (HasFlag(flags, UpdateFlags::Background))
-        p.background = m_sharedState->GetBackground();
-
     if (HasFlag(flags, UpdateFlags::Visibility))
 		p.visibilityMask = m_sharedState->GetVisibilityMask();
 
@@ -798,6 +800,16 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
     auto s = StrategyFactory::GetStrategy(mode);
     if (s) m_strategyCache[mode] = s;
     return s;
+}
+
+void MedicalVizService::SetRendererBackgroundApplied()
+{
+    if (!m_renderer || !m_sharedState) {
+        return;
+    }
+
+    const auto bg = m_sharedState->GetBackground();
+    m_renderer->SetBackground(bg.r, bg.g, bg.b);
 }
 
 void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)

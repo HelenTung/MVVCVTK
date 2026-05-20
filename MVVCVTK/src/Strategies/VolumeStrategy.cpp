@@ -122,15 +122,14 @@ void VolumeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
     BaseVisualStrategy::SetRendererAttached(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
-    ren->SetBackground(0.05, 0.05, 0.05); // 黑色背景
 }
 
 void VolumeStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
-}   
+}
 
 void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
-{   
+{
     if (!m_volume || !m_volume->GetProperty()) return;
 
     auto prop = m_volume->GetProperty();
