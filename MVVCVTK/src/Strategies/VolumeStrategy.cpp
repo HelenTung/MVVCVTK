@@ -6,28 +6,7 @@
 #include <vtkImageResample.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
-#include <algorithm>
 #include <cmath>
-
-double VolumeStrategy::GetSampleDistance(const double spacing[3]) const
-{
-    // 采样步长以最小 spacing 为基准，保证各向异性数据下不会因为某一轴 spacing 较大而采样过粗。
-    double minSpacing = 0.0;
-    for (int i = 0; i < 3; ++i) {
-        const double axisSpacing = spacing[i];
-        if (axisSpacing <= 0.0) continue;
-        if (minSpacing <= 0.0 || axisSpacing < minSpacing)
-            minSpacing = axisSpacing;
-    }
-
-    return minSpacing > 0.0 ? minSpacing : 1.0;
-}
-
-void VolumeStrategy::SetSampleDistance(bool isInteracting)
-{
-    if (!m_mapper) return;
-    m_mapper->SetSampleDistance(isInteracting ? m_interactionSampleDistance : m_staticSampleDistance);
-}
 
 bool VolumeStrategy::GetOpacityChanged(double opacity) const
 {
@@ -79,7 +58,6 @@ VolumeStrategy::VolumeStrategy() {
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
     m_mapper->SetRequestedRenderModeToGPU(); // 优先走 GPU 体渲染管线，避免大体数据退回 CPU 路径
-    m_mapper->SetAutoAdjustSampleDistances(0); // 采样步长由业务状态控制，避免自动策略频繁波动
     m_mapper->SetInteractiveUpdateRate(10.0);
     m_volume->SetMapper(m_mapper);
 
@@ -103,16 +81,10 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
     m_lastInput = data;
 
-    // 3D 体渲染优先走降采样输出端口，把大体数据的交互成本压下来；
-    // 真实体素数据仍保留在 DataManager 中，必要时可以切回原始输入路径。
-    m_mapper->SetInputConnection(GetDownsampledOutputPort(img,766)); // 使用处理后(或原始)的数据
-    // m_mapper->SetInputData(img); // 使用原始数据
-
-	double spacing[3];
-	img->GetSpacing(spacing);
-    m_staticSampleDistance = GetSampleDistance(spacing);
-    m_interactionSampleDistance = std::max(m_staticSampleDistance * 2.0, m_staticSampleDistance + 1e-6);
-    SetSampleDistance(false);
+    m_qualityResample = ImageProcessor::GetDownsampledImage(img, m_qualityTargetDim);
+    m_interactionResample = ImageProcessor::GetDownsampledImage(img, m_interactionTargetDim);
+    m_mapper->SetInputConnection(m_qualityResample->GetOutputPort());
+    m_isInteracting = false;
 
 	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
     m_cubeAxes->SetBounds(img->GetBounds());
@@ -135,6 +107,21 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     auto prop = m_volume->GetProperty();
     const bool isTfChanged = HasFlag(flags, UpdateFlags::TF);
     const bool isMaterialChanged = HasFlag(flags, UpdateFlags::Material);
+    const bool isInteractionChanged = HasFlag(flags, UpdateFlags::Interaction);
+
+    if ((isTfChanged || isInteractionChanged) && m_mapper) {
+        const bool nextIsInteracting = isInteractionChanged
+            ? params.isInteracting
+            : m_isInteracting;
+        const bool interactionStateChanged = (m_isInteracting != nextIsInteracting);
+
+        m_isInteracting = nextIsInteracting;
+
+        auto activeResample = m_isInteracting ? m_interactionResample : m_qualityResample;
+        if (activeResample && (interactionStateChanged || isTfChanged)) {
+            m_mapper->SetInputConnection(activeResample->GetOutputPort());
+        }
+    }
 
     // TF 与 Material 分开处理的原因是：
     // TF 变更通常意味着整条颜色/透明度曲线要重建；
@@ -180,11 +167,6 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
 
         if (params.material.shadeOn) prop->ShadeOn();
         else prop->ShadeOff();
-    }
-
-    if (HasFlag(flags, UpdateFlags::Interaction)) {
-        // 交互期切大采样步长，停止交互后恢复精细采样，这是体渲染流畅度的关键开销控制点。
-        SetSampleDistance(params.isInteracting);
     }
 
     // 响应变换矩阵
