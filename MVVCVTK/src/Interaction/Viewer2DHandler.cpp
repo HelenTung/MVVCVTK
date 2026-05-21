@@ -141,7 +141,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
     // ── 鼠标移动：十字线拖拽 / 调窗拖拽 / 缩放 / 定轴旋转 ─────────────
     if (eve.vtkEventId == vtkCommand::MouseMoveEvent)
     {
-        // 路径 A：十字线拖拽（Shift+左键）
+        // 路径 A：十字线拖拽
         if (m_enableDragCrosshair)
         {
             if (!m_picker || !m_renderer) return {};
@@ -155,7 +155,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             return { true, true };
         }
 
-        // 路径 B：调窗拖拽（右键）
+        // 路径 B：调窗拖拽
         //   水平方向（ΔX > 0 → 向右拖）→ 增大 WW（对比度变强）
         //   垂直方向（ΔY > 0 → 向上拖）→ 增大 WC（图像变暗/窗位升高）
         if (m_enableDragWindowLevel)
@@ -180,7 +180,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
-
+        // zoom放大
         if (m_enableRightZoom)
         {
             if (!m_renderer || !m_renderer->GetActiveCamera()) {
