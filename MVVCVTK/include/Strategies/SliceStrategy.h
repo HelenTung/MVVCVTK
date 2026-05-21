@@ -46,7 +46,7 @@ private:
         const std::array<double, 16>& modelMatrix,
         double worldBounds[6]) const; // 把局部数据包围盒映射到当前模型变换后的世界包围盒
 
-    vtkWeakPointer<vtkRenderer> m_renderer; // 当前切片视图依附的 renderer，用于相机和窗口尺寸相关操作
+    vtkWeakPointer<vtkRenderer> m_renderer; // 当前切片视图依附的 renderer，用于相机和窗口尺寸相关操作 
     vtkSmartPointer<vtkImageSlice> m_slice; // 切片主显示对象
     vtkSmartPointer<vtkImageResliceMapper> m_mapper; // 负责按当前切片平面从体数据抽取图像
     vtkSmartPointer<vtkPlane> m_slicePlane;           // 持久切片平面，保持 mapper 输入关系稳定，仅更新原点与法线

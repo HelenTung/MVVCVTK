@@ -162,6 +162,15 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         else prop->SetInterpolationToFlat();
     }
 
+    // 等值面这里也采用与体渲染一致的状态收敛思路：
+    // 1. 先计算这一帧最终应落到的交互态 nextIsInteracting
+    // 2. 再计算这一帧最终应使用的阈值 nextIsoValue
+    // 3. 根据 nextIsInteracting 选择当前活动过滤器 activeIsoFilter
+    // 4. 只在交互态切换或阈值确实变化时，才把最终值下发到活动过滤器
+    // 这样可以保证：
+    // - 拖动期间只更新 256 预览等值面
+    // - 松手后切回 766 质量等值面
+    // - 同一帧同时带有 Interaction 和 IsoValue 时，统一按最终状态收口
     if (HasFlag(flags, UpdateFlags::Interaction) || HasFlag(flags, UpdateFlags::IsoValue)) {
         const bool nextIsInteracting = HasFlag(flags, UpdateFlags::Interaction)
             ? params.isInteracting
@@ -179,10 +188,13 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         if (activeIsoFilter && activeIsoFilter->GetInput()) {
             if ((interactionChanged || isoValueChanged)
                 && activeIsoFilter->GetValue(0) != m_currentIsoValue) {
+                // 活动过滤器只接收这一帧最终阈值，避免交互过程中两条等值面管线同时重算。
                 activeIsoFilter->SetValue(0, m_currentIsoValue);
             }
 
             if (interactionChanged) {
+                // 只有交互态真的切换时才改 mapper 输入，
+                // 避免单纯阈值变化时重复做输入重绑。
                 m_mapper->SetInputConnection(activeIsoFilter->GetOutputPort());
             }
         }

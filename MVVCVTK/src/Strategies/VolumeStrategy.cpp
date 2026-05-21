@@ -107,18 +107,27 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     auto prop = m_volume->GetProperty();
     const bool isTfChanged = HasFlag(flags, UpdateFlags::TF);
     const bool isMaterialChanged = HasFlag(flags, UpdateFlags::Material);
-    const bool isInteractionChanged = HasFlag(flags, UpdateFlags::Interaction);
 
-    if ((isTfChanged || isInteractionChanged) && m_mapper) {
-        const bool nextIsInteracting = isInteractionChanged
+    // 体渲染这里把 Interaction 与 TF 放在同一个状态收敛块里处理：
+    // 1. 先推导“这一帧结束后”应该处于的交互态 nextIsInteracting
+    // 2. 再根据 nextIsInteracting 选择当前活动输入 activeResample
+    // 3. 只有在交互态真的切换，或 TF 刷新要求重新绑定当前输入时，才改 mapper 输入
+    // 这样可以保证：
+    // - 交互过程中 TF 高频变化仍然稳定落在 256 预览输入
+    // - 静止期 TF 更新会继续落在 766 质量输入
+    // - 同一帧里若同时出现 TF 与 Interaction，也只按最终状态收口一次
+    if ((isTfChanged || HasFlag(flags, UpdateFlags::Interaction)) && m_mapper) {
+        const bool nextIsInteracting = HasFlag(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
-        const bool interactionStateChanged = (m_isInteracting != nextIsInteracting);
+        const bool interactionChanged = (m_isInteracting != nextIsInteracting);
 
         m_isInteracting = nextIsInteracting;
 
         auto activeResample = m_isInteracting ? m_interactionResample : m_qualityResample;
-        if (activeResample && (interactionStateChanged || isTfChanged)) {
+        if (activeResample && (interactionChanged || isTfChanged)) {
+            // TF 改变后需要确保 mapper 仍绑在“当前应该显示”的那一路输入上；
+            // 这里不区分是交互切换导致，还是 TF 更新导致，统一按活动输入重绑即可。
             m_mapper->SetInputConnection(activeResample->GetOutputPort());
         }
     }
@@ -148,6 +157,8 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     }
 
     if (isMaterialChanged && !isTfChanged && GetOpacityChanged(params.material.opacity)) {
+        // 当 TF 没变、只有全局 opacity 变动时，不必重建颜色函数；
+        // 这里只重建 OTF，把当前 opacity 重新折算进已有 TF 节点即可。
         auto otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
         const double min = params.scalarRange[0];
         const double max = params.scalarRange[1];
@@ -160,6 +171,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     }
 
     if (isMaterialChanged) {
+        // 光照相关参数和 TF/OTF 解耦处理，避免纯材质调整时不必要地重建体数据映射函数。
         prop->SetAmbient(params.material.ambient);
         prop->SetDiffuse(params.material.diffuse);
         prop->SetSpecular(params.material.specular);
