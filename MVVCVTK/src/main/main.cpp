@@ -36,7 +36,9 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "GapAlgorithmOverlayStrategies.h"
 #include <vtkCommand.h>
 
+#include <chrono>
 #include <iostream>
+#include <thread>
 #include <vector>
 
 class GapOverlayKeyTrigger : public vtkCommand {
@@ -301,6 +303,54 @@ int main()
     contextD->SetInteractorInitialized();
     contextE->SetInteractorInitialized();
 
+    //// 只等待共享加载状态成功后按固定节奏持续调节等值面阈值并打印。
+    //std::thread([sharedState, serviceA]() {
+    //    using namespace std::chrono_literals;
+
+    //    while (true) {
+    //        const LoadState fileLoadState = sharedState->GetFileLoadState();
+    //        if (fileLoadState == LoadState::Succeeded) {
+    //            break;
+    //        }
+    //        if (fileLoadState == LoadState::Failed) {
+    //            std::cerr << "[Iso Test] Volume data load failed; skip repeated iso threshold test." << std::endl;
+    //            return;
+    //        }
+    //        std::this_thread::sleep_for(100ms);
+    //    }
+
+    //    const auto range = sharedState->GetDataRange();
+    //    const double minIsoValue = range[0];
+    //    const double maxIsoValue = range[1];
+    //    const double isoSpan = maxIsoValue - minIsoValue;
+    //    if (isoSpan <= 0.0) {
+    //        std::cerr << "[Iso Test] Invalid scalar range; skip repeated iso threshold test." << std::endl;
+    //        return;
+    //    }
+
+    //    int currentNormalizedStep = 0;
+    //    double normalizedIsoValue = 0.0;
+    //    double actualIsoValue = minIsoValue + isoSpan * normalizedIsoValue;
+    //    serviceA->SetInteracting(true);
+    //    serviceA->SetIsoThreshold(actualIsoValue);
+
+    //    std::cout << "[Iso Test] Armed repeated iso threshold test: update about every 792 ms, normalized value steps by +0.1 and wraps after 1.0.\n"
+    //        << "[Iso Test] Timer update: normalized iso = 0, actual iso = " << actualIsoValue
+    //        << std::endl;
+
+    //    while (true) {
+    //        std::this_thread::sleep_for(std::chrono::milliseconds(792));
+    //        currentNormalizedStep = (currentNormalizedStep + 1) % 11;
+    //        normalizedIsoValue = static_cast<double>(currentNormalizedStep) * 0.1;
+    //        actualIsoValue = minIsoValue + isoSpan * normalizedIsoValue;
+
+    //        serviceA->SetInteracting(true);
+    //        serviceA->SetIsoThreshold(actualIsoValue);
+    //        std::cout << "[Iso Test] Timer update: normalized iso = " << normalizedIsoValue
+    //            << ", actual iso = " << actualIsoValue << std::endl;
+    //    }
+    //}).detach();
+
     //auto trigger = vtkSmartPointer<GapOverlayKeyTrigger>::New();
     //trigger->gapAnalysis = gapAnalysis;
     //trigger->srvA = serviceA; trigger->srvB = serviceB;
@@ -313,7 +363,8 @@ int main()
     //contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure\n";
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure\n"
+        << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
     contextB->SetStarted();
