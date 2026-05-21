@@ -248,7 +248,7 @@ int main()
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},
         [sharedState, serviceA, imageAnalysis, gapAnalysis](bool success)
-        {
+        {   
             if (!success) {
                 std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
