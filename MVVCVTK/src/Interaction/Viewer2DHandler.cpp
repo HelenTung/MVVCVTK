@@ -1,11 +1,15 @@
 ﻿#include "Viewer2DHandler.h"
 #include "AppInterfaces.h"
 #include <vtkCommand.h>
+#include <vtkMath.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <vtkCamera.h>
 #include <vtkTransform.h>
 #include <vtkMatrix4x4.h>
+#include <cmath>
+#include <algorithm>
 
 namespace {
 
@@ -69,10 +73,22 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             m_service->SetInteracting(true);
             return { true, true };  // abortVtk=true：阻止 VTK 默认 Window/Level
         }
+
+        m_enableDragWindowLevel = true;
+        m_lastDragX = eve.x;
+        m_lastDragY = eve.y;
+        m_startDragX = eve.x;
+        m_startDragY = eve.y;
+
+        const auto wl = m_service->GetWindowLevel();
+        m_startWW = wl.windowWidth;
+        m_startWC = wl.windowCenter;
+
+        m_service->SetInteracting(true);
         return { true, true };
     }
 
-    // ── 左键抬起：结束十字线拖拽 ─────────────────────────────────────
+    // ── 左键抬起：结束交互 ─────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::LeftButtonReleaseEvent)
     {
         if (m_enableDragCrosshair) {
@@ -86,40 +102,43 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
 			m_service->SetInteracting(false);
 			return { true, true };
         }
-        return { true, true };
-    }
-
-    // ── 右键按下：开始拖拽调窗 ─────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::RightButtonPressEvent)
-    {
-        m_enableDragWindowLevel = true;
-        m_lastDragX = eve.x;
-        m_lastDragY = eve.y;
-
-        m_startDragX = eve.x;
-        m_startDragY = eve.y;
-
-        // 获取当前状态作为静态常数 W_start
-        auto wl = m_service->GetWindowLevel();
-        m_startWW = wl.windowWidth;
-        m_startWC = wl.windowCenter;
-
-        m_service->SetInteracting(true);
-        return { true, true };  // abortVtk=true：阻止 VTK 默认右键菜单/操作
-    }
-
-    // ── 右键抬起：结束调窗 ─────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::RightButtonReleaseEvent)
-    {
         if (m_enableDragWindowLevel) {
             m_enableDragWindowLevel = false;
             m_service->SetInteracting(false);
-            return { true, false };
+            return { true, true };
+        }
+        return { true, true };
+    }
+
+    // ── 右键按下：开始缩放 ─────────────────────────────────────
+    if (eve.vtkEventId == vtkCommand::RightButtonPressEvent)
+    {
+        m_enableRightZoom = true;
+        m_zoomStartY = eve.y;
+
+        if (m_renderer && m_renderer->GetActiveCamera()) {
+            m_startOriginValue = m_renderer->GetActiveCamera()->GetParallelScale();
+        }
+        else {
+            m_startOriginValue = 1.0;
+        }
+
+        m_service->SetInteracting(true);
+        return { true, true };
+    }
+
+    // ── 右键抬起：结束缩放 ─────────────────────────────────────────
+    if (eve.vtkEventId == vtkCommand::RightButtonReleaseEvent)
+    {
+        if (m_enableRightZoom) {
+            m_enableRightZoom = false;
+            m_service->SetInteracting(false);
+            return { true, true };
         }
         return {};
     }
 
-    // ── 鼠标移动：十字线拖拽 / 调窗拖拽（二选一）────────────────────
+    // ── 鼠标移动：十字线拖拽 / 调窗拖拽 / 缩放 / 定轴旋转 ─────────────
     if (eve.vtkEventId == vtkCommand::MouseMoveEvent)
     {
         // 路径 A：十字线拖拽（Shift+左键）
@@ -161,6 +180,28 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
+
+        if (m_enableRightZoom)
+        {
+            if (!m_renderer || !m_renderer->GetActiveCamera()) {
+                return { true, true };
+            }
+
+            const int totalDy = eve.y - m_zoomStartY;
+            const double factor = std::pow(1.01, totalDy);
+            const double nextScale = std::max(1e-6, m_startOriginValue * factor);
+
+            auto* cam = m_renderer->GetActiveCamera();
+            cam->SetParallelScale(nextScale);
+            m_renderer->ResetCameraClippingRange();
+
+            if (m_renderer->GetRenderWindow()) {
+                m_renderer->GetRenderWindow()->Render();
+            }
+
+            return { true, true };
+        }
+
         // 路径C：定轴旋转
         if (m_enableDragSlice)
         {
