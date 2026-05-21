@@ -244,7 +244,7 @@ int main()
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     serviceA->SetFileLoadedAsync(
-        "E:\\data\\ct\\700x1358x1252.raw",
+        "E:\\data\\1000x1000x1000.raw",
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},
         [sharedState, serviceA, imageAnalysis, gapAnalysis](bool success)
@@ -338,12 +338,12 @@ int main()
     //        << "[Iso Test] Timer update: normalized iso = 0, actual iso = " << actualIsoValue
     //        << std::endl;
 
+
     //    while (true) {
     //        std::this_thread::sleep_for(std::chrono::milliseconds(792));
     //        currentNormalizedStep = (currentNormalizedStep + 1) % 11;
-    //        normalizedIsoValue = static_cast<double>(currentNormalizedStep) * 0.1;
+    //        normalizedIsoValue = static_cast<double>(currentNormalizedStep) * 0.05;
     //        actualIsoValue = minIsoValue + isoSpan * normalizedIsoValue;
-
     //        serviceA->SetInteracting(true);
     //        serviceA->SetIsoThreshold(actualIsoValue);
     //        std::cout << "[Iso Test] Timer update: normalized iso = " << normalizedIsoValue
