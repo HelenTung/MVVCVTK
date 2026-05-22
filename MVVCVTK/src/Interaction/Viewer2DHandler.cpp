@@ -147,9 +147,18 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             if (!m_picker || !m_renderer) return {};
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
+            
             if (worldPos) {
                 // 这里直接写 CursorWorldPosition，让服务层统一完成轴约束、状态广播和后续渲染刷新。
-                m_service->SetCursorWorldPosition(worldPos);
+                if (eve.vizMode == VizMode::SliceTop_down) {
+                    m_service->SetCursorWorldPosition(worldPos, 2);
+                }
+                else if (eve.vizMode == VizMode::SliceFront_back) {
+                    m_service->SetCursorWorldPosition(worldPos, 1);
+                }
+                else if (eve.vizMode == VizMode::SliceLeft_right) {
+                    m_service->SetCursorWorldPosition(worldPos, 0);
+                }
                 m_service->SetDirtyMarked();
             }
             return { true, true };
