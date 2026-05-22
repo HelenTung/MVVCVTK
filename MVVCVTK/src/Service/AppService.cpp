@@ -419,16 +419,21 @@ void MedicalVizService::SetSliceScrolled(int delta)
 
 void MedicalVizService::SetCursorWorldPosition(double worldPos[3], int axis)
 {
-    if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState || axis < 0 || axis > 2) return;
+    if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
     auto currentPos = m_sharedState->GetCursorWorld();
     m_sharedState->SetCursorRawWorld(worldPos[0], worldPos[1], worldPos[2]);
     m_sharedState->SetCursorAxis(axis);
 
     // 0 1 2 分别表示 SliceLeft_right SliceFront_back SliceTop_down
-    double newPos[3] = { worldPos[0], worldPos[1], worldPos[2] };
-    newPos[axis] = currentPos[axis];
-
-    m_sharedState->SetCursorWorld(newPos[0], newPos[1], newPos[2]);
+    if (axis == -1)
+    {
+        m_sharedState->SetCursorWorld(worldPos[0], worldPos[1], worldPos[2]);
+    }
+    else {
+        double newPos[3] = { worldPos[0], worldPos[1], worldPos[2] };
+        newPos[axis] = currentPos[axis];
+        m_sharedState->SetCursorWorld(newPos[0], newPos[1], newPos[2]);
+    }
 }
 
 std::array<double, 3> MedicalVizService::GetCursorWorld()
