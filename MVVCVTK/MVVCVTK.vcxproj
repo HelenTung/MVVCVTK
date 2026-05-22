@@ -177,9 +177,9 @@
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
     <ClInclude Include="include\Math\GapAnalysis\VoidDetector.h" />
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBoxWidgetController.h" />
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDataBackendService.h" />
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDemoService.h" />
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropWidgetStateController.h" />
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBackendRouterService.h" />
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropInteractionBridgeService.h" />
     <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropPluginService.h" />
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
     <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h" />

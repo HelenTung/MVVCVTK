@@ -8,8 +8,8 @@
 // - WidgetStateController：只负责 3D 裁切盒 UI 状态；
 // - InteractionBridgeService：仅做热键桥接、bounds 同步与结果投递，不耦合底层裁切流程。
 
-#include "OrthogonalCrop/OrthogonalCropBoxWidgetController.h"
-#include "OrthogonalCrop/OrthogonalCropDataBackendService.h"
+#include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
+#include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
 #include "AppService.h"
 
 #include <vtkCommand.h>
@@ -44,7 +44,7 @@ public:
         m_widgetStateController.SetInteractor(interactor);
     }
 
-    void SetReferenceRenderService(std::shared_ptr<MedicalVizService> referenceService)
+    void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService)
     {
         m_referenceRenderService = std::move(referenceService);
         if (!m_referenceRenderService && !m_previewRenderServices.empty()) {
@@ -52,7 +52,7 @@ public:
         }
     }
 
-    void SetPreviewRenderServices(std::vector<std::shared_ptr<MedicalVizService>> previewRenderServices)
+    void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices)
     {
         m_previewRenderServices.clear();
         m_previewRenderServices.reserve(previewRenderServices.size());
@@ -500,7 +500,7 @@ private:
         }
     }
 
-    void AddPreviewRenderService(const std::shared_ptr<MedicalVizService>& service)
+    void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service)
     {
         if (!service) {
             return;
@@ -533,6 +533,6 @@ private:
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     OrthogonalCropWidgetStateController m_widgetStateController;
-    std::shared_ptr<MedicalVizService> m_referenceRenderService;
-    std::vector<std::shared_ptr<MedicalVizService>> m_previewRenderServices;
+    std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;
+    std::vector<std::shared_ptr<AbstractInteractiveService>> m_previewRenderServices;
 };

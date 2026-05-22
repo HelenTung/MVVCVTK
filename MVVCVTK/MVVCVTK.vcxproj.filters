@@ -174,13 +174,13 @@
     <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h">
       <Filter>include\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBoxWidgetController.h">
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropWidgetStateController.h">
       <Filter>include\Service\OrthogonalCrop</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDataBackendService.h">
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBackendRouterService.h">
       <Filter>include\Service\OrthogonalCrop</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDemoService.h">
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropInteractionBridgeService.h">
       <Filter>include\Service\OrthogonalCrop</Filter>
     </ClInclude>
     <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropPluginService.h">
