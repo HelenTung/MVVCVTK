@@ -30,86 +30,31 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "DataManager.h"
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
+#include "OrthogonalCrop/OrthogonalCropDemoService.h"
 
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"
-#include "GapAlgorithmOverlayStrategies.h"
 #include <vtkCommand.h>
 
+#include <cmath>
 #include <chrono>
 #include <iostream>
 #include <thread>
 #include <vector>
 
-class GapOverlayKeyTrigger : public vtkCommand {
+class OrthogonalCropHotkeyObserver : public vtkCommand {
 public:
-    static GapOverlayKeyTrigger* New() { return new GapOverlayKeyTrigger; }
+    static OrthogonalCropHotkeyObserver* New() { return new OrthogonalCropHotkeyObserver; }
 
-    std::shared_ptr<GapAnalysisService> gapAnalysis;
-    std::shared_ptr<MedicalVizService> srvA, srvB, srvC, srvD, srvE;
-    bool isApplied = false;
+    std::shared_ptr<OrthogonalCropInteractionBridgeService> orthogonalCropBridge;
 
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
-        // 1. 只响应键盘按下事件
-        if (eventId != vtkCommand::KeyPressEvent) return;
-
-        // 2. 获取交互器并提取按键
+        (void)callData;
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
         if (!iren) return;
 
-        char key = iren->GetKeyCode();
-        // 如果按下的不是 j 或 J，直接忽略
-        if (key != 'j' && key != 'J') return;
-
-        // 如果已经加载过图层，就不重复加载了
-        if (isApplied || !gapAnalysis) return;
-
-        auto state = gapAnalysis->GetAnalysisState();
-
-        // 3. 状态分支判断
-        if (state == GapAnalysisState::Running) {
-            std::cout << "[Key Trigger] Algorithm is still running... Please wait." << std::endl;
-            return;
-        }
-        else if (state == GapAnalysisState::Succeeded) {
-            isApplied = true;
-            std::cout << "\n[Main] Gap Analysis completed! Applying overlays to UI...\n";
-
-            // 获取算法产物（此时仍在主线程）
-            auto voidMesh = gapAnalysis->BuildVoidMesh();
-            auto labelImg = gapAnalysis->BuildLabelImage();
-
-            // 为 3D 窗口配置网格融合图层 (Window A, E)
-            auto meshOverlayA = std::make_shared<GapMeshOverlayStrategy>();
-            meshOverlayA->SetInputData(voidMesh);
-            srvA->SetOverlayStrategyAdded(meshOverlayA);
-
-            auto meshOverlayE = std::make_shared<GapMeshOverlayStrategy>();
-            meshOverlayE->SetInputData(voidMesh);
-            srvE->SetOverlayStrategyAdded(meshOverlayE);
-
-            // 为 2D 窗口配置标签切片融合图层 (Window B, C, D)
-            auto sliceOverlayB = std::make_shared<GapSliceOverlayStrategy>(Orientation::Top_down);
-            sliceOverlayB->SetInputData(labelImg);
-            srvB->SetOverlayStrategyAdded(sliceOverlayB);
-
-            auto sliceOverlayC = std::make_shared<GapSliceOverlayStrategy>(Orientation::Front_back);
-            sliceOverlayC->SetInputData(labelImg);
-            srvC->SetOverlayStrategyAdded(sliceOverlayC);
-
-            auto sliceOverlayD = std::make_shared<GapSliceOverlayStrategy>(Orientation::Left_right);
-            sliceOverlayD->SetInputData(labelImg);
-            srvD->SetOverlayStrategyAdded(sliceOverlayD);
-
-            gapAnalysis->saveResults("E:\\data\\ct\\out");
-
-            // 通知所有窗口画面标脏，触发重绘
-            srvA->SetDirtyMarked(); srvB->SetDirtyMarked();
-            srvC->SetDirtyMarked(); srvD->SetDirtyMarked(); srvE->SetDirtyMarked();
-        }
-        else if (state == GapAnalysisState::Failed) {
-            isApplied = true;
-            std::cerr << "\n[Main] Gap Analysis failed to process.\n";
+        if (orthogonalCropBridge) {
+            orthogonalCropBridge->HandleHotkey(iren, eventId);
         }
     }
 };
@@ -156,6 +101,7 @@ int main()
     auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
     auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
+    auto orthogonalCropBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
 
     // ── 传输函数（数据无关，前处理阶段安全）──────────────────────
     std::vector<TFNode> volTF = {
@@ -230,9 +176,13 @@ int main()
     auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState, sharedStateBroadcaster);
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState, sharedStateBroadcaster);
 
+    orthogonalCropBridge->SetDataManager(sharedDataMgr);
+    orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetPreviewRenderServices({ serviceB, serviceC, serviceD, serviceE });
+
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
-    serviceA->SetElementVisible(VisFlags::Planes3D, true);
-    serviceE->SetElementVisible(VisFlags::Planes3D, true);
+    serviceA->SetElementVisible(VisFlags::Planes3D, false);
+    serviceE->SetElementVisible(VisFlags::Planes3D, false);
 
     // 3D 窗口：隐藏标尺
     serviceA->SetElementVisible(VisFlags::Ruler, false);
@@ -247,8 +197,8 @@ int main()
         "E:\\data\\1000x1000x1000.raw",
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},
-        [sharedState, serviceA, imageAnalysis, gapAnalysis](bool success)
-        {   
+        [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success)
+        {
             if (!success) {
                 std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
@@ -268,6 +218,14 @@ int main()
             else {
                 std::cerr << "[Main] Histogram generation failed.\n";
             }
+
+            orthogonalCropBridge->SetInputImage(sharedDataMgr->GetVtkImage());
+            if (!orthogonalCropBridge->GetInputImage()) {
+                std::cerr << "[Main] Orthogonal crop init failed: input image missing." << std::endl;
+                return;
+            }
+
+            std::cout << "[Main] Orthogonal crop armed. Press O to toggle axis-aligned crop editing, Esc to exit crop mode, hold 1 keep inside, hold 2 keep outside." << std::endl;
 
             //// 触发孔隙分析算法
             //SurfaceParams surfP;
@@ -302,6 +260,8 @@ int main()
     contextC->SetInteractorInitialized();
     contextD->SetInteractorInitialized();
     contextE->SetInteractorInitialized();
+
+    orthogonalCropBridge->SetPrimaryInteractor(contextA->GetInteractor());
 
     //// 只等待共享加载状态成功后按固定节奏持续调节等值面阈值并打印。
     //std::thread([sharedState, serviceA]() {
@@ -351,19 +311,22 @@ int main()
     //    }
     //}).detach();
 
-    //auto trigger = vtkSmartPointer<GapOverlayKeyTrigger>::New();
-    //trigger->gapAnalysis = gapAnalysis;
-    //trigger->srvA = serviceA; trigger->srvB = serviceB;
-    //trigger->srvC = serviceC; trigger->srvD = serviceD; trigger->srvE = serviceE;
+    auto orthogonalCropHotkeyObserver = vtkSmartPointer<OrthogonalCropHotkeyObserver>::New();
+    orthogonalCropHotkeyObserver->orthogonalCropBridge = orthogonalCropBridge;
 
-    //contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
-    //contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, trigger);
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    contextB->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    contextC->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    contextD->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop widget | Esc = exit crop mode | hold 1 = keep inside | hold 2 = keep outside\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

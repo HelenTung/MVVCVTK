@@ -24,6 +24,9 @@
     <Filter Include="include\Math\GapAnalysis">
       <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Math\OrthogonalCrop">
+      <UniqueIdentifier>{9bda74ef-455f-4a83-8cc8-bb931bfcb1d4}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Interaction">
       <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
     </Filter>
@@ -35,6 +38,9 @@
     </Filter>
     <Filter Include="include\Service\GapMeshOverlayService">
       <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Service\OrthogonalCrop">
+      <UniqueIdentifier>{f605a9cb-31f6-4168-9489-f2ccddcfe2b9}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Data">
       <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
@@ -102,6 +108,12 @@
     <ClInclude Include="include\Math\GapAnalysis\SurfaceRefiner.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
+    <ClInclude Include="include\Math\OrthogonalCrop\OrthogonalCropAlgorithm.h">
+      <Filter>include\Math\OrthogonalCrop</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Math\OrthogonalCrop\OrthogonalCropTypes.h">
+      <Filter>include\Math\OrthogonalCrop</Filter>
+    </ClInclude>
     <ClInclude Include="include\Math\GapAnalysis\VoidDetector.h">
       <Filter>include\Math\GapAnalysis</Filter>
     </ClInclude>
@@ -161,6 +173,18 @@
     </ClInclude>
     <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h">
       <Filter>include\Service\GapMeshOverlayService</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBoxWidgetController.h">
+      <Filter>include\Service\OrthogonalCrop</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDataBackendService.h">
+      <Filter>include\Service\OrthogonalCrop</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropDemoService.h">
+      <Filter>include\Service\OrthogonalCrop</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropPluginService.h">
+      <Filter>include\Service\OrthogonalCrop</Filter>
     </ClInclude>
     <ClInclude Include="include\Utils\InteractionComputeService.h">
       <Filter>include\Utils</Filter>

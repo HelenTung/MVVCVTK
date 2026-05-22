@@ -147,7 +147,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             if (!m_picker || !m_renderer) return {};
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
             double* worldPos = m_picker->GetPickPosition();
-            
+
             if (worldPos) {
                 // 这里直接写 CursorWorldPosition，让服务层统一完成轴约束、状态广播和后续渲染刷新。
                 if (eve.vizMode == VizMode::SliceTop_down) {

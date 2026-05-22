@@ -357,3 +357,112 @@ example.cpp — 精简接入示例（对齐当前 main.cpp）
    优先通过 service / context 的公开接口表达意图。
 5. 如果想看最完整的真实接法，以 main.cpp 当前版本为准，example.cpp 只保留常用骨架。
 */
+
+/*
+─────────────────────────────────────────────────────────────────────
+九、OrthogonalCrop 独立插件最小接法
+─────────────────────────────────────────────────────────────────────
+
+定位：
+- 这是一个独立算法插件，不挂到 MedicalVizService / SharedState / Interaction 主链上。
+- 前端只负责参数编辑、按钮流程和错误提示；插件只处理边界校验、体素吸附、RAM 估算与结果生成。
+- 如果只做预览，就取 VirtualCrop；如果确认执行硬裁切，再切到 PhysicalCrop。
+
+1) 最小调用骨架
+
+    auto cropBackend = std::make_shared<OrthogonalCropBackendRouterService>();
+    cropBackend->CropPreInit_SetInputImage(sharedDataMgr->GetVtkImage());
+    cropBackend->CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource::ImageData);
+
+    auto request = cropBackend->GetDefaultRequest();
+
+    CropStateModel cropState;
+    cropState.SetCropEnabled(true);
+    cropState.SetInsideOpacity(0.20);
+    cropState.SetOutsideVisibility(false);
+    cropState.SetInteractionPhase(CropInteractionPhase::Released);
+    request.SetCropStateModel(cropState);
+
+    request.SetBoundsMode(CropBoundsMode::CenterAndDimensions);
+    request.SetCenter({ 12.0, 15.0, 18.0 });
+    request.SetDimensions({ 8.0, 10.0, 12.0 });
+    request.SetRemovalMode(CropRemovalMode::KeepInside);
+    request.SetExecutionMode(CropExecutionMode::VirtualCrop);
+
+    auto stats = cropBackend->GetStatistics(request);
+    auto result = cropBackend->GetResult(request);
+    if (!result.GetSucceeded()) {
+        std::cerr << "crop failed: " << result.GetMessage() << std::endl;
+        return;
+    }
+
+    auto previewMask = result.GetVirtualMaskImage();
+    auto previewImage = result.GetDerivedImage();
+    auto outline = result.GetOutlinePolyData();
+
+2) 切到局部坐标系裁切盒
+
+    auto request = cropBackend->GetDefaultRequest();
+    request.SetBoundsMode(CropBoundsMode::LocalCenterAndDimensions);
+    request.SetLocalAlignmentMatrix({
+        1.0, 0.0, 0.0, 20.0,
+        0.0, 1.0, 0.0, 30.0,
+        0.0, 0.0, 1.0, 40.0,
+        0.0, 0.0, 0.0, 1.0
+    });
+    request.SetLocalCenter({ 0.0, 0.0, 0.0 });
+    request.SetLocalDimensions({ 6.0, 8.0, 10.0 });
+
+3) 先预估，再执行物理硬裁切
+
+    auto hardRequest = request;
+    hardRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
+    auto hardStats = cropBackend->GetStatistics(hardRequest);
+    if (!hardStats.GetCanExecutePhysicalCrop()) {
+        std::cerr << hardStats.GetValidationMessage() << std::endl;
+        return;
+    }
+
+    auto hardResult = cropBackend->GetResult(hardRequest);
+    if (!hardResult.GetSucceeded()) {
+        std::cerr << hardResult.GetMessage() << std::endl;
+        return;
+    }
+
+    auto derivedImage = hardResult.GetDerivedImage();
+    auto offsetMatrix = hardResult.GetCropDataModel().GetGlobalOffsetMatrix();
+
+4) 如果输入改成 vtkPolyData
+
+    cropBackend->CropPreInit_SetInputPolyData(inputSurface);
+    cropBackend->CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource::PolyData);
+
+    auto polyRequest = cropBackend->GetDefaultRequest();
+    polyRequest.SetBoundsMode(CropBoundsMode::MinMaxCoordinates);
+    polyRequest.SetRasBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
+    auto polyResult = cropBackend->GetResult(polyRequest);
+    auto clippedSurface = polyResult.GetDerivedPolyData();
+
+5) UI / 视图层桥接
+
+    auto cropInteractionBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
+    cropInteractionBridge->SetDataManager(sharedDataMgr);
+    cropInteractionBridge->SetReferenceRenderService(serviceA);
+    cropInteractionBridge->SetPreviewRenderServices({ serviceB, serviceC, serviceD, serviceE });
+    cropInteractionBridge->SetPrimaryInteractor(contextA->GetInteractor());
+    cropInteractionBridge->CropPreInit_SetInputImage(sharedDataMgr->GetVtkImage());
+
+    // InteractionBridgeService 内部：
+    // - vtkBoxWidget2 / vtkBoxRepresentation 只管理 3D 裁切盒 UI 状态；
+    // - bounds 变化后交给 OrthogonalCropBackendRouterService 选 image/polydata 后端；
+    // - 参考坐标系只依赖 reference service；
+    // - 只有 preview 目标服务列表会被置脏联动。
+
+6) 调用约定
+
+1. DataBackend 和 BoxWidgetController 是独立层；前者只处理数据，后者只处理 UI 状态。
+2. request 仍然是一次性快照；前端或 ViewModel 每次确认参数后重新组装即可。
+3. vtkImageData 路径默认走 image backend；vtkPolyData 路径默认走 vtkBox + vtkTableBasedClipDataSet。
+4. VirtualCrop 时，image 路径可返回 mask / extracted preview image；polydata 路径返回 clipped polydata。
+5. 物理裁切的 RemoveInside 在 image 路径默认阻断，因为那会打破“连续派生体、不插值、不重采样”的约束。
+*/
