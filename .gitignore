@@ -375,3 +375,4 @@ Local.props
 **/Local.props
 *.md
 *.patch
+/MVVCVTK/include
