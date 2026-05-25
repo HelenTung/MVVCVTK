@@ -204,14 +204,16 @@ std::filesystem::path GetDefaultSliceDir(const std::string& loadedFilePath, cons
         ? loadedPath.parent_path()
         : std::filesystem::current_path();
 
-    std::string sourceName = loadedPath.has_extension()
-        ? loadedPath.stem().string()
-        : loadedPath.filename().string();
+    std::filesystem::path sourceName = loadedPath.has_extension()
+        ? loadedPath.stem()
+        : loadedPath.filename();
     if (sourceName.empty()) {
-        sourceName = "Volume";
+        sourceName = std::filesystem::path("Volume");
     }
 
-    return parentPath / (sourceName + "_" + orientationName + "_Slices");
+    sourceName += std::string("_") + orientationName + "_Slices";
+
+    return parentPath / sourceName;
 }
 }
 
@@ -556,7 +558,8 @@ bool BaseDataManager::SetSliceImagesSaved(
 
         auto writer = vtkSmartPointer<vtkPNGWriter>::New();
         const std::filesystem::path outputFilePath = outputDir / fileName.str();
-        writer->SetFileName(outputFilePath.string().c_str());
+        const std::string vtkFileName = outputFilePath.u8string();
+        writer->SetFileName(vtkFileName.c_str());
         writer->SetInputData(sliceImage);
         writer->Write();
     }
@@ -774,7 +777,10 @@ bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const
     std::filesystem::path pathObj(filePath);
     std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
     // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
-    std::filesystem::path finalPath = pathObj.parent_path() / (pathObj.stem().string() + "_" + dimStr + pathObj.extension().string());
+    std::filesystem::path finalFileName = pathObj.stem();
+    finalFileName += std::string("_") + dimStr;
+    finalFileName += pathObj.extension();
+    std::filesystem::path finalPath = pathObj.parent_path() / finalFileName;
 
     // 使用 C++ 标准库直接持久化写入裸 raw 数据
     std::ofstream rawFile(finalPath, std::ios::binary);
@@ -795,7 +801,7 @@ bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const
     }
 
     rawFile.close();
-    std::cout << "[Export] Successfully saved transformed RAW to: " << filePath << "\n"
+    std::cout << "[Export] Successfully saved transformed RAW to: " << finalPath.u8string() << "\n"
         << "[Export] IMPORTANT: New Dimensions are "
         << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
 

@@ -64,7 +64,7 @@ public:
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataConverter<InputT, OutputT>
-// ───────────────────────────────────────────────��─────────────────────
+// ─────────────────────────────────────────────────────────────────────
 template <typename InputT, typename OutputT>
 class AbstractDataConverter {
 public:
