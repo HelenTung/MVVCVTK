@@ -29,6 +29,7 @@ public:
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override;
 
 private:
+    // 回调真正要反向通知的 controller；callback 自己不拥有它。
     OrthogonalCropWidgetStateController* m_owner = nullptr;
 };
 
@@ -228,6 +229,7 @@ inline void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsign
 {
     (void)caller;
     (void)callData;
+    // VTK 事件最终统一转发回 controller，由 controller 决定如何同步 bounds/phase。
     if (m_owner) {
         m_owner->HandleWidgetEvent(eventId);
     }

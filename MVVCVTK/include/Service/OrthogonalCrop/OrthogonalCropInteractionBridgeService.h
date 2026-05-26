@@ -502,6 +502,7 @@ private:
         }
     }
 
+    // 把 failureReason 枚举转成稳定日志文本，避免多个调用点重复写 switch。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason)
     {
         switch (failureReason) {
@@ -530,6 +531,7 @@ private:
         return "Unknown";
     }
 
+    // 把 removal mode 转成日志/调试输出使用的文本。
     static const char* GetRemovalModeText(CropRemovalMode removalMode)
     {
         switch (removalMode) {
@@ -542,6 +544,7 @@ private:
         return "Unknown";
     }
 
+    // 把数据源枚举转成日志文本。
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource)
     {
         switch (dataSource) {
@@ -555,6 +558,7 @@ private:
         }
     }
 
+    // 把最终 backend 枚举转成日志文本。
     static const char* GetResolvedBackendText(OrthogonalCropResolvedBackend backend)
     {
         switch (backend) {
@@ -572,6 +576,7 @@ private:
         }
     }
 
+    // 向 preview 列表追加一个服务，同时做 null 和重复过滤。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service)
     {
         // 空指针直接忽略，避免污染 preview 列表。

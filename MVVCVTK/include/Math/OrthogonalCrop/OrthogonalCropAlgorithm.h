@@ -311,6 +311,8 @@ inline vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& crop
 
 class OrthogonalCropAlgorithm {
 public:
+    // 直接校验一份目标 bounds 是否既自洽，又完全落在输入 bounds 内部。
+    // 这个重载不依赖具体数据对象，适合 router/polydata 路径复用统一边界判断。
     static bool GetBoundsAreValid(
         const std::array<double, 6>& inputBounds,
         const std::array<double, 6>& rasBounds,
@@ -337,6 +339,8 @@ public:
         return true;
     }
 
+    // 以 vtkImageData 为输入做 bounds 校验；先读原图 bounds，再复用通用重载。
+    // 这是 image 路径最常用的前置保护，避免空图像或越界裁切继续往下执行。
     static bool GetBoundsAreValid(
         vtkImageData* image,
         const std::array<double, 6>& rasBounds,
@@ -368,6 +372,8 @@ public:
             message);
     }
 
+    // 把一次 request 解析为稳定的 CropDataModel。
+    // 这一步会统一处理四种 boundsMode，并把局部坐标定义最终还原成世界坐标 bounds。
     static bool GetCropDataModel(
         const std::array<double, 6>& inputBounds,
         const OrthogonalCropRequest& request,
@@ -408,6 +414,7 @@ public:
         return GetBoundsAreValid(inputBounds, cropData.GetRasBounds(), failureReason, message);
     }
 
+    // image 路径版本的 request 归一化入口；先读取 image bounds，再复用通用重载。
     static bool GetCropDataModel(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
@@ -435,11 +442,15 @@ public:
             message);
     }
 
+    // 把世界坐标裁切盒吸附到 image 的整数 IJK 边界。
+    // 后面的统计、virtual mask 和 physical crop 都直接建立在这份 snapped bounds 上。
     static std::array<int, 6> GetSnappedVoxelBounds(vtkImageData* image, const CropDataModel& cropData)
     {
         return OrthogonalCropInternal::GetSnappedIjkBounds(image, cropData);
     }
 
+    // 基于已经归一化好的 cropData 做纯统计估算。
+    // 它不生成结果图像，只回答“inside 有多大、输出会多大、物理裁切是否允许继续做”。
     static OrthogonalCropStatistics GetStatistics(
         vtkImageData* image,
         const CropDataModel& cropData,
@@ -497,6 +508,7 @@ public:
         return statistics;
     }
 
+    // 从 request 直接得到统计信息的便捷入口；内部会先把 request 解析成 cropData。
     static OrthogonalCropStatistics GetStatistics(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
@@ -520,6 +532,8 @@ public:
             OrthogonalCropInternal::GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
     }
 
+    // 构建 virtual crop 结果：保留原图拓扑，只返回 mask、outline 和配套统计。
+    // 这条路径不会生成真正脱离原图的派生体数据。
     static OrthogonalCropResult GetVirtualCropResult(
         vtkImageData* image,
         const CropDataModel& cropData,
@@ -556,6 +570,8 @@ public:
         return result;
     }
 
+    // 构建 physical crop 结果：真正提取连续子体，并更新派生结果的 origin/bounds/offset matrix。
+    // 只有通过统计阶段的合法性和内存判断后，才会进入这条路径。
     static OrthogonalCropResult GetPhysicalCropResult(
         vtkImageData* image,
         const CropDataModel& cropData,
@@ -626,6 +642,7 @@ public:
         return result;
     }
 
+    // image 路径总入口：先统计和校验，再根据 executionMode 分发到 virtual 或 physical 结果构建。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
