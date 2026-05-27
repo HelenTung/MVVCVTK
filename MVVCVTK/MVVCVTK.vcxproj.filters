@@ -70,6 +70,18 @@
     <Filter Include="src\Service">
       <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
     </Filter>
+    <Filter Include="src\Service\OrthogonalCrop">
+      <UniqueIdentifier>{bb408546-4d9d-4bc0-8497-8876b82260f7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Strategies\OrthogonalCropPreviewStrategy">
+      <UniqueIdentifier>{98194483-608e-4e5c-8d05-0b9390f1956c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Math">
+      <UniqueIdentifier>{934b87ca-873a-4a65-b1a7-54c92bb8f0c0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Math\OrthogonalCrop">
+      <UniqueIdentifier>{3f6f4b4c-e572-49c0-afb0-92ce3e5f5f5d}</UniqueIdentifier>
+    </Filter>
     <Filter Include="src\Data">
       <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
     </Filter>
@@ -259,6 +271,24 @@
     </ClCompile>
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Math\OrthogonalCrop\OrthogonalCropAlgorithm.cpp">
+      <Filter>src\Math\OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropBackendRouterService.cpp">
+      <Filter>src\Service\OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropInteractionBridgeService.cpp">
+      <Filter>src\Service\OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropPluginService.cpp">
+      <Filter>src\Service\OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropWidgetStateController.cpp">
+      <Filter>src\Service\OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Strategies\OrthogonalCropPreviewStrategy\OrthogonalCropPreviewOverlayStrategy.cpp">
+      <Filter>src\Strategies\OrthogonalCropPreviewStrategy</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
