@@ -6,6 +6,12 @@
 // OrthogonalCropInteractionBridgeService - 正交裁切交互桥接服务
 // 说明: 连接 widget、数据后端与 preview 窗口，管理交互态与预览刷新顺序。
 // =====================================================================
+// 交互主链路：
+// 1. ActivateInteractiveCrop 生成默认 widget bounds 并挂接 vtkBoxWidget2
+// 2. HandleWidgetBoundsChanged 持续记录世界坐标 bounds 与交互 phase
+// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把世界盒折叠成模型空间 request
+// 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
+// 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做临时 clip
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
@@ -91,12 +97,14 @@ private:
     template <typename BackendMethod, typename... Args>
     decltype(auto) CallBackend(BackendMethod method, Args&&... args)
     {
+        // bridge 自己不复制 backend 逻辑，所有真正的执行都透传给 router。
         return (m_backend.*method)(std::forward<Args>(args)...);
     }
 
     template <typename BackendMethod, typename... Args>
     decltype(auto) CallBackend(BackendMethod method, Args&&... args) const
     {
+        // const 版本保证查询接口也走同一条 router 路径，避免读写路径分叉。
         return (m_backend.*method)(std::forward<Args>(args)...);
     }
 
@@ -131,9 +139,11 @@ private:
     std::array<double, 6> GetActiveWorldBounds() const;
 
     // 返回 world -> model 矩阵，供 LocalCenterAndDimensions 预览请求使用。
+    // 这是 world 中 widget 盒与 model 中真实裁切输入之间最关键的坐标桥。
     std::array<double, 16> GetWorldToModelMatrix() const;
 
     // 基于当前 widget bounds 组装一次 preview request。
+    // 这里会把世界坐标轴对齐盒转换成“局部中心 + 局部尺寸 + 对齐矩阵”的统一表达。
     OrthogonalCropRequest BuildPreviewRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。

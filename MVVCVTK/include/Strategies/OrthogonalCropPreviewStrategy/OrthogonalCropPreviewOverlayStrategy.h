@@ -5,6 +5,11 @@
 // 分类: Strategy / Preview Overlay
 // 说明: 把裁切结果渲染为 outline、mask slice 或 clipped polydata overlay。
 // =====================================================================
+// 显示主链路：
+// 1. bridge 把统一的 OrthogonalCropResult 推给 overlay strategy
+// 2. strategy 从结果里拆出 outline / virtual mask / derived polydata
+// 3. 再根据当前窗口是 2D 还是 3D，决定显示实体区域、mask slice 还是 polydata
+// 4. 所有 prop 都共享同一套 removal mode 颜色语义与主模型变换
 
 #include "BaseVisualStrategy.h"
 #include "OrthogonalCrop/OrthogonalCropTypes.h"
@@ -37,6 +42,7 @@ public:
     void ClearPreview();
 
     // 根据变换、游标等状态同步 overlay 视觉表现。
+    // 这里不重新请求后端结果，只消费已经存在的 crop result 和窗口状态。
     void SetVisualState(const RenderParams& params, UpdateFlags flags) override;
 
 private:

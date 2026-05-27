@@ -687,6 +687,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     const CropStateModel& cropState,
     CropRemovalMode removalMode)
 {
+    // virtual crop 返回的是“原图 + mask 解释信息”，
+    // 不改主数据布局，因此更适合交互预览与多窗口同步显示。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
@@ -736,6 +738,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
+    // physical crop 返回的是新的 derived image，
+    // 因此除了提取体素数据，还必须同步修正 bounds 和 global offset matrix。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetCropDataModel(cropData);
@@ -807,6 +811,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
+    // 统一入口故意不在这里混入执行细节：
+    // 这里只做一次 request 归一化和分流决策，具体结果组装交给下游分支函数完成。
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
 

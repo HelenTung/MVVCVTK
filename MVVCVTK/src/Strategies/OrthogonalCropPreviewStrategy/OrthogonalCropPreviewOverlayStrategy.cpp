@@ -3,6 +3,10 @@
 // 分类: Strategy / Preview Overlay Implementation
 // 说明: 把裁切结果拆成 3D outline、3D clipped polydata、2D mask slice 三类可视表现。
 // =====================================================================
+// 这个策略的职责不是“计算裁切”，而是“解释裁切结果”：
+// - 同一份结果在 2D 窗口主要表现为 mask slice
+// - 在 3D 窗口主要表现为 outline / preview region / clipped polydata
+// - 视觉语义由 removal mode 与当前窗口轴向共同决定
 
 #include "OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.h"
 
@@ -82,6 +86,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetInputData(vtkSmartPointer<vtkDataO
 
 void OrthogonalCropPreviewOverlayStrategy::SetSliceAxis(int axis)
 {
+    // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D preview region 逻辑。
     m_sliceAxis = axis;
     UpdateVisiblePreviewProps();
 }
@@ -93,6 +98,8 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
     }
 
     m_removalMode = removalMode;
+
+    // 颜色语义切换不依赖新结果，当前缓存的 prop 直接改样式即可。
     ApplyRemovalVisualStyle();
 }
 
@@ -129,6 +136,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
 
 void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
 {
+    // 清空时只重置本策略持有的显示状态，不触碰主模型或上游缓存结果。
     m_hasOutline = false;
     m_hasMaskImage = false;
     m_previewRegionActor->SetVisibility(false);
@@ -204,6 +212,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetPropTransform(vtkProp3D* prop, con
 
     auto matrix = prop->GetUserMatrix();
     if (!matrix) {
+        // 首次赋值时为 prop 建一份 user matrix，后续只做 in-place 覆盖，避免重复分配。
         auto nextMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
         nextMatrix->DeepCopy(matrixData.data());
         prop->SetUserMatrix(nextMatrix);

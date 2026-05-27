@@ -5,6 +5,11 @@
 // 分类: Math / Core Algorithm
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================
+// 核心执行链：
+// 1. 由 request 归一化得到 CropDataModel
+// 2. 基于 cropData 做 bounds 校验与统计估算
+// 3. 按 executionMode 分流到 virtual mask 或 physical extract
+// 4. 把几何数据、派生数据、统计信息与交互态重新组装为统一结果模型
 
 #include "OrthogonalCropTypes.h"
 
@@ -88,6 +93,7 @@ public:
         std::size_t availableRamBytes = 0);
 
     // 算法总入口：先校验和归一化，再分发到 virtual / physical 两条执行链。
+    // 调用方不需要关心 request 的盒定义来自哪种模式，算法层会先折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,

@@ -5,6 +5,11 @@
 // 分类: Service / Widget Controller
 // 说明: 管理 vtkBoxWidget2 与 box representation，把 VTK 事件翻译为裁切模块状态回调。
 // =====================================================================
+// 边界约束：
+// 1. 这里只维护 widget 生命周期与 bounds 状态
+// 2. 它不生成 request、不执行算法、也不刷新 preview
+// 3. 对外唯一语义输出是“当前 bounds + 当前交互阶段”
+// 4. 交互桥再基于这组纯状态决定何时真正刷新裁切预览
 
 #include "OrthogonalCrop/OrthogonalCropTypes.h"
 
@@ -63,6 +68,7 @@ public:
     void SetBoundsChangedCallback(BoundsChangedCallback callback);
 
     // 开关 widget；打开时会自动补 observer 并 place 到当前 bounds。
+    // 返回 false 表示当前还不满足安全启用条件，例如缺少 interactor 或有效 bounds。
     bool SetEnabled(bool enabled);
 
     // 查询当前 widget 是否开启。

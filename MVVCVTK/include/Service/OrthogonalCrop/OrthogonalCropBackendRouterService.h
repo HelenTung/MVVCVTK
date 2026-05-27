@@ -5,6 +5,12 @@
 // 分类: Service / Backend Router
 // 说明: 在 image 与 polydata 两条裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
+// 路由主链路：
+// 1. 根据 preferredDataSource 与当前已绑定输入确定 active data source
+// 2. 把默认 request、统计查询和结果执行都收口到同一组入口
+// 3. image 路径直接委托给 OrthogonalCropPluginService
+// 4. polydata 路径把 request 归一化为 cropData，再生成 implicit function 做 clip
+// 5. 两条路径最终都回填到统一的 OrthogonalCropResult / OrthogonalCropStatistics
 
 #include "OrthogonalCrop/OrthogonalCropPluginService.h"
 
@@ -51,9 +57,11 @@ public:
     OrthogonalCropRequest GetDefaultRequest() const;
 
     // 查询当前请求的统计信息，内部会按数据源分发。
+    // 调用方只需要提交统一 request，不需要提前知道自己会落到 image 还是 polydata 后端。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
     // 执行当前请求并返回完整结果，内部会按数据源分发。
+    // 结果对象会补齐 resolved source / backend，供交互桥和 overlay 直接消费。
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
     // 对已有 VTK implicit function 做通用 polydata clip。

@@ -264,6 +264,9 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteract
         (sourceBounds[5] - sourceBounds[4]) * 0.36
     };
 
+    // 这组比例不是算法约束，而是交互层的默认起始盒经验值：
+    // 初始盒要足够小，便于用户第一下就看到明显裁切效果，同时保持三个轴都有可拖拽余量。
+
     bounds[0] = center[0] - dimensions[0] * 0.5;
     bounds[1] = center[0] + dimensions[0] * 0.5;
     bounds[2] = center[1] - dimensions[1] * 0.5;
@@ -347,6 +350,8 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
         return GetIdentityMatrixArray();
     }
 
+    // 参考窗口维护的是 model->world 矩阵；裁切 request 需要反向的 world->model，
+    // 否则 widget 盒和后端输入会落在两个不同坐标系里。
     auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
     matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
     matrix->Invert();
@@ -384,6 +389,9 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     auto cropState = previewRequest.GetCropStateModel();
     cropState.SetCropEnabled(m_cropInteractionEnabled);
     cropState.SetInteractionPhase(m_lastInteractionPhase);
+
+    // cropState 不参与几何计算，但会跟随结果回到 overlay / 上层日志，
+    // 让调用方知道这次 preview 是“拖拽后释放”还是“静态切换模式”触发的。
     previewRequest.SetCropStateModel(cropState);
     return previewRequest;
 }
@@ -417,6 +425,9 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     }
 
     const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
+
+    // 这里的 3D 主模型 clip 只是临时预览表现；真正的后端结果仍以 previewResult 为准，
+    // 这样退出 preview 时才能无损恢复原始主模型输入。
 
     if (logStats) {
         // 统计日志优先使用 result 中的 resolved 信息；若上层未回填，则退回 statistics 字段。
@@ -666,6 +677,8 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
     if (!target.service || target.service->GetNavigationAxis() >= 0 || !previewResult.GetSucceeded()) {
         return false;
     }
+
+    // 只有 3D 主窗口才会走到这里；2D slice 窗口只消费 overlay，不改主 mapper 输入。
 
     auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
     if (!actor) {

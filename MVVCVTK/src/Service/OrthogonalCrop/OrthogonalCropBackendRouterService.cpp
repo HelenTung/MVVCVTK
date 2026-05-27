@@ -3,6 +3,10 @@
 // 分类: Service / Backend Router Implementation
 // 说明: 在 image plugin 与 polydata clip 之间统一分发请求，并回填统一结果模型。
 // =====================================================================
+// 这里不重新发明裁切算法：
+// - image 输入沿用 algorithm/plugin 的 mask / extract 语义
+// - polydata 输入只负责把同一份 cropData 翻译成 implicit function 后做 clip
+// - 两条路径最后都折叠成统一结果模型，供上层按同一种方式读取
 
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
 
@@ -181,6 +185,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const OrthogonalCropRequest& request) const
 {
+    // 统计入口与执行入口保持同样的路由规则，避免“能统计但不能执行”来自不同后端的歧义。
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
         return GetImageStatistics(request);
@@ -193,6 +198,8 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
+    // 真正执行时沿用与统计一致的 active data source 选择，
+    // 这样 preview 日志里的 statistics/result 不会来自两条不同路径。
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
         return GetImageResult(request);
@@ -215,6 +222,9 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     auto clip = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
     clip->SetInputData(polyData);
     clip->SetClipFunction(clipFunction);
+
+    // removalMode 在 polydata 路径里直接映射到 InsideOut，
+    // 保证“保留盒内 / 移除盒内”与 image 路径保持同一语义名称。
     if (removalMode == CropRemovalMode::KeepInside) {
         clip->InsideOutOn();
     }
@@ -387,6 +397,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetImageStatistics(const OrthogonalCropRequest& request) const
 {
+    // image 路径的真实统计仍由 plugin/algorithm 计算；router 只负责把 resolved 字段补完整。
     auto statistics = m_imageService.GetStatistics(request);
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
@@ -433,6 +444,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const OrthogonalCropRequest& request) const
 {
+    // image 结果主体全部来自 plugin；router 只做来源与后端标记补齐。
     auto result = m_imageService.GetResult(request);
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
@@ -444,6 +456,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const Or
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const OrthogonalCropRequest& request) const
 {
+    // polydata 路径没有 image plugin 那样的统一结果实现，
+    // 因此 router 自己负责把 clip 后的数据与统计重新封装成标准结果对象。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);

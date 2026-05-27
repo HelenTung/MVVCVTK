@@ -3,6 +3,9 @@
 // 分类: Service / Widget Controller Implementation
 // 说明: 封装 vtkBoxWidget2 的构造、启停、observer 绑定与 bounds 回调翻译。
 // =====================================================================
+// - 下层只接触 VTK widget 细节
+// - 上层只拿到 bounds 与 phase
+// - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
 
@@ -47,6 +50,7 @@ OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
 
 void OrthogonalCropWidgetStateController::SetInteractor(vtkRenderWindowInteractor* interactor)
 {
+    // widget 与 interactor 的绑定始终在这里完成，避免上层直接碰 vtkBoxWidget2。
     m_interactor = interactor;
     m_widget->SetInteractor(interactor);
 }
@@ -87,6 +91,9 @@ bool OrthogonalCropWidgetStateController::GetPlanes(vtkPlanes* planes) const
     }
 
     m_representation->GetPlanes(planes);
+
+    // 这里返回的是 widget 当前几何状态的即时快照，
+    // 供交互桥在需要 3D 主模型临时 clip 时读取，不持久缓存到控制器外部。
     return planes->GetPoints() && planes->GetNormals();
 }
 
@@ -183,6 +190,7 @@ void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventI
     m_currentBounds = bounds;
     if (m_boundsChangedCallback) {
         // 这里不做任何 preview / 算法调用，只把纯状态变化上抛给交互桥。
+        // 因此 dragging 与 released 的不同处理策略，完全由桥接层决定。
         m_boundsChangedCallback(m_currentBounds, GetInteractionPhaseFromEvent(eventId));
     }
 }

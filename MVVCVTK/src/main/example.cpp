@@ -28,6 +28,12 @@ OrthogonalCrop 模块路径速查：
 4. 由一个主窗口发起 SetFileLoadedAsync
 5. 所有窗口 SetRendered / SetInteractorInitialized
 6. 由一个窗口进入 SetStarted()
+
+OrthogonalCrop 流程速记：
+- 交互入口在 OrthogonalCropInteractionBridgeService，负责 widget、坐标转换和 preview 分发。
+- 算法入口在 OrthogonalCropAlgorithm，负责把 request 折叠成统一 cropData，并分流到 virtual / physical 两条路径。
+- image 输入默认走 mask / extract 语义，polydata 输入默认走 implicit function + clip 语义。
+- 2D 窗口主要消费 overlay mask，3D 主窗口在必要时会额外套一层临时 polydata clip 预览。
 =====================================================================
 */
 
