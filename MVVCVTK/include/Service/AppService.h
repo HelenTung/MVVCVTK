@@ -136,6 +136,10 @@ public:
         return p;
     }
 
+    int GetNavigationAxis() const override {
+        return m_currentStrategy ? m_currentStrategy->GetNavigationAxis() : -1;
+    }
+
     // 模型变换扩展：统一走 InteractionComputeService 的静态计算逻辑。
     // 原生依赖对象：m_sharedState。
     void SetModelTransform(double translate[3], double rotate[3], double scale[3]);

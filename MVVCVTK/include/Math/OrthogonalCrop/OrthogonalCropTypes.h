@@ -390,6 +390,12 @@ public:
         m_boundsMode = boundsMode;
     }
 
+    // 明确声明本次请求使用完整输入范围，不消费其它 bounds payload 字段。
+    void SetInputVolumeBounds()
+    {
+        m_boundsMode = CropBoundsMode::InputVolumeBounds;
+    }
+
     // 返回本次请求是 VirtualCrop 还是 PhysicalCrop。
     CropExecutionMode GetExecutionMode() const
     {
@@ -426,6 +432,13 @@ public:
         m_rasBounds = rasBounds;
     }
 
+    // 用 min/max bounds 完整定义请求，同时切换到对应 bounds mode。
+    void SetMinMaxCoordinates(const std::array<double, 6>& rasBounds)
+    {
+        m_boundsMode = CropBoundsMode::MinMaxCoordinates;
+        m_rasBounds = rasBounds;
+    }
+
     // 返回世界坐标中的中心点定义。
     const std::array<double, 3>& GetCenter() const
     {
@@ -447,6 +460,16 @@ public:
     // 写入世界坐标中的尺寸定义。
     void SetDimensions(const std::array<double, 3>& dimensions)
     {
+        m_dimensions = dimensions;
+    }
+
+    // 用世界中心点和尺寸完整定义请求，同时切换到对应 bounds mode。
+    void SetCenterAndDimensions(
+        const std::array<double, 3>& center,
+        const std::array<double, 3>& dimensions)
+    {
+        m_boundsMode = CropBoundsMode::CenterAndDimensions;
+        m_center = center;
         m_dimensions = dimensions;
     }
 
@@ -472,6 +495,18 @@ public:
     void SetLocalDimensions(const std::array<double, 3>& dimensions)
     {
         m_localDimensions = dimensions;
+    }
+
+    // 用局部中心点、局部尺寸和对齐矩阵完整定义请求，同时切换到对应 bounds mode。
+    void SetLocalCenterAndDimensions(
+        const std::array<double, 3>& center,
+        const std::array<double, 3>& dimensions,
+        const std::array<double, 16>& localAlignmentMatrix)
+    {
+        m_boundsMode = CropBoundsMode::LocalCenterAndDimensions;
+        m_localCenter = center;
+        m_localDimensions = dimensions;
+        m_localAlignmentMatrix = localAlignmentMatrix;
     }
 
     // 返回局部坐标系到世界坐标系的对齐矩阵。

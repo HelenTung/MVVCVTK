@@ -167,6 +167,7 @@
     <ClInclude Include="include\Strategies\IsoSurfaceStrategy.h" />
     <ClInclude Include="include\Utils\MemMappedFile.h" />
     <ClInclude Include="include\Strategies\MultiSliceStrategy.h" />
+    <ClInclude Include="include\Strategies\OrthogonalCropPreviewStrategy\OrthogonalCropPreviewOverlayStrategy.h" />
     <ClInclude Include="include\Strategies\SliceStrategy.h" />
     <ClInclude Include="include\Render\StdRenderContext.h" />
     <ClInclude Include="include\Render\StrategyFactory.h" />

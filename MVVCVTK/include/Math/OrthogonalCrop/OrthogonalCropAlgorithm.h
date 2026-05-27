@@ -21,7 +21,10 @@
 #include <string>
 
 #include <vtkCubeSource.h>
+#include <vtkExtractVOI.h>
+#include <vtkImageChangeInformation.h>
 #include <vtkImageData.h>
+#include <vtkImageMask.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOutlineSource.h>
 #include <vtkPointData.h>
@@ -183,8 +186,10 @@ inline std::size_t GetEffectiveAvailableRamBytes(
 
 inline vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     vtkImageData* image,
+    const CropDataModel& cropData,
     const std::array<int, 6>& ijkBounds,
-    CropRemovalMode removalMode)
+    CropRemovalMode removalMode,
+    std::size_t* insideVoxelCount = nullptr)
 {
     if (!image) {
         return nullptr;
@@ -206,26 +211,147 @@ inline vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
     const unsigned char insideValue = removalMode == CropRemovalMode::KeepInside ? 255 : 0;
     const unsigned char outsideValue = removalMode == CropRemovalMode::KeepInside ? 0 : 255;
+    const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
+    std::memset(maskPtr, outsideValue, static_cast<std::size_t>(totalVoxelCount));
 
-    for (int k = 0; k < dims[2]; ++k) {
-        for (int j = 0; j < dims[1]; ++j) {
-            for (int i = 0; i < dims[0]; ++i) {
-                const bool isInside = i >= ijkBounds[0] && i <= ijkBounds[1]
-                    && j >= ijkBounds[2] && j <= ijkBounds[3]
-                    && k >= ijkBounds[4] && k <= ijkBounds[5];
-                const vtkIdType linearIndex = static_cast<vtkIdType>(k) * dims[0] * dims[1]
-                    + static_cast<vtkIdType>(j) * dims[0]
-                    + i;
-                maskPtr[linearIndex] = isInside ? insideValue : outsideValue;
+    const int minI = std::max(0, ijkBounds[0]);
+    const int maxI = std::min(dims[0] - 1, ijkBounds[1]);
+    const int minJ = std::max(0, ijkBounds[2]);
+    const int maxJ = std::min(dims[1] - 1, ijkBounds[3]);
+    const int minK = std::max(0, ijkBounds[4]);
+    const int maxK = std::min(dims[2] - 1, ijkBounds[5]);
+    if (minI > maxI || minJ > maxJ || minK > maxK) {
+        if (insideVoxelCount) {
+            *insideVoxelCount = 0;
+        }
+        maskImage->Modified();
+        return maskImage;
+    }
+
+    const bool useLocalBounds = cropData.GetLocalAlignmentEnabled();
+
+    if (!useLocalBounds) {
+        const int width = maxI - minI + 1;
+        const int height = maxJ - minJ + 1;
+        const int depth = maxK - minK + 1;
+        const vtkIdType rowStride = dims[0];
+        const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
+        for (int k = minK; k <= maxK; ++k) {
+            for (int j = minJ; j <= maxJ; ++j) {
+                const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
+                    + static_cast<vtkIdType>(j) * rowStride
+                    + minI;
+                std::memset(maskPtr + rowStart, insideValue, static_cast<std::size_t>(width));
+            }
+        }
+
+        if (insideVoxelCount) {
+            *insideVoxelCount = static_cast<std::size_t>(width) * height * depth;
+        }
+        maskImage->Modified();
+        return maskImage;
+    }
+
+    auto modelToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    auto localToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    const auto& localAlignmentMatrix = cropData.GetLocalAlignmentMatrix();
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            localToModelMatrix->SetElement(row, col, localAlignmentMatrix[row * 4 + col]);
+        }
+    }
+    vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
+
+    std::array<double, 16> modelToLocal = { 0.0 };
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            modelToLocal[row * 4 + col] = modelToLocalMatrix->GetElement(row, col);
+        }
+    }
+
+    const auto localCenter = cropData.GetLocalCenter();
+    const auto localDimensions = cropData.GetLocalDimensions();
+    const std::array<double, 3> localHalfDimensions = {
+        localDimensions[0] * 0.5,
+        localDimensions[1] * 0.5,
+        localDimensions[2] * 0.5
+    };
+    std::size_t countedInsideVoxelCount = 0;
+    const vtkIdType rowStride = dims[0];
+    const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
+    const double stepX = modelToLocal[0] * spacing[0];
+    const double stepY = modelToLocal[4] * spacing[0];
+    const double stepZ = modelToLocal[8] * spacing[0];
+    const double stepW = modelToLocal[12] * spacing[0];
+
+    for (int k = minK; k <= maxK; ++k) {
+        const double modelZ = origin[2] + spacing[2] * static_cast<double>(k);
+        for (int j = minJ; j <= maxJ; ++j) {
+            const double modelX = origin[0] + spacing[0] * static_cast<double>(minI);
+            const double modelY = origin[1] + spacing[1] * static_cast<double>(j);
+            double localXRaw = modelToLocal[0] * modelX + modelToLocal[1] * modelY + modelToLocal[2] * modelZ + modelToLocal[3];
+            double localYRaw = modelToLocal[4] * modelX + modelToLocal[5] * modelY + modelToLocal[6] * modelZ + modelToLocal[7];
+            double localZRaw = modelToLocal[8] * modelX + modelToLocal[9] * modelY + modelToLocal[10] * modelZ + modelToLocal[11];
+            double localWRaw = modelToLocal[12] * modelX + modelToLocal[13] * modelY + modelToLocal[14] * modelZ + modelToLocal[15];
+
+            for (int i = minI; i <= maxI; ++i) {
+                const double invW = std::abs(localWRaw) > 1e-12 ? 1.0 / localWRaw : 1.0;
+                const double localX = localXRaw * invW;
+                const double localY = localYRaw * invW;
+                const double localZ = localZRaw * invW;
+                const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
+                    && localX <= localCenter[0] + localHalfDimensions[0]
+                    && localY >= localCenter[1] - localHalfDimensions[1]
+                    && localY <= localCenter[1] + localHalfDimensions[1]
+                    && localZ >= localCenter[2] - localHalfDimensions[2]
+                    && localZ <= localCenter[2] + localHalfDimensions[2];
+
+                if (isInside) {
+                    ++countedInsideVoxelCount;
+                    const vtkIdType linearIndex = static_cast<vtkIdType>(k) * sliceStride
+                        + static_cast<vtkIdType>(j) * rowStride
+                        + i;
+                    maskPtr[linearIndex] = insideValue;
+                }
+
+                localXRaw += stepX;
+                localYRaw += stepY;
+                localZRaw += stepZ;
+                localWRaw += stepW;
             }
         }
     }
 
     maskImage->Modified();
+    if (insideVoxelCount) {
+        *insideVoxelCount = countedInsideVoxelCount;
+    }
     return maskImage;
 }
 
-inline vtkSmartPointer<vtkImageData> GetPhysicalCroppedImage(
+inline vtkSmartPointer<vtkImageData> GetImageLinkedToMask(
+    vtkImageData* image,
+    vtkImageData* maskImage,
+    double maskedOutputValue = 0.0,
+    bool invertMask = false)
+{
+    if (!image || !maskImage) {
+        return nullptr;
+    }
+
+    auto maskFilter = vtkSmartPointer<vtkImageMask>::New();
+    maskFilter->SetImageInputData(image);
+    maskFilter->SetMaskInputData(maskImage);
+    maskFilter->SetMaskedOutputValue(maskedOutputValue);
+    maskFilter->SetNotMask(invertMask ? 1 : 0);
+    maskFilter->Update();
+
+    auto output = vtkSmartPointer<vtkImageData>::New();
+    output->ShallowCopy(maskFilter->GetOutput());
+    return output;
+}
+
+inline vtkSmartPointer<vtkImageData> GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& ijkBounds)
 {
@@ -245,26 +371,35 @@ inline vtkSmartPointer<vtkImageData> GetPhysicalCroppedImage(
     image->GetSpacing(spacing);
     image->GetOrigin(origin);
 
-    auto croppedImage = vtkSmartPointer<vtkImageData>::New();
-    croppedImage->SetDimensions(width, height, depth);
-    croppedImage->SetSpacing(spacing);
-    croppedImage->SetOrigin(
+    const double outputOrigin[3] = {
         origin[0] + spacing[0] * ijkBounds[0],
         origin[1] + spacing[1] * ijkBounds[2],
-        origin[2] + spacing[2] * ijkBounds[4]);
-    croppedImage->AllocateScalars(image->GetScalarType(), image->GetNumberOfScalarComponents());
+        origin[2] + spacing[2] * ijkBounds[4]
+    };
 
-    const std::size_t rowBytes = static_cast<std::size_t>(width) * GetImageBytesPerVoxel(image);
-    for (int k = 0; k < depth; ++k) {
-        for (int j = 0; j < height; ++j) {
-            void* srcRow = image->GetScalarPointer(ijkBounds[0], ijkBounds[2] + j, ijkBounds[4] + k);
-            void* dstRow = croppedImage->GetScalarPointer(0, j, k);
-            std::memcpy(dstRow, srcRow, rowBytes);
-        }
-    }
+    auto extract = vtkSmartPointer<vtkExtractVOI>::New();
+    extract->SetInputData(image);
+    extract->SetVOI(
+        ijkBounds[0], ijkBounds[1],
+        ijkBounds[2], ijkBounds[3],
+        ijkBounds[4], ijkBounds[5]);
 
-    croppedImage->Modified();
-    return croppedImage;
+    auto normalizeInformation = vtkSmartPointer<vtkImageChangeInformation>::New();
+    normalizeInformation->SetInputConnection(extract->GetOutputPort());
+    normalizeInformation->SetOutputExtentStart(0, 0, 0);
+    normalizeInformation->SetOutputOrigin(outputOrigin);
+    normalizeInformation->Update();
+
+    auto output = vtkSmartPointer<vtkImageData>::New();
+    output->ShallowCopy(normalizeInformation->GetOutput());
+    return output;
+}
+
+inline vtkSmartPointer<vtkImageData> GetPhysicalCroppedImage(
+    vtkImageData* image,
+    const std::array<int, 6>& ijkBounds)
+{
+    return GetExtractedImage(image, ijkBounds);
 }
 
 inline vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData)
@@ -317,7 +452,8 @@ public:
         const std::array<double, 6>& inputBounds,
         const std::array<double, 6>& rasBounds,
         OrthogonalCropFailureReason& failureReason,
-        std::string& message)
+        std::string& message,
+        bool allowPartialOverlap = false)
     {
         if (!(rasBounds[0] < rasBounds[1] && rasBounds[2] < rasBounds[3] && rasBounds[4] < rasBounds[5])) {
             failureReason = OrthogonalCropFailureReason::InvalidBounds;
@@ -325,13 +461,29 @@ public:
             return false;
         }
 
+        bool overlapsInput = true;
         for (int axis = 0; axis < 3; ++axis) {
+            if (rasBounds[axis * 2 + 1] < inputBounds[axis * 2 + 0]
+                || rasBounds[axis * 2 + 0] > inputBounds[axis * 2 + 1]) {
+                overlapsInput = false;
+            }
+
             if (rasBounds[axis * 2 + 0] < inputBounds[axis * 2 + 0]
                 || rasBounds[axis * 2 + 1] > inputBounds[axis * 2 + 1]) {
+                if (allowPartialOverlap) {
+                    continue;
+                }
+
                 failureReason = OrthogonalCropFailureReason::BoundsOutOfRange;
                 message = "Crop bounds exceed the source volume bounds.";
                 return false;
             }
+        }
+
+        if (allowPartialOverlap && !overlapsInput) {
+            failureReason = OrthogonalCropFailureReason::BoundsOutOfRange;
+            message = "Crop bounds do not overlap the source volume bounds.";
+            return false;
         }
 
         failureReason = OrthogonalCropFailureReason::None;
@@ -345,17 +497,12 @@ public:
         vtkImageData* image,
         const std::array<double, 6>& rasBounds,
         OrthogonalCropFailureReason& failureReason,
-        std::string& message)
+        std::string& message,
+        bool allowPartialOverlap = false)
     {
         if (!image) {
             failureReason = OrthogonalCropFailureReason::InputImageMissing;
             message = "Input image is null.";
-            return false;
-        }
-
-        if (!(rasBounds[0] < rasBounds[1] && rasBounds[2] < rasBounds[3] && rasBounds[4] < rasBounds[5])) {
-            failureReason = OrthogonalCropFailureReason::InvalidBounds;
-            message = "Crop bounds are invalid because min is not smaller than max.";
             return false;
         }
 
@@ -369,7 +516,8 @@ public:
             },
             rasBounds,
             failureReason,
-            message);
+            message,
+            allowPartialOverlap);
     }
 
     // 把一次 request 解析为稳定的 CropDataModel。
@@ -379,7 +527,8 @@ public:
         const OrthogonalCropRequest& request,
         CropDataModel& cropData,
         OrthogonalCropFailureReason& failureReason,
-        std::string& message)
+        std::string& message,
+        bool allowPartialOverlap = false)
     {
         cropData = CropDataModel();
         cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
@@ -411,7 +560,7 @@ public:
             break;
         }
 
-        return GetBoundsAreValid(inputBounds, cropData.GetRasBounds(), failureReason, message);
+        return GetBoundsAreValid(inputBounds, cropData.GetRasBounds(), failureReason, message, allowPartialOverlap);
     }
 
     // image 路径版本的 request 归一化入口；先读取 image bounds，再复用通用重载。
@@ -420,7 +569,8 @@ public:
         const OrthogonalCropRequest& request,
         CropDataModel& cropData,
         OrthogonalCropFailureReason& failureReason,
-        std::string& message)
+        std::string& message,
+        bool allowPartialOverlap = false)
     {
         if (!image) {
             failureReason = OrthogonalCropFailureReason::InputImageMissing;
@@ -439,7 +589,8 @@ public:
             request,
             cropData,
             failureReason,
-            message);
+            message,
+            allowPartialOverlap);
     }
 
     // 把世界坐标裁切盒吸附到 image 的整数 IJK 边界。
@@ -447,6 +598,26 @@ public:
     static std::array<int, 6> GetSnappedVoxelBounds(vtkImageData* image, const CropDataModel& cropData)
     {
         return OrthogonalCropInternal::GetSnappedIjkBounds(image, cropData);
+    }
+
+    static vtkSmartPointer<vtkImageData> GetImageLinkedToMask(
+        vtkImageData* image,
+        vtkImageData* maskImage,
+        double maskedOutputValue = 0.0,
+        bool invertMask = false)
+    {
+        return OrthogonalCropInternal::GetImageLinkedToMask(
+            image,
+            maskImage,
+            maskedOutputValue,
+            invertMask);
+    }
+
+    static vtkSmartPointer<vtkImageData> GetExtractedImage(
+        vtkImageData* image,
+        const std::array<int, 6>& ijkBounds)
+    {
+        return OrthogonalCropInternal::GetExtractedImage(image, ijkBounds);
     }
 
     // 基于已经归一化好的 cropData 做纯统计估算。
@@ -461,7 +632,12 @@ public:
         OrthogonalCropStatistics statistics;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string validationMessage;
-        if (!GetBoundsAreValid(image, cropData.GetRasBounds(), failureReason, validationMessage)) {
+        if (!GetBoundsAreValid(
+            image,
+            cropData.GetRasBounds(),
+            failureReason,
+            validationMessage,
+            executionMode == CropExecutionMode::VirtualCrop)) {
             statistics.SetFailureReason(failureReason);
             statistics.SetValidationMessage(validationMessage);
             return statistics;
@@ -518,7 +694,8 @@ public:
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string message;
-        if (!GetCropDataModel(image, request, cropData, failureReason, message)) {
+        const bool allowPartialOverlap = request.GetExecutionMode() == CropExecutionMode::VirtualCrop;
+        if (!GetCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
             statistics.SetFailureReason(failureReason);
             statistics.SetValidationMessage(message);
             return statistics;
@@ -548,7 +725,7 @@ public:
 
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string validationMessage;
-        if (!GetBoundsAreValid(image, cropData.GetRasBounds(), failureReason, validationMessage)) {
+        if (!GetBoundsAreValid(image, cropData.GetRasBounds(), failureReason, validationMessage, true)) {
             result.SetFailureReason(failureReason);
             result.SetMessage(validationMessage);
             return result;
@@ -557,10 +734,18 @@ public:
         const auto statistics = GetStatistics(image, cropData, removalMode, CropExecutionMode::VirtualCrop);
         result.SetStatistics(statistics);
         result.SetFailureReason(statistics.GetFailureReason());
+        std::size_t exactInsideVoxelCount = statistics.GetInsideVoxelCount();
         result.SetVirtualMaskImage(OrthogonalCropInternal::GetVirtualMaskImage(
             image,
+            cropData,
             statistics.GetSnappedIjkBounds(),
-            removalMode));
+            removalMode,
+            &exactInsideVoxelCount));
+        if (cropData.GetLocalAlignmentEnabled()) {
+            auto exactStatistics = statistics;
+            exactStatistics.SetInsideVoxelCount(exactInsideVoxelCount);
+            result.SetStatistics(exactStatistics);
+        }
         result.SetOutlinePolyData(OrthogonalCropInternal::GetOutlinePolyData(cropData));
         result.SetSucceeded(result.GetVirtualMaskImage() != nullptr);
         if (!result.GetSucceeded()) {
@@ -662,7 +847,8 @@ public:
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string message;
-        if (!GetCropDataModel(image, request, cropData, failureReason, message)) {
+        const bool allowPartialOverlap = request.GetExecutionMode() == CropExecutionMode::VirtualCrop;
+        if (!GetCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
             result.SetFailureReason(failureReason);
             result.SetMessage(message);
             return result;

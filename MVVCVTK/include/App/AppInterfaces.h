@@ -235,6 +235,7 @@ public:
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }
+    virtual int GetNavigationAxis() const { return -1; }
     virtual WindowLevelParams GetWindowLevel() const { return {}; }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
     virtual void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}

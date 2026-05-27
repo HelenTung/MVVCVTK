@@ -10,20 +10,29 @@
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
+#include "OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.h"
 #include "AppService.h"
 
-#include <vtkCommand.h>
+#include <vtkActor.h>
+#include <vtkDataArray.h>
+#include <vtkDoubleArray.h>
+#include <vtkPlanes.h>
+#include <vtkPoints.h>
+#include <vtkMatrix4x4.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkRenderWindowInteractor.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
-class OrthogonalCropInteractionBridgeService : public OrthogonalCropBackendRouterService {
+class OrthogonalCropInteractionBridgeService {
 public:
     // 交互桥接层启动时就把 widget 事件统一接到本类的状态更新入口，
     // 后续只需要维护 bounds/phase，不需要在 main 里直接碰 widget 细节。
@@ -33,6 +42,71 @@ public:
             [this](const std::array<double, 6>& bounds, CropInteractionPhase phase) {
                 HandleWidgetBoundsChanged(bounds, phase);
             });
+    }
+
+    void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
+    {
+        CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetInputImage, std::move(image));
+    }
+
+    void SetInputImage(vtkSmartPointer<vtkImageData> image)
+    {
+        CropPreInit_SetInputImage(std::move(image));
+    }
+
+    vtkSmartPointer<vtkImageData> GetInputImage() const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetInputImage);
+    }
+
+    void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
+    {
+        CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetInputPolyData, std::move(polyData));
+    }
+
+    void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
+    {
+        CropPreInit_SetInputPolyData(std::move(polyData));
+    }
+
+    vtkSmartPointer<vtkPolyData> GetInputPolyData() const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetInputPolyData);
+    }
+
+    void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource)
+    {
+        CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetPreferredDataSource, dataSource);
+    }
+
+    void SetPreferredDataSource(OrthogonalCropDataSource dataSource)
+    {
+        CropPreInit_SetPreferredDataSource(dataSource);
+    }
+
+    OrthogonalCropDataSource GetActiveDataSource() const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetActiveDataSource);
+    }
+
+    std::array<double, 6> GetActiveInputBounds() const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetActiveInputBounds);
+    }
+
+    OrthogonalCropRequest GetDefaultRequest() const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetDefaultRequest);
+    }
+
+    OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetStatistics, request);
+    }
+
+    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const
+    {
+        return CallBackend(&OrthogonalCropBackendRouterService::GetResult, request);
     }
 
     // 数据管理器仅作为输入兜底来源：当外部还没显式 SetInputImage 时，
@@ -55,8 +129,8 @@ public:
     {
         m_referenceRenderService = std::move(referenceService);
         // 如果外部没有单独提供参考服务，就退化成“借用第一个 preview 服务做坐标转换”。
-        if (!m_referenceRenderService && !m_previewRenderServices.empty()) {
-            m_referenceRenderService = m_previewRenderServices.front();
+        if (!m_referenceRenderService) {
+            m_referenceRenderService = GetFirstPreviewRenderService();
         }
     }
 
@@ -65,8 +139,8 @@ public:
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices)
     {
         // 每次都按外部最新注册结果整体替换，避免旧窗口残留在 preview 联动列表里。
-        m_previewRenderServices.clear();
-        m_previewRenderServices.reserve(previewRenderServices.size());
+        ClearPreviewRenderTargets();
+        m_previewRenderTargets.reserve(previewRenderServices.size());
 
         // 逐个经过 null/重复过滤，保证后续 SetDirtyMarked 不会重复打同一窗口。
         for (const auto& service : previewRenderServices) {
@@ -74,68 +148,29 @@ public:
         }
 
         // reference 未单独设置时，默认借用第一个 preview 服务做世界/模型坐标换算。
-        if (!m_referenceRenderService && !m_previewRenderServices.empty()) {
-            m_referenceRenderService = m_previewRenderServices.front();
+        if (!m_referenceRenderService) {
+            m_referenceRenderService = GetFirstPreviewRenderService();
         }
     }
 
-    // 热键入口只做状态切换，不在按键回调里直接做重型计算。
-    // O 负责进入/退出裁切，Esc 退出，1/2 临时切换 inside/outside removal mode。
-    void HandleHotkey(vtkRenderWindowInteractor* interactor, unsigned long eventId)
+    bool ToggleInteractiveCrop()
     {
-        if (!interactor) {
-            return;
-        }
+        return ActivateInteractiveCrop();
+    }
 
-        // 先把 VTK 原始输入统一归一化成当前逻辑真正关心的几类按键语义。
-        const std::string keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
-        const char keyCode = interactor->GetKeyCode();
+    bool ExitInteractiveCrop()
+    {
+        return DeactivateInteractiveCrop();
+    }
 
-        const bool isInsideKey = keyCode == '1' || keySym == "1";
-        const bool isOutsideKey = keyCode == '2' || keySym == "2";
-        const bool isToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
+    void ToggleInsidePreview()
+    {
+        TogglePreview(CropRemovalMode::KeepInside, true);
+    }
 
-        if (eventId == vtkCommand::KeyPressEvent) {
-            // O 是模式切换键：已经激活就退出，否则就尝试进入裁切模式。
-            if (isToggleKey) {
-                ExecuteDemo();
-                return;
-            }
-
-            // Esc 只负责退出裁切，不修改当前 bounds。
-            if (keySym == "Escape") {
-                DeactivateDemo();
-                return;
-            }
-
-            // 1/2 是瞬时模式键：只改当前 removal mode，不直接改几何范围。
-            if (isInsideKey) {
-                m_keepInsideShortcutDown = true;
-                UpdateRemovalModeFromShortcuts(true);
-                return;
-            }
-
-            if (isOutsideKey) {
-                m_keepOutsideShortcutDown = true;
-                UpdateRemovalModeFromShortcuts(true);
-                return;
-            }
-        }
-
-        if (eventId == vtkCommand::KeyReleaseEvent) {
-            // 快捷键释放后立即恢复默认语义，并在需要时重新推 preview。
-            if (isInsideKey) {
-                m_keepInsideShortcutDown = false;
-                UpdateRemovalModeFromShortcuts(true);
-                return;
-            }
-
-            if (isOutsideKey) {
-                m_keepOutsideShortcutDown = false;
-                UpdateRemovalModeFromShortcuts(true);
-                return;
-            }
-        }
+    void ToggleOutsidePreview()
+    {
+        TogglePreview(CropRemovalMode::RemoveInside, true);
     }
 
     // 回到默认裁切盒，并可选择是否立即推一次 preview。
@@ -153,16 +188,19 @@ public:
         // 再把这份状态同步回 widget，保证 UI 和内部缓存重新对齐。
         m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds());
         m_widgetStateController.SetWidgetBounds(m_currentBounds);
-        // reset 是否立刻触发 preview 由调用方决定，避免某些场景下重复刷新。
-        if (updatePreview) {
+        // reset 是否立刻触发 preview 由调用方决定；但只有 preview 已开启时才真正裁预览。
+        if (updatePreview && m_previewEnabled) {
             UpdatePreviewFromCurrentBounds(true);
+        }
+        else if (updatePreview) {
+            RestorePreviewRenderTargets();
         }
         return true;
     }
 
-    // 进入裁切模式时只初始化 widget 状态和一次 preview，
+    // 进入裁切模式时只初始化 widget 状态；preview 由 1/2 显式切换。
     // 后续拖拽过程中的同步由 widget callback 驱动。
-    bool ExecuteDemo()
+    bool ActivateInteractiveCrop()
     {
         // 第一步：确认已经有活跃输入；Auto 模式下这里也会尝试走 data manager 兜底。
         if (!EnsureInputReady()) {
@@ -172,7 +210,7 @@ public:
 
         // O 键再次触发时直接退出，保持 toggle 语义一致。
         if (m_cropInteractionEnabled) {
-            DeactivateDemo();
+            DeactivateInteractiveCrop();
             return true;
         }
 
@@ -198,19 +236,24 @@ public:
             return false;
         }
 
-        // widget 成功后再切业务状态，并主动推一次初始 preview，保证所有 preview 窗口与当前 bounds 对齐。
+        // widget 成功后只进入交互状态，不主动裁主模型；预览必须由 1/2 显式触发。
         m_cropInteractionEnabled = true;
         m_lastInteractionPhase = CropInteractionPhase::Released;
-        UpdatePreviewFromCurrentBounds(true);
+        RestorePreviewRenderTargets();
         std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
             << GetDataSourceText(GetActiveDataSource())
-            << ". Hold 1 to keep inside, hold 2 to keep outside, press O or Esc to exit." << std::endl;
+            << ". Press 1 to toggle inside preview, press 2 to toggle outside preview; press O or Esc to exit." << std::endl;
         return true;
     }
 
+    bool ExecuteDemo()
+    {
+        return ActivateInteractiveCrop();
+    }
+
     // 退出裁切模式时保留当前 bounds，但撤掉 widget 交互占用，
-    // 这样 3D 模型可继续旋转，同时 preview 仍保持最后一次结果。
-    bool DeactivateDemo()
+    // 这样 3D 模型可继续旋转，同时临时 preview 会恢复成完整模型。
+    bool DeactivateInteractiveCrop()
     {
         if (!m_cropInteractionEnabled) {
             return false;
@@ -219,20 +262,39 @@ public:
         // 先撤掉 widget 占用，让 3D 窗口立刻恢复普通导航交互。
         m_widgetStateController.SetEnabled(false);
         m_cropInteractionEnabled = false;
-        // 清理瞬时快捷键状态，并把 removal mode 回退到默认值。
-        m_keepInsideShortcutDown = false;
-        m_keepOutsideShortcutDown = false;
-        m_currentRemovalMode = m_defaultRemovalMode;
+        // 退出时撤销临时预览，主模型回到完整状态。
+        m_previewEnabled = false;
         m_lastInteractionPhase = CropInteractionPhase::Released;
-        // 退出模式时保留最后一份 bounds，因此需要把 preview 语义也稳定到退出后的默认 removal mode 上。
-        if (m_boundsInitialized) {
-            UpdatePreviewFromCurrentBounds(false);
-        }
+        RestorePreviewRenderTargets();
         std::cout << "[Main] Orthogonal crop widget deactivated. 3D navigation restored." << std::endl;
         return true;
     }
 
+    bool DeactivateDemo()
+    {
+        return DeactivateInteractiveCrop();
+    }
+
 private:
+    template <typename BackendMethod, typename... Args>
+    decltype(auto) CallBackend(BackendMethod method, Args&&... args)
+    {
+        return (m_backend.*method)(std::forward<Args>(args)...);
+    }
+
+    template <typename BackendMethod, typename... Args>
+    decltype(auto) CallBackend(BackendMethod method, Args&&... args) const
+    {
+        return (m_backend.*method)(std::forward<Args>(args)...);
+    }
+
+    struct PreviewRenderTarget {
+        std::shared_ptr<AbstractInteractiveService> service;
+        std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
+        vtkPolyDataMapper* mainPreviewMapper = nullptr;
+        vtkSmartPointer<vtkPolyData> mainPreviewSourcePolyData;
+    };
+
     // 统一把 min/max bounds 展开成 8 个角点，供世界/模型坐标转换复用。
     static std::array<std::array<double, 3>, 8> GetCornersFromBounds(const std::array<double, 6>& bounds)
     {
@@ -308,8 +370,8 @@ private:
         m_currentBounds = bounds;
         m_boundsInitialized = true;
         m_lastInteractionPhase = phase;
-        // 只有 released 才做 preview，dragging 期间只保留轻量状态同步。
-        if (phase == CropInteractionPhase::Released) {
+        // 只有 preview 已开启且 released 才做重算，dragging 期间只保留轻量状态同步。
+        if (m_previewEnabled && phase == CropInteractionPhase::Released) {
             UpdatePreviewFromCurrentBounds(true);
         }
     }
@@ -387,10 +449,25 @@ private:
         return GetTransformedBounds(modelBounds, true);
     }
 
-    // 算法请求仍然吃模型坐标 bounds，因此 preview 前需要做一次反向映射。
-    std::array<double, 6> GetModelBoundsFromWorldBounds(const std::array<double, 6>& worldBounds) const
+    // LocalCenterAndDimensions 需要一份 local -> model 矩阵；交互盒 local 定义在世界坐标中，
+    // 因此这里使用 reference service 的 model matrix 反矩阵，把世界盒子映射回模型空间。
+    std::array<double, 16> GetWorldToModelMatrix() const
     {
-        return GetTransformedBounds(worldBounds, false);
+        if (!m_referenceRenderService) {
+            return GetIdentityMatrixArray();
+        }
+
+        auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+        matrix->Invert();
+
+        std::array<double, 16> matrixData = { 0.0 };
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                matrixData[row * 4 + col] = matrix->GetElement(row, col);
+            }
+        }
+        return matrixData;
     }
 
     // preview 请求固定走 VirtualCrop，目的是做轻量联动预览，不在交互层做物理裁切。
@@ -398,9 +475,19 @@ private:
     {
         // 先拿后端默认 request，继承数据源、矩阵和默认执行语义。
         auto previewRequest = GetDefaultRequest();
-        // 再覆盖成交互层真正关心的世界裁切盒 -> 模型裁切盒、虚拟裁切模式和当前 removal mode。
-        previewRequest.SetBoundsMode(CropBoundsMode::MinMaxCoordinates);
-        previewRequest.SetRasBounds(GetModelBoundsFromWorldBounds(m_currentBounds));
+        // 再把世界坐标中的 widget 盒子作为 local crop 定义交给算法，避免模型旋转后退化成过宽的轴对齐盒。
+        previewRequest.SetLocalCenterAndDimensions(
+            {
+                (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
+                (m_currentBounds[2] + m_currentBounds[3]) * 0.5,
+                (m_currentBounds[4] + m_currentBounds[5]) * 0.5
+            },
+            {
+                m_currentBounds[1] - m_currentBounds[0],
+                m_currentBounds[3] - m_currentBounds[2],
+                m_currentBounds[5] - m_currentBounds[4]
+            },
+            GetWorldToModelMatrix());
         previewRequest.SetExecutionMode(CropExecutionMode::VirtualCrop);
         previewRequest.SetRemovalMode(m_currentRemovalMode);
 
@@ -443,8 +530,8 @@ private:
             return;
         }
 
-        // 第四步：只有成功结果才通知真正的 preview 服务列表设脏重绘。
-        SetPreviewServicesDirty();
+        // 第四步：只有成功结果才把 result 投递到 overlay，并通知真正的 preview 服务列表重绘。
+        const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
 
         // 最后再做日志输出，打印此次 preview 真正落到的数据源、backend 和当前 bounds。
         if (logStats) {
@@ -465,6 +552,8 @@ private:
                 << previewStats.GetOutputVoxelCount()
                 << ", removal = "
                 << GetRemovalModeText(m_currentRemovalMode)
+                << ", main3D = "
+                << (main3DPreviewApplied ? "PolyDataClip" : "OverlayOnly")
                 << ", bounds = ["
                 << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
                 << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
@@ -473,33 +562,102 @@ private:
         }
     }
 
-    // 1/2 是瞬时按键状态，不是永久配置；只有 removal mode 真变化时才刷新 preview。
-    void UpdateRemovalModeFromShortcuts(bool logStats)
+    // 1/2 的具体绑定在 main 中完成；bridge 只接收抽象 preview 动作。
+    void TogglePreview(CropRemovalMode removalMode, bool logStats)
     {
-        // 默认先回到“保留内部”，只有按住 2 时才切到 remove-inside。
-        CropRemovalMode nextRemovalMode = m_defaultRemovalMode;
-        if (m_keepOutsideShortcutDown) {
-            nextRemovalMode = CropRemovalMode::RemoveInside;
-        }
-        else if (m_keepInsideShortcutDown) {
-            nextRemovalMode = CropRemovalMode::KeepInside;
-        }
-
-        // 模式没变就不重复推 preview，避免按键抖动造成无意义刷新。
-        if (nextRemovalMode == m_currentRemovalMode) {
+        if (!m_cropInteractionEnabled) {
             return;
         }
 
-        m_currentRemovalMode = nextRemovalMode;
-        std::cout << "[Main] Orthogonal crop removal mode: "
-            << GetRemovalModeText(m_currentRemovalMode)
-            << std::endl;
+        if (m_previewEnabled && m_currentRemovalMode == removalMode) {
+            m_previewEnabled = false;
+            RestorePreviewRenderTargets();
+            if (logStats) {
+                std::cout << "[Main] Orthogonal crop preview restored full model." << std::endl;
+            }
+            return;
+        }
+
+        m_previewEnabled = true;
+        m_currentRemovalMode = removalMode;
+        if (logStats) {
+            std::cout << "[Main] Orthogonal crop preview mode: "
+                << GetRemovalModeText(m_currentRemovalMode)
+                << std::endl;
+        }
 
         // 拖拽中不重算 preview；等释放后会走 bounds changed 的 released 分支统一刷新。
         if (m_cropInteractionEnabled
             && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
             UpdatePreviewFromCurrentBounds(logStats);
         }
+    }
+
+    static std::array<double, 3> GetNormalTransformedToModel(
+        const std::array<double, 16>& modelToWorldMatrix,
+        const double worldNormal[3])
+    {
+        std::array<double, 3> modelNormal = {
+            modelToWorldMatrix[0] * worldNormal[0] + modelToWorldMatrix[4] * worldNormal[1] + modelToWorldMatrix[8] * worldNormal[2],
+            modelToWorldMatrix[1] * worldNormal[0] + modelToWorldMatrix[5] * worldNormal[1] + modelToWorldMatrix[9] * worldNormal[2],
+            modelToWorldMatrix[2] * worldNormal[0] + modelToWorldMatrix[6] * worldNormal[1] + modelToWorldMatrix[10] * worldNormal[2]
+        };
+        const double length = std::sqrt(modelNormal[0] * modelNormal[0]
+            + modelNormal[1] * modelNormal[1]
+            + modelNormal[2] * modelNormal[2]);
+        if (length > 1e-12) {
+            modelNormal[0] /= length;
+            modelNormal[1] /= length;
+            modelNormal[2] /= length;
+        }
+        return modelNormal;
+    }
+
+    vtkSmartPointer<vtkPlanes> GetCurrentWidgetPlanesInModel() const
+    {
+        auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
+        if (!m_widgetStateController.GetPlanes(worldPlanes)) {
+            return nullptr;
+        }
+
+        auto worldPoints = worldPlanes->GetPoints();
+        auto worldNormals = worldPlanes->GetNormals();
+        if (!worldPoints || !worldNormals) {
+            return nullptr;
+        }
+
+        const vtkIdType planeCount = worldPoints->GetNumberOfPoints();
+        if (planeCount <= 0 || worldNormals->GetNumberOfTuples() < planeCount) {
+            return nullptr;
+        }
+
+        auto modelPlanes = vtkSmartPointer<vtkPlanes>::New();
+        auto modelPoints = vtkSmartPointer<vtkPoints>::New();
+        auto modelNormals = vtkSmartPointer<vtkDoubleArray>::New();
+        modelPoints->SetNumberOfPoints(planeCount);
+        modelNormals->SetNumberOfComponents(3);
+        modelNormals->SetNumberOfTuples(planeCount);
+
+        const auto modelToWorldMatrix = m_referenceRenderService
+            ? m_referenceRenderService->GetModelMatrix()
+            : GetIdentityMatrixArray();
+
+        for (vtkIdType planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
+            double worldPoint[3] = { 0.0, 0.0, 0.0 };
+            double modelPoint[3] = { 0.0, 0.0, 0.0 };
+            double worldNormal[3] = { 0.0, 0.0, 0.0 };
+            worldPoints->GetPoint(planeIndex, worldPoint);
+            worldNormals->GetTuple(planeIndex, worldNormal);
+
+            GetModelPositionFromWorld(worldPoint, modelPoint);
+            const auto modelNormal = GetNormalTransformedToModel(modelToWorldMatrix, worldNormal);
+            modelPoints->SetPoint(planeIndex, modelPoint);
+            modelNormals->SetTuple3(planeIndex, modelNormal[0], modelNormal[1], modelNormal[2]);
+        }
+
+        modelPlanes->SetPoints(modelPoints);
+        modelPlanes->SetNormals(modelNormals);
+        return modelPlanes;
     }
 
     // 把 failureReason 枚举转成稳定日志文本，避免多个调用点重复写 switch。
@@ -576,6 +734,41 @@ private:
         }
     }
 
+    // 返回 preview 列表里的第一个有效服务，供 reference service 未显式设置时兜底。
+    std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const
+    {
+        for (const auto& target : m_previewRenderTargets) {
+            if (target.service) {
+                return target.service;
+            }
+        }
+        return nullptr;
+    }
+
+    // 切换 preview 列表前，先把旧 overlay 从旧服务上摘掉，避免目标窗口残留旧叠加层。
+    void ClearPreviewRenderTargets()
+    {
+        for (const auto& target : m_previewRenderTargets) {
+            if (target.service && target.overlayStrategy) {
+                target.service->SetOverlayStrategyRemoved(target.overlayStrategy);
+            }
+        }
+        m_previewRenderTargets.clear();
+    }
+
+    void RestorePreviewRenderTargets()
+    {
+        for (auto& target : m_previewRenderTargets) {
+            if (target.overlayStrategy) {
+                target.overlayStrategy->ClearPreview();
+            }
+            RestoreMainPolyDataPreview(target);
+            if (target.service) {
+                target.service->SetDirtyMarked();
+            }
+        }
+    }
+
     // 向 preview 列表追加一个服务，同时做 null 和重复过滤。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service)
     {
@@ -584,25 +777,104 @@ private:
             return;
         }
 
-        // 同一个服务只保留一份，防止后面重复 SetDirtyMarked。
-        if (std::find(m_previewRenderServices.begin(), m_previewRenderServices.end(), service) != m_previewRenderServices.end()) {
+        // 同一个服务只保留一份，防止后面重复挂 overlay 或重复 SetDirtyMarked。
+        const auto sameTarget = std::find_if(
+            m_previewRenderTargets.begin(),
+            m_previewRenderTargets.end(),
+            [service](const PreviewRenderTarget& target) {
+                return target.service == service;
+            });
+        if (sameTarget != m_previewRenderTargets.end()) {
             return;
         }
 
-        m_previewRenderServices.push_back(service);
+        auto overlayStrategy = std::make_shared<OrthogonalCropPreviewOverlayStrategy>();
+        service->SetOverlayStrategyAdded(overlayStrategy);
+        m_previewRenderTargets.push_back({ service, overlayStrategy });
     }
 
     // 真正需要联动的只是 preview 服务列表，而不是所有注册过的服务。
-    void SetPreviewServicesDirty()
+    bool SetPreviewServicesDirty(const OrthogonalCropResult& previewResult)
     {
-        for (const auto& service : m_previewRenderServices) {
-            if (service) {
-                // bridge 不直接操作渲染细节，只通过设脏通知各目标服务自行刷新。
-                service->SetDirtyMarked();
+        bool main3DPreviewApplied = false;
+        for (auto& target : m_previewRenderTargets) {
+            if (target.service && target.overlayStrategy) {
+                target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
+                target.overlayStrategy->SetRemovalMode(m_currentRemovalMode);
+                target.overlayStrategy->SetCropResult(previewResult);
+                main3DPreviewApplied = SetMainPolyDataPreviewApplied(target, previewResult) || main3DPreviewApplied;
+                target.service->SetDirtyMarked();
+            }
+        }
+        return main3DPreviewApplied;
+    }
+
+    void RestoreMainPolyDataPreview(PreviewRenderTarget& target)
+    {
+        if (!target.mainPreviewMapper || !target.mainPreviewSourcePolyData) {
+            return;
+        }
+
+        target.mainPreviewMapper->SetInputData(target.mainPreviewSourcePolyData);
+        target.mainPreviewMapper->Update();
+
+        if (target.service) {
+            auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
+            if (actor) {
+                actor->Modified();
             }
         }
     }
 
+    bool SetMainPolyDataPreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult)
+    {
+        if (!target.service || target.service->GetNavigationAxis() >= 0 || !previewResult.GetSucceeded()) {
+            return false;
+        }
+
+        auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
+        if (!actor) {
+            return false;
+        }
+
+        auto mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+        if (!mapper) {
+            return false;
+        }
+
+        if (target.mainPreviewMapper != mapper || !target.mainPreviewSourcePolyData) {
+            mapper->Update();
+            auto source = mapper->GetInput();
+            if (!source || source->GetNumberOfPoints() == 0) {
+                return false;
+            }
+
+            target.mainPreviewMapper = mapper;
+            target.mainPreviewSourcePolyData = vtkSmartPointer<vtkPolyData>::New();
+            target.mainPreviewSourcePolyData->ShallowCopy(source);
+        }
+
+        auto clipPlanes = GetCurrentWidgetPlanesInModel();
+        if (!clipPlanes) {
+            return false;
+        }
+
+        auto clipped = OrthogonalCropBackendRouterService::GetClippedPolyData(
+            target.mainPreviewSourcePolyData,
+            clipPlanes,
+            m_currentRemovalMode);
+        if (!clipped) {
+            return false;
+        }
+
+        mapper->SetInputData(clipped);
+        mapper->Update();
+        actor->Modified();
+        return true;
+    }
+
+    // 后端路由由 bridge 组合持有，避免交互层在类型上伪装成 backend service。
+    OrthogonalCropBackendRouterService m_backend;
     // 输入兜底来源，只在 Auto 模式且外部尚未显式绑定输入时参与补齐。
     std::shared_ptr<AbstractDataManager> m_dataMgr;
     // widget 唯一挂载的 interactor，一般来自主 3D 参考窗口。
@@ -611,22 +883,18 @@ private:
     bool m_cropInteractionEnabled = false;
     // 当前 bounds 是否已被初始化过；避免对零 bounds 做无效 preview。
     bool m_boundsInitialized = false;
-    // 按住 1 时暂时保持 inside 视图语义。
-    bool m_keepInsideShortcutDown = false;
-    // 按住 2 时临时切到 remove-inside，从而表现为 keep outside。
-    bool m_keepOutsideShortcutDown = false;
+    // 当前是否正在由 1/2 快捷键显示裁切预览。
+    bool m_previewEnabled = false;
     // 记录最近一次 widget 交互阶段，防止拖拽过程中重复触发 preview。
     CropInteractionPhase m_lastInteractionPhase = CropInteractionPhase::Idle;
-    // 默认 removal mode 是交互退出或快捷键释放后的回退目标。
-    CropRemovalMode m_defaultRemovalMode = CropRemovalMode::KeepInside;
     // 当前真正下发给 preview 请求的 removal mode。
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
     // widget 当前维护的世界坐标 bounds，也是所有 preview 的唯一输入源。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 只负责 vtkBoxWidget2 的生命周期和 UI 状态，不承担业务计算。
     OrthogonalCropWidgetStateController m_widgetStateController;
-    // 只做坐标参考，不参与 preview 设脏列表。
+    // 只做坐标参考；外部也可以把同一个服务加入 preview 列表显示结果。
     std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;
-    // 真正需要跟随 preview 结果刷新的目标服务列表。
-    std::vector<std::shared_ptr<AbstractInteractiveService>> m_previewRenderServices;
+    // 真正需要跟随 preview 结果刷新的目标服务和对应 overlay。
+    std::vector<PreviewRenderTarget> m_previewRenderTargets;
 };

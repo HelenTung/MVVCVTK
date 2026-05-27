@@ -35,6 +35,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"
 #include <vtkCommand.h>
+#include <vtkRenderWindowInteractor.h>
 
 #include <cmath>
 #include <chrono>
@@ -53,10 +54,63 @@ public:
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
         if (!iren) return;
 
-        if (orthogonalCropBridge) {
-            orthogonalCropBridge->HandleHotkey(iren, eventId);
+        if (!orthogonalCropBridge) {
+            return;
+        }
+
+        const std::string keySym = iren->GetKeySym() ? iren->GetKeySym() : "";
+        const char keyCode = iren->GetKeyCode();
+        const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
+        const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
+        const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
+
+        if (eventId == vtkCommand::KeyPressEvent) {
+            if (isCropToggleKey && !m_cropToggleKeyDown) {
+                m_cropToggleKeyDown = true;
+                orthogonalCropBridge->ToggleInteractiveCrop();
+                return;
+            }
+
+            if (keySym == "Escape") {
+                orthogonalCropBridge->ExitInteractiveCrop();
+                return;
+            }
+
+            if (isInsidePreviewKey && !m_insidePreviewKeyDown) {
+                m_insidePreviewKeyDown = true;
+                orthogonalCropBridge->ToggleInsidePreview();
+                return;
+            }
+
+            if (isOutsidePreviewKey && !m_outsidePreviewKeyDown) {
+                m_outsidePreviewKeyDown = true;
+                orthogonalCropBridge->ToggleOutsidePreview();
+                return;
+            }
+        }
+
+        if (eventId == vtkCommand::KeyReleaseEvent) {
+            if (isCropToggleKey) {
+                m_cropToggleKeyDown = false;
+                return;
+            }
+
+            if (isInsidePreviewKey) {
+                m_insidePreviewKeyDown = false;
+                return;
+            }
+
+            if (isOutsidePreviewKey) {
+                m_outsidePreviewKeyDown = false;
+                return;
+            }
         }
     }
+
+private:
+    bool m_cropToggleKeyDown = false;
+    bool m_insidePreviewKeyDown = false;
+    bool m_outsidePreviewKeyDown = false;
 };
 
 static std::pair<
@@ -178,7 +232,7 @@ int main()
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
-    orthogonalCropBridge->SetPreviewRenderServices({ serviceB, serviceC, serviceD, serviceE });
+    orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
@@ -225,7 +279,7 @@ int main()
                 return;
             }
 
-            std::cout << "[Main] Orthogonal crop armed. Press O to toggle axis-aligned crop editing, Esc to exit crop mode, hold 1 keep inside, hold 2 keep outside." << std::endl;
+            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview." << std::endl;
 
             //// 触发孔隙分析算法
             //SurfaceParams surfP;
@@ -326,7 +380,7 @@ int main()
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop widget | Esc = exit crop mode | hold 1 = keep inside | hold 2 = keep outside\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

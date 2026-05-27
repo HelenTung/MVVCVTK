@@ -3,45 +3,27 @@
 #include "OrthogonalCrop/OrthogonalCropPluginService.h"
 
 #include <vtkBox.h>
-#include <vtkExtractVOI.h>
+#include <vtkDoubleArray.h>
 #include <vtkGeometryFilter.h>
+#include <vtkImplicitFunction.h>
+#include <vtkMatrix4x4.h>
+#include <vtkPlanes.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkTableBasedClipDataSet.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <utility>
 
-// Router 层对 bridge 暴露统一后端接口，屏蔽 image/polydata 的实现差异。
-class IOrthogonalCropBackendService {
-public:
-    virtual ~IOrthogonalCropBackendService() = default;
-
-    // 绑定 image 输入，供 image backend 做 virtual/physical crop。
-    virtual void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image) = 0;
-    // 绑定 polydata 输入，供 polydata backend 做 box clip。
-    virtual void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData) = 0;
-    // 显式声明优先数据源；Auto 则由 router 按当前输入自行判断。
-    virtual void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource) = 0;
-    // 返回当前真正可用的后端数据源。
-    virtual OrthogonalCropDataSource GetActiveDataSource() const = 0;
-    // 返回当前活跃输入对象的原始 bounds。
-    virtual std::array<double, 6> GetActiveInputBounds() const = 0;
-    // 生成一份后端默认请求，供上层继续填充交互态字段。
-    virtual OrthogonalCropRequest GetDefaultRequest() const = 0;
-    // 只查询统计信息，不保证带出 derived data。
-    virtual OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const = 0;
-    // 返回一次完整执行结果，必要时附带 derived image/polydata。
-    virtual OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const = 0;
-};
-
 // 在 image-only 插件和 polydata clip 之间做统一路由的桥接服务。
-class OrthogonalCropBackendRouterService : public IOrthogonalCropBackendService {
+class OrthogonalCropBackendRouterService {
 public:
-    void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image) override
+    void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
     {
         m_imageService.SetInputImage(std::move(image));
     }
@@ -58,7 +40,7 @@ public:
         return m_imageService.GetInputImage();
     }
 
-    void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData) override
+    void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
     {
         m_inputPolyData = std::move(polyData);
     }
@@ -75,7 +57,7 @@ public:
         return m_inputPolyData;
     }
 
-    void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource) override
+    void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource)
     {
         m_preferredDataSource = dataSource;
     }
@@ -87,7 +69,7 @@ public:
     }
 
     // 优先尊重显式偏好，其次按当前已有输入回退到可执行后端。
-    OrthogonalCropDataSource GetActiveDataSource() const override
+    OrthogonalCropDataSource GetActiveDataSource() const
     {
         const bool hasImage = GetInputImage() != nullptr;
         const bool hasPolyData = m_inputPolyData != nullptr;
@@ -115,7 +97,7 @@ public:
     }
 
     // 对上层隐藏 image/polydata 分支，统一返回当前活跃输入的 bounds。
-    std::array<double, 6> GetActiveInputBounds() const override
+    std::array<double, 6> GetActiveInputBounds() const
     {
         std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         switch (GetActiveDataSource()) {
@@ -129,7 +111,7 @@ public:
     }
 
     // image 路径复用原插件默认请求；polydata 路径在这里补齐一份等价默认值。
-    OrthogonalCropRequest GetDefaultRequest() const override
+    OrthogonalCropRequest GetDefaultRequest() const
     {
         if (GetActiveDataSource() == OrthogonalCropDataSource::ImageData) {
             // image 路径直接沿用原插件默认 request，保持既有行为一致。
@@ -163,7 +145,7 @@ public:
     }
 
     // 统计查询只负责选择后端，不附带额外 UI 语义。
-    OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const override
+    OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const
     {
         switch (GetActiveDataSource()) {
         case OrthogonalCropDataSource::ImageData:
@@ -176,7 +158,7 @@ public:
     }
 
     // 完整结果查询会补齐 resolved source/backend，并在需要时生成 derived data。
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const override
+    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const
     {
         switch (GetActiveDataSource()) {
         case OrthogonalCropDataSource::ImageData:
@@ -188,53 +170,20 @@ public:
         }
     }
 
-protected:
-    // KeepInside preview 或 physical crop 都需要真正抽取一块 VOI。
-    static vtkSmartPointer<vtkImageData> GetExtractedImage(
-        vtkImageData* image,
-        const std::array<int, 6>& ijkBounds)
-    {
-        if (!image) {
-            return nullptr;
-        }
-
-        // 先通过 vtkExtractVOI 从原体数据中截出目标子块。
-        auto extract = vtkSmartPointer<vtkExtractVOI>::New();
-        extract->SetInputData(image);
-        extract->SetVOI(
-            ijkBounds[0], ijkBounds[1],
-            ijkBounds[2], ijkBounds[3],
-            ijkBounds[4], ijkBounds[5]);
-        extract->Update();
-
-        // 再 shallow copy 一份稳定输出，避免调用方继续依赖 filter 生命周期。
-        auto output = vtkSmartPointer<vtkImageData>::New();
-        output->ShallowCopy(extract->GetOutput());
-        return output;
-    }
-
-    // polydata 路径统一采用 box clip，再经 geometry filter 输出最终 polydata。
-    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
+    // polydata 路径统一采用 VTK implicit mask/function，再经 geometry filter 输出最终 polydata。
+    // 这里不关心上游是 box、planes 还是 cylinder mask，保持后端入口可复用。
+    static vtkSmartPointer<vtkPolyData> GetMaskedPolyData(
         vtkPolyData* polyData,
-        const CropDataModel& cropData,
+        vtkImplicitFunction* maskFunction,
         CropRemovalMode removalMode)
     {
-        if (!polyData) {
+        if (!polyData || !maskFunction) {
             return nullptr;
         }
 
-        // 第一步：把 cropData 的 RAS bounds 组装成 clip function 用的 vtkBox。
-        auto box = vtkSmartPointer<vtkBox>::New();
-        const auto rasBounds = cropData.GetRasBounds();
-        box->SetBounds(
-            rasBounds[0], rasBounds[1],
-            rasBounds[2], rasBounds[3],
-            rasBounds[4], rasBounds[5]);
-
-        // 第二步：对输入 dataset 执行 box clip，并按 removal mode 切换 inside/outside 语义。
         auto clip = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
         clip->SetInputData(polyData);
-        clip->SetClipFunction(box);
+        clip->SetClipFunction(maskFunction);
         if (removalMode == CropRemovalMode::KeepInside) {
             clip->InsideOutOn();
         }
@@ -243,15 +192,126 @@ protected:
         }
         clip->Update();
 
-        // 第三步：clip 输出可能仍是 dataset，这里统一过一层 geometry filter 得到 polydata。
         auto geometry = vtkSmartPointer<vtkGeometryFilter>::New();
         geometry->SetInputConnection(clip->GetOutputPort());
         geometry->Update();
 
-        // 最后 shallow copy 一份结果，避免依赖中间 filter 生命周期。
         auto output = vtkSmartPointer<vtkPolyData>::New();
         output->ShallowCopy(geometry->GetOutput());
         return output;
+    }
+
+    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
+        vtkPolyData* polyData,
+        vtkImplicitFunction* clipFunction,
+        CropRemovalMode removalMode)
+    {
+        return GetMaskedPolyData(polyData, clipFunction, removalMode);
+    }
+
+    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
+        vtkPolyData* polyData,
+        const CropDataModel& cropData,
+        CropRemovalMode removalMode)
+    {
+        return GetClippedPolyData(polyData, GetClipFunction(cropData), removalMode);
+    }
+
+protected:
+    static std::array<double, 3> GetPointTransformed(
+        const std::array<double, 16>& matrix,
+        const std::array<double, 3>& point)
+    {
+        const double x = matrix[0] * point[0] + matrix[1] * point[1] + matrix[2] * point[2] + matrix[3];
+        const double y = matrix[4] * point[0] + matrix[5] * point[1] + matrix[6] * point[2] + matrix[7];
+        const double z = matrix[8] * point[0] + matrix[9] * point[1] + matrix[10] * point[2] + matrix[11];
+        const double w = matrix[12] * point[0] + matrix[13] * point[1] + matrix[14] * point[2] + matrix[15];
+        const double invW = std::abs(w) > 1e-12 ? 1.0 / w : 1.0;
+        return { x * invW, y * invW, z * invW };
+    }
+
+    static std::array<double, 3> GetNormalTransformed(
+        const std::array<double, 16>& modelToLocalMatrix,
+        const std::array<double, 3>& localNormal)
+    {
+        std::array<double, 3> normal = {
+            modelToLocalMatrix[0] * localNormal[0] + modelToLocalMatrix[4] * localNormal[1] + modelToLocalMatrix[8] * localNormal[2],
+            modelToLocalMatrix[1] * localNormal[0] + modelToLocalMatrix[5] * localNormal[1] + modelToLocalMatrix[9] * localNormal[2],
+            modelToLocalMatrix[2] * localNormal[0] + modelToLocalMatrix[6] * localNormal[1] + modelToLocalMatrix[10] * localNormal[2]
+        };
+        const double length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+        if (length > 1e-12) {
+            normal[0] /= length;
+            normal[1] /= length;
+            normal[2] /= length;
+        }
+        return normal;
+    }
+
+    static std::array<double, 16> GetMatrixInverted(const std::array<double, 16>& matrixData)
+    {
+        auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                matrix->SetElement(row, col, matrixData[row * 4 + col]);
+            }
+        }
+        matrix->Invert();
+
+        std::array<double, 16> inverted = { 0.0 };
+        for (int row = 0; row < 4; ++row) {
+            for (int col = 0; col < 4; ++col) {
+                inverted[row * 4 + col] = matrix->GetElement(row, col);
+            }
+        }
+        return inverted;
+    }
+
+    static vtkSmartPointer<vtkImplicitFunction> GetClipFunction(const CropDataModel& cropData)
+    {
+        if (!cropData.GetLocalAlignmentEnabled()) {
+            auto box = vtkSmartPointer<vtkBox>::New();
+            const auto rasBounds = cropData.GetRasBounds();
+            box->SetBounds(
+                rasBounds[0], rasBounds[1],
+                rasBounds[2], rasBounds[3],
+                rasBounds[4], rasBounds[5]);
+            return box;
+        }
+
+        auto planes = vtkSmartPointer<vtkPlanes>::New();
+        auto points = vtkSmartPointer<vtkPoints>::New();
+        auto normals = vtkSmartPointer<vtkDoubleArray>::New();
+        points->SetNumberOfPoints(6);
+        normals->SetNumberOfComponents(3);
+        normals->SetNumberOfTuples(6);
+
+        const auto& localToModel = cropData.GetLocalAlignmentMatrix();
+        const auto modelToLocal = GetMatrixInverted(localToModel);
+        const auto localCenter = cropData.GetLocalCenter();
+        const auto localDimensions = cropData.GetLocalDimensions();
+
+        int planeIndex = 0;
+        for (int axis = 0; axis < 3; ++axis) {
+            for (int signIndex = 0; signIndex < 2; ++signIndex) {
+                const double sign = signIndex == 0 ? -1.0 : 1.0;
+                auto localPoint = localCenter;
+                localPoint[axis] += sign * localDimensions[axis] * 0.5;
+
+                std::array<double, 3> localNormal = { 0.0, 0.0, 0.0 };
+                localNormal[axis] = sign;
+
+                const auto modelPoint = GetPointTransformed(localToModel, localPoint);
+                const auto modelNormal = GetNormalTransformed(modelToLocal, localNormal);
+                points->SetPoint(planeIndex, modelPoint[0], modelPoint[1], modelPoint[2]);
+                normals->SetTuple3(planeIndex, modelNormal[0], modelNormal[1], modelNormal[2]);
+                ++planeIndex;
+            }
+        }
+
+        planes->SetPoints(points);
+        planes->SetNormals(normals);
+        return planes;
     }
 
 private:
@@ -331,18 +391,41 @@ private:
             message);
     }
 
+    // polydata 路径用一次 clip 结果同时回填统计，避免 GetResult 里重复执行昂贵裁切。
+    OrthogonalCropStatistics GetPolyDataStatisticsFromClipped(vtkPolyData* clipped) const
+    {
+        OrthogonalCropStatistics statistics;
+        statistics.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
+        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
+
+        if (!m_inputPolyData) {
+            statistics.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
+            statistics.SetValidationMessage("Input polydata is null.");
+            return statistics;
+        }
+
+        if (!clipped) {
+            statistics.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
+            statistics.SetValidationMessage("Failed to build clipped polydata.");
+            return statistics;
+        }
+
+        statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+        statistics.SetTotalVoxelCount(static_cast<std::size_t>(m_inputPolyData->GetNumberOfCells()));
+        statistics.SetInsideVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
+        statistics.SetOutputVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
+        statistics.SetCanExecutePhysicalCrop(true);
+        return statistics;
+    }
+
     // image 统计复用原 image-only 插件，再补 resolved source/backend 信息。
     OrthogonalCropStatistics GetImageStatistics(const OrthogonalCropRequest& request) const
     {
         // 先复用 image-only 插件已有统计结果。
         auto statistics = m_imageService.GetStatistics(request);
         statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-        // 再根据执行模式和 removal mode 回填这次真正采用的 image backend。
-        if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
-            && request.GetRemovalMode() == CropRemovalMode::KeepInside) {
-            statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageExtractVOI);
-        }
-        else if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
+        // preview 一律走 virtual mask；物理裁切才标记为真正的 VOI 抽取。
+        if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
             statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
         }
         else {
@@ -385,13 +468,7 @@ private:
             return statistics;
         }
 
-        // polydata 路径没有 voxel 概念，这里统一用 cell 数量近似表达 total/inside/output。
-        statistics.SetFailureReason(OrthogonalCropFailureReason::None);
-        statistics.SetTotalVoxelCount(static_cast<std::size_t>(m_inputPolyData->GetNumberOfCells()));
-        statistics.SetInsideVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
-        statistics.SetOutputVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
-        statistics.SetCanExecutePhysicalCrop(true);
-        return statistics;
+        return GetPolyDataStatisticsFromClipped(clipped);
     }
 
     // image 完整结果优先沿用原插件，仅在需要 extracted preview 时额外构建 derived image。
@@ -409,9 +486,8 @@ private:
             return result;
         }
 
-        // 只有 physical crop 或 keep-inside 预览才需要真正抽取一份 image 子块。
-        const bool useExtractPreview = request.GetExecutionMode() == CropExecutionMode::PhysicalCrop
-            || request.GetRemovalMode() == CropRemovalMode::KeepInside;
+        // preview 只给 overlay 提供 mask/outline；只有 physical crop 才真正抽取一份 image 子块。
+        const bool useExtractPreview = request.GetExecutionMode() == CropExecutionMode::PhysicalCrop;
         if (!useExtractPreview) {
             result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
             return result;
@@ -428,7 +504,7 @@ private:
 
         // 用统计阶段已经 snap 好的 IJK bounds 提取真正的 derived image。
         const auto snappedIjkBounds = result.GetStatistics().GetSnappedIjkBounds();
-        auto extractedImage = GetExtractedImage(image, snappedIjkBounds);
+        auto extractedImage = OrthogonalCropAlgorithm::GetExtractedImage(image, snappedIjkBounds);
         if (!extractedImage) {
             result.SetFailureReason(OrthogonalCropFailureReason::DerivedImageCreationFailed);
             result.SetMessage("Failed to build extracted preview image.");
@@ -451,16 +527,14 @@ private:
         result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
         result.SetCropStateModel(request.GetCropStateModel());
 
-        // 先复用统计路径，统一处理输入缺失、bounds 非法等前置失败。
-        const auto statistics = GetPolyDataStatistics(request);
-        result.SetStatistics(statistics);
-        result.SetFailureReason(statistics.GetFailureReason());
-        if (statistics.GetFailureReason() != OrthogonalCropFailureReason::None) {
-            result.SetMessage(statistics.GetValidationMessage());
+        // 输入缺失时直接返回失败结果，不进入后续归一化和 clip。
+        if (!m_inputPolyData) {
+            result.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
+            result.SetMessage("Input polydata is null.");
             return result;
         }
 
-        // 再归一化一次 cropData，用于结果中的 outline 和最终 clipped polydata 构建。
+        // 归一化一次 cropData，用于结果中的 outline、statistics 和最终 clipped polydata 构建。
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string message;
@@ -478,7 +552,10 @@ private:
             return result;
         }
 
+        const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
+
         // 成功后把几何数据、轮廓和派生 polydata 全部挂回 result。
+        result.SetStatistics(statistics);
         result.SetCropDataModel(cropData);
         result.SetOutlinePolyData(OrthogonalCropInternal::GetOutlinePolyData(cropData));
         result.SetDerivedPolyData(clipped);

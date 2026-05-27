@@ -15,6 +15,9 @@
     <Filter Include="include\Strategies\GapMeshOverlayStrategy">
       <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Strategies\OrthogonalCropPreviewStrategy">
+      <UniqueIdentifier>{fa7bc6d6-ef88-45af-b4a7-6adca0b3927d}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Utils">
       <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
     </Filter>
@@ -89,6 +92,9 @@
     </ClInclude>
     <ClInclude Include="include\Strategies\MultiSliceStrategy.h">
       <Filter>include\Strategies</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Strategies\OrthogonalCropPreviewStrategy\OrthogonalCropPreviewOverlayStrategy.h">
+      <Filter>include\Strategies\OrthogonalCropPreviewStrategy</Filter>
     </ClInclude>
     <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h">
       <Filter>include\Strategies</Filter>

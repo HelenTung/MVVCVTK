@@ -5,6 +5,7 @@
 #include <vtkBoxRepresentation.h>
 #include <vtkBoxWidget2.h>
 #include <vtkCommand.h>
+#include <vtkPlanes.h>
 #include <vtkProperty.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
@@ -93,6 +94,16 @@ public:
     const std::array<double, 6>& GetCurrentBounds() const
     {
         return m_currentBounds;
+    }
+
+    bool GetPlanes(vtkPlanes* planes) const
+    {
+        if (!planes || !m_representation) {
+            return false;
+        }
+
+        m_representation->GetPlanes(planes);
+        return planes->GetPoints() && planes->GetNormals();
     }
 
     // bounds 变化由 bridge 注册回调接收，用于驱动 preview 同步。
