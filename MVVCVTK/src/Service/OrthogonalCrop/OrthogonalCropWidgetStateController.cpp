@@ -1,3 +1,9 @@
+// =====================================================================
+// Path: MVVCVTK/src/Service/OrthogonalCrop/OrthogonalCropWidgetStateController.cpp
+// 分类: Service / Widget Controller Implementation
+// 说明: 封装 vtkBoxWidget2 的构造、启停、observer 绑定与 bounds 回调翻译。
+// =====================================================================
+
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
 
 #include <vtkProperty.h>
@@ -25,6 +31,7 @@ void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long
 
 OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
 {
+    // widget 外观在这里集中初始化；交互桥只消费 bounds，不再关心 VTK 风格细节。
     m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
@@ -50,6 +57,7 @@ void OrthogonalCropWidgetStateController::SetReferenceBounds(const std::array<do
         return;
     }
 
+    // referenceBounds 是 Enable 时的回退基准，同时也是第一次 PlaceWidget 的边界来源。
     m_referenceBounds = bounds;
     if (!GetBoundsAreValid(m_currentBounds)) {
         m_currentBounds = bounds;
@@ -96,6 +104,7 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
     EnsureObserversAdded();
 
     if (enabled) {
+        // 开启前保证 currentBounds 至少能从 referenceBounds 恢复出一份有效值。
         if (!GetBoundsAreValid(m_currentBounds)) {
             m_currentBounds = m_referenceBounds;
         }
@@ -129,6 +138,7 @@ bool OrthogonalCropWidgetStateController::GetBoundsAreValid(const std::array<dou
 
 CropInteractionPhase OrthogonalCropWidgetStateController::GetInteractionPhaseFromEvent(unsigned long eventId)
 {
+    // Start/Interaction 一律视为拖拽中，只有 End 才切换到 Released。
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
         return CropInteractionPhase::Dragging;
@@ -147,6 +157,7 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
         return;
     }
 
+    // observer 只绑定一次，避免重复进入模式时收到多重回调。
     m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand);
@@ -171,6 +182,7 @@ void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventI
 
     m_currentBounds = bounds;
     if (m_boundsChangedCallback) {
+        // 这里不做任何 preview / 算法调用，只把纯状态变化上抛给交互桥。
         m_boundsChangedCallback(m_currentBounds, GetInteractionPhaseFromEvent(eventId));
     }
 }

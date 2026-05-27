@@ -1,3 +1,9 @@
+// =====================================================================
+// Path: MVVCVTK/src/Strategies/OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.cpp
+// 分类: Strategy / Preview Overlay Implementation
+// 说明: 把裁切结果拆成 3D outline、3D clipped polydata、2D mask slice 三类可视表现。
+// =====================================================================
+
 #include "OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.h"
 
 #include <vtkImageProperty.h>
@@ -6,6 +12,8 @@
 
 OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
 {
+    // 3D 区域体、outline、polydata 结果和 2D mask slice 在构造时全部建好，
+    // 后续每次 preview 只切换输入与可见性，避免频繁重建 prop。
     m_previewRegionActor = vtkSmartPointer<vtkActor>::New();
     m_previewRegionMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     m_previewRegionMapper->ScalarVisibilityOff();
@@ -95,6 +103,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         return;
     }
 
+    // outline 是所有窗口都共享的最低公共几何表示。
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -109,6 +118,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
+    // image 虚拟裁切结果通过 mask image 提供给 2D 切片窗口显示。
     auto maskImage = result.GetVirtualMaskImage();
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
@@ -130,6 +140,7 @@ void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
 void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (HasFlag(flags, UpdateFlags::Transform)) {
+        // 所有 3D prop 都跟随主模型矩阵，保持 overlay 与主内容严格对齐。
         SetPropTransform(m_previewRegionActor, params.modelMatrix);
         SetPropTransform(m_outlineActor, params.modelMatrix);
         SetPropTransform(m_polyDataActor, params.modelMatrix);
@@ -154,12 +165,15 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
 
         m_slicePlane->SetOrigin(params.cursor[0], params.cursor[1], params.cursor[2]);
         m_slicePlane->SetNormal(normal[0], normal[1], normal[2]);
+
+        // 2D 预览始终以当前窗口 cursor 所在切面切 mask。
         m_maskSlice->SetVisibility(true);
     }
 }
 
 void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
 {
+    // 3D 窗口显示实体区域，2D 窗口显示 mask slice，两者都保留 outline 作为共同参照。
     m_outlineActor->SetVisibility(m_hasOutline ? 1 : 0);
     m_previewRegionActor->SetVisibility(m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
@@ -167,6 +181,7 @@ void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
 
 void OrthogonalCropPreviewOverlayStrategy::ApplyRemovalVisualStyle()
 {
+    // KeepInside / RemoveInside 用同一套 prop，但通过颜色语义区分“保留”与“移除”。
     const bool keepInside = m_removalMode == CropRemovalMode::KeepInside;
     const double red = keepInside ? 0.10 : 1.0;
     const double green = keepInside ? 0.90 : 0.18;

@@ -1,5 +1,7 @@
 #pragma once
 // =====================================================================
+// Path: MVVCVTK/include/Math/OrthogonalCrop/OrthogonalCropTypes.h
+// 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
 // 设计约束：

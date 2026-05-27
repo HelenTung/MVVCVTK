@@ -1,3 +1,9 @@
+// =====================================================================
+// Path: MVVCVTK/src/Service/OrthogonalCrop/OrthogonalCropInteractionBridgeService.cpp
+// 分类: Service / Interaction Bridge Implementation
+// 说明: 维护交互态、构造 preview request、把结果分发给 overlay 与 3D 主模型预览。
+// =====================================================================
+
 #include "OrthogonalCrop/OrthogonalCropInteractionBridgeService.h"
 
 #include <vtkActor.h>
@@ -12,6 +18,7 @@
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
+    // widget controller 只负责发 bounds/phase；桥接层在这里接管后续业务流程。
     m_widgetStateController.SetBoundsChangedCallback(
         [this](const std::array<double, 6>& bounds, CropInteractionPhase phase) {
             HandleWidgetBoundsChanged(bounds, phase);
@@ -142,6 +149,7 @@ bool OrthogonalCropInteractionBridgeService::ResetInteractiveBoundsToDefault(boo
         return false;
     }
 
+    // 重置不仅要回写当前 bounds，还要同步 widget 与 phase，确保后续预览从一致状态起步。
     m_currentBounds = GetDefaultInteractiveBounds();
     m_boundsInitialized = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
@@ -178,6 +186,7 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
         m_boundsInitialized = true;
     }
 
+    // 进入交互模式时，widget 使用世界坐标 bounds；真正执行时再转回模型空间。
     m_widgetStateController.SetInteractor(m_primaryInteractor);
     m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds());
     m_widgetStateController.SetWidgetBounds(m_currentBounds);
@@ -226,6 +235,7 @@ bool OrthogonalCropInteractionBridgeService::EnsureInputReady()
         return true;
     }
 
+    // 只有在 router 仍找不到活跃输入时，才尝试从 data manager 兜底补 image。
     if (!GetInputImage() && m_dataMgr) {
         SetInputImage(m_dataMgr->GetVtkImage());
     }
@@ -271,6 +281,8 @@ void OrthogonalCropInteractionBridgeService::HandleWidgetBoundsChanged(
         return;
     }
 
+    // 交互过程中始终记录最新 bounds，但只在 Released 时同步 preview，
+    // 保持“拖拽只更新轻量 UI，预览结果在释放后统一刷新”的既有流程。
     m_currentBounds = bounds;
     m_boundsInitialized = true;
     m_lastInteractionPhase = phase;
@@ -351,6 +363,9 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
     auto previewRequest = GetDefaultRequest();
+
+    // widget 持有的是世界坐标轴对齐盒；preview request 始终折叠成
+    // LocalCenterAndDimensions + worldToModelMatrix，这样 image / polydata 两条后端都能复用同一套盒定义。
     previewRequest.SetLocalCenterAndDimensions(
         {
             (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
@@ -379,6 +394,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
+    // 预览刷新主流程固定为：当前 bounds -> request -> backend result -> overlay/3D preview。
     const auto previewRequest = BuildPreviewRequest();
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
@@ -403,6 +419,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
 
     if (logStats) {
+        // 统计日志优先使用 result 中的 resolved 信息；若上层未回填，则退回 statistics 字段。
         const auto dataSource = previewResult.GetResolvedDataSource() != OrthogonalCropDataSource::Auto
             ? previewResult.GetResolvedDataSource()
             : previewStats.GetResolvedDataSource();
@@ -437,6 +454,7 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
     }
 
     if (m_previewEnabled && m_currentRemovalMode == removalMode) {
+        // 再次触发同一模式表示关闭 preview，并恢复原始显示内容。
         m_previewEnabled = false;
         RestorePreviewRenderTargets();
         if (logStats) {
@@ -455,6 +473,7 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
 
     if (m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
+        // 非拖拽阶段才立即刷新；拖拽中依旧等待 EndInteractionEvent 统一触发。
         UpdatePreviewFromCurrentBounds(logStats);
     }
 }
@@ -467,6 +486,8 @@ vtkSmartPointer<vtkPlanes> OrthogonalCropInteractionBridgeService::GetCurrentWid
     }
 
     if (m_referenceRenderService) {
+        // vtkPlanes 内部 transform 会在求值时把模型点带到 widget 世界空间，
+        // 这样 3D 主模型 polydata clip 可以直接使用模型坐标输入。
         auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
         matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
 
@@ -560,6 +581,7 @@ std::shared_ptr<AbstractInteractiveService> OrthogonalCropInteractionBridgeServi
 
 void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 {
+    // 更新 preview 目标列表前，先把旧 overlay 从旧窗口解绑，避免残留 prop。
     for (const auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
             target.service->SetOverlayStrategyRemoved(target.overlayStrategy);
@@ -570,6 +592,7 @@ void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 
 void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
 {
+    // 退出 preview 时同时恢复 overlay 和 3D 主模型 mapper 输入。
     for (auto& target : m_previewRenderTargets) {
         if (target.overlayStrategy) {
             target.overlayStrategy->ClearPreview();
@@ -605,6 +628,8 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
 bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const OrthogonalCropResult& previewResult)
 {
     bool main3DPreviewApplied = false;
+
+    // 同一份 previewResult 同时喂给所有目标窗口，保证多窗口显示的一致性。
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
             target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
@@ -653,6 +678,7 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
     }
 
     if (target.mainPreviewMapper != mapper || !target.mainPreviewSourcePolyData) {
+        // 第一次进入该 3D 窗口 preview 时缓存原始主模型输入，后续退出时直接恢复。
         mapper->Update();
         auto source = mapper->GetInput();
         if (!source || source->GetNumberOfPoints() == 0) {
@@ -669,6 +695,8 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
         return false;
     }
 
+    // 3D 主模型预览始终基于原始 polydata + 当前 widget planes 重新 clip，
+    // 避免在连续切换 preview 时叠加裁切误差。
     auto clipped = OrthogonalCropBackendRouterService::GetClippedPolyData(
         target.mainPreviewSourcePolyData,
         clipPlanes,

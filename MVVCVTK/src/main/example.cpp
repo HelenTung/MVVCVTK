@@ -2,6 +2,21 @@
 =====================================================================
 example.cpp — 精简接入示例（对齐当前 main.cpp）
 
+OrthogonalCrop 模块路径速查：
+- Math / 数据模型：include/Math/OrthogonalCrop/OrthogonalCropTypes.h
+- Math / 算法接口：include/Math/OrthogonalCrop/OrthogonalCropAlgorithm.h
+- Math / 算法实现：src/Math/OrthogonalCrop/OrthogonalCropAlgorithm.cpp
+- Service / image 插件封装：include/Service/OrthogonalCrop/OrthogonalCropPluginService.h
+- Service / image 插件实现：src/Service/OrthogonalCrop/OrthogonalCropPluginService.cpp
+- Service / 后端路由：include/Service/OrthogonalCrop/OrthogonalCropBackendRouterService.h
+- Service / 后端路由实现：src/Service/OrthogonalCrop/OrthogonalCropBackendRouterService.cpp
+- Service / 交互桥：include/Service/OrthogonalCrop/OrthogonalCropInteractionBridgeService.h
+- Service / 交互桥实现：src/Service/OrthogonalCrop/OrthogonalCropInteractionBridgeService.cpp
+- Service / widget 状态控制：include/Service/OrthogonalCrop/OrthogonalCropWidgetStateController.h
+- Service / widget 状态控制实现：src/Service/OrthogonalCrop/OrthogonalCropWidgetStateController.cpp
+- Strategy / preview overlay：include/Strategies/OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.h
+- Strategy / preview overlay 实现：src/Strategies/OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.cpp
+
 用途：
 - 只保留当前项目最常用、最接近实际可复制调用的骨架。
 - 以 main.cpp 当前做法为准，不再保留 UML、模式说明、长篇职责文档。

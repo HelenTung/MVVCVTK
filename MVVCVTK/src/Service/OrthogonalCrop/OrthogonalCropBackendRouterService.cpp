@@ -1,3 +1,9 @@
+// =====================================================================
+// Path: MVVCVTK/src/Service/OrthogonalCrop/OrthogonalCropBackendRouterService.cpp
+// 分类: Service / Backend Router Implementation
+// 说明: 在 image plugin 与 polydata clip 之间统一分发请求，并回填统一结果模型。
+// =====================================================================
+
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
 
 #include <vtkBox.h>
@@ -13,6 +19,7 @@
 #include <utility>
 
 namespace {
+// 以齐次坐标方式变换裁切盒顶点，供 local-aligned polydata clip 生成 planes。
 std::array<double, 3> GetPointTransformed(
     const std::array<double, 16>& matrix,
     const std::array<double, 3>& point)
@@ -105,6 +112,7 @@ void OrthogonalCropBackendRouterService::SetPreferredDataSource(OrthogonalCropDa
 
 OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource() const
 {
+    // 先尊重显式 preferredDataSource；若对应输入不存在，再按当前可用输入回退。
     const bool hasImage = GetInputImage() != nullptr;
     const bool hasPolyData = m_inputPolyData != nullptr;
 
@@ -146,6 +154,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
         return m_imageService.GetDefaultRequest();
     }
 
+    // polydata 路径没有 image 的 spacing/origin 语义，因此默认 request 直接围绕输入 bounds 构造。
     OrthogonalCropRequest request;
     request.SetBoundsMode(CropBoundsMode::InputVolumeBounds);
     request.SetExecutionMode(CropExecutionMode::VirtualCrop);
@@ -234,6 +243,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
 vtkSmartPointer<vtkImplicitFunction> OrthogonalCropBackendRouterService::GetClipFunction(const CropDataModel& cropData)
 {
     if (!cropData.GetLocalAlignmentEnabled()) {
+        // 轴对齐盒直接映射成 vtkBox。
         auto box = vtkSmartPointer<vtkBox>::New();
         const auto rasBounds = cropData.GetRasBounds();
         box->SetBounds(
@@ -255,6 +265,7 @@ vtkSmartPointer<vtkImplicitFunction> OrthogonalCropBackendRouterService::GetClip
     const auto localCenter = cropData.GetLocalCenter();
     const auto localDimensions = cropData.GetLocalDimensions();
 
+    // 本地对齐盒要显式生成 6 个平面：每个轴两个面，各自带点和法线。
     int planeIndex = 0;
     for (int axis = 0; axis < 3; ++axis) {
         for (int signIndex = 0; signIndex < 2; ++signIndex) {
@@ -339,6 +350,7 @@ bool OrthogonalCropBackendRouterService::GetPolyDataCropDataModel(
         return false;
     }
 
+    // polydata 路径复用算法层的 request 归一化逻辑，保证 image / polydata 的盒定义一致。
     return OrthogonalCropAlgorithm::GetCropDataModel(
         GetPolyDataBounds(),
         request,
@@ -415,6 +427,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
         return statistics;
     }
 
+    // 这里直接复用真实 clipped 结果统计，避免额外发明一套 polydata 估算规则。
     return GetPolyDataStatisticsFromClipped(clipped);
 }
 
@@ -458,6 +471,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
+    // polydata 路径的结果组织方式与 image 路径保持一致：
+    // statistics + cropData + outline + derived data 一次性回填，便于 preview 层统一消费。
     const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
 
     result.SetStatistics(statistics);
