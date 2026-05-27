@@ -24,7 +24,6 @@
 #include <vtkExtractVOI.h>
 #include <vtkImageChangeInformation.h>
 #include <vtkImageData.h>
-#include <vtkImageMask.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOutlineSource.h>
 #include <vtkPointData.h>
@@ -329,28 +328,6 @@ inline vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     return maskImage;
 }
 
-inline vtkSmartPointer<vtkImageData> GetImageLinkedToMask(
-    vtkImageData* image,
-    vtkImageData* maskImage,
-    double maskedOutputValue = 0.0,
-    bool invertMask = false)
-{
-    if (!image || !maskImage) {
-        return nullptr;
-    }
-
-    auto maskFilter = vtkSmartPointer<vtkImageMask>::New();
-    maskFilter->SetImageInputData(image);
-    maskFilter->SetMaskInputData(maskImage);
-    maskFilter->SetMaskedOutputValue(maskedOutputValue);
-    maskFilter->SetNotMask(invertMask ? 1 : 0);
-    maskFilter->Update();
-
-    auto output = vtkSmartPointer<vtkImageData>::New();
-    output->ShallowCopy(maskFilter->GetOutput());
-    return output;
-}
-
 inline vtkSmartPointer<vtkImageData> GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& ijkBounds)
@@ -393,13 +370,6 @@ inline vtkSmartPointer<vtkImageData> GetExtractedImage(
     auto output = vtkSmartPointer<vtkImageData>::New();
     output->ShallowCopy(normalizeInformation->GetOutput());
     return output;
-}
-
-inline vtkSmartPointer<vtkImageData> GetPhysicalCroppedImage(
-    vtkImageData* image,
-    const std::array<int, 6>& ijkBounds)
-{
-    return GetExtractedImage(image, ijkBounds);
 }
 
 inline vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData)
@@ -600,26 +570,6 @@ public:
         return OrthogonalCropInternal::GetSnappedIjkBounds(image, cropData);
     }
 
-    static vtkSmartPointer<vtkImageData> GetImageLinkedToMask(
-        vtkImageData* image,
-        vtkImageData* maskImage,
-        double maskedOutputValue = 0.0,
-        bool invertMask = false)
-    {
-        return OrthogonalCropInternal::GetImageLinkedToMask(
-            image,
-            maskImage,
-            maskedOutputValue,
-            invertMask);
-    }
-
-    static vtkSmartPointer<vtkImageData> GetExtractedImage(
-        vtkImageData* image,
-        const std::array<int, 6>& ijkBounds)
-    {
-        return OrthogonalCropInternal::GetExtractedImage(image, ijkBounds);
-    }
-
     // 基于已经归一化好的 cropData 做纯统计估算。
     // 它不生成结果图像，只回答“inside 有多大、输出会多大、物理裁切是否允许继续做”。
     static OrthogonalCropStatistics GetStatistics(
@@ -783,7 +733,7 @@ public:
             return result;
         }
 
-        auto derivedImage = OrthogonalCropInternal::GetPhysicalCroppedImage(
+        auto derivedImage = OrthogonalCropInternal::GetExtractedImage(
             image,
             statistics.GetSnappedIjkBounds());
         if (!derivedImage) {
@@ -835,14 +785,6 @@ public:
     {
         OrthogonalCropResult result;
         result.SetCropStateModel(request.GetCropStateModel());
-
-        const auto statistics = GetStatistics(image, request, fallbackAvailableRamBytes);
-        result.SetStatistics(statistics);
-        result.SetFailureReason(statistics.GetFailureReason());
-        if (statistics.GetFailureReason() != OrthogonalCropFailureReason::None) {
-            result.SetMessage(statistics.GetValidationMessage());
-            return result;
-        }
 
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;

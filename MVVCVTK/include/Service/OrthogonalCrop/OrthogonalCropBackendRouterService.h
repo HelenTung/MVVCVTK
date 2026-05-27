@@ -170,20 +170,20 @@ public:
         }
     }
 
-    // polydata 路径统一采用 VTK implicit mask/function，再经 geometry filter 输出最终 polydata。
-    // 这里不关心上游是 box、planes 还是 cylinder mask，保持后端入口可复用。
-    static vtkSmartPointer<vtkPolyData> GetMaskedPolyData(
+    // polydata 路径统一采用 VTK implicit function，再经 geometry filter 输出最终 polydata。
+    // 这里不关心上游是 box、planes 还是 cylinder function，保持后端入口可复用。
+    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
         vtkPolyData* polyData,
-        vtkImplicitFunction* maskFunction,
+        vtkImplicitFunction* clipFunction,
         CropRemovalMode removalMode)
     {
-        if (!polyData || !maskFunction) {
+        if (!polyData || !clipFunction) {
             return nullptr;
         }
 
         auto clip = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
         clip->SetInputData(polyData);
-        clip->SetClipFunction(maskFunction);
+        clip->SetClipFunction(clipFunction);
         if (removalMode == CropRemovalMode::KeepInside) {
             clip->InsideOutOn();
         }
@@ -199,14 +199,6 @@ public:
         auto output = vtkSmartPointer<vtkPolyData>::New();
         output->ShallowCopy(geometry->GetOutput());
         return output;
-    }
-
-    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
-        vtkPolyData* polyData,
-        vtkImplicitFunction* clipFunction,
-        CropRemovalMode removalMode)
-    {
-        return GetMaskedPolyData(polyData, clipFunction, removalMode);
     }
 
     static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
@@ -471,50 +463,15 @@ private:
         return GetPolyDataStatisticsFromClipped(clipped);
     }
 
-    // image 完整结果优先沿用原插件，仅在需要 extracted preview 时额外构建 derived image。
+    // image 完整结果直接沿用 image-only 插件，避免 router 再生成第二份派生数据。
     OrthogonalCropResult GetImageResult(const OrthogonalCropRequest& request) const
     {
-        // 第一步：先拿 image-only 插件现有结果，复用其 bounds 解析和统计逻辑。
         auto result = m_imageService.GetResult(request);
         result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-
-        // 插件已经失败时，只补 resolved backend，不再继续派生 derived image。
-        if (!result.GetSucceeded()) {
-            if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
-                result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
-            }
-            return result;
-        }
-
-        // preview 只给 overlay 提供 mask/outline；只有 physical crop 才真正抽取一份 image 子块。
-        const bool useExtractPreview = request.GetExecutionMode() == CropExecutionMode::PhysicalCrop;
-        if (!useExtractPreview) {
+        if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
+            && result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {
             result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
-            return result;
         }
-
-        // 进入抽取路径前再次校验输入 image，避免 result/statistics 正常但原图像已丢失。
-        auto image = GetInputImage();
-        if (!image) {
-            result.SetFailureReason(OrthogonalCropFailureReason::InputImageMissing);
-            result.SetMessage("Input image is null.");
-            result.SetSucceeded(false);
-            return result;
-        }
-
-        // 用统计阶段已经 snap 好的 IJK bounds 提取真正的 derived image。
-        const auto snappedIjkBounds = result.GetStatistics().GetSnappedIjkBounds();
-        auto extractedImage = OrthogonalCropAlgorithm::GetExtractedImage(image, snappedIjkBounds);
-        if (!extractedImage) {
-            result.SetFailureReason(OrthogonalCropFailureReason::DerivedImageCreationFailed);
-            result.SetMessage("Failed to build extracted preview image.");
-            result.SetSucceeded(false);
-            return result;
-        }
-
-        // 最后把派生出的 image 挂回 result，并标记 resolved backend。
-        result.SetDerivedImage(extractedImage);
-        result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageExtractVOI);
         return result;
     }
 

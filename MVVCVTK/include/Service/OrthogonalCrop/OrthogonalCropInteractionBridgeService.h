@@ -14,17 +14,14 @@
 #include "AppService.h"
 
 #include <vtkActor.h>
-#include <vtkDataArray.h>
-#include <vtkDoubleArray.h>
 #include <vtkPlanes.h>
-#include <vtkPoints.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkTransform.h>
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -593,71 +590,23 @@ private:
         }
     }
 
-    static std::array<double, 3> GetNormalTransformedToModel(
-        const std::array<double, 16>& modelToWorldMatrix,
-        const double worldNormal[3])
-    {
-        std::array<double, 3> modelNormal = {
-            modelToWorldMatrix[0] * worldNormal[0] + modelToWorldMatrix[4] * worldNormal[1] + modelToWorldMatrix[8] * worldNormal[2],
-            modelToWorldMatrix[1] * worldNormal[0] + modelToWorldMatrix[5] * worldNormal[1] + modelToWorldMatrix[9] * worldNormal[2],
-            modelToWorldMatrix[2] * worldNormal[0] + modelToWorldMatrix[6] * worldNormal[1] + modelToWorldMatrix[10] * worldNormal[2]
-        };
-        const double length = std::sqrt(modelNormal[0] * modelNormal[0]
-            + modelNormal[1] * modelNormal[1]
-            + modelNormal[2] * modelNormal[2]);
-        if (length > 1e-12) {
-            modelNormal[0] /= length;
-            modelNormal[1] /= length;
-            modelNormal[2] /= length;
-        }
-        return modelNormal;
-    }
-
-    vtkSmartPointer<vtkPlanes> GetCurrentWidgetPlanesInModel() const
+    vtkSmartPointer<vtkPlanes> GetCurrentWidgetPlanesForModelInput() const
     {
         auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
         if (!m_widgetStateController.GetPlanes(worldPlanes)) {
             return nullptr;
         }
 
-        auto worldPoints = worldPlanes->GetPoints();
-        auto worldNormals = worldPlanes->GetNormals();
-        if (!worldPoints || !worldNormals) {
-            return nullptr;
+        if (m_referenceRenderService) {
+            auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+
+            auto modelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
+            modelToWorldTransform->SetMatrix(matrix);
+            worldPlanes->SetTransform(modelToWorldTransform);
         }
 
-        const vtkIdType planeCount = worldPoints->GetNumberOfPoints();
-        if (planeCount <= 0 || worldNormals->GetNumberOfTuples() < planeCount) {
-            return nullptr;
-        }
-
-        auto modelPlanes = vtkSmartPointer<vtkPlanes>::New();
-        auto modelPoints = vtkSmartPointer<vtkPoints>::New();
-        auto modelNormals = vtkSmartPointer<vtkDoubleArray>::New();
-        modelPoints->SetNumberOfPoints(planeCount);
-        modelNormals->SetNumberOfComponents(3);
-        modelNormals->SetNumberOfTuples(planeCount);
-
-        const auto modelToWorldMatrix = m_referenceRenderService
-            ? m_referenceRenderService->GetModelMatrix()
-            : GetIdentityMatrixArray();
-
-        for (vtkIdType planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
-            double worldPoint[3] = { 0.0, 0.0, 0.0 };
-            double modelPoint[3] = { 0.0, 0.0, 0.0 };
-            double worldNormal[3] = { 0.0, 0.0, 0.0 };
-            worldPoints->GetPoint(planeIndex, worldPoint);
-            worldNormals->GetTuple(planeIndex, worldNormal);
-
-            GetModelPositionFromWorld(worldPoint, modelPoint);
-            const auto modelNormal = GetNormalTransformedToModel(modelToWorldMatrix, worldNormal);
-            modelPoints->SetPoint(planeIndex, modelPoint);
-            modelNormals->SetTuple3(planeIndex, modelNormal[0], modelNormal[1], modelNormal[2]);
-        }
-
-        modelPlanes->SetPoints(modelPoints);
-        modelPlanes->SetNormals(modelNormals);
-        return modelPlanes;
+        return worldPlanes;
     }
 
     // 把 failureReason 枚举转成稳定日志文本，避免多个调用点重复写 switch。
@@ -854,7 +803,7 @@ private:
             target.mainPreviewSourcePolyData->ShallowCopy(source);
         }
 
-        auto clipPlanes = GetCurrentWidgetPlanesInModel();
+        auto clipPlanes = GetCurrentWidgetPlanesForModelInput();
         if (!clipPlanes) {
             return false;
         }
