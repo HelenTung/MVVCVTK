@@ -357,11 +357,7 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
     matrix->Invert();
 
     std::array<double, 16> matrixData = { 0.0 };
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrixData[row * 4 + col] = matrix->GetElement(row, col);
-        }
-    }
+    vtkMatrix4x4::DeepCopy(matrixData.data(), matrix);
     return matrixData;
 }
 

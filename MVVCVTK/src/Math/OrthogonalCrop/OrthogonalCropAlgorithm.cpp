@@ -81,15 +81,8 @@ std::array<double, 6> GetRasBoundsFromLocalDefinition(
 {
     // LocalCenterAndDimensions 模式下，先把局部坐标系中的盒子 8 个角点变换到模型空间，
     // 再回收为一个轴对齐 RAS bounds，后续验证与统计都围绕这组 bounds 展开。
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrix->SetElement(row, col, localAlignmentMatrix[row * 4 + col]);
-        }
-    }
-
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(matrix);
+    transform->SetMatrix(localAlignmentMatrix.data());
 
     vtkBoundingBox rasBounds;
     for (int sx = -1; sx <= 1; sx += 2) {
@@ -119,22 +112,14 @@ std::array<double, 16> GetMatrixArray(vtkMatrix4x4* matrix)
     }
 
     std::array<double, 16> matrixData = { 0.0 };
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrixData[row * 4 + col] = matrix->GetElement(row, col);
-        }
-    }
+    vtkMatrix4x4::DeepCopy(matrixData.data(), matrix);
     return matrixData;
 }
 
 vtkSmartPointer<vtkTransform> GetArrayTransform(const std::array<double, 16>& matrixData, bool invert = false)
 {
     auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrix->SetElement(row, col, matrixData[row * 4 + col]);
-        }
-    }
+    matrix->DeepCopy(matrixData.data());
     if (invert) {
         matrix->Invert();
     }
@@ -149,11 +134,7 @@ std::array<double, 16> GetUpdatedOffsetMatrix(
     const std::array<double, 3>& translation)
 {
     auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrix->SetElement(row, col, currentMatrix[row * 4 + col]);
-        }
-    }
+    matrix->DeepCopy(currentMatrix.data());
 
     auto transform = vtkSmartPointer<vtkTransform>::New();
     transform->PostMultiply();
@@ -277,19 +258,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     auto modelToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     auto localToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     const auto& localAlignmentMatrix = cropData.GetLocalAlignmentMatrix();
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            localToModelMatrix->SetElement(row, col, localAlignmentMatrix[row * 4 + col]);
-        }
-    }
+    localToModelMatrix->DeepCopy(localAlignmentMatrix.data());
     vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
 
-    std::array<double, 16> modelToLocal = { 0.0 };
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            modelToLocal[row * 4 + col] = modelToLocalMatrix->GetElement(row, col);
-        }
-    }
+    const std::array<double, 16> modelToLocal = GetMatrixArray(modelToLocalMatrix);
 
     const auto localCenter = cropData.GetLocalCenter();
     const auto localDimensions = cropData.GetLocalDimensions();

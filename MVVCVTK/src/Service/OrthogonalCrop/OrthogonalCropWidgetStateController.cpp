@@ -8,9 +8,7 @@
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
-
 #include <vtkProperty.h>
-
 #include <utility>
 
 OrthogonalCropWidgetStateCallback* OrthogonalCropWidgetStateCallback::New()
