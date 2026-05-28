@@ -24,6 +24,11 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
+using CropBoundsDouble6Array = std::array<double, 6>;
+using CropVectorDouble3Array = std::array<double, 3>;
+using CropMatrixDouble16Array = std::array<double, 16>;
+using CropIjkBoundsInt6Array = std::array<int, 6>;
+
 // 返回 4x4 单位矩阵，作为 request/result 中各种坐标补偿矩阵的默认值。
 inline std::array<double, 16> GetIdentityMatrixArray()
 {
@@ -147,16 +152,10 @@ enum class OrthogonalCropFailureReason {
 class CropDataModel {
 public:
     // 返回当前裁切盒在世界坐标系下的 RAS min/max bounds。
-    const std::array<double, 6>& GetRasBounds() const
-    {
-        return m_rasBounds;
-    }
+    const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
 
     // 直接写入世界坐标系下的 RAS bounds；适合 MinMaxCoordinates 模式或结果回填。
-    void SetRasBounds(const std::array<double, 6>& rasBounds)
-    {
-        m_rasBounds = rasBounds;
-    }
+    void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
 
     // 用六个显式 min/max 坐标直接定义裁切盒。
     void SetMinMaxCoordinates(
@@ -213,64 +212,34 @@ public:
     }
 
     // 返回当前裁切结果相对原输入的全局偏移补偿矩阵。
-    const std::array<double, 16>& GetGlobalOffsetMatrix() const
-    {
-        return m_globalOffsetMatrix;
-    }
+    const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
-    void SetGlobalOffsetMatrix(const std::array<double, 16>& matrix)
-    {
-        m_globalOffsetMatrix = matrix;
-    }
+    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
 
     // 返回局部裁切盒到世界坐标系的对齐矩阵。
-    const std::array<double, 16>& GetLocalAlignmentMatrix() const
-    {
-        return m_localAlignmentMatrix;
-    }
+    const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
 
     // 写入局部坐标系到世界坐标系的变换矩阵。
-    void SetLocalAlignmentMatrix(const std::array<double, 16>& matrix)
-    {
-        m_localAlignmentMatrix = matrix;
-    }
+    void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
 
     // 当前是否启用了局部对齐裁切语义。
-    bool GetLocalAlignmentEnabled() const
-    {
-        return m_localAlignmentEnabled;
-    }
+    bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
 
     // 显式打开或关闭局部对齐语义；关闭时通常按普通世界轴对齐盒处理。
-    void SetLocalAlignmentEnabled(bool enabled)
-    {
-        m_localAlignmentEnabled = enabled;
-    }
+    void SetLocalAlignmentEnabled(bool enabled) { m_localAlignmentEnabled = enabled; }
 
     // 返回局部对齐坐标系中的中心点。
-    const std::array<double, 3>& GetLocalCenter() const
-    {
-        return m_localCenter;
-    }
+    const CropVectorDouble3Array& GetLocalCenter() const { return m_localCenter; }
 
     // 写入局部坐标系中的中心点。
-    void SetLocalCenter(const std::array<double, 3>& center)
-    {
-        m_localCenter = center;
-    }
+    void SetLocalCenter(const CropVectorDouble3Array& center) { m_localCenter = center; }
 
     // 返回局部对齐坐标系中的尺寸。
-    const std::array<double, 3>& GetLocalDimensions() const
-    {
-        return m_localDimensions;
-    }
+    const CropVectorDouble3Array& GetLocalDimensions() const { return m_localDimensions; }
 
     // 写入局部对齐坐标系中的尺寸。
-    void SetLocalDimensions(const std::array<double, 3>& dimensions)
-    {
-        m_localDimensions = dimensions;
-    }
+    void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
 
 private:
     // 世界坐标系下的 RAS min/max bounds，是最基础的裁切盒表达。
@@ -291,76 +260,40 @@ private:
 class CropStateModel {
 public:
     // 当前结果或请求是否仍然处于“启用裁切语义”的状态。
-    bool GetCropEnabled() const
-    {
-        return m_cropEnabled;
-    }
+    bool GetCropEnabled() const { return m_cropEnabled; }
 
     // 设置裁切语义是否生效；physical crop 产出结果时常会把它关掉。
-    void SetCropEnabled(bool enabled)
-    {
-        m_cropEnabled = enabled;
-    }
+    void SetCropEnabled(bool enabled) { m_cropEnabled = enabled; }
 
     // 返回 inside 区域当前期望的显示透明度。
-    double GetInsideOpacity() const
-    {
-        return m_insideOpacity;
-    }
+    double GetInsideOpacity() const { return m_insideOpacity; }
 
     // 设置 inside 区域的透明度；主要服务 preview/overlay 表现。
-    void SetInsideOpacity(double opacity)
-    {
-        m_insideOpacity = opacity;
-    }
+    void SetInsideOpacity(double opacity) { m_insideOpacity = opacity; }
 
     // 返回 outside 区域当前是否应继续显示。
-    bool GetOutsideVisibility() const
-    {
-        return m_outsideVisibility;
-    }
+    bool GetOutsideVisibility() const { return m_outsideVisibility; }
 
     // 设置 outside 区域是否可见；上层可据此决定是否遮罩或淡出外围区域。
-    void SetOutsideVisibility(bool visible)
-    {
-        m_outsideVisibility = visible;
-    }
+    void SetOutsideVisibility(bool visible) { m_outsideVisibility = visible; }
 
     // 返回裁切相关的高亮/LUT 颜色。
-    const std::array<double, 3>& GetLutColor() const
-    {
-        return m_lutColor;
-    }
+    const CropVectorDouble3Array& GetLutColor() const { return m_lutColor; }
 
     // 设置裁切相关的高亮/LUT 颜色。
-    void SetLutColor(const std::array<double, 3>& color)
-    {
-        m_lutColor = color;
-    }
+    void SetLutColor(const CropVectorDouble3Array& color) { m_lutColor = color; }
 
     // 返回当前交互层认为被激活的裁切手柄。
-    CropHandleId GetActiveHandle() const
-    {
-        return m_activeHandle;
-    }
+    CropHandleId GetActiveHandle() const { return m_activeHandle; }
 
     // 写入当前激活的裁切手柄语义。
-    void SetActiveHandle(CropHandleId handleId)
-    {
-        m_activeHandle = handleId;
-    }
+    void SetActiveHandle(CropHandleId handleId) { m_activeHandle = handleId; }
 
     // 返回当前交互阶段，如 Idle、Dragging、Released。
-    CropInteractionPhase GetInteractionPhase() const
-    {
-        return m_interactionPhase;
-    }
+    CropInteractionPhase GetInteractionPhase() const { return m_interactionPhase; }
 
     // 更新当前交互阶段；bridge 会把它打进 request/result，供上层理解结果产生时机。
-    void SetInteractionPhase(CropInteractionPhase phase)
-    {
-        m_interactionPhase = phase;
-    }
+    void SetInteractionPhase(CropInteractionPhase phase) { m_interactionPhase = phase; }
 
 private:
     // 当前是否启用了裁切语义；上层可据此决定是否显示/应用裁切效果。
@@ -381,16 +314,10 @@ private:
 class OrthogonalCropRequest {
 public:
     // 返回本次请求采用的 bounds 解释方式。
-    CropBoundsMode GetBoundsMode() const
-    {
-        return m_boundsMode;
-    }
+    CropBoundsMode GetBoundsMode() const { return m_boundsMode; }
 
     // 设置本次请求采用哪一种 bounds 解释方式。
-    void SetBoundsMode(CropBoundsMode boundsMode)
-    {
-        m_boundsMode = boundsMode;
-    }
+    void SetBoundsMode(CropBoundsMode boundsMode) { m_boundsMode = boundsMode; }
 
     // 明确声明本次请求使用完整输入范围，不消费其它 bounds payload 字段。
     void SetInputVolumeBounds()
@@ -399,40 +326,22 @@ public:
     }
 
     // 返回本次请求是 VirtualCrop 还是 PhysicalCrop。
-    CropExecutionMode GetExecutionMode() const
-    {
-        return m_executionMode;
-    }
+    CropExecutionMode GetExecutionMode() const { return m_executionMode; }
 
     // 设置本次请求只做预览还是要求真正输出派生结果。
-    void SetExecutionMode(CropExecutionMode executionMode)
-    {
-        m_executionMode = executionMode;
-    }
+    void SetExecutionMode(CropExecutionMode executionMode) { m_executionMode = executionMode; }
 
     // 返回 inside / outside 的保留语义。
-    CropRemovalMode GetRemovalMode() const
-    {
-        return m_removalMode;
-    }
+    CropRemovalMode GetRemovalMode() const { return m_removalMode; }
 
     // 设置 inside / outside 的保留语义。
-    void SetRemovalMode(CropRemovalMode removalMode)
-    {
-        m_removalMode = removalMode;
-    }
+    void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
 
     // 返回显式给定的世界坐标 RAS bounds。
-    const std::array<double, 6>& GetRasBounds() const
-    {
-        return m_rasBounds;
-    }
+    const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
 
     // 写入显式给定的世界坐标 RAS bounds。
-    void SetRasBounds(const std::array<double, 6>& rasBounds)
-    {
-        m_rasBounds = rasBounds;
-    }
+    void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
 
     // 用 min/max bounds 完整定义请求，同时切换到对应 bounds mode。
     void SetMinMaxCoordinates(const std::array<double, 6>& rasBounds)
@@ -442,28 +351,16 @@ public:
     }
 
     // 返回世界坐标中的中心点定义。
-    const std::array<double, 3>& GetCenter() const
-    {
-        return m_center;
-    }
+    const CropVectorDouble3Array& GetCenter() const { return m_center; }
 
     // 写入世界坐标中的中心点定义。
-    void SetCenter(const std::array<double, 3>& center)
-    {
-        m_center = center;
-    }
+    void SetCenter(const CropVectorDouble3Array& center) { m_center = center; }
 
     // 返回世界坐标中的尺寸定义。
-    const std::array<double, 3>& GetDimensions() const
-    {
-        return m_dimensions;
-    }
+    const CropVectorDouble3Array& GetDimensions() const { return m_dimensions; }
 
     // 写入世界坐标中的尺寸定义。
-    void SetDimensions(const std::array<double, 3>& dimensions)
-    {
-        m_dimensions = dimensions;
-    }
+    void SetDimensions(const CropVectorDouble3Array& dimensions) { m_dimensions = dimensions; }
 
     // 用世界中心点和尺寸完整定义请求，同时切换到对应 bounds mode。
     void SetCenterAndDimensions(
@@ -476,28 +373,16 @@ public:
     }
 
     // 返回局部对齐坐标系中的中心点定义。
-    const std::array<double, 3>& GetLocalCenter() const
-    {
-        return m_localCenter;
-    }
+    const CropVectorDouble3Array& GetLocalCenter() const { return m_localCenter; }
 
     // 写入局部对齐坐标系中的中心点定义。
-    void SetLocalCenter(const std::array<double, 3>& center)
-    {
-        m_localCenter = center;
-    }
+    void SetLocalCenter(const CropVectorDouble3Array& center) { m_localCenter = center; }
 
     // 返回局部对齐坐标系中的尺寸定义。
-    const std::array<double, 3>& GetLocalDimensions() const
-    {
-        return m_localDimensions;
-    }
+    const CropVectorDouble3Array& GetLocalDimensions() const { return m_localDimensions; }
 
     // 写入局部对齐坐标系中的尺寸定义。
-    void SetLocalDimensions(const std::array<double, 3>& dimensions)
-    {
-        m_localDimensions = dimensions;
-    }
+    void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
 
     // 用局部中心点、局部尺寸和对齐矩阵完整定义请求，同时切换到对应 bounds mode。
     void SetLocalCenterAndDimensions(
@@ -512,52 +397,28 @@ public:
     }
 
     // 返回局部坐标系到世界坐标系的对齐矩阵。
-    const std::array<double, 16>& GetLocalAlignmentMatrix() const
-    {
-        return m_localAlignmentMatrix;
-    }
+    const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
 
     // 写入局部坐标系到世界坐标系的对齐矩阵。
-    void SetLocalAlignmentMatrix(const std::array<double, 16>& matrix)
-    {
-        m_localAlignmentMatrix = matrix;
-    }
+    void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
 
     // 返回请求当前携带的全局偏移补偿矩阵。
-    const std::array<double, 16>& GetGlobalOffsetMatrix() const
-    {
-        return m_globalOffsetMatrix;
-    }
+    const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
     // 写入请求当前携带的全局偏移补偿矩阵。
-    void SetGlobalOffsetMatrix(const std::array<double, 16>& matrix)
-    {
-        m_globalOffsetMatrix = matrix;
-    }
+    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
 
     // 返回随请求一起下发的 UI/交互状态快照。
-    const CropStateModel& GetCropStateModel() const
-    {
-        return m_cropStateModel;
-    }
+    const CropStateModel& GetCropStateModel() const { return m_cropStateModel; }
 
     // 写入随请求一起下发的 UI/交互状态快照。
-    void SetCropStateModel(const CropStateModel& cropStateModel)
-    {
-        m_cropStateModel = cropStateModel;
-    }
+    void SetCropStateModel(const CropStateModel& cropStateModel) { m_cropStateModel = cropStateModel; }
 
     // 返回调用方显式指定的可用内存上限。
-    std::size_t GetAvailableRamBytes() const
-    {
-        return m_availableRamBytes;
-    }
+    std::size_t GetAvailableRamBytes() const { return m_availableRamBytes; }
 
     // 写入调用方显式指定的可用内存上限；为 0 表示交给后端兜底判断。
-    void SetAvailableRamBytes(std::size_t availableRamBytes)
-    {
-        m_availableRamBytes = availableRamBytes;
-    }
+    void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
     // 本次请求采用哪一种 bounds 解释方式；算法层会据此决定如何还原 cropData。
@@ -589,118 +450,61 @@ private:
 class OrthogonalCropStatistics {
 public:
     // 返回统计最终落到的数据源。
-    OrthogonalCropDataSource GetResolvedDataSource() const
-    {
-        return m_resolvedDataSource;
-    }
+    OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
 
     // 写入统计最终落到的数据源。
-    void SetResolvedDataSource(OrthogonalCropDataSource dataSource)
-    {
-        m_resolvedDataSource = dataSource;
-    }
+    void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
     // 返回统计采用的具体后端实现。
-    OrthogonalCropResolvedBackend GetResolvedBackend() const
-    {
-        return m_resolvedBackend;
-    }
+    OrthogonalCropResolvedBackend GetResolvedBackend() const { return m_resolvedBackend; }
 
     // 写入统计采用的具体后端实现。
-    void SetResolvedBackend(OrthogonalCropResolvedBackend backend)
-    {
-        m_resolvedBackend = backend;
-    }
+    void SetResolvedBackend(OrthogonalCropResolvedBackend backend) { m_resolvedBackend = backend; }
 
     // 返回统计阶段发现的失败原因。
-    OrthogonalCropFailureReason GetFailureReason() const
-    {
-        return m_failureReason;
-    }
+    OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
 
     // 写入统计阶段发现的失败原因。
-    void SetFailureReason(OrthogonalCropFailureReason failureReason)
-    {
-        m_failureReason = failureReason;
-    }
+    void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
 
     // 返回原始输入总体规模。
-    std::size_t GetTotalVoxelCount() const
-    {
-        return m_totalVoxelCount;
-    }
+    std::size_t GetTotalVoxelCount() const { return m_totalVoxelCount; }
 
     // 写入原始输入总体规模。
-    void SetTotalVoxelCount(std::size_t voxelCount)
-    {
-        m_totalVoxelCount = voxelCount;
-    }
+    void SetTotalVoxelCount(std::size_t voxelCount) { m_totalVoxelCount = voxelCount; }
 
     // 返回裁切盒内部规模。
-    std::size_t GetInsideVoxelCount() const
-    {
-        return m_insideVoxelCount;
-    }
+    std::size_t GetInsideVoxelCount() const { return m_insideVoxelCount; }
 
     // 写入裁切盒内部规模。
-    void SetInsideVoxelCount(std::size_t voxelCount)
-    {
-        m_insideVoxelCount = voxelCount;
-    }
+    void SetInsideVoxelCount(std::size_t voxelCount) { m_insideVoxelCount = voxelCount; }
 
     // 返回真正输出结果的规模。
-    std::size_t GetOutputVoxelCount() const
-    {
-        return m_outputVoxelCount;
-    }
+    std::size_t GetOutputVoxelCount() const { return m_outputVoxelCount; }
 
     // 写入真正输出结果的规模。
-    void SetOutputVoxelCount(std::size_t voxelCount)
-    {
-        m_outputVoxelCount = voxelCount;
-    }
+    void SetOutputVoxelCount(std::size_t voxelCount) { m_outputVoxelCount = voxelCount; }
 
     // 返回当前请求的内存预估值。
-    std::size_t GetEstimatedRamUsageBytes() const
-    {
-        return m_estimatedRamUsageBytes;
-    }
+    std::size_t GetEstimatedRamUsageBytes() const { return m_estimatedRamUsageBytes; }
 
     // 写入当前请求的内存预估值。
-    void SetEstimatedRamUsageBytes(std::size_t ramUsageBytes)
-    {
-        m_estimatedRamUsageBytes = ramUsageBytes;
-    }
+    void SetEstimatedRamUsageBytes(std::size_t ramUsageBytes) { m_estimatedRamUsageBytes = ramUsageBytes; }
 
     // 返回 image 路径吸附后的 IJK 边界。
-    const std::array<int, 6>& GetSnappedIjkBounds() const
-    {
-        return m_snappedIjkBounds;
-    }
+    const CropIjkBoundsInt6Array& GetSnappedIjkBounds() const { return m_snappedIjkBounds; }
 
     // 写入 image 路径吸附后的 IJK 边界。
-    void SetSnappedIjkBounds(const std::array<int, 6>& ijkBounds)
-    {
-        m_snappedIjkBounds = ijkBounds;
-    }
+    void SetSnappedIjkBounds(const CropIjkBoundsInt6Array& ijkBounds) { m_snappedIjkBounds = ijkBounds; }
 
     // 返回当前是否允许继续执行 physical crop。
-    bool GetCanExecutePhysicalCrop() const
-    {
-        return m_canExecutePhysicalCrop;
-    }
+    bool GetCanExecutePhysicalCrop() const { return m_canExecutePhysicalCrop; }
 
     // 写入当前是否允许继续执行 physical crop。
-    void SetCanExecutePhysicalCrop(bool canExecute)
-    {
-        m_canExecutePhysicalCrop = canExecute;
-    }
+    void SetCanExecutePhysicalCrop(bool canExecute) { m_canExecutePhysicalCrop = canExecute; }
 
     // 返回统一的校验/告警文本。
-    const std::string& GetValidationMessage() const
-    {
-        return m_validationMessage;
-    }
+    const std::string& GetValidationMessage() const { return m_validationMessage; }
 
     // GetValidationMessage 的别名，便于调用方统一按 message 读取。
     const std::string& GetMessage() const
@@ -709,10 +513,7 @@ public:
     }
 
     // 写入统一的校验/告警文本。
-    void SetValidationMessage(const std::string& validationMessage)
-    {
-        m_validationMessage = validationMessage;
-    }
+    void SetValidationMessage(const std::string& validationMessage) { m_validationMessage = validationMessage; }
 
     // SetValidationMessage 的别名，便于与 Result 的 message 语义保持一致。
     void SetMessage(const std::string& message)
@@ -746,148 +547,76 @@ private:
 class OrthogonalCropResult {
 public:
     // 返回结果最终落到的数据源。
-    OrthogonalCropDataSource GetResolvedDataSource() const
-    {
-        return m_resolvedDataSource;
-    }
+    OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
 
     // 写入结果最终落到的数据源。
-    void SetResolvedDataSource(OrthogonalCropDataSource dataSource)
-    {
-        m_resolvedDataSource = dataSource;
-    }
+    void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
     // 返回结果采用的具体后端实现。
-    OrthogonalCropResolvedBackend GetResolvedBackend() const
-    {
-        return m_resolvedBackend;
-    }
+    OrthogonalCropResolvedBackend GetResolvedBackend() const { return m_resolvedBackend; }
 
     // 写入结果采用的具体后端实现。
-    void SetResolvedBackend(OrthogonalCropResolvedBackend backend)
-    {
-        m_resolvedBackend = backend;
-    }
+    void SetResolvedBackend(OrthogonalCropResolvedBackend backend) { m_resolvedBackend = backend; }
 
     // 返回本次执行是否构造出了有效结果。
-    bool GetSucceeded() const
-    {
-        return m_succeeded;
-    }
+    bool GetSucceeded() const { return m_succeeded; }
 
     // 写入本次执行是否成功。
-    void SetSucceeded(bool succeeded)
-    {
-        m_succeeded = succeeded;
-    }
+    void SetSucceeded(bool succeeded) { m_succeeded = succeeded; }
 
     // 返回本次执行的失败原因。
-    OrthogonalCropFailureReason GetFailureReason() const
-    {
-        return m_failureReason;
-    }
+    OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
 
     // 写入本次执行的失败原因。
-    void SetFailureReason(OrthogonalCropFailureReason failureReason)
-    {
-        m_failureReason = failureReason;
-    }
+    void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
 
     // 返回本次执行的说明文本。
-    const std::string& GetMessage() const
-    {
-        return m_message;
-    }
+    const std::string& GetMessage() const { return m_message; }
 
     // 写入本次执行的说明文本。
-    void SetMessage(const std::string& message)
-    {
-        m_message = message;
-    }
+    void SetMessage(const std::string& message) { m_message = message; }
 
     // 返回 image 路径产出的派生图像结果。
-    vtkSmartPointer<vtkImageData> GetDerivedImage() const
-    {
-        return m_derivedImage;
-    }
+    vtkSmartPointer<vtkImageData> GetDerivedImage() const { return m_derivedImage; }
 
     // 写入 image 路径产出的派生图像结果。
-    void SetDerivedImage(vtkSmartPointer<vtkImageData> derivedImage)
-    {
-        m_derivedImage = std::move(derivedImage);
-    }
+    void SetDerivedImage(vtkSmartPointer<vtkImageData> derivedImage) { m_derivedImage = std::move(derivedImage); }
 
     // 返回 polydata 路径产出的派生网格结果。
-    vtkSmartPointer<vtkPolyData> GetDerivedPolyData() const
-    {
-        return m_derivedPolyData;
-    }
+    vtkSmartPointer<vtkPolyData> GetDerivedPolyData() const { return m_derivedPolyData; }
 
     // 写入 polydata 路径产出的派生网格结果。
-    void SetDerivedPolyData(vtkSmartPointer<vtkPolyData> derivedPolyData)
-    {
-        m_derivedPolyData = std::move(derivedPolyData);
-    }
+    void SetDerivedPolyData(vtkSmartPointer<vtkPolyData> derivedPolyData) { m_derivedPolyData = std::move(derivedPolyData); }
 
     // 返回 virtual crop 生成的遮罩图像。
-    vtkSmartPointer<vtkImageData> GetVirtualMaskImage() const
-    {
-        return m_virtualMaskImage;
-    }
+    vtkSmartPointer<vtkImageData> GetVirtualMaskImage() const { return m_virtualMaskImage; }
 
     // 写入 virtual crop 生成的遮罩图像。
-    void SetVirtualMaskImage(vtkSmartPointer<vtkImageData> virtualMaskImage)
-    {
-        m_virtualMaskImage = std::move(virtualMaskImage);
-    }
+    void SetVirtualMaskImage(vtkSmartPointer<vtkImageData> virtualMaskImage) { m_virtualMaskImage = std::move(virtualMaskImage); }
 
     // 返回裁切盒轮廓几何结果。
-    vtkSmartPointer<vtkPolyData> GetOutlinePolyData() const
-    {
-        return m_outlinePolyData;
-    }
+    vtkSmartPointer<vtkPolyData> GetOutlinePolyData() const { return m_outlinePolyData; }
 
     // 写入裁切盒轮廓几何结果。
-    void SetOutlinePolyData(vtkSmartPointer<vtkPolyData> outlinePolyData)
-    {
-        m_outlinePolyData = std::move(outlinePolyData);
-    }
+    void SetOutlinePolyData(vtkSmartPointer<vtkPolyData> outlinePolyData) { m_outlinePolyData = std::move(outlinePolyData); }
 
     // 返回这次执行对应的客观几何快照。
-    const CropDataModel& GetCropDataModel() const
-    {
-        return m_cropDataModel;
-    }
+    const CropDataModel& GetCropDataModel() const { return m_cropDataModel; }
 
     // 写入这次执行对应的客观几何快照。
-    void SetCropDataModel(const CropDataModel& cropDataModel)
-    {
-        m_cropDataModel = cropDataModel;
-    }
+    void SetCropDataModel(const CropDataModel& cropDataModel) { m_cropDataModel = cropDataModel; }
 
     // 返回这次执行对应的交互/显示状态快照。
-    const CropStateModel& GetCropStateModel() const
-    {
-        return m_cropStateModel;
-    }
+    const CropStateModel& GetCropStateModel() const { return m_cropStateModel; }
 
     // 写入这次执行对应的交互/显示状态快照。
-    void SetCropStateModel(const CropStateModel& cropStateModel)
-    {
-        m_cropStateModel = cropStateModel;
-    }
+    void SetCropStateModel(const CropStateModel& cropStateModel) { m_cropStateModel = cropStateModel; }
 
     // 返回与本次结果配套的统计信息。
-    const OrthogonalCropStatistics& GetStatistics() const
-    {
-        return m_statistics;
-    }
+    const OrthogonalCropStatistics& GetStatistics() const { return m_statistics; }
 
     // 写入与本次结果配套的统计信息。
-    void SetStatistics(const OrthogonalCropStatistics& statistics)
-    {
-        m_statistics = statistics;
-    }
+    void SetStatistics(const OrthogonalCropStatistics& statistics) { m_statistics = statistics; }
 
 private:
     // 最终执行实际落到的数据源；通常和 statistics 保持一致，但以结果本身为准。

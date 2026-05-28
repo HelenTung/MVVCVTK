@@ -11,68 +11,12 @@
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
 
 #include <vtkBox.h>
-#include <vtkDoubleArray.h>
 #include <vtkGeometryFilter.h>
-#include <vtkMatrix4x4.h>
-#include <vtkPlanes.h>
-#include <vtkPoints.h>
 #include <vtkTableBasedClipDataSet.h>
+#include <vtkTransform.h>
 
-#include <cmath>
 #include <cstddef>
 #include <utility>
-
-namespace {
-// 以齐次坐标方式变换裁切盒顶点，供 local-aligned polydata clip 生成 planes。
-std::array<double, 3> GetPointTransformed(
-    const std::array<double, 16>& matrix,
-    const std::array<double, 3>& point)
-{
-    const double x = matrix[0] * point[0] + matrix[1] * point[1] + matrix[2] * point[2] + matrix[3];
-    const double y = matrix[4] * point[0] + matrix[5] * point[1] + matrix[6] * point[2] + matrix[7];
-    const double z = matrix[8] * point[0] + matrix[9] * point[1] + matrix[10] * point[2] + matrix[11];
-    const double w = matrix[12] * point[0] + matrix[13] * point[1] + matrix[14] * point[2] + matrix[15];
-    const double invW = std::abs(w) > 1e-12 ? 1.0 / w : 1.0;
-    return { x * invW, y * invW, z * invW };
-}
-
-std::array<double, 3> GetNormalTransformed(
-    const std::array<double, 16>& modelToLocalMatrix,
-    const std::array<double, 3>& localNormal)
-{
-    std::array<double, 3> normal = {
-        modelToLocalMatrix[0] * localNormal[0] + modelToLocalMatrix[4] * localNormal[1] + modelToLocalMatrix[8] * localNormal[2],
-        modelToLocalMatrix[1] * localNormal[0] + modelToLocalMatrix[5] * localNormal[1] + modelToLocalMatrix[9] * localNormal[2],
-        modelToLocalMatrix[2] * localNormal[0] + modelToLocalMatrix[6] * localNormal[1] + modelToLocalMatrix[10] * localNormal[2]
-    };
-    const double length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
-    if (length > 1e-12) {
-        normal[0] /= length;
-        normal[1] /= length;
-        normal[2] /= length;
-    }
-    return normal;
-}
-
-std::array<double, 16> GetMatrixInverted(const std::array<double, 16>& matrixData)
-{
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            matrix->SetElement(row, col, matrixData[row * 4 + col]);
-        }
-    }
-    matrix->Invert();
-
-    std::array<double, 16> inverted = { 0.0 };
-    for (int row = 0; row < 4; ++row) {
-        for (int col = 0; col < 4; ++col) {
-            inverted[row * 4 + col] = matrix->GetElement(row, col);
-        }
-    }
-    return inverted;
-}
-} // namespace
 
 void OrthogonalCropBackendRouterService::CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
@@ -252,9 +196,9 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
 
 vtkSmartPointer<vtkImplicitFunction> OrthogonalCropBackendRouterService::GetClipFunction(const CropDataModel& cropData)
 {
+    auto box = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
         // 轴对齐盒直接映射成 vtkBox。
-        auto box = vtkSmartPointer<vtkBox>::New();
         const auto rasBounds = cropData.GetRasBounds();
         box->SetBounds(
             rasBounds[0], rasBounds[1],
@@ -263,40 +207,24 @@ vtkSmartPointer<vtkImplicitFunction> OrthogonalCropBackendRouterService::GetClip
         return box;
     }
 
-    auto planes = vtkSmartPointer<vtkPlanes>::New();
-    auto points = vtkSmartPointer<vtkPoints>::New();
-    auto normals = vtkSmartPointer<vtkDoubleArray>::New();
-    points->SetNumberOfPoints(6);
-    normals->SetNumberOfComponents(3);
-    normals->SetNumberOfTuples(6);
-
-    const auto& localToModel = cropData.GetLocalAlignmentMatrix();
-    const auto modelToLocal = GetMatrixInverted(localToModel);
     const auto localCenter = cropData.GetLocalCenter();
     const auto localDimensions = cropData.GetLocalDimensions();
 
-    // 本地对齐盒要显式生成 6 个平面：每个轴两个面，各自带点和法线。
-    int planeIndex = 0;
-    for (int axis = 0; axis < 3; ++axis) {
-        for (int signIndex = 0; signIndex < 2; ++signIndex) {
-            const double sign = signIndex == 0 ? -1.0 : 1.0;
-            auto localPoint = localCenter;
-            localPoint[axis] += sign * localDimensions[axis] * 0.5;
+    // vtkImplicitFunction 会先把输入点变换到隐函数空间，因此这里传入 localToModel 的逆，
+    // 就能直接复用 vtkBox 表达“局部对齐盒 + 模型空间输入”的组合语义。
+    box->SetBounds(
+        localCenter[0] - localDimensions[0] * 0.5,
+        localCenter[0] + localDimensions[0] * 0.5,
+        localCenter[1] - localDimensions[1] * 0.5,
+        localCenter[1] + localDimensions[1] * 0.5,
+        localCenter[2] - localDimensions[2] * 0.5,
+        localCenter[2] + localDimensions[2] * 0.5);
 
-            std::array<double, 3> localNormal = { 0.0, 0.0, 0.0 };
-            localNormal[axis] = sign;
-
-            const auto modelPoint = GetPointTransformed(localToModel, localPoint);
-            const auto modelNormal = GetNormalTransformed(modelToLocal, localNormal);
-            points->SetPoint(planeIndex, modelPoint[0], modelPoint[1], modelPoint[2]);
-            normals->SetTuple3(planeIndex, modelNormal[0], modelNormal[1], modelNormal[2]);
-            ++planeIndex;
-        }
-    }
-
-    planes->SetPoints(points);
-    planes->SetNormals(normals);
-    return planes;
+    auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
+    modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());
+    modelToLocalTransform->Inverse();
+    box->SetTransform(modelToLocalTransform);
+    return box;
 }
 
 std::array<double, 6> OrthogonalCropBackendRouterService::GetImageBounds() const
