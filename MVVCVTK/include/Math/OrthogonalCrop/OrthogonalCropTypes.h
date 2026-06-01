@@ -151,10 +151,11 @@ enum class OrthogonalCropFailureReason {
 // 纯几何数据快照：描述裁切盒客观空间范围，以及和局部对齐相关的矩阵信息。
 class CropDataModel {
 public:
-    // 返回当前裁切盒在世界坐标系下的 RAS min/max bounds。
+    // 返回当前裁切盒在后端输入坐标系下的 RAS/physical min/max bounds。
+    // image 路径这里对应 vtkImageData 的 physical 坐标；polydata 路径对应模型坐标。
     const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
 
-    // 直接写入世界坐标系下的 RAS bounds；适合 MinMaxCoordinates 模式或结果回填。
+    // 直接写入后端输入坐标系下的 RAS bounds；适合 MinMaxCoordinates 模式或结果回填。
     void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
 
     // 用六个显式 min/max 坐标直接定义裁切盒。
@@ -169,7 +170,7 @@ public:
         m_rasBounds = { minR, maxR, minA, maxA, minS, maxS };
     }
 
-    // 用世界坐标中的中心点和尺寸换算出对应的 RAS bounds。
+    // 用后端输入坐标系中的中心点和尺寸换算出对应的 RAS bounds。
     void SetCenterAndDimensions(
         const std::array<double, 3>& center,
         const std::array<double, 3>& dimensions)
@@ -184,7 +185,7 @@ public:
         };
     }
 
-    // 根据当前 bounds 反推世界坐标中的中心点。
+    // 根据当前 bounds 反推后端输入坐标系中的中心点。
     std::array<double, 3> GetCenter() const
     {
         return {
@@ -194,7 +195,7 @@ public:
         };
     }
 
-    // 根据当前 bounds 反推世界坐标中的三轴尺寸。
+    // 根据当前 bounds 反推后端输入坐标系中的三轴尺寸。
     std::array<double, 3> GetDimensions() const
     {
         return {
@@ -217,10 +218,10 @@ public:
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
 
-    // 返回局部裁切盒到世界坐标系的对齐矩阵。
+    // 返回局部裁切盒坐标系到后端输入坐标系的对齐矩阵。
     const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
 
-    // 写入局部坐标系到世界坐标系的变换矩阵。
+    // 写入局部坐标系到后端输入坐标系的变换矩阵。
     void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
 
     // 当前是否启用了局部对齐裁切语义。
@@ -242,11 +243,11 @@ public:
     void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
 
 private:
-    // 世界坐标系下的 RAS min/max bounds，是最基础的裁切盒表达。
+    // 后端输入坐标系下的 RAS/physical min/max bounds，是最基础的裁切盒表达。
     std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 全局偏移矩阵，用于把算法输入和上层世界坐标系对齐。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
-    // 局部对齐矩阵，用于表达非世界轴对齐情况下的局部裁切参考系。
+    // 局部对齐矩阵，用于表达局部裁切参考系到后端输入坐标系的映射。
     std::array<double, 16> m_localAlignmentMatrix = GetIdentityMatrixArray();
     // 当前是否启用了局部对齐语义。
     bool m_localAlignmentEnabled = false;
@@ -337,10 +338,10 @@ public:
     // 设置 inside / outside 的保留语义。
     void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
 
-    // 返回显式给定的世界坐标 RAS bounds。
+    // 返回显式给定的后端输入坐标系 RAS bounds。
     const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
 
-    // 写入显式给定的世界坐标 RAS bounds。
+    // 写入显式给定的后端输入坐标系 RAS bounds。
     void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
 
     // 用 min/max bounds 完整定义请求，同时切换到对应 bounds mode。
@@ -350,19 +351,19 @@ public:
         m_rasBounds = rasBounds;
     }
 
-    // 返回世界坐标中的中心点定义。
+    // 返回后端输入坐标系中的中心点定义。
     const CropVectorDouble3Array& GetCenter() const { return m_center; }
 
-    // 写入世界坐标中的中心点定义。
+    // 写入后端输入坐标系中的中心点定义。
     void SetCenter(const CropVectorDouble3Array& center) { m_center = center; }
 
-    // 返回世界坐标中的尺寸定义。
+    // 返回后端输入坐标系中的尺寸定义。
     const CropVectorDouble3Array& GetDimensions() const { return m_dimensions; }
 
-    // 写入世界坐标中的尺寸定义。
+    // 写入后端输入坐标系中的尺寸定义。
     void SetDimensions(const CropVectorDouble3Array& dimensions) { m_dimensions = dimensions; }
 
-    // 用世界中心点和尺寸完整定义请求，同时切换到对应 bounds mode。
+    // 用后端输入坐标系中的中心点和尺寸完整定义请求，同时切换到对应 bounds mode。
     void SetCenterAndDimensions(
         const std::array<double, 3>& center,
         const std::array<double, 3>& dimensions)
@@ -385,6 +386,8 @@ public:
     void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
 
     // 用局部中心点、局部尺寸和对齐矩阵完整定义请求，同时切换到对应 bounds mode。
+    // 交互预览路径里，这个局部坐标系通常直接取 widget 所在的世界坐标系，
+    // localAlignmentMatrix 则提供 world -> model/physical 的折叠关系。
     void SetLocalCenterAndDimensions(
         const std::array<double, 3>& center,
         const std::array<double, 3>& dimensions,
@@ -396,10 +399,10 @@ public:
         m_localAlignmentMatrix = localAlignmentMatrix;
     }
 
-    // 返回局部坐标系到世界坐标系的对齐矩阵。
+    // 返回局部坐标系到后端输入坐标系的对齐矩阵。
     const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
 
-    // 写入局部坐标系到世界坐标系的对齐矩阵。
+    // 写入局部坐标系到后端输入坐标系的对齐矩阵。
     void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
 
     // 返回请求当前携带的全局偏移补偿矩阵。

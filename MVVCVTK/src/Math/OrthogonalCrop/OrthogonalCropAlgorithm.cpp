@@ -79,8 +79,9 @@ std::array<double, 6> GetRasBoundsFromLocalDefinition(
     const std::array<double, 3>& localDimensions,
     const std::array<double, 16>& localAlignmentMatrix)
 {
-    // LocalCenterAndDimensions 模式下，先把局部坐标系中的盒子 8 个角点变换到模型空间，
+    // LocalCenterAndDimensions 模式下，先把局部坐标系中的盒子 8 个角点变换到后端输入坐标系，
     // 再回收为一个轴对齐 RAS bounds，后续验证与统计都围绕这组 bounds 展开。
+    // 交互预览路径里，这里的局部空间通常就是 widget 所在的世界坐标系。
     auto transform = vtkSmartPointer<vtkTransform>::New();
     transform->SetMatrix(localAlignmentMatrix.data());
 
@@ -520,7 +521,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
 
 std::array<int, 6> OrthogonalCropAlgorithm::GetSnappedVoxelBounds(vtkImageData* image, const CropDataModel& cropData)
 {
-    // image 路径最终都要落到体素级执行，因此先把物理空间 bounds
+    // image 路径最终都要落到体素级执行，因此先把已经折叠回 image physical/model 空间的 bounds
     // 通过 vtkImageData 原生的 physical->continuous-index 变换吸附到 IJK 整数区间。
     // 这里显式变换 8 个角点，避免 direction 非单位矩阵时只按各轴独立换算导致包围盒失真。
     std::array<int, 6> ijkBounds = { 0, 0, 0, 0, 0, 0 };

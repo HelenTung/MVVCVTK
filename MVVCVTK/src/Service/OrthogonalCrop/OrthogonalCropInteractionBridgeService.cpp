@@ -369,7 +369,9 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     auto previewRequest = GetDefaultRequest();
 
     // widget 持有的是世界坐标轴对齐盒；preview request 始终折叠成
-    // LocalCenterAndDimensions + worldToModelMatrix，这样 image / polydata 两条后端都能复用同一套盒定义。
+    // LocalCenterAndDimensions + worldToModelMatrix。
+    // 这里的 local 空间直接取 widget 所在世界坐标系，因此对 image 路径的真实顺序是
+    // world -> model(= vtkImageData physical) -> continuous index；不是 physical 再转一次 model。
     previewRequest.SetLocalCenterAndDimensions(
         {
             (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
