@@ -5,6 +5,7 @@
 // =====================================================================
 
 #include "OrthogonalCrop/OrthogonalCropInteractionBridgeService.h"
+#include "OrthogonalCrop/OrthogonalCropAlgorithm.h"
 
 #include <vtkActor.h>
 #include <vtkBoundingBox.h>
@@ -126,6 +127,27 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRenderServices(std::vecto
     }
 }
 
+void OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts(bool required)
+{
+    m_previewRequiresFullArtifacts = required;
+}
+
+void OrthogonalCropInteractionBridgeService::TogglePreviewArtifactMode(bool logStats)
+{
+    m_previewRequiresFullArtifacts = !m_previewRequiresFullArtifacts;
+    if (logStats) {
+        std::cout << "[Main] Orthogonal crop preview artifact mode: "
+            << (m_previewRequiresFullArtifacts ? "Full" : "Lightweight")
+            << std::endl;
+    }
+
+    if (m_previewEnabled
+        && m_cropInteractionEnabled
+        && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
+        UpdatePreviewFromCurrentBounds(logStats);
+    }
+}
+
 bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
 {
     return ActivateInteractiveCrop();
@@ -203,7 +225,7 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
         << GetDataSourceText(GetActiveDataSource())
-        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview; press O or Esc to exit." << std::endl;
+        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview; press O or Esc to exit." << std::endl;
     return true;
 }
 
@@ -424,6 +446,53 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // 3. overlay 与 3D 主模型 preview 各自消费同一份结果
     // 4. 失败时只记录日志，不污染当前已经显示的 preview 内容
     const auto previewRequest = BuildPreviewRequest();
+
+    if (!m_previewRequiresFullArtifacts) {
+        CropDataModel cropData;
+        OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+        std::string message;
+        if (!OrthogonalCropAlgorithm::GetCropDataModel(
+                GetActiveInputBounds(),
+                previewRequest,
+                cropData,
+                failureReason,
+                message,
+                true)) {
+            if (logStats) {
+                std::cerr << "[Main] Orthogonal crop preview failed: "
+                    << GetFailureReasonText(failureReason)
+                    << " - " << message << std::endl;
+            }
+            return;
+        }
+
+        OrthogonalCropResult previewResult;
+        previewResult.SetResolvedDataSource(GetActiveDataSource());
+        previewResult.SetSucceeded(true);
+        previewResult.SetFailureReason(OrthogonalCropFailureReason::None);
+        previewResult.SetCropDataModel(cropData);
+        previewResult.SetCropStateModel(previewRequest.GetCropStateModel());
+        previewResult.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
+
+        const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
+        if (logStats) {
+            std::cout
+                << "[Main] Orthogonal crop preview updated. source = "
+                << GetDataSourceText(previewResult.GetResolvedDataSource())
+                << ", backend = LightweightPreview"
+                << ", removal = "
+                << GetRemovalModeText(m_currentRemovalMode)
+                << ", main3D = "
+                << (main3DPreviewApplied ? "PolyDataClip" : "OverlayOnly")
+                << ", bounds = ["
+                << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
+                << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
+                << m_currentBounds[4] << ", " << m_currentBounds[5] << "]"
+                << std::endl;
+        }
+        return;
+    }
+
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {

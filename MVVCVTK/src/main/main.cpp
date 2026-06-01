@@ -51,6 +51,7 @@ public:
 
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
         (void)callData;
+        this->AbortFlagOff();
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
         if (!iren) return;
 
@@ -63,6 +64,17 @@ public:
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
+        const bool isPreviewArtifactModeKey = keyCode == '3' || keySym == "3";
+        const bool isManagedCropHotkey = isCropToggleKey
+            || keySym == "Escape"
+            || isInsidePreviewKey
+            || isOutsidePreviewKey
+            || isPreviewArtifactModeKey;
+
+        if (eventId == vtkCommand::CharEvent && isManagedCropHotkey) {
+            this->AbortFlagOn();
+            return;
+        }
 
         if (eventId == vtkCommand::KeyPressEvent) {
             if (isCropToggleKey && !m_cropToggleKeyDown) {
@@ -87,6 +99,12 @@ public:
                 orthogonalCropBridge->ToggleOutsidePreview();
                 return;
             }
+
+            if (isPreviewArtifactModeKey && !m_previewArtifactModeKeyDown) {
+                m_previewArtifactModeKeyDown = true;
+                orthogonalCropBridge->TogglePreviewArtifactMode(true);
+                return;
+            }
         }
 
         if (eventId == vtkCommand::KeyReleaseEvent) {
@@ -104,6 +122,11 @@ public:
                 m_outsidePreviewKeyDown = false;
                 return;
             }
+
+            if (isPreviewArtifactModeKey) {
+                m_previewArtifactModeKeyDown = false;
+                return;
+            }
         }
     }
 
@@ -111,6 +134,7 @@ private:
     bool m_cropToggleKeyDown = false;
     bool m_insidePreviewKeyDown = false;
     bool m_outsidePreviewKeyDown = false;
+    bool m_previewArtifactModeKeyDown = false;
 };
 
 static std::pair<
@@ -279,7 +303,7 @@ int main()
                 return;
             }
 
-            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview." << std::endl;
+            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle lightweight/full preview." << std::endl;
 
             //// 触发孔隙分析算法
             //SurfaceParams surfP;
@@ -370,17 +394,22 @@ int main()
 
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextA->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
     contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextB->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextB->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
     contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextC->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextC->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
     contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextD->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextD->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
+    contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle lightweight/full preview\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

@@ -200,7 +200,7 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     CropRemovalMode removalMode,
     std::size_t* insideVoxelCount = nullptr)
 {
-    // virtual mask 的结果不是导出新体数据，而是构造一张与原图同结构的 inside/outside 掩码。
+    // virtual mask 的结果不是导出新体数据，而是构造一张用于预览的 inside/outside 掩码。
     // 整体流程分两段：
     // 1. 先用 snapped IJK bounds 把执行域收缩到最小候选包围盒
     // 2. 再根据是否 local-aligned 决定走整块填充还是逐体素 inside 判定
@@ -211,10 +211,50 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     int dims[3] = { 0, 0, 0 };
     image->GetDimensions(dims);
 
+    const int minI = std::max(0, ijkBounds[0]);
+    const int maxI = std::min(dims[0] - 1, ijkBounds[1]);
+    const int minJ = std::max(0, ijkBounds[2]);
+    const int maxJ = std::min(dims[1] - 1, ijkBounds[3]);
+    const int minK = std::max(0, ijkBounds[4]);
+    const int maxK = std::min(dims[2] - 1, ijkBounds[5]);
+    const bool useCompactMask = removalMode == CropRemovalMode::KeepInside;
+
     auto maskImage = vtkSmartPointer<vtkImageData>::New();
-    // CopyStructure 会保留 extent/origin/spacing/direction，
-    // 这样输出 mask 能直接和原图在同一 physical 坐标系下叠加显示。
-    maskImage->CopyStructure(image);
+    if (minI > maxI || minJ > maxJ || minK > maxK) {
+        // 无有效交叠时仍返回一张与输入结构兼容的空 mask，避免上层处理 nullptr 分支。
+        maskImage->CopyStructure(image);
+        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+        auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
+        if (!maskPtr) {
+            return nullptr;
+        }
+        const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
+        std::memset(maskPtr, 0, static_cast<std::size_t>(totalVoxelCount));
+        if (insideVoxelCount) {
+            *insideVoxelCount = 0;
+        }
+        maskImage->Modified();
+        return maskImage;
+    }
+
+    const int width = maxI - minI + 1;
+    const int height = maxJ - minJ + 1;
+    const int depth = maxK - minK + 1;
+    if (useCompactMask) {
+        const int outputStartIndex[3] = { minI, minJ, minK };
+        double outputOrigin[3] = { 0.0, 0.0, 0.0 };
+        image->TransformIndexToPhysicalPoint(outputStartIndex, outputOrigin);
+
+        // KeepInside 只需要 snapped ROI 大小的 mask；
+        // 输出图像改成 ROI 结构即可，避免每次 preview 都整图分配和清零。
+        maskImage->CopyStructure(image);
+        maskImage->SetExtent(0, width - 1, 0, height - 1, 0, depth - 1);
+        maskImage->SetOrigin(outputOrigin);
+    }
+    else {
+        // RemoveInside 需要表达盒外补集，因此仍保留 full-volume mask。
+        maskImage->CopyStructure(image);
+    }
     maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
 
     auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
@@ -225,36 +265,27 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     const unsigned char insideValue = removalMode == CropRemovalMode::KeepInside ? 255 : 0;
     const unsigned char outsideValue = removalMode == CropRemovalMode::KeepInside ? 0 : 255;
     const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
-    std::memset(maskPtr, outsideValue, static_cast<std::size_t>(totalVoxelCount));
-
-    const int minI = std::max(0, ijkBounds[0]);
-    const int maxI = std::min(dims[0] - 1, ijkBounds[1]);
-    const int minJ = std::max(0, ijkBounds[2]);
-    const int maxJ = std::min(dims[1] - 1, ijkBounds[3]);
-    const int minK = std::max(0, ijkBounds[4]);
-    const int maxK = std::min(dims[2] - 1, ijkBounds[5]);
-    if (minI > maxI || minJ > maxJ || minK > maxK) {
-        if (insideVoxelCount) {
-            *insideVoxelCount = 0;
-        }
-        maskImage->Modified();
-        return maskImage;
-    }
+    const vtkIdType allocatedVoxelCount = useCompactMask
+        ? static_cast<vtkIdType>(width) * height * depth
+        : totalVoxelCount;
+    std::memset(maskPtr, outsideValue, static_cast<std::size_t>(allocatedVoxelCount));
 
     if (!cropData.GetLocalAlignmentEnabled()) {
         // 轴对齐盒没有额外姿态信息，候选 IJK 包围盒内部整块都属于 inside。
         // 这里继续沿用拆分前的整块 memset 快路径，避免无意义的逐体素判断。
-        const int width = maxI - minI + 1;
-        const int height = maxJ - minJ + 1;
-        const int depth = maxK - minK + 1;
-        const vtkIdType rowStride = dims[0];
-        const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
-        for (int k = minK; k <= maxK; ++k) {
-            for (int j = minJ; j <= maxJ; ++j) {
-                const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
-                    + static_cast<vtkIdType>(j) * rowStride
-                    + minI;
-                std::memset(maskPtr + rowStart, insideValue, static_cast<std::size_t>(width));
+        if (useCompactMask) {
+            std::memset(maskPtr, insideValue, static_cast<std::size_t>(allocatedVoxelCount));
+        }
+        else {
+            const vtkIdType rowStride = dims[0];
+            const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
+            for (int k = minK; k <= maxK; ++k) {
+                for (int j = minJ; j <= maxJ; ++j) {
+                    const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
+                        + static_cast<vtkIdType>(j) * rowStride
+                        + minI;
+                    std::memset(maskPtr + rowStart, insideValue, static_cast<std::size_t>(width));
+                }
             }
         }
 
@@ -282,8 +313,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     // 局部对齐盒的真实 inside 必须经过“体素中心 -> 输入 physical 空间 -> 局部裁切参考系”后再判断。
     // 这里仍旧只在 snapped 包围盒范围内遍历，避免为了旋转盒额外扩张执行域。
     std::size_t countedInsideVoxelCount = 0;
-    const vtkIdType rowStride = dims[0];
-    const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
+    const vtkIdType rowStride = useCompactMask ? width : dims[0];
+    const vtkIdType sliceStride = useCompactMask
+        ? static_cast<vtkIdType>(width) * height
+        : static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
     const double modelStepI[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
@@ -319,9 +352,13 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
 
                 if (isInside) {
                     ++countedInsideVoxelCount;
-                    const vtkIdType linearIndex = static_cast<vtkIdType>(k) * sliceStride
-                        + static_cast<vtkIdType>(j) * rowStride
-                        + i;
+                    const vtkIdType linearIndex = useCompactMask
+                        ? static_cast<vtkIdType>(k - minK) * sliceStride
+                            + static_cast<vtkIdType>(j - minJ) * rowStride
+                            + (i - minI)
+                        : static_cast<vtkIdType>(k) * sliceStride
+                            + static_cast<vtkIdType>(j) * rowStride
+                            + i;
                     maskPtr[linearIndex] = insideValue;
                 }
 
@@ -723,11 +760,15 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     statistics.SetSnappedIjkBounds(snappedIjkBounds);
 
     if (executionMode == CropExecutionMode::VirtualCrop) {
-        // virtual crop 只生成 mask，因此输出体素规模仍等于原图大小；
-        // estimatedRamUsageBytes 这里延续旧逻辑，用单字节 mask 粗估内存消耗。
+        // virtual crop 会按 removal mode 决定 mask 粒度：
+        // - KeepInside：只分配 snapped ROI 大小的 mask
+        // - RemoveInside：仍保留 full-volume mask，以表达盒外补集
         statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
-        statistics.SetOutputVoxelCount(totalVoxelCount);
-        statistics.SetEstimatedRamUsageBytes(totalVoxelCount);
+        const std::size_t virtualMaskVoxelCount = removalMode == CropRemovalMode::KeepInside
+            ? GetVoxelCountFromIjkBounds(snappedIjkBounds)
+            : totalVoxelCount;
+        statistics.SetOutputVoxelCount(virtualMaskVoxelCount);
+        statistics.SetEstimatedRamUsageBytes(virtualMaskVoxelCount);
         statistics.SetCanExecutePhysicalCrop(true);
         return statistics;
     }
@@ -805,17 +846,36 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
         return result;
     }
 
-    const auto statistics = GetStatistics(image, cropData, removalMode, CropExecutionMode::VirtualCrop);
-    result.SetStatistics(statistics);
-    result.SetFailureReason(statistics.GetFailureReason());
+    const auto snappedIjkBounds = GetSnappedVoxelBounds(image, cropData);
+    const std::size_t totalVoxelCount = GetImageVoxelCount(image);
+    std::size_t insideVoxelCount = 0;
 
-    // 先复用统计阶段给出的 snapped bounds 缩小遍历范围，再真正生成 mask。
-    // 结果说明：mask 与原图同结构，outline 仍落在后端输入坐标系下，供 overlay 直接消费。
+    // 先复用 snapped bounds 缩小遍历范围，再真正生成 mask。
+    // 结果说明：KeepInside 会返回 ROI mask，RemoveInside 仍返回 full-volume mask；
+    // outline 继续落在后端输入坐标系下，供 overlay 直接消费。
     result.SetVirtualMaskImage(GetVirtualMaskImage(
         image,
         cropData,
-        statistics.GetSnappedIjkBounds(),
-        removalMode));
+        snappedIjkBounds,
+        removalMode,
+        &insideVoxelCount));
+
+    OrthogonalCropStatistics statistics;
+    statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
+    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+    statistics.SetTotalVoxelCount(totalVoxelCount);
+    statistics.SetInsideVoxelCount(insideVoxelCount);
+    const std::size_t virtualMaskVoxelCount = removalMode == CropRemovalMode::KeepInside
+        ? GetVoxelCountFromIjkBounds(snappedIjkBounds)
+        : totalVoxelCount;
+    statistics.SetOutputVoxelCount(virtualMaskVoxelCount);
+    statistics.SetEstimatedRamUsageBytes(virtualMaskVoxelCount);
+    statistics.SetSnappedIjkBounds(snappedIjkBounds);
+    statistics.SetCanExecutePhysicalCrop(true);
+    result.SetStatistics(statistics);
+    result.SetFailureReason(statistics.GetFailureReason());
+
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
     result.SetSucceeded(result.GetVirtualMaskImage() != nullptr);
     if (!result.GetSucceeded()) {

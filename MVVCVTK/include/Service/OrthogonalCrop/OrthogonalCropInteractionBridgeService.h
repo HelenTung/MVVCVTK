@@ -69,6 +69,12 @@ public:
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
+    // 控制 preview 是否必须产出完整后端结果（mask / derived polydata）。
+    void SetPreviewRequiresFullArtifacts(bool required);
+
+    // 在轻量 preview 与完整 preview 之间切换；必要时会立即刷新当前 preview。
+    void TogglePreviewArtifactMode(bool logStats = true);
+
     // O 键对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
 
@@ -203,6 +209,9 @@ private:
 
     // 当前 preview 真正使用的 removal mode。
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
+
+    // 当前 preview 是否强制要求完整后端结果；关闭时会走轻量 preview 路径。
+    bool m_previewRequiresFullArtifacts = true;
 
     // widget 当前世界坐标 bounds，也是 preview 请求的几何真源。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
