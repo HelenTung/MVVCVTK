@@ -196,16 +196,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     }
 
     int dims[3] = { 0, 0, 0 };
-    double spacing[3] = { 1.0, 1.0, 1.0 };
-    double origin[3] = { 0.0, 0.0, 0.0 };
     image->GetDimensions(dims);
-    image->GetSpacing(spacing);
-    image->GetOrigin(origin);
 
     auto maskImage = vtkSmartPointer<vtkImageData>::New();
-    maskImage->SetDimensions(dims);
-    maskImage->SetSpacing(spacing);
-    maskImage->SetOrigin(origin);
+    maskImage->CopyStructure(image);
     maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
 
     auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
@@ -261,8 +255,6 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     localToModelMatrix->DeepCopy(localAlignmentMatrix.data());
     vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
 
-    const std::array<double, 16> modelToLocal = GetMatrixArray(modelToLocalMatrix);
-
     const auto localCenter = cropData.GetLocalCenter();
     const auto localDimensions = cropData.GetLocalDimensions();
     const std::array<double, 3> localHalfDimensions = {
@@ -277,31 +269,29 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-    const double modelStepI[3] = {
+    const double modelStepI[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
-        indexToPhysicalMatrix->GetElement(2, 0)
+        indexToPhysicalMatrix->GetElement(2, 0),
+        0.0
     };
-    const double stepX = modelToLocal[0] * modelStepI[0] + modelToLocal[1] * modelStepI[1] + modelToLocal[2] * modelStepI[2];
-    const double stepY = modelToLocal[4] * modelStepI[0] + modelToLocal[5] * modelStepI[1] + modelToLocal[6] * modelStepI[2];
-    const double stepZ = modelToLocal[8] * modelStepI[0] + modelToLocal[9] * modelStepI[1] + modelToLocal[10] * modelStepI[2];
-    const double stepW = modelToLocal[12] * modelStepI[0] + modelToLocal[13] * modelStepI[1] + modelToLocal[14] * modelStepI[2];
+    double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
+    modelToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
 
     for (int k = minK; k <= maxK; ++k) {
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
             double modelPoint[3] = { 0.0, 0.0, 0.0 };
             image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
-            double localXRaw = modelToLocal[0] * modelPoint[0] + modelToLocal[1] * modelPoint[1] + modelToLocal[2] * modelPoint[2] + modelToLocal[3];
-            double localYRaw = modelToLocal[4] * modelPoint[0] + modelToLocal[5] * modelPoint[1] + modelToLocal[6] * modelPoint[2] + modelToLocal[7];
-            double localZRaw = modelToLocal[8] * modelPoint[0] + modelToLocal[9] * modelPoint[1] + modelToLocal[10] * modelPoint[2] + modelToLocal[11];
-            double localWRaw = modelToLocal[12] * modelPoint[0] + modelToLocal[13] * modelPoint[1] + modelToLocal[14] * modelPoint[2] + modelToLocal[15];
+            const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
+            double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
+            modelToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
 
             for (int i = minI; i <= maxI; ++i) {
-                const double invW = std::abs(localWRaw) > 1e-12 ? 1.0 / localWRaw : 1.0;
-                const double localX = localXRaw * invW;
-                const double localY = localYRaw * invW;
-                const double localZ = localZRaw * invW;
+                const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0;
+                const double localX = localPointRaw[0] * invW;
+                const double localY = localPointRaw[1] * invW;
+                const double localZ = localPointRaw[2] * invW;
                 const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
                     && localX <= localCenter[0] + localHalfDimensions[0]
                     && localY >= localCenter[1] - localHalfDimensions[1]
@@ -317,10 +307,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
                     maskPtr[linearIndex] = insideValue;
                 }
 
-                localXRaw += stepX;
-                localYRaw += stepY;
-                localZRaw += stepZ;
-                localWRaw += stepW;
+                localPointRaw[0] += localStepRaw[0];
+                localPointRaw[1] += localStepRaw[1];
+                localPointRaw[2] += localStepRaw[2];
+                localPointRaw[3] += localStepRaw[3];
             }
         }
     }
