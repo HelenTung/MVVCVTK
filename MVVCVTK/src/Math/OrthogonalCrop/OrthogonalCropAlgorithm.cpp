@@ -637,8 +637,84 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
 
     const auto snappedIjkBounds = GetSnappedVoxelBounds(image, cropData);
     const std::size_t totalVoxelCount = GetImageVoxelCount(image);
-    const std::size_t insideVoxelCount = GetVoxelCountFromIjkBounds(snappedIjkBounds);
+    std::size_t insideVoxelCount = GetVoxelCountFromIjkBounds(snappedIjkBounds);
     const std::size_t bytesPerVoxel = GetImageBytesPerVoxel(image);
+
+    if (executionMode == CropExecutionMode::VirtualCrop && cropData.GetLocalAlignmentEnabled()) {
+        // 对局部对齐盒，virtual crop 的 inside 语义应以真实旋转盒体素数为准，
+        // 不能继续沿用 snapped AABB 的包围盒体素数，否则 GetStatistics 与 GetResult 的统计会分叉。
+        int dims[3] = { 0, 0, 0 };
+        image->GetDimensions(dims);
+
+        const int minI = std::max(0, snappedIjkBounds[0]);
+        const int maxI = std::min(dims[0] - 1, snappedIjkBounds[1]);
+        const int minJ = std::max(0, snappedIjkBounds[2]);
+        const int maxJ = std::min(dims[1] - 1, snappedIjkBounds[3]);
+        const int minK = std::max(0, snappedIjkBounds[4]);
+        const int maxK = std::min(dims[2] - 1, snappedIjkBounds[5]);
+        if (minI > maxI || minJ > maxJ || minK > maxK) {
+            insideVoxelCount = 0;
+        }
+        else {
+            auto modelToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            auto localToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            const auto& localAlignmentMatrix = cropData.GetLocalAlignmentMatrix();
+            localToModelMatrix->DeepCopy(localAlignmentMatrix.data());
+            vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
+
+            const auto localCenter = cropData.GetLocalCenter();
+            const auto localDimensions = cropData.GetLocalDimensions();
+            const std::array<double, 3> localHalfDimensions = {
+                localDimensions[0] * 0.5,
+                localDimensions[1] * 0.5,
+                localDimensions[2] * 0.5
+            };
+
+            insideVoxelCount = 0;
+            auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
+            const double modelStepI[4] = {
+                indexToPhysicalMatrix->GetElement(0, 0),
+                indexToPhysicalMatrix->GetElement(1, 0),
+                indexToPhysicalMatrix->GetElement(2, 0),
+                0.0
+            };
+            double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
+            modelToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
+
+            for (int k = minK; k <= maxK; ++k) {
+                for (int j = minJ; j <= maxJ; ++j) {
+                    const int rowStartIndex[3] = { minI, j, k };
+                    double modelPoint[3] = { 0.0, 0.0, 0.0 };
+                    image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
+                    const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
+                    double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
+                    modelToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
+
+                    for (int i = minI; i <= maxI; ++i) {
+                        const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0;
+                        const double localX = localPointRaw[0] * invW;
+                        const double localY = localPointRaw[1] * invW;
+                        const double localZ = localPointRaw[2] * invW;
+                        const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
+                            && localX <= localCenter[0] + localHalfDimensions[0]
+                            && localY >= localCenter[1] - localHalfDimensions[1]
+                            && localY <= localCenter[1] + localHalfDimensions[1]
+                            && localZ >= localCenter[2] - localHalfDimensions[2]
+                            && localZ <= localCenter[2] + localHalfDimensions[2];
+
+                        if (isInside) {
+                            ++insideVoxelCount;
+                        }
+
+                        localPointRaw[0] += localStepRaw[0];
+                        localPointRaw[1] += localStepRaw[1];
+                        localPointRaw[2] += localStepRaw[2];
+                        localPointRaw[3] += localStepRaw[3];
+                    }
+                }
+            }
+        }
+    }
 
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
@@ -732,7 +808,6 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     const auto statistics = GetStatistics(image, cropData, removalMode, CropExecutionMode::VirtualCrop);
     result.SetStatistics(statistics);
     result.SetFailureReason(statistics.GetFailureReason());
-    std::size_t exactInsideVoxelCount = statistics.GetInsideVoxelCount();
 
     // 先复用统计阶段给出的 snapped bounds 缩小遍历范围，再真正生成 mask。
     // 结果说明：mask 与原图同结构，outline 仍落在后端输入坐标系下，供 overlay 直接消费。
@@ -740,15 +815,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
         image,
         cropData,
         statistics.GetSnappedIjkBounds(),
-        removalMode,
-        &exactInsideVoxelCount));
-    if (cropData.GetLocalAlignmentEnabled()) {
-        // 本地对齐盒的 inside 体素数只能在逐体素判定后拿到精确值，
-        // 因此这里用真实计数回写统计，避免仅使用包围盒体素数。
-        auto exactStatistics = statistics;
-        exactStatistics.SetInsideVoxelCount(exactInsideVoxelCount);
-        result.SetStatistics(exactStatistics);
-    }
+        removalMode));
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
     result.SetSucceeded(result.GetVirtualMaskImage() != nullptr);
     if (!result.GetSucceeded()) {

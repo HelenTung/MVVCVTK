@@ -15,6 +15,7 @@
 #include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
 
+#include <cmath>
 #include <cstddef>
 #include <utility>
 
@@ -36,6 +37,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropBackendRouterService::GetInputImage(
 void OrthogonalCropBackendRouterService::CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
     m_inputPolyData = std::move(polyData);
+    m_cachedPolyDataInput = nullptr;
+    m_cachedClippedPolyData = nullptr;
+    m_hasCachedPolyDataClip = false;
 }
 
 void OrthogonalCropBackendRouterService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
@@ -162,6 +166,61 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         return nullptr;
     }
 
+    bool canReuseCachedClip = m_hasCachedPolyDataClip
+        && m_cachedPolyDataInput == m_inputPolyData.GetPointer()
+        && m_cachedPolyDataRemovalMode == removalMode
+        && m_cachedClippedPolyData;
+    if (canReuseCachedClip
+        && m_cachedPolyDataCropData.GetLocalAlignmentEnabled() != cropData.GetLocalAlignmentEnabled()) {
+        canReuseCachedClip = false;
+    }
+
+    if (canReuseCachedClip) {
+        constexpr double epsilon = 1e-9;
+        const auto& cachedRasBounds = m_cachedPolyDataCropData.GetRasBounds();
+        const auto& rasBounds = cropData.GetRasBounds();
+        for (std::size_t index = 0; index < rasBounds.size(); ++index) {
+            if (std::abs(cachedRasBounds[index] - rasBounds[index]) > epsilon) {
+                canReuseCachedClip = false;
+                break;
+            }
+        }
+    }
+
+    if (canReuseCachedClip && cropData.GetLocalAlignmentEnabled()) {
+        constexpr double epsilon = 1e-9;
+        const auto& cachedLocalCenter = m_cachedPolyDataCropData.GetLocalCenter();
+        const auto& localCenter = cropData.GetLocalCenter();
+        for (std::size_t index = 0; index < localCenter.size(); ++index) {
+            if (std::abs(cachedLocalCenter[index] - localCenter[index]) > epsilon) {
+                canReuseCachedClip = false;
+                break;
+            }
+        }
+
+        const auto& cachedLocalDimensions = m_cachedPolyDataCropData.GetLocalDimensions();
+        const auto& localDimensions = cropData.GetLocalDimensions();
+        for (std::size_t index = 0; canReuseCachedClip && index < localDimensions.size(); ++index) {
+            if (std::abs(cachedLocalDimensions[index] - localDimensions[index]) > epsilon) {
+                canReuseCachedClip = false;
+                break;
+            }
+        }
+
+        const auto& cachedLocalMatrix = m_cachedPolyDataCropData.GetLocalAlignmentMatrix();
+        const auto& localMatrix = cropData.GetLocalAlignmentMatrix();
+        for (std::size_t index = 0; canReuseCachedClip && index < localMatrix.size(); ++index) {
+            if (std::abs(cachedLocalMatrix[index] - localMatrix[index]) > epsilon) {
+                canReuseCachedClip = false;
+                break;
+            }
+        }
+    }
+
+    if (canReuseCachedClip) {
+        return m_cachedClippedPolyData;
+    }
+
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
         // 轴对齐盒直接映射成 vtkBox。
@@ -212,6 +271,13 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
 
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->ShallowCopy(m_polyDataGeometryFilter->GetOutput());
+
+    m_cachedPolyDataCropData = cropData;
+    m_cachedPolyDataRemovalMode = removalMode;
+    m_cachedPolyDataInput = m_inputPolyData.GetPointer();
+    m_cachedClippedPolyData = output;
+    m_hasCachedPolyDataClip = true;
+
     return output;
 }
 
@@ -277,12 +343,15 @@ bool OrthogonalCropBackendRouterService::GetPolyDataCropDataModel(
     }
 
     // polydata 路径复用算法层的 request 归一化逻辑，保证 image / polydata 的盒定义一致。
+    // 与 image physical extract 不同，polydata clip 不依赖稳定的轴对齐导出范围，
+    // 因此这里统一允许 partial overlap：盒子只要和输入有交集即可执行 clip。
     return OrthogonalCropAlgorithm::GetCropDataModel(
         GetPolyDataBounds(),
         request,
         cropData,
         failureReason,
-        message);
+        message,
+        true);
 }
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisticsFromClipped(vtkPolyData* clipped) const

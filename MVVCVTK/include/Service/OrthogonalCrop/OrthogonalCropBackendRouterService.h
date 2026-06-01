@@ -119,6 +119,21 @@ private:
     // polydata 统计/结果路径复用的 geometry filter。
     mutable vtkSmartPointer<vtkGeometryFilter> m_polyDataGeometryFilter;
 
+    // 最近一次 polydata clip 的输入几何快照；命中时可直接复用 clipped 输出。
+    mutable CropDataModel m_cachedPolyDataCropData;
+
+    // 最近一次 polydata clip 对应的 removal mode。
+    mutable CropRemovalMode m_cachedPolyDataRemovalMode = CropRemovalMode::KeepInside;
+
+    // 最近一次 polydata clip 对应的原始输入指针；输入变更时缓存必须失效。
+    mutable vtkPolyData* m_cachedPolyDataInput = nullptr;
+
+    // 最近一次 polydata clip 的输出结果；供 statistics/result 连续调用复用。
+    mutable vtkSmartPointer<vtkPolyData> m_cachedClippedPolyData;
+
+    // 当前是否持有可用的 polydata clip 缓存。
+    mutable bool m_hasCachedPolyDataClip = false;
+
     // 外部偏好的数据源；若对应输入不存在，则会自动回退。
     OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::Auto;
 };
