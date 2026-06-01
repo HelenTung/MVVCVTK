@@ -1,51 +1,230 @@
 /*
 =====================================================================
-example.cpp — 精简接入示例（对齐当前 main.cpp）
-
-OrthogonalCrop 模块路径速查：
-- Math / 数据模型：include/Math/OrthogonalCrop/OrthogonalCropTypes.h
-- Math / 算法接口：include/Math/OrthogonalCrop/OrthogonalCropAlgorithm.h
-- Math / 算法实现：src/Math/OrthogonalCrop/OrthogonalCropAlgorithm.cpp
-- Service / image 插件封装：include/Service/OrthogonalCrop/OrthogonalCropPluginService.h
-- Service / image 插件实现：src/Service/OrthogonalCrop/OrthogonalCropPluginService.cpp
-- Service / 后端路由：include/Service/OrthogonalCrop/OrthogonalCropBackendRouterService.h
-- Service / 后端路由实现：src/Service/OrthogonalCrop/OrthogonalCropBackendRouterService.cpp
-- Service / 交互桥：include/Service/OrthogonalCrop/OrthogonalCropInteractionBridgeService.h
-- Service / 交互桥实现：src/Service/OrthogonalCrop/OrthogonalCropInteractionBridgeService.cpp
-- Service / widget 状态控制：include/Service/OrthogonalCrop/OrthogonalCropWidgetStateController.h
-- Service / widget 状态控制实现：src/Service/OrthogonalCrop/OrthogonalCropWidgetStateController.cpp
-- Strategy / preview overlay：include/Strategies/OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.h
-- Strategy / preview overlay 实现：src/Strategies/OrthogonalCropPreviewStrategy/OrthogonalCropPreviewOverlayStrategy.cpp
+example.cpp — 当前架构对齐的接入说明示例
 
 用途：
-- 只保留当前项目最常用、最接近实际可复制调用的骨架。
-- 以 main.cpp 当前做法为准，不再保留 UML、模式说明、长篇职责文档。
+- 这不是一份要直接编译运行的 demo，而是一份和 main.cpp 同步维护的“活文档”。
+- 重点不是罗列所有类，而是把当前主流程、关键 Set 接口、以及为什么要这样设变量讲清楚。
+- 如果 example.cpp 和 main.cpp 有冲突，以 main.cpp 的当前实现为准，再回头修正这份说明。
 
-当前主线：
-1. 共享一份 DataManager
-2. 共享一份 SharedStateBroadcaster + SharedInteractionState
-3. 每个窗口各自持有 MedicalVizService + StdRenderContext
-4. 由一个主窗口发起 SetFileLoadedAsync
-5. 所有窗口 SetRendered / SetInteractorInitialized
-6. 由一个窗口进入 SetStarted()
-
-OrthogonalCrop 流程速记：
-- 交互入口在 OrthogonalCropInteractionBridgeService，负责 widget、坐标转换和 preview 分发。
-- 算法入口在 OrthogonalCropAlgorithm，负责把 request 折叠成统一 cropData，并分流到 virtual / physical 两条路径。
-- image 输入默认走 mask / extract 语义，polydata 输入默认走 implicit function + clip 语义。
-- 2D 窗口主要消费 overlay mask，3D 主窗口在必要时会额外套一层临时 polydata clip 预览。
+当前架构的核心判断：
+1. SharedInteractionState 是跨窗口共享的状态真源。
+2. MedicalVizService 是“窗口级业务调度层”，StdRenderContext 是“窗口级渲染/事件入口”。
+3. 数据加载、导出、重载都通过 service 发起，但真正的数据只保留一份，窗口之间共享。
+4. OrthogonalCropInteractionBridgeService 不直接做算法，它只负责 widget、坐标换算、preview 时机和结果分发。
+5. OrthogonalCropBackendRouterService 统一接 request，然后再决定走 image 还是 polydata 后端。
 =====================================================================
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-一、最小可复制骨架
+一、先认清现在这套架构里谁在负责什么
 ─────────────────────────────────────────────────────────────────────
+
+1) 共享层
+
+    RawVolumeDataManager
+    - 真正持有 vtkImageData / buffer / 导出实现。
+    - 多个窗口共享同一份数据，不为每个窗口复制体数据。
+
+    SharedStateBroadcaster + SharedInteractionState
+    - SharedInteractionState 是单一状态真源，保存 TF、材质、WW/WC、cursor、modelMatrix、可见性等。
+    - SharedStateBroadcaster 只负责把状态变化翻译成 UpdateFlags 广播出去。
+
+2) 窗口层
+
+    MedicalVizService
+    - 每个窗口各一份。
+    - 负责：前处理配置登记、加载入口、导出入口、交互状态写回、主线程后处理。
+
+    StdRenderContext
+    - 每个窗口各一份。
+    - 负责：VTK renderer/renderWindow/interactor 生命周期、事件接入、Timer 驱动、工具模式切换。
+
+3) 裁切层
+
+    OrthogonalCropInteractionBridgeService
+    - 交互桥。
+    - 负责：widget、world/model 坐标换算、preview 刷新时机、结果分发到多个窗口。
+
+    OrthogonalCropBackendRouterService
+    - 数据后端路由。
+    - 负责：对同一份 OrthogonalCropRequest 选择 image 或 polydata 执行路径。
+
+    OrthogonalCropAlgorithm
+    - 纯算法层。
+    - 负责：request 归一化、bounds 校验、voxel snapped、virtual/physical 结果构造。
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+二、当前 main.cpp 的真实调用流程
+─────────────────────────────────────────────────────────────────────
+
+下面这条顺序就是当前主程序的骨架，不要再按旧版“先建窗口再边走边改状态”的方式理解。
+
+Step 1: 创建共享资源
 
     auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
     auto sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
     auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
+    auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
+    auto orthogonalCropBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
+
+为什么要先建这些：
+- DataManager 和 SharedState 是所有窗口共享的，属于应用级单例资源，而不是窗口级资源。
+- imageAnalysis / gapAnalysis 依赖同一个 DataManager，说明它们消费的是同一份体数据快照。
+- orthogonalCropBridge 也只有一份，因为裁切模式本质上是“应用当前数据上的一个交互工具”，不是每个窗口各自独立一套。
+
+Step 2: 先声明 WindowConfig，而不是立刻操作 VTK 对象
+
+    WindowConfig cfgA;
+    WindowConfig cfgB;
+    WindowConfig cfgC;
+    WindowConfig cfgD;
+    WindowConfig cfgE;
+
+为什么：
+- WindowConfig/PreInitConfig 是纯数据，不碰 VTK，适合在真正建窗前先把意图说清楚。
+- 这样可以保证“前处理配置”和“窗口生命周期”解耦。
+- 尤其是 vizMode / TF / material / WW/WC 这类配置，本质上是状态，不应该写死在建窗细节里。
+
+Step 3: 通过 GetWindowPair 批量建窗
+
+    auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceE, contextE] = GetWindowPair(cfgE, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceB, contextB] = GetWindowPair(cfgB, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState, sharedStateBroadcaster);
+    auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState, sharedStateBroadcaster);
+
+为什么按这个阶段建窗：
+- 到这一步，每个窗口都得到一对固定组合：MedicalVizService + StdRenderContext。
+- service 是业务面，context 是渲染/交互面；后面所有 Set 基本都围绕这两个对象展开。
+
+Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
+
+    orthogonalCropBridge->SetDataManager(sharedDataMgr);
+    orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+
+为什么这么设：
+- SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
+- SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的世界/model 坐标转换都以它为准。
+- SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
+
+Step 5: 再做窗口级辅助元素策略
+
+    serviceA->SetElementVisible(VisFlags::Planes3D, false);
+    serviceE->SetElementVisible(VisFlags::Planes3D, false);
+    serviceA->SetElementVisible(VisFlags::Ruler, false);
+    serviceE->SetElementVisible(VisFlags::Ruler, false);
+    serviceB->SetElementVisible(VisFlags::Crosshair, true);
+    serviceC->SetElementVisible(VisFlags::Crosshair, true);
+    serviceD->SetElementVisible(VisFlags::Crosshair, true);
+
+为什么这些不放进 WindowConfig：
+- 这些不是“窗口壳子”的固定属性，而是运行期可变的渲染元素策略。
+- 它们最后会进入 SharedState 的 visibilityMask，并通过 Strategy 同步到具体渲染对象。
+- 所以这类设置属于 service 级状态，而不是 context 级窗口参数。
+
+Step 6: 只用一个 service 发起加载
+
+    serviceA->SetFileLoadedAsync(..., [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success) {
+        ...
+    });
+
+为什么由 A 来发起：
+- 任何一个 service 理论上都能发起，因为底层 DataManager/SharedState 是共享的。
+- 当前选择 A，是因为加载成功后会立刻推导 iso 值，并把裁切工具绑定到主 3D 参考窗口；A 最接近这条主线。
+
+Step 7: 在加载成功回调里做“数据相关”的后处理
+
+    auto range = sharedState->GetDataRange();
+    double isoVal = range[0] + (range[1] - range[0]) * 0.55;
+    serviceA->SetIsoThreshold(isoVal);
+
+    auto histogramTable = imageAnalysis->GetHistogramData(2048);
+    ...
+
+    orthogonalCropBridge->SetInputImage(sharedDataMgr->GetVtkImage());
+
+为什么这些动作必须等加载成功后再做：
+- Iso 阈值依赖实际数据 range，加载前没有意义。
+- Histogram 也必须消费已经就绪的 vtkImageData。
+- OrthogonalCrop 的 image 输入只有在 DataManager 真正持有有效 image 后才能绑定，否则 bridge/routing 里看到的是空输入。
+
+非常重要：
+- SetFileLoadedAsync / SetReloadFromBufferAsync / SetTransformedDataSavedAsync 的业务回调，当前实现是“主线程延迟回调”，不是后台线程直接回调。
+- 也就是说，回调执行时，SetPendingUpdatesProcessed 已经先把 DataReady / LoadFailed / pipeline rebuild 收敛过一轮了。
+
+Step 8: 全窗口先 Render，再 Initialize interactor
+
+    contextA->SetRendered();
+    contextB->SetRendered();
+    contextC->SetRendered();
+    contextD->SetRendered();
+    contextE->SetRendered();
+
+    contextA->SetInteractorInitialized();
+    contextB->SetInteractorInitialized();
+    contextC->SetInteractorInitialized();
+    contextD->SetInteractorInitialized();
+    contextE->SetInteractorInitialized();
+
+为什么分成两步：
+- SetRendered() 先把初始 renderer/window 内容打出来，避免第一次交互前窗口是半初始化状态。
+- SetInteractorInitialized() 再去初始化 interactor 和 repeating timer，Timer 才能开始驱动主线程后处理链路。
+
+Step 9: 明确谁给裁切 widget 提供 interactor
+
+    orthogonalCropBridge->SetPrimaryInteractor(contextA->GetInteractor());
+
+为什么一定是 A：
+- 当前 widget 只挂一处 interactor，不能同时挂在 5 个窗口上。
+- A 是主 3D 参考窗口，最适合作为 O/1/2/3 裁切热键与 box widget 的宿主。
+
+Step 10: 给所有窗口挂同一份裁切热键观察器
+
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
+    ...
+    contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
+
+为什么既挂 KeyPress/KeyRelease，又挂 CharEvent：
+- KeyPress/KeyRelease 负责我们自己的动作语义和按键防抖。
+- CharEvent 必须额外拦截，因为 VTK 默认交互样式还会在 CharEvent 里处理内建快捷键；
+  当前 `3` 如果不拦，会落到 stereo 默认逻辑上，触发不必要的 VTK warning。
+
+Step 11: 只让一个窗口进入 SetStarted()
+
+    contextB->SetStarted();
+
+为什么不是所有窗口都 Start：
+- 一个应用只需要一个主消息循环。
+- 当前 main 选择 B 作为持有主事件循环的窗口，这只是应用层选择，不代表 B 比其他窗口更“核心”。
+- 真正关键的是：在 SetStarted() 之前，所有窗口都已经完成 SetRendered() 和 SetInteractorInitialized()。
+*/
+
+/*
+─────────────────────────────────────────────────────────────────────
+三、当前架构下的最小可复制骨架
+─────────────────────────────────────────────────────────────────────
+
+下面这段示意代码只保留当前 main 的主干，不再写旧版分支。
+
+    auto sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    auto sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
+    auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
+    auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
+    auto orthogonalCropBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
+
+    std::vector<TFNode> volTF = {
+        { 0.00, 0.0, 0.0, 0.0, 0.0 },
+        { 0.50, 0.0, 0.0, 0.5, 0.0 },
+        { 0.85, 0.8, 0.0, 0.5, 0.0 },
+        { 1.00, 1.0, 0.0, 0.5, 0.0 },
+    };
 
     WindowConfig cfgA;
     cfgA.title = "Window A: Composite IsoSurface";
@@ -66,12 +245,7 @@ OrthogonalCrop 流程速记：
     cfgE.posX = 660;
     cfgE.posY = 50;
     cfgE.preInitCfg.vizMode = VizMode::CompositeVolume;
-    cfgE.preInitCfg.tfNodes = {
-        { 0.00, 0.0, 0.0, 0.0, 0.0 },
-        { 0.50, 0.0, 0.0, 0.5, 0.0 },
-        { 0.85, 0.8, 0.0, 0.5, 0.0 },
-        { 1.00, 1.0, 0.0, 0.5, 0.0 },
-    };
+    cfgE.preInitCfg.tfNodes = volTF;
     cfgE.preInitCfg.hasTF = true;
     cfgE.preInitCfg.bgColor = { 0.08, 0.08, 0.12 };
     cfgE.preInitCfg.hasBgColor = true;
@@ -88,29 +262,15 @@ OrthogonalCrop 流程速记：
     cfgB.preInitCfg.windowLevel = { 400.0, 40.0 };
     cfgB.preInitCfg.hasWindowLevel = true;
 
-    WindowConfig cfgC;
+    WindowConfig cfgC = cfgB;
     cfgC.title = "Window C: Front_back Slice";
-    cfgC.width = 400;
-    cfgC.height = 400;
     cfgC.posX = 460;
-    cfgC.posY = 660;
     cfgC.preInitCfg.vizMode = VizMode::SliceFront_back;
-    cfgC.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
-    cfgC.preInitCfg.hasBgColor = true;
-    cfgC.preInitCfg.windowLevel = { 400.0, 40.0 };
-    cfgC.preInitCfg.hasWindowLevel = true;
 
-    WindowConfig cfgD;
+    WindowConfig cfgD = cfgB;
     cfgD.title = "Window D: Left_right Slice";
-    cfgD.width = 400;
-    cfgD.height = 400;
     cfgD.posX = 870;
-    cfgD.posY = 660;
     cfgD.preInitCfg.vizMode = VizMode::SliceLeft_right;
-    cfgD.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
-    cfgD.preInitCfg.hasBgColor = true;
-    cfgD.preInitCfg.windowLevel = { 400.0, 40.0 };
-    cfgD.preInitCfg.hasWindowLevel = true;
 
     auto [serviceA, contextA] = GetWindowPair(cfgA, sharedDataMgr, sharedState, sharedStateBroadcaster);
     auto [serviceE, contextE] = GetWindowPair(cfgE, sharedDataMgr, sharedState, sharedStateBroadcaster);
@@ -118,8 +278,12 @@ OrthogonalCrop 流程速记：
     auto [serviceC, contextC] = GetWindowPair(cfgC, sharedDataMgr, sharedState, sharedStateBroadcaster);
     auto [serviceD, contextD] = GetWindowPair(cfgD, sharedDataMgr, sharedState, sharedStateBroadcaster);
 
-    serviceA->SetElementVisible(VisFlags::Planes3D, true);
-    serviceE->SetElementVisible(VisFlags::Planes3D, true);
+    orthogonalCropBridge->SetDataManager(sharedDataMgr);
+    orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+
+    serviceA->SetElementVisible(VisFlags::Planes3D, false);
+    serviceE->SetElementVisible(VisFlags::Planes3D, false);
     serviceA->SetElementVisible(VisFlags::Ruler, false);
     serviceE->SetElementVisible(VisFlags::Ruler, false);
     serviceB->SetElementVisible(VisFlags::Crosshair, true);
@@ -127,24 +291,27 @@ OrthogonalCrop 流程速记：
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     serviceA->SetFileLoadedAsync(
-        "E:/data/ct/700x1358x1252.raw",
+        "E:/data/1000x1000x1000.raw",
         { 0.02125f, 0.02125f, 0.02125f },
         { 0.0f, 0.0f, 0.0f },
-        [sharedState, serviceA, imageAnalysis](bool success)
+        [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success)
         {
             if (!success) {
                 std::cerr << "[onComplete] Volume data load failed.\n";
                 return;
             }
 
-            auto range = sharedState->GetDataRange();
-            double isoVal = range[0] + (range[1] - range[0]) * 0.55;
+            const auto range = sharedState->GetDataRange();
+            const double isoVal = range[0] + (range[1] - range[0]) * 0.55;
             serviceA->SetIsoThreshold(isoVal);
 
-            auto histogramTable = imageAnalysis->GetHistogramData(2048);
+            const int histogramBinCount = 2048;
+            auto histogramTable = imageAnalysis->GetHistogramData(histogramBinCount);
             if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
-                imageAnalysis->SetHistogramImageSaved("E:/data/ct/histogram.png", 2048);
+                imageAnalysis->SetHistogramImageSaved("E:/data/ct/histogram.png", histogramBinCount);
             }
+
+            orthogonalCropBridge->SetInputImage(sharedDataMgr->GetVtkImage());
         });
 
     contextA->SetRendered();
@@ -159,22 +326,28 @@ OrthogonalCrop 流程速记：
     contextD->SetInteractorInitialized();
     contextE->SetInteractorInitialized();
 
-    // 当前 main.cpp 由 B 窗口进入消息循环
+    orthogonalCropBridge->SetPrimaryInteractor(contextA->GetInteractor());
+
+    // 这里挂同一份热键观察器到五个 interactor；
+    // KeyPress/KeyRelease 处理业务动作，CharEvent 负责拦截 VTK 默认快捷键。
+
     contextB->SetStarted();
 
-说明：
-- SetFileLoadedAsync 的 onComplete 是主线程延迟回调。
-- 等值面阈值、直方图导出这类后处理，统一放在加载成功回调里即可。
-- 辅助元素显隐由各自窗口自己的 service 控制，不放进 WindowConfig。
+最关键的时序不要改：
+1. 先 SetRendered。
+2. 再 SetInteractorInitialized。
+3. 再 SetPrimaryInteractor。
+4. 最后只让一个 context 调 SetStarted。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-二、GetWindowPair 当前约定
+四、GetWindowPair 里每个 Set 接口到底在做什么
 ─────────────────────────────────────────────────────────────────────
 
-    static std::pair<std::shared_ptr<MedicalVizService>,
-                     std::shared_ptr<StdRenderContext>>
+当前 main 的建窗 helper 等价于：
+
+    static std::pair<std::shared_ptr<MedicalVizService>, std::shared_ptr<StdRenderContext>>
     GetWindowPair(const WindowConfig& cfg,
                   std::shared_ptr<AbstractDataManager> dataMgr,
                   std::shared_ptr<SharedInteractionState> sharedState,
@@ -189,214 +362,300 @@ OrthogonalCrop 流程速记：
         context->SetWindowSize(cfg.width, cfg.height);
         context->SetWindowPosition(cfg.posX, cfg.posY);
         context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode);
-        if (cfg.showAxes) {
+        if (cfg.showAxes)
             context->SetOrientationAxesVisible(true);
-        }
-        if (cfg.preInitCfg.hasBgColor) {
+        if (cfg.preInitCfg.hasBgColor)
             service->SetBackground(cfg.preInitCfg.bgColor);
-        }
 
         return { service, context };
     }
+
+逐条解释：
+
+1) context->SetServiceBound(service)
+- 作用：把 renderWindow / renderer 交给 service，并注册状态事件观察链。
+- 为什么必须最早做：后面的 service 配置要有合法 renderer/renderWindow 归属，观察回调也要在这里接入。
+
+2) service->SetVisualConfig(cfg.preInitCfg)
+- 作用：批量写入 PreInitConfig，对 SharedState 做一次性状态登记。
+- 为什么放在建窗阶段：这些配置与数据内容无关，属于“先说明应该怎么显示”。
+- 为什么是批量接口：减少多次加锁和多次 UpdateFlags 广播。
+
+3) context->SetWindowTitle / SetWindowSize / SetWindowPosition
+- 作用：设置窗口壳属性，只影响 renderWindow 外壳，不参与 SharedState。
+- 为什么走 context：这是渲染上下文的职责，不是业务状态。
+
+4) context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode)
+- 作用：根据 VizMode 选择 2D image style 或 3D trackball camera style。
+- 为什么这里做：交互风格要和窗口目标模式同步，但这仍然是 context 层职责，不应该放进 service 的状态同步里。
+
+5) context->SetOrientationAxesVisible(true)
+- 作用：只控制方向轴 widget 的启停。
+- 为什么不是全局配置：这是窗口装饰级能力，不是共享渲染状态。
+
+6) service->SetBackground(cfg.preInitCfg.bgColor)
+- 作用：显式写背景色到 SharedState。
+- 说明：如果 `cfg.preInitCfg.hasBgColor = true`，`SetVisualConfig` 本身已经会把 bgColor 写进去；
+  当前 main 额外再写一次，是为了在调用点上把“背景色属于窗口前处理显示意图”表达得更直白。
+- 结论：这行在语义上更接近“显式重复说明”，不是另一个不可缺少的阶段。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-三、前处理配置接口
+五、为什么 PreInitConfig 里有一堆 hasXxx 标志位
 ─────────────────────────────────────────────────────────────────────
 
-1) 批量提交初始化配置
+当前 PreInitConfig 不是“所有字段都必须有值”的配置对象，而是“可部分提交的前处理快照”。
 
-    PreInitConfig cfg;
-    cfg.vizMode = VizMode::CompositeIsoSurface;
-    cfg.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
-    cfg.hasBgColor = true;
-    cfg.bgColor = { 0.05, 0.05, 0.05 };
-    cfg.hasWindowLevel = true;
-    cfg.windowLevel = { 400.0, 40.0 };
-    serviceA->SetVisualConfig(cfg);
-
-2) 切换模式
-
-    serviceA->SetVizMode(VizMode::CompositeIsoSurface);
-    serviceE->SetVizMode(VizMode::CompositeVolume);
-
-3) 设置材质 / 透明度 / 背景 / spacing
-
-    serviceA->SetMaterial({ 0.3, 0.6, 0.2, 15.0, 0.4, false });
-    serviceA->SetOpacity(0.4);
-    serviceA->SetBackground({ 0.05, 0.05, 0.05 });
-    serviceA->SetSpacing(0.02125, 0.02125, 0.02125);
-
-4) 设置传输函数
-
-    std::vector<TFNode> tf = {
-        { 0.00, 0.0, 0.0, 0.0, 0.0 },
-        { 0.50, 0.0, 0.0, 0.5, 0.0 },
-        { 0.85, 0.8, 0.0, 0.5, 0.0 },
-        { 1.00, 1.0, 0.0, 0.5, 0.0 },
+    struct PreInitConfig {
+        VizMode vizMode;
+        MaterialParams material;
+        std::vector<TFNode> tfNodes;
+        double isoThreshold;
+        BackgroundColor bgColor;
+        std::array<double, 3> spacing;
+        WindowLevelParams windowLevel;
+        bool hasTF;
+        bool hasIso;
+        bool hasBgColor;
+        bool hasSpacing;
+        bool hasWindowLevel;
     };
-    serviceE->SetTransferFunction(tf);
 
-5) 设置窗宽窗位 / 等值面阈值
+这些 hasXxx 的原因必须明确：
 
-    serviceB->SetWindowLevel(400.0, 40.0);
-    serviceA->SetIsoThreshold(1800.0);
+1) 默认值本身可能是合法业务值
+- 例如 bgColor = {0,0,0} 可能就是想要纯黑，而不是“没设置背景”。
+- 例如 isoThreshold = 0.0 也可能就是合法阈值，而不是“没有设置”。
+
+2) SetVisualConfig 需要支持“只覆盖一部分配置”
+- 如果没有 hasXxx，就分不清当前是“想写默认值”，还是“根本不想覆盖这个字段”。
+
+3) AppState::SetPreInitConfig 需要精确生成 UpdateFlags
+- 只有 hasXxx 为 true 时，才应该尝试比较并触发 TF / Background / Spacing / WindowLevel 等变更位。
+
+一句话概括：
+- hasXxx 不是啰嗦，而是在避免“合法零值”和“未设置”混淆。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-四、加载与状态查询
+六、MedicalVizService 常用 Set 接口说明
 ─────────────────────────────────────────────────────────────────────
 
-1) 从文件异步加载
+这一节不只说“叫什么”，而是说“写到哪里、什么时候生效、为什么这样设计”。
 
-    serviceA->SetFileLoadedAsync(
-        "E:/data/ct/700x1358x1252.raw",
-        { 0.02125f, 0.02125f, 0.02125f },
-        { 0.0f, 0.0f, 0.0f },
-        [](bool success) {
-            std::cout << (success ? "load ok\n" : "load failed\n");
-        });
+1) SetVizMode(VizMode mode)
+- 做什么：只写 `m_pendingVizModeInt`，不立即重建 Strategy。
+- 为什么：模式切换是结构性变化，真正重建要等主线程 `SetPendingUpdatesProcessed -> SetPipelineRebuilt`。
+- 否则如果在任意线程或任意回调里直接切 Strategy，会破坏 VTK 渲染线程边界。
 
-2) 从上游 buffer 重载
+2) SetVisualConfig(const PreInitConfig& cfg)
+- 做什么：把 cfg 一次性提交到 SharedState。
+- 为什么：前处理配置的本质是“显示意图”，不应该在这里直接碰 mapper/actor。
 
-    const float* data = nullptr;
-    std::array<int, 3> dims = { 512, 512, 512 };
-    std::array<float, 3> spacing = { 0.1f, 0.1f, 0.1f };
-    std::array<float, 3> origin = { 0.0f, 0.0f, 0.0f };
-    serviceA->SetReloadFromBufferAsync(data, dims, spacing, origin,
-        [](bool success) {
-            std::cout << (success ? "reload ok\n" : "reload failed\n");
-        });
+3) SetMaterial / SetOpacity / SetTransferFunction / SetIsoThreshold / SetBackground / SetSpacing / SetWindowLevel
+- 做什么：全都只改 SharedState。
+- 什么时候真正落到渲染对象：下一次 Timer 心跳，`SetPendingUpdatesProcessed -> SetStrategyStateSynced`。
+- 为什么：保持“状态写回”和“VTK 渲染对象更新”分离，避免任意线程直接碰渲染对象。
 
-3) 查询加载状态 / 请求取消
+4) SetFileLoadedAsync(path, spacing, origin, onComplete)
+- 做什么：后台线程做 I/O 和数据准备；成功后通过 SharedState 发布 DataReady；onComplete 在主线程延迟执行。
+- 为什么：加载要异步，VTK 管线重建要主线程，二者不能混在同一层里直接做。
 
-    LoadState fileState = serviceA->GetFileLoadState();
-    LoadState reloadState = serviceA->GetReloadLoadState();
-    serviceA->SetFileLoadCanceled();
+5) SetReloadFromBufferAsync(...)
+- 做什么：后台线程准备待提交镜像，真正消费要等主线程 `SetPendingUpdatesProcessed`。
+- 为什么：重载数据和文件流加载一样，也必须遵守主线程收敛策略。
+
+6) SetElementVisible(flagBit, show)
+- 做什么：改 SharedState 里的 visibilityMask。
+- 为什么：Planes3D / Crosshair / Ruler 是策略级显示元素，不是窗口壳属性。
+
+7) SetInteracting(bool val)
+- 做什么：写 SharedState 的交互态。
+- 为什么：Strategy 可以用这个状态切换轻量渲染参数，renderWindow 也会跟着调整 desired update rate。
+
+8) SetSliceScrolled(delta)
+- 做什么：根据当前 VizMode 计算当前应推进哪个切片轴，然后更新 cursor。
+- 为什么：切片滚动本质上是“状态计算 + cursor 写回”，不是直接命令 slice actor 自己跳。
+
+9) SetCursorWorldPosition(worldPos, axis)
+- 做什么：更新共享 cursor；axis = -1 表示直接写三维点，否则只在非导航轴上跟随更新。
+- 为什么：2D/3D 联动都要依赖同一份 cursor 真源。
+
+10) SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, startWW, startWC)
+- 做什么：把拖拽增量折算成新的 WW/WC，再写回 SharedState。
+- 为什么：把交互增量转业务值的逻辑固定在服务层，不让 UI 侧重复算。
+
+11) SetModelTransform / SetModelTransformReset / SetModelMatrixSynced
+- SetModelTransform：基于当前矩阵叠加一轮 TRS。
+- SetModelTransformReset：重置成单位矩阵。
+- SetModelMatrixSynced：把 TrackballActor 拖拽出的 VTK 矩阵回写到 SharedState。
+- 为什么：模型矩阵必须始终只有 SharedState 这一份真源，world/model 互转都以它为准。
+
+12) SetTransformedDataSavedAsync / SetSliceImagesSavedAsync
+- 做什么：后台导出，主线程延迟回调结果。
+- 为什么：导出和渲染都可能重，必须异步；回调必须回主线程，避免上层 UI 状态错线程。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-五、交互与状态接口
+七、StdRenderContext 常用 Set 接口说明
 ─────────────────────────────────────────────────────────────────────
 
-1) 切片滚动 / 光标联动
+1) SetServiceBound(service)
+- 做什么：把 renderer/renderWindow 绑定给 service。
+- 为什么：service 后续所有 Strategy 附着和状态同步，都以这对 VTK 对象为落点。
 
-    serviceB->SetSliceScrolled(+1);
-    double worldPos[3] = { 10.0, 20.0, 30.0 };
-    serviceB->SetCursorWorldPosition(worldPos, -1);
-    auto cursor = serviceB->GetCursorWorld();
+2) SetCameraStyleByVizMode(mode)
+- 做什么：2D 窗口用 vtkInteractorStyleImage，3D 窗口用 vtkInteractorStyleTrackballCamera。
+- 为什么：相机交互风格属于 context，不属于业务状态。
 
-2) 交互态开关
+3) SetRendered()
+- 做什么：触发一次初始 Render。
+- 为什么：先把窗口内容打出来，再进入更复杂的 interactor/timer 阶段。
 
-    serviceA->SetInteracting(true);
-    serviceA->SetInteracting(false);
+4) SetInteractorInitialized()
+- 做什么：Initialize interactor，创建 repeating timer，挂 Timer observer。
+- 为什么：Timer 是当前主线程后处理链的心跳源。
 
-3) 控制辅助元素显隐
+5) SetStarted()
+- 做什么：先 Render，再 Start interactor 主循环。
+- 为什么：应用只需要一个真正的消息循环宿主。
 
-    serviceA->SetElementVisible(VisFlags::Planes3D, true);
-    serviceA->SetElementVisible(VisFlags::Ruler, false);
-    serviceB->SetElementVisible(VisFlags::Crosshair, true);
-
-4) 拖拽式窗宽窗位调节
-
-    auto wl = serviceB->GetWindowLevel();
-    serviceB->SetWindowLevelAdjusted(
-        20,
-        -10,
-        400,
-        400,
-        wl.windowWidth,
-        wl.windowCenter);
-
-5) 模型变换 / 读取矩阵
-
-    double t[3] = { 1.0, 2.0, 3.0 };
-    double r[3] = { 0.0, 0.0, 15.0 };
-    double s[3] = { 1.0, 1.0, 1.0 };
-    serviceA->SetModelTransform(t, r, s);
-    serviceA->SetModelTransformReset();
-    auto matrix = serviceA->GetModelMatrix();
+6) SetToolMode(mode)
+- 做什么：在 Navigation 和 ModelTransform 之间切换交互风格。
+- 为什么：ModelTransform 会改成 vtkInteractorStyleTrackballActor，并允许 main prop 被 pick。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-六、导出接口
+八、OrthogonalCrop 相关 Set 接口说明
 ─────────────────────────────────────────────────────────────────────
 
-1) 导出当前变换后的体数据
+1) OrthogonalCropBackendRouterService::SetInputImage / SetInputPolyData
+- 做什么：绑定当前后端输入。
+- 为什么：router 必须显式知道自己在裁谁，不能从窗口状态里猜。
 
-    serviceA->SetTransformedDataSavedAsync({}, [](bool success) {
-        std::cout << (success ? "export ok\n" : "export failed\n");
-    });
+2) OrthogonalCropBackendRouterService::SetPreferredDataSource
+- 做什么：设置优先走 image / polydata / auto。
+- 为什么：UI 层不该自己散落 if/else；由 router 统一决策数据后端。
 
-2) 导出当前方向全部切片图
+3) OrthogonalCropInteractionBridgeService::SetDataManager
+- 做什么：为 Auto 模式准备 image 输入兜底来源。
+- 为什么：bridge 进入交互时如果还没显式 SetInputImage，可以尽力从 DataManager 拿当前体数据。
 
-    serviceB->SetSliceImagesSavedAsync({}, 0.0, [](bool success) {
-        std::cout << (success ? "slice export ok\n" : "slice export failed\n");
-    });
+4) OrthogonalCropInteractionBridgeService::SetReferenceRenderService
+- 做什么：提供世界坐标和模型坐标互转基准。
+- 为什么：widget 在世界坐标里拖，算法输入更接近模型/数据坐标，必须有一份权威变换参考。
+
+5) OrthogonalCropInteractionBridgeService::SetPreviewRenderServices
+- 做什么：决定哪些窗口接收 overlay 和设脏刷新。
+- 为什么：坐标参考和结果分发是两种不同职责，不能混成一个“主窗口服务”。
+
+6) OrthogonalCropInteractionBridgeService::SetPrimaryInteractor
+- 做什么：指定 vtkBoxWidget2 只挂在哪一个 interactor 上。
+- 为什么：widget 只能有一个宿主 interactor；当前架构用 A 作为 3D 主交互窗口。
+
+7) OrthogonalCropInteractionBridgeService::SetInputImage
+- 做什么：把加载成功后的 vtkImageData 真正注入裁切后端。
+- 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
+
+8) OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts
+- 做什么：控制 preview 是否必须生成完整 mask / derived polydata 等重型结果。
+- 为什么：当前默认值是 true，优先保证完整 preview 语义；轻量 preview 改成显式用户选择，而不是自动猜测。
+
+9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewArtifactMode
+- 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
+- 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-七、Context 常用接口
+九、为什么 OrthogonalCrop preview 要这样设变量
 ─────────────────────────────────────────────────────────────────────
 
-1) 绑定与窗口属性
+1) 为什么 preview request 固定走 LocalCenterAndDimensions
+- 因为 widget 盒子是在世界坐标中拖出来的。
+- 直接把世界 min/max 当成算法输入，会在模型发生旋转/平移后失真。
+- 所以 bridge 会把世界盒写成：局部中心 + 局部尺寸 + worldToModel 对齐矩阵。
 
-    contextA->SetServiceBound(serviceA);
-    contextA->SetWindowTitle("Window A: Composite IsoSurface");
-    contextA->SetWindowSize(600, 600);
-    contextA->SetWindowPosition(50, 50);
+2) 为什么 referenceRenderService 和 previewRenderServices 必须分开
+- referenceRenderService 只负责坐标系问题。
+- previewRenderServices 只负责谁跟着刷新。
+- 如果把两者混成一个字段，后面一旦要“用 A 当坐标参考，但让 A/B/C/D/E 一起刷新”，语义就会打架。
 
-2) 相机风格 / 方向轴 / 工具模式
+3) 为什么 primary interactor 是 A，但 SetStarted() 是 B
+- primary interactor 决定 widget 挂在哪。
+- SetStarted() 决定谁持有应用主消息循环。
+- 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
-    contextA->SetCameraStyleByVizMode(VizMode::CompositeIsoSurface);
-    contextA->SetOrientationAxesVisible(true);
-    contextA->SetToolMode(ToolMode::Navigation);
-    contextA->SetToolMode(ToolMode::ModelTransform);
+4) 为什么默认 `m_previewRequiresFullArtifacts = true`
+- 因为 full preview 才能稳定产出 2D mask、3D overlay、必要时的主模型 clip 预览。
+- 如果一上来默认轻量，会让用户误以为预览本该有的 mask/完整结果丢了。
+- 所以当前策略是：默认完整，按 3 手动切 lightweight/full。
 
-3) 渲染生命周期
-
-    contextA->SetRendered();
-    contextA->SetInteractorInitialized();
-    contextB->SetStarted();
+5) 为什么拖拽中不实时重算 preview，只在 Released 或显式 toggle 时重算
+- 因为重型 preview 本身可能包含 mask 生成、polydata clip、overlay 同步。
+- 如果把鼠标移动频率直接映射为结果重算频率，会明显卡顿。
+- 所以当前桥接层只在拖拽中更新 bounds/phase，松手后才真正刷新结果。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-八、实际接入时记住这几条
+十、OrthogonalCrop 当前完整调用链
 ─────────────────────────────────────────────────────────────────────
 
-1. SharedState 和 DataManager 是多窗口共享的。
-2. MedicalVizService 和 StdRenderContext 是每个窗口各自一份。
-3. SetFileLoadedAsync / SetReloadFromBufferAsync / SetTransformedDataSavedAsync 的回调，
-   都按当前实现走主线程延迟分发。
-4. 前端不要在鼠标事件或业务回调里直接操作底层 VTK 对象，
-   优先通过 service / context 的公开接口表达意图。
-5. 如果想看最完整的真实接法，以 main.cpp 当前版本为准，example.cpp 只保留常用骨架。
+从用户视角看是按 O/1/2/3，底层实际上是下面这条链：
+
+1. O 键
+- main.cpp 的热键观察器调用 bridge->ToggleInteractiveCrop()。
+- bridge 激活 widget，设置默认 bounds，但此时还不自动开启 preview。
+
+2. 拖拽 widget
+- OrthogonalCropWidgetStateController 只把 VTK 事件翻译成 bounds + phase。
+- bridge 记录 m_currentBounds 和 m_lastInteractionPhase。
+
+3. 按 1 或 2
+- bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
+- bridge 组装 preview request，executionMode 固定是 VirtualCrop。
+
+4. BuildPreviewRequest()
+- 从 router->GetDefaultRequest() 开始。
+- 覆盖为 LocalCenterAndDimensions。
+- 写入当前 removalMode。
+- 写入 cropStateModel。
+
+5. UpdatePreviewFromCurrentBounds()
+- full preview：走 GetResult()，拿完整 statistics/result。
+- lightweight preview：只构造 cropData + outline，跳过重型完整产物。
+
+6. SetPreviewServicesDirty(previewResult)
+- 2D 窗口消费 overlay mask/outline。
+- 3D 主窗口在合适条件下做临时 polydata clip preview。
+
+7. 按 3
+- bridge->TogglePreviewArtifactMode(true)。
+- 在 Full / Lightweight 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-九、OrthogonalCrop 独立插件最小接法
+十一、OrthogonalCrop 独立后端最小调用示例
 ─────────────────────────────────────────────────────────────────────
 
-定位：
-- 这是一个独立算法插件，不挂到 MedicalVizService / SharedState / Interaction 主链上。
-- 前端只负责参数编辑、按钮流程和错误提示；插件只处理边界校验、体素吸附、RAM 估算与结果生成。
-- 如果只做预览，就取 VirtualCrop；如果确认执行硬裁切，再切到 PhysicalCrop。
-- 代码组织上，.h 只保留类声明和公开契约，真正的 VTK 管线与交互实现都放在 src/Math、src/Service、src/Strategies 下的 .cpp 中。
-
-1) 最小调用骨架
+如果你暂时不接 widget，只想直接调后端，最小骨架是：
 
     auto cropBackend = std::make_shared<OrthogonalCropBackendRouterService>();
-    cropBackend->CropPreInit_SetInputImage(sharedDataMgr->GetVtkImage());
-    cropBackend->CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource::ImageData);
+    cropBackend->SetInputImage(sharedDataMgr->GetVtkImage());
+    cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::ImageData);
 
     auto request = cropBackend->GetDefaultRequest();
+    request.SetBoundsMode(CropBoundsMode::CenterAndDimensions);
+    request.SetCenter({ 12.0, 15.0, 18.0 });
+    request.SetDimensions({ 8.0, 10.0, 12.0 });
+    request.SetRemovalMode(CropRemovalMode::KeepInside);
+    request.SetExecutionMode(CropExecutionMode::VirtualCrop);
 
     CropStateModel cropState;
     cropState.SetCropEnabled(true);
@@ -405,37 +664,22 @@ OrthogonalCrop 流程速记：
     cropState.SetInteractionPhase(CropInteractionPhase::Released);
     request.SetCropStateModel(cropState);
 
-    request.SetBoundsMode(CropBoundsMode::CenterAndDimensions);
-    request.SetCenter({ 12.0, 15.0, 18.0 });
-    request.SetDimensions({ 8.0, 10.0, 12.0 });
-    request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetExecutionMode(CropExecutionMode::VirtualCrop);
-
     auto stats = cropBackend->GetStatistics(request);
-    auto result = cropBackend->GetResult(request);
-    if (!result.GetSucceeded()) {
-        std::cerr << "crop failed: " << result.GetMessage() << std::endl;
+    if (stats.GetFailureReason() != OrthogonalCropFailureReason::None) {
+        std::cerr << stats.GetValidationMessage() << std::endl;
         return;
     }
 
-    auto previewMask = result.GetVirtualMaskImage();
-    auto previewImage = result.GetDerivedImage();
+    auto result = cropBackend->GetResult(request);
+    if (!result.GetSucceeded()) {
+        std::cerr << result.GetMessage() << std::endl;
+        return;
+    }
+
+    auto virtualMask = result.GetVirtualMaskImage();
     auto outline = result.GetOutlinePolyData();
 
-2) 切到局部坐标系裁切盒
-
-    auto request = cropBackend->GetDefaultRequest();
-    request.SetBoundsMode(CropBoundsMode::LocalCenterAndDimensions);
-    request.SetLocalAlignmentMatrix({
-        1.0, 0.0, 0.0, 20.0,
-        0.0, 1.0, 0.0, 30.0,
-        0.0, 0.0, 1.0, 40.0,
-        0.0, 0.0, 0.0, 1.0
-    });
-    request.SetLocalCenter({ 0.0, 0.0, 0.0 });
-    request.SetLocalDimensions({ 6.0, 8.0, 10.0 });
-
-3) 先预估，再执行物理硬裁切
+如果改走物理裁切：
 
     auto hardRequest = request;
     hardRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
@@ -446,811 +690,30 @@ OrthogonalCrop 流程速记：
     }
 
     auto hardResult = cropBackend->GetResult(hardRequest);
-    if (!hardResult.GetSucceeded()) {
-        std::cerr << hardResult.GetMessage() << std::endl;
-        return;
-    }
-
     auto derivedImage = hardResult.GetDerivedImage();
-    auto offsetMatrix = hardResult.GetCropDataModel().GetGlobalOffsetMatrix();
 
-4) 如果输入改成 vtkPolyData
+如果改走 polydata：
 
-    cropBackend->CropPreInit_SetInputPolyData(inputSurface);
-    cropBackend->CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource::PolyData);
+    cropBackend->SetInputPolyData(inputSurface);
+    cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::PolyData);
 
     auto polyRequest = cropBackend->GetDefaultRequest();
     polyRequest.SetBoundsMode(CropBoundsMode::MinMaxCoordinates);
     polyRequest.SetRasBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
+
     auto polyResult = cropBackend->GetResult(polyRequest);
     auto clippedSurface = polyResult.GetDerivedPolyData();
-
-5) UI / 视图层桥接
-
-    auto cropInteractionBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
-    cropInteractionBridge->SetDataManager(sharedDataMgr);
-    cropInteractionBridge->SetReferenceRenderService(serviceA);
-    cropInteractionBridge->SetPreviewRenderServices({ serviceB, serviceC, serviceD, serviceE });
-    cropInteractionBridge->SetPrimaryInteractor(contextA->GetInteractor());
-    cropInteractionBridge->CropPreInit_SetInputImage(sharedDataMgr->GetVtkImage());
-
-    // InteractionBridgeService 内部：
-    // - vtkBoxWidget2 / vtkBoxRepresentation 只管理 3D 裁切盒 UI 状态；
-    // - bounds 变化后交给 OrthogonalCropBackendRouterService 选 image/polydata 后端；
-    // - 参考坐标系只依赖 reference service；
-    // - 只有 preview 目标服务列表会被置脏联动。
-
-6) 调用约定
-
-1. DataBackend 和 BoxWidgetController 是独立层；前者只处理数据，后者只处理 UI 状态。
-2. request 仍然是一次性快照；前端或 ViewModel 每次确认参数后重新组装即可。
-3. vtkImageData 路径默认走 image backend；vtkPolyData 路径默认走 vtkBox + vtkTableBasedClipDataSet。
-4. VirtualCrop 时，image 路径可返回 mask / extracted preview image；polydata 路径返回 clipped polydata。
-5. 物理裁切的 RemoveInside 在 image 路径默认阻断，因为那会打破“连续派生体、不插值、不重采样”的约束。
 */
 
 /*
 ─────────────────────────────────────────────────────────────────────
-十、OrthogonalCrop 详细设计说明
+十二、最后记住这几条，不容易用错
 ─────────────────────────────────────────────────────────────────────
 
-这一节不再讲“怎么调用”，而是讲“为什么这样设计”。
-如果前一节是接线图，这一节就是把裁切从输入、状态、坐标、后端选择到结果回传的整条链路拆开。
-
-1) 核心原理：先把所有裁切定义归一化，再决定如何执行
-
-这个插件真正处理的不是“按钮”或“widget”，而是一份一次性请求快照 OrthogonalCropRequest。
-请求里虽然允许四种 bounds 表达方式：
-
-- InputVolumeBounds：直接吃输入整体 bounds；
-- MinMaxCoordinates：直接给六个 min/max；
-- CenterAndDimensions：给中心点和尺寸；
-- LocalCenterAndDimensions：给局部坐标系下的中心点和尺寸；
-
-但算法层第一件事并不是执行裁切，而是把这些表达全部收敛成同一种客观几何语义：CropDataModel。
-
-统一后的 CropDataModel 里，最关键的是三件东西：
-
-- 一份最终可校验的 RAS min/max bounds；
-- 一份 global offset matrix，用来表达派生结果相对原输入的平移补偿；
-- 一份 local alignment matrix + local center/dimensions，用来保留“这个盒子原本是在局部坐标系里定义的”这一事实。
-
-也就是说，裁切的本质不是“拖了一个框”，而是：
-先把 UI 或上层输入归一成可验证、可投影、可复算的几何快照，
-后面的 voxel 吸附、mask 生成、VOI 提取、polydata clip 都只吃这份快照。
-
-2) 为什么拆成四层，而不是一个类全做
-
-当前实现不是一个大而全的 CropService，而是故意拆成四个层次：
-
-- OrthogonalCropAlgorithm：纯算法层，只处理 request -> cropData -> statistics/result；
-- OrthogonalCropPluginService：image-only 的轻封装，只负责给算法层补齐输入和 RAM 查询；
-- OrthogonalCropBackendRouterService：在 image 与 polydata 路径之间选后端；
-- OrthogonalCropWidgetStateController：只维护 vtkBoxWidget2 的启停、样式、bounds、事件转发；
-- OrthogonalCropInteractionBridgeService：热键、世界/模型坐标转换、何时触发 preview、哪些窗口要设脏。
-
-这样拆的原因不是“好看”，而是为了切掉几种常见耦合：
-
-- 算法层不依赖 MedicalVizService，不知道窗口、交互器、SharedState；
-- widget controller 不知道 image/polydata，也不知道 preview 该怎么做；
-- bridge 不直接操作具体 mapper，只负责把交互状态翻译成请求，并决定何时刷新；
-- router 不知道热键，也不关心拖拽过程，只根据当前输入类型决定走哪条数据路径。
-
-所以这个裁切模块的真正边界是：
-UI 可以换，窗口数量可以换，甚至数据源从 image 换成 polydata，
-只要 request/result 语义不变，裁切主逻辑就不用跟着重写。
-
-3) 算法层到底做了什么
-
-3.1 request 归一化
-
-OrthogonalCropAlgorithm::GetCropDataModel 先把 request 的 boundsMode 展开：
-
-- InputVolumeBounds：直接把输入 bounds 作为裁切盒；
-- MinMaxCoordinates：直接写入 rasBounds；
-- CenterAndDimensions：换算成 ras min/max；
-- LocalCenterAndDimensions：先在局部坐标系中生成 8 个角点，再乘 localAlignmentMatrix，最后重新包成世界轴对齐 bounds。
-
-这里有一个很重要的点：
-局部裁切盒不是直接把中心点平移一下就完事，
-而是把 localAlignmentMatrix 交给 vtkTransform，
-再用 vtkBoundingBox 收集八个角点变换后的范围，重新求一个 axis-aligned bounding box。
-这样在模型有旋转或局部对齐矩阵不是单位阵时，最终 bounds 才不会错。
-
-3.2 bounds 校验
-
-统一完 cropData 后，算法层会立刻做两类校验：
-
-- 几何合法性：min 必须小于 max；
-- 范围合法性：裁切盒不能超出输入数据的整体 bounds。
-
-这一步失败时，直接返回 InvalidBounds 或 BoundsOutOfRange，后面不会再进入 voxel 计算。
-
-3.3 image 路径的体素吸附
-
-对于 vtkImageData，真正执行前还要做一次世界坐标到 IJK 体素索引的吸附：
-
-- 先取裁切盒在物理坐标里的 8 个角点；
-- 交给 vtkImageData::TransformPhysicalPointToContinuousIndex 转成连续 IJK；
-- 用 floor / ceil 把连续索引包成包含完整裁切范围的整数 VOI；
-- 再 clamp 到 image extent 的合法范围内。
-
-这一步的结果是 snappedIJKBounds。
-后面的 inside voxel 统计、mask 生成、VOI 提取，全都依赖这份吸附后的整数边界。
-
-3.4 统计与执行为什么分两步
-
-GetStatistics 不是可有可无，它是裁切链路里的前置判定器：
-
-- totalVoxelCount：原体数据总体素数；
-- insideVoxelCount：裁切盒内部体素数；
-- outputVoxelCount：输出体素数；
-- estimatedRamUsageBytes：预估内存消耗；
-- canExecutePhysicalCrop：是否允许继续做硬裁切；
-- failureReason / validationMessage：失败原因与提示。
-
-这样做的目的，是把“能不能做”与“真正去做”分开。
-前端可以先拿 statistics 决定是否给用户亮红字、是否需要二次确认，
-而不用先真的分配一块派生体内存再说。
-
-3.5 VirtualCrop 与 PhysicalCrop 的本质差别
-
-VirtualCrop 不是“裁小一点的数据”，而是“保留原数据拓扑，只改变裁切语义”。
-在 image 路径里，它会返回：
-
-- 一张和原图同尺寸的 virtualMaskImage；
-- 一份 outline polydata；
-- 一组 statistics；
-- 一份原始 cropState 快照。
-
-这个 mask 的 inside / outside 值会根据 removalMode 决定：
-
-- KeepInside：inside=255，outside=0；
-- RemoveInside：inside=0，outside=255。
-
-PhysicalCrop 则是真的要得到一个可脱离原图独立使用的派生体。
-在 image 路径里，它会：
-
-- 用 vtkExtractVOI 按 snappedIJKBounds 提取一个连续子块；
-- 用 vtkImageChangeInformation 把输出 extent 归零，并按新子块起点重算 origin；
-- 计算新旧 origin 之间的平移差，并写回 globalOffsetMatrix；
-- 把结果的 cropEnabled 置为 false，表示这份输出已经不是“待继续交互的裁切态”，而是“已生成的派生数据”。
-
-VirtualCrop 不额外生成一份被裁过的新 image 数据。
-它保留原图拓扑，把 virtualMaskImage、outline 和 statistics 作为本次虚拟裁切结果返回。
-交互桥里的 1 / 2 预览与算法入口保持同一条 GetResult 路径，
-不会在拆分后单独插入一条新的 preview 结果构造分支。
-
-这也是为什么 PhysicalCrop + RemoveInside 默认被拦住。
-因为“移除内部、保留外部”在体数据里通常对应一个中空体，
-它不再是一个简单、连续、无重采样的 VOI 子块；
-如果硬做，就要引入额外的稀疏表示、重采样或多块拼接，已经超出了当前插件的语义边界。
-
-4) router 层解决的不是算法，而是“到底走哪条数据链”
-
-OrthogonalCropBackendRouterService 的职责很明确：
-它不创造新的裁切语义，只负责把同一份 request 映射到 image 或 polydata 后端。
-
-它的选择顺序是：
-
-- 如果外部显式要求 PolyData，而且真的有 polydata 输入，就走 polydata；
-- 如果外部显式要求 ImageData，而且真的有 image 输入，就走 image；
-- 如果是 Auto，则优先 image，没有 image 再回退到 polydata；
-- 两边都没有输入时，返回缺失输入错误。
-
-这样设计的意义在于：
-UI 不需要自己维护两套按钮逻辑，
-也不需要写“如果当前是体数据就这样、如果当前是表面数据就那样”的分支散落在界面层。
-
-对于 polydata，当前实现走的是：
-
-- 普通轴对齐裁切用 cropData 里的 rasBounds 构造 vtkBox；
-- 局部对齐裁切用 local box 的 6 个面构造 vtkPlanes，点和法线由 local-to-model / model-to-local 矩阵换算；
-- 3D widget 预览直接接收 widget 当前的 vtkPlanes，并把 model->world 变换交给 vtkPlanes::SetTransform；
-- 通过 GetClippedPolyData(vtkImplicitFunction*) 交给 vtkTableBasedClipDataSet；
-- 最后过一层 vtkGeometryFilter 得到稳定的 vtkPolyData 输出。
-
-也就是说，polydata 后端真正关心的是“一个 VTK implicit function”。
-今天它可以是 vtkBox 或 vtkPlanes，后续如果要接 CylinderMask / vtkCylinder，
-只要生成同样的 vtkImplicitFunction，就能走同一条 polydata 联动管线，
-main 里的 O / 1 / 2 交互绑定不需要跟着变化。
-
-因此，router 这一层本质上是在做“统一调用面 + 后端分发”，而不是把算法和交互揉在一起。
-
-5) 交互桥接层真正管理的状态有哪些
-
-如果只看 UI，感觉像是“一个盒子在拖”。
-但真正参与状态切换的状态，实际上分成四类：
-
-5.1 客观几何状态
-
-- m_currentBounds：当前 widget 世界坐标盒，是 preview 的唯一几何真源；
-- boundsInitialized：当前是否已经有一份有效盒子；
-- GetActiveWorldBounds()：当前活跃输入在世界坐标下的整体包围盒；
-- GetWorldToModelMatrix()：把世界坐标下的 widget 局部盒映射回模型坐标，交给 LocalCenterAndDimensions 模式。
-
-5.2 交互控制状态
-
-- m_cropInteractionEnabled：当前是否处于裁切模式；
-- m_lastInteractionPhase：最近一次交互阶段，Idle / Dragging / Released；
-- m_currentRemovalMode：当前真正写进 previewRequest 的 removal mode；
-- m_previewEnabled：当前是否正在显示裁切预览。
-
-O / 1 / 2 这些具体键位不由 bridge 识别，main.cpp 里的 observer 负责绑定和按键防抖。
-bridge 只暴露 ToggleInteractiveCrop、ToggleInsidePreview、ToggleOutsidePreview 这种动作入口，
-这样后续换快捷键或接 UI 按钮时不需要改裁切服务本身。
-
-5.3 坐标参考状态
-
-- referenceRenderService：只负责世界坐标和模型坐标互转；
-- previewRenderServices：只负责接收 overlay 策略和“设脏刷新”通知；
-- dataMgr：只作为 Auto 模式下、尚未显式绑定输入时的 image 兜底来源。
-
-这三者故意拆开，避免一个 service 同时承担“坐标换算 + 数据输入 + 多窗口刷新列表”三种职责。
-
-5.4 结果状态
-
-- OrthogonalCropStatistics：一次执行的校验/估算结果；
-- OrthogonalCropResult：一次执行的完整输出；
-- CropStateModel：把交互态快照塞回 request/result，保证上层知道这份结果产生时处于什么交互阶段。
-
-这里最关键的一点是：
-bridge 并不把自己当作最终结果存储器。
-它会在 UpdatePreviewFromCurrentBounds 里调用一次 GetResult 做校验和日志，
-但它自己的职责停在“判定成功与否 + 置脏 preview 服务”这一层，
-不会在内部长期缓存一份 previewResult 作为全局单例状态。
-
-这意味着：
-mask、outline 或 derived polydata 会被写入 OrthogonalCropPreviewOverlayStrategy，
-再通过 preview service 的 overlay 管线参与刷新，而不是继续把 bridge 做成一个状态黑盒。
-
-6) 为什么 widget 用世界坐标，而 request 用 local crop 语义
-
-这是当前实现里最容易被忽略，但其实最关键的耦合点。
-
-vtkBoxWidget2 是挂在 3D 参考窗口上的，用户看到和拖拽的盒子天然属于世界坐标语义。
-但数据本身的 image bounds 或 polydata bounds，很多时候更接近模型坐标或数据本地坐标。
-
-如果直接把 widget 的 min/max 当成算法输入，就会在模型发生旋转、平移或缩放时出现错位。
-所以 bridge 做了两层表达：
-
-- GetActiveWorldBounds：把输入数据的模型 bounds 升到世界坐标，供 widget 摆放；
-- BuildPreviewRequest：把用户拖完后的世界盒子写成 LocalCenterAndDimensions；
-- GetWorldToModelMatrix：把 reference service 的 model matrix 取反，作为 local -> model 的对齐矩阵。
-- polydata backend 的 3D 主模型临时裁切不再只依赖 bounds，而是直接读取 vtkBoxRepresentation 当前 6 个世界平面，
-    再把 reference service 的 model matrix 作为 vtkPlanes 的 transform 交给 VTK implicit function，
-    由 vtkTableBasedClipDataSet 在裁切模型点时完成模型坐标到世界平面的联动判断。
-
-这样做的关键是：
-交互盒子的 center / dimensions 保留“用户眼里看到的世界坐标盒”，
-矩阵负责说明这个盒子如何落回模型空间。
-模型 bounds 与世界 bounds 之间的互相换算也交给 vtkTransform + vtkBoundingBox，
-避免在 bridge 中维护手写的点变换和 min/max 数学工具。
-算法层会用这份 local 定义求出必要的模型包围范围，
-virtual mask 还会把每个 voxel 反算回 local 盒子里判断，
-所以模型带旋转时不会退化成一个过宽的模型轴对齐 preview mask。
-而 A 窗口这类 3D 等值面窗口，只要目标主 prop 是 vtkPolyDataMapper，
-就会按红色 widget 当前平面做临时主模型裁切；退出预览或退出裁切模式时再恢复原 mapper 输入。
-
-7) 完整流程：从按下 O 到切换 preview
-
-可以把当前交互链路理解成下面这条顺序：
-
-7.1 进入模式前
-
-- 外部先把 image 或 polydata 输入绑定给 backend/router；
-- 如需交互，还要设置 primary interactor；
-- referenceRenderService 决定坐标系换算基准；
-- previewRenderServices 决定哪些窗口会跟随刷新。
-
-7.2 按下 O
-
-ExecuteDemo() 会做以下几步：
-
-- EnsureInputReady：若当前是 Auto 且还没显式绑定 image，就尝试从 dataMgr 抓当前 volume；
-- 若已经处于激活状态，则 O 直接走退出逻辑；
-- 若第一次进入且还没初始化过 bounds，就取输入整体 bounds 的中心子盒作为默认盒；
-- 把参考 bounds 和当前 bounds 同步给 widget；
-- 真正启用 vtkBoxWidget2；
-- 把交互状态切成 enabled=true、phase=Released；
-- 清理旧 preview，等待用户按 1 或 2 显式开始预览。
-
-注意这里的默认盒子不是全幅包围盒，
-而是整体 bounds 中的一个中心子盒，
-目的是让用户一进来就看到一个可拖、且视觉上明显区别于整幅包围的裁切框。
-
-7.3 拖拽过程中
-
-widget controller 只监听三类 VTK 事件：
-
-- StartInteractionEvent；
-- InteractionEvent；
-- EndInteractionEvent。
-
-它会把这三类事件统一翻译成 CropInteractionPhase：
-
-- StartInteraction / Interaction -> Dragging；
-- EndInteraction -> Released；
-- 其他 -> Idle。
-
-bridge 收到回调后，并不会在每一帧拖拽都重新做裁切，
-而是只更新：
-
-- m_currentBounds；
-- boundsInitialized；
-- m_lastInteractionPhase。
-
-只有 preview 已打开且 phase == Released 时，才真正调用 UpdatePreviewFromCurrentBounds。
-
-这是一个非常明确的性能取舍：
-拖拽中只同步轻量 UI 状态，重型 preview 只在松手时执行，
-避免把鼠标移动频率直接变成体数据重算频率。
-
-7.4 预览请求构造
-
-BuildPreviewRequest() 会固定做几件事：
-
-- 从 router 的 GetDefaultRequest() 拿一份基础 request；
-- 强制覆盖成 LocalCenterAndDimensions；
-- 把世界坐标中的 m_currentBounds 配合 world-to-model 矩阵表达成局部裁切盒；
-- 强制 executionMode = VirtualCrop；
-- 写入当前 removalMode；
-- 把 cropEnabled 和 interactionPhase 打进 cropStateModel。
-
-也就是说，交互层的 preview 永远走 VirtualCrop。
-bridge 不负责在拖拽 UI 里直接触发 PhysicalCrop，
-因为硬裁切意味着真正派生数据、内存分配和偏移矩阵更新，
-这应该是“确认执行”的业务动作，而不是“鼠标拖一下就改底层数据”。
-
-7.5 preview 结果消费
-
-UpdatePreviewFromCurrentBounds() 的顺序是：
-
-- 按当前 widget bounds 组装 previewRequest；
-- 统一调用 GetResult(previewRequest)，不按 image/polydata 插入额外分支；
-- 失败则按 failureReason / message 打日志并立即返回；
-- 成功则把 result 投递给 preview overlay；
-- 如果目标窗口是 3D 且主 prop 是 vtkPolyDataMapper，则读取当前 widget 6 个平面做临时 polydata clip；
-- 最后输出本次 preview 的 source / backend / inside voxel / output voxel / main3D / bounds 日志。
-
-所以这里的耦合边界非常清楚：
-main 负责“O / 1 / 2 绑定”，bridge 负责“什么时候算”和“哪些窗口该刷新”，
-overlay 负责 outline、mask 或 derived polydata；3D 主 prop 可用时才额外做临时 polydata clip。
-日志里的 main3D = PolyDataClip 表示 A 这类 3D 等值面窗口已经真的裁过主模型；
-main3D = OverlayOnly 表示当前窗口只能显示 overlay，不能直接改主模型 mapper。
-
-8) removal mode 为什么设计成“按下切换的 preview 态”
-
-当前 removal mode 是交互预览的切换态：
-
-- 当前实际下发值存在 m_currentRemovalMode；
-- 按 1 时切到 KeepInside，preview 保留盒内；
-- 再次按 1 时撤销 preview，主模型恢复完整显示；
-- 按 2 时切到 RemoveInside，preview 保留盒外；
-- 再次按 2 时撤销 preview，主模型恢复完整显示；
-- preview 已开启时按另一枚键，会直接切换 inside/outside 语义。
-
-这意味着 1/2 是“查看 inside/outside 裁切效果”的预览切换键，
-不是永久提交或保持裁切结果的设置项。
-
-同时它还和交互阶段耦合：
-
-- 如果当前正在 Dragging，切换 removal mode 只更新状态，不立刻重算；
-- 等到 Released，bounds changed 的 released 分支会统一刷新 preview；
-- 如果当前本来就不在拖拽中，才允许快捷键即时刷新 preview。
-
-这样做是为了避免两个高频事件源叠加：
-鼠标拖拽已经很频繁，如果再叠加按键变化时立刻重算，就很容易把 preview 触发频率抬高到不可控。
-
-9) 状态切换可以直接理解成这张文字状态机
-
-9.1 未激活态
-
-- m_cropInteractionEnabled = false；
-- widget 关闭；
-- 当前可能没有有效 bounds，也可能保留着上次退出时的 bounds。
-
-9.2 按 O 成功进入
-
-- 若输入有效且 interactor 就绪，widget 被启用；
-- 若之前没初始化过 bounds，则创建默认中心子盒；
-- phase 置为 Released；
-- 不自动裁主模型，等待用户按 1 / 2 开始 preview。
-
-9.3 拖拽中
-
-- widget 事件进入 Dragging；
-- m_currentBounds 持续更新；
-- 不做重 preview；
-- removal mode 变化只改状态，不重算。
-
-9.4 释放鼠标
-
-- phase 切为 Released；
-- 以当前 bounds 组装 previewRequest；
-- 调一次 GetResult；
-- 成功后设脏 preview 窗口。
-
-9.5 按 1、2
-
-- 第一次按 1 打开 KeepInside preview；
-- 第二次按 1 恢复完整模型；
-- 第一次按 2 打开 RemoveInside preview；
-- 第二次按 2 恢复完整模型；
-- 已经打开 preview 时按另一枚键会切换 removal mode；
-- 若不在拖拽中，立刻刷新 preview；
-- 若在拖拽中，延后到 Released 再统一刷新；
-- KeyRelease 由 main 的 observer 用于清掉按键防抖，不改变 preview 状态。
-
-9.6 按 Esc 或再次按 O
-
-- widget 关闭；
-- m_cropInteractionEnabled = false；
-- 保留最后一份 bounds；
-- 关闭 1/2 preview 状态；
-- 撤销 overlay 和 3D 主模型临时裁切。
-
-这里的关键点是：退出并不会把 bounds 清空。
-也就是说，当前设计把“是否处于交互模式”和“最后一次裁切盒几何”分离开了。
-这样再次进入时可以延续上次盒子，而不是每次都从头摆一个新框。
-
-10) 这个设计当前最重要的边界与取舍
-
-如果用一句话总结当前思路，就是：
-把裁切当作“独立可复算的几何请求”，而不是“挂死在某个窗口里的特殊 UI 功能”。
-
-因此它有几个非常明确的取舍：
-
-- request/result 是真边界，UI、算法、后端都围绕它展开；
-- 交互层只管理 widget 状态、触发时机和设脏，不抢算法层职责；
-- preview 默认只在 Released 执行，优先保证交互稳定性；
-- image 路径允许虚拟裁切和硬裁切，polydata 路径优先保证 clip 输出一致性；
-- RemoveInside 的物理裁切被有意阻断，避免为了“看起来都支持”而引入不受控的派生语义；
-- bridge 不缓存全局 preview 结果，后续若要真正接到渲染链，应由上层明确消费 result。
-
-理解了这几点，再回头看第九节的最小接法，就会更容易明白：
-example 里那份 request 不是参数堆砌，
-而是在给这个“独立裁切请求机”提供一次完整、可复算、可验证的状态快照。
-*/
-
-/*
-─────────────────────────────────────────────────────────────────────
-十一、OrthogonalCrop 流程图与类名速查
-─────────────────────────────────────────────────────────────────────
-
-如果前一节是在讲“原理”，这一节就是把它直接画出来。
-读这一节时，建议先看 11.1 的总装图，再看 11.2 的一次交互时间线，
-最后用 11.3 的类名速查表把每个类的职责对上。
-
-11.1 总装图：谁驱动谁
-
-    [前端 / ViewModel / main 示例]
-              |
-              | 组装 request、设置输入、绑定窗口
-              v
-    +----------------------------------------------+
-    | OrthogonalCropInteractionBridgeService       |
-    | 作用：交互总调度                             |
-    | - 处理 O / Esc / 1 / 2 热键                  |
-    | - vtkTransform / vtkBoundingBox 做坐标换算    |
-    | - 决定何时触发 preview                       |
-    | - 决定哪些窗口需要 SetDirtyMarked()          |
-    +----------------------------------------------+
-          |                            |
-          | 挂接 UI 盒子               | 提交裁切请求
-          v                            v
-    +------------------------+   +----------------------------------+
-    | OrthogonalCropWidget   |   | OrthogonalCropBackendRouter      |
-    | StateController        |   | Service                          |
-    | 作用：只管盒子 UI      |   | 作用：决定走 image 还是 polydata |
-    | - vtkBoxWidget2 开关    |   | - Auto / Image / PolyData 选择   |
-    | - bounds 同步           |   | - 统一 GetDefaultRequest         |
-    | - 交互事件转 phase      |   | - 统一 GetStatistics / GetResult |
-    +------------------------+   +----------------------------------+
-                                               |
-                        +----------------------+----------------------+
-                        |                                             |
-                        | image 路径                                  | polydata 路径
-                        v                                             v
-         +----------------------------------+         +----------------------------------+
-         | OrthogonalCropPluginService      |         | vtkBox / vtkPlanes implicit func  |
-         | 作用：image-only 轻封装          |         | + vtkTableBasedClipDataSet        |
-         | - 持有 vtkImageData              |         | + vtkGeometryFilter               |
-         | - 查询系统 RAM                   |         | 作用：裁表面 / 网格               |
-         | - 转给纯算法层                   |         +----------------------------------+
-         +----------------------------------+
-                          |
-                          v
-         +----------------------------------+
-         | OrthogonalCropAlgorithm          |
-         | 作用：真正做裁切语义计算         |
-         | - request -> cropData            |
-         | - bounds 校验                    |
-         | - voxel 吸附                     |
-         | - statistics/result 生成         |
-         +----------------------------------+
-                          |
-                          v
-         +----------------------------------+
-         | OrthogonalCropResult             |
-         | - virtualMaskImage               |
-         | - derivedImage / derivedPolyData |
-         | - outlinePolyData                |
-         | - statistics                     |
-         | - cropDataModel / cropStateModel |
-         +----------------------------------+
-
-一句话记忆：
-- Bridge 像“导演”，决定什么时候演；
-- WidgetController 像“舞台机械”，只负责把盒子摆出来；
-- Router 像“分诊台”，决定病人走哪科；
-- Algorithm 才是“主刀医生”，真正下刀算裁切。
-
-11.2 一次交互时间线：从按 O 到松手刷新
-
-    [用户按 O]
-        |
-        v
-    ExecuteDemo()
-        |
-        +--> EnsureInputReady()
-        |      |
-        |      +--> 没有显式 image 输入时，尝试从 dataMgr 兜底
-        |
-        +--> 如果之前没 bounds，就创建默认中心子盒
-        |
-        +--> widget.SetReferenceBounds(...)
-        +--> widget.SetWidgetBounds(...)
-        +--> widget.SetEnabled(true)
-        |
-        +--> m_cropInteractionEnabled = true
-        +--> m_lastInteractionPhase = Released
-        |
-        v
-    等待用户按 1 / 2 打开 preview
-        |
-        v
-    UpdatePreviewFromCurrentBounds(true)
-        |
-        +--> BuildPreviewRequest()
-        |      |
-        |      +--> 世界 bounds -> 模型 bounds
-        |      +--> executionMode 强制 VirtualCrop
-        |      +--> 写入 currentRemovalMode
-        |      +--> 写入 cropStateModel
-        |
-        +--> router.GetResult(request)
-               |
-               +--> image? 走 Algorithm::GetResult(...)
-               |       |
-               |       +--> 归一化 request
-               |       +--> 校验 bounds
-               |       +--> 体素吸附 snappedIJKBounds
-               |       +--> 生成 statistics
-               |       +--> 生成 virtualMask 或 derivedImage
-               |
-               +--> polydata? 走 box clip
-        |
-        +--> 成功: preview services SetDirtyMarked()
-        +--> 失败: 打日志，不广播坏结果
-
-拖拽过程中的节流逻辑是：
-
-    [StartInteractionEvent / InteractionEvent]
-        |
-        v
-    phase = Dragging
-        |
-        +--> 只更新 m_currentBounds
-        +--> 不执行 preview 重算
-
-    [EndInteractionEvent]
-        |
-        v
-    phase = Released
-        |
-        +--> UpdatePreviewFromCurrentBounds(true)
-
-所以当前交互不是“边拖边重算体数据”，而是“边拖边更新盒子，松手后统一重算一次”。
-
-11.3 快捷键状态切换图
-
-    默认态
-      |
-      | 按 O
-      v
-    进入裁切模式
-      |
-      | 拖拽盒子
-      v
-    Dragging -----------------------------+
-      |                                   |
-      | 松开鼠标                          | 按 1 / 2
-      v                                   |
-    Released                              |
-      |                                   |
-      | 触发 preview                      |
-      +-----------------------------------+
-      |
-      | Esc 或再次按 O
-      v
-    退出裁切模式
-
-其中 1 / 2 是按下切换的 preview：
-
-    Full model
-        |
-       | 按 1
-        v
-    KeepInside preview
-        |
-       | 再按 1
-        v
-    Full model restored
-
-    Full model
-        |
-       | 按 2
-        v
-    RemoveInside preview
-        |
-       | 再按 2
-        v
-    Full model restored
-
-如果此时正在 Dragging：
-- 只切换 removal mode 状态；
-- 不立刻重算 preview；
-- 等 Released 再统一重算。
-
-11.4 类名拆词：每个名字到底想表达什么
-
-1) OrthogonalCropAlgorithm
-
-- Orthogonal：正交的、按轴对齐的；
-- Crop：裁切；
-- Algorithm：真正负责算结果的算法核心。
-
-这个类名字的重点不是“服务”，而是“算法”。
-它说明这里的输入输出应该是干净的 request/result，
-而不是窗口、按钮、交互器这些 UI 物件。
-
-2) OrthogonalCropPluginService
-
-- Plugin：独立插件；
-- Service：对外暴露一套更好调用的入口。
-
-它本质上是 image 路径的轻门面。
-真正的计算仍然在 Algorithm，
-它只是负责“持有输入 image + 查系统 RAM + 调算法”。
-
-如果把 Algorithm 理解成发动机，
-那 PluginService 更像“发动机外面那层可直接拧钥匙的壳”。
-
-3) OrthogonalCropBackendRouterService
-
-- Backend：后端实现；
-- Router：路由器、分发器。
-
-这个名字已经明说了它的重点不是算，
-而是“同一个裁切请求，最后交给谁执行”。
-
-你可以把它理解成：
-- 有 image，就优先走 image backend；
-- 有 polydata，就能切到 polydata backend；
-- 上层不需要自己写一堆 if/else。
-
-4) OrthogonalCropWidgetStateController
-
-- Widget：VTK 里的裁切盒控件；
-- State：这里维护的是控件状态，不是裁切结果；
-- Controller：控制器，不做业务运算。
-
-这个类最容易误会成“裁切控制器”，
-但实际上它只管一件事：
-让 vtkBoxWidget2 的当前 bounds、启停状态和交互事件保持稳定。
-
-它不应该知道：
-- 当前是 image 还是 polydata；
-- 当前 preview 要不要生成 mask；
-- 哪些窗口要刷新。
-
-5) OrthogonalCropInteractionBridgeService
-
-- Interaction：交互；
-- Bridge：桥接；
-- Service：对外可直接用的一层总控。
-
-这个名字最准确地说明了它的真实身份：
-它不是“算法执行器”，也不是“UI 控件本体”，
-而是把“热键/拖拽/坐标系/preview 触发”桥接到后端裁切能力上的那层胶水。
-
-它干的是把两边语言互相翻译：
-- UI 这边说的是世界坐标、按键、拖拽阶段；
-- 后端那边说的是 request、boundsMode、result、failureReason。
-
-6) CropDataModel
-
-- Data：客观数据；
-- Model：稳定的数据模型。
-
-它表示的是“这个裁切盒在几何上到底是什么”。
-里面放的是：
-- rasBounds；
-- globalOffsetMatrix；
-- localAlignmentMatrix；
-- localCenter / localDimensions。
-
-它不表示“用户现在是否按着鼠标”，
-只表示“裁切盒这件事在客观空间里是什么样”。
-
-7) CropStateModel
-
-- State：瞬时状态；
-- Model：状态快照。
-
-它和 CropDataModel 刚好互补。
-CropDataModel 说“盒子在哪、大小多少”，
-CropStateModel 说“当前是不是启用、正在拖没拖、inside 透明度多少、当前哪个 handle 激活”。
-
-所以可以用一句话区分：
-- DataModel = 盒子本体事实；
-- StateModel = 盒子当前表现状态。
-
-8) OrthogonalCropRequest
-
-- Request：一次请求单。
-
-这个名字的关键在“一次性”。
-它不是长期全局状态对象，
-而是“当前这次要怎么裁”的完整参数包。
-
-前端或 ViewModel 每次确认参数后，
-重新组一份 request 再发下去，就是当前设计的推荐用法。
-
-9) OrthogonalCropStatistics
-
-- Statistics：统计与预估。
-
-它不是结果图像，
-而是“执行前/执行中给上层看的体检单”：
-- inside 有多少；
-- output 有多少；
-- 估计要多少内存；
-- 能不能做 physical crop；
-- 失败的话为什么失败。
-
-10) OrthogonalCropResult
-
-- Result：一次执行的最终交付物。
-
-它可以带的东西很多：
-- virtualMaskImage；
-- derivedImage；
-- derivedPolyData；
-- outlinePolyData；
-- statistics；
-- cropDataModel；
-- cropStateModel。
-
-所以它不是“只有图像结果”，
-而是“这一刀裁下去之后，算法愿意完整交回来的所有东西”。
-
-11.5 一眼分清这些类最简单的办法
-
-如果你只想要一句话版本，可以这样记：
-
-- Request：这次想怎么裁；
-- DataModel：这个盒子客观上长什么样；
-- StateModel：这个盒子现在处于什么交互态；
-- Statistics：现在能不能安全裁；
-- Result：裁完后拿到了什么；
-- Algorithm：真正算；
-- PluginService：给 image backend 套一层易用入口；
-- BackendRouterService：决定走哪条后端路；
-- WidgetStateController：只管 UI 盒子；
-- InteractionBridgeService：把 UI 事件翻译成后端请求。
-
-如果再压缩成一句：
-“Bridge 收集用户意图，WidgetController 保持盒子稳定，Router 选择后端，Algorithm 产出 Result。”
+1. SharedState 和 DataManager 是应用级共享资源，不要给每个窗口各建一份。
+2. MedicalVizService 和 StdRenderContext 是窗口级对象，一窗一对。
+3. 所有 SetXxx 大多先改 SharedState，再由 Timer 心跳把状态同步到 Strategy/VTK 对象。
+4. 回调里能安全假设“主线程状态已经收敛过一轮”，但不要因此绕过 service/context 直接改底层 VTK 管线。
+5. OrthogonalCrop bridge 负责交互，不负责算法；router 负责路由，不负责键位；algorithm 负责结果，不负责窗口。
+6. 当前 preview 默认是 Full，`3` 才切 Lightweight/Full；不要依赖 2D 窗口自动判断的旧逻辑。
 */
