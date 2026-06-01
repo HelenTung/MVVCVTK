@@ -276,20 +276,26 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     std::size_t countedInsideVoxelCount = 0;
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
-    const double stepX = modelToLocal[0] * spacing[0];
-    const double stepY = modelToLocal[4] * spacing[0];
-    const double stepZ = modelToLocal[8] * spacing[0];
-    const double stepW = modelToLocal[12] * spacing[0];
+    auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
+    const double modelStepI[3] = {
+        indexToPhysicalMatrix->GetElement(0, 0),
+        indexToPhysicalMatrix->GetElement(1, 0),
+        indexToPhysicalMatrix->GetElement(2, 0)
+    };
+    const double stepX = modelToLocal[0] * modelStepI[0] + modelToLocal[1] * modelStepI[1] + modelToLocal[2] * modelStepI[2];
+    const double stepY = modelToLocal[4] * modelStepI[0] + modelToLocal[5] * modelStepI[1] + modelToLocal[6] * modelStepI[2];
+    const double stepZ = modelToLocal[8] * modelStepI[0] + modelToLocal[9] * modelStepI[1] + modelToLocal[10] * modelStepI[2];
+    const double stepW = modelToLocal[12] * modelStepI[0] + modelToLocal[13] * modelStepI[1] + modelToLocal[14] * modelStepI[2];
 
     for (int k = minK; k <= maxK; ++k) {
-        const double modelZ = origin[2] + spacing[2] * static_cast<double>(k);
         for (int j = minJ; j <= maxJ; ++j) {
-            const double modelX = origin[0] + spacing[0] * static_cast<double>(minI);
-            const double modelY = origin[1] + spacing[1] * static_cast<double>(j);
-            double localXRaw = modelToLocal[0] * modelX + modelToLocal[1] * modelY + modelToLocal[2] * modelZ + modelToLocal[3];
-            double localYRaw = modelToLocal[4] * modelX + modelToLocal[5] * modelY + modelToLocal[6] * modelZ + modelToLocal[7];
-            double localZRaw = modelToLocal[8] * modelX + modelToLocal[9] * modelY + modelToLocal[10] * modelZ + modelToLocal[11];
-            double localWRaw = modelToLocal[12] * modelX + modelToLocal[13] * modelY + modelToLocal[14] * modelZ + modelToLocal[15];
+            const int rowStartIndex[3] = { minI, j, k };
+            double modelPoint[3] = { 0.0, 0.0, 0.0 };
+            image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
+            double localXRaw = modelToLocal[0] * modelPoint[0] + modelToLocal[1] * modelPoint[1] + modelToLocal[2] * modelPoint[2] + modelToLocal[3];
+            double localYRaw = modelToLocal[4] * modelPoint[0] + modelToLocal[5] * modelPoint[1] + modelToLocal[6] * modelPoint[2] + modelToLocal[7];
+            double localZRaw = modelToLocal[8] * modelPoint[0] + modelToLocal[9] * modelPoint[1] + modelToLocal[10] * modelPoint[2] + modelToLocal[11];
+            double localWRaw = modelToLocal[12] * modelPoint[0] + modelToLocal[13] * modelPoint[1] + modelToLocal[14] * modelPoint[2] + modelToLocal[15];
 
             for (int i = minI; i <= maxI; ++i) {
                 const double invW = std::abs(localWRaw) > 1e-12 ? 1.0 / localWRaw : 1.0;
@@ -341,16 +347,9 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
         return nullptr;
     }
 
-    double spacing[3] = { 1.0, 1.0, 1.0 };
-    double origin[3] = { 0.0, 0.0, 0.0 };
-    image->GetSpacing(spacing);
-    image->GetOrigin(origin);
-
-    const double outputOrigin[3] = {
-        origin[0] + spacing[0] * ijkBounds[0],
-        origin[1] + spacing[1] * ijkBounds[2],
-        origin[2] + spacing[2] * ijkBounds[4]
-    };
+    const int outputStartIndex[3] = { ijkBounds[0], ijkBounds[2], ijkBounds[4] };
+    double outputOrigin[3] = { 0.0, 0.0, 0.0 };
+    image->TransformIndexToPhysicalPoint(outputStartIndex, outputOrigin);
 
     // 物理裁切沿用 vtkExtractVOI 提取体素子块，再显式把 extent 起点归零，
     // 同时保留新的物理 origin，确保 derived image 能独立表达自身坐标系。
@@ -531,26 +530,50 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
 
 std::array<int, 6> OrthogonalCropAlgorithm::GetSnappedVoxelBounds(vtkImageData* image, const CropDataModel& cropData)
 {
-    // image 路径最终都要落到体素级执行，因此先把世界坐标 bounds 吸附到 IJK 整数区间。
+    // image 路径最终都要落到体素级执行，因此先把物理空间 bounds
+    // 通过 vtkImageData 原生的 physical->continuous-index 变换吸附到 IJK 整数区间。
+    // 这里显式变换 8 个角点，避免 direction 非单位矩阵时只按各轴独立换算导致包围盒失真。
     std::array<int, 6> ijkBounds = { 0, 0, 0, 0, 0, 0 };
     if (!image) {
         return ijkBounds;
     }
 
     int dims[3] = { 0, 0, 0 };
-    double origin[3] = { 0.0, 0.0, 0.0 };
-    double spacing[3] = { 1.0, 1.0, 1.0 };
     image->GetDimensions(dims);
-    image->GetOrigin(origin);
-    image->GetSpacing(spacing);
 
     const auto rasBounds = cropData.GetRasBounds();
+    std::array<double, 3> minContinuousIndex = {
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max()
+    };
+    std::array<double, 3> maxContinuousIndex = {
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest()
+    };
+
+    for (int sx = 0; sx < 2; ++sx) {
+        for (int sy = 0; sy < 2; ++sy) {
+            for (int sz = 0; sz < 2; ++sz) {
+                const double physicalPoint[3] = {
+                    rasBounds[sx == 0 ? 0 : 1],
+                    rasBounds[sy == 0 ? 2 : 3],
+                    rasBounds[sz == 0 ? 4 : 5]
+                };
+                double continuousIndex[3] = { 0.0, 0.0, 0.0 };
+                image->TransformPhysicalPointToContinuousIndex(physicalPoint, continuousIndex);
+                for (int axis = 0; axis < 3; ++axis) {
+                    minContinuousIndex[axis] = std::min(minContinuousIndex[axis], continuousIndex[axis]);
+                    maxContinuousIndex[axis] = std::max(maxContinuousIndex[axis], continuousIndex[axis]);
+                }
+            }
+        }
+    }
+
     for (int axis = 0; axis < 3; ++axis) {
-        const double minCoord = rasBounds[axis * 2 + 0];
-        const double maxCoord = rasBounds[axis * 2 + 1];
-        const double axisSpacing = std::abs(spacing[axis]) > 1e-12 ? spacing[axis] : 1.0;
-        const int minIndex = static_cast<int>(std::llround((minCoord - origin[axis]) / axisSpacing));
-        const int maxIndex = static_cast<int>(std::llround((maxCoord - origin[axis]) / axisSpacing));
+        const int minIndex = static_cast<int>(std::floor(minContinuousIndex[axis] + BoundsEpsilon));
+        const int maxIndex = static_cast<int>(std::ceil(maxContinuousIndex[axis] - BoundsEpsilon));
         ijkBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
         ijkBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
     }

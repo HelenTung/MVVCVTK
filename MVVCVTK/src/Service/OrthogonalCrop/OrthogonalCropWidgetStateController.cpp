@@ -3,6 +3,7 @@
 // 分类: Service / Widget Controller Implementation
 // 说明: 封装 vtkBoxWidget2 的构造、启停、observer 绑定与 bounds 回调翻译。
 // =====================================================================
+// 这个控制器刻意保持“薄”：
 // - 下层只接触 VTK widget 细节
 // - 上层只拿到 bounds 与 phase
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
