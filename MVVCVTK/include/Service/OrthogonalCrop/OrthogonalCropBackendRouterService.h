@@ -21,6 +21,9 @@
 #include <array>
 #include <string>
 
+class vtkGeometryFilter;
+class vtkTableBasedClipDataSet;
+
 class OrthogonalCropBackendRouterService {
 public:
     // 预初始化阶段绑定 image 输入，供交互桥或 main 在数据加载后注入。
@@ -64,23 +67,12 @@ public:
     // 结果对象会补齐 resolved source / backend，供交互桥和 overlay 直接消费。
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
-    // 对已有 VTK implicit function 做通用 polydata clip。
-    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
-        vtkPolyData* polyData,
-        vtkImplicitFunction* clipFunction,
-        CropRemovalMode removalMode);
-
-    // 从 cropData 推导 implicit function，再执行 polydata clip。
-    static vtkSmartPointer<vtkPolyData> GetClippedPolyData(
-        vtkPolyData* polyData,
-        const CropDataModel& cropData,
-        CropRemovalMode removalMode);
-
-protected:
-    // 把 cropData 转换成具体的 VTK implicit function，供 polydata 路径复用。
-    static vtkSmartPointer<vtkImplicitFunction> GetClipFunction(const CropDataModel& cropData);
-
 private:
+    // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。
+    vtkSmartPointer<vtkPolyData> GetClippedPolyData(
+        const CropDataModel& cropData,
+        CropRemovalMode removalMode) const;
+
     // 读取 image 输入 bounds。
     std::array<double, 6> GetImageBounds() const;
 
@@ -120,6 +112,12 @@ private:
 
     // polydata 输入单独缓存在 router 中，由 polydata 分支直接消费。
     vtkSmartPointer<vtkPolyData> m_inputPolyData;
+
+    // polydata 统计/结果路径复用的 clip filter。
+    mutable vtkSmartPointer<vtkTableBasedClipDataSet> m_polyDataClipFilter;
+
+    // polydata 统计/结果路径复用的 geometry filter。
+    mutable vtkSmartPointer<vtkGeometryFilter> m_polyDataGeometryFilter;
 
     // 外部偏好的数据源；若对应输入不存在，则会自动回退。
     OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::Auto;

@@ -8,8 +8,10 @@
 
 #include <vtkActor.h>
 #include <vtkBoundingBox.h>
+#include <vtkGeometryFilter.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlanes.h>
+#include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
 
 #include <algorithm>
@@ -656,7 +658,6 @@ void OrthogonalCropInteractionBridgeService::RestoreMainPolyDataPreview(PreviewR
     }
 
     target.mainPreviewMapper->SetInputData(target.mainPreviewSourcePolyData);
-    target.mainPreviewMapper->Update();
 
     if (target.service) {
         auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
@@ -688,8 +689,13 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
 
     if (target.mainPreviewMapper != mapper || !target.mainPreviewSourcePolyData) {
         // 第一次进入该 3D 窗口 preview 时缓存原始主模型输入，后续退出时直接恢复。
-        mapper->Update();
+        // 优先尝试直接读取 mapper 当前输入；只有当它尚未物化成稳定 polydata 时，
+        // 才退回一次 Update() 去抓取上游管道的当前输出。
         auto source = mapper->GetInput();
+        if (!source || source->GetNumberOfPoints() == 0) {
+            mapper->Update();
+            source = mapper->GetInput();
+        }
         if (!source || source->GetNumberOfPoints() == 0) {
             return false;
         }
@@ -697,25 +703,28 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
         target.mainPreviewMapper = mapper;
         target.mainPreviewSourcePolyData = vtkSmartPointer<vtkPolyData>::New();
         target.mainPreviewSourcePolyData->ShallowCopy(source);
+        target.mainPreviewClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
+        target.mainPreviewClipFilter->SetInputData(target.mainPreviewSourcePolyData);
+        target.mainPreviewGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
+        target.mainPreviewGeometryFilter->SetInputConnection(target.mainPreviewClipFilter->GetOutputPort());
     }
 
     auto clipPlanes = GetCurrentWidgetPlanesForModelInput();
-    if (!clipPlanes) {
+    if (!clipPlanes || !target.mainPreviewClipFilter || !target.mainPreviewGeometryFilter) {
         return false;
     }
 
-    // 3D 主模型预览始终基于原始 polydata + 当前 widget planes 重新 clip，
-    // 避免在连续切换 preview 时叠加裁切误差。
-    auto clipped = OrthogonalCropBackendRouterService::GetClippedPolyData(
-        target.mainPreviewSourcePolyData,
-        clipPlanes,
-        m_currentRemovalMode);
-    if (!clipped) {
-        return false;
+    // 3D 主模型预览始终基于原始 polydata + 当前 widget planes 更新同一条 clip 管道，
+    // 避免连续刷新时反复重建 filter，同时仍然不叠加裁切误差。
+    target.mainPreviewClipFilter->SetClipFunction(clipPlanes);
+    if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
+        target.mainPreviewClipFilter->InsideOutOn();
+    }
+    else {
+        target.mainPreviewClipFilter->InsideOutOff();
     }
 
-    mapper->SetInputData(clipped);
-    mapper->Update();
+    mapper->SetInputConnection(target.mainPreviewGeometryFilter->GetOutputPort());
     actor->Modified();
     return true;
 }

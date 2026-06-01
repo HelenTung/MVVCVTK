@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+class vtkGeometryFilter;
+class vtkTableBasedClipDataSet;
 class OrthogonalCropInteractionBridgeService {
 public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
@@ -121,6 +123,12 @@ private:
 
         // 主模型原始 polydata 的浅拷贝，用于退出 preview 时恢复。
         vtkSmartPointer<vtkPolyData> mainPreviewSourcePolyData;
+
+        // 3D 主窗口预览时复用的 clip 管道，避免每次刷新都重建 filter。
+        vtkSmartPointer<vtkTableBasedClipDataSet> mainPreviewClipFilter;
+
+        // 把 clip dataset 输出稳定收敛为 polydata 的持久 geometry filter。
+        vtkSmartPointer<vtkGeometryFilter> mainPreviewGeometryFilter;
     };
 
     // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。

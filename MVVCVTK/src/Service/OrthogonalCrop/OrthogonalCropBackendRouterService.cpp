@@ -155,76 +155,64 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
 }
 
 vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyData(
-    vtkPolyData* polyData,
-    vtkImplicitFunction* clipFunction,
-    CropRemovalMode removalMode)
+    const CropDataModel& cropData,
+    CropRemovalMode removalMode) const
 {
-    if (!polyData || !clipFunction) {
+    if (!m_inputPolyData) {
         return nullptr;
     }
 
-    auto clip = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
-    clip->SetInputData(polyData);
-    clip->SetClipFunction(clipFunction);
-
-    // removalMode 在 polydata 路径里直接映射到 InsideOut，
-    // 保证“保留盒内 / 移除盒内”与 image 路径保持同一语义名称。
-    if (removalMode == CropRemovalMode::KeepInside) {
-        clip->InsideOutOn();
-    }
-    else {
-        clip->InsideOutOff();
-    }
-    clip->Update();
-
-    auto geometry = vtkSmartPointer<vtkGeometryFilter>::New();
-    geometry->SetInputConnection(clip->GetOutputPort());
-    geometry->Update();
-
-    auto output = vtkSmartPointer<vtkPolyData>::New();
-    output->ShallowCopy(geometry->GetOutput());
-    return output;
-}
-
-vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyData(
-    vtkPolyData* polyData,
-    const CropDataModel& cropData,
-    CropRemovalMode removalMode)
-{
-    return GetClippedPolyData(polyData, GetClipFunction(cropData), removalMode);
-}
-
-vtkSmartPointer<vtkImplicitFunction> OrthogonalCropBackendRouterService::GetClipFunction(const CropDataModel& cropData)
-{
-    auto box = vtkSmartPointer<vtkBox>::New();
+    auto clipFunction = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
         // 轴对齐盒直接映射成 vtkBox。
         const auto rasBounds = cropData.GetRasBounds();
-        box->SetBounds(
+        clipFunction->SetBounds(
             rasBounds[0], rasBounds[1],
             rasBounds[2], rasBounds[3],
             rasBounds[4], rasBounds[5]);
-        return box;
+    }
+    else {
+        const auto localCenter = cropData.GetLocalCenter();
+        const auto localDimensions = cropData.GetLocalDimensions();
+
+        // vtkImplicitFunction 会先把输入点变换到隐函数空间，因此这里传入 localToModel 的逆，
+        // 就能直接复用 vtkBox 表达“局部对齐盒 + 模型空间输入”的组合语义。
+        clipFunction->SetBounds(
+            localCenter[0] - localDimensions[0] * 0.5,
+            localCenter[0] + localDimensions[0] * 0.5,
+            localCenter[1] - localDimensions[1] * 0.5,
+            localCenter[1] + localDimensions[1] * 0.5,
+            localCenter[2] - localDimensions[2] * 0.5,
+            localCenter[2] + localDimensions[2] * 0.5);
+
+        auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
+        modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());
+        modelToLocalTransform->Inverse();
+        clipFunction->SetTransform(modelToLocalTransform);
     }
 
-    const auto localCenter = cropData.GetLocalCenter();
-    const auto localDimensions = cropData.GetLocalDimensions();
+    if (!m_polyDataClipFilter) {
+        m_polyDataClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
+    }
+    if (!m_polyDataGeometryFilter) {
+        m_polyDataGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
+        m_polyDataGeometryFilter->SetInputConnection(m_polyDataClipFilter->GetOutputPort());
+    }
 
-    // vtkImplicitFunction 会先把输入点变换到隐函数空间，因此这里传入 localToModel 的逆，
-    // 就能直接复用 vtkBox 表达“局部对齐盒 + 模型空间输入”的组合语义。
-    box->SetBounds(
-        localCenter[0] - localDimensions[0] * 0.5,
-        localCenter[0] + localDimensions[0] * 0.5,
-        localCenter[1] - localDimensions[1] * 0.5,
-        localCenter[1] + localDimensions[1] * 0.5,
-        localCenter[2] - localDimensions[2] * 0.5,
-        localCenter[2] + localDimensions[2] * 0.5);
+    m_polyDataClipFilter->SetInputData(m_inputPolyData);
+    m_polyDataClipFilter->SetClipFunction(clipFunction);
+    if (removalMode == CropRemovalMode::KeepInside) {
+        m_polyDataClipFilter->InsideOutOn();
+    }
+    else {
+        m_polyDataClipFilter->InsideOutOff();
+    }
 
-    auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
-    modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());
-    modelToLocalTransform->Inverse();
-    box->SetTransform(modelToLocalTransform);
-    return box;
+    m_polyDataGeometryFilter->Update();
+
+    auto output = vtkSmartPointer<vtkPolyData>::New();
+    output->ShallowCopy(m_polyDataGeometryFilter->GetOutput());
+    return output;
 }
 
 std::array<double, 6> OrthogonalCropBackendRouterService::GetImageBounds() const
@@ -359,7 +347,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
         return statistics;
     }
 
-    auto clipped = GetClippedPolyData(m_inputPolyData, cropData, request.GetRemovalMode());
+    auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
         statistics.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
         statistics.SetValidationMessage("Failed to build clipped polydata.");
@@ -406,7 +394,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
-    auto clipped = GetClippedPolyData(m_inputPolyData, cropData, request.GetRemovalMode());
+    auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
         result.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
         result.SetMessage("Failed to build clipped polydata.");
