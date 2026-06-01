@@ -642,10 +642,19 @@ bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const Ortho
     // 同一份 previewResult 同时喂给所有目标窗口，保证多窗口显示的一致性。
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
+            const bool mainPreviewAppliedForTarget = SetMainPolyDataPreviewApplied(target, previewResult);
+
+            auto overlayResult = previewResult;
+            if (mainPreviewAppliedForTarget && target.service->GetNavigationAxis() < 0) {
+                // 3D 主窗口已经由常驻 clip 管道直接表现裁切结果，
+                // 不再额外叠一份 clipped polydata overlay，避免重复绘制同一套网格。
+                overlayResult.SetDerivedPolyData(nullptr);
+            }
+
             target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
             target.overlayStrategy->SetRemovalMode(m_currentRemovalMode);
-            target.overlayStrategy->SetCropResult(previewResult);
-            main3DPreviewApplied = SetMainPolyDataPreviewApplied(target, previewResult) || main3DPreviewApplied;
+            target.overlayStrategy->SetCropResult(overlayResult);
+            main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
             target.service->SetDirtyMarked();
         }
     }
