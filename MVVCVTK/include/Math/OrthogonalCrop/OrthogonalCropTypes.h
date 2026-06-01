@@ -118,9 +118,10 @@ enum class CropBoundsMode {
     InputVolumeBounds,
     // 以 min/max 六个坐标直接表达裁切盒。
     MinMaxCoordinates,
-    // 以世界坐标系下的中心点和尺寸表达裁切盒。
+    // 以后端输入坐标系下的中心点和尺寸表达裁切盒。
     CenterAndDimensions,
     // 以局部对齐坐标系下的中心点和尺寸表达裁切盒。
+    // 交互预览路径里，这个“局部坐标系”通常直接取 widget 所在的世界坐标系。
     LocalCenterAndDimensions
 };
 
@@ -205,7 +206,7 @@ public:
         };
     }
 
-    // 返回当前裁切盒在物理空间中的体积估计值；用于日志或粗粒度规模判断。
+    // 返回当前裁切盒在后端输入坐标系中的体积估计值；用于日志或粗粒度规模判断。
     double GetPhysicalVolume() const
     {
         const auto dimensions = GetDimensions();
@@ -227,7 +228,7 @@ public:
     // 当前是否启用了局部对齐裁切语义。
     bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
 
-    // 显式打开或关闭局部对齐语义；关闭时通常按普通世界轴对齐盒处理。
+    // 显式打开或关闭局部对齐语义；关闭时通常按普通后端输入轴对齐盒处理。
     void SetLocalAlignmentEnabled(bool enabled) { m_localAlignmentEnabled = enabled; }
 
     // 返回局部对齐坐标系中的中心点。
@@ -245,7 +246,7 @@ public:
 private:
     // 后端输入坐标系下的 RAS/physical min/max bounds，是最基础的裁切盒表达。
     std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    // 全局偏移矩阵，用于把算法输入和上层世界坐标系对齐。
+    // 全局偏移矩阵，用于把后端结果重新对齐回上层共享坐标语义。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
     // 局部对齐矩阵，用于表达局部裁切参考系到后端输入坐标系的映射。
     std::array<double, 16> m_localAlignmentMatrix = GetIdentityMatrixArray();
@@ -345,6 +346,7 @@ public:
     void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
 
     // 用 min/max bounds 完整定义请求，同时切换到对应 bounds mode。
+    // 这里的 min/max 一律约定在后端输入坐标系下解释。
     void SetMinMaxCoordinates(const std::array<double, 6>& rasBounds)
     {
         m_boundsMode = CropBoundsMode::MinMaxCoordinates;
@@ -374,12 +376,14 @@ public:
     }
 
     // 返回局部对齐坐标系中的中心点定义。
+    // 对交互预览来说，这通常就是 widget 世界坐标系中的中心点。
     const CropVectorDouble3Array& GetLocalCenter() const { return m_localCenter; }
 
     // 写入局部对齐坐标系中的中心点定义。
     void SetLocalCenter(const CropVectorDouble3Array& center) { m_localCenter = center; }
 
     // 返回局部对齐坐标系中的尺寸定义。
+    // 对交互预览来说，这通常就是 widget 世界坐标系中的盒尺寸。
     const CropVectorDouble3Array& GetLocalDimensions() const { return m_localDimensions; }
 
     // 写入局部对齐坐标系中的尺寸定义。
@@ -430,17 +434,17 @@ private:
     CropExecutionMode m_executionMode = CropExecutionMode::VirtualCrop;
     // inside / outside 的保留语义；影响虚拟 mask 取值和物理裁切合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
-    // 直接给出的世界坐标系 RAS min/max bounds；MinMaxCoordinates 模式主要使用它。
+    // 直接给出的后端输入坐标系 RAS/physical min/max bounds；MinMaxCoordinates 模式主要使用它。
     std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    // 世界坐标系下的中心点；CenterAndDimensions 模式使用它重建裁切盒。
+    // 后端输入坐标系下的中心点；CenterAndDimensions 模式使用它重建裁切盒。
     std::array<double, 3> m_center = { 0.0, 0.0, 0.0 };
-    // 世界坐标系下的尺寸；与中心点一起定义轴对齐裁切盒。
+    // 后端输入坐标系下的尺寸；与中心点一起定义轴对齐裁切盒。
     std::array<double, 3> m_dimensions = { 0.0, 0.0, 0.0 };
     // 局部对齐坐标系中的中心点；只有 LocalCenterAndDimensions 模式会消费它。
     std::array<double, 3> m_localCenter = { 0.0, 0.0, 0.0 };
-    // 局部对齐坐标系中的尺寸；会先和局部中心一起生成局部盒子，再映射回世界坐标。
+    // 局部对齐坐标系中的尺寸；会先和局部中心一起生成局部盒子，再映射回后端输入坐标系。
     std::array<double, 3> m_localDimensions = { 0.0, 0.0, 0.0 };
-    // 局部坐标系到世界坐标系的对齐矩阵；用于表达旋转后的局部裁切框。
+    // 局部坐标系到后端输入坐标系的对齐矩阵；用于表达旋转后的局部裁切框。
     std::array<double, 16> m_localAlignmentMatrix = GetIdentityMatrixArray();
     // 输入数据当前附带的全局偏移补偿矩阵；物理裁切后会继续累加新的 origin 偏移。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();

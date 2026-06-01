@@ -27,6 +27,8 @@ constexpr double BoundsEpsilon = 1e-6;
 
 std::array<double, 6> GetImageBounds(vtkImageData* image)
 {
+    // vtkImageData::GetBounds 返回的就是 image physical 坐标范围；
+    // 这里不再额外做 world/model 折叠，算法层后续所有 image 校验都直接用这套坐标语义。
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!image) {
         return bounds;
@@ -56,6 +58,7 @@ std::string GetBoundsMessage(const char* prefix, const std::array<double, 6>& bo
 
 bool GetBoundsOverlap(const std::array<double, 6>& inputBounds, const std::array<double, 6>& rasBounds)
 {
+    // preview 允许 partial overlap，因此这里只判断两个轴对齐盒是否真正有体积交集。
     return rasBounds[1] > inputBounds[0] + BoundsEpsilon
         && rasBounds[0] < inputBounds[1] - BoundsEpsilon
         && rasBounds[3] > inputBounds[2] + BoundsEpsilon
@@ -66,6 +69,7 @@ bool GetBoundsOverlap(const std::array<double, 6>& inputBounds, const std::array
 
 bool GetBoundsContained(const std::array<double, 6>& inputBounds, const std::array<double, 6>& rasBounds)
 {
+    // physical crop 需要稳定的 derived 数据范围，因此要求裁切盒完整包含在输入 bounds 内。
     return rasBounds[0] >= inputBounds[0] - BoundsEpsilon
         && rasBounds[1] <= inputBounds[1] + BoundsEpsilon
         && rasBounds[2] >= inputBounds[2] - BoundsEpsilon
@@ -79,9 +83,11 @@ std::array<double, 6> GetRasBoundsFromLocalDefinition(
     const std::array<double, 3>& localDimensions,
     const std::array<double, 16>& localAlignmentMatrix)
 {
-    // LocalCenterAndDimensions 模式下，先把局部坐标系中的盒子 8 个角点变换到后端输入坐标系，
-    // 再回收为一个轴对齐 RAS bounds，后续验证与统计都围绕这组 bounds 展开。
-    // 交互预览路径里，这里的局部空间通常就是 widget 所在的世界坐标系。
+    // LocalCenterAndDimensions 的几何还原流程：
+    // 1. 先在局部裁切参考系里恢复盒子的 8 个角点
+    // 2. 再用 localAlignmentMatrix 把这些角点送到后端输入坐标系
+    // 3. 最后回收成输入空间轴对齐 bounds，供统一校验、吸附和统计复用
+    // 交互预览路径里，这里的局部参考系通常就是 widget 所在的世界坐标系。
     auto transform = vtkSmartPointer<vtkTransform>::New();
     transform->SetMatrix(localAlignmentMatrix.data());
 
@@ -134,6 +140,8 @@ std::array<double, 16> GetUpdatedOffsetMatrix(
     const std::array<double, 16>& currentMatrix,
     const std::array<double, 3>& translation)
 {
+    // physical crop 会改变 derived image 的 origin，
+    // 这里把这次位移继续累加进 offset matrix，保证上层共享坐标语义保持连续。
     auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
     matrix->DeepCopy(currentMatrix.data());
 
@@ -192,6 +200,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     CropRemovalMode removalMode,
     std::size_t* insideVoxelCount = nullptr)
 {
+    // virtual mask 的结果不是导出新体数据，而是构造一张与原图同结构的 inside/outside 掩码。
+    // 整体流程分两段：
+    // 1. 先用 snapped IJK bounds 把执行域收缩到最小候选包围盒
+    // 2. 再根据是否 local-aligned 决定走整块填充还是逐体素 inside 判定
     if (!image) {
         return nullptr;
     }
@@ -200,6 +212,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     image->GetDimensions(dims);
 
     auto maskImage = vtkSmartPointer<vtkImageData>::New();
+    // CopyStructure 会保留 extent/origin/spacing/direction，
+    // 这样输出 mask 能直接和原图在同一 physical 坐标系下叠加显示。
     maskImage->CopyStructure(image);
     maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
 
@@ -228,7 +242,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     }
 
     if (!cropData.GetLocalAlignmentEnabled()) {
-        // 轴对齐盒使用整块 memset 快路径，保持与拆分前一致的低成本行为。
+        // 轴对齐盒没有额外姿态信息，候选 IJK 包围盒内部整块都属于 inside。
+        // 这里继续沿用拆分前的整块 memset 快路径，避免无意义的逐体素判断。
         const int width = maxI - minI + 1;
         const int height = maxJ - minJ + 1;
         const int depth = maxK - minK + 1;
@@ -264,8 +279,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         localDimensions[2] * 0.5
     };
 
-    // 本地对齐盒无法直接沿 IJK 批量填充，因此退化为“候选包围盒内逐体素判 inside”。
-    // 这里保持旧逻辑：只在 snapped 包围盒范围内遍历，不额外扩张执行域。
+    // 局部对齐盒的真实 inside 必须经过“体素中心 -> 输入 physical 空间 -> 局部裁切参考系”后再判断。
+    // 这里仍旧只在 snapped 包围盒范围内遍历，避免为了旋转盒额外扩张执行域。
     std::size_t countedInsideVoxelCount = 0;
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
@@ -283,6 +298,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
             double modelPoint[3] = { 0.0, 0.0, 0.0 };
+            // 每一行先把 row 起点 index 转到输入 physical 空间，
+            // 再整体乘 modelToLocal；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
             image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
             const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
             double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
@@ -327,6 +344,9 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& ijkBounds)
 {
+    // physical crop 的目标是导出真正独立的 derived image。
+    // 这里先按 snapped IJK 做 vtkExtractVOI，再把 extent 起点归零，
+    // 同时把新的 physical origin 设置成输出块起点对应的 physical 坐标。
     if (!image) {
         return nullptr;
     }
@@ -342,8 +362,8 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
     double outputOrigin[3] = { 0.0, 0.0, 0.0 };
     image->TransformIndexToPhysicalPoint(outputStartIndex, outputOrigin);
 
-    // 物理裁切沿用 vtkExtractVOI 提取体素子块，再显式把 extent 起点归零，
-    // 同时保留新的物理 origin，确保 derived image 能独立表达自身坐标系。
+    // 这里让 vtkExtractVOI 只负责提取体素子块，
+    // vtkImageChangeInformation 再只修正输出 extent/origin，不改真实体素内容。
     auto extract = vtkSmartPointer<vtkExtractVOI>::New();
     extract->SetInputData(image);
     extract->SetVOI(
@@ -365,7 +385,8 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
 vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cropData)
 {
     if (cropData.GetLocalAlignmentEnabled()) {
-        // 本地对齐盒先在局部空间生成 cube，再乘 localAlignmentMatrix 回到模型空间。
+        // local-aligned 路径的结果语义是“局部盒真实姿态的轮廓”。
+        // 因此先在局部坐标系里生成轴对齐 cube，再乘 localAlignmentMatrix 回到后端输入坐标系。
         const auto center = cropData.GetLocalCenter();
         const auto dimensions = cropData.GetLocalDimensions();
 
@@ -392,7 +413,7 @@ vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cro
 
     const auto rasBounds = cropData.GetRasBounds();
 
-    // 轴对齐路径直接输出 outline source，供 2D/3D overlay 复用。
+    // 轴对齐路径没有额外姿态信息，直接按输入空间 bounds 生成 outline 即可。
     auto outline = vtkSmartPointer<vtkOutlineSource>::New();
     outline->SetBounds(
         rasBounds[0], rasBounds[1],
@@ -415,6 +436,7 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
 {
     // allowPartialOverlap 只在 virtual crop 中启用，表示 preview 允许盒子部分超出输入范围，
     // 但 physical crop 仍要求完整包含，避免导出的 derived image 语义不稳定。
+    // 这里默认调用方已经把 inputBounds 和 crop bounds 放到了同一坐标系里，不再做二次折叠。
     if (!GetBoundsHavePositiveVolume(inputBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
         message = GetBoundsMessage("Input bounds are invalid:", inputBounds);
@@ -450,6 +472,7 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     std::string& message,
     bool allowPartialOverlap)
 {
+    // image 重载只是把 vtkImageData 的 physical bounds 提出来，再复用统一的 bounds 判定逻辑。
     if (!image) {
         failureReason = OrthogonalCropFailureReason::InputImageMissing;
         message = "Input image is null.";
@@ -469,26 +492,33 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
 {
     // 这一步把多种 request 表达统一折叠成一个 CropDataModel，
     // 后续统计、outline、mask、physical extract 都只认这一种内部表示。
+    // 结果语义固定为：m_rasBounds 始终落在“后端输入坐标系”下；
+    // 若启用 local-aligned，则额外保留局部盒参数与 local->input 的对齐矩阵。
     cropData = CropDataModel();
     cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
     cropData.SetLocalAlignmentMatrix(request.GetLocalAlignmentMatrix());
 
     switch (request.GetBoundsMode()) {
     case CropBoundsMode::InputVolumeBounds:
+        // 直接使用完整输入范围；常用于初始化或恢复“全量显示”。
         cropData.SetLocalAlignmentEnabled(false);
         cropData.SetRasBounds(inputBounds);
         cropData.SetLocalCenter({ 0.0, 0.0, 0.0 });
         cropData.SetLocalDimensions(cropData.GetDimensions());
         break;
     case CropBoundsMode::MinMaxCoordinates:
+        // 调用方已经直接给出了输入空间 bounds，不再额外换算。
         cropData.SetLocalAlignmentEnabled(false);
         cropData.SetRasBounds(request.GetRasBounds());
         break;
     case CropBoundsMode::CenterAndDimensions:
+        // 中心点 + 尺寸同样被解释为输入空间中的轴对齐盒。
         cropData.SetLocalAlignmentEnabled(false);
         cropData.SetCenterAndDimensions(request.GetCenter(), request.GetDimensions());
         break;
     case CropBoundsMode::LocalCenterAndDimensions:
+        // 局部模式会额外保留局部参考系中的中心/尺寸，
+        // 同时回收出一份输入空间轴对齐包围盒，供后续统一校验和 snapped IJK 计算使用。
         cropData.SetLocalAlignmentEnabled(true);
         cropData.SetLocalCenter(request.GetLocalCenter());
         cropData.SetLocalDimensions(request.GetLocalDimensions());
@@ -510,6 +540,8 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     std::string& message,
     bool allowPartialOverlap)
 {
+    // image 重载只负责把 vtkImageData 的 physical bounds 作为输入 bounds 传下去；
+    // 真正的 request -> cropData 归一化仍由通用重载完成。
     if (!image) {
         failureReason = OrthogonalCropFailureReason::InputImageMissing;
         message = "Input image is null.";
@@ -524,6 +556,7 @@ std::array<int, 6> OrthogonalCropAlgorithm::GetSnappedVoxelBounds(vtkImageData* 
     // image 路径最终都要落到体素级执行，因此先把已经折叠回 image physical/model 空间的 bounds
     // 通过 vtkImageData 原生的 physical->continuous-index 变换吸附到 IJK 整数区间。
     // 这里显式变换 8 个角点，避免 direction 非单位矩阵时只按各轴独立换算导致包围盒失真。
+    // 最终结果语义是一个“完整覆盖 crop bounds 的整数 IJK 包围盒”，供统计和执行路径共用。
     std::array<int, 6> ijkBounds = { 0, 0, 0, 0, 0, 0 };
     if (!image) {
         return ijkBounds;
@@ -584,6 +617,10 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     CropExecutionMode executionMode,
     std::size_t availableRamBytes)
 {
+    // 统计核心只做三件事：
+    // 1. 确认 crop bounds 在输入 physical 坐标范围内是否合法
+    // 2. 把 crop bounds 吸附成 snapped IJK 包围盒
+    // 3. 按 execution mode 推导 inside/output 规模和物理执行可行性
     OrthogonalCropStatistics statistics;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
@@ -647,6 +684,8 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
+    // request 入口的职责非常窄：先做一次 request -> cropData 归一化，
+    // 再把 execution/removal/RAM 约束带进 cropData 版本的统计核心。
     OrthogonalCropStatistics statistics;
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
@@ -675,6 +714,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
 {
     // virtual crop 返回的是“原图 + mask 解释信息”，
     // 不改主数据布局，因此更适合交互预览与多窗口同步显示。
+    // 结果里最重要的三个产物是：statistics、virtualMaskImage 和 outlinePolyData。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
@@ -695,6 +735,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     std::size_t exactInsideVoxelCount = statistics.GetInsideVoxelCount();
 
     // 先复用统计阶段给出的 snapped bounds 缩小遍历范围，再真正生成 mask。
+    // 结果说明：mask 与原图同结构，outline 仍落在后端输入坐标系下，供 overlay 直接消费。
     result.SetVirtualMaskImage(GetVirtualMaskImage(
         image,
         cropData,
@@ -726,6 +767,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
 {
     // physical crop 返回的是新的 derived image，
     // 因此除了提取体素数据，还必须同步修正 bounds 和 global offset matrix。
+    // 结果说明：derived image 是新的主数据快照，derivedCropData 记录它自己的 physical bounds 与位移补偿。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetCropDataModel(cropData);
@@ -799,6 +841,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 {
     // 统一入口故意不在这里混入执行细节：
     // 这里只做一次 request 归一化和分流决策，具体结果组装交给下游分支函数完成。
+    // 因此坐标链在这里也只归一化一次：request 表达 -> cropData，
+    // 后续 virtual/physical 两条分支都直接消费同一个 cropData。
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
 
