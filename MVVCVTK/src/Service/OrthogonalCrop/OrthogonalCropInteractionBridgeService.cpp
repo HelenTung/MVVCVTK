@@ -8,6 +8,7 @@
 
 #include <vtkActor.h>
 #include <vtkBoundingBox.h>
+#include <vtkBox.h>
 #include <vtkGeometryFilter.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlanes.h>
@@ -29,7 +30,7 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 
 void OrthogonalCropInteractionBridgeService::CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
-    CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetInputImage, std::move(image));
+    m_backend.CropPreInit_SetInputImage(std::move(image));
 }
 
 void OrthogonalCropInteractionBridgeService::SetInputImage(vtkSmartPointer<vtkImageData> image)
@@ -39,12 +40,12 @@ void OrthogonalCropInteractionBridgeService::SetInputImage(vtkSmartPointer<vtkIm
 
 vtkSmartPointer<vtkImageData> OrthogonalCropInteractionBridgeService::GetInputImage() const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetInputImage);
+    return m_backend.GetInputImage();
 }
 
 void OrthogonalCropInteractionBridgeService::CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
-    CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetInputPolyData, std::move(polyData));
+    m_backend.CropPreInit_SetInputPolyData(std::move(polyData));
 }
 
 void OrthogonalCropInteractionBridgeService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
@@ -54,12 +55,12 @@ void OrthogonalCropInteractionBridgeService::SetInputPolyData(vtkSmartPointer<vt
 
 vtkSmartPointer<vtkPolyData> OrthogonalCropInteractionBridgeService::GetInputPolyData() const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetInputPolyData);
+    return m_backend.GetInputPolyData();
 }
 
 void OrthogonalCropInteractionBridgeService::CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource)
 {
-    CallBackend(&OrthogonalCropBackendRouterService::CropPreInit_SetPreferredDataSource, dataSource);
+    m_backend.CropPreInit_SetPreferredDataSource(dataSource);
 }
 
 void OrthogonalCropInteractionBridgeService::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
@@ -69,27 +70,27 @@ void OrthogonalCropInteractionBridgeService::SetPreferredDataSource(OrthogonalCr
 
 OrthogonalCropDataSource OrthogonalCropInteractionBridgeService::GetActiveDataSource() const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetActiveDataSource);
+    return m_backend.GetActiveDataSource();
 }
 
 std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveInputBounds() const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetActiveInputBounds);
+    return m_backend.GetActiveInputBounds();
 }
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::GetDefaultRequest() const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetDefaultRequest);
+    return m_backend.GetDefaultRequest();
 }
 
 OrthogonalCropStatistics OrthogonalCropInteractionBridgeService::GetStatistics(const OrthogonalCropRequest& request) const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetStatistics, request);
+    return m_backend.GetStatistics(request);
 }
 
 OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetResult(const OrthogonalCropRequest& request) const
 {
-    return CallBackend(&OrthogonalCropBackendRouterService::GetResult, request);
+    return m_backend.GetResult(request);
 }
 
 void OrthogonalCropInteractionBridgeService::SetDataManager(std::shared_ptr<AbstractDataManager> dataMgr)
@@ -653,11 +654,12 @@ bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const Ortho
 
 void OrthogonalCropInteractionBridgeService::RestoreMainPolyDataPreview(PreviewRenderTarget& target)
 {
-    if (!target.mainPreviewMapper || !target.mainPreviewSourcePolyData) {
+    if (!target.mainPreviewClipFilter || !target.mainPreviewPassThroughBox) {
         return;
     }
 
-    target.mainPreviewMapper->SetInputData(target.mainPreviewSourcePolyData);
+    target.mainPreviewClipFilter->SetClipFunction(target.mainPreviewPassThroughBox);
+    target.mainPreviewClipFilter->InsideOutOn();
 
     if (target.service) {
         auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
@@ -707,6 +709,22 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
         target.mainPreviewClipFilter->SetInputData(target.mainPreviewSourcePolyData);
         target.mainPreviewGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
         target.mainPreviewGeometryFilter->SetInputConnection(target.mainPreviewClipFilter->GetOutputPort());
+
+        double sourceBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        target.mainPreviewSourcePolyData->GetBounds(sourceBounds);
+        const double xSpan = sourceBounds[1] - sourceBounds[0];
+        const double ySpan = sourceBounds[3] - sourceBounds[2];
+        const double zSpan = sourceBounds[5] - sourceBounds[4];
+        const double maxSpan = std::max({ xSpan, ySpan, zSpan, 1.0 });
+        const double padding = std::max(maxSpan * 1e-6, 1e-6);
+
+        target.mainPreviewPassThroughBox = vtkSmartPointer<vtkBox>::New();
+        target.mainPreviewPassThroughBox->SetBounds(
+            sourceBounds[0] - padding, sourceBounds[1] + padding,
+            sourceBounds[2] - padding, sourceBounds[3] + padding,
+            sourceBounds[4] - padding, sourceBounds[5] + padding);
+
+        mapper->SetInputConnection(target.mainPreviewGeometryFilter->GetOutputPort());
     }
 
     auto clipPlanes = GetCurrentWidgetPlanesForModelInput();
@@ -724,7 +742,6 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
         target.mainPreviewClipFilter->InsideOutOff();
     }
 
-    mapper->SetInputConnection(target.mainPreviewGeometryFilter->GetOutputPort());
     actor->Modified();
     return true;
 }

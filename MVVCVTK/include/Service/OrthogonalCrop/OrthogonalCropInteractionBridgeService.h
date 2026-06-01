@@ -30,6 +30,7 @@
 
 class vtkGeometryFilter;
 class vtkTableBasedClipDataSet;
+class vtkBox;
 class OrthogonalCropInteractionBridgeService {
 public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
@@ -96,20 +97,6 @@ public:
     bool DeactivateDemo();
 
 private:
-    template <typename BackendMethod, typename... Args>
-    decltype(auto) CallBackend(BackendMethod method, Args&&... args)
-    {
-        // bridge 自己不复制 backend 逻辑，所有真正的执行都透传给 router。
-        return (m_backend.*method)(std::forward<Args>(args)...);
-    }
-
-    template <typename BackendMethod, typename... Args>
-    decltype(auto) CallBackend(BackendMethod method, Args&&... args) const
-    {
-        // const 版本保证查询接口也走同一条 router 路径，避免读写路径分叉。
-        return (m_backend.*method)(std::forward<Args>(args)...);
-    }
-
     // 一个 preview 目标窗口对应一份 overlay 策略与可能的主模型临时裁切缓存。
     struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
@@ -121,7 +108,7 @@ private:
         // 3D 主模型预览时缓存的 mapper 指针。
         vtkPolyDataMapper* mainPreviewMapper = nullptr;
 
-        // 主模型原始 polydata 的浅拷贝，用于退出 preview 时恢复。
+        // 主模型原始 polydata 的浅拷贝，作为 preview 持久管道的稳定输入。
         vtkSmartPointer<vtkPolyData> mainPreviewSourcePolyData;
 
         // 3D 主窗口预览时复用的 clip 管道，避免每次刷新都重建 filter。
@@ -129,6 +116,9 @@ private:
 
         // 把 clip dataset 输出稳定收敛为 polydata 的持久 geometry filter。
         vtkSmartPointer<vtkGeometryFilter> mainPreviewGeometryFilter;
+
+        // preview 关闭时使用的全量直通盒，避免再切回原始 mapper 输入。
+        vtkSmartPointer<vtkBox> mainPreviewPassThroughBox;
     };
 
     // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。
@@ -175,7 +165,7 @@ private:
     // 替换 preview 目标列表前，先把旧 overlay 从旧窗口上摘掉。
     void ClearPreviewRenderTargets();
 
-    // 退出 preview 或退出交互模式时恢复 overlay 和主模型输入。
+    // 退出 preview 或退出交互模式时恢复 overlay，并把主模型管道切回全量直通。
     void RestorePreviewRenderTargets();
 
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
@@ -184,7 +174,7 @@ private:
     // 把一次 previewResult 分发给所有 preview 窗口。
     bool SetPreviewServicesDirty(const OrthogonalCropResult& previewResult);
 
-    // 把某个 3D 主窗口的 mapper 恢复到进入 preview 前的原始输入。
+    // 把某个 3D 主窗口的持久 preview 管道恢复成全量直通状态。
     void RestoreMainPolyDataPreview(PreviewRenderTarget& target);
 
     // 在满足条件的 3D 主窗口上执行一次临时 polydata clip 预览。
