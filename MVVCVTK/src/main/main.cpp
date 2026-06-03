@@ -272,7 +272,7 @@ int main()
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
     serviceA->SetFileLoadedAsync(
-        "E:\\data\\1000x1000x1000.raw",
+        "F:\\data\\1000x1000x1000.raw",
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},
         [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success)
