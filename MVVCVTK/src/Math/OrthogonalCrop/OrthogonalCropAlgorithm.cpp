@@ -829,15 +829,17 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     const CropStateModel& cropState,
     CropRemovalMode removalMode)
 {
-    // virtual crop 返回的是“原图 + mask 解释信息”，
-    // 不改主数据布局，因此更适合交互预览与多窗口同步显示。
-    // 结果里最重要的三个产物是：statistics、virtualMaskImage 和 outlinePolyData。
+    // ── 步骤 1：构造基本结果骨架 ──
+    // 预先填充数据源/后端标记、几何快照与交互状态
+    // 后续 steps 逐步回填 mask / statistics / outline
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
+    // ── 步骤 2：校验 bounds 合法性 ──
+    // allowPartialOverlap=true，预览允许盒子部分超出输入边界
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
     if (!GetBoundsAreValid(image, cropData.GetRasBounds(), failureReason, validationMessage, true)) {
@@ -850,9 +852,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     const std::size_t totalVoxelCount = GetImageVoxelCount(image);
     std::size_t insideVoxelCount = 0;
 
-    // 先复用 snapped bounds 缩小遍历范围，再真正生成 mask。
-    // 结果说明：KeepInside 会返回 ROI mask，RemoveInside 仍返回 full-volume mask；
-    // outline 继续落在后端输入坐标系下，供 overlay 直接消费。
+    // ── 步骤 3a：生成 mask ──
+    // KeepInside  → ROI 大小 compact mask（memset 快路径）
+    // RemoveInside → full-volume mask（标记盒外区域）
     result.SetVirtualMaskImage(GetVirtualMaskImage(
         image,
         cropData,
@@ -860,6 +862,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
         removalMode,
         &insideVoxelCount));
 
+    // ── 步骤 3b：回填 statistics ──
+    // 包含 total/inside/output voxel 计数、snapped IJK 边界、RAM 估算
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
@@ -876,6 +880,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     result.SetStatistics(statistics);
     result.SetFailureReason(statistics.GetFailureReason());
 
+    // ── 步骤 3c：回填 outline 与最终状态 ──
+    // outline 落在后端输入坐标系下，供 overlay 直接消费
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
     result.SetSucceeded(result.GetVirtualMaskImage() != nullptr);
     if (!result.GetSucceeded()) {
@@ -900,6 +906,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
+    // ── 步骤 1：统计预估与可行性判断 ──
+    // 综合 removal mode / RAM 约束判断是否能安全执行 physical crop
     const auto statistics = GetStatistics(
         image,
         cropData,
@@ -914,8 +922,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
         return result;
     }
 
-    // 物理裁切先提取 derived image，再把 origin 变化折算到 global offset matrix，
-    // 从而保持拆分前“导出数据 + 空间偏移”这组耦合语义不变。
+    // ── 步骤 2：体素提取 ──
+    // 通过 ExtractVOI → ImageChangeInformation 产出独立 derived image
     auto derivedImage = GetExtractedImage(image, statistics.GetSnappedIjkBounds());
     if (!derivedImage) {
         result.SetFailureReason(OrthogonalCropFailureReason::DerivedImageCreationFailed);
@@ -923,6 +931,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
         return result;
     }
 
+    // ── 步骤 3：偏移补偿 ──
+    // 提取后 origin 改变，把位移量累加进 globalOffsetMatrix
+    // 保证上层共享坐标语义连续
     double originalOrigin[3] = { 0.0, 0.0, 0.0 };
     image->GetOrigin(originalOrigin);
     double newOrigin[3] = { 0.0, 0.0, 0.0 };
@@ -945,11 +956,10 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
                 newOrigin[2] - originalOrigin[2]
             }));
 
+    // ── 步骤 4：结果回填 ──
+    // derived image 本身就是新主数据，关闭交互裁切语义
     CropStateModel derivedCropState = cropState;
     derivedCropState.SetCropEnabled(false);
-
-    // 物理导出完成后，结果中的 cropState 会显式关闭交互裁切，
-    // 因为此时 derived image 本身已经成为新的主数据。
 
     result.SetDerivedImage(derivedImage);
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(derivedCropData));
@@ -966,13 +976,14 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
-    // 统一入口故意不在这里混入执行细节：
-    // 这里只做一次 request 归一化和分流决策，具体结果组装交给下游分支函数完成。
-    // 因此坐标链在这里也只归一化一次：request 表达 -> cropData，
-    // 后续 virtual/physical 两条分支都直接消费同一个 cropData。
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
 
+    // ── 请求归一化 ──
+    // 把四种 bounds mode 统一折叠为 CropDataModel：
+    //   InputVolumeBounds / MinMaxCoordinates → 直接取 inputBounds
+    //   CenterAndDimensions → 中心+尺寸换算为 rasBounds
+    //   LocalCenterAndDimensions → 局部盒经 worldToModel 矩阵映射到输入空间
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
@@ -983,7 +994,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         return result;
     }
 
-    // 总入口只负责做一次前置归一化与校验，随后严格按 executionMode 分流。
+    // ── 执行分支分发：VirtualCrop vs PhysicalCrop ──
+    // VirtualCrop  → GetVirtualCropResult  → mask + outline + statistics（预览用，不复制体数据）
+    // PhysicalCrop → GetPhysicalCropResult → derived image + offset matrix（可独立使用的新数据）
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
         return GetVirtualCropResult(
             image,

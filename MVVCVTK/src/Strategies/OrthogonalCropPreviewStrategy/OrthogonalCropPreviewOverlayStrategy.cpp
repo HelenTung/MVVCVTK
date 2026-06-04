@@ -114,7 +114,9 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         return;
     }
 
-    // --- 分发 a: outline (所有窗口的最低公共几何表示) ---
+    // ── 分发 A：outlinePolyData（所有窗口共享的公共几何表示） ──
+    // 3D 窗口 → 裁切盒线框 + 半透明实体区域（m_previewRegionMapper）
+    // 2D 窗口 → 裁切盒在切片上的投影轮廓
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -122,7 +124,9 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         m_previewRegionMapper->SetInputData(outline);
     }
 
-    // --- 分发 b: derivedPolyData (仅 polydata 路径有输出) ---
+    // ── 分发 B：derivedPolyData（仅 polydata 路径） ──
+    // clipped 网格以半透明叠加方式显示在 3D 窗口
+    // 若 3D 主窗口已被 bridge 常驻 clip 管道接管，bridge 会先剥离此字段避免重复绘制
     auto clippedPolyData = result.GetDerivedPolyData();
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {
@@ -130,13 +134,19 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // --- 分发 c: virtualMask (image 路径虚拟裁切的掩码叠加) ---
+    // ── 分发 C：virtualMaskImage（仅 image 路径虚拟裁切） ──
+    // 2D 窗口 → vtkImageResliceMapper 切片显示，颜色由 m_maskLut 控制
+    // 3D 窗口 → mask 不可见（只依赖 outline + 主模型 clip）
     auto maskImage = result.GetVirtualMaskImage();
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
         m_maskMapper->SetInputData(maskImage);
     }
-    UpdateVisiblePreviewProps();  // 根据 sliceAxis 决定显示 mask 还是 3D 区域
+
+    // ── 最终可见性决策 ──
+    // m_sliceAxis < 0 (3D)：显示 outline + region，隐藏 mask
+    // m_sliceAxis >= 0 (2D)：显示 outline + mask，隐藏 region
+    UpdateVisiblePreviewProps();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::ClearPreview()

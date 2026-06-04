@@ -147,22 +147,18 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
-    // ═══════════════════════════════════════════════════════════════
-    // 双后端路由入口 — 为什么这样设计：
-    //
-    // Image 分支:  裁切计算在 PluginService→Algorithm 链中完成
-    //   只做 result.resolvedDataSource 回填标记, 不做计算
-    //
-    // PolyData 分支:  没有 PluginService 封装, Router 自己完成:
-    //   request→cropData 归一化 → vtkBox clip 执行 → 结果组装
-    //
-    // 两条分支持统一接口(GetResult/GetStatistics),
-    // 调用方(Bridge)完全不需要关心底层走 image 还是 polydata
-    // ═══════════════════════════════════════════════════════════════
+    // ── 分支入口：根据活跃数据源路由到对应后端 ──
+    // 先通过 GetActiveDataSource() 确定后端：
+    //   优先 preferredDataSource → 有输入则走对应分支
+    //   Auto 模式按 image → polydata 优先级自动回退
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
+        // Image 分支 → PluginService → Algorithm
+        // Router 只回填 resolvedDataSource 标记
         return GetImageResult(request);
     case OrthogonalCropDataSource::PolyData:
+        // PolyData 分支 → Router 内部三步：归一化→clip→结果封装
+        // 含 5 层缓存判断避免重复执行昂贵 VTK 管道
         return GetPolyDataResult(request);
     default:
         return GetMissingInputResult();
@@ -445,17 +441,19 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
         return statistics;
     }
 
-    // 这里直接复用真实 clipped 结果统计，避免额外发明一套 polydata 估算规则。
+    // 直接复用真实 clipped 结果统计，避免额外发明 polydata 估算规则
     return GetPolyDataStatisticsFromClipped(clipped);
 }
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const OrthogonalCropRequest& request) const
 {
-    // ═══ Image 分支结果组装 ═══
-    // 计算全部在 PluginService→Algorithm 链, Router 只负责:
-    //   1) resolvedDataSource = ImageData (标记来源)
-    //   2) VirtualCrop 兜底补 backend = ImageVirtualMask
+    // ── 请求转发：Router → PluginService → Algorithm ──
+    // PluginService 注入系统可用 RAM (GlobalMemoryStatusEx)
+    // Algorithm 完成 cropData 归一化 → virtual mask 或 physical extract
     auto result = m_imageService.GetResult(request);
+    // ── 结果回填（Router 层）：只补标记字段 ──
+    // resolvedDataSource = ImageData（上游可据此知道数据来源）
+    // VirtualCrop 场景下若 Algorithm 未设置 backend，兜底为 ImageVirtualMask
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
         && result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {
@@ -475,6 +473,9 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
     result.SetCropStateModel(request.GetCropStateModel());
 
+    // ── 步骤 1：请求归一化 ──
+    // GetPolyDataCropDataModel → Algorithm::GetCropDataModel(inputBounds, request)
+    // 四种 bounds mode → CropDataModel，allowPartialOverlap=true
     if (!m_inputPolyData) {
         result.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
         result.SetMessage("Input polydata is null.");
@@ -490,6 +491,9 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
+    // ── 步骤 2：裁切执行 ──
+    // GetClippedPolyData 内部含 5 层缓存判断（inputPtr / rasBounds / localParams / alignmentMatrix）
+    // 缓存未命中时构建 vtkBox → TableBasedClipDataSet → GeometryFilter 管道
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
         result.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
@@ -497,9 +501,9 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
-    // ═══ Polydata 结果组装 ═══
-    // Router 自己负责把 clip 后的数据与统计封装成标准 OrthogonalCropResult
-    // statistics + cropData + outline + derived data 一次性回填
+    // ── 步骤 3：结果回填 ──
+    // statistics + cropData + outline + derivedPolyData 一次性封装
+    // 格式与 Image 路径完全一致，Preview 层统一消费
     const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
 
     result.SetStatistics(statistics);

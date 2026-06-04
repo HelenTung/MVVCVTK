@@ -401,17 +401,16 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
-    // ═══ World Box → 模型空间 request: 坐标折叠链路 ═══
-    // Widget 持有世界坐标 AABB, Backend 需要模型空间表达
-    // 因此把 世界盒的中心+尺寸 连同 worldToModel 矩阵编码进 request
-    // Algorithm 收到后用 worldToModel 矩阵还原到模型空间再执行裁切
+    // ── 分支 ①：获取默认 request 模板 ──
+    // Image 路径 → PluginService 根据 inputImage bounds 构造
+    // PolyData 路径 → Router 根据 activeInput bounds 构造
     auto previewRequest = GetDefaultRequest();
 
-    // preview request 的组装流程：
-    // 1. widget 当前持有的是 world-space axis-aligned bounds
-    // 2. bridge 把这只 world 盒折叠成 LocalCenterAndDimensions + worldToModelMatrix
-    // 3. 下游算法再把这组信息恢复成统一的输入空间 cropData
-    // 对 image 路径，真实顺序就是 world -> model(= vtkImageData physical) -> continuous index。
+    // ── 分支 ②：Widget 世界 box → LocalCenterAndDimensions 编码 ──
+    // center = widget 世界坐标盒中心
+    // dimensions = widget 世界坐标盒尺寸
+    // localAlignmentMatrix = GetWorldToModelMatrix()（参考渲染服务 modelMatrix 的逆）
+    // 下游 Algorithm 收到后用 world→model 矩阵还原到后端输入坐标系
     previewRequest.SetLocalCenterAndDimensions(
         {
             (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
@@ -444,13 +443,13 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // preview 刷新主流程固定为：
-    // 1. 当前世界坐标 bounds -> BuildPreviewRequest
-    // 2. backend 内部把 request 归一化成 cropData，并产出统一 previewResult
-    // 3. overlay 与 3D 主模型 preview 各自消费同一份结果
-    // 4. 失败时只记录日志，不污染当前已经显示的 preview 内容
+    // ── 步骤 1：构建 preview request ──
+    // widget 世界坐标盒 → LocalCenterAndDimensions 编码
+    // 固定 VirtualCrop 模式 + 当前 removalMode
     const auto previewRequest = BuildPreviewRequest();
 
+    // ── 分支 A：轻量预览（不触发完整 mask 管道） ──
+    // 只做 cropData 归一化 + outline 生成，适合频繁拖拽场景
     if (!m_previewRequiresFullArtifacts) {
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
@@ -470,6 +469,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             return;
         }
 
+        // ── 手动构造轻量结果 ──
         OrthogonalCropResult previewResult;
         previewResult.SetResolvedDataSource(GetActiveDataSource());
         previewResult.SetSucceeded(true);
@@ -478,6 +478,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         previewResult.SetCropStateModel(previewRequest.GetCropStateModel());
         previewResult.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
 
+        // ── 结果分发 ──
         const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
         if (logStats) {
             std::cout
@@ -497,6 +498,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
+    // ── 分支 B：完整预览 ──
+    // 经 Router → PluginService/Algorithm 完整执行 mask 或 polyData clip
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
@@ -517,6 +520,12 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
+    // ── 步骤 2：结果分发（两条分支共享） ──
+    // 对每个 PreviewRenderTarget：
+    // ① SetMainPolyDataPreviewApplied → 3D 主窗口常驻 clip 管道更新
+    //    3D 主窗口（axis<0）若成功接管，剥离 derivedPolyData overlay 避免重复绘制
+    // ② overlayStrategy->SetCropResult → outline / mask / polydata 三类可视内容
+    // ③ target.service->SetDirtyMarked → 触发渲染刷新
     const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);
 
     // 这里的 3D 主模型 clip 只是临时预览表现；真正的几何/统计结果仍以 previewResult 为准。
