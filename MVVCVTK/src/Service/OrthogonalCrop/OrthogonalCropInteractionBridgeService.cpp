@@ -401,6 +401,10 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
+    // ═══ World Box → 模型空间 request: 坐标折叠链路 ═══
+    // Widget 持有世界坐标 AABB, Backend 需要模型空间表达
+    // 因此把 世界盒的中心+尺寸 连同 worldToModel 矩阵编码进 request
+    // Algorithm 收到后用 worldToModel 矩阵还原到模型空间再执行裁切
     auto previewRequest = GetDefaultRequest();
 
     // preview request 的组装流程：

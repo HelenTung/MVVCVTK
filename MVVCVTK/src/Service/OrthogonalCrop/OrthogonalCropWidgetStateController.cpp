@@ -33,16 +33,19 @@ void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long
 
 OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
 {
-    // widget 外观在这里集中初始化；交互桥只消费 bounds，不再关心 VTK 风格细节。
+    // ═══ 初始化 vtkBoxWidget2 外观 ═══
     m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
+    // 默认轮廓：暗红色 2.0px 线宽
     m_representation->GetOutlineProperty()->SetColor(1.0, 0.15, 0.10);
     m_representation->GetOutlineProperty()->SetLineWidth(2.0);
+    // 选中轮廓：亮橙色 2.5px 线宽
     m_representation->GetSelectedOutlineProperty()->SetColor(1.0, 0.55, 0.20);
     m_representation->GetSelectedOutlineProperty()->SetLineWidth(2.5);
     m_widget->SetRepresentation(m_representation);
 
+    // VTK 回调适配器：把原始 VTK 事件转交到 HandleWidgetEvent
     m_callbackCommand = vtkSmartPointer<OrthogonalCropWidgetStateCallback>::New();
     m_callbackCommand->SetOwner(this);
 }
@@ -103,14 +106,16 @@ void OrthogonalCropWidgetStateController::SetBoundsChangedCallback(BoundsChanged
 
 bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
 {
+    // 启用前提：必须已绑定 interactor
     if (enabled && !m_interactor) {
         return false;
     }
 
+    // ═══ 懒绑定 observer（整个生命周期只做一次，避免重复回调）═══
     EnsureObserversAdded();
 
     if (enabled) {
-        // 开启前保证 currentBounds 至少能从 referenceBounds 恢复出一份有效值。
+        // 启用：先确保有合法 bounds，再 Place + On
         if (!GetBoundsAreValid(m_currentBounds)) {
             m_currentBounds = m_referenceBounds;
         }

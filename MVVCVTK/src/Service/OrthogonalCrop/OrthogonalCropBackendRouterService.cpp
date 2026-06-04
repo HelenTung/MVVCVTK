@@ -133,7 +133,8 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const OrthogonalCropRequest& request) const
 {
-    // 统计入口与执行入口保持同样的路由规则，避免“能统计但不能执行”来自不同后端的歧义。
+    // 统计入口与执行入口保持同样的路由规则
+    // 避免"能统计但不能执行"来自不同后端的歧义
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
         return GetImageStatistics(request);
@@ -146,8 +147,18 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
-    // 真正执行时沿用与统计一致的 active data source 选择，
-    // 这样 preview 日志里的 statistics/result 不会来自两条不同路径。
+    // ═══════════════════════════════════════════════════════════════
+    // 双后端路由入口 — 为什么这样设计：
+    //
+    // Image 分支:  裁切计算在 PluginService→Algorithm 链中完成
+    //   只做 result.resolvedDataSource 回填标记, 不做计算
+    //
+    // PolyData 分支:  没有 PluginService 封装, Router 自己完成:
+    //   request→cropData 归一化 → vtkBox clip 执行 → 结果组装
+    //
+    // 两条分支持统一接口(GetResult/GetStatistics),
+    // 调用方(Bridge)完全不需要关心底层走 image 还是 polydata
+    // ═══════════════════════════════════════════════════════════════
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
         return GetImageResult(request);
@@ -166,15 +177,19 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         return nullptr;
     }
 
+    // ═══ PolyData 裁切缓存判断：5 层条件，任一不满足则重新执行 ═══
+    // 第1层-快速：输入指针 + removalMode + 基本有效性
     bool canReuseCachedClip = m_hasCachedPolyDataClip
         && m_cachedPolyDataInput == m_inputPolyData.GetPointer()
         && m_cachedPolyDataRemovalMode == removalMode
         && m_cachedClippedPolyData;
+    // 同时检查 LocalAlignmentEnable 开关是否变化
     if (canReuseCachedClip
         && m_cachedPolyDataCropData.GetLocalAlignmentEnabled() != cropData.GetLocalAlignmentEnabled()) {
         canReuseCachedClip = false;
     }
 
+    // 第2层-RasBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
         const auto& cachedRasBounds = m_cachedPolyDataCropData.GetRasBounds();
@@ -187,8 +202,10 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
     }
 
+    // 第3层-LocalAlignment：启用时验证 localCenter + localDimensions + alignmentMatrix
     if (canReuseCachedClip && cropData.GetLocalAlignmentEnabled()) {
         constexpr double epsilon = 1e-9;
+        // 局部中心点 (3个值)
         const auto& cachedLocalCenter = m_cachedPolyDataCropData.GetLocalCenter();
         const auto& localCenter = cropData.GetLocalCenter();
         for (std::size_t index = 0; index < localCenter.size(); ++index) {
@@ -217,13 +234,15 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
     }
 
+    // ═══ 缓存命中 === 跳过昂贵的 VTK 管道执行，直接复用
     if (canReuseCachedClip) {
         return m_cachedClippedPolyData;
     }
 
+    // ═══ 缓存未命中 === 构造 vtkBox 隐函数
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
-        // 轴对齐盒直接映射成 vtkBox。
+        // 轴对齐模式：直接用后端输入空间 bounds
         const auto rasBounds = cropData.GetRasBounds();
         clipFunction->SetBounds(
             rasBounds[0], rasBounds[1],
@@ -250,6 +269,8 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         clipFunction->SetTransform(modelToLocalTransform);
     }
 
+    // ═══ 懒初始化 VTK 裁切管道: TableBasedClipDataSet → GeometryFilter → PolyData
+    // 整个 Router 生命周期只创建一次，后续调用只更换输入
     if (!m_polyDataClipFilter) {
         m_polyDataClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
     }
@@ -258,20 +279,22 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         m_polyDataGeometryFilter->SetInputConnection(m_polyDataClipFilter->GetOutputPort());
     }
 
+    // ═══ 执行裁切 ===
     m_polyDataClipFilter->SetInputData(m_inputPolyData);
     m_polyDataClipFilter->SetClipFunction(clipFunction);
     if (removalMode == CropRemovalMode::KeepInside) {
-        m_polyDataClipFilter->InsideOutOn();
+        m_polyDataClipFilter->InsideOutOn();   // KeepInside: 保留盒内部
     }
     else {
-        m_polyDataClipFilter->InsideOutOff();
+        m_polyDataClipFilter->InsideOutOff();  // RemoveInside: 保留盒外部
     }
+    m_polyDataGeometryFilter->Update();  // 触发整条管道计算
 
-    m_polyDataGeometryFilter->Update();
-
+    // ═══ 提取输出: ShallowCopy 共享底层数据以减少内存开销 ===
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->ShallowCopy(m_polyDataGeometryFilter->GetOutput());
 
+    // ═══ 更新缓存 tuple: cropData+removalMode+inputPtr+clippedResult ===
     m_cachedPolyDataCropData = cropData;
     m_cachedPolyDataRemovalMode = removalMode;
     m_cachedPolyDataInput = m_inputPolyData.GetPointer();
@@ -342,9 +365,8 @@ bool OrthogonalCropBackendRouterService::GetPolyDataCropDataModel(
         return false;
     }
 
-    // polydata 路径复用算法层的 request 归一化逻辑，保证 image / polydata 的盒定义一致。
-    // 与 image physical extract 不同，polydata clip 不依赖稳定的轴对齐导出范围，
-    // 因此这里统一允许 partial overlap：盒子只要和输入有交集即可执行 clip。
+    // polydata 路径复用 Algorithm 的 request 归一化逻辑
+    // allowPartialOverlap=true: 盒子只要和输入有交集即可执行 clip (不要求完全包含)
     return OrthogonalCropAlgorithm::GetCropDataModel(
         GetPolyDataBounds(),
         request,
@@ -429,7 +451,10 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const OrthogonalCropRequest& request) const
 {
-    // image 结果主体全部来自 plugin；router 只做来源与后端标记补齐。
+    // ═══ Image 分支结果组装 ═══
+    // 计算全部在 PluginService→Algorithm 链, Router 只负责:
+    //   1) resolvedDataSource = ImageData (标记来源)
+    //   2) VirtualCrop 兜底补 backend = ImageVirtualMask
     auto result = m_imageService.GetResult(request);
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
@@ -441,8 +466,10 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const Or
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const OrthogonalCropRequest& request) const
 {
-    // polydata 路径没有 image plugin 那样的统一结果实现，
-    // 因此 router 自己负责把 clip 后的数据与统计重新封装成标准结果对象。
+    // ═══ PolyData 分支结果组装 ═══
+    // 三步流程: 归一化 → clip 执行 → 结果封装
+    // 封装字段: statistics + cropData + outline + derivedPolyData
+    // 格式与 Image 路径完全一致, Preview 层统一消费
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
@@ -470,8 +497,9 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
-    // polydata 路径的结果组织方式与 image 路径保持一致：
-    // statistics + cropData + outline + derived data 一次性回填，便于 preview 层统一消费。
+    // ═══ Polydata 结果组装 ═══
+    // Router 自己负责把 clip 后的数据与统计封装成标准 OrthogonalCropResult
+    // statistics + cropData + outline + derived data 一次性回填
     const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
 
     result.SetStatistics(statistics);
