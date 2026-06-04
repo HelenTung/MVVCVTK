@@ -105,12 +105,16 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
 
 void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
 {
+    // ═══ 裁切结果 → 三类可视化数据分发 ═══
+    // a) outlinePolyData  → m_outlineMapper    (3D 线框 + 2D 参考, 所有窗口共享)
+    // b) derivedPolyData  → m_polyDataMapper   (仅 3D 窗口: clipped 半透明网格)
+    // c) virtualMaskImage → m_maskMapper       (仅 2D 窗口: 半透明颜色叠加)
     if (!result.GetSucceeded()) {
         ClearPreview();
         return;
     }
 
-    // outline 是所有窗口都共享的最低公共几何表示。
+    // --- 分发 a: outline (所有窗口的最低公共几何表示) ---
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -118,6 +122,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         m_previewRegionMapper->SetInputData(outline);
     }
 
+    // --- 分发 b: derivedPolyData (仅 polydata 路径有输出) ---
     auto clippedPolyData = result.GetDerivedPolyData();
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {
@@ -125,13 +130,13 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // image 虚拟裁切结果通过 mask image 提供给 2D 切片窗口显示。
+    // --- 分发 c: virtualMask (image 路径虚拟裁切的掩码叠加) ---
     auto maskImage = result.GetVirtualMaskImage();
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
         m_maskMapper->SetInputData(maskImage);
     }
-    UpdateVisiblePreviewProps();
+    UpdateVisiblePreviewProps();  // 根据 sliceAxis 决定显示 mask 还是 3D 区域
 }
 
 void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
