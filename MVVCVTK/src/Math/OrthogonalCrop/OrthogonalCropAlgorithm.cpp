@@ -559,6 +559,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
         cropData.SetLocalAlignmentEnabled(true);
         cropData.SetLocalCenter(request.GetLocalCenter());
         cropData.SetLocalDimensions(request.GetLocalDimensions());
+        // 世界坐标空间
         cropData.SetRasBounds(GetRasBoundsFromLocalDefinition(
             request.GetLocalCenter(),
             request.GetLocalDimensions(),

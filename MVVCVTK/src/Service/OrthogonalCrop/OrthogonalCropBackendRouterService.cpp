@@ -174,18 +174,18 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     }
 
     // ═══ PolyData 裁切缓存判断：5 层条件，任一不满足则重新执行 ═══
-    // 第1层-快速：输入指针 + removalMode + 基本有效性
+    // 第1层-快速：输入指针 + removalMode + 基本有效性、canReuseCachedClip是缓存标志是否变换标志位
     bool canReuseCachedClip = m_hasCachedPolyDataClip
         && m_cachedPolyDataInput == m_inputPolyData.GetPointer()
         && m_cachedPolyDataRemovalMode == removalMode
         && m_cachedClippedPolyData;
-    // 同时检查 LocalAlignmentEnable 开关是否变化
+    // 同时检查 LocalAlignmentEnable 开关是否变化，变换了就进去，没变化就不进去
     if (canReuseCachedClip
         && m_cachedPolyDataCropData.GetLocalAlignmentEnabled() != cropData.GetLocalAlignmentEnabled()) {
         canReuseCachedClip = false;
     }
 
-    // 第2层-RasBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切
+    // 第2层-RasBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切，边界盒看看有无变化
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
         const auto& cachedRasBounds = m_cachedPolyDataCropData.GetRasBounds();
@@ -201,7 +201,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     // 第3层-LocalAlignment：启用时验证 localCenter + localDimensions + alignmentMatrix
     if (canReuseCachedClip && cropData.GetLocalAlignmentEnabled()) {
         constexpr double epsilon = 1e-9;
-        // 局部中心点 (3个值)
+		// 局部中心点 (3个值)，局部中心看是否有变化，阈值为1e-9，微调也触发重裁切
         const auto& cachedLocalCenter = m_cachedPolyDataCropData.GetLocalCenter();
         const auto& localCenter = cropData.GetLocalCenter();
         for (std::size_t index = 0; index < localCenter.size(); ++index) {
@@ -210,7 +210,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
                 break;
             }
         }
-
+		// 看看三维局部尺寸有无变化，局部尺寸看是否有变化，阈值为1e-9，微调也触发重裁切
         const auto& cachedLocalDimensions = m_cachedPolyDataCropData.GetLocalDimensions();
         const auto& localDimensions = cropData.GetLocalDimensions();
         for (std::size_t index = 0; canReuseCachedClip && index < localDimensions.size(); ++index) {
@@ -219,7 +219,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
                 break;
             }
         }
-
+		// 最后看看局部对齐矩阵有无变化，16个值逐元素比较，阈值为1e-9，微调也触发重裁切
         const auto& cachedLocalMatrix = m_cachedPolyDataCropData.GetLocalAlignmentMatrix();
         const auto& localMatrix = cropData.GetLocalAlignmentMatrix();
         for (std::size_t index = 0; canReuseCachedClip && index < localMatrix.size(); ++index) {
@@ -236,6 +236,11 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     }
 
     // ═══ 缓存未命中 === 构造 vtkBox 隐函数
+    //   此函数接收的是 CropDataModel (已在 GetPolyDataCropDataModel 中归一化)
+    //   此时 BoundsMode 已被折叠消除, CropDataModel 内部只保留两种几何表达:
+    //     LocalAlignmentEnabled=false → cropData.GetRasBounds() [输入空间AABB]
+    //     LocalAlignmentEnabled=true  → localCenter+localDimensions+alignmentMatrix
+    //   所以这里只需判断 LocalAlignmentEnabled 即可选择正确的 vtkBox 构造路径
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
         // 轴对齐模式：直接用后端输入空间 bounds
@@ -260,8 +265,8 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
             localCenter[2] + localDimensions[2] * 0.5);
 
         auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
-        modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());
-        modelToLocalTransform->Inverse();
+		modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());  // 先设置局部对齐矩阵（localToModel），再求逆得到 modelToLocal
+        modelToLocalTransform->Inverse(); // 求逆变换 local->model 变换 model->local
         clipFunction->SetTransform(modelToLocalTransform);
     }
 
@@ -270,6 +275,8 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     if (!m_polyDataClipFilter) {
         m_polyDataClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
     }
+    // VTK 的 clip 过滤器设计为"只做布尔运算"，输出格式取决于输入单元类型与裁切面的交点情况。
+    // vtkGeometryFilter 是标准后处理，保证下游（渲染器、ShallowCopy）拿到干净的三角形网格
     if (!m_polyDataGeometryFilter) {
         m_polyDataGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
         m_polyDataGeometryFilter->SetInputConnection(m_polyDataClipFilter->GetOutputPort());

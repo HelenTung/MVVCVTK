@@ -26,7 +26,7 @@
 
 using CropBoundsDouble6Array = std::array<double, 6>;
 using CropVectorDouble3Array = std::array<double, 3>;
-using CropMatrixDouble16Array = std::array<double, 16>;
+using CropMatrixDouble16Array = std::array<double, 16>; // 世界到模型的 4x4 仿射变换矩阵，列主序展开。
 using CropIjkBoundsInt6Array = std::array<int, 6>;
 
 // 返回 4x4 单位矩阵，作为 request/result 中各种坐标补偿矩阵的默认值。
@@ -219,7 +219,7 @@ public:
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
 
-    // 返回局部裁切盒坐标系到后端输入坐标系的对齐矩阵。
+	// 返回局部裁切盒坐标系到后端输入坐标系的对齐矩阵。世界到模型的变换矩阵。
     const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
 
     // 写入局部坐标系到后端输入坐标系的变换矩阵。
@@ -228,7 +228,7 @@ public:
     // 当前是否启用了局部对齐裁切语义。
     bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
 
-    // 显式打开或关闭局部对齐语义；关闭时通常按普通后端输入轴对齐盒处理。
+    // 置为true表示在世界坐标系下，false表示在模型坐标系下
     void SetLocalAlignmentEnabled(bool enabled) { m_localAlignmentEnabled = enabled; }
 
     // 返回局部对齐坐标系中的中心点。
