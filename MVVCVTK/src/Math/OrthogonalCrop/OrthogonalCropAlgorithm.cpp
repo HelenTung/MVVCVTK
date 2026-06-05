@@ -223,13 +223,13 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     if (minI > maxI || minJ > maxJ || minK > maxK) {
         // 无有效交叠时仍返回一张与输入结构兼容的空 mask，避免上层处理 nullptr 分支。
         maskImage->CopyStructure(image);
-        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);  // 每个体素 1 个分量 类型是VTK_UNSIGNED_CHAR 就是说，这是一张单通道的 mask 图
         auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
         if (!maskPtr) {
             return nullptr;
         }
         const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
-        std::memset(maskPtr, 0, static_cast<std::size_t>(totalVoxelCount));
+        std::memset(maskPtr, 0, static_cast<std::size_t>(totalVoxelCount)); // 通常语义是：0 表示不在区域内 1 或 255 表示在区域内
         if (insideVoxelCount) {
             *insideVoxelCount = 0;
         }
@@ -262,8 +262,13 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         return nullptr;
     }
 
-    const unsigned char insideValue = removalMode == CropRemovalMode::KeepInside ? 255 : 0;
-    const unsigned char outsideValue = removalMode == CropRemovalMode::KeepInside ? 0 : 255;
+    const bool keepInside = removalMode == CropRemovalMode::KeepInside;
+    // 255保留 0去除
+    const unsigned char keptValue = 255;
+    const unsigned char removedValue = 0;
+    const unsigned char insideValue = keepInside ? keptValue : removedValue;
+    const unsigned char outsideValue = keepInside ? removedValue : keptValue;
+
     const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
     const vtkIdType allocatedVoxelCount = useCompactMask
         ? static_cast<vtkIdType>(width) * height * depth
@@ -623,6 +628,7 @@ std::array<int, 6> OrthogonalCropAlgorithm::GetSnappedVoxelBounds(vtkImageData* 
                     rasBounds[sy == 0 ? 2 : 3],
                     rasBounds[sz == 0 ? 4 : 5]
                 };
+				// 物理模型坐标系下点rasBounds 落在 IJK 里的哪个子区间
                 double continuousIndex[3] = { 0.0, 0.0, 0.0 };
                 image->TransformPhysicalPointToContinuousIndex(physicalPoint, continuousIndex);
                 for (int axis = 0; axis < 3; ++axis) {
@@ -636,8 +642,9 @@ std::array<int, 6> OrthogonalCropAlgorithm::GetSnappedVoxelBounds(vtkImageData* 
     for (int axis = 0; axis < 3; ++axis) {
         const int minIndex = static_cast<int>(std::floor(minContinuousIndex[axis] + BoundsEpsilon));
         const int maxIndex = static_cast<int>(std::ceil(maxContinuousIndex[axis] - BoundsEpsilon));
-        ijkBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
-        ijkBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
+        // axis = 0 表示 X 轴  axis = 1 表示 Y 轴  axis = 2 表示 Z 轴
+        ijkBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0)); // min
+        ijkBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0)); // max
     }
 
     return ijkBounds;
@@ -848,7 +855,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
         result.SetMessage(validationMessage);
         return result;
     }
-
+    // 8个ras模型坐标角点转换为六维盒边界，只需要六维盒边界即可表示出来八个角点
     const auto snappedIjkBounds = GetSnappedVoxelBounds(image, cropData);
     const std::size_t totalVoxelCount = GetImageVoxelCount(image);
     std::size_t insideVoxelCount = 0;
