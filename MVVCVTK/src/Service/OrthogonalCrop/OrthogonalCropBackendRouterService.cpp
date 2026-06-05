@@ -19,14 +19,11 @@
 #include <cstddef>
 #include <utility>
 
-void OrthogonalCropBackendRouterService::CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
-{
-    m_imageService.SetInputImage(std::move(image));
-}
-
+// ═══ 输入绑定 ═══
+// Image输入：委托给 plugin service 的 SetInputImage
 void OrthogonalCropBackendRouterService::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
-    CropPreInit_SetInputImage(std::move(image));
+    m_imageService.SetInputImage(std::move(image));
 }
 
 vtkSmartPointer<vtkImageData> OrthogonalCropBackendRouterService::GetInputImage() const
@@ -34,7 +31,8 @@ vtkSmartPointer<vtkImageData> OrthogonalCropBackendRouterService::GetInputImage(
     return m_imageService.GetInputImage();
 }
 
-void OrthogonalCropBackendRouterService::CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
+// PolyData输入：直接存储并清空 clip 缓存
+void OrthogonalCropBackendRouterService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
     m_inputPolyData = std::move(polyData);
     m_cachedPolyDataInput = nullptr;
@@ -42,24 +40,15 @@ void OrthogonalCropBackendRouterService::CropPreInit_SetInputPolyData(vtkSmartPo
     m_hasCachedPolyDataClip = false;
 }
 
-void OrthogonalCropBackendRouterService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    CropPreInit_SetInputPolyData(std::move(polyData));
-}
-
 vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetInputPolyData() const
 {
     return m_inputPolyData;
 }
 
-void OrthogonalCropBackendRouterService::CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_preferredDataSource = dataSource;
-}
-
+// 数据源偏好设置：影响 GetActiveDataSource() 的路由优先级
 void OrthogonalCropBackendRouterService::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
 {
-    CropPreInit_SetPreferredDataSource(dataSource);
+    m_preferredDataSource = dataSource;
 }
 
 OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource() const

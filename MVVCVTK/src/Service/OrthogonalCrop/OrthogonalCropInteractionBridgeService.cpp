@@ -29,14 +29,11 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
         });
 }
 
-void OrthogonalCropInteractionBridgeService::CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image)
-{
-    m_backend.CropPreInit_SetInputImage(std::move(image));
-}
-
+// ═══ 输入转发 ═══
+// 以下接口把输入参数透传给 backend router，bridge 自身不做额外处理
 void OrthogonalCropInteractionBridgeService::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
-    CropPreInit_SetInputImage(std::move(image));
+    m_backend.SetInputImage(std::move(image));
 }
 
 vtkSmartPointer<vtkImageData> OrthogonalCropInteractionBridgeService::GetInputImage() const
@@ -44,14 +41,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropInteractionBridgeService::GetInputIm
     return m_backend.GetInputImage();
 }
 
-void OrthogonalCropInteractionBridgeService::CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    m_backend.CropPreInit_SetInputPolyData(std::move(polyData));
-}
-
 void OrthogonalCropInteractionBridgeService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
-    CropPreInit_SetInputPolyData(std::move(polyData));
+    m_backend.SetInputPolyData(std::move(polyData));
 }
 
 vtkSmartPointer<vtkPolyData> OrthogonalCropInteractionBridgeService::GetInputPolyData() const
@@ -59,14 +51,9 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropInteractionBridgeService::GetInputPol
     return m_backend.GetInputPolyData();
 }
 
-void OrthogonalCropInteractionBridgeService::CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_backend.CropPreInit_SetPreferredDataSource(dataSource);
-}
-
 void OrthogonalCropInteractionBridgeService::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
 {
-    CropPreInit_SetPreferredDataSource(dataSource);
+    m_backend.SetPreferredDataSource(dataSource);
 }
 
 OrthogonalCropDataSource OrthogonalCropInteractionBridgeService::GetActiveDataSource() const
@@ -229,11 +216,6 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     return true;
 }
 
-bool OrthogonalCropInteractionBridgeService::ExecuteDemo()
-{
-    return ActivateInteractiveCrop();
-}
-
 bool OrthogonalCropInteractionBridgeService::DeactivateInteractiveCrop()
 {
     if (!m_cropInteractionEnabled) {
@@ -247,11 +229,6 @@ bool OrthogonalCropInteractionBridgeService::DeactivateInteractiveCrop()
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget deactivated. 3D navigation restored." << std::endl;
     return true;
-}
-
-bool OrthogonalCropInteractionBridgeService::DeactivateDemo()
-{
-    return DeactivateInteractiveCrop();
 }
 
 bool OrthogonalCropInteractionBridgeService::EnsureInputReady()

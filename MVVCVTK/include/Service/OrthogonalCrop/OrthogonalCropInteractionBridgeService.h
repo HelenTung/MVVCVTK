@@ -36,18 +36,15 @@ public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
     OrthogonalCropInteractionBridgeService();
 
-    // 以下一组接口只是把 image 输入转发给 backend router。
-    void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image);
+    // 以下一组接口把 image 输入转发给 backend router。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
     vtkSmartPointer<vtkImageData> GetInputImage() const;
 
-    // 以下一组接口只是把 polydata 输入转发给 backend router。
-    void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
+    // 以下一组接口把 polydata 输入转发给 backend router。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
     vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
 
-    // 设置 / 查询 backend router 的首选数据源。
-    void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource);
+    // 设置 backend router 的首选数据源。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
 
     // 以下查询接口统一透传给 backend router，方便 bridge 作为单一服务暴露给 main。
@@ -93,14 +90,8 @@ public:
     // 激活交互裁切模式，初始化 widget 与默认 bounds。
     bool ActivateInteractiveCrop();
 
-    // 兼容旧调用名的进入裁切模式入口。
-    bool ExecuteDemo();
-
     // 关闭裁切模式并恢复 preview / 主模型状态。
     bool DeactivateInteractiveCrop();
-
-    // 兼容旧调用名的退出入口。
-    bool DeactivateDemo();
 
 private:
     // 一个 preview 目标窗口对应一份 overlay 策略与可能的主模型临时裁切缓存。

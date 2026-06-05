@@ -26,28 +26,19 @@ class vtkTableBasedClipDataSet;
 
 class OrthogonalCropBackendRouterService {
 public:
-    // 预初始化阶段绑定 image 输入，供交互桥或 main 在数据加载后注入。
-    void CropPreInit_SetInputImage(vtkSmartPointer<vtkImageData> image);
-
-    // 对外保留的 image 输入设置接口，行为与 PreInit 版本一致。
+    // 绑定 image 输入，供交互桥或 main 在数据加载后注入。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
 
     // 返回当前 router 绑定的 image 输入。
     vtkSmartPointer<vtkImageData> GetInputImage() const;
 
-    // 预初始化阶段绑定 polydata 输入。
-    void CropPreInit_SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
-
-    // 对外保留的 polydata 输入设置接口。
+    // 绑定 polydata 输入，同时清空 clip 缓存。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
 
     // 返回当前 router 绑定的 polydata 输入。
     vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
 
     // 设置期望优先使用的数据源，Auto 时会按当前可用输入自动回退。
-    void CropPreInit_SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-
-    // 对外保留的首选数据源设置接口。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
 
     // 返回本次请求实际会走到的活跃数据源。
