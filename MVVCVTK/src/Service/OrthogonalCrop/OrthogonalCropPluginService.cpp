@@ -35,7 +35,7 @@ OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
     request.SetExecutionMode(CropExecutionMode::VirtualCrop);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
-    request.SetLocalAlignmentMatrix(GetIdentityMatrixArray());
+    request.SetLocalToInputMatrix(GetIdentityMatrixArray());
     request.SetLocalCenter({ 0.0, 0.0, 0.0 });
 
     if (!m_inputImage) {

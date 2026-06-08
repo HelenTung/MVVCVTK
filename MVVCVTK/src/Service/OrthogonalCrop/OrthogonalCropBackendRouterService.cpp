@@ -101,7 +101,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
     request.SetExecutionMode(CropExecutionMode::VirtualCrop);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
-    request.SetLocalAlignmentMatrix(GetIdentityMatrixArray());
+    request.SetLocalToInputMatrix(GetIdentityMatrixArray());
     request.SetLocalCenter({ 0.0, 0.0, 0.0 });
 
     const auto bounds = GetActiveInputBounds();
@@ -208,11 +208,11 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
                 break;
             }
         }
-		// 最后看看局部对齐矩阵有无变化，16个值逐元素比较，阈值为1e-9，微调也触发重裁切
-        const auto& cachedLocalMatrix = m_cachedPolyDataCropData.GetLocalAlignmentMatrix();
-        const auto& localMatrix = cropData.GetLocalAlignmentMatrix();
-        for (std::size_t index = 0; canReuseCachedClip && index < localMatrix.size(); ++index) {
-            if (std::abs(cachedLocalMatrix[index] - localMatrix[index]) > epsilon) {
+		// 最后看看 localToInputMatrix 有无变化，16个值逐元素比较，阈值为1e-9，微调也触发重裁切
+        const auto& cachedLocalToInputMatrix = m_cachedPolyDataCropData.GetLocalToInputMatrix();
+        const auto& localToInputMatrix = cropData.GetLocalToInputMatrix();
+        for (std::size_t index = 0; canReuseCachedClip && index < localToInputMatrix.size(); ++index) {
+            if (std::abs(cachedLocalToInputMatrix[index] - localToInputMatrix[index]) > epsilon) {
                 canReuseCachedClip = false;
                 break;
             }
@@ -254,7 +254,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
             localCenter[2] + localDimensions[2] * 0.5);
 
         auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
-		modelToLocalTransform->SetMatrix(cropData.GetLocalAlignmentMatrix().data());  // 先设置局部对齐矩阵（localToModel），再求逆得到 modelToLocal
+		modelToLocalTransform->SetMatrix(cropData.GetLocalToInputMatrix().data());  // 先设置 localToInput 矩阵（localToModel），再求逆得到 modelToLocal
         modelToLocalTransform->Inverse(); // 求逆变换 local->model 变换 model->local
         clipFunction->SetTransform(modelToLocalTransform);
     }

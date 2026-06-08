@@ -219,11 +219,11 @@ public:
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
 
-	// 返回局部裁切盒坐标系到后端输入坐标系的对齐矩阵。世界到模型的变换矩阵。
-    const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
+	// 返回局部裁切盒坐标系到后端输入坐标系的变换矩阵。
+    const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
 
     // 写入局部坐标系到后端输入坐标系的变换矩阵。
-    void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
+    void SetLocalToInputMatrix(const CropMatrixDouble16Array& matrix) { m_localToInputMatrix = matrix; }
 
     // 当前是否启用了局部对齐裁切语义。
     bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
@@ -248,8 +248,8 @@ private:
     std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 全局偏移矩阵，用于把后端结果重新对齐回上层共享坐标语义。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
-    // 局部对齐矩阵，用于表达局部裁切参考系到后端输入坐标系的映射。
-    std::array<double, 16> m_localAlignmentMatrix = GetIdentityMatrixArray();
+    // 局部坐标系到后端输入坐标系的变换矩阵。
+    std::array<double, 16> m_localToInputMatrix = GetIdentityMatrixArray();
     // 当前是否启用了局部对齐语义。
     bool m_localAlignmentEnabled = false;
     // 局部对齐坐标系下的中心点。
@@ -389,25 +389,25 @@ public:
     // 写入局部对齐坐标系中的尺寸定义。
     void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
 
-    // 用局部中心点、局部尺寸和对齐矩阵完整定义请求，同时切换到对应 bounds mode。
+    // 用局部中心点、局部尺寸和变换矩阵完整定义请求，同时切换到对应 bounds mode。
     // 交互预览路径里，这个局部坐标系通常直接取 widget 所在的世界坐标系，
-    // localAlignmentMatrix 则提供 world -> model/physical 的折叠关系。
+    // localToInputMatrix 则提供 local/world -> input/model/physical 的折叠关系。
     void SetLocalCenterAndDimensions(
         const std::array<double, 3>& center,
         const std::array<double, 3>& dimensions,
-        const std::array<double, 16>& localAlignmentMatrix)
+        const std::array<double, 16>& localToInputMatrix)
     {
         m_boundsMode = CropBoundsMode::LocalCenterAndDimensions;
         m_localCenter = center;
         m_localDimensions = dimensions;
-        m_localAlignmentMatrix = localAlignmentMatrix;
+        m_localToInputMatrix = localToInputMatrix;
     }
 
-    // 返回局部坐标系到后端输入坐标系的对齐矩阵。
-    const CropMatrixDouble16Array& GetLocalAlignmentMatrix() const { return m_localAlignmentMatrix; }
+    // 返回局部坐标系到后端输入坐标系的变换矩阵。
+    const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
 
-    // 写入局部坐标系到后端输入坐标系的对齐矩阵。
-    void SetLocalAlignmentMatrix(const CropMatrixDouble16Array& matrix) { m_localAlignmentMatrix = matrix; }
+    // 写入局部坐标系到后端输入坐标系的变换矩阵。
+    void SetLocalToInputMatrix(const CropMatrixDouble16Array& matrix) { m_localToInputMatrix = matrix; }
 
     // 返回请求当前携带的全局偏移补偿矩阵。
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
@@ -444,8 +444,8 @@ private:
     std::array<double, 3> m_localCenter = { 0.0, 0.0, 0.0 };
     // 局部对齐坐标系中的尺寸；会先和局部中心一起生成局部盒子，再映射回后端输入坐标系。
     std::array<double, 3> m_localDimensions = { 0.0, 0.0, 0.0 };
-    // 局部坐标系到后端输入坐标系的对齐矩阵；用于表达旋转后的局部裁切框。
-    std::array<double, 16> m_localAlignmentMatrix = GetIdentityMatrixArray();
+    // 局部坐标系到后端输入坐标系的变换矩阵；用于表达旋转后的局部裁切框。
+    std::array<double, 16> m_localToInputMatrix = GetIdentityMatrixArray();
     // 输入数据当前附带的全局偏移补偿矩阵；物理裁切后会继续累加新的 origin 偏移。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
     // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。

@@ -386,7 +386,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     // ── 分支 ②：Widget 世界 box → LocalCenterAndDimensions 编码 ──
     // center = widget 世界坐标盒中心
     // dimensions = widget 世界坐标盒尺寸
-    // localAlignmentMatrix = GetWorldToModelMatrix()（参考渲染服务 modelMatrix 的逆）
+    // localToInputMatrix = GetWorldToModelMatrix()（参考渲染服务 modelMatrix 的逆）
     // 下游 Algorithm 收到后用 world→model 矩阵还原到后端输入坐标系
     previewRequest.SetLocalCenterAndDimensions(
         {

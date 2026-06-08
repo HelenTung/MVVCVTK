@@ -81,15 +81,15 @@ bool GetBoundsContained(const std::array<double, 6>& inputBounds, const std::arr
 std::array<double, 6> GetRasBoundsFromLocalDefinition(
     const std::array<double, 3>& localCenter,
     const std::array<double, 3>& localDimensions,
-    const std::array<double, 16>& localAlignmentMatrix)
+    const std::array<double, 16>& localToInputMatrix)
 {
     // LocalCenterAndDimensions 的几何还原流程：
     // 1. 先在局部裁切参考系里恢复盒子的 8 个角点
-    // 2. 再用 localAlignmentMatrix 把这些角点送到后端输入坐标系
+    // 2. 再用 localToInputMatrix 把这些角点送到后端输入坐标系
     // 3. 最后回收成输入空间轴对齐 bounds，供统一校验、吸附和统计复用
     // 交互预览路径里，这里的局部参考系通常就是 widget 所在的世界坐标系。
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(localAlignmentMatrix.data());
+    transform->SetMatrix(localToInputMatrix.data());
 
     vtkBoundingBox rasBounds;
     for (int sx = -1; sx <= 1; sx += 2) {
@@ -302,11 +302,11 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         return maskImage;
     }
 
-    auto modelToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    auto localToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    const auto& localAlignmentMatrix = cropData.GetLocalAlignmentMatrix();
-    localToModelMatrix->DeepCopy(localAlignmentMatrix.data());
-    vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
+    auto inputToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    const auto& localToInputMatrixData = cropData.GetLocalToInputMatrix();
+    localToInputMatrix->DeepCopy(localToInputMatrixData.data());
+    vtkMatrix4x4::Invert(localToInputMatrix, inputToLocalMatrix);
 
     const auto localCenter = cropData.GetLocalCenter();
     const auto localDimensions = cropData.GetLocalDimensions();
@@ -331,18 +331,18 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         0.0
     };
     double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-    modelToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
+    inputToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
 
     for (int k = minK; k <= maxK; ++k) {
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
             double modelPoint[3] = { 0.0, 0.0, 0.0 };
             // 每一行先把 row 起点 index 转到输入 physical 空间，
-            // 再整体乘 modelToLocal；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
+            // 再整体乘 inputToLocal；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
             image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
             const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
             double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-            modelToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
+            inputToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
             
             for (int i = minI; i <= maxI; ++i) {
 				const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0; // 除以齐次坐标的 w 分量，得到局部空间的实际坐标。这里加了一个小阈值避免除以零的情况。
@@ -429,7 +429,7 @@ vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cro
 {
     if (cropData.GetLocalAlignmentEnabled()) {
         // local-aligned 路径的结果语义是“局部盒真实姿态的轮廓”。
-        // 因此先在局部坐标系里生成轴对齐 cube，再乘 localAlignmentMatrix 回到后端输入坐标系。
+        // 因此先在局部坐标系里生成轴对齐 cube，再乘 localToInputMatrix 回到后端输入坐标系。
         const auto center = cropData.GetLocalCenter();
         const auto dimensions = cropData.GetLocalDimensions();
 
@@ -443,7 +443,7 @@ vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cro
             center[2] + dimensions[2] * 0.5);
         cube->Update();
 
-        auto transform = GetArrayTransform(cropData.GetLocalAlignmentMatrix());
+        auto transform = GetArrayTransform(cropData.GetLocalToInputMatrix());
         auto transformFilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
         transformFilter->SetInputConnection(cube->GetOutputPort());
         transformFilter->SetTransform(transform);
@@ -539,7 +539,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     // 若启用 local-aligned，则额外保留局部盒参数与 local->input 的对齐矩阵。
     cropData = CropDataModel();
     cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
-    cropData.SetLocalAlignmentMatrix(request.GetLocalAlignmentMatrix());
+    cropData.SetLocalToInputMatrix(request.GetLocalToInputMatrix());
 
     switch (request.GetBoundsMode()) {
     case CropBoundsMode::InputVolumeBounds:
@@ -569,7 +569,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
         cropData.SetRasBounds(GetRasBoundsFromLocalDefinition(
             request.GetLocalCenter(),
             request.GetLocalDimensions(),
-            request.GetLocalAlignmentMatrix()));
+            request.GetLocalToInputMatrix()));
         break;
     }
 
@@ -702,11 +702,11 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
             insideVoxelCount = 0;
         }
         else {
-            auto modelToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            auto localToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            const auto& localAlignmentMatrix = cropData.GetLocalAlignmentMatrix();
-            localToModelMatrix->DeepCopy(localAlignmentMatrix.data());
-            vtkMatrix4x4::Invert(localToModelMatrix, modelToLocalMatrix);
+            auto inputToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            const auto& localToInputMatrixData = cropData.GetLocalToInputMatrix();
+            localToInputMatrix->DeepCopy(localToInputMatrixData.data());
+            vtkMatrix4x4::Invert(localToInputMatrix, inputToLocalMatrix);
 
             const auto localCenter = cropData.GetLocalCenter();
             const auto localDimensions = cropData.GetLocalDimensions();
@@ -725,7 +725,7 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
                 0.0
             };
             double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-            modelToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
+            inputToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
 
             for (int k = minK; k <= maxK; ++k) {
                 for (int j = minJ; j <= maxJ; ++j) {
@@ -734,7 +734,7 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
                     image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
                     const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
                     double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-                    modelToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
+                    inputToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
 
                     for (int i = minI; i <= maxI; ++i) {
                         const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0;
