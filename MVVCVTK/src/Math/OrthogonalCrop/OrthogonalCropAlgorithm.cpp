@@ -286,6 +286,7 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
             const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
             for (int k = minK; k <= maxK; ++k) {
                 for (int j = minJ; j <= maxJ; ++j) {
+					// z = index_z * y *x + index_y * x + index_x 刚好是mini+width 批量填充的线性地址计算方式，直接 memset 整行。
                     const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
                         + static_cast<vtkIdType>(j) * rowStride
                         + minI;
@@ -342,13 +343,13 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
             const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
             double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
             modelToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
-
+            
             for (int i = minI; i <= maxI; ++i) {
-                const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0;
+				const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0; // 除以齐次坐标的 w 分量，得到局部空间的实际坐标。这里加了一个小阈值避免除以零的情况。
                 const double localX = localPointRaw[0] * invW;
                 const double localY = localPointRaw[1] * invW;
-                const double localZ = localPointRaw[2] * invW;
-                const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
+                const double localZ = localPointRaw[2] * invW; 
+                const bool isInside = localX >= localCenter[0] - localHalfDimensions[0] // 判断是否越界
                     && localX <= localCenter[0] + localHalfDimensions[0]
                     && localY >= localCenter[1] - localHalfDimensions[1]
                     && localY <= localCenter[1] + localHalfDimensions[1]
@@ -364,7 +365,7 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
                         : static_cast<vtkIdType>(k) * sliceStride
                             + static_cast<vtkIdType>(j) * rowStride
                             + i;
-                    maskPtr[linearIndex] = insideValue;
+                    maskPtr[linearIndex] = insideValue; // 初始化
                 }
 
                 localPointRaw[0] += localStepRaw[0];
