@@ -180,11 +180,11 @@ public:
     }
 
     // ── 模型变换矩阵 ──────────────────────────────────────────────
-    void SetModelMatrix(const std::array<double, 16>& mat) {
+    void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix) {
         bool changed = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetArray(m_modelMatrix, mat, 1e-9);
+            changed = AppStateCommands::SetArray(m_modelMatrix, modelToWorldMatrix, 1e-9);
         }
         if (changed) SetFlagsPublished(UpdateFlags::Transform);
     }

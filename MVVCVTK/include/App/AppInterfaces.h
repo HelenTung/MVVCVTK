@@ -57,8 +57,8 @@ public:
     virtual bool SetPendingImageConsumed() {
         return false;
     }
-    virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix) { return false; }
-    virtual bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& transformMatrix) { return false; }
+    virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
     virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 };
 
@@ -231,7 +231,7 @@ public:
     virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
-    virtual void SetModelMatrixSynced(vtkMatrix4x4* mat) {}
+    virtual void SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix) {}
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }

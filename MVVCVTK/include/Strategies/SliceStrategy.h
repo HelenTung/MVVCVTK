@@ -35,7 +35,7 @@ private:
     //  bounds    — 数据在局部空间的包围盒 [xMin,xMax, yMin,yMax, zMin,zMax]
     //  origin    — 数据原点
     //  spacing   — 数据间距
-    //  mat       — 当前模型矩阵 M（局部→世界）
+    //  modelToWorldMatrix — 当前模型矩阵 M（局部→世界）
     //  safeOffset— 沿法线微量偏移，防穿模闪烁
     void SetCrosshair(const double focusWorld[3],
         const double worldBounds[6],

@@ -95,14 +95,14 @@ std::array<double, 6> GetRasBoundsFromLocalDefinition(
     for (int sx = -1; sx <= 1; sx += 2) {
         for (int sy = -1; sy <= 1; sy += 2) {
             for (int sz = -1; sz <= 1; sz += 2) {
-                const double localPoint[3] = {
+                const double localToInputPoint[3] = {
                     localCenter[0] + sx * localDimensions[0] * 0.5,
                     localCenter[1] + sy * localDimensions[1] * 0.5,
                     localCenter[2] + sz * localDimensions[2] * 0.5
                 };
-                double rasPoint[3] = { 0.0, 0.0, 0.0 };
-                transform->TransformPoint(localPoint, rasPoint);
-                rasBounds.AddPoint(rasPoint);
+                double inputPoint[3] = { 0.0, 0.0, 0.0 };
+                transform->TransformPoint(localToInputPoint, inputPoint);
+                rasBounds.AddPoint(inputPoint);
             }
         }
     }
@@ -137,17 +137,17 @@ vtkSmartPointer<vtkTransform> GetArrayTransform(const std::array<double, 16>& ma
 }
 
 std::array<double, 16> GetUpdatedOffsetMatrix(
-    const std::array<double, 16>& currentMatrix,
+    const std::array<double, 16>& sourceToTargetMatrixData,
     const std::array<double, 3>& translation)
 {
     // physical crop 会改变 derived image 的 origin，
     // 这里把这次位移继续累加进 offset matrix，保证上层共享坐标语义保持连续。
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(currentMatrix.data());
+    auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    sourceToTargetMatrix->DeepCopy(sourceToTargetMatrixData.data());
 
     auto transform = vtkSmartPointer<vtkTransform>::New();
     transform->PostMultiply();
-    transform->SetMatrix(matrix);
+    transform->SetMatrix(sourceToTargetMatrix);
     transform->Translate(translation[0], translation[1], translation[2]);
 
     return GetMatrixArray(transform->GetMatrix());
@@ -324,31 +324,31 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         ? static_cast<vtkIdType>(width) * height
         : static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-    const double modelStepI[4] = {
+    const double inputToLocalStepVector[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
         indexToPhysicalMatrix->GetElement(2, 0),
         0.0
     };
-    double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-    inputToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
+    double inputToLocalStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+    inputToLocalMatrix->MultiplyPoint(inputToLocalStepVector, inputToLocalStepResult);
 
     for (int k = minK; k <= maxK; ++k) {
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
-            double modelPoint[3] = { 0.0, 0.0, 0.0 };
+            double inputPoint[3] = { 0.0, 0.0, 0.0 };
             // 每一行先把 row 起点 index 转到输入 physical 空间，
             // 再整体乘 inputToLocal；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
-            image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
-            const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
-            double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-            inputToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
+            image->TransformIndexToPhysicalPoint(rowStartIndex, inputPoint);
+            const double inputToLocalInputPoint[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
+            double inputToLocalOutputPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
+            inputToLocalMatrix->MultiplyPoint(inputToLocalInputPoint, inputToLocalOutputPoint);
             
             for (int i = minI; i <= maxI; ++i) {
-				const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0; // 除以齐次坐标的 w 分量，得到局部空间的实际坐标。这里加了一个小阈值避免除以零的情况。
-                const double localX = localPointRaw[0] * invW;
-                const double localY = localPointRaw[1] * invW;
-                const double localZ = localPointRaw[2] * invW; 
+				const double invW = std::abs(inputToLocalOutputPoint[3]) > 1e-12 ? 1.0 / inputToLocalOutputPoint[3] : 1.0; // 除以齐次坐标的 w 分量，得到局部空间的实际坐标。这里加了一个小阈值避免除以零的情况。
+                const double localX = inputToLocalOutputPoint[0] * invW;
+                const double localY = inputToLocalOutputPoint[1] * invW;
+                const double localZ = inputToLocalOutputPoint[2] * invW; 
                 const bool isInside = localX >= localCenter[0] - localHalfDimensions[0] // 判断是否越界
                     && localX <= localCenter[0] + localHalfDimensions[0]
                     && localY >= localCenter[1] - localHalfDimensions[1]
@@ -368,10 +368,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
                     maskPtr[linearIndex] = insideValue; // 初始化
                 }
 
-                localPointRaw[0] += localStepRaw[0];
-                localPointRaw[1] += localStepRaw[1];
-                localPointRaw[2] += localStepRaw[2];
-                localPointRaw[3] += localStepRaw[3];
+                inputToLocalOutputPoint[0] += inputToLocalStepResult[0];
+                inputToLocalOutputPoint[1] += inputToLocalStepResult[1];
+                inputToLocalOutputPoint[2] += inputToLocalStepResult[2];
+                inputToLocalOutputPoint[3] += inputToLocalStepResult[3];
             }
         }
     }
@@ -718,29 +718,29 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
 
             insideVoxelCount = 0;
             auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-            const double modelStepI[4] = {
+            const double inputToLocalStepVector[4] = {
                 indexToPhysicalMatrix->GetElement(0, 0),
                 indexToPhysicalMatrix->GetElement(1, 0),
                 indexToPhysicalMatrix->GetElement(2, 0),
                 0.0
             };
-            double localStepRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-            inputToLocalMatrix->MultiplyPoint(modelStepI, localStepRaw);
+            double inputToLocalStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+            inputToLocalMatrix->MultiplyPoint(inputToLocalStepVector, inputToLocalStepResult);
 
             for (int k = minK; k <= maxK; ++k) {
                 for (int j = minJ; j <= maxJ; ++j) {
                     const int rowStartIndex[3] = { minI, j, k };
-                    double modelPoint[3] = { 0.0, 0.0, 0.0 };
-                    image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
-                    const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
-                    double localPointRaw[4] = { 0.0, 0.0, 0.0, 0.0 };
-                    inputToLocalMatrix->MultiplyPoint(modelPoint4, localPointRaw);
+                    double inputPoint[3] = { 0.0, 0.0, 0.0 };
+                    image->TransformIndexToPhysicalPoint(rowStartIndex, inputPoint);
+                    const double inputToLocalInputPoint[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
+                    double inputToLocalOutputPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
+                    inputToLocalMatrix->MultiplyPoint(inputToLocalInputPoint, inputToLocalOutputPoint);
 
                     for (int i = minI; i <= maxI; ++i) {
-                        const double invW = std::abs(localPointRaw[3]) > 1e-12 ? 1.0 / localPointRaw[3] : 1.0;
-                        const double localX = localPointRaw[0] * invW;
-                        const double localY = localPointRaw[1] * invW;
-                        const double localZ = localPointRaw[2] * invW;
+                        const double invW = std::abs(inputToLocalOutputPoint[3]) > 1e-12 ? 1.0 / inputToLocalOutputPoint[3] : 1.0;
+                        const double localX = inputToLocalOutputPoint[0] * invW;
+                        const double localY = inputToLocalOutputPoint[1] * invW;
+                        const double localZ = inputToLocalOutputPoint[2] * invW;
                         const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
                             && localX <= localCenter[0] + localHalfDimensions[0]
                             && localY >= localCenter[1] - localHalfDimensions[1]
@@ -752,10 +752,10 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
                             ++insideVoxelCount;
                         }
 
-                        localPointRaw[0] += localStepRaw[0];
-                        localPointRaw[1] += localStepRaw[1];
-                        localPointRaw[2] += localStepRaw[2];
-                        localPointRaw[3] += localStepRaw[3];
+                        inputToLocalOutputPoint[0] += inputToLocalStepResult[0];
+                        inputToLocalOutputPoint[1] += inputToLocalStepResult[1];
+                        inputToLocalOutputPoint[2] += inputToLocalStepResult[2];
+                        inputToLocalOutputPoint[3] += inputToLocalStepResult[3];
                     }
                 }
             }

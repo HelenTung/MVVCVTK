@@ -8,8 +8,8 @@
 void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const {
     // 与 SliceStrategy 一样，把局部包围盒角点映射到世界空间，
     // 这样参考平面在模型旋转后依旧沿当前世界包围盒正确铺开。
-    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-    mat->DeepCopy(modelMatrix.data());
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(modelMatrix.data());
 
     worldBounds[0] = worldBounds[2] = worldBounds[4] = std::numeric_limits<double>::max();
     worldBounds[1] = worldBounds[3] = worldBounds[5] = std::numeric_limits<double>::lowest();
@@ -17,19 +17,19 @@ void ColoredPlanesStrategy::SetWorldBounds(const std::array<double, 16>& modelMa
     for (int ix = 0; ix < 2; ++ix) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int iz = 0; iz < 2; ++iz) {
-                double localPoint[4] = {
+                double modelToWorldInputPoint[4] = {
                     ix == 0 ? m_bounds[0] : m_bounds[1],
                     iy == 0 ? m_bounds[2] : m_bounds[3],
                     iz == 0 ? m_bounds[4] : m_bounds[5],
                     1.0
                 };
-                double worldPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
-                mat->MultiplyPoint(localPoint, worldPoint);
+                double modelToWorldOutputPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+                modelToWorldMatrix->MultiplyPoint(modelToWorldInputPoint, modelToWorldOutputPoint);
 
-                const double invW = std::abs(worldPoint[3]) > 1e-12 ? 1.0 / worldPoint[3] : 1.0;
-                const double x = worldPoint[0] * invW;
-                const double y = worldPoint[1] * invW;
-                const double z = worldPoint[2] * invW;
+                const double invW = std::abs(modelToWorldOutputPoint[3]) > 1e-12 ? 1.0 / modelToWorldOutputPoint[3] : 1.0;
+                const double x = modelToWorldOutputPoint[0] * invW;
+                const double y = modelToWorldOutputPoint[1] * invW;
+                const double z = modelToWorldOutputPoint[2] * invW;
 
                 worldBounds[0] = std::min(worldBounds[0], x);
                 worldBounds[1] = std::max(worldBounds[1], x);

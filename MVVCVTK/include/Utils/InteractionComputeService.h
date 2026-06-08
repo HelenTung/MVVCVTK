@@ -19,7 +19,7 @@ struct SliceExportData {
 class InteractionComputeService {
 public:
     static vtkSmartPointer<vtkMatrix4x4> GetModelMatrix(
-        vtkMatrix4x4* currentMatrix,
+        vtkMatrix4x4* modelToWorldMatrix,
         const double translate[3],
         const double rotate[3],
         const double scale[3])
@@ -27,8 +27,8 @@ public:
         auto transform = vtkSmartPointer<vtkTransform>::New();
         transform->PostMultiply();
 
-        if (currentMatrix) {
-            transform->SetMatrix(currentMatrix);
+        if (modelToWorldMatrix) {
+            transform->SetMatrix(modelToWorldMatrix);
         }
 
         const double sx = (scale[0] == 0.0) ? 1.0 : scale[0];
@@ -40,25 +40,25 @@ public:
         transform->RotateZ(rotate[2]);
         transform->Translate(translate[0], translate[1], translate[2]);
 
-        auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        matrix->DeepCopy(transform->GetMatrix());
-        return matrix;
+        auto updatedModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        updatedModelToWorldMatrix->DeepCopy(transform->GetMatrix());
+        return updatedModelToWorldMatrix;
     }
 
     static void GetModelPositionFromWorld(
-        vtkMatrix4x4* inverseMatrix,
+        vtkMatrix4x4* worldToModelMatrix,
         const double worldPos[3],
         double modelPos[3])
     {
-        if (!inverseMatrix) return;
+        if (!worldToModelMatrix) return;
 
-        double inPos[4] = { worldPos[0], worldPos[1], worldPos[2], 1.0 };
-        double outPos[4] = { 0, 0, 0, 1 };
-        inverseMatrix->MultiplyPoint(inPos, outPos);
-        if (outPos[3] != 0.0) {
-            modelPos[0] = outPos[0] / outPos[3];
-            modelPos[1] = outPos[1] / outPos[3];
-            modelPos[2] = outPos[2] / outPos[3];
+        double worldToModelInputPoint[4] = { worldPos[0], worldPos[1], worldPos[2], 1.0 };
+        double worldToModelOutputPoint[4] = { 0, 0, 0, 1 };
+        worldToModelMatrix->MultiplyPoint(worldToModelInputPoint, worldToModelOutputPoint);
+        if (worldToModelOutputPoint[3] != 0.0) {
+            modelPos[0] = worldToModelOutputPoint[0] / worldToModelOutputPoint[3];
+            modelPos[1] = worldToModelOutputPoint[1] / worldToModelOutputPoint[3];
+            modelPos[2] = worldToModelOutputPoint[2] / worldToModelOutputPoint[3];
         }
     }
 
@@ -69,13 +69,13 @@ public:
     {
         if (!modelMatrix) return;
 
-        double inPos[4] = { modelPos[0], modelPos[1], modelPos[2], 1.0 };
-        double outPos[4] = { 0, 0, 0, 1 };
-        modelMatrix->MultiplyPoint(inPos, outPos);
-        if (outPos[3] != 0.0) {
-            worldPos[0] = outPos[0] / outPos[3];
-            worldPos[1] = outPos[1] / outPos[3];
-            worldPos[2] = outPos[2] / outPos[3];
+        double modelToWorldInputPoint[4] = { modelPos[0], modelPos[1], modelPos[2], 1.0 };
+        double modelToWorldOutputPoint[4] = { 0, 0, 0, 1 };
+        modelMatrix->MultiplyPoint(modelToWorldInputPoint, modelToWorldOutputPoint);
+        if (modelToWorldOutputPoint[3] != 0.0) {
+            worldPos[0] = modelToWorldOutputPoint[0] / modelToWorldOutputPoint[3];
+            worldPos[1] = modelToWorldOutputPoint[1] / modelToWorldOutputPoint[3];
+            worldPos[2] = modelToWorldOutputPoint[2] / modelToWorldOutputPoint[3];
         }
     }
 
@@ -109,17 +109,17 @@ public:
     }
 
     static SliceExportData GetSliceExportData(
-        const std::array<double, 16>& currentMatrix,
+        const std::array<double, 16>& modelToWorldMatrixData,
         VizMode mode,
         const std::array<double, 3>& cursorWorld,
         double angle)
     {
         SliceExportData exportData;
-        auto baseMatrix = vtkSmartPointer<vtkMatrix4x4>::New(   );
+        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
         auto transform = vtkSmartPointer<vtkTransform>::New();
-        baseMatrix->DeepCopy(currentMatrix.data());
+        modelToWorldMatrix->DeepCopy(modelToWorldMatrixData.data());
         transform->PostMultiply();
-        transform->SetMatrix(baseMatrix);
+        transform->SetMatrix(modelToWorldMatrix);
 
 		double camNormal[3] = { 0.0, 0.0, 0.0 }; // 默认切片法线朝向，后续会被旋转到正确位置
         //vtkTransform::Concatenate 把一个新变换矩阵 A 拼接到当前变换 M 上

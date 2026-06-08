@@ -313,14 +313,14 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetTransformedBoun
         return sourceBounds;
     }
 
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+    auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    sourceToTargetMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
     if (!modelToWorld) {
-        matrix->Invert();
+        sourceToTargetMatrix->Invert();
     }
 
-    auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(matrix);
+    auto sourceToTargetTransform = vtkSmartPointer<vtkTransform>::New();
+    sourceToTargetTransform->SetMatrix(sourceToTargetMatrix);
 
     vtkBoundingBox transformedBounds;
     for (int ix = 0; ix < 2; ++ix) {
@@ -331,9 +331,9 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetTransformedBoun
                     sourceBounds[iy == 0 ? 2 : 3],
                     sourceBounds[iz == 0 ? 4 : 5]
                 };
-                double transformedPoint[3] = { 0.0, 0.0, 0.0 };
-                transform->TransformPoint(corner, transformedPoint);
-                transformedBounds.AddPoint(transformedPoint);
+                double sourceToTargetPoint[3] = { 0.0, 0.0, 0.0 };
+                sourceToTargetTransform->TransformPoint(corner, sourceToTargetPoint);
+                transformedBounds.AddPoint(sourceToTargetPoint);
             }
         }
     }
@@ -367,12 +367,12 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
     // 否则 widget 盒和后端输入会落在两个不同坐标系里。
     // 对 image 路径，这里的 model 实际就是 vtkImageData 的 physical 空间；
     // 对 polydata 路径，则是主模型自己的输入坐标系。
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-    matrix->Invert();
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+    worldToModelMatrix->Invert();
 
     std::array<double, 16> matrixData = { 0.0 };
-    vtkMatrix4x4::DeepCopy(matrixData.data(), matrix);
+    vtkMatrix4x4::DeepCopy(matrixData.data(), worldToModelMatrix);
     return matrixData;
 }
 
@@ -584,11 +584,11 @@ vtkSmartPointer<vtkPlanes> OrthogonalCropInteractionBridgeService::GetCurrentWid
     if (m_referenceRenderService) {
         // vtkPlanes 内部 transform 会在求值时把模型点带到 widget 世界空间，
         // 这样 3D 主模型 polydata clip 可以直接使用模型坐标输入。
-        auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        matrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
 
         auto modelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-        modelToWorldTransform->SetMatrix(matrix);
+        modelToWorldTransform->SetMatrix(modelToWorldMatrix);
         worldPlanes->SetTransform(modelToWorldTransform);
     }
 

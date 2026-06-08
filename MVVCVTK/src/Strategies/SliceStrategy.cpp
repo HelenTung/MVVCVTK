@@ -15,8 +15,8 @@ void SliceStrategy::SetWorldBounds(const double bounds[6],
 {
     // 把局部轴对齐包围盒的 8 个顶点全部变换到世界空间，
     // 重新求 min/max，避免模型旋转后仍沿用旧的局部 bounds。
-    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-    mat->DeepCopy(modelMatrix.data());
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(modelMatrix.data());
 
     worldBounds[0] = worldBounds[2] = worldBounds[4] = std::numeric_limits<double>::max();
     worldBounds[1] = worldBounds[3] = worldBounds[5] = std::numeric_limits<double>::lowest();
@@ -24,19 +24,19 @@ void SliceStrategy::SetWorldBounds(const double bounds[6],
     for (int ix = 0; ix < 2; ++ix) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int iz = 0; iz < 2; ++iz) {
-                double localPoint[4] = {
+                double modelToWorldInputPoint[4] = {
                     ix == 0 ? bounds[0] : bounds[1],
                     iy == 0 ? bounds[2] : bounds[3],
                     iz == 0 ? bounds[4] : bounds[5],
                     1.0
                 };
-                double worldPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
-                mat->MultiplyPoint(localPoint, worldPoint);
+                double modelToWorldOutputPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+                modelToWorldMatrix->MultiplyPoint(modelToWorldInputPoint, modelToWorldOutputPoint);
 
-                const double invW = std::abs(worldPoint[3]) > 1e-12 ? 1.0 / worldPoint[3] : 1.0;
-                const double x = worldPoint[0] * invW;
-                const double y = worldPoint[1] * invW;
-                const double z = worldPoint[2] * invW;
+                const double invW = std::abs(modelToWorldOutputPoint[3]) > 1e-12 ? 1.0 / modelToWorldOutputPoint[3] : 1.0;
+                const double x = modelToWorldOutputPoint[0] * invW;
+                const double y = modelToWorldOutputPoint[1] * invW;
+                const double z = modelToWorldOutputPoint[2] * invW;
 
                 worldBounds[0] = std::min(worldBounds[0], x);
                 worldBounds[1] = std::max(worldBounds[1], x);
@@ -57,23 +57,23 @@ void SliceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix,
     // 切片模式下也沿用“保持相机相对偏移、只更新焦点中心”的策略，
     // 这样模型旋转或重置后，用户视角不会突然改变观察距离。
 
-    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-    mat->DeepCopy(modelMatrix.data());
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(modelMatrix.data());
 
-    double modelCenter[4] = {
+    double modelToWorldInputCenter[4] = {
         (bounds[0] + bounds[1]) * 0.5,
         (bounds[2] + bounds[3]) * 0.5,
         (bounds[4] + bounds[5]) * 0.5,
         1.0
     };
-    double worldCenter4[4] = { 0.0, 0.0, 0.0, 1.0 };
-    mat->MultiplyPoint(modelCenter, worldCenter4);
+    double modelToWorldOutputCenter[4] = { 0.0, 0.0, 0.0, 1.0 };
+    modelToWorldMatrix->MultiplyPoint(modelToWorldInputCenter, modelToWorldOutputCenter);
 
-    const double invW = std::abs(worldCenter4[3]) > 1e-12 ? 1.0 / worldCenter4[3] : 1.0;
+    const double invW = std::abs(modelToWorldOutputCenter[3]) > 1e-12 ? 1.0 / modelToWorldOutputCenter[3] : 1.0;
     double worldCenter[3] = {
-        worldCenter4[0] * invW,
-        worldCenter4[1] * invW,
-        worldCenter4[2] * invW
+        modelToWorldOutputCenter[0] * invW,
+        modelToWorldOutputCenter[1] * invW,
+        modelToWorldOutputCenter[2] * invW
     };
 
     vtkCamera* cam = m_renderer->GetActiveCamera();
@@ -290,9 +290,9 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         SetWorldBounds(bounds, params.modelMatrix, worldBounds);
 
         if (HasFlag(flags, UpdateFlags::Transform)) {
-            auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-            mat->DeepCopy(params.modelMatrix.data());
-            if (m_slice)      m_slice->SetUserMatrix(mat);
+            auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
+            if (m_slice)      m_slice->SetUserMatrix(modelToWorldMatrix);
             if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
             if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
         }

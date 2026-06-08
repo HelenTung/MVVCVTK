@@ -219,20 +219,20 @@ void OrthogonalCropPreviewOverlayStrategy::ApplyRemovalVisualStyle()
     m_maskLut->Build();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& matrixData)
+void OrthogonalCropPreviewOverlayStrategy::SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData)
 {
     if (!prop) {
         return;
     }
 
-    auto matrix = prop->GetUserMatrix();
-    if (!matrix) {
+    auto userMatrix = prop->GetUserMatrix();
+    if (!userMatrix) {
         // 首次赋值时为 prop 建一份 user matrix，后续只做 in-place 覆盖，避免重复分配。
-        auto nextMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        nextMatrix->DeepCopy(matrixData.data());
-        prop->SetUserMatrix(nextMatrix);
+        auto nextUserMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        nextUserMatrix->DeepCopy(modelToWorldMatrixData.data());
+        prop->SetUserMatrix(nextUserMatrix);
         return;
     }
 
-    matrix->DeepCopy(matrixData.data());
+    userMatrix->DeepCopy(modelToWorldMatrixData.data());
 }

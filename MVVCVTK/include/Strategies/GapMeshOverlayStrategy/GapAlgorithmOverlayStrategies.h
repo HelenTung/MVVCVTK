@@ -103,9 +103,9 @@ public:
     void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
         // 自动跟随主视图的切片滚动和模型变换
         if (HasFlag(flags, UpdateFlags::Transform) || HasFlag(flags, UpdateFlags::Cursor)) {
-            auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-            mat->DeepCopy(params.modelMatrix.data());
-            m_slice->SetUserMatrix(mat);
+            auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
+            m_slice->SetUserMatrix(modelToWorldMatrix);
 
             auto plane = m_mapper->GetSlicePlane();
             if (plane) {

@@ -46,16 +46,16 @@ void MultiSliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 }
 
 void MultiSliceStrategy::SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix) {
-    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-    mat->DeepCopy(modelMatrix.data());
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(modelMatrix.data());
 
-    auto inv = vtkSmartPointer<vtkTransform>::New();
-    inv->SetMatrix(mat);
-    inv->Inverse();
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(modelToWorldMatrix);
+    worldToModelTransform->Inverse();
 
-    double cursorWorld4[4] = { cursorWorld[0], cursorWorld[1], cursorWorld[2], 1.0 };
-    double cursorModel4[4] = { 0.0, 0.0, 0.0, 1.0 };
-    inv->MultiplyPoint(cursorWorld4, cursorModel4);
+    double worldToModelInputPoint[4] = { cursorWorld[0], cursorWorld[1], cursorWorld[2], 1.0 };
+    double worldToModelOutputPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+    worldToModelTransform->MultiplyPoint(worldToModelInputPoint, worldToModelOutputPoint);
 
     for (int i = 0; i < 3; i++) {
         auto plane = m_mappers[i]->GetSlicePlane();
@@ -68,9 +68,9 @@ void MultiSliceStrategy::SetAllPositions(const double cursorWorld[3], const std:
         double bounds[6];
         input->GetBounds(bounds);
 
-        planeOrigin[0] = std::max(bounds[0], std::min(cursorModel4[0], bounds[1]));
-        planeOrigin[1] = std::max(bounds[2], std::min(cursorModel4[1], bounds[3]));
-        planeOrigin[2] = std::max(bounds[4], std::min(cursorModel4[2], bounds[5]));
+        planeOrigin[0] = std::max(bounds[0], std::min(worldToModelOutputPoint[0], bounds[1]));
+        planeOrigin[1] = std::max(bounds[2], std::min(worldToModelOutputPoint[1], bounds[3]));
+        planeOrigin[2] = std::max(bounds[4], std::min(worldToModelOutputPoint[2], bounds[5]));
         plane->SetOrigin(planeOrigin);
     }
 }

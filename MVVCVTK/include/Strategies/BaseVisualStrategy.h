@@ -36,22 +36,22 @@ public:
 	}
 
 protected:
-    void Set3DPropsTransform(const std::array<double, 16>& matrixData) {
+    void Set3DPropsTransform(const std::array<double, 16>& modelToWorldMatrixData) {
 		// 对策略拥有的 3D prop 批量下发同一份模型矩阵，
 		// 保证 actor、axes 等附属对象始终跟随同一个世界变换。
         for (auto prop : m_managedProps) {
             auto prop3D = vtkProp3D::SafeDownCast(prop);
           if (!prop3D) continue; // 仅对 3D prop 应用模型矩阵，跳过文本等 2D prop
-			auto matrix = prop3D->GetUserMatrix();
-            if (!matrix)
+			auto userMatrix = prop3D->GetUserMatrix();
+            if (!userMatrix)
             {
-                vtkSmartPointer<vtkMatrix4x4> mat = vtkSmartPointer<vtkMatrix4x4>::New();
-				mat->DeepCopy(matrixData.data());
-				prop3D->SetUserMatrix(mat);
+                vtkSmartPointer<vtkMatrix4x4> modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+				modelToWorldMatrix->DeepCopy(modelToWorldMatrixData.data());
+				prop3D->SetUserMatrix(modelToWorldMatrix);
             }
             else
             {
-                matrix->DeepCopy(matrixData.data());
+                userMatrix->DeepCopy(modelToWorldMatrixData.data());
             }
 		}
     }

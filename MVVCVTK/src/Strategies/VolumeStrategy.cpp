@@ -20,18 +20,18 @@ void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
     // 体对象经过模型矩阵变换后，保持相机到焦点的相对偏移不变，
     // 只把焦点整体搬到新的世界中心，避免用户视角在 Transform 后突然跳变。
 
-    auto mat = vtkSmartPointer<vtkMatrix4x4>::New();
-    mat->DeepCopy(modelMatrix.data());
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(modelMatrix.data());
 
-    double modelCenter[4] = { m_dataCenter[0], m_dataCenter[1], m_dataCenter[2], 1.0 };
-    double worldCenter4[4] = { 0.0, 0.0, 0.0, 1.0 };
-    mat->MultiplyPoint(modelCenter, worldCenter4);
+    double modelToWorldInputCenter[4] = { m_dataCenter[0], m_dataCenter[1], m_dataCenter[2], 1.0 };
+    double modelToWorldOutputCenter[4] = { 0.0, 0.0, 0.0, 1.0 };
+    modelToWorldMatrix->MultiplyPoint(modelToWorldInputCenter, modelToWorldOutputCenter);
 
-    const double invW = std::abs(worldCenter4[3]) > 1e-12 ? 1.0 / worldCenter4[3] : 1.0;
+    const double invW = std::abs(modelToWorldOutputCenter[3]) > 1e-12 ? 1.0 / modelToWorldOutputCenter[3] : 1.0;
     double worldCenter[3] = {
-        worldCenter4[0] * invW,
-        worldCenter4[1] * invW,
-        worldCenter4[2] * invW
+        modelToWorldOutputCenter[0] * invW,
+        modelToWorldOutputCenter[1] * invW,
+        modelToWorldOutputCenter[2] * invW
     };
 
     vtkCamera* cam = m_renderer->GetActiveCamera();

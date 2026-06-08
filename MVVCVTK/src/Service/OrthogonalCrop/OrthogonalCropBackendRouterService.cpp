@@ -210,9 +210,9 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
 		// 最后看看 localToInputMatrix 有无变化，16个值逐元素比较，阈值为1e-9，微调也触发重裁切
         const auto& cachedLocalToInputMatrix = m_cachedPolyDataCropData.GetLocalToInputMatrix();
-        const auto& localToInputMatrix = cropData.GetLocalToInputMatrix();
-        for (std::size_t index = 0; canReuseCachedClip && index < localToInputMatrix.size(); ++index) {
-            if (std::abs(cachedLocalToInputMatrix[index] - localToInputMatrix[index]) > epsilon) {
+        const auto& localToInputMatrixData = cropData.GetLocalToInputMatrix();
+        for (std::size_t index = 0; canReuseCachedClip && index < localToInputMatrixData.size(); ++index) {
+            if (std::abs(cachedLocalToInputMatrix[index] - localToInputMatrixData[index]) > epsilon) {
                 canReuseCachedClip = false;
                 break;
             }
@@ -253,10 +253,10 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
             localCenter[2] - localDimensions[2] * 0.5,
             localCenter[2] + localDimensions[2] * 0.5);
 
-        auto modelToLocalTransform = vtkSmartPointer<vtkTransform>::New();
-		modelToLocalTransform->SetMatrix(cropData.GetLocalToInputMatrix().data());  // 先设置 localToInput 矩阵（localToModel），再求逆得到 modelToLocal
-        modelToLocalTransform->Inverse(); // 求逆变换 local->model 变换 model->local
-        clipFunction->SetTransform(modelToLocalTransform);
+        auto inputToLocalTransform = vtkSmartPointer<vtkTransform>::New();
+		inputToLocalTransform->SetMatrix(cropData.GetLocalToInputMatrix().data());  // 先设置 localToInput 矩阵，再求逆得到 inputToLocal
+        inputToLocalTransform->Inverse(); // 求逆把 local->input 变换转换成 input->local
+        clipFunction->SetTransform(inputToLocalTransform);
     }
 
     // ═══ 懒初始化 VTK 裁切管道: TableBasedClipDataSet → GeometryFilter → PolyData

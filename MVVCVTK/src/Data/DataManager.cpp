@@ -445,7 +445,7 @@ bool BaseDataManager::SetSliceImagesSaved(
     const std::string& dirPath,
     Orientation orientation,
     const WindowLevelParams& windowLevel,
-    const std::array<double, 16>& transformMatrix)
+    const std::array<double, 16>& modelToWorldMatrix)
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     std::string loadedFilePath;
@@ -456,16 +456,16 @@ bool BaseDataManager::SetSliceImagesSaved(
         loadedFilePath = m_loadedFilePath;
     }
 
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(transformMatrix.data());
-    matrix->Invert();
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
+    worldToModelMatrix->Invert();
 
-    auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(matrix);
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(worldToModelMatrix);
 
     auto reslice = vtkSmartPointer<vtkImageReslice>::New();
     reslice->SetInputData(imageCopy);
-    reslice->SetResliceTransform(transform);
+    reslice->SetResliceTransform(worldToModelTransform);
     reslice->SetInterpolationModeToLinear();
     reslice->SetOutputDimensionality(3);
     reslice->SetAutoCropOutput(true);
@@ -714,7 +714,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     return true;
 }
 
-bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& transformMatrix)
+bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {
@@ -725,17 +725,17 @@ bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const
     }
 
     //  VTK 逆变换矩阵
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(transformMatrix.data());
-    matrix->Invert();
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
+    worldToModelMatrix->Invert();
 
-    auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(matrix);
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(worldToModelMatrix);
 
     // 利用 vtkImageReslice 进行核心插值运算
     auto reslice = vtkSmartPointer<vtkImageReslice>::New();
     reslice->SetInputData(imageCopy);
-    reslice->SetResliceTransform(transform);
+    reslice->SetResliceTransform(worldToModelTransform);
     reslice->SetInterpolationModeToLinear();
 
     // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。

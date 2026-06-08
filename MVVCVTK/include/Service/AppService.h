@@ -121,7 +121,7 @@ public:
     void SetInteracting(bool val) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
-    void SetModelMatrixSynced(vtkMatrix4x4* mat) override;
+    void SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool show) override;
     void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
