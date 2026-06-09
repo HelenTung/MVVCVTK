@@ -632,7 +632,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 6. SetPreviewServicesDirty(previewResult)
 - 2D 窗口消费 overlay mask/outline。
-- 3D 主窗口在合适条件下做临时 polydata clip preview。
+- 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
 
 7. 按 3
 - bridge->TogglePreviewArtifactMode(true)。

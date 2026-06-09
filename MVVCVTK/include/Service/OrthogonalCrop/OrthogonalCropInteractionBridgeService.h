@@ -11,7 +11,7 @@
 // 2. HandleWidgetBoundsChanged 持续记录世界坐标 bounds 与交互 phase
 // 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把世界盒折叠成模型空间 request
 // 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
-// 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做临时 clip
+// 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCrop/OrthogonalCropBackendRouterService.h"
@@ -31,6 +31,7 @@
 class vtkGeometryFilter;
 class vtkTableBasedClipDataSet;
 class vtkBox;
+class vtkVolumeMapper;
 class OrthogonalCropInteractionBridgeService {
 public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
@@ -170,6 +171,12 @@ private:
 
     // 把一次 previewResult 分发给所有 preview 窗口。
     bool SetPreviewServicesDirty(const OrthogonalCropResult& previewResult);
+
+    // 在 3D volume 主窗口上执行一次 volume preview；仅接管 VTK mapper 能正确表达的模式。
+    bool SetMainVolumePreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
+
+    // KeepInside 用 widget 平面裁切表达“只显示盒内”。
+    void SetVolumeKeepInsidePreviewApplied(vtkVolumeMapper* volumeMapper) const;
 
     // 把某个 3D 主窗口的持久 preview 管道恢复成全量直通状态。
     void RestoreMainPolyDataPreview(PreviewRenderTarget& target);

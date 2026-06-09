@@ -617,7 +617,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
 
     // ── 步骤 2：结果分发（两条分支共享） ──
     // 对每个 PreviewRenderTarget：
-    // ① SetMainPolyDataPreviewApplied → 3D 主窗口常驻 clip 管道更新
+    // ① SetMainVolumePreviewApplied / SetMainPolyDataPreviewApplied → 3D 主窗口常驻预览管道更新
     //    3D 主窗口（axis<0）若成功接管，剥离 derivedPolyData overlay 避免重复绘制
     // ② overlayStrategy->SetCropResult → outline / mask / polydata 三类可视内容
     // ③ target.service->SetDirtyMarked → 触发渲染刷新
@@ -868,82 +868,8 @@ bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const Ortho
     // 3. 如果 3D 主窗口已经接管主模型显示，就剥掉 derived polydata overlay，避免重复绘制
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
-            bool mainPreviewAppliedForTarget = false;
-            auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
-            auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
-            if (volumeMapper && previewResult.GetSucceeded()) {
-                volumeMapper->RemoveAllClippingPlanes();
-                if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
-                    auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
-                    if (m_widgetStateController.GetPlanes(worldPlanes)) {
-                        volumeMapper->CroppingOff();
-                        auto clippingPlanes = vtkSmartPointer<vtkPlaneCollection>::New();
-                        const int planeCount = worldPlanes->GetNumberOfPlanes();
-                        for (int planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
-                            auto plane = vtkSmartPointer<vtkPlane>::New();
-                            worldPlanes->GetPlane(planeIndex, plane);
-
-                            double normal[3] = { 0.0, 0.0, 0.0 };
-                            plane->GetNormal(normal);
-                            plane->SetNormal(-normal[0], -normal[1], -normal[2]);
-                            clippingPlanes->AddItem(plane);
-                        }
-                        volumeMapper->SetClippingPlanes(clippingPlanes);
-                    }
-                }
-                else {
-                    const auto rasBounds = previewResult.GetCropDataModel().GetRasBounds();
-                    auto mappedBounds = rasBounds;
-                    auto sourceBounds = GetActiveInputBounds();
-                    auto volumeInput = vtkImageData::SafeDownCast(volumeMapper->GetInput());
-                    if (!volumeInput) {
-                        volumeMapper->Update();
-                        volumeInput = vtkImageData::SafeDownCast(volumeMapper->GetInput());
-                    }
-
-                    if (volumeInput
-                        && sourceBounds[0] < sourceBounds[1]
-                        && sourceBounds[2] < sourceBounds[3]
-                        && sourceBounds[4] < sourceBounds[5]) {
-                        double volumeBoundsData[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-                        volumeInput->GetBounds(volumeBoundsData);
-                        const std::array<double, 6> volumeBounds = {
-                            volumeBoundsData[0], volumeBoundsData[1],
-                            volumeBoundsData[2], volumeBoundsData[3],
-                            volumeBoundsData[4], volumeBoundsData[5]
-                        };
-
-                        for (int axis = 0; axis < 3; ++axis) {
-                            const int minIndex = axis * 2;
-                            const int maxIndex = minIndex + 1;
-                            const double sourceSpan = sourceBounds[maxIndex] - sourceBounds[minIndex];
-                            const double volumeSpan = volumeBounds[maxIndex] - volumeBounds[minIndex];
-                            if (sourceSpan <= 1e-12 || volumeSpan <= 1e-12) {
-                                continue;
-                            }
-
-                            const double normalizedMin =
-                                (rasBounds[minIndex] - sourceBounds[minIndex]) / sourceSpan;
-                            const double normalizedMax =
-                                (rasBounds[maxIndex] - sourceBounds[minIndex]) / sourceSpan;
-                            mappedBounds[minIndex] =
-                                volumeBounds[minIndex] + normalizedMin * volumeSpan;
-                            mappedBounds[maxIndex] =
-                                volumeBounds[minIndex] + normalizedMax * volumeSpan;
-                        }
-                    }
-
-                    volumeMapper->SetCroppingRegionPlanes(
-                        mappedBounds[0], mappedBounds[1],
-                        mappedBounds[2], mappedBounds[3],
-                        mappedBounds[4], mappedBounds[5]);
-                    volumeMapper->SetCroppingRegionFlags(0x07ffffff & ~VTK_CROP_SUBVOLUME);
-                    volumeMapper->CroppingOn();
-                }
-                volume->Modified();
-                mainPreviewAppliedForTarget = true;
-            }
-            else {
+            bool mainPreviewAppliedForTarget = SetMainVolumePreviewApplied(target, previewResult);
+            if (!mainPreviewAppliedForTarget) {
                 mainPreviewAppliedForTarget = SetMainPolyDataPreviewApplied(target, previewResult);
             }
 
@@ -962,6 +888,62 @@ bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const Ortho
         }
     }
     return main3DPreviewApplied;
+}
+
+bool OrthogonalCropInteractionBridgeService::SetMainVolumePreviewApplied(
+    PreviewRenderTarget& target,
+    const OrthogonalCropResult& previewResult)
+{
+    if (!target.service || !previewResult.GetSucceeded()) {
+        return false;
+    }
+
+    auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
+    auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
+    if (!volumeMapper) {
+        return false;
+    }
+
+    volumeMapper->RemoveAllClippingPlanes();
+    volumeMapper->CroppingOff();
+
+    if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
+        // vtkVolumeMapper cropping region 只能表达输入空间轴对齐 subvolume，
+        // 无法表达当前 widget 旋转盒的 RemoveInside 补集。这里不接管主 volume，
+        // 避免体渲染窗口显示出与等值面/polydata clip 不一致的错误预览。
+        volumeMapper->SetCroppingRegionFlagsToSubVolume();
+        volume->Modified();
+        return false;
+    }
+
+    SetVolumeKeepInsidePreviewApplied(volumeMapper);
+    volume->Modified();
+    return true;
+}
+
+void OrthogonalCropInteractionBridgeService::SetVolumeKeepInsidePreviewApplied(vtkVolumeMapper* volumeMapper) const
+{
+    if (!volumeMapper) {
+        return;
+    }
+
+    auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
+    if (!m_widgetStateController.GetPlanes(worldPlanes)) {
+        return;
+    }
+
+    auto clippingPlanes = vtkSmartPointer<vtkPlaneCollection>::New();
+    const int planeCount = worldPlanes->GetNumberOfPlanes();
+    for (int planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
+        auto plane = vtkSmartPointer<vtkPlane>::New();
+        worldPlanes->GetPlane(planeIndex, plane);
+
+        double normal[3] = { 0.0, 0.0, 0.0 };
+        plane->GetNormal(normal);
+        plane->SetNormal(-normal[0], -normal[1], -normal[2]);
+        clippingPlanes->AddItem(plane);
+    }
+    volumeMapper->SetClippingPlanes(clippingPlanes);
 }
 
 void OrthogonalCropInteractionBridgeService::RestoreMainPolyDataPreview(PreviewRenderTarget& target)
