@@ -127,8 +127,8 @@ private:
     // 响应 widget 交互回调，记录 bounds/phase，并在 Released 时触发 preview。
     void HandleWidgetBoundsChanged(const std::array<double, 6>& bounds, CropInteractionPhase phase);
 
-    // 在模型 / 世界坐标之间转换轴对齐 bounds。
-    std::array<double, 6> GetTransformedBounds(const std::array<double, 6>& sourceBounds, bool modelToWorld) const;
+    // 把后端模型/输入坐标系 bounds 提升为 widget 所需的世界坐标 bounds。
+    std::array<double, 6> GetModelBoundsAsWorldBounds(const std::array<double, 6>& modelBounds) const;
 
     // 返回活跃输入在世界坐标下的 bounds，供 widget 摆放与默认盒生成。
     std::array<double, 6> GetActiveWorldBounds() const;

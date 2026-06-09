@@ -217,13 +217,13 @@ public:
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
-    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
+    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
 	// 返回局部裁切盒坐标系到后端输入坐标系的变换矩阵。
     const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
 
     // 写入局部坐标系到后端输入坐标系的变换矩阵。
-    void SetLocalToInputMatrix(const CropMatrixDouble16Array& matrix) { m_localToInputMatrix = matrix; }
+    void SetLocalToInputMatrix(const CropMatrixDouble16Array& localToInputMatrix) { m_localToInputMatrix = localToInputMatrix; }
 
     // 当前是否启用了局部对齐裁切语义。
     bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
@@ -407,13 +407,13 @@ public:
     const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
 
     // 写入局部坐标系到后端输入坐标系的变换矩阵。
-    void SetLocalToInputMatrix(const CropMatrixDouble16Array& matrix) { m_localToInputMatrix = matrix; }
+    void SetLocalToInputMatrix(const CropMatrixDouble16Array& localToInputMatrix) { m_localToInputMatrix = localToInputMatrix; }
 
     // 返回请求当前携带的全局偏移补偿矩阵。
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
     // 写入请求当前携带的全局偏移补偿矩阵。
-    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& matrix) { m_globalOffsetMatrix = matrix; }
+    void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
     // 返回随请求一起下发的 UI/交互状态快照。
     const CropStateModel& GetCropStateModel() const { return m_cropStateModel; }

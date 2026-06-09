@@ -112,27 +112,24 @@ std::array<double, 6> GetRasBoundsFromLocalDefinition(
     return { bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5] };
 }
 
-std::array<double, 16> GetMatrixArray(vtkMatrix4x4* matrix)
+std::array<double, 16> GetSourceToTargetMatrixArray(vtkMatrix4x4* sourceToTargetMatrix)
 {
-    if (!matrix) {
+    if (!sourceToTargetMatrix) {
         return GetIdentityMatrixArray();
     }
 
-    std::array<double, 16> matrixData = { 0.0 };
-    vtkMatrix4x4::DeepCopy(matrixData.data(), matrix);
-    return matrixData;
+    std::array<double, 16> sourceToTargetMatrixData = { 0.0 };
+    vtkMatrix4x4::DeepCopy(sourceToTargetMatrixData.data(), sourceToTargetMatrix);
+    return sourceToTargetMatrixData;
 }
 
-vtkSmartPointer<vtkTransform> GetArrayTransform(const std::array<double, 16>& matrixData, bool invert = false)
+vtkSmartPointer<vtkTransform> GetLocalToInputTransform(const std::array<double, 16>& localToInputMatrixData)
 {
-    auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    matrix->DeepCopy(matrixData.data());
-    if (invert) {
-        matrix->Invert();
-    }
+    auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    localToInputMatrix->DeepCopy(localToInputMatrixData.data());
 
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(matrix);
+    transform->SetMatrix(localToInputMatrix);
     return transform;
 }
 
@@ -141,7 +138,7 @@ std::array<double, 16> GetUpdatedOffsetMatrix(
     const std::array<double, 3>& translation)
 {
     // physical crop 会改变 derived image 的 origin，
-    // 这里把这次位移继续累加进 offset matrix，保证上层共享坐标语义保持连续。
+    // 这里把这次位移继续累加进 globalOffsetMatrix，保证上层共享坐标语义保持连续。
     auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     sourceToTargetMatrix->DeepCopy(sourceToTargetMatrixData.data());
 
@@ -150,7 +147,7 @@ std::array<double, 16> GetUpdatedOffsetMatrix(
     transform->SetMatrix(sourceToTargetMatrix);
     transform->Translate(translation[0], translation[1], translation[2]);
 
-    return GetMatrixArray(transform->GetMatrix());
+    return GetSourceToTargetMatrixArray(transform->GetMatrix());
 }
 
 std::size_t GetImageVoxelCount(vtkImageData* image)
@@ -443,10 +440,10 @@ vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cro
             center[2] + dimensions[2] * 0.5);
         cube->Update();
 
-        auto transform = GetArrayTransform(cropData.GetLocalToInputMatrix());
+        auto localToInputTransform = GetLocalToInputTransform(cropData.GetLocalToInputMatrix());
         auto transformFilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
         transformFilter->SetInputConnection(cube->GetOutputPort());
-        transformFilter->SetTransform(transform);
+        transformFilter->SetTransform(localToInputTransform);
         transformFilter->Update();
 
         auto output = vtkSmartPointer<vtkPolyData>::New();
@@ -908,7 +905,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     std::size_t availableRamBytes)
 {
     // physical crop 返回的是新的 derived image，
-    // 因此除了提取体素数据，还必须同步修正 bounds 和 global offset matrix。
+    // 因此除了提取体素数据，还必须同步修正 bounds 和 globalOffsetMatrix。
     // 结果说明：derived image 是新的主数据快照，derivedCropData 记录它自己的 physical bounds 与位移补偿。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
@@ -992,7 +989,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     // 把四种 bounds mode 统一折叠为 CropDataModel：
     //   InputVolumeBounds / MinMaxCoordinates → 直接取 inputBounds
     //   CenterAndDimensions → 中心+尺寸换算为 rasBounds
-    //   LocalCenterAndDimensions → 局部盒经 worldToModel 矩阵映射到输入空间
+    //   LocalCenterAndDimensions → 局部盒经 localToInput 矩阵映射到输入空间
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
@@ -1005,7 +1002,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 
     // ── 执行分支分发：VirtualCrop vs PhysicalCrop ──
     // VirtualCrop  → GetVirtualCropResult  → mask + outline + statistics（预览用，不复制体数据）
-    // PhysicalCrop → GetPhysicalCropResult → derived image + offset matrix（可独立使用的新数据）
+    // PhysicalCrop → GetPhysicalCropResult → derived image + globalOffsetMatrix（可独立使用的新数据）
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
         return GetVirtualCropResult(
             image,

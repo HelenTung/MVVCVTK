@@ -424,44 +424,40 @@ void OrthogonalCropInteractionBridgeService::HandleWidgetBoundsChanged(
     }
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetTransformedBounds(
-    const std::array<double, 6>& sourceBounds,
-    bool modelToWorld) const
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetModelBoundsAsWorldBounds(
+    const std::array<double, 6>& modelBounds) const
 {
     // 这是纯 bounds 级别的 8 角点变换 helper：
-    // 输入和输出都仍然是轴对齐盒，只是根据方向选择 model->world 或其逆矩阵。
+    // 输入是后端模型/输入坐标系轴对齐盒，输出是 widget 使用的世界坐标轴对齐盒。
     // 显式变换 8 个角点后再回收包围盒，可以避免旋转场景下的逐轴换算失真。
     if (!m_referenceRenderService) {
-        return sourceBounds;
+        return modelBounds;
     }
 
-    auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    sourceToTargetMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-    if (!modelToWorld) {
-        sourceToTargetMatrix->Invert();
-    }
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
 
-    auto sourceToTargetTransform = vtkSmartPointer<vtkTransform>::New();
-    sourceToTargetTransform->SetMatrix(sourceToTargetMatrix);
+    auto modelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
+    modelToWorldTransform->SetMatrix(modelToWorldMatrix);
 
-    vtkBoundingBox transformedBounds;
+    vtkBoundingBox worldBounds;
     for (int ix = 0; ix < 2; ++ix) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int iz = 0; iz < 2; ++iz) {
-                const double corner[3] = {
-                    sourceBounds[ix == 0 ? 0 : 1],
-                    sourceBounds[iy == 0 ? 2 : 3],
-                    sourceBounds[iz == 0 ? 4 : 5]
+                const double modelCorner[3] = {
+                    modelBounds[ix == 0 ? 0 : 1],
+                    modelBounds[iy == 0 ? 2 : 3],
+                    modelBounds[iz == 0 ? 4 : 5]
                 };
-                double sourceToTargetPoint[3] = { 0.0, 0.0, 0.0 };
-                sourceToTargetTransform->TransformPoint(corner, sourceToTargetPoint);
-                transformedBounds.AddPoint(sourceToTargetPoint);
+                double worldCorner[3] = { 0.0, 0.0, 0.0 };
+                modelToWorldTransform->TransformPoint(modelCorner, worldCorner);
+                worldBounds.AddPoint(worldCorner);
             }
         }
     }
 
     double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    transformedBounds.GetBounds(bounds);
+    worldBounds.GetBounds(bounds);
     return { bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5] };
 }
 
@@ -476,7 +472,7 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveWorldBoun
         return modelBounds;
     }
 
-    return GetTransformedBounds(modelBounds, true);
+    return GetModelBoundsAsWorldBounds(modelBounds);
 }
 
 std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMatrix() const
@@ -493,9 +489,9 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
     worldToModelMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
     worldToModelMatrix->Invert();
 
-    std::array<double, 16> matrixData = { 0.0 };
-    vtkMatrix4x4::DeepCopy(matrixData.data(), worldToModelMatrix);
-    return matrixData;
+    std::array<double, 16> worldToModelMatrixData = { 0.0 };
+    vtkMatrix4x4::DeepCopy(worldToModelMatrixData.data(), worldToModelMatrix);
+    return worldToModelMatrixData;
 }
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
@@ -508,8 +504,8 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     // ── 分支 ②：Widget 世界 box → LocalCenterAndDimensions 编码 ──
     // center = widget 世界坐标盒中心
     // dimensions = widget 世界坐标盒尺寸
-    // localToInputMatrix = GetWorldToModelMatrix()（参考渲染服务 modelMatrix 的逆）
-    // 下游 Algorithm 收到后用 world→model 矩阵还原到后端输入坐标系
+    // localToInputMatrix = GetWorldToModelMatrix()（参考渲染服务 modelToWorld 的逆）
+    // 这里的 local 就是 widget world；下游 Algorithm 用 localToInput/worldToModel 还原到后端输入坐标系
     previewRequest.SetLocalCenterAndDimensions(
         {
             (m_currentBounds[0] + m_currentBounds[1]) * 0.5,

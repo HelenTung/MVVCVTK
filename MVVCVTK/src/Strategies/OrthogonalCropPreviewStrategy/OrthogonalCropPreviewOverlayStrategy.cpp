@@ -227,7 +227,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetPropTransform(vtkProp3D* prop, con
 
     auto userMatrix = prop->GetUserMatrix();
     if (!userMatrix) {
-        // 首次赋值时为 prop 建一份 user matrix，后续只做 in-place 覆盖，避免重复分配。
+        // 首次赋值时为 prop 建一份 modelToWorld user matrix，后续只做 in-place 覆盖，避免重复分配。
         auto nextUserMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
         nextUserMatrix->DeepCopy(modelToWorldMatrixData.data());
         prop->SetUserMatrix(nextUserMatrix);

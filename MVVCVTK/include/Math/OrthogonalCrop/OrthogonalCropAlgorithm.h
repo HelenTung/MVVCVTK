@@ -84,7 +84,7 @@ public:
         const CropStateModel& cropState,
         CropRemovalMode removalMode);
 
-    // 生成物理裁切结果：derived image、更新后的 cropData 与 offset matrix。
+    // 生成物理裁切结果：derived image、更新后的 cropData 与 globalOffsetMatrix。
     static OrthogonalCropResult GetPhysicalCropResult(
         vtkImageData* image,
         const CropDataModel& cropData,

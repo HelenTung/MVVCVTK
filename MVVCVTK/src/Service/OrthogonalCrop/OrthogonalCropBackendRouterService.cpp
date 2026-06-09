@@ -187,7 +187,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
     }
 
-    // 第3层-LocalAlignment：启用时验证 localCenter + localDimensions + alignmentMatrix
+    // 第3层-LocalAlignment：启用时验证 localCenter + localDimensions + localToInputMatrix
     if (canReuseCachedClip && cropData.GetLocalAlignmentEnabled()) {
         constexpr double epsilon = 1e-9;
 		// 局部中心点 (3个值)，局部中心看是否有变化，阈值为1e-9，微调也触发重裁切
@@ -228,7 +228,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     //   此函数接收的是 CropDataModel (已在 GetPolyDataCropDataModel 中归一化)
     //   此时 BoundsMode 已被折叠消除, CropDataModel 内部只保留两种几何表达:
     //     LocalAlignmentEnabled=false → cropData.GetRasBounds() [输入空间AABB]
-    //     LocalAlignmentEnabled=true  → localCenter+localDimensions+alignmentMatrix
+    //     LocalAlignmentEnabled=true  → localCenter+localDimensions+localToInputMatrix
     //   所以这里只需判断 LocalAlignmentEnabled 即可选择正确的 vtkBox 构造路径
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     if (!cropData.GetLocalAlignmentEnabled()) {
@@ -243,7 +243,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         const auto localCenter = cropData.GetLocalCenter();
         const auto localDimensions = cropData.GetLocalDimensions();
 
-        // vtkImplicitFunction 会先把输入点变换到隐函数空间，因此这里传入 localToModel 的逆，
+        // vtkImplicitFunction 会先把输入点变换到隐函数空间，因此这里传入 localToInput 的逆，
         // 就能直接复用 vtkBox 表达“局部对齐盒 + 模型空间输入”的组合语义。
         clipFunction->SetBounds(
             localCenter[0] - localDimensions[0] * 0.5,
@@ -488,7 +488,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     }
 
     // ── 步骤 2：裁切执行 ──
-    // GetClippedPolyData 内部含 5 层缓存判断（inputPtr / rasBounds / localParams / alignmentMatrix）
+    // GetClippedPolyData 内部含 5 层缓存判断（inputPtr / rasBounds / localParams / localToInputMatrix）
     // 缓存未命中时构建 vtkBox → TableBasedClipDataSet → GeometryFilter 管道
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {

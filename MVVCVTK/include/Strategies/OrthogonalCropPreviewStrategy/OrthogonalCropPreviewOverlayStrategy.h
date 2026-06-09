@@ -53,7 +53,7 @@ private:
     void ApplyRemovalVisualStyle();
 
     // 把主模型矩阵同步到 overlay prop。
-    static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& matrixData);
+    static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData);
 
     // 3D 预览区域 actor，显示裁切盒实体范围。
     vtkSmartPointer<vtkActor> m_previewRegionActor;
