@@ -61,10 +61,12 @@ public:
 
         const std::string keySym = iren->GetKeySym() ? iren->GetKeySym() : "";
         const char keyCode = iren->GetKeyCode();
+        const bool isControlPressed = iren->GetControlKey() != 0;
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
         const bool isPreviewArtifactModeKey = keyCode == '3' || keySym == "3";
+        const bool isPhysicalCropSubmitKey = isPreviewArtifactModeKey && isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
@@ -102,7 +104,7 @@ public:
 
             if (isPreviewArtifactModeKey && !m_previewArtifactModeKeyDown) {
                 m_previewArtifactModeKeyDown = true;
-                orthogonalCropBridge->TogglePreviewArtifactMode(true);
+                orthogonalCropBridge->TogglePreviewArtifactMode(!isPhysicalCropSubmitKey);
                 return;
             }
         }
@@ -303,7 +305,7 @@ int main()
                 return;
             }
 
-            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle lightweight/full preview." << std::endl;
+            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle lightweight/full preview, press Ctrl+3 to apply physical crop." << std::endl;
 
             //// 触发孔隙分析算法
             //SurfaceParams surfP;
@@ -409,7 +411,7 @@ int main()
     contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle lightweight/full preview\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle lightweight/full preview | Ctrl+3 = apply physical crop\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

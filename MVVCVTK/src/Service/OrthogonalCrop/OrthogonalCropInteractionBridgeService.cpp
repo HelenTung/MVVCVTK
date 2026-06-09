@@ -11,10 +11,15 @@
 #include <vtkBoundingBox.h>
 #include <vtkBox.h>
 #include <vtkGeometryFilter.h>
+#include <vtkImageData.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPlane.h>
+#include <vtkPlaneCollection.h>
 #include <vtkPlanes.h>
 #include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
+#include <vtkVolume.h>
+#include <vtkVolumeMapper.h>
 
 #include <algorithm>
 #include <iostream>
@@ -121,6 +126,123 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts(boo
 
 void OrthogonalCropInteractionBridgeService::TogglePreviewArtifactMode(bool logStats)
 {
+    if (!logStats) {
+        if (!m_cropInteractionEnabled || !m_boundsInitialized) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: crop widget is not active." << std::endl;
+            return;
+        }
+
+        if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: wait until widget dragging finishes." << std::endl;
+            return;
+        }
+
+        if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: RemoveInside preview does not support physical submit." << std::endl;
+            return;
+        }
+
+        auto referenceRenderService = std::dynamic_pointer_cast<MedicalVizService>(m_referenceRenderService);
+        if (!referenceRenderService) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: reference render service does not support reload." << std::endl;
+            return;
+        }
+
+        auto submitRequest = BuildPreviewRequest();
+        submitRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
+
+        const auto submitResult = GetResult(submitRequest);
+        if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: "
+                << GetFailureReasonText(submitResult.GetFailureReason())
+                << " - " << submitResult.GetMessage() << std::endl;
+            return;
+        }
+
+        auto derivedImage = submitResult.GetDerivedImage();
+        if (!derivedImage) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: derived image is null." << std::endl;
+            return;
+        }
+
+        int dims[3] = { 0, 0, 0 };
+        double spacingData[3] = { 1.0, 1.0, 1.0 };
+        double rasOriginData[3] = { 0.0, 0.0, 0.0 };
+        derivedImage->GetDimensions(dims);
+        derivedImage->GetSpacing(spacingData);
+        derivedImage->GetOrigin(rasOriginData);
+        auto sourceData = static_cast<const float*>(derivedImage->GetScalarPointer());
+        if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: derived image buffer is invalid." << std::endl;
+            return;
+        }
+
+        const size_t nx = static_cast<size_t>(dims[0]);
+        const size_t ny = static_cast<size_t>(dims[1]);
+        const size_t nz = static_cast<size_t>(dims[2]);
+        const size_t sliceSize = nx * ny;
+        const size_t totalSize = sliceSize * nz;
+        m_reloadBuffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
+
+        auto* reloadData = m_reloadBuffer->data();
+        for (size_t z = 0; z < nz; ++z) {
+            const size_t sourceSliceOffset = z * sliceSize;
+            const size_t targetSliceOffset = z * sliceSize;
+            for (size_t y = 0; y < ny; ++y) {
+                const float* sourceRow = sourceData + sourceSliceOffset + y * nx;
+                float* targetRow = reloadData + targetSliceOffset + (ny - 1 - y) * nx;
+                for (size_t x = 0; x < nx; ++x) {
+                    targetRow[nx - 1 - x] = sourceRow[x];
+                }
+            }
+        }
+
+        const std::array<int, 3> reloadDims = { dims[0], dims[1], dims[2] };
+        const std::array<float, 3> reloadSpacing = {
+            static_cast<float>(spacingData[0]),
+            static_cast<float>(spacingData[1]),
+            static_cast<float>(spacingData[2])
+        };
+        const std::array<float, 3> reloadOrigin = {
+            static_cast<float>(-rasOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
+            static_cast<float>(-rasOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
+            static_cast<float>(rasOriginData[2])
+        };
+
+        if (!referenceRenderService->SetReloadFromBufferAsync(
+                m_reloadBuffer->data(),
+                reloadDims,
+                reloadSpacing,
+                reloadOrigin,
+                [this, referenceRenderService](bool success) {
+                    if (!success) {
+                        std::cerr << "[Main] Orthogonal crop physical crop reload failed." << std::endl;
+                        m_reloadBuffer.reset();
+                        return;
+                    }
+
+                    if (m_dataMgr) {
+                        SetInputImage(m_dataMgr->GetVtkImage());
+                    }
+
+                    if (m_dataMgr) {
+                        const auto range = m_dataMgr->GetScalarRange();
+                        referenceRenderService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
+                    }
+
+                    std::cout << "[Main] Orthogonal crop physical crop applied to main image data." << std::endl;
+                    m_reloadBuffer.reset();
+                })) {
+            std::cerr << "[Main] Orthogonal crop physical crop failed: reload request was rejected." << std::endl;
+            m_reloadBuffer.reset();
+            return;
+        }
+
+        SetInputImage(nullptr);
+        DeactivateInteractiveCrop();
+        return;
+    }
+
     m_previewRequiresFullArtifacts = !m_previewRequiresFullArtifacts;
     if (logStats) {
         std::cout << "[Main] Orthogonal crop preview artifact mode: "
@@ -212,7 +334,7 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
         << GetDataSourceText(GetActiveDataSource())
-        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview; press O or Esc to exit." << std::endl;
+        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview, press Ctrl+3 to apply physical crop; press O or Esc to exit." << std::endl;
     return true;
 }
 
@@ -465,7 +587,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
                 << ", removal = "
                 << GetRemovalModeText(m_currentRemovalMode)
                 << ", main3D = "
-                << (main3DPreviewApplied ? "PolyDataClip" : "OverlayOnly")
+                << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
                 << ", bounds = ["
                 << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
                 << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
@@ -528,7 +650,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             << ", removal = "
             << GetRemovalModeText(m_currentRemovalMode)
             << ", main3D = "
-            << (main3DPreviewApplied ? "PolyDataClip" : "OverlayOnly")
+            << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
             << ", bounds = ["
             << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
             << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
@@ -699,6 +821,18 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
         if (target.overlayStrategy) {
             target.overlayStrategy->ClearPreview();
         }
+
+        if (target.service) {
+            auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
+            auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
+            if (volumeMapper) {
+                volumeMapper->RemoveAllClippingPlanes();
+                volumeMapper->CroppingOff();
+                volumeMapper->SetCroppingRegionFlagsToSubVolume();
+                volume->Modified();
+            }
+        }
+
         RestoreMainPolyDataPreview(target);
         if (target.service) {
             target.service->SetDirtyMarked();
@@ -738,7 +872,84 @@ bool OrthogonalCropInteractionBridgeService::SetPreviewServicesDirty(const Ortho
     // 3. 如果 3D 主窗口已经接管主模型显示，就剥掉 derived polydata overlay，避免重复绘制
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
-            const bool mainPreviewAppliedForTarget = SetMainPolyDataPreviewApplied(target, previewResult);
+            bool mainPreviewAppliedForTarget = false;
+            auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
+            auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
+            if (volumeMapper && previewResult.GetSucceeded()) {
+                volumeMapper->RemoveAllClippingPlanes();
+                if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
+                    auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
+                    if (m_widgetStateController.GetPlanes(worldPlanes)) {
+                        volumeMapper->CroppingOff();
+                        auto clippingPlanes = vtkSmartPointer<vtkPlaneCollection>::New();
+                        const int planeCount = worldPlanes->GetNumberOfPlanes();
+                        for (int planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
+                            auto plane = vtkSmartPointer<vtkPlane>::New();
+                            worldPlanes->GetPlane(planeIndex, plane);
+
+                            double normal[3] = { 0.0, 0.0, 0.0 };
+                            plane->GetNormal(normal);
+                            plane->SetNormal(-normal[0], -normal[1], -normal[2]);
+                            clippingPlanes->AddItem(plane);
+                        }
+                        volumeMapper->SetClippingPlanes(clippingPlanes);
+                    }
+                }
+                else {
+                    const auto rasBounds = previewResult.GetCropDataModel().GetRasBounds();
+                    auto mappedBounds = rasBounds;
+                    auto sourceBounds = GetActiveInputBounds();
+                    auto volumeInput = vtkImageData::SafeDownCast(volumeMapper->GetInput());
+                    if (!volumeInput) {
+                        volumeMapper->Update();
+                        volumeInput = vtkImageData::SafeDownCast(volumeMapper->GetInput());
+                    }
+
+                    if (volumeInput
+                        && sourceBounds[0] < sourceBounds[1]
+                        && sourceBounds[2] < sourceBounds[3]
+                        && sourceBounds[4] < sourceBounds[5]) {
+                        double volumeBoundsData[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+                        volumeInput->GetBounds(volumeBoundsData);
+                        const std::array<double, 6> volumeBounds = {
+                            volumeBoundsData[0], volumeBoundsData[1],
+                            volumeBoundsData[2], volumeBoundsData[3],
+                            volumeBoundsData[4], volumeBoundsData[5]
+                        };
+
+                        for (int axis = 0; axis < 3; ++axis) {
+                            const int minIndex = axis * 2;
+                            const int maxIndex = minIndex + 1;
+                            const double sourceSpan = sourceBounds[maxIndex] - sourceBounds[minIndex];
+                            const double volumeSpan = volumeBounds[maxIndex] - volumeBounds[minIndex];
+                            if (sourceSpan <= 1e-12 || volumeSpan <= 1e-12) {
+                                continue;
+                            }
+
+                            const double normalizedMin =
+                                (rasBounds[minIndex] - sourceBounds[minIndex]) / sourceSpan;
+                            const double normalizedMax =
+                                (rasBounds[maxIndex] - sourceBounds[minIndex]) / sourceSpan;
+                            mappedBounds[minIndex] =
+                                volumeBounds[minIndex] + normalizedMin * volumeSpan;
+                            mappedBounds[maxIndex] =
+                                volumeBounds[minIndex] + normalizedMax * volumeSpan;
+                        }
+                    }
+
+                    volumeMapper->SetCroppingRegionPlanes(
+                        mappedBounds[0], mappedBounds[1],
+                        mappedBounds[2], mappedBounds[3],
+                        mappedBounds[4], mappedBounds[5]);
+                    volumeMapper->SetCroppingRegionFlags(0x07ffffff & ~VTK_CROP_SUBVOLUME);
+                    volumeMapper->CroppingOn();
+                }
+                volume->Modified();
+                mainPreviewAppliedForTarget = true;
+            }
+            else {
+                mainPreviewAppliedForTarget = SetMainPolyDataPreviewApplied(target, previewResult);
+            }
 
             auto overlayResult = previewResult;
             if (mainPreviewAppliedForTarget && target.service->GetNavigationAxis() < 0) {

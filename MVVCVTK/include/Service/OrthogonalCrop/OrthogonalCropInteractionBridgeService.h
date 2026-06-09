@@ -207,6 +207,9 @@ private:
     // widget 当前世界坐标 bounds，也是 preview 请求的几何真源。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
+    // physical crop 重载期间持有提交缓冲，直到主线程回调收口。
+    std::shared_ptr<std::vector<float>> m_reloadBuffer;
+
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。
     OrthogonalCropWidgetStateController m_widgetStateController;
 
