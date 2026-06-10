@@ -590,36 +590,18 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // widget 有向盒 → boxToInputMatrix 编码
     // 固定 VirtualCrop 模式 + 当前 removalMode
     const auto previewRequest = BuildPreviewRequest();
-    // ── 分支 A：轻量预览（不触发完整 mask 管道） ──
-    // 只做 cropData 归一化 + outline 生成，适合频繁拖拽场景
-    // volume RemoveInside 后端直接用 shader discard 消费 cropData，不再强制生成 virtualMaskImage。
+    // ── 分支 A：轻量预览（不触发完整 mask/clip/统计管道） ──
+    // Bridge 仍然只提交 request；source 分发与 request->cropData 归一化统一收口在 Router。
     if (!m_previewRequiresFullArtifacts) {
-        CropDataModel cropData;
-        OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
-        std::string message;
-        if (!OrthogonalCropAlgorithm::GetCropDataModel(
-                GetActiveInputBounds(),
-                previewRequest,
-                cropData,
-                failureReason,
-                message,
-                true)) {
+        const auto previewResult = m_backend.GetLightweightPreviewResult(previewRequest);
+        if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None || !previewResult.GetSucceeded()) {
             if (logStats) {
                 std::cerr << "[Main] Orthogonal crop preview failed: "
-                    << GetFailureReasonText(failureReason)
-                    << " - " << message << std::endl;
+                    << GetFailureReasonText(previewResult.GetFailureReason())
+                    << " - " << previewResult.GetMessage() << std::endl;
             }
             return;
         }
-
-        // ── 手动构造轻量结果 ──
-        OrthogonalCropResult previewResult;
-        previewResult.SetResolvedDataSource(GetActiveDataSource());
-        previewResult.SetSucceeded(true);
-        previewResult.SetFailureReason(OrthogonalCropFailureReason::None);
-        previewResult.SetCropDataModel(cropData);
-        previewResult.SetCropStateModel(previewRequest.GetCropStateModel());
-        previewResult.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
 
         // ── 结果分发 ──
         const bool main3DPreviewApplied = SetPreviewServicesDirty(previewResult);

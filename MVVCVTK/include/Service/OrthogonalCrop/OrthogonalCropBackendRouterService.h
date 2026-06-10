@@ -7,7 +7,7 @@
 // =====================================================================
 // 路由主链路：
 // 1. 根据 preferredDataSource 与当前已绑定输入确定 active data source
-// 2. 把默认 request、统计查询和结果执行都收口到同一组入口
+// 2. 把默认 request、轻量预览、统计查询和结果执行都收口到同一组入口
 // 3. image 路径直接委托给 OrthogonalCropPluginService
 // 4. polydata 路径把 request 归一化为 cropData，再生成 implicit function 做 clip
 // 5. 两条路径最终都回填到统一的 OrthogonalCropResult / OrthogonalCropStatistics
@@ -57,6 +57,9 @@ public:
     // 执行当前请求并返回完整结果，内部会按数据源分发。
     // 结果对象会补齐 resolved source / backend，供交互桥和 overlay 直接消费。
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
+
+    // 执行轻量 preview：只归一化 request->cropData 并生成 outline，不跑 mask/clip/统计。
+    OrthogonalCropResult GetLightweightPreviewResult(const OrthogonalCropRequest& request) const;
 
 private:
     // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。

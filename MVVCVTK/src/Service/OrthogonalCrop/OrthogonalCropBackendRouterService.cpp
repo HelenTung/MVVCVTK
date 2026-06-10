@@ -138,6 +138,52 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
     }
 }
 
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetLightweightPreviewResult(const OrthogonalCropRequest& request) const
+{
+    OrthogonalCropResult result;
+    result.SetCropStateModel(request.GetCropStateModel());
+
+    CropDataModel cropData;
+    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    std::string message;
+    const auto activeDataSource = GetActiveDataSource();
+    switch (activeDataSource) {
+    case OrthogonalCropDataSource::ImageData:
+        result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+        result.SetResolvedBackend(OrthogonalCropResolvedBackend::None);
+        if (!OrthogonalCropAlgorithm::GetCropDataModel(
+                GetInputImage(),
+                request,
+                cropData,
+                failureReason,
+                message,
+                true)) {
+            result.SetFailureReason(failureReason);
+            result.SetMessage(message);
+            return result;
+        }
+        break;
+    case OrthogonalCropDataSource::PolyData:
+        result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
+        result.SetResolvedBackend(OrthogonalCropResolvedBackend::None);
+        if (!GetPolyDataCropDataModel(request, cropData, failureReason, message)) {
+            result.SetFailureReason(failureReason);
+            result.SetMessage(message);
+            return result;
+        }
+        break;
+    default:
+        return GetMissingInputResult();
+    }
+
+    // 轻量 preview 只提供显示分发必需字段；统计、mask 和 clipped polydata 留给完整结果入口。
+    result.SetSucceeded(true);
+    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetCropDataModel(cropData);
+    result.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
+    return result;
+}
+
 vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyData(
     const CropDataModel& cropData,
     CropRemovalMode removalMode) const
