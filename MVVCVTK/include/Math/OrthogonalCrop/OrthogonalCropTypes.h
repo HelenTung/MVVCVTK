@@ -26,7 +26,7 @@
 
 using CropBoundsDouble6Array = std::array<double, 6>;
 using CropVectorDouble3Array = std::array<double, 3>;
-using CropMatrixDouble16Array = std::array<double, 16>; // 世界到模型的 4x4 仿射变换矩阵，列主序展开。
+using CropMatrixDouble16Array = std::array<double, 16>; // 4x4 仿射变换矩阵，按 VTK DeepCopy 约定展开。
 using CropIjkBoundsInt6Array = std::array<int, 6>;
 
 // 返回 4x4 单位矩阵，作为 request/result 中各种坐标补偿矩阵的默认值。
@@ -37,6 +37,30 @@ inline std::array<double, 16> GetIdentityMatrixArray()
         0.0, 1.0, 0.0, 0.0,
         0.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 1.0
+    };
+}
+
+// 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToInputMatrix 作为几何真源。
+inline std::array<double, 6> GetCanonicalCropBoxBounds()
+{
+    return { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
+}
+
+// 从输入空间轴对齐 bounds 构造标准盒到输入坐标系的矩阵。
+inline std::array<double, 16> GetBoxToInputMatrixFromBounds(const std::array<double, 6>& inputBounds)
+{
+    const double centerX = (inputBounds[0] + inputBounds[1]) * 0.5;
+    const double centerY = (inputBounds[2] + inputBounds[3]) * 0.5;
+    const double centerZ = (inputBounds[4] + inputBounds[5]) * 0.5;
+    const double halfX = (inputBounds[1] - inputBounds[0]) * 0.5;
+    const double halfY = (inputBounds[3] - inputBounds[2]) * 0.5;
+    const double halfZ = (inputBounds[5] - inputBounds[4]) * 0.5;
+
+    return {
+        halfX, 0.0,   0.0,   centerX,
+        0.0,   halfY, 0.0,   centerY,
+        0.0,   0.0,   halfZ, centerZ,
+        0.0,   0.0,   0.0,   1.0
     };
 }
 
@@ -112,19 +136,6 @@ enum class CropInteractionPhase {
     Released
 };
 
-// 请求中 bounds 的解释方式。
-enum class CropBoundsMode {
-    // 直接以输入数据整体 bounds 作为裁切范围。
-    InputVolumeBounds,
-    // 以 min/max 六个坐标直接表达裁切盒。
-    MinMaxCoordinates,
-    // 以后端输入坐标系下的中心点和尺寸表达裁切盒。
-    CenterAndDimensions,
-    // 以局部对齐坐标系下的中心点和尺寸表达裁切盒。
-    // 交互预览路径里，这个“局部坐标系”通常直接取 widget 所在的世界坐标系。
-    LocalCenterAndDimensions
-};
-
 // 统一归档请求/执行失败原因，便于 bridge 日志和上层 UI 提示复用同一套语义。
 enum class OrthogonalCropFailureReason {
     // 没有失败，当前请求可以视作正常完成。
@@ -149,42 +160,27 @@ enum class OrthogonalCropFailureReason {
     DerivedPolyDataCreationFailed
 };
 
-// 纯几何数据快照：描述裁切盒客观空间范围，以及和局部对齐相关的矩阵信息。
+// 纯几何数据快照：boxToInputMatrix 是标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
 class CropDataModel {
 public:
-    // 返回当前裁切盒在后端输入坐标系下的 RAS/physical min/max bounds。
-    // image 路径这里对应 vtkImageData 的 physical 坐标；polydata 路径对应模型坐标。
+    // 返回标准盒到后端输入坐标系的变换矩阵。
+    const CropMatrixDouble16Array& GetBoxToInputMatrix() const { return m_boxToInputMatrix; }
+
+    // 写入标准盒到后端输入坐标系的变换矩阵。
+    void SetBoxToInputMatrix(const CropMatrixDouble16Array& boxToInputMatrix) { m_boxToInputMatrix = boxToInputMatrix; }
+
+    // 用输入空间轴对齐 bounds 重建 boxToInputMatrix；适合默认全量盒或 physical 结果回填。
+    void SetBoxToInputMatrixFromBounds(const CropBoundsDouble6Array& inputBounds)
+    {
+        m_boxToInputMatrix = GetBoxToInputMatrixFromBounds(inputBounds);
+    }
+
+    // 返回由 boxToInputMatrix 派生出的输入空间 AABB。
+    // image 路径对应 vtkImageData physical 坐标；polydata 路径对应模型输入坐标。
     const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
 
-    // 直接写入后端输入坐标系下的 RAS bounds；适合 MinMaxCoordinates 模式或结果回填。
+    // 写入派生输入空间 AABB；只作为执行/校验范围缓存，不再是裁切盒真源。
     void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
-
-    // 用六个显式 min/max 坐标直接定义裁切盒。
-    void SetMinMaxCoordinates(
-        double minR,
-        double maxR,
-        double minA,
-        double maxA,
-        double minS,
-        double maxS)
-    {
-        m_rasBounds = { minR, maxR, minA, maxA, minS, maxS };
-    }
-
-    // 用后端输入坐标系中的中心点和尺寸换算出对应的 RAS bounds。
-    void SetCenterAndDimensions(
-        const std::array<double, 3>& center,
-        const std::array<double, 3>& dimensions)
-    {
-        m_rasBounds = {
-            center[0] - dimensions[0] * 0.5,
-            center[0] + dimensions[0] * 0.5,
-            center[1] - dimensions[1] * 0.5,
-            center[1] + dimensions[1] * 0.5,
-            center[2] - dimensions[2] * 0.5,
-            center[2] + dimensions[2] * 0.5
-        };
-    }
 
     // 根据当前 bounds 反推后端输入坐标系中的中心点。
     std::array<double, 3> GetCenter() const
@@ -219,43 +215,13 @@ public:
     // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
-	// 返回局部裁切盒坐标系到后端输入坐标系的变换矩阵。
-    const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
-
-    // 写入局部坐标系到后端输入坐标系的变换矩阵。
-    void SetLocalToInputMatrix(const CropMatrixDouble16Array& localToInputMatrix) { m_localToInputMatrix = localToInputMatrix; }
-
-    // 当前是否启用了局部对齐裁切语义。
-    bool GetLocalAlignmentEnabled() const { return m_localAlignmentEnabled; }
-
-    // 置为true表示在世界坐标系下，false表示在模型坐标系下
-    void SetLocalAlignmentEnabled(bool enabled) { m_localAlignmentEnabled = enabled; }
-
-    // 返回局部对齐坐标系中的中心点。
-    const CropVectorDouble3Array& GetLocalCenter() const { return m_localCenter; }
-
-    // 写入局部坐标系中的中心点。
-    void SetLocalCenter(const CropVectorDouble3Array& center) { m_localCenter = center; }
-
-    // 返回局部对齐坐标系中的尺寸。
-    const CropVectorDouble3Array& GetLocalDimensions() const { return m_localDimensions; }
-
-    // 写入局部对齐坐标系中的尺寸。
-    void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
-
 private:
-    // 后端输入坐标系下的 RAS/physical min/max bounds，是最基础的裁切盒表达。
+    // 标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
+    std::array<double, 16> m_boxToInputMatrix = GetIdentityMatrixArray();
+    // 由 boxToInputMatrix 派生出的输入空间 AABB，用于 bounds 校验、IJK 吸附和粗粒度执行范围。
     std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 全局偏移矩阵，用于把后端结果重新对齐回上层共享坐标语义。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
-    // 局部坐标系到后端输入坐标系的变换矩阵。
-    std::array<double, 16> m_localToInputMatrix = GetIdentityMatrixArray();
-    // 当前是否启用了局部对齐语义。
-    bool m_localAlignmentEnabled = false;
-    // 局部对齐坐标系下的中心点。
-    std::array<double, 3> m_localCenter = { 0.0, 0.0, 0.0 };
-    // 局部对齐坐标系下的尺寸。
-    std::array<double, 3> m_localDimensions = { 0.0, 0.0, 0.0 };
 };
 
 // UI/交互层状态快照：描述当前裁切是否启用、手柄状态和显示语义。
@@ -312,19 +278,19 @@ private:
     CropInteractionPhase m_interactionPhase = CropInteractionPhase::Idle;
 };
 
-// 一次裁切执行请求：既包含 bounds 语义，也包含执行模式和显示态快照。
+// 一次裁切执行请求：boxToInputMatrix 是标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
 class OrthogonalCropRequest {
 public:
-    // 返回本次请求采用的 bounds 解释方式。
-    CropBoundsMode GetBoundsMode() const { return m_boundsMode; }
+    // 返回标准裁切盒到后端输入坐标系的矩阵。
+    const CropMatrixDouble16Array& GetBoxToInputMatrix() const { return m_boxToInputMatrix; }
 
-    // 设置本次请求采用哪一种 bounds 解释方式。
-    void SetBoundsMode(CropBoundsMode boundsMode) { m_boundsMode = boundsMode; }
+    // 写入标准裁切盒到后端输入坐标系的矩阵。
+    void SetBoxToInputMatrix(const CropMatrixDouble16Array& boxToInputMatrix) { m_boxToInputMatrix = boxToInputMatrix; }
 
-    // 明确声明本次请求使用完整输入范围，不消费其它 bounds payload 字段。
-    void SetInputVolumeBounds()
+    // 用输入空间轴对齐 bounds 构造标准盒请求。
+    void SetBoxToInputMatrixFromBounds(const CropBoundsDouble6Array& inputBounds)
     {
-        m_boundsMode = CropBoundsMode::InputVolumeBounds;
+        m_boxToInputMatrix = GetBoxToInputMatrixFromBounds(inputBounds);
     }
 
     // 返回本次请求是 VirtualCrop 还是 PhysicalCrop。
@@ -338,76 +304,6 @@ public:
 
     // 设置 inside / outside 的保留语义。
     void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
-
-    // 返回显式给定的后端输入坐标系 RAS bounds。
-    const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
-
-    // 写入显式给定的后端输入坐标系 RAS bounds。
-    void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
-
-    // 用 min/max bounds 完整定义请求，同时切换到对应 bounds mode。
-    // 这里的 min/max 一律约定在后端输入坐标系下解释。
-    void SetMinMaxCoordinates(const std::array<double, 6>& rasBounds)
-    {
-        m_boundsMode = CropBoundsMode::MinMaxCoordinates;
-        m_rasBounds = rasBounds;
-    }
-
-    // 返回后端输入坐标系中的中心点定义。
-    const CropVectorDouble3Array& GetCenter() const { return m_center; }
-
-    // 写入后端输入坐标系中的中心点定义。
-    void SetCenter(const CropVectorDouble3Array& center) { m_center = center; }
-
-    // 返回后端输入坐标系中的尺寸定义。
-    const CropVectorDouble3Array& GetDimensions() const { return m_dimensions; }
-
-    // 写入后端输入坐标系中的尺寸定义。
-    void SetDimensions(const CropVectorDouble3Array& dimensions) { m_dimensions = dimensions; }
-
-    // 用后端输入坐标系中的中心点和尺寸完整定义请求，同时切换到对应 bounds mode。
-    void SetCenterAndDimensions(
-        const std::array<double, 3>& center,
-        const std::array<double, 3>& dimensions)
-    {
-        m_boundsMode = CropBoundsMode::CenterAndDimensions;
-        m_center = center;
-        m_dimensions = dimensions;
-    }
-
-    // 返回局部对齐坐标系中的中心点定义。
-    // 对交互预览来说，这通常就是 widget 世界坐标系中的中心点。
-    const CropVectorDouble3Array& GetLocalCenter() const { return m_localCenter; }
-
-    // 写入局部对齐坐标系中的中心点定义。
-    void SetLocalCenter(const CropVectorDouble3Array& center) { m_localCenter = center; }
-
-    // 返回局部对齐坐标系中的尺寸定义。
-    // 对交互预览来说，这通常就是 widget 世界坐标系中的盒尺寸。
-    const CropVectorDouble3Array& GetLocalDimensions() const { return m_localDimensions; }
-
-    // 写入局部对齐坐标系中的尺寸定义。
-    void SetLocalDimensions(const CropVectorDouble3Array& dimensions) { m_localDimensions = dimensions; }
-
-    // 用局部中心点、局部尺寸和变换矩阵完整定义请求，同时切换到对应 bounds mode。
-    // 交互预览路径里，这个局部坐标系通常直接取 widget 所在的世界坐标系，
-    // localToInputMatrix 则提供 local/world -> input/model/physical 的折叠关系。
-    void SetLocalCenterAndDimensions(
-        const std::array<double, 3>& center,
-        const std::array<double, 3>& dimensions,
-        const std::array<double, 16>& localToInputMatrix)
-    {
-        m_boundsMode = CropBoundsMode::LocalCenterAndDimensions;
-        m_localCenter = center;
-        m_localDimensions = dimensions;
-        m_localToInputMatrix = localToInputMatrix;
-    }
-
-    // 返回局部坐标系到后端输入坐标系的变换矩阵。
-    const CropMatrixDouble16Array& GetLocalToInputMatrix() const { return m_localToInputMatrix; }
-
-    // 写入局部坐标系到后端输入坐标系的变换矩阵。
-    void SetLocalToInputMatrix(const CropMatrixDouble16Array& localToInputMatrix) { m_localToInputMatrix = localToInputMatrix; }
 
     // 返回请求当前携带的全局偏移补偿矩阵。
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
@@ -428,24 +324,12 @@ public:
     void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
-    // 本次请求采用哪一种 bounds 解释方式；算法层会据此决定如何还原 cropData。
-    CropBoundsMode m_boundsMode = CropBoundsMode::InputVolumeBounds;
+    // 标准裁切盒 [-1,1]^3 到后端输入坐标系的矩阵。
+    std::array<double, 16> m_boxToInputMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
     CropExecutionMode m_executionMode = CropExecutionMode::VirtualCrop;
     // inside / outside 的保留语义；影响虚拟 mask 取值和物理裁切合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
-    // 直接给出的后端输入坐标系 RAS/physical min/max bounds；MinMaxCoordinates 模式主要使用它。
-    std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    // 后端输入坐标系下的中心点；CenterAndDimensions 模式使用它重建裁切盒。
-    std::array<double, 3> m_center = { 0.0, 0.0, 0.0 };
-    // 后端输入坐标系下的尺寸；与中心点一起定义轴对齐裁切盒。
-    std::array<double, 3> m_dimensions = { 0.0, 0.0, 0.0 };
-    // 局部对齐坐标系中的中心点；只有 LocalCenterAndDimensions 模式会消费它。
-    std::array<double, 3> m_localCenter = { 0.0, 0.0, 0.0 };
-    // 局部对齐坐标系中的尺寸；会先和局部中心一起生成局部盒子，再映射回后端输入坐标系。
-    std::array<double, 3> m_localDimensions = { 0.0, 0.0, 0.0 };
-    // 局部坐标系到后端输入坐标系的变换矩阵；用于表达旋转后的局部裁切框。
-    std::array<double, 16> m_localToInputMatrix = GetIdentityMatrixArray();
     // 输入数据当前附带的全局偏移补偿矩阵；物理裁切后会继续累加新的 origin 偏移。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
     // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。

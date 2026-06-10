@@ -1,5 +1,5 @@
 ﻿#include "VolumeStrategy.h"
-#include <vtkSmartVolumeMapper.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkVolumeProperty.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
@@ -54,11 +54,11 @@ void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
-    m_mapper = vtkSmartPointer<vtkSmartVolumeMapper>::New();
+    // 固定 GPU mapper：volume RemoveInside 预览需要 shader discard 后端表达。
+    m_mapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
-    m_mapper->SetRequestedRenderModeToGPU(); // 优先走 GPU 体渲染管线，避免大体数据退回 CPU 路径
-    m_mapper->SetInteractiveUpdateRate(10.0);
+    m_mapper->SetAutoAdjustSampleDistances(true);
     m_volume->SetMapper(m_mapper);
 
     auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();

@@ -8,7 +8,7 @@
 // 边界约束：
 // 1. 这里只维护 widget 生命周期与 bounds 状态
 // 2. 它不生成 request、不执行算法、也不刷新 preview
-// 3. 对外唯一语义输出是“当前 bounds + 当前交互阶段”
+// 3. 对外唯一语义输出是“当前 bounds/有向盒 + 当前交互阶段”
 // 4. 交互桥再基于这组纯状态决定何时真正刷新裁切预览
 
 #include "OrthogonalCrop/OrthogonalCropTypes.h"
@@ -16,7 +16,6 @@
 #include <vtkBoxRepresentation.h>
 #include <vtkBoxWidget2.h>
 #include <vtkCommand.h>
-#include <vtkPlanes.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 
@@ -61,8 +60,12 @@ public:
     // 返回当前缓存的 widget bounds。
     const std::array<double, 6>& GetCurrentBounds() const;
 
-    // 读取当前 representation 的 6 个裁切平面。
-    bool GetPlanes(vtkPlanes* planes) const;
+    // 读取当前 widget 的有向盒定义：local 是 PlaceWidget 时的盒坐标，
+    // localToWorld 由当前 0/1/3/4 角点重建，避免依赖 widget transform 分解语义。
+    bool GetCurrentLocalBox(
+        CropVectorDouble3Array& localCenter,
+        CropVectorDouble3Array& localDimensions,
+        CropMatrixDouble16Array& localToWorldMatrix) const;
 
     // 设置 bounds 变化回调。
     void SetBoundsChangedCallback(BoundsChangedCallback callback);
@@ -112,6 +115,9 @@ private:
 
     // 当前缓存的有效 bounds。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+
+    // 最近一次 PlaceWidget 使用的 local bounds；旋转交互后 currentBounds 会变成世界 AABB，不能再当有向盒局部定义。
+    std::array<double, 6> m_widgetLocalBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     // 当前参考 bounds，作为 currentBounds 无效时的回退来源。
     std::array<double, 6> m_referenceBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };

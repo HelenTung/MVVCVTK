@@ -9,6 +9,8 @@
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
 #include "OrthogonalCrop/OrthogonalCropWidgetStateController.h"
+#include <vtkMatrix4x4.h>
+#include <vtkPolyData.h>
 #include <vtkProperty.h>
 #include <utility>
 
@@ -68,6 +70,7 @@ void OrthogonalCropWidgetStateController::SetReferenceBounds(const std::array<do
     if (!GetBoundsAreValid(m_currentBounds)) {
         m_currentBounds = bounds;
     }
+    m_widgetLocalBounds = m_currentBounds;
     m_representation->PlaceWidget(m_currentBounds.data());
 }
 
@@ -78,6 +81,7 @@ void OrthogonalCropWidgetStateController::SetWidgetBounds(const std::array<doubl
     }
 
     m_currentBounds = bounds;
+    m_widgetLocalBounds = bounds;
     m_representation->PlaceWidget(m_currentBounds.data());
 }
 
@@ -86,17 +90,66 @@ const std::array<double, 6>& OrthogonalCropWidgetStateController::GetCurrentBoun
     return m_currentBounds;
 }
 
-bool OrthogonalCropWidgetStateController::GetPlanes(vtkPlanes* planes) const
+bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
+    CropVectorDouble3Array& localCenter,
+    CropVectorDouble3Array& localDimensions,
+    CropMatrixDouble16Array& localToWorldMatrix) const
 {
-    if (!planes || !m_representation) {
+    if (!m_representation || !GetBoundsAreValid(m_widgetLocalBounds)) {
         return false;
     }
 
-    m_representation->GetPlanes(planes);
+    localCenter = {
+        (m_widgetLocalBounds[0] + m_widgetLocalBounds[1]) * 0.5,
+        (m_widgetLocalBounds[2] + m_widgetLocalBounds[3]) * 0.5,
+        (m_widgetLocalBounds[4] + m_widgetLocalBounds[5]) * 0.5
+    };
+    localDimensions = {
+        m_widgetLocalBounds[1] - m_widgetLocalBounds[0],
+        m_widgetLocalBounds[3] - m_widgetLocalBounds[2],
+        m_widgetLocalBounds[5] - m_widgetLocalBounds[4]
+    };
 
-    // 这里返回的是 widget 当前几何状态的即时快照，
-    // 供交互桥在需要 3D 主模型临时 clip 时读取，不持久缓存到控制器外部。
-    return planes->GetPoints() && planes->GetNormals();
+    // vtkBoxRepresentation 的 GetTransform 是相对 PlaceWidget 的分解结果；
+    // 这里直接用当前角点重建 localToWorld，保证旋转/平移后的盒几何就是唯一真源。
+    auto boxPolyData = vtkSmartPointer<vtkPolyData>::New();
+    m_representation->GetPolyData(boxPolyData);
+    if (!boxPolyData->GetPoints() || boxPolyData->GetNumberOfPoints() < 8) {
+        return false;
+    }
+
+    double currentP0[3] = { 0.0, 0.0, 0.0 };
+    double currentP1[3] = { 0.0, 0.0, 0.0 };
+    double currentP3[3] = { 0.0, 0.0, 0.0 };
+    double currentP4[3] = { 0.0, 0.0, 0.0 };
+    boxPolyData->GetPoint(0, currentP0);
+    boxPolyData->GetPoint(1, currentP1);
+    boxPolyData->GetPoint(3, currentP3);
+    boxPolyData->GetPoint(4, currentP4);
+
+    auto localToWorldVtkMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    localToWorldVtkMatrix->Identity();
+    for (int row = 0; row < 3; ++row) {
+        const double localToWorldX =
+            (currentP1[row] - currentP0[row]) / localDimensions[0];
+        const double localToWorldY =
+            (currentP3[row] - currentP0[row]) / localDimensions[1];
+        const double localToWorldZ =
+            (currentP4[row] - currentP0[row]) / localDimensions[2];
+        const double localToWorldOffset =
+            currentP0[row]
+            - localToWorldX * m_widgetLocalBounds[0]
+            - localToWorldY * m_widgetLocalBounds[2]
+            - localToWorldZ * m_widgetLocalBounds[4];
+
+        localToWorldVtkMatrix->SetElement(row, 0, localToWorldX);
+        localToWorldVtkMatrix->SetElement(row, 1, localToWorldY);
+        localToWorldVtkMatrix->SetElement(row, 2, localToWorldZ);
+        localToWorldVtkMatrix->SetElement(row, 3, localToWorldOffset);
+    }
+
+    vtkMatrix4x4::DeepCopy(localToWorldMatrix.data(), localToWorldVtkMatrix);
+    return true;
 }
 
 void OrthogonalCropWidgetStateController::SetBoundsChangedCallback(BoundsChangedCallback callback)
@@ -124,6 +177,7 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
             return false;
         }
 
+        m_widgetLocalBounds = m_currentBounds;
         m_representation->PlaceWidget(m_currentBounds.data());
         m_widget->On();
     }

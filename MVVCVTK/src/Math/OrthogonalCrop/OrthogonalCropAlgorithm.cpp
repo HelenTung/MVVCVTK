@@ -78,30 +78,20 @@ bool GetBoundsContained(const std::array<double, 6>& inputBounds, const std::arr
         && rasBounds[5] <= inputBounds[5] + BoundsEpsilon;
 }
 
-std::array<double, 6> GetRasBoundsFromLocalDefinition(
-    const std::array<double, 3>& localCenter,
-    const std::array<double, 3>& localDimensions,
-    const std::array<double, 16>& localToInputMatrix)
+std::array<double, 6> GetRasBoundsFromBoxToInputMatrix(const std::array<double, 16>& boxToInputMatrixData)
 {
-    // LocalCenterAndDimensions 的几何还原流程：
-    // 1. 先在局部裁切参考系里恢复盒子的 8 个角点
-    // 2. 再用 localToInputMatrix 把这些角点送到后端输入坐标系
-    // 3. 最后回收成输入空间轴对齐 bounds，供统一校验、吸附和统计复用
-    // 交互预览路径里，这里的局部参考系通常就是 widget 所在的世界坐标系。
-    auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(localToInputMatrix.data());
+    // boxToInputMatrix 是标准盒 [-1,1]^3 到输入空间的唯一几何真源；
+    // AABB 只通过 8 个标准角点派生，用于统一校验、IJK 吸附和统计范围。
+    auto boxToInputTransform = vtkSmartPointer<vtkTransform>::New();
+    boxToInputTransform->SetMatrix(boxToInputMatrixData.data());
 
     vtkBoundingBox rasBounds;
     for (int sx = -1; sx <= 1; sx += 2) {
         for (int sy = -1; sy <= 1; sy += 2) {
             for (int sz = -1; sz <= 1; sz += 2) {
-                const double localToInputPoint[3] = {
-                    localCenter[0] + sx * localDimensions[0] * 0.5,
-                    localCenter[1] + sy * localDimensions[1] * 0.5,
-                    localCenter[2] + sz * localDimensions[2] * 0.5
-                };
+                const double boxPoint[3] = { static_cast<double>(sx), static_cast<double>(sy), static_cast<double>(sz) };
                 double inputPoint[3] = { 0.0, 0.0, 0.0 };
-                transform->TransformPoint(localToInputPoint, inputPoint);
+                boxToInputTransform->TransformPoint(boxPoint, inputPoint);
                 rasBounds.AddPoint(inputPoint);
             }
         }
@@ -123,14 +113,43 @@ std::array<double, 16> GetSourceToTargetMatrixArray(vtkMatrix4x4* sourceToTarget
     return sourceToTargetMatrixData;
 }
 
-vtkSmartPointer<vtkTransform> GetLocalToInputTransform(const std::array<double, 16>& localToInputMatrixData)
+vtkSmartPointer<vtkTransform> GetBoxToInputTransform(const std::array<double, 16>& boxToInputMatrixData)
 {
-    auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    localToInputMatrix->DeepCopy(localToInputMatrixData.data());
+    auto boxToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMatrix->DeepCopy(boxToInputMatrixData.data());
 
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(localToInputMatrix);
+    transform->SetMatrix(boxToInputMatrix);
     return transform;
+}
+
+vtkSmartPointer<vtkMatrix4x4> GetInputToBoxMatrix(const CropDataModel& cropData)
+{
+    auto boxToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMatrix->DeepCopy(cropData.GetBoxToInputMatrix().data());
+
+    auto inputToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToInputMatrix, inputToBoxMatrix);
+    return inputToBoxMatrix;
+}
+
+bool GetBoxToInputIsAxisAligned(const std::array<double, 16>& boxToInputMatrixData)
+{
+    // 只识别无旋转/无剪切的对角矩阵快路径；任意旋转或剪切仍走标准 inputToBox 判断。
+    return std::abs(boxToInputMatrixData[1]) <= BoundsEpsilon
+        && std::abs(boxToInputMatrixData[2]) <= BoundsEpsilon
+        && std::abs(boxToInputMatrixData[4]) <= BoundsEpsilon
+        && std::abs(boxToInputMatrixData[6]) <= BoundsEpsilon
+        && std::abs(boxToInputMatrixData[8]) <= BoundsEpsilon
+        && std::abs(boxToInputMatrixData[9]) <= BoundsEpsilon;
+}
+
+bool GetCanonicalBoxContainsPoint(const double boxPoint[4])
+{
+    const double invW = std::abs(boxPoint[3]) > 1e-12 ? 1.0 / boxPoint[3] : 1.0;
+    return std::abs(boxPoint[0] * invW) <= 1.0 + BoundsEpsilon
+        && std::abs(boxPoint[1] * invW) <= 1.0 + BoundsEpsilon
+        && std::abs(boxPoint[2] * invW) <= 1.0 + BoundsEpsilon;
 }
 
 std::array<double, 16> GetUpdatedOffsetMatrix(
@@ -199,8 +218,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
 {
     // virtual mask 的结果不是导出新体数据，而是构造一张用于预览的 inside/outside 掩码。
     // 整体流程分两段：
-    // 1. 先用 snapped IJK bounds 把执行域收缩到最小候选包围盒
-    // 2. 再根据是否 local-aligned 决定走整块填充还是逐体素 inside 判定
+    // 1. 先用 snapped IJK bounds 把执行域收缩到最小候选 AABB
+    // 2. 再用 inputToBox 把体素中心归一化到标准盒 [-1,1]^3 做 inside 判定
     if (!image) {
         return nullptr;
     }
@@ -272,9 +291,8 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         : totalVoxelCount;
     std::memset(maskPtr, outsideValue, static_cast<std::size_t>(allocatedVoxelCount));
 
-    if (!cropData.GetLocalAlignmentEnabled()) {
-        // 轴对齐盒没有额外姿态信息，候选 IJK 包围盒内部整块都属于 inside。
-        // 这里继续沿用拆分前的整块 memset 快路径，避免无意义的逐体素判断。
+    if (GetBoxToInputIsAxisAligned(cropData.GetBoxToInputMatrix())) {
+        // 标准盒矩阵退化为输入空间轴对齐盒时，snapped AABB 内部整块都属于 inside。
         if (useCompactMask) {
             std::memset(maskPtr, insideValue, static_cast<std::size_t>(allocatedVoxelCount));
         }
@@ -299,59 +317,38 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
         return maskImage;
     }
 
-    auto inputToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    const auto& localToInputMatrixData = cropData.GetLocalToInputMatrix();
-    localToInputMatrix->DeepCopy(localToInputMatrixData.data());
-    vtkMatrix4x4::Invert(localToInputMatrix, inputToLocalMatrix);
+    auto inputToBoxMatrix = GetInputToBoxMatrix(cropData);
 
-    const auto localCenter = cropData.GetLocalCenter();
-    const auto localDimensions = cropData.GetLocalDimensions();
-    const std::array<double, 3> localHalfDimensions = {
-        localDimensions[0] * 0.5,
-        localDimensions[1] * 0.5,
-        localDimensions[2] * 0.5
-    };
-
-    // 局部对齐盒的真实 inside 必须经过“体素中心 -> 输入 physical 空间 -> 局部裁切参考系”后再判断。
-    // 这里仍旧只在 snapped 包围盒范围内遍历，避免为了旋转盒额外扩张执行域。
+    // 旋转/缩放盒的真实 inside 由“体素中心 -> 输入 physical 空间 -> 标准盒空间”决定。
+    // 这里仍旧只在 snapped AABB 范围内遍历，避免为了旋转盒额外扩张执行域。
     std::size_t countedInsideVoxelCount = 0;
     const vtkIdType rowStride = useCompactMask ? width : dims[0];
     const vtkIdType sliceStride = useCompactMask
         ? static_cast<vtkIdType>(width) * height
         : static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-    const double inputToLocalStepVector[4] = {
+    const double inputToBoxStepVector[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
         indexToPhysicalMatrix->GetElement(2, 0),
         0.0
     };
-    double inputToLocalStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
-    inputToLocalMatrix->MultiplyPoint(inputToLocalStepVector, inputToLocalStepResult);
+    double inputToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+    inputToBoxMatrix->MultiplyPoint(inputToBoxStepVector, inputToBoxStepResult);
 
     for (int k = minK; k <= maxK; ++k) {
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
             double inputPoint[3] = { 0.0, 0.0, 0.0 };
             // 每一行先把 row 起点 index 转到输入 physical 空间，
-            // 再整体乘 inputToLocal；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
+            // 再整体乘 inputToBox；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
             image->TransformIndexToPhysicalPoint(rowStartIndex, inputPoint);
-            const double inputToLocalInputPoint[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
-            double inputToLocalOutputPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
-            inputToLocalMatrix->MultiplyPoint(inputToLocalInputPoint, inputToLocalOutputPoint);
+            const double inputPoint4[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
+            double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
+            inputToBoxMatrix->MultiplyPoint(inputPoint4, boxPoint);
             
             for (int i = minI; i <= maxI; ++i) {
-				const double invW = std::abs(inputToLocalOutputPoint[3]) > 1e-12 ? 1.0 / inputToLocalOutputPoint[3] : 1.0; // 除以齐次坐标的 w 分量，得到局部空间的实际坐标。这里加了一个小阈值避免除以零的情况。
-                const double localX = inputToLocalOutputPoint[0] * invW;
-                const double localY = inputToLocalOutputPoint[1] * invW;
-                const double localZ = inputToLocalOutputPoint[2] * invW; 
-                const bool isInside = localX >= localCenter[0] - localHalfDimensions[0] // 判断是否越界
-                    && localX <= localCenter[0] + localHalfDimensions[0]
-                    && localY >= localCenter[1] - localHalfDimensions[1]
-                    && localY <= localCenter[1] + localHalfDimensions[1]
-                    && localZ >= localCenter[2] - localHalfDimensions[2]
-                    && localZ <= localCenter[2] + localHalfDimensions[2];
+                const bool isInside = GetCanonicalBoxContainsPoint(boxPoint);
 
                 if (isInside) {
                     ++countedInsideVoxelCount;
@@ -365,10 +362,10 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
                     maskPtr[linearIndex] = insideValue; // 初始化
                 }
 
-                inputToLocalOutputPoint[0] += inputToLocalStepResult[0];
-                inputToLocalOutputPoint[1] += inputToLocalStepResult[1];
-                inputToLocalOutputPoint[2] += inputToLocalStepResult[2];
-                inputToLocalOutputPoint[3] += inputToLocalStepResult[3];
+                boxPoint[0] += inputToBoxStepResult[0];
+                boxPoint[1] += inputToBoxStepResult[1];
+                boxPoint[2] += inputToBoxStepResult[2];
+                boxPoint[3] += inputToBoxStepResult[3];
             }
         }
     }
@@ -424,45 +421,23 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
 
 vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cropData)
 {
-    if (cropData.GetLocalAlignmentEnabled()) {
-        // local-aligned 路径的结果语义是“局部盒真实姿态的轮廓”。
-        // 因此先在局部坐标系里生成轴对齐 cube，再乘 localToInputMatrix 回到后端输入坐标系。
-        const auto center = cropData.GetLocalCenter();
-        const auto dimensions = cropData.GetLocalDimensions();
+    // outline 的几何真源同样是标准盒 [-1,1]^3 + boxToInputMatrix。
+    auto cube = vtkSmartPointer<vtkCubeSource>::New();
+    const auto canonicalBounds = GetCanonicalCropBoxBounds();
+    cube->SetBounds(
+        canonicalBounds[0], canonicalBounds[1],
+        canonicalBounds[2], canonicalBounds[3],
+        canonicalBounds[4], canonicalBounds[5]);
+    cube->Update();
 
-        auto cube = vtkSmartPointer<vtkCubeSource>::New();
-        cube->SetBounds(
-            center[0] - dimensions[0] * 0.5,
-            center[0] + dimensions[0] * 0.5,
-            center[1] - dimensions[1] * 0.5,
-            center[1] + dimensions[1] * 0.5,
-            center[2] - dimensions[2] * 0.5,
-            center[2] + dimensions[2] * 0.5);
-        cube->Update();
-
-        auto localToInputTransform = GetLocalToInputTransform(cropData.GetLocalToInputMatrix());
-        auto transformFilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
-        transformFilter->SetInputConnection(cube->GetOutputPort());
-        transformFilter->SetTransform(localToInputTransform);
-        transformFilter->Update();
-
-        auto output = vtkSmartPointer<vtkPolyData>::New();
-        output->ShallowCopy(transformFilter->GetOutput());
-        return output;
-    }
-
-    const auto rasBounds = cropData.GetRasBounds();
-
-    // 轴对齐路径没有额外姿态信息，直接按输入空间 bounds 生成 outline 即可。
-    auto outline = vtkSmartPointer<vtkOutlineSource>::New();
-    outline->SetBounds(
-        rasBounds[0], rasBounds[1],
-        rasBounds[2], rasBounds[3],
-        rasBounds[4], rasBounds[5]);
-    outline->Update();
+    auto boxToInputTransform = GetBoxToInputTransform(cropData.GetBoxToInputMatrix());
+    auto transformFilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
+    transformFilter->SetInputConnection(cube->GetOutputPort());
+    transformFilter->SetTransform(boxToInputTransform);
+    transformFilter->Update();
 
     auto output = vtkSmartPointer<vtkPolyData>::New();
-    output->ShallowCopy(outline->GetOutput());
+    output->ShallowCopy(transformFilter->GetOutput());
     return output;
 }
 } // namespace
@@ -530,45 +505,11 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     std::string& message,
     bool allowPartialOverlap)
 {
-    // 这一步把多种 request 表达统一折叠成一个 CropDataModel，
-    // 后续统计、outline、mask、physical extract 都只认这一种内部表示。
-    // 结果语义固定为：m_rasBounds 始终落在“后端输入坐标系”下；
-    // 若启用 local-aligned，则额外保留局部盒参数与 local->input 的对齐矩阵。
+    // request 的几何真源只有 boxToInputMatrix；cropData 只额外缓存由它派生出的输入空间 AABB。
     cropData = CropDataModel();
     cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
-    cropData.SetLocalToInputMatrix(request.GetLocalToInputMatrix());
-
-    switch (request.GetBoundsMode()) {
-    case CropBoundsMode::InputVolumeBounds:
-        // 直接使用完整输入范围；常用于初始化或恢复“全量显示”。
-        cropData.SetLocalAlignmentEnabled(false);
-        cropData.SetRasBounds(inputBounds);
-        cropData.SetLocalCenter({ 0.0, 0.0, 0.0 });
-        cropData.SetLocalDimensions(cropData.GetDimensions());
-        break;
-    case CropBoundsMode::MinMaxCoordinates:
-        // 调用方已经直接给出了输入空间 bounds，不再额外换算。
-        cropData.SetLocalAlignmentEnabled(false);
-        cropData.SetRasBounds(request.GetRasBounds());
-        break;
-    case CropBoundsMode::CenterAndDimensions:
-        // 中心点 + 尺寸同样被解释为输入空间中的轴对齐盒。
-        cropData.SetLocalAlignmentEnabled(false);
-        cropData.SetCenterAndDimensions(request.GetCenter(), request.GetDimensions());
-        break;
-    case CropBoundsMode::LocalCenterAndDimensions:
-        // 局部模式会额外保留局部参考系中的中心/尺寸，
-        // 同时回收出一份输入空间轴对齐包围盒，供后续统一校验和 snapped IJK 计算使用。
-        cropData.SetLocalAlignmentEnabled(true);
-        cropData.SetLocalCenter(request.GetLocalCenter());
-        cropData.SetLocalDimensions(request.GetLocalDimensions());
-        // 世界坐标空间
-        cropData.SetRasBounds(GetRasBoundsFromLocalDefinition(
-            request.GetLocalCenter(),
-            request.GetLocalDimensions(),
-            request.GetLocalToInputMatrix()));
-        break;
-    }
+    cropData.SetBoxToInputMatrix(request.GetBoxToInputMatrix());
+    cropData.SetRasBounds(GetRasBoundsFromBoxToInputMatrix(request.GetBoxToInputMatrix()));
 
     return GetBoundsAreValid(inputBounds, cropData.GetRasBounds(), failureReason, message, allowPartialOverlap);
 }
@@ -683,8 +624,9 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     std::size_t insideVoxelCount = GetVoxelCountFromIjkBounds(snappedIjkBounds);
     const std::size_t bytesPerVoxel = GetImageBytesPerVoxel(image);
 
-    if (executionMode == CropExecutionMode::VirtualCrop && cropData.GetLocalAlignmentEnabled()) {
-        // 对局部对齐盒，virtual crop 的 inside 语义应以真实旋转盒体素数为准，
+    if (executionMode == CropExecutionMode::VirtualCrop
+        && !GetBoxToInputIsAxisAligned(cropData.GetBoxToInputMatrix())) {
+        // 对旋转/缩放盒，virtual crop 的 inside 语义应以真实标准盒体素数为准，
         // 不能继续沿用 snapped AABB 的包围盒体素数，否则 GetStatistics 与 GetResult 的统计会分叉。
         int dims[3] = { 0, 0, 0 };
         image->GetDimensions(dims);
@@ -699,60 +641,39 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
             insideVoxelCount = 0;
         }
         else {
-            auto inputToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            auto localToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            const auto& localToInputMatrixData = cropData.GetLocalToInputMatrix();
-            localToInputMatrix->DeepCopy(localToInputMatrixData.data());
-            vtkMatrix4x4::Invert(localToInputMatrix, inputToLocalMatrix);
-
-            const auto localCenter = cropData.GetLocalCenter();
-            const auto localDimensions = cropData.GetLocalDimensions();
-            const std::array<double, 3> localHalfDimensions = {
-                localDimensions[0] * 0.5,
-                localDimensions[1] * 0.5,
-                localDimensions[2] * 0.5
-            };
+            auto inputToBoxMatrix = GetInputToBoxMatrix(cropData);
 
             insideVoxelCount = 0;
             auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-            const double inputToLocalStepVector[4] = {
+            const double inputToBoxStepVector[4] = {
                 indexToPhysicalMatrix->GetElement(0, 0),
                 indexToPhysicalMatrix->GetElement(1, 0),
                 indexToPhysicalMatrix->GetElement(2, 0),
                 0.0
             };
-            double inputToLocalStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
-            inputToLocalMatrix->MultiplyPoint(inputToLocalStepVector, inputToLocalStepResult);
+            double inputToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+            inputToBoxMatrix->MultiplyPoint(inputToBoxStepVector, inputToBoxStepResult);
 
             for (int k = minK; k <= maxK; ++k) {
                 for (int j = minJ; j <= maxJ; ++j) {
                     const int rowStartIndex[3] = { minI, j, k };
                     double inputPoint[3] = { 0.0, 0.0, 0.0 };
                     image->TransformIndexToPhysicalPoint(rowStartIndex, inputPoint);
-                    const double inputToLocalInputPoint[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
-                    double inputToLocalOutputPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
-                    inputToLocalMatrix->MultiplyPoint(inputToLocalInputPoint, inputToLocalOutputPoint);
+                    const double inputPoint4[4] = { inputPoint[0], inputPoint[1], inputPoint[2], 1.0 };
+                    double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
+                    inputToBoxMatrix->MultiplyPoint(inputPoint4, boxPoint);
 
                     for (int i = minI; i <= maxI; ++i) {
-                        const double invW = std::abs(inputToLocalOutputPoint[3]) > 1e-12 ? 1.0 / inputToLocalOutputPoint[3] : 1.0;
-                        const double localX = inputToLocalOutputPoint[0] * invW;
-                        const double localY = inputToLocalOutputPoint[1] * invW;
-                        const double localZ = inputToLocalOutputPoint[2] * invW;
-                        const bool isInside = localX >= localCenter[0] - localHalfDimensions[0]
-                            && localX <= localCenter[0] + localHalfDimensions[0]
-                            && localY >= localCenter[1] - localHalfDimensions[1]
-                            && localY <= localCenter[1] + localHalfDimensions[1]
-                            && localZ >= localCenter[2] - localHalfDimensions[2]
-                            && localZ <= localCenter[2] + localHalfDimensions[2];
+                        const bool isInside = GetCanonicalBoxContainsPoint(boxPoint);
 
                         if (isInside) {
                             ++insideVoxelCount;
                         }
 
-                        inputToLocalOutputPoint[0] += inputToLocalStepResult[0];
-                        inputToLocalOutputPoint[1] += inputToLocalStepResult[1];
-                        inputToLocalOutputPoint[2] += inputToLocalStepResult[2];
-                        inputToLocalOutputPoint[3] += inputToLocalStepResult[3];
+                        boxPoint[0] += inputToBoxStepResult[0];
+                        boxPoint[1] += inputToBoxStepResult[1];
+                        boxPoint[2] += inputToBoxStepResult[2];
+                        boxPoint[3] += inputToBoxStepResult[3];
                     }
                 }
             }
@@ -861,7 +782,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetVirtualCropResult(
     // ── 步骤 3a：生成 mask ──
     // KeepInside  → ROI 大小 compact mask（memset 快路径）
     // RemoveInside → full-volume mask（标记盒外区域）
-    result.SetVirtualMaskImage(GetVirtualMaskImage(
+    result.SetVirtualMaskImage(::GetVirtualMaskImage(
         image,
         cropData,
         snappedIjkBounds,
@@ -948,11 +869,13 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     CropDataModel derivedCropData = cropData;
     double derivedBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     derivedImage->GetBounds(derivedBounds);
-    derivedCropData.SetRasBounds({
+    const CropBoundsDouble6Array derivedRasBounds = {
         derivedBounds[0], derivedBounds[1],
         derivedBounds[2], derivedBounds[3],
         derivedBounds[4], derivedBounds[5]
-    });
+    };
+    derivedCropData.SetBoxToInputMatrixFromBounds(derivedRasBounds);
+    derivedCropData.SetRasBounds(derivedRasBounds);
     derivedCropData.SetGlobalOffsetMatrix(
         GetUpdatedOffsetMatrix(
             cropData.GetGlobalOffsetMatrix(),
@@ -986,10 +909,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     result.SetCropStateModel(request.GetCropStateModel());
 
     // ── 请求归一化 ──
-    // 把四种 bounds mode 统一折叠为 CropDataModel：
-    //   InputVolumeBounds / MinMaxCoordinates → 直接取 inputBounds
-    //   CenterAndDimensions → 中心+尺寸换算为 rasBounds
-    //   LocalCenterAndDimensions → 局部盒经 localToInput 矩阵映射到输入空间
+    // request 只携带 boxToInputMatrix；cropData 额外派生输入空间 AABB 供后端执行。
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;

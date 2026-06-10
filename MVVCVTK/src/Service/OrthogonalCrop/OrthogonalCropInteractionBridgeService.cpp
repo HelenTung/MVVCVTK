@@ -11,19 +11,44 @@
 #include <vtkBoundingBox.h>
 #include <vtkBox.h>
 #include <vtkGeometryFilter.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlane.h>
 #include <vtkPlaneCollection.h>
-#include <vtkPlanes.h>
+#include <vtkShaderProperty.h>
 #include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
+#include <vtkUniforms.h>
 #include <vtkVolume.h>
 #include <vtkVolumeMapper.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <utility>
+
+namespace {
+constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
+constexpr const char* kVolumeRemoveInsideInputToBoxUniform = "mvvcvtk_volumeRemoveInsideInputToBox";
+constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
+
+constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
+    "//VTK::Base::Impl\n"
+    "    if (!g_skip && mvvcvtk_volumeRemoveInsideEnabled != 0)\n"
+    "      {\n"
+    "      vec4 mvvcvtk_inputPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
+    "      float mvvcvtk_inputInvW = abs(mvvcvtk_inputPoint.w) > 1e-6 ? 1.0 / mvvcvtk_inputPoint.w : 1.0;\n"
+    "      mvvcvtk_inputPoint = vec4(mvvcvtk_inputPoint.xyz * mvvcvtk_inputInvW, 1.0);\n"
+    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volumeRemoveInsideInputToBox * mvvcvtk_inputPoint;\n"
+    "      float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
+    "      vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
+    "      if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
+    "        {\n"
+    "        g_skip = true;\n"
+    "        }\n"
+    "      }\n";
+}
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
@@ -501,23 +526,46 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     // PolyData 路径 → Router 根据 activeInput bounds 构造
     auto previewRequest = GetDefaultRequest();
 
-    // ── 分支 ②：Widget 世界 box → LocalCenterAndDimensions 编码 ──
-    // center = widget 世界坐标盒中心
-    // dimensions = widget 世界坐标盒尺寸
-    // localToInputMatrix = GetWorldToModelMatrix()（参考渲染服务 modelToWorld 的逆）
-    // 这里的 local 就是 widget world；下游 Algorithm 用 localToInput/worldToModel 还原到后端输入坐标系
-    previewRequest.SetLocalCenterAndDimensions(
-        {
-            (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
-            (m_currentBounds[2] + m_currentBounds[3]) * 0.5,
-            (m_currentBounds[4] + m_currentBounds[5]) * 0.5
-        },
-        {
-            m_currentBounds[1] - m_currentBounds[0],
-            m_currentBounds[3] - m_currentBounds[2],
-            m_currentBounds[5] - m_currentBounds[4]
-        },
-        GetWorldToModelMatrix());
+    // ── 分支 ②：Widget 有向盒 → boxToInputMatrix 编码 ──
+    // 标准盒 [-1,1]^3 先映射到 widget local 盒，再经 localToWorld 和 worldToModel 进入后端输入空间。
+    CropVectorDouble3Array localCenter = {
+        (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
+        (m_currentBounds[2] + m_currentBounds[3]) * 0.5,
+        (m_currentBounds[4] + m_currentBounds[5]) * 0.5
+    };
+    CropVectorDouble3Array localDimensions = {
+        m_currentBounds[1] - m_currentBounds[0],
+        m_currentBounds[3] - m_currentBounds[2],
+        m_currentBounds[5] - m_currentBounds[4]
+    };
+    CropMatrixDouble16Array boxToInputMatrixData = GetIdentityMatrixArray();
+    CropMatrixDouble16Array localToWorldMatrixData = GetIdentityMatrixArray();
+    m_widgetStateController.GetCurrentLocalBox(
+        localCenter,
+        localDimensions,
+        localToWorldMatrixData);
+
+    auto boxToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToLocalMatrix->Identity();
+    for (int axis = 0; axis < 3; ++axis) {
+        boxToLocalMatrix->SetElement(axis, axis, localDimensions[axis] * 0.5);
+        boxToLocalMatrix->SetElement(axis, 3, localCenter[axis]);
+    }
+
+    auto localToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    localToWorldMatrix->DeepCopy(localToWorldMatrixData.data());
+
+    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(localToWorldMatrix, boxToLocalMatrix, boxToWorldMatrix);
+
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(GetWorldToModelMatrix().data());
+
+    auto boxToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(worldToModelMatrix, boxToWorldMatrix, boxToInputMatrix);
+    vtkMatrix4x4::DeepCopy(boxToInputMatrixData.data(), boxToInputMatrix);
+
+    previewRequest.SetBoxToInputMatrix(boxToInputMatrixData);
     previewRequest.SetExecutionMode(CropExecutionMode::VirtualCrop);
     previewRequest.SetRemovalMode(m_currentRemovalMode);
 
@@ -539,12 +587,12 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     }
 
     // ── 步骤 1：构建 preview request ──
-    // widget 世界坐标盒 → LocalCenterAndDimensions 编码
+    // widget 有向盒 → boxToInputMatrix 编码
     // 固定 VirtualCrop 模式 + 当前 removalMode
     const auto previewRequest = BuildPreviewRequest();
-
     // ── 分支 A：轻量预览（不触发完整 mask 管道） ──
     // 只做 cropData 归一化 + outline 生成，适合频繁拖拽场景
+    // volume RemoveInside 后端直接用 shader discard 消费 cropData，不再强制生成 virtualMaskImage。
     if (!m_previewRequiresFullArtifacts) {
         CropDataModel cropData;
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
@@ -689,30 +737,6 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
     }
 }
 
-vtkSmartPointer<vtkPlanes> OrthogonalCropInteractionBridgeService::GetCurrentWidgetPlanesForModelInput() const
-{
-    // widget controller 提供的是世界坐标平面；
-    // 这里给 vtkPlanes 挂上 modelToWorld transform，让 clip 在“评估模型点时”自动折叠到 widget 世界空间。
-    // 结果语义是：调用方可以直接拿这组 planes 去裁模型坐标下的 polydata，而不用先手动变换点。
-    auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
-    if (!m_widgetStateController.GetPlanes(worldPlanes)) {
-        return nullptr;
-    }
-
-    if (m_referenceRenderService) {
-        // vtkPlanes 内部 transform 会在求值时把模型点带到 widget 世界空间，
-        // 这样 3D 主模型 polydata clip 可以直接使用模型坐标输入。
-        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-
-        auto modelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-        modelToWorldTransform->SetMatrix(modelToWorldMatrix);
-        worldPlanes->SetTransform(modelToWorldTransform);
-    }
-
-    return worldPlanes;
-}
-
 const char* OrthogonalCropInteractionBridgeService::GetFailureReasonText(OrthogonalCropFailureReason failureReason)
 {
     switch (failureReason) {
@@ -811,8 +835,9 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
 {
     // preview 恢复流程：
     // 1. 清掉每个窗口的 overlay 内容
-    // 2. 3D 主窗口把 clip function 切回全量直通盒
-    // 3. 最后统一标脏，交给渲染阶段按需拉起
+    // 2. 3D volume 主窗口清掉 shader discard / mask / clipping 状态
+    // 3. 3D actor 主窗口把 clip function 切回全量直通盒
+    // 4. 最后统一标脏，交给渲染阶段按需拉起
     for (auto& target : m_previewRenderTargets) {
         if (target.overlayStrategy) {
             target.overlayStrategy->ClearPreview();
@@ -822,6 +847,11 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
             auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
             auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
             if (volumeMapper) {
+                volume->GetShaderProperty()->ClearFragmentShaderReplacement(kVolumeRemoveInsideBaseImplTag, true);
+                volume->GetShaderProperty()->GetFragmentCustomUniforms()->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
+                if (auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper)) {
+                    gpuVolumeMapper->SetMaskInput(nullptr);
+                }
                 volumeMapper->RemoveAllClippingPlanes();
                 volumeMapper->CroppingOff();
                 volumeMapper->SetCroppingRegionFlagsToSubVolume();
@@ -904,46 +934,135 @@ bool OrthogonalCropInteractionBridgeService::SetMainVolumePreviewApplied(
         return false;
     }
 
+    // 每次接管前先清空上一种 volume 后端表达，避免 KeepInside clipping
+    // 与 RemoveInside shader discard / mask 在反复切换时互相残留。
+    volume->GetShaderProperty()->ClearFragmentShaderReplacement(kVolumeRemoveInsideBaseImplTag, true);
+    volume->GetShaderProperty()->GetFragmentCustomUniforms()->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
+    if (auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper)) {
+        gpuVolumeMapper->SetMaskInput(nullptr);
+    }
     volumeMapper->RemoveAllClippingPlanes();
     volumeMapper->CroppingOff();
 
     if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
-        // vtkVolumeMapper cropping region 只能表达输入空间轴对齐 subvolume，
-        // 无法表达当前 widget 旋转盒的 RemoveInside 补集。这里不接管主 volume，
-        // 避免体渲染窗口显示出与等值面/polydata clip 不一致的错误预览。
-        volumeMapper->SetCroppingRegionFlagsToSubVolume();
+        auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
+        if (!SetVolumeRemoveInsidePreviewApplied(volume, gpuVolumeMapper, previewResult)) {
+            volumeMapper->SetCroppingRegionFlagsToSubVolume();
+            volume->Modified();
+            return false;
+        }
+
         volume->Modified();
-        return false;
+        return true;
     }
 
-    SetVolumeKeepInsidePreviewApplied(volumeMapper);
+    SetVolumeKeepInsidePreviewApplied(volumeMapper, previewResult);
     volume->Modified();
     return true;
 }
 
-void OrthogonalCropInteractionBridgeService::SetVolumeKeepInsidePreviewApplied(vtkVolumeMapper* volumeMapper) const
+void OrthogonalCropInteractionBridgeService::SetVolumeKeepInsidePreviewApplied(
+    vtkVolumeMapper* volumeMapper,
+    const OrthogonalCropResult& previewResult) const
 {
     if (!volumeMapper) {
         return;
     }
 
-    auto worldPlanes = vtkSmartPointer<vtkPlanes>::New();
-    if (!m_widgetStateController.GetPlanes(worldPlanes)) {
-        return;
+    const auto& cropData = previewResult.GetCropDataModel();
+    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    modelToWorldMatrix->Identity();
+    if (m_referenceRenderService) {
+        modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
     }
+
+    auto boxToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMatrix->DeepCopy(cropData.GetBoxToInputMatrix().data());
+
+    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(modelToWorldMatrix, boxToInputMatrix, boxToWorldMatrix);
+
+    auto boxToWorldTransform = vtkSmartPointer<vtkTransform>::New();
+    boxToWorldTransform->SetMatrix(boxToWorldMatrix);
 
     auto clippingPlanes = vtkSmartPointer<vtkPlaneCollection>::New();
-    const int planeCount = worldPlanes->GetNumberOfPlanes();
-    for (int planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
-        auto plane = vtkSmartPointer<vtkPlane>::New();
-        worldPlanes->GetPlane(planeIndex, plane);
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int sideIndex = 0; sideIndex < 2; ++sideIndex) {
+            const double side = sideIndex == 0 ? -1.0 : 1.0;
+            double boxOrigin[3] = { 0.0, 0.0, 0.0 };
+            boxOrigin[axis] = side;
 
-        double normal[3] = { 0.0, 0.0, 0.0 };
-        plane->GetNormal(normal);
-        plane->SetNormal(-normal[0], -normal[1], -normal[2]);
-        clippingPlanes->AddItem(plane);
+            double boxNormal[3] = { 0.0, 0.0, 0.0 };
+            boxNormal[axis] = -side;
+
+            double worldOrigin[3] = { 0.0, 0.0, 0.0 };
+            double worldNormal[3] = { 0.0, 0.0, 0.0 };
+            boxToWorldTransform->TransformPoint(boxOrigin, worldOrigin);
+            boxToWorldTransform->TransformNormal(boxNormal, worldNormal);
+
+            const double normalLength = std::sqrt(
+                worldNormal[0] * worldNormal[0]
+                + worldNormal[1] * worldNormal[1]
+                + worldNormal[2] * worldNormal[2]);
+            if (normalLength <= 1e-12) {
+                continue;
+            }
+
+            auto plane = vtkSmartPointer<vtkPlane>::New();
+            plane->SetOrigin(worldOrigin);
+            plane->SetNormal(
+                worldNormal[0] / normalLength,
+                worldNormal[1] / normalLength,
+                worldNormal[2] / normalLength);
+            clippingPlanes->AddItem(plane);
+        }
     }
+
+    // KeepInside 和 RemoveInside 都只消费 previewResult.cropData；
+    // 这里仅在 VTK volume clipping 需要的后端表达点，把 box/input 盒还原成 world planes。
     volumeMapper->SetClippingPlanes(clippingPlanes);
+}
+
+bool OrthogonalCropInteractionBridgeService::SetVolumeRemoveInsidePreviewApplied(
+    vtkVolume* volume,
+    vtkGPUVolumeRayCastMapper* volumeMapper,
+    const OrthogonalCropResult& previewResult) const
+{
+    if (!volume || !volumeMapper) {
+        return false;
+    }
+
+    const auto& cropData = previewResult.GetCropDataModel();
+    auto boxToInputMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMatrix->DeepCopy(cropData.GetBoxToInputMatrix().data());
+
+    auto inputToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToInputMatrix, inputToBoxMatrix);
+
+    auto shaderProperty = volume->GetShaderProperty();
+    shaderProperty->AddFragmentShaderReplacement(
+        kVolumeRemoveInsideBaseImplTag,
+        true,
+        kVolumeRemoveInsideBaseImplReplacement,
+        false);
+
+    // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
+    auto inputToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToBoxShaderMatrix->DeepCopy(inputToBoxMatrix);
+    inputToBoxShaderMatrix->Transpose();
+
+    // vtk volume shader 中 g_dataPos 是纹理坐标；in_textureDatasetMatrix[0] 才会把它还原到后端输入空间。
+    // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 inputToBox 需要先转置再交给 shader。
+    // uniforms 的声明由 VTK 的 CustomUniforms::Dec 自动生成，不能再手写到 Base::Dec，否则会重复声明。
+    auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
+    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideInputToBoxUniform, inputToBoxShaderMatrix);
+    fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 1);
+
+    volumeMapper->SetMaskInput(nullptr);
+    shaderProperty->Modified();
+    volumeMapper->Modified();
+    volume->Modified();
+    return true;
 }
 
 void OrthogonalCropInteractionBridgeService::RestoreMainPolyDataPreview(PreviewRenderTarget& target)
@@ -978,7 +1097,7 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
     // 应用流程固定为：
     // 1. 首次进入时抓一份稳定 source polydata，作为常驻 preview 管道输入
     // 2. 建 clip -> geometry 持久管道，并准备 pass-through box 作为“全量直通”状态
-    // 3. 后续每次刷新只更新 widget planes 和 InsideOut 语义，不再反复切换 mapper 输入
+    // 3. 后续每次刷新只更新 cropData 派生的 clip function 和 InsideOut 语义，不再反复切换 mapper 输入
 
     auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
     if (!actor) {
@@ -1029,15 +1148,27 @@ bool OrthogonalCropInteractionBridgeService::SetMainPolyDataPreviewApplied(
         mapper->SetInputConnection(target.mainPreviewGeometryFilter->GetOutputPort());
     }
 
-    auto clipPlanes = GetCurrentWidgetPlanesForModelInput();
-    if (!clipPlanes || !target.mainPreviewClipFilter || !target.mainPreviewGeometryFilter) {
+    if (!target.mainPreviewClipFilter || !target.mainPreviewGeometryFilter) {
         return false;
     }
 
-    // 这里每次只更新当前 widget planes 和 removal mode，
+    const auto& cropData = previewResult.GetCropDataModel();
+    auto clipFunction = vtkSmartPointer<vtkBox>::New();
+    const auto canonicalBounds = GetCanonicalCropBoxBounds();
+    clipFunction->SetBounds(
+        canonicalBounds[0], canonicalBounds[1],
+        canonicalBounds[2], canonicalBounds[3],
+        canonicalBounds[4], canonicalBounds[5]);
+
+    auto inputToBoxTransform = vtkSmartPointer<vtkTransform>::New();
+    inputToBoxTransform->SetMatrix(cropData.GetBoxToInputMatrix().data());
+    inputToBoxTransform->Inverse();
+    clipFunction->SetTransform(inputToBoxTransform);
+
+    // 这里每次只更新统一 cropData 派生出的 clip function 和 removal mode，
     // 持久管道本身不重建、不换输入，从而把卡顿点压缩到真正的 clip 执行上。
     // 结果说明：主窗口看到的是主模型本体被 clip 后的结果，而不是额外叠加的一份 overlay 网格。
-    target.mainPreviewClipFilter->SetClipFunction(clipPlanes);
+    target.mainPreviewClipFilter->SetClipFunction(clipFunction);
     if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
         target.mainPreviewClipFilter->InsideOutOn();
     }

@@ -93,7 +93,7 @@ public:
         std::size_t availableRamBytes = 0);
 
     // 算法总入口：先校验和归一化，再分发到 virtual / physical 两条执行链。
-    // 调用方不需要关心 request 的盒定义来自哪种模式，算法层会先折叠成统一 cropData。
+    // request 只携带 boxToInputMatrix；算法层会派生 AABB 并折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,

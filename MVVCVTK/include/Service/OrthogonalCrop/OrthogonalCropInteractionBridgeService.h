@@ -9,7 +9,7 @@
 // 交互主链路：
 // 1. ActivateInteractiveCrop 生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetBoundsChanged 持续记录世界坐标 bounds 与交互 phase
-// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把世界盒折叠成模型空间 request
+// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折叠成模型空间 request
 // 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
 // 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
@@ -31,7 +31,9 @@
 class vtkGeometryFilter;
 class vtkTableBasedClipDataSet;
 class vtkBox;
+class vtkVolume;
 class vtkVolumeMapper;
+class vtkGPUVolumeRayCastMapper;
 class OrthogonalCropInteractionBridgeService {
 public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
@@ -134,12 +136,12 @@ private:
     // 返回活跃输入在世界坐标下的 bounds，供 widget 摆放与默认盒生成。
     std::array<double, 6> GetActiveWorldBounds() const;
 
-    // 返回 world -> model 矩阵，供 LocalCenterAndDimensions 预览请求使用。
-    // 这是 world 中 widget 盒与 model 中真实裁切输入之间最关键的坐标桥。
+    // 返回 world -> model 矩阵，供 widget boxToWorld 继续组合为 boxToInput。
+    // 这是 widget 世界姿态与 model 中真实裁切输入之间最关键的坐标桥。
     std::array<double, 16> GetWorldToModelMatrix() const;
 
-    // 基于当前 widget bounds 组装一次 preview request。
-    // 这里会把世界坐标轴对齐盒转换成“局部中心 + 局部尺寸 + 对齐矩阵”的统一表达。
+    // 基于当前 widget 有向盒组装一次 preview request。
+    // 这里会把标准盒 [-1,1]^3 转换成 boxToInputMatrix 的统一表达。
     OrthogonalCropRequest BuildPreviewRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
@@ -147,9 +149,6 @@ private:
 
     // 切换 preview 开关与 removal mode。
     void TogglePreview(CropRemovalMode removalMode, bool logStats);
-
-    // 读取 widget 当前 6 个平面，并转换成模型输入可消费的 planes。
-    vtkSmartPointer<vtkPlanes> GetCurrentWidgetPlanesForModelInput() const;
 
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
@@ -175,8 +174,16 @@ private:
     // 在 3D volume 主窗口上执行一次 volume preview；仅接管 VTK mapper 能正确表达的模式。
     bool SetMainVolumePreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
 
-    // KeepInside 用 widget 平面裁切表达“只显示盒内”。
-    void SetVolumeKeepInsidePreviewApplied(vtkVolumeMapper* volumeMapper) const;
+    // KeepInside 从统一 cropData 还原世界平面，再交给 VTK volume clipping 表达“只显示盒内”。
+    void SetVolumeKeepInsidePreviewApplied(
+        vtkVolumeMapper* volumeMapper,
+        const OrthogonalCropResult& previewResult) const;
+
+    // RemoveInside 用 GPU volume shader discard 表达旋转盒外补集。
+    bool SetVolumeRemoveInsidePreviewApplied(
+        vtkVolume* volume,
+        vtkGPUVolumeRayCastMapper* volumeMapper,
+        const OrthogonalCropResult& previewResult) const;
 
     // 把某个 3D 主窗口的持久 preview 管道恢复成全量直通状态。
     void RestoreMainPolyDataPreview(PreviewRenderTarget& target);

@@ -31,12 +31,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropPluginService::GetInputImage() const
 OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
 {
     OrthogonalCropRequest request;
-    request.SetBoundsMode(CropBoundsMode::InputVolumeBounds);
     request.SetExecutionMode(CropExecutionMode::VirtualCrop);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
-    request.SetLocalToInputMatrix(GetIdentityMatrixArray());
-    request.SetLocalCenter({ 0.0, 0.0, 0.0 });
 
     if (!m_inputImage) {
         return request;
@@ -46,22 +43,11 @@ OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
     // 供交互桥在进入模式时派生出第一版 preview request。
     double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     m_inputImage->GetBounds(bounds);
-    request.SetRasBounds({
+    request.SetBoxToInputMatrixFromBounds({
         bounds[0], bounds[1],
         bounds[2], bounds[3],
         bounds[4], bounds[5]
     });
-    request.SetCenter({
-        (bounds[0] + bounds[1]) * 0.5,
-        (bounds[2] + bounds[3]) * 0.5,
-        (bounds[4] + bounds[5]) * 0.5
-    });
-    request.SetDimensions({
-        bounds[1] - bounds[0],
-        bounds[3] - bounds[2],
-        bounds[5] - bounds[4]
-    });
-    request.SetLocalDimensions(request.GetDimensions());
     return request;
 }
 

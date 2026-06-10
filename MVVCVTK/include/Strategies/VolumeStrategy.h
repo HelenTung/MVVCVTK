@@ -5,7 +5,7 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkImageResample.h>
 #include <vtkRenderer.h>
-#include <vtkSmartVolumeMapper.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 
 // --- 策略 B: 体渲染 ---
 class VolumeStrategy : public BaseVisualStrategy {
@@ -23,7 +23,7 @@ private:
     void SetCameraAligned(const std::array<double, 16>& modelMatrix); // 模型变换后保持相机相对观察关系不突变
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume; // 体渲染主 prop
-    vtkSmartPointer<vtkSmartVolumeMapper> m_mapper; // 体渲染 mapper，保持单实例复用，避免频繁重建
+    vtkSmartPointer<vtkGPUVolumeRayCastMapper> m_mapper; // GPU 体渲染 mapper，支持 RemoveInside shader discard 预览
     vtkSmartPointer<vtkImageResample> m_qualityResample; // 静止期 766 分辨率输入
     vtkSmartPointer<vtkImageResample> m_interactionResample; // 交互期 256 分辨率输入
     vtkSmartPointer<vtkDataObject> m_lastInput; // 最近一次绑定的数据快照，避免重复喂同一输入
