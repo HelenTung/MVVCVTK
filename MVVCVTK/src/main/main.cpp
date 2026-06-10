@@ -1,4 +1,4 @@
-﻿// =====================================================================
+// =====================================================================
 //
 // 三阶段结构（保持不变）：
 //   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / SetVisualConfig
@@ -30,7 +30,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "DataManager.h"
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
-#include "OrthogonalCrop/OrthogonalCropInteractionBridgeService.h"
+#include "OrthogonalCropInteractionBridgeService.h"
 
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="资源文件">
@@ -12,23 +12,47 @@
     <Filter Include="include\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Strategies\GapMeshOverlayStrategy">
+    <Filter Include="tools">
+      <UniqueIdentifier>{8a63dd27-4f90-49bc-97df-bf8adfeea6a1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis">
+      <UniqueIdentifier>{f4f27366-9d41-4a29-a905-cf54da6d39d2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include">
+      <UniqueIdentifier>{a6177ce6-2c77-47bb-8ac3-4eb5d08350d7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include\GapAnalysis">
+      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include\Service">
+      <UniqueIdentifier>{c7976d87-6825-471b-b609-d54d8e435a4d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include\Service\GapMeshOverlayService">
+      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include\Strategies">
+      <UniqueIdentifier>{d9dceca6-a587-4696-98a2-b7a748226dfb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy">
       <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Strategies\OrthogonalCropPreviewStrategy">
-      <UniqueIdentifier>{fa7bc6d6-ef88-45af-b4a7-6adca0b3927d}</UniqueIdentifier>
+    <Filter Include="tools\OrthogonalCrop">
+      <UniqueIdentifier>{d7bc8d21-38c0-4f6e-a9c8-cb7cfcc53e26}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\OrthogonalCrop\include">
+      <UniqueIdentifier>{a361b8d8-6e5c-473e-ab39-4272f587d4a2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\OrthogonalCrop\include\Service">
+      <UniqueIdentifier>{bf8806d9-f6f6-4fa3-81b7-2108d90aa977}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\OrthogonalCrop\include\Strategies">
+      <UniqueIdentifier>{d8ab8fe1-6a5b-4918-995d-61560cb3186c}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Utils">
       <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Math">
       <UniqueIdentifier>{daf8e20e-8217-4b2c-87ab-8ad66f8d5a02}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Math\GapAnalysis">
-      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Math\OrthogonalCrop">
-      <UniqueIdentifier>{9bda74ef-455f-4a83-8cc8-bb931bfcb1d4}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Interaction">
       <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
@@ -38,12 +62,6 @@
     </Filter>
     <Filter Include="include\Service">
       <UniqueIdentifier>{bc41cad7-f141-4d16-a4a6-700e21a5e52c}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Service\GapMeshOverlayService">
-      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="include\Service\OrthogonalCrop">
-      <UniqueIdentifier>{f605a9cb-31f6-4168-9489-f2ccddcfe2b9}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Data">
       <UniqueIdentifier>{35a3626f-de60-4e60-9e25-b32aff42bdf4}</UniqueIdentifier>
@@ -70,17 +88,17 @@
     <Filter Include="src\Service">
       <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\Service\OrthogonalCrop">
-      <UniqueIdentifier>{bb408546-4d9d-4bc0-8497-8876b82260f7}</UniqueIdentifier>
+    <Filter Include="tools\OrthogonalCrop\src">
+      <UniqueIdentifier>{3f6f4b4c-e572-49c0-afb0-92ce3e5f5f5d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\Strategies\OrthogonalCropPreviewStrategy">
-      <UniqueIdentifier>{98194483-608e-4e5c-8d05-0b9390f1956c}</UniqueIdentifier>
+    <Filter Include="tools\OrthogonalCrop\src\Service">
+      <UniqueIdentifier>{78584a27-f147-408c-920d-548e50794407}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tools\OrthogonalCrop\src\Strategies">
+      <UniqueIdentifier>{22dc60c7-d8d7-47d6-91f4-40315e4967c4}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Math">
       <UniqueIdentifier>{934b87ca-873a-4a65-b1a7-54c92bb8f0c0}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="src\Math\OrthogonalCrop">
-      <UniqueIdentifier>{3f6f4b4c-e572-49c0-afb0-92ce3e5f5f5d}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Data">
       <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>
@@ -105,8 +123,8 @@
     <ClInclude Include="include\Strategies\MultiSliceStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\OrthogonalCropPreviewStrategy\OrthogonalCropPreviewOverlayStrategy.h">
-      <Filter>include\Strategies\OrthogonalCropPreviewStrategy</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\Strategies\OrthogonalCropPreviewOverlayStrategy.h">
+      <Filter>tools\OrthogonalCrop\include\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h">
       <Filter>include\Strategies</Filter>
@@ -117,23 +135,23 @@
     <ClInclude Include="include\Utils\MemMappedFile.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\GapAnalysis\GapAnalysisTypes.h">
-      <Filter>include\Math\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\GapAnalysisTypes.h">
+      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\GapAnalysis\VolumeBuffer.h">
-      <Filter>include\Math\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VolumeBuffer.h">
+      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\GapAnalysis\SurfaceRefiner.h">
-      <Filter>include\Math\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\SurfaceRefiner.h">
+      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\OrthogonalCrop\OrthogonalCropAlgorithm.h">
-      <Filter>include\Math\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h">
+      <Filter>tools\OrthogonalCrop\include</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\OrthogonalCrop\OrthogonalCropTypes.h">
-      <Filter>include\Math\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h">
+      <Filter>tools\OrthogonalCrop\include</Filter>
     </ClInclude>
-    <ClInclude Include="include\Math\GapAnalysis\VoidDetector.h">
-      <Filter>include\Math\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VoidDetector.h">
+      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
     </ClInclude>
     <ClInclude Include="include\Interaction\Viewer3DHandler.h">
       <Filter>include\Interaction</Filter>
@@ -186,23 +204,23 @@
     <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h">
-      <Filter>include\Strategies\GapMeshOverlayStrategy</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h">
+      <Filter>tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\GapMeshOverlayService\GapAnalysisService.h">
-      <Filter>include\Service\GapMeshOverlayService</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\Service\GapMeshOverlayService\GapAnalysisService.h">
+      <Filter>tools\GapAnalysis\include\Service\GapMeshOverlayService</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropWidgetStateController.h">
-      <Filter>include\Service\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropBackendRouterService.h">
-      <Filter>include\Service\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropInteractionBridgeService.h">
-      <Filter>include\Service\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\OrthogonalCrop\OrthogonalCropPluginService.h">
-      <Filter>include\Service\OrthogonalCrop</Filter>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPluginService.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
     <ClInclude Include="include\Utils\InteractionComputeService.h">
       <Filter>include\Utils</Filter>
@@ -272,23 +290,23 @@
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="src\Math\OrthogonalCrop\OrthogonalCropAlgorithm.cpp">
-      <Filter>src\Math\OrthogonalCrop</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\OrthogonalCropAlgorithm.cpp">
+      <Filter>tools\OrthogonalCrop\src</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropBackendRouterService.cpp">
-      <Filter>src\Service\OrthogonalCrop</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropInteractionBridgeService.cpp">
-      <Filter>src\Service\OrthogonalCrop</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropPluginService.cpp">
-      <Filter>src\Service\OrthogonalCrop</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPluginService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\OrthogonalCrop\OrthogonalCropWidgetStateController.cpp">
-      <Filter>src\Service\OrthogonalCrop</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\OrthogonalCropPreviewStrategy\OrthogonalCropPreviewOverlayStrategy.cpp">
-      <Filter>src\Strategies\OrthogonalCropPreviewStrategy</Filter>
+    <ClCompile Include="tools\OrthogonalCrop\src\Strategies\OrthogonalCropPreviewOverlayStrategy.cpp">
+      <Filter>tools\OrthogonalCrop\src\Strategies</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
