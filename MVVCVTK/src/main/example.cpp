@@ -575,10 +575,10 @@ Step 11: 只让一个窗口进入 SetStarted()
 九、为什么 OrthogonalCrop preview 要这样设变量
 ─────────────────────────────────────────────────────────────────────
 
-1) 为什么 preview request 固定走 boxToInputMatrix
+1) 为什么 preview request 固定走 boxToModelMatrix
 - 因为 widget 盒子是在世界坐标中拖出来的。
-- 直接把世界 min/max 当成算法输入，会在模型发生旋转/平移后失真。
-- 所以 bridge 会把 widget 有向盒归一化成：标准盒 [-1,1]^3 + boxToInputMatrix。
+- 直接把 world min/max 当成算法 model bounds，会在模型发生旋转/平移后失真。
+- 所以 bridge 会把 widget 有向盒归一化成：标准盒 [-1,1]^3 + boxToModelMatrix。
 
 2) 为什么 referenceRenderService 和 previewRenderServices 必须分开
 - referenceRenderService 只负责坐标系问题。
@@ -622,7 +622,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 4. BuildPreviewRequest()
 - 从 router->GetDefaultRequest() 开始。
-- 覆盖为当前 widget 有向盒对应的 boxToInputMatrix。
+- 覆盖为当前 widget 有向盒对应的 boxToModelMatrix。
 - 写入当前 removalMode。
 - 写入 cropStateModel。
 
