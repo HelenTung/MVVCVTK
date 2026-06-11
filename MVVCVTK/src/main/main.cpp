@@ -531,15 +531,15 @@ int main()
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
     contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
 
-    auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
-    gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
-    gapAnalysisOverlayObserver->serviceA = serviceA;
-    gapAnalysisOverlayObserver->serviceB = serviceB;
-    gapAnalysisOverlayObserver->serviceC = serviceC;
-    gapAnalysisOverlayObserver->serviceD = serviceD;
-    gapAnalysisOverlayObserver->serviceE = serviceE;
-    gapAnalysisOverlayObserver->sharedState = sharedState;
-    contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
+    //auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
+    //gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
+    //gapAnalysisOverlayObserver->serviceA = serviceA;
+    //gapAnalysisOverlayObserver->serviceB = serviceB;
+    //gapAnalysisOverlayObserver->serviceC = serviceC;
+    //gapAnalysisOverlayObserver->serviceD = serviceD;
+    //gapAnalysisOverlayObserver->serviceE = serviceE;
+    //gapAnalysisOverlayObserver->sharedState = sharedState;
+    //contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle lightweight/full preview | Ctrl+3 = apply physical crop\n"
