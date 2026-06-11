@@ -8,8 +8,8 @@
 // =====================================================================
 // 交互主链路：
 // 1. ActivateInteractiveCrop 生成默认 widget bounds 并挂接 vtkBoxWidget2
-// 2. HandleWidgetBoundsChanged 持续记录世界坐标 bounds 与交互 phase
-// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折叠成模型空间 request
+// 2. HandleWidgetBoundsChanged 持续记录 reference render 交互坐标 bounds 与交互 phase
+// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折回 model request
 // 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
 // 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
@@ -52,7 +52,7 @@ public:
 
     // 以下查询接口统一透传给 backend router，方便 bridge 作为单一服务暴露给 main。
     OrthogonalCropDataSource GetActiveDataSource() const;
-    std::array<double, 6> GetActiveInputBounds() const;
+    std::array<double, 6> GetActiveModelBounds() const;
     OrthogonalCropRequest GetDefaultRequest() const;
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
@@ -63,7 +63,7 @@ public:
     // 主 interactor 由 3D 参考窗口提供，widget 只会挂到这个 interactor 上。
     void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
 
-    // 参考渲染服务负责世界/模型坐标互转。
+    // 参考渲染服务负责 world/model 坐标互转。
     void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
 
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
@@ -130,18 +130,19 @@ private:
     // 响应 widget 交互回调，记录 bounds/phase，并在 Released 时触发 preview。
     void HandleWidgetBoundsChanged(const std::array<double, 6>& bounds, CropInteractionPhase phase);
 
-    // 把后端模型/输入坐标系 bounds 提升为 widget 所需的世界坐标 bounds。
+    // 把 model bounds 提升为 widget 所需的 world bounds。
+    // image model 底层由 VTK physical-point API 表达。
     std::array<double, 6> GetModelBoundsAsWorldBounds(const std::array<double, 6>& modelBounds) const;
 
-    // 返回活跃输入在世界坐标下的 bounds，供 widget 摆放与默认盒生成。
+    // 返回活跃数据在 world 下的 bounds，供 widget 摆放与默认盒生成。
     std::array<double, 6> GetActiveWorldBounds() const;
 
-    // 返回 world -> model 矩阵，供 widget boxToWorld 继续组合为 boxToInput。
-    // 这是 widget 世界姿态与 model 中真实裁切输入之间最关键的坐标桥。
+    // 返回 world -> model 矩阵，供 widget boxToWorld 继续组合为 boxToModel。
+    // 这是 widget 交互姿态与后端 model 裁切之间最关键的坐标桥。
     std::array<double, 16> GetWorldToModelMatrix() const;
 
     // 基于当前 widget 有向盒组装一次 preview request。
-    // 这里会把标准盒 [-1,1]^3 转换成 boxToInputMatrix 的统一表达。
+    // 这里会把标准盒 [-1,1]^3 转换成 boxToModelMatrix 的统一表达。
     OrthogonalCropRequest BuildPreviewRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
@@ -218,7 +219,7 @@ private:
     // 当前 preview 是否强制要求完整后端结果；关闭时会走轻量 preview 路径。
     bool m_previewRequiresFullArtifacts = true;
 
-    // widget 当前世界坐标 bounds，也是 preview 请求的几何真源。
+    // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     // physical crop 重载期间持有提交缓冲，直到主线程回调收口。

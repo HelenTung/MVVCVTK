@@ -43,7 +43,7 @@ OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
     // 供交互桥在进入模式时派生出第一版 preview request。
     double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     m_inputImage->GetBounds(bounds);
-    request.SetBoxToInputMatrixFromBounds({
+    request.SetBoxToModelMatrixFromBounds({
         bounds[0], bounds[1],
         bounds[2], bounds[3],
         bounds[4], bounds[5]

@@ -23,25 +23,25 @@
 
 class OrthogonalCropAlgorithm {
 public:
-    // 校验一组输入 bounds 与目标裁切 bounds 是否满足执行前提。
+    // 校验一组数据 model bounds 与目标裁切 model bounds 是否满足执行前提。
     static bool GetBoundsAreValid(
-        const std::array<double, 6>& inputBounds,
-        const std::array<double, 6>& rasBounds,
+        const std::array<double, 6>& dataModelBounds,
+        const std::array<double, 6>& cropModelBounds,
         OrthogonalCropFailureReason& failureReason,
         std::string& message,
         bool allowPartialOverlap = false);
 
-    // 直接从 image 读取输入 bounds，再复用通用校验逻辑。
+    // 直接从 image 读取 model bounds，再复用通用校验逻辑。
     static bool GetBoundsAreValid(
         vtkImageData* image,
-        const std::array<double, 6>& rasBounds,
+        const std::array<double, 6>& cropModelBounds,
         OrthogonalCropFailureReason& failureReason,
         std::string& message,
         bool allowPartialOverlap = false);
 
     // 把 request 归一化为可执行的 CropDataModel。
     static bool GetCropDataModel(
-        const std::array<double, 6>& inputBounds,
+        const std::array<double, 6>& dataModelBounds,
         const OrthogonalCropRequest& request,
         CropDataModel& cropData,
         OrthogonalCropFailureReason& failureReason,
@@ -57,8 +57,8 @@ public:
         std::string& message,
         bool allowPartialOverlap = false);
 
-    // 把物理空间 bounds 吸附到当前 image 的 IJK 体素范围。
-    static std::array<int, 6> GetSnappedVoxelBounds(vtkImageData* image, const CropDataModel& cropData);
+    // 把 model bounds 吸附到当前 image 的 index 体素范围。
+    static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
 
     // 生成裁切盒 outline，供 overlay 和 3D 预览复用。
     static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
@@ -93,7 +93,7 @@ public:
         std::size_t availableRamBytes = 0);
 
     // 算法总入口：先校验和归一化，再分发到 virtual / physical 两条执行链。
-    // request 只携带 boxToInputMatrix；算法层会派生 AABB 并折叠成统一 cropData。
+    // request 只携带 boxToModelMatrix；算法层会派生 AABB 并折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,

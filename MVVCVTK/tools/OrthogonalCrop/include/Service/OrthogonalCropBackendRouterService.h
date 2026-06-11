@@ -44,8 +44,8 @@ public:
     // 返回本次请求实际会走到的活跃数据源。
     OrthogonalCropDataSource GetActiveDataSource() const;
 
-    // 返回当前活跃输入的原始空间 bounds。
-    std::array<double, 6> GetActiveInputBounds() const;
+    // 返回当前活跃数据的 model bounds。
+    std::array<double, 6> GetActiveModelBounds() const;
 
     // 构造与当前活跃输入一致的默认 request。
     OrthogonalCropRequest GetDefaultRequest() const;

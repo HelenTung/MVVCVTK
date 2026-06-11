@@ -76,7 +76,7 @@ OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource
     return OrthogonalCropDataSource::Auto;
 }
 
-std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveInputBounds() const
+std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveModelBounds() const
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     switch (GetActiveDataSource()) {
@@ -100,7 +100,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
     request.SetExecutionMode(CropExecutionMode::VirtualCrop);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
-    request.SetBoxToInputMatrixFromBounds(GetActiveInputBounds());
+    request.SetBoxToModelMatrixFromBounds(GetActiveModelBounds());
     return request;
 }
 
@@ -198,26 +198,26 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         && m_cachedPolyDataInput == m_inputPolyData.GetPointer()
         && m_cachedPolyDataRemovalMode == removalMode
         && m_cachedClippedPolyData;
-    // 第2层-RasBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切，边界盒看看有无变化
+    // 第2层-ModelBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切，边界盒看看有无变化
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
-        const auto& cachedRasBounds = m_cachedPolyDataCropData.GetRasBounds();
-        const auto& rasBounds = cropData.GetRasBounds();
-        for (std::size_t index = 0; index < rasBounds.size(); ++index) {
-            if (std::abs(cachedRasBounds[index] - rasBounds[index]) > epsilon) {
+        const auto& cachedModelBounds = m_cachedPolyDataCropData.GetModelBounds();
+        const auto& modelBounds = cropData.GetModelBounds();
+        for (std::size_t index = 0; index < modelBounds.size(); ++index) {
+            if (std::abs(cachedModelBounds[index] - modelBounds[index]) > epsilon) {
                 canReuseCachedClip = false;
                 break;
             }
         }
     }
 
-    // 第3层-boxToInputMatrix：16 个值逐元素比较，旋转/平移/缩放任一变化都触发重裁切。
+    // 第3层-boxToModelMatrix：16 个值逐元素比较，旋转/平移/缩放任一变化都触发重裁切。
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
-        const auto& cachedBoxToInputMatrix = m_cachedPolyDataCropData.GetBoxToInputMatrix();
-        const auto& boxToInputMatrixData = cropData.GetBoxToInputMatrix();
-        for (std::size_t index = 0; index < boxToInputMatrixData.size(); ++index) {
-            if (std::abs(cachedBoxToInputMatrix[index] - boxToInputMatrixData[index]) > epsilon) {
+        const auto& cachedBoxToModelMatrix = m_cachedPolyDataCropData.GetBoxToModelMatrix();
+        const auto& boxToModelMatrixData = cropData.GetBoxToModelMatrix();
+        for (std::size_t index = 0; index < boxToModelMatrixData.size(); ++index) {
+            if (std::abs(cachedBoxToModelMatrix[index] - boxToModelMatrixData[index]) > epsilon) {
                 canReuseCachedClip = false;
                 break;
             }
@@ -231,7 +231,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
 
     // ═══ 缓存未命中 === 构造 vtkBox 隐函数
     //   此函数接收的是 CropDataModel (已在 GetPolyDataCropDataModel 中归一化)。
-    //   vtkBox 固定表达标准盒 [-1,1]^3，inputToBox transform 负责把输入点送回标准盒空间。
+    //   vtkBox 固定表达标准盒 [-1,1]^3，modelToBox transform 负责把 model 点送回标准盒空间。
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     const auto canonicalBounds = GetCanonicalCropBoxBounds();
     clipFunction->SetBounds(
@@ -239,10 +239,10 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         canonicalBounds[2], canonicalBounds[3],
         canonicalBounds[4], canonicalBounds[5]);
 
-    auto inputToBoxTransform = vtkSmartPointer<vtkTransform>::New();
-    inputToBoxTransform->SetMatrix(cropData.GetBoxToInputMatrix().data());
-    inputToBoxTransform->Inverse();
-    clipFunction->SetTransform(inputToBoxTransform);
+    auto modelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
+    modelToBoxTransform->SetMatrix(cropData.GetBoxToModelMatrix().data());
+    modelToBoxTransform->Inverse();
+    clipFunction->SetTransform(modelToBoxTransform);
 
     // ═══ 懒初始化 VTK 裁切管道: TableBasedClipDataSet → GeometryFilter → PolyData
     // 整个 Router 生命周期只创建一次，后续调用只更换输入
@@ -455,8 +455,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     result.SetCropStateModel(request.GetCropStateModel());
 
     // ── 步骤 1：请求归一化 ──
-    // GetPolyDataCropDataModel → Algorithm::GetCropDataModel(inputBounds, request)
-    // boxToInputMatrix → CropDataModel，allowPartialOverlap=true
+    // GetPolyDataCropDataModel → Algorithm::GetCropDataModel(modelBounds, request)
+    // boxToModelMatrix → CropDataModel，allowPartialOverlap=true
     if (!m_inputPolyData) {
         result.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
         result.SetMessage("Input polydata is null.");
@@ -473,7 +473,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     }
 
     // ── 步骤 2：裁切执行 ──
-    // GetClippedPolyData 内部含缓存判断（inputPtr / rasBounds / boxToInputMatrix）
+    // GetClippedPolyData 内部含缓存判断（inputPtr / modelBounds / boxToModelMatrix）
     // 缓存未命中时构建 vtkBox → TableBasedClipDataSet → GeometryFilter 管道
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {

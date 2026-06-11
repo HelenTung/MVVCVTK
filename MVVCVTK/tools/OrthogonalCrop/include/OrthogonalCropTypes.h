@@ -27,7 +27,7 @@
 using CropBoundsDouble6Array = std::array<double, 6>;
 using CropVectorDouble3Array = std::array<double, 3>;
 using CropMatrixDouble16Array = std::array<double, 16>; // 4x4 仿射变换矩阵，按 VTK DeepCopy 约定展开。
-using CropIjkBoundsInt6Array = std::array<int, 6>;
+using CropIndexBoundsInt6Array = std::array<int, 6>;
 
 // 返回 4x4 单位矩阵，作为 request/result 中各种坐标补偿矩阵的默认值。
 inline std::array<double, 16> GetIdentityMatrixArray()
@@ -40,21 +40,21 @@ inline std::array<double, 16> GetIdentityMatrixArray()
     };
 }
 
-// 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToInputMatrix 作为几何真源。
+// 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToModelMatrix 作为几何真源。
 inline std::array<double, 6> GetCanonicalCropBoxBounds()
 {
     return { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
 }
 
-// 从输入空间轴对齐 bounds 构造标准盒到输入坐标系的矩阵。
-inline std::array<double, 16> GetBoxToInputMatrixFromBounds(const std::array<double, 6>& inputBounds)
+// 从 model 轴对齐 bounds 构造标准盒到 model 的矩阵。
+inline std::array<double, 16> GetBoxToModelMatrixFromBounds(const std::array<double, 6>& modelBounds)
 {
-    const double centerX = (inputBounds[0] + inputBounds[1]) * 0.5;
-    const double centerY = (inputBounds[2] + inputBounds[3]) * 0.5;
-    const double centerZ = (inputBounds[4] + inputBounds[5]) * 0.5;
-    const double halfX = (inputBounds[1] - inputBounds[0]) * 0.5;
-    const double halfY = (inputBounds[3] - inputBounds[2]) * 0.5;
-    const double halfZ = (inputBounds[5] - inputBounds[4]) * 0.5;
+    const double centerX = (modelBounds[0] + modelBounds[1]) * 0.5;
+    const double centerY = (modelBounds[2] + modelBounds[3]) * 0.5;
+    const double centerZ = (modelBounds[4] + modelBounds[5]) * 0.5;
+    const double halfX = (modelBounds[1] - modelBounds[0]) * 0.5;
+    const double halfY = (modelBounds[3] - modelBounds[2]) * 0.5;
+    const double halfZ = (modelBounds[5] - modelBounds[4]) * 0.5;
 
     return {
         halfX, 0.0,   0.0,   centerX,
@@ -108,18 +108,18 @@ enum class OrthogonalCropResolvedBackend {
 enum class CropHandleId {
     // 当前没有任何有效手柄被激活。
     None,
-    // R 轴负方向平面手柄。
-    MinR,
-    // R 轴正方向平面手柄。
-    MaxR,
-    // A 轴负方向平面手柄。
-    MinA,
-    // A 轴正方向平面手柄。
-    MaxA,
-    // S 轴负方向平面手柄。
-    MinS,
-    // S 轴正方向平面手柄。
-    MaxS,
+    // model X 轴负方向平面手柄。
+    MinModelX,
+    // model X 轴正方向平面手柄。
+    MaxModelX,
+    // model Y 轴负方向平面手柄。
+    MinModelY,
+    // model Y 轴正方向平面手柄。
+    MaxModelY,
+    // model Z 轴负方向平面手柄。
+    MinModelZ,
+    // model Z 轴正方向平面手柄。
+    MaxModelZ,
     // 中心平移手柄，代表整体拖拽裁切盒。
     Center
 };
@@ -160,49 +160,49 @@ enum class OrthogonalCropFailureReason {
     DerivedPolyDataCreationFailed
 };
 
-// 纯几何数据快照：boxToInputMatrix 是标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
+// 纯几何数据快照：boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源。
 class CropDataModel {
 public:
-    // 返回标准盒到后端输入坐标系的变换矩阵。
-    const CropMatrixDouble16Array& GetBoxToInputMatrix() const { return m_boxToInputMatrix; }
+    // 返回标准盒到 model 的变换矩阵。
+    const CropMatrixDouble16Array& GetBoxToModelMatrix() const { return m_boxToModelMatrix; }
 
-    // 写入标准盒到后端输入坐标系的变换矩阵。
-    void SetBoxToInputMatrix(const CropMatrixDouble16Array& boxToInputMatrix) { m_boxToInputMatrix = boxToInputMatrix; }
+    // 写入标准盒到 model 的变换矩阵。
+    void SetBoxToModelMatrix(const CropMatrixDouble16Array& boxToModelMatrix) { m_boxToModelMatrix = boxToModelMatrix; }
 
-    // 用输入空间轴对齐 bounds 重建 boxToInputMatrix；适合默认全量盒或 physical 结果回填。
-    void SetBoxToInputMatrixFromBounds(const CropBoundsDouble6Array& inputBounds)
+    // 用 model 轴对齐 bounds 重建 boxToModelMatrix；适合默认全量盒或 physical 结果回填。
+    void SetBoxToModelMatrixFromBounds(const CropBoundsDouble6Array& modelBounds)
     {
-        m_boxToInputMatrix = GetBoxToInputMatrixFromBounds(inputBounds);
+        m_boxToModelMatrix = GetBoxToModelMatrixFromBounds(modelBounds);
     }
 
-    // 返回由 boxToInputMatrix 派生出的输入空间 AABB。
-    // image 路径对应 vtkImageData physical 坐标；polydata 路径对应模型输入坐标。
-    const CropBoundsDouble6Array& GetRasBounds() const { return m_rasBounds; }
+    // 返回由 boxToModelMatrix 派生出的 model AABB。
+    // image model 底层由 VTK physical-point API 表达；polydata model 对应网格自身坐标。
+    const CropBoundsDouble6Array& GetModelBounds() const { return m_modelBounds; }
 
-    // 写入派生输入空间 AABB；只作为执行/校验范围缓存，不再是裁切盒真源。
-    void SetRasBounds(const CropBoundsDouble6Array& rasBounds) { m_rasBounds = rasBounds; }
+    // 写入派生 model AABB；只作为执行/校验范围缓存，不再是裁切盒真源。
+    void SetModelBounds(const CropBoundsDouble6Array& modelBounds) { m_modelBounds = modelBounds; }
 
-    // 根据当前 bounds 反推后端输入坐标系中的中心点。
+    // 根据当前 bounds 反推 model 中的中心点。
     std::array<double, 3> GetCenter() const
     {
         return {
-            (m_rasBounds[0] + m_rasBounds[1]) * 0.5,
-            (m_rasBounds[2] + m_rasBounds[3]) * 0.5,
-            (m_rasBounds[4] + m_rasBounds[5]) * 0.5
+            (m_modelBounds[0] + m_modelBounds[1]) * 0.5,
+            (m_modelBounds[2] + m_modelBounds[3]) * 0.5,
+            (m_modelBounds[4] + m_modelBounds[5]) * 0.5
         };
     }
 
-    // 根据当前 bounds 反推后端输入坐标系中的三轴尺寸。
+    // 根据当前 bounds 反推 model 中的三轴尺寸。
     std::array<double, 3> GetDimensions() const
     {
         return {
-            m_rasBounds[1] - m_rasBounds[0],
-            m_rasBounds[3] - m_rasBounds[2],
-            m_rasBounds[5] - m_rasBounds[4]
+            m_modelBounds[1] - m_modelBounds[0],
+            m_modelBounds[3] - m_modelBounds[2],
+            m_modelBounds[5] - m_modelBounds[4]
         };
     }
 
-    // 返回当前裁切盒在后端输入坐标系中的体积估计值；用于日志或粗粒度规模判断。
+    // 返回当前裁切盒在 model 中的体积估计值；用于日志或粗粒度规模判断。
     double GetPhysicalVolume() const
     {
         const auto dimensions = GetDimensions();
@@ -216,10 +216,10 @@ public:
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
 private:
-    // 标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
-    std::array<double, 16> m_boxToInputMatrix = GetIdentityMatrixArray();
-    // 由 boxToInputMatrix 派生出的输入空间 AABB，用于 bounds 校验、IJK 吸附和粗粒度执行范围。
-    std::array<double, 6> m_rasBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 标准盒 [-1,1]^3 到 model 的唯一几何真源。
+    std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
+    // 由 boxToModelMatrix 派生出的 model AABB，用于 bounds 校验、index 吸附和粗粒度执行范围。
+    std::array<double, 6> m_modelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 全局偏移矩阵，用于把后端结果重新对齐回上层共享坐标语义。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
 };
@@ -278,19 +278,19 @@ private:
     CropInteractionPhase m_interactionPhase = CropInteractionPhase::Idle;
 };
 
-// 一次裁切执行请求：boxToInputMatrix 是标准盒 [-1,1]^3 到后端输入坐标系的唯一几何真源。
+// 一次裁切执行请求：boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源。
 class OrthogonalCropRequest {
 public:
-    // 返回标准裁切盒到后端输入坐标系的矩阵。
-    const CropMatrixDouble16Array& GetBoxToInputMatrix() const { return m_boxToInputMatrix; }
+    // 返回标准裁切盒到 model 的矩阵。
+    const CropMatrixDouble16Array& GetBoxToModelMatrix() const { return m_boxToModelMatrix; }
 
-    // 写入标准裁切盒到后端输入坐标系的矩阵。
-    void SetBoxToInputMatrix(const CropMatrixDouble16Array& boxToInputMatrix) { m_boxToInputMatrix = boxToInputMatrix; }
+    // 写入标准裁切盒到 model 的矩阵。
+    void SetBoxToModelMatrix(const CropMatrixDouble16Array& boxToModelMatrix) { m_boxToModelMatrix = boxToModelMatrix; }
 
-    // 用输入空间轴对齐 bounds 构造标准盒请求。
-    void SetBoxToInputMatrixFromBounds(const CropBoundsDouble6Array& inputBounds)
+    // 用 model 轴对齐 bounds 构造标准盒请求。
+    void SetBoxToModelMatrixFromBounds(const CropBoundsDouble6Array& modelBounds)
     {
-        m_boxToInputMatrix = GetBoxToInputMatrixFromBounds(inputBounds);
+        m_boxToModelMatrix = GetBoxToModelMatrixFromBounds(modelBounds);
     }
 
     // 返回本次请求是 VirtualCrop 还是 PhysicalCrop。
@@ -324,8 +324,8 @@ public:
     void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
-    // 标准裁切盒 [-1,1]^3 到后端输入坐标系的矩阵。
-    std::array<double, 16> m_boxToInputMatrix = GetIdentityMatrixArray();
+    // 标准裁切盒 [-1,1]^3 到 model 的矩阵。
+    std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
     CropExecutionMode m_executionMode = CropExecutionMode::VirtualCrop;
     // inside / outside 的保留语义；影响虚拟 mask 取值和物理裁切合法性判断。
@@ -382,11 +382,11 @@ public:
     // 写入当前请求的内存预估值。
     void SetEstimatedRamUsageBytes(std::size_t ramUsageBytes) { m_estimatedRamUsageBytes = ramUsageBytes; }
 
-    // 返回 image 路径吸附后的 IJK 边界。
-    const CropIjkBoundsInt6Array& GetSnappedIjkBounds() const { return m_snappedIjkBounds; }
+    // 返回 image 路径吸附后的 index 边界。
+    const CropIndexBoundsInt6Array& GetSnappedIndexBounds() const { return m_snappedIndexBounds; }
 
-    // 写入 image 路径吸附后的 IJK 边界。
-    void SetSnappedIjkBounds(const CropIjkBoundsInt6Array& ijkBounds) { m_snappedIjkBounds = ijkBounds; }
+    // 写入 image 路径吸附后的 index 边界。
+    void SetSnappedIndexBounds(const CropIndexBoundsInt6Array& indexBounds) { m_snappedIndexBounds = indexBounds; }
 
     // 返回当前是否允许继续执行 physical crop。
     bool GetCanExecutePhysicalCrop() const { return m_canExecutePhysicalCrop; }
@@ -427,8 +427,8 @@ private:
     std::size_t m_outputVoxelCount = 0;
     // 当前请求若继续执行，预估至少需要的内存量；主要服务 physical crop 风险判断。
     std::size_t m_estimatedRamUsageBytes = 0;
-    // image 路径里世界坐标 bounds 吸附后的 IJK 整数边界；供 mask/VOI 提取直接复用。
-    std::array<int, 6> m_snappedIjkBounds = { 0, 0, 0, 0, 0, 0 };
+    // image 路径里 model bounds 吸附后的 index 整数边界；供 mask/VOI 提取直接复用。
+    std::array<int, 6> m_snappedIndexBounds = { 0, 0, 0, 0, 0, 0 };
     // 当前统计是否允许继续做 physical crop；会综合 removal mode 与内存约束。
     bool m_canExecutePhysicalCrop = false;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
