@@ -3,10 +3,10 @@
 // GapAnalysisService.h — IGapAnalysisService 实现
 // =====================================================================
 
-#include "GapAnalysis/GapAnalysisTypes.h"
-#include "GapAnalysis/VolumeBuffer.h"
-#include "GapAnalysis/VoidDetector.h"
-#include "GapAnalysis/SurfaceRefiner.h"
+#include "GapAnalysisTypes.h"
+#include "VolumeBuffer.h"
+#include "VoidDetector.h"
+#include "SurfaceRefiner.h"
 #include "AppInterfaces.h"
 
 #include <vtkSmartPointer.h>

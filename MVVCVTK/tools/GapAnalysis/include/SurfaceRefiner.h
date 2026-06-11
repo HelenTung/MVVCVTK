@@ -1,11 +1,11 @@
 //#pragma once
 //// =====================================================================
-//// Path: MVVCVTK/tools/GapAnalysis/include/GapAnalysis/SurfaceRefiner.h
+//// Path: MVVCVTK/tools/GapAnalysis/include/SurfaceRefiner.h
 //// SurfaceRefiner.h — 沿表面法向精化顶点位置（纯算法）
 //// =====================================================================
 //
-//#include "GapAnalysis/VolumeBuffer.h"
-//#include "GapAnalysis/GapAnalysisTypes.h"
+//#include "VolumeBuffer.h"
+//#include "GapAnalysisTypes.h"
 //#include <vtkSmartPointer.h>
 //#include <vtkPolyData.h>
 //#include <vtkPointData.h>

@@ -21,20 +21,11 @@
     <Filter Include="tools\GapAnalysis\include">
       <UniqueIdentifier>{a6177ce6-2c77-47bb-8ac3-4eb5d08350d7}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis\include\GapAnalysis">
-      <UniqueIdentifier>{01f8d78d-24f9-42a0-865c-72acbc655e7d}</UniqueIdentifier>
-    </Filter>
     <Filter Include="tools\GapAnalysis\include\Service">
       <UniqueIdentifier>{c7976d87-6825-471b-b609-d54d8e435a4d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis\include\Service\GapMeshOverlayService">
-      <UniqueIdentifier>{cacb958d-e7fc-4d17-90dd-ade720c21bfd}</UniqueIdentifier>
-    </Filter>
     <Filter Include="tools\GapAnalysis\include\Strategies">
       <UniqueIdentifier>{d9dceca6-a587-4696-98a2-b7a748226dfb}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy">
-      <UniqueIdentifier>{2f95694d-2ddf-4b0e-a587-3ec67b7afbb8}</UniqueIdentifier>
     </Filter>
     <Filter Include="tools\OrthogonalCrop">
       <UniqueIdentifier>{d7bc8d21-38c0-4f6e-a9c8-cb7cfcc53e26}</UniqueIdentifier>
@@ -135,14 +126,14 @@
     <ClInclude Include="include\Utils\MemMappedFile.h">
       <Filter>include\Utils</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\GapAnalysisTypes.h">
-      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysisTypes.h">
+      <Filter>tools\GapAnalysis\include</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VolumeBuffer.h">
-      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h">
+      <Filter>tools\GapAnalysis\include</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\SurfaceRefiner.h">
-      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\SurfaceRefiner.h">
+      <Filter>tools\GapAnalysis\include</Filter>
     </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h">
       <Filter>tools\OrthogonalCrop\include</Filter>
@@ -150,8 +141,8 @@
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>tools\OrthogonalCrop\include</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VoidDetector.h">
-      <Filter>tools\GapAnalysis\include\GapAnalysis</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\VoidDetector.h">
+      <Filter>tools\GapAnalysis\include</Filter>
     </ClInclude>
     <ClInclude Include="include\Interaction\Viewer3DHandler.h">
       <Filter>include\Interaction</Filter>
@@ -204,11 +195,11 @@
     <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
       <Filter>include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h">
-      <Filter>tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapAlgorithmOverlayStrategies.h">
+      <Filter>tools\GapAnalysis\include\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\Service\GapMeshOverlayService\GapAnalysisService.h">
-      <Filter>tools\GapAnalysis\include\Service\GapMeshOverlayService</Filter>
+    <ClInclude Include="tools\GapAnalysis\include\Service\GapAnalysisService.h">
+      <Filter>tools\GapAnalysis\include\Service</Filter>
     </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>

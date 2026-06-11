@@ -1,11 +1,11 @@
 #pragma once
 // =====================================================================
-// Path: MVVCVTK/tools/GapAnalysis/include/GapAnalysis/VoidDetector.h
+// Path: MVVCVTK/tools/GapAnalysis/include/VoidDetector.h
 // VoidDetector.h — 空洞检测纯算法层
 // =====================================================================
 
-#include "GapAnalysis/VolumeBuffer.h"
-#include "GapAnalysis/GapAnalysisTypes.h"
+#include "VolumeBuffer.h"
+#include "GapAnalysisTypes.h"
 #include <vtkSMPTools.h>
 #include <vtkMath.h>
 #include <vector>

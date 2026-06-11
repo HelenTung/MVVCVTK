@@ -1,6 +1,6 @@
 #pragma once
 // =====================================================================
-// Path: MVVCVTK/tools/GapAnalysis/include/GapAnalysis/VolumeBuffer.h
+// Path: MVVCVTK/tools/GapAnalysis/include/VolumeBuffer.h
 // VolumeBuffer.h — 纯体素访问层（无文件加载，无 I/O）
 //
 // =====================================================================

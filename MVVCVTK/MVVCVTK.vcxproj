@@ -70,7 +70,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math;$(ProjectDir)tools\GapAnalysis\include;$(ProjectDir)tools\GapAnalysis\include\Service\GapMeshOverlayService;$(ProjectDir)tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy;$(ProjectDir)tools\OrthogonalCrop\include;$(ProjectDir)tools\OrthogonalCrop\include\Service;$(ProjectDir)tools\OrthogonalCrop\include\Strategies;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Strategies;$(ProjectDir)include\Utils</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math;$(ProjectDir)tools\GapAnalysis\include;$(ProjectDir)tools\GapAnalysis\include\Service;$(ProjectDir)tools\GapAnalysis\include\Strategies;$(ProjectDir)tools\OrthogonalCrop\include;$(ProjectDir)tools\OrthogonalCrop\include\Service;$(ProjectDir)tools\OrthogonalCrop\include\Strategies;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Strategies;$(ProjectDir)include\Utils</ProjectIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
@@ -161,9 +161,9 @@
     <ClInclude Include="include\Strategies\CompositeStrategy.h" />
     <ClInclude Include="include\Data\DataConverters.h" />
     <ClInclude Include="include\Data\DataManager.h" />
-    <ClInclude Include="tools\GapAnalysis\include\Service\GapMeshOverlayService\GapAnalysisService.h" />
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\GapAnalysisTypes.h" />
-    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapMeshOverlayStrategy\GapAlgorithmOverlayStrategies.h" />
+    <ClInclude Include="tools\GapAnalysis\include\Service\GapAnalysisService.h" />
+    <ClInclude Include="tools\GapAnalysis\include\GapAnalysisTypes.h" />
+    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapAlgorithmOverlayStrategies.h" />
     <ClInclude Include="include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="include\Utils\ImageProcessor.h" />
     <ClInclude Include="include\Utils\InteractionComputeService.h" />
@@ -177,19 +177,19 @@
     <ClInclude Include="include\Strategies\SliceStrategy.h" />
     <ClInclude Include="include\Render\StdRenderContext.h" />
     <ClInclude Include="include\Render\StrategyFactory.h" />
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\SurfaceRefiner.h" />
+    <ClInclude Include="tools\GapAnalysis\include\SurfaceRefiner.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VoidDetector.h" />
+    <ClInclude Include="tools\GapAnalysis\include\VoidDetector.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPluginService.h" />
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysis\VolumeBuffer.h" />
+    <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h" />
     <ClInclude Include="include\Strategies\VolumeStrategy.h" />
     <ClInclude Include="include\App\AppStateCommands.h" />
     <ClInclude Include="include\App\AppStateEvents.h" />

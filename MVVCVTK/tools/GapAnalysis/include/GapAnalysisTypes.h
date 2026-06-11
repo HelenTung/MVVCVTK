@@ -1,6 +1,6 @@
 #pragma once
 // =====================================================================
-// Path: MVVCVTK/tools/GapAnalysis/include/GapAnalysis/GapAnalysisTypes.h
+// Path: MVVCVTK/tools/GapAnalysis/include/GapAnalysisTypes.h
 // GapAnalysisTypes.h — 间隙/空洞分析模块纯数据结构
 // =====================================================================
 

@@ -7,8 +7,8 @@
 //   Phase 3 【渲染骨架】SetInteractorInitialized + SetStarted 进入消息循环
 //
 //   • PreInitConfig 中统一携带 bgColor / hasBgColor（前处理背景色）
-//   • SetFileLoadedAsync 回调中执行数据相关的后处理业务（等值面阈值推算）
-//   • 回调内明确注释：在后台线程，只允许操作 SharedState
+//   • SetFileLoadedAsync 回调中执行数据相关的后处理业务（等值面阈值推算、算法启动）
+//   • 加载回调由主线程 Timer 延迟执行；算法完成后的 VTK overlay 挂接也通过 Timer observer 主线程收口
 //   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
 //   • IDataLoaderService 通过 GetFileLoadState / GetReloadLoadState 做主线程状态查询
 //   • main.cpp 中的 SetInteractorInitialized() 调用方式明确分离（接口显式）
@@ -34,7 +34,10 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"
+#include "GapAlgorithmOverlayStrategies.h"
 #include <vtkCommand.h>
+#include <vtkImageData.h>
+#include <vtkPolyData.h>
 #include <vtkRenderWindowInteractor.h>
 
 #include <cmath>
@@ -137,6 +140,141 @@ private:
     bool m_insidePreviewKeyDown = false;
     bool m_outsidePreviewKeyDown = false;
     bool m_previewArtifactModeKeyDown = false;
+};
+
+class GapAnalysisOverlayCommitObserver : public vtkCommand {
+public:
+    static GapAnalysisOverlayCommitObserver* New() { return new GapAnalysisOverlayCommitObserver; }
+
+    std::shared_ptr<GapAnalysisService> gapAnalysis;
+    std::shared_ptr<MedicalVizService> serviceA;
+    std::shared_ptr<MedicalVizService> serviceB;
+    std::shared_ptr<MedicalVizService> serviceC;
+    std::shared_ptr<MedicalVizService> serviceD;
+    std::shared_ptr<MedicalVizService> serviceE;
+    std::shared_ptr<SharedInteractionState> sharedState;
+
+    void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
+        (void)caller;
+        (void)callData;
+        if (eventId != vtkCommand::TimerEvent || m_overlayCommitted || !gapAnalysis) {
+            return;
+        }
+
+        const GapAnalysisState state = gapAnalysis->GetAnalysisState();
+        if (state == GapAnalysisState::Idle) {
+            TryStartAnalysis();
+            return;
+        }
+
+        if (state == GapAnalysisState::Running) {
+            return;
+        }
+
+        if (state == GapAnalysisState::Failed) {
+            if (!m_failureLogged) {
+                std::cerr << "[Main] Gap Analysis failed; overlay will not be attached." << std::endl;
+                m_failureLogged = true;
+            }
+            return;
+        }
+
+        CommitOverlays();
+        m_overlayCommitted = true;
+    }
+
+private:
+    bool m_overlayCommitted = false;
+    bool m_failureLogged = false;
+
+    void TryStartAnalysis()
+    {
+        if (!sharedState || sharedState->GetFileLoadState() != LoadState::Succeeded) {
+            return;
+        }
+
+        const auto range = sharedState->GetDataRange();
+        const double isoValue = range[0] + (range[1] - range[0]) * 0.55;
+        if (serviceA) {
+            serviceA->SetIsoThreshold(isoValue);
+        }
+
+        SurfaceParams surfP;
+        surfP.isoValue = static_cast<float>(isoValue);
+        gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
+
+        VoidDetectionParams voidP;
+        voidP.grayMin = -0.2262536138296127f;
+        voidP.grayMax = 0.15f;
+        voidP.minVolumeMM3 = 0.0001;
+        voidP.angleThresholdDeg = 30.0f;
+        voidP.tensorWindowSize = 1;
+        voidP.erosionIterations = 2;
+        gapAnalysis->GapPreInit_SetVoidParams(voidP);
+
+        gapAnalysis->RunAsync();
+    }
+
+    static void AddMeshOverlay(
+        const std::shared_ptr<MedicalVizService>& service,
+        vtkSmartPointer<vtkPolyData> voidMesh)
+    {
+        if (!service || !voidMesh) {
+            return;
+        }
+
+        auto overlay = std::make_shared<GapMeshOverlayStrategy>();
+        overlay->SetInputData(voidMesh);
+        service->SetOverlayStrategyAdded(overlay);
+    }
+
+    static void AddSliceOverlay(
+        const std::shared_ptr<MedicalVizService>& service,
+        vtkSmartPointer<vtkImageData> labelImage,
+        Orientation orientation)
+    {
+        if (!service || !labelImage) {
+            return;
+        }
+
+        auto overlay = std::make_shared<GapSliceOverlayStrategy>(orientation);
+        overlay->SetInputData(labelImage);
+        service->SetOverlayStrategyAdded(overlay);
+    }
+
+    void CommitOverlays()
+    {
+        auto voidMesh = gapAnalysis->BuildVoidMesh();
+        auto labelImage = gapAnalysis->BuildLabelImage();
+
+        const vtkIdType meshPoints = voidMesh ? voidMesh->GetNumberOfPoints() : 0;
+        const vtkIdType meshCells = voidMesh ? voidMesh->GetNumberOfCells() : 0;
+        if (voidMesh && meshPoints > 0 && meshCells > 0) {
+            AddMeshOverlay(serviceA, voidMesh);
+            AddMeshOverlay(serviceE, voidMesh);
+        }
+        else {
+            std::cerr << "[Main] Gap Analysis produced no 3D void mesh overlay." << std::endl;
+        }
+
+        int labelDims[3] = { 0, 0, 0 };
+        if (labelImage) {
+            labelImage->GetDimensions(labelDims);
+        }
+        if (labelImage && labelDims[0] > 0 && labelDims[1] > 0 && labelDims[2] > 0) {
+            AddSliceOverlay(serviceB, labelImage, Orientation::Top_down);
+            AddSliceOverlay(serviceC, labelImage, Orientation::Front_back);
+            AddSliceOverlay(serviceD, labelImage, Orientation::Left_right);
+        }
+        else {
+            std::cerr << "[Main] Gap Analysis produced no 2D label overlay." << std::endl;
+        }
+
+        std::cout << "[Main] Gap Analysis overlay committed: mesh points = "
+            << meshPoints << ", mesh cells = " << meshCells
+            << ", label dims = " << labelDims[0] << "x" << labelDims[1] << "x" << labelDims[2]
+            << std::endl;
+    }
 };
 
 static std::pair<
@@ -302,30 +440,13 @@ int main()
             orthogonalCropBridge->SetInputImage(sharedDataMgr->GetVtkImage());
             if (!orthogonalCropBridge->GetInputImage()) {
                 std::cerr << "[Main] Orthogonal crop init failed: input image missing." << std::endl;
-                return;
+            }
+            else {
+                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle lightweight/full preview, press Ctrl+3 to apply physical crop." << std::endl;
             }
 
-            std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle lightweight/full preview, press Ctrl+3 to apply physical crop." << std::endl;
-
-            //// 触发孔隙分析算法
-            //SurfaceParams surfP;
-            //surfP.isoValue = static_cast<float>(isoVal); // 使用自动推算的阈值
-            //gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
-
-            //VoidDetectionParams voidP;
-            //voidP.grayMin = -0.2262536138296127f;
-            //voidP.grayMax = 0.15f;
-            ////voidP.minVolumeMM3 = 3;
-            //// 0.000009595703125
-            //voidP.minVolumeMM3 = 0.0001;
-            //voidP.angleThresholdDeg = 30.0f;
-            //voidP.tensorWindowSize = 1;
-            //voidP.erosionIterations = 2;
-            //gapAnalysis->GapPreInit_SetVoidParams(voidP);
-
-            //std::cout << "[Main] Triggering background Gap Analysis...\n";
-            //// 发起后台计算，不阻塞当前 UI
-            //gapAnalysis->RunAsync();
+            // GapAnalysis 的启动由 contextB 上的 Timer observer 统一处理，
+            // 避免文件加载回调被其他窗口 service 先消费时漏启动算法。
         }
     );
 
@@ -409,6 +530,16 @@ int main()
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
     contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
+
+    auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
+    gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
+    gapAnalysisOverlayObserver->serviceA = serviceA;
+    gapAnalysisOverlayObserver->serviceB = serviceB;
+    gapAnalysisOverlayObserver->serviceC = serviceC;
+    gapAnalysisOverlayObserver->serviceD = serviceD;
+    gapAnalysisOverlayObserver->serviceE = serviceE;
+    gapAnalysisOverlayObserver->sharedState = sharedState;
+    contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle lightweight/full preview | Ctrl+3 = apply physical crop\n"
