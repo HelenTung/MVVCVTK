@@ -231,7 +231,7 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
 
 void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
 {
-    const auto rawBounds = m_representation->GetBounds();
+    const auto rawBounds = m_representation->GetBounds(); // 返回的是世界坐标
     if (!rawBounds) {
         return;
     }

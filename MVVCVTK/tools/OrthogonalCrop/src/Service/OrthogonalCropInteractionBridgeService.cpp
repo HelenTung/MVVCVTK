@@ -977,7 +977,7 @@ void OrthogonalCropInteractionBridgeService::SetVolumeKeepInsidePreviewApplied(
             boxOrigin[axis] = side;
 
             double boxNormal[3] = { 0.0, 0.0, 0.0 };
-            boxNormal[axis] = -side;
+            boxNormal[axis] = -side; //因为 KeepInside 要保留盒内区域。用 6 个向内平面组合起来，表达的就是“同时在这 6 个面的内部一侧”。
 
             double worldOrigin[3] = { 0.0, 0.0, 0.0 };
             double worldNormal[3] = { 0.0, 0.0, 0.0 };
@@ -1033,7 +1033,7 @@ bool OrthogonalCropInteractionBridgeService::SetVolumeRemoveInsidePreviewApplied
     // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
     auto modelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     modelToBoxShaderMatrix->DeepCopy(modelToBoxMatrix);
-    modelToBoxShaderMatrix->Transpose();
+    modelToBoxShaderMatrix->Transpose();//为了让 shader 里这个乘法得到和 C++ 侧 modelToBoxMatrix 一样的几何结果，上传前显式转置
 
     // vtk volume shader 中 g_dataPos 是纹理坐标；in_textureDatasetMatrix[0] 才会把它还原到 model。
     // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 modelToBox 需要先转置再交给 shader。

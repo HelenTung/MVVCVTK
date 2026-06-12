@@ -95,7 +95,7 @@ private:
     // widget 当前所属 interactor。
     vtkRenderWindowInteractor* m_interactor = nullptr;
 
-    // 真正参与交互的 vtkBoxWidget2。
+    // 真正参与交互的 vtkBoxWidget2。local 指的是 widget 自己的局部坐标系
     vtkSmartPointer<vtkBoxWidget2> m_widget;
 
     // widget 的可视外观与 bounds 数据载体。
