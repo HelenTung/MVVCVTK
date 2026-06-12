@@ -58,7 +58,7 @@ public:
     // 结果对象会补齐 resolved source / backend，供交互桥和 overlay 直接消费。
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
-    // 执行轻量 preview：只归一化 request->cropData 并生成 outline，不跑 mask/clip/统计。
+    // 执行 3D outline guide preview：只归一化 request->cropData 并生成 outline，不跑 2D mask / 3D clip / 统计。
     OrthogonalCropResult GetLightweightPreviewResult(const OrthogonalCropRequest& request) const;
 
 private:

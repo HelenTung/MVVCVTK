@@ -13,7 +13,7 @@
 // - CropDataModel：客观几何与绝对坐标补偿信息；
 // - CropStateModel：瞬态显示与交互状态快照；
 // - OrthogonalCropRequest：一次执行请求；
-// - OrthogonalCropResult：一次执行结果，虚拟裁切返回 mask，物理裁切返回 derived image。
+// - OrthogonalCropResult：一次执行结果，预览产物链返回 2D mask / 3D outline，主数据物理提交链返回 derived image。
 
 #include <array>
 #include <cstddef>
@@ -72,11 +72,11 @@ enum class CropRemovalMode {
     RemoveInside
 };
 
-// 本次请求到底只做预览，还是要产出真正可复用的裁切结果。
+// 本次请求到底只做显示预览产物，还是要产出真正可复用的主数据裁切结果。
 enum class CropExecutionMode {
-    // 虚拟裁切：偏向交互预览，不要求立刻生成独立数据副本。
+    // 预览产物裁切：生成 2D mask / 3D outline / 3D clip 等显示产物，不替换主数据。
     VirtualCrop,
-    // 物理裁切：要求得到可脱离原输入单独使用的输出数据。
+    // 主数据 physical submit：要求得到可脱离原输入单独使用的输出数据。
     PhysicalCrop
 };
 
@@ -94,13 +94,13 @@ enum class OrthogonalCropDataSource {
 enum class OrthogonalCropResolvedBackend {
     // 还没有成功解析出实际 backend，通常表示输入缺失或执行失败。
     None,
-    // image 路径走虚拟 mask 方案，只改变可视语义，不复制体数据。
+    // image 路径生成 2D slice mask preview，同时提供 3D outline 所需 cropData。
     ImageVirtualMask,
-    // image 路径通过提取 VOI 直接生成裁切后的子体数据。
+    // image 路径通过提取 VOI 生成 physical submit 后的新主子体数据。
     ImageExtractVOI,
-    // image mapper 原生 cropping 方案，通常只用于渲染层裁切语义。
+    // image volume mapper 原生 3D cropping preview 方案。
     ImageMapperCropping,
-    // polydata 路径使用 box clip + geometry filter 得到输出网格。
+    // polydata 路径使用 3D box clip + geometry filter 得到 preview 网格。
     PolyDataClipDataSet
 };
 
@@ -152,7 +152,7 @@ enum class OrthogonalCropFailureReason {
     PhysicalRemoveInsideUnsupported,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     InsufficientRam,
-    // 虚拟裁切阶段构建 mask 失败。
+    // 2D mask preview 产物构建失败。
     VirtualMaskCreationFailed,
     // 需要输出裁切 image 时，生成 derived image 失败。
     DerivedImageCreationFailed,
@@ -212,7 +212,7 @@ public:
     // 返回当前裁切结果相对原输入的全局偏移补偿矩阵。
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
-    // 写入全局偏移补偿矩阵；physical crop 结果会基于 origin 位移更新它。
+    // 写入全局偏移补偿矩阵；physical submit 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
 private:
@@ -230,7 +230,7 @@ public:
     // 当前结果或请求是否仍然处于“启用裁切语义”的状态。
     bool GetCropEnabled() const { return m_cropEnabled; }
 
-    // 设置裁切语义是否生效；physical crop 产出结果时常会把它关掉。
+    // 设置裁切语义是否生效；physical submit 产出结果时常会把它关掉。
     void SetCropEnabled(bool enabled) { m_cropEnabled = enabled; }
 
     // 返回 inside 区域当前期望的显示透明度。
@@ -266,7 +266,7 @@ public:
 private:
     // 当前是否启用了裁切语义；上层可据此决定是否显示/应用裁切效果。
     bool m_cropEnabled = true;
-    // inside 区域的可视透明度，常用于虚拟裁切或 overlay 预览。
+    // inside 区域的可视透明度，常用于 2D/3D overlay 预览。
     double m_insideOpacity = 0.35;
     // outside 区域当前是否可见。
     bool m_outsideVisibility = false;
@@ -328,9 +328,9 @@ private:
     std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
     CropExecutionMode m_executionMode = CropExecutionMode::VirtualCrop;
-    // inside / outside 的保留语义；影响虚拟 mask 取值和物理裁切合法性判断。
+    // inside / outside 的保留语义；影响 2D mask preview 取值和 physical submit 合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
-    // 输入数据当前附带的全局偏移补偿矩阵；物理裁切后会继续累加新的 origin 偏移。
+    // 输入数据当前附带的全局偏移补偿矩阵；physical submit 后会继续累加新的 origin 偏移。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
     // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。
     CropStateModel m_cropStateModel;
@@ -388,10 +388,10 @@ public:
     // 写入 image 路径吸附后的 index 边界。
     void SetSnappedIndexBounds(const CropIndexBoundsInt6Array& indexBounds) { m_snappedIndexBounds = indexBounds; }
 
-    // 返回当前是否允许继续执行 physical crop。
+    // 返回当前是否允许继续执行 physical submit。
     bool GetCanExecutePhysicalCrop() const { return m_canExecutePhysicalCrop; }
 
-    // 写入当前是否允许继续执行 physical crop。
+    // 写入当前是否允许继续执行 physical submit。
     void SetCanExecutePhysicalCrop(bool canExecute) { m_canExecutePhysicalCrop = canExecute; }
 
     // 返回统一的校验/告警文本。
@@ -415,21 +415,21 @@ public:
 private:
     // 这次统计最终落到的数据源；用于日志和上层 UI 提示。
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::Auto;
-    // 这次统计真正采用的底层实现路径，如 virtual mask、extract VOI 或 polydata clip。
+    // 这次统计真正采用的底层实现路径，如 2D mask preview、extract VOI 或 polydata clip。
     OrthogonalCropResolvedBackend m_resolvedBackend = OrthogonalCropResolvedBackend::None;
     // 统计阶段发现的失败原因；None 表示校验通过。
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 原始输入总体规模；image 路径用 voxel 数，polydata 路径用 cell 数近似表达。
     std::size_t m_totalVoxelCount = 0;
-    // 裁切盒内部规模；用于估算 preview 影响范围和 physical crop 输出大小。
+    // 裁切盒内部规模；用于估算 preview 影响范围和 physical submit 输出大小。
     std::size_t m_insideVoxelCount = 0;
-    // 真正输出结果的规模；virtual crop 常等于 total，physical crop 常等于 inside。
+    // 真正输出结果的规模；preview artifact 常等于 total，physical submit 常等于 inside。
     std::size_t m_outputVoxelCount = 0;
-    // 当前请求若继续执行，预估至少需要的内存量；主要服务 physical crop 风险判断。
+    // 当前请求若继续执行，预估至少需要的内存量；主要服务 physical submit 风险判断。
     std::size_t m_estimatedRamUsageBytes = 0;
     // image 路径里 model bounds 吸附后的 index 整数边界；供 mask/VOI 提取直接复用。
     std::array<int, 6> m_snappedIndexBounds = { 0, 0, 0, 0, 0, 0 };
-    // 当前统计是否允许继续做 physical crop；会综合 removal mode 与内存约束。
+    // 当前统计是否允许继续做 physical submit；会综合 removal mode 与内存约束。
     bool m_canExecutePhysicalCrop = false;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
     std::string m_validationMessage;
@@ -520,7 +520,7 @@ private:
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 对当前成功/失败状态的文字解释；可直接给日志或 UI 弹框使用。
     std::string m_message;
-    // image 路径 physical crop 或 extracted preview 返回的派生体数据。
+    // image 路径 physical submit 或 extracted preview 返回的派生体数据。
     vtkSmartPointer<vtkImageData> m_derivedImage;
     // polydata 路径裁切后的输出网格；image 路径通常为空。
     vtkSmartPointer<vtkPolyData> m_derivedPolyData;
@@ -528,7 +528,7 @@ private:
     vtkSmartPointer<vtkImageData> m_virtualMaskImage;
     // 当前裁切盒轮廓的可视几何；常用于 overlay 或调试显示。
     vtkSmartPointer<vtkPolyData> m_outlinePolyData;
-    // 这次结果对应的客观几何快照；physical crop 后可能已经更新为派生体自身的 bounds。
+    // 这次结果对应的客观几何快照；physical submit 后可能已经更新为派生体自身的 bounds。
     CropDataModel m_cropDataModel;
     // 这次结果对应的交互/显示状态快照；便于上层知道结果产生时是否仍处于交互态。
     CropStateModel m_cropStateModel;

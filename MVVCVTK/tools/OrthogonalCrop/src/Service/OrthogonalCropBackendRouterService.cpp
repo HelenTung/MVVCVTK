@@ -176,7 +176,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetLightweightPreviewRe
         return GetMissingInputResult();
     }
 
-    // 轻量 preview 只提供显示分发必需字段；统计、mask 和 clipped polydata 留给完整结果入口。
+    // 3D outline guide 只提供显示分发必需字段；统计、2D mask 和 3D clipped polydata 留给完整结果入口。
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
     result.SetCropDataModel(cropData);
@@ -430,11 +430,11 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const Or
 {
     // ── 请求转发：Router → PluginService → Algorithm ──
     // PluginService 注入系统可用 RAM (GlobalMemoryStatusEx)
-    // Algorithm 完成 cropData 归一化 → virtual mask 或 physical extract
+    // Algorithm 完成 cropData 归一化 → 2D mask preview 或 physical submit extract
     auto result = m_imageService.GetResult(request);
     // ── 结果回填（Router 层）：只补标记字段 ──
     // resolvedDataSource = ImageData（上游可据此知道数据来源）
-    // VirtualCrop 场景下若 Algorithm 未设置 backend，兜底为 ImageVirtualMask
+    // preview artifact 场景下若 Algorithm 未设置 backend，兜底为 ImageVirtualMask
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
         && result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {

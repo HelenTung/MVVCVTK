@@ -57,7 +57,7 @@ std::size_t OrthogonalCropPluginService::GetSystemAvailableRamBytes() const
     // ═══ 系统可用物理内存查询 (Windows) ═══
     // 用途: PhysicalCrop 执行前判断是否有足够 RAM
     // Algorithm::GetStatistics 会拿这个值和 expectedBytes 比较
-    // 不够时会返回 InsufficientRam 阻止物理裁切执行
+    // 不够时会返回 InsufficientRam 阻止 physical submit 执行
     MEMORYSTATUSEX memoryStatus = {};
     memoryStatus.dwLength = sizeof(memoryStatus);
     if (GlobalMemoryStatusEx(&memoryStatus) != 0) {

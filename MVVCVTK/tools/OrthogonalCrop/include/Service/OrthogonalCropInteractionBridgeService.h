@@ -7,7 +7,7 @@
 // 说明: 连接 widget、数据后端与 preview 窗口，管理交互态与预览刷新顺序。
 // =====================================================================
 // 交互主链路：
-// 1. ActivateInteractiveCrop 生成默认 widget bounds 并挂接 vtkBoxWidget2
+// 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetBoundsChanged 持续记录 reference render 交互坐标 bounds 与交互 phase
 // 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折回 model request
 // 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
@@ -36,6 +36,9 @@ class vtkVolumeMapper;
 class vtkGPUVolumeRayCastMapper;
 class OrthogonalCropInteractionBridgeService {
 public:
+    // Public boundary: initialization/setup and user hotkey actions.
+    // Internal state transitions, backend routing details, and VTK preview plumbing stay private.
+
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
     OrthogonalCropInteractionBridgeService();
 
@@ -45,17 +48,9 @@ public:
 
     // 以下一组接口把 polydata 输入转发给 backend router。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
-    vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
 
     // 设置 backend router 的首选数据源。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-
-    // 以下查询接口统一透传给 backend router，方便 bridge 作为单一服务暴露给 main。
-    OrthogonalCropDataSource GetActiveDataSource() const;
-    std::array<double, 6> GetActiveModelBounds() const;
-    OrthogonalCropRequest GetDefaultRequest() const;
-    OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
     // DataManager 只作为 Auto 模式下 image 输入的兜底来源。
     void SetDataManager(std::shared_ptr<AbstractDataManager> dataMgr);
@@ -69,11 +64,14 @@ public:
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
-    // 控制 preview 是否必须产出完整后端结果（mask / derived polydata）。
+    // 控制 preview 是否必须产出完整 2D/3D 后端产物（2D mask / 3D clipped polydata）。
     void SetPreviewRequiresFullArtifacts(bool required);
 
-    // 在轻量 preview 与完整 preview 之间切换；必要时会立即刷新当前 preview。
-    void TogglePreviewArtifactMode(bool logStats = true);
+    // 在 3D outline 轻量预览与完整 2D/3D artifact 预览之间切换；必要时会立即刷新当前 preview。
+    void TogglePreviewArtifactMode();
+
+    // 提交当前 KeepInside image 裁切结果到主数据 reload 通道。
+    void ApplyPhysicalSubmit();
 
     // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
@@ -87,16 +85,10 @@ public:
     // 对应的“移除盒内”预览动作。
     void ToggleOutsidePreview();
 
-    // 回到默认裁切盒，并按需要刷新 preview。
-    bool ResetInteractiveBoundsToDefault(bool updatePreview = true);
-
-    // 激活交互裁切模式，初始化 widget 与默认 bounds。
-    bool ActivateInteractiveCrop();
-
-    // 关闭裁切模式并恢复 preview / 主模型状态。
-    bool DeactivateInteractiveCrop();
-
 private:
+    // Private boundary: widget state machine, model/world conversion, backend query,
+    // preview distribution, and VTK mapper/shader implementation details.
+
     // 一个 preview 目标窗口对应一份 overlay 策略与可能的主模型临时裁切缓存。
     struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
@@ -150,6 +142,29 @@ private:
 
     // 切换 preview 开关与 removal mode。
     void TogglePreview(CropRemovalMode removalMode, bool logStats);
+
+    // 校验当前交互状态是否允许发起主数据物理提交。
+    bool CanApplyPhysicalSubmit() const;
+
+    // 基于当前 widget 有向盒构建主数据物理提交 request。
+    OrthogonalCropRequest BuildPhysicalSubmitRequest() const;
+
+    // 把 physical submit 的 derived image 转交给 reload 通道；保持原有 buffer/origin 翻转语义。
+    bool SubmitDerivedImageReload(
+        const OrthogonalCropResult& submitResult,
+        const std::shared_ptr<MedicalVizService>& referenceRenderService);
+
+    // 激活交互裁切模式，初始化 widget 与默认 bounds。
+    bool ActivateInteractiveCrop();
+
+    // 关闭裁切模式并恢复 preview / 主模型状态。
+    bool DeactivateInteractiveCrop();
+
+    // 以下查询接口仅作为 bridge 内部 backend 边界，外部不直接调用 backend 细节。
+    OrthogonalCropDataSource GetActiveDataSource() const;
+    std::array<double, 6> GetActiveModelBounds() const;
+    OrthogonalCropRequest GetDefaultRequest() const;
+    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
@@ -216,13 +231,13 @@ private:
     // 当前 preview 真正使用的 removal mode。
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
 
-    // 当前 preview 是否强制要求完整后端结果；关闭时会走轻量 preview 路径。
+    // 当前 preview 是否强制要求完整 2D/3D 后端产物；关闭时只走 3D outline guide。
     bool m_previewRequiresFullArtifacts = true;
 
     // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // physical crop 重载期间持有提交缓冲，直到主线程回调收口。
+    // physical submit 重载期间持有提交缓冲，直到主线程回调收口。
     std::shared_ptr<std::vector<float>> m_reloadBuffer;
 
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。

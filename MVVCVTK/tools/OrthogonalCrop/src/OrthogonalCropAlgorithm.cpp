@@ -74,7 +74,7 @@ bool GetBoundsContained(
     const std::array<double, 6>& cropModelBounds)
 {
     // 严格校验路径要求裁切盒完整包含在数据 model bounds 内。
-    // Image KeepInside physical crop 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
+    // Image KeepInside physical submit 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
     return cropModelBounds[0] >= dataModelBounds[0] - BoundsEpsilon
         && cropModelBounds[1] <= dataModelBounds[1] + BoundsEpsilon
         && cropModelBounds[2] >= dataModelBounds[2] - BoundsEpsilon
@@ -161,7 +161,7 @@ std::array<double, 16> GetUpdatedOffsetMatrix(
     const std::array<double, 16>& sourceToTargetMatrixData,
     const std::array<double, 3>& translation)
 {
-    // physical crop 会改变 derived image 的 origin，
+    // physical submit 会改变 derived image 的 origin，
     // 这里把这次位移继续累加进 globalOffsetMatrix，保证上层共享坐标语义保持连续。
     auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     sourceToTargetMatrix->DeepCopy(sourceToTargetMatrixData.data());
@@ -221,7 +221,7 @@ vtkSmartPointer<vtkImageData> GetVirtualMaskImage(
     CropRemovalMode removalMode,
     std::size_t* insideVoxelCount = nullptr)
 {
-    // virtual mask 的结果不是导出新体数据，而是构造一张用于预览的 inside/outside 掩码。
+    // 2D mask preview 的结果不是导出新体数据，而是构造一张用于预览的 inside/outside 掩码。
     // 整体流程分两段：
     // 1. 先用 snapped index bounds 把执行域收缩到最小候选 AABB
     // 2. 再用 modelToBox 把体素中心归一化到标准盒 [-1,1]^3 做 inside 判定
@@ -387,7 +387,7 @@ vtkSmartPointer<vtkImageData> GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& indexBounds)
 {
-    // physical crop 的目标是导出真正独立的 derived image。
+    // physical submit 的目标是导出真正独立的 derived image。
     // 这里先按 snapped index 做 vtkExtractVOI，再把 extent 起点归零，
     // 同时把新的 model origin 设置成输出块起点对应的 model 坐标。
     if (!image) {
@@ -456,7 +456,7 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     bool allowPartialOverlap)
 {
     // allowPartialOverlap 表示裁切盒只要和输入有真实体积交集即可。
-    // Virtual preview 和 Image KeepInside physical crop 都允许该语义；后者会提取交集范围。
+    // Virtual preview 和 Image KeepInside physical submit 都允许该语义；后者会提取交集范围。
     // 这里默认调用方已经把 dataModelBounds 和 cropModelBounds 放到了同一 model 坐标系里，不再做二次折叠。
     if (!GetBoundsHavePositiveVolume(dataModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
@@ -726,7 +726,7 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     statistics.SetCanExecutePhysicalCrop(canExecute);
     if (!canExecute) {
         statistics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
-        statistics.SetValidationMessage("Estimated physical crop memory usage exceeds currently available RAM.");
+        statistics.SetValidationMessage("Estimated physical submit memory usage exceeds currently available RAM.");
     }
 
     return statistics;
@@ -837,7 +837,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    // physical crop 返回的是新的 derived image，
+    // physical submit 返回的是新的 derived image，
     // 因此除了提取体素数据，还必须同步修正 bounds 和 globalOffsetMatrix。
     // 结果说明：derived image 是新的主数据快照，derivedCropData 记录它自己的 model bounds 与位移补偿。
     OrthogonalCropResult result;
@@ -846,7 +846,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetPhysicalCropResult(
     result.SetCropStateModel(cropState);
 
     // ── 步骤 1：统计预估与可行性判断 ──
-    // 综合 removal mode / RAM 约束判断是否能安全执行 physical crop
+    // 综合 removal mode / RAM 约束判断是否能安全执行 physical submit
     const auto statistics = GetStatistics(
         image,
         cropData,
@@ -935,9 +935,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         return result;
     }
 
-    // ── 执行分支分发：VirtualCrop vs PhysicalCrop ──
-    // VirtualCrop  → GetVirtualCropResult  → mask + outline + statistics（预览用，不复制体数据）
-    // PhysicalCrop → GetPhysicalCropResult → derived image + globalOffsetMatrix（可独立使用的新数据）
+    // ── 执行分支分发：preview artifact vs physical submit ──
+    // VirtualCrop  → GetVirtualCropResult  → 2D mask + 3D outline + statistics（预览用，不复制体数据）
+    // PhysicalCrop → GetPhysicalCropResult → derived image + globalOffsetMatrix（可独立使用的新主数据）
     if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
         return GetVirtualCropResult(
             image,

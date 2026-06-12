@@ -76,11 +76,6 @@ void OrthogonalCropInteractionBridgeService::SetInputPolyData(vtkSmartPointer<vt
     m_backend.SetInputPolyData(std::move(polyData));
 }
 
-vtkSmartPointer<vtkPolyData> OrthogonalCropInteractionBridgeService::GetInputPolyData() const
-{
-    return m_backend.GetInputPolyData();
-}
-
 void OrthogonalCropInteractionBridgeService::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
 {
     m_backend.SetPreferredDataSource(dataSource);
@@ -99,11 +94,6 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveModelBoun
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::GetDefaultRequest() const
 {
     return m_backend.GetDefaultRequest();
-}
-
-OrthogonalCropStatistics OrthogonalCropInteractionBridgeService::GetStatistics(const OrthogonalCropRequest& request) const
-{
-    return m_backend.GetStatistics(request);
 }
 
 OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetResult(const OrthogonalCropRequest& request) const
@@ -149,137 +139,160 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts(boo
     m_previewRequiresFullArtifacts = required;
 }
 
-void OrthogonalCropInteractionBridgeService::TogglePreviewArtifactMode(bool logStats)
+void OrthogonalCropInteractionBridgeService::TogglePreviewArtifactMode()
 {
-    if (!logStats) {
-        if (!m_cropInteractionEnabled || !m_boundsInitialized) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: crop widget is not active." << std::endl;
-            return;
-        }
-
-        if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: wait until widget dragging finishes." << std::endl;
-            return;
-        }
-
-        if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: RemoveInside preview does not support physical submit." << std::endl;
-            return;
-        }
-
-        auto referenceRenderService = std::dynamic_pointer_cast<MedicalVizService>(m_referenceRenderService);
-        if (!referenceRenderService) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: reference render service does not support reload." << std::endl;
-            return;
-        }
-
-        auto submitRequest = BuildPreviewRequest();
-        submitRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
-
-        const auto submitResult = GetResult(submitRequest);
-        if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: "
-                << GetFailureReasonText(submitResult.GetFailureReason())
-                << " - " << submitResult.GetMessage() << std::endl;
-            return;
-        }
-
-        auto derivedImage = submitResult.GetDerivedImage();
-        if (!derivedImage) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: derived image is null." << std::endl;
-            return;
-        }
-
-        int dims[3] = { 0, 0, 0 };
-        double spacingData[3] = { 1.0, 1.0, 1.0 };
-        double modelOriginData[3] = { 0.0, 0.0, 0.0 };
-        derivedImage->GetDimensions(dims);
-        derivedImage->GetSpacing(spacingData);
-        derivedImage->GetOrigin(modelOriginData);
-        auto sourceData = static_cast<const float*>(derivedImage->GetScalarPointer());
-        if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: derived image buffer is invalid." << std::endl;
-            return;
-        }
-
-        const size_t nx = static_cast<size_t>(dims[0]);
-        const size_t ny = static_cast<size_t>(dims[1]);
-        const size_t nz = static_cast<size_t>(dims[2]);
-        const size_t sliceSize = nx * ny;
-        const size_t totalSize = sliceSize * nz;
-        m_reloadBuffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
-
-        auto* reloadData = m_reloadBuffer->data();
-        for (size_t z = 0; z < nz; ++z) {
-            const size_t sourceSliceOffset = z * sliceSize;
-            const size_t targetSliceOffset = z * sliceSize;
-            for (size_t y = 0; y < ny; ++y) {
-                const float* sourceRow = sourceData + sourceSliceOffset + y * nx;
-                float* targetRow = reloadData + targetSliceOffset + (ny - 1 - y) * nx;
-                for (size_t x = 0; x < nx; ++x) {
-                    targetRow[nx - 1 - x] = sourceRow[x];
-                }
-            }
-        }
-
-        const std::array<int, 3> reloadDims = { dims[0], dims[1], dims[2] };
-        const std::array<float, 3> reloadSpacing = {
-            static_cast<float>(spacingData[0]),
-            static_cast<float>(spacingData[1]),
-            static_cast<float>(spacingData[2])
-        };
-        const std::array<float, 3> reloadOrigin = {
-            static_cast<float>(-modelOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
-            static_cast<float>(-modelOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
-            static_cast<float>(modelOriginData[2])
-        };
-
-        if (!referenceRenderService->SetReloadFromBufferAsync(
-                m_reloadBuffer->data(),
-                reloadDims,
-                reloadSpacing,
-                reloadOrigin,
-                [this, referenceRenderService](bool success) {
-                    if (!success) {
-                        std::cerr << "[Main] Orthogonal crop physical crop reload failed." << std::endl;
-                        m_reloadBuffer.reset();
-                        return;
-                    }
-
-                    if (m_dataMgr) {
-                        SetInputImage(m_dataMgr->GetVtkImage());
-                    }
-
-                    if (m_dataMgr) {
-                        const auto range = m_dataMgr->GetScalarRange();
-                        referenceRenderService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
-                    }
-
-                    std::cout << "[Main] Orthogonal crop physical crop applied to main image data." << std::endl;
-                    m_reloadBuffer.reset();
-                })) {
-            std::cerr << "[Main] Orthogonal crop physical crop failed: reload request was rejected." << std::endl;
-            m_reloadBuffer.reset();
-            return;
-        }
-
-        SetInputImage(nullptr);
-        DeactivateInteractiveCrop();
-        return;
-    }
-
     m_previewRequiresFullArtifacts = !m_previewRequiresFullArtifacts;
-    if (logStats) {
-        std::cout << "[Main] Orthogonal crop preview artifact mode: "
-            << (m_previewRequiresFullArtifacts ? "Full" : "Lightweight")
-            << std::endl;
-    }
+    std::cout << "[Main] Orthogonal crop preview artifact mode: "
+        << (m_previewRequiresFullArtifacts ? "Full2D3DArtifactPreview" : "Lightweight3DOutlineGuide")
+        << std::endl;
 
     if (m_previewEnabled
         && m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
-        UpdatePreviewFromCurrentBounds(logStats);
+        UpdatePreviewFromCurrentBounds(true);
     }
+}
+
+void OrthogonalCropInteractionBridgeService::ApplyPhysicalSubmit()
+{
+    if (!CanApplyPhysicalSubmit()) {
+        return;
+    }
+
+    auto referenceRenderService = std::dynamic_pointer_cast<MedicalVizService>(m_referenceRenderService);
+    if (!referenceRenderService) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: reference render service does not support reload." << std::endl;
+        return;
+    }
+
+    const auto submitRequest = BuildPhysicalSubmitRequest();
+    const auto submitResult = GetResult(submitRequest);
+    if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: "
+            << GetFailureReasonText(submitResult.GetFailureReason())
+            << " - " << submitResult.GetMessage() << std::endl;
+        return;
+    }
+
+    if (!SubmitDerivedImageReload(submitResult, referenceRenderService)) {
+        return;
+    }
+
+    SetInputImage(nullptr);
+    DeactivateInteractiveCrop();
+}
+
+bool OrthogonalCropInteractionBridgeService::CanApplyPhysicalSubmit() const
+{
+    if (!m_cropInteractionEnabled || !m_boundsInitialized) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: crop widget is not active." << std::endl;
+        return false;
+    }
+
+    if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: wait until widget dragging finishes." << std::endl;
+        return false;
+    }
+
+    if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: RemoveInside preview does not support physical submit." << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPhysicalSubmitRequest() const
+{
+    auto submitRequest = BuildPreviewRequest();
+    submitRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
+    return submitRequest;
+}
+
+bool OrthogonalCropInteractionBridgeService::SubmitDerivedImageReload(
+    const OrthogonalCropResult& submitResult,
+    const std::shared_ptr<MedicalVizService>& referenceRenderService)
+{
+    auto derivedImage = submitResult.GetDerivedImage();
+    if (!derivedImage) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: derived image is null." << std::endl;
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    double spacingData[3] = { 1.0, 1.0, 1.0 };
+    double modelOriginData[3] = { 0.0, 0.0, 0.0 };
+    derivedImage->GetDimensions(dims);
+    derivedImage->GetSpacing(spacingData);
+    derivedImage->GetOrigin(modelOriginData);
+    auto sourceData = static_cast<const float*>(derivedImage->GetScalarPointer());
+    if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: derived image buffer is invalid." << std::endl;
+        return false;
+    }
+
+    const size_t nx = static_cast<size_t>(dims[0]);
+    const size_t ny = static_cast<size_t>(dims[1]);
+    const size_t nz = static_cast<size_t>(dims[2]);
+    const size_t sliceSize = nx * ny;
+    const size_t totalSize = sliceSize * nz;
+    m_reloadBuffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
+
+    auto* reloadData = m_reloadBuffer->data();
+    for (size_t z = 0; z < nz; ++z) {
+        const size_t sourceSliceOffset = z * sliceSize;
+        const size_t targetSliceOffset = z * sliceSize;
+        for (size_t y = 0; y < ny; ++y) {
+            const float* sourceRow = sourceData + sourceSliceOffset + y * nx;
+            float* targetRow = reloadData + targetSliceOffset + (ny - 1 - y) * nx;
+            for (size_t x = 0; x < nx; ++x) {
+                targetRow[nx - 1 - x] = sourceRow[x];
+            }
+        }
+    }
+
+    const std::array<int, 3> reloadDims = { dims[0], dims[1], dims[2] };
+    const std::array<float, 3> reloadSpacing = {
+        static_cast<float>(spacingData[0]),
+        static_cast<float>(spacingData[1]),
+        static_cast<float>(spacingData[2])
+    };
+    const std::array<float, 3> reloadOrigin = {
+        static_cast<float>(-modelOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
+        static_cast<float>(-modelOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
+        static_cast<float>(modelOriginData[2])
+    };
+
+    if (!referenceRenderService->SetReloadFromBufferAsync(
+            m_reloadBuffer->data(),
+            reloadDims,
+            reloadSpacing,
+            reloadOrigin,
+            [this, referenceRenderService](bool success) {
+                if (!success) {
+                    std::cerr << "[Main] Orthogonal crop physical submit reload failed." << std::endl;
+                    m_reloadBuffer.reset();
+                    return;
+                }
+
+                if (m_dataMgr) {
+                    SetInputImage(m_dataMgr->GetVtkImage());
+                }
+
+                if (m_dataMgr) {
+                    const auto range = m_dataMgr->GetScalarRange();
+                    referenceRenderService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
+                }
+
+                std::cout << "[Main] Orthogonal crop physical submit applied to main image data." << std::endl;
+                m_reloadBuffer.reset();
+            })) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: reload request was rejected." << std::endl;
+        m_reloadBuffer.reset();
+        return false;
+    }
+
+    return true;
 }
 
 bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
@@ -300,27 +313,6 @@ void OrthogonalCropInteractionBridgeService::ToggleInsidePreview()
 void OrthogonalCropInteractionBridgeService::ToggleOutsidePreview()
 {
     TogglePreview(CropRemovalMode::RemoveInside, true);
-}
-
-bool OrthogonalCropInteractionBridgeService::ResetInteractiveBoundsToDefault(bool updatePreview)
-{
-    if (!EnsureInputReady()) {
-        return false;
-    }
-
-    // 重置不仅要回写当前 bounds，还要同步 widget 与 phase，确保后续预览从一致状态起步。
-    m_currentBounds = GetDefaultInteractiveBounds();
-    m_boundsInitialized = true;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds());
-    m_widgetStateController.SetWidgetBounds(m_currentBounds);
-    if (updatePreview && m_previewEnabled) {
-        UpdatePreviewFromCurrentBounds(true);
-    }
-    else if (updatePreview) {
-        RestorePreviewRenderTargets();
-    }
-    return true;
 }
 
 bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
@@ -359,7 +351,7 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
         << GetDataSourceText(GetActiveDataSource())
-        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview, press Ctrl+3 to apply physical crop; press O or Esc to exit." << std::endl;
+        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview, press Ctrl+3 to apply physical submit; press O or Esc to exit." << std::endl;
     return true;
 }
 
@@ -592,7 +584,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // widget 有向盒 → boxToModelMatrix 编码
     // 固定 VirtualCrop 模式 + 当前 removalMode
     const auto previewRequest = BuildPreviewRequest();
-    // ── 分支 A：轻量预览（不触发完整 mask/clip/统计管道） ──
+    // ── 分支 A：3D outline guide 轻量预览（不触发 2D mask / 3D clip / 统计管道） ──
     // Bridge 仍然只提交 request；source 分发与 request->cropData 归一化统一收口在 Router。
     if (!m_previewRequiresFullArtifacts) {
         const auto previewResult = m_backend.GetLightweightPreviewResult(previewRequest);
@@ -611,7 +603,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             std::cout
                 << "[Main] Orthogonal crop preview updated. source = "
                 << GetDataSourceText(previewResult.GetResolvedDataSource())
-                << ", backend = LightweightPreview"
+                << ", artifact = Lightweight3DOutlineGuide"
                 << ", removal = "
                 << GetRemovalModeText(m_currentRemovalMode)
                 << ", main3D = "
@@ -625,8 +617,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // ── 分支 B：完整预览 ──
-    // 经 Router → PluginService/Algorithm 完整执行 mask 或 polyData clip
+    // ── 分支 B：完整 2D/3D artifact 预览 ──
+    // 经 Router → PluginService/Algorithm 完整执行 2D image mask 或 3D polydata clip。
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
@@ -669,6 +661,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         std::cout
             << "[Main] Orthogonal crop preview updated. source = "
             << GetDataSourceText(dataSource)
+            << ", artifact = Full2D3DArtifactPreview"
             << ", backend = "
             << GetResolvedBackendText(backend)
             << ", inside = "
@@ -778,13 +771,13 @@ const char* OrthogonalCropInteractionBridgeService::GetResolvedBackendText(Ortho
 {
     switch (backend) {
     case OrthogonalCropResolvedBackend::ImageVirtualMask:
-        return "ImageVirtualMask";
+        return "Image2DMaskPreview";
     case OrthogonalCropResolvedBackend::ImageExtractVOI:
-        return "ImageExtractVOI";
+        return "ImagePhysicalSubmitExtractVOI";
     case OrthogonalCropResolvedBackend::ImageMapperCropping:
-        return "ImageMapperCropping";
+        return "Image3DVolumeMapperPreview";
     case OrthogonalCropResolvedBackend::PolyDataClipDataSet:
-        return "PolyDataClipDataSet";
+        return "PolyData3DClipPreview";
     case OrthogonalCropResolvedBackend::None:
     default:
         return "None";

@@ -563,9 +563,9 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 8) OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts
 - 做什么：控制 preview 是否必须生成完整 mask / derived polydata 等重型结果。
-- 为什么：当前默认值是 true，优先保证完整 preview 语义；轻量 preview 改成显式用户选择，而不是自动猜测。
+- 为什么：当前默认值是 true，优先保证完整 2D/3D artifact preview 语义；3D outline guide 改成显式用户选择，而不是自动猜测。
 
-9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewArtifactMode
+9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewArtifactMode / ApplyPhysicalSubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
 - 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
@@ -635,8 +635,16 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
 
 7. 按 3
-- bridge->TogglePreviewArtifactMode(true)。
-- 在 Full / Lightweight 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
+- bridge->TogglePreviewArtifactMode()。
+- 在 Full2D3DArtifactPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
+
+8. 按 Ctrl+3
+- bridge->ApplyPhysicalSubmit()。
+- 校验当前是否为 KeepInside、非 dragging、widget 已激活。
+- BuildPhysicalSubmitRequest() 把当前 widget 有向盒改成 PhysicalCrop request。
+- SubmitDerivedImageReload() 保持原有 reload buffer / origin 翻转语义，把 derived image 提交回主数据通道。
+
+注意：物理提交入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
 
 /*
@@ -681,7 +689,7 @@ Step 11: 只让一个窗口进入 SetStarted()
     auto virtualMask = result.GetVirtualMaskImage();
     auto outline = result.GetOutlinePolyData();
 
-如果改走物理裁切：
+如果改走主数据 physical submit：
 
     auto hardRequest = request;
     hardRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);

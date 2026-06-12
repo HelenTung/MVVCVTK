@@ -7,7 +7,7 @@
 // =====================================================================
 // 显示主链路：
 // 1. bridge 把统一的 OrthogonalCropResult 推给 overlay strategy
-// 2. strategy 从结果里拆出 outline / virtual mask / derived polydata
+// 2. strategy 从结果里拆出 outline / 2D mask / derived polydata
 // 3. 再根据当前窗口是 2D 还是 3D，决定显示实体区域、mask slice 还是 polydata
 // 4. 所有 prop 都共享同一套 removal mode 颜色语义与主模型变换
 

@@ -134,7 +134,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // ── 分发 C：virtualMaskImage（仅 image 路径虚拟裁切） ──
+    // ── 分发 C：virtualMaskImage（仅 image 路径 2D mask preview） ──
     // 2D 窗口 → vtkImageResliceMapper 切片显示，颜色由 m_maskLut 控制
     // 3D 窗口 → mask 不可见（只依赖 outline + 主模型 clip）
     auto maskImage = result.GetVirtualMaskImage();
