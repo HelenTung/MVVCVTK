@@ -13,6 +13,7 @@
 #include <vtkGeometryFilter.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
+#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPlane.h>
 #include <vtkPlaneCollection.h>
@@ -24,7 +25,6 @@
 #include <vtkVolumeMapper.h>
 
 #include <algorithm>
-#include <cmath>
 #include <iostream>
 #include <utility>
 
@@ -984,20 +984,13 @@ void OrthogonalCropInteractionBridgeService::SetVolumeKeepInsidePreviewApplied(
             boxToWorldTransform->TransformPoint(boxOrigin, worldOrigin);
             boxToWorldTransform->TransformNormal(boxNormal, worldNormal);
 
-            const double normalLength = std::sqrt(
-                worldNormal[0] * worldNormal[0]
-                + worldNormal[1] * worldNormal[1]
-                + worldNormal[2] * worldNormal[2]);
-            if (normalLength <= 1e-12) {
+            if (vtkMath::Normalize(worldNormal) <= 1e-12) {
                 continue;
             }
 
             auto plane = vtkSmartPointer<vtkPlane>::New();
             plane->SetOrigin(worldOrigin);
-            plane->SetNormal(
-                worldNormal[0] / normalLength,
-                worldNormal[1] / normalLength,
-                worldNormal[2] / normalLength);
+            plane->SetNormal(worldNormal);
             clippingPlanes->AddItem(plane);
         }
     }

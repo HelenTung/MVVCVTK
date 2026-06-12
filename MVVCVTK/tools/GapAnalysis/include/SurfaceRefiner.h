@@ -11,7 +11,7 @@
 //#include <vtkPointData.h>
 //#include <vtkSmoothPolyDataFilter.h>
 //#include <vtkSMPTools.h>
-//#include <cmath>
+//#include <vtkMath.h>
 //#include <vector>
 //
 //class SurfaceRefiner {
@@ -110,10 +110,7 @@
 //                points->GetPoint(pid, p);
 //                nArray->GetTuple(pid, n);
 //
-//                const double nLen =
-//                    std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-//                if (nLen < 1e-6) continue;
-//                n[0] /= nLen; n[1] /= nLen; n[2] /= nLen;
+//                if (vtkMath::Normalize(n) < 1e-6) continue;
 //
 //                ts.clear();
 //                svals.clear();

@@ -74,8 +74,13 @@ private:
 //                    (vol.GetVoxelValue(x + dx, y + dy, z + dz + 1) - vol.GetVoxelValue(x + dx, y + dy, z + dz - 1)) * 0.5f;
 //                m11 += gx * gx; m22 += gy * gy; m33 += gz * gz;
 //            }
-//    const float len = std::sqrt(m11 + m22 + m33 + 1e-9f);
-//    return { std::sqrt(m11) / len, std::sqrt(m22) / len, std::sqrt(m33) / len };
+//    double direction[3] = { std::sqrt(m11), std::sqrt(m22), std::sqrt(m33) };
+//    vtkMath::Normalize(direction);
+//    return {
+//        static_cast<float>(direction[0]),
+//        static_cast<float>(direction[1]),
+//        static_cast<float>(direction[2])
+//    };
 //}
 
 inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
