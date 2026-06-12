@@ -7,10 +7,10 @@
 // =====================================================================
 // 路由主链路：
 // 1. 根据 preferredDataSource 与当前已绑定输入确定 active data source
-// 2. 把默认 request、轻量预览、统计查询和结果执行都收口到同一组入口
+// 2. 把默认 request、轻量预览、诊断查询和结果执行都收口到同一组入口
 // 3. image 路径直接委托给 OrthogonalCropPluginService
 // 4. polydata 路径把 request 归一化为 cropData，再生成 implicit function 做 clip
-// 5. 两条路径最终都回填到统一的 OrthogonalCropResult / OrthogonalCropStatistics
+// 5. 两条路径最终都回填到统一的 OrthogonalCropResult / OrthogonalCropStatistics 诊断模型
 
 #include "OrthogonalCropPluginService.h"
 
@@ -50,7 +50,7 @@ public:
     // 构造与当前活跃输入一致的默认 request。
     OrthogonalCropRequest GetDefaultRequest() const;
 
-    // 查询当前请求的统计信息，内部会按数据源分发。
+    // 查询当前请求的诊断信息，内部会按数据源分发。
     // 调用方只需要提交统一 request，不需要提前知道自己会落到 image 还是 polydata 后端。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
@@ -73,7 +73,7 @@ private:
     // 读取 polydata 输入 bounds。
     std::array<double, 6> GetPolyDataBounds() const;
 
-    // 统一构造“输入缺失”统计结果。
+    // 统一构造“输入缺失”诊断结果。
     OrthogonalCropStatistics GetMissingInputStatistics() const;
 
     // 统一构造“输入缺失”执行结果。
@@ -86,17 +86,11 @@ private:
         OrthogonalCropFailureReason& failureReason,
         std::string& message) const;
 
-    // 用已完成的 clipped polydata 回填统计信息，避免重复执行 clip。
+    // 用已完成的 clipped polydata 回填诊断信息，避免重复执行 clip。
     OrthogonalCropStatistics GetPolyDataStatisticsFromClipped(vtkPolyData* clipped) const;
 
-    // image 路径统计接口，最终委托给 image-only plugin。
-    OrthogonalCropStatistics GetImageStatistics(const OrthogonalCropRequest& request) const;
-
-    // polydata 路径统计接口，会实际做一次 clip 来估算输出规模。
+    // polydata 路径诊断接口，会实际做一次 clip 来确认可执行性。
     OrthogonalCropStatistics GetPolyDataStatistics(const OrthogonalCropRequest& request) const;
-
-    // image 路径完整结果接口。
-    OrthogonalCropResult GetImageResult(const OrthogonalCropRequest& request) const;
 
     // polydata 路径完整结果接口。
     OrthogonalCropResult GetPolyDataResult(const OrthogonalCropRequest& request) const;
@@ -107,10 +101,10 @@ private:
     // polydata 输入单独缓存在 router 中，由 polydata 分支直接消费。
     vtkSmartPointer<vtkPolyData> m_inputPolyData;
 
-    // polydata 统计/结果路径复用的 clip filter。
+    // polydata 诊断/结果路径复用的 clip filter。
     mutable vtkSmartPointer<vtkTableBasedClipDataSet> m_polyDataClipFilter;
 
-    // polydata 统计/结果路径复用的 geometry filter。
+    // polydata 诊断/结果路径复用的 geometry filter。
     mutable vtkSmartPointer<vtkGeometryFilter> m_polyDataGeometryFilter;
 
     // 最近一次 polydata clip 的输入几何快照；命中时可直接复用 clipped 输出。
@@ -122,7 +116,7 @@ private:
     // 最近一次 polydata clip 对应的原始输入指针；输入变更时缓存必须失效。
     mutable vtkPolyData* m_cachedPolyDataInput = nullptr;
 
-    // 最近一次 polydata clip 的输出结果；供 statistics/result 连续调用复用。
+    // 最近一次 polydata clip 的输出结果；供 diagnostics/result 连续调用复用。
     mutable vtkSmartPointer<vtkPolyData> m_cachedClippedPolyData;
 
     // 当前是否持有可用的 polydata clip 缓存。

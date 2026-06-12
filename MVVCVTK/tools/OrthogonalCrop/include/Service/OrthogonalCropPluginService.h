@@ -4,7 +4,7 @@
 // Path: MVVCVTK/tools/OrthogonalCrop/include/Service/OrthogonalCropPluginService.h
 // 分类: Service / Image Plugin Facade
 // OrthogonalCropPluginService.h - 正交裁切独立插件服务封装
-// 说明: 只处理 vtkImageData 路径，向上提供默认 request、统计与执行入口。
+// 说明: 只处理 vtkImageData 路径，向上提供默认 request、诊断与执行入口。
 // =====================================================================
 
 #include "OrthogonalCropAlgorithm.h"
@@ -23,7 +23,7 @@ public:
     // 查询系统当前可用物理内存，供 physical submit 估算使用。
     std::size_t GetSystemAvailableRamBytes() const;
 
-    // 查询 image 路径统计结果。
+    // 查询 image 路径诊断结果。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
     // 执行 image 路径裁切。

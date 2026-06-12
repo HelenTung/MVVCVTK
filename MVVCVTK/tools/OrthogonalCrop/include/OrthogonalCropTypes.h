@@ -5,7 +5,7 @@
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
 // 设计约束：
-// - 这里只保留请求、结果、统计、失败原因以及数据/状态快照；
+// - 这里只保留请求、结果、诊断、失败原因以及数据/状态快照；
 // - 不依赖 MedicalVizService、Renderer、Interactor 或具体窗口对象；
 // - 前端或 ViewModel 只需组装 OrthogonalCropRequest，再消费 OrthogonalCropResult。
 //
@@ -99,30 +99,8 @@ enum class OrthogonalCropResolvedBackend {
     Image2DMaskPreview,
     // image 路径通过提取 VOI 生成 physical submit 后的新主子体数据。
     ImagePhysicalSubmitExtractVOI,
-    // image volume mapper 原生 3D cropping preview 方案。
-    Image3DVolumeMapperPreview,
     // polydata 路径使用 3D box clip + geometry filter 得到 preview 网格。
     PolyData3DClipPreview
-};
-
-// 交互层当前选中的裁切手柄语义。
-enum class CropHandleId {
-    // 当前没有任何有效手柄被激活。
-    None,
-    // model X 轴负方向平面手柄。
-    MinModelX,
-    // model X 轴正方向平面手柄。
-    MaxModelX,
-    // model Y 轴负方向平面手柄。
-    MinModelY,
-    // model Y 轴正方向平面手柄。
-    MaxModelY,
-    // model Z 轴负方向平面手柄。
-    MinModelZ,
-    // model Z 轴正方向平面手柄。
-    MaxModelZ,
-    // 中心平移手柄，代表整体拖拽裁切盒。
-    Center
 };
 
 // 裁切交互过程的瞬时状态；主要用于区分“拖拽中”和“已释放”。
@@ -252,12 +230,6 @@ public:
     // 设置裁切相关的高亮/LUT 颜色。
     void SetLutColor(const CropVectorDouble3Array& color) { m_lutColor = color; }
 
-    // 返回当前交互层认为被激活的裁切手柄。
-    CropHandleId GetActiveHandle() const { return m_activeHandle; }
-
-    // 写入当前激活的裁切手柄语义。
-    void SetActiveHandle(CropHandleId handleId) { m_activeHandle = handleId; }
-
     // 返回当前交互阶段，如 Idle、Dragging、Released。
     CropInteractionPhase GetInteractionPhase() const { return m_interactionPhase; }
 
@@ -273,8 +245,6 @@ private:
     bool m_outsideVisibility = false;
     // 裁切相关 LUT/高亮颜色。
     std::array<double, 3> m_lutColor = { 1.0, 0.4, 0.2 };
-    // 当前被激活的交互手柄。
-    CropHandleId m_activeHandle = CropHandleId::None;
     // 当前交互阶段，供上层区分 dragging/released。
     CropInteractionPhase m_interactionPhase = CropInteractionPhase::Idle;
 };
@@ -341,59 +311,23 @@ private:
 
 class OrthogonalCropStatistics {
 public:
-    // 返回统计最终落到的数据源。
+    // 返回诊断信息最终落到的数据源。
     OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
 
-    // 写入统计最终落到的数据源。
+    // 写入诊断信息最终落到的数据源。
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
-    // 返回统计采用的具体后端实现。
+    // 返回诊断信息采用的具体后端实现。
     OrthogonalCropResolvedBackend GetResolvedBackend() const { return m_resolvedBackend; }
 
-    // 写入统计采用的具体后端实现。
+    // 写入诊断信息采用的具体后端实现。
     void SetResolvedBackend(OrthogonalCropResolvedBackend backend) { m_resolvedBackend = backend; }
 
-    // 返回统计阶段发现的失败原因。
+    // 返回诊断阶段发现的失败原因。
     OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
 
-    // 写入统计阶段发现的失败原因。
+    // 写入诊断阶段发现的失败原因。
     void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
-
-    // 返回原始输入总体规模。
-    std::size_t GetTotalVoxelCount() const { return m_totalVoxelCount; }
-
-    // 写入原始输入总体规模。
-    void SetTotalVoxelCount(std::size_t voxelCount) { m_totalVoxelCount = voxelCount; }
-
-    // 返回裁切盒内部规模。
-    std::size_t GetInsideVoxelCount() const { return m_insideVoxelCount; }
-
-    // 写入裁切盒内部规模。
-    void SetInsideVoxelCount(std::size_t voxelCount) { m_insideVoxelCount = voxelCount; }
-
-    // 返回真正输出结果的规模。
-    std::size_t GetOutputVoxelCount() const { return m_outputVoxelCount; }
-
-    // 写入真正输出结果的规模。
-    void SetOutputVoxelCount(std::size_t voxelCount) { m_outputVoxelCount = voxelCount; }
-
-    // 返回当前请求的内存预估值。
-    std::size_t GetEstimatedRamUsageBytes() const { return m_estimatedRamUsageBytes; }
-
-    // 写入当前请求的内存预估值。
-    void SetEstimatedRamUsageBytes(std::size_t ramUsageBytes) { m_estimatedRamUsageBytes = ramUsageBytes; }
-
-    // 返回 image 路径吸附后的 index 边界。
-    const CropIndexBoundsInt6Array& GetSnappedIndexBounds() const { return m_snappedIndexBounds; }
-
-    // 写入 image 路径吸附后的 index 边界。
-    void SetSnappedIndexBounds(const CropIndexBoundsInt6Array& indexBounds) { m_snappedIndexBounds = indexBounds; }
-
-    // 返回当前是否允许继续执行 image physical submit。
-    bool GetCanExecuteImagePhysicalSubmit() const { return m_canExecuteImagePhysicalSubmit; }
-
-    // 写入当前是否允许继续执行 image physical submit。
-    void SetCanExecuteImagePhysicalSubmit(bool canExecute) { m_canExecuteImagePhysicalSubmit = canExecute; }
 
     // 返回统一的校验/告警文本。
     const std::string& GetValidationMessage() const { return m_validationMessage; }
@@ -414,24 +348,12 @@ public:
     }
 
 private:
-    // 这次统计最终落到的数据源；用于日志和上层 UI 提示。
+    // 这次诊断最终落到的数据源；用于日志和上层 UI 提示。
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::Auto;
-    // 这次统计真正采用的底层实现路径，如 2D mask preview、extract VOI 或 polydata clip。
+    // 这次诊断真正采用的底层实现路径，如 2D mask preview、extract VOI 或 polydata clip。
     OrthogonalCropResolvedBackend m_resolvedBackend = OrthogonalCropResolvedBackend::None;
-    // 统计阶段发现的失败原因；None 表示校验通过。
+    // 诊断阶段发现的失败原因；None 表示校验通过。
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
-    // 原始输入总体规模；image 路径用 voxel 数，polydata 路径用 cell 数近似表达。
-    std::size_t m_totalVoxelCount = 0;
-    // 裁切盒内部规模；用于估算 preview 影响范围和 image physical submit 输出大小。
-    std::size_t m_insideVoxelCount = 0;
-    // 真正输出结果的规模；preview 产物常等于 total，image physical submit 常等于 inside。
-    std::size_t m_outputVoxelCount = 0;
-    // 当前请求若继续执行，预估至少需要的内存量；主要服务 image physical submit 风险判断。
-    std::size_t m_estimatedRamUsageBytes = 0;
-    // image 路径里 model bounds 吸附后的 index 整数边界；供 mask/VOI 提取直接复用。
-    std::array<int, 6> m_snappedIndexBounds = { 0, 0, 0, 0, 0, 0 };
-    // 当前统计是否允许继续做 image physical submit；会综合 removal mode 与内存约束。
-    bool m_canExecuteImagePhysicalSubmit = false;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
     std::string m_validationMessage;
 };
@@ -504,10 +426,10 @@ public:
     // 写入这次执行对应的交互/显示状态快照。
     void SetCropStateModel(const CropStateModel& cropStateModel) { m_cropStateModel = cropStateModel; }
 
-    // 返回与本次结果配套的统计信息。
+    // 返回与本次结果配套的诊断信息。
     const OrthogonalCropStatistics& GetStatistics() const { return m_statistics; }
 
-    // 写入与本次结果配套的统计信息。
+    // 写入与本次结果配套的诊断信息。
     void SetStatistics(const OrthogonalCropStatistics& statistics) { m_statistics = statistics; }
 
 private:
@@ -533,6 +455,6 @@ private:
     CropDataModel m_cropDataModel;
     // 这次结果对应的交互/显示状态快照；便于上层知道结果产生时是否仍处于交互态。
     CropStateModel m_cropStateModel;
-    // 与结果配套的统计信息；避免调用方再次重复跑一遍统计。
+    // 与结果配套的诊断信息；避免调用方再次重复跑一遍诊断。
     OrthogonalCropStatistics m_statistics;
 };

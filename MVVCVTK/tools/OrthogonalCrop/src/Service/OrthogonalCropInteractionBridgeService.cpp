@@ -28,12 +28,11 @@
 #include <iostream>
 #include <utility>
 
-namespace {
-constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
-constexpr const char* kVolumeRemoveInsideModelToBoxUniform = "mvvcvtk_volumeRemoveInsideModelToBox";
-constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
+static constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
+static constexpr const char* kVolumeRemoveInsideModelToBoxUniform = "mvvcvtk_volumeRemoveInsideModelToBox";
+static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
 
-constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
+static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "//VTK::Base::Impl\n"
     "    if (!g_skip && mvvcvtk_volumeRemoveInsideEnabled != 0)\n"
     "      {\n"
@@ -48,7 +47,6 @@ constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "        g_skip = true;\n"
     "        }\n"
     "      }\n";
-}
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
@@ -664,10 +662,6 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
             << ", artifact = Full2D3DArtifactPreview"
             << ", backend = "
             << GetResolvedBackendText(backend)
-            << ", inside = "
-            << previewStats.GetInsideVoxelCount()
-            << ", output = "
-            << previewStats.GetOutputVoxelCount()
             << ", removal = "
             << GetRemovalModeText(m_currentRemovalMode)
             << ", main3D = "
@@ -774,8 +768,6 @@ const char* OrthogonalCropInteractionBridgeService::GetResolvedBackendText(Ortho
         return "Image2DMaskPreview";
     case OrthogonalCropResolvedBackend::ImagePhysicalSubmitExtractVOI:
         return "ImagePhysicalSubmitExtractVOI";
-    case OrthogonalCropResolvedBackend::Image3DVolumeMapperPreview:
-        return "Image3DVolumeMapperPreview";
     case OrthogonalCropResolvedBackend::PolyData3DClipPreview:
         return "PolyData3DClipPreview";
     case OrthogonalCropResolvedBackend::None:

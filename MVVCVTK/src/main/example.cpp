@@ -694,7 +694,7 @@ Step 11: 只让一个窗口进入 SetStarted()
     auto hardRequest = request;
     hardRequest.SetExecutionMode(CropExecutionMode::ImagePhysicalSubmit);
     auto hardStats = cropBackend->GetStatistics(hardRequest);
-    if (!hardStats.GetCanExecuteImagePhysicalSubmit()) {
+    if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
         return;
     }
