@@ -9,9 +9,9 @@
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetBoundsChanged 持续记录 reference render 交互坐标 bounds 与交互 phase
-// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折回 model request
-// 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
-// 5. SetPreviewServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
+// 3. Released 或显式 toggle preview 时，BuildPreview2D3DArtifactRequest 把 widget 有向盒折回 model request
+// 4. UpdatePreview2D3DArtifactsFromCurrentBounds 调用 backend 获取统一结果
+// 5. SetPreview2D3DServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropBackendRouterService.h"
@@ -65,13 +65,13 @@ public:
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
     // 控制 preview 是否必须产出完整 2D/3D 后端产物（2D mask / 3D clipped polydata）。
-    void SetPreviewRequiresFullArtifacts(bool required);
+    void SetPreviewRequiresFull2D3DArtifacts(bool required);
 
     // 在 3D outline 轻量预览与完整 2D/3D artifact 预览之间切换；必要时会立即刷新当前 preview。
-    void TogglePreviewArtifactMode();
+    void TogglePreview2D3DArtifactMode();
 
-    // 提交当前 KeepInside image 裁切结果到主数据 reload 通道。
-    void ApplyPhysicalSubmit();
+    // 提交当前 KeepInside image physical submit 结果到主数据 reload 通道。
+    void ApplyImagePhysicalSubmit();
 
     // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
@@ -135,22 +135,22 @@ private:
 
     // 基于当前 widget 有向盒组装一次 preview request。
     // 这里会把标准盒 [-1,1]^3 转换成 boxToModelMatrix 的统一表达。
-    OrthogonalCropRequest BuildPreviewRequest() const;
+    OrthogonalCropRequest BuildPreview2D3DArtifactRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
-    void UpdatePreviewFromCurrentBounds(bool logStats);
+    void UpdatePreview2D3DArtifactsFromCurrentBounds(bool logStats);
 
     // 切换 preview 开关与 removal mode。
     void TogglePreview(CropRemovalMode removalMode, bool logStats);
 
-    // 校验当前交互状态是否允许发起主数据物理提交。
-    bool CanApplyPhysicalSubmit() const;
+    // 校验当前交互状态是否允许发起 image physical submit。
+    bool CanApplyImagePhysicalSubmit() const;
 
-    // 基于当前 widget 有向盒构建主数据物理提交 request。
-    OrthogonalCropRequest BuildPhysicalSubmitRequest() const;
+    // 基于当前 widget 有向盒构建 image physical submit request。
+    OrthogonalCropRequest BuildImagePhysicalSubmitRequest() const;
 
-    // 把 physical submit 的 derived image 转交给 reload 通道；保持原有 buffer/origin 翻转语义。
-    bool SubmitDerivedImageReload(
+    // 把 image physical submit image 转交给 reload 通道；保持原有 buffer/origin 翻转语义。
+    bool SubmitImagePhysicalSubmitImageReload(
         const OrthogonalCropResult& submitResult,
         const std::shared_ptr<MedicalVizService>& referenceRenderService);
 
@@ -185,27 +185,27 @@ private:
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
     // 把一次 previewResult 分发给所有 preview 窗口。
-    bool SetPreviewServicesDirty(const OrthogonalCropResult& previewResult);
+    bool SetPreview2D3DServicesDirty(const OrthogonalCropResult& previewResult);
 
     // 在 3D volume 主窗口上执行一次 volume preview；仅接管 VTK mapper 能正确表达的模式。
-    bool SetMainVolumePreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
+    bool SetMainImage3DVolumePreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
 
     // KeepInside 从统一 cropData 还原世界平面，再交给 VTK volume clipping 表达“只显示盒内”。
-    void SetVolumeKeepInsidePreviewApplied(
+    void SetImage3DVolumeKeepInsidePreviewApplied(
         vtkVolumeMapper* volumeMapper,
         const OrthogonalCropResult& previewResult) const;
 
     // RemoveInside 用 GPU volume shader discard 表达旋转盒外补集。
-    bool SetVolumeRemoveInsidePreviewApplied(
+    bool SetImage3DVolumeRemoveInsidePreviewApplied(
         vtkVolume* volume,
         vtkGPUVolumeRayCastMapper* volumeMapper,
         const OrthogonalCropResult& previewResult) const;
 
     // 把某个 3D 主窗口的持久 preview 管道恢复成全量直通状态。
-    void RestoreMainPolyDataPreview(PreviewRenderTarget& target);
+    void RestoreMainPolyData3DPreview(PreviewRenderTarget& target);
 
     // 在满足条件的 3D 主窗口上执行一次临时 polydata clip 预览。
-    bool SetMainPolyDataPreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
+    bool SetMainPolyData3DPreviewApplied(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;
@@ -232,12 +232,12 @@ private:
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
 
     // 当前 preview 是否强制要求完整 2D/3D 后端产物；关闭时只走 3D outline guide。
-    bool m_previewRequiresFullArtifacts = true;
+    bool m_previewRequiresFull2D3DArtifacts = true;
 
     // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // physical submit 重载期间持有提交缓冲，直到主线程回调收口。
+    // image physical submit 重载期间持有提交缓冲，直到主线程回调收口。
     std::shared_ptr<std::vector<float>> m_reloadBuffer;
 
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。

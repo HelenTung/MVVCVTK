@@ -8,8 +8,8 @@
 // 核心执行链：
 // 1. 由 request 归一化得到 CropDataModel
 // 2. 基于 cropData 做 bounds 校验与统计估算
-// 3. 按 executionMode 分流到 2D/3D preview artifact 或 physical submit extract
-// 4. 把几何数据、派生数据、统计信息与交互态重新组装为统一结果模型
+// 3. 按 executionMode 分流到 image 2D/3D preview artifact 或 image physical submit extract
+// 4. 把几何数据、image/polydata 产物、统计信息与交互态重新组装为统一结果模型
 
 #include "OrthogonalCropTypes.h"
 
@@ -60,10 +60,10 @@ public:
     // 把 model bounds 吸附到当前 image 的 index 体素范围。
     static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
 
-    // 生成裁切盒 outline，供 overlay 和 3D 预览复用。
-    static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
+    // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
+    static vtkSmartPointer<vtkPolyData> GetBox3DOutlinePreviewPolyData(const CropDataModel& cropData);
 
-    // 基于已归一化 cropData 估算输出规模、失败原因与 physical submit 可执行性。
+    // 基于已归一化 cropData 估算输出规模、失败原因与 image physical submit 可执行性。
     static OrthogonalCropStatistics GetStatistics(
         vtkImageData* image,
         const CropDataModel& cropData,
@@ -77,22 +77,22 @@ public:
         const OrthogonalCropRequest& request,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // 生成 preview artifact 结果：2D mask、3D outline、统计以及交互态快照。
-    static OrthogonalCropResult GetVirtualCropResult(
+    // 生成 image 2D mask + box 3D outline preview 结果、统计以及交互态快照。
+    static OrthogonalCropResult GetImage2DMaskAndBox3DOutlinePreviewResult(
         vtkImageData* image,
         const CropDataModel& cropData,
         const CropStateModel& cropState,
         CropRemovalMode removalMode);
 
-    // 生成 physical submit 结果：derived image、更新后的 cropData 与 globalOffsetMatrix。
-    static OrthogonalCropResult GetPhysicalCropResult(
+    // 生成 image physical submit 结果：输出 image、更新后的 cropData 与 globalOffsetMatrix。
+    static OrthogonalCropResult GetImagePhysicalSubmitResult(
         vtkImageData* image,
         const CropDataModel& cropData,
         const CropStateModel& cropState,
         CropRemovalMode removalMode,
         std::size_t availableRamBytes = 0);
 
-    // 算法总入口：先校验和归一化，再分发到 preview artifact / physical submit 两条执行链。
+    // 算法总入口：先校验和归一化，再分发到 preview 2D/3D artifact / image physical submit 两条执行链。
     // request 只携带 boxToModelMatrix；算法层会派生 AABB 并折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,

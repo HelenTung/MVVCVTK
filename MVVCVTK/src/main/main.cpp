@@ -68,13 +68,13 @@ public:
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
-        const bool isPreviewArtifactModeKey = keyCode == '3' || keySym == "3";
-        const bool isPhysicalCropSubmitKey = isPreviewArtifactModeKey && isControlPressed;
+        const bool isPreview2D3DArtifactModeKey = keyCode == '3' || keySym == "3";
+        const bool isImagePhysicalSubmitKey = isPreview2D3DArtifactModeKey && isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
             || isOutsidePreviewKey
-            || isPreviewArtifactModeKey;
+            || isPreview2D3DArtifactModeKey;
 
         if (eventId == vtkCommand::CharEvent && isManagedCropHotkey) {
             this->AbortFlagOn();
@@ -105,13 +105,13 @@ public:
                 return;
             }
 
-            if (isPreviewArtifactModeKey && !m_previewArtifactModeKeyDown) {
-                m_previewArtifactModeKeyDown = true;
-                if (isPhysicalCropSubmitKey) {
-                    orthogonalCropBridge->ApplyPhysicalSubmit();
+            if (isPreview2D3DArtifactModeKey && !m_preview2D3DArtifactModeKeyDown) {
+                m_preview2D3DArtifactModeKeyDown = true;
+                if (isImagePhysicalSubmitKey) {
+                    orthogonalCropBridge->ApplyImagePhysicalSubmit();
                 }
                 else {
-                    orthogonalCropBridge->TogglePreviewArtifactMode();
+                    orthogonalCropBridge->TogglePreview2D3DArtifactMode();
                 }
                 return;
             }
@@ -133,8 +133,8 @@ public:
                 return;
             }
 
-            if (isPreviewArtifactModeKey) {
-                m_previewArtifactModeKeyDown = false;
+            if (isPreview2D3DArtifactModeKey) {
+                m_preview2D3DArtifactModeKeyDown = false;
                 return;
             }
         }
@@ -144,7 +144,7 @@ private:
     bool m_cropToggleKeyDown = false;
     bool m_insidePreviewKeyDown = false;
     bool m_outsidePreviewKeyDown = false;
-    bool m_previewArtifactModeKeyDown = false;
+    bool m_preview2D3DArtifactModeKeyDown = false;
 };
 
 class GapAnalysisOverlayCommitObserver : public vtkCommand {

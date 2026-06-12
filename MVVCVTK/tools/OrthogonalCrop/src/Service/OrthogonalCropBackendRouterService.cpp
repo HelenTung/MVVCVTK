@@ -97,7 +97,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
 
     // polydata 路径没有 image 的 spacing/origin 语义，因此默认 request 直接围绕输入 bounds 构造。
     OrthogonalCropRequest request;
-    request.SetExecutionMode(CropExecutionMode::VirtualCrop);
+    request.SetExecutionMode(CropExecutionMode::Preview2D3DArtifact);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
     request.SetBoxToModelMatrixFromBounds(GetActiveModelBounds());
@@ -138,7 +138,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
     }
 }
 
-OrthogonalCropResult OrthogonalCropBackendRouterService::GetLightweightPreviewResult(const OrthogonalCropRequest& request) const
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetImagePoly3DOutlineGuidePreviewResult(const OrthogonalCropRequest& request) const
 {
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
@@ -180,7 +180,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetLightweightPreviewRe
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
     result.SetCropDataModel(cropData);
-    result.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
+    result.SetBox3DOutlinePreviewPolyData(OrthogonalCropAlgorithm::GetBox3DOutlinePreviewPolyData(cropData));
     return result;
 }
 
@@ -357,7 +357,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 {
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
-    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
+    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyData3DClipPreview);
 
     if (!m_inputPolyData) {
         statistics.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
@@ -366,7 +366,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
     }
 
     if (!clipped) {
-        statistics.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
+        statistics.SetFailureReason(OrthogonalCropFailureReason::PolyData3DClipPreviewPolyDataCreationFailed);
         statistics.SetValidationMessage("Failed to build clipped polydata.");
         return statistics;
     }
@@ -375,7 +375,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
     statistics.SetTotalVoxelCount(static_cast<std::size_t>(m_inputPolyData->GetNumberOfCells()));
     statistics.SetInsideVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
     statistics.SetOutputVoxelCount(static_cast<std::size_t>(clipped->GetNumberOfCells()));
-    statistics.SetCanExecutePhysicalCrop(true);
+    statistics.SetCanExecuteImagePhysicalSubmit(true);
     return statistics;
 }
 
@@ -384,11 +384,11 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetImageStatistics(
     // image 路径的真实统计仍由 plugin/algorithm 计算；router 只负责把 resolved 字段补完整。
     auto statistics = m_imageService.GetStatistics(request);
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-    if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop) {
-        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
+    if (request.GetExecutionMode() == CropExecutionMode::Preview2D3DArtifact) {
+        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::Image2DMaskPreview);
     }
     else {
-        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageExtractVOI);
+        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImagePhysicalSubmitExtractVOI);
     }
 
     return statistics;
@@ -398,7 +398,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 {
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
-    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
+    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyData3DClipPreview);
 
     if (!m_inputPolyData) {
         statistics.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
@@ -417,7 +417,7 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
-        statistics.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
+        statistics.SetFailureReason(OrthogonalCropFailureReason::PolyData3DClipPreviewPolyDataCreationFailed);
         statistics.SetValidationMessage("Failed to build clipped polydata.");
         return statistics;
     }
@@ -430,15 +430,15 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetImageResult(const Or
 {
     // ── 请求转发：Router → PluginService → Algorithm ──
     // PluginService 注入系统可用 RAM (GlobalMemoryStatusEx)
-    // Algorithm 完成 cropData 归一化 → 2D mask preview 或 physical submit extract
+    // Algorithm 完成 cropData 归一化 → image 2D mask preview 或 image physical submit extract
     auto result = m_imageService.GetResult(request);
     // ── 结果回填（Router 层）：只补标记字段 ──
     // resolvedDataSource = ImageData（上游可据此知道数据来源）
-    // preview artifact 场景下若 Algorithm 未设置 backend，兜底为 ImageVirtualMask
+    // Preview2D3DArtifact 场景下若 Algorithm 未设置 backend，兜底为 Image2DMaskPreview
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-    if (request.GetExecutionMode() == CropExecutionMode::VirtualCrop
+    if (request.GetExecutionMode() == CropExecutionMode::Preview2D3DArtifact
         && result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {
-        result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImageVirtualMask);
+        result.SetResolvedBackend(OrthogonalCropResolvedBackend::Image2DMaskPreview);
     }
     return result;
 }
@@ -447,11 +447,11 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
 {
     // ═══ PolyData 分支结果组装 ═══
     // 三步流程: 归一化 → clip 执行 → 结果封装
-    // 封装字段: statistics + cropData + outline + derivedPolyData
+    // 封装字段: statistics + cropData + box 3D outline + polydata 3D clip preview
     // 格式与 Image 路径完全一致, Preview 层统一消费
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
-    result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyDataClipDataSet);
+    result.SetResolvedBackend(OrthogonalCropResolvedBackend::PolyData3DClipPreview);
     result.SetCropStateModel(request.GetCropStateModel());
 
     // ── 步骤 1：请求归一化 ──
@@ -477,20 +477,20 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     // 缓存未命中时构建 vtkBox → TableBasedClipDataSet → GeometryFilter 管道
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
-        result.SetFailureReason(OrthogonalCropFailureReason::DerivedPolyDataCreationFailed);
+        result.SetFailureReason(OrthogonalCropFailureReason::PolyData3DClipPreviewPolyDataCreationFailed);
         result.SetMessage("Failed to build clipped polydata.");
         return result;
     }
 
     // ── 步骤 3：结果回填 ──
-    // statistics + cropData + outline + derivedPolyData 一次性封装
+    // statistics + cropData + box 3D outline + polydata 3D clip preview 一次性封装
     // 格式与 Image 路径完全一致，Preview 层统一消费
     const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
 
     result.SetStatistics(statistics);
     result.SetCropDataModel(cropData);
-    result.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
-    result.SetDerivedPolyData(clipped);
+    result.SetBox3DOutlinePreviewPolyData(OrthogonalCropAlgorithm::GetBox3DOutlinePreviewPolyData(cropData));
+    result.SetPolyData3DClipPreviewPolyData(clipped);
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
     return result;

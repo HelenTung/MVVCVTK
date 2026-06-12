@@ -561,11 +561,11 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：把加载成功后的 vtkImageData 真正注入裁切后端。
 - 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
 
-8) OrthogonalCropInteractionBridgeService::SetPreviewRequiresFullArtifacts
-- 做什么：控制 preview 是否必须生成完整 mask / derived polydata 等重型结果。
+8) OrthogonalCropInteractionBridgeService::SetPreviewRequiresFull2D3DArtifacts
+- 做什么：控制 preview 是否必须生成完整 image 2D mask / polydata 3D clip 等重型结果。
 - 为什么：当前默认值是 true，优先保证完整 2D/3D artifact preview 语义；3D outline guide 改成显式用户选择，而不是自动猜测。
 
-9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewArtifactMode / ApplyPhysicalSubmit
+9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreview2D3DArtifactMode / ApplyImagePhysicalSubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
 - 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
@@ -590,7 +590,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - SetStarted() 决定谁持有应用主消息循环。
 - 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
-4) 为什么默认 `m_previewRequiresFullArtifacts = true`
+4) 为什么默认 `m_previewRequiresFull2D3DArtifacts = true`
 - 因为 full preview 才能稳定产出 2D mask、3D overlay、必要时的主模型 clip 预览。
 - 如果一上来默认轻量，会让用户误以为预览本该有的 mask/完整结果丢了。
 - 所以当前策略是：默认完整，按 3 手动切 lightweight/full。
@@ -618,31 +618,31 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 3. 按 1 或 2
 - bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
-- bridge 组装 preview request，executionMode 固定是 VirtualCrop。
+- bridge 组装 preview request，executionMode 固定是 Preview2D3DArtifact。
 
-4. BuildPreviewRequest()
+4. BuildPreview2D3DArtifactRequest()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget 有向盒对应的 boxToModelMatrix。
 - 写入当前 removalMode。
 - 写入 cropStateModel。
 
-5. UpdatePreviewFromCurrentBounds()
+5. UpdatePreview2D3DArtifactsFromCurrentBounds()
 - full preview：走 GetResult()，拿完整 statistics/result。
 - lightweight preview：只构造 cropData + outline，跳过重型完整产物。
 
-6. SetPreviewServicesDirty(previewResult)
+6. SetPreview2D3DServicesDirty(previewResult)
 - 2D 窗口消费 overlay mask/outline。
 - 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
 
 7. 按 3
-- bridge->TogglePreviewArtifactMode()。
+- bridge->TogglePreview2D3DArtifactMode()。
 - 在 Full2D3DArtifactPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
 
 8. 按 Ctrl+3
-- bridge->ApplyPhysicalSubmit()。
+- bridge->ApplyImagePhysicalSubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活。
-- BuildPhysicalSubmitRequest() 把当前 widget 有向盒改成 PhysicalCrop request。
-- SubmitDerivedImageReload() 保持原有 reload buffer / origin 翻转语义，把 derived image 提交回主数据通道。
+- BuildImagePhysicalSubmitRequest() 把当前 widget 有向盒改成 ImagePhysicalSubmit request。
+- SubmitImagePhysicalSubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image physical submit image 提交回主数据通道。
 
 注意：物理提交入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
@@ -659,13 +659,13 @@ Step 11: 只让一个窗口进入 SetStarted()
     cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::ImageData);
 
     auto request = cropBackend->GetDefaultRequest();
-    request.SetBoxToInputMatrixFromBounds({
+    request.SetBoxToModelMatrixFromBounds({
         8.0, 16.0,
         10.0, 20.0,
         12.0, 24.0
     });
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetExecutionMode(CropExecutionMode::VirtualCrop);
+    request.SetExecutionMode(CropExecutionMode::Preview2D3DArtifact);
 
     CropStateModel cropState;
     cropState.SetCropEnabled(true);
@@ -686,21 +686,21 @@ Step 11: 只让一个窗口进入 SetStarted()
         return;
     }
 
-    auto virtualMask = result.GetVirtualMaskImage();
-    auto outline = result.GetOutlinePolyData();
+    auto image2DMaskPreview = result.GetImage2DMaskPreviewImage();
+    auto outline = result.GetBox3DOutlinePreviewPolyData();
 
 如果改走主数据 physical submit：
 
     auto hardRequest = request;
-    hardRequest.SetExecutionMode(CropExecutionMode::PhysicalCrop);
+    hardRequest.SetExecutionMode(CropExecutionMode::ImagePhysicalSubmit);
     auto hardStats = cropBackend->GetStatistics(hardRequest);
-    if (!hardStats.GetCanExecutePhysicalCrop()) {
+    if (!hardStats.GetCanExecuteImagePhysicalSubmit()) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
         return;
     }
 
     auto hardResult = cropBackend->GetResult(hardRequest);
-    auto derivedImage = hardResult.GetDerivedImage();
+    auto imagePhysicalSubmitImage = hardResult.GetImagePhysicalSubmitImage();
 
 如果改走 polydata：
 
@@ -708,10 +708,10 @@ Step 11: 只让一个窗口进入 SetStarted()
     cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::PolyData);
 
     auto polyRequest = cropBackend->GetDefaultRequest();
-    polyRequest.SetBoxToInputMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
+    polyRequest.SetBoxToModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
 
     auto polyResult = cropBackend->GetResult(polyRequest);
-    auto clippedSurface = polyResult.GetDerivedPolyData();
+    auto clippedSurface = polyResult.GetPolyData3DClipPreviewPolyData();
 */
 
 /*
