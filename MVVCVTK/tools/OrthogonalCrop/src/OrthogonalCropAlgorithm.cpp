@@ -73,7 +73,8 @@ bool GetBoundsContained(
     const std::array<double, 6>& dataModelBounds,
     const std::array<double, 6>& cropModelBounds)
 {
-    // physical crop 需要稳定的 derived 数据范围，因此要求裁切盒完整包含在数据 model bounds 内。
+    // 严格校验路径要求裁切盒完整包含在数据 model bounds 内。
+    // Image KeepInside physical crop 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
     return cropModelBounds[0] >= dataModelBounds[0] - BoundsEpsilon
         && cropModelBounds[1] <= dataModelBounds[1] + BoundsEpsilon
         && cropModelBounds[2] >= dataModelBounds[2] - BoundsEpsilon
@@ -454,8 +455,8 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     std::string& message,
     bool allowPartialOverlap)
 {
-    // allowPartialOverlap 只在 virtual crop 中启用，表示 preview 允许盒子部分超出输入范围，
-    // 但 physical crop 仍要求完整包含，避免导出的 derived image 语义不稳定。
+    // allowPartialOverlap 表示裁切盒只要和输入有真实体积交集即可。
+    // Virtual preview 和 Image KeepInside physical crop 都允许该语义；后者会提取交集范围。
     // 这里默认调用方已经把 dataModelBounds 和 cropModelBounds 放到了同一 model 坐标系里，不再做二次折叠。
     if (!GetBoundsHavePositiveVolume(dataModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
@@ -613,12 +614,15 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     OrthogonalCropStatistics statistics;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
+    const bool allowPartialOverlap =
+        executionMode == CropExecutionMode::VirtualCrop
+        || (executionMode == CropExecutionMode::PhysicalCrop && removalMode == CropRemovalMode::KeepInside);
     if (!GetBoundsAreValid(
         image,
         cropData.GetModelBounds(),
         failureReason,
         validationMessage,
-        executionMode == CropExecutionMode::VirtualCrop)) {
+        allowPartialOverlap)) {
         statistics.SetFailureReason(failureReason);
         statistics.SetValidationMessage(validationMessage);
         return statistics;
@@ -739,7 +743,10 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
-    const bool allowPartialOverlap = request.GetExecutionMode() == CropExecutionMode::VirtualCrop;
+    const bool allowPartialOverlap =
+        request.GetExecutionMode() == CropExecutionMode::VirtualCrop
+        || (request.GetExecutionMode() == CropExecutionMode::PhysicalCrop
+            && request.GetRemovalMode() == CropRemovalMode::KeepInside);
     if (!GetCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         statistics.SetFailureReason(failureReason);
         statistics.SetValidationMessage(message);
@@ -918,7 +925,10 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
-    const bool allowPartialOverlap = request.GetExecutionMode() == CropExecutionMode::VirtualCrop;
+    const bool allowPartialOverlap =
+        request.GetExecutionMode() == CropExecutionMode::VirtualCrop
+        || (request.GetExecutionMode() == CropExecutionMode::PhysicalCrop
+            && request.GetRemovalMode() == CropRemovalMode::KeepInside);
     if (!GetCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         result.SetFailureReason(failureReason);
         result.SetMessage(message);
