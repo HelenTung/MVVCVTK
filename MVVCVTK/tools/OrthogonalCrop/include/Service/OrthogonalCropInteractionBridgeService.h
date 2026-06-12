@@ -75,16 +75,16 @@ public:
     // 在轻量 preview 与完整 preview 之间切换；必要时会立即刷新当前 preview。
     void TogglePreviewArtifactMode(bool logStats = true);
 
-    // O 键对应的裁切模式 toggle 入口。
+    // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
 
-    // Esc 对应的显式退出入口。
+    // 对应的显式退出入口。
     bool ExitInteractiveCrop();
 
-    // 1 键对应的“保留盒内”预览动作。
+    // 对应的“保留盒内”预览动作。
     void ToggleInsidePreview();
 
-    // 2 键对应的“移除盒内”预览动作。
+    // 对应的“移除盒内”预览动作。
     void ToggleOutsidePreview();
 
     // 回到默认裁切盒，并按需要刷新 preview。
