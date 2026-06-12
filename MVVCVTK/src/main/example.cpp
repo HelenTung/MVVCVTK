@@ -53,7 +53,7 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropAlgorithm
     - 纯算法层。
-    - 负责：request 归一化、bounds 校验、voxel snapped、virtual/physical 结果构造。
+    - 负责：request 归一化、bounds 校验、voxel snapped、preview 2D/3D artifact / image physical submit 结果构造。
 */
 
 /*
@@ -644,7 +644,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - BuildImagePhysicalSubmitRequest() 把当前 widget 有向盒改成 ImagePhysicalSubmit request。
 - SubmitImagePhysicalSubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image physical submit image 提交回主数据通道。
 
-注意：物理提交入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
+注意：image physical submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
 
 /*
