@@ -7,7 +7,7 @@
 //   Phase 3 【渲染骨架】SetInteractorInitialized + SetStarted 进入消息循环
 //
 //   • PreInitConfig 中统一携带 bgColor / hasBgColor（前处理背景色）
-//   • SetFileLoadedAsync 回调中执行数据相关的后处理业务（等值面阈值推算、算法启动）
+//   • LoadFileAsync 回调中执行数据相关的后处理业务（等值面阈值推算、算法启动）
 //   • 加载回调由主线程 Timer 延迟执行；算法完成后的 VTK overlay 挂接也通过 Timer observer 主线程收口
 //   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
 //   • IDataLoaderService 通过 GetFileLoadState / GetReloadLoadState 做主线程状态查询
@@ -68,13 +68,13 @@ public:
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
-        const bool isPreview2D3DArtifactModeKey = keyCode == '3' || keySym == "3";
-        const bool isImagePhysicalSubmitKey = isPreview2D3DArtifactModeKey && isControlPressed;
+        const bool isPreviewArtifactModeKey = keyCode == '3' || keySym == "3";
+        const bool isSubmitKey = isPreviewArtifactModeKey && isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
             || isOutsidePreviewKey
-            || isPreview2D3DArtifactModeKey;
+            || isPreviewArtifactModeKey;
 
         if (eventId == vtkCommand::CharEvent && isManagedCropHotkey) {
             this->AbortFlagOn();
@@ -105,13 +105,13 @@ public:
                 return;
             }
 
-            if (isPreview2D3DArtifactModeKey && !m_preview2D3DArtifactModeKeyDown) {
-                m_preview2D3DArtifactModeKeyDown = true;
-                if (isImagePhysicalSubmitKey) {
-                    orthogonalCropBridge->ApplyImagePhysicalSubmit();
+            if (isPreviewArtifactModeKey && !m_previewModeKeyDown) {
+                m_previewModeKeyDown = true;
+                if (isSubmitKey) {
+                    orthogonalCropBridge->ApplySubmit();
                 }
                 else {
-                    orthogonalCropBridge->TogglePreview2D3DArtifactMode();
+                    orthogonalCropBridge->TogglePreviewMode();
                 }
                 return;
             }
@@ -133,8 +133,8 @@ public:
                 return;
             }
 
-            if (isPreview2D3DArtifactModeKey) {
-                m_preview2D3DArtifactModeKeyDown = false;
+            if (isPreviewArtifactModeKey) {
+                m_previewModeKeyDown = false;
                 return;
             }
         }
@@ -144,7 +144,7 @@ private:
     bool m_cropToggleKeyDown = false;
     bool m_insidePreviewKeyDown = false;
     bool m_outsidePreviewKeyDown = false;
-    bool m_preview2D3DArtifactModeKeyDown = false;
+    bool m_previewModeKeyDown = false;
 };
 
 class GapAnalysisOverlayCommitObserver : public vtkCommand {
@@ -434,7 +434,7 @@ int main()
     serviceC->SetElementVisible(VisFlags::Crosshair, true);
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
-    serviceA->SetFileLoadedAsync(
+    serviceA->LoadFileAsync(
         "F:\\data\\1000x1000x1000.raw",
         {0.02125, 0.02125, 0.02125},
         {0.0, 0.0, 0.0},
@@ -465,7 +465,7 @@ int main()
                 std::cerr << "[Main] Orthogonal crop init failed: input image missing." << std::endl;
             }
             else {
-                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle 3D outline/full 2D3D preview, press Ctrl+3 to apply physical submit." << std::endl;
+                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle 3D outline/full preview, press Ctrl+3 to apply submit." << std::endl;
             }
 
             // GapAnalysis 的启动由 contextB 上的 Timer observer 统一处理，
@@ -565,7 +565,7 @@ int main()
     //contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle 3D outline/full 2D3D preview | Ctrl+3 = apply physical submit\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle 3D outline/full preview | Ctrl+3 = apply submit\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

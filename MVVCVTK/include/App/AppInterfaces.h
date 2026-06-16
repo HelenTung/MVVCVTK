@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // =====================================================================
 // AppInterfaces.h — 纯虚接口定义
 //
@@ -94,7 +94,7 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService — 基础服务（渲染脏标记 + SetPendingUpdatesProcessed 更新入口）
+// AbstractAppService — 基础服务（渲染脏标记 + ProcessPendingUpdates 更新入口）
 // ─────────────────────────────────────────────────────────────────────
 class AbstractAppService {
 protected:
@@ -140,7 +140,7 @@ public:
     }
 
     // 主线程 Timer 心跳驱动的更新入口
-    virtual void SetPendingUpdatesProcessed() {}
+    virtual void ProcessPendingUpdates() {}
 
     bool IsDirty()      const { return m_isDirty; }
     void SetDirtyMarked() { m_isDirty = true; }
@@ -206,12 +206,12 @@ public:
     virtual ~IDataExportService() = default;
 
     // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调
-    virtual void SetTransformedDataSavedAsync(
+    virtual void SaveTransformedDataAsync(
         const std::string& path = {},
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // 异步保存：按当前切片方向导出原始体数据全部切片图，窗宽窗位沿用当前状态
-    virtual void SetSliceImagesSavedAsync(
+    virtual void SaveSliceImagesAsync(
         const std::string& path = {},
         const double angle = 0.0,
         std::function<void(bool success)> onComplete = nullptr) = 0;

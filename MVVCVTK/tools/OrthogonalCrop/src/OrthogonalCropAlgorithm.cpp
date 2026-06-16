@@ -1,7 +1,7 @@
 // =====================================================================
 // Path: MVVCVTK/tools/OrthogonalCrop/src/OrthogonalCropAlgorithm.cpp
 // 分类: Math / Core Algorithm Implementation
-// 说明: 负责 bounds 校验、request 归一化、image 2D mask preview、box 3D outline preview 与 image physical submit 统计/执行。
+// 说明: 负责 bounds 校验、request 归一化、image 2D mask preview、box 3D outline preview 与 image submit 统计/执行。
 // =====================================================================
 
 #include "OrthogonalCropAlgorithm.h"
@@ -76,7 +76,7 @@ static bool GetBoundsContained(
     const std::array<double, 6>& cropModelBounds)
 {
     // 严格校验路径要求裁切盒完整包含在数据 model bounds 内。
-    // Image KeepInside physical submit 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
+    // Image KeepInside submit 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
     return cropModelBounds[0] >= dataModelBounds[0] - BoundsEpsilon
         && cropModelBounds[1] <= dataModelBounds[1] + BoundsEpsilon
         && cropModelBounds[2] >= dataModelBounds[2] - BoundsEpsilon
@@ -163,7 +163,7 @@ static std::array<double, 16> GetUpdatedOffsetMatrix(
     const std::array<double, 16>& sourceToTargetMatrixData,
     const std::array<double, 3>& translation)
 {
-    // image physical submit 会改变输出 image 的 origin，
+    // image submit 会改变输出 image 的 origin，
     // 这里把这次位移继续累加进 globalOffsetMatrix，保证上层共享坐标语义保持连续。
     auto sourceToTargetMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     sourceToTargetMatrix->DeepCopy(sourceToTargetMatrixData.data());
@@ -205,21 +205,21 @@ static std::size_t GetEffectiveAvailableRamBytes(
 
 static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
 
-struct ImagePhysicalSubmitPlan {
+struct SubmitPlan {
     bool canExecute = false;
     CropIndexBoundsInt6Array snappedIndexBounds = { 0, 0, 0, 0, 0, 0 };
     OrthogonalCropStatistics diagnostics;
 };
 
-static ImagePhysicalSubmitPlan GetImagePhysicalSubmitPlan(
+static SubmitPlan BuildSubmitPlan(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    ImagePhysicalSubmitPlan plan;
+    SubmitPlan plan;
     plan.diagnostics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-    plan.diagnostics.SetResolvedBackend(OrthogonalCropResolvedBackend::ImagePhysicalSubmitExtractVOI);
+    plan.diagnostics.SetResolvedBackend(OrthogonalCropResolvedBackend::SubmitExtractVOI);
 
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
@@ -242,9 +242,9 @@ static ImagePhysicalSubmitPlan GetImagePhysicalSubmitPlan(
     }
 
     if (removalMode == CropRemovalMode::RemoveInside) {
-        plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::ImagePhysicalSubmitRemoveInsideUnsupported);
+        plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitRemoveInsideUnsupported);
         plan.diagnostics.SetValidationMessage(
-            "Image physical submit with RemoveInside is intentionally blocked because it cannot preserve a contiguous derived volume without resampling.");
+            "Image submit with RemoveInside is intentionally blocked because it cannot preserve a contiguous derived volume without resampling.");
         return plan;
     }
 
@@ -253,7 +253,7 @@ static ImagePhysicalSubmitPlan GetImagePhysicalSubmitPlan(
     const std::size_t estimatedRamUsageBytes = outputVoxelCount * GetImageBytesPerVoxel(image);
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
         plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
-        plan.diagnostics.SetValidationMessage("Estimated image physical submit memory usage exceeds currently available RAM.");
+        plan.diagnostics.SetValidationMessage("Estimated image submit memory usage exceeds currently available RAM.");
         return plan;
     }
 
@@ -262,7 +262,7 @@ static ImagePhysicalSubmitPlan GetImagePhysicalSubmitPlan(
     return plan;
 }
 
-static vtkSmartPointer<vtkImageData> GetImage2DMaskPreviewImage(
+static vtkSmartPointer<vtkImageData> GetMaskImage(
     vtkImageData* image,
     const CropDataModel& cropData,
     const std::array<int, 6>& indexBounds,
@@ -423,7 +423,7 @@ static vtkSmartPointer<vtkImageData> GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& indexBounds)
 {
-    // image physical submit 的目标是导出真正独立的输出 image。
+    // image submit 的目标是导出真正独立的输出 image。
     // 这里先按 snapped index 做 vtkExtractVOI，再把 extent 起点归零，
     // 同时把新的 model origin 设置成输出块起点对应的 model 坐标。
     if (!image) {
@@ -461,37 +461,37 @@ static vtkSmartPointer<vtkImageData> GetExtractedImage(
     return output;
 }
 
-static void SetImagePhysicalSubmitOutsideBoxToBackground(
-    vtkImageData* imagePhysicalSubmitImage,
+static void SetSubmitOutsideBoxToBackground(
+    vtkImageData* submitImage,
     const CropDataModel& cropData)
 {
-    if (!imagePhysicalSubmitImage
+    if (!submitImage
         || GetBoxToModelIsAxisAligned(cropData.GetBoxToModelMatrix())) {
         return;
     }
 
-    auto scalars = imagePhysicalSubmitImage->GetPointData()
-        ? imagePhysicalSubmitImage->GetPointData()->GetScalars()
+    auto scalars = submitImage->GetPointData()
+        ? submitImage->GetPointData()->GetScalars()
         : nullptr;
     if (!scalars) {
         return;
     }
 
     int dims[3] = { 0, 0, 0 };
-    imagePhysicalSubmitImage->GetDimensions(dims);
+    submitImage->GetDimensions(dims);
     const int componentCount = scalars->GetNumberOfComponents();
     if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0 || componentCount <= 0) {
         return;
     }
 
     double scalarRange[2] = { 0.0, 0.0 };
-    imagePhysicalSubmitImage->GetScalarRange(scalarRange);
+    submitImage->GetScalarRange(scalarRange);
     const std::vector<double> backgroundTuple(
         static_cast<std::size_t>(componentCount),
         scalarRange[0]);
 
     auto modelToBoxMatrix = GetModelToBoxMatrix(cropData);
-    auto indexToPhysicalMatrix = imagePhysicalSubmitImage->GetIndexToPhysicalMatrix();
+    auto indexToPhysicalMatrix = submitImage->GetIndexToPhysicalMatrix();
     const double modelToBoxStepVector[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
@@ -505,7 +505,7 @@ static void SetImagePhysicalSubmitOutsideBoxToBackground(
         for (int j = 0; j < dims[1]; ++j) {
             const int rowStartIndex[3] = { 0, j, k };
             double modelPoint[3] = { 0.0, 0.0, 0.0 };
-            imagePhysicalSubmitImage->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
+            submitImage->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
 
             const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
             double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
@@ -515,7 +515,7 @@ static void SetImagePhysicalSubmitOutsideBoxToBackground(
                 if (!GetCanonicalBoxContainsPoint(boxPoint)) {
                     int index[3] = { i, j, k };
                     scalars->SetTuple(
-                        imagePhysicalSubmitImage->ComputePointId(index),
+                        submitImage->ComputePointId(index),
                         backgroundTuple.data());
                 }
 
@@ -527,10 +527,10 @@ static void SetImagePhysicalSubmitOutsideBoxToBackground(
         }
     }
 
-    imagePhysicalSubmitImage->Modified();
+    submitImage->Modified();
 }
 
-static vtkSmartPointer<vtkPolyData> GetBox3DOutlinePreviewPolyDataInternal(const CropDataModel& cropData)
+static vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cropData)
 {
     // box 3D outline preview 的几何真源同样是标准盒 [-1,1]^3 + boxToModelMatrix。
     auto cube = vtkSmartPointer<vtkCubeSource>::New();
@@ -559,7 +559,7 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     bool allowPartialOverlap)
 {
     // allowPartialOverlap 表示裁切盒只要和输入有真实体积交集即可。
-    // preview 2D/3D artifact 和 image KeepInside physical submit 都允许该语义；后者会提取交集范围。
+    // preview artifact 和 image KeepInside submit 都允许该语义；后者会提取交集范围。
     // 这里默认调用方已经把 dataModelBounds 和 cropModelBounds 放到了同一 model 坐标系里，不再做二次折叠。
     if (!GetBoundsHavePositiveVolume(dataModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
@@ -606,7 +606,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     return GetBoundsAreValid(dataModelBounds, cropData.GetModelBounds(), failureReason, message, allowPartialOverlap);
 }
 
-static bool GetImageCropDataModel(
+static bool BuildCropDataModel(
     vtkImageData* image,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
@@ -687,9 +687,9 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
     return indexBounds;
 }
 
-vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetBox3DOutlinePreviewPolyData(const CropDataModel& cropData)
+vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const CropDataModel& cropData)
 {
-    return GetBox3DOutlinePreviewPolyDataInternal(cropData);
+    return GetOutlinePolyDataInternal(cropData);
 }
 
 static OrthogonalCropStatistics GetImageDiagnostics(
@@ -700,12 +700,12 @@ static OrthogonalCropStatistics GetImageDiagnostics(
     std::size_t availableRamBytes)
 {
     // Statistics 只对外报告数据源、后端和失败诊断。
-    // image physical submit 的 snapped index / RAM gate 属于内部执行计划，不再挂在 statistics 上。
+    // image submit 的 snapped index / RAM gate 属于内部执行计划，不再挂在 statistics 上。
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
 
-    if (executionMode == CropExecutionMode::Preview2D3DArtifact) {
-        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::Image2DMaskPreview);
+    if (executionMode == CropExecutionMode::PreviewArtifact) {
+        statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string validationMessage;
         if (!OrthogonalCropAlgorithm::GetBoundsAreValid(
@@ -722,7 +722,7 @@ static OrthogonalCropStatistics GetImageDiagnostics(
         return statistics;
     }
 
-    return GetImagePhysicalSubmitPlan(image, cropData, removalMode, availableRamBytes).diagnostics;
+    return BuildSubmitPlan(image, cropData, removalMode, availableRamBytes).diagnostics;
 }
 
 OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
@@ -737,10 +737,10 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
     const bool allowPartialOverlap =
-        request.GetExecutionMode() == CropExecutionMode::Preview2D3DArtifact
-        || (request.GetExecutionMode() == CropExecutionMode::ImagePhysicalSubmit
+        request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
+        || (request.GetExecutionMode() == CropExecutionMode::Submit
             && request.GetRemovalMode() == CropRemovalMode::KeepInside);
-    if (!GetImageCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
+    if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         statistics.SetFailureReason(failureReason);
         statistics.SetValidationMessage(message);
         return statistics;
@@ -755,7 +755,7 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
         GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
 }
 
-static OrthogonalCropResult GetImage2DMaskAndBox3DOutlinePreviewResult(
+static OrthogonalCropResult GetPreviewResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const CropStateModel& cropState,
@@ -766,7 +766,7 @@ static OrthogonalCropResult GetImage2DMaskAndBox3DOutlinePreviewResult(
     // 后续 steps 逐步回填 mask / diagnostics / outline
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-    result.SetResolvedBackend(OrthogonalCropResolvedBackend::Image2DMaskPreview);
+    result.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
@@ -790,7 +790,7 @@ static OrthogonalCropResult GetImage2DMaskAndBox3DOutlinePreviewResult(
     // ── 步骤 3a：生成 mask ──
     // KeepInside  → ROI 大小 compact mask（memset 快路径）
     // RemoveInside → full-volume mask（标记盒外区域）
-    result.SetImage2DMaskPreviewImage(::GetImage2DMaskPreviewImage(
+    result.SetMaskImage(::GetMaskImage(
         image,
         cropData,
         snappedIndexBounds,
@@ -800,30 +800,30 @@ static OrthogonalCropResult GetImage2DMaskAndBox3DOutlinePreviewResult(
     // Statistics 只携带数据源、后端和失败诊断；mask 产物本身由 result 持有。
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
-    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::Image2DMaskPreview);
+    statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
     result.SetStatistics(statistics);
     result.SetFailureReason(statistics.GetFailureReason());
 
     // ── 步骤 3c：回填 outline 与最终状态 ──
     // outline 落在 model 下，供 overlay 直接消费
-    result.SetBox3DOutlinePreviewPolyData(GetBox3DOutlinePreviewPolyDataInternal(cropData));
-    result.SetSucceeded(result.GetImage2DMaskPreviewImage() != nullptr);
+    result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
+    result.SetSucceeded(result.GetMaskImage() != nullptr);
     if (!result.GetSucceeded()) {
-        result.SetFailureReason(OrthogonalCropFailureReason::Image2DMaskPreviewCreationFailed);
+        result.SetFailureReason(OrthogonalCropFailureReason::MaskPreviewCreationFailed);
         result.SetMessage("Failed to build image 2D mask preview.");
     }
     return result;
 }
 
-static OrthogonalCropResult GetImagePhysicalSubmitResult(
+static OrthogonalCropResult GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const CropStateModel& cropState,
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    // image physical submit 返回的是新的主数据 image，
+    // image submit 返回的是新的主数据 image，
     // 因此除了提取体素数据，还必须同步修正 bounds 和 globalOffsetMatrix。
     // 结果说明：输出 image 是新的主数据快照，derivedCropData 记录它自己的 model bounds 与位移补偿。
     OrthogonalCropResult result;
@@ -832,8 +832,8 @@ static OrthogonalCropResult GetImagePhysicalSubmitResult(
     result.SetCropStateModel(cropState);
 
     // ── 步骤 1：内部提交计划 ──
-    // snapped index、RAM gate 和可执行性只服务 image physical submit，不进入通用 statistics。
-    const auto submitPlan = GetImagePhysicalSubmitPlan(
+    // snapped index、RAM gate 和可执行性只服务 image submit，不进入通用 statistics。
+    const auto submitPlan = BuildSubmitPlan(
         image,
         cropData,
         removalMode,
@@ -847,16 +847,16 @@ static OrthogonalCropResult GetImagePhysicalSubmitResult(
     }
 
     // ── 步骤 2：体素提取 ──
-    // 通过 ExtractVOI → ImageChangeInformation 产出独立 image physical submit image。
+    // 通过 ExtractVOI → ImageChangeInformation 产出独立 image submit image。
     // VOI 只能输出 index 轴对齐子体；若 widget box 是旋转盒，再按同一份
     // modelToBox 判定清掉盒外体素，避免提交结果比 preview 多出 AABB 角落内容。
-    auto imagePhysicalSubmitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
-    if (!imagePhysicalSubmitImage) {
-        result.SetFailureReason(OrthogonalCropFailureReason::ImagePhysicalSubmitImageCreationFailed);
-        result.SetMessage("Failed to build image physical submit image.");
+    auto submitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
+    if (!submitImage) {
+        result.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
+        result.SetMessage("Failed to build image submit image.");
         return result;
     }
-    SetImagePhysicalSubmitOutsideBoxToBackground(imagePhysicalSubmitImage, cropData);
+    SetSubmitOutsideBoxToBackground(submitImage, cropData);
 
     // ── 步骤 3：偏移补偿 ──
     // 提取后 origin 改变，把位移量累加进 globalOffsetMatrix
@@ -864,19 +864,19 @@ static OrthogonalCropResult GetImagePhysicalSubmitResult(
     double originalOrigin[3] = { 0.0, 0.0, 0.0 };
     image->GetOrigin(originalOrigin);
     double newOrigin[3] = { 0.0, 0.0, 0.0 };
-    imagePhysicalSubmitImage->GetOrigin(newOrigin);
+    submitImage->GetOrigin(newOrigin);
 
-    CropDataModel imagePhysicalSubmitCropData = cropData;
-    double imagePhysicalSubmitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    imagePhysicalSubmitImage->GetBounds(imagePhysicalSubmitBounds);
-    const CropBoundsDouble6Array imagePhysicalSubmitModelBounds = {
-        imagePhysicalSubmitBounds[0], imagePhysicalSubmitBounds[1],
-        imagePhysicalSubmitBounds[2], imagePhysicalSubmitBounds[3],
-        imagePhysicalSubmitBounds[4], imagePhysicalSubmitBounds[5]
+    CropDataModel submitCropData = cropData;
+    double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    submitImage->GetBounds(submitBounds);
+    const CropBoundsDouble6Array submitModelBounds = {
+        submitBounds[0], submitBounds[1],
+        submitBounds[2], submitBounds[3],
+        submitBounds[4], submitBounds[5]
     };
-    imagePhysicalSubmitCropData.SetBoxToModelMatrixFromBounds(imagePhysicalSubmitModelBounds);
-    imagePhysicalSubmitCropData.SetModelBounds(imagePhysicalSubmitModelBounds);
-    imagePhysicalSubmitCropData.SetGlobalOffsetMatrix(
+    submitCropData.SetBoxToModelMatrixFromBounds(submitModelBounds);
+    submitCropData.SetModelBounds(submitModelBounds);
+    submitCropData.SetGlobalOffsetMatrix(
         GetUpdatedOffsetMatrix(
             cropData.GetGlobalOffsetMatrix(),
             {
@@ -886,15 +886,15 @@ static OrthogonalCropResult GetImagePhysicalSubmitResult(
             }));
 
     // ── 步骤 4：结果回填 ──
-    // image physical submit image 本身就是新主数据，关闭交互裁切语义
-    CropStateModel imagePhysicalSubmitCropState = cropState;
-    imagePhysicalSubmitCropState.SetCropEnabled(false);
+    // image submit image 本身就是新主数据，关闭交互裁切语义
+    CropStateModel submitCropState = cropState;
+    submitCropState.SetCropEnabled(false);
 
-    result.SetImagePhysicalSubmitImage(imagePhysicalSubmitImage);
-    result.SetBox3DOutlinePreviewPolyData(GetBox3DOutlinePreviewPolyDataInternal(imagePhysicalSubmitCropData));
-    result.SetCropDataModel(imagePhysicalSubmitCropData);
-    result.SetCropStateModel(imagePhysicalSubmitCropState);
-    result.SetResolvedBackend(OrthogonalCropResolvedBackend::ImagePhysicalSubmitExtractVOI);
+    result.SetSubmitImage(submitImage);
+    result.SetOutlinePolyData(GetOutlinePolyDataInternal(submitCropData));
+    result.SetCropDataModel(submitCropData);
+    result.SetCropStateModel(submitCropState);
+    result.SetResolvedBackend(OrthogonalCropResolvedBackend::SubmitExtractVOI);
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
     return result;
@@ -914,27 +914,27 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
     const bool allowPartialOverlap =
-        request.GetExecutionMode() == CropExecutionMode::Preview2D3DArtifact
-        || (request.GetExecutionMode() == CropExecutionMode::ImagePhysicalSubmit
+        request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
+        || (request.GetExecutionMode() == CropExecutionMode::Submit
             && request.GetRemovalMode() == CropRemovalMode::KeepInside);
-    if (!GetImageCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
+    if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         result.SetFailureReason(failureReason);
         result.SetMessage(message);
         return result;
     }
 
-    // ── 执行分支分发：preview 2D/3D artifact vs image physical submit ──
-    // Preview2D3DArtifact → GetImage2DMaskAndBox3DOutlinePreviewResult → image 2D mask + box 3D outline + diagnostics
-    // ImagePhysicalSubmit → GetImagePhysicalSubmitResult → image physical submit image + globalOffsetMatrix
-    if (request.GetExecutionMode() == CropExecutionMode::Preview2D3DArtifact) {
-        return GetImage2DMaskAndBox3DOutlinePreviewResult(
+    // ── 执行分支分发：preview artifact vs image submit ──
+    // PreviewArtifact → GetPreviewResult → image 2D mask + box 3D outline + diagnostics
+    // Submit → GetSubmitResult → image submit image + globalOffsetMatrix
+    if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact) {
+        return GetPreviewResult(
             image,
             cropData,
             request.GetCropStateModel(),
             request.GetRemovalMode());
     }
 
-    return GetImagePhysicalSubmitResult(
+    return GetSubmitResult(
         image,
         cropData,
         request.GetCropStateModel(),

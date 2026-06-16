@@ -8,7 +8,7 @@
 // 核心执行链：
 // 1. 由 request 归一化得到 CropDataModel
 // 2. 基于 cropData 做 bounds 校验与执行诊断
-// 3. 按 executionMode 分流到 image 2D/3D preview artifact 或 image physical submit extract
+// 3. 按 executionMode 分流到 image preview artifact 或 image submit extract
 // 4. 把几何数据、image/polydata 产物、诊断信息与交互态重新组装为统一结果模型
 
 #include "OrthogonalCropTypes.h"
@@ -41,7 +41,7 @@ public:
         bool allowPartialOverlap = false);
 
     // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
-    static vtkSmartPointer<vtkPolyData> GetBox3DOutlinePreviewPolyData(const CropDataModel& cropData);
+    static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
 
     // 直接从 request 获取诊断信息，是 UI 和 service 最常走的便捷入口。
     static OrthogonalCropStatistics GetStatistics(
@@ -49,7 +49,7 @@ public:
         const OrthogonalCropRequest& request,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // 算法总入口：先校验和归一化，再分发到 preview 2D/3D artifact / image physical submit 两条执行链。
+    // 算法总入口：先校验和归一化，再分发到 preview artifact / image submit 两条执行链。
     // request 只携带 boxToModelMatrix；算法层会派生 AABB 并折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,

@@ -20,7 +20,7 @@ public:
     // 基于当前 image 构造默认 request。
     OrthogonalCropRequest GetDefaultRequest() const;
 
-    // 查询系统当前可用物理内存，供 physical submit 估算使用。
+    // 查询系统当前可用物理内存，供 submit 估算使用。
     std::size_t GetSystemAvailableRamBytes() const;
 
     // 查询 image 路径诊断结果。

@@ -108,7 +108,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     // ═══ 裁切结果 → 三类可视化数据分发 ═══
     // a) outlinePolyData  → m_outlineMapper    (3D 线框 + 2D 参考, 所有窗口共享)
     // b) derivedPolyData  → m_polyDataMapper   (仅 3D 窗口: clipped 半透明网格)
-    // c) image2DMaskPreviewImage → m_maskMapper       (仅 2D 窗口: 半透明颜色叠加)
+    // c) maskImage → m_maskMapper       (仅 2D 窗口: 半透明颜色叠加)
     if (!result.GetSucceeded()) {
         ClearPreview();
         return;
@@ -117,7 +117,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     // ── 分发 A：outlinePolyData（所有窗口共享的公共几何表示） ──
     // 3D 窗口 → 裁切盒线框 + 半透明实体区域（m_previewRegionMapper）
     // 2D 窗口 → 裁切盒在切片上的投影轮廓
-    auto outline = result.GetBox3DOutlinePreviewPolyData();
+    auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
         m_outlineMapper->SetInputData(outline);
@@ -127,17 +127,17 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     // ── 分发 B：derivedPolyData（仅 polydata 路径） ──
     // clipped 网格以半透明叠加方式显示在 3D 窗口
     // 若 3D 主窗口已被 bridge 常驻 clip 管道接管，bridge 会先剥离此字段避免重复绘制
-    auto clippedPolyData = result.GetPolyData3DClipPreviewPolyData();
+    auto clippedPolyData = result.GetClipPolyData();
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {
         m_polyDataMapper->SetInputData(clippedPolyData);
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // ── 分发 C：image2DMaskPreviewImage（仅 image 路径 2D mask preview） ──
+    // ── 分发 C：maskImage（仅 image 路径 2D mask preview） ──
     // 2D 窗口 → vtkImageResliceMapper 切片显示，颜色由 m_maskLut 控制
     // 3D 窗口 → mask 不可见（只依赖 outline + 主模型 clip）
-    auto maskImage = result.GetImage2DMaskPreviewImage();
+    auto maskImage = result.GetMaskImage();
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
         m_maskMapper->SetInputData(maskImage);

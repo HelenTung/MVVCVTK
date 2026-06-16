@@ -142,43 +142,43 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRenderServices(std::vecto
     }
 }
 
-void OrthogonalCropInteractionBridgeService::SetPreviewRequiresFull2D3DArtifacts(bool required)
+void OrthogonalCropInteractionBridgeService::SetFullPreviewRequired(bool required)
 {
-    m_previewRequiresFull2D3DArtifacts = required;
+    m_fullPreviewRequired = required;
 }
 
-void OrthogonalCropInteractionBridgeService::TogglePreview2D3DArtifactMode()
+void OrthogonalCropInteractionBridgeService::TogglePreviewMode()
 {
-    m_previewRequiresFull2D3DArtifacts = !m_previewRequiresFull2D3DArtifacts;
+    m_fullPreviewRequired = !m_fullPreviewRequired;
     std::cout << "[Main] Orthogonal crop preview artifact mode: "
-        << (m_previewRequiresFull2D3DArtifacts ? "Full2D3DArtifactPreview" : "Lightweight3DOutlineGuide")
+        << (m_fullPreviewRequired ? "FullPreview" : "Lightweight3DOutlineGuide")
         << std::endl;
 
     if (m_previewEnabled
         && m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
-        UpdatePreview2D3DArtifactsFromCurrentBounds(true);
+        UpdatePreviewFromCurrentBounds(true);
     }
 }
 
-void OrthogonalCropInteractionBridgeService::ApplyImagePhysicalSubmit()
+void OrthogonalCropInteractionBridgeService::ApplySubmit()
 {
-    if (!CanApplyImagePhysicalSubmit()) {
+    if (!CanApplySubmit()) {
         return;
     }
 
     if (!m_reloadSubmitter) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: reload submitter is missing." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit failed: reload submitter is missing." << std::endl;
         return;
     }
 
     m_cameraStateController.Save(m_referenceRenderer);
 
-    const auto submitRequest = BuildImagePhysicalSubmitRequest();
+    const auto submitRequest = BuildSubmitRequest();
     const auto submitResult = GetResult(submitRequest);
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
-        std::cerr << "[Main] Orthogonal crop physical submit failed: "
+        std::cerr << "[Main] Orthogonal crop submit failed: "
             << GetFailureReasonText(submitResult.GetFailureReason())
             << " - " << submitResult.GetMessage() << std::endl;
         return;
@@ -193,58 +193,58 @@ void OrthogonalCropInteractionBridgeService::ApplyImagePhysicalSubmit()
     m_widgetStateController.SetEnabled(false);
 }
 
-bool OrthogonalCropInteractionBridgeService::CanApplyImagePhysicalSubmit() const
+bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
 {
     if (!m_cropInteractionEnabled || !m_boundsInitialized) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: crop widget is not active." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit failed: crop widget is not active." << std::endl;
         return false;
     }
 
     if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: wait until widget dragging finishes." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit failed: wait until widget dragging finishes." << std::endl;
         return false;
     }
 
     if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: RemoveInside preview does not support physical submit." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit failed: RemoveInside preview does not support submit." << std::endl;
         return false;
     }
 
     if (m_submitReloadPending) {
-        std::cerr << "[Main] Orthogonal crop physical submit ignored: reload is already pending." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit ignored: reload is already pending." << std::endl;
         return false;
     }
 
     return true;
 }
 
-OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildImagePhysicalSubmitRequest() const
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildSubmitRequest() const
 {
-    auto submitRequest = BuildPreview2D3DArtifactRequest();
-    submitRequest.SetExecutionMode(CropExecutionMode::ImagePhysicalSubmit);
+    auto submitRequest = BuildPreviewRequest();
+    submitRequest.SetExecutionMode(CropExecutionMode::Submit);
     return submitRequest;
 }
 
 bool OrthogonalCropInteractionBridgeService::SubmitImageReload(const OrthogonalCropResult& submitResult)
 {
-    auto imagePhysicalSubmitImage = submitResult.GetImagePhysicalSubmitImage();
-    if (!imagePhysicalSubmitImage) {
-        std::cerr << "[Main] Orthogonal crop image physical submit failed: output image is null." << std::endl;
+    auto submitImage = submitResult.GetSubmitImage();
+    if (!submitImage) {
+        std::cerr << "[Main] Orthogonal crop image submit failed: output image is null." << std::endl;
         return false;
     }
 
     int dims[3] = { 0, 0, 0 };
-    imagePhysicalSubmitImage->GetDimensions(dims);
-    const auto sourceData = static_cast<const float*>(imagePhysicalSubmitImage->GetScalarPointer());
+    submitImage->GetDimensions(dims);
+    const auto sourceData = static_cast<const float*>(submitImage->GetScalarPointer());
     if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        std::cerr << "[Main] Orthogonal crop image physical submit failed: output image buffer is invalid." << std::endl;
+        std::cerr << "[Main] Orthogonal crop image submit failed: output image buffer is invalid." << std::endl;
         return false;
     }
 
     double spacingData[3] = { 1.0, 1.0, 1.0 };
     double modelOriginData[3] = { 0.0, 0.0, 0.0 };
-    imagePhysicalSubmitImage->GetSpacing(spacingData);
-    imagePhysicalSubmitImage->GetOrigin(modelOriginData);
+    submitImage->GetSpacing(spacingData);
+    submitImage->GetOrigin(modelOriginData);
 
     const std::array<int, 3> reloadDims = { dims[0], dims[1], dims[2] };
     const std::array<float, 3> reloadSpacing = {
@@ -283,7 +283,7 @@ bool OrthogonalCropInteractionBridgeService::SubmitImageReload(const OrthogonalC
             reloadOrigin,
             [this](bool success) {
                 if (!success) {
-                    std::cerr << "[Main] Orthogonal crop physical submit reload failed." << std::endl;
+                    std::cerr << "[Main] Orthogonal crop submit reload failed." << std::endl;
                     m_submitReloadPending = false;
                     m_cameraStateController.Clear();
                     m_submitReloadBuffer.reset();
@@ -304,10 +304,10 @@ bool OrthogonalCropInteractionBridgeService::SubmitImageReload(const OrthogonalC
                     }
                 }
 
-                std::cout << "[Main] Orthogonal crop physical submit applied to main image data." << std::endl;
+                std::cout << "[Main] Orthogonal crop submit applied to main image data." << std::endl;
             },
             GetDataAlgorithmKind())) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: reload request was rejected." << std::endl;
+        std::cerr << "[Main] Orthogonal crop submit failed: reload request was rejected." << std::endl;
         m_submitReloadPending = false;
         m_submitReloadBuffer.reset();
         return false;
@@ -338,7 +338,7 @@ void OrthogonalCropInteractionBridgeService::ToggleOutsidePreview()
 
 DataAlgorithmKind OrthogonalCropInteractionBridgeService::GetDataAlgorithmKind() const
 {
-    return DataAlgorithmKind::OrthogonalCropImagePhysicalSubmit;
+    return DataAlgorithmKind::OrthogonalCropSubmit;
 }
 
 void OrthogonalCropInteractionBridgeService::OnPipelineSynced(vtkRenderer* renderer)
@@ -392,7 +392,7 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
         << GetDataSourceText(GetActiveDataSource())
-        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview, press Ctrl+3 to apply physical submit; press O or Esc to exit." << std::endl;
+        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press 3 to toggle lightweight/full preview, press Ctrl+3 to apply submit; press O or Esc to exit." << std::endl;
     return true;
 }
 
@@ -403,7 +403,7 @@ bool OrthogonalCropInteractionBridgeService::DeactivateInteractiveCrop()
     }
 
     if (m_submitReloadPending) {
-        std::cout << "[Main] Orthogonal crop widget deactivation deferred: image physical submit reload is pending." << std::endl;
+        std::cout << "[Main] Orthogonal crop widget deactivation deferred: image submit reload is pending." << std::endl;
         return false;
     }
 
@@ -484,7 +484,7 @@ void OrthogonalCropInteractionBridgeService::HandleWidgetBoundsChanged(
     m_boundsInitialized = true;
     m_lastInteractionPhase = phase;
     if (m_previewEnabled && phase == CropInteractionPhase::Released) {
-        UpdatePreview2D3DArtifactsFromCurrentBounds(true);
+        UpdatePreviewFromCurrentBounds(true);
     }
 }
 
@@ -559,7 +559,7 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
     return worldToModelMatrixData;
 }
 
-OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview2D3DArtifactRequest() const
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
     // ── 分支 ①：获取默认 request 模板 ──
     // Image 路径 → PluginService 根据 inputImage bounds 构造
@@ -607,7 +607,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview2D3DAr
     vtkMatrix4x4::DeepCopy(boxToModelMatrixData.data(), boxToModelMatrix);
 
     previewRequest.SetBoxToModelMatrix(boxToModelMatrixData);
-    previewRequest.SetExecutionMode(CropExecutionMode::Preview2D3DArtifact);
+    previewRequest.SetExecutionMode(CropExecutionMode::PreviewArtifact);
     previewRequest.SetRemovalMode(m_currentRemovalMode);
 
     auto cropState = previewRequest.GetCropStateModel();
@@ -621,7 +621,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview2D3DAr
     return previewRequest;
 }
 
-void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurrentBounds(bool logStats)
+void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool logStats)
 {
     if (!m_boundsInitialized) {
         return;
@@ -629,12 +629,12 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
 
     // ── 步骤 1：构建 preview request ──
     // widget 有向盒 → boxToModelMatrix 编码
-    // 固定 Preview2D3DArtifact 模式 + 当前 removalMode
-    const auto previewRequest = BuildPreview2D3DArtifactRequest();
+    // 固定 PreviewArtifact 模式 + 当前 removalMode
+    const auto previewRequest = BuildPreviewRequest();
     // ── 分支 A：3D outline guide 轻量预览（不触发 2D mask / 3D clip / 统计管道） ──
     // Bridge 仍然只提交 request；source 分发与 request->cropData 归一化统一收口在 Router。
-    if (!m_previewRequiresFull2D3DArtifacts) {
-        const auto previewResult = m_backend.GetImagePoly3DOutlineGuidePreviewResult(previewRequest);
+    if (!m_fullPreviewRequired) {
+        const auto previewResult = m_backend.GetGuidePreviewResult(previewRequest);
         if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None || !previewResult.GetSucceeded()) {
             if (logStats) {
                 std::cerr << "[Main] Orthogonal crop preview failed: "
@@ -645,7 +645,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
         }
 
         // ── 结果分发 ──
-        const bool main3DPreviewApplied = SetPreview2D3DServicesDirty(previewResult);
+        const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
         if (logStats) {
             std::cout
                 << "[Main] Orthogonal crop preview updated. source = "
@@ -664,7 +664,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
         return;
     }
 
-    // ── 分支 B：完整 2D/3D artifact 预览 ──
+    // ── 分支 B：完整 preview artifact 预览 ──
     // 经 Router → PluginService/Algorithm 完整执行 2D image mask 或 3D polydata clip。
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
@@ -688,11 +688,11 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
 
     // ── 步骤 2：结果分发（两条分支共享） ──
     // 对每个 PreviewRenderTarget：
-    // ① SetMainImage3DVolumePreviewApplied / SetMainPolyData3DPreviewApplied → 3D 主窗口常驻预览管道更新
+    // ① ApplyVolumePreview / ApplyPolyDataPreview → 3D 主窗口常驻预览管道更新
     //    3D 主窗口（axis<0）若成功接管，剥离 derivedPolyData overlay 避免重复绘制
     // ② overlayStrategy->SetCropResult → outline / mask / polydata 三类可视内容
     // ③ target.service->SetDirtyMarked → 触发渲染刷新
-    const bool main3DPreviewApplied = SetPreview2D3DServicesDirty(previewResult);
+    const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
 
     // 这里的 3D 主模型 clip 只是临时预览表现；真正的几何/统计结果仍以 previewResult 为准。
     // 因此关闭 preview 时只需要把管道切回 pass-through 状态，而不是重新向后端求一份“恢复结果”。
@@ -708,7 +708,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreview2D3DArtifactsFromCurre
         std::cout
             << "[Main] Orthogonal crop preview updated. source = "
             << GetDataSourceText(dataSource)
-            << ", artifact = Full2D3DArtifactPreview"
+            << ", artifact = FullPreview"
             << ", backend = "
             << GetResolvedBackendText(backend)
             << ", removal = "
@@ -753,7 +753,7 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
     if (m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
         // 非拖拽阶段才立即刷新；拖拽中依旧等待 EndInteractionEvent 统一触发。
-        UpdatePreview2D3DArtifactsFromCurrentBounds(logStats);
+        UpdatePreviewFromCurrentBounds(logStats);
     }
 }
 
@@ -770,16 +770,16 @@ const char* OrthogonalCropInteractionBridgeService::GetFailureReasonText(Orthogo
         return "InvalidBounds";
     case OrthogonalCropFailureReason::BoundsOutOfRange:
         return "BoundsOutOfRange";
-    case OrthogonalCropFailureReason::ImagePhysicalSubmitRemoveInsideUnsupported:
-        return "ImagePhysicalSubmitRemoveInsideUnsupported";
+    case OrthogonalCropFailureReason::SubmitRemoveInsideUnsupported:
+        return "SubmitRemoveInsideUnsupported";
     case OrthogonalCropFailureReason::InsufficientRam:
         return "InsufficientRam";
-    case OrthogonalCropFailureReason::Image2DMaskPreviewCreationFailed:
-        return "Image2DMaskPreviewCreationFailed";
-    case OrthogonalCropFailureReason::ImagePhysicalSubmitImageCreationFailed:
-        return "ImagePhysicalSubmitImageCreationFailed";
-    case OrthogonalCropFailureReason::PolyData3DClipPreviewPolyDataCreationFailed:
-        return "PolyData3DClipPreviewPolyDataCreationFailed";
+    case OrthogonalCropFailureReason::MaskPreviewCreationFailed:
+        return "MaskPreviewCreationFailed";
+    case OrthogonalCropFailureReason::SubmitImageCreationFailed:
+        return "SubmitImageCreationFailed";
+    case OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed:
+        return "ClipPreviewPolyDataCreationFailed";
     }
 
     return "Unknown";
@@ -813,12 +813,12 @@ const char* OrthogonalCropInteractionBridgeService::GetDataSourceText(Orthogonal
 const char* OrthogonalCropInteractionBridgeService::GetResolvedBackendText(OrthogonalCropResolvedBackend backend)
 {
     switch (backend) {
-    case OrthogonalCropResolvedBackend::Image2DMaskPreview:
-        return "Image2DMaskPreview";
-    case OrthogonalCropResolvedBackend::ImagePhysicalSubmitExtractVOI:
-        return "ImagePhysicalSubmitExtractVOI";
-    case OrthogonalCropResolvedBackend::PolyData3DClipPreview:
-        return "PolyData3DClipPreview";
+    case OrthogonalCropResolvedBackend::MaskPreview:
+        return "MaskPreview";
+    case OrthogonalCropResolvedBackend::SubmitExtractVOI:
+        return "SubmitExtractVOI";
+    case OrthogonalCropResolvedBackend::ClipPreview:
+        return "ClipPreview";
     case OrthogonalCropResolvedBackend::None:
     default:
         return "None";
@@ -877,7 +877,7 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
             }
         }
 
-        RestoreMainPolyData3DPreview(target);
+        RestorePolyDataPreview(target);
         if (target.service) {
             target.service->SetDirtyMarked();
         }
@@ -906,7 +906,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }
 
-bool OrthogonalCropInteractionBridgeService::SetPreview2D3DServicesDirty(const OrthogonalCropResult& previewResult)
+bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(const OrthogonalCropResult& previewResult)
 {
     bool main3DPreviewApplied = false;
 
@@ -916,16 +916,16 @@ bool OrthogonalCropInteractionBridgeService::SetPreview2D3DServicesDirty(const O
     // 3. 如果 3D 主窗口已经接管主模型显示，就剥掉 polydata 3D clip preview overlay，避免重复绘制
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
-            bool mainPreviewAppliedForTarget = SetMainImage3DVolumePreviewApplied(target, previewResult);
+            bool mainPreviewAppliedForTarget = ApplyVolumePreview(target, previewResult);
             if (!mainPreviewAppliedForTarget) {
-                mainPreviewAppliedForTarget = SetMainPolyData3DPreviewApplied(target, previewResult);
+                mainPreviewAppliedForTarget = ApplyPolyDataPreview(target, previewResult);
             }
 
             auto overlayResult = previewResult;
             if (mainPreviewAppliedForTarget && target.service->GetNavigationAxis() < 0) {
                 // 3D 主窗口已经由常驻 clip 管道直接表现裁切结果，
                 // 不再额外叠一份 clipped polydata overlay，避免重复绘制同一套网格。
-                overlayResult.SetPolyData3DClipPreviewPolyData(nullptr);
+                overlayResult.SetClipPolyData(nullptr);
             }
 
             target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
@@ -938,7 +938,7 @@ bool OrthogonalCropInteractionBridgeService::SetPreview2D3DServicesDirty(const O
     return main3DPreviewApplied;
 }
 
-bool OrthogonalCropInteractionBridgeService::SetMainImage3DVolumePreviewApplied(
+bool OrthogonalCropInteractionBridgeService::ApplyVolumePreview(
     PreviewRenderTarget& target,
     const OrthogonalCropResult& previewResult)
 {
@@ -964,7 +964,7 @@ bool OrthogonalCropInteractionBridgeService::SetMainImage3DVolumePreviewApplied(
 
     if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
-        if (!SetImage3DVolumeRemoveInsidePreviewApplied(volume, gpuVolumeMapper, previewResult)) {
+        if (!ApplyVolumeRemoveInsidePreview(volume, gpuVolumeMapper, previewResult)) {
             volumeMapper->SetCroppingRegionFlagsToSubVolume();
             volume->Modified();
             return false;
@@ -974,12 +974,12 @@ bool OrthogonalCropInteractionBridgeService::SetMainImage3DVolumePreviewApplied(
         return true;
     }
 
-    SetImage3DVolumeKeepInsidePreviewApplied(volumeMapper, previewResult);
+    ApplyVolumeKeepInsidePreview(volumeMapper, previewResult);
     volume->Modified();
     return true;
 }
 
-void OrthogonalCropInteractionBridgeService::SetImage3DVolumeKeepInsidePreviewApplied(
+void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
     vtkVolumeMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
 {
@@ -1034,7 +1034,7 @@ void OrthogonalCropInteractionBridgeService::SetImage3DVolumeKeepInsidePreviewAp
     volumeMapper->SetClippingPlanes(clippingPlanes);
 }
 
-bool OrthogonalCropInteractionBridgeService::SetImage3DVolumeRemoveInsidePreviewApplied(
+bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
     vtkVolume* volume,
     vtkGPUVolumeRayCastMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
@@ -1076,7 +1076,7 @@ bool OrthogonalCropInteractionBridgeService::SetImage3DVolumeRemoveInsidePreview
     return true;
 }
 
-void OrthogonalCropInteractionBridgeService::RestoreMainPolyData3DPreview(PreviewRenderTarget& target)
+void OrthogonalCropInteractionBridgeService::RestorePolyDataPreview(PreviewRenderTarget& target)
 {
     // 3D 主窗口并不切回原始 mapper 输入，
     // 而是把 clip function 切回一只完全包住原模型的 pass-through box。
@@ -1096,7 +1096,7 @@ void OrthogonalCropInteractionBridgeService::RestoreMainPolyData3DPreview(Previe
     }
 }
 
-bool OrthogonalCropInteractionBridgeService::SetMainPolyData3DPreviewApplied(
+bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
     PreviewRenderTarget& target,
     const OrthogonalCropResult& previewResult)
 {

@@ -53,7 +53,7 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropAlgorithm
     - 纯算法层。
-    - 负责：request 归一化、bounds 校验、voxel snapped、preview 2D/3D artifact / image physical submit 结果构造。
+    - 负责：request 归一化、bounds 校验、voxel snapped、preview artifact / image submit 结果构造。
 */
 
 /*
@@ -136,7 +136,7 @@ Step 5: 再做窗口级辅助元素策略
 
 Step 6: 只用一个 service 发起加载
 
-    serviceA->SetFileLoadedAsync(..., [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success) {
+    serviceA->LoadFileAsync(..., [sharedState, sharedDataMgr, serviceA, imageAnalysis, orthogonalCropBridge](bool success) {
         ...
     });
 
@@ -161,8 +161,8 @@ Step 7: 在加载成功回调里做“数据相关”的后处理
 - OrthogonalCrop 的 image 输入只有在 DataManager 真正持有有效 image 后才能绑定，否则 bridge/routing 里看到的是空输入。
 
 非常重要：
-- SetFileLoadedAsync / ReloadFromBufferAsync / SetTransformedDataSavedAsync 的业务回调，当前实现是“主线程延迟回调”，不是后台线程直接回调。
-- 也就是说，回调执行时，SetPendingUpdatesProcessed 已经先把 DataReady / LoadFailed / pipeline rebuild 收敛过一轮了。
+- LoadFileAsync / ReloadFromBufferAsync / SaveTransformedDataAsync 的业务回调，当前实现是“主线程延迟回调”，不是后台线程直接回调。
+- 也就是说，回调执行时，ProcessPendingUpdates 已经先把 DataReady / LoadFailed / pipeline rebuild 收敛过一轮了。
 
 Step 8: 全窗口先 Render，再 Initialize interactor
 
@@ -297,7 +297,7 @@ Step 11: 只让一个窗口进入 SetStarted()
     serviceC->SetElementVisible(VisFlags::Crosshair, true);
     serviceD->SetElementVisible(VisFlags::Crosshair, true);
 
-    serviceA->SetFileLoadedAsync(
+    serviceA->LoadFileAsync(
         "E:/data/1000x1000x1000.raw",
         { 0.02125f, 0.02125f, 0.02125f },
         { 0.0f, 0.0f, 0.0f },
@@ -454,7 +454,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 1) SetVizMode(VizMode mode)
 - 做什么：只写 `m_pendingVizModeInt`，不立即重建 Strategy。
-- 为什么：模式切换是结构性变化，真正重建要等主线程 `SetPendingUpdatesProcessed -> SetPipelineRebuilt`。
+- 为什么：模式切换是结构性变化，真正重建要等主线程 `ProcessPendingUpdates -> RebuildPipeline`。
 - 否则如果在任意线程或任意回调里直接切 Strategy，会破坏 VTK 渲染线程边界。
 
 2) SetVisualConfig(const PreInitConfig& cfg)
@@ -463,15 +463,15 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 3) SetMaterial / SetOpacity / SetTransferFunction / SetIsoThreshold / SetBackground / SetSpacing / SetWindowLevel
 - 做什么：全都只改 SharedState。
-- 什么时候真正落到渲染对象：下一次 Timer 心跳，`SetPendingUpdatesProcessed -> SetStrategyStateSynced`。
+- 什么时候真正落到渲染对象：下一次 Timer 心跳，`ProcessPendingUpdates -> SyncStrategyState`。
 - 为什么：保持“状态写回”和“VTK 渲染对象更新”分离，避免任意线程直接碰渲染对象。
 
-4) SetFileLoadedAsync(path, spacing, origin, onComplete)
+4) LoadFileAsync(path, spacing, origin, onComplete)
 - 做什么：后台线程做 I/O 和数据准备；成功后通过 SharedState 发布 DataReady；onComplete 在主线程延迟执行。
 - 为什么：加载要异步，VTK 管线重建要主线程，二者不能混在同一层里直接做。
 
 5) ReloadFromBufferAsync(...)
-- 做什么：后台线程准备待提交镜像，真正消费要等主线程 `SetPendingUpdatesProcessed`。
+- 做什么：后台线程准备待提交镜像，真正消费要等主线程 `ProcessPendingUpdates`。
 - 为什么：重载数据和文件流加载一样，也必须遵守主线程收敛策略。
 
 6) SetElementVisible(flagBit, show)
@@ -500,7 +500,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - SetModelMatrixSynced：把 TrackballActor 拖拽出的 VTK 矩阵回写到 SharedState。
 - 为什么：模型矩阵必须始终只有 SharedState 这一份真源，world/model 互转都以它为准。
 
-12) SetTransformedDataSavedAsync / SetSliceImagesSavedAsync
+12) SaveTransformedDataAsync / SaveSliceImagesAsync
 - 做什么：后台导出，主线程延迟回调结果。
 - 为什么：导出和渲染都可能重，必须异步；回调必须回主线程，避免上层 UI 状态错线程。
 */
@@ -568,11 +568,11 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：把加载成功后的 vtkImageData 真正注入裁切后端。
 - 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
 
-8) OrthogonalCropInteractionBridgeService::SetPreviewRequiresFull2D3DArtifacts
+8) OrthogonalCropInteractionBridgeService::SetFullPreviewRequired
 - 做什么：控制 preview 是否必须生成完整 image 2D mask / polydata 3D clip 等重型结果。
-- 为什么：当前默认值是 true，优先保证完整 2D/3D artifact preview 语义；3D outline guide 改成显式用户选择，而不是自动猜测。
+- 为什么：当前默认值是 true，优先保证完整 preview artifact preview 语义；3D outline guide 改成显式用户选择，而不是自动猜测。
 
-9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreview2D3DArtifactMode / ApplyImagePhysicalSubmit
+9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewMode / ApplySubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
 - 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
@@ -597,7 +597,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - SetStarted() 决定谁持有应用主消息循环。
 - 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
-4) 为什么默认 `m_previewRequiresFull2D3DArtifacts = true`
+4) 为什么默认 `m_fullPreviewRequired = true`
 - 因为 full preview 才能稳定产出 2D mask、3D overlay、必要时的主模型 clip 预览。
 - 如果一上来默认轻量，会让用户误以为预览本该有的 mask/完整结果丢了。
 - 所以当前策略是：默认完整，按 3 手动切 lightweight/full。
@@ -625,36 +625,36 @@ Step 11: 只让一个窗口进入 SetStarted()
 
 3. 按 1 或 2
 - bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
-- bridge 组装 preview request，executionMode 固定是 Preview2D3DArtifact。
+- bridge 组装 preview request，executionMode 固定是 PreviewArtifact。
 
-4. BuildPreview2D3DArtifactRequest()
+4. BuildPreviewRequest()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget 有向盒对应的 boxToModelMatrix。
 - 写入当前 removalMode。
 - 写入 cropStateModel。
 
-5. UpdatePreview2D3DArtifactsFromCurrentBounds()
+5. UpdatePreviewFromCurrentBounds()
 - full preview：走 GetResult()，拿完整 statistics/result。
 - lightweight preview：只构造 cropData + outline，跳过重型完整产物。
 
-6. SetPreview2D3DServicesDirty(previewResult)
+6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。
 - 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
 
 7. 按 3
-- bridge->TogglePreview2D3DArtifactMode()。
-- 在 Full2D3DArtifactPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
+- bridge->TogglePreviewMode()。
+- 在 FullPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
 
 8. 按 Ctrl+3
-- bridge->ApplyImagePhysicalSubmit()。
+- bridge->ApplySubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- BuildImagePhysicalSubmitRequest() 把当前 widget 有向盒改成 ImagePhysicalSubmit request。
-- SubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image physical submit image 提交回主数据通道。
-- 主线程后处理在 SetPipelineRebuilt -> SetStrategyStateSynced 之后，按本次算法类型分发 runtime。
+- BuildSubmitRequest() 把当前 widget 有向盒改成 Submit request。
+- SubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image submit image 提交回主数据通道。
+- 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后，按本次算法类型分发 runtime。
 - runtime 内部自己处理相机恢复与同步，service 只负责 reload 消费和后处理入口。
 
-注意：image physical submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
+注意：image submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
 
 /*
@@ -675,7 +675,7 @@ Step 11: 只让一个窗口进入 SetStarted()
         12.0, 24.0
     });
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetExecutionMode(CropExecutionMode::Preview2D3DArtifact);
+    request.SetExecutionMode(CropExecutionMode::PreviewArtifact);
 
     CropStateModel cropState;
     cropState.SetCropEnabled(true);
@@ -696,13 +696,13 @@ Step 11: 只让一个窗口进入 SetStarted()
         return;
     }
 
-    auto image2DMaskPreview = result.GetImage2DMaskPreviewImage();
-    auto outline = result.GetBox3DOutlinePreviewPolyData();
+    auto maskPreview = result.GetMaskImage();
+    auto outline = result.GetOutlinePolyData();
 
-如果改走主数据 physical submit：
+如果改走主数据 submit：
 
     auto hardRequest = request;
-    hardRequest.SetExecutionMode(CropExecutionMode::ImagePhysicalSubmit);
+    hardRequest.SetExecutionMode(CropExecutionMode::Submit);
     auto hardStats = cropBackend->GetStatistics(hardRequest);
     if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
@@ -710,7 +710,7 @@ Step 11: 只让一个窗口进入 SetStarted()
     }
 
     auto hardResult = cropBackend->GetResult(hardRequest);
-    auto imagePhysicalSubmitImage = hardResult.GetImagePhysicalSubmitImage();
+    auto submitImage = hardResult.GetSubmitImage();
 
 如果改走 polydata：
 
@@ -721,7 +721,7 @@ Step 11: 只让一个窗口进入 SetStarted()
     polyRequest.SetBoxToModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
 
     auto polyResult = cropBackend->GetResult(polyRequest);
-    auto clippedSurface = polyResult.GetPolyData3DClipPreviewPolyData();
+    auto clippedSurface = polyResult.GetClipPolyData();
 */
 
 /*

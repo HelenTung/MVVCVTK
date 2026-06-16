@@ -1,4 +1,4 @@
-﻿#include "TimeUpdateHandler.h"
+#include "TimeUpdateHandler.h"
 #include "AppInterfaces.h"
 #include <vtkCommand.h>
 #include <vtkRenderWindow.h>
@@ -25,7 +25,7 @@ InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve
     }
 
     // 1. 驱动数据同步（后台线程写入的脏标记在此主线程消费）
-    m_service->SetPendingUpdatesProcessed();
+    m_service->ProcessPendingUpdates();
 
     // needRender: 本帧是否存在待消费的渲染请求，先原子消费，避免渲染期间的新脏标记被误清掉
     const bool needRender = m_service->SetDirtyConsumed();

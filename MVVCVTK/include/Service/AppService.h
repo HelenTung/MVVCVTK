@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // =====================================================================
 // AppService.h — MedicalVizService 渲染业务调度层
 //
@@ -55,7 +55,7 @@ public:
 
     // ================================================================
     // IVisualConfigService — 前处理配置
-    // 调用时机：SetServiceBound 之后，SetFileLoadedAsync 之前（或之后均可）
+    // 调用时机：SetServiceBound 之后，LoadFileAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // 这一组方法只做“配置意图登记”，不直接操作 VTK 原生对象。
     // 原生依赖对象：m_sharedState。
@@ -74,9 +74,9 @@ public:
     // 文件流加载 / 重载加载入口
     // 功能：发起后台加载任务，并通过主线程回调把结果返回给 UI / 上层。
     // 作用：把文件流加载、重载加载与渲染同步解耦。
-    // 原生依赖对象：m_dataManager、m_sharedState、m_ActiveLoadFuture。
+    // 原生依赖对象：m_dataManager、m_sharedState、m_activeLoadFuture。
     // ================================================================
-    void SetFileLoadedAsync(const std::string& path,
+    void LoadFileAsync(const std::string& path,
         const std::array<float, 3>& spacing = {0.02125,0.02125,0.02125},
         const std::array<float, 3>& origin = {0,0,0},
         std::function<void(bool success)> onComplete = nullptr);
@@ -104,9 +104,9 @@ public:
     // 作用：把导出 I/O 与当前渲染线程解耦。
     // 原生依赖对象：m_dataManager、m_sharedState。
     // ================================================================
-    void SetTransformedDataSavedAsync(const std::string& path,
+    void SaveTransformedDataAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
-    void SetSliceImagesSavedAsync(const std::string& path, const double angle,
+    void SaveSliceImagesAsync(const std::string& path, const double angle,
         std::function<void(bool success)> onComplete = nullptr) override;
 
     // ================================================================
@@ -155,42 +155,42 @@ public:
     // 作用：按下面优先级处理缓存清理、加载失败、数据重建和增量同步。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // 路由优先级：
-    //   1. m_needsCacheClear  → SetStrategyCacheCleared
-    //   2. m_needsLoadFailed  → SetLoadFailedHandled
-    //   3. m_needsDataRefresh → SetPipelineRebuilt
-    //   4. m_needsSync        → SetStrategyStateSynced
+    //   1. m_needsCacheClear  → ClearStrategyCache
+    //   2. m_needsLoadFailed  → HandleLoadFailure
+    //   3. m_needsDataRefresh → RebuildPipeline
+    //   4. m_needsSync        → SyncStrategyState
     // ================================================================
-    void SetPendingUpdatesProcessed() override;
+    void ProcessPendingUpdates() override;
 
 private:
     struct CallbackState {
-        mutable std::mutex m_Mutex;
-        std::function<void(bool)> m_Callback; // 当前业务方注册但尚未触发的回调
-        std::function<void(bool)> m_PendingCallback; // 已由后台任务准备好、等待主线程执行的回调
-        bool m_PendingResult{ false }; // 与 PendingCallback 对应的任务结果快照
-        std::atomic<bool> m_HasPendingCallback{ false }; // 回调就绪位：后台线程只投递结果，主线程在心跳阶段统一执行 UI/业务回调
+        mutable std::mutex m_mutex;
+        std::function<void(bool)> m_callback; // 当前业务方注册但尚未触发的回调
+        std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调
+        bool m_pendingResult{ false }; // 与 PendingCallback 对应的任务结果快照
+        std::atomic<bool> m_hasPendingCallback{ false }; // 回调就绪位：后台线程只投递结果，主线程在心跳阶段统一执行 UI/业务回调
 
         void SetCallback(std::function<void(bool)> callback) {
-            std::lock_guard<std::mutex> lk(m_Mutex);
-            m_Callback = std::move(callback);
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_callback = std::move(callback);
         }
 
         void SetCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
             {
-                std::lock_guard<std::mutex> lk(m_Mutex);
+                std::lock_guard<std::mutex> lk(m_mutex);
                 if (callback) {
-                    m_PendingCallback = std::move(callback);
+                    m_pendingCallback = std::move(callback);
                 }
-                else if (m_Callback) {
-                    callback = std::move(m_Callback);
-                    m_Callback = nullptr;
-                    m_PendingCallback = std::move(callback);
+                else if (m_callback) {
+                    callback = std::move(m_callback);
+                    m_callback = nullptr;
+                    m_pendingCallback = std::move(callback);
                 }
                 else {
                     return;
                 }
-                m_PendingResult = success;
-                m_HasPendingCallback = true;
+                m_pendingResult = success;
+                m_hasPendingCallback = true;
             }
         }
 
@@ -198,10 +198,10 @@ private:
             std::function<void(bool)> callback;
             bool success = false;
             {
-                std::lock_guard<std::mutex> lk(m_Mutex);
-                callback = std::move(m_PendingCallback);
-                m_PendingCallback = nullptr;
-                success = m_PendingResult;
+                std::lock_guard<std::mutex> lk(m_mutex);
+                callback = std::move(m_pendingCallback);
+                m_pendingCallback = nullptr;
+                success = m_pendingResult;
             }
             if (callback) {
                 callback(success);
@@ -209,7 +209,7 @@ private:
         }
 
         bool GetPendingCallbackConsumed() {
-            return m_HasPendingCallback.exchange(false);
+            return m_hasPendingCallback.exchange(false);
         }
     };
 
@@ -218,51 +218,51 @@ private:
     // 功能：服务主线程渲染骨架，负责重建、同步、失败清理和参数快照组装。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // ================================================================
-    void SetPipelineRebuilt();
-    void SetStrategyStateSynced();
-    void SetLoadFailedHandled();
+    void RebuildPipeline();
+    void SyncStrategyState();
+    void HandleLoadFailure();
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
-    void SetRendererBackgroundApplied();
-    void SetStrategyCacheClearRequested();
-    void SetStrategyCacheCleared();
-    void SetCursorCentered();
-    void SetSyncRequested();
-    void SetPendingFlagsMerged(UpdateFlags flags) override;
-    void SetDataRefreshRequested() override;
-    void SetLoadFailedRequested() override;
+    void ApplyRendererBackground();
+    void RequestStrategyCacheClear();
+    void ClearStrategyCache();
+    void CenterCursor();
+    void RequestSync();
+    void MergePendingFlags(UpdateFlags flags) override;
+    void RequestDataRefresh() override;
+    void RequestLoadFailed() override;
 
     // ================================================================
     // 异步任务启动辅助
     // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
-    // 原生依赖对象：m_sharedState、m_ActiveLoadFuture。
+    // 原生依赖对象：m_sharedState、m_activeLoadFuture。
     // ================================================================
-    void SetTaskStarted(std::packaged_task<void()> task,
+    void StartTask(std::packaged_task<void()> task,
         bool keepActiveLoadFuture);
 
     // ================================================================
     // 保存完成回调队列
     // 功能：缓存导出请求的完成回调，并把后台保存结果延迟到主线程执行。
-    // 原生依赖对象：m_SaveCompletionCallbackState。
+    // 原生依赖对象：m_saveCompletionCallbackState。
     // ================================================================
 
     // 保存当前保存请求绑定的完成回调
-    void SetSaveCompletionCallback(std::function<void(bool)> callback) {
-        m_SaveCompletionCallbackState.SetCallback(std::move(callback));
+    void SetSaveCallback(std::function<void(bool)> callback) {
+        m_saveCompletionCallbackState.SetCallback(std::move(callback));
     }
 
     // 将保存完成回调标记为就绪，等待主线程统一执行
-    void SetSaveCompletionCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-        m_SaveCompletionCallbackState.SetCallbackReady(success, std::move(callback));
+    void SetSaveCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+        m_saveCompletionCallbackState.SetCallbackReady(success, std::move(callback));
     }
 
     // 在主线程执行待处理的保存完成回调
     void SetPendingSaveCompletionCallbackExecuted() {
-        m_SaveCompletionCallbackState.SetPendingCallbackExecuted();
+        m_saveCompletionCallbackState.SetPendingCallbackExecuted();
     }
 
-    bool GetPendingSaveCompletionCallbackConsumed() {
-        return m_SaveCompletionCallbackState.GetPendingCallbackConsumed();
+    bool ConsumeSaveCallback() {
+        return m_saveCompletionCallbackState.GetPendingCallbackConsumed();
     }
 
     // ================================================================
@@ -272,9 +272,9 @@ private:
     // 3. 保存完成回调状态
     // 4. 运行期原生成员对象 / 标志位
     // ================================================================
-    CallbackState m_FileLoadCallbackState; // 文件流加载回调状态
-    CallbackState m_ReloadLoadCallbackState; // 重载回调状态
-    CallbackState m_SaveCompletionCallbackState; // 保存完成回调状态
+    CallbackState m_fileLoadCallbackState; // 文件流加载回调状态
+    CallbackState m_reloadLoadCallbackState; // 重载回调状态
+    CallbackState m_saveCompletionCallbackState; // 保存完成回调状态
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
@@ -289,6 +289,6 @@ private:
     std::atomic<bool> m_needsCacheClear{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
     std::atomic<bool> m_needsLoadFailed{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
 
-    std::future<void> m_ActiveLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
-    mutable std::mutex m_ActiveLoadMutex; // 保护 m_ActiveLoadFuture
+    std::future<void> m_activeLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
+    mutable std::mutex m_activeLoadMutex; // 保护 m_activeLoadFuture
 };

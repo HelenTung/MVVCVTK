@@ -59,7 +59,7 @@ public:
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
     // 执行 3D outline guide preview：只归一化 request->cropData 并生成 outline，不跑 2D mask / 3D clip / 统计。
-    OrthogonalCropResult GetImagePoly3DOutlineGuidePreviewResult(const OrthogonalCropRequest& request) const;
+    OrthogonalCropResult GetGuidePreviewResult(const OrthogonalCropRequest& request) const;
 
 private:
     // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。

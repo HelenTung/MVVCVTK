@@ -1,4 +1,4 @@
-﻿#include "StdRenderContext.h"
+#include "StdRenderContext.h"
 #include "TimeUpdateHandler.h"   // 新增
 #include "Viewer2DHandler.h"     // 新增
 #include "Viewer3DHandler.h"     // 新增
@@ -235,7 +235,7 @@ bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
         // s: 触发整体变换后的体数据导出。
         if (m_interactiveService) {
             if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                exporter->SetTransformedDataSavedAsync();
+                exporter->SaveTransformedDataAsync();
             }
         }
         return true;
@@ -243,7 +243,7 @@ bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
     if (key == 't' || key == 'T') {
         // t: 触发当前角度下的切片导出。
         if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-            exporter->SetSliceImagesSavedAsync({}, m_angle);
+            exporter->SaveSliceImagesAsync({}, m_angle);
         }
         return true;
     }

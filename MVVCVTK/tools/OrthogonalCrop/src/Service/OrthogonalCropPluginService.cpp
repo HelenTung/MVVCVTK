@@ -31,7 +31,7 @@ vtkSmartPointer<vtkImageData> OrthogonalCropPluginService::GetInputImage() const
 OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
 {
     OrthogonalCropRequest request;
-    request.SetExecutionMode(CropExecutionMode::Preview2D3DArtifact);
+    request.SetExecutionMode(CropExecutionMode::PreviewArtifact);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
 
@@ -55,8 +55,8 @@ std::size_t OrthogonalCropPluginService::GetSystemAvailableRamBytes() const
 {
 #ifdef _WIN32
     // ═══ 系统可用物理内存查询 (Windows) ═══
-    // 用途: ImagePhysicalSubmit 内部执行计划判断是否有足够 RAM。
-    // 不够时会返回 InsufficientRam 阻止 image physical submit 执行。
+    // 用途: Submit 内部执行计划判断是否有足够 RAM。
+    // 不够时会返回 InsufficientRam 阻止 image submit 执行。
     MEMORYSTATUSEX memoryStatus = {};
     memoryStatus.dwLength = sizeof(memoryStatus);
     if (GlobalMemoryStatusEx(&memoryStatus) != 0) {
@@ -70,7 +70,7 @@ OrthogonalCropStatistics OrthogonalCropPluginService::GetStatistics(const Orthog
 {
     // ═══ Image 路径诊断：透传给 Algorithm + 注入 RAM 参数 ═══
     // PluginService 不重写算法, 唯一附加值是补上系统 RAM。
-    // Algorithm 在 ImagePhysicalSubmit 场景下通过内部 submit plan 判断是否安全执行。
+    // Algorithm 在 Submit 场景下通过内部 submit plan 判断是否安全执行。
     return OrthogonalCropAlgorithm::GetStatistics(
         m_inputImage,
         request,

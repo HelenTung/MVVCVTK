@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "IInteractionHandler.h"
 
 class AbstractInteractiveService;
@@ -8,7 +8,7 @@ class vtkRenderWindow;
 // TimeUpdateHandler — 处理 VTK TimerEvent（心跳）
 //
 // 职责：
-//   1. 驱动 Service::SetPendingUpdatesProcessed()（数据同步、策略重建）
+//   1. 驱动 Service::ProcessPendingUpdates()（数据同步、策略重建）
 //   2. 检查渲染脏标记，触发 RenderWindow::Render()
 //   3. 重置脏标记
 //

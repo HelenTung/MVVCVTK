@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // =====================================================================
 // AppTypes.h   纯数据结构定义，无 VTK / 线程 依赖
 //
@@ -80,7 +80,7 @@ struct WindowLevelParams {
 // --- 数据流算法类型（用于 reload 后处理和 runtime 路由）---
 enum class DataAlgorithmKind {
     None,
-    OrthogonalCropImagePhysicalSubmit
+    OrthogonalCropSubmit
 };
 
 // --- 渲染相机快照：算法内部临时状态，不写入 SharedState ---

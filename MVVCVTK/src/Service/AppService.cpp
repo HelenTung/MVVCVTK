@@ -97,9 +97,9 @@ MedicalVizService::MedicalVizService(
 
 MedicalVizService::~MedicalVizService()
 {
-    std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
-    if (m_ActiveLoadFuture.valid())
-        m_ActiveLoadFuture.wait();
+    std::lock_guard<std::mutex> lk(m_activeLoadMutex);
+    if (m_activeLoadFuture.valid())
+        m_activeLoadFuture.wait();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -110,7 +110,7 @@ void MedicalVizService::SetRenderContext(
     vtkSmartPointer<vtkRenderer> ren)
 {
     AbstractAppService::SetRenderContext(win, ren);
-    SetRendererBackgroundApplied();
+    ApplyRendererBackground();
     if (!m_stateEventSource) return;
 
     std::weak_ptr<MedicalVizService> weakSelf =
@@ -197,38 +197,38 @@ LoadState MedicalVizService::GetReloadLoadState() const
     return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
 }
 
-void MedicalVizService::SetTaskStarted(
+void MedicalVizService::StartTask(
     std::packaged_task<void()> task,
     bool keepActiveLoadFuture)
 {
     if (keepActiveLoadFuture) {
-        std::lock_guard<std::mutex> lk(m_ActiveLoadMutex);
-        m_ActiveLoadFuture = task.get_future(); // 当前活动加载任务的 future，用于析构时等待后台线程结束
+        std::lock_guard<std::mutex> lk(m_activeLoadMutex);
+        m_activeLoadFuture = task.get_future(); // 当前活动加载任务的 future，用于析构时等待后台线程结束
     }
     // 线程统一 detach，说明 Service 只关心生命周期托管和结果回收，不在调用点阻塞等待后台任务。
     std::thread(std::move(task)).detach();
 }
 
-void MedicalVizService::SetFileLoadedAsync(
+void MedicalVizService::LoadFileAsync(
     const std::string& path,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
     if (!m_sharedState) {
-        m_FileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return;
     }
 
     if (m_sharedState->GetFileLoadState() == LoadState::Loading
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
-        std::cerr << "[SetFileLoadedAsync] Loading is already in progress.\n";
-        m_FileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        std::cerr << "[LoadFileAsync] Loading is already in progress.\n";
+        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return;
     }
 
-    m_FileLoadCallbackState.SetCallback(std::move(onComplete));
+    m_fileLoadCallbackState.SetCallback(std::move(onComplete));
     m_sharedState->SetFileLoadStarted();
 
     auto dataMgr = m_dataManager;
@@ -248,17 +248,17 @@ void MedicalVizService::SetFileLoadedAsync(
                     sharedState->SetFileDataReady(range[0], range[1], spacing);
                 }
                 else {
-                    std::cerr << "[SetFileLoadedAsync] GetVtkImage() returned null after load.\n";
+                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
                     sharedState->SetFileLoadFailed();
                 }
             }
             else {
-                std::cerr << "[SetFileLoadedAsync] Failed to load: " << path << "\n";
+                std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
                 sharedState->SetFileLoadFailed();
             }
         });
 
-    SetTaskStarted(std::move(task), true);
+    StartTask(std::move(task), true);
 }
 
 bool MedicalVizService::ReloadFromBufferAsync(
@@ -270,7 +270,7 @@ bool MedicalVizService::ReloadFromBufferAsync(
     DataAlgorithmKind algorithmKind)
 {
     if (!m_sharedState) {
-        m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return false;
     }
 
@@ -278,11 +278,11 @@ bool MedicalVizService::ReloadFromBufferAsync(
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
         std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
-        m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return false;
     }
 
-    m_ReloadLoadCallbackState.SetCallback(std::move(onComplete));
+    m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
     m_pendingReloadAlgorithmKind = algorithmKind;
     m_sharedState->SetReloadLoadStarted();
 
@@ -292,7 +292,7 @@ bool MedicalVizService::ReloadFromBufferAsync(
     std::packaged_task<void()> task(
         [dataMgr, sharedState, data, dims, spacing, origin]() mutable
         {
-            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换要等主线程在 SetPendingUpdatesProcessed 中消费。
+            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换要等主线程在 ProcessPendingUpdates 中消费。
             bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
 
             if (!ok)
@@ -301,15 +301,15 @@ bool MedicalVizService::ReloadFromBufferAsync(
             }
         });
 
-    SetTaskStarted(std::move(task), true);
+    StartTask(std::move(task), true);
     return true;
 }
 
-void MedicalVizService::SetTransformedDataSavedAsync(
+void MedicalVizService::SaveTransformedDataAsync(
     const std::string& path,
     std::function<void(bool success)> onComplete)
 {
-    SetSaveCompletionCallback(std::move(onComplete));
+    SetSaveCallback(std::move(onComplete));
 
     // 捕获必要资源，确保在后台线程中的生命周期安全
     auto dataMgr = m_dataManager;
@@ -319,12 +319,12 @@ void MedicalVizService::SetTransformedDataSavedAsync(
         : path;
 
     if (!dataMgr || !sharedState) {
-        SetSaveCompletionCallbackReady(false);
+        SetSaveCallbackReady(false);
         return;
     }
 
     if (resolvedPath.empty()) {
-        SetSaveCompletionCallbackReady(false);
+        SetSaveCallbackReady(false);
         return;
     }
 
@@ -339,26 +339,26 @@ void MedicalVizService::SetTransformedDataSavedAsync(
 
         auto self = weakSelf.lock();
         if (self) {
-            self->SetSaveCompletionCallbackReady(ok);
+            self->SetSaveCallbackReady(ok);
         }
     });
 
-    SetTaskStarted(std::move(task), false);
+    StartTask(std::move(task), false);
 }
 
-void MedicalVizService::SetSliceImagesSavedAsync(
+void MedicalVizService::SaveSliceImagesAsync(
     const std::string& path,
     const double angle,
     std::function<void(bool success)> onComplete)
 {
-    SetSaveCompletionCallback(std::move(onComplete));
+    SetSaveCallback(std::move(onComplete));
 
     auto dataMgr = m_dataManager;
     auto sharedState = m_sharedState;
     const std::string resolvedPath = path;
 
     if (!dataMgr || !sharedState) {
-        SetSaveCompletionCallbackReady(false);
+        SetSaveCallbackReady(false);
         return;
     }
 
@@ -377,11 +377,11 @@ void MedicalVizService::SetSliceImagesSavedAsync(
 
         auto self = weakSelf.lock();
         if (self) {
-            self->SetSaveCompletionCallbackReady(ok);
+            self->SetSaveCallbackReady(ok);
         }
     });
 
-    SetTaskStarted(std::move(task), false);
+    StartTask(std::move(task), false);
 }
 
 void MedicalVizService::SetFileLoadCanceled()
@@ -418,7 +418,7 @@ void MedicalVizService::SetSliceScrolled(int delta)
     m_sharedState->SetCursorRawWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     m_sharedState->SetCursorAxis(axis);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
-    SetSyncRequested();
+    RequestSync();
 }
 
 void MedicalVizService::SetCursorWorldPosition(double worldPos[3], int axis)
@@ -489,7 +489,7 @@ void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int vie
         startWC); // 当前拖拽结束后应写回状态的窗宽窗位
 
     m_sharedState->SetWindowLevel(windowLevel.windowWidth, windowLevel.windowCenter);
-    SetSyncRequested();
+    RequestSync();
 }
 
 void MedicalVizService::SetModelTransform(
@@ -552,7 +552,7 @@ void MedicalVizService::GetWorldPositionFromModel(const double m[3], double w[3]
 // ─────────────────────────────────────────────────────────────────────
 // AbstractAppService — 主线程后处理入口
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::SetPendingUpdatesProcessed()
+void MedicalVizService::ProcessPendingUpdates()
 {
     // 统一主线程后处理链路：
     // 1. 消费后台提交的新 vtkImageData
@@ -577,25 +577,25 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     }
 
     // 导出异步任务回调触发
-    if (GetPendingSaveCompletionCallbackConsumed()) {
+    if (ConsumeSaveCallback()) {
         SetPendingSaveCompletionCallbackExecuted();
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_needsCacheClear.exchange(false))
-        SetStrategyCacheCleared();
+        ClearStrategyCache();
 
     bool shouldReturnAfterLoadFailure = false;
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
-        SetLoadFailedHandled();
+        HandleLoadFailure();
         if (loadEventKind == LoadEventKind::File) {
-            m_FileLoadCallbackState.SetCallbackReady(false);
+            m_fileLoadCallbackState.SetCallbackReady(false);
         }
         else if (loadEventKind == LoadEventKind::Reload) {
-            m_ReloadLoadCallbackState.SetCallbackReady(false);
+            m_reloadLoadCallbackState.SetCallbackReady(false);
             m_pendingReloadAlgorithmKind = DataAlgorithmKind::None;
         }
         shouldReturnAfterLoadFailure = true;
@@ -608,23 +608,23 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
         pipelineLoadEventKind = loadEventKind;
-        SetPipelineRebuilt();
+        RebuildPipeline();
         pipelineRebuilt = true;
         if (loadEventKind == LoadEventKind::File) {
-            m_FileLoadCallbackState.SetCallbackReady(true);
+            m_fileLoadCallbackState.SetCallbackReady(true);
         }
         else if (loadEventKind == LoadEventKind::Reload) {
-            m_ReloadLoadCallbackState.SetCallbackReady(true);
+            m_reloadLoadCallbackState.SetCallbackReady(true);
         }
         // return; // 本帧只做重建，同步留到下帧
     }
 
     // 文件加载/重载回调延后到这里统一执行，保证 UI 看到的已经是主线程收敛后的最终状态。
-    if (m_FileLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_FileLoadCallbackState.SetPendingCallbackExecuted();
+    if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
+        m_fileLoadCallbackState.SetPendingCallbackExecuted();
     }
-    if (m_ReloadLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_ReloadLoadCallbackState.SetPendingCallbackExecuted();
+    if (m_reloadLoadCallbackState.GetPendingCallbackConsumed()) {
+        m_reloadLoadCallbackState.SetPendingCallbackExecuted();
     }
 
     if (shouldReturnAfterLoadFailure) {
@@ -633,7 +633,7 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     }
 
     // 普通事件增量同步
-    SetStrategyStateSynced();
+    SyncStrategyState();
 
     if (pipelineRebuilt && pipelineLoadEventKind == LoadEventKind::Reload && reloadAlgorithmKind != DataAlgorithmKind::None) {
         // reload 完成重建与策略同步后，按本次算法类型分发 runtime。
@@ -651,7 +651,7 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 // ─────────────────────────────────────────────────────────────────────
 // 私有辅助
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::SetPipelineRebuilt()
+void MedicalVizService::RebuildPipeline()
 {
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
@@ -691,11 +691,11 @@ void MedicalVizService::SetPipelineRebuilt()
     }
 
     SetCurrentStrategy(strategy);
-    SetRendererBackgroundApplied();
-    SetSyncRequested(); // 重建后触发一次全量参数同步
+    ApplyRendererBackground();
+    RequestSync(); // 重建后触发一次全量参数同步
 }
 
-void MedicalVizService::SetStrategyStateSynced()
+void MedicalVizService::SyncStrategyState()
 {
     bool expected = true;
     if (!m_needsSync.compare_exchange_strong(expected, false)) return;
@@ -719,7 +719,7 @@ void MedicalVizService::SetStrategyStateSynced()
 
     // 背景色同步（数据无关，直接写渲染器）
     if (HasFlag(flags, UpdateFlags::Background) && m_renderer) {
-        SetRendererBackgroundApplied();
+        ApplyRendererBackground();
         flags = static_cast<UpdateFlags>(
             static_cast<int>(flags) & ~static_cast<int>(UpdateFlags::Background));
     }
@@ -741,12 +741,12 @@ void MedicalVizService::SetStrategyStateSynced()
     // m_needsSync = false;
 }
 
-void MedicalVizService::SetLoadFailedHandled()
+void MedicalVizService::HandleLoadFailure()
 {
-    std::cerr << "[SetLoadFailedHandled] Load failed; clearing pipeline state.\n";
+    std::cerr << "[HandleLoadFailure] Load failed; clearing pipeline state.\n";
 
     // 清理策略缓存（无有效数据，不应保留旧 Strategy）
-    SetStrategyCacheCleared();
+    ClearStrategyCache();
 
     // 重置刷新标记，防止残留 DataReady 触发错误重建
     m_needsDataRefresh = false;
@@ -818,7 +818,7 @@ std::shared_ptr<AbstractVisualStrategy> MedicalVizService::GetStrategy(VizMode m
     return s;
 }
 
-void MedicalVizService::SetRendererBackgroundApplied()
+void MedicalVizService::ApplyRendererBackground()
 {
     if (!m_renderer || !m_sharedState) {
         return;
@@ -833,7 +833,7 @@ void MedicalVizService::RegisterAlgorithmPost(const std::shared_ptr<IAlgorithmPo
     m_algorithmPostRegistry.Register(post);
 }
 
-void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)
+void MedicalVizService::MergePendingFlags(UpdateFlags flags)
 {
     int old = m_pendingFlags.load();
     // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
@@ -843,23 +843,23 @@ void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)
     }
 }
 
-void MedicalVizService::SetDataRefreshRequested()
+void MedicalVizService::RequestDataRefresh()
 {
     m_needsDataRefresh = true;
 }
 
-void MedicalVizService::SetLoadFailedRequested()
+void MedicalVizService::RequestLoadFailed()
 {
     m_needsLoadFailed = true;
     m_isDirty = true;
 }
 
-void MedicalVizService::SetStrategyCacheClearRequested()
+void MedicalVizService::RequestStrategyCacheClear()
 {
     m_needsCacheClear = true;
 }
 
-void MedicalVizService::SetStrategyCacheCleared()
+void MedicalVizService::ClearStrategyCache()
 {
     // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
     // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
@@ -872,7 +872,7 @@ void MedicalVizService::SetStrategyCacheCleared()
     m_strategyCache.clear();
 }
 
-void MedicalVizService::SetCursorCentered()
+void MedicalVizService::CenterCursor()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
@@ -887,7 +887,7 @@ void MedicalVizService::SetCursorCentered()
     m_sharedState->SetCursorWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
 }
 
-void MedicalVizService::SetSyncRequested()
+void MedicalVizService::RequestSync()
 {
     // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
     m_needsSync = true;

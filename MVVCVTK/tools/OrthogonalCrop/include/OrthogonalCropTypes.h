@@ -14,7 +14,7 @@
 // - CropStateModel：瞬态显示与交互状态快照；
 // - OrthogonalCropRequest：一次执行请求；
 // - OrthogonalCropResult：一次执行结果，预览产物链返回 image 2D mask / box 3D outline / polydata 3D clip，
-//   image physical submit 链返回可重新载入主数据的 image。
+//   image submit 链返回可重新载入主数据的 image。
 
 #include <array>
 #include <cstddef>
@@ -75,10 +75,10 @@ enum class CropRemovalMode {
 
 // 本次请求到底只做 2D/3D 显示预览产物，还是要产出 image 主数据裁切提交结果。
 enum class CropExecutionMode {
-    // 2D/3D preview artifact：生成 image 2D mask、box 3D outline 或 polydata 3D clip，不替换主数据。
-    Preview2D3DArtifact,
-    // image physical submit：要求得到可脱离原输入、能重新载入主数据通道的 image。
-    ImagePhysicalSubmit
+    // preview artifact：生成 image 2D mask、box 3D outline 或 polydata 3D clip，不替换主数据。
+    PreviewArtifact,
+    // image submit：要求得到可脱离原输入、能重新载入主数据通道的 image。
+    Submit
 };
 
 // Router 输入侧的数据来源选择。
@@ -96,11 +96,11 @@ enum class OrthogonalCropResolvedBackend {
     // 还没有成功解析出实际 backend，通常表示输入缺失或执行失败。
     None,
     // image 路径生成 2D slice mask preview，同时提供 3D outline 所需 cropData。
-    Image2DMaskPreview,
-    // image 路径通过提取 VOI 生成 physical submit 后的新主子体数据。
-    ImagePhysicalSubmitExtractVOI,
+    MaskPreview,
+    // image 路径通过提取 VOI 生成 submit 后的新主子体数据。
+    SubmitExtractVOI,
     // polydata 路径使用 3D box clip + geometry filter 得到 preview 网格。
-    PolyData3DClipPreview
+    ClipPreview
 };
 
 // 裁切交互过程的瞬时状态；主要用于区分“拖拽中”和“已释放”。
@@ -127,16 +127,16 @@ enum class OrthogonalCropFailureReason {
     InvalidBounds,
     // bounds 虽合法，但超出了输入数据允许的范围。
     BoundsOutOfRange,
-    // image physical submit 不支持“移除内部、保留外部”的执行方式。
-    ImagePhysicalSubmitRemoveInsideUnsupported,
+    // image submit 不支持“移除内部、保留外部”的执行方式。
+    SubmitRemoveInsideUnsupported,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     InsufficientRam,
     // image 2D mask preview 产物构建失败。
-    Image2DMaskPreviewCreationFailed,
-    // image physical submit 需要输出主数据 image 时，生成输出 image 失败。
-    ImagePhysicalSubmitImageCreationFailed,
+    MaskPreviewCreationFailed,
+    // image submit 需要输出主数据 image 时，生成输出 image 失败。
+    SubmitImageCreationFailed,
     // polydata 3D clip preview 需要输出裁切 polydata 时，生成输出 polydata 失败。
-    PolyData3DClipPreviewPolyDataCreationFailed
+    ClipPreviewPolyDataCreationFailed
 };
 
 // 纯几何数据快照：boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源。
@@ -191,7 +191,7 @@ public:
     // 返回当前裁切结果相对原输入的全局偏移补偿矩阵。
     const CropMatrixDouble16Array& GetGlobalOffsetMatrix() const { return m_globalOffsetMatrix; }
 
-    // 写入全局偏移补偿矩阵；physical submit 结果会基于 origin 位移更新它。
+    // 写入全局偏移补偿矩阵；submit 结果会基于 origin 位移更新它。
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
 private:
@@ -209,7 +209,7 @@ public:
     // 当前结果或请求是否仍然处于“启用裁切语义”的状态。
     bool GetCropEnabled() const { return m_cropEnabled; }
 
-    // 设置裁切语义是否生效；physical submit 产出结果时常会把它关掉。
+    // 设置裁切语义是否生效；submit 产出结果时常会把它关掉。
     void SetCropEnabled(bool enabled) { m_cropEnabled = enabled; }
 
     // 返回 inside 区域当前期望的显示透明度。
@@ -264,7 +264,7 @@ public:
         m_boxToModelMatrix = GetBoxToModelMatrixFromBounds(modelBounds);
     }
 
-    // 返回本次请求是 Preview2D3DArtifact 还是 ImagePhysicalSubmit。
+    // 返回本次请求是 PreviewArtifact 还是 Submit。
     CropExecutionMode GetExecutionMode() const { return m_executionMode; }
 
     // 设置本次请求只做 2D/3D 预览产物，还是要求真正输出 image 主数据提交结果。
@@ -298,10 +298,10 @@ private:
     // 标准裁切盒 [-1,1]^3 到 model 的矩阵。
     std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
-    CropExecutionMode m_executionMode = CropExecutionMode::Preview2D3DArtifact;
-    // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image physical submit 合法性判断。
+    CropExecutionMode m_executionMode = CropExecutionMode::PreviewArtifact;
+    // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image submit 合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
-    // 输入数据当前附带的全局偏移补偿矩阵；physical submit 后会继续累加新的 origin 偏移。
+    // 输入数据当前附带的全局偏移补偿矩阵；submit 后会继续累加新的 origin 偏移。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
     // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。
     CropStateModel m_cropStateModel;
@@ -390,29 +390,29 @@ public:
     // 写入本次执行的说明文本。
     void SetMessage(const std::string& message) { m_message = message; }
 
-    // 返回 image physical submit 链路产出的主数据 image。
-    vtkSmartPointer<vtkImageData> GetImagePhysicalSubmitImage() const { return m_imagePhysicalSubmitImage; }
+    // 返回 image submit 链路产出的主数据 image。
+    vtkSmartPointer<vtkImageData> GetSubmitImage() const { return m_submitImage; }
 
-    // 写入 image physical submit 链路产出的主数据 image。
-    void SetImagePhysicalSubmitImage(vtkSmartPointer<vtkImageData> imagePhysicalSubmitImage) { m_imagePhysicalSubmitImage = std::move(imagePhysicalSubmitImage); }
+    // 写入 image submit 链路产出的主数据 image。
+    void SetSubmitImage(vtkSmartPointer<vtkImageData> submitImage) { m_submitImage = std::move(submitImage); }
 
     // 返回 polydata 3D clip preview 链路产出的裁切网格。
-    vtkSmartPointer<vtkPolyData> GetPolyData3DClipPreviewPolyData() const { return m_polyData3DClipPreviewPolyData; }
+    vtkSmartPointer<vtkPolyData> GetClipPolyData() const { return m_clipPolyData; }
 
     // 写入 polydata 3D clip preview 链路产出的裁切网格。
-    void SetPolyData3DClipPreviewPolyData(vtkSmartPointer<vtkPolyData> polyData3DClipPreviewPolyData) { m_polyData3DClipPreviewPolyData = std::move(polyData3DClipPreviewPolyData); }
+    void SetClipPolyData(vtkSmartPointer<vtkPolyData> clipPolyData) { m_clipPolyData = std::move(clipPolyData); }
 
     // 返回 image 2D mask preview 链路生成的遮罩图像。
-    vtkSmartPointer<vtkImageData> GetImage2DMaskPreviewImage() const { return m_image2DMaskPreviewImage; }
+    vtkSmartPointer<vtkImageData> GetMaskImage() const { return m_maskImage; }
 
     // 写入 image 2D mask preview 链路生成的遮罩图像。
-    void SetImage2DMaskPreviewImage(vtkSmartPointer<vtkImageData> image2DMaskPreviewImage) { m_image2DMaskPreviewImage = std::move(image2DMaskPreviewImage); }
+    void SetMaskImage(vtkSmartPointer<vtkImageData> maskImage) { m_maskImage = std::move(maskImage); }
 
     // 返回 box 3D outline preview 链路生成的裁切盒轮廓几何。
-    vtkSmartPointer<vtkPolyData> GetBox3DOutlinePreviewPolyData() const { return m_box3DOutlinePreviewPolyData; }
+    vtkSmartPointer<vtkPolyData> GetOutlinePolyData() const { return m_outlinePolyData; }
 
     // 写入 box 3D outline preview 链路生成的裁切盒轮廓几何。
-    void SetBox3DOutlinePreviewPolyData(vtkSmartPointer<vtkPolyData> box3DOutlinePreviewPolyData) { m_box3DOutlinePreviewPolyData = std::move(box3DOutlinePreviewPolyData); }
+    void SetOutlinePolyData(vtkSmartPointer<vtkPolyData> outlinePolyData) { m_outlinePolyData = std::move(outlinePolyData); }
 
     // 返回这次执行对应的客观几何快照。
     const CropDataModel& GetCropDataModel() const { return m_cropDataModel; }
@@ -443,15 +443,15 @@ private:
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 对当前成功/失败状态的文字解释；可直接给日志或 UI 弹框使用。
     std::string m_message;
-    // image physical submit 链路返回的主数据 image。
-    vtkSmartPointer<vtkImageData> m_imagePhysicalSubmitImage;
+    // image submit 链路返回的主数据 image。
+    vtkSmartPointer<vtkImageData> m_submitImage;
     // polydata 3D clip preview 链路返回的裁切网格；image 路径通常为空。
-    vtkSmartPointer<vtkPolyData> m_polyData3DClipPreviewPolyData;
+    vtkSmartPointer<vtkPolyData> m_clipPolyData;
     // image 2D mask preview 链路生成的遮罩图；真正控制 inside/outside 语义。
-    vtkSmartPointer<vtkImageData> m_image2DMaskPreviewImage;
+    vtkSmartPointer<vtkImageData> m_maskImage;
     // box 3D outline preview 链路生成的裁切盒可视几何；常用于 overlay 或调试显示。
-    vtkSmartPointer<vtkPolyData> m_box3DOutlinePreviewPolyData;
-    // 这次结果对应的客观几何快照；image physical submit 后可能已经更新为输出 image 自身的 bounds。
+    vtkSmartPointer<vtkPolyData> m_outlinePolyData;
+    // 这次结果对应的客观几何快照；image submit 后可能已经更新为输出 image 自身的 bounds。
     CropDataModel m_cropDataModel;
     // 这次结果对应的交互/显示状态快照；便于上层知道结果产生时是否仍处于交互态。
     CropStateModel m_cropStateModel;
