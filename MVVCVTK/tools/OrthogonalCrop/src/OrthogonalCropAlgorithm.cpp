@@ -125,6 +125,7 @@ static vtkSmartPointer<vtkTransform> GetBoxToModelTransform(const std::array<dou
     auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToModelMatrix->DeepCopy(boxToModelMatrixData.data());
 
+    // 输出 outline 时从标准盒 [-1,1]^3 出发，直接用 box -> model 生成显示几何。
     auto transform = vtkSmartPointer<vtkTransform>::New();
     transform->SetMatrix(boxToModelMatrix);
     return transform;
@@ -135,6 +136,8 @@ static vtkSmartPointer<vtkMatrix4x4> GetModelToBoxMatrix(const CropDataModel& cr
     auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
 
+    // inside/outside 判定统一在标准盒空间完成：
+    // model 点乘以 modelToBox 后，只需检查三个坐标是否落在 [-1,1]。
     auto modelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Invert(boxToModelMatrix, modelToBoxMatrix);
     return modelToBoxMatrix;

@@ -127,15 +127,24 @@ bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
     boxPolyData->GetPoint(3, currentP3);
     boxPolyData->GetPoint(4, currentP4);
 
+    // 用 4 个稳定角点反解 affine:
+    // P0 是 local(minX,minY,minZ) 的当前 world 位置；
+    // P1/P3/P4 分别给出 local X/Y/Z 三条边在 world 中的方向和长度。
+    // 矩阵按行填充 worldX/worldY/worldZ 三个方程：
+    // world(row) = XAxis(row)*localX + YAxis(row)*localY + ZAxis(row)*localZ + offset(row)。
     auto localToWorldVtkMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     localToWorldVtkMatrix->Identity();
     for (int row = 0; row < 3; ++row) {
+        // 整条边除以 PlaceWidget 时的 local 尺寸，得到 local 每前进 1 个单位时 world 对应的步长。
         const double localToWorldX =
             (currentP1[row] - currentP0[row]) / localDimensions[0];
         const double localToWorldY =
             (currentP3[row] - currentP0[row]) / localDimensions[1];
         const double localToWorldZ =
             (currentP4[row] - currentP0[row]) / localDimensions[2];
+
+        // 反解平移项，保证 local(minX,minY,minZ) 精确映射回 P0。
+        // P0 = XAxis*minX + YAxis*minY + ZAxis*minZ + offset。
         const double localToWorldOffset =
             currentP0[row]
             - localToWorldX * m_widgetLocalBounds[0]

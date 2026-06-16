@@ -546,6 +546,8 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
         localDimensions,
         localToWorldMatrixData);
 
+    // boxToLocal 把固定标准盒 [-1,1]^3 放回 widget 的 local 初始盒：
+    // local = center + box * (localDimensions / 2)。
     auto boxToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToLocalMatrix->Identity();
     for (int axis = 0; axis < 3; ++axis) {
@@ -556,12 +558,16 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     auto localToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     localToWorldMatrix->DeepCopy(localToWorldMatrixData.data());
 
+    // 组合顺序按坐标方向从右到左读：
+    // boxToWorld = localToWorld * boxToLocal，表示标准盒先进入 widget local，再进入 render world。
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Multiply4x4(localToWorldMatrix, boxToLocalMatrix, boxToWorldMatrix);
 
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     worldToModelMatrix->DeepCopy(GetWorldToModelMatrix().data());
 
+    // request 只下发 boxToModelMatrix；后端不再读取 widget。
+    // boxToModel = worldToModel * boxToWorld，保证用户在 world 中拖出的有向盒折回 model 空间。
     auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Multiply4x4(worldToModelMatrix, boxToWorldMatrix, boxToModelMatrix);
     vtkMatrix4x4::DeepCopy(boxToModelMatrixData.data(), boxToModelMatrix);
@@ -957,6 +963,8 @@ void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
     auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
 
+    // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> model，
+    // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Multiply4x4(modelToWorldMatrix, boxToModelMatrix, boxToWorldMatrix);
 
@@ -1007,6 +1015,8 @@ bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
     auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
 
+    // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
+    // 采样点先由 VTK shader 内置矩阵还原到 model，再用这里的 modelToBox 送入标准盒空间。
     auto modelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Invert(boxToModelMatrix, modelToBoxMatrix);
 
@@ -1132,6 +1142,8 @@ bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
         canonicalBounds[4], canonicalBounds[5]);
 
     auto modelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
+    // vtkBox 的 implicit function 定义在标准盒空间；把输入 model 点先变到 box 空间，
+    // 就能复用同一个 [-1,1]^3 盒子表达任意旋转/缩放后的裁切区域。
     modelToBoxTransform->SetMatrix(cropData.GetBoxToModelMatrix().data());
     modelToBoxTransform->Inverse();
     clipFunction->SetTransform(modelToBoxTransform);
