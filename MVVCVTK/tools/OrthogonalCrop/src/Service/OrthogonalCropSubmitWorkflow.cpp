@@ -5,12 +5,10 @@
 OrthogonalCropSubmitWorkflow::OrthogonalCropSubmitWorkflow(
     std::shared_ptr<OrthogonalCropInteractionBridgeService> bridge,
     ReloadSubmitter reloadSubmitter,
-    std::shared_ptr<AbstractDataManager> dataMgr,
-    std::shared_ptr<IVisualConfigService> visualConfigService)
+    std::shared_ptr<AbstractDataManager> dataMgr)
     : m_bridge(std::move(bridge))
     , m_reloadSubmitter(std::move(reloadSubmitter))
     , m_dataMgr(std::move(dataMgr))
-    , m_visualConfigService(std::move(visualConfigService))
 {
 }
 
@@ -72,10 +70,6 @@ void OrthogonalCropSubmitWorkflow::HandleReloadComplete(bool success)
 
     if (m_dataMgr) {
         m_bridge->SetInputImage(m_dataMgr->GetVtkImage());
-        const auto range = m_dataMgr->GetScalarRange();
-        if (m_visualConfigService) {
-            m_visualConfigService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
-        }
     }
 
     std::cout << "[Main] Orthogonal crop submit applied to main image data." << std::endl;

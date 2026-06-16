@@ -111,15 +111,14 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
     auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
         orthogonalCropBridge,
         reloadSubmitter,
-        sharedDataMgr,
-        serviceA);
+        sharedDataMgr);
 
 为什么这么设：
 - SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的世界/model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
-- OrthogonalCropSubmitWorkflow：统一协调 submit payload、主数据 reload、reload 完成后的相机恢复与裁切收尾；Workflow 只接收 reload 能力函数和配置接口，不直接依赖 MedicalVizService，Service 也不注册裁切后处理。
+- OrthogonalCropSubmitWorkflow：统一协调 submit payload、主数据 reload、reload 完成后的 bridge 收尾；Workflow 只接收 reload 能力函数和数据管理接口，不直接依赖 MedicalVizService，也不修改 iso threshold 等视觉参数。
 
 Step 5: 再做窗口级辅助元素策略
 
@@ -292,8 +291,7 @@ Step 11: 只让一个窗口进入 Start()
     auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
         orthogonalCropBridge,
         reloadSubmitter,
-        sharedDataMgr,
-        serviceA);
+        sharedDataMgr);
 
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
     serviceE->SetElementVisible(VisFlags::Planes3D, false);

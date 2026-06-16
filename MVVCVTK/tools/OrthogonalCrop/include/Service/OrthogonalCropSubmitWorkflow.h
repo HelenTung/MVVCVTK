@@ -27,8 +27,7 @@ public:
     OrthogonalCropSubmitWorkflow(
         std::shared_ptr<OrthogonalCropInteractionBridgeService> bridge,
         ReloadSubmitter reloadSubmitter,
-        std::shared_ptr<AbstractDataManager> dataMgr,
-        std::shared_ptr<IVisualConfigService> visualConfigService);
+        std::shared_ptr<AbstractDataManager> dataMgr);
 
     void ApplySubmit();
 
@@ -38,6 +37,5 @@ private:
     std::shared_ptr<OrthogonalCropInteractionBridgeService> m_bridge;
     ReloadSubmitter m_reloadSubmitter;
     std::shared_ptr<AbstractDataManager> m_dataMgr;
-    std::shared_ptr<IVisualConfigService> m_visualConfigService;
     std::shared_ptr<std::vector<float>> m_reloadBuffer;
 };

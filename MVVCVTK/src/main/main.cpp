@@ -422,8 +422,7 @@ int main()
                 origin,
                 std::move(onComplete));
         },
-        sharedDataMgr,
-        serviceA);
+        sharedDataMgr);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
