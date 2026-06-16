@@ -14,9 +14,10 @@
 // 5. SetPreview2D3DServicesDirty 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
 #include "OrthogonalCropWidgetStateController.h"
+#include "OrthogonalCropCameraStateController.h"
 #include "OrthogonalCropBackendRouterService.h"
 #include "OrthogonalCropPreviewOverlayStrategy.h"
-#include "AppService.h"
+#include "AppInterfaces.h"
 
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
@@ -24,6 +25,7 @@
 #include <vtkSmartPointer.h>
 
 #include <array>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -34,8 +36,17 @@ class vtkBox;
 class vtkVolume;
 class vtkVolumeMapper;
 class vtkGPUVolumeRayCastMapper;
-class OrthogonalCropInteractionBridgeService {
+class vtkRenderer;
+class OrthogonalCropInteractionBridgeService : public IAlgorithmPost {
 public:
+    using ReloadSubmitter = std::function<bool(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
+        std::function<void(bool success)> onComplete,
+        DataAlgorithmKind algorithmKind)>;
+
     // Public boundary: initialization/setup and user hotkey actions.
     // Internal state transitions, backend routing details, and VTK preview plumbing stay private.
 
@@ -58,8 +69,14 @@ public:
     // 主 interactor 由 3D 参考窗口提供，widget 只会挂到这个 interactor 上。
     void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
 
+    // 参考渲染器只供算法内部保存/恢复相机状态，不写入 SharedState。
+    void SetReferenceRenderer(vtkRenderer* renderer);
+
     // 参考渲染服务负责 world/model 坐标互转。
     void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
+
+    // reload 提交能力由装配层注入；算法内部不依赖具体应用服务类型。
+    void SetReloadSubmitter(ReloadSubmitter submitter);
 
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
@@ -84,6 +101,9 @@ public:
 
     // 对应的“移除盒内”预览动作。
     void ToggleOutsidePreview();
+
+    DataAlgorithmKind GetDataAlgorithmKind() const override;
+    void OnPipelineSynced(vtkRenderer* renderer) override;
 
 private:
     // Private boundary: widget state machine, model/world conversion, backend query,
@@ -149,10 +169,8 @@ private:
     // 基于当前 widget 有向盒构建 image physical submit request。
     OrthogonalCropRequest BuildImagePhysicalSubmitRequest() const;
 
-    // 把 image physical submit image 转交给 reload 通道；保持原有 buffer/origin 翻转语义。
-    bool SubmitImagePhysicalSubmitImageReload(
-        const OrthogonalCropResult& submitResult,
-        const std::shared_ptr<MedicalVizService>& referenceRenderService);
+    // 把 image physical submit image 适配成现有 reload buffer 通道。
+    bool SubmitImageReload(const OrthogonalCropResult& submitResult);
 
     // 激活交互裁切模式，初始化 widget 与默认 bounds。
     bool ActivateInteractiveCrop();
@@ -237,14 +255,26 @@ private:
     // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // image physical submit 重载期间持有提交缓冲，直到主线程回调收口。
-    std::shared_ptr<std::vector<float>> m_reloadBuffer;
+    // image physical submit 的重载输入由算法桥临时持有，直到 reload 回调收口。
+    std::shared_ptr<std::vector<float>> m_submitReloadBuffer;
+
+    // image physical submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
+    bool m_submitReloadPending = false;
+
+    // reload 提交函数，只表达能力边界，不绑定具体 service 类。
+    ReloadSubmitter m_reloadSubmitter;
+
+    // 裁切提交前保存相机，下一次主数据重建并完成策略同步后恢复；每次保存都会覆盖上一份。
+    OrthogonalCropCameraStateController m_cameraStateController;
 
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。
     OrthogonalCropWidgetStateController m_widgetStateController;
 
     // 世界 / 模型坐标互转的参考窗口服务。
     std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;
+
+    // 相机快照保存/恢复的参考 renderer；算法内部状态，不进入 service/share。
+    vtkRenderer* m_referenceRenderer = nullptr;
 
     // 真正需要被 overlay / preview 联动刷新的窗口目标列表。
     std::vector<PreviewRenderTarget> m_previewRenderTargets;

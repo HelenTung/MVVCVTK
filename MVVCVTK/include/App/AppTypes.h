@@ -13,6 +13,7 @@
 #include <vector>
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <functional>
 
@@ -74,6 +75,24 @@ struct BackgroundColor {
 struct WindowLevelParams {
     double windowWidth = 400.0;  // WW 默认
     double windowCenter = 40.0;   // WC 默认
+};
+
+// --- 数据流算法类型（用于 reload 后处理和 runtime 路由）---
+enum class DataAlgorithmKind {
+    None,
+    OrthogonalCropImagePhysicalSubmit
+};
+
+// --- 渲染相机快照：算法内部临时状态，不写入 SharedState ---
+struct CameraStateSnapshot {
+    bool isValid = false;
+    std::array<double, 3> position = { 0.0, 0.0, 1.0 };
+    std::array<double, 3> focalPoint = { 0.0, 0.0, 0.0 };
+    std::array<double, 3> viewUp = { 0.0, 1.0, 0.0 };
+    std::array<double, 2> clippingRange = { 0.1, 1000.0 };
+    double parallelScale = 1.0;
+    double viewAngle = 30.0;
+    bool parallelProjection = false;
 };
 
 // --- 更新类型位掩码（可组合）---

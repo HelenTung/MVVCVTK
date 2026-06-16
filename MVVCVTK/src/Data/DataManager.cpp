@@ -498,6 +498,9 @@ bool BaseDataManager::SetSliceImagesSaved(
     if (outputDir.has_extension()) {
         outputDir = outputDir.parent_path() / outputDir.stem();
     }
+    if (outputDir.empty()) {
+        return false;
+    }
 
     try {
         std::filesystem::create_directories(outputDir);
@@ -562,6 +565,9 @@ bool BaseDataManager::SetSliceImagesSaved(
         writer->SetFileName(vtkFileName.c_str());
         writer->SetInputData(sliceImage);
         writer->Write();
+        if (writer->GetErrorCode() != 0) {
+            return false;
+        }
     }
 
     return true;

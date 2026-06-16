@@ -82,12 +82,13 @@ public:
         std::function<void(bool success)> onComplete = nullptr);
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。
-    bool SetReloadFromBufferAsync(
+    bool ReloadFromBufferAsync(
         const float* data,
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool success)> onComplete = nullptr,
+        DataAlgorithmKind algorithmKind = DataAlgorithmKind::None);
 
     // 状态查询：当前只对外暴露 File / Reload 两组状态。
     LoadState GetFileLoadState() const override;
@@ -124,6 +125,7 @@ public:
     void SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool show) override;
     void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
+    void RegisterAlgorithmPost(const std::shared_ptr<IAlgorithmPost>& post);
 
     std::array<double, 16> GetModelMatrix() override {
         return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
@@ -276,6 +278,9 @@ private:
 
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
+    AlgorithmPostRegistry m_algorithmPostRegistry; // 数据算法后处理注册表；Service 只负责调度
+    DataAlgorithmKind m_pendingReloadAlgorithmKind = DataAlgorithmKind::None; // 当前 reload 完成后需要同步的算法 runtime
+    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 当前 service 本地待消费的 load 事件来源，避免多个窗口抢同一个 Share pending 标记
     std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
     std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
 

@@ -1,4 +1,4 @@
-﻿#include "AppService.h"
+#include "AppService.h"
 #include "DataManager.h"
 #include "StrategyFactory.h"
 #include <vtkSmartPointer.h>
@@ -122,6 +122,10 @@ void MedicalVizService::SetRenderContext(
             auto self = weakSelf.lock();
             if (!self) return;
 
+            if (HasFlag(flags, UpdateFlags::DataReady) && self->m_sharedState) {
+                self->m_pendingLoadEventKind = self->m_sharedState->GetPendingLoadEventKind();
+            }
+
             // 广播回调只做“事件翻译”为主线程可消费的原子标志，
             // 不在这里直接碰 VTK/Strategy，避免后台线程或任意调用线程破坏渲染线程边界。
             self->m_stateSyncStrategy.SetFlagsHandled(flags, *self);
@@ -216,11 +220,10 @@ void MedicalVizService::SetFileLoadedAsync(
         return;
     }
 
-    if (m_sharedState->GetPendingLoadEventKind() != LoadEventKind::None
-        || m_sharedState->GetFileLoadState() == LoadState::Loading
+    if (m_sharedState->GetFileLoadState() == LoadState::Loading
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
-        std::cerr << "[SetFileLoadedAsync] Previous load result is still pending or loading is in progress.\n";
+        std::cerr << "[SetFileLoadedAsync] Loading is already in progress.\n";
         m_FileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return;
     }
@@ -258,28 +261,29 @@ void MedicalVizService::SetFileLoadedAsync(
     SetTaskStarted(std::move(task), true);
 }
 
-bool MedicalVizService::SetReloadFromBufferAsync(
+bool MedicalVizService::ReloadFromBufferAsync(
     const float* data,
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool success)> onComplete,
+    DataAlgorithmKind algorithmKind)
 {
     if (!m_sharedState) {
         m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return false;
     }
 
-    if (m_sharedState->GetPendingLoadEventKind() != LoadEventKind::None
-        || m_sharedState->GetFileLoadState() == LoadState::Loading
+    if (m_sharedState->GetFileLoadState() == LoadState::Loading
         || m_sharedState->GetReloadLoadState() == LoadState::Loading)
     {
-        std::cerr << "[SetReloadFromBufferAsync] Previous load result is still pending or loading is in progress.\n";
+        std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
         m_ReloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
         return false;
     }
 
     m_ReloadLoadCallbackState.SetCallback(std::move(onComplete));
+    m_pendingReloadAlgorithmKind = algorithmKind;
     m_sharedState->SetReloadLoadStarted();
 
     auto dataMgr = m_dataManager;
@@ -556,8 +560,9 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     // 3. 处理失败与重建请求
     // 4. 最后再做普通增量同步
 
-    // 消费来自第三方重建的 ReconBuffer
-    // 必须在 m_needsDataRefresh 检查前，因为 SetPendingImageConsumed 成功后会更新 SharedState 的重载状态与数据可信状态，下面的逻辑再据此驱动管线重建。
+    const DataAlgorithmKind reloadAlgorithmKind = m_pendingReloadAlgorithmKind;
+
+    // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
     if (m_dataManager && m_dataManager->SetPendingImageConsumed()) {
         // 走和文件加载成功相同的后处理路径
         auto img = m_dataManager->GetVtkImage();
@@ -584,25 +589,27 @@ void MedicalVizService::SetPendingUpdatesProcessed()
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
-        const LoadEventKind loadEventKind = m_sharedState
-            ? m_sharedState->GetPendingLoadEventKindConsumed()
-            : LoadEventKind::None;
+        const LoadEventKind loadEventKind = m_pendingLoadEventKind;
         SetLoadFailedHandled();
         if (loadEventKind == LoadEventKind::File) {
             m_FileLoadCallbackState.SetCallbackReady(false);
         }
         else if (loadEventKind == LoadEventKind::Reload) {
             m_ReloadLoadCallbackState.SetCallbackReady(false);
+            m_pendingReloadAlgorithmKind = DataAlgorithmKind::None;
         }
         shouldReturnAfterLoadFailure = true;
     }
 
+    bool pipelineRebuilt = false;
+    LoadEventKind pipelineLoadEventKind = LoadEventKind::None;
+
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
-        const LoadEventKind loadEventKind = m_sharedState
-            ? m_sharedState->GetPendingLoadEventKindConsumed()
-            : LoadEventKind::None;
+        const LoadEventKind loadEventKind = m_pendingLoadEventKind;
+        pipelineLoadEventKind = loadEventKind;
         SetPipelineRebuilt();
+        pipelineRebuilt = true;
         if (loadEventKind == LoadEventKind::File) {
             m_FileLoadCallbackState.SetCallbackReady(true);
         }
@@ -621,11 +628,24 @@ void MedicalVizService::SetPendingUpdatesProcessed()
     }
 
     if (shouldReturnAfterLoadFailure) {
+        m_pendingLoadEventKind = LoadEventKind::None;
         return;
     }
 
     // 普通事件增量同步
     SetStrategyStateSynced();
+
+    if (pipelineRebuilt && pipelineLoadEventKind == LoadEventKind::Reload && reloadAlgorithmKind != DataAlgorithmKind::None) {
+        // reload 完成重建与策略同步后，按本次算法类型分发 runtime。
+        m_algorithmPostRegistry.Sync(reloadAlgorithmKind, m_renderer.GetPointer());
+    }
+
+    if (pipelineRebuilt) {
+        if (pipelineLoadEventKind == LoadEventKind::Reload) {
+            m_pendingReloadAlgorithmKind = DataAlgorithmKind::None;
+        }
+        m_pendingLoadEventKind = LoadEventKind::None;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -806,6 +826,11 @@ void MedicalVizService::SetRendererBackgroundApplied()
 
     const auto bg = m_sharedState->GetBackground();
     m_renderer->SetBackground(bg.r, bg.g, bg.b);
+}
+
+void MedicalVizService::RegisterAlgorithmPost(const std::shared_ptr<IAlgorithmPost>& post)
+{
+    m_algorithmPostRegistry.Register(post);
 }
 
 void MedicalVizService::SetPendingFlagsMerged(UpdateFlags flags)

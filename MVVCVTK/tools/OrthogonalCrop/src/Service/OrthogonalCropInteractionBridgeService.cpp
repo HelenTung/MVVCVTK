@@ -110,12 +110,22 @@ void OrthogonalCropInteractionBridgeService::SetPrimaryInteractor(vtkRenderWindo
     m_widgetStateController.SetInteractor(interactor);
 }
 
+void OrthogonalCropInteractionBridgeService::SetReferenceRenderer(vtkRenderer* renderer)
+{
+    m_referenceRenderer = renderer;
+}
+
 void OrthogonalCropInteractionBridgeService::SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService)
 {
     m_referenceRenderService = std::move(referenceService);
     if (!m_referenceRenderService) {
         m_referenceRenderService = GetFirstPreviewRenderService();
     }
+}
+
+void OrthogonalCropInteractionBridgeService::SetReloadSubmitter(ReloadSubmitter submitter)
+{
+    m_reloadSubmitter = std::move(submitter);
 }
 
 void OrthogonalCropInteractionBridgeService::SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices)
@@ -157,27 +167,30 @@ void OrthogonalCropInteractionBridgeService::ApplyImagePhysicalSubmit()
         return;
     }
 
-    auto referenceRenderService = std::dynamic_pointer_cast<MedicalVizService>(m_referenceRenderService);
-    if (!referenceRenderService) {
-        std::cerr << "[Main] Orthogonal crop physical submit failed: reference render service does not support reload." << std::endl;
+    if (!m_reloadSubmitter) {
+        std::cerr << "[Main] Orthogonal crop physical submit failed: reload submitter is missing." << std::endl;
         return;
     }
+
+    m_cameraStateController.Save(m_referenceRenderer);
 
     const auto submitRequest = BuildImagePhysicalSubmitRequest();
     const auto submitResult = GetResult(submitRequest);
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
+        m_cameraStateController.Clear();
         std::cerr << "[Main] Orthogonal crop physical submit failed: "
             << GetFailureReasonText(submitResult.GetFailureReason())
             << " - " << submitResult.GetMessage() << std::endl;
         return;
     }
 
-    if (!SubmitImagePhysicalSubmitImageReload(submitResult, referenceRenderService)) {
+    if (!SubmitImageReload(submitResult)) {
+        m_cameraStateController.Clear();
         return;
     }
 
-    SetInputImage(nullptr);
-    DeactivateInteractiveCrop();
+    m_submitReloadPending = true;
+    m_widgetStateController.SetEnabled(false);
 }
 
 bool OrthogonalCropInteractionBridgeService::CanApplyImagePhysicalSubmit() const
@@ -197,6 +210,11 @@ bool OrthogonalCropInteractionBridgeService::CanApplyImagePhysicalSubmit() const
         return false;
     }
 
+    if (m_submitReloadPending) {
+        std::cerr << "[Main] Orthogonal crop physical submit ignored: reload is already pending." << std::endl;
+        return false;
+    }
+
     return true;
 }
 
@@ -207,9 +225,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildImagePhysical
     return submitRequest;
 }
 
-bool OrthogonalCropInteractionBridgeService::SubmitImagePhysicalSubmitImageReload(
-    const OrthogonalCropResult& submitResult,
-    const std::shared_ptr<MedicalVizService>& referenceRenderService)
+bool OrthogonalCropInteractionBridgeService::SubmitImageReload(const OrthogonalCropResult& submitResult)
 {
     auto imagePhysicalSubmitImage = submitResult.GetImagePhysicalSubmitImage();
     if (!imagePhysicalSubmitImage) {
@@ -218,36 +234,17 @@ bool OrthogonalCropInteractionBridgeService::SubmitImagePhysicalSubmitImageReloa
     }
 
     int dims[3] = { 0, 0, 0 };
-    double spacingData[3] = { 1.0, 1.0, 1.0 };
-    double modelOriginData[3] = { 0.0, 0.0, 0.0 };
     imagePhysicalSubmitImage->GetDimensions(dims);
-    imagePhysicalSubmitImage->GetSpacing(spacingData);
-    imagePhysicalSubmitImage->GetOrigin(modelOriginData);
-    auto sourceData = static_cast<const float*>(imagePhysicalSubmitImage->GetScalarPointer());
+    const auto sourceData = static_cast<const float*>(imagePhysicalSubmitImage->GetScalarPointer());
     if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
         std::cerr << "[Main] Orthogonal crop image physical submit failed: output image buffer is invalid." << std::endl;
         return false;
     }
 
-    const size_t nx = static_cast<size_t>(dims[0]);
-    const size_t ny = static_cast<size_t>(dims[1]);
-    const size_t nz = static_cast<size_t>(dims[2]);
-    const size_t sliceSize = nx * ny;
-    const size_t totalSize = sliceSize * nz;
-    m_reloadBuffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
-
-    auto* reloadData = m_reloadBuffer->data();
-    for (size_t z = 0; z < nz; ++z) {
-        const size_t sourceSliceOffset = z * sliceSize;
-        const size_t targetSliceOffset = z * sliceSize;
-        for (size_t y = 0; y < ny; ++y) {
-            const float* sourceRow = sourceData + sourceSliceOffset + y * nx;
-            float* targetRow = reloadData + targetSliceOffset + (ny - 1 - y) * nx;
-            for (size_t x = 0; x < nx; ++x) {
-                targetRow[nx - 1 - x] = sourceRow[x];
-            }
-        }
-    }
+    double spacingData[3] = { 1.0, 1.0, 1.0 };
+    double modelOriginData[3] = { 0.0, 0.0, 0.0 };
+    imagePhysicalSubmitImage->GetSpacing(spacingData);
+    imagePhysicalSubmitImage->GetOrigin(modelOriginData);
 
     const std::array<int, 3> reloadDims = { dims[0], dims[1], dims[2] };
     const std::array<float, 3> reloadSpacing = {
@@ -261,15 +258,38 @@ bool OrthogonalCropInteractionBridgeService::SubmitImagePhysicalSubmitImageReloa
         static_cast<float>(modelOriginData[2])
     };
 
-    if (!referenceRenderService->SetReloadFromBufferAsync(
-            m_reloadBuffer->data(),
+    const size_t nx = static_cast<size_t>(dims[0]);
+    const size_t ny = static_cast<size_t>(dims[1]);
+    const size_t nz = static_cast<size_t>(dims[2]);
+    const size_t sliceSize = nx * ny;
+    const size_t totalSize = sliceSize * nz;
+    m_submitReloadBuffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
+    auto* reloadData = m_submitReloadBuffer->data();
+    for (size_t z = 0; z < nz; ++z) {
+        const size_t sliceOffset = z * sliceSize;
+        for (size_t y = 0; y < ny; ++y) {
+            const float* sourceRow = sourceData + sliceOffset + y * nx;
+            float* targetRow = reloadData + sliceOffset + (ny - 1 - y) * nx;
+            for (size_t x = 0; x < nx; ++x) {
+                targetRow[nx - 1 - x] = sourceRow[x];
+            }
+        }
+    }
+
+    if (!m_reloadSubmitter(
+            m_submitReloadBuffer->data(),
             reloadDims,
             reloadSpacing,
             reloadOrigin,
-            [this, referenceRenderService](bool success) {
+            [this](bool success) {
                 if (!success) {
                     std::cerr << "[Main] Orthogonal crop physical submit reload failed." << std::endl;
-                    m_reloadBuffer.reset();
+                    m_submitReloadPending = false;
+                    m_cameraStateController.Clear();
+                    m_submitReloadBuffer.reset();
+                    if (m_cropInteractionEnabled) {
+                        m_widgetStateController.SetEnabled(true);
+                    }
                     return;
                 }
 
@@ -279,14 +299,17 @@ bool OrthogonalCropInteractionBridgeService::SubmitImagePhysicalSubmitImageReloa
 
                 if (m_dataMgr) {
                     const auto range = m_dataMgr->GetScalarRange();
-                    referenceRenderService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
+                    if (const auto visualConfigService = std::dynamic_pointer_cast<IVisualConfigService>(m_referenceRenderService)) {
+                        visualConfigService->SetIsoThreshold(range[0] + (range[1] - range[0]) * 0.55);
+                    }
                 }
 
                 std::cout << "[Main] Orthogonal crop physical submit applied to main image data." << std::endl;
-                m_reloadBuffer.reset();
-            })) {
+            },
+            GetDataAlgorithmKind())) {
         std::cerr << "[Main] Orthogonal crop physical submit failed: reload request was rejected." << std::endl;
-        m_reloadBuffer.reset();
+        m_submitReloadPending = false;
+        m_submitReloadBuffer.reset();
         return false;
     }
 
@@ -311,6 +334,26 @@ void OrthogonalCropInteractionBridgeService::ToggleInsidePreview()
 void OrthogonalCropInteractionBridgeService::ToggleOutsidePreview()
 {
     TogglePreview(CropRemovalMode::RemoveInside, true);
+}
+
+DataAlgorithmKind OrthogonalCropInteractionBridgeService::GetDataAlgorithmKind() const
+{
+    return DataAlgorithmKind::OrthogonalCropImagePhysicalSubmit;
+}
+
+void OrthogonalCropInteractionBridgeService::OnPipelineSynced(vtkRenderer* renderer)
+{
+    if (renderer == m_referenceRenderer) {
+        m_cameraStateController.Restore(m_referenceRenderer);
+    }
+
+    if (m_submitReloadPending) {
+        m_submitReloadPending = false;
+        SetInputImage(nullptr);
+        m_submitReloadBuffer.reset();
+        m_boundsInitialized = false;
+        DeactivateInteractiveCrop();
+    }
 }
 
 bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
@@ -359,7 +402,13 @@ bool OrthogonalCropInteractionBridgeService::DeactivateInteractiveCrop()
         return false;
     }
 
+    if (m_submitReloadPending) {
+        std::cout << "[Main] Orthogonal crop widget deactivation deferred: image physical submit reload is pending." << std::endl;
+        return false;
+    }
+
     m_widgetStateController.SetEnabled(false);
+    m_submitReloadPending = false;
     m_cropInteractionEnabled = false;
     m_previewEnabled = false;
     m_lastInteractionPhase = CropInteractionPhase::Released;

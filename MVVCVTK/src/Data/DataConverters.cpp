@@ -77,6 +77,18 @@ void HistogramConverter::SetHistogramImageSaved(vtkSmartPointer<vtkImageData> in
     }
 
     const std::filesystem::path outputPath(filePath);
+    if (outputPath.empty()) {
+        return;
+    }
+    const auto parentDir = outputPath.parent_path();
+    if (!parentDir.empty()) {
+        try {
+            std::filesystem::create_directories(parentDir);
+        }
+        catch (...) {
+            return;
+        }
+    }
     std::string ext = outputPath.extension().string();
     vtkSmartPointer<vtkImageWriter> writer;
     if (ext == ".png" || ext == ".PNG") writer = vtkSmartPointer<vtkPNGWriter>::New();

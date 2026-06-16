@@ -62,13 +62,6 @@ public:
         return m_pendingLoadEventKind;
     }
 
-    LoadEventKind GetPendingLoadEventKindConsumed() {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        const LoadEventKind eventKind = m_pendingLoadEventKind;
-        m_pendingLoadEventKind = LoadEventKind::None;
-        return eventKind;
-    }
-
     // ── 文件流加载开始 ────────────────────────────────────────────
     void SetFileLoadStarted() {
         std::lock_guard<std::mutex> lk(m_mutex);

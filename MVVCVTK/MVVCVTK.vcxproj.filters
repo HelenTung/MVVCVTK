@@ -204,6 +204,9 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropCameraStateController.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
@@ -285,6 +288,9 @@
       <Filter>tools\OrthogonalCrop\src</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropCameraStateController.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">

@@ -401,7 +401,25 @@ int main()
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
+    orthogonalCropBridge->SetReloadSubmitter(
+        [serviceA](
+            const float* data,
+            const std::array<int, 3>& dims,
+            const std::array<float, 3>& spacing,
+            const std::array<float, 3>& origin,
+            std::function<void(bool success)> onComplete,
+            DataAlgorithmKind algorithmKind) {
+            return serviceA->ReloadFromBufferAsync(
+                data,
+                dims,
+                spacing,
+                origin,
+                std::move(onComplete),
+                algorithmKind);
+    });
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+    serviceA->RegisterAlgorithmPost(orthogonalCropBridge);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, false);

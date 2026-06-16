@@ -106,12 +106,18 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
+    orthogonalCropBridge->SetReloadSubmitter([serviceA](...) { return serviceA->ReloadFromBufferAsync(...); });
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+    serviceA->RegisterAlgorithmPost(orthogonalCropBridge);
 
 为什么这么设：
 - SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的世界/model 坐标转换都以它为准。
+- SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
+- SetReloadSubmitter(...)：装配层只注入 reload 提交能力，OrthogonalCrop 算法内部不依赖 MedicalVizService 具体类。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
+- RegisterAlgorithmPost(...)：把裁切后处理入口注册到发起 reload 的 service；数据消费仍由单一 DataManager 的 pending image 门铃保证只发生一次。
 
 Step 5: 再做窗口级辅助元素策略
 
@@ -155,7 +161,7 @@ Step 7: 在加载成功回调里做“数据相关”的后处理
 - OrthogonalCrop 的 image 输入只有在 DataManager 真正持有有效 image 后才能绑定，否则 bridge/routing 里看到的是空输入。
 
 非常重要：
-- SetFileLoadedAsync / SetReloadFromBufferAsync / SetTransformedDataSavedAsync 的业务回调，当前实现是“主线程延迟回调”，不是后台线程直接回调。
+- SetFileLoadedAsync / ReloadFromBufferAsync / SetTransformedDataSavedAsync 的业务回调，当前实现是“主线程延迟回调”，不是后台线程直接回调。
 - 也就是说，回调执行时，SetPendingUpdatesProcessed 已经先把 DataReady / LoadFailed / pipeline rebuild 收敛过一轮了。
 
 Step 8: 全窗口先 Render，再 Initialize interactor
@@ -280,6 +286,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetReloadSubmitter([serviceA](...) { return serviceA->ReloadFromBufferAsync(...); });
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
 
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
@@ -463,7 +470,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：后台线程做 I/O 和数据准备；成功后通过 SharedState 发布 DataReady；onComplete 在主线程延迟执行。
 - 为什么：加载要异步，VTK 管线重建要主线程，二者不能混在同一层里直接做。
 
-5) SetReloadFromBufferAsync(...)
+5) ReloadFromBufferAsync(...)
 - 做什么：后台线程准备待提交镜像，真正消费要等主线程 `SetPendingUpdatesProcessed`。
 - 为什么：重载数据和文件流加载一样，也必须遵守主线程收敛策略。
 
@@ -641,8 +648,11 @@ Step 11: 只让一个窗口进入 SetStarted()
 8. 按 Ctrl+3
 - bridge->ApplyImagePhysicalSubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活。
+- OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
 - BuildImagePhysicalSubmitRequest() 把当前 widget 有向盒改成 ImagePhysicalSubmit request。
-- SubmitImagePhysicalSubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image physical submit image 提交回主数据通道。
+- SubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image physical submit image 提交回主数据通道。
+- 主线程后处理在 SetPipelineRebuilt -> SetStrategyStateSynced 之后，按本次算法类型分发 runtime。
+- runtime 内部自己处理相机恢复与同步，service 只负责 reload 消费和后处理入口。
 
 注意：image physical submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
