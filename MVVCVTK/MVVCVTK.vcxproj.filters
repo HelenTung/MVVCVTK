@@ -213,6 +213,9 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropSubmitWorkflow.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPluginService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
@@ -294,6 +297,9 @@
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropSubmitWorkflow.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPluginService.cpp">

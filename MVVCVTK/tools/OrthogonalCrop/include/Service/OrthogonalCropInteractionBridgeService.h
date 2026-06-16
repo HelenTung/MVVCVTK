@@ -37,15 +37,15 @@ class vtkVolume;
 class vtkVolumeMapper;
 class vtkGPUVolumeRayCastMapper;
 class vtkRenderer;
-class OrthogonalCropInteractionBridgeService : public IAlgorithmPost {
+struct OrthogonalCropSubmitReloadPayload {
+    std::shared_ptr<std::vector<float>> buffer;
+    std::array<int, 3> dims = { 0, 0, 0 };
+    std::array<float, 3> spacing = { 1.0f, 1.0f, 1.0f };
+    std::array<float, 3> origin = { 0.0f, 0.0f, 0.0f };
+};
+
+class OrthogonalCropInteractionBridgeService {
 public:
-    using ReloadSubmitter = std::function<bool(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete,
-        DataAlgorithmKind algorithmKind)>;
 
     // Public boundary: initialization/setup and user hotkey actions.
     // Internal state transitions, backend routing details, and VTK preview plumbing stay private.
@@ -75,9 +75,6 @@ public:
     // 参考渲染服务负责 world/model 坐标互转。
     void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
 
-    // reload 提交能力由装配层注入；算法内部不依赖具体应用服务类型。
-    void SetReloadSubmitter(ReloadSubmitter submitter);
-
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
@@ -87,8 +84,17 @@ public:
     // 在 3D outline 轻量预览与完整 preview artifact 预览之间切换；必要时会立即刷新当前 preview。
     void TogglePreviewMode();
 
-    // 提交当前 KeepInside image submit 结果到主数据 reload 通道。
-    void ApplySubmit();
+    // 构建当前 KeepInside image submit 的 reload payload；真正提交由 workflow 协调。
+    bool BuildSubmitReloadPayload(OrthogonalCropSubmitReloadPayload& payload);
+
+    // workflow 提交 reload 成功发起后，bridge 锁住 widget 并保留 preview 状态。
+    void SetSubmitReloadStarted();
+
+    // workflow 收到 reload 失败或请求被拒绝时，bridge 恢复可交互状态。
+    void SetSubmitReloadFailed();
+
+    // workflow 收到 reload 完成回调后，bridge 统一恢复相机并关闭裁切状态。
+    void SetSubmitReloadSynced();
 
     // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
@@ -101,9 +107,6 @@ public:
 
     // 对应的“移除盒内”预览动作。
     void ToggleOutsidePreview();
-
-    DataAlgorithmKind GetDataAlgorithmKind() const override;
-    void OnPipelineSynced(vtkRenderer* renderer) override;
 
 private:
     // Private boundary: widget state machine, model/world conversion, backend query,
@@ -169,8 +172,8 @@ private:
     // 基于当前 widget 有向盒构建 image submit request。
     OrthogonalCropRequest BuildSubmitRequest() const;
 
-    // 把 image submit image 适配成现有 reload buffer 通道。
-    bool SubmitImageReload(const OrthogonalCropResult& submitResult);
+    // 把 image submit image 适配成 workflow 可提交的 reload payload。
+    bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, OrthogonalCropSubmitReloadPayload& payload) const;
 
     // 激活交互裁切模式，初始化 widget 与默认 bounds。
     bool ActivateInteractiveCrop();
@@ -255,14 +258,8 @@ private:
     // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
     std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // image submit 的重载输入由算法桥临时持有，直到 reload 回调收口。
-    std::shared_ptr<std::vector<float>> m_submitReloadBuffer;
-
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
     bool m_submitReloadPending = false;
-
-    // reload 提交函数，只表达能力边界，不绑定具体 service 类。
-    ReloadSubmitter m_reloadSubmitter;
 
     // 裁切提交前保存相机，下一次主数据重建并完成策略同步后恢复；每次保存都会覆盖上一份。
     OrthogonalCropCameraStateController m_cameraStateController;

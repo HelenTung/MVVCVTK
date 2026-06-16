@@ -266,8 +266,7 @@ bool MedicalVizService::ReloadFromBufferAsync(
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete,
-    DataAlgorithmKind algorithmKind)
+    std::function<void(bool success)> onComplete)
 {
     if (!m_sharedState) {
         m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
@@ -283,7 +282,6 @@ bool MedicalVizService::ReloadFromBufferAsync(
     }
 
     m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
-    m_pendingReloadAlgorithmKind = algorithmKind;
     m_sharedState->SetReloadLoadStarted();
 
     auto dataMgr = m_dataManager;
@@ -560,8 +558,6 @@ void MedicalVizService::ProcessPendingUpdates()
     // 3. 处理失败与重建请求
     // 4. 最后再做普通增量同步
 
-    const DataAlgorithmKind reloadAlgorithmKind = m_pendingReloadAlgorithmKind;
-
     // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
     if (m_dataManager && m_dataManager->ConsumePendingImage()) {
         // 走和文件加载成功相同的后处理路径
@@ -586,6 +582,7 @@ void MedicalVizService::ProcessPendingUpdates()
         ClearStrategyCache();
 
     bool shouldReturnAfterLoadFailure = false;
+    bool loadEventHandled = false;
 
     // 加载失败处理
     if (m_needsLoadFailed.exchange(false)) {
@@ -596,30 +593,42 @@ void MedicalVizService::ProcessPendingUpdates()
         }
         else if (loadEventKind == LoadEventKind::Reload) {
             m_reloadLoadCallbackState.SetCallbackReady(false);
-            m_pendingReloadAlgorithmKind = DataAlgorithmKind::None;
         }
         shouldReturnAfterLoadFailure = true;
+        loadEventHandled = true;
     }
-
-    bool pipelineRebuilt = false;
-    LoadEventKind pipelineLoadEventKind = LoadEventKind::None;
 
     // DataReady → 重建管线（优先于增量同步）
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
-        pipelineLoadEventKind = loadEventKind;
         RebuildPipeline();
-        pipelineRebuilt = true;
         if (loadEventKind == LoadEventKind::File) {
             m_fileLoadCallbackState.SetCallbackReady(true);
         }
         else if (loadEventKind == LoadEventKind::Reload) {
             m_reloadLoadCallbackState.SetCallbackReady(true);
         }
+        loadEventHandled = true;
         // return; // 本帧只做重建，同步留到下帧
     }
 
-    // 文件加载/重载回调延后到这里统一执行，保证 UI 看到的已经是主线程收敛后的最终状态。
+    if (shouldReturnAfterLoadFailure) {
+        if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
+            m_fileLoadCallbackState.ExecutePendingCallback();
+        }
+        if (m_reloadLoadCallbackState.GetPendingCallbackConsumed()) {
+            m_reloadLoadCallbackState.ExecutePendingCallback();
+        }
+        if (loadEventHandled) {
+            m_pendingLoadEventKind = LoadEventKind::None;
+        }
+        return;
+    }
+
+    // 普通事件增量同步
+    SyncStrategyState();
+
+    // 文件加载/重载回调延后到策略同步之后，保证上层 workflow 看到的是主线程收敛后的最终状态。
     if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
         m_fileLoadCallbackState.ExecutePendingCallback();
     }
@@ -627,23 +636,7 @@ void MedicalVizService::ProcessPendingUpdates()
         m_reloadLoadCallbackState.ExecutePendingCallback();
     }
 
-    if (shouldReturnAfterLoadFailure) {
-        m_pendingLoadEventKind = LoadEventKind::None;
-        return;
-    }
-
-    // 普通事件增量同步
-    SyncStrategyState();
-
-    if (pipelineRebuilt && pipelineLoadEventKind == LoadEventKind::Reload && reloadAlgorithmKind != DataAlgorithmKind::None) {
-        // reload 完成重建与策略同步后，按本次算法类型分发 runtime。
-        m_algorithmPostRegistry.Sync(reloadAlgorithmKind, m_renderer.GetPointer());
-    }
-
-    if (pipelineRebuilt) {
-        if (pipelineLoadEventKind == LoadEventKind::Reload) {
-            m_pendingReloadAlgorithmKind = DataAlgorithmKind::None;
-        }
+    if (loadEventHandled) {
         m_pendingLoadEventKind = LoadEventKind::None;
     }
 }
@@ -826,11 +819,6 @@ void MedicalVizService::ApplyRendererBackground()
 
     const auto bg = m_sharedState->GetBackground();
     m_renderer->SetBackground(bg.r, bg.g, bg.b);
-}
-
-void MedicalVizService::RegisterAlgorithmPost(const std::shared_ptr<IAlgorithmPost>& post)
-{
-    m_algorithmPostRegistry.Register(post);
 }
 
 void MedicalVizService::MergePendingFlags(UpdateFlags flags)

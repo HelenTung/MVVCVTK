@@ -31,6 +31,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
 #include "OrthogonalCropInteractionBridgeService.h"
+#include "OrthogonalCropSubmitWorkflow.h"
 
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"
@@ -51,6 +52,7 @@ public:
     static OrthogonalCropHotkeyObserver* New() { return new OrthogonalCropHotkeyObserver; }
 
     std::shared_ptr<OrthogonalCropInteractionBridgeService> orthogonalCropBridge;
+    std::shared_ptr<OrthogonalCropSubmitWorkflow> orthogonalCropSubmitWorkflow;
 
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
         (void)callData;
@@ -108,7 +110,9 @@ public:
             if (isPreviewArtifactModeKey && !m_previewModeKeyDown) {
                 m_previewModeKeyDown = true;
                 if (isSubmitKey) {
-                    orthogonalCropBridge->ApplySubmit();
+                    if (orthogonalCropSubmitWorkflow) {
+                        orthogonalCropSubmitWorkflow->ApplySubmit();
+                    }
                 }
                 else {
                     orthogonalCropBridge->TogglePreviewMode();
@@ -402,24 +406,24 @@ int main()
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
     orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
-    orthogonalCropBridge->SetReloadSubmitter(
+    orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
+        orthogonalCropBridge,
         [serviceA](
             const float* data,
             const std::array<int, 3>& dims,
             const std::array<float, 3>& spacing,
             const std::array<float, 3>& origin,
-            std::function<void(bool success)> onComplete,
-            DataAlgorithmKind algorithmKind) {
+            std::function<void(bool success)> onComplete) {
             return serviceA->ReloadFromBufferAsync(
                 data,
                 dims,
                 spacing,
                 origin,
-                std::move(onComplete),
-                algorithmKind);
-    });
-    orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
-    serviceA->RegisterAlgorithmPost(orthogonalCropBridge);
+                std::move(onComplete));
+        },
+        sharedDataMgr,
+        serviceA);
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
@@ -537,6 +541,7 @@ int main()
 
     auto orthogonalCropHotkeyObserver = vtkSmartPointer<OrthogonalCropHotkeyObserver>::New();
     orthogonalCropHotkeyObserver->orthogonalCropBridge = orthogonalCropBridge;
+    orthogonalCropHotkeyObserver->orthogonalCropSubmitWorkflow = orthogonalCropSubmitWorkflow;
 
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);

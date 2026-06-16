@@ -217,43 +217,6 @@ public:
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };
 
-class AbstractInteractiveService;
-
-// 数据算法后处理入口与注册表：MedicalVizService 只负责在 reload 重建完成后分发本次算法后处理，
-// 具体相机保存/恢复等策略由各算法入口内部执行。注册表按算法类型聚合多个入口。
-class IAlgorithmPost {
-public:
-    virtual ~IAlgorithmPost() = default;
-    virtual DataAlgorithmKind GetDataAlgorithmKind() const = 0;
-    virtual void OnPipelineSynced(vtkRenderer* renderer) = 0;
-};
-
-class AlgorithmPostRegistry {
-public:
-    void Register(const std::shared_ptr<IAlgorithmPost>& entry) {
-        if (!entry || entry->GetDataAlgorithmKind() == DataAlgorithmKind::None) {
-            return;
-        }
-
-        m_posts[entry->GetDataAlgorithmKind()].push_back(entry);
-    }
-
-    void Sync(DataAlgorithmKind algorithmKind, vtkRenderer* renderer) const {
-        const auto it = m_posts.find(algorithmKind);
-        if (it == m_posts.end()) {
-            return;
-        }
-
-        for (const auto& weakEntry : it->second) {
-            if (const auto entry = weakEntry.lock()) {
-                entry->OnPipelineSynced(renderer);
-            }
-        }
-    }
-
-private:
-    std::map<DataAlgorithmKind, std::vector<std::weak_ptr<IAlgorithmPost>>> m_posts;
-};
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractInteractiveService — 交互服务接口

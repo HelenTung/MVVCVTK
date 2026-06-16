@@ -107,17 +107,19 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
     orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
-    orthogonalCropBridge->SetReloadSubmitter([serviceA](...) { return serviceA->ReloadFromBufferAsync(...); });
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
-    serviceA->RegisterAlgorithmPost(orthogonalCropBridge);
+    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
+        orthogonalCropBridge,
+        reloadSubmitter,
+        sharedDataMgr,
+        serviceA);
 
 为什么这么设：
 - SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的世界/model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
-- SetReloadSubmitter(...)：装配层只注入 reload 提交能力，OrthogonalCrop 算法内部不依赖 MedicalVizService 具体类。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
-- RegisterAlgorithmPost(...)：把裁切后处理入口注册到发起 reload 的 service；数据消费仍由单一 DataManager 的 pending image 门铃保证只发生一次。
+- OrthogonalCropSubmitWorkflow：统一协调 submit payload、主数据 reload、reload 完成后的相机恢复与裁切收尾；Workflow 只接收 reload 能力函数和配置接口，不直接依赖 MedicalVizService，Service 也不注册裁切后处理。
 
 Step 5: 再做窗口级辅助元素策略
 
@@ -286,8 +288,12 @@ Step 11: 只让一个窗口进入 Start()
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
-    orthogonalCropBridge->SetReloadSubmitter([serviceA](...) { return serviceA->ReloadFromBufferAsync(...); });
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
+    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
+        orthogonalCropBridge,
+        reloadSubmitter,
+        sharedDataMgr,
+        serviceA);
 
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
     serviceE->SetElementVisible(VisFlags::Planes3D, false);
@@ -646,13 +652,13 @@ Step 11: 只让一个窗口进入 Start()
 - 在 FullPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
 
 8. 按 Ctrl+3
-- bridge->ApplySubmit()。
+- orthogonalCropSubmitWorkflow->ApplySubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- BuildSubmitRequest() 把当前 widget 有向盒改成 Submit request。
-- SubmitImageReload() 保持原有 reload buffer / origin 翻转语义，把 image submit image 提交回主数据通道。
-- 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后，按本次算法类型分发 runtime。
-- runtime 内部自己处理相机恢复与同步，service 只负责 reload 消费和后处理入口。
+- Bridge 的 BuildSubmitReloadPayload() 把当前 widget 有向盒改成 Submit request，并生成 reload buffer / origin 翻转后的 payload。
+- Workflow 持有 reload buffer 生命周期，调用 serviceA->ReloadFromBufferAsync(...) 把 image submit image 提交回主数据通道。
+- 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
+- Workflow 收到 reload 完成回调后，通知 bridge 恢复相机、清理 submit 状态并关闭裁切。
 
 注意：image submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */

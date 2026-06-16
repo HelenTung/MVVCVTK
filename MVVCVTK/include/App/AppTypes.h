@@ -77,13 +77,7 @@ struct WindowLevelParams {
     double windowCenter = 40.0;   // WC 默认
 };
 
-// --- 数据流算法类型（用于 reload 后处理和 runtime 路由）---
-enum class DataAlgorithmKind {
-    None,
-    OrthogonalCropSubmit
-};
-
-// --- 渲染相机快照：算法内部临时状态，不写入 SharedState ---
+  // --- 渲染相机快照：算法内部临时状态，不写入 SharedState ---
 struct CameraStateSnapshot {
     bool isValid = false;
     std::array<double, 3> position = { 0.0, 0.0, 1.0 };
