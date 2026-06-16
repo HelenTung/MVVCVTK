@@ -102,9 +102,9 @@ public:
     virtual ~IGapAnalysisService() = default;
 
     // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
-    virtual void GapPreInit_SetSurfaceParams(const SurfaceParams& p) = 0;
-    virtual void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
-    virtual void GapPreInit_SetVoidParams(const VoidDetectionParams& p) = 0;
+    virtual void SetSurfaceParams(const SurfaceParams& p) = 0;
+    virtual void SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
+    virtual void SetVoidParams(const VoidDetectionParams& p) = 0;
 
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
     // onComplete 在后台线程回调，只允许写原子标记

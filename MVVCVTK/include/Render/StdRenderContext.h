@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "AppInterfaces.h"
 #include "InteractionRouter.h"
 #include <memory>
@@ -24,26 +24,26 @@ private:
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
 
-    void SetInteractionObserversAdded();
+    void AddInteractionObservers();
     // 构建/重建路由表（BindService 和 InitInteractor 后调用）
-    void SetInteractionRouter();
-    bool SetKeyEventHandled(vtkRenderWindowInteractor* interactor); // RenderContext 自己处理的快捷键，不进入交互 Router
-    void SetInteractionEventBuilt(InteractionEvent& eve,
+    void BuildInteractionRouter();
+    bool HandleKeyEvent(vtkRenderWindowInteractor* interactor); // RenderContext 自己处理的快捷键，不进入交互 Router
+    void BuildInteractionEvent(InteractionEvent& eve,
         vtkRenderWindowInteractor* interactor,
         long unsigned int eventId) const; // 把 VTK 原生事件压平成业务层统一使用的 InteractionEvent
 
 public:
-    void SetInteractorInitialized() override;
+    void InitializeInteractor() override;
     StdRenderContext();
-    void SetStarted() override;
-    void SetCameraStyleByVizMode(VizMode mode) override;
+    void Start() override;
+    void ApplyCameraStyle(VizMode mode) override;
     void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
     void SetOrientationAxesVisible(bool show) override;
     void SetToolMode(ToolMode mode);
     void SetAngle(double angle = 0) { m_angle = angle; };
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }
 protected:
-    void SetVTKEventHandled(vtkObject* caller,
+    void HandleVTKEvent(vtkObject* caller,
         long unsigned int eventId,
         void* callData) override;
 };

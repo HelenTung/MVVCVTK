@@ -1,4 +1,4 @@
-﻿#include "MemMappedFile.h"
+#include "MemMappedFile.h"
 #include <cstring>
 
 #ifdef _WIN32
@@ -11,7 +11,7 @@
 #include <unistd.h>
 #endif
 
-bool MemMappedFile::SetOpened(const std::string& path, size_t length) {
+bool MemMappedFile::Open(const std::string& path, size_t length) {
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING,
@@ -66,7 +66,7 @@ bool MemMappedFile::SetOpened(const std::string& path, size_t length) {
     return true;
 }
 
-void MemMappedFile::SetClosed() {
+void MemMappedFile::Close() {
     if (!m_data) return;
 #ifdef _WIN32
     UnmapViewOfFile(m_data);

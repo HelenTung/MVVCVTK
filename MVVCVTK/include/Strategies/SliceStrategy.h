@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -22,8 +22,8 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer);
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
@@ -40,7 +40,7 @@ private:
     void SetCrosshair(const double focusWorld[3],
         const double worldBounds[6],
         double safeOffset);
-    void SetCameraAligned(const std::array<double, 16>& modelMatrix,
+    void AlignCamera(const std::array<double, 16>& modelMatrix,
         const double bounds[6]);
     void SetWorldBounds(const double bounds[6],
         const std::array<double, 16>& modelMatrix,

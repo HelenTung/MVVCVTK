@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "BaseVisualStrategy.h"
 #include <vtkLODActor.h>
 #include <vtkVolume.h>
@@ -23,12 +23,12 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer);
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override;
 private:
-    void SetCameraAligned(const std::array<double, 16>& modelMatrix); // 模型矩阵变化后重对齐相机焦点
+    void AlignCamera(const std::array<double, 16>& modelMatrix); // 模型矩阵变化后重对齐相机焦点
     vtkSmartPointer<vtkLODActor> m_actor; // 等值面主 actor
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_qualityIsoFilter; // 静止期 766 分辨率等值面过滤器

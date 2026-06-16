@@ -166,21 +166,21 @@ Step 7: 在加载成功回调里做“数据相关”的后处理
 
 Step 8: 全窗口先 Render，再 Initialize interactor
 
-    contextA->SetRendered();
-    contextB->SetRendered();
-    contextC->SetRendered();
-    contextD->SetRendered();
-    contextE->SetRendered();
+    contextA->Render();
+    contextB->Render();
+    contextC->Render();
+    contextD->Render();
+    contextE->Render();
 
-    contextA->SetInteractorInitialized();
-    contextB->SetInteractorInitialized();
-    contextC->SetInteractorInitialized();
-    contextD->SetInteractorInitialized();
-    contextE->SetInteractorInitialized();
+    contextA->InitializeInteractor();
+    contextB->InitializeInteractor();
+    contextC->InitializeInteractor();
+    contextD->InitializeInteractor();
+    contextE->InitializeInteractor();
 
 为什么分成两步：
-- SetRendered() 先把初始 renderer/window 内容打出来，避免第一次交互前窗口是半初始化状态。
-- SetInteractorInitialized() 再去初始化 interactor 和 repeating timer，Timer 才能开始驱动主线程后处理链路。
+- Render() 先把初始 renderer/window 内容打出来，避免第一次交互前窗口是半初始化状态。
+- InitializeInteractor() 再去初始化 interactor 和 repeating timer，Timer 才能开始驱动主线程后处理链路。
 
 Step 9: 明确谁给裁切 widget 提供 interactor
 
@@ -201,14 +201,14 @@ Step 10: 给所有窗口挂同一份裁切热键观察器
 - CharEvent 必须额外拦截，因为 VTK 默认交互样式还会在 CharEvent 里处理内建快捷键；
   当前 `3` 如果不拦，会落到 stereo 默认逻辑上，触发不必要的 VTK warning。
 
-Step 11: 只让一个窗口进入 SetStarted()
+Step 11: 只让一个窗口进入 Start()
 
-    contextB->SetStarted();
+    contextB->Start();
 
 为什么不是所有窗口都 Start：
 - 一个应用只需要一个主消息循环。
 - 当前 main 选择 B 作为持有主事件循环的窗口，这只是应用层选择，不代表 B 比其他窗口更“核心”。
-- 真正关键的是：在 SetStarted() 之前，所有窗口都已经完成 SetRendered() 和 SetInteractorInitialized()。
+- 真正关键的是：在 Start() 之前，所有窗口都已经完成 Render() 和 InitializeInteractor()。
 */
 
 /*
@@ -315,36 +315,36 @@ Step 11: 只让一个窗口进入 SetStarted()
             const int histogramBinCount = 2048;
             auto histogramTable = imageAnalysis->GetHistogramData(histogramBinCount);
             if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
-                imageAnalysis->SetHistogramImageSaved("E:/data/ct/histogram.png", histogramBinCount);
+                imageAnalysis->SaveHistogramImage("E:/data/ct/histogram.png", histogramBinCount);
             }
 
             orthogonalCropBridge->SetInputImage(sharedDataMgr->GetVtkImage());
         });
 
-    contextA->SetRendered();
-    contextB->SetRendered();
-    contextC->SetRendered();
-    contextD->SetRendered();
-    contextE->SetRendered();
+    contextA->Render();
+    contextB->Render();
+    contextC->Render();
+    contextD->Render();
+    contextE->Render();
 
-    contextA->SetInteractorInitialized();
-    contextB->SetInteractorInitialized();
-    contextC->SetInteractorInitialized();
-    contextD->SetInteractorInitialized();
-    contextE->SetInteractorInitialized();
+    contextA->InitializeInteractor();
+    contextB->InitializeInteractor();
+    contextC->InitializeInteractor();
+    contextD->InitializeInteractor();
+    contextE->InitializeInteractor();
 
     orthogonalCropBridge->SetPrimaryInteractor(contextA->GetInteractor());
 
     // 这里挂同一份热键观察器到五个 interactor；
     // KeyPress/KeyRelease 处理业务动作，CharEvent 负责拦截 VTK 默认快捷键。
 
-    contextB->SetStarted();
+    contextB->Start();
 
 最关键的时序不要改：
-1. 先 SetRendered。
-2. 再 SetInteractorInitialized。
+1. 先 Render。
+2. 再 InitializeInteractor。
 3. 再 SetPrimaryInteractor。
-4. 最后只让一个 context 调 SetStarted。
+4. 最后只让一个 context 调 Start。
 */
 
 /*
@@ -368,7 +368,7 @@ Step 11: 只让一个窗口进入 SetStarted()
         context->SetWindowTitle(cfg.title);
         context->SetWindowSize(cfg.width, cfg.height);
         context->SetWindowPosition(cfg.posX, cfg.posY);
-        context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode);
+        context->ApplyCameraStyle(cfg.preInitCfg.vizMode);
         if (cfg.showAxes)
             context->SetOrientationAxesVisible(true);
         if (cfg.preInitCfg.hasBgColor)
@@ -392,7 +392,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 作用：设置窗口壳属性，只影响 renderWindow 外壳，不参与 SharedState。
 - 为什么走 context：这是渲染上下文的职责，不是业务状态。
 
-4) context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode)
+4) context->ApplyCameraStyle(cfg.preInitCfg.vizMode)
 - 作用：根据 VizMode 选择 2D image style 或 3D trackball camera style。
 - 为什么这里做：交互风格要和窗口目标模式同步，但这仍然是 context 层职责，不应该放进 service 的状态同步里。
 
@@ -482,7 +482,7 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：写 SharedState 的交互态。
 - 为什么：Strategy 可以用这个状态切换轻量渲染参数，renderWindow 也会跟着调整 desired update rate。
 
-8) SetSliceScrolled(delta)
+8) ScrollSlice(delta)
 - 做什么：根据当前 VizMode 计算当前应推进哪个切片轴，然后更新 cursor。
 - 为什么：切片滚动本质上是“状态计算 + cursor 写回”，不是直接命令 slice actor 自己跳。
 
@@ -490,14 +490,14 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：更新共享 cursor；axis = -1 表示直接写三维点，否则只在非导航轴上跟随更新。
 - 为什么：2D/3D 联动都要依赖同一份 cursor 真源。
 
-10) SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, startWW, startWC)
+10) AdjustWindowLevel(totalDx, totalDy, viewWidth, viewHeight, startWW, startWC)
 - 做什么：把拖拽增量折算成新的 WW/WC，再写回 SharedState。
 - 为什么：把交互增量转业务值的逻辑固定在服务层，不让 UI 侧重复算。
 
-11) SetModelTransform / SetModelTransformReset / SetModelMatrixSynced
+11) SetModelTransform / SetModelTransformReset / SyncModelMatrix
 - SetModelTransform：基于当前矩阵叠加一轮 TRS。
 - SetModelTransformReset：重置成单位矩阵。
-- SetModelMatrixSynced：把 TrackballActor 拖拽出的 VTK 矩阵回写到 SharedState。
+- SyncModelMatrix：把 TrackballActor 拖拽出的 VTK 矩阵回写到 SharedState。
 - 为什么：模型矩阵必须始终只有 SharedState 这一份真源，world/model 互转都以它为准。
 
 12) SaveTransformedDataAsync / SaveSliceImagesAsync
@@ -514,19 +514,19 @@ Step 11: 只让一个窗口进入 SetStarted()
 - 做什么：把 renderer/renderWindow 绑定给 service。
 - 为什么：service 后续所有 Strategy 附着和状态同步，都以这对 VTK 对象为落点。
 
-2) SetCameraStyleByVizMode(mode)
+2) ApplyCameraStyle(mode)
 - 做什么：2D 窗口用 vtkInteractorStyleImage，3D 窗口用 vtkInteractorStyleTrackballCamera。
 - 为什么：相机交互风格属于 context，不属于业务状态。
 
-3) SetRendered()
+3) Render()
 - 做什么：触发一次初始 Render。
 - 为什么：先把窗口内容打出来，再进入更复杂的 interactor/timer 阶段。
 
-4) SetInteractorInitialized()
+4) InitializeInteractor()
 - 做什么：Initialize interactor，创建 repeating timer，挂 Timer observer。
 - 为什么：Timer 是当前主线程后处理链的心跳源。
 
-5) SetStarted()
+5) Start()
 - 做什么：先 Render，再 Start interactor 主循环。
 - 为什么：应用只需要一个真正的消息循环宿主。
 
@@ -592,9 +592,9 @@ Step 11: 只让一个窗口进入 SetStarted()
 - previewRenderServices 只负责谁跟着刷新。
 - 如果把两者混成一个字段，后面一旦要“用 A 当坐标参考，但让 A/B/C/D/E 一起刷新”，语义就会打架。
 
-3) 为什么 primary interactor 是 A，但 SetStarted() 是 B
+3) 为什么 primary interactor 是 A，但 Start() 是 B
 - primary interactor 决定 widget 挂在哪。
-- SetStarted() 决定谁持有应用主消息循环。
+- Start() 决定谁持有应用主消息循环。
 - 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
 4) 为什么默认 `m_fullPreviewRequired = true`

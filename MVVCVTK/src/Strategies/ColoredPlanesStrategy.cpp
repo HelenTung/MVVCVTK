@@ -1,4 +1,4 @@
-﻿#include "ColoredPlanesStrategy.h"
+#include "ColoredPlanesStrategy.h"
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkMatrix4x4.h>
@@ -68,7 +68,7 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
     m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z-axis normal (Top_down)
 
     for (int i = 0; i < 3; i++) {
-        SetManagedProp(m_planeActors[i]); 
+        AddManagedProp(m_planeActors[i]);
     }
 }
 

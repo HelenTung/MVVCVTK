@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // =====================================================================
 // VolumeAnalysisService.h
 //
@@ -32,10 +32,10 @@ public:
     }
 
     // 保存直方图为 PNG 图片
-    void SetHistogramImageSaved(const std::string& filePath, int binCount = 2048) const {
+    void SaveHistogramImage(const std::string& filePath, int binCount = 2048) const {
         if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
         auto converter = std::make_shared<HistogramConverter>();
         converter->SetParameter("BinCount", static_cast<double>(binCount));
-        converter->SetHistogramImageSaved(m_dataManager->GetVtkImage(), filePath);
+        converter->SaveHistogramImage(m_dataManager->GetVtkImage(), filePath);
     }
 };

@@ -1,6 +1,6 @@
-﻿#include "InteractionRouter.h"
+#include "InteractionRouter.h"
 
-void InteractionRouter::SetHandlerAdded(std::unique_ptr<IInteractionHandler> handler)
+void InteractionRouter::AddHandler(std::unique_ptr<IInteractionHandler> handler)
 {
     if (!handler) {
         return;
@@ -8,12 +8,12 @@ void InteractionRouter::SetHandlerAdded(std::unique_ptr<IInteractionHandler> han
     m_handlers.push_back(std::move(handler));
 }
 
-void InteractionRouter::SetHandlersCleared()
+void InteractionRouter::ClearHandlers()
 {
     m_handlers.clear();
 }
 
-InteractionResult InteractionRouter::GetDispatchResult(const InteractionEvent& eve,
+InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
     RouterDispatchMode mode)
 {
     InteractionResult aggregated;
@@ -23,7 +23,7 @@ InteractionResult InteractionRouter::GetDispatchResult(const InteractionEvent& e
             continue;
         }
 
-        const InteractionResult result = handler->GetHandleResult(eve);
+        const InteractionResult result = handler->Handle(eve);
 
         // abortVtk 做 OR 聚合：任一 Handler 要求中止即中止
         if (result.abortVtk) {

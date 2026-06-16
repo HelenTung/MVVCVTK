@@ -1,4 +1,4 @@
-﻿#include "CompositeStrategy.h"
+#include "CompositeStrategy.h"
 #include "VolumeStrategy.h"
 #include "IsoSurfaceStrategy.h"
 #include "ColoredPlanesStrategy.h"
@@ -34,17 +34,17 @@ void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void CompositeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
-    if (m_mainStrategy) m_mainStrategy->SetRendererAttached(renderer);
-    if (m_referencePlanes) m_referencePlanes->SetRendererAttached(renderer);
+void CompositeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->AttachRenderer(renderer);
+    if (m_referencePlanes) m_referencePlanes->AttachRenderer(renderer);
 }
 
-void CompositeStrategy::SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) {
-    if (m_mainStrategy) m_mainStrategy->SetRendererDetached(renderer);
-    if (m_referencePlanes) m_referencePlanes->SetRendererDetached(renderer);
+void CompositeStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
+    if (m_mainStrategy) m_mainStrategy->DetachRenderer(renderer);
+    if (m_referencePlanes) m_referencePlanes->DetachRenderer(renderer);
 }
 
-void CompositeStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer) {
+void CompositeStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer) {
     // 通常 3D 视图使用透视投影
     if (renderer && renderer->GetActiveCamera()) {
         renderer->GetActiveCamera()->ParallelProjectionOff();

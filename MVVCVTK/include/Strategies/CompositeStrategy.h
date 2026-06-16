@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "BaseVisualStrategy.h" 
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -21,9 +21,9 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
-    void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer);
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //

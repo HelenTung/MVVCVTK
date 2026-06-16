@@ -1,4 +1,4 @@
-﻿#include "VolumeStrategy.h"
+#include "VolumeStrategy.h"
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkVolumeProperty.h>
 #include <vtkColorTransferFunction.h>
@@ -13,7 +13,7 @@ bool VolumeStrategy::GetOpacityChanged(double opacity) const
     return std::abs(m_opacity - opacity) > 1e-6;
 }
 
-void VolumeStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
+void VolumeStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
 
@@ -66,8 +66,8 @@ VolumeStrategy::VolumeStrategy() {
     volumeProperty->SetInterpolationTypeToLinear();
     m_volume->SetProperty(volumeProperty);
 
-    SetManagedProp(m_volume);
-    SetManagedProp(m_cubeAxes);
+    AddManagedProp(m_volume);
+    AddManagedProp(m_cubeAxes);
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -90,13 +90,13 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_cubeAxes->SetBounds(img->GetBounds());
 }
 
-void VolumeStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::SetRendererAttached(ren);
+void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void VolumeStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
+void VolumeStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 
@@ -184,7 +184,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     // 响应变换矩阵
     if (HasFlag(flags,UpdateFlags::Transform)) {
         Set3DPropsTransform(params.modelMatrix);
-        SetCameraAligned(params.modelMatrix);
+        AlignCamera(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

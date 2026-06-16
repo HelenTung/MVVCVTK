@@ -73,10 +73,10 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
 
     ApplyRemovalVisualStyle();
 
-    SetManagedProp(m_previewRegionActor);
-    SetManagedProp(m_outlineActor);
-    SetManagedProp(m_polyDataActor);
-    SetManagedProp(m_maskSlice);
+    AddManagedProp(m_previewRegionActor);
+    AddManagedProp(m_outlineActor);
+    AddManagedProp(m_polyDataActor);
+    AddManagedProp(m_maskSlice);
 }
 
 void OrthogonalCropPreviewOverlayStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data)

@@ -4,14 +4,14 @@
 //   Phase 1 【前处理】  创建共享资源 + 通过 WindowConfig / SetVisualConfig
 //                       批量配置所有与数据无关的参数（含背景色）
 //   Phase 2 【加载】    通过 IDataLoaderService 接口发起异步加载
-//   Phase 3 【渲染骨架】SetInteractorInitialized + SetStarted 进入消息循环
+//   Phase 3 【渲染骨架】InitializeInteractor + Start 进入消息循环
 //
 //   • PreInitConfig 中统一携带 bgColor / hasBgColor（前处理背景色）
 //   • LoadFileAsync 回调中执行数据相关的后处理业务（等值面阈值推算、算法启动）
 //   • 加载回调由主线程 Timer 延迟执行；算法完成后的 VTK overlay 挂接也通过 Timer observer 主线程收口
 //   • 加载失败时通过 SetLoadFailed → PostData_HandleLoadFailed 处理
 //   • IDataLoaderService 通过 GetFileLoadState / GetReloadLoadState 做主线程状态查询
-//   • main.cpp 中的 SetInteractorInitialized() 调用方式明确分离（接口显式）
+//   • main.cpp 中的 InitializeInteractor() 调用方式明确分离（接口显式）
 // =====================================================================
 #pragma once
 #define _CRT_SECURE_NO_WARNINGS
@@ -206,7 +206,7 @@ private:
 
         SurfaceParams surfP;
         surfP.isoValue = static_cast<float>(isoValue);
-        gapAnalysis->GapPreInit_SetSurfaceParams(surfP);
+        gapAnalysis->SetSurfaceParams(surfP);
 
         VoidDetectionParams voidP;
         voidP.grayMin = -0.2262536138296127f;
@@ -215,7 +215,7 @@ private:
         voidP.angleThresholdDeg = 30.0f;
         voidP.tensorWindowSize = 1;
         voidP.erosionIterations = 2;
-        gapAnalysis->GapPreInit_SetVoidParams(voidP);
+        gapAnalysis->SetVoidParams(voidP);
 
         gapAnalysis->RunAsync();
     }
@@ -230,7 +230,7 @@ private:
 
         auto overlay = std::make_shared<GapMeshOverlayStrategy>();
         overlay->SetInputData(voidMesh);
-        service->SetOverlayStrategyAdded(overlay);
+        service->AddOverlayStrategy(overlay);
     }
 
     static void AddSliceOverlay(
@@ -244,7 +244,7 @@ private:
 
         auto overlay = std::make_shared<GapSliceOverlayStrategy>(orientation);
         overlay->SetInputData(labelImage);
-        service->SetOverlayStrategyAdded(overlay);
+        service->AddOverlayStrategy(overlay);
     }
 
     void CommitOverlays()
@@ -304,7 +304,7 @@ static std::pair<
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->SetCameraStyleByVizMode(cfg.preInitCfg.vizMode);
+    context->ApplyCameraStyle(cfg.preInitCfg.vizMode);
     if (cfg.showAxes)
         context->SetOrientationAxesVisible(true);
 
@@ -454,7 +454,7 @@ int main()
             const std::string histogramFilePath = "E:\\data\\ct\\histogram.png"; // 直方图导出图片路径
             auto histogramTable = imageAnalysis->GetHistogramData(histogramBinCount);
             if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
-                imageAnalysis->SetHistogramImageSaved(histogramFilePath, histogramBinCount);
+                imageAnalysis->SaveHistogramImage(histogramFilePath, histogramBinCount);
             }
             else {
                 std::cerr << "[Main] Histogram generation failed.\n";
@@ -473,17 +473,17 @@ int main()
         }
     );
 
-    contextA->SetRendered();
-    contextB->SetRendered();
-    contextC->SetRendered();
-    contextD->SetRendered();
-    contextE->SetRendered();
+    contextA->Render();
+    contextB->Render();
+    contextC->Render();
+    contextD->Render();
+    contextE->Render();
 
-    contextA->SetInteractorInitialized();
-    contextB->SetInteractorInitialized();
-    contextC->SetInteractorInitialized();
-    contextD->SetInteractorInitialized();
-    contextE->SetInteractorInitialized();
+    contextA->InitializeInteractor();
+    contextB->InitializeInteractor();
+    contextC->InitializeInteractor();
+    contextD->InitializeInteractor();
+    contextE->InitializeInteractor();
 
     orthogonalCropBridge->SetPrimaryInteractor(contextA->GetInteractor());
 
@@ -569,7 +569,7 @@ int main()
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
-    contextB->SetStarted();
+    contextB->Start();
 
     return 0;
 }

@@ -1,4 +1,4 @@
-﻿#include "Viewer2DHandler.h"
+#include "Viewer2DHandler.h"
 #include "AppInterfaces.h"
 #include <vtkCommand.h>
 #include <vtkMath.h>
@@ -36,7 +36,7 @@ Viewer2DHandler::Viewer2DHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
+InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
 {
     if (!m_service || !GetIsSliceMode(eve.vizMode)) {
         return {};
@@ -52,7 +52,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
         const int step = eve.ctrl ? 10 : 5;
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
-        m_service->SetSliceScrolled(delta);
+        m_service->ScrollSlice(delta);
         // m_service->MarkDirty();
         return { true, true };  // abortVtk=true：阻止 VTK 默认滚轮相机缩放
     }
@@ -159,7 +159,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
                 else if (eve.vizMode == VizMode::SliceLeft_right) {
                     m_service->SetCursorWorldPosition(worldPos, 0);
                 }
-                m_service->SetDirtyMarked();
+                m_service->MarkDirty();
             }
             return { true, true };
         }
@@ -186,7 +186,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
                 }
             }
 
-            m_service->SetWindowLevelAdjusted(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
+            m_service->AdjustWindowLevel(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
         // zoom放大
@@ -268,7 +268,7 @@ InteractionResult Viewer2DHandler::GetHandleResult(const InteractionEvent& eve)
             transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点
 
 			// 将旋转后的矩阵同步回服务，触发模型更新
-			m_service->SetModelMatrixSynced(transform->GetMatrix());
+			m_service->SyncModelMatrix(transform->GetMatrix());
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
 			return { true, true };

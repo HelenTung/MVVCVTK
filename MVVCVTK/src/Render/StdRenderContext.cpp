@@ -29,13 +29,13 @@ StdRenderContext::StdRenderContext()
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
 
     m_eventCallback = vtkSmartPointer<vtkCallbackCommand>::New();
-    m_eventCallback->SetCallback(AbstractRenderContext::SetVTKEventDispatched);
+    m_eventCallback->SetCallback(AbstractRenderContext::DispatchVTKEvent);
     m_eventCallback->SetClientData(this);
 
-    SetInteractionObserversAdded();
+    AddInteractionObservers();
 }
 
-void StdRenderContext::SetInteractionObserversAdded()
+void StdRenderContext::AddInteractionObservers()
 {
     if (!m_interactor || !m_eventCallback) {
         return;
@@ -62,9 +62,9 @@ void StdRenderContext::SetInteractionObserversAdded()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetInteractorInitialized —— 初始化定时器
+// InitializeInteractor —— 初始化定时器
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetInteractorInitialized()
+void StdRenderContext::InitializeInteractor()
 {
     if (m_interactor && !m_interactor->GetInitialized()) {
         m_interactor->Initialize();
@@ -76,20 +76,20 @@ void StdRenderContext::SetInteractorInitialized()
     }
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
-    SetInteractionRouter();
+    BuildInteractionRouter();
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetInteractionRouter —— 装配 Handler
+// BuildInteractionRouter —— 装配 Handler
 //
 // 顺序决定 FirstMatch 优先级（越前越优先）：
 //   1. TimeUpdateHandler  → Timer 心跳，使用 Broadcast 模式单独处理
 //   2. Viewer2DHandler    → SliceXxx 模式下的滚轮/十字线
 //   3. Viewer3DHandler    → CompositeXxx 模式下的平面拖拽
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetInteractionRouter()
+void StdRenderContext::BuildInteractionRouter()
 {
-    m_interactionRouter.SetHandlersCleared();
+    m_interactionRouter.ClearHandlers();
 
     if (!m_interactiveService) {
         return;
@@ -97,15 +97,15 @@ void StdRenderContext::SetInteractionRouter()
 
     // 这里的装配顺序就是交互链路优先级：Timer 负责统一收口状态推进，
     // 2D/3D Handler 再分别处理各自模式下的输入命中，避免同一事件被多个处理器重复消费。
-    m_interactionRouter.SetHandlerAdded(std::make_unique<TimeUpdateHandler>(
+    m_interactionRouter.AddHandler(std::make_unique<TimeUpdateHandler>(
         m_interactiveService.get(), m_renderWindow.GetPointer()));
 
-    m_interactionRouter.SetHandlerAdded(std::make_unique<Viewer2DHandler>(
+    m_interactionRouter.AddHandler(std::make_unique<Viewer2DHandler>(
         m_interactiveService.get(),
         m_picker.GetPointer(),
         m_renderer.GetPointer()));
 
-    m_interactionRouter.SetHandlerAdded(std::make_unique<Viewer3DHandler>(
+    m_interactionRouter.AddHandler(std::make_unique<Viewer3DHandler>(
         m_interactiveService.get(),
         m_picker.GetPointer(),
         m_renderer.GetPointer()));
@@ -121,13 +121,13 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
 
     // Service 就位后重建 Router
-    SetInteractionRouter();
+    BuildInteractionRouter();
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetStarted
+// Start
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetStarted()
+void StdRenderContext::Start()
 {
     // 先触发一次 Render，保证窗口初始内容与后续交互状态一致，
     // 然后再进入 interactor 主循环。
@@ -141,9 +141,9 @@ void StdRenderContext::SetStarted()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetCameraStyleByVizMode
+// ApplyCameraStyle
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetCameraStyleByVizMode(VizMode mode)
+void StdRenderContext::ApplyCameraStyle(VizMode mode)
 {
     m_currentMode = mode;
 
@@ -209,13 +209,13 @@ void StdRenderContext::SetToolMode(ToolMode mode)
         m_interactor->SetInteractorStyle(style);
     }
     else {
-        SetCameraStyleByVizMode(m_currentMode);
+        ApplyCameraStyle(m_currentMode);
     }
 
-    if (m_interactiveService) m_interactiveService->SetDirtyMarked();
+    if (m_interactiveService) m_interactiveService->MarkDirty();
 }
 
-bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
+bool StdRenderContext::HandleKeyEvent(vtkRenderWindowInteractor* interactor)
 {
     if (!interactor) {
         return false;
@@ -255,7 +255,7 @@ bool StdRenderContext::SetKeyEventHandled(vtkRenderWindowInteractor* interactor)
     return false;
 }
 
-void StdRenderContext::SetInteractionEventBuilt(
+void StdRenderContext::BuildInteractionEvent(
     InteractionEvent& eve,
     vtkRenderWindowInteractor* interactor,
     long unsigned int eventId) const
@@ -281,13 +281,13 @@ void StdRenderContext::SetInteractionEventBuilt(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// SetVTKEventHandled —— 统一入口，委托给 Router
+// HandleVTKEvent —— 统一入口，委托给 Router
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
 //   2. 填充 InteractionEvent → Dispatch → 处理 abortVtk
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
+void StdRenderContext::HandleVTKEvent(vtkObject* caller,
     long unsigned int eventId,
     void* callData)
 {
@@ -303,7 +303,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     // （这部分与路由解耦，StdRenderContext 自身处理快捷键）
     if (eventId == vtkCommand::KeyPressEvent) {
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-        if (SetKeyEventHandled(iren)) {
+        if (HandleKeyEvent(iren)) {
             return;
         }
     }
@@ -315,8 +315,8 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     {
         vtkProp3D* prop = m_interactiveService->GetMainProp();
         if (prop && prop->GetMatrix()) {
-            m_interactiveService->SetModelMatrixSynced(prop->GetMatrix());
-            m_interactiveService->SetDirtyMarked();
+            m_interactiveService->SyncModelMatrix(prop->GetMatrix());
+            m_interactiveService->MarkDirty();
         }
         return;
     }
@@ -326,7 +326,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
     if (!iren) return;
 
     InteractionEvent eve;
-    SetInteractionEventBuilt(eve, iren, eventId);
+    BuildInteractionEvent(eve, iren, eventId);
 
     // Timer → Broadcast（所有 Handler 均需执行）；其余 → FirstMatch
     const auto dispatchMode = (eventId == vtkCommand::TimerEvent)
@@ -334,7 +334,7 @@ void StdRenderContext::SetVTKEventHandled(vtkObject* caller,
         : RouterDispatchMode::FirstMatch;
 
     const InteractionResult result =
-        m_interactionRouter.GetDispatchResult(eve, dispatchMode);
+        m_interactionRouter.Dispatch(eve, dispatchMode);
 
     if (result.abortVtk && m_eventCallback) {
         // 业务层已经完整消费该事件时，阻止 VTK 默认相机/窗口行为继续处理，避免双重响应。

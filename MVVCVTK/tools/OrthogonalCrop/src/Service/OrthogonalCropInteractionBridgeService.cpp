@@ -691,7 +691,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // ① ApplyVolumePreview / ApplyPolyDataPreview → 3D 主窗口常驻预览管道更新
     //    3D 主窗口（axis<0）若成功接管，剥离 derivedPolyData overlay 避免重复绘制
     // ② overlayStrategy->SetCropResult → outline / mask / polydata 三类可视内容
-    // ③ target.service->SetDirtyMarked → 触发渲染刷新
+    // ③ target.service->MarkDirty → 触发渲染刷新
     const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
 
     // 这里的 3D 主模型 clip 只是临时预览表现；真正的几何/统计结果仍以 previewResult 为准。
@@ -843,7 +843,7 @@ void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
     // 主模型 clip 管道的恢复由 RestorePreviewRenderTargets 单独收口。
     for (const auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
-            target.service->SetOverlayStrategyRemoved(target.overlayStrategy);
+            target.service->RemoveOverlayStrategy(target.overlayStrategy);
         }
     }
     m_previewRenderTargets.clear();
@@ -879,7 +879,7 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
 
         RestorePolyDataPreview(target);
         if (target.service) {
-            target.service->SetDirtyMarked();
+            target.service->MarkDirty();
         }
     }
 }
@@ -902,7 +902,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     }
 
     auto overlayStrategy = std::make_shared<OrthogonalCropPreviewOverlayStrategy>();
-    service->SetOverlayStrategyAdded(overlayStrategy);
+    service->AddOverlayStrategy(overlayStrategy);
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }
 
@@ -932,7 +932,7 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(const Orthogo
             target.overlayStrategy->SetRemovalMode(m_currentRemovalMode);
             target.overlayStrategy->SetCropResult(overlayResult);
             main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
-            target.service->SetDirtyMarked();
+            target.service->MarkDirty();
         }
     }
     return main3DPreviewApplied;

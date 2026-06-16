@@ -18,7 +18,7 @@ class IStateEventSink {
 public:
     virtual ~IStateEventSink() = default;
     // SharedInteractionState 通过该接口向外发布“有哪些状态发生了变化”。
-    virtual void SetFlagsPublished(UpdateFlags flags) = 0;
+    virtual void PublishFlags(UpdateFlags flags) = 0;
 };
 
 class IStateEventSource {
@@ -47,7 +47,7 @@ public:
         m_observers.push_back({ std::move(owner), std::move(callback) });
     }
 
-    void SetFlagsPublished(UpdateFlags flags) override {
+    void PublishFlags(UpdateFlags flags) override {
         std::vector<ObserverCallback> callbacks;
         {
             std::lock_guard<std::mutex> lk(m_mutex);

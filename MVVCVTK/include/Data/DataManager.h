@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "AppInterfaces.h"
 #include <vector>
 #include <mutex>
@@ -36,8 +36,8 @@ public:
     std::array<double, 2> GetScalarRange() const override;
     std::array<double, 3> GetSpacing() const override;
 
-    bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
-    bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
+    bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
+    bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
     std::string GetDefaultTransformedDataPath() const override;
 };
 
@@ -64,7 +64,7 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
-    bool SetPendingImageConsumed() override;
+    bool ConsumePendingImage() override;
 };
 
 class TiffVolumeDataManager : public BaseDataManager {

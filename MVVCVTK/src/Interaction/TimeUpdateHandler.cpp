@@ -10,7 +10,7 @@ TimeUpdateHandler::TimeUpdateHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve)
+InteractionResult TimeUpdateHandler::Handle(const InteractionEvent& eve)
 {
     if (eve.vtkEventId != vtkCommand::TimerEvent) {
         return {};
@@ -28,7 +28,7 @@ InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve
     m_service->ProcessPendingUpdates();
 
     // needRender: 本帧是否存在待消费的渲染请求，先原子消费，避免渲染期间的新脏标记被误清掉
-    const bool needRender = m_service->SetDirtyConsumed();
+    const bool needRender = m_service->ConsumeDirty();
 
     // 2. 检查渲染脏标记，仅在窗口有效时渲染
     if (needRender) {
@@ -39,7 +39,7 @@ InteractionResult TimeUpdateHandler::GetHandleResult(const InteractionEvent& eve
             m_renderWindow->Render();
         }
         else {
-            m_service->SetDirtyMarked();
+            m_service->MarkDirty();
         }
     }
 

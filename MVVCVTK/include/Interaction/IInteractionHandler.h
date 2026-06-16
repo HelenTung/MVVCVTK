@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "InteractionEvent.h"
 #include "InteractionResult.h"
 
@@ -14,5 +14,5 @@ public:
     virtual ~IInteractionHandler() = default;
 
     // 返回 handled=true 时，FirstMatch 模式的 Router 停止继续分发
-    virtual InteractionResult GetHandleResult(const InteractionEvent& eve) = 0;
+    virtual InteractionResult Handle(const InteractionEvent& eve) = 0;
 };

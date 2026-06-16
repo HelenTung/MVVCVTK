@@ -1,4 +1,4 @@
-﻿#include "MultiSliceStrategy.h"
+#include "MultiSliceStrategy.h"
 #include <vtkPlane.h>
 #include <vtkImageProperty.h>
 #include <vtkTransform.h>
@@ -11,7 +11,7 @@ MultiSliceStrategy::MultiSliceStrategy() {
         m_slices[i]->SetMapper(m_mappers[i]);
         m_mappers[i]->SliceFacesCameraOff();
         m_mappers[i]->SliceAtFocalPointOff();
-      SetManagedProp(m_slices[i]);
+      AddManagedProp(m_slices[i]);
     }
 
     m_slicePlanes[0]->SetNormal(1, 0, 0);
@@ -99,6 +99,6 @@ void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     }
 }
 
-void MultiSliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) {
-    BaseVisualStrategy::SetRendererAttached(renderer);
+void MultiSliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
+    BaseVisualStrategy::AttachRenderer(renderer);
 }

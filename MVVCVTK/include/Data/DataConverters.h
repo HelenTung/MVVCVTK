@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "AppInterfaces.h"
 #include <vtkTable.h>
 #include <vtkImageData.h>
@@ -16,7 +16,7 @@ public:
     vtkSmartPointer<vtkTable> GetOutputData(vtkSmartPointer<vtkImageData> input) override;
 
     // 直方图转图片
-    void SetHistogramImageSaved(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
+    void SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
 
 private:
     // 内部复用：执行 accumulate 并返回频率指针，避免 Process 与 SaveHistogramImage 重复计算

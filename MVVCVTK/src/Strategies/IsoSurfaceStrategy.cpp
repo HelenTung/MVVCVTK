@@ -1,4 +1,4 @@
-﻿#include "IsoSurfaceStrategy.h"
+#include "IsoSurfaceStrategy.h"
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
@@ -11,7 +11,7 @@ constexpr int kQualityIsoTargetDim = 766;
 
 }
 
-void IsoSurfaceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix)
+void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
 
@@ -70,8 +70,8 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_interactionIsoFilter->ComputeNormalsOff();
     m_interactionIsoFilter->ComputeGradientsOff();
 
-    SetManagedProp(m_actor);
-    SetManagedProp(m_cubeAxes);
+    AddManagedProp(m_actor);
+    AddManagedProp(m_cubeAxes);
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -125,13 +125,13 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     }
 }
 
-void IsoSurfaceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::SetRendererAttached(ren);
+void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void IsoSurfaceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
+void IsoSurfaceStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
     // 3D 模式必须是透视投影
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
@@ -203,7 +203,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // 响应 UpdateFlags::Transform
     if (HasFlag(flags, UpdateFlags::Transform)) {
         Set3DPropsTransform(params.modelMatrix);
-        SetCameraAligned(params.modelMatrix);
+        AlignCamera(params.modelMatrix);
     }
 
     if (HasFlag(flags, UpdateFlags::Visibility)) {

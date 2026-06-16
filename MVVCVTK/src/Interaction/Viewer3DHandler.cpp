@@ -1,4 +1,4 @@
-﻿#include "Viewer3DHandler.h"
+#include "Viewer3DHandler.h"
 #include "AppInterfaces.h"
 #include <vtkActor.h>
 #include <vtkCommand.h>
@@ -27,7 +27,7 @@ Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
+InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
 {
     if (!m_service || !GetIsCompositeMode(eve.vizMode)) {
         return {};
@@ -74,7 +74,7 @@ InteractionResult Viewer3DHandler::GetHandleResult(const InteractionEvent& eve)
                 rw->SetDesiredUpdateRate(0.001);
             }
             m_service->SetInteracting(false);
-            m_service->SetDirtyMarked();
+            m_service->MarkDirty();
             m_isDragging = false;
             m_dragAxis = -1;
             return { true, false };

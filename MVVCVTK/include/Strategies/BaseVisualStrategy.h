@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "AppInterfaces.h"
 #include "ImageProcessor.h"
 #include <vtkProp.h>
@@ -14,7 +14,7 @@ class BaseVisualStrategy :public AbstractVisualStrategy
 protected:
 	std::vector<vtkSmartPointer<vtkProp>> m_managedProps; // 当前策略管理的 VTK 组件列表，供 Attach/Detach 统一处理
     vtkSmartPointer<vtkImageResample> m_resampleFilter; // 需要降采样时缓存 filter，保证输出端口生命周期稳定
-    void SetManagedProp(vtkSmartPointer<vtkProp> prop)
+    void AddManagedProp(vtkSmartPointer<vtkProp> prop)
 	{
 		if (prop)
 			m_managedProps.push_back(prop);
@@ -22,14 +22,14 @@ protected:
 
 public:
 	virtual ~BaseVisualStrategy() = default;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) override {
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {
 		if (!renderer) return;
         // 基类只处理“把当前策略拥有的 prop 全部挂到 renderer 上”，
         // 具体背景色、相机或附加 VTK 关系由派生类继续补充。
 		for (auto& prop : m_managedProps) 
 				renderer->AddViewProp(prop);
 	}
-    void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) override {
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override {
 		if (!renderer) return;
 		for (auto& prop : m_managedProps)
 			renderer->RemoveViewProp(prop);
@@ -64,7 +64,7 @@ protected:
 		return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }
 
-    void SetImageBoundsClamped(int& x, int& y, int& z, const int dims[3]) {
+    void ClampImageBounds(int& x, int& y, int& z, const int dims[3]) {
         if (!dims) return;
         x = std::max(0, std::min(x, dims[0] - 1));
         y = std::max(0, std::min(y, dims[1] - 1));

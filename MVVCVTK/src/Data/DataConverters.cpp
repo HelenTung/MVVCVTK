@@ -1,4 +1,4 @@
-﻿#include "DataConverters.h"
+#include "DataConverters.h"
 #include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
@@ -40,7 +40,7 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
 }
 
 
-void HistogramConverter::SetHistogramImageSaved(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
+void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
     double range[2], binWidth;
     // 复用 ComputeHistogram，不重复计算

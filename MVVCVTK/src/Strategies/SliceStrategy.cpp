@@ -1,4 +1,4 @@
-﻿#include "SliceStrategy.h"
+#include "SliceStrategy.h"
 #include <vtkPlane.h>
 #include <vtkCamera.h>
 #include <vtkPolyDataMapper.h>
@@ -49,7 +49,7 @@ void SliceStrategy::SetWorldBounds(const double bounds[6],
     }
 }
 
-void SliceStrategy::SetCameraAligned(const std::array<double, 16>& modelMatrix,
+void SliceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix,
     const double bounds[6])
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) return;
@@ -150,9 +150,9 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
         m_hLineActor->GetProperty()->SetOpacity(0.4);
     }
 
-    SetManagedProp(m_slice);
-    SetManagedProp(m_vLineActor);
-    SetManagedProp(m_hLineActor);
+    AddManagedProp(m_slice);
+    AddManagedProp(m_vLineActor);
+    AddManagedProp(m_hLineActor);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -173,8 +173,8 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     m_slice->SetMapper(m_mapper);
 }
 
-void SliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
-    BaseVisualStrategy::SetRendererAttached(ren); //
+void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
+    BaseVisualStrategy::AttachRenderer(ren); //
     m_renderer = ren;
     // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
     ren->SetUseDepthPeeling(1);
@@ -182,7 +182,7 @@ void SliceStrategy::SetRendererAttached(vtkSmartPointer<vtkRenderer> ren) {
     ren->SetOcclusionRatio(0.0);
 }
 
-void SliceStrategy::SetCameraConfigured(vtkSmartPointer<vtkRenderer> ren) {
+void SliceStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
     if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影
@@ -317,7 +317,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         SetCrosshair(params.cursor.data(), worldBounds, safeOffset);
 
         if (HasFlag(flags, UpdateFlags::Transform)) {
-            SetCameraAligned(params.modelMatrix, bounds);
+            AlignCamera(params.modelMatrix, bounds);
         }
     }
 

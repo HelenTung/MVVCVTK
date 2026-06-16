@@ -96,7 +96,7 @@ public:
 
     // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
     // 原生依赖对象：m_cancelFlag。
-    void SetFileLoadCanceled() override;
+    void CancelFileLoad() override;
 
     // ================================================================
     // IDataExportService — 导出任务
@@ -116,15 +116,15 @@ public:
     // 原生依赖对象：m_sharedState、m_currentStrategy、m_dataManager。
     // 说明：这一组是交互主线，已尽量保持“读状态 → 算结果 → 回状态”的单一路径。
     // ================================================================
-    void SetSliceScrolled(int delta) override;
+    void ScrollSlice(int delta) override;
     void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
     std::array<double, 3> GetCursorWorld() override;
     void SetInteracting(bool val) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
-    void SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix) override;
+    void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool show) override;
-    void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
+    void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
     void RegisterAlgorithmPost(const std::shared_ptr<IAlgorithmPost>& post);
 
     std::array<double, 16> GetModelMatrix() override {
@@ -194,7 +194,7 @@ private:
             }
         }
 
-        void SetPendingCallbackExecuted() {
+        void ExecutePendingCallback() {
             std::function<void(bool)> callback;
             bool success = false;
             {
@@ -257,8 +257,8 @@ private:
     }
 
     // 在主线程执行待处理的保存完成回调
-    void SetPendingSaveCompletionCallbackExecuted() {
-        m_saveCompletionCallbackState.SetPendingCallbackExecuted();
+    void ExecutePendingSaveCallback() {
+        m_saveCompletionCallbackState.ExecutePendingCallback();
     }
 
     bool ConsumeSaveCallback() {

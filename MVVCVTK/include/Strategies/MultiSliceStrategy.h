@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -19,7 +19,7 @@ public:
     MultiSliceStrategy();
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
 
 private:

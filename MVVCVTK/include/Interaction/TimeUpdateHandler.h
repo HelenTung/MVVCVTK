@@ -20,7 +20,7 @@ public:
     TimeUpdateHandler(AbstractInteractiveService* service,
         vtkRenderWindow* renderWindow);
 
-    InteractionResult GetHandleResult(const InteractionEvent& eve) override;
+    InteractionResult Handle(const InteractionEvent& eve) override;
 
 private:
     AbstractInteractiveService* m_service = nullptr;

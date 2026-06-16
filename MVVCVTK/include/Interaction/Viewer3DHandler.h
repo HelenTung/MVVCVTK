@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "IInteractionHandler.h"
 
 class AbstractInteractiveService;
@@ -19,7 +19,7 @@ public:
         vtkPropPicker* picker,
         vtkRenderer* renderer);
 
-    InteractionResult GetHandleResult(const InteractionEvent& eve) override;
+    InteractionResult Handle(const InteractionEvent& eve) override;
 
 private:
     AbstractInteractiveService* m_service = nullptr;

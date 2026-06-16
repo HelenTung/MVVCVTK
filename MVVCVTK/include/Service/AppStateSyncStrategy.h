@@ -15,7 +15,7 @@ public:
 
 class AppStateSyncStrategy {
 public:
-    void SetFlagsHandled(UpdateFlags flags, IAppStateSyncTarget& target) const {
+    void HandleFlags(UpdateFlags flags, IAppStateSyncTarget& target) const {
         // DataReady 代表底层数据对象已经替换，旧 Strategy 持有的输入与派生缓存都可能失效，
         // 所以这里走“清缓存 -> 居中光标 -> 全量标志 -> 请求重建”的重路径，而不是普通增量刷新。
         if (HasFlag(flags, UpdateFlags::DataReady)) {

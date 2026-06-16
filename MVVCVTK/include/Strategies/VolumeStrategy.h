@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -14,13 +14,13 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer);
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override; //
 private:
     bool GetOpacityChanged(double opacity) const; // 判断是否只需更新 OTF 透明度而无需重建整套 TF
-    void SetCameraAligned(const std::array<double, 16>& modelMatrix); // 模型变换后保持相机相对观察关系不突变
+    void AlignCamera(const std::array<double, 16>& modelMatrix); // 模型变换后保持相机相对观察关系不突变
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkVolume> m_volume; // 体渲染主 prop
     vtkSmartPointer<vtkGPUVolumeRayCastMapper> m_mapper; // GPU 体渲染 mapper，支持 RemoveInside shader discard 预览

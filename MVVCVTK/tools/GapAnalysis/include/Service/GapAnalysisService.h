@@ -37,15 +37,15 @@ public:
     // ================================================================
     // 【前处理】— 只写参数，零计算，线程安全
     // ================================================================
-    void GapPreInit_SetSurfaceParams(const SurfaceParams& p) override {
+    void SetSurfaceParams(const SurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_surfParams = p;
     }
-    void GapPreInit_SetAdvancedParams(const AdvancedSurfaceParams& p) override {
+    void SetAdvancedParams(const AdvancedSurfaceParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_advParams = p;
     }
-    void GapPreInit_SetVoidParams(const VoidDetectionParams& p) override {
+    void SetVoidParams(const VoidDetectionParams& p) override {
         std::lock_guard<std::mutex> lk(m_paramsMutex);
         m_voidParams = p;
     }
@@ -237,7 +237,7 @@ private:
 
 public:
     // ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
-    bool saveResults(const std::string& baseName) {
+    bool SaveResults(const std::string& baseName) {
         std::vector<VoidRegion> voids;
         {
             std::lock_guard<std::mutex> lk(m_resultMutex);

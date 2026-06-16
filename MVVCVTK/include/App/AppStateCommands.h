@@ -114,7 +114,7 @@ public:
         return true;
     }
 
-    static void SetFlagsMerged(UpdateFlags& current, UpdateFlags next) {
+    static void MergeFlags(UpdateFlags& current, UpdateFlags next) {
         // 这里只做位并集，不做覆盖，保证同一批事务内多个字段变化都能保留下来。
         current |= next;
     }

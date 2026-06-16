@@ -55,11 +55,11 @@ public:
         return false;
     }
     // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
-    virtual bool SetPendingImageConsumed() {
+    virtual bool ConsumePendingImage() {
         return false;
     }
-    virtual bool SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
-    virtual bool SetSliceImagesSaved(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
     virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 };
 
@@ -82,9 +82,9 @@ public:
     virtual ~AbstractVisualStrategy() = default;
 
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
-    virtual void SetRendererAttached(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void SetRendererDetached(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void SetCameraConfigured(vtkSmartPointer<vtkRenderer> renderer) {}
+    virtual void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
+    virtual void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
+    virtual void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer) {}
     virtual void SetVisualState(const RenderParams& params,
         UpdateFlags flags = UpdateFlags::All) {
     }
@@ -117,10 +117,10 @@ public:
         auto oldRenderer = m_renderer;
         if (oldRenderer && oldRenderer != ren) {
             if (m_currentStrategy) {
-                m_currentStrategy->SetRendererDetached(oldRenderer);
+                m_currentStrategy->DetachRenderer(oldRenderer);
             }
             for (auto& overlay : m_overlayStrategies) {
-                if (overlay) overlay->SetRendererDetached(oldRenderer);
+                if (overlay) overlay->DetachRenderer(oldRenderer);
             }
         }
 
@@ -130,11 +130,11 @@ public:
         if (!m_renderer) return;
 
         if (m_currentStrategy) {
-            m_currentStrategy->SetRendererAttached(m_renderer);
-            m_currentStrategy->SetCameraConfigured(m_renderer);
+            m_currentStrategy->AttachRenderer(m_renderer);
+            m_currentStrategy->ConfigureCamera(m_renderer);
         }
         for (auto& overlay : m_overlayStrategies) {
-            if (overlay) overlay->SetRendererAttached(m_renderer);
+            if (overlay) overlay->AttachRenderer(m_renderer);
         }
         m_isDirty = true;
     }
@@ -143,17 +143,17 @@ public:
     virtual void ProcessPendingUpdates() {}
 
     bool IsDirty()      const { return m_isDirty; }
-    void SetDirtyMarked() { m_isDirty = true; }
+    void MarkDirty() { m_isDirty = true; }
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
-    bool SetDirtyConsumed() { return m_isDirty.exchange(false); }
+    bool ConsumeDirty() { return m_isDirty.exchange(false); }
 
     // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 
 	// 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
-    virtual void SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy);
-    virtual void SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisualStrategy> strategy);
-    virtual void SetOverlayStrategiesCleared();
+    virtual void AddOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    virtual void ClearOverlayStrategies();
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -198,7 +198,7 @@ public:
 
     // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
     // 默认空实现，派生类按需覆盖
-    virtual void SetFileLoadCanceled() {}
+    virtual void CancelFileLoad() {}
 };
 
 class IDataExportService {
@@ -264,20 +264,20 @@ class AbstractInteractiveService
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    virtual void SetSliceScrolled(int delta) {}
+    virtual void ScrollSlice(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
     virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) {}
     virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool val) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
-    virtual void SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix) {}
+    virtual void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) {}
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }
     virtual int GetNavigationAxis() const { return -1; }
     virtual WindowLevelParams GetWindowLevel() const { return {}; }
     virtual void SetElementVisible(uint32_t flagBit, bool show) {}
-    virtual void SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
+    virtual void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
     virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
 };
@@ -306,18 +306,18 @@ public:
             m_service->SetRenderContext(m_renderWindow, m_renderer);
     }
 
-    virtual void SetRendered() {
+    virtual void Render() {
         if (m_renderWindow) m_renderWindow->Render();
     }
 
-    virtual void SetCameraReset() {
+    virtual void ResetCamera() {
         if (m_renderer) m_renderer->ResetCamera();
     }
     vtkRenderer* GetRenderer() const { return m_renderer.GetPointer(); }
 
-    virtual void SetCameraStyleByVizMode(VizMode mode) = 0;
-    virtual void SetInteractorInitialized() = 0;  // 显式分离，避免 Start() 混乱
-    virtual void SetStarted() = 0;
+    virtual void ApplyCameraStyle(VizMode mode) = 0;
+    virtual void InitializeInteractor() = 0;  // 显式分离，避免 Start() 混乱
+    virtual void Start() = 0;
 
     virtual void SetWindowSize(int w, int h) {
         if (m_renderWindow) m_renderWindow->SetSize(w, h);
@@ -335,16 +335,16 @@ public:
             m_renderer->SetBackground(bg.r, bg.g, bg.b);
     }
 protected:
-    static void SetVTKEventDispatched(vtkObject* caller,
+    static void DispatchVTKEvent(vtkObject* caller,
         long unsigned int eventId,
         void* clientData,
         void* callData)
     {
         auto* ctx = static_cast<AbstractRenderContext*>(clientData);
-        if (ctx) ctx->SetVTKEventHandled(caller, eventId, callData);
+        if (ctx) ctx->HandleVTKEvent(caller, eventId, callData);
     }
 
-    virtual void SetVTKEventHandled(vtkObject* caller,
+    virtual void HandleVTKEvent(vtkObject* caller,
         long unsigned int eventId,
         void* callData) {
     }

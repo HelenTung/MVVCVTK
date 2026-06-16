@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <memory>
 #include <vector>
 #include "IInteractionHandler.h"
@@ -32,15 +32,15 @@ class InteractionRouter
 {
 public:
     // 追加一个 Handler（按添加顺序分发，先添加的优先级高）
-    void SetHandlerAdded(std::unique_ptr<IInteractionHandler> handler);
+    void AddHandler(std::unique_ptr<IInteractionHandler> handler);
 
     // 清空所有 Handler（通常在重新 BuildRouter 时调用）
-    void SetHandlersCleared();
+    void ClearHandlers();
 
     // 分发事件
     // - FirstMatch：第一个 handled=true 后停止，返回其结果（abortVtk 聚合）
     // - Broadcast ：所有 Handler 均执行，abortVtk 取 OR 聚合
-    InteractionResult GetDispatchResult(const InteractionEvent& eve,
+    InteractionResult Dispatch(const InteractionEvent& eve,
         RouterDispatchMode mode = RouterDispatchMode::FirstMatch);
 
 private:

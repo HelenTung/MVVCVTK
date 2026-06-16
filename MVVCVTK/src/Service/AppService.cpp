@@ -13,27 +13,27 @@ void AbstractAppService::SetCurrentStrategy(
 {
     if (m_currentStrategy == newStrategy) {
         if (m_currentStrategy && m_renderer) {
-            m_currentStrategy->SetCameraConfigured(m_renderer);
+            m_currentStrategy->ConfigureCamera(m_renderer);
             m_isDirty = true;
         }
         return;
     }
 
     if (m_currentStrategy && m_renderer)
-        m_currentStrategy->SetRendererDetached(m_renderer);
+        m_currentStrategy->DetachRenderer(m_renderer);
 
     m_currentStrategy = newStrategy;
 
     if (m_currentStrategy && m_renderer) {
-        m_currentStrategy->SetRendererAttached(m_renderer);
-        m_currentStrategy->SetCameraConfigured(m_renderer);
+        m_currentStrategy->AttachRenderer(m_renderer);
+        m_currentStrategy->ConfigureCamera(m_renderer);
     }
     if (m_renderer)
         m_renderer->ResetCamera();
     m_isDirty = true;
 }
 
-void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualStrategy> strategy) {
+void AbstractAppService::AddOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
     if (!strategy) return;
 
     const auto sameStrategy = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
@@ -46,7 +46,7 @@ void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualS
 
     m_overlayStrategies.push_back(strategy);
     if (m_renderer) {
-        strategy->SetRendererAttached(m_renderer);
+        strategy->AttachRenderer(m_renderer);
     }
 
     m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
@@ -54,7 +54,7 @@ void AbstractAppService::SetOverlayStrategyAdded(std::shared_ptr<AbstractVisualS
     m_isDirty = true;
 }
 
-void AbstractAppService::SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisualStrategy> strategy) {
+void AbstractAppService::RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
     if (!strategy) return;
 
     const auto it = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
@@ -66,16 +66,16 @@ void AbstractAppService::SetOverlayStrategyRemoved(std::shared_ptr<AbstractVisua
     }
 
     if (m_renderer) {
-        strategy->SetRendererDetached(m_renderer);
+        strategy->DetachRenderer(m_renderer);
     }
     m_overlayStrategies.erase(it);
     m_isDirty = true;
 }
 
-void AbstractAppService::SetOverlayStrategiesCleared() {
+void AbstractAppService::ClearOverlayStrategies() {
     if (m_renderer) {
         for (auto& s : m_overlayStrategies) {
-            s->SetRendererDetached(m_renderer);
+            s->DetachRenderer(m_renderer);
         }
     }
     m_overlayStrategies.clear();
@@ -128,7 +128,7 @@ void MedicalVizService::SetRenderContext(
 
             // 广播回调只做“事件翻译”为主线程可消费的原子标志，
             // 不在这里直接碰 VTK/Strategy，避免后台线程或任意调用线程破坏渲染线程边界。
-            self->m_stateSyncStrategy.SetFlagsHandled(flags, *self);
+            self->m_stateSyncStrategy.HandleFlags(flags, *self);
         }
     );
 }
@@ -335,7 +335,7 @@ void MedicalVizService::SaveTransformedDataAsync(
     // 封装异步任务
     std::packaged_task<void()> task([dataMgr, resolvedPath, modelToWorldMatrixSnapshot, weakSelf]() mutable {
         // 进入后台线程，执行重采样和保存操作
-        bool ok = dataMgr->SetTransformedDataSaved(resolvedPath, modelToWorldMatrixSnapshot);
+        bool ok = dataMgr->SaveTransformedData(resolvedPath, modelToWorldMatrixSnapshot);
 
         auto self = weakSelf.lock();
         if (self) {
@@ -373,7 +373,7 @@ void MedicalVizService::SaveSliceImagesAsync(
 
     std::weak_ptr<MedicalVizService> weakSelf = shared_from_this();
     std::packaged_task<void()> task([dataMgr, resolvedPath, exportData, currentWindowLevel, weakSelf]() mutable {
-        bool ok = dataMgr->SetSliceImagesSaved(resolvedPath, exportData.orientation, currentWindowLevel, exportData.matrix);
+        bool ok = dataMgr->SaveSliceImages(resolvedPath, exportData.orientation, currentWindowLevel, exportData.matrix);
 
         auto self = weakSelf.lock();
         if (self) {
@@ -384,7 +384,7 @@ void MedicalVizService::SaveSliceImagesAsync(
     StartTask(std::move(task), false);
 }
 
-void MedicalVizService::SetFileLoadCanceled()
+void MedicalVizService::CancelFileLoad()
 {
     // 当前未实现可中断加载，接口保留仅为兼容 IFileLoadControlService。
 }
@@ -392,7 +392,7 @@ void MedicalVizService::SetFileLoadCanceled()
 // ─────────────────────────────────────────────────────────────────────
 // AbstractInteractiveService — 交互接口
 // ─────────────────────────────────────────────────────────────────────
-void MedicalVizService::SetSliceScrolled(int delta)
+void MedicalVizService::ScrollSlice(int delta)
 {
     if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
     const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
@@ -460,7 +460,7 @@ vtkProp3D* MedicalVizService::GetMainProp()
     return m_currentStrategy ? m_currentStrategy->GetMainProp() : nullptr;
 }
 
-void MedicalVizService::SetModelMatrixSynced(vtkMatrix4x4* modelToWorldMatrix)
+void MedicalVizService::SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
 {
     if (!modelToWorldMatrix) return;
 
@@ -476,7 +476,7 @@ void MedicalVizService::SetElementVisible(uint32_t flagBit, bool show)
     m_sharedState->SetElementVisible(flagBit, show);
 }
 
-void MedicalVizService::SetWindowLevelAdjusted(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
+void MedicalVizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
     if (!m_sharedState) return;
 
@@ -563,7 +563,7 @@ void MedicalVizService::ProcessPendingUpdates()
     const DataAlgorithmKind reloadAlgorithmKind = m_pendingReloadAlgorithmKind;
 
     // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
-    if (m_dataManager && m_dataManager->SetPendingImageConsumed()) {
+    if (m_dataManager && m_dataManager->ConsumePendingImage()) {
         // 走和文件加载成功相同的后处理路径
         auto img = m_dataManager->GetVtkImage();
         if (img) {
@@ -578,7 +578,7 @@ void MedicalVizService::ProcessPendingUpdates()
 
     // 导出异步任务回调触发
     if (ConsumeSaveCallback()) {
-        SetPendingSaveCompletionCallbackExecuted();
+        ExecutePendingSaveCallback();
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
@@ -621,10 +621,10 @@ void MedicalVizService::ProcessPendingUpdates()
 
     // 文件加载/重载回调延后到这里统一执行，保证 UI 看到的已经是主线程收敛后的最终状态。
     if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_fileLoadCallbackState.SetPendingCallbackExecuted();
+        m_fileLoadCallbackState.ExecutePendingCallback();
     }
     if (m_reloadLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_reloadLoadCallbackState.SetPendingCallbackExecuted();
+        m_reloadLoadCallbackState.ExecutePendingCallback();
     }
 
     if (shouldReturnAfterLoadFailure) {
@@ -864,11 +864,11 @@ void MedicalVizService::ClearStrategyCache()
     // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
     // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
     if (m_currentStrategy && m_renderer) {
-        m_currentStrategy->SetRendererDetached(m_renderer);
+        m_currentStrategy->DetachRenderer(m_renderer);
         m_currentStrategy = nullptr;
     }
 
-    SetOverlayStrategiesCleared();
+    ClearOverlayStrategies();
     m_strategyCache.clear();
 }
 

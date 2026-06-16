@@ -1,4 +1,4 @@
-﻿#include "DataManager.h"
+#include "DataManager.h"
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
 #include <fstream>
@@ -297,7 +297,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
-    if (mmf.SetOpened(filePath)) {
+    if (mmf.Open(filePath)) {
         //   - 文件够大 → 只取前 expectedBytes
         //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
         size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
@@ -409,7 +409,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     return true;
 }
 
-bool RawVolumeDataManager::SetPendingImageConsumed()
+bool RawVolumeDataManager::ConsumePendingImage()
 {
     if (!m_hasPendingImage.load()) return false;
 
@@ -441,7 +441,7 @@ bool RawVolumeDataManager::SetPendingImageConsumed()
     return true;
 }
 
-bool BaseDataManager::SetSliceImagesSaved(
+bool BaseDataManager::SaveSliceImages(
     const std::string& dirPath,
     Orientation orientation,
     const WindowLevelParams& windowLevel,
@@ -720,7 +720,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     return true;
 }
 
-bool BaseDataManager::SetTransformedDataSaved(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
+bool BaseDataManager::SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {
