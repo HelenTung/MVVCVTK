@@ -240,11 +240,12 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
 
 void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
 {
-    const auto rawBounds = m_representation->GetBounds(); // 返回的是世界坐标
+    const auto rawBounds = m_representation->GetBounds(); // 返回的是AABB世界坐标
     if (!rawBounds) {
         return;
     }
-
+    // 拿到的是当前 widget 的“外接框范围”，不是模型局部坐标，也不是完整姿态矩阵。
+    // 这也是为什么后面还要用 GetPolyData() 再去重建 localToWorld，因为 GetBounds() 本身不够表达旋转盒。
     const std::array<double, 6> bounds = {
         rawBounds[0], rawBounds[1],
         rawBounds[2], rawBounds[3],

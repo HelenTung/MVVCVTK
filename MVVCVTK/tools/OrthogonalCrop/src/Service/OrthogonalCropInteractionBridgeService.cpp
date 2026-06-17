@@ -50,11 +50,13 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
-    // widget controller 只负责发 bounds/phase；桥接层在这里接管后续业务流程。
+    // widget controller 只负责发 bounds/phase；桥接层在这里接管后续业务流程。 
     m_widgetStateController.SetBoundsChangedCallback(
         [this](const std::array<double, 6>& bounds, CropInteractionPhase phase) {
             HandleWidgetBoundsChanged(bounds, phase);
-        });
+        });// m_widgetStateController.SetBoundsChangedCallback绑定了OrthogonalCropInteractionBridgeService类中的处理函数
+	// 所以当widget的调用OrthogonalCropWidgetStateController,SetBoundsChangedCallback时，会调用HandleWidgetBoundsChanged函数来处理
+	// 从而把 widget 交互事件转入本类状态机，触发后续的 preview request 构建与分发。
 }
 
 // ═══ 输入转发 ═══
@@ -340,8 +342,8 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
 
     // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToModel 折回 model。
     m_widgetStateController.SetInteractor(m_primaryInteractor);
-    m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds());
-    m_widgetStateController.SetWidgetBounds(m_currentBounds);
+    m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds()); // 初始化widget交互范围
+    m_widgetStateController.SetWidgetBounds(m_currentBounds); // 设置实际交互盒子范围有多大
     if (!m_widgetStateController.SetEnabled(true)) {
         std::cerr << "[Main] Orthogonal crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
         return false;
