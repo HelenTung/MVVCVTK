@@ -112,7 +112,7 @@ bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
     };
 
     // vtkBoxRepresentation 的 GetTransform 是相对 PlaceWidget 的分解结果；
-    // 这里直接用当前角点重建 localToWorld，保证旋转/平移后的盒几何就是唯一真源。
+    // 这里直接用当前角点重建 localToWorld，保证旋转/平移后的盒几何就是唯一真源。真实的poly盒对比默认初始盒得到的矩阵
     auto boxPolyData = vtkSmartPointer<vtkPolyData>::New();
     m_representation->GetPolyData(boxPolyData);
     if (!boxPolyData->GetPoints() || boxPolyData->GetNumberOfPoints() < 8) {
