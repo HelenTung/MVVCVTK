@@ -98,7 +98,8 @@ bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
     if (!m_representation || !GetBoundsAreValid(m_widgetLocalBounds)) {
         return false;
     }
-
+    //bridge 的 m_currentBounds 负责交互状态、初始摆放、日志；真正裁切几何不该依赖它，
+    // 而该依赖 widget controller 重建出的 local box + localToWorldMatrix。
     localCenter = {
         (m_widgetLocalBounds[0] + m_widgetLocalBounds[1]) * 0.5,
         (m_widgetLocalBounds[2] + m_widgetLocalBounds[3]) * 0.5,
@@ -127,7 +128,7 @@ bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
     boxPolyData->GetPoint(3, currentP3);
     boxPolyData->GetPoint(4, currentP4);
 
-    // 用 4 个稳定角点反解 affine:
+    // 取当前 P0/P1/P3/P4 四个角点，反解 affine，用 4 个稳定角点反解 affine:
     // P0 是 local(minX,minY,minZ) 的当前 world 位置；
     // P1/P3/P4 分别给出 local X/Y/Z 三条边在 world 中的方向和长度。
     // 矩阵按行填充 worldX/worldY/worldZ 三个方程：
