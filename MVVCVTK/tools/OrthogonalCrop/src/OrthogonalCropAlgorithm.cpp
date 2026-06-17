@@ -604,7 +604,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     cropData = CropDataModel();
     cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
     cropData.SetBoxToModelMatrix(request.GetBoxToModelMatrix());
-    cropData.SetModelBounds(GetModelBoundsFromBoxToModelMatrix(request.GetBoxToModelMatrix()));
+    cropData.SetModelBounds(GetModelBoundsFromBoxToModelMatrix(request.GetBoxToModelMatrix()));// 将正交盒转化为模型坐标下正交盒
 
     return GetBoundsAreValid(dataModelBounds, cropData.GetModelBounds(), failureReason, message, allowPartialOverlap);
 }
