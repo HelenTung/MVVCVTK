@@ -595,12 +595,12 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // ── 步骤 1：构建 preview request ──
-    // widget 有向盒 → boxToModelMatrix 编码
-    // 固定 PreviewArtifact 模式 + 当前 removalMode
+    // 将当前 widget 有向盒固化为 model-space preview request；
+    // 后端只消费稳定 request，避免直接依赖 widget 生命周期与渲染状态。
     const auto previewRequest = BuildPreviewRequest();
-    // ── 分支 A：3D outline guide 轻量预览（不触发 2D mask / 3D clip / 统计管道） ──
-    // Bridge 仍然只提交 request；source 分发与 request->cropData 归一化统一收口在 Router。
+
+    // 轻量预览只生成 3D outline guide；
+    // 用于模式切换和交互反馈，避免把 2D mask、3D clip、统计管道放进频繁刷新路径。
     if (!m_fullPreviewRequired) {
         const auto previewResult = m_backend.GetGuidePreviewResult(previewRequest);
         if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None || !previewResult.GetSucceeded()) {
@@ -612,7 +612,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             return;
         }
 
-        // ── 结果分发 ──
+        // 分发轻量结果到主 3D 预览或 overlay；
+        // 日志记录接管位置，方便判断当前是主模型预览还是仅 overlay 显示。
         const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
         if (logStats) {
             std::cout
@@ -632,8 +633,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // ── 分支 B：完整 preview artifact 预览 ──
-    // 经 Router → PluginService/Algorithm 完整执行 2D image mask 或 3D polydata clip。
+    // 完整预览经 Router 进入对应后端；
+    // image 数据生成 2D mask artifact，polydata 数据生成 3D clip artifact。
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
@@ -654,19 +655,16 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // ── 步骤 2：结果分发（两条分支共享） ──
-    // 对每个 PreviewRenderTarget：
-    // ① ApplyVolumePreview / ApplyPolyDataPreview → 3D 主窗口常驻预览管道更新
-    //    3D 主窗口（axis<0）若成功接管，剥离 derivedPolyData overlay 避免重复绘制
-    // ② overlayStrategy->SetCropResult → outline / mask / polydata 三类可视内容
-    // ③ target.service->MarkDirty → 触发渲染刷新
+    // 分发完整结果到所有预览目标；
+    // 主 3D 窗口优先接管体绘制或 polydata clip，overlay 只保留未被主模型接管的 artifact。
     const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
 
-    // 这里的 3D 主模型 clip 只是临时预览表现；真正的几何/统计结果仍以 previewResult 为准。
-    // 因此关闭 preview 时只需要把管道切回 pass-through 状态，而不是重新向后端求一份“恢复结果”。
+    // 3D 主模型 clip 只是临时显示状态；
+    // 关闭 preview 时切回 pass-through 管道即可恢复全模型，不需要重新向后端请求恢复结果。
 
     if (logStats) {
-        // 统计日志优先使用 result 中的 resolved 信息；若上层未回填，则退回 statistics 字段。
+        // 日志优先使用 result 的 resolved 信息；
+        // 若上层结果未回填，则退回 statistics，保证日志仍能说明实际后端来源。
         const auto dataSource = previewResult.GetResolvedDataSource() != OrthogonalCropDataSource::Auto
             ? previewResult.GetResolvedDataSource()
             : previewStats.GetResolvedDataSource();
