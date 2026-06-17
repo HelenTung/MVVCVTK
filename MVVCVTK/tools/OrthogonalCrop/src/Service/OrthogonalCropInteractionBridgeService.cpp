@@ -50,7 +50,8 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
-    // widget controller 只负责发 bounds/phase；桥接层在这里接管后续业务流程。 
+    // widget controller 只上报 bounds 和交互阶段；
+    // bridge 接管预览请求构建与结果分发，保持 VTK widget 层不触碰后端业务。
     m_widgetStateController.SetBoundsChangedCallback(
         [this](const std::array<double, 6>& bounds, CropInteractionPhase phase) {
             HandleWidgetBoundsChanged(bounds, phase);
@@ -59,8 +60,8 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 	// 从而把 widget 交互事件转入本类状态机，触发后续的 preview request 构建与分发。
 }
 
-// ═══ 输入转发 ═══
-// 以下接口把输入参数透传给 backend router，bridge 自身不做额外处理
+// 输入由 bridge 透传给 backend router；
+// bridge 自身只管理交互状态，不拥有 image/polydata 后端选择逻辑。
 void OrthogonalCropInteractionBridgeService::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
     m_backend.SetInputImage(std::move(image));
@@ -523,14 +524,12 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMa
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
-    // ── 分支 ①：获取默认 request 模板 ──
-    // Image 路径 → PluginService 根据 inputImage bounds 构造
-    // PolyData 路径 → Router 根据 activeModel bounds 构造
+    // 先获取当前数据源的默认 request；
+    // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
     auto previewRequest = GetDefaultRequest();
 
-    // ── 分支 ②：Widget 有向盒 → boxToModelMatrix 编码 ──
-    // 标准盒 [-1,1]^3 先映射到 widget local 盒，再经 localToWorld
-    // 到 world，最后用 worldToModel 折回 model。
+    // 将 widget 有向盒编码成 boxToModelMatrix；
+    // 后端只接收标准盒到 model 的稳定矩阵，不直接读取 VTK widget 状态。
     CropVectorDouble3Array localCenter = {
         (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
         (m_currentBounds[2] + m_currentBounds[3]) * 0.5,
@@ -582,9 +581,8 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     cropState.SetCropEnabled(m_cropInteractionEnabled);
     cropState.SetInteractionPhase(m_lastInteractionPhase);
 
-    // cropState 不参与几何计算，但会跟随结果回到 overlay / 上层日志，
-    // 让调用方知道这次 preview 到底是拖拽释放触发，还是模式切换触发。
-    // 结果说明：这个 request 仍然只是 preview 请求，不会直接要求 physical 导出。
+    // cropState 只描述交互语义，不参与几何计算；
+    // 它随结果回到 overlay 和日志，让调用方区分拖拽释放与模式切换触发。
     previewRequest.SetCropStateModel(cropState);
     return previewRequest;
 }
@@ -803,10 +801,8 @@ std::shared_ptr<AbstractInteractiveService> OrthogonalCropInteractionBridgeServi
 
 void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 {
-    // 清理流程只处理 overlay 生命周期：
-    // 1. 先把旧 overlay 从旧窗口解绑，避免残留 prop
-    // 2. 再清空目标数组
-    // 主模型 clip 管道的恢复由 RestorePreviewRenderTargets 单独收口。
+    // 这里只清理 overlay 生命周期；
+    // 主模型 clip 管道由 RestorePreviewRenderTargets 收口，避免解绑窗口时意外改动主显示。
     for (const auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
             target.service->RemoveOverlayStrategy(target.overlayStrategy);
@@ -817,11 +813,8 @@ void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 
 void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
 {
-    // preview 恢复流程：
-    // 1. 清掉每个窗口的 overlay 内容
-    // 2. 3D volume 主窗口清掉 shader discard / mask / clipping 状态
-    // 3. 3D actor 主窗口把 clip function 切回全量直通盒
-    // 4. 最后统一标脏，交给渲染阶段按需拉起
+    // 恢复 preview 涉及 overlay、volume shader 和 polydata clip 三条显示路径；
+    // 统一在这里清空临时状态并标脏，确保关闭 preview 后各窗口回到全模型显示。
     for (auto& target : m_previewRenderTargets) {
         if (target.overlayStrategy) {
             target.overlayStrategy->ClearPreview();
@@ -876,10 +869,8 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(const Orthogo
 {
     bool main3DPreviewApplied = false;
 
-    // 结果分发流程：
-    // 1. 先尝试给 3D 主窗口更新常驻 clip 管道
-    // 2. 再按目标窗口轴向准备 overlay 要消费的结果
-    // 3. 如果 3D 主窗口已经接管主模型显示，就剥掉 polydata 3D clip preview overlay，避免重复绘制
+    // 分发时优先让 3D 主窗口接管主模型 clip；
+    // overlay 再按窗口轴向消费剩余 artifact，避免同一份 polydata 被主模型和 overlay 重复绘制。
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
             bool mainPreviewAppliedForTarget = ApplyVolumePreview(target, previewResult);
@@ -979,7 +970,9 @@ void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
             boxOrigin[axis] = side;
 
             double boxNormal[3] = { 0.0, 0.0, 0.0 };
-            boxNormal[axis] = -side; //因为 KeepInside 要保留盒内区域。用 6 个向内平面组合起来，表达的就是“同时在这 6 个面的内部一侧”。
+            // KeepInside 需要保留 6 个面共同围住的内部区域；
+            // 法线朝内时，VTK clipping planes 的交集语义正好表达盒内保留。
+            boxNormal[axis] = -side;
 
             double worldOrigin[3] = { 0.0, 0.0, 0.0 };
             double worldNormal[3] = { 0.0, 0.0, 0.0 };
@@ -1030,7 +1023,9 @@ bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
     // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
     auto modelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     modelToBoxShaderMatrix->DeepCopy(modelToBoxMatrix);
-    modelToBoxShaderMatrix->Transpose();//为了让 shader 里这个乘法得到和 C++ 侧 modelToBoxMatrix 一样的几何结果，上传前显式转置
+    // 上传前转置矩阵；
+    // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ modelToBox 结果一致。
+    modelToBoxShaderMatrix->Transpose();
 
     // vtk volume shader 中 g_dataPos 是纹理坐标；in_textureDatasetMatrix[0] 才会把它还原到 model。
     // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 modelToBox 需要先转置再交给 shader。
@@ -1074,11 +1069,9 @@ bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
         return false;
     }
 
-    // 这里只有 3D 主窗口会命中；2D slice 窗口只消费 overlay，不接管主 mapper。
-    // 应用流程固定为：
-    // 1. 首次进入时抓一份稳定 source polydata，作为常驻 preview 管道输入
-    // 2. 建 clip -> geometry 持久管道，并准备 pass-through box 作为“全量直通”状态
-    // 3. 后续每次刷新只更新 cropData 派生的 clip function 和 InsideOut 语义，不再反复切换 mapper 输入
+    // 只有 3D 主窗口接管主 mapper；
+    // 2D 窗口继续走 overlay，避免切片视图被 3D polydata 管道影响。
+    // 首次命中时建立常驻 clip 管道，后续只更新 clip function 和 InsideOut 语义。
 
     auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
     if (!actor) {
@@ -1148,9 +1141,8 @@ bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
     modelToBoxTransform->Inverse();
     clipFunction->SetTransform(modelToBoxTransform);
 
-    // 这里每次只更新统一 cropData 派生出的 clip function 和 removal mode，
-    // 持久管道本身不重建、不换输入，从而把卡顿点压缩到真正的 clip 执行上。
-    // 结果说明：主窗口看到的是主模型本体被 clip 后的结果，而不是额外叠加的一份 overlay 网格。
+    // 每次刷新只更新 cropData 派生出的 clip function 和 removal mode；
+    // 持久管道不重建、不换输入，让主窗口显示主模型本体的 clip 结果而不是叠加网格。
     target.mainPreviewClipFilter->SetClipFunction(clipFunction);
     if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
         target.mainPreviewClipFilter->InsideOutOn();

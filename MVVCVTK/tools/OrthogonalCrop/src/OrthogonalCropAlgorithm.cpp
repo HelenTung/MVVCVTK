@@ -271,10 +271,8 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     const std::array<int, 6>& indexBounds,
     CropRemovalMode removalMode)
 {
-    // 2D mask preview 的结果不是导出新体数据，而是构造一张用于预览的 inside/outside 掩码。
-    // 整体流程分两段：
-    // 1. 先用 snapped index bounds 把执行域收缩到最小候选 AABB
-    // 2. 再用 modelToBox 把体素中心归一化到标准盒 [-1,1]^3 做 inside 判定
+    // 2D mask preview 只生成 inside/outside 掩码；
+    // 执行域先收缩到 snapped AABB，再用标准盒判定避免整图遍历。
     if (!image) {
         return nullptr;
     }
@@ -294,13 +292,13 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     if (minI > maxI || minJ > maxJ || minK > maxK) {
         // 无有效交叠时仍返回一张与输入结构兼容的空 mask，避免上层处理 nullptr 分支。
         maskImage->CopyStructure(image);
-        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);  // 每个体素 1 个分量 类型是VTK_UNSIGNED_CHAR 就是说，这是一张单通道的 mask 图
+        maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
         auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
         if (!maskPtr) {
             return nullptr;
         }
         const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
-        std::memset(maskPtr, 0, static_cast<std::size_t>(totalVoxelCount)); // 通常语义是：0 表示不在区域内 1 或 255 表示在区域内
+        std::memset(maskPtr, 0, static_cast<std::size_t>(totalVoxelCount));
         maskImage->Modified();
         return maskImage;
     }
@@ -331,7 +329,8 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     }
 
     const bool keepInside = removalMode == CropRemovalMode::KeepInside;
-    // 255保留 0去除
+    // mask 用 255 表示保留、0 表示移除；
+    // KeepInside 和 RemoveInside 只交换 inside/outside 的写入语义。
     const unsigned char keptValue = 255;
     const unsigned char removedValue = 0;
     const unsigned char insideValue = keepInside ? keptValue : removedValue;
@@ -353,7 +352,8 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
             const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
             for (int k = minK; k <= maxK; ++k) {
                 for (int j = minJ; j <= maxJ; ++j) {
-					// z = index_z * y *x + index_y * x + index_x 刚好是mini+width 批量填充的线性地址计算方式，直接 memset 整行。
+                    // 轴对齐盒的每个有效区间在内存中是连续行；
+                    // 直接 memset 整行，避免逐体素写入同一语义值。
                     const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
                         + static_cast<vtkIdType>(j) * rowStride
                         + minI;
@@ -407,7 +407,7 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
                         : static_cast<vtkIdType>(k) * sliceStride
                             + static_cast<vtkIdType>(j) * rowStride
                             + i;
-                    maskPtr[linearIndex] = insideValue; // 初始化
+                    maskPtr[linearIndex] = insideValue;
                 }
 
                 boxPoint[0] += modelToBoxStepResult[0];
@@ -683,8 +683,8 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
         const int minIndex = static_cast<int>(std::floor(minContinuousIndex[axis] + BoundsEpsilon));
         const int maxIndex = static_cast<int>(std::ceil(maxContinuousIndex[axis] - BoundsEpsilon));
         // axis = 0 表示 X 轴  axis = 1 表示 Y 轴  axis = 2 表示 Z 轴
-        indexBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0)); // min
-        indexBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0)); // max
+        indexBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
+        indexBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
     }
 
     return indexBounds;
@@ -764,17 +764,16 @@ static OrthogonalCropResult GetPreviewResult(
     const CropStateModel& cropState,
     CropRemovalMode removalMode)
 {
-    // ── 步骤 1：构造基本结果骨架 ──
-    // 预先填充数据源/后端标记、几何快照与交互状态
-    // 后续 steps 逐步回填 mask / diagnostics / outline
+    // 先填充结果的稳定上下文；
+    // 后续 mask、diagnostics、outline 都围绕同一份 cropData 回填。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
-    // ── 步骤 2：校验 bounds 合法性 ──
-    // allowPartialOverlap=true，预览允许盒子部分超出输入边界
+    // 预览允许裁切盒只与输入部分重叠；
+    // 这样用户拖到边界外时仍能看到有效交集的反馈。
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
     if (!OrthogonalCropAlgorithm::GetBoundsAreValid(
@@ -787,20 +786,20 @@ static OrthogonalCropResult GetPreviewResult(
         result.SetMessage(validationMessage);
         return result;
     }
-    // 8 个 model 角点转换成覆盖它们的 index bounds。
+    // 将 model 角点吸附为 index bounds；
+    // mask 执行只需要覆盖裁切盒可能影响到的体素范围。
     const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
 
-    // ── 步骤 3a：生成 mask ──
-    // KeepInside  → ROI 大小 compact mask（memset 快路径）
-    // RemoveInside → full-volume mask（标记盒外区域）
+    // 按 removal mode 生成 mask；
+    // KeepInside 用 compact ROI 降低分配成本，RemoveInside 保留 full-volume 以表达盒外补集。
     result.SetMaskImage(::GetMaskImage(
         image,
         cropData,
         snappedIndexBounds,
         removalMode));
 
-    // ── 步骤 3b：回填 diagnostics ──
-    // Statistics 只携带数据源、后端和失败诊断；mask 产物本身由 result 持有。
+    // 统计信息只记录数据源、后端和失败诊断；
+    // mask 产物由 result 持有，避免把大对象挂进 diagnostics。
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     statistics.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
@@ -808,8 +807,8 @@ static OrthogonalCropResult GetPreviewResult(
     result.SetStatistics(statistics);
     result.SetFailureReason(statistics.GetFailureReason());
 
-    // ── 步骤 3c：回填 outline 与最终状态 ──
-    // outline 落在 model 下，供 overlay 直接消费
+    // outline 使用 model 坐标回填；
+    // overlay 可以直接与主数据矩阵对齐显示。
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
     result.SetSucceeded(result.GetMaskImage() != nullptr);
     if (!result.GetSucceeded()) {
@@ -826,16 +825,15 @@ static OrthogonalCropResult GetSubmitResult(
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    // image submit 返回的是新的主数据 image，
-    // 因此除了提取体素数据，还必须同步修正 bounds 和 globalOffsetMatrix。
-    // 结果说明：输出 image 是新的主数据快照，derivedCropData 记录它自己的 model bounds 与位移补偿。
+    // image submit 产出新的主数据 image；
+    // 同步修正 bounds 和 globalOffsetMatrix，保证上层共享坐标语义连续。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
-    // ── 步骤 1：内部提交计划 ──
-    // snapped index、RAM gate 和可执行性只服务 image submit，不进入通用 statistics。
+    // 提交计划只服务 image submit；
+    // snapped index、RAM gate 和可执行性留在内部，避免污染通用 statistics 语义。
     const auto submitPlan = BuildSubmitPlan(
         image,
         cropData,
@@ -849,10 +847,8 @@ static OrthogonalCropResult GetSubmitResult(
         return result;
     }
 
-    // ── 步骤 2：体素提取 ──
-    // 通过 ExtractVOI → ImageChangeInformation 产出独立 image submit image。
-    // VOI 只能输出 index 轴对齐子体；若 widget box 是旋转盒，再按同一份
-    // modelToBox 判定清掉盒外体素，避免提交结果比 preview 多出 AABB 角落内容。
+    // 提取独立的 image submit image；
+    // VOI 只能得到 index AABB，旋转盒还要用 modelToBox 清掉盒外角落，保证 submit 与 preview 语义一致。
     auto submitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
     if (!submitImage) {
         result.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
@@ -861,9 +857,8 @@ static OrthogonalCropResult GetSubmitResult(
     }
     SetSubmitOutsideBoxToBackground(submitImage, cropData);
 
-    // ── 步骤 3：偏移补偿 ──
-    // 提取后 origin 改变，把位移量累加进 globalOffsetMatrix
-    // 保证上层共享坐标语义连续
+    // 记录提取后 origin 位移；
+    // 位移累加到 globalOffsetMatrix，避免重载后世界坐标突然跳变。
     double originalOrigin[3] = { 0.0, 0.0, 0.0 };
     image->GetOrigin(originalOrigin);
     double newOrigin[3] = { 0.0, 0.0, 0.0 };
@@ -888,8 +883,8 @@ static OrthogonalCropResult GetSubmitResult(
                 newOrigin[2] - originalOrigin[2]
             }));
 
-    // ── 步骤 4：结果回填 ──
-    // image submit image 本身就是新主数据，关闭交互裁切语义
+    // 回填提交结果并关闭交互裁切语义；
+    // submit image 将成为新主数据，旧 preview 状态不能继续沿用。
     CropStateModel submitCropState = cropState;
     submitCropState.SetCropEnabled(false);
 
@@ -911,8 +906,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
 
-    // ── 请求归一化 ──
-    // request 只携带 boxToModelMatrix；cropData 额外派生 model AABB 供后端执行。
+    // 将 request 归一化为 cropData；
+    // request 只携带 boxToModelMatrix，cropData 再派生 model AABB 供后端执行。
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
@@ -926,9 +921,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         return result;
     }
 
-    // ── 执行分支分发：preview artifact vs image submit ──
-    // PreviewArtifact → GetPreviewResult → image 2D mask + box 3D outline + diagnostics
-    // Submit → GetSubmitResult → image submit image + globalOffsetMatrix
+    // 按 execution mode 分发到 preview 或 submit；
+    // preview 产出 mask/outline artifact，submit 产出新的 image 和位移补偿。
     if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact) {
         return GetPreviewResult(
             image,

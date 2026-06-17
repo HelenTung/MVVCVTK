@@ -35,19 +35,19 @@ void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long
 
 OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
 {
-    // ═══ 初始化 vtkBoxWidget2 外观 ═══
+    // 初始化 widget 和 representation；
+    // 外观在控制器内固定，避免上层交互桥直接接触 VTK widget 细节。
     m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
-    // 默认轮廓：暗红色 2.0px 线宽
     m_representation->GetOutlineProperty()->SetColor(1.0, 0.15, 0.10);
     m_representation->GetOutlineProperty()->SetLineWidth(2.0);
-    // 选中轮廓：亮橙色 2.5px 线宽
     m_representation->GetSelectedOutlineProperty()->SetColor(1.0, 0.55, 0.20);
     m_representation->GetSelectedOutlineProperty()->SetLineWidth(2.5);
     m_widget->SetRepresentation(m_representation);
 
-    // VTK 回调适配器：把原始 VTK 事件转交到 HandleWidgetEvent
+    // VTK callback 只做事件转发；
+    // 交互相位和 preview 触发策略统一留给控制器与 bridge。
     m_callbackCommand = vtkSmartPointer<OrthogonalCropWidgetStateCallback>::New();
     m_callbackCommand->SetOwner(this);
 }
@@ -168,16 +168,19 @@ void OrthogonalCropWidgetStateController::SetBoundsChangedCallback(BoundsChanged
 
 bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
 {
-    // 启用前提：必须已绑定 interactor
+    // 启用 widget 必须先绑定 interactor；
+    // 没有窗口事件源时直接返回失败，避免创建半启用状态。
     if (enabled && !m_interactor) {
         return false;
     }
 
-    // ═══ 懒绑定 observer（整个生命周期只做一次，避免重复回调）═══
+    // observer 懒绑定且只绑定一次；
+    // 重复进入裁切模式时不应产生多重 VTK 回调。
     EnsureObserversAdded();
 
     if (enabled) {
-        // 启用：先确保有合法 bounds，再 Place + On
+        // 启用前确保有合法 bounds；
+        // 当前盒无效时回退到 reference bounds，保证 PlaceWidget 有稳定输入。
         if (!GetBoundsAreValid(m_currentBounds)) {
             m_currentBounds = m_referenceBounds;
         }
@@ -240,12 +243,13 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
 
 void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
 {
-    const auto rawBounds = m_representation->GetBounds(); // 返回的是AABB世界坐标
+    const auto rawBounds = m_representation->GetBounds();
     if (!rawBounds) {
         return;
     }
-    // 拿到的是当前 widget 的“外接框范围”，不是模型局部坐标，也不是完整姿态矩阵。
-    // 这也是为什么后面还要用 GetPolyData() 再去重建 localToWorld，因为 GetBounds() 本身不够表达旋转盒。
+
+    // GetBounds 只返回当前 widget 的 world AABB；
+    // 完整旋转姿态由 GetPolyData 重建 localToWorld，避免把外接框误当作有向盒。
     const std::array<double, 6> bounds = {
         rawBounds[0], rawBounds[1],
         rawBounds[2], rawBounds[3],

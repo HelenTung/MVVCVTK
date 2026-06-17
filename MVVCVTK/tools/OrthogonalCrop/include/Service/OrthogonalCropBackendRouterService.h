@@ -5,12 +5,10 @@
 // 分类: Service / Backend Router
 // 说明: 在 image 与 polydata 两条裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
-// 路由主链路：
-// 1. 根据 preferredDataSource 与当前已绑定输入确定 active data source
-// 2. 把默认 request、轻量预览、诊断查询和结果执行都收口到同一组入口
-// 3. image 路径直接委托给 OrthogonalCropPluginService
-// 4. polydata 路径把 request 归一化为 cropData，再生成 implicit function 做 clip
-// 5. 两条路径最终都回填到统一的 OrthogonalCropResult / OrthogonalCropStatistics 诊断模型
+// Router 根据 preferredDataSource 和当前输入确定 active data source；
+// 默认 request、轻量预览、诊断查询和结果执行都从这里收口，屏蔽 UI 层的后端判断。
+// image 路径委托 OrthogonalCropPluginService，polydata 路径在 Router 内归一化并执行 clip，
+// 两条路径最终都回填统一的 OrthogonalCropResult / OrthogonalCropStatistics。
 
 #include "OrthogonalCropPluginService.h"
 

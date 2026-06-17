@@ -5,11 +5,9 @@
 // 分类: Math / Core Algorithm
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================
-// 核心执行链：
-// 1. 由 request 归一化得到 CropDataModel
-// 2. 基于 cropData 做 bounds 校验与执行诊断
-// 3. 按 executionMode 分流到 image preview artifact 或 image submit extract
-// 4. 把几何数据、image/polydata 产物、诊断信息与交互态重新组装为统一结果模型
+// 算法层只消费 request 与输入数据；
+// 它先归一化 cropData，再按 executionMode 产出 preview artifact 或 image submit 结果。
+// 统一结果模型承载几何、产物、诊断和交互态，避免 service / UI 分散理解算法细节。
 
 #include "OrthogonalCropTypes.h"
 

@@ -4,10 +4,9 @@
 // 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
-// 设计约束：
-// - 这里只保留请求、结果、诊断、失败原因以及数据/状态快照；
-// - 不依赖 MedicalVizService、Renderer、Interactor 或具体窗口对象；
-// - 前端或 ViewModel 只需组装 OrthogonalCropRequest，再消费 OrthogonalCropResult。
+// 类型层只保存请求、结果、诊断、失败原因和数据/状态快照；
+// 它不依赖 MedicalVizService、Renderer、Interactor 或具体窗口对象，
+// 让前端或 ViewModel 只需要组装 OrthogonalCropRequest 并消费 OrthogonalCropResult。
 //
 // 语义边界：
 // - CropDataModel：客观几何与绝对坐标补偿信息；

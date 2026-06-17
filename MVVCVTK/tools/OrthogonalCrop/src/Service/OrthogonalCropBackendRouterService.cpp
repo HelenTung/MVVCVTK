@@ -19,8 +19,8 @@
 #include <cstddef>
 #include <utility>
 
-// ═══ 输入绑定 ═══
-// Image输入：委托给 plugin service 的 SetInputImage
+// image 输入由 image-only plugin 持有；
+// router 只负责在 image 与 polydata 后端之间做统一分发。
 void OrthogonalCropBackendRouterService::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
     m_imageService.SetInputImage(std::move(image));
@@ -31,7 +31,8 @@ vtkSmartPointer<vtkImageData> OrthogonalCropBackendRouterService::GetInputImage(
     return m_imageService.GetInputImage();
 }
 
-// PolyData输入：直接存储并清空 clip 缓存
+// polydata 输入直接缓存在 router；
+// 输入变化会使旧 clip 结果失效，因此必须同步清空缓存。
 void OrthogonalCropBackendRouterService::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
     m_inputPolyData = std::move(polyData);
@@ -139,10 +140,8 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
-    // ── 分支入口：根据活跃数据源路由到对应后端 ──
-    // 先通过 GetActiveDataSource() 确定后端：
-    //   优先 preferredDataSource → 有输入则走对应分支
-    //   Auto 模式按 image → polydata 优先级自动回退
+    // 根据执行模式和活跃数据源路由后端；
+    // submit 只支持 image，preview 则按 preferredDataSource 或 Auto 回退规则选择 image/polydata。
     if (request.GetExecutionMode() == CropExecutionMode::Submit) {
         if (!GetInputImage()) {
             auto result = GetMissingInputResult();
@@ -162,8 +161,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
 
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData: {
-        // Image 分支 → PluginService → Algorithm
-        // Router 只回填 resolvedDataSource 标记
+        // image 分支委托 PluginService；
+        // Router 只补 resolvedDataSource，保持 image 算法入口独立。
         auto result = m_imageService.GetResult(request);
         result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
         if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
@@ -173,8 +172,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
         return result;
     }
     case OrthogonalCropDataSource::PolyData:
-        // PolyData 分支 → Router 内部三步：归一化→clip→结果封装
-        // 含 5 层缓存判断避免重复执行昂贵 VTK 管道
+        // polydata 分支在 Router 内完成归一化、clip 和结果封装；
+        // 缓存判断留在 GetClippedPolyData，避免重复执行昂贵 VTK 管道。
         return GetPolyDataResult(request);
     default:
         return GetMissingInputResult();
@@ -240,13 +239,14 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         return nullptr;
     }
 
-    // ═══ PolyData 裁切缓存判断：5 层条件，任一不满足则重新执行 ═══
-    // 第1层-快速：输入指针 + removalMode + 基本有效性、canReuseCachedClip是缓存标志是否变换标志位
+    // polydata clip 缓存必须同时匹配输入、removal mode 和几何状态；
+    // 任一条件变化都重新执行 VTK 管道，避免复用过期裁切结果。
     bool canReuseCachedClip = m_hasCachedPolyDataClip
         && m_cachedPolyDataInput == m_inputPolyData.GetPointer()
         && m_cachedPolyDataRemovalMode == removalMode
         && m_cachedClippedPolyData;
-    // 第2层-ModelBounds：6个值逐元素比较 (ε=1e-9)，尺寸微调也触发重裁切，边界盒看看有无变化
+    // model bounds 的细微变化也会影响 clip 结果；
+    // 用固定 epsilon 比较 6 个边界值，避免尺寸变化后继续复用旧输出。
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
         const auto& cachedModelBounds = m_cachedPolyDataCropData.GetModelBounds();
@@ -259,7 +259,8 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
     }
 
-    // 第3层-boxToModelMatrix：16 个值逐元素比较，旋转/平移/缩放任一变化都触发重裁切。
+    // boxToModelMatrix 是有向盒姿态真源；
+    // 旋转、平移或缩放任一变化都会触发重裁切。
     if (canReuseCachedClip) {
         constexpr double epsilon = 1e-9;
         const auto& cachedBoxToModelMatrix = m_cachedPolyDataCropData.GetBoxToModelMatrix();
@@ -272,14 +273,14 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
         }
     }
 
-    // ═══ 缓存命中 === 跳过昂贵的 VTK 管道执行，直接复用
+    // 缓存命中时直接复用 clipped polydata；
+    // 这是 polydata preview 避免重复跑 VTK clip 管道的主要性能保护。
     if (canReuseCachedClip) {
         return m_cachedClippedPolyData;
     }
 
-    // ═══ 缓存未命中 === 构造 vtkBox 隐函数
-    //   此函数接收的是 CropDataModel (已在 GetPolyDataCropDataModel 中归一化)。
-    //   vtkBox 固定表达标准盒 [-1,1]^3，modelToBox transform 负责把 model 点送回标准盒空间。
+    // 缓存未命中时构造标准盒隐函数；
+    // cropData 已归一化，modelToBox transform 负责把 model 点送回 [-1,1]^3。
     auto clipFunction = vtkSmartPointer<vtkBox>::New();
     const auto canonicalBounds = GetCanonicalCropBoxBounds();
     clipFunction->SetBounds(
@@ -292,34 +293,37 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetClippedPolyD
     modelToBoxTransform->Inverse();
     clipFunction->SetTransform(modelToBoxTransform);
 
-    // ═══ 懒初始化 VTK 裁切管道: TableBasedClipDataSet → GeometryFilter → PolyData
-    // 整个 Router 生命周期只创建一次，后续调用只更换输入
+    // VTK clip 管道按需创建并在 Router 生命周期内复用；
+    // 后续 preview 只替换输入和 clip function，减少对象重建成本。
     if (!m_polyDataClipFilter) {
         m_polyDataClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
     }
-    // VTK 的 clip 过滤器设计为"只做布尔运算"，输出格式取决于输入单元类型与裁切面的交点情况。
-    // vtkGeometryFilter 是标准后处理，保证下游（渲染器、ShallowCopy）拿到干净的三角形网格
+    // vtkGeometryFilter 统一 clip 输出为 polydata；
+    // 下游渲染器和 ShallowCopy 因此不需要处理多种 VTK 数据集类型。
     if (!m_polyDataGeometryFilter) {
         m_polyDataGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
         m_polyDataGeometryFilter->SetInputConnection(m_polyDataClipFilter->GetOutputPort());
     }
 
-    // ═══ 执行裁切 ===
+    // 执行当前 cropData 对应的 clip；
+    // InsideOut 只由 removal mode 决定，保持 KeepInside/RemoveInside 语义集中。
     m_polyDataClipFilter->SetInputData(m_inputPolyData);
     m_polyDataClipFilter->SetClipFunction(clipFunction);
     if (removalMode == CropRemovalMode::KeepInside) {
-        m_polyDataClipFilter->InsideOutOn();   // KeepInside: 保留盒内部
+        m_polyDataClipFilter->InsideOutOn();
     }
     else {
-        m_polyDataClipFilter->InsideOutOff();  // RemoveInside: 保留盒外部
+        m_polyDataClipFilter->InsideOutOff();
     }
-    m_polyDataGeometryFilter->Update();  // 触发整条管道计算
+    m_polyDataGeometryFilter->Update();
 
-    // ═══ 提取输出: ShallowCopy 共享底层数据以减少内存开销 ===
+    // ShallowCopy 当前输出作为稳定 result；
+    // 既隔离后续管道更新，又避免不必要的深拷贝内存成本。
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->ShallowCopy(m_polyDataGeometryFilter->GetOutput());
 
-    // ═══ 更新缓存 tuple: cropData+removalMode+inputPtr+clippedResult ===
+    // 更新缓存键和值；
+    // 下一次相同输入和几何状态可以直接复用本次 clip 结果。
     m_cachedPolyDataCropData = cropData;
     m_cachedPolyDataRemovalMode = removalMode;
     m_cachedPolyDataInput = m_inputPolyData.GetPointer();
@@ -457,18 +461,15 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetPolyDataStatisti
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const OrthogonalCropRequest& request) const
 {
-    // ═══ PolyData 分支结果组装 ═══
-    // 三步流程: 归一化 → clip 执行 → 结果封装
-    // 封装字段: diagnostics + cropData + box 3D outline + polydata 3D clip preview
-    // 格式与 Image 路径完全一致, Preview 层统一消费
+    // polydata 结果与 image preview 使用同一份 result contract；
+    // preview 层因此只消费 diagnostics、cropData、outline 和 artifact，不需要知道后端分支。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::ClipPreview);
     result.SetCropStateModel(request.GetCropStateModel());
 
-    // ── 步骤 1：请求归一化 ──
-    // GetPolyDataCropDataModel → Algorithm::GetCropDataModel(modelBounds, request)
-    // boxToModelMatrix → CropDataModel，allowPartialOverlap=true
+    // 先把 request 归一化为 polydata cropData；
+    // preview 允许部分重叠，用户拖出边界时仍能看到有效 clip 反馈。
     if (!m_inputPolyData) {
         result.SetFailureReason(OrthogonalCropFailureReason::InputPolyDataMissing);
         result.SetMessage("Input polydata is null.");
@@ -484,9 +485,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
-    // ── 步骤 2：裁切执行 ──
-    // GetClippedPolyData 内部含缓存判断（inputPtr / modelBounds / boxToModelMatrix）
-    // 缓存未命中时构建 vtkBox → TableBasedClipDataSet → GeometryFilter 管道
+    // 执行或复用 polydata clip；
+    // 缓存键包含 input、model bounds 和 boxToModelMatrix，避免重复跑相同 VTK 管道。
     auto clipped = GetClippedPolyData(cropData, request.GetRemovalMode());
     if (!clipped) {
         result.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
@@ -494,9 +494,8 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
         return result;
     }
 
-    // ── 步骤 3：结果回填 ──
-    // diagnostics + cropData + box 3D outline + polydata 3D clip preview 一次性封装
-    // 格式与 Image 路径完全一致，Preview 层统一消费
+    // 回填 diagnostics、cropData、outline 和 clipped polydata；
+    // result 形状保持与 image preview 一致，方便上层统一分发。
     const auto statistics = GetPolyDataStatisticsFromClipped(clipped);
 
     result.SetStatistics(statistics);

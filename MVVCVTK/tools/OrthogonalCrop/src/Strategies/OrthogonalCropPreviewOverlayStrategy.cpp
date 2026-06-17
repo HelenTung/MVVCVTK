@@ -105,18 +105,15 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
 
 void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
 {
-    // ═══ 裁切结果 → 三类可视化数据分发 ═══
-    // a) outlinePolyData  → m_outlineMapper    (3D 线框 + 2D 参考, 所有窗口共享)
-    // b) derivedPolyData  → m_polyDataMapper   (仅 3D 窗口: clipped 半透明网格)
-    // c) maskImage → m_maskMapper       (仅 2D 窗口: 半透明颜色叠加)
+    // 裁切结果在 overlay 层拆成 outline、clipped polydata、mask 三种显示数据；
+    // 同一份 result 由当前窗口轴向决定最终可见内容，避免算法层关心窗口类型。
     if (!result.GetSucceeded()) {
         ClearPreview();
         return;
     }
 
-    // ── 分发 A：outlinePolyData（所有窗口共享的公共几何表示） ──
-    // 3D 窗口 → 裁切盒线框 + 半透明实体区域（m_previewRegionMapper）
-    // 2D 窗口 → 裁切盒在切片上的投影轮廓
+    // outline 是所有窗口共享的几何参照；
+    // 3D 用它显示线框和实体区域，2D 用它显示切片投影轮廓。
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -124,9 +121,8 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         m_previewRegionMapper->SetInputData(outline);
     }
 
-    // ── 分发 B：derivedPolyData（仅 polydata 路径） ──
-    // clipped 网格以半透明叠加方式显示在 3D 窗口
-    // 若 3D 主窗口已被 bridge 常驻 clip 管道接管，bridge 会先剥离此字段避免重复绘制
+    // clipped polydata 只服务 3D overlay；
+    // 若主 3D 模型已经接管 clip 显示，bridge 会剥离该字段以避免重复绘制。
     auto clippedPolyData = result.GetClipPolyData();
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {
@@ -134,18 +130,16 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // ── 分发 C：maskImage（仅 image 路径 2D mask preview） ──
-    // 2D 窗口 → vtkImageResliceMapper 切片显示，颜色由 m_maskLut 控制
-    // 3D 窗口 → mask 不可见（只依赖 outline + 主模型 clip）
+    // mask image 只服务 image 路径的 2D 预览；
+    // 3D 窗口依赖 outline 和主模型 clip，不直接显示 mask。
     auto maskImage = result.GetMaskImage();
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
         m_maskMapper->SetInputData(maskImage);
     }
 
-    // ── 最终可见性决策 ──
-    // m_sliceAxis < 0 (3D)：显示 outline + region，隐藏 mask
-    // m_sliceAxis >= 0 (2D)：显示 outline + mask，隐藏 region
+    // 可见性统一在最后收口；
+    // 这样数据更新和窗口轴向切换都能复用同一套显示决策。
     UpdateVisiblePreviewProps();
 }
 
