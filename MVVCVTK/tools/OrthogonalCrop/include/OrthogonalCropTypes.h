@@ -80,6 +80,14 @@ enum class CropExecutionMode {
     Submit
 };
 
+// PreviewArtifact 模式下期望生成的预览产物粒度。
+enum class CropPreviewArtifactMode {
+    // 只生成 3D outline guide，用于高频交互反馈，避免触发 mask / clip 重型管线。
+    Lightweight3DOutlineGuide,
+    // 生成当前数据源对应的完整预览产物：image mask 或 polydata clip。
+    FullPreview
+};
+
 // Router 输入侧的数据来源选择。
 enum class OrthogonalCropDataSource {
     // 自动选择：按当前可用输入在 image/polydata 之间回退。
@@ -275,6 +283,12 @@ public:
     // 设置本次请求只做 2D/3D 预览产物，还是要求真正输出 image 主数据提交结果。
     void SetExecutionMode(CropExecutionMode executionMode) { m_executionMode = executionMode; }
 
+    // 返回 PreviewArtifact 模式下需要生成轻量 outline 还是完整预览产物。
+    CropPreviewArtifactMode GetPreviewArtifactMode() const { return m_previewArtifactMode; }
+
+    // 设置 PreviewArtifact 模式下的预览产物粒度；Submit 会忽略该字段。
+    void SetPreviewArtifactMode(CropPreviewArtifactMode previewArtifactMode) { m_previewArtifactMode = previewArtifactMode; }
+
     // 返回 inside / outside 的保留语义。
     CropRemovalMode GetRemovalMode() const { return m_removalMode; }
 
@@ -304,6 +318,8 @@ private:
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
     CropExecutionMode m_executionMode = CropExecutionMode::PreviewArtifact;
+    // PreviewArtifact 模式下的产物粒度；用于让 Router 内部选择 guide / full preview 后端。
+    CropPreviewArtifactMode m_previewArtifactMode = CropPreviewArtifactMode::FullPreview;
     // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image submit 合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
     // 输入数据当前附带的全局偏移补偿矩阵；submit 后会继续累加新的 origin 偏移。
@@ -377,6 +393,12 @@ public:
     // 写入结果采用的具体后端实现。
     void SetResolvedBackend(OrthogonalCropResolvedBackend backend) { m_resolvedBackend = backend; }
 
+    // 返回本次结果对应的 inside / outside 保留语义。
+    CropRemovalMode GetRemovalMode() const { return m_removalMode; }
+
+    // 写入本次结果对应的 inside / outside 保留语义。
+    void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
+
     // 返回本次执行是否构造出了有效结果。
     bool GetSucceeded() const { return m_succeeded; }
 
@@ -442,6 +464,8 @@ private:
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::Auto;
     // 结果实际采用的后端实现；决定调用方该如何理解 image/polydata/2D/3D 产物来源。
     OrthogonalCropResolvedBackend m_resolvedBackend = OrthogonalCropResolvedBackend::None;
+    // 这次结果对应的保留语义；上层分发 preview 时以结果为准，避免再读取 bridge 的临时状态。
+    CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_succeeded = false;
     // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。

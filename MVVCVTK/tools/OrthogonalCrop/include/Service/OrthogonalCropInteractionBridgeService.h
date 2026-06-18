@@ -192,6 +192,7 @@ private:
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
+    static const char* GetPreviewArtifactModeText(CropPreviewArtifactMode previewArtifactMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
     static const char* GetResolvedBackendText(OrthogonalCropResolvedBackend backend);
 

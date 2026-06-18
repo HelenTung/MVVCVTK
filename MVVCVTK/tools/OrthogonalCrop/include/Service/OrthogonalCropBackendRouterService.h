@@ -5,8 +5,8 @@
 // 分类: Service / Backend Router
 // 说明: 在 image 与 polydata 两条裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
-// Router 根据 preferredDataSource 和当前输入确定 active data source；
-// 默认 request、轻量预览、诊断查询和结果执行都从这里收口，屏蔽 UI 层的后端判断。
+// Router 根据 preferredDataSource、当前输入和 request 模式确定 active data source 与预览粒度；
+// 默认 request、诊断查询和结果执行都从这里收口，屏蔽 UI 层的后端判断。
 // image 路径委托 OrthogonalCropPluginService，polydata 路径在 Router 内归一化并执行 clip，
 // 两条路径最终都回填统一的 OrthogonalCropResult / OrthogonalCropStatistics。
 
@@ -52,14 +52,14 @@ public:
     // 调用方只需要提交统一 request，不需要提前知道自己会落到 image 还是 polydata 后端。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
-    // 执行当前请求并返回完整结果，内部会按数据源分发。
-    // 结果对象会补齐 resolved source / backend，供交互桥和 overlay 直接消费。
+    // 执行当前请求并返回统一结果，内部会按数据源和 preview artifact mode 分发。
+    // 结果对象会补齐 resolved source / backend / removal mode，供交互桥和 overlay 直接消费。
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
+private:
     // 执行 3D outline guide preview：只归一化 request->cropData 并生成 outline，不跑 2D mask / 3D clip / 统计。
     OrthogonalCropResult GetGuidePreviewResult(const OrthogonalCropRequest& request) const;
 
-private:
     // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。
     vtkSmartPointer<vtkPolyData> GetClippedPolyData(
         const CropDataModel& cropData,

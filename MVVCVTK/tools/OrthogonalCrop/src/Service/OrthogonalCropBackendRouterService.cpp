@@ -107,8 +107,19 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const OrthogonalCropRequest& request) const
 {
-    // 诊断入口与执行入口保持同样的路由规则
-    // 避免"诊断通过但执行失败"来自不同后端的歧义
+    // 诊断入口与执行入口保持同样的路由规则；
+    // PreviewArtifact 的产物粒度也在这里生效，避免轻量请求误触发重型 clip / mask 诊断。
+    if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
+        && request.GetPreviewArtifactMode() == CropPreviewArtifactMode::Lightweight3DOutlineGuide) {
+        const auto guideResult = GetGuidePreviewResult(request);
+        OrthogonalCropStatistics statistics;
+        statistics.SetResolvedDataSource(guideResult.GetResolvedDataSource());
+        statistics.SetResolvedBackend(guideResult.GetResolvedBackend());
+        statistics.SetFailureReason(guideResult.GetFailureReason());
+        statistics.SetValidationMessage(guideResult.GetMessage());
+        return statistics;
+    }
+
     if (request.GetExecutionMode() == CropExecutionMode::Submit) {
         if (!GetInputImage()) {
             auto statistics = GetMissingInputStatistics();
@@ -140,19 +151,26 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
-    // 根据执行模式和活跃数据源路由后端；
-    // submit 只支持 image，preview 则按 preferredDataSource 或 Auto 回退规则选择 image/polydata。
+    // 根据执行模式、预览产物粒度和活跃数据源路由后端；
+    // bridge 只提交统一 request，具体 guide / mask / clip / submit 入口都在 Router 内收口。
+    if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
+        && request.GetPreviewArtifactMode() == CropPreviewArtifactMode::Lightweight3DOutlineGuide) {
+        return GetGuidePreviewResult(request);
+    }
+
     if (request.GetExecutionMode() == CropExecutionMode::Submit) {
         if (!GetInputImage()) {
             auto result = GetMissingInputResult();
             result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
             result.SetResolvedBackend(OrthogonalCropResolvedBackend::SubmitExtractVOI);
+            result.SetRemovalMode(request.GetRemovalMode());
             result.SetMessage("Image submit requires image input data.");
             return result;
         }
 
         auto result = m_imageService.GetResult(request);
         result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+        result.SetRemovalMode(request.GetRemovalMode());
         if (result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {
             result.SetResolvedBackend(OrthogonalCropResolvedBackend::SubmitExtractVOI);
         }
@@ -165,6 +183,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
         // Router 只补 resolvedDataSource，保持 image 算法入口独立。
         auto result = m_imageService.GetResult(request);
         result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+        result.SetRemovalMode(request.GetRemovalMode());
         if (request.GetExecutionMode() == CropExecutionMode::PreviewArtifact
             && result.GetResolvedBackend() == OrthogonalCropResolvedBackend::None) {
             result.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
@@ -175,8 +194,11 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
         // polydata 分支在 Router 内完成归一化、clip 和结果封装；
         // 缓存判断留在 GetClippedPolyData，避免重复执行昂贵 VTK 管道。
         return GetPolyDataResult(request);
-    default:
-        return GetMissingInputResult();
+    default: {
+        auto result = GetMissingInputResult();
+        result.SetRemovalMode(request.GetRemovalMode());
+        return result;
+    }
     }
 }
 
@@ -184,6 +206,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetGuidePreviewResult(c
 {
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
+    result.SetRemovalMode(request.GetRemovalMode());
 
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
@@ -219,8 +242,14 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetGuidePreviewResult(c
     }
 
     // 3D outline guide 只提供显示分发必需字段；诊断、2D mask 和 3D clipped polydata 留给完整结果入口。
+    OrthogonalCropStatistics statistics;
+    statistics.SetResolvedDataSource(result.GetResolvedDataSource());
+    statistics.SetResolvedBackend(result.GetResolvedBackend());
+    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetStatistics(statistics);
     result.SetCropDataModel(cropData);
     result.SetOutlinePolyData(OrthogonalCropAlgorithm::GetOutlinePolyData(cropData));
     return result;
@@ -461,6 +490,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPolyDataResult(const
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::ClipPreview);
+    result.SetRemovalMode(request.GetRemovalMode());
     result.SetCropStateModel(request.GetCropStateModel());
 
     // 先把 request 归一化为 polydata cropData；

@@ -573,8 +573,8 @@ Step 11: 只让一个窗口进入 Start()
 - 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
 
 8) OrthogonalCropInteractionBridgeService::SetFullPreviewRequired
-- 做什么：控制 preview 是否必须生成完整 image 2D mask / polydata 3D clip 等重型结果。
-- 为什么：当前默认值是 true，优先保证完整 preview artifact preview 语义；3D outline guide 改成显式用户选择，而不是自动猜测。
+- 做什么：控制 BuildPreviewRequest 写入 FullPreview 还是 Lightweight3DOutlineGuide。
+- 为什么：预览粒度必须随 request 透传给 router，让 bridge 只表达 UI 选择，不直接挑后端入口。
 
 9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewMode / ApplySubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
@@ -635,11 +635,13 @@ Step 11: 只让一个窗口进入 Start()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
+- 写入当前 previewArtifactMode：FullPreview 或 Lightweight3DOutlineGuide。
 - 写入 cropStateModel。
 
 5. UpdatePreviewFromCurrentBounds()
-- full preview：走 GetResult()，拿完整 statistics/result。
-- lightweight preview：只构造 cropData + outline，跳过重型完整产物。
+- 统一调用 router->GetResult(previewRequest)。
+- router 读取 previewArtifactMode：FullPreview 生成 image mask / polydata clip，Lightweight3DOutlineGuide 只生成 cropData + outline。
+- 为什么：bridge 不再知道 guide/full 两个后端入口，预览粒度由 request 透传到 router 内部决策。
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。
@@ -738,5 +740,5 @@ Step 11: 只让一个窗口进入 Start()
 3. 所有 SetXxx 大多先改 SharedState，再由 Timer 心跳把状态同步到 Strategy/VTK 对象。
 4. 回调里能安全假设“主线程状态已经收敛过一轮”，但不要因此绕过 service/context 直接改底层 VTK 管线。
 5. OrthogonalCrop bridge 负责交互，不负责算法；router 负责路由，不负责键位；algorithm 负责结果，不负责窗口。
-6. 当前 preview 默认是 Full，`3` 才切 Lightweight/Full；不要依赖 2D 窗口自动判断的旧逻辑。
+6. 当前 preview 默认是 Full，`3` 只切 request.previewArtifactMode；不要让 bridge 直接分叉调用后端入口。
 */

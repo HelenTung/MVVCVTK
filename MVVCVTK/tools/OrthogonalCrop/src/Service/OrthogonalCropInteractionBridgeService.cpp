@@ -582,6 +582,10 @@ const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview
 
     previewRequest.SetBoxToInputModelMatrix(boxToInputModelMatrixData);
     previewRequest.SetExecutionMode(CropExecutionMode::PreviewArtifact);
+    previewRequest.SetPreviewArtifactMode(
+        m_fullPreviewRequired
+            ? CropPreviewArtifactMode::FullPreview
+            : CropPreviewArtifactMode::Lightweight3DOutlineGuide);
     previewRequest.SetRemovalMode(m_currentRemovalMode);
 
     auto cropState = previewRequest.GetCropStateModel();
@@ -601,45 +605,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     }
 
     // 将当前 widget world 有向盒固化为 active input model request；
-    // 后端只消费这份稳定几何，避免直接依赖 widget 生命周期与渲染状态。
+    // 后端根据 request 内的 preview artifact mode 选择轻量 guide 或完整预览产物。
     const auto previewRequest = BuildPreviewRequest();
-
-    // 轻量预览只生成 3D outline guide；
-    // 用于模式切换和交互反馈，避免把 2D mask、3D clip、统计管道放进频繁刷新路径。
-    if (!m_fullPreviewRequired) {
-        const auto previewResult = m_backend.GetGuidePreviewResult(previewRequest);
-        if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None || !previewResult.GetSucceeded()) {
-            if (logStats) {
-                std::cerr << "[Main] Orthogonal crop preview failed: "
-                    << GetFailureReasonText(previewResult.GetFailureReason())
-                    << " - " << previewResult.GetMessage() << std::endl;
-            }
-            return;
-        }
-
-        // 分发轻量结果到主 3D 预览或 overlay；
-        // 日志记录接管位置，方便判断当前是主模型预览还是仅 overlay 显示。
-        const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
-        if (logStats) {
-            std::cout
-                << "[Main] Orthogonal crop preview updated. source = "
-                << GetDataSourceText(previewResult.GetResolvedDataSource())
-                << ", artifact = Lightweight3DOutlineGuide"
-                << ", removal = "
-                << GetRemovalModeText(m_currentRemovalMode)
-                << ", main3D = "
-                << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
-                << ", bounds = ["
-                << m_currentWorldBounds[0] << ", " << m_currentWorldBounds[1] << "; "
-                << m_currentWorldBounds[2] << ", " << m_currentWorldBounds[3] << "; "
-                << m_currentWorldBounds[4] << ", " << m_currentWorldBounds[5] << "]"
-                << std::endl;
-        }
-        return;
-    }
-
-    // 完整预览经 Router 进入对应后端；
-    // image 数据生成 2D mask artifact，polydata 数据生成 3D clip artifact。
     const auto previewResult = GetResult(previewRequest);
     const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
@@ -660,8 +627,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // 分发完整结果到所有预览目标；
-    // 主 3D 窗口优先接管体绘制或 polydata clip，overlay 只保留未被主模型接管的 artifact。
+    // 分发预览结果到所有目标；
+    // 轻量模式只携带 outline，完整模式再携带 image mask 或 polydata clip artifact。
     const bool main3DPreviewApplied = DispatchPreviewResult(previewResult);
 
     // 3D 主模型 clip 只是临时显示状态；
@@ -679,11 +646,12 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         std::cout
             << "[Main] Orthogonal crop preview updated. source = "
             << GetDataSourceText(dataSource)
-            << ", artifact = FullPreview"
+            << ", artifact = "
+            << GetPreviewArtifactModeText(previewRequest.GetPreviewArtifactMode())
             << ", backend = "
             << GetResolvedBackendText(backend)
             << ", removal = "
-            << GetRemovalModeText(m_currentRemovalMode)
+            << GetRemovalModeText(previewResult.GetRemovalMode())
             << ", main3D = "
             << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
             << ", bounds = ["
@@ -763,6 +731,18 @@ const char* OrthogonalCropInteractionBridgeService::GetRemovalModeText(CropRemov
         return "KeepInside";
     case CropRemovalMode::RemoveInside:
         return "RemoveInside";
+    }
+
+    return "Unknown";
+}
+
+const char* OrthogonalCropInteractionBridgeService::GetPreviewArtifactModeText(CropPreviewArtifactMode previewArtifactMode)
+{
+    switch (previewArtifactMode) {
+    case CropPreviewArtifactMode::Lightweight3DOutlineGuide:
+        return "Lightweight3DOutlineGuide";
+    case CropPreviewArtifactMode::FullPreview:
+        return "FullPreview";
     }
 
     return "Unknown";
@@ -893,7 +873,7 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(const Orthogo
             }
 
             target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
-            target.overlayStrategy->SetRemovalMode(m_currentRemovalMode);
+            target.overlayStrategy->SetRemovalMode(previewResult.GetRemovalMode());
             target.overlayStrategy->SetCropResult(overlayResult);
             main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
             target.service->MarkDirty();
@@ -926,7 +906,7 @@ bool OrthogonalCropInteractionBridgeService::ApplyVolumePreview(
     volumeMapper->RemoveAllClippingPlanes();
     volumeMapper->CroppingOff();
 
-    if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
+    if (previewResult.GetRemovalMode() != CropRemovalMode::KeepInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
         if (!ApplyVolumeRemoveInsidePreview(volume, gpuVolumeMapper, previewResult)) {
             volumeMapper->SetCroppingRegionFlagsToSubVolume();
@@ -1152,7 +1132,7 @@ bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
     // 每次刷新只更新 cropData 派生出的 clip function 和 removal mode；
     // 持久管道不重建、不换输入，让主窗口显示主模型本体的 clip 结果而不是叠加网格。
     target.mainPreviewClipFilter->SetClipFunction(clipFunction);
-    if (m_currentRemovalMode == CropRemovalMode::KeepInside) {
+    if (previewResult.GetRemovalMode() == CropRemovalMode::KeepInside) {
         target.mainPreviewClipFilter->InsideOutOn();
     }
     else {

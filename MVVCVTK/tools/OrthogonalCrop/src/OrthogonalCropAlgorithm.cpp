@@ -772,6 +772,7 @@ static OrthogonalCropResult GetPreviewResult(
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
     result.SetResolvedBackend(OrthogonalCropResolvedBackend::MaskPreview);
+    result.SetRemovalMode(removalMode);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
@@ -832,6 +833,7 @@ static OrthogonalCropResult GetSubmitResult(
     // 同步修正 bounds 和 globalOffsetMatrix，保证上层共享坐标语义连续。
     OrthogonalCropResult result;
     result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+    result.SetRemovalMode(removalMode);
     result.SetCropDataModel(cropData);
     result.SetCropStateModel(cropState);
 
@@ -908,6 +910,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 {
     OrthogonalCropResult result;
     result.SetCropStateModel(request.GetCropStateModel());
+    result.SetRemovalMode(request.GetRemovalMode());
 
     // 将 request 归一化为 cropData；
     // request 只携带 boxToInputModelMatrix，cropData 再派生 input model AABB 供后端执行。
