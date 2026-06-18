@@ -547,7 +547,8 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
         localDimensions,
         localToWorldMatrixData);
 
-    // boxToLocal 把固定标准盒 [-1,1]^3 放回 widget 的 local 初始盒： local指的是再次进入裁切的默认初始化盒，box指的是虚构正交盒
+	// boxToLocal 把固定标准盒 [-1,1]^3 放回 widget 的 local 初始盒： local指的是再次进入裁切的默认初始化盒，box是标准盒。这个矩阵里包含了 widget 当前 local 盒的缩放和平移，但不包含旋转（因为 widget 是轴对齐的）。后端拿到这个矩阵后，会先把标准盒变换到 widget local，
+    // 再通过 localToWorld 把它放到 world，最后通过 worldToModel 把它折回 model。
 	// local = center + box * (localDimensions / 2)。构造了一个box到local的仿射矩阵。但是这里只是AABB的缩放和平移，没有旋转。
     auto boxToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToLocalMatrix->Identity();
