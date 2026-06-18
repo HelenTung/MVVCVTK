@@ -160,7 +160,7 @@ private:
     // 基于当前 widget 有向盒组装一次 preview request。
     // 这里把标准盒 [-1,1]^3 依次映射到初始 world、当前 world、active input model，
     // 最终只把 boxToInputModelMatrix 下发给后端，避免后端反向读取 UI 状态。
-    OrthogonalCropRequest BuildPreviewRequest() const;
+    const OrthogonalCropRequest BuildPreviewRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
     void UpdatePreviewFromCurrentBounds(bool logStats);

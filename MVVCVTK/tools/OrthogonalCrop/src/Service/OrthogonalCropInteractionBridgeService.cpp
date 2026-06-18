@@ -520,7 +520,7 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToActiveI
     return worldToActiveInputModelMatrixData;
 }
 
-OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
+const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
 {
     // 先获取当前数据源的默认 request；
     // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
