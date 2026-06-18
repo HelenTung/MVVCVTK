@@ -27,10 +27,10 @@
 // 统一的 bounds 比较容差，避免浮点误差导致边界判断抖动。
 static constexpr double BoundsEpsilon = 1e-6;
 
-static std::array<double, 6> GetImageBounds(vtkImageData* image)
+static std::array<double, 6> GetImageModelBounds(vtkImageData* image)
 {
     // vtkImageData::GetBounds 返回 image model 范围；底层仍通过 VTK physical-point API 表达。
-    // 这里不再额外做 world/model 折叠，算法层后续所有 image 校验都直接用 model 语义。
+    // 这里不再额外做 world/image model 折叠，算法层后续所有 image 校验都直接用 image model 语义。
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!image) {
         return bounds;
@@ -59,53 +59,53 @@ static std::string GetBoundsMessage(const char* prefix, const std::array<double,
 }
 
 static bool GetBoundsOverlap(
-    const std::array<double, 6>& dataModelBounds,
-    const std::array<double, 6>& cropModelBounds)
+    const std::array<double, 6>& inputModelBounds,
+    const std::array<double, 6>& cropInputModelBounds)
 {
     // preview 允许 partial overlap，因此这里只判断两个轴对齐盒是否真正有体积交集。
-    return cropModelBounds[1] > dataModelBounds[0] + BoundsEpsilon
-        && cropModelBounds[0] < dataModelBounds[1] - BoundsEpsilon
-        && cropModelBounds[3] > dataModelBounds[2] + BoundsEpsilon
-        && cropModelBounds[2] < dataModelBounds[3] - BoundsEpsilon
-        && cropModelBounds[5] > dataModelBounds[4] + BoundsEpsilon
-        && cropModelBounds[4] < dataModelBounds[5] - BoundsEpsilon;
+    return cropInputModelBounds[1] > inputModelBounds[0] + BoundsEpsilon
+        && cropInputModelBounds[0] < inputModelBounds[1] - BoundsEpsilon
+        && cropInputModelBounds[3] > inputModelBounds[2] + BoundsEpsilon
+        && cropInputModelBounds[2] < inputModelBounds[3] - BoundsEpsilon
+        && cropInputModelBounds[5] > inputModelBounds[4] + BoundsEpsilon
+        && cropInputModelBounds[4] < inputModelBounds[5] - BoundsEpsilon;
 }
 
 static bool GetBoundsContained(
-    const std::array<double, 6>& dataModelBounds,
-    const std::array<double, 6>& cropModelBounds)
+    const std::array<double, 6>& inputModelBounds,
+    const std::array<double, 6>& cropInputModelBounds)
 {
-    // 严格校验路径要求裁切盒完整包含在数据 model bounds 内。
+    // 严格校验路径要求裁切盒完整包含在 active input model bounds 内。
     // Image KeepInside submit 会走 partial overlap：后续 snapped index 会 clamp 到有效体素范围。
-    return cropModelBounds[0] >= dataModelBounds[0] - BoundsEpsilon
-        && cropModelBounds[1] <= dataModelBounds[1] + BoundsEpsilon
-        && cropModelBounds[2] >= dataModelBounds[2] - BoundsEpsilon
-        && cropModelBounds[3] <= dataModelBounds[3] + BoundsEpsilon
-        && cropModelBounds[4] >= dataModelBounds[4] - BoundsEpsilon
-        && cropModelBounds[5] <= dataModelBounds[5] + BoundsEpsilon;
+    return cropInputModelBounds[0] >= inputModelBounds[0] - BoundsEpsilon
+        && cropInputModelBounds[1] <= inputModelBounds[1] + BoundsEpsilon
+        && cropInputModelBounds[2] >= inputModelBounds[2] - BoundsEpsilon
+        && cropInputModelBounds[3] <= inputModelBounds[3] + BoundsEpsilon
+        && cropInputModelBounds[4] >= inputModelBounds[4] - BoundsEpsilon
+        && cropInputModelBounds[5] <= inputModelBounds[5] + BoundsEpsilon;
 }
 
-static std::array<double, 6> GetModelBoundsFromBoxToModelMatrix(const std::array<double, 16>& boxToModelMatrixData)
+static std::array<double, 6> GetInputModelBoundsFromBoxToInputModelMatrix(const std::array<double, 16>& boxToInputModelMatrixData)
 {
-    // boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源；
-    // AABB 只通过 8 个标准角点派生，用于统一校验、index 吸附和统计范围。
-    auto boxToModelTransform = vtkSmartPointer<vtkTransform>::New();
-    boxToModelTransform->SetMatrix(boxToModelMatrixData.data());
+    // 从 boxToInputModelMatrix 派生 active input model AABB；
+    // 8 个标准盒角点保留有向盒的真实外包范围，后续用它做校验、index 吸附和统计。
+    auto boxToInputModelTransform = vtkSmartPointer<vtkTransform>::New();
+    boxToInputModelTransform->SetMatrix(boxToInputModelMatrixData.data());
 
-    vtkBoundingBox modelBounds;
+    vtkBoundingBox inputModelBounds;
     for (int sx = -1; sx <= 1; sx += 2) {
         for (int sy = -1; sy <= 1; sy += 2) {
             for (int sz = -1; sz <= 1; sz += 2) {
                 const double boxPoint[3] = { static_cast<double>(sx), static_cast<double>(sy), static_cast<double>(sz) };
-                double modelPoint[3] = { 0.0, 0.0, 0.0 };
-                boxToModelTransform->TransformPoint(boxPoint, modelPoint);
-                modelBounds.AddPoint(modelPoint);
+                double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
+                boxToInputModelTransform->TransformPoint(boxPoint, inputModelPoint);
+                inputModelBounds.AddPoint(inputModelPoint);
             }
         }
     }
 
     double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    modelBounds.GetBounds(bounds);
+    inputModelBounds.GetBounds(bounds);
     return { bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5] };
 }
 
@@ -120,38 +120,38 @@ static std::array<double, 16> GetSourceToTargetMatrixArray(vtkMatrix4x4* sourceT
     return sourceToTargetMatrixData;
 }
 
-static vtkSmartPointer<vtkTransform> GetBoxToModelTransform(const std::array<double, 16>& boxToModelMatrixData)
+static vtkSmartPointer<vtkTransform> GetBoxToInputModelTransform(const std::array<double, 16>& boxToInputModelMatrixData)
 {
-    auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToModelMatrix->DeepCopy(boxToModelMatrixData.data());
+    auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModelMatrix->DeepCopy(boxToInputModelMatrixData.data());
 
-    // 输出 outline 时从标准盒 [-1,1]^3 出发，直接用 box -> model 生成显示几何。
+    // 输出 outline 时从标准盒 [-1,1]^3 出发，直接用 box -> input model 生成显示几何。
     auto transform = vtkSmartPointer<vtkTransform>::New();
-    transform->SetMatrix(boxToModelMatrix);
+    transform->SetMatrix(boxToInputModelMatrix);
     return transform;
 }
 
-static vtkSmartPointer<vtkMatrix4x4> GetModelToBoxMatrix(const CropDataModel& cropData)
+static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataModel& cropData)
 {
-    auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
+    auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
     // inside/outside 判定统一在标准盒空间完成：
-    // model 点乘以 modelToBox 后，只需检查三个坐标是否落在 [-1,1]。
-    auto modelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToModelMatrix, modelToBoxMatrix);
-    return modelToBoxMatrix;
+    // input model 点乘以 inputModelToBox 后，只需检查三个坐标是否落在 [-1,1]。
+    auto inputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToInputModelMatrix, inputModelToBoxMatrix);
+    return inputModelToBoxMatrix;
 }
 
-static bool GetBoxToModelIsAxisAligned(const std::array<double, 16>& boxToModelMatrixData)
+static bool GetBoxToInputModelIsAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData)
 {
-    // 只识别无旋转/无剪切的对角矩阵快路径；任意旋转或剪切仍走标准 modelToBox 判断。
-    return std::abs(boxToModelMatrixData[1]) <= BoundsEpsilon
-        && std::abs(boxToModelMatrixData[2]) <= BoundsEpsilon
-        && std::abs(boxToModelMatrixData[4]) <= BoundsEpsilon
-        && std::abs(boxToModelMatrixData[6]) <= BoundsEpsilon
-        && std::abs(boxToModelMatrixData[8]) <= BoundsEpsilon
-        && std::abs(boxToModelMatrixData[9]) <= BoundsEpsilon;
+    // 只识别无旋转/无剪切的对角矩阵快路径；任意旋转或剪切仍走标准 inputModelToBox 判断。
+    return std::abs(boxToInputModelMatrixData[1]) <= BoundsEpsilon
+        && std::abs(boxToInputModelMatrixData[2]) <= BoundsEpsilon
+        && std::abs(boxToInputModelMatrixData[4]) <= BoundsEpsilon
+        && std::abs(boxToInputModelMatrixData[6]) <= BoundsEpsilon
+        && std::abs(boxToInputModelMatrixData[8]) <= BoundsEpsilon
+        && std::abs(boxToInputModelMatrixData[9]) <= BoundsEpsilon;
 }
 
 static bool GetCanonicalBoxContainsPoint(const double boxPoint[4])
@@ -234,8 +234,8 @@ static SubmitPlan BuildSubmitPlan(
     }
 
     if (!OrthogonalCropAlgorithm::GetBoundsAreValid(
-        GetImageBounds(image),
-        cropData.GetModelBounds(),
+        GetImageModelBounds(image),
+        cropData.GetInputModelBounds(),
         failureReason,
         validationMessage,
         allowPartialOverlap)) {
@@ -342,8 +342,8 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
         : totalVoxelCount;
     std::memset(maskPtr, outsideValue, static_cast<std::size_t>(allocatedVoxelCount));
 
-    if (GetBoxToModelIsAxisAligned(cropData.GetBoxToModelMatrix())) {
-        // 标准盒矩阵退化为 model 轴对齐盒时，snapped AABB 内部整块都属于 inside。
+    if (GetBoxToInputModelIsAxisAligned(cropData.GetBoxToInputModelMatrix())) {
+        // 标准盒矩阵退化为 input model 轴对齐盒时，snapped AABB 内部整块都属于 inside。
         if (useCompactMask) {
             std::memset(maskPtr, insideValue, static_cast<std::size_t>(allocatedVoxelCount));
         }
@@ -366,35 +366,35 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
         return maskImage;
     }
 
-    auto modelToBoxMatrix = GetModelToBoxMatrix(cropData);
+    auto inputModelToBoxMatrix = GetInputModelToBoxMatrix(cropData);
 
-    // 旋转/缩放盒的真实 inside 由“index 体素中心 -> model -> 标准盒空间”决定。
+    // 旋转/缩放盒的真实 inside 由“index 体素中心 -> image model -> 标准盒空间”决定。
     // 这里仍旧只在 snapped AABB 范围内遍历，避免为了旋转盒额外扩张执行域。
     const vtkIdType rowStride = useCompactMask ? width : dims[0];
     const vtkIdType sliceStride = useCompactMask
         ? static_cast<vtkIdType>(width) * height
         : static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
-    const double modelToBoxStepVector[4] = {
+    const double inputModelToBoxStepVector[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
         indexToPhysicalMatrix->GetElement(2, 0),
         0.0
     };
-    double modelToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
-    modelToBoxMatrix->MultiplyPoint(modelToBoxStepVector, modelToBoxStepResult);
+    double inputModelToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+    inputModelToBoxMatrix->MultiplyPoint(inputModelToBoxStepVector, inputModelToBoxStepResult);
 
     for (int k = minK; k <= maxK; ++k) {
         for (int j = minJ; j <= maxJ; ++j) {
             const int rowStartIndex[3] = { minI, j, k };
-            double modelPoint[3] = { 0.0, 0.0, 0.0 };
-            // 每一行先把 row 起点 index 转到 model，
-            // 再整体乘 modelToBox；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
+            double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
+            // 每一行先把 row 起点 index 转到 image model，
+            // 再整体乘 inputModelToBox；后续沿 i 方向只做增量推进，避免每个点都重乘矩阵。
             // image model 底层通过 VTK physical-point API 表达。
-            image->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
-            const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
+            image->TransformIndexToPhysicalPoint(rowStartIndex, inputModelPoint);
+            const double inputModelPoint4[4] = { inputModelPoint[0], inputModelPoint[1], inputModelPoint[2], 1.0 };
             double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
-            modelToBoxMatrix->MultiplyPoint(modelPoint4, boxPoint);
+            inputModelToBoxMatrix->MultiplyPoint(inputModelPoint4, boxPoint);
 
             for (int i = minI; i <= maxI; ++i) {
                 const bool isInside = GetCanonicalBoxContainsPoint(boxPoint);
@@ -410,10 +410,10 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
                     maskPtr[linearIndex] = insideValue;
                 }
 
-                boxPoint[0] += modelToBoxStepResult[0];
-                boxPoint[1] += modelToBoxStepResult[1];
-                boxPoint[2] += modelToBoxStepResult[2];
-                boxPoint[3] += modelToBoxStepResult[3];
+                boxPoint[0] += inputModelToBoxStepResult[0];
+                boxPoint[1] += inputModelToBoxStepResult[1];
+                boxPoint[2] += inputModelToBoxStepResult[2];
+                boxPoint[3] += inputModelToBoxStepResult[3];
             }
         }
     }
@@ -428,7 +428,7 @@ static vtkSmartPointer<vtkImageData> GetExtractedImage(
 {
     // image submit 的目标是导出真正独立的输出 image。
     // 这里先按 snapped index 做 vtkExtractVOI，再把 extent 起点归零，
-    // 同时把新的 model origin 设置成输出块起点对应的 model 坐标。
+    // 同时把新的 image model origin 设置成输出块起点对应的 image model 坐标。
     if (!image) {
         return nullptr;
     }
@@ -469,7 +469,7 @@ static void SetSubmitOutsideBoxToBackground(
     const CropDataModel& cropData)
 {
     if (!submitImage
-        || GetBoxToModelIsAxisAligned(cropData.GetBoxToModelMatrix())) {
+        || GetBoxToInputModelIsAxisAligned(cropData.GetBoxToInputModelMatrix())) {
         return;
     }
 
@@ -493,26 +493,26 @@ static void SetSubmitOutsideBoxToBackground(
         static_cast<std::size_t>(componentCount),
         scalarRange[0]);
 
-    auto modelToBoxMatrix = GetModelToBoxMatrix(cropData);
+    auto inputModelToBoxMatrix = GetInputModelToBoxMatrix(cropData);
     auto indexToPhysicalMatrix = submitImage->GetIndexToPhysicalMatrix();
-    const double modelToBoxStepVector[4] = {
+    const double inputModelToBoxStepVector[4] = {
         indexToPhysicalMatrix->GetElement(0, 0),
         indexToPhysicalMatrix->GetElement(1, 0),
         indexToPhysicalMatrix->GetElement(2, 0),
         0.0
     };
-    double modelToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
-    modelToBoxMatrix->MultiplyPoint(modelToBoxStepVector, modelToBoxStepResult);
+    double inputModelToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
+    inputModelToBoxMatrix->MultiplyPoint(inputModelToBoxStepVector, inputModelToBoxStepResult);
 
     for (int k = 0; k < dims[2]; ++k) {
         for (int j = 0; j < dims[1]; ++j) {
             const int rowStartIndex[3] = { 0, j, k };
-            double modelPoint[3] = { 0.0, 0.0, 0.0 };
-            submitImage->TransformIndexToPhysicalPoint(rowStartIndex, modelPoint);
+            double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
+            submitImage->TransformIndexToPhysicalPoint(rowStartIndex, inputModelPoint);
 
-            const double modelPoint4[4] = { modelPoint[0], modelPoint[1], modelPoint[2], 1.0 };
+            const double inputModelPoint4[4] = { inputModelPoint[0], inputModelPoint[1], inputModelPoint[2], 1.0 };
             double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
-            modelToBoxMatrix->MultiplyPoint(modelPoint4, boxPoint);
+            inputModelToBoxMatrix->MultiplyPoint(inputModelPoint4, boxPoint);
 
             for (int i = 0; i < dims[0]; ++i) {
                 if (!GetCanonicalBoxContainsPoint(boxPoint)) {
@@ -522,10 +522,10 @@ static void SetSubmitOutsideBoxToBackground(
                         backgroundTuple.data());
                 }
 
-                boxPoint[0] += modelToBoxStepResult[0];
-                boxPoint[1] += modelToBoxStepResult[1];
-                boxPoint[2] += modelToBoxStepResult[2];
-                boxPoint[3] += modelToBoxStepResult[3];
+                boxPoint[0] += inputModelToBoxStepResult[0];
+                boxPoint[1] += inputModelToBoxStepResult[1];
+                boxPoint[2] += inputModelToBoxStepResult[2];
+                boxPoint[3] += inputModelToBoxStepResult[3];
             }
         }
     }
@@ -535,7 +535,7 @@ static void SetSubmitOutsideBoxToBackground(
 
 static vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataModel& cropData)
 {
-    // box 3D outline preview 的几何真源同样是标准盒 [-1,1]^3 + boxToModelMatrix。
+    // box 3D outline preview 的几何真源同样是标准盒 [-1,1]^3 + boxToInputModelMatrix。
     auto cube = vtkSmartPointer<vtkCubeSource>::New();
     const auto canonicalBounds = GetCanonicalCropBoxBounds();
     cube->SetBounds(
@@ -544,10 +544,10 @@ static vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataMod
         canonicalBounds[4], canonicalBounds[5]);
     cube->Update();
 
-    auto boxToModelTransform = GetBoxToModelTransform(cropData.GetBoxToModelMatrix());
+    auto boxToInputModelTransform = GetBoxToInputModelTransform(cropData.GetBoxToInputModelMatrix());
     auto transformFilter = vtkSmartPointer<vtkTransformPolyDataFilter>::New();
     transformFilter->SetInputConnection(cube->GetOutputPort());
-    transformFilter->SetTransform(boxToModelTransform);
+    transformFilter->SetTransform(boxToInputModelTransform);
     transformFilter->Update();
 
     auto output = vtkSmartPointer<vtkPolyData>::New();
@@ -555,35 +555,37 @@ static vtkSmartPointer<vtkPolyData> GetOutlinePolyDataInternal(const CropDataMod
     return output;
 }
 bool OrthogonalCropAlgorithm::GetBoundsAreValid(
-    const std::array<double, 6>& dataModelBounds,
-    const std::array<double, 6>& cropModelBounds,
+    const std::array<double, 6>& inputModelBounds,
+    const std::array<double, 6>& cropInputModelBounds,
     OrthogonalCropFailureReason& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
     // allowPartialOverlap 表示裁切盒只要和输入有真实体积交集即可。
     // preview artifact 和 image KeepInside submit 都允许该语义；后者会提取交集范围。
-    // 这里默认调用方已经把 dataModelBounds 和 cropModelBounds 放到了同一 model 坐标系里，不再做二次折叠。
-    if (!GetBoundsHavePositiveVolume(dataModelBounds)) {
+    // inputModelBounds 是当前输入数据在 active input model 下的 AABB，
+    // cropInputModelBounds 是 boxToInputModelMatrix 派生出的裁切盒外接 AABB；
+    // 二者已在同一坐标系里，因此这里只判断正体积、相交或包含关系。
+    if (!GetBoundsHavePositiveVolume(inputModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
-        message = GetBoundsMessage("Data model bounds are invalid:", dataModelBounds);
+        message = GetBoundsMessage("Input model bounds are invalid:", inputModelBounds);
         return false;
     }
 
-    if (!GetBoundsHavePositiveVolume(cropModelBounds)) {
+    if (!GetBoundsHavePositiveVolume(cropInputModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
-        message = GetBoundsMessage("Crop model bounds are invalid:", cropModelBounds);
+        message = GetBoundsMessage("Crop input model bounds are invalid:", cropInputModelBounds);
         return false;
     }
 
     const bool inRange = allowPartialOverlap
-        ? GetBoundsOverlap(dataModelBounds, cropModelBounds)
-        : GetBoundsContained(dataModelBounds, cropModelBounds);
+        ? GetBoundsOverlap(inputModelBounds, cropInputModelBounds)
+        : GetBoundsContained(inputModelBounds, cropInputModelBounds);
     if (!inRange) {
         failureReason = OrthogonalCropFailureReason::BoundsOutOfRange;
         message = allowPartialOverlap
-            ? "Crop model bounds do not overlap the active model bounds."
-            : "Crop model bounds exceed the active model bounds.";
+            ? "Crop input model bounds do not overlap the active input model bounds."
+            : "Crop input model bounds exceed the active input model bounds.";
         return false;
     }
 
@@ -593,20 +595,21 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
 }
 
 bool OrthogonalCropAlgorithm::GetCropDataModel(
-    const std::array<double, 6>& dataModelBounds,
+    const std::array<double, 6>& inputModelBounds,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
     OrthogonalCropFailureReason& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
-    // request 的几何真源只有 boxToModelMatrix；cropData 只额外缓存由它派生出的 model AABB。
+    // 将 request 归一化为后端统一的 cropData；
+    // boxToInputModelMatrix 继续作为精确有向盒真源，inputModelBounds 只派生为校验和粗范围缓存。
     cropData = CropDataModel();
     cropData.SetGlobalOffsetMatrix(request.GetGlobalOffsetMatrix());
-    cropData.SetBoxToModelMatrix(request.GetBoxToModelMatrix());
-    cropData.SetModelBounds(GetModelBoundsFromBoxToModelMatrix(request.GetBoxToModelMatrix()));// 将正交盒转化为模型坐标下正交盒
+    cropData.SetBoxToInputModelMatrix(request.GetBoxToInputModelMatrix());
+    cropData.SetInputModelBounds(GetInputModelBoundsFromBoxToInputModelMatrix(request.GetBoxToInputModelMatrix()));
 
-    return GetBoundsAreValid(dataModelBounds, cropData.GetModelBounds(), failureReason, message, allowPartialOverlap);
+    return GetBoundsAreValid(inputModelBounds, cropData.GetInputModelBounds(), failureReason, message, allowPartialOverlap);
 }
 
 static bool BuildCropDataModel(
@@ -617,7 +620,7 @@ static bool BuildCropDataModel(
     std::string& message,
     bool allowPartialOverlap)
 {
-    // image 重载只负责把 vtkImageData 的 model bounds 作为 dataModelBounds 传下去；
+    // image 重载只负责把 vtkImageData 的 input model bounds 作为 inputModelBounds 传下去；
     // 真正的 request -> cropData 归一化仍由通用重载完成。
     if (!image) {
         failureReason = OrthogonalCropFailureReason::InputImageMissing;
@@ -626,7 +629,7 @@ static bool BuildCropDataModel(
     }
 
     return OrthogonalCropAlgorithm::GetCropDataModel(
-        GetImageBounds(image),
+        GetImageModelBounds(image),
         request,
         cropData,
         failureReason,
@@ -637,7 +640,7 @@ static bool BuildCropDataModel(
 static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData)
 {
     // image 路径最终都要落到体素级执行，因此先把已经折叠回 image model 的 bounds
-    // 通过 vtkImageData 原生的 model->continuous-index 变换吸附到 index 整数区间。
+    // 通过 vtkImageData 原生的 image-model -> continuous-index 变换吸附到 index 整数区间。
     // 这里显式变换 8 个角点，避免 direction 非单位矩阵时只按各轴独立换算导致包围盒失真。
     // 最终结果语义是一个“完整覆盖 crop bounds 的整数 index 包围盒”，供统计和执行路径共用。
     std::array<int, 6> indexBounds = { 0, 0, 0, 0, 0, 0 };
@@ -648,7 +651,7 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
     int dims[3] = { 0, 0, 0 };
     image->GetDimensions(dims);
 
-    const auto modelBounds = cropData.GetModelBounds();
+    const auto inputModelBounds = cropData.GetInputModelBounds();
     std::array<double, 3> minContinuousIndex = {
         std::numeric_limits<double>::max(),
         std::numeric_limits<double>::max(),
@@ -663,14 +666,14 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
     for (int sx = 0; sx < 2; ++sx) {
         for (int sy = 0; sy < 2; ++sy) {
             for (int sz = 0; sz < 2; ++sz) {
-                const double modelPoint[3] = {
-                    modelBounds[sx == 0 ? 0 : 1],
-                    modelBounds[sy == 0 ? 2 : 3],
-                    modelBounds[sz == 0 ? 4 : 5]
+                const double inputModelPoint[3] = {
+                    inputModelBounds[sx == 0 ? 0 : 1],
+                    inputModelBounds[sy == 0 ? 2 : 3],
+                    inputModelBounds[sz == 0 ? 4 : 5]
                 };
-                // model 点落在 index 的哪个连续子区间；VTK API 名里的 PhysicalPoint 对应 image model。
+                // input model 点落在 index 的哪个连续子区间；VTK API 名里的 PhysicalPoint 对应 image model。
                 double continuousIndex[3] = { 0.0, 0.0, 0.0 };
-                image->TransformPhysicalPointToContinuousIndex(modelPoint, continuousIndex);
+                image->TransformPhysicalPointToContinuousIndex(inputModelPoint, continuousIndex);
                 for (int axis = 0; axis < 3; ++axis) {
                     minContinuousIndex[axis] = std::min(minContinuousIndex[axis], continuousIndex[axis]);
                     maxContinuousIndex[axis] = std::max(maxContinuousIndex[axis], continuousIndex[axis]);
@@ -712,8 +715,8 @@ static OrthogonalCropStatistics GetImageDiagnostics(
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
         std::string validationMessage;
         if (!OrthogonalCropAlgorithm::GetBoundsAreValid(
-            GetImageBounds(image),
-            cropData.GetModelBounds(),
+            GetImageModelBounds(image),
+            cropData.GetInputModelBounds(),
             failureReason,
             validationMessage,
             true)) {
@@ -777,8 +780,8 @@ static OrthogonalCropResult GetPreviewResult(
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string validationMessage;
     if (!OrthogonalCropAlgorithm::GetBoundsAreValid(
-        GetImageBounds(image),
-        cropData.GetModelBounds(),
+        GetImageModelBounds(image),
+        cropData.GetInputModelBounds(),
         failureReason,
         validationMessage,
         true)) {
@@ -786,7 +789,7 @@ static OrthogonalCropResult GetPreviewResult(
         result.SetMessage(validationMessage);
         return result;
     }
-    // 将 model 角点吸附为 index bounds；
+    // 将 input model 角点吸附为 index bounds；
     // mask 执行只需要覆盖裁切盒可能影响到的体素范围。
     const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
 
@@ -807,7 +810,7 @@ static OrthogonalCropResult GetPreviewResult(
     result.SetStatistics(statistics);
     result.SetFailureReason(statistics.GetFailureReason());
 
-    // outline 使用 model 坐标回填；
+    // outline 使用 active input model 坐标回填；
     // overlay 可以直接与主数据矩阵对齐显示。
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
     result.SetSucceeded(result.GetMaskImage() != nullptr);
@@ -848,7 +851,7 @@ static OrthogonalCropResult GetSubmitResult(
     }
 
     // 提取独立的 image submit image；
-    // VOI 只能得到 index AABB，旋转盒还要用 modelToBox 清掉盒外角落，保证 submit 与 preview 语义一致。
+    // VOI 只能得到 index AABB，旋转盒还要用 inputModelToBox 清掉盒外角落，保证 submit 与 preview 语义一致。
     auto submitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
     if (!submitImage) {
         result.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
@@ -867,13 +870,13 @@ static OrthogonalCropResult GetSubmitResult(
     CropDataModel submitCropData = cropData;
     double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     submitImage->GetBounds(submitBounds);
-    const CropBoundsDouble6Array submitModelBounds = {
+    const CropBoundsDouble6Array submitInputModelBounds = {
         submitBounds[0], submitBounds[1],
         submitBounds[2], submitBounds[3],
         submitBounds[4], submitBounds[5]
     };
-    submitCropData.SetBoxToModelMatrixFromBounds(submitModelBounds);
-    submitCropData.SetModelBounds(submitModelBounds);
+    submitCropData.SetBoxToInputModelMatrixFromBounds(submitInputModelBounds);
+    submitCropData.SetInputModelBounds(submitInputModelBounds);
     submitCropData.SetGlobalOffsetMatrix(
         GetUpdatedOffsetMatrix(
             cropData.GetGlobalOffsetMatrix(),
@@ -907,7 +910,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     result.SetCropStateModel(request.GetCropStateModel());
 
     // 将 request 归一化为 cropData；
-    // request 只携带 boxToModelMatrix，cropData 再派生 model AABB 供后端执行。
+    // request 只携带 boxToInputModelMatrix，cropData 再派生 input model AABB 供后端执行。
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;

@@ -59,60 +59,61 @@ void OrthogonalCropWidgetStateController::SetInteractor(vtkRenderWindowInteracto
     m_widget->SetInteractor(interactor);
 }
 
-void OrthogonalCropWidgetStateController::SetReferenceBounds(const std::array<double, 6>& bounds)
+void OrthogonalCropWidgetStateController::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
 {
-    if (!GetBoundsAreValid(bounds)) {
+    if (!GetBoundsAreValid(worldBounds)) {
         return;
     }
 
-    // referenceBounds 是 Enable 时的回退基准，同时也是第一次 PlaceWidget 的边界来源。
-    m_referenceBounds = bounds;
-    if (!GetBoundsAreValid(m_currentBounds)) {
-        m_currentBounds = bounds;
+    // referenceWorldBounds 是 Enable 时的回退基准，同时也是第一次 PlaceWidget 的边界来源。
+    m_referenceWorldBounds = worldBounds;
+    if (!GetBoundsAreValid(m_currentWorldBounds)) {
+        m_currentWorldBounds = worldBounds;
     }
-    m_widgetLocalBounds = m_currentBounds;
-    m_representation->PlaceWidget(m_currentBounds.data());
+    m_widgetInitialWorldBounds = m_currentWorldBounds;
+    m_representation->PlaceWidget(m_currentWorldBounds.data());
 }
 
-void OrthogonalCropWidgetStateController::SetWidgetBounds(const std::array<double, 6>& bounds)
+void OrthogonalCropWidgetStateController::SetWidgetWorldBounds(const std::array<double, 6>& worldBounds)
 {
-    if (!GetBoundsAreValid(bounds)) {
+    if (!GetBoundsAreValid(worldBounds)) {
         return;
     }
 
-    m_currentBounds = bounds;
-    m_widgetLocalBounds = bounds;
-    m_representation->PlaceWidget(m_currentBounds.data());
+    m_currentWorldBounds = worldBounds;
+    m_widgetInitialWorldBounds = worldBounds;
+    m_representation->PlaceWidget(m_currentWorldBounds.data());
 }
 
-const std::array<double, 6>& OrthogonalCropWidgetStateController::GetCurrentBounds() const
+const std::array<double, 6>& OrthogonalCropWidgetStateController::GetCurrentWorldBounds() const
 {
-    return m_currentBounds;
+    return m_currentWorldBounds;
 }
 
-bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
-    CropVectorDouble3Array& localCenter,
-    CropVectorDouble3Array& localDimensions,
-    CropMatrixDouble16Array& localToWorldMatrix) const
+bool OrthogonalCropWidgetStateController::GetCurrentWorldBox(
+    CropVectorDouble3Array& initialWorldCenter,
+    CropVectorDouble3Array& initialWorldDimensions,
+    CropMatrixDouble16Array& initialWorldToCurrentWorldMatrix) const
 {
-    if (!m_representation || !GetBoundsAreValid(m_widgetLocalBounds)) {
+    if (!m_representation || !GetBoundsAreValid(m_widgetInitialWorldBounds)) {
         return false;
     }
-    //bridge 的 m_currentBounds 负责交互状态、初始摆放、日志；真正裁切几何不该依赖它，
-    // 而该依赖 widget controller 重建出的 local box + localToWorldMatrix。
-    localCenter = {
-        (m_widgetLocalBounds[0] + m_widgetLocalBounds[1]) * 0.5,
-        (m_widgetLocalBounds[2] + m_widgetLocalBounds[3]) * 0.5,
-        (m_widgetLocalBounds[4] + m_widgetLocalBounds[5]) * 0.5
+
+    // 先把最近一次 PlaceWidget 的 world AABB 拆成中心和尺寸；
+    // 这两个变量描述“未交互前的基准盒”，后续用它把标准盒放回同一个 world 体积。
+    initialWorldCenter = {
+        (m_widgetInitialWorldBounds[0] + m_widgetInitialWorldBounds[1]) * 0.5,
+        (m_widgetInitialWorldBounds[2] + m_widgetInitialWorldBounds[3]) * 0.5,
+        (m_widgetInitialWorldBounds[4] + m_widgetInitialWorldBounds[5]) * 0.5
     };
-    localDimensions = {
-        m_widgetLocalBounds[1] - m_widgetLocalBounds[0],
-        m_widgetLocalBounds[3] - m_widgetLocalBounds[2],
-        m_widgetLocalBounds[5] - m_widgetLocalBounds[4]
+    initialWorldDimensions = {
+        m_widgetInitialWorldBounds[1] - m_widgetInitialWorldBounds[0],
+        m_widgetInitialWorldBounds[3] - m_widgetInitialWorldBounds[2],
+        m_widgetInitialWorldBounds[5] - m_widgetInitialWorldBounds[4]
     };
 
-    // vtkBoxRepresentation 的 GetTransform 是相对 PlaceWidget 的分解结果；
-    // 这里直接用当前角点重建 localToWorld，保证旋转/平移后的盒几何就是唯一真源。真实的poly盒对比默认初始盒得到的矩阵
+    // 再从当前 widget polydata 读取交互后的 world 角点；
+    // polydata 保留旋转姿态，GetBounds 只给外接 AABB，不能表达真实有向盒。
     auto boxPolyData = vtkSmartPointer<vtkPolyData>::New();
     m_representation->GetPolyData(boxPolyData);
     if (!boxPolyData->GetPoints() || boxPolyData->GetNumberOfPoints() < 8) {
@@ -128,43 +129,42 @@ bool OrthogonalCropWidgetStateController::GetCurrentLocalBox(
     boxPolyData->GetPoint(3, currentP3);
     boxPolyData->GetPoint(4, currentP4);
 
-    // 取当前 P0/P1/P3/P4 四个角点，反解 affine，用 4 个稳定角点反解 affine:
-    // P0 是 local(minX,minY,minZ) 的当前 world 位置；
-    // P1/P3/P4 分别给出 local X/Y/Z 三条边在 world 中的方向和长度。
-    // 矩阵按行填充 worldX/worldY/worldZ 三个方程：
-    // world(row) = XAxis(row)*localX + YAxis(row)*localY + ZAxis(row)*localZ + offset(row)。
-    auto localToWorldVtkMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    localToWorldVtkMatrix->Identity();
+    // 用 P0/P1/P3/P4 反解 initialWorld -> currentWorld affine：
+    // currentP0 是基准盒 minX/minY/minZ 角点交互后的 world 位置，
+    // currentP1/currentP3/currentP4 分别提供基准盒 X/Y/Z 三条边的当前 world 方向和长度，
+    // 因此矩阵能表达用户拖拽后的旋转、缩放和平移，而不是只表达外接框大小。
+    auto initialWorldToCurrentWorldVtkMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    initialWorldToCurrentWorldVtkMatrix->Identity();
     for (int row = 0; row < 3; ++row) {
-        // 整条边除以 PlaceWidget 时的 local 尺寸，得到 local 每前进 1 个单位时 world 对应的步长。
-        const double localToWorldX =
-            (currentP1[row] - currentP0[row]) / localDimensions[0];
-        const double localToWorldY =
-            (currentP3[row] - currentP0[row]) / localDimensions[1];
-        const double localToWorldZ =
-            (currentP4[row] - currentP0[row]) / localDimensions[2];
+        // 每条当前 world 边除以基准盒原始 world 尺寸，得到 initialWorld 单位长度在 currentWorld 中的步长。
+        const double initialWorldToCurrentWorldX =
+            (currentP1[row] - currentP0[row]) / initialWorldDimensions[0];
+        const double initialWorldToCurrentWorldY =
+            (currentP3[row] - currentP0[row]) / initialWorldDimensions[1];
+        const double initialWorldToCurrentWorldZ =
+            (currentP4[row] - currentP0[row]) / initialWorldDimensions[2];
 
-        // 反解平移项，保证 local(minX,minY,minZ) 精确映射回 P0。
-        // P0 = XAxis*minX + YAxis*minY + ZAxis*minZ + offset。
-        const double localToWorldOffset =
+        // 反解 offset，让基准盒 min 角点精确映射到 currentP0；
+        // 这样矩阵同时包含原始 min 坐标补偿，不会把基准盒错误地当成从原点开始。
+        const double initialWorldToCurrentWorldOffset =
             currentP0[row]
-            - localToWorldX * m_widgetLocalBounds[0]
-            - localToWorldY * m_widgetLocalBounds[2]
-            - localToWorldZ * m_widgetLocalBounds[4];
+            - initialWorldToCurrentWorldX * m_widgetInitialWorldBounds[0]
+            - initialWorldToCurrentWorldY * m_widgetInitialWorldBounds[2]
+            - initialWorldToCurrentWorldZ * m_widgetInitialWorldBounds[4];
 
-        localToWorldVtkMatrix->SetElement(row, 0, localToWorldX);
-        localToWorldVtkMatrix->SetElement(row, 1, localToWorldY);
-        localToWorldVtkMatrix->SetElement(row, 2, localToWorldZ);
-        localToWorldVtkMatrix->SetElement(row, 3, localToWorldOffset);
+        initialWorldToCurrentWorldVtkMatrix->SetElement(row, 0, initialWorldToCurrentWorldX);
+        initialWorldToCurrentWorldVtkMatrix->SetElement(row, 1, initialWorldToCurrentWorldY);
+        initialWorldToCurrentWorldVtkMatrix->SetElement(row, 2, initialWorldToCurrentWorldZ);
+        initialWorldToCurrentWorldVtkMatrix->SetElement(row, 3, initialWorldToCurrentWorldOffset);
     }
 
-    vtkMatrix4x4::DeepCopy(localToWorldMatrix.data(), localToWorldVtkMatrix);
+    vtkMatrix4x4::DeepCopy(initialWorldToCurrentWorldMatrix.data(), initialWorldToCurrentWorldVtkMatrix);
     return true;
 }
 
-void OrthogonalCropWidgetStateController::SetBoundsChangedCallback(BoundsChangedCallback callback)
+void OrthogonalCropWidgetStateController::SetWorldBoundsChangedCallback(WorldBoundsChangedCallback callback)
 {
-    m_boundsChangedCallback = std::move(callback);
+    m_worldBoundsChangedCallback = std::move(callback);
 }
 
 bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
@@ -180,18 +180,18 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
     EnsureObserversAdded();
 
     if (enabled) {
-        // 启用前确保有合法 bounds；
-        // 当前盒无效时回退到 reference bounds，保证 PlaceWidget 有稳定输入。
-        if (!GetBoundsAreValid(m_currentBounds)) {
-            m_currentBounds = m_referenceBounds;
+        // 启用前确保有合法 world bounds；
+        // 当前盒无效时回退到 reference world bounds，保证 PlaceWidget 有稳定输入。
+        if (!GetBoundsAreValid(m_currentWorldBounds)) {
+            m_currentWorldBounds = m_referenceWorldBounds;
         }
 
-        if (!GetBoundsAreValid(m_currentBounds)) {
+        if (!GetBoundsAreValid(m_currentWorldBounds)) {
             return false;
         }
 
-        m_widgetLocalBounds = m_currentBounds;
-        m_representation->PlaceWidget(m_currentBounds.data());
+        m_widgetInitialWorldBounds = m_currentWorldBounds;
+        m_representation->PlaceWidget(m_currentWorldBounds.data());
         m_widget->On();
     }
     else {
@@ -250,20 +250,20 @@ void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventI
     }
 
     // GetBounds 只返回当前 widget 的 world AABB；
-    // 完整旋转姿态由 GetPolyData 重建 localToWorld，避免把外接框误当作有向盒。
-    const std::array<double, 6> bounds = {
+    // 完整旋转姿态由 GetPolyData 重建 initialWorldToCurrentWorld，避免把外接框误当作有向盒。
+    const std::array<double, 6> worldBounds = {
         rawBounds[0], rawBounds[1],
         rawBounds[2], rawBounds[3],
         rawBounds[4], rawBounds[5]
     };
-    if (!GetBoundsAreValid(bounds)) {
+    if (!GetBoundsAreValid(worldBounds)) {
         return;
     }
 
-    m_currentBounds = bounds;
-    if (m_boundsChangedCallback) {
+    m_currentWorldBounds = worldBounds;
+    if (m_worldBoundsChangedCallback) {
         // 这里不做任何 preview / 算法调用，只把纯状态变化上抛给交互桥。
         // 因此 dragging 与 released 的不同处理策略，完全由桥接层决定。
-        m_boundsChangedCallback(m_currentBounds, GetInteractionPhaseFromEvent(eventId));
+        m_worldBoundsChangedCallback(m_currentWorldBounds, GetInteractionPhaseFromEvent(eventId));
     }
 }

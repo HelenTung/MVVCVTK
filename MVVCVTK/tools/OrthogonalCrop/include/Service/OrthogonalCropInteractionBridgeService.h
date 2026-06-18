@@ -8,8 +8,8 @@
 // =====================================================================
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
-// 2. HandleWidgetBoundsChanged 持续记录 reference render 交互坐标 bounds 与交互 phase
-// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget 有向盒折回 model request
+// 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
+// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget world 有向盒折回 input model request
 // 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
 // 5. DispatchPreviewResult 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
@@ -72,7 +72,7 @@ public:
     // 参考渲染器只供算法内部保存/恢复相机状态，不写入 SharedState。
     void SetReferenceRenderer(vtkRenderer* renderer);
 
-    // 参考渲染服务负责 world/model 坐标互转。
+    // 参考渲染服务负责 world / active input model 坐标互转。
     void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
 
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
@@ -109,7 +109,7 @@ public:
     void ToggleOutsidePreview();
 
 private:
-    // Private boundary: widget state machine, model/world conversion, backend query,
+    // Private boundary: widget state machine, world/active input model conversion, backend query,
     // preview distribution, and VTK mapper/shader implementation details.
 
     // 一个 preview 目标窗口对应一份 overlay 策略与可能的主模型临时裁切缓存。
@@ -139,25 +139,27 @@ private:
     // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。
     bool EnsureInputReady();
 
-    // 生成默认交互裁切盒，作为第一次进入模式时的初始 bounds。
-    std::array<double, 6> GetDefaultInteractiveBounds() const;
+    // 生成默认交互裁切盒，作为第一次进入模式时的初始 world bounds。
+    std::array<double, 6> GetDefaultInteractiveWorldBounds() const;
 
-    // 响应 widget 交互回调，记录 bounds/phase，并在 Released 时触发 preview。
-    void HandleWidgetBoundsChanged(const std::array<double, 6>& bounds, CropInteractionPhase phase);
+    // 响应 widget 交互回调，记录 world bounds/phase，并在 Released 时触发 preview。
+    void HandleWidgetWorldBoundsChanged(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
 
-    // 把 model bounds 提升为 widget 所需的 world bounds。
+    // 把 active input model bounds 提升为 widget 所需的 world bounds。
     // image model 底层由 VTK physical-point API 表达。
-    std::array<double, 6> GetModelBoundsAsWorldBounds(const std::array<double, 6>& modelBounds) const;
+    std::array<double, 6> GetActiveInputModelBoundsAsWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
 
     // 返回活跃数据在 world 下的 bounds，供 widget 摆放与默认盒生成。
     std::array<double, 6> GetActiveWorldBounds() const;
 
-    // 返回 world -> model 矩阵，供 widget boxToWorld 继续组合为 boxToModel。
-    // 这是 widget 交互姿态与后端 model 裁切之间最关键的坐标桥。
-    std::array<double, 16> GetWorldToModelMatrix() const;
+    // 返回 world -> active input model 矩阵。
+    // 它把 widget 在显示层 world 中形成的 boxToWorld 继续折回 boxToInputModel，
+    // 让后端在输入数据坐标里执行裁切，而不是依赖窗口或 widget 状态。
+    std::array<double, 16> GetWorldToActiveInputModelMatrix() const;
 
     // 基于当前 widget 有向盒组装一次 preview request。
-    // 这里会把标准盒 [-1,1]^3 转换成 boxToModelMatrix 的统一表达。
+    // 这里把标准盒 [-1,1]^3 依次映射到初始 world、当前 world、active input model，
+    // 最终只把 boxToInputModelMatrix 下发给后端，避免后端反向读取 UI 状态。
     OrthogonalCropRequest BuildPreviewRequest() const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
@@ -183,7 +185,7 @@ private:
 
     // 以下查询接口仅作为 bridge 内部 backend 边界，外部不直接调用 backend 细节。
     OrthogonalCropDataSource GetActiveDataSource() const;
-    std::array<double, 6> GetActiveModelBounds() const;
+    std::array<double, 6> GetActiveInputModelBounds() const;
     OrthogonalCropRequest GetDefaultRequest() const;
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
@@ -240,8 +242,8 @@ private:
     // 当前是否处于裁切交互模式。
     bool m_cropInteractionEnabled = false;
 
-    // 当前 bounds 是否已经初始化过。
-    bool m_boundsInitialized = false;
+    // 当前 world bounds 是否已经初始化过。
+    bool m_worldBoundsInitialized = false;
 
     // 当前是否有 preview 在显示。
     bool m_previewEnabled = false;
@@ -255,8 +257,9 @@ private:
     // 当前 preview 是否强制要求完整 2D/3D 后端产物；关闭时只走 3D outline guide。
     bool m_fullPreviewRequired = true;
 
-    // widget 当前 reference render 交互坐标 AABB；真实裁切盒以 GetCurrentLocalBox() 重建的有向盒为准。
-    std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 缓存 widget 当前 world AABB，用于初始化、日志和 bounds 变化回调；
+    // 旋转后它只是外接范围，真实裁切姿态必须由 GetCurrentWorldBox() 重建。
+    std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
     bool m_submitReloadPending = false;
@@ -267,7 +270,7 @@ private:
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。
     OrthogonalCropWidgetStateController m_widgetStateController;
 
-    // 世界 / 模型坐标互转的参考窗口服务。
+    // world / active input model 坐标互转的参考窗口服务。
     std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;
 
     // 相机快照保存/恢复的参考 renderer；算法内部状态，不进入 service/share。

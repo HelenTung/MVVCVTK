@@ -45,7 +45,7 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropInteractionBridgeService
     - 交互桥。
-    - 负责：widget、world/model 坐标换算、preview 刷新时机、结果分发到多个窗口。
+    - 负责：widget、world / active input model 坐标换算、preview 刷新时机、结果分发到多个窗口。
 
     OrthogonalCropBackendRouterService
     - 数据后端路由。
@@ -115,7 +115,7 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
 
 为什么这么设：
 - SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
-- SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的世界/model 坐标转换都以它为准。
+- SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的 world / active input model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
 - OrthogonalCropSubmitWorkflow：统一协调 submit payload、主数据 reload、reload 完成后的 bridge 收尾；Workflow 只接收 reload 能力函数和数据管理接口，不直接依赖 MedicalVizService，也不修改 iso threshold 等视觉参数。
@@ -502,7 +502,7 @@ Step 11: 只让一个窗口进入 Start()
 - SetModelTransform：基于当前矩阵叠加一轮 TRS。
 - SetModelTransformReset：重置成单位矩阵。
 - SyncModelMatrix：把 TrackballActor 拖拽出的 VTK 矩阵回写到 SharedState。
-- 为什么：模型矩阵必须始终只有 SharedState 这一份真源，world/model 互转都以它为准。
+- 为什么：模型矩阵必须始终只有 SharedState 这一份真源，world / model 互转都以它为准。
 
 12) SaveTransformedDataAsync / SaveSliceImagesAsync
 - 做什么：后台导出，主线程延迟回调结果。
@@ -557,8 +557,8 @@ Step 11: 只让一个窗口进入 Start()
 - 为什么：bridge 进入交互时如果还没显式 SetInputImage，可以尽力从 DataManager 拿当前体数据。
 
 4) OrthogonalCropInteractionBridgeService::SetReferenceRenderService
-- 做什么：提供世界坐标和模型坐标互转基准。
-- 为什么：widget 在世界坐标里拖，算法输入更接近模型/数据坐标，必须有一份权威变换参考。
+- 做什么：提供 world 和 active input model 坐标互转基准。
+- 为什么：widget 在 world 坐标里拖，算法输入使用 active input model 坐标，必须有一份权威变换参考。
 
 5) OrthogonalCropInteractionBridgeService::SetPreviewRenderServices
 - 做什么：决定哪些窗口接收 overlay 和设脏刷新。
@@ -586,10 +586,10 @@ Step 11: 只让一个窗口进入 Start()
 九、为什么 OrthogonalCrop preview 要这样设变量
 ─────────────────────────────────────────────────────────────────────
 
-1) 为什么 preview request 固定走 boxToModelMatrix
-- 因为 widget 盒子是在世界坐标中拖出来的。
-- 直接把 world min/max 当成算法 model bounds，会在模型发生旋转/平移后失真。
-- 所以 bridge 会把 widget 有向盒归一化成：标准盒 [-1,1]^3 + boxToModelMatrix。
+1) 为什么 preview request 固定走 boxToInputModelMatrix
+- 因为 widget 盒子是在 world 坐标中拖出来的。
+- 直接把 world min/max 当成算法 input model bounds，会在模型发生旋转/平移后失真。
+- 所以 bridge 会把 widget 有向盒归一化成：标准盒 [-1,1]^3 + boxToInputModelMatrix。
 
 2) 为什么 referenceRenderService 和 previewRenderServices 必须分开
 - referenceRenderService 只负责坐标系问题。
@@ -625,7 +625,7 @@ Step 11: 只让一个窗口进入 Start()
 
 2. 拖拽 widget
 - OrthogonalCropWidgetStateController 只把 VTK 事件翻译成 bounds + phase。
-- bridge 记录 m_currentBounds 和 m_lastInteractionPhase。
+- bridge 记录 m_currentWorldBounds 和 m_lastInteractionPhase。
 
 3. 按 1 或 2
 - bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
@@ -633,7 +633,7 @@ Step 11: 只让一个窗口进入 Start()
 
 4. BuildPreviewRequest()
 - 从 router->GetDefaultRequest() 开始。
-- 覆盖为当前 widget 有向盒对应的 boxToModelMatrix。
+- 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
 - 写入 cropStateModel。
 
@@ -673,7 +673,7 @@ Step 11: 只让一个窗口进入 Start()
     cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::ImageData);
 
     auto request = cropBackend->GetDefaultRequest();
-    request.SetBoxToModelMatrixFromBounds({
+    request.SetBoxToInputModelMatrixFromBounds({
         8.0, 16.0,
         10.0, 20.0,
         12.0, 24.0
@@ -722,7 +722,7 @@ Step 11: 只让一个窗口进入 Start()
     cropBackend->SetPreferredDataSource(OrthogonalCropDataSource::PolyData);
 
     auto polyRequest = cropBackend->GetDefaultRequest();
-    polyRequest.SetBoxToModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
+    polyRequest.SetBoxToInputModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
 
     auto polyResult = cropBackend->GetResult(polyRequest);
     auto clippedSurface = polyResult.GetClipPolyData();

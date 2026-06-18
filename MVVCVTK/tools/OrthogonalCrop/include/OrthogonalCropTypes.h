@@ -40,21 +40,21 @@ inline std::array<double, 16> GetIdentityMatrixArray()
     };
 }
 
-// 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToModelMatrix 作为几何真源。
+// 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToInputModelMatrix 作为几何真源。
 inline std::array<double, 6> GetCanonicalCropBoxBounds()
 {
     return { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
 }
 
-// 从 model 轴对齐 bounds 构造标准盒到 model 的矩阵。
-inline std::array<double, 16> GetBoxToModelMatrixFromBounds(const std::array<double, 6>& modelBounds)
+// 从 active input model 轴对齐 bounds 构造标准盒到 active input model 的矩阵。
+inline std::array<double, 16> GetBoxToInputModelMatrixFromBounds(const std::array<double, 6>& inputModelBounds)
 {
-    const double centerX = (modelBounds[0] + modelBounds[1]) * 0.5;
-    const double centerY = (modelBounds[2] + modelBounds[3]) * 0.5;
-    const double centerZ = (modelBounds[4] + modelBounds[5]) * 0.5;
-    const double halfX = (modelBounds[1] - modelBounds[0]) * 0.5;
-    const double halfY = (modelBounds[3] - modelBounds[2]) * 0.5;
-    const double halfZ = (modelBounds[5] - modelBounds[4]) * 0.5;
+    const double centerX = (inputModelBounds[0] + inputModelBounds[1]) * 0.5;
+    const double centerY = (inputModelBounds[2] + inputModelBounds[3]) * 0.5;
+    const double centerZ = (inputModelBounds[4] + inputModelBounds[5]) * 0.5;
+    const double halfX = (inputModelBounds[1] - inputModelBounds[0]) * 0.5;
+    const double halfY = (inputModelBounds[3] - inputModelBounds[2]) * 0.5;
+    const double halfZ = (inputModelBounds[5] - inputModelBounds[4]) * 0.5;
 
     return {
         halfX, 0.0,   0.0,   centerX,
@@ -138,53 +138,57 @@ enum class OrthogonalCropFailureReason {
     ClipPreviewPolyDataCreationFailed
 };
 
-// 纯几何数据快照：boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源。
+// 纯几何数据快照：保存裁切盒的稳定后端表达。
+// boxToInputModelMatrix 是标准盒 [-1,1]^3 到 active input model 的唯一几何真源，
+// inputModelBounds 只是从矩阵派生出的外接 AABB，便于校验、吸附和粗粒度执行。
 class CropDataModel {
 public:
-    // 返回标准盒到 model 的变换矩阵。
-    const CropMatrixDouble16Array& GetBoxToModelMatrix() const { return m_boxToModelMatrix; }
+    // 返回标准盒到 active input model 的变换矩阵；后端用它还原真实有向盒姿态。
+    const CropMatrixDouble16Array& GetBoxToInputModelMatrix() const { return m_boxToInputModelMatrix; }
 
-    // 写入标准盒到 model 的变换矩阵。
-    void SetBoxToModelMatrix(const CropMatrixDouble16Array& boxToModelMatrix) { m_boxToModelMatrix = boxToModelMatrix; }
+    // 写入标准盒到 active input model 的变换矩阵；调用方必须把当前裁切姿态折叠到这一份矩阵里。
+    void SetBoxToInputModelMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
 
-    // 用 model 轴对齐 bounds 重建 boxToModelMatrix；适合默认全量盒或 physical 结果回填。
-    void SetBoxToModelMatrixFromBounds(const CropBoundsDouble6Array& modelBounds)
+    // 用 active input model 轴对齐 bounds 重建 boxToInputModelMatrix；
+    // 适合默认全量盒或 image physical 结果回填，因为这些场景本身没有额外旋转姿态。
+    void SetBoxToInputModelMatrixFromBounds(const CropBoundsDouble6Array& inputModelBounds)
     {
-        m_boxToModelMatrix = GetBoxToModelMatrixFromBounds(modelBounds);
+        m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
     }
 
-    // 返回由 boxToModelMatrix 派生出的 model AABB。
-    // image model 底层由 VTK physical-point API 表达；polydata model 对应网格自身坐标。
-    const CropBoundsDouble6Array& GetModelBounds() const { return m_modelBounds; }
+    // 返回由 boxToInputModelMatrix 派生出的 active input model AABB。
+    // image model 底层由 VTK physical-point API 表达；polyData input model 对应网格自身坐标。
+    const CropBoundsDouble6Array& GetInputModelBounds() const { return m_inputModelBounds; }
 
-    // 写入派生 model AABB；只作为执行/校验范围缓存，不再是裁切盒真源。
-    void SetModelBounds(const CropBoundsDouble6Array& modelBounds) { m_modelBounds = modelBounds; }
+    // 写入派生 active input model AABB；算法用它做 bounds 校验、index 吸附和粗范围裁剪。
+    // 它不保留旋转姿态，因此不能替代 boxToInputModelMatrix。
+    void SetInputModelBounds(const CropBoundsDouble6Array& inputModelBounds) { m_inputModelBounds = inputModelBounds; }
 
-    // 根据当前 bounds 反推 model 中的中心点。
-    std::array<double, 3> GetCenter() const
+    // 根据当前 input model bounds 反推 active input model 中的中心点。
+    std::array<double, 3> GetInputModelCenter() const
     {
         return {
-            (m_modelBounds[0] + m_modelBounds[1]) * 0.5,
-            (m_modelBounds[2] + m_modelBounds[3]) * 0.5,
-            (m_modelBounds[4] + m_modelBounds[5]) * 0.5
+            (m_inputModelBounds[0] + m_inputModelBounds[1]) * 0.5,
+            (m_inputModelBounds[2] + m_inputModelBounds[3]) * 0.5,
+            (m_inputModelBounds[4] + m_inputModelBounds[5]) * 0.5
         };
     }
 
-    // 根据当前 bounds 反推 model 中的三轴尺寸。
-    std::array<double, 3> GetDimensions() const
+    // 根据当前 input model bounds 反推 active input model 中的三轴尺寸。
+    std::array<double, 3> GetInputModelDimensions() const
     {
         return {
-            m_modelBounds[1] - m_modelBounds[0],
-            m_modelBounds[3] - m_modelBounds[2],
-            m_modelBounds[5] - m_modelBounds[4]
+            m_inputModelBounds[1] - m_inputModelBounds[0],
+            m_inputModelBounds[3] - m_inputModelBounds[2],
+            m_inputModelBounds[5] - m_inputModelBounds[4]
         };
     }
 
-    // 返回当前裁切盒在 model 中的体积估计值；用于日志或粗粒度规模判断。
-    double GetPhysicalVolume() const
+    // 返回当前裁切盒在 active input model 中的体积估计值；用于日志或粗粒度规模判断。
+    double GetInputModelVolume() const
     {
-        const auto dimensions = GetDimensions();
-        return dimensions[0] * dimensions[1] * dimensions[2];
+        const auto inputModelDimensions = GetInputModelDimensions();
+        return inputModelDimensions[0] * inputModelDimensions[1] * inputModelDimensions[2];
     }
 
     // 返回当前裁切结果相对原输入的全局偏移补偿矩阵。
@@ -194,10 +198,12 @@ public:
     void SetGlobalOffsetMatrix(const CropMatrixDouble16Array& globalOffsetMatrix) { m_globalOffsetMatrix = globalOffsetMatrix; }
 
 private:
-    // 标准盒 [-1,1]^3 到 model 的唯一几何真源。
-    std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
-    // 由 boxToModelMatrix 派生出的 model AABB，用于 bounds 校验、index 吸附和粗粒度执行范围。
-    std::array<double, 6> m_modelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
+    // 旋转、缩放、平移都在这里，后端所有精确几何判断以它为准。
+    std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
+    // 保存由 boxToInputModelMatrix 派生出的 active input model AABB；
+    // 它用于快速排除、index 吸附和缓存键比较，不作为有向盒真源。
+    std::array<double, 6> m_inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 全局偏移矩阵，用于把后端结果重新对齐回上层共享坐标语义。
     std::array<double, 16> m_globalOffsetMatrix = GetIdentityMatrixArray();
 };
@@ -248,19 +254,19 @@ private:
     CropInteractionPhase m_interactionPhase = CropInteractionPhase::Idle;
 };
 
-// 一次裁切执行请求：boxToModelMatrix 是标准盒 [-1,1]^3 到 model 的唯一几何真源。
+// 一次裁切执行请求：boxToInputModelMatrix 是标准盒 [-1,1]^3 到 active input model 的唯一几何真源。
 class OrthogonalCropRequest {
 public:
-    // 返回标准裁切盒到 model 的矩阵。
-    const CropMatrixDouble16Array& GetBoxToModelMatrix() const { return m_boxToModelMatrix; }
+    // 返回标准裁切盒到 active input model 的矩阵。
+    const CropMatrixDouble16Array& GetBoxToInputModelMatrix() const { return m_boxToInputModelMatrix; }
 
-    // 写入标准裁切盒到 model 的矩阵。
-    void SetBoxToModelMatrix(const CropMatrixDouble16Array& boxToModelMatrix) { m_boxToModelMatrix = boxToModelMatrix; }
+    // 写入标准裁切盒到 active input model 的矩阵。
+    void SetBoxToInputModelMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
 
-    // 用 model 轴对齐 bounds 构造标准盒请求。
-    void SetBoxToModelMatrixFromBounds(const CropBoundsDouble6Array& modelBounds)
+    // 用 active input model 轴对齐 bounds 构造标准盒请求。
+    void SetBoxToInputModelMatrixFromBounds(const CropBoundsDouble6Array& inputModelBounds)
     {
-        m_boxToModelMatrix = GetBoxToModelMatrixFromBounds(modelBounds);
+        m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
     }
 
     // 返回本次请求是 PreviewArtifact 还是 Submit。
@@ -294,8 +300,8 @@ public:
     void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
-    // 标准裁切盒 [-1,1]^3 到 model 的矩阵。
-    std::array<double, 16> m_boxToModelMatrix = GetIdentityMatrixArray();
+    // 标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
+    std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
     // 当前请求只做预览，还是要求输出真正可复用的派生结果。
     CropExecutionMode m_executionMode = CropExecutionMode::PreviewArtifact;
     // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image submit 合法性判断。

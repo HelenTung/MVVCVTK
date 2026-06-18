@@ -42,8 +42,8 @@ public:
     // 返回本次请求实际会走到的活跃数据源。
     OrthogonalCropDataSource GetActiveDataSource() const;
 
-    // 返回当前活跃数据的 model bounds。
-    std::array<double, 6> GetActiveModelBounds() const;
+    // 返回当前活跃数据的 input model bounds。
+    std::array<double, 6> GetActiveInputModelBounds() const;
 
     // 构造与当前活跃输入一致的默认 request。
     OrthogonalCropRequest GetDefaultRequest() const;
@@ -65,11 +65,11 @@ private:
         const CropDataModel& cropData,
         CropRemovalMode removalMode) const;
 
-    // 读取 image 输入 bounds。
-    std::array<double, 6> GetImageBounds() const;
+    // 读取 image model bounds。
+    std::array<double, 6> GetImageModelBounds() const;
 
-    // 读取 polydata 输入 bounds。
-    std::array<double, 6> GetPolyDataBounds() const;
+    // 读取 polyData input model bounds。
+    std::array<double, 6> GetPolyDataInputModelBounds() const;
 
     // 统一构造“输入缺失”诊断结果。
     OrthogonalCropStatistics GetMissingInputStatistics() const;

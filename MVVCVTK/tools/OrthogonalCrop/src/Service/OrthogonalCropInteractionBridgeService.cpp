@@ -29,17 +29,17 @@
 #include <utility>
 
 static constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
-static constexpr const char* kVolumeRemoveInsideModelToBoxUniform = "mvvcvtk_volumeRemoveInsideModelToBox";
+static constexpr const char* kVolumeRemoveInsideActiveInputModelToBoxUniform = "mvvcvtk_volumeRemoveInsideActiveInputModelToBox";
 static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
 
 static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "//VTK::Base::Impl\n"
     "    if (!g_skip && mvvcvtk_volumeRemoveInsideEnabled != 0)\n"
     "      {\n"
-    "      vec4 mvvcvtk_modelPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
-    "      float mvvcvtk_modelInvW = abs(mvvcvtk_modelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_modelPoint.w : 1.0;\n"
-    "      mvvcvtk_modelPoint = vec4(mvvcvtk_modelPoint.xyz * mvvcvtk_modelInvW, 1.0);\n"
-    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volumeRemoveInsideModelToBox * mvvcvtk_modelPoint;\n"
+    "      vec4 mvvcvtk_activeInputModelPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
+    "      float mvvcvtk_activeInputModelInvW = abs(mvvcvtk_activeInputModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_activeInputModelPoint.w : 1.0;\n"
+    "      mvvcvtk_activeInputModelPoint = vec4(mvvcvtk_activeInputModelPoint.xyz * mvvcvtk_activeInputModelInvW, 1.0);\n"
+    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volumeRemoveInsideActiveInputModelToBox * mvvcvtk_activeInputModelPoint;\n"
     "      float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
     "      vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
     "      if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
@@ -52,12 +52,10 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
     // widget controller 只上报 bounds 和交互阶段；
     // bridge 接管预览请求构建与结果分发，保持 VTK widget 层不触碰后端业务。
-    m_widgetStateController.SetBoundsChangedCallback(
-        [this](const std::array<double, 6>& bounds, CropInteractionPhase phase) {
-            HandleWidgetBoundsChanged(bounds, phase);
-        });// m_widgetStateController.SetBoundsChangedCallback绑定了OrthogonalCropInteractionBridgeService类中的处理函数
-	// 所以当widget的调用OrthogonalCropWidgetStateController,SetBoundsChangedCallback时，会调用HandleWidgetBoundsChanged函数来处理
-	// 从而把 widget 交互事件转入本类状态机，触发后续的 preview request 构建与分发。
+    m_widgetStateController.SetWorldBoundsChangedCallback(
+        [this](const std::array<double, 6>& worldBounds, CropInteractionPhase phase) {
+            HandleWidgetWorldBoundsChanged(worldBounds, phase);
+        });
 }
 
 // 输入由 bridge 透传给 backend router；
@@ -87,9 +85,9 @@ OrthogonalCropDataSource OrthogonalCropInteractionBridgeService::GetActiveDataSo
     return m_backend.GetActiveDataSource();
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveModelBounds() const
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveInputModelBounds() const
 {
-    return m_backend.GetActiveModelBounds();
+    return m_backend.GetActiveInputModelBounds();
 }
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::GetDefaultRequest() const
@@ -206,14 +204,14 @@ void OrthogonalCropInteractionBridgeService::SetSubmitReloadSynced()
     if (m_submitReloadPending) {
         m_submitReloadPending = false;
         SetInputImage(nullptr);
-        m_boundsInitialized = false;
+        m_worldBoundsInitialized = false;
         DeactivateInteractiveCrop();
     }
 }
 
 bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
 {
-    if (!m_cropInteractionEnabled || !m_boundsInitialized) {
+    if (!m_cropInteractionEnabled || !m_worldBoundsInitialized) {
         std::cerr << "[Main] Orthogonal crop submit failed: crop widget is not active." << std::endl;
         return false;
     }
@@ -262,9 +260,9 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
     }
 
     double spacingData[3] = { 1.0, 1.0, 1.0 };
-    double modelOriginData[3] = { 0.0, 0.0, 0.0 };
+    double imageModelOriginData[3] = { 0.0, 0.0, 0.0 };
     submitImage->GetSpacing(spacingData);
-    submitImage->GetOrigin(modelOriginData);
+    submitImage->GetOrigin(imageModelOriginData);
 
     payload.dims = { dims[0], dims[1], dims[2] };
     payload.spacing = {
@@ -273,9 +271,9 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
         static_cast<float>(spacingData[2])
     };
     payload.origin = {
-        static_cast<float>(-modelOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
-        static_cast<float>(-modelOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
-        static_cast<float>(modelOriginData[2])
+        static_cast<float>(-imageModelOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
+        static_cast<float>(-imageModelOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
+        static_cast<float>(imageModelOriginData[2])
     };
 
     const size_t nx = static_cast<size_t>(dims[0]);
@@ -336,15 +334,15 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
         return false;
     }
 
-    if (!m_boundsInitialized) {
-        m_currentBounds = GetDefaultInteractiveBounds();
-        m_boundsInitialized = true;
+    if (!m_worldBoundsInitialized) {
+        m_currentWorldBounds = GetDefaultInteractiveWorldBounds();
+        m_worldBoundsInitialized = true;
     }
 
-    // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToModel 折回 model。
+    // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToInputModel 折回 active input model。
     m_widgetStateController.SetInteractor(m_primaryInteractor);
-    m_widgetStateController.SetReferenceBounds(GetActiveWorldBounds()); // 初始化widget交互范围
-    m_widgetStateController.SetWidgetBounds(m_currentBounds); // 设置实际交互盒子范围有多大
+    m_widgetStateController.SetReferenceWorldBounds(GetActiveWorldBounds()); // 初始化widget交互范围
+    m_widgetStateController.SetWidgetWorldBounds(m_currentWorldBounds); // 设置实际交互盒子范围有多大
     if (!m_widgetStateController.SetEnabled(true)) {
         std::cerr << "[Main] Orthogonal crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
         return false;
@@ -396,89 +394,89 @@ bool OrthogonalCropInteractionBridgeService::EnsureInputReady()
     return GetActiveDataSource() != OrthogonalCropDataSource::Auto;
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteractiveBounds() const
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteractiveWorldBounds() const
 {
-    // 默认交互盒在 reference render 交互坐标下构造：
-    // 1. 先取当前活跃输入提升到 reference render 交互坐标后的完整 bounds
+    // 默认交互盒在 world 坐标下构造：
+    // 1. 先取当前活跃输入提升到 world 后的完整 bounds
     // 2. 再按经验比例缩小，得到首次拖拽更容易观察的起始盒
-    // 3. 这只盒子只服务 widget；真正执行时还会折回 model
-    std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    const auto sourceBounds = GetActiveWorldBounds();
-    if (!(sourceBounds[0] < sourceBounds[1]
-        && sourceBounds[2] < sourceBounds[3]
-        && sourceBounds[4] < sourceBounds[5])) {
-        return bounds;
+    // 3. 这只盒子只服务 widget；真正执行时还会折回 active input model
+    std::array<double, 6> worldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    const auto activeWorldBounds = GetActiveWorldBounds();
+    if (!(activeWorldBounds[0] < activeWorldBounds[1]
+        && activeWorldBounds[2] < activeWorldBounds[3]
+        && activeWorldBounds[4] < activeWorldBounds[5])) {
+        return worldBounds;
     }
 
     const std::array<double, 3> center = {
-        (sourceBounds[0] + sourceBounds[1]) * 0.5,
-        (sourceBounds[2] + sourceBounds[3]) * 0.5,
-        (sourceBounds[4] + sourceBounds[5]) * 0.5
+        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
+        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
+        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
     };
     const std::array<double, 3> dimensions = {
-        (sourceBounds[1] - sourceBounds[0]) * 0.30,
-        (sourceBounds[3] - sourceBounds[2]) * 0.24,
-        (sourceBounds[5] - sourceBounds[4]) * 0.36
+        (activeWorldBounds[1] - activeWorldBounds[0]) * 0.30,
+        (activeWorldBounds[3] - activeWorldBounds[2]) * 0.24,
+        (activeWorldBounds[5] - activeWorldBounds[4]) * 0.36
     };
 
     // 这组比例不是算法约束，而是交互层的默认起始盒经验值：
     // 初始盒要足够小，便于用户第一下就看到明显裁切效果，同时保持三个轴都有可拖拽余量。
 
-    bounds[0] = center[0] - dimensions[0] * 0.5;
-    bounds[1] = center[0] + dimensions[0] * 0.5;
-    bounds[2] = center[1] - dimensions[1] * 0.5;
-    bounds[3] = center[1] + dimensions[1] * 0.5;
-    bounds[4] = center[2] - dimensions[2] * 0.5;
-    bounds[5] = center[2] + dimensions[2] * 0.5;
-    return bounds;
+    worldBounds[0] = center[0] - dimensions[0] * 0.5;
+    worldBounds[1] = center[0] + dimensions[0] * 0.5;
+    worldBounds[2] = center[1] - dimensions[1] * 0.5;
+    worldBounds[3] = center[1] + dimensions[1] * 0.5;
+    worldBounds[4] = center[2] - dimensions[2] * 0.5;
+    worldBounds[5] = center[2] + dimensions[2] * 0.5;
+    return worldBounds;
 }
 
-void OrthogonalCropInteractionBridgeService::HandleWidgetBoundsChanged(
-    const std::array<double, 6>& bounds,
+void OrthogonalCropInteractionBridgeService::HandleWidgetWorldBoundsChanged(
+    const std::array<double, 6>& worldBounds,
     CropInteractionPhase phase)
 {
     if (!m_cropInteractionEnabled) {
         return;
     }
 
-    // 交互过程中始终记录最新 reference render 交互坐标 AABB 和 phase，
+    // 交互过程中始终记录最新 world AABB 和 phase，
     // 但只在 Released 时触发 preview，保持“拖拽只更新轻量 UI，释放后再统一跑后端”的既有流程。
-    m_currentBounds = bounds;
-    m_boundsInitialized = true;
+    m_currentWorldBounds = worldBounds;
+    m_worldBoundsInitialized = true;
     m_lastInteractionPhase = phase;
     if (m_previewEnabled && phase == CropInteractionPhase::Released) {
         UpdatePreviewFromCurrentBounds(true);
     }
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetModelBoundsAsWorldBounds(
-    const std::array<double, 6>& modelBounds) const
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveInputModelBoundsAsWorldBounds(
+    const std::array<double, 6>& activeInputModelBounds) const
 {
     // 这是纯 bounds 级别的 8 角点变换 helper：
-    // 输入是 model 轴对齐盒，输出是 widget 使用的 world AABB。
-    // 对 image 路径，model 底层由 VTK physical-point API 表达。
+    // 输入是 active input model 轴对齐盒，输出是 widget 使用的 world AABB。
+    // 对 image 路径，input model 底层由 VTK physical-point API 表达。
     // 显式变换 8 个角点后再回收包围盒，可以避免旋转场景下的逐轴换算失真。
     if (!m_referenceRenderService) {
-        return modelBounds;
+        return activeInputModelBounds;
     }
 
-    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    activeInputModelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
 
-    auto modelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-    modelToWorldTransform->SetMatrix(modelToWorldMatrix);
+    auto activeInputModelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
+    activeInputModelToWorldTransform->SetMatrix(activeInputModelToWorldMatrix);
 
     vtkBoundingBox worldBounds;
     for (int ix = 0; ix < 2; ++ix) {
         for (int iy = 0; iy < 2; ++iy) {
             for (int iz = 0; iz < 2; ++iz) {
-                const double modelCorner[3] = {
-                    modelBounds[ix == 0 ? 0 : 1],
-                    modelBounds[iy == 0 ? 2 : 3],
-                    modelBounds[iz == 0 ? 4 : 5]
+                const double activeInputModelCorner[3] = {
+                    activeInputModelBounds[ix == 0 ? 0 : 1],
+                    activeInputModelBounds[iy == 0 ? 2 : 3],
+                    activeInputModelBounds[iz == 0 ? 4 : 5]
                 };
                 double worldCorner[3] = { 0.0, 0.0, 0.0 };
-                modelToWorldTransform->TransformPoint(modelCorner, worldCorner);
+                activeInputModelToWorldTransform->TransformPoint(activeInputModelCorner, worldCorner);
                 worldBounds.AddPoint(worldCorner);
             }
         }
@@ -491,35 +489,35 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetModelBoundsAsWo
 
 std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveWorldBounds() const
 {
-    // backend/router 暴露的是 model bounds；
-    // widget 放在 world 里，所以这里负责做一次 model -> world 的包围盒提升。
-    const auto modelBounds = GetActiveModelBounds();
-    if (!(modelBounds[0] < modelBounds[1]
-        && modelBounds[2] < modelBounds[3]
-        && modelBounds[4] < modelBounds[5])) {
-        return modelBounds;
+    // backend/router 暴露的是 active input model bounds；
+    // widget 放在 world 里，所以这里负责做一次 active input model -> world 的包围盒提升。
+    const auto activeInputModelBounds = GetActiveInputModelBounds();
+    if (!(activeInputModelBounds[0] < activeInputModelBounds[1]
+        && activeInputModelBounds[2] < activeInputModelBounds[3]
+        && activeInputModelBounds[4] < activeInputModelBounds[5])) {
+        return activeInputModelBounds;
     }
 
-    return GetModelBoundsAsWorldBounds(modelBounds);
+    return GetActiveInputModelBoundsAsWorldBounds(activeInputModelBounds);
 }
 
-std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToModelMatrix() const
+std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToActiveInputModelMatrix() const
 {
     if (!m_referenceRenderService) {
         return GetIdentityMatrixArray();
     }
 
-    // 参考窗口维护的是 model -> world 矩阵；裁切 request 需要反向矩阵，
-    // 否则 widget 盒和后端 model 会落在两个不同坐标系里。
-    // 对 image 路径，model 底层由 VTK physical-point API 表达；
-    // 对 polydata 路径，则是主模型自己的 model 坐标。
-    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToModelMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-    worldToModelMatrix->Invert();
+    // 参考窗口维护的是 active input model -> world 矩阵；裁切 request 需要反向矩阵，
+    // 否则 widget 盒和后端 active input model 会落在两个不同坐标系里。
+    // 对 image 路径，active input model 底层由 VTK physical-point API 表达；
+    // 对 polydata 路径，则是主网格自己的 input model 坐标。
+    auto worldToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToActiveInputModelMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+    worldToActiveInputModelMatrix->Invert();
 
-    std::array<double, 16> worldToModelMatrixData = { 0.0 };
-    vtkMatrix4x4::DeepCopy(worldToModelMatrixData.data(), worldToModelMatrix);
-    return worldToModelMatrixData;
+    std::array<double, 16> worldToActiveInputModelMatrixData = { 0.0 };
+    vtkMatrix4x4::DeepCopy(worldToActiveInputModelMatrixData.data(), worldToActiveInputModelMatrix);
+    return worldToActiveInputModelMatrixData;
 }
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
@@ -528,53 +526,61 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
     // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
     auto previewRequest = GetDefaultRequest();
 
-    // 将 widget 有向盒编码成 boxToModelMatrix；
-    // 后端只接收标准盒到 model 的稳定矩阵，不直接读取 VTK widget 状态。
-    CropVectorDouble3Array localCenter = {
-        (m_currentBounds[0] + m_currentBounds[1]) * 0.5,
-        (m_currentBounds[2] + m_currentBounds[3]) * 0.5,
-        (m_currentBounds[4] + m_currentBounds[5]) * 0.5
+    // 准备 widget 有向盒的 world 基准信息；
+    // 默认值来自当前 world AABB，GetCurrentWorldBox 成功时会替换成最近一次 PlaceWidget 的基准盒。
+    CropVectorDouble3Array initialWorldCenter = {
+        (m_currentWorldBounds[0] + m_currentWorldBounds[1]) * 0.5,
+        (m_currentWorldBounds[2] + m_currentWorldBounds[3]) * 0.5,
+        (m_currentWorldBounds[4] + m_currentWorldBounds[5]) * 0.5
     };
-    CropVectorDouble3Array localDimensions = {
-        m_currentBounds[1] - m_currentBounds[0],
-        m_currentBounds[3] - m_currentBounds[2],
-        m_currentBounds[5] - m_currentBounds[4]
+    CropVectorDouble3Array initialWorldDimensions = {
+        m_currentWorldBounds[1] - m_currentWorldBounds[0],
+        m_currentWorldBounds[3] - m_currentWorldBounds[2],
+        m_currentWorldBounds[5] - m_currentWorldBounds[4]
     };
-    CropMatrixDouble16Array boxToModelMatrixData = GetIdentityMatrixArray();
-    CropMatrixDouble16Array localToWorldMatrixData = GetIdentityMatrixArray();
-    m_widgetStateController.GetCurrentLocalBox(
-        localCenter,
-        localDimensions,
-        localToWorldMatrixData);
+    CropMatrixDouble16Array boxToInputModelMatrixData = GetIdentityMatrixArray();
+    CropMatrixDouble16Array initialWorldToCurrentWorldMatrixData = GetIdentityMatrixArray();
 
-	// boxToLocal 把固定标准盒 [-1,1]^3 放回 widget 的 local 初始盒： local指的是再次进入裁切的默认初始化盒，box是标准盒。这个矩阵里包含了 widget 当前 local 盒的缩放和平移，但不包含旋转（因为 widget 是轴对齐的）。后端拿到这个矩阵后，会先把标准盒变换到 widget local，
-    // 再通过 localToWorld 把它放到 world，最后通过 worldToModel 把它折回 model。
-	// local = center + box * (localDimensions / 2)。构造了一个box到local的仿射矩阵。但是这里只是AABB的缩放和平移，没有旋转。
-    auto boxToLocalMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToLocalMatrix->Identity();
-    for (int axis = 0; axis < 3; ++axis) {
-        boxToLocalMatrix->SetElement(axis, axis, localDimensions[axis] * 0.5);
-        boxToLocalMatrix->SetElement(axis, 3, localCenter[axis]);
+    // 读取 widget 当前姿态并反解 initialWorld -> currentWorld；
+    // 失败时保留默认 request，避免把不完整 widget 状态发给后端。
+    if (!m_widgetStateController.GetCurrentWorldBox(
+        initialWorldCenter,
+        initialWorldDimensions,
+        initialWorldToCurrentWorldMatrixData)) {
+        return previewRequest;
     }
 
-    auto localToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    localToWorldMatrix->DeepCopy(localToWorldMatrixData.data());
+    // boxToInitialWorldMatrix 把固定标准盒 [-1,1]^3 放回 PlaceWidget 时的 world AABB；
+    // 标准盒半径为 1，所以轴向缩放必须使用 initialWorldDimensions * 0.5。
+    auto boxToInitialWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInitialWorldMatrix->Identity();
+    for (int axis = 0; axis < 3; ++axis) {
+        boxToInitialWorldMatrix->SetElement(axis, axis, initialWorldDimensions[axis] * 0.5);
+        boxToInitialWorldMatrix->SetElement(axis, 3, initialWorldCenter[axis]);
+    }
 
-    // 组合顺序按坐标方向从右到左读：
-    // boxToWorld = localToWorld * boxToLocal，表示标准盒先进入 widget local，再进入 render world。
+    // initialWorldToCurrentWorldMatrix 表达用户交互造成的姿态变化；
+    // 它接在 boxToInitialWorldMatrix 后面，负责把初始 world AABB 变成当前 world 有向盒。
+    auto initialWorldToCurrentWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    initialWorldToCurrentWorldMatrix->DeepCopy(initialWorldToCurrentWorldMatrixData.data());
+
+    // boxToWorldMatrix 是当前裁切盒在 world 中的完整几何；
+    // 组合顺序从右到左读：标准盒先进入初始 world，再应用交互后的 current world 姿态。
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(localToWorldMatrix, boxToLocalMatrix, boxToWorldMatrix);
+    vtkMatrix4x4::Multiply4x4(initialWorldToCurrentWorldMatrix, boxToInitialWorldMatrix, boxToWorldMatrix);
 
-    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToModelMatrix->DeepCopy(GetWorldToModelMatrix().data());
+    // worldToActiveInputModelMatrix 把显示层 world 几何折回当前数据输入坐标；
+    // image 使用 physical-point 语义，polydata 使用主网格 input model 语义。
+    auto worldToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToActiveInputModelMatrix->DeepCopy(GetWorldToActiveInputModelMatrix().data());
 
-    // request 只下发 boxToModelMatrix；后端不再读取 widget。
-    // boxToModel = worldToModel * boxToWorld，保证用户在 world 中拖出的有向盒折回 model 空间。
-    auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(worldToModelMatrix, boxToWorldMatrix, boxToModelMatrix);
-    vtkMatrix4x4::DeepCopy(boxToModelMatrixData.data(), boxToModelMatrix);
+    // boxToInputModelMatrix 是 request 下发给后端的唯一几何真源；
+    // 后端只消费标准盒到 active input model 的矩阵，不再依赖 widget 或 world 状态。
+    auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(worldToActiveInputModelMatrix, boxToWorldMatrix, boxToInputModelMatrix);
+    vtkMatrix4x4::DeepCopy(boxToInputModelMatrixData.data(), boxToInputModelMatrix);
 
-    previewRequest.SetBoxToModelMatrix(boxToModelMatrixData);
+    previewRequest.SetBoxToInputModelMatrix(boxToInputModelMatrixData);
     previewRequest.SetExecutionMode(CropExecutionMode::PreviewArtifact);
     previewRequest.SetRemovalMode(m_currentRemovalMode);
 
@@ -590,12 +596,12 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewReques
 
 void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool logStats)
 {
-    if (!m_boundsInitialized) {
+    if (!m_worldBoundsInitialized) {
         return;
     }
 
-    // 将当前 widget 有向盒固化为 model-space preview request；
-    // 后端只消费稳定 request，避免直接依赖 widget 生命周期与渲染状态。
+    // 将当前 widget world 有向盒固化为 active input model request；
+    // 后端只消费这份稳定几何，避免直接依赖 widget 生命周期与渲染状态。
     const auto previewRequest = BuildPreviewRequest();
 
     // 轻量预览只生成 3D outline guide；
@@ -624,9 +630,9 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
                 << ", main3D = "
                 << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
                 << ", bounds = ["
-                << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
-                << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
-                << m_currentBounds[4] << ", " << m_currentBounds[5] << "]"
+                << m_currentWorldBounds[0] << ", " << m_currentWorldBounds[1] << "; "
+                << m_currentWorldBounds[2] << ", " << m_currentWorldBounds[3] << "; "
+                << m_currentWorldBounds[4] << ", " << m_currentWorldBounds[5] << "]"
                 << std::endl;
         }
         return;
@@ -681,9 +687,9 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             << ", main3D = "
             << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
             << ", bounds = ["
-            << m_currentBounds[0] << ", " << m_currentBounds[1] << "; "
-            << m_currentBounds[2] << ", " << m_currentBounds[3] << "; "
-            << m_currentBounds[4] << ", " << m_currentBounds[5] << "]"
+            << m_currentWorldBounds[0] << ", " << m_currentWorldBounds[1] << "; "
+            << m_currentWorldBounds[2] << ", " << m_currentWorldBounds[3] << "; "
+            << m_currentWorldBounds[4] << ", " << m_currentWorldBounds[5] << "]"
             << std::endl;
     }
 }
@@ -691,7 +697,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
 void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode removalMode, bool logStats)
 {
     // Toggle 语义固定为：
-    // - 同模式再次触发：关闭 preview，并恢复 full model 显示
+    // - 同模式再次触发：关闭 preview，并恢复主模型全量显示
     // - 切到新模式：更新 removal mode；若当前不在 dragging，则立即刷新一次 preview
     if (!m_cropInteractionEnabled) {
         return;
@@ -946,19 +952,19 @@ void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
     }
 
     const auto& cropData = previewResult.GetCropDataModel();
-    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToWorldMatrix->Identity();
+    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    activeInputModelToWorldMatrix->Identity();
     if (m_referenceRenderService) {
-        modelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+        activeInputModelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
     }
 
-    auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
+    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
-    // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> model，
+    // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> active input model，
     // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(modelToWorldMatrix, boxToModelMatrix, boxToWorldMatrix);
+    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
 
     auto boxToWorldTransform = vtkSmartPointer<vtkTransform>::New();
     boxToWorldTransform->SetMatrix(boxToWorldMatrix);
@@ -992,7 +998,7 @@ void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
     }
 
     // KeepInside 和 RemoveInside 都只消费 previewResult.cropData；
-    // 这里仅在 VTK volume clipping 需要的后端表达点，把 box/model 盒还原成 world planes。
+    // 这里仅在 VTK volume clipping 需要的后端表达点，把 box/active input model 盒还原成 world planes。
     volumeMapper->SetClippingPlanes(clippingPlanes);
 }
 
@@ -1006,13 +1012,13 @@ bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
     }
 
     const auto& cropData = previewResult.GetCropDataModel();
-    auto boxToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToModelMatrix->DeepCopy(cropData.GetBoxToModelMatrix().data());
+    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
     // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
-    // 采样点先由 VTK shader 内置矩阵还原到 model，再用这里的 modelToBox 送入标准盒空间。
-    auto modelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToModelMatrix, modelToBoxMatrix);
+    // 采样点先由 VTK shader 内置矩阵还原到 active input model，再用 activeInputModelToBox 送入标准盒空间。
+    auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
 
     auto shaderProperty = volume->GetShaderProperty();
     shaderProperty->AddFragmentShaderReplacement(
@@ -1022,17 +1028,18 @@ bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
         false);
 
     // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
-    auto modelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToBoxShaderMatrix->DeepCopy(modelToBoxMatrix);
+    auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
     // 上传前转置矩阵；
-    // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ modelToBox 结果一致。
-    modelToBoxShaderMatrix->Transpose();
+    // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ activeInputModelToBox 结果一致。
+    activeInputModelToBoxShaderMatrix->Transpose();
 
-    // vtk volume shader 中 g_dataPos 是纹理坐标；in_textureDatasetMatrix[0] 才会把它还原到 model。
-    // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 modelToBox 需要先转置再交给 shader。
+    // vtk volume shader 中 g_dataPos 是纹理坐标；
+    // in_textureDatasetMatrix[0] 会把它还原到 active input model。
+    // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 activeInputModelToBox 需要先转置再交给 shader。
     // uniforms 的声明由 VTK 的 CustomUniforms::Dec 自动生成，不能再手写到 Base::Dec，否则会重复声明。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideModelToBoxUniform, modelToBoxShaderMatrix);
+    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, activeInputModelToBoxShaderMatrix);
     fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 1);
 
     volumeMapper->SetMaskInput(nullptr);
@@ -1135,12 +1142,12 @@ bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
         canonicalBounds[2], canonicalBounds[3],
         canonicalBounds[4], canonicalBounds[5]);
 
-    auto modelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
-    // vtkBox 的 implicit function 定义在标准盒空间；把输入 model 点先变到 box 空间，
+    auto activeInputModelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
+    // vtkBox 的 implicit function 定义在标准盒空间；把 active input model 点先变到 box 空间，
     // 就能复用同一个 [-1,1]^3 盒子表达任意旋转/缩放后的裁切区域。
-    modelToBoxTransform->SetMatrix(cropData.GetBoxToModelMatrix().data());
-    modelToBoxTransform->Inverse();
-    clipFunction->SetTransform(modelToBoxTransform);
+    activeInputModelToBoxTransform->SetMatrix(cropData.GetBoxToInputModelMatrix().data());
+    activeInputModelToBoxTransform->Inverse();
+    clipFunction->SetTransform(activeInputModelToBoxTransform);
 
     // 每次刷新只更新 cropData 派生出的 clip function 和 removal mode；
     // 持久管道不重建、不换输入，让主窗口显示主模型本体的 clip 结果而不是叠加网格。

@@ -21,17 +21,17 @@
 
 class OrthogonalCropAlgorithm {
 public:
-    // 校验一组数据 model bounds 与目标裁切 model bounds 是否满足执行前提。
+    // 校验 active input model bounds 与目标裁切 input model bounds 是否满足执行前提。
     static bool GetBoundsAreValid(
-        const std::array<double, 6>& dataModelBounds,
-        const std::array<double, 6>& cropModelBounds,
+        const std::array<double, 6>& inputModelBounds,
+        const std::array<double, 6>& cropInputModelBounds,
         OrthogonalCropFailureReason& failureReason,
         std::string& message,
         bool allowPartialOverlap = false);
 
     // 把 request 归一化为可执行的 CropDataModel。
     static bool GetCropDataModel(
-        const std::array<double, 6>& dataModelBounds,
+        const std::array<double, 6>& inputModelBounds,
         const OrthogonalCropRequest& request,
         CropDataModel& cropData,
         OrthogonalCropFailureReason& failureReason,
@@ -48,7 +48,7 @@ public:
         std::size_t fallbackAvailableRamBytes = 0);
 
     // 算法总入口：先校验和归一化，再分发到 preview artifact / image submit 两条执行链。
-    // request 只携带 boxToModelMatrix；算法层会派生 AABB 并折叠成统一 cropData。
+    // request 只携带 boxToInputModelMatrix；算法层会派生 AABB 并折叠成统一 cropData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,

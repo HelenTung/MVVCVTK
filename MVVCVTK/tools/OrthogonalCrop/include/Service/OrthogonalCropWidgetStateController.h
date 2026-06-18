@@ -40,35 +40,37 @@ private:
 // 只管理 widget 生命周期、bounds 与交互事件，不关心裁切算法与结果投递。
 class OrthogonalCropWidgetStateController {
 public:
-    // 向上层报告 bounds 与交互阶段的统一回调类型。
-    using BoundsChangedCallback = std::function<void(const std::array<double, 6>& bounds, CropInteractionPhase phase)>;
+    // 向上层报告 world bounds 与交互阶段的统一回调类型。
+    using WorldBoundsChangedCallback = std::function<void(const std::array<double, 6>& worldBounds, CropInteractionPhase phase)>;
 
     OrthogonalCropWidgetStateController();
 
     // 绑定 widget 所属 interactor。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
 
-    // 设置参考 bounds；当前 bounds 无效时会回退到它。
-    void SetReferenceBounds(const std::array<double, 6>& bounds);
+    // 设置参考 world bounds；当前 world bounds 无效时会回退到它。
+    void SetReferenceWorldBounds(const std::array<double, 6>& worldBounds);
 
-    // 直接设置当前 widget bounds。
-    void SetWidgetBounds(const std::array<double, 6>& bounds);
+    // 直接设置当前 widget world bounds。
+    void SetWidgetWorldBounds(const std::array<double, 6>& worldBounds);
 
-    // 返回当前缓存的 widget bounds。
-    const std::array<double, 6>& GetCurrentBounds() const;
+    // 返回当前缓存的 widget world AABB；调用方用它做状态显示、回调同步和下一次 PlaceWidget 的兜底来源。
+    const std::array<double, 6>& GetCurrentWorldBounds() const;
 
-    // 读取当前 widget 的有向盒定义：local 是 PlaceWidget 时的盒坐标，
-    // localToWorld 由当前 0/1/3/4 角点重建，避免依赖 widget transform 分解语义。
-    bool GetCurrentLocalBox(
-        CropVectorDouble3Array& localCenter,
-        CropVectorDouble3Array& localDimensions,
-        CropMatrixDouble16Array& localToWorldMatrix) const;
+    // 读取当前 widget 的有向盒定义。
+    // initialWorldCenter / initialWorldDimensions 描述最近一次 PlaceWidget 的 world AABB 基准盒，
+    // initialWorldToCurrentWorldMatrix 描述这个基准盒经过交互后的旋转、缩放和平移，
+    // 调用方据此重建真实有向盒，避免把旋转后的 GetBounds 外接框误当成裁切几何。
+    bool GetCurrentWorldBox(
+        CropVectorDouble3Array& initialWorldCenter,
+        CropVectorDouble3Array& initialWorldDimensions,
+        CropMatrixDouble16Array& initialWorldToCurrentWorldMatrix) const;
 
-    // 设置 bounds 变化回调。
-    void SetBoundsChangedCallback(BoundsChangedCallback callback);
+    // 设置 world bounds 变化回调。
+    void SetWorldBoundsChangedCallback(WorldBoundsChangedCallback callback);
 
-    // 开关 widget；打开时会自动补 observer 并 place 到当前 bounds。
-    // 返回 false 表示当前还不满足安全启用条件，例如缺少 interactor 或有效 bounds。
+    // 开关 widget；打开时会自动补 observer 并 place 到当前 world bounds。
+    // 返回 false 表示当前还不满足安全启用条件，例如缺少 interactor 或有效 world bounds。
     bool SetEnabled(bool enabled);
 
     // 查询当前 widget 是否开启。
@@ -92,7 +94,7 @@ private:
     // widget 当前所属 interactor。
     vtkRenderWindowInteractor* m_interactor = nullptr;
 
-    // 真正参与交互的 vtkBoxWidget2。local 指的是 widget 自己的局部坐标系
+    // 真正参与交互的 vtkBoxWidget2。
     vtkSmartPointer<vtkBoxWidget2> m_widget;
 
     // widget 的可视外观与 bounds 数据载体。
@@ -101,8 +103,8 @@ private:
     // VTK observer 适配器。
     vtkSmartPointer<OrthogonalCropWidgetStateCallback> m_callbackCommand;
 
-    // 向交互桥上报 bounds / phase 的回调。
-    BoundsChangedCallback m_boundsChangedCallback;
+    // 向交互桥上报 world bounds / phase 的回调。
+    WorldBoundsChangedCallback m_worldBoundsChangedCallback;
 
     // 当前 widget 开关状态。
     bool m_enabled = false;
@@ -110,12 +112,14 @@ private:
     // observer 是否已经绑定过。
     bool m_observersAdded = false;
 
-    // 当前缓存的有效 bounds。
-    std::array<double, 6> m_currentBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 缓存 widget 当前 world AABB，用于状态回调、日志、重进裁切和 PlaceWidget 兜底；
+    // 旋转交互后它只是外接框，因此不能作为真实裁切盒姿态。
+    std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // 最近一次 PlaceWidget 使用的 local bounds；旋转交互后 currentBounds 会变成世界 AABB，不能再当有向盒局部定义。
-    std::array<double, 6> m_widgetLocalBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 记录最近一次 PlaceWidget 使用的 world AABB，作为反解当前有向盒的固定基准；
+    // 当前 polydata 角点只表达交互后的姿态，必须配合这个基准盒才能求回完整 affine。
+    std::array<double, 6> m_widgetInitialWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
-    // 当前参考 bounds，作为 currentBounds 无效时的回退来源。
-    std::array<double, 6> m_referenceBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 当前参考 world bounds，作为 currentWorldBounds 无效时的回退来源。
+    std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 };
