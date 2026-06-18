@@ -56,7 +56,7 @@ OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource
 {
     // 先尊重显式 preferredDataSource；若对应输入不存在，再按当前可用输入回退。
     const bool hasImage = GetInputImage() != nullptr;
-    const bool hasPolyData = m_inputPolyData != nullptr;
+    const bool hasPolyData = GetInputPolyData() != nullptr;
 
     if (m_preferredDataSource == OrthogonalCropDataSource::PolyData && hasPolyData) {
         return OrthogonalCropDataSource::PolyData;
@@ -193,11 +193,6 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetGuidePreviewResult(c
     case OrthogonalCropDataSource::ImageData:
         result.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
         result.SetResolvedBackend(OrthogonalCropResolvedBackend::None);
-        if (!GetInputImage()) {
-            result.SetFailureReason(OrthogonalCropFailureReason::InputImageMissing);
-            result.SetMessage("Input image is null.");
-            return result;
-        }
         if (!OrthogonalCropAlgorithm::GetCropDataModel(
                 GetImageModelBounds(),
                 request,
