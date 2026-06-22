@@ -747,7 +747,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }
 
-OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetPolyDataPreviewResult(
+OrthogonalCropResult OrthogonalCropInteractionBridgeService::BuildTargetPreviewResult(
     const OrthogonalCropRequest& previewRequest,
     const OrthogonalCropResult& previewResult,
     const std::shared_ptr<AbstractInteractiveService>& targetService)
@@ -790,7 +790,13 @@ OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetPolyDataPreviewR
 
     m_backend.SetInputPolyData(polyData);
     auto polyResultContext = BuildResultContext(polyRequest);
-    return m_backend.GetResult(polyRequest, polyResultContext);
+    auto targetPreviewResult = m_backend.GetResult(polyRequest, polyResultContext);
+    if (targetPreviewResult.GetFailureReason() != OrthogonalCropFailureReason::None
+        || !targetPreviewResult.GetSucceeded()) {
+        return previewResult;
+    }
+
+    return targetPreviewResult;
 }
 
 bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
@@ -799,25 +805,22 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
 {
     bool main3DPreviewApplied = false;
 
-    // 分发时优先让 3D 主窗口接管主模型 clip；
-    // overlay 再按窗口轴向消费剩余 artifact，避免同一份 polydata 被主模型和 overlay 重复绘制。
+    // 每个目标窗口可能需要自己的 polydata clip 结果；volume / 2D 目标会复用原始 previewResult。
     for (auto& target : m_previewRenderTargets) {
-        if (target.service && target.overlayStrategy) {
-            auto targetPreviewResult = GetPolyDataPreviewResult(previewRequest, previewResult, target.service);
-            if (targetPreviewResult.GetFailureReason() != OrthogonalCropFailureReason::None
-                || !targetPreviewResult.GetSucceeded()) {
-                targetPreviewResult = previewResult;
-            }
-
-            const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
-                target.service,
-                target.overlayStrategy,
-                m_referenceRenderService,
-                targetPreviewResult,
-                previewRequest.GetRemovalMode());
-            main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
-            target.service->MarkDirty();
+        if (!target.service || !target.overlayStrategy) {
+            continue;
         }
+
+        const auto targetPreviewResult = BuildTargetPreviewResult(previewRequest, previewResult, target.service);
+        const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
+            target.service,
+            target.overlayStrategy,
+            m_referenceRenderService,
+            targetPreviewResult,
+            previewRequest.GetRemovalMode());
+
+        main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
+        target.service->MarkDirty();
     }
     return main3DPreviewApplied;
 }

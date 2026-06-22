@@ -169,7 +169,8 @@ private:
     // 把一次 previewResult 按本次 request 的 removal mode 分发给所有 preview 窗口。
     bool DispatchPreviewResult(const OrthogonalCropRequest& previewRequest, const OrthogonalCropResult& previewResult);
 
-    OrthogonalCropResult GetPolyDataPreviewResult(
+    // 为单个窗口准备最终要应用的结果；3D polydata 目标会优先拿自身主 mapper 的 polydata 重算 clip。
+    OrthogonalCropResult BuildTargetPreviewResult(
         const OrthogonalCropRequest& previewRequest,
         const OrthogonalCropResult& previewResult,
         const std::shared_ptr<AbstractInteractiveService>& targetService);
