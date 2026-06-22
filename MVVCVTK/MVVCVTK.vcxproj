@@ -188,8 +188,8 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropCameraStateController.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h" />
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropSubmitWorkflow.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPluginService.h" />
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
     <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h" />
     <ClInclude Include="include\Strategies\VolumeStrategy.h" />
@@ -210,8 +210,8 @@
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropCameraStateController.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp" />
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropSubmitWorkflow.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPluginService.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp" />
     <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp" />
     <ClCompile Include="src\main\main.cpp" />

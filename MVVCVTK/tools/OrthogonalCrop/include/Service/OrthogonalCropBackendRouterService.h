@@ -7,20 +7,15 @@
 // =====================================================================
 // Router 只根据 request.dataSource / request.backend 执行已经决定好的后端目标；
 // 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
-// image 路径委托 OrthogonalCropPluginService，polydata 路径在 Router 内归一化并执行 clip，
-// 两条路径最终都回填统一的 OrthogonalCropResult / OrthogonalCropStatistics。
+// image / polydata 数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
-#include "OrthogonalCropPluginService.h"
+#include "OrthogonalCropAlgorithm.h"
 
-#include <vtkImplicitFunction.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
 #include <array>
-#include <string>
-
-class vtkGeometryFilter;
-class vtkTableBasedClipDataSet;
+#include <cstddef>
 
 class OrthogonalCropBackendRouterService {
 public:
@@ -60,11 +55,6 @@ public:
         const OrthogonalCropResult& resultContext) const;
 
 private:
-    // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。
-    vtkSmartPointer<vtkPolyData> GetClippedPolyData(
-        const CropDataModel& cropData,
-        CropRemovalMode removalMode) const;
-
     // 读取 image model bounds。
     std::array<double, 6> GetImageModelBounds() const;
 
@@ -81,50 +71,14 @@ private:
         const OrthogonalCropResult& resultContext,
         OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::InputImageMissing) const;
 
-    // polydata 路径把 request 归一化为 cropData 的内部 helper。
-    bool GetPolyDataCropDataModel(
-        const OrthogonalCropRequest& request,
-        CropDataModel& cropData,
-        OrthogonalCropFailureReason& failureReason,
-        std::string& message) const;
+    // 查询系统当前可用物理内存，供 image submit 估算使用。
+    std::size_t GetSystemAvailableRamBytes() const;
 
-    // 用已完成的 clipped polydata 回填诊断信息，避免重复执行 clip。
-    OrthogonalCropStatistics GetPolyDataStatisticsFromClipped(vtkPolyData* clipped) const;
+    // image 输入由 router 统一持有，实际处理直接分发到算法层。
+    vtkSmartPointer<vtkImageData> m_inputImage;
 
-    // polydata 路径诊断接口，会实际做一次 clip 来确认可执行性。
-    OrthogonalCropStatistics GetPolyDataStatistics(const OrthogonalCropRequest& request) const;
-
-    // polydata 路径完整结果接口，在既有 result 上下文里补齐 clip 产物。
-    OrthogonalCropResult GetPolyDataResult(
-        const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext) const;
-
-    // 组合持有 image-only plugin；router 的 image 分支全部委托给它。
-    OrthogonalCropPluginService m_imageService;
-
-    // polydata 输入单独缓存在 router 中，由 polydata 分支直接消费。
+    // polydata 输入由 router 统一持有，实际处理直接分发到算法层。
     vtkSmartPointer<vtkPolyData> m_inputPolyData;
-
-    // polydata 诊断/结果路径复用的 clip filter。
-    mutable vtkSmartPointer<vtkTableBasedClipDataSet> m_polyDataClipFilter;
-
-    // polydata 诊断/结果路径复用的 geometry filter。
-    mutable vtkSmartPointer<vtkGeometryFilter> m_polyDataGeometryFilter;
-
-    // 最近一次 polydata clip 的输入几何快照；命中时可直接复用 clipped 输出。
-    mutable CropDataModel m_cachedPolyDataCropData;
-
-    // 最近一次 polydata clip 对应的 removal mode。
-    mutable CropRemovalMode m_cachedPolyDataRemovalMode = CropRemovalMode::KeepInside;
-
-    // 最近一次 polydata clip 对应的原始输入指针；输入变更时缓存必须失效。
-    mutable vtkPolyData* m_cachedPolyDataInput = nullptr;
-
-    // 最近一次 polydata clip 的输出结果；供 diagnostics/result 连续调用复用。
-    mutable vtkSmartPointer<vtkPolyData> m_cachedClippedPolyData;
-
-    // 当前是否持有可用的 polydata clip 缓存。
-    mutable bool m_hasCachedPolyDataClip = false;
 
     // 外部偏好的数据源；若对应输入不存在，则会自动回退。
     OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::Auto;

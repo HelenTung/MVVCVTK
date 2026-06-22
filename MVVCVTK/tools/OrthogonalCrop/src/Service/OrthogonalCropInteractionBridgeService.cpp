@@ -7,46 +7,14 @@
 #include "OrthogonalCropInteractionBridgeService.h"
 #include "OrthogonalCropAlgorithm.h"
 
-#include <vtkActor.h>
 #include <vtkBoundingBox.h>
-#include <vtkBox.h>
-#include <vtkGeometryFilter.h>
-#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
-#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
-#include <vtkPlane.h>
-#include <vtkPlaneCollection.h>
-#include <vtkShaderProperty.h>
-#include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
-#include <vtkUniforms.h>
-#include <vtkVolume.h>
-#include <vtkVolumeMapper.h>
 
 #include <algorithm>
 #include <iostream>
 #include <utility>
-
-static constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
-static constexpr const char* kVolumeRemoveInsideActiveInputModelToBoxUniform = "mvvcvtk_volumeRemoveInsideActiveInputModelToBox";
-static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
-
-static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
-    "//VTK::Base::Impl\n"
-    "    if (!g_skip && mvvcvtk_volumeRemoveInsideEnabled != 0)\n"
-    "      {\n"
-    "      vec4 mvvcvtk_activeInputModelPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
-    "      float mvvcvtk_activeInputModelInvW = abs(mvvcvtk_activeInputModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_activeInputModelPoint.w : 1.0;\n"
-    "      mvvcvtk_activeInputModelPoint = vec4(mvvcvtk_activeInputModelPoint.xyz * mvvcvtk_activeInputModelInvW, 1.0);\n"
-    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volumeRemoveInsideActiveInputModelToBox * mvvcvtk_activeInputModelPoint;\n"
-    "      float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
-    "      vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
-    "      if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
-    "        {\n"
-    "        g_skip = true;\n"
-    "        }\n"
-    "      }\n";
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
@@ -615,7 +583,6 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // request 已经写入目标数据源和后端，router 只负责按目标执行。
     const auto previewRequest = BuildPreviewRequest();
     const auto previewResult = GetResult(previewRequest, BuildResultContext(previewRequest));
-    const auto& previewStats = previewResult.GetStatistics();
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
         if (logStats) {
             std::cerr << "[Main] Orthogonal crop preview failed: "
@@ -636,25 +603,19 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
 
     // 分发预览结果到所有目标；
     // image preview 携带 mask + outline，polydata preview 携带 clip + outline。
-    const bool main3DPreviewApplied = DispatchPreviewResult(previewResult, previewRequest.GetRemovalMode());
+    const bool main3DPreviewApplied = DispatchPreviewResult(previewRequest, previewResult);
 
     // 3D 主模型 clip 只是临时显示状态；
     // 关闭 preview 时切回 pass-through 管道即可恢复全模型，不需要重新向后端请求恢复结果。
 
     if (logStats) {
-        // 日志优先使用 result 的 resolved 信息；
-        // 若上层结果未回填，则退回 statistics，保证日志仍能说明实际后端来源。
-        const auto dataSource = previewResult.GetResolvedDataSource() != OrthogonalCropDataSource::Auto
-            ? previewResult.GetResolvedDataSource()
-            : previewStats.GetResolvedDataSource();
-        const auto backend = previewResult.GetResolvedBackend() != OrthogonalCropBackend::None
-            ? previewResult.GetResolvedBackend()
-            : previewStats.GetResolvedBackend();
+        // 日志只使用本次 request 的显式路由字段；
+        // result/statistics 是执行回执，不能反过来作为流程判断来源。
         std::cout
             << "[Main] Orthogonal crop preview updated. source = "
-            << GetDataSourceText(dataSource)
+            << GetDataSourceText(previewRequest.GetDataSource())
             << ", backend = "
-            << GetBackendText(backend)
+            << GetBackendText(previewRequest.GetBackend())
             << ", removal = "
             << GetRemovalModeText(previewRequest.GetRemovalMode())
             << ", main3D = "
@@ -784,12 +745,13 @@ std::shared_ptr<AbstractInteractiveService> OrthogonalCropInteractionBridgeServi
 void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 {
     // 这里只清理 overlay 生命周期；
-    // 主模型 clip 管道由 RestorePreviewRenderTargets 收口，避免解绑窗口时意外改动主显示。
+    // 主模型 preview 状态由 RestorePreviewRenderTargets 收口，避免解绑窗口时意外改动主显示。
     for (const auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
             target.service->RemoveOverlayStrategy(target.overlayStrategy);
         }
     }
+    m_previewPlug.Clear();
     m_previewRenderTargets.clear();
 }
 
@@ -798,27 +760,7 @@ void OrthogonalCropInteractionBridgeService::RestorePreviewRenderTargets()
     // 恢复 preview 涉及 overlay、volume shader 和 polydata clip 三条显示路径；
     // 统一在这里清空临时状态并标脏，确保关闭 preview 后各窗口回到全模型显示。
     for (auto& target : m_previewRenderTargets) {
-        if (target.overlayStrategy) {
-            target.overlayStrategy->ClearPreview();
-        }
-
-        if (target.service) {
-            auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
-            auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
-            if (volumeMapper) {
-                volume->GetShaderProperty()->ClearFragmentShaderReplacement(kVolumeRemoveInsideBaseImplTag, true);
-                volume->GetShaderProperty()->GetFragmentCustomUniforms()->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
-                if (auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper)) {
-                    gpuVolumeMapper->SetMaskInput(nullptr);
-                }
-                volumeMapper->RemoveAllClippingPlanes();
-                volumeMapper->CroppingOff();
-                volumeMapper->SetCroppingRegionFlagsToSubVolume();
-                volume->Modified();
-            }
-        }
-
-        RestorePolyDataPreview(target);
+        m_previewPlug.RestorePreview(target.service, target.overlayStrategy);
         if (target.service) {
             target.service->MarkDirty();
         }
@@ -847,9 +789,55 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }
 
-bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
+OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetPolyDataPreviewResult(
+    const OrthogonalCropRequest& previewRequest,
     const OrthogonalCropResult& previewResult,
-    CropRemovalMode removalMode)
+    const std::shared_ptr<AbstractInteractiveService>& targetService)
+{
+    auto polyData = m_previewPlug.GetPreviewPolyData(targetService);
+    if (!polyData) {
+        return previewResult;
+    }
+
+    auto polyRequest = previewRequest;
+    polyRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
+    polyRequest.SetBackend(OrthogonalCropBackend::ClipPreview);
+    if (targetService) {
+        auto worldToTargetInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        worldToTargetInputModelMatrix->DeepCopy(targetService->GetModelMatrix().data());
+        worldToTargetInputModelMatrix->Invert();
+
+        auto boxToRequestInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        boxToRequestInputModelMatrix->DeepCopy(previewResult.GetCropDataModel().GetBoxToInputModelMatrix().data());
+        auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        if (m_referenceRenderService) {
+            auto referenceInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+            referenceInputModelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+            vtkMatrix4x4::Multiply4x4(
+                referenceInputModelToWorldMatrix,
+                boxToRequestInputModelMatrix,
+                boxToWorldMatrix);
+        }
+        else {
+            boxToWorldMatrix->DeepCopy(boxToRequestInputModelMatrix);
+        }
+
+        auto boxToTargetInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        vtkMatrix4x4::Multiply4x4(worldToTargetInputModelMatrix, boxToWorldMatrix, boxToTargetInputModelMatrix);
+
+        CropMatrixDouble16Array boxToTargetInputModelMatrixData = GetIdentityMatrixArray();
+        vtkMatrix4x4::DeepCopy(boxToTargetInputModelMatrixData.data(), boxToTargetInputModelMatrix);
+        polyRequest.SetBoxToInputModelMatrix(boxToTargetInputModelMatrixData);
+    }
+
+    m_backend.SetInputPolyData(polyData);
+    auto polyResultContext = BuildResultContext(polyRequest);
+    return GetResult(polyRequest, polyResultContext);
+}
+
+bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
+    const OrthogonalCropRequest& previewRequest,
+    const OrthogonalCropResult& previewResult)
 {
     bool main3DPreviewApplied = false;
 
@@ -857,287 +845,21 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
     // overlay 再按窗口轴向消费剩余 artifact，避免同一份 polydata 被主模型和 overlay 重复绘制。
     for (auto& target : m_previewRenderTargets) {
         if (target.service && target.overlayStrategy) {
-            bool mainPreviewAppliedForTarget = ApplyVolumePreview(target, previewResult, removalMode);
-            if (!mainPreviewAppliedForTarget) {
-                mainPreviewAppliedForTarget = ApplyPolyDataPreview(target, previewResult, removalMode);
+            auto targetPreviewResult = GetPolyDataPreviewResult(previewRequest, previewResult, target.service);
+            if (targetPreviewResult.GetFailureReason() != OrthogonalCropFailureReason::None
+                || !targetPreviewResult.GetSucceeded()) {
+                targetPreviewResult = previewResult;
             }
 
-            auto overlayResult = previewResult;
-            if (mainPreviewAppliedForTarget && target.service->GetNavigationAxis() < 0) {
-                // 3D 主窗口已经由常驻 clip 管道直接表现裁切结果，
-                // 不再额外叠一份 clipped polydata overlay，避免重复绘制同一套网格。
-                overlayResult.SetClipPolyData(nullptr);
-            }
-
-            target.overlayStrategy->SetSliceAxis(target.service->GetNavigationAxis());
-            target.overlayStrategy->SetRemovalMode(removalMode);
-            target.overlayStrategy->SetCropResult(overlayResult);
+            const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
+                target.service,
+                target.overlayStrategy,
+                m_referenceRenderService,
+                targetPreviewResult,
+                previewRequest.GetRemovalMode());
             main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
             target.service->MarkDirty();
         }
     }
     return main3DPreviewApplied;
-}
-
-bool OrthogonalCropInteractionBridgeService::ApplyVolumePreview(
-    PreviewRenderTarget& target,
-    const OrthogonalCropResult& previewResult,
-    CropRemovalMode removalMode)
-{
-    if (!target.service || !previewResult.GetSucceeded()) {
-        return false;
-    }
-
-    auto volume = vtkVolume::SafeDownCast(target.service->GetMainProp());
-    auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
-    if (!volumeMapper) {
-        return false;
-    }
-
-    // 每次接管前先清空上一种 volume 后端表达，避免 KeepInside clipping
-    // 与 RemoveInside shader discard / mask 在反复切换时互相残留。
-    volume->GetShaderProperty()->ClearFragmentShaderReplacement(kVolumeRemoveInsideBaseImplTag, true);
-    volume->GetShaderProperty()->GetFragmentCustomUniforms()->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
-    if (auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper)) {
-        gpuVolumeMapper->SetMaskInput(nullptr);
-    }
-    volumeMapper->RemoveAllClippingPlanes();
-    volumeMapper->CroppingOff();
-
-    if (removalMode != CropRemovalMode::KeepInside) {
-        auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
-        if (!ApplyVolumeRemoveInsidePreview(volume, gpuVolumeMapper, previewResult)) {
-            volumeMapper->SetCroppingRegionFlagsToSubVolume();
-            volume->Modified();
-            return false;
-        }
-
-        volume->Modified();
-        return true;
-    }
-
-    ApplyVolumeKeepInsidePreview(volumeMapper, previewResult);
-    volume->Modified();
-    return true;
-}
-
-void OrthogonalCropInteractionBridgeService::ApplyVolumeKeepInsidePreview(
-    vtkVolumeMapper* volumeMapper,
-    const OrthogonalCropResult& previewResult) const
-{
-    if (!volumeMapper) {
-        return;
-    }
-
-    const auto& cropData = previewResult.GetCropDataModel();
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
-    if (m_referenceRenderService) {
-        activeInputModelToWorldMatrix->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-    }
-
-    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
-
-    // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> active input model，
-    // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
-    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
-
-    auto boxToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-    boxToWorldTransform->SetMatrix(boxToWorldMatrix);
-
-    auto clippingPlanes = vtkSmartPointer<vtkPlaneCollection>::New();
-    for (int axis = 0; axis < 3; ++axis) {
-        for (int sideIndex = 0; sideIndex < 2; ++sideIndex) {
-            const double side = sideIndex == 0 ? -1.0 : 1.0;
-            double boxOrigin[3] = { 0.0, 0.0, 0.0 };
-            boxOrigin[axis] = side;
-
-            double boxNormal[3] = { 0.0, 0.0, 0.0 };
-            // KeepInside 需要保留 6 个面共同围住的内部区域；
-            // 法线朝内时，VTK clipping planes 的交集语义正好表达盒内保留。
-            boxNormal[axis] = -side;
-
-            double worldOrigin[3] = { 0.0, 0.0, 0.0 };
-            double worldNormal[3] = { 0.0, 0.0, 0.0 };
-            boxToWorldTransform->TransformPoint(boxOrigin, worldOrigin);
-            boxToWorldTransform->TransformNormal(boxNormal, worldNormal);
-
-            if (vtkMath::Normalize(worldNormal) <= 1e-12) {
-                continue;
-            }
-
-            auto plane = vtkSmartPointer<vtkPlane>::New();
-            plane->SetOrigin(worldOrigin);
-            plane->SetNormal(worldNormal);
-            clippingPlanes->AddItem(plane);
-        }
-    }
-
-    // KeepInside 和 RemoveInside 都只消费 previewResult.cropData；
-    // 这里仅在 VTK volume clipping 需要的后端表达点，把 box/active input model 盒还原成 world planes。
-    volumeMapper->SetClippingPlanes(clippingPlanes);
-}
-
-bool OrthogonalCropInteractionBridgeService::ApplyVolumeRemoveInsidePreview(
-    vtkVolume* volume,
-    vtkGPUVolumeRayCastMapper* volumeMapper,
-    const OrthogonalCropResult& previewResult) const
-{
-    if (!volume || !volumeMapper) {
-        return false;
-    }
-
-    const auto& cropData = previewResult.GetCropDataModel();
-    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
-
-    // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
-    // 采样点先由 VTK shader 内置矩阵还原到 active input model，再用 activeInputModelToBox 送入标准盒空间。
-    auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
-
-    auto shaderProperty = volume->GetShaderProperty();
-    shaderProperty->AddFragmentShaderReplacement(
-        kVolumeRemoveInsideBaseImplTag,
-        true,
-        kVolumeRemoveInsideBaseImplReplacement,
-        false);
-
-    // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
-    auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
-    // 上传前转置矩阵；
-    // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ activeInputModelToBox 结果一致。
-    activeInputModelToBoxShaderMatrix->Transpose();
-
-    // vtk volume shader 中 g_dataPos 是纹理坐标；
-    // in_textureDatasetMatrix[0] 会把它还原到 active input model。
-    // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 activeInputModelToBox 需要先转置再交给 shader。
-    // uniforms 的声明由 VTK 的 CustomUniforms::Dec 自动生成，不能再手写到 Base::Dec，否则会重复声明。
-    auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, activeInputModelToBoxShaderMatrix);
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 1);
-
-    volumeMapper->SetMaskInput(nullptr);
-    shaderProperty->Modified();
-    volumeMapper->Modified();
-    volume->Modified();
-    return true;
-}
-
-void OrthogonalCropInteractionBridgeService::RestorePolyDataPreview(PreviewRenderTarget& target)
-{
-    // 3D 主窗口并不切回原始 mapper 输入，
-    // 而是把 clip function 切回一只完全包住原模型的 pass-through box。
-    // 这样 mapper 始终挂在同一条流式管道上，关闭 preview 只会让输出退化成原模型。
-    if (!target.mainPreviewClipFilter || !target.mainPreviewPassThroughBox) {
-        return;
-    }
-
-    target.mainPreviewClipFilter->SetClipFunction(target.mainPreviewPassThroughBox);
-    target.mainPreviewClipFilter->InsideOutOn();
-
-    if (target.service) {
-        auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
-        if (actor) {
-            actor->Modified();
-        }
-    }
-}
-
-bool OrthogonalCropInteractionBridgeService::ApplyPolyDataPreview(
-    PreviewRenderTarget& target,
-    const OrthogonalCropResult& previewResult,
-    CropRemovalMode removalMode)
-{
-    if (!target.service || target.service->GetNavigationAxis() >= 0 || !previewResult.GetSucceeded()) {
-        return false;
-    }
-
-    // 只有 3D 主窗口接管主 mapper；
-    // 2D 窗口继续走 overlay，避免切片视图被 3D polydata 管道影响。
-    // 首次命中时建立常驻 clip 管道，后续只更新 clip function 和 InsideOut 语义。
-
-    auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
-    if (!actor) {
-        return false;
-    }
-
-    auto mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
-    if (!mapper) {
-        return false;
-    }
-
-    if (target.mainPreviewMapper != mapper || !target.mainPreviewSourcePolyData) {
-        // 首次进入时先尝试直接抓 mapper 当前输入；
-        // 只有当上游还没物化成稳定 polydata 时，才退回一次 Update() 取当前输出快照。
-        auto source = mapper->GetInput();
-        if (!source || source->GetNumberOfPoints() == 0) {
-            mapper->Update();
-            source = mapper->GetInput();
-        }
-        if (!source || source->GetNumberOfPoints() == 0) {
-            return false;
-        }
-
-        target.mainPreviewMapper = mapper;
-        target.mainPreviewSourcePolyData = vtkSmartPointer<vtkPolyData>::New();
-        target.mainPreviewSourcePolyData->ShallowCopy(source);
-        target.mainPreviewClipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
-        target.mainPreviewClipFilter->SetInputData(target.mainPreviewSourcePolyData);
-        target.mainPreviewGeometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
-        target.mainPreviewGeometryFilter->SetInputConnection(target.mainPreviewClipFilter->GetOutputPort());
-
-        // pass-through box 需要完整包住原模型输入，
-        // 这样关闭 preview 时只切 clip function 就能恢复“显示全量模型”的结果。
-        double sourceBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-        target.mainPreviewSourcePolyData->GetBounds(sourceBounds);
-        const double xSpan = sourceBounds[1] - sourceBounds[0];
-        const double ySpan = sourceBounds[3] - sourceBounds[2];
-        const double zSpan = sourceBounds[5] - sourceBounds[4];
-        const double maxSpan = std::max({ xSpan, ySpan, zSpan, 1.0 });
-        const double padding = std::max(maxSpan * 1e-6, 1e-6);
-
-        target.mainPreviewPassThroughBox = vtkSmartPointer<vtkBox>::New();
-        target.mainPreviewPassThroughBox->SetBounds(
-            sourceBounds[0] - padding, sourceBounds[1] + padding,
-            sourceBounds[2] - padding, sourceBounds[3] + padding,
-            sourceBounds[4] - padding, sourceBounds[5] + padding);
-
-        mapper->SetInputConnection(target.mainPreviewGeometryFilter->GetOutputPort());
-    }
-
-    if (!target.mainPreviewClipFilter || !target.mainPreviewGeometryFilter) {
-        return false;
-    }
-
-    const auto& cropData = previewResult.GetCropDataModel();
-    auto clipFunction = vtkSmartPointer<vtkBox>::New();
-    const auto canonicalBounds = GetCanonicalCropBoxBounds();
-    clipFunction->SetBounds(
-        canonicalBounds[0], canonicalBounds[1],
-        canonicalBounds[2], canonicalBounds[3],
-        canonicalBounds[4], canonicalBounds[5]);
-
-    auto activeInputModelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
-    // vtkBox 的 implicit function 定义在标准盒空间；把 active input model 点先变到 box 空间，
-    // 就能复用同一个 [-1,1]^3 盒子表达任意旋转/缩放后的裁切区域。
-    activeInputModelToBoxTransform->SetMatrix(cropData.GetBoxToInputModelMatrix().data());
-    activeInputModelToBoxTransform->Inverse();
-    clipFunction->SetTransform(activeInputModelToBoxTransform);
-
-    // 每次刷新只更新 cropData 派生出的 clip function 和 removal mode；
-    // 持久管道不重建、不换输入，让主窗口显示主模型本体的 clip 结果而不是叠加网格。
-    target.mainPreviewClipFilter->SetClipFunction(clipFunction);
-    if (removalMode == CropRemovalMode::KeepInside) {
-        target.mainPreviewClipFilter->InsideOutOn();
-    }
-    else {
-        target.mainPreviewClipFilter->InsideOutOff();
-    }
-
-    actor->Modified();
-    return true;
 }

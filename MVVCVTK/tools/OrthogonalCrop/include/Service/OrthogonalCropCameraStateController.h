@@ -6,7 +6,7 @@ class vtkRenderer;
 
 class OrthogonalCropCameraStateController {
 public:
-    void Save(vtkRenderer* renderer);
+    void Save(vtkRenderer* renderer);   
     void Restore(vtkRenderer* renderer);
     void Clear();
     bool HasSaved() const;

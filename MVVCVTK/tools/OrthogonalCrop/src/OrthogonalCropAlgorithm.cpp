@@ -6,14 +6,17 @@
 
 #include "OrthogonalCropAlgorithm.h"
 
+#include <vtkBox.h>
 #include <vtkBoundingBox.h>
 #include <vtkCubeSource.h>
 #include <vtkDataArray.h>
 #include <vtkExtractVOI.h>
+#include <vtkGeometryFilter.h>
 #include <vtkImageChangeInformation.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOutlineSource.h>
 #include <vtkPointData.h>
+#include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
 #include <vtkTransformPolyDataFilter.h>
 
@@ -38,6 +41,18 @@ static std::array<double, 6> GetImageModelBounds(vtkImageData* image)
 
     double rawBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     image->GetBounds(rawBounds);
+    return { rawBounds[0], rawBounds[1], rawBounds[2], rawBounds[3], rawBounds[4], rawBounds[5] };
+}
+
+static std::array<double, 6> GetPolyDataInputModelBounds(vtkPolyData* polyData)
+{
+    std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    if (!polyData) {
+        return bounds;
+    }
+
+    double rawBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    polyData->GetBounds(rawBounds);
     return { rawBounds[0], rawBounds[1], rawBounds[2], rawBounds[3], rawBounds[4], rawBounds[5] };
 }
 
@@ -608,6 +623,31 @@ static bool BuildCropDataModel(
         allowPartialOverlap);
 }
 
+static bool BuildCropDataModel(
+    vtkPolyData* polyData,
+    const OrthogonalCropRequest& request,
+    CropDataModel& cropData,
+    OrthogonalCropFailureReason& failureReason,
+    std::string& message,
+    bool allowPartialOverlap)
+{
+    // polydata 重载只负责提供输入网格自身的 input model bounds；
+    // request -> cropData 的几何归一化继续与 image 路径共享同一套算法。
+    if (!polyData) {
+        failureReason = OrthogonalCropFailureReason::InputPolyDataMissing;
+        message = "Input polydata is null.";
+        return false;
+    }
+
+    return OrthogonalCropAlgorithm::GetCropDataModel(
+        GetPolyDataInputModelBounds(polyData),
+        request,
+        cropData,
+        failureReason,
+        message,
+        allowPartialOverlap);
+}
+
 static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData)
 {
     // image 路径最终都要落到体素级执行，因此先把已经折叠回 image model 的 bounds
@@ -880,6 +920,98 @@ static OrthogonalCropResult GetSubmitResult(
     return result;
 }
 
+static OrthogonalCropStatistics GetPolyDataDiagnostics(
+    OrthogonalCropBackend backend)
+{
+    OrthogonalCropStatistics statistics;
+    statistics.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
+    statistics.SetResolvedBackend(backend);
+
+    switch (backend) {
+    case OrthogonalCropBackend::None:
+    case OrthogonalCropBackend::ClipPreview:
+        statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+        return statistics;
+    case OrthogonalCropBackend::MaskPreview:
+    case OrthogonalCropBackend::SubmitExtractVOI:
+        statistics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+        statistics.SetValidationMessage("Polydata algorithm does not support image crop backend.");
+        return statistics;
+    default:
+        statistics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+        statistics.SetValidationMessage("Polydata algorithm received an unsupported crop backend.");
+        return statistics;
+    }
+}
+
+static vtkSmartPointer<vtkPolyData> GetClippedPolyDataInternal(
+    vtkPolyData* polyData,
+    const CropDataModel& cropData,
+    CropRemovalMode removalMode)
+{
+    if (!polyData) {
+        return nullptr;
+    }
+
+    // cropData 已归一化，activeInputModelToBox transform 负责把 active input model 点送回 [-1,1]^3。
+    auto clipFunction = vtkSmartPointer<vtkBox>::New();
+    const auto canonicalBounds = GetCanonicalCropBoxBounds();
+    clipFunction->SetBounds(
+        canonicalBounds[0], canonicalBounds[1],
+        canonicalBounds[2], canonicalBounds[3],
+        canonicalBounds[4], canonicalBounds[5]);
+
+    auto activeInputModelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
+    activeInputModelToBoxTransform->SetMatrix(cropData.GetBoxToInputModelMatrix().data());
+    activeInputModelToBoxTransform->Inverse();
+    clipFunction->SetTransform(activeInputModelToBoxTransform);
+
+    auto clipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
+    clipFilter->SetInputData(polyData);
+    clipFilter->SetClipFunction(clipFunction);
+    if (removalMode == CropRemovalMode::KeepInside) {
+        clipFilter->InsideOutOn();
+    }
+    else {
+        clipFilter->InsideOutOff();
+    }
+
+    auto geometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
+    geometryFilter->SetInputConnection(clipFilter->GetOutputPort());
+    geometryFilter->Update();
+
+    auto output = vtkSmartPointer<vtkPolyData>::New();
+    output->ShallowCopy(geometryFilter->GetOutput());
+    return output;
+}
+
+static OrthogonalCropResult GetClipPreviewResult(
+    vtkPolyData* polyData,
+    const CropDataModel& cropData,
+    const OrthogonalCropResult& resultContext,
+    CropRemovalMode removalMode)
+{
+    // polydata preview 与 image preview 共用 result contract；
+    // 算法层直接产出 clip polydata，bridge 只负责显示返回的 artifact。
+    auto result = resultContext;
+    result.SetCropDataModel(cropData);
+
+    auto clipped = GetClippedPolyDataInternal(polyData, cropData, removalMode);
+    if (!clipped) {
+        result.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
+        result.SetMessage("Failed to build clipped polydata.");
+        return result;
+    }
+
+    const auto statistics = GetPolyDataDiagnostics(OrthogonalCropBackend::ClipPreview);
+    result.SetStatistics(statistics);
+    result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
+    result.SetClipPolyData(clipped);
+    result.SetSucceeded(true);
+    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    return result;
+}
+
 OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     vtkImageData* image,
     const OrthogonalCropRequest& request,
@@ -945,6 +1077,69 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         request.GetRemovalMode(),
         request.GetBackend(),
         GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
+    fallbackResult.SetCropDataModel(cropData);
+    fallbackResult.SetStatistics(diagnostics);
+    fallbackResult.SetFailureReason(diagnostics.GetFailureReason());
+    fallbackResult.SetMessage(diagnostics.GetValidationMessage());
+    fallbackResult.SetSucceeded(false);
+    return fallbackResult;
+}
+
+OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
+    vtkPolyData* polyData,
+    const OrthogonalCropRequest& request)
+{
+    OrthogonalCropStatistics statistics;
+    CropDataModel cropData;
+    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    std::string message;
+    if (!BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
+        statistics.SetResolvedDataSource(OrthogonalCropDataSource::PolyData);
+        statistics.SetResolvedBackend(request.GetBackend());
+        statistics.SetFailureReason(failureReason);
+        statistics.SetValidationMessage(message);
+        return statistics;
+    }
+
+    return GetPolyDataDiagnostics(request.GetBackend());
+}
+
+OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
+    vtkPolyData* polyData,
+    const OrthogonalCropRequest& request,
+    const OrthogonalCropResult& resultContext)
+{
+    auto result = resultContext;
+
+    CropDataModel cropData;
+    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    std::string message;
+    if (!BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
+        result.SetFailureReason(failureReason);
+        result.SetMessage(message);
+        return result;
+    }
+
+    if (request.GetBackend() == OrthogonalCropBackend::None) {
+        const auto statistics = GetPolyDataDiagnostics(OrthogonalCropBackend::None);
+        result.SetStatistics(statistics);
+        result.SetCropDataModel(cropData);
+        result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
+        result.SetSucceeded(true);
+        result.SetFailureReason(OrthogonalCropFailureReason::None);
+        return result;
+    }
+
+    if (request.GetBackend() == OrthogonalCropBackend::ClipPreview) {
+        return GetClipPreviewResult(
+            polyData,
+            cropData,
+            resultContext,
+            request.GetRemovalMode());
+    }
+
+    auto fallbackResult = resultContext;
+    const auto diagnostics = GetPolyDataDiagnostics(request.GetBackend());
     fallbackResult.SetCropDataModel(cropData);
     fallbackResult.SetStatistics(diagnostics);
     fallbackResult.SetFailureReason(diagnostics.GetFailureReason());

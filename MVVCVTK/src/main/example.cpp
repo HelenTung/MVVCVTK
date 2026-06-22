@@ -49,11 +49,11 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropBackendRouterService
     - 数据后端路由。
-    - 负责：按 OrthogonalCropRequest 已指定的 dataSource/backend 执行 image 或 polydata 路径。
+    - 负责：按 OrthogonalCropRequest 已指定的 dataSource/backend 校验输入并分发到算法层。
 
     OrthogonalCropAlgorithm
     - 纯算法层。
-    - 负责：request 归一化、bounds 校验、voxel snapped、preview / image submit 结果构造。
+    - 负责：request 归一化、bounds 校验、voxel snapped、image preview、polydata preview 和 image submit 结果构造。
 */
 
 /*
@@ -638,8 +638,8 @@ Step 11: 只让一个窗口进入 Start()
 5. UpdatePreviewFromCurrentBounds()
 - bridge 先按 request 构造 resultContext，固定本次结果的数据源、后端和交互态。
 - 统一调用 router->GetResult(previewRequest, resultContext)。
-- router 读取 request.dataSource 和 request.backend：ImageData + MaskPreview 生成 image mask，PolyData + ClipPreview 生成 polydata clip。
-- 为什么：bridge 在请求和 resultContext 里已经决定目标后端，router 只负责校验输入、转发和填充结果。
+- router 读取 request.dataSource 和 request.backend，只校验输入并分发到 OrthogonalCropAlgorithm。
+- algorithm 按 ImageData + MaskPreview 生成 image mask，按 PolyData + ClipPreview 生成 polydata clip。
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。

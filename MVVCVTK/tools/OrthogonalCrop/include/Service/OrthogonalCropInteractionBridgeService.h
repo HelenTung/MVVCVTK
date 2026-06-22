@@ -12,16 +12,16 @@
 // 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget world 有向盒折回 input model request
 // 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、后端和交互态
 // 5. UpdatePreviewFromCurrentBounds 调用 backend 填充统一结果
-// 6. DispatchPreviewResult 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
+// 6. DispatchPreviewResult 把结果交给 preview plug，由 plug 统一更新 overlay / 3D 主显示状态
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
 #include "OrthogonalCropBackendRouterService.h"
+#include "OrthogonalCropPreviewPlugService.h"
 #include "OrthogonalCropPreviewOverlayStrategy.h"
 #include "AppInterfaces.h"
 
 #include <vtkPolyData.h>
-#include <vtkPolyDataMapper.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 
@@ -31,12 +31,6 @@
 #include <utility>
 #include <vector>
 
-class vtkGeometryFilter;
-class vtkTableBasedClipDataSet;
-class vtkBox;
-class vtkVolume;
-class vtkVolumeMapper;
-class vtkGPUVolumeRayCastMapper;
 class vtkRenderer;
 struct OrthogonalCropSubmitReloadPayload {
     std::shared_ptr<std::vector<float>> buffer;
@@ -107,28 +101,13 @@ private:
     // Private boundary: widget state machine, world/active input model conversion, backend query,
     // preview distribution, and VTK mapper/shader implementation details.
 
-    // 一个 preview 目标窗口对应一份 overlay 策略与可能的主模型临时裁切缓存。
+    // 一个 preview 目标窗口对应一份 overlay 策略。
     struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
         std::shared_ptr<AbstractInteractiveService> service;
 
         // 负责显示 mask / outline / clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
-
-        // 3D 主模型预览时缓存的 mapper 指针。
-        vtkPolyDataMapper* mainPreviewMapper = nullptr;
-
-        // 主模型原始 polydata 的浅拷贝，作为 preview 持久管道的稳定输入。
-        vtkSmartPointer<vtkPolyData> mainPreviewSourcePolyData;
-
-        // 3D 主窗口预览时复用的 clip 管道，避免每次刷新都重建 filter。
-        vtkSmartPointer<vtkTableBasedClipDataSet> mainPreviewClipFilter;
-
-        // 把 clip dataset 输出稳定收敛为 polydata 的持久 geometry filter。
-        vtkSmartPointer<vtkGeometryFilter> mainPreviewGeometryFilter;
-
-        // preview 关闭时使用的全量直通盒，避免再切回原始 mapper 输入。
-        vtkSmartPointer<vtkBox> mainPreviewPassThroughBox;
     };
 
     // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。
@@ -208,36 +187,18 @@ private:
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
     // 把一次 previewResult 按本次 request 的 removal mode 分发给所有 preview 窗口。
-    bool DispatchPreviewResult(const OrthogonalCropResult& previewResult, CropRemovalMode removalMode);
+    bool DispatchPreviewResult(const OrthogonalCropRequest& previewRequest, const OrthogonalCropResult& previewResult);
 
-    // 在 3D volume 主窗口上执行一次 volume preview；仅接管 VTK mapper 能正确表达的模式。
-    bool ApplyVolumePreview(
-        PreviewRenderTarget& target,
+    OrthogonalCropResult GetPolyDataPreviewResult(
+        const OrthogonalCropRequest& previewRequest,
         const OrthogonalCropResult& previewResult,
-        CropRemovalMode removalMode);
-
-    // KeepInside 从统一 cropData 还原世界平面，再交给 VTK volume clipping 表达“只显示盒内”。
-    void ApplyVolumeKeepInsidePreview(
-        vtkVolumeMapper* volumeMapper,
-        const OrthogonalCropResult& previewResult) const;
-
-    // RemoveInside 用 GPU volume shader discard 表达旋转盒外补集。
-    bool ApplyVolumeRemoveInsidePreview(
-        vtkVolume* volume,
-        vtkGPUVolumeRayCastMapper* volumeMapper,
-        const OrthogonalCropResult& previewResult) const;
-
-    // 把某个 3D 主窗口的持久 preview 管道恢复成全量直通状态。
-    void RestorePolyDataPreview(PreviewRenderTarget& target);
-
-    // 在满足条件的 3D 主窗口上执行一次临时 polydata clip 预览。
-    bool ApplyPolyDataPreview(
-        PreviewRenderTarget& target,
-        const OrthogonalCropResult& previewResult,
-        CropRemovalMode removalMode);
+        const std::shared_ptr<AbstractInteractiveService>& targetService);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;
+
+    // preview plug 负责 overlay / mapper / shader / volume 等 VTK 显示状态。
+    OrthogonalCropPreviewPlugService m_previewPlug;
 
     // Auto 模式下 image 输入的兜底来源。
     std::shared_ptr<AbstractDataManager> m_dataMgr;

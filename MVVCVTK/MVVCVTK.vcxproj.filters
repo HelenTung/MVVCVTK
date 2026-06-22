@@ -213,10 +213,10 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropSubmitWorkflow.h">
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPluginService.h">
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropSubmitWorkflow.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
     <ClInclude Include="include\Utils\InteractionComputeService.h">
@@ -299,10 +299,10 @@
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropSubmitWorkflow.cpp">
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPluginService.cpp">
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropSubmitWorkflow.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp">
