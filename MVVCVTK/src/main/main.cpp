@@ -72,11 +72,13 @@ public:
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
         const bool isSubmitKeyCode = keyCode == '3' || keySym == "3";
         const bool isSubmitKey = isSubmitKeyCode && isControlPressed;
+        const bool shouldBlockVtkStereoKey = isSubmitKeyCode && !isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
             || isOutsidePreviewKey
-            || isSubmitKey;
+            || isSubmitKey
+            || shouldBlockVtkStereoKey;
 
         if (eventId == vtkCommand::CharEvent && isManagedCropHotkey) {
             this->AbortFlagOn();
@@ -463,7 +465,7 @@ int main()
                 std::cerr << "[Main] Orthogonal crop init failed: input image missing." << std::endl;
             }
             else {
-                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press 3 toggle 3D outline/full preview, press Ctrl+3 to apply submit." << std::endl;
+                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press Ctrl+3 to apply submit." << std::endl;
             }
 
             // GapAnalysis 的启动由 contextB 上的 Timer observer 统一处理，
@@ -564,7 +566,7 @@ int main()
     //contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | 3 = toggle 3D outline/full preview | Ctrl+3 = apply submit\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | Ctrl+3 = apply submit\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）
