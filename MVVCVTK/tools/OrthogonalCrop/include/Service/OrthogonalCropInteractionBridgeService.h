@@ -91,11 +91,8 @@ public:
     // 对应的显式退出入口。
     bool ExitInteractiveCrop();
 
-    // 对应的“保留盒内”预览动作。
-    void ToggleInsidePreview();
-
-    // 对应的“移除盒内”预览动作。
-    void ToggleOutsidePreview();
+    // 切换 preview 开关与 removal mode。
+    void TogglePreview(CropRemovalMode removalMode, bool logStats);
 
 private:
     // Private boundary: widget state machine, world/active input model conversion, backend query,
@@ -142,9 +139,6 @@ private:
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
     void UpdatePreviewFromCurrentBounds(bool logStats);
 
-    // 切换 preview 开关与 removal mode。
-    void TogglePreview(CropRemovalMode removalMode, bool logStats);
-
     // 校验当前交互状态是否允许发起 image submit。
     bool CanApplySubmit() const;
 
@@ -153,20 +147,6 @@ private:
 
     // 把 image submit image 适配成 workflow 可提交的 reload payload。
     bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, OrthogonalCropSubmitReloadPayload& payload) const;
-
-    // 激活交互裁切模式，初始化 widget 与默认 bounds。
-    bool ActivateInteractiveCrop();
-
-    // 关闭裁切模式并恢复 preview / 主模型状态。
-    bool DeactivateInteractiveCrop();
-
-    // 以下查询接口仅作为 bridge 内部 backend 边界，外部不直接调用 backend 细节。
-    OrthogonalCropDataSource GetActiveDataSource() const;
-    std::array<double, 6> GetActiveInputModelBounds() const;
-    OrthogonalCropRequest GetDefaultRequest() const;
-    OrthogonalCropResult GetResult(
-        const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext) const;
 
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);

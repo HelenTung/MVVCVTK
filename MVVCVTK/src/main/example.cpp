@@ -572,7 +572,7 @@ Step 11: 只让一个窗口进入 Start()
 - 做什么：把加载成功后的 vtkImageData 真正注入裁切后端。
 - 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
 
-8) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / ApplySubmit
+8) ToggleInteractiveCrop / ExitInteractiveCrop / TogglePreview / ApplySubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
 - 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
@@ -624,7 +624,7 @@ Step 11: 只让一个窗口进入 Start()
 - bridge 记录 m_currentWorldBounds 和 m_lastInteractionPhase。
 
 3. 按 1 或 2
-- bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
+- bridge->TogglePreview(CropRemovalMode::KeepInside / RemoveInside, true)。
 - bridge 组装 preview request，并写入当前 dataSource 与 preview backend。
 
 4. BuildPreviewRequest()

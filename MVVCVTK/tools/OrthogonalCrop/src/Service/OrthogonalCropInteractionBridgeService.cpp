@@ -48,28 +48,6 @@ void OrthogonalCropInteractionBridgeService::SetPreferredDataSource(OrthogonalCr
     m_backend.SetPreferredDataSource(dataSource);
 }
 
-OrthogonalCropDataSource OrthogonalCropInteractionBridgeService::GetActiveDataSource() const
-{
-    return m_backend.GetActiveDataSource();
-}
-
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveInputModelBounds() const
-{
-    return m_backend.GetActiveInputModelBounds();
-}
-
-OrthogonalCropRequest OrthogonalCropInteractionBridgeService::GetDefaultRequest() const
-{
-    return m_backend.GetDefaultRequest();
-}
-
-OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetResult(
-    const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext) const
-{
-    return m_backend.GetResult(request, resultContext);
-}
-
 void OrthogonalCropInteractionBridgeService::SetDataManager(std::shared_ptr<AbstractDataManager> dataMgr)
 {
     m_dataMgr = std::move(dataMgr);
@@ -117,7 +95,7 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitReloadPayload(Orthogonal
     m_cameraStateController.Save(m_referenceRenderer);
 
     const auto submitRequest = BuildSubmitRequest();
-    const auto submitResult = GetResult(submitRequest, BuildResultContext(submitRequest));
+    const auto submitResult = m_backend.GetResult(submitRequest, BuildResultContext(submitRequest));
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
         std::cerr << "[Main] Orthogonal crop submit failed: "
@@ -156,7 +134,7 @@ void OrthogonalCropInteractionBridgeService::SetSubmitReloadSynced()
         m_submitReloadPending = false;
         SetInputImage(nullptr);
         m_worldBoundsInitialized = false;
-        DeactivateInteractiveCrop();
+        ExitInteractiveCrop();
     }
 }
 
@@ -177,7 +155,7 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
         return false;
     }
 
-    if (GetActiveDataSource() != OrthogonalCropDataSource::ImageData) {
+    if (m_backend.GetActiveDataSource() != OrthogonalCropDataSource::ImageData) {
         std::cerr << "[Main] Orthogonal crop submit failed: active crop backend is not image data." << std::endl;
         return false;
     }
@@ -256,33 +234,13 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
 
 bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
 {
-    return ActivateInteractiveCrop();
-}
-
-bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
-{
-    return DeactivateInteractiveCrop();
-}
-
-void OrthogonalCropInteractionBridgeService::ToggleInsidePreview()
-{
-    TogglePreview(CropRemovalMode::KeepInside, true);
-}
-
-void OrthogonalCropInteractionBridgeService::ToggleOutsidePreview()
-{
-    TogglePreview(CropRemovalMode::RemoveInside, true);
-}
-
-bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
-{
     if (!EnsureInputReady()) {
         std::cerr << "[Main] Orthogonal crop trigger failed: no active image/polydata input is available yet." << std::endl;
         return false;
     }
 
     if (m_cropInteractionEnabled) {
-        DeactivateInteractiveCrop();
+        ExitInteractiveCrop();
         return true;
     }
 
@@ -309,12 +267,12 @@ bool OrthogonalCropInteractionBridgeService::ActivateInteractiveCrop()
     m_lastInteractionPhase = CropInteractionPhase::Released;
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, backend = "
-        << GetDataSourceText(GetActiveDataSource())
+        << GetDataSourceText(m_backend.GetActiveDataSource())
         << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press Ctrl+3 to apply submit; press O or Esc to exit." << std::endl;
     return true;
 }
 
-bool OrthogonalCropInteractionBridgeService::DeactivateInteractiveCrop()
+bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
 {
     if (!m_cropInteractionEnabled) {
         return false;
@@ -339,7 +297,7 @@ bool OrthogonalCropInteractionBridgeService::EnsureInputReady()
 {
     // bridge 只保证“当前至少有一个可用后端输入”。
     // 它不在这里做任何坐标折叠；只有在 Auto 模式下还找不到活跃输入时，才从 data manager 兜底补 image。
-    if (GetActiveDataSource() != OrthogonalCropDataSource::Auto) {
+    if (m_backend.GetActiveDataSource() != OrthogonalCropDataSource::Auto) {
         return true;
     }
 
@@ -348,7 +306,7 @@ bool OrthogonalCropInteractionBridgeService::EnsureInputReady()
         SetInputImage(m_dataMgr->GetVtkImage());
     }
 
-    return GetActiveDataSource() != OrthogonalCropDataSource::Auto;
+    return m_backend.GetActiveDataSource() != OrthogonalCropDataSource::Auto;
 }
 
 std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteractiveWorldBounds() const
@@ -448,7 +406,7 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveWorldBoun
 {
     // backend/router 暴露的是 active input model bounds；
     // widget 放在 world 里，所以这里负责做一次 active input model -> world 的包围盒提升。
-    const auto activeInputModelBounds = GetActiveInputModelBounds();
+    const auto activeInputModelBounds = m_backend.GetActiveInputModelBounds();
     if (!(activeInputModelBounds[0] < activeInputModelBounds[1]
         && activeInputModelBounds[2] < activeInputModelBounds[3]
         && activeInputModelBounds[4] < activeInputModelBounds[5])) {
@@ -481,7 +439,7 @@ const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview
 {
     // 先获取当前数据源的默认 request；
     // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
-    auto previewRequest = GetDefaultRequest();
+    auto previewRequest = m_backend.GetDefaultRequest();
 
     // 准备 widget 有向盒的 world 基准信息；
     // 默认值来自当前 world AABB，GetCurrentWorldBox 成功时会替换成最近一次 PlaceWidget 的基准盒。
@@ -538,7 +496,7 @@ const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview
     vtkMatrix4x4::DeepCopy(boxToInputModelMatrixData.data(), boxToInputModelMatrix);
 
     previewRequest.SetBoxToInputModelMatrix(boxToInputModelMatrixData);
-    previewRequest.SetDataSource(GetActiveDataSource());
+    previewRequest.SetDataSource(m_backend.GetActiveDataSource());
     switch (previewRequest.GetDataSource()) {
     case OrthogonalCropDataSource::ImageData:
         previewRequest.SetBackend(OrthogonalCropBackend::MaskPreview);
@@ -582,7 +540,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     // 将当前 widget world 有向盒固化为 active input model request；
     // request 已经写入目标数据源和后端，router 只负责按目标执行。
     const auto previewRequest = BuildPreviewRequest();
-    const auto previewResult = GetResult(previewRequest, BuildResultContext(previewRequest));
+    const auto previewResult = m_backend.GetResult(previewRequest, BuildResultContext(previewRequest));
     if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
         if (logStats) {
             std::cerr << "[Main] Orthogonal crop preview failed: "
@@ -832,7 +790,7 @@ OrthogonalCropResult OrthogonalCropInteractionBridgeService::GetPolyDataPreviewR
 
     m_backend.SetInputPolyData(polyData);
     auto polyResultContext = BuildResultContext(polyRequest);
-    return GetResult(polyRequest, polyResultContext);
+    return m_backend.GetResult(polyRequest, polyResultContext);
 }
 
 bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
