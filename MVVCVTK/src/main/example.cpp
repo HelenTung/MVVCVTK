@@ -12,7 +12,7 @@ example.cpp — 当前架构对齐的接入说明示例
 2. MedicalVizService 是“窗口级业务调度层”，StdRenderContext 是“窗口级渲染/事件入口”。
 3. 数据加载、导出、重载都通过 service 发起，但真正的数据只保留一份，窗口之间共享。
 4. OrthogonalCropInteractionBridgeService 不直接做算法，它只负责 widget、坐标换算、preview 时机和结果分发。
-5. OrthogonalCropBackendRouterService 统一接 request，然后再决定走 image 还是 polydata 后端。
+5. OrthogonalCropInteractionBridgeService 先在 request 中写入 dataSource/backend，OrthogonalCropBackendRouterService 只按 request 执行。
 =====================================================================
 */
 
@@ -49,11 +49,11 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropBackendRouterService
     - 数据后端路由。
-    - 负责：对同一份 OrthogonalCropRequest 选择 image 或 polydata 执行路径。
+    - 负责：按 OrthogonalCropRequest 已指定的 dataSource/backend 执行 image 或 polydata 路径。
 
     OrthogonalCropAlgorithm
     - 纯算法层。
-    - 负责：request 归一化、bounds 校验、voxel snapped、preview artifact / image submit 结果构造。
+    - 负责：request 归一化、bounds 校验、voxel snapped、preview / image submit 结果构造。
 */
 
 /*
@@ -572,11 +572,7 @@ Step 11: 只让一个窗口进入 Start()
 - 做什么：把加载成功后的 vtkImageData 真正注入裁切后端。
 - 为什么：裁切输入必须等数据成功加载后才能绑定，不能在启动阶段盲设空 image。
 
-8) OrthogonalCropInteractionBridgeService::SetFullPreviewRequired
-- 做什么：控制 BuildPreviewRequest 写入 FullPreview 还是 Lightweight3DOutlineGuide。
-- 为什么：预览粒度必须随 request 透传给 router，让 bridge 只表达 UI 选择，不直接挑后端入口。
-
-9) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / TogglePreviewMode / ApplySubmit
+8) ToggleInteractiveCrop / ExitInteractiveCrop / ToggleInsidePreview / ToggleOutsidePreview / ApplySubmit
 - 做什么：这些是 bridge 暴露给 UI/热键层的动作接口。
 - 为什么：bridge 只认动作，不认具体键位；键盘映射应放在 main.cpp 观察器，而不是塞进 bridge 内部。
 */
@@ -601,10 +597,10 @@ Step 11: 只让一个窗口进入 Start()
 - Start() 决定谁持有应用主消息循环。
 - 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
-4) 为什么默认 `m_fullPreviewRequired = true`
-- 因为 full preview 才能稳定产出 2D mask、3D overlay、必要时的主模型 clip 预览。
-- 如果一上来默认轻量，会让用户误以为预览本该有的 mask/完整结果丢了。
-- 所以当前策略是：默认完整，按 3 手动切 lightweight/full。
+4) 为什么 preview request 必须写入 dataSource 和 backend
+- 因为 bridge 才知道这次交互面对的是 image 还是 polydata，也知道 UI 动作是 preview 还是 submit。
+- router 只应该执行 request 已经说明的后端目标，不能再根据 active source 和枚举组合自行猜测。
+- 所以 preview 固定写成 ImageData + MaskPreview 或 PolyData + ClipPreview；submit 固定写成 ImageData + SubmitExtractVOI。
 
 5) 为什么拖拽中不实时重算 preview，只在 Released 或显式 toggle 时重算
 - 因为重型 preview 本身可能包含 mask 生成、polydata clip、overlay 同步。
@@ -617,7 +613,7 @@ Step 11: 只让一个窗口进入 Start()
 十、OrthogonalCrop 当前完整调用链
 ─────────────────────────────────────────────────────────────────────
 
-从用户视角看是按 O/1/2/3，底层实际上是下面这条链：
+从用户视角看是按 O/1/2/Ctrl+3，底层实际上是下面这条链：
 
 1. O 键
 - main.cpp 的热键观察器调用 bridge->ToggleInteractiveCrop()。
@@ -629,33 +625,31 @@ Step 11: 只让一个窗口进入 Start()
 
 3. 按 1 或 2
 - bridge->ToggleInsidePreview() / ToggleOutsidePreview()。
-- bridge 组装 preview request，executionMode 固定是 PreviewArtifact。
+- bridge 组装 preview request，并写入当前 dataSource 与 preview backend。
 
 4. BuildPreviewRequest()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
-- 写入当前 previewArtifactMode：FullPreview 或 Lightweight3DOutlineGuide。
+- 写入当前 dataSource：ImageData 或 PolyData。
+- 写入当前 backend：ImageData 对应 MaskPreview，PolyData 对应 ClipPreview。
 - 写入 cropStateModel。
 
 5. UpdatePreviewFromCurrentBounds()
-- 统一调用 router->GetResult(previewRequest)。
-- router 读取 previewArtifactMode：FullPreview 生成 image mask / polydata clip，Lightweight3DOutlineGuide 只生成 cropData + outline。
-- 为什么：bridge 不再知道 guide/full 两个后端入口，预览粒度由 request 透传到 router 内部决策。
+- bridge 先按 request 构造 resultContext，固定本次结果的数据源、后端和交互态。
+- 统一调用 router->GetResult(previewRequest, resultContext)。
+- router 读取 request.dataSource 和 request.backend：ImageData + MaskPreview 生成 image mask，PolyData + ClipPreview 生成 polydata clip。
+- 为什么：bridge 在请求和 resultContext 里已经决定目标后端，router 只负责校验输入、转发和填充结果。
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。
 - 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
 
-7. 按 3
-- bridge->TogglePreviewMode()。
-- 在 FullPreview / Lightweight3DOutlineGuide 之间切换，并在非 Dragging 状态下立即刷新一次当前 preview。
-
-8. 按 Ctrl+3
+7. 按 Ctrl+3
 - orthogonalCropSubmitWorkflow->ApplySubmit()。
-- 校验当前是否为 KeepInside、非 dragging、widget 已激活。
+- 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且当前 active source 是 ImageData。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- Bridge 的 BuildSubmitReloadPayload() 把当前 widget 有向盒改成 Submit request，并生成 reload buffer / origin 翻转后的 payload。
+- Bridge 的 BuildSubmitReloadPayload() 把当前 widget 有向盒改成 ImageData + SubmitExtractVOI request，并生成 reload buffer / origin 翻转后的 payload。
 - Workflow 持有 reload buffer 生命周期，调用 serviceA->ReloadFromBufferAsync(...) 把 image submit image 提交回主数据通道。
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
 - Workflow 收到 reload 完成回调后，通知 bridge 恢复相机、清理 submit 状态并关闭裁切。
@@ -681,7 +675,8 @@ Step 11: 只让一个窗口进入 Start()
         12.0, 24.0
     });
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetExecutionMode(CropExecutionMode::PreviewArtifact);
+    request.SetDataSource(OrthogonalCropDataSource::ImageData);
+    request.SetBackend(OrthogonalCropBackend::MaskPreview);
 
     CropStateModel cropState;
     cropState.SetCropEnabled(true);
@@ -690,13 +685,18 @@ Step 11: 只让一个窗口进入 Start()
     cropState.SetInteractionPhase(CropInteractionPhase::Released);
     request.SetCropStateModel(cropState);
 
+    auto resultContext = OrthogonalCropResult();
+    resultContext.SetResolvedDataSource(request.GetDataSource());
+    resultContext.SetResolvedBackend(request.GetBackend());
+    resultContext.SetCropStateModel(request.GetCropStateModel());
+
     auto stats = cropBackend->GetStatistics(request);
     if (stats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << stats.GetValidationMessage() << std::endl;
         return;
     }
 
-    auto result = cropBackend->GetResult(request);
+    auto result = cropBackend->GetResult(request, resultContext);
     if (!result.GetSucceeded()) {
         std::cerr << result.GetMessage() << std::endl;
         return;
@@ -708,14 +708,18 @@ Step 11: 只让一个窗口进入 Start()
 如果改走主数据 submit：
 
     auto hardRequest = request;
-    hardRequest.SetExecutionMode(CropExecutionMode::Submit);
+    hardRequest.SetDataSource(OrthogonalCropDataSource::ImageData);
+    hardRequest.SetBackend(OrthogonalCropBackend::SubmitExtractVOI);
+    auto hardResultContext = resultContext;
+    hardResultContext.SetResolvedDataSource(hardRequest.GetDataSource());
+    hardResultContext.SetResolvedBackend(hardRequest.GetBackend());
     auto hardStats = cropBackend->GetStatistics(hardRequest);
     if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
         return;
     }
 
-    auto hardResult = cropBackend->GetResult(hardRequest);
+    auto hardResult = cropBackend->GetResult(hardRequest, hardResultContext);
     auto submitImage = hardResult.GetSubmitImage();
 
 如果改走 polydata：
@@ -725,8 +729,15 @@ Step 11: 只让一个窗口进入 Start()
 
     auto polyRequest = cropBackend->GetDefaultRequest();
     polyRequest.SetBoxToInputModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
+    polyRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
+    polyRequest.SetBackend(OrthogonalCropBackend::ClipPreview);
 
-    auto polyResult = cropBackend->GetResult(polyRequest);
+    auto polyResultContext = OrthogonalCropResult();
+    polyResultContext.SetResolvedDataSource(polyRequest.GetDataSource());
+    polyResultContext.SetResolvedBackend(polyRequest.GetBackend());
+    polyResultContext.SetCropStateModel(polyRequest.GetCropStateModel());
+
+    auto polyResult = cropBackend->GetResult(polyRequest, polyResultContext);
     auto clippedSurface = polyResult.GetClipPolyData();
 */
 
@@ -740,5 +751,5 @@ Step 11: 只让一个窗口进入 Start()
 3. 所有 SetXxx 大多先改 SharedState，再由 Timer 心跳把状态同步到 Strategy/VTK 对象。
 4. 回调里能安全假设“主线程状态已经收敛过一轮”，但不要因此绕过 service/context 直接改底层 VTK 管线。
 5. OrthogonalCrop bridge 负责交互，不负责算法；router 负责路由，不负责键位；algorithm 负责结果，不负责窗口。
-6. 当前 preview 默认是 Full，`3` 只切 request.previewArtifactMode；不要让 bridge 直接分叉调用后端入口。
+6. preview / submit 的业务目标写在 request.dataSource 和 request.backend；router 只执行目标，不再自行猜后端。
 */

@@ -5,8 +5,8 @@
 // 分类: Service / Backend Router
 // 说明: 在 image 与 polydata 两条裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
-// Router 根据 preferredDataSource、当前输入和 request 模式确定 active data source 与预览粒度；
-// 默认 request、诊断查询和结果执行都从这里收口，屏蔽 UI 层的后端判断。
+// Router 只根据 request.dataSource / request.backend 执行已经决定好的后端目标；
+// 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
 // image 路径委托 OrthogonalCropPluginService，polydata 路径在 Router 内归一化并执行 clip，
 // 两条路径最终都回填统一的 OrthogonalCropResult / OrthogonalCropStatistics。
 
@@ -45,21 +45,21 @@ public:
     // 返回当前活跃数据的 input model bounds。
     std::array<double, 6> GetActiveInputModelBounds() const;
 
-    // 构造与当前活跃输入一致的默认 request。
+    // 构造与当前活跃输入一致的默认 request 模板。
+    // 它只提供初始几何和兜底目标，正式执行前仍由 bridge 写入本次业务选择。
     OrthogonalCropRequest GetDefaultRequest() const;
 
-    // 查询当前请求的诊断信息，内部会按数据源分发。
-    // 调用方只需要提交统一 request，不需要提前知道自己会落到 image 还是 polydata 后端。
+    // 查询当前请求的诊断信息，按 request 已指定的数据源和后端分发。
+    // 调用方必须先把业务选择写进 request，router 只负责校验和转发。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
-    // 执行当前请求并返回统一结果，内部会按数据源和 preview artifact mode 分发。
-    // 结果对象会补齐 resolved source / backend / removal mode，供交互桥和 overlay 直接消费。
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
+    // 执行当前请求并填充调用方给定的结果上下文，按 request 已指定的数据源和后端分发。
+    // resultContext 已携带 resolved source / backend，router 只校验和转发，不再决定结果身份。
+    OrthogonalCropResult GetResult(
+        const OrthogonalCropRequest& request,
+        const OrthogonalCropResult& resultContext) const;
 
 private:
-    // 执行 3D outline guide preview：只归一化 request->cropData 并生成 outline，不跑 2D mask / 3D clip / 统计。
-    OrthogonalCropResult GetGuidePreviewResult(const OrthogonalCropRequest& request) const;
-
     // polydata 路径统一从 cropData 直接生成 clipped polydata，内部复用 clip 管道。
     vtkSmartPointer<vtkPolyData> GetClippedPolyData(
         const CropDataModel& cropData,
@@ -71,11 +71,15 @@ private:
     // 读取 polyData input model bounds。
     std::array<double, 6> GetPolyDataInputModelBounds() const;
 
-    // 统一构造“输入缺失”诊断结果。
-    OrthogonalCropStatistics GetMissingInputStatistics() const;
+    // 统一构造“输入缺失”诊断结果，并按目标后端保留准确失败原因。
+    OrthogonalCropStatistics GetMissingInputStatistics(
+        OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::Auto,
+        OrthogonalCropBackend backend = OrthogonalCropBackend::None) const;
 
-    // 统一构造“输入缺失”执行结果。
-    OrthogonalCropResult GetMissingInputResult() const;
+    // 在调用方结果上下文上回填“输入缺失”执行结果，并按目标后端保留准确失败原因。
+    OrthogonalCropResult GetMissingInputResult(
+        const OrthogonalCropResult& resultContext,
+        OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::InputImageMissing) const;
 
     // polydata 路径把 request 归一化为 cropData 的内部 helper。
     bool GetPolyDataCropDataModel(
@@ -90,8 +94,10 @@ private:
     // polydata 路径诊断接口，会实际做一次 clip 来确认可执行性。
     OrthogonalCropStatistics GetPolyDataStatistics(const OrthogonalCropRequest& request) const;
 
-    // polydata 路径完整结果接口。
-    OrthogonalCropResult GetPolyDataResult(const OrthogonalCropRequest& request) const;
+    // polydata 路径完整结果接口，在既有 result 上下文里补齐 clip 产物。
+    OrthogonalCropResult GetPolyDataResult(
+        const OrthogonalCropRequest& request,
+        const OrthogonalCropResult& resultContext) const;
 
     // 组合持有 image-only plugin；router 的 image 分支全部委托给它。
     OrthogonalCropPluginService m_imageService;

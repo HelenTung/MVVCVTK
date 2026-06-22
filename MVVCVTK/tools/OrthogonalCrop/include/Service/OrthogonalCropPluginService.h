@@ -26,8 +26,10 @@ public:
     // 查询 image 路径诊断结果。
     OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
 
-    // 执行 image 路径裁切。
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
+    // 执行 image 路径裁切，并把产物填入调用方已构造的结果上下文。
+    OrthogonalCropResult GetResult(
+        const OrthogonalCropRequest& request,
+        const OrthogonalCropResult& resultContext) const;
 
 private:
     // image-only plugin 唯一持有的输入对象。

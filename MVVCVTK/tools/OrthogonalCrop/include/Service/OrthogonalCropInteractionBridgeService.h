@@ -10,8 +10,9 @@
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
 // 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget world 有向盒折回 input model request
-// 4. UpdatePreviewFromCurrentBounds 调用 backend 获取统一结果
-// 5. DispatchPreviewResult 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
+// 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、后端和交互态
+// 5. UpdatePreviewFromCurrentBounds 调用 backend 填充统一结果
+// 6. DispatchPreviewResult 把结果分发给 2D/3D overlay，必要时再给 3D 主模型做主显示预览
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
@@ -77,12 +78,6 @@ public:
 
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
-
-    // 控制 preview 是否必须产出完整 2D/3D 后端产物（2D mask / 3D clipped polydata）。
-    void SetFullPreviewRequired(bool required);
-
-    // 在 3D outline 轻量预览与完整 preview artifact 预览之间切换；必要时会立即刷新当前 preview。
-    void TogglePreviewMode();
 
     // 构建当前 KeepInside image submit 的 reload payload；真正提交由 workflow 协调。
     bool BuildSubmitReloadPayload(OrthogonalCropSubmitReloadPayload& payload);
@@ -162,6 +157,9 @@ private:
     // 最终只把 boxToInputModelMatrix 下发给后端，避免后端反向读取 UI 状态。
     const OrthogonalCropRequest BuildPreviewRequest() const;
 
+    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、后端和交互态。
+    OrthogonalCropResult BuildResultContext(const OrthogonalCropRequest& request) const;
+
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
     void UpdatePreviewFromCurrentBounds(bool logStats);
 
@@ -187,14 +185,15 @@ private:
     OrthogonalCropDataSource GetActiveDataSource() const;
     std::array<double, 6> GetActiveInputModelBounds() const;
     OrthogonalCropRequest GetDefaultRequest() const;
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
+    OrthogonalCropResult GetResult(
+        const OrthogonalCropRequest& request,
+        const OrthogonalCropResult& resultContext) const;
 
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
-    static const char* GetPreviewArtifactModeText(CropPreviewArtifactMode previewArtifactMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
-    static const char* GetResolvedBackendText(OrthogonalCropResolvedBackend backend);
+    static const char* GetBackendText(OrthogonalCropBackend backend);
 
     // preview 列表为空时，取第一个有效目标作为 reference service 的后备来源。
     std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const;
@@ -208,11 +207,14 @@ private:
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
-    // 把一次 previewResult 分发给所有 preview 窗口。
-    bool DispatchPreviewResult(const OrthogonalCropResult& previewResult);
+    // 把一次 previewResult 按本次 request 的 removal mode 分发给所有 preview 窗口。
+    bool DispatchPreviewResult(const OrthogonalCropResult& previewResult, CropRemovalMode removalMode);
 
     // 在 3D volume 主窗口上执行一次 volume preview；仅接管 VTK mapper 能正确表达的模式。
-    bool ApplyVolumePreview(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
+    bool ApplyVolumePreview(
+        PreviewRenderTarget& target,
+        const OrthogonalCropResult& previewResult,
+        CropRemovalMode removalMode);
 
     // KeepInside 从统一 cropData 还原世界平面，再交给 VTK volume clipping 表达“只显示盒内”。
     void ApplyVolumeKeepInsidePreview(
@@ -229,7 +231,10 @@ private:
     void RestorePolyDataPreview(PreviewRenderTarget& target);
 
     // 在满足条件的 3D 主窗口上执行一次临时 polydata clip 预览。
-    bool ApplyPolyDataPreview(PreviewRenderTarget& target, const OrthogonalCropResult& previewResult);
+    bool ApplyPolyDataPreview(
+        PreviewRenderTarget& target,
+        const OrthogonalCropResult& previewResult,
+        CropRemovalMode removalMode);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;
@@ -254,9 +259,6 @@ private:
 
     // 当前 preview 真正使用的 removal mode。
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
-
-    // 当前 preview 是否强制要求完整 2D/3D 后端产物；关闭时只走 3D outline guide。
-    bool m_fullPreviewRequired = true;
 
     // 缓存 widget 当前 world AABB，用于初始化、日志和 bounds 变化回调；
     // 旋转后它只是外接范围，真实裁切姿态必须由 GetCurrentWorldBox() 重建。

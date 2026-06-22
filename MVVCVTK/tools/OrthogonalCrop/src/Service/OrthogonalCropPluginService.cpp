@@ -31,9 +31,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropPluginService::GetInputImage() const
 OrthogonalCropRequest OrthogonalCropPluginService::GetDefaultRequest() const
 {
     OrthogonalCropRequest request;
-    request.SetExecutionMode(CropExecutionMode::PreviewArtifact);
+    request.SetDataSource(OrthogonalCropDataSource::ImageData);
+    request.SetBackend(OrthogonalCropBackend::MaskPreview);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetGlobalOffsetMatrix(GetIdentityMatrixArray());
 
     if (!m_inputImage) {
         return request;
@@ -75,12 +75,15 @@ OrthogonalCropStatistics OrthogonalCropPluginService::GetStatistics(const Orthog
         GetSystemAvailableRamBytes());
 }
 
-OrthogonalCropResult OrthogonalCropPluginService::GetResult(const OrthogonalCropRequest& request) const
+OrthogonalCropResult OrthogonalCropPluginService::GetResult(
+    const OrthogonalCropRequest& request,
+    const OrthogonalCropResult& resultContext) const
 {
     // image 执行直接委托算法层；
-    // PluginService 只持有输入 image 并注入 RAM，不重写 request 归一化或结果回填。
+    // PluginService 只持有输入 image 并注入 RAM，不重写 result 身份或 request 归一化。
     return OrthogonalCropAlgorithm::GetResult(
         m_inputImage,
         request,
+        resultContext,
         GetSystemAvailableRamBytes());
 }

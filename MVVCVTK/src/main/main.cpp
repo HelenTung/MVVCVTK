@@ -70,13 +70,13 @@ public:
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
-        const bool isPreviewArtifactModeKey = keyCode == '3' || keySym == "3";
-        const bool isSubmitKey = isPreviewArtifactModeKey && isControlPressed;
+        const bool isSubmitKeyCode = keyCode == '3' || keySym == "3";
+        const bool isSubmitKey = isSubmitKeyCode && isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
             || isOutsidePreviewKey
-            || isPreviewArtifactModeKey;
+            || isSubmitKey;
 
         if (eventId == vtkCommand::CharEvent && isManagedCropHotkey) {
             this->AbortFlagOn();
@@ -107,15 +107,10 @@ public:
                 return;
             }
 
-            if (isPreviewArtifactModeKey && !m_previewModeKeyDown) {
-                m_previewModeKeyDown = true;
-                if (isSubmitKey) {
-                    if (orthogonalCropSubmitWorkflow) {
-                        orthogonalCropSubmitWorkflow->ApplySubmit();
-                    }
-                }
-                else {
-                    orthogonalCropBridge->TogglePreviewMode();
+            if (isSubmitKey && !m_submitKeyDown) {
+                m_submitKeyDown = true;
+                if (orthogonalCropSubmitWorkflow) {
+                    orthogonalCropSubmitWorkflow->ApplySubmit();
                 }
                 return;
             }
@@ -137,8 +132,8 @@ public:
                 return;
             }
 
-            if (isPreviewArtifactModeKey) {
-                m_previewModeKeyDown = false;
+            if (isSubmitKeyCode) {
+                m_submitKeyDown = false;
                 return;
             }
         }
@@ -148,7 +143,7 @@ private:
     bool m_cropToggleKeyDown = false;
     bool m_insidePreviewKeyDown = false;
     bool m_outsidePreviewKeyDown = false;
-    bool m_previewModeKeyDown = false;
+    bool m_submitKeyDown = false;
 };
 
 class GapAnalysisOverlayCommitObserver : public vtkCommand {
