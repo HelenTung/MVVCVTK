@@ -559,9 +559,10 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // 分发预览结果到所有目标；
-    // image preview 携带 mask + outline，polydata preview 携带 clip + outline。
-    const bool main3DPreviewApplied = DispatchPreviewResult(previewRequest, previewResult);
+    // 先按窗口目标准备结果，再做显示分发；
+    // target-specific polydata request 只在准备阶段派生，DispatchPreviewResult 只负责投递。
+    const auto targetPreviewResults = BuildTargetPreviewResults(previewRequest, previewResult);
+    const bool main3DPreviewApplied = DispatchPreviewResult(previewRequest.GetRemovalMode(), targetPreviewResults);
 
     // 3D 主模型 clip 只是临时显示状态；
     // 关闭 preview 时切回 pass-through 管道即可恢复全模型，不需要重新向后端请求恢复结果。
@@ -757,9 +758,7 @@ OrthogonalCropResult OrthogonalCropInteractionBridgeService::BuildTargetPreviewR
         return previewResult;
     }
 
-    auto polyRequest = previewRequest;
-    polyRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
-    polyRequest.SetBackend(OrthogonalCropBackend::ClipPreview);
+    auto targetPolyDataRequest = previewRequest;
     if (targetService) {
         auto worldToTargetInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
         worldToTargetInputModelMatrix->DeepCopy(targetService->GetModelMatrix().data());
@@ -785,12 +784,17 @@ OrthogonalCropResult OrthogonalCropInteractionBridgeService::BuildTargetPreviewR
 
         CropMatrixDouble16Array boxToTargetInputModelMatrixData = GetIdentityMatrixArray();
         vtkMatrix4x4::DeepCopy(boxToTargetInputModelMatrixData.data(), boxToTargetInputModelMatrix);
-        polyRequest.SetBoxToInputModelMatrix(boxToTargetInputModelMatrixData);
+        targetPolyDataRequest.SetBoxToInputModelMatrix(boxToTargetInputModelMatrixData);
     }
 
+    // 这里派生的是目标窗口专用 request：继承基础裁切盒和 removal mode，
+    // 但执行目标改为当前窗口主 mapper 的 polydata clip。
+    targetPolyDataRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
+    targetPolyDataRequest.SetBackend(OrthogonalCropBackend::ClipPreview);
+
     m_backend.SetInputPolyData(polyData);
-    auto polyResultContext = BuildResultContext(polyRequest);
-    auto targetPreviewResult = m_backend.GetResult(polyRequest, polyResultContext);
+    auto targetPolyDataResultContext = BuildResultContext(targetPolyDataRequest);
+    auto targetPreviewResult = m_backend.GetResult(targetPolyDataRequest, targetPolyDataResultContext);
     if (targetPreviewResult.GetFailureReason() != OrthogonalCropFailureReason::None
         || !targetPreviewResult.GetSucceeded()) {
         return previewResult;
@@ -799,28 +803,44 @@ OrthogonalCropResult OrthogonalCropInteractionBridgeService::BuildTargetPreviewR
     return targetPreviewResult;
 }
 
-bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
+std::vector<OrthogonalCropInteractionBridgeService::TargetPreviewResult>
+OrthogonalCropInteractionBridgeService::BuildTargetPreviewResults(
     const OrthogonalCropRequest& previewRequest,
     const OrthogonalCropResult& previewResult)
 {
-    bool main3DPreviewApplied = false;
+    std::vector<TargetPreviewResult> targetPreviewResults;
+    targetPreviewResults.reserve(m_previewRenderTargets.size());
 
-    // 每个目标窗口可能需要自己的 polydata clip 结果；volume / 2D 目标会复用原始 previewResult。
-    for (auto& target : m_previewRenderTargets) {
+    for (const auto& target : m_previewRenderTargets) {
         if (!target.service || !target.overlayStrategy) {
             continue;
         }
 
-        const auto targetPreviewResult = BuildTargetPreviewResult(previewRequest, previewResult, target.service);
+        targetPreviewResults.push_back({
+            target,
+            BuildTargetPreviewResult(previewRequest, previewResult, target.service)
+        });
+    }
+
+    return targetPreviewResults;
+}
+
+bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
+    CropRemovalMode removalMode,
+    const std::vector<TargetPreviewResult>& targetPreviewResults)
+{
+    bool main3DPreviewApplied = false;
+
+    for (const auto& targetPreviewResult : targetPreviewResults) {
         const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
-            target.service,
-            target.overlayStrategy,
+            targetPreviewResult.target.service,
+            targetPreviewResult.target.overlayStrategy,
             m_referenceRenderService,
-            targetPreviewResult,
-            previewRequest.GetRemovalMode());
+            targetPreviewResult.result,
+            removalMode);
 
         main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
-        target.service->MarkDirty();
+        targetPreviewResult.target.service->MarkDirty();
     }
     return main3DPreviewApplied;
 }

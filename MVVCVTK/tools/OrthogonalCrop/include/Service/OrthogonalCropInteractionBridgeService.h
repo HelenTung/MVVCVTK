@@ -107,6 +107,12 @@ private:
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
     };
 
+    // 一个目标窗口已经准备好的 preview result。
+    struct TargetPreviewResult {
+        PreviewRenderTarget target;
+        OrthogonalCropResult result;
+    };
+
     // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。
     bool EnsureInputReady();
 
@@ -166,14 +172,21 @@ private:
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
-    // 把一次 previewResult 按本次 request 的 removal mode 分发给所有 preview 窗口。
-    bool DispatchPreviewResult(const OrthogonalCropRequest& previewRequest, const OrthogonalCropResult& previewResult);
+    // 为所有有效 preview 窗口准备最终要应用的结果。
+    std::vector<TargetPreviewResult> BuildTargetPreviewResults(
+        const OrthogonalCropRequest& previewRequest,
+        const OrthogonalCropResult& previewResult);
 
     // 为单个窗口准备最终要应用的结果；3D polydata 目标会优先拿自身主 mapper 的 polydata 重算 clip。
     OrthogonalCropResult BuildTargetPreviewResult(
         const OrthogonalCropRequest& previewRequest,
         const OrthogonalCropResult& previewResult,
         const std::shared_ptr<AbstractInteractiveService>& targetService);
+
+    // 把已经准备好的 target results 分发给 preview plug。
+    bool DispatchPreviewResult(
+        CropRemovalMode removalMode,
+        const std::vector<TargetPreviewResult>& targetPreviewResults);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;
