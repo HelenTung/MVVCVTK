@@ -10,7 +10,6 @@
 #include <unordered_map>
 
 class vtkActor;
-class vtkAlgorithmOutput;
 class vtkGPUVolumeRayCastMapper;
 class vtkPlaneCollection;
 class vtkPolyData;
@@ -27,7 +26,8 @@ public:
         const std::shared_ptr<AbstractInteractiveService>& targetService,
         const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
-        const OrthogonalCropResult& previewResult,
+        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* polyDataPreviewResult,
         CropRemovalMode removalMode);
 
     void RestorePreview(
@@ -39,8 +39,6 @@ public:
 private:
     struct TargetState {
         vtkPolyDataMapper* mainPreviewMapper = nullptr;
-        vtkAlgorithmOutput* mainPreviewInputConnection = nullptr;
-        vtkSmartPointer<vtkPolyData> mainPreviewInputData;
     };
 
     vtkSmartPointer<vtkPlaneCollection> BuildWorldClippingPlanes(
@@ -79,6 +77,7 @@ private:
     bool ApplyPolyDataRemoveInsidePreview(
         vtkActor* actor,
         vtkPolyDataMapper* mapper,
+        const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     std::unordered_map<AbstractInteractiveService*, TargetState> m_targetStates;

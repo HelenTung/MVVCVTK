@@ -10,8 +10,8 @@
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
 // 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget world 有向盒折回 input model request
-// 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、后端和交互态
-// 5. UpdatePreviewFromCurrentBounds 调用 backend 填充统一结果
+// 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、operation 和交互态
+// 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求 image / polydata 结果
 // 6. DispatchPreviewResult 把结果交给 preview plug，由 plug 统一更新 overlay / 3D 主显示状态
 
 #include "OrthogonalCropWidgetStateController.h"
@@ -131,9 +131,9 @@ private:
     // 基于当前 widget 有向盒组装一次 preview request。
     // 这里把标准盒 [-1,1]^3 依次映射到初始 world、当前 world、active input model，
     // 最终只把 boxToInputModelMatrix 下发给后端，避免后端反向读取 UI 状态。
-    const OrthogonalCropRequest BuildPreviewRequest() const;
+    OrthogonalCropRequest BuildPreviewRequest(OrthogonalCropDataSource dataSource) const;
 
-    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、后端和交互态。
+    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、operation 和交互态。
     OrthogonalCropResult BuildResultContext(const OrthogonalCropRequest& request) const;
 
     // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
@@ -166,10 +166,12 @@ private:
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
-    // 把算法层返回的统一 preview result 分发给 preview plug。
+    // 把算法层返回的 preview result 分发给指定 preview 目标。
     bool DispatchPreviewResult(
+        const PreviewRenderTarget& target,
         CropRemovalMode removalMode,
-        const OrthogonalCropResult& previewResult);
+        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* polyDataPreviewResult);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;

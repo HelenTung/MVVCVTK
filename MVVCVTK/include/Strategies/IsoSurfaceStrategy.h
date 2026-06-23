@@ -1,6 +1,6 @@
 #pragma once
 #include "BaseVisualStrategy.h"
-#include <vtkLODActor.h>
+#include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
 #include <vtkImageResliceMapper.h>
@@ -29,7 +29,7 @@ public:
     vtkProp3D* GetMainProp() override;
 private:
     void AlignCamera(const std::array<double, 16>& modelMatrix); // 模型矩阵变化后重对齐相机焦点
-    vtkSmartPointer<vtkLODActor> m_actor; // 等值面主 actor
+    vtkSmartPointer<vtkActor> m_actor; // 等值面主 actor
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
     vtkSmartPointer<vtkFlyingEdges3D> m_qualityIsoFilter; // 静止期 766 分辨率等值面过滤器
     vtkSmartPointer<vtkFlyingEdges3D> m_interactionIsoFilter; // 交互期粗等值面过滤器

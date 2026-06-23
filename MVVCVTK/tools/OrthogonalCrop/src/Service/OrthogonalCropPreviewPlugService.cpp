@@ -1,8 +1,6 @@
 #include "OrthogonalCropPreviewPlugService.h"
 
-#include <vtkAlgorithm.h>
 #include <vtkActor.h>
-#include <vtkAlgorithmOutput.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkMath.h>
 #include <vtkMatrix4x4.h>
@@ -21,8 +19,8 @@ static constexpr const char* kVolumeRemoveInsideActiveInputModelToBoxUniform = "
 static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
 static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionTag = "//VTK::PositionVC::Dec";
 static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionImplTag = "//VTK::PositionVC::Impl";
-static constexpr const char* kPolyDataRemoveInsideClipImplTag = "//VTK::Clip::Impl";
-static constexpr const char* kPolyDataRemoveInsideActiveInputModelToBoxUniform = "mvvcvtk_polyDataRemoveInsideActiveInputModelToBox";
+static constexpr const char* kPolyDataRemoveInsideLightImplTag = "//VTK::Light::Impl";
+static constexpr const char* kPolyDataRemoveInsidePolyDataModelToBoxUniform = "mvvcvtk_polyDataRemoveInsidePolyDataModelToBox";
 
 static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "//VTK::Base::Impl\n"
@@ -42,22 +40,22 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
 
 static constexpr const char* kPolyDataRemoveInsideVertexPositionReplacement =
     "//VTK::PositionVC::Dec\n"
-    "out vec4 mvvcvtk_activeInputModelPositionVSOutput;\n";
+    "out vec4 mvvcvtk_polyDataModelPositionVSOutput;\n";
 
 static constexpr const char* kPolyDataRemoveInsideVertexPositionImplReplacement =
     "//VTK::PositionVC::Impl\n"
-    "mvvcvtk_activeInputModelPositionVSOutput = vertexMC;\n";
+    "mvvcvtk_polyDataModelPositionVSOutput = vertexMC;\n";
 
 static constexpr const char* kPolyDataRemoveInsideFragmentPositionReplacement =
     "//VTK::PositionVC::Dec\n"
-    "in vec4 mvvcvtk_activeInputModelPositionVSOutput;\n";
+    "in vec4 mvvcvtk_polyDataModelPositionVSOutput;\n";
 
-static constexpr const char* kPolyDataRemoveInsideClipImplReplacement =
-    "//VTK::Clip::Impl\n"
-    "    vec4 mvvcvtk_activeInputModelPoint = mvvcvtk_activeInputModelPositionVSOutput;\n"
-    "    float mvvcvtk_activeInputModelInvW = abs(mvvcvtk_activeInputModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_activeInputModelPoint.w : 1.0;\n"
-    "    mvvcvtk_activeInputModelPoint = vec4(mvvcvtk_activeInputModelPoint.xyz * mvvcvtk_activeInputModelInvW, 1.0);\n"
-    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsideActiveInputModelToBox * mvvcvtk_activeInputModelPoint;\n"
+static constexpr const char* kPolyDataRemoveInsideLightImplReplacement =
+    "//VTK::Light::Impl\n"
+    "    vec4 mvvcvtk_polyDataModelPoint = mvvcvtk_polyDataModelPositionVSOutput;\n"
+    "    float mvvcvtk_polyDataModelInvW = abs(mvvcvtk_polyDataModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_polyDataModelPoint.w : 1.0;\n"
+    "    mvvcvtk_polyDataModelPoint = vec4(mvvcvtk_polyDataModelPoint.xyz * mvvcvtk_polyDataModelInvW, 1.0);\n"
+    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsidePolyDataModelToBox * mvvcvtk_polyDataModelPoint;\n"
     "    float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
     "    vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
     "    if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
@@ -69,21 +67,48 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
-    const OrthogonalCropResult& previewResult,
+    const OrthogonalCropResult* imagePreviewResult,
+    const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
 {
     if (!targetService || !overlayStrategy) {
         return false;
     }
 
-    bool mainPreviewApplied = ApplyVolumePreview(targetService, referenceService, previewResult, removalMode);
-    if (!mainPreviewApplied) {
-        mainPreviewApplied = ApplyPolyDataPreview(targetService, referenceService, previewResult, removalMode);
+    bool mainPreviewApplied = false;
+    if (imagePreviewResult) {
+        mainPreviewApplied = ApplyVolumePreview(
+            targetService,
+            referenceService,
+            *imagePreviewResult,
+            removalMode);
+    }
+
+    bool polyDataPreviewApplied = false;
+    if (!mainPreviewApplied && polyDataPreviewResult) {
+        polyDataPreviewApplied = ApplyPolyDataPreview(
+            targetService,
+            referenceService,
+            *polyDataPreviewResult,
+            removalMode);
+        mainPreviewApplied = polyDataPreviewApplied;
     }
 
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
     overlayStrategy->SetRemovalMode(removalMode);
-    overlayStrategy->SetCropResult(previewResult);
+
+    const OrthogonalCropResult* overlayResult = imagePreviewResult ? imagePreviewResult : polyDataPreviewResult;
+    if (overlayResult) {
+        auto visibleOverlayResult = *overlayResult;
+        if (polyDataPreviewApplied) {
+            visibleOverlayResult.SetClipPolyData(nullptr);
+        }
+        overlayStrategy->SetCropResult(visibleOverlayResult);
+    }
+    else {
+        overlayStrategy->ClearPreview();
+    }
+
     return mainPreviewApplied;
 }
 
@@ -286,16 +311,8 @@ void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
     if (state != m_targetStates.end() && state->second.mainPreviewMapper) {
         auto mapper = state->second.mainPreviewMapper;
         mapper->RemoveAllClippingPlanes();
-        if (state->second.mainPreviewInputConnection) {
-            mapper->SetInputConnection(state->second.mainPreviewInputConnection);
-        }
-        else if (state->second.mainPreviewInputData) {
-            mapper->SetInputData(state->second.mainPreviewInputData);
-        }
         mapper->Modified();
         state->second.mainPreviewMapper = nullptr;
-        state->second.mainPreviewInputConnection = nullptr;
-        state->second.mainPreviewInputData = nullptr;
     }
 
     if (!targetService) {
@@ -311,8 +328,8 @@ void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
     shaderProperty->ClearVertexShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionTag, true);
     shaderProperty->ClearVertexShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionImplTag, true);
     shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionTag, true);
-    shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideClipImplTag, true);
-    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsideActiveInputModelToBoxUniform);
+    shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideLightImplTag, true);
+    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsidePolyDataModelToBoxUniform);
     shaderProperty->Modified();
     actor->Modified();
 }
@@ -342,16 +359,13 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataPreview(
     RestorePolyDataPreview(targetService);
     auto& targetState = m_targetStates[targetService.get()];
     targetState.mainPreviewMapper = mapper;
-    targetState.mainPreviewInputConnection = mapper->GetInputConnection(0, 0);
-    targetState.mainPreviewInputData = mapper->GetInput();
-
     if (removalMode == CropRemovalMode::KeepInside) {
         ApplyPolyDataKeepInsidePreview(mapper, referenceService, previewResult);
         actor->Modified();
         return true;
     }
 
-    return ApplyPolyDataRemoveInsidePreview(actor, mapper, previewResult);
+    return ApplyPolyDataRemoveInsidePreview(actor, mapper, referenceService, previewResult);
 }
 
 void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
@@ -364,7 +378,7 @@ void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
     }
 
     // PolyData KeepInside 与 volume KeepInside 使用同一套 world clipping planes；
-    // mapper 会把 world planes 转回当前 actor data 坐标，因此等值面策略重绑 input 后仍能保留裁切状态。
+    // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
     mapper->SetClippingPlanes(BuildWorldClippingPlanes(referenceService, previewResult));
     mapper->Modified();
 }
@@ -372,26 +386,34 @@ void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
 bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
+    const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!actor || !mapper) {
         return false;
     }
 
-    auto clippedPolyData = previewResult.GetClipPolyData();
-    if (clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0) {
-        mapper->SetInputData(clippedPolyData);
-        mapper->Modified();
-        actor->Modified();
-        return true;
-    }
-
     const auto& cropData = previewResult.GetCropDataModel();
     auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
-    auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
+    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    activeInputModelToWorldMatrix->Identity();
+    if (referenceService) {
+        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
+    }
+
+    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
+
+    auto worldToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToWorldMatrix, worldToBoxMatrix);
+
+    auto polyDataModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    actor->GetModelToWorldMatrix(polyDataModelToWorldMatrix);
+
+    auto polyDataModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(worldToBoxMatrix, polyDataModelToWorldMatrix, polyDataModelToBoxMatrix);
 
     auto shaderProperty = actor->GetShaderProperty();
     shaderProperty->AddVertexShaderReplacement(
@@ -410,21 +432,19 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
         kPolyDataRemoveInsideFragmentPositionReplacement,
         false);
     shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideClipImplTag,
+        kPolyDataRemoveInsideLightImplTag,
         true,
-        kPolyDataRemoveInsideClipImplReplacement,
+        kPolyDataRemoveInsideLightImplReplacement,
         false);
 
-    auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
-    // 上传前转置矩阵；
-    // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ 矩阵结果一致。
-    activeInputModelToBoxShaderMatrix->Transpose();
+    auto polyDataModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    polyDataModelToBoxShaderMatrix->DeepCopy(polyDataModelToBoxMatrix);
+    polyDataModelToBoxShaderMatrix->Transpose();
 
-    // PolyData RemoveInside 直接在 active input model 中判断盒内片元；
-    // 这与 request/cropData 的坐标语义一致，也避免 actor world transform 被重复折算。
+    // PolyData RemoveInside 只在标准盒空间判断 [-1, 1]^3；
+    // C++ 侧预先折叠 polyData model -> box，并按 VTK shader uniform 约定上传转置矩阵。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsideActiveInputModelToBoxUniform, activeInputModelToBoxShaderMatrix);
+    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsidePolyDataModelToBoxUniform, polyDataModelToBoxShaderMatrix);
 
     shaderProperty->Modified();
     mapper->Modified();

@@ -7,9 +7,11 @@
 #include "OrthogonalCropInteractionBridgeService.h"
 #include "OrthogonalCropAlgorithm.h"
 
+#include <vtkActor.h>
 #include <vtkBoundingBox.h>
 #include <vtkImageData.h>
 #include <vtkMatrix4x4.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkTransform.h>
 
 #include <algorithm>
@@ -155,8 +157,8 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
         return false;
     }
 
-    if (m_backend.GetActiveDataSource() != OrthogonalCropDataSource::ImageData) {
-        std::cerr << "[Main] Orthogonal crop submit failed: active crop data source is not image data." << std::endl;
+    if (!GetInputImage()) {
+        std::cerr << "[Main] Orthogonal crop submit failed: image crop input is missing." << std::endl;
         return false;
     }
 
@@ -170,8 +172,7 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildSubmitRequest() const
 {
-    auto submitRequest = BuildPreviewRequest();
-    submitRequest.SetDataSource(OrthogonalCropDataSource::ImageData);
+    auto submitRequest = BuildPreviewRequest(OrthogonalCropDataSource::ImageData);
     submitRequest.SetOperation(OrthogonalCropOperation::Submit);
     return submitRequest;
 }
@@ -434,11 +435,13 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToActiveI
     return worldToActiveInputModelMatrixData;
 }
 
-const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest() const
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreviewRequest(
+    OrthogonalCropDataSource dataSource) const
 {
     // 先获取当前数据源的默认 request；
     // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
     auto previewRequest = m_backend.GetDefaultRequest();
+    previewRequest.SetDataSource(dataSource);
 
     // 准备 widget 有向盒的 world 基准信息；
     // 默认值来自当前 world AABB，GetCurrentWorldBox 成功时会替换成最近一次 PlaceWidget 的基准盒。
@@ -495,7 +498,6 @@ const OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPreview
     vtkMatrix4x4::DeepCopy(boxToInputModelMatrixData.data(), boxToInputModelMatrix);
 
     previewRequest.SetBoxToInputModelMatrix(boxToInputModelMatrixData);
-    previewRequest.SetDataSource(m_backend.GetActiveDataSource());
     previewRequest.SetOperation(OrthogonalCropOperation::Preview);
     previewRequest.SetRemovalMode(m_currentRemovalMode);
 
@@ -526,44 +528,99 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // 将当前 widget world 有向盒固化为 active input model request；
-    // request 已经写入目标数据源和业务动作，router 只负责按目标执行。
-    const auto previewRequest = BuildPreviewRequest();
-    const auto previewResult = m_backend.GetResult(previewRequest, BuildResultContext(previewRequest));
-    if (previewResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
+    // image preview 使用 router 已显式持有的 image 输入；
+    // polydata preview 直接读取目标窗口通过 GetMainProp 暴露的主 3D 输入，bridge 不识别具体策略类。
+    OrthogonalCropResult imageResult;
+    bool hasImageResult = false;
+    if (GetInputImage()) {
+        const auto imageRequest = BuildPreviewRequest(OrthogonalCropDataSource::ImageData);
+        imageResult = m_backend.GetResult(imageRequest, BuildResultContext(imageRequest));
+        if (imageResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
+            if (logStats) {
+                std::cerr << "[Main] Orthogonal crop image preview failed: "
+                    << GetFailureReasonText(imageResult.GetFailureReason())
+                    << " - " << imageResult.GetMessage() << std::endl;
+            }
+            return;
+        }
+
+        if (!imageResult.GetSucceeded()) {
+            if (logStats) {
+                std::cerr << "[Main] Orthogonal crop image preview result warning: "
+                    << GetFailureReasonText(imageResult.GetFailureReason())
+                    << " - " << imageResult.GetMessage() << std::endl;
+            }
+            return;
+        }
+
+        hasImageResult = true;
+    }
+
+    bool main3DPreviewApplied = false;
+    bool polyDataPreviewApplied = false;
+    bool anyPreviewApplied = false;
+    for (const auto& target : m_previewRenderTargets) {
+        if (!target.service || !target.overlayStrategy) {
+            continue;
+        }
+
+        OrthogonalCropResult polyResult;
+        bool hasPolyDataResult = false;
+        m_previewPlug.RestorePreview(target.service, target.overlayStrategy);
+
+        auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
+        auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
+        if (mapper) {
+            mapper->Update();
+            if (auto polyData = vtkPolyData::SafeDownCast(mapper->GetInput())) {
+                m_backend.SetInputPolyData(polyData);
+
+                const auto polyRequest = BuildPreviewRequest(OrthogonalCropDataSource::PolyData);
+                polyResult = m_backend.GetResult(polyRequest, BuildResultContext(polyRequest));
+                if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
+                    && polyResult.GetSucceeded()
+                    && polyResult.GetClipPolyData()) {
+                    hasPolyDataResult = true;
+                    polyDataPreviewApplied = true;
+                }
+                else if (logStats && polyResult.GetFailureReason() != OrthogonalCropFailureReason::InputPolyDataMissing) {
+                    std::cerr << "[Main] Orthogonal crop polydata preview skipped: "
+                        << GetFailureReasonText(polyResult.GetFailureReason())
+                        << " - " << polyResult.GetMessage() << std::endl;
+                }
+            }
+        }
+
+        if (!hasImageResult && !hasPolyDataResult) {
+            continue;
+        }
+
+        main3DPreviewApplied = DispatchPreviewResult(
+            target,
+            m_currentRemovalMode,
+            hasImageResult ? &imageResult : nullptr,
+            hasPolyDataResult ? &polyResult : nullptr) || main3DPreviewApplied;
+        anyPreviewApplied = true;
+    }
+
+    if (!anyPreviewApplied) {
         if (logStats) {
-            std::cerr << "[Main] Orthogonal crop preview failed: "
-                << GetFailureReasonText(previewResult.GetFailureReason())
-                << " - " << previewResult.GetMessage() << std::endl;
+            std::cerr << "[Main] Orthogonal crop preview skipped: no image or polydata preview input is available." << std::endl;
         }
         return;
     }
-
-    if (!previewResult.GetSucceeded()) {
-        if (logStats) {
-            std::cerr << "[Main] Orthogonal crop preview result warning: "
-                << GetFailureReasonText(previewResult.GetFailureReason())
-                << " - " << previewResult.GetMessage() << std::endl;
-        }
-        return;
-    }
-
-    // result 只由算法层生成；bridge 只把同一份 result 分发给各窗口显示。
-    const bool main3DPreviewApplied = DispatchPreviewResult(previewRequest.GetRemovalMode(), previewResult);
-
-    // 3D 主模型 clip 只是临时显示状态；
-    // 关闭 preview 时切回 pass-through 管道即可恢复全模型，不需要重新向后端请求恢复结果。
 
     if (logStats) {
-        // 日志只使用本次 request 的显式路由字段；
-        // result/statistics 是执行回执，不能反过来作为流程判断来源。
+        // 日志只报告本次显式跑过的数据源；result/statistics 是执行回执，不能反过来作为流程判断来源。
         std::cout
-            << "[Main] Orthogonal crop preview updated. source = "
-            << GetDataSourceText(previewRequest.GetDataSource())
+            << "[Main] Orthogonal crop preview updated. image = "
+            << (hasImageResult ? "Used" : "Skipped")
+            << ", polydata = "
+            << (polyDataPreviewApplied ? "Used" : "Skipped")
             << ", operation = "
-            << GetOperationText(previewRequest.GetOperation())
+            << GetOperationText(OrthogonalCropOperation::Preview)
             << ", removal = "
-            << GetRemovalModeText(previewRequest.GetRemovalMode())
+            << GetRemovalModeText(m_currentRemovalMode)
             << ", main3D = "
             << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
             << ", bounds = ["
@@ -733,25 +790,23 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
 }
 
 bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
+    const PreviewRenderTarget& target,
     CropRemovalMode removalMode,
-    const OrthogonalCropResult& previewResult)
+    const OrthogonalCropResult* imagePreviewResult,
+    const OrthogonalCropResult* polyDataPreviewResult)
 {
-    bool main3DPreviewApplied = false;
-
-    for (const auto& target : m_previewRenderTargets) {
-        if (!target.service || !target.overlayStrategy) {
-            continue;
-        }
-
-        const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
-            target.service,
-            target.overlayStrategy,
-            m_referenceRenderService,
-            previewResult,
-            removalMode);
-
-        main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
-        target.service->MarkDirty();
+    if (!target.service || !target.overlayStrategy) {
+        return false;
     }
-    return main3DPreviewApplied;
+
+    const bool mainPreviewApplied = m_previewPlug.ApplyPreview(
+        target.service,
+        target.overlayStrategy,
+        m_referenceRenderService,
+        imagePreviewResult,
+        polyDataPreviewResult,
+        removalMode);
+
+    target.service->MarkDirty();
+    return mainPreviewApplied;
 }

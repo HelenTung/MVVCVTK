@@ -2,7 +2,6 @@
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
-#include <vtkPolyDataNormals.h>
 
 namespace {
 
@@ -50,11 +49,12 @@ void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 }
 
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
-    m_actor = vtkSmartPointer<vtkLODActor>::New();
+    m_actor = vtkSmartPointer<vtkActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_qualityIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    m_mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetInterpolationToPhong();
@@ -63,7 +63,6 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
     // 静态数据
-    m_actor->SetNumberOfCloudPoints(50000);
     m_actor->GetProperty()->SetInterpolationToPhong();
     m_qualityIsoFilter->ComputeNormalsOff();
     m_qualityIsoFilter->ComputeGradientsOff();
