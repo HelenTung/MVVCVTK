@@ -577,6 +577,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
 
                 const auto polyRequest = BuildPreviewRequest(OrthogonalCropDataSource::PolyData);
                 polyResult = m_backend.GetResult(polyRequest, BuildResultContext(polyRequest));
+                // clipPolyData 是 polydata 后端的成功产物；主 actor 的 shader discard
+                // 可能只消费 cropData，但这里仍要避免把只有诊断信息的结果当作有效预览。
                 if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
                     && polyResult.GetSucceeded()
                     && polyResult.GetClipPolyData()) {

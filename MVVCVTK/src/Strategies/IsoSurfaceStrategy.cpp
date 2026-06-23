@@ -54,6 +54,8 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_qualityIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
+    // polydata RemoveInside shader 直接读取 vertexMC 做 box 判定；
+    // 禁用 VBO shift/scale 才能保证 vertexMC 仍是原始等值面 model 坐标。
     m_mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);

@@ -77,6 +77,8 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
 
     bool mainPreviewApplied = false;
     if (imagePreviewResult) {
+        // image result 只负责 volume 路径；如果目标不是 volume 窗口，
+        // 这里会返回 false，让同一目标继续尝试下面的 polydata 路径。
         mainPreviewApplied = ApplyVolumePreview(
             targetService,
             referenceService,
@@ -86,6 +88,8 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
 
     bool polyDataPreviewApplied = false;
     if (!mainPreviewApplied && polyDataPreviewResult) {
+        // polydata result 只负责 actor 窗口：
+        // KeepInside 使用 mapper planes，RemoveInside 使用 actor shader discard。
         polyDataPreviewApplied = ApplyPolyDataPreview(
             targetService,
             referenceService,
@@ -101,6 +105,8 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;
         if (polyDataPreviewApplied) {
+            // 主 actor 已经用 mapper clipping 或 shader discard 表达 polydata 预览；
+            // overlay 仍显示裁切盒，但不再重复绘制同一份裁切网格。
             visibleOverlayResult.SetClipPolyData(nullptr);
         }
         overlayStrategy->SetCropResult(visibleOverlayResult);
@@ -412,6 +418,8 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
     auto polyDataModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     actor->GetModelToWorldMatrix(polyDataModelToWorldMatrix);
 
+    // polydata shader 的输入点是 actor 自己的 model 坐标，不是 volume shader 的 g_dataPos。
+    // 因此先把 crop box 提升到 world，再用 actor model->world 折出 polyData model -> box。
     auto polyDataModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Multiply4x4(worldToBoxMatrix, polyDataModelToWorldMatrix, polyDataModelToBoxMatrix);
 

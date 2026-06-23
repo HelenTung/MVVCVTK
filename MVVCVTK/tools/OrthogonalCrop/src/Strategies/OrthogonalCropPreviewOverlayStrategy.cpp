@@ -121,8 +121,8 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         m_previewRegionMapper->SetInputData(outline);
     }
 
-    // clipped polydata 只服务 3D overlay；
-    // 体渲染主窗口若已由 shader 接管 clip 显示，bridge 会剥离该字段以避免重复绘制。
+    // 裁切后的 polydata 只服务 3D overlay；
+    // 若主 actor 已用 shader / clipping 接管 polydata 预览，plug 会剥离该字段避免重复绘制。
     auto clippedPolyData = result.GetClipPolyData();
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {

@@ -17,9 +17,8 @@ class vtkPolyDataMapper;
 class vtkVolume;
 class vtkVolumeMapper;
 
-// OrthogonalCropPreviewPlugService owns preview-time VTK display state.
-// It does not build requests or process crop data; router/algo produce OrthogonalCropResult,
-// and this plug maps that result onto overlay, mapper, shader, and volume preview state.
+// OrthogonalCropPreviewPlugService 只拥有 preview 期间的 VTK 显示状态。
+// request 构造和裁切数据处理交给 router / algorithm；本类只把 result 映射到 overlay、mapper、shader 和 volume 状态。
 class OrthogonalCropPreviewPlugService {
 public:
     bool ApplyPreview(
@@ -38,6 +37,8 @@ public:
 
 private:
     struct TargetState {
+        // 非拥有引用：记录当前带有 preview-only clipping 状态的 mapper。
+        // RemoveInside shader 状态挂在 actor 上，恢复时单独清理。
         vtkPolyDataMapper* mainPreviewMapper = nullptr;
     };
 

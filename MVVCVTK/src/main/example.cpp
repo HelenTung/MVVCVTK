@@ -643,7 +643,8 @@ Step 11: 只让一个窗口进入 Start()
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。
-- 3D 主窗口先尝试主显示管道 preview；volume 只接管 KeepInside，actor/polydata 走 clip preview。
+- 3D 主窗口先尝试主显示管道 preview；volume 的 KeepInside 走 mapper clipping、RemoveInside 走 shader discard。
+- actor/polydata 的 KeepInside 走 mapper clipping，RemoveInside 走 actor shader discard；clipPolyData 只作为算法输出和 overlay 输入。
 
 7. 按 Ctrl+3
 - orthogonalCropSubmitWorkflow->ApplySubmit()。
