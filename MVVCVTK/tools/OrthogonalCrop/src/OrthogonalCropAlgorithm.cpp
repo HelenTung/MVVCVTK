@@ -765,10 +765,11 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
+    const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
+    // 预览允许裁切盒只与输入有交集；提交时只有 KeepInside 会截取交集范围。
+    // RemoveInside submit 不使用交集语义；范围完整包含时，submit 计划再返回“不支持”。
     const bool allowPartialOverlap =
-        request.GetOperation() != OrthogonalCropOperation::Submit
-        || (request.GetOperation() == OrthogonalCropOperation::Submit
-            && request.GetRemovalMode() == CropRemovalMode::KeepInside);
+        !isSubmit || request.GetRemovalMode() == CropRemovalMode::KeepInside;
     if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         statistics.SetFailureReason(failureReason);
         statistics.SetValidationMessage(message);
@@ -1010,10 +1011,11 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
+    const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
+    // 预览允许裁切盒只与输入有交集；提交时只有 KeepInside 会截取交集范围。
+    // RemoveInside submit 不使用交集语义；范围完整包含时，submit 计划再返回“不支持”。
     const bool allowPartialOverlap =
-        request.GetOperation() != OrthogonalCropOperation::Submit
-        || (request.GetOperation() == OrthogonalCropOperation::Submit
-            && request.GetRemovalMode() == CropRemovalMode::KeepInside);
+        !isSubmit || request.GetRemovalMode() == CropRemovalMode::KeepInside;
     if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         result.SetFailureReason(failureReason);
         result.SetMessage(message);
