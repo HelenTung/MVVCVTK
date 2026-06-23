@@ -98,18 +98,18 @@ private:
     // Private boundary: widget state machine, world/active input model conversion, backend query,
     // preview distribution, and VTK mapper/shader implementation details.
 
-    // 一个 preview 目标窗口对应一份 overlay 策略。
-    struct PreviewRenderTarget {
+    // 一个目标窗口对应的 overlay 策略，以及分发前准备好的 preview result。
+    struct TargetPreviewResult {
         // 实际要刷新的窗口服务。
         std::shared_ptr<AbstractInteractiveService> service;
 
         // 负责显示 mask / outline / clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
-    };
 
-    // 一个目标窗口已经准备好的 preview result。
-    struct TargetPreviewResult {
-        PreviewRenderTarget target;
+        // result 是否已经按目标窗口准备完成。
+        bool hasResult = false;
+
+        // 挂载目标窗口时为空；BuildTargetPreviewResults 填充后交给 DispatchPreviewResult。
         OrthogonalCropResult result;
     };
 
@@ -235,5 +235,5 @@ private:
     vtkRenderer* m_referenceRenderer = nullptr;
 
     // 真正需要被 overlay / preview 联动刷新的窗口目标列表。
-    std::vector<PreviewRenderTarget> m_previewRenderTargets;
+    std::vector<TargetPreviewResult> m_previewRenderTargets;
 };

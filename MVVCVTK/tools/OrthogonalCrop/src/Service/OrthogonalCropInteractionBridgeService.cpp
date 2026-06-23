@@ -736,7 +736,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     const auto sameTarget = std::find_if(
         m_previewRenderTargets.begin(),
         m_previewRenderTargets.end(),
-        [service](const PreviewRenderTarget& target) {
+        [service](const TargetPreviewResult& target) {
             return target.service == service;
         });
     if (sameTarget != m_previewRenderTargets.end()) {
@@ -817,7 +817,9 @@ OrthogonalCropInteractionBridgeService::BuildTargetPreviewResults(
         }
 
         targetPreviewResults.push_back({
-            target,
+            target.service,
+            target.overlayStrategy,
+            true,
             BuildTargetPreviewResult(previewRequest, previewResult, target.service)
         });
     }
@@ -832,15 +834,19 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
     bool main3DPreviewApplied = false;
 
     for (const auto& targetPreviewResult : targetPreviewResults) {
+        if (!targetPreviewResult.service || !targetPreviewResult.overlayStrategy || !targetPreviewResult.hasResult) {
+            continue;
+        }
+
         const bool mainPreviewAppliedForTarget = m_previewPlug.ApplyPreview(
-            targetPreviewResult.target.service,
-            targetPreviewResult.target.overlayStrategy,
+            targetPreviewResult.service,
+            targetPreviewResult.overlayStrategy,
             m_referenceRenderService,
             targetPreviewResult.result,
             removalMode);
 
         main3DPreviewApplied = mainPreviewAppliedForTarget || main3DPreviewApplied;
-        targetPreviewResult.target.service->MarkDirty();
+        targetPreviewResult.service->MarkDirty();
     }
     return main3DPreviewApplied;
 }
