@@ -149,13 +149,31 @@ static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataMode
 
 static bool GetBoxToInputModelIsAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData)
 {
-    // 只识别无旋转/无剪切的对角矩阵快路径；任意旋转或剪切仍走标准 inputModelToBox 判断。
-    return std::abs(boxToInputModelMatrixData[1]) <= BoundsEpsilon
-        && std::abs(boxToInputModelMatrixData[2]) <= BoundsEpsilon
-        && std::abs(boxToInputModelMatrixData[4]) <= BoundsEpsilon
-        && std::abs(boxToInputModelMatrixData[6]) <= BoundsEpsilon
-        && std::abs(boxToInputModelMatrixData[8]) <= BoundsEpsilon
-        && std::abs(boxToInputModelMatrixData[9]) <= BoundsEpsilon;
+    // 判断标准盒的三条局部轴在 input model 中是否仍分别落在单一坐标轴上。
+    // 允许轴交换、90 度旋转和翻转；若某一列混入多个分量，或多个 box 轴占用同一 input model 轴，
+    // 就说明存在任意角旋转、剪切或退化，不能走 AABB 快路径。
+    bool inputModelAxisUsed[3] = { false, false, false };
+    for (int boxAxis = 0; boxAxis < 3; ++boxAxis) {
+        int mappedInputModelAxis = -1;
+        for (int inputModelAxis = 0; inputModelAxis < 3; ++inputModelAxis) {
+            const double component = boxToInputModelMatrixData[inputModelAxis * 4 + boxAxis];
+            if (std::abs(component) <= BoundsEpsilon) {
+                continue;
+            }
+
+            if (mappedInputModelAxis >= 0) {
+                return false;
+            }
+            mappedInputModelAxis = inputModelAxis;
+        }
+
+        if (mappedInputModelAxis < 0 || inputModelAxisUsed[mappedInputModelAxis]) {
+            return false;
+        }
+        inputModelAxisUsed[mappedInputModelAxis] = true;
+    }
+
+    return true;
 }
 
 static bool GetCanonicalBoxContainsPoint(const double boxPoint[4])
