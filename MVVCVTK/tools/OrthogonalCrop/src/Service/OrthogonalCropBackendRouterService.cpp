@@ -45,12 +45,16 @@ void OrthogonalCropBackendRouterService::SetPreferredDataSource(OrthogonalCropDa
 
 OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource() const
 {
-    if (m_preferredDataSource != OrthogonalCropDataSource::Auto) {
-        return m_preferredDataSource;
-    }
-
     const bool hasImage = GetInputImage() != nullptr;
     const bool hasPolyData = GetInputPolyData() != nullptr;
+
+    if (m_preferredDataSource == OrthogonalCropDataSource::ImageData && hasImage) {
+        return OrthogonalCropDataSource::ImageData;
+    }
+
+    if (m_preferredDataSource == OrthogonalCropDataSource::PolyData && hasPolyData) {
+        return OrthogonalCropDataSource::PolyData;
+    }
 
     if (hasImage) {
         return OrthogonalCropDataSource::ImageData;
@@ -60,7 +64,7 @@ OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource
         return OrthogonalCropDataSource::PolyData;
     }
 
-    return OrthogonalCropDataSource::Auto;
+    return m_preferredDataSource;
 }
 
 std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveInputModelBounds() const
@@ -79,39 +83,23 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveInputModelBou
 OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() const
 {
     const auto activeDataSource = GetActiveDataSource();
-    if (activeDataSource == OrthogonalCropDataSource::Auto) {
-        OrthogonalCropRequest request;
-        request.SetDataSource(OrthogonalCropDataSource::Auto);
-        request.SetBackend(OrthogonalCropBackend::None);
-        return request;
-    }
-
     OrthogonalCropRequest request;
     request.SetDataSource(activeDataSource);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetBoxToInputModelMatrixFromBounds(GetActiveInputModelBounds());
-    request.SetBackend(activeDataSource == OrthogonalCropDataSource::PolyData
-        ? OrthogonalCropBackend::ClipPreview
-        : OrthogonalCropBackend::MaskPreview);
+    request.SetOperation(OrthogonalCropOperation::Preview);
     return request;
 }
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const OrthogonalCropRequest& request) const
 {
-    switch (request.GetBackend()) {
-    case OrthogonalCropBackend::MaskPreview:
-    case OrthogonalCropBackend::SubmitExtractVOI: {
-        if (request.GetDataSource() != OrthogonalCropDataSource::ImageData) {
-            auto statistics = GetMissingInputStatistics(request.GetDataSource(), request.GetBackend());
-            statistics.SetValidationMessage("Image crop backend requires image input data source.");
-            return statistics;
-        }
-
+    switch (request.GetDataSource()) {
+    case OrthogonalCropDataSource::ImageData:
         if (!GetInputImage()) {
             auto statistics = GetMissingInputStatistics(
                 OrthogonalCropDataSource::ImageData,
-                request.GetBackend());
-            statistics.SetValidationMessage("Image crop backend requires image input data.");
+                request.GetOperation());
+            statistics.SetValidationMessage("Image crop data source requires image input data.");
             return statistics;
         }
 
@@ -119,37 +107,22 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
             m_inputImage,
             request,
             GetSystemAvailableRamBytes());
-    }
-    case OrthogonalCropBackend::ClipPreview: {
-        if (request.GetDataSource() != OrthogonalCropDataSource::PolyData) {
-            auto statistics = GetMissingInputStatistics(request.GetDataSource(), request.GetBackend());
-            statistics.SetValidationMessage("Polydata clip backend requires polydata input data source.");
-            return statistics;
-        }
-
+    case OrthogonalCropDataSource::PolyData:
         if (!GetInputPolyData()) {
             auto statistics = GetMissingInputStatistics(
                 OrthogonalCropDataSource::PolyData,
-                OrthogonalCropBackend::ClipPreview);
-            statistics.SetValidationMessage("Polydata clip backend requires polydata input data.");
+                request.GetOperation());
+            statistics.SetValidationMessage("Polydata crop data source requires polydata input data.");
             return statistics;
         }
 
         return OrthogonalCropAlgorithm::GetStatistics(m_inputPolyData, request);
+    default: {
+        auto statistics = GetMissingInputStatistics(request.GetDataSource(), request.GetOperation());
+        statistics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+        statistics.SetValidationMessage("Orthogonal crop request has no executable data source.");
+        return statistics;
     }
-    case OrthogonalCropBackend::None:
-        if (request.GetDataSource() == OrthogonalCropDataSource::ImageData && GetInputImage()) {
-            return OrthogonalCropAlgorithm::GetStatistics(
-                m_inputImage,
-                request,
-                GetSystemAvailableRamBytes());
-        }
-        if (request.GetDataSource() == OrthogonalCropDataSource::PolyData && GetInputPolyData()) {
-            return OrthogonalCropAlgorithm::GetStatistics(m_inputPolyData, request);
-        }
-        return GetMissingInputStatistics(request.GetDataSource(), request.GetBackend());
-    default:
-        return GetMissingInputStatistics(request.GetDataSource(), request.GetBackend());
     }
 }
 
@@ -157,18 +130,11 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(
     const OrthogonalCropRequest& request,
     const OrthogonalCropResult& resultContext) const
 {
-    switch (request.GetBackend()) {
-    case OrthogonalCropBackend::MaskPreview:
-    case OrthogonalCropBackend::SubmitExtractVOI: {
-        if (request.GetDataSource() != OrthogonalCropDataSource::ImageData) {
-            auto result = GetMissingInputResult(resultContext);
-            result.SetMessage("Image crop backend requires image input data source.");
-            return result;
-        }
-
+    switch (request.GetDataSource()) {
+    case OrthogonalCropDataSource::ImageData:
         if (!GetInputImage()) {
             auto result = GetMissingInputResult(resultContext);
-            result.SetMessage("Image crop backend requires image input data.");
+            result.SetMessage("Image crop data source requires image input data.");
             return result;
         }
 
@@ -177,40 +143,21 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(
             request,
             resultContext,
             GetSystemAvailableRamBytes());
-    }
-    case OrthogonalCropBackend::ClipPreview: {
-        if (request.GetDataSource() != OrthogonalCropDataSource::PolyData) {
-            auto result = GetMissingInputResult(
-                resultContext,
-                OrthogonalCropFailureReason::InputPolyDataMissing);
-            result.SetMessage("Polydata clip backend requires polydata input data source.");
-            return result;
-        }
-
+    case OrthogonalCropDataSource::PolyData:
         if (!GetInputPolyData()) {
             auto result = GetMissingInputResult(
                 resultContext,
                 OrthogonalCropFailureReason::InputPolyDataMissing);
-            result.SetMessage("Polydata clip backend requires polydata input data.");
+            result.SetMessage("Polydata crop data source requires polydata input data.");
             return result;
         }
 
         return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request, resultContext);
+    default: {
+        auto result = GetMissingInputResult(resultContext, OrthogonalCropFailureReason::UnsupportedBackend);
+        result.SetMessage("Orthogonal crop request has no executable data source.");
+        return result;
     }
-    case OrthogonalCropBackend::None:
-        if (request.GetDataSource() == OrthogonalCropDataSource::ImageData && GetInputImage()) {
-            return OrthogonalCropAlgorithm::GetResult(
-                m_inputImage,
-                request,
-                resultContext,
-                GetSystemAvailableRamBytes());
-        }
-        if (request.GetDataSource() == OrthogonalCropDataSource::PolyData && GetInputPolyData()) {
-            return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request, resultContext);
-        }
-        return GetMissingInputResult(resultContext);
-    default:
-        return GetMissingInputResult(resultContext);
     }
 }
 
@@ -249,14 +196,13 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetPolyDataInputModelB
 
 OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetMissingInputStatistics(
     OrthogonalCropDataSource dataSource,
-    OrthogonalCropBackend backend) const
+    OrthogonalCropOperation operation) const
 {
-    const bool requiresPolyData = backend == OrthogonalCropBackend::ClipPreview
-        || dataSource == OrthogonalCropDataSource::PolyData;
+    const bool requiresPolyData = dataSource == OrthogonalCropDataSource::PolyData;
 
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(dataSource);
-    statistics.SetResolvedBackend(backend);
+    statistics.SetResolvedOperation(operation);
     statistics.SetFailureReason(
         requiresPolyData
             ? OrthogonalCropFailureReason::InputPolyDataMissing

@@ -58,7 +58,7 @@ public:
     // 设置 backend router 的首选数据源。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
 
-    // DataManager 只作为 Auto 模式下 image 输入的兜底来源。
+    // DataManager 只作为 image 输入的兜底来源。
     void SetDataManager(std::shared_ptr<AbstractDataManager> dataMgr);
 
     // 主 interactor 由 3D 参考窗口提供，widget 只会挂到这个 interactor 上。
@@ -98,22 +98,16 @@ private:
     // Private boundary: widget state machine, world/active input model conversion, backend query,
     // preview distribution, and VTK mapper/shader implementation details.
 
-    // 一个目标窗口对应的 overlay 策略，以及分发前准备好的 preview result。
-    struct TargetPreviewResult {
+    // 一个 preview 目标窗口对应一份 overlay 策略。
+    struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
         std::shared_ptr<AbstractInteractiveService> service;
 
         // 负责显示 mask / outline / clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
-
-        // result 是否已经按目标窗口准备完成。
-        bool hasResult = false;
-
-        // 挂载目标窗口时为空；BuildTargetPreviewResults 填充后交给 DispatchPreviewResult。
-        OrthogonalCropResult result;
     };
 
-    // 确保当前至少有一个可用后端；Auto 模式下会尝试从 data manager 抓 image。
+    // 确保当前至少有一个可用输入；必要时会尝试从 data manager 抓 image。
     bool EnsureInputReady();
 
     // 生成默认交互裁切盒，作为第一次进入模式时的初始 world bounds。
@@ -158,7 +152,7 @@ private:
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
-    static const char* GetBackendText(OrthogonalCropBackend backend);
+    static const char* GetOperationText(OrthogonalCropOperation operation);
 
     // preview 列表为空时，取第一个有效目标作为 reference service 的后备来源。
     std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const;
@@ -172,21 +166,10 @@ private:
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
-    // 为所有有效 preview 窗口准备最终要应用的结果。
-    std::vector<TargetPreviewResult> BuildTargetPreviewResults(
-        const OrthogonalCropRequest& previewRequest,
-        const OrthogonalCropResult& previewResult);
-
-    // 为单个窗口准备最终要应用的结果；3D polydata 目标会优先拿自身主 mapper 的 polydata 重算 clip。
-    OrthogonalCropResult BuildTargetPreviewResult(
-        const OrthogonalCropRequest& previewRequest,
-        const OrthogonalCropResult& previewResult,
-        const std::shared_ptr<AbstractInteractiveService>& targetService);
-
-    // 把已经准备好的 target results 分发给 preview plug。
+    // 把算法层返回的统一 preview result 分发给 preview plug。
     bool DispatchPreviewResult(
         CropRemovalMode removalMode,
-        const std::vector<TargetPreviewResult>& targetPreviewResults);
+        const OrthogonalCropResult& previewResult);
 
     // 后端分发器，负责 image / polydata 两条执行链。
     OrthogonalCropBackendRouterService m_backend;
@@ -194,7 +177,7 @@ private:
     // preview plug 负责 overlay / mapper / shader / volume 等 VTK 显示状态。
     OrthogonalCropPreviewPlugService m_previewPlug;
 
-    // Auto 模式下 image 输入的兜底来源。
+    // image 输入的兜底来源。
     std::shared_ptr<AbstractDataManager> m_dataMgr;
 
     // widget 唯一挂载的主 interactor。
@@ -235,5 +218,5 @@ private:
     vtkRenderer* m_referenceRenderer = nullptr;
 
     // 真正需要被 overlay / preview 联动刷新的窗口目标列表。
-    std::vector<TargetPreviewResult> m_previewRenderTargets;
+    std::vector<PreviewRenderTarget> m_previewRenderTargets;
 };

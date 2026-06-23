@@ -22,9 +22,7 @@ static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl
 static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionTag = "//VTK::PositionVC::Dec";
 static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionImplTag = "//VTK::PositionVC::Impl";
 static constexpr const char* kPolyDataRemoveInsideClipImplTag = "//VTK::Clip::Impl";
-static constexpr const char* kPolyDataRemoveInsideLightImplTag = "//VTK::Light::Impl";
-static constexpr const char* kPolyDataRemoveInsidePolyDataModelToWorldUniform = "mvvcvtk_polyDataRemoveInsidePolyDataModelToWorld";
-static constexpr const char* kPolyDataRemoveInsideWorldToBoxUniform = "mvvcvtk_polyDataRemoveInsideWorldToBox";
+static constexpr const char* kPolyDataRemoveInsideActiveInputModelToBoxUniform = "mvvcvtk_polyDataRemoveInsideActiveInputModelToBox";
 
 static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "//VTK::Base::Impl\n"
@@ -44,35 +42,22 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
 
 static constexpr const char* kPolyDataRemoveInsideVertexPositionReplacement =
     "//VTK::PositionVC::Dec\n"
-    "out vec4 mvvcvtk_worldPositionVSOutput;\n";
+    "out vec4 mvvcvtk_activeInputModelPositionVSOutput;\n";
 
 static constexpr const char* kPolyDataRemoveInsideVertexPositionImplReplacement =
     "//VTK::PositionVC::Impl\n"
-    "mvvcvtk_worldPositionVSOutput = mvvcvtk_polyDataRemoveInsidePolyDataModelToWorld * vertexMC;\n";
+    "mvvcvtk_activeInputModelPositionVSOutput = vertexMC;\n";
 
 static constexpr const char* kPolyDataRemoveInsideFragmentPositionReplacement =
     "//VTK::PositionVC::Dec\n"
-    "in vec4 mvvcvtk_worldPositionVSOutput;\n";
+    "in vec4 mvvcvtk_activeInputModelPositionVSOutput;\n";
 
 static constexpr const char* kPolyDataRemoveInsideClipImplReplacement =
     "//VTK::Clip::Impl\n"
-    "    vec4 mvvcvtk_worldPoint = mvvcvtk_worldPositionVSOutput;\n"
-    "    float mvvcvtk_worldInvW = abs(mvvcvtk_worldPoint.w) > 1e-6 ? 1.0 / mvvcvtk_worldPoint.w : 1.0;\n"
-    "    mvvcvtk_worldPoint = vec4(mvvcvtk_worldPoint.xyz * mvvcvtk_worldInvW, 1.0);\n"
-    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsideWorldToBox * mvvcvtk_worldPoint;\n"
-    "    float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
-    "    vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
-    "    if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
-    "      {\n"
-    "      discard;\n"
-    "      }\n";
-
-static constexpr const char* kPolyDataRemoveInsideLightImplReplacement =
-    "//VTK::Light::Impl\n"
-    "    vec4 mvvcvtk_worldPoint = mvvcvtk_worldPositionVSOutput;\n"
-    "    float mvvcvtk_worldInvW = abs(mvvcvtk_worldPoint.w) > 1e-6 ? 1.0 / mvvcvtk_worldPoint.w : 1.0;\n"
-    "    mvvcvtk_worldPoint = vec4(mvvcvtk_worldPoint.xyz * mvvcvtk_worldInvW, 1.0);\n"
-    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsideWorldToBox * mvvcvtk_worldPoint;\n"
+    "    vec4 mvvcvtk_activeInputModelPoint = mvvcvtk_activeInputModelPositionVSOutput;\n"
+    "    float mvvcvtk_activeInputModelInvW = abs(mvvcvtk_activeInputModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_activeInputModelPoint.w : 1.0;\n"
+    "    mvvcvtk_activeInputModelPoint = vec4(mvvcvtk_activeInputModelPoint.xyz * mvvcvtk_activeInputModelInvW, 1.0);\n"
+    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsideActiveInputModelToBox * mvvcvtk_activeInputModelPoint;\n"
     "    float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
     "    vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
     "    if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
@@ -134,47 +119,6 @@ void OrthogonalCropPreviewPlugService::RestorePreview(
 void OrthogonalCropPreviewPlugService::Clear()
 {
     m_targetStates.clear();
-}
-
-vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewPolyData(
-    const std::shared_ptr<AbstractInteractiveService>& targetService) const
-{
-    if (!targetService || targetService->GetNavigationAxis() >= 0) {
-        return nullptr;
-    }
-
-    auto actor = vtkActor::SafeDownCast(targetService->GetMainProp());
-    auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
-    if (!mapper) {
-        return nullptr;
-    }
-
-    vtkPolyData* polyData = nullptr;
-    const auto state = m_targetStates.find(targetService.get());
-    if (state != m_targetStates.end() && state->second.mainPreviewMapper == mapper) {
-        if (state->second.mainPreviewInputConnection
-            && state->second.mainPreviewInputConnection->GetProducer()) {
-            auto producer = state->second.mainPreviewInputConnection->GetProducer();
-            producer->Update();
-            polyData = vtkPolyData::SafeDownCast(
-                producer->GetOutputDataObject(state->second.mainPreviewInputConnection->GetIndex()));
-        }
-        else {
-            polyData = state->second.mainPreviewInputData;
-        }
-    }
-    else {
-        mapper->Update();
-        polyData = mapper->GetInput();
-    }
-
-    if (!polyData || polyData->GetNumberOfPoints() <= 0) {
-        return nullptr;
-    }
-
-    auto output = vtkSmartPointer<vtkPolyData>::New();
-    output->ShallowCopy(polyData);
-    return output;
 }
 
 vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildWorldClippingPlanes(
@@ -368,9 +312,7 @@ void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
     shaderProperty->ClearVertexShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionImplTag, true);
     shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionTag, true);
     shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideClipImplTag, true);
-    shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideLightImplTag, true);
-    shaderProperty->GetVertexCustomUniforms()->RemoveUniform(kPolyDataRemoveInsidePolyDataModelToWorldUniform);
-    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsideWorldToBoxUniform);
+    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsideActiveInputModelToBoxUniform);
     shaderProperty->Modified();
     actor->Modified();
 }
@@ -409,7 +351,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataPreview(
         return true;
     }
 
-    return ApplyPolyDataRemoveInsidePreview(actor, mapper, referenceService, previewResult);
+    return ApplyPolyDataRemoveInsidePreview(actor, mapper, previewResult);
 }
 
 void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
@@ -430,7 +372,6 @@ void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
 bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!actor || !mapper) {
@@ -449,20 +390,8 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
     auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
-    if (referenceService) {
-        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
-    }
-
-    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
-
-    auto worldToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToWorldMatrix, worldToBoxMatrix);
-
-    auto polyDataModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    actor->GetModelToWorldMatrix(polyDataModelToWorldMatrix);
+    auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
 
     auto shaderProperty = actor->GetShaderProperty();
     shaderProperty->AddVertexShaderReplacement(
@@ -485,28 +414,17 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
         true,
         kPolyDataRemoveInsideClipImplReplacement,
         false);
-    shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideLightImplTag,
-        true,
-        kPolyDataRemoveInsideLightImplReplacement,
-        false);
 
-    auto worldToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToBoxShaderMatrix->DeepCopy(worldToBoxMatrix);
-    auto polyDataModelToWorldShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    polyDataModelToWorldShaderMatrix->DeepCopy(polyDataModelToWorldMatrix);
+    auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
     // 上传前转置矩阵；
     // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ 矩阵结果一致。
-    worldToBoxShaderMatrix->Transpose();
-    polyDataModelToWorldShaderMatrix->Transpose();
+    activeInputModelToBoxShaderMatrix->Transpose();
 
-    // PolyData RemoveInside 在 world 空间判断当前片元是否落入标准盒；
-    // 这样 image 派生的等值面、直接输入的 polydata，以及红色预览框共享同一显示坐标。
-    auto vertexUniforms = shaderProperty->GetVertexCustomUniforms();
-    vertexUniforms->SetUniformMatrix(kPolyDataRemoveInsidePolyDataModelToWorldUniform, polyDataModelToWorldShaderMatrix);
-
+    // PolyData RemoveInside 直接在 active input model 中判断盒内片元；
+    // 这与 request/cropData 的坐标语义一致，也避免 actor world transform 被重复折算。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsideWorldToBoxUniform, worldToBoxShaderMatrix);
+    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsideActiveInputModelToBoxUniform, activeInputModelToBoxShaderMatrix);
 
     shaderProperty->Modified();
     mapper->Modified();

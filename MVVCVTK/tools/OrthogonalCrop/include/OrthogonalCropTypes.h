@@ -11,7 +11,7 @@
 // 语义边界：
 // - CropDataModel：客观几何快照；
 // - CropStateModel：瞬态显示与交互状态快照；
-// - OrthogonalCropRequest：一次执行请求，携带目标数据源、目标后端、几何、保留语义和交互状态快照；
+// - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、几何、保留语义和交互状态快照；
 // - OrthogonalCropResult：一次执行结果，预览链返回 image 2D mask / box 3D outline / polydata 3D clip，
 //   image submit 链返回可重新载入主数据的 image。
 
@@ -74,24 +74,20 @@ enum class CropRemovalMode {
 
 // Router 输入侧的数据来源选择。
 enum class OrthogonalCropDataSource {
-    // 自动选择：按当前可用输入在 image/polydata 之间回退。
-    Auto,
     // 强制优先走 vtkImageData 路径。
     ImageData,
     // 强制优先走 vtkPolyData 路径。
     PolyData
 };
 
-// 一次裁切请求或结果采用的具体后端；便于 bridge 明确目标、result 回填来源。
-enum class OrthogonalCropBackend {
-    // request 尚未指定目标后端，或 result 尚未成功解析出实际后端。
+// 一次裁切请求的业务动作；数据处理方法由 dataSource 决定。
+enum class OrthogonalCropOperation {
+    // request 尚未指定可执行动作。
     None,
-    // image 路径生成 2D slice mask preview，同时提供 3D outline 所需 cropData。
-    MaskPreview,
-    // image 路径通过提取 VOI 生成 submit 后的新主子体数据。
-    SubmitExtractVOI,
-    // polydata 路径使用 3D box clip + geometry filter 得到 preview 网格。
-    ClipPreview
+    // 生成 preview 结果；image 产出 mask/outline，polydata 产出 clipped polydata/outline。
+    Preview,
+    // 提交裁切结果；当前只支持 ImageData + KeepInside。
+    Submit
 };
 
 // 裁切交互过程的瞬时状态；主要用于区分“拖拽中”和“已释放”。
@@ -258,14 +254,14 @@ public:
     // 返回 bridge 决定好的目标数据源；router 只按它执行，不再自行推断。
     OrthogonalCropDataSource GetDataSource() const { return m_dataSource; }
 
-    // 写入本次请求目标数据源；Auto 只允许出现在默认请求或输入缺失场景。
+    // 写入本次请求目标数据源。
     void SetDataSource(OrthogonalCropDataSource dataSource) { m_dataSource = dataSource; }
 
-    // 返回 bridge 决定好的目标后端；它直接说明本次请求要生成哪类产物。
-    OrthogonalCropBackend GetBackend() const { return m_backend; }
+    // 返回 bridge 决定好的业务动作；router 结合 dataSource 选择具体数据处理方法。
+    OrthogonalCropOperation GetOperation() const { return m_operation; }
 
-    // 写入本次请求目标后端；router 使用它选择 image mask、polydata clip 或 image submit。
-    void SetBackend(OrthogonalCropBackend backend) { m_backend = backend; }
+    // 写入本次请求业务动作；Preview/Submit 不再伪装成数据后端。
+    void SetOperation(OrthogonalCropOperation operation) { m_operation = operation; }
 
     // 返回 inside / outside 的保留语义。
     CropRemovalMode GetRemovalMode() const { return m_removalMode; }
@@ -288,10 +284,10 @@ public:
 private:
     // 标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
-    // 本次请求的目标数据源；bridge 在调用 router 前把 Auto 解析成具体输入。
-    OrthogonalCropDataSource m_dataSource = OrthogonalCropDataSource::Auto;
-    // 本次请求的目标后端；None 表示还没有可执行目标，避免缺输入时伪装成 preview。
-    OrthogonalCropBackend m_backend = OrthogonalCropBackend::None;
+    // 本次请求的目标数据源。
+    OrthogonalCropDataSource m_dataSource = OrthogonalCropDataSource::ImageData;
+    // 本次请求的业务动作；None 表示还没有可执行目标，避免缺输入时伪装成 preview。
+    OrthogonalCropOperation m_operation = OrthogonalCropOperation::None;
     // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image submit 合法性判断。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
     // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。
@@ -308,11 +304,11 @@ public:
     // 写入诊断信息最终落到的数据源。
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
-    // 返回诊断信息采用的具体后端实现。
-    OrthogonalCropBackend GetResolvedBackend() const { return m_resolvedBackend; }
+    // 返回诊断信息采用的业务动作。
+    OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
 
-    // 写入诊断信息采用的具体后端实现。
-    void SetResolvedBackend(OrthogonalCropBackend backend) { m_resolvedBackend = backend; }
+    // 写入诊断信息采用的业务动作。
+    void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
     // 返回诊断阶段发现的失败原因。
     OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
@@ -340,9 +336,9 @@ public:
 
 private:
     // 这次诊断最终落到的数据源；用于日志和上层 UI 提示。
-    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::Auto;
-    // 这次诊断真正采用的底层实现路径，如 2D mask preview、extract VOI 或 polydata clip。
-    OrthogonalCropBackend m_resolvedBackend = OrthogonalCropBackend::None;
+    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
+    // 这次诊断真正采用的业务动作，如 preview 或 submit。
+    OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
     // 诊断阶段发现的失败原因；None 表示校验通过。
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
@@ -357,11 +353,11 @@ public:
     // 写入结果最终落到的数据源。
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
-    // 返回结果采用的具体后端实现。
-    OrthogonalCropBackend GetResolvedBackend() const { return m_resolvedBackend; }
+    // 返回结果采用的业务动作。
+    OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
 
-    // 写入结果采用的具体后端实现。
-    void SetResolvedBackend(OrthogonalCropBackend backend) { m_resolvedBackend = backend; }
+    // 写入结果采用的业务动作。
+    void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
     // 返回本次执行是否构造出了有效结果。
     bool GetSucceeded() const { return m_succeeded; }
@@ -425,9 +421,9 @@ public:
 
 private:
     // 最终执行实际落到的数据源；通常和 statistics 保持一致，但以结果本身为准。
-    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::Auto;
-    // 结果实际采用的后端实现；决定调用方该如何理解 image/polydata/2D/3D 产物来源。
-    OrthogonalCropBackend m_resolvedBackend = OrthogonalCropBackend::None;
+    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
+    // 结果实际采用的业务动作；数据来源由 resolvedDataSource 表达。
+    OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_succeeded = false;
     // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。

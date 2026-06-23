@@ -114,7 +114,7 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
         sharedDataMgr);
 
 为什么这么设：
-- SetDataManager：只作为 Auto 模式下 image 输入的兜底来源，不是主输入真源。
+- SetDataManager：只作为缺 image 输入时的兜底来源，不是主输入真源。
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的 world / active input model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
@@ -549,11 +549,11 @@ Step 11: 只让一个窗口进入 Start()
 - 为什么：router 必须显式知道自己在裁谁，不能从窗口状态里猜。
 
 2) OrthogonalCropBackendRouterService::SetPreferredDataSource
-- 做什么：设置优先走 image / polydata / auto。
+- 做什么：设置优先走 image / polydata。
 - 为什么：UI 层不该自己散落 if/else；由 router 统一决策数据后端。
 
 3) OrthogonalCropInteractionBridgeService::SetDataManager
-- 做什么：为 Auto 模式准备 image 输入兜底来源。
+- 做什么：为缺 image 输入时准备兜底来源。
 - 为什么：bridge 进入交互时如果还没显式 SetInputImage，可以尽力从 DataManager 拿当前体数据。
 
 4) OrthogonalCropInteractionBridgeService::SetReferenceRenderService

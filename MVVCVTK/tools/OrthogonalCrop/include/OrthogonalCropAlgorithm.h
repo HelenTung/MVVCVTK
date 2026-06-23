@@ -6,7 +6,8 @@
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================
 // 算法层只消费 request 与输入数据；
-// 它先归一化 cropData，再按 request.backend 产出 image preview、image submit 或 polydata preview 结果。
+// 它先归一化 cropData，再按 request.dataSource / request.operation 产出 image preview、
+// image submit 或 polydata preview 结果。
 // 统一结果模型承载几何、产物、诊断和交互态，避免 service / UI 分散理解算法细节。
 
 #include "OrthogonalCropTypes.h"
@@ -47,7 +48,7 @@ public:
         const OrthogonalCropRequest& request,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // image 算法入口：先校验和归一化，再按 request.backend 填充上层已构造的 result。
+    // image 算法入口：先校验和归一化，再按 request.operation 填充上层已构造的 result。
     // resultContext 已经带有数据源、后端和交互态，算法层只补 cropData、产物和诊断。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
@@ -60,7 +61,7 @@ public:
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request);
 
-    // polydata 算法入口：按 request.backend 生成 3D clip preview 结果。
+    // polydata 算法入口：按 request.operation 生成 3D clip preview 结果。
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request,

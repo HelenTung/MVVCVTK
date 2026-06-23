@@ -36,9 +36,6 @@ public:
 
     void Clear();
 
-    vtkSmartPointer<vtkPolyData> GetPreviewPolyData(
-        const std::shared_ptr<AbstractInteractiveService>& targetService) const;
-
 private:
     struct TargetState {
         vtkPolyDataMapper* mainPreviewMapper = nullptr;
@@ -82,7 +79,6 @@ private:
     bool ApplyPolyDataRemoveInsidePreview(
         vtkActor* actor,
         vtkPolyDataMapper* mapper,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     std::unordered_map<AbstractInteractiveService*, TargetState> m_targetStates;
