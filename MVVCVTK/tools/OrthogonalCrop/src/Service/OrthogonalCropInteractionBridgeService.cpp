@@ -408,7 +408,7 @@ void OrthogonalCropInteractionBridgeService::HandleWidgetWorldBoundsChanged(
     m_worldBoundsInitialized = true;
     m_lastInteractionPhase = phase;
     if (m_previewEnabled && phase == CropInteractionPhase::Released) {
-        UpdatePreviewFromCurrentBounds(true);
+        UpdatePreviewFromCurrentBounds();
     }
 }
 
@@ -553,7 +553,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
     return boxRequest;
 }
 
-void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool logStats)
+void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds()
 {
     if (!m_worldBoundsInitialized) {
         return;
@@ -633,12 +633,9 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    if (logStats) {
-        std::cout << "[Main] Orthogonal crop preview updated." << std::endl;
-    }
 }
 
-void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode removalMode, bool logStats)
+void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode removalMode)
 {
     // Toggle 语义固定为：
     // - 同模式再次触发：关闭 preview，并恢复主模型全量显示
@@ -651,24 +648,16 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
         // 再次触发同一模式表示关闭 preview，并恢复原始显示内容。
         m_previewEnabled = false;
         RestorePreviewRenderTargets();
-        if (logStats) {
-            std::cout << "[Main] Orthogonal crop preview restored full model." << std::endl;
-        }
         return;
     }
 
     m_previewEnabled = true;
     m_currentRemovalMode = removalMode;
-    if (logStats) {
-        std::cout << "[Main] Orthogonal crop preview mode: "
-            << GetRemovalModeText(m_currentRemovalMode)
-            << std::endl;
-    }
 
     if (m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
         // 非拖拽阶段才立即刷新；拖拽中依旧等待 EndInteractionEvent 统一触发。
-        UpdatePreviewFromCurrentBounds(logStats);
+        UpdatePreviewFromCurrentBounds();
     }
 }
 

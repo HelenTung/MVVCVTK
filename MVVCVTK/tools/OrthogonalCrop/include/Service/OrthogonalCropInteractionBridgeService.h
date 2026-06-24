@@ -88,7 +88,7 @@ public:
     bool ExitInteractiveCrop();
 
     // 切换 preview 开关与 removal mode。
-    void TogglePreview(CropRemovalMode removalMode, bool logStats);
+    void TogglePreview(CropRemovalMode removalMode);
 
 private:
     // 私有边界负责 widget 状态机、world / 当前输入模型坐标转换、后端查询、
@@ -140,7 +140,7 @@ private:
         OrthogonalCropDataSource dataSource) const;
 
     // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
-    void UpdatePreviewFromCurrentBounds(bool logStats);
+    void UpdatePreviewFromCurrentBounds();
 
     // 校验当前交互状态是否允许发起 image submit。
     bool CanApplySubmit() const;

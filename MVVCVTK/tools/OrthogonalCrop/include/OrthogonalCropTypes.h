@@ -278,16 +278,8 @@ public:
     void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
 
     const std::string& GetValidationMessage() const { return m_validationMessage; }
-    const std::string& GetMessage() const
-    {
-        return m_validationMessage;
-    }
 
     void SetValidationMessage(const std::string& validationMessage) { m_validationMessage = validationMessage; }
-    void SetMessage(const std::string& message)
-    {
-        m_validationMessage = message;
-    }
 
 private:
     // 这次诊断最终落到的数据源；用于日志和上层 UI 提示。

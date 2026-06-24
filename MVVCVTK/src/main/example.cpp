@@ -619,7 +619,7 @@ Step 11: 只让一个窗口进入 Start()
 - bridge 记录 m_currentWorldBounds 和 m_lastInteractionPhase。
 
 3. 按 1 或 2
-- bridge->TogglePreview(CropRemovalMode::KeepInside / RemoveInside, true)。
+- bridge->TogglePreview(CropRemovalMode::KeepInside / RemoveInside)。
 - bridge 分别为可用的 3D volume 目标和 polydata 目标组装 preview request。
 
 4. BuildBoxRequest()
@@ -636,7 +636,7 @@ Step 11: 只让一个窗口进入 Start()
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口在 preview 阶段不生成 mask；submit 完成后才消费 submit mask/outline。
 - 3D 主窗口先尝试主显示管道 preview；volume 的 KeepInside 走 mapper clipping、RemoveInside 走 shader discard。
-- actor/polydata 的 KeepInside 走 mapper clipping，RemoveInside 走 actor shader discard；clipPolyData 只作为算法输出和 overlay 输入。
+- actor/polydata 的 KeepInside 走 mapper clipping，RemoveInside 走 actor shader discard；主预览不依赖裁切后 polydata artifact。
 
 7. 按 Ctrl+3
 - bridge->ApplySubmit()。
@@ -648,7 +648,7 @@ Step 11: 只让一个窗口进入 Start()
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
 - Bridge 收到 reload 完成回调后，恢复输入 image、恢复相机、关闭裁切，再把 submit mask/outline 重新分发到 overlay 层渲染。
 
-注意：image submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
+注意：image submit 入口必须与 preview 刷新入口分离，不能再用日志开关这类标志位隐式表示提交模式。
 */
 
 /*

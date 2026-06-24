@@ -97,13 +97,13 @@ public:
 
             if (isInsidePreviewKey && !m_insidePreviewKeyDown) {
                 m_insidePreviewKeyDown = true;
-                orthogonalCropBridge->TogglePreview(CropRemovalMode::KeepInside, true);
+                orthogonalCropBridge->TogglePreview(CropRemovalMode::KeepInside);
                 return;
             }
 
             if (isOutsidePreviewKey && !m_outsidePreviewKeyDown) {
                 m_outsidePreviewKeyDown = true;
-                orthogonalCropBridge->TogglePreview(CropRemovalMode::RemoveInside, true);
+                orthogonalCropBridge->TogglePreview(CropRemovalMode::RemoveInside);
                 return;
             }
 
