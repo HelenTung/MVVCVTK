@@ -1,7 +1,7 @@
 // =====================================================================
 // Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropBackendRouterService.cpp
 // 分类: Service / Backend Router Implementation
-// 说明: 按 request 指定的数据源与后端，把 image / polydata 请求直接分发到算法层。
+// 说明: 按 request 指定的数据源与后端，把图像 / 体渲染 / 网格请求直接分发到算法层。
 // =====================================================================
 
 #include "OrthogonalCropBackendRouterService.h"
@@ -52,6 +52,10 @@ OrthogonalCropDataSource OrthogonalCropBackendRouterService::GetActiveDataSource
         return OrthogonalCropDataSource::ImageData;
     }
 
+    if (m_preferredDataSource == OrthogonalCropDataSource::VolumeData && hasImage) {
+        return OrthogonalCropDataSource::VolumeData;
+    }
+
     if (m_preferredDataSource == OrthogonalCropDataSource::PolyData && hasPolyData) {
         return OrthogonalCropDataSource::PolyData;
     }
@@ -72,6 +76,7 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveInputModelBou
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     switch (GetActiveDataSource()) {
     case OrthogonalCropDataSource::ImageData:
+    case OrthogonalCropDataSource::VolumeData:
         return GetImageModelBounds();
     case OrthogonalCropDataSource::PolyData:
         return GetPolyDataInputModelBounds();
@@ -95,11 +100,22 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const
 {
     switch (request.GetDataSource()) {
     case OrthogonalCropDataSource::ImageData:
+    case OrthogonalCropDataSource::VolumeData:
+        if (request.GetDataSource() == OrthogonalCropDataSource::VolumeData
+            && request.GetOperation() != OrthogonalCropOperation::Preview) {
+            auto statistics = GetMissingInputStatistics(
+                request.GetDataSource(),
+                request.GetOperation());
+            statistics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+            statistics.SetValidationMessage("Volume crop data source only supports preview operation.");
+            return statistics;
+        }
+
         if (!GetInputImage()) {
             auto statistics = GetMissingInputStatistics(
-                OrthogonalCropDataSource::ImageData,
+                request.GetDataSource(),
                 request.GetOperation());
-            statistics.SetValidationMessage("Image crop data source requires image input data.");
+            statistics.SetValidationMessage("Image-backed crop data source requires image input data.");
             return statistics;
         }
 
@@ -132,9 +148,19 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(
 {
     switch (request.GetDataSource()) {
     case OrthogonalCropDataSource::ImageData:
+    case OrthogonalCropDataSource::VolumeData:
+        if (request.GetDataSource() == OrthogonalCropDataSource::VolumeData
+            && request.GetOperation() != OrthogonalCropOperation::Preview) {
+            auto result = GetMissingInputResult(resultContext, OrthogonalCropFailureReason::UnsupportedBackend);
+            result.SetMessage("Volume crop data source only supports preview operation.");
+            return result;
+        }
+
         if (!GetInputImage()) {
-            auto result = GetMissingInputResult(resultContext);
-            result.SetMessage("Image crop data source requires image input data.");
+            auto result = GetMissingInputResult(
+                resultContext,
+                OrthogonalCropFailureReason::InputImageMissing);
+            result.SetMessage("Image-backed crop data source requires image input data.");
             return result;
         }
 

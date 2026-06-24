@@ -12,8 +12,8 @@
 // - CropDataModel：客观几何快照；
 // - CropStateModel：瞬态显示与交互状态快照；
 // - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、几何、保留语义和交互状态快照；
-// - OrthogonalCropResult：一次执行结果，预览链返回 image 2D mask / box 3D outline / polydata 3D clip，
-//   image submit 链返回可重新载入主数据的 image。
+// - OrthogonalCropResult：一次执行结果，预览链返回图像/体渲染预览、盒体三维轮廓 / 网格裁切预览，
+//   图像提交链返回可重新载入主数据的图像。
 
 #include <array>
 #include <cstddef>
@@ -76,6 +76,8 @@ enum class CropRemovalMode {
 enum class OrthogonalCropDataSource {
     // 强制优先走 vtkImageData 路径。
     ImageData,
+    // 体渲染主预览路径；输入仍复用 vtkImageData，只用路由身份区分主预览目标。
+    VolumeData,
     // 强制优先走 vtkPolyData 路径。
     PolyData
 };
@@ -84,7 +86,7 @@ enum class OrthogonalCropDataSource {
 enum class OrthogonalCropOperation {
     // request 尚未指定可执行动作。
     None,
-    // 生成 preview 结果；image 产出 mask/outline，polydata 产出 clipped polydata/outline。
+    // 生成预览结果；图像/体渲染产出遮罩与轮廓，网格产出裁切网格与轮廓。
     Preview,
     // 提交裁切结果；当前只支持 ImageData + KeepInside。
     Submit

@@ -9,10 +9,10 @@
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
-// 3. Released 或显式 toggle preview 时，BuildPreviewRequest 把 widget world 有向盒折回 input model request
+// 3. Released 或显式切换预览时，BuildPreviewRequest 把 widget world 有向盒折回当前输入模型 request
 // 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、operation 和交互态
-// 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求 image / polydata 结果
-// 6. DispatchPreviewResult 把结果交给 preview plug，由 plug 统一更新 overlay / 3D 主显示状态
+// 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
+// 6. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
@@ -42,8 +42,8 @@ struct OrthogonalCropSubmitReloadPayload {
 class OrthogonalCropInteractionBridgeService {
 public:
 
-    // Public boundary: initialization/setup and user hotkey actions.
-    // Internal state transitions, backend routing details, and VTK preview plumbing stay private.
+    // 公共边界只暴露初始化、窗口接入和用户热键动作。
+    // 内部状态切换、后端路由细节和 VTK 预览接管都留在私有实现里。
 
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
     OrthogonalCropInteractionBridgeService();
@@ -95,8 +95,8 @@ public:
     void TogglePreview(CropRemovalMode removalMode, bool logStats);
 
 private:
-    // Private boundary: widget state machine, world/active input model conversion, backend query,
-    // preview distribution, and VTK mapper/shader implementation details.
+    // 私有边界负责 widget 状态机、world / 当前输入模型坐标转换、后端查询、
+    // 预览分发，以及 VTK mapper / shader 显示细节。
 
     // 一个 preview 目标窗口对应一份 overlay 策略。
     struct PreviewRenderTarget {
@@ -136,7 +136,7 @@ private:
     // 基于 request 构造 result 上下文；bridge 在这里固定数据源、operation 和交互态。
     OrthogonalCropResult BuildResultContext(const OrthogonalCropRequest& request) const;
 
-    // 统一执行一次 preview 刷新：构建 request、拿结果、投递 overlay、刷新窗口。
+    // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
     void UpdatePreviewFromCurrentBounds(bool logStats);
 
     // 校验当前交互状态是否允许发起 image submit。
@@ -170,13 +170,13 @@ private:
     bool DispatchPreviewResult(
         const PreviewRenderTarget& target,
         CropRemovalMode removalMode,
-        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult);
 
-    // 后端分发器，负责 image / polydata 两条执行链。
+    // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
     OrthogonalCropBackendRouterService m_backend;
 
-    // preview plug 负责 overlay / mapper / shader / volume 等 VTK 显示状态。
+    // 预览接管层只负责把明确的预览结果应用到叠加层、mapper、shader、volume 等 VTK 显示状态。
     OrthogonalCropPreviewPlugService m_previewPlug;
 
     // image 输入的兜底来源。

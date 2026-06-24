@@ -18,14 +18,14 @@ class vtkVolume;
 class vtkVolumeMapper;
 
 // OrthogonalCropPreviewPlugService 只拥有 preview 期间的 VTK 显示状态。
-// request 构造和裁切数据处理交给 router / algorithm；本类只把 result 映射到 overlay、mapper、shader 和 volume 状态。
+// request 构造和裁切数据处理交给 router / algorithm；本类只应用已经分发好的预览结果。
 class OrthogonalCropPreviewPlugService {
 public:
     bool ApplyPreview(
         const std::shared_ptr<AbstractInteractiveService>& targetService,
         const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
-        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult,
         CropRemovalMode removalMode);
 

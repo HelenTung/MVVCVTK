@@ -6,8 +6,8 @@
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================
 // 算法层只消费 request 与输入数据；
-// 它先归一化 cropData，再按 request.dataSource / request.operation 产出 image preview、
-// image submit 或 polydata preview 结果。
+// 它先归一化 cropData，再按 request.dataSource / request.operation 产出图像/体渲染预览、
+// 图像提交或网格预览结果。
 // 统一结果模型承载几何、产物、诊断和交互态，避免 service / UI 分散理解算法细节。
 
 #include "OrthogonalCropTypes.h"

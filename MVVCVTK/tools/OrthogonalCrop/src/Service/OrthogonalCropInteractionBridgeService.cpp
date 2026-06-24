@@ -5,7 +5,6 @@
 // =====================================================================
 
 #include "OrthogonalCropInteractionBridgeService.h"
-#include "OrthogonalCropAlgorithm.h"
 
 #include <vtkActor.h>
 #include <vtkBoundingBox.h>
@@ -528,32 +527,32 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // image preview 使用 router 已显式持有的 image 输入；
-    // polydata preview 直接读取目标窗口通过 GetMainProp 暴露的主 3D 输入，bridge 不识别具体策略类。
-    OrthogonalCropResult imageResult;
-    bool hasImageResult = false;
+    // 体渲染预览使用 router 已显式持有的图像输入；
+    // 网格预览直接读取目标窗口通过 GetMainProp 暴露的主三维输入，bridge 不识别具体策略类。
+    OrthogonalCropResult volumeResult;
+    bool hasVolumeResult = false;
     if (GetInputImage()) {
-        const auto imageRequest = BuildPreviewRequest(OrthogonalCropDataSource::ImageData);
-        imageResult = m_backend.GetResult(imageRequest, BuildResultContext(imageRequest));
-        if (imageResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
+        const auto volumeRequest = BuildPreviewRequest(OrthogonalCropDataSource::VolumeData);
+        volumeResult = m_backend.GetResult(volumeRequest, BuildResultContext(volumeRequest));
+        if (volumeResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
             if (logStats) {
-                std::cerr << "[Main] Orthogonal crop image preview failed: "
-                    << GetFailureReasonText(imageResult.GetFailureReason())
-                    << " - " << imageResult.GetMessage() << std::endl;
+                std::cerr << "[Main] Orthogonal crop volume preview failed: "
+                    << GetFailureReasonText(volumeResult.GetFailureReason())
+                    << " - " << volumeResult.GetMessage() << std::endl;
             }
             return;
         }
 
-        if (!imageResult.GetSucceeded()) {
+        if (!volumeResult.GetSucceeded()) {
             if (logStats) {
-                std::cerr << "[Main] Orthogonal crop image preview result warning: "
-                    << GetFailureReasonText(imageResult.GetFailureReason())
-                    << " - " << imageResult.GetMessage() << std::endl;
+                std::cerr << "[Main] Orthogonal crop volume preview result warning: "
+                    << GetFailureReasonText(volumeResult.GetFailureReason())
+                    << " - " << volumeResult.GetMessage() << std::endl;
             }
             return;
         }
 
-        hasImageResult = true;
+        hasVolumeResult = true;
     }
 
     bool main3DPreviewApplied = false;
@@ -593,30 +592,30 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             }
         }
 
-        if (!hasImageResult && !hasPolyDataResult) {
+        if (!hasVolumeResult && !hasPolyDataResult) {
             continue;
         }
 
         main3DPreviewApplied = DispatchPreviewResult(
             target,
             m_currentRemovalMode,
-            hasImageResult ? &imageResult : nullptr,
+            hasVolumeResult ? &volumeResult : nullptr,
             hasPolyDataResult ? &polyResult : nullptr) || main3DPreviewApplied;
         anyPreviewApplied = true;
     }
 
     if (!anyPreviewApplied) {
         if (logStats) {
-            std::cerr << "[Main] Orthogonal crop preview skipped: no image or polydata preview input is available." << std::endl;
+            std::cerr << "[Main] Orthogonal crop preview skipped: no volume or polydata preview input is available." << std::endl;
         }
         return;
     }
 
     if (logStats) {
-        // 日志只报告本次显式跑过的数据源；result/statistics 是执行回执，不能反过来作为流程判断来源。
+        // 日志只报告本次显式跑过的数据源；结果与统计只是执行回执，不能反过来作为流程判断来源。
         std::cout
-            << "[Main] Orthogonal crop preview updated. image = "
-            << (hasImageResult ? "Used" : "Skipped")
+            << "[Main] Orthogonal crop preview updated. volume = "
+            << (hasVolumeResult ? "Used" : "Skipped")
             << ", polydata = "
             << (polyDataPreviewApplied ? "Used" : "Skipped")
             << ", operation = "
@@ -714,6 +713,8 @@ const char* OrthogonalCropInteractionBridgeService::GetDataSourceText(Orthogonal
     switch (dataSource) {
     case OrthogonalCropDataSource::ImageData:
         return "ImageData";
+    case OrthogonalCropDataSource::VolumeData:
+        return "VolumeData";
     case OrthogonalCropDataSource::PolyData:
         return "PolyData";
     default:
@@ -794,7 +795,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
 bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
     const PreviewRenderTarget& target,
     CropRemovalMode removalMode,
-    const OrthogonalCropResult* imagePreviewResult,
+    const OrthogonalCropResult* volumePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult)
 {
     if (!target.service || !target.overlayStrategy) {
@@ -805,7 +806,7 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
         target.service,
         target.overlayStrategy,
         m_referenceRenderService,
-        imagePreviewResult,
+        volumePreviewResult,
         polyDataPreviewResult,
         removalMode);
 

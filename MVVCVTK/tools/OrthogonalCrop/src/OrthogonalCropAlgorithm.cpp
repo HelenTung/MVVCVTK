@@ -730,6 +730,7 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const C
 static OrthogonalCropStatistics GetImageDiagnostics(
     vtkImageData* image,
     const CropDataModel& cropData,
+    OrthogonalCropDataSource dataSource,
     CropRemovalMode removalMode,
     OrthogonalCropOperation operation,
     std::size_t availableRamBytes)
@@ -737,7 +738,7 @@ static OrthogonalCropStatistics GetImageDiagnostics(
     // Statistics 只对外报告数据源、动作和失败诊断。
     // image submit 的 snapped index / RAM gate 属于内部执行计划，不再挂在 statistics 上。
     OrthogonalCropStatistics statistics;
-    statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+    statistics.SetResolvedDataSource(dataSource);
 
     switch (operation) {
     case OrthogonalCropOperation::None:
@@ -780,6 +781,9 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     // request 入口的职责非常窄：先做一次 request -> cropData 归一化，
     // 再把 operation/removal/RAM 约束带进 cropData 版本的统计核心。
     OrthogonalCropStatistics statistics;
+    statistics.SetResolvedDataSource(request.GetDataSource());
+    statistics.SetResolvedOperation(request.GetOperation());
+
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
@@ -798,6 +802,7 @@ OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
     return GetImageDiagnostics(
         image,
         cropData,
+        request.GetDataSource(),
         request.GetRemovalMode(),
         request.GetOperation(),
         GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
@@ -843,7 +848,7 @@ static OrthogonalCropResult GetPreviewResult(
     // 统计信息只记录数据源、后端和失败诊断；
     // mask 产物由 result 持有，避免把大对象挂进 diagnostics。
     OrthogonalCropStatistics statistics;
-    statistics.SetResolvedDataSource(OrthogonalCropDataSource::ImageData);
+    statistics.SetResolvedDataSource(resultContext.GetResolvedDataSource());
     statistics.SetResolvedOperation(OrthogonalCropOperation::Preview);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
     result.SetStatistics(statistics);
@@ -1065,6 +1070,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     const auto diagnostics = GetImageDiagnostics(
         image,
         cropData,
+        resultContext.GetResolvedDataSource(),
         request.GetRemovalMode(),
         request.GetOperation(),
         GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));

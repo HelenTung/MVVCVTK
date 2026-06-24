@@ -67,7 +67,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
-    const OrthogonalCropResult* imagePreviewResult,
+    const OrthogonalCropResult* volumePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
 {
@@ -76,19 +76,19 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     }
 
     bool mainPreviewApplied = false;
-    if (imagePreviewResult) {
-        // image result 只负责 volume 路径；如果目标不是 volume 窗口，
+    if (volumePreviewResult) {
+        // 体渲染结果只负责体渲染主显示路径；如果目标不是体渲染窗口，
         // 这里会返回 false，让同一目标继续尝试下面的 polydata 路径。
         mainPreviewApplied = ApplyVolumePreview(
             targetService,
             referenceService,
-            *imagePreviewResult,
+            *volumePreviewResult,
             removalMode);
     }
 
     bool polyDataPreviewApplied = false;
     if (!mainPreviewApplied && polyDataPreviewResult) {
-        // polydata result 只负责 actor 窗口：
+        // 网格结果只负责 actor 窗口：
         // KeepInside 使用 mapper planes，RemoveInside 使用 actor shader discard。
         polyDataPreviewApplied = ApplyPolyDataPreview(
             targetService,
@@ -101,7 +101,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
     overlayStrategy->SetRemovalMode(removalMode);
 
-    const OrthogonalCropResult* overlayResult = imagePreviewResult ? imagePreviewResult : polyDataPreviewResult;
+    const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;
         if (polyDataPreviewApplied) {
@@ -211,7 +211,11 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumePreview(
     const OrthogonalCropResult& previewResult,
     CropRemovalMode removalMode)
 {
-    if (!targetService || targetService->GetNavigationAxis() >= 0 || !previewResult.GetSucceeded()) {
+    if (!targetService
+        || targetService->GetNavigationAxis() >= 0
+        || !previewResult.GetSucceeded()
+        || previewResult.GetResolvedDataSource() != OrthogonalCropDataSource::VolumeData
+        || previewResult.GetResolvedOperation() != OrthogonalCropOperation::Preview) {
         return false;
     }
 
@@ -231,7 +235,7 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumePreview(
     volumeMapper->RemoveAllClippingPlanes();
     volumeMapper->CroppingOff();
 
-    if (removalMode != CropRemovalMode::KeepInside) {
+    if (removalMode == CropRemovalMode::RemoveInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
         if (!ApplyVolumeRemoveInsidePreview(volume, gpuVolumeMapper, previewResult)) {
             volumeMapper->SetCroppingRegionFlagsToSubVolume();
@@ -257,8 +261,8 @@ void OrthogonalCropPreviewPlugService::ApplyVolumeKeepInsidePreview(
         return;
     }
 
-    // KeepInside 和 RemoveInside 都只消费 previewResult.cropData；
-    // 这里仅在 VTK volume clipping 需要的后端表达点，把 box/active input model 盒还原成 world planes。
+    // 体渲染 mapper 的 clipping planes 需要 world 坐标；
+    // 结果只提供标准盒到当前输入模型，world 矩阵来自参考窗口当前主数据。
     volumeMapper->SetClippingPlanes(BuildWorldClippingPlanes(referenceService, previewResult));
 }
 
@@ -276,7 +280,7 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumeRemoveInsidePreview(
     boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
 
     // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
-    // 采样点先由 VTK shader 内置矩阵还原到 active input model，再用 activeInputModelToBox 送入标准盒空间。
+    // 采样点先由 VTK shader 内置矩阵还原到 active input model，再送入标准盒空间。
     auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
 
@@ -287,7 +291,6 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumeRemoveInsidePreview(
         kVolumeRemoveInsideBaseImplReplacement,
         false);
 
-    // 体渲染只消费 previewResult 中的 cropData；业务来源统一由 request -> cropData 决定。
     auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
     // 上传前转置矩阵；
