@@ -5,7 +5,7 @@
 // 分类: Service / Backend Router
 // 说明: 在基于图像输入与网格输入的裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
-// Router 只根据 request.dataSource / request.operation / request.geometryType 执行已经决定好的目标；
+// Router 只根据 request.geometryType / request.operation / request.dataSource 执行已经决定好的目标；
 // 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
 // 图像 / 体渲染 / 网格的数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
@@ -44,10 +44,6 @@ public:
     // 它只提供初始几何和兜底目标，正式执行前仍由 bridge 写入本次业务选择。
     OrthogonalCropRequest GetDefaultRequest() const;
 
-    // 查询当前请求的诊断信息，按 request 已指定的数据源和动作分发。
-    // 调用方必须先把业务选择写进 request，router 只负责校验和转发。
-    OrthogonalCropStatistics GetStatistics(const OrthogonalCropRequest& request) const;
-
     // 执行当前请求并填充调用方给定的结果上下文，按 request 已指定的数据源和动作分发。
     // resultContext 已携带 resolved source / operation，router 只校验和转发，不再决定结果身份。
     OrthogonalCropResult GetResult(
@@ -55,17 +51,16 @@ public:
         const OrthogonalCropResult& resultContext) const;
 
 private:
+    // Box 目前是唯一实现的裁切类型，这里集中处理动作 + 数据源组合。
+    OrthogonalCropResult GetBoxResult(
+        const OrthogonalCropRequest& request,
+        const OrthogonalCropResult& resultContext) const;
+
     // 读取 image model bounds。
     std::array<double, 6> GetImageModelBounds() const;
 
     // 读取 polyData input model bounds。
     std::array<double, 6> GetPolyDataInputModelBounds() const;
-
-    // 统一构造 router 层失败诊断，并保留请求三元组。
-    OrthogonalCropStatistics GetRouterFailureStatistics(
-        const OrthogonalCropRequest& request,
-        OrthogonalCropFailureReason failureReason,
-        const std::string& message) const;
 
     // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
     OrthogonalCropResult GetRouterFailureResult(

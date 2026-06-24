@@ -1,7 +1,7 @@
 // =====================================================================
 // Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropBackendRouterService.cpp
 // 分类: Service / Backend Router Implementation
-// 说明: 按 request 指定的数据源与后端，把图像 / 体渲染 / 网格请求直接分发到算法层。
+// 说明: 按 request 指定的裁切类型 / 动作 / 数据源，把图像 / 体渲染 / 网格请求直接分发到算法层。
 // =====================================================================
 
 #include "OrthogonalCropBackendRouterService.h"
@@ -18,11 +18,6 @@
 
 #include <string>
 #include <utility>
-
-static bool GetRequestUsesBoxGeometry(const OrthogonalCropRequest& request)
-{
-    return request.GetGeometryType() == OrthogonalCropGeometryType::Box;
-}
 
 void OrthogonalCropBackendRouterService::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
@@ -102,154 +97,91 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
     return request;
 }
 
-OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetStatistics(const OrthogonalCropRequest& request) const
-{
-    if (!GetRequestUsesBoxGeometry(request)) {
-        return GetRouterFailureStatistics(
-            request,
-            OrthogonalCropFailureReason::UnsupportedBackend,
-            "Router supports only Box crop geometry.");
-    }
-
-    switch (request.GetDataSource()) {
-    case OrthogonalCropDataSource::ImageData:
-        if (request.GetOperation() != OrthogonalCropOperation::Submit) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "ImageData crop source supports only Submit operation.");
-        }
-        if (!GetInputImage()) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::InputImageMissing,
-                "ImageData crop source requires image input data.");
-        }
-        return OrthogonalCropAlgorithm::GetStatistics(
-            m_inputImage,
-            request,
-            GetSystemAvailableRamBytes());
-
-    case OrthogonalCropDataSource::VolumeData:
-        if (request.GetOperation() != OrthogonalCropOperation::Preview) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "VolumeData crop source supports only Preview operation.");
-        }
-        if (!GetInputImage()) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::InputImageMissing,
-                "VolumeData crop source requires image input data.");
-        }
-        return OrthogonalCropAlgorithm::GetStatistics(
-            m_inputImage,
-            request,
-            GetSystemAvailableRamBytes());
-
-    case OrthogonalCropDataSource::PolyData:
-        if (request.GetOperation() != OrthogonalCropOperation::Preview) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "PolyData crop source supports only Preview operation.");
-        }
-        if (!GetInputPolyData()) {
-            return GetRouterFailureStatistics(
-                request,
-                OrthogonalCropFailureReason::InputPolyDataMissing,
-                "PolyData crop source requires polydata input data.");
-        }
-
-        return OrthogonalCropAlgorithm::GetStatistics(m_inputPolyData, request);
-    default:
-        return GetRouterFailureStatistics(
-            request,
-            OrthogonalCropFailureReason::UnsupportedBackend,
-            "Orthogonal crop request has no executable data source.");
-    }
-}
-
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(
     const OrthogonalCropRequest& request,
     const OrthogonalCropResult& resultContext) const
 {
-    if (!GetRequestUsesBoxGeometry(request)) {
+    // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
+    switch (request.GetGeometryType()) {
+    case OrthogonalCropGeometryType::Box:
+        return GetBoxResult(request, resultContext);
+
+    default:
         return GetRouterFailureResult(
             request,
             resultContext,
             OrthogonalCropFailureReason::UnsupportedBackend,
             "Router supports only Box crop geometry.");
     }
+}
 
-    switch (request.GetDataSource()) {
-    case OrthogonalCropDataSource::ImageData:
-        if (request.GetOperation() != OrthogonalCropOperation::Submit) {
-            return GetRouterFailureResult(
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(
+    const OrthogonalCropRequest& request,
+    const OrthogonalCropResult& resultContext) const
+{
+    // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
+    switch (request.GetOperation()) {
+    case OrthogonalCropOperation::Preview:
+        switch (request.GetDataSource()) {
+        case OrthogonalCropDataSource::VolumeData:
+            if (!GetInputImage()) {
+                return GetRouterFailureResult(
+                    request,
+                    resultContext,
+                    OrthogonalCropFailureReason::InputImageMissing,
+                    "Image-backed crop route requires image input data.");
+            }
+            return OrthogonalCropAlgorithm::GetResult(
+                m_inputImage,
                 request,
                 resultContext,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "ImageData crop source supports only Submit operation.");
-        }
-        if (!GetInputImage()) {
-            return GetRouterFailureResult(
-                request,
-                resultContext,
-                OrthogonalCropFailureReason::InputImageMissing,
-                "ImageData crop source requires image input data.");
-        }
-        return OrthogonalCropAlgorithm::GetResult(
-            m_inputImage,
-            request,
-            resultContext,
-            GetSystemAvailableRamBytes());
+                GetSystemAvailableRamBytes());
 
-    case OrthogonalCropDataSource::VolumeData:
-        if (request.GetOperation() != OrthogonalCropOperation::Preview) {
-            return GetRouterFailureResult(
-                request,
-                resultContext,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "VolumeData crop source supports only Preview operation.");
-        }
-        if (!GetInputImage()) {
-            return GetRouterFailureResult(
-                request,
-                resultContext,
-                OrthogonalCropFailureReason::InputImageMissing,
-                "VolumeData crop source requires image input data.");
-        }
-        return OrthogonalCropAlgorithm::GetResult(
-            m_inputImage,
-            request,
-            resultContext,
-            GetSystemAvailableRamBytes());
+        case OrthogonalCropDataSource::PolyData:
+            if (!GetInputPolyData()) {
+                return GetRouterFailureResult(
+                    request,
+                    resultContext,
+                    OrthogonalCropFailureReason::InputPolyDataMissing,
+                    "PolyData crop route requires polydata input data.");
+            }
+            return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request, resultContext);
 
-    case OrthogonalCropDataSource::PolyData:
-        if (request.GetOperation() != OrthogonalCropOperation::Preview) {
-            return GetRouterFailureResult(
-                request,
-                resultContext,
-                OrthogonalCropFailureReason::UnsupportedBackend,
-                "PolyData crop source supports only Preview operation.");
+        default:
+            break;
         }
-        if (!GetInputPolyData()) {
-            return GetRouterFailureResult(
-                request,
-                resultContext,
-                OrthogonalCropFailureReason::InputPolyDataMissing,
-                "PolyData crop source requires polydata input data.");
-        }
+        break;
 
-        return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request, resultContext);
+    case OrthogonalCropOperation::Submit:
+        switch (request.GetDataSource()) {
+        case OrthogonalCropDataSource::ImageData:
+            if (!GetInputImage()) {
+                return GetRouterFailureResult(
+                    request,
+                    resultContext,
+                    OrthogonalCropFailureReason::InputImageMissing,
+                    "Image-backed crop route requires image input data.");
+            }
+            return OrthogonalCropAlgorithm::GetResult(
+                m_inputImage,
+                request,
+                resultContext,
+                GetSystemAvailableRamBytes());
+
+        default:
+            break;
+        }
+        break;
+
     default:
-        return GetRouterFailureResult(
-            request,
-            resultContext,
-            OrthogonalCropFailureReason::UnsupportedBackend,
-            "Orthogonal crop request has no executable data source.");
+        break;
     }
+
+    return GetRouterFailureResult(
+        request,
+        resultContext,
+        OrthogonalCropFailureReason::UnsupportedBackend,
+        "Router has no executable path for this crop route.");
 }
 
 std::array<double, 6> OrthogonalCropBackendRouterService::GetImageModelBounds() const
@@ -285,21 +217,6 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetPolyDataInputModelB
     };
 }
 
-OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetRouterFailureStatistics(
-    const OrthogonalCropRequest& request,
-    OrthogonalCropFailureReason failureReason,
-    const std::string& message) const
-{
-    OrthogonalCropStatistics statistics;
-    statistics.SetResolvedDataSource(request.GetDataSource());
-    statistics.SetResolvedOperation(request.GetOperation());
-    statistics.SetResolvedGeometryType(request.GetGeometryType());
-    statistics.SetResolvedRemovalMode(request.GetRemovalMode());
-    statistics.SetFailureReason(failureReason);
-    statistics.SetValidationMessage(message);
-    return statistics;
-}
-
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetRouterFailureResult(
     const OrthogonalCropRequest& request,
     const OrthogonalCropResult& resultContext,
@@ -307,7 +224,14 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetRouterFailureResult(
     const std::string& message) const
 {
     auto result = resultContext;
-    const auto statistics = GetRouterFailureStatistics(request, failureReason, message);
+    OrthogonalCropStatistics statistics;
+    statistics.SetResolvedDataSource(request.GetDataSource());
+    statistics.SetResolvedOperation(request.GetOperation());
+    statistics.SetResolvedGeometryType(request.GetGeometryType());
+    statistics.SetResolvedRemovalMode(request.GetRemovalMode());
+    statistics.SetFailureReason(failureReason);
+    statistics.SetValidationMessage(message);
+
     result.SetStatistics(statistics);
     result.SetFailureReason(failureReason);
     result.SetMessage(message);

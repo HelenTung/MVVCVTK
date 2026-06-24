@@ -107,8 +107,8 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     m_cameraStateController.Save(m_referenceRenderer);
 
     const auto submitRequest = BuildBoxRequest(
-        OrthogonalCropDataSource::ImageData,
-        OrthogonalCropOperation::Submit);
+        OrthogonalCropOperation::Submit,
+        OrthogonalCropDataSource::ImageData);
     const auto submitResult = m_backend.GetResult(submitRequest, BuildResultContext(submitRequest));
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
@@ -484,8 +484,8 @@ std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToActiveI
 }
 
 OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
-    OrthogonalCropDataSource dataSource,
-    OrthogonalCropOperation operation) const
+    OrthogonalCropOperation operation,
+    OrthogonalCropDataSource dataSource) const
 {
     // 先获取当前数据源的默认 request；
     // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
@@ -586,8 +586,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     bool hasVolumeResult = false;
     if (GetInputImage() && hasMain3DPreviewTarget) {
         const auto volumeRequest = BuildBoxRequest(
-            OrthogonalCropDataSource::VolumeData,
-            OrthogonalCropOperation::Preview);
+            OrthogonalCropOperation::Preview,
+            OrthogonalCropDataSource::VolumeData);
         volumeResult = m_backend.GetResult(volumeRequest, BuildResultContext(volumeRequest));
         if (volumeResult.GetFailureReason() == OrthogonalCropFailureReason::None
             && volumeResult.GetSucceeded()) {
@@ -617,8 +617,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
                 m_backend.SetInputPolyData(polyData);
 
                 const auto polyRequest = BuildBoxRequest(
-                    OrthogonalCropDataSource::PolyData,
-                    OrthogonalCropOperation::Preview);
+                    OrthogonalCropOperation::Preview,
+                    OrthogonalCropDataSource::PolyData);
                 polyResult = m_backend.GetResult(polyRequest, BuildResultContext(polyRequest));
                 // PolyData preview 是 render-only 主显示路径；
                 // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。

@@ -728,42 +728,6 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const C
     return GetOutlinePolyDataInternal(cropData);
 }
 
-OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
-    vtkImageData* image,
-    const OrthogonalCropRequest& request,
-    std::size_t fallbackAvailableRamBytes)
-{
-    auto statistics = GetAlgorithmDiagnostics(
-        request.GetDataSource(),
-        request.GetOperation(),
-        request.GetGeometryType(),
-        request.GetRemovalMode());
-
-    CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
-    std::string message;
-    const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
-    const bool allowPartialOverlap =
-        !isSubmit || request.GetRemovalMode() == CropRemovalMode::KeepInside;
-    if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
-        statistics.SetFailureReason(failureReason);
-        statistics.SetValidationMessage(message);
-        return statistics;
-    }
-
-    if (request.GetOperation() == OrthogonalCropOperation::Submit) {
-        return BuildSubmitPlan(
-            image,
-            cropData,
-            request.GetGeometryType(),
-            request.GetRemovalMode(),
-            GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes)).diagnostics;
-    }
-
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
-    return statistics;
-}
-
 static OrthogonalCropResult GetBoxPreviewResult(
     const CropDataModel& cropData,
     const OrthogonalCropResult& resultContext)
@@ -782,6 +746,9 @@ static OrthogonalCropResult GetBoxPreviewResult(
     result.SetSucceeded(result.GetOutlinePolyData() != nullptr);
     result.SetFailureReason(statistics.GetFailureReason());
     if (!result.GetSucceeded()) {
+        statistics.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
+        statistics.SetValidationMessage("Box preview outline creation failed.");
+        result.SetStatistics(statistics);
         result.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
         result.SetMessage("Box preview outline creation failed.");
     }
@@ -815,6 +782,10 @@ static OrthogonalCropResult GetSubmitResult(
 
     auto submitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
     if (!submitImage) {
+        auto diagnostics = submitPlan.diagnostics;
+        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
+        diagnostics.SetValidationMessage("Failed to build image submit image.");
+        result.SetStatistics(diagnostics);
         result.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
         result.SetMessage("Failed to build image submit image.");
         return result;
@@ -827,6 +798,10 @@ static OrthogonalCropResult GetSubmitResult(
         submitPlan.snappedIndexBounds,
         removalMode);
     if (!submitMaskImage) {
+        auto diagnostics = submitPlan.diagnostics;
+        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitMaskCreationFailed);
+        diagnostics.SetValidationMessage("Failed to build image submit mask.");
+        result.SetStatistics(diagnostics);
         result.SetFailureReason(OrthogonalCropFailureReason::SubmitMaskCreationFailed);
         result.SetMessage("Failed to build image submit mask.");
         return result;
@@ -860,14 +835,11 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 {
     auto result = resultContext;
 
-    // 将 request 归一化为 cropData；
-    // request 只携带 boxToInputModelMatrix，cropData 再派生 input model AABB 供后端执行。
+    // request 只携带 boxToInputModelMatrix；image-backed 入口负责派生 cropData 供 preview / submit 复用。
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
     const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
-    // 预览允许裁切盒只与输入有交集；提交时只有 KeepInside 会截取交集范围。
-    // RemoveInside submit 不使用交集语义；范围完整包含时，submit 计划再返回“不支持”。
     const bool allowPartialOverlap =
         !isSubmit || request.GetRemovalMode() == CropRemovalMode::KeepInside;
     if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
@@ -916,28 +888,6 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     return fallbackResult;
 }
 
-OrthogonalCropStatistics OrthogonalCropAlgorithm::GetStatistics(
-    vtkPolyData* polyData,
-    const OrthogonalCropRequest& request)
-{
-    auto statistics = GetAlgorithmDiagnostics(
-        request.GetDataSource(),
-        request.GetOperation(),
-        request.GetGeometryType(),
-        request.GetRemovalMode());
-    CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
-    std::string message;
-    if (!BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
-        statistics.SetFailureReason(failureReason);
-        statistics.SetValidationMessage(message);
-        return statistics;
-    }
-
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
-    return statistics;
-}
-
 OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     vtkPolyData* polyData,
     const OrthogonalCropRequest& request,
@@ -945,6 +895,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 {
     auto result = resultContext;
 
+    // polydata preview 复用同一份 boxToInputModelMatrix；router 已保证 submit 不会进入这里。
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;

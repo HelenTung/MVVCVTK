@@ -6,9 +6,9 @@
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================
 // 算法层只消费 request 与输入数据；
-// 它先归一化 cropData，再按 request.dataSource / request.operation 产出图像/体渲染预览、
-// 图像提交或网格预览结果。
-// 统一结果模型承载几何、产物、诊断和交互态，避免 service / UI 分散理解算法细节。
+// 它先归一化 cropData，再按 request.geometryType / request.operation / request.dataSource
+// 产出体渲染预览、图像提交或网格预览结果。
+// 统一结果模型承载几何、产物和诊断，避免 service / UI 分散理解算法细节。
 
 #include "OrthogonalCropTypes.h"
 
@@ -42,26 +42,14 @@ public:
     // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
     static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
 
-    // 直接从 request 获取 image 诊断信息，是 UI 和 service 最常走的便捷入口。
-    static OrthogonalCropStatistics GetStatistics(
-        vtkImageData* image,
-        const OrthogonalCropRequest& request,
-        std::size_t fallbackAvailableRamBytes = 0);
-
-    // image 算法入口：先校验和归一化，再按 request.operation 填充上层已构造的 result。
-    // resultContext 已经带有数据源、后端和交互态，算法层只补 cropData、产物和诊断。
+    // image / volume 共用 image 输入入口；算法只补 cropData、产物和诊断。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
         const OrthogonalCropResult& resultContext,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // 直接从 request 获取 polydata 诊断信息。
-    static OrthogonalCropStatistics GetStatistics(
-        vtkPolyData* polyData,
-        const OrthogonalCropRequest& request);
-
-    // polydata 算法入口：按 request.operation 生成 3D clip preview 结果。
+    // polydata 输入入口只处理 router 放行的 Box + Preview + PolyData 请求。
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request,

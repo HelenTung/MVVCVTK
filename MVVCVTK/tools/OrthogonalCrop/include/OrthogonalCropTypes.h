@@ -124,7 +124,7 @@ enum class OrthogonalCropFailureReason {
     InvalidBounds,
     // bounds 虽合法，但超出了输入数据允许的范围。
     BoundsOutOfRange,
-    // 请求后端与当前算法入口不匹配，例如 image 算法收到 polydata clip 后端。
+    // 请求三元组没有可执行路径，或与当前算法输入不匹配。
     UnsupportedBackend,
     // image submit 不支持“移除内部、保留外部”的执行方式。
     SubmitRemoveInsideUnsupported,

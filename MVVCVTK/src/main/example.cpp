@@ -626,13 +626,13 @@ Step 11: 只让一个窗口进入 Start()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
-- 写入当前 dataSource / operation / geometryType；bridge 不把 UI 交互态塞进 request。
+- 写入当前 geometryType / operation / dataSource；bridge 不把 UI 交互态塞进 request。
 
 5. UpdatePreviewFromCurrentBounds()
 - bridge 先按 request 构造 resultContext，固定本次结果的数据源、操作类型、几何类型和保留语义。
 - 统一调用 router->GetResult(previewRequest, resultContext)。
-- router 读取 request.dataSource、request.operation 和 request.geometryType，只校验输入并分发到 OrthogonalCropAlgorithm。
-- preview 只允许 VolumeData + Preview 生成体渲染裁切语义，或 PolyData + Preview 生成 polydata 裁切语义；ImageData 不参与 preview mask 生成。
+- router 读取 request.geometryType、request.operation 和 request.dataSource，只校验输入并分发到 OrthogonalCropAlgorithm。
+- preview 只允许 Box + Preview + VolumeData 生成体渲染裁切语义，或 Box + Preview + PolyData 生成 polydata 裁切语义；ImageData 不参与 preview。
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口在 preview 阶段不生成 mask；submit 完成后才消费 submit mask/outline。
@@ -643,7 +643,7 @@ Step 11: 只让一个窗口进入 Start()
 - bridge->ApplySubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且 image 输入可用。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- Bridge 通过 BuildBoxRequest(ImageData, Submit) 构造 submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
+- Bridge 通过 BuildBoxRequest(Submit, ImageData) 构造 submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
 - Algorithm 在 submit 阶段同时生成 submit image 和 submit mask；mask 不进入 preview 路由。
 - Bridge 持有 reload buffer 生命周期，调用注入的 reload handler 把 image submit image 提交回主数据通道。
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
@@ -680,15 +680,13 @@ Step 11: 只让一个窗口进入 Start()
     resultContext.SetResolvedGeometryType(request.GetGeometryType());
     resultContext.SetResolvedRemovalMode(request.GetRemovalMode());
 
-    auto stats = cropBackend->GetStatistics(request);
-    if (stats.GetFailureReason() != OrthogonalCropFailureReason::None) {
-        std::cerr << stats.GetValidationMessage() << std::endl;
-        return;
-    }
-
     auto result = cropBackend->GetResult(request, resultContext);
-    if (!result.GetSucceeded()) {
-        std::cerr << result.GetMessage() << std::endl;
+    if (result.GetFailureReason() != OrthogonalCropFailureReason::None || !result.GetSucceeded()) {
+        const auto& stats = result.GetStatistics();
+        std::cerr << result.GetMessage()
+            << " / "
+            << stats.GetValidationMessage()
+            << std::endl;
         return;
     }
 
@@ -704,13 +702,17 @@ Step 11: 只让一个窗口进入 Start()
     hardResultContext.SetResolvedOperation(hardRequest.GetOperation());
     hardResultContext.SetResolvedGeometryType(hardRequest.GetGeometryType());
     hardResultContext.SetResolvedRemovalMode(hardRequest.GetRemovalMode());
-    auto hardStats = cropBackend->GetStatistics(hardRequest);
-    if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
-        std::cerr << hardStats.GetValidationMessage() << std::endl;
+
+    auto hardResult = cropBackend->GetResult(hardRequest, hardResultContext);
+    if (hardResult.GetFailureReason() != OrthogonalCropFailureReason::None || !hardResult.GetSucceeded()) {
+        const auto& hardStats = hardResult.GetStatistics();
+        std::cerr << hardResult.GetMessage()
+            << " / "
+            << hardStats.GetValidationMessage()
+            << std::endl;
         return;
     }
 
-    auto hardResult = cropBackend->GetResult(hardRequest, hardResultContext);
     auto submitImage = hardResult.GetSubmitImage();
     auto submitMask = hardResult.GetMaskImage();
 
@@ -745,5 +747,5 @@ Step 11: 只让一个窗口进入 Start()
 3. 所有 SetXxx 大多先改 SharedState，再由 Timer 心跳把状态同步到 Strategy/VTK 对象。
 4. 回调里能安全假设“主线程状态已经收敛过一轮”，但不要因此绕过 service/context 直接改底层 VTK 管线。
 5. OrthogonalCrop bridge 负责交互，不负责算法；router 负责路由，不负责键位；algorithm 负责结果，不负责窗口。
-6. preview / submit 的业务目标写在 request.dataSource 和 request.operation；router 只执行目标，不再自行猜操作。
+6. preview / submit 的业务目标写在 request.geometryType、request.operation 和 request.dataSource；router 只执行目标，不再自行猜操作。
 */
