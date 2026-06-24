@@ -97,27 +97,23 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
     return request;
 }
 
-OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(
-    const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext) const
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
     // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
-    switch (request.GetGeometryType()) {
+	auto GemotryType = request.GetGeometryType();
+    switch (GemotryType) {
     case OrthogonalCropGeometryType::Box:
-        return GetBoxResult(request, resultContext);
+        return GetBoxResult(request);
 
     default:
         return GetRouterFailureResult(
             request,
-            resultContext,
             OrthogonalCropFailureReason::UnsupportedBackend,
             "Router supports only Box crop geometry.");
     }
 }
 
-OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(
-    const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext) const
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(const OrthogonalCropRequest& request) const
 {
     // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
     switch (request.GetOperation()) {
@@ -127,25 +123,22 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(
             if (!GetInputImage()) {
                 return GetRouterFailureResult(
                     request,
-                    resultContext,
                     OrthogonalCropFailureReason::InputImageMissing,
                     "Image-backed crop route requires image input data.");
             }
             return OrthogonalCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                resultContext,
                 GetSystemAvailableRamBytes());
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
                 return GetRouterFailureResult(
                     request,
-                    resultContext,
                     OrthogonalCropFailureReason::InputPolyDataMissing,
                     "PolyData crop route requires polydata input data.");
             }
-            return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request, resultContext);
+            return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request);
 
         default:
             break;
@@ -158,14 +151,12 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(
             if (!GetInputImage()) {
                 return GetRouterFailureResult(
                     request,
-                    resultContext,
                     OrthogonalCropFailureReason::InputImageMissing,
                     "Image-backed crop route requires image input data.");
             }
             return OrthogonalCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                resultContext,
                 GetSystemAvailableRamBytes());
 
         default:
@@ -179,7 +170,6 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(
 
     return GetRouterFailureResult(
         request,
-        resultContext,
         OrthogonalCropFailureReason::UnsupportedBackend,
         "Router has no executable path for this crop route.");
 }
@@ -219,11 +209,15 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetPolyDataInputModelB
 
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetRouterFailureResult(
     const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext,
     OrthogonalCropFailureReason failureReason,
     const std::string& message) const
 {
-    auto result = resultContext;
+    OrthogonalCropResult result;
+    result.SetResolvedDataSource(request.GetDataSource());
+    result.SetResolvedOperation(request.GetOperation());
+    result.SetResolvedGeometryType(request.GetGeometryType());
+    result.SetResolvedRemovalMode(request.GetRemovalMode());
+
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(request.GetDataSource());
     statistics.SetResolvedOperation(request.GetOperation());

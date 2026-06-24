@@ -224,6 +224,16 @@ static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     return statistics;
 }
 
+static OrthogonalCropResult GetResultFromRequest(const OrthogonalCropRequest& request)
+{
+    OrthogonalCropResult result;
+    result.SetResolvedDataSource(request.GetDataSource());
+    result.SetResolvedOperation(request.GetOperation());
+    result.SetResolvedGeometryType(request.GetGeometryType());
+    result.SetResolvedRemovalMode(request.GetRemovalMode());
+    return result;
+}
+
 static vtkSmartPointer<vtkImageData> GetMaskImage(
     vtkImageData* image,
     const CropDataModel& cropData,
@@ -683,16 +693,16 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const C
 
 static OrthogonalCropResult GetBoxPreviewResult(
     const CropDataModel& cropData,
-    const OrthogonalCropResult& resultContext)
+    const OrthogonalCropRequest& request)
 {
-    auto result = resultContext;
+    auto result = GetResultFromRequest(request);
     result.SetCropDataModel(cropData);
 
     auto statistics = GetAlgorithmDiagnostics(
-        resultContext.GetResolvedDataSource(),
+        request.GetDataSource(),
         OrthogonalCropOperation::Preview,
-        resultContext.GetResolvedGeometryType(),
-        resultContext.GetResolvedRemovalMode());
+        request.GetGeometryType(),
+        request.GetRemovalMode());
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
     result.SetStatistics(statistics);
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
@@ -711,12 +721,12 @@ static OrthogonalCropResult GetBoxPreviewResult(
 static OrthogonalCropResult GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
-    const OrthogonalCropResult& resultContext,
+    const OrthogonalCropRequest& request,
     OrthogonalCropGeometryType geometryType,
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    auto result = resultContext;
+    auto result = GetResultFromRequest(request);
     result.SetCropDataModel(cropData);
 
     auto diagnostics = GetAlgorithmDiagnostics(
@@ -810,10 +820,9 @@ static OrthogonalCropResult GetSubmitResult(
 OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     vtkImageData* image,
     const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext,
     std::size_t fallbackAvailableRamBytes)
 {
-    auto result = resultContext;
+    auto result = GetResultFromRequest(request);
 
     // request 只携带 boxToInputModelMatrix；image-backed 入口负责派生 cropData 供 preview / submit 复用。
     CropDataModel cropData;
@@ -839,20 +848,20 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
         return GetBoxPreviewResult(
             cropData,
-            resultContext);
+            request);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Submit) {
         return GetSubmitResult(
             image,
             cropData,
-            resultContext,
+            request,
             request.GetGeometryType(),
             request.GetRemovalMode(),
             GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
     }
 
-    auto fallbackResult = resultContext;
+    auto fallbackResult = GetResultFromRequest(request);
     auto diagnostics = GetAlgorithmDiagnostics(
         request.GetDataSource(),
         request.GetOperation(),
@@ -870,10 +879,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 
 OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     vtkPolyData* polyData,
-    const OrthogonalCropRequest& request,
-    const OrthogonalCropResult& resultContext)
+    const OrthogonalCropRequest& request)
 {
-    auto result = resultContext;
+    auto result = GetResultFromRequest(request);
 
     // polydata preview 复用同一份 boxToInputModelMatrix；router 已保证 submit 不会进入这里。
     CropDataModel cropData;
@@ -896,10 +904,10 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
         return GetBoxPreviewResult(
             cropData,
-            resultContext);
+            request);
     }
 
-    auto fallbackResult = resultContext;
+    auto fallbackResult = GetResultFromRequest(request);
     auto diagnostics = GetAlgorithmDiagnostics(
         request.GetDataSource(),
         request.GetOperation(),

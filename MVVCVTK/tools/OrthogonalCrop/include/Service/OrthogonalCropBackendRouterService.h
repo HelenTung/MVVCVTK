@@ -44,17 +44,12 @@ public:
     // 它只提供初始几何和兜底目标，正式执行前仍由 bridge 写入本次业务选择。
     OrthogonalCropRequest GetDefaultRequest() const;
 
-    // 执行当前请求并填充调用方给定的结果上下文，按 request 已指定的数据源和动作分发。
-    // resultContext 已携带 resolved source / operation，router 只校验和转发，不再决定结果身份。
-    OrthogonalCropResult GetResult(
-        const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext) const;
+    // 执行当前请求；request 是本次裁切身份和几何的唯一输入来源。
+    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
 private:
     // Box 目前是唯一实现的裁切类型，这里集中处理动作 + 数据源组合。
-    OrthogonalCropResult GetBoxResult(
-        const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext) const;
+    OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
 
     // 读取 image model bounds。
     std::array<double, 6> GetImageModelBounds() const;
@@ -65,7 +60,6 @@ private:
     // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
     OrthogonalCropResult GetRouterFailureResult(
         const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext,
         OrthogonalCropFailureReason failureReason,
         const std::string& message) const;
 

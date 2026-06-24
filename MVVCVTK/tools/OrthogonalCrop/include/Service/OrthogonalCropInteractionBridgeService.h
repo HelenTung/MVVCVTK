@@ -11,10 +11,9 @@
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
 // 3. Released 或显式切换预览时，BuildBoxRequest 把 widget world 有向盒折回当前输入模型 request
-// 4. BuildResultContext 在 bridge 侧确定本次结果的几何类型、operation、数据源和保留语义
-// 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
-// 6. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
-// 7. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
+// 4. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
+// 5. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
+// 6. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
@@ -139,9 +138,6 @@ private:
     OrthogonalCropRequest BuildBoxRequest(
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) const;
-
-    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、operation、几何类型和保留语义。
-    OrthogonalCropResult BuildResultContext(const OrthogonalCropRequest& request) const;
 
     // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
     void UpdatePreviewFromCurrentBounds(bool logStats);

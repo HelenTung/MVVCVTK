@@ -109,7 +109,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     const auto submitRequest = BuildBoxRequest(
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    const auto submitResult = m_backend.GetResult(submitRequest, BuildResultContext(submitRequest));
+    const auto submitResult = m_backend.GetResult(submitRequest);
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
         std::cerr << "[Main] Orthogonal crop submit failed: "
@@ -553,18 +553,6 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
     return boxRequest;
 }
 
-OrthogonalCropResult OrthogonalCropInteractionBridgeService::BuildResultContext(const OrthogonalCropRequest& request) const
-{
-    // bridge 在调用 backend 前固定结果身份；
-    // router 和算法只填充 artifact、cropData 和 diagnostics，避免下层重新决定业务动作。
-    OrthogonalCropResult resultContext;
-    resultContext.SetResolvedDataSource(request.GetDataSource());
-    resultContext.SetResolvedOperation(request.GetOperation());
-    resultContext.SetResolvedGeometryType(request.GetGeometryType());
-    resultContext.SetResolvedRemovalMode(request.GetRemovalMode());
-    return resultContext;
-}
-
 void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool logStats)
 {
     if (!m_worldBoundsInitialized) {
@@ -588,7 +576,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         const auto volumeRequest = BuildBoxRequest(
             OrthogonalCropOperation::Preview,
             OrthogonalCropDataSource::VolumeData);
-        volumeResult = m_backend.GetResult(volumeRequest, BuildResultContext(volumeRequest));
+        volumeResult = m_backend.GetResult(volumeRequest);
         if (volumeResult.GetFailureReason() == OrthogonalCropFailureReason::None
             && volumeResult.GetSucceeded()) {
             hasVolumeResult = true;
@@ -619,7 +607,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
                 const auto polyRequest = BuildBoxRequest(
                     OrthogonalCropOperation::Preview,
                     OrthogonalCropDataSource::PolyData);
-                polyResult = m_backend.GetResult(polyRequest, BuildResultContext(polyRequest));
+                polyResult = m_backend.GetResult(polyRequest);
                 // PolyData preview 是 render-only 主显示路径；
                 // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
                 if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None

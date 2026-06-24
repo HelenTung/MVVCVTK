@@ -629,8 +629,7 @@ Step 11: 只让一个窗口进入 Start()
 - 写入当前 geometryType / operation / dataSource；bridge 不把 UI 交互态塞进 request。
 
 5. UpdatePreviewFromCurrentBounds()
-- bridge 先按 request 构造 resultContext，固定本次结果的数据源、操作类型、几何类型和保留语义。
-- 统一调用 router->GetResult(previewRequest, resultContext)。
+- bridge 统一调用 router->GetResult(previewRequest)，request 是本次结果身份和几何的唯一输入来源。
 - router 读取 request.geometryType、request.operation 和 request.dataSource，只校验输入并分发到 OrthogonalCropAlgorithm。
 - preview 只允许 Box + Preview + VolumeData 生成体渲染裁切语义，或 Box + Preview + PolyData 生成 polydata 裁切语义；ImageData 不参与 preview。
 
@@ -674,13 +673,7 @@ Step 11: 只让一个窗口进入 Start()
     request.SetOperation(OrthogonalCropOperation::Preview);
     request.SetGeometryType(OrthogonalCropGeometryType::Box);
 
-    auto resultContext = OrthogonalCropResult();
-    resultContext.SetResolvedDataSource(request.GetDataSource());
-    resultContext.SetResolvedOperation(request.GetOperation());
-    resultContext.SetResolvedGeometryType(request.GetGeometryType());
-    resultContext.SetResolvedRemovalMode(request.GetRemovalMode());
-
-    auto result = cropBackend->GetResult(request, resultContext);
+    auto result = cropBackend->GetResult(request);
     if (result.GetFailureReason() != OrthogonalCropFailureReason::None || !result.GetSucceeded()) {
         const auto& stats = result.GetStatistics();
         std::cerr << result.GetMessage()
@@ -697,13 +690,8 @@ Step 11: 只让一个窗口进入 Start()
     auto hardRequest = request;
     hardRequest.SetDataSource(OrthogonalCropDataSource::ImageData);
     hardRequest.SetOperation(OrthogonalCropOperation::Submit);
-    auto hardResultContext = resultContext;
-    hardResultContext.SetResolvedDataSource(hardRequest.GetDataSource());
-    hardResultContext.SetResolvedOperation(hardRequest.GetOperation());
-    hardResultContext.SetResolvedGeometryType(hardRequest.GetGeometryType());
-    hardResultContext.SetResolvedRemovalMode(hardRequest.GetRemovalMode());
 
-    auto hardResult = cropBackend->GetResult(hardRequest, hardResultContext);
+    auto hardResult = cropBackend->GetResult(hardRequest);
     if (hardResult.GetFailureReason() != OrthogonalCropFailureReason::None || !hardResult.GetSucceeded()) {
         const auto& hardStats = hardResult.GetStatistics();
         std::cerr << hardResult.GetMessage()
@@ -727,13 +715,7 @@ Step 11: 只让一个窗口进入 Start()
     polyRequest.SetOperation(OrthogonalCropOperation::Preview);
     polyRequest.SetGeometryType(OrthogonalCropGeometryType::Box);
 
-    auto polyResultContext = OrthogonalCropResult();
-    polyResultContext.SetResolvedDataSource(polyRequest.GetDataSource());
-    polyResultContext.SetResolvedOperation(polyRequest.GetOperation());
-    polyResultContext.SetResolvedGeometryType(polyRequest.GetGeometryType());
-    polyResultContext.SetResolvedRemovalMode(polyRequest.GetRemovalMode());
-
-    auto polyResult = cropBackend->GetResult(polyRequest, polyResultContext);
+    auto polyResult = cropBackend->GetResult(polyRequest);
     auto polyOutline = polyResult.GetOutlinePolyData();
 */
 

@@ -46,12 +46,10 @@ public:
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext,
         std::size_t fallbackAvailableRamBytes = 0);
 
     // polydata 输入入口只处理 router 放行的 Box + Preview + PolyData 请求。
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
-        const OrthogonalCropRequest& request,
-        const OrthogonalCropResult& resultContext);
+        const OrthogonalCropRequest& request);
 };
