@@ -100,8 +100,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
 OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const OrthogonalCropRequest& request) const
 {
     // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
-	auto GemotryType = request.GetGeometryType();
-    switch (GemotryType) {
+    switch (request.GetGeometryType()) {
     case OrthogonalCropGeometryType::Box:
         return GetBoxResult(request);
 
