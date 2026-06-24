@@ -628,7 +628,7 @@ void MedicalVizService::ProcessPendingUpdates()
     // 普通事件增量同步
     SyncStrategyState();
 
-    // 文件加载/重载回调延后到策略同步之后，保证上层 workflow 看到的是主线程收敛后的最终状态。
+    // 文件加载/重载回调延后到策略同步之后，保证上层 submit 回调看到的是主线程收敛后的最终状态。
     if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
         m_fileLoadCallbackState.ExecutePendingCallback();
     }

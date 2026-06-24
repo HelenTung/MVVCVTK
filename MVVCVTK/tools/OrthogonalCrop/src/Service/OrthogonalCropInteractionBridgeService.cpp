@@ -1,7 +1,8 @@
 // =====================================================================
 // Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropInteractionBridgeService.cpp
 // 分类: Service / Interaction Bridge Implementation
-// 说明: 维护交互态、构造 preview request、把结果分发给 overlay 与 3D 主模型预览。
+// 说明: 维护交互态，构造 preview/submit request，把预览结果分发给 overlay 与 3D 主模型，
+//       并把 submit 结果交给主数据 reload 通道。
 // =====================================================================
 
 #include "OrthogonalCropInteractionBridgeService.h"
@@ -87,10 +88,20 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRenderServices(std::vecto
     }
 }
 
-bool OrthogonalCropInteractionBridgeService::BuildSubmitReloadPayload(OrthogonalCropSubmitReloadPayload& payload)
+void OrthogonalCropInteractionBridgeService::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
 {
+    m_submitReloadHandler = std::move(reloadSubmitter);
+}
+
+void OrthogonalCropInteractionBridgeService::ApplySubmit()
+{
+    if (!m_submitReloadHandler) {
+        std::cerr << "[Main] Orthogonal crop submit failed: submit reload handler is not ready." << std::endl;
+        return;
+    }
+
     if (!CanApplySubmit()) {
-        return false;
+        return;
     }
 
     m_cameraStateController.Save(m_referenceRenderer);
@@ -102,39 +113,42 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitReloadPayload(Orthogonal
         std::cerr << "[Main] Orthogonal crop submit failed: "
             << GetFailureReasonText(submitResult.GetFailureReason())
             << " - " << submitResult.GetMessage() << std::endl;
-        return false;
+        return;
     }
 
+    SubmitReloadPayload payload;
     if (!BuildSubmitPayload(submitResult, payload)) {
         m_cameraStateController.Clear();
-        return false;
+        return;
     }
 
-    return true;
-}
+    if (!payload.buffer || payload.buffer->empty()) {
+        std::cerr << "[Main] Orthogonal crop submit failed: reload payload buffer is empty." << std::endl;
+        m_cameraStateController.Clear();
+        return;
+    }
 
-void OrthogonalCropInteractionBridgeService::SetSubmitReloadStarted()
-{
+    // bridge 是 main 持有的应用级对象，生命周期覆盖 reload 回调；
+    // ReloadFromBufferAsync 会把裸数据指针交给后台任务，回调完成前必须由 bridge 持有 buffer。
+    m_submitReloadBuffer = payload.buffer;
     m_submitReloadPending = true;
     m_widgetStateController.SetEnabled(false);
-}
 
-void OrthogonalCropInteractionBridgeService::SetSubmitReloadFailed()
-{
-    m_submitReloadPending = false;
-    m_cameraStateController.Clear();
-    if (m_cropInteractionEnabled) {
-        m_widgetStateController.SetEnabled(true);
-    }
-}
-
-void OrthogonalCropInteractionBridgeService::SetSubmitReloadSynced()
-{
-    m_cameraStateController.Restore(m_referenceRenderer);
-    if (m_submitReloadPending) {
+    if (!m_submitReloadHandler(
+            m_submitReloadBuffer->data(),
+            payload.dims,
+            payload.spacing,
+            payload.origin,
+            [this](bool success) {
+                HandleSubmitReloadComplete(success);
+            })) {
+        std::cerr << "[Main] Orthogonal crop submit failed: reload request was rejected." << std::endl;
+        m_submitReloadBuffer.reset();
         m_submitReloadPending = false;
-        m_worldBoundsInitialized = false;
-        ExitInteractiveCrop();
+        m_cameraStateController.Clear();
+        if (m_cropInteractionEnabled) {
+            m_widgetStateController.SetEnabled(true);
+        }
     }
 }
 
@@ -177,7 +191,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildSubmitRequest
 
 bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
     const OrthogonalCropResult& submitResult,
-    OrthogonalCropSubmitReloadPayload& payload) const
+    SubmitReloadPayload& payload) const
 {
     auto submitImage = submitResult.GetSubmitImage();
     if (!submitImage) {
@@ -229,6 +243,33 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
     }
 
     return true;
+}
+
+void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool success)
+{
+    if (!success) {
+        std::cerr << "[Main] Orthogonal crop submit reload failed." << std::endl;
+        m_submitReloadBuffer.reset();
+        m_submitReloadPending = false;
+        m_cameraStateController.Clear();
+        if (m_cropInteractionEnabled) {
+            m_widgetStateController.SetEnabled(true);
+        }
+        return;
+    }
+
+    if (m_dataMgr) {
+        SetInputImage(m_dataMgr->GetVtkImage());
+    }
+
+    std::cout << "[Main] Orthogonal crop submit applied to main image data." << std::endl;
+    m_submitReloadBuffer.reset();
+    m_cameraStateController.Restore(m_referenceRenderer);
+    if (m_submitReloadPending) {
+        m_submitReloadPending = false;
+        m_worldBoundsInitialized = false;
+        ExitInteractiveCrop();
+    }
 }
 
 bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()

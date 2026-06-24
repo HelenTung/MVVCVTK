@@ -4,7 +4,8 @@
 // Path: MVVCVTK/tools/OrthogonalCrop/include/Service/OrthogonalCropInteractionBridgeService.h
 // 分类: Service / Interaction Bridge
 // OrthogonalCropInteractionBridgeService - 正交裁切交互桥接服务
-// 说明: 连接 widget、数据后端与 preview 窗口，管理交互态与预览刷新顺序。
+// 说明: 连接 widget、数据后端、preview 窗口与 submit reload 通道，
+//       管理交互态、预览刷新顺序和提交收尾。
 // =====================================================================
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
@@ -13,6 +14,7 @@
 // 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、operation 和交互态
 // 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
 // 6. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
+// 7. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
 #include "OrthogonalCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
@@ -32,15 +34,16 @@
 #include <vector>
 
 class vtkRenderer;
-struct OrthogonalCropSubmitReloadPayload {
-    std::shared_ptr<std::vector<float>> buffer;
-    std::array<int, 3> dims = { 0, 0, 0 };
-    std::array<float, 3> spacing = { 1.0f, 1.0f, 1.0f };
-    std::array<float, 3> origin = { 0.0f, 0.0f, 0.0f };
-};
 
 class OrthogonalCropInteractionBridgeService {
 public:
+    // main 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
+    using ReloadSubmitter = std::function<bool(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
+        std::function<void(bool success)> onComplete)>;
 
     // 公共边界只暴露初始化、窗口接入和用户热键动作。
     // 内部状态切换、后端路由细节和 VTK 预览接管都留在私有实现里。
@@ -73,17 +76,11 @@ public:
     // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
-    // 构建当前 KeepInside image submit 的 reload payload；真正提交由 workflow 协调。
-    bool BuildSubmitReloadPayload(OrthogonalCropSubmitReloadPayload& payload);
+    // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
+    void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
-    // workflow 提交 reload 成功发起后，bridge 锁住 widget 并保留 preview 状态。
-    void SetSubmitReloadStarted();
-
-    // workflow 收到 reload 失败或请求被拒绝时，bridge 恢复可交互状态。
-    void SetSubmitReloadFailed();
-
-    // workflow 收到 reload 完成回调后，bridge 统一恢复相机并关闭裁切状态。
-    void SetSubmitReloadSynced();
+    // 执行当前 KeepInside image submit：构建 request、经 router/algorithm 取结果，再提交到主数据 reload 通道。
+    void ApplySubmit();
 
     // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
@@ -105,6 +102,14 @@ private:
 
         // 负责显示 mask / outline / clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
+    };
+
+    struct SubmitReloadPayload {
+        // buffer 必须跟随 reload 异步任务存活；其余字段是 ReloadFromBufferAsync 的输入快照。
+        std::shared_ptr<std::vector<float>> buffer;
+        std::array<int, 3> dims = { 0, 0, 0 };
+        std::array<float, 3> spacing = { 1.0f, 1.0f, 1.0f };
+        std::array<float, 3> origin = { 0.0f, 0.0f, 0.0f };
     };
 
     // 确保当前至少有一个可用输入；必要时会尝试从 data manager 抓 image。
@@ -145,8 +150,11 @@ private:
     // 基于当前 widget 有向盒构建 image submit request。
     OrthogonalCropRequest BuildSubmitRequest() const;
 
-    // 把 image submit image 适配成 workflow 可提交的 reload payload。
-    bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, OrthogonalCropSubmitReloadPayload& payload) const;
+    // 把 image submit image 适配成 reload 通道需要的数据布局。
+    bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, SubmitReloadPayload& payload) const;
+
+    // reload 回调在主线程状态收敛后触发；这里做输入恢复和 submit 收尾。
+    void HandleSubmitReloadComplete(bool success);
 
     // 以下文本 helper 统一服务于日志输出。
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
@@ -206,6 +214,12 @@ private:
 
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
     bool m_submitReloadPending = false;
+
+    // 主数据 reload 能力由 main 注入；bridge 负责编排 submit 生命周期。
+    ReloadSubmitter m_submitReloadHandler;
+
+    // submit reload 后台线程只接收裸指针，bridge 必须持有 buffer 到 reload 回调结束。
+    std::shared_ptr<std::vector<float>> m_submitReloadBuffer;
 
     // 裁切提交前保存相机，下一次主数据重建并完成策略同步后恢复；每次保存都会覆盖上一份。
     OrthogonalCropCameraStateController m_cameraStateController;

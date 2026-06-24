@@ -12,7 +12,7 @@ example.cpp — 当前架构对齐的接入说明示例
 2. MedicalVizService 是“窗口级业务调度层”，StdRenderContext 是“窗口级渲染/事件入口”。
 3. 数据加载、导出、重载都通过 service 发起，但真正的数据只保留一份，窗口之间共享。
 4. OrthogonalCropInteractionBridgeService 不直接做算法，它只负责 widget、坐标换算、preview 时机和结果分发。
-5. OrthogonalCropInteractionBridgeService 先在 request 中写入 dataSource/backend，OrthogonalCropBackendRouterService 只按 request 执行。
+5. OrthogonalCropInteractionBridgeService 先在 request 中写入 dataSource/operation，OrthogonalCropBackendRouterService 只按 request 执行。
 =====================================================================
 */
 
@@ -49,7 +49,7 @@ example.cpp — 当前架构对齐的接入说明示例
 
     OrthogonalCropBackendRouterService
     - 数据后端路由。
-    - 负责：按 OrthogonalCropRequest 已指定的 dataSource/backend 校验输入并分发到算法层。
+    - 负责：按 OrthogonalCropRequest 已指定的 dataSource/operation 校验输入并分发到算法层。
 
     OrthogonalCropAlgorithm
     - 纯算法层。
@@ -108,17 +108,14 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
     orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
-    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
-        orthogonalCropBridge,
-        reloadSubmitter,
-        sharedDataMgr);
+    orthogonalCropBridge->SetSubmitReloadHandler(reloadSubmitter);
 
 为什么这么设：
 - SetDataManager：只作为缺 image 输入时的兜底来源，不是主输入真源。
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的 world / active input model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
-- OrthogonalCropSubmitWorkflow：统一协调 submit payload、主数据 reload、reload 完成后的 bridge 收尾；Workflow 只接收 reload 能力函数和数据管理接口，不直接依赖 MedicalVizService，也不修改 iso threshold 等视觉参数。
+- SetSubmitReloadHandler：只把主数据 reload 能力注入 bridge；submit 的 request 构建、payload 生成、buffer 生命周期和 reload 完成收尾都由 bridge 按同一条裁切链路处理，不直接修改 iso threshold 等视觉参数。
 
 Step 5: 再做窗口级辅助元素策略
 
@@ -287,11 +284,9 @@ Step 11: 只让一个窗口进入 Start()
 
     orthogonalCropBridge->SetDataManager(sharedDataMgr);
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
+    orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
-    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
-        orthogonalCropBridge,
-        reloadSubmitter,
-        sharedDataMgr);
+    orthogonalCropBridge->SetSubmitReloadHandler(reloadSubmitter);
 
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
     serviceE->SetElementVisible(VisFlags::Planes3D, false);
@@ -597,10 +592,10 @@ Step 11: 只让一个窗口进入 Start()
 - Start() 决定谁持有应用主消息循环。
 - 这两件事不是同一个概念，所以当前 main 才会出现“A 持有裁切 widget，B 持有主事件循环”的组合。
 
-4) 为什么 preview request 必须写入 dataSource 和 backend
+4) 为什么 preview request 必须写入 dataSource 和 operation
 - 因为 bridge 才知道这次交互面对的是 image 还是 polydata，也知道 UI 动作是 preview 还是 submit。
-- router 只应该执行 request 已经说明的后端目标，不能再根据 active source 和枚举组合自行猜测。
-- 所以 preview 固定写成 ImageData + MaskPreview 或 PolyData + ClipPreview；submit 固定写成 ImageData + SubmitExtractVOI。
+- router 只应该执行 request 已经说明的数据源和操作目标，不能再根据 active source 和枚举组合自行猜测。
+- 所以 preview 固定写成 operation = Preview；submit 固定写成 ImageData + operation = Submit。
 
 5) 为什么拖拽中不实时重算 preview，只在 Released 或显式 toggle 时重算
 - 因为重型 preview 本身可能包含 mask 生成、polydata clip、overlay 同步。
@@ -632,14 +627,14 @@ Step 11: 只让一个窗口进入 Start()
 - 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
 - 写入当前 dataSource：ImageData 或 PolyData。
-- 写入当前 backend：ImageData 对应 MaskPreview，PolyData 对应 ClipPreview。
+- 写入当前 operation：Preview。
 - 写入 cropStateModel。
 
 5. UpdatePreviewFromCurrentBounds()
-- bridge 先按 request 构造 resultContext，固定本次结果的数据源、后端和交互态。
+- bridge 先按 request 构造 resultContext，固定本次结果的数据源、操作类型和交互态。
 - 统一调用 router->GetResult(previewRequest, resultContext)。
-- router 读取 request.dataSource 和 request.backend，只校验输入并分发到 OrthogonalCropAlgorithm。
-- algorithm 按 ImageData + MaskPreview 生成 image mask，按 PolyData + ClipPreview 生成 polydata clip。
+- router 读取 request.dataSource 和 request.operation，只校验输入并分发到 OrthogonalCropAlgorithm。
+- algorithm 按 ImageData + Preview 生成 image mask，按 PolyData + Preview 生成 polydata clip。
 
 6. DispatchPreviewResult(previewResult)
 - 2D 窗口消费 overlay mask/outline。
@@ -647,13 +642,13 @@ Step 11: 只让一个窗口进入 Start()
 - actor/polydata 的 KeepInside 走 mapper clipping，RemoveInside 走 actor shader discard；clipPolyData 只作为算法输出和 overlay 输入。
 
 7. 按 Ctrl+3
-- orthogonalCropSubmitWorkflow->ApplySubmit()。
+- bridge->ApplySubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且当前 active source 是 ImageData。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- Bridge 的 BuildSubmitReloadPayload() 把当前 widget 有向盒改成 ImageData + SubmitExtractVOI request，并生成 reload buffer / origin 翻转后的 payload。
-- Workflow 持有 reload buffer 生命周期，调用 serviceA->ReloadFromBufferAsync(...) 把 image submit image 提交回主数据通道。
+- Bridge 通过 BuildSubmitRequest() 把当前 widget 有向盒改成 ImageData + Submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
+- Bridge 持有 reload buffer 生命周期，调用注入的 reload handler 把 image submit image 提交回主数据通道。
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
-- Workflow 收到 reload 完成回调后，通知 bridge 恢复相机、清理 submit 状态并关闭裁切。
+- Bridge 收到 reload 完成回调后，恢复输入 image、恢复相机、清理 submit 状态并关闭裁切。
 
 注意：image submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
@@ -677,7 +672,7 @@ Step 11: 只让一个窗口进入 Start()
     });
     request.SetRemovalMode(CropRemovalMode::KeepInside);
     request.SetDataSource(OrthogonalCropDataSource::ImageData);
-    request.SetBackend(OrthogonalCropBackend::MaskPreview);
+    request.SetOperation(OrthogonalCropOperation::Preview);
 
     CropStateModel cropState;
     cropState.SetCropEnabled(true);
@@ -688,7 +683,7 @@ Step 11: 只让一个窗口进入 Start()
 
     auto resultContext = OrthogonalCropResult();
     resultContext.SetResolvedDataSource(request.GetDataSource());
-    resultContext.SetResolvedBackend(request.GetBackend());
+    resultContext.SetResolvedOperation(request.GetOperation());
     resultContext.SetCropStateModel(request.GetCropStateModel());
 
     auto stats = cropBackend->GetStatistics(request);
@@ -710,10 +705,10 @@ Step 11: 只让一个窗口进入 Start()
 
     auto hardRequest = request;
     hardRequest.SetDataSource(OrthogonalCropDataSource::ImageData);
-    hardRequest.SetBackend(OrthogonalCropBackend::SubmitExtractVOI);
+    hardRequest.SetOperation(OrthogonalCropOperation::Submit);
     auto hardResultContext = resultContext;
     hardResultContext.SetResolvedDataSource(hardRequest.GetDataSource());
-    hardResultContext.SetResolvedBackend(hardRequest.GetBackend());
+    hardResultContext.SetResolvedOperation(hardRequest.GetOperation());
     auto hardStats = cropBackend->GetStatistics(hardRequest);
     if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
@@ -731,11 +726,11 @@ Step 11: 只让一个窗口进入 Start()
     auto polyRequest = cropBackend->GetDefaultRequest();
     polyRequest.SetBoxToInputModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
     polyRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
-    polyRequest.SetBackend(OrthogonalCropBackend::ClipPreview);
+    polyRequest.SetOperation(OrthogonalCropOperation::Preview);
 
     auto polyResultContext = OrthogonalCropResult();
     polyResultContext.SetResolvedDataSource(polyRequest.GetDataSource());
-    polyResultContext.SetResolvedBackend(polyRequest.GetBackend());
+    polyResultContext.SetResolvedOperation(polyRequest.GetOperation());
     polyResultContext.SetCropStateModel(polyRequest.GetCropStateModel());
 
     auto polyResult = cropBackend->GetResult(polyRequest, polyResultContext);
@@ -752,5 +747,5 @@ Step 11: 只让一个窗口进入 Start()
 3. 所有 SetXxx 大多先改 SharedState，再由 Timer 心跳把状态同步到 Strategy/VTK 对象。
 4. 回调里能安全假设“主线程状态已经收敛过一轮”，但不要因此绕过 service/context 直接改底层 VTK 管线。
 5. OrthogonalCrop bridge 负责交互，不负责算法；router 负责路由，不负责键位；algorithm 负责结果，不负责窗口。
-6. preview / submit 的业务目标写在 request.dataSource 和 request.backend；router 只执行目标，不再自行猜后端。
+6. preview / submit 的业务目标写在 request.dataSource 和 request.operation；router 只执行目标，不再自行猜操作。
 */

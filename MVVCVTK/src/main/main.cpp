@@ -31,7 +31,6 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
 #include "OrthogonalCropInteractionBridgeService.h"
-#include "OrthogonalCropSubmitWorkflow.h"
 
 // 融合算法孔隙分析
 #include "GapAnalysisService.h"
@@ -52,7 +51,6 @@ public:
     static OrthogonalCropHotkeyObserver* New() { return new OrthogonalCropHotkeyObserver; }
 
     std::shared_ptr<OrthogonalCropInteractionBridgeService> orthogonalCropBridge;
-    std::shared_ptr<OrthogonalCropSubmitWorkflow> orthogonalCropSubmitWorkflow;
 
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
         (void)callData;
@@ -111,9 +109,7 @@ public:
 
             if (isSubmitKey && !m_submitKeyDown) {
                 m_submitKeyDown = true;
-                if (orthogonalCropSubmitWorkflow) {
-                    orthogonalCropSubmitWorkflow->ApplySubmit();
-                }
+                orthogonalCropBridge->ApplySubmit();
                 return;
             }
         }
@@ -404,8 +400,7 @@ int main()
     orthogonalCropBridge->SetReferenceRenderService(serviceA);
     orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
-    auto orthogonalCropSubmitWorkflow = std::make_shared<OrthogonalCropSubmitWorkflow>(
-        orthogonalCropBridge,
+    orthogonalCropBridge->SetSubmitReloadHandler(
         [serviceA](
             const float* data,
             const std::array<int, 3>& dims,
@@ -418,8 +413,7 @@ int main()
                 spacing,
                 origin,
                 std::move(onComplete));
-        },
-        sharedDataMgr);
+        });
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）
     serviceA->SetElementVisible(VisFlags::Planes3D, false);
@@ -537,7 +531,6 @@ int main()
 
     auto orthogonalCropHotkeyObserver = vtkSmartPointer<OrthogonalCropHotkeyObserver>::New();
     orthogonalCropHotkeyObserver->orthogonalCropBridge = orthogonalCropBridge;
-    orthogonalCropHotkeyObserver->orthogonalCropSubmitWorkflow = orthogonalCropSubmitWorkflow;
 
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
     contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
