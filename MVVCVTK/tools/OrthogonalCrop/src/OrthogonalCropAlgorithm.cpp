@@ -227,7 +227,6 @@ static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     statistics.SetResolvedOperation(operation);
     statistics.SetResolvedGeometryType(geometryType);
     statistics.SetResolvedRemovalMode(removalMode);
-    statistics.SetFailureLayer("Algorithm");
     return statistics;
 }
 

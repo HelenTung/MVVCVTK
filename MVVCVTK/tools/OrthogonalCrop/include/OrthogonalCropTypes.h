@@ -262,55 +262,28 @@ private:
 
 class OrthogonalCropStatistics {
 public:
-    // 返回诊断信息最终落到的数据源。
     OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
-
-    // 写入诊断信息最终落到的数据源。
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
-    // 返回诊断信息采用的业务动作。
     OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
-
-    // 写入诊断信息采用的业务动作。
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
-    // 返回诊断信息采用的裁切几何类型。
     OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
-
-    // 写入诊断信息采用的裁切几何类型。
     void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
 
-    // 返回诊断信息采用的保留语义。
     CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
-
-    // 写入诊断信息采用的保留语义。
     void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
 
-    // 返回失败发生的层级。
-    const std::string& GetFailureLayer() const { return m_failureLayer; }
-
-    // 写入失败发生的层级。
-    void SetFailureLayer(const std::string& failureLayer) { m_failureLayer = failureLayer; }
-
-    // 返回诊断阶段发现的失败原因。
     OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
-
-    // 写入诊断阶段发现的失败原因。
     void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
 
-    // 返回统一的校验/告警文本。
     const std::string& GetValidationMessage() const { return m_validationMessage; }
-
-    // GetValidationMessage 的别名，便于调用方统一按 message 读取。
     const std::string& GetMessage() const
     {
         return m_validationMessage;
     }
 
-    // 写入统一的校验/告警文本。
     void SetValidationMessage(const std::string& validationMessage) { m_validationMessage = validationMessage; }
-
-    // SetValidationMessage 的别名，便于与 Result 的 message 语义保持一致。
     void SetMessage(const std::string& message)
     {
         m_validationMessage = message;
@@ -325,8 +298,6 @@ private:
     OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
     // 这次诊断真正采用的保留语义。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
-    // 失败发生的层级，如 Router 或 Algorithm。
-    std::string m_failureLayer;
     // 诊断阶段发现的失败原因；None 表示校验通过。
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
@@ -335,91 +306,43 @@ private:
 
 class OrthogonalCropResult {
 public:
-    // 返回结果最终落到的数据源。
     OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
-
-    // 写入结果最终落到的数据源。
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
 
-    // 返回结果采用的业务动作。
     OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
-
-    // 写入结果采用的业务动作。
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
-    // 返回结果采用的裁切几何类型。
     OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
-
-    // 写入结果采用的裁切几何类型。
     void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
 
-    // 返回结果采用的保留语义。
     CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
-
-    // 写入结果采用的保留语义。
     void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
 
-    // 返回失败发生的层级；优先使用结果自身覆盖值，否则回落到配套 diagnostics。
-    const std::string& GetFailureLayer() const
-    {
-        return m_failureLayer.empty() ? m_statistics.GetFailureLayer() : m_failureLayer;
-    }
-
-    // 写入失败发生的层级。
-    void SetFailureLayer(const std::string& failureLayer) { m_failureLayer = failureLayer; }
-
-    // 返回本次执行是否构造出了有效结果。
     bool GetSucceeded() const { return m_succeeded; }
-
-    // 写入本次执行是否成功。
     void SetSucceeded(bool succeeded) { m_succeeded = succeeded; }
 
-    // 返回本次执行的失败原因。
     OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
-
-    // 写入本次执行的失败原因。
     void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
 
-    // 返回本次执行的说明文本。
     const std::string& GetMessage() const { return m_message; }
-
-    // 写入本次执行的说明文本。
     void SetMessage(const std::string& message) { m_message = message; }
 
-    // 返回 image submit 链路产出的主数据 image。
     vtkSmartPointer<vtkImageData> GetSubmitImage() const { return m_submitImage; }
-
-    // 写入 image submit 链路产出的主数据 image。
     void SetSubmitImage(vtkSmartPointer<vtkImageData> submitImage) { m_submitImage = std::move(submitImage); }
 
-    // 返回 polydata preview 可选产出的裁切网格；主 3D render-only 路径通常不需要它。
     vtkSmartPointer<vtkPolyData> GetClipPolyData() const { return m_clipPolyData; }
-
-    // 写入 polydata preview 可选产出的裁切网格。
     void SetClipPolyData(vtkSmartPointer<vtkPolyData> clipPolyData) { m_clipPolyData = std::move(clipPolyData); }
 
-    // 返回 image submit 链路生成的遮罩图像。
     vtkSmartPointer<vtkImageData> GetMaskImage() const { return m_maskImage; }
-
-    // 写入 image submit 链路生成的遮罩图像。
     void SetMaskImage(vtkSmartPointer<vtkImageData> maskImage) { m_maskImage = std::move(maskImage); }
 
-    // 返回 box 3D outline preview 链路生成的裁切盒轮廓几何。
     vtkSmartPointer<vtkPolyData> GetOutlinePolyData() const { return m_outlinePolyData; }
-
-    // 写入 box 3D outline preview 链路生成的裁切盒轮廓几何。
     void SetOutlinePolyData(vtkSmartPointer<vtkPolyData> outlinePolyData) { m_outlinePolyData = std::move(outlinePolyData); }
 
-    // 返回这次执行对应的客观几何快照。
     const CropDataModel& GetCropDataModel() const { return m_cropDataModel; }
-
-    // 写入这次执行对应的客观几何快照。
     void SetCropDataModel(const CropDataModel& cropDataModel) { m_cropDataModel = cropDataModel; }
 
-    // 返回与本次结果配套的诊断信息。
     const OrthogonalCropStatistics& GetStatistics() const { return m_statistics; }
-
-    // 写入与本次结果配套的诊断信息。
     void SetStatistics(const OrthogonalCropStatistics& statistics) { m_statistics = statistics; }
 
 private:
@@ -431,8 +354,6 @@ private:
     OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
     // 结果实际采用的保留语义。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
-    // 失败发生的层级；为空时由 statistics 提供。
-    std::string m_failureLayer;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_succeeded = false;
     // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。

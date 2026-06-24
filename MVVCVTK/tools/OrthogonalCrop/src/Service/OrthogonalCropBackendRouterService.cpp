@@ -295,7 +295,6 @@ OrthogonalCropStatistics OrthogonalCropBackendRouterService::GetRouterFailureSta
     statistics.SetResolvedOperation(request.GetOperation());
     statistics.SetResolvedGeometryType(request.GetGeometryType());
     statistics.SetResolvedRemovalMode(request.GetRemovalMode());
-    statistics.SetFailureLayer("Router");
     statistics.SetFailureReason(failureReason);
     statistics.SetValidationMessage(message);
     return statistics;

@@ -112,7 +112,12 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     const auto submitResult = m_backend.GetResult(submitRequest, BuildResultContext(submitRequest));
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
-        ReportCropFailure("bridge", submitResult);
+        std::cerr << "[Main] Orthogonal crop submit failed: "
+            << GetFailureReasonText(submitResult.GetFailureReason());
+        if (!submitResult.GetMessage().empty()) {
+            std::cerr << " - " << submitResult.GetMessage();
+        }
+        std::cerr << std::endl;
         return;
     }
 
@@ -124,13 +129,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     }
 
     if (!payload.buffer || payload.buffer->empty()) {
-        ReportCropFailure(
-            "bridge",
-            OrthogonalCropDataSource::ImageData,
-            OrthogonalCropOperation::Submit,
-            OrthogonalCropGeometryType::Box,
-            OrthogonalCropFailureReason::SubmitImageCreationFailed,
-            "Reload payload buffer is empty.");
+        std::cerr << "[Main] Orthogonal crop submit failed: reload payload buffer is empty." << std::endl;
         m_cameraStateController.Clear();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         return;
@@ -198,13 +197,7 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
 {
     auto submitImage = submitResult.GetSubmitImage();
     if (!submitImage) {
-        ReportCropFailure(
-            "bridge",
-            OrthogonalCropDataSource::ImageData,
-            OrthogonalCropOperation::Submit,
-            OrthogonalCropGeometryType::Box,
-            OrthogonalCropFailureReason::SubmitImageCreationFailed,
-            "Output image is null.");
+        std::cerr << "[Main] Orthogonal crop image submit failed: output image is null." << std::endl;
         return false;
     }
 
@@ -212,13 +205,7 @@ bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
     submitImage->GetDimensions(dims);
     const auto sourceData = static_cast<const float*>(submitImage->GetScalarPointer());
     if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        ReportCropFailure(
-            "bridge",
-            OrthogonalCropDataSource::ImageData,
-            OrthogonalCropOperation::Submit,
-            OrthogonalCropGeometryType::Box,
-            OrthogonalCropFailureReason::SubmitImageCreationFailed,
-            "Output image buffer is invalid.");
+        std::cerr << "[Main] Orthogonal crop image submit failed: output image buffer is invalid." << std::endl;
         return false;
     }
 
@@ -608,8 +595,6 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         }
     }
 
-    bool main3DPreviewApplied = false;
-    bool polyDataPreviewApplied = false;
     bool anyPreviewApplied = false;
     for (const auto& target : m_previewRenderTargets) {
         if (!target.service || !target.overlayStrategy) {
@@ -640,7 +625,6 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
                 if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
                     && polyResult.GetSucceeded()) {
                     hasPolyDataResult = true;
-                    polyDataPreviewApplied = true;
                 }
             }
         }
@@ -649,11 +633,11 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             continue;
         }
 
-        main3DPreviewApplied = DispatchPreviewResult(
+        DispatchPreviewResult(
             target,
             m_currentRemovalMode,
             volumePreviewResult,
-            hasPolyDataResult ? &polyResult : nullptr) || main3DPreviewApplied;
+            hasPolyDataResult ? &polyResult : nullptr);
         anyPreviewApplied = true;
     }
 
@@ -662,23 +646,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
     }
 
     if (logStats) {
-        // 日志只报告本次显式跑过的数据源；结果与统计只是执行回执，不能反过来作为流程判断来源。
-        std::cout
-            << "[Main] Orthogonal crop preview updated. volume = "
-            << (hasVolumeResult ? "Used" : "Skipped")
-            << ", polydata = "
-            << (polyDataPreviewApplied ? "Used" : "Skipped")
-            << ", operation = "
-            << GetOperationText(OrthogonalCropOperation::Preview)
-            << ", removal = "
-            << GetRemovalModeText(m_currentRemovalMode)
-            << ", main3D = "
-            << (main3DPreviewApplied ? "MainPreview" : "OverlayOnly")
-            << ", bounds = ["
-            << m_currentWorldBounds[0] << ", " << m_currentWorldBounds[1] << "; "
-            << m_currentWorldBounds[2] << ", " << m_currentWorldBounds[3] << "; "
-            << m_currentWorldBounds[4] << ", " << m_currentWorldBounds[5] << "]"
-            << std::endl;
+        std::cout << "[Main] Orthogonal crop preview updated." << std::endl;
     }
 }
 
@@ -770,68 +738,6 @@ const char* OrthogonalCropInteractionBridgeService::GetDataSourceText(Orthogonal
     default:
         return "Unknown";
     }
-}
-
-const char* OrthogonalCropInteractionBridgeService::GetOperationText(OrthogonalCropOperation operation)
-{
-    switch (operation) {
-    case OrthogonalCropOperation::Preview:
-        return "Preview";
-    case OrthogonalCropOperation::Submit:
-        return "Submit";
-    case OrthogonalCropOperation::None:
-    default:
-        return "None";
-    }
-}
-
-const char* OrthogonalCropInteractionBridgeService::GetGeometryTypeText(OrthogonalCropGeometryType geometryType)
-{
-    switch (geometryType) {
-    case OrthogonalCropGeometryType::Box:
-        return "Box";
-    case OrthogonalCropGeometryType::Plane:
-        return "Plane";
-    case OrthogonalCropGeometryType::Cylinder:
-        return "Cylinder";
-    }
-
-    return "Unknown";
-}
-
-void OrthogonalCropInteractionBridgeService::ReportCropFailure(
-    const char* layer,
-    OrthogonalCropDataSource dataSource,
-    OrthogonalCropOperation operation,
-    OrthogonalCropGeometryType geometryType,
-    OrthogonalCropFailureReason failureReason,
-    const std::string& message)
-{
-    std::cerr
-        << "[Main] Orthogonal crop failed"
-        << " layer=" << (layer ? layer : "Unknown")
-        << " source=" << GetDataSourceText(dataSource)
-        << " action=" << GetOperationText(operation)
-        << " geometry=" << GetGeometryTypeText(geometryType)
-        << " reason=" << GetFailureReasonText(failureReason);
-    if (!message.empty()) {
-        std::cerr << " message=" << message;
-    }
-    std::cerr << std::endl;
-}
-
-void OrthogonalCropInteractionBridgeService::ReportCropFailure(
-    const char* layer,
-    const OrthogonalCropResult& result)
-{
-    const auto& failureLayer = result.GetFailureLayer();
-    ReportCropFailure(
-        failureLayer.empty() ? layer : failureLayer.c_str(),
-        result.GetResolvedDataSource(),
-        result.GetResolvedOperation(),
-        result.GetResolvedGeometryType(),
-        result.GetFailureReason(),
-        result.GetMessage());
 }
 
 std::shared_ptr<AbstractInteractiveService> OrthogonalCropInteractionBridgeService::GetFirstPreviewRenderService() const

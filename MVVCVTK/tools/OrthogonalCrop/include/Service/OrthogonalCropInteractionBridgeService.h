@@ -30,7 +30,6 @@
 #include <array>
 #include <functional>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -156,20 +155,10 @@ private:
     // reload 回调在主线程状态收敛后触发；这里做输入恢复和 submit 收尾。
     void HandleSubmitReloadComplete(bool success);
 
-    // 以下文本 helper 统一服务于日志输出。
+    // 少量日志文本 helper；
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
-    static const char* GetOperationText(OrthogonalCropOperation operation);
-    static const char* GetGeometryTypeText(OrthogonalCropGeometryType geometryType);
-    static void ReportCropFailure(
-        const char* layer,
-        OrthogonalCropDataSource dataSource,
-        OrthogonalCropOperation operation,
-        OrthogonalCropGeometryType geometryType,
-        OrthogonalCropFailureReason failureReason,
-        const std::string& message);
-    static void ReportCropFailure(const char* layer, const OrthogonalCropResult& result);
 
     // preview 列表为空时，取第一个有效目标作为 reference service 的后备来源。
     std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const;
