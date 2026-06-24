@@ -7,8 +7,8 @@
 // =====================================================================
 // 显示主链路：
 // 1. bridge 把统一的 OrthogonalCropResult 推给 overlay strategy
-// 2. strategy 从结果里拆出 box 3D outline / image 2D mask / polydata 3D clip
-// 3. 再根据当前窗口是 2D 还是 3D，决定显示实体区域、mask slice 还是 polydata
+// 2. strategy 从结果里拆出 box 3D outline / image 2D mask / 可选 polydata 3D clip
+// 3. 再根据当前窗口是 2D 还是 3D，决定显示实体区域、mask slice 或可选 polydata
 // 4. 所有 prop 都共享同一套 removal mode 颜色语义与主模型变换
 
 #include "BaseVisualStrategy.h"
@@ -35,7 +35,7 @@ public:
     // 设置预览颜色语义：保留盒内或移除盒内。
     void SetRemovalMode(CropRemovalMode removalMode);
 
-    // 注入一次完整裁切结果，自动更新 outline / mask / polydata 三类显示内容。
+    // 注入一次完整裁切结果，自动更新 outline / mask / 可选 polydata 三类显示内容。
     void SetCropResult(const OrthogonalCropResult& result);
 
     // 清空当前 preview 可视内容。
@@ -67,10 +67,10 @@ private:
     // 裁切盒 outline mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_outlineMapper;
 
-    // polydata 裁切结果 actor。
+    // polydata 可选裁切结果 actor。
     vtkSmartPointer<vtkActor> m_polyDataActor;
 
-    // polydata 裁切结果 mapper。
+    // polydata 可选裁切结果 mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_polyDataMapper;
 
     // 2D mask 预览 image slice。

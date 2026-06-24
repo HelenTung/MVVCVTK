@@ -6,17 +6,14 @@
 
 #include "OrthogonalCropAlgorithm.h"
 
-#include <vtkBox.h>
 #include <vtkBoundingBox.h>
 #include <vtkCubeSource.h>
 #include <vtkDataArray.h>
 #include <vtkExtractVOI.h>
-#include <vtkGeometryFilter.h>
 #include <vtkImageChangeInformation.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOutlineSource.h>
 #include <vtkPointData.h>
-#include <vtkTableBasedClipDataSet.h>
 #include <vtkTransform.h>
 #include <vtkTransformPolyDataFilter.h>
 
@@ -815,7 +812,7 @@ static OrthogonalCropResult GetPreviewResult(
     CropRemovalMode removalMode)
 {
     // 复用调用方已经确定好的结果身份；
-    // 后续 mask、diagnostics、outline 都围绕同一份 cropData 回填。
+    // 后续 diagnostics、outline 和可选 mask 都围绕同一份 cropData 回填。
     auto result = resultContext;
     result.SetCropDataModel(cropData);
 
@@ -833,20 +830,23 @@ static OrthogonalCropResult GetPreviewResult(
         result.SetMessage(validationMessage);
         return result;
     }
-    // 将 input model 角点吸附为 index bounds；
-    // mask 执行只需要覆盖裁切盒可能影响到的体素范围。
-    const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
+    const bool needsMaskImage = resultContext.GetResolvedDataSource() == OrthogonalCropDataSource::ImageData;
+    if (needsMaskImage) {
+        // ImageData preview 是 2D overlay 的 mask 路径；
+        // 将 input model 角点吸附为 index bounds，mask 只覆盖裁切盒可能影响到的体素范围。
+        const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
 
-    // 按 removal mode 生成 mask；
-    // KeepInside 用 compact ROI 降低分配成本，RemoveInside 保留 full-volume 以表达盒外补集。
-    result.SetMaskImage(::GetMaskImage(
-        image,
-        cropData,
-        snappedIndexBounds,
-        removalMode));
+        // 按 removal mode 生成 mask；
+        // KeepInside 用 compact ROI 降低分配成本，RemoveInside 保留 full-volume 以表达盒外补集。
+        result.SetMaskImage(::GetMaskImage(
+            image,
+            cropData,
+            snappedIndexBounds,
+            removalMode));
+    }
 
     // 统计信息只记录数据源、后端和失败诊断；
-    // mask 产物由 result 持有，避免把大对象挂进 diagnostics。
+    // mask 产物只在 ImageData preview 里存在，避免 VolumeData 主预览承担 2D overlay 的成本。
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(resultContext.GetResolvedDataSource());
     statistics.SetResolvedOperation(OrthogonalCropOperation::Preview);
@@ -855,12 +855,15 @@ static OrthogonalCropResult GetPreviewResult(
     result.SetFailureReason(statistics.GetFailureReason());
 
     // outline 使用 active input model 坐标回填；
-    // overlay 可以直接与主数据矩阵对齐显示。
+    // 3D render-only preview 和 2D overlay 都可以直接与主数据矩阵对齐显示。
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
-    result.SetSucceeded(result.GetMaskImage() != nullptr);
+    result.SetSucceeded(needsMaskImage ? result.GetMaskImage() != nullptr : result.GetOutlinePolyData() != nullptr);
     if (!result.GetSucceeded()) {
         result.SetFailureReason(OrthogonalCropFailureReason::MaskPreviewCreationFailed);
-        result.SetMessage("Failed to build image 2D mask preview.");
+        result.SetMessage(
+            needsMaskImage
+                ? "Failed to build image 2D mask preview."
+                : "Failed to build image-backed render-only preview.");
     }
     return result;
 }
@@ -953,69 +956,19 @@ static OrthogonalCropStatistics GetPolyDataDiagnostics(
     }
 }
 
-static vtkSmartPointer<vtkPolyData> GetClippedPolyDataInternal(
-    vtkPolyData* polyData,
+static OrthogonalCropResult GetPolyDataPreviewResult(
     const CropDataModel& cropData,
-    CropRemovalMode removalMode)
-{
-    if (!polyData) {
-        return nullptr;
-    }
-
-    // cropData 已归一化，activeInputModelToBox transform 负责把 active input model 点送回 [-1,1]^3。
-    auto clipFunction = vtkSmartPointer<vtkBox>::New();
-    const auto canonicalBounds = GetCanonicalCropBoxBounds();
-    clipFunction->SetBounds(
-        canonicalBounds[0], canonicalBounds[1],
-        canonicalBounds[2], canonicalBounds[3],
-        canonicalBounds[4], canonicalBounds[5]);
-
-    auto activeInputModelToBoxTransform = vtkSmartPointer<vtkTransform>::New();
-    activeInputModelToBoxTransform->SetMatrix(cropData.GetBoxToInputModelMatrix().data());
-    activeInputModelToBoxTransform->Inverse();
-    clipFunction->SetTransform(activeInputModelToBoxTransform);
-
-    auto clipFilter = vtkSmartPointer<vtkTableBasedClipDataSet>::New();
-    clipFilter->SetInputData(polyData);
-    clipFilter->SetClipFunction(clipFunction);
-    if (removalMode == CropRemovalMode::KeepInside) {
-        clipFilter->InsideOutOn();
-    }
-    else {
-        clipFilter->InsideOutOff();
-    }
-
-    auto geometryFilter = vtkSmartPointer<vtkGeometryFilter>::New();
-    geometryFilter->SetInputConnection(clipFilter->GetOutputPort());
-    geometryFilter->Update();
-
-    auto output = vtkSmartPointer<vtkPolyData>::New();
-    output->ShallowCopy(geometryFilter->GetOutput());
-    return output;
-}
-
-static OrthogonalCropResult GetClipPreviewResult(
-    vtkPolyData* polyData,
-    const CropDataModel& cropData,
-    const OrthogonalCropResult& resultContext,
-    CropRemovalMode removalMode)
+    const OrthogonalCropResult& resultContext)
 {
     // polydata preview 与 image preview 共用 result contract；
-    // 算法层直接产出 clip polydata，bridge 只负责显示返回的 artifact。
+    // 主 actor 预览由 plug 使用 mapper clipping 或 shader discard 表达，
+    // 算法层只返回 cropData / outline，避免为 render-only preview 跑重型 clip filter。
     auto result = resultContext;
     result.SetCropDataModel(cropData);
-
-    auto clipped = GetClippedPolyDataInternal(polyData, cropData, removalMode);
-    if (!clipped) {
-        result.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
-        result.SetMessage("Failed to build clipped polydata.");
-        return result;
-    }
 
     const auto statistics = GetPolyDataDiagnostics(OrthogonalCropOperation::Preview);
     result.SetStatistics(statistics);
     result.SetOutlinePolyData(GetOutlinePolyDataInternal(cropData));
-    result.SetClipPolyData(clipped);
     result.SetSucceeded(true);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
     return result;
@@ -1118,11 +1071,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
-        return GetClipPreviewResult(
-            polyData,
+        return GetPolyDataPreviewResult(
             cropData,
-            resultContext,
-            request.GetRemovalMode());
+            resultContext);
     }
 
     auto fallbackResult = resultContext;

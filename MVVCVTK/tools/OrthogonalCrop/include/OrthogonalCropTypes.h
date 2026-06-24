@@ -86,7 +86,7 @@ enum class OrthogonalCropDataSource {
 enum class OrthogonalCropOperation {
     // request 尚未指定可执行动作。
     None,
-    // 生成预览结果；图像/体渲染产出遮罩与轮廓，网格产出裁切网格与轮廓。
+    // 生成预览结果；ImageData 产出 2D mask，VolumeData / PolyData 产出 render-only 几何状态。
     Preview,
     // 提交裁切结果；当前只支持 ImageData + KeepInside。
     Submit
@@ -126,7 +126,7 @@ enum class OrthogonalCropFailureReason {
     MaskPreviewCreationFailed,
     // image submit 需要输出主数据 image 时，生成输出 image 失败。
     SubmitImageCreationFailed,
-    // polydata 3D clip preview 需要输出裁切 polydata 时，生成输出 polydata 失败。
+    // polydata 预览需要可选裁切网格 artifact 时，生成输出 polydata 失败。
     ClipPreviewPolyDataCreationFailed
 };
 
@@ -385,10 +385,10 @@ public:
     // 写入 image submit 链路产出的主数据 image。
     void SetSubmitImage(vtkSmartPointer<vtkImageData> submitImage) { m_submitImage = std::move(submitImage); }
 
-    // 返回 polydata 3D clip preview 链路产出的裁切网格。
+    // 返回 polydata preview 可选产出的裁切网格；主 3D render-only 路径通常不需要它。
     vtkSmartPointer<vtkPolyData> GetClipPolyData() const { return m_clipPolyData; }
 
-    // 写入 polydata 3D clip preview 链路产出的裁切网格。
+    // 写入 polydata preview 可选产出的裁切网格。
     void SetClipPolyData(vtkSmartPointer<vtkPolyData> clipPolyData) { m_clipPolyData = std::move(clipPolyData); }
 
     // 返回 image 2D mask preview 链路生成的遮罩图像。
@@ -434,7 +434,7 @@ private:
     std::string m_message;
     // image submit 链路返回的主数据 image。
     vtkSmartPointer<vtkImageData> m_submitImage;
-    // polydata 3D clip preview 链路返回的裁切网格；image 路径通常为空。
+    // polydata preview 可选返回的裁切网格；render-only 主预览和 image 路径通常为空。
     vtkSmartPointer<vtkPolyData> m_clipPolyData;
     // image 2D mask preview 链路生成的遮罩图；真正控制 inside/outside 语义。
     vtkSmartPointer<vtkImageData> m_maskImage;

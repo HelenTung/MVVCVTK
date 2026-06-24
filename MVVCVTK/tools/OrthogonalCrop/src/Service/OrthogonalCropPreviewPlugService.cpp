@@ -67,7 +67,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
-    const OrthogonalCropResult* volumePreviewResult,
+    const OrthogonalCropResult* imagePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
 {
@@ -76,13 +76,13 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     }
 
     bool mainPreviewApplied = false;
-    if (volumePreviewResult) {
-        // 体渲染结果只负责体渲染主显示路径；如果目标不是体渲染窗口，
-        // 这里会返回 false，让同一目标继续尝试下面的 polydata 路径。
+    if (imagePreviewResult) {
+        // image-backed 结果在 3D volume 窗口表达 render-only 主预览；
+        // 在 2D 窗口则只作为 overlay mask/outline 输入，不会接管主显示。
         mainPreviewApplied = ApplyVolumePreview(
             targetService,
             referenceService,
-            *volumePreviewResult,
+            *imagePreviewResult,
             removalMode);
     }
 
@@ -101,12 +101,12 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
     overlayStrategy->SetRemovalMode(removalMode);
 
-    const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
+    const OrthogonalCropResult* overlayResult = imagePreviewResult ? imagePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;
         if (polyDataPreviewApplied) {
             // 主 actor 已经用 mapper clipping 或 shader discard 表达 polydata 预览；
-            // overlay 仍显示裁切盒，但不再重复绘制同一份裁切网格。
+            // overlay 仍显示裁切盒，可选裁切网格 artifact 不参与主预览判定。
             visibleOverlayResult.SetClipPolyData(nullptr);
         }
         overlayStrategy->SetCropResult(visibleOverlayResult);

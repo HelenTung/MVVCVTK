@@ -527,32 +527,54 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         return;
     }
 
-    // 体渲染预览使用 router 已显式持有的图像输入；
-    // 网格预览直接读取目标窗口通过 GetMainProp 暴露的主三维输入，bridge 不识别具体策略类。
+    bool hasSlicePreviewTarget = false;
+    bool hasMain3DPreviewTarget = false;
+    for (const auto& target : m_previewRenderTargets) {
+        if (!target.service) {
+            continue;
+        }
+
+        if (target.service->GetNavigationAxis() >= 0) {
+            hasSlicePreviewTarget = true;
+        }
+        else {
+            hasMain3DPreviewTarget = true;
+        }
+    }
+
+    // 同一套 request 仍由 router 分发：
+    // - VolumeData preview 只服务 3D 主显示，返回 cropData/outline，不生成 mask。
+    // - ImageData preview 只在 2D overlay 需要时生成 mask。
+    OrthogonalCropResult imageMaskResult;
+    bool hasImageMaskResult = false;
+    if (GetInputImage() && hasSlicePreviewTarget) {
+        const auto imageMaskRequest = BuildPreviewRequest(OrthogonalCropDataSource::ImageData);
+        imageMaskResult = m_backend.GetResult(imageMaskRequest, BuildResultContext(imageMaskRequest));
+        if (imageMaskResult.GetFailureReason() == OrthogonalCropFailureReason::None
+            && imageMaskResult.GetSucceeded()) {
+            hasImageMaskResult = true;
+        }
+        else if (logStats) {
+            std::cerr << "[Main] Orthogonal crop image mask preview skipped: "
+                << GetFailureReasonText(imageMaskResult.GetFailureReason())
+                << " - " << imageMaskResult.GetMessage() << std::endl;
+        }
+    }
+
     OrthogonalCropResult volumeResult;
     bool hasVolumeResult = false;
-    if (GetInputImage()) {
+    if (GetInputImage() && hasMain3DPreviewTarget) {
         const auto volumeRequest = BuildPreviewRequest(OrthogonalCropDataSource::VolumeData);
         volumeResult = m_backend.GetResult(volumeRequest, BuildResultContext(volumeRequest));
-        if (volumeResult.GetFailureReason() != OrthogonalCropFailureReason::None) {
-            if (logStats) {
-                std::cerr << "[Main] Orthogonal crop volume preview failed: "
-                    << GetFailureReasonText(volumeResult.GetFailureReason())
-                    << " - " << volumeResult.GetMessage() << std::endl;
-            }
-            return;
+        if (volumeResult.GetFailureReason() == OrthogonalCropFailureReason::None
+            && volumeResult.GetSucceeded()) {
+            hasVolumeResult = true;
         }
-
-        if (!volumeResult.GetSucceeded()) {
-            if (logStats) {
-                std::cerr << "[Main] Orthogonal crop volume preview result warning: "
-                    << GetFailureReasonText(volumeResult.GetFailureReason())
-                    << " - " << volumeResult.GetMessage() << std::endl;
-            }
-            return;
+        else if (logStats) {
+            std::cerr << "[Main] Orthogonal crop volume preview skipped: "
+                << GetFailureReasonText(volumeResult.GetFailureReason())
+                << " - " << volumeResult.GetMessage() << std::endl;
         }
-
-        hasVolumeResult = true;
     }
 
     bool main3DPreviewApplied = false;
@@ -567,20 +589,23 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         bool hasPolyDataResult = false;
         m_previewPlug.RestorePreview(target.service, target.overlayStrategy);
 
+        const bool isSliceTarget = target.service->GetNavigationAxis() >= 0;
+        const OrthogonalCropResult* imagePreviewResult = isSliceTarget
+            ? (hasImageMaskResult ? &imageMaskResult : nullptr)
+            : (hasVolumeResult ? &volumeResult : nullptr);
+
         auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
         auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
         if (mapper) {
-            mapper->Update();
             if (auto polyData = vtkPolyData::SafeDownCast(mapper->GetInput())) {
                 m_backend.SetInputPolyData(polyData);
 
                 const auto polyRequest = BuildPreviewRequest(OrthogonalCropDataSource::PolyData);
                 polyResult = m_backend.GetResult(polyRequest, BuildResultContext(polyRequest));
-                // clipPolyData 是 polydata 后端的成功产物；主 actor 的 shader discard
-                // 可能只消费 cropData，但这里仍要避免把只有诊断信息的结果当作有效预览。
+                // PolyData preview 是 render-only 主显示路径；
+                // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
                 if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
-                    && polyResult.GetSucceeded()
-                    && polyResult.GetClipPolyData()) {
+                    && polyResult.GetSucceeded()) {
                     hasPolyDataResult = true;
                     polyDataPreviewApplied = true;
                 }
@@ -592,14 +617,14 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
             }
         }
 
-        if (!hasVolumeResult && !hasPolyDataResult) {
+        if (!imagePreviewResult && !hasPolyDataResult) {
             continue;
         }
 
         main3DPreviewApplied = DispatchPreviewResult(
             target,
             m_currentRemovalMode,
-            hasVolumeResult ? &volumeResult : nullptr,
+            imagePreviewResult,
             hasPolyDataResult ? &polyResult : nullptr) || main3DPreviewApplied;
         anyPreviewApplied = true;
     }
@@ -616,6 +641,8 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds(bool
         std::cout
             << "[Main] Orthogonal crop preview updated. volume = "
             << (hasVolumeResult ? "Used" : "Skipped")
+            << ", mask = "
+            << (hasImageMaskResult ? "Used" : "Skipped")
             << ", polydata = "
             << (polyDataPreviewApplied ? "Used" : "Skipped")
             << ", operation = "
@@ -795,7 +822,7 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
 bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
     const PreviewRenderTarget& target,
     CropRemovalMode removalMode,
-    const OrthogonalCropResult* volumePreviewResult,
+    const OrthogonalCropResult* imagePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult)
 {
     if (!target.service || !target.overlayStrategy) {
@@ -806,7 +833,7 @@ bool OrthogonalCropInteractionBridgeService::DispatchPreviewResult(
         target.service,
         target.overlayStrategy,
         m_referenceRenderService,
-        volumePreviewResult,
+        imagePreviewResult,
         polyDataPreviewResult,
         removalMode);
 

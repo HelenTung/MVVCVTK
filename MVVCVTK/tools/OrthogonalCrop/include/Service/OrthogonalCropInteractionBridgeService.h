@@ -170,7 +170,7 @@ private:
     bool DispatchPreviewResult(
         const PreviewRenderTarget& target,
         CropRemovalMode removalMode,
-        const OrthogonalCropResult* volumePreviewResult,
+        const OrthogonalCropResult* imagePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult);
 
     // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
