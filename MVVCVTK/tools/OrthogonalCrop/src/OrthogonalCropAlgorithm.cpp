@@ -210,12 +210,6 @@ static std::size_t GetEffectiveAvailableRamBytes(
 
 static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
 
-struct SubmitPlan {
-    bool canExecute = false;
-    CropIndexBoundsInt6Array snappedIndexBounds = { 0, 0, 0, 0, 0, 0 };
-    OrthogonalCropStatistics diagnostics;
-};
-
 static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     OrthogonalCropDataSource dataSource,
     OrthogonalCropOperation operation,
@@ -228,47 +222,6 @@ static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     statistics.SetResolvedGeometryType(geometryType);
     statistics.SetResolvedRemovalMode(removalMode);
     return statistics;
-}
-
-static SubmitPlan BuildSubmitPlan(
-    vtkImageData* image,
-    const CropDataModel& cropData,
-    OrthogonalCropGeometryType geometryType,
-    CropRemovalMode removalMode,
-    std::size_t availableRamBytes)
-{
-    SubmitPlan plan;
-    plan.diagnostics = GetAlgorithmDiagnostics(
-        OrthogonalCropDataSource::ImageData,
-        OrthogonalCropOperation::Submit,
-        geometryType,
-        removalMode);
-
-    if (!image) {
-        plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::InputImageMissing);
-        plan.diagnostics.SetValidationMessage("Input image is null.");
-        return plan;
-    }
-
-    if (removalMode == CropRemovalMode::RemoveInside) {
-        plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitRemoveInsideUnsupported);
-        plan.diagnostics.SetValidationMessage(
-            "Image submit with RemoveInside is intentionally blocked because it cannot preserve a contiguous derived volume without resampling.");
-        return plan;
-    }
-
-    plan.snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
-    const std::size_t outputVoxelCount = GetVoxelCountFromIndexBounds(plan.snappedIndexBounds);
-    const std::size_t estimatedRamUsageBytes = outputVoxelCount * GetImageBytesPerVoxel(image);
-    if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
-        plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
-        plan.diagnostics.SetValidationMessage("Estimated image submit memory usage exceeds currently available RAM.");
-        return plan;
-    }
-
-    plan.canExecute = true;
-    plan.diagnostics.SetFailureReason(OrthogonalCropFailureReason::None);
-    return plan;
 }
 
 static vtkSmartPointer<vtkImageData> GetMaskImage(
@@ -766,23 +719,51 @@ static OrthogonalCropResult GetSubmitResult(
     auto result = resultContext;
     result.SetCropDataModel(cropData);
 
-    const auto submitPlan = BuildSubmitPlan(
-        image,
-        cropData,
+    auto diagnostics = GetAlgorithmDiagnostics(
+        OrthogonalCropDataSource::ImageData,
+        OrthogonalCropOperation::Submit,
         geometryType,
-        removalMode,
-        availableRamBytes);
-    result.SetStatistics(submitPlan.diagnostics);
-    result.SetFailureReason(submitPlan.diagnostics.GetFailureReason());
+        removalMode);
 
-    if (!submitPlan.canExecute) {
-        result.SetMessage(submitPlan.diagnostics.GetValidationMessage());
+    if (!image) {
+        diagnostics.SetFailureReason(OrthogonalCropFailureReason::InputImageMissing);
+        diagnostics.SetValidationMessage("Input image is null.");
+        result.SetStatistics(diagnostics);
+        result.SetFailureReason(diagnostics.GetFailureReason());
+        result.SetMessage(diagnostics.GetValidationMessage());
         return result;
     }
 
-    auto submitImage = GetExtractedImage(image, submitPlan.snappedIndexBounds);
+    if (removalMode == CropRemovalMode::RemoveInside) {
+        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitRemoveInsideUnsupported);
+        diagnostics.SetValidationMessage(
+            "Image submit with RemoveInside is intentionally blocked because it cannot preserve a contiguous derived volume without resampling.");
+        result.SetStatistics(diagnostics);
+        result.SetFailureReason(diagnostics.GetFailureReason());
+        result.SetMessage(diagnostics.GetValidationMessage());
+        return result;
+    }
+
+    // submit 的体素 ROI 是 cropData 在 image index 空间的局部执行坐标；
+    // 它只服务本次 ExtractVOI / mask / 内存估算，不写回几何模型，避免和 input model bounds 混用。
+    const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
+    const std::size_t outputVoxelCount = GetVoxelCountFromIndexBounds(snappedIndexBounds);
+    const std::size_t estimatedRamUsageBytes = outputVoxelCount * GetImageBytesPerVoxel(image);
+    if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
+        diagnostics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
+        diagnostics.SetValidationMessage("Estimated image submit memory usage exceeds currently available RAM.");
+        result.SetStatistics(diagnostics);
+        result.SetFailureReason(diagnostics.GetFailureReason());
+        result.SetMessage(diagnostics.GetValidationMessage());
+        return result;
+    }
+
+    diagnostics.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetStatistics(diagnostics);
+    result.SetFailureReason(diagnostics.GetFailureReason());
+
+    auto submitImage = GetExtractedImage(image, snappedIndexBounds);
     if (!submitImage) {
-        auto diagnostics = submitPlan.diagnostics;
         diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
         diagnostics.SetValidationMessage("Failed to build image submit image.");
         result.SetStatistics(diagnostics);
@@ -795,10 +776,9 @@ static OrthogonalCropResult GetSubmitResult(
     auto submitMaskImage = ::GetMaskImage(
         image,
         cropData,
-        submitPlan.snappedIndexBounds,
+        snappedIndexBounds,
         removalMode);
     if (!submitMaskImage) {
-        auto diagnostics = submitPlan.diagnostics;
         diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitMaskCreationFailed);
         diagnostics.SetValidationMessage("Failed to build image submit mask.");
         result.SetStatistics(diagnostics);
