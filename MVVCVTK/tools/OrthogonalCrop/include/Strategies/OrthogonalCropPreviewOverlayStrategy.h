@@ -73,7 +73,7 @@ private:
     // polydata 可选裁切结果 mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_polyDataMapper;
 
-    // 2D mask 预览 image slice。
+    // 2D submit mask image slice。
     vtkSmartPointer<vtkImageSlice> m_maskSlice;
 
     // 2D mask slice 对应的 reslice mapper。

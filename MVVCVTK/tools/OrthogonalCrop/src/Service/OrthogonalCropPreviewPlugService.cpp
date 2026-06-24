@@ -67,7 +67,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
-    const OrthogonalCropResult* imagePreviewResult,
+    const OrthogonalCropResult* volumePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
 {
@@ -76,13 +76,13 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     }
 
     bool mainPreviewApplied = false;
-    if (imagePreviewResult) {
-        // image-backed 结果在 3D volume 窗口表达 render-only 主预览；
-        // 在 2D 窗口则只作为 overlay mask/outline 输入，不会接管主显示。
+    if (volumePreviewResult) {
+        // VolumeData preview 结果在 3D volume 窗口表达 render-only 主预览；
+        // 2D mask 由 submit 结果单独进入 overlay，不参与 preview 路由。
         mainPreviewApplied = ApplyVolumePreview(
             targetService,
             referenceService,
-            *imagePreviewResult,
+            *volumePreviewResult,
             removalMode);
     }
 
@@ -101,7 +101,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
     overlayStrategy->SetRemovalMode(removalMode);
 
-    const OrthogonalCropResult* overlayResult = imagePreviewResult ? imagePreviewResult : polyDataPreviewResult;
+    const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;
         if (polyDataPreviewApplied) {

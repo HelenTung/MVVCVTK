@@ -130,7 +130,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
     m_polyDataActor->SetVisibility(hasPolyData ? 1 : 0);
 
-    // mask image 只服务 image 路径的 2D 预览；
+    // mask image 只服务 image submit 路径的 2D overlay；
     // 3D 窗口依赖 outline 和主模型 clip，不直接显示 mask。
     auto maskImage = result.GetMaskImage();
     m_hasMaskImage = maskImage != nullptr;
@@ -183,7 +183,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
         m_slicePlane->SetOrigin(params.cursor[0], params.cursor[1], params.cursor[2]);
         m_slicePlane->SetNormal(normal[0], normal[1], normal[2]);
 
-        // 2D 预览始终以当前窗口 cursor 所在切面切 mask。
+        // 2D overlay 始终以当前窗口 cursor 所在切面切 mask。
         m_maskSlice->SetVisibility(true);
     }
 }

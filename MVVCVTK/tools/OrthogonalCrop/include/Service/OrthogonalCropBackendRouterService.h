@@ -5,7 +5,7 @@
 // 分类: Service / Backend Router
 // 说明: 在基于图像输入与网格输入的裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
-// Router 只根据 request.dataSource / request.operation 执行已经决定好的目标；
+// Router 只根据 request.dataSource / request.operation / request.geometryType 执行已经决定好的目标；
 // 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
 // 图像 / 体渲染 / 网格的数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
@@ -61,15 +61,18 @@ private:
     // 读取 polyData input model bounds。
     std::array<double, 6> GetPolyDataInputModelBounds() const;
 
-    // 统一构造“输入缺失”诊断结果，并按目标数据源保留准确失败原因。
-    OrthogonalCropStatistics GetMissingInputStatistics(
-        OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData,
-        OrthogonalCropOperation operation = OrthogonalCropOperation::None) const;
+    // 统一构造 router 层失败诊断，并保留请求三元组。
+    OrthogonalCropStatistics GetRouterFailureStatistics(
+        const OrthogonalCropRequest& request,
+        OrthogonalCropFailureReason failureReason,
+        const std::string& message) const;
 
-    // 在调用方结果上下文上回填“输入缺失”执行结果，并保留准确失败原因。
-    OrthogonalCropResult GetMissingInputResult(
+    // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
+    OrthogonalCropResult GetRouterFailureResult(
+        const OrthogonalCropRequest& request,
         const OrthogonalCropResult& resultContext,
-        OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::InputImageMissing) const;
+        OrthogonalCropFailureReason failureReason,
+        const std::string& message) const;
 
     // 查询系统当前可用物理内存，供 image submit 估算使用。
     std::size_t GetSystemAvailableRamBytes() const;

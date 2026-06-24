@@ -25,7 +25,7 @@ public:
         const std::shared_ptr<AbstractInteractiveService>& targetService,
         const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
-        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult,
         CropRemovalMode removalMode);
 

@@ -10,8 +10,8 @@
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
-// 3. Released 或显式切换预览时，BuildPreviewRequest 把 widget world 有向盒折回当前输入模型 request
-// 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、operation 和交互态
+// 3. Released 或显式切换预览时，BuildBoxRequest 把 widget world 有向盒折回当前输入模型 request
+// 4. BuildResultContext 在 bridge 侧确定本次结果的数据源、operation、几何类型和保留语义
 // 5. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
 // 6. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
 // 7. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
@@ -30,6 +30,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -95,12 +96,12 @@ private:
     // 私有边界负责 widget 状态机、world / 当前输入模型坐标转换、后端查询、
     // 预览分发，以及 VTK mapper / shader 显示细节。
 
-    // 一个 preview 目标窗口对应一份 overlay 策略。
+    // 一个显示目标窗口对应一份裁切 overlay 策略。
     struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
         std::shared_ptr<AbstractInteractiveService> service;
 
-        // 负责显示 mask / outline / clipped polydata 的 overlay 策略。
+        // 负责显示 outline、submit mask 和可选 clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
     };
 
@@ -133,12 +134,14 @@ private:
     // 让后端在输入数据坐标里执行裁切，而不是依赖窗口或 widget 状态。
     std::array<double, 16> GetWorldToActiveInputModelMatrix() const;
 
-    // 基于当前 widget 有向盒组装一次 preview request。
+    // 基于当前 widget 有向盒组装一次 box request。
     // 这里把标准盒 [-1,1]^3 依次映射到初始 world、当前 world、active input model，
     // 最终只把 boxToInputModelMatrix 下发给后端，避免后端反向读取 UI 状态。
-    OrthogonalCropRequest BuildPreviewRequest(OrthogonalCropDataSource dataSource) const;
+    OrthogonalCropRequest BuildBoxRequest(
+        OrthogonalCropDataSource dataSource,
+        OrthogonalCropOperation operation) const;
 
-    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、operation 和交互态。
+    // 基于 request 构造 result 上下文；bridge 在这里固定数据源、operation、几何类型和保留语义。
     OrthogonalCropResult BuildResultContext(const OrthogonalCropRequest& request) const;
 
     // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
@@ -146,9 +149,6 @@ private:
 
     // 校验当前交互状态是否允许发起 image submit。
     bool CanApplySubmit() const;
-
-    // 基于当前 widget 有向盒构建 image submit request。
-    OrthogonalCropRequest BuildSubmitRequest() const;
 
     // 把 image submit image 适配成 reload 通道需要的数据布局。
     bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, SubmitReloadPayload& payload) const;
@@ -161,6 +161,15 @@ private:
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
     static const char* GetOperationText(OrthogonalCropOperation operation);
+    static const char* GetGeometryTypeText(OrthogonalCropGeometryType geometryType);
+    static void ReportCropFailure(
+        const char* layer,
+        OrthogonalCropDataSource dataSource,
+        OrthogonalCropOperation operation,
+        OrthogonalCropGeometryType geometryType,
+        OrthogonalCropFailureReason failureReason,
+        const std::string& message);
+    static void ReportCropFailure(const char* layer, const OrthogonalCropResult& result);
 
     // preview 列表为空时，取第一个有效目标作为 reference service 的后备来源。
     std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const;
@@ -178,8 +187,11 @@ private:
     bool DispatchPreviewResult(
         const PreviewRenderTarget& target,
         CropRemovalMode removalMode,
-        const OrthogonalCropResult* imagePreviewResult,
+        const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult);
+
+    // 把 submit 结果中的 mask / outline 分发到 overlay 层。
+    void DispatchSubmitResult(const OrthogonalCropResult& submitResult);
 
     // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
     OrthogonalCropBackendRouterService m_backend;
@@ -220,6 +232,9 @@ private:
 
     // submit reload 后台线程只接收裸指针，bridge 必须持有 buffer 到 reload 回调结束。
     std::shared_ptr<std::vector<float>> m_submitReloadBuffer;
+
+    // submit 结果中的 mask / outline 在 reload 后重新写入 overlay，避免被 preview 清理带走。
+    OrthogonalCropResult m_pendingSubmitOverlayResult;
 
     // 裁切提交前保存相机，下一次主数据重建并完成策略同步后恢复；每次保存都会覆盖上一份。
     OrthogonalCropCameraStateController m_cameraStateController;

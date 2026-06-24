@@ -4,16 +4,14 @@
 // 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
-// 类型层只保存请求、结果、诊断、失败原因和数据/状态快照；
+// 类型层只保存请求、结果、诊断、失败原因和数据快照；
 // 它不依赖 MedicalVizService、Renderer、Interactor 或具体窗口对象，
 // 让前端或 ViewModel 只需要组装 OrthogonalCropRequest 并消费 OrthogonalCropResult。
 //
 // 语义边界：
 // - CropDataModel：客观几何快照；
-// - CropStateModel：瞬态显示与交互状态快照；
-// - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、几何、保留语义和交互状态快照；
-// - OrthogonalCropResult：一次执行结果，预览链返回图像/体渲染预览、盒体三维轮廓 / 网格裁切预览，
-//   图像提交链返回可重新载入主数据的图像。
+// - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、裁切几何类型、几何矩阵和保留语义；
+// - OrthogonalCropResult：一次执行结果，预览链返回盒体三维轮廓，图像提交链返回主数据图像和提交 mask。
 
 #include <array>
 #include <cstddef>
@@ -82,13 +80,23 @@ enum class OrthogonalCropDataSource {
     PolyData
 };
 
+// 裁切几何类型；router 用它和数据源、动作一起决定可执行路径。
+enum class OrthogonalCropGeometryType {
+    // 当前唯一可执行的有向盒裁切。
+    Box,
+    // 预留平面裁切入口。
+    Plane,
+    // 预留圆柱裁切入口。
+    Cylinder
+};
+
 // 一次裁切请求的业务动作；数据处理方法由 dataSource 决定。
 enum class OrthogonalCropOperation {
     // request 尚未指定可执行动作。
     None,
-    // 生成预览结果；ImageData 产出 2D mask，VolumeData / PolyData 产出 render-only 几何状态。
+    // 生成 render-only 预览结果；当前只允许 VolumeData / PolyData。
     Preview,
-    // 提交裁切结果；当前只支持 ImageData + KeepInside。
+    // 提交裁切结果；当前只允许 ImageData + KeepInside。
     Submit
 };
 
@@ -122,8 +130,8 @@ enum class OrthogonalCropFailureReason {
     SubmitRemoveInsideUnsupported,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     InsufficientRam,
-    // image 2D mask preview 产物构建失败。
-    MaskPreviewCreationFailed,
+    // image submit 需要输出 2D mask 时，生成 mask 失败。
+    SubmitMaskCreationFailed,
     // image submit 需要输出主数据 image 时，生成输出 image 失败。
     SubmitImageCreationFailed,
     // polydata 预览需要可选裁切网格 artifact 时，生成输出 polydata 失败。
@@ -192,52 +200,6 @@ private:
     std::array<double, 6> m_inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 };
 
-// UI/交互层状态快照：描述当前裁切是否启用、手柄状态和显示语义。
-class CropStateModel {
-public:
-    // 当前结果或请求是否仍然处于“启用裁切语义”的状态。
-    bool GetCropEnabled() const { return m_cropEnabled; }
-
-    // 设置裁切语义是否生效；submit 产出结果时常会把它关掉。
-    void SetCropEnabled(bool enabled) { m_cropEnabled = enabled; }
-
-    // 返回 inside 区域当前期望的显示透明度。
-    double GetInsideOpacity() const { return m_insideOpacity; }
-
-    // 设置 inside 区域的透明度；主要服务 preview/overlay 表现。
-    void SetInsideOpacity(double opacity) { m_insideOpacity = opacity; }
-
-    // 返回 outside 区域当前是否应继续显示。
-    bool GetOutsideVisibility() const { return m_outsideVisibility; }
-
-    // 设置 outside 区域是否可见；上层可据此决定是否遮罩或淡出外围区域。
-    void SetOutsideVisibility(bool visible) { m_outsideVisibility = visible; }
-
-    // 返回裁切相关的高亮/LUT 颜色。
-    const CropVectorDouble3Array& GetLutColor() const { return m_lutColor; }
-
-    // 设置裁切相关的高亮/LUT 颜色。
-    void SetLutColor(const CropVectorDouble3Array& color) { m_lutColor = color; }
-
-    // 返回当前交互阶段，如 Idle、Dragging、Released。
-    CropInteractionPhase GetInteractionPhase() const { return m_interactionPhase; }
-
-    // 更新当前交互阶段；bridge 会把它打进 request/result，供上层理解结果产生时机。
-    void SetInteractionPhase(CropInteractionPhase phase) { m_interactionPhase = phase; }
-
-private:
-    // 当前是否启用了裁切语义；上层可据此决定是否显示/应用裁切效果。
-    bool m_cropEnabled = true;
-    // inside 区域的可视透明度，常用于 2D/3D overlay 预览。
-    double m_insideOpacity = 0.35;
-    // outside 区域当前是否可见。
-    bool m_outsideVisibility = false;
-    // 裁切相关 LUT/高亮颜色。
-    std::array<double, 3> m_lutColor = { 1.0, 0.4, 0.2 };
-    // 当前交互阶段，供上层区分 dragging/released。
-    CropInteractionPhase m_interactionPhase = CropInteractionPhase::Idle;
-};
-
 // 一次裁切执行请求：boxToInputModelMatrix 是标准盒 [-1,1]^3 到 active input model 的唯一几何真源。
 class OrthogonalCropRequest {
 public:
@@ -265,17 +227,17 @@ public:
     // 写入本次请求业务动作；Preview/Submit 不再伪装成数据后端。
     void SetOperation(OrthogonalCropOperation operation) { m_operation = operation; }
 
+    // 返回本次请求的裁切几何类型。
+    OrthogonalCropGeometryType GetGeometryType() const { return m_geometryType; }
+
+    // 写入本次请求的裁切几何类型。
+    void SetGeometryType(OrthogonalCropGeometryType geometryType) { m_geometryType = geometryType; }
+
     // 返回 inside / outside 的保留语义。
     CropRemovalMode GetRemovalMode() const { return m_removalMode; }
 
     // 设置 inside / outside 的保留语义。
     void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
-
-    // 返回随请求一起下发的 UI/交互状态快照。
-    const CropStateModel& GetCropStateModel() const { return m_cropStateModel; }
-
-    // 写入随请求一起下发的 UI/交互状态快照。
-    void SetCropStateModel(const CropStateModel& cropStateModel) { m_cropStateModel = cropStateModel; }
 
     // 返回调用方显式指定的可用内存上限。
     std::size_t GetAvailableRamBytes() const { return m_availableRamBytes; }
@@ -290,10 +252,10 @@ private:
     OrthogonalCropDataSource m_dataSource = OrthogonalCropDataSource::ImageData;
     // 本次请求的业务动作；None 表示还没有可执行目标，避免缺输入时伪装成 preview。
     OrthogonalCropOperation m_operation = OrthogonalCropOperation::None;
-    // inside / outside 的保留语义；影响 image 2D mask preview 取值和 image submit 合法性判断。
+    // 本次请求的裁切几何类型；当前只有 Box 可执行。
+    OrthogonalCropGeometryType m_geometryType = OrthogonalCropGeometryType::Box;
+    // inside / outside 的保留语义；影响 image submit 合法性判断和提交 mask 取值。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
-    // UI/交互层随本次请求一并带下去的状态快照，如是否启用、当前 phase、透明度等。
-    CropStateModel m_cropStateModel;
     // 可选的可用内存上限；为 0 表示交给后端使用系统 RAM 查询或默认兜底值。
     std::size_t m_availableRamBytes = 0;
 };
@@ -311,6 +273,24 @@ public:
 
     // 写入诊断信息采用的业务动作。
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
+
+    // 返回诊断信息采用的裁切几何类型。
+    OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
+
+    // 写入诊断信息采用的裁切几何类型。
+    void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
+
+    // 返回诊断信息采用的保留语义。
+    CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
+
+    // 写入诊断信息采用的保留语义。
+    void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
+
+    // 返回失败发生的层级。
+    const std::string& GetFailureLayer() const { return m_failureLayer; }
+
+    // 写入失败发生的层级。
+    void SetFailureLayer(const std::string& failureLayer) { m_failureLayer = failureLayer; }
 
     // 返回诊断阶段发现的失败原因。
     OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
@@ -341,6 +321,12 @@ private:
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
     // 这次诊断真正采用的业务动作，如 preview 或 submit。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
+    // 这次诊断真正采用的裁切几何类型。
+    OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
+    // 这次诊断真正采用的保留语义。
+    CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
+    // 失败发生的层级，如 Router 或 Algorithm。
+    std::string m_failureLayer;
     // 诊断阶段发现的失败原因；None 表示校验通过。
     OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
@@ -360,6 +346,27 @@ public:
 
     // 写入结果采用的业务动作。
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
+
+    // 返回结果采用的裁切几何类型。
+    OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
+
+    // 写入结果采用的裁切几何类型。
+    void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
+
+    // 返回结果采用的保留语义。
+    CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
+
+    // 写入结果采用的保留语义。
+    void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
+
+    // 返回失败发生的层级；优先使用结果自身覆盖值，否则回落到配套 diagnostics。
+    const std::string& GetFailureLayer() const
+    {
+        return m_failureLayer.empty() ? m_statistics.GetFailureLayer() : m_failureLayer;
+    }
+
+    // 写入失败发生的层级。
+    void SetFailureLayer(const std::string& failureLayer) { m_failureLayer = failureLayer; }
 
     // 返回本次执行是否构造出了有效结果。
     bool GetSucceeded() const { return m_succeeded; }
@@ -391,10 +398,10 @@ public:
     // 写入 polydata preview 可选产出的裁切网格。
     void SetClipPolyData(vtkSmartPointer<vtkPolyData> clipPolyData) { m_clipPolyData = std::move(clipPolyData); }
 
-    // 返回 image 2D mask preview 链路生成的遮罩图像。
+    // 返回 image submit 链路生成的遮罩图像。
     vtkSmartPointer<vtkImageData> GetMaskImage() const { return m_maskImage; }
 
-    // 写入 image 2D mask preview 链路生成的遮罩图像。
+    // 写入 image submit 链路生成的遮罩图像。
     void SetMaskImage(vtkSmartPointer<vtkImageData> maskImage) { m_maskImage = std::move(maskImage); }
 
     // 返回 box 3D outline preview 链路生成的裁切盒轮廓几何。
@@ -409,12 +416,6 @@ public:
     // 写入这次执行对应的客观几何快照。
     void SetCropDataModel(const CropDataModel& cropDataModel) { m_cropDataModel = cropDataModel; }
 
-    // 返回这次执行对应的交互/显示状态快照。
-    const CropStateModel& GetCropStateModel() const { return m_cropStateModel; }
-
-    // 写入这次执行对应的交互/显示状态快照。
-    void SetCropStateModel(const CropStateModel& cropStateModel) { m_cropStateModel = cropStateModel; }
-
     // 返回与本次结果配套的诊断信息。
     const OrthogonalCropStatistics& GetStatistics() const { return m_statistics; }
 
@@ -426,6 +427,12 @@ private:
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
     // 结果实际采用的业务动作；数据来源由 resolvedDataSource 表达。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
+    // 结果实际采用的裁切几何类型。
+    OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
+    // 结果实际采用的保留语义。
+    CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
+    // 失败发生的层级；为空时由 statistics 提供。
+    std::string m_failureLayer;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_succeeded = false;
     // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。
@@ -436,14 +443,12 @@ private:
     vtkSmartPointer<vtkImageData> m_submitImage;
     // polydata preview 可选返回的裁切网格；render-only 主预览和 image 路径通常为空。
     vtkSmartPointer<vtkPolyData> m_clipPolyData;
-    // image 2D mask preview 链路生成的遮罩图；真正控制 inside/outside 语义。
+    // image submit 链路生成的遮罩图；真正控制 inside/outside 语义。
     vtkSmartPointer<vtkImageData> m_maskImage;
     // box 3D outline preview 链路生成的裁切盒可视几何；常用于 overlay 或调试显示。
     vtkSmartPointer<vtkPolyData> m_outlinePolyData;
     // 这次结果对应的客观几何快照；image submit 后可能已经更新为输出 image 自身的 bounds。
     CropDataModel m_cropDataModel;
-    // 这次结果对应的交互/显示状态快照；便于上层知道结果产生时是否仍处于交互态。
-    CropStateModel m_cropStateModel;
     // 与结果配套的诊断信息；避免调用方再次重复跑一遍诊断。
     OrthogonalCropStatistics m_statistics;
 };

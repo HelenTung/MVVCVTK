@@ -594,11 +594,11 @@ Step 11: 只让一个窗口进入 Start()
 
 4) 为什么 preview request 必须写入 dataSource 和 operation
 - 因为 bridge 才知道这次交互面对的是 image 还是 polydata，也知道 UI 动作是 preview 还是 submit。
-- router 只应该执行 request 已经说明的数据源和操作目标，不能再根据 active source 和枚举组合自行猜测。
-- 所以 preview 固定写成 operation = Preview；submit 固定写成 ImageData + operation = Submit。
+- router 只应该执行 request 已经说明的数据源、操作目标和裁切几何，不能再根据 active source 和枚举组合自行猜测。
+- 所以 preview 明确写成 VolumeData/PolyData + Preview + Box；submit 明确写成 ImageData + Submit + Box。
 
 5) 为什么拖拽中不实时重算 preview，只在 Released 或显式 toggle 时重算
-- 因为重型 preview 本身可能包含 mask 生成、polydata clip、overlay 同步。
+- 因为重型 preview 本身可能包含 volume mapper 状态、polydata clip、overlay 同步。
 - 如果把鼠标移动频率直接映射为结果重算频率，会明显卡顿。
 - 所以当前桥接层只在拖拽中更新 bounds/phase，松手后才真正刷新结果。
 */
@@ -620,35 +620,34 @@ Step 11: 只让一个窗口进入 Start()
 
 3. 按 1 或 2
 - bridge->TogglePreview(CropRemovalMode::KeepInside / RemoveInside, true)。
-- bridge 组装 preview request，并写入当前 dataSource 与 preview backend。
+- bridge 分别为可用的 3D volume 目标和 polydata 目标组装 preview request。
 
-4. BuildPreviewRequest()
+4. BuildBoxRequest()
 - 从 router->GetDefaultRequest() 开始。
 - 覆盖为当前 widget world 有向盒对应的 boxToInputModelMatrix。
 - 写入当前 removalMode。
-- 写入当前 dataSource：ImageData 或 PolyData。
-- 写入当前 operation：Preview。
-- 写入 cropStateModel。
+- 写入当前 dataSource / operation / geometryType；bridge 不把 UI 交互态塞进 request。
 
 5. UpdatePreviewFromCurrentBounds()
-- bridge 先按 request 构造 resultContext，固定本次结果的数据源、操作类型和交互态。
+- bridge 先按 request 构造 resultContext，固定本次结果的数据源、操作类型、几何类型和保留语义。
 - 统一调用 router->GetResult(previewRequest, resultContext)。
-- router 读取 request.dataSource 和 request.operation，只校验输入并分发到 OrthogonalCropAlgorithm。
-- algorithm 按 ImageData + Preview 生成 image mask，按 PolyData + Preview 生成 polydata clip。
+- router 读取 request.dataSource、request.operation 和 request.geometryType，只校验输入并分发到 OrthogonalCropAlgorithm。
+- preview 只允许 VolumeData + Preview 生成体渲染裁切语义，或 PolyData + Preview 生成 polydata 裁切语义；ImageData 不参与 preview mask 生成。
 
 6. DispatchPreviewResult(previewResult)
-- 2D 窗口消费 overlay mask/outline。
+- 2D 窗口在 preview 阶段不生成 mask；submit 完成后才消费 submit mask/outline。
 - 3D 主窗口先尝试主显示管道 preview；volume 的 KeepInside 走 mapper clipping、RemoveInside 走 shader discard。
 - actor/polydata 的 KeepInside 走 mapper clipping，RemoveInside 走 actor shader discard；clipPolyData 只作为算法输出和 overlay 输入。
 
 7. 按 Ctrl+3
 - bridge->ApplySubmit()。
-- 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且当前 active source 是 ImageData。
+- 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且 image 输入可用。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- Bridge 通过 BuildSubmitRequest() 把当前 widget 有向盒改成 ImageData + Submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
+- Bridge 通过 BuildBoxRequest(ImageData, Submit) 构造 submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
+- Algorithm 在 submit 阶段同时生成 submit image 和 submit mask；mask 不进入 preview 路由。
 - Bridge 持有 reload buffer 生命周期，调用注入的 reload handler 把 image submit image 提交回主数据通道。
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
-- Bridge 收到 reload 完成回调后，恢复输入 image、恢复相机、清理 submit 状态并关闭裁切。
+- Bridge 收到 reload 完成回调后，恢复输入 image、恢复相机、关闭裁切，再把 submit mask/outline 重新分发到 overlay 层渲染。
 
 注意：image submit 入口必须与 preview 日志/刷新开关分离，不能再用 bool logStats=false 这类标志位隐式表示提交模式。
 */
@@ -671,20 +670,15 @@ Step 11: 只让一个窗口进入 Start()
         12.0, 24.0
     });
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetDataSource(OrthogonalCropDataSource::ImageData);
+    request.SetDataSource(OrthogonalCropDataSource::VolumeData);
     request.SetOperation(OrthogonalCropOperation::Preview);
-
-    CropStateModel cropState;
-    cropState.SetCropEnabled(true);
-    cropState.SetInsideOpacity(0.20);
-    cropState.SetOutsideVisibility(false);
-    cropState.SetInteractionPhase(CropInteractionPhase::Released);
-    request.SetCropStateModel(cropState);
+    request.SetGeometryType(OrthogonalCropGeometryType::Box);
 
     auto resultContext = OrthogonalCropResult();
     resultContext.SetResolvedDataSource(request.GetDataSource());
     resultContext.SetResolvedOperation(request.GetOperation());
-    resultContext.SetCropStateModel(request.GetCropStateModel());
+    resultContext.SetResolvedGeometryType(request.GetGeometryType());
+    resultContext.SetResolvedRemovalMode(request.GetRemovalMode());
 
     auto stats = cropBackend->GetStatistics(request);
     if (stats.GetFailureReason() != OrthogonalCropFailureReason::None) {
@@ -698,7 +692,6 @@ Step 11: 只让一个窗口进入 Start()
         return;
     }
 
-    auto maskPreview = result.GetMaskImage();
     auto outline = result.GetOutlinePolyData();
 
 如果改走主数据 submit：
@@ -709,6 +702,8 @@ Step 11: 只让一个窗口进入 Start()
     auto hardResultContext = resultContext;
     hardResultContext.SetResolvedDataSource(hardRequest.GetDataSource());
     hardResultContext.SetResolvedOperation(hardRequest.GetOperation());
+    hardResultContext.SetResolvedGeometryType(hardRequest.GetGeometryType());
+    hardResultContext.SetResolvedRemovalMode(hardRequest.GetRemovalMode());
     auto hardStats = cropBackend->GetStatistics(hardRequest);
     if (hardStats.GetFailureReason() != OrthogonalCropFailureReason::None) {
         std::cerr << hardStats.GetValidationMessage() << std::endl;
@@ -717,6 +712,7 @@ Step 11: 只让一个窗口进入 Start()
 
     auto hardResult = cropBackend->GetResult(hardRequest, hardResultContext);
     auto submitImage = hardResult.GetSubmitImage();
+    auto submitMask = hardResult.GetMaskImage();
 
 如果改走 polydata：
 
@@ -727,14 +723,16 @@ Step 11: 只让一个窗口进入 Start()
     polyRequest.SetBoxToInputModelMatrixFromBounds({ 10.0, 40.0, 5.0, 30.0, 8.0, 22.0 });
     polyRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
     polyRequest.SetOperation(OrthogonalCropOperation::Preview);
+    polyRequest.SetGeometryType(OrthogonalCropGeometryType::Box);
 
     auto polyResultContext = OrthogonalCropResult();
     polyResultContext.SetResolvedDataSource(polyRequest.GetDataSource());
     polyResultContext.SetResolvedOperation(polyRequest.GetOperation());
-    polyResultContext.SetCropStateModel(polyRequest.GetCropStateModel());
+    polyResultContext.SetResolvedGeometryType(polyRequest.GetGeometryType());
+    polyResultContext.SetResolvedRemovalMode(polyRequest.GetRemovalMode());
 
     auto polyResult = cropBackend->GetResult(polyRequest, polyResultContext);
-    auto clippedSurface = polyResult.GetClipPolyData();
+    auto polyOutline = polyResult.GetOutlinePolyData();
 */
 
 /*
