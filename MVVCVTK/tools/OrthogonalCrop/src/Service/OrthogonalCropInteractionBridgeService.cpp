@@ -133,7 +133,6 @@ void OrthogonalCropInteractionBridgeService::SetSubmitReloadSynced()
     m_cameraStateController.Restore(m_referenceRenderer);
     if (m_submitReloadPending) {
         m_submitReloadPending = false;
-        SetInputImage(nullptr);
         m_worldBoundsInitialized = false;
         ExitInteractiveCrop();
     }
@@ -296,16 +295,17 @@ bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
 bool OrthogonalCropInteractionBridgeService::EnsureInputReady()
 {
     // bridge 只保证“当前至少有一个可用输入”。
-    // 它不在这里做任何坐标折叠；缺 image 输入时才从 data manager 兜底补 image。
+    // 它不在这里做任何坐标折叠；缺 image 输入时总是先从 data manager 兜底补 image。
+    // PolyData 可能是上一轮等值面 preview 临时写入 router 的输入，不能因此跳过 image 恢复。
+    if (!GetInputImage() && m_dataMgr) {
+        SetInputImage(m_dataMgr->GetVtkImage());
+    }
+
     if (GetInputImage() || m_backend.GetInputPolyData()) {
         return true;
     }
 
-    if (m_dataMgr) {
-        SetInputImage(m_dataMgr->GetVtkImage());
-    }
-
-    return GetInputImage() || m_backend.GetInputPolyData();
+    return false;
 }
 
 std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteractiveWorldBounds() const
