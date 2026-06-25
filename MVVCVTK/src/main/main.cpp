@@ -401,18 +401,36 @@ int main()
     orthogonalCropBridge->SetReferenceRenderer(contextA->GetRenderer());
     orthogonalCropBridge->SetPreviewRenderServices({ serviceA, serviceB, serviceC, serviceD, serviceE });
     orthogonalCropBridge->SetSubmitReloadHandler(
-        [serviceA](
-            const float* data,
-            const std::array<int, 3>& dims,
-            const std::array<float, 3>& spacing,
-            const std::array<float, 3>& origin,
+        [sharedDataMgr, sharedState, serviceA](
+            vtkSmartPointer<vtkImageData> image,
             std::function<void(bool success)> onComplete) {
-            return serviceA->ReloadFromBufferAsync(
-                data,
-                dims,
-                spacing,
-                origin,
-                std::move(onComplete));
+            if (!sharedDataMgr || !sharedState || !serviceA || !image) {
+                return false;
+            }
+
+            if (sharedState->GetFileLoadState() == LoadState::Loading
+                || sharedState->GetReloadLoadState() == LoadState::Loading)
+            {
+                std::cerr << "[Main] Orthogonal crop submit failed: reload is already in progress." << std::endl;
+                return false;
+            }
+
+            sharedState->SetReloadLoadStarted();
+            if (!sharedDataMgr->TakeImageSnapshot(std::move(image))
+                || !sharedDataMgr->ConsumePendingImage()) {
+                sharedState->SetReloadLoadFailed();
+                return false;
+            }
+
+            const auto range = sharedDataMgr->GetScalarRange();
+            const auto spacing = sharedDataMgr->GetSpacing();
+            sharedState->SetReloadDataReady(range[0], range[1], spacing);
+            serviceA->ProcessPendingUpdates();
+
+            if (onComplete) {
+                onComplete(true);
+            }
+            return true;
         });
 
     // 3D窗口：设置参考切面可见（Composite 模式默认显示，纯 3D 模式无参考切面）

@@ -409,6 +409,39 @@ bool RawVolumeDataManager::SetFromBuffer(
     return true;
 }
 
+bool RawVolumeDataManager::TakeImageSnapshot(vtkSmartPointer<vtkImageData> image)
+{
+    SetLoadedFilePath({});
+
+    if (!image) {
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    image->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0 || !image->GetScalarPointer()) {
+        return false;
+    }
+
+    double range[2] = { 0.0, 0.0 };
+    image->GetScalarRange(range);
+    const std::array<double, 3> imageSpacing = {
+        image->GetSpacing()[0],
+        image->GetSpacing()[1],
+        image->GetSpacing()[2]
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(m_reconMutex);
+        m_pendingImage = std::move(image);
+        m_pendingScalarRange = { range[0], range[1] };
+        m_pendingSpacing = imageSpacing;
+    }
+    m_hasPendingImage.store(true);
+
+    return true;
+}
+
 bool RawVolumeDataManager::ConsumePendingImage()
 {
     if (!m_hasPendingImage.load()) return false;

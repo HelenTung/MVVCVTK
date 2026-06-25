@@ -109,7 +109,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     const auto submitRequest = BuildBoxRequest(
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    const auto submitResult = m_backend.GetResult(submitRequest);
+    auto submitResult = m_backend.GetResult(submitRequest);
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
         std::cerr << "[Main] Orthogonal crop submit failed: "
@@ -121,37 +121,25 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
         return;
     }
 
-    SubmitReloadPayload payload;
-    if (!BuildSubmitPayload(submitResult, payload)) {
+    auto submitImage = submitResult.GetSubmitImage();
+    if (!submitImage) {
+        std::cerr << "[Main] Orthogonal crop image submit failed: output image is null." << std::endl;
         m_cameraStateController.Clear();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         return;
     }
 
-    if (!payload.buffer || payload.buffer->empty()) {
-        std::cerr << "[Main] Orthogonal crop submit failed: reload payload buffer is empty." << std::endl;
-        m_cameraStateController.Clear();
-        m_pendingSubmitOverlayResult = OrthogonalCropResult();
-        return;
-    }
-
-    // bridge 是 main 持有的应用级对象，生命周期覆盖 reload 回调；
-    // ReloadFromBufferAsync 会把裸数据指针交给后台任务，回调完成前必须由 bridge 持有 buffer。
-    m_submitReloadBuffer = payload.buffer;
+    submitResult.SetSubmitImage(vtkSmartPointer<vtkImageData>());
     m_pendingSubmitOverlayResult = submitResult;
     m_submitReloadPending = true;
     m_widgetStateController.SetEnabled(false);
 
     if (!m_submitReloadHandler(
-            m_submitReloadBuffer->data(),
-            payload.dims,
-            payload.spacing,
-            payload.origin,
+            std::move(submitImage),
             [this](bool success) {
                 HandleSubmitReloadComplete(success);
             })) {
         std::cerr << "[Main] Orthogonal crop submit failed: reload request was rejected." << std::endl;
-        m_submitReloadBuffer.reset();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         m_submitReloadPending = false;
         m_cameraStateController.Clear();
@@ -186,67 +174,10 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
     return true;
 }
 
-bool OrthogonalCropInteractionBridgeService::BuildSubmitPayload(
-    const OrthogonalCropResult& submitResult,
-    SubmitReloadPayload& payload) const
-{
-    auto submitImage = submitResult.GetSubmitImage();
-    if (!submitImage) {
-        std::cerr << "[Main] Orthogonal crop image submit failed: output image is null." << std::endl;
-        return false;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    submitImage->GetDimensions(dims);
-    const auto sourceData = static_cast<const float*>(submitImage->GetScalarPointer());
-    if (!sourceData || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        std::cerr << "[Main] Orthogonal crop image submit failed: output image buffer is invalid." << std::endl;
-        return false;
-    }
-
-    double spacingData[3] = { 1.0, 1.0, 1.0 };
-    double imageModelOriginData[3] = { 0.0, 0.0, 0.0 };
-    submitImage->GetSpacing(spacingData);
-    submitImage->GetOrigin(imageModelOriginData);
-
-    payload.dims = { dims[0], dims[1], dims[2] };
-    payload.spacing = {
-        static_cast<float>(spacingData[0]),
-        static_cast<float>(spacingData[1]),
-        static_cast<float>(spacingData[2])
-    };
-    payload.origin = {
-        static_cast<float>(-imageModelOriginData[0] - (static_cast<double>(dims[0] - 1) * spacingData[0])),
-        static_cast<float>(-imageModelOriginData[1] - (static_cast<double>(dims[1] - 1) * spacingData[1])),
-        static_cast<float>(imageModelOriginData[2])
-    };
-
-    const size_t nx = static_cast<size_t>(dims[0]);
-    const size_t ny = static_cast<size_t>(dims[1]);
-    const size_t nz = static_cast<size_t>(dims[2]);
-    const size_t sliceSize = nx * ny;
-    const size_t totalSize = sliceSize * nz;
-    payload.buffer = std::make_shared<std::vector<float>>(totalSize, 0.0f);
-    auto* reloadData = payload.buffer->data();
-    for (size_t z = 0; z < nz; ++z) {
-        const size_t sliceOffset = z * sliceSize;
-        for (size_t y = 0; y < ny; ++y) {
-            const float* sourceRow = sourceData + sliceOffset + y * nx;
-            float* targetRow = reloadData + sliceOffset + (ny - 1 - y) * nx;
-            for (size_t x = 0; x < nx; ++x) {
-                targetRow[nx - 1 - x] = sourceRow[x];
-            }
-        }
-    }
-
-    return true;
-}
-
 void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool success)
 {
     if (!success) {
         std::cerr << "[Main] Orthogonal crop submit reload failed." << std::endl;
-        m_submitReloadBuffer.reset();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         m_submitReloadPending = false;
         m_cameraStateController.Clear();
@@ -264,7 +195,6 @@ void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool suc
     m_pendingSubmitOverlayResult = OrthogonalCropResult();
 
     std::cout << "[Main] Orthogonal crop submit applied to main image data." << std::endl;
-    m_submitReloadBuffer.reset();
     m_cameraStateController.Restore(m_referenceRenderer);
     if (m_submitReloadPending) {
         m_submitReloadPending = false;

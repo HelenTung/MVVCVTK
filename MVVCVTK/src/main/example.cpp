@@ -115,7 +115,7 @@ Step 4: 绑定 OrthogonalCrop 的坐标参考和 preview 目标
 - SetReferenceRenderService(serviceA)：A 是当前 3D 等值面主参考窗口，裁切盒的 world / active input model 坐标转换都以它为准。
 - SetReferenceRenderer(contextA->GetRenderer())：只把参考窗口 renderer 作为算法内部相机快照来源，不把相机状态写进 Service 或 SharedState。
 - SetPreviewRenderServices(...)：谁要跟着 overlay 刷新，就放进这个列表。当前 main 把 5 个窗口都放进来，意味着 2D 和 3D 都参与联动。
-- SetSubmitReloadHandler：只把主数据 reload 能力注入 bridge；submit 的 request 构建、payload 生成、buffer 生命周期和 reload 完成收尾都由 bridge 按同一条裁切链路处理，不直接修改 iso threshold 等视觉参数。
+- SetSubmitReloadHandler：只把主数据 reload 能力注入 bridge；submit 的 request 构建、vtkImageData 快照交接和 reload 完成收尾都由 bridge 按同一条裁切链路处理，不直接修改 iso threshold 等视觉参数。
 
 Step 5: 再做窗口级辅助元素策略
 
@@ -469,9 +469,9 @@ Step 11: 只让一个窗口进入 Start()
 - 做什么：后台线程做 I/O 和数据准备；成功后通过 SharedState 发布 DataReady；onComplete 在主线程延迟执行。
 - 为什么：加载要异步，VTK 管线重建要主线程，二者不能混在同一层里直接做。
 
-5) ReloadFromBufferAsync(...)
-- 做什么：后台线程准备待提交镜像，真正消费要等主线程 `ProcessPendingUpdates`。
-- 为什么：重载数据和文件流加载一样，也必须遵守主线程收敛策略。
+5) ReloadFromBufferAsync(...) / RawVolumeDataManager::TakeImageSnapshot(...)
+- 做什么：buffer reload 后台准备待提交镜像；submit image 已经是 VTK/RAS 语义时，由 RawVolumeDataManager 接管快照，再走同一条 DataReady 重建链路。
+- 为什么：重载数据和文件流加载一样，也必须遵守主线程收敛策略；submit image 不再展平成 buffer 后二次重建。
 
 6) SetElementVisible(flagBit, show)
 - 做什么：改 SharedState 里的 visibilityMask。
@@ -642,9 +642,9 @@ Step 11: 只让一个窗口进入 Start()
 - bridge->ApplySubmit()。
 - 校验当前是否为 KeepInside、非 dragging、widget 已激活，并且 image 输入可用。
 - OrthogonalCropCameraStateController 先保存 reference renderer 当前相机快照；同一算法内只保留最近一次，下一次保存会覆盖。
-- Bridge 通过 BuildBoxRequest(Submit, ImageData) 构造 submit request，再把 submit image 适配成 reload buffer / origin 翻转后的 payload。
+- Bridge 通过 BuildBoxRequest(Submit, ImageData) 构造 submit request，再把 submit image 作为 VTK/RAS 语义快照交给主数据通道。
 - Algorithm 在 submit 阶段同时生成 submit image 和 submit mask；mask 不进入 preview 路由。
-- Bridge 持有 reload buffer 生命周期，调用注入的 reload handler 把 image submit image 提交回主数据通道。
+- RawVolumeDataManager 在已有数据持有职责内接管 submit image 快照，避免 buffer 展平、origin 反推和二次 vtkImageData 构建。
 - 主线程后处理在 RebuildPipeline -> SyncStrategyState 之后执行 reload 回调。
 - Bridge 收到 reload 完成回调后，恢复输入 image、恢复相机、关闭裁切，再把 submit mask/outline 重新分发到 overlay 层渲染。
 

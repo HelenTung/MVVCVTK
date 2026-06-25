@@ -38,10 +38,7 @@ class OrthogonalCropInteractionBridgeService {
 public:
     // main 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
     using ReloadSubmitter = std::function<bool(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
+        vtkSmartPointer<vtkImageData> image,
         std::function<void(bool success)> onComplete)>;
 
     // 公共边界只暴露初始化、窗口接入和用户热键动作。
@@ -78,7 +75,7 @@ public:
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
-    // 执行当前 KeepInside image submit：构建 request、经 router/algorithm 取结果，再提交到主数据 reload 通道。
+    // 执行当前 image submit：构建 request、经 router/algorithm 取结果，再把 submit image 提交到主数据 reload 通道。
     void ApplySubmit();
 
     // 对应的裁切模式 toggle 入口。
@@ -101,14 +98,6 @@ private:
 
         // 负责显示 outline、submit mask 和可选 clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
-    };
-
-    struct SubmitReloadPayload {
-        // buffer 必须跟随 reload 异步任务存活；其余字段是 ReloadFromBufferAsync 的输入快照。
-        std::shared_ptr<std::vector<float>> buffer;
-        std::array<int, 3> dims = { 0, 0, 0 };
-        std::array<float, 3> spacing = { 1.0f, 1.0f, 1.0f };
-        std::array<float, 3> origin = { 0.0f, 0.0f, 0.0f };
     };
 
     // 确保当前至少有一个可用输入；必要时会尝试从 data manager 抓 image。
@@ -144,9 +133,6 @@ private:
 
     // 校验当前交互状态是否允许发起 image submit。
     bool CanApplySubmit() const;
-
-    // 把 image submit image 适配成 reload 通道需要的数据布局。
-    bool BuildSubmitPayload(const OrthogonalCropResult& submitResult, SubmitReloadPayload& payload) const;
 
     // reload 回调在主线程状态收敛后触发；这里做输入恢复和 submit 收尾。
     void HandleSubmitReloadComplete(bool success);
@@ -214,9 +200,6 @@ private:
 
     // 主数据 reload 能力由 main 注入；bridge 负责编排 submit 生命周期。
     ReloadSubmitter m_submitReloadHandler;
-
-    // submit reload 后台线程只接收裸指针，bridge 必须持有 buffer 到 reload 回调结束。
-    std::shared_ptr<std::vector<float>> m_submitReloadBuffer;
 
     // submit 结果中的 mask / outline 在 reload 后重新写入 overlay，避免被 preview 清理带走。
     OrthogonalCropResult m_pendingSubmitOverlayResult;

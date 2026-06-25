@@ -64,6 +64,7 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
+    bool TakeImageSnapshot(vtkSmartPointer<vtkImageData> image);
     bool ConsumePendingImage() override;
 };
 
