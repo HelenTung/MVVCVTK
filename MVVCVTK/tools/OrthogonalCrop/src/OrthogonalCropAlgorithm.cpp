@@ -433,12 +433,13 @@ static vtkSmartPointer<vtkImageData> GetExtractedImage(
     return output;
 }
 
-static void SetSubmitOutsideBoxToBackground(
+static void SetSubmitRemovedVoxelsToBackground(
     vtkImageData* submitImage,
-    const CropDataModel& cropData)
+    const CropDataModel& cropData,
+    CropRemovalMode removalMode,
+    const std::array<int, 6>& inputImageIndexBounds)
 {
-    if (!submitImage
-        || GetBoxToInputModelIsAxisAligned(cropData.GetBoxToInputModelMatrix())) {
+    if (!submitImage) {
         return;
     }
 
@@ -453,6 +454,22 @@ static void SetSubmitOutsideBoxToBackground(
     submitImage->GetDimensions(dims);
     const int componentCount = scalars->GetNumberOfComponents();
     if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0 || componentCount <= 0) {
+        return;
+    }
+
+    const bool removeInside = removalMode == CropRemovalMode::RemoveInside;
+    if (!removeInside
+        && GetBoxToInputModelIsAxisAligned(cropData.GetBoxToInputModelMatrix())) {
+        return;
+    }
+
+    const int minI = removeInside ? std::clamp(inputImageIndexBounds[0], 0, dims[0] - 1) : 0;
+    const int maxI = removeInside ? std::clamp(inputImageIndexBounds[1], 0, dims[0] - 1) : dims[0] - 1;
+    const int minJ = removeInside ? std::clamp(inputImageIndexBounds[2], 0, dims[1] - 1) : 0;
+    const int maxJ = removeInside ? std::clamp(inputImageIndexBounds[3], 0, dims[1] - 1) : dims[1] - 1;
+    const int minK = removeInside ? std::clamp(inputImageIndexBounds[4], 0, dims[2] - 1) : 0;
+    const int maxK = removeInside ? std::clamp(inputImageIndexBounds[5], 0, dims[2] - 1) : dims[2] - 1;
+    if (minI > maxI || minJ > maxJ || minK > maxK) {
         return;
     }
 
@@ -473,9 +490,9 @@ static void SetSubmitOutsideBoxToBackground(
     double inputModelToBoxStepResult[4] = { 0.0, 0.0, 0.0, 0.0 };
     inputModelToBoxMatrix->MultiplyPoint(inputModelToBoxStepVector, inputModelToBoxStepResult);
 
-    for (int k = 0; k < dims[2]; ++k) {
-        for (int j = 0; j < dims[1]; ++j) {
-            const int rowStartIndex[3] = { 0, j, k };
+    for (int k = minK; k <= maxK; ++k) {
+        for (int j = minJ; j <= maxJ; ++j) {
+            const int rowStartIndex[3] = { minI, j, k };
             double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
             submitImage->TransformIndexToPhysicalPoint(rowStartIndex, inputModelPoint);
 
@@ -483,8 +500,9 @@ static void SetSubmitOutsideBoxToBackground(
             double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
             inputModelToBoxMatrix->MultiplyPoint(inputModelPoint4, boxPoint);
 
-            for (int i = 0; i < dims[0]; ++i) {
-                if (!GetCanonicalBoxContainsPoint(boxPoint)) {
+            for (int i = minI; i <= maxI; ++i) {
+                const bool isInside = GetCanonicalBoxContainsPoint(boxPoint);
+                if ((removeInside && isInside) || (!removeInside && !isInside)) {
                     int index[3] = { i, j, k };
                     scalars->SetTuple(
                         submitImage->ComputePointId(index),
@@ -744,21 +762,20 @@ static OrthogonalCropResult GetSubmitResult(
         return result;
     }
 
-    if (removalMode == CropRemovalMode::RemoveInside) {
-        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitRemoveInsideUnsupported);
-        diagnostics.SetValidationMessage(
-            "Image submit with RemoveInside is intentionally blocked because it cannot preserve a contiguous derived volume without resampling.");
-        result.SetStatistics(diagnostics);
-        result.SetFailureReason(diagnostics.GetFailureReason());
-        result.SetMessage(diagnostics.GetValidationMessage());
-        return result;
-    }
-
     // submit 的体素 ROI 是 cropData 在 image index 空间的局部执行坐标；
-    // 它只服务本次 ExtractVOI / mask / 内存估算，不写回几何模型，避免和 input model bounds 混用。
+    // KeepInside 用它生成独立子体，RemoveInside 用它限制 full-volume 挖空范围。
     const auto snappedIndexBounds = GetSnappedIndexBounds(image, cropData);
-    const std::size_t outputVoxelCount = GetVoxelCountFromIndexBounds(snappedIndexBounds);
-    const std::size_t estimatedRamUsageBytes = outputVoxelCount * GetImageBytesPerVoxel(image);
+    int inputDims[3] = { 0, 0, 0 };
+    image->GetDimensions(inputDims);
+
+    const bool removeInside = removalMode == CropRemovalMode::RemoveInside;
+    const std::size_t fullVoxelCount = static_cast<std::size_t>(inputDims[0])
+        * static_cast<std::size_t>(inputDims[1])
+        * static_cast<std::size_t>(inputDims[2]);
+    const std::size_t roiVoxelCount = GetVoxelCountFromIndexBounds(snappedIndexBounds);
+    const std::size_t estimatedRamUsageBytes = removeInside
+        ? fullVoxelCount * (GetImageBytesPerVoxel(image) + sizeof(unsigned char))
+        : roiVoxelCount * GetImageBytesPerVoxel(image);
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
         diagnostics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
         diagnostics.SetValidationMessage("Estimated image submit memory usage exceeds currently available RAM.");
@@ -772,7 +789,14 @@ static OrthogonalCropResult GetSubmitResult(
     result.SetStatistics(diagnostics);
     result.SetFailureReason(diagnostics.GetFailureReason());
 
-    auto submitImage = GetExtractedImage(image, snappedIndexBounds);
+    vtkSmartPointer<vtkImageData> submitImage;
+    if (removeInside) {
+        submitImage = vtkSmartPointer<vtkImageData>::New();
+        submitImage->DeepCopy(image);
+    }
+    else {
+        submitImage = GetExtractedImage(image, snappedIndexBounds);
+    }
     if (!submitImage) {
         diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
         diagnostics.SetValidationMessage("Failed to build image submit image.");
@@ -781,7 +805,11 @@ static OrthogonalCropResult GetSubmitResult(
         result.SetMessage("Failed to build image submit image.");
         return result;
     }
-    SetSubmitOutsideBoxToBackground(submitImage, cropData);
+    SetSubmitRemovedVoxelsToBackground(
+        submitImage,
+        cropData,
+        removalMode,
+        snappedIndexBounds);
 
     auto submitMaskImage = ::GetMaskImage(
         image,
@@ -798,15 +826,17 @@ static OrthogonalCropResult GetSubmitResult(
     }
 
     CropDataModel submitCropData = cropData;
-    double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    submitImage->GetBounds(submitBounds);
-    const CropBoundsDouble6Array submitInputModelBounds = {
-        submitBounds[0], submitBounds[1],
-        submitBounds[2], submitBounds[3],
-        submitBounds[4], submitBounds[5]
-    };
-    submitCropData.SetBoxToInputModelMatrixFromBounds(submitInputModelBounds);
-    submitCropData.SetInputModelBounds(submitInputModelBounds);
+    if (!removeInside) {
+        double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        submitImage->GetBounds(submitBounds);
+        const CropBoundsDouble6Array submitInputModelBounds = {
+            submitBounds[0], submitBounds[1],
+            submitBounds[2], submitBounds[3],
+            submitBounds[4], submitBounds[5]
+        };
+        submitCropData.SetBoxToInputModelMatrixFromBounds(submitInputModelBounds);
+        submitCropData.SetInputModelBounds(submitInputModelBounds);
+    }
 
     result.SetSubmitImage(submitImage);
     result.SetMaskImage(submitMaskImage);
@@ -830,7 +860,9 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     std::string message;
     const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
     const bool allowPartialOverlap =
-        !isSubmit || request.GetRemovalMode() == CropRemovalMode::KeepInside;
+        !isSubmit
+        || request.GetRemovalMode() == CropRemovalMode::KeepInside
+        || request.GetRemovalMode() == CropRemovalMode::RemoveInside;
     if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
         auto statistics = GetAlgorithmDiagnostics(
             request.GetDataSource(),

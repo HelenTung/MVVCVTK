@@ -317,20 +317,31 @@ void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
 {
     auto key = targetService.get();
     auto state = key ? m_targetStates.find(key) : m_targetStates.end();
-    if (state != m_targetStates.end() && state->second.mainPreviewMapper) {
-        auto mapper = state->second.mainPreviewMapper;
-        mapper->RemoveAllClippingPlanes();
-        mapper->Modified();
-        state->second.mainPreviewMapper = nullptr;
-    }
 
     if (!targetService) {
+        if (state != m_targetStates.end()) {
+            state->second.mainPreviewMapper = nullptr;
+        }
         return;
     }
 
     auto actor = vtkActor::SafeDownCast(targetService->GetMainProp());
     if (!actor) {
+        if (state != m_targetStates.end()) {
+            state->second.mainPreviewMapper = nullptr;
+        }
         return;
+    }
+
+    auto mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
+    if (mapper
+        && state != m_targetStates.end()
+        && state->second.mainPreviewMapper == mapper) {
+        mapper->RemoveAllClippingPlanes();
+        mapper->Modified();
+    }
+    if (state != m_targetStates.end()) {
+        state->second.mainPreviewMapper = nullptr;
     }
 
     auto shaderProperty = actor->GetShaderProperty();

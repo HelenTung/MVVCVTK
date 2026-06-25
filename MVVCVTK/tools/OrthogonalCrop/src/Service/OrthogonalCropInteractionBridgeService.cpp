@@ -173,11 +173,6 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
         return false;
     }
 
-    if (m_currentRemovalMode != CropRemovalMode::KeepInside) {
-        std::cerr << "[Main] Orthogonal crop submit failed: RemoveInside preview does not support submit." << std::endl;
-        return false;
-    }
-
     if (!GetInputImage()) {
         std::cerr << "[Main] Orthogonal crop submit failed: image crop input is missing." << std::endl;
         return false;
