@@ -42,9 +42,6 @@
     <Filter Include="include\Utils">
       <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Math">
-      <UniqueIdentifier>{daf8e20e-8217-4b2c-87ab-8ad66f8d5a02}</UniqueIdentifier>
-    </Filter>
     <Filter Include="include\Interaction">
       <UniqueIdentifier>{359efad5-ad54-4936-be38-241b4bc599c2}</UniqueIdentifier>
     </Filter>
@@ -87,9 +84,6 @@
     </Filter>
     <Filter Include="tools\OrthogonalCrop\src\Strategies">
       <UniqueIdentifier>{22dc60c7-d8d7-47d6-91f4-40315e4967c4}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="src\Math">
-      <UniqueIdentifier>{934b87ca-873a-4a65-b1a7-54c92bb8f0c0}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Data">
       <UniqueIdentifier>{49da0bd7-4f2b-414d-8104-2a1bb54ed2f0}</UniqueIdentifier>

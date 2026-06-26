@@ -70,7 +70,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)include\Math;$(ProjectDir)tools\GapAnalysis\include;$(ProjectDir)tools\GapAnalysis\include\Service;$(ProjectDir)tools\GapAnalysis\include\Strategies;$(ProjectDir)tools\OrthogonalCrop\include;$(ProjectDir)tools\OrthogonalCrop\include\Service;$(ProjectDir)tools\OrthogonalCrop\include\Strategies;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Strategies;$(ProjectDir)include\Utils</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)tools\GapAnalysis\include;$(ProjectDir)tools\GapAnalysis\include\Service;$(ProjectDir)tools\GapAnalysis\include\Strategies;$(ProjectDir)tools\OrthogonalCrop\include;$(ProjectDir)tools\OrthogonalCrop\include\Service;$(ProjectDir)tools\OrthogonalCrop\include\Strategies;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Strategies;$(ProjectDir)include\Utils</ProjectIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
