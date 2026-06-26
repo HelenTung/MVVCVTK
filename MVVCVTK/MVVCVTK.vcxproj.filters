@@ -251,9 +251,6 @@
     <ClCompile Include="src\Utils\MemMappedFile.cpp">
       <Filter>src\Utils</Filter>
     </ClCompile>
-    <ClCompile Include="src\main\example.cpp">
-      <Filter>src\main</Filter>
-    </ClCompile>
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
