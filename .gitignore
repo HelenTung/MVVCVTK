@@ -373,6 +373,14 @@ FodyWeavers.xsd
 
 Local.props
 **/Local.props
+
+# Local agent / graphify outputs
+.graphify/
+**/.graphify/
+graphify-out/
+**/graphify-out/
+
 *.md
 *.patch
+*.json
 
