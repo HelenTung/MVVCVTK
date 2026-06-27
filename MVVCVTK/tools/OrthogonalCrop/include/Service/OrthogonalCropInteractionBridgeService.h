@@ -16,6 +16,7 @@
 // 6. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
 #include "OrthogonalCropWidgetStateController.h"
+#include "PlanarCropWidgetStateController.h"
 #include "OrthogonalCropCameraStateController.h"
 #include "OrthogonalCropBackendRouterService.h"
 #include "OrthogonalCropPreviewPlugService.h"
@@ -81,6 +82,9 @@ public:
     // 对应的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
 
+    // 对应的平面裁切模式 toggle 入口。
+    bool ToggleInteractivePlanarCrop();
+
     // 对应的显式退出入口。
     bool ExitInteractiveCrop();
 
@@ -109,6 +113,12 @@ private:
     // 响应 widget 交互回调，记录 world bounds/phase，并在 Released 时触发 preview。
     void HandleWidgetWorldBoundsChanged(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
 
+    // 响应平面 widget 交互回调，记录 world plane/phase，并在 Released 时触发 preview。
+    void HandleWidgetWorldPlaneChanged(
+        const CropVectorDouble3Array& worldOrigin,
+        const CropVectorDouble3Array& worldNormal,
+        CropInteractionPhase phase);
+
     // 把 active input model bounds 提升为 widget 所需的 world bounds。
     // image model 底层由 VTK physical-point API 表达。
     std::array<double, 6> GetActiveInputModelBoundsAsWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
@@ -128,8 +138,24 @@ private:
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) const;
 
+    // 基于当前平面 widget 组装一次 plane request。
+    OrthogonalCropRequest BuildPlaneRequest(
+        OrthogonalCropOperation operation,
+        OrthogonalCropDataSource dataSource) const;
+
+    // 根据当前几何类型选择 box 或 plane request 构造路径。
+    OrthogonalCropRequest BuildCurrentRequest(
+        OrthogonalCropOperation operation,
+        OrthogonalCropDataSource dataSource) const;
+
     // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
     void UpdatePreviewFromCurrentBounds();
+
+    // Box 模式保持原有 toggle 语义：同一侧再次触发表示关闭预览。
+    void ToggleBoxPreview(CropRemovalMode removalMode);
+
+    // Plane 模式把 1/2 视为显式选择法线侧预览，不复用 box 的再次触发关闭语义。
+    void ApplyPlanarPreview(CropRemovalMode removalMode);
 
     // 校验当前交互状态是否允许发起 image submit。
     bool CanApplySubmit() const;
@@ -179,6 +205,9 @@ private:
     // 当前是否处于裁切交互模式。
     bool m_cropInteractionEnabled = false;
 
+    // 当前裁切交互使用的几何类型。
+    OrthogonalCropGeometryType m_currentGeometryType = OrthogonalCropGeometryType::Box;
+
     // 当前 world bounds 是否已经初始化过。
     bool m_worldBoundsInitialized = false;
 
@@ -195,6 +224,15 @@ private:
     // 旋转后它只是外接范围，真实裁切姿态必须由 GetCurrentWorldBox() 重建。
     std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
+    // 当前平面 widget 的 world 中心点。
+    CropVectorDouble3Array m_currentWorldPlaneOrigin = { 0.0, 0.0, 0.0 };
+
+    // 当前平面 widget 的 world 法线。
+    CropVectorDouble3Array m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
+
+    // 当前平面矩形的 world 半尺寸，布局为 [halfWidth, halfHeight]。
+    std::array<double, 2> m_currentWorldPlaneHalfExtents = { 1.0, 1.0 };
+
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
     bool m_submitReloadPending = false;
 
@@ -209,6 +247,9 @@ private:
 
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。
     OrthogonalCropWidgetStateController m_widgetStateController;
+
+    // 只负责 vtkImplicitPlaneWidget2 生命周期与状态同步，不承担业务计算。
+    PlanarCropWidgetStateController m_planarWidgetStateController;
 
     // world / active input model 坐标互转的参考窗口服务。
     std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;

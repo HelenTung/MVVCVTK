@@ -156,6 +156,33 @@ public:
         m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
     }
 
+    // 返回 active input model 坐标系下的平面法线；法线正侧定义为 Inside。
+    const CropVectorDouble3Array& GetPlaneNormalInInputModel() const { return m_planeNormalInInputModel; }
+
+    // 写入 active input model 坐标系下的平面法线。
+    void SetPlaneNormalInInputModel(const CropVectorDouble3Array& planeNormalInInputModel)
+    {
+        m_planeNormalInInputModel = planeNormalInInputModel;
+    }
+
+    // 返回 active input model 坐标系下的平面中心。
+    const CropVectorDouble3Array& GetPlaneCenterInInputModel() const { return m_planeCenterInInputModel; }
+
+    // 写入 active input model 坐标系下的平面中心。
+    void SetPlaneCenterInInputModel(const CropVectorDouble3Array& planeCenterInInputModel)
+    {
+        m_planeCenterInInputModel = planeCenterInInputModel;
+    }
+
+    // 返回平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
+
+    // 写入平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    {
+        m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
+    }
+
     // 返回由 boxToInputModelMatrix 派生出的 active input model AABB。
     // image model 底层由 VTK physical-point API 表达；polyData input model 对应网格自身坐标。
     const CropBoundsDouble6Array& GetInputModelBounds() const { return m_inputModelBounds; }
@@ -192,9 +219,14 @@ public:
     }
 
 private:
-    // 保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
+    // Box 几何真源：保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
     // 旋转、缩放、平移都在这里，后端所有精确几何判断以它为准。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
+    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和矩形半尺寸。
+    // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
+    CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
+    CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
+    std::array<double, 2> m_planeHalfExtentsInInputModel = { 1.0, 1.0 };
     // 保存由 boxToInputModelMatrix 派生出的 active input model AABB；
     // 它用于快速排除、index 吸附和缓存键比较，不作为有向盒真源。
     std::array<double, 6> m_inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -213,6 +245,33 @@ public:
     void SetBoxToInputModelMatrixFromBounds(const CropBoundsDouble6Array& inputModelBounds)
     {
         m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
+    }
+
+    // 返回 active input model 坐标系下的平面法线；geometryType 为 Plane 时有效。
+    const CropVectorDouble3Array& GetPlaneNormalInInputModel() const { return m_planeNormalInInputModel; }
+
+    // 写入 active input model 坐标系下的平面法线。
+    void SetPlaneNormalInInputModel(const CropVectorDouble3Array& planeNormalInInputModel)
+    {
+        m_planeNormalInInputModel = planeNormalInInputModel;
+    }
+
+    // 返回 active input model 坐标系下的平面中心；geometryType 为 Plane 时有效。
+    const CropVectorDouble3Array& GetPlaneCenterInInputModel() const { return m_planeCenterInInputModel; }
+
+    // 写入 active input model 坐标系下的平面中心。
+    void SetPlaneCenterInInputModel(const CropVectorDouble3Array& planeCenterInInputModel)
+    {
+        m_planeCenterInInputModel = planeCenterInInputModel;
+    }
+
+    // 返回平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
+
+    // 写入平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    {
+        m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
     }
 
     // 返回 bridge 决定好的目标数据源；router 只按它执行，不再自行推断。
@@ -246,8 +305,13 @@ public:
     void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
-    // 标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
+    // Box 几何真源：标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
+    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和矩形半尺寸。
+    // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
+    CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
+    CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
+    std::array<double, 2> m_planeHalfExtentsInInputModel = { 1.0, 1.0 };
     // 本次请求的目标数据源。
     OrthogonalCropDataSource m_dataSource = OrthogonalCropDataSource::ImageData;
     // 本次请求的业务动作；None 表示还没有可执行目标，避免缺输入时伪装成 preview。

@@ -10,6 +10,7 @@
 // 图像 / 体渲染 / 网格的数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
 #include "OrthogonalCropAlgorithm.h"
+#include "PlanarCropAlgorithm.h"
 
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
@@ -50,6 +51,9 @@ public:
 private:
     // Box 目前是唯一实现的裁切类型，这里集中处理动作 + 数据源组合。
     OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
+
+    // Plane 复用当前动作 + 数据源组合，实际执行交给 PlanarCropAlgorithm。
+    OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
 
     // 读取 image model bounds。
     std::array<double, 6> GetImageModelBounds() const;

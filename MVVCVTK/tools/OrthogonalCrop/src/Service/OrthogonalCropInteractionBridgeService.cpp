@@ -10,13 +10,18 @@
 #include <vtkActor.h>
 #include <vtkBoundingBox.h>
 #include <vtkImageData.h>
+#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkTransform.h>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <utility>
+
+static constexpr double kPlanarInitialRectangleExtentScale = 0.35;
+static constexpr double kPlaneVectorEpsilon = 1e-12;
 
 OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
@@ -25,6 +30,14 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
     m_widgetStateController.SetWorldBoundsChangedCallback(
         [this](const std::array<double, 6>& worldBounds, CropInteractionPhase phase) {
             HandleWidgetWorldBoundsChanged(worldBounds, phase);
+        });
+
+    m_planarWidgetStateController.SetWorldPlaneChangedCallback(
+        [this](
+            const CropVectorDouble3Array& worldOrigin,
+            const CropVectorDouble3Array& worldNormal,
+            CropInteractionPhase phase) {
+            HandleWidgetWorldPlaneChanged(worldOrigin, worldNormal, phase);
         });
 }
 
@@ -59,6 +72,7 @@ void OrthogonalCropInteractionBridgeService::SetPrimaryInteractor(vtkRenderWindo
 {
     m_primaryInteractor = interactor;
     m_widgetStateController.SetInteractor(interactor);
+    m_planarWidgetStateController.SetInteractor(interactor);
 }
 
 void OrthogonalCropInteractionBridgeService::SetReferenceRenderer(vtkRenderer* renderer)
@@ -106,7 +120,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
 
     m_cameraStateController.Save(m_referenceRenderer);
 
-    const auto submitRequest = BuildBoxRequest(
+    const auto submitRequest = BuildCurrentRequest(
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
     auto submitResult = m_backend.GetResult(submitRequest);
@@ -133,6 +147,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     m_pendingSubmitOverlayResult = submitResult;
     m_submitReloadPending = true;
     m_widgetStateController.SetEnabled(false);
+    m_planarWidgetStateController.SetEnabled(false);
 
     if (!m_submitReloadHandler(
             std::move(submitImage),
@@ -144,7 +159,12 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
         m_submitReloadPending = false;
         m_cameraStateController.Clear();
         if (m_cropInteractionEnabled) {
-            m_widgetStateController.SetEnabled(true);
+            if (m_currentGeometryType == OrthogonalCropGeometryType::Plane) {
+                m_planarWidgetStateController.SetEnabled(true);
+            }
+            else {
+                m_widgetStateController.SetEnabled(true);
+            }
         }
     }
 }
@@ -182,7 +202,12 @@ void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool suc
         m_submitReloadPending = false;
         m_cameraStateController.Clear();
         if (m_cropInteractionEnabled) {
-            m_widgetStateController.SetEnabled(true);
+            if (m_currentGeometryType == OrthogonalCropGeometryType::Plane) {
+                m_planarWidgetStateController.SetEnabled(true);
+            }
+            else {
+                m_widgetStateController.SetEnabled(true);
+            }
         }
         return;
     }
@@ -213,8 +238,13 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
     }
 
     if (m_cropInteractionEnabled) {
-        ExitInteractiveCrop();
-        return true;
+        const auto previousGeometryType = m_currentGeometryType;
+        if (!ExitInteractiveCrop()) {
+            return false;
+        }
+        if (previousGeometryType == OrthogonalCropGeometryType::Box) {
+            return true;
+        }
     }
 
     if (!m_primaryInteractor) {
@@ -236,12 +266,76 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
         return false;
     }
 
+    m_planarWidgetStateController.SetEnabled(false);
+    m_currentGeometryType = OrthogonalCropGeometryType::Box;
     m_cropInteractionEnabled = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
     RestorePreviewRenderTargets();
     std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, dataSource = "
         << GetDataSourceText(m_backend.GetActiveDataSource())
         << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press Ctrl+3 to apply submit; press O or Esc to exit." << std::endl;
+    return true;
+}
+
+bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
+{
+    if (!EnsureInputReady()) {
+        std::cerr << "[Main] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
+        return false;
+    }
+
+    if (m_cropInteractionEnabled) {
+        const auto previousGeometryType = m_currentGeometryType;
+        if (!ExitInteractiveCrop()) {
+            return false;
+        }
+        if (previousGeometryType == OrthogonalCropGeometryType::Plane) {
+            return true;
+        }
+    }
+
+    if (!m_primaryInteractor) {
+        std::cerr << "[Main] Planar crop widget init failed: primary interactor missing." << std::endl;
+        return false;
+    }
+
+    const auto activeWorldBounds = GetActiveWorldBounds();
+    const std::array<double, 3> activeWorldDimensions = {
+        activeWorldBounds[1] - activeWorldBounds[0],
+        activeWorldBounds[3] - activeWorldBounds[2],
+        activeWorldBounds[5] - activeWorldBounds[4]
+    };
+    m_currentWorldPlaneOrigin = {
+        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
+        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
+        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
+    };
+    m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
+    m_currentWorldPlaneHalfExtents = {
+        std::max(activeWorldDimensions[0] * kPlanarInitialRectangleExtentScale, kPlaneVectorEpsilon),
+        std::max(activeWorldDimensions[1] * kPlanarInitialRectangleExtentScale, kPlaneVectorEpsilon)
+    };
+    // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
+    // 真实裁切矩形尺寸由 m_currentWorldPlaneHalfExtents 下发给 request。
+    m_currentWorldBounds = activeWorldBounds;
+    m_worldBoundsInitialized = true;
+
+    m_widgetStateController.SetEnabled(false);
+    m_planarWidgetStateController.SetInteractor(m_primaryInteractor);
+    m_planarWidgetStateController.SetReferenceWorldBounds(activeWorldBounds);
+    m_planarWidgetStateController.SetWidgetWorldPlane(m_currentWorldPlaneOrigin, m_currentWorldPlaneNormal);
+    if (!m_planarWidgetStateController.SetEnabled(true)) {
+        std::cerr << "[Main] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
+        return false;
+    }
+
+    m_currentGeometryType = OrthogonalCropGeometryType::Plane;
+    m_cropInteractionEnabled = true;
+    m_lastInteractionPhase = CropInteractionPhase::Released;
+    RestorePreviewRenderTargets();
+    std::cout << "[Main] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
+        << GetDataSourceText(m_backend.GetActiveDataSource())
+        << ". Press 1 to keep normal-side preview, press 2 to remove normal-side preview, press Ctrl+3 to apply submit; press P or Esc to exit." << std::endl;
     return true;
 }
 
@@ -257,6 +351,7 @@ bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
     }
 
     m_widgetStateController.SetEnabled(false);
+    m_planarWidgetStateController.SetEnabled(false);
     m_submitReloadPending = false;
     m_cropInteractionEnabled = false;
     m_previewEnabled = false;
@@ -323,13 +418,31 @@ void OrthogonalCropInteractionBridgeService::HandleWidgetWorldBoundsChanged(
     const std::array<double, 6>& worldBounds,
     CropInteractionPhase phase)
 {
-    if (!m_cropInteractionEnabled) {
+    if (!m_cropInteractionEnabled || m_currentGeometryType != OrthogonalCropGeometryType::Box) {
         return;
     }
 
     // 交互过程中始终记录最新 world AABB 和 phase，
     // 但只在 Released 时触发 preview，保持“拖拽只更新显示状态，释放后再统一跑后端”的既有流程。
     m_currentWorldBounds = worldBounds;
+    m_worldBoundsInitialized = true;
+    m_lastInteractionPhase = phase;
+    if (m_previewEnabled && phase == CropInteractionPhase::Released) {
+        UpdatePreviewFromCurrentBounds();
+    }
+}
+
+void OrthogonalCropInteractionBridgeService::HandleWidgetWorldPlaneChanged(
+    const CropVectorDouble3Array& worldOrigin,
+    const CropVectorDouble3Array& worldNormal,
+    CropInteractionPhase phase)
+{
+    if (!m_cropInteractionEnabled || m_currentGeometryType != OrthogonalCropGeometryType::Plane) {
+        return;
+    }
+
+    m_currentWorldPlaneOrigin = worldOrigin;
+    m_currentWorldPlaneNormal = worldNormal;
     m_worldBoundsInitialized = true;
     m_lastInteractionPhase = phase;
     if (m_previewEnabled && phase == CropInteractionPhase::Released) {
@@ -478,6 +591,137 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
     return boxRequest;
 }
 
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPlaneRequest(
+    OrthogonalCropOperation operation,
+    OrthogonalCropDataSource dataSource) const
+{
+    auto planeRequest = m_backend.GetDefaultRequest();
+    planeRequest.SetDataSource(dataSource);
+    planeRequest.SetOperation(operation);
+    planeRequest.SetGeometryType(OrthogonalCropGeometryType::Plane);
+    planeRequest.SetRemovalMode(m_currentRemovalMode);
+
+    CropVectorDouble3Array worldOrigin = m_currentWorldPlaneOrigin;
+    CropVectorDouble3Array worldNormal = m_currentWorldPlaneNormal;
+    if (m_planarWidgetStateController.GetCurrentWorldPlane(worldOrigin, worldNormal)) {
+        // 以 widget controller 的即时状态为准；缓存值只作为 widget 不可读时的兜底。
+    }
+
+    auto worldToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToActiveInputModelMatrix->DeepCopy(GetWorldToActiveInputModelMatrix().data());
+
+    const double worldOriginPoint[4] = { worldOrigin[0], worldOrigin[1], worldOrigin[2], 1.0 };
+    double inputModelOriginPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+    worldToActiveInputModelMatrix->MultiplyPoint(worldOriginPoint, inputModelOriginPoint);
+    const double invW = std::abs(inputModelOriginPoint[3]) > kPlaneVectorEpsilon
+        ? 1.0 / inputModelOriginPoint[3]
+        : 1.0;
+
+    CropVectorDouble3Array planeCenterInInputModel = {
+        inputModelOriginPoint[0] * invW,
+        inputModelOriginPoint[1] * invW,
+        inputModelOriginPoint[2] * invW
+    };
+
+    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(worldToActiveInputModelMatrix, activeInputModelToWorldMatrix);
+    activeInputModelToWorldMatrix->Transpose();
+
+    const double worldNormalVector[4] = { worldNormal[0], worldNormal[1], worldNormal[2], 0.0 };
+    double inputModelNormalVector[4] = { 0.0, 0.0, 1.0, 0.0 };
+    activeInputModelToWorldMatrix->MultiplyPoint(worldNormalVector, inputModelNormalVector);
+
+    CropVectorDouble3Array planeNormalInInputModel = {
+        inputModelNormalVector[0],
+        inputModelNormalVector[1],
+        inputModelNormalVector[2]
+    };
+    if (vtkMath::Normalize(planeNormalInInputModel.data()) <= kPlaneVectorEpsilon) {
+        planeNormalInInputModel = { 0.0, 0.0, 1.0 };
+    }
+
+    double worldNormalData[3] = { worldNormal[0], worldNormal[1], worldNormal[2] };
+    if (vtkMath::Normalize(worldNormalData) <= kPlaneVectorEpsilon) {
+        worldNormalData[0] = 0.0;
+        worldNormalData[1] = 0.0;
+        worldNormalData[2] = 1.0;
+    }
+
+    double referenceUp[3] = { 0.0, 1.0, 0.0 };
+    if (std::abs(vtkMath::Dot(worldNormalData, referenceUp)) > 0.99) {
+        referenceUp[0] = 0.0;
+        referenceUp[1] = 0.0;
+        referenceUp[2] = 1.0;
+    }
+
+    double worldPlaneAxisWidth[3] = { 0.0, 0.0, 0.0 };
+    double worldPlaneAxisHeight[3] = { 0.0, 0.0, 0.0 };
+    vtkMath::Cross(worldNormalData, referenceUp, worldPlaneAxisWidth);
+    if (vtkMath::Normalize(worldPlaneAxisWidth) <= kPlaneVectorEpsilon) {
+        worldPlaneAxisWidth[0] = 1.0;
+        worldPlaneAxisWidth[1] = 0.0;
+        worldPlaneAxisWidth[2] = 0.0;
+    }
+    vtkMath::Cross(worldNormalData, worldPlaneAxisWidth, worldPlaneAxisHeight);
+    if (vtkMath::Normalize(worldPlaneAxisHeight) <= kPlaneVectorEpsilon) {
+        worldPlaneAxisHeight[0] = 0.0;
+        worldPlaneAxisHeight[1] = 1.0;
+        worldPlaneAxisHeight[2] = 0.0;
+    }
+
+    double worldAxisWidthPoint[4] = {
+        worldOrigin[0] + worldPlaneAxisWidth[0] * m_currentWorldPlaneHalfExtents[0],
+        worldOrigin[1] + worldPlaneAxisWidth[1] * m_currentWorldPlaneHalfExtents[0],
+        worldOrigin[2] + worldPlaneAxisWidth[2] * m_currentWorldPlaneHalfExtents[0],
+        1.0
+    };
+    double worldAxisHeightPoint[4] = {
+        worldOrigin[0] + worldPlaneAxisHeight[0] * m_currentWorldPlaneHalfExtents[1],
+        worldOrigin[1] + worldPlaneAxisHeight[1] * m_currentWorldPlaneHalfExtents[1],
+        worldOrigin[2] + worldPlaneAxisHeight[2] * m_currentWorldPlaneHalfExtents[1],
+        1.0
+    };
+    double inputModelAxisWidthPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+    double inputModelAxisHeightPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+    worldToActiveInputModelMatrix->MultiplyPoint(worldAxisWidthPoint, inputModelAxisWidthPoint);
+    worldToActiveInputModelMatrix->MultiplyPoint(worldAxisHeightPoint, inputModelAxisHeightPoint);
+
+    const double widthInvW = std::abs(inputModelAxisWidthPoint[3]) > kPlaneVectorEpsilon
+        ? 1.0 / inputModelAxisWidthPoint[3]
+        : 1.0;
+    const double heightInvW = std::abs(inputModelAxisHeightPoint[3]) > kPlaneVectorEpsilon
+        ? 1.0 / inputModelAxisHeightPoint[3]
+        : 1.0;
+    const double inputModelAxisWidthVector[3] = {
+        inputModelAxisWidthPoint[0] * widthInvW - planeCenterInInputModel[0],
+        inputModelAxisWidthPoint[1] * widthInvW - planeCenterInInputModel[1],
+        inputModelAxisWidthPoint[2] * widthInvW - planeCenterInInputModel[2]
+    };
+    const double inputModelAxisHeightVector[3] = {
+        inputModelAxisHeightPoint[0] * heightInvW - planeCenterInInputModel[0],
+        inputModelAxisHeightPoint[1] * heightInvW - planeCenterInInputModel[1],
+        inputModelAxisHeightPoint[2] * heightInvW - planeCenterInInputModel[2]
+    };
+    const std::array<double, 2> planeHalfExtentsInInputModel = {
+        std::max(vtkMath::Norm(inputModelAxisWidthVector), kPlaneVectorEpsilon),
+        std::max(vtkMath::Norm(inputModelAxisHeightVector), kPlaneVectorEpsilon)
+    };
+
+    planeRequest.SetPlaneCenterInInputModel(planeCenterInInputModel);
+    planeRequest.SetPlaneNormalInInputModel(planeNormalInInputModel);
+    planeRequest.SetPlaneHalfExtentsInInputModel(planeHalfExtentsInInputModel);
+    return planeRequest;
+}
+
+OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildCurrentRequest(
+    OrthogonalCropOperation operation,
+    OrthogonalCropDataSource dataSource) const
+{
+    return m_currentGeometryType == OrthogonalCropGeometryType::Plane
+        ? BuildPlaneRequest(operation, dataSource)
+        : BuildBoxRequest(operation, dataSource);
+}
+
 void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds()
 {
     if (!m_worldBoundsInitialized) {
@@ -498,7 +742,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds()
     OrthogonalCropResult volumeResult;
     bool hasVolumeResult = false;
     if (GetInputImage() && hasMain3DPreviewTarget) {
-        const auto volumeRequest = BuildBoxRequest(
+        const auto volumeRequest = BuildCurrentRequest(
             OrthogonalCropOperation::Preview,
             OrthogonalCropDataSource::VolumeData);
         volumeResult = m_backend.GetResult(volumeRequest);
@@ -529,7 +773,7 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds()
             if (auto polyData = vtkPolyData::SafeDownCast(mapper->GetInput())) {
                 m_backend.SetInputPolyData(polyData);
 
-                const auto polyRequest = BuildBoxRequest(
+                const auto polyRequest = BuildCurrentRequest(
                     OrthogonalCropOperation::Preview,
                     OrthogonalCropDataSource::PolyData);
                 polyResult = m_backend.GetResult(polyRequest);
@@ -562,9 +806,19 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromCurrentBounds()
 
 void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode removalMode)
 {
-    // Toggle 语义固定为：
-    // - 同模式再次触发：关闭 preview，并恢复主模型全量显示
-    // - 切到新模式：更新 removal mode；若当前不在 dragging，则立即刷新一次 preview
+    if (m_currentGeometryType == OrthogonalCropGeometryType::Plane) {
+        ApplyPlanarPreview(removalMode);
+        return;
+    }
+
+    ToggleBoxPreview(removalMode);
+}
+
+void OrthogonalCropInteractionBridgeService::ToggleBoxPreview(CropRemovalMode removalMode)
+{
+    // Box 继续保留旧 toggle 语义：
+    // A. 同模式再次触发：关闭 preview，并恢复主模型全量显示
+    // B. 切到新模式：更新 removal mode；若当前不在 dragging，则立即刷新一次 preview
     if (!m_cropInteractionEnabled) {
         return;
     }
@@ -582,6 +836,27 @@ void OrthogonalCropInteractionBridgeService::TogglePreview(CropRemovalMode remov
     if (m_cropInteractionEnabled
         && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
         // 非拖拽阶段才立即刷新；拖拽中依旧等待 EndInteractionEvent 统一触发。
+        UpdatePreviewFromCurrentBounds();
+    }
+}
+
+void OrthogonalCropInteractionBridgeService::ApplyPlanarPreview(CropRemovalMode removalMode)
+{
+    // Plane 模式下 1/2 是明确的半空间选择；
+    // 再次按下当前激活的模式键表示关闭预览并恢复主模型，给用户明确的复原入口。
+    if (!m_cropInteractionEnabled || m_currentGeometryType != OrthogonalCropGeometryType::Plane) {
+        return;
+    }
+
+    if (m_previewEnabled && m_currentRemovalMode == removalMode) {
+        m_previewEnabled = false;
+        RestorePreviewRenderTargets();
+        return;
+    }
+
+    m_previewEnabled = true;
+    m_currentRemovalMode = removalMode;
+    if (m_lastInteractionPhase != CropInteractionPhase::Dragging) {
         UpdatePreviewFromCurrentBounds();
     }
 }

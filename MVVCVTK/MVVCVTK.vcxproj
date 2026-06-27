@@ -179,6 +179,7 @@
     <ClInclude Include="include\Render\StrategyFactory.h" />
     <ClInclude Include="tools\GapAnalysis\include\SurfaceRefiner.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h" />
+    <ClInclude Include="tools\OrthogonalCrop\include\PlanarCropAlgorithm.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
@@ -188,6 +189,7 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropCameraStateController.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h" />
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\PlanarCropWidgetStateController.h" />
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h" />
     <ClInclude Include="include\Service\VolumeAnalysisService.h" />
     <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h" />
@@ -203,11 +205,13 @@
     <ClCompile Include="src\Data\DataConverters.cpp" />
     <ClCompile Include="src\Data\DataManager.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\OrthogonalCropAlgorithm.cpp" />
+    <ClCompile Include="tools\OrthogonalCrop\src\PlanarCropAlgorithm.cpp" />
     <ClCompile Include="src\Utils\ImageProcessor.cpp" />
     <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropCameraStateController.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp" />
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\PlanarCropWidgetStateController.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp" />
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp" />
     <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp" />

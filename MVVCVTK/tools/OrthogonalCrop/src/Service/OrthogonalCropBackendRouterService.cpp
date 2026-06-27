@@ -104,11 +104,14 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetResult(const Orthogo
     case OrthogonalCropGeometryType::Box:
         return GetBoxResult(request);
 
+    case OrthogonalCropGeometryType::Plane:
+        return GetPlaneResult(request);
+
     default:
         return GetRouterFailureResult(
             request,
             OrthogonalCropFailureReason::UnsupportedBackend,
-            "Router supports only Box crop geometry.");
+            "Router has no executable path for this crop geometry.");
     }
 }
 
@@ -171,6 +174,67 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(const Orth
         request,
         OrthogonalCropFailureReason::UnsupportedBackend,
         "Router has no executable path for this crop route.");
+}
+
+OrthogonalCropResult OrthogonalCropBackendRouterService::GetPlaneResult(const OrthogonalCropRequest& request) const
+{
+    // Plane 路由放行与 Box 相同的主链路：体预览、网格预览、图像提交。
+    switch (request.GetOperation()) {
+    case OrthogonalCropOperation::Preview:
+        switch (request.GetDataSource()) {
+        case OrthogonalCropDataSource::VolumeData:
+            if (!GetInputImage()) {
+                return GetRouterFailureResult(
+                    request,
+                    OrthogonalCropFailureReason::InputImageMissing,
+                    "Image-backed planar crop route requires image input data.");
+            }
+            return PlanarCropAlgorithm::GetResult(
+                m_inputImage,
+                request,
+                GetSystemAvailableRamBytes());
+
+        case OrthogonalCropDataSource::PolyData:
+            if (!GetInputPolyData()) {
+                return GetRouterFailureResult(
+                    request,
+                    OrthogonalCropFailureReason::InputPolyDataMissing,
+                    "PolyData planar crop route requires polydata input data.");
+            }
+            return PlanarCropAlgorithm::GetResult(m_inputPolyData, request);
+
+        default:
+            break;
+        }
+        break;
+
+    case OrthogonalCropOperation::Submit:
+        switch (request.GetDataSource()) {
+        case OrthogonalCropDataSource::ImageData:
+            if (!GetInputImage()) {
+                return GetRouterFailureResult(
+                    request,
+                    OrthogonalCropFailureReason::InputImageMissing,
+                    "Image-backed planar crop route requires image input data.");
+            }
+            return PlanarCropAlgorithm::GetResult(
+                m_inputImage,
+                request,
+                GetSystemAvailableRamBytes());
+
+        default:
+            break;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return GetRouterFailureResult(
+        request,
+        OrthogonalCropFailureReason::UnsupportedBackend,
+        "Router has no executable path for this planar crop route.");
 }
 
 std::array<double, 6> OrthogonalCropBackendRouterService::GetImageModelBounds() const

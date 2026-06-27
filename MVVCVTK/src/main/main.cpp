@@ -46,6 +46,10 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include <thread>
 #include <vector>
 
+namespace {
+constexpr double kCropHotkeyObserverPriority = 1.0;
+}
+
 class OrthogonalCropHotkeyObserver : public vtkCommand {
 public:
     static OrthogonalCropHotkeyObserver* New() { return new OrthogonalCropHotkeyObserver; }
@@ -66,12 +70,14 @@ public:
         const char keyCode = iren->GetKeyCode();
         const bool isControlPressed = iren->GetControlKey() != 0;
         const bool isCropToggleKey = keyCode == 'o' || keyCode == 'O' || keySym == "o" || keySym == "O";
+        const bool isPlanarCropToggleKey = keyCode == 'p' || keyCode == 'P' || keySym == "p" || keySym == "P";
         const bool isInsidePreviewKey = keyCode == '1' || keySym == "1";
         const bool isOutsidePreviewKey = keyCode == '2' || keySym == "2";
         const bool isSubmitKeyCode = keyCode == '3' || keySym == "3";
         const bool isSubmitKey = isSubmitKeyCode && isControlPressed;
         const bool shouldBlockVtkStereoKey = isSubmitKeyCode && !isControlPressed;
         const bool isManagedCropHotkey = isCropToggleKey
+            || isPlanarCropToggleKey
             || keySym == "Escape"
             || isInsidePreviewKey
             || isOutsidePreviewKey
@@ -87,29 +93,44 @@ public:
             if (isCropToggleKey && !m_cropToggleKeyDown) {
                 m_cropToggleKeyDown = true;
                 orthogonalCropBridge->ToggleInteractiveCrop();
+                this->AbortFlagOn();
+                return;
+            }
+
+            if (isPlanarCropToggleKey && !m_planarCropToggleKeyDown) {
+                m_planarCropToggleKeyDown = true;
+                orthogonalCropBridge->ToggleInteractivePlanarCrop();
+                this->AbortFlagOn();
                 return;
             }
 
             if (keySym == "Escape") {
                 orthogonalCropBridge->ExitInteractiveCrop();
+                this->AbortFlagOn();
                 return;
             }
 
-            if (isInsidePreviewKey && !m_insidePreviewKeyDown) {
-                m_insidePreviewKeyDown = true;
+            if (isInsidePreviewKey) {
                 orthogonalCropBridge->TogglePreview(CropRemovalMode::KeepInside);
+                this->AbortFlagOn();
                 return;
             }
 
-            if (isOutsidePreviewKey && !m_outsidePreviewKeyDown) {
-                m_outsidePreviewKeyDown = true;
+            if (isOutsidePreviewKey) {
                 orthogonalCropBridge->TogglePreview(CropRemovalMode::RemoveInside);
+                this->AbortFlagOn();
                 return;
             }
 
             if (isSubmitKey && !m_submitKeyDown) {
                 m_submitKeyDown = true;
                 orthogonalCropBridge->ApplySubmit();
+                this->AbortFlagOn();
+                return;
+            }
+
+            if (isManagedCropHotkey) {
+                this->AbortFlagOn();
                 return;
             }
         }
@@ -117,21 +138,29 @@ public:
         if (eventId == vtkCommand::KeyReleaseEvent) {
             if (isCropToggleKey) {
                 m_cropToggleKeyDown = false;
+                this->AbortFlagOn();
+                return;
+            }
+
+            if (isPlanarCropToggleKey) {
+                m_planarCropToggleKeyDown = false;
+                this->AbortFlagOn();
                 return;
             }
 
             if (isInsidePreviewKey) {
-                m_insidePreviewKeyDown = false;
+                this->AbortFlagOn();
                 return;
             }
 
             if (isOutsidePreviewKey) {
-                m_outsidePreviewKeyDown = false;
+                this->AbortFlagOn();
                 return;
             }
 
             if (isSubmitKeyCode) {
                 m_submitKeyDown = false;
+                this->AbortFlagOn();
                 return;
             }
         }
@@ -139,8 +168,7 @@ public:
 
 private:
     bool m_cropToggleKeyDown = false;
-    bool m_insidePreviewKeyDown = false;
-    bool m_outsidePreviewKeyDown = false;
+    bool m_planarCropToggleKeyDown = false;
     bool m_submitKeyDown = false;
 };
 
@@ -477,7 +505,7 @@ int main()
                 std::cerr << "[Main] Orthogonal crop init failed: input image missing." << std::endl;
             }
             else {
-                std::cout << "[Main] Orthogonal crop armed. Press O to toggle crop box, Esc to exit crop mode, press 1 toggle inside preview, press 2 toggle outside preview, press Ctrl+3 to apply submit." << std::endl;
+                std::cout << "[Main] Crop tools armed. Press O to toggle crop box, press P to toggle planar crop, Esc to exit crop mode, press 1 to keep inside/normal-side preview, press 2 to remove inside/normal-side preview, press Ctrl+3 to apply submit." << std::endl;
             }
 
             // GapAnalysis 的启动由 contextB 上的 Timer observer 统一处理，
@@ -550,21 +578,21 @@ int main()
     auto orthogonalCropHotkeyObserver = vtkSmartPointer<OrthogonalCropHotkeyObserver>::New();
     orthogonalCropHotkeyObserver->orthogonalCropBridge = orthogonalCropBridge;
 
-    contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
-    contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
-    contextA->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
-    contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
-    contextB->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
-    contextB->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
-    contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
-    contextC->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
-    contextC->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
-    contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
-    contextD->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
-    contextD->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
-    contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver);
-    contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver);
-    contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, 1.0f);
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextA->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextA->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextB->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextB->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextB->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextC->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextC->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextC->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextD->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextD->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextD->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextE->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
+    contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
 
     //auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
     //gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
@@ -577,7 +605,7 @@ int main()
     //contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
-        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | Esc = exit crop mode | 1 = toggle inside preview | 2 = toggle outside preview | Ctrl+3 = apply submit\n"
+        << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | P = toggle planar crop | Esc = exit crop mode | 1 = keep inside/normal-side preview | 2 = remove inside/normal-side preview | Ctrl+3 = apply submit\n"
         << "Iso test: after load succeeds, main.cpp will update normalized iso by +0.1 every 24 timer ticks and print each change.\n";
 
     // contextB 持有主事件循环（其他窗口通过共享 Timer 驱动）

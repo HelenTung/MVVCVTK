@@ -42,7 +42,15 @@ private:
         vtkPolyDataMapper* mainPreviewMapper = nullptr;
     };
 
+    void RestoreVolumePreview(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
+
+    void ClearVolumeRemoveInsideState(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
+
     vtkSmartPointer<vtkPlaneCollection> BuildWorldClippingPlanes(
+        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const OrthogonalCropResult& previewResult) const;
+
+    vtkSmartPointer<vtkPlaneCollection> BuildPlaneWorldClippingPlanes(
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
@@ -62,6 +70,11 @@ private:
         vtkGPUVolumeRayCastMapper* volumeMapper,
         const OrthogonalCropResult& previewResult) const;
 
+    bool ApplyVolumePlaneRemoveInsidePreview(
+        vtkVolume* volume,
+        vtkGPUVolumeRayCastMapper* volumeMapper,
+        const OrthogonalCropResult& previewResult) const;
+
     void RestorePolyDataPreview(const std::shared_ptr<AbstractInteractiveService>& targetService);
 
     bool ApplyPolyDataPreview(
@@ -76,6 +89,12 @@ private:
         const OrthogonalCropResult& previewResult) const;
 
     bool ApplyPolyDataRemoveInsidePreview(
+        vtkActor* actor,
+        vtkPolyDataMapper* mapper,
+        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const OrthogonalCropResult& previewResult) const;
+
+    bool ApplyPolyDataPlaneRemoveInsidePreview(
         vtkActor* actor,
         vtkPolyDataMapper* mapper,
         const std::shared_ptr<AbstractInteractiveService>& referenceService,

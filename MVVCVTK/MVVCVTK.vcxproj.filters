@@ -132,6 +132,9 @@
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h">
       <Filter>tools\OrthogonalCrop\include</Filter>
     </ClInclude>
+    <ClInclude Include="tools\OrthogonalCrop\include\PlanarCropAlgorithm.h">
+      <Filter>tools\OrthogonalCrop\include</Filter>
+    </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>tools\OrthogonalCrop\include</Filter>
     </ClInclude>
@@ -207,6 +210,9 @@
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
+    <ClInclude Include="tools\OrthogonalCrop\include\Service\PlanarCropWidgetStateController.h">
+      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    </ClInclude>
     <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h">
       <Filter>tools\OrthogonalCrop\include\Service</Filter>
     </ClInclude>
@@ -278,6 +284,9 @@
     <ClCompile Include="tools\OrthogonalCrop\src\OrthogonalCropAlgorithm.cpp">
       <Filter>tools\OrthogonalCrop\src</Filter>
     </ClCompile>
+    <ClCompile Include="tools\OrthogonalCrop\src\PlanarCropAlgorithm.cpp">
+      <Filter>tools\OrthogonalCrop\src</Filter>
+    </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
@@ -285,6 +294,9 @@
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">
+      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="tools\OrthogonalCrop\src\Service\PlanarCropWidgetStateController.cpp">
       <Filter>tools\OrthogonalCrop\src\Service</Filter>
     </ClCompile>
     <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp">
