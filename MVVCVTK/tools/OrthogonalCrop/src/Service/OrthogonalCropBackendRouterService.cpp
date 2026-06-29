@@ -34,6 +34,11 @@ void OrthogonalCropBackendRouterService::SetInputPolyData(vtkSmartPointer<vtkPol
     m_inputPolyData = std::move(polyData);
 }
 
+void OrthogonalCropBackendRouterService::ClearInputPolyData()
+{
+    m_inputPolyData = nullptr;
+}
+
 vtkSmartPointer<vtkPolyData> OrthogonalCropBackendRouterService::GetInputPolyData() const
 {
     return m_inputPolyData;

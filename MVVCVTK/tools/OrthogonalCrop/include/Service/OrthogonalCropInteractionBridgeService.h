@@ -10,8 +10,8 @@
 // 交互主链路：
 // 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
 // 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
-// 3. Released 或显式切换预览时，BuildBoxRequest 把 widget world 有向盒折回当前输入模型 request
-// 4. UpdatePreviewFromCurrentBounds 按显式输入分别请求体渲染 / 网格结果
+// 3. Released 或显式切换预览时，按当前几何调用 BuildBoxRequest / BuildPlaneRequest
+// 4. Box / Plane 各自刷新入口构造本几何 request，再按显式数据源请求体渲染 / 网格结果
 // 5. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
 // 6. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
@@ -143,18 +143,21 @@ private:
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) const;
 
-    // 根据当前几何类型选择 box 或 plane request 构造路径。
-    OrthogonalCropRequest BuildCurrentRequest(
-        OrthogonalCropOperation operation,
-        OrthogonalCropDataSource dataSource) const;
+    // Box 模式执行一次预览刷新：只使用 BuildBoxRequest 构造预览请求。
+    void UpdateBoxPreviewFromCurrentBounds();
 
-    // 统一执行一次预览刷新：构建 request、拿结果、投递接管层、刷新窗口。
-    void UpdatePreviewFromCurrentBounds();
+    // Plane 模式执行一次预览刷新：只使用 BuildPlaneRequest 构造预览请求。
+    void UpdatePlanePreviewFromCurrentPlane();
+
+    // 只消费已经构造好的预览请求；这里不再判断当前几何类型。
+    void UpdatePreviewFromRequests(
+        const OrthogonalCropRequest& volumeRequest,
+        const OrthogonalCropRequest& polyDataRequest);
 
     // Box 模式保持原有 toggle 语义：同一侧再次触发表示关闭预览。
     void ToggleBoxPreview(CropRemovalMode removalMode);
 
-    // Plane 模式把 1/2 视为显式选择法线侧预览，不复用 box 的再次触发关闭语义。
+    // Plane 模式把 1/2 视为显式选择法线侧预览；同侧再次触发表示关闭预览。
     void ApplyPlanarPreview(CropRemovalMode removalMode);
 
     // 校验当前交互状态是否允许发起 image submit。
@@ -177,6 +180,9 @@ private:
     // 退出 preview 或退出交互模式时恢复 overlay，并把主模型管道切回全量直通。
     void RestorePreviewRenderTargets();
 
+    // 清掉预览临时绑定到 router 的 polydata；若调用方有显式 polydata 真源则恢复它。
+    void ClearPreviewPolyDataInput();
+
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
     void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
 
@@ -198,6 +204,9 @@ private:
 
     // image 输入的兜底来源。
     std::shared_ptr<AbstractDataManager> m_dataMgr;
+
+    // 调用方显式绑定的 polydata 输入；preview 临时 mapper 输入结束后恢复到这份真源。
+    vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
 
     // widget 唯一挂载的主 interactor。
     vtkRenderWindowInteractor* m_primaryInteractor = nullptr;

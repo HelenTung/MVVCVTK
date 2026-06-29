@@ -10,11 +10,13 @@
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
 #include <vtkMath.h>
+#include <vtkMatrix4x4.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkPoints.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -141,14 +143,12 @@ static bool GetNormalizedPlane(
 }
 
 static CropDataModel GetPlaneCropDataModel(
-    const OrthogonalCropRequest& request,
     const CropVectorDouble3Array& planeNormalInInputModel,
     const CropVectorDouble3Array& planeCenterInInputModel,
     const std::array<double, 2>& planeHalfExtentsInInputModel,
     const CropBoundsDouble6Array& inputModelBounds)
 {
     CropDataModel cropData;
-    cropData.SetBoxToInputModelMatrix(request.GetBoxToInputModelMatrix());
     cropData.SetPlaneNormalInInputModel(planeNormalInInputModel);
     cropData.SetPlaneCenterInInputModel(planeCenterInInputModel);
     cropData.SetPlaneHalfExtentsInInputModel(planeHalfExtentsInInputModel);
@@ -181,7 +181,6 @@ static bool GetPlaneCropDataModel(
     }
 
     cropData = GetPlaneCropDataModel(
-        request,
         planeNormalInInputModel,
         planeCenterInInputModel,
         request.GetPlaneHalfExtentsInInputModel(),
@@ -203,6 +202,25 @@ static bool GetPointIsOnNormalSide(
     return vtkMath::Dot(offset, planeNormalInInputModel.data()) > 0.0;
 }
 
+struct PlanarVoxelSideStep {
+    std::array<double, 3> planeCenterContinuousIndex = { 0.0, 0.0, 0.0 };
+    double iStep = 0.0;
+    double jStep = 0.0;
+    double kStep = 0.0;
+    double boundaryEpsilon = PlaneEpsilon;
+};
+
+struct PlanarSubmitImages {
+    vtkSmartPointer<vtkImageData> submitImage;
+    vtkSmartPointer<vtkImageData> maskImage;
+};
+
+enum class PlanarRowSide {
+    NormalSide,
+    OppositeSide,
+    Mixed
+};
+
 static OrthogonalCropResult GetFailureResult(
     const OrthogonalCropRequest& request,
     OrthogonalCropFailureReason failureReason,
@@ -223,121 +241,309 @@ static OrthogonalCropResult GetFailureResult(
     return result;
 }
 
-static void SetScalarTupleToBackground(vtkDataArray* scalars, vtkIdType tupleId, const std::vector<double>& backgroundTuple)
+static PlanarVoxelSideStep GetPlanarVoxelSideStep(
+    vtkImageData* image,
+    const CropDataModel& cropData,
+    const int dims[3])
 {
-    if (!scalars || backgroundTuple.empty()) {
+    PlanarVoxelSideStep sideStep;
+    if (!image) {
+        return sideStep;
+    }
+
+    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
+    image->TransformPhysicalPointToContinuousIndex(
+        planeCenterInInputModel.data(),
+        sideStep.planeCenterContinuousIndex.data());
+
+    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
+    auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
+    sideStep.iStep = planeNormalInInputModel[0] * indexToPhysicalMatrix->GetElement(0, 0)
+        + planeNormalInInputModel[1] * indexToPhysicalMatrix->GetElement(1, 0)
+        + planeNormalInInputModel[2] * indexToPhysicalMatrix->GetElement(2, 0);
+    sideStep.jStep = planeNormalInInputModel[0] * indexToPhysicalMatrix->GetElement(0, 1)
+        + planeNormalInInputModel[1] * indexToPhysicalMatrix->GetElement(1, 1)
+        + planeNormalInInputModel[2] * indexToPhysicalMatrix->GetElement(2, 1);
+    sideStep.kStep = planeNormalInInputModel[0] * indexToPhysicalMatrix->GetElement(0, 2)
+        + planeNormalInInputModel[1] * indexToPhysicalMatrix->GetElement(1, 2)
+        + planeNormalInInputModel[2] * indexToPhysicalMatrix->GetElement(2, 2);
+
+    const double traversalMagnitude =
+        std::abs(sideStep.iStep) * static_cast<double>(std::max(dims[0] - 1, 0))
+        + std::abs(sideStep.jStep) * static_cast<double>(std::max(dims[1] - 1, 0))
+        + std::abs(sideStep.kStep) * static_cast<double>(std::max(dims[2] - 1, 0));
+    sideStep.boundaryEpsilon = PlaneEpsilon * (1.0 + traversalMagnitude);
+    return sideStep;
+}
+
+static double GetPlanarVoxelSideAtIndex(
+    const PlanarVoxelSideStep& sideStep,
+    int i,
+    int j,
+    int k)
+{
+    return (static_cast<double>(i) - sideStep.planeCenterContinuousIndex[0]) * sideStep.iStep
+        + (static_cast<double>(j) - sideStep.planeCenterContinuousIndex[1]) * sideStep.jStep
+        + (static_cast<double>(k) - sideStep.planeCenterContinuousIndex[2]) * sideStep.kStep;
+}
+
+static bool GetPlanarVoxelIsOnNormalSide(
+    vtkImageData* image,
+    const PlanarVoxelSideStep& sideStep,
+    const CropDataModel& cropData,
+    const int index[3],
+    double planeSide)
+{
+    if (std::abs(planeSide) > sideStep.boundaryEpsilon) {
+        return planeSide > 0.0;
+    }
+
+    double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
+    image->TransformIndexToPhysicalPoint(index, inputModelPoint);
+    return GetPointIsOnNormalSide(
+        inputModelPoint,
+        cropData.GetPlaneCenterInInputModel(),
+        cropData.GetPlaneNormalInInputModel());
+}
+
+static PlanarRowSide GetPlanarRowSide(
+    double rowStartSide,
+    double rowEndSide,
+    double boundaryEpsilon)
+{
+    const double minSide = std::min(rowStartSide, rowEndSide);
+    const double maxSide = std::max(rowStartSide, rowEndSide);
+    if (minSide > boundaryEpsilon) {
+        return PlanarRowSide::NormalSide;
+    }
+    if (maxSide < -boundaryEpsilon) {
+        return PlanarRowSide::OppositeSide;
+    }
+    return PlanarRowSide::Mixed;
+}
+
+static std::vector<unsigned char> GetPlanarBackgroundVoxelBytes(
+    vtkDataArray* sourceScalars,
+    vtkDataArray* submitScalars,
+    unsigned char* submitBytes,
+    int componentCount,
+    std::size_t bytesPerVoxel)
+{
+    std::vector<unsigned char> backgroundBytes(bytesPerVoxel, 0);
+    if (!sourceScalars || !submitScalars || !submitBytes || componentCount <= 0 || bytesPerVoxel == 0) {
+        return backgroundBytes;
+    }
+
+    double scalarRange[2] = { 0.0, 0.0 };
+    sourceScalars->GetRange(scalarRange);
+    const std::vector<double> backgroundTuple(
+        static_cast<std::size_t>(componentCount),
+        scalarRange[0]);
+
+    submitScalars->SetTuple(0, backgroundTuple.data());
+    std::memcpy(backgroundBytes.data(), submitBytes, bytesPerVoxel);
+    return backgroundBytes;
+}
+
+static void SetPlanarSubmitRowToBackground(
+    unsigned char* submitRowPtr,
+    const std::vector<unsigned char>& backgroundVoxelBytes,
+    int voxelCount)
+{
+    if (!submitRowPtr || backgroundVoxelBytes.empty() || voxelCount <= 0) {
         return;
     }
 
-    scalars->SetTuple(tupleId, backgroundTuple.data());
+    const auto bytesPerVoxel = backgroundVoxelBytes.size();
+    for (int voxelIndex = 0; voxelIndex < voxelCount; ++voxelIndex) {
+        std::memcpy(
+            submitRowPtr + static_cast<std::size_t>(voxelIndex) * bytesPerVoxel,
+            backgroundVoxelBytes.data(),
+            bytesPerVoxel);
+    }
 }
 
-static vtkSmartPointer<vtkImageData> GetPlanarMaskImage(
+static void SetPlanarSubmitRowBytes(
+    unsigned char* maskRowPtr,
+    unsigned char* submitRowPtr,
+    const unsigned char* sourceRowPtr,
+    const std::vector<unsigned char>& backgroundVoxelBytes,
+    std::size_t rowBytes,
+    int voxelCount,
+    bool keepRow)
+{
+    const auto maskBytes = static_cast<std::size_t>(voxelCount);
+    if (keepRow) {
+        std::memset(maskRowPtr, 255, maskBytes);
+        std::memcpy(submitRowPtr, sourceRowPtr, rowBytes);
+        return;
+    }
+
+    std::memset(maskRowPtr, 0, maskBytes);
+    SetPlanarSubmitRowToBackground(
+        submitRowPtr,
+        backgroundVoxelBytes,
+        voxelCount);
+}
+
+static void SetPlanarSubmitVoxelBytes(
+    unsigned char* maskPtr,
+    unsigned char* submitPtr,
+    const unsigned char* sourcePtr,
+    const std::vector<unsigned char>& backgroundVoxelBytes,
+    std::size_t bytesPerVoxel,
+    bool keepVoxel)
+{
+    if (keepVoxel) {
+        *maskPtr = 255;
+        std::memcpy(submitPtr, sourcePtr, bytesPerVoxel);
+        return;
+    }
+
+    *maskPtr = 0;
+    if (!backgroundVoxelBytes.empty()) {
+        std::memcpy(submitPtr, backgroundVoxelBytes.data(), bytesPerVoxel);
+    }
+}
+
+static PlanarSubmitImages GetPlanarSubmitImages(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
 {
+    PlanarSubmitImages images;
     if (!image) {
-        return nullptr;
+        return images;
     }
 
+    auto sourceScalars = image->GetPointData()
+        ? image->GetPointData()->GetScalars()
+        : nullptr;
+    if (!sourceScalars) {
+        return images;
+    }
+
+    const int componentCount = sourceScalars->GetNumberOfComponents();
+    if (componentCount <= 0) {
+        return images;
+    }
+
+    int extent[6] = { 0, -1, 0, -1, 0, -1 };
+    image->GetExtent(extent);
     int dims[3] = { 0, 0, 0 };
     image->GetDimensions(dims);
-
-    auto maskImage = vtkSmartPointer<vtkImageData>::New();
-    maskImage->CopyStructure(image);
-    maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-
-    auto* maskPtr = static_cast<unsigned char*>(maskImage->GetScalarPointer());
-    if (!maskPtr) {
-        return nullptr;
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        return images;
     }
 
+    const std::size_t bytesPerVoxel = static_cast<std::size_t>(sourceScalars->GetDataTypeSize())
+        * static_cast<std::size_t>(componentCount);
+    if (bytesPerVoxel == 0) {
+        return images;
+    }
+
+    images.submitImage = vtkSmartPointer<vtkImageData>::New();
+    images.submitImage->CopyStructure(image);
+    images.submitImage->AllocateScalars(sourceScalars->GetDataType(), componentCount);
+
+    auto submitScalars = images.submitImage->GetPointData()
+        ? images.submitImage->GetPointData()->GetScalars()
+        : nullptr;
+    if (!submitScalars) {
+        images.submitImage = nullptr;
+        return images;
+    }
+    if (sourceScalars->GetName()) {
+        submitScalars->SetName(sourceScalars->GetName());
+    }
+
+    images.maskImage = vtkSmartPointer<vtkImageData>::New();
+    images.maskImage->CopyStructure(image);
+    images.maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+
+    const auto* sourceBytes = static_cast<const unsigned char*>(
+        image->GetScalarPointer(extent[0], extent[2], extent[4]));
+    auto* submitBytes = static_cast<unsigned char*>(
+        images.submitImage->GetScalarPointer(extent[0], extent[2], extent[4]));
+    auto* maskBytes = static_cast<unsigned char*>(
+        images.maskImage->GetScalarPointer(extent[0], extent[2], extent[4]));
+    if (!sourceBytes || !submitBytes || !maskBytes) {
+        images.submitImage = nullptr;
+        images.maskImage = nullptr;
+        return images;
+    }
+
+    const auto backgroundVoxelBytes = GetPlanarBackgroundVoxelBytes(
+        sourceScalars,
+        submitScalars,
+        submitBytes,
+        componentCount,
+        bytesPerVoxel);
     const bool keepInside = removalMode == CropRemovalMode::KeepInside;
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
+    const auto sideStep = GetPlanarVoxelSideStep(image, cropData, dims);
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
+    const std::size_t rowBytes = static_cast<std::size_t>(dims[0]) * bytesPerVoxel;
 
-    for (int k = 0; k < dims[2]; ++k) {
-        for (int j = 0; j < dims[1]; ++j) {
-            for (int i = 0; i < dims[0]; ++i) {
-                const int index[3] = { i, j, k };
-                double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
-                image->TransformIndexToPhysicalPoint(index, inputModelPoint);
+    for (int kOffset = 0; kOffset < dims[2]; ++kOffset) {
+        const int k = extent[4] + kOffset;
+        const vtkIdType sliceStart = static_cast<vtkIdType>(kOffset) * sliceStride;
+        for (int jOffset = 0; jOffset < dims[1]; ++jOffset) {
+            const int j = extent[2] + jOffset;
+            const vtkIdType rowStart = sliceStart + static_cast<vtkIdType>(jOffset) * rowStride;
+            const auto rowByteOffset = static_cast<std::size_t>(rowStart) * bytesPerVoxel;
+            auto* maskRowPtr = maskBytes + rowStart;
+            auto* submitRowPtr = submitBytes + rowByteOffset;
+            const auto* sourceRowPtr = sourceBytes + rowByteOffset;
 
-                const bool isInside = GetPointIsOnNormalSide(
-                    inputModelPoint,
-                    planeCenterInInputModel,
-                    planeNormalInInputModel);
+            const double rowStartSide = GetPlanarVoxelSideAtIndex(sideStep, extent[0], j, k);
+            const double rowEndSide = rowStartSide
+                + static_cast<double>(dims[0] - 1) * sideStep.iStep;
+            const auto rowSide = GetPlanarRowSide(
+                rowStartSide,
+                rowEndSide,
+                sideStep.boundaryEpsilon);
+            if (rowSide != PlanarRowSide::Mixed) {
+                const bool rowIsInside = rowSide == PlanarRowSide::NormalSide;
+                const bool keepRow = keepInside ? rowIsInside : !rowIsInside;
+                SetPlanarSubmitRowBytes(
+                    maskRowPtr,
+                    submitRowPtr,
+                    sourceRowPtr,
+                    backgroundVoxelBytes,
+                    rowBytes,
+                    dims[0],
+                    keepRow);
+                continue;
+            }
+
+            double planeSide = rowStartSide;
+            for (int iOffset = 0; iOffset < dims[0]; ++iOffset) {
+                const int index[3] = { extent[0] + iOffset, j, k };
+                const bool isInside = GetPlanarVoxelIsOnNormalSide(
+                    image,
+                    sideStep,
+                    cropData,
+                    index,
+                    planeSide);
                 const bool keepVoxel = keepInside ? isInside : !isInside;
-                const vtkIdType linearIndex = static_cast<vtkIdType>(k) * sliceStride
-                    + static_cast<vtkIdType>(j) * rowStride
-                    + i;
-                maskPtr[linearIndex] = keepVoxel ? 255 : 0;
+                const auto voxelByteOffset = static_cast<std::size_t>(iOffset) * bytesPerVoxel;
+                SetPlanarSubmitVoxelBytes(
+                    maskRowPtr + iOffset,
+                    submitRowPtr + voxelByteOffset,
+                    sourceRowPtr + voxelByteOffset,
+                    backgroundVoxelBytes,
+                    bytesPerVoxel,
+                    keepVoxel);
+
+                planeSide += sideStep.iStep;
             }
         }
     }
 
-    maskImage->Modified();
-    return maskImage;
-}
-
-static void SetPlanarRemovedVoxelsToBackground(
-    vtkImageData* submitImage,
-    const CropDataModel& cropData,
-    CropRemovalMode removalMode)
-{
-    if (!submitImage) {
-        return;
-    }
-
-    auto scalars = submitImage->GetPointData()
-        ? submitImage->GetPointData()->GetScalars()
-        : nullptr;
-    if (!scalars) {
-        return;
-    }
-
-    const int componentCount = scalars->GetNumberOfComponents();
-    if (componentCount <= 0) {
-        return;
-    }
-
-    double scalarRange[2] = { 0.0, 0.0 };
-    scalars->GetRange(scalarRange);
-    std::vector<double> backgroundTuple(static_cast<std::size_t>(componentCount), scalarRange[0]);
-
-    int dims[3] = { 0, 0, 0 };
-    submitImage->GetDimensions(dims);
-
-    const bool keepInside = removalMode == CropRemovalMode::KeepInside;
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
-
-    for (int k = 0; k < dims[2]; ++k) {
-        for (int j = 0; j < dims[1]; ++j) {
-            for (int i = 0; i < dims[0]; ++i) {
-                int index[3] = { i, j, k };
-                double inputModelPoint[3] = { 0.0, 0.0, 0.0 };
-                submitImage->TransformIndexToPhysicalPoint(index, inputModelPoint);
-
-                const bool isInside = GetPointIsOnNormalSide(
-                    inputModelPoint,
-                    planeCenterInInputModel,
-                    planeNormalInInputModel);
-                const bool keepVoxel = keepInside ? isInside : !isInside;
-                if (!keepVoxel) {
-                    SetScalarTupleToBackground(
-                        scalars,
-                        submitImage->ComputePointId(index),
-                        backgroundTuple);
-                }
-            }
-        }
-    }
-
-    submitImage->Modified();
+    images.submitImage->Modified();
+    images.maskImage->Modified();
+    return images;
 }
 
 vtkSmartPointer<vtkPolyData> PlanarCropAlgorithm::GetOutlinePolyData(
@@ -433,7 +639,7 @@ static OrthogonalCropResult GetPlanarSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
-    const CropBoundsDouble6Array& inputModelBounds,
+    const CropBoundsDouble6Array& /*inputModelBounds*/,
     std::size_t availableRamBytes)
 {
     if (!image) {
@@ -455,9 +661,11 @@ static OrthogonalCropResult GetPlanarSubmitResult(
             &cropData);
     }
 
-    auto submitImage = vtkSmartPointer<vtkImageData>::New();
-    submitImage->DeepCopy(image);
-    if (!submitImage) {
+    auto submitImages = GetPlanarSubmitImages(
+        image,
+        cropData,
+        request.GetRemovalMode());
+    if (!submitImages.submitImage) {
         return GetFailureResult(
             request,
             OrthogonalCropFailureReason::SubmitImageCreationFailed,
@@ -465,16 +673,7 @@ static OrthogonalCropResult GetPlanarSubmitResult(
             &cropData);
     }
 
-    SetPlanarRemovedVoxelsToBackground(
-        submitImage,
-        cropData,
-        request.GetRemovalMode());
-
-    auto maskImage = GetPlanarMaskImage(
-        image,
-        cropData,
-        request.GetRemovalMode());
-    if (!maskImage) {
+    if (!submitImages.maskImage) {
         return GetFailureResult(
             request,
             OrthogonalCropFailureReason::SubmitMaskCreationFailed,
@@ -489,9 +688,8 @@ static OrthogonalCropResult GetPlanarSubmitResult(
     result.SetCropDataModel(cropData);
     result.SetStatistics(statistics);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
-    result.SetSubmitImage(submitImage);
-    result.SetMaskImage(maskImage);
-    result.SetOutlinePolyData(PlanarCropAlgorithm::GetOutlinePolyData(cropData, inputModelBounds));
+    result.SetSubmitImage(submitImages.submitImage);
+    result.SetMaskImage(submitImages.maskImage);
     result.SetSucceeded(true);
     return result;
 }

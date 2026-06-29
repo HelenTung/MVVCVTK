@@ -26,8 +26,11 @@ public:
     // 返回当前 router 绑定的 image 输入。
     vtkSmartPointer<vtkImageData> GetInputImage() const;
 
-    // 绑定 polydata 输入，同时清空 clip 缓存。
+    // 绑定本次 polydata 输入；来源生命周期由调用方负责。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
+
+    // 清空 polydata 输入，避免临时 preview 缓存影响后续 active input 判断。
+    void ClearInputPolyData();
 
     // 返回当前 router 绑定的 polydata 输入。
     vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
@@ -49,10 +52,10 @@ public:
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
 private:
-    // Box 目前是唯一实现的裁切类型，这里集中处理动作 + 数据源组合。
+    // Box 路由集中处理动作 + 数据源组合。
     OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
 
-    // Plane 复用当前动作 + 数据源组合，实际执行交给 PlanarCropAlgorithm。
+    // Plane 路由集中处理动作 + 数据源组合，实际执行交给 PlanarCropAlgorithm。
     OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
 
     // 读取 image model bounds。
@@ -73,7 +76,7 @@ private:
     // image 输入由 router 统一持有，实际处理直接分发到算法层。
     vtkSmartPointer<vtkImageData> m_inputImage;
 
-    // polydata 输入由 router 统一持有，实际处理直接分发到算法层。
+    // polydata 输入由调用方按本次请求绑定；router 不判断来源和生命周期。
     vtkSmartPointer<vtkPolyData> m_inputPolyData;
 
     // 外部偏好的数据源；若对应输入不存在，则会自动回退。
