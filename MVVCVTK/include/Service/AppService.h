@@ -20,11 +20,15 @@
 #include "AppInterfaces.h"
 #include "AppState.h"
 #include "AppStateSyncStrategy.h"
+#include "AppTaskCallbackState.h"
 #include "InteractionComputeService.h"
 #include <vtkMatrix4x4.h>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <future>
+
+class AppDataExportTaskService;
 
 class MedicalVizService
     : public AbstractInteractiveService
@@ -161,56 +165,6 @@ public:
     void ProcessPendingUpdates() override;
 
 private:
-    struct CallbackState {
-        mutable std::mutex m_mutex;
-        std::function<void(bool)> m_callback; // 当前业务方注册但尚未触发的回调
-        std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调
-        bool m_pendingResult{ false }; // 与 PendingCallback 对应的任务结果快照
-        std::atomic<bool> m_hasPendingCallback{ false }; // 回调就绪位：后台线程只投递结果，主线程在心跳阶段统一执行 UI/业务回调
-
-        void SetCallback(std::function<void(bool)> callback) {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_callback = std::move(callback);
-        }
-
-        void SetCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-            {
-                std::lock_guard<std::mutex> lk(m_mutex);
-                if (callback) {
-                    m_pendingCallback = std::move(callback);
-                }
-                else if (m_callback) {
-                    callback = std::move(m_callback);
-                    m_callback = nullptr;
-                    m_pendingCallback = std::move(callback);
-                }
-                else {
-                    return;
-                }
-                m_pendingResult = success;
-                m_hasPendingCallback = true;
-            }
-        }
-
-        void ExecutePendingCallback() {
-            std::function<void(bool)> callback;
-            bool success = false;
-            {
-                std::lock_guard<std::mutex> lk(m_mutex);
-                callback = std::move(m_pendingCallback);
-                m_pendingCallback = nullptr;
-                success = m_pendingResult;
-            }
-            if (callback) {
-                callback(success);
-            }
-        }
-
-        bool GetPendingCallbackConsumed() {
-            return m_hasPendingCallback.exchange(false);
-        }
-    };
-
     // ================================================================
     // 渲染后处理 / 策略辅助
     // 功能：服务主线程渲染骨架，负责重建、同步、失败清理和参数快照组装。
@@ -239,41 +193,15 @@ private:
         bool keepActiveLoadFuture);
 
     // ================================================================
-    // 保存完成回调队列
-    // 功能：缓存导出请求的完成回调，并把后台保存结果延迟到主线程执行。
-    // 原生依赖对象：m_saveCompletionCallbackState。
-    // ================================================================
-
-    // 保存当前保存请求绑定的完成回调
-    void SetSaveCallback(std::function<void(bool)> callback) {
-        m_saveCompletionCallbackState.SetCallback(std::move(callback));
-    }
-
-    // 将保存完成回调标记为就绪，等待主线程统一执行
-    void SetSaveCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
-        m_saveCompletionCallbackState.SetCallbackReady(success, std::move(callback));
-    }
-
-    // 在主线程执行待处理的保存完成回调
-    void ExecutePendingSaveCallback() {
-        m_saveCompletionCallbackState.ExecutePendingCallback();
-    }
-
-    bool ConsumeSaveCallback() {
-        return m_saveCompletionCallbackState.GetPendingCallbackConsumed();
-    }
-
-    // ================================================================
     // 成员变量（按职责分组）
     // 1. 文件流加载回调状态
     // 2. 重载回调状态
-    // 3. 保存完成回调状态
-    // 4. 运行期原生成员对象 / 标志位
+    // 3. 运行期原生成员对象 / 标志位
     // ================================================================
-    CallbackState m_fileLoadCallbackState; // 文件流加载回调状态
-    CallbackState m_reloadLoadCallbackState; // 重载回调状态
-    CallbackState m_saveCompletionCallbackState; // 保存完成回调状态
+    AppTaskCallbackState m_fileLoadCallbackState; // 文件流加载回调状态
+    AppTaskCallbackState m_reloadLoadCallbackState; // 重载回调状态
 
+    std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
     LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 当前 service 本地待消费的 load 事件来源，避免多个窗口抢同一个 Share pending 标记
