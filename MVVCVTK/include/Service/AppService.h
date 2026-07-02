@@ -20,7 +20,6 @@
 #include "AppInterfaces.h"
 #include "AppState.h"
 #include "AppStateSyncStrategy.h"
-#include "AppTaskCallbackState.h"
 #include "InteractionComputeService.h"
 #include <vtkMatrix4x4.h>
 #include <atomic>
@@ -29,6 +28,7 @@
 #include <future>
 
 class AppDataExportTaskService;
+class AppDataLoadTaskService;
 
 class MedicalVizService
     : public AbstractInteractiveService
@@ -194,13 +194,10 @@ private:
 
     // ================================================================
     // 成员变量（按职责分组）
-    // 1. 文件流加载回调状态
-    // 2. 重载回调状态
-    // 3. 运行期原生成员对象 / 标志位
+    // 1. 加载 / 导出任务服务
+    // 2. 运行期原生成员对象 / 标志位
     // ================================================================
-    AppTaskCallbackState m_fileLoadCallbackState; // 文件流加载回调状态
-    AppTaskCallbackState m_reloadLoadCallbackState; // 重载回调状态
-
+    std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService; // 加载任务构建和加载回调状态
     std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
     AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象

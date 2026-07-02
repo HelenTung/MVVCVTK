@@ -1,5 +1,6 @@
 #include "AppService.h"
 #include "AppDataExportTaskService.h"
+#include "AppDataLoadTaskService.h"
 #include "DataManager.h"
 #include "StrategyFactory.h"
 #include <vtkSmartPointer.h>
@@ -94,6 +95,7 @@ MedicalVizService::MedicalVizService(
     , m_stateEventSource(std::move(stateEventSource))
 {
     m_dataManager = std::move(dataMgr);
+    m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager, m_sharedState);
     m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(m_dataManager, m_sharedState);
 }
 
@@ -217,50 +219,18 @@ void MedicalVizService::LoadFileAsync(
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (!m_sharedState) {
-        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+    if (!m_dataLoadTaskService) {
         return;
     }
 
-    if (m_sharedState->GetFileLoadState() == LoadState::Loading
-        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
-    {
-        std::cerr << "[LoadFileAsync] Loading is already in progress.\n";
-        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
-        return;
+    auto task = m_dataLoadTaskService->BuildLoadFileTask(
+        path,
+        spacing,
+        origin,
+        std::move(onComplete));
+    if (task) {
+        StartTask(std::move(*task), true);
     }
-
-    m_fileLoadCallbackState.SetCallback(std::move(onComplete));
-    m_sharedState->SetFileLoadStarted();
-
-    auto dataMgr = m_dataManager;
-    auto sharedState = m_sharedState;
-
-    std::packaged_task<void()> task([dataMgr, sharedState, path, spacing, origin]() mutable
-        {
-            // 后台任务只负责 I/O 和基础数据快照准备；
-            // 一旦成功，就通过 SharedState 发出 DataReady，让主线程后续统一重建渲染管线。
-            bool ok = dataMgr->SetDataLoaded(path,spacing,origin);
-
-            if (ok) {
-                auto img = dataMgr->GetVtkImage();
-                if (img) {
-                    const auto range = dataMgr->GetScalarRange();
-                    const auto spacing = dataMgr->GetSpacing();
-                    sharedState->SetFileDataReady(range[0], range[1], spacing);
-                }
-                else {
-                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
-                    sharedState->SetFileLoadFailed();
-                }
-            }
-            else {
-                std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
-                sharedState->SetFileLoadFailed();
-            }
-        });
-
-    StartTask(std::move(task), true);
 }
 
 bool MedicalVizService::ReloadFromBufferAsync(
@@ -270,38 +240,21 @@ bool MedicalVizService::ReloadFromBufferAsync(
     const std::array<float, 3>& origin,
     std::function<void(bool success)> onComplete)
 {
-    if (!m_sharedState) {
-        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+    if (!m_dataLoadTaskService) {
         return false;
     }
 
-    if (m_sharedState->GetFileLoadState() == LoadState::Loading
-        || m_sharedState->GetReloadLoadState() == LoadState::Loading)
-    {
-        std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
-        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+    auto task = m_dataLoadTaskService->BuildReloadFromBufferTask(
+        data,
+        dims,
+        spacing,
+        origin,
+        std::move(onComplete));
+    if (!task) {
         return false;
     }
 
-    m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
-    m_sharedState->SetReloadLoadStarted();
-
-    auto dataMgr = m_dataManager;
-    auto sharedState = m_sharedState;
-
-    std::packaged_task<void()> task(
-        [dataMgr, sharedState, data, dims, spacing, origin]() mutable
-        {
-            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换要等主线程在 ProcessPendingUpdates 中消费。
-            bool ok = dataMgr->SetFromBuffer(data, dims, spacing, origin);
-
-            if (!ok)
-            {
-                sharedState->SetReloadLoadFailed();
-            }
-        });
-
-    StartTask(std::move(task), true);
+    StartTask(std::move(*task), true);
     return true;
 }
 
@@ -545,11 +498,11 @@ void MedicalVizService::ProcessPendingUpdates()
     if (m_needsLoadFailed.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
         HandleLoadFailure();
-        if (loadEventKind == LoadEventKind::File) {
-            m_fileLoadCallbackState.SetCallbackReady(false);
+        if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
+            m_dataLoadTaskService->SetFileLoadCallbackReady(false);
         }
-        else if (loadEventKind == LoadEventKind::Reload) {
-            m_reloadLoadCallbackState.SetCallbackReady(false);
+        else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
+            m_dataLoadTaskService->SetReloadLoadCallbackReady(false);
         }
         shouldReturnAfterLoadFailure = true;
         loadEventHandled = true;
@@ -559,22 +512,22 @@ void MedicalVizService::ProcessPendingUpdates()
     if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
         RebuildPipeline();
-        if (loadEventKind == LoadEventKind::File) {
-            m_fileLoadCallbackState.SetCallbackReady(true);
+        if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
+            m_dataLoadTaskService->SetFileLoadCallbackReady(true);
         }
-        else if (loadEventKind == LoadEventKind::Reload) {
-            m_reloadLoadCallbackState.SetCallbackReady(true);
+        else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
+            m_dataLoadTaskService->SetReloadLoadCallbackReady(true);
         }
         loadEventHandled = true;
         // return; // 本帧只做重建，同步留到下帧
     }
 
     if (shouldReturnAfterLoadFailure) {
-        if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
-            m_fileLoadCallbackState.ExecutePendingCallback();
+        if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeFileLoadCallback()) {
+            m_dataLoadTaskService->ExecutePendingFileLoadCallback();
         }
-        if (m_reloadLoadCallbackState.GetPendingCallbackConsumed()) {
-            m_reloadLoadCallbackState.ExecutePendingCallback();
+        if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeReloadLoadCallback()) {
+            m_dataLoadTaskService->ExecutePendingReloadLoadCallback();
         }
         if (loadEventHandled) {
             m_pendingLoadEventKind = LoadEventKind::None;
@@ -586,11 +539,11 @@ void MedicalVizService::ProcessPendingUpdates()
     SyncStrategyState();
 
     // 文件加载/重载回调延后到策略同步之后，保证上层 submit 回调看到的是主线程收敛后的最终状态。
-    if (m_fileLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_fileLoadCallbackState.ExecutePendingCallback();
+    if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeFileLoadCallback()) {
+        m_dataLoadTaskService->ExecutePendingFileLoadCallback();
     }
-    if (m_reloadLoadCallbackState.GetPendingCallbackConsumed()) {
-        m_reloadLoadCallbackState.ExecutePendingCallback();
+    if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeReloadLoadCallback()) {
+        m_dataLoadTaskService->ExecutePendingReloadLoadCallback();
     }
 
     if (loadEventHandled) {

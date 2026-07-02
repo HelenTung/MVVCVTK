@@ -1,0 +1,132 @@
+#include "AppDataLoadTaskService.h"
+#include <iostream>
+#include <utility>
+
+AppDataLoadTaskService::AppDataLoadTaskService(
+    std::shared_ptr<AbstractDataManager> dataManager,
+    std::shared_ptr<SharedInteractionState> sharedState)
+    : m_dataManager(std::move(dataManager))
+    , m_sharedState(std::move(sharedState))
+{
+}
+
+std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileTask(
+    const std::string& path,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
+    std::function<void(bool success)> onComplete)
+{
+    if (!m_sharedState || !m_dataManager) {
+        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return std::nullopt;
+    }
+
+    if (GetAnyLoadRunning()) {
+        std::cerr << "[LoadFileAsync] Loading is already in progress.\n";
+        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return std::nullopt;
+    }
+
+    m_fileLoadCallbackState.SetCallback(std::move(onComplete));
+    m_sharedState->SetFileLoadStarted();
+
+    auto dataManager = m_dataManager;
+    auto sharedState = m_sharedState;
+
+    return std::packaged_task<void()>(
+        [dataManager, sharedState, path, spacing, origin]() mutable
+        {
+            // 后台任务只负责 I/O 和基础数据快照准备；渲染管线重建统一留给主线程。
+            const bool ok = dataManager->SetDataLoaded(path, spacing, origin);
+
+            if (ok) {
+                auto image = dataManager->GetVtkImage();
+                if (image) {
+                    const auto range = dataManager->GetScalarRange();
+                    const auto imageSpacing = dataManager->GetSpacing();
+                    sharedState->SetFileDataReady(range[0], range[1], imageSpacing);
+                }
+                else {
+                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
+                    sharedState->SetFileLoadFailed();
+                }
+            }
+            else {
+                std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
+                sharedState->SetFileLoadFailed();
+            }
+        });
+}
+
+std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFromBufferTask(
+    const float* data,
+    const std::array<int, 3>& dims,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
+    std::function<void(bool success)> onComplete)
+{
+    if (!m_sharedState || !m_dataManager) {
+        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return std::nullopt;
+    }
+
+    if (GetAnyLoadRunning()) {
+        std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
+        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        return std::nullopt;
+    }
+
+    m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
+    m_sharedState->SetReloadLoadStarted();
+
+    auto dataManager = m_dataManager;
+    auto sharedState = m_sharedState;
+
+    return std::packaged_task<void()>(
+        [dataManager, sharedState, data, dims, spacing, origin]() mutable
+        {
+            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换由主线程消费。
+            const bool ok = dataManager->SetFromBuffer(data, dims, spacing, origin);
+
+            if (!ok) {
+                sharedState->SetReloadLoadFailed();
+            }
+        });
+}
+
+void AppDataLoadTaskService::SetFileLoadCallbackReady(bool success)
+{
+    m_fileLoadCallbackState.SetCallbackReady(success);
+}
+
+void AppDataLoadTaskService::SetReloadLoadCallbackReady(bool success)
+{
+    m_reloadLoadCallbackState.SetCallbackReady(success);
+}
+
+bool AppDataLoadTaskService::ConsumeFileLoadCallback()
+{
+    return m_fileLoadCallbackState.GetPendingCallbackConsumed();
+}
+
+bool AppDataLoadTaskService::ConsumeReloadLoadCallback()
+{
+    return m_reloadLoadCallbackState.GetPendingCallbackConsumed();
+}
+
+void AppDataLoadTaskService::ExecutePendingFileLoadCallback()
+{
+    m_fileLoadCallbackState.ExecutePendingCallback();
+}
+
+void AppDataLoadTaskService::ExecutePendingReloadLoadCallback()
+{
+    m_reloadLoadCallbackState.ExecutePendingCallback();
+}
+
+bool AppDataLoadTaskService::GetAnyLoadRunning() const
+{
+    return m_sharedState
+        && (m_sharedState->GetFileLoadState() == LoadState::Loading
+            || m_sharedState->GetReloadLoadState() == LoadState::Loading);
+}

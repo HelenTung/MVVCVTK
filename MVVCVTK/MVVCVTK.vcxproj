@@ -154,6 +154,7 @@
   <ItemGroup>
     <ClInclude Include="include\App\AppInterfaces.h" />
     <ClInclude Include="include\Service\AppDataExportTaskService.h" />
+    <ClInclude Include="include\Service\AppDataLoadTaskService.h" />
     <ClInclude Include="include\Service\AppService.h" />
     <ClInclude Include="include\Service\AppTaskCallbackState.h" />
     <ClInclude Include="include\App\AppState.h" />
@@ -202,6 +203,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Service\AppDataExportTaskService.cpp" />
+    <ClCompile Include="src\Service\AppDataLoadTaskService.cpp" />
     <ClCompile Include="src\Service\AppService.cpp" />
     <ClCompile Include="src\Strategies\ColoredPlanesStrategy.cpp" />
     <ClCompile Include="src\Strategies\CompositeStrategy.cpp" />

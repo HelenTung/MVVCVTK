@@ -177,6 +177,9 @@
     <ClInclude Include="include\Service\AppDataExportTaskService.h">
       <Filter>include\Service</Filter>
     </ClInclude>
+    <ClInclude Include="include\Service\AppDataLoadTaskService.h">
+      <Filter>include\Service</Filter>
+    </ClInclude>
     <ClInclude Include="include\Service\AppTaskCallbackState.h">
       <Filter>include\Service</Filter>
     </ClInclude>
@@ -282,6 +285,9 @@
       <Filter>src\Service</Filter>
     </ClCompile>
     <ClCompile Include="src\Service\AppDataExportTaskService.cpp">
+      <Filter>src\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Service\AppDataLoadTaskService.cpp">
       <Filter>src\Service</Filter>
     </ClCompile>
     <ClCompile Include="src\Data\DataManager.cpp">
