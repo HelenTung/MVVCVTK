@@ -9,37 +9,55 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="include\Strategies">
+    <Filter Include="include\Render\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools">
+    <Filter Include="features">
       <UniqueIdentifier>{8a63dd27-4f90-49bc-97df-bf8adfeea6a1}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis">
+    <Filter Include="features\GapAnalysis">
       <UniqueIdentifier>{f4f27366-9d41-4a29-a905-cf54da6d39d2}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis\include">
+    <Filter Include="features\GapAnalysis\include">
       <UniqueIdentifier>{a6177ce6-2c77-47bb-8ac3-4eb5d08350d7}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis\include\Service">
+    <Filter Include="features\GapAnalysis\include\Services">
       <UniqueIdentifier>{c7976d87-6825-471b-b609-d54d8e435a4d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\GapAnalysis\include\Strategies">
+    <Filter Include="features\GapAnalysis\include\Algorithms">
+      <UniqueIdentifier>{3d2d986a-7cde-4ed5-8441-e55d64eb01e1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\GapAnalysis\include\Render">
+      <UniqueIdentifier>{6f3598cb-2a24-4e78-9e8c-0d2dfd1ba9c2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\GapAnalysis\include\Render\Strategies">
       <UniqueIdentifier>{d9dceca6-a587-4696-98a2-b7a748226dfb}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop">
+    <Filter Include="features\OrthogonalCrop">
       <UniqueIdentifier>{d7bc8d21-38c0-4f6e-a9c8-cb7cfcc53e26}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\include">
+    <Filter Include="features\OrthogonalCrop\include">
       <UniqueIdentifier>{a361b8d8-6e5c-473e-ab39-4272f587d4a2}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\include\Service">
+    <Filter Include="features\OrthogonalCrop\include\Algorithms">
+      <UniqueIdentifier>{2e093748-b348-4ce6-aa6c-1e6d025af0f4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\include\Routing">
       <UniqueIdentifier>{bf8806d9-f6f6-4fa3-81b7-2108d90aa977}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\include\Strategies">
+    <Filter Include="features\OrthogonalCrop\include\Interaction">
+      <UniqueIdentifier>{f39040d1-529e-485c-829d-cc4d3d1c7292}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\include\Preview">
+      <UniqueIdentifier>{7d979643-e210-499f-968c-9c195651ae0e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\include\Render">
+      <UniqueIdentifier>{0fd795c1-9c80-42d7-9f92-53381ae90c2f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\include\Render\Strategies">
       <UniqueIdentifier>{d8ab8fe1-6a5b-4918-995d-61560cb3186c}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Utils">
+    <Filter Include="include\Platform">
       <UniqueIdentifier>{c1efaecb-d9ec-4bb6-8e12-d3a12e167979}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Interaction">
@@ -48,7 +66,7 @@
     <Filter Include="include\Render">
       <UniqueIdentifier>{f0303deb-b2f1-437d-b276-6b51b7f6ac6b}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Service">
+    <Filter Include="include\App\Services">
       <UniqueIdentifier>{bc41cad7-f141-4d16-a4a6-700e21a5e52c}</UniqueIdentifier>
     </Filter>
     <Filter Include="include\Data">
@@ -58,13 +76,13 @@
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
-    <Filter Include="src\main">
+    <Filter Include="src\App">
       <UniqueIdentifier>{b4a2b4ac-7c20-4fd8-a3fa-d6df8e5d82a8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\Strategies">
+    <Filter Include="src\Render\Strategies">
       <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\Utils">
+    <Filter Include="src\Platform">
       <UniqueIdentifier>{a5f21c88-3127-4ee9-9c77-05fe2058cc3f}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Interaction">
@@ -73,16 +91,28 @@
     <Filter Include="src\Render">
       <UniqueIdentifier>{cec7be8b-9c99-4ae3-83f3-d789f49f5ff8}</UniqueIdentifier>
     </Filter>
-    <Filter Include="src\Service">
+    <Filter Include="src\App\Services">
       <UniqueIdentifier>{72cc6730-bf96-461a-96db-f212a30d135f}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\src">
+    <Filter Include="features\OrthogonalCrop\src">
       <UniqueIdentifier>{3f6f4b4c-e572-49c0-afb0-92ce3e5f5f5d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\src\Service">
+    <Filter Include="features\OrthogonalCrop\src\Algorithms">
+      <UniqueIdentifier>{609e96c3-af44-4321-8995-c9b7f82a7e98}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\src\Routing">
       <UniqueIdentifier>{78584a27-f147-408c-920d-548e50794407}</UniqueIdentifier>
     </Filter>
-    <Filter Include="tools\OrthogonalCrop\src\Strategies">
+    <Filter Include="features\OrthogonalCrop\src\Interaction">
+      <UniqueIdentifier>{cc11d587-a63e-481a-9341-0f51eb1484b2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\src\Preview">
+      <UniqueIdentifier>{b57e52b3-f7cc-4ed1-81c7-f878cf8a09ad}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\src\Render">
+      <UniqueIdentifier>{1f6e4f39-f132-440d-9fc8-ddff43074f52}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\OrthogonalCrop\src\Render\Strategies">
       <UniqueIdentifier>{22dc60c7-d8d7-47d6-91f4-40315e4967c4}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Data">
@@ -91,55 +121,67 @@
     <Filter Include="include\App">
       <UniqueIdentifier>{a55b8286-7d35-4d9d-9e64-7b4385c222e1}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\App\Tasks">
+      <UniqueIdentifier>{d3aa9b0c-ec19-4f61-bf3c-20e26d45f2b1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Analysis">
+      <UniqueIdentifier>{28b9861a-e534-4cc1-acfc-d24b4b08e910}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Geometry">
+      <UniqueIdentifier>{ee720178-1215-4a5d-8284-98f1788f757b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\App\Tasks">
+      <UniqueIdentifier>{a8b63aa1-c893-4f8a-8d25-e1d8d2f8f62e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="include\Strategies\IsoSurfaceStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\IsoSurfaceStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\VolumeStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\VolumeStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\SliceStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\SliceStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\CompositeStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\CompositeStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\MultiSliceStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\MultiSliceStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Strategies\OrthogonalCropPreviewOverlayStrategy.h">
-      <Filter>tools\OrthogonalCrop\include\Strategies</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Render\Strategies\OrthogonalCropPreviewOverlayStrategy.h">
+      <Filter>features\OrthogonalCrop\include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="include\Utils\ImageProcessor.h">
-      <Filter>include\Utils</Filter>
+    <ClInclude Include="include\Data\ImageProcessor.h">
+      <Filter>include\Data</Filter>
     </ClInclude>
-    <ClInclude Include="include\Utils\MemMappedFile.h">
-      <Filter>include\Utils</Filter>
+    <ClInclude Include="include\Platform\MemMappedFile.h">
+      <Filter>include\Platform</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysisTypes.h">
-      <Filter>tools\GapAnalysis\include</Filter>
+    <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h">
+      <Filter>features\GapAnalysis\include</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h">
-      <Filter>tools\GapAnalysis\include</Filter>
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VolumeBuffer.h">
+      <Filter>features\GapAnalysis\include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\SurfaceRefiner.h">
-      <Filter>tools\GapAnalysis\include</Filter>
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\SurfaceRefiner.h">
+      <Filter>features\GapAnalysis\include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h">
-      <Filter>tools\OrthogonalCrop\include</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h">
+      <Filter>features\OrthogonalCrop\include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\PlanarCropAlgorithm.h">
-      <Filter>tools\OrthogonalCrop\include</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h">
+      <Filter>features\OrthogonalCrop\include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h">
-      <Filter>tools\OrthogonalCrop\include</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\OrthogonalCropTypes.h">
+      <Filter>features\OrthogonalCrop\include</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\VoidDetector.h">
-      <Filter>tools\GapAnalysis\include</Filter>
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h">
+      <Filter>features\GapAnalysis\include\Algorithms</Filter>
     </ClInclude>
     <ClInclude Include="include\Interaction\Viewer3DHandler.h">
       <Filter>include\Interaction</Filter>
@@ -168,20 +210,20 @@
     <ClInclude Include="include\Render\StdRenderContext.h">
       <Filter>include\Render</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\VolumeAnalysisService.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\Analysis\VolumeAnalysisService.h">
+      <Filter>include\Analysis</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\AppService.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\App\Services\AppService.h">
+      <Filter>include\App\Services</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\AppDataExportTaskService.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\App\Tasks\AppDataExportTaskService.h">
+      <Filter>include\App\Tasks</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\AppDataLoadTaskService.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\App\Tasks\AppDataLoadTaskService.h">
+      <Filter>include\App\Tasks</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\AppTaskCallbackState.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\App\Tasks\AppTaskCallbackState.h">
+      <Filter>include\App\Tasks</Filter>
     </ClInclude>
     <ClInclude Include="include\Data\DataManager.h">
       <Filter>include\Data</Filter>
@@ -198,73 +240,73 @@
     <ClInclude Include="include\App\AppInterfaces.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="include\Strategies\BaseVisualStrategy.h">
-      <Filter>include\Strategies</Filter>
+    <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
+      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapAlgorithmOverlayStrategies.h">
-      <Filter>tools\GapAnalysis\include\Strategies</Filter>
+    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapAlgorithmOverlayStrategies.h">
+      <Filter>features\GapAnalysis\include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="tools\GapAnalysis\include\Service\GapAnalysisService.h">
-      <Filter>tools\GapAnalysis\include\Service</Filter>
+    <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h">
+      <Filter>features\GapAnalysis\include\Services</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropWidgetStateController.h">
+      <Filter>features\OrthogonalCrop\include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropCameraStateController.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropCameraStateController.h">
+      <Filter>features\OrthogonalCrop\include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h">
+      <Filter>features\OrthogonalCrop\include\Routing</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropInteractionBridgeService.h">
+      <Filter>features\OrthogonalCrop\include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\PlanarCropWidgetStateController.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\PlanarCropWidgetStateController.h">
+      <Filter>features\OrthogonalCrop\include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h">
-      <Filter>tools\OrthogonalCrop\include\Service</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Preview\OrthogonalCropPreviewPlugService.h">
+      <Filter>features\OrthogonalCrop\include\Preview</Filter>
     </ClInclude>
-    <ClInclude Include="include\Utils\InteractionComputeService.h">
-      <Filter>include\Utils</Filter>
+    <ClInclude Include="include\Geometry\InteractionComputeService.h">
+      <Filter>include\Geometry</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppStateEvents.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="include\Service\AppStateSyncStrategy.h">
-      <Filter>include\Service</Filter>
+    <ClInclude Include="include\App\Services\AppStateSyncStrategy.h">
+      <Filter>include\App\Services</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppStateCommands.h">
       <Filter>include\App</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\main\main.cpp">
-      <Filter>src\main</Filter>
+    <ClCompile Include="src\App\main.cpp">
+      <Filter>src\App</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\CompositeStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\SliceStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\SliceStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\VolumeStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\VolumeStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\IsoSurfaceStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\MultiSliceStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\MultiSliceStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Strategies\ColoredPlanesStrategy.cpp">
-      <Filter>src\Strategies</Filter>
+    <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp">
+      <Filter>src\Render\Strategies</Filter>
     </ClCompile>
-    <ClCompile Include="src\Utils\ImageProcessor.cpp">
-      <Filter>src\Utils</Filter>
+    <ClCompile Include="src\Data\ImageProcessor.cpp">
+      <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="src\Utils\MemMappedFile.cpp">
-      <Filter>src\Utils</Filter>
+    <ClCompile Include="src\Platform\MemMappedFile.cpp">
+      <Filter>src\Platform</Filter>
     </ClCompile>
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp">
       <Filter>src\Interaction</Filter>
@@ -281,14 +323,14 @@
     <ClCompile Include="src\Render\StdRenderContext.cpp">
       <Filter>src\Render</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\AppService.cpp">
-      <Filter>src\Service</Filter>
+    <ClCompile Include="src\App\Services\AppService.cpp">
+      <Filter>src\App\Services</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\AppDataExportTaskService.cpp">
-      <Filter>src\Service</Filter>
+    <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp">
+      <Filter>src\App\Tasks</Filter>
     </ClCompile>
-    <ClCompile Include="src\Service\AppDataLoadTaskService.cpp">
-      <Filter>src\Service</Filter>
+    <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp">
+      <Filter>src\App\Tasks</Filter>
     </ClCompile>
     <ClCompile Include="src\Data\DataManager.cpp">
       <Filter>src\Data</Filter>
@@ -296,32 +338,32 @@
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\OrthogonalCropAlgorithm.cpp">
-      <Filter>tools\OrthogonalCrop\src</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
+      <Filter>features\OrthogonalCrop\src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\PlanarCropAlgorithm.cpp">
-      <Filter>tools\OrthogonalCrop\src</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
+      <Filter>features\OrthogonalCrop\src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp">
+      <Filter>features\OrthogonalCrop\src\Routing</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropCameraStateController.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropCameraStateController.cpp">
+      <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropInteractionBridgeService.cpp">
+      <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\PlanarCropWidgetStateController.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\PlanarCropWidgetStateController.cpp">
+      <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Preview\OrthogonalCropPreviewPlugService.cpp">
+      <Filter>features\OrthogonalCrop\src\Preview</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp">
-      <Filter>tools\OrthogonalCrop\src\Service</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropWidgetStateController.cpp">
+      <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="tools\OrthogonalCrop\src\Strategies\OrthogonalCropPreviewOverlayStrategy.cpp">
-      <Filter>tools\OrthogonalCrop\src\Strategies</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Render\Strategies\OrthogonalCropPreviewOverlayStrategy.cpp">
+      <Filter>features\OrthogonalCrop\src\Render\Strategies</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

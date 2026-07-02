@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/PlanarCropAlgorithm.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Algorithms/PlanarCropAlgorithm.h
 // 分类: Math / Core Algorithm
 // 说明: 平面裁切算法入口；只消费 request 与输入数据，不持有 UI 或渲染状态。
 // =====================================================================

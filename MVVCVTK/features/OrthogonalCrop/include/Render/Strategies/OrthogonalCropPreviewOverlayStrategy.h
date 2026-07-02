@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/Strategies/OrthogonalCropPreviewOverlayStrategy.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h
 // 分类: Strategy / Preview Overlay
 // 说明: 把裁切结果渲染为 outline、mask slice 或 clipped polydata overlay。
 // =====================================================================

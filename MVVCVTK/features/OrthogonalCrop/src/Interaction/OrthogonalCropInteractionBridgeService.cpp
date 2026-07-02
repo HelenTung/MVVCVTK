@@ -1,11 +1,11 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropInteractionBridgeService.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/OrthogonalCropInteractionBridgeService.cpp
 // 分类: Service / Interaction Bridge Implementation
 // 说明: 维护交互态，构造 preview/submit request，把预览结果分发给 overlay 与 3D 主模型，
 //       并把 submit 结果交给主数据 reload 通道。
 // =====================================================================
 
-#include "OrthogonalCropInteractionBridgeService.h"
+#include "Interaction/OrthogonalCropInteractionBridgeService.h"
 
 #include <vtkBoundingBox.h>
 #include <vtkImageData.h>

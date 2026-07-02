@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/Service/PlanarCropWidgetStateController.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/PlanarCropWidgetStateController.cpp
 // 分类: Service / Widget Controller Implementation
 // 说明: 封装 vtkImplicitPlaneWidget2 的构造、启停、observer 绑定与平面回调翻译。
 // =====================================================================
 
-#include "PlanarCropWidgetStateController.h"
+#include "Interaction/PlanarCropWidgetStateController.h"
 
 #include <vtkMath.h>
 #include <vtkProperty.h>

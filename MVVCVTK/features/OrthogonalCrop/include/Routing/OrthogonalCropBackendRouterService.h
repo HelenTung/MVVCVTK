@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/Service/OrthogonalCropBackendRouterService.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Routing/OrthogonalCropBackendRouterService.h
 // 分类: Service / Backend Router
 // 说明: 在基于图像输入与网格输入的裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
@@ -9,8 +9,8 @@
 // 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
 // 图像 / 体渲染 / 网格的数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
-#include "OrthogonalCropAlgorithm.h"
-#include "PlanarCropAlgorithm.h"
+#include "Algorithms/OrthogonalCropAlgorithm.h"
+#include "Algorithms/PlanarCropAlgorithm.h"
 
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>

@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/OrthogonalCropAlgorithm.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Algorithms/OrthogonalCropAlgorithm.h
 // 分类: Math / Core Algorithm
 // OrthogonalCropAlgorithm.h - 正交裁切独立插件纯算法层
 // =====================================================================

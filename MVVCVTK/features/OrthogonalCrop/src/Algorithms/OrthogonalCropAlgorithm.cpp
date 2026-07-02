@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/OrthogonalCropAlgorithm.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Algorithms/OrthogonalCropAlgorithm.cpp
 // 分类: Math / Core Algorithm Implementation
 // 说明: 负责 request 归一化、box preview 几何结果与 image submit 产物构建。
 // =====================================================================
 
-#include "OrthogonalCropAlgorithm.h"
+#include "Algorithms/OrthogonalCropAlgorithm.h"
 
 #include <vtkBoundingBox.h>
 #include <vtkCubeSource.h>

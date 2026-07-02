@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/tests/PlanarCropAlgorithmSubmitTests.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/tests/PlanarCropAlgorithmSubmitTests.cpp
 // 分类: Tests / OrthogonalCrop
 // 说明: 平面 image submit 的 mask + background 单遍构建回归测试。
 // =====================================================================
 
-#include "Service/OrthogonalCropBackendRouterService.h"
+#include "Routing/OrthogonalCropBackendRouterService.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>

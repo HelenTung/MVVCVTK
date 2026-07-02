@@ -1,5 +1,5 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/Strategies/OrthogonalCropPreviewOverlayStrategy.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Render/Strategies/OrthogonalCropPreviewOverlayStrategy.cpp
 // 分类: Strategy / Preview Overlay Implementation
 // 说明: 把裁切结果拆成 3D outline、3D clipped polydata、2D mask slice 三类可视表现。
 // =====================================================================
@@ -8,7 +8,7 @@
 // - 在 3D 窗口主要表现为 outline / preview region / clipped polydata
 // - 视觉语义由 removal mode 与当前窗口轴向共同决定
 
-#include "OrthogonalCropPreviewOverlayStrategy.h"
+#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
 
 #include <vtkImageProperty.h>
 #include <vtkMatrix4x4.h>

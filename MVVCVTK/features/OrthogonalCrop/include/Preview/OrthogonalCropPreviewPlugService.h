@@ -1,7 +1,7 @@
 #pragma once
 
 #include "AppInterfaces.h"
-#include "OrthogonalCropPreviewOverlayStrategy.h"
+#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
 #include "OrthogonalCropTypes.h"
 
 #include <vtkSmartPointer.h>

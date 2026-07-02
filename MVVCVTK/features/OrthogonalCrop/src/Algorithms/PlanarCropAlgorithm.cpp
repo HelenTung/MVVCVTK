@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/PlanarCropAlgorithm.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Algorithms/PlanarCropAlgorithm.cpp
 // 分类: Math / Core Algorithm Implementation
 // 说明: 负责平面 request 归一化、平面矩形轮廓和 image submit 产物构建。
 // =====================================================================
 
-#include "PlanarCropAlgorithm.h"
+#include "Algorithms/PlanarCropAlgorithm.h"
 
 #include <vtkCellArray.h>
 #include <vtkDataArray.h>

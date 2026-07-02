@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\include;$(ProjectDir)..\include\Service</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\include</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
@@ -148,15 +148,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\OrthogonalCropAlgorithm.h" />
-    <ClInclude Include="..\include\PlanarCropAlgorithm.h" />
+    <ClInclude Include="..\include\Algorithms\OrthogonalCropAlgorithm.h" />
+    <ClInclude Include="..\include\Algorithms\PlanarCropAlgorithm.h" />
     <ClInclude Include="..\include\OrthogonalCropTypes.h" />
-    <ClInclude Include="..\include\Service\OrthogonalCropBackendRouterService.h" />
+    <ClInclude Include="..\include\Routing\OrthogonalCropBackendRouterService.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\src\OrthogonalCropAlgorithm.cpp" />
-    <ClCompile Include="..\src\PlanarCropAlgorithm.cpp" />
-    <ClCompile Include="..\src\Service\OrthogonalCropBackendRouterService.cpp" />
+    <ClCompile Include="..\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
+    <ClCompile Include="..\src\Algorithms\PlanarCropAlgorithm.cpp" />
+    <ClCompile Include="..\src\Routing\OrthogonalCropBackendRouterService.cpp" />
     <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

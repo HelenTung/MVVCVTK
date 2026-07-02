@@ -1,4 +1,4 @@
-#include "OrthogonalCropCameraStateController.h"
+#include "Interaction/OrthogonalCropCameraStateController.h"
 #include <vtkCamera.h>
 #include <vtkRenderer.h>
 

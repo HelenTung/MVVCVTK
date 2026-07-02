@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/Service/OrthogonalCropInteractionBridgeService.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/OrthogonalCropInteractionBridgeService.h
 // 分类: Service / Interaction Bridge
 // OrthogonalCropInteractionBridgeService - 正交裁切交互桥接服务
 // 说明: 连接 widget、数据后端、preview 窗口与 submit reload 通道，
@@ -15,12 +15,12 @@
 // 5. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
 // 6. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
-#include "OrthogonalCropWidgetStateController.h"
-#include "PlanarCropWidgetStateController.h"
-#include "OrthogonalCropCameraStateController.h"
-#include "OrthogonalCropBackendRouterService.h"
-#include "OrthogonalCropPreviewPlugService.h"
-#include "OrthogonalCropPreviewOverlayStrategy.h"
+#include "Interaction/OrthogonalCropWidgetStateController.h"
+#include "Interaction/PlanarCropWidgetStateController.h"
+#include "Interaction/OrthogonalCropCameraStateController.h"
+#include "Routing/OrthogonalCropBackendRouterService.h"
+#include "Preview/OrthogonalCropPreviewPlugService.h"
+#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
 #include "AppInterfaces.h"
 
 #include <vtkPolyData.h>

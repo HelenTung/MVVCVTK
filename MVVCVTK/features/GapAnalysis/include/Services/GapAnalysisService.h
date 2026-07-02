@@ -4,9 +4,9 @@
 // =====================================================================
 
 #include "GapAnalysisTypes.h"
-#include "VolumeBuffer.h"
-#include "VoidDetector.h"
-#include "SurfaceRefiner.h"
+#include "Algorithms/VolumeBuffer.h"
+#include "Algorithms/VoidDetector.h"
+#include "Algorithms/SurfaceRefiner.h"
 #include "AppInterfaces.h"
 #include "AppTaskCallbackState.h"
 

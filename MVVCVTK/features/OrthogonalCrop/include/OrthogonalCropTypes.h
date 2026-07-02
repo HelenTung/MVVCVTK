@@ -1,6 +1,6 @@
 #pragma once
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/OrthogonalCropTypes.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/OrthogonalCropTypes.h
 // 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================

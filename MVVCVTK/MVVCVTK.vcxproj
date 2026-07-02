@@ -70,7 +70,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\Data;$(ProjectDir)include\Interaction;$(ProjectDir)tools\GapAnalysis\include;$(ProjectDir)tools\GapAnalysis\include\Service;$(ProjectDir)tools\GapAnalysis\include\Strategies;$(ProjectDir)tools\OrthogonalCrop\include;$(ProjectDir)tools\OrthogonalCrop\include\Service;$(ProjectDir)tools\OrthogonalCrop\include\Strategies;$(ProjectDir)include\Render;$(ProjectDir)include\Service;$(ProjectDir)include\Strategies;$(ProjectDir)include\Utils</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\App\Services;$(ProjectDir)include\App\Tasks;$(ProjectDir)include\Analysis;$(ProjectDir)include\Data;$(ProjectDir)include\Geometry;$(ProjectDir)include\Interaction;$(ProjectDir)include\Platform;$(ProjectDir)include\Render;$(ProjectDir)include\Render\Strategies;$(ProjectDir)features\GapAnalysis\include;$(ProjectDir)features\OrthogonalCrop\include</ProjectIncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
@@ -153,83 +153,83 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="include\App\AppInterfaces.h" />
-    <ClInclude Include="include\Service\AppDataExportTaskService.h" />
-    <ClInclude Include="include\Service\AppDataLoadTaskService.h" />
-    <ClInclude Include="include\Service\AppService.h" />
-    <ClInclude Include="include\Service\AppTaskCallbackState.h" />
+    <ClInclude Include="include\App\Tasks\AppDataExportTaskService.h" />
+    <ClInclude Include="include\App\Tasks\AppDataLoadTaskService.h" />
+    <ClInclude Include="include\App\Services\AppService.h" />
+    <ClInclude Include="include\App\Tasks\AppTaskCallbackState.h" />
     <ClInclude Include="include\App\AppState.h" />
     <ClInclude Include="include\App\AppTypes.h" />
-    <ClInclude Include="include\Strategies\BaseVisualStrategy.h" />
-    <ClInclude Include="include\Strategies\ColoredPlanesStrategy.h" />
-    <ClInclude Include="include\Strategies\CompositeStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\CompositeStrategy.h" />
     <ClInclude Include="include\Data\DataConverters.h" />
     <ClInclude Include="include\Data\DataManager.h" />
-    <ClInclude Include="tools\GapAnalysis\include\Service\GapAnalysisService.h" />
-    <ClInclude Include="tools\GapAnalysis\include\GapAnalysisTypes.h" />
-    <ClInclude Include="tools\GapAnalysis\include\Strategies\GapAlgorithmOverlayStrategies.h" />
+    <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h" />
+    <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h" />
+    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapAlgorithmOverlayStrategies.h" />
     <ClInclude Include="include\Interaction\IInteractionHandler.h" />
-    <ClInclude Include="include\Utils\ImageProcessor.h" />
-    <ClInclude Include="include\Utils\InteractionComputeService.h" />
+    <ClInclude Include="include\Data\ImageProcessor.h" />
+    <ClInclude Include="include\Geometry\InteractionComputeService.h" />
     <ClInclude Include="include\Interaction\InteractionEvent.h" />
     <ClInclude Include="include\Interaction\InteractionResult.h" />
     <ClInclude Include="include\Interaction\InteractionRouter.h" />
-    <ClInclude Include="include\Strategies\IsoSurfaceStrategy.h" />
-    <ClInclude Include="include\Utils\MemMappedFile.h" />
-    <ClInclude Include="include\Strategies\MultiSliceStrategy.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Strategies\OrthogonalCropPreviewOverlayStrategy.h" />
-    <ClInclude Include="include\Strategies\SliceStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\IsoSurfaceStrategy.h" />
+    <ClInclude Include="include\Platform\MemMappedFile.h" />
+    <ClInclude Include="include\Render\Strategies\MultiSliceStrategy.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Render\Strategies\OrthogonalCropPreviewOverlayStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\SliceStrategy.h" />
     <ClInclude Include="include\Render\StdRenderContext.h" />
     <ClInclude Include="include\Render\StrategyFactory.h" />
-    <ClInclude Include="tools\GapAnalysis\include\SurfaceRefiner.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropAlgorithm.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\PlanarCropAlgorithm.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\OrthogonalCropTypes.h" />
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\SurfaceRefiner.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
-    <ClInclude Include="tools\GapAnalysis\include\VoidDetector.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropWidgetStateController.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropCameraStateController.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropBackendRouterService.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropInteractionBridgeService.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\PlanarCropWidgetStateController.h" />
-    <ClInclude Include="tools\OrthogonalCrop\include\Service\OrthogonalCropPreviewPlugService.h" />
-    <ClInclude Include="include\Service\VolumeAnalysisService.h" />
-    <ClInclude Include="tools\GapAnalysis\include\VolumeBuffer.h" />
-    <ClInclude Include="include\Strategies\VolumeStrategy.h" />
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropWidgetStateController.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropCameraStateController.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\OrthogonalCropInteractionBridgeService.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Interaction\PlanarCropWidgetStateController.h" />
+    <ClInclude Include="features\OrthogonalCrop\include\Preview\OrthogonalCropPreviewPlugService.h" />
+    <ClInclude Include="include\Analysis\VolumeAnalysisService.h" />
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
+    <ClInclude Include="include\Render\Strategies\VolumeStrategy.h" />
     <ClInclude Include="include\App\AppStateCommands.h" />
     <ClInclude Include="include\App\AppStateEvents.h" />
-    <ClInclude Include="include\Service\AppStateSyncStrategy.h" />
+    <ClInclude Include="include\App\Services\AppStateSyncStrategy.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\Service\AppDataExportTaskService.cpp" />
-    <ClCompile Include="src\Service\AppDataLoadTaskService.cpp" />
-    <ClCompile Include="src\Service\AppService.cpp" />
-    <ClCompile Include="src\Strategies\ColoredPlanesStrategy.cpp" />
-    <ClCompile Include="src\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp" />
+    <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp" />
+    <ClCompile Include="src\App\Services\AppService.cpp" />
+    <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp" />
     <ClCompile Include="src\Data\DataConverters.cpp" />
     <ClCompile Include="src\Data\DataManager.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\OrthogonalCropAlgorithm.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\PlanarCropAlgorithm.cpp" />
-    <ClCompile Include="src\Utils\ImageProcessor.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
+    <ClCompile Include="src\Data\ImageProcessor.cpp" />
     <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropBackendRouterService.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropCameraStateController.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropInteractionBridgeService.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\PlanarCropWidgetStateController.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropPreviewPlugService.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Service\OrthogonalCropWidgetStateController.cpp" />
-    <ClCompile Include="src\Strategies\IsoSurfaceStrategy.cpp" />
-    <ClCompile Include="src\main\main.cpp" />
-    <ClCompile Include="src\Utils\MemMappedFile.cpp" />
-    <ClCompile Include="src\Strategies\MultiSliceStrategy.cpp" />
-    <ClCompile Include="tools\OrthogonalCrop\src\Strategies\OrthogonalCropPreviewOverlayStrategy.cpp" />
-    <ClCompile Include="src\Strategies\SliceStrategy.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropCameraStateController.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropInteractionBridgeService.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\PlanarCropWidgetStateController.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Preview\OrthogonalCropPreviewPlugService.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Interaction\OrthogonalCropWidgetStateController.cpp" />
+    <ClCompile Include="src\Render\Strategies\IsoSurfaceStrategy.cpp" />
+    <ClCompile Include="src\App\main.cpp" />
+    <ClCompile Include="src\Platform\MemMappedFile.cpp" />
+    <ClCompile Include="src\Render\Strategies\MultiSliceStrategy.cpp" />
+    <ClCompile Include="features\OrthogonalCrop\src\Render\Strategies\OrthogonalCropPreviewOverlayStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\SliceStrategy.cpp" />
     <ClCompile Include="src\Render\StdRenderContext.cpp" />
     <ClCompile Include="src\Interaction\TimeUpdateHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer2DHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp" />
-    <ClCompile Include="src\Strategies\VolumeStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\VolumeStrategy.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

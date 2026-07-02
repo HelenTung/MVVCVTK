@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/Service/OrthogonalCropWidgetStateController.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/OrthogonalCropWidgetStateController.h
 // 分类: Service / Widget Controller
 // 说明: 管理 vtkBoxWidget2 与 box representation，把 VTK 事件翻译为裁切模块状态回调。
 // =====================================================================

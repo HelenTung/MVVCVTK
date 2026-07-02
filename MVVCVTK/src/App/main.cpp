@@ -30,11 +30,11 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "DataManager.h"
 #include "VolumeAnalysisService.h"
 #include "StdRenderContext.h"
-#include "OrthogonalCropInteractionBridgeService.h"
+#include "Interaction/OrthogonalCropInteractionBridgeService.h"
 
 // 融合算法孔隙分析
-#include "GapAnalysisService.h"
-#include "GapAlgorithmOverlayStrategies.h"
+#include "Services/GapAnalysisService.h"
+#include "Render/Strategies/GapAlgorithmOverlayStrategies.h"
 #include <vtkCommand.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>

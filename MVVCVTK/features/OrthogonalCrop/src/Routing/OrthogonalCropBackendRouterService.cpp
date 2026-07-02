@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropBackendRouterService.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Routing/OrthogonalCropBackendRouterService.cpp
 // 分类: Service / Backend Router Implementation
 // 说明: 按 request 指定的裁切类型 / 动作 / 数据源，把图像 / 体渲染 / 网格请求直接分发到算法层。
 // =====================================================================
 
-#include "OrthogonalCropBackendRouterService.h"
+#include "Routing/OrthogonalCropBackendRouterService.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX

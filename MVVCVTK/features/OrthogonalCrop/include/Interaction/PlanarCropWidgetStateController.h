@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/include/Service/PlanarCropWidgetStateController.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/PlanarCropWidgetStateController.h
 // 分类: Service / Widget Controller
 // 说明: 管理 vtkImplicitPlaneWidget2，把 VTK 平面事件翻译为裁切模块状态回调。
 // =====================================================================

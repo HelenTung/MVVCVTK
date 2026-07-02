@@ -1,6 +1,6 @@
 //#pragma once
 //// =====================================================================
-//// Path: MVVCVTK/tools/GapAnalysis/include/SurfaceRefiner.h
+//// Path: MVVCVTK/features/GapAnalysis/include/Algorithms/SurfaceRefiner.h
 //// SurfaceRefiner.h — 沿表面法向精化顶点位置（纯算法）
 //// =====================================================================
 //

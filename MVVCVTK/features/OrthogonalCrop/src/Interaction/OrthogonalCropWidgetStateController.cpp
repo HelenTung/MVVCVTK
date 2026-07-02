@@ -1,5 +1,5 @@
 // =====================================================================
-// Path: MVVCVTK/tools/OrthogonalCrop/src/Service/OrthogonalCropWidgetStateController.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/OrthogonalCropWidgetStateController.cpp
 // 分类: Service / Widget Controller Implementation
 // 说明: 封装 vtkBoxWidget2 的构造、启停、observer 绑定与 bounds 回调翻译。
 // =====================================================================
@@ -8,7 +8,7 @@
 // - 上层只拿到 bounds 与 phase
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
-#include "OrthogonalCropWidgetStateController.h"
+#include "Interaction/OrthogonalCropWidgetStateController.h"
 #include <vtkMatrix4x4.h>
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
