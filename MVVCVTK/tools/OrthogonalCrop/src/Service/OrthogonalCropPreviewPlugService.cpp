@@ -166,6 +166,18 @@ void OrthogonalCropPreviewPlugService::RestorePreview(
     RestorePolyDataPreview(targetService);
 }
 
+vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewPolyDataInput(
+    const std::shared_ptr<AbstractInteractiveService>& targetService) const
+{
+    if (!targetService) {
+        return nullptr;
+    }
+
+    auto actor = vtkActor::SafeDownCast(targetService->GetMainProp());
+    auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
+    return mapper ? vtkPolyData::SafeDownCast(mapper->GetInput()) : nullptr;
+}
+
 void OrthogonalCropPreviewPlugService::Clear()
 {
     m_targetStates.clear();

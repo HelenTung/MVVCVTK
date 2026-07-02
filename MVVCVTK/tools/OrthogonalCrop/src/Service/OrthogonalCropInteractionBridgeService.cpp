@@ -7,12 +7,10 @@
 
 #include "OrthogonalCropInteractionBridgeService.h"
 
-#include <vtkActor.h>
 #include <vtkBoundingBox.h>
 #include <vtkImageData.h>
 #include <vtkMath.h>
 #include <vtkMatrix4x4.h>
-#include <vtkPolyDataMapper.h>
 #include <vtkTransform.h>
 
 #include <algorithm>
@@ -790,20 +788,16 @@ void OrthogonalCropInteractionBridgeService::UpdatePreviewFromRequests(
             ? &volumeResult
             : nullptr;
 
-        auto actor = vtkActor::SafeDownCast(target.service->GetMainProp());
-        auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
-        if (mapper) {
-            if (auto polyData = vtkPolyData::SafeDownCast(mapper->GetInput())) {
-                m_backend.SetInputPolyData(polyData);
+        if (auto polyData = m_previewPlug.GetPreviewPolyDataInput(target.service)) {
+            m_backend.SetInputPolyData(polyData);
 
-                polyResult = m_backend.GetResult(polyDataRequest);
-                ClearPreviewPolyDataInput();
-                // PolyData preview 是 render-only 主显示路径；
-                // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
-                if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
-                    && polyResult.GetSucceeded()) {
-                    hasPolyDataResult = true;
-                }
+            polyResult = m_backend.GetResult(polyDataRequest);
+            ClearPreviewPolyDataInput();
+            // PolyData preview 是 render-only 主显示路径；
+            // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
+            if (polyResult.GetFailureReason() == OrthogonalCropFailureReason::None
+                && polyResult.GetSucceeded()) {
+                hasPolyDataResult = true;
             }
         }
 

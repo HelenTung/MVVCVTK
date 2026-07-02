@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="include">
+      <UniqueIdentifier>{a2e389cf-7ad6-481c-929d-d880ac083801}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="include\Service">
+      <UniqueIdentifier>{8612763f-2d90-4dab-9119-a4ed23681512}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{2c0900b4-25f5-4c97-a582-2a42076b887a}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="src\Service">
+      <UniqueIdentifier>{a023adcb-f04e-4ff1-8b6f-908ad25b0659}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="tests">
+      <UniqueIdentifier>{3a723f5f-0e9c-4d9b-8c44-0d93bd02ae39}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\include\OrthogonalCropAlgorithm.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\PlanarCropAlgorithm.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\OrthogonalCropTypes.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\include\Service\OrthogonalCropBackendRouterService.h">
+      <Filter>include\Service</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\OrthogonalCropAlgorithm.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\PlanarCropAlgorithm.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\Service\OrthogonalCropBackendRouterService.cpp">
+      <Filter>src\Service</Filter>
+    </ClCompile>
+    <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

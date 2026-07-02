@@ -33,6 +33,9 @@ public:
         const std::shared_ptr<AbstractInteractiveService>& targetService,
         const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy);
 
+    vtkSmartPointer<vtkPolyData> GetPreviewPolyDataInput(
+        const std::shared_ptr<AbstractInteractiveService>& targetService) const;
+
     void Clear();
 
 private:
