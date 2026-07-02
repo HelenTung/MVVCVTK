@@ -1,296 +1,93 @@
 #pragma once
 // =====================================================================
-// GapAnalysisService.h — IGapAnalysisService 实现
+// Path: MVVCVTK/features/GapAnalysis/include/Services/GapAnalysisService.h
+// GapAnalysisService.h - GapAnalysis 插件编排服务
 // =====================================================================
 
-#include "GapAnalysisTypes.h"
 #include "Algorithms/VolumeBuffer.h"
-#include "Algorithms/VoidDetector.h"
-#include "Algorithms/SurfaceRefiner.h"
-#include "AppInterfaces.h"
-#include "AppTaskCallbackState.h"
+#include "GapAnalysisTypes.h"
 
-#include <vtkSmartPointer.h>
-#include <vtkImageData.h>
-#include <vtkPolyData.h>
-#include <vtkIntArray.h>
-#include <vtkPointData.h>
-#include <vtkFlyingEdges3D.h>
-
-#include <mutex>
-#include <future>
-#include <thread>
 #include <atomic>
-#include <memory>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
+
+class GapAnalysisCompletionCallbackState;
 
 class GapAnalysisService : public IGapAnalysisService {
 public:
-    explicit GapAnalysisService(std::shared_ptr<AbstractDataManager> dataMgr)
-        : m_dataMgr(std::move(dataMgr)) {
-    }
+    GapAnalysisService();
+    ~GapAnalysisService() override;
 
-    ~GapAnalysisService() {
-        m_cancelFlag.store(true);
-        std::lock_guard<std::mutex> lk(m_futureMutex);
-    }
+    GapAnalysisService(const GapAnalysisService&) = delete;
+    GapAnalysisService& operator=(const GapAnalysisService&) = delete;
+    GapAnalysisService(GapAnalysisService&&) = delete;
+    GapAnalysisService& operator=(GapAnalysisService&&) = delete;
 
-    // ================================================================
-    // 【前处理】— 只写参数，零计算，线程安全
-    // ================================================================
-    void SetSurfaceParams(const SurfaceParams& p) override {
-        std::lock_guard<std::mutex> lk(m_paramsMutex);
-        m_surfParams = p;
-    }
-    void SetAdvancedParams(const AdvancedSurfaceParams& p) override {
-        std::lock_guard<std::mutex> lk(m_paramsMutex);
-        m_advParams = p;
-    }
-    void SetVoidParams(const VoidDetectionParams& p) override {
-        std::lock_guard<std::mutex> lk(m_paramsMutex);
-        m_voidParams = p;
-    }
+    // 输入边界放在插件 API 上，而不是在 feature 内部持有 App/DataManager。
+    // 这样 GapAnalysis 可以随插随拔：宿主只负责在合适时机交付 VTK 图像，后台任务只消费复制后的快照。
+    bool SetInputImage(vtkSmartPointer<vtkImageData> image) override;
 
-    // ================================================================
-    // 【触发】— 主动发起后台计算，对齐 LoadFileAsync 线程模式
-    // ================================================================
-    void RunAsync( // MAIN
-        std::function<void(bool success)> onComplete = nullptr) override
-    {
-        if (m_analysisState.load() == static_cast<int>(GapAnalysisState::Running))
-            return;
+    void SetSurfaceParams(const SurfaceParams& p) override;
+    void SetAdvancedParams(const AdvancedSurfaceParams& p) override;
+    void SetVoidParams(const VoidDetectionParams& p) override;
 
-        // GapAnalysis 结果会被 overlay / UI 消费；即使调用方传入回调，也必须推迟到主线程轮询点执行。
-        m_completionCallbackState.SetCallback(std::move(onComplete));
+    void RunAsync(std::function<void(bool success)> onComplete = nullptr) override;
+    void CancelRun() override;
 
-        auto img = m_dataMgr ? m_dataMgr->GetVtkImage() : nullptr;
-        if (!img) {
-            m_analysisState.store(static_cast<int>(GapAnalysisState::Failed));
-            m_completionCallbackState.SetCallbackReady(false);
-            return;
-        }
+    bool ConsumePendingCompletionCallback() override;
+    void ExecutePendingCompletionCallback() override;
 
-        m_cancelFlag.store(false);
-        m_analysisState.store(static_cast<int>(GapAnalysisState::Running));
+    GapAnalysisState GetAnalysisState() const override;
+    std::vector<VoidRegion> GetVoidRegions() const override;
 
-        SurfaceParams         surfP;
-        AdvancedSurfaceParams advP;
-        VoidDetectionParams   voidP;
-        {
-            // 后台任务启动前先拍一份参数快照，保证这次分析过程使用的是同一组配置，
-            // 不会被 UI 后续继续修改参数打断到“半旧半新”的状态。
-            std::lock_guard<std::mutex> lk(m_paramsMutex);
-            surfP = m_surfParams;
-            advP = m_advParams;
-            voidP = m_voidParams;
-        }
-
-        std::packaged_task<void()> task(
-            [this, img, surfP, advP, voidP]() mutable
-            {
-                bool ok = false;
-                if (m_cancelFlag.load()) {
-                    m_analysisState.store(static_cast<int>(GapAnalysisState::Idle));
-                    // 后台线程只投递完成状态，不执行回调，避免回调里误触 VTK 或 UI 对象。
-                    m_completionCallbackState.SetCallbackReady(false);
-                    return;
-                }
-
-                VolumeBuffer volBuf;
-                if (BuildVolumeBuffer(img, volBuf) && !m_cancelFlag.load()) {
-                    // 整条分析链按“体数据快照 -> 内部区域 -> 候选空洞 -> 标记/统计结果”的顺序推进；
-                    // 每一段之间都插入取消检查，保证长任务能在安全边界上尽快退出。
-                    auto interior = VoidDetector::CreateInteriorMask(volBuf, surfP.isoValue);
-                    if (!m_cancelFlag.load()) {
-                        auto candidates = VoidDetector::ExtractCandidates(volBuf, interior, voidP);
-                        if (!m_cancelFlag.load()) {
-                            GapAnalysisResult result;
-                            result.voids = VoidDetector::LabelAndAnalyze(
-                                volBuf, candidates, voidP, result.labelVolume);
-                            result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
-                            result.succeeded = true;
-                            {
-                                std::lock_guard<std::mutex> lk(m_resultMutex);
-                                m_result = std::move(result); // 当前分析快照，供主线程后处理阶段统一消费
-                                m_volBufSnap = std::move(volBuf);
-                            }
-                            ok = true;
-                        }
-                    }
-                }
-
-                m_analysisState.store(ok
-                    ? static_cast<int>(GapAnalysisState::Succeeded)
-                    : static_cast<int>(GapAnalysisState::Failed));
-                // 分析结果已经写入成员快照；主线程稍后消费回调时能看到稳定的 result 状态。
-                m_completionCallbackState.SetCallbackReady(ok);
-            });
-
-        {
-            std::lock_guard<std::mutex> lk(m_futureMutex);
-            // 保留 future 主要是为了让对象析构阶段能够感知后台任务生命周期，
-            // 线程本身仍然 detach，避免把分析任务绑死在调用线程上。
-            m_future = task.get_future();
-        }
-        std::thread(std::move(task)).detach();
-    }
-
-    void CancelRun() override { m_cancelFlag.store(true); }
-
-    bool ConsumePendingCompletionCallback() override {
-        return m_completionCallbackState.GetPendingCallbackConsumed();
-    }
-
-    void ExecutePendingCompletionCallback() override {
-        m_completionCallbackState.ExecutePendingCallback();
-    }
-
-    // ================================================================
-    // 【查询】
-    // ================================================================
-    GapAnalysisState GetAnalysisState() const override {
-        return static_cast<GapAnalysisState>(m_analysisState.load());
-    }
-
-    // ================================================================
-    // 【后处理】— 主线程消费，在 PostData 阶段调用
-    // ================================================================
-    std::vector<VoidRegion> GetVoidRegions() const override {
-        std::lock_guard<std::mutex> lk(m_resultMutex);
-        return m_result.voids;
-    }
-
-    // ── 3D：空洞等值面 Mesh（喂给 IsoSurfaceStrategy）──────────────
-    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override {
-        std::lock_guard<std::mutex> lk(m_resultMutex);
-        if (!m_result.succeeded || !m_result.labelImage)
-            return nullptr;
-
-        auto img = m_result.labelImage;
-        if (!img) return nullptr;
-
-        auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
-        fe->SetInputData(img);
-        fe->SetValue(0, 0.5);   // label > 0 即为空洞区域
-        fe->ComputeNormalsOff();
-        fe->Update();
-        return fe->GetOutput();
-    }
-
-    // ── 2D：标签体 vtkImageData（喂给 SliceStrategy）───────────────
-    // label=0 → 背景（透明）；label>0 → 空洞编号
-    // SliceStrategy::SetInputData 接受 vtkImageData，直接传入即可。
-    // 调用时机：主线程，GetAnalysisState() == Succeeded 之后
-    vtkSmartPointer<vtkImageData> BuildLabelImage() const {
-        std::lock_guard<std::mutex> lk(m_resultMutex);
-        return m_result.labelImage;
-    }
+    vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override;
+    vtkSmartPointer<vtkImageData> BuildLabelImage() const override;
 
 private:
-    std::shared_ptr<AbstractDataManager> m_dataMgr;
+    using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
 
-    mutable std::mutex    m_paramsMutex;
-    SurfaceParams         m_surfParams;
-    AdvancedSurfaceParams m_advParams;
-    VoidDetectionParams   m_voidParams;
+    struct ParameterSnapshot {
+        SurfaceParams surfParams;
+        AdvancedSurfaceParams advParams;
+        VoidDetectionParams voidParams;
+    };
 
-    mutable std::mutex  m_resultMutex;
-    GapAnalysisResult   m_result;
-    VolumeBuffer        m_volBufSnap;
+    VolumeBufferSnapshot GetInputSnapshot() const;
+    ParameterSnapshot GetParameterSnapshot() const;
 
-    std::atomic<int>    m_analysisState{ static_cast<int>(GapAnalysisState::Idle) }; // 跨线程阶段机：UI 轮询与后台任务都只通过枚举态沟通分析生命周期
-    std::atomic<bool>   m_cancelFlag{ false }; // 取消令牌：后台循环主动轮询，避免从外部粗暴终止线程或打断 VTK/算法对象状态
-    mutable std::mutex  m_futureMutex;
-    std::future<void>   m_future;
-    AppTaskCallbackState m_completionCallbackState; // 后台任务只投递完成状态，主线程轮询时执行完成回调
+    void RunAnalysisWorker(
+        VolumeBufferSnapshot inputSnapshot,
+        ParameterSnapshot params);
+    void WaitForWorkerThread();
+    void SetAnalysisState(GapAnalysisState state);
 
-    // ── 内部辅助：labelVolume → vtkImageData，分析完成时构建一次标签缓存 ──
+    static bool BuildVolumeBuffer(
+        vtkSmartPointer<vtkImageData> image,
+        VolumeBuffer& out);
     static vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<int>& labelVolume,
-        const VolumeBuffer& volBuf) {
-        if (labelVolume.empty())
-            return nullptr;
+        const VolumeBuffer& volBuf);
 
-        auto img = vtkSmartPointer<vtkImageData>::New();
-        img->SetDimensions(volBuf.dims[0], volBuf.dims[1], volBuf.dims[2]);
-        img->SetSpacing(volBuf.spacing[0], volBuf.spacing[1], volBuf.spacing[2]);
-        img->SetOrigin(volBuf.origin[0], volBuf.origin[1], volBuf.origin[2]);
-        img->AllocateScalars(VTK_INT, 1);
+    mutable std::mutex m_inputMutex;
+    VolumeBufferSnapshot m_inputSnapshot;
 
-        int* labelPtr = static_cast<int*>(img->GetScalarPointer()); // 标签缓存底层指针，供一次性拷贝 labelVolume
-        const size_t total = static_cast<size_t>(volBuf.dims[0]) * volBuf.dims[1] * volBuf.dims[2];
-        std::copy(labelVolume.begin(),
-            labelVolume.begin() + static_cast<std::ptrdiff_t>(total),
-            labelPtr);
-        img->Modified();
-        return img;
-    }
+    mutable std::mutex m_paramsMutex;
+    SurfaceParams m_surfParams;
+    AdvancedSurfaceParams m_advParams;
+    VoidDetectionParams m_voidParams;
 
-    // ── 内部辅助：vtkImageData → VolumeBuffer（零拷贝，调用方持有 m_resultMutex）
-    static bool BuildVolumeBuffer(
-        const vtkSmartPointer<vtkImageData> img, VolumeBuffer& out)
-    {
-        if (!img) return false;
-        int d[3]; img->GetDimensions(d);
-        out.dims = { d[0], d[1], d[2] };
-        double sp[3]; img->GetSpacing(sp);
-        out.spacing = { sp[0], sp[1], sp[2] };
-        double og[3]; img->GetOrigin(og);
-        out.origin = { og[0], og[1], og[2] };
+    mutable std::mutex m_resultMutex;
+    GapAnalysisResult m_result;
 
-        // 零拷贝：直接获取底层数据指针
-        out.voxelsPtr = static_cast<float*>(img->GetScalarPointer());
+    // service 拥有后台线程的生命周期；析构 join 只保证任务不会访问已销毁对象，
+    // 不把 service 变成进程生命周期管理器，也不让 feature 了解宿主对象树。
+    mutable std::mutex m_workerMutex;
+    std::thread m_workerThread;
+    std::atomic<bool> m_cancelFlag{ false };
+    std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
 
-		// 直接调用 VTK 内置方法获取标量范围，避免手动遍历
-        double range[2];
-		img->GetScalarRange(range);
-		out.minVal = static_cast<float>(range[0]);
-		out.maxVal = static_cast<float>(range[1]);
-
-        return true;
-    }
-
-public:
-    // ── 保存结果（CSV + RAW），调试用，调用方持有 m_resultMutex
-    bool SaveResults(const std::string& baseName) {
-        std::vector<VoidRegion> voids;
-        {
-            std::lock_guard<std::mutex> lk(m_resultMutex);
-            voids = m_result.voids;
-        }
-
-        std::string csvPath = baseName + "_voids.csv";
-        FILE* fp = fopen(csvPath.c_str(), "w+");
-        if (!fp) return false;
-
-        // 1. 写入表头
-        fprintf(fp, "ID,VoxelCount,Volume(mm3),EquivDiameter(mm),Radius(mm),Gap(mm),Compactness,Sphericity,"
-            "CentroidX(mm),CentroidY(mm),CentroidZ(mm),"
-            "MinGray,MaxGray,MeanGray,StdDevGray,"
-            "X_Projection(mm),Y_Projection(mm),Z_Projection(mm),"
-            "PCA_Axis1,PCA_Axis2,PCA_Axis3,Elongation,Flatness,PCA_Deviation1,PCA_MaxDevRatio,"
-            "ProjAreaYZ(mm2),ProjAreaXZ(mm2),ProjAreaXY(mm2),SurfaceArea(mm2),"
-            "BBox_Xmin,BBox_Xmax,BBox_Ymin,BBox_Ymax,BBox_Zmin,BBox_Zmax\n");
-
-        // 2. 遍历写入每一行数据
-        for (const auto& v : voids) {
-            fprintf(fp, "%d,%llu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                "%.4f,%.4f,%.4f,"
-                "%.4f,%.4f,%.4f,%.4f,"
-                "%.4f,%.4f,%.4f,"
-                "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                "%.4f,%.4f,%.4f,%.4f,"
-                "%d,%d,%d,%d,%d,%d\n",
-                v.id, (unsigned long long)v.voxelCount, v.volumeMM3, v.equivalentDiameterMM, v.radius, v.gapMM, v.compactness, v.sphericity,
-                v.centroidMM[0], v.centroidMM[1], v.centroidMM[2],
-                v.minGray, v.maxGray, v.meanGray, v.stdDevGray,
-                v.xProjection, v.yProjection, v.zProjection,
-                v.pcaAxes[0], v.pcaAxes[1], v.pcaAxes[2], v.elongation, v.flatness, v.pcaDeviation1, v.pcaMaxDeviationRatio,
-                v.projectedAreaYZMM2, v.projectedAreaXZMM2, v.projectedAreaXYMM2, v.surfaceAreaMM2,
-                v.bbox[0], v.bbox[1], v.bbox[2], v.bbox[3], v.bbox[4], v.bbox[5]);
-        }
-
-        fclose(fp);
-        return true;
-    }
+    // 插件内部 pending callback 状态；只暴露主线程轮询接口，不反向 include App 层。
+    std::unique_ptr<GapAnalysisCompletionCallbackState> m_completionCallbackState;
 };

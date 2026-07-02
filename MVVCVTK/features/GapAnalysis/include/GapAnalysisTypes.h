@@ -1,7 +1,7 @@
 #pragma once
 // =====================================================================
 // Path: MVVCVTK/features/GapAnalysis/include/GapAnalysisTypes.h
-// GapAnalysisTypes.h — 间隙/空洞分析模块纯数据结构
+// GapAnalysisTypes.h - 间隙/空洞分析模块纯数据结构与插件接口
 // =====================================================================
 
 #include <vector>
@@ -10,6 +10,7 @@
 #include <functional>
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
+#include <vtkPolyData.h>
 
 // ── 分析任务状态（对齐 LoadState 风格）──────────────────────────────
 enum class GapAnalysisState {
@@ -102,6 +103,10 @@ class IGapAnalysisService {
 public:
     virtual ~IGapAnalysisService() = default;
 
+    // ── 插件输入：调用方显式喂入当前图像，模块内部立即复制为稳定体素快照 ──
+    // feature 不反向依赖 App/DataManager；宿主可以在加载完成、重建完成或插件挂载时决定何时刷新输入。
+    virtual bool SetInputImage(vtkSmartPointer<vtkImageData> image) = 0;
+
     // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
     virtual void SetSurfaceParams(const SurfaceParams& p) = 0;
     virtual void SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
@@ -112,7 +117,7 @@ public:
     virtual void RunAsync(
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
-    // ── 主线程回调消费：对齐 AppTaskCallbackState 的 pending callback 约定
+    // ── 主线程回调消费：后台只投递完成信号，宿主在主线程轮询点执行回调
     virtual bool ConsumePendingCompletionCallback() = 0;
     virtual void ExecutePendingCompletionCallback() = 0;
 
@@ -128,4 +133,7 @@ public:
 
     // 生成空洞 Mesh，供 IsoSurfaceStrategy::SetInputData 消费
     virtual vtkSmartPointer<vtkPolyData> BuildVoidMesh() const = 0;
+
+    // 生成标签体，供 SliceStrategy::SetInputData 消费
+    virtual vtkSmartPointer<vtkImageData> BuildLabelImage() const = 0;
 };

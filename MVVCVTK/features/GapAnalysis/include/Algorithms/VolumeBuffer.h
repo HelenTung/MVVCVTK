@@ -1,7 +1,7 @@
 #pragma once
 // =====================================================================
 // Path: MVVCVTK/features/GapAnalysis/include/Algorithms/VolumeBuffer.h
-// VolumeBuffer.h — 纯体素访问层（无文件加载，无 I/O）
+// VolumeBuffer.h - 纯体素快照访问层（无文件加载，无 I/O）
 //
 // =====================================================================
 
@@ -9,15 +9,77 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
-#include <vtkSmartPointer.h>
-#include <vtkImageData.h>
+#include <utility>
 
 class VolumeBuffer {
 public:
+    VolumeBuffer() = default;
 
-    vtkSmartPointer<vtkImageData> m_imgData;
-    // 零拷贝指针，直接指向 vtkImageData 的底层数据
-    float* voxelsPtr = nullptr;
+    VolumeBuffer(const VolumeBuffer& other)
+        : voxels(other.voxels),
+          dims(other.dims),
+          spacing(other.spacing),
+          origin(other.origin),
+          minVal(other.minVal),
+          maxVal(other.maxVal) {
+        ResetVoxelPointer();
+    }
+
+    VolumeBuffer& operator=(const VolumeBuffer& other) {
+        if (this == &other) {
+            return *this;
+        }
+
+        voxels = other.voxels;
+        dims = other.dims;
+        spacing = other.spacing;
+        origin = other.origin;
+        minVal = other.minVal;
+        maxVal = other.maxVal;
+        ResetVoxelPointer();
+        return *this;
+    }
+
+    VolumeBuffer(VolumeBuffer&& other) noexcept
+        : voxels(std::move(other.voxels)),
+          dims(other.dims),
+          spacing(other.spacing),
+          origin(other.origin),
+          minVal(other.minVal),
+          maxVal(other.maxVal) {
+        ResetVoxelPointer();
+        other.ResetVoxelPointer();
+    }
+
+    VolumeBuffer& operator=(VolumeBuffer&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+
+        voxels = std::move(other.voxels);
+        dims = other.dims;
+        spacing = other.spacing;
+        origin = other.origin;
+        minVal = other.minVal;
+        maxVal = other.maxVal;
+        ResetVoxelPointer();
+        other.ResetVoxelPointer();
+        return *this;
+    }
+
+    // 后台算法只读体素数据，所以快照在进入算法层前一次性拥有数据。
+    // 这样 feature 不需要知道 App/DataManager 生命周期，也不会在 VTK 图像被替换时误读旧指针。
+    void SetOwnedVoxels(std::vector<float> ownedVoxels) noexcept {
+        voxels = std::move(ownedVoxels);
+        ResetVoxelPointer();
+    }
+
+    bool HasVoxelData() const noexcept {
+        return voxelsPtr != nullptr;
+    }
+
+    std::vector<float> voxels; // 稳定快照的实际所有者；voxelsPtr 始终指向它的 data()
+    const float* voxelsPtr = nullptr;
 
     std::array<int, 3>     dims = { 0, 0, 0 };
     std::array<double, 3>  spacing = { 1.0, 1.0, 1.0 };
@@ -59,5 +121,10 @@ public:
             static_cast<float>((x - origin[0]) / spacing[0]),
             static_cast<float>((y - origin[1]) / spacing[1]),
             static_cast<float>((z - origin[2]) / spacing[2]));
+    }
+
+private:
+    void ResetVoxelPointer() noexcept {
+        voxelsPtr = voxels.empty() ? nullptr : voxels.data();
     }
 };

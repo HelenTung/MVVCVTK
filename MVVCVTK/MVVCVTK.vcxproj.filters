@@ -33,6 +33,12 @@
     <Filter Include="features\GapAnalysis\include\Render\Strategies">
       <UniqueIdentifier>{d9dceca6-a587-4696-98a2-b7a748226dfb}</UniqueIdentifier>
     </Filter>
+    <Filter Include="features\GapAnalysis\src">
+      <UniqueIdentifier>{51fb4448-3f13-4a99-a61e-8f08655a4c8f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\GapAnalysis\src\Services">
+      <UniqueIdentifier>{898bb9c1-8c57-4c6e-9ed4-a3a47462b481}</UniqueIdentifier>
+    </Filter>
     <Filter Include="features\OrthogonalCrop">
       <UniqueIdentifier>{d7bc8d21-38c0-4f6e-a9c8-cb7cfcc53e26}</UniqueIdentifier>
     </Filter>
@@ -334,6 +340,9 @@
     </ClCompile>
     <ClCompile Include="src\Data\DataManager.cpp">
       <Filter>src\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp">
+      <Filter>features\GapAnalysis\src\Services</Filter>
     </ClCompile>
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>

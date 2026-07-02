@@ -182,6 +182,7 @@ public:
     std::shared_ptr<MedicalVizService> serviceC;
     std::shared_ptr<MedicalVizService> serviceD;
     std::shared_ptr<MedicalVizService> serviceE;
+    std::shared_ptr<AbstractDataManager> dataMgr;
     std::shared_ptr<SharedInteractionState> sharedState;
 
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
@@ -224,6 +225,10 @@ private:
     void TryStartAnalysis()
     {
         if (!sharedState || sharedState->GetFileLoadState() != LoadState::Succeeded) {
+            return;
+        }
+
+        if (!dataMgr || !gapAnalysis->SetInputImage(dataMgr->GetVtkImage())) {
             return;
         }
 
@@ -352,7 +357,7 @@ int main()
     auto sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
     auto sharedState = std::make_shared<SharedInteractionState>(sharedStateBroadcaster);
     auto imageAnalysis = std::make_shared<VolumeAnalysisService>(sharedDataMgr);
-    auto gapAnalysis = std::make_shared<GapAnalysisService>(sharedDataMgr);
+    auto gapAnalysis = std::make_shared<GapAnalysisService>();
     auto orthogonalCropBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
 
     // ── 传输函数（数据无关，前处理阶段安全）──────────────────────
@@ -598,15 +603,16 @@ int main()
     contextE->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
     contextE->GetInteractor()->AddObserver(vtkCommand::CharEvent, orthogonalCropHotkeyObserver, kCropHotkeyObserverPriority);
 
-    //auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
-    //gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
-    //gapAnalysisOverlayObserver->serviceA = serviceA;
-    //gapAnalysisOverlayObserver->serviceB = serviceB;
-    //gapAnalysisOverlayObserver->serviceC = serviceC;
-    //gapAnalysisOverlayObserver->serviceD = serviceD;
-    //gapAnalysisOverlayObserver->serviceE = serviceE;
-    //gapAnalysisOverlayObserver->sharedState = sharedState;
-    //contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
+    auto gapAnalysisOverlayObserver = vtkSmartPointer<GapAnalysisOverlayCommitObserver>::New();
+    gapAnalysisOverlayObserver->gapAnalysis = gapAnalysis;
+    gapAnalysisOverlayObserver->serviceA = serviceA;
+    gapAnalysisOverlayObserver->serviceB = serviceB;
+    gapAnalysisOverlayObserver->serviceC = serviceC;
+    gapAnalysisOverlayObserver->serviceD = serviceD;
+    gapAnalysisOverlayObserver->serviceE = serviceE;
+    gapAnalysisOverlayObserver->dataMgr = sharedDataMgr;
+    gapAnalysisOverlayObserver->sharedState = sharedState;
+    contextB->GetInteractor()->AddObserver(vtkCommand::TimerEvent, gapAnalysisOverlayObserver, 0.2f);
 
     std::cout << "Application started. Loading data in background...\n"
         << "Controls: A/D = navigate slices | M = toggle model transform | D = distance measure | A = angle measure | O = toggle orthogonal crop box | P = toggle planar crop | Esc = exit crop mode | 1 = keep inside/normal-side preview | 2 = remove inside/normal-side preview | Ctrl+3 = apply submit\n"

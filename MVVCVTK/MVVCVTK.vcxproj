@@ -209,6 +209,7 @@
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp" />
     <ClCompile Include="src\Data\DataConverters.cpp" />
     <ClCompile Include="src\Data\DataManager.cpp" />
+    <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
     <ClCompile Include="src\Data\ImageProcessor.cpp" />
