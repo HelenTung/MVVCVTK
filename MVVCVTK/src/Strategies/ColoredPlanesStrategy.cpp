@@ -63,9 +63,9 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
     }
 
     // 设置每个平面的法线方向
-    m_planeSources[0]->SetNormal(1.0, 0.0, 0.0); // X-axis normal (Left_right)
-    m_planeSources[1]->SetNormal(0.0, 1.0, 0.0); // Y-axis normal (Front_back)
-    m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z-axis normal (Top_down)
+    m_planeSources[0]->SetNormal(1.0, 0.0, 0.0); // X 轴法线（Left_right）
+    m_planeSources[1]->SetNormal(0.0, 1.0, 0.0); // Y 轴法线（Front_back）
+    m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z 轴法线（Top_down）
 
     for (int i = 0; i < 3; i++) {
         AddManagedProp(m_planeActors[i]);
