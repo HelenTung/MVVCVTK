@@ -7,6 +7,7 @@
 #include <vector>
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 
@@ -107,9 +108,13 @@ public:
     virtual void SetVoidParams(const VoidDetectionParams& p) = 0;
 
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
-    // onComplete 在后台线程回调，只允许写原子标记
+    // onComplete 不在后台线程直接执行；后台线程只投递完成状态，调用方应在主线程轮询消费。
     virtual void RunAsync(
         std::function<void(bool success)> onComplete = nullptr) = 0;
+
+    // ── 主线程回调消费：对齐 AppTaskCallbackState 的 pending callback 约定
+    virtual bool ConsumePendingCompletionCallback() = 0;
+    virtual void ExecutePendingCompletionCallback() = 0;
 
     // ── 查询：主线程轮询（对齐 GetLoadState 风格）────────────────────
     virtual GapAnalysisState GetAnalysisState() const = 0;

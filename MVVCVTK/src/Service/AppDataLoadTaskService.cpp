@@ -28,6 +28,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
     }
 
     m_fileLoadCallbackState.SetCallback(std::move(onComplete));
+    // 先写 Loading 状态再返回任务，避免调用方启动线程后 UI 仍短暂看到 Idle。
     m_sharedState->SetFileLoadStarted();
 
     auto dataManager = m_dataManager;
@@ -40,6 +41,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
             const bool ok = dataManager->SetDataLoaded(path, spacing, origin);
 
             if (ok) {
+                // 文件加载路径直接生成当前 vtkImage；这里可以只发布 DataReady，不碰 renderer / strategy。
                 auto image = dataManager->GetVtkImage();
                 if (image) {
                     const auto range = dataManager->GetScalarRange();
@@ -77,6 +79,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
     }
 
     m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
+    // reload 先进入 pending image 通道；真正替换当前 vtkImage 要等主线程统一消费。
     m_sharedState->SetReloadLoadStarted();
 
     auto dataManager = m_dataManager;

@@ -8,6 +8,7 @@
 #include "VoidDetector.h"
 #include "SurfaceRefiner.h"
 #include "AppInterfaces.h"
+#include "AppTaskCallbackState.h"
 
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
@@ -59,10 +60,13 @@ public:
         if (m_analysisState.load() == static_cast<int>(GapAnalysisState::Running))
             return;
 
+        // GapAnalysis 结果会被 overlay / UI 消费；即使调用方传入回调，也必须推迟到主线程轮询点执行。
+        m_completionCallbackState.SetCallback(std::move(onComplete));
+
         auto img = m_dataMgr ? m_dataMgr->GetVtkImage() : nullptr;
         if (!img) {
             m_analysisState.store(static_cast<int>(GapAnalysisState::Failed));
-            if (onComplete) onComplete(false);
+            m_completionCallbackState.SetCallbackReady(false);
             return;
         }
 
@@ -82,12 +86,13 @@ public:
         }
 
         std::packaged_task<void()> task(
-            [this, img, surfP, advP, voidP, onComplete]() mutable
+            [this, img, surfP, advP, voidP]() mutable
             {
                 bool ok = false;
                 if (m_cancelFlag.load()) {
                     m_analysisState.store(static_cast<int>(GapAnalysisState::Idle));
-                    if (onComplete) onComplete(false);
+                    // 后台线程只投递完成状态，不执行回调，避免回调里误触 VTK 或 UI 对象。
+                    m_completionCallbackState.SetCallbackReady(false);
                     return;
                 }
 
@@ -117,7 +122,8 @@ public:
                 m_analysisState.store(ok
                     ? static_cast<int>(GapAnalysisState::Succeeded)
                     : static_cast<int>(GapAnalysisState::Failed));
-                if (onComplete) onComplete(ok);
+                // 分析结果已经写入成员快照；主线程稍后消费回调时能看到稳定的 result 状态。
+                m_completionCallbackState.SetCallbackReady(ok);
             });
 
         {
@@ -130,6 +136,14 @@ public:
     }
 
     void CancelRun() override { m_cancelFlag.store(true); }
+
+    bool ConsumePendingCompletionCallback() override {
+        return m_completionCallbackState.GetPendingCallbackConsumed();
+    }
+
+    void ExecutePendingCompletionCallback() override {
+        m_completionCallbackState.ExecutePendingCallback();
+    }
 
     // ================================================================
     // 【查询】
@@ -188,6 +202,7 @@ private:
     std::atomic<bool>   m_cancelFlag{ false }; // 取消令牌：后台循环主动轮询，避免从外部粗暴终止线程或打断 VTK/算法对象状态
     mutable std::mutex  m_futureMutex;
     std::future<void>   m_future;
+    AppTaskCallbackState m_completionCallbackState; // 后台任务只投递完成状态，主线程轮询时执行完成回调
 
     // ── 内部辅助：labelVolume → vtkImageData，分析完成时构建一次标签缓存 ──
     static vtkSmartPointer<vtkImageData> BuildLabelImage(

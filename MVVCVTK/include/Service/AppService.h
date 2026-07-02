@@ -1,6 +1,6 @@
 #pragma once
 // =====================================================================
-// AppService.h — MedicalVizService 渲染业务调度层
+// AppService.h — MedicalVizService 主线程编排层
 //
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
@@ -12,9 +12,9 @@
 // 主线职责：
 //   1. 构造 / 绑定渲染上下文
 //   2. 前处理配置：只写 SharedState，零 VTK 操作
-//   3. 加载 / 导出：后台处理，主线程统一回调
-//   4. 交互：更新状态或委托变换服务
-//   5. 主线程后处理：统一重建 / 同步 / 分发回调
+//   3. 加载 / 导出：委托任务服务构建后台任务，主线程统一回调
+//   4. 交互：读取状态、计算结果、回写 SharedState
+//   5. 主线程编排：消费 pending 事件，按顺序触发重建 / 同步 / 回调
 // =====================================================================
 
 #include "AppInterfaces.h"
@@ -152,9 +152,9 @@ public:
     void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const override;
 
     // ================================================================
-    // AbstractAppService — 主线程后处理入口
-    // 功能：Timer 心跳驱动的统一后处理入口。
-    // 作用：按下面优先级处理缓存清理、加载失败、数据重建和增量同步。
+    // AbstractAppService — 主线程编排入口
+    // 功能：Timer 心跳驱动，只编排各类 pending 状态的消费顺序。
+    // 作用：按下面优先级处理缓存清理、加载失败、数据重建和增量同步；具体任务构建已下沉到专门 service。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // 路由优先级：
     //   1. m_needsCacheClear  → ClearStrategyCache
@@ -166,7 +166,7 @@ public:
 
 private:
     // ================================================================
-    // 渲染后处理 / 策略辅助
+    // 主线程编排辅助
     // 功能：服务主线程渲染骨架，负责重建、同步、失败清理和参数快照组装。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // ================================================================
@@ -186,7 +186,7 @@ private:
 
     // ================================================================
     // 异步任务启动辅助
-    // 功能：统一文件流加载 / 重载加载任务的启动与线程托管。
+    // 功能：只负责启动已构建好的后台任务和保存加载 future，不构建具体业务任务。
     // 原生依赖对象：m_sharedState、m_activeLoadFuture。
     // ================================================================
     void StartTask(std::packaged_task<void()> task,

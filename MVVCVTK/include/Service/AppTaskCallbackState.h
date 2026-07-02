@@ -5,6 +5,11 @@
 #include <mutex>
 #include <utility>
 
+// 后台任务完成时不能直接调用 UI / VTK 相关回调，因为调用方常常假设回调运行在主线程。
+// 这个状态对象把“登记回调、后台投递结果、主线程消费执行”拆成三步：
+// 1. 业务入口登记回调；
+// 2. 后台线程只移动回调和结果快照，不执行未知用户代码；
+// 3. 主线程心跳用 exchange 消费一次 pending 位，再在锁外执行回调。
 class AppTaskCallbackState
 {
 public:
@@ -41,6 +46,7 @@ public:
             m_pendingCallback = nullptr;
             success = m_pendingResult;
         }
+        // 回调可能反向触发 UI、状态或服务调用；锁外执行能避免业务回调重入时和本状态对象死锁。
         if (callback) {
             callback(success);
         }

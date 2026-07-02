@@ -201,6 +201,10 @@ public:
             return;
         }
 
+        if (gapAnalysis->ConsumePendingCompletionCallback()) {
+            gapAnalysis->ExecutePendingCompletionCallback();
+        }
+
         if (state == GapAnalysisState::Failed) {
             if (!m_failureLogged) {
                 std::cerr << "[Main] Gap Analysis failed; overlay will not be attached." << std::endl;

@@ -28,6 +28,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTra
     }
 
     const std::array<double, 16> modelToWorldMatrixSnapshot = sharedState->GetModelMatrix();
+    // 导出后台任务可能比 owning service 活得久；捕获 weak_ptr 可以在 service 已销毁时安全丢弃回调投递。
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
     return std::packaged_task<void()>(
@@ -60,6 +61,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSli
 
     const WindowLevelParams currentWindowLevel = sharedState->GetWindowLevel();
     const std::array<double, 16> modelToWorldMatrixSnapshot = sharedState->GetModelMatrix();
+    // 切片导出使用提交瞬间的姿态、窗宽窗位和游标，避免后台执行时被后续交互改成另一帧状态。
     const SliceExportData exportData = InteractionComputeService::GetSliceExportData(
         modelToWorldMatrixSnapshot,
         currentMode,
