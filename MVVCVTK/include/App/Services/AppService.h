@@ -4,7 +4,7 @@
 //
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
-//   IVisualConfigService        — 前处理接口（main.cpp 配置阶段调用）
+//   IVisualConfigService        — 前处理接口（host/session 配置阶段调用）
 //   IFileLoadControlService     — 文件加载状态/控制接口（与渲染解耦）
 //   IDataExportService          — 数据导出接口（与渲染解耦）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()

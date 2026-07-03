@@ -23,9 +23,9 @@ public:
         m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
         m_actor->SetMapper(m_mapper);
 
-        m_actor->GetProperty()->SetColor(1.0, 0.0, 0.0); // 红色
-        m_actor->GetProperty()->SetOpacity(1.0);         // 半透明
-        m_actor->GetProperty()->SetLighting(false);      //
+        m_actor->GetProperty()->SetColor(1.0, 0.0, 0.0); // 红色标出孔隙，和主模型材质色区分开
+        m_actor->GetProperty()->SetOpacity(1.0);         // 保持不透明，避免小孔隙在等值面后被背景吞掉
+        m_actor->GetProperty()->SetLighting(false);      // 关闭光照，避免红色标签被场景光照改色
         m_actor->SetPickable(false);
 
 		// 多边形偏移设置，防止在极少数重合表面发生 Z-Fighting
@@ -71,7 +71,7 @@ public:
         m_lut->SetTableRange(0, 255);
         m_lut->SetTableValue(0, 0.0, 0.0, 0.0, 0.0); // 0 为完全透明
         for (int i = 1; i < 256; ++i) {
-            m_lut->SetTableValue(i, 1.0, 0.0, 0.0, 1.0); // 算法结果半透明红色
+            m_lut->SetTableValue(i, 1.0, 0.0, 0.0, 1.0); // 非 0 标签统一显示为红色孔隙
         }
         m_lut->Build(); // 生效
 

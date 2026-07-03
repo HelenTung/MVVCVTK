@@ -159,6 +159,7 @@
     <ClInclude Include="include\App\Tasks\AppTaskCallbackState.h" />
     <ClInclude Include="include\App\AppState.h" />
     <ClInclude Include="include\App\AppTypes.h" />
+    <ClInclude Include="include\Host\VtkAppHostSession.h" />
     <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h" />
     <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h" />
     <ClInclude Include="include\Render\Strategies\CompositeStrategy.h" />
@@ -205,6 +206,7 @@
     <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp" />
     <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp" />
     <ClCompile Include="src\App\Services\AppService.cpp" />
+    <ClCompile Include="src\Host\VtkAppHostSession.cpp" />
     <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp" />
     <ClCompile Include="src\Data\DataConverters.cpp" />

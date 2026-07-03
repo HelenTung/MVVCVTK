@@ -37,12 +37,12 @@ class vtkRenderer;
 
 class OrthogonalCropInteractionBridgeService {
 public:
-    // main 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
+    // host/session 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
     using ReloadSubmitter = std::function<bool(
         vtkSmartPointer<vtkImageData> image,
         std::function<void(bool success)> onComplete)>;
 
-    // 公共边界只暴露初始化、窗口接入和用户热键动作。
+    // 公共边界只暴露初始化、窗口接入和用户命令动作。
     // 内部状态切换、后端路由细节和 VTK 预览接管都留在私有实现里。
 
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
@@ -79,14 +79,17 @@ public:
     // 执行当前 image submit：构建 request、经 router/algorithm 取结果，再把 submit image 提交到主数据 reload 通道。
     void ApplySubmit();
 
-    // 对应的裁切模式 toggle 入口。
+    // 宿主命令触发的裁切模式 toggle 入口。
     bool ToggleInteractiveCrop();
 
-    // 对应的平面裁切模式 toggle 入口。
+    // 宿主命令触发的平面裁切模式 toggle 入口。
     bool ToggleInteractivePlanarCrop();
 
-    // 对应的显式退出入口。
+    // 宿主命令触发的显式退出入口。
     bool ExitInteractiveCrop();
+
+    // 宿主只需要知道裁切链路是否已激活，用于决定退出命令是否应被裁切消费。
+    bool GetInteractiveCropActive() const;
 
     // 切换 preview 开关与 removal mode。
     void TogglePreview(CropRemovalMode removalMode);

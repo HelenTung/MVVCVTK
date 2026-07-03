@@ -9,6 +9,9 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
+    <Filter Include="include\Host">
+      <UniqueIdentifier>{14cd860b-7a52-4f86-850d-74b269948a52}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Render\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
@@ -84,6 +87,9 @@
     </Filter>
     <Filter Include="src\App">
       <UniqueIdentifier>{b4a2b4ac-7c20-4fd8-a3fa-d6df8e5d82a8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Host">
+      <UniqueIdentifier>{c46c4f0b-a7d1-4b66-bc40-d132b5c687c5}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Render\Strategies">
       <UniqueIdentifier>{e5f12f65-f87b-40bb-9ff9-db0fb71f1386}</UniqueIdentifier>
@@ -246,6 +252,9 @@
     <ClInclude Include="include\App\AppInterfaces.h">
       <Filter>include\App</Filter>
     </ClInclude>
+    <ClInclude Include="include\Host\VtkAppHostSession.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
     <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
@@ -289,6 +298,9 @@
   <ItemGroup>
     <ClCompile Include="src\App\main.cpp">
       <Filter>src\App</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\VtkAppHostSession.cpp">
+      <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp">
       <Filter>src\Render\Strategies</Filter>

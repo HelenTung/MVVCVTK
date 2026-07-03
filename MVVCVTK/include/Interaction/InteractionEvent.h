@@ -34,8 +34,8 @@ struct InteractionEvent
     bool alt = false;
 
     // ── 键盘按键（KeyPressEvent 时有效） ─────────────────────────────
-    char        keyCode = 0;    // iren->GetKeyCode()，单字符（如 'm'）
-    std::string keySym;         // iren->GetKeySym()，符号名（如 "Escape"）
+    char        keyCode = 0;    // iren->GetKeyCode()，单字符输入；具体功能键由宿主映射
+    std::string keySym;         // iren->GetKeySym()，非字符按键的符号名；具体含义由宿主映射
 
     // ── 当前渲染/工具模式（由 RenderContext 在分发前填入） ─────────────
     VizMode  vizMode = VizMode::Volume;

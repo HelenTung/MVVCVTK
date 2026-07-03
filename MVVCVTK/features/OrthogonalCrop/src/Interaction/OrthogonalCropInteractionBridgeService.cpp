@@ -109,7 +109,7 @@ void OrthogonalCropInteractionBridgeService::SetSubmitReloadHandler(ReloadSubmit
 void OrthogonalCropInteractionBridgeService::ApplySubmit()
 {
     if (!m_submitReloadHandler) {
-        std::cerr << "[Main] Orthogonal crop submit failed: submit reload handler is not ready." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
         return;
     }
 
@@ -126,7 +126,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
     auto submitResult = m_backend.GetResult(submitRequest);
     if (submitResult.GetFailureReason() != OrthogonalCropFailureReason::None || !submitResult.GetSucceeded()) {
         m_cameraStateController.Clear();
-        std::cerr << "[Main] Orthogonal crop submit failed: "
+        std::cerr << "[OrthogonalCrop] Submit failed: "
             << GetFailureReasonText(submitResult.GetFailureReason());
         if (!submitResult.GetMessage().empty()) {
             std::cerr << " - " << submitResult.GetMessage();
@@ -137,7 +137,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
 
     auto submitImage = submitResult.GetSubmitImage();
     if (!submitImage) {
-        std::cerr << "[Main] Orthogonal crop image submit failed: output image is null." << std::endl;
+        std::cerr << "[OrthogonalCrop] Image submit failed: output image is null." << std::endl;
         m_cameraStateController.Clear();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         return;
@@ -154,7 +154,7 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
             [this](bool success) {
                 HandleSubmitReloadComplete(success);
             })) {
-        std::cerr << "[Main] Orthogonal crop submit failed: reload request was rejected." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit failed: reload request was rejected." << std::endl;
         ClearPreviewPolyDataInput();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         m_submitReloadPending = false;
@@ -173,22 +173,22 @@ void OrthogonalCropInteractionBridgeService::ApplySubmit()
 bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
 {
     if (!m_cropInteractionEnabled || !m_worldBoundsInitialized) {
-        std::cerr << "[Main] Orthogonal crop submit failed: crop widget is not active." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit failed: crop widget is not active." << std::endl;
         return false;
     }
 
     if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
-        std::cerr << "[Main] Orthogonal crop submit failed: wait until widget dragging finishes." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit failed: wait until widget dragging finishes." << std::endl;
         return false;
     }
 
     if (!GetInputImage()) {
-        std::cerr << "[Main] Orthogonal crop submit failed: image crop input is missing." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit failed: image crop input is missing." << std::endl;
         return false;
     }
 
     if (m_submitReloadPending) {
-        std::cerr << "[Main] Orthogonal crop submit ignored: reload is already pending." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit ignored: reload is already pending." << std::endl;
         return false;
     }
 
@@ -198,7 +198,7 @@ bool OrthogonalCropInteractionBridgeService::CanApplySubmit() const
 void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool success)
 {
     if (!success) {
-        std::cerr << "[Main] Orthogonal crop submit reload failed." << std::endl;
+        std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
         ClearPreviewPolyDataInput();
         m_pendingSubmitOverlayResult = OrthogonalCropResult();
         m_submitReloadPending = false;
@@ -222,7 +222,7 @@ void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool suc
     const auto submitOverlayResult = m_pendingSubmitOverlayResult;
     m_pendingSubmitOverlayResult = OrthogonalCropResult();
 
-    std::cout << "[Main] Orthogonal crop submit applied to main image data." << std::endl;
+    std::cout << "[OrthogonalCrop] Submit applied to host image data." << std::endl;
     m_cameraStateController.Restore(m_referenceRenderer);
     if (m_submitReloadPending) {
         m_submitReloadPending = false;
@@ -236,7 +236,7 @@ void OrthogonalCropInteractionBridgeService::HandleSubmitReloadComplete(bool suc
 bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
 {
     if (!EnsureInputReady()) {
-        std::cerr << "[Main] Orthogonal crop trigger failed: no active image/polydata input is available yet." << std::endl;
+        std::cerr << "[OrthogonalCrop] Box crop trigger failed: no active image/polydata input is available yet." << std::endl;
         return false;
     }
 
@@ -251,7 +251,7 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
     }
 
     if (!m_primaryInteractor) {
-        std::cerr << "[Main] Orthogonal crop widget init failed: primary interactor missing." << std::endl;
+        std::cerr << "[OrthogonalCrop] Box crop widget init failed: primary interactor missing." << std::endl;
         return false;
     }
 
@@ -265,7 +265,7 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
     m_widgetStateController.SetReferenceWorldBounds(GetActiveWorldBounds()); // 初始化widget交互范围
     m_widgetStateController.SetWidgetWorldBounds(m_currentWorldBounds); // 设置实际交互盒子范围有多大
     if (!m_widgetStateController.SetEnabled(true)) {
-        std::cerr << "[Main] Orthogonal crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
+        std::cerr << "[OrthogonalCrop] Box crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
         return false;
     }
 
@@ -274,16 +274,16 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractiveCrop()
     m_cropInteractionEnabled = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
     RestorePreviewRenderTargets();
-    std::cout << "[Main] Orthogonal crop widget active. UI uses vtkBoxWidget2, dataSource = "
+    std::cout << "[OrthogonalCrop] Box crop widget active. UI uses vtkBoxWidget2, dataSource = "
         << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Press 1 to toggle inside preview, press 2 to toggle outside preview, press Ctrl+3 to apply submit; press O or Esc to exit." << std::endl;
+        << ". Use host crop commands to preview, submit, or exit." << std::endl;
     return true;
 }
 
 bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
 {
     if (!EnsureInputReady()) {
-        std::cerr << "[Main] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
+        std::cerr << "[OrthogonalCrop] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
         return false;
     }
 
@@ -298,7 +298,7 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
     }
 
     if (!m_primaryInteractor) {
-        std::cerr << "[Main] Planar crop widget init failed: primary interactor missing." << std::endl;
+        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: primary interactor missing." << std::endl;
         return false;
     }
 
@@ -328,7 +328,7 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
     m_planarWidgetStateController.SetReferenceWorldBounds(activeWorldBounds);
     m_planarWidgetStateController.SetWidgetWorldPlane(m_currentWorldPlaneOrigin, m_currentWorldPlaneNormal);
     if (!m_planarWidgetStateController.SetEnabled(true)) {
-        std::cerr << "[Main] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
+        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
         return false;
     }
 
@@ -336,9 +336,9 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
     m_cropInteractionEnabled = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
     RestorePreviewRenderTargets();
-    std::cout << "[Main] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
+    std::cout << "[OrthogonalCrop] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
         << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Press 1 to keep normal-side preview, press 2 to remove normal-side preview, press Ctrl+3 to apply submit; press P or Esc to exit." << std::endl;
+        << ". Use host crop commands to preview, submit, or exit." << std::endl;
     return true;
 }
 
@@ -349,7 +349,7 @@ bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
     }
 
     if (m_submitReloadPending) {
-        std::cout << "[Main] Orthogonal crop widget deactivation deferred: image submit reload is pending." << std::endl;
+        std::cout << "[OrthogonalCrop] Crop widget deactivation deferred: image submit reload is pending." << std::endl;
         return false;
     }
 
@@ -360,8 +360,13 @@ bool OrthogonalCropInteractionBridgeService::ExitInteractiveCrop()
     m_previewEnabled = false;
     m_lastInteractionPhase = CropInteractionPhase::Released;
     RestorePreviewRenderTargets();
-    std::cout << "[Main] Orthogonal crop widget deactivated. 3D navigation restored." << std::endl;
+    std::cout << "[OrthogonalCrop] Crop widget deactivated. 3D navigation restored." << std::endl;
     return true;
+}
+
+bool OrthogonalCropInteractionBridgeService::GetInteractiveCropActive() const
+{
+    return m_cropInteractionEnabled;
 }
 
 bool OrthogonalCropInteractionBridgeService::EnsureInputReady()

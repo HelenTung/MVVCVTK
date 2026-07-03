@@ -7,6 +7,7 @@
 #include <vtkInteractorStyleImage.h>
 #include <vtkInteractorStyleTrackballActor.h>
 #include <array>
+#include <utility>
 
 namespace {
 constexpr double kDefaultObserverPriority = 0.5;
@@ -215,41 +216,19 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     if (m_interactiveService) m_interactiveService->MarkDirty();
 }
 
+void StdRenderContext::SetHostKeyEventHandler(HostKeyEventHandler handler)
+{
+    m_hostKeyEventHandler = std::move(handler);
+}
+
 bool StdRenderContext::HandleKeyEvent(vtkRenderWindowInteractor* interactor)
 {
     if (!interactor) {
         return false;
     }
 
-    const char key = interactor->GetKeyCode();
-    const std::string keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
-
-    if (key == 'm' || key == 'M') {
-        // m: 导航模式与模型变换模式切换，直接影响后续交互风格与事件分流。
-        SetToolMode(m_toolMode == ToolMode::ModelTransform
-            ? ToolMode::Navigation
-            : ToolMode::ModelTransform);
-        return true;
-    }
-    if (key == 's' || key == 'S') {
-        // s: 触发整体变换后的体数据导出。
-        if (m_interactiveService) {
-            if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-                exporter->SaveTransformedDataAsync();
-            }
-        }
-        return true;
-    }
-    if (key == 't' || key == 'T') {
-        // t: 触发当前角度下的切片导出。
-        if (auto exporter = std::dynamic_pointer_cast<IDataExportService>(m_interactiveService)) {
-            exporter->SaveSliceImagesAsync({}, m_angle);
-        }
-        return true;
-    }
-    if (keySym == "Escape") {
-        SetToolMode(ToolMode::Navigation);
-        return true;
+    if (m_hostKeyEventHandler) {
+        return m_hostKeyEventHandler(interactor, *this);
     }
 
     return false;
@@ -299,8 +278,8 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
         return;
     }
 
-    // ── 键盘：工具模式切换与导出快捷键 ───────────────────────────────
-    // （这部分与路由解耦，StdRenderContext 自身处理快捷键）
+    // ── 键盘：宿主层按键映射 ───────────────────────────────────────
+    // RenderContext 只提供事件转交点；具体功能键属于宿主，不写进 core 渲染上下文。
     if (eventId == vtkCommand::KeyPressEvent) {
         auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
         if (HandleKeyEvent(iren)) {
