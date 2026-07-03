@@ -1,7 +1,7 @@
 #include "StdRenderContext.h"
-#include "TimeUpdateHandler.h"   // 新增
-#include "Viewer2DHandler.h"     // 新增
-#include "Viewer3DHandler.h"     // 新增
+#include "TimeUpdateHandler.h"
+#include "Viewer2DHandler.h"
+#include "Viewer3DHandler.h"
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkInteractorStyleImage.h>
@@ -13,6 +13,17 @@ namespace {
 constexpr double kDefaultObserverPriority = 0.5;
 constexpr double kTimerObserverPriority = 1.0; // Timer 事件优先级更高，确保主线程后处理先于同帧普通交互事件收敛
 constexpr int kTimerIntervalMs = 33;
+
+static void ConfigureRenderWindowForOverlay(vtkRenderWindow* renderWindow)
+{
+    if (!renderWindow) {
+        return;
+    }
+
+    // 叠加层和透明材质都依赖稳定的 alpha/depth 行为；外部 Qt window 注入时也必须走同一约束。
+    renderWindow->SetAlphaBitPlanes(1);
+    renderWindow->SetMultiSamples(0);
+}
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -20,12 +31,7 @@ constexpr int kTimerIntervalMs = 33;
 // ─────────────────────────────────────────────────────────────────────
 StdRenderContext::StdRenderContext()
 {
-    m_interactor = vtkSmartPointer<vtkRenderWindowInteractor>::New();
-    m_interactor->SetRenderWindow(m_renderWindow);
-    // 强制向系统申请 Alpha 缓冲区，以支持深度剥离（透明度透视）
-    m_renderWindow->SetAlphaBitPlanes(1);
-    // 关闭多重采样，某些显卡下 MSAA 会导致深度剥离彻底失效
-    m_renderWindow->SetMultiSamples(0);
+    ConfigureRenderWindowForOverlay(m_renderWindow);
 
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
 
@@ -33,7 +39,33 @@ StdRenderContext::StdRenderContext()
     m_eventCallback->SetCallback(AbstractRenderContext::DispatchVTKEvent);
     m_eventCallback->SetClientData(this);
 
+    AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor>::New());
+}
+
+void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor)
+{
+    if (!interactor) {
+        return;
+    }
+
+    if (m_interactor.GetPointer() == interactor.GetPointer()) {
+        if (m_renderWindow) {
+            // 同一个 interactor 也可能因为外部窗口注入而换绑 window，必须保持 VTK 双向关系一致。
+            m_interactor->SetRenderWindow(m_renderWindow);
+        }
+        return;
+    }
+
+    m_interactor = std::move(interactor);
+    if (m_renderWindow) {
+        m_interactor->SetRenderWindow(m_renderWindow);
+    }
+    // observer 绑定在 interactor 上；替换 interactor 后必须重新挂载，否则 Qt 注入窗口收不到业务事件。
     AddInteractionObservers();
+    if (m_axesWidget) {
+        m_axesWidget->SetInteractor(m_interactor);
+    }
+    BuildInteractionRouter();
 }
 
 void StdRenderContext::AddInteractionObservers()
@@ -121,7 +153,32 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
     m_interactiveService =
         std::dynamic_pointer_cast<AbstractInteractiveService>(service);
 
-    // Service 就位后重建 Router
+    // Router handler 持有 service / renderer / picker 等入口，service 换绑后必须重建以避免旧依赖继续收事件。
+    BuildInteractionRouter();
+}
+
+void StdRenderContext::SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWindow)
+{
+    vtkRenderWindow* oldRenderWindow = GetRenderWindow();
+    AbstractRenderContext::SetRenderWindow(std::move(renderWindow));
+    if (GetRenderWindow() == oldRenderWindow) {
+        return;
+    }
+
+    ConfigureRenderWindowForOverlay(GetRenderWindow());
+    // 1. 外部 window 已经有 interactor 时优先采用它，让 Qt/QVTK 生命周期继续由宿主掌控。
+    // 2. 外部 window 没有 interactor 时沿用当前 interactor，保持独立 VTK 路径行为不变。
+    if (GetRenderWindow() && GetRenderWindow()->GetInteractor()) {
+        AttachInteractor(GetRenderWindow()->GetInteractor());
+    }
+    else if (m_interactor) {
+        m_interactor->SetRenderWindow(m_renderWindow);
+    }
+    if (m_axesWidget) {
+        m_axesWidget->SetInteractor(m_interactor);
+    }
+
+    // TimeUpdateHandler 持有 renderWindow 指针，替换底层窗口后必须重建路由表。
     BuildInteractionRouter();
 }
 

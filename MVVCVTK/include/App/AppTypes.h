@@ -104,7 +104,7 @@ enum class UpdateFlags : int {
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
     WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
     Spacing = 1 << 11,  // 体数据 spacing 改变 (0x800)
-    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background | Spacing
+    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background | Spacing | DataReady
 };
 
 // 位运算辅助

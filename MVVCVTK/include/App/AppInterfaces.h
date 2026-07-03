@@ -34,6 +34,7 @@
 #include <thread>
 #include <functional>
 #include <map>
+#include <utility>
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
@@ -269,6 +270,27 @@ public:
             m_service->SetRenderContext(m_renderWindow, m_renderer);
     }
 
+    // 宿主层可能先创建平台相关窗口，例如 Qt 的 vtkGenericOpenGLRenderWindow。
+    // 接口只接受 VTK 基类，是为了让 core / feature 继续与具体 UI 框架解耦。
+    virtual void SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWindow) {
+        if (!renderWindow || renderWindow.GetPointer() == m_renderWindow.GetPointer()) {
+            return;
+        }
+
+        // renderer 是业务视图的稳定真源，替换窗口时只能迁移 renderer，
+        // 不能让 service 持有旧 window，否则后续 overlay / Render 会落到错误宿主窗口。
+        if (m_renderWindow && m_renderer) {
+            m_renderWindow->RemoveRenderer(m_renderer);
+        }
+        m_renderWindow = std::move(renderWindow);
+        if (m_renderWindow && m_renderer) {
+            m_renderWindow->AddRenderer(m_renderer);
+        }
+        if (m_service) {
+            m_service->SetRenderContext(m_renderWindow, m_renderer);
+        }
+    }
+
     virtual void Render() {
         if (m_renderWindow) m_renderWindow->Render();
     }
@@ -277,6 +299,7 @@ public:
         if (m_renderer) m_renderer->ResetCamera();
     }
     vtkRenderer* GetRenderer() const { return m_renderer.GetPointer(); }
+    vtkRenderWindow* GetRenderWindow() const { return m_renderWindow.GetPointer(); }
 
     virtual void ApplyCameraStyle(VizMode mode) = 0;
     virtual void InitializeInteractor() = 0;  // 显式分离，避免 Start() 混乱
