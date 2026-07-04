@@ -79,10 +79,11 @@ public:
     // 功能：发起后台加载任务，并通过主线程回调把结果返回给 UI / 上层。
     // 作用：把文件流加载、重载加载与渲染同步解耦。
     // 原生依赖对象：m_dataManager、m_sharedState、m_activeLoadFuture。
+    // spacing / origin 必须由宿主数据命令显式传入；RAW 体数据不携带这些物理事实，service 不提供样本默认值。
     // ================================================================
     void LoadFileAsync(const std::string& path,
-        const std::array<float, 3>& spacing = {0.02125,0.02125,0.02125},
-        const std::array<float, 3>& origin = {0,0,0},
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
         std::function<void(bool success)> onComplete = nullptr);
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。

@@ -261,6 +261,9 @@
     <ClInclude Include="include\Host\HostFeatureBindings.h">
       <Filter>include\Host</Filter>
     </ClInclude>
+    <ClInclude Include="include\Host\HostGapAnalysisBinding.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
     <ClInclude Include="include\Host\HostRenderViewSet.h">
       <Filter>include\Host</Filter>
     </ClInclude>
@@ -318,6 +321,9 @@
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostFeatureBindings.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\HostGapAnalysisBinding.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostRenderViewSet.cpp">

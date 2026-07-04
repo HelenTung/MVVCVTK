@@ -161,6 +161,7 @@
     <ClInclude Include="include\App\AppTypes.h" />
     <ClInclude Include="include\Host\HostCoreServices.h" />
     <ClInclude Include="include\Host\HostFeatureBindings.h" />
+    <ClInclude Include="include\Host\HostGapAnalysisBinding.h" />
     <ClInclude Include="include\Host\HostRenderViewSet.h" />
     <ClInclude Include="include\Host\HostSessionTypes.h" />
     <ClInclude Include="include\Host\VtkAppHostSession.h" />
@@ -212,6 +213,7 @@
     <ClCompile Include="src\App\Services\AppService.cpp" />
     <ClCompile Include="src\Host\HostCoreServices.cpp" />
     <ClCompile Include="src\Host\HostFeatureBindings.cpp" />
+    <ClCompile Include="src\Host\HostGapAnalysisBinding.cpp" />
     <ClCompile Include="src\Host\HostRenderViewSet.cpp" />
     <ClCompile Include="src\Host\VtkAppHostSession.cpp" />
     <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />

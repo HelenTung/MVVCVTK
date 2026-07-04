@@ -22,7 +22,7 @@ struct HostCoreServices {
     std::shared_ptr<SharedInteractionState> sharedState;
     // 图像分析服务，例如直方图；它依赖 sharedDataMgr，但不持有窗口。
     std::shared_ptr<VolumeAnalysisService> imageAnalysis;
-    // 孔隙算法服务，只负责计算结果；显示目标和 overlay 生命周期由 HostFeatureBindings 决定。
+    // 孔隙算法服务只负责计算结果；显示目标、算法配方快照和 overlay 生命周期由 HostGapAnalysisBinding 决定。
     std::shared_ptr<GapAnalysisService> gapAnalysis;
     // 裁切交互桥，连接裁切 feature 与 host 窗口；具体 reference/preview 窗口在激活请求到来后再绑定。
     std::shared_ptr<OrthogonalCropInteractionBridgeService> orthogonalCropBridge;

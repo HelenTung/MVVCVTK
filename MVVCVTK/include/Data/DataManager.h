@@ -45,7 +45,7 @@ class RawVolumeDataManager : public BaseDataManager {
 private:
     int m_dims[3] = { 0, 0, 0 }; // 当前已提交体数据的体素维度
     std::array<double, 3> m_origin = { 0.0, 0.0, 0.0 }; // 当前体数据 RAS 原点，和 spacing 一起定义统一世界坐标映射
-	std::array<double, 3> m_spacing = { 0.02125, 0.02125, 0.02125 }; // 当前生效 spacing，供导出与交互换算复用
+    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 }; // 空数据使用中性 spacing；真实 spacing 必须由加载/重建命令提交
 
     // ── 重建注入路径（前后处理分离）──────────────────────────────────
     mutable std::mutex            m_reconMutex; // 保护“后台准备中但尚未提交”的重建快照

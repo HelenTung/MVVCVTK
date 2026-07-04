@@ -78,6 +78,9 @@ struct InitialVolumeLoadConfig {
     std::string filePath;
     // RAW 必需的物理几何元数据；optional 表示“宿主尚未下发”，不是使用默认值。
     std::optional<InitialVolumeGeometryConfig> geometry;
+    // 初始 3D 等值面显示阈值的范围比例。optional 是为了让宿主明确选择是否要在加载完成后设置 iso。
+    // 为什么放在加载命令里：这个值描述当前数据集的启动显示配方，不属于 session 或 feature 的通用默认。
+    std::optional<double> initialIsoDataRangeRatio;
     // 直方图仅服务调试诊断，放在 host 加载配置里，不让图像分析服务记住某个 UI 偏好。
     int histogramBinCount = 2048;
     // 空路径表示不导出直方图图片；这样不会因为默认写死路径导致 vtkPNGWriter 报错。
@@ -149,7 +152,63 @@ enum class HostCropPreviewMode {
     RemoveInside
 };
 
-// 孔隙分析显示请求只决定 overlay 投递目标；是否运行算法由显式进入显示模式后再触发。
+// 孔隙等值面阈值来源。按数据范围比例计算时，真实阈值为 min + (max - min) * ratio。
+// 为什么不用裸 bool：绝对阈值和范围比例是两种不同业务来源，枚举能防止上位机参数被误解释。
+enum class HostGapAnalysisIsoMode {
+    DataRangeRatio,
+    AbsoluteValue
+};
+
+// 孔隙表面提取参数属于一次宿主分析命令，而不是 timer observer 的隐式经验值。
+// 调用方必须显式传入，是为了让不同材料、不同批次或上位机配方可以独立控制分析策略。
+struct HostGapAnalysisSurfaceConfig {
+    // 选择 isoValue 的来源；默认只作为字段初值，真正激活时仍要求 request.algorithm 存在。
+    HostGapAnalysisIsoMode isoMode = HostGapAnalysisIsoMode::DataRangeRatio;
+    // 数据范围比例，单位为归一化比例；isoMode=DataRangeRatio 时使用。
+    double dataRangeRatio = 0.0;
+    // 绝对灰度阈值；isoMode=AbsoluteValue 时使用。
+    double absoluteIsoValue = 0.0;
+};
+
+// 孔隙候选筛选参数直接对应 GapAnalysis 插件的 VoidDetectionParams。
+// 放在 host DTO 中是为了避免 main / Qt 上位机包含插件内部头后再散落设置字段。
+struct HostGapAnalysisVoidDetectionConfig {
+    // 灰度下限，按当前 vtkImageData 标量单位解释。
+    float grayMin = 0.0f;
+    // 灰度上限，按当前 vtkImageData 标量单位解释。
+    float grayMax = 0.0f;
+    // 最小孔隙体积，单位 mm^3；依赖体数据 spacing 的物理尺度。
+    float minVolumeMM3 = 0.0f;
+    // 法向/结构张量判定角度阈值，单位 degree。
+    float angleThresholdDeg = 0.0f;
+    // 张量局部窗口半径/尺寸，语义由 GapAnalysis 插件保持。
+    int tensorWindowSize = 0;
+    // 二值形态腐蚀迭代次数，语义由 GapAnalysis 插件保持。
+    int erosionIterations = 0;
+};
+
+// 一次孔隙分析命令的算法参数集合。
+// surface 决定等值面输入阈值，voidDetection 决定孔隙候选筛选；二者随同激活请求一起进入 host binding。
+struct HostGapAnalysisAlgorithmConfig {
+    HostGapAnalysisSurfaceConfig surface;
+    HostGapAnalysisVoidDetectionConfig voidDetection;
+};
+
+// 孔隙分析完成轮询的 VTK Timer 承载窗口配置。
+// 为什么显式配置：standalone 可以选择进入 Start() 的 interactor，Qt / 上位机可以选择自己的事件泵窗口；
+// session 不再猜测“第一个窗口”或“默认五窗口中的某个窗口”。
+struct HostGapAnalysisEventPumpConfig {
+    // false 表示不安装 VTK Timer observer；调用方可以稍后接入自己的主线程轮询机制。
+    bool enableTimer = false;
+    // 优先按 id 选择 timer view，适合 Qt 已经建立 widget 到 view id 的映射。
+    std::string timerViewId;
+    // timerViewId 为空时是否允许按 role 选择第一个事件泵窗口。
+    bool useTimerViewRole = false;
+    // role fallback 的事件泵窗口；它只决定 TimerEvent 来源，不决定 overlay 目标。
+    HostRenderViewRole timerViewRole = HostRenderViewRole::Primary3D;
+};
+
+// 孔隙分析显示请求决定 overlay 投递目标和算法参数；是否运行算法由显式进入显示模式后再触发。
 // 这样“显示/隐藏 overlay”和“是否退出孔隙分析模式”可以分开处理。
 struct HostGapAnalysisActivationRequest {
     // 显式 overlay 目标 id 列表；空列表不代表所有窗口。
@@ -158,6 +217,8 @@ struct HostGapAnalysisActivationRequest {
     std::vector<HostRenderViewRole> targetViewRoles;
     // true 才允许退回默认 overlay role，防止未指定目标时全局接管。
     bool useDefaultOverlayRoles = false;
+    // 一次分析运行所需参数；没有参数时 host 会拒绝进入分析链路，避免使用隐藏经验默认值。
+    std::optional<HostGapAnalysisAlgorithmConfig> algorithm;
 };
 
 // 独立 VTK host 的 feature 输入绑定，由 main 配置，由 HostFeatureBindings 安装到指定窗口。

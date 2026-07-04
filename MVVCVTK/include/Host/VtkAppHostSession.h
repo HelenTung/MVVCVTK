@@ -26,6 +26,8 @@ public:
         HostRenderContextInputConfig renderContextInput;
         // standalone hotkey 绑定属于当前 VTK 调试 host；Qt / 上位机可关闭它，只通过显式命令驱动 feature。
         HostCommandInputConfig commandInput;
+        // 孔隙分析完成轮询的事件泵配置；standalone/Qt 都必须显式选择承载 TimerEvent 的窗口。
+        HostGapAnalysisEventPumpConfig gapAnalysisEventPump;
     };
 
     VtkAppHostSession();
@@ -55,9 +57,10 @@ public:
     bool ExitGapAnalysisDisplay();
 
     // endpoint 指针只在当前 session 生命周期内有效；外部宿主按 id/role 绑定 widget，不接管所有权。
-    const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints() const;
-    const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& id) const;
-    const HostRenderViewEndpoint* GetPrimaryRenderViewEndpoint() const;
+    // 读取 endpoint 会懒 Initialize，避免 Qt host 构造 session 后立即取窗口句柄时拿到空缓存。
+    const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
+    const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& id);
+    const HostRenderViewEndpoint* GetPrimaryRenderViewEndpoint();
 
     // 默认五视图只是保持现有独立 VTK 调试体验，不代表项目架构要求固定窗口数。
     static std::vector<HostRenderViewConfig> BuildDefaultRenderViewConfigs();

@@ -7,7 +7,7 @@
 #include <functional>
 #include <memory>
 
-class IGapAnalysisDisplayController;
+class HostGapAnalysisBinding;
 
 // HostFeatureBindings 是 host/session 到 feature 的绑定边界，由 VtkAppHostSession 持有。
 // 它上接 HostRenderViewSet 的窗口查询，下接裁切 bridge / 孔隙算法服务，职责只限“把显式宿主命令绑定到 feature 能力”。
@@ -21,7 +21,8 @@ class IGapAnalysisDisplayController;
 // observer 只保存 weak_ptr，窗口事件晚到时不会反向延长或访问已销毁的 HostFeatureBindings。
 class HostFeatureBindings : public std::enable_shared_from_this<HostFeatureBindings> {
 public:
-    HostFeatureBindings() = default;
+    HostFeatureBindings();
+    ~HostFeatureBindings();
 
     // 注册 core 能力和 submit 回调；这里不绑定 reference/preview 窗口，因为目标必须来自后续激活请求。
     void RegisterFeatures(
@@ -53,7 +54,7 @@ public:
         const HostCommandInputConfig& inputConfig,
         const HostHotkeyBindings& hotkeys);
     // Timer 只是把异步孔隙算法结果提交回显示控制器；没有显式显示请求时它保持空转。
-    void AttachGapAnalysisTimer();
+    void AttachGapAnalysisTimer(const HostGapAnalysisEventPumpConfig& eventPumpConfig);
 
 private:
     // 从共享 DataManager 把当前 vtkImageData 交给裁切 bridge；加载完成和显式激活都会复用同一刷新点。
@@ -65,6 +66,6 @@ private:
     HostCoreServices m_core;
     // 非拥有指针，指向 VtkAppHostSession::Impl 中的窗口集合；session 保证其生命周期覆盖本对象。
     const HostRenderViewSet* m_renderViews = nullptr;
-    // 孔隙显示控制器只管理 overlay 显隐和结果缓存；用接口保存是为了把 timer observer 和 public 命令都收敛到同一状态机。
-    std::shared_ptr<IGapAnalysisDisplayController> m_gapAnalysisOverlayController;
+    // 孔隙分析绑定对象收口显示状态机、算法参数快照和 TimerEvent 提交桥；HostFeatureBindings 只转发宿主命令。
+    std::unique_ptr<HostGapAnalysisBinding> m_gapAnalysisBinding;
 };

@@ -33,6 +33,22 @@ static HostHotkeyBindings BuildStandaloneHotkeyBindings()
     hotkeys.exitKeySym = "Escape";
     return hotkeys;
 }
+
+static HostGapAnalysisAlgorithmConfig BuildStandaloneGapAnalysisAlgorithmConfig()
+{
+    // 这些值只是 standalone 调试样本的孔隙分析配方。
+    // 为什么放在 main：真实上位机应按材料、批次或用户参数下发同一结构，Host/timer 只负责执行显式命令。
+    HostGapAnalysisAlgorithmConfig config;
+    config.surface.isoMode = HostGapAnalysisIsoMode::DataRangeRatio;
+    config.surface.dataRangeRatio = 0.55;
+    config.voidDetection.grayMin = -0.2262536138296127f;
+    config.voidDetection.grayMax = 0.15f;
+    config.voidDetection.minVolumeMM3 = 0.0001f;
+    config.voidDetection.angleThresholdDeg = 30.0f;
+    config.voidDetection.tensorWindowSize = 1;
+    config.voidDetection.erosionIterations = 2;
+    return config;
+}
 }
 
 int main()
@@ -53,14 +69,16 @@ int main()
     config.hotkeys = BuildStandaloneHotkeyBindings();
 
     // 这里临时模拟上位机下发“加载体数据”命令，所以文件路径和 RAW 物理元数据都在 main 中显式展开。
-    // 后续真实上位机接入时，只替换这三个输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
+    // 后续真实上位机接入时，只替换这些输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
     const std::string simulatedVolumeFilePath = "F:\\data\\1000x1000x1000.raw";
     const std::array<float, 3> simulatedVolumeSpacing = { 0.02125f, 0.02125f, 0.02125f };
     const std::array<float, 3> simulatedVolumeOriginValues = { 0.0f, 0.0f, 0.0f };
+    const double simulatedInitialIsoDataRangeRatio = 0.55;
     if (!simulatedVolumeFilePath.empty()) {
         config.initialVolume.enableInitialLoad = true;
         config.initialVolume.filePath = simulatedVolumeFilePath;
         config.initialVolume.geometry.emplace(simulatedVolumeSpacing, simulatedVolumeOriginValues);
+        config.initialVolume.initialIsoDataRangeRatio = simulatedInitialIsoDataRangeRatio;
     }
 
     config.renderContextInput.enableStandaloneHotkeys = true;
@@ -75,6 +93,13 @@ int main()
     config.commandInput.orthogonalCropRequest.referenceRole = HostRenderViewRole::Primary3D;
     config.commandInput.orthogonalCropRequest.previewViewRoles = standaloneViewRoles;
     config.commandInput.gapAnalysisRequest.targetViewRoles = standaloneViewRoles;
+    config.commandInput.gapAnalysisRequest.algorithm = BuildStandaloneGapAnalysisAlgorithmConfig();
+
+    // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以孔隙分析完成轮询也显式挂到这个 role。
+    // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。
+    config.gapAnalysisEventPump.enableTimer = true;
+    config.gapAnalysisEventPump.useTimerViewRole = true;
+    config.gapAnalysisEventPump.timerViewRole = HostRenderViewRole::TopDownSlice;
 
     VtkAppHostSession session(std::move(config));
     session.Start();

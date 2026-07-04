@@ -129,8 +129,17 @@ static void StartInitialVolumeLoad(
             }
 
             auto range = sharedState->GetDataRange();
-            double isoVal = range[0] + (range[1] - range[0]) * 0.55;
-            primaryService->SetIsoThreshold(isoVal);
+            if (initialVolume.initialIsoDataRangeRatio) {
+                const double ratio = *initialVolume.initialIsoDataRangeRatio;
+                if (ratio < 0.0 || ratio > 1.0) {
+                    std::cerr << "[Host] Initial iso threshold skipped: data range ratio must be within [0, 1]." << std::endl;
+                }
+                else {
+                    // 初始 iso 只按宿主显式配方设置显示状态；session 不保存样本数据的经验阈值。
+                    const double isoVal = range[0] + (range[1] - range[0]) * ratio;
+                    primaryService->SetIsoThreshold(isoVal);
+                }
+            }
 
             auto histogramTable = imageAnalysis->GetHistogramData(initialVolume.histogramBinCount);
             if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
@@ -232,7 +241,7 @@ void VtkAppHostSession::Initialize()
     m_impl->featureBindings->AttachStandaloneHotkeys(
         m_impl->config.commandInput,
         m_impl->config.hotkeys);
-    m_impl->featureBindings->AttachGapAnalysisTimer();
+    m_impl->featureBindings->AttachGapAnalysisTimer(m_impl->config.gapAnalysisEventPump);
     PrintStartupStatus(m_impl->config);
 
     m_impl->isInitialized = true;
@@ -312,14 +321,16 @@ bool VtkAppHostSession::ExitGapAnalysisDisplay()
     return m_impl->featureBindings->ExitGapAnalysisDisplay();
 }
 
-const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints() const
+const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()
 {
+    Initialize();
     return m_impl->renderViewEndpoints;
 }
 
 const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
-    const std::string& id) const
+    const std::string& id)
 {
+    Initialize();
     for (const auto& endpoint : m_impl->renderViewEndpoints) {
         if (endpoint.id == id) {
             return &endpoint;
@@ -328,8 +339,9 @@ const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
     return nullptr;
 }
 
-const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryRenderViewEndpoint() const
+const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryRenderViewEndpoint()
 {
+    Initialize();
     for (const auto& endpoint : m_impl->renderViewEndpoints) {
         if (endpoint.role == HostRenderViewRole::Primary3D) {
             return &endpoint;
