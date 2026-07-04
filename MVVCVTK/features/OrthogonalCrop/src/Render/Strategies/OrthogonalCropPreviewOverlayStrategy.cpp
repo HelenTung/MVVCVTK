@@ -5,8 +5,8 @@
 // =====================================================================
 // 这个策略的职责不是“计算裁切”，而是“解释裁切结果”：
 // - 同一份结果在 2D 窗口主要表现为 mask slice
-// - 在 3D 窗口主要表现为 outline / preview region / clipped polydata
-// - 视觉语义由 removal mode 与当前窗口轴向共同决定
+// - 在 3D 窗口只保留线框参照 / clipped polydata，不再显示半透明实体盒
+// - 视觉语义由结果类型与当前窗口轴向共同决定，裁切模式本身不再染色
 
 #include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
 
@@ -14,15 +14,22 @@
 #include <vtkMatrix4x4.h>
 #include <vtkProperty.h>
 
+namespace {
+constexpr double kOverlayPreviewRed = 0.72;
+constexpr double kOverlayPreviewGreen = 0.76;
+constexpr double kOverlayPreviewBlue = 0.80;
+constexpr double kOverlayMaskAlpha = 0.42;
+}
+
 OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
 {
-    // 3D 区域体、outline、polydata 结果和 2D mask slice 在构造时全部建好，
+    // outline、polydata 结果和 2D mask slice 在构造时全部建好，
     // 后续每次 preview 只切换输入与可见性，避免频繁重建 prop。
     m_previewRegionActor = vtkSmartPointer<vtkActor>::New();
     m_previewRegionMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     m_previewRegionMapper->ScalarVisibilityOff();
     m_previewRegionActor->SetMapper(m_previewRegionMapper);
-    m_previewRegionActor->GetProperty()->SetOpacity(0.18);
+    m_previewRegionActor->GetProperty()->SetOpacity(0.0);
     m_previewRegionActor->GetProperty()->SetLighting(false);
     m_previewRegionActor->SetPickable(false);
     m_previewRegionActor->SetVisibility(false);
@@ -31,7 +38,7 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
     m_outlineMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     m_outlineMapper->ScalarVisibilityOff();
     m_outlineActor->SetMapper(m_outlineMapper);
-    m_outlineActor->GetProperty()->SetColor(1.0, 0.55, 0.12);
+    m_outlineActor->GetProperty()->SetColor(kOverlayPreviewRed, kOverlayPreviewGreen, kOverlayPreviewBlue);
     m_outlineActor->GetProperty()->SetLineWidth(2.0);
     m_outlineActor->GetProperty()->SetLighting(false);
     m_outlineActor->GetProperty()->SetRepresentationToWireframe();
@@ -41,7 +48,7 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
     m_polyDataActor = vtkSmartPointer<vtkActor>::New();
     m_polyDataMapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     m_polyDataActor->SetMapper(m_polyDataMapper);
-    m_polyDataActor->GetProperty()->SetColor(1.0, 0.55, 0.12);
+    m_polyDataActor->GetProperty()->SetColor(kOverlayPreviewRed, kOverlayPreviewGreen, kOverlayPreviewBlue);
     m_polyDataActor->GetProperty()->SetOpacity(0.35);
     m_polyDataActor->GetProperty()->SetLighting(false);
     m_polyDataActor->SetPickable(false);
@@ -71,7 +78,7 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
     m_maskSlice->GetProperty()->SetInterpolationTypeToNearest();
     m_maskSlice->GetProperty()->SetLayerNumber(2);
 
-    ApplyRemovalVisualStyle();
+    ApplyOverlayVisualStyle();
 
     AddManagedProp(m_previewRegionActor);
     AddManagedProp(m_outlineActor);
@@ -86,7 +93,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetInputData(vtkSmartPointer<vtkDataO
 
 void OrthogonalCropPreviewOverlayStrategy::SetSliceAxis(int axis)
 {
-    // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D preview region 逻辑。
+    // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D 线框参照逻辑。
     m_sliceAxis = axis;
     UpdateVisiblePreviewProps();
 }
@@ -99,8 +106,9 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
 
     m_removalMode = removalMode;
 
-    // 颜色语义切换不依赖新结果，当前缓存的 prop 直接改样式即可。
-    ApplyRemovalVisualStyle();
+    // 颜色不再承载 KeepInside / RemoveInside 语义；
+    // 记录模式只是为了保持 overlay 与后端请求的状态一致。
+    ApplyOverlayVisualStyle();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
@@ -113,7 +121,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     }
 
     // outline 是所有窗口共享的几何参照；
-    // 3D 用它显示线框和实体区域，2D 用它显示切片投影轮廓。
+    // 3D 只显示线框，避免半透明实体盒在非拖拽态形成“裁切盒变色”的错觉。
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -190,25 +198,27 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
 
 void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
 {
-    // 3D 窗口显示实体区域，2D 窗口显示 mask slice，两者都保留 outline 作为共同参照。
+    // 3D 窗口只显示线框参照，2D 窗口显示 mask slice。
+    // 半透明实体盒固定隐藏，因为交互态颜色应该只由 widget selected property 表达。
     m_outlineActor->SetVisibility(m_hasOutline ? 1 : 0);
-    m_previewRegionActor->SetVisibility(m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
+    m_previewRegionActor->SetVisibility(false);
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
 }
 
-void OrthogonalCropPreviewOverlayStrategy::ApplyRemovalVisualStyle()
+void OrthogonalCropPreviewOverlayStrategy::ApplyOverlayVisualStyle()
 {
-    // KeepInside / RemoveInside 用同一套 prop，但通过颜色语义区分“保留”与“移除”。
-    const bool keepInside = m_removalMode == CropRemovalMode::KeepInside;
-    const double red = keepInside ? 0.10 : 1.0;
-    const double green = keepInside ? 0.90 : 0.18;
-    const double blue = keepInside ? 0.45 : 0.06;
-
-    m_previewRegionActor->GetProperty()->SetColor(red, green, blue);
-    m_outlineActor->GetProperty()->SetColor(red, green, blue);
+    // 裁切盒颜色只在 widget 选中/拖拽时变化；
+    // overlay 使用固定中性色，避免用户把预览模式切换误读成模型或裁切盒状态被改写。
+    m_previewRegionActor->GetProperty()->SetColor(kOverlayPreviewRed, kOverlayPreviewGreen, kOverlayPreviewBlue);
+    m_outlineActor->GetProperty()->SetColor(kOverlayPreviewRed, kOverlayPreviewGreen, kOverlayPreviewBlue);
 
     for (int value = 1; value < 256; ++value) {
-        m_maskLut->SetTableValue(value, red, green, blue, 0.42);
+        m_maskLut->SetTableValue(
+            value,
+            kOverlayPreviewRed,
+            kOverlayPreviewGreen,
+            kOverlayPreviewBlue,
+            kOverlayMaskAlpha);
     }
     m_maskLut->Build();
 }

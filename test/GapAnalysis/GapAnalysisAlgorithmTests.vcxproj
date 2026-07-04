@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\include</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\features\GapAnalysis\include</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
@@ -148,16 +148,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\Algorithms\VolumeBuffer.h" />
-    <ClInclude Include="..\include\Algorithms\VoidDetector.h" />
-    <ClInclude Include="..\include\GapAnalysisTypes.h" />
-    <ClInclude Include="..\include\Services\GapAnalysisService.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VoidDetector.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\GapAnalysisTypes.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\src\Services\GapAnalysisService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
     <ClCompile Include="GapAnalysisAlgorithmTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
-

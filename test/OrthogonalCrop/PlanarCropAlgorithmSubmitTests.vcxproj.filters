@@ -26,27 +26,27 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\Algorithms\OrthogonalCropAlgorithm.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h">
       <Filter>include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\Algorithms\PlanarCropAlgorithm.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h">
       <Filter>include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\OrthogonalCropTypes.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\Routing\OrthogonalCropBackendRouterService.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h">
       <Filter>include\Routing</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\src\Algorithms\OrthogonalCropAlgorithm.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
       <Filter>src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\Algorithms\PlanarCropAlgorithm.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
       <Filter>src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\Routing\OrthogonalCropBackendRouterService.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp">
       <Filter>src\Routing</Filter>
     </ClCompile>
     <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp">

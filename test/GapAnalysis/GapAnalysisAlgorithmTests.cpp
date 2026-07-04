@@ -1,8 +1,7 @@
-// =====================================================================
-// Path: MVVCVTK/features/GapAnalysis/tests/GapAnalysisAlgorithmTests.cpp
-// 分类: Tests / GapAnalysis
-// 说明: 合成封闭孔洞体数据的算法与服务快照回归测试。
-// =====================================================================
+// 这个测试放在仓库根 test/ 下，刻意不放回 feature 目录：
+// 1. 主项目只负责编译应用链路，测试工程独立验证算法/服务契约。
+// 2. 合成体数据让回归测试不依赖本地 RAW 文件或窗口初始化。
+// 3. 同时测纯算法和 GapAnalysisService 快照，防止 UI/host 改动污染孔隙分析核心边界。
 
 #include "Algorithms/VoidDetector.h"
 #include "Services/GapAnalysisService.h"
@@ -29,6 +28,8 @@ constexpr double NumericTolerance = 1e-9;
 
 std::size_t GetLinearIndex(int x, int y, int z, const std::array<int, 3>& dims)
 {
+    // VTK image 标量按 x 最快、y 次之、z 最慢展开；这里显式写公式，
+    // 是为了让 label image 校验和合成 voxel buffer 使用同一线性布局。
     return static_cast<std::size_t>(x)
         + static_cast<std::size_t>(y) * static_cast<std::size_t>(dims[0])
         + static_cast<std::size_t>(z) * static_cast<std::size_t>(dims[0]) * static_cast<std::size_t>(dims[1]);
@@ -36,6 +37,8 @@ std::size_t GetLinearIndex(int x, int y, int z, const std::array<int, 3>& dims)
 
 bool GetVoxelIsInsideSyntheticVoid(int x, int y, int z)
 {
+    // 合成 3x3x3 封闭低灰度块，外层一圈高灰度体素作为“封闭边界”，
+    // 这样检测到的区域数量、体素数、bbox 和质心都有确定答案。
     return x >= 2 && x <= 4
         && y >= 2 && y <= 4
         && z >= 2 && z <= 4;
@@ -56,6 +59,8 @@ void ExpectNear(double actual, double expected, const std::string& message, int&
 
 VoidDetectionParams BuildVoidDetectionParams()
 {
+    // 参数刻意压低 minVolume 并关闭腐蚀，使测试只验证“封闭孔洞识别”本身，
+    // 不把经验阈值和后处理策略混进这个单元回归。
     VoidDetectionParams params;
     params.grayMin = -0.1f;
     params.grayMax = 0.1f;
@@ -155,6 +160,7 @@ void VerifySingleSyntheticVoidRegion(const VoidRegion& region, int& failureCount
 
 void VerifyLabelImage(vtkImageData* labelImage, int& failureCount)
 {
+    // label image 是后续 overlay 的输入真源；这里逐 voxel 校验，确保 mesh 成功不掩盖 label 错位。
     Expect(labelImage != nullptr, "gap analysis label image should exist.", failureCount);
     if (!labelImage) {
         return;
@@ -195,6 +201,7 @@ void VerifyLabelImage(vtkImageData* labelImage, int& failureCount)
 
 void RunPureAlgorithmCase(int& failureCount)
 {
+    // 纯算法路径不经过 service 或线程，先确认 VoidDetector 的数学结果稳定。
     const auto volume = BuildSyntheticVolumeBuffer();
     const auto interior = VoidDetector::CreateInteriorMask(volume, 0.5f);
     Expect(CountMaskValues(interior) == 27, "interior mask should contain only the enclosed void.", failureCount);
@@ -244,6 +251,8 @@ bool ConsumeCompletionCallback(GapAnalysisService& service)
 
 void RunServiceSnapshotCase(int& failureCount)
 {
+    // service 路径验证异步快照语义：SetInputImage 后后台任务必须读自己的副本，
+    // 否则 UI 线程或 host 后续修改 VTK image 会改变正在运行的分析结果。
     auto image = BuildSyntheticImage();
     GapAnalysisService service;
 

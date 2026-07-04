@@ -242,7 +242,8 @@ private:
     // 当前平面 widget 的 world 法线。
     CropVectorDouble3Array m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
 
-    // 当前平面矩形的 world 半尺寸，布局为 [halfWidth, halfHeight]。
+    // 当前平面 widget 可视区域的 world 半尺寸，布局为 [halfWidth, halfHeight]。
+    // 它描述交互控件尺度，不代表平面裁切存在有限矩形边界。
     std::array<double, 2> m_currentWorldPlaneHalfExtents = { 1.0, 1.0 };
 
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。

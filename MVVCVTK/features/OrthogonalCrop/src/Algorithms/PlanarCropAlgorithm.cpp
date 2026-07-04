@@ -1,19 +1,17 @@
 // =====================================================================
 // Path: MVVCVTK/features/OrthogonalCrop/src/Algorithms/PlanarCropAlgorithm.cpp
 // 分类: Math / Core Algorithm Implementation
-// 说明: 负责平面 request 归一化、平面矩形轮廓和 image submit 产物构建。
+// 说明: 负责平面 request 归一化、半空间 preview 元数据和 image submit 产物构建。
 // =====================================================================
 
 #include "Algorithms/PlanarCropAlgorithm.h"
 
-#include <vtkCellArray.h>
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
 #include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
-#include <vtkPoints.h>
 
 #include <algorithm>
 #include <array>
@@ -546,92 +544,20 @@ static PlanarSubmitImages GetPlanarSubmitImages(
     return images;
 }
 
-vtkSmartPointer<vtkPolyData> PlanarCropAlgorithm::GetOutlinePolyData(
-    const CropDataModel& cropData,
-    const CropBoundsDouble6Array& /*inputModelBounds*/)
-{
-    const auto normal = cropData.GetPlaneNormalInInputModel();
-    const auto center = cropData.GetPlaneCenterInInputModel();
-    const auto halfExtents = cropData.GetPlaneHalfExtentsInInputModel();
-    double normalData[3] = { normal[0], normal[1], normal[2] };
-    if (vtkMath::Normalize(normalData) <= PlaneEpsilon) {
-        return nullptr;
-    }
-
-    const double halfWidth = std::abs(halfExtents[0]);
-    const double halfHeight = std::abs(halfExtents[1]);
-    if (halfWidth <= PlaneEpsilon || halfHeight <= PlaneEpsilon) {
-        return nullptr;
-    }
-
-    double referenceUp[3] = { 0.0, 1.0, 0.0 };
-    if (std::abs(vtkMath::Dot(normalData, referenceUp)) > 0.99) {
-        referenceUp[0] = 0.0;
-        referenceUp[1] = 0.0;
-        referenceUp[2] = 1.0;
-    }
-
-    double axisWidth[3] = { 0.0, 0.0, 0.0 };
-    double axisHeight[3] = { 0.0, 0.0, 0.0 };
-    vtkMath::Cross(normalData, referenceUp, axisWidth);
-    if (vtkMath::Normalize(axisWidth) <= PlaneEpsilon) {
-        return nullptr;
-    }
-    vtkMath::Cross(normalData, axisWidth, axisHeight);
-    if (vtkMath::Normalize(axisHeight) <= PlaneEpsilon) {
-        return nullptr;
-    }
-
-    auto points = vtkSmartPointer<vtkPoints>::New();
-    points->SetNumberOfPoints(4);
-
-    const double signs[4][2] = {
-        { -1.0, -1.0 },
-        { 1.0, -1.0 },
-        { 1.0, 1.0 },
-        { -1.0, 1.0 }
-    };
-    for (vtkIdType pointIndex = 0; pointIndex < 4; ++pointIndex) {
-        double point[3] = { 0.0, 0.0, 0.0 };
-        for (int axis = 0; axis < 3; ++axis) {
-            point[axis] = center[axis]
-                + signs[pointIndex][0] * halfWidth * axisWidth[axis]
-                + signs[pointIndex][1] * halfHeight * axisHeight[axis];
-        }
-        points->SetPoint(pointIndex, point);
-    }
-
-    auto lines = vtkSmartPointer<vtkCellArray>::New();
-    const vtkIdType rectangleLine[5] = { 0, 1, 2, 3, 0 };
-    lines->InsertNextCell(5, rectangleLine);
-
-    auto outline = vtkSmartPointer<vtkPolyData>::New();
-    outline->SetPoints(points);
-    outline->SetLines(lines);
-    return outline;
-}
-
 static OrthogonalCropResult GetPlanarPreviewResult(
     const CropDataModel& cropData,
-    const OrthogonalCropRequest& request,
-    const CropBoundsDouble6Array& inputModelBounds)
+    const OrthogonalCropRequest& request)
 {
     auto result = GetPlanarResultFromRequest(request);
     auto statistics = GetPlanarDiagnostics(request);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
 
+    // 平面 preview 的真实语义是无限半空间：dot(point - center, normal) 决定保留/移除侧。
+    // 之前生成有限矩形 outline 只是显示参照，会误导用户以为裁切只发生在框内，因此这里不再返回 outline。
     result.SetCropDataModel(cropData);
     result.SetStatistics(statistics);
     result.SetFailureReason(OrthogonalCropFailureReason::None);
-    result.SetOutlinePolyData(PlanarCropAlgorithm::GetOutlinePolyData(cropData, inputModelBounds));
-    result.SetSucceeded(result.GetOutlinePolyData() != nullptr);
-    if (!result.GetSucceeded()) {
-        statistics.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
-        statistics.SetValidationMessage("Plane preview outline creation failed.");
-        result.SetStatistics(statistics);
-        result.SetFailureReason(statistics.GetFailureReason());
-        result.SetMessage(statistics.GetValidationMessage());
-    }
+    result.SetSucceeded(true);
     return result;
 }
 
@@ -722,8 +648,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
         return GetPlanarPreviewResult(
             cropData,
-            request,
-            inputModelBounds);
+            request);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Submit) {
@@ -776,9 +701,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
 
     auto result = GetPlanarPreviewResult(
         cropData,
-        request,
-        inputModelBounds);
-    result.SetSucceeded(result.GetOutlinePolyData() != nullptr);
+        request);
     if (!result.GetSucceeded()) {
         return result;
     }

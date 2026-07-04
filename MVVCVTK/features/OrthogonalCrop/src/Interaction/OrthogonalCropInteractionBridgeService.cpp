@@ -319,7 +319,7 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
         std::max(activeWorldDimensions[1] * kPlanarInitialRectangleExtentScale, kPlaneVectorEpsilon)
     };
     // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
-    // 真实裁切矩形尺寸由 m_currentWorldPlaneHalfExtents 下发给 request。
+    // halfExtents 只保留交互平面的尺度快照，不再驱动算法层生成有限矩形 outline。
     m_currentWorldBounds = activeWorldBounds;
     m_worldBoundsInitialized = true;
 
@@ -717,6 +717,8 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPlaneRequest(
 
     planeRequest.SetPlaneCenterInInputModel(planeCenterInInputModel);
     planeRequest.SetPlaneNormalInInputModel(planeNormalInInputModel);
+    // halfExtents 继续随 request 下发，是为了保留 widget 尺度这一层级信息；
+    // 裁切数学只使用 center + normal 的无限半空间，避免再次出现误导性的平面方框。
     planeRequest.SetPlaneHalfExtentsInInputModel(planeHalfExtentsInInputModel);
     return planeRequest;
 }

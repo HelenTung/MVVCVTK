@@ -174,10 +174,11 @@ public:
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
-    // 返回平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // 该值用于保存交互尺度，不参与无限半空间裁切方程。
     const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
 
-    // 写入平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
     {
         m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
@@ -222,8 +223,8 @@ private:
     // Box 几何真源：保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
     // 旋转、缩放、平移都在这里，后端所有精确几何判断以它为准。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
-    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和矩形半尺寸。
-    // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
+    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和 widget 尺度快照。
+    // 裁切方程只依赖 center + normal；halfExtents 不再表示可见裁切框，避免把无限半空间误读成有限矩形。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
     std::array<double, 2> m_planeHalfExtentsInInputModel = { 1.0, 1.0 };
@@ -265,10 +266,11 @@ public:
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
-    // 返回平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // Plane preview 不再把该值转换为 overlay 方框。
     const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
 
-    // 写入平面矩形中心到两条边的距离，布局为 [halfWidth, halfHeight]。
+    // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
     {
         m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;

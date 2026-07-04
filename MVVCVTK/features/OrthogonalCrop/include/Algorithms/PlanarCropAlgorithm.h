@@ -18,11 +18,6 @@ class OrthogonalCropBackendRouterService;
 
 class PlanarCropAlgorithm {
 public:
-    // 生成平面预览矩形轮廓，供 overlay 和 3D 预览共用。
-    static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(
-        const CropDataModel& cropData,
-        const CropBoundsDouble6Array& inputModelBounds);
-
 private:
     // router 是三元组分发边界；算法执行入口只给 router 调用，避免外部绕过路由组合。
     friend class OrthogonalCropBackendRouterService;

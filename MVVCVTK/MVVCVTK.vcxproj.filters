@@ -255,6 +255,18 @@
     <ClInclude Include="include\Host\VtkAppHostSession.h">
       <Filter>include\Host</Filter>
     </ClInclude>
+    <ClInclude Include="include\Host\HostCoreServices.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\HostFeatureBindings.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\HostRenderViewSet.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\HostSessionTypes.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
     <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
@@ -300,6 +312,15 @@
       <Filter>src\App</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\VtkAppHostSession.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\HostCoreServices.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\HostFeatureBindings.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\HostRenderViewSet.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp">

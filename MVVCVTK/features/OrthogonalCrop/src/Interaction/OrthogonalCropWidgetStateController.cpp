@@ -36,11 +36,11 @@ void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long
 OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
 {
     // 初始化 widget 和 representation；
-    // 外观在控制器内固定，避免上层交互桥直接接触 VTK widget 细节。
+    // 普通态使用中性色，是因为裁切盒只是空间手柄；只有被 VTK 选中/拖拽时才用高亮色提示交互焦点。
     m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
-    m_representation->GetOutlineProperty()->SetColor(1.0, 0.15, 0.10);
+    m_representation->GetOutlineProperty()->SetColor(0.82, 0.86, 0.90);
     m_representation->GetOutlineProperty()->SetLineWidth(2.0);
     m_representation->GetSelectedOutlineProperty()->SetColor(1.0, 0.55, 0.20);
     m_representation->GetSelectedOutlineProperty()->SetLineWidth(2.5);

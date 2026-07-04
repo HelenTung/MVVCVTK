@@ -1,8 +1,7 @@
-// =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/tests/PlanarCropAlgorithmSubmitTests.cpp
-// 分类: Tests / OrthogonalCrop
-// 说明: 平面 image submit 的 mask + background 单遍构建回归测试。
-// =====================================================================
+// 这个测试独立在根 test/ 下验证裁切算法 submit 契约，不参与主应用链路：
+// 1. 用合成 vtkImageData 覆盖非零 extent、方向矩阵和多 component 标量。
+// 2. 直接调用 backend router，避免窗口/交互器影响算法结果判断。
+// 3. 明确校验 mask 和 submit image 的一致性，防止后续优化只改一条输出链。
 
 #include "Routing/OrthogonalCropBackendRouterService.h"
 
@@ -25,12 +24,16 @@ namespace {
 constexpr double TupleTolerance = 1e-9;
 
 struct TestPlane {
+    // normal/center 均在 input model physical 坐标系中，和 OrthogonalCropRequest 字段保持同一语义。
     CropVectorDouble3Array normal = { 1.25, -0.5, 0.75 };
     CropVectorDouble3Array center = { 0.0, 0.0, 0.0 };
 };
 
 vtkSmartPointer<vtkImageData> BuildObliqueImage()
 {
+    // 方向矩阵把 image index 轴旋转到 input model physical 坐标：
+    // physicalPoint = origin + direction * (index - extentMin) * spacing。
+    // 这个场景专门防止 submit 逻辑偷用裸 index 坐标而绕过 VTK 的物理坐标变换。
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(2, 5, -1, 1, 3, 4);
     image->SetOrigin(10.0, -4.0, 2.5);
@@ -65,6 +68,8 @@ vtkSmartPointer<vtkImageData> BuildObliqueImage()
 
 vtkSmartPointer<vtkImageData> BuildDeepRowBoundaryImage()
 {
+    // X 方向超过 512 个点是为了覆盖曾经容易出错的深行索引边界，
+    // 同时使用非各向同性 spacing，确保线性下标和物理半空间判断相互独立。
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(0, 700, 0, 1, 0, 1);
     image->SetOrigin(0.0, 0.0, 0.0);
@@ -106,6 +111,7 @@ TestPlane BuildPlaneWithBoundaryIndex(
     TestPlane plane;
     plane.normal = normal;
     double boundaryPoint[3] = { 0.0, 0.0, 0.0 };
+    // 边界点通过 VTK index -> physical point 变换得到，使测试平面和真实算法使用同一坐标系。
     image->TransformIndexToPhysicalPoint(boundaryIndex, boundaryPoint);
     plane.center = { boundaryPoint[0], boundaryPoint[1], boundaryPoint[2] };
     return plane;
@@ -121,6 +127,8 @@ bool GetPointIsInsidePlane(
 
     std::array<double, 3> normal = plane.normal;
     vtkMath::Normalize(normal.data());
+    // 半空间公式：signedDistance = dot(inputModelPoint - plane.center, normalize(plane.normal))。
+    // 算法约定 signedDistance > 0 才属于 inside，等于 0 的边界点不属于 inside。
     const double offset[3] = {
         inputModelPoint[0] - plane.center[0],
         inputModelPoint[1] - plane.center[1],
@@ -135,6 +143,8 @@ OrthogonalCropRequest BuildImagePlaneRequest(
     OrthogonalCropOperation operation,
     OrthogonalCropDataSource dataSource)
 {
+    // 请求只表达 image submit 所需的稳定输入：数据源、几何、保留语义和 input model 坐标中的平面。
+    // 这里不设置窗口或交互状态，确保测试覆盖算法边界而不是 host 绑定边界。
     OrthogonalCropRequest request;
     request.SetGeometryType(OrthogonalCropGeometryType::Plane);
     request.SetOperation(operation);
@@ -242,7 +252,7 @@ void VerifyPreviewResultDoesNotSatisfySubmitContract(
         failureCount);
     Expect(result.GetSubmitImage() == nullptr, "planar preview must not return submit image.", failureCount);
     Expect(result.GetMaskImage() == nullptr, "planar preview must not return submit mask.", failureCount);
-    Expect(result.GetOutlinePolyData() != nullptr, "planar preview should return preview plane outline.", failureCount);
+    Expect(result.GetOutlinePolyData() == nullptr, "planar preview must not return a misleading finite plane outline.", failureCount);
 }
 
 void VerifySubmitImages(
@@ -253,6 +263,10 @@ void VerifySubmitImages(
     CropRemovalMode removalMode,
     int& failureCount)
 {
+    // submit image 和 mask 必须逐点一致：
+    // A. keepVoxel=true 时，submit 保留原始 tuple，mask=255。
+    // B. keepVoxel=false 时，submit 写入背景值，mask=0。
+    // C. 背景值取输入标量最小值，避免测试依赖某个硬编码灰度。
     auto* sourceScalars = sourceImage->GetPointData()->GetScalars();
     auto* submitScalars = submitImage->GetPointData()->GetScalars();
     double scalarRange[2] = { 0.0, 0.0 };
@@ -280,6 +294,8 @@ void VerifySubmitImages(
             for (int iOffset = 0; iOffset < dims[0]; ++iOffset) {
                 const int i = extent[0] + iOffset;
                 int index[3] = { i, j, k };
+                // mask buffer 从 extent 起点取指针，所以本地 linearIndex 必须使用 offset 计算；
+                // 再与 VTK ComputePointId 对照，确保非零 extent 场景没有整体平移错误。
                 const vtkIdType linearIndex = rowStart + iOffset;
                 const vtkIdType vtkPointId = sourceImage->ComputePointId(index);
                 Expect(
@@ -324,6 +340,8 @@ void VerifyBoundaryEquality(
     CropRemovalMode removalMode,
     int& failureCount)
 {
+    // 边界点 signedDistance == 0。严格 inside 使用 dot > 0，
+    // 所以 KeepInside 下边界被移除，RemoveInside 下边界被保留。
     int mutableBoundaryIndex[3] = { boundaryIndex[0], boundaryIndex[1], boundaryIndex[2] };
     const vtkIdType boundaryPointId = maskImage->ComputePointId(mutableBoundaryIndex);
     int extent[6] = { 0, -1, 0, -1, 0, -1 };

@@ -8,8 +8,8 @@
 // 显示主链路：
 // 1. bridge 把统一的 OrthogonalCropResult 推给 overlay strategy
 // 2. strategy 从结果里拆出 box 3D outline / image 2D mask / 可选 polydata 3D clip
-// 3. 再根据当前窗口是 2D 还是 3D，决定显示实体区域、mask slice 或可选 polydata
-// 4. 所有 prop 都共享同一套 removal mode 颜色语义与主模型变换
+// 3. 再根据当前窗口是 2D 还是 3D，决定显示线框参照、mask slice 或可选 polydata
+// 4. 所有 prop 跟随主模型变换；颜色只表达 overlay 类型，不表达裁切模式
 
 #include "BaseVisualStrategy.h"
 #include "OrthogonalCropTypes.h"
@@ -32,7 +32,7 @@ public:
     // 指定当前窗口是 2D 哪个切片轴，-1 表示 3D 视图。
     void SetSliceAxis(int axis);
 
-    // 设置预览颜色语义：保留盒内或移除盒内。
+    // 记录当前预览模式；颜色不再随模式切换，避免非交互态裁切盒反复变色。
     void SetRemovalMode(CropRemovalMode removalMode);
 
     // 注入一次完整裁切结果，自动更新 outline / mask / 可选 polydata 三类显示内容。
@@ -49,16 +49,16 @@ private:
     // 根据当前是否有 outline / mask 和窗口轴向决定显示哪些 prop。
     void UpdateVisiblePreviewProps();
 
-    // 按 removal mode 更新 preview 颜色与 LUT。
-    void ApplyRemovalVisualStyle();
+    // 更新 overlay 固定样式；交互选中高亮由 widget 自己负责。
+    void ApplyOverlayVisualStyle();
 
     // 把主模型矩阵同步到 overlay prop。
     static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData);
 
-    // 3D 预览区域 actor，显示裁切盒实体范围。
+    // 旧的 3D 实体区域 actor；当前固定隐藏，保留对象只是为了少改动既有 prop 生命周期。
     vtkSmartPointer<vtkActor> m_previewRegionActor;
 
-    // 3D 预览区域 mapper。
+    // 旧的 3D 实体区域 mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_previewRegionMapper;
 
     // 裁切盒 outline actor。
@@ -91,7 +91,7 @@ private:
     // 当前是否已经有 mask image 可显示。
     bool m_hasMaskImage = false;
 
-    // 当前颜色语义。
+    // 当前预览模式；裁切保留/移除语义由 preview plug 和算法执行，不再通过颜色表达。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
 
     // 当前窗口切片轴；3D 时通常为 -1。

@@ -23,21 +23,21 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\include\Algorithms\VolumeBuffer.h">
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VolumeBuffer.h">
       <Filter>include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\Algorithms\VoidDetector.h">
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VoidDetector.h">
       <Filter>include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\GapAnalysisTypes.h">
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\GapAnalysisTypes.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\include\Services\GapAnalysisService.h">
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h">
       <Filter>include\Services</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\src\Services\GapAnalysisService.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp">
       <Filter>src\Services</Filter>
     </ClCompile>
     <ClCompile Include="GapAnalysisAlgorithmTests.cpp">
@@ -45,4 +45,3 @@
     </ClCompile>
   </ItemGroup>
 </Project>
-
