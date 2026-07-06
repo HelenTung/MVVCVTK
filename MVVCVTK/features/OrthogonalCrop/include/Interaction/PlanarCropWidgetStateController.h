@@ -55,7 +55,8 @@ public:
     // 直接设置当前 widget world 平面。
     void SetWidgetWorldPlane(
         const CropVectorDouble3Array& worldOrigin,
-        const CropVectorDouble3Array& worldNormal);
+        const CropVectorDouble3Array& worldNormal,
+        const std::array<double, 2>& worldHalfExtents);
 
     // 读取当前缓存的 world 平面。
     bool GetCurrentWorldPlane(
@@ -113,7 +114,8 @@ private:
     // observer 是否已经绑定过。
     bool m_observersAdded = false;
 
-    // 当前 world bounds，供 representation PlaceWidget 限定交互范围。
+    // 当前完整模型 world bounds，只作为 reference 输入合法性和默认原点来源；
+    // 平面可视尺寸由 bridge 下发的 halfExtents 决定，避免 widget 层重新发明一套尺寸策略。
     std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     // 缓存当前 world 平面原点。
@@ -121,4 +123,7 @@ private:
 
     // 缓存当前 world 平面法线。
     CropVectorDouble3Array m_currentWorldNormal = { 0.0, 0.0, 1.0 };
+
+    // 缓存 bridge 下发的平面可视半尺寸；它只影响 VTK 平面控件大小，不改变无限半空间裁切语义。
+    std::array<double, 2> m_currentWorldHalfExtents = { 1.0, 1.0 };
 };

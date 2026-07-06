@@ -4,6 +4,8 @@
 // 3. 明确校验 mask 和 submit image 的一致性，防止后续优化只改一条输出链。
 
 #include "Routing/OrthogonalCropBackendRouterService.h"
+#include "DataManager.h"
+#include "InteractionComputeService.h"
 
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
@@ -15,13 +17,16 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace {
 
 constexpr double TupleTolerance = 1e-9;
+constexpr double MatrixTolerance = 1e-9;
 
 struct TestPlane {
     // normal/center 均在 input model physical 坐标系中，和 OrthogonalCropRequest 字段保持同一语义。
@@ -101,6 +106,76 @@ vtkSmartPointer<vtkImageData> BuildPerformanceImage()
     }
 
     return image;
+}
+
+vtkSmartPointer<vtkImageData> BuildExportImage()
+{
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(3, 4, 2);
+    image->SetOrigin(0.0, 0.0, 0.0);
+    image->SetSpacing(1.0, 1.0, 1.0);
+    image->AllocateScalars(VTK_FLOAT, 1);
+
+    auto* scalars = static_cast<float*>(image->GetScalarPointer());
+    const vtkIdType tupleCount = image->GetNumberOfPoints();
+    for (vtkIdType tupleId = 0; tupleId < tupleCount; ++tupleId) {
+        scalars[tupleId] = static_cast<float>(tupleId + 1);
+    }
+    image->Modified();
+    return image;
+}
+
+std::array<double, 16> GetIdentityMatrixData()
+{
+    return {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1
+    };
+}
+
+std::filesystem::path BuildTestOutputRoot()
+{
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::filesystem::temp_directory_path()
+        / ("MVVCVTK_export_tests_" + std::to_string(ticks));
+}
+
+int CountFilesWithExtension(
+    const std::filesystem::path& directory,
+    const std::string& extension)
+{
+    int count = 0;
+    if (!std::filesystem::exists(directory)) {
+        return count;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (entry.is_regular_file() && entry.path().extension() == extension) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool GetAnyRegularFileHasBytes(
+    const std::filesystem::path& directory,
+    const std::string& extension)
+{
+    if (!std::filesystem::exists(directory)) {
+        return false;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        if (!entry.is_regular_file() || entry.path().extension() != extension) {
+            continue;
+        }
+        if (std::filesystem::file_size(entry.path()) > 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 TestPlane BuildPlaneWithBoundaryIndex(
@@ -474,6 +549,140 @@ void RunPerformanceBenchmark(int& failureCount)
               << " removeInsideAvgMs=" << removeInsideMilliseconds << '\n';
 }
 
+void RunSliceExportDataCases(int& failureCount)
+{
+    const auto identity = GetIdentityMatrixData();
+    const std::array<double, 3> cursorWorld = { 0.0, 0.0, 0.0 };
+
+    const auto topDownData = InteractionComputeService::GetSliceExportData(
+        identity,
+        VizMode::SliceTop_down,
+        cursorWorld);
+    Expect(topDownData.has_value(), "slice export data should exist for a real slice mode.", failureCount);
+    if (topDownData) {
+        Expect(
+            topDownData->orientation == Orientation::Top_down,
+            "slice export data should preserve Top_down orientation.",
+            failureCount);
+        for (std::size_t index = 0; index < identity.size(); ++index) {
+            Expect(
+                std::abs(topDownData->matrix[index] - identity[index]) <= MatrixTolerance,
+                "slice export matrix should keep the upstream model matrix.",
+                failureCount);
+        }
+    }
+
+    std::array<double, 16> rotatedModelToWorld = identity;
+    rotatedModelToWorld[0] = 0.0;
+    rotatedModelToWorld[1] = -1.0;
+    rotatedModelToWorld[4] = 1.0;
+    rotatedModelToWorld[5] = 0.0;
+    const auto rotatedData = InteractionComputeService::GetSliceExportData(
+        rotatedModelToWorld,
+        VizMode::SliceTop_down,
+        cursorWorld);
+    Expect(rotatedData.has_value(), "slice export data should accept the current model matrix snapshot.", failureCount);
+    if (rotatedData) {
+        for (std::size_t index = 0; index < identity.size(); ++index) {
+            Expect(
+                std::abs(rotatedData->matrix[index] - rotatedModelToWorld[index]) <= MatrixTolerance,
+                "slice export matrix should not apply a second angle when host angle is absent.",
+                failureCount);
+        }
+    }
+
+    const auto customAngleData = InteractionComputeService::GetSliceExportData(
+        identity,
+        VizMode::SliceTop_down,
+        cursorWorld,
+        90.0);
+    Expect(customAngleData.has_value(), "slice export data should accept an optional host-provided angle.", failureCount);
+    if (customAngleData) {
+        bool anyMatrixElementChanged = false;
+        for (std::size_t index = 0; index < identity.size(); ++index) {
+            if (std::abs(customAngleData->matrix[index] - identity[index]) > MatrixTolerance) {
+                anyMatrixElementChanged = true;
+                break;
+            }
+        }
+        Expect(
+            anyMatrixElementChanged,
+            "optional host angle should affect the slice export matrix.",
+            failureCount);
+    }
+
+    const auto invalidModeData = InteractionComputeService::GetSliceExportData(
+        identity,
+        VizMode::CompositeIsoSurface,
+        cursorWorld);
+    Expect(
+        !invalidModeData.has_value(),
+        "slice export data should reject non-slice view modes instead of falling back to Top_down.",
+        failureCount);
+}
+
+void RunDataExportCases(int& failureCount)
+{
+    RawVolumeDataManager dataManager;
+    auto image = BuildExportImage();
+    const auto identity = GetIdentityMatrixData();
+    const auto outputRoot = BuildTestOutputRoot();
+    std::error_code createError;
+    std::filesystem::create_directories(outputRoot, createError);
+    Expect(!createError, "data export test should create its temporary output directory.", failureCount);
+
+    Expect(
+        dataManager.TakeImageSnapshot(image),
+        "data export setup should accept a synthetic vtkImageData snapshot.",
+        failureCount);
+    Expect(
+        dataManager.ConsumePendingImage(),
+        "data export setup should promote the pending image into the current data manager image.",
+        failureCount);
+
+    const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
+    Expect(
+        dataManager.SaveTransformedData(rawRequestPath.string(), identity),
+        "transformed data export should write a RAW file for synthetic input.",
+        failureCount);
+    Expect(
+        CountFilesWithExtension(outputRoot, ".raw") == 1,
+        "transformed data export should create exactly one RAW file in the requested folder.",
+        failureCount);
+    Expect(
+        GetAnyRegularFileHasBytes(outputRoot, ".raw"),
+        "transformed data export should create a non-empty RAW file.",
+        failureCount);
+
+    const std::filesystem::path sliceDir = outputRoot / "top_down_slices";
+    WindowLevelParams windowLevel;
+    windowLevel.windowWidth = 32.0;
+    windowLevel.windowCenter = 16.0;
+    Expect(
+        !dataManager.SaveSliceImages("", Orientation::Top_down, windowLevel, identity),
+        "slice image export should reject an empty output directory.",
+        failureCount);
+    Expect(
+        dataManager.SaveSliceImages(sliceDir.string(), Orientation::Top_down, windowLevel, identity),
+        "slice image export should write PNG slices for synthetic input.",
+        failureCount);
+    Expect(
+        CountFilesWithExtension(sliceDir, ".png") == 2,
+        "top-down slice export should create one PNG per z slice.",
+        failureCount);
+    Expect(
+        GetAnyRegularFileHasBytes(sliceDir, ".png"),
+        "slice image export should create non-empty PNG files.",
+        failureCount);
+
+    std::error_code removeError;
+    std::filesystem::remove_all(outputRoot, removeError);
+    Expect(
+        !removeError,
+        "test cleanup should remove temporary export files.",
+        failureCount);
+}
+
 } // namespace
 
 int main()
@@ -482,6 +691,8 @@ int main()
     RunObliqueSubmitCases(failureCount);
     RunDeepBoundarySubmitCases(failureCount);
     RunPerformanceBenchmark(failureCount);
+    RunSliceExportDataCases(failureCount);
+    RunDataExportCases(failureCount);
 
     if (failureCount != 0) {
         std::cerr << "PlanarCropAlgorithmSubmitTests failed: " << failureCount << '\n';

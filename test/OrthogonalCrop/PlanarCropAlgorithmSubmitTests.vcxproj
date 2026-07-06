@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Geometry;$(ProjectDir)..\..\MVVCVTK\include\Platform</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
@@ -152,11 +152,18 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Geometry\InteractionComputeService.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

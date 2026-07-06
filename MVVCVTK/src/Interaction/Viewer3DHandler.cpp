@@ -29,7 +29,22 @@ Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
 
 InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
 {
-    if (!m_service || !GetIsCompositeMode(eve.vizMode)) {
+    if (!m_service) {
+        return {};
+    }
+
+    if (eve.toolMode == ToolMode::ModelTransform
+        && eve.vtkEventId == vtkCommand::InteractionEvent) {
+        vtkProp3D* prop = m_service->GetMainProp();
+        if (prop && prop->GetMatrix()) {
+            m_service->SyncModelMatrix(prop->GetMatrix());
+            m_service->MarkDirty();
+            return { true, false };
+        }
+        return {};
+    }
+
+    if (!GetIsCompositeMode(eve.vizMode)) {
         return {};
     }
 

@@ -192,35 +192,6 @@ unsigned char GetWindowLevelGray(const double value, const WindowLevelParams& wi
     return static_cast<unsigned char>(clamped * 255.0 + 0.5);
 }
 
-std::filesystem::path GetDefaultSliceDir(const std::string& loadedFilePath, const Orientation orientation)
-{
-    const std::string orientationName = GetOrientationName(orientation);
-    if (loadedFilePath.empty()) {
-        return std::filesystem::current_path() / (std::string("SliceExport_") + orientationName);
-    }
-
-    std::filesystem::path loadedPath = std::filesystem::path(loadedFilePath).lexically_normal();
-    std::filesystem::path parentPath = loadedPath.has_parent_path()
-        ? loadedPath.parent_path()
-        : std::filesystem::current_path();
-
-    std::filesystem::path sourceName = loadedPath.has_extension()
-        ? loadedPath.stem()
-        : loadedPath.filename();
-    if (sourceName.empty()) {
-        sourceName = std::filesystem::path("Volume");
-    }
-
-    sourceName += std::string("_") + orientationName + "_Slices";
-
-    return parentPath / sourceName;
-}
-}
-
-void BaseDataManager::SetLoadedFilePath(const std::string& filePath)
-{
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    m_loadedFilePath = filePath;
 }
 
 std::array<double, 2> BaseDataManager::GetScalarRange() const
@@ -235,15 +206,8 @@ std::array<double, 3> BaseDataManager::GetSpacing() const
     return m_imageSpacing;
 }
 
-std::string BaseDataManager::GetDefaultTransformedDataPath() const
-{
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    return m_loadedFilePath;
-}
-
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
-    SetLoadedFilePath({});
     // 解析文件名
     std::filesystem::path pathObj(filePath);
     std::string name = pathObj.filename().string();
@@ -348,7 +312,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         m_scalarRange = { range[0], range[1] };
         m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
     }
-    SetLoadedFilePath(filePath);
     return true;
 }
 
@@ -358,8 +321,6 @@ bool RawVolumeDataManager::SetFromBuffer(
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin)
 {
-    SetLoadedFilePath({});
-
     if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
         return false;
     }
@@ -411,8 +372,6 @@ bool RawVolumeDataManager::SetFromBuffer(
 
 bool RawVolumeDataManager::TakeImageSnapshot(vtkSmartPointer<vtkImageData> image)
 {
-    SetLoadedFilePath({});
-
     if (!image) {
         return false;
     }
@@ -480,13 +439,16 @@ bool BaseDataManager::SaveSliceImages(
     const WindowLevelParams& windowLevel,
     const std::array<double, 16>& modelToWorldMatrix)
 {
+    if (dirPath.empty()) {
+        std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
+        return false;
+    }
+
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
-    std::string loadedFilePath;
     {
         std::lock_guard<std::mutex> lock(m_dataMutex);
         if (!m_vtkImage) return false;
         imageCopy->ShallowCopy(m_vtkImage);
-        loadedFilePath = m_loadedFilePath;
     }
 
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -525,9 +487,7 @@ bool BaseDataManager::SaveSliceImages(
         return false;
     }
 
-    std::filesystem::path outputDir = dirPath.empty()
-        ? GetDefaultSliceDir(loadedFilePath, orientation)
-        : std::filesystem::path(dirPath);
+    std::filesystem::path outputDir = std::filesystem::path(dirPath);
     if (outputDir.has_extension()) {
         outputDir = outputDir.parent_path() / outputDir.stem();
     }
@@ -609,7 +569,6 @@ bool BaseDataManager::SaveSliceImages(
 bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin) {
-    SetLoadedFilePath({});
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
@@ -749,7 +708,6 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     }
 
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
-    SetLoadedFilePath(inputPath);
     return true;
 }
 

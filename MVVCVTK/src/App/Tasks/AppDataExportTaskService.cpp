@@ -1,5 +1,6 @@
 #include "AppDataExportTaskService.h"
 #include "InteractionComputeService.h"
+#include <iostream>
 #include <utility>
 
 AppDataExportTaskService::AppDataExportTaskService(
@@ -18,11 +19,14 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTra
 
     auto dataManager = m_dataManager;
     auto sharedState = m_sharedState;
-    const std::string resolvedPath = path.empty() && dataManager
-        ? dataManager->GetDefaultTransformedDataPath()
-        : path;
 
-    if (!dataManager || !sharedState || resolvedPath.empty()) {
+    if (!dataManager || !sharedState) {
+        SetSaveCallbackReady(false);
+        return std::nullopt;
+    }
+
+    if (path.empty()) {
+        std::cerr << "[Export] Transformed data export skipped: output path is empty." << std::endl;
         SetSaveCallbackReady(false);
         return std::nullopt;
     }
@@ -32,9 +36,9 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTra
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
     return std::packaged_task<void()>(
-        [dataManager, resolvedPath, modelToWorldMatrixSnapshot, weakSelf]() mutable
+        [dataManager, path, modelToWorldMatrixSnapshot, weakSelf]() mutable
         {
-            const bool ok = dataManager->SaveTransformedData(resolvedPath, modelToWorldMatrixSnapshot);
+            const bool ok = dataManager->SaveTransformedData(path, modelToWorldMatrixSnapshot);
 
             auto self = weakSelf.lock();
             if (self) {
@@ -45,7 +49,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTra
 
 std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSliceImagesTask(
     const std::string& path,
-    double angle,
+    std::optional<double> rotationAngleDeg,
     VizMode currentMode,
     std::function<void(bool success)> onComplete)
 {
@@ -59,14 +63,31 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSli
         return std::nullopt;
     }
 
+    if (path.empty()) {
+        std::cerr << "[Export] Slice image export skipped: output directory is empty." << std::endl;
+        SetSaveCallbackReady(false);
+        return std::nullopt;
+    }
+
+    // 切片导出只接受真实切片视图模式；3D 窗口误触不能退回 Top_down，否则上位机看到的是“成功但方向错误”的隐性失败。
+    if (InteractionComputeService::GetSliceAxis(currentMode) < 0) {
+        SetSaveCallbackReady(false);
+        return std::nullopt;
+    }
+
     const WindowLevelParams currentWindowLevel = sharedState->GetWindowLevel();
     const std::array<double, 16> modelToWorldMatrixSnapshot = sharedState->GetModelMatrix();
-    // 切片导出使用提交瞬间的姿态、窗宽窗位和游标，避免后台执行时被后续交互改成另一帧状态。
-    const SliceExportData exportData = InteractionComputeService::GetSliceExportData(
+    const std::array<double, 3> cursorWorldSnapshot = sharedState->GetCursorWorld();
+    // 切片导出使用提交瞬间的姿态、窗宽窗位、游标和可选上位机角度，避免后台执行时被后续交互改成另一帧状态。
+    const std::optional<SliceExportData> exportData = InteractionComputeService::GetSliceExportData(
         modelToWorldMatrixSnapshot,
         currentMode,
-        sharedState->GetCursorWorld(),
-        angle);
+        cursorWorldSnapshot,
+        rotationAngleDeg);
+    if (!exportData) {
+        SetSaveCallbackReady(false);
+        return std::nullopt;
+    }
 
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
@@ -75,9 +96,9 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSli
         {
             const bool ok = dataManager->SaveSliceImages(
                 path,
-                exportData.orientation,
+                exportData->orientation,
                 currentWindowLevel,
-                exportData.matrix);
+                exportData->matrix);
 
             auto self = weakSelf.lock();
             if (self) {

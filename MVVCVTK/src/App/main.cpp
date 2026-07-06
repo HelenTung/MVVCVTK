@@ -16,6 +16,95 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "Host/VtkAppHostSession.h"
 
 namespace {
+static std::vector<TFNode> BuildStandaloneVolumeTransferFunction()
+{
+    // 这组 transfer function 是 standalone 五视图调试布局的视觉输入；真实上位机应按自己的显示配方下发 WindowConfig。
+    return {
+        { 0.00, 0.0, 0.0, 0.0, 0.0 },
+        { 0.50, 0.0, 0.0, 0.5, 0.0 },
+        { 0.85, 0.8, 0.0, 0.5, 0.0 },
+        { 1.00, 1.0, 0.0, 0.5, 0.0 },
+    };
+}
+
+static HostRenderViewConfig BuildStandaloneRenderViewConfig(
+    std::string id,
+    HostRenderViewRole role,
+    WindowConfig window,
+    bool startStandaloneEventLoop = false)
+{
+    HostRenderViewConfig view;
+    view.id = std::move(id);
+    view.role = role;
+    view.window = std::move(window);
+    view.startStandaloneEventLoop = startStandaloneEventLoop;
+    return view;
+}
+
+static std::vector<HostRenderViewConfig> BuildStandaloneRenderViewConfigs()
+{
+    std::vector<HostRenderViewConfig> views;
+    const auto volTF = BuildStandaloneVolumeTransferFunction();
+
+    // 这五个窗口只是 standalone 调试拓扑；放在 main 是为了让 session/HostRenderViewSet 不再携带固定窗口数假设。
+    WindowConfig compositeVolume;
+    compositeVolume.title = "Window E: Composite Volume";
+    compositeVolume.width = 600; compositeVolume.height = 600;
+    compositeVolume.posX = 660; compositeVolume.posY = 50;
+    compositeVolume.preInitCfg.vizMode = VizMode::CompositeVolume;
+    compositeVolume.preInitCfg.tfNodes = volTF;
+    compositeVolume.preInitCfg.hasTF = true;
+    compositeVolume.preInitCfg.bgColor = { 0.08, 0.08, 0.12 };
+    compositeVolume.preInitCfg.hasBgColor = true;
+
+    WindowConfig topDownSlice;
+    topDownSlice.title = "Window B: Top_down Slice";
+    topDownSlice.width = 400; topDownSlice.height = 400;
+    topDownSlice.posX = 50;  topDownSlice.posY = 660;
+    topDownSlice.preInitCfg.vizMode = VizMode::SliceTop_down;
+    topDownSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    topDownSlice.preInitCfg.hasBgColor = true;
+    topDownSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
+    topDownSlice.preInitCfg.hasWindowLevel = true;
+
+    WindowConfig frontBackSlice;
+    frontBackSlice.title = "Window C: Front_back Slice";
+    frontBackSlice.width = 400; frontBackSlice.height = 400;
+    frontBackSlice.posX = 460; frontBackSlice.posY = 660;
+    frontBackSlice.preInitCfg.vizMode = VizMode::SliceFront_back;
+    frontBackSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    frontBackSlice.preInitCfg.hasBgColor = true;
+    frontBackSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
+    frontBackSlice.preInitCfg.hasWindowLevel = true;
+
+    WindowConfig leftRightSlice;
+    leftRightSlice.title = "Window D: Left_right Slice";
+    leftRightSlice.width = 400; leftRightSlice.height = 400;
+    leftRightSlice.posX = 870; leftRightSlice.posY = 660;
+    leftRightSlice.preInitCfg.vizMode = VizMode::SliceLeft_right;
+    leftRightSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
+    leftRightSlice.preInitCfg.hasBgColor = true;
+    leftRightSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
+    leftRightSlice.preInitCfg.hasWindowLevel = true;
+
+    WindowConfig primary3D;
+    primary3D.title = "Window A: Composite IsoSurface";
+    primary3D.width = 600; primary3D.height = 600;
+    primary3D.posX = 50;  primary3D.posY = 50;
+    primary3D.showAxes = true;
+    primary3D.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
+    primary3D.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
+    primary3D.preInitCfg.bgColor = { 0.05, 0.05, 0.05 };
+    primary3D.preInitCfg.hasBgColor = true;
+
+    views.push_back(BuildStandaloneRenderViewConfig("primary-3d", HostRenderViewRole::Primary3D, std::move(primary3D)));
+    views.push_back(BuildStandaloneRenderViewConfig("composite-volume", HostRenderViewRole::Composite3D, std::move(compositeVolume)));
+    views.push_back(BuildStandaloneRenderViewConfig("slice-top-down", HostRenderViewRole::TopDownSlice, std::move(topDownSlice), true));
+    views.push_back(BuildStandaloneRenderViewConfig("slice-front-back", HostRenderViewRole::FrontBackSlice, std::move(frontBackSlice)));
+    views.push_back(BuildStandaloneRenderViewConfig("slice-left-right", HostRenderViewRole::LeftRightSlice, std::move(leftRightSlice)));
+    return views;
+}
+
 static HostHotkeyBindings BuildStandaloneHotkeyBindings()
 {
     // 这些按键只模拟当前 standalone 调试入口的输入协议。
@@ -67,22 +156,28 @@ int main()
     // main 现在扮演“临时上位机适配层”：显式声明调试键位、监听范围和 feature 作用目标。
     // 这样 session/feature 不需要默认假设输入协议，也不会在创建时自动进入某个分析链路。
     config.hotkeys = BuildStandaloneHotkeyBindings();
+    // standalone 五窗口也是上位机模拟输入的一部分；session 不再保存或暗补固定窗口拓扑。
+    config.renderViews = BuildStandaloneRenderViewConfigs();
 
     // 这里临时模拟上位机下发“加载体数据”命令，所以文件路径和 RAW 物理元数据都在 main 中显式展开。
     // 后续真实上位机接入时，只替换这些输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
     const std::string simulatedVolumeFilePath = "F:\\data\\1000x1000x1000.raw";
+    const std::string simulatedTransformedDataOutputPath = "F:\\data\\1000x1000x1000_transformed.raw";
+    const std::string simulatedSliceImagesExportDirectory = "F:\\data\\1000x1000x1000_slice_exports";
     const std::array<float, 3> simulatedVolumeSpacing = { 0.02125f, 0.02125f, 0.02125f };
     const std::array<float, 3> simulatedVolumeOriginValues = { 0.0f, 0.0f, 0.0f };
-    const double simulatedInitialIsoDataRangeRatio = 0.55;
     if (!simulatedVolumeFilePath.empty()) {
         config.initialVolume.enableInitialLoad = true;
         config.initialVolume.filePath = simulatedVolumeFilePath;
         config.initialVolume.geometry.emplace(simulatedVolumeSpacing, simulatedVolumeOriginValues);
-        config.initialVolume.initialIsoDataRangeRatio = simulatedInitialIsoDataRangeRatio;
     }
 
     config.renderContextInput.enableStandaloneHotkeys = true;
     config.renderContextInput.targetViewRoles = standaloneViewRoles;
+    // 体数据导出路径由上位机输入；standalone 只在这里模拟，不让 DataManager 按加载路径猜输出位置。
+    config.dataExport.transformedDataOutputPath = simulatedTransformedDataOutputPath;
+    // 切片导出目录也是上位机输入事实；standalone 只在这里模拟，不让 host/session 或 DataManager 隐式拼默认路径。
+    config.dataExport.sliceImagesOutputDirectory = simulatedSliceImagesExportDirectory;
 
     // 热键监听范围和 feature 作用范围分开配置：
     // A. targetViewRoles 决定哪些 interactor 收 standalone 键。
@@ -95,11 +190,11 @@ int main()
     config.commandInput.gapAnalysisRequest.targetViewRoles = standaloneViewRoles;
     config.commandInput.gapAnalysisRequest.algorithm = BuildStandaloneGapAnalysisAlgorithmConfig();
 
-    // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以孔隙分析完成轮询也显式挂到这个 role。
+    // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以 host/session 主线程 tick 也显式挂到这个 role。
     // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。
-    config.gapAnalysisEventPump.enableTimer = true;
-    config.gapAnalysisEventPump.useTimerViewRole = true;
-    config.gapAnalysisEventPump.timerViewRole = HostRenderViewRole::TopDownSlice;
+    config.timerEventPump.enableTimer = true;
+    config.timerEventPump.useTimerViewRole = true;
+    config.timerEventPump.timerViewRole = HostRenderViewRole::TopDownSlice;
 
     VtkAppHostSession session(std::move(config));
     session.Start();

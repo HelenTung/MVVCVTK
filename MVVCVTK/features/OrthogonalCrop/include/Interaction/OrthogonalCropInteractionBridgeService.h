@@ -70,7 +70,7 @@ public:
     // 参考渲染服务负责 world / active input model 坐标互转。
     void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
 
-    // preview 服务列表决定哪些窗口会收到 overlay 与设脏刷新。
+    // preview 服务列表决定哪些窗口会收到裁切主预览与设脏刷新；几何参照线框只在 reference 目标显示。
     void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
 
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
@@ -103,7 +103,7 @@ private:
         // 实际要刷新的窗口服务。
         std::shared_ptr<AbstractInteractiveService> service;
 
-        // 负责显示 outline、submit mask 和可选 clipped polydata 的 overlay 策略。
+        // 负责显示可选几何参照、submit mask 和可选 clipped polydata 的 overlay 策略。
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
     };
 
@@ -173,9 +173,6 @@ private:
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
-
-    // preview 列表为空时，取第一个有效目标作为 reference service 的后备来源。
-    std::shared_ptr<AbstractInteractiveService> GetFirstPreviewRenderService() const;
 
     // 替换 preview 目标列表前，先把旧 overlay 从旧窗口上摘掉。
     void ClearPreviewRenderTargets();

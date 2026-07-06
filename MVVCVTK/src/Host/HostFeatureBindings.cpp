@@ -4,137 +4,23 @@
 #include "AppService.h"
 #include "AppState.h"
 #include "DataManager.h"
-#include "Host/HostGapAnalysisBinding.h"
 #include "Interaction/OrthogonalCropInteractionBridgeService.h"
-#include "StdRenderContext.h"
 #include "OrthogonalCropTypes.h"
+#include "Services/GapAnalysisService.h"
+#include "StdRenderContext.h"
 
-#include <vtkCommand.h>
 #include <vtkImageData.h>
-#include <vtkRenderWindowInteractor.h>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
-constexpr double kHostCommandHotkeyObserverPriority = 1.0;
-
-// standalone observer 的按键快照。VTK 的 KeyCode、KeySym 和 ControlKey 分散在 interactor 上，
-// 先归一化成 host 输入结构，后面才能把“裸数字键拦截”和“Ctrl+提交”写清楚。
-struct HostKeyInput {
-    char keyCode = 0;
-    std::string keySym;
-    bool isControlPressed = false;
-};
-
-static HostKeyInput BuildHostKeyInput(vtkRenderWindowInteractor* interactor)
-{
-    HostKeyInput input;
-    if (!interactor) {
-        return input;
-    }
-
-    input.keyCode = interactor->GetKeyCode();
-    input.keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
-    input.isControlPressed = interactor->GetControlKey() != 0;
-    return input;
-}
-
-static char ToUpperAscii(char value)
-{
-    return (value >= 'a' && value <= 'z')
-        ? static_cast<char>(value - 'a' + 'A')
-        : value;
-}
-
-static bool MatchesCharacterKey(const HostKeyInput& input, char key)
-{
-    if (key == 0) {
-        // 0 表示 host 没有分配这个调试键；这里直接不匹配，避免未配置键位被 VTK 空 KeyCode 误触发。
-        return false;
-    }
-
-    const char upperKey = ToUpperAscii(key);
-    const std::string keySymbol(1, key);
-    const std::string upperKeySymbol(1, upperKey);
-    return input.keyCode == key
-        || input.keyCode == upperKey
-        || input.keySym == keySymbol
-        || input.keySym == upperKeySymbol;
-}
-
-static bool MatchesKeySymbol(const HostKeyInput& input, const std::string& keySym)
-{
-    return !keySym.empty() && input.keySym == keySym;
-}
-
-static bool GetRenderContextToolModeActive(
-    const std::shared_ptr<StdRenderContext>& context,
-    ToolMode mode)
-{
-    return context && context->GetToolMode() == mode;
-}
-
-static bool ExitRenderContextToolMode(
-    const std::shared_ptr<StdRenderContext>& context,
-    ToolMode mode)
-{
-    if (!GetRenderContextToolModeActive(context, mode)) {
-        return false;
-    }
-
-    context->SetToolMode(ToolMode::Navigation);
-    return true;
-}
-
-static std::function<bool()> BuildHostToolModeActiveHandler(
-    const std::vector<const HostRenderViewRuntime*>& targetViews)
-{
-    std::vector<std::weak_ptr<StdRenderContext>> contexts;
-    contexts.reserve(targetViews.size());
-    for (const auto* view : targetViews) {
-        if (view) {
-            contexts.push_back(view->context);
-        }
-    }
-
-    // observer 被 VTK interactor 持有；这里捕获 weak_ptr，避免宿主 session 关闭时形成引用环。
-    // 为什么不捕获 HostRenderViewSet 指针：observer 只需要知道目标窗口中是否仍有 host tool mode 活跃。
-    return [contexts = std::move(contexts)]() {
-        for (const auto& context : contexts) {
-            if (GetRenderContextToolModeActive(context.lock(), ToolMode::ModelTransform)) {
-                return true;
-            }
-        }
-        return false;
-    };
-}
-
-static std::function<bool()> BuildExitHostToolModeHandler(
-    const std::vector<const HostRenderViewRuntime*>& targetViews)
-{
-    std::vector<std::weak_ptr<StdRenderContext>> contexts;
-    contexts.reserve(targetViews.size());
-    for (const auto* view : targetViews) {
-        if (view) {
-            contexts.push_back(view->context);
-        }
-    }
-
-    // observer 被 VTK interactor 持有；这里捕获 weak_ptr，避免宿主 session 关闭时形成引用环。
-    return [contexts = std::move(contexts)]() {
-        bool exitedAnyToolMode = false;
-        for (const auto& context : contexts) {
-            exitedAnyToolMode = ExitRenderContextToolMode(context.lock(), ToolMode::ModelTransform) || exitedAnyToolMode;
-        }
-        return exitedAnyToolMode;
-    };
-}
-
 static CropRemovalMode GetCropRemovalMode(HostCropPreviewMode previewMode)
 {
     switch (previewMode) {
@@ -147,214 +33,84 @@ static CropRemovalMode GetCropRemovalMode(HostCropPreviewMode previewMode)
     }
 }
 
-// HostCommandHotkeyObserver 只属于 standalone 调试输入层。
-// 它把固定键位转换成 VtkAppHostSession 暴露的稳定命令；真实上位机不需要安装这个 observer。
-class HostCommandHotkeyObserver final : public vtkCommand {
-public:
-    static HostCommandHotkeyObserver* New() { return new HostCommandHotkeyObserver; }
-
-    // weak_ptr 防止 VTK interactor 比 session 活得更久时回调悬挂对象。
-    std::weak_ptr<HostFeatureBindings> featureBindings;
-    // 用函数注入 RenderContext 状态，避免 feature observer 直接依赖 HostRenderViewSet 或遍历窗口集合。
-    std::function<bool()> getHostToolModeActive;
-    std::function<bool()> exitHostToolMode;
-    // hotkey 被触发后使用的 feature 目标请求；监听窗口和作用窗口由 HostCommandInputConfig 分开提供。
-    HostOrthogonalCropActivationRequest orthogonalCropRequest;
-    HostGapAnalysisActivationRequest gapAnalysisRequest;
-    // standalone 键位配置。这里保存的是宿主输入协议，不是 feature 行为默认值。
-    HostHotkeyBindings hotkeys;
-
-    void Execute(vtkObject* caller, unsigned long eventId, void* callData) override {
-        (void)callData;
-        this->AbortFlagOff();
-        auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-        auto bindings = featureBindings.lock();
-        if (!iren || !bindings) {
-            return;
-        }
-
-        const HostKeyInput keyInput = BuildHostKeyInput(iren);
-        const bool isExitKey = MatchesKeySymbol(keyInput, hotkeys.exitKeySym);
-        const bool isGapOverlayToggleKey = MatchesCharacterKey(keyInput, hotkeys.gapOverlayToggleKey);
-        const bool isCropToggleKey = MatchesCharacterKey(keyInput, hotkeys.cropToggleKey);
-        const bool isPlanarCropToggleKey = MatchesCharacterKey(keyInput, hotkeys.planarCropToggleKey);
-        const bool isInsidePreviewKey = MatchesCharacterKey(keyInput, hotkeys.keepInsidePreviewKey);
-        const bool isOutsidePreviewKey = MatchesCharacterKey(keyInput, hotkeys.removeInsidePreviewKey);
-        const bool isSubmitKeyCode = MatchesCharacterKey(keyInput, hotkeys.submitKey);
-        const bool isSubmitKey = isSubmitKeyCode && keyInput.isControlPressed;
-        const bool shouldBlockVtkStereoKey = isSubmitKeyCode && !keyInput.isControlPressed;
-        const bool canHandleExitCommand = isExitKey && GetAnyExitTargetActive();
-        const bool isManagedHotkey =
-            isCropToggleKey
-            || isPlanarCropToggleKey
-            || isInsidePreviewKey
-            || isOutsidePreviewKey
-            || isSubmitKey
-            || shouldBlockVtkStereoKey
-            || isGapOverlayToggleKey
-            || canHandleExitCommand;
-
-        if (eventId == vtkCommand::CharEvent && isManagedHotkey) {
-            // VTK 的 CharEvent 仍会触发内建快捷键，例如裸数字键可能进入 stereo 行为。
-            // 宿主管理的键先在这里截断，避免 feature 命令和 VTK 默认命令同时响应。
-            this->AbortFlagOn();
-            return;
-        }
-
-        if (eventId == vtkCommand::KeyPressEvent) {
-            if (isCropToggleKey && !m_cropToggleKeyDown) {
-                m_cropToggleKeyDown = true;
-                bindings->ToggleInteractiveCrop(orthogonalCropRequest);
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isPlanarCropToggleKey && !m_planarCropToggleKeyDown) {
-                m_planarCropToggleKeyDown = true;
-                bindings->ToggleInteractivePlanarCrop(orthogonalCropRequest);
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isGapOverlayToggleKey && !m_gapOverlayToggleKeyDown) {
-                m_gapOverlayToggleKeyDown = true;
-                // 同一宿主显隐命令按状态分派：未进入时激活显示模式，已进入时只切换 overlay 显隐。
-                // 彻底退出由独立宿主退出命令负责，避免“临时隐藏”误清本轮分析结果。
-                if (!bindings->GetGapAnalysisDisplayActive()) {
-                    bindings->ActivateGapAnalysisDisplay(gapAnalysisRequest);
-                }
-                else {
-                    bindings->ToggleGapAnalysisOverlayVisibility();
-                }
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isExitKey && ExitActiveHostMode()) {
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isInsidePreviewKey) {
-                bindings->ToggleCropPreview(orthogonalCropRequest, HostCropPreviewMode::KeepInside);
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isOutsidePreviewKey) {
-                bindings->ToggleCropPreview(orthogonalCropRequest, HostCropPreviewMode::RemoveInside);
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isSubmitKey && !m_submitKeyDown) {
-                m_submitKeyDown = true;
-                bindings->ApplyCropSubmit(orthogonalCropRequest);
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isManagedHotkey) {
-                this->AbortFlagOn();
-                return;
-            }
-        }
-
-        if (eventId == vtkCommand::KeyReleaseEvent) {
-            if (isCropToggleKey) {
-                m_cropToggleKeyDown = false;
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isPlanarCropToggleKey) {
-                m_planarCropToggleKeyDown = false;
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isGapOverlayToggleKey) {
-                m_gapOverlayToggleKeyDown = false;
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isInsidePreviewKey || isOutsidePreviewKey) {
-                this->AbortFlagOn();
-                return;
-            }
-
-            if (isSubmitKeyCode) {
-                m_submitKeyDown = false;
-                this->AbortFlagOn();
-                return;
-            }
-        }
+static std::optional<Orientation> GetGapSliceOverlayOrientation(HostRenderViewRole role)
+{
+    switch (role) {
+    case HostRenderViewRole::TopDownSlice:
+        return Orientation::Top_down;
+    case HostRenderViewRole::FrontBackSlice:
+        return Orientation::Front_back;
+    case HostRenderViewRole::LeftRightSlice:
+        return Orientation::Left_right;
+    default:
+        return std::nullopt;
     }
+}
 
-private:
-    // VTK 可能对同一物理按键连续发送 KeyPressEvent；这些状态位让 Toggle/Submit 只在按下边沿触发一次。
-    bool m_cropToggleKeyDown = false;
-    bool m_planarCropToggleKeyDown = false;
-    bool m_gapOverlayToggleKeyDown = false;
-    bool m_submitKeyDown = false;
+static bool ShouldReceiveGapMeshOverlay(HostRenderViewRole role)
+{
+    return HostRenderViewSet::GetRoleIs3DView(role);
+}
 
-    bool GetAnyExitTargetActive() const
-    {
-        auto bindings = featureBindings.lock();
-        if (bindings && bindings->GetInteractiveCropActive()) {
-            return true;
-        }
-        if (bindings && bindings->GetGapAnalysisDisplayActive()) {
-            return true;
-        }
-        return getHostToolModeActive && getHostToolModeActive();
-    }
+static VoidDetectionParams BuildVoidDetectionParams(
+    const HostGapAnalysisVoidDetectionConfig& config)
+{
+    VoidDetectionParams params;
+    params.grayMin = config.grayMin;
+    params.grayMax = config.grayMax;
+    params.minVolumeMM3 = config.minVolumeMM3;
+    params.angleThresholdDeg = config.angleThresholdDeg;
+    params.tensorWindowSize = config.tensorWindowSize;
+    params.erosionIterations = config.erosionIterations;
+    return params;
+}
 
-    bool ExitActiveHostMode()
-    {
-        auto bindings = featureBindings.lock();
-        // 宿主退出命令只退出当前活跃工具模式，不做全局关闭；顺序体现用户正在操作的显式模式优先级。
-        if (bindings && bindings->GetInteractiveCropActive()) {
-            bindings->ExitInteractiveCrop();
-            return true;
-        }
-        if (bindings && bindings->GetGapAnalysisDisplayActive()) {
-            bindings->ExitGapAnalysisDisplay();
-            return true;
-        }
-        if (getHostToolModeActive && getHostToolModeActive() && exitHostToolMode) {
-            exitHostToolMode();
-            return true;
-        }
+static GapAnalysisSurfaceRequest BuildGapAnalysisSurfaceRequest(
+    const HostGapAnalysisSurfaceConfig& config)
+{
+    GapAnalysisSurfaceRequest request;
+    request.isoMode = config.isoMode == HostGapAnalysisIsoMode::AbsoluteValue
+        ? GapAnalysisIsoValueMode::AbsoluteValue
+        : GapAnalysisIsoValueMode::DataRangeRatio;
+    request.dataRangeRatio = config.dataRangeRatio;
+    request.absoluteIsoValue = config.absoluteIsoValue;
+    return request;
+}
+
+static bool ValidateGapAnalysisAlgorithmConfig(
+    const HostGapAnalysisAlgorithmConfig& config)
+{
+    if (config.surface.isoMode == HostGapAnalysisIsoMode::DataRangeRatio
+        && (config.surface.dataRangeRatio < 0.0 || config.surface.dataRangeRatio > 1.0)) {
+        std::cerr << "[Host] Gap Analysis activation skipped: iso data range ratio must be within [0, 1]." << std::endl;
         return false;
     }
-};
-
-static void AttachHostCommandHotkeyObserverToContext(
-    const std::shared_ptr<StdRenderContext>& context,
-    const vtkSmartPointer<HostCommandHotkeyObserver>& observer)
-{
-    if (!context || !context->GetInteractor()) {
-        return;
+    if (config.voidDetection.grayMin > config.voidDetection.grayMax) {
+        std::cerr << "[Host] Gap Analysis activation skipped: grayMin must not be greater than grayMax." << std::endl;
+        return false;
     }
-
-    // 同一个 observer 同时监听 press/release/char：
-    // 1. press 负责触发命令。
-    // 2. release 负责复位边沿状态。
-    // 3. char 负责阻断 VTK 内建快捷键和 host 命令双响应。
-    context->GetInteractor()->AddObserver(vtkCommand::KeyPressEvent, observer, kHostCommandHotkeyObserverPriority);
-    context->GetInteractor()->AddObserver(vtkCommand::KeyReleaseEvent, observer, kHostCommandHotkeyObserverPriority);
-    context->GetInteractor()->AddObserver(vtkCommand::CharEvent, observer, kHostCommandHotkeyObserverPriority);
+    if (config.voidDetection.tensorWindowSize <= 0) {
+        std::cerr << "[Host] Gap Analysis activation skipped: tensorWindowSize must be positive." << std::endl;
+        return false;
+    }
+    if (config.voidDetection.erosionIterations < 0) {
+        std::cerr << "[Host] Gap Analysis activation skipped: erosionIterations must not be negative." << std::endl;
+        return false;
+    }
+    return true;
 }
-}
 
-HostFeatureBindings::HostFeatureBindings()
-    : m_gapAnalysisBinding(std::make_unique<HostGapAnalysisBinding>())
+} // namespace
+
+HostFeatureBindings::HostFeatureBindings() = default;
+
+HostFeatureBindings::~HostFeatureBindings()
 {
+    DetachHostTimerEventPump();
+    if (m_core.gapAnalysis) {
+        m_core.gapAnalysis->ExitDisplay();
+    }
 }
-
-HostFeatureBindings::~HostFeatureBindings() = default;
 
 void HostFeatureBindings::RegisterFeatures(
     const HostCoreServices& core,
@@ -362,8 +118,8 @@ void HostFeatureBindings::RegisterFeatures(
 {
     m_core = core;
     m_renderViews = &renderViews;
-    if (m_gapAnalysisBinding) {
-        m_gapAnalysisBinding->Register(core, renderViews);
+    if (m_core.gapAnalysis) {
+        m_core.gapAnalysis->ExitDisplay();
     }
     if (m_core.orthogonalCropBridge) {
         // submit 后需要刷新所有现有视图的共享数据，但不应该把“哪些窗口参与 preview”的语义写进 reload。
@@ -437,26 +193,104 @@ bool HostFeatureBindings::ActivateOrthogonalCrop(
 bool HostFeatureBindings::ActivateGapAnalysisDisplay(
     const HostGapAnalysisActivationRequest& request)
 {
-    return m_gapAnalysisBinding
-        && m_gapAnalysisBinding->ActivateDisplay(request);
+    if (!m_renderViews) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: host feature bindings are not ready." << std::endl;
+        return false;
+    }
+    if (request.targetViewIds.empty()
+        && request.targetViewRoles.empty()
+        && !request.useDefaultOverlayRoles) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: no render view target was requested." << std::endl;
+        return false;
+    }
+    if (!request.algorithm) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: algorithm parameters were not specified." << std::endl;
+        return false;
+    }
+    if (!ValidateGapAnalysisAlgorithmConfig(*request.algorithm)) {
+        return false;
+    }
+
+    std::vector<const HostRenderViewRuntime*> targetViews =
+        m_renderViews->GetViewsByIdsAndRoles(request.targetViewIds, request.targetViewRoles);
+    if (targetViews.empty() && request.useDefaultOverlayRoles) {
+        // 默认 overlay role 只有在宿主明确允许 fallback 时才使用；空请求不能被解释成全窗口。
+        targetViews = m_renderViews->GetDefaultGapOverlayViews();
+    }
+    if (targetViews.empty()) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: no overlay render view target was found." << std::endl;
+        return false;
+    }
+
+    if (!m_core.gapAnalysis) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: feature service is not ready." << std::endl;
+        return false;
+    }
+
+    std::vector<std::shared_ptr<AbstractAppService>> meshOverlayTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> sliceOverlayTargets;
+    meshOverlayTargets.reserve(targetViews.size());
+    sliceOverlayTargets.reserve(targetViews.size());
+    for (const auto* view : targetViews) {
+        if (!view || !view->service) {
+            continue;
+        }
+
+        if (ShouldReceiveGapMeshOverlay(view->config.role)) {
+            meshOverlayTargets.push_back(view->service);
+        }
+
+        const auto orientation = GetGapSliceOverlayOrientation(view->config.role);
+        if (orientation) {
+            sliceOverlayTargets.push_back({ *orientation, view->service });
+        }
+    }
+
+    return m_core.gapAnalysis->ActivateDisplay(
+        BuildGapAnalysisSurfaceRequest(request.algorithm->surface),
+        BuildVoidDetectionParams(request.algorithm->voidDetection),
+        meshOverlayTargets,
+        sliceOverlayTargets,
+        [sharedState = m_core.sharedState](double isoValue) {
+            if (sharedState) {
+                sharedState->SetIsoValue(isoValue);
+            }
+        });
+}
+
+bool HostFeatureBindings::ToggleGapAnalysisDisplay(
+    const HostGapAnalysisActivationRequest& request)
+{
+    if (!m_core.gapAnalysis) {
+        std::cerr << "[Host] Gap Analysis display toggle skipped: feature service is not ready." << std::endl;
+        return false;
+    }
+
+    return m_core.gapAnalysis->GetDisplayActive()
+        ? m_core.gapAnalysis->ToggleOverlayVisibility()
+        : ActivateGapAnalysisDisplay(request);
 }
 
 bool HostFeatureBindings::ToggleGapAnalysisOverlayVisibility()
 {
-    return m_gapAnalysisBinding
-        && m_gapAnalysisBinding->ToggleOverlayVisibility();
+    if (!m_core.gapAnalysis) {
+        std::cerr << "[Host] Gap Analysis overlay toggle skipped: feature service is not ready." << std::endl;
+        return false;
+    }
+    return m_core.gapAnalysis->ToggleOverlayVisibility();
 }
 
 bool HostFeatureBindings::ExitGapAnalysisDisplay()
 {
-    return m_gapAnalysisBinding
-        && m_gapAnalysisBinding->ExitDisplay();
+    if (!m_core.gapAnalysis) {
+        return false;
+    }
+    return m_core.gapAnalysis->ExitDisplay();
 }
 
 bool HostFeatureBindings::GetGapAnalysisDisplayActive() const
 {
-    return m_gapAnalysisBinding
-        && m_gapAnalysisBinding->GetDisplayActive();
+    return m_core.gapAnalysis && m_core.gapAnalysis->GetDisplayActive();
 }
 
 bool HostFeatureBindings::ToggleInteractiveCrop(
@@ -507,6 +341,14 @@ bool HostFeatureBindings::ExitInteractiveCrop()
         && m_core.orthogonalCropBridge->ExitInteractiveCrop();
 }
 
+bool HostFeatureBindings::ExitActiveFeatureMode()
+{
+    if (ExitInteractiveCrop()) {
+        return true;
+    }
+    return ExitGapAnalysisDisplay();
+}
+
 bool HostFeatureBindings::GetInteractiveCropActive() const
 {
     return m_core.orthogonalCropBridge
@@ -516,7 +358,7 @@ bool HostFeatureBindings::GetInteractiveCropActive() const
 std::function<bool()> HostFeatureBindings::BuildOrthogonalCropInputRefreshHandler() const
 {
     // 返回函数而不是立即刷新，是因为初始加载异步完成后才有 vtkImageData；
-    // session 可以把同一刷新点传给加载回调，避免裁切链路自己监听文件 I/O。
+    // router 可以把同一刷新点传给加载回调，避免裁切链路自己监听文件 I/O。
     return [
         orthogonalCropBridge = m_core.orthogonalCropBridge,
         sharedDataMgr = m_core.sharedDataMgr
@@ -543,51 +385,58 @@ bool HostFeatureBindings::RefreshOrthogonalCropInputImage()
     return refreshInput();
 }
 
-void HostFeatureBindings::AttachStandaloneHotkeys(
-    const HostCommandInputConfig& inputConfig,
-    const HostHotkeyBindings& hotkeys)
+void HostFeatureBindings::AttachHostTimerEventPump(
+    const HostTimerEventPumpConfig& eventPumpConfig)
 {
-    // standalone hotkey 是可选适配层；关闭时，所有 feature 仍可由 VtkAppHostSession public 命令驱动。
-    if (!inputConfig.enableStandaloneHotkeys || !m_renderViews) {
+    if (!eventPumpConfig.enableTimer || !m_renderViews) {
+        DetachHostTimerEventPump();
         return;
     }
 
-    std::vector<const HostRenderViewRuntime*> targetViews =
-        m_renderViews->GetViewsByIdsAndRoles(inputConfig.targetViewIds, inputConfig.targetViewRoles);
-    if (targetViews.empty()) {
-        std::cerr << "[Host] Standalone feature hotkeys skipped: no target render view was requested." << std::endl;
+    const HostRenderViewRuntime* timerView = nullptr;
+    if (!eventPumpConfig.timerViewId.empty()) {
+        timerView = m_renderViews->GetViewById(eventPumpConfig.timerViewId);
+    }
+    else if (eventPumpConfig.useTimerViewRole) {
+        timerView = m_renderViews->GetFirstViewByRole(eventPumpConfig.timerViewRole);
+    }
+
+    if (!timerView || !timerView->context) {
+        std::cerr << "[Host] Timer event pump skipped: explicit timer render view is missing." << std::endl;
+        DetachHostTimerEventPump();
         return;
     }
 
-    auto observer = vtkSmartPointer<HostCommandHotkeyObserver>::New();
-    const auto self = weak_from_this().lock();
-    if (!self) {
-        std::cerr << "[Host] Standalone feature hotkeys skipped: feature bindings are not owned by session." << std::endl;
-        return;
-    }
-
-    // VTK observer 由 interactor 持有，不能保存强 shared_ptr 指回 HostFeatureBindings；weak_ptr 可让 session 生命周期单向结束。
-    observer->featureBindings = self;
-    observer->getHostToolModeActive = BuildHostToolModeActiveHandler(targetViews);
-    observer->exitHostToolMode = BuildExitHostToolModeHandler(targetViews);
-    observer->orthogonalCropRequest = inputConfig.orthogonalCropRequest;
-    observer->gapAnalysisRequest = inputConfig.gapAnalysisRequest;
-    observer->hotkeys = hotkeys;
-
-    // hotkey 绑定范围由 host config 或上位机决定；空范围直接跳过，避免 feature 默认接管所有窗口。
-    for (const auto* view : targetViews) {
-        if (view) {
-            AttachHostCommandHotkeyObserverToContext(view->context, observer);
+    DetachHostTimerEventPump();
+    m_timerContext = timerView->context;
+    std::weak_ptr<HostFeatureBindings> weakSelf = weak_from_this();
+    timerView->context->SetTimerHandler([weakSelf]() {
+        if (const auto self = weakSelf.lock()) {
+            self->ProcessHostTimerTick();
         }
-    }
+    });
 }
 
-void HostFeatureBindings::AttachGapAnalysisTimer(
-    const HostGapAnalysisEventPumpConfig& eventPumpConfig)
+void HostFeatureBindings::ProcessHostTimerTick()
 {
-    if (m_gapAnalysisBinding) {
-        m_gapAnalysisBinding->AttachTimer(eventPumpConfig);
+    if (!m_core.gapAnalysis || !m_core.sharedState || !m_core.sharedDataMgr) {
+        return;
     }
+
+    // host 只提供主线程 tick 和当前数据快照入口；GapAnalysis 自己判断是否有 pending 显示请求。
+    if (m_core.sharedState->GetDataTrustedState() != LoadState::Succeeded) {
+        return;
+    }
+
+    m_core.gapAnalysis->ProcessDisplayTick(m_core.sharedDataMgr->GetVtkImage());
+}
+
+void HostFeatureBindings::DetachHostTimerEventPump()
+{
+    if (const auto context = m_timerContext.lock()) {
+        context->ClearTimerHandler();
+    }
+    m_timerContext.reset();
 }
 
 bool HostFeatureBindings::ConfigureOrthogonalCrop(

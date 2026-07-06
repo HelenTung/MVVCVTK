@@ -133,7 +133,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
         auto visibleOverlayResult = *overlayResult;
         if (polyDataPreviewApplied) {
             // 主 actor 已经用 mapper clipping 或 shader discard 表达 polydata 预览；
-            // overlay 仍显示裁切盒，可选裁切网格 artifact 不参与主预览判定。
+            // overlay 是否显示几何参照由 bridge 按 reference 窗口注入；可选裁切网格 artifact 不参与主预览判定。
             visibleOverlayResult.SetClipPolyData(nullptr);
         }
         overlayStrategy->SetCropResult(visibleOverlayResult);

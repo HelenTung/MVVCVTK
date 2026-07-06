@@ -5,6 +5,7 @@
 // =====================================================================
 
 #include "Algorithms/VolumeBuffer.h"
+#include "AppTypes.h"
 #include "GapAnalysisTypes.h"
 
 #include <atomic>
@@ -12,7 +13,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
+#include <vector>
 
+class AbstractAppService;
+class AbstractVisualStrategy;
 class GapAnalysisCompletionCallbackState;
 
 class GapAnalysisService : public IGapAnalysisService {
@@ -45,6 +50,18 @@ public:
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const override;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const override;
 
+    // GapAnalysis 显示模式由 feature 持有状态；host 只注入已降级的 overlay 目标和主线程 tick。
+    bool ActivateDisplay(
+        const GapAnalysisSurfaceRequest& surfaceRequest,
+        const VoidDetectionParams& voidParams,
+        const std::vector<std::shared_ptr<AbstractAppService>>& meshOverlayTargets,
+        const std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>>& sliceOverlayTargets,
+        std::function<void(double isoValue)> onIsoValueResolved = nullptr);
+    bool ToggleOverlayVisibility();
+    bool ExitDisplay();
+    bool GetDisplayActive() const;
+    void ProcessDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+
 private:
     using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
 
@@ -52,6 +69,11 @@ private:
         SurfaceParams surfParams;
         AdvancedSurfaceParams advParams;
         VoidDetectionParams voidParams;
+    };
+
+    struct DisplayOverlayBinding {
+        std::shared_ptr<AbstractAppService> service;
+        std::shared_ptr<AbstractVisualStrategy> overlayStrategy;
     };
 
     VolumeBufferSnapshot GetInputSnapshot() const;
@@ -62,6 +84,13 @@ private:
         ParameterSnapshot params);
     void WaitForWorkerThread();
     void SetAnalysisState(GapAnalysisState state);
+
+    bool TryStartDisplayAnalysis(vtkSmartPointer<vtkImageData> inputImage);
+    void CommitDisplayOverlays();
+    bool HideDisplayOverlays();
+    bool ShowStoredDisplayResult();
+    void ClearDisplayState();
+    double ResolveDisplayIsoValue(const VolumeBuffer& inputSnapshot) const;
 
     static bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> image,
@@ -90,4 +119,18 @@ private:
 
     // 插件内部 pending callback 状态；只暴露主线程轮询接口，不反向 include App 层。
     std::unique_ptr<GapAnalysisCompletionCallbackState> m_completionCallbackState;
+
+    std::vector<std::shared_ptr<AbstractAppService>> m_displayMeshOverlayTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> m_displaySliceOverlayTargets;
+    std::vector<DisplayOverlayBinding> m_displayOverlayBindings;
+    vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
+    vtkSmartPointer<vtkImageData> m_displayLabelImage;
+    GapAnalysisSurfaceRequest m_displaySurfaceRequest;
+    VoidDetectionParams m_displayVoidParams;
+    std::function<void(double isoValue)> m_displayIsoValueResolvedCallback;
+    bool m_displayActive = false;
+    bool m_displayOverlayVisible = false;
+    bool m_displayRunRequested = false;
+    bool m_displayCompletionHandled = false;
+    bool m_displayFailureLogged = false;
 };

@@ -28,11 +28,12 @@ struct HostRenderViewRuntime {
 // 2. HostFeatureBindings 只通过 id/role 查询目标窗口，不知道默认五窗口布局。
 // 3. 外部 Qt / 上位机只拿 endpoint，不直接碰 service。
 // 这样它和 StdRenderContext 不重叠：StdRenderContext 负责单窗口渲染对象，HostRenderViewSet 负责多窗口集合语义。
+// 输入事件不在这里安装；独立 VTK 调试热键由 HostCommandRouter 私有 observer 翻译成 host request。
 class HostRenderViewSet {
 public:
     HostRenderViewSet() = default;
 
-    // 根据 host 配置构建一次窗口集合；configs 数量就是窗口数量，空 id 只在本地调试时补兜底名。
+    // 根据 host 配置构建一次窗口集合；configs 数量就是窗口数量，id 必须由宿主作为稳定外部事实提供。
     void Build(
         const HostCoreServices& core,
         const std::vector<HostRenderViewConfig>& configs);
@@ -61,14 +62,10 @@ public:
         const std::vector<const HostRenderViewRuntime*>& views) const;
 
     void ConfigureInitialVisibility() const;
-    void AttachRenderContextHotkeys(
-        const HostRenderContextInputConfig& inputConfig,
-        const HostHotkeyBindings& hotkeys) const;
     void RenderAll() const;
     void InitializeAllInteractors() const;
     std::vector<HostRenderViewEndpoint> BuildEndpoints() const;
 
-    static std::vector<HostRenderViewConfig> BuildDefaultConfigs();
     static bool GetRoleIs3DView(HostRenderViewRole role);
     static bool GetRoleIsSliceView(HostRenderViewRole role);
     static bool GetRoleIsGapOverlayRole(HostRenderViewRole role);

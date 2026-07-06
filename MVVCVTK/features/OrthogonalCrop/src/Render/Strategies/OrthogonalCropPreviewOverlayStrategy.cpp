@@ -111,6 +111,16 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
     ApplyOverlayVisualStyle();
 }
 
+void OrthogonalCropPreviewOverlayStrategy::SetGeometryReferenceVisible(bool isVisible)
+{
+    if (m_allowGeometryReferenceVisible == isVisible) {
+        return;
+    }
+
+    m_allowGeometryReferenceVisible = isVisible;
+    UpdateVisiblePreviewProps();
+}
+
 void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
 {
     // 裁切结果在 overlay 层拆成 outline、clipped polydata、mask 三种显示数据；
@@ -120,8 +130,8 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
         return;
     }
 
-    // outline 是所有窗口共享的几何参照；
-    // 3D 只显示线框，避免半透明实体盒在非拖拽态形成“裁切盒变色”的错觉。
+    // outline 是 host 可选择显示的几何参照；
+    // 非 reference 窗口仍可能接收主模型裁切效果，但不再显示另一个裁切 box 线框。
     auto outline = result.GetOutlinePolyData();
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
@@ -198,9 +208,9 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
 
 void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
 {
-    // 3D 窗口只显示线框参照，2D 窗口显示 mask slice。
+    // 3D reference 窗口才显示线框参照；其它 preview 窗口只表达裁切后的主模型或 2D mask。
     // 半透明实体盒固定隐藏，因为交互态颜色应该只由 widget selected property 表达。
-    m_outlineActor->SetVisibility(m_hasOutline ? 1 : 0);
+    m_outlineActor->SetVisibility(m_allowGeometryReferenceVisible && m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
     m_previewRegionActor->SetVisibility(false);
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
 }

@@ -42,6 +42,12 @@ StdRenderContext::StdRenderContext()
     AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor>::New());
 }
 
+StdRenderContext::~StdRenderContext()
+{
+    RemoveTimer();
+    RemoveObservers();
+}
+
 void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor)
 {
     if (!interactor) {
@@ -53,34 +59,39 @@ void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteracto
             // 同一个 interactor 也可能因为外部窗口注入而换绑 window，必须保持 VTK 双向关系一致。
             m_interactor->SetRenderWindow(m_renderWindow);
         }
+        EnsureObservers();
         return;
     }
 
+    RemoveTimer();
+    RemoveObservers();
     m_interactor = std::move(interactor);
     if (m_renderWindow) {
         m_interactor->SetRenderWindow(m_renderWindow);
     }
     // observer 绑定在 interactor 上；替换 interactor 后必须重新挂载，否则 Qt 注入窗口收不到业务事件。
-    AddInteractionObservers();
+    EnsureObservers();
     if (m_axesWidget) {
         m_axesWidget->SetInteractor(m_interactor);
     }
     BuildInteractionRouter();
 }
 
-void StdRenderContext::AddInteractionObservers()
+void StdRenderContext::EnsureObservers()
 {
-    if (!m_interactor || !m_eventCallback) {
+    if (!m_interactor || !m_eventCallback || !m_observerTags.empty()) {
         return;
     }
 
-    const std::array<unsigned long, 10> events = {
+    const std::array<unsigned long, 12> events = {
         vtkCommand::MouseWheelForwardEvent,
         vtkCommand::MouseWheelBackwardEvent,
         vtkCommand::LeftButtonPressEvent,
         vtkCommand::MouseMoveEvent,
         vtkCommand::LeftButtonReleaseEvent,
         vtkCommand::KeyPressEvent,
+        vtkCommand::KeyReleaseEvent,
+        vtkCommand::CharEvent,
         vtkCommand::ExitEvent,
         vtkCommand::InteractionEvent,
         vtkCommand::RightButtonPressEvent,
@@ -89,9 +100,50 @@ void StdRenderContext::AddInteractionObservers()
 
     // 所有业务关心的交互事件都先汇入同一个 callback，
     // 后面再由 RenderContext 按工具模式和 Router 规则细分处理路径。
+    m_observerTags.reserve(events.size());
     for (const auto eventId : events) {
-        m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority);
+        m_observerTags.push_back(
+            m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority));
     }
+}
+
+void StdRenderContext::RemoveObservers()
+{
+    if (m_interactor) {
+        for (const auto tag : m_observerTags) {
+            if (tag != 0) {
+                m_interactor->RemoveObserver(tag);
+            }
+        }
+    }
+    m_observerTags.clear();
+}
+
+void StdRenderContext::EnsureTimer()
+{
+    if (!m_interactor || !m_eventCallback) {
+        return;
+    }
+
+    if (m_timerId == 0) {
+        m_timerId = m_interactor->CreateRepeatingTimer(kTimerIntervalMs);
+    }
+    if (m_timerObserverTag == 0) {
+        m_timerObserverTag =
+            m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, kTimerObserverPriority);
+    }
+}
+
+void StdRenderContext::RemoveTimer()
+{
+    if (m_interactor && m_timerObserverTag != 0) {
+        m_interactor->RemoveObserver(m_timerObserverTag);
+    }
+    if (m_interactor && m_timerId != 0) {
+        m_interactor->DestroyTimer(m_timerId);
+    }
+    m_timerObserverTag = 0;
+    m_timerId = 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -103,10 +155,7 @@ void StdRenderContext::InitializeInteractor()
         m_interactor->Initialize();
     }
 
-    if (m_interactor) {
-        m_interactor->CreateRepeatingTimer(kTimerIntervalMs);  // ~30 FPS
-        m_interactor->AddObserver(vtkCommand::TimerEvent, m_eventCallback, kTimerObserverPriority);
-    }
+    EnsureTimer();
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
     BuildInteractionRouter();
@@ -273,22 +322,25 @@ void StdRenderContext::SetToolMode(ToolMode mode)
     if (m_interactiveService) m_interactiveService->MarkDirty();
 }
 
-void StdRenderContext::SetHostKeyEventHandler(HostKeyEventHandler handler)
+void StdRenderContext::SetKeyHandler(
+    std::function<InteractionResult(const InteractionEvent&)> handler)
 {
-    m_hostKeyEventHandler = std::move(handler);
+    m_keyHandler = std::move(handler);
 }
 
-bool StdRenderContext::HandleKeyEvent(vtkRenderWindowInteractor* interactor)
+void StdRenderContext::ClearKeyHandler()
 {
-    if (!interactor) {
-        return false;
-    }
+    m_keyHandler = nullptr;
+}
 
-    if (m_hostKeyEventHandler) {
-        return m_hostKeyEventHandler(interactor, *this);
-    }
+void StdRenderContext::SetTimerHandler(std::function<void()> handler)
+{
+    m_timerHandler = std::move(handler);
+}
 
-    return false;
+void StdRenderContext::ClearTimerHandler()
+{
+    m_timerHandler = nullptr;
 }
 
 void StdRenderContext::BuildInteractionEvent(
@@ -329,31 +381,13 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
 {
     (void)callData;
 
+    if (m_eventCallback) {
+        m_eventCallback->AbortFlagOff();
+    }
+
     // ── ExitEvent：销毁定时器，停止心跳 ─────────────────────────────
     if (eventId == vtkCommand::ExitEvent) {
-        if (m_interactor) m_interactor->DestroyTimer();
-        return;
-    }
-
-    // ── 键盘：宿主层按键映射 ───────────────────────────────────────
-    // RenderContext 只提供事件转交点；具体功能键属于宿主，不写进 core 渲染上下文。
-    if (eventId == vtkCommand::KeyPressEvent) {
-        auto* iren = vtkRenderWindowInteractor::SafeDownCast(caller);
-        if (HandleKeyEvent(iren)) {
-            return;
-        }
-    }
-
-    // ── ModelTransform：InteractionEvent → 矩阵同步 ──────────────────
-    if (m_toolMode == ToolMode::ModelTransform
-        && eventId == vtkCommand::InteractionEvent
-        && m_interactiveService)
-    {
-        vtkProp3D* prop = m_interactiveService->GetMainProp();
-        if (prop && prop->GetMatrix()) {
-            m_interactiveService->SyncModelMatrix(prop->GetMatrix());
-            m_interactiveService->MarkDirty();
-        }
+        RemoveTimer();
         return;
     }
 
@@ -369,8 +403,24 @@ void StdRenderContext::HandleVTKEvent(vtkObject* caller,
         ? RouterDispatchMode::Broadcast
         : RouterDispatchMode::FirstMatch;
 
-    const InteractionResult result =
-        m_interactionRouter.Dispatch(eve, dispatchMode);
+    InteractionResult result;
+    if (m_keyHandler
+        && (eventId == vtkCommand::KeyPressEvent
+            || eventId == vtkCommand::KeyReleaseEvent
+            || eventId == vtkCommand::CharEvent)) {
+        result = m_keyHandler(eve);
+    }
+
+    if (!result.handled) {
+        const InteractionResult routerResult =
+            m_interactionRouter.Dispatch(eve, dispatchMode);
+        result.handled = result.handled || routerResult.handled;
+        result.abortVtk = result.abortVtk || routerResult.abortVtk;
+    }
+
+    if (eventId == vtkCommand::TimerEvent && m_timerHandler) {
+        m_timerHandler();
+    }
 
     if (result.abortVtk && m_eventCallback) {
         // 业务层已经完整消费该事件时，阻止 VTK 默认相机/窗口行为继续处理，避免双重响应。

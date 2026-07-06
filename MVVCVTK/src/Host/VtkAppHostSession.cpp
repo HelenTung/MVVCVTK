@@ -1,15 +1,12 @@
 #include "Host/VtkAppHostSession.h"
 
+#include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 
-#include "AppService.h"
-#include "AppState.h"
 #include "StdRenderContext.h"
-#include "VolumeAnalysisService.h"
 
-#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -74,92 +71,6 @@ static void PrintStartupStatus(
     }
 }
 
-static void StartInitialVolumeLoad(
-    const HostCoreServices& core,
-    const HostRenderViewSet& renderViews,
-    std::function<bool()> refreshOrthogonalCropInput,
-    const InitialVolumeLoadConfig& initialVolume,
-    bool showStandaloneHotkeyHelp,
-    const HostHotkeyBindings& hotkeys)
-{
-    // 初始加载是 host 命令，不是 session 默认动作：
-    // 1. 没有显式 enable 时直接等待上位机后续命令。
-    // 2. enable 后必须同时具备路径和 RAW 几何元数据。
-    // 3. 加载完成只刷新共享状态和裁切输入，不自动进入孔隙显示模式。
-    if (!initialVolume.enableInitialLoad) {
-        // 数据来源必须由宿主显式决定；Qt / 上位机初始化 session 时不应隐式读取独立调试 RAW 文件。
-        return;
-    }
-    if (initialVolume.filePath.empty()) {
-        // enableInitialLoad 表达“宿主要执行初始加载”，filePath 表达“加载哪个外部数据源”；两者分开校验，避免空路径落到 DataManager。
-        std::cerr << "[Host] Initial volume load skipped: file path was not specified." << std::endl;
-        return;
-    }
-    if (!initialVolume.geometry) {
-        // RAW 路径只能定位字节来源，不能说明物理坐标；缺少 geometry 时拒绝加载，避免下游裁切和孔隙分析使用伪 spacing/origin。
-        std::cerr << "[Host] Initial volume load skipped: volume geometry was not specified." << std::endl;
-        return;
-    }
-
-    const auto* primaryView = renderViews.GetPrimaryView();
-    if (!primaryView || !primaryView->service) {
-        std::cerr << "[Host] Initial volume load skipped: primary render view is missing." << std::endl;
-        return;
-    }
-
-    // 数据只加载一次到共享 DataManager；其他视图通过共享状态和 Timer 同步，不各自触发文件 I/O。
-    primaryView->service->LoadFileAsync(
-        initialVolume.filePath,
-        initialVolume.geometry->spacing,
-        initialVolume.geometry->origin,
-        [
-            sharedState = core.sharedState,
-            sharedDataMgr = core.sharedDataMgr,
-            primaryService = primaryView->service,
-            imageAnalysis = core.imageAnalysis,
-            refreshOrthogonalCropInput = std::move(refreshOrthogonalCropInput),
-            initialVolume,
-            showStandaloneHotkeyHelp,
-            hotkeys
-        ](bool success)
-        {
-            if (!success) {
-                std::cerr << "[Host] Volume data load failed.\n";
-                return;
-            }
-
-            auto range = sharedState->GetDataRange();
-            if (initialVolume.initialIsoDataRangeRatio) {
-                const double ratio = *initialVolume.initialIsoDataRangeRatio;
-                if (ratio < 0.0 || ratio > 1.0) {
-                    std::cerr << "[Host] Initial iso threshold skipped: data range ratio must be within [0, 1]." << std::endl;
-                }
-                else {
-                    // 初始 iso 只按宿主显式配方设置显示状态；session 不保存样本数据的经验阈值。
-                    const double isoVal = range[0] + (range[1] - range[0]) * ratio;
-                    primaryService->SetIsoThreshold(isoVal);
-                }
-            }
-
-            auto histogramTable = imageAnalysis->GetHistogramData(initialVolume.histogramBinCount);
-            if (histogramTable && histogramTable->GetNumberOfRows() > 0) {
-                if (!initialVolume.histogramFilePath.empty()) {
-                    // 直方图图片是调试导出产物，不是加载链路的必需步骤；路径不明确时不触发 VTK writer。
-                    imageAnalysis->SaveHistogramImage(initialVolume.histogramFilePath, initialVolume.histogramBinCount);
-                }
-            }
-            else {
-                std::cerr << "[Host] Histogram generation failed.\n";
-            }
-
-            if (showStandaloneHotkeyHelp && refreshOrthogonalCropInput && refreshOrthogonalCropInput()) {
-                std::cout << "[Host] Crop tools armed. " << BuildStartupControlsText(hotkeys) << std::endl;
-            }
-
-            // GapAnalysis 不随加载自动进入；宿主收到对应命令后，再由 Timer 消费显式分析请求。
-        }
-    );
-}
 } // namespace
 
 struct VtkAppHostSession::Impl {
@@ -171,6 +82,8 @@ struct VtkAppHostSession::Impl {
     HostRenderViewSet renderViews;
     // host 到 feature 的绑定层；shared_ptr 是为了让 VTK observer 用 weak_ptr 安全回调。
     std::shared_ptr<HostFeatureBindings> featureBindings;
+    // host 命令分发器只暴露单一 Dispatch 入口，具体分发由内部标志位判断。
+    std::shared_ptr<HostCommandRouter> commandRouter;
     // Initialize 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
     std::vector<HostRenderViewEndpoint> renderViewEndpoints;
     // 防止 Start 或命令入口重复执行组装；命令入口可懒 Initialize，方便上位机先配置后调用。
@@ -180,17 +93,8 @@ struct VtkAppHostSession::Impl {
         : config(std::move(sessionConfig))
         , featureBindings(std::make_shared<HostFeatureBindings>())
     {
-        if (config.renderViews.empty()) {
-            // 空配置保持历史调试入口可直接运行；传入 renderViews 时则完全尊重外部宿主拓扑。
-            config.renderViews = HostRenderViewSet::BuildDefaultConfigs();
-        }
     }
 };
-
-VtkAppHostSession::VtkAppHostSession()
-    : VtkAppHostSession(Config{})
-{
-}
 
 VtkAppHostSession::VtkAppHostSession(Config config)
     : m_impl(std::make_unique<Impl>(std::move(config)))
@@ -202,11 +106,6 @@ VtkAppHostSession::~VtkAppHostSession() = default;
 VtkAppHostSession::VtkAppHostSession(VtkAppHostSession&&) noexcept = default;
 
 VtkAppHostSession& VtkAppHostSession::operator=(VtkAppHostSession&&) noexcept = default;
-
-std::vector<HostRenderViewConfig> VtkAppHostSession::BuildDefaultRenderViewConfigs()
-{
-    return HostRenderViewSet::BuildDefaultConfigs();
-}
 
 void VtkAppHostSession::Initialize()
 {
@@ -220,28 +119,32 @@ void VtkAppHostSession::Initialize()
     m_impl->core = BuildHostCoreServices();
     m_impl->renderViews.Build(m_impl->core, m_impl->config.renderViews);
     m_impl->featureBindings->RegisterFeatures(m_impl->core, m_impl->renderViews);
-
-    m_impl->renderViews.AttachRenderContextHotkeys(
-        m_impl->config.renderContextInput,
-        m_impl->config.hotkeys);
-    m_impl->renderViews.ConfigureInitialVisibility();
-    StartInitialVolumeLoad(
+    m_impl->commandRouter = std::make_shared<HostCommandRouter>(
         m_impl->core,
         m_impl->renderViews,
-        m_impl->featureBindings->BuildOrthogonalCropInputRefreshHandler(),
-        m_impl->config.initialVolume,
-        m_impl->config.commandInput.enableStandaloneHotkeys,
-        m_impl->config.hotkeys);
+        m_impl->featureBindings);
+
+    m_impl->renderViews.ConfigureInitialVisibility();
+    if (m_impl->config.initialVolume.enableInitialLoad) {
+        HostCommandRouterRequest initialLoadRequest;
+        initialLoadRequest.command = HostCommandKind::Load;
+        initialLoadRequest.initialVolume = m_impl->config.initialVolume;
+        m_impl->commandRouter->DispatchHostCommand(std::move(initialLoadRequest));
+    }
 
     m_impl->renderViews.RenderAll();
     m_impl->renderViews.InitializeAllInteractors();
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     m_impl->renderViewEndpoints = m_impl->renderViews.BuildEndpoints();
 
-    m_impl->featureBindings->AttachStandaloneHotkeys(
-        m_impl->config.commandInput,
-        m_impl->config.hotkeys);
-    m_impl->featureBindings->AttachGapAnalysisTimer(m_impl->config.gapAnalysisEventPump);
+    HostCommandRouterRequest attachHotkeysRequest;
+    attachHotkeysRequest.command = HostCommandKind::Hotkeys;
+    attachHotkeysRequest.renderContextInput = m_impl->config.renderContextInput;
+    attachHotkeysRequest.dataExportConfig = m_impl->config.dataExport;
+    attachHotkeysRequest.commandInput = m_impl->config.commandInput;
+    attachHotkeysRequest.hotkeys = m_impl->config.hotkeys;
+    m_impl->commandRouter->DispatchHostCommand(std::move(attachHotkeysRequest));
+    m_impl->featureBindings->AttachHostTimerEventPump(m_impl->config.timerEventPump);
     PrintStartupStatus(m_impl->config);
 
     m_impl->isInitialized = true;
@@ -258,25 +161,46 @@ void VtkAppHostSession::Start()
     }
 }
 
+bool VtkAppHostSession::RequestVolumeLoad(
+    const InitialVolumeLoadConfig& request,
+    std::function<void(bool success)> onComplete)
+{
+    Initialize();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::Load;
+    routerRequest.initialVolume = request;
+    routerRequest.loadComplete = std::move(onComplete);
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+}
+
 bool VtkAppHostSession::ActivateOrthogonalCrop(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
-    return m_impl->featureBindings->ActivateOrthogonalCrop(request);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropStart;
+    routerRequest.orthogonalCropRequest = request;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ToggleOrthogonalCropBox(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
-    return m_impl->featureBindings->ToggleInteractiveCrop(request);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropBox;
+    routerRequest.orthogonalCropRequest = request;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ToggleOrthogonalCropPlane(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
-    return m_impl->featureBindings->ToggleInteractivePlanarCrop(request);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropPlane;
+    routerRequest.orthogonalCropRequest = request;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ToggleOrthogonalCropPreview(
@@ -284,41 +208,67 @@ bool VtkAppHostSession::ToggleOrthogonalCropPreview(
     HostCropPreviewMode previewMode)
 {
     Initialize();
-    return m_impl->featureBindings->ToggleCropPreview(
-        request,
-        previewMode);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropPreview;
+    routerRequest.orthogonalCropRequest = request;
+    routerRequest.cropPreviewMode = previewMode;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ApplyOrthogonalCropSubmit(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
-    return m_impl->featureBindings->ApplyCropSubmit(request);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropApply;
+    routerRequest.orthogonalCropRequest = request;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ExitOrthogonalCrop()
 {
     Initialize();
-    return m_impl->featureBindings->ExitInteractiveCrop();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::CropExit;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ActivateGapAnalysisDisplay(
     const HostGapAnalysisActivationRequest& request)
 {
     Initialize();
-    return m_impl->featureBindings->ActivateGapAnalysisDisplay(request);
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::GapStart;
+    routerRequest.gapAnalysisRequest = request;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ToggleGapAnalysisOverlayVisibility()
 {
     Initialize();
-    return m_impl->featureBindings->ToggleGapAnalysisOverlayVisibility();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::GapOverlay;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ExitGapAnalysisDisplay()
 {
     Initialize();
-    return m_impl->featureBindings->ExitGapAnalysisDisplay();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::GapExit;
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+}
+
+bool VtkAppHostSession::RequestDataExport(
+    const HostDataExportConfig& dataExportConfig,
+    std::function<void(bool success)> onComplete)
+{
+    Initialize();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::Export;
+    routerRequest.dataExportConfig = dataExportConfig;
+    routerRequest.dataExportComplete = std::move(onComplete);
+    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
 }
 
 const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()

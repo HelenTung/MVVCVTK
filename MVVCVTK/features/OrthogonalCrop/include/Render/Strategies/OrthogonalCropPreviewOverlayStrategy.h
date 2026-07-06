@@ -35,6 +35,10 @@ public:
     // 记录当前预览模式；颜色不再随模式切换，避免非交互态裁切盒反复变色。
     void SetRemovalMode(CropRemovalMode removalMode);
 
+    // 控制 3D 几何参照线框是否显示；裁切效果、2D mask 和清理链路不受这个开关影响。
+    // 为什么由 host/bridge 注入：只有宿主知道哪个窗口是 reference，feature overlay 不能自己猜窗口角色。
+    void SetGeometryReferenceVisible(bool isVisible);
+
     // 注入一次完整裁切结果，自动更新 outline / mask / 可选 polydata 三类显示内容。
     void SetCropResult(const OrthogonalCropResult& result);
 
@@ -93,6 +97,10 @@ private:
 
     // 当前预览模式；裁切保留/移除语义由 preview plug 和算法执行，不再通过颜色表达。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
+
+    // 是否允许当前窗口显示 3D 几何参照线框。
+    // 非 reference 预览窗口仍可显示裁切后的主模型效果，但不再额外画一个像可拖拽 box 的线框。
+    bool m_allowGeometryReferenceVisible = true;
 
     // 当前窗口切片轴；3D 时通常为 -1。
     int m_sliceAxis = -1;

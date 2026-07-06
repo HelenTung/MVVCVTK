@@ -2,6 +2,7 @@
 
 #include "Host/HostSessionTypes.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,17 +21,18 @@ public:
         HostHotkeyBindings hotkeys;
         // 可选启动加载命令；路径、spacing、origin 必须由宿主显式填入。
         InitialVolumeLoadConfig initialVolume;
-        // 空列表表示使用独立 VTK host 的默认调试视图；非空则完全由宿主决定窗口拓扑。
+        // 窗口拓扑必须由宿主显式传入；空列表表示当前 session 没有窗口，不再由构造函数暗补调试视图。
         std::vector<HostRenderViewConfig> renderViews;
         // RenderContext 热键仅属于独立 VTK 调试宿主；Qt / 上位机默认不接管窗口事件。
         HostRenderContextInputConfig renderContextInput;
+        // 导出命令参数属于 host I/O 输入，不放进窗口热键范围配置。
+        HostDataExportConfig dataExport;
         // standalone hotkey 绑定属于当前 VTK 调试 host；Qt / 上位机可关闭它，只通过显式命令驱动 feature。
         HostCommandInputConfig commandInput;
-        // 孔隙分析完成轮询的事件泵配置；standalone/Qt 都必须显式选择承载 TimerEvent 的窗口。
-        HostGapAnalysisEventPumpConfig gapAnalysisEventPump;
+        // host/session 主线程 tick 事件泵配置；standalone/Qt 都必须显式选择承载 TimerEvent 的窗口。
+        HostTimerEventPumpConfig timerEventPump;
     };
 
-    VtkAppHostSession();
     explicit VtkAppHostSession(Config config);
     ~VtkAppHostSession();
 
@@ -41,6 +43,11 @@ public:
 
     void Initialize();
     void Start();
+
+    // 显式体数据加载命令入口；session 只构造 request，不直接调用底层 service。
+    bool RequestVolumeLoad(
+        const InitialVolumeLoadConfig& request,
+        std::function<void(bool success)> onComplete = nullptr);
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。
@@ -55,15 +62,16 @@ public:
     bool ActivateGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
     bool ToggleGapAnalysisOverlayVisibility();
     bool ExitGapAnalysisDisplay();
+    // 显式导出命令入口；session 只转交上位机配置，不解析具体导出 service。
+    bool RequestDataExport(
+        const HostDataExportConfig& dataExportConfig,
+        std::function<void(bool success)> onComplete = nullptr);
 
     // endpoint 指针只在当前 session 生命周期内有效；外部宿主按 id/role 绑定 widget，不接管所有权。
     // 读取 endpoint 会懒 Initialize，避免 Qt host 构造 session 后立即取窗口句柄时拿到空缓存。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
     const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& id);
     const HostRenderViewEndpoint* GetPrimaryRenderViewEndpoint();
-
-    // 默认五视图只是保持现有独立 VTK 调试体验，不代表项目架构要求固定窗口数。
-    static std::vector<HostRenderViewConfig> BuildDefaultRenderViewConfigs();
 
 private:
     // PIMPL 隐藏 HostCoreServices、HostRenderViewSet 等组装细节，减少上位机包含本头文件时的编译依赖。

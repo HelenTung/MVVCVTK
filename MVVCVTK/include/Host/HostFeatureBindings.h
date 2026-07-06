@@ -7,7 +7,7 @@
 #include <functional>
 #include <memory>
 
-class HostGapAnalysisBinding;
+class StdRenderContext;
 
 // HostFeatureBindings 是 host/session 到 feature 的绑定边界，由 VtkAppHostSession 持有。
 // 它上接 HostRenderViewSet 的窗口查询，下接裁切 bridge / 孔隙算法服务，职责只限“把显式宿主命令绑定到 feature 能力”。
@@ -33,6 +33,8 @@ public:
     bool ActivateOrthogonalCrop(const HostOrthogonalCropActivationRequest& request);
     // 显式进入孔隙显示链路；只在请求提供目标窗口后才启动一次算法请求。
     bool ActivateGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
+    // standalone 输入使用的“进入或切换显示”命令；具体状态由 GapAnalysis feature 自己判断。
+    bool ToggleGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
     // 临时隐藏/显示已进入模式的孔隙 overlay；不清除算法结果，也不退出显示模式。
     bool ToggleGapAnalysisOverlayVisibility();
     // 彻底退出孔隙显示模式；清除 overlay 缓存和 pending 请求。
@@ -46,26 +48,26 @@ public:
         HostCropPreviewMode previewMode);
     bool ApplyCropSubmit(const HostOrthogonalCropActivationRequest& request);
     bool ExitInteractiveCrop();
+    bool ExitActiveFeatureMode();
     bool GetInteractiveCropActive() const;
     std::function<bool()> BuildOrthogonalCropInputRefreshHandler() const;
 
-    // 仅 standalone 调试入口使用。真实上位机应直接调用 public feature 命令，不安装固定按键。
-    void AttachStandaloneHotkeys(
-        const HostCommandInputConfig& inputConfig,
-        const HostHotkeyBindings& hotkeys);
-    // Timer 只是把异步孔隙算法结果提交回显示控制器；没有显式显示请求时它保持空转。
-    void AttachGapAnalysisTimer(const HostGapAnalysisEventPumpConfig& eventPumpConfig);
+    // 通用 TimerEvent pump 是 host/session 主线程收敛点；具体 feature 只在 tick 中消费自己的 pending 状态。
+    void AttachHostTimerEventPump(const HostTimerEventPumpConfig& eventPumpConfig);
 
 private:
     // 从共享 DataManager 把当前 vtkImageData 交给裁切 bridge；加载完成和显式激活都会复用同一刷新点。
     bool RefreshOrthogonalCropInputImage();
     // 按 request 解析 reference view 和 preview views，并把这些 host 窗口注入裁切 bridge。
     bool ConfigureOrthogonalCrop(const HostOrthogonalCropActivationRequest& request);
+    // 单次主线程 tick 分发入口；后续 feature 接入异步结果时复用这里，不再各自安装 VTK observer。
+    void ProcessHostTimerTick();
+    void DetachHostTimerEventPump();
 
     // 会话核心服务的拷贝，shared_ptr 成员共享所有权；HostFeatureBindings 不单独创建数据或算法服务。
     HostCoreServices m_core;
     // 非拥有指针，指向 VtkAppHostSession::Impl 中的窗口集合；session 保证其生命周期覆盖本对象。
     const HostRenderViewSet* m_renderViews = nullptr;
-    // 孔隙分析绑定对象收口显示状态机、算法参数快照和 TimerEvent 提交桥；HostFeatureBindings 只转发宿主命令。
-    std::unique_ptr<HostGapAnalysisBinding> m_gapAnalysisBinding;
+    // TimerEvent 生命周期归 StdRenderContext；这里仅记住 host 选择的 tick 承载窗口。
+    std::weak_ptr<StdRenderContext> m_timerContext;
 };

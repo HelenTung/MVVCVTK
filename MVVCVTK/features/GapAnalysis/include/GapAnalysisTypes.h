@@ -27,6 +27,19 @@ struct SurfaceParams {
     float material = 0.0f;  // 材料灰度下限
 };
 
+// ── 显示请求中的等值面阈值来源 ────────────────────────────────────
+// 这是 GapAnalysis feature 自己的执行语义，不携带 host 窗口、按键或上位机协议细节。
+enum class GapAnalysisIsoValueMode {
+    DataRangeRatio,
+    AbsoluteValue
+};
+
+struct GapAnalysisSurfaceRequest {
+    GapAnalysisIsoValueMode isoMode = GapAnalysisIsoValueMode::DataRangeRatio;
+    double dataRangeRatio = 0.0;
+    double absoluteIsoValue = 0.0;
+};
+
 // ── 高级法向精化参数 ──────────────────────────────────────────────────
 struct AdvancedSurfaceParams {
     bool  enabled = true;

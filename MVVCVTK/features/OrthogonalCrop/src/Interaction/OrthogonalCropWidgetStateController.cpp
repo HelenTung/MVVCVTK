@@ -14,6 +14,18 @@
 #include <vtkProperty.h>
 #include <utility>
 
+namespace {
+constexpr double kBoxOutlineNormalRed = 0.74;
+constexpr double kBoxOutlineNormalGreen = 0.80;
+constexpr double kBoxOutlineNormalBlue = 0.86;
+constexpr double kBoxOutlineSelectedRed = 1.0;
+constexpr double kBoxOutlineSelectedGreen = 0.68;
+constexpr double kBoxOutlineSelectedBlue = 0.16;
+constexpr double kBoxOutlineNormalLineWidth = 2.0;
+constexpr double kBoxOutlineSelectedLineWidth = 2.8;
+constexpr double kBoxFaceOpacity = 0.0;
+}
+
 OrthogonalCropWidgetStateCallback* OrthogonalCropWidgetStateCallback::New()
 {
     return new OrthogonalCropWidgetStateCallback();
@@ -40,10 +52,22 @@ OrthogonalCropWidgetStateController::OrthogonalCropWidgetStateController()
     m_widget = vtkSmartPointer<vtkBoxWidget2>::New();
     m_representation = vtkSmartPointer<vtkBoxRepresentation>::New();
     m_representation->SetPlaceFactor(1.0);
-    m_representation->GetOutlineProperty()->SetColor(0.82, 0.86, 0.90);
-    m_representation->GetOutlineProperty()->SetLineWidth(2.0);
-    m_representation->GetSelectedOutlineProperty()->SetColor(1.0, 0.55, 0.20);
-    m_representation->GetSelectedOutlineProperty()->SetLineWidth(2.5);
+
+    // BOX 裁切只让线框承载交互反馈；
+    // VTK 默认 selected face 会显示半透明黄面，容易被误读成裁切结果或模型被染色，所以这里显式保持面透明。
+    m_representation->GetFaceProperty()->SetOpacity(kBoxFaceOpacity);
+    m_representation->GetSelectedFaceProperty()->SetOpacity(kBoxFaceOpacity);
+
+    m_representation->GetOutlineProperty()->SetColor(
+        kBoxOutlineNormalRed,
+        kBoxOutlineNormalGreen,
+        kBoxOutlineNormalBlue);
+    m_representation->GetOutlineProperty()->SetLineWidth(kBoxOutlineNormalLineWidth);
+    m_representation->GetSelectedOutlineProperty()->SetColor(
+        kBoxOutlineSelectedRed,
+        kBoxOutlineSelectedGreen,
+        kBoxOutlineSelectedBlue);
+    m_representation->GetSelectedOutlineProperty()->SetLineWidth(kBoxOutlineSelectedLineWidth);
     m_widget->SetRepresentation(m_representation);
 
     // VTK callback 只做事件转发；
@@ -192,10 +216,12 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
 
         m_widgetInitialWorldBounds = m_currentWorldBounds;
         m_representation->PlaceWidget(m_currentWorldBounds.data());
+        ApplyInteractionVisualState(CropInteractionPhase::Idle);
         m_widget->On();
     }
     else {
         m_widget->Off();
+        ApplyInteractionVisualState(CropInteractionPhase::Idle);
     }
 
     m_enabled = enabled;
@@ -244,6 +270,9 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
 
 void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
 {
+    const auto interactionPhase = GetInteractionPhaseFromEvent(eventId);
+    ApplyInteractionVisualState(interactionPhase);
+
     const auto rawBounds = m_representation->GetBounds();
     if (!rawBounds) {
         return;
@@ -264,6 +293,27 @@ void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventI
     if (m_worldBoundsChangedCallback) {
         // 这里不做任何 preview / 算法调用，只把纯状态变化上抛给交互桥。
         // 因此 dragging 与 released 的不同处理策略，完全由桥接层决定。
-        m_worldBoundsChangedCallback(m_currentWorldBounds, GetInteractionPhaseFromEvent(eventId));
+        m_worldBoundsChangedCallback(m_currentWorldBounds, interactionPhase);
     }
+}
+
+void OrthogonalCropWidgetStateController::ApplyInteractionVisualState(CropInteractionPhase phase)
+{
+    const bool isDragging = phase == CropInteractionPhase::Dragging;
+
+    // 1. 普通 outline 在单面拖动时仍会被 VTK 使用；
+    //    因此拖动期间要临时改普通 outline，才能覆盖“拖面只亮面、不亮线”的默认行为。
+    // 2. selected outline 仍保留高亮色；
+    //    平移/缩放等 VTK 会直接切到 selected outline 的场景，也能使用同一套交互颜色。
+    m_representation->GetOutlineProperty()->SetColor(
+        isDragging ? kBoxOutlineSelectedRed : kBoxOutlineNormalRed,
+        isDragging ? kBoxOutlineSelectedGreen : kBoxOutlineNormalGreen,
+        isDragging ? kBoxOutlineSelectedBlue : kBoxOutlineNormalBlue);
+    m_representation->GetOutlineProperty()->SetLineWidth(
+        isDragging ? kBoxOutlineSelectedLineWidth : kBoxOutlineNormalLineWidth);
+    m_representation->GetSelectedOutlineProperty()->SetColor(
+        kBoxOutlineSelectedRed,
+        kBoxOutlineSelectedGreen,
+        kBoxOutlineSelectedBlue);
+    m_representation->GetSelectedOutlineProperty()->SetLineWidth(kBoxOutlineSelectedLineWidth);
 }

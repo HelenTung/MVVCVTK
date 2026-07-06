@@ -24,7 +24,7 @@ public:
 
     std::optional<std::packaged_task<void()>> BuildSaveSliceImagesTask(
         const std::string& path,
-        double angle,
+        std::optional<double> rotationAngleDeg,
         VizMode currentMode,
         std::function<void(bool success)> onComplete);
 

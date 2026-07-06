@@ -78,19 +78,12 @@ struct InitialVolumeLoadConfig {
     std::string filePath;
     // RAW 必需的物理几何元数据；optional 表示“宿主尚未下发”，不是使用默认值。
     std::optional<InitialVolumeGeometryConfig> geometry;
-    // 初始 3D 等值面显示阈值的范围比例。optional 是为了让宿主明确选择是否要在加载完成后设置 iso。
-    // 为什么放在加载命令里：这个值描述当前数据集的启动显示配方，不属于 session 或 feature 的通用默认。
-    std::optional<double> initialIsoDataRangeRatio;
-    // 直方图仅服务调试诊断，放在 host 加载配置里，不让图像分析服务记住某个 UI 偏好。
-    int histogramBinCount = 2048;
-    // 空路径表示不导出直方图图片；这样不会因为默认写死路径导致 vtkPNGWriter 报错。
-    std::string histogramFilePath = "";
 };
 
 // 每个 config 描述一个宿主视图的创建/接管意图，由上位机 / main 填充，由 HostRenderViewSet 消费。
 // 为什么只放窗口事实：窗口数量、role、是否参与预览属于 host 拓扑，不能固化到 feature 插件。
 struct HostRenderViewConfig {
-    // 稳定视图标识，供 Qt widget 映射和后续命令按 id 定向；为空时仅由独立调试入口生成兜底 id。
+    // 稳定视图标识，供 Qt widget 映射和后续命令按 id 定向；为空时保持为空，不能被 id 类命令寻址。
     std::string id;
     // 视图业务角色，供裁切 reference、overlay 目标和主循环承载点选择。
     HostRenderViewRole role = HostRenderViewRole::Auxiliary;
@@ -126,6 +119,27 @@ struct HostRenderContextInputConfig {
     std::vector<std::string> targetViewIds;
     // 按 role 指定哪些窗口接收 RenderContext 调试键；与 id 取并集。
     std::vector<HostRenderViewRole> targetViewRoles;
+};
+
+// host 导出命令参数。它只描述上位机请求和外部 I/O 目的地，不参与具体 service 执行。
+// 为什么用 flag：上位机只声明“请求哪类导出”，下层绑定按配置判断是否进入对应导出状态。
+struct HostDataExportConfig {
+    // true 表示本次命令请求导出变换后的体数据；false 表示保持空闲。
+    bool hasVolumeExport = false;
+    // 空路径表示不允许 standalone hotkey 导出变换后的体数据。
+    std::string transformedDataOutputPath;
+    // true 表示本次命令请求导出切片图片；false 表示保持空闲。
+    bool hasSliceExport = false;
+    // 空目录表示不允许 standalone hotkey 导出切片图片。
+    std::string sliceImagesOutputDirectory;
+    // 优先按 id 指定来源切片视图，适合 Qt 已经掌握 widget -> view id 映射的场景。
+    std::string sliceImagesSourceViewId;
+    // sliceImagesSourceViewId 为空时，是否允许按 role 查找来源切片视图。
+    bool useSliceImagesSourceViewRole = false;
+    // role fallback 的来源切片视图。
+    HostRenderViewRole sliceImagesSourceViewRole = HostRenderViewRole::TopDownSlice;
+    // 可选自定义切片偏转角，单位 degree；未设置时只使用当前共享模型矩阵。
+    std::optional<double> sliceImagesRotationAngleDeg;
 };
 
 // 裁切激活请求把“参考窗口”和“预览窗口”拆开描述。
@@ -194,10 +208,11 @@ struct HostGapAnalysisAlgorithmConfig {
     HostGapAnalysisVoidDetectionConfig voidDetection;
 };
 
-// 孔隙分析完成轮询的 VTK Timer 承载窗口配置。
+// host/session 主线程 TimerEvent 承载窗口配置。
 // 为什么显式配置：standalone 可以选择进入 Start() 的 interactor，Qt / 上位机可以选择自己的事件泵窗口；
-// session 不再猜测“第一个窗口”或“默认五窗口中的某个窗口”。
-struct HostGapAnalysisEventPumpConfig {
+// session 不再猜测“第一个窗口”或“默认五窗口中的某个窗口”。当前 GapAnalysis 是第一个 tick 使用者，
+// 后续其他异步 feature 也应复用这一条 host/session 事件泵，而不是各自新建 feature 专属 observer。
+struct HostTimerEventPumpConfig {
     // false 表示不安装 VTK Timer observer；调用方可以稍后接入自己的主线程轮询机制。
     bool enableTimer = false;
     // 优先按 id 选择 timer view，适合 Qt 已经建立 widget 到 view id 的映射。

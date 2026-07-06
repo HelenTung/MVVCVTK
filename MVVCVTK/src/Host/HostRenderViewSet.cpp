@@ -6,60 +6,11 @@
 #include "DataManager.h"
 #include "StdRenderContext.h"
 
-#include <vtkRenderWindowInteractor.h>
-
 #include <algorithm>
 #include <iostream>
 #include <utility>
 
 namespace {
-// VTK 同时提供 KeyCode 和 KeySym；host 统一采样后再匹配配置键位，
-// 是为了让字母键大小写和 Escape 这类控制键走同一条输入边界。
-struct HostKeyInput {
-    char keyCode = 0;
-    std::string keySym;
-};
-
-static HostKeyInput BuildHostKeyInput(vtkRenderWindowInteractor* interactor)
-{
-    HostKeyInput input;
-    if (!interactor) {
-        return input;
-    }
-
-    input.keyCode = interactor->GetKeyCode();
-    input.keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
-    return input;
-}
-
-static char ToUpperAscii(char value)
-{
-    return (value >= 'a' && value <= 'z')
-        ? static_cast<char>(value - 'a' + 'A')
-        : value;
-}
-
-static bool MatchesCharacterKey(const HostKeyInput& input, char key)
-{
-    if (key == 0) {
-        // 0 表示 host 没有分配这个调试键；空键位不参与匹配，避免默认配置意外响应窗口事件。
-        return false;
-    }
-
-    const char upperKey = ToUpperAscii(key);
-    const std::string keySymbol(1, key);
-    const std::string upperKeySymbol(1, upperKey);
-    return input.keyCode == key
-        || input.keyCode == upperKey
-        || input.keySym == keySymbol
-        || input.keySym == upperKeySymbol;
-}
-
-static bool MatchesKeySymbol(const HostKeyInput& input, const std::string& keySym)
-{
-    return !keySym.empty() && input.keySym == keySym;
-}
-
 static std::pair<
     std::shared_ptr<MedicalVizService>,
     std::shared_ptr<StdRenderContext>>
@@ -100,36 +51,6 @@ static std::pair<
     return { service, context };
 }
 
-static std::vector<TFNode> BuildVolumeTransferFunction()
-{
-    // 这组 transfer function 是 standalone 五视图调试布局的默认视觉参数，不属于体数据或孔隙算法事实。
-    return {
-        { 0.00, 0.0, 0.0, 0.0, 0.0 },
-        { 0.50, 0.0, 0.0, 0.5, 0.0 },
-        { 0.85, 0.8, 0.0, 0.5, 0.0 },
-        { 1.00, 1.0, 0.0, 0.5, 0.0 },
-    };
-}
-
-static std::string BuildFallbackRenderViewId(size_t index)
-{
-    return "view-" + std::to_string(index + 1);
-}
-
-static HostRenderViewConfig BuildRenderViewConfig(
-    std::string id,
-    HostRenderViewRole role,
-    WindowConfig window,
-    bool startStandaloneEventLoop = false)
-{
-    HostRenderViewConfig view;
-    view.id = std::move(id);
-    view.role = role;
-    view.window = std::move(window);
-    view.startStandaloneEventLoop = startStandaloneEventLoop;
-    return view;
-}
-
 static bool ContainsRole(
     const std::vector<HostRenderViewRole>& roles,
     HostRenderViewRole role)
@@ -144,60 +65,6 @@ static bool ContainsId(
     return std::find(ids.begin(), ids.end(), id) != ids.end();
 }
 
-static bool HandleHostRenderContextHotkey(
-    const HostHotkeyBindings& hotkeys,
-    const std::shared_ptr<MedicalVizService>& service,
-    vtkRenderWindowInteractor* interactor,
-    StdRenderContext& context)
-{
-    const HostKeyInput keyInput = BuildHostKeyInput(interactor);
-    if (MatchesCharacterKey(keyInput, hotkeys.modelTransformToggleKey)) {
-        // 工具模式切换属于宿主输入映射：RenderContext 提供能力，具体键位不写进 core。
-        context.SetToolMode(context.GetToolMode() == ToolMode::ModelTransform
-            ? ToolMode::Navigation
-            : ToolMode::ModelTransform);
-        return true;
-    }
-
-    if (MatchesCharacterKey(keyInput, hotkeys.saveTransformedDataKey)) {
-        if (service) {
-            service->SaveTransformedDataAsync({});
-        }
-        return true;
-    }
-
-    if (MatchesCharacterKey(keyInput, hotkeys.saveSliceImagesKey)) {
-        if (service) {
-            service->SaveSliceImagesAsync({}, context.GetAngle());
-        }
-        return true;
-    }
-
-    if (MatchesKeySymbol(keyInput, hotkeys.exitKeySym)) {
-        if (context.GetToolMode() == ToolMode::ModelTransform) {
-            context.SetToolMode(ToolMode::Navigation);
-            return true;
-        }
-        return false;
-    }
-
-    return false;
-}
-
-static void AttachHostRenderContextHotkey(
-    const std::shared_ptr<StdRenderContext>& context,
-    const std::shared_ptr<MedicalVizService>& service,
-    const HostHotkeyBindings& hotkeys)
-{
-    if (!context) {
-        return;
-    }
-
-    context->SetHostKeyEventHandler(
-        [service, hotkeys](vtkRenderWindowInteractor* interactor, StdRenderContext& renderContext) {
-            return HandleHostRenderContextHotkey(hotkeys, service, interactor, renderContext);
-        });
-}
 }
 
 void HostRenderViewSet::Build(
@@ -205,16 +72,15 @@ void HostRenderViewSet::Build(
     const std::vector<HostRenderViewConfig>& configs)
 {
     // Build 是窗口拓扑进入 session 的唯一入口；调用方传多少 configs，就创建/接管多少窗口。
-    // 这里不补默认五窗口，默认值由 VtkAppHostSession::Impl 处理，避免集合层同时承担配置决策。
+    // 这里不补默认五窗口；standalone 调试拓扑由 main 显式传入，真实上位机也走同一条配置链路。
     m_views.clear();
     m_views.reserve(configs.size());
-    for (size_t index = 0; index < configs.size(); ++index) {
-        HostRenderViewConfig config = configs[index];
+    for (const auto& requestedConfig : configs) {
+        HostRenderViewConfig config = requestedConfig;
         if (config.id.empty()) {
-            // endpoint 需要稳定 id 供 Qt / 上位机回填 widget 映射；缺省 id 只用于本地调试兜底。
-            config.id = BuildFallbackRenderViewId(index);
+            // 空 id 不再按 index 造假稳定标识；上位机若需要按 id 寻址，必须在 HostRenderViewConfig 中显式提供。
+            std::cerr << "[Host] Render view config has empty id; this view can only be targeted by role." << std::endl;
         }
-
         auto pair = BuildRenderViewRuntimePair(
             config.window,
             config.renderWindow,
@@ -360,30 +226,6 @@ void HostRenderViewSet::ConfigureInitialVisibility() const
     }
 }
 
-void HostRenderViewSet::AttachRenderContextHotkeys(
-    const HostRenderContextInputConfig& inputConfig,
-    const HostHotkeyBindings& hotkeys) const
-{
-    if (!inputConfig.enableStandaloneHotkeys) {
-        return;
-    }
-
-    const auto targetViews = GetViewsByIdsAndRoles(
-        inputConfig.targetViewIds,
-        inputConfig.targetViewRoles);
-    if (targetViews.empty()) {
-        std::cerr << "[Host] Standalone render context hotkeys skipped: no target render view was requested." << std::endl;
-        return;
-    }
-
-    // RenderContext 只暴露按键转交点；当前独立 VTK host 在这里安装自己的非 feature 功能键映射。
-    for (const auto* view : targetViews) {
-        if (view) {
-            AttachHostRenderContextHotkey(view->context, view->service, hotkeys);
-        }
-    }
-}
-
 void HostRenderViewSet::RenderAll() const
 {
     // 初始化末尾先渲染一次，让外部 host 获取 endpoint 后看到的是已创建 renderer/interactor 的窗口。
@@ -419,70 +261,6 @@ std::vector<HostRenderViewEndpoint> HostRenderViewSet::BuildEndpoints() const
         endpoints.push_back(endpoint);
     }
     return endpoints;
-}
-
-std::vector<HostRenderViewConfig> HostRenderViewSet::BuildDefaultConfigs()
-{
-    std::vector<HostRenderViewConfig> views;
-    const auto volTF = BuildVolumeTransferFunction();
-
-    // 默认五视图保留原独立 VTK 调试入口的观察布局；真正的窗口数量仍由 Config::renderViews 决定。
-    WindowConfig compositeVolume;
-    compositeVolume.title = "Window E: Composite Volume";
-    compositeVolume.width = 600; compositeVolume.height = 600;
-    compositeVolume.posX = 660; compositeVolume.posY = 50;
-    compositeVolume.preInitCfg.vizMode = VizMode::CompositeVolume;
-    compositeVolume.preInitCfg.tfNodes = volTF;
-    compositeVolume.preInitCfg.hasTF = true;
-    compositeVolume.preInitCfg.bgColor = { 0.08, 0.08, 0.12 };
-    compositeVolume.preInitCfg.hasBgColor = true;
-
-    WindowConfig topDownSlice;
-    topDownSlice.title = "Window B: Top_down Slice";
-    topDownSlice.width = 400; topDownSlice.height = 400;
-    topDownSlice.posX = 50;  topDownSlice.posY = 660;
-    topDownSlice.preInitCfg.vizMode = VizMode::SliceTop_down;
-    topDownSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
-    topDownSlice.preInitCfg.hasBgColor = true;
-    topDownSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
-    topDownSlice.preInitCfg.hasWindowLevel = true;
-
-    WindowConfig frontBackSlice;
-    frontBackSlice.title = "Window C: Front_back Slice";
-    frontBackSlice.width = 400; frontBackSlice.height = 400;
-    frontBackSlice.posX = 460; frontBackSlice.posY = 660;
-    frontBackSlice.preInitCfg.vizMode = VizMode::SliceFront_back;
-    frontBackSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
-    frontBackSlice.preInitCfg.hasBgColor = true;
-    frontBackSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
-    frontBackSlice.preInitCfg.hasWindowLevel = true;
-
-    WindowConfig leftRightSlice;
-    leftRightSlice.title = "Window D: Left_right Slice";
-    leftRightSlice.width = 400; leftRightSlice.height = 400;
-    leftRightSlice.posX = 870; leftRightSlice.posY = 660;
-    leftRightSlice.preInitCfg.vizMode = VizMode::SliceLeft_right;
-    leftRightSlice.preInitCfg.bgColor = { 0.0, 0.0, 0.0 };
-    leftRightSlice.preInitCfg.hasBgColor = true;
-    leftRightSlice.preInitCfg.windowLevel = { 400.0, 40.0 };
-    leftRightSlice.preInitCfg.hasWindowLevel = true;
-
-    WindowConfig primary3D;
-    primary3D.title = "Window A: Composite IsoSurface";
-    primary3D.width = 600; primary3D.height = 600;
-    primary3D.posX = 50;  primary3D.posY = 50;
-    primary3D.showAxes = true;
-    primary3D.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
-    primary3D.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
-    primary3D.preInitCfg.bgColor = { 0.05, 0.05, 0.05 };
-    primary3D.preInitCfg.hasBgColor = true;
-
-    views.push_back(BuildRenderViewConfig("primary-3d", HostRenderViewRole::Primary3D, std::move(primary3D)));
-    views.push_back(BuildRenderViewConfig("composite-volume", HostRenderViewRole::Composite3D, std::move(compositeVolume)));
-    views.push_back(BuildRenderViewConfig("slice-top-down", HostRenderViewRole::TopDownSlice, std::move(topDownSlice), true));
-    views.push_back(BuildRenderViewConfig("slice-front-back", HostRenderViewRole::FrontBackSlice, std::move(frontBackSlice)));
-    views.push_back(BuildRenderViewConfig("slice-left-right", HostRenderViewRole::LeftRightSlice, std::move(leftRightSlice)));
-    return views;
 }
 
 bool HostRenderViewSet::GetRoleIs3DView(HostRenderViewRole role)

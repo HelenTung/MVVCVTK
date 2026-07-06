@@ -20,9 +20,6 @@ protected:
 	vtkSmartPointer<vtkImageData> m_vtkImage;
     std::array<double, 2> m_scalarRange = { 0.0, 0.0 };      // 缓存当前体数据标量范围，避免重复全量扫描
     std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // 缓存当前体数据 spacing，加载后优先复用
-    std::string m_loadedFilePath;
-
-    void SetLoadedFilePath(const std::string& filePath);
 public:
     BaseDataManager() {
         m_vtkImage = vtkSmartPointer<vtkImageData>::New();
@@ -38,7 +35,6 @@ public:
 
     bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
     bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
-    std::string GetDefaultTransformedDataPath() const override;
 };
 
 class RawVolumeDataManager : public BaseDataManager {

@@ -18,6 +18,7 @@
 #include <iostream>
 #include <utility>
 
+static constexpr double kBoxInitialBoundsScale = 0.60;
 static constexpr double kPlanarInitialRectangleExtentScale = 0.35;
 static constexpr double kPlaneVectorEpsilon = 1e-12;
 
@@ -82,8 +83,13 @@ void OrthogonalCropInteractionBridgeService::SetReferenceRenderer(vtkRenderer* r
 void OrthogonalCropInteractionBridgeService::SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService)
 {
     m_referenceRenderService = std::move(referenceService);
-    if (!m_referenceRenderService) {
-        m_referenceRenderService = GetFirstPreviewRenderService();
+
+    // reference service 是几何参照线框的唯一显示窗口；
+    // preview target 已经存在时也要同步一次，支持上位机重新绑定 reference 窗口。
+    for (auto& target : m_previewRenderTargets) {
+        if (target.overlayStrategy) {
+            target.overlayStrategy->SetGeometryReferenceVisible(target.service == m_referenceRenderService);
+        }
     }
 }
 
@@ -96,9 +102,6 @@ void OrthogonalCropInteractionBridgeService::SetPreviewRenderServices(std::vecto
         AddPreviewRenderService(service);
     }
 
-    if (!m_referenceRenderService) {
-        m_referenceRenderService = GetFirstPreviewRenderService();
-    }
 }
 
 void OrthogonalCropInteractionBridgeService::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
@@ -326,7 +329,10 @@ bool OrthogonalCropInteractionBridgeService::ToggleInteractivePlanarCrop()
     m_widgetStateController.SetEnabled(false);
     m_planarWidgetStateController.SetInteractor(m_primaryInteractor);
     m_planarWidgetStateController.SetReferenceWorldBounds(activeWorldBounds);
-    m_planarWidgetStateController.SetWidgetWorldPlane(m_currentWorldPlaneOrigin, m_currentWorldPlaneNormal);
+    m_planarWidgetStateController.SetWidgetWorldPlane(
+        m_currentWorldPlaneOrigin,
+        m_currentWorldPlaneNormal,
+        m_currentWorldPlaneHalfExtents);
     if (!m_planarWidgetStateController.SetEnabled(true)) {
         std::cerr << "[OrthogonalCrop] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
         return false;
@@ -389,7 +395,7 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteract
 {
     // 默认交互盒在 world 坐标下构造：
     // 1. 先取当前活跃输入提升到 world 后的完整 bounds
-    // 2. 再按经验比例缩小，得到首次拖拽更容易观察的起始盒
+    // 2. 再按中心等比缩小，得到首次拖拽更容易观察的起始盒
     // 3. 这只盒子只服务 widget；真正执行时还会折回 active input model
     std::array<double, 6> worldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     const auto activeWorldBounds = GetActiveWorldBounds();
@@ -399,26 +405,25 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteract
         return worldBounds;
     }
 
+    // 60% 不是算法约束，而是交互层的默认起始尺寸：
+    // 它保留四周约 20% 的缩放/拖拽余量，同时避免初始盒过小导致用户难以选中。
     const std::array<double, 3> center = {
         (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
         (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
         (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
     };
-    const std::array<double, 3> dimensions = {
-        (activeWorldBounds[1] - activeWorldBounds[0]) * 0.30,
-        (activeWorldBounds[3] - activeWorldBounds[2]) * 0.24,
-        (activeWorldBounds[5] - activeWorldBounds[4]) * 0.36
+    const std::array<double, 3> halfExtents = {
+        (activeWorldBounds[1] - activeWorldBounds[0]) * kBoxInitialBoundsScale * 0.5,
+        (activeWorldBounds[3] - activeWorldBounds[2]) * kBoxInitialBoundsScale * 0.5,
+        (activeWorldBounds[5] - activeWorldBounds[4]) * kBoxInitialBoundsScale * 0.5
     };
 
-    // 这组比例不是算法约束，而是交互层的默认起始盒经验值：
-    // 初始盒要足够小，便于用户第一下就看到明显裁切效果，同时保持三个轴都有可拖拽余量。
-
-    worldBounds[0] = center[0] - dimensions[0] * 0.5;
-    worldBounds[1] = center[0] + dimensions[0] * 0.5;
-    worldBounds[2] = center[1] - dimensions[1] * 0.5;
-    worldBounds[3] = center[1] + dimensions[1] * 0.5;
-    worldBounds[4] = center[2] - dimensions[2] * 0.5;
-    worldBounds[5] = center[2] + dimensions[2] * 0.5;
+    worldBounds[0] = center[0] - halfExtents[0];
+    worldBounds[1] = center[0] + halfExtents[0];
+    worldBounds[2] = center[1] - halfExtents[1];
+    worldBounds[3] = center[1] + halfExtents[1];
+    worldBounds[4] = center[2] - halfExtents[2];
+    worldBounds[5] = center[2] + halfExtents[2];
     return worldBounds;
 }
 
@@ -941,16 +946,6 @@ const char* OrthogonalCropInteractionBridgeService::GetDataSourceText(Orthogonal
     }
 }
 
-std::shared_ptr<AbstractInteractiveService> OrthogonalCropInteractionBridgeService::GetFirstPreviewRenderService() const
-{
-    for (const auto& target : m_previewRenderTargets) {
-        if (target.service) {
-            return target.service;
-        }
-    }
-    return nullptr;
-}
-
 void OrthogonalCropInteractionBridgeService::ClearPreviewRenderTargets()
 {
     // 这里只清理 overlay 生命周期；
@@ -1006,6 +1001,9 @@ void OrthogonalCropInteractionBridgeService::AddPreviewRenderService(const std::
     }
 
     auto overlayStrategy = std::make_shared<OrthogonalCropPreviewOverlayStrategy>();
+    // preview 目标可以有多个，但裁切 box/outline 只属于 reference 窗口。
+    // 这样其它 3D 窗口仍能显示裁切后的主模型预览，不会再出现第二个可误读为交互控件的 box。
+    overlayStrategy->SetGeometryReferenceVisible(service == m_referenceRenderService);
     service->AddOverlayStrategy(overlayStrategy);
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }

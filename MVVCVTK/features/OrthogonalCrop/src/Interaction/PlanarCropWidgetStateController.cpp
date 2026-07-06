@@ -9,9 +9,10 @@
 #include <vtkMath.h>
 #include <vtkProperty.h>
 
+#include <algorithm>
 #include <utility>
 
-static constexpr double PlaneWidgetNormalEpsilon = 1e-8;
+static constexpr double kPlaneWidgetNormalEpsilon = 1e-8;
 
 PlanarCropWidgetStateCallback* PlanarCropWidgetStateCallback::New()
 {
@@ -43,6 +44,7 @@ PlanarCropWidgetStateController::PlanarCropWidgetStateController()
     m_representation->DrawOutlineOff();
     m_representation->OutlineTranslationOff();
     m_representation->ScaleEnabledOff();
+    m_representation->ConstrainToWidgetBoundsOff();
     m_representation->TubingOff();
     m_representation->GetPlaneProperty()->SetColor(0.1, 0.85, 0.5);
     m_representation->GetPlaneProperty()->SetOpacity(0.28);
@@ -79,7 +81,8 @@ void PlanarCropWidgetStateController::SetReferenceWorldBounds(const std::array<d
 
 void PlanarCropWidgetStateController::SetWidgetWorldPlane(
     const CropVectorDouble3Array& worldOrigin,
-    const CropVectorDouble3Array& worldNormal)
+    const CropVectorDouble3Array& worldNormal,
+    const std::array<double, 2>& worldHalfExtents)
 {
     auto normalizedNormal = worldNormal;
     if (!NormalizePlaneNormal(normalizedNormal)) {
@@ -88,6 +91,10 @@ void PlanarCropWidgetStateController::SetWidgetWorldPlane(
 
     m_currentWorldOrigin = worldOrigin;
     m_currentWorldNormal = normalizedNormal;
+    m_currentWorldHalfExtents = {
+        std::max(worldHalfExtents[0], kPlaneWidgetNormalEpsilon),
+        std::max(worldHalfExtents[1], kPlaneWidgetNormalEpsilon)
+    };
     ApplyCurrentPlaneToRepresentation();
 }
 
@@ -97,7 +104,7 @@ bool PlanarCropWidgetStateController::GetCurrentWorldPlane(
 {
     worldOrigin = m_currentWorldOrigin;
     worldNormal = m_currentWorldNormal;
-    return vtkMath::Norm(worldNormal.data()) > PlaneWidgetNormalEpsilon;
+    return vtkMath::Norm(worldNormal.data()) > kPlaneWidgetNormalEpsilon;
 }
 
 void PlanarCropWidgetStateController::SetWorldPlaneChangedCallback(WorldPlaneChangedCallback callback)
@@ -144,7 +151,7 @@ bool PlanarCropWidgetStateController::GetBoundsAreValid(const std::array<double,
 bool PlanarCropWidgetStateController::NormalizePlaneNormal(CropVectorDouble3Array& worldNormal)
 {
     const double length = vtkMath::Norm(worldNormal.data());
-    if (length <= PlaneWidgetNormalEpsilon) {
+    if (length <= kPlaneWidgetNormalEpsilon) {
         return false;
     }
 
@@ -186,7 +193,20 @@ void PlanarCropWidgetStateController::ApplyCurrentPlaneToRepresentation()
         return;
     }
 
-    m_representation->PlaceWidget(m_referenceWorldBounds.data());
+    // VTK 的平面控件只能通过 PlaceWidget bounds 推导显示面大小；
+    // halfExtents 已由 bridge/request 状态给出，这里只把它翻译成围绕当前 origin 的最小可视 AABB。
+    const double visualHalfExtent = std::max(
+        m_currentWorldHalfExtents[0],
+        m_currentWorldHalfExtents[1]);
+    std::array<double, 6> visualWorldBounds = {
+        m_currentWorldOrigin[0] - visualHalfExtent,
+        m_currentWorldOrigin[0] + visualHalfExtent,
+        m_currentWorldOrigin[1] - visualHalfExtent,
+        m_currentWorldOrigin[1] + visualHalfExtent,
+        m_currentWorldOrigin[2] - visualHalfExtent,
+        m_currentWorldOrigin[2] + visualHalfExtent
+    };
+    m_representation->PlaceWidget(visualWorldBounds.data());
     m_representation->SetOrigin(m_currentWorldOrigin.data());
     m_representation->SetNormal(m_currentWorldNormal.data());
 }

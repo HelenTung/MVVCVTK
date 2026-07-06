@@ -11,6 +11,18 @@
     <Filter Include="include\Routing">
       <UniqueIdentifier>{0a0648f2-1d60-4d30-bc57-356fb143bf08}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\App">
+      <UniqueIdentifier>{ba9d41ca-704c-4895-a755-302970f8ba95}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Data">
+      <UniqueIdentifier>{e302920a-1ad6-475b-a5f2-37bfc8e7ef1b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Geometry">
+      <UniqueIdentifier>{3a6c3f68-6413-4799-8b9e-9b7ba81626d1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Platform">
+      <UniqueIdentifier>{3fbc3080-20e2-4e98-af91-08f470b9f27a}</UniqueIdentifier>
+    </Filter>
     <Filter Include="src">
       <UniqueIdentifier>{2c0900b4-25f5-4c97-a582-2a42076b887a}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
@@ -20,6 +32,12 @@
     </Filter>
     <Filter Include="src\Routing">
       <UniqueIdentifier>{0bcc8f30-cb17-4b68-a596-308d9b91755a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Data">
+      <UniqueIdentifier>{67ec98bc-10a5-4913-b743-c05ed23d7df0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Platform">
+      <UniqueIdentifier>{41f13a79-54c7-4fc9-a1c8-57b3139af1d8}</UniqueIdentifier>
     </Filter>
     <Filter Include="tests">
       <UniqueIdentifier>{3a723f5f-0e9c-4d9b-8c44-0d93bd02ae39}</UniqueIdentifier>
@@ -38,6 +56,21 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h">
       <Filter>include\Routing</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h">
+      <Filter>include\App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h">
+      <Filter>include\App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Geometry\InteractionComputeService.h">
+      <Filter>include\Geometry</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h">
+      <Filter>include\Platform</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
@@ -48,6 +81,12 @@
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp">
       <Filter>src\Routing</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp">
+      <Filter>src\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp">
+      <Filter>src\Platform</Filter>
     </ClCompile>
     <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp">
       <Filter>tests</Filter>

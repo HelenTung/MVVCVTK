@@ -34,6 +34,7 @@
 #include <thread>
 #include <functional>
 #include <map>
+#include <optional>
 #include <utility>
 
 // ─────────────────────────────────────────────────────────────────────
@@ -61,7 +62,6 @@ public:
     }
     virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
     virtual bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
-    virtual std::string GetDefaultTransformedDataPath() const { return {}; }
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -206,15 +206,16 @@ class IDataExportService {
 public:
     virtual ~IDataExportService() = default;
 
-    // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调
+    // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调；空路径会被拒绝。
     virtual void SaveTransformedDataAsync(
-        const std::string& path = {},
+        const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
-    // 异步保存：按当前切片方向导出原始体数据全部切片图，窗宽窗位沿用当前状态
+    // 异步保存：按调用视图的当前切片方向导出全部切片图，窗宽窗位和模型姿态在任务创建时拍快照。
+    // rotationAngleDeg 由上位机按需显式传入；未传时不额外叠加角度。
     virtual void SaveSliceImagesAsync(
-        const std::string& path = {},
-        const double angle = 0.0,
+        const std::string& path,
+        std::optional<double> rotationAngleDeg = std::nullopt,
         std::function<void(bool success)> onComplete = nullptr) = 0;
 };
 

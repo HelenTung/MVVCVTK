@@ -274,7 +274,7 @@ void MedicalVizService::SaveTransformedDataAsync(
 
 void MedicalVizService::SaveSliceImagesAsync(
     const std::string& path,
-    const double angle,
+    std::optional<double> rotationAngleDeg,
     std::function<void(bool success)> onComplete)
 {
     if (!m_dataExportTaskService) {
@@ -284,7 +284,7 @@ void MedicalVizService::SaveSliceImagesAsync(
     const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto task = m_dataExportTaskService->BuildSaveSliceImagesTask(
         path,
-        angle,
+        rotationAngleDeg,
         currentMode,
         std::move(onComplete));
     if (task) {

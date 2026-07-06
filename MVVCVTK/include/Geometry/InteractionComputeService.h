@@ -5,6 +5,7 @@
 #include <vtkSmartPointer.h>
 #include <algorithm>
 #include <array>
+#include <optional>
 
 struct SliceExportData {
     Orientation orientation = Orientation::Top_down;
@@ -13,7 +14,7 @@ struct SliceExportData {
         0,1,0,0,
         0,0,1,0,
         0,0,0,1
-    }; // 当前切片导出任务应使用的姿态矩阵
+    }; // 当前切片导出任务应使用的模型到世界坐标矩阵快照
 };
 
 class InteractionComputeService {
@@ -108,40 +109,49 @@ public:
         nextModel[2] = std::max(bounds[4], std::min(nextModel[2], bounds[5]));
     }
 
-    static SliceExportData GetSliceExportData(
+    static std::optional<SliceExportData> GetSliceExportData(
         const std::array<double, 16>& modelToWorldMatrixData,
         VizMode mode,
         const std::array<double, 3>& cursorWorld,
-        double angle)
+        std::optional<double> rotationAngleDeg = std::nullopt)
     {
         SliceExportData exportData;
-        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-        auto transform = vtkSmartPointer<vtkTransform>::New();
-        modelToWorldMatrix->DeepCopy(modelToWorldMatrixData.data());
-        transform->PostMultiply();
-        transform->SetMatrix(modelToWorldMatrix);
-
-		double camNormal[3] = { 0.0, 0.0, 0.0 }; // 默认切片法线朝向，后续会被旋转到正确位置
-        //vtkTransform::Concatenate 把一个新变换矩阵 A 拼接到当前变换 M 上
-        transform->Translate(-cursorWorld[0], -cursorWorld[1], -cursorWorld[2]); // 当前切片旋转中心，对应联动光标世界坐标
+        std::array<double, 3> rotationAxis = { 0.0, 0.0, 0.0 };
         if (mode == VizMode::SliceFront_back) {
             exportData.orientation = Orientation::Front_back;
-			camNormal[1] = -1.0;
-            transform->RotateWXYZ(angle, camNormal);
+            rotationAxis[1] = -1.0;
         }
         else if (mode == VizMode::SliceLeft_right) {
             exportData.orientation = Orientation::Left_right;
-            camNormal[0] = 1.0;
-            transform->RotateWXYZ(angle,camNormal);
+            rotationAxis[0] = 1.0;
         }
         else if (mode == VizMode::SliceTop_down) {
             exportData.orientation = Orientation::Top_down;
-            camNormal[2] = -1.0;
-            transform->RotateWXYZ(angle,camNormal);
+            rotationAxis[2] = -1.0;
         }
+        else {
+            return std::nullopt;
+        }
+
+        if (!rotationAngleDeg) {
+            exportData.matrix = modelToWorldMatrixData;
+            return exportData;
+        }
+
+        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        modelToWorldMatrix->DeepCopy(modelToWorldMatrixData.data());
+
+        auto transform = vtkSmartPointer<vtkTransform>::New();
+        transform->PostMultiply();
+        transform->SetMatrix(modelToWorldMatrix);
+
+        // 上位机角度是一次导出命令的可选叠加量；未传时不重复旋转当前共享模型矩阵。
+        // 数学顺序为 M' = T(cursor) * R(axis, angle) * T(-cursor) * M。
+        transform->Translate(-cursorWorld[0], -cursorWorld[1], -cursorWorld[2]);
+        transform->RotateWXYZ(*rotationAngleDeg, rotationAxis.data());
         transform->Translate(cursorWorld[0], cursorWorld[1], cursorWorld[2]);
 
-        const double* matrixData = transform->GetMatrix()->GetData(); // 切片导出最终使用的 4x4 姿态矩阵数据
+        const double* matrixData = transform->GetMatrix()->GetData();
         std::copy(matrixData, matrixData + 16, exportData.matrix.begin());
         return exportData;
     }

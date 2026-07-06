@@ -255,13 +255,13 @@
     <ClInclude Include="include\Host\VtkAppHostSession.h">
       <Filter>include\Host</Filter>
     </ClInclude>
+    <ClInclude Include="include\Host\HostCommandRouter.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
     <ClInclude Include="include\Host\HostCoreServices.h">
       <Filter>include\Host</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\HostFeatureBindings.h">
-      <Filter>include\Host</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Host\HostGapAnalysisBinding.h">
       <Filter>include\Host</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\HostRenderViewSet.h">
@@ -317,13 +317,13 @@
     <ClCompile Include="src\Host\VtkAppHostSession.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
+    <ClCompile Include="src\Host\HostCommandRouter.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
     <ClCompile Include="src\Host\HostCoreServices.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostFeatureBindings.cpp">
-      <Filter>src\Host</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Host\HostGapAnalysisBinding.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostRenderViewSet.cpp">

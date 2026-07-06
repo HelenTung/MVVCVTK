@@ -26,6 +26,7 @@
 #include <map>
 #include <mutex>
 #include <future>
+#include <optional>
 
 class AppDataExportTaskService;
 class AppDataLoadTaskService;
@@ -110,7 +111,8 @@ public:
     // ================================================================
     void SaveTransformedDataAsync(const std::string& path,
         std::function<void(bool success)> onComplete = nullptr) override;
-    void SaveSliceImagesAsync(const std::string& path, const double angle,
+    void SaveSliceImagesAsync(const std::string& path,
+        std::optional<double> rotationAngleDeg = std::nullopt,
         std::function<void(bool success)> onComplete = nullptr) override;
 
     // ================================================================
