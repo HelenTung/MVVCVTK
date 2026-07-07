@@ -66,10 +66,10 @@ public:
     void SetReferenceRenderer(vtkRenderer* renderer);
 
     // 参考渲染服务负责 world / active input model 坐标互转。
-    void SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService);
+    void SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService);
 
     // preview 服务列表决定哪些窗口会收到裁切主预览与设脏刷新；几何参照线框只在 reference 目标显示。
-    void SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices);
+    void SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices);
 
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
@@ -99,7 +99,7 @@ private:
     // 一个显示目标窗口对应一份裁切 overlay 策略。
     struct PreviewRenderTarget {
         // 实际要刷新的窗口服务。
-        std::shared_ptr<AbstractInteractiveService> service;
+        std::shared_ptr<InteractiveService> service;
 
         // 负责显示可选几何参照、submit mask 和可选 clipped polydata 的 overlay 策略。
         std::shared_ptr<CropOverlay> overlayStrategy;
@@ -182,7 +182,7 @@ private:
     void ClearPreviewInput();
 
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
-    void AttachPreview(const std::shared_ptr<AbstractInteractiveService>& service);
+    void AttachPreview(const std::shared_ptr<InteractiveService>& service);
 
     // 把算法层返回的 preview result 分发给指定 preview 目标。
     bool SendPreview(
@@ -261,7 +261,7 @@ private:
     CropPlaneWidget m_planeWidget;
 
     // world / active input model 坐标互转的参考窗口服务。
-    std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;
+    std::shared_ptr<InteractiveService> m_referenceRenderService;
 
     // 相机快照保存/恢复的参考 renderer；算法内部状态，不进入 service/share。
     vtkRenderer* m_referenceRenderer = nullptr;

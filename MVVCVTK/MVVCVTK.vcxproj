@@ -172,7 +172,7 @@
     <ClInclude Include="include\Data\DataManager.h" />
     <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h" />
     <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h" />
-    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapAlgorithmOverlayStrategies.h" />
+    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapOverlayStrategies.h" />
     <ClInclude Include="include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="include\Data\ImageProcessor.h" />
     <ClInclude Include="include\Geometry\InteractionComputeService.h" />

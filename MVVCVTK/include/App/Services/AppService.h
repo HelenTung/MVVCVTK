@@ -3,7 +3,7 @@
 // AppService.h — VizService 主线程编排层
 //
 // 继承关系：
-//   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
+//   InteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
 //   IAppStateSyncTarget         — 状态同步目标（只由同步策略调用）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
@@ -30,7 +30,7 @@ class AppDataExportTaskService;
 class AppDataLoadTaskService;
 
 class VizService
-    : public AbstractInteractiveService
+    : public InteractiveService
     , private IAppStateSyncTarget
     , public std::enable_shared_from_this<VizService>
 {
@@ -111,7 +111,7 @@ public:
         std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // ================================================================
-    // AbstractInteractiveService — 交互接口
+    // InteractiveService — 交互接口
     // 功能：处理切片滚动、光标联动、模型矩阵同步、显隐切换等交互入口。
     // 作用：读取 SharedState / 当前策略 / 交互计算服务，并回写状态。
     // 原生依赖对象：m_sharedState、m_currentStrategy、m_dataManager。
@@ -123,12 +123,12 @@ public:
     void SetInteracting(bool isInteracting) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
-    void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
+    void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool isVisible) override;
     void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override {
-        return m_sharedState ? m_sharedState->GetModelMatrix() : AbstractInteractiveService::GetModelMatrix();
+        return m_sharedState ? m_sharedState->GetModelMatrix() : InteractiveService::GetModelMatrix();
     }
 
     WindowLevelParams GetWindowLevel() const override {

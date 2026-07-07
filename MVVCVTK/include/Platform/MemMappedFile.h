@@ -15,7 +15,7 @@ public:
 
     const void* GetData() const { return m_data; }
     size_t      GetSize() const { return m_size; }
-    bool        IsOpen() const { return m_data != nullptr; }
+    bool        GetOpen() const { return m_data != nullptr; }
 
 private:
     const void* m_data = nullptr;

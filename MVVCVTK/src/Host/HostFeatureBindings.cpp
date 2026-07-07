@@ -53,7 +53,7 @@ static bool GetGapMeshUsed(HostRenderViewRole role)
 }
 
 static VoidDetectionParams BuildVoidParams(
-    const HostGapAnalysisVoidDetectionConfig& config)
+    const HostGapVoidConfig& config)
 {
     VoidDetectionParams params;
     params.grayMin = config.grayMin;
@@ -66,7 +66,7 @@ static VoidDetectionParams BuildVoidParams(
 }
 
 static GapAnalysisSurfaceRequest BuildGapSurfaceReq(
-    const HostGapAnalysisSurfaceConfig& config)
+    const HostGapSurface& config)
 {
     GapAnalysisSurfaceRequest request;
     request.isoMode = config.isoMode == HostGapAnalysisIsoMode::AbsoluteValue
@@ -78,7 +78,7 @@ static GapAnalysisSurfaceRequest BuildGapSurfaceReq(
 }
 
 static bool GetGapConfigValid(
-    const HostGapAnalysisAlgorithmConfig& config)
+    const HostGapConfig& config)
 {
     if (config.surface.isoMode == HostGapAnalysisIsoMode::DataRangeRatio
         && (config.surface.dataRangeRatio < 0.0 || config.surface.dataRangeRatio > 1.0)) {
@@ -198,7 +198,7 @@ void HostFeatureBindings::AttachFeatures(
 }
 
 bool HostFeatureBindings::StartCrop(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     // 裁切至少需要一个 reference view，因为 widget interactor、renderer 和输入模型坐标都来自这一路。
     // preview view 可以为空；那只意味着不显示预览，不影响 reference 链路边界。
@@ -211,7 +211,7 @@ bool HostFeatureBindings::StartCrop(
 }
 
 bool HostFeatureBindings::StartGapView(
-    const HostGapAnalysisActivationRequest& request)
+    const HostGapRequest& request)
 {
     if (!m_renderViews) {
         std::cerr << "[Host] Gap Analysis display activation skipped: host feature bindings are not ready." << std::endl;
@@ -279,7 +279,7 @@ bool HostFeatureBindings::StartGapView(
 }
 
 bool HostFeatureBindings::SwitchGapView(
-    const HostGapAnalysisActivationRequest& request)
+    const HostGapRequest& request)
 {
     if (!m_core.gapAnalysis) {
         std::cerr << "[Host] Gap Analysis display toggle skipped: feature service is not ready." << std::endl;
@@ -314,7 +314,7 @@ bool HostFeatureBindings::GetGapView() const
 }
 
 bool HostFeatureBindings::SwitchCropBox(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     // Switch 前先 Start，是为了让上位机切换窗口布局后，裁切 bridge 始终使用最新 reference/preview 目标。
     if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
@@ -324,7 +324,7 @@ bool HostFeatureBindings::SwitchCropBox(
 }
 
 bool HostFeatureBindings::SwitchCropPlane(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
         return false;
@@ -333,7 +333,7 @@ bool HostFeatureBindings::SwitchCropPlane(
 }
 
 bool HostFeatureBindings::SwitchCropView(
-    const HostOrthogonalCropActivationRequest& request,
+    const HostCropRequest& request,
     HostCropPreviewMode previewMode)
 {
     if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
@@ -345,7 +345,7 @@ bool HostFeatureBindings::SwitchCropView(
 }
 
 bool HostFeatureBindings::SendCrop(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
         return false;
@@ -470,11 +470,11 @@ void HostFeatureBindings::DetachHostTimer()
 }
 
 bool HostFeatureBindings::SetCropViews(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     // 这一步是 host 窗口语义到裁切 bridge 的唯一转换点：
     // 1. reference view 提供 renderer/interactor，并决定 widget 所在坐标语境。
-    // 2. preview views 只提供 AbstractInteractiveService，用于显示预览和刷新 dirty 状态。
+    // 2. preview views 只提供 InteractiveService，用于显示预览和刷新 dirty 状态。
     // 3. 空 preview 不失败，空 reference 必须失败。
     if (!m_renderViews || !m_core.orthogonalCropBridge) {
         std::cerr << "[Host] Orthogonal crop activation skipped: host feature bindings are not ready." << std::endl;

@@ -3,7 +3,7 @@
 #include <vtkCommand.h>
 #include <vtkRenderWindow.h>
 
-TimeUpdateHandler::TimeUpdateHandler(AbstractInteractiveService* service,
+TimeUpdateHandler::TimeUpdateHandler(InteractiveService* service,
     vtkRenderWindow* renderWindow)
     : m_service(service)
     , m_renderWindow(renderWindow)

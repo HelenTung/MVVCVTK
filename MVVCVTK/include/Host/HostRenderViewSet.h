@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-class AbstractInteractiveService;
+class InteractiveService;
 class VizService;
 class StdRenderContext;
 
@@ -57,8 +57,8 @@ public:
     // 孔隙 overlay 默认角色也是显式 fallback；它描述可显示 overlay 的 role，不描述当前窗口数量。
     std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
 
-    // 裁切 bridge 只需要 AbstractInteractiveService 列表；在这里降级接口，避免 feature 看到完整 runtime。
-    std::vector<std::shared_ptr<AbstractInteractiveService>> BuildServices(
+    // 裁切 bridge 只需要 InteractiveService 列表；在这里降级接口，避免 feature 看到完整 runtime。
+    std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
 
     void SetInitialVisibility() const;

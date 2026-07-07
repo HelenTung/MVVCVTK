@@ -33,7 +33,7 @@ public:
         std::function<void(bool isSuccess)> onComplete);
 
     void SetFileLoadCallbackReady(bool isSuccess);
-    void SetReloadLoadCallbackReady(bool isSuccess);
+    void SetReloadReady(bool isSuccess);
     bool GetFileLoadCallback();
     bool GetReloadLoadCallback();
     void SendFileLoadCallback();

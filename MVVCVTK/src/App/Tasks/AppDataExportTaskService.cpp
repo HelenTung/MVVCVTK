@@ -109,7 +109,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
 
 bool AppDataExportTaskService::GetSaveCallback()
 {
-    return m_saveCompletionCallbackState.GetPendingCallbackConsumed();
+    return m_saveCompletionCallbackState.GetCallbackConsumed();
 }
 
 void AppDataExportTaskService::SendSaveCallback()

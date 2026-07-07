@@ -54,8 +54,8 @@ struct HostHotkeyBindings {
 // 初始体数据的物理几何配置，由 main / 上位机数据命令提供，由 VtkAppHostSession 加载链路消费。
 // RAW 体数据没有自描述的物理坐标，所以 spacing/origin 必须作为同一组外部事实传入。
 // 这里不提供默认构造，是为了避免 session 在缺少上位机元数据时悄悄使用假 geometry。
-struct InitialVolumeGeometryConfig {
-    explicit InitialVolumeGeometryConfig(
+struct VolumeGeometryConfig {
+    explicit VolumeGeometryConfig(
         std::array<float, 3> spacingValues,
         std::array<float, 3> originValues)
         : spacing(spacingValues)
@@ -77,7 +77,7 @@ struct InitialVolumeLoadConfig {
     // 外部体数据路径。空路径即使 isInitialLoadEnabled=true 也会被拒绝，避免 DataManager 进入不明确 I/O。
     std::string filePath;
     // RAW 必需的物理几何元数据；optional 表示“宿主尚未下发”，不是使用默认值。
-    std::optional<InitialVolumeGeometryConfig> geometry;
+    std::optional<VolumeGeometryConfig> geometry;
 };
 
 // 每个 config 描述一个宿主视图的创建/接管意图，由上位机 / main 填充，由 HostRenderViewSet 消费。
@@ -132,7 +132,7 @@ struct HostViewConfig {
 
 // RenderContext 热键只服务独立 VTK 调试宿主，例如模型变换和本地导出。
 // 这一层不触发 feature，只让 StdRenderContext 暴露现有工具能力；Qt / 上位机应默认关闭。
-struct HostRenderContextInputConfig {
+struct HostContextInput {
     // false 时不向 RenderContext 安装任何 host 按键回调。
     bool isHotkeyEnabled = false;
     // 按 id 指定哪些窗口接收 RenderContext 调试键；空列表不代表所有窗口。
@@ -165,7 +165,7 @@ struct HostDataExportConfig {
 // 裁切激活请求把“参考窗口”和“预览窗口”拆开描述。
 // 调用方：上位机命令或 standalone hotkey；消费方：HostFeatureBindings::ConfigureOrthogonalCrop。
 // 参考窗口提供坐标互转与 widget interactor，预览窗口只接收 overlay/dirty 刷新。
-struct HostOrthogonalCropActivationRequest {
+struct HostCropRequest {
     // 优先级最高的参考窗口选择方式；适合 Qt 已经拿到具体窗口 id 的场景。
     std::string referenceViewId;
     // referenceViewId 为空时，是否允许按 role 选择第一个参考窗口。
@@ -195,7 +195,7 @@ enum class HostGapAnalysisIsoMode {
 
 // 孔隙表面提取参数属于一次宿主分析命令，而不是 timer observer 的隐式经验值。
 // 调用方必须显式传入，是为了让不同材料、不同批次或上位机配方可以独立控制分析策略。
-struct HostGapAnalysisSurfaceConfig {
+struct HostGapSurface {
     // 选择 isoValue 的来源；默认只作为字段初值，真正激活时仍要求 request.algorithm 存在。
     HostGapAnalysisIsoMode isoMode = HostGapAnalysisIsoMode::DataRangeRatio;
     // 数据范围比例，单位为归一化比例；isoMode=DataRangeRatio 时使用。
@@ -206,7 +206,7 @@ struct HostGapAnalysisSurfaceConfig {
 
 // 孔隙候选筛选参数直接对应 GapAnalysis 插件的 VoidDetectionParams。
 // 放在 host DTO 中是为了避免 main / Qt 上位机包含插件内部头后再散落设置字段。
-struct HostGapAnalysisVoidDetectionConfig {
+struct HostGapVoidConfig {
     // 灰度下限，按当前 vtkImageData 标量单位解释。
     float grayMin = 0.0f;
     // 灰度上限，按当前 vtkImageData 标量单位解释。
@@ -223,9 +223,9 @@ struct HostGapAnalysisVoidDetectionConfig {
 
 // 一次孔隙分析命令的算法参数集合。
 // surface 决定等值面输入阈值，voidDetection 决定孔隙候选筛选；二者随同激活请求一起进入 host binding。
-struct HostGapAnalysisAlgorithmConfig {
-    HostGapAnalysisSurfaceConfig surface;
-    HostGapAnalysisVoidDetectionConfig voidDetection;
+struct HostGapConfig {
+    HostGapSurface surface;
+    HostGapVoidConfig voidDetection;
 };
 
 // host/session 主线程 TimerEvent 承载窗口配置。
@@ -245,7 +245,7 @@ struct HostTimerEventPumpConfig {
 
 // 孔隙分析显示请求决定 overlay 投递目标和算法参数；是否运行算法由显式进入显示模式后再触发。
 // 这样“显示/隐藏 overlay”和“是否退出孔隙分析模式”可以分开处理。
-struct HostGapAnalysisActivationRequest {
+struct HostGapRequest {
     // 显式 overlay 目标 id 列表；空列表不代表所有窗口。
     std::vector<std::string> targetViewIds;
     // 显式 overlay 目标 role 列表；与 targetViewIds 取并集。
@@ -253,7 +253,7 @@ struct HostGapAnalysisActivationRequest {
     // true 才允许退回默认 overlay role，防止未指定目标时全局接管。
     bool isDefaultOverlayUsed = false;
     // 一次分析运行所需参数；没有参数时 host 会拒绝进入分析链路，避免使用隐藏经验默认值。
-    std::optional<HostGapAnalysisAlgorithmConfig> algorithm;
+    std::optional<HostGapConfig> algorithm;
 };
 
 // 独立 VTK host 的 feature 输入绑定，由 main 配置，由 HostFeatureBindings 安装到指定窗口。
@@ -266,7 +266,7 @@ struct HostCommandInputConfig {
     // 哪些 role 监听 standalone feature 按键；与 targetViewIds 取并集。
     std::vector<HostRenderViewRole> targetViewRoles;
     // hotkey 触发裁切时复用的业务目标请求，和监听范围相互独立。
-    HostOrthogonalCropActivationRequest orthogonalCropRequest;
+    HostCropRequest orthogonalCropRequest;
     // hotkey 触发孔隙显示时复用的业务目标请求，和监听范围相互独立。
-    HostGapAnalysisActivationRequest gapAnalysisRequest;
+    HostGapRequest gapAnalysisRequest;
 };

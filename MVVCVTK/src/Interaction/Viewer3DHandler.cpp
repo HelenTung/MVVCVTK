@@ -18,7 +18,7 @@ namespace {
 
 } // namespace
 
-Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
+Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
     : m_service(service)
@@ -37,7 +37,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         && eve.vtkEventId == vtkCommand::InteractionEvent) {
         vtkProp3D* prop = m_service->GetMainProp();
         if (prop && prop->GetMatrix()) {
-            m_service->SyncModelMatrix(prop->GetMatrix());
+            m_service->SetModelMatrix(prop->GetMatrix());
             m_service->MarkDirty();
             return { true, false };
         }

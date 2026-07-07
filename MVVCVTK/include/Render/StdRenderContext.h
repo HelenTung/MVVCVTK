@@ -11,7 +11,7 @@
 
 class StdRenderContext : public AbstractRenderContext {
 private:
-    std::shared_ptr<AbstractInteractiveService> m_interactiveService; // 交互服务入口，Router 最终把事件委托给它更新状态
+    std::shared_ptr<InteractiveService> m_interactiveService; // 交互服务入口，Router 最终把事件委托给它更新状态
     vtkSmartPointer<vtkRenderWindowInteractor>  m_interactor; // VTK 事件源与主循环载体
     vtkSmartPointer<vtkCallbackCommand>         m_eventCallback; // 统一转发 VTK 事件到当前 RenderContext
     vtkSmartPointer<vtkPropPicker>              m_picker; // 2D/3D 交互命中检测共用的拾取器
@@ -43,7 +43,7 @@ private:
         long unsigned int eventId) const; // 把 VTK 原生事件压平成业务层统一使用的 InteractionEvent
 
 public:
-    void InitializeInteractor() override;
+    void SetInteractorReady() override;
     StdRenderContext();
     ~StdRenderContext() override;
     void Start() override;

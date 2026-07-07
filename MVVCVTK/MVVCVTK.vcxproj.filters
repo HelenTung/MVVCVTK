@@ -273,7 +273,7 @@
     <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapAlgorithmOverlayStrategies.h">
+    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapOverlayStrategies.h">
       <Filter>features\GapAnalysis\include\Render\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h">

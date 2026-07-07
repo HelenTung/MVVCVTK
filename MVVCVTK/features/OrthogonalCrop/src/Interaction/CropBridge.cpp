@@ -103,7 +103,7 @@ void CropBridge::SetReferenceRenderer(vtkRenderer* renderer)
     m_referenceRenderer = renderer;
 }
 
-void CropBridge::SetReferenceRenderService(std::shared_ptr<AbstractInteractiveService> referenceService)
+void CropBridge::SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService)
 {
     m_referenceRenderService = std::move(referenceService);
 
@@ -116,7 +116,7 @@ void CropBridge::SetReferenceRenderService(std::shared_ptr<AbstractInteractiveSe
     }
 }
 
-void CropBridge::SetPreviewRenderServices(std::vector<std::shared_ptr<AbstractInteractiveService>> previewRenderServices)
+void CropBridge::SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices)
 {
     ClearPreviewViews();
     m_previewRenderTargets.reserve(previewRenderServices.size());
@@ -1004,7 +1004,7 @@ void CropBridge::ClearPreviewInput()
     m_backend.ClearInputPolyData();
 }
 
-void CropBridge::AttachPreview(const std::shared_ptr<AbstractInteractiveService>& service)
+void CropBridge::AttachPreview(const std::shared_ptr<InteractiveService>& service)
 {
     if (!service) {
         return;

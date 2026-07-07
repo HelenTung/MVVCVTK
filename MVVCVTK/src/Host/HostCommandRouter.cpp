@@ -81,7 +81,7 @@ static bool GetKeySymMatched(const HostKeyInput& input, const std::string& keySy
     return !keySym.empty() && input.keySym == keySym;
 }
 
-static bool IsToolOn(
+static bool GetToolOn(
     const std::shared_ptr<StdRenderContext>& context,
     ToolMode mode)
 {
@@ -92,7 +92,7 @@ static bool ExitTool(
     const std::shared_ptr<StdRenderContext>& context,
     ToolMode mode)
 {
-    if (!IsToolOn(context, mode)) {
+    if (!GetToolOn(context, mode)) {
         return false;
     }
 
@@ -122,7 +122,7 @@ static void SetViewsAdded(
     }
 }
 
-static bool HasView(
+static bool GetViewFound(
     const std::vector<const HostRenderViewRuntime*>& views,
     const HostRenderViewRuntime* view)
 {
@@ -145,8 +145,8 @@ class HostHotkeyHandler final {
 public:
     std::weak_ptr<const HostCommandRouter> commandRouter;
     std::weak_ptr<HostFeatureBindings> featureBindings;
-    HostOrthogonalCropActivationRequest orthogonalCropRequest;
-    HostGapAnalysisActivationRequest gapAnalysisRequest;
+    HostCropRequest orthogonalCropRequest;
+    HostGapRequest gapAnalysisRequest;
     HostHotkeyBindings hotkeys;
     HostDataExportConfig dataExportConfig;
 
@@ -237,7 +237,7 @@ private:
             return false;
         }
         if (action == HotkeyAction::Exit) {
-            return CanExit(target);
+            return GetExitReady(target);
         }
         return true;
     }
@@ -273,7 +273,7 @@ private:
             m_isGapDown = true;
             return SendFeature(router, action);
         case HotkeyAction::Exit:
-            if (!CanExit(target)) {
+            if (!GetExitReady(target)) {
                 return false;
             }
             return ExitMode(target, router);
@@ -323,10 +323,10 @@ private:
         }
     }
 
-    bool IsModelOn(const HostHotkeyTarget& target) const
+    bool GetModelOn(const HostHotkeyTarget& target) const
     {
         const auto context = target.context.lock();
-        return IsToolOn(context, ToolMode::ModelTransform);
+        return GetToolOn(context, ToolMode::ModelTransform);
     }
 
     bool SwitchModel(const HostHotkeyTarget& target) const
@@ -411,7 +411,7 @@ private:
         return router.DispatchCommand(std::move(request));
     }
 
-    bool CanExit(const HostHotkeyTarget& target) const
+    bool GetExitReady(const HostHotkeyTarget& target) const
     {
         bool hasFeature = false;
         if (target.hasFeature) {
@@ -420,7 +420,7 @@ private:
                     || bindings->GetGapView();
             }
         }
-        return hasFeature || (target.hasContext && IsModelOn(target));
+        return hasFeature || (target.hasContext && GetModelOn(target));
     }
 
     bool ExitMode(
@@ -434,7 +434,7 @@ private:
                 return true;
             }
         }
-        if (target.hasContext && IsModelOn(target)) {
+        if (target.hasContext && GetModelOn(target)) {
             ExitTool(
                 target.context.lock(),
                 ToolMode::ModelTransform);
@@ -759,8 +759,8 @@ bool HostCommandRouter::AttachHotkeys(
 
         HostHotkeyTarget target;
         target.context = view->context;
-        target.hasFeature = HasView(featureTargetViews, view);
-        target.hasContext = HasView(renderContextTargetViews, view);
+        target.hasFeature = GetViewFound(featureTargetViews, view);
+        target.hasContext = GetViewFound(renderContextTargetViews, view);
         target.role = view->config.role;
         view->context->SetKeyHandler(
             [handler, target](const InteractionEvent& event) {

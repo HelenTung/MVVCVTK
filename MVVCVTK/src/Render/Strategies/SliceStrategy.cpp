@@ -182,7 +182,7 @@ void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     ren->SetOcclusionRatio(0.0);
 }
 
-void SliceStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
+void SliceStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
     if (!ren) return;
     vtkCamera* cam = ren->GetActiveCamera();
     cam->ParallelProjectionOn(); // 开启平行投影

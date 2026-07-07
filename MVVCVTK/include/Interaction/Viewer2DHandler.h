@@ -1,7 +1,7 @@
 #pragma once
 #include "IInteractionHandler.h"
 
-class AbstractInteractiveService;
+class InteractiveService;
 class vtkPropPicker;
 class vtkRenderer;
 
@@ -18,14 +18,14 @@ class vtkRenderer;
 class Viewer2DHandler : public IInteractionHandler
 {
 public:
-    Viewer2DHandler(AbstractInteractiveService* service,
+    Viewer2DHandler(InteractiveService* service,
         vtkPropPicker* picker,
         vtkRenderer* renderer);
 
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
-    AbstractInteractiveService* m_service = nullptr;
+    InteractiveService* m_service = nullptr;
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
 

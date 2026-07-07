@@ -10,7 +10,7 @@
 //   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
 //   AbstractAppService         — 基础服务
-//   AbstractInteractiveService — 交互服务
+//   InteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
 // =====================================================================
 
@@ -84,7 +84,7 @@ public:
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
     virtual void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
     virtual void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer) {}
+    virtual void SetCamera(vtkSmartPointer<vtkRenderer> renderer) {}
     virtual void SetVisualState(const RenderParams& params,
         UpdateFlags flags = UpdateFlags::All) {
     }
@@ -131,7 +131,7 @@ public:
 
         if (m_currentStrategy) {
             m_currentStrategy->AttachRenderer(m_renderer);
-            m_currentStrategy->ConfigureCamera(m_renderer);
+            m_currentStrategy->SetCamera(m_renderer);
         }
         for (auto& overlay : m_overlayStrategies) {
             if (overlay) overlay->AttachRenderer(m_renderer);
@@ -142,7 +142,7 @@ public:
     // 主线程 Timer 心跳驱动的更新入口
     virtual void SendUpdates() {}
 
-    bool IsDirty()      const { return m_isDirty; }
+    bool GetDirty()      const { return m_isDirty; }
     void MarkDirty() { m_isDirty = true; }
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
     bool GetDirtyConsumed() { return m_isDirty.exchange(false); }
@@ -157,13 +157,13 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractInteractiveService — 交互服务接口
+// InteractiveService — 交互服务接口
 // ─────────────────────────────────────────────────────────────────────
-class AbstractInteractiveService
+class InteractiveService
     : public AbstractAppService
 {
 public:
-    virtual ~AbstractInteractiveService() = default;
+    virtual ~InteractiveService() = default;
 
     virtual void SetSliceScroll(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
@@ -171,7 +171,7 @@ public:
     virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
     virtual void SetInteracting(bool isInteracting) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
-    virtual void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) {}
+    virtual void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) {}
     virtual std::array<double, 16> GetModelMatrix() {
         return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
     }
@@ -239,7 +239,7 @@ public:
     vtkRenderWindow* GetRenderWindow() const { return m_renderWindow.GetPointer(); }
 
     virtual void SetCameraStyle(VizMode mode) = 0;
-    virtual void InitializeInteractor() = 0;  // 显式分离，避免 Start() 混乱
+    virtual void SetInteractorReady() = 0;  // 显式分离，避免 Start() 混乱
     virtual void Start() = 0;
 
     virtual void SetWindowSize(int w, int h) {

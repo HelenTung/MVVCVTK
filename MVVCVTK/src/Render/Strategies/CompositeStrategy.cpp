@@ -44,7 +44,7 @@ void CompositeStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
     if (m_referencePlanes) m_referencePlanes->DetachRenderer(renderer);
 }
 
-void CompositeStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer) {
+void CompositeStrategy::SetCamera(vtkSmartPointer<vtkRenderer> renderer) {
     // 通常 3D 视图使用透视投影
     if (renderer && renderer->GetActiveCamera()) {
         renderer->GetActiveCamera()->ParallelProjectionOff();

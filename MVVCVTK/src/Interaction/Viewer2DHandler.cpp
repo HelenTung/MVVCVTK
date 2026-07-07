@@ -27,7 +27,7 @@ namespace {
 
 } // namespace
 
-Viewer2DHandler::Viewer2DHandler(AbstractInteractiveService* service,
+Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
     : m_service(service)
@@ -268,7 +268,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点
 
 			// 将旋转后的矩阵同步回服务，触发模型更新
-			m_service->SyncModelMatrix(transform->GetMatrix());
+			m_service->SetModelMatrix(transform->GetMatrix());
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
 			return { true, true };

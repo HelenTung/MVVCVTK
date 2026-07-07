@@ -96,7 +96,7 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void VolumeStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
+void VolumeStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
     ren->GetActiveCamera()->ParallelProjectionOff();
 }
 

@@ -2,7 +2,7 @@
 
 #include "Algorithms/VoidDetector.h"
 #include "AppInterfaces.h"
-#include "Render/Strategies/GapAlgorithmOverlayStrategies.h"
+#include "Render/Strategies/GapOverlayStrategies.h"
 
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>

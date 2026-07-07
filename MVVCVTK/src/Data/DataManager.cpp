@@ -46,7 +46,7 @@ std::array<int, 2> GetSliceImageSize(const int dims[3], const Orientation orient
     }
 }
 
-bool HasExplicitValue(const std::array<float, 3>& values)
+bool GetExplicitValue(const std::array<float, 3>& values)
 {
     return std::any_of(values.begin(), values.end(), [](const float value) {
         return value != 0.0f;
@@ -701,10 +701,10 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     // --- 数据提交 (Back Buffer 策略) ---
     auto lpsImage = vtkSmartPointer<vtkImageData>::New();
     lpsImage->ShallowCopy(output);
-    if (HasExplicitValue(spacing)) {
+    if (GetExplicitValue(spacing)) {
         lpsImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
     }
-    if (HasExplicitValue(origin)) {
+    if (GetExplicitValue(origin)) {
         lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
     }
 

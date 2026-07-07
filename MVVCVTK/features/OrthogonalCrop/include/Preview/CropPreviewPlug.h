@@ -22,19 +22,19 @@ class vtkVolumeMapper;
 class CropPreviewPlug {
 public:
     bool SetPreview(
-        const std::shared_ptr<AbstractInteractiveService>& targetService,
+        const std::shared_ptr<InteractiveService>& targetService,
         const std::shared_ptr<CropOverlay>& overlayStrategy,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult,
         CropRemovalMode removalMode);
 
     void ResetPreview(
-        const std::shared_ptr<AbstractInteractiveService>& targetService,
+        const std::shared_ptr<InteractiveService>& targetService,
         const std::shared_ptr<CropOverlay>& overlayStrategy);
 
     vtkSmartPointer<vtkPolyData> GetPreviewData(
-        const std::shared_ptr<AbstractInteractiveService>& targetService) const;
+        const std::shared_ptr<InteractiveService>& targetService) const;
 
     void Clear();
 
@@ -50,22 +50,22 @@ private:
     void ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
 
     vtkSmartPointer<vtkPlaneCollection> BuildBoxClip(
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     vtkSmartPointer<vtkPlaneCollection> BuildPlaneClip(
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     bool SetVolumeView(
-        const std::shared_ptr<AbstractInteractiveService>& targetService,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& targetService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult,
         CropRemovalMode removalMode);
 
     void SetVolumeKeep(
         vtkVolumeMapper* volumeMapper,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     bool SetVolumeRemove(
@@ -78,30 +78,30 @@ private:
         vtkGPUVolumeRayCastMapper* volumeMapper,
         const OrthogonalCropResult& previewResult) const;
 
-    void ResetMeshView(const std::shared_ptr<AbstractInteractiveService>& targetService);
+    void ResetMeshView(const std::shared_ptr<InteractiveService>& targetService);
 
     bool SetMeshView(
-        const std::shared_ptr<AbstractInteractiveService>& targetService,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& targetService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult,
         CropRemovalMode removalMode);
 
     void SetMeshKeep(
         vtkPolyDataMapper* mapper,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     bool SetMeshRemove(
         vtkActor* actor,
         vtkPolyDataMapper* mapper,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
     bool SetMeshPlaneCut(
         vtkActor* actor,
         vtkPolyDataMapper* mapper,
-        const std::shared_ptr<AbstractInteractiveService>& referenceService,
+        const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
-    std::unordered_map<AbstractInteractiveService*, TargetState> m_targetStates;
+    std::unordered_map<InteractiveService*, TargetState> m_targetStates;
 };

@@ -24,7 +24,7 @@ public:
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
+    void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override;
 private:

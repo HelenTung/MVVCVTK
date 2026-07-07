@@ -1,7 +1,7 @@
 #pragma once
 #include "IInteractionHandler.h"
 
-class AbstractInteractiveService;
+class InteractiveService;
 class vtkRenderWindow;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -17,12 +17,12 @@ class vtkRenderWindow;
 class TimeUpdateHandler : public IInteractionHandler
 {
 public:
-    TimeUpdateHandler(AbstractInteractiveService* service,
+    TimeUpdateHandler(InteractiveService* service,
         vtkRenderWindow* renderWindow);
 
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
-    AbstractInteractiveService* m_service = nullptr;
+    InteractiveService* m_service = nullptr;
     vtkRenderWindow* m_renderWindow = nullptr;
 };

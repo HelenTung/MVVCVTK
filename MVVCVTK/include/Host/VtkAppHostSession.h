@@ -24,7 +24,7 @@ public:
         // 窗口拓扑必须由宿主显式传入；空列表表示当前 session 没有窗口，不再由构造函数暗补调试视图。
         std::vector<HostRenderViewConfig> renderViews;
         // RenderContext 热键仅属于独立 VTK 调试宿主；Qt / 上位机默认不接管窗口事件。
-        HostRenderContextInputConfig renderContextInput;
+        HostContextInput renderContextInput;
         // 导出命令参数属于 host I/O 输入，不放进窗口热键范围配置。
         HostDataExportConfig dataExport;
         // standalone hotkey 绑定属于当前 VTK 调试 host；Qt / 上位机可关闭它，只通过显式命令驱动 feature。
@@ -51,15 +51,15 @@ public:
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。
-    bool StartCrop(const HostOrthogonalCropActivationRequest& request);
-    bool SwitchCropBox(const HostOrthogonalCropActivationRequest& request);
-    bool SwitchCropPlane(const HostOrthogonalCropActivationRequest& request);
+    bool StartCrop(const HostCropRequest& request);
+    bool SwitchCropBox(const HostCropRequest& request);
+    bool SwitchCropPlane(const HostCropRequest& request);
     bool SwitchCropView(
-        const HostOrthogonalCropActivationRequest& request,
+        const HostCropRequest& request,
         HostCropPreviewMode previewMode);
-    bool SendCrop(const HostOrthogonalCropActivationRequest& request);
+    bool SendCrop(const HostCropRequest& request);
     bool ExitCrop();
-    bool StartGapView(const HostGapAnalysisActivationRequest& request);
+    bool StartGapView(const HostGapRequest& request);
     bool SwitchGapLayer();
     bool ExitGapView();
     // 运行期视图配置命令入口；session 只记录请求并统一交给 router 分发。
@@ -73,7 +73,7 @@ public:
     // 读取 endpoint 会懒 BuildSession，避免 Qt host 构造 session 后立即取窗口句柄时拿到空缓存。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
     const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& id);
-    const HostRenderViewEndpoint* GetPrimaryRenderViewEndpoint();
+    const HostRenderViewEndpoint* GetPrimaryEndpoint();
 
 private:
     // PIMPL 隐藏 HostCoreServices、HostRenderViewSet 等组装细节，减少上位机包含本头文件时的编译依赖。

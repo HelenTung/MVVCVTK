@@ -15,7 +15,7 @@ void AbstractAppService::SetCurrentStrategy(
 {
     if (m_currentStrategy == newStrategy) {
         if (m_currentStrategy && m_renderer) {
-            m_currentStrategy->ConfigureCamera(m_renderer);
+            m_currentStrategy->SetCamera(m_renderer);
             m_isDirty = true;
         }
         return;
@@ -28,7 +28,7 @@ void AbstractAppService::SetCurrentStrategy(
 
     if (m_currentStrategy && m_renderer) {
         m_currentStrategy->AttachRenderer(m_renderer);
-        m_currentStrategy->ConfigureCamera(m_renderer);
+        m_currentStrategy->SetCamera(m_renderer);
     }
     if (m_renderer)
         m_renderer->ResetCamera();
@@ -298,7 +298,7 @@ void VizService::StopFileLoad()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractInteractiveService — 交互接口
+// InteractiveService — 交互接口
 // ─────────────────────────────────────────────────────────────────────
 void VizService::SetSliceScroll(int delta)
 {
@@ -368,7 +368,7 @@ vtkProp3D* VizService::GetMainProp()
     return m_currentStrategy ? m_currentStrategy->GetMainProp() : nullptr;
 }
 
-void VizService::SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
+void VizService::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
 {
     if (!modelToWorldMatrix) return;
 
@@ -504,7 +504,7 @@ void VizService::SendUpdates()
             m_dataLoadTaskService->SetFileLoadCallbackReady(false);
         }
         else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
-            m_dataLoadTaskService->SetReloadLoadCallbackReady(false);
+            m_dataLoadTaskService->SetReloadReady(false);
         }
         isReturnAfterLoadFailure = true;
         hasLoadEvent = true;
@@ -518,7 +518,7 @@ void VizService::SendUpdates()
             m_dataLoadTaskService->SetFileLoadCallbackReady(true);
         }
         else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
-            m_dataLoadTaskService->SetReloadLoadCallbackReady(true);
+            m_dataLoadTaskService->SetReloadReady(true);
         }
         hasLoadEvent = true;
         // return; // 本帧只做重建，同步留到下帧

@@ -36,17 +36,17 @@ struct HostCommandRouterRequest {
     InitialVolumeLoadConfig initialVolume;
     std::function<void(bool isSuccess)> loadComplete;
 
-    HostOrthogonalCropActivationRequest orthogonalCropRequest;
+    HostCropRequest orthogonalCropRequest;
     HostCropPreviewMode cropPreviewMode = HostCropPreviewMode::KeepInside;
 
-    HostGapAnalysisActivationRequest gapAnalysisRequest;
+    HostGapRequest gapAnalysisRequest;
 
     HostDataExportConfig dataExportConfig;
     std::function<void(bool isSuccess)> dataExportComplete;
 
     HostViewConfig viewConfig;
 
-    HostRenderContextInputConfig renderContextInput;
+    HostContextInput renderContextInput;
     HostCommandInputConfig commandInput;
     HostHotkeyBindings hotkeys;
 };

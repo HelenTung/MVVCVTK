@@ -14,7 +14,7 @@ constexpr double kDefaultObserverPriority = 0.5;
 constexpr double kTimerObserverPriority = 1.0; // Timer 事件优先级更高，确保主线程后处理先于同帧普通交互事件收敛
 constexpr int kTimerIntervalMs = 33;
 
-static void ConfigureRenderWindowForOverlay(vtkRenderWindow* renderWindow)
+static void SetOverlayWindow(vtkRenderWindow* renderWindow)
 {
     if (!renderWindow) {
         return;
@@ -31,7 +31,7 @@ static void ConfigureRenderWindowForOverlay(vtkRenderWindow* renderWindow)
 // ─────────────────────────────────────────────────────────────────────
 StdRenderContext::StdRenderContext()
 {
-    ConfigureRenderWindowForOverlay(m_renderWindow);
+    SetOverlayWindow(m_renderWindow);
 
     m_picker = vtkSmartPointer<vtkPropPicker>::New();
 
@@ -147,9 +147,9 @@ void StdRenderContext::RemoveTimer()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// InitializeInteractor —— 初始化定时器
+// SetInteractorReady —— 初始化定时器
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::InitializeInteractor()
+void StdRenderContext::SetInteractorReady()
 {
     if (m_interactor && !m_interactor->GetInitialized()) {
         m_interactor->Initialize();
@@ -200,7 +200,7 @@ void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> servi
 {
     AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
-        std::dynamic_pointer_cast<AbstractInteractiveService>(service);
+        std::dynamic_pointer_cast<InteractiveService>(service);
 
     // Router handler 持有 service / renderer / picker 等入口，service 换绑后必须重建以避免旧依赖继续收事件。
     BuildInteractionRouter();
@@ -214,7 +214,7 @@ void StdRenderContext::SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWi
         return;
     }
 
-    ConfigureRenderWindowForOverlay(GetRenderWindow());
+    SetOverlayWindow(GetRenderWindow());
     // 1. 外部 window 已经有 interactor 时优先采用它，让 Qt/QVTK 生命周期继续由宿主掌控。
     // 2. 外部 window 没有 interactor 时沿用当前 interactor，保持独立 VTK 路径行为不变。
     if (GetRenderWindow() && GetRenderWindow()->GetInteractor()) {

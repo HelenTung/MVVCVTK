@@ -88,7 +88,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp">
       <Filter>src\Platform</Filter>
     </ClCompile>
-    <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp">
+    <ClCompile Include="PlanarCropTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
   </ItemGroup>

@@ -132,7 +132,7 @@ void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void IsoSurfaceStrategy::ConfigureCamera(vtkSmartPointer<vtkRenderer> ren) {
+void IsoSurfaceStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
     // 3D 模式必须是透视投影
     ren->GetActiveCamera()->ParallelProjectionOff();
 }

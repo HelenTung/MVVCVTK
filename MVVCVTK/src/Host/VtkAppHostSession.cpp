@@ -183,7 +183,7 @@ bool VtkAppHostSession::LoadVolume(
 }
 
 bool VtkAppHostSession::StartCrop(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     BuildSession();
     HostCommandRouterRequest routerRequest;
@@ -193,7 +193,7 @@ bool VtkAppHostSession::StartCrop(
 }
 
 bool VtkAppHostSession::SwitchCropBox(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     BuildSession();
     HostCommandRouterRequest routerRequest;
@@ -203,7 +203,7 @@ bool VtkAppHostSession::SwitchCropBox(
 }
 
 bool VtkAppHostSession::SwitchCropPlane(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     BuildSession();
     HostCommandRouterRequest routerRequest;
@@ -213,7 +213,7 @@ bool VtkAppHostSession::SwitchCropPlane(
 }
 
 bool VtkAppHostSession::SwitchCropView(
-    const HostOrthogonalCropActivationRequest& request,
+    const HostCropRequest& request,
     HostCropPreviewMode previewMode)
 {
     BuildSession();
@@ -225,7 +225,7 @@ bool VtkAppHostSession::SwitchCropView(
 }
 
 bool VtkAppHostSession::SendCrop(
-    const HostOrthogonalCropActivationRequest& request)
+    const HostCropRequest& request)
 {
     BuildSession();
     HostCommandRouterRequest routerRequest;
@@ -243,7 +243,7 @@ bool VtkAppHostSession::ExitCrop()
 }
 
 bool VtkAppHostSession::StartGapView(
-    const HostGapAnalysisActivationRequest& request)
+    const HostGapRequest& request)
 {
     BuildSession();
     HostCommandRouterRequest routerRequest;
@@ -307,7 +307,7 @@ const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
     return nullptr;
 }
 
-const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryRenderViewEndpoint()
+const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryEndpoint()
 {
     BuildSession();
     for (const auto& endpoint : m_impl->renderViewEndpoints) {

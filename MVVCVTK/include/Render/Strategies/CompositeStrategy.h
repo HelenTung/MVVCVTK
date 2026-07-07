@@ -23,7 +23,7 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void ConfigureCamera(vtkSmartPointer<vtkRenderer> renderer);
+    void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //

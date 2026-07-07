@@ -193,11 +193,11 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetGapOverlayViews(
     return selectedViews;
 }
 
-std::vector<std::shared_ptr<AbstractInteractiveService>> HostRenderViewSet::BuildServices(
+std::vector<std::shared_ptr<InteractiveService>> HostRenderViewSet::BuildServices(
     const std::vector<const HostRenderViewRuntime*>& views) const
 {
     // 裁切 bridge 只需要刷新/overlay 这种交互服务接口；这里降到抽象类型，防止 feature 依赖 HostRenderViewRuntime。
-    std::vector<std::shared_ptr<AbstractInteractiveService>> services;
+    std::vector<std::shared_ptr<InteractiveService>> services;
     services.reserve(views.size());
     for (const auto* view : views) {
         if (view && view->service) {
@@ -241,7 +241,7 @@ void HostRenderViewSet::SetInteractorsReady() const
     // VTK interactor 需要在 endpoint 暴露前完成初始化；Qt host 注入的 window 也沿用同一顺序。
     for (const auto& view : m_views) {
         if (view.context) {
-            view.context->InitializeInteractor();
+            view.context->SetInteractorReady();
         }
     }
 }

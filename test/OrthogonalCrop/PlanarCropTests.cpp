@@ -159,7 +159,7 @@ int GetFileCount(
     return count;
 }
 
-bool HasFileBytes(
+bool GetFileBytes(
     const std::filesystem::path& directory,
     const std::string& extension)
 {
@@ -659,7 +659,7 @@ void StartDataExport(int& failureCount)
         "transformed data export should create exactly one RAW file in the requested folder.",
         failureCount);
     SetExpect(
-        HasFileBytes(outputRoot, ".raw"),
+        GetFileBytes(outputRoot, ".raw"),
         "transformed data export should create a non-empty RAW file.",
         failureCount);
 
@@ -680,7 +680,7 @@ void StartDataExport(int& failureCount)
         "top-down slice export should create one PNG per z slice.",
         failureCount);
     SetExpect(
-        HasFileBytes(sliceDir, ".png"),
+        GetFileBytes(sliceDir, ".png"),
         "slice image export should create non-empty PNG files.",
         failureCount);
 
@@ -704,10 +704,10 @@ int main()
     StartDataExport(failureCount);
 
     if (failureCount != 0) {
-        std::cerr << "PlanarCropAlgorithmSubmitTests failed: " << failureCount << '\n';
+        std::cerr << "PlanarCropTests failed: " << failureCount << '\n';
         return 1;
     }
 
-    std::cout << "PlanarCropAlgorithmSubmitTests passed.\n";
+    std::cout << "PlanarCropTests passed.\n";
     return 0;
 }

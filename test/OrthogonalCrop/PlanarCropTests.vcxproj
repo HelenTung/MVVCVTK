@@ -22,7 +22,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{2f65a2d4-4d71-4c77-b3a0-6c5c67719074}</ProjectGuid>
-    <RootNamespace>PlanarCropAlgorithmSubmitTests</RootNamespace>
+    <RootNamespace>PlanarCropTests</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -74,6 +74,7 @@
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
     <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib</VtkLibraries>
+    <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -164,7 +165,7 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
-    <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp" />
+    <ClCompile Include="PlanarCropTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

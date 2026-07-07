@@ -91,9 +91,9 @@ static constexpr const char* kPolyDataRemoveInsidePlaneLightImplReplacement =
     "      }\n";
 
 bool CropPreviewPlug::SetPreview(
-    const std::shared_ptr<AbstractInteractiveService>& targetService,
+    const std::shared_ptr<InteractiveService>& targetService,
     const std::shared_ptr<CropOverlay>& overlayStrategy,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult* volumePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
@@ -146,7 +146,7 @@ bool CropPreviewPlug::SetPreview(
 }
 
 void CropPreviewPlug::ResetPreview(
-    const std::shared_ptr<AbstractInteractiveService>& targetService,
+    const std::shared_ptr<InteractiveService>& targetService,
     const std::shared_ptr<CropOverlay>& overlayStrategy)
 {
     if (overlayStrategy) {
@@ -167,7 +167,7 @@ void CropPreviewPlug::ResetPreview(
 }
 
 vtkSmartPointer<vtkPolyData> CropPreviewPlug::GetPreviewData(
-    const std::shared_ptr<AbstractInteractiveService>& targetService) const
+    const std::shared_ptr<InteractiveService>& targetService) const
 {
     if (!targetService) {
         return nullptr;
@@ -220,7 +220,7 @@ void CropPreviewPlug::ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeM
 }
 
 vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     const auto& cropData = previewResult.GetCropDataModel();
@@ -273,7 +273,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
 }
 
 vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     const auto& cropData = previewResult.GetCropDataModel();
@@ -312,8 +312,8 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
 }
 
 bool CropPreviewPlug::SetVolumeView(
-    const std::shared_ptr<AbstractInteractiveService>& targetService,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& targetService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
     CropRemovalMode removalMode)
 {
@@ -360,7 +360,7 @@ bool CropPreviewPlug::SetVolumeView(
 
 void CropPreviewPlug::SetVolumeKeep(
     vtkVolumeMapper* volumeMapper,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!volumeMapper) {
@@ -467,7 +467,7 @@ bool CropPreviewPlug::SetVolumePlane(
 }
 
 void CropPreviewPlug::ResetMeshView(
-    const std::shared_ptr<AbstractInteractiveService>& targetService)
+    const std::shared_ptr<InteractiveService>& targetService)
 {
     auto key = targetService.get();
     auto state = key ? m_targetStates.find(key) : m_targetStates.end();
@@ -509,8 +509,8 @@ void CropPreviewPlug::ResetMeshView(
 }
 
 bool CropPreviewPlug::SetMeshView(
-    const std::shared_ptr<AbstractInteractiveService>& targetService,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& targetService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
     CropRemovalMode removalMode)
 {
@@ -546,7 +546,7 @@ bool CropPreviewPlug::SetMeshView(
 
 void CropPreviewPlug::SetMeshKeep(
     vtkPolyDataMapper* mapper,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!mapper) {
@@ -565,7 +565,7 @@ void CropPreviewPlug::SetMeshKeep(
 bool CropPreviewPlug::SetMeshRemove(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!actor || !mapper) {
@@ -636,7 +636,7 @@ bool CropPreviewPlug::SetMeshRemove(
 bool CropPreviewPlug::SetMeshPlaneCut(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
-    const std::shared_ptr<AbstractInteractiveService>& referenceService,
+    const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     if (!actor || !mapper) {

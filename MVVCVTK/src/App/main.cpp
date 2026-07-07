@@ -16,7 +16,7 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 #include "Host/VtkAppHostSession.h"
 
 namespace {
-static std::vector<TFNode> BuildStandaloneVolumeTransferFunction()
+static std::vector<TFNode> BuildVolumeTF()
 {
     // 这组 transfer function 是 standalone 五视图调试布局的视觉输入；真实上位机应按自己的显示配方下发 WindowConfig。
     return {
@@ -27,7 +27,7 @@ static std::vector<TFNode> BuildStandaloneVolumeTransferFunction()
     };
 }
 
-static HostRenderViewConfig BuildStandaloneRenderViewConfig(
+static HostRenderViewConfig BuildViewConfig(
     std::string id,
     HostRenderViewRole role,
     WindowConfig window,
@@ -41,10 +41,10 @@ static HostRenderViewConfig BuildStandaloneRenderViewConfig(
     return view;
 }
 
-static std::vector<HostRenderViewConfig> BuildStandaloneRenderViewConfigs()
+static std::vector<HostRenderViewConfig> BuildViewConfigs()
 {
     std::vector<HostRenderViewConfig> views;
-    const auto volTF = BuildStandaloneVolumeTransferFunction();
+    const auto volTF = BuildVolumeTF();
 
     // 这五个窗口只是 standalone 调试拓扑；放在 main 是为了让 session/HostRenderViewSet 不再携带固定窗口数假设。
     WindowConfig compositeVolume;
@@ -97,15 +97,15 @@ static std::vector<HostRenderViewConfig> BuildStandaloneRenderViewConfigs()
     primary3D.preInitCfg.bgColor = { 0.05, 0.05, 0.05 };
     primary3D.preInitCfg.hasBgColor = true;
 
-    views.push_back(BuildStandaloneRenderViewConfig("primary-3d", HostRenderViewRole::Primary3D, std::move(primary3D)));
-    views.push_back(BuildStandaloneRenderViewConfig("composite-volume", HostRenderViewRole::Composite3D, std::move(compositeVolume)));
-    views.push_back(BuildStandaloneRenderViewConfig("slice-top-down", HostRenderViewRole::TopDownSlice, std::move(topDownSlice), true));
-    views.push_back(BuildStandaloneRenderViewConfig("slice-front-back", HostRenderViewRole::FrontBackSlice, std::move(frontBackSlice)));
-    views.push_back(BuildStandaloneRenderViewConfig("slice-left-right", HostRenderViewRole::LeftRightSlice, std::move(leftRightSlice)));
+    views.push_back(BuildViewConfig("primary-3d", HostRenderViewRole::Primary3D, std::move(primary3D)));
+    views.push_back(BuildViewConfig("composite-volume", HostRenderViewRole::Composite3D, std::move(compositeVolume)));
+    views.push_back(BuildViewConfig("slice-top-down", HostRenderViewRole::TopDownSlice, std::move(topDownSlice), true));
+    views.push_back(BuildViewConfig("slice-front-back", HostRenderViewRole::FrontBackSlice, std::move(frontBackSlice)));
+    views.push_back(BuildViewConfig("slice-left-right", HostRenderViewRole::LeftRightSlice, std::move(leftRightSlice)));
     return views;
 }
 
-static HostHotkeyBindings BuildStandaloneHotkeyBindings()
+static HostHotkeyBindings BuildHotkeys()
 {
     // 这些按键只模拟当前 standalone 调试入口的输入协议。
     // 为什么集中在 main：后续真实上位机接入时可以替换为 UI action / IPC 命令，而 feature 不需要重编译。
@@ -123,11 +123,11 @@ static HostHotkeyBindings BuildStandaloneHotkeyBindings()
     return hotkeys;
 }
 
-static HostGapAnalysisAlgorithmConfig BuildStandaloneGapAnalysisAlgorithmConfig()
+static HostGapConfig BuildGapConfig()
 {
     // 这些值只是 standalone 调试样本的孔隙分析配方。
     // 为什么放在 main：真实上位机应按材料、批次或用户参数下发同一结构，Host/timer 只负责执行显式命令。
-    HostGapAnalysisAlgorithmConfig config;
+    HostGapConfig config;
     config.surface.isoMode = HostGapAnalysisIsoMode::DataRangeRatio;
     config.surface.dataRangeRatio = 0.55;
     config.voidDetection.grayMin = -0.2262536138296127f;
@@ -155,9 +155,9 @@ int main()
 
     // main 现在扮演“临时上位机适配层”：显式声明调试键位、监听范围和 feature 作用目标。
     // 这样 session/feature 不需要默认假设输入协议，也不会在创建时自动进入某个分析链路。
-    config.hotkeys = BuildStandaloneHotkeyBindings();
+    config.hotkeys = BuildHotkeys();
     // standalone 五窗口也是上位机模拟输入的一部分；session 不再保存或暗补固定窗口拓扑。
-    config.renderViews = BuildStandaloneRenderViewConfigs();
+    config.renderViews = BuildViewConfigs();
 
     // 这里临时模拟上位机下发“加载体数据”命令，所以文件路径和 RAW 物理元数据都在 main 中显式展开。
     // 后续真实上位机接入时，只替换这些输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
@@ -188,7 +188,7 @@ int main()
     config.commandInput.orthogonalCropRequest.referenceRole = HostRenderViewRole::Primary3D;
     config.commandInput.orthogonalCropRequest.previewViewRoles = standaloneViewRoles;
     config.commandInput.gapAnalysisRequest.targetViewRoles = standaloneViewRoles;
-    config.commandInput.gapAnalysisRequest.algorithm = BuildStandaloneGapAnalysisAlgorithmConfig();
+    config.commandInput.gapAnalysisRequest.algorithm = BuildGapConfig();
 
     // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以 host/session 主线程 tick 也显式挂到这个 role。
     // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。
