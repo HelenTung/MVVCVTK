@@ -37,7 +37,7 @@ public:
 
     // 控制 3D 几何参照线框是否显示；裁切效果、2D mask 和清理链路不受这个开关影响。
     // 为什么由 host/bridge 注入：只有宿主知道哪个窗口是 reference，feature overlay 不能自己猜窗口角色。
-    void SetGeometryReferenceVisible(bool isVisible);
+    void SetRefVisible(bool isVisible);
 
     // 注入一次完整裁切结果，自动更新 outline / mask / 可选 polydata 三类显示内容。
     void SetCropResult(const OrthogonalCropResult& result);

@@ -85,7 +85,7 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetActiveInputModelBou
     case OrthogonalCropDataSource::VolumeData:
         return GetImageModelBounds();
     case OrthogonalCropDataSource::PolyData:
-        return GetPolyDataInputModelBounds();
+        return GetPolyBounds();
     default:
         return bounds;
     }
@@ -97,7 +97,7 @@ OrthogonalCropRequest OrthogonalCropBackendRouterService::GetDefaultRequest() co
     OrthogonalCropRequest request;
     request.SetDataSource(activeDataSource);
     request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetBoxToInputModelMatrixFromBounds(GetActiveInputModelBounds());
+    request.SetBoxBounds(GetActiveInputModelBounds());
     request.SetOperation(OrthogonalCropOperation::Preview);
     return request;
 }
@@ -136,7 +136,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(const Orth
             return OrthogonalCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                GetSystemAvailableRamBytes());
+                GetRamBytes());
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
@@ -164,7 +164,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetBoxResult(const Orth
             return OrthogonalCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                GetSystemAvailableRamBytes());
+                GetRamBytes());
 
         default:
             break;
@@ -197,7 +197,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPlaneResult(const Or
             return PlanarCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                GetSystemAvailableRamBytes());
+                GetRamBytes());
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
@@ -225,7 +225,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetPlaneResult(const Or
             return PlanarCropAlgorithm::GetResult(
                 m_inputImage,
                 request,
-                GetSystemAvailableRamBytes());
+                GetRamBytes());
 
         default:
             break;
@@ -259,7 +259,7 @@ std::array<double, 6> OrthogonalCropBackendRouterService::GetImageModelBounds() 
     };
 }
 
-std::array<double, 6> OrthogonalCropBackendRouterService::GetPolyDataInputModelBounds() const
+std::array<double, 6> OrthogonalCropBackendRouterService::GetPolyBounds() const
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!m_inputPolyData) {
@@ -301,7 +301,7 @@ OrthogonalCropResult OrthogonalCropBackendRouterService::GetRouterFailureResult(
     return result;
 }
 
-std::size_t OrthogonalCropBackendRouterService::GetSystemAvailableRamBytes() const
+std::size_t OrthogonalCropBackendRouterService::GetRamBytes() const
 {
 #ifdef _WIN32
     MEMORYSTATUSEX memoryStatus = {};

@@ -225,9 +225,9 @@ OrthogonalCropRequest BuildImagePlaneRequest(
     request.SetOperation(operation);
     request.SetDataSource(dataSource);
     request.SetRemovalMode(removalMode);
-    request.SetPlaneNormalInInputModel(plane.normal);
-    request.SetPlaneCenterInInputModel(plane.center);
-    request.SetPlaneHalfExtentsInInputModel({ 2.0, 2.0 });
+    request.SetPlaneNormal(plane.normal);
+    request.SetPlaneCenter(plane.center);
+    request.SetPlaneHalf({ 2.0, 2.0 });
     return request;
 }
 

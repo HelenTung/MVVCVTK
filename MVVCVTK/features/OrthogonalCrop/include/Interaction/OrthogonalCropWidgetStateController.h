@@ -67,7 +67,7 @@ public:
         CropMatrixDouble16Array& initialWorldToCurrentWorldMatrix) const;
 
     // 设置 world bounds 变化回调。
-    void SetWorldBoundsChangedCallback(WorldBoundsChangedCallback callback);
+    void SetBoundsCallback(WorldBoundsChangedCallback callback);
 
     // 开关 widget；打开时会自动补 observer 并 place 到当前 world bounds。
     // 返回 false 表示当前还不满足安全启用条件，例如缺少 interactor 或有效 world bounds。
@@ -83,7 +83,7 @@ private:
     static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
 
     // 把 VTK 事件类型统一映射为模块内部交互阶段。
-    static CropInteractionPhase GetInteractionPhaseFromEvent(unsigned long eventId);
+    static CropInteractionPhase GetEventPhase(unsigned long eventId);
 
     // 懒加载绑定 widget observer，避免重复 AddObserver。
     void AttachObservers();

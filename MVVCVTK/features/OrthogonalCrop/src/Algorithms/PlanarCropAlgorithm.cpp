@@ -39,7 +39,7 @@ static CropBoundsDouble6Array GetImageModelBounds(vtkImageData* image)
     };
 }
 
-static CropBoundsDouble6Array GetPolyDataInputModelBounds(vtkPolyData* polyData)
+static CropBoundsDouble6Array GetPolyBounds(vtkPolyData* polyData)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!polyData) {
@@ -55,14 +55,14 @@ static CropBoundsDouble6Array GetPolyDataInputModelBounds(vtkPolyData* polyData)
     };
 }
 
-static bool GetBoundsHavePositiveVolume(const CropBoundsDouble6Array& bounds)
+static bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-static std::size_t GetImageBytesPerVoxel(vtkImageData* image)
+static std::size_t GetVoxelBytes(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -85,12 +85,12 @@ static std::size_t GetImageVoxelCount(vtkImageData* image)
         * static_cast<std::size_t>(std::max(dims[2], 0));
 }
 
-static std::size_t GetEffectiveAvailableRamBytes(
+static std::size_t GetRamBytes(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
-    return request.GetAvailableRamBytes() != 0
-        ? request.GetAvailableRamBytes()
+    return request.GetRamBytes() != 0
+        ? request.GetRamBytes()
         : fallbackAvailableRamBytes;
 }
 
@@ -104,7 +104,7 @@ static OrthogonalCropStatistics GetPlanarDiagnostics(const OrthogonalCropRequest
     return statistics;
 }
 
-static OrthogonalCropResult GetPlanarResultFromRequest(const OrthogonalCropRequest& request)
+static OrthogonalCropResult GetBaseResult(const OrthogonalCropRequest& request)
 {
     OrthogonalCropResult result;
     result.SetResolvedDataSource(request.GetDataSource());
@@ -121,8 +121,8 @@ static bool GetNormalizedPlane(
     OrthogonalCropFailureReason& failureReason,
     std::string& message)
 {
-    planeNormalInInputModel = request.GetPlaneNormalInInputModel();
-    planeCenterInInputModel = request.GetPlaneCenterInInputModel();
+    planeNormalInInputModel = request.GetPlaneNormal();
+    planeCenterInInputModel = request.GetPlaneCenter();
 
     const double length = vtkMath::Norm(planeNormalInInputModel.data());
     if (length <= PlaneEpsilon) {
@@ -140,28 +140,28 @@ static bool GetNormalizedPlane(
     return true;
 }
 
-static CropDataModel GetPlaneCropDataModel(
+static CropDataModel GetPlaneData(
     const CropVectorDouble3Array& planeNormalInInputModel,
     const CropVectorDouble3Array& planeCenterInInputModel,
     const std::array<double, 2>& planeHalfExtentsInInputModel,
     const CropBoundsDouble6Array& inputModelBounds)
 {
     CropDataModel cropData;
-    cropData.SetPlaneNormalInInputModel(planeNormalInInputModel);
-    cropData.SetPlaneCenterInInputModel(planeCenterInInputModel);
-    cropData.SetPlaneHalfExtentsInInputModel(planeHalfExtentsInInputModel);
-    cropData.SetInputModelBounds(inputModelBounds);
+    cropData.SetPlaneNormal(planeNormalInInputModel);
+    cropData.SetPlaneCenter(planeCenterInInputModel);
+    cropData.SetPlaneHalf(planeHalfExtentsInInputModel);
+    cropData.SetInputBounds(inputModelBounds);
     return cropData;
 }
 
-static bool GetPlaneCropDataModel(
+static bool GetPlaneData(
     const OrthogonalCropRequest& request,
     const CropBoundsDouble6Array& inputModelBounds,
     CropDataModel& cropData,
     OrthogonalCropFailureReason& failureReason,
     std::string& message)
 {
-    if (!GetBoundsHavePositiveVolume(inputModelBounds)) {
+    if (!GetBoundsValid(inputModelBounds)) {
         failureReason = OrthogonalCropFailureReason::InvalidBounds;
         message = "Input model bounds are invalid.";
         return false;
@@ -178,10 +178,10 @@ static bool GetPlaneCropDataModel(
         return false;
     }
 
-    cropData = GetPlaneCropDataModel(
+    cropData = GetPlaneData(
         planeNormalInInputModel,
         planeCenterInInputModel,
-        request.GetPlaneHalfExtentsInInputModel(),
+        request.GetPlaneHalf(),
         inputModelBounds);
     return true;
 }
@@ -225,7 +225,7 @@ static OrthogonalCropResult GetFailureResult(
     const std::string& message,
     const CropDataModel* cropData = nullptr)
 {
-    auto result = GetPlanarResultFromRequest(request);
+    auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
     statistics.SetFailureReason(failureReason);
     statistics.SetValidationMessage(message);
@@ -239,7 +239,7 @@ static OrthogonalCropResult GetFailureResult(
     return result;
 }
 
-static PlanarVoxelSideStep GetPlanarVoxelSideStep(
+static PlanarVoxelSideStep GetSideStep(
     vtkImageData* image,
     const CropDataModel& cropData,
     const int dims[3])
@@ -249,12 +249,12 @@ static PlanarVoxelSideStep GetPlanarVoxelSideStep(
         return sideStep;
     }
 
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
+    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
     image->TransformPhysicalPointToContinuousIndex(
         planeCenterInInputModel.data(),
         sideStep.planeCenterContinuousIndex.data());
 
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
+    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
     sideStep.iStep = planeNormalInInputModel[0] * indexToPhysicalMatrix->GetElement(0, 0)
         + planeNormalInInputModel[1] * indexToPhysicalMatrix->GetElement(1, 0)
@@ -274,7 +274,7 @@ static PlanarVoxelSideStep GetPlanarVoxelSideStep(
     return sideStep;
 }
 
-static double GetPlanarVoxelSideAtIndex(
+static double GetSideAtIndex(
     const PlanarVoxelSideStep& sideStep,
     int i,
     int j,
@@ -285,7 +285,7 @@ static double GetPlanarVoxelSideAtIndex(
         + (static_cast<double>(k) - sideStep.planeCenterContinuousIndex[2]) * sideStep.kStep;
 }
 
-static bool GetPlanarVoxelIsOnNormalSide(
+static bool GetVoxelOnSide(
     vtkImageData* image,
     const PlanarVoxelSideStep& sideStep,
     const CropDataModel& cropData,
@@ -300,8 +300,8 @@ static bool GetPlanarVoxelIsOnNormalSide(
     image->TransformIndexToPhysicalPoint(index, inputModelPoint);
     return GetPointIsOnNormalSide(
         inputModelPoint,
-        cropData.GetPlaneCenterInInputModel(),
-        cropData.GetPlaneNormalInInputModel());
+        cropData.GetPlaneCenter(),
+        cropData.GetPlaneNormal());
 }
 
 static PlanarRowSide GetPlanarRowSide(
@@ -320,7 +320,7 @@ static PlanarRowSide GetPlanarRowSide(
     return PlanarRowSide::Mixed;
 }
 
-static std::vector<unsigned char> GetPlanarBackgroundVoxelBytes(
+static std::vector<unsigned char> GetBgBytes(
     vtkDataArray* sourceScalars,
     vtkDataArray* submitScalars,
     unsigned char* submitBytes,
@@ -343,7 +343,7 @@ static std::vector<unsigned char> GetPlanarBackgroundVoxelBytes(
     return backgroundBytes;
 }
 
-static void SetPlanarSubmitRowToBackground(
+static void SetRowBg(
     unsigned char* submitRowPtr,
     const std::vector<unsigned char>& backgroundVoxelBytes,
     int voxelCount)
@@ -361,7 +361,7 @@ static void SetPlanarSubmitRowToBackground(
     }
 }
 
-static void SetPlanarSubmitRowBytes(
+static void SetRowBytes(
     unsigned char* maskRowPtr,
     unsigned char* submitRowPtr,
     const unsigned char* sourceRowPtr,
@@ -378,13 +378,13 @@ static void SetPlanarSubmitRowBytes(
     }
 
     std::memset(maskRowPtr, 0, maskBytes);
-    SetPlanarSubmitRowToBackground(
+    SetRowBg(
         submitRowPtr,
         backgroundVoxelBytes,
         voxelCount);
 }
 
-static void SetPlanarSubmitVoxelBytes(
+static void SetVoxelBytes(
     unsigned char* maskPtr,
     unsigned char* submitPtr,
     const unsigned char* sourcePtr,
@@ -404,7 +404,7 @@ static void SetPlanarSubmitVoxelBytes(
     }
 }
 
-static PlanarSubmitImages GetPlanarSubmitImages(
+static PlanarSubmitImages GetSubmitImages(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
@@ -471,14 +471,14 @@ static PlanarSubmitImages GetPlanarSubmitImages(
         return images;
     }
 
-    const auto backgroundVoxelBytes = GetPlanarBackgroundVoxelBytes(
+    const auto backgroundVoxelBytes = GetBgBytes(
         sourceScalars,
         submitScalars,
         submitBytes,
         componentCount,
         bytesPerVoxel);
     const bool keepInside = removalMode == CropRemovalMode::KeepInside;
-    const auto sideStep = GetPlanarVoxelSideStep(image, cropData, dims);
+    const auto sideStep = GetSideStep(image, cropData, dims);
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
     const std::size_t rowBytes = static_cast<std::size_t>(dims[0]) * bytesPerVoxel;
@@ -494,7 +494,7 @@ static PlanarSubmitImages GetPlanarSubmitImages(
             auto* submitRowPtr = submitBytes + rowByteOffset;
             const auto* sourceRowPtr = sourceBytes + rowByteOffset;
 
-            const double rowStartSide = GetPlanarVoxelSideAtIndex(sideStep, extent[0], j, k);
+            const double rowStartSide = GetSideAtIndex(sideStep, extent[0], j, k);
             const double rowEndSide = rowStartSide
                 + static_cast<double>(dims[0] - 1) * sideStep.iStep;
             const auto rowSide = GetPlanarRowSide(
@@ -504,7 +504,7 @@ static PlanarSubmitImages GetPlanarSubmitImages(
             if (rowSide != PlanarRowSide::Mixed) {
                 const bool rowIsInside = rowSide == PlanarRowSide::NormalSide;
                 const bool keepRow = keepInside ? rowIsInside : !rowIsInside;
-                SetPlanarSubmitRowBytes(
+                SetRowBytes(
                     maskRowPtr,
                     submitRowPtr,
                     sourceRowPtr,
@@ -518,7 +518,7 @@ static PlanarSubmitImages GetPlanarSubmitImages(
             double planeSide = rowStartSide;
             for (int iOffset = 0; iOffset < dims[0]; ++iOffset) {
                 const int index[3] = { extent[0] + iOffset, j, k };
-                const bool isInside = GetPlanarVoxelIsOnNormalSide(
+                const bool isInside = GetVoxelOnSide(
                     image,
                     sideStep,
                     cropData,
@@ -526,7 +526,7 @@ static PlanarSubmitImages GetPlanarSubmitImages(
                     planeSide);
                 const bool keepVoxel = keepInside ? isInside : !isInside;
                 const auto voxelByteOffset = static_cast<std::size_t>(iOffset) * bytesPerVoxel;
-                SetPlanarSubmitVoxelBytes(
+                SetVoxelBytes(
                     maskRowPtr + iOffset,
                     submitRowPtr + voxelByteOffset,
                     sourceRowPtr + voxelByteOffset,
@@ -544,11 +544,11 @@ static PlanarSubmitImages GetPlanarSubmitImages(
     return images;
 }
 
-static OrthogonalCropResult GetPlanarPreviewResult(
+static OrthogonalCropResult GetPreviewResult(
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request)
 {
-    auto result = GetPlanarResultFromRequest(request);
+    auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
 
@@ -561,7 +561,7 @@ static OrthogonalCropResult GetPlanarPreviewResult(
     return result;
 }
 
-static OrthogonalCropResult GetPlanarSubmitResult(
+static OrthogonalCropResult GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
@@ -578,7 +578,7 @@ static OrthogonalCropResult GetPlanarSubmitResult(
 
     const std::size_t voxelCount = GetImageVoxelCount(image);
     const std::size_t estimatedRamUsageBytes =
-        voxelCount * (GetImageBytesPerVoxel(image) + sizeof(unsigned char));
+        voxelCount * (GetVoxelBytes(image) + sizeof(unsigned char));
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
         return GetFailureResult(
             request,
@@ -587,7 +587,7 @@ static OrthogonalCropResult GetPlanarSubmitResult(
             &cropData);
     }
 
-    auto submitImages = GetPlanarSubmitImages(
+    auto submitImages = GetSubmitImages(
         image,
         cropData,
         request.GetRemovalMode());
@@ -607,7 +607,7 @@ static OrthogonalCropResult GetPlanarSubmitResult(
             &cropData);
     }
 
-    auto result = GetPlanarResultFromRequest(request);
+    auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
     statistics.SetFailureReason(OrthogonalCropFailureReason::None);
 
@@ -636,7 +636,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
-    if (!GetPlaneCropDataModel(
+    if (!GetPlaneData(
             request,
             inputModelBounds,
             cropData,
@@ -646,18 +646,18 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
-        return GetPlanarPreviewResult(
+        return GetPreviewResult(
             cropData,
             request);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Submit) {
-        return GetPlanarSubmitResult(
+        return GetSubmitResult(
             image,
             cropData,
             request,
             inputModelBounds,
-            GetEffectiveAvailableRamBytes(request, fallbackAvailableRamBytes));
+            GetRamBytes(request, fallbackAvailableRamBytes));
     }
 
     return GetFailureResult(
@@ -678,11 +678,11 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
             "Input polydata is null.");
     }
 
-    const auto inputModelBounds = GetPolyDataInputModelBounds(polyData);
+    const auto inputModelBounds = GetPolyBounds(polyData);
     CropDataModel cropData;
     OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
     std::string message;
-    if (!GetPlaneCropDataModel(
+    if (!GetPlaneData(
             request,
             inputModelBounds,
             cropData,
@@ -699,7 +699,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
             &cropData);
     }
 
-    auto result = GetPlanarPreviewResult(
+    auto result = GetPreviewResult(
         cropData,
         request);
     if (!result.GetSucceeded()) {

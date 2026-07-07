@@ -111,7 +111,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
     SetStyle();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetGeometryReferenceVisible(bool isVisible)
+void OrthogonalCropPreviewOverlayStrategy::SetRefVisible(bool isVisible)
 {
     if (m_allowGeometryReferenceVisible == isVisible) {
         return;

@@ -109,7 +109,7 @@ private:
     bool GetInputReady();
 
     // 生成默认交互裁切盒，作为第一次进入模式时的初始 world bounds。
-    std::array<double, 6> GetDefaultInteractiveWorldBounds() const;
+    std::array<double, 6> GetStartBounds() const;
 
     // 响应 widget 交互回调，记录 world bounds/phase，并在 Released 时触发 preview。
     void OnBoxWidget(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
@@ -122,7 +122,7 @@ private:
 
     // 把 active input model bounds 提升为 widget 所需的 world bounds。
     // image model 底层由 VTK physical-point API 表达。
-    std::array<double, 6> GetActiveInputModelBoundsAsWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
+    std::array<double, 6> GetWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
 
     // 返回活跃数据在 world 下的 bounds，供 widget 摆放与默认盒生成。
     std::array<double, 6> GetActiveWorldBounds() const;
@@ -130,7 +130,7 @@ private:
     // 返回 world -> active input model 矩阵。
     // 它把 widget 在显示层 world 中形成的 boxToWorld 继续折回 boxToInputModel，
     // 让后端在输入数据坐标里执行裁切，而不是依赖窗口或 widget 状态。
-    std::array<double, 16> GetWorldToActiveInputModelMatrix() const;
+    std::array<double, 16> GetWorldToInput() const;
 
     // 基于当前 widget 有向盒组装一次 box request。
     // 这里把标准盒 [-1,1]^3 依次映射到初始 world、当前 world、active input model，

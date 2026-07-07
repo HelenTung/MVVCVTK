@@ -166,7 +166,7 @@ void OrthogonalCropPreviewPlugService::ResetPreview(
     ResetMeshView(targetService);
 }
 
-vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewPolyDataInput(
+vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewData(
     const std::shared_ptr<AbstractInteractiveService>& targetService) const
 {
     if (!targetService) {
@@ -185,7 +185,7 @@ void OrthogonalCropPreviewPlugService::Clear()
 
 void OrthogonalCropPreviewPlugService::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
 {
-    ClearVolumeRemoveInsideState(volume, volumeMapper);
+    ClearVolumeCut(volume, volumeMapper);
     if (!volume || !volumeMapper) {
         return;
     }
@@ -197,7 +197,7 @@ void OrthogonalCropPreviewPlugService::ResetVolumeView(vtkVolume* volume, vtkVol
     volume->Modified();
 }
 
-void OrthogonalCropPreviewPlugService::ClearVolumeRemoveInsideState(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
+void OrthogonalCropPreviewPlugService::ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
 {
     if (!volume || !volumeMapper) {
         return;
@@ -219,7 +219,7 @@ void OrthogonalCropPreviewPlugService::ClearVolumeRemoveInsideState(vtkVolume* v
     volume->Modified();
 }
 
-vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildWorldClippingPlanes(
+vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildBoxClip(
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
@@ -231,7 +231,7 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildWorld
     }
 
     auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
+    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
 
     // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> active input model，
     // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
@@ -272,7 +272,7 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildWorld
     return clippingPlanes;
 }
 
-vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlaneWorldClippingPlanes(
+vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlaneClip(
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
@@ -286,8 +286,8 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlane
     auto activeInputModelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
     activeInputModelToWorldTransform->SetMatrix(activeInputModelToWorldMatrix);
 
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
+    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
+    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
     activeInputModelToWorldTransform->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
@@ -333,7 +333,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumeView(
 
     // 每次接管前先清空上一种 volume 后端表达，避免 KeepInside clipping
     // 与 RemoveInside shader discard / mask 在反复切换时互相残留。
-    ClearVolumeRemoveInsideState(volume, volumeMapper);
+    ClearVolumeCut(volume, volumeMapper);
     volumeMapper->RemoveAllClippingPlanes();
     volumeMapper->CroppingOff();
 
@@ -371,8 +371,8 @@ void OrthogonalCropPreviewPlugService::SetVolumeKeep(
     // 结果只提供标准盒到当前输入模型，world 矩阵来自参考窗口当前主数据。
     volumeMapper->SetClippingPlanes(
         previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
-            ? BuildPlaneWorldClippingPlanes(referenceService, previewResult)
-            : BuildWorldClippingPlanes(referenceService, previewResult));
+            ? BuildPlaneClip(referenceService, previewResult)
+            : BuildBoxClip(referenceService, previewResult));
 }
 
 bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
@@ -386,7 +386,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
 
     const auto& cropData = previewResult.GetCropDataModel();
     auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
+    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
 
     // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
     // 采样点先由 VTK shader 内置矩阵还原到 active input model，再送入标准盒空间。
@@ -447,8 +447,8 @@ bool OrthogonalCropPreviewPlugService::SetVolumePlane(
         kVolumeRemoveInsideBaseImplReplacement,
         false);
 
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
+    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
+    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
 
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
     auto inactiveBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -557,8 +557,8 @@ void OrthogonalCropPreviewPlugService::SetMeshKeep(
     // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
     mapper->SetClippingPlanes(
         previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
-            ? BuildPlaneWorldClippingPlanes(referenceService, previewResult)
-            : BuildWorldClippingPlanes(referenceService, previewResult));
+            ? BuildPlaneClip(referenceService, previewResult)
+            : BuildBoxClip(referenceService, previewResult));
     mapper->Modified();
 }
 
@@ -574,7 +574,7 @@ bool OrthogonalCropPreviewPlugService::SetMeshRemove(
 
     const auto& cropData = previewResult.GetCropDataModel();
     auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxToInputModelMatrix().data());
+    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
 
     auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     activeInputModelToWorldMatrix->Identity();
@@ -653,8 +653,8 @@ bool OrthogonalCropPreviewPlugService::SetMeshPlaneCut(
     auto activeInputModelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
     activeInputModelToWorldTransform->SetMatrix(activeInputModelToWorldMatrix);
 
-    const auto planeCenterInInputModel = cropData.GetPlaneCenterInInputModel();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormalInInputModel();
+    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
+    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
     activeInputModelToWorldTransform->TransformPoint(planeCenterInInputModel.data(), worldOrigin);

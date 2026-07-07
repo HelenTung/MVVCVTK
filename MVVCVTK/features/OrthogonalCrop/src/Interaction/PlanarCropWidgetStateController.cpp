@@ -105,7 +105,7 @@ bool PlanarCropWidgetStateController::GetCurrentWorldPlane(
     return vtkMath::Norm(worldNormal.data()) > kPlaneWidgetNormalEpsilon;
 }
 
-void PlanarCropWidgetStateController::SetWorldPlaneChangedCallback(WorldPlaneChangedCallback callback)
+void PlanarCropWidgetStateController::SetPlaneCallback(WorldPlaneChangedCallback callback)
 {
     m_worldPlaneChangedCallback = std::move(callback);
 }
@@ -159,7 +159,7 @@ bool PlanarCropWidgetStateController::SetUnitNormal(CropVectorDouble3Array& worl
     return true;
 }
 
-CropInteractionPhase PlanarCropWidgetStateController::GetInteractionPhaseFromEvent(unsigned long eventId)
+CropInteractionPhase PlanarCropWidgetStateController::GetEventPhase(unsigned long eventId)
 {
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
@@ -232,6 +232,6 @@ void PlanarCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
         m_worldPlaneChangedCallback(
             m_currentWorldOrigin,
             m_currentWorldNormal,
-            GetInteractionPhaseFromEvent(eventId));
+            GetEventPhase(eventId));
     }
 }

@@ -64,7 +64,7 @@ public:
         CropVectorDouble3Array& worldNormal) const;
 
     // 设置 world 平面变化回调。
-    void SetWorldPlaneChangedCallback(WorldPlaneChangedCallback callback);
+    void SetPlaneCallback(WorldPlaneChangedCallback callback);
 
     // 开关 widget；打开时会自动补 observer 并 place 到当前 reference bounds。
     bool SetEnabled(bool enabled);
@@ -82,7 +82,7 @@ private:
     static bool SetUnitNormal(CropVectorDouble3Array& worldNormal);
 
     // 把 VTK 事件类型统一映射为模块内部交互阶段。
-    static CropInteractionPhase GetInteractionPhaseFromEvent(unsigned long eventId);
+    static CropInteractionPhase GetEventPhase(unsigned long eventId);
 
     // 懒加载绑定 widget observer，避免重复 AddObserver。
     void AttachObservers();

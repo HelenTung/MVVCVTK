@@ -184,7 +184,7 @@ bool OrthogonalCropWidgetStateController::GetCurrentWorldBox(
     return true;
 }
 
-void OrthogonalCropWidgetStateController::SetWorldBoundsChangedCallback(WorldBoundsChangedCallback callback)
+void OrthogonalCropWidgetStateController::SetBoundsCallback(WorldBoundsChangedCallback callback)
 {
     m_worldBoundsChangedCallback = std::move(callback);
 }
@@ -238,7 +238,7 @@ bool OrthogonalCropWidgetStateController::GetBoundsAreValid(const std::array<dou
         && bounds[4] < bounds[5];
 }
 
-CropInteractionPhase OrthogonalCropWidgetStateController::GetInteractionPhaseFromEvent(unsigned long eventId)
+CropInteractionPhase OrthogonalCropWidgetStateController::GetEventPhase(unsigned long eventId)
 {
     // Start/Interaction 一律视为拖拽中，只有 End 才切换到 Released。
     switch (eventId) {
@@ -268,7 +268,7 @@ void OrthogonalCropWidgetStateController::AttachObservers()
 
 void OrthogonalCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
 {
-    const auto interactionPhase = GetInteractionPhaseFromEvent(eventId);
+    const auto interactionPhase = GetEventPhase(eventId);
     SetVisualState(interactionPhase);
 
     const auto rawBounds = m_representation->GetBounds();

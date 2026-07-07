@@ -39,12 +39,12 @@ OrthogonalCropInteractionBridgeService::OrthogonalCropInteractionBridgeService()
 {
     // widget controller 只上报 bounds 和交互阶段；
     // bridge 接管预览请求构建与结果分发，保持 VTK widget 层不触碰后端业务。
-    m_widgetStateController.SetWorldBoundsChangedCallback(
+    m_widgetStateController.SetBoundsCallback(
         [this](const std::array<double, 6>& worldBounds, CropInteractionPhase phase) {
             OnBoxWidget(worldBounds, phase);
         });
 
-    m_planarWidgetStateController.SetWorldPlaneChangedCallback(
+    m_planarWidgetStateController.SetPlaneCallback(
         [this](
             const CropVectorDouble3Array& worldOrigin,
             const CropVectorDouble3Array& worldNormal,
@@ -111,7 +111,7 @@ void OrthogonalCropInteractionBridgeService::SetReferenceRenderService(std::shar
     // preview target 已经存在时也要同步一次，支持上位机重新绑定 reference 窗口。
     for (auto& target : m_previewRenderTargets) {
         if (target.overlayStrategy) {
-            target.overlayStrategy->SetGeometryReferenceVisible(target.service == m_referenceRenderService);
+            target.overlayStrategy->SetRefVisible(target.service == m_referenceRenderService);
         }
     }
 }
@@ -284,7 +284,7 @@ bool OrthogonalCropInteractionBridgeService::SwitchCropBox()
     }
 
     if (!m_worldBoundsInitialized) {
-        m_currentWorldBounds = GetDefaultInteractiveWorldBounds();
+        m_currentWorldBounds = GetStartBounds();
         m_worldBoundsInitialized = true;
     }
 
@@ -412,7 +412,7 @@ bool OrthogonalCropInteractionBridgeService::GetInputReady()
     return false;
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetDefaultInteractiveWorldBounds() const
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetStartBounds() const
 {
     // 默认交互盒在 world 坐标下构造：
     // 1. 先取当前活跃输入提升到 world 后的完整 bounds
@@ -484,7 +484,7 @@ void OrthogonalCropInteractionBridgeService::OnPlaneWidget(
     }
 }
 
-std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveInputModelBoundsAsWorldBounds(
+std::array<double, 6> OrthogonalCropInteractionBridgeService::GetWorldBounds(
     const std::array<double, 6>& activeInputModelBounds) const
 {
     // 这是纯 bounds 级别的 8 角点变换 helper：
@@ -533,10 +533,10 @@ std::array<double, 6> OrthogonalCropInteractionBridgeService::GetActiveWorldBoun
         return activeInputModelBounds;
     }
 
-    return GetActiveInputModelBoundsAsWorldBounds(activeInputModelBounds);
+    return GetWorldBounds(activeInputModelBounds);
 }
 
-std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToActiveInputModelMatrix() const
+std::array<double, 16> OrthogonalCropInteractionBridgeService::GetWorldToInput() const
 {
     if (!m_referenceRenderService) {
         return GetIdentityMatrixArray();
@@ -613,7 +613,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
     // worldToActiveInputModelMatrix 把显示层 world 几何折回当前数据输入坐标；
     // image 使用 physical-point 语义，polydata 使用主网格 input model 语义。
     auto worldToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToActiveInputModelMatrix->DeepCopy(GetWorldToActiveInputModelMatrix().data());
+    worldToActiveInputModelMatrix->DeepCopy(GetWorldToInput().data());
 
     // boxToInputModelMatrix 是 request 下发给算法层的唯一几何真源；
     // 算法只消费标准盒到 active input model 的矩阵，不再依赖 widget 或 world 状态。
@@ -621,7 +621,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildBoxRequest(
     vtkMatrix4x4::Multiply4x4(worldToActiveInputModelMatrix, boxToWorldMatrix, boxToInputModelMatrix);
     vtkMatrix4x4::DeepCopy(boxToInputModelMatrixData.data(), boxToInputModelMatrix);
 
-    boxRequest.SetBoxToInputModelMatrix(boxToInputModelMatrixData);
+    boxRequest.SetBoxMatrix(boxToInputModelMatrixData);
     return boxRequest;
 }
 
@@ -642,7 +642,7 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPlaneRequest(
     }
 
     auto worldToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToActiveInputModelMatrix->DeepCopy(GetWorldToActiveInputModelMatrix().data());
+    worldToActiveInputModelMatrix->DeepCopy(GetWorldToInput().data());
 
     const double worldOriginPoint[4] = { worldOrigin[0], worldOrigin[1], worldOrigin[2], 1.0 };
     double inputModelOriginPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
@@ -741,11 +741,11 @@ OrthogonalCropRequest OrthogonalCropInteractionBridgeService::BuildPlaneRequest(
         std::max(vtkMath::Norm(inputModelAxisHeightVector), kPlaneVectorEpsilon)
     };
 
-    planeRequest.SetPlaneCenterInInputModel(planeCenterInInputModel);
-    planeRequest.SetPlaneNormalInInputModel(planeNormalInInputModel);
+    planeRequest.SetPlaneCenter(planeCenterInInputModel);
+    planeRequest.SetPlaneNormal(planeNormalInInputModel);
     // halfExtents 继续随 request 下发，是为了保留 widget 尺度这一层级信息；
     // 裁切数学只使用 center + normal 的无限半空间，避免再次出现误导性的平面方框。
-    planeRequest.SetPlaneHalfExtentsInInputModel(planeHalfExtentsInInputModel);
+    planeRequest.SetPlaneHalf(planeHalfExtentsInInputModel);
     return planeRequest;
 }
 
@@ -821,7 +821,7 @@ void OrthogonalCropInteractionBridgeService::SetPreviewReq(
             ? &volumeResult
             : nullptr;
 
-        if (auto polyData = m_previewPlug.GetPreviewPolyDataInput(target.service)) {
+        if (auto polyData = m_previewPlug.GetPreviewData(target.service)) {
             m_backend.SetInputPolyData(polyData);
 
             polyResult = m_backend.GetResult(polyDataRequest);
@@ -1024,7 +1024,7 @@ void OrthogonalCropInteractionBridgeService::AttachPreviewView(const std::shared
     auto overlayStrategy = std::make_shared<OrthogonalCropPreviewOverlayStrategy>();
     // preview 目标可以有多个，但裁切 box/outline 只属于 reference 窗口。
     // 这样其它 3D 窗口仍能显示裁切后的主模型预览，不会再出现第二个可误读为交互控件的 box。
-    overlayStrategy->SetGeometryReferenceVisible(service == m_referenceRenderService);
+    overlayStrategy->SetRefVisible(service == m_referenceRenderService);
     service->AddOverlayStrategy(overlayStrategy);
     m_previewRenderTargets.push_back({ service, overlayStrategy });
 }

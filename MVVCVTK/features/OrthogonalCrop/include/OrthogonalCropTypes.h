@@ -45,7 +45,7 @@ inline std::array<double, 6> GetCanonicalCropBoxBounds()
 }
 
 // 从 active input model 轴对齐 bounds 构造标准盒到 active input model 的矩阵。
-inline std::array<double, 16> GetBoxToInputModelMatrixFromBounds(const std::array<double, 6>& inputModelBounds)
+inline std::array<double, 16> GetBoxMatrixFromBounds(const std::array<double, 6>& inputModelBounds)
 {
     const double centerX = (inputModelBounds[0] + inputModelBounds[1]) * 0.5;
     const double centerY = (inputModelBounds[2] + inputModelBounds[3]) * 0.5;
@@ -144,56 +144,56 @@ enum class OrthogonalCropFailureReason {
 class CropDataModel {
 public:
     // 返回标准盒到 active input model 的变换矩阵；后端用它还原真实有向盒姿态。
-    const CropMatrixDouble16Array& GetBoxToInputModelMatrix() const { return m_boxToInputModelMatrix; }
+    const CropMatrixDouble16Array& GetBoxMatrix() const { return m_boxToInputModelMatrix; }
 
     // 写入标准盒到 active input model 的变换矩阵；调用方必须把当前裁切姿态折叠到这一份矩阵里。
-    void SetBoxToInputModelMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
+    void SetBoxMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
 
     // 用 active input model 轴对齐 bounds 重建 boxToInputModelMatrix；
     // 适合默认全量盒或 image physical 结果回填，因为这些场景本身没有额外旋转姿态。
-    void SetBoxToInputModelMatrixFromBounds(const CropBoundsDouble6Array& inputModelBounds)
+    void SetBoxBounds(const CropBoundsDouble6Array& inputModelBounds)
     {
-        m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
+        m_boxToInputModelMatrix = GetBoxMatrixFromBounds(inputModelBounds);
     }
 
     // 返回 active input model 坐标系下的平面法线；法线正侧定义为 Inside。
-    const CropVectorDouble3Array& GetPlaneNormalInInputModel() const { return m_planeNormalInInputModel; }
+    const CropVectorDouble3Array& GetPlaneNormal() const { return m_planeNormalInInputModel; }
 
     // 写入 active input model 坐标系下的平面法线。
-    void SetPlaneNormalInInputModel(const CropVectorDouble3Array& planeNormalInInputModel)
+    void SetPlaneNormal(const CropVectorDouble3Array& planeNormalInInputModel)
     {
         m_planeNormalInInputModel = planeNormalInInputModel;
     }
 
     // 返回 active input model 坐标系下的平面中心。
-    const CropVectorDouble3Array& GetPlaneCenterInInputModel() const { return m_planeCenterInInputModel; }
+    const CropVectorDouble3Array& GetPlaneCenter() const { return m_planeCenterInInputModel; }
 
     // 写入 active input model 坐标系下的平面中心。
-    void SetPlaneCenterInInputModel(const CropVectorDouble3Array& planeCenterInInputModel)
+    void SetPlaneCenter(const CropVectorDouble3Array& planeCenterInInputModel)
     {
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
     // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // 该值用于保存交互尺度，不参与无限半空间裁切方程。
-    const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
+    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalfExtentsInInputModel; }
 
     // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
-    void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    void SetPlaneHalf(const std::array<double, 2>& planeHalfExtentsInInputModel)
     {
         m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
     }
 
     // 返回由 boxToInputModelMatrix 派生出的 active input model AABB。
     // image model 底层由 VTK physical-point API 表达；polyData input model 对应网格自身坐标。
-    const CropBoundsDouble6Array& GetInputModelBounds() const { return m_inputModelBounds; }
+    const CropBoundsDouble6Array& GetInputBounds() const { return m_inputModelBounds; }
 
     // 写入派生 active input model AABB；算法用它做 bounds 校验、index 吸附和粗范围裁剪。
     // 它不保留旋转姿态，因此不能替代 boxToInputModelMatrix。
-    void SetInputModelBounds(const CropBoundsDouble6Array& inputModelBounds) { m_inputModelBounds = inputModelBounds; }
+    void SetInputBounds(const CropBoundsDouble6Array& inputModelBounds) { m_inputModelBounds = inputModelBounds; }
 
     // 根据当前 input model bounds 反推 active input model 中的中心点。
-    std::array<double, 3> GetInputModelCenter() const
+    std::array<double, 3> GetInputCenter() const
     {
         return {
             (m_inputModelBounds[0] + m_inputModelBounds[1]) * 0.5,
@@ -203,7 +203,7 @@ public:
     }
 
     // 根据当前 input model bounds 反推 active input model 中的三轴尺寸。
-    std::array<double, 3> GetInputModelDimensions() const
+    std::array<double, 3> GetInputSize() const
     {
         return {
             m_inputModelBounds[1] - m_inputModelBounds[0],
@@ -213,9 +213,9 @@ public:
     }
 
     // 返回当前裁切盒在 active input model 中的体积估计值；用于日志或粗粒度规模判断。
-    double GetInputModelVolume() const
+    double GetInputVolume() const
     {
-        const auto inputModelDimensions = GetInputModelDimensions();
+        const auto inputModelDimensions = GetInputSize();
         return inputModelDimensions[0] * inputModelDimensions[1] * inputModelDimensions[2];
     }
 
@@ -237,41 +237,41 @@ private:
 class OrthogonalCropRequest {
 public:
     // 返回标准裁切盒到 active input model 的矩阵。
-    const CropMatrixDouble16Array& GetBoxToInputModelMatrix() const { return m_boxToInputModelMatrix; }
+    const CropMatrixDouble16Array& GetBoxMatrix() const { return m_boxToInputModelMatrix; }
 
     // 写入标准裁切盒到 active input model 的矩阵。
-    void SetBoxToInputModelMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
+    void SetBoxMatrix(const CropMatrixDouble16Array& boxToInputModelMatrix) { m_boxToInputModelMatrix = boxToInputModelMatrix; }
 
     // 用 active input model 轴对齐 bounds 构造标准盒请求。
-    void SetBoxToInputModelMatrixFromBounds(const CropBoundsDouble6Array& inputModelBounds)
+    void SetBoxBounds(const CropBoundsDouble6Array& inputModelBounds)
     {
-        m_boxToInputModelMatrix = GetBoxToInputModelMatrixFromBounds(inputModelBounds);
+        m_boxToInputModelMatrix = GetBoxMatrixFromBounds(inputModelBounds);
     }
 
     // 返回 active input model 坐标系下的平面法线；geometryType 为 Plane 时有效。
-    const CropVectorDouble3Array& GetPlaneNormalInInputModel() const { return m_planeNormalInInputModel; }
+    const CropVectorDouble3Array& GetPlaneNormal() const { return m_planeNormalInInputModel; }
 
     // 写入 active input model 坐标系下的平面法线。
-    void SetPlaneNormalInInputModel(const CropVectorDouble3Array& planeNormalInInputModel)
+    void SetPlaneNormal(const CropVectorDouble3Array& planeNormalInInputModel)
     {
         m_planeNormalInInputModel = planeNormalInInputModel;
     }
 
     // 返回 active input model 坐标系下的平面中心；geometryType 为 Plane 时有效。
-    const CropVectorDouble3Array& GetPlaneCenterInInputModel() const { return m_planeCenterInInputModel; }
+    const CropVectorDouble3Array& GetPlaneCenter() const { return m_planeCenterInInputModel; }
 
     // 写入 active input model 坐标系下的平面中心。
-    void SetPlaneCenterInInputModel(const CropVectorDouble3Array& planeCenterInInputModel)
+    void SetPlaneCenter(const CropVectorDouble3Array& planeCenterInInputModel)
     {
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
     // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // Plane preview 不再把该值转换为 overlay 方框。
-    const std::array<double, 2>& GetPlaneHalfExtentsInInputModel() const { return m_planeHalfExtentsInInputModel; }
+    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalfExtentsInInputModel; }
 
     // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
-    void SetPlaneHalfExtentsInInputModel(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    void SetPlaneHalf(const std::array<double, 2>& planeHalfExtentsInInputModel)
     {
         m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
     }
@@ -301,10 +301,10 @@ public:
     void SetRemovalMode(CropRemovalMode removalMode) { m_removalMode = removalMode; }
 
     // 返回调用方显式指定的可用内存上限。
-    std::size_t GetAvailableRamBytes() const { return m_availableRamBytes; }
+    std::size_t GetRamBytes() const { return m_availableRamBytes; }
 
     // 写入调用方显式指定的可用内存上限；为 0 表示交给后端兜底判断。
-    void SetAvailableRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
+    void SetRamBytes(std::size_t availableRamBytes) { m_availableRamBytes = availableRamBytes; }
 
 private:
     // Box 几何真源：标准裁切盒 [-1,1]^3 到 active input model 的矩阵。

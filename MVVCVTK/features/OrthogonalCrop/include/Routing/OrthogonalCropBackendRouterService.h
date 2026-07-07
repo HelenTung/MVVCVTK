@@ -62,7 +62,7 @@ private:
     std::array<double, 6> GetImageModelBounds() const;
 
     // 读取 polyData input model bounds。
-    std::array<double, 6> GetPolyDataInputModelBounds() const;
+    std::array<double, 6> GetPolyBounds() const;
 
     // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
     OrthogonalCropResult GetRouterFailureResult(
@@ -71,7 +71,7 @@ private:
         const std::string& message) const;
 
     // 查询系统当前可用物理内存，供 image submit 估算使用。
-    std::size_t GetSystemAvailableRamBytes() const;
+    std::size_t GetRamBytes() const;
 
     // image 输入由 router 统一持有，实际处理直接分发到算法层。
     vtkSmartPointer<vtkImageData> m_inputImage;

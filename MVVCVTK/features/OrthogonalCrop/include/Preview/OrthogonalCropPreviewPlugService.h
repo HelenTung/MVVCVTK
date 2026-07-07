@@ -33,7 +33,7 @@ public:
         const std::shared_ptr<AbstractInteractiveService>& targetService,
         const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy);
 
-    vtkSmartPointer<vtkPolyData> GetPreviewPolyDataInput(
+    vtkSmartPointer<vtkPolyData> GetPreviewData(
         const std::shared_ptr<AbstractInteractiveService>& targetService) const;
 
     void Clear();
@@ -47,13 +47,13 @@ private:
 
     void ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
 
-    void ClearVolumeRemoveInsideState(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
+    void ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
 
-    vtkSmartPointer<vtkPlaneCollection> BuildWorldClippingPlanes(
+    vtkSmartPointer<vtkPlaneCollection> BuildBoxClip(
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
-    vtkSmartPointer<vtkPlaneCollection> BuildPlaneWorldClippingPlanes(
+    vtkSmartPointer<vtkPlaneCollection> BuildPlaneClip(
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
