@@ -18,7 +18,7 @@ public:
         m_callback = std::move(callback);
     }
 
-    void SetCallbackReady(bool success, std::function<void(bool)> callback = nullptr) {
+    void SetCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr) {
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             if (callback) {
@@ -32,23 +32,23 @@ public:
             else {
                 return;
             }
-            m_pendingResult = success;
+            m_isNextOk = isSuccess;
             m_hasPendingCallback = true;
         }
     }
 
     void ExecutePendingCallback() {
         std::function<void(bool)> callback;
-        bool success = false;
+        bool isSuccess = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             callback = std::move(m_pendingCallback);
             m_pendingCallback = nullptr;
-            success = m_pendingResult;
+            isSuccess = m_isNextOk;
         }
         // 回调可能反向触发 UI、状态或服务调用；锁外执行能避免业务回调重入时和本状态对象死锁。
         if (callback) {
-            callback(success);
+            callback(isSuccess);
         }
     }
 
@@ -60,6 +60,6 @@ private:
     mutable std::mutex m_mutex;
     std::function<void(bool)> m_callback; // 当前业务方注册但尚未触发的回调
     std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调
-    bool m_pendingResult{ false }; // 与 m_pendingCallback 对应的任务结果快照
+    bool m_isNextOk{ false }; // 与 m_pendingCallback 对应的任务结果快照
     std::atomic<bool> m_hasPendingCallback{ false }; // 后台线程只投递结果，主线程在心跳阶段统一执行回调
 };

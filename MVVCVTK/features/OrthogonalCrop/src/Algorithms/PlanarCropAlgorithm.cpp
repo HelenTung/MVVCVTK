@@ -118,7 +118,7 @@ static bool GetNormalizedPlane(
     const OrthogonalCropRequest& request,
     CropVectorDouble3Array& planeNormalInInputModel,
     CropVectorDouble3Array& planeCenterInInputModel,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message)
 {
     planeNormalInInputModel = request.GetPlaneNormal();
@@ -126,7 +126,7 @@ static bool GetNormalizedPlane(
 
     const double length = vtkMath::Norm(planeNormalInInputModel.data());
     if (length <= PlaneEpsilon) {
-        failureReason = OrthogonalCropFailureReason::InvalidBounds;
+        failureReason = CropFailure::BadBounds;
         message = "Plane normal length is too small.";
         return false;
     }
@@ -135,7 +135,7 @@ static bool GetNormalizedPlane(
         component /= length;
     }
 
-    failureReason = OrthogonalCropFailureReason::None;
+    failureReason = CropFailure::None;
     message.clear();
     return true;
 }
@@ -143,13 +143,13 @@ static bool GetNormalizedPlane(
 static CropDataModel GetPlaneData(
     const CropVectorDouble3Array& planeNormalInInputModel,
     const CropVectorDouble3Array& planeCenterInInputModel,
-    const std::array<double, 2>& planeHalfExtentsInInputModel,
+    const std::array<double, 2>& planeHalf,
     const CropBoundsDouble6Array& inputModelBounds)
 {
     CropDataModel cropData;
     cropData.SetPlaneNormal(planeNormalInInputModel);
     cropData.SetPlaneCenter(planeCenterInInputModel);
-    cropData.SetPlaneHalf(planeHalfExtentsInInputModel);
+    cropData.SetPlaneHalf(planeHalf);
     cropData.SetInputBounds(inputModelBounds);
     return cropData;
 }
@@ -158,11 +158,11 @@ static bool GetPlaneData(
     const OrthogonalCropRequest& request,
     const CropBoundsDouble6Array& inputModelBounds,
     CropDataModel& cropData,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message)
 {
     if (!GetBoundsValid(inputModelBounds)) {
-        failureReason = OrthogonalCropFailureReason::InvalidBounds;
+        failureReason = CropFailure::BadBounds;
         message = "Input model bounds are invalid.";
         return false;
     }
@@ -201,7 +201,7 @@ static bool GetPointIsOnNormalSide(
 }
 
 struct PlanarVoxelSideStep {
-    std::array<double, 3> planeCenterContinuousIndex = { 0.0, 0.0, 0.0 };
+    std::array<double, 3> planeIndex = { 0.0, 0.0, 0.0 };
     double iStep = 0.0;
     double jStep = 0.0;
     double kStep = 0.0;
@@ -221,7 +221,7 @@ enum class PlanarRowSide {
 
 static OrthogonalCropResult GetFailureResult(
     const OrthogonalCropRequest& request,
-    OrthogonalCropFailureReason failureReason,
+    CropFailure failureReason,
     const std::string& message,
     const CropDataModel* cropData = nullptr)
 {
@@ -252,7 +252,7 @@ static PlanarVoxelSideStep GetSideStep(
     const auto planeCenterInInputModel = cropData.GetPlaneCenter();
     image->TransformPhysicalPointToContinuousIndex(
         planeCenterInInputModel.data(),
-        sideStep.planeCenterContinuousIndex.data());
+        sideStep.planeIndex.data());
 
     const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
@@ -280,9 +280,9 @@ static double GetSideAtIndex(
     int j,
     int k)
 {
-    return (static_cast<double>(i) - sideStep.planeCenterContinuousIndex[0]) * sideStep.iStep
-        + (static_cast<double>(j) - sideStep.planeCenterContinuousIndex[1]) * sideStep.jStep
-        + (static_cast<double>(k) - sideStep.planeCenterContinuousIndex[2]) * sideStep.kStep;
+    return (static_cast<double>(i) - sideStep.planeIndex[0]) * sideStep.iStep
+        + (static_cast<double>(j) - sideStep.planeIndex[1]) * sideStep.jStep
+        + (static_cast<double>(k) - sideStep.planeIndex[2]) * sideStep.kStep;
 }
 
 static bool GetVoxelOnSide(
@@ -550,13 +550,13 @@ static OrthogonalCropResult GetPreviewResult(
 {
     auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+    statistics.SetFailureReason(CropFailure::None);
 
     // 平面 preview 的真实语义是无限半空间：dot(point - center, normal) 决定保留/移除侧。
     // 之前生成有限矩形 outline 只是显示参照，会误导用户以为裁切只发生在框内，因此这里不再返回 outline。
     result.SetCropDataModel(cropData);
     result.SetStatistics(statistics);
-    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetFailureReason(CropFailure::None);
     result.SetSucceeded(true);
     return result;
 }
@@ -571,7 +571,7 @@ static OrthogonalCropResult GetSubmitResult(
     if (!image) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::InputImageMissing,
+            CropFailure::NoImage,
             "Input image is null.",
             &cropData);
     }
@@ -582,7 +582,7 @@ static OrthogonalCropResult GetSubmitResult(
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::InsufficientRam,
+            CropFailure::LowRam,
             "Estimated planar image submit memory usage exceeds currently available RAM.",
             &cropData);
     }
@@ -594,7 +594,7 @@ static OrthogonalCropResult GetSubmitResult(
     if (!submitImages.submitImage) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::SubmitImageCreationFailed,
+            CropFailure::ImageFailed,
             "Failed to build planar image submit image.",
             &cropData);
     }
@@ -602,18 +602,18 @@ static OrthogonalCropResult GetSubmitResult(
     if (!submitImages.maskImage) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::SubmitMaskCreationFailed,
+            CropFailure::MaskFailed,
             "Failed to build planar image submit mask.",
             &cropData);
     }
 
     auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+    statistics.SetFailureReason(CropFailure::None);
 
     result.SetCropDataModel(cropData);
     result.SetStatistics(statistics);
-    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetFailureReason(CropFailure::None);
     result.SetSubmitImage(submitImages.submitImage);
     result.SetMaskImage(submitImages.maskImage);
     result.SetSucceeded(true);
@@ -628,13 +628,13 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     if (!image) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::InputImageMissing,
+            CropFailure::NoImage,
             "Input image is null.");
     }
 
     const auto inputModelBounds = GetImageModelBounds(image);
     CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    CropFailure failureReason = CropFailure::None;
     std::string message;
     if (!GetPlaneData(
             request,
@@ -662,7 +662,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
 
     return GetFailureResult(
         request,
-        OrthogonalCropFailureReason::UnsupportedBackend,
+        CropFailure::NoBackend,
         "Image algorithm received an unsupported planar crop operation.",
         &cropData);
 }
@@ -674,13 +674,13 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     if (!polyData) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::InputPolyDataMissing,
+            CropFailure::NoPolyData,
             "Input polydata is null.");
     }
 
     const auto inputModelBounds = GetPolyBounds(polyData);
     CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    CropFailure failureReason = CropFailure::None;
     std::string message;
     if (!GetPlaneData(
             request,
@@ -694,7 +694,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     if (request.GetOperation() != OrthogonalCropOperation::Preview) {
         return GetFailureResult(
             request,
-            OrthogonalCropFailureReason::UnsupportedBackend,
+            CropFailure::NoBackend,
             "PolyData algorithm received an unsupported planar crop operation.",
             &cropData);
     }
@@ -707,10 +707,10 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     }
 
     auto statistics = result.GetStatistics();
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+    statistics.SetFailureReason(CropFailure::None);
     statistics.SetValidationMessage("");
     result.SetStatistics(statistics);
-    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetFailureReason(CropFailure::None);
     result.SetMessage("");
     return result;
 }

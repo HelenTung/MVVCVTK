@@ -3,7 +3,7 @@
 // 2. 直接调用 backend router，避免窗口/交互器影响算法结果判断。
 // 3. 明确校验 mask 和 submit image 的一致性，防止后续优化只改一条输出链。
 
-#include "Routing/OrthogonalCropBackendRouterService.h"
+#include "Routing/CropRouter.h"
 #include "DataManager.h"
 #include "InteractionComputeService.h"
 
@@ -221,7 +221,7 @@ OrthogonalCropRequest BuildImagePlaneRequest(
     // 请求只表达 image submit 所需的稳定输入：数据源、几何、保留语义和 input model 坐标中的平面。
     // 这里不设置窗口或交互状态，确保测试覆盖算法边界而不是 host 绑定边界。
     OrthogonalCropRequest request;
-    request.SetGeometryType(OrthogonalCropGeometryType::Plane);
+    request.SetGeometryType(CropShape::Plane);
     request.SetOperation(operation);
     request.SetDataSource(dataSource);
     request.SetRemovalMode(removalMode);
@@ -238,7 +238,7 @@ OrthogonalCropResult GetImagePlaneResult(
     OrthogonalCropOperation operation,
     OrthogonalCropDataSource dataSource)
 {
-    OrthogonalCropBackendRouterService router;
+    CropRouter router;
     router.SetInputImage(image);
 
     const auto request = BuildImagePlaneRequest(plane, removalMode, operation, dataSource);
@@ -270,7 +270,7 @@ void VerifySubmitResultContract(
         "planar submit result must resolve to ImageData source.",
         failureCount);
     Expect(
-        result.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane,
+        result.GetResolvedGeometryType() == CropShape::Plane,
         "planar submit result must resolve to Plane geometry.",
         failureCount);
     Expect(
@@ -278,7 +278,7 @@ void VerifySubmitResultContract(
         "planar submit result must preserve requested removal mode.",
         failureCount);
     Expect(
-        result.GetFailureReason() == OrthogonalCropFailureReason::None,
+        result.GetFailureReason() == CropFailure::None,
         "planar submit result must not report failure.",
         failureCount);
     Expect(
@@ -290,7 +290,7 @@ void VerifySubmitResultContract(
         "planar submit statistics must resolve to ImageData source.",
         failureCount);
     Expect(
-        statistics.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane,
+        statistics.GetResolvedGeometryType() == CropShape::Plane,
         "planar submit statistics must resolve to Plane geometry.",
         failureCount);
     Expect(
@@ -298,7 +298,7 @@ void VerifySubmitResultContract(
         "planar submit statistics must preserve requested removal mode.",
         failureCount);
     Expect(
-        statistics.GetFailureReason() == OrthogonalCropFailureReason::None,
+        statistics.GetFailureReason() == CropFailure::None,
         "planar submit statistics must not report failure.",
         failureCount);
     Expect(result.GetSubmitImage() != nullptr, "planar submit image must exist.", failureCount);

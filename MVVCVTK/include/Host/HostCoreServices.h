@@ -3,7 +3,7 @@
 #include <memory>
 
 class GapAnalysisService;
-class OrthogonalCropInteractionBridgeService;
+class CropBridge;
 class RawVolumeDataManager;
 class SharedInteractionState;
 class SharedStateBroadcaster;
@@ -25,7 +25,7 @@ struct HostCoreServices {
     // 孔隙 feature 服务负责计算、显示模式状态和 overlay 生命周期；host 只注入目标和主线程 tick。
     std::shared_ptr<GapAnalysisService> gapAnalysis;
     // 裁切交互桥，连接裁切 feature 与 host 窗口；具体 reference/preview 窗口在激活请求到来后再绑定。
-    std::shared_ptr<OrthogonalCropInteractionBridgeService> orthogonalCropBridge;
+    std::shared_ptr<CropBridge> orthogonalCropBridge;
 };
 
 // 构建一次 session 的窗口无关服务集合。调用方再把它传入窗口层和 feature 绑定层，

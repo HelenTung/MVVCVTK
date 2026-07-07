@@ -4,7 +4,7 @@
 
 class vtkRenderer;
 
-class OrthogonalCropCameraStateController {
+class CropCameraState {
 public:
     void SetCameraState(vtkRenderer* renderer);
     void ResetCamera(vtkRenderer* renderer);

@@ -151,7 +151,7 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h" />
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h" />
@@ -161,7 +161,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="PlanarCropAlgorithmSubmitTests.cpp" />

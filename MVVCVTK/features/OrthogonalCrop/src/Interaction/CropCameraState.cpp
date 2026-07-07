@@ -1,8 +1,8 @@
-#include "Interaction/OrthogonalCropCameraStateController.h"
+#include "Interaction/CropCameraState.h"
 #include <vtkCamera.h>
 #include <vtkRenderer.h>
 
-void OrthogonalCropCameraStateController::SetCameraState(vtkRenderer* renderer)
+void CropCameraState::SetCameraState(vtkRenderer* renderer)
 {
     m_cameraState = {};
     if (!renderer || !renderer->GetActiveCamera()) {
@@ -22,7 +22,7 @@ void OrthogonalCropCameraStateController::SetCameraState(vtkRenderer* renderer)
     m_hasCameraState = true;
 }
 
-void OrthogonalCropCameraStateController::ResetCamera(vtkRenderer* renderer)
+void CropCameraState::ResetCamera(vtkRenderer* renderer)
 {
     if (!m_hasCameraState || !m_cameraState.isValid || !renderer || !renderer->GetActiveCamera()) {
         return;
@@ -48,13 +48,13 @@ void OrthogonalCropCameraStateController::ResetCamera(vtkRenderer* renderer)
     Clear();
 }
 
-void OrthogonalCropCameraStateController::Clear()
+void CropCameraState::Clear()
 {
     m_cameraState = {};
     m_hasCameraState = false;
 }
 
-bool OrthogonalCropCameraStateController::GetSaved() const
+bool CropCameraState::GetSaved() const
 {
     return m_hasCameraState;
 }

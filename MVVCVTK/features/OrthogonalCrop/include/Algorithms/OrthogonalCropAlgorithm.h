@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <string>
 
-class OrthogonalCropBackendRouterService;
+class CropRouter;
 
 class OrthogonalCropAlgorithm {
 public:
@@ -28,7 +28,7 @@ public:
     static bool GetBoundsAreValid(
         const std::array<double, 6>& inputModelBounds,
         const std::array<double, 6>& cropInputModelBounds,
-        OrthogonalCropFailureReason& failureReason,
+        CropFailure& failureReason,
         std::string& message,
         bool allowPartialOverlap = false);
 
@@ -37,7 +37,7 @@ public:
         const std::array<double, 6>& inputModelBounds,
         const OrthogonalCropRequest& request,
         CropDataModel& cropData,
-        OrthogonalCropFailureReason& failureReason,
+        CropFailure& failureReason,
         std::string& message,
         bool allowPartialOverlap = false);
 
@@ -46,7 +46,7 @@ public:
 
 private:
     // router 是三元组分发边界；算法执行入口只给 router 调用，避免外部绕过路由组合。
-    friend class OrthogonalCropBackendRouterService;
+    friend class CropRouter;
 
     // image / volume 共用 image 输入入口；算法只补 cropData、产物和诊断。
     static OrthogonalCropResult GetResult(

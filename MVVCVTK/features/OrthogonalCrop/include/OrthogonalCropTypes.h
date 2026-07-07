@@ -81,7 +81,7 @@ enum class OrthogonalCropDataSource {
 };
 
 // 裁切几何类型；router 用它和数据源、动作一起决定可执行路径。
-enum class OrthogonalCropGeometryType {
+enum class CropShape {
     // 当前唯一可执行的有向盒裁切。
     Box,
     // 预留平面裁切入口。
@@ -113,29 +113,29 @@ enum class CropInteractionPhase {
 };
 
 // 统一归档请求/执行失败原因，便于 bridge 日志和上层 UI 提示复用同一套语义。
-enum class OrthogonalCropFailureReason {
+enum class CropFailure {
     // 没有失败，当前请求可以视作正常完成。
     None,
     // image 路径需要 vtkImageData，但当前没有绑定输入图像。
-    InputImageMissing,
+    NoImage,
     // polydata 路径需要 vtkPolyData，但当前没有绑定输入网格。
-    InputPolyDataMissing,
+    NoPolyData,
     // 请求里的 bounds 自身就不合法，例如 min >= max。
-    InvalidBounds,
+    BadBounds,
     // bounds 虽合法，但超出了输入数据允许的范围。
-    BoundsOutOfRange,
+    OutOfBounds,
     // 请求三元组没有可执行路径，或与当前算法输入不匹配。
-    UnsupportedBackend,
+    NoBackend,
     // image submit 不支持“移除内部、保留外部”的执行方式。
-    SubmitRemoveInsideUnsupported,
+    BadSubmitMode,
     // 预估或执行时发现内存不足，无法安全完成裁切。
-    InsufficientRam,
+    LowRam,
     // image submit 需要输出 2D mask 时，生成 mask 失败。
-    SubmitMaskCreationFailed,
+    MaskFailed,
     // image submit 需要输出主数据 image 时，生成输出 image 失败。
-    SubmitImageCreationFailed,
+    ImageFailed,
     // polydata 预览需要可选裁切网格 artifact 时，生成输出 polydata 失败。
-    ClipPreviewPolyDataCreationFailed
+    ClipFailed
 };
 
 // 纯几何数据快照：保存裁切盒的稳定后端表达。
@@ -176,12 +176,12 @@ public:
 
     // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // 该值用于保存交互尺度，不参与无限半空间裁切方程。
-    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalfExtentsInInputModel; }
+    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalf; }
 
     // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
-    void SetPlaneHalf(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    void SetPlaneHalf(const std::array<double, 2>& planeHalf)
     {
-        m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
+        m_planeHalf = planeHalf;
     }
 
     // 返回由 boxToInputModelMatrix 派生出的 active input model AABB。
@@ -227,7 +227,7 @@ private:
     // 裁切方程只依赖 center + normal；halfExtents 不再表示可见裁切框，避免把无限半空间误读成有限矩形。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
-    std::array<double, 2> m_planeHalfExtentsInInputModel = { 1.0, 1.0 };
+    std::array<double, 2> m_planeHalf = { 1.0, 1.0 };
     // 保存由 boxToInputModelMatrix 派生出的 active input model AABB；
     // 它用于快速排除、index 吸附和缓存键比较，不作为有向盒真源。
     std::array<double, 6> m_inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -268,12 +268,12 @@ public:
 
     // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // Plane preview 不再把该值转换为 overlay 方框。
-    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalfExtentsInInputModel; }
+    const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalf; }
 
     // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
-    void SetPlaneHalf(const std::array<double, 2>& planeHalfExtentsInInputModel)
+    void SetPlaneHalf(const std::array<double, 2>& planeHalf)
     {
-        m_planeHalfExtentsInInputModel = planeHalfExtentsInInputModel;
+        m_planeHalf = planeHalf;
     }
 
     // 返回 bridge 决定好的目标数据源；router 只按它执行，不再自行推断。
@@ -289,10 +289,10 @@ public:
     void SetOperation(OrthogonalCropOperation operation) { m_operation = operation; }
 
     // 返回本次请求的裁切几何类型。
-    OrthogonalCropGeometryType GetGeometryType() const { return m_geometryType; }
+    CropShape GetGeometryType() const { return m_geometryType; }
 
     // 写入本次请求的裁切几何类型。
-    void SetGeometryType(OrthogonalCropGeometryType geometryType) { m_geometryType = geometryType; }
+    void SetGeometryType(CropShape geometryType) { m_geometryType = geometryType; }
 
     // 返回 inside / outside 的保留语义。
     CropRemovalMode GetRemovalMode() const { return m_removalMode; }
@@ -313,13 +313,13 @@ private:
     // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
-    std::array<double, 2> m_planeHalfExtentsInInputModel = { 1.0, 1.0 };
+    std::array<double, 2> m_planeHalf = { 1.0, 1.0 };
     // 本次请求的目标数据源。
     OrthogonalCropDataSource m_dataSource = OrthogonalCropDataSource::ImageData;
     // 本次请求的业务动作；None 表示还没有可执行目标，避免缺输入时伪装成 preview。
     OrthogonalCropOperation m_operation = OrthogonalCropOperation::None;
     // 本次请求的裁切几何类型；当前只有 Box 可执行。
-    OrthogonalCropGeometryType m_geometryType = OrthogonalCropGeometryType::Box;
+    CropShape m_geometryType = CropShape::Box;
     // inside / outside 的保留语义；影响 image submit 合法性判断和提交 mask 取值。
     CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
     // 可选的可用内存上限；为 0 表示交给后端使用系统 RAM 查询或默认兜底值。
@@ -334,14 +334,14 @@ public:
     OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
-    OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
-    void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
+    CropShape GetResolvedGeometryType() const { return m_resolvedGeometryType; }
+    void SetResolvedGeometryType(CropShape geometryType) { m_resolvedGeometryType = geometryType; }
 
     CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
     void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
 
-    OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
-    void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
+    CropFailure GetFailureReason() const { return m_failureReason; }
+    void SetFailureReason(CropFailure failureReason) { m_failureReason = failureReason; }
 
     const std::string& GetValidationMessage() const { return m_validationMessage; }
 
@@ -353,11 +353,11 @@ private:
     // 这次诊断真正采用的业务动作，如 preview 或 submit。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
     // 这次诊断真正采用的裁切几何类型。
-    OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
+    CropShape m_resolvedGeometryType = CropShape::Box;
     // 这次诊断真正采用的保留语义。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
     // 诊断阶段发现的失败原因；None 表示校验通过。
-    OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
+    CropFailure m_failureReason = CropFailure::None;
     // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
     std::string m_validationMessage;
 };
@@ -370,17 +370,17 @@ public:
     OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
     void SetResolvedOperation(OrthogonalCropOperation operation) { m_resolvedOperation = operation; }
 
-    OrthogonalCropGeometryType GetResolvedGeometryType() const { return m_resolvedGeometryType; }
-    void SetResolvedGeometryType(OrthogonalCropGeometryType geometryType) { m_resolvedGeometryType = geometryType; }
+    CropShape GetResolvedGeometryType() const { return m_resolvedGeometryType; }
+    void SetResolvedGeometryType(CropShape geometryType) { m_resolvedGeometryType = geometryType; }
 
     CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
     void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
 
-    bool GetSucceeded() const { return m_succeeded; }
-    void SetSucceeded(bool succeeded) { m_succeeded = succeeded; }
+    bool GetSucceeded() const { return m_isSucceeded; }
+    void SetSucceeded(bool isSucceeded) { m_isSucceeded = isSucceeded; }
 
-    OrthogonalCropFailureReason GetFailureReason() const { return m_failureReason; }
-    void SetFailureReason(OrthogonalCropFailureReason failureReason) { m_failureReason = failureReason; }
+    CropFailure GetFailureReason() const { return m_failureReason; }
+    void SetFailureReason(CropFailure failureReason) { m_failureReason = failureReason; }
 
     const std::string& GetMessage() const { return m_message; }
     void SetMessage(const std::string& message) { m_message = message; }
@@ -409,13 +409,13 @@ private:
     // 结果实际采用的业务动作；数据来源由 resolvedDataSource 表达。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
     // 结果实际采用的裁切几何类型。
-    OrthogonalCropGeometryType m_resolvedGeometryType = OrthogonalCropGeometryType::Box;
+    CropShape m_resolvedGeometryType = CropShape::Box;
     // 结果实际采用的保留语义。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
-    bool m_succeeded = false;
+    bool m_isSucceeded = false;
     // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。
-    OrthogonalCropFailureReason m_failureReason = OrthogonalCropFailureReason::None;
+    CropFailure m_failureReason = CropFailure::None;
     // 对当前成功/失败状态的文字解释；可直接给日志或 UI 弹框使用。
     std::string m_message;
     // image submit 链路返回的主数据 image。

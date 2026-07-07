@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/include/Routing/OrthogonalCropBackendRouterService.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Routing/CropRouter.h
 // 分类: Service / Backend Router
 // 说明: 在基于图像输入与网格输入的裁切后端之间做统一分发，屏蔽 UI 层的分支判断。
 // =====================================================================
@@ -18,7 +18,7 @@
 #include <array>
 #include <cstddef>
 
-class OrthogonalCropBackendRouterService {
+class CropRouter {
 public:
     // 绑定 image 输入，供交互桥或 main 在数据加载后注入。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
@@ -67,7 +67,7 @@ private:
     // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
     OrthogonalCropResult GetRouterFailureResult(
         const OrthogonalCropRequest& request,
-        OrthogonalCropFailureReason failureReason,
+        CropFailure failureReason,
         const std::string& message) const;
 
     // 查询系统当前可用物理内存，供 image submit 估算使用。

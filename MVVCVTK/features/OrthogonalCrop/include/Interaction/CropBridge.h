@@ -1,9 +1,9 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/OrthogonalCropInteractionBridgeService.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/CropBridge.h
 // 分类: Service / Interaction Bridge
-// OrthogonalCropInteractionBridgeService - 正交裁切交互桥接服务
+// CropBridge - 正交裁切交互桥接服务
 // 说明: 连接 widget、数据后端、preview 窗口与 submit reload 通道，
 //       管理交互态、预览刷新顺序和提交收尾。
 // =====================================================================
@@ -15,12 +15,12 @@
 // 5. SendPreview 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
 // 6. SendSubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
-#include "Interaction/OrthogonalCropWidgetStateController.h"
-#include "Interaction/PlanarCropWidgetStateController.h"
-#include "Interaction/OrthogonalCropCameraStateController.h"
-#include "Routing/OrthogonalCropBackendRouterService.h"
-#include "Preview/OrthogonalCropPreviewPlugService.h"
-#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
+#include "Interaction/CropBoxWidget.h"
+#include "Interaction/CropPlaneWidget.h"
+#include "Interaction/CropCameraState.h"
+#include "Routing/CropRouter.h"
+#include "Preview/CropPreviewPlug.h"
+#include "Render/Strategies/CropOverlay.h"
 #include "AppInterfaces.h"
 
 #include <vtkPolyData.h>
@@ -35,7 +35,7 @@
 
 class vtkRenderer;
 
-class OrthogonalCropInteractionBridgeService {
+class CropBridge {
 public:
     // host/session 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
     using ReloadSubmitter = std::function<bool(
@@ -46,7 +46,7 @@ public:
     // 内部状态切换、后端路由细节和 VTK 预览接管都留在私有实现里。
 
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
-    OrthogonalCropInteractionBridgeService();
+    CropBridge();
 
     // 以下一组接口把 host 注入的 image 输入转发给 backend router，并保存版本戳。
     void SetInputImage(vtkSmartPointer<vtkImageData> image, DataVersion version);
@@ -102,7 +102,7 @@ private:
         std::shared_ptr<AbstractInteractiveService> service;
 
         // 负责显示可选几何参照、submit mask 和可选 clipped polydata 的 overlay 策略。
-        std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
+        std::shared_ptr<CropOverlay> overlayStrategy;
     };
 
     // 确保当前至少有一个可用输入；image 输入只能来自 host 显式注入。
@@ -165,10 +165,10 @@ private:
     bool GetSubmitReady() const;
 
     // reload 回调在主线程状态收敛后触发；这里做输入恢复和 submit 收尾。
-    void OnSubmitReload(bool success);
+    void OnSubmitReload(bool isSuccess);
 
     // 少量日志文本 helper；
-    static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
+    static const char* GetFailureReasonText(CropFailure failureReason);
     static const char* GetRemovalModeText(CropRemovalMode removalMode);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
 
@@ -195,10 +195,10 @@ private:
     void SendResult(const OrthogonalCropResult& submitResult);
 
     // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
-    OrthogonalCropBackendRouterService m_backend;
+    CropRouter m_backend;
 
     // 预览接管层只负责把明确的预览结果应用到叠加层、mapper、shader、volume 等 VTK 显示状态。
-    OrthogonalCropPreviewPlugService m_previewPlug;
+    CropPreviewPlug m_previewPlug;
 
     // host 最近一次注入的 image 版本；bridge 不用它反查 DataManager，只做输入时序诊断。
     DataVersion m_inputVersion = 0;
@@ -211,16 +211,16 @@ private:
     vtkRenderWindowInteractor* m_primaryInteractor = nullptr;
 
     // 当前是否处于裁切交互模式。
-    bool m_cropInteractionEnabled = false;
+    bool m_isCropOn = false;
 
     // 当前裁切交互使用的几何类型。
-    OrthogonalCropGeometryType m_currentGeometryType = OrthogonalCropGeometryType::Box;
+    CropShape m_currentGeometryType = CropShape::Box;
 
     // 当前 world bounds 是否已经初始化过。
-    bool m_worldBoundsInitialized = false;
+    bool m_hasWorldBounds = false;
 
     // 当前是否有 preview 在显示。
-    bool m_previewEnabled = false;
+    bool m_isPreviewOn = false;
 
     // 最近一次 widget 交互阶段，用于区分 dragging / released。
     CropInteractionPhase m_lastInteractionPhase = CropInteractionPhase::Idle;
@@ -240,25 +240,25 @@ private:
 
     // 当前平面 widget 可视区域的 world 半尺寸，布局为 [halfWidth, halfHeight]。
     // 它描述交互控件尺度，不代表平面裁切存在有限矩形边界。
-    std::array<double, 2> m_currentWorldPlaneHalfExtents = { 1.0, 1.0 };
+    std::array<double, 2> m_worldHalf = { 1.0, 1.0 };
 
     // image submit 已提交到 reload 通道但尚未完成；期间保留 preview，避免闪回原模型。
-    bool m_submitReloadPending = false;
+    bool m_hasReload = false;
 
     // 主数据 reload 能力由 main 注入；bridge 负责编排 submit 生命周期。
     ReloadSubmitter m_submitReloadHandler;
 
     // submit 结果中的 mask / outline 在 reload 后重新写入 overlay，避免被 preview 清理带走。
-    OrthogonalCropResult m_pendingSubmitOverlayResult;
+    OrthogonalCropResult m_submitOverlay;
 
     // 裁切提交前保存相机，下一次主数据重建并完成策略同步后恢复；每次保存都会覆盖上一份。
-    OrthogonalCropCameraStateController m_cameraStateController;
+    CropCameraState m_cameraState;
 
     // 只负责 vtkBoxWidget2 生命周期与状态同步，不承担业务计算。
-    OrthogonalCropWidgetStateController m_widgetStateController;
+    CropBoxWidget m_boxWidget;
 
     // 只负责 vtkImplicitPlaneWidget2 生命周期与状态同步，不承担业务计算。
-    PlanarCropWidgetStateController m_planarWidgetStateController;
+    CropPlaneWidget m_planeWidget;
 
     // world / active input model 坐标互转的参考窗口服务。
     std::shared_ptr<AbstractInteractiveService> m_referenceRenderService;

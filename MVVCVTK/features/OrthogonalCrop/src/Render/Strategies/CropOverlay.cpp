@@ -1,5 +1,5 @@
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/src/Render/Strategies/OrthogonalCropPreviewOverlayStrategy.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Render/Strategies/CropOverlay.cpp
 // 分类: Strategy / Preview Overlay Implementation
 // 说明: 把裁切结果拆成 3D outline、3D clipped polydata、2D mask slice 三类可视表现。
 // =====================================================================
@@ -8,7 +8,7 @@
 // - 在 3D 窗口只保留线框参照 / clipped polydata，不再显示半透明实体盒
 // - 视觉语义由结果类型与当前窗口轴向共同决定，裁切模式本身不再染色
 
-#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
+#include "Render/Strategies/CropOverlay.h"
 
 #include <vtkImageProperty.h>
 #include <vtkMatrix4x4.h>
@@ -21,7 +21,7 @@ constexpr double kOverlayPreviewBlue = 0.80;
 constexpr double kOverlayMaskAlpha = 0.42;
 }
 
-OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
+CropOverlay::CropOverlay()
 {
     // outline、polydata 结果和 2D mask slice 在构造时全部建好，
     // 后续每次 preview 只切换输入与可见性，避免频繁重建 prop。
@@ -86,19 +86,19 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
     AddManagedProp(m_maskSlice);
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data)
+void CropOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data)
 {
     (void)data;
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetSliceAxis(int axis)
+void CropOverlay::SetSliceAxis(int axis)
 {
     // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D 线框参照逻辑。
     m_sliceAxis = axis;
     SetVisibleProps();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode removalMode)
+void CropOverlay::SetRemovalMode(CropRemovalMode removalMode)
 {
     if (m_removalMode == removalMode) {
         return;
@@ -111,17 +111,17 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
     SetStyle();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetRefVisible(bool isVisible)
+void CropOverlay::SetRefVisible(bool isVisible)
 {
-    if (m_allowGeometryReferenceVisible == isVisible) {
+    if (m_isRefVisible == isVisible) {
         return;
     }
 
-    m_allowGeometryReferenceVisible = isVisible;
+    m_isRefVisible = isVisible;
     SetVisibleProps();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
+void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
 {
     // 裁切结果在 overlay 层拆成 outline、clipped polydata、mask 三种显示数据；
     // 同一份 result 由当前窗口轴向决定最终可见内容，避免算法层关心窗口类型。
@@ -161,7 +161,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
     SetVisibleProps();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
+void CropOverlay::ClearPreview()
 {
     // 清空时只重置本策略持有的显示状态，不触碰主模型或上游缓存结果。
     m_hasOutline = false;
@@ -172,7 +172,7 @@ void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
     m_maskSlice->SetVisibility(false);
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+void CropOverlay::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (GetFlagOn(flags, UpdateFlags::Transform)) {
         // 所有 3D prop 都跟随主模型矩阵，保持 overlay 与主内容严格对齐。
@@ -206,16 +206,16 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
     }
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetVisibleProps()
+void CropOverlay::SetVisibleProps()
 {
     // 3D reference 窗口才显示线框参照；其它 preview 窗口只表达裁切后的主模型或 2D mask。
     // 半透明实体盒固定隐藏，因为交互态颜色应该只由 widget selected property 表达。
-    m_outlineActor->SetVisibility(m_allowGeometryReferenceVisible && m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
+    m_outlineActor->SetVisibility(m_isRefVisible && m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
     m_previewRegionActor->SetVisibility(false);
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetStyle()
+void CropOverlay::SetStyle()
 {
     // 裁切盒颜色只在 widget 选中/拖拽时变化；
     // overlay 使用固定中性色，避免用户把预览模式切换误读成模型或裁切盒状态被改写。
@@ -233,7 +233,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetStyle()
     m_maskLut->Build();
 }
 
-void OrthogonalCropPreviewOverlayStrategy::SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData)
+void CropOverlay::SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData)
 {
     if (!prop) {
         return;

@@ -4,7 +4,7 @@
 #include "AppService.h"
 #include "AppState.h"
 #include "DataManager.h"
-#include "Interaction/OrthogonalCropInteractionBridgeService.h"
+#include "Interaction/CropBridge.h"
 #include "OrthogonalCropTypes.h"
 #include "Services/GapAnalysisService.h"
 #include "StdRenderContext.h"

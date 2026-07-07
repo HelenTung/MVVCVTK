@@ -213,7 +213,7 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
 static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     OrthogonalCropDataSource dataSource,
     OrthogonalCropOperation operation,
-    OrthogonalCropGeometryType geometryType,
+    CropShape geometryType,
     CropRemovalMode removalMode)
 {
     OrthogonalCropStatistics statistics;
@@ -544,7 +544,7 @@ static vtkSmartPointer<vtkPolyData> GetOutlineData(const CropDataModel& cropData
 bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     const std::array<double, 6>& inputModelBounds,
     const std::array<double, 6>& cropInputModelBounds,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
@@ -554,13 +554,13 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     // cropInputModelBounds 是 boxToInputModelMatrix 派生出的裁切盒外接 AABB；
     // 二者已在同一坐标系里，因此这里只判断正体积、相交或包含关系。
     if (!GetBoundsValid(inputModelBounds)) {
-        failureReason = OrthogonalCropFailureReason::InvalidBounds;
+        failureReason = CropFailure::BadBounds;
         message = GetBoundsMessage("Input model bounds are invalid:", inputModelBounds);
         return false;
     }
 
     if (!GetBoundsValid(cropInputModelBounds)) {
-        failureReason = OrthogonalCropFailureReason::InvalidBounds;
+        failureReason = CropFailure::BadBounds;
         message = GetBoundsMessage("Crop input model bounds are invalid:", cropInputModelBounds);
         return false;
     }
@@ -569,14 +569,14 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
         ? GetBoundsOverlap(inputModelBounds, cropInputModelBounds)
         : GetBoundsContained(inputModelBounds, cropInputModelBounds);
     if (!inRange) {
-        failureReason = OrthogonalCropFailureReason::BoundsOutOfRange;
+        failureReason = CropFailure::OutOfBounds;
         message = allowPartialOverlap
             ? "Crop input model bounds do not overlap the active input model bounds."
             : "Crop input model bounds exceed the active input model bounds.";
         return false;
     }
 
-    failureReason = OrthogonalCropFailureReason::None;
+    failureReason = CropFailure::None;
     message.clear();
     return true;
 }
@@ -585,7 +585,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     const std::array<double, 6>& inputModelBounds,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
@@ -602,14 +602,14 @@ static bool BuildCropDataModel(
     vtkImageData* image,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
     // image 重载只负责把 vtkImageData 的 input model bounds 作为 inputModelBounds 传下去；
     // 真正的 request -> cropData 归一化仍由通用重载完成。
     if (!image) {
-        failureReason = OrthogonalCropFailureReason::InputImageMissing;
+        failureReason = CropFailure::NoImage;
         message = "Input image is null.";
         return false;
     }
@@ -627,14 +627,14 @@ static bool BuildCropDataModel(
     vtkPolyData* polyData,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
-    OrthogonalCropFailureReason& failureReason,
+    CropFailure& failureReason,
     std::string& message,
     bool allowPartialOverlap)
 {
     // polydata 重载只负责提供输入网格自身的 input model bounds；
     // request -> cropData 的几何归一化继续与 image 路径共享同一套算法。
     if (!polyData) {
-        failureReason = OrthogonalCropFailureReason::InputPolyDataMissing;
+        failureReason = CropFailure::NoPolyData;
         message = "Input polydata is null.";
         return false;
     }
@@ -721,16 +721,16 @@ static OrthogonalCropResult GetBoxPreviewResult(
         OrthogonalCropOperation::Preview,
         request.GetGeometryType(),
         request.GetRemovalMode());
-    statistics.SetFailureReason(OrthogonalCropFailureReason::None);
+    statistics.SetFailureReason(CropFailure::None);
     result.SetStatistics(statistics);
     result.SetOutlinePolyData(GetOutlineData(cropData));
     result.SetSucceeded(result.GetOutlinePolyData() != nullptr);
     result.SetFailureReason(statistics.GetFailureReason());
     if (!result.GetSucceeded()) {
-        statistics.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
+        statistics.SetFailureReason(CropFailure::ClipFailed);
         statistics.SetValidationMessage("Box preview outline creation failed.");
         result.SetStatistics(statistics);
-        result.SetFailureReason(OrthogonalCropFailureReason::ClipPreviewPolyDataCreationFailed);
+        result.SetFailureReason(CropFailure::ClipFailed);
         result.SetMessage("Box preview outline creation failed.");
     }
     return result;
@@ -740,7 +740,7 @@ static OrthogonalCropResult GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
-    OrthogonalCropGeometryType geometryType,
+    CropShape geometryType,
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
@@ -754,7 +754,7 @@ static OrthogonalCropResult GetSubmitResult(
         removalMode);
 
     if (!image) {
-        diagnostics.SetFailureReason(OrthogonalCropFailureReason::InputImageMissing);
+        diagnostics.SetFailureReason(CropFailure::NoImage);
         diagnostics.SetValidationMessage("Input image is null.");
         result.SetStatistics(diagnostics);
         result.SetFailureReason(diagnostics.GetFailureReason());
@@ -777,7 +777,7 @@ static OrthogonalCropResult GetSubmitResult(
         ? fullVoxelCount * (GetVoxelBytes(image) + sizeof(unsigned char))
         : roiVoxelCount * GetVoxelBytes(image);
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
-        diagnostics.SetFailureReason(OrthogonalCropFailureReason::InsufficientRam);
+        diagnostics.SetFailureReason(CropFailure::LowRam);
         diagnostics.SetValidationMessage("Estimated image submit memory usage exceeds currently available RAM.");
         result.SetStatistics(diagnostics);
         result.SetFailureReason(diagnostics.GetFailureReason());
@@ -785,7 +785,7 @@ static OrthogonalCropResult GetSubmitResult(
         return result;
     }
 
-    diagnostics.SetFailureReason(OrthogonalCropFailureReason::None);
+    diagnostics.SetFailureReason(CropFailure::None);
     result.SetStatistics(diagnostics);
     result.SetFailureReason(diagnostics.GetFailureReason());
 
@@ -798,10 +798,10 @@ static OrthogonalCropResult GetSubmitResult(
         submitImage = GetExtractedImage(image, snappedIndexBounds);
     }
     if (!submitImage) {
-        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
+        diagnostics.SetFailureReason(CropFailure::ImageFailed);
         diagnostics.SetValidationMessage("Failed to build image submit image.");
         result.SetStatistics(diagnostics);
-        result.SetFailureReason(OrthogonalCropFailureReason::SubmitImageCreationFailed);
+        result.SetFailureReason(CropFailure::ImageFailed);
         result.SetMessage("Failed to build image submit image.");
         return result;
     }
@@ -817,10 +817,10 @@ static OrthogonalCropResult GetSubmitResult(
         snappedIndexBounds,
         removalMode);
     if (!submitMaskImage) {
-        diagnostics.SetFailureReason(OrthogonalCropFailureReason::SubmitMaskCreationFailed);
+        diagnostics.SetFailureReason(CropFailure::MaskFailed);
         diagnostics.SetValidationMessage("Failed to build image submit mask.");
         result.SetStatistics(diagnostics);
-        result.SetFailureReason(OrthogonalCropFailureReason::SubmitMaskCreationFailed);
+        result.SetFailureReason(CropFailure::MaskFailed);
         result.SetMessage("Failed to build image submit mask.");
         return result;
     }
@@ -843,7 +843,7 @@ static OrthogonalCropResult GetSubmitResult(
     result.SetOutlinePolyData(GetOutlineData(submitCropData));
     result.SetCropDataModel(submitCropData);
     result.SetSucceeded(true);
-    result.SetFailureReason(OrthogonalCropFailureReason::None);
+    result.SetFailureReason(CropFailure::None);
     return result;
 }
 
@@ -856,7 +856,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 
     // request 只携带 boxToInputModelMatrix；image-backed 入口负责派生 cropData 供 preview / submit 复用。
     CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    CropFailure failureReason = CropFailure::None;
     std::string message;
     const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
     const bool allowPartialOverlap =
@@ -899,7 +899,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         request.GetOperation(),
         request.GetGeometryType(),
         request.GetRemovalMode());
-    diagnostics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+    diagnostics.SetFailureReason(CropFailure::NoBackend);
     diagnostics.SetValidationMessage("Image algorithm received an unsupported crop operation.");
     fallbackResult.SetCropDataModel(cropData);
     fallbackResult.SetStatistics(diagnostics);
@@ -917,7 +917,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
 
     // polydata preview 复用同一份 boxToInputModelMatrix；router 已保证 submit 不会进入这里。
     CropDataModel cropData;
-    OrthogonalCropFailureReason failureReason = OrthogonalCropFailureReason::None;
+    CropFailure failureReason = CropFailure::None;
     std::string message;
     if (!BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
         auto statistics = GetAlgorithmDiagnostics(
@@ -945,7 +945,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         request.GetOperation(),
         request.GetGeometryType(),
         request.GetRemovalMode());
-    diagnostics.SetFailureReason(OrthogonalCropFailureReason::UnsupportedBackend);
+    diagnostics.SetFailureReason(CropFailure::NoBackend);
     diagnostics.SetValidationMessage("PolyData algorithm received an unsupported crop operation.");
     fallbackResult.SetCropDataModel(cropData);
     fallbackResult.SetStatistics(diagnostics);

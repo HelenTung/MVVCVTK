@@ -1,7 +1,7 @@
 #pragma once
 
 #include "AppInterfaces.h"
-#include "Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h"
+#include "Render/Strategies/CropOverlay.h"
 #include "OrthogonalCropTypes.h"
 
 #include <vtkSmartPointer.h>
@@ -17,13 +17,13 @@ class vtkPolyDataMapper;
 class vtkVolume;
 class vtkVolumeMapper;
 
-// OrthogonalCropPreviewPlugService 只拥有 preview 期间的 VTK 显示状态。
+// CropPreviewPlug 只拥有 preview 期间的 VTK 显示状态。
 // request 构造和裁切数据处理交给 router / algorithm；本类只应用已经分发好的预览结果。
-class OrthogonalCropPreviewPlugService {
+class CropPreviewPlug {
 public:
     bool SetPreview(
         const std::shared_ptr<AbstractInteractiveService>& targetService,
-        const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
+        const std::shared_ptr<CropOverlay>& overlayStrategy,
         const std::shared_ptr<AbstractInteractiveService>& referenceService,
         const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult,
@@ -31,7 +31,7 @@ public:
 
     void ResetPreview(
         const std::shared_ptr<AbstractInteractiveService>& targetService,
-        const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy);
+        const std::shared_ptr<CropOverlay>& overlayStrategy);
 
     vtkSmartPointer<vtkPolyData> GetPreviewData(
         const std::shared_ptr<AbstractInteractiveService>& targetService) const;

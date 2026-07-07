@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/OrthogonalCropWidgetStateController.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/CropBoxWidget.h
 // 分类: Service / Widget Controller
 // 说明: 管理 vtkBoxWidget2 与 box representation，把 VTK 事件翻译为裁切模块状态回调。
 // =====================================================================
@@ -19,31 +19,31 @@
 #include <array>
 #include <functional>
 
-class OrthogonalCropWidgetStateController;
+class CropBoxWidget;
 
 // VTK observer 适配器：把原始事件转交给 WidgetStateController 处理。
-class OrthogonalCropWidgetStateCallback : public vtkCommand {
+class CropBoxCallback : public vtkCommand {
 public:
-    static OrthogonalCropWidgetStateCallback* New();
+    static CropBoxCallback* New();
 
     // 绑定回调所有者。
-    void SetOwner(OrthogonalCropWidgetStateController* owner);
+    void SetOwner(CropBoxWidget* owner);
 
     // VTK 事件入口。
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override;
 
 private:
     // 事件真正的业务处理者。
-    OrthogonalCropWidgetStateController* m_owner = nullptr;
+    CropBoxWidget* m_owner = nullptr;
 };
 
 // 只管理 widget 生命周期、bounds 与交互事件，不关心裁切算法与结果投递。
-class OrthogonalCropWidgetStateController {
+class CropBoxWidget {
 public:
     // 向上层报告 world bounds 与交互阶段的统一回调类型。
-    using WorldBoundsChangedCallback = std::function<void(const std::array<double, 6>& worldBounds, CropInteractionPhase phase)>;
+    using BoundsCallback = std::function<void(const std::array<double, 6>& worldBounds, CropInteractionPhase phase)>;
 
-    OrthogonalCropWidgetStateController();
+    CropBoxWidget();
 
     // 绑定 widget 所属 interactor。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
@@ -58,26 +58,26 @@ public:
     const std::array<double, 6>& GetCurrentWorldBounds() const;
 
     // 读取当前 widget 的有向盒定义。
-    // initialWorldCenter / initialWorldDimensions 描述最近一次 PlaceWidget 的 world AABB 基准盒，
-    // initialWorldToCurrentWorldMatrix 描述这个基准盒经过交互后的旋转、缩放和平移，
+    // baseCenter / baseSize 描述最近一次 PlaceWidget 的 world AABB 基准盒，
+    // baseToNow 描述这个基准盒经过交互后的旋转、缩放和平移，
     // 调用方据此重建真实有向盒，避免把旋转后的 GetBounds 外接框误当成裁切几何。
     bool GetCurrentWorldBox(
-        CropVectorDouble3Array& initialWorldCenter,
-        CropVectorDouble3Array& initialWorldDimensions,
-        CropMatrixDouble16Array& initialWorldToCurrentWorldMatrix) const;
+        CropVectorDouble3Array& baseCenter,
+        CropVectorDouble3Array& baseSize,
+        CropMatrixDouble16Array& baseToNow) const;
 
     // 设置 world bounds 变化回调。
-    void SetBoundsCallback(WorldBoundsChangedCallback callback);
+    void SetBoundsCallback(BoundsCallback callback);
 
     // 开关 widget；打开时会自动补 observer 并 place 到当前 world bounds。
     // 返回 false 表示当前还不满足安全启用条件，例如缺少 interactor 或有效 world bounds。
-    bool SetEnabled(bool enabled);
+    bool SetEnabled(bool isEnabled);
 
     // 查询当前 widget 是否开启。
     bool GetEnabled() const;
 
 private:
-    friend class OrthogonalCropWidgetStateCallback;
+    friend class CropBoxCallback;
 
     // 检查一组 bounds 是否有正体积。
     static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
@@ -105,13 +105,13 @@ private:
     vtkSmartPointer<vtkBoxRepresentation> m_representation;
 
     // VTK observer 适配器。
-    vtkSmartPointer<OrthogonalCropWidgetStateCallback> m_callbackCommand;
+    vtkSmartPointer<CropBoxCallback> m_callbackCommand;
 
     // 向交互桥上报 world bounds / phase 的回调。
-    WorldBoundsChangedCallback m_worldBoundsChangedCallback;
+    BoundsCallback m_boundsCallback;
 
     // 当前 widget 开关状态。
-    bool m_enabled = false;
+    bool m_isEnabled = false;
 
     // observer 是否已经绑定过。
     bool m_hasObservers = false;
@@ -122,7 +122,7 @@ private:
 
     // 记录最近一次 PlaceWidget 使用的 world AABB，作为反解当前有向盒的固定基准；
     // 当前 polydata 角点只表达交互后的姿态，必须配合这个基准盒才能求回完整 affine。
-    std::array<double, 6> m_widgetInitialWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    std::array<double, 6> m_baseBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 
     // 当前参考 world bounds，作为 currentWorldBounds 无效时的回退来源。
     std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };

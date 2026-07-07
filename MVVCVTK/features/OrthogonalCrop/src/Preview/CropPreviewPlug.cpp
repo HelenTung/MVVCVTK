@@ -1,4 +1,4 @@
-#include "Preview/OrthogonalCropPreviewPlugService.h"
+#include "Preview/CropPreviewPlug.h"
 
 #include <vtkActor.h>
 #include <vtkGPUVolumeRayCastMapper.h>
@@ -90,9 +90,9 @@ static constexpr const char* kPolyDataRemoveInsidePlaneLightImplReplacement =
     "      discard;\n"
     "      }\n";
 
-bool OrthogonalCropPreviewPlugService::SetPreview(
+bool CropPreviewPlug::SetPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
-    const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
+    const std::shared_ptr<CropOverlay>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult* volumePreviewResult,
     const OrthogonalCropResult* polyDataPreviewResult,
@@ -145,9 +145,9 @@ bool OrthogonalCropPreviewPlugService::SetPreview(
     return mainPreviewApplied;
 }
 
-void OrthogonalCropPreviewPlugService::ResetPreview(
+void CropPreviewPlug::ResetPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
-    const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy)
+    const std::shared_ptr<CropOverlay>& overlayStrategy)
 {
     if (overlayStrategy) {
         overlayStrategy->ClearPreview();
@@ -166,7 +166,7 @@ void OrthogonalCropPreviewPlugService::ResetPreview(
     ResetMeshView(targetService);
 }
 
-vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewData(
+vtkSmartPointer<vtkPolyData> CropPreviewPlug::GetPreviewData(
     const std::shared_ptr<AbstractInteractiveService>& targetService) const
 {
     if (!targetService) {
@@ -178,12 +178,12 @@ vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewData(
     return mapper ? vtkPolyData::SafeDownCast(mapper->GetInput()) : nullptr;
 }
 
-void OrthogonalCropPreviewPlugService::Clear()
+void CropPreviewPlug::Clear()
 {
     m_targetStates.clear();
 }
 
-void OrthogonalCropPreviewPlugService::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
+void CropPreviewPlug::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
 {
     ClearVolumeCut(volume, volumeMapper);
     if (!volume || !volumeMapper) {
@@ -197,7 +197,7 @@ void OrthogonalCropPreviewPlugService::ResetVolumeView(vtkVolume* volume, vtkVol
     volume->Modified();
 }
 
-void OrthogonalCropPreviewPlugService::ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
+void CropPreviewPlug::ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
 {
     if (!volume || !volumeMapper) {
         return;
@@ -219,24 +219,24 @@ void OrthogonalCropPreviewPlugService::ClearVolumeCut(vtkVolume* volume, vtkVolu
     volume->Modified();
 }
 
-vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildBoxClip(
+vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     const auto& cropData = previewResult.GetCropDataModel();
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
+    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToWorldMat->Identity();
     if (referenceService) {
-        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
+        inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
-    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
+    auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
 
     // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> active input model，
     // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
+    vtkMatrix4x4::Multiply4x4(inputToWorldMat, boxToInputMat, boxToWorldMatrix);
 
     auto boxToWorldTransform = vtkSmartPointer<vtkTransform>::New();
     boxToWorldTransform->SetMatrix(boxToWorldMatrix);
@@ -272,26 +272,26 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildBoxCl
     return clippingPlanes;
 }
 
-vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlaneClip(
+vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
     const auto& cropData = previewResult.GetCropDataModel();
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
+    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToWorldMat->Identity();
     if (referenceService) {
-        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
+        inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
-    auto activeInputModelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-    activeInputModelToWorldTransform->SetMatrix(activeInputModelToWorldMatrix);
+    auto inputToWorld = vtkSmartPointer<vtkTransform>::New();
+    inputToWorld->SetMatrix(inputToWorldMat);
 
     const auto planeCenterInInputModel = cropData.GetPlaneCenter();
     const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
-    activeInputModelToWorldTransform->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
-    activeInputModelToWorldTransform->TransformNormal(planeNormalInInputModel.data(), worldNormal);
+    inputToWorld->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
+    inputToWorld->TransformNormal(planeNormalInInputModel.data(), worldNormal);
     if (vtkMath::Normalize(worldNormal) <= 1e-12) {
         worldNormal[0] = 0.0;
         worldNormal[1] = 0.0;
@@ -311,7 +311,7 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlane
     return clippingPlanes;
 }
 
-bool OrthogonalCropPreviewPlugService::SetVolumeView(
+bool CropPreviewPlug::SetVolumeView(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
@@ -339,7 +339,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumeView(
 
     if (removalMode == CropRemovalMode::RemoveInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
-        const bool usePlane = previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane;
+        const bool usePlane = previewResult.GetResolvedGeometryType() == CropShape::Plane;
         const bool applied = usePlane
             ? SetVolumePlane(volume, gpuVolumeMapper, previewResult)
             : SetVolumeRemove(volume, gpuVolumeMapper, previewResult);
@@ -358,7 +358,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumeView(
     return true;
 }
 
-void OrthogonalCropPreviewPlugService::SetVolumeKeep(
+void CropPreviewPlug::SetVolumeKeep(
     vtkVolumeMapper* volumeMapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
@@ -370,12 +370,12 @@ void OrthogonalCropPreviewPlugService::SetVolumeKeep(
     // 体渲染 mapper 的 clipping planes 需要 world 坐标；
     // 结果只提供标准盒到当前输入模型，world 矩阵来自参考窗口当前主数据。
     volumeMapper->SetClippingPlanes(
-        previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
+        previewResult.GetResolvedGeometryType() == CropShape::Plane
             ? BuildPlaneClip(referenceService, previewResult)
             : BuildBoxClip(referenceService, previewResult));
 }
 
-bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
+bool CropPreviewPlug::SetVolumeRemove(
     vtkVolume* volume,
     vtkGPUVolumeRayCastMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
@@ -385,13 +385,13 @@ bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
     }
 
     const auto& cropData = previewResult.GetCropDataModel();
-    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
+    auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
 
     // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
     // 采样点先由 VTK shader 内置矩阵还原到 active input model，再送入标准盒空间。
-    auto activeInputModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(boxToActiveInputModelMatrix, activeInputModelToBoxMatrix);
+    auto inputToBoxMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToInputMat, inputToBoxMat);
 
     auto shaderProperty = volume->GetShaderProperty();
     shaderProperty->AddFragmentShaderReplacement(
@@ -400,18 +400,18 @@ bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
         kVolumeRemoveInsideBaseImplReplacement,
         false);
 
-    auto activeInputModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToBoxShaderMatrix->DeepCopy(activeInputModelToBoxMatrix);
+    auto inputToBoxShader = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToBoxShader->DeepCopy(inputToBoxMat);
     // 上传前转置矩阵；
     // VTK uniforms 按 OpenGL 列主序解释，转置后 shader 乘法才与 C++ activeInputModelToBox 结果一致。
-    activeInputModelToBoxShaderMatrix->Transpose();
+    inputToBoxShader->Transpose();
 
     // vtk volume shader 中 g_dataPos 是纹理坐标；
     // in_textureDatasetMatrix[0] 会把它还原到 active input model。
     // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 activeInputModelToBox 需要先转置再交给 shader。
     // uniforms 的声明由 VTK 的 CustomUniforms::Dec 自动生成，不能再手写到 Base::Dec，否则会重复声明。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, activeInputModelToBoxShaderMatrix);
+    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, inputToBoxShader);
     fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 1);
 
     // box 与 plane 共用同一段 shader replacement，shader 同时引用 plane uniform。
@@ -430,7 +430,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
     return true;
 }
 
-bool OrthogonalCropPreviewPlugService::SetVolumePlane(
+bool CropPreviewPlug::SetVolumePlane(
     vtkVolume* volume,
     vtkGPUVolumeRayCastMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
@@ -466,7 +466,7 @@ bool OrthogonalCropPreviewPlugService::SetVolumePlane(
     return true;
 }
 
-void OrthogonalCropPreviewPlugService::ResetMeshView(
+void CropPreviewPlug::ResetMeshView(
     const std::shared_ptr<AbstractInteractiveService>& targetService)
 {
     auto key = targetService.get();
@@ -508,7 +508,7 @@ void OrthogonalCropPreviewPlugService::ResetMeshView(
     actor->Modified();
 }
 
-bool OrthogonalCropPreviewPlugService::SetMeshView(
+bool CropPreviewPlug::SetMeshView(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
@@ -539,12 +539,12 @@ bool OrthogonalCropPreviewPlugService::SetMeshView(
         return true;
     }
 
-    return previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
+    return previewResult.GetResolvedGeometryType() == CropShape::Plane
         ? SetMeshPlaneCut(actor, mapper, referenceService, previewResult)
         : SetMeshRemove(actor, mapper, referenceService, previewResult);
 }
 
-void OrthogonalCropPreviewPlugService::SetMeshKeep(
+void CropPreviewPlug::SetMeshKeep(
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
@@ -556,13 +556,13 @@ void OrthogonalCropPreviewPlugService::SetMeshKeep(
     // PolyData KeepInside 与 volume KeepInside 使用同一套 world clipping planes；
     // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
     mapper->SetClippingPlanes(
-        previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
+        previewResult.GetResolvedGeometryType() == CropShape::Plane
             ? BuildPlaneClip(referenceService, previewResult)
             : BuildBoxClip(referenceService, previewResult));
     mapper->Modified();
 }
 
-bool OrthogonalCropPreviewPlugService::SetMeshRemove(
+bool CropPreviewPlug::SetMeshRemove(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
@@ -573,28 +573,28 @@ bool OrthogonalCropPreviewPlugService::SetMeshRemove(
     }
 
     const auto& cropData = previewResult.GetCropDataModel();
-    auto boxToActiveInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToActiveInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
+    auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
 
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
+    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToWorldMat->Identity();
     if (referenceService) {
-        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
+        inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
     auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(activeInputModelToWorldMatrix, boxToActiveInputModelMatrix, boxToWorldMatrix);
+    vtkMatrix4x4::Multiply4x4(inputToWorldMat, boxToInputMat, boxToWorldMatrix);
 
     auto worldToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Invert(boxToWorldMatrix, worldToBoxMatrix);
 
-    auto polyDataModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    actor->GetModelToWorldMatrix(polyDataModelToWorldMatrix);
+    auto polyToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    actor->GetModelToWorldMatrix(polyToWorldMat);
 
     // polydata shader 的输入点是 actor 自己的 model 坐标，不是 volume shader 的 g_dataPos。
     // 因此先把 crop box 提升到 world，再用 actor model->world 折出 polyData model -> box。
     auto polyDataModelToBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(worldToBoxMatrix, polyDataModelToWorldMatrix, polyDataModelToBoxMatrix);
+    vtkMatrix4x4::Multiply4x4(worldToBoxMatrix, polyToWorldMat, polyDataModelToBoxMatrix);
 
     auto shaderProperty = actor->GetShaderProperty();
     shaderProperty->AddVertexShaderReplacement(
@@ -618,14 +618,14 @@ bool OrthogonalCropPreviewPlugService::SetMeshRemove(
         kPolyDataRemoveInsideLightImplReplacement,
         false);
 
-    auto polyDataModelToBoxShaderMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    polyDataModelToBoxShaderMatrix->DeepCopy(polyDataModelToBoxMatrix);
-    polyDataModelToBoxShaderMatrix->Transpose();
+    auto polyToBoxShader = vtkSmartPointer<vtkMatrix4x4>::New();
+    polyToBoxShader->DeepCopy(polyDataModelToBoxMatrix);
+    polyToBoxShader->Transpose();
 
     // PolyData RemoveInside 只在标准盒空间判断 [-1, 1]^3；
     // C++ 侧预先折叠 polyData model -> box，并按 VTK shader uniform 约定上传转置矩阵。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsidePolyDataModelToBoxUniform, polyDataModelToBoxShaderMatrix);
+    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsidePolyDataModelToBoxUniform, polyToBoxShader);
 
     shaderProperty->Modified();
     mapper->Modified();
@@ -633,7 +633,7 @@ bool OrthogonalCropPreviewPlugService::SetMeshRemove(
     return true;
 }
 
-bool OrthogonalCropPreviewPlugService::SetMeshPlaneCut(
+bool CropPreviewPlug::SetMeshPlaneCut(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
@@ -644,38 +644,38 @@ bool OrthogonalCropPreviewPlugService::SetMeshPlaneCut(
     }
 
     const auto& cropData = previewResult.GetCropDataModel();
-    auto activeInputModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    activeInputModelToWorldMatrix->Identity();
+    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    inputToWorldMat->Identity();
     if (referenceService) {
-        activeInputModelToWorldMatrix->DeepCopy(referenceService->GetModelMatrix().data());
+        inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
-    auto activeInputModelToWorldTransform = vtkSmartPointer<vtkTransform>::New();
-    activeInputModelToWorldTransform->SetMatrix(activeInputModelToWorldMatrix);
+    auto inputToWorld = vtkSmartPointer<vtkTransform>::New();
+    inputToWorld->SetMatrix(inputToWorldMat);
 
     const auto planeCenterInInputModel = cropData.GetPlaneCenter();
     const auto planeNormalInInputModel = cropData.GetPlaneNormal();
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
-    activeInputModelToWorldTransform->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
-    activeInputModelToWorldTransform->TransformNormal(planeNormalInInputModel.data(), worldNormal);
+    inputToWorld->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
+    inputToWorld->TransformNormal(planeNormalInInputModel.data(), worldNormal);
     if (vtkMath::Normalize(worldNormal) <= 1e-12) {
         return false;
     }
 
-    auto polyDataModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    actor->GetModelToWorldMatrix(polyDataModelToWorldMatrix);
+    auto polyToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    actor->GetModelToWorldMatrix(polyToWorldMat);
 
-    auto worldToPolyDataModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(polyDataModelToWorldMatrix, worldToPolyDataModelMatrix);
+    auto worldToPolyMat = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(polyToWorldMat, worldToPolyMat);
 
-    auto worldToPolyDataModelTransform = vtkSmartPointer<vtkTransform>::New();
-    worldToPolyDataModelTransform->SetMatrix(worldToPolyDataModelMatrix);
+    auto worldToPoly = vtkSmartPointer<vtkTransform>::New();
+    worldToPoly->SetMatrix(worldToPolyMat);
 
     double polyDataModelOrigin[3] = { 0.0, 0.0, 0.0 };
     double polyDataModelNormal[3] = { 0.0, 0.0, 1.0 };
-    worldToPolyDataModelTransform->TransformPoint(worldOrigin, polyDataModelOrigin);
-    worldToPolyDataModelTransform->TransformNormal(worldNormal, polyDataModelNormal);
+    worldToPoly->TransformPoint(worldOrigin, polyDataModelOrigin);
+    worldToPoly->TransformNormal(worldNormal, polyDataModelNormal);
     if (vtkMath::Normalize(polyDataModelNormal) <= 1e-12) {
         return false;
     }

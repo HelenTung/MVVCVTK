@@ -53,7 +53,7 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\OrthogonalCropBackendRouterService.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h">
       <Filter>include\Routing</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h">
@@ -79,7 +79,7 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
       <Filter>src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\OrthogonalCropBackendRouterService.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>src\Routing</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp">

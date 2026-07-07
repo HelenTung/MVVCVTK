@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/PlanarCropWidgetStateController.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Interaction/CropPlaneWidget.h
 // 分类: Service / Widget Controller
 // 说明: 管理 vtkImplicitPlaneWidget2，把 VTK 平面事件翻译为裁切模块状态回调。
 // =====================================================================
@@ -17,34 +17,34 @@
 #include <array>
 #include <functional>
 
-class PlanarCropWidgetStateController;
+class CropPlaneWidget;
 
-// VTK observer 适配器：把原始事件转交给 PlanarCropWidgetStateController 处理。
-class PlanarCropWidgetStateCallback : public vtkCommand {
+// VTK observer 适配器：把原始事件转交给 CropPlaneWidget 处理。
+class CropPlaneCallback : public vtkCommand {
 public:
-    static PlanarCropWidgetStateCallback* New();
+    static CropPlaneCallback* New();
 
     // 绑定回调所有者。
-    void SetOwner(PlanarCropWidgetStateController* owner);
+    void SetOwner(CropPlaneWidget* owner);
 
     // VTK 事件入口。
     void Execute(vtkObject* caller, unsigned long eventId, void* callData) override;
 
 private:
     // 事件真正的业务处理者。
-    PlanarCropWidgetStateController* m_owner = nullptr;
+    CropPlaneWidget* m_owner = nullptr;
 };
 
 // 只管理平面 widget 生命周期、平面参数与交互事件，不关心裁切算法与结果投递。
-class PlanarCropWidgetStateController {
+class CropPlaneWidget {
 public:
     // 向上层报告 world 平面与交互阶段的统一回调类型。
-    using WorldPlaneChangedCallback = std::function<void(
+    using PlaneCallback = std::function<void(
         const CropVectorDouble3Array& worldOrigin,
         const CropVectorDouble3Array& worldNormal,
         CropInteractionPhase phase)>;
 
-    PlanarCropWidgetStateController();
+    CropPlaneWidget();
 
     // 绑定 widget 所属 interactor。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
@@ -64,16 +64,16 @@ public:
         CropVectorDouble3Array& worldNormal) const;
 
     // 设置 world 平面变化回调。
-    void SetPlaneCallback(WorldPlaneChangedCallback callback);
+    void SetPlaneCallback(PlaneCallback callback);
 
     // 开关 widget；打开时会自动补 observer 并 place 到当前 reference bounds。
-    bool SetEnabled(bool enabled);
+    bool SetEnabled(bool isEnabled);
 
     // 查询当前 widget 是否开启。
     bool GetEnabled() const;
 
 private:
-    friend class PlanarCropWidgetStateCallback;
+    friend class CropPlaneCallback;
 
     // 检查一组 bounds 是否有正体积。
     static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
@@ -103,13 +103,13 @@ private:
     vtkSmartPointer<vtkImplicitPlaneRepresentation> m_representation;
 
     // VTK observer 适配器。
-    vtkSmartPointer<PlanarCropWidgetStateCallback> m_callbackCommand;
+    vtkSmartPointer<CropPlaneCallback> m_callbackCommand;
 
     // 向交互桥上报 world plane / phase 的回调。
-    WorldPlaneChangedCallback m_worldPlaneChangedCallback;
+    PlaneCallback m_planeCallback;
 
     // 当前 widget 开关状态。
-    bool m_enabled = false;
+    bool m_isEnabled = false;
 
     // observer 是否已经绑定过。
     bool m_hasObservers = false;

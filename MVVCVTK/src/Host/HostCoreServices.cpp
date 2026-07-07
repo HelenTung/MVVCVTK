@@ -2,7 +2,7 @@
 
 #include "AppState.h"
 #include "DataManager.h"
-#include "Interaction/OrthogonalCropInteractionBridgeService.h"
+#include "Interaction/CropBridge.h"
 #include "Services/GapAnalysisService.h"
 #include "VolumeAnalysisService.h"
 
@@ -16,6 +16,6 @@ HostCoreServices BuildHostCoreServices()
     core.sharedState = std::make_shared<SharedInteractionState>(core.sharedStateBroadcaster);
     core.imageAnalysis = std::make_shared<VolumeAnalysisService>(core.sharedDataMgr);
     core.gapAnalysis = std::make_shared<GapAnalysisService>();
-    core.orthogonalCropBridge = std::make_shared<OrthogonalCropInteractionBridgeService>();
+    core.orthogonalCropBridge = std::make_shared<CropBridge>();
     return core;
 }

@@ -18,7 +18,7 @@
 
 class AbstractAppService;
 class AbstractVisualStrategy;
-class GapAnalysisCompletionCallbackState;
+class GapDoneState;
 
 class GapAnalysisService : public IGapAnalysisService {
 public:
@@ -118,19 +118,19 @@ private:
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
 
     // 插件内部 pending callback 状态；只暴露主线程轮询接口，不反向 include App 层。
-    std::unique_ptr<GapAnalysisCompletionCallbackState> m_completionCallbackState;
+    std::unique_ptr<GapDoneState> m_completionCallbackState;
 
-    std::vector<std::shared_ptr<AbstractAppService>> m_displayMeshOverlayTargets;
-    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> m_displaySliceOverlayTargets;
+    std::vector<std::shared_ptr<AbstractAppService>> m_meshTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> m_sliceTargets;
     std::vector<DisplayOverlayBinding> m_displayOverlayBindings;
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     GapAnalysisSurfaceRequest m_displaySurfaceRequest;
     VoidDetectionParams m_displayVoidParams;
-    std::function<void(double isoValue)> m_displayIsoValueResolvedCallback;
-    bool m_displayActive = false;
-    bool m_displayOverlayVisible = false;
-    bool m_displayRunRequested = false;
-    bool m_displayCompletionHandled = false;
-    bool m_displayFailureLogged = false;
+    std::function<void(double isoValue)> m_isoCallback;
+    bool m_isViewOn = false;
+    bool m_isOverlayOn = false;
+    bool m_hasRunReq = false;
+    bool m_hasDone = false;
+    bool m_hasFailLog = false;
 };

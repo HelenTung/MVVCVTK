@@ -14,13 +14,13 @@
 
 #include <cstddef>
 
-class OrthogonalCropBackendRouterService;
+class CropRouter;
 
 class PlanarCropAlgorithm {
 public:
 private:
     // router 是三元组分发边界；算法执行入口只给 router 调用，避免外部绕过路由组合。
-    friend class OrthogonalCropBackendRouterService;
+    friend class CropRouter;
 
     // image / volume 共用 image 输入入口；preview 只返回几何快照，submit 返回 image 与 mask。
     static OrthogonalCropResult GetResult(

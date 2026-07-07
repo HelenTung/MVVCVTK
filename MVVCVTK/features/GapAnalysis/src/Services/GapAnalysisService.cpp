@@ -37,14 +37,14 @@ static bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage)
 }
 } // namespace
 
-class GapAnalysisCompletionCallbackState {
+class GapDoneState {
 public:
     void SetCallback(std::function<void(bool)> callback) {
         std::lock_guard<std::mutex> lk(m_mutex);
         m_callback = std::move(callback);
     }
 
-    void SetReady(bool success) {
+    void SetReady(bool isSuccess) {
         std::lock_guard<std::mutex> lk(m_mutex);
         if (!m_callback) {
             return;
@@ -52,7 +52,7 @@ public:
 
         m_nextCallback = std::move(m_callback);
         m_callback = nullptr;
-        m_pendingResult = success;
+        m_isNextOk = isSuccess;
         m_hasCallback.store(true);
     }
 
@@ -62,17 +62,17 @@ public:
 
     void SendCallback() {
         std::function<void(bool)> callback;
-        bool success = false;
+        bool isSuccess = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
             callback = std::move(m_nextCallback);
             m_nextCallback = nullptr;
-            success = m_pendingResult;
+            isSuccess = m_isNextOk;
         }
 
         // 回调可能触发 UI、VTK 或服务调用；锁外执行避免插件内部状态和宿主回调互相重入死锁。
         if (callback) {
-            callback(success);
+            callback(isSuccess);
         }
     }
 
@@ -80,12 +80,12 @@ private:
     std::mutex m_mutex;
     std::function<void(bool)> m_callback;
     std::function<void(bool)> m_nextCallback;
-    bool m_pendingResult{ false };
+    bool m_isNextOk{ false };
     std::atomic<bool> m_hasCallback{ false };
 };
 
 GapAnalysisService::GapAnalysisService()
-    : m_completionCallbackState(std::make_unique<GapAnalysisCompletionCallbackState>()) {
+    : m_completionCallbackState(std::make_unique<GapDoneState>()) {
 }
 
 GapAnalysisService::~GapAnalysisService() {
@@ -220,23 +220,23 @@ bool GapAnalysisService::StartView(
         StopAsync();
     }
 
-    m_displayMeshOverlayTargets.clear();
-    m_displayMeshOverlayTargets.reserve(meshOverlayTargets.size());
+    m_meshTargets.clear();
+    m_meshTargets.reserve(meshOverlayTargets.size());
     for (const auto& target : meshOverlayTargets) {
         if (target) {
-            m_displayMeshOverlayTargets.push_back(target);
+            m_meshTargets.push_back(target);
         }
     }
 
-    m_displaySliceOverlayTargets.clear();
-    m_displaySliceOverlayTargets.reserve(sliceOverlayTargets.size());
+    m_sliceTargets.clear();
+    m_sliceTargets.reserve(sliceOverlayTargets.size());
     for (const auto& target : sliceOverlayTargets) {
         if (target.second) {
-            m_displaySliceOverlayTargets.push_back(target);
+            m_sliceTargets.push_back(target);
         }
     }
 
-    if (m_displayMeshOverlayTargets.empty() && m_displaySliceOverlayTargets.empty()) {
+    if (m_meshTargets.empty() && m_sliceTargets.empty()) {
         std::cerr << "[GapAnalysis] Display activation skipped: no overlay target was provided." << std::endl;
         ClearDisplayState();
         return false;
@@ -246,24 +246,24 @@ bool GapAnalysisService::StartView(
     m_displayLabelImage = nullptr;
     m_displaySurfaceRequest = surfaceRequest;
     m_displayVoidParams = voidParams;
-    m_displayIsoValueResolvedCallback = std::move(onIsoValueResolved);
-    m_displayActive = true;
-    m_displayOverlayVisible = true;
-    m_displayRunRequested = true;
-    m_displayCompletionHandled = false;
-    m_displayFailureLogged = false;
+    m_isoCallback = std::move(onIsoValueResolved);
+    m_isViewOn = true;
+    m_isOverlayOn = true;
+    m_hasRunReq = true;
+    m_hasDone = false;
+    m_hasFailLog = false;
     std::cout << "[GapAnalysis] Display mode requested. Analysis will start after volume data is ready." << std::endl;
     return true;
 }
 
 bool GapAnalysisService::SwitchOverlay() {
-    if (!m_displayActive) {
+    if (!m_isViewOn) {
         std::cerr << "[GapAnalysis] Overlay toggle ignored: display mode is not active." << std::endl;
         return false;
     }
 
-    m_displayOverlayVisible = !m_displayOverlayVisible;
-    if (!m_displayOverlayVisible) {
+    m_isOverlayOn = !m_isOverlayOn;
+    if (!m_isOverlayOn) {
         SetOverlayOff();
         std::cout << "[GapAnalysis] Overlays hidden. Use the host overlay toggle command to show them again." << std::endl;
         return true;
@@ -278,7 +278,7 @@ bool GapAnalysisService::SwitchOverlay() {
 }
 
 bool GapAnalysisService::ExitView() {
-    const bool wasActive = m_displayActive;
+    const bool wasActive = m_isViewOn;
     const bool hadCachedResult = m_displayVoidMesh != nullptr || m_displayLabelImage != nullptr;
     const bool removedAnyOverlay = SetOverlayOff();
     if (wasActive) {
@@ -292,25 +292,25 @@ bool GapAnalysisService::ExitView() {
 }
 
 bool GapAnalysisService::GetViewOn() const {
-    return m_displayActive;
+    return m_isViewOn;
 }
 
 void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
-    if (!m_displayActive) {
+    if (!m_isViewOn) {
         return;
     }
 
-    if (m_displayRunRequested) {
+    if (m_hasRunReq) {
         if (GetAnalysisState() != GapAnalysisState::Running
             && StartTask(std::move(inputImage))) {
-            m_displayRunRequested = false;
-            m_displayCompletionHandled = false;
-            m_displayFailureLogged = false;
+            m_hasRunReq = false;
+            m_hasDone = false;
+            m_hasFailLog = false;
         }
         return;
     }
 
-    if (m_displayCompletionHandled) {
+    if (m_hasDone) {
         return;
     }
 
@@ -324,16 +324,16 @@ void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
     }
 
     if (state == GapAnalysisState::Failed) {
-        if (!m_displayFailureLogged) {
+        if (!m_hasFailLog) {
             std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
-            m_displayFailureLogged = true;
+            m_hasFailLog = true;
         }
-        m_displayCompletionHandled = true;
+        m_hasDone = true;
         return;
     }
 
     SetDisplayView();
-    m_displayCompletionHandled = true;
+    m_hasDone = true;
 }
 
 GapAnalysisService::VolumeBufferSnapshot GapAnalysisService::GetInputSnapshot() const {
@@ -414,8 +414,8 @@ bool GapAnalysisService::StartTask(vtkSmartPointer<vtkImageData> inputImage) {
     }
 
     const double isoValue = GetDisplayIso(*inputSnapshot);
-    if (m_displayIsoValueResolvedCallback) {
-        m_displayIsoValueResolvedCallback(isoValue);
+    if (m_isoCallback) {
+        m_isoCallback(isoValue);
     }
 
     SurfaceParams surfaceParams;
@@ -427,14 +427,14 @@ bool GapAnalysisService::StartTask(vtkSmartPointer<vtkImageData> inputImage) {
 }
 
 void GapAnalysisService::SetDisplayView() {
-    if (!m_displayActive) {
+    if (!m_isViewOn) {
         return;
     }
 
     m_displayVoidMesh = BuildVoidMesh();
     m_displayLabelImage = BuildLabelImage();
     SetOverlayOff();
-    if (!m_displayOverlayVisible) {
+    if (!m_isOverlayOn) {
         std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay toggle command to show them." << std::endl;
         return;
     }
@@ -465,7 +465,7 @@ bool GapAnalysisService::SetStoredView() {
     bool addedSliceOverlay = false;
 
     if (hasMeshOverlayInput) {
-        for (const auto& service : m_displayMeshOverlayTargets) {
+        for (const auto& service : m_meshTargets) {
             if (!service) {
                 continue;
             }
@@ -478,7 +478,7 @@ bool GapAnalysisService::SetStoredView() {
     }
 
     if (hasSliceOverlayInput) {
-        for (const auto& target : m_displaySliceOverlayTargets) {
+        for (const auto& target : m_sliceTargets) {
             if (!target.second) {
                 continue;
             }
@@ -513,18 +513,18 @@ bool GapAnalysisService::SetStoredView() {
 }
 
 void GapAnalysisService::ClearDisplayState() {
-    m_displayMeshOverlayTargets.clear();
-    m_displaySliceOverlayTargets.clear();
+    m_meshTargets.clear();
+    m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
     m_displaySurfaceRequest = {};
     m_displayVoidParams = {};
-    m_displayIsoValueResolvedCallback = nullptr;
-    m_displayActive = false;
-    m_displayOverlayVisible = false;
-    m_displayRunRequested = false;
-    m_displayCompletionHandled = false;
-    m_displayFailureLogged = false;
+    m_isoCallback = nullptr;
+    m_isViewOn = false;
+    m_isOverlayOn = false;
+    m_hasRunReq = false;
+    m_hasDone = false;
+    m_hasFailLog = false;
 }
 
 double GapAnalysisService::GetDisplayIso(const VolumeBuffer& inputSnapshot) const {

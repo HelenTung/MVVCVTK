@@ -1,7 +1,7 @@
 #pragma once
 
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/include/Render/Strategies/OrthogonalCropPreviewOverlayStrategy.h
+// Path: MVVCVTK/features/OrthogonalCrop/include/Render/Strategies/CropOverlay.h
 // 分类: Strategy / Preview Overlay
 // 说明: 把裁切结果渲染为 outline、mask slice 或 clipped polydata overlay。
 // =====================================================================
@@ -22,9 +22,9 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkProp3D.h>
 
-class OrthogonalCropPreviewOverlayStrategy : public BaseVisualStrategy {
+class CropOverlay : public BaseVisualStrategy {
 public:
-    OrthogonalCropPreviewOverlayStrategy();
+    CropOverlay();
 
     // BaseVisualStrategy 要求的输入接口；本策略实际通过 SetCropResult 驱动。
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
@@ -100,7 +100,7 @@ private:
 
     // 是否允许当前窗口显示 3D 几何参照线框。
     // 非 reference 预览窗口仍可显示裁切后的主模型效果，但不再额外画一个像可拖拽 box 的线框。
-    bool m_allowGeometryReferenceVisible = true;
+    bool m_isRefVisible = true;
 
     // 当前窗口切片轴；3D 时通常为 -1。
     int m_sliceAxis = -1;

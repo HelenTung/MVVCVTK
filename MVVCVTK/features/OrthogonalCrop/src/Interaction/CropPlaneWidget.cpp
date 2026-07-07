@@ -1,10 +1,10 @@
 // =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/PlanarCropWidgetStateController.cpp
+// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/CropPlaneWidget.cpp
 // 分类: Service / Widget Controller Implementation
 // 说明: 封装 vtkImplicitPlaneWidget2 的构造、启停、observer 绑定与平面回调翻译。
 // =====================================================================
 
-#include "Interaction/PlanarCropWidgetStateController.h"
+#include "Interaction/CropPlaneWidget.h"
 
 #include <vtkMath.h>
 #include <vtkObjectFactory.h>
@@ -15,14 +15,14 @@
 
 static constexpr double kPlaneWidgetNormalEpsilon = 1e-8;
 
-vtkStandardNewMacro(PlanarCropWidgetStateCallback);
+vtkStandardNewMacro(CropPlaneCallback);
 
-void PlanarCropWidgetStateCallback::SetOwner(PlanarCropWidgetStateController* owner)
+void CropPlaneCallback::SetOwner(CropPlaneWidget* owner)
 {
     m_owner = owner;
 }
 
-void PlanarCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long eventId, void* callData)
+void CropPlaneCallback::Execute(vtkObject* caller, unsigned long eventId, void* callData)
 {
     (void)caller;
     (void)callData;
@@ -31,7 +31,7 @@ void PlanarCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long eve
     }
 }
 
-PlanarCropWidgetStateController::PlanarCropWidgetStateController()
+CropPlaneWidget::CropPlaneWidget()
 {
     // 平面 widget 外观固定在控制器内，上层 bridge 只消费 world 中心点/法线。
     m_widget = vtkSmartPointer<vtkImplicitPlaneWidget2>::New();
@@ -52,17 +52,17 @@ PlanarCropWidgetStateController::PlanarCropWidgetStateController()
     m_representation->GetSelectedPlaneProperty()->SetOpacity(0.36);
     m_widget->SetRepresentation(m_representation);
 
-    m_callbackCommand = vtkSmartPointer<PlanarCropWidgetStateCallback>::New();
+    m_callbackCommand = vtkSmartPointer<CropPlaneCallback>::New();
     m_callbackCommand->SetOwner(this);
 }
 
-void PlanarCropWidgetStateController::SetInteractor(vtkRenderWindowInteractor* interactor)
+void CropPlaneWidget::SetInteractor(vtkRenderWindowInteractor* interactor)
 {
     m_interactor = interactor;
     m_widget->SetInteractor(interactor);
 }
 
-void PlanarCropWidgetStateController::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
+void CropPlaneWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
 {
     if (!GetBoundsAreValid(worldBounds)) {
         return;
@@ -77,7 +77,7 @@ void PlanarCropWidgetStateController::SetReferenceWorldBounds(const std::array<d
     SetPlaneRep();
 }
 
-void PlanarCropWidgetStateController::SetWidgetWorldPlane(
+void CropPlaneWidget::SetWidgetWorldPlane(
     const CropVectorDouble3Array& worldOrigin,
     const CropVectorDouble3Array& worldNormal,
     const std::array<double, 2>& worldHalfExtents)
@@ -96,7 +96,7 @@ void PlanarCropWidgetStateController::SetWidgetWorldPlane(
     SetPlaneRep();
 }
 
-bool PlanarCropWidgetStateController::GetCurrentWorldPlane(
+bool CropPlaneWidget::GetCurrentWorldPlane(
     CropVectorDouble3Array& worldOrigin,
     CropVectorDouble3Array& worldNormal) const
 {
@@ -105,20 +105,20 @@ bool PlanarCropWidgetStateController::GetCurrentWorldPlane(
     return vtkMath::Norm(worldNormal.data()) > kPlaneWidgetNormalEpsilon;
 }
 
-void PlanarCropWidgetStateController::SetPlaneCallback(WorldPlaneChangedCallback callback)
+void CropPlaneWidget::SetPlaneCallback(PlaneCallback callback)
 {
-    m_worldPlaneChangedCallback = std::move(callback);
+    m_planeCallback = std::move(callback);
 }
 
-bool PlanarCropWidgetStateController::SetEnabled(bool enabled)
+bool CropPlaneWidget::SetEnabled(bool isEnabled)
 {
-    if (enabled && !m_interactor) {
+    if (isEnabled && !m_interactor) {
         return false;
     }
 
     AttachObservers();
 
-    if (enabled) {
+    if (isEnabled) {
         if (!GetBoundsAreValid(m_referenceWorldBounds)) {
             return false;
         }
@@ -130,23 +130,23 @@ bool PlanarCropWidgetStateController::SetEnabled(bool enabled)
         m_widget->Off();
     }
 
-    m_enabled = enabled;
+    m_isEnabled = isEnabled;
     return true;
 }
 
-bool PlanarCropWidgetStateController::GetEnabled() const
+bool CropPlaneWidget::GetEnabled() const
 {
-    return m_enabled;
+    return m_isEnabled;
 }
 
-bool PlanarCropWidgetStateController::GetBoundsAreValid(const std::array<double, 6>& bounds)
+bool CropPlaneWidget::GetBoundsAreValid(const std::array<double, 6>& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-bool PlanarCropWidgetStateController::SetUnitNormal(CropVectorDouble3Array& worldNormal)
+bool CropPlaneWidget::SetUnitNormal(CropVectorDouble3Array& worldNormal)
 {
     const double length = vtkMath::Norm(worldNormal.data());
     if (length <= kPlaneWidgetNormalEpsilon) {
@@ -159,7 +159,7 @@ bool PlanarCropWidgetStateController::SetUnitNormal(CropVectorDouble3Array& worl
     return true;
 }
 
-CropInteractionPhase PlanarCropWidgetStateController::GetEventPhase(unsigned long eventId)
+CropInteractionPhase CropPlaneWidget::GetEventPhase(unsigned long eventId)
 {
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
@@ -173,7 +173,7 @@ CropInteractionPhase PlanarCropWidgetStateController::GetEventPhase(unsigned lon
     }
 }
 
-void PlanarCropWidgetStateController::AttachObservers()
+void CropPlaneWidget::AttachObservers()
 {
     if (m_hasObservers) {
         return;
@@ -185,7 +185,7 @@ void PlanarCropWidgetStateController::AttachObservers()
     m_hasObservers = true;
 }
 
-void PlanarCropWidgetStateController::SetPlaneRep()
+void CropPlaneWidget::SetPlaneRep()
 {
     if (!m_representation || !GetBoundsAreValid(m_referenceWorldBounds)) {
         return;
@@ -209,7 +209,7 @@ void PlanarCropWidgetStateController::SetPlaneRep()
     m_representation->SetNormal(m_currentWorldNormal.data());
 }
 
-void PlanarCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
+void CropPlaneWidget::OnWidgetEvent(unsigned long eventId)
 {
     if (!m_representation) {
         return;
@@ -228,8 +228,8 @@ void PlanarCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
 
     m_currentWorldOrigin = worldOrigin;
     m_currentWorldNormal = worldNormal;
-    if (m_worldPlaneChangedCallback) {
-        m_worldPlaneChangedCallback(
+    if (m_planeCallback) {
+        m_planeCallback(
             m_currentWorldOrigin,
             m_currentWorldNormal,
             GetEventPhase(eventId));
