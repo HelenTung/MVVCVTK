@@ -28,10 +28,10 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
     m_service->SendUpdates();
 
     // needRender: 本帧是否存在待消费的渲染请求，先原子消费，避免渲染期间的新脏标记被误清掉
-    const bool needRender = m_service->ConsumeDirty();
+    const bool hasRenderNeed = m_service->GetDirtyConsumed();
 
     // 2. 检查渲染脏标记，仅在窗口有效时渲染
-    if (needRender) {
+    if (hasRenderNeed) {
         if (m_renderWindow
             && m_renderWindow->GetMapped()
             && m_renderWindow->GetGenericWindowId())

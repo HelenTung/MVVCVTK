@@ -151,7 +151,7 @@ private:
     void SetPlanePreview();
 
     // 只消费已经构造好的预览请求；这里不再判断当前几何类型。
-    void SetPreviewReq(
+    void SetPreviewRequest(
         const OrthogonalCropRequest& volumeRequest,
         const OrthogonalCropRequest& polyDataRequest);
 
@@ -173,16 +173,16 @@ private:
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
 
     // 替换 preview 目标列表前，先把旧 overlay 从旧窗口上摘掉。
-    void ClearPreviewRenderTargets();
+    void ClearPreviewViews();
 
     // 退出 preview 或退出交互模式时恢复 overlay，并把主模型管道切回全量直通。
-    void ResetPreviewTargets();
+    void ResetPreview();
 
     // 清掉预览临时绑定到 router 的 polydata；若调用方有显式 polydata 真源则恢复它。
-    void ClearPreviewPolyDataInput();
+    void ClearPreviewInput();
 
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
-    void AttachPreviewView(const std::shared_ptr<AbstractInteractiveService>& service);
+    void AttachPreview(const std::shared_ptr<AbstractInteractiveService>& service);
 
     // 把算法层返回的 preview result 分发给指定 preview 目标。
     bool SendPreview(
@@ -192,7 +192,7 @@ private:
         const OrthogonalCropResult* polyDataPreviewResult);
 
     // 把 submit 结果中的 mask / outline 分发到 overlay 层。
-    void SendResult(const OrthogonalCropResult& submitResult);
+    void SendSubmitResult(const OrthogonalCropResult& submitResult);
 
     // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
     CropRouter m_backend;

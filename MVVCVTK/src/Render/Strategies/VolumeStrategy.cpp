@@ -105,8 +105,8 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     if (!m_volume || !m_volume->GetProperty()) return;
 
     auto prop = m_volume->GetProperty();
-    const bool isTfChanged = GetFlagOn(flags, UpdateFlags::TF);
-    const bool isMaterialChanged = GetFlagOn(flags, UpdateFlags::Material);
+    const bool hasTfChanged = GetFlagOn(flags, UpdateFlags::TF);
+    const bool hasMaterialChanged = GetFlagOn(flags, UpdateFlags::Material);
 
     // 体渲染这里把 Interaction 与 TF 放在同一个状态收敛块里处理：
     // 1. 先推导“这一帧结束后”应该处于的交互态 nextIsInteracting
@@ -116,16 +116,16 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     // - 交互过程中 TF 高频变化仍然稳定落在 256 预览输入
     // - 静止期 TF 更新会继续落在 766 质量输入
     // - 同一帧里若同时出现 TF 与 Interaction，也只按最终状态收口一次
-    if ((isTfChanged || GetFlagOn(flags, UpdateFlags::Interaction)) && m_mapper) {
+    if ((hasTfChanged || GetFlagOn(flags, UpdateFlags::Interaction)) && m_mapper) {
         const bool nextIsInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
-        const bool interactionChanged = (m_isInteracting != nextIsInteracting);
+        const bool hasInteractionChanged = (m_isInteracting != nextIsInteracting);
 
         m_isInteracting = nextIsInteracting;
 
         auto activeResample = m_isInteracting ? m_interactionResample : m_qualityResample;
-        if (activeResample && (interactionChanged || isTfChanged)) {
+        if (activeResample && (hasInteractionChanged || hasTfChanged)) {
             // TF 改变后需要确保 mapper 仍绑在“当前应该显示”的那一路输入上；
             // 这里不区分是交互切换导致，还是 TF 更新导致，统一按活动输入重绑即可。
             m_mapper->SetInputConnection(activeResample->GetOutputPort());
@@ -156,7 +156,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
         m_opacity = params.material.opacity;
     }
 
-    if (isMaterialChanged && !isTfChanged && GetOpacityChanged(params.material.opacity)) {
+    if (hasMaterialChanged && !hasTfChanged && GetOpacityChanged(params.material.opacity)) {
         // 当 TF 没变、只有全局 opacity 变动时，不必重建颜色函数；
         // 这里只重建 OTF，把当前 opacity 重新折算进已有 TF 节点即可。
         auto otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
@@ -170,14 +170,14 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
         m_opacity = params.material.opacity;
     }
 
-    if (isMaterialChanged) {
+    if (hasMaterialChanged) {
         // 光照相关参数和 TF/OTF 解耦处理，避免纯材质调整时不必要地重建体数据映射函数。
         prop->SetAmbient(params.material.ambient);
         prop->SetDiffuse(params.material.diffuse);
         prop->SetSpecular(params.material.specular);
         prop->SetSpecularPower(params.material.specularPower);
 
-        if (params.material.shadeOn) prop->ShadeOn();
+        if (params.material.isShadeOn) prop->ShadeOn();
         else prop->ShadeOff();
     }
 

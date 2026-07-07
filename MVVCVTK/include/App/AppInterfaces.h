@@ -56,11 +56,11 @@ public:
         return false;
     }
     // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
-    virtual bool ConsumePendingImage() {
+    virtual bool GetPendingImage() {
         return false;
     }
-    virtual bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
-    virtual bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ protected:
     vtkSmartPointer<vtkRenderer>            m_renderer;
     vtkSmartPointer<vtkRenderWindow>        m_renderWindow;
     std::atomic<bool> m_isDirty{ false }; // 渲染脏位：只负责驱动下一帧 Render，不承载具体业务语义
-    std::atomic<bool> m_needsSync{ false }; // 同步闸门：后台/回调线程只置位，真正的策略同步统一留给主线程 Timer 心跳执行
+    std::atomic<bool> m_hasSyncNeed{ false }; // 同步闸门：后台/回调线程只置位，真正的策略同步统一留给主线程 Timer 心跳执行
     std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 增量更新位图：把多次状态改动折叠成一次主线程消费
 
     // 图层叠加策略列表（泛型支持任意算法）
@@ -145,7 +145,7 @@ public:
     bool IsDirty()      const { return m_isDirty; }
     void MarkDirty() { m_isDirty = true; }
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
-    bool ConsumeDirty() { return m_isDirty.exchange(false); }
+    bool GetDirtyConsumed() { return m_isDirty.exchange(false); }
 
     // Strategy 切换，实现在 AppService.cpp
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
@@ -165,11 +165,11 @@ class AbstractInteractiveService
 public:
     virtual ~AbstractInteractiveService() = default;
 
-    virtual void ScrollSlice(int delta) {}
+    virtual void SetSliceScroll(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
     virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) {}
     virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
-    virtual void SetInteracting(bool val) {}
+    virtual void SetInteracting(bool isInteracting) {}
     virtual vtkProp3D* GetMainProp() { return nullptr; }
     virtual void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) {}
     virtual std::array<double, 16> GetModelMatrix() {
@@ -177,7 +177,7 @@ public:
     }
     virtual int GetNavigationAxis() const { return -1; }
     virtual WindowLevelParams GetWindowLevel() const { return {}; }
-    virtual void SetElementVisible(uint32_t flagBit, bool show) {}
+    virtual void SetElementVisible(uint32_t flagBit, bool isVisible) {}
     virtual void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
     virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
@@ -251,7 +251,7 @@ public:
     virtual void SetWindowTitle(const std::string& title) {
         if (m_renderWindow) m_renderWindow->SetWindowName(title.c_str());
     }
-    virtual void SetOrientationAxesVisible(bool show) {}
+    virtual void SetOrientationAxesVisible(bool isVisible) {}
 
     virtual void SetRendererBackground(const BackgroundColor& bg) {
         if (m_renderer)

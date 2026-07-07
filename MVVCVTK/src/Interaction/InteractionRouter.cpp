@@ -25,18 +25,18 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
 
         const InteractionResult result = handler->Send(eve);
 
-        // abortVtk 做 OR 聚合：任一 Handler 要求中止即中止
-        if (result.abortVtk) {
-            aggregated.abortVtk = true;
+        // hasVtkAbort 做 OR 聚合：任一 Handler 要求中止即中止
+        if (result.hasVtkAbort) {
+            aggregated.hasVtkAbort = true;
         }
 
-        if (mode == RouterDispatchMode::FirstMatch && result.handled) {
-            aggregated.handled = true;
+        if (mode == RouterDispatchMode::FirstMatch && result.isHandled) {
+            aggregated.isHandled = true;
             return aggregated;  // 找到第一个消费者，提前退出
         }
 
-        if (result.handled) {
-            aggregated.handled = true;
+        if (result.isHandled) {
+            aggregated.isHandled = true;
         }
     }
 

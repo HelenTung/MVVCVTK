@@ -59,7 +59,7 @@ void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteracto
             // 同一个 interactor 也可能因为外部窗口注入而换绑 window，必须保持 VTK 双向关系一致。
             m_interactor->SetRenderWindow(m_renderWindow);
         }
-        EnsureObservers();
+        AttachObservers();
         return;
     }
 
@@ -70,14 +70,14 @@ void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteracto
         m_interactor->SetRenderWindow(m_renderWindow);
     }
     // observer 绑定在 interactor 上；替换 interactor 后必须重新挂载，否则 Qt 注入窗口收不到业务事件。
-    EnsureObservers();
+    AttachObservers();
     if (m_axesWidget) {
         m_axesWidget->SetInteractor(m_interactor);
     }
     BuildInteractionRouter();
 }
 
-void StdRenderContext::EnsureObservers()
+void StdRenderContext::AttachObservers()
 {
     if (!m_interactor || !m_eventCallback || !m_observerTags.empty()) {
         return;
@@ -119,7 +119,7 @@ void StdRenderContext::RemoveObservers()
     m_observerTags.clear();
 }
 
-void StdRenderContext::EnsureTimer()
+void StdRenderContext::AttachTimer()
 {
     if (!m_interactor || !m_eventCallback) {
         return;
@@ -155,7 +155,7 @@ void StdRenderContext::InitializeInteractor()
         m_interactor->Initialize();
     }
 
-    EnsureTimer();
+    AttachTimer();
 
     // interactor 就位后才能正确构建 Router（TimeUpdateHandler 需要 renderWindow）
     BuildInteractionRouter();
@@ -273,9 +273,9 @@ void StdRenderContext::SetCameraStyle(VizMode mode)
 // ─────────────────────────────────────────────────────────────────────
 // SetOrientationAxesVisible
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::SetOrientationAxesVisible(bool show)
+void StdRenderContext::SetOrientationAxesVisible(bool isVisible)
 {
-    if (show) {
+    if (isVisible) {
         if (!m_axesWidget) {
             // 坐标轴 widget 延迟初始化，避免在不需要时创建额外的 VTK 组件。
             auto axes = vtkSmartPointer<vtkAxesActor>::New();
@@ -357,9 +357,9 @@ void StdRenderContext::BuildInteractionEvent(
         eve.y = pos[1];
     }
 
-    eve.shift = interactor->GetShiftKey() != 0;
-    eve.ctrl = interactor->GetControlKey() != 0;
-    eve.alt = interactor->GetAltKey() != 0;
+    eve.isShiftDown = interactor->GetShiftKey() != 0;
+    eve.isCtrlDown = interactor->GetControlKey() != 0;
+    eve.isAltDown = interactor->GetAltKey() != 0;
     eve.keyCode = interactor->GetKeyCode();
     eve.keySym = interactor->GetKeySym() ? interactor->GetKeySym() : "";
     eve.vizMode = m_currentMode;
@@ -373,7 +373,7 @@ void StdRenderContext::BuildInteractionEvent(
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
-//   2. 填充 InteractionEvent → Dispatch → 处理 abortVtk
+//   2. 填充 InteractionEvent → Dispatch → 处理 hasVtkAbort
 // ─────────────────────────────────────────────────────────────────────
 void StdRenderContext::OnVTKEvent(vtkObject* caller,
     long unsigned int eventId,
@@ -411,18 +411,18 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
         result = m_keyHandler(eve);
     }
 
-    if (!result.handled) {
+    if (!result.isHandled) {
         const InteractionResult routerResult =
             m_interactionRouter.Dispatch(eve, dispatchMode);
-        result.handled = result.handled || routerResult.handled;
-        result.abortVtk = result.abortVtk || routerResult.abortVtk;
+        result.isHandled = result.isHandled || routerResult.isHandled;
+        result.hasVtkAbort = result.hasVtkAbort || routerResult.hasVtkAbort;
     }
 
     if (eventId == vtkCommand::TimerEvent && m_timerHandler) {
         m_timerHandler();
     }
 
-    if (result.abortVtk && m_eventCallback) {
+    if (result.hasVtkAbort && m_eventCallback) {
         // 业务层已经完整消费该事件时，阻止 VTK 默认相机/窗口行为继续处理，避免双重响应。
         m_eventCallback->SetAbortFlag(1);
     }

@@ -16,9 +16,9 @@ public:
     vtkSmartPointer<vtkTable> GetOutputData(vtkSmartPointer<vtkImageData> input) override;
 
     // 直方图转图片
-    void SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
+    void ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
 
 private:
-    // 内部复用：执行 accumulate 并返回频率指针，避免 Process 与 SaveHistogramImage 重复计算
+    // 内部复用：执行 accumulate 并返回频率指针，避免 Process 与 ExportHistogram 重复计算
     vtkIdType* GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth);
 };

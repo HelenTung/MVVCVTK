@@ -23,21 +23,21 @@ public:
         const std::string& path,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete);
+        std::function<void(bool isSuccess)> onComplete);
 
     std::optional<std::packaged_task<void()>> BuildReloadFromBufferTask(
         const float* data,
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete);
+        std::function<void(bool isSuccess)> onComplete);
 
-    void SetFileLoadCallbackReady(bool success);
-    void SetReloadLoadCallbackReady(bool success);
-    bool ConsumeFileLoadCallback();
-    bool ConsumeReloadLoadCallback();
-    void ExecutePendingFileLoadCallback();
-    void ExecutePendingReloadLoadCallback();
+    void SetFileLoadCallbackReady(bool isSuccess);
+    void SetReloadLoadCallbackReady(bool isSuccess);
+    bool GetFileLoadCallback();
+    bool GetReloadLoadCallback();
+    void SendFileLoadCallback();
+    void SendReloadCallback();
 
 private:
     bool GetAnyLoadRunning() const;

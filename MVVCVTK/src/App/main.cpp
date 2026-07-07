@@ -31,13 +31,13 @@ static HostRenderViewConfig BuildStandaloneRenderViewConfig(
     std::string id,
     HostRenderViewRole role,
     WindowConfig window,
-    bool startStandaloneEventLoop = false)
+    bool isEventLoopEnabled = false)
 {
     HostRenderViewConfig view;
     view.id = std::move(id);
     view.role = role;
     view.window = std::move(window);
-    view.startStandaloneEventLoop = startStandaloneEventLoop;
+    view.isEventLoopEnabled = isEventLoopEnabled;
     return view;
 }
 
@@ -91,7 +91,7 @@ static std::vector<HostRenderViewConfig> BuildStandaloneRenderViewConfigs()
     primary3D.title = "Window A: Composite IsoSurface";
     primary3D.width = 600; primary3D.height = 600;
     primary3D.posX = 50;  primary3D.posY = 50;
-    primary3D.showAxes = true;
+    primary3D.isAxesVisible = true;
     primary3D.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
     primary3D.preInitCfg.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
     primary3D.preInitCfg.bgColor = { 0.05, 0.05, 0.05 };
@@ -167,12 +167,12 @@ int main()
     const std::array<float, 3> simulatedVolumeSpacing = { 0.02125f, 0.02125f, 0.02125f };
     const std::array<float, 3> simulatedVolumeOriginValues = { 0.0f, 0.0f, 0.0f };
     if (!simulatedVolumeFilePath.empty()) {
-        config.initialVolume.enableInitialLoad = true;
+        config.initialVolume.isInitialLoadEnabled = true;
         config.initialVolume.filePath = simulatedVolumeFilePath;
         config.initialVolume.geometry.emplace(simulatedVolumeSpacing, simulatedVolumeOriginValues);
     }
 
-    config.renderContextInput.enableStandaloneHotkeys = true;
+    config.renderContextInput.isHotkeyEnabled = true;
     config.renderContextInput.targetViewRoles = standaloneViewRoles;
     // 体数据导出路径由上位机输入；standalone 只在这里模拟，不让 DataManager 按加载路径猜输出位置。
     config.dataExport.transformedDataOutputPath = simulatedTransformedDataOutputPath;
@@ -182,9 +182,9 @@ int main()
     // 热键监听范围和 feature 作用范围分开配置：
     // A. targetViewRoles 决定哪些 interactor 收 standalone 键。
     // B. orthogonalCropRequest / gapAnalysisRequest 决定命令真正作用到哪些窗口。
-    config.commandInput.enableStandaloneHotkeys = true;
+    config.commandInput.isHotkeyEnabled = true;
     config.commandInput.targetViewRoles = standaloneViewRoles;
-    config.commandInput.orthogonalCropRequest.useReferenceRole = true;
+    config.commandInput.orthogonalCropRequest.isReferenceRoleUsed = true;
     config.commandInput.orthogonalCropRequest.referenceRole = HostRenderViewRole::Primary3D;
     config.commandInput.orthogonalCropRequest.previewViewRoles = standaloneViewRoles;
     config.commandInput.gapAnalysisRequest.targetViewRoles = standaloneViewRoles;
@@ -192,8 +192,8 @@ int main()
 
     // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以 host/session 主线程 tick 也显式挂到这个 role。
     // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。
-    config.timerEventPump.enableTimer = true;
-    config.timerEventPump.useTimerViewRole = true;
+    config.timerEventPump.isTimerEnabled = true;
+    config.timerEventPump.isTimerRoleUsed = true;
     config.timerEventPump.timerViewRole = HostRenderViewRole::TopDownSlice;
 
     VtkAppHostSession session(std::move(config));

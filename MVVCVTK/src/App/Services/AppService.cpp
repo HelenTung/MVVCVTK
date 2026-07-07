@@ -52,7 +52,7 @@ void AbstractAppService::AddOverlayStrategy(std::shared_ptr<AbstractVisualStrate
     }
 
     m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
-    m_needsSync = true;
+    m_hasSyncNeed = true;
     m_isDirty = true;
 }
 
@@ -201,11 +201,11 @@ LoadState VizService::GetReloadLoadState() const
     return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
 }
 
-void VizService::StartTask(
+void VizService::StartRun(
     std::packaged_task<void()> task,
-    bool keepActiveLoadFuture)
+    bool hasActiveLoadFuture)
 {
-    if (keepActiveLoadFuture) {
+    if (hasActiveLoadFuture) {
         std::lock_guard<std::mutex> lk(m_activeLoadMutex);
         m_activeLoadFuture = task.get_future(); // 当前活动加载任务的 future，用于析构时等待后台线程结束
     }
@@ -217,7 +217,7 @@ void VizService::LoadFileAsync(
     const std::string& path,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_dataLoadTaskService) {
         return;
@@ -229,7 +229,7 @@ void VizService::LoadFileAsync(
         origin,
         std::move(onComplete));
     if (task) {
-        StartTask(std::move(*task), true);
+        StartRun(std::move(*task), true);
     }
 }
 
@@ -238,7 +238,7 @@ bool VizService::ReloadFromBufferAsync(
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_dataLoadTaskService) {
         return false;
@@ -254,45 +254,45 @@ bool VizService::ReloadFromBufferAsync(
         return false;
     }
 
-    StartTask(std::move(*task), true);
+    StartRun(std::move(*task), true);
     return true;
 }
 
-void VizService::SaveTransformedDataAsync(
+void VizService::ExportDataAsync(
     const std::string& path,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_dataExportTaskService) {
         return;
     }
 
-    auto task = m_dataExportTaskService->BuildSaveTransformedDataTask(path, std::move(onComplete));
+    auto task = m_dataExportTaskService->BuildDataTask(path, std::move(onComplete));
     if (task) {
-        StartTask(std::move(*task), false);
+        StartRun(std::move(*task), false);
     }
 }
 
-void VizService::SaveSliceImagesAsync(
+void VizService::ExportSlicesAsync(
     const std::string& path,
     std::optional<double> rotationAngleDeg,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_dataExportTaskService) {
         return;
     }
 
     const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    auto task = m_dataExportTaskService->BuildSaveSliceImagesTask(
+    auto task = m_dataExportTaskService->BuildSlicesTask(
         path,
         rotationAngleDeg,
         currentMode,
         std::move(onComplete));
     if (task) {
-        StartTask(std::move(*task), false);
+        StartRun(std::move(*task), false);
     }
 }
 
-void VizService::CancelFileLoad()
+void VizService::StopFileLoad()
 {
     // 当前加载流程尚未接入可中断检查，先保留上层控制入口。
 }
@@ -300,7 +300,7 @@ void VizService::CancelFileLoad()
 // ─────────────────────────────────────────────────────────────────────
 // AbstractInteractiveService — 交互接口
 // ─────────────────────────────────────────────────────────────────────
-void VizService::ScrollSlice(int delta)
+void VizService::SetSliceScroll(int delta)
 {
     if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
     const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
@@ -326,7 +326,7 @@ void VizService::ScrollSlice(int delta)
     m_sharedState->SetCursorRawWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
     m_sharedState->SetCursorAxis(axis);
     m_sharedState->SetCursorWorld(newCursorWorld[0], newCursorWorld[1], newCursorWorld[2]);
-    RequestSync();
+    SetSyncNeeded();
 }
 
 void VizService::SetCursorWorldPosition(double worldPos[3], int axis)
@@ -353,9 +353,9 @@ std::array<double, 3> VizService::GetCursorWorld()
     return m_sharedState->GetCursorWorld();
 }
 
-void VizService::SetInteracting(bool val)
+void VizService::SetInteracting(bool isInteracting)
 {
-    m_sharedState->SetInteracting(val);
+    m_sharedState->SetInteracting(isInteracting);
 }
 
 int VizService::GetPlaneAxis(vtkActor* actor)
@@ -379,9 +379,9 @@ void VizService::SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
     }
 }
 
-void VizService::SetElementVisible(uint32_t flagBit, bool show)
+void VizService::SetElementVisible(uint32_t flagBit, bool isVisible)
 {
-    m_sharedState->SetElementVisible(flagBit, show);
+    m_sharedState->SetElementVisible(flagBit, isVisible);
 }
 
 void VizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
@@ -397,7 +397,7 @@ void VizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int 
         startWC); // 当前拖拽结束后应写回状态的窗宽窗位
 
     m_sharedState->SetWindowLevel(windowLevel.windowWidth, windowLevel.windowCenter);
-    RequestSync();
+    SetSyncNeeded();
 }
 
 void VizService::SetModelTransform(
@@ -471,7 +471,7 @@ void VizService::SendUpdates()
     // 6. 文件加载 / reload 回调
 
     // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
-    if (m_dataManager && m_dataManager->ConsumePendingImage()) {
+    if (m_dataManager && m_dataManager->GetPendingImage()) {
         // 走和文件加载成功相同的后处理路径
         auto img = m_dataManager->GetVtkImage();
         if (img) {
@@ -485,19 +485,19 @@ void VizService::SendUpdates()
     }
 
     // 导出异步任务回调触发
-    if (m_dataExportTaskService && m_dataExportTaskService->ConsumeSaveCallback()) {
-        m_dataExportTaskService->ExecutePendingSaveCallback();
+    if (m_dataExportTaskService && m_dataExportTaskService->GetSaveCallback()) {
+        m_dataExportTaskService->SendSaveCallback();
     }
 
     // 延迟缓存清理（Detach 必须在主线程）
-    if (m_needsCacheClear.exchange(false))
+    if (m_hasCacheClearNeed.exchange(false))
         ClearStrategyCache();
 
-    bool shouldReturnAfterLoadFailure = false;
-    bool loadEventHandled = false;
+    bool isReturnAfterLoadFailure = false;
+    bool hasLoadEvent = false;
 
     // 加载失败处理
-    if (m_needsLoadFailed.exchange(false)) {
+    if (m_hasLoadFailure.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
         ClearLoadFail();
         if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
@@ -506,49 +506,49 @@ void VizService::SendUpdates()
         else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
             m_dataLoadTaskService->SetReloadLoadCallbackReady(false);
         }
-        shouldReturnAfterLoadFailure = true;
-        loadEventHandled = true;
+        isReturnAfterLoadFailure = true;
+        hasLoadEvent = true;
     }
 
     // DataReady → 重建管线（优先于增量同步）
-    if (!shouldReturnAfterLoadFailure && m_needsDataRefresh.exchange(false)) {
+    if (!isReturnAfterLoadFailure && m_hasDataRefreshNeed.exchange(false)) {
         const LoadEventKind loadEventKind = m_pendingLoadEventKind;
-        RebuildPipeline();
+        BuildPipeline();
         if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
             m_dataLoadTaskService->SetFileLoadCallbackReady(true);
         }
         else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
             m_dataLoadTaskService->SetReloadLoadCallbackReady(true);
         }
-        loadEventHandled = true;
+        hasLoadEvent = true;
         // return; // 本帧只做重建，同步留到下帧
     }
 
-    if (shouldReturnAfterLoadFailure) {
-        if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeFileLoadCallback()) {
-            m_dataLoadTaskService->ExecutePendingFileLoadCallback();
+    if (isReturnAfterLoadFailure) {
+        if (m_dataLoadTaskService && m_dataLoadTaskService->GetFileLoadCallback()) {
+            m_dataLoadTaskService->SendFileLoadCallback();
         }
-        if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeReloadLoadCallback()) {
-            m_dataLoadTaskService->ExecutePendingReloadLoadCallback();
+        if (m_dataLoadTaskService && m_dataLoadTaskService->GetReloadLoadCallback()) {
+            m_dataLoadTaskService->SendReloadCallback();
         }
-        if (loadEventHandled) {
+        if (hasLoadEvent) {
             m_pendingLoadEventKind = LoadEventKind::None;
         }
         return;
     }
 
     // 普通事件增量同步
-    SyncStrategyState();
+    SetStrategyState();
 
     // 文件加载 / 重载回调延后到策略同步之后，保证上层 submit 回调看到的是主线程收敛后的最终状态。
-    if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeFileLoadCallback()) {
-        m_dataLoadTaskService->ExecutePendingFileLoadCallback();
+    if (m_dataLoadTaskService && m_dataLoadTaskService->GetFileLoadCallback()) {
+        m_dataLoadTaskService->SendFileLoadCallback();
     }
-    if (m_dataLoadTaskService && m_dataLoadTaskService->ConsumeReloadLoadCallback()) {
-        m_dataLoadTaskService->ExecutePendingReloadLoadCallback();
+    if (m_dataLoadTaskService && m_dataLoadTaskService->GetReloadLoadCallback()) {
+        m_dataLoadTaskService->SendReloadCallback();
     }
 
-    if (loadEventHandled) {
+    if (hasLoadEvent) {
         m_pendingLoadEventKind = LoadEventKind::None;
     }
 }
@@ -556,14 +556,14 @@ void VizService::SendUpdates()
 // ─────────────────────────────────────────────────────────────────────
 // 私有辅助
 // ─────────────────────────────────────────────────────────────────────
-void VizService::RebuildPipeline()
+void VizService::BuildPipeline()
 {
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto strategy = GetStrategy(mode);
     if (!strategy) {
-        std::cerr << "[RebuildPipeline] StrategyFactory returned null for mode "
+        std::cerr << "[BuildPipeline] StrategyFactory returned null for mode "
             << static_cast<int>(mode) << "\n";
         return;
     }
@@ -586,24 +586,24 @@ void VizService::RebuildPipeline()
             strategy->SetInputData(img);
         }
         else {
-            std::cerr << "[RebuildPipeline] Image has zero dimension, skipping SetInputData.\n";
+            std::cerr << "[BuildPipeline] Image has zero dimension, skipping SetInputData.\n";
             return;
         }
     }
     else {
-        std::cerr << "[RebuildPipeline] DataManager has no valid image.\n";
+        std::cerr << "[BuildPipeline] DataManager has no valid image.\n";
         return;
     }
 
     SetCurrentStrategy(strategy);
     SetRendererBg();
-    RequestSync(); // 重建后触发一次全量参数同步
+    SetSyncNeeded(); // 重建后触发一次全量参数同步
 }
 
-void VizService::SyncStrategyState()
+void VizService::SetStrategyState()
 {
-    bool expected = true;
-    if (!m_needsSync.compare_exchange_strong(expected, false)) return;
+    bool isExpected = true;
+    if (!m_hasSyncNeed.compare_exchange_strong(isExpected, false)) return;
     if (!m_currentStrategy) return;
 
     // 用 exchange(0) 取走当前整包增量标志，相当于把这一帧前累计的状态改动做一次原子快照。
@@ -612,14 +612,14 @@ void VizService::SyncStrategyState()
     UpdateFlags flags = static_cast<UpdateFlags>(flagsInt);
 
     if (flags == UpdateFlags::None) {
-        m_needsSync = false;
+        m_hasSyncNeed = false;
         return;
     }
 
     // 交互状态控制帧率
     if (GetFlagOn(flags, UpdateFlags::Interaction) && m_renderWindow) {
-        bool interacting = m_sharedState->GetIsInteracting();
-        m_renderWindow->SetDesiredUpdateRate(interacting ? 15.0 : 0.001);
+        const bool isInteracting = m_sharedState->GetIsInteracting();
+        m_renderWindow->SetDesiredUpdateRate(isInteracting ? 15.0 : 0.001);
     }
 
     // 背景色同步（数据无关，直接写渲染器）
@@ -643,7 +643,7 @@ void VizService::SyncStrategyState()
     }
 
     m_isDirty = true;
-    // m_needsSync = false;
+    // m_hasSyncNeed = false;
 }
 
 void VizService::ClearLoadFail()
@@ -654,7 +654,7 @@ void VizService::ClearLoadFail()
     ClearStrategyCache();
 
     // 重置刷新标记，防止残留 DataReady 触发错误重建
-    m_needsDataRefresh = false;
+    m_hasDataRefreshNeed = false;
 
 	// 重置交互状态
     m_pendingFlags = 0;
@@ -733,7 +733,7 @@ void VizService::SetRendererBg()
     m_renderer->SetBackground(bg.r, bg.g, bg.b);
 }
 
-void VizService::MergePendingFlags(UpdateFlags flags)
+void VizService::SetPendingFlags(UpdateFlags flags)
 {
     int old = m_pendingFlags.load();
     // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
@@ -743,20 +743,20 @@ void VizService::MergePendingFlags(UpdateFlags flags)
     }
 }
 
-void VizService::RequestDataRefresh()
+void VizService::SetDataRefresh()
 {
-    m_needsDataRefresh = true;
+    m_hasDataRefreshNeed = true;
 }
 
-void VizService::RequestLoadFailed()
+void VizService::SetLoadFailed()
 {
-    m_needsLoadFailed = true;
+    m_hasLoadFailure = true;
     m_isDirty = true;
 }
 
-void VizService::RequestStrategyCacheClear()
+void VizService::SetStrategyClear()
 {
-    m_needsCacheClear = true;
+    m_hasCacheClearNeed = true;
 }
 
 void VizService::ClearStrategyCache()
@@ -772,7 +772,7 @@ void VizService::ClearStrategyCache()
     m_strategyCache.clear();
 }
 
-void VizService::CenterCursor()
+void VizService::SetCursorCenter()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
@@ -787,9 +787,9 @@ void VizService::CenterCursor()
     m_sharedState->SetCursorWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
 }
 
-void VizService::RequestSync()
+void VizService::SetSyncNeeded()
 {
     // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
-    m_needsSync = true;
+    m_hasSyncNeed = true;
     m_isDirty = true;
 }

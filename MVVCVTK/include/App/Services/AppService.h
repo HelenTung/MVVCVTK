@@ -80,7 +80,7 @@ public:
     void LoadFileAsync(const std::string& path,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。
     bool ReloadFromBufferAsync(
@@ -88,7 +88,7 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 状态查询：当前只对外暴露 File / Reload 两组状态。
     LoadState GetFileLoadState() const;
@@ -96,7 +96,7 @@ public:
 
     // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
     // 原生依赖对象：m_cancelFlag。
-    void CancelFileLoad();
+    void StopFileLoad();
 
     // ================================================================
     // 数据导出任务
@@ -104,11 +104,11 @@ public:
     // 作用：把导出 I/O 与当前渲染线程解耦。
     // 原生依赖对象：m_dataManager、m_sharedState。
     // ================================================================
-    void SaveTransformedDataAsync(const std::string& path,
-        std::function<void(bool success)> onComplete = nullptr);
-    void SaveSliceImagesAsync(const std::string& path,
+    void ExportDataAsync(const std::string& path,
+        std::function<void(bool isSuccess)> onComplete = nullptr);
+    void ExportSlicesAsync(const std::string& path,
         std::optional<double> rotationAngleDeg = std::nullopt,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // ================================================================
     // AbstractInteractiveService — 交互接口
@@ -117,14 +117,14 @@ public:
     // 原生依赖对象：m_sharedState、m_currentStrategy、m_dataManager。
     // 说明：这一组是交互主线，已尽量保持“读状态 → 算结果 → 回状态”的单一路径。
     // ================================================================
-    void ScrollSlice(int delta) override;
+    void SetSliceScroll(int delta) override;
     void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
     std::array<double, 3> GetCursorWorld() override;
-    void SetInteracting(bool val) override;
+    void SetInteracting(bool isInteracting) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
     void SyncModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
-    void SetElementVisible(uint32_t flagBit, bool show) override;
+    void SetElementVisible(uint32_t flagBit, bool isVisible) override;
     void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override {
@@ -155,12 +155,12 @@ public:
     // 作用：按固定顺序消费 pending image、导出回调、缓存清理、加载状态、策略同步和加载回调。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // 固定顺序：
-    //   1. ConsumePendingImage -> SetReloadDataReady
-    //   2. ConsumeSaveCallback -> ExecutePendingSaveCallback
-    //   3. m_needsCacheClear   -> ClearStrategyCache
-    //   4. LoadFailed/DataReady -> ClearLoadFail/RebuildPipeline
-    //   5. m_needsSync         -> SyncStrategyState
-    //   6. load callback       -> ExecutePending*LoadCallback
+    //   1. GetPendingImage -> SetReloadDataReady
+    //   2. GetSaveCallback -> SendSaveCallback
+    //   3. m_hasCacheClearNeed   -> ClearStrategyCache
+    //   4. LoadFailed/DataReady -> ClearLoadFail/BuildPipeline
+    //   5. m_hasSyncNeed         -> SetStrategyState
+    //   6. load callback       -> Send*LoadCallback
     // ================================================================
     void SendUpdates() override;
 
@@ -170,27 +170,27 @@ private:
     // 功能：服务主线程渲染骨架，负责重建、同步、失败清理和参数快照组装。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
     // ================================================================
-    void RebuildPipeline();
-    void SyncStrategyState();
+    void BuildPipeline();
+    void SetStrategyState();
     void ClearLoadFail();
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void SetRendererBg();
-    void RequestStrategyCacheClear();
+    void SetStrategyClear();
     void ClearStrategyCache();
-    void CenterCursor();
-    void RequestSync();
-    void MergePendingFlags(UpdateFlags flags) override;
-    void RequestDataRefresh() override;
-    void RequestLoadFailed() override;
+    void SetCursorCenter();
+    void SetSyncNeeded();
+    void SetPendingFlags(UpdateFlags flags) override;
+    void SetDataRefresh() override;
+    void SetLoadFailed() override;
 
     // ================================================================
     // 异步任务启动辅助
     // 功能：只负责启动已构建好的后台任务和保存加载 future，不构建具体业务任务。
     // 原生依赖对象：m_sharedState、m_activeLoadFuture。
     // ================================================================
-    void StartTask(std::packaged_task<void()> task,
-        bool keepActiveLoadFuture);
+    void StartRun(std::packaged_task<void()> task,
+        bool hasActiveLoadFuture);
 
     // ================================================================
     // 成员变量（按职责分组）
@@ -206,9 +206,9 @@ private:
     std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
 
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) }; // 模式切换快照：前处理阶段可先写入，主线程重建管线时再一次性读取
-    std::atomic<bool> m_needsDataRefresh{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建
-    std::atomic<bool> m_needsCacheClear{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
-    std::atomic<bool> m_needsLoadFailed{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
+    std::atomic<bool> m_hasDataRefreshNeed{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建
+    std::atomic<bool> m_hasCacheClearNeed{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
+    std::atomic<bool> m_hasLoadFailure{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
 
     std::future<void> m_activeLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
     mutable std::mutex m_activeLoadMutex; // 保护 m_activeLoadFuture

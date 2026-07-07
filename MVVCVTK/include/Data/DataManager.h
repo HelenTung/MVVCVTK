@@ -41,8 +41,8 @@ public:
     DataVersion GetDataVersion() const override;
     ImageState GetImageState() const;
 
-    bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
-    bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
+    bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
+    bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
 };
 
 class RawVolumeDataManager : public BaseDataManager {
@@ -69,7 +69,7 @@ public:
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
     bool TakeImageSnapshot(vtkSmartPointer<vtkImageData> image);
-    bool ConsumePendingImage() override;
+    bool GetPendingImage() override;
 };
 
 class TiffVolumeDataManager : public BaseDataManager {

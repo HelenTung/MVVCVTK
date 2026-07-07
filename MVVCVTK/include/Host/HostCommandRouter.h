@@ -34,7 +34,7 @@ struct HostCommandRouterRequest {
     HostCommandKind command = HostCommandKind::None;
 
     InitialVolumeLoadConfig initialVolume;
-    std::function<void(bool success)> loadComplete;
+    std::function<void(bool isSuccess)> loadComplete;
 
     HostOrthogonalCropActivationRequest orthogonalCropRequest;
     HostCropPreviewMode cropPreviewMode = HostCropPreviewMode::KeepInside;
@@ -42,7 +42,7 @@ struct HostCommandRouterRequest {
     HostGapAnalysisActivationRequest gapAnalysisRequest;
 
     HostDataExportConfig dataExportConfig;
-    std::function<void(bool success)> dataExportComplete;
+    std::function<void(bool isSuccess)> dataExportComplete;
 
     HostViewConfig viewConfig;
 
@@ -63,11 +63,11 @@ public:
 private:
     bool LoadVolume(
         const InitialVolumeLoadConfig& initialVolume,
-        std::function<void(bool success)> loadComplete) const;
+        std::function<void(bool isSuccess)> loadComplete) const;
     bool SendFeature(const HostCommandRouterRequest& request) const;
     bool ExportData(
         const HostDataExportConfig& dataExportConfig,
-        std::function<void(bool success)> onComplete) const;
+        std::function<void(bool isSuccess)> onComplete) const;
     bool SetViewConfig(const HostViewConfig& viewConfig) const;
     bool AttachHotkeys(const HostCommandRouterRequest& request) const;
 

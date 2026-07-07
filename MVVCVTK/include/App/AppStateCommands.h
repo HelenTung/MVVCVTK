@@ -52,7 +52,7 @@ public:
             return true;
         }
 
-        const bool same = std::equal(current.begin(), current.end(), next.begin(),
+        const bool isSame = std::equal(current.begin(), current.end(), next.begin(),
             [](const TFNode& left, const TFNode& right) {
                 return std::abs(left.position - right.position) <= 1e-6 &&
                     std::abs(left.opacity - right.opacity) <= 1e-6 &&
@@ -60,7 +60,7 @@ public:
                     std::abs(left.g - right.g) <= 1e-6 &&
                     std::abs(left.b - right.b) <= 1e-6;
             });
-        if (same) {
+        if (isSame) {
             return false;
         }
 
@@ -74,7 +74,7 @@ public:
             std::abs(current.specular - next.specular) <= 1e-6 &&
             std::abs(current.specularPower - next.specularPower) <= 1e-6 &&
             std::abs(current.opacity - next.opacity) <= 1e-6 &&
-            current.shadeOn == next.shadeOn) {
+            current.isShadeOn == next.isShadeOn) {
             return false;
         }
 
@@ -103,9 +103,9 @@ public:
         return true;
     }
 
-    static bool SetVisibilityMask(uint32_t& current, uint32_t flagBit, bool show) {
+    static bool SetVisibilityMask(uint32_t& current, uint32_t flagBit, bool isVisible) {
         // 可见性统一用位掩码增删，便于多个 UI 开关合并到同一个 Visibility 更新域内。
-        const uint32_t next = show ? (current | flagBit) : (current & ~flagBit);
+        const uint32_t next = isVisible ? (current | flagBit) : (current & ~flagBit);
         if (next == current) {
             return false;
         }
@@ -114,7 +114,7 @@ public:
         return true;
     }
 
-    static void MergeFlags(UpdateFlags& current, UpdateFlags next) {
+    static void SetFlagsMerged(UpdateFlags& current, UpdateFlags next) {
         // 这里只做位并集，不做覆盖，保证同一批事务内多个字段变化都能保留下来。
         current |= next;
     }

@@ -40,7 +40,7 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
 }
 
 
-void HistogramConverter::SaveHistogramImage(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
+void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
     double range[2], binWidth;
     // 复用 ComputeHistogram，不重复计算

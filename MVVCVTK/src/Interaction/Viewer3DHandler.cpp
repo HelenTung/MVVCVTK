@@ -73,7 +73,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                 if (vtkRenderWindow* rw = m_renderer->GetRenderWindow()) {
                     rw->SetDesiredUpdateRate(15.0);
                 }
-                return { true, true };  // abortVtk=true：阻止相机转动
+                return { true, true };  // hasVtkAbort=true：阻止相机转动
             }
         }
         // 点到主模型或空白处：不消费，让相机交互继续

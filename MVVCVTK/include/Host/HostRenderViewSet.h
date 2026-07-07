@@ -53,17 +53,17 @@ public:
         const std::vector<std::string>& ids,
         const std::vector<HostRenderViewRole>& roles) const;
     // 只有请求允许使用配置默认值时才调用，避免裁切 preview 在未声明目标时接管新窗口。
-    std::vector<const HostRenderViewRuntime*> GetConfiguredCropPreviewViews() const;
+    std::vector<const HostRenderViewRuntime*> GetCropPreviewViews() const;
     // 孔隙 overlay 默认角色也是显式 fallback；它描述可显示 overlay 的 role，不描述当前窗口数量。
-    std::vector<const HostRenderViewRuntime*> GetDefaultGapOverlayViews() const;
+    std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
 
     // 裁切 bridge 只需要 AbstractInteractiveService 列表；在这里降级接口，避免 feature 看到完整 runtime。
-    std::vector<std::shared_ptr<AbstractInteractiveService>> BuildInteractiveServices(
+    std::vector<std::shared_ptr<AbstractInteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
 
-    void ConfigureInitialVisibility() const;
+    void SetInitialVisibility() const;
     void RenderAll() const;
-    void InitializeAllInteractors() const;
+    void SetInteractorsReady() const;
     std::vector<HostRenderViewEndpoint> BuildEndpoints() const;
 
     static bool GetRoleIs3DView(HostRenderViewRole role);

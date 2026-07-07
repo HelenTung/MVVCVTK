@@ -37,7 +37,7 @@ public:
         }
     }
 
-    void ExecutePendingCallback() {
+    void SendCallback() {
         std::function<void(bool)> callback;
         bool isSuccess = false;
         {

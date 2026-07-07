@@ -32,9 +32,9 @@ private:
 
     // 外部宿主窗口可能已经带有自己的 interactor；集中接管可以复用同一套路由和 observer 生命周期。
     void AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor);
-    void EnsureObservers();
+    void AttachObservers();
     void RemoveObservers();
-    void EnsureTimer();
+    void AttachTimer();
     void RemoveTimer();
     // 构建/重建路由表（BindService 和 InitInteractor 后调用）
     void BuildInteractionRouter();
@@ -51,7 +51,7 @@ public:
     void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
     // 只替换 VTK render window，不引入 Qt 类型；Qt 生命周期由宿主层负责。
     void SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWindow) override;
-    void SetOrientationAxesVisible(bool show) override;
+    void SetOrientationAxesVisible(bool isVisible) override;
     void SetToolMode(ToolMode mode);
     ToolMode GetToolMode() const { return m_toolMode; }
     void SetKeyHandler(std::function<InteractionResult(const InteractionEvent&)> handler);

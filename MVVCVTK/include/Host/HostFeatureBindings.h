@@ -25,7 +25,7 @@ public:
     ~HostFeatureBindings();
 
     // 注册 core 能力和 submit 回调；这里不绑定 reference/preview 窗口，因为目标必须来自后续激活请求。
-    void RegisterFeatures(
+    void AttachFeatures(
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews);
 

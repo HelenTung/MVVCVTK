@@ -85,7 +85,7 @@ private:
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
-    bool StartTask(vtkSmartPointer<vtkImageData> inputImage);
+    bool StartRun(vtkSmartPointer<vtkImageData> inputImage);
     void SetDisplayView();
     bool SetOverlayOff();
     bool SetStoredView();

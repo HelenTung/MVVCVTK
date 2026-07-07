@@ -14,7 +14,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
     const std::string& path,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_sharedState || !m_dataManager) {
         m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
@@ -38,9 +38,9 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
         [dataManager, sharedState, path, spacing, origin]() mutable
         {
             // 后台任务只负责 I/O 和基础数据快照准备；渲染管线重建统一留给主线程。
-            const bool ok = dataManager->SetDataLoaded(path, spacing, origin);
+            const bool isOk = dataManager->SetDataLoaded(path, spacing, origin);
 
-            if (ok) {
+            if (isOk) {
                 // 文件加载路径直接生成当前 vtkImage；这里可以只发布 DataReady，不碰 renderer / strategy。
                 auto image = dataManager->GetVtkImage();
                 if (image) {
@@ -65,7 +65,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_sharedState || !m_dataManager) {
         m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
@@ -89,42 +89,42 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
         [dataManager, sharedState, data, dims, spacing, origin]() mutable
         {
             // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换由主线程消费。
-            const bool ok = dataManager->SetFromBuffer(data, dims, spacing, origin);
+            const bool isOk = dataManager->SetFromBuffer(data, dims, spacing, origin);
 
-            if (!ok) {
+            if (!isOk) {
                 sharedState->SetReloadLoadFailed();
             }
         });
 }
 
-void AppDataLoadTaskService::SetFileLoadCallbackReady(bool success)
+void AppDataLoadTaskService::SetFileLoadCallbackReady(bool isSuccess)
 {
-    m_fileLoadCallbackState.SetCallbackReady(success);
+    m_fileLoadCallbackState.SetCallbackReady(isSuccess);
 }
 
-void AppDataLoadTaskService::SetReloadLoadCallbackReady(bool success)
+void AppDataLoadTaskService::SetReloadLoadCallbackReady(bool isSuccess)
 {
-    m_reloadLoadCallbackState.SetCallbackReady(success);
+    m_reloadLoadCallbackState.SetCallbackReady(isSuccess);
 }
 
-bool AppDataLoadTaskService::ConsumeFileLoadCallback()
+bool AppDataLoadTaskService::GetFileLoadCallback()
 {
     return m_fileLoadCallbackState.GetPendingCallbackConsumed();
 }
 
-bool AppDataLoadTaskService::ConsumeReloadLoadCallback()
+bool AppDataLoadTaskService::GetReloadLoadCallback()
 {
     return m_reloadLoadCallbackState.GetPendingCallbackConsumed();
 }
 
-void AppDataLoadTaskService::ExecutePendingFileLoadCallback()
+void AppDataLoadTaskService::SendFileLoadCallback()
 {
-    m_fileLoadCallbackState.ExecutePendingCallback();
+    m_fileLoadCallbackState.SendCallback();
 }
 
-void AppDataLoadTaskService::ExecutePendingReloadLoadCallback()
+void AppDataLoadTaskService::SendReloadCallback()
 {
-    m_reloadLoadCallbackState.ExecutePendingCallback();
+    m_reloadLoadCallbackState.SendCallback();
 }
 
 bool AppDataLoadTaskService::GetAnyLoadRunning() const

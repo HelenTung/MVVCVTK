@@ -367,7 +367,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
-    // Modified() 暂不调用——留到主线程 ConsumeReconImage() 中调用，
+    // Modified() 暂不调用——留到主线程 GetPendingImage() 中调用，
     // 确保 VTK pipeline 脏标记传播在正确线程触发。
 
     {
@@ -414,7 +414,7 @@ bool RawVolumeDataManager::TakeImageSnapshot(vtkSmartPointer<vtkImageData> image
     return true;
 }
 
-bool RawVolumeDataManager::ConsumePendingImage()
+bool RawVolumeDataManager::GetPendingImage()
 {
     if (!m_hasPendingImage.load()) return false;
 
@@ -451,7 +451,7 @@ bool RawVolumeDataManager::ConsumePendingImage()
     return true;
 }
 
-bool BaseDataManager::SaveSliceImages(
+bool BaseDataManager::ExportSlices(
     const std::string& dirPath,
     Orientation orientation,
     const WindowLevelParams& windowLevel,
@@ -730,7 +730,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     return true;
 }
 
-bool BaseDataManager::SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
+bool BaseDataManager::ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {

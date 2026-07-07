@@ -641,7 +641,7 @@ void StartDataExport(int& failureCount)
         "pending image snapshot should not change the current data version.",
         failureCount);
     SetExpect(
-        dataManager.ConsumePendingImage(),
+        dataManager.GetPendingImage(),
         "data export setup should promote the pending image into the current data manager image.",
         failureCount);
     SetExpect(
@@ -651,7 +651,7 @@ void StartDataExport(int& failureCount)
 
     const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
     SetExpect(
-        dataManager.SaveTransformedData(rawRequestPath.string(), identity),
+        dataManager.ExportData(rawRequestPath.string(), identity),
         "transformed data export should write a RAW file for synthetic input.",
         failureCount);
     SetExpect(
@@ -668,11 +668,11 @@ void StartDataExport(int& failureCount)
     windowLevel.windowWidth = 32.0;
     windowLevel.windowCenter = 16.0;
     SetExpect(
-        !dataManager.SaveSliceImages("", Orientation::Top_down, windowLevel, identity),
+        !dataManager.ExportSlices("", Orientation::Top_down, windowLevel, identity),
         "slice image export should reject an empty output directory.",
         failureCount);
     SetExpect(
-        dataManager.SaveSliceImages(sliceDir.string(), Orientation::Top_down, windowLevel, identity),
+        dataManager.ExportSlices(sliceDir.string(), Orientation::Top_down, windowLevel, identity),
         "slice image export should write PNG slices for synthetic input.",
         failureCount);
     SetExpect(

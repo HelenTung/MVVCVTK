@@ -6,10 +6,10 @@
 // ─────────────────────────────────────────────────────────────────────
 // RouterDispatchMode — Dispatch 策略
 //
-//   FirstMatch : 找到第一个 handled=true 的 Handler 后立即停止（默认）
+//   FirstMatch : 找到第一个 isHandled=true 的 Handler 后立即停止（默认）
 //                适用于：鼠标点击、移动、滚轮等互斥性事件
 //
-//   Broadcast  : 所有 Handler 均执行，忽略 handled 标志
+//   Broadcast  : 所有 Handler 均执行，忽略 isHandled 标志
 //                适用于：TimerEvent（心跳更新 + 渲染 + 其他逻辑均需触发）
 // ─────────────────────────────────────────────────────────────────────
 enum class RouterDispatchMode
@@ -26,7 +26,7 @@ enum class RouterDispatchMode
 //   router.Add(std::make_unique<Viewer2DHandler>(...));
 //   ...
 //   InteractionResult r = router.Dispatch(eve, RouterDispatchMode::FirstMatch);
-//   if (r.abortVtk) callback->SetAbortFlag(1);
+//   if (r.hasVtkAbort) callback->SetAbortFlag(1);
 // ─────────────────────────────────────────────────────────────────────
 class InteractionRouter
 {
@@ -38,8 +38,8 @@ public:
     void ClearHandlers();
 
     // 分发事件
-    // - FirstMatch：第一个 handled=true 后停止，返回其结果（abortVtk 聚合）
-    // - Broadcast ：所有 Handler 均执行，abortVtk 取 OR 聚合
+    // - FirstMatch：第一个 isHandled=true 后停止，返回其结果（hasVtkAbort 聚合）
+    // - Broadcast ：所有 Handler 均执行，hasVtkAbort 取 OR 聚合
     InteractionResult Dispatch(const InteractionEvent& eve,
         RouterDispatchMode mode = RouterDispatchMode::FirstMatch);
 

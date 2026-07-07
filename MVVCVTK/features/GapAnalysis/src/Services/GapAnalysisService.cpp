@@ -302,7 +302,7 @@ void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
 
     if (m_hasRunReq) {
         if (GetAnalysisState() != GapAnalysisState::Running
-            && StartTask(std::move(inputImage))) {
+            && StartRun(std::move(inputImage))) {
             m_hasRunReq = false;
             m_hasDone = false;
             m_hasFailLog = false;
@@ -403,7 +403,7 @@ void GapAnalysisService::SetAnalysisState(GapAnalysisState state) {
     m_analysisState.store(static_cast<int>(state));
 }
 
-bool GapAnalysisService::StartTask(vtkSmartPointer<vtkImageData> inputImage) {
+bool GapAnalysisService::StartRun(vtkSmartPointer<vtkImageData> inputImage) {
     if (!SetInputImage(std::move(inputImage))) {
         return false;
     }

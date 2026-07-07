@@ -13,6 +13,6 @@ class IInteractionHandler
 public:
     virtual ~IInteractionHandler() = default;
 
-    // 返回 handled=true 时，FirstMatch 模式的 Router 停止继续分发
+    // 返回 isHandled=true 时，FirstMatch 模式的 Router 停止继续分发
     virtual InteractionResult Send(const InteractionEvent& eve) = 0;
 };

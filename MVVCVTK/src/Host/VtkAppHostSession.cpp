@@ -56,16 +56,16 @@ static std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys)
 static void PrintStartupStatus(
     const VtkAppHostSession::Config& config)
 {
-    const bool willLoadInitialVolume =
-        config.initialVolume.enableInitialLoad
+    const bool hasInitialVolumeLoad =
+        config.initialVolume.isInitialLoadEnabled
         && !config.initialVolume.filePath.empty()
         && config.initialVolume.geometry.has_value();
 
-    std::cout << (willLoadInitialVolume
+    std::cout << (hasInitialVolumeLoad
         ? "Application started. Loading data in background...\n"
         : "Application started. Waiting for host data command...\n");
-    if (config.renderContextInput.enableStandaloneHotkeys
-        || config.commandInput.enableStandaloneHotkeys) {
+    if (config.renderContextInput.isHotkeyEnabled
+        || config.commandInput.isHotkeyEnabled) {
         // 控制台提示只描述当前独立 VTK host 的真实输入映射；Qt / 上位机关闭热键时不输出固定键位假象。
         std::cout << BuildStartupControlsText(config.hotkeys) << '\n';
     }
@@ -74,7 +74,7 @@ static void PrintStartupStatus(
 } // namespace
 
 struct VtkAppHostSession::Impl {
-    // 宿主输入配置的快照；Initialize 之后不再把 main / 上位机的临时变量带入内部链路。
+    // 宿主输入配置的快照；BuildSession 之后不再把 main / 上位机的临时变量带入内部链路。
     Config config;
     // 窗口无关的核心服务集合，生命周期跟随 session。
     HostCoreServices core;
@@ -84,9 +84,9 @@ struct VtkAppHostSession::Impl {
     std::shared_ptr<HostFeatureBindings> featureBindings;
     // host 命令分发器只暴露单一 Dispatch 入口，具体分发由内部标志位判断。
     std::shared_ptr<HostCommandRouter> commandRouter;
-    // Initialize 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
+    // BuildSession 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
     std::vector<HostRenderViewEndpoint> renderViewEndpoints;
-    // 防止 Start 或命令入口重复执行组装；命令入口可懒 Initialize，方便上位机先配置后调用。
+    // 防止 Start 或命令入口重复执行组装；命令入口可懒 BuildSession，方便上位机先配置后调用。
     bool isInitialized = false;
 
     explicit Impl(Config sessionConfig)
@@ -116,7 +116,7 @@ VtkAppHostSession::VtkAppHostSession(VtkAppHostSession&&) noexcept = default;
 
 VtkAppHostSession& VtkAppHostSession::operator=(VtkAppHostSession&&) noexcept = default;
 
-void VtkAppHostSession::Initialize()
+void VtkAppHostSession::BuildSession()
 {
     if (m_impl->isInitialized) {
         return;
@@ -127,14 +127,14 @@ void VtkAppHostSession::Initialize()
     // 3. feature bindings 只注册能力；裁切或孔隙显示必须等宿主命令携带目标窗口后才激活。
     m_impl->core = BuildHostCoreServices();
     m_impl->renderViews.Build(m_impl->core, m_impl->config.renderViews);
-    m_impl->featureBindings->RegisterFeatures(m_impl->core, m_impl->renderViews);
+    m_impl->featureBindings->AttachFeatures(m_impl->core, m_impl->renderViews);
     m_impl->commandRouter = std::make_shared<HostCommandRouter>(
         m_impl->core,
         m_impl->renderViews,
         m_impl->featureBindings);
 
-    m_impl->renderViews.ConfigureInitialVisibility();
-    if (m_impl->config.initialVolume.enableInitialLoad) {
+    m_impl->renderViews.SetInitialVisibility();
+    if (m_impl->config.initialVolume.isInitialLoadEnabled) {
         HostCommandRouterRequest initialLoadRequest;
         initialLoadRequest.command = HostCommandKind::Load;
         initialLoadRequest.initialVolume = m_impl->config.initialVolume;
@@ -142,7 +142,7 @@ void VtkAppHostSession::Initialize()
     }
 
     m_impl->renderViews.RenderAll();
-    m_impl->renderViews.InitializeAllInteractors();
+    m_impl->renderViews.SetInteractorsReady();
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     m_impl->renderViewEndpoints = m_impl->renderViews.BuildEndpoints();
 
@@ -161,10 +161,10 @@ void VtkAppHostSession::Initialize()
 
 void VtkAppHostSession::Start()
 {
-    Initialize();
+    BuildSession();
     if (const auto* startView = m_impl->renderViews.GetStandaloneStartView()) {
         if (startView->context) {
-            // 独立 VTK host 需要一个 interactor 承载主循环；Qt host 可只调用 Initialize 后接管 endpoints。
+            // 独立 VTK host 需要一个 interactor 承载主循环；Qt host 可只调用 BuildSession 后接管 endpoints。
             startView->context->Start();
         }
     }
@@ -172,9 +172,9 @@ void VtkAppHostSession::Start()
 
 bool VtkAppHostSession::LoadVolume(
     const InitialVolumeLoadConfig& request,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::Load;
     routerRequest.initialVolume = request;
@@ -185,7 +185,7 @@ bool VtkAppHostSession::LoadVolume(
 bool VtkAppHostSession::StartCrop(
     const HostOrthogonalCropActivationRequest& request)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropStart;
     routerRequest.orthogonalCropRequest = request;
@@ -195,7 +195,7 @@ bool VtkAppHostSession::StartCrop(
 bool VtkAppHostSession::SwitchCropBox(
     const HostOrthogonalCropActivationRequest& request)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropBox;
     routerRequest.orthogonalCropRequest = request;
@@ -205,7 +205,7 @@ bool VtkAppHostSession::SwitchCropBox(
 bool VtkAppHostSession::SwitchCropPlane(
     const HostOrthogonalCropActivationRequest& request)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropPlane;
     routerRequest.orthogonalCropRequest = request;
@@ -216,7 +216,7 @@ bool VtkAppHostSession::SwitchCropView(
     const HostOrthogonalCropActivationRequest& request,
     HostCropPreviewMode previewMode)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropPreview;
     routerRequest.orthogonalCropRequest = request;
@@ -227,7 +227,7 @@ bool VtkAppHostSession::SwitchCropView(
 bool VtkAppHostSession::SendCrop(
     const HostOrthogonalCropActivationRequest& request)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropApply;
     routerRequest.orthogonalCropRequest = request;
@@ -236,7 +236,7 @@ bool VtkAppHostSession::SendCrop(
 
 bool VtkAppHostSession::ExitCrop()
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropExit;
     return m_impl->Send(std::move(routerRequest));
@@ -245,7 +245,7 @@ bool VtkAppHostSession::ExitCrop()
 bool VtkAppHostSession::StartGapView(
     const HostGapAnalysisActivationRequest& request)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapStart;
     routerRequest.gapAnalysisRequest = request;
@@ -254,7 +254,7 @@ bool VtkAppHostSession::StartGapView(
 
 bool VtkAppHostSession::SwitchGapLayer()
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapOverlay;
     return m_impl->Send(std::move(routerRequest));
@@ -262,7 +262,7 @@ bool VtkAppHostSession::SwitchGapLayer()
 
 bool VtkAppHostSession::ExitGapView()
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapExit;
     return m_impl->Send(std::move(routerRequest));
@@ -270,7 +270,7 @@ bool VtkAppHostSession::ExitGapView()
 
 bool VtkAppHostSession::SetViewConfig(const HostViewConfig& config)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::ViewConfig;
     routerRequest.viewConfig = config;
@@ -279,9 +279,9 @@ bool VtkAppHostSession::SetViewConfig(const HostViewConfig& config)
 
 bool VtkAppHostSession::ExportData(
     const HostDataExportConfig& dataExportConfig,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
-    Initialize();
+    BuildSession();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::Export;
     routerRequest.dataExportConfig = dataExportConfig;
@@ -291,14 +291,14 @@ bool VtkAppHostSession::ExportData(
 
 const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()
 {
-    Initialize();
+    BuildSession();
     return m_impl->renderViewEndpoints;
 }
 
 const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
     const std::string& id)
 {
-    Initialize();
+    BuildSession();
     for (const auto& endpoint : m_impl->renderViewEndpoints) {
         if (endpoint.id == id) {
             return &endpoint;
@@ -309,7 +309,7 @@ const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
 
 const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryRenderViewEndpoint()
 {
-    Initialize();
+    BuildSession();
     for (const auto& endpoint : m_impl->renderViewEndpoints) {
         if (endpoint.role == HostRenderViewRole::Primary3D) {
             return &endpoint;

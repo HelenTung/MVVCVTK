@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "AppTypes.h"  // VizMode, ToolMode
 #include <string>
 
@@ -29,9 +29,9 @@ struct InteractionEvent
     int y = 0;
 
     // ── 键盘修饰键 ─────────────────────────────────────────────────────
-    bool shift = false;
-    bool ctrl = false;
-    bool alt = false;
+    bool isShiftDown = false;
+    bool isCtrlDown = false;
+    bool isAltDown = false;
 
     // ── 键盘按键（KeyPressEvent 时有效） ─────────────────────────────
     char        keyCode = 0;    // iren->GetKeyCode()，单字符输入；具体功能键由宿主映射

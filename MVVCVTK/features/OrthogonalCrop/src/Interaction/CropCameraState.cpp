@@ -17,7 +17,7 @@ void CropCameraState::SetCameraState(vtkRenderer* renderer)
     camera->GetClippingRange(m_cameraState.clippingRange.data());
     m_cameraState.parallelScale = camera->GetParallelScale();
     m_cameraState.viewAngle = camera->GetViewAngle();
-    m_cameraState.parallelProjection = camera->GetParallelProjection() != 0;
+    m_cameraState.isParallelProjection = camera->GetParallelProjection() != 0;
     m_cameraState.isValid = true;
     m_hasCamera = true;
 }
@@ -43,7 +43,7 @@ void CropCameraState::ResetCamera(vtkRenderer* renderer)
         m_cameraState.viewUp[2]);
     camera->SetParallelScale(m_cameraState.parallelScale);
     camera->SetViewAngle(m_cameraState.viewAngle);
-    camera->SetParallelProjection(m_cameraState.parallelProjection ? 1 : 0);
+    camera->SetParallelProjection(m_cameraState.isParallelProjection ? 1 : 0);
     renderer->ResetCameraClippingRange();
     Clear();
 }

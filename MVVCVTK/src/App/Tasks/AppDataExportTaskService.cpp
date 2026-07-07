@@ -11,9 +11,9 @@ AppDataExportTaskService::AppDataExportTaskService(
 {
 }
 
-std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTransformedDataTask(
+std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildDataTask(
     const std::string& path,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     SetSaveCallback(std::move(onComplete));
 
@@ -38,20 +38,20 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveTra
     return std::packaged_task<void()>(
         [dataManager, path, modelToWorldMatrixSnapshot, weakSelf]() mutable
         {
-            const bool ok = dataManager->SaveTransformedData(path, modelToWorldMatrixSnapshot);
+            const bool isOk = dataManager->ExportData(path, modelToWorldMatrixSnapshot);
 
             auto self = weakSelf.lock();
             if (self) {
-                self->SetSaveCallbackReady(ok);
+                self->SetSaveCallbackReady(isOk);
             }
         });
 }
 
-std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSliceImagesTask(
+std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesTask(
     const std::string& path,
     std::optional<double> rotationAngleDeg,
     VizMode currentMode,
-    std::function<void(bool success)> onComplete)
+    std::function<void(bool isSuccess)> onComplete)
 {
     SetSaveCallback(std::move(onComplete));
 
@@ -94,7 +94,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSli
     return std::packaged_task<void()>(
         [dataManager, path, exportData, currentWindowLevel, weakSelf]() mutable
         {
-            const bool ok = dataManager->SaveSliceImages(
+            const bool isOk = dataManager->ExportSlices(
                 path,
                 exportData->orientation,
                 currentWindowLevel,
@@ -102,19 +102,19 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSaveSli
 
             auto self = weakSelf.lock();
             if (self) {
-                self->SetSaveCallbackReady(ok);
+                self->SetSaveCallbackReady(isOk);
             }
         });
 }
 
-bool AppDataExportTaskService::ConsumeSaveCallback()
+bool AppDataExportTaskService::GetSaveCallback()
 {
     return m_saveCompletionCallbackState.GetPendingCallbackConsumed();
 }
 
-void AppDataExportTaskService::ExecutePendingSaveCallback()
+void AppDataExportTaskService::SendSaveCallback()
 {
-    m_saveCompletionCallbackState.ExecutePendingCallback();
+    m_saveCompletionCallbackState.SendCallback();
 }
 
 void AppDataExportTaskService::SetSaveCallback(std::function<void(bool)> callback)
@@ -123,8 +123,8 @@ void AppDataExportTaskService::SetSaveCallback(std::function<void(bool)> callbac
 }
 
 void AppDataExportTaskService::SetSaveCallbackReady(
-    bool success,
+    bool isSuccess,
     std::function<void(bool)> callback)
 {
-    m_saveCompletionCallbackState.SetCallbackReady(success, std::move(callback));
+    m_saveCompletionCallbackState.SetCallbackReady(isSuccess, std::move(callback));
 }

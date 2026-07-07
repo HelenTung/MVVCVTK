@@ -33,7 +33,7 @@ static CropRemovalMode GetCropRemovalMode(HostCropPreviewMode previewMode)
     }
 }
 
-static std::optional<Orientation> GetGapSliceOverlayOrientation(HostRenderViewRole role)
+static std::optional<Orientation> GetGapSliceOrient(HostRenderViewRole role)
 {
     switch (role) {
     case HostRenderViewRole::TopDownSlice:
@@ -47,12 +47,12 @@ static std::optional<Orientation> GetGapSliceOverlayOrientation(HostRenderViewRo
     }
 }
 
-static bool ShouldReceiveGapMeshOverlay(HostRenderViewRole role)
+static bool GetGapMeshUsed(HostRenderViewRole role)
 {
     return HostRenderViewSet::GetRoleIs3DView(role);
 }
 
-static VoidDetectionParams BuildVoidDetectionParams(
+static VoidDetectionParams BuildVoidParams(
     const HostGapAnalysisVoidDetectionConfig& config)
 {
     VoidDetectionParams params;
@@ -65,7 +65,7 @@ static VoidDetectionParams BuildVoidDetectionParams(
     return params;
 }
 
-static GapAnalysisSurfaceRequest BuildGapAnalysisSurfaceRequest(
+static GapAnalysisSurfaceRequest BuildGapSurfaceReq(
     const HostGapAnalysisSurfaceConfig& config)
 {
     GapAnalysisSurfaceRequest request;
@@ -77,7 +77,7 @@ static GapAnalysisSurfaceRequest BuildGapAnalysisSurfaceRequest(
     return request;
 }
 
-static bool ValidateGapAnalysisAlgorithmConfig(
+static bool GetGapConfigValid(
     const HostGapAnalysisAlgorithmConfig& config)
 {
     if (config.surface.isoMode == HostGapAnalysisIsoMode::DataRangeRatio
@@ -123,7 +123,7 @@ HostFeatureBindings::~HostFeatureBindings()
     }
 }
 
-void HostFeatureBindings::RegisterFeatures(
+void HostFeatureBindings::AttachFeatures(
     const HostCoreServices& core,
     const HostRenderViewSet& renderViews)
 {
@@ -151,7 +151,7 @@ void HostFeatureBindings::RegisterFeatures(
                 renderViewServices = std::move(renderViewServices)
             ](
                 vtkSmartPointer<vtkImageData> image,
-                std::function<void(bool success)> onComplete) {
+                std::function<void(bool isSuccess)> onComplete) {
                 if (!sharedDataMgr || !sharedState || !image) {
                     return false;
                 }
@@ -166,7 +166,7 @@ void HostFeatureBindings::RegisterFeatures(
 
                 sharedState->SetReloadLoadStarted();
                 if (!sharedDataMgr->TakeImageSnapshot(std::move(image))
-                    || !sharedDataMgr->ConsumePendingImage()) {
+                    || !sharedDataMgr->GetPendingImage()) {
                     sharedState->SetReloadLoadFailed();
                     return false;
                 }
@@ -202,7 +202,7 @@ bool HostFeatureBindings::StartCrop(
 {
     // 裁切至少需要一个 reference view，因为 widget interactor、renderer 和输入模型坐标都来自这一路。
     // preview view 可以为空；那只意味着不显示预览，不影响 reference 链路边界。
-    if (request.referenceViewId.empty() && !request.useReferenceRole) {
+    if (request.referenceViewId.empty() && !request.isReferenceRoleUsed) {
         std::cerr << "[Host] Orthogonal crop activation skipped: reference render view was not specified." << std::endl;
         return false;
     }
@@ -219,7 +219,7 @@ bool HostFeatureBindings::StartGapView(
     }
     if (request.targetViewIds.empty()
         && request.targetViewRoles.empty()
-        && !request.useDefaultOverlayRoles) {
+        && !request.isDefaultOverlayUsed) {
         std::cerr << "[Host] Gap Analysis display activation skipped: no render view target was requested." << std::endl;
         return false;
     }
@@ -227,15 +227,15 @@ bool HostFeatureBindings::StartGapView(
         std::cerr << "[Host] Gap Analysis display activation skipped: algorithm parameters were not specified." << std::endl;
         return false;
     }
-    if (!ValidateGapAnalysisAlgorithmConfig(*request.algorithm)) {
+    if (!GetGapConfigValid(*request.algorithm)) {
         return false;
     }
 
     std::vector<const HostRenderViewRuntime*> targetViews =
         m_renderViews->GetViewsByIdsAndRoles(request.targetViewIds, request.targetViewRoles);
-    if (targetViews.empty() && request.useDefaultOverlayRoles) {
+    if (targetViews.empty() && request.isDefaultOverlayUsed) {
         // 默认 overlay role 只有在宿主明确允许 fallback 时才使用；空请求不能被解释成全窗口。
-        targetViews = m_renderViews->GetDefaultGapOverlayViews();
+        targetViews = m_renderViews->GetGapOverlayViews();
     }
     if (targetViews.empty()) {
         std::cerr << "[Host] Gap Analysis display activation skipped: no overlay render view target was found." << std::endl;
@@ -256,19 +256,19 @@ bool HostFeatureBindings::StartGapView(
             continue;
         }
 
-        if (ShouldReceiveGapMeshOverlay(view->config.role)) {
+        if (GetGapMeshUsed(view->config.role)) {
             meshOverlayTargets.push_back(view->service);
         }
 
-        const auto orientation = GetGapSliceOverlayOrientation(view->config.role);
+        const auto orientation = GetGapSliceOrient(view->config.role);
         if (orientation) {
             sliceOverlayTargets.push_back({ *orientation, view->service });
         }
     }
 
     return m_core.gapAnalysis->StartView(
-        BuildGapAnalysisSurfaceRequest(request.algorithm->surface),
-        BuildVoidDetectionParams(request.algorithm->voidDetection),
+        BuildGapSurfaceReq(request.algorithm->surface),
+        BuildVoidParams(request.algorithm->voidDetection),
         meshOverlayTargets,
         sliceOverlayTargets,
         [sharedState = m_core.sharedState](double isoValue) {
@@ -418,7 +418,7 @@ bool HostFeatureBindings::SetCropInput()
 void HostFeatureBindings::AttachHostTimer(
     const HostTimerEventPumpConfig& eventPumpConfig)
 {
-    if (!eventPumpConfig.enableTimer || !m_renderViews) {
+    if (!eventPumpConfig.isTimerEnabled || !m_renderViews) {
         DetachHostTimer();
         return;
     }
@@ -427,7 +427,7 @@ void HostFeatureBindings::AttachHostTimer(
     if (!eventPumpConfig.timerViewId.empty()) {
         timerView = m_renderViews->GetViewById(eventPumpConfig.timerViewId);
     }
-    else if (eventPumpConfig.useTimerViewRole) {
+    else if (eventPumpConfig.isTimerRoleUsed) {
         timerView = m_renderViews->GetFirstViewByRole(eventPumpConfig.timerViewRole);
     }
 
@@ -485,7 +485,7 @@ bool HostFeatureBindings::SetCropViews(
     if (!request.referenceViewId.empty()) {
         referenceView = m_renderViews->GetViewById(request.referenceViewId);
     }
-    else if (request.useReferenceRole) {
+    else if (request.isReferenceRoleUsed) {
         referenceView = m_renderViews->GetFirstViewByRole(request.referenceRole);
     }
 
@@ -496,9 +496,9 @@ bool HostFeatureBindings::SetCropViews(
 
     std::vector<const HostRenderViewRuntime*> previewViews =
         m_renderViews->GetViewsByIdsAndRoles(request.previewViewIds, request.previewViewRoles);
-    if (previewViews.empty() && request.useConfiguredPreviewViews) {
+    if (previewViews.empty() && request.isPreviewViewsUsed) {
         // 裁切预览目标也必须由请求允许后才退到配置默认值；空请求不全选，避免误把新窗口纳入 preview。
-        previewViews = m_renderViews->GetConfiguredCropPreviewViews();
+        previewViews = m_renderViews->GetCropPreviewViews();
     }
 
     auto bridge = m_core.orthogonalCropBridge;
@@ -506,7 +506,7 @@ bool HostFeatureBindings::SetCropViews(
     bridge->SetReferenceRenderService(referenceView->service);
     bridge->SetReferenceRenderer(referenceView->context->GetRenderer());
     bridge->SetPrimaryInteractor(referenceView->context->GetInteractor());
-    bridge->SetPreviewRenderServices(m_renderViews->BuildInteractiveServices(previewViews));
+    bridge->SetPreviewRenderServices(m_renderViews->BuildServices(previewViews));
 
     if (!SetCropInput()) {
         return false;

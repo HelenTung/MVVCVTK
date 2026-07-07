@@ -14,7 +14,7 @@ namespace {
 static std::pair<
     std::shared_ptr<VizService>,
     std::shared_ptr<StdRenderContext>>
-    BuildRenderViewRuntimePair(
+    BuildViewPair(
         const WindowConfig& cfg,
         vtkSmartPointer<vtkRenderWindow> renderWindow,
         std::shared_ptr<AbstractDataManager> dataMgr,
@@ -40,7 +40,7 @@ static std::pair<
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
     context->SetCameraStyle(cfg.preInitCfg.vizMode);
-    if (cfg.showAxes) {
+    if (cfg.isAxesVisible) {
         context->SetOrientationAxesVisible(true);
     }
 
@@ -51,14 +51,14 @@ static std::pair<
     return { service, context };
 }
 
-static bool ContainsRole(
+static bool GetRoleIncluded(
     const std::vector<HostRenderViewRole>& roles,
     HostRenderViewRole role)
 {
     return std::find(roles.begin(), roles.end(), role) != roles.end();
 }
 
-static bool ContainsId(
+static bool GetIdIncluded(
     const std::vector<std::string>& ids,
     const std::string& id)
 {
@@ -81,7 +81,7 @@ void HostRenderViewSet::Build(
             // 空 id 不再按 index 造假稳定标识；上位机若需要按 id 寻址，必须在 HostRenderViewConfig 中显式提供。
             std::cerr << "[Host] Render view config has empty id; this view can only be targeted by role." << std::endl;
         }
-        auto pair = BuildRenderViewRuntimePair(
+        auto pair = BuildViewPair(
             config.window,
             config.renderWindow,
             core.sharedDataMgr,
@@ -141,7 +141,7 @@ const HostRenderViewRuntime* HostRenderViewSet::GetStandaloneStartView() const
 {
     // 独立 VTK host 只能由一个 interactor 进入阻塞主循环；Qt host 不调用 Start，因此不会被这里约束。
     for (const auto& view : m_views) {
-        if (view.config.startStandaloneEventLoop) {
+        if (view.config.isEventLoopEnabled) {
             return &view;
         }
     }
@@ -157,9 +157,9 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByIdsAndRol
 
     // 空 ids/roles 表示宿主没有声明作用域，返回空而不是全选；这样 feature 激活不会因为漏配目标而接管所有窗口。
     for (const auto& view : m_views) {
-        const bool idSelected = !ids.empty() && ContainsId(ids, view.config.id);
-        const bool roleSelected = !roles.empty() && ContainsRole(roles, view.config.role);
-        if (idSelected || roleSelected) {
+        const bool isIdSelected = !ids.empty() && GetIdIncluded(ids, view.config.id);
+        const bool isRoleSelected = !roles.empty() && GetRoleIncluded(roles, view.config.role);
+        if (isIdSelected || isRoleSelected) {
             selectedViews.push_back(&view);
         }
     }
@@ -167,20 +167,20 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByIdsAndRol
     return selectedViews;
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetConfiguredCropPreviewViews() const
+std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetCropPreviewViews() const
 {
-    // includeInCropPreview 是 host 对“配置默认 preview 集合”的声明；只有请求明确允许 fallback 时才会走到这里。
+    // isCropPreviewIncluded 是 host 对“配置默认 preview 集合”的声明；只有请求明确允许 fallback 时才会走到这里。
     std::vector<const HostRenderViewRuntime*> selectedViews;
     selectedViews.reserve(m_views.size());
     for (const auto& view : m_views) {
-        if (view.config.includeInCropPreview) {
+        if (view.config.isCropPreviewIncluded) {
             selectedViews.push_back(&view);
         }
     }
     return selectedViews;
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetDefaultGapOverlayViews() const
+std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetGapOverlayViews() const
 {
     // 默认孔隙 overlay 只按 role 判断可显示能力，不按窗口序号或历史五窗口布局判断。
     std::vector<const HostRenderViewRuntime*> selectedViews;
@@ -193,7 +193,7 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetDefaultGapOverla
     return selectedViews;
 }
 
-std::vector<std::shared_ptr<AbstractInteractiveService>> HostRenderViewSet::BuildInteractiveServices(
+std::vector<std::shared_ptr<AbstractInteractiveService>> HostRenderViewSet::BuildServices(
     const std::vector<const HostRenderViewRuntime*>& views) const
 {
     // 裁切 bridge 只需要刷新/overlay 这种交互服务接口；这里降到抽象类型，防止 feature 依赖 HostRenderViewRuntime。
@@ -207,7 +207,7 @@ std::vector<std::shared_ptr<AbstractInteractiveService>> HostRenderViewSet::Buil
     return services;
 }
 
-void HostRenderViewSet::ConfigureInitialVisibility() const
+void HostRenderViewSet::SetInitialVisibility() const
 {
     // 初始可见性是视图角色策略，不是窗口编号策略；新增窗口只要声明 role 即可进入正确默认状态。
     for (const auto& view : m_views) {
@@ -236,7 +236,7 @@ void HostRenderViewSet::RenderAll() const
     }
 }
 
-void HostRenderViewSet::InitializeAllInteractors() const
+void HostRenderViewSet::SetInteractorsReady() const
 {
     // VTK interactor 需要在 endpoint 暴露前完成初始化；Qt host 注入的 window 也沿用同一顺序。
     for (const auto& view : m_views) {

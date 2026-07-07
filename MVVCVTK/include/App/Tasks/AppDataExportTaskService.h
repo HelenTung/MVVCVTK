@@ -18,22 +18,22 @@ public:
     AppDataExportTaskService(std::shared_ptr<AbstractDataManager> dataManager,
         std::shared_ptr<SharedInteractionState> sharedState);
 
-    std::optional<std::packaged_task<void()>> BuildSaveTransformedDataTask(
+    std::optional<std::packaged_task<void()>> BuildDataTask(
         const std::string& path,
-        std::function<void(bool success)> onComplete);
+        std::function<void(bool isSuccess)> onComplete);
 
-    std::optional<std::packaged_task<void()>> BuildSaveSliceImagesTask(
+    std::optional<std::packaged_task<void()>> BuildSlicesTask(
         const std::string& path,
         std::optional<double> rotationAngleDeg,
         VizMode currentMode,
-        std::function<void(bool success)> onComplete);
+        std::function<void(bool isSuccess)> onComplete);
 
-    bool ConsumeSaveCallback();
-    void ExecutePendingSaveCallback();
+    bool GetSaveCallback();
+    void SendSaveCallback();
 
 private:
     void SetSaveCallback(std::function<void(bool)> callback);
-    void SetSaveCallbackReady(bool success, std::function<void(bool)> callback = nullptr);
+    void SetSaveCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr);
 
     std::shared_ptr<AbstractDataManager> m_dataManager;
     std::shared_ptr<SharedInteractionState> m_sharedState;

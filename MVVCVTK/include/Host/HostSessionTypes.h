@@ -45,7 +45,7 @@ struct HostHotkeyBindings {
     char keepInsidePreviewKey = 0;
     // 调试预览键：移除平面法向内侧。
     char removeInsidePreviewKey = 0;
-    // 调试提交键的主键位；observer 额外要求 Ctrl，避免裸数字键触发 VTK 内建行为。
+    // 调试提交键的主键位；observer 额外要求 isCtrlDown，避免裸数字键触发 VTK 内建行为。
     char submitKey = 0;
     // 使用 key symbol 而不是 char，是因为 Escape 这类控制键没有稳定可打印字符。
     std::string exitKeySym;
@@ -73,8 +73,8 @@ struct InitialVolumeGeometryConfig {
 // 路径和 geometry 默认都为空，是因为它们属于上位机 / 调试入口的外部事实，不能写进通用 session 配置。
 struct InitialVolumeLoadConfig {
     // true 表示宿主明确要求 session 启动后加载 filePath；false 表示等待后续数据命令。
-    bool enableInitialLoad = false;
-    // 外部体数据路径。空路径即使 enableInitialLoad=true 也会被拒绝，避免 DataManager 进入不明确 I/O。
+    bool isInitialLoadEnabled = false;
+    // 外部体数据路径。空路径即使 isInitialLoadEnabled=true 也会被拒绝，避免 DataManager 进入不明确 I/O。
     std::string filePath;
     // RAW 必需的物理几何元数据；optional 表示“宿主尚未下发”，不是使用默认值。
     std::optional<InitialVolumeGeometryConfig> geometry;
@@ -92,12 +92,12 @@ struct HostRenderViewConfig {
     // Qt host 可注入 vtkGenericOpenGLRenderWindow；host 只接收 VTK 基类，避免把 Qt widget 类型带入业务层。
     vtkSmartPointer<vtkRenderWindow> renderWindow;
     // true 表示当请求允许使用配置默认预览窗口时，此视图可接收裁切 preview overlay。
-    bool includeInCropPreview = true;
+    bool isCropPreviewIncluded = true;
     // 独立 VTK host 只能选择一个 interactor 进入阻塞 Start；Qt host 不依赖这个字段。
-    bool startStandaloneEventLoop = false;
+    bool isEventLoopEnabled = false;
 };
 
-// endpoint 是 Initialize 之后给宿主层使用的非拥有观察视图。
+// endpoint 是 BuildSession 之后给宿主层使用的非拥有观察视图。
 // 这里不暴露 service，是为了避免 Qt / 上位机绕过 host/session 直接改 feature 或 core 状态。
 struct HostRenderViewEndpoint {
     // 与 HostRenderViewConfig::id 对应，外部宿主用它把 endpoint 绑定到自己的 widget。
@@ -116,7 +116,7 @@ struct HostViewConfig {
     // 优先按 id 定位目标窗口，适合 Qt widget 已建立 id 映射的场景。
     std::string viewId;
     // viewId 为空时是否允许按 role 查找目标窗口。
-    bool useViewRole = false;
+    bool isViewRoleUsed = false;
     // role fallback 的目标窗口。
     HostRenderViewRole viewRole = HostRenderViewRole::Auxiliary;
 
@@ -134,7 +134,7 @@ struct HostViewConfig {
 // 这一层不触发 feature，只让 StdRenderContext 暴露现有工具能力；Qt / 上位机应默认关闭。
 struct HostRenderContextInputConfig {
     // false 时不向 RenderContext 安装任何 host 按键回调。
-    bool enableStandaloneHotkeys = false;
+    bool isHotkeyEnabled = false;
     // 按 id 指定哪些窗口接收 RenderContext 调试键；空列表不代表所有窗口。
     std::vector<std::string> targetViewIds;
     // 按 role 指定哪些窗口接收 RenderContext 调试键；与 id 取并集。
@@ -155,7 +155,7 @@ struct HostDataExportConfig {
     // 优先按 id 指定来源切片视图，适合 Qt 已经掌握 widget -> view id 映射的场景。
     std::string sliceImagesSourceViewId;
     // sliceImagesSourceViewId 为空时，是否允许按 role 查找来源切片视图。
-    bool useSliceImagesSourceViewRole = false;
+    bool isSliceRoleUsed = false;
     // role fallback 的来源切片视图。
     HostRenderViewRole sliceImagesSourceViewRole = HostRenderViewRole::TopDownSlice;
     // 可选自定义切片偏转角，单位 degree；未设置时只使用当前共享模型矩阵。
@@ -169,15 +169,15 @@ struct HostOrthogonalCropActivationRequest {
     // 优先级最高的参考窗口选择方式；适合 Qt 已经拿到具体窗口 id 的场景。
     std::string referenceViewId;
     // referenceViewId 为空时，是否允许按 role 选择第一个参考窗口。
-    bool useReferenceRole = false;
+    bool isReferenceRoleUsed = false;
     // role fallback 的参考窗口角色，默认 Primary3D 只是语义默认，不代表固定第一个窗口。
     HostRenderViewRole referenceRole = HostRenderViewRole::Primary3D;
     // 显式预览窗口 id 列表；空列表表示调用方没有指定，不自动全选。
     std::vector<std::string> previewViewIds;
     // 显式预览窗口 role 列表；与 previewViewIds 取并集。
     std::vector<HostRenderViewRole> previewViewRoles;
-    // true 才允许退回 HostRenderViewConfig::includeInCropPreview，避免漏配请求时污染所有窗口。
-    bool useConfiguredPreviewViews = false;
+    // true 才允许退回 HostRenderViewConfig::isCropPreviewIncluded，避免漏配请求时污染所有窗口。
+    bool isPreviewViewsUsed = false;
 };
 
 // 裁切预览命令只表达“保留哪一侧”的业务意图，底层 CropRemovalMode 仍由裁切模块维护。
@@ -234,11 +234,11 @@ struct HostGapAnalysisAlgorithmConfig {
 // 后续其他异步 feature 也应复用这一条 host/session 事件泵，而不是各自新建 feature 专属 observer。
 struct HostTimerEventPumpConfig {
     // false 表示不安装 VTK Timer observer；调用方可以稍后接入自己的主线程轮询机制。
-    bool enableTimer = false;
+    bool isTimerEnabled = false;
     // 优先按 id 选择 timer view，适合 Qt 已经建立 widget 到 view id 的映射。
     std::string timerViewId;
     // timerViewId 为空时是否允许按 role 选择第一个事件泵窗口。
-    bool useTimerViewRole = false;
+    bool isTimerRoleUsed = false;
     // role fallback 的事件泵窗口；它只决定 TimerEvent 来源，不决定 overlay 目标。
     HostRenderViewRole timerViewRole = HostRenderViewRole::Primary3D;
 };
@@ -251,7 +251,7 @@ struct HostGapAnalysisActivationRequest {
     // 显式 overlay 目标 role 列表；与 targetViewIds 取并集。
     std::vector<HostRenderViewRole> targetViewRoles;
     // true 才允许退回默认 overlay role，防止未指定目标时全局接管。
-    bool useDefaultOverlayRoles = false;
+    bool isDefaultOverlayUsed = false;
     // 一次分析运行所需参数；没有参数时 host 会拒绝进入分析链路，避免使用隐藏经验默认值。
     std::optional<HostGapAnalysisAlgorithmConfig> algorithm;
 };
@@ -260,7 +260,7 @@ struct HostGapAnalysisActivationRequest {
 // 热键监听范围和 feature 激活目标分开写，是为了避免“哪个窗口收键”被误当成“feature 作用在哪些窗口”。
 struct HostCommandInputConfig {
     // false 时不安装 standalone feature observer；Qt / 上位机应走 VtkAppHostSession 的显式命令。
-    bool enableStandaloneHotkeys = false;
+    bool isHotkeyEnabled = false;
     // 哪些窗口监听 standalone feature 按键；空列表不代表所有窗口。
     std::vector<std::string> targetViewIds;
     // 哪些 role 监听 standalone feature 按键；与 targetViewIds 取并集。

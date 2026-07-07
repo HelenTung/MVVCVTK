@@ -43,38 +43,38 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // 2D 模式下同一时刻只允许一种主交互语义成立：
-    // 滚轮切片、Shift 左键拖十字线、Ctrl 左键定轴旋转、右键调窗彼此互斥。
+    // 滚轮切片、isShiftDown 左键拖十字线、isCtrlDown 左键定轴旋转、右键调窗彼此互斥。
 
     // ── 滚轮切片 ──────────────────────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent
         || eve.vtkEventId == vtkCommand::MouseWheelBackwardEvent)
     {
-        const int step = eve.ctrl ? 10 : 5;
+        const int step = eve.isCtrlDown ? 10 : 5;
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
-        m_service->ScrollSlice(delta);
+        m_service->SetSliceScroll(delta);
         // m_service->MarkDirty();
-        return { true, true };  // abortVtk=true：阻止 VTK 默认滚轮相机缩放
+        return { true, true };  // hasVtkAbort=true：阻止 VTK 默认滚轮相机缩放
     }
 
-    // ── 左键按下：Shift → 开始拖拽十字线 ────────────────────────────
+    // ── 左键按下：isShiftDown → 开始拖拽十字线 ────────────────────────────
     if (eve.vtkEventId == vtkCommand::LeftButtonPressEvent)
     {
-        if (eve.ctrl)
+        if (eve.isCtrlDown)
         {
-            m_enableDragSlice = true;
+            m_isDragSlice = true;
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
 			m_service->SetInteracting(true);
-			return { true, true };  // abortVtk=true：阻止 VTK 默认 Window/Level
+			return { true, true };  // hasVtkAbort=true：阻止 VTK 默认 Window/Level
         }
-        if (eve.shift) {
-            m_enableDragCrosshair = true;
+        if (eve.isShiftDown) {
+            m_isDragCrosshair = true;
             m_service->SetInteracting(true);
-            return { true, true };  // abortVtk=true：阻止 VTK 默认 Window/Level
+            return { true, true };  // hasVtkAbort=true：阻止 VTK 默认 Window/Level
         }
 
-        m_enableDragWindowLevel = true;
+        m_isDragWindowLevel = true;
         m_lastDragX = eve.x;
         m_lastDragY = eve.y;
         m_startDragX = eve.x;
@@ -91,19 +91,19 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     // ── 左键抬起：结束交互 ─────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::LeftButtonReleaseEvent)
     {
-        if (m_enableDragCrosshair) {
-            m_enableDragCrosshair = false;
+        if (m_isDragCrosshair) {
+            m_isDragCrosshair = false;
             m_service->SetInteracting(false);
             return { true, true };
         }
-        if (m_enableDragSlice)
+        if (m_isDragSlice)
         {
-            m_enableDragSlice = false;
+            m_isDragSlice = false;
 			m_service->SetInteracting(false);
 			return { true, true };
         }
-        if (m_enableDragWindowLevel) {
-            m_enableDragWindowLevel = false;
+        if (m_isDragWindowLevel) {
+            m_isDragWindowLevel = false;
             m_service->SetInteracting(false);
             return { true, true };
         }
@@ -113,7 +113,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     // ── 右键按下：开始缩放 ─────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::RightButtonPressEvent)
     {
-        m_enableRightZoom = true;
+        m_isRightZoom = true;
         m_zoomStartY = eve.y;
 
         if (m_renderer && m_renderer->GetActiveCamera()) {
@@ -130,8 +130,8 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     // ── 右键抬起：结束缩放 ─────────────────────────────────────────
     if (eve.vtkEventId == vtkCommand::RightButtonReleaseEvent)
     {
-        if (m_enableRightZoom) {
-            m_enableRightZoom = false;
+        if (m_isRightZoom) {
+            m_isRightZoom = false;
             m_service->SetInteracting(false);
             return { true, true };
         }
@@ -142,7 +142,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     if (eve.vtkEventId == vtkCommand::MouseMoveEvent)
     {
         // 路径 A：十字线拖拽
-        if (m_enableDragCrosshair)
+        if (m_isDragCrosshair)
         {
             if (!m_picker || !m_renderer) return {};
             m_picker->Pick(eve.x, eve.y, 0, m_renderer);
@@ -167,7 +167,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         // 路径 B：调窗拖拽
         //   水平方向（ΔX > 0 → 向右拖）→ 增大 WW（对比度变强）
         //   垂直方向（ΔY > 0 → 向上拖）→ 增大 WC（图像变暗/窗位升高）
-        if (m_enableDragWindowLevel)
+        if (m_isDragWindowLevel)
         {
             const int dx = eve.x - m_lastDragX;
             const int dy = eve.y - m_lastDragY;
@@ -190,7 +190,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             return { true, true };
         }
         // zoom放大
-        if (m_enableRightZoom)
+        if (m_isRightZoom)
         {
             if (!m_renderer || !m_renderer->GetActiveCamera()) {
                 return { true, true };
@@ -212,7 +212,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         }
 
         // 路径C：定轴旋转
-        if (m_enableDragSlice)
+        if (m_isDragSlice)
         {
             if (!m_renderer)
                 return{true,true};

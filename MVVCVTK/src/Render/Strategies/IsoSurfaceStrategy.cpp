@@ -55,7 +55,7 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     // polydata RemoveInside shader 直接读取 vertexMC 做 box 判定；
-    // 禁用 VBO shift/scale 才能保证 vertexMC 仍是原始等值面 model 坐标。
+    // 禁用 VBO isShiftDown/scale 才能保证 vertexMC 仍是原始等值面 model 坐标。
     m_mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);
@@ -159,7 +159,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         // 设置几何体透明度
         prop->SetOpacity(params.material.opacity);
         // 设置着色方式,开启光照
-        if (params.material.shadeOn) prop->SetInterpolationToPhong();
+        if (params.material.isShadeOn) prop->SetInterpolationToPhong();
         else prop->SetInterpolationToFlat();
     }
 
@@ -179,21 +179,21 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         const double nextIsoValue = GetFlagOn(flags, UpdateFlags::IsoValue)
             ? params.isoValue
             : m_currentIsoValue;
-        const bool interactionChanged = (m_isInteracting != nextIsInteracting);
-        const bool isoValueChanged = (m_currentIsoValue != nextIsoValue);
+        const bool hasInteractionChanged = (m_isInteracting != nextIsInteracting);
+        const bool hasIsoValueChanged = (m_currentIsoValue != nextIsoValue);
 
         m_isInteracting = nextIsInteracting;
         m_currentIsoValue = nextIsoValue;
 
         auto activeIsoFilter = m_isInteracting ? m_interactionIsoFilter : m_qualityIsoFilter;
         if (activeIsoFilter && activeIsoFilter->GetInput()) {
-            if ((interactionChanged || isoValueChanged)
+            if ((hasInteractionChanged || hasIsoValueChanged)
                 && activeIsoFilter->GetValue(0) != m_currentIsoValue) {
                 // 活动过滤器只接收这一帧最终阈值，避免交互过程中两条等值面管线同时重算。
                 activeIsoFilter->SetValue(0, m_currentIsoValue);
             }
 
-            if (interactionChanged) {
+            if (hasInteractionChanged) {
                 // 只有交互态真的切换时才改 mapper 输入，
                 // 避免单纯阈值变化时重复做输入重绑。
                 m_mapper->SetInputConnection(activeIsoFilter->GetOutputPort());

@@ -15,7 +15,7 @@
 class VtkAppHostSession final {
 public:
     // Config 是宿主输入的聚合 DTO：main 现在模拟上位机填它，未来 Qt / 上位机也填同一结构。
-    // 它只描述外部事实和输入协议，不创建对象，因此可安全地在 Initialize 前完整校验。
+    // 它只描述外部事实和输入协议，不创建对象，因此可安全地在 BuildSession 前完整校验。
     struct Config {
         // standalone hotkey 映射；关闭 standalone 输入时这些值不会被消费。
         HostHotkeyBindings hotkeys;
@@ -41,13 +41,13 @@ public:
     VtkAppHostSession(VtkAppHostSession&&) noexcept;
     VtkAppHostSession& operator=(VtkAppHostSession&&) noexcept;
 
-    void Initialize();
+    void BuildSession();
     void Start();
 
     // 显式体数据加载命令入口；session 只构造 request，不直接调用底层 service。
     bool LoadVolume(
         const InitialVolumeLoadConfig& request,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。
@@ -67,10 +67,10 @@ public:
     // 显式导出命令入口；session 只转交上位机配置，不解析具体导出 service。
     bool ExportData(
         const HostDataExportConfig& dataExportConfig,
-        std::function<void(bool success)> onComplete = nullptr);
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // endpoint 指针只在当前 session 生命周期内有效；外部宿主按 id/role 绑定 widget，不接管所有权。
-    // 读取 endpoint 会懒 Initialize，避免 Qt host 构造 session 后立即取窗口句柄时拿到空缓存。
+    // 读取 endpoint 会懒 BuildSession，避免 Qt host 构造 session 后立即取窗口句柄时拿到空缓存。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
     const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& id);
     const HostRenderViewEndpoint* GetPrimaryRenderViewEndpoint();

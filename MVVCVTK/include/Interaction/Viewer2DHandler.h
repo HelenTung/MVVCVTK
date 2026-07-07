@@ -10,8 +10,8 @@ class vtkRenderer;
 //
 // 支持的交互：
 //   滚轮前/后         → 切片步进
-//   Shift + 左键拖拽  → 拖拽十字线定位
-//   Ctrl + 左键拖拽   → 定轴旋转
+//   isShiftDown + 左键拖拽  → 拖拽十字线定位
+//   isCtrlDown + 左键拖拽   → 定轴旋转
 //   左键拖拽          → 调窗
 //   右键拖拽          → 缩放
 // ─────────────────────────────────────────────────────────────────────
@@ -29,10 +29,10 @@ private:
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
 
-    bool m_enableDragCrosshair = false;  // 是否正在拖拽十字线
-    bool m_enableDragSlice = false;      // 是否正在拖拽切片
-    bool m_enableDragWindowLevel = false; // 左键：拖拽调窗
-    bool m_enableRightZoom = false;       // 右键：2D 图像缩放
+    bool m_isDragCrosshair = false;  // 是否正在拖拽十字线
+    bool m_isDragSlice = false;      // 是否正在拖拽切片
+    bool m_isDragWindowLevel = false; // 左键：拖拽调窗
+    bool m_isRightZoom = false;       // 右键：2D 图像缩放
     int  m_lastRotateX = 0;               // 上一帧旋转角度（用于计算 delta，单位度）
     int  m_lastRotateY = 0;               // 上一帧旋转角度（用于计算 delta，单位度）
     int  m_lastDragX = 0;                 // 上一帧鼠标 X（用于计算 delta）

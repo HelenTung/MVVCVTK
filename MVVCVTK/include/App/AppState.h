@@ -89,7 +89,7 @@ public:
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
-        PublishFlags(UpdateFlags::DataReady);
+        SendFlags(UpdateFlags::DataReady);
     }
 
     // ── 重载数据就绪广播 ──────────────────────────────────────────
@@ -106,7 +106,7 @@ public:
             m_windowLevel.windowWidth = rangeMax - rangeMin;
             m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
         }
-        PublishFlags(UpdateFlags::DataReady);
+        SendFlags(UpdateFlags::DataReady);
     }
 
     // ── 文件流加载失败广播 ────────────────────────────────────────
@@ -118,7 +118,7 @@ public:
             m_dataTrustedState = LoadState::Failed;
             m_pendingLoadEventKind = LoadEventKind::File;
         }
-        PublishFlags(UpdateFlags::LoadFailed);
+        SendFlags(UpdateFlags::LoadFailed);
     }
 
     // ── 重载加载失败广播 ──────────────────────────────────────────
@@ -132,7 +132,7 @@ public:
             }
             m_pendingLoadEventKind = LoadEventKind::Reload;
         }
-        PublishFlags(UpdateFlags::LoadFailed);
+        SendFlags(UpdateFlags::LoadFailed);
     }
 
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
@@ -145,41 +145,41 @@ public:
             std::lock_guard<std::mutex> lk(m_mutex);
 
             if (AppStateCommands::SetMaterial(m_material, cfg.material)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::Material);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Material);
             }
 
             if (cfg.hasTF && AppStateCommands::SetTFNodes(m_nodes, cfg.tfNodes)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::TF);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::TF);
             }
 
             if (cfg.hasIso && AppStateCommands::SetScalar(m_isoValue, cfg.isoThreshold)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::IsoValue);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::IsoValue);
             }
 
             if (cfg.hasBgColor && AppStateCommands::SetBackground(m_background, cfg.bgColor)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::Background);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Background);
             }
 
             if (cfg.hasSpacing && AppStateCommands::SetArray(m_spacing, cfg.spacing)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::Spacing);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Spacing);
             }
 
             if (cfg.hasWindowLevel && AppStateCommands::SetWindowLevel(m_windowLevel, cfg.windowLevel)) {
-                AppStateCommands::MergeFlags(flags, UpdateFlags::WindowLevel);
+                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::WindowLevel);
             }
         }
         if (flags != UpdateFlags::None)
-            PublishFlags(flags);
+            SendFlags(flags);
     }
 
     // ── 模型变换矩阵 ──────────────────────────────────────────────
     void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetArray(m_modelMatrix, modelToWorldMatrix, 1e-9);
+            hasChanged = AppStateCommands::SetArray(m_modelMatrix, modelToWorldMatrix, 1e-9);
         }
-        if (changed) PublishFlags(UpdateFlags::Transform);
+        if (hasChanged) SendFlags(UpdateFlags::Transform);
     }
     std::array<double, 16> GetModelMatrix() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -188,12 +188,12 @@ public:
 
     // ── 标量范围 ──────────────────────────────────────────────────
     void SetScalarRange(double minv, double maxv) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetArray(m_dataRange, { minv, maxv });
+            hasChanged = AppStateCommands::SetArray(m_dataRange, { minv, maxv });
         }
-        if (changed) PublishFlags(UpdateFlags::TF);
+        if (hasChanged) SendFlags(UpdateFlags::TF);
     }
     std::array<double, 2> GetDataRange() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -202,12 +202,12 @@ public:
 
     // ── 传输函数节点 ──────────────────────────────────────────────
     void SetTFNodes(const std::vector<TFNode>& nodes) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetTFNodes(m_nodes, nodes);
+            hasChanged = AppStateCommands::SetTFNodes(m_nodes, nodes);
         }
-        if (changed) PublishFlags(UpdateFlags::TF);
+        if (hasChanged) SendFlags(UpdateFlags::TF);
     }
     void GetTFNodes(std::vector<TFNode>& dest) const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -216,12 +216,12 @@ public:
 
     // ── 等值面阈值 ────────────────────────────────────────────────
     void SetIsoValue(double val) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetScalar(m_isoValue, val);
+            hasChanged = AppStateCommands::SetScalar(m_isoValue, val);
         }
-        if (changed) PublishFlags(UpdateFlags::IsoValue);
+        if (hasChanged) SendFlags(UpdateFlags::IsoValue);
     }
     double GetIsoValue() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -230,12 +230,12 @@ public:
 
     // ── 材质参数 ──────────────────────────────────────────────────
     void SetMaterial(const MaterialParams& mat) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetMaterial(m_material, mat);
+            hasChanged = AppStateCommands::SetMaterial(m_material, mat);
         }
-        if (changed) PublishFlags(UpdateFlags::Material);
+        if (hasChanged) SendFlags(UpdateFlags::Material);
     }
     MaterialParams GetMaterial() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -244,12 +244,12 @@ public:
 
     // ── 背景色 ──────────────────────────────────────────────
     void SetBackground(const BackgroundColor& bg) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetBackground(m_background, bg);
+            hasChanged = AppStateCommands::SetBackground(m_background, bg);
         }
-        if (changed) PublishFlags(UpdateFlags::Background);
+        if (hasChanged) SendFlags(UpdateFlags::Background);
     }
     BackgroundColor GetBackground() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -258,12 +258,12 @@ public:
 
     // ── 体数据 spacing ──────────────────────────────────────────────
     void SetSpacing(double sx, double sy, double sz) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetArray(m_spacing, { sx, sy, sz });
+            hasChanged = AppStateCommands::SetArray(m_spacing, { sx, sy, sz });
         }
-        if (changed) PublishFlags(UpdateFlags::Spacing);
+        if (hasChanged) SendFlags(UpdateFlags::Spacing);
     }
 
     std::array<double, 3> GetSpacing() const {
@@ -273,12 +273,12 @@ public:
 
     // ── 切片窗宽/窗位（WW/WC，工业 CT 标准）─────────────────────
     void SetWindowLevel(double ww, double wc) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetWindowLevel(m_windowLevel, { ww, wc });
+            hasChanged = AppStateCommands::SetWindowLevel(m_windowLevel, { ww, wc });
         }
-        if (changed) PublishFlags(UpdateFlags::WindowLevel);
+        if (hasChanged) SendFlags(UpdateFlags::WindowLevel);
     }
     WindowLevelParams GetWindowLevel() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -287,13 +287,13 @@ public:
 
 
     // ── 交互状态 ──────────────────────────────────────────────────
-    void SetInteracting(bool val) {
-        bool changed = false;
+    void SetInteracting(bool isInteracting) {
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetValue(m_isInteracting, val);
+            hasChanged = AppStateCommands::SetValue(m_isInteracting, isInteracting);
         }
-        if (changed) PublishFlags(UpdateFlags::Interaction);
+        if (hasChanged) SendFlags(UpdateFlags::Interaction);
     }
     bool GetIsInteracting() const {
         std::lock_guard<std::mutex> lk(m_mutex);
@@ -302,12 +302,12 @@ public:
 
     // ── 光标位置 ──────────────────────────────────────────────────
     void SetCursorWorld(double x, double y, double z) {
-        bool changed = false;
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetArray(m_cursorWorld, { x, y, z }, 1e-9);
+            hasChanged = AppStateCommands::SetArray(m_cursorWorld, { x, y, z }, 1e-9);
         }
-        if (changed) PublishFlags(UpdateFlags::Cursor);
+        if (hasChanged) SendFlags(UpdateFlags::Cursor);
     }
 
     void SetCursorRawWorld(double x, double y, double z) {
@@ -338,13 +338,13 @@ public:
     }
 
     // ── 显隐状态 ──────────────────────────────────────────────────────────
-    void SetElementVisible(uint32_t flagBit, bool show) {
-        bool changed = false;
+    void SetElementVisible(uint32_t flagBit, bool isVisible) {
+        bool hasChanged = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
-            changed = AppStateCommands::SetVisibilityMask(m_visibilityMask, flagBit, show);
+            hasChanged = AppStateCommands::SetVisibilityMask(m_visibilityMask, flagBit, isVisible);
         }
-        if (changed) PublishFlags(UpdateFlags::Visibility);
+        if (hasChanged) SendFlags(UpdateFlags::Visibility);
     }
 
     uint32_t GetVisibilityMask() const {
@@ -385,7 +385,7 @@ private:
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
     };                                                         // 当前模型矩阵（列主序 4x4）
 
-    void PublishFlags(UpdateFlags flags) {
+    void SendFlags(UpdateFlags flags) {
         std::shared_ptr<IStateEventSink> eventSink;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
@@ -394,7 +394,7 @@ private:
 
         // 先复制 sink 再在锁外广播，避免观察者回调重新进入 SharedInteractionState 时形成锁嵌套。
         if (eventSink) {
-            eventSink->PublishFlags(flags);
+            eventSink->SendFlags(flags);
         }
     }
 };

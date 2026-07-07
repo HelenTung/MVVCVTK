@@ -65,7 +65,7 @@ struct MaterialParams {
     double specular = 0.2;
     double specularPower = 10.0;
     double opacity = 1.0;
-    bool   shadeOn = false;
+    bool   isShadeOn = false;
 };
 
 // --- 背景色（RGB，0~1）---
@@ -88,7 +88,7 @@ struct CameraStateSnapshot {
     std::array<double, 2> clippingRange = { 0.1, 1000.0 };
     double parallelScale = 1.0;
     double viewAngle = 30.0;
-    bool parallelProjection = false;
+    bool isParallelProjection = false;
 };
 
 // --- 更新类型位掩码（可组合）---
@@ -177,6 +177,6 @@ struct WindowConfig {
     int             height = 600;
     int             posX = 0;
     int             posY = 0;
-    bool            showAxes = false;
+    bool            isAxesVisible = false;
     PreInitConfig   preInitCfg;
 };
