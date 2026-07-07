@@ -149,7 +149,7 @@ static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixDa
     // 判断标准盒的三条局部轴在 input model 中是否仍分别落在单一坐标轴上。
     // 允许轴交换、90 度旋转和翻转；若某一列混入多个分量，或多个 box 轴占用同一 input model 轴，
     // 就说明存在任意角旋转、剪切或退化，不能走 AABB 快路径。
-    bool inputModelAxisUsed[3] = { false, false, false };
+    bool isInputAxisUsed[3] = { false, false, false };
     for (int boxAxis = 0; boxAxis < 3; ++boxAxis) {
         int mappedInputModelAxis = -1;
         for (int inputModelAxis = 0; inputModelAxis < 3; ++inputModelAxis) {
@@ -164,10 +164,10 @@ static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixDa
             mappedInputModelAxis = inputModelAxis;
         }
 
-        if (mappedInputModelAxis < 0 || inputModelAxisUsed[mappedInputModelAxis]) {
+        if (mappedInputModelAxis < 0 || isInputAxisUsed[mappedInputModelAxis]) {
             return false;
         }
-        inputModelAxisUsed[mappedInputModelAxis] = true;
+        isInputAxisUsed[mappedInputModelAxis] = true;
     }
 
     return true;
@@ -255,7 +255,7 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     const int maxJ = std::min(dims[1] - 1, indexBounds[3]);
     const int minK = std::max(0, indexBounds[4]);
     const int maxK = std::min(dims[2] - 1, indexBounds[5]);
-    const bool useCompactMask = removalMode == CropRemovalMode::KeepInside;
+    const bool isCompactMask = removalMode == CropRemovalMode::KeepInside;
 
     auto maskImage = vtkSmartPointer<vtkImageData>::New();
     if (minI > maxI || minJ > maxJ || minK > maxK) {
@@ -275,7 +275,7 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     const int width = maxI - minI + 1;
     const int height = maxJ - minJ + 1;
     const int depth = maxK - minK + 1;
-    if (useCompactMask) {
+    if (isCompactMask) {
         const int outputStartIndex[3] = { minI, minJ, minK };
         double outputOrigin[3] = { 0.0, 0.0, 0.0 };
         image->TransformIndexToPhysicalPoint(outputStartIndex, outputOrigin);
@@ -297,23 +297,23 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
         return nullptr;
     }
 
-    const bool keepInside = removalMode == CropRemovalMode::KeepInside;
+    const bool isKeepInside = removalMode == CropRemovalMode::KeepInside;
     // mask 用 255 表示保留、0 表示移除；
     // KeepInside 和 RemoveInside 只交换 inside/outside 的写入语义。
     const unsigned char keptValue = 255;
     const unsigned char removedValue = 0;
-    const unsigned char insideValue = keepInside ? keptValue : removedValue;
-    const unsigned char outsideValue = keepInside ? removedValue : keptValue;
+    const unsigned char insideValue = isKeepInside ? keptValue : removedValue;
+    const unsigned char outsideValue = isKeepInside ? removedValue : keptValue;
 
     const vtkIdType totalVoxelCount = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
-    const vtkIdType allocatedVoxelCount = useCompactMask
+    const vtkIdType allocatedVoxelCount = isCompactMask
         ? static_cast<vtkIdType>(width) * height * depth
         : totalVoxelCount;
     std::memset(maskPtr, outsideValue, static_cast<std::size_t>(allocatedVoxelCount));
 
     if (GetAxisAligned(cropData.GetBoxMatrix())) {
         // 标准盒矩阵退化为 input model 轴对齐盒时，snapped AABB 内部整块都属于 inside。
-        if (useCompactMask) {
+        if (isCompactMask) {
             std::memset(maskPtr, insideValue, static_cast<std::size_t>(allocatedVoxelCount));
         }
         else {
@@ -339,8 +339,8 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
 
     // 旋转/缩放盒的真实 inside 由“index 体素中心 -> image model -> 标准盒空间”决定。
     // 这里仍旧只在 snapped AABB 范围内遍历，避免为了旋转盒额外扩张执行域。
-    const vtkIdType rowStride = useCompactMask ? width : dims[0];
-    const vtkIdType sliceStride = useCompactMask
+    const vtkIdType rowStride = isCompactMask ? width : dims[0];
+    const vtkIdType sliceStride = isCompactMask
         ? static_cast<vtkIdType>(width) * height
         : static_cast<vtkIdType>(dims[0]) * dims[1];
     auto indexToPhysicalMatrix = image->GetIndexToPhysicalMatrix();
@@ -369,7 +369,7 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
                 const bool isInside = GetPointInBox(boxPoint);
 
                 if (isInside) {
-                    const vtkIdType linearIndex = useCompactMask
+                    const vtkIdType linearIndex = isCompactMask
                         ? static_cast<vtkIdType>(k - minK) * sliceStride
                             + static_cast<vtkIdType>(j - minJ) * rowStride
                             + (i - minI)
@@ -457,18 +457,18 @@ static void SetRemovedBg(
         return;
     }
 
-    const bool removeInside = removalMode == CropRemovalMode::RemoveInside;
-    if (!removeInside
+    const bool isRemoveInside = removalMode == CropRemovalMode::RemoveInside;
+    if (!isRemoveInside
         && GetAxisAligned(cropData.GetBoxMatrix())) {
         return;
     }
 
-    const int minI = removeInside ? std::clamp(inputImageIndexBounds[0], 0, dims[0] - 1) : 0;
-    const int maxI = removeInside ? std::clamp(inputImageIndexBounds[1], 0, dims[0] - 1) : dims[0] - 1;
-    const int minJ = removeInside ? std::clamp(inputImageIndexBounds[2], 0, dims[1] - 1) : 0;
-    const int maxJ = removeInside ? std::clamp(inputImageIndexBounds[3], 0, dims[1] - 1) : dims[1] - 1;
-    const int minK = removeInside ? std::clamp(inputImageIndexBounds[4], 0, dims[2] - 1) : 0;
-    const int maxK = removeInside ? std::clamp(inputImageIndexBounds[5], 0, dims[2] - 1) : dims[2] - 1;
+    const int minI = isRemoveInside ? std::clamp(inputImageIndexBounds[0], 0, dims[0] - 1) : 0;
+    const int maxI = isRemoveInside ? std::clamp(inputImageIndexBounds[1], 0, dims[0] - 1) : dims[0] - 1;
+    const int minJ = isRemoveInside ? std::clamp(inputImageIndexBounds[2], 0, dims[1] - 1) : 0;
+    const int maxJ = isRemoveInside ? std::clamp(inputImageIndexBounds[3], 0, dims[1] - 1) : dims[1] - 1;
+    const int minK = isRemoveInside ? std::clamp(inputImageIndexBounds[4], 0, dims[2] - 1) : 0;
+    const int maxK = isRemoveInside ? std::clamp(inputImageIndexBounds[5], 0, dims[2] - 1) : dims[2] - 1;
     if (minI > maxI || minJ > maxJ || minK > maxK) {
         return;
     }
@@ -502,7 +502,7 @@ static void SetRemovedBg(
 
             for (int i = minI; i <= maxI; ++i) {
                 const bool isInside = GetPointInBox(boxPoint);
-                if ((removeInside && isInside) || (!removeInside && !isInside)) {
+                if ((isRemoveInside && isInside) || (!isRemoveInside && !isInside)) {
                     int index[3] = { i, j, k };
                     scalars->SetTuple(
                         submitImage->ComputePointId(index),
@@ -546,9 +546,9 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     const std::array<double, 6>& cropInputModelBounds,
     CropFailure& failureReason,
     std::string& message,
-    bool allowPartialOverlap)
+    bool isPartialOk)
 {
-    // allowPartialOverlap 表示裁切盒只要和输入有真实体积交集即可。
+    // isPartialOk 表示裁切盒只要和输入有真实体积交集即可。
     // 预览执行链和 image KeepInside submit 都允许该语义；后者会提取交集范围。
     // inputModelBounds 是当前输入数据在 active input model 下的 AABB，
     // cropInputModelBounds 是 boxToInputModelMatrix 派生出的裁切盒外接 AABB；
@@ -565,12 +565,12 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
         return false;
     }
 
-    const bool inRange = allowPartialOverlap
+    const bool isInRange = isPartialOk
         ? GetBoundsOverlap(inputModelBounds, cropInputModelBounds)
         : GetBoundsContained(inputModelBounds, cropInputModelBounds);
-    if (!inRange) {
+    if (!isInRange) {
         failureReason = CropFailure::OutOfBounds;
-        message = allowPartialOverlap
+        message = isPartialOk
             ? "Crop input model bounds do not overlap the active input model bounds."
             : "Crop input model bounds exceed the active input model bounds.";
         return false;
@@ -587,7 +587,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     CropDataModel& cropData,
     CropFailure& failureReason,
     std::string& message,
-    bool allowPartialOverlap)
+    bool isPartialOk)
 {
     // 将 request 归一化为后端统一的 cropData；
     // boxToInputModelMatrix 继续作为精确有向盒真源，inputModelBounds 只派生为校验和粗范围缓存。
@@ -595,7 +595,7 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     cropData.SetBoxMatrix(request.GetBoxMatrix());
     cropData.SetInputBounds(GetBoxBounds(request.GetBoxMatrix()));
 
-    return GetBoundsAreValid(inputModelBounds, cropData.GetInputBounds(), failureReason, message, allowPartialOverlap);
+    return GetBoundsAreValid(inputModelBounds, cropData.GetInputBounds(), failureReason, message, isPartialOk);
 }
 
 static bool BuildCropDataModel(
@@ -604,7 +604,7 @@ static bool BuildCropDataModel(
     CropDataModel& cropData,
     CropFailure& failureReason,
     std::string& message,
-    bool allowPartialOverlap)
+    bool isPartialOk)
 {
     // image 重载只负责把 vtkImageData 的 input model bounds 作为 inputModelBounds 传下去；
     // 真正的 request -> cropData 归一化仍由通用重载完成。
@@ -620,7 +620,7 @@ static bool BuildCropDataModel(
         cropData,
         failureReason,
         message,
-        allowPartialOverlap);
+        isPartialOk);
 }
 
 static bool BuildCropDataModel(
@@ -629,7 +629,7 @@ static bool BuildCropDataModel(
     CropDataModel& cropData,
     CropFailure& failureReason,
     std::string& message,
-    bool allowPartialOverlap)
+    bool isPartialOk)
 {
     // polydata 重载只负责提供输入网格自身的 input model bounds；
     // request -> cropData 的几何归一化继续与 image 路径共享同一套算法。
@@ -645,7 +645,7 @@ static bool BuildCropDataModel(
         cropData,
         failureReason,
         message,
-        allowPartialOverlap);
+        isPartialOk);
 }
 
 static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData)
@@ -768,12 +768,12 @@ static OrthogonalCropResult GetSubmitResult(
     int inputDims[3] = { 0, 0, 0 };
     image->GetDimensions(inputDims);
 
-    const bool removeInside = removalMode == CropRemovalMode::RemoveInside;
+    const bool isRemoveInside = removalMode == CropRemovalMode::RemoveInside;
     const std::size_t fullVoxelCount = static_cast<std::size_t>(inputDims[0])
         * static_cast<std::size_t>(inputDims[1])
         * static_cast<std::size_t>(inputDims[2]);
     const std::size_t roiVoxelCount = GetVoxelCount(snappedIndexBounds);
-    const std::size_t estimatedRamUsageBytes = removeInside
+    const std::size_t estimatedRamUsageBytes = isRemoveInside
         ? fullVoxelCount * (GetVoxelBytes(image) + sizeof(unsigned char))
         : roiVoxelCount * GetVoxelBytes(image);
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
@@ -790,7 +790,7 @@ static OrthogonalCropResult GetSubmitResult(
     result.SetFailureReason(diagnostics.GetFailureReason());
 
     vtkSmartPointer<vtkImageData> submitImage;
-    if (removeInside) {
+    if (isRemoveInside) {
         submitImage = vtkSmartPointer<vtkImageData>::New();
         submitImage->DeepCopy(image);
     }
@@ -826,7 +826,7 @@ static OrthogonalCropResult GetSubmitResult(
     }
 
     CropDataModel submitCropData = cropData;
-    if (!removeInside) {
+    if (!isRemoveInside) {
         double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         submitImage->GetBounds(submitBounds);
         const CropBoundsDouble6Array submitInputModelBounds = {
@@ -859,11 +859,11 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     CropFailure failureReason = CropFailure::None;
     std::string message;
     const bool isSubmit = request.GetOperation() == OrthogonalCropOperation::Submit;
-    const bool allowPartialOverlap =
+    const bool isPartialOk =
         !isSubmit
         || request.GetRemovalMode() == CropRemovalMode::KeepInside
         || request.GetRemovalMode() == CropRemovalMode::RemoveInside;
-    if (!BuildCropDataModel(image, request, cropData, failureReason, message, allowPartialOverlap)) {
+    if (!BuildCropDataModel(image, request, cropData, failureReason, message, isPartialOk)) {
         auto statistics = GetAlgorithmDiagnostics(
             request.GetDataSource(),
             request.GetOperation(),

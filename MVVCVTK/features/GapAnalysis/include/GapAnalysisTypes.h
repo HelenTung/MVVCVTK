@@ -42,9 +42,9 @@ struct GapAnalysisSurfaceRequest {
 
 // ── 高级法向精化参数 ──────────────────────────────────────────────────
 struct AdvancedSurfaceParams {
-    bool  enabled = true;
+    bool  isEnabled = true;
     float normalSearchDistance = 2.0f;
-    bool  useMillimeter = false;
+    bool  isMillimeter = false;
     float searchStep = 0.5f;
     float maxVertexShift = 2.0f;
     float gradientThreshold = 0.0f;
@@ -109,7 +109,7 @@ struct GapAnalysisResult {
     std::vector<VoidRegion> voids;
     std::vector<int>        labelVolume;  // 与体素一一对应，0 = 非空洞
     vtkSmartPointer<vtkImageData> labelImage; // 标签体缓存，分析完成后构建一次，供 2D/3D 后处理复用
-    bool                    succeeded = false;
+    bool                    isSucceeded = false;
 };
 
 class IGapAnalysisService {
@@ -128,7 +128,7 @@ public:
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
     // onComplete 不在后台线程直接执行；后台线程只投递完成状态，调用方应在主线程轮询消费。
     virtual void StartAsync(
-        std::function<void(bool success)> onComplete = nullptr) = 0;
+        std::function<void(bool isSuccess)> onComplete = nullptr) = 0;
 
     // ── 主线程回调消费：后台只投递完成信号，宿主在主线程轮询点执行回调
     virtual bool GetDoneEvent() = 0;

@@ -13,5 +13,5 @@ public:
 
 private:
     CameraStateSnapshot m_cameraState;
-    bool m_hasCameraState = false;
+    bool m_hasCamera = false;
 };

@@ -34,7 +34,7 @@ struct TestPlane {
     CropVectorDouble3Array center = { 0.0, 0.0, 0.0 };
 };
 
-vtkSmartPointer<vtkImageData> BuildObliqueImage()
+vtkSmartPointer<vtkImageData> BuildOblique()
 {
     // 方向矩阵把 image index 轴旋转到 input model physical 坐标：
     // physicalPoint = origin + direction * (index - extentMin) * spacing。
@@ -71,7 +71,7 @@ vtkSmartPointer<vtkImageData> BuildObliqueImage()
     return image;
 }
 
-vtkSmartPointer<vtkImageData> BuildDeepRowBoundaryImage()
+vtkSmartPointer<vtkImageData> BuildDeepImage()
 {
     // X 方向超过 512 个点是为了覆盖曾经容易出错的深行索引边界，
     // 同时使用非各向同性 spacing，确保线性下标和物理半空间判断相互独立。
@@ -91,7 +91,7 @@ vtkSmartPointer<vtkImageData> BuildDeepRowBoundaryImage()
     return image;
 }
 
-vtkSmartPointer<vtkImageData> BuildPerformanceImage()
+vtkSmartPointer<vtkImageData> BuildPerfImage()
 {
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(0, 159, 0, 159, 0, 63);
@@ -108,7 +108,7 @@ vtkSmartPointer<vtkImageData> BuildPerformanceImage()
     return image;
 }
 
-vtkSmartPointer<vtkImageData> BuildExportImage()
+vtkSmartPointer<vtkImageData> BuildExport()
 {
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetDimensions(3, 4, 2);
@@ -125,7 +125,7 @@ vtkSmartPointer<vtkImageData> BuildExportImage()
     return image;
 }
 
-std::array<double, 16> GetIdentityMatrixData()
+std::array<double, 16> GetIdentityData()
 {
     return {
         1,0,0,0,
@@ -135,14 +135,14 @@ std::array<double, 16> GetIdentityMatrixData()
     };
 }
 
-std::filesystem::path BuildTestOutputRoot()
+std::filesystem::path BuildOutputRoot()
 {
     const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
     return std::filesystem::temp_directory_path()
         / ("MVVCVTK_export_tests_" + std::to_string(ticks));
 }
 
-int CountFilesWithExtension(
+int GetFileCount(
     const std::filesystem::path& directory,
     const std::string& extension)
 {
@@ -159,7 +159,7 @@ int CountFilesWithExtension(
     return count;
 }
 
-bool GetAnyRegularFileHasBytes(
+bool HasFileBytes(
     const std::filesystem::path& directory,
     const std::string& extension)
 {
@@ -178,7 +178,7 @@ bool GetAnyRegularFileHasBytes(
     return false;
 }
 
-TestPlane BuildPlaneWithBoundaryIndex(
+TestPlane BuildIndexPlane(
     vtkImageData* image,
     const int boundaryIndex[3],
     const CropVectorDouble3Array& normal)
@@ -192,7 +192,7 @@ TestPlane BuildPlaneWithBoundaryIndex(
     return plane;
 }
 
-bool GetPointIsInsidePlane(
+bool GetPointInPlane(
     vtkImageData* image,
     const int index[3],
     const TestPlane& plane)
@@ -212,7 +212,7 @@ bool GetPointIsInsidePlane(
     return vtkMath::Dot(offset, normal.data()) > 0.0;
 }
 
-OrthogonalCropRequest BuildImagePlaneRequest(
+OrthogonalCropRequest BuildPlaneReq(
     const TestPlane& plane,
     CropRemovalMode removalMode,
     OrthogonalCropOperation operation,
@@ -231,7 +231,7 @@ OrthogonalCropRequest BuildImagePlaneRequest(
     return request;
 }
 
-OrthogonalCropResult GetImagePlaneResult(
+OrthogonalCropResult GetPlaneResult(
     vtkSmartPointer<vtkImageData> image,
     const TestPlane& plane,
     CropRemovalMode removalMode,
@@ -241,96 +241,96 @@ OrthogonalCropResult GetImagePlaneResult(
     CropRouter router;
     router.SetInputImage(image);
 
-    const auto request = BuildImagePlaneRequest(plane, removalMode, operation, dataSource);
+    const auto request = BuildPlaneReq(plane, removalMode, operation, dataSource);
     return router.GetResult(request);
 }
 
-void Expect(bool condition, const std::string& message, int& failureCount)
+void SetExpect(bool isExpected, const std::string& message, int& failureCount)
 {
-    if (!condition) {
+    if (!isExpected) {
         std::cerr << message << '\n';
         ++failureCount;
     }
 }
 
-void VerifySubmitResultContract(
+void SetResultExpect(
     const OrthogonalCropResult& result,
     CropRemovalMode removalMode,
     int& failureCount)
 {
     const auto& statistics = result.GetStatistics();
 
-    Expect(result.GetSucceeded(), "planar submit should succeed.", failureCount);
-    Expect(
+    SetExpect(result.GetSucceeded(), "planar submit should succeed.", failureCount);
+    SetExpect(
         result.GetResolvedOperation() == OrthogonalCropOperation::Submit,
         "planar submit result must resolve to Submit operation.",
         failureCount);
-    Expect(
+    SetExpect(
         result.GetResolvedDataSource() == OrthogonalCropDataSource::ImageData,
         "planar submit result must resolve to ImageData source.",
         failureCount);
-    Expect(
+    SetExpect(
         result.GetResolvedGeometryType() == CropShape::Plane,
         "planar submit result must resolve to Plane geometry.",
         failureCount);
-    Expect(
+    SetExpect(
         result.GetResolvedRemovalMode() == removalMode,
         "planar submit result must preserve requested removal mode.",
         failureCount);
-    Expect(
+    SetExpect(
         result.GetFailureReason() == CropFailure::None,
         "planar submit result must not report failure.",
         failureCount);
-    Expect(
+    SetExpect(
         statistics.GetResolvedOperation() == OrthogonalCropOperation::Submit,
         "planar submit statistics must resolve to Submit operation.",
         failureCount);
-    Expect(
+    SetExpect(
         statistics.GetResolvedDataSource() == OrthogonalCropDataSource::ImageData,
         "planar submit statistics must resolve to ImageData source.",
         failureCount);
-    Expect(
+    SetExpect(
         statistics.GetResolvedGeometryType() == CropShape::Plane,
         "planar submit statistics must resolve to Plane geometry.",
         failureCount);
-    Expect(
+    SetExpect(
         statistics.GetResolvedRemovalMode() == removalMode,
         "planar submit statistics must preserve requested removal mode.",
         failureCount);
-    Expect(
+    SetExpect(
         statistics.GetFailureReason() == CropFailure::None,
         "planar submit statistics must not report failure.",
         failureCount);
-    Expect(result.GetSubmitImage() != nullptr, "planar submit image must exist.", failureCount);
-    Expect(result.GetMaskImage() != nullptr, "planar submit mask must exist.", failureCount);
-    Expect(result.GetOutlinePolyData() == nullptr, "planar submit must not return preview plane outline.", failureCount);
-    Expect(result.GetClipPolyData() == nullptr, "planar submit must not return preview clip polydata.", failureCount);
+    SetExpect(result.GetSubmitImage() != nullptr, "planar submit image must exist.", failureCount);
+    SetExpect(result.GetMaskImage() != nullptr, "planar submit mask must exist.", failureCount);
+    SetExpect(result.GetOutlinePolyData() == nullptr, "planar submit must not return preview plane outline.", failureCount);
+    SetExpect(result.GetClipPolyData() == nullptr, "planar submit must not return preview clip polydata.", failureCount);
 }
 
-void VerifyPreviewResultDoesNotSatisfySubmitContract(
+void SetPreviewTest(
     vtkSmartPointer<vtkImageData> image,
     const TestPlane& plane,
     CropRemovalMode removalMode,
     int& failureCount)
 {
-    const auto result = GetImagePlaneResult(
+    const auto result = GetPlaneResult(
         image,
         plane,
         removalMode,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::VolumeData);
 
-    Expect(result.GetSucceeded(), "planar preview contrast case should succeed.", failureCount);
-    Expect(
+    SetExpect(result.GetSucceeded(), "planar preview contrast case should succeed.", failureCount);
+    SetExpect(
         result.GetResolvedOperation() == OrthogonalCropOperation::Preview,
         "planar preview contrast case must resolve to Preview operation.",
         failureCount);
-    Expect(result.GetSubmitImage() == nullptr, "planar preview must not return submit image.", failureCount);
-    Expect(result.GetMaskImage() == nullptr, "planar preview must not return submit mask.", failureCount);
-    Expect(result.GetOutlinePolyData() == nullptr, "planar preview must not return a misleading finite plane outline.", failureCount);
+    SetExpect(result.GetSubmitImage() == nullptr, "planar preview must not return submit image.", failureCount);
+    SetExpect(result.GetMaskImage() == nullptr, "planar preview must not return submit mask.", failureCount);
+    SetExpect(result.GetOutlinePolyData() == nullptr, "planar preview must not return a misleading finite plane outline.", failureCount);
 }
 
-void VerifySubmitImages(
+void SetSubmitExpect(
     vtkImageData* sourceImage,
     vtkImageData* submitImage,
     vtkImageData* maskImage,
@@ -339,8 +339,8 @@ void VerifySubmitImages(
     int& failureCount)
 {
     // submit image 和 mask 必须逐点一致：
-    // A. keepVoxel=true 时，submit 保留原始 tuple，mask=255。
-    // B. keepVoxel=false 时，submit 写入背景值，mask=0。
+    // A. isVoxelKept=true 时，submit 保留原始 tuple，mask=255。
+    // B. isVoxelKept=false 时，submit 写入背景值，mask=0。
     // C. 背景值取输入标量最小值，避免测试依赖某个硬编码灰度。
     auto* sourceScalars = sourceImage->GetPointData()->GetScalars();
     auto* submitScalars = submitImage->GetPointData()->GetScalars();
@@ -373,17 +373,17 @@ void VerifySubmitImages(
                 // 再与 VTK ComputePointId 对照，确保非零 extent 场景没有整体平移错误。
                 const vtkIdType linearIndex = rowStart + iOffset;
                 const vtkIdType vtkPointId = sourceImage->ComputePointId(index);
-                Expect(
+                SetExpect(
                     linearIndex == vtkPointId,
                     "linear index must match VTK point id for non-zero extent image.",
                     failureCount);
 
-                const bool isInside = GetPointIsInsidePlane(sourceImage, index, plane);
-                const bool keepVoxel = removalMode == CropRemovalMode::KeepInside
+                const bool isInside = GetPointInPlane(sourceImage, index, plane);
+                const bool isVoxelKept = removalMode == CropRemovalMode::KeepInside
                     ? isInside
                     : !isInside;
-                const unsigned char expectedMask = keepVoxel ? 255 : 0;
-                Expect(
+                const unsigned char expectedMask = isVoxelKept ? 255 : 0;
+                SetExpect(
                     maskPtr[linearIndex] == expectedMask,
                     "mask value does not match half-space classification.",
                     failureCount);
@@ -395,10 +395,10 @@ void VerifySubmitImages(
                 submitScalars->GetTuple(linearIndex, submitTuple.data());
 
                 for (int component = 0; component < componentCount; ++component) {
-                    const double expectedValue = keepVoxel
+                    const double expectedValue = isVoxelKept
                         ? sourceTuple[static_cast<std::size_t>(component)]
                         : backgroundValue;
-                    Expect(
+                    SetExpect(
                         std::abs(submitTuple[static_cast<std::size_t>(component)] - expectedValue)
                             <= TupleTolerance,
                         "submit tuple does not match mask removal decision.",
@@ -409,7 +409,7 @@ void VerifySubmitImages(
     }
 }
 
-void VerifyBoundaryEquality(
+void SetBoundExpect(
     vtkImageData* maskImage,
     const int boundaryIndex[3],
     CropRemovalMode removalMode,
@@ -424,7 +424,7 @@ void VerifyBoundaryEquality(
     auto* maskPtr = static_cast<unsigned char*>(
         maskImage->GetScalarPointer(extent[0], extent[2], extent[4]));
     const unsigned char expectedMask = removalMode == CropRemovalMode::KeepInside ? 0 : 255;
-    Expect(
+    SetExpect(
         maskPtr[boundaryPointId] == expectedMask,
         "plane boundary must keep strict dot > 0 inside semantics.",
         failureCount);
@@ -437,35 +437,35 @@ void StartSubmitCase(
     CropRemovalMode removalMode,
     int& failureCount)
 {
-    const auto result = GetImagePlaneResult(
+    const auto result = GetPlaneResult(
         image,
         plane,
         removalMode,
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
 
-    VerifySubmitResultContract(result, removalMode, failureCount);
+    SetResultExpect(result, removalMode, failureCount);
     if (!result.GetSucceeded() || !result.GetSubmitImage() || !result.GetMaskImage()) {
         return;
     }
 
-    VerifySubmitImages(
+    SetSubmitExpect(
         image,
         result.GetSubmitImage(),
         result.GetMaskImage(),
         plane,
         removalMode,
         failureCount);
-    VerifyBoundaryEquality(result.GetMaskImage(), boundaryIndex, removalMode, failureCount);
+    SetBoundExpect(result.GetMaskImage(), boundaryIndex, removalMode, failureCount);
 }
 
-void StartObliqueCases(int& failureCount)
+void StartOblique(int& failureCount)
 {
-    auto image = BuildObliqueImage();
+    auto image = BuildOblique();
     const int boundaryIndex[3] = { 3, 0, 3 };
-    const auto plane = BuildPlaneWithBoundaryIndex(image, boundaryIndex, { 1.25, -0.5, 0.75 });
+    const auto plane = BuildIndexPlane(image, boundaryIndex, { 1.25, -0.5, 0.75 });
 
-    VerifyPreviewResultDoesNotSatisfySubmitContract(
+    SetPreviewTest(
         image,
         plane,
         CropRemovalMode::KeepInside,
@@ -476,41 +476,41 @@ void StartObliqueCases(int& failureCount)
 
 void StartDeepCases(int& failureCount)
 {
-    auto image = BuildDeepRowBoundaryImage();
+    auto image = BuildDeepImage();
     const int boundaryIndex[3] = { 500, 0, 0 };
-    const auto plane = BuildPlaneWithBoundaryIndex(image, boundaryIndex, { 1.0, 0.0, 0.0 });
+    const auto plane = BuildIndexPlane(image, boundaryIndex, { 1.0, 0.0, 0.0 });
 
     StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::KeepInside, failureCount);
     StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::RemoveInside, failureCount);
 }
 
-double MeasureSubmitAverageMilliseconds(
+double GetSubmitAvgMs(
     vtkSmartPointer<vtkImageData> image,
     const TestPlane& plane,
     CropRemovalMode removalMode,
     int iterationCount,
     int& failureCount)
 {
-    const auto warmup = GetImagePlaneResult(
+    const auto warmup = GetPlaneResult(
         image,
         plane,
         removalMode,
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    Expect(warmup.GetSucceeded(), "planar submit warmup should succeed.", failureCount);
+    SetExpect(warmup.GetSucceeded(), "planar submit warmup should succeed.", failureCount);
 
     double totalMilliseconds = 0.0;
     for (int iteration = 0; iteration < iterationCount; ++iteration) {
         const auto start = std::chrono::steady_clock::now();
-        const auto result = GetImagePlaneResult(
+        const auto result = GetPlaneResult(
             image,
             plane,
             removalMode,
             OrthogonalCropOperation::Submit,
             OrthogonalCropDataSource::ImageData);
         const auto finish = std::chrono::steady_clock::now();
-        Expect(result.GetSucceeded(), "planar submit benchmark should succeed.", failureCount);
-        Expect(
+        SetExpect(result.GetSucceeded(), "planar submit benchmark should succeed.", failureCount);
+        SetExpect(
             result.GetResolvedOperation() == OrthogonalCropOperation::Submit,
             "planar submit benchmark must resolve to Submit operation.",
             failureCount);
@@ -524,19 +524,19 @@ double MeasureSubmitAverageMilliseconds(
 
 void StartBench(int& failureCount)
 {
-    auto image = BuildPerformanceImage();
+    auto image = BuildPerfImage();
     const int boundaryIndex[3] = { 80, 80, 32 };
-    const auto plane = BuildPlaneWithBoundaryIndex(image, boundaryIndex, { 0.35, -0.2, 1.0 });
+    const auto plane = BuildIndexPlane(image, boundaryIndex, { 0.35, -0.2, 1.0 });
     const int iterationCount = 5;
     const auto voxelCount = image->GetNumberOfPoints();
 
-    const double keepInsideMilliseconds = MeasureSubmitAverageMilliseconds(
+    const double keepInsideMilliseconds = GetSubmitAvgMs(
         image,
         plane,
         CropRemovalMode::KeepInside,
         iterationCount,
         failureCount);
-    const double removeInsideMilliseconds = MeasureSubmitAverageMilliseconds(
+    const double removeInsideMilliseconds = GetSubmitAvgMs(
         image,
         plane,
         CropRemovalMode::RemoveInside,
@@ -549,23 +549,23 @@ void StartBench(int& failureCount)
               << " removeInsideAvgMs=" << removeInsideMilliseconds << '\n';
 }
 
-void StartSliceExport(int& failureCount)
+void StartSliceView(int& failureCount)
 {
-    const auto identity = GetIdentityMatrixData();
+    const auto identity = GetIdentityData();
     const std::array<double, 3> cursorWorld = { 0.0, 0.0, 0.0 };
 
     const auto topDownData = InteractionComputeService::GetSliceExportData(
         identity,
         VizMode::SliceTop_down,
         cursorWorld);
-    Expect(topDownData.has_value(), "slice export data should exist for a real slice mode.", failureCount);
+    SetExpect(topDownData.has_value(), "slice export data should exist for a real slice mode.", failureCount);
     if (topDownData) {
-        Expect(
+        SetExpect(
             topDownData->orientation == Orientation::Top_down,
             "slice export data should preserve Top_down orientation.",
             failureCount);
         for (std::size_t index = 0; index < identity.size(); ++index) {
-            Expect(
+            SetExpect(
                 std::abs(topDownData->matrix[index] - identity[index]) <= MatrixTolerance,
                 "slice export matrix should keep the upstream model matrix.",
                 failureCount);
@@ -581,10 +581,10 @@ void StartSliceExport(int& failureCount)
         rotatedModelToWorld,
         VizMode::SliceTop_down,
         cursorWorld);
-    Expect(rotatedData.has_value(), "slice export data should accept the current model matrix snapshot.", failureCount);
+    SetExpect(rotatedData.has_value(), "slice export data should accept the current model matrix snapshot.", failureCount);
     if (rotatedData) {
         for (std::size_t index = 0; index < identity.size(); ++index) {
-            Expect(
+            SetExpect(
                 std::abs(rotatedData->matrix[index] - rotatedModelToWorld[index]) <= MatrixTolerance,
                 "slice export matrix should not apply a second angle when host angle is absent.",
                 failureCount);
@@ -596,17 +596,17 @@ void StartSliceExport(int& failureCount)
         VizMode::SliceTop_down,
         cursorWorld,
         90.0);
-    Expect(customAngleData.has_value(), "slice export data should accept an optional host-provided angle.", failureCount);
+    SetExpect(customAngleData.has_value(), "slice export data should accept an optional host-provided angle.", failureCount);
     if (customAngleData) {
-        bool anyMatrixElementChanged = false;
+        bool hasMatrixChange = false;
         for (std::size_t index = 0; index < identity.size(); ++index) {
             if (std::abs(customAngleData->matrix[index] - identity[index]) > MatrixTolerance) {
-                anyMatrixElementChanged = true;
+                hasMatrixChange = true;
                 break;
             }
         }
-        Expect(
-            anyMatrixElementChanged,
+        SetExpect(
+            hasMatrixChange,
             "optional host angle should affect the slice export matrix.",
             failureCount);
     }
@@ -615,7 +615,7 @@ void StartSliceExport(int& failureCount)
         identity,
         VizMode::CompositeIsoSurface,
         cursorWorld);
-    Expect(
+    SetExpect(
         !invalidModeData.has_value(),
         "slice export data should reject non-slice view modes instead of falling back to Top_down.",
         failureCount);
@@ -624,42 +624,42 @@ void StartSliceExport(int& failureCount)
 void StartDataExport(int& failureCount)
 {
     RawVolumeDataManager dataManager;
-    auto image = BuildExportImage();
-    const auto identity = GetIdentityMatrixData();
-    const auto outputRoot = BuildTestOutputRoot();
+    auto image = BuildExport();
+    const auto identity = GetIdentityData();
+    const auto outputRoot = BuildOutputRoot();
     std::error_code createError;
     std::filesystem::create_directories(outputRoot, createError);
-    Expect(!createError, "data export test should create its temporary output directory.", failureCount);
+    SetExpect(!createError, "data export test should create its temporary output directory.", failureCount);
 
     const auto initialVersion = dataManager.GetDataVersion();
-    Expect(
+    SetExpect(
         dataManager.TakeImageSnapshot(image),
         "data export setup should accept a synthetic vtkImageData snapshot.",
         failureCount);
-    Expect(
+    SetExpect(
         dataManager.GetDataVersion() == initialVersion,
         "pending image snapshot should not change the current data version.",
         failureCount);
-    Expect(
+    SetExpect(
         dataManager.ConsumePendingImage(),
         "data export setup should promote the pending image into the current data manager image.",
         failureCount);
-    Expect(
+    SetExpect(
         dataManager.GetDataVersion() == initialVersion + 1,
         "consuming a pending image should advance the current data version.",
         failureCount);
 
     const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
-    Expect(
+    SetExpect(
         dataManager.SaveTransformedData(rawRequestPath.string(), identity),
         "transformed data export should write a RAW file for synthetic input.",
         failureCount);
-    Expect(
-        CountFilesWithExtension(outputRoot, ".raw") == 1,
+    SetExpect(
+        GetFileCount(outputRoot, ".raw") == 1,
         "transformed data export should create exactly one RAW file in the requested folder.",
         failureCount);
-    Expect(
-        GetAnyRegularFileHasBytes(outputRoot, ".raw"),
+    SetExpect(
+        HasFileBytes(outputRoot, ".raw"),
         "transformed data export should create a non-empty RAW file.",
         failureCount);
 
@@ -667,26 +667,26 @@ void StartDataExport(int& failureCount)
     WindowLevelParams windowLevel;
     windowLevel.windowWidth = 32.0;
     windowLevel.windowCenter = 16.0;
-    Expect(
+    SetExpect(
         !dataManager.SaveSliceImages("", Orientation::Top_down, windowLevel, identity),
         "slice image export should reject an empty output directory.",
         failureCount);
-    Expect(
+    SetExpect(
         dataManager.SaveSliceImages(sliceDir.string(), Orientation::Top_down, windowLevel, identity),
         "slice image export should write PNG slices for synthetic input.",
         failureCount);
-    Expect(
-        CountFilesWithExtension(sliceDir, ".png") == 2,
+    SetExpect(
+        GetFileCount(sliceDir, ".png") == 2,
         "top-down slice export should create one PNG per z slice.",
         failureCount);
-    Expect(
-        GetAnyRegularFileHasBytes(sliceDir, ".png"),
+    SetExpect(
+        HasFileBytes(sliceDir, ".png"),
         "slice image export should create non-empty PNG files.",
         failureCount);
 
     std::error_code removeError;
     std::filesystem::remove_all(outputRoot, removeError);
-    Expect(
+    SetExpect(
         !removeError,
         "test cleanup should remove temporary export files.",
         failureCount);
@@ -697,10 +697,10 @@ void StartDataExport(int& failureCount)
 int main()
 {
     int failureCount = 0;
-    StartObliqueCases(failureCount);
+    StartOblique(failureCount);
     StartDeepCases(failureCount);
     StartBench(failureCount);
-    StartSliceExport(failureCount);
+    StartSliceView(failureCount);
     StartDataExport(failureCount);
 
     if (failureCount != 0) {

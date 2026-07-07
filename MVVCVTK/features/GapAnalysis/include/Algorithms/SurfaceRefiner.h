@@ -70,7 +70,7 @@
 //    const SurfaceParams& surfParams,
 //    const AdvancedSurfaceParams& adv)
 //{
-//    if (!adv.enabled || !surface) return surface;
+//    if (!adv.isEnabled || !surface) return surface;
 //
 //    vtkPoints* points = surface->GetPoints();
 //    vtkDataArray* nArray = surface->GetPointData()->GetNormals();
@@ -80,7 +80,7 @@
 //    if (numPts == 0) return surface;
 //
 //    auto unitToWorld = [&](float v) -> double {
-//        if (adv.useMillimeter) return static_cast<double>(v);
+//        if (adv.isMillimeter) return static_cast<double>(v);
 //        const double avgSpacing =
 //            (vol.spacing[0] + vol.spacing[1] + vol.spacing[2]) / 3.0;
 //        return static_cast<double>(v) * avgSpacing;

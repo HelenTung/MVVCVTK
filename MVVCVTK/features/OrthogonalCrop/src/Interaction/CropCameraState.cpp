@@ -6,7 +6,7 @@ void CropCameraState::SetCameraState(vtkRenderer* renderer)
 {
     m_cameraState = {};
     if (!renderer || !renderer->GetActiveCamera()) {
-        m_hasCameraState = false;
+        m_hasCamera = false;
         return;
     }
 
@@ -19,12 +19,12 @@ void CropCameraState::SetCameraState(vtkRenderer* renderer)
     m_cameraState.viewAngle = camera->GetViewAngle();
     m_cameraState.parallelProjection = camera->GetParallelProjection() != 0;
     m_cameraState.isValid = true;
-    m_hasCameraState = true;
+    m_hasCamera = true;
 }
 
 void CropCameraState::ResetCamera(vtkRenderer* renderer)
 {
-    if (!m_hasCameraState || !m_cameraState.isValid || !renderer || !renderer->GetActiveCamera()) {
+    if (!m_hasCamera || !m_cameraState.isValid || !renderer || !renderer->GetActiveCamera()) {
         return;
     }
 
@@ -51,10 +51,10 @@ void CropCameraState::ResetCamera(vtkRenderer* renderer)
 void CropCameraState::Clear()
 {
     m_cameraState = {};
-    m_hasCameraState = false;
+    m_hasCamera = false;
 }
 
 bool CropCameraState::GetSaved() const
 {
-    return m_hasCameraState;
+    return m_hasCamera;
 }

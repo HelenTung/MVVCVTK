@@ -64,7 +64,7 @@ void CropBridge::SetInputImage(
         return;
     }
     m_inputVersion = version;
-    m_hasInputVersion = true;
+    m_hasInputVer = true;
     m_backend.SetInputImage(std::move(image));
 }
 
@@ -72,7 +72,7 @@ void CropBridge::ClearInputImage()
 {
     m_backend.SetInputImage(vtkSmartPointer<vtkImageData>());
     m_inputVersion = 0;
-    m_hasInputVersion = false;
+    m_hasInputVer = false;
 }
 
 vtkSmartPointer<vtkImageData> CropBridge::GetInputImage() const
@@ -198,7 +198,7 @@ void CropBridge::SendSubmit()
 
 bool CropBridge::GetSubmitReady() const
 {
-    if (!m_isCropOn || !m_hasWorldBounds) {
+    if (!m_isCropOn || !m_hasWorldState) {
         std::cerr << "[OrthogonalCrop] Submit failed: crop widget is not active." << std::endl;
         return false;
     }
@@ -213,7 +213,7 @@ bool CropBridge::GetSubmitReady() const
         return false;
     }
 
-    if (!m_hasInputVersion) {
+    if (!m_hasInputVer) {
         std::cerr << "[OrthogonalCrop] Submit failed: image crop input version is missing." << std::endl;
         return false;
     }
@@ -254,7 +254,7 @@ void CropBridge::OnSubmitReload(bool isSuccess)
     m_cameraState.ResetCamera(m_referenceRenderer);
     if (m_hasReload) {
         m_hasReload = false;
-        m_hasWorldBounds = false;
+        m_hasWorldState = false;
         ExitCrop();
     }
 
@@ -283,9 +283,9 @@ bool CropBridge::SwitchCropBox()
         return false;
     }
 
-    if (!m_hasWorldBounds) {
+    if (!m_hasWorldState) {
         m_currentWorldBounds = GetStartBounds();
-        m_hasWorldBounds = true;
+        m_hasWorldState = true;
     }
 
     // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToInputModel 折回 active input model。
@@ -349,7 +349,7 @@ bool CropBridge::SwitchCropPlane()
     // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
     // halfExtents 只保留交互平面的尺度快照，不再驱动算法层生成有限矩形 outline。
     m_currentWorldBounds = activeWorldBounds;
-    m_hasWorldBounds = true;
+    m_hasWorldState = true;
 
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetInteractor(m_primaryInteractor);
@@ -459,7 +459,7 @@ void CropBridge::OnBoxWidget(
     // 交互过程中始终记录最新 world AABB 和 phase，
     // 但只在 Released 时触发 preview，保持“拖拽只更新显示状态，释放后再统一跑后端”的既有流程。
     m_currentWorldBounds = worldBounds;
-    m_hasWorldBounds = true;
+    m_hasWorldState = true;
     m_lastInteractionPhase = phase;
     if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
         SetBoxPreview();
@@ -477,7 +477,7 @@ void CropBridge::OnPlaneWidget(
 
     m_currentWorldPlaneOrigin = worldOrigin;
     m_currentWorldPlaneNormal = worldNormal;
-    m_hasWorldBounds = true;
+    m_hasWorldState = true;
     m_lastInteractionPhase = phase;
     if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
         SetPlanePreview();
@@ -751,7 +751,7 @@ OrthogonalCropRequest CropBridge::BuildPlaneRequest(
 
 void CropBridge::SetBoxPreview()
 {
-    if (!m_hasWorldBounds) {
+    if (!m_hasWorldState) {
         return;
     }
 
@@ -766,7 +766,7 @@ void CropBridge::SetBoxPreview()
 
 void CropBridge::SetPlanePreview()
 {
-    if (!m_hasWorldBounds) {
+    if (!m_hasWorldState) {
         return;
     }
 
@@ -785,20 +785,20 @@ void CropBridge::SetPreviewReq(
 {
     ClearPreviewPolyDataInput();
 
-    bool hasMain3DPreviewTarget = false;
+    bool hasMainTarget = false;
     for (const auto& target : m_previewRenderTargets) {
         if (!target.service) {
             continue;
         }
 
         if (target.service->GetNavigationAxis() < 0) {
-            hasMain3DPreviewTarget = true;
+            hasMainTarget = true;
         }
     }
 
     OrthogonalCropResult volumeResult;
     bool hasVolumeResult = false;
-    if (GetInputImage() && hasMain3DPreviewTarget) {
+    if (GetInputImage() && hasMainTarget) {
         volumeResult = m_backend.GetResult(volumeRequest);
         if (volumeResult.GetFailureReason() == CropFailure::None
             && volumeResult.GetSucceeded()) {
@@ -806,14 +806,14 @@ void CropBridge::SetPreviewReq(
         }
     }
 
-    bool anyPreviewApplied = false;
+    bool hasPreview = false;
     for (const auto& target : m_previewRenderTargets) {
         if (!target.service || !target.overlayStrategy) {
             continue;
         }
 
         OrthogonalCropResult polyResult;
-        bool hasPolyDataResult = false;
+        bool hasPolyResult = false;
         m_previewPlug.ResetPreview(target.service, target.overlayStrategy);
 
         const bool isMain3DTarget = target.service->GetNavigationAxis() < 0;
@@ -830,11 +830,11 @@ void CropBridge::SetPreviewReq(
             // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
             if (polyResult.GetFailureReason() == CropFailure::None
                 && polyResult.GetSucceeded()) {
-                hasPolyDataResult = true;
+                hasPolyResult = true;
             }
         }
 
-        if (!volumePreviewResult && !hasPolyDataResult) {
+        if (!volumePreviewResult && !hasPolyResult) {
             continue;
         }
 
@@ -842,11 +842,11 @@ void CropBridge::SetPreviewReq(
             target,
             m_currentRemovalMode,
             volumePreviewResult,
-            hasPolyDataResult ? &polyResult : nullptr);
-        anyPreviewApplied = true;
+            hasPolyResult ? &polyResult : nullptr);
+        hasPreview = true;
     }
 
-    if (!anyPreviewApplied) {
+    if (!hasPreview) {
         ClearPreviewPolyDataInput();
         return;
     }
@@ -1039,7 +1039,7 @@ bool CropBridge::SendPreview(
         return false;
     }
 
-    const bool mainPreviewApplied = m_previewPlug.SetPreview(
+    const bool isMainSet = m_previewPlug.SetPreview(
         target.service,
         target.overlayStrategy,
         m_referenceRenderService,
@@ -1048,7 +1048,7 @@ bool CropBridge::SendPreview(
         removalMode);
 
     target.service->MarkDirty();
-    return mainPreviewApplied;
+    return isMainSet;
 }
 
 void CropBridge::SendResult(const OrthogonalCropResult& submitResult)

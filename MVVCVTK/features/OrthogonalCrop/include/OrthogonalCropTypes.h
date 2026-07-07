@@ -414,7 +414,7 @@ private:
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_isSucceeded = false;
-    // 最终失败原因；当 succeeded 为 false 时，上层应优先读取它和 message。
+    // 最终失败原因；当 isSucceeded 为 false 时，上层应优先读取它和 message。
     CropFailure m_failureReason = CropFailure::None;
     // 对当前成功/失败状态的文字解释；可直接给日志或 UI 弹框使用。
     std::string m_message;

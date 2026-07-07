@@ -102,27 +102,27 @@ bool CropPreviewPlug::SetPreview(
         return false;
     }
 
-    bool mainPreviewApplied = false;
+    bool isMainSet = false;
     if (volumePreviewResult) {
         // VolumeData preview 结果在 3D volume 窗口表达 render-only 主预览；
         // 2D mask 由 submit 结果单独进入 overlay，不参与 preview 路由。
-        mainPreviewApplied = SetVolumeView(
+        isMainSet = SetVolumeView(
             targetService,
             referenceService,
             *volumePreviewResult,
             removalMode);
     }
 
-    bool polyDataPreviewApplied = false;
-    if (!mainPreviewApplied && polyDataPreviewResult) {
+    bool isPolySet = false;
+    if (!isMainSet && polyDataPreviewResult) {
         // 网格结果只负责 actor 窗口：
         // KeepInside 使用 mapper planes，RemoveInside 使用 actor shader discard。
-        polyDataPreviewApplied = SetMeshView(
+        isPolySet = SetMeshView(
             targetService,
             referenceService,
             *polyDataPreviewResult,
             removalMode);
-        mainPreviewApplied = polyDataPreviewApplied;
+        isMainSet = isPolySet;
     }
 
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
@@ -131,7 +131,7 @@ bool CropPreviewPlug::SetPreview(
     const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;
-        if (polyDataPreviewApplied) {
+        if (isPolySet) {
             // 主 actor 已经用 mapper clipping 或 shader discard 表达 polydata 预览；
             // overlay 是否显示几何参照由 bridge 按 reference 窗口注入；可选裁切网格 artifact 不参与主预览判定。
             visibleOverlayResult.SetClipPolyData(nullptr);
@@ -142,7 +142,7 @@ bool CropPreviewPlug::SetPreview(
         overlayStrategy->ClearPreview();
     }
 
-    return mainPreviewApplied;
+    return isMainSet;
 }
 
 void CropPreviewPlug::ResetPreview(
@@ -339,11 +339,11 @@ bool CropPreviewPlug::SetVolumeView(
 
     if (removalMode == CropRemovalMode::RemoveInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
-        const bool usePlane = previewResult.GetResolvedGeometryType() == CropShape::Plane;
-        const bool applied = usePlane
+        const bool isPlane = previewResult.GetResolvedGeometryType() == CropShape::Plane;
+        const bool isApplied = isPlane
             ? SetVolumePlane(volume, gpuVolumeMapper, previewResult)
             : SetVolumeRemove(volume, gpuVolumeMapper, previewResult);
-        if (!applied) {
+        if (!isApplied) {
             volumeMapper->SetCroppingRegionFlagsToSubVolume();
             volume->Modified();
             return false;

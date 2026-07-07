@@ -368,10 +368,10 @@ static void SetRowBytes(
     const std::vector<unsigned char>& backgroundVoxelBytes,
     std::size_t rowBytes,
     int voxelCount,
-    bool keepRow)
+    bool isRowKept)
 {
     const auto maskBytes = static_cast<std::size_t>(voxelCount);
-    if (keepRow) {
+    if (isRowKept) {
         std::memset(maskRowPtr, 255, maskBytes);
         std::memcpy(submitRowPtr, sourceRowPtr, rowBytes);
         return;
@@ -390,9 +390,9 @@ static void SetVoxelBytes(
     const unsigned char* sourcePtr,
     const std::vector<unsigned char>& backgroundVoxelBytes,
     std::size_t bytesPerVoxel,
-    bool keepVoxel)
+    bool isVoxelKept)
 {
-    if (keepVoxel) {
+    if (isVoxelKept) {
         *maskPtr = 255;
         std::memcpy(submitPtr, sourcePtr, bytesPerVoxel);
         return;
@@ -477,7 +477,7 @@ static PlanarSubmitImages GetSubmitImages(
         submitBytes,
         componentCount,
         bytesPerVoxel);
-    const bool keepInside = removalMode == CropRemovalMode::KeepInside;
+    const bool isKeepInside = removalMode == CropRemovalMode::KeepInside;
     const auto sideStep = GetSideStep(image, cropData, dims);
     const vtkIdType rowStride = dims[0];
     const vtkIdType sliceStride = static_cast<vtkIdType>(dims[0]) * dims[1];
@@ -502,8 +502,8 @@ static PlanarSubmitImages GetSubmitImages(
                 rowEndSide,
                 sideStep.boundaryEpsilon);
             if (rowSide != PlanarRowSide::Mixed) {
-                const bool rowIsInside = rowSide == PlanarRowSide::NormalSide;
-                const bool keepRow = keepInside ? rowIsInside : !rowIsInside;
+                const bool isRowInside = rowSide == PlanarRowSide::NormalSide;
+                const bool isRowKept = isKeepInside ? isRowInside : !isRowInside;
                 SetRowBytes(
                     maskRowPtr,
                     submitRowPtr,
@@ -511,7 +511,7 @@ static PlanarSubmitImages GetSubmitImages(
                     backgroundVoxelBytes,
                     rowBytes,
                     dims[0],
-                    keepRow);
+                    isRowKept);
                 continue;
             }
 
@@ -524,7 +524,7 @@ static PlanarSubmitImages GetSubmitImages(
                     cropData,
                     index,
                     planeSide);
-                const bool keepVoxel = keepInside ? isInside : !isInside;
+                const bool isVoxelKept = isKeepInside ? isInside : !isInside;
                 const auto voxelByteOffset = static_cast<std::size_t>(iOffset) * bytesPerVoxel;
                 SetVoxelBytes(
                     maskRowPtr + iOffset,
@@ -532,7 +532,7 @@ static PlanarSubmitImages GetSubmitImages(
                     sourceRowPtr + voxelByteOffset,
                     backgroundVoxelBytes,
                     bytesPerVoxel,
-                    keepVoxel);
+                    isVoxelKept);
 
                 planeSide += sideStep.iStep;
             }

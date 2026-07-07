@@ -133,7 +133,7 @@ void GapAnalysisService::SetVoid(const VoidDetectionParams& p) {
     m_voidParams = p;
 }
 
-void GapAnalysisService::StartAsync(std::function<void(bool success)> onComplete) {
+void GapAnalysisService::StartAsync(std::function<void(bool isSuccess)> onComplete) {
     std::lock_guard<std::mutex> workerLock(m_workerMutex);
     if (GetAnalysisState() == GapAnalysisState::Running) {
         return;
@@ -157,7 +157,7 @@ void GapAnalysisService::StartAsync(std::function<void(bool success)> onComplete
         m_result = {};
     }
 
-    m_cancelFlag.store(false);
+    m_isStopping.store(false);
     SetAnalysisState(GapAnalysisState::Running);
 
     // worker 只捕获不可变快照和参数副本；服务成员只用于写回最终状态和结果。
@@ -170,7 +170,7 @@ void GapAnalysisService::StartAsync(std::function<void(bool success)> onComplete
 }
 
 void GapAnalysisService::StopAsync() {
-    m_cancelFlag.store(true);
+    m_isStopping.store(true);
 }
 
 bool GapAnalysisService::GetDoneEvent() {
@@ -192,7 +192,7 @@ std::vector<VoidRegion> GapAnalysisService::GetVoidRegions() const {
 
 vtkSmartPointer<vtkPolyData> GapAnalysisService::BuildVoidMesh() const {
     std::lock_guard<std::mutex> lk(m_resultMutex);
-    if (!m_result.succeeded || !m_result.labelImage) {
+    if (!m_result.isSucceeded || !m_result.labelImage) {
         return nullptr;
     }
 
@@ -278,17 +278,17 @@ bool GapAnalysisService::SwitchOverlay() {
 }
 
 bool GapAnalysisService::ExitView() {
-    const bool wasActive = m_isViewOn;
-    const bool hadCachedResult = m_displayVoidMesh != nullptr || m_displayLabelImage != nullptr;
-    const bool removedAnyOverlay = SetOverlayOff();
-    if (wasActive) {
+    const bool isActive = m_isViewOn;
+    const bool hasCachedResult = m_displayVoidMesh != nullptr || m_displayLabelImage != nullptr;
+    const bool hasRemoved = SetOverlayOff();
+    if (isActive) {
         StopAsync();
     }
     ClearDisplayState();
-    if (wasActive || hadCachedResult || removedAnyOverlay) {
+    if (isActive || hasCachedResult || hasRemoved) {
         std::cout << "[GapAnalysis] Display mode exited. Void overlays are hidden." << std::endl;
     }
-    return wasActive || hadCachedResult || removedAnyOverlay;
+    return isActive || hasCachedResult || hasRemoved;
 }
 
 bool GapAnalysisService::GetViewOn() const {
@@ -349,9 +349,9 @@ GapAnalysisService::ParameterSnapshot GapAnalysisService::GetParameterSnapshot()
 void GapAnalysisService::StartWorker(
     VolumeBufferSnapshot inputSnapshot,
     ParameterSnapshot params) {
-    bool ok = false;
+    bool isSuccess = false;
 
-    if (!inputSnapshot || !inputSnapshot->GetVoxelReady() || m_cancelFlag.load()) {
+    if (!inputSnapshot || !inputSnapshot->GetVoxelReady() || m_isStopping.load()) {
         SetAnalysisState(GapAnalysisState::Idle);
         m_completionCallbackState->SetReady(false);
         return;
@@ -361,9 +361,9 @@ void GapAnalysisService::StartWorker(
         const VolumeBuffer& volBuf = *inputSnapshot;
 
         auto interior = VoidDetector::CreateInteriorMask(volBuf, params.surfParams.isoValue);
-        if (!m_cancelFlag.load()) {
+        if (!m_isStopping.load()) {
             auto candidates = VoidDetector::BuildCandidates(volBuf, interior, params.voidParams);
-            if (!m_cancelFlag.load()) {
+            if (!m_isStopping.load()) {
                 GapAnalysisResult result;
                 result.voids = VoidDetector::BuildRegions(
                     volBuf,
@@ -371,25 +371,25 @@ void GapAnalysisService::StartWorker(
                     params.voidParams,
                     result.labelVolume);
                 result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
-                result.succeeded = true;
+                result.isSucceeded = true;
 
                 {
                     std::lock_guard<std::mutex> lk(m_resultMutex);
                     m_result = std::move(result);
                 }
-                ok = true;
+                isSuccess = true;
             }
         }
     }
     catch (const std::exception&) {
-        ok = false;
+        isSuccess = false;
     }
     catch (...) {
-        ok = false;
+        isSuccess = false;
     }
 
-    SetAnalysisState(ok ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
-    m_completionCallbackState->SetReady(ok);
+    SetAnalysisState(isSuccess ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
+    m_completionCallbackState->SetReady(isSuccess);
 }
 
 void GapAnalysisService::StopWorker() {
@@ -443,28 +443,28 @@ void GapAnalysisService::SetDisplayView() {
 }
 
 bool GapAnalysisService::SetOverlayOff() {
-    bool removedAnyOverlay = false;
+    bool hasRemoved = false;
     for (const auto& binding : m_displayOverlayBindings) {
         if (!binding.service || !binding.overlayStrategy) {
             continue;
         }
         binding.service->RemoveOverlayStrategy(binding.overlayStrategy);
         binding.service->MarkDirty();
-        removedAnyOverlay = true;
+        hasRemoved = true;
     }
     m_displayOverlayBindings.clear();
-    return removedAnyOverlay;
+    return hasRemoved;
 }
 
 bool GapAnalysisService::SetStoredView() {
     SetOverlayOff();
 
-    const bool hasMeshOverlayInput = GetMeshVisible(m_displayVoidMesh);
-    const bool hasSliceOverlayInput = GetLabelExtent(m_displayLabelImage);
-    bool addedMeshOverlay = false;
-    bool addedSliceOverlay = false;
+    const bool hasMeshInput = GetMeshVisible(m_displayVoidMesh);
+    const bool hasSliceInput = GetLabelExtent(m_displayLabelImage);
+    bool hasMeshAdded = false;
+    bool hasSliceAdded = false;
 
-    if (hasMeshOverlayInput) {
+    if (hasMeshInput) {
         for (const auto& service : m_meshTargets) {
             if (!service) {
                 continue;
@@ -473,11 +473,11 @@ bool GapAnalysisService::SetStoredView() {
             overlay->SetInputData(m_displayVoidMesh);
             service->AddOverlayStrategy(overlay);
             m_displayOverlayBindings.push_back({ service, overlay });
-            addedMeshOverlay = true;
+            hasMeshAdded = true;
         }
     }
 
-    if (hasSliceOverlayInput) {
+    if (hasSliceInput) {
         for (const auto& target : m_sliceTargets) {
             if (!target.second) {
                 continue;
@@ -486,14 +486,14 @@ bool GapAnalysisService::SetStoredView() {
             overlay->SetInputData(m_displayLabelImage);
             target.second->AddOverlayStrategy(overlay);
             m_displayOverlayBindings.push_back({ target.second, overlay });
-            addedSliceOverlay = true;
+            hasSliceAdded = true;
         }
     }
 
-    if (!addedMeshOverlay) {
+    if (!hasMeshAdded) {
         std::cerr << "[GapAnalysis] Analysis produced no 3D void mesh overlay target." << std::endl;
     }
-    if (!addedSliceOverlay) {
+    if (!hasSliceAdded) {
         std::cerr << "[GapAnalysis] Analysis produced no 2D label overlay target." << std::endl;
     }
 

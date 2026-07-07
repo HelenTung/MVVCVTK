@@ -30,7 +30,7 @@ public:
         const std::array<double, 6>& cropInputModelBounds,
         CropFailure& failureReason,
         std::string& message,
-        bool allowPartialOverlap = false);
+        bool isPartialOk = false);
 
     // 把 request 归一化为可执行的 CropDataModel。
     static bool GetCropDataModel(
@@ -39,7 +39,7 @@ public:
         CropDataModel& cropData,
         CropFailure& failureReason,
         std::string& message,
-        bool allowPartialOverlap = false);
+        bool isPartialOk = false);
 
     // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
     static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);

@@ -40,7 +40,7 @@ public:
     // host/session 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
     using ReloadSubmitter = std::function<bool(
         vtkSmartPointer<vtkImageData> image,
-        std::function<void(bool success)> onComplete)>;
+        std::function<void(bool isSuccess)> onComplete)>;
 
     // 公共边界只暴露初始化、窗口接入和用户命令动作。
     // 内部状态切换、后端路由细节和 VTK 预览接管都留在私有实现里。
@@ -202,7 +202,7 @@ private:
 
     // host 最近一次注入的 image 版本；bridge 不用它反查 DataManager，只做输入时序诊断。
     DataVersion m_inputVersion = 0;
-    bool m_hasInputVersion = false;
+    bool m_hasInputVer = false;
 
     // 调用方显式绑定的 polydata 输入；preview 临时 mapper 输入结束后恢复到这份真源。
     vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
@@ -217,7 +217,7 @@ private:
     CropShape m_currentGeometryType = CropShape::Box;
 
     // 当前 world bounds 是否已经初始化过。
-    bool m_hasWorldBounds = false;
+    bool m_hasWorldState = false;
 
     // 当前是否有 preview 在显示。
     bool m_isPreviewOn = false;

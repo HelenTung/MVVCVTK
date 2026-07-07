@@ -38,7 +38,7 @@ public:
     void SetAdvanced(const AdvancedSurfaceParams& p) override;
     void SetVoid(const VoidDetectionParams& p) override;
 
-    void StartAsync(std::function<void(bool success)> onComplete = nullptr) override;
+    void StartAsync(std::function<void(bool isSuccess)> onComplete = nullptr) override;
     void StopAsync() override;
 
     bool GetDoneEvent() override;
@@ -114,7 +114,7 @@ private:
     // 不把 service 变成进程生命周期管理器，也不让 feature 了解宿主对象树。
     mutable std::mutex m_workerMutex;
     std::thread m_workerThread;
-    std::atomic<bool> m_cancelFlag{ false };
+    std::atomic<bool> m_isStopping{ false };
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
 
     // 插件内部 pending callback 状态；只暴露主线程轮询接口，不反向 include App 层。
