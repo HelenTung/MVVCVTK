@@ -77,11 +77,11 @@ void MultiSliceStrategy::SetAllPositions(const double cursorWorld[3], const std:
 
 void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
-    if (HasFlag(flags , UpdateFlags::Cursor) || HasFlag(flags, UpdateFlags::Transform)) {
+    if (GetFlagOn(flags , UpdateFlags::Cursor) || GetFlagOn(flags, UpdateFlags::Transform)) {
         SetAllPositions(params.cursor.data(), params.modelMatrix);
     }
 
-    if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material)) {
+    if (GetFlagOn(flags, UpdateFlags::WindowLevel) || GetFlagOn(flags, UpdateFlags::Material)) {
         for (int i = 0; i < 3; i++) {
             if (m_slices[i] && m_slices[i]->GetProperty()) {
                 m_slices[i]->GetProperty()->SetColorWindow(params.windowLevel.windowWidth);
@@ -91,7 +91,7 @@ void MultiSliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         }
     }
 
-    if (HasFlag(flags, UpdateFlags::Visibility)) {
+    if (GetFlagOn(flags, UpdateFlags::Visibility)) {
         const int vis = (params.visibilityMask & VisFlags::Planes3D) ? 1 : 0;
         for (int i = 0; i < 3; i++) {
             if (m_slices[i]) m_slices[i]->SetVisibility(vis);

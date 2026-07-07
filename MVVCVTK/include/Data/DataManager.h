@@ -12,6 +12,11 @@ struct ReconBuffer {
     std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // 上游 ITK/LPS 物理原点，提交到 VTK 前统一转 RAS
 };
 
+struct ImageState {
+    vtkSmartPointer<vtkImageData> image;
+    DataVersion version = 0;
+};
+
 
 class BaseDataManager : public AbstractDataManager
 {
@@ -20,6 +25,7 @@ protected:
 	vtkSmartPointer<vtkImageData> m_vtkImage;
     std::array<double, 2> m_scalarRange = { 0.0, 0.0 };      // 缓存当前体数据标量范围，避免重复全量扫描
     std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // 缓存当前体数据 spacing，加载后优先复用
+    DataVersion m_dataVersion = 0; // current vtkImageData 的版本戳，pending image 不推进
 public:
     BaseDataManager() {
         m_vtkImage = vtkSmartPointer<vtkImageData>::New();
@@ -28,10 +34,12 @@ public:
     vtkSmartPointer<vtkImageData> GetVtkImage() const override {
         std::lock_guard<std::mutex> lk(m_dataMutex);
         return m_vtkImage;
-	}
+    }
 
     std::array<double, 2> GetScalarRange() const override;
     std::array<double, 3> GetSpacing() const override;
+    DataVersion GetDataVersion() const override;
+    ImageState GetImageState() const;
 
     bool SaveTransformedData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
     bool SaveSliceImages(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;

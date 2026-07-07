@@ -206,6 +206,18 @@ std::array<double, 3> BaseDataManager::GetSpacing() const
     return m_imageSpacing;
 }
 
+DataVersion BaseDataManager::GetDataVersion() const
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return m_dataVersion;
+}
+
+ImageState BaseDataManager::GetImageState() const
+{
+    std::lock_guard<std::mutex> lock(m_dataMutex);
+    return { m_vtkImage, m_dataVersion };
+}
+
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
     // 解析文件名
@@ -311,6 +323,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         m_dims[2] = newDims[2];
         m_scalarRange = { range[0], range[1] };
         m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
+        ++m_dataVersion;
     }
     return true;
 }
@@ -406,10 +419,14 @@ bool RawVolumeDataManager::ConsumePendingImage()
     if (!m_hasPendingImage.load()) return false;
 
     vtkSmartPointer<vtkImageData> incoming;
+    std::array<double, 2> pendingRange = { 0.0, 0.0 };
+    std::array<double, 3> pendingSpacing = { 1.0, 1.0, 1.0 };
     {
         std::lock_guard<std::mutex> lock(m_reconMutex);
         if (!m_pendingImage) return false;
         incoming = std::move(m_pendingImage);
+        pendingRange = m_pendingScalarRange;
+        pendingSpacing = m_pendingSpacing;
         // 先在互斥区内拿走所有权，再清掉原子门铃，保证主线程这一帧只消费一次这批重建结果。
         m_hasPendingImage.store(false);
     }
@@ -425,8 +442,9 @@ bool RawVolumeDataManager::ConsumePendingImage()
         m_dims[2] = incoming->GetDimensions()[2];
         m_spacing = { incoming->GetSpacing()[0], incoming->GetSpacing()[1], incoming->GetSpacing()[2] };
         m_origin = { incoming->GetOrigin()[0], incoming->GetOrigin()[1], incoming->GetOrigin()[2] };
-        m_scalarRange = m_pendingScalarRange;
-        m_imageSpacing = m_pendingSpacing;
+        m_scalarRange = pendingRange;
+        m_imageSpacing = pendingSpacing;
+        ++m_dataVersion;
     }
     // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
     // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。
@@ -705,6 +723,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
         m_vtkImage = newImage;
         m_scalarRange = { range[0], range[1] };
         m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
+        ++m_dataVersion;
     }
 
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;

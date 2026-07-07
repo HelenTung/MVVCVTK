@@ -8,12 +8,12 @@
 //       管理交互态、预览刷新顺序和提交收尾。
 // =====================================================================
 // 交互主链路：
-// 1. ToggleInteractiveCrop 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
-// 2. HandleWidgetWorldBoundsChanged 持续记录 widget world bounds 与交互 phase
+// 1. SwitchCropBox 进入交互态，内部生成默认 widget bounds 并挂接 vtkBoxWidget2
+// 2. OnBoxWidget 持续记录 widget world bounds 与交互 phase
 // 3. Released 或显式切换预览时，按当前几何调用 BuildBoxRequest / BuildPlaneRequest
 // 4. Box / Plane 各自刷新入口构造本几何 request，再按显式数据源请求体渲染 / 网格结果
-// 5. DispatchPreviewResult 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
-// 6. ApplySubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
+// 5. SendPreview 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
+// 6. SendSubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
 #include "Interaction/OrthogonalCropWidgetStateController.h"
 #include "Interaction/PlanarCropWidgetStateController.h"
@@ -48,8 +48,9 @@ public:
     // 构造时绑定 widget bounds 回调，把 VTK 交互事件转入本类状态机。
     OrthogonalCropInteractionBridgeService();
 
-    // 以下一组接口把 image 输入转发给 backend router。
-    void SetInputImage(vtkSmartPointer<vtkImageData> image);
+    // 以下一组接口把 host 注入的 image 输入转发给 backend router，并保存版本戳。
+    void SetInputImage(vtkSmartPointer<vtkImageData> image, DataVersion version);
+    void ClearInputImage();
     vtkSmartPointer<vtkImageData> GetInputImage() const;
 
     // 以下一组接口把 polydata 输入转发给 backend router。
@@ -57,9 +58,6 @@ public:
 
     // 设置 backend router 的首选数据源。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-
-    // DataManager 只作为 image 输入的兜底来源。
-    void SetDataManager(std::shared_ptr<AbstractDataManager> dataMgr);
 
     // 主 interactor 由 3D 参考窗口提供，widget 只会挂到这个 interactor 上。
     void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
@@ -77,22 +75,22 @@ public:
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
     // 执行当前 image submit：构建 request、经 router/algorithm 取结果，再把 submit image 提交到主数据 reload 通道。
-    void ApplySubmit();
+    void SendSubmit();
 
     // 宿主命令触发的裁切模式 toggle 入口。
-    bool ToggleInteractiveCrop();
+    bool SwitchCropBox();
 
     // 宿主命令触发的平面裁切模式 toggle 入口。
-    bool ToggleInteractivePlanarCrop();
+    bool SwitchCropPlane();
 
     // 宿主命令触发的显式退出入口。
-    bool ExitInteractiveCrop();
+    bool ExitCrop();
 
     // 宿主只需要知道裁切链路是否已激活，用于决定退出命令是否应被裁切消费。
-    bool GetInteractiveCropActive() const;
+    bool GetCropActive() const;
 
     // 切换 preview 开关与 removal mode。
-    void TogglePreview(CropRemovalMode removalMode);
+    void SwitchPreview(CropRemovalMode removalMode);
 
 private:
     // 私有边界负责 widget 状态机、world / 当前输入模型坐标转换、后端查询、
@@ -107,17 +105,17 @@ private:
         std::shared_ptr<OrthogonalCropPreviewOverlayStrategy> overlayStrategy;
     };
 
-    // 确保当前至少有一个可用输入；必要时会尝试从 data manager 抓 image。
-    bool EnsureInputReady();
+    // 确保当前至少有一个可用输入；image 输入只能来自 host 显式注入。
+    bool GetInputReady();
 
     // 生成默认交互裁切盒，作为第一次进入模式时的初始 world bounds。
     std::array<double, 6> GetDefaultInteractiveWorldBounds() const;
 
     // 响应 widget 交互回调，记录 world bounds/phase，并在 Released 时触发 preview。
-    void HandleWidgetWorldBoundsChanged(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
+    void OnBoxWidget(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
 
     // 响应平面 widget 交互回调，记录 world plane/phase，并在 Released 时触发 preview。
-    void HandleWidgetWorldPlaneChanged(
+    void OnPlaneWidget(
         const CropVectorDouble3Array& worldOrigin,
         const CropVectorDouble3Array& worldNormal,
         CropInteractionPhase phase);
@@ -147,27 +145,27 @@ private:
         OrthogonalCropDataSource dataSource) const;
 
     // Box 模式执行一次预览刷新：只使用 BuildBoxRequest 构造预览请求。
-    void UpdateBoxPreviewFromCurrentBounds();
+    void SetBoxPreview();
 
     // Plane 模式执行一次预览刷新：只使用 BuildPlaneRequest 构造预览请求。
-    void UpdatePlanePreviewFromCurrentPlane();
+    void SetPlanePreview();
 
     // 只消费已经构造好的预览请求；这里不再判断当前几何类型。
-    void UpdatePreviewFromRequests(
+    void SetPreviewReq(
         const OrthogonalCropRequest& volumeRequest,
         const OrthogonalCropRequest& polyDataRequest);
 
     // Box 模式保持原有 toggle 语义：同一侧再次触发表示关闭预览。
-    void ToggleBoxPreview(CropRemovalMode removalMode);
+    void SwitchBoxView(CropRemovalMode removalMode);
 
     // Plane 模式把 1/2 视为显式选择法线侧预览；同侧再次触发表示关闭预览。
-    void ApplyPlanarPreview(CropRemovalMode removalMode);
+    void SetPlaneView(CropRemovalMode removalMode);
 
     // 校验当前交互状态是否允许发起 image submit。
-    bool CanApplySubmit() const;
+    bool GetSubmitReady() const;
 
     // reload 回调在主线程状态收敛后触发；这里做输入恢复和 submit 收尾。
-    void HandleSubmitReloadComplete(bool success);
+    void OnSubmitReload(bool success);
 
     // 少量日志文本 helper；
     static const char* GetFailureReasonText(OrthogonalCropFailureReason failureReason);
@@ -178,23 +176,23 @@ private:
     void ClearPreviewRenderTargets();
 
     // 退出 preview 或退出交互模式时恢复 overlay，并把主模型管道切回全量直通。
-    void RestorePreviewRenderTargets();
+    void ResetPreviewTargets();
 
     // 清掉预览临时绑定到 router 的 polydata；若调用方有显式 polydata 真源则恢复它。
     void ClearPreviewPolyDataInput();
 
     // 向 preview 目标列表新增一个窗口服务，并为其挂载 overlay。
-    void AddPreviewRenderService(const std::shared_ptr<AbstractInteractiveService>& service);
+    void AttachPreviewView(const std::shared_ptr<AbstractInteractiveService>& service);
 
     // 把算法层返回的 preview result 分发给指定 preview 目标。
-    bool DispatchPreviewResult(
+    bool SendPreview(
         const PreviewRenderTarget& target,
         CropRemovalMode removalMode,
         const OrthogonalCropResult* volumePreviewResult,
         const OrthogonalCropResult* polyDataPreviewResult);
 
     // 把 submit 结果中的 mask / outline 分发到 overlay 层。
-    void DispatchSubmitResult(const OrthogonalCropResult& submitResult);
+    void SendResult(const OrthogonalCropResult& submitResult);
 
     // 后端分发器，负责基于图像输入 / 网格输入两类执行链。
     OrthogonalCropBackendRouterService m_backend;
@@ -202,8 +200,9 @@ private:
     // 预览接管层只负责把明确的预览结果应用到叠加层、mapper、shader、volume 等 VTK 显示状态。
     OrthogonalCropPreviewPlugService m_previewPlug;
 
-    // image 输入的兜底来源。
-    std::shared_ptr<AbstractDataManager> m_dataMgr;
+    // host 最近一次注入的 image 版本；bridge 不用它反查 DataManager，只做输入时序诊断。
+    DataVersion m_inputVersion = 0;
+    bool m_hasInputVersion = false;
 
     // 调用方显式绑定的 polydata 输入；preview 临时 mapper 输入结束后恢复到这份真源。
     vtkSmartPointer<vtkPolyData> m_boundInputPolyData;

@@ -17,6 +17,8 @@
 #include <string>
 #include <functional>
 
+using DataVersion = std::uint64_t;
+
 // --- 可视化模式枚举 ---
 enum class VizMode {
     Volume,
@@ -117,7 +119,7 @@ inline UpdateFlags operator&(UpdateFlags a, UpdateFlags b) {
 inline UpdateFlags& operator|=(UpdateFlags& a, UpdateFlags b) {
     a = a | b; return a;
 }
-inline bool HasFlag(UpdateFlags flags, UpdateFlags bit) {
+inline bool GetFlagOn(UpdateFlags flags, UpdateFlags bit) {
     return (static_cast<int>(flags) & static_cast<int>(bit)) != 0;
 }
 

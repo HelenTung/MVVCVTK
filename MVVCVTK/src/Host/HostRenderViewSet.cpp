@@ -12,7 +12,7 @@
 
 namespace {
 static std::pair<
-    std::shared_ptr<MedicalVizService>,
+    std::shared_ptr<VizService>,
     std::shared_ptr<StdRenderContext>>
     BuildRenderViewRuntimePair(
         const WindowConfig& cfg,
@@ -24,7 +24,7 @@ static std::pair<
     // 1. service 绑定共享数据和状态，负责业务渲染能力。
     // 2. context 绑定 VTK window/interactor，负责单窗口渲染生命周期。
     // 3. 二者在这里组装，是因为 HostRenderViewSet 知道窗口拓扑，但不把 topology 写进 StdRenderContext。
-    auto service = std::make_shared<MedicalVizService>(
+    auto service = std::make_shared<VizService>(
         std::move(dataMgr),
         std::move(sharedState),
         std::move(stateEventSource));
@@ -39,7 +39,7 @@ static std::pair<
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->ApplyCameraStyle(cfg.preInitCfg.vizMode);
+    context->SetCameraStyle(cfg.preInitCfg.vizMode);
     if (cfg.showAxes) {
         context->SetOrientationAxesVisible(true);
     }

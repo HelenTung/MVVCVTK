@@ -24,7 +24,8 @@ enum class HostCommandKind {
     GapOverlay,
     GapExit,
     Export,
-    Hotkeys
+    Hotkeys,
+    ViewConfig
 };
 
 // HostCommandRouter 是 host 命令分发器，不是 feature，也不是业务 service。
@@ -43,6 +44,8 @@ struct HostCommandRouterRequest {
     HostDataExportConfig dataExportConfig;
     std::function<void(bool success)> dataExportComplete;
 
+    HostViewConfig viewConfig;
+
     HostRenderContextInputConfig renderContextInput;
     HostCommandInputConfig commandInput;
     HostHotkeyBindings hotkeys;
@@ -55,17 +58,18 @@ public:
         const HostRenderViewSet& renderViews,
         std::shared_ptr<HostFeatureBindings> featureBindings);
 
-    bool DispatchHostCommand(HostCommandRouterRequest request) const;
+    bool DispatchCommand(HostCommandRouterRequest request) const;
 
 private:
-    bool DispatchInitialVolumeLoad(
+    bool LoadVolume(
         const InitialVolumeLoadConfig& initialVolume,
         std::function<void(bool success)> loadComplete) const;
-    bool DispatchFeatureCommand(const HostCommandRouterRequest& request) const;
-    bool DispatchDataExport(
+    bool SendFeature(const HostCommandRouterRequest& request) const;
+    bool ExportData(
         const HostDataExportConfig& dataExportConfig,
         std::function<void(bool success)> onComplete) const;
-    bool AttachStandaloneHotkeys(const HostCommandRouterRequest& request) const;
+    bool SetViewConfig(const HostViewConfig& viewConfig) const;
+    bool AttachHotkeys(const HostCommandRouterRequest& request) const;
 
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;

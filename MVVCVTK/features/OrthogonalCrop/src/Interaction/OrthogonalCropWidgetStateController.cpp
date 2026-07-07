@@ -10,6 +10,7 @@
 
 #include "Interaction/OrthogonalCropWidgetStateController.h"
 #include <vtkMatrix4x4.h>
+#include <vtkObjectFactory.h>
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
 #include <utility>
@@ -26,10 +27,7 @@ constexpr double kBoxOutlineSelectedLineWidth = 2.8;
 constexpr double kBoxFaceOpacity = 0.0;
 }
 
-OrthogonalCropWidgetStateCallback* OrthogonalCropWidgetStateCallback::New()
-{
-    return new OrthogonalCropWidgetStateCallback();
-}
+vtkStandardNewMacro(OrthogonalCropWidgetStateCallback);
 
 void OrthogonalCropWidgetStateCallback::SetOwner(OrthogonalCropWidgetStateController* owner)
 {
@@ -41,7 +39,7 @@ void OrthogonalCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long
     (void)caller;
     (void)callData;
     if (m_owner) {
-        m_owner->HandleWidgetEvent(eventId);
+        m_owner->OnWidgetEvent(eventId);
     }
 }
 
@@ -201,7 +199,7 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
 
     // observer 懒绑定且只绑定一次；
     // 重复进入裁切模式时不应产生多重 VTK 回调。
-    EnsureObserversAdded();
+    AttachObservers();
 
     if (enabled) {
         // 启用前确保有合法 world bounds；
@@ -216,12 +214,12 @@ bool OrthogonalCropWidgetStateController::SetEnabled(bool enabled)
 
         m_widgetInitialWorldBounds = m_currentWorldBounds;
         m_representation->PlaceWidget(m_currentWorldBounds.data());
-        ApplyInteractionVisualState(CropInteractionPhase::Idle);
+        SetVisualState(CropInteractionPhase::Idle);
         m_widget->On();
     }
     else {
         m_widget->Off();
-        ApplyInteractionVisualState(CropInteractionPhase::Idle);
+        SetVisualState(CropInteractionPhase::Idle);
     }
 
     m_enabled = enabled;
@@ -255,9 +253,9 @@ CropInteractionPhase OrthogonalCropWidgetStateController::GetInteractionPhaseFro
     }
 }
 
-void OrthogonalCropWidgetStateController::EnsureObserversAdded()
+void OrthogonalCropWidgetStateController::AttachObservers()
 {
-    if (m_observersAdded) {
+    if (m_hasObservers) {
         return;
     }
 
@@ -265,13 +263,13 @@ void OrthogonalCropWidgetStateController::EnsureObserversAdded()
     m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand);
-    m_observersAdded = true;
+    m_hasObservers = true;
 }
 
-void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
+void OrthogonalCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
 {
     const auto interactionPhase = GetInteractionPhaseFromEvent(eventId);
-    ApplyInteractionVisualState(interactionPhase);
+    SetVisualState(interactionPhase);
 
     const auto rawBounds = m_representation->GetBounds();
     if (!rawBounds) {
@@ -297,7 +295,7 @@ void OrthogonalCropWidgetStateController::HandleWidgetEvent(unsigned long eventI
     }
 }
 
-void OrthogonalCropWidgetStateController::ApplyInteractionVisualState(CropInteractionPhase phase)
+void OrthogonalCropWidgetStateController::SetVisualState(CropInteractionPhase phase)
 {
     const bool isDragging = phase == CropInteractionPhase::Dragging;
 

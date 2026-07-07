@@ -136,7 +136,7 @@ public:
     }
 
     // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
-    // 对应 IVisualConfigService::CommitVisualConfig
+    // 只用于完整配置快照；运行期局部设置应走具体 Set* 入口，避免默认字段污染当前状态。
     void SetPreInitConfig(const PreInitConfig& cfg) {
         UpdateFlags flags = UpdateFlags::None;
         {

@@ -8,7 +8,7 @@
 #include <vector>
 
 class AbstractInteractiveService;
-class MedicalVizService;
+class VizService;
 class StdRenderContext;
 
 // runtime 是 HostRenderViewSet 内部的单视图运行态，组合“宿主配置 + 单窗口渲染 context + 业务 service”。
@@ -16,8 +16,8 @@ class StdRenderContext;
 struct HostRenderViewRuntime {
     // 上位机或 standalone main 下发的窗口声明，是 id/role/默认预览策略的真源。
     HostRenderViewConfig config;
-    // 每个窗口自己的 MedicalVizService；共享数据来自 HostCoreServices，不在这里另起 DataManager。
-    std::shared_ptr<MedicalVizService> service;
+    // 每个窗口自己的 VizService；共享数据来自 HostCoreServices，不在这里另起 DataManager。
+    std::shared_ptr<VizService> service;
     // 单窗口渲染组装仍由 StdRenderContext 负责，HostRenderViewSet 不接管其内部 camera/interactor 细节。
     std::shared_ptr<StdRenderContext> context;
 };

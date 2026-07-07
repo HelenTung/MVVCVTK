@@ -90,7 +90,7 @@ static constexpr const char* kPolyDataRemoveInsidePlaneLightImplReplacement =
     "      discard;\n"
     "      }\n";
 
-bool OrthogonalCropPreviewPlugService::ApplyPreview(
+bool OrthogonalCropPreviewPlugService::SetPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
@@ -106,7 +106,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     if (volumePreviewResult) {
         // VolumeData preview 结果在 3D volume 窗口表达 render-only 主预览；
         // 2D mask 由 submit 结果单独进入 overlay，不参与 preview 路由。
-        mainPreviewApplied = ApplyVolumePreview(
+        mainPreviewApplied = SetVolumeView(
             targetService,
             referenceService,
             *volumePreviewResult,
@@ -117,7 +117,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     if (!mainPreviewApplied && polyDataPreviewResult) {
         // 网格结果只负责 actor 窗口：
         // KeepInside 使用 mapper planes，RemoveInside 使用 actor shader discard。
-        polyDataPreviewApplied = ApplyPolyDataPreview(
+        polyDataPreviewApplied = SetMeshView(
             targetService,
             referenceService,
             *polyDataPreviewResult,
@@ -145,7 +145,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPreview(
     return mainPreviewApplied;
 }
 
-void OrthogonalCropPreviewPlugService::RestorePreview(
+void OrthogonalCropPreviewPlugService::ResetPreview(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<OrthogonalCropPreviewOverlayStrategy>& overlayStrategy)
 {
@@ -160,10 +160,10 @@ void OrthogonalCropPreviewPlugService::RestorePreview(
     auto volume = vtkVolume::SafeDownCast(targetService->GetMainProp());
     auto volumeMapper = volume ? vtkVolumeMapper::SafeDownCast(volume->GetMapper()) : nullptr;
     if (volumeMapper) {
-        RestoreVolumePreview(volume, volumeMapper);
+        ResetVolumeView(volume, volumeMapper);
     }
 
-    RestorePolyDataPreview(targetService);
+    ResetMeshView(targetService);
 }
 
 vtkSmartPointer<vtkPolyData> OrthogonalCropPreviewPlugService::GetPreviewPolyDataInput(
@@ -183,7 +183,7 @@ void OrthogonalCropPreviewPlugService::Clear()
     m_targetStates.clear();
 }
 
-void OrthogonalCropPreviewPlugService::RestoreVolumePreview(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
+void OrthogonalCropPreviewPlugService::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
 {
     ClearVolumeRemoveInsideState(volume, volumeMapper);
     if (!volume || !volumeMapper) {
@@ -311,7 +311,7 @@ vtkSmartPointer<vtkPlaneCollection> OrthogonalCropPreviewPlugService::BuildPlane
     return clippingPlanes;
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyVolumePreview(
+bool OrthogonalCropPreviewPlugService::SetVolumeView(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
@@ -341,8 +341,8 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumePreview(
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
         const bool usePlane = previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane;
         const bool applied = usePlane
-            ? ApplyVolumePlaneRemoveInsidePreview(volume, gpuVolumeMapper, previewResult)
-            : ApplyVolumeRemoveInsidePreview(volume, gpuVolumeMapper, previewResult);
+            ? SetVolumePlane(volume, gpuVolumeMapper, previewResult)
+            : SetVolumeRemove(volume, gpuVolumeMapper, previewResult);
         if (!applied) {
             volumeMapper->SetCroppingRegionFlagsToSubVolume();
             volume->Modified();
@@ -353,12 +353,12 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumePreview(
         return true;
     }
 
-    ApplyVolumeKeepInsidePreview(volumeMapper, referenceService, previewResult);
+    SetVolumeKeep(volumeMapper, referenceService, previewResult);
     volume->Modified();
     return true;
 }
 
-void OrthogonalCropPreviewPlugService::ApplyVolumeKeepInsidePreview(
+void OrthogonalCropPreviewPlugService::SetVolumeKeep(
     vtkVolumeMapper* volumeMapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
@@ -375,7 +375,7 @@ void OrthogonalCropPreviewPlugService::ApplyVolumeKeepInsidePreview(
             : BuildWorldClippingPlanes(referenceService, previewResult));
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyVolumeRemoveInsidePreview(
+bool OrthogonalCropPreviewPlugService::SetVolumeRemove(
     vtkVolume* volume,
     vtkGPUVolumeRayCastMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
@@ -430,7 +430,7 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumeRemoveInsidePreview(
     return true;
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyVolumePlaneRemoveInsidePreview(
+bool OrthogonalCropPreviewPlugService::SetVolumePlane(
     vtkVolume* volume,
     vtkGPUVolumeRayCastMapper* volumeMapper,
     const OrthogonalCropResult& previewResult) const
@@ -466,7 +466,7 @@ bool OrthogonalCropPreviewPlugService::ApplyVolumePlaneRemoveInsidePreview(
     return true;
 }
 
-void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
+void OrthogonalCropPreviewPlugService::ResetMeshView(
     const std::shared_ptr<AbstractInteractiveService>& targetService)
 {
     auto key = targetService.get();
@@ -508,7 +508,7 @@ void OrthogonalCropPreviewPlugService::RestorePolyDataPreview(
     actor->Modified();
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyPolyDataPreview(
+bool OrthogonalCropPreviewPlugService::SetMeshView(
     const std::shared_ptr<AbstractInteractiveService>& targetService,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult,
@@ -530,21 +530,21 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataPreview(
 
     // 每次接管前先清空上一种 polydata 后端表达，避免 KeepInside clipping planes
     // 与 RemoveInside shader discard 在反复切换时互相残留。
-    RestorePolyDataPreview(targetService);
+    ResetMeshView(targetService);
     auto& targetState = m_targetStates[targetService.get()];
     targetState.mainPreviewMapper = mapper;
     if (removalMode == CropRemovalMode::KeepInside) {
-        ApplyPolyDataKeepInsidePreview(mapper, referenceService, previewResult);
+        SetMeshKeep(mapper, referenceService, previewResult);
         actor->Modified();
         return true;
     }
 
     return previewResult.GetResolvedGeometryType() == OrthogonalCropGeometryType::Plane
-        ? ApplyPolyDataPlaneRemoveInsidePreview(actor, mapper, referenceService, previewResult)
-        : ApplyPolyDataRemoveInsidePreview(actor, mapper, referenceService, previewResult);
+        ? SetMeshPlaneCut(actor, mapper, referenceService, previewResult)
+        : SetMeshRemove(actor, mapper, referenceService, previewResult);
 }
 
-void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
+void OrthogonalCropPreviewPlugService::SetMeshKeep(
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
@@ -562,7 +562,7 @@ void OrthogonalCropPreviewPlugService::ApplyPolyDataKeepInsidePreview(
     mapper->Modified();
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
+bool OrthogonalCropPreviewPlugService::SetMeshRemove(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,
@@ -633,7 +633,7 @@ bool OrthogonalCropPreviewPlugService::ApplyPolyDataRemoveInsidePreview(
     return true;
 }
 
-bool OrthogonalCropPreviewPlugService::ApplyPolyDataPlaneRemoveInsidePreview(
+bool OrthogonalCropPreviewPlugService::SetMeshPlaneCut(
     vtkActor* actor,
     vtkPolyDataMapper* mapper,
     const std::shared_ptr<AbstractInteractiveService>& referenceService,

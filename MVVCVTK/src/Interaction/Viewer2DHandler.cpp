@@ -36,7 +36,7 @@ Viewer2DHandler::Viewer2DHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult Viewer2DHandler::Handle(const InteractionEvent& eve)
+InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
 {
     if (!m_service || !GetIsSliceMode(eve.vizMode)) {
         return {};

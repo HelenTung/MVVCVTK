@@ -40,13 +40,13 @@ public:
         float               isoValue);
 
     // ── Step 2：候选空洞提取（灰度阈值筛选）────────────────────────
-    static std::vector<uint8_t> ExtractCandidates(
+    static std::vector<uint8_t> BuildCandidates(
         const VolumeBuffer& vol,
         const std::vector<uint8_t>& interiorMask,
         const VoidDetectionParams& params);
 
     // ── Step 3：结构张量场驱动的连通域分析 ─────────────────────────
-    static std::vector<VoidRegion> LabelAndAnalyze(
+    static std::vector<VoidRegion> BuildRegions(
         const VolumeBuffer& vol,
         std::vector<uint8_t>& candidateMask,
         const VoidDetectionParams& params,
@@ -182,7 +182,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     return exterior;
 }
 
-inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
+inline std::vector<uint8_t> VoidDetector::BuildCandidates(
     const VolumeBuffer& vol,
     const std::vector<uint8_t>& interiorMask,
     const VoidDetectionParams& params)
@@ -254,7 +254,7 @@ inline std::vector<uint8_t> VoidDetector::ExtractCandidates(
     return candidates;
 }
 
-inline std::vector<VoidRegion> VoidDetector::LabelAndAnalyze(
+inline std::vector<VoidRegion> VoidDetector::BuildRegions(
     const VolumeBuffer& vol,
     std::vector<uint8_t>& candidateMask,
     const VoidDetectionParams& params,

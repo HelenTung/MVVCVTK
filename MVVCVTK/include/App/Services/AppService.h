@@ -1,12 +1,10 @@
 #pragma once
 // =====================================================================
-// AppService.h — MedicalVizService 主线程编排层
+// AppService.h — VizService 主线程编排层
 //
 // 继承关系：
 //   AbstractInteractiveService  — 交互接口（StdRenderContext 通过此类型持有）
-//   IVisualConfigService        — 前处理接口（host/session 配置阶段调用）
-//   IFileLoadControlService     — 文件加载状态/控制接口（与渲染解耦）
-//   IDataExportService          — 数据导出接口（与渲染解耦）
+//   IAppStateSyncTarget         — 状态同步目标（只由同步策略调用）
 //   enable_shared_from_this     — Observer 注册需要 shared_from_this()
 //
 // 主线职责：
@@ -31,24 +29,21 @@
 class AppDataExportTaskService;
 class AppDataLoadTaskService;
 
-class MedicalVizService
+class VizService
     : public AbstractInteractiveService
-    , public IVisualConfigService
-    , public IFileLoadControlService
-    , public IDataExportService
     , private IAppStateSyncTarget
-    , public std::enable_shared_from_this<MedicalVizService>
+    , public std::enable_shared_from_this<VizService>
 {
 public:
     // ================================================================
     // 构造 / 析构
     // 功能：绑定 DataManager、SharedInteractionState 与状态事件源三个核心对象。
-    // 作用：建立 MedicalVizService 作为“状态调度中枢”的运行基础。
+    // 作用：建立 VizService 作为“状态调度中枢”的运行基础。
     // ================================================================
-    MedicalVizService(std::shared_ptr<AbstractDataManager> dataMgr,
+    VizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state,
         std::shared_ptr<IStateEventSource> stateEventSource);
-    ~MedicalVizService();
+    ~VizService();
 
     // ================================================================
     // RenderContext 绑定
@@ -59,21 +54,21 @@ public:
         vtkSmartPointer<vtkRenderer> ren) override;
 
     // ================================================================
-    // IVisualConfigService — 前处理配置
+    // 视觉配置 — 前处理 / 运行期配置意图
     // 调用时机：SetServiceBound 之后，LoadFileAsync 之前（或之后均可）
     // 线程安全：写 SharedState（内部 mutex 保护）
     // 这一组方法只做“配置意图登记”，不直接操作 VTK 原生对象。
     // 原生依赖对象：m_sharedState。
     // ================================================================
-    void SetVizMode(VizMode mode) override;
-    void SetMaterial(const MaterialParams& mat) override;
-    void SetOpacity(double opacity) override;
-    void SetTransferFunction(const std::vector<TFNode>& nodes) override;
-    void SetIsoThreshold(double val) override;
-    void SetBackground(const BackgroundColor& bg) override;
-    void SetSpacing(double sx, double sy, double sz) override;
-    void SetWindowLevel(double ww, double wc) override;
-    void SetVisualConfig(const PreInitConfig& cfg) override;
+    void SetVizMode(VizMode mode);
+    void SetMaterial(const MaterialParams& mat);
+    void SetOpacity(double opacity);
+    void SetTransferFunction(const std::vector<TFNode>& nodes);
+    void SetIsoThreshold(double val);
+    void SetBackground(const BackgroundColor& bg);
+    void SetSpacing(double sx, double sy, double sz);
+    void SetWindowLevel(double ww, double wc);
+    void SetVisualConfig(const PreInitConfig& cfg);
 
     // ================================================================
     // 文件流加载 / 重载加载入口
@@ -96,24 +91,24 @@ public:
         std::function<void(bool success)> onComplete = nullptr);
 
     // 状态查询：当前只对外暴露 File / Reload 两组状态。
-    LoadState GetFileLoadState() const override;
-    LoadState GetReloadLoadState() const override;
+    LoadState GetFileLoadState() const;
+    LoadState GetReloadLoadState() const;
 
     // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
     // 原生依赖对象：m_cancelFlag。
-    void CancelFileLoad() override;
+    void CancelFileLoad();
 
     // ================================================================
-    // IDataExportService — 导出任务
+    // 数据导出任务
     // 功能：发起后台保存任务，并把保存完成结果延迟回到主线程。
     // 作用：把导出 I/O 与当前渲染线程解耦。
     // 原生依赖对象：m_dataManager、m_sharedState。
     // ================================================================
     void SaveTransformedDataAsync(const std::string& path,
-        std::function<void(bool success)> onComplete = nullptr) override;
+        std::function<void(bool success)> onComplete = nullptr);
     void SaveSliceImagesAsync(const std::string& path,
         std::optional<double> rotationAngleDeg = std::nullopt,
-        std::function<void(bool success)> onComplete = nullptr) override;
+        std::function<void(bool success)> onComplete = nullptr);
 
     // ================================================================
     // AbstractInteractiveService — 交互接口
@@ -157,15 +152,17 @@ public:
     // ================================================================
     // AbstractAppService — 主线程编排入口
     // 功能：Timer 心跳驱动，只编排各类 pending 状态的消费顺序。
-    // 作用：按下面优先级处理缓存清理、加载失败、数据重建和增量同步；具体任务构建已下沉到专门 service。
+    // 作用：按固定顺序消费 pending image、导出回调、缓存清理、加载状态、策略同步和加载回调。
     // 原生依赖对象：m_strategyCache、m_currentStrategy、m_renderer、m_renderWindow。
-    // 路由优先级：
-    //   1. m_needsCacheClear  → ClearStrategyCache
-    //   2. m_needsLoadFailed  → HandleLoadFailure
-    //   3. m_needsDataRefresh → RebuildPipeline
-    //   4. m_needsSync        → SyncStrategyState
+    // 固定顺序：
+    //   1. ConsumePendingImage -> SetReloadDataReady
+    //   2. ConsumeSaveCallback -> ExecutePendingSaveCallback
+    //   3. m_needsCacheClear   -> ClearStrategyCache
+    //   4. LoadFailed/DataReady -> ClearLoadFail/RebuildPipeline
+    //   5. m_needsSync         -> SyncStrategyState
+    //   6. load callback       -> ExecutePending*LoadCallback
     // ================================================================
-    void ProcessPendingUpdates() override;
+    void SendUpdates() override;
 
 private:
     // ================================================================
@@ -175,10 +172,10 @@ private:
     // ================================================================
     void RebuildPipeline();
     void SyncStrategyState();
-    void HandleLoadFailure();
+    void ClearLoadFail();
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
-    void ApplyRendererBackground();
+    void SetRendererBg();
     void RequestStrategyCacheClear();
     void ClearStrategyCache();
     void CenterCursor();

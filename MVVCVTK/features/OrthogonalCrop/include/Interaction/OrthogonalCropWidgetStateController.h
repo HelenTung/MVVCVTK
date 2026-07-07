@@ -86,14 +86,14 @@ private:
     static CropInteractionPhase GetInteractionPhaseFromEvent(unsigned long eventId);
 
     // 懒加载绑定 widget observer，避免重复 AddObserver。
-    void EnsureObserversAdded();
+    void AttachObservers();
 
     // 处理一次 widget 事件并向上抛出 bounds 回调。
-    void HandleWidgetEvent(unsigned long eventId);
+    void OnWidgetEvent(unsigned long eventId);
 
     // 根据交互阶段刷新 widget 线框样式；
     // VTK 拖动单面时默认高亮 face 而不是 outline，本控制器把反馈统一收口到线框，避免出现实体面染色。
-    void ApplyInteractionVisualState(CropInteractionPhase phase);
+    void SetVisualState(CropInteractionPhase phase);
 
     // widget 当前所属 interactor。
     vtkRenderWindowInteractor* m_interactor = nullptr;
@@ -114,7 +114,7 @@ private:
     bool m_enabled = false;
 
     // observer 是否已经绑定过。
-    bool m_observersAdded = false;
+    bool m_hasObservers = false;
 
     // 缓存 widget 当前 world AABB，用于状态回调、日志、重进裁切和 PlaceWidget 兜底；
     // 旋转交互后它只是外接框，因此不能作为真实裁切盒姿态。

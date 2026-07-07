@@ -74,7 +74,7 @@ public:
         ResetVoxelPointer();
     }
 
-    bool HasVoxelData() const noexcept {
+    bool GetVoxelReady() const noexcept {
         return voxelsPtr != nullptr;
     }
 

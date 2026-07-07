@@ -10,8 +10,6 @@
 //   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
 //   AbstractAppService         — 基础服务
-//   IVisualConfigService       — 前处理配置
-//   IFileLoadControlService    — 文件加载状态/控制
 //   AbstractInteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
 // =====================================================================
@@ -46,6 +44,7 @@ public:
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
     virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
+    virtual DataVersion GetDataVersion() const = 0;
     virtual bool SetDataLoaded(const std::string& filePath,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) = 0;
@@ -95,7 +94,7 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService — 基础服务（渲染脏标记 + ProcessPendingUpdates 更新入口）
+// AbstractAppService — 基础服务（渲染脏标记 + SendUpdates 更新入口）
 // ─────────────────────────────────────────────────────────────────────
 class AbstractAppService {
 protected:
@@ -141,7 +140,7 @@ public:
     }
 
     // 主线程 Timer 心跳驱动的更新入口
-    virtual void ProcessPendingUpdates() {}
+    virtual void SendUpdates() {}
 
     bool IsDirty()      const { return m_isDirty; }
     void MarkDirty() { m_isDirty = true; }
@@ -156,69 +155,6 @@ public:
     virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void ClearOverlayStrategies();
 };
-
-// ─────────────────────────────────────────────────────────────────────
-// IVisualConfigService — 前处理接口
-//
-// 职责：数据到达之前，登记所有与数据无关的配置意图。
-//   • 所有方法只写 SharedState（内部有 mutex），零 VTK 操作
-//   • 可在 SetServiceBound 之后、异步加载之前的任意时刻调用
-//   • 支持逐项设置 OR 批量提交（SetVisualConfig）
-// ─────────────────────────────────────────────────────────────────────
-class IVisualConfigService {
-public:
-    virtual ~IVisualConfigService() = default;
-
-    // 逐项设置（向后兼容）
-    virtual void SetVizMode(VizMode mode) = 0;
-    virtual void SetMaterial(const MaterialParams& mat) = 0;
-    virtual void SetOpacity(double opacity) = 0;
-    virtual void SetTransferFunction(const std::vector<TFNode>& nodes) = 0;
-    virtual void SetIsoThreshold(double val) = 0;
-    virtual void SetBackground(const BackgroundColor& bg) = 0;
-    virtual void SetSpacing(double sx, double sy, double sz) = 0;
-    virtual void SetWindowLevel(double ww, double wc) = 0;
-    virtual void SetVisualConfig(const PreInitConfig& cfg) = 0;
-};
-
-// ─────────────────────────────────────────────────────────────────────
-// IFileLoadControlService — 文件加载状态/控制接口
-//
-// 只暴露文件流/重载流程的状态读取与取消控制。
-// 文件流加载入口与回调广播由独立流程对象负责，不再耦合到该接口。
-// ─────────────────────────────────────────────────────────────────────
-class IFileLoadControlService {
-public:
-    virtual ~IFileLoadControlService() = default;
-
-    // 查询文件流加载状态（推荐 UI / 上层按需读取）
-    virtual LoadState GetFileLoadState() const = 0;
-
-    // 查询重载加载状态（推荐 UI / 上层按需读取）
-    virtual LoadState GetReloadLoadState() const = 0;
-
-    // 尽力取消加载（若实现支持，则设标记由加载线程自检退出）
-    // 默认空实现，派生类按需覆盖
-    virtual void CancelFileLoad() {}
-};
-
-class IDataExportService {
-public:
-    virtual ~IDataExportService() = default;
-
-    // 异步保存：在后台线程进行重采样和 I/O，onComplete 由主线程延迟回调；空路径会被拒绝。
-    virtual void SaveTransformedDataAsync(
-        const std::string& path,
-        std::function<void(bool success)> onComplete = nullptr) = 0;
-
-    // 异步保存：按调用视图的当前切片方向导出全部切片图，窗宽窗位和模型姿态在任务创建时拍快照。
-    // rotationAngleDeg 由上位机按需显式传入；未传时不额外叠加角度。
-    virtual void SaveSliceImagesAsync(
-        const std::string& path,
-        std::optional<double> rotationAngleDeg = std::nullopt,
-        std::function<void(bool success)> onComplete = nullptr) = 0;
-};
-
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractInteractiveService — 交互服务接口
@@ -302,7 +238,7 @@ public:
     vtkRenderer* GetRenderer() const { return m_renderer.GetPointer(); }
     vtkRenderWindow* GetRenderWindow() const { return m_renderWindow.GetPointer(); }
 
-    virtual void ApplyCameraStyle(VizMode mode) = 0;
+    virtual void SetCameraStyle(VizMode mode) = 0;
     virtual void InitializeInteractor() = 0;  // 显式分离，避免 Start() 混乱
     virtual void Start() = 0;
 
@@ -328,10 +264,10 @@ protected:
         void* callData)
     {
         auto* ctx = static_cast<AbstractRenderContext*>(clientData);
-        if (ctx) ctx->HandleVTKEvent(caller, eventId, callData);
+        if (ctx) ctx->OnVTKEvent(caller, eventId, callData);
     }
 
-    virtual void HandleVTKEvent(vtkObject* caller,
+    virtual void OnVTKEvent(vtkObject* caller,
         long unsigned int eventId,
         void* callData) {
     }

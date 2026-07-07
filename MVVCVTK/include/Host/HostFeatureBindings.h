@@ -30,39 +30,40 @@ public:
         const HostRenderViewSet& renderViews);
 
     // 显式激活裁切链路，只解析参考/预览窗口并刷新输入图像，不负责具体按键语义。
-    bool ActivateOrthogonalCrop(const HostOrthogonalCropActivationRequest& request);
+    bool StartCrop(const HostOrthogonalCropActivationRequest& request);
     // 显式进入孔隙显示链路；只在请求提供目标窗口后才启动一次算法请求。
-    bool ActivateGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
+    bool StartGapView(const HostGapAnalysisActivationRequest& request);
     // standalone 输入使用的“进入或切换显示”命令；具体状态由 GapAnalysis feature 自己判断。
-    bool ToggleGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
+    bool SwitchGapView(const HostGapAnalysisActivationRequest& request);
     // 临时隐藏/显示已进入模式的孔隙 overlay；不清除算法结果，也不退出显示模式。
-    bool ToggleGapAnalysisOverlayVisibility();
+    bool SwitchGapLayer();
     // 彻底退出孔隙显示模式；清除 overlay 缓存和 pending 请求。
-    bool ExitGapAnalysisDisplay();
-    bool GetGapAnalysisDisplayActive() const;
+    bool ExitGapView();
+    bool GetGapView() const;
 
-    bool ToggleInteractiveCrop(const HostOrthogonalCropActivationRequest& request);
-    bool ToggleInteractivePlanarCrop(const HostOrthogonalCropActivationRequest& request);
-    bool ToggleCropPreview(
+    bool SwitchCropBox(const HostOrthogonalCropActivationRequest& request);
+    bool SwitchCropPlane(const HostOrthogonalCropActivationRequest& request);
+    bool SwitchCropView(
         const HostOrthogonalCropActivationRequest& request,
         HostCropPreviewMode previewMode);
-    bool ApplyCropSubmit(const HostOrthogonalCropActivationRequest& request);
-    bool ExitInteractiveCrop();
-    bool ExitActiveFeatureMode();
-    bool GetInteractiveCropActive() const;
-    std::function<bool()> BuildOrthogonalCropInputRefreshHandler() const;
+    bool SendCrop(const HostOrthogonalCropActivationRequest& request);
+    bool ExitCrop();
+    bool ExitFeature();
+    bool GetCropActive() const;
+    void ClearCropInput() const;
+    std::function<bool()> BuildCropInput() const;
 
     // 通用 TimerEvent pump 是 host/session 主线程收敛点；具体 feature 只在 tick 中消费自己的 pending 状态。
-    void AttachHostTimerEventPump(const HostTimerEventPumpConfig& eventPumpConfig);
+    void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
 
 private:
     // 从共享 DataManager 把当前 vtkImageData 交给裁切 bridge；加载完成和显式激活都会复用同一刷新点。
-    bool RefreshOrthogonalCropInputImage();
+    bool SetCropInput();
     // 按 request 解析 reference view 和 preview views，并把这些 host 窗口注入裁切 bridge。
-    bool ConfigureOrthogonalCrop(const HostOrthogonalCropActivationRequest& request);
+    bool SetCropViews(const HostOrthogonalCropActivationRequest& request);
     // 单次主线程 tick 分发入口；后续 feature 接入异步结果时复用这里，不再各自安装 VTK observer。
-    void ProcessHostTimerTick();
-    void DetachHostTimerEventPump();
+    void OnHostTimer();
+    void DetachHostTimer();
 
     // 会话核心服务的拷贝，shared_ptr 成员共享所有权；HostFeatureBindings 不单独创建数据或算法服务。
     HostCoreServices m_core;

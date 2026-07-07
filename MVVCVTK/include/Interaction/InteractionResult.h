@@ -1,7 +1,7 @@
-﻿#pragma once
+#pragma once
 
 // ───────────��─────────────────────────────────────────────────────────
-// InteractionResult — Handler::Handle() 的返回值
+// InteractionResult — Handler::Send() 的返回值
 //
 //   handled  = true  → Router 在 FirstMatch 模式下停止向后传递
 //   abortVtk = true  → RenderContext 应对当前 VTK 事件调用 SetAbortFlag(1)

@@ -26,7 +26,7 @@ enum class HostRenderViewRole {
 };
 
 // 独立 VTK 调试入口的输入协议。它由 main 或上位机适配层填充，由 host observer 消费。
-// 为什么不放进 feature：固定按键是宿主交互事实，feature 只暴露 Activate/Toggle/Exit 等稳定命令。
+// 为什么不放进 feature：固定按键是宿主交互事实，feature 只暴露 Start/Switch/Exit 等稳定命令。
 // 字段默认保持未分配，是为了让 Qt / 上位机创建 session 后不会隐式继承调试程序的快捷键。
 struct HostHotkeyBindings {
     // RenderContext 层的模型变换模式切换键，只服务独立 VTK 调试窗口。
@@ -108,6 +108,26 @@ struct HostRenderViewEndpoint {
     vtkRenderer* renderer = nullptr;
     vtkRenderWindow* renderWindow = nullptr;
     vtkRenderWindowInteractor* interactor = nullptr;
+};
+
+// 运行期单视图视觉配置命令。字段 optional 表示“本次命令是否下发该值”，
+// 不能复用 PreInitConfig 做局部更新，否则默认 mode/material 会污染当前状态。
+struct HostViewConfig {
+    // 优先按 id 定位目标窗口，适合 Qt widget 已建立 id 映射的场景。
+    std::string viewId;
+    // viewId 为空时是否允许按 role 查找目标窗口。
+    bool useViewRole = false;
+    // role fallback 的目标窗口。
+    HostRenderViewRole viewRole = HostRenderViewRole::Auxiliary;
+
+    std::optional<VizMode> mode;
+    std::optional<MaterialParams> material;
+    std::optional<double> opacity;
+    std::optional<std::vector<TFNode>> tfNodes;
+    std::optional<double> iso;
+    std::optional<BackgroundColor> background;
+    std::optional<std::array<double, 3>> spacing;
+    std::optional<WindowLevelParams> windowLevel;
 };
 
 // RenderContext 热键只服务独立 VTK 调试宿主，例如模型变换和本地导出。

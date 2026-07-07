@@ -5,7 +5,7 @@
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
 // 类型层只保存请求、结果、诊断、失败原因和数据快照；
-// 它不依赖 MedicalVizService、Renderer、Interactor 或具体窗口对象，
+// 它不依赖 VizService、Renderer、Interactor 或具体窗口对象，
 // 让前端或 ViewModel 只需要组装 OrthogonalCropRequest 并消费 OrthogonalCropResult。
 //
 // 语义边界：

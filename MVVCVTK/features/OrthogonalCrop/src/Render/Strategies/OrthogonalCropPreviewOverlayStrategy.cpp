@@ -78,7 +78,7 @@ OrthogonalCropPreviewOverlayStrategy::OrthogonalCropPreviewOverlayStrategy()
     m_maskSlice->GetProperty()->SetInterpolationTypeToNearest();
     m_maskSlice->GetProperty()->SetLayerNumber(2);
 
-    ApplyOverlayVisualStyle();
+    SetStyle();
 
     AddManagedProp(m_previewRegionActor);
     AddManagedProp(m_outlineActor);
@@ -95,7 +95,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetSliceAxis(int axis)
 {
     // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D 线框参照逻辑。
     m_sliceAxis = axis;
-    UpdateVisiblePreviewProps();
+    SetVisibleProps();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode removalMode)
@@ -108,7 +108,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetRemovalMode(CropRemovalMode remova
 
     // 颜色不再承载 KeepInside / RemoveInside 语义；
     // 记录模式只是为了保持 overlay 与后端请求的状态一致。
-    ApplyOverlayVisualStyle();
+    SetStyle();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::SetGeometryReferenceVisible(bool isVisible)
@@ -118,7 +118,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetGeometryReferenceVisible(bool isVi
     }
 
     m_allowGeometryReferenceVisible = isVisible;
-    UpdateVisiblePreviewProps();
+    SetVisibleProps();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropResult& result)
@@ -158,7 +158,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetCropResult(const OrthogonalCropRes
 
     // 可见性统一在最后收口；
     // 这样数据更新和窗口轴向切换都能复用同一套显示决策。
-    UpdateVisiblePreviewProps();
+    SetVisibleProps();
 }
 
 void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
@@ -174,7 +174,7 @@ void OrthogonalCropPreviewOverlayStrategy::ClearPreview()
 
 void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
-    if (HasFlag(flags, UpdateFlags::Transform)) {
+    if (GetFlagOn(flags, UpdateFlags::Transform)) {
         // 所有 3D prop 都跟随主模型矩阵，保持 overlay 与主内容严格对齐。
         SetPropTransform(m_previewRegionActor, params.modelMatrix);
         SetPropTransform(m_outlineActor, params.modelMatrix);
@@ -188,7 +188,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
         return;
     }
 
-    if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags, UpdateFlags::Transform)) {
+    if (GetFlagOn(flags, UpdateFlags::Cursor) || GetFlagOn(flags, UpdateFlags::Transform)) {
         double normal[3] = { 0.0, 0.0, 0.0 };
         if (m_sliceAxis >= 0 && m_sliceAxis < 3) {
             normal[m_sliceAxis] = 1.0;
@@ -206,7 +206,7 @@ void OrthogonalCropPreviewOverlayStrategy::SetVisualState(const RenderParams& pa
     }
 }
 
-void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
+void OrthogonalCropPreviewOverlayStrategy::SetVisibleProps()
 {
     // 3D reference 窗口才显示线框参照；其它 preview 窗口只表达裁切后的主模型或 2D mask。
     // 半透明实体盒固定隐藏，因为交互态颜色应该只由 widget selected property 表达。
@@ -215,7 +215,7 @@ void OrthogonalCropPreviewOverlayStrategy::UpdateVisiblePreviewProps()
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
 }
 
-void OrthogonalCropPreviewOverlayStrategy::ApplyOverlayVisualStyle()
+void OrthogonalCropPreviewOverlayStrategy::SetStyle()
 {
     // 裁切盒颜色只在 widget 选中/拖拽时变化；
     // overlay 使用固定中性色，避免用户把预览模式切换误读成模型或裁切盒状态被改写。

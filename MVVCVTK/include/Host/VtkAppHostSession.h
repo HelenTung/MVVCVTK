@@ -45,25 +45,27 @@ public:
     void Start();
 
     // 显式体数据加载命令入口；session 只构造 request，不直接调用底层 service。
-    bool RequestVolumeLoad(
+    bool LoadVolume(
         const InitialVolumeLoadConfig& request,
         std::function<void(bool success)> onComplete = nullptr);
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。
-    bool ActivateOrthogonalCrop(const HostOrthogonalCropActivationRequest& request);
-    bool ToggleOrthogonalCropBox(const HostOrthogonalCropActivationRequest& request);
-    bool ToggleOrthogonalCropPlane(const HostOrthogonalCropActivationRequest& request);
-    bool ToggleOrthogonalCropPreview(
+    bool StartCrop(const HostOrthogonalCropActivationRequest& request);
+    bool SwitchCropBox(const HostOrthogonalCropActivationRequest& request);
+    bool SwitchCropPlane(const HostOrthogonalCropActivationRequest& request);
+    bool SwitchCropView(
         const HostOrthogonalCropActivationRequest& request,
         HostCropPreviewMode previewMode);
-    bool ApplyOrthogonalCropSubmit(const HostOrthogonalCropActivationRequest& request);
-    bool ExitOrthogonalCrop();
-    bool ActivateGapAnalysisDisplay(const HostGapAnalysisActivationRequest& request);
-    bool ToggleGapAnalysisOverlayVisibility();
-    bool ExitGapAnalysisDisplay();
+    bool SendCrop(const HostOrthogonalCropActivationRequest& request);
+    bool ExitCrop();
+    bool StartGapView(const HostGapAnalysisActivationRequest& request);
+    bool SwitchGapLayer();
+    bool ExitGapView();
+    // 运行期视图配置命令入口；session 只记录请求并统一交给 router 分发。
+    bool SetViewConfig(const HostViewConfig& config);
     // 显式导出命令入口；session 只转交上位机配置，不解析具体导出 service。
-    bool RequestDataExport(
+    bool ExportData(
         const HostDataExportConfig& dataExportConfig,
         std::function<void(bool success)> onComplete = nullptr);
 

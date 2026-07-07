@@ -105,8 +105,8 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     if (!m_volume || !m_volume->GetProperty()) return;
 
     auto prop = m_volume->GetProperty();
-    const bool isTfChanged = HasFlag(flags, UpdateFlags::TF);
-    const bool isMaterialChanged = HasFlag(flags, UpdateFlags::Material);
+    const bool isTfChanged = GetFlagOn(flags, UpdateFlags::TF);
+    const bool isMaterialChanged = GetFlagOn(flags, UpdateFlags::Material);
 
     // 体渲染这里把 Interaction 与 TF 放在同一个状态收敛块里处理：
     // 1. 先推导“这一帧结束后”应该处于的交互态 nextIsInteracting
@@ -116,8 +116,8 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     // - 交互过程中 TF 高频变化仍然稳定落在 256 预览输入
     // - 静止期 TF 更新会继续落在 766 质量输入
     // - 同一帧里若同时出现 TF 与 Interaction，也只按最终状态收口一次
-    if ((isTfChanged || HasFlag(flags, UpdateFlags::Interaction)) && m_mapper) {
-        const bool nextIsInteracting = HasFlag(flags, UpdateFlags::Interaction)
+    if ((isTfChanged || GetFlagOn(flags, UpdateFlags::Interaction)) && m_mapper) {
+        const bool nextIsInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
         const bool interactionChanged = (m_isInteracting != nextIsInteracting);
@@ -135,7 +135,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     // TF 与 Material 分开处理的原因是：
     // TF 变更通常意味着整条颜色/透明度曲线要重建；
     // 单纯材质变化则尽量只更新光照或全局 opacity，避免重复构造整套传输函数。
-    if (HasFlag(flags, UpdateFlags::TF)) {
+    if (GetFlagOn(flags, UpdateFlags::TF)) {
         // 遵循数据类与状态类分离、前后处理分离的思想，离线组装 VTK 函数，避免高频 Modified 触发重新渲染
         auto newCtf = vtkSmartPointer<vtkColorTransferFunction>::New();
         auto newOtf = vtkSmartPointer<vtkPiecewiseFunction>::New();
@@ -182,12 +182,12 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     }
 
     // 响应变换矩阵
-    if (HasFlag(flags,UpdateFlags::Transform)) {
+    if (GetFlagOn(flags,UpdateFlags::Transform)) {
         Set3DPropsTransform(params.modelMatrix);
         AlignCamera(params.modelMatrix);
     }
 
-    if (HasFlag(flags, UpdateFlags::Visibility)) {
+    if (GetFlagOn(flags, UpdateFlags::Visibility)) {
         if (m_cubeAxes)
             m_cubeAxes->SetVisibility(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);

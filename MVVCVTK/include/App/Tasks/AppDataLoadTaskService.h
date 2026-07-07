@@ -11,7 +11,7 @@
 #include <string>
 
 // 加载链路需要先写 LoadState，再构造后台 I/O 任务，最后把回调延迟到主线程策略同步之后执行。
-// 这里不直接启动线程，是为了让 MedicalVizService 继续统一托管 future 和 detach 策略；
+// 这里不直接启动线程，是为了让 VizService 继续统一托管 future 和 detach 策略；
 // 这样加载细节可以拆出，同时主线程收口顺序仍只有一个编排入口。
 class AppDataLoadTaskService
 {

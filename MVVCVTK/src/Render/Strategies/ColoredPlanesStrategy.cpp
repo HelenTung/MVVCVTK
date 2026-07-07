@@ -163,12 +163,12 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
 
 void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
-    if (HasFlag(flags, UpdateFlags::Cursor) || HasFlag(flags,UpdateFlags::Transform)) {
+    if (GetFlagOn(flags, UpdateFlags::Cursor) || GetFlagOn(flags,UpdateFlags::Transform)) {
         // Cursor 与 Transform 任一变化，都需要重新把三张平面放到正确世界位置。
         SetAllPositions(params.cursor.data(), params.modelMatrix);
     }
 
-    if (HasFlag(flags, UpdateFlags::Visibility)) {
+    if (GetFlagOn(flags, UpdateFlags::Visibility)) {
         const int vis = (params.visibilityMask & VisFlags::Planes3D) ? 1 : 0;
         for (int i = 0; i < 3; i++) {
             if (m_planeActors[i]) m_planeActors[i]->SetVisibility(vis);

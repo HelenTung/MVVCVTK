@@ -27,7 +27,7 @@ Viewer3DHandler::Viewer3DHandler(AbstractInteractiveService* service,
 {
 }
 
-InteractionResult Viewer3DHandler::Handle(const InteractionEvent& eve)
+InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
 {
     if (!m_service) {
         return {};

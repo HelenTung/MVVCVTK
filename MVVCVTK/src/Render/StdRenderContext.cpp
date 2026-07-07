@@ -248,9 +248,9 @@ void StdRenderContext::Start()
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// ApplyCameraStyle
+// SetCameraStyle
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::ApplyCameraStyle(VizMode mode)
+void StdRenderContext::SetCameraStyle(VizMode mode)
 {
     m_currentMode = mode;
 
@@ -316,7 +316,7 @@ void StdRenderContext::SetToolMode(ToolMode mode)
         m_interactor->SetInteractorStyle(style);
     }
     else {
-        ApplyCameraStyle(m_currentMode);
+        SetCameraStyle(m_currentMode);
     }
 
     if (m_interactiveService) m_interactiveService->MarkDirty();
@@ -369,13 +369,13 @@ void StdRenderContext::BuildInteractionEvent(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// HandleVTKEvent —— 统一入口，委托给 Router
+// OnVTKEvent —— 统一入口，委托给 Router
 //
 // 这里只做三件事：
 //   1. ExitEvent / 守卫性检查
 //   2. 填充 InteractionEvent → Dispatch → 处理 abortVtk
 // ─────────────────────────────────────────────────────────────────────
-void StdRenderContext::HandleVTKEvent(vtkObject* caller,
+void StdRenderContext::OnVTKEvent(vtkObject* caller,
     long unsigned int eventId,
     void* callData)
 {

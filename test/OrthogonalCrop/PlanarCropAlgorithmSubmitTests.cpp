@@ -430,7 +430,7 @@ void VerifyBoundaryEquality(
         failureCount);
 }
 
-void RunSubmitCase(
+void StartSubmitCase(
     vtkSmartPointer<vtkImageData> image,
     const TestPlane& plane,
     const int boundaryIndex[3],
@@ -459,7 +459,7 @@ void RunSubmitCase(
     VerifyBoundaryEquality(result.GetMaskImage(), boundaryIndex, removalMode, failureCount);
 }
 
-void RunObliqueSubmitCases(int& failureCount)
+void StartObliqueCases(int& failureCount)
 {
     auto image = BuildObliqueImage();
     const int boundaryIndex[3] = { 3, 0, 3 };
@@ -470,18 +470,18 @@ void RunObliqueSubmitCases(int& failureCount)
         plane,
         CropRemovalMode::KeepInside,
         failureCount);
-    RunSubmitCase(image, plane, boundaryIndex, CropRemovalMode::KeepInside, failureCount);
-    RunSubmitCase(image, plane, boundaryIndex, CropRemovalMode::RemoveInside, failureCount);
+    StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::KeepInside, failureCount);
+    StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::RemoveInside, failureCount);
 }
 
-void RunDeepBoundarySubmitCases(int& failureCount)
+void StartDeepCases(int& failureCount)
 {
     auto image = BuildDeepRowBoundaryImage();
     const int boundaryIndex[3] = { 500, 0, 0 };
     const auto plane = BuildPlaneWithBoundaryIndex(image, boundaryIndex, { 1.0, 0.0, 0.0 });
 
-    RunSubmitCase(image, plane, boundaryIndex, CropRemovalMode::KeepInside, failureCount);
-    RunSubmitCase(image, plane, boundaryIndex, CropRemovalMode::RemoveInside, failureCount);
+    StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::KeepInside, failureCount);
+    StartSubmitCase(image, plane, boundaryIndex, CropRemovalMode::RemoveInside, failureCount);
 }
 
 double MeasureSubmitAverageMilliseconds(
@@ -522,7 +522,7 @@ double MeasureSubmitAverageMilliseconds(
     return totalMilliseconds / static_cast<double>(iterationCount);
 }
 
-void RunPerformanceBenchmark(int& failureCount)
+void StartBench(int& failureCount)
 {
     auto image = BuildPerformanceImage();
     const int boundaryIndex[3] = { 80, 80, 32 };
@@ -549,7 +549,7 @@ void RunPerformanceBenchmark(int& failureCount)
               << " removeInsideAvgMs=" << removeInsideMilliseconds << '\n';
 }
 
-void RunSliceExportDataCases(int& failureCount)
+void StartSliceExport(int& failureCount)
 {
     const auto identity = GetIdentityMatrixData();
     const std::array<double, 3> cursorWorld = { 0.0, 0.0, 0.0 };
@@ -621,7 +621,7 @@ void RunSliceExportDataCases(int& failureCount)
         failureCount);
 }
 
-void RunDataExportCases(int& failureCount)
+void StartDataExport(int& failureCount)
 {
     RawVolumeDataManager dataManager;
     auto image = BuildExportImage();
@@ -631,13 +631,22 @@ void RunDataExportCases(int& failureCount)
     std::filesystem::create_directories(outputRoot, createError);
     Expect(!createError, "data export test should create its temporary output directory.", failureCount);
 
+    const auto initialVersion = dataManager.GetDataVersion();
     Expect(
         dataManager.TakeImageSnapshot(image),
         "data export setup should accept a synthetic vtkImageData snapshot.",
         failureCount);
     Expect(
+        dataManager.GetDataVersion() == initialVersion,
+        "pending image snapshot should not change the current data version.",
+        failureCount);
+    Expect(
         dataManager.ConsumePendingImage(),
         "data export setup should promote the pending image into the current data manager image.",
+        failureCount);
+    Expect(
+        dataManager.GetDataVersion() == initialVersion + 1,
+        "consuming a pending image should advance the current data version.",
         failureCount);
 
     const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
@@ -688,11 +697,11 @@ void RunDataExportCases(int& failureCount)
 int main()
 {
     int failureCount = 0;
-    RunObliqueSubmitCases(failureCount);
-    RunDeepBoundarySubmitCases(failureCount);
-    RunPerformanceBenchmark(failureCount);
-    RunSliceExportDataCases(failureCount);
-    RunDataExportCases(failureCount);
+    StartObliqueCases(failureCount);
+    StartDeepCases(failureCount);
+    StartBench(failureCount);
+    StartSliceExport(failureCount);
+    StartDataExport(failureCount);
 
     if (failureCount != 0) {
         std::cerr << "PlanarCropAlgorithmSubmitTests failed: " << failureCount << '\n';

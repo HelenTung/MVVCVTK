@@ -79,19 +79,19 @@ private:
     static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
 
     // 检查并归一化平面法线。
-    static bool NormalizePlaneNormal(CropVectorDouble3Array& worldNormal);
+    static bool SetUnitNormal(CropVectorDouble3Array& worldNormal);
 
     // 把 VTK 事件类型统一映射为模块内部交互阶段。
     static CropInteractionPhase GetInteractionPhaseFromEvent(unsigned long eventId);
 
     // 懒加载绑定 widget observer，避免重复 AddObserver。
-    void EnsureObserversAdded();
+    void AttachObservers();
 
     // 将当前平面状态同步到 representation。
-    void ApplyCurrentPlaneToRepresentation();
+    void SetPlaneRep();
 
     // 处理一次 widget 事件并向上抛出平面回调。
-    void HandleWidgetEvent(unsigned long eventId);
+    void OnWidgetEvent(unsigned long eventId);
 
     // widget 当前所属 interactor。
     vtkRenderWindowInteractor* m_interactor = nullptr;
@@ -112,7 +112,7 @@ private:
     bool m_enabled = false;
 
     // observer 是否已经绑定过。
-    bool m_observersAdded = false;
+    bool m_hasObservers = false;
 
     // 当前完整模型 world bounds，只作为 reference 输入合法性和默认原点来源；
     // 平面可视尺寸由 bridge 下发的 halfExtents 决定，避免 widget 层重新发明一套尺寸策略。

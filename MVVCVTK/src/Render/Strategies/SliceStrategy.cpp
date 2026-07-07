@@ -265,7 +265,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
     // 3. Visibility 控制十字线显隐
 
     // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
-    if (HasFlag(flags, UpdateFlags::WindowLevel) || HasFlag(flags, UpdateFlags::Material))
+    if (GetFlagOn(flags, UpdateFlags::WindowLevel) || GetFlagOn(flags, UpdateFlags::Material))
     {
         if (m_slice && m_slice->GetProperty())
         {
@@ -278,7 +278,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         }
     }
 
-	if (HasFlag(flags, UpdateFlags::Transform) || HasFlag(flags, UpdateFlags::Cursor))
+	if (GetFlagOn(flags, UpdateFlags::Transform) || GetFlagOn(flags, UpdateFlags::Cursor))
     {
         auto resliceMapper = vtkImageResliceMapper::SafeDownCast(m_mapper);
         if (!resliceMapper || !resliceMapper->GetInput()) return;
@@ -289,7 +289,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         double worldBounds[6] = { 0.0 };
         SetWorldBounds(bounds, params.modelMatrix, worldBounds);
 
-        if (HasFlag(flags, UpdateFlags::Transform)) {
+        if (GetFlagOn(flags, UpdateFlags::Transform)) {
             auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
             modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
             if (m_slice)      m_slice->SetUserMatrix(modelToWorldMatrix);
@@ -316,12 +316,12 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
             std::min({ spacing[0], spacing[1], spacing[2] });
         SetCrosshair(params.cursor.data(), worldBounds, safeOffset);
 
-        if (HasFlag(flags, UpdateFlags::Transform)) {
+        if (GetFlagOn(flags, UpdateFlags::Transform)) {
             AlignCamera(params.modelMatrix, bounds);
         }
     }
 
-    if (HasFlag(flags, UpdateFlags::Visibility)) {
+    if (GetFlagOn(flags, UpdateFlags::Visibility)) {
         const int vis = (params.visibilityMask & VisFlags::Crosshair) ? 1 : 0;
         if (m_vLineActor) m_vLineActor->SetVisibility(vis);
         if (m_hLineActor) m_hLineActor->SetVisibility(vis);

@@ -23,7 +23,7 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
             continue;
         }
 
-        const InteractionResult result = handler->Handle(eve);
+        const InteractionResult result = handler->Send(eve);
 
         // abortVtk 做 OR 聚合：任一 Handler 要求中止即中止
         if (result.abortVtk) {

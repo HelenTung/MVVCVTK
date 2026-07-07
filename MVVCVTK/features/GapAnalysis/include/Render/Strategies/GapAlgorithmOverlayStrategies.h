@@ -43,7 +43,7 @@ public:
 
     void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
         // 自动跟随主视图的模型变换（鼠标拖拽旋转平移）
-        if (HasFlag(flags, UpdateFlags::Transform)) {
+        if (GetFlagOn(flags, UpdateFlags::Transform)) {
             Set3DPropsTransform(params.modelMatrix);
         }
     }
@@ -102,7 +102,7 @@ public:
 
     void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
         // 自动跟随主视图的切片滚动和模型变换
-        if (HasFlag(flags, UpdateFlags::Transform) || HasFlag(flags, UpdateFlags::Cursor)) {
+        if (GetFlagOn(flags, UpdateFlags::Transform) || GetFlagOn(flags, UpdateFlags::Cursor)) {
             auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
             modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
             m_slice->SetUserMatrix(modelToWorldMatrix);

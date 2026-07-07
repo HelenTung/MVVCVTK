@@ -15,10 +15,10 @@ public:
 
 class AppStateSyncStrategy {
 public:
-    void HandleFlags(UpdateFlags flags, IAppStateSyncTarget& target) const {
+    void SendFlags(UpdateFlags flags, IAppStateSyncTarget& target) const {
         // DataReady 代表底层数据对象已经替换，旧 Strategy 持有的输入与派生缓存都可能失效，
         // 所以这里走“清缓存 -> 居中光标 -> 全量标志 -> 请求重建”的重路径，而不是普通增量刷新。
-        if (HasFlag(flags, UpdateFlags::DataReady)) {
+        if (GetFlagOn(flags, UpdateFlags::DataReady)) {
             target.RequestStrategyCacheClear();
             target.CenterCursor();
             target.MergePendingFlags(UpdateFlags::All);
@@ -28,7 +28,7 @@ public:
 
         // Spacing 改变会影响切片、坐标换算和体绘制采样，语义上等价于渲染管线基础输入发生变化，
         // 因此同样强制走一次全量重建，避免局部同步留下旧几何或旧采样参数。
-        if (HasFlag(flags, UpdateFlags::Spacing)) {
+        if (GetFlagOn(flags, UpdateFlags::Spacing)) {
             target.RequestStrategyCacheClear();
             target.MergePendingFlags(UpdateFlags::All);
             target.RequestDataRefresh();
@@ -36,7 +36,7 @@ public:
         }
 
         // 失败链路只负责收敛到主线程清理现场，不再继续叠加普通增量标志。
-        if (HasFlag(flags, UpdateFlags::LoadFailed)) {
+        if (GetFlagOn(flags, UpdateFlags::LoadFailed)) {
             target.RequestLoadFailed();
             return;
         }

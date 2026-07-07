@@ -19,7 +19,7 @@ private:
     VizMode  m_currentMode = VizMode::Volume; // 当前视图模式，决定相机风格与事件路由目标
     ToolMode m_toolMode = ToolMode::Navigation; // 当前工具模式，决定事件是否进入模型变换专用路径
 
-    // ── 路由器（替代原来 HandleVTKEvent 里的手写 if-else） ──────────
+    // ── 路由器（替代原来 OnVTKEvent 里的手写 if-else） ──────────
     InteractionRouter m_interactionRouter; // 把 Timer / 2D / 3D 交互处理器组织成统一派发链
     std::vector<unsigned long> m_observerTags; // 当前 interactor 上由本 context 注册的业务 observer
     unsigned long m_timerObserverTag = 0; // 当前 TimerEvent observer tag，替换 interactor 时精确移除
@@ -47,7 +47,7 @@ public:
     StdRenderContext();
     ~StdRenderContext() override;
     void Start() override;
-    void ApplyCameraStyle(VizMode mode) override;
+    void SetCameraStyle(VizMode mode) override;
     void SetServiceBound(std::shared_ptr<AbstractAppService> service) override;
     // 只替换 VTK render window，不引入 Qt 类型；Qt 生命周期由宿主层负责。
     void SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWindow) override;
@@ -60,7 +60,7 @@ public:
     void ClearTimerHandler();
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }
 protected:
-    void HandleVTKEvent(vtkObject* caller,
+    void OnVTKEvent(vtkObject* caller,
         long unsigned int eventId,
         void* callData) override;
 };

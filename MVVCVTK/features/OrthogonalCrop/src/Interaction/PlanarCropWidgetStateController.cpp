@@ -7,6 +7,7 @@
 #include "Interaction/PlanarCropWidgetStateController.h"
 
 #include <vtkMath.h>
+#include <vtkObjectFactory.h>
 #include <vtkProperty.h>
 
 #include <algorithm>
@@ -14,10 +15,7 @@
 
 static constexpr double kPlaneWidgetNormalEpsilon = 1e-8;
 
-PlanarCropWidgetStateCallback* PlanarCropWidgetStateCallback::New()
-{
-    return new PlanarCropWidgetStateCallback();
-}
+vtkStandardNewMacro(PlanarCropWidgetStateCallback);
 
 void PlanarCropWidgetStateCallback::SetOwner(PlanarCropWidgetStateController* owner)
 {
@@ -29,7 +27,7 @@ void PlanarCropWidgetStateCallback::Execute(vtkObject* caller, unsigned long eve
     (void)caller;
     (void)callData;
     if (m_owner) {
-        m_owner->HandleWidgetEvent(eventId);
+        m_owner->OnWidgetEvent(eventId);
     }
 }
 
@@ -76,7 +74,7 @@ void PlanarCropWidgetStateController::SetReferenceWorldBounds(const std::array<d
         (worldBounds[2] + worldBounds[3]) * 0.5,
         (worldBounds[4] + worldBounds[5]) * 0.5
     };
-    ApplyCurrentPlaneToRepresentation();
+    SetPlaneRep();
 }
 
 void PlanarCropWidgetStateController::SetWidgetWorldPlane(
@@ -85,7 +83,7 @@ void PlanarCropWidgetStateController::SetWidgetWorldPlane(
     const std::array<double, 2>& worldHalfExtents)
 {
     auto normalizedNormal = worldNormal;
-    if (!NormalizePlaneNormal(normalizedNormal)) {
+    if (!SetUnitNormal(normalizedNormal)) {
         return;
     }
 
@@ -95,7 +93,7 @@ void PlanarCropWidgetStateController::SetWidgetWorldPlane(
         std::max(worldHalfExtents[0], kPlaneWidgetNormalEpsilon),
         std::max(worldHalfExtents[1], kPlaneWidgetNormalEpsilon)
     };
-    ApplyCurrentPlaneToRepresentation();
+    SetPlaneRep();
 }
 
 bool PlanarCropWidgetStateController::GetCurrentWorldPlane(
@@ -118,14 +116,14 @@ bool PlanarCropWidgetStateController::SetEnabled(bool enabled)
         return false;
     }
 
-    EnsureObserversAdded();
+    AttachObservers();
 
     if (enabled) {
         if (!GetBoundsAreValid(m_referenceWorldBounds)) {
             return false;
         }
 
-        ApplyCurrentPlaneToRepresentation();
+        SetPlaneRep();
         m_widget->On();
     }
     else {
@@ -148,7 +146,7 @@ bool PlanarCropWidgetStateController::GetBoundsAreValid(const std::array<double,
         && bounds[4] < bounds[5];
 }
 
-bool PlanarCropWidgetStateController::NormalizePlaneNormal(CropVectorDouble3Array& worldNormal)
+bool PlanarCropWidgetStateController::SetUnitNormal(CropVectorDouble3Array& worldNormal)
 {
     const double length = vtkMath::Norm(worldNormal.data());
     if (length <= kPlaneWidgetNormalEpsilon) {
@@ -175,19 +173,19 @@ CropInteractionPhase PlanarCropWidgetStateController::GetInteractionPhaseFromEve
     }
 }
 
-void PlanarCropWidgetStateController::EnsureObserversAdded()
+void PlanarCropWidgetStateController::AttachObservers()
 {
-    if (m_observersAdded) {
+    if (m_hasObservers) {
         return;
     }
 
     m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand);
     m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand);
-    m_observersAdded = true;
+    m_hasObservers = true;
 }
 
-void PlanarCropWidgetStateController::ApplyCurrentPlaneToRepresentation()
+void PlanarCropWidgetStateController::SetPlaneRep()
 {
     if (!m_representation || !GetBoundsAreValid(m_referenceWorldBounds)) {
         return;
@@ -211,7 +209,7 @@ void PlanarCropWidgetStateController::ApplyCurrentPlaneToRepresentation()
     m_representation->SetNormal(m_currentWorldNormal.data());
 }
 
-void PlanarCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
+void PlanarCropWidgetStateController::OnWidgetEvent(unsigned long eventId)
 {
     if (!m_representation) {
         return;
@@ -224,7 +222,7 @@ void PlanarCropWidgetStateController::HandleWidgetEvent(unsigned long eventId)
 
     CropVectorDouble3Array worldOrigin = { rawOrigin[0], rawOrigin[1], rawOrigin[2] };
     CropVectorDouble3Array worldNormal = { rawNormal[0], rawNormal[1], rawNormal[2] };
-    if (!NormalizePlaneNormal(worldNormal)) {
+    if (!SetUnitNormal(worldNormal)) {
         return;
     }
 

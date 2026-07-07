@@ -34,15 +34,15 @@ public:
     // 这样 GapAnalysis 可以随插随拔：宿主只负责在合适时机交付 VTK 图像，后台任务只消费复制后的快照。
     bool SetInputImage(vtkSmartPointer<vtkImageData> image) override;
 
-    void SetSurfaceParams(const SurfaceParams& p) override;
-    void SetAdvancedParams(const AdvancedSurfaceParams& p) override;
-    void SetVoidParams(const VoidDetectionParams& p) override;
+    void SetSurface(const SurfaceParams& p) override;
+    void SetAdvanced(const AdvancedSurfaceParams& p) override;
+    void SetVoid(const VoidDetectionParams& p) override;
 
-    void RunAsync(std::function<void(bool success)> onComplete = nullptr) override;
-    void CancelRun() override;
+    void StartAsync(std::function<void(bool success)> onComplete = nullptr) override;
+    void StopAsync() override;
 
-    bool ConsumePendingCompletionCallback() override;
-    void ExecutePendingCompletionCallback() override;
+    bool GetDoneEvent() override;
+    void SendCallback() override;
 
     GapAnalysisState GetAnalysisState() const override;
     std::vector<VoidRegion> GetVoidRegions() const override;
@@ -51,16 +51,16 @@ public:
     vtkSmartPointer<vtkImageData> BuildLabelImage() const override;
 
     // GapAnalysis 显示模式由 feature 持有状态；host 只注入已降级的 overlay 目标和主线程 tick。
-    bool ActivateDisplay(
+    bool StartView(
         const GapAnalysisSurfaceRequest& surfaceRequest,
         const VoidDetectionParams& voidParams,
         const std::vector<std::shared_ptr<AbstractAppService>>& meshOverlayTargets,
         const std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>>& sliceOverlayTargets,
         std::function<void(double isoValue)> onIsoValueResolved = nullptr);
-    bool ToggleOverlayVisibility();
-    bool ExitDisplay();
-    bool GetDisplayActive() const;
-    void ProcessDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+    bool SwitchOverlay();
+    bool ExitView();
+    bool GetViewOn() const;
+    void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
     using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
@@ -79,18 +79,18 @@ private:
     VolumeBufferSnapshot GetInputSnapshot() const;
     ParameterSnapshot GetParameterSnapshot() const;
 
-    void RunAnalysisWorker(
+    void StartWorker(
         VolumeBufferSnapshot inputSnapshot,
         ParameterSnapshot params);
-    void WaitForWorkerThread();
+    void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
-    bool TryStartDisplayAnalysis(vtkSmartPointer<vtkImageData> inputImage);
-    void CommitDisplayOverlays();
-    bool HideDisplayOverlays();
-    bool ShowStoredDisplayResult();
+    bool StartTask(vtkSmartPointer<vtkImageData> inputImage);
+    void SetDisplayView();
+    bool SetOverlayOff();
+    bool SetStoredView();
     void ClearDisplayState();
-    double ResolveDisplayIsoValue(const VolumeBuffer& inputSnapshot) const;
+    double GetDisplayIso(const VolumeBuffer& inputSnapshot) const;
 
     static bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> image,

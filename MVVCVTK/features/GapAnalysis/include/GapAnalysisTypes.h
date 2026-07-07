@@ -121,24 +121,24 @@ public:
     virtual bool SetInputImage(vtkSmartPointer<vtkImageData> image) = 0;
 
     // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
-    virtual void SetSurfaceParams(const SurfaceParams& p) = 0;
-    virtual void SetAdvancedParams(const AdvancedSurfaceParams& p) = 0;
-    virtual void SetVoidParams(const VoidDetectionParams& p) = 0;
+    virtual void SetSurface(const SurfaceParams& p) = 0;
+    virtual void SetAdvanced(const AdvancedSurfaceParams& p) = 0;
+    virtual void SetVoid(const VoidDetectionParams& p) = 0;
 
     // ── 触发：主动发起后台计算 ────────────────────────────────────────
     // onComplete 不在后台线程直接执行；后台线程只投递完成状态，调用方应在主线程轮询消费。
-    virtual void RunAsync(
+    virtual void StartAsync(
         std::function<void(bool success)> onComplete = nullptr) = 0;
 
     // ── 主线程回调消费：后台只投递完成信号，宿主在主线程轮询点执行回调
-    virtual bool ConsumePendingCompletionCallback() = 0;
-    virtual void ExecutePendingCompletionCallback() = 0;
+    virtual bool GetDoneEvent() = 0;
+    virtual void SendCallback() = 0;
 
     // ── 查询：主线程轮询（对齐 GetLoadState 风格）────────────────────
     virtual GapAnalysisState GetAnalysisState() const = 0;
 
     // ── 取消（尽力，对齐 CancelLoad 语义）────────────────────────────
-    virtual void CancelRun() {}
+    virtual void StopAsync() {}
 
     // ── 后处理：主线程消费结果（对齐 PostData_RebuildPipeline 调用点）
     // 返回空洞区域列表（供 UI 展示）

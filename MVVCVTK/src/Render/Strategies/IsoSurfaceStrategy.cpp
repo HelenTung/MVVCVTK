@@ -148,7 +148,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // 3. Transform / Visibility 控制空间摆放与辅助元素显隐
 
     // 响应 UpdateFlags::Material
-    if (HasFlag(flags, UpdateFlags::Material)) {
+    if (GetFlagOn(flags, UpdateFlags::Material)) {
 
         // 设置光照参数
         prop->SetAmbient(params.material.ambient);
@@ -172,11 +172,11 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // - 拖动期间只更新 256 预览等值面
     // - 松手后切回 766 质量等值面
     // - 同一帧同时带有 Interaction 和 IsoValue 时，统一按最终状态收口
-    if (HasFlag(flags, UpdateFlags::Interaction) || HasFlag(flags, UpdateFlags::IsoValue)) {
-        const bool nextIsInteracting = HasFlag(flags, UpdateFlags::Interaction)
+    if (GetFlagOn(flags, UpdateFlags::Interaction) || GetFlagOn(flags, UpdateFlags::IsoValue)) {
+        const bool nextIsInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
-        const double nextIsoValue = HasFlag(flags, UpdateFlags::IsoValue)
+        const double nextIsoValue = GetFlagOn(flags, UpdateFlags::IsoValue)
             ? params.isoValue
             : m_currentIsoValue;
         const bool interactionChanged = (m_isInteracting != nextIsInteracting);
@@ -202,12 +202,12 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     }
 
     // 响应 UpdateFlags::Transform
-    if (HasFlag(flags, UpdateFlags::Transform)) {
+    if (GetFlagOn(flags, UpdateFlags::Transform)) {
         Set3DPropsTransform(params.modelMatrix);
         AlignCamera(params.modelMatrix);
     }
 
-    if (HasFlag(flags, UpdateFlags::Visibility)) {
+    if (GetFlagOn(flags, UpdateFlags::Visibility)) {
         if (m_cubeAxes)
             m_cubeAxes->SetVisibility(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);

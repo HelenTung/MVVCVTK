@@ -51,10 +51,10 @@ public:
 
 private:
     // 根据当前是否有 outline / mask 和窗口轴向决定显示哪些 prop。
-    void UpdateVisiblePreviewProps();
+    void SetVisibleProps();
 
     // 更新 overlay 固定样式；交互选中高亮由 widget 自己负责。
-    void ApplyOverlayVisualStyle();
+    void SetStyle();
 
     // 把主模型矩阵同步到 overlay prop。
     static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData);

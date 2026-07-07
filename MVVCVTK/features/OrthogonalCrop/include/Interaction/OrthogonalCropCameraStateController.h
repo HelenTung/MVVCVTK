@@ -6,10 +6,10 @@ class vtkRenderer;
 
 class OrthogonalCropCameraStateController {
 public:
-    void Save(vtkRenderer* renderer);   
-    void Restore(vtkRenderer* renderer);
+    void SetCameraState(vtkRenderer* renderer);
+    void ResetCamera(vtkRenderer* renderer);
     void Clear();
-    bool HasSaved() const;
+    bool GetSaved() const;
 
 private:
     CameraStateSnapshot m_cameraState;

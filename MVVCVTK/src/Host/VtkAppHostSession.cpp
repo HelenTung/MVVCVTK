@@ -94,6 +94,15 @@ struct VtkAppHostSession::Impl {
         , featureBindings(std::make_shared<HostFeatureBindings>())
     {
     }
+
+    bool Send(HostCommandRouterRequest request)
+    {
+        if (!commandRouter) {
+            std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
+            return false;
+        }
+        return commandRouter->DispatchCommand(std::move(request));
+    }
 };
 
 VtkAppHostSession::VtkAppHostSession(Config config)
@@ -129,7 +138,7 @@ void VtkAppHostSession::Initialize()
         HostCommandRouterRequest initialLoadRequest;
         initialLoadRequest.command = HostCommandKind::Load;
         initialLoadRequest.initialVolume = m_impl->config.initialVolume;
-        m_impl->commandRouter->DispatchHostCommand(std::move(initialLoadRequest));
+        m_impl->Send(std::move(initialLoadRequest));
     }
 
     m_impl->renderViews.RenderAll();
@@ -143,8 +152,8 @@ void VtkAppHostSession::Initialize()
     attachHotkeysRequest.dataExportConfig = m_impl->config.dataExport;
     attachHotkeysRequest.commandInput = m_impl->config.commandInput;
     attachHotkeysRequest.hotkeys = m_impl->config.hotkeys;
-    m_impl->commandRouter->DispatchHostCommand(std::move(attachHotkeysRequest));
-    m_impl->featureBindings->AttachHostTimerEventPump(m_impl->config.timerEventPump);
+    m_impl->Send(std::move(attachHotkeysRequest));
+    m_impl->featureBindings->AttachHostTimer(m_impl->config.timerEventPump);
     PrintStartupStatus(m_impl->config);
 
     m_impl->isInitialized = true;
@@ -161,7 +170,7 @@ void VtkAppHostSession::Start()
     }
 }
 
-bool VtkAppHostSession::RequestVolumeLoad(
+bool VtkAppHostSession::LoadVolume(
     const InitialVolumeLoadConfig& request,
     std::function<void(bool success)> onComplete)
 {
@@ -170,40 +179,40 @@ bool VtkAppHostSession::RequestVolumeLoad(
     routerRequest.command = HostCommandKind::Load;
     routerRequest.initialVolume = request;
     routerRequest.loadComplete = std::move(onComplete);
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ActivateOrthogonalCrop(
+bool VtkAppHostSession::StartCrop(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropStart;
     routerRequest.orthogonalCropRequest = request;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ToggleOrthogonalCropBox(
+bool VtkAppHostSession::SwitchCropBox(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropBox;
     routerRequest.orthogonalCropRequest = request;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ToggleOrthogonalCropPlane(
+bool VtkAppHostSession::SwitchCropPlane(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropPlane;
     routerRequest.orthogonalCropRequest = request;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ToggleOrthogonalCropPreview(
+bool VtkAppHostSession::SwitchCropView(
     const HostOrthogonalCropActivationRequest& request,
     HostCropPreviewMode previewMode)
 {
@@ -212,54 +221,63 @@ bool VtkAppHostSession::ToggleOrthogonalCropPreview(
     routerRequest.command = HostCommandKind::CropPreview;
     routerRequest.orthogonalCropRequest = request;
     routerRequest.cropPreviewMode = previewMode;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ApplyOrthogonalCropSubmit(
+bool VtkAppHostSession::SendCrop(
     const HostOrthogonalCropActivationRequest& request)
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropApply;
     routerRequest.orthogonalCropRequest = request;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ExitOrthogonalCrop()
+bool VtkAppHostSession::ExitCrop()
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::CropExit;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ActivateGapAnalysisDisplay(
+bool VtkAppHostSession::StartGapView(
     const HostGapAnalysisActivationRequest& request)
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapStart;
     routerRequest.gapAnalysisRequest = request;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ToggleGapAnalysisOverlayVisibility()
+bool VtkAppHostSession::SwitchGapLayer()
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapOverlay;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::ExitGapAnalysisDisplay()
+bool VtkAppHostSession::ExitGapView()
 {
     Initialize();
     HostCommandRouterRequest routerRequest;
     routerRequest.command = HostCommandKind::GapExit;
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
-bool VtkAppHostSession::RequestDataExport(
+bool VtkAppHostSession::SetViewConfig(const HostViewConfig& config)
+{
+    Initialize();
+    HostCommandRouterRequest routerRequest;
+    routerRequest.command = HostCommandKind::ViewConfig;
+    routerRequest.viewConfig = config;
+    return m_impl->Send(std::move(routerRequest));
+}
+
+bool VtkAppHostSession::ExportData(
     const HostDataExportConfig& dataExportConfig,
     std::function<void(bool success)> onComplete)
 {
@@ -268,7 +286,7 @@ bool VtkAppHostSession::RequestDataExport(
     routerRequest.command = HostCommandKind::Export;
     routerRequest.dataExportConfig = dataExportConfig;
     routerRequest.dataExportComplete = std::move(onComplete);
-    return m_impl->commandRouter->DispatchHostCommand(std::move(routerRequest));
+    return m_impl->Send(std::move(routerRequest));
 }
 
 const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()

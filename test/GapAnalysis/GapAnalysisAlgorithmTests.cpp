@@ -199,18 +199,18 @@ void VerifyLabelImage(vtkImageData* labelImage, int& failureCount)
     Expect(labeledVoxelCount == 27, "gap analysis label image should contain 27 labeled voxels.", failureCount);
 }
 
-void RunPureAlgorithmCase(int& failureCount)
+void StartAlgoCase(int& failureCount)
 {
     // 纯算法路径不经过 service 或线程，先确认 VoidDetector 的数学结果稳定。
     const auto volume = BuildSyntheticVolumeBuffer();
     const auto interior = VoidDetector::CreateInteriorMask(volume, 0.5f);
     Expect(CountMaskValues(interior) == 27, "interior mask should contain only the enclosed void.", failureCount);
 
-    auto candidates = VoidDetector::ExtractCandidates(volume, interior, BuildVoidDetectionParams());
+    auto candidates = VoidDetector::BuildCandidates(volume, interior, BuildVoidDetectionParams());
     Expect(CountMaskValues(candidates) == 27, "candidate mask should preserve the enclosed void.", failureCount);
 
     std::vector<int> labels;
-    const auto regions = VoidDetector::LabelAndAnalyze(
+    const auto regions = VoidDetector::BuildRegions(
         volume,
         candidates,
         BuildVoidDetectionParams(),
@@ -240,8 +240,8 @@ bool ConsumeCompletionCallback(GapAnalysisService& service)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
     while (std::chrono::steady_clock::now() < deadline) {
-        if (service.ConsumePendingCompletionCallback()) {
-            service.ExecutePendingCompletionCallback();
+        if (service.GetDoneEvent()) {
+            service.SendCallback();
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -249,7 +249,7 @@ bool ConsumeCompletionCallback(GapAnalysisService& service)
     return false;
 }
 
-void RunServiceSnapshotCase(int& failureCount)
+void StartSnapshotCase(int& failureCount)
 {
     // service 路径验证异步快照语义：SetInputImage 后后台任务必须读自己的副本，
     // 否则 UI 线程或 host 后续修改 VTK image 会改变正在运行的分析结果。
@@ -264,12 +264,12 @@ void RunServiceSnapshotCase(int& failureCount)
 
     SurfaceParams surfaceParams;
     surfaceParams.isoValue = 0.5f;
-    service.SetSurfaceParams(surfaceParams);
-    service.SetVoidParams(BuildVoidDetectionParams());
+    service.SetSurface(surfaceParams);
+    service.SetVoid(BuildVoidDetectionParams());
 
     std::atomic<bool> callbackCalled{ false };
     std::atomic<bool> callbackSuccess{ false };
-    service.RunAsync([&](bool success) {
+    service.StartAsync([&](bool success) {
         callbackCalled.store(true);
         callbackSuccess.store(success);
     });
@@ -301,8 +301,8 @@ void RunServiceSnapshotCase(int& failureCount)
 int main()
 {
     int failureCount = 0;
-    RunPureAlgorithmCase(failureCount);
-    RunServiceSnapshotCase(failureCount);
+    StartAlgoCase(failureCount);
+    StartSnapshotCase(failureCount);
 
     if (failureCount != 0) {
         std::cerr << "GapAnalysisAlgorithmTests failed: " << failureCount << '\n';
