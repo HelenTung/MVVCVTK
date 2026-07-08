@@ -78,7 +78,7 @@ public:
 private:
     // PIMPL 隐藏 HostCoreServices、HostRenderViewSet 等组装细节，减少上位机包含本头文件时的编译依赖。
     // 这里不是为了抽象 feature，而是为了让 public header 只暴露稳定 host 命令和 endpoint 类型。
-    struct Impl;
     // session 独占 Impl 生命周期；移动 session 时一起移动，避免 VTK observer 回调看到半拆状态。
+    class Impl;
     std::unique_ptr<Impl> m_impl;
 };

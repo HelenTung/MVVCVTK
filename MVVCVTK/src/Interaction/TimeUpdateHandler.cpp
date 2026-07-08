@@ -39,7 +39,7 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
             m_renderWindow->Render();
         }
         else {
-            m_service->MarkDirty();
+            m_service->SetDirty();
         }
     }
 

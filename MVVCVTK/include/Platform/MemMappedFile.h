@@ -5,13 +5,13 @@
 class MemMappedFile {
 public:
     MemMappedFile() = default;
-    ~MemMappedFile() { Close(); }
+    ~MemMappedFile() { Clear(); }
     MemMappedFile(const MemMappedFile&) = delete;
     MemMappedFile& operator=(const MemMappedFile&) = delete;
 
     /// @param length 0 = 映射整个文件
-    bool Open(const std::string& path, size_t length = 0);
-    void Close();
+    bool Load(const std::string& path, size_t length = 0);
+    void Clear();
 
     const void* GetData() const { return m_data; }
     size_t      GetSize() const { return m_size; }

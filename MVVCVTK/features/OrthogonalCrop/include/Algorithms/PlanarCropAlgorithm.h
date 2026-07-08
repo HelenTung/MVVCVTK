@@ -12,16 +12,30 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
+#include <array>
 #include <cstddef>
 
-class CropRouter;
+struct PlanarVoxelStep {
+    std::array<double, 3> planeIndex = { 0.0, 0.0, 0.0 };
+    double iStep = 0.0;
+    double jStep = 0.0;
+    double kStep = 0.0;
+    double boundaryEpsilon = 1e-8;
+};
+
+struct PlanarSubmitImages {
+    vtkSmartPointer<vtkImageData> submitImage;
+    vtkSmartPointer<vtkImageData> maskImage;
+};
+
+enum class PlanarRowSide {
+    NormalSide,
+    OppositeSide,
+    Mixed
+};
 
 class PlanarCropAlgorithm {
 public:
-private:
-    // router 是三元组分发边界；算法执行入口只给 router 调用，避免外部绕过路由组合。
-    friend class CropRouter;
-
     // image / volume 共用 image 输入入口；preview 只返回几何快照，submit 返回 image 与 mask。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,

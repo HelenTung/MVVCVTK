@@ -9,17 +9,26 @@
 // 默认 request 只是当前 active input 的几何模板，正式目标由 bridge 或调用方写回 request。
 // 图像 / 体渲染 / 网格的数据处理都由 OrthogonalCropAlgorithm 执行，router 只做输入选择和错误边界。
 
-#include "Algorithms/OrthogonalCropAlgorithm.h"
-#include "Algorithms/PlanarCropAlgorithm.h"
+#include "OrthogonalCropTypes.h"
 
-#include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
 #include <array>
-#include <cstddef>
+#include <memory>
+
+class vtkImageData;
+class vtkPolyData;
 
 class CropRouter {
 public:
+    CropRouter();
+    ~CropRouter();
+
+    CropRouter(const CropRouter&) = delete;
+    CropRouter& operator=(const CropRouter&) = delete;
+    CropRouter(CropRouter&&) noexcept;
+    CropRouter& operator=(CropRouter&&) noexcept;
+
     // 绑定 image 输入，供交互桥或 main 在数据加载后注入。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
 
@@ -52,33 +61,6 @@ public:
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
 private:
-    // Box 路由集中处理动作 + 数据源组合。
-    OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
-
-    // Plane 路由集中处理动作 + 数据源组合，实际执行交给 PlanarCropAlgorithm。
-    OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
-
-    // 读取 image model bounds。
-    std::array<double, 6> GetImageModelBounds() const;
-
-    // 读取 polyData input model bounds。
-    std::array<double, 6> GetPolyBounds() const;
-
-    // 在调用方结果上下文上回填 router 层失败结果，并保留请求三元组。
-    OrthogonalCropResult GetRouterFailureResult(
-        const OrthogonalCropRequest& request,
-        CropFailure failureReason,
-        const std::string& message) const;
-
-    // 查询系统当前可用物理内存，供 image submit 估算使用。
-    std::size_t GetRamBytes() const;
-
-    // image 输入由 router 统一持有，实际处理直接分发到算法层。
-    vtkSmartPointer<vtkImageData> m_inputImage;
-
-    // polydata 输入由调用方按本次请求绑定；router 不判断来源和生命周期。
-    vtkSmartPointer<vtkPolyData> m_inputPolyData;
-
-    // 外部偏好的数据源；若对应输入不存在，则会自动回退。
-    OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::ImageData;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

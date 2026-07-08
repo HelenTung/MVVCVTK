@@ -68,7 +68,7 @@ ColoredPlanesStrategy::ColoredPlanesStrategy() {
     m_planeSources[2]->SetNormal(0.0, 0.0, 1.0); // Z 轴法线（Top_down）
 
     for (int i = 0; i < 3; i++) {
-        AddManagedProp(m_planeActors[i]);
+        AttachProp(m_planeActors[i]);
     }
 }
 

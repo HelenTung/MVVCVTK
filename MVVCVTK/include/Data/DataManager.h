@@ -4,6 +4,8 @@
 #include <mutex>
 #include <array>
 #include <atomic>
+#include <memory>
+#include <string>
 
 struct ReconBuffer {
     std::vector<float>    data;                // 拷贝自重建输出的体素数据
@@ -17,7 +19,6 @@ struct ImageState {
     DataVersion version = 0;
 };
 
-
 class BaseDataManager : public AbstractDataManager
 {
 protected:
@@ -26,10 +27,14 @@ protected:
     std::array<double, 2> m_scalarRange = { 0.0, 0.0 };      // 缓存当前体数据标量范围，避免重复全量扫描
     std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // 缓存当前体数据 spacing，加载后优先复用
     DataVersion m_dataVersion = 0; // current vtkImageData 的版本戳，pending image 不推进
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
+
+    bool SetCurrentImage(vtkSmartPointer<vtkImageData> image);
+
 public:
-    BaseDataManager() {
-        m_vtkImage = vtkSmartPointer<vtkImageData>::New();
-    }
+    BaseDataManager();
+    ~BaseDataManager() override;
 
     vtkSmartPointer<vtkImageData> GetVtkImage() const override {
         std::lock_guard<std::mutex> lk(m_dataMutex);
@@ -68,15 +73,20 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
-    bool TakeImageSnapshot(vtkSmartPointer<vtkImageData> image);
+    bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
     bool GetPendingImage() override;
 };
 
 class TiffVolumeDataManager : public BaseDataManager {
 public:
-    TiffVolumeDataManager() = default;
+    TiffVolumeDataManager();
+    ~TiffVolumeDataManager() override;
     // 实现加载接口
     bool SetDataLoaded(const std::string& filePath,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

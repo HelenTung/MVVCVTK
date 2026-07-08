@@ -20,8 +20,6 @@
 #include <cstddef>
 #include <string>
 
-class CropRouter;
-
 class OrthogonalCropAlgorithm {
 public:
     // 校验 active input model bounds 与目标裁切 input model bounds 是否满足执行前提。
@@ -43,10 +41,6 @@ public:
 
     // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
     static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
-
-private:
-    // router 是三元组分发边界；算法执行入口只给 router 调用，避免外部绕过路由组合。
-    friend class CropRouter;
 
     // image / volume 共用 image 输入入口；算法只补 cropData、产物和诊断。
     static OrthogonalCropResult GetResult(

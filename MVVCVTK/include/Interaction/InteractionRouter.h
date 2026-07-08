@@ -22,8 +22,8 @@ enum class RouterDispatchMode
 // InteractionRouter — 将 InteractionEvent 分发给已注册的 Handler 列表
 //
 // 用法：
-//   router.Add(std::make_unique<TimeUpdateHandler>(...));
-//   router.Add(std::make_unique<Viewer2DHandler>(...));
+//   router.AttachHandler(std::make_unique<TimeUpdateHandler>(...));
+//   router.AttachHandler(std::make_unique<Viewer2DHandler>(...));
 //   ...
 //   InteractionResult r = router.Dispatch(eve, RouterDispatchMode::FirstMatch);
 //   if (r.hasVtkAbort) callback->SetAbortFlag(1);
@@ -31,8 +31,8 @@ enum class RouterDispatchMode
 class InteractionRouter
 {
 public:
-    // 追加一个 Handler（按添加顺序分发，先添加的优先级高）
-    void AddHandler(std::unique_ptr<IInteractionHandler> handler);
+    // 挂接一个 Handler（按挂接顺序分发，先挂接的优先级高）
+    void AttachHandler(std::unique_ptr<IInteractionHandler> handler);
 
     // 清空所有 Handler（通常在重新 BuildRouter 时调用）
     void ClearHandlers();

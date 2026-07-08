@@ -150,9 +150,9 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
         m_hLineActor->GetProperty()->SetOpacity(0.4);
     }
 
-    AddManagedProp(m_slice);
-    AddManagedProp(m_vLineActor);
-    AddManagedProp(m_hLineActor);
+    AttachProp(m_slice);
+    AttachProp(m_vLineActor);
+    AttachProp(m_hLineActor);
 }
 
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {

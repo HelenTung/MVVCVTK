@@ -18,181 +18,141 @@
 #include <cstring>
 #include "MemMappedFile.h"
 
+class BaseDataManager::Impl final {
+public:
+    std::array<double, 3> GetRasOrigin(
+        const std::array<double, 3>& lpsOrigin,
+        const int dims[3],
+        const std::array<double, 3>& spacing) const
+    {
+        std::array<double, 3> rasOrigin = {
+            -lpsOrigin[0],
+            -lpsOrigin[1],
+            lpsOrigin[2]
+        };
 
-namespace {
-std::string GetOrientationName(const Orientation orientation)
-{
-    switch (orientation) {
-    case Orientation::Front_back:
-        return "Front_back";
-    case Orientation::Left_right:
-        return "Left_right";
-    case Orientation::Top_down:
-    default:
-        return "Top_down";
-    }
-}
+        if (dims[0] > 0) {
+            rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
+        }
+        if (dims[1] > 0) {
+            rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
+        }
 
-std::array<int, 2> GetSliceImageSize(const int dims[3], const Orientation orientation)
-{
-    switch (orientation) {
-    case Orientation::Front_back:
-        return { dims[0], dims[2] };
-    case Orientation::Left_right:
-        return { dims[1], dims[2] };
-    case Orientation::Top_down:
-    default:
-        return { dims[0], dims[1] };
-    }
-}
-
-bool GetExplicitValue(const std::array<float, 3>& values)
-{
-    return std::any_of(values.begin(), values.end(), [](const float value) {
-        return value != 0.0f;
-    });
-}
-
-std::array<double, 3> GetRasOriginFromLps(
-    const std::array<double, 3>& lpsOrigin,
-    const int dims[3],
-    const std::array<double, 3>& spacing)
-{
-    std::array<double, 3> rasOrigin = {
-        -lpsOrigin[0],
-        -lpsOrigin[1],
-        lpsOrigin[2]
-    };
-
-    if (dims[0] > 0) {
-        rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
-    }
-    if (dims[1] > 0) {
-        rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
+        return rasOrigin;
     }
 
-    return rasOrigin;
-}
+    bool SetRasScalars(
+        const float* src,
+        float* dst,
+        const int dims[3],
+        size_t availableCount) const
+    {
+        const size_t nx = dims[0] > 0 ? static_cast<size_t>(dims[0]) : 0;
+        const size_t ny = dims[1] > 0 ? static_cast<size_t>(dims[1]) : 0;
+        const size_t nz = dims[2] > 0 ? static_cast<size_t>(dims[2]) : 0;
+        const size_t sliceSize = nx * ny;
+        const size_t totalCount = sliceSize * nz;
 
-void SetLpsToRasScalarsCopied(
-    const float* src,
-    float* dst,
-    const int dims[3],
-    size_t availableCount)
-{
-    const size_t nx = dims[0] > 0 ? static_cast<size_t>(dims[0]) : 0;
-    const size_t ny = dims[1] > 0 ? static_cast<size_t>(dims[1]) : 0;
-    const size_t nz = dims[2] > 0 ? static_cast<size_t>(dims[2]) : 0;
-    const size_t sliceSize = nx * ny;
-    const size_t totalCount = sliceSize * nz;
+        if (!dst || totalCount == 0) {
+            return false;
+        }
 
-    if (!dst || totalCount == 0) {
-        return;
-    }
+        if (!src || availableCount == 0) {
+            std::fill(dst, dst + totalCount, 0.0f);
+            return true;
+        }
 
-    if (!src || availableCount == 0) {
-        std::fill(dst, dst + totalCount, 0.0f);
-        return;
-    }
-
-    if (availableCount == totalCount) {
-        for (size_t z = 0; z < nz; ++z) {
-            const size_t srcSliceOffset = z * sliceSize;
-            const size_t dstSliceOffset = z * sliceSize;
-            for (size_t y = 0; y < ny; ++y) {
-                const float* srcRow = src + srcSliceOffset + y * nx;
-                float* dstRow = dst + dstSliceOffset + (ny - 1 - y) * nx;
-                for (size_t x = 0; x < nx; ++x) {
-                    dstRow[nx - 1 - x] = srcRow[x];
+        if (availableCount == totalCount) {
+            for (size_t z = 0; z < nz; ++z) {
+                const size_t srcSliceOffset = z * sliceSize;
+                const size_t dstSliceOffset = z * sliceSize;
+                for (size_t y = 0; y < ny; ++y) {
+                    const float* srcRow = src + srcSliceOffset + y * nx;
+                    float* dstRow = dst + dstSliceOffset + (ny - 1 - y) * nx;
+                    for (size_t x = 0; x < nx; ++x) {
+                        dstRow[nx - 1 - x] = srcRow[x];
+                    }
                 }
             }
+            return true;
         }
-        return;
+
+        std::fill(dst, dst + totalCount, 0.0f);
+        for (size_t srcIndex = 0; srcIndex < availableCount; ++srcIndex) {
+            const size_t z = srcIndex / sliceSize;
+            const size_t rem = srcIndex % sliceSize;
+            const size_t y = rem / nx;
+            const size_t x = rem % nx;
+            const size_t dstIndex = z * sliceSize + (ny - 1 - y) * nx + (nx - 1 - x);
+            dst[dstIndex] = src[srcIndex];
+        }
+
+        return true;
     }
 
-    std::fill(dst, dst + totalCount, 0.0f);
-    for (size_t srcIndex = 0; srcIndex < availableCount; ++srcIndex) {
-        const size_t z = srcIndex / sliceSize;
-        const size_t rem = srcIndex % sliceSize;
-        const size_t y = rem / nx;
-        const size_t x = rem % nx;
-        const size_t dstIndex = z * sliceSize + (ny - 1 - y) * nx + (nx - 1 - x);
-        dst[dstIndex] = src[srcIndex];
-    }
-}
-
-void SetLpsToRasImageCopied(vtkImageData* source, vtkImageData* target)
-{
-    if (!source || !target) {
-        return;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    source->GetDimensions(dims);
-    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        return;
-    }
-
-    double spacingRaw[3] = { 1.0, 1.0, 1.0 };
-    double originRaw[3] = { 0.0, 0.0, 0.0 };
-    source->GetSpacing(spacingRaw);
-    source->GetOrigin(originRaw);
-
-    const std::array<double, 3> spacing = {
-        spacingRaw[0], spacingRaw[1], spacingRaw[2]
-    };
-    const std::array<double, 3> lpsOrigin = {
-        originRaw[0], originRaw[1], originRaw[2]
-    };
-    const std::array<double, 3> rasOrigin = GetRasOriginFromLps(lpsOrigin, dims, spacing);
-
-    target->SetDimensions(dims[0], dims[1], dims[2]);
-    target->SetSpacing(spacing[0], spacing[1], spacing[2]);
-    target->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
-    target->AllocateScalars(source->GetScalarType(), source->GetNumberOfScalarComponents());
-
-    const int componentCount = source->GetNumberOfScalarComponents();
-    const int scalarSize = source->GetScalarSize();
-    const size_t pixelBytes = static_cast<size_t>(componentCount) * static_cast<size_t>(scalarSize);
-    const size_t nx = static_cast<size_t>(dims[0]);
-    const size_t ny = static_cast<size_t>(dims[1]);
-    const size_t rowBytes = nx * pixelBytes;
-    const size_t sliceBytes = ny * rowBytes;
-
-    const char* srcBase = static_cast<const char*>(source->GetScalarPointer());
-    char* dstBase = static_cast<char*>(target->GetScalarPointer());
-    if (!srcBase || !dstBase) {
-        return;
-    }
-
-    for (size_t z = 0; z < static_cast<size_t>(dims[2]); ++z) {
-        const size_t srcSliceOffset = z * sliceBytes;
-        const size_t dstSliceOffset = z * sliceBytes;
-        for (size_t y = 0; y < ny; ++y) {
-            const char* srcRow = srcBase + srcSliceOffset + y * rowBytes;
-            char* dstRow = dstBase + dstSliceOffset + (ny - 1 - y) * rowBytes;
-            for (size_t x = 0; x < nx; ++x) {
-                std::memcpy(
-                    dstRow + (nx - 1 - x) * pixelBytes,
-                    srcRow + x * pixelBytes,
-                    pixelBytes);
-            }
+    std::string GetOrientName(Orientation value) const
+    {
+        switch (value) {
+        case Orientation::Front_back:
+            return "Front_back";
+        case Orientation::Left_right:
+            return "Left_right";
+        case Orientation::Top_down:
+        default:
+            return "Top_down";
         }
     }
 
-    target->Modified();
-}
+    std::array<int, 2> GetSliceSize(
+        const int sliceDims[3],
+        Orientation value) const
+    {
+        switch (value) {
+        case Orientation::Front_back:
+            return { sliceDims[0], sliceDims[2] };
+        case Orientation::Left_right:
+            return { sliceDims[1], sliceDims[2] };
+        case Orientation::Top_down:
+        default:
+            return { sliceDims[0], sliceDims[1] };
+        }
+    }
 
-unsigned char GetWindowLevelGray(const double value, const WindowLevelParams& windowLevel)
+    unsigned char GetWindowGray(
+        double value,
+        const WindowLevelParams& params) const
+    {
+        const double safeWindowWidth = std::max(params.windowWidth, 1e-6); // 当前导出使用的窗宽，避免除零
+        const double windowMin = params.windowCenter - safeWindowWidth * 0.5; // 当前灰度映射下限
+        const double normalized = (value - windowMin) / safeWindowWidth;
+        const double clamped = std::clamp(normalized, 0.0, 1.0);
+        return static_cast<unsigned char>(clamped * 255.0 + 0.5);
+    }
+};
+
+class TiffVolumeDataManager::Impl final {
+public:
+    vtkSmartPointer<vtkImageData> LoadImage(
+        const std::string& inputPath,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin);
+
+private:
+    bool GetExplicitValue(const std::array<float, 3>& values) const;
+    std::array<double, 3> GetRasOrigin(
+        const std::array<double, 3>& lpsOrigin,
+        const int dims[3],
+        const std::array<double, 3>& spacing) const;
+    bool SetLpsRasImage(vtkImageData* source, vtkImageData* target) const;
+};
+
+BaseDataManager::BaseDataManager()
+    : m_vtkImage(vtkSmartPointer<vtkImageData>::New()),
+      m_impl(std::make_unique<BaseDataManager::Impl>())
 {
-    const double safeWindowWidth = std::max(windowLevel.windowWidth, 1e-6); // 当前导出使用的窗宽，避免除零
-    const double windowMin = windowLevel.windowCenter - safeWindowWidth * 0.5; // 当前灰度映射下限
-    const double normalized = (value - windowMin) / safeWindowWidth;
-    const double clamped = std::clamp(normalized, 0.0, 1.0);
-    return static_cast<unsigned char>(clamped * 255.0 + 0.5);
 }
 
-}
+BaseDataManager::~BaseDataManager() = default;
 
 std::array<double, 2> BaseDataManager::GetScalarRange() const
 {
@@ -216,6 +176,28 @@ ImageState BaseDataManager::GetImageState() const
 {
     std::lock_guard<std::mutex> lock(m_dataMutex);
     return { m_vtkImage, m_dataVersion };
+}
+
+bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
+{
+    if (!image) {
+        return false;
+    }
+
+    double range[2] = { 0.0, 0.0 };
+    double imageSpacing[3] = { 1.0, 1.0, 1.0 };
+    image->GetScalarRange(range);
+    image->GetSpacing(imageSpacing);
+
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        m_vtkImage = std::move(image);
+        m_scalarRange = { range[0], range[1] };
+        m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
+        ++m_dataVersion;
+    }
+
+    return true;
 }
 
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
@@ -256,7 +238,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         static_cast<double>(origin[2])
     };
     m_spacing = lpsSpacing;
-    m_origin = GetRasOriginFromLps(lpsOrigin, newDims, m_spacing);
+    m_origin = m_impl->GetRasOrigin(lpsOrigin, newDims, m_spacing);
 
     // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
@@ -273,7 +255,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
-    if (mmf.Open(filePath)) {
+    if (mmf.Load(filePath)) {
         //   - 文件够大 → 只取前 expectedBytes
         //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
         size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
@@ -285,11 +267,13 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
                 << "). Partial load, remainder zeroed." << std::endl;
         }
 
-        SetLpsToRasScalarsCopied(
+        if (!m_impl->SetRasScalars(
             reinterpret_cast<const float*>(mmf.GetData()),
             dst,
             newDims,
-            copyCount);
+            copyCount)) {
+            return false;
+        }
         // mmf 析构时自动 close()
     }
     else {
@@ -305,7 +289,9 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
             static_cast<std::streamsize>(expectedBytes));
         const size_t readBytes = static_cast<size_t>(file.gcount());
         const size_t readCount = readBytes / sizeof(float);
-        SetLpsToRasScalarsCopied(srcBuffer.data(), dst, newDims, readCount);
+        if (!m_impl->SetRasScalars(srcBuffer.data(), dst, newDims, readCount)) {
+            return false;
+        }
         file.close();
     }
 
@@ -352,7 +338,7 @@ bool RawVolumeDataManager::SetFromBuffer(
         static_cast<double>(origin[1]),
         static_cast<double>(origin[2])
     };
-    const std::array<double, 3> rasOrigin = GetRasOriginFromLps(lpsOrigin, rasDims, rasSpacing);
+    const std::array<double, 3> rasOrigin = m_impl->GetRasOrigin(lpsOrigin, rasDims, rasSpacing);
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
     newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
@@ -363,7 +349,9 @@ bool RawVolumeDataManager::SetFromBuffer(
         static_cast<size_t>(dims[1]) *
         static_cast<size_t>(dims[2]);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-    SetLpsToRasScalarsCopied(data, dst, rasDims, total);  // 唯一一次拷贝，同时完成 LPS->RAS 轴翻转
+    if (!m_impl->SetRasScalars(data, dst, rasDims, total)) {
+        return false;
+    }
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
@@ -383,7 +371,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     return true;
 }
 
-bool RawVolumeDataManager::TakeImageSnapshot(vtkSmartPointer<vtkImageData> image)
+bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 {
     if (!image) {
         return false;
@@ -457,6 +445,7 @@ bool BaseDataManager::ExportSlices(
     const WindowLevelParams& windowLevel,
     const std::array<double, 16>& modelToWorldMatrix)
 {
+
     if (dirPath.empty()) {
         std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
         return false;
@@ -522,11 +511,11 @@ bool BaseDataManager::ExportSlices(
 
     const int sliceAxis = static_cast<int>(orientation); // 与 Orientation 枚举值保持一致
     const int sliceCount = dims[sliceAxis];
-    const std::array<int, 2> sliceSize = GetSliceImageSize(dims, orientation); // 当前导出图片宽高
+    const std::array<int, 2> sliceSize = m_impl->GetSliceSize(dims, orientation); // 当前导出图片宽高
     const int width = sliceSize[0];
     const int height = sliceSize[1];
     const int digits = std::max(4, static_cast<int>(std::to_string(std::max(sliceCount - 1, 0)).size()));
-    const std::string orientationName = GetOrientationName(orientation);
+    const std::string orientationName = m_impl->GetOrientName(orientation);
 
     for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
         auto sliceImage = vtkSmartPointer<vtkImageData>::New();
@@ -561,7 +550,7 @@ bool BaseDataManager::ExportSlices(
                     z = py;
                 }
                 const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
-                dst[py * width + px] = GetWindowLevelGray(value, windowLevel);
+                dst[py * width + px] = m_impl->GetWindowGray(value, windowLevel);
             }
         }
 
@@ -584,14 +573,35 @@ bool BaseDataManager::ExportSlices(
     return true;
 }
 
-bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
+TiffVolumeDataManager::TiffVolumeDataManager()
+    : m_impl(std::make_unique<TiffVolumeDataManager::Impl>())
+{
+}
+
+TiffVolumeDataManager::~TiffVolumeDataManager() = default;
+
+bool TiffVolumeDataManager::SetDataLoaded(
+    const std::string& inputPath,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin)
+{
+    if (!m_impl) {
+        return false;
+    }
+
+    auto image = m_impl->LoadImage(inputPath, spacing, origin);
+    return SetCurrentImage(std::move(image));
+}
+
+vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
+    const std::string& inputPath,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin) {
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
-        return false;
+        return nullptr;
     }
 
     auto reader = vtkSmartPointer<vtkTIFFReader>::New();
@@ -618,7 +628,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
 
         if (fileList.empty()) {
             std::cerr << "[Error] No .tif files found in folder." << std::endl;
-            return false;
+            return nullptr;
         }
 
         auto naturalSort = [](const std::string& s1, const std::string& s2) {
@@ -679,7 +689,7 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
 
         if (!reader->CanReadFile(inputPath.c_str())) {
             std::cerr << "[Error] VTK cannot read this TIFF file." << std::endl;
-            return false;
+            return nullptr;
         }
     }
 
@@ -690,12 +700,12 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     }
     catch (...) {
         std::cerr << "[Error] Exception during TIFF reading." << std::endl;
-        return false;
+        return nullptr;
     }
 
     auto output = reader->GetOutput();
     if (!output || output->GetDimensions()[0] == 0) {
-        return false;
+        return nullptr;
     }
 
     // --- 数据提交 (Back Buffer 策略) ---
@@ -709,24 +719,107 @@ bool TiffVolumeDataManager::SetDataLoaded(const std::string& inputPath,
     }
 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
-    SetLpsToRasImageCopied(lpsImage, newImage);
+    if (!SetLpsRasImage(lpsImage, newImage)) {
+        return nullptr;
+    }
 
-    double range[2] = { 0.0, 0.0 };
-    double imageSpacing[3] = { 1.0, 1.0, 1.0 };
-    newImage->GetScalarRange(range);
-    newImage->GetSpacing(imageSpacing);
     int dims[3] = { 0, 0, 0 };
     newImage->GetDimensions(dims);
 
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_vtkImage = newImage;
-        m_scalarRange = { range[0], range[1] };
-        m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
-        ++m_dataVersion;
+    std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
+    return newImage;
+}
+
+bool TiffVolumeDataManager::Impl::GetExplicitValue(const std::array<float, 3>& values) const
+{
+    return std::any_of(values.begin(), values.end(), [](const float value) {
+        return value != 0.0f;
+    });
+}
+
+std::array<double, 3> TiffVolumeDataManager::Impl::GetRasOrigin(
+    const std::array<double, 3>& lpsOrigin,
+    const int dims[3],
+    const std::array<double, 3>& spacing) const
+{
+    std::array<double, 3> rasOrigin = {
+        -lpsOrigin[0],
+        -lpsOrigin[1],
+        lpsOrigin[2]
+    };
+
+    if (dims[0] > 0) {
+        rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
+    }
+    if (dims[1] > 0) {
+        rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
     }
 
-    std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
+    return rasOrigin;
+}
+
+bool TiffVolumeDataManager::Impl::SetLpsRasImage(
+    vtkImageData* source,
+    vtkImageData* target) const
+{
+    if (!source || !target) {
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    source->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        return false;
+    }
+
+    double spacingRaw[3] = { 1.0, 1.0, 1.0 };
+    double originRaw[3] = { 0.0, 0.0, 0.0 };
+    source->GetSpacing(spacingRaw);
+    source->GetOrigin(originRaw);
+
+    const std::array<double, 3> imageSpacing = {
+        spacingRaw[0], spacingRaw[1], spacingRaw[2]
+    };
+    const std::array<double, 3> lpsOrigin = {
+        originRaw[0], originRaw[1], originRaw[2]
+    };
+    const std::array<double, 3> rasOrigin = GetRasOrigin(lpsOrigin, dims, imageSpacing);
+
+    target->SetDimensions(dims[0], dims[1], dims[2]);
+    target->SetSpacing(imageSpacing[0], imageSpacing[1], imageSpacing[2]);
+    target->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
+    target->AllocateScalars(source->GetScalarType(), source->GetNumberOfScalarComponents());
+
+    const int componentCount = source->GetNumberOfScalarComponents();
+    const int scalarSize = source->GetScalarSize();
+    const size_t pixelBytes = static_cast<size_t>(componentCount) * static_cast<size_t>(scalarSize);
+    const size_t nx = static_cast<size_t>(dims[0]);
+    const size_t ny = static_cast<size_t>(dims[1]);
+    const size_t rowBytes = nx * pixelBytes;
+    const size_t sliceBytes = ny * rowBytes;
+
+    const char* srcBase = static_cast<const char*>(source->GetScalarPointer());
+    char* dstBase = static_cast<char*>(target->GetScalarPointer());
+    if (!srcBase || !dstBase) {
+        return false;
+    }
+
+    for (size_t z = 0; z < static_cast<size_t>(dims[2]); ++z) {
+        const size_t srcSliceOffset = z * sliceBytes;
+        const size_t dstSliceOffset = z * sliceBytes;
+        for (size_t y = 0; y < ny; ++y) {
+            const char* srcRow = srcBase + srcSliceOffset + y * rowBytes;
+            char* dstRow = dstBase + dstSliceOffset + (ny - 1 - y) * rowBytes;
+            for (size_t x = 0; x < nx; ++x) {
+                std::memcpy(
+                    dstRow + (nx - 1 - x) * pixelBytes,
+                    srcRow + x * pixelBytes,
+                    pixelBytes);
+            }
+        }
+    }
+
+    target->Modified();
     return true;
 }
 

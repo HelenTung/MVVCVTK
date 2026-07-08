@@ -8,32 +8,11 @@
 
 #include "OrthogonalCropTypes.h"
 
-#include <vtkCommand.h>
-#include <vtkImplicitPlaneRepresentation.h>
-#include <vtkImplicitPlaneWidget2.h>
-#include <vtkRenderWindowInteractor.h>
-#include <vtkSmartPointer.h>
-
 #include <array>
 #include <functional>
+#include <memory>
 
-class CropPlaneWidget;
-
-// VTK observer 适配器：把原始事件转交给 CropPlaneWidget 处理。
-class CropPlaneCallback : public vtkCommand {
-public:
-    static CropPlaneCallback* New();
-
-    // 绑定回调所有者。
-    void SetOwner(CropPlaneWidget* owner);
-
-    // VTK 事件入口。
-    void Execute(vtkObject* caller, unsigned long eventId, void* callData) override;
-
-private:
-    // 事件真正的业务处理者。
-    CropPlaneWidget* m_owner = nullptr;
-};
+class vtkRenderWindowInteractor;
 
 // 只管理平面 widget 生命周期、平面参数与交互事件，不关心裁切算法与结果投递。
 class CropPlaneWidget {
@@ -45,6 +24,12 @@ public:
         CropInteractionPhase phase)>;
 
     CropPlaneWidget();
+    ~CropPlaneWidget();
+
+    CropPlaneWidget(const CropPlaneWidget&) = delete;
+    CropPlaneWidget& operator=(const CropPlaneWidget&) = delete;
+    CropPlaneWidget(CropPlaneWidget&&) noexcept;
+    CropPlaneWidget& operator=(CropPlaneWidget&&) noexcept;
 
     // 绑定 widget 所属 interactor。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
@@ -73,57 +58,6 @@ public:
     bool GetEnabled() const;
 
 private:
-    friend class CropPlaneCallback;
-
-    // 检查一组 bounds 是否有正体积。
-    static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
-
-    // 检查并归一化平面法线。
-    static bool SetUnitNormal(CropVectorDouble3Array& worldNormal);
-
-    // 把 VTK 事件类型统一映射为模块内部交互阶段。
-    static CropInteractionPhase GetEventPhase(unsigned long eventId);
-
-    // 懒加载绑定 widget observer，避免重复 AddObserver。
-    void AttachObservers();
-
-    // 将当前平面状态同步到 representation。
-    void SetPlaneRep();
-
-    // 处理一次 widget 事件并向上抛出平面回调。
-    void OnWidgetEvent(unsigned long eventId);
-
-    // widget 当前所属 interactor。
-    vtkRenderWindowInteractor* m_interactor = nullptr;
-
-    // 真正参与交互的 vtkImplicitPlaneWidget2。
-    vtkSmartPointer<vtkImplicitPlaneWidget2> m_widget;
-
-    // widget 的可视外观与平面数据载体。
-    vtkSmartPointer<vtkImplicitPlaneRepresentation> m_representation;
-
-    // VTK observer 适配器。
-    vtkSmartPointer<CropPlaneCallback> m_callbackCommand;
-
-    // 向交互桥上报 world plane / phase 的回调。
-    PlaneCallback m_planeCallback;
-
-    // 当前 widget 开关状态。
-    bool m_isEnabled = false;
-
-    // observer 是否已经绑定过。
-    bool m_hasObservers = false;
-
-    // 当前完整模型 world bounds，只作为 reference 输入合法性和默认原点来源；
-    // 平面可视尺寸由 bridge 下发的 halfExtents 决定，避免 widget 层重新发明一套尺寸策略。
-    std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-
-    // 缓存当前 world 平面原点。
-    CropVectorDouble3Array m_currentWorldOrigin = { 0.0, 0.0, 0.0 };
-
-    // 缓存当前 world 平面法线。
-    CropVectorDouble3Array m_currentWorldNormal = { 0.0, 0.0, 1.0 };
-
-    // 缓存 bridge 下发的平面可视半尺寸；它只影响 VTK 平面控件大小，不改变无限半空间裁切语义。
-    std::array<double, 2> m_currentWorldHalfExtents = { 1.0, 1.0 };
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

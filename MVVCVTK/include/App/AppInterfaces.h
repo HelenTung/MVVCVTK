@@ -143,7 +143,7 @@ public:
     virtual void SendUpdates() {}
 
     bool GetDirty()      const { return m_isDirty; }
-    void MarkDirty() { m_isDirty = true; }
+    void SetDirty() { m_isDirty = true; }
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
     bool GetDirtyConsumed() { return m_isDirty.exchange(false); }
 
@@ -151,7 +151,7 @@ public:
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
 
 	// 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
-    virtual void AddOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    virtual void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
     virtual void ClearOverlayStrategies();
 };
@@ -178,7 +178,7 @@ public:
     virtual int GetNavigationAxis() const { return -1; }
     virtual WindowLevelParams GetWindowLevel() const { return {}; }
     virtual void SetElementVisible(uint32_t flagBit, bool isVisible) {}
-    virtual void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
+    virtual void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
     virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
 };
@@ -228,7 +228,7 @@ public:
         }
     }
 
-    virtual void Render() {
+    virtual void SendRender() {
         if (m_renderWindow) m_renderWindow->Render();
     }
 

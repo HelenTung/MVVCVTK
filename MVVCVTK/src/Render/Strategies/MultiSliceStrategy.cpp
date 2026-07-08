@@ -11,7 +11,7 @@ MultiSliceStrategy::MultiSliceStrategy() {
         m_slices[i]->SetMapper(m_mappers[i]);
         m_mappers[i]->SliceFacesCameraOff();
         m_mappers[i]->SliceAtFocalPointOff();
-      AddManagedProp(m_slices[i]);
+      AttachProp(m_slices[i]);
     }
 
     m_slicePlanes[0]->SetNormal(1, 0, 0);

@@ -6,32 +6,82 @@
 
 #include "Interaction/CropPlaneWidget.h"
 
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
+#include <vtkImplicitPlaneRepresentation.h>
+#include <vtkImplicitPlaneWidget2.h>
 #include <vtkMath.h>
-#include <vtkObjectFactory.h>
 #include <vtkProperty.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkSmartPointer.h>
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 static constexpr double kPlaneWidgetNormalEpsilon = 1e-8;
+static constexpr double kPlaneColorRed = 0.1;
+static constexpr double kPlaneColorGreen = 0.85;
+static constexpr double kPlaneColorBlue = 0.5;
+static constexpr double kPlaneSelectedRed = 1.0;
+static constexpr double kPlaneSelectedGreen = 0.55;
+static constexpr double kPlaneSelectedBlue = 0.12;
+static constexpr double kPlaneOpacity = 0.28;
+static constexpr double kPlaneSelectedOpacity = 0.36;
+static constexpr double kPlaneLineWidth = 2.0;
 
-vtkStandardNewMacro(CropPlaneCallback);
+class CropPlaneWidget::Impl final {
+public:
+    using PlaneCallback = CropPlaneWidget::PlaneCallback;
 
-void CropPlaneCallback::SetOwner(CropPlaneWidget* owner)
-{
-    m_owner = owner;
-}
+    Impl();
+    ~Impl();
 
-void CropPlaneCallback::Execute(vtkObject* caller, unsigned long eventId, void* callData)
-{
-    (void)caller;
-    (void)callData;
-    if (m_owner) {
-        m_owner->OnWidgetEvent(eventId);
-    }
-}
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 
-CropPlaneWidget::CropPlaneWidget()
+    void SetInteractor(vtkRenderWindowInteractor* interactor);
+    void SetReferenceWorldBounds(const std::array<double, 6>& worldBounds);
+    void SetWidgetWorldPlane(
+        const CropVectorDouble3Array& worldOrigin,
+        const CropVectorDouble3Array& worldNormal,
+        const std::array<double, 2>& worldHalfExtents);
+    bool GetCurrentWorldPlane(
+        CropVectorDouble3Array& worldOrigin,
+        CropVectorDouble3Array& worldNormal) const;
+    void SetPlaneCallback(PlaneCallback callback);
+    bool SetEnabled(bool isEnabled);
+    bool GetEnabled() const;
+
+private:
+    static void SendWidgetEvent(
+        vtkObject* caller,
+        unsigned long eventId,
+        void* clientData,
+        void* callData);
+    static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
+    static bool SetUnitNormal(CropVectorDouble3Array& worldNormal);
+    static CropInteractionPhase GetEventPhase(unsigned long eventId);
+
+    void AttachObservers();
+    void SetPlaneRep();
+    void OnWidgetEvent(unsigned long eventId);
+
+    vtkRenderWindowInteractor* m_interactor = nullptr;
+    vtkSmartPointer<vtkImplicitPlaneWidget2> m_widget;
+    vtkSmartPointer<vtkImplicitPlaneRepresentation> m_representation;
+    vtkSmartPointer<vtkCallbackCommand> m_callbackCommand;
+    PlaneCallback m_planeCallback;
+    bool m_isEnabled = false;
+    bool m_hasObservers = false;
+    std::array<unsigned long, 3> m_observerTags = { 0, 0, 0 };
+    std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    CropVectorDouble3Array m_currentWorldOrigin = { 0.0, 0.0, 0.0 };
+    CropVectorDouble3Array m_currentWorldNormal = { 0.0, 0.0, 1.0 };
+    std::array<double, 2> m_currentWorldHalfExtents = { 1.0, 1.0 };
+};
+
+CropPlaneWidget::Impl::Impl()
 {
     // 平面 widget 外观固定在控制器内，上层 bridge 只消费 world 中心点/法线。
     m_widget = vtkSmartPointer<vtkImplicitPlaneWidget2>::New();
@@ -44,25 +94,50 @@ CropPlaneWidget::CropPlaneWidget()
     m_representation->ScaleEnabledOff();
     m_representation->ConstrainToWidgetBoundsOff();
     m_representation->TubingOff();
-    m_representation->GetPlaneProperty()->SetColor(0.1, 0.85, 0.5);
-    m_representation->GetPlaneProperty()->SetOpacity(0.28);
-    m_representation->GetOutlineProperty()->SetColor(0.1, 0.85, 0.5);
-    m_representation->GetOutlineProperty()->SetLineWidth(2.0);
-    m_representation->GetSelectedPlaneProperty()->SetColor(1.0, 0.55, 0.12);
-    m_representation->GetSelectedPlaneProperty()->SetOpacity(0.36);
+    m_representation->GetPlaneProperty()->SetColor(
+        kPlaneColorRed,
+        kPlaneColorGreen,
+        kPlaneColorBlue);
+    m_representation->GetPlaneProperty()->SetOpacity(kPlaneOpacity);
+    m_representation->GetOutlineProperty()->SetColor(
+        kPlaneColorRed,
+        kPlaneColorGreen,
+        kPlaneColorBlue);
+    m_representation->GetOutlineProperty()->SetLineWidth(kPlaneLineWidth);
+    m_representation->GetSelectedPlaneProperty()->SetColor(
+        kPlaneSelectedRed,
+        kPlaneSelectedGreen,
+        kPlaneSelectedBlue);
+    m_representation->GetSelectedPlaneProperty()->SetOpacity(kPlaneSelectedOpacity);
     m_widget->SetRepresentation(m_representation);
 
-    m_callbackCommand = vtkSmartPointer<CropPlaneCallback>::New();
-    m_callbackCommand->SetOwner(this);
+    m_callbackCommand = vtkSmartPointer<vtkCallbackCommand>::New();
+    m_callbackCommand->SetClientData(this);
+    m_callbackCommand->SetCallback(&CropPlaneWidget::Impl::SendWidgetEvent);
 }
 
-void CropPlaneWidget::SetInteractor(vtkRenderWindowInteractor* interactor)
+CropPlaneWidget::Impl::~Impl()
+{
+    if (m_widget && m_hasObservers) {
+        for (const auto observerTag : m_observerTags) {
+            if (observerTag != 0) {
+                m_widget->RemoveObserver(observerTag);
+            }
+        }
+    }
+
+    if (m_callbackCommand) {
+        m_callbackCommand->SetClientData(nullptr);
+    }
+}
+
+void CropPlaneWidget::Impl::SetInteractor(vtkRenderWindowInteractor* interactor)
 {
     m_interactor = interactor;
     m_widget->SetInteractor(interactor);
 }
 
-void CropPlaneWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
+void CropPlaneWidget::Impl::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
 {
     if (!GetBoundsAreValid(worldBounds)) {
         return;
@@ -77,7 +152,7 @@ void CropPlaneWidget::SetReferenceWorldBounds(const std::array<double, 6>& world
     SetPlaneRep();
 }
 
-void CropPlaneWidget::SetWidgetWorldPlane(
+void CropPlaneWidget::Impl::SetWidgetWorldPlane(
     const CropVectorDouble3Array& worldOrigin,
     const CropVectorDouble3Array& worldNormal,
     const std::array<double, 2>& worldHalfExtents)
@@ -96,7 +171,7 @@ void CropPlaneWidget::SetWidgetWorldPlane(
     SetPlaneRep();
 }
 
-bool CropPlaneWidget::GetCurrentWorldPlane(
+bool CropPlaneWidget::Impl::GetCurrentWorldPlane(
     CropVectorDouble3Array& worldOrigin,
     CropVectorDouble3Array& worldNormal) const
 {
@@ -105,12 +180,12 @@ bool CropPlaneWidget::GetCurrentWorldPlane(
     return vtkMath::Norm(worldNormal.data()) > kPlaneWidgetNormalEpsilon;
 }
 
-void CropPlaneWidget::SetPlaneCallback(PlaneCallback callback)
+void CropPlaneWidget::Impl::SetPlaneCallback(PlaneCallback callback)
 {
     m_planeCallback = std::move(callback);
 }
 
-bool CropPlaneWidget::SetEnabled(bool isEnabled)
+bool CropPlaneWidget::Impl::SetEnabled(bool isEnabled)
 {
     if (isEnabled && !m_interactor) {
         return false;
@@ -134,19 +209,34 @@ bool CropPlaneWidget::SetEnabled(bool isEnabled)
     return true;
 }
 
-bool CropPlaneWidget::GetEnabled() const
+bool CropPlaneWidget::Impl::GetEnabled() const
 {
     return m_isEnabled;
 }
 
-bool CropPlaneWidget::GetBoundsAreValid(const std::array<double, 6>& bounds)
+void CropPlaneWidget::Impl::SendWidgetEvent(
+    vtkObject* caller,
+    unsigned long eventId,
+    void* clientData,
+    void* callData)
+{
+    (void)caller;
+    (void)callData;
+
+    auto* widget = static_cast<CropPlaneWidget::Impl*>(clientData);
+    if (widget) {
+        widget->OnWidgetEvent(eventId);
+    }
+}
+
+bool CropPlaneWidget::Impl::GetBoundsAreValid(const std::array<double, 6>& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-bool CropPlaneWidget::SetUnitNormal(CropVectorDouble3Array& worldNormal)
+bool CropPlaneWidget::Impl::SetUnitNormal(CropVectorDouble3Array& worldNormal)
 {
     const double length = vtkMath::Norm(worldNormal.data());
     if (length <= kPlaneWidgetNormalEpsilon) {
@@ -159,7 +249,7 @@ bool CropPlaneWidget::SetUnitNormal(CropVectorDouble3Array& worldNormal)
     return true;
 }
 
-CropInteractionPhase CropPlaneWidget::GetEventPhase(unsigned long eventId)
+CropInteractionPhase CropPlaneWidget::Impl::GetEventPhase(unsigned long eventId)
 {
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
@@ -173,19 +263,21 @@ CropInteractionPhase CropPlaneWidget::GetEventPhase(unsigned long eventId)
     }
 }
 
-void CropPlaneWidget::AttachObservers()
+void CropPlaneWidget::Impl::AttachObservers()
 {
     if (m_hasObservers) {
         return;
     }
 
-    m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand);
-    m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand);
-    m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand);
+    m_observerTags = {
+        m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand),
+        m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand),
+        m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand)
+    };
     m_hasObservers = true;
 }
 
-void CropPlaneWidget::SetPlaneRep()
+void CropPlaneWidget::Impl::SetPlaneRep()
 {
     if (!m_representation || !GetBoundsAreValid(m_referenceWorldBounds)) {
         return;
@@ -209,7 +301,7 @@ void CropPlaneWidget::SetPlaneRep()
     m_representation->SetNormal(m_currentWorldNormal.data());
 }
 
-void CropPlaneWidget::OnWidgetEvent(unsigned long eventId)
+void CropPlaneWidget::Impl::OnWidgetEvent(unsigned long eventId)
 {
     if (!m_representation) {
         return;
@@ -234,4 +326,55 @@ void CropPlaneWidget::OnWidgetEvent(unsigned long eventId)
             m_currentWorldNormal,
             GetEventPhase(eventId));
     }
+}
+
+CropPlaneWidget::CropPlaneWidget()
+    : m_impl(std::make_unique<CropPlaneWidget::Impl>())
+{
+}
+
+CropPlaneWidget::~CropPlaneWidget() = default;
+
+CropPlaneWidget::CropPlaneWidget(CropPlaneWidget&&) noexcept = default;
+
+CropPlaneWidget& CropPlaneWidget::operator=(CropPlaneWidget&&) noexcept = default;
+
+void CropPlaneWidget::SetInteractor(vtkRenderWindowInteractor* interactor)
+{
+    m_impl->SetInteractor(interactor);
+}
+
+void CropPlaneWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
+{
+    m_impl->SetReferenceWorldBounds(worldBounds);
+}
+
+void CropPlaneWidget::SetWidgetWorldPlane(
+    const CropVectorDouble3Array& worldOrigin,
+    const CropVectorDouble3Array& worldNormal,
+    const std::array<double, 2>& worldHalfExtents)
+{
+    m_impl->SetWidgetWorldPlane(worldOrigin, worldNormal, worldHalfExtents);
+}
+
+bool CropPlaneWidget::GetCurrentWorldPlane(
+    CropVectorDouble3Array& worldOrigin,
+    CropVectorDouble3Array& worldNormal) const
+{
+    return m_impl->GetCurrentWorldPlane(worldOrigin, worldNormal);
+}
+
+void CropPlaneWidget::SetPlaneCallback(PlaneCallback callback)
+{
+    m_impl->SetPlaneCallback(std::move(callback));
+}
+
+bool CropPlaneWidget::SetEnabled(bool isEnabled)
+{
+    return m_impl->SetEnabled(isEnabled);
+}
+
+bool CropPlaneWidget::GetEnabled() const
+{
+    return m_impl->GetEnabled();
 }

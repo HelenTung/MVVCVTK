@@ -1,6 +1,6 @@
 #include "InteractionRouter.h"
 
-void InteractionRouter::AddHandler(std::unique_ptr<IInteractionHandler> handler)
+void InteractionRouter::AttachHandler(std::unique_ptr<IInteractionHandler> handler)
 {
     if (!handler) {
         return;

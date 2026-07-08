@@ -13,23 +13,65 @@
 #include <utility>
 #include <vector>
 
-namespace {
-static char ToUpperAscii(char value)
+class VtkAppHostSession::Impl final {
+public:
+    // 宿主输入配置的快照；BuildSession 之后不再把 main / 上位机的临时变量带入内部链路。
+    VtkAppHostSession::Config config;
+    // 窗口无关的核心服务集合，生命周期跟随 session。
+    HostCoreServices core;
+    // 当前 session 的窗口集合，负责 id/role 查询和 endpoint 生成。
+    HostRenderViewSet renderViews;
+    // host 到 feature 的绑定层；shared_ptr 是为了让 VTK observer 用 weak_ptr 安全回调。
+    std::shared_ptr<HostFeatureBindings> featureBindings;
+    // host 命令分发器只暴露单一 Dispatch 入口，具体分发由内部标志位判断。
+    std::shared_ptr<HostCommandRouter> commandRouter;
+    // BuildSession 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
+    std::vector<HostRenderViewEndpoint> renderViewEndpoints;
+    // 防止 Start 或命令入口重复执行组装；命令入口可懒 BuildSession，方便上位机先配置后调用。
+    bool isInitialized = false;
+
+    explicit Impl(VtkAppHostSession::Config sessionConfig);
+
+    bool Send(HostCommandRouterRequest request);
+
+    char GetUpperAscii(char value) const;
+    std::string BuildKeyLabel(char key) const;
+    std::string BuildControlKeyLabel(char key) const;
+    std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const;
+    void SendStartupStatus() const;
+};
+
+VtkAppHostSession::Impl::Impl(VtkAppHostSession::Config sessionConfig)
+    : config(std::move(sessionConfig))
+    , featureBindings(std::make_shared<HostFeatureBindings>())
+{
+}
+
+bool VtkAppHostSession::Impl::Send(HostCommandRouterRequest request)
+{
+    if (!commandRouter) {
+        std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
+        return false;
+    }
+    return commandRouter->DispatchCommand(std::move(request));
+}
+
+char VtkAppHostSession::Impl::GetUpperAscii(char value) const
 {
     return (value >= 'a' && value <= 'z')
         ? static_cast<char>(value - 'a' + 'A')
         : value;
 }
 
-static std::string BuildKeyLabel(char key)
+std::string VtkAppHostSession::Impl::BuildKeyLabel(char key) const
 {
     if (key == 0) {
         return "<unassigned>";
     }
-    return std::string(1, ToUpperAscii(key));
+    return std::string(1, GetUpperAscii(key));
 }
 
-static std::string BuildControlKeyLabel(char key)
+std::string VtkAppHostSession::Impl::BuildControlKeyLabel(char key) const
 {
     if (key == 0) {
         return "<unassigned>";
@@ -37,7 +79,7 @@ static std::string BuildControlKeyLabel(char key)
     return "Ctrl+" + BuildKeyLabel(key);
 }
 
-static std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys)
+std::string VtkAppHostSession::Impl::BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const
 {
     // 控制台文本从 Config 派生，不写死具体键位；这样 main 改模拟输入时提示不会和实际 observer 脱节。
     return "Controls: "
@@ -53,13 +95,12 @@ static std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys)
         + BuildControlKeyLabel(hotkeys.submitKey) + " = apply submit";
 }
 
-static void PrintStartupStatus(
-    const VtkAppHostSession::Config& config)
+void VtkAppHostSession::Impl::SendStartupStatus() const
 {
     const bool hasInitialVolumeLoad =
-        config.initialVolume.isInitialLoadEnabled
-        && !config.initialVolume.filePath.empty()
-        && config.initialVolume.geometry.has_value();
+        this->config.initialVolume.isInitialLoadEnabled
+        && !this->config.initialVolume.filePath.empty()
+        && this->config.initialVolume.geometry.has_value();
 
     std::cout << (hasInitialVolumeLoad
         ? "Application started. Loading data in background...\n"
@@ -71,42 +112,8 @@ static void PrintStartupStatus(
     }
 }
 
-} // namespace
-
-struct VtkAppHostSession::Impl {
-    // 宿主输入配置的快照；BuildSession 之后不再把 main / 上位机的临时变量带入内部链路。
-    Config config;
-    // 窗口无关的核心服务集合，生命周期跟随 session。
-    HostCoreServices core;
-    // 当前 session 的窗口集合，负责 id/role 查询和 endpoint 生成。
-    HostRenderViewSet renderViews;
-    // host 到 feature 的绑定层；shared_ptr 是为了让 VTK observer 用 weak_ptr 安全回调。
-    std::shared_ptr<HostFeatureBindings> featureBindings;
-    // host 命令分发器只暴露单一 Dispatch 入口，具体分发由内部标志位判断。
-    std::shared_ptr<HostCommandRouter> commandRouter;
-    // BuildSession 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
-    std::vector<HostRenderViewEndpoint> renderViewEndpoints;
-    // 防止 Start 或命令入口重复执行组装；命令入口可懒 BuildSession，方便上位机先配置后调用。
-    bool isInitialized = false;
-
-    explicit Impl(Config sessionConfig)
-        : config(std::move(sessionConfig))
-        , featureBindings(std::make_shared<HostFeatureBindings>())
-    {
-    }
-
-    bool Send(HostCommandRouterRequest request)
-    {
-        if (!commandRouter) {
-            std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
-            return false;
-        }
-        return commandRouter->DispatchCommand(std::move(request));
-    }
-};
-
 VtkAppHostSession::VtkAppHostSession(Config config)
-    : m_impl(std::make_unique<Impl>(std::move(config)))
+    : m_impl(std::make_unique<VtkAppHostSession::Impl>(std::move(config)))
 {
 }
 
@@ -141,7 +148,7 @@ void VtkAppHostSession::BuildSession()
         m_impl->Send(std::move(initialLoadRequest));
     }
 
-    m_impl->renderViews.RenderAll();
+    m_impl->renderViews.SendRenderAll();
     m_impl->renderViews.SetInteractorsReady();
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     m_impl->renderViewEndpoints = m_impl->renderViews.BuildEndpoints();
@@ -154,7 +161,7 @@ void VtkAppHostSession::BuildSession()
     attachHotkeysRequest.hotkeys = m_impl->config.hotkeys;
     m_impl->Send(std::move(attachHotkeysRequest));
     m_impl->featureBindings->AttachHostTimer(m_impl->config.timerEventPump);
-    PrintStartupStatus(m_impl->config);
+    m_impl->SendStartupStatus();
 
     m_impl->isInitialized = true;
 }

@@ -3,12 +3,10 @@
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 
-namespace {
 
-constexpr int kInteractionIsoTargetDim = 256;
-constexpr int kQualityIsoTargetDim = 766;
+static constexpr int kInteractionIsoTargetDim = 256;
+static constexpr int kQualityIsoTargetDim = 766;
 
-}
 
 void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 {
@@ -46,6 +44,7 @@ void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
     cam->SetFocalPoint(worldCenter);
     cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
     m_renderer->ResetCameraClippingRange();
+
 }
 
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
@@ -71,8 +70,9 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_interactionIsoFilter->ComputeNormalsOff();
     m_interactionIsoFilter->ComputeGradientsOff();
 
-    AddManagedProp(m_actor);
-    AddManagedProp(m_cubeAxes);
+    AttachProp(m_actor);
+    AttachProp(m_cubeAxes);
+
 }
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -124,17 +124,20 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_mapper->ScalarVisibilityOff();
         m_cubeAxes->SetBounds(img->GetBounds());
     }
+
 }
 
 void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
+
 }
 
 void IsoSurfaceStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
     // 3D 模式必须是透视投影
     ren->GetActiveCamera()->ParallelProjectionOff();
+
 }
 
 void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
@@ -164,25 +167,25 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     }
 
     // 等值面这里也采用与体渲染一致的状态收敛思路：
-    // 1. 先计算这一帧最终应落到的交互态 nextIsInteracting
+    // 1. 先计算这一帧最终应落到的交互态 isNextInteracting
     // 2. 再计算这一帧最终应使用的阈值 nextIsoValue
-    // 3. 根据 nextIsInteracting 选择当前活动过滤器 activeIsoFilter
+    // 3. 根据 isNextInteracting 选择当前活动过滤器 activeIsoFilter
     // 4. 只在交互态切换或阈值确实变化时，才把最终值下发到活动过滤器
     // 这样可以保证：
     // - 拖动期间只更新 256 预览等值面
     // - 松手后切回 766 质量等值面
     // - 同一帧同时带有 Interaction 和 IsoValue 时，统一按最终状态收口
     if (GetFlagOn(flags, UpdateFlags::Interaction) || GetFlagOn(flags, UpdateFlags::IsoValue)) {
-        const bool nextIsInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
+        const bool isNextInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
         const double nextIsoValue = GetFlagOn(flags, UpdateFlags::IsoValue)
             ? params.isoValue
             : m_currentIsoValue;
-        const bool hasInteractionChanged = (m_isInteracting != nextIsInteracting);
+        const bool hasInteractionChanged = (m_isInteracting != isNextInteracting);
         const bool hasIsoValueChanged = (m_currentIsoValue != nextIsoValue);
 
-        m_isInteracting = nextIsInteracting;
+        m_isInteracting = isNextInteracting;
         m_currentIsoValue = nextIsoValue;
 
         auto activeIsoFilter = m_isInteracting ? m_interactionIsoFilter : m_qualityIsoFilter;
@@ -212,6 +215,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
             m_cubeAxes->SetVisibility(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
+
 }
 
 vtkProp3D* IsoSurfaceStrategy::GetMainProp()

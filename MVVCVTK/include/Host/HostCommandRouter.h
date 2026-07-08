@@ -57,21 +57,11 @@ public:
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews,
         std::shared_ptr<HostFeatureBindings> featureBindings);
+    ~HostCommandRouter();
 
     bool DispatchCommand(HostCommandRouterRequest request) const;
 
 private:
-    bool LoadVolume(
-        const InitialVolumeLoadConfig& initialVolume,
-        std::function<void(bool isSuccess)> loadComplete) const;
-    bool SendFeature(const HostCommandRouterRequest& request) const;
-    bool ExportData(
-        const HostDataExportConfig& dataExportConfig,
-        std::function<void(bool isSuccess)> onComplete) const;
-    bool SetViewConfig(const HostViewConfig& viewConfig) const;
-    bool AttachHotkeys(const HostCommandRouterRequest& request) const;
-
-    const HostCoreServices* m_core = nullptr;
-    const HostRenderViewSet* m_renderViews = nullptr;
-    std::weak_ptr<HostFeatureBindings> m_featureBindings;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

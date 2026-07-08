@@ -17,15 +17,79 @@
 #include <new>
 #include <utility>
 
-namespace {
-static bool GetMeshVisible(vtkSmartPointer<vtkPolyData> voidMesh)
+class GapAnalysisService::Impl final {
+public:
+    void SetCompletionCallback(std::function<void(bool)> callback);
+    void SetCallbackReady(bool isSuccess);
+    bool GetDoneEvent();
+    void SendCallback();
+
+    bool GetMeshVisible(vtkSmartPointer<vtkPolyData> voidMesh) const;
+    bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const;
+    bool BuildVolumeBuffer(
+        vtkSmartPointer<vtkImageData> image,
+        VolumeBuffer& out) const;
+    vtkSmartPointer<vtkImageData> BuildLabelImage(
+        const std::vector<int>& labelVolume,
+        const VolumeBuffer& volBuf) const;
+
+private:
+    std::mutex m_callbackMutex;
+    std::function<void(bool)> m_completionCallback;
+    std::function<void(bool)> m_nextCallback;
+    bool m_isNextOk = false;
+    std::atomic<bool> m_hasCallback{ false };
+};
+
+void GapAnalysisService::Impl::SetCompletionCallback(std::function<void(bool)> callback)
+{
+    std::lock_guard<std::mutex> lk(m_callbackMutex);
+    m_completionCallback = std::move(callback);
+}
+
+void GapAnalysisService::Impl::SetCallbackReady(bool isSuccess)
+{
+    std::lock_guard<std::mutex> lk(m_callbackMutex);
+    if (!m_completionCallback) {
+        return;
+    }
+
+    m_nextCallback = std::move(m_completionCallback);
+    m_completionCallback = nullptr;
+    m_isNextOk = isSuccess;
+    m_hasCallback.store(true);
+}
+
+bool GapAnalysisService::Impl::GetDoneEvent()
+{
+    return m_hasCallback.exchange(false);
+}
+
+void GapAnalysisService::Impl::SendCallback()
+{
+    std::function<void(bool)> callback;
+    bool isSuccess = false;
+    {
+        std::lock_guard<std::mutex> lk(m_callbackMutex);
+        callback = std::move(m_nextCallback);
+        m_nextCallback = nullptr;
+        isSuccess = m_isNextOk;
+    }
+
+    // 回调可能触发 UI、VTK 或服务调用；锁外执行避免插件内部状态和宿主回调互相重入死锁。
+    if (callback) {
+        callback(isSuccess);
+    }
+}
+
+bool GapAnalysisService::Impl::GetMeshVisible(vtkSmartPointer<vtkPolyData> voidMesh) const
 {
     return voidMesh
         && voidMesh->GetNumberOfPoints() > 0
         && voidMesh->GetNumberOfCells() > 0;
 }
 
-static bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage)
+bool GapAnalysisService::Impl::GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const
 {
     if (!labelImage) {
         return false;
@@ -35,57 +99,10 @@ static bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage)
     labelImage->GetDimensions(labelDims);
     return labelDims[0] > 0 && labelDims[1] > 0 && labelDims[2] > 0;
 }
-} // namespace
-
-class GapDoneState {
-public:
-    void SetCallback(std::function<void(bool)> callback) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_callback = std::move(callback);
-    }
-
-    void SetReady(bool isSuccess) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        if (!m_callback) {
-            return;
-        }
-
-        m_nextCallback = std::move(m_callback);
-        m_callback = nullptr;
-        m_isNextOk = isSuccess;
-        m_hasCallback.store(true);
-    }
-
-    bool GetDoneEvent() {
-        return m_hasCallback.exchange(false);
-    }
-
-    void SendCallback() {
-        std::function<void(bool)> callback;
-        bool isSuccess = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            callback = std::move(m_nextCallback);
-            m_nextCallback = nullptr;
-            isSuccess = m_isNextOk;
-        }
-
-        // 回调可能触发 UI、VTK 或服务调用；锁外执行避免插件内部状态和宿主回调互相重入死锁。
-        if (callback) {
-            callback(isSuccess);
-        }
-    }
-
-private:
-    std::mutex m_mutex;
-    std::function<void(bool)> m_callback;
-    std::function<void(bool)> m_nextCallback;
-    bool m_isNextOk{ false };
-    std::atomic<bool> m_hasCallback{ false };
-};
 
 GapAnalysisService::GapAnalysisService()
-    : m_completionCallbackState(std::make_unique<GapDoneState>()) {
+    : m_impl(std::make_unique<GapAnalysisService::Impl>())
+{
 }
 
 GapAnalysisService::~GapAnalysisService() {
@@ -96,7 +113,7 @@ GapAnalysisService::~GapAnalysisService() {
 
 bool GapAnalysisService::SetInputImage(vtkSmartPointer<vtkImageData> image) {
     VolumeBuffer snapshot;
-    if (!BuildVolumeBuffer(std::move(image), snapshot)) {
+    if (!m_impl->BuildVolumeBuffer(std::move(image), snapshot)) {
         std::lock_guard<std::mutex> lk(m_inputMutex);
         m_inputSnapshot.reset();
         if (GetAnalysisState() != GapAnalysisState::Running) {
@@ -143,12 +160,12 @@ void GapAnalysisService::StartAsync(std::function<void(bool isSuccess)> onComple
         m_workerThread.join();
     }
 
-    m_completionCallbackState->SetCallback(std::move(onComplete));
+    m_impl->SetCompletionCallback(std::move(onComplete));
 
     auto inputSnapshot = GetInputSnapshot();
     if (!inputSnapshot || !inputSnapshot->GetVoxelReady()) {
         SetAnalysisState(GapAnalysisState::Failed);
-        m_completionCallbackState->SetReady(false);
+        m_impl->SetCallbackReady(false);
         return;
     }
 
@@ -166,7 +183,7 @@ void GapAnalysisService::StartAsync(std::function<void(bool isSuccess)> onComple
         &GapAnalysisService::StartWorker,
         this,
         std::move(inputSnapshot),
-        GetParameterSnapshot());
+        GetParamSnapshot());
 }
 
 void GapAnalysisService::StopAsync() {
@@ -174,11 +191,13 @@ void GapAnalysisService::StopAsync() {
 }
 
 bool GapAnalysisService::GetDoneEvent() {
-    return m_completionCallbackState->GetDoneEvent();
+    return m_impl && m_impl->GetDoneEvent();
 }
 
 void GapAnalysisService::SendCallback() {
-    m_completionCallbackState->SendCallback();
+    if (m_impl) {
+        m_impl->SendCallback();
+    }
 }
 
 GapAnalysisState GapAnalysisService::GetAnalysisState() const {
@@ -341,19 +360,19 @@ GapAnalysisService::VolumeBufferSnapshot GapAnalysisService::GetInputSnapshot() 
     return m_inputSnapshot;
 }
 
-GapAnalysisService::ParameterSnapshot GapAnalysisService::GetParameterSnapshot() const {
+GapParamSnapshot GapAnalysisService::GetParamSnapshot() const {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
     return { m_surfParams, m_advParams, m_voidParams };
 }
 
 void GapAnalysisService::StartWorker(
     VolumeBufferSnapshot inputSnapshot,
-    ParameterSnapshot params) {
+    GapParamSnapshot params) {
     bool isSuccess = false;
 
     if (!inputSnapshot || !inputSnapshot->GetVoxelReady() || m_isStopping.load()) {
         SetAnalysisState(GapAnalysisState::Idle);
-        m_completionCallbackState->SetReady(false);
+        m_impl->SetCallbackReady(false);
         return;
     }
 
@@ -370,7 +389,7 @@ void GapAnalysisService::StartWorker(
                     candidates,
                     params.voidParams,
                     result.labelVolume);
-                result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
+                result.labelImage = m_impl->BuildLabelImage(result.labelVolume, volBuf);
                 result.isSucceeded = true;
 
                 {
@@ -389,7 +408,7 @@ void GapAnalysisService::StartWorker(
     }
 
     SetAnalysisState(isSuccess ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
-    m_completionCallbackState->SetReady(isSuccess);
+    m_impl->SetCallbackReady(isSuccess);
 }
 
 void GapAnalysisService::StopWorker() {
@@ -449,7 +468,7 @@ bool GapAnalysisService::SetOverlayOff() {
             continue;
         }
         binding.service->RemoveOverlayStrategy(binding.overlayStrategy);
-        binding.service->MarkDirty();
+        binding.service->SetDirty();
         hasRemoved = true;
     }
     m_displayOverlayBindings.clear();
@@ -459,8 +478,8 @@ bool GapAnalysisService::SetOverlayOff() {
 bool GapAnalysisService::SetStoredView() {
     SetOverlayOff();
 
-    const bool hasMeshInput = GetMeshVisible(m_displayVoidMesh);
-    const bool hasSliceInput = GetLabelExtent(m_displayLabelImage);
+    const bool hasMeshInput = m_impl->GetMeshVisible(m_displayVoidMesh);
+    const bool hasSliceInput = m_impl->GetLabelExtent(m_displayLabelImage);
     bool hasMeshAdded = false;
     bool hasSliceAdded = false;
 
@@ -471,7 +490,7 @@ bool GapAnalysisService::SetStoredView() {
             }
             auto overlay = std::make_shared<GapMeshOverlayStrategy>();
             overlay->SetInputData(m_displayVoidMesh);
-            service->AddOverlayStrategy(overlay);
+            service->AttachOverlayStrategy(overlay);
             m_displayOverlayBindings.push_back({ service, overlay });
             hasMeshAdded = true;
         }
@@ -484,7 +503,7 @@ bool GapAnalysisService::SetStoredView() {
             }
             auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first);
             overlay->SetInputData(m_displayLabelImage);
-            target.second->AddOverlayStrategy(overlay);
+            target.second->AttachOverlayStrategy(overlay);
             m_displayOverlayBindings.push_back({ target.second, overlay });
             hasSliceAdded = true;
         }
@@ -538,9 +557,10 @@ double GapAnalysisService::GetDisplayIso(const VolumeBuffer& inputSnapshot) cons
         + (inputSnapshot.maxVal - inputSnapshot.minVal) * m_displaySurfaceRequest.dataRangeRatio;
 }
 
-bool GapAnalysisService::BuildVolumeBuffer(
+bool GapAnalysisService::Impl::BuildVolumeBuffer(
     vtkSmartPointer<vtkImageData> image,
-    VolumeBuffer& out) {
+    VolumeBuffer& out) const
+{
     if (!image) {
         return false;
     }
@@ -603,9 +623,10 @@ bool GapAnalysisService::BuildVolumeBuffer(
     return true;
 }
 
-vtkSmartPointer<vtkImageData> GapAnalysisService::BuildLabelImage(
+vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
     const std::vector<int>& labelVolume,
-    const VolumeBuffer& volBuf) {
+    const VolumeBuffer& volBuf) const
+{
     if (labelVolume.empty()) {
         return nullptr;
     }

@@ -10,7 +10,6 @@
 class InteractiveService;
 class VizService;
 class StdRenderContext;
-
 // runtime 是 HostRenderViewSet 内部的单视图运行态，组合“宿主配置 + 单窗口渲染 context + 业务 service”。
 // 为什么不是 endpoint：runtime 允许 host/session 内部继续绑定 feature，而 endpoint 只给外部宿主观察窗口句柄。
 struct HostRenderViewRuntime {
@@ -31,7 +30,13 @@ struct HostRenderViewRuntime {
 // 输入事件不在这里安装；独立 VTK 调试热键由 HostCommandRouter 私有 observer 翻译成 host request。
 class HostRenderViewSet {
 public:
-    HostRenderViewSet() = default;
+    HostRenderViewSet();
+    ~HostRenderViewSet();
+
+    HostRenderViewSet(const HostRenderViewSet&) = delete;
+    HostRenderViewSet& operator=(const HostRenderViewSet&) = delete;
+    HostRenderViewSet(HostRenderViewSet&&) noexcept;
+    HostRenderViewSet& operator=(HostRenderViewSet&&) noexcept;
 
     // 根据 host 配置构建一次窗口集合；configs 数量就是窗口数量，id 必须由宿主作为稳定外部事实提供。
     void Build(
@@ -62,15 +67,15 @@ public:
         const std::vector<const HostRenderViewRuntime*>& views) const;
 
     void SetInitialVisibility() const;
-    void RenderAll() const;
+    void SendRenderAll() const;
     void SetInteractorsReady() const;
     std::vector<HostRenderViewEndpoint> BuildEndpoints() const;
 
-    static bool GetRoleIs3DView(HostRenderViewRole role);
-    static bool GetRoleIsSliceView(HostRenderViewRole role);
-    static bool GetRoleIsGapOverlayRole(HostRenderViewRole role);
+    bool GetRoleIs3DView(HostRenderViewRole role) const;
+    bool GetRoleIsSliceView(HostRenderViewRole role) const;
+    bool GetRoleIsGapOverlayRole(HostRenderViewRole role) const;
 
 private:
-    // 当前 session 的视图运行态集合。vector 地址在 Build 之后保持稳定，feature 只保存查询出的短生命周期指针。
-    std::vector<HostRenderViewRuntime> m_views;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

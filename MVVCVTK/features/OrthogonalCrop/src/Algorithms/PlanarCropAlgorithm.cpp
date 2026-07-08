@@ -21,9 +21,105 @@
 #include <string>
 #include <vector>
 
-static constexpr double PlaneEpsilon = 1e-8;
+class PlanarCropAlgorithmImpl final {
+public:
+    static constexpr double PlaneEpsilon = 1e-8;
 
-static CropBoundsDouble6Array GetImageModelBounds(vtkImageData* image)
+    static CropBoundsDouble6Array GetImageModelBounds(vtkImageData* image);
+    static CropBoundsDouble6Array GetPolyBounds(vtkPolyData* polyData);
+    static bool GetBoundsValid(const CropBoundsDouble6Array& bounds);
+    static std::size_t GetVoxelBytes(vtkImageData* image);
+    static std::size_t GetImageVoxelCount(vtkImageData* image);
+    static std::size_t GetRamBytes(
+        const OrthogonalCropRequest& request,
+        std::size_t fallbackAvailableRamBytes);
+    static OrthogonalCropStatistics GetPlanarDiagnostics(const OrthogonalCropRequest& request);
+    static OrthogonalCropResult GetBaseResult(const OrthogonalCropRequest& request);
+    static bool GetNormalizedPlane(
+        const OrthogonalCropRequest& request,
+        CropVectorDouble3Array& planeNormalInInputModel,
+        CropVectorDouble3Array& planeCenterInInputModel,
+        CropFailure& failureReason,
+        std::string& message);
+    static CropDataModel GetPlaneData(
+        const CropVectorDouble3Array& planeNormalInInputModel,
+        const CropVectorDouble3Array& planeCenterInInputModel,
+        const std::array<double, 2>& planeHalf,
+        const CropBoundsDouble6Array& inputModelBounds);
+    static bool GetPlaneData(
+        const OrthogonalCropRequest& request,
+        const CropBoundsDouble6Array& inputModelBounds,
+        CropDataModel& cropData,
+        CropFailure& failureReason,
+        std::string& message);
+    static bool GetPointIsOnNormalSide(
+        const double inputModelPoint[3],
+        const CropVectorDouble3Array& planeCenterInInputModel,
+        const CropVectorDouble3Array& planeNormalInInputModel);
+    static OrthogonalCropResult GetFailureResult(
+        const OrthogonalCropRequest& request,
+        CropFailure failureReason,
+        const std::string& message,
+        const CropDataModel* cropData = nullptr);
+    static PlanarVoxelStep GetSideStep(
+        vtkImageData* image,
+        const CropDataModel& cropData,
+        const int dims[3]);
+    static double GetSideAtIndex(
+        const PlanarVoxelStep& sideStep,
+        int i,
+        int j,
+        int k);
+    static bool GetVoxelOnSide(
+        vtkImageData* image,
+        const PlanarVoxelStep& sideStep,
+        const CropDataModel& cropData,
+        const int index[3],
+        double planeSide);
+    static PlanarRowSide GetPlanarRowSide(
+        double rowStartSide,
+        double rowEndSide,
+        double boundaryEpsilon);
+    static std::vector<unsigned char> GetBgBytes(
+        vtkDataArray* sourceScalars,
+        vtkDataArray* submitScalars,
+        unsigned char* submitBytes,
+        int componentCount,
+        std::size_t bytesPerVoxel);
+    static void SetRowBg(
+        unsigned char* submitRowPtr,
+        const std::vector<unsigned char>& backgroundVoxelBytes,
+        int voxelCount);
+    static void SetRowBytes(
+        unsigned char* maskRowPtr,
+        unsigned char* submitRowPtr,
+        const unsigned char* sourceRowPtr,
+        const std::vector<unsigned char>& backgroundVoxelBytes,
+        std::size_t rowBytes,
+        int voxelCount,
+        bool isRowKept);
+    static void SetVoxelBytes(
+        unsigned char* maskPtr,
+        unsigned char* submitPtr,
+        const unsigned char* sourcePtr,
+        const std::vector<unsigned char>& backgroundVoxelBytes,
+        std::size_t bytesPerVoxel,
+        bool isVoxelKept);
+    static PlanarSubmitImages GetSubmitImages(
+        vtkImageData* image,
+        const CropDataModel& cropData,
+        CropRemovalMode removalMode);
+    static OrthogonalCropResult GetPreviewResult(
+        const CropDataModel& cropData,
+        const OrthogonalCropRequest& request);
+    static OrthogonalCropResult GetSubmitResult(
+        vtkImageData* image,
+        const CropDataModel& cropData,
+        const OrthogonalCropRequest& request,
+        const CropBoundsDouble6Array& inputModelBounds,
+        std::size_t availableRamBytes);
+};
+CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetImageModelBounds(vtkImageData* image)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!image) {
@@ -39,7 +135,7 @@ static CropBoundsDouble6Array GetImageModelBounds(vtkImageData* image)
     };
 }
 
-static CropBoundsDouble6Array GetPolyBounds(vtkPolyData* polyData)
+CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetPolyBounds(vtkPolyData* polyData)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!polyData) {
@@ -55,14 +151,14 @@ static CropBoundsDouble6Array GetPolyBounds(vtkPolyData* polyData)
     };
 }
 
-static bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
+bool PlanarCropAlgorithmImpl::GetBoundsValid(const CropBoundsDouble6Array& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-static std::size_t GetVoxelBytes(vtkImageData* image)
+std::size_t PlanarCropAlgorithmImpl::GetVoxelBytes(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -72,7 +168,7 @@ static std::size_t GetVoxelBytes(vtkImageData* image)
         * static_cast<std::size_t>(image->GetNumberOfScalarComponents());
 }
 
-static std::size_t GetImageVoxelCount(vtkImageData* image)
+std::size_t PlanarCropAlgorithmImpl::GetImageVoxelCount(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -85,7 +181,7 @@ static std::size_t GetImageVoxelCount(vtkImageData* image)
         * static_cast<std::size_t>(std::max(dims[2], 0));
 }
 
-static std::size_t GetRamBytes(
+std::size_t PlanarCropAlgorithmImpl::GetRamBytes(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
@@ -94,7 +190,7 @@ static std::size_t GetRamBytes(
         : fallbackAvailableRamBytes;
 }
 
-static OrthogonalCropStatistics GetPlanarDiagnostics(const OrthogonalCropRequest& request)
+OrthogonalCropStatistics PlanarCropAlgorithmImpl::GetPlanarDiagnostics(const OrthogonalCropRequest& request)
 {
     OrthogonalCropStatistics statistics;
     statistics.SetResolvedDataSource(request.GetDataSource());
@@ -104,7 +200,7 @@ static OrthogonalCropStatistics GetPlanarDiagnostics(const OrthogonalCropRequest
     return statistics;
 }
 
-static OrthogonalCropResult GetBaseResult(const OrthogonalCropRequest& request)
+OrthogonalCropResult PlanarCropAlgorithmImpl::GetBaseResult(const OrthogonalCropRequest& request)
 {
     OrthogonalCropResult result;
     result.SetResolvedDataSource(request.GetDataSource());
@@ -114,7 +210,7 @@ static OrthogonalCropResult GetBaseResult(const OrthogonalCropRequest& request)
     return result;
 }
 
-static bool GetNormalizedPlane(
+bool PlanarCropAlgorithmImpl::GetNormalizedPlane(
     const OrthogonalCropRequest& request,
     CropVectorDouble3Array& planeNormalInInputModel,
     CropVectorDouble3Array& planeCenterInInputModel,
@@ -140,7 +236,7 @@ static bool GetNormalizedPlane(
     return true;
 }
 
-static CropDataModel GetPlaneData(
+CropDataModel PlanarCropAlgorithmImpl::GetPlaneData(
     const CropVectorDouble3Array& planeNormalInInputModel,
     const CropVectorDouble3Array& planeCenterInInputModel,
     const std::array<double, 2>& planeHalf,
@@ -154,7 +250,7 @@ static CropDataModel GetPlaneData(
     return cropData;
 }
 
-static bool GetPlaneData(
+bool PlanarCropAlgorithmImpl::GetPlaneData(
     const OrthogonalCropRequest& request,
     const CropBoundsDouble6Array& inputModelBounds,
     CropDataModel& cropData,
@@ -186,7 +282,7 @@ static bool GetPlaneData(
     return true;
 }
 
-static bool GetPointIsOnNormalSide(
+bool PlanarCropAlgorithmImpl::GetPointIsOnNormalSide(
     const double inputModelPoint[3],
     const CropVectorDouble3Array& planeCenterInInputModel,
     const CropVectorDouble3Array& planeNormalInInputModel)
@@ -200,30 +296,11 @@ static bool GetPointIsOnNormalSide(
     return vtkMath::Dot(offset, planeNormalInInputModel.data()) > 0.0;
 }
 
-struct PlanarVoxelSideStep {
-    std::array<double, 3> planeIndex = { 0.0, 0.0, 0.0 };
-    double iStep = 0.0;
-    double jStep = 0.0;
-    double kStep = 0.0;
-    double boundaryEpsilon = PlaneEpsilon;
-};
-
-struct PlanarSubmitImages {
-    vtkSmartPointer<vtkImageData> submitImage;
-    vtkSmartPointer<vtkImageData> maskImage;
-};
-
-enum class PlanarRowSide {
-    NormalSide,
-    OppositeSide,
-    Mixed
-};
-
-static OrthogonalCropResult GetFailureResult(
+OrthogonalCropResult PlanarCropAlgorithmImpl::GetFailureResult(
     const OrthogonalCropRequest& request,
     CropFailure failureReason,
     const std::string& message,
-    const CropDataModel* cropData = nullptr)
+    const CropDataModel* cropData)
 {
     auto result = GetBaseResult(request);
     auto statistics = GetPlanarDiagnostics(request);
@@ -239,12 +316,12 @@ static OrthogonalCropResult GetFailureResult(
     return result;
 }
 
-static PlanarVoxelSideStep GetSideStep(
+PlanarVoxelStep PlanarCropAlgorithmImpl::GetSideStep(
     vtkImageData* image,
     const CropDataModel& cropData,
     const int dims[3])
 {
-    PlanarVoxelSideStep sideStep;
+    PlanarVoxelStep sideStep;
     if (!image) {
         return sideStep;
     }
@@ -274,8 +351,8 @@ static PlanarVoxelSideStep GetSideStep(
     return sideStep;
 }
 
-static double GetSideAtIndex(
-    const PlanarVoxelSideStep& sideStep,
+double PlanarCropAlgorithmImpl::GetSideAtIndex(
+    const PlanarVoxelStep& sideStep,
     int i,
     int j,
     int k)
@@ -285,9 +362,9 @@ static double GetSideAtIndex(
         + (static_cast<double>(k) - sideStep.planeIndex[2]) * sideStep.kStep;
 }
 
-static bool GetVoxelOnSide(
+bool PlanarCropAlgorithmImpl::GetVoxelOnSide(
     vtkImageData* image,
-    const PlanarVoxelSideStep& sideStep,
+    const PlanarVoxelStep& sideStep,
     const CropDataModel& cropData,
     const int index[3],
     double planeSide)
@@ -304,7 +381,7 @@ static bool GetVoxelOnSide(
         cropData.GetPlaneNormal());
 }
 
-static PlanarRowSide GetPlanarRowSide(
+PlanarRowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
     double rowStartSide,
     double rowEndSide,
     double boundaryEpsilon)
@@ -320,7 +397,7 @@ static PlanarRowSide GetPlanarRowSide(
     return PlanarRowSide::Mixed;
 }
 
-static std::vector<unsigned char> GetBgBytes(
+std::vector<unsigned char> PlanarCropAlgorithmImpl::GetBgBytes(
     vtkDataArray* sourceScalars,
     vtkDataArray* submitScalars,
     unsigned char* submitBytes,
@@ -343,7 +420,7 @@ static std::vector<unsigned char> GetBgBytes(
     return backgroundBytes;
 }
 
-static void SetRowBg(
+void PlanarCropAlgorithmImpl::SetRowBg(
     unsigned char* submitRowPtr,
     const std::vector<unsigned char>& backgroundVoxelBytes,
     int voxelCount)
@@ -361,7 +438,7 @@ static void SetRowBg(
     }
 }
 
-static void SetRowBytes(
+void PlanarCropAlgorithmImpl::SetRowBytes(
     unsigned char* maskRowPtr,
     unsigned char* submitRowPtr,
     const unsigned char* sourceRowPtr,
@@ -384,7 +461,7 @@ static void SetRowBytes(
         voxelCount);
 }
 
-static void SetVoxelBytes(
+void PlanarCropAlgorithmImpl::SetVoxelBytes(
     unsigned char* maskPtr,
     unsigned char* submitPtr,
     const unsigned char* sourcePtr,
@@ -404,7 +481,7 @@ static void SetVoxelBytes(
     }
 }
 
-static PlanarSubmitImages GetSubmitImages(
+PlanarSubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
@@ -544,7 +621,7 @@ static PlanarSubmitImages GetSubmitImages(
     return images;
 }
 
-static OrthogonalCropResult GetPreviewResult(
+OrthogonalCropResult PlanarCropAlgorithmImpl::GetPreviewResult(
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request)
 {
@@ -561,7 +638,7 @@ static OrthogonalCropResult GetPreviewResult(
     return result;
 }
 
-static OrthogonalCropResult GetSubmitResult(
+OrthogonalCropResult PlanarCropAlgorithmImpl::GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
@@ -626,41 +703,41 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     std::size_t fallbackAvailableRamBytes)
 {
     if (!image) {
-        return GetFailureResult(
+        return PlanarCropAlgorithmImpl::GetFailureResult(
             request,
             CropFailure::NoImage,
             "Input image is null.");
     }
 
-    const auto inputModelBounds = GetImageModelBounds(image);
+    const auto inputModelBounds = PlanarCropAlgorithmImpl::GetImageModelBounds(image);
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!GetPlaneData(
+    if (!PlanarCropAlgorithmImpl::GetPlaneData(
             request,
             inputModelBounds,
             cropData,
             failureReason,
             message)) {
-        return GetFailureResult(request, failureReason, message);
+        return PlanarCropAlgorithmImpl::GetFailureResult(request, failureReason, message);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
-        return GetPreviewResult(
+        return PlanarCropAlgorithmImpl::GetPreviewResult(
             cropData,
             request);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Submit) {
-        return GetSubmitResult(
+        return PlanarCropAlgorithmImpl::GetSubmitResult(
             image,
             cropData,
             request,
             inputModelBounds,
-            GetRamBytes(request, fallbackAvailableRamBytes));
+            PlanarCropAlgorithmImpl::GetRamBytes(request, fallbackAvailableRamBytes));
     }
 
-    return GetFailureResult(
+    return PlanarCropAlgorithmImpl::GetFailureResult(
         request,
         CropFailure::NoBackend,
         "Image algorithm received an unsupported planar crop operation.",
@@ -672,34 +749,34 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request)
 {
     if (!polyData) {
-        return GetFailureResult(
+        return PlanarCropAlgorithmImpl::GetFailureResult(
             request,
             CropFailure::NoPolyData,
             "Input polydata is null.");
     }
 
-    const auto inputModelBounds = GetPolyBounds(polyData);
+    const auto inputModelBounds = PlanarCropAlgorithmImpl::GetPolyBounds(polyData);
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!GetPlaneData(
+    if (!PlanarCropAlgorithmImpl::GetPlaneData(
             request,
             inputModelBounds,
             cropData,
             failureReason,
             message)) {
-        return GetFailureResult(request, failureReason, message);
+        return PlanarCropAlgorithmImpl::GetFailureResult(request, failureReason, message);
     }
 
     if (request.GetOperation() != OrthogonalCropOperation::Preview) {
-        return GetFailureResult(
+        return PlanarCropAlgorithmImpl::GetFailureResult(
             request,
             CropFailure::NoBackend,
             "PolyData algorithm received an unsupported planar crop operation.",
             &cropData);
     }
 
-    auto result = GetPreviewResult(
+    auto result = PlanarCropAlgorithmImpl::GetPreviewResult(
         cropData,
         request);
     if (!result.GetSucceeded()) {

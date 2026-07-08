@@ -8,16 +8,6 @@
 #include <vtkCamera.h>
 #include <vtkMath.h>
 
-namespace {
-
-    bool GetIsCompositeMode(VizMode mode)
-    {
-        return mode == VizMode::CompositeVolume
-            || mode == VizMode::CompositeIsoSurface;
-    }
-
-} // namespace
-
 Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
@@ -38,13 +28,16 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         vtkProp3D* prop = m_service->GetMainProp();
         if (prop && prop->GetMatrix()) {
             m_service->SetModelMatrix(prop->GetMatrix());
-            m_service->MarkDirty();
+            m_service->SetDirty();
             return { true, false };
         }
         return {};
     }
 
-    if (!GetIsCompositeMode(eve.vizMode)) {
+    const bool isCompositeMode =
+        eve.vizMode == VizMode::CompositeVolume
+        || eve.vizMode == VizMode::CompositeIsoSurface;
+    if (!isCompositeMode) {
         return {};
     }
 
@@ -89,7 +82,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                 rw->SetDesiredUpdateRate(0.001);
             }
             m_service->SetInteracting(false);
-            m_service->MarkDirty();
+            m_service->SetDirty();
             m_isDragging = false;
             m_dragAxis = -1;
             return { true, false };
@@ -114,44 +107,44 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         }
 
         // 获取屏幕二维坐标
-        auto lastworldpos = m_service->GetCursorWorld();
-        m_renderer->SetWorldPoint(lastworldpos[0], lastworldpos[1], lastworldpos[2],1.0);
+        auto lastWorldPos = m_service->GetCursorWorld();
+        m_renderer->SetWorldPoint(lastWorldPos[0], lastWorldPos[1], lastWorldPos[2], 1.0);
         m_renderer->WorldToDisplay();
-        auto lastdisplay = m_renderer->GetDisplayPoint();
+        auto lastDisplay = m_renderer->GetDisplayPoint();
 
         // 新的屏幕二维坐标，深度保持不变，确保深度关系正常
-        double curdisplay[3] =
+        double curDisplay[3] =
         {
-            lastdisplay[0] + static_cast<double>(dx),
-            lastdisplay[1] + static_cast<double>(dy),
-            lastdisplay[2]
+            lastDisplay[0] + static_cast<double>(dx),
+            lastDisplay[1] + static_cast<double>(dy),
+            lastDisplay[2]
         };
 
         // 将新的屏幕坐标反投影回世界空间
-        m_renderer->SetDisplayPoint(curdisplay);
+        m_renderer->SetDisplayPoint(curDisplay);
         m_renderer->DisplayToWorld();
-        auto curworldpos = m_renderer->GetWorldPoint();
+        auto curWorldPos = m_renderer->GetWorldPoint();
 
         // 齐次坐标除法，还原为 3D 世界坐标
-        double invW = (curworldpos[3] != 0.0) ? (1.0 / curworldpos[3]) : 1.0;
+        double invW = (curWorldPos[3] != 0.0) ? (1.0 / curWorldPos[3]) : 1.0;
         double newWorldPos[3] = {
-            curworldpos[0] * invW,
-            curworldpos[1] * invW,
-            curworldpos[2] * invW
+            curWorldPos[0] * invW,
+            curWorldPos[1] * invW,
+            curWorldPos[2] * invW
         };
 
         // 增量约束更新：只放开当前拖拽轴，其余轴保持不变，
         // 这样 2D 参考平面在 3D 视图中的拖动仍然遵守单轴切片语义。
-        auto deltaAxis = newWorldPos[m_dragAxis] - lastworldpos[m_dragAxis];
-        double finalyworld[3] = {
-            lastworldpos[0],
-            lastworldpos[1],
-            lastworldpos[2]
+        auto deltaAxis = newWorldPos[m_dragAxis] - lastWorldPos[m_dragAxis];
+        double finalWorld[3] = {
+            lastWorldPos[0],
+            lastWorldPos[1],
+            lastWorldPos[2]
         };
-        finalyworld[m_dragAxis] += deltaAxis;
+        finalWorld[m_dragAxis] += deltaAxis;
 
         // 全量更新
-        m_service->SetCursorWorldPosition(finalyworld, -1);
+        m_service->SetCursorWorldPosition(finalWorld, -1);
 
         return { true, true };
     }

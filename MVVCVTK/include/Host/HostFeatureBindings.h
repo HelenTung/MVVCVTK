@@ -8,7 +8,6 @@
 #include <memory>
 
 class StdRenderContext;
-
 // HostFeatureBindings 是 host/session 到 feature 的绑定边界，由 VtkAppHostSession 持有。
 // 它上接 HostRenderViewSet 的窗口查询，下接裁切 bridge / 孔隙算法服务，职责只限“把显式宿主命令绑定到 feature 能力”。
 // 为什么不放进 feature 插件：窗口 role、standalone hotkey、VTK observer 生命周期都是宿主事实，插件应保持可复用算法/交互能力。
@@ -51,24 +50,12 @@ public:
     bool ExitFeature();
     bool GetCropActive() const;
     void ClearCropInput() const;
-    std::function<bool()> BuildCropInput() const;
+    std::function<bool()> BuildCropInput();
 
     // 通用 TimerEvent pump 是 host/session 主线程收敛点；具体 feature 只在 tick 中消费自己的 pending 状态。
     void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
 
 private:
-    // 从共享 DataManager 把当前 vtkImageData 交给裁切 bridge；加载完成和显式激活都会复用同一刷新点。
-    bool SetCropInput();
-    // 按 request 解析 reference view 和 preview views，并把这些 host 窗口注入裁切 bridge。
-    bool SetCropViews(const HostCropRequest& request);
-    // 单次主线程 tick 分发入口；后续 feature 接入异步结果时复用这里，不再各自安装 VTK observer。
-    void OnHostTimer();
-    void DetachHostTimer();
-
-    // 会话核心服务的拷贝，shared_ptr 成员共享所有权；HostFeatureBindings 不单独创建数据或算法服务。
-    HostCoreServices m_core;
-    // 非拥有指针，指向 VtkAppHostSession::Impl 中的窗口集合；session 保证其生命周期覆盖本对象。
-    const HostRenderViewSet* m_renderViews = nullptr;
-    // TimerEvent 生命周期归 StdRenderContext；这里仅记住 host 选择的 tick 承载窗口。
-    std::weak_ptr<StdRenderContext> m_timerContext;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

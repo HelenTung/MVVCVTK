@@ -9,41 +9,79 @@
 // - 中间不掺入任何 preview 或算法逻辑，便于保持交互链路职责清晰
 
 #include "Interaction/CropBoxWidget.h"
+
+#include <vtkBoxRepresentation.h>
+#include <vtkBoxWidget2.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
 #include <vtkMatrix4x4.h>
-#include <vtkObjectFactory.h>
 #include <vtkPolyData.h>
 #include <vtkProperty.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkSmartPointer.h>
+
+#include <memory>
 #include <utility>
 
-namespace {
-constexpr double kBoxOutlineNormalRed = 0.74;
-constexpr double kBoxOutlineNormalGreen = 0.80;
-constexpr double kBoxOutlineNormalBlue = 0.86;
-constexpr double kBoxOutlineSelectedRed = 1.0;
-constexpr double kBoxOutlineSelectedGreen = 0.68;
-constexpr double kBoxOutlineSelectedBlue = 0.16;
-constexpr double kBoxLineWidth = 2.0;
-constexpr double kBoxHotWidth = 2.8;
-constexpr double kBoxFaceOpacity = 0.0;
-}
+static constexpr double kBoxOutlineNormalRed = 0.74;
+static constexpr double kBoxOutlineNormalGreen = 0.80;
+static constexpr double kBoxOutlineNormalBlue = 0.86;
+static constexpr double kBoxOutlineSelectedRed = 1.0;
+static constexpr double kBoxOutlineSelectedGreen = 0.68;
+static constexpr double kBoxOutlineSelectedBlue = 0.16;
+static constexpr double kBoxLineWidth = 2.0;
+static constexpr double kBoxHotWidth = 2.8;
+static constexpr double kBoxFaceOpacity = 0.0;
 
-vtkStandardNewMacro(CropBoxCallback);
+class CropBoxWidget::Impl final {
+public:
+    using BoundsCallback = CropBoxWidget::BoundsCallback;
 
-void CropBoxCallback::SetOwner(CropBoxWidget* owner)
-{
-    m_owner = owner;
-}
+    Impl();
+    ~Impl();
 
-void CropBoxCallback::Execute(vtkObject* caller, unsigned long eventId, void* callData)
-{
-    (void)caller;
-    (void)callData;
-    if (m_owner) {
-        m_owner->OnWidgetEvent(eventId);
-    }
-}
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 
-CropBoxWidget::CropBoxWidget()
+    void SetInteractor(vtkRenderWindowInteractor* interactor);
+    void SetReferenceWorldBounds(const std::array<double, 6>& worldBounds);
+    void SetWidgetWorldBounds(const std::array<double, 6>& worldBounds);
+    const std::array<double, 6>& GetCurrentWorldBounds() const;
+    bool GetCurrentWorldBox(
+        CropVectorDouble3Array& baseCenter,
+        CropVectorDouble3Array& baseSize,
+        CropMatrixDouble16Array& baseToNow) const;
+    void SetBoundsCallback(BoundsCallback callback);
+    bool SetEnabled(bool isEnabled);
+    bool GetEnabled() const;
+
+private:
+    static void SendWidgetEvent(
+        vtkObject* caller,
+        unsigned long eventId,
+        void* clientData,
+        void* callData);
+    static bool GetBoundsAreValid(const std::array<double, 6>& bounds);
+    static CropInteractionPhase GetEventPhase(unsigned long eventId);
+
+    void AttachObservers();
+    void OnWidgetEvent(unsigned long eventId);
+    void SetVisualState(CropInteractionPhase phase);
+
+    vtkRenderWindowInteractor* m_interactor = nullptr;
+    vtkSmartPointer<vtkBoxWidget2> m_widget;
+    vtkSmartPointer<vtkBoxRepresentation> m_representation;
+    vtkSmartPointer<vtkCallbackCommand> m_callbackCommand;
+    BoundsCallback m_boundsCallback;
+    bool m_isEnabled = false;
+    bool m_hasObservers = false;
+    std::array<unsigned long, 3> m_observerTags = { 0, 0, 0 };
+    std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    std::array<double, 6> m_baseBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+};
+
+CropBoxWidget::Impl::Impl()
 {
     // 初始化 widget 和 representation；
     // 普通态使用中性色，是因为裁切盒只是空间手柄；只有被 VTK 选中/拖拽时才用高亮色提示交互焦点。
@@ -68,20 +106,35 @@ CropBoxWidget::CropBoxWidget()
     m_representation->GetSelectedOutlineProperty()->SetLineWidth(kBoxHotWidth);
     m_widget->SetRepresentation(m_representation);
 
-    // VTK callback 只做事件转发；
-    // 交互相位和 preview 触发策略统一留给控制器与 bridge。
-    m_callbackCommand = vtkSmartPointer<CropBoxCallback>::New();
-    m_callbackCommand->SetOwner(this);
+    // VTK callback 只做事件投递；交互相位和 preview 触发策略统一留给 Impl 与 bridge。
+    m_callbackCommand = vtkSmartPointer<vtkCallbackCommand>::New();
+    m_callbackCommand->SetClientData(this);
+    m_callbackCommand->SetCallback(&CropBoxWidget::Impl::SendWidgetEvent);
 }
 
-void CropBoxWidget::SetInteractor(vtkRenderWindowInteractor* interactor)
+CropBoxWidget::Impl::~Impl()
+{
+    if (m_widget && m_hasObservers) {
+        for (const auto observerTag : m_observerTags) {
+            if (observerTag != 0) {
+                m_widget->RemoveObserver(observerTag);
+            }
+        }
+    }
+
+    if (m_callbackCommand) {
+        m_callbackCommand->SetClientData(nullptr);
+    }
+}
+
+void CropBoxWidget::Impl::SetInteractor(vtkRenderWindowInteractor* interactor)
 {
     // widget 与 interactor 的绑定始终在这里完成，避免上层直接碰 vtkBoxWidget2。
     m_interactor = interactor;
     m_widget->SetInteractor(interactor);
 }
 
-void CropBoxWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
+void CropBoxWidget::Impl::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
 {
     if (!GetBoundsAreValid(worldBounds)) {
         return;
@@ -96,7 +149,7 @@ void CropBoxWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBo
     m_representation->PlaceWidget(m_currentWorldBounds.data());
 }
 
-void CropBoxWidget::SetWidgetWorldBounds(const std::array<double, 6>& worldBounds)
+void CropBoxWidget::Impl::SetWidgetWorldBounds(const std::array<double, 6>& worldBounds)
 {
     if (!GetBoundsAreValid(worldBounds)) {
         return;
@@ -107,12 +160,12 @@ void CropBoxWidget::SetWidgetWorldBounds(const std::array<double, 6>& worldBound
     m_representation->PlaceWidget(m_currentWorldBounds.data());
 }
 
-const std::array<double, 6>& CropBoxWidget::GetCurrentWorldBounds() const
+const std::array<double, 6>& CropBoxWidget::Impl::GetCurrentWorldBounds() const
 {
     return m_currentWorldBounds;
 }
 
-bool CropBoxWidget::GetCurrentWorldBox(
+bool CropBoxWidget::Impl::GetCurrentWorldBox(
     CropVectorDouble3Array& baseCenter,
     CropVectorDouble3Array& baseSize,
     CropMatrixDouble16Array& baseToNow) const
@@ -184,12 +237,12 @@ bool CropBoxWidget::GetCurrentWorldBox(
     return true;
 }
 
-void CropBoxWidget::SetBoundsCallback(BoundsCallback callback)
+void CropBoxWidget::Impl::SetBoundsCallback(BoundsCallback callback)
 {
     m_boundsCallback = std::move(callback);
 }
 
-bool CropBoxWidget::SetEnabled(bool isEnabled)
+bool CropBoxWidget::Impl::SetEnabled(bool isEnabled)
 {
     // 启用 widget 必须先绑定 interactor；
     // 没有窗口事件源时直接返回失败，避免创建半启用状态。
@@ -226,19 +279,34 @@ bool CropBoxWidget::SetEnabled(bool isEnabled)
     return true;
 }
 
-bool CropBoxWidget::GetEnabled() const
+bool CropBoxWidget::Impl::GetEnabled() const
 {
     return m_isEnabled;
 }
 
-bool CropBoxWidget::GetBoundsAreValid(const std::array<double, 6>& bounds)
+void CropBoxWidget::Impl::SendWidgetEvent(
+    vtkObject* caller,
+    unsigned long eventId,
+    void* clientData,
+    void* callData)
+{
+    (void)caller;
+    (void)callData;
+
+    auto* widget = static_cast<CropBoxWidget::Impl*>(clientData);
+    if (widget) {
+        widget->OnWidgetEvent(eventId);
+    }
+}
+
+bool CropBoxWidget::Impl::GetBoundsAreValid(const std::array<double, 6>& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-CropInteractionPhase CropBoxWidget::GetEventPhase(unsigned long eventId)
+CropInteractionPhase CropBoxWidget::Impl::GetEventPhase(unsigned long eventId)
 {
     // Start/Interaction 一律视为拖拽中，只有 End 才切换到 Released。
     switch (eventId) {
@@ -253,20 +321,22 @@ CropInteractionPhase CropBoxWidget::GetEventPhase(unsigned long eventId)
     }
 }
 
-void CropBoxWidget::AttachObservers()
+void CropBoxWidget::Impl::AttachObservers()
 {
     if (m_hasObservers) {
         return;
     }
 
     // observer 只绑定一次，避免重复进入模式时收到多重回调。
-    m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand);
-    m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand);
-    m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand);
+    m_observerTags = {
+        m_widget->AddObserver(vtkCommand::StartInteractionEvent, m_callbackCommand),
+        m_widget->AddObserver(vtkCommand::InteractionEvent, m_callbackCommand),
+        m_widget->AddObserver(vtkCommand::EndInteractionEvent, m_callbackCommand)
+    };
     m_hasObservers = true;
 }
 
-void CropBoxWidget::OnWidgetEvent(unsigned long eventId)
+void CropBoxWidget::Impl::OnWidgetEvent(unsigned long eventId)
 {
     const auto interactionPhase = GetEventPhase(eventId);
     SetVisualState(interactionPhase);
@@ -295,7 +365,7 @@ void CropBoxWidget::OnWidgetEvent(unsigned long eventId)
     }
 }
 
-void CropBoxWidget::SetVisualState(CropInteractionPhase phase)
+void CropBoxWidget::Impl::SetVisualState(CropInteractionPhase phase)
 {
     const bool isDragging = phase == CropInteractionPhase::Dragging;
 
@@ -314,4 +384,58 @@ void CropBoxWidget::SetVisualState(CropInteractionPhase phase)
         kBoxOutlineSelectedGreen,
         kBoxOutlineSelectedBlue);
     m_representation->GetSelectedOutlineProperty()->SetLineWidth(kBoxHotWidth);
+}
+
+CropBoxWidget::CropBoxWidget()
+    : m_impl(std::make_unique<CropBoxWidget::Impl>())
+{
+}
+
+CropBoxWidget::~CropBoxWidget() = default;
+
+CropBoxWidget::CropBoxWidget(CropBoxWidget&&) noexcept = default;
+
+CropBoxWidget& CropBoxWidget::operator=(CropBoxWidget&&) noexcept = default;
+
+void CropBoxWidget::SetInteractor(vtkRenderWindowInteractor* interactor)
+{
+    m_impl->SetInteractor(interactor);
+}
+
+void CropBoxWidget::SetReferenceWorldBounds(const std::array<double, 6>& worldBounds)
+{
+    m_impl->SetReferenceWorldBounds(worldBounds);
+}
+
+void CropBoxWidget::SetWidgetWorldBounds(const std::array<double, 6>& worldBounds)
+{
+    m_impl->SetWidgetWorldBounds(worldBounds);
+}
+
+const std::array<double, 6>& CropBoxWidget::GetCurrentWorldBounds() const
+{
+    return m_impl->GetCurrentWorldBounds();
+}
+
+bool CropBoxWidget::GetCurrentWorldBox(
+    CropVectorDouble3Array& baseCenter,
+    CropVectorDouble3Array& baseSize,
+    CropMatrixDouble16Array& baseToNow) const
+{
+    return m_impl->GetCurrentWorldBox(baseCenter, baseSize, baseToNow);
+}
+
+void CropBoxWidget::SetBoundsCallback(BoundsCallback callback)
+{
+    m_impl->SetBoundsCallback(std::move(callback));
+}
+
+bool CropBoxWidget::SetEnabled(bool isEnabled)
+{
+    return m_impl->SetEnabled(isEnabled);
+}
+
+bool CropBoxWidget::GetEnabled() const
+{
+    return m_impl->GetEnabled();
 }

@@ -66,8 +66,8 @@ VolumeStrategy::VolumeStrategy() {
     volumeProperty->SetInterpolationTypeToLinear();
     m_volume->SetProperty(volumeProperty);
 
-    AddManagedProp(m_volume);
-    AddManagedProp(m_cubeAxes);
+    AttachProp(m_volume);
+    AttachProp(m_cubeAxes);
 }
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -109,20 +109,20 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     const bool hasMaterialChanged = GetFlagOn(flags, UpdateFlags::Material);
 
     // 体渲染这里把 Interaction 与 TF 放在同一个状态收敛块里处理：
-    // 1. 先推导“这一帧结束后”应该处于的交互态 nextIsInteracting
-    // 2. 再根据 nextIsInteracting 选择当前活动输入 activeResample
+    // 1. 先推导“这一帧结束后”应该处于的交互态 isNextInteracting
+    // 2. 再根据 isNextInteracting 选择当前活动输入 activeResample
     // 3. 只有在交互态真的切换，或 TF 刷新要求重新绑定当前输入时，才改 mapper 输入
     // 这样可以保证：
     // - 交互过程中 TF 高频变化仍然稳定落在 256 预览输入
     // - 静止期 TF 更新会继续落在 766 质量输入
     // - 同一帧里若同时出现 TF 与 Interaction，也只按最终状态收口一次
     if ((hasTfChanged || GetFlagOn(flags, UpdateFlags::Interaction)) && m_mapper) {
-        const bool nextIsInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
+        const bool isNextInteracting = GetFlagOn(flags, UpdateFlags::Interaction)
             ? params.isInteracting
             : m_isInteracting;
-        const bool hasInteractionChanged = (m_isInteracting != nextIsInteracting);
+        const bool hasInteractionChanged = (m_isInteracting != isNextInteracting);
 
-        m_isInteracting = nextIsInteracting;
+        m_isInteracting = isNextInteracting;
 
         auto activeResample = m_isInteracting ? m_interactionResample : m_qualityResample;
         if (activeResample && (hasInteractionChanged || hasTfChanged)) {

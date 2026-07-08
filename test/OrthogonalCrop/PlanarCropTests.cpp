@@ -633,7 +633,7 @@ void StartDataExport(int& failureCount)
 
     const auto initialVersion = dataManager.GetDataVersion();
     SetExpect(
-        dataManager.TakeImageSnapshot(image),
+        dataManager.SetImageSnapshot(image),
         "data export setup should accept a synthetic vtkImageData snapshot.",
         failureCount);
     SetExpect(

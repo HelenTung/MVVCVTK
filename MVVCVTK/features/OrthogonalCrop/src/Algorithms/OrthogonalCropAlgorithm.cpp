@@ -24,10 +24,79 @@
 #include <sstream>
 #include <vector>
 
-// 统一的 bounds 比较容差，避免浮点误差导致边界判断抖动。
-static constexpr double BoundsEpsilon = 1e-6;
+class OrthoCropAlgoImpl final {
+public:
+    // 统一的 bounds 比较容差，避免浮点误差导致边界判断抖动。
+    static constexpr double BoundsEpsilon = 1e-6;
 
-static std::array<double, 6> GetImageModelBounds(vtkImageData* image)
+    static std::array<double, 6> GetImageModelBounds(vtkImageData* image);
+    static std::array<double, 6> GetPolyBounds(vtkPolyData* polyData);
+    static bool GetBoundsValid(const std::array<double, 6>& bounds);
+    static std::string GetBoundsMessage(const char* prefix, const std::array<double, 6>& bounds);
+    static bool GetBoundsOverlap(
+        const std::array<double, 6>& inputModelBounds,
+        const std::array<double, 6>& cropInputModelBounds);
+    static bool GetBoundsContained(
+        const std::array<double, 6>& inputModelBounds,
+        const std::array<double, 6>& cropInputModelBounds);
+    static std::array<double, 6> GetBoxBounds(const std::array<double, 16>& boxToInputModelMatrixData);
+    static vtkSmartPointer<vtkTransform> GetBoxToInput(const std::array<double, 16>& boxToInputModelMatrixData);
+    static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataModel& cropData);
+    static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData);
+    static bool GetPointInBox(const double boxPoint[4]);
+    static std::size_t GetVoxelBytes(vtkImageData* image);
+    static std::size_t GetVoxelCount(const std::array<int, 6>& indexBounds);
+    static std::size_t GetRamBytes(
+        const OrthogonalCropRequest& request,
+        std::size_t fallbackAvailableRamBytes);
+    static OrthogonalCropStatistics GetAlgorithmDiagnostics(
+        OrthogonalCropDataSource dataSource,
+        OrthogonalCropOperation operation,
+        CropShape geometryType,
+        CropRemovalMode removalMode);
+    static OrthogonalCropResult GetResultFromRequest(const OrthogonalCropRequest& request);
+    static vtkSmartPointer<vtkImageData> GetMaskImage(
+        vtkImageData* image,
+        const CropDataModel& cropData,
+        const std::array<int, 6>& indexBounds,
+        CropRemovalMode removalMode);
+    static vtkSmartPointer<vtkImageData> GetExtractedImage(
+        vtkImageData* image,
+        const std::array<int, 6>& indexBounds);
+    static void SetRemovedBg(
+        vtkImageData* submitImage,
+        const CropDataModel& cropData,
+        CropRemovalMode removalMode,
+        const std::array<int, 6>& inputImageIndexBounds);
+    static vtkSmartPointer<vtkPolyData> GetOutlineData(const CropDataModel& cropData);
+    static bool BuildCropDataModel(
+        vtkImageData* image,
+        const OrthogonalCropRequest& request,
+        CropDataModel& cropData,
+        CropFailure& failureReason,
+        std::string& message,
+        bool isPartialOk);
+    static bool BuildCropDataModel(
+        vtkPolyData* polyData,
+        const OrthogonalCropRequest& request,
+        CropDataModel& cropData,
+        CropFailure& failureReason,
+        std::string& message,
+        bool isPartialOk);
+    static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
+    static OrthogonalCropResult GetBoxPreviewResult(
+        const CropDataModel& cropData,
+        const OrthogonalCropRequest& request);
+    static OrthogonalCropResult GetSubmitResult(
+        vtkImageData* image,
+        const CropDataModel& cropData,
+        const OrthogonalCropRequest& request,
+        CropShape geometryType,
+        CropRemovalMode removalMode,
+        std::size_t availableRamBytes);
+};
+
+std::array<double, 6> OrthoCropAlgoImpl::GetImageModelBounds(vtkImageData* image)
 {
     // vtkImageData::GetBounds 返回 image model 范围；底层仍通过 VTK physical-point API 表达。
     // 这里不再额外做 world/image model 折叠，算法层后续所有 image 校验都直接用 image model 语义。
@@ -41,7 +110,7 @@ static std::array<double, 6> GetImageModelBounds(vtkImageData* image)
     return { rawBounds[0], rawBounds[1], rawBounds[2], rawBounds[3], rawBounds[4], rawBounds[5] };
 }
 
-static std::array<double, 6> GetPolyBounds(vtkPolyData* polyData)
+std::array<double, 6> OrthoCropAlgoImpl::GetPolyBounds(vtkPolyData* polyData)
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!polyData) {
@@ -53,14 +122,14 @@ static std::array<double, 6> GetPolyBounds(vtkPolyData* polyData)
     return { rawBounds[0], rawBounds[1], rawBounds[2], rawBounds[3], rawBounds[4], rawBounds[5] };
 }
 
-static bool GetBoundsValid(const std::array<double, 6>& bounds)
+bool OrthoCropAlgoImpl::GetBoundsValid(const std::array<double, 6>& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-static std::string GetBoundsMessage(const char* prefix, const std::array<double, 6>& bounds)
+std::string OrthoCropAlgoImpl::GetBoundsMessage(const char* prefix, const std::array<double, 6>& bounds)
 {
     std::ostringstream stream;
     stream << prefix << " ["
@@ -70,7 +139,7 @@ static std::string GetBoundsMessage(const char* prefix, const std::array<double,
     return stream.str();
 }
 
-static bool GetBoundsOverlap(
+bool OrthoCropAlgoImpl::GetBoundsOverlap(
     const std::array<double, 6>& inputModelBounds,
     const std::array<double, 6>& cropInputModelBounds)
 {
@@ -83,7 +152,7 @@ static bool GetBoundsOverlap(
         && cropInputModelBounds[4] < inputModelBounds[5] - BoundsEpsilon;
 }
 
-static bool GetBoundsContained(
+bool OrthoCropAlgoImpl::GetBoundsContained(
     const std::array<double, 6>& inputModelBounds,
     const std::array<double, 6>& cropInputModelBounds)
 {
@@ -97,7 +166,7 @@ static bool GetBoundsContained(
         && cropInputModelBounds[5] <= inputModelBounds[5] + BoundsEpsilon;
 }
 
-static std::array<double, 6> GetBoxBounds(const std::array<double, 16>& boxToInputModelMatrixData)
+std::array<double, 6> OrthoCropAlgoImpl::GetBoxBounds(const std::array<double, 16>& boxToInputModelMatrixData)
 {
     // 从 boxToInputModelMatrix 派生 active input model AABB；
     // 8 个标准盒角点保留有向盒的真实外包范围，后续用它做校验、index 吸附和统计。
@@ -121,7 +190,7 @@ static std::array<double, 6> GetBoxBounds(const std::array<double, 16>& boxToInp
     return { bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5] };
 }
 
-static vtkSmartPointer<vtkTransform> GetBoxToInput(const std::array<double, 16>& boxToInputModelMatrixData)
+vtkSmartPointer<vtkTransform> OrthoCropAlgoImpl::GetBoxToInput(const std::array<double, 16>& boxToInputModelMatrixData)
 {
     auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToInputModelMatrix->DeepCopy(boxToInputModelMatrixData.data());
@@ -132,7 +201,7 @@ static vtkSmartPointer<vtkTransform> GetBoxToInput(const std::array<double, 16>&
     return transform;
 }
 
-static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataModel& cropData)
+vtkSmartPointer<vtkMatrix4x4> OrthoCropAlgoImpl::GetInputModelToBoxMatrix(const CropDataModel& cropData)
 {
     auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     boxToInputModelMatrix->DeepCopy(cropData.GetBoxMatrix().data());
@@ -144,7 +213,7 @@ static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataMode
     return inputModelToBoxMatrix;
 }
 
-static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData)
+bool OrthoCropAlgoImpl::GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData)
 {
     // 判断标准盒的三条局部轴在 input model 中是否仍分别落在单一坐标轴上。
     // 允许轴交换、90 度旋转和翻转；若某一列混入多个分量，或多个 box 轴占用同一 input model 轴，
@@ -173,7 +242,7 @@ static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixDa
     return true;
 }
 
-static bool GetPointInBox(const double boxPoint[4])
+bool OrthoCropAlgoImpl::GetPointInBox(const double boxPoint[4])
 {
     const double invW = std::abs(boxPoint[3]) > 1e-12 ? 1.0 / boxPoint[3] : 1.0;
     return std::abs(boxPoint[0] * invW) <= 1.0 + BoundsEpsilon
@@ -181,7 +250,7 @@ static bool GetPointInBox(const double boxPoint[4])
         && std::abs(boxPoint[2] * invW) <= 1.0 + BoundsEpsilon;
 }
 
-static std::size_t GetVoxelBytes(vtkImageData* image)
+std::size_t OrthoCropAlgoImpl::GetVoxelBytes(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -191,7 +260,7 @@ static std::size_t GetVoxelBytes(vtkImageData* image)
         * static_cast<std::size_t>(image->GetNumberOfScalarComponents());
 }
 
-static std::size_t GetVoxelCount(const std::array<int, 6>& indexBounds)
+std::size_t OrthoCropAlgoImpl::GetVoxelCount(const std::array<int, 6>& indexBounds)
 {
     const std::size_t sizeI = static_cast<std::size_t>(indexBounds[1] - indexBounds[0] + 1);
     const std::size_t sizeJ = static_cast<std::size_t>(indexBounds[3] - indexBounds[2] + 1);
@@ -199,7 +268,7 @@ static std::size_t GetVoxelCount(const std::array<int, 6>& indexBounds)
     return sizeI * sizeJ * sizeK;
 }
 
-static std::size_t GetRamBytes(
+std::size_t OrthoCropAlgoImpl::GetRamBytes(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
@@ -208,9 +277,7 @@ static std::size_t GetRamBytes(
         : fallbackAvailableRamBytes;
 }
 
-static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
-
-static OrthogonalCropStatistics GetAlgorithmDiagnostics(
+OrthogonalCropStatistics OrthoCropAlgoImpl::GetAlgorithmDiagnostics(
     OrthogonalCropDataSource dataSource,
     OrthogonalCropOperation operation,
     CropShape geometryType,
@@ -224,7 +291,7 @@ static OrthogonalCropStatistics GetAlgorithmDiagnostics(
     return statistics;
 }
 
-static OrthogonalCropResult GetResultFromRequest(const OrthogonalCropRequest& request)
+OrthogonalCropResult OrthoCropAlgoImpl::GetResultFromRequest(const OrthogonalCropRequest& request)
 {
     OrthogonalCropResult result;
     result.SetResolvedDataSource(request.GetDataSource());
@@ -234,7 +301,7 @@ static OrthogonalCropResult GetResultFromRequest(const OrthogonalCropRequest& re
     return result;
 }
 
-static vtkSmartPointer<vtkImageData> GetMaskImage(
+vtkSmartPointer<vtkImageData> OrthoCropAlgoImpl::GetMaskImage(
     vtkImageData* image,
     const CropDataModel& cropData,
     const std::array<int, 6>& indexBounds,
@@ -391,7 +458,7 @@ static vtkSmartPointer<vtkImageData> GetMaskImage(
     return maskImage;
 }
 
-static vtkSmartPointer<vtkImageData> GetExtractedImage(
+vtkSmartPointer<vtkImageData> OrthoCropAlgoImpl::GetExtractedImage(
     vtkImageData* image,
     const std::array<int, 6>& indexBounds)
 {
@@ -433,7 +500,7 @@ static vtkSmartPointer<vtkImageData> GetExtractedImage(
     return output;
 }
 
-static void SetRemovedBg(
+void OrthoCropAlgoImpl::SetRemovedBg(
     vtkImageData* submitImage,
     const CropDataModel& cropData,
     CropRemovalMode removalMode,
@@ -520,7 +587,7 @@ static void SetRemovedBg(
     submitImage->Modified();
 }
 
-static vtkSmartPointer<vtkPolyData> GetOutlineData(const CropDataModel& cropData)
+vtkSmartPointer<vtkPolyData> OrthoCropAlgoImpl::GetOutlineData(const CropDataModel& cropData)
 {
     // box 3D outline preview 的几何真源同样是标准盒 [-1,1]^3 + boxToInputModelMatrix。
     auto cube = vtkSmartPointer<vtkCubeSource>::New();
@@ -553,21 +620,21 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     // inputModelBounds 是当前输入数据在 active input model 下的 AABB，
     // cropInputModelBounds 是 boxToInputModelMatrix 派生出的裁切盒外接 AABB；
     // 二者已在同一坐标系里，因此这里只判断正体积、相交或包含关系。
-    if (!GetBoundsValid(inputModelBounds)) {
+    if (!OrthoCropAlgoImpl::GetBoundsValid(inputModelBounds)) {
         failureReason = CropFailure::BadBounds;
-        message = GetBoundsMessage("Input model bounds are invalid:", inputModelBounds);
+        message = OrthoCropAlgoImpl::GetBoundsMessage("Input model bounds are invalid:", inputModelBounds);
         return false;
     }
 
-    if (!GetBoundsValid(cropInputModelBounds)) {
+    if (!OrthoCropAlgoImpl::GetBoundsValid(cropInputModelBounds)) {
         failureReason = CropFailure::BadBounds;
-        message = GetBoundsMessage("Crop input model bounds are invalid:", cropInputModelBounds);
+        message = OrthoCropAlgoImpl::GetBoundsMessage("Crop input model bounds are invalid:", cropInputModelBounds);
         return false;
     }
 
     const bool isInRange = isPartialOk
-        ? GetBoundsOverlap(inputModelBounds, cropInputModelBounds)
-        : GetBoundsContained(inputModelBounds, cropInputModelBounds);
+        ? OrthoCropAlgoImpl::GetBoundsOverlap(inputModelBounds, cropInputModelBounds)
+        : OrthoCropAlgoImpl::GetBoundsContained(inputModelBounds, cropInputModelBounds);
     if (!isInRange) {
         failureReason = CropFailure::OutOfBounds;
         message = isPartialOk
@@ -593,12 +660,12 @@ bool OrthogonalCropAlgorithm::GetCropDataModel(
     // boxToInputModelMatrix 继续作为精确有向盒真源，inputModelBounds 只派生为校验和粗范围缓存。
     cropData = CropDataModel();
     cropData.SetBoxMatrix(request.GetBoxMatrix());
-    cropData.SetInputBounds(GetBoxBounds(request.GetBoxMatrix()));
+    cropData.SetInputBounds(OrthoCropAlgoImpl::GetBoxBounds(request.GetBoxMatrix()));
 
     return GetBoundsAreValid(inputModelBounds, cropData.GetInputBounds(), failureReason, message, isPartialOk);
 }
 
-static bool BuildCropDataModel(
+bool OrthoCropAlgoImpl::BuildCropDataModel(
     vtkImageData* image,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
@@ -623,7 +690,7 @@ static bool BuildCropDataModel(
         isPartialOk);
 }
 
-static bool BuildCropDataModel(
+bool OrthoCropAlgoImpl::BuildCropDataModel(
     vtkPolyData* polyData,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
@@ -648,7 +715,7 @@ static bool BuildCropDataModel(
         isPartialOk);
 }
 
-static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData)
+std::array<int, 6> OrthoCropAlgoImpl::GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData)
 {
     // image 路径最终都要落到体素级执行，因此先把已经折叠回 image model 的 bounds
     // 通过 vtkImageData 原生的 image-model -> continuous-index 变换吸附到 index 整数区间。
@@ -706,14 +773,14 @@ static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropD
 
 vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const CropDataModel& cropData)
 {
-    return GetOutlineData(cropData);
+    return OrthoCropAlgoImpl::GetOutlineData(cropData);
 }
 
-static OrthogonalCropResult GetBoxPreviewResult(
+OrthogonalCropResult OrthoCropAlgoImpl::GetBoxPreviewResult(
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request)
 {
-    auto result = GetResultFromRequest(request);
+    auto result = OrthoCropAlgoImpl::GetResultFromRequest(request);
     result.SetCropDataModel(cropData);
 
     auto statistics = GetAlgorithmDiagnostics(
@@ -736,7 +803,7 @@ static OrthogonalCropResult GetBoxPreviewResult(
     return result;
 }
 
-static OrthogonalCropResult GetSubmitResult(
+OrthogonalCropResult OrthoCropAlgoImpl::GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
@@ -744,7 +811,7 @@ static OrthogonalCropResult GetSubmitResult(
     CropRemovalMode removalMode,
     std::size_t availableRamBytes)
 {
-    auto result = GetResultFromRequest(request);
+    auto result = OrthoCropAlgoImpl::GetResultFromRequest(request);
     result.SetCropDataModel(cropData);
 
     auto diagnostics = GetAlgorithmDiagnostics(
@@ -811,7 +878,7 @@ static OrthogonalCropResult GetSubmitResult(
         removalMode,
         snappedIndexBounds);
 
-    auto submitMaskImage = ::GetMaskImage(
+    auto submitMaskImage = GetMaskImage(
         image,
         cropData,
         snappedIndexBounds,
@@ -852,7 +919,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
-    auto result = GetResultFromRequest(request);
+    auto result = OrthoCropAlgoImpl::GetResultFromRequest(request);
 
     // request 只携带 boxToInputModelMatrix；image-backed 入口负责派生 cropData 供 preview / submit 复用。
     CropDataModel cropData;
@@ -863,8 +930,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
         !isSubmit
         || request.GetRemovalMode() == CropRemovalMode::KeepInside
         || request.GetRemovalMode() == CropRemovalMode::RemoveInside;
-    if (!BuildCropDataModel(image, request, cropData, failureReason, message, isPartialOk)) {
-        auto statistics = GetAlgorithmDiagnostics(
+    if (!OrthoCropAlgoImpl::BuildCropDataModel(image, request, cropData, failureReason, message, isPartialOk)) {
+        auto statistics = OrthoCropAlgoImpl::GetAlgorithmDiagnostics(
             request.GetDataSource(),
             request.GetOperation(),
             request.GetGeometryType(),
@@ -878,23 +945,23 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
-        return GetBoxPreviewResult(
+        return OrthoCropAlgoImpl::GetBoxPreviewResult(
             cropData,
             request);
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Submit) {
-        return GetSubmitResult(
+        return OrthoCropAlgoImpl::GetSubmitResult(
             image,
             cropData,
             request,
             request.GetGeometryType(),
             request.GetRemovalMode(),
-            GetRamBytes(request, fallbackAvailableRamBytes));
+            OrthoCropAlgoImpl::GetRamBytes(request, fallbackAvailableRamBytes));
     }
 
-    auto fallbackResult = GetResultFromRequest(request);
-    auto diagnostics = GetAlgorithmDiagnostics(
+    auto fallbackResult = OrthoCropAlgoImpl::GetResultFromRequest(request);
+    auto diagnostics = OrthoCropAlgoImpl::GetAlgorithmDiagnostics(
         request.GetDataSource(),
         request.GetOperation(),
         request.GetGeometryType(),
@@ -913,14 +980,14 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     vtkPolyData* polyData,
     const OrthogonalCropRequest& request)
 {
-    auto result = GetResultFromRequest(request);
+    auto result = OrthoCropAlgoImpl::GetResultFromRequest(request);
 
     // polydata preview 复用同一份 boxToInputModelMatrix；router 已保证 submit 不会进入这里。
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
-        auto statistics = GetAlgorithmDiagnostics(
+    if (!OrthoCropAlgoImpl::BuildCropDataModel(polyData, request, cropData, failureReason, message, true)) {
+        auto statistics = OrthoCropAlgoImpl::GetAlgorithmDiagnostics(
             request.GetDataSource(),
             request.GetOperation(),
             request.GetGeometryType(),
@@ -934,13 +1001,13 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     }
 
     if (request.GetOperation() == OrthogonalCropOperation::Preview) {
-        return GetBoxPreviewResult(
+        return OrthoCropAlgoImpl::GetBoxPreviewResult(
             cropData,
             request);
     }
 
-    auto fallbackResult = GetResultFromRequest(request);
-    auto diagnostics = GetAlgorithmDiagnostics(
+    auto fallbackResult = OrthoCropAlgoImpl::GetResultFromRequest(request);
+    auto diagnostics = OrthoCropAlgoImpl::GetAlgorithmDiagnostics(
         request.GetDataSource(),
         request.GetOperation(),
         request.GetGeometryType(),

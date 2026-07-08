@@ -11,22 +11,6 @@
 #include <cmath>
 #include <algorithm>
 
-namespace {
-
-    bool GetIsSliceMode(VizMode mode)
-    {
-        return mode == VizMode::SliceTop_down
-            || mode == VizMode::SliceFront_back
-            || mode == VizMode::SliceLeft_right;
-    }
-
-    // 窗宽/窗位灵敏度系数（每像素对应的 WW/WC 变化量）
-    // 可根据数据范围动态缩放，此处使用固定系数作为合理默认值
-    constexpr double kWWSensitivity = 2.0;   // 水平拖动 → ΔWW（对比度）
-    constexpr double kWCSensitivity = 2.0;   // 垂直拖动 → ΔWC（亮度/窗位）
-
-} // namespace
-
 Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
@@ -38,7 +22,11 @@ Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
 
 InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
 {
-    if (!m_service || !GetIsSliceMode(eve.vizMode)) {
+    const bool isSliceMode =
+        eve.vizMode == VizMode::SliceTop_down
+        || eve.vizMode == VizMode::SliceFront_back
+        || eve.vizMode == VizMode::SliceLeft_right;
+    if (!m_service || !isSliceMode) {
         return {};
     }
 
@@ -53,7 +41,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
             ? step : -step;
         m_service->SetSliceScroll(delta);
-        // m_service->MarkDirty();
+        // m_service->SetDirty();
         return { true, true };  // hasVtkAbort=true：阻止 VTK 默认滚轮相机缩放
     }
 
@@ -159,7 +147,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 else if (eve.vizMode == VizMode::SliceLeft_right) {
                     m_service->SetCursorWorldPosition(worldPos, 0);
                 }
-                m_service->MarkDirty();
+                m_service->SetDirty();
             }
             return { true, true };
         }
@@ -186,7 +174,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 }
             }
 
-            m_service->AdjustWindowLevel(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
+            m_service->SetWindowLevelDrag(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
         // zoom放大

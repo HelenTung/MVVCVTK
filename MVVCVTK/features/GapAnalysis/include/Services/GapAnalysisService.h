@@ -18,7 +18,16 @@
 
 class AbstractAppService;
 class AbstractVisualStrategy;
-class GapDoneState;
+struct GapParamSnapshot {
+    SurfaceParams surfParams;
+    AdvancedSurfaceParams advParams;
+    VoidDetectionParams voidParams;
+};
+
+struct GapOverlayBinding {
+    std::shared_ptr<AbstractAppService> service;
+    std::shared_ptr<AbstractVisualStrategy> overlayStrategy;
+};
 
 class GapAnalysisService : public IGapAnalysisService {
 public:
@@ -65,23 +74,12 @@ public:
 private:
     using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
 
-    struct ParameterSnapshot {
-        SurfaceParams surfParams;
-        AdvancedSurfaceParams advParams;
-        VoidDetectionParams voidParams;
-    };
-
-    struct DisplayOverlayBinding {
-        std::shared_ptr<AbstractAppService> service;
-        std::shared_ptr<AbstractVisualStrategy> overlayStrategy;
-    };
-
     VolumeBufferSnapshot GetInputSnapshot() const;
-    ParameterSnapshot GetParameterSnapshot() const;
+    GapParamSnapshot GetParamSnapshot() const;
 
     void StartWorker(
         VolumeBufferSnapshot inputSnapshot,
-        ParameterSnapshot params);
+        GapParamSnapshot params);
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
@@ -91,13 +89,6 @@ private:
     bool SetStoredView();
     void ClearDisplayState();
     double GetDisplayIso(const VolumeBuffer& inputSnapshot) const;
-
-    static bool BuildVolumeBuffer(
-        vtkSmartPointer<vtkImageData> image,
-        VolumeBuffer& out);
-    static vtkSmartPointer<vtkImageData> BuildLabelImage(
-        const std::vector<int>& labelVolume,
-        const VolumeBuffer& volBuf);
 
     mutable std::mutex m_inputMutex;
     VolumeBufferSnapshot m_inputSnapshot;
@@ -116,13 +107,12 @@ private:
     std::thread m_workerThread;
     std::atomic<bool> m_isStopping{ false };
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
-
-    // 插件内部 pending callback 状态；只暴露主线程轮询接口，不反向 include App 层。
-    std::unique_ptr<GapDoneState> m_completionCallbackState;
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 
     std::vector<std::shared_ptr<AbstractAppService>> m_meshTargets;
     std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> m_sliceTargets;
-    std::vector<DisplayOverlayBinding> m_displayOverlayBindings;
+    std::vector<GapOverlayBinding> m_displayOverlayBindings;
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     GapAnalysisSurfaceRequest m_displaySurfaceRequest;

@@ -125,7 +125,7 @@ public:
     vtkProp3D* GetMainProp() override;
     void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool isVisible) override;
-    void AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
+    void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override {
         return m_sharedState ? m_sharedState->GetModelMatrix() : InteractiveService::GetModelMatrix();

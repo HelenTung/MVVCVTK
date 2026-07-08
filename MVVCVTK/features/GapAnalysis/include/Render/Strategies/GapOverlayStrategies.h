@@ -31,7 +31,7 @@ public:
 		// 多边形偏移设置，防止在极少数重合表面发生 Z-Fighting
         m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
 
-        AddManagedProp(m_actor);
+        AttachProp(m_actor);
     }
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
@@ -79,7 +79,7 @@ public:
         m_slice->GetProperty()->SetUseLookupTableScalarRange(1);
         m_slice->GetProperty()->SetLayerNumber(1); // 提高层级防止 Z-fighting
 		m_slice->GetProperty()->SetInterpolationTypeToNearest(); // 最近邻插值，保持标签边界清晰
-        AddManagedProp(m_slice);
+        AttachProp(m_slice);
     }
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {

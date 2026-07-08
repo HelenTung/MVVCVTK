@@ -15,7 +15,6 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 #include "Host/VtkAppHostSession.h"
 
-namespace {
 static std::vector<TFNode> BuildVolumeTF()
 {
     // 这组 transfer function 是 standalone 五视图调试布局的视觉输入；真实上位机应按自己的显示配方下发 WindowConfig。
@@ -137,7 +136,6 @@ static HostGapConfig BuildGapConfig()
     config.voidDetection.tensorWindowSize = 1;
     config.voidDetection.erosionIterations = 2;
     return config;
-}
 }
 
 int main()

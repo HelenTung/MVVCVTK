@@ -14,12 +14,10 @@
 #include <vtkMatrix4x4.h>
 #include <vtkProperty.h>
 
-namespace {
-constexpr double kOverlayPreviewRed = 0.72;
-constexpr double kOverlayPreviewGreen = 0.76;
-constexpr double kOverlayPreviewBlue = 0.80;
-constexpr double kOverlayMaskAlpha = 0.42;
-}
+static constexpr double kOverlayPreviewRed = 0.72;
+static constexpr double kOverlayPreviewGreen = 0.76;
+static constexpr double kOverlayPreviewBlue = 0.80;
+static constexpr double kOverlayMaskAlpha = 0.42;
 
 CropOverlay::CropOverlay()
 {
@@ -80,15 +78,17 @@ CropOverlay::CropOverlay()
 
     SetStyle();
 
-    AddManagedProp(m_previewRegionActor);
-    AddManagedProp(m_outlineActor);
-    AddManagedProp(m_polyDataActor);
-    AddManagedProp(m_maskSlice);
+    AttachProp(m_previewRegionActor);
+    AttachProp(m_outlineActor);
+    AttachProp(m_polyDataActor);
+    AttachProp(m_maskSlice);
+
 }
 
 void CropOverlay::SetInputData(vtkSmartPointer<vtkDataObject> data)
 {
     (void)data;
+
 }
 
 void CropOverlay::SetSliceAxis(int axis)
@@ -96,6 +96,7 @@ void CropOverlay::SetSliceAxis(int axis)
     // sliceAxis 直接决定当前窗口是走 2D mask 逻辑还是 3D 线框参照逻辑。
     m_sliceAxis = axis;
     SetVisibleProps();
+
 }
 
 void CropOverlay::SetRemovalMode(CropRemovalMode removalMode)
@@ -109,6 +110,7 @@ void CropOverlay::SetRemovalMode(CropRemovalMode removalMode)
     // 颜色不再承载 KeepInside / RemoveInside 语义；
     // 记录模式只是为了保持 overlay 与后端请求的状态一致。
     SetStyle();
+
 }
 
 void CropOverlay::SetRefVisible(bool isVisible)
@@ -119,6 +121,7 @@ void CropOverlay::SetRefVisible(bool isVisible)
 
     m_isRefVisible = isVisible;
     SetVisibleProps();
+
 }
 
 void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
@@ -159,6 +162,7 @@ void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
     // 可见性统一在最后收口；
     // 这样数据更新和窗口轴向切换都能复用同一套显示决策。
     SetVisibleProps();
+
 }
 
 void CropOverlay::ClearPreview()
@@ -170,6 +174,7 @@ void CropOverlay::ClearPreview()
     m_outlineActor->SetVisibility(false);
     m_polyDataActor->SetVisibility(false);
     m_maskSlice->SetVisibility(false);
+
 }
 
 void CropOverlay::SetVisualState(const RenderParams& params, UpdateFlags flags)
@@ -204,6 +209,7 @@ void CropOverlay::SetVisualState(const RenderParams& params, UpdateFlags flags)
         // 2D overlay 始终以当前窗口 cursor 所在切面切 mask。
         m_maskSlice->SetVisibility(true);
     }
+
 }
 
 void CropOverlay::SetVisibleProps()
@@ -213,6 +219,7 @@ void CropOverlay::SetVisibleProps()
     m_outlineActor->SetVisibility(m_isRefVisible && m_hasOutline && m_sliceAxis < 0 ? 1 : 0);
     m_previewRegionActor->SetVisibility(false);
     m_maskSlice->SetVisibility(m_hasMaskImage && m_sliceAxis >= 0 ? 1 : 0);
+
 }
 
 void CropOverlay::SetStyle()
@@ -231,6 +238,7 @@ void CropOverlay::SetStyle()
             kOverlayMaskAlpha);
     }
     m_maskLut->Build();
+
 }
 
 void CropOverlay::SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData)

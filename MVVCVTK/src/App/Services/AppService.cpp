@@ -35,7 +35,7 @@ void AbstractAppService::SetCurrentStrategy(
     m_isDirty = true;
 }
 
-void AbstractAppService::AddOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
+void AbstractAppService::AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
     if (!strategy) return;
 
     const auto sameStrategy = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
@@ -384,7 +384,7 @@ void VizService::SetElementVisible(uint32_t flagBit, bool isVisible)
     m_sharedState->SetElementVisible(flagBit, isVisible);
 }
 
-void VizService::AdjustWindowLevel(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
+void VizService::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
     if (!m_sharedState) return;
 

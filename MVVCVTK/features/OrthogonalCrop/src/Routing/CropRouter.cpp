@@ -6,6 +6,12 @@
 
 #include "Routing/CropRouter.h"
 
+#include "Algorithms/OrthogonalCropAlgorithm.h"
+#include "Algorithms/PlanarCropAlgorithm.h"
+
+#include <vtkImageData.h>
+#include <vtkPolyData.h>
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -16,40 +22,71 @@
 #endif
 #endif
 
+#include <memory>
 #include <string>
 #include <utility>
 
-void CropRouter::SetInputImage(vtkSmartPointer<vtkImageData> image)
+class CropRouter::Impl final {
+public:
+    void SetInputImage(vtkSmartPointer<vtkImageData> image);
+    vtkSmartPointer<vtkImageData> GetInputImage() const;
+    void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
+    void ClearInputPolyData();
+    vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
+    void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
+    OrthogonalCropDataSource GetActiveDataSource() const;
+    std::array<double, 6> GetActiveInputModelBounds() const;
+    OrthogonalCropRequest GetDefaultRequest() const;
+    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
+
+private:
+    OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
+    OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
+    std::array<double, 6> GetImageModelBounds() const;
+    std::array<double, 6> GetPolyBounds() const;
+    OrthogonalCropResult GetRouterFailureResult(
+        const OrthogonalCropRequest& request,
+        CropFailure failureReason,
+        const std::string& message) const;
+    std::size_t GetRamBytes() const;
+
+    // router 持有当前后端输入快照，公开头文件不暴露具体缓存策略。
+    vtkSmartPointer<vtkImageData> m_inputImage;
+    vtkSmartPointer<vtkPolyData> m_inputPolyData;
+    OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::ImageData;
+};
+
+void CropRouter::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
     m_inputImage = std::move(image);
 }
 
-vtkSmartPointer<vtkImageData> CropRouter::GetInputImage() const
+vtkSmartPointer<vtkImageData> CropRouter::Impl::GetInputImage() const
 {
     return m_inputImage;
 }
 
-void CropRouter::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
+void CropRouter::Impl::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
     m_inputPolyData = std::move(polyData);
 }
 
-void CropRouter::ClearInputPolyData()
+void CropRouter::Impl::ClearInputPolyData()
 {
     m_inputPolyData = nullptr;
 }
 
-vtkSmartPointer<vtkPolyData> CropRouter::GetInputPolyData() const
+vtkSmartPointer<vtkPolyData> CropRouter::Impl::GetInputPolyData() const
 {
     return m_inputPolyData;
 }
 
-void CropRouter::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
+void CropRouter::Impl::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
 {
     m_preferredDataSource = dataSource;
 }
 
-OrthogonalCropDataSource CropRouter::GetActiveDataSource() const
+OrthogonalCropDataSource CropRouter::Impl::GetActiveDataSource() const
 {
     const bool hasImage = GetInputImage() != nullptr;
     const bool hasPolyData = GetInputPolyData() != nullptr;
@@ -77,7 +114,7 @@ OrthogonalCropDataSource CropRouter::GetActiveDataSource() const
     return m_preferredDataSource;
 }
 
-std::array<double, 6> CropRouter::GetActiveInputModelBounds() const
+std::array<double, 6> CropRouter::Impl::GetActiveInputModelBounds() const
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     switch (GetActiveDataSource()) {
@@ -91,7 +128,7 @@ std::array<double, 6> CropRouter::GetActiveInputModelBounds() const
     }
 }
 
-OrthogonalCropRequest CropRouter::GetDefaultRequest() const
+OrthogonalCropRequest CropRouter::Impl::GetDefaultRequest() const
 {
     const auto activeDataSource = GetActiveDataSource();
     OrthogonalCropRequest request;
@@ -102,7 +139,7 @@ OrthogonalCropRequest CropRouter::GetDefaultRequest() const
     return request;
 }
 
-OrthogonalCropResult CropRouter::GetResult(const OrthogonalCropRequest& request) const
+OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& request) const
 {
     // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
     switch (request.GetGeometryType()) {
@@ -120,7 +157,7 @@ OrthogonalCropResult CropRouter::GetResult(const OrthogonalCropRequest& request)
     }
 }
 
-OrthogonalCropResult CropRouter::GetBoxResult(const OrthogonalCropRequest& request) const
+OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest& request) const
 {
     // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
     switch (request.GetOperation()) {
@@ -181,7 +218,7 @@ OrthogonalCropResult CropRouter::GetBoxResult(const OrthogonalCropRequest& reque
         "Router has no executable path for this crop route.");
 }
 
-OrthogonalCropResult CropRouter::GetPlaneResult(const OrthogonalCropRequest& request) const
+OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropRequest& request) const
 {
     // Plane 路由放行与 Box 相同的主链路：体预览、网格预览、图像提交。
     switch (request.GetOperation()) {
@@ -242,7 +279,7 @@ OrthogonalCropResult CropRouter::GetPlaneResult(const OrthogonalCropRequest& req
         "Router has no executable path for this planar crop route.");
 }
 
-std::array<double, 6> CropRouter::GetImageModelBounds() const
+std::array<double, 6> CropRouter::Impl::GetImageModelBounds() const
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     auto image = GetInputImage();
@@ -259,7 +296,7 @@ std::array<double, 6> CropRouter::GetImageModelBounds() const
     };
 }
 
-std::array<double, 6> CropRouter::GetPolyBounds() const
+std::array<double, 6> CropRouter::Impl::GetPolyBounds() const
 {
     std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!m_inputPolyData) {
@@ -275,7 +312,7 @@ std::array<double, 6> CropRouter::GetPolyBounds() const
     };
 }
 
-OrthogonalCropResult CropRouter::GetRouterFailureResult(
+OrthogonalCropResult CropRouter::Impl::GetRouterFailureResult(
     const OrthogonalCropRequest& request,
     CropFailure failureReason,
     const std::string& message) const
@@ -301,7 +338,7 @@ OrthogonalCropResult CropRouter::GetRouterFailureResult(
     return result;
 }
 
-std::size_t CropRouter::GetRamBytes() const
+std::size_t CropRouter::Impl::GetRamBytes() const
 {
 #ifdef _WIN32
     MEMORYSTATUSEX memoryStatus = {};
@@ -311,4 +348,65 @@ std::size_t CropRouter::GetRamBytes() const
     }
 #endif
     return 0;
+}
+
+CropRouter::CropRouter()
+    : m_impl(std::make_unique<CropRouter::Impl>())
+{
+}
+
+CropRouter::~CropRouter() = default;
+
+CropRouter::CropRouter(CropRouter&&) noexcept = default;
+
+CropRouter& CropRouter::operator=(CropRouter&&) noexcept = default;
+
+void CropRouter::SetInputImage(vtkSmartPointer<vtkImageData> image)
+{
+    m_impl->SetInputImage(std::move(image));
+}
+
+vtkSmartPointer<vtkImageData> CropRouter::GetInputImage() const
+{
+    return m_impl->GetInputImage();
+}
+
+void CropRouter::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
+{
+    m_impl->SetInputPolyData(std::move(polyData));
+}
+
+void CropRouter::ClearInputPolyData()
+{
+    m_impl->ClearInputPolyData();
+}
+
+vtkSmartPointer<vtkPolyData> CropRouter::GetInputPolyData() const
+{
+    return m_impl->GetInputPolyData();
+}
+
+void CropRouter::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
+{
+    m_impl->SetPreferredDataSource(dataSource);
+}
+
+OrthogonalCropDataSource CropRouter::GetActiveDataSource() const
+{
+    return m_impl->GetActiveDataSource();
+}
+
+std::array<double, 6> CropRouter::GetActiveInputModelBounds() const
+{
+    return m_impl->GetActiveInputModelBounds();
+}
+
+OrthogonalCropRequest CropRouter::GetDefaultRequest() const
+{
+    return m_impl->GetDefaultRequest();
+}
+
+OrthogonalCropResult CropRouter::GetResult(const OrthogonalCropRequest& request) const
+{
+    return m_impl->GetResult(request);
 }
