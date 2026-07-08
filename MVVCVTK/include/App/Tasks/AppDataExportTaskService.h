@@ -37,5 +37,5 @@ private:
 
     std::shared_ptr<AbstractDataManager> m_dataManager;
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    AppTaskCallbackState m_saveCompletionCallbackState; // 保存完成后由主线程执行业务回调
+    AppTaskCallbackState m_saveCallback; // 保存完成后由主线程执行业务回调
 };

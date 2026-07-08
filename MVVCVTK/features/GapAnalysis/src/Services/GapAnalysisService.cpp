@@ -268,7 +268,7 @@ bool GapAnalysisService::StartView(
     m_isoCallback = std::move(onIsoValueResolved);
     m_isViewOn = true;
     m_isOverlayOn = true;
-    m_hasRunReq = true;
+    m_hasRunRequest = true;
     m_hasDone = false;
     m_hasFailLog = false;
     std::cout << "[GapAnalysis] Display mode requested. Analysis will start after volume data is ready." << std::endl;
@@ -277,14 +277,14 @@ bool GapAnalysisService::StartView(
 
 bool GapAnalysisService::SwitchOverlay() {
     if (!m_isViewOn) {
-        std::cerr << "[GapAnalysis] Overlay toggle ignored: display mode is not active." << std::endl;
+        std::cerr << "[GapAnalysis] Overlay switch ignored: display mode is not active." << std::endl;
         return false;
     }
 
     m_isOverlayOn = !m_isOverlayOn;
     if (!m_isOverlayOn) {
         SetOverlayOff();
-        std::cout << "[GapAnalysis] Overlays hidden. Use the host overlay toggle command to show them again." << std::endl;
+        std::cout << "[GapAnalysis] Overlays hidden. Use the host overlay switch command to show them again." << std::endl;
         return true;
     }
 
@@ -319,10 +319,10 @@ void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
         return;
     }
 
-    if (m_hasRunReq) {
+    if (m_hasRunRequest) {
         if (GetAnalysisState() != GapAnalysisState::Running
             && StartRun(std::move(inputImage))) {
-            m_hasRunReq = false;
+            m_hasRunRequest = false;
             m_hasDone = false;
             m_hasFailLog = false;
         }
@@ -454,7 +454,7 @@ void GapAnalysisService::SetDisplayView() {
     m_displayLabelImage = BuildLabelImage();
     SetOverlayOff();
     if (!m_isOverlayOn) {
-        std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay toggle command to show them." << std::endl;
+        std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay switch command to show them." << std::endl;
         return;
     }
 
@@ -541,7 +541,7 @@ void GapAnalysisService::ClearDisplayState() {
     m_isoCallback = nullptr;
     m_isViewOn = false;
     m_isOverlayOn = false;
-    m_hasRunReq = false;
+    m_hasRunRequest = false;
     m_hasDone = false;
     m_hasFailLog = false;
 }

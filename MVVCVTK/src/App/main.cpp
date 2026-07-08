@@ -109,12 +109,12 @@ static HostHotkeyBindings BuildHotkeys()
     // 这些按键只模拟当前 standalone 调试入口的输入协议。
     // 为什么集中在 main：后续真实上位机接入时可以替换为 UI action / IPC 命令，而 feature 不需要重编译。
     HostHotkeyBindings hotkeys;
-    hotkeys.modelTransformToggleKey = 'm';
+    hotkeys.modelSwitchKey = 'm';
     hotkeys.saveTransformedDataKey = 's';
     hotkeys.saveSliceImagesKey = 't';
-    hotkeys.cropToggleKey = 'o';
-    hotkeys.planarCropToggleKey = 'p';
-    hotkeys.gapOverlayToggleKey = 'j';
+    hotkeys.cropSwitchKey = 'o';
+    hotkeys.planarSwitchKey = 'p';
+    hotkeys.gapSwitchKey = 'j';
     hotkeys.keepInsidePreviewKey = '1';
     hotkeys.removeInsidePreviewKey = '2';
     hotkeys.submitKey = '3';
@@ -159,34 +159,34 @@ int main()
 
     // 这里临时模拟上位机下发“加载体数据”命令，所以文件路径和 RAW 物理元数据都在 main 中显式展开。
     // 后续真实上位机接入时，只替换这些输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
-    const std::string simulatedVolumeFilePath = "F:\\data\\1000x1000x1000.raw";
-    const std::string simulatedTransformedDataOutputPath = "F:\\data\\1000x1000x1000_transformed.raw";
-    const std::string simulatedSliceImagesExportDirectory = "F:\\data\\1000x1000x1000_slice_exports";
-    const std::array<float, 3> simulatedVolumeSpacing = { 0.02125f, 0.02125f, 0.02125f };
-    const std::array<float, 3> simulatedVolumeOriginValues = { 0.0f, 0.0f, 0.0f };
-    if (!simulatedVolumeFilePath.empty()) {
+    const std::string volumePath = "F:\\data\\1000x1000x1000.raw";
+    const std::string volumeExportPath = "F:\\data\\1000x1000x1000_transformed.raw";
+    const std::string sliceExportDir = "F:\\data\\1000x1000x1000_slice_exports";
+    const std::array<float, 3> volumeSpacing = { 0.02125f, 0.02125f, 0.02125f };
+    const std::array<float, 3> volumeOrigin = { 0.0f, 0.0f, 0.0f };
+    if (!volumePath.empty()) {
         config.initialVolume.isInitialLoadEnabled = true;
-        config.initialVolume.filePath = simulatedVolumeFilePath;
-        config.initialVolume.geometry.emplace(simulatedVolumeSpacing, simulatedVolumeOriginValues);
+        config.initialVolume.filePath = volumePath;
+        config.initialVolume.geometry.emplace(volumeSpacing, volumeOrigin);
     }
 
     config.renderContextInput.isHotkeyEnabled = true;
     config.renderContextInput.targetViewRoles = standaloneViewRoles;
     // 体数据导出路径由上位机输入；standalone 只在这里模拟，不让 DataManager 按加载路径猜输出位置。
-    config.dataExport.transformedDataOutputPath = simulatedTransformedDataOutputPath;
+    config.dataExport.transformedDataOutputPath = volumeExportPath;
     // 切片导出目录也是上位机输入事实；standalone 只在这里模拟，不让 host/session 或 DataManager 隐式拼默认路径。
-    config.dataExport.sliceImagesOutputDirectory = simulatedSliceImagesExportDirectory;
+    config.dataExport.sliceOutputDir = sliceExportDir;
 
     // 热键监听范围和 feature 作用范围分开配置：
     // A. targetViewRoles 决定哪些 interactor 收 standalone 键。
-    // B. orthogonalCropRequest / gapAnalysisRequest 决定命令真正作用到哪些窗口。
+    // B. cropViewRequest / gapViewRequest 决定命令真正作用到哪些窗口。
     config.commandInput.isHotkeyEnabled = true;
     config.commandInput.targetViewRoles = standaloneViewRoles;
-    config.commandInput.orthogonalCropRequest.isReferenceRoleUsed = true;
-    config.commandInput.orthogonalCropRequest.referenceRole = HostRenderViewRole::Primary3D;
-    config.commandInput.orthogonalCropRequest.previewViewRoles = standaloneViewRoles;
-    config.commandInput.gapAnalysisRequest.targetViewRoles = standaloneViewRoles;
-    config.commandInput.gapAnalysisRequest.algorithm = BuildGapConfig();
+    config.commandInput.cropViewRequest.isReferenceRoleUsed = true;
+    config.commandInput.cropViewRequest.referenceRole = HostRenderViewRole::Primary3D;
+    config.commandInput.cropViewRequest.previewViewRoles = standaloneViewRoles;
+    config.commandInput.gapViewRequest.targetViewRoles = standaloneViewRoles;
+    config.commandInput.gapViewRequest.algorithm = BuildGapConfig();
 
     // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以 host/session 主线程 tick 也显式挂到这个 role。
     // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。

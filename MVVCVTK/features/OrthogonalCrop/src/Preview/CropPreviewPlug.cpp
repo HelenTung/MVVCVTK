@@ -14,29 +14,29 @@
 #include <vtkVolume.h>
 #include <vtkVolumeMapper.h>
 
-static constexpr const char* kVolumeRemoveInsideEnabledUniform = "mvvcvtk_volumeRemoveInsideEnabled";
-static constexpr const char* kVolumeRemoveInsideActiveInputModelToBoxUniform = "mvvcvtk_volumeRemoveInsideActiveInputModelToBox";
-static constexpr const char* kVolumeRemoveInsidePlaneEnabledUniform = "mvvcvtk_volumeRemoveInsidePlaneEnabled";
-static constexpr const char* kVolumeRemoveInsidePlaneNormalUniform = "mvvcvtk_volumeRemoveInsidePlaneNormal";
-static constexpr const char* kVolumeRemoveInsidePlaneOriginUniform = "mvvcvtk_volumeRemoveInsidePlaneOrigin";
-static constexpr const char* kVolumeRemoveInsideBaseImplTag = "//VTK::Base::Impl";
-static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionTag = "//VTK::PositionVC::Dec";
-static constexpr const char* kPolyDataRemoveInsideActiveInputModelPositionImplTag = "//VTK::PositionVC::Impl";
-static constexpr const char* kPolyDataRemoveInsideLightImplTag = "//VTK::Light::Impl";
-static constexpr const char* kPolyDataRemoveInsidePolyDataModelToBoxUniform = "mvvcvtk_polyDataRemoveInsidePolyDataModelToBox";
-static constexpr const char* kPolyDataRemoveInsidePlaneNormalUniform = "mvvcvtk_polyDataRemoveInsidePlaneNormal";
-static constexpr const char* kPolyDataRemoveInsidePlaneOriginUniform = "mvvcvtk_polyDataRemoveInsidePlaneOrigin";
+static constexpr const char* kVolBoxOnUniform = "mvvcvtk_volBoxOn";
+static constexpr const char* kVolBoxMatrixUniform = "mvvcvtk_volBoxMatrix";
+static constexpr const char* kVolPlaneOnUniform = "mvvcvtk_volPlaneOn";
+static constexpr const char* kVolPlaneNormalUniform = "mvvcvtk_volPlaneNormal";
+static constexpr const char* kVolPlaneOriginUniform = "mvvcvtk_volPlaneOrigin";
+static constexpr const char* kVolBaseTag = "//VTK::Base::Impl";
+static constexpr const char* kPolyPosTag = "//VTK::PositionVC::Dec";
+static constexpr const char* kPolyPosImplTag = "//VTK::PositionVC::Impl";
+static constexpr const char* kPolyLightTag = "//VTK::Light::Impl";
+static constexpr const char* kPolyBoxMatrixUniform = "mvvcvtk_polyBoxMatrix";
+static constexpr const char* kPolyPlaneNormalUniform = "mvvcvtk_polyPlaneNormal";
+static constexpr const char* kPolyPlaneOriginUniform = "mvvcvtk_polyPlaneOrigin";
 
-static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
+static constexpr const char* kVolBaseCode =
     "//VTK::Base::Impl\n"
-    "    if (!g_skip && (mvvcvtk_volumeRemoveInsideEnabled != 0 || mvvcvtk_volumeRemoveInsidePlaneEnabled != 0))\n"
+    "    if (!g_skip && (mvvcvtk_volBoxOn != 0 || mvvcvtk_volPlaneOn != 0))\n"
     "      {\n"
-    "      vec4 mvvcvtk_activeInputModelPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
-    "      float mvvcvtk_activeInputModelInvW = abs(mvvcvtk_activeInputModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_activeInputModelPoint.w : 1.0;\n"
-    "      mvvcvtk_activeInputModelPoint = vec4(mvvcvtk_activeInputModelPoint.xyz * mvvcvtk_activeInputModelInvW, 1.0);\n"
-    "      if (mvvcvtk_volumeRemoveInsidePlaneEnabled != 0)\n"
+    "      vec4 mvvcvtk_inputPoint = in_textureDatasetMatrix[0] * vec4(g_dataPos, 1.0);\n"
+    "      float mvvcvtk_inputInvW = abs(mvvcvtk_inputPoint.w) > 1e-6 ? 1.0 / mvvcvtk_inputPoint.w : 1.0;\n"
+    "      mvvcvtk_inputPoint = vec4(mvvcvtk_inputPoint.xyz * mvvcvtk_inputInvW, 1.0);\n"
+    "      if (mvvcvtk_volPlaneOn != 0)\n"
     "        {\n"
-    "        float mvvcvtk_planeSide = dot(mvvcvtk_activeInputModelPoint.xyz - mvvcvtk_volumeRemoveInsidePlaneOrigin, mvvcvtk_volumeRemoveInsidePlaneNormal);\n"
+    "        float mvvcvtk_planeSide = dot(mvvcvtk_inputPoint.xyz - mvvcvtk_volPlaneOrigin, mvvcvtk_volPlaneNormal);\n"
     "        if (mvvcvtk_planeSide > 0.0)\n"
     "          {\n"
     "          g_skip = true;\n"
@@ -44,7 +44,7 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "        }\n"
     "      else\n"
     "        {\n"
-    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volumeRemoveInsideActiveInputModelToBox * mvvcvtk_activeInputModelPoint;\n"
+    "      vec4 mvvcvtk_boxPoint4 = mvvcvtk_volBoxMatrix * mvvcvtk_inputPoint;\n"
     "      float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
     "      vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
     "      if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
@@ -54,24 +54,24 @@ static constexpr const char* kVolumeRemoveInsideBaseImplReplacement =
     "        }\n"
     "      }\n";
 
-static constexpr const char* kPolyDataRemoveInsideVertexPositionReplacement =
+static constexpr const char* kPolyVertPosCode =
     "//VTK::PositionVC::Dec\n"
-    "out vec4 mvvcvtk_polyDataModelPositionVSOutput;\n";
+    "out vec4 mvvcvtk_polyPosVS;\n";
 
-static constexpr const char* kPolyDataRemoveInsideVertexPositionImplReplacement =
+static constexpr const char* kPolyVertImplCode =
     "//VTK::PositionVC::Impl\n"
-    "mvvcvtk_polyDataModelPositionVSOutput = vertexMC;\n";
+    "mvvcvtk_polyPosVS = vertexMC;\n";
 
-static constexpr const char* kPolyDataRemoveInsideFragmentPositionReplacement =
+static constexpr const char* kPolyFragPosCode =
     "//VTK::PositionVC::Dec\n"
-    "in vec4 mvvcvtk_polyDataModelPositionVSOutput;\n";
+    "in vec4 mvvcvtk_polyPosVS;\n";
 
-static constexpr const char* kPolyDataRemoveInsideLightImplReplacement =
+static constexpr const char* kPolyBoxCode =
     "//VTK::Light::Impl\n"
-    "    vec4 mvvcvtk_polyDataModelPoint = mvvcvtk_polyDataModelPositionVSOutput;\n"
-    "    float mvvcvtk_polyDataModelInvW = abs(mvvcvtk_polyDataModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_polyDataModelPoint.w : 1.0;\n"
-    "    mvvcvtk_polyDataModelPoint = vec4(mvvcvtk_polyDataModelPoint.xyz * mvvcvtk_polyDataModelInvW, 1.0);\n"
-    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyDataRemoveInsidePolyDataModelToBox * mvvcvtk_polyDataModelPoint;\n"
+    "    vec4 mvvcvtk_polyPoint = mvvcvtk_polyPosVS;\n"
+    "    float mvvcvtk_polyInvW = abs(mvvcvtk_polyPoint.w) > 1e-6 ? 1.0 / mvvcvtk_polyPoint.w : 1.0;\n"
+    "    mvvcvtk_polyPoint = vec4(mvvcvtk_polyPoint.xyz * mvvcvtk_polyInvW, 1.0);\n"
+    "    vec4 mvvcvtk_boxPoint4 = mvvcvtk_polyBoxMatrix * mvvcvtk_polyPoint;\n"
     "    float mvvcvtk_boxInvW = abs(mvvcvtk_boxPoint4.w) > 1e-6 ? 1.0 / mvvcvtk_boxPoint4.w : 1.0;\n"
     "    vec3 mvvcvtk_boxPoint = mvvcvtk_boxPoint4.xyz * mvvcvtk_boxInvW;\n"
     "    if (all(lessThanEqual(abs(mvvcvtk_boxPoint), vec3(1.0))))\n"
@@ -79,12 +79,12 @@ static constexpr const char* kPolyDataRemoveInsideLightImplReplacement =
     "      discard;\n"
     "      }\n";
 
-static constexpr const char* kPolyDataRemoveInsidePlaneLightImplReplacement =
+static constexpr const char* kPolyPlaneCode =
     "//VTK::Light::Impl\n"
-    "    vec4 mvvcvtk_polyDataModelPoint = mvvcvtk_polyDataModelPositionVSOutput;\n"
-    "    float mvvcvtk_polyDataModelInvW = abs(mvvcvtk_polyDataModelPoint.w) > 1e-6 ? 1.0 / mvvcvtk_polyDataModelPoint.w : 1.0;\n"
-    "    mvvcvtk_polyDataModelPoint = vec4(mvvcvtk_polyDataModelPoint.xyz * mvvcvtk_polyDataModelInvW, 1.0);\n"
-    "    float mvvcvtk_planeSide = dot(mvvcvtk_polyDataModelPoint.xyz - mvvcvtk_polyDataRemoveInsidePlaneOrigin, mvvcvtk_polyDataRemoveInsidePlaneNormal);\n"
+    "    vec4 mvvcvtk_polyPoint = mvvcvtk_polyPosVS;\n"
+    "    float mvvcvtk_polyInvW = abs(mvvcvtk_polyPoint.w) > 1e-6 ? 1.0 / mvvcvtk_polyPoint.w : 1.0;\n"
+    "    mvvcvtk_polyPoint = vec4(mvvcvtk_polyPoint.xyz * mvvcvtk_polyInvW, 1.0);\n"
+    "    float mvvcvtk_planeSide = dot(mvvcvtk_polyPoint.xyz - mvvcvtk_polyPlaneOrigin, mvvcvtk_polyPlaneNormal);\n"
     "    if (mvvcvtk_planeSide > 0.0)\n"
     "      {\n"
     "      discard;\n"
@@ -204,12 +204,12 @@ void CropPreviewPlug::ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeM
     }
 
     auto shaderProperty = volume->GetShaderProperty();
-    shaderProperty->ClearFragmentShaderReplacement(kVolumeRemoveInsideBaseImplTag, true);
+    shaderProperty->ClearFragmentShaderReplacement(kVolBaseTag, true);
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsidePlaneEnabledUniform, 0);
-    fragmentUniforms->RemoveUniform(kVolumeRemoveInsidePlaneNormalUniform);
-    fragmentUniforms->RemoveUniform(kVolumeRemoveInsidePlaneOriginUniform);
+    fragmentUniforms->SetUniformi(kVolBoxOnUniform, 0);
+    fragmentUniforms->SetUniformi(kVolPlaneOnUniform, 0);
+    fragmentUniforms->RemoveUniform(kVolPlaneNormalUniform);
+    fragmentUniforms->RemoveUniform(kVolPlaneOriginUniform);
     if (auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper)) {
         gpuVolumeMapper->SetMaskInput(nullptr);
     }
@@ -395,9 +395,9 @@ bool CropPreviewPlug::SetVolumeRemove(
 
     auto shaderProperty = volume->GetShaderProperty();
     shaderProperty->AddFragmentShaderReplacement(
-        kVolumeRemoveInsideBaseImplTag,
+        kVolBaseTag,
         true,
-        kVolumeRemoveInsideBaseImplReplacement,
+        kVolBaseCode,
         false);
 
     auto inputToBoxShader = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -411,17 +411,17 @@ bool CropPreviewPlug::SetVolumeRemove(
     // vtkUniforms 上传 vtkMatrix4x4 时按 OpenGL 列主序解释，所以自定义 activeInputModelToBox 需要先转置再交给 shader。
     // uniforms 的声明由 VTK 的 CustomUniforms::Dec 自动生成，不能再手写到 Base::Dec，否则会重复声明。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, inputToBoxShader);
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 1);
+    fragmentUniforms->SetUniformMatrix(kVolBoxMatrixUniform, inputToBoxShader);
+    fragmentUniforms->SetUniformi(kVolBoxOnUniform, 1);
 
     // box 与 plane 共用同一段 shader replacement，shader 同时引用 plane uniform。
     // VTK 只在 SetUniform 时生成对应声明，因此 box 路径必须把 plane uniform 也声明出来
     // （enabled=0 + 占位值），否则 shader 编译会报 undefined variable。
     const double inactivePlaneNormal[3] = { 0.0, 0.0, 1.0 };
     const double inactivePlaneOrigin[3] = { 0.0, 0.0, 0.0 };
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsidePlaneEnabledUniform, 0);
-    fragmentUniforms->SetUniform3f(kVolumeRemoveInsidePlaneNormalUniform, inactivePlaneNormal);
-    fragmentUniforms->SetUniform3f(kVolumeRemoveInsidePlaneOriginUniform, inactivePlaneOrigin);
+    fragmentUniforms->SetUniformi(kVolPlaneOnUniform, 0);
+    fragmentUniforms->SetUniform3f(kVolPlaneNormalUniform, inactivePlaneNormal);
+    fragmentUniforms->SetUniform3f(kVolPlaneOriginUniform, inactivePlaneOrigin);
 
     volumeMapper->SetMaskInput(nullptr);
     shaderProperty->Modified();
@@ -442,9 +442,9 @@ bool CropPreviewPlug::SetVolumePlane(
     const auto& cropData = previewResult.GetCropDataModel();
     auto shaderProperty = volume->GetShaderProperty();
     shaderProperty->AddFragmentShaderReplacement(
-        kVolumeRemoveInsideBaseImplTag,
+        kVolBaseTag,
         true,
-        kVolumeRemoveInsideBaseImplReplacement,
+        kVolBaseCode,
         false);
 
     const auto planeNormalInInputModel = cropData.GetPlaneNormal();
@@ -453,11 +453,11 @@ bool CropPreviewPlug::SetVolumePlane(
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
     auto inactiveBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     inactiveBoxMatrix->Identity();
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsideEnabledUniform, 0);
-    fragmentUniforms->SetUniformMatrix(kVolumeRemoveInsideActiveInputModelToBoxUniform, inactiveBoxMatrix);
-    fragmentUniforms->SetUniform3f(kVolumeRemoveInsidePlaneNormalUniform, planeNormalInInputModel.data());
-    fragmentUniforms->SetUniform3f(kVolumeRemoveInsidePlaneOriginUniform, planeCenterInInputModel.data());
-    fragmentUniforms->SetUniformi(kVolumeRemoveInsidePlaneEnabledUniform, 1);
+    fragmentUniforms->SetUniformi(kVolBoxOnUniform, 0);
+    fragmentUniforms->SetUniformMatrix(kVolBoxMatrixUniform, inactiveBoxMatrix);
+    fragmentUniforms->SetUniform3f(kVolPlaneNormalUniform, planeNormalInInputModel.data());
+    fragmentUniforms->SetUniform3f(kVolPlaneOriginUniform, planeCenterInInputModel.data());
+    fragmentUniforms->SetUniformi(kVolPlaneOnUniform, 1);
 
     volumeMapper->SetMaskInput(nullptr);
     shaderProperty->Modified();
@@ -497,13 +497,13 @@ void CropPreviewPlug::ResetMeshView(
     }
 
     auto shaderProperty = actor->GetShaderProperty();
-    shaderProperty->ClearVertexShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionTag, true);
-    shaderProperty->ClearVertexShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionImplTag, true);
-    shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideActiveInputModelPositionTag, true);
-    shaderProperty->ClearFragmentShaderReplacement(kPolyDataRemoveInsideLightImplTag, true);
-    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsidePolyDataModelToBoxUniform);
-    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsidePlaneNormalUniform);
-    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyDataRemoveInsidePlaneOriginUniform);
+    shaderProperty->ClearVertexShaderReplacement(kPolyPosTag, true);
+    shaderProperty->ClearVertexShaderReplacement(kPolyPosImplTag, true);
+    shaderProperty->ClearFragmentShaderReplacement(kPolyPosTag, true);
+    shaderProperty->ClearFragmentShaderReplacement(kPolyLightTag, true);
+    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyBoxMatrixUniform);
+    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyPlaneNormalUniform);
+    shaderProperty->GetFragmentCustomUniforms()->RemoveUniform(kPolyPlaneOriginUniform);
     shaderProperty->Modified();
     actor->Modified();
 }
@@ -598,24 +598,24 @@ bool CropPreviewPlug::SetMeshRemove(
 
     auto shaderProperty = actor->GetShaderProperty();
     shaderProperty->AddVertexShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionTag,
+        kPolyPosTag,
         true,
-        kPolyDataRemoveInsideVertexPositionReplacement,
+        kPolyVertPosCode,
         false);
     shaderProperty->AddVertexShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionImplTag,
+        kPolyPosImplTag,
         true,
-        kPolyDataRemoveInsideVertexPositionImplReplacement,
+        kPolyVertImplCode,
         false);
     shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionTag,
+        kPolyPosTag,
         true,
-        kPolyDataRemoveInsideFragmentPositionReplacement,
+        kPolyFragPosCode,
         false);
     shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideLightImplTag,
+        kPolyLightTag,
         true,
-        kPolyDataRemoveInsideLightImplReplacement,
+        kPolyBoxCode,
         false);
 
     auto polyToBoxShader = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -625,7 +625,7 @@ bool CropPreviewPlug::SetMeshRemove(
     // PolyData RemoveInside 只在标准盒空间判断 [-1, 1]^3；
     // C++ 侧预先折叠 polyData model -> box，并按 VTK shader uniform 约定上传转置矩阵。
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniformMatrix(kPolyDataRemoveInsidePolyDataModelToBoxUniform, polyToBoxShader);
+    fragmentUniforms->SetUniformMatrix(kPolyBoxMatrixUniform, polyToBoxShader);
 
     shaderProperty->Modified();
     mapper->Modified();
@@ -682,29 +682,29 @@ bool CropPreviewPlug::SetMeshPlaneCut(
 
     auto shaderProperty = actor->GetShaderProperty();
     shaderProperty->AddVertexShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionTag,
+        kPolyPosTag,
         true,
-        kPolyDataRemoveInsideVertexPositionReplacement,
+        kPolyVertPosCode,
         false);
     shaderProperty->AddVertexShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionImplTag,
+        kPolyPosImplTag,
         true,
-        kPolyDataRemoveInsideVertexPositionImplReplacement,
+        kPolyVertImplCode,
         false);
     shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideActiveInputModelPositionTag,
+        kPolyPosTag,
         true,
-        kPolyDataRemoveInsideFragmentPositionReplacement,
+        kPolyFragPosCode,
         false);
     shaderProperty->AddFragmentShaderReplacement(
-        kPolyDataRemoveInsideLightImplTag,
+        kPolyLightTag,
         true,
-        kPolyDataRemoveInsidePlaneLightImplReplacement,
+        kPolyPlaneCode,
         false);
 
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
-    fragmentUniforms->SetUniform3f(kPolyDataRemoveInsidePlaneNormalUniform, polyDataModelNormal);
-    fragmentUniforms->SetUniform3f(kPolyDataRemoveInsidePlaneOriginUniform, polyDataModelOrigin);
+    fragmentUniforms->SetUniform3f(kPolyPlaneNormalUniform, polyDataModelNormal);
+    fragmentUniforms->SetUniform3f(kPolyPlaneOriginUniform, polyDataModelOrigin);
 
     shaderProperty->Modified();
     mapper->Modified();

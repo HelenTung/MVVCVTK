@@ -32,7 +32,9 @@ public:
 
     explicit Impl(VtkAppHostSession::Config sessionConfig);
 
-    bool Send(HostCommandRouterRequest request);
+    void BuildSession();
+    HostCommandRouterRequest BuildRequest(HostCommandKind command) const;
+    bool SendCommand(HostCommandRouterRequest request);
 
     char GetUpperAscii(char value) const;
     std::string BuildKeyLabel(char key) const;
@@ -47,8 +49,16 @@ VtkAppHostSession::Impl::Impl(VtkAppHostSession::Config sessionConfig)
 {
 }
 
-bool VtkAppHostSession::Impl::Send(HostCommandRouterRequest request)
+HostCommandRouterRequest VtkAppHostSession::Impl::BuildRequest(HostCommandKind command) const
 {
+    HostCommandRouterRequest request;
+    request.command = command;
+    return request;
+}
+
+bool VtkAppHostSession::Impl::SendCommand(HostCommandRouterRequest request)
+{
+    BuildSession();
     if (!commandRouter) {
         std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
         return false;
@@ -83,12 +93,12 @@ std::string VtkAppHostSession::Impl::BuildStartupControlsText(const HostHotkeyBi
 {
     // 控制台文本从 Config 派生，不写死具体键位；这样 main 改模拟输入时提示不会和实际 observer 脱节。
     return "Controls: "
-        + BuildKeyLabel(hotkeys.modelTransformToggleKey) + " = toggle model transform | "
+        + BuildKeyLabel(hotkeys.modelSwitchKey) + " = switch model transform | "
         + BuildKeyLabel(hotkeys.saveTransformedDataKey) + " = save transformed data | "
         + BuildKeyLabel(hotkeys.saveSliceImagesKey) + " = save slice images | "
-        + BuildKeyLabel(hotkeys.cropToggleKey) + " = toggle orthogonal crop box | "
-        + BuildKeyLabel(hotkeys.planarCropToggleKey) + " = toggle planar crop | "
-        + BuildKeyLabel(hotkeys.gapOverlayToggleKey) + " = enter/toggle gap overlays | "
+        + BuildKeyLabel(hotkeys.cropSwitchKey) + " = switch orthogonal crop box | "
+        + BuildKeyLabel(hotkeys.planarSwitchKey) + " = switch planar crop | "
+        + BuildKeyLabel(hotkeys.gapSwitchKey) + " = enter/switch gap overlays | "
         + (hotkeys.exitKeySym.empty() ? "<unassigned>" : hotkeys.exitKeySym) + " = exit active crop/gap/model-transform mode | "
         + BuildKeyLabel(hotkeys.keepInsidePreviewKey) + " = keep inside/normal-side preview | "
         + BuildKeyLabel(hotkeys.removeInsidePreviewKey) + " = remove inside/normal-side preview | "
@@ -112,6 +122,47 @@ void VtkAppHostSession::Impl::SendStartupStatus() const
     }
 }
 
+void VtkAppHostSession::Impl::BuildSession()
+{
+    if (isInitialized) {
+        return;
+    }
+
+    // 1. core services 不知道窗口数量，只建立数据、状态和算法服务生命周期。
+    // 2. render view set 负责按 host 配置创建/接管窗口，并对外提供 id/role/endpoint。
+    // 3. feature bindings 只注册能力；裁切或孔隙显示必须等宿主命令携带目标窗口后才激活。
+    core = BuildHostCoreServices();
+    renderViews.Build(core, config.renderViews);
+    featureBindings->AttachFeatures(core, renderViews);
+    commandRouter = std::make_shared<HostCommandRouter>(
+        core,
+        renderViews,
+        featureBindings);
+
+    renderViews.SetInitialVisibility();
+    if (config.initialVolume.isInitialLoadEnabled) {
+        auto initialLoadRequest = BuildRequest(HostCommandKind::Load);
+        initialLoadRequest.initialVolume = config.initialVolume;
+        commandRouter->DispatchCommand(std::move(initialLoadRequest));
+    }
+
+    renderViews.SendRenderAll();
+    renderViews.SetInteractorsReady();
+    // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
+    renderViewEndpoints = renderViews.BuildEndpoints();
+
+    auto attachHotkeysRequest = BuildRequest(HostCommandKind::Hotkeys);
+    attachHotkeysRequest.renderContextInput = config.renderContextInput;
+    attachHotkeysRequest.dataExportConfig = config.dataExport;
+    attachHotkeysRequest.commandInput = config.commandInput;
+    attachHotkeysRequest.hotkeys = config.hotkeys;
+    commandRouter->DispatchCommand(std::move(attachHotkeysRequest));
+    featureBindings->AttachHostTimer(config.timerEventPump);
+    SendStartupStatus();
+
+    isInitialized = true;
+}
+
 VtkAppHostSession::VtkAppHostSession(Config config)
     : m_impl(std::make_unique<VtkAppHostSession::Impl>(std::move(config)))
 {
@@ -125,45 +176,7 @@ VtkAppHostSession& VtkAppHostSession::operator=(VtkAppHostSession&&) noexcept = 
 
 void VtkAppHostSession::BuildSession()
 {
-    if (m_impl->isInitialized) {
-        return;
-    }
-
-    // 1. core services 不知道窗口数量，只建立数据、状态和算法服务生命周期。
-    // 2. render view set 负责按 host 配置创建/接管窗口，并对外提供 id/role/endpoint。
-    // 3. feature bindings 只注册能力；裁切或孔隙显示必须等宿主命令携带目标窗口后才激活。
-    m_impl->core = BuildHostCoreServices();
-    m_impl->renderViews.Build(m_impl->core, m_impl->config.renderViews);
-    m_impl->featureBindings->AttachFeatures(m_impl->core, m_impl->renderViews);
-    m_impl->commandRouter = std::make_shared<HostCommandRouter>(
-        m_impl->core,
-        m_impl->renderViews,
-        m_impl->featureBindings);
-
-    m_impl->renderViews.SetInitialVisibility();
-    if (m_impl->config.initialVolume.isInitialLoadEnabled) {
-        HostCommandRouterRequest initialLoadRequest;
-        initialLoadRequest.command = HostCommandKind::Load;
-        initialLoadRequest.initialVolume = m_impl->config.initialVolume;
-        m_impl->Send(std::move(initialLoadRequest));
-    }
-
-    m_impl->renderViews.SendRenderAll();
-    m_impl->renderViews.SetInteractorsReady();
-    // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
-    m_impl->renderViewEndpoints = m_impl->renderViews.BuildEndpoints();
-
-    HostCommandRouterRequest attachHotkeysRequest;
-    attachHotkeysRequest.command = HostCommandKind::Hotkeys;
-    attachHotkeysRequest.renderContextInput = m_impl->config.renderContextInput;
-    attachHotkeysRequest.dataExportConfig = m_impl->config.dataExport;
-    attachHotkeysRequest.commandInput = m_impl->config.commandInput;
-    attachHotkeysRequest.hotkeys = m_impl->config.hotkeys;
-    m_impl->Send(std::move(attachHotkeysRequest));
-    m_impl->featureBindings->AttachHostTimer(m_impl->config.timerEventPump);
-    m_impl->SendStartupStatus();
-
-    m_impl->isInitialized = true;
+    m_impl->BuildSession();
 }
 
 void VtkAppHostSession::Start()
@@ -181,119 +194,92 @@ bool VtkAppHostSession::LoadVolume(
     const InitialVolumeLoadConfig& request,
     std::function<void(bool isSuccess)> onComplete)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::Load;
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::Load);
     routerRequest.initialVolume = request;
     routerRequest.loadComplete = std::move(onComplete);
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::StartCrop(
-    const HostCropRequest& request)
+    const HostCropViewRequest& request)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropStart;
-    routerRequest.orthogonalCropRequest = request;
-    return m_impl->Send(std::move(routerRequest));
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::CropStart);
+    routerRequest.cropViewRequest = request;
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::SwitchCropBox(
-    const HostCropRequest& request)
+    const HostCropViewRequest& request)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropBox;
-    routerRequest.orthogonalCropRequest = request;
-    return m_impl->Send(std::move(routerRequest));
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::CropBox);
+    routerRequest.cropViewRequest = request;
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::SwitchCropPlane(
-    const HostCropRequest& request)
+    const HostCropViewRequest& request)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropPlane;
-    routerRequest.orthogonalCropRequest = request;
-    return m_impl->Send(std::move(routerRequest));
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::CropPlane);
+    routerRequest.cropViewRequest = request;
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::SwitchCropView(
-    const HostCropRequest& request,
+    const HostCropViewRequest& request,
     HostCropPreviewMode previewMode)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropPreview;
-    routerRequest.orthogonalCropRequest = request;
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::CropPreview);
+    routerRequest.cropViewRequest = request;
     routerRequest.cropPreviewMode = previewMode;
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::SendCrop(
-    const HostCropRequest& request)
+    const HostCropViewRequest& request)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropApply;
-    routerRequest.orthogonalCropRequest = request;
-    return m_impl->Send(std::move(routerRequest));
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::CropApply);
+    routerRequest.cropViewRequest = request;
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ExitCrop()
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::CropExit;
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(m_impl->BuildRequest(HostCommandKind::CropExit));
 }
 
 bool VtkAppHostSession::StartGapView(
-    const HostGapRequest& request)
+    const HostGapViewRequest& request)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::GapStart;
-    routerRequest.gapAnalysisRequest = request;
-    return m_impl->Send(std::move(routerRequest));
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::GapStart);
+    routerRequest.gapViewRequest = request;
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::SwitchGapLayer()
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::GapOverlay;
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(m_impl->BuildRequest(HostCommandKind::GapOverlay));
 }
 
 bool VtkAppHostSession::ExitGapView()
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::GapExit;
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(m_impl->BuildRequest(HostCommandKind::GapExit));
 }
 
 bool VtkAppHostSession::SetViewConfig(const HostViewConfig& config)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::ViewConfig;
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::ViewConfig);
     routerRequest.viewConfig = config;
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 bool VtkAppHostSession::ExportData(
     const HostDataExportConfig& dataExportConfig,
     std::function<void(bool isSuccess)> onComplete)
 {
-    BuildSession();
-    HostCommandRouterRequest routerRequest;
-    routerRequest.command = HostCommandKind::Export;
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::Export);
     routerRequest.dataExportConfig = dataExportConfig;
     routerRequest.dataExportComplete = std::move(onComplete);
-    return m_impl->Send(std::move(routerRequest));
+    return m_impl->SendCommand(std::move(routerRequest));
 }
 
 const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()

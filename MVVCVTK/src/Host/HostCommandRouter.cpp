@@ -24,7 +24,7 @@ enum class HotkeyAction {
     ExportSlices,
     CropBox,
     CropPlane,
-    GapToggle,
+    GapSwitch,
     Exit,
     KeepPreview,
     RemovePreview,
@@ -43,13 +43,25 @@ public:
     bool DispatchCommand(HostCommandRouterRequest request) const;
 
 private:
+    bool DispatchCrop(
+        HostCommandKind command,
+        const HostCropViewRequest& request,
+        HostCropPreviewMode previewMode = HostCropPreviewMode::KeepInside) const;
+    bool DispatchCrop(HostCommandKind command) const;
+    bool DispatchGap(
+        HostCommandKind command,
+        const HostGapViewRequest& request) const;
+    bool DispatchGap(HostCommandKind command) const;
+    bool DispatchFeatureExit() const;
     InteractionResult SendHotkey(
         const InteractionEvent& event,
         const std::weak_ptr<StdRenderContext>& context,
         bool hasFeature,
         bool hasContext,
         HostRenderViewRole role,
-        const HostCommandRouterRequest& request,
+        const HostDataExportConfig& dataExportConfig,
+        const HostCommandInputConfig& commandInput,
+        const HostHotkeyBindings& hotkeys,
         bool& isCropDown,
         bool& isPlaneDown,
         bool& isGapDown,
@@ -58,12 +70,15 @@ private:
     bool LoadVolume(
         const InitialVolumeLoadConfig& initialVolume,
         std::function<void(bool isSuccess)> loadComplete) const;
-    bool SendFeature(const HostCommandRouterRequest& request) const;
     bool ExportData(
         const HostDataExportConfig& dataExportConfig,
         std::function<void(bool isSuccess)> onComplete) const;
     bool SetViewConfig(const HostViewConfig& viewConfig) const;
-    bool AttachHotkeys(const HostCommandRouterRequest& request) const;
+    bool AttachHotkeys(
+        const HostContextInput& renderContextInput,
+        const HostDataExportConfig& dataExportConfig,
+        const HostCommandInputConfig& commandInput,
+        const HostHotkeyBindings& hotkeys) const;
     void SetViewAdded(
         std::vector<const HostRenderViewRuntime*>& views,
         const HostRenderViewRuntime* view) const;
@@ -79,7 +94,8 @@ private:
         bool hasFeature,
         bool hasContext,
         HostRenderViewRole role,
-        const HostCommandRouterRequest& request,
+        const HostDataExportConfig& dataExportConfig,
+        const HostCommandInputConfig& commandInput,
         bool& isCropDown,
         bool& isPlaneDown,
         bool& isGapDown,
@@ -92,10 +108,11 @@ private:
         bool& isSubmitDown) const;
     bool SendHotkeyFeature(
         HotkeyAction action,
-        const HostCommandRouterRequest& request) const;
-    bool ExportHotkeyVolume(const HostCommandRouterRequest& request) const;
+        const HostCommandInputConfig& commandInput) const;
+    HostCommandKind GetHotkeyKind(HotkeyAction action) const;
+    bool ExportHotkeyVolume(const HostDataExportConfig& dataExportConfig) const;
     bool ExportHotkeySlices(
-        const HostCommandRouterRequest& request,
+        const HostDataExportConfig& dataExportConfig,
         bool hasContext,
         HostRenderViewRole role) const;
     bool ExitHotkeyMode(
@@ -217,7 +234,11 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) 
             request.dataExportConfig,
             std::move(request.dataExportComplete));
     case HostCommandKind::Hotkeys:
-        return AttachHotkeys(request);
+        return AttachHotkeys(
+            request.renderContextInput,
+            request.dataExportConfig,
+            request.commandInput,
+            request.hotkeys);
     case HostCommandKind::ViewConfig:
         return SetViewConfig(request.viewConfig);
     case HostCommandKind::CropStart:
@@ -225,13 +246,22 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) 
     case HostCommandKind::CropPlane:
     case HostCommandKind::CropPreview:
     case HostCommandKind::CropApply:
+        return DispatchCrop(
+            request.command,
+            request.cropViewRequest,
+            request.cropPreviewMode);
     case HostCommandKind::CropExit:
+        return DispatchCrop(request.command);
     case HostCommandKind::FeatureExit:
+        return DispatchFeatureExit();
     case HostCommandKind::GapStart:
-    case HostCommandKind::GapToggle:
+    case HostCommandKind::GapSwitch:
+        return DispatchGap(
+            request.command,
+            request.gapViewRequest);
     case HostCommandKind::GapOverlay:
     case HostCommandKind::GapExit:
-        return SendFeature(request);
+        return DispatchGap(request.command);
     case HostCommandKind::None:
     default:
         std::cerr << "[Host] Command dispatch skipped: command was not specified." << std::endl;
@@ -295,7 +325,10 @@ bool HostCommandRouter::Impl::LoadVolume(
     return true;
 }
 
-bool HostCommandRouter::Impl::SendFeature(const HostCommandRouterRequest& request) const
+bool HostCommandRouter::Impl::DispatchCrop(
+    HostCommandKind command,
+    const HostCropViewRequest& request,
+    HostCropPreviewMode previewMode) const
 {
     const auto bindings = m_featureBindings.lock();
     if (!bindings) {
@@ -303,39 +336,86 @@ bool HostCommandRouter::Impl::SendFeature(const HostCommandRouterRequest& reques
         return false;
     }
 
-    switch (request.command) {
+    switch (command) {
     case HostCommandKind::CropStart:
-        return bindings->StartCrop(request.orthogonalCropRequest);
+        return bindings->StartCrop(request);
     case HostCommandKind::CropBox:
-        return bindings->SwitchCropBox(request.orthogonalCropRequest);
+        return bindings->SwitchCropBox(request);
     case HostCommandKind::CropPlane:
-        return bindings->SwitchCropPlane(request.orthogonalCropRequest);
+        return bindings->SwitchCropPlane(request);
     case HostCommandKind::CropPreview:
         return bindings->SwitchCropView(
-            request.orthogonalCropRequest,
-            request.cropPreviewMode);
+            request,
+            previewMode);
     case HostCommandKind::CropApply:
-        return bindings->SendCrop(request.orthogonalCropRequest);
+        return bindings->SendCrop(request);
+    default:
+        return false;
+    }
+}
+
+bool HostCommandRouter::Impl::DispatchCrop(HostCommandKind command) const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) {
+        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
+        return false;
+    }
+
+    switch (command) {
     case HostCommandKind::CropExit:
         return bindings->ExitCrop();
-    case HostCommandKind::FeatureExit:
-        return bindings->ExitFeature();
+    default:
+        return false;
+    }
+}
+
+bool HostCommandRouter::Impl::DispatchGap(
+    HostCommandKind command,
+    const HostGapViewRequest& request) const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) {
+        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
+        return false;
+    }
+
+    switch (command) {
     case HostCommandKind::GapStart:
-        return bindings->StartGapView(request.gapAnalysisRequest);
-    case HostCommandKind::GapToggle:
-        return bindings->SwitchGapView(request.gapAnalysisRequest);
+        return bindings->StartGapView(request);
+    case HostCommandKind::GapSwitch:
+        return bindings->SwitchGapView(request);
+    default:
+        return false;
+    }
+}
+
+bool HostCommandRouter::Impl::DispatchGap(HostCommandKind command) const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) {
+        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
+        return false;
+    }
+
+    switch (command) {
     case HostCommandKind::GapOverlay:
         return bindings->SwitchGapLayer();
     case HostCommandKind::GapExit:
         return bindings->ExitGapView();
-    case HostCommandKind::None:
-    case HostCommandKind::Load:
-    case HostCommandKind::Export:
-    case HostCommandKind::Hotkeys:
-    case HostCommandKind::ViewConfig:
     default:
         return false;
     }
+}
+
+bool HostCommandRouter::Impl::DispatchFeatureExit() const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) {
+        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
+        return false;
+    }
+    return bindings->ExitFeature();
 }
 
 bool HostCommandRouter::Impl::ExportData(
@@ -370,17 +450,17 @@ bool HostCommandRouter::Impl::ExportData(
         return true;
     }
 
-    if (dataExportConfig.sliceImagesOutputDirectory.empty()) {
+    if (dataExportConfig.sliceOutputDir.empty()) {
         std::cerr << "[Host] Slice image export skipped: output directory was not configured." << std::endl;
         return false;
     }
 
     const HostRenderViewRuntime* exportView = nullptr;
-    if (!dataExportConfig.sliceImagesSourceViewId.empty()) {
-        exportView = m_renderViews->GetViewById(dataExportConfig.sliceImagesSourceViewId);
+    if (!dataExportConfig.sliceSourceViewId.empty()) {
+        exportView = m_renderViews->GetViewById(dataExportConfig.sliceSourceViewId);
     }
     else if (dataExportConfig.isSliceRoleUsed) {
-        exportView = m_renderViews->GetFirstViewByRole(dataExportConfig.sliceImagesSourceViewRole);
+        exportView = m_renderViews->GetFirstViewByRole(dataExportConfig.sliceSourceRole);
     }
 
     if (!exportView || !exportView->service) {
@@ -393,8 +473,8 @@ bool HostCommandRouter::Impl::ExportData(
     }
 
     exportView->service->ExportSlicesAsync(
-        dataExportConfig.sliceImagesOutputDirectory,
-        dataExportConfig.sliceImagesRotationAngleDeg,
+        dataExportConfig.sliceOutputDir,
+        dataExportConfig.sliceAngleDeg,
         std::move(onComplete));
     return true;
 }
@@ -472,7 +552,9 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
     bool hasFeature,
     bool hasContext,
     HostRenderViewRole role,
-    const HostCommandRouterRequest& request,
+    const HostDataExportConfig& dataExportConfig,
+    const HostCommandInputConfig& commandInput,
+    const HostHotkeyBindings& hotkeys,
     bool& isCropDown,
     bool& isPlaneDown,
     bool& isGapDown,
@@ -482,7 +564,7 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
         event,
         hasFeature,
         hasContext,
-        request.hotkeys);
+        hotkeys);
     const bool isManaged = GetHotkeyUse(action, context, hasFeature, hasContext);
 
     if (event.vtkEventId == vtkCommand::CharEvent && isManaged) {
@@ -496,7 +578,8 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
             hasFeature,
             hasContext,
             role,
-            request,
+            dataExportConfig,
+            commandInput,
             isCropDown,
             isPlaneDown,
             isGapDown,
@@ -529,7 +612,7 @@ HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
     bool hasContext,
     const HostHotkeyBindings& hotkeys) const
 {
-    if (hasContext && GetCharKeyMatched(event, hotkeys.modelTransformToggleKey)) {
+    if (hasContext && GetCharKeyMatched(event, hotkeys.modelSwitchKey)) {
         return HotkeyAction::Model;
     }
     if (hasContext && GetCharKeyMatched(event, hotkeys.saveTransformedDataKey)) {
@@ -538,14 +621,14 @@ HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
     if (hasContext && GetCharKeyMatched(event, hotkeys.saveSliceImagesKey)) {
         return HotkeyAction::ExportSlices;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.cropToggleKey)) {
+    if (hasFeature && GetCharKeyMatched(event, hotkeys.cropSwitchKey)) {
         return HotkeyAction::CropBox;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.planarCropToggleKey)) {
+    if (hasFeature && GetCharKeyMatched(event, hotkeys.planarSwitchKey)) {
         return HotkeyAction::CropPlane;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.gapOverlayToggleKey)) {
-        return HotkeyAction::GapToggle;
+    if (hasFeature && GetCharKeyMatched(event, hotkeys.gapSwitchKey)) {
+        return HotkeyAction::GapSwitch;
     }
     if (GetKeySymMatched(event, hotkeys.exitKeySym)) {
         return HotkeyAction::Exit;
@@ -583,7 +666,8 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
     bool hasFeature,
     bool hasContext,
     HostRenderViewRole role,
-    const HostCommandRouterRequest& request,
+    const HostDataExportConfig& dataExportConfig,
+    const HostCommandInputConfig& commandInput,
     bool& isCropDown,
     bool& isPlaneDown,
     bool& isGapDown,
@@ -593,27 +677,27 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
     case HotkeyAction::Model:
         return SwitchModel(context);
     case HotkeyAction::ExportVolume:
-        return ExportHotkeyVolume(request);
+        return ExportHotkeyVolume(dataExportConfig);
     case HotkeyAction::ExportSlices:
-        return ExportHotkeySlices(request, hasContext, role);
+        return ExportHotkeySlices(dataExportConfig, hasContext, role);
     case HotkeyAction::CropBox:
         if (isCropDown) {
             return false;
         }
         isCropDown = true;
-        return SendHotkeyFeature(action, request);
+        return SendHotkeyFeature(action, commandInput);
     case HotkeyAction::CropPlane:
         if (isPlaneDown) {
             return false;
         }
         isPlaneDown = true;
-        return SendHotkeyFeature(action, request);
-    case HotkeyAction::GapToggle:
+        return SendHotkeyFeature(action, commandInput);
+    case HotkeyAction::GapSwitch:
         if (isGapDown) {
             return false;
         }
         isGapDown = true;
-        return SendHotkeyFeature(action, request);
+        return SendHotkeyFeature(action, commandInput);
     case HotkeyAction::Exit:
         if (!GetExitReady(context, hasFeature, hasContext)) {
             return false;
@@ -621,13 +705,13 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
         return ExitHotkeyMode(context, hasFeature, hasContext);
     case HotkeyAction::KeepPreview:
     case HotkeyAction::RemovePreview:
-        return SendHotkeyFeature(action, request);
+        return SendHotkeyFeature(action, commandInput);
     case HotkeyAction::Submit:
         if (isSubmitDown) {
             return false;
         }
         isSubmitDown = true;
-        return SendHotkeyFeature(action, request);
+        return SendHotkeyFeature(action, commandInput);
     case HotkeyAction::SubmitBlock:
         return true;
     case HotkeyAction::None:
@@ -650,7 +734,7 @@ bool HostCommandRouter::Impl::SetHotkeyRelease(
     case HotkeyAction::CropPlane:
         isPlaneDown = false;
         return true;
-    case HotkeyAction::GapToggle:
+    case HotkeyAction::GapSwitch:
         isGapDown = false;
         return true;
     case HotkeyAction::KeepPreview:
@@ -688,18 +772,41 @@ bool HostCommandRouter::Impl::SwitchModel(const std::weak_ptr<StdRenderContext>&
     return true;
 }
 
-bool HostCommandRouter::Impl::ExportHotkeyVolume(const HostCommandRouterRequest& request) const
+HostCommandKind HostCommandRouter::Impl::GetHotkeyKind(HotkeyAction action) const
 {
-    HostCommandRouterRequest exportRequest;
-    exportRequest.command = HostCommandKind::Export;
-    exportRequest.dataExportConfig = request.dataExportConfig;
-    exportRequest.dataExportConfig.hasVolumeExport = true;
-    exportRequest.dataExportConfig.hasSliceExport = false;
-    return DispatchCommand(std::move(exportRequest));
+    switch (action) {
+    case HotkeyAction::CropBox:
+        return HostCommandKind::CropBox;
+    case HotkeyAction::CropPlane:
+        return HostCommandKind::CropPlane;
+    case HotkeyAction::GapSwitch:
+        return HostCommandKind::GapSwitch;
+    case HotkeyAction::KeepPreview:
+    case HotkeyAction::RemovePreview:
+        return HostCommandKind::CropPreview;
+    case HotkeyAction::Submit:
+        return HostCommandKind::CropApply;
+    case HotkeyAction::None:
+    case HotkeyAction::Model:
+    case HotkeyAction::ExportVolume:
+    case HotkeyAction::ExportSlices:
+    case HotkeyAction::Exit:
+    case HotkeyAction::SubmitBlock:
+    default:
+        return HostCommandKind::None;
+    }
+}
+
+bool HostCommandRouter::Impl::ExportHotkeyVolume(const HostDataExportConfig& dataExportConfig) const
+{
+    auto exportConfig = dataExportConfig;
+    exportConfig.hasVolumeExport = true;
+    exportConfig.hasSliceExport = false;
+    return ExportData(exportConfig, nullptr);
 }
 
 bool HostCommandRouter::Impl::ExportHotkeySlices(
-    const HostCommandRouterRequest& request,
+    const HostDataExportConfig& dataExportConfig,
     bool hasContext,
     HostRenderViewRole role) const
 {
@@ -707,55 +814,48 @@ bool HostCommandRouter::Impl::ExportHotkeySlices(
         return false;
     }
 
-    HostCommandRouterRequest exportRequest;
-    exportRequest.command = HostCommandKind::Export;
-    exportRequest.dataExportConfig = request.dataExportConfig;
-    exportRequest.dataExportConfig.hasVolumeExport = false;
-    exportRequest.dataExportConfig.hasSliceExport = true;
-    if (exportRequest.dataExportConfig.sliceImagesSourceViewId.empty()
-        && !exportRequest.dataExportConfig.isSliceRoleUsed) {
-        exportRequest.dataExportConfig.isSliceRoleUsed = true;
-        exportRequest.dataExportConfig.sliceImagesSourceViewRole = role;
+    auto exportConfig = dataExportConfig;
+    exportConfig.hasVolumeExport = false;
+    exportConfig.hasSliceExport = true;
+    if (exportConfig.sliceSourceViewId.empty()
+        && !exportConfig.isSliceRoleUsed) {
+        exportConfig.isSliceRoleUsed = true;
+        exportConfig.sliceSourceRole = role;
     }
-    return DispatchCommand(std::move(exportRequest));
+    return ExportData(exportConfig, nullptr);
 }
 
 bool HostCommandRouter::Impl::SendHotkeyFeature(
     HotkeyAction action,
-    const HostCommandRouterRequest& request) const
+    const HostCommandInputConfig& commandInput) const
 {
-    HostCommandRouterRequest featureRequest;
+    const HostCommandKind command = GetHotkeyKind(action);
+    if (command == HostCommandKind::None) {
+        return false;
+    }
+
     switch (action) {
     case HotkeyAction::CropBox:
-        featureRequest.command = HostCommandKind::CropBox;
-        featureRequest.orthogonalCropRequest = request.commandInput.orthogonalCropRequest;
-        break;
+        return DispatchCrop(command, commandInput.cropViewRequest);
     case HotkeyAction::CropPlane:
-        featureRequest.command = HostCommandKind::CropPlane;
-        featureRequest.orthogonalCropRequest = request.commandInput.orthogonalCropRequest;
-        break;
-    case HotkeyAction::GapToggle:
-        featureRequest.command = HostCommandKind::GapToggle;
-        featureRequest.gapAnalysisRequest = request.commandInput.gapAnalysisRequest;
-        break;
+        return DispatchCrop(command, commandInput.cropViewRequest);
+    case HotkeyAction::GapSwitch:
+        return DispatchGap(command, commandInput.gapViewRequest);
     case HotkeyAction::KeepPreview:
-        featureRequest.command = HostCommandKind::CropPreview;
-        featureRequest.orthogonalCropRequest = request.commandInput.orthogonalCropRequest;
-        featureRequest.cropPreviewMode = HostCropPreviewMode::KeepInside;
-        break;
+        return DispatchCrop(
+            command,
+            commandInput.cropViewRequest,
+            HostCropPreviewMode::KeepInside);
     case HotkeyAction::RemovePreview:
-        featureRequest.command = HostCommandKind::CropPreview;
-        featureRequest.orthogonalCropRequest = request.commandInput.orthogonalCropRequest;
-        featureRequest.cropPreviewMode = HostCropPreviewMode::RemoveInside;
-        break;
+        return DispatchCrop(
+            command,
+            commandInput.cropViewRequest,
+            HostCropPreviewMode::RemoveInside);
     case HotkeyAction::Submit:
-        featureRequest.command = HostCommandKind::CropApply;
-        featureRequest.orthogonalCropRequest = request.commandInput.orthogonalCropRequest;
-        break;
+        return DispatchCrop(command, commandInput.cropViewRequest);
     default:
         return false;
     }
-    return DispatchCommand(std::move(featureRequest));
 }
 
 bool HostCommandRouter::Impl::GetExitReady(
@@ -779,9 +879,7 @@ bool HostCommandRouter::Impl::ExitHotkeyMode(
     bool hasContext) const
 {
     if (hasFeature) {
-        HostCommandRouterRequest request;
-        request.command = HostCommandKind::FeatureExit;
-        if (DispatchCommand(std::move(request))) {
+        if (DispatchFeatureExit()) {
             return true;
         }
     }
@@ -795,31 +893,34 @@ bool HostCommandRouter::Impl::ExitHotkeyMode(
 }
 
 bool HostCommandRouter::Impl::AttachHotkeys(
-    const HostCommandRouterRequest& request) const
+    const HostContextInput& renderContextInput,
+    const HostDataExportConfig& dataExportConfig,
+    const HostCommandInputConfig& commandInput,
+    const HostHotkeyBindings& hotkeys) const
 {
     if (!m_renderViews) {
         return false;
     }
-    if (!request.commandInput.isHotkeyEnabled
-        && !request.renderContextInput.isHotkeyEnabled) {
+    if (!commandInput.isHotkeyEnabled
+        && !renderContextInput.isHotkeyEnabled) {
         return true;
     }
 
     std::vector<const HostRenderViewRuntime*> featureTargetViews;
-    if (request.commandInput.isHotkeyEnabled) {
+    if (commandInput.isHotkeyEnabled) {
         featureTargetViews = m_renderViews->GetViewsByIdsAndRoles(
-            request.commandInput.targetViewIds,
-            request.commandInput.targetViewRoles);
+            commandInput.targetViewIds,
+            commandInput.targetViewRoles);
         if (featureTargetViews.empty()) {
             std::cerr << "[Host] Standalone feature hotkeys skipped: no target render view was requested." << std::endl;
         }
     }
 
     std::vector<const HostRenderViewRuntime*> renderContextTargetViews;
-    if (request.renderContextInput.isHotkeyEnabled) {
+    if (renderContextInput.isHotkeyEnabled) {
         renderContextTargetViews = m_renderViews->GetViewsByIdsAndRoles(
-            request.renderContextInput.targetViewIds,
-            request.renderContextInput.targetViewRoles);
+            renderContextInput.targetViewIds,
+            renderContextInput.targetViewRoles);
         if (renderContextTargetViews.empty()) {
             std::cerr << "[Host] Standalone render context hotkeys skipped: no target render view was requested." << std::endl;
         }
@@ -853,7 +954,9 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                 hasFeature,
                 hasContext,
                 role,
-                request,
+                dataExportConfig,
+                commandInput,
+                hotkeys,
                 isCropDown,
                 isPlaneDown,
                 isGapDown,
@@ -865,7 +968,9 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                     hasFeature,
                     hasContext,
                     role,
-                    request,
+                    dataExportConfig,
+                    commandInput,
+                    hotkeys,
                     *isCropDown,
                     *isPlaneDown,
                     *isGapDown,

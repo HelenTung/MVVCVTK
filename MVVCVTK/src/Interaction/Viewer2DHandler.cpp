@@ -245,8 +245,8 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             // 构建“绕十字线中心、沿当前视线法向”的增量旋转，
             // 然后把结果矩阵整包回写给服务层，由服务层继续触发 Transform 链路。
 			auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            auto previousModelToWorldMatrix = m_service->GetModelMatrix();
-			modelToWorldMatrix->DeepCopy(previousModelToWorldMatrix.data());
+            auto oldModelToWorld = m_service->GetModelMatrix();
+			modelToWorldMatrix->DeepCopy(oldModelToWorld.data());
 
 			auto transform = vtkSmartPointer<vtkTransform>::New();
 			transform->SetMatrix(modelToWorldMatrix);

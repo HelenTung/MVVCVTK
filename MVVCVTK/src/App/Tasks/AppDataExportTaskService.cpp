@@ -31,14 +31,14 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildDataTas
         return std::nullopt;
     }
 
-    const std::array<double, 16> modelToWorldMatrixSnapshot = sharedState->GetModelMatrix();
+    const std::array<double, 16> modelToWorld = sharedState->GetModelMatrix();
     // 导出后台任务可能比 owning service 活得久；捕获 weak_ptr 可以在 service 已销毁时安全丢弃回调投递。
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
     return std::packaged_task<void()>(
-        [dataManager, path, modelToWorldMatrixSnapshot, weakSelf]() mutable
+        [dataManager, path, modelToWorld, weakSelf]() mutable
         {
-            const bool isOk = dataManager->ExportData(path, modelToWorldMatrixSnapshot);
+            const bool isOk = dataManager->ExportData(path, modelToWorld);
 
             auto self = weakSelf.lock();
             if (self) {
@@ -76,11 +76,11 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
     }
 
     const WindowLevelParams currentWindowLevel = sharedState->GetWindowLevel();
-    const std::array<double, 16> modelToWorldMatrixSnapshot = sharedState->GetModelMatrix();
+    const std::array<double, 16> modelToWorld = sharedState->GetModelMatrix();
     const std::array<double, 3> cursorWorldSnapshot = sharedState->GetCursorWorld();
     // 切片导出使用提交瞬间的姿态、窗宽窗位、游标和可选上位机角度，避免后台执行时被后续交互改成另一帧状态。
     const std::optional<SliceExportData> exportData = InteractionComputeService::GetSliceExportData(
-        modelToWorldMatrixSnapshot,
+        modelToWorld,
         currentMode,
         cursorWorldSnapshot,
         rotationAngleDeg);
@@ -109,22 +109,22 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
 
 bool AppDataExportTaskService::GetSaveCallback()
 {
-    return m_saveCompletionCallbackState.GetCallbackConsumed();
+    return m_saveCallback.GetCallbackConsumed();
 }
 
 void AppDataExportTaskService::SendSaveCallback()
 {
-    m_saveCompletionCallbackState.SendCallback();
+    m_saveCallback.SendCallback();
 }
 
 void AppDataExportTaskService::SetSaveCallback(std::function<void(bool)> callback)
 {
-    m_saveCompletionCallbackState.SetCallback(std::move(callback));
+    m_saveCallback.SetCallback(std::move(callback));
 }
 
 void AppDataExportTaskService::SetSaveCallbackReady(
     bool isSuccess,
     std::function<void(bool)> callback)
 {
-    m_saveCompletionCallbackState.SetCallbackReady(isSuccess, std::move(callback));
+    m_saveCallback.SetCallbackReady(isSuccess, std::move(callback));
 }

@@ -30,17 +30,17 @@ enum class HostRenderViewRole {
 // 字段默认保持未分配，是为了让 Qt / 上位机创建 session 后不会隐式继承调试程序的快捷键。
 struct HostHotkeyBindings {
     // RenderContext 层的模型变换模式切换键，只服务独立 VTK 调试窗口。
-    char modelTransformToggleKey = 0;
+    char modelSwitchKey = 0;
     // 调试导出键：保存当前变换后的体数据，真实上位机应走显式命令。
     char saveTransformedDataKey = 0;
     // 调试导出键：按当前切片角度保存 slice 图片。
     char saveSliceImagesKey = 0;
     // 裁切盒交互模式切换键；按键只触发 host 命令，不进入裁切插件。
-    char cropToggleKey = 0;
-    // 平面裁切交互模式切换键；与 cropToggleKey 分开是为了保持两种 widget 状态边界。
-    char planarCropToggleKey = 0;
+    char cropSwitchKey = 0;
+    // 平面裁切交互模式切换键；与 cropSwitchKey 分开是为了保持两种 widget 状态边界。
+    char planarSwitchKey = 0;
     // 孔隙 overlay 键：未进入显示模式时进入，已进入时只切换显隐。
-    char gapOverlayToggleKey = 0;
+    char gapSwitchKey = 0;
     // 调试预览键：保留平面法向内侧。
     char keepInsidePreviewKey = 0;
     // 调试预览键：移除平面法向内侧。
@@ -151,21 +151,21 @@ struct HostDataExportConfig {
     // true 表示本次命令请求导出切片图片；false 表示保持空闲。
     bool hasSliceExport = false;
     // 空目录表示不允许 standalone hotkey 导出切片图片。
-    std::string sliceImagesOutputDirectory;
+    std::string sliceOutputDir;
     // 优先按 id 指定来源切片视图，适合 Qt 已经掌握 widget -> view id 映射的场景。
-    std::string sliceImagesSourceViewId;
-    // sliceImagesSourceViewId 为空时，是否允许按 role 查找来源切片视图。
+    std::string sliceSourceViewId;
+    // sliceSourceViewId 为空时，是否允许按 role 查找来源切片视图。
     bool isSliceRoleUsed = false;
     // role fallback 的来源切片视图。
-    HostRenderViewRole sliceImagesSourceViewRole = HostRenderViewRole::TopDownSlice;
+    HostRenderViewRole sliceSourceRole = HostRenderViewRole::TopDownSlice;
     // 可选自定义切片偏转角，单位 degree；未设置时只使用当前共享模型矩阵。
-    std::optional<double> sliceImagesRotationAngleDeg;
+    std::optional<double> sliceAngleDeg;
 };
 
 // 裁切激活请求把“参考窗口”和“预览窗口”拆开描述。
 // 调用方：上位机命令或 standalone hotkey；消费方：HostFeatureBindings::ConfigureOrthogonalCrop。
 // 参考窗口提供坐标互转与 widget interactor，预览窗口只接收 overlay/dirty 刷新。
-struct HostCropRequest {
+struct HostCropViewRequest {
     // 优先级最高的参考窗口选择方式；适合 Qt 已经拿到具体窗口 id 的场景。
     std::string referenceViewId;
     // referenceViewId 为空时，是否允许按 role 选择第一个参考窗口。
@@ -245,7 +245,7 @@ struct HostTimerEventPumpConfig {
 
 // 孔隙分析显示请求决定 overlay 投递目标和算法参数；是否运行算法由显式进入显示模式后再触发。
 // 这样“显示/隐藏 overlay”和“是否退出孔隙分析模式”可以分开处理。
-struct HostGapRequest {
+struct HostGapViewRequest {
     // 显式 overlay 目标 id 列表；空列表不代表所有窗口。
     std::vector<std::string> targetViewIds;
     // 显式 overlay 目标 role 列表；与 targetViewIds 取并集。
@@ -266,7 +266,7 @@ struct HostCommandInputConfig {
     // 哪些 role 监听 standalone feature 按键；与 targetViewIds 取并集。
     std::vector<HostRenderViewRole> targetViewRoles;
     // hotkey 触发裁切时复用的业务目标请求，和监听范围相互独立。
-    HostCropRequest orthogonalCropRequest;
+    HostCropViewRequest cropViewRequest;
     // hotkey 触发孔隙显示时复用的业务目标请求，和监听范围相互独立。
-    HostGapRequest gapAnalysisRequest;
+    HostGapViewRequest gapViewRequest;
 };

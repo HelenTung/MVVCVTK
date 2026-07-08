@@ -120,7 +120,7 @@ private:
     std::function<void(double isoValue)> m_isoCallback;
     bool m_isViewOn = false;
     bool m_isOverlayOn = false;
-    bool m_hasRunReq = false;
+    bool m_hasRunRequest = false;
     bool m_hasDone = false;
     bool m_hasFailLog = false;
 };

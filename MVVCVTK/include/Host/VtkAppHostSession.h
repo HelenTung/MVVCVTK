@@ -51,15 +51,15 @@ public:
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。
-    bool StartCrop(const HostCropRequest& request);
-    bool SwitchCropBox(const HostCropRequest& request);
-    bool SwitchCropPlane(const HostCropRequest& request);
+    bool StartCrop(const HostCropViewRequest& request);
+    bool SwitchCropBox(const HostCropViewRequest& request);
+    bool SwitchCropPlane(const HostCropViewRequest& request);
     bool SwitchCropView(
-        const HostCropRequest& request,
+        const HostCropViewRequest& request,
         HostCropPreviewMode previewMode);
-    bool SendCrop(const HostCropRequest& request);
+    bool SendCrop(const HostCropViewRequest& request);
     bool ExitCrop();
-    bool StartGapView(const HostGapRequest& request);
+    bool StartGapView(const HostGapViewRequest& request);
     bool SwitchGapLayer();
     bool ExitGapView();
     // 运行期视图配置命令入口；session 只记录请求并统一交给 router 分发。

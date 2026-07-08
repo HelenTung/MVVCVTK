@@ -29,23 +29,23 @@ public:
         const HostRenderViewSet& renderViews);
 
     // 显式激活裁切链路，只解析参考/预览窗口并刷新输入图像，不负责具体按键语义。
-    bool StartCrop(const HostCropRequest& request);
+    bool StartCrop(const HostCropViewRequest& request);
     // 显式进入孔隙显示链路；只在请求提供目标窗口后才启动一次算法请求。
-    bool StartGapView(const HostGapRequest& request);
+    bool StartGapView(const HostGapViewRequest& request);
     // standalone 输入使用的“进入或切换显示”命令；具体状态由 GapAnalysis feature 自己判断。
-    bool SwitchGapView(const HostGapRequest& request);
+    bool SwitchGapView(const HostGapViewRequest& request);
     // 临时隐藏/显示已进入模式的孔隙 overlay；不清除算法结果，也不退出显示模式。
     bool SwitchGapLayer();
     // 彻底退出孔隙显示模式；清除 overlay 缓存和 pending 请求。
     bool ExitGapView();
     bool GetGapView() const;
 
-    bool SwitchCropBox(const HostCropRequest& request);
-    bool SwitchCropPlane(const HostCropRequest& request);
+    bool SwitchCropBox(const HostCropViewRequest& request);
+    bool SwitchCropPlane(const HostCropViewRequest& request);
     bool SwitchCropView(
-        const HostCropRequest& request,
+        const HostCropViewRequest& request,
         HostCropPreviewMode previewMode);
-    bool SendCrop(const HostCropRequest& request);
+    bool SendCrop(const HostCropViewRequest& request);
     bool ExitCrop();
     bool ExitFeature();
     bool GetCropActive() const;

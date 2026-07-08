@@ -963,7 +963,7 @@ void CropBridge::Impl::SwitchPreview(CropRemovalMode removalMode)
 
 void CropBridge::Impl::SwitchBoxView(CropRemovalMode removalMode)
 {
-    // Box 继续保留旧 toggle 语义：
+    // Box 继续保留旧 switch 语义：
     // A. 同模式再次触发：关闭 preview，并恢复主模型全量显示
     // B. 切到新模式：更新 removal mode；若当前不在 dragging，则立即刷新一次 preview
     if (!m_isCropOn) {

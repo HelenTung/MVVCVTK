@@ -212,7 +212,7 @@ bool GetPointInPlane(
     return vtkMath::Dot(offset, normal.data()) > 0.0;
 }
 
-OrthogonalCropRequest BuildPlaneReq(
+OrthogonalCropRequest BuildPlaneRequest(
     const TestPlane& plane,
     CropRemovalMode removalMode,
     OrthogonalCropOperation operation,
@@ -241,7 +241,7 @@ OrthogonalCropResult GetPlaneResult(
     CropRouter router;
     router.SetInputImage(image);
 
-    const auto request = BuildPlaneReq(plane, removalMode, operation, dataSource);
+    const auto request = BuildPlaneRequest(plane, removalMode, operation, dataSource);
     return router.GetResult(request);
 }
 

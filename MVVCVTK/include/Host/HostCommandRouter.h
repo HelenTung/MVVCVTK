@@ -20,7 +20,7 @@ enum class HostCommandKind {
     CropExit,
     FeatureExit,
     GapStart,
-    GapToggle,
+    GapSwitch,
     GapOverlay,
     GapExit,
     Export,
@@ -29,17 +29,18 @@ enum class HostCommandKind {
 };
 
 // HostCommandRouter 是 host 命令分发器，不是 feature，也不是业务 service。
-// 外部只提交一个命令类型和它需要的配置；具体导出、feature、standalone 输入安装都在私有函数里分发。
+// HostCommandRouterRequest 是 session->router 的跨对象命令包，不是 host 对外请求模型。
+// 对外业务请求仍由 VtkAppHostSession 暴露；router 只消费 session 已经归一化后的命令。
 struct HostCommandRouterRequest {
     HostCommandKind command = HostCommandKind::None;
 
     InitialVolumeLoadConfig initialVolume;
     std::function<void(bool isSuccess)> loadComplete;
 
-    HostCropRequest orthogonalCropRequest;
+    HostCropViewRequest cropViewRequest;
     HostCropPreviewMode cropPreviewMode = HostCropPreviewMode::KeepInside;
 
-    HostGapRequest gapAnalysisRequest;
+    HostGapViewRequest gapViewRequest;
 
     HostDataExportConfig dataExportConfig;
     std::function<void(bool isSuccess)> dataExportComplete;

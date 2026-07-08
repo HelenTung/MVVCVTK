@@ -77,10 +77,10 @@ public:
     // 执行当前 image submit：构建 request、经 router/algorithm 取结果，再把 submit image 提交到主数据 reload 通道。
     void SendSubmit();
 
-    // 宿主命令触发的裁切模式 toggle 入口。
+    // 宿主命令触发的裁切模式 switch 入口。
     bool SwitchCropBox();
 
-    // 宿主命令触发的平面裁切模式 toggle 入口。
+    // 宿主命令触发的平面裁切模式 switch 入口。
     bool SwitchCropPlane();
 
     // 宿主命令触发的显式退出入口。
