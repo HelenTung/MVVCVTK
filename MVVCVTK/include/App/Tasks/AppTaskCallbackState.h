@@ -52,7 +52,7 @@ public:
         }
     }
 
-    bool GetCallbackConsumed() {
+    bool ResetCallback() {
         return m_hasPendingCallback.exchange(false);
     }
 

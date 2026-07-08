@@ -28,7 +28,7 @@ public:
         VizMode currentMode,
         std::function<void(bool isSuccess)> onComplete);
 
-    bool GetSaveCallback();
+    bool ResetSaveCallback();
     void SendSaveCallback();
 
 private:

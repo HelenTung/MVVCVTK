@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-class AbstractAppService;
+class OverlayService;
 class AbstractVisualStrategy;
 struct GapParamSnapshot {
     SurfaceParams surfParams;
@@ -25,7 +25,7 @@ struct GapParamSnapshot {
 };
 
 struct GapOverlayBinding {
-    std::shared_ptr<AbstractAppService> service;
+    std::shared_ptr<OverlayService> service;
     std::shared_ptr<AbstractVisualStrategy> overlayStrategy;
 };
 
@@ -63,8 +63,8 @@ public:
     bool StartView(
         const GapAnalysisSurfaceRequest& surfaceRequest,
         const VoidDetectionParams& voidParams,
-        const std::vector<std::shared_ptr<AbstractAppService>>& meshOverlayTargets,
-        const std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>>& sliceOverlayTargets,
+        const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
+        const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
         std::function<void(double isoValue)> onIsoValueResolved = nullptr);
     bool SwitchOverlay();
     bool ExitView();
@@ -110,8 +110,8 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 
-    std::vector<std::shared_ptr<AbstractAppService>> m_meshTargets;
-    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> m_sliceTargets;
+    std::vector<std::shared_ptr<OverlayService>> m_meshTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> m_sliceTargets;
     std::vector<GapOverlayBinding> m_displayOverlayBindings;
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     vtkSmartPointer<vtkImageData> m_displayLabelImage;

@@ -40,8 +40,9 @@ public:
         std::lock_guard<std::mutex> lk(m_mutex);
         m_observers.erase(
             std::remove_if(m_observers.begin(), m_observers.end(),
-                [](const ObserverEntry& entry) {
-                    return entry.owner.expired();
+                [&owner](const ObserverEntry& entry) {
+                    auto currentOwner = entry.owner.lock();
+                    return !currentOwner || currentOwner == owner;
                 }),
             m_observers.end());
         m_observers.push_back({ std::move(owner), std::move(callback) });

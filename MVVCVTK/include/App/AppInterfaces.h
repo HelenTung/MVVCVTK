@@ -9,7 +9,8 @@
 //   AbstractDataManager        — 数据 I/O
 //   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
-//   AbstractAppService         — 基础服务
+//   OverlayService             — 图层叠加服务
+//   AbstractAppService         — 基础渲染服务
 //   InteractiveService — 交互服务
 //   AbstractRenderContext      — 渲染上下文
 // =====================================================================
@@ -28,10 +29,7 @@
 #include <vector>
 #include <memory>
 #include <string>
-#include <atomic>
-#include <thread>
 #include <functional>
-#include <map>
 #include <optional>
 #include <utility>
 
@@ -56,7 +54,7 @@ public:
         return false;
     }
     // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
-    virtual bool GetPendingImage() {
+    virtual bool SetCurrentFromPending() {
         return false;
     }
     virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
@@ -94,66 +92,38 @@ public:
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService — 基础服务（渲染脏标记 + SendUpdates 更新入口）
+// OverlayService — 图层叠加策略生命周期
 // ─────────────────────────────────────────────────────────────────────
-class AbstractAppService {
-protected:
-    std::shared_ptr<AbstractDataManager>    m_dataManager;
-    std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
-    vtkSmartPointer<vtkRenderer>            m_renderer;
-    vtkSmartPointer<vtkRenderWindow>        m_renderWindow;
-    std::atomic<bool> m_isDirty{ false }; // 渲染脏位：只负责驱动下一帧 Render，不承载具体业务语义
-    std::atomic<bool> m_hasSyncNeed{ false }; // 同步闸门：后台/回调线程只置位，真正的策略同步统一留给主线程 Timer 心跳执行
-    std::atomic<int>  m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 增量更新位图：把多次状态改动折叠成一次主线程消费
-
-    // 图层叠加策略列表（泛型支持任意算法）
-    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;
+class OverlayService {
 public:
-    virtual ~AbstractAppService() = default;
+    virtual ~OverlayService() = default;
+
+    // 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
+    virtual void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) = 0;
+    virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) = 0;
+    virtual void ClearOverlayStrategies() = 0;
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// AbstractAppService — 基础渲染服务
+// ─────────────────────────────────────────────────────────────────────
+class AbstractAppService
+    : public OverlayService {
+public:
+    ~AbstractAppService() override = default;
 
     virtual void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
-        vtkSmartPointer<vtkRenderer>     ren)
-    {
-        auto oldRenderer = m_renderer;
-        if (oldRenderer && oldRenderer != ren) {
-            if (m_currentStrategy) {
-                m_currentStrategy->DetachRenderer(oldRenderer);
-            }
-            for (auto& overlay : m_overlayStrategies) {
-                if (overlay) overlay->DetachRenderer(oldRenderer);
-            }
-        }
+        vtkSmartPointer<vtkRenderer> ren) = 0;
 
-        m_renderWindow = win;
-        m_renderer = ren;
+    // 主线程 Timer 心跳驱动的更新入口。
+    virtual void SendUpdates() = 0;
 
-        if (!m_renderer) return;
-
-        if (m_currentStrategy) {
-            m_currentStrategy->AttachRenderer(m_renderer);
-            m_currentStrategy->SetCamera(m_renderer);
-        }
-        for (auto& overlay : m_overlayStrategies) {
-            if (overlay) overlay->AttachRenderer(m_renderer);
-        }
-        m_isDirty = true;
-    }
-
-    // 主线程 Timer 心跳驱动的更新入口
-    virtual void SendUpdates() {}
-
-    bool GetDirty()      const { return m_isDirty; }
-    void SetDirty() { m_isDirty = true; }
+    virtual bool GetDirty() const = 0;
+    virtual void SetDirty() = 0;
     // 取走并清空当前渲染脏位，让 Timer 线程能以“消费一次渲染请求”的语义推进渲染循环。
-    bool GetDirtyConsumed() { return m_isDirty.exchange(false); }
+    virtual bool ResetDirty() = 0;
 
-    // Strategy 切换，实现在 AppService.cpp
-    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
-
-	// 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
-    virtual void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
-    virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
-    virtual void ClearOverlayStrategies();
+    virtual void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -163,7 +133,7 @@ class InteractiveService
     : public AbstractAppService
 {
 public:
-    virtual ~InteractiveService() = default;
+    ~InteractiveService() override = default;
 
     virtual void SetSliceScroll(int delta) {}
     virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }

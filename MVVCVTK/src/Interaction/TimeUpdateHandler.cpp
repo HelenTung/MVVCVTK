@@ -3,7 +3,7 @@
 #include <vtkCommand.h>
 #include <vtkRenderWindow.h>
 
-TimeUpdateHandler::TimeUpdateHandler(InteractiveService* service,
+TimeUpdateHandler::TimeUpdateHandler(AbstractAppService* service,
     vtkRenderWindow* renderWindow)
     : m_service(service)
     , m_renderWindow(renderWindow)
@@ -28,7 +28,7 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
     m_service->SendUpdates();
 
     // needRender: 本帧是否存在待消费的渲染请求，先原子消费，避免渲染期间的新脏标记被误清掉
-    const bool hasRenderNeed = m_service->GetDirtyConsumed();
+    const bool hasRenderNeed = m_service->ResetDirty();
 
     // 2. 检查渲染脏标记，仅在窗口有效时渲染
     if (hasRenderNeed) {

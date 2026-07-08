@@ -107,9 +107,9 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
         });
 }
 
-bool AppDataExportTaskService::GetSaveCallback()
+bool AppDataExportTaskService::ResetSaveCallback()
 {
-    return m_saveCallback.GetCallbackConsumed();
+    return m_saveCallback.ResetCallback();
 }
 
 void AppDataExportTaskService::SendSaveCallback()

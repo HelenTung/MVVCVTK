@@ -34,8 +34,8 @@ public:
 
     void SetFileLoadCallbackReady(bool isSuccess);
     void SetReloadReady(bool isSuccess);
-    bool GetFileLoadCallback();
-    bool GetReloadLoadCallback();
+    bool ResetFileCallback();
+    bool ResetReloadCallback();
     void SendFileLoadCallback();
     void SendReloadCallback();
 

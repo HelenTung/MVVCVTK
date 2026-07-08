@@ -201,7 +201,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
 
                 sharedState->SetReloadLoadStarted();
                 if (!sharedDataMgr->SetImageSnapshot(std::move(image))
-                    || !sharedDataMgr->GetPendingImage()) {
+                    || !sharedDataMgr->SetCurrentFromPending()) {
                     sharedState->SetReloadLoadFailed();
                     return false;
                 }
@@ -282,8 +282,8 @@ bool HostFeatureBindings::Impl::StartGapView(
         return false;
     }
 
-    std::vector<std::shared_ptr<AbstractAppService>> meshOverlayTargets;
-    std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>> sliceOverlayTargets;
+    std::vector<std::shared_ptr<OverlayService>> meshOverlayTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceOverlayTargets;
     meshOverlayTargets.reserve(targetViews.size());
     sliceOverlayTargets.reserve(targetViews.size());
     for (const auto* view : targetViews) {

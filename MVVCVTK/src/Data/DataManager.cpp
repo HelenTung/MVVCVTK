@@ -355,7 +355,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
-    // Modified() 暂不调用——留到主线程 GetPendingImage() 中调用，
+    // Modified() 暂不调用——留到主线程 SetCurrentFromPending() 中调用，
     // 确保 VTK pipeline 脏标记传播在正确线程触发。
 
     {
@@ -402,7 +402,7 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
     return true;
 }
 
-bool RawVolumeDataManager::GetPendingImage()
+bool RawVolumeDataManager::SetCurrentFromPending()
 {
     if (!m_hasPendingImage.load()) return false;
 

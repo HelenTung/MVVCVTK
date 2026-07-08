@@ -22,7 +22,7 @@ protected:
     }
 
 public:
-    virtual ~BaseVisualStrategy() = default;
+    ~BaseVisualStrategy() override = default;
 
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
     {

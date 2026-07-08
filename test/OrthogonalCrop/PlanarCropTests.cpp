@@ -641,7 +641,7 @@ void StartDataExport(int& failureCount)
         "pending image snapshot should not change the current data version.",
         failureCount);
     SetExpect(
-        dataManager.GetPendingImage(),
+        dataManager.SetCurrentFromPending(),
         "data export setup should promote the pending image into the current data manager image.",
         failureCount);
     SetExpect(

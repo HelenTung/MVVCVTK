@@ -107,14 +107,14 @@ void AppDataLoadTaskService::SetReloadReady(bool isSuccess)
     m_reloadLoadCallbackState.SetCallbackReady(isSuccess);
 }
 
-bool AppDataLoadTaskService::GetFileLoadCallback()
+bool AppDataLoadTaskService::ResetFileCallback()
 {
-    return m_fileLoadCallbackState.GetCallbackConsumed();
+    return m_fileLoadCallbackState.ResetCallback();
 }
 
-bool AppDataLoadTaskService::GetReloadLoadCallback()
+bool AppDataLoadTaskService::ResetReloadCallback()
 {
-    return m_reloadLoadCallbackState.GetCallbackConsumed();
+    return m_reloadLoadCallbackState.ResetCallback();
 }
 
 void AppDataLoadTaskService::SendFileLoadCallback()

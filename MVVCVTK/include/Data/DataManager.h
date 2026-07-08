@@ -74,7 +74,7 @@ public:
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
     bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
-    bool GetPendingImage() override;
+    bool SetCurrentFromPending() override;
 };
 
 class TiffVolumeDataManager : public BaseDataManager {

@@ -172,14 +172,16 @@ void StdRenderContext::BuildInteractionRouter()
 {
     m_interactionRouter.ClearHandlers();
 
+    // 这里的装配顺序就是交互链路优先级：Timer 负责统一收口状态推进，
+    // 2D/3D Handler 再分别处理各自模式下的输入命中，避免同一事件被多个处理器重复消费。
+    if (m_service) {
+        m_interactionRouter.AttachHandler(std::make_unique<TimeUpdateHandler>(
+            m_service.get(), m_renderWindow.GetPointer()));
+    }
+
     if (!m_interactiveService) {
         return;
     }
-
-    // 这里的装配顺序就是交互链路优先级：Timer 负责统一收口状态推进，
-    // 2D/3D Handler 再分别处理各自模式下的输入命中，避免同一事件被多个处理器重复消费。
-    m_interactionRouter.AttachHandler(std::make_unique<TimeUpdateHandler>(
-        m_interactiveService.get(), m_renderWindow.GetPointer()));
 
     m_interactionRouter.AttachHandler(std::make_unique<Viewer2DHandler>(
         m_interactiveService.get(),

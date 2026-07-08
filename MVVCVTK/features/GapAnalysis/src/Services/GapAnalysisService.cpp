@@ -231,8 +231,8 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::BuildLabelImage() const {
 bool GapAnalysisService::StartView(
     const GapAnalysisSurfaceRequest& surfaceRequest,
     const VoidDetectionParams& voidParams,
-    const std::vector<std::shared_ptr<AbstractAppService>>& meshOverlayTargets,
-    const std::vector<std::pair<Orientation, std::shared_ptr<AbstractAppService>>>& sliceOverlayTargets,
+    const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
+    const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
     std::function<void(double isoValue)> onIsoValueResolved) {
     SetOverlayOff();
     if (GetAnalysisState() == GapAnalysisState::Running) {
@@ -468,7 +468,6 @@ bool GapAnalysisService::SetOverlayOff() {
             continue;
         }
         binding.service->RemoveOverlayStrategy(binding.overlayStrategy);
-        binding.service->SetDirty();
         hasRemoved = true;
     }
     m_displayOverlayBindings.clear();

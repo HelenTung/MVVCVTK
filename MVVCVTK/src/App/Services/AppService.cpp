@@ -1,16 +1,173 @@
 #include "AppService.h"
 #include "AppDataExportTaskService.h"
 #include "AppDataLoadTaskService.h"
+#include "AppState.h"
+#include "AppStateSyncStrategy.h"
 #include "DataManager.h"
+#include "InteractionComputeService.h"
 #include "StrategyFactory.h"
 #include <vtkSmartPointer.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <future>
 #include <iostream>
+#include <map>
+#include <mutex>
 #include <thread>
 
 // ─────────────────────────────────────────────────────────────────────
-// AbstractAppService::SetCurrentStrategy（主线程专属）
+// 构造 / 析构
 // ─────────────────────────────────────────────────────────────────────
-void AbstractAppService::SetCurrentStrategy(
+class VizService::Impl final
+    : public IAppStateSyncTarget
+    , public std::enable_shared_from_this<Impl> {
+public:
+    Impl(std::shared_ptr<AbstractDataManager> dataMgr,
+        std::shared_ptr<SharedInteractionState> state,
+        std::shared_ptr<IStateEventSource> stateEventSource);
+    ~Impl();
+
+    void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
+        vtkSmartPointer<vtkRenderer> ren);
+    void SetVizMode(VizMode mode);
+    void SetMaterial(const MaterialParams& mat);
+    void SetOpacity(double opacity);
+    void SetTransferFunction(const std::vector<TFNode>& nodes);
+    void SetIsoThreshold(double val);
+    void SetBackground(const BackgroundColor& bg);
+    void SetSpacing(double sx, double sy, double sz);
+    void SetWindowLevel(double ww, double wc);
+    void SetVisualConfig(const PreInitConfig& cfg);
+    LoadState GetFileLoadState() const;
+    LoadState GetReloadLoadState() const;
+    void LoadFileAsync(const std::string& path,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
+        std::function<void(bool isSuccess)> onComplete);
+    bool ReloadFromBufferAsync(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin,
+        std::function<void(bool isSuccess)> onComplete);
+    void ExportDataAsync(const std::string& path,
+        std::function<void(bool isSuccess)> onComplete);
+    void ExportSlicesAsync(const std::string& path,
+        std::optional<double> rotationAngleDeg,
+        std::function<void(bool isSuccess)> onComplete);
+    void StopFileLoad();
+    void SetSliceScroll(int delta);
+    void SetCursorWorldPosition(double worldPos[3], int axis);
+    std::array<double, 3> GetCursorWorld();
+    void SetInteracting(bool isInteracting);
+    int GetPlaneAxis(vtkActor* actor);
+    vtkProp3D* GetMainProp();
+    void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix);
+    std::array<double, 16> GetModelMatrix();
+    WindowLevelParams GetWindowLevel() const;
+    int GetNavigationAxis() const;
+    void SetElementVisible(uint32_t flagBit, bool isVisible);
+    void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC);
+    void SetModelTransform(double translate[3], double rotate[3], double scale[3]);
+    void SetModelTransformReset();
+    void GetModelPositionFromWorld(const double w[3], double m[3]) const;
+    void GetWorldPositionFromModel(const double m[3], double w[3]) const;
+    void SendUpdates();
+    bool GetDirty() const;
+    void SetDirty();
+    bool ResetDirty();
+    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
+    void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    void ClearOverlayStrategies();
+
+private:
+    void SetRenderBinding(vtkSmartPointer<vtkRenderWindow> win,
+        vtkSmartPointer<vtkRenderer> ren);
+    void SetStateObserver();
+    void SendPendingImage();
+    void SendExportCallback();
+    bool SetLoadFailureState(bool& hasLoadEvent);
+    bool SetDataRefreshState(bool& hasLoadEvent);
+    void SendLoadCallbacks();
+    void BuildPipeline();
+    void SetStrategyState();
+    void ClearLoadFail();
+    RenderParams GetRenderParams(UpdateFlags flags) const;
+    std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
+    void SetRendererBg();
+    void SetStrategyClear() override;
+    void ClearStrategyCache();
+    void SetCursorCenter() override;
+    void SetSyncNeeded() override;
+    void SetPendingFlags(UpdateFlags flags) override;
+    void SetDataRefresh() override;
+    void SetLoadFailed() override;
+    void StartRun(std::packaged_task<void()> task,
+        bool hasActiveLoadFuture);
+
+    std::shared_ptr<AbstractDataManager> m_dataManager; // 当前体数据源，加载成功后由主线程提交到渲染管线
+    std::shared_ptr<AbstractVisualStrategy> m_currentStrategy; // 当前主渲染策略
+    vtkSmartPointer<vtkRenderer> m_renderer; // 当前渲染器，所有 VTK 节点挂接都收口到主线程
+    vtkSmartPointer<vtkRenderWindow> m_renderWindow; // 当前渲染窗口，用于交互帧率控制
+    std::atomic<bool> m_isDirty{ false }; // 渲染脏位：只驱动下一帧 Render
+    std::atomic<bool> m_hasSyncNeed{ false }; // 同步闸门：状态事件只置位，主线程统一消费
+    std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 增量更新位图
+    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies; // 图层叠加策略列表
+    std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService; // 加载任务构建和加载回调状态
+    std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
+    std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
+    AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
+    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 当前 service 本地待消费的 load 事件来源，避免多个窗口抢同一个 Share pending 标记
+    std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
+    std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
+
+    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) }; // 模式切换快照：前处理阶段可先写入，主线程重建管线时再一次性读取
+    std::atomic<bool> m_hasDataRefreshNeed{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建
+    std::atomic<bool> m_hasCacheClearNeed{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
+    std::atomic<bool> m_hasLoadFailure{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
+
+    std::future<void> m_activeLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
+    mutable std::mutex m_activeLoadMutex; // 保护 m_activeLoadFuture
+};
+
+VizService::Impl::Impl(
+    std::shared_ptr<AbstractDataManager> dataMgr,
+    std::shared_ptr<SharedInteractionState> state,
+    std::shared_ptr<IStateEventSource> stateEventSource)
+    : m_dataManager(std::move(dataMgr))
+    , m_sharedState(std::move(state))
+    , m_stateEventSource(std::move(stateEventSource))
+{
+    m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager, m_sharedState);
+    m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(m_dataManager, m_sharedState);
+}
+
+VizService::Impl::~Impl()
+{
+    std::lock_guard<std::mutex> lk(m_activeLoadMutex);
+    if (m_activeLoadFuture.valid())
+        m_activeLoadFuture.wait();
+}
+
+bool VizService::Impl::GetDirty() const
+{
+    return m_isDirty;
+}
+
+void VizService::Impl::SetDirty()
+{
+    m_isDirty = true;
+}
+
+bool VizService::Impl::ResetDirty()
+{
+    return m_isDirty.exchange(false);
+}
+
+void VizService::Impl::SetCurrentStrategy(
     std::shared_ptr<AbstractVisualStrategy> newStrategy)
 {
     if (m_currentStrategy == newStrategy) {
@@ -24,7 +181,7 @@ void AbstractAppService::SetCurrentStrategy(
     if (m_currentStrategy && m_renderer)
         m_currentStrategy->DetachRenderer(m_renderer);
 
-    m_currentStrategy = newStrategy;
+    m_currentStrategy = std::move(newStrategy);
 
     if (m_currentStrategy && m_renderer) {
         m_currentStrategy->AttachRenderer(m_renderer);
@@ -35,7 +192,9 @@ void AbstractAppService::SetCurrentStrategy(
     m_isDirty = true;
 }
 
-void AbstractAppService::AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
+void VizService::Impl::AttachOverlayStrategy(
+    std::shared_ptr<AbstractVisualStrategy> strategy)
+{
     if (!strategy) return;
 
     const auto sameStrategy = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
@@ -56,7 +215,9 @@ void AbstractAppService::AttachOverlayStrategy(std::shared_ptr<AbstractVisualStr
     m_isDirty = true;
 }
 
-void AbstractAppService::RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) {
+void VizService::Impl::RemoveOverlayStrategy(
+    std::shared_ptr<AbstractVisualStrategy> strategy)
+{
     if (!strategy) return;
 
     const auto it = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
@@ -74,53 +235,300 @@ void AbstractAppService::RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStr
     m_isDirty = true;
 }
 
-void AbstractAppService::ClearOverlayStrategies() {
+void VizService::Impl::ClearOverlayStrategies()
+{
     if (m_renderer) {
-        for (auto& s : m_overlayStrategies) {
-            s->DetachRenderer(m_renderer);
+        for (auto& strategy : m_overlayStrategies) {
+            strategy->DetachRenderer(m_renderer);
         }
     }
     m_overlayStrategies.clear();
     m_isDirty = true;
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// 构造 / 析构
-// ─────────────────────────────────────────────────────────────────────
 VizService::VizService(
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state,
     std::shared_ptr<IStateEventSource> stateEventSource)
-    : m_sharedState(std::move(state))
-    , m_stateEventSource(std::move(stateEventSource))
+    : m_impl(std::make_shared<VizService::Impl>(
+        std::move(dataMgr),
+        std::move(state),
+        std::move(stateEventSource)))
 {
-    m_dataManager = std::move(dataMgr);
-    m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager, m_sharedState);
-    m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(m_dataManager, m_sharedState);
 }
 
-VizService::~VizService()
+VizService::~VizService() = default;
+
+void VizService::SetRenderContext(
+    vtkSmartPointer<vtkRenderWindow> win,
+    vtkSmartPointer<vtkRenderer> ren)
 {
-    std::lock_guard<std::mutex> lk(m_activeLoadMutex);
-    if (m_activeLoadFuture.valid())
-        m_activeLoadFuture.wait();
+    m_impl->SetRenderContext(std::move(win), std::move(ren));
+}
+
+void VizService::SetVizMode(VizMode mode)
+{
+    m_impl->SetVizMode(mode);
+}
+
+void VizService::SetMaterial(const MaterialParams& mat)
+{
+    m_impl->SetMaterial(mat);
+}
+
+void VizService::SetOpacity(double opacity)
+{
+    m_impl->SetOpacity(opacity);
+}
+
+void VizService::SetTransferFunction(const std::vector<TFNode>& nodes)
+{
+    m_impl->SetTransferFunction(nodes);
+}
+
+void VizService::SetIsoThreshold(double val)
+{
+    m_impl->SetIsoThreshold(val);
+}
+
+void VizService::SetBackground(const BackgroundColor& bg)
+{
+    m_impl->SetBackground(bg);
+}
+
+void VizService::SetSpacing(double sx, double sy, double sz)
+{
+    m_impl->SetSpacing(sx, sy, sz);
+}
+
+void VizService::SetWindowLevel(double ww, double wc)
+{
+    m_impl->SetWindowLevel(ww, wc);
+}
+
+void VizService::SetVisualConfig(const PreInitConfig& cfg)
+{
+    m_impl->SetVisualConfig(cfg);
+}
+
+LoadState VizService::GetFileLoadState() const
+{
+    return m_impl->GetFileLoadState();
+}
+
+LoadState VizService::GetReloadLoadState() const
+{
+    return m_impl->GetReloadLoadState();
+}
+
+void VizService::LoadFileAsync(
+    const std::string& path,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
+    std::function<void(bool isSuccess)> onComplete)
+{
+    m_impl->LoadFileAsync(path, spacing, origin, std::move(onComplete));
+}
+
+bool VizService::ReloadFromBufferAsync(
+    const float* data,
+    const std::array<int, 3>& dims,
+    const std::array<float, 3>& spacing,
+    const std::array<float, 3>& origin,
+    std::function<void(bool isSuccess)> onComplete)
+{
+    return m_impl->ReloadFromBufferAsync(data, dims, spacing, origin, std::move(onComplete));
+}
+
+void VizService::ExportDataAsync(
+    const std::string& path,
+    std::function<void(bool isSuccess)> onComplete)
+{
+    m_impl->ExportDataAsync(path, std::move(onComplete));
+}
+
+void VizService::ExportSlicesAsync(
+    const std::string& path,
+    std::optional<double> rotationAngleDeg,
+    std::function<void(bool isSuccess)> onComplete)
+{
+    m_impl->ExportSlicesAsync(path, rotationAngleDeg, std::move(onComplete));
+}
+
+void VizService::StopFileLoad()
+{
+    m_impl->StopFileLoad();
+}
+
+void VizService::SetSliceScroll(int delta)
+{
+    m_impl->SetSliceScroll(delta);
+}
+
+void VizService::SetCursorWorldPosition(double worldPos[3], int axis)
+{
+    m_impl->SetCursorWorldPosition(worldPos, axis);
+}
+
+std::array<double, 3> VizService::GetCursorWorld()
+{
+    return m_impl->GetCursorWorld();
+}
+
+void VizService::SetInteracting(bool isInteracting)
+{
+    m_impl->SetInteracting(isInteracting);
+}
+
+int VizService::GetPlaneAxis(vtkActor* actor)
+{
+    return m_impl->GetPlaneAxis(actor);
+}
+
+vtkProp3D* VizService::GetMainProp()
+{
+    return m_impl->GetMainProp();
+}
+
+void VizService::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
+{
+    m_impl->SetModelMatrix(modelToWorldMatrix);
+}
+
+std::array<double, 16> VizService::GetModelMatrix()
+{
+    return m_impl->GetModelMatrix();
+}
+
+WindowLevelParams VizService::GetWindowLevel() const
+{
+    return m_impl->GetWindowLevel();
+}
+
+int VizService::GetNavigationAxis() const
+{
+    return m_impl->GetNavigationAxis();
+}
+
+void VizService::SetElementVisible(uint32_t flagBit, bool isVisible)
+{
+    m_impl->SetElementVisible(flagBit, isVisible);
+}
+
+void VizService::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
+{
+    m_impl->SetWindowLevelDrag(totalDx, totalDy, viewWidth, viewHeight, startWW, startWC);
+}
+
+void VizService::SetModelTransform(double translate[3], double rotate[3], double scale[3])
+{
+    m_impl->SetModelTransform(translate, rotate, scale);
+}
+
+void VizService::SetModelTransformReset()
+{
+    m_impl->SetModelTransformReset();
+}
+
+void VizService::GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const
+{
+    m_impl->GetModelPositionFromWorld(worldPos, modelPos);
+}
+
+void VizService::GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const
+{
+    m_impl->GetWorldPositionFromModel(modelPos, worldPos);
+}
+
+void VizService::SendUpdates()
+{
+    m_impl->SendUpdates();
+}
+
+bool VizService::GetDirty() const
+{
+    return m_impl->GetDirty();
+}
+
+void VizService::SetDirty()
+{
+    m_impl->SetDirty();
+}
+
+bool VizService::ResetDirty()
+{
+    return m_impl->ResetDirty();
+}
+
+void VizService::SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy)
+{
+    m_impl->SetCurrentStrategy(std::move(newStrategy));
+}
+
+void VizService::AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy)
+{
+    m_impl->AttachOverlayStrategy(std::move(strategy));
+}
+
+void VizService::RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy)
+{
+    m_impl->RemoveOverlayStrategy(std::move(strategy));
+}
+
+void VizService::ClearOverlayStrategies()
+{
+    m_impl->ClearOverlayStrategies();
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // RenderContext 绑定
 // ─────────────────────────────────────────────────────────────────────
-void VizService::SetRenderContext(
+void VizService::Impl::SetRenderContext(
     vtkSmartPointer<vtkRenderWindow> win,
     vtkSmartPointer<vtkRenderer> ren)
 {
-    AbstractAppService::SetRenderContext(win, ren);
+    SetRenderBinding(std::move(win), std::move(ren));
     SetRendererBg();
     if (!m_stateEventSource) return;
 
-    std::weak_ptr<VizService> weakSelf =
-        std::static_pointer_cast<VizService>(shared_from_this());
+    SetStateObserver();
+}
 
-    m_stateEventSource->SetObserver(shared_from_this(),
+void VizService::Impl::SetRenderBinding(
+    vtkSmartPointer<vtkRenderWindow> win,
+    vtkSmartPointer<vtkRenderer> ren)
+{
+    auto oldRenderer = m_renderer;
+    if (oldRenderer && oldRenderer != ren) {
+        if (m_currentStrategy) {
+            m_currentStrategy->DetachRenderer(oldRenderer);
+        }
+        for (auto& overlay : m_overlayStrategies) {
+            if (overlay) overlay->DetachRenderer(oldRenderer);
+        }
+    }
+
+    m_renderWindow = std::move(win);
+    m_renderer = std::move(ren);
+
+    if (m_renderer) {
+        if (m_currentStrategy) {
+            m_currentStrategy->AttachRenderer(m_renderer);
+            m_currentStrategy->SetCamera(m_renderer);
+        }
+        for (auto& overlay : m_overlayStrategies) {
+            if (overlay) overlay->AttachRenderer(m_renderer);
+        }
+        m_isDirty = true;
+    }
+}
+
+void VizService::Impl::SetStateObserver()
+{
+    std::shared_ptr<Impl> self = shared_from_this();
+    std::weak_ptr<Impl> weakSelf = self;
+
+    m_stateEventSource->SetObserver(std::move(self),
         [weakSelf](UpdateFlags flags)
         {
             auto self = weakSelf.lock();
@@ -140,49 +548,49 @@ void VizService::SetRenderContext(
 // ─────────────────────────────────────────────────────────────────────
 // 视觉配置 — 前处理 / 运行期配置意图
 // ─────────────────────────────────────────────────────────────────────
-void VizService::SetVizMode(VizMode mode)
+void VizService::Impl::SetVizMode(VizMode mode)
 {
     m_pendingVizModeInt.store(static_cast<int>(mode));
 }
 
-void VizService::SetMaterial(const MaterialParams& mat)
+void VizService::Impl::SetMaterial(const MaterialParams& mat)
 {
     m_sharedState->SetMaterial(mat);
 }
 
-void VizService::SetOpacity(double opacity)
+void VizService::Impl::SetOpacity(double opacity)
 {
     auto mat = m_sharedState->GetMaterial();
     mat.opacity = opacity;
     m_sharedState->SetMaterial(mat);
 }
 
-void VizService::SetTransferFunction(const std::vector<TFNode>& nodes)
+void VizService::Impl::SetTransferFunction(const std::vector<TFNode>& nodes)
 {
     m_sharedState->SetTFNodes(nodes);
 }
 
-void VizService::SetIsoThreshold(double val)
+void VizService::Impl::SetIsoThreshold(double val)
 {
     m_sharedState->SetIsoValue(val);
 }
 
-void VizService::SetBackground(const BackgroundColor& bg)
+void VizService::Impl::SetBackground(const BackgroundColor& bg)
 {
     m_sharedState->SetBackground(bg);
 }
 
-void VizService::SetSpacing(double sx, double sy, double sz)
+void VizService::Impl::SetSpacing(double sx, double sy, double sz)
 {
     m_sharedState->SetSpacing(sx, sy, sz);
 }
 
-void VizService::SetWindowLevel(double ww, double wc)
+void VizService::Impl::SetWindowLevel(double ww, double wc)
 {
     m_sharedState->SetWindowLevel(ww, wc);
 }
 
-void VizService::SetVisualConfig(const PreInitConfig& cfg)
+void VizService::Impl::SetVisualConfig(const PreInitConfig& cfg)
 {
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
     m_sharedState->SetPreInitConfig(cfg);
@@ -191,17 +599,17 @@ void VizService::SetVisualConfig(const PreInitConfig& cfg)
 // ─────────────────────────────────────────────────────────────────────
 // 数据加载 / 数据导出
 // ─────────────────────────────────────────────────────────────────────
-LoadState VizService::GetFileLoadState() const
+LoadState VizService::Impl::GetFileLoadState() const
 {
     return m_sharedState ? m_sharedState->GetFileLoadState() : LoadState::Idle;
 }
 
-LoadState VizService::GetReloadLoadState() const
+LoadState VizService::Impl::GetReloadLoadState() const
 {
     return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
 }
 
-void VizService::StartRun(
+void VizService::Impl::StartRun(
     std::packaged_task<void()> task,
     bool hasActiveLoadFuture)
 {
@@ -213,7 +621,7 @@ void VizService::StartRun(
     std::thread(std::move(task)).detach();
 }
 
-void VizService::LoadFileAsync(
+void VizService::Impl::LoadFileAsync(
     const std::string& path,
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin,
@@ -233,7 +641,7 @@ void VizService::LoadFileAsync(
     }
 }
 
-bool VizService::ReloadFromBufferAsync(
+bool VizService::Impl::ReloadFromBufferAsync(
     const float* data,
     const std::array<int, 3>& dims,
     const std::array<float, 3>& spacing,
@@ -258,7 +666,7 @@ bool VizService::ReloadFromBufferAsync(
     return true;
 }
 
-void VizService::ExportDataAsync(
+void VizService::Impl::ExportDataAsync(
     const std::string& path,
     std::function<void(bool isSuccess)> onComplete)
 {
@@ -272,7 +680,7 @@ void VizService::ExportDataAsync(
     }
 }
 
-void VizService::ExportSlicesAsync(
+void VizService::Impl::ExportSlicesAsync(
     const std::string& path,
     std::optional<double> rotationAngleDeg,
     std::function<void(bool isSuccess)> onComplete)
@@ -292,7 +700,7 @@ void VizService::ExportSlicesAsync(
     }
 }
 
-void VizService::StopFileLoad()
+void VizService::Impl::StopFileLoad()
 {
     // 当前加载流程尚未接入可中断检查，先保留上层控制入口。
 }
@@ -300,7 +708,7 @@ void VizService::StopFileLoad()
 // ─────────────────────────────────────────────────────────────────────
 // InteractiveService — 交互接口
 // ─────────────────────────────────────────────────────────────────────
-void VizService::SetSliceScroll(int delta)
+void VizService::Impl::SetSliceScroll(int delta)
 {
     if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
     const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
@@ -329,7 +737,7 @@ void VizService::SetSliceScroll(int delta)
     SetSyncNeeded();
 }
 
-void VizService::SetCursorWorldPosition(double worldPos[3], int axis)
+void VizService::Impl::SetCursorWorldPosition(double worldPos[3], int axis)
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
     auto currentPos = m_sharedState->GetCursorWorld();
@@ -348,27 +756,27 @@ void VizService::SetCursorWorldPosition(double worldPos[3], int axis)
     }
 }
 
-std::array<double, 3> VizService::GetCursorWorld()
+std::array<double, 3> VizService::Impl::GetCursorWorld()
 {
     return m_sharedState->GetCursorWorld();
 }
 
-void VizService::SetInteracting(bool isInteracting)
+void VizService::Impl::SetInteracting(bool isInteracting)
 {
     m_sharedState->SetInteracting(isInteracting);
 }
 
-int VizService::GetPlaneAxis(vtkActor* actor)
+int VizService::Impl::GetPlaneAxis(vtkActor* actor)
 {
     return m_currentStrategy ? m_currentStrategy->GetPlaneAxis(actor) : -1;
 }
 
-vtkProp3D* VizService::GetMainProp()
+vtkProp3D* VizService::Impl::GetMainProp()
 {
     return m_currentStrategy ? m_currentStrategy->GetMainProp() : nullptr;
 }
 
-void VizService::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
+void VizService::Impl::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
 {
     if (!modelToWorldMatrix) return;
 
@@ -379,12 +787,32 @@ void VizService::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
     }
 }
 
-void VizService::SetElementVisible(uint32_t flagBit, bool isVisible)
+std::array<double, 16> VizService::Impl::GetModelMatrix()
+{
+    return m_sharedState ? m_sharedState->GetModelMatrix()
+        : std::array<double, 16>{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+}
+
+WindowLevelParams VizService::Impl::GetWindowLevel() const
+{
+    if (m_sharedState)
+        return m_sharedState->GetWindowLevel();
+
+    WindowLevelParams p = {};
+    return p;
+}
+
+int VizService::Impl::GetNavigationAxis() const
+{
+    return m_currentStrategy ? m_currentStrategy->GetNavigationAxis() : -1;
+}
+
+void VizService::Impl::SetElementVisible(uint32_t flagBit, bool isVisible)
 {
     m_sharedState->SetElementVisible(flagBit, isVisible);
 }
 
-void VizService::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
+void VizService::Impl::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
 {
     if (!m_sharedState) return;
 
@@ -400,7 +828,7 @@ void VizService::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int
     SetSyncNeeded();
 }
 
-void VizService::SetModelTransform(
+void VizService::Impl::SetModelTransform(
     double translate[3], double rotate[3], double scale[3])
 {
     auto currentModelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // SharedState 当前模型矩阵快照，作为 TRS 叠加基准
@@ -419,7 +847,7 @@ void VizService::SetModelTransform(
     }
 }
 
-void VizService::SetModelTransformReset()
+void VizService::Impl::SetModelTransformReset()
 {
     std::array<double, 16> identity = {
         1,0,0,0,
@@ -432,7 +860,7 @@ void VizService::SetModelTransformReset()
     }
 }
 
-void VizService::GetModelPositionFromWorld(const double w[3], double m[3]) const
+void VizService::Impl::GetModelPositionFromWorld(const double w[3], double m[3]) const
 {
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // 由 SharedState 现算的逆矩阵，避免维护第二份真相
     worldToModelMatrix->Identity();
@@ -445,7 +873,7 @@ void VizService::GetModelPositionFromWorld(const double w[3], double m[3]) const
     InteractionComputeService::GetModelPositionFromWorld(worldToModelMatrix, w, m);
 }
 
-void VizService::GetWorldPositionFromModel(const double m[3], double w[3]) const
+void VizService::Impl::GetWorldPositionFromModel(const double m[3], double w[3]) const
 {
     auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New(); // SharedState 当前模型矩阵快照，保证 world/model 换算只依赖单一真源
     modelToWorldMatrix->Identity();
@@ -460,7 +888,7 @@ void VizService::GetWorldPositionFromModel(const double m[3], double w[3]) const
 // ─────────────────────────────────────────────────────────────────────
 // AbstractAppService — 主线程后处理入口
 // ─────────────────────────────────────────────────────────────────────
-void VizService::SendUpdates()
+void VizService::Impl::SendUpdates()
 {
     // 统一主线程后处理链路：
     // 1. pending image 提交为 current data
@@ -470,93 +898,104 @@ void VizService::SendUpdates()
     // 5. 普通增量同步
     // 6. 文件加载 / reload 回调
 
-    // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
-    if (m_dataManager && m_dataManager->GetPendingImage()) {
-        // 走和文件加载成功相同的后处理路径
-        auto img = m_dataManager->GetVtkImage();
-        if (img) {
-            const auto range = m_dataManager->GetScalarRange();
-            const auto spacing = m_dataManager->GetSpacing();
-            m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
-        }
-        else {
-            m_sharedState->SetReloadLoadFailed();
-        }
-    }
-
-    // 导出异步任务回调触发
-    if (m_dataExportTaskService && m_dataExportTaskService->GetSaveCallback()) {
-        m_dataExportTaskService->SendSaveCallback();
-    }
+    SendPendingImage();
+    SendExportCallback();
 
     // 延迟缓存清理（Detach 必须在主线程）
     if (m_hasCacheClearNeed.exchange(false))
         ClearStrategyCache();
 
-    bool isReturnAfterLoadFailure = false;
     bool hasLoadEvent = false;
-
-    // 加载失败处理
-    if (m_hasLoadFailure.exchange(false)) {
-        const LoadEventKind loadEventKind = m_pendingLoadEventKind;
-        ClearLoadFail();
-        if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
-            m_dataLoadTaskService->SetFileLoadCallbackReady(false);
-        }
-        else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
-            m_dataLoadTaskService->SetReloadReady(false);
-        }
-        isReturnAfterLoadFailure = true;
-        hasLoadEvent = true;
+    const bool hasLoadFailure = SetLoadFailureState(hasLoadEvent);
+    if (!hasLoadFailure) {
+        SetDataRefreshState(hasLoadEvent);
+        SetStrategyState();
     }
 
-    // DataReady → 重建管线（优先于增量同步）
-    if (!isReturnAfterLoadFailure && m_hasDataRefreshNeed.exchange(false)) {
-        const LoadEventKind loadEventKind = m_pendingLoadEventKind;
-        BuildPipeline();
-        if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
-            m_dataLoadTaskService->SetFileLoadCallbackReady(true);
-        }
-        else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
-            m_dataLoadTaskService->SetReloadReady(true);
-        }
-        hasLoadEvent = true;
-        // return; // 本帧只做重建，同步留到下帧
+    SendLoadCallbacks();
+    if (hasLoadEvent) {
+        m_pendingLoadEventKind = LoadEventKind::None;
     }
+}
 
-    if (isReturnAfterLoadFailure) {
-        if (m_dataLoadTaskService && m_dataLoadTaskService->GetFileLoadCallback()) {
-            m_dataLoadTaskService->SendFileLoadCallback();
-        }
-        if (m_dataLoadTaskService && m_dataLoadTaskService->GetReloadLoadCallback()) {
-            m_dataLoadTaskService->SendReloadCallback();
-        }
-        if (hasLoadEvent) {
-            m_pendingLoadEventKind = LoadEventKind::None;
-        }
+void VizService::Impl::SendPendingImage()
+{
+    // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
+    if (!m_dataManager || !m_dataManager->SetCurrentFromPending()) {
         return;
     }
 
-    // 普通事件增量同步
-    SetStrategyState();
+    // 走和文件加载成功相同的后处理路径。
+    auto img = m_dataManager->GetVtkImage();
+    if (!img) {
+        m_sharedState->SetReloadLoadFailed();
+        return;
+    }
 
+    const auto range = m_dataManager->GetScalarRange();
+    const auto spacing = m_dataManager->GetSpacing();
+    m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
+}
+
+void VizService::Impl::SendExportCallback()
+{
+    // 导出异步任务回调触发。
+    if (m_dataExportTaskService && m_dataExportTaskService->ResetSaveCallback()) {
+        m_dataExportTaskService->SendSaveCallback();
+    }
+}
+
+bool VizService::Impl::SetLoadFailureState(bool& hasLoadEvent)
+{
+    if (!m_hasLoadFailure.exchange(false)) {
+        return false;
+    }
+
+    const LoadEventKind loadEventKind = m_pendingLoadEventKind;
+    ClearLoadFail();
+    if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
+        m_dataLoadTaskService->SetFileLoadCallbackReady(false);
+    }
+    else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
+        m_dataLoadTaskService->SetReloadReady(false);
+    }
+    hasLoadEvent = true;
+    return true;
+}
+
+bool VizService::Impl::SetDataRefreshState(bool& hasLoadEvent)
+{
+    if (!m_hasDataRefreshNeed.exchange(false)) {
+        return false;
+    }
+
+    const LoadEventKind loadEventKind = m_pendingLoadEventKind;
+    BuildPipeline();
+    if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
+        m_dataLoadTaskService->SetFileLoadCallbackReady(true);
+    }
+    else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
+        m_dataLoadTaskService->SetReloadReady(true);
+    }
+    hasLoadEvent = true;
+    return true;
+}
+
+void VizService::Impl::SendLoadCallbacks()
+{
     // 文件加载 / 重载回调延后到策略同步之后，保证上层 submit 回调看到的是主线程收敛后的最终状态。
-    if (m_dataLoadTaskService && m_dataLoadTaskService->GetFileLoadCallback()) {
+    if (m_dataLoadTaskService && m_dataLoadTaskService->ResetFileCallback()) {
         m_dataLoadTaskService->SendFileLoadCallback();
     }
-    if (m_dataLoadTaskService && m_dataLoadTaskService->GetReloadLoadCallback()) {
+    if (m_dataLoadTaskService && m_dataLoadTaskService->ResetReloadCallback()) {
         m_dataLoadTaskService->SendReloadCallback();
-    }
-
-    if (hasLoadEvent) {
-        m_pendingLoadEventKind = LoadEventKind::None;
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // 私有辅助
 // ─────────────────────────────────────────────────────────────────────
-void VizService::BuildPipeline()
+void VizService::Impl::BuildPipeline()
 {
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
@@ -600,7 +1039,7 @@ void VizService::BuildPipeline()
     SetSyncNeeded(); // 重建后触发一次全量参数同步
 }
 
-void VizService::SetStrategyState()
+void VizService::Impl::SetStrategyState()
 {
     bool isExpected = true;
     if (!m_hasSyncNeed.compare_exchange_strong(isExpected, false)) return;
@@ -646,7 +1085,7 @@ void VizService::SetStrategyState()
     // m_hasSyncNeed = false;
 }
 
-void VizService::ClearLoadFail()
+void VizService::Impl::ClearLoadFail()
 {
     std::cerr << "[ClearLoadFail] Load failed; clearing pipeline state.\n";
 
@@ -663,7 +1102,7 @@ void VizService::ClearLoadFail()
     m_isDirty = true;
 }
 
-RenderParams VizService::GetRenderParams(UpdateFlags flags) const
+RenderParams VizService::Impl::GetRenderParams(UpdateFlags flags) const
 {
     RenderParams p;
 
@@ -712,7 +1151,7 @@ RenderParams VizService::GetRenderParams(UpdateFlags flags) const
     return p;
 }
 
-std::shared_ptr<AbstractVisualStrategy> VizService::GetStrategy(VizMode mode)
+std::shared_ptr<AbstractVisualStrategy> VizService::Impl::GetStrategy(VizMode mode)
 {
     // Strategy 以 VizMode 为键缓存，说明模式切换是“复用既有渲染对象”而不是“每次全新构建”。
     auto it = m_strategyCache.find(mode);
@@ -723,7 +1162,7 @@ std::shared_ptr<AbstractVisualStrategy> VizService::GetStrategy(VizMode mode)
     return s;
 }
 
-void VizService::SetRendererBg()
+void VizService::Impl::SetRendererBg()
 {
     if (!m_renderer || !m_sharedState) {
         return;
@@ -733,7 +1172,7 @@ void VizService::SetRendererBg()
     m_renderer->SetBackground(bg.r, bg.g, bg.b);
 }
 
-void VizService::SetPendingFlags(UpdateFlags flags)
+void VizService::Impl::SetPendingFlags(UpdateFlags flags)
 {
     int old = m_pendingFlags.load();
     // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
@@ -743,23 +1182,23 @@ void VizService::SetPendingFlags(UpdateFlags flags)
     }
 }
 
-void VizService::SetDataRefresh()
+void VizService::Impl::SetDataRefresh()
 {
     m_hasDataRefreshNeed = true;
 }
 
-void VizService::SetLoadFailed()
+void VizService::Impl::SetLoadFailed()
 {
     m_hasLoadFailure = true;
     m_isDirty = true;
 }
 
-void VizService::SetStrategyClear()
+void VizService::Impl::SetStrategyClear()
 {
     m_hasCacheClearNeed = true;
 }
 
-void VizService::ClearStrategyCache()
+void VizService::Impl::ClearStrategyCache()
 {
     // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
     // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
@@ -772,7 +1211,7 @@ void VizService::ClearStrategyCache()
     m_strategyCache.clear();
 }
 
-void VizService::SetCursorCenter()
+void VizService::Impl::SetCursorCenter()
 {
     if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
     // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
@@ -787,7 +1226,7 @@ void VizService::SetCursorCenter()
     m_sharedState->SetCursorWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
 }
 
-void VizService::SetSyncNeeded()
+void VizService::Impl::SetSyncNeeded()
 {
     // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
     m_hasSyncNeed = true;
