@@ -216,6 +216,9 @@
     <ClInclude Include="include\Interaction\IInteractionHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
+    <ClInclude Include="include\Interaction\InputCallbackHandler.h">
+      <Filter>include\Interaction</Filter>
+    </ClInclude>
     <ClInclude Include="include\Render\StrategyFactory.h">
       <Filter>include\Render</Filter>
     </ClInclude>
@@ -363,6 +366,9 @@
       <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="src\Interaction\InteractionRouter.cpp">
+      <Filter>src\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Interaction\InputCallbackHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\StdRenderContext.cpp">

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="include">
+      <UniqueIdentifier>{8f420567-63f5-4dc5-a652-ed0bd0f1f31b}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{5a9cb314-08a8-4f8d-a5d1-1f5e69314451}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="tests">
+      <UniqueIdentifier>{d69324b3-e388-406f-a371-eb1b5247f48f}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\IInteractionHandler.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionEvent.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionResult.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h">
+      <Filter>include</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="InteractionRouterTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

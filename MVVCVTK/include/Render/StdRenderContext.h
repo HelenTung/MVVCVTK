@@ -24,7 +24,8 @@ private:
     std::vector<unsigned long> m_observerTags; // 当前 interactor 上由本 context 注册的业务 observer
     unsigned long m_timerObserverTag = 0; // 当前 TimerEvent observer tag，替换 interactor 时精确移除
     int m_timerId = 0; // CreateRepeatingTimer 返回的 timer id，用于避免重复创建和精确销毁
-    std::function<InteractionResult(const InteractionEvent&)> m_keyHandler; // host 调试输入 hook，不携带 host 语义
+    std::function<InteractionResult(const InteractionEvent&)> m_inputHandler; // host 输入适配 hook，不携带 host 或 feature 语义
+    std::vector<unsigned long> m_inputEventIds; // 限定输入 hook 消费的 VTK 事件，避免影响鼠标和 timer 链路
     std::function<void()> m_timerHandler; // host 主线程 tick hook，TimerEvent 生命周期仍归 RenderContext
 
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
@@ -54,8 +55,10 @@ public:
     void SetOrientationAxesVisible(bool isVisible) override;
     void SetToolMode(ToolMode mode);
     ToolMode GetToolMode() const { return m_toolMode; }
-    void SetKeyHandler(std::function<InteractionResult(const InteractionEvent&)> handler);
-    void ClearKeyHandler();
+    void SetInputHandler(
+        std::function<InteractionResult(const InteractionEvent&)> handler,
+        std::vector<unsigned long> eventIds);
+    void ClearInputHandler();
     void SetTimerHandler(std::function<void()> handler);
     void ClearTimerHandler();
     vtkRenderWindowInteractor* GetInteractor() const { return m_interactor.GetPointer(); }

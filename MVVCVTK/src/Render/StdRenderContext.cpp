@@ -1,4 +1,5 @@
 #include "StdRenderContext.h"
+#include "InputCallbackHandler.h"
 #include "TimeUpdateHandler.h"
 #include "Viewer2DHandler.h"
 #include "Viewer3DHandler.h"
@@ -162,9 +163,10 @@ void StdRenderContext::SetInteractorReady()
 // BuildInteractionRouter —— 装配 Handler
 //
 // 顺序决定 FirstMatch 优先级（越前越优先）：
-//   1. TimeUpdateHandler  → Timer 心跳，使用 Broadcast 模式单独处理
-//   2. Viewer2DHandler    → SliceXxx 模式下的滚轮/十字线
-//   3. Viewer3DHandler    → CompositeXxx 模式下的平面拖拽
+//   1. TimeUpdateHandler   → Timer 心跳，使用 Broadcast 模式单独处理
+//   2. InputCallbackHandler → host 输入适配，不承载 host 或 feature 语义
+//   3. Viewer2DHandler     → SliceXxx 模式下的滚轮/十字线
+//   4. Viewer3DHandler     → CompositeXxx 模式下的平面拖拽
 // ─────────────────────────────────────────────────────────────────────
 }
 
@@ -177,6 +179,12 @@ void StdRenderContext::BuildInteractionRouter()
     if (m_service) {
         m_interactionRouter.AttachHandler(std::make_unique<TimeUpdateHandler>(
             m_service.get(), m_renderWindow.GetPointer()));
+    }
+
+    if (m_inputHandler) {
+        m_interactionRouter.AttachHandler(std::make_unique<InputCallbackHandler>(
+            m_inputHandler,
+            m_inputEventIds));
     }
 
     if (!m_interactiveService) {
@@ -334,16 +342,21 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 
 }
 
-void StdRenderContext::SetKeyHandler(
-    std::function<InteractionResult(const InteractionEvent&)> handler)
+void StdRenderContext::SetInputHandler(
+    std::function<InteractionResult(const InteractionEvent&)> handler,
+    std::vector<unsigned long> eventIds)
 {
-    m_keyHandler = std::move(handler);
+    m_inputHandler = std::move(handler);
+    m_inputEventIds = std::move(eventIds);
+    BuildInteractionRouter();
 
 }
 
-void StdRenderContext::ClearKeyHandler()
+void StdRenderContext::ClearInputHandler()
 {
-    m_keyHandler = nullptr;
+    m_inputHandler = nullptr;
+    m_inputEventIds.clear();
+    BuildInteractionRouter();
 
 }
 
@@ -420,20 +433,8 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
         ? RouterDispatchMode::Broadcast
         : RouterDispatchMode::FirstMatch;
 
-    InteractionResult result;
-    if (m_keyHandler
-        && (eventId == vtkCommand::KeyPressEvent
-            || eventId == vtkCommand::KeyReleaseEvent
-            || eventId == vtkCommand::CharEvent)) {
-        result = m_keyHandler(eve);
-    }
-
-    if (!result.isHandled) {
-        const InteractionResult routerResult =
-            m_interactionRouter.Dispatch(eve, dispatchMode);
-        result.isHandled = result.isHandled || routerResult.isHandled;
-        result.hasVtkAbort = result.hasVtkAbort || routerResult.hasVtkAbort;
-    }
+    const InteractionResult result =
+        m_interactionRouter.Dispatch(eve, dispatchMode);
 
     if (eventId == vtkCommand::TimerEvent && m_timerHandler) {
         m_timerHandler();

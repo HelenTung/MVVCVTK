@@ -149,7 +149,7 @@ private:
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
     std::weak_ptr<HostFeatureBindings> m_featureBindings;
-    mutable std::vector<std::weak_ptr<StdRenderContext>> m_keyContexts;
+    mutable std::vector<std::weak_ptr<StdRenderContext>> m_hotkeyContexts;
 };
 
 HostCommandRouter::Impl::Impl(
@@ -164,12 +164,12 @@ HostCommandRouter::Impl::Impl(
 
 HostCommandRouter::Impl::~Impl()
 {
-    for (const auto& context : m_keyContexts) {
+    for (const auto& context : m_hotkeyContexts) {
         if (const auto lockedContext = context.lock()) {
-            lockedContext->ClearKeyHandler();
+            lockedContext->ClearInputHandler();
         }
     }
-    m_keyContexts.clear();
+    m_hotkeyContexts.clear();
 }
 
 char HostCommandRouter::Impl::GetUpperAscii(char value) const
@@ -939,7 +939,7 @@ bool HostCommandRouter::Impl::AttachHotkeys(
         }
 
         const std::weak_ptr<StdRenderContext> context = view->context;
-        m_keyContexts.push_back(context);
+        m_hotkeyContexts.push_back(context);
         const bool hasFeature = GetViewFound(featureTargetViews, view);
         const bool hasContext = GetViewFound(renderContextTargetViews, view);
         const HostRenderViewRole role = view->config.role;
@@ -947,7 +947,7 @@ bool HostCommandRouter::Impl::AttachHotkeys(
         auto isPlaneDown = std::make_shared<bool>(false);
         auto isGapDown = std::make_shared<bool>(false);
         auto isSubmitDown = std::make_shared<bool>(false);
-        view->context->SetKeyHandler(
+        view->context->SetInputHandler(
             [
                 impl = this,
                 context,
@@ -975,6 +975,11 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                     *isPlaneDown,
                     *isGapDown,
                     *isSubmitDown);
+            },
+            std::vector<unsigned long>{
+                vtkCommand::KeyPressEvent,
+                vtkCommand::KeyReleaseEvent,
+                vtkCommand::CharEvent
             });
     }
     return true;
