@@ -26,9 +26,15 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
+
+static_assert(std::is_same_v<
+    decltype(std::declval<const OrthogonalCropResult&>().GetStatistics()),
+    OrthogonalCropStatistics>);
 
 constexpr double TupleTolerance = 1e-9;
 constexpr double MatrixTolerance = 1e-9;
@@ -268,7 +274,7 @@ void StartCropFailure(int& failureCount)
 
     CropRouter router;
     const auto result = router.GetResult(request);
-    const auto& statistics = result.GetStatistics();
+    const auto statistics = result.GetStatistics();
 
     SetExpect(!result.GetSucceeded(), "missing polydata route should fail.", failureCount);
     SetExpect(
@@ -307,29 +313,17 @@ void StartCropFailure(int& failureCount)
         result.GetFailureReason() == CropFailure::NoPolyData,
         "failure result must report NoPolyData.",
         failureCount);
-    SetExpect(
-        statistics.GetFailureReason() == CropFailure::NoPolyData,
-        "failure statistics must report NoPolyData.",
-        failureCount);
-    SetExpect(
-        result.GetFailureReason() == statistics.GetFailureReason(),
-        "failure result and statistics reasons must stay synchronized.",
-        failureCount);
     SetExpect(!result.GetMessage().empty(), "failure result message must not be empty.", failureCount);
-    SetExpect(
-        result.GetMessage() == statistics.GetValidationMessage(),
-        "failure result and statistics messages must stay synchronized.",
-        failureCount);
 }
 
-void StartResultSync(int& failureCount)
+void StartResultView(int& failureCount)
 {
     const auto resultExpect = [&failureCount](
         const OrthogonalCropResult& result,
         const OrthogonalCropRequest& request,
         CropFailure failureReason,
         const std::string& label) {
-        const auto& resultStatistics = result.GetStatistics();
+        const auto resultStatistics = result.GetStatistics();
         SetExpect(
             result.GetResolvedDataSource() == request.GetDataSource(),
             label + " result data source must match the request.",
@@ -366,14 +360,6 @@ void StartResultSync(int& failureCount)
             result.GetFailureReason() == failureReason,
             label + " result failure reason must match the expected value.",
             failureCount);
-        SetExpect(
-            resultStatistics.GetFailureReason() == failureReason,
-            label + " statistics failure reason must match the expected value.",
-            failureCount);
-        SetExpect(
-            result.GetMessage() == resultStatistics.GetValidationMessage(),
-            label + " result and statistics messages must stay synchronized.",
-            failureCount);
         if (failureReason != CropFailure::None) {
             SetExpect(
                 !result.GetMessage().empty(),
@@ -393,21 +379,16 @@ void StartResultSync(int& failureCount)
         return request;
     };
 
-    auto statistics = OrthogonalCropStatistics::GetResolved(
-        OrthogonalCropDataSource::PolyData,
-        OrthogonalCropOperation::Preview,
-        CropShape::Plane,
-        CropRemovalMode::RemoveInside);
-    statistics.SetFailureReason(CropFailure::NoPolyData);
-    statistics.SetValidationMessage("Synthetic missing polydata.");
-
-    const auto factoryResult = OrthogonalCropResult::GetResolved(statistics);
     auto factoryRequest = requestFactory(
         CropShape::Plane,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::PolyData);
     factoryRequest.SetRemovalMode(CropRemovalMode::RemoveInside);
-    resultExpect(factoryResult, factoryRequest, CropFailure::NoPolyData, "resolved factory");
+    const auto factoryResult = OrthogonalCropResult::GetFailure(
+        factoryRequest,
+        CropFailure::NoPolyData,
+        "Synthetic missing polydata.");
+    resultExpect(factoryResult, factoryRequest, CropFailure::NoPolyData, "failure factory");
 
     OrthogonalCropResult setterResult;
     setterResult.SetResolvedDataSource(factoryRequest.GetDataSource());
@@ -539,7 +520,7 @@ void SetResultExpect(
     CropRemovalMode removalMode,
     int& failureCount)
 {
-    const auto& statistics = result.GetStatistics();
+    const auto statistics = result.GetStatistics();
 
     SetExpect(result.GetSucceeded(), "planar submit should succeed.", failureCount);
     SetExpect(
@@ -577,10 +558,6 @@ void SetResultExpect(
     SetExpect(
         statistics.GetResolvedRemovalMode() == removalMode,
         "planar submit statistics must preserve requested removal mode.",
-        failureCount);
-    SetExpect(
-        statistics.GetFailureReason() == CropFailure::None,
-        "planar submit statistics must not report failure.",
         failureCount);
     SetExpect(result.GetSubmitImage() != nullptr, "planar submit image must exist.", failureCount);
     SetExpect(result.GetMaskImage() != nullptr, "planar submit mask must exist.", failureCount);
@@ -979,7 +956,7 @@ int main()
 {
     int failureCount = 0;
     StartCropFailure(failureCount);
-    StartResultSync(failureCount);
+    StartResultView(failureCount);
     StartCameraState(failureCount);
     StartOblique(failureCount);
     StartDeepCases(failureCount);

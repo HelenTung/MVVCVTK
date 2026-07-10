@@ -48,7 +48,6 @@ public:
     void DetachHostTimer();
 
 private:
-    bool SetCropViews(const HostCropViewRequest& request);
     void OnHostTimer();
     bool SetCropInput();
     static bool GetImageReady(vtkImageData* image);
@@ -241,12 +240,6 @@ bool HostFeatureBindings::Impl::StartCrop(
         return false;
     }
 
-    return SetCropViews(request);
-}
-
-bool HostFeatureBindings::Impl::SetCropViews(
-    const HostCropViewRequest& request)
-{
     // 这一步是 host 窗口语义到裁切 bridge 的唯一转换点：
     // 1. reference view 提供 renderer/interactor，并决定 widget 所在坐标语境。
     // 2. preview views 只提供 InteractiveService，用于显示预览和刷新 dirty 状态。
@@ -394,7 +387,7 @@ bool HostFeatureBindings::Impl::SwitchCropBox(
     const HostCropViewRequest& request)
 {
     // Switch 前先 Start，是为了让上位机切换窗口布局后，裁切 bridge 始终使用最新 reference/preview 目标。
-    if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
+    if (!StartCrop(request)) {
         return false;
     }
     return m_core.orthogonalCropBridge->SwitchCropBox();
@@ -403,7 +396,7 @@ bool HostFeatureBindings::Impl::SwitchCropBox(
 bool HostFeatureBindings::Impl::SwitchCropPlane(
     const HostCropViewRequest& request)
 {
-    if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
+    if (!StartCrop(request)) {
         return false;
     }
     return m_core.orthogonalCropBridge->SwitchCropPlane();
@@ -413,7 +406,7 @@ bool HostFeatureBindings::Impl::SwitchCropView(
     const HostCropViewRequest& request,
     HostCropPreviewMode previewMode)
 {
-    if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
+    if (!StartCrop(request)) {
         return false;
     }
 
@@ -424,7 +417,7 @@ bool HostFeatureBindings::Impl::SwitchCropView(
 bool HostFeatureBindings::Impl::SendCrop(
     const HostCropViewRequest& request)
 {
-    if (!StartCrop(request) || !m_core.orthogonalCropBridge) {
+    if (!StartCrop(request)) {
         return false;
     }
 
@@ -472,15 +465,7 @@ std::function<bool()> HostFeatureBindings::Impl::BuildCropInput() const
         }
 
         const auto imageState = sharedDataMgr->GetImageState();
-        if (!imageState.image || !imageState.image->GetScalarPointer()) {
-            bridge->ClearInputImage();
-            std::cerr << "[Host] Orthogonal crop init failed: input image missing." << std::endl;
-            return false;
-        }
-
-        int dims[3] = { 0, 0, 0 };
-        imageState.image->GetDimensions(dims);
-        if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        if (!GetImageReady(imageState.image)) {
             bridge->ClearInputImage();
             std::cerr << "[Host] Orthogonal crop init failed: input image missing." << std::endl;
             return false;

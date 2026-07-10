@@ -44,10 +44,6 @@ private:
     OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
     std::array<double, 6> GetImageModelBounds() const;
     std::array<double, 6> GetPolyBounds() const;
-    OrthogonalCropResult GetRouterFailureResult(
-        const OrthogonalCropRequest& request,
-        CropFailure failureReason,
-        const std::string& message) const;
     std::size_t GetRamBytes() const;
 
     // router 持有当前后端输入快照，公开头文件不暴露具体缓存策略。
@@ -150,7 +146,7 @@ OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& re
         return GetPlaneResult(request);
 
     default:
-        return GetRouterFailureResult(
+        return OrthogonalCropResult::GetFailure(
             request,
             CropFailure::NoBackend,
             "Router has no executable path for this crop geometry.");
@@ -165,7 +161,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
         switch (request.GetDataSource()) {
         case OrthogonalCropDataSource::VolumeData:
             if (!GetInputImage()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed crop route requires image input data.");
@@ -177,7 +173,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoPolyData,
                     "PolyData crop route requires polydata input data.");
@@ -193,7 +189,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
         switch (request.GetDataSource()) {
         case OrthogonalCropDataSource::ImageData:
             if (!GetInputImage()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed crop route requires image input data.");
@@ -212,7 +208,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
         break;
     }
 
-    return GetRouterFailureResult(
+    return OrthogonalCropResult::GetFailure(
         request,
         CropFailure::NoBackend,
         "Router has no executable path for this crop route.");
@@ -226,7 +222,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
         switch (request.GetDataSource()) {
         case OrthogonalCropDataSource::VolumeData:
             if (!GetInputImage()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed planar crop route requires image input data.");
@@ -238,7 +234,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoPolyData,
                     "PolyData planar crop route requires polydata input data.");
@@ -254,7 +250,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
         switch (request.GetDataSource()) {
         case OrthogonalCropDataSource::ImageData:
             if (!GetInputImage()) {
-                return GetRouterFailureResult(
+                return OrthogonalCropResult::GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed planar crop route requires image input data.");
@@ -273,7 +269,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
         break;
     }
 
-    return GetRouterFailureResult(
+    return OrthogonalCropResult::GetFailure(
         request,
         CropFailure::NoBackend,
         "Router has no executable path for this planar crop route.");
@@ -310,20 +306,6 @@ std::array<double, 6> CropRouter::Impl::GetPolyBounds() const
         rawBounds[2], rawBounds[3],
         rawBounds[4], rawBounds[5]
     };
-}
-
-OrthogonalCropResult CropRouter::Impl::GetRouterFailureResult(
-    const OrthogonalCropRequest& request,
-    CropFailure failureReason,
-    const std::string& message) const
-{
-    auto statistics = OrthogonalCropStatistics::GetResolved(request);
-    statistics.SetFailureReason(failureReason);
-    statistics.SetValidationMessage(message);
-
-    auto result = OrthogonalCropResult::GetResolved(statistics);
-    result.SetSucceeded(false);
-    return result;
 }
 
 std::size_t CropRouter::Impl::GetRamBytes() const

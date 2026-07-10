@@ -12,7 +12,7 @@
 // 2. OnBoxWidget 持续记录 widget world bounds 与交互 phase
 // 3. Released 或显式切换预览时，按当前几何调用 BuildBoxRequest / BuildPlaneRequest
 // 4. Box / Plane 各自刷新入口构造本几何 request，再按显式数据源请求体渲染 / 网格结果
-// 5. SendPreview 把结果交给预览接管层，由接管层应用叠加层 / 三维主显示状态
+// 5. SendPreview 把结果交给 CropPreviewPlug，由接管层应用叠加层 / 三维主显示状态
 // 6. SendSubmit 复用 request/router/algorithm 链路生成 submit image，再通过注入的 reload handler 回写主数据
 
 #include "AppTypes.h"
@@ -48,7 +48,8 @@ public:
     CropBridge(CropBridge&&) noexcept;
     CropBridge& operator=(CropBridge&&) noexcept;
 
-    // 以下一组接口把 host 注入的 image 输入转发给 backend router，并保存版本戳。
+    // 以下接口把 host 注入的 image 输入转发给 backend router；version 保留为 host 兼容参数，
+    // 当前 submit 只以 backend 持有的有效 image 为输入真源，不维护一份镜像版本状态。
     void SetInputImage(vtkSmartPointer<vtkImageData> image, DataVersion version);
     void ClearInputImage();
     vtkSmartPointer<vtkImageData> GetInputImage() const;

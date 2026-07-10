@@ -5,6 +5,8 @@
 #include <memory>
 #include <vector>
 
+int GetHostRouterFailCount();
+
 namespace {
 
 void SetExpect(bool isExpected, const char* message, int& failureCount)
@@ -125,12 +127,13 @@ int main()
     StartBroadcastCase(failureCount);
     StartFilterCase(failureCount);
     StartEmptyFilterCase(failureCount);
+    failureCount += GetHostRouterFailCount();
 
     if (failureCount == 0) {
-        std::cout << "Interaction router tests passed.\n";
+        std::cout << "Interaction tests passed.\n";
         return 0;
     }
 
-    std::cerr << "Interaction router tests failed: " << failureCount << '\n';
+    std::cerr << "Interaction tests failed: " << failureCount << '\n';
     return 1;
 }

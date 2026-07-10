@@ -11,6 +11,7 @@
 #include <vtkCommand.h>
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -41,19 +42,10 @@ private:
         KeepPreview,
         RemovePreview,
         Submit,
-        SubmitBlock
+        SubmitBlock,
+        Count
     };
 
-    bool DispatchCrop(
-        HostCommandKind command,
-        const HostCropViewRequest& request,
-        HostCropPreviewMode previewMode = HostCropPreviewMode::KeepInside) const;
-    bool DispatchCrop(HostCommandKind command) const;
-    bool DispatchGap(
-        HostCommandKind command,
-        const HostGapViewRequest& request) const;
-    bool DispatchGap(HostCommandKind command) const;
-    bool DispatchFeatureExit() const;
     bool LoadVolume(
         const InitialVolumeLoadConfig& initialVolume,
         std::function<void(bool isSuccess)> loadComplete) const;
@@ -78,11 +70,7 @@ private:
         HostRenderViewRole role,
         const HostDataExportConfig& dataExportConfig,
         const HostCommandInputConfig& commandInput,
-        const HostHotkeyBindings& hotkeys,
-        bool& isCropDown,
-        bool& isPlaneDown,
-        bool& isGapDown,
-        bool& isSubmitDown) const;
+        const HostHotkeyBindings& hotkeys) const;
     bool SendHotkeyPress(
         HotkeyAction action,
         const std::weak_ptr<StdRenderContext>& context,
@@ -90,20 +78,16 @@ private:
         bool hasContext,
         HostRenderViewRole role,
         const HostDataExportConfig& dataExportConfig,
-        const HostCommandInputConfig& commandInput,
-        bool& isCropDown,
-        bool& isPlaneDown,
-        bool& isGapDown,
-        bool& isSubmitDown) const;
-    bool SetHotkeyRelease(
+        const HostCommandInputConfig& commandInput) const;
+    bool SetHotkeyDown(
         HotkeyAction action,
-        bool& isCropDown,
-        bool& isPlaneDown,
-        bool& isGapDown,
-        bool& isSubmitDown) const;
+        bool isDown) const;
+    bool ClearHotkeyDown(
+        const InteractionEvent& event,
+        const HostHotkeyBindings& hotkeys) const;
+    bool ClearHotkeys() const;
     bool SendHotkeyCommand(
         HotkeyAction action,
-        bool hasContext,
         HostRenderViewRole role,
         const HostDataExportConfig& dataExportConfig,
         const HostCommandInputConfig& commandInput) const;
@@ -111,6 +95,13 @@ private:
         const InteractionEvent& event,
         bool hasFeature,
         bool hasContext,
+        const HostHotkeyBindings& hotkeys) const;
+    bool GetHotkeyMatched(
+        const InteractionEvent& event,
+        const HostHotkeyBindings& hotkeys,
+        HotkeyAction action) const;
+    bool GetHotkeyDown(
+        const InteractionEvent& event,
         const HostHotkeyBindings& hotkeys) const;
     bool AttachViews(
         std::vector<const HostRenderViewRuntime*>& target,
@@ -124,6 +115,7 @@ private:
     const HostRenderViewSet* m_renderViews = nullptr;
     std::weak_ptr<HostFeatureBindings> m_featureBindings;
     mutable std::vector<std::weak_ptr<StdRenderContext>> m_hotkeyContexts;
+    mutable std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)> m_isHotkeyDown = {};
 };
 
 HostCommandRouter::Impl::Impl(
@@ -138,12 +130,20 @@ HostCommandRouter::Impl::Impl(
 
 HostCommandRouter::Impl::~Impl()
 {
-    // 输入 handler 捕获 Impl 地址，必须在 Impl 销毁前解除所有仍存活的回调。
+    ClearHotkeys();
+}
+
+bool HostCommandRouter::Impl::ClearHotkeys() const
+{
+    // 输入 handler 捕获 Impl 地址；销毁或重新配置前必须先解除所有仍存活的回调。
     for (const auto& context : m_hotkeyContexts) {
         if (const auto lockedContext = context.lock()) {
             lockedContext->ClearInputHandler();
         }
     }
+    m_hotkeyContexts.clear();
+    m_isHotkeyDown.fill(false);
+    return true;
 }
 
 bool HostCommandRouter::Impl::GetCharKeyMatched(
@@ -163,6 +163,76 @@ bool HostCommandRouter::Impl::GetCharKeyMatched(
         || event.keyCode == upperKey
         || event.keySym == keySymbol
         || event.keySym == upperKeySymbol;
+}
+
+bool HostCommandRouter::Impl::GetHotkeyMatched(
+    const InteractionEvent& event,
+    const HostHotkeyBindings& hotkeys,
+    HotkeyAction action) const
+{
+    switch (action) {
+    case HotkeyAction::Model:
+        return GetCharKeyMatched(event, hotkeys.modelSwitchKey);
+    case HotkeyAction::ExportVolume:
+        return GetCharKeyMatched(event, hotkeys.saveTransformedDataKey);
+    case HotkeyAction::ExportSlices:
+        return GetCharKeyMatched(event, hotkeys.saveSliceImagesKey);
+    case HotkeyAction::CropBox:
+        return GetCharKeyMatched(event, hotkeys.cropSwitchKey);
+    case HotkeyAction::CropPlane:
+        return GetCharKeyMatched(event, hotkeys.planarSwitchKey);
+    case HotkeyAction::GapSwitch:
+        return GetCharKeyMatched(event, hotkeys.gapSwitchKey);
+    case HotkeyAction::Exit:
+        return !hotkeys.exitKeySym.empty() && event.keySym == hotkeys.exitKeySym;
+    case HotkeyAction::KeepPreview:
+        return GetCharKeyMatched(event, hotkeys.keepInsidePreviewKey);
+    case HotkeyAction::RemovePreview:
+        return GetCharKeyMatched(event, hotkeys.removeInsidePreviewKey);
+    case HotkeyAction::Submit:
+    case HotkeyAction::SubmitBlock:
+        return GetCharKeyMatched(event, hotkeys.submitKey);
+    case HotkeyAction::None:
+    case HotkeyAction::Count:
+    default:
+        return false;
+    }
+}
+
+bool HostCommandRouter::Impl::GetHotkeyDown(
+    const InteractionEvent& event,
+    const HostHotkeyBindings& hotkeys) const
+{
+    for (std::size_t index = 1;
+        index < static_cast<std::size_t>(HotkeyAction::Count);
+        ++index) {
+        const auto action = static_cast<HotkeyAction>(index);
+        const auto stateAction = action == HotkeyAction::SubmitBlock
+            ? HotkeyAction::Submit
+            : action;
+        if (GetHotkeyMatched(event, hotkeys, action)
+            && m_isHotkeyDown[static_cast<std::size_t>(stateAction)]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HostCommandRouter::Impl::ClearHotkeyDown(
+    const InteractionEvent& event,
+    const HostHotkeyBindings& hotkeys) const
+{
+    bool isCleared = false;
+    for (std::size_t index = 1;
+        index < static_cast<std::size_t>(HotkeyAction::Count);
+        ++index) {
+        const auto action = static_cast<HotkeyAction>(index);
+        if (GetHotkeyMatched(event, hotkeys, action)
+            && SetHotkeyDown(action, false)) {
+            isCleared = true;
+        }
+    }
+    return isCleared;
 }
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) const
@@ -189,22 +259,47 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) 
     case HostCommandKind::CropPlane:
     case HostCommandKind::CropPreview:
     case HostCommandKind::CropApply:
-        return DispatchCrop(
-            request.command,
-            request.cropViewRequest,
-            request.cropPreviewMode);
     case HostCommandKind::CropExit:
-        return DispatchCrop(request.command);
     case HostCommandKind::FeatureExit:
-        return DispatchFeatureExit();
     case HostCommandKind::GapStart:
     case HostCommandKind::GapSwitch:
-        return DispatchGap(
-            request.command,
-            request.gapViewRequest);
     case HostCommandKind::GapOverlay:
-    case HostCommandKind::GapExit:
-        return DispatchGap(request.command);
+    case HostCommandKind::GapExit: {
+        const auto bindings = m_featureBindings.lock();
+        if (!bindings) {
+            std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
+            return false;
+        }
+
+        switch (request.command) {
+        case HostCommandKind::CropStart:
+            return bindings->StartCrop(request.cropViewRequest);
+        case HostCommandKind::CropBox:
+            return bindings->SwitchCropBox(request.cropViewRequest);
+        case HostCommandKind::CropPlane:
+            return bindings->SwitchCropPlane(request.cropViewRequest);
+        case HostCommandKind::CropPreview:
+            return bindings->SwitchCropView(
+                request.cropViewRequest,
+                request.cropPreviewMode);
+        case HostCommandKind::CropApply:
+            return bindings->SendCrop(request.cropViewRequest);
+        case HostCommandKind::CropExit:
+            return bindings->ExitCrop();
+        case HostCommandKind::FeatureExit:
+            return bindings->ExitFeature();
+        case HostCommandKind::GapStart:
+            return bindings->StartGapView(request.gapViewRequest);
+        case HostCommandKind::GapSwitch:
+            return bindings->SwitchGapView(request.gapViewRequest);
+        case HostCommandKind::GapOverlay:
+            return bindings->SwitchGapLayer();
+        case HostCommandKind::GapExit:
+            return bindings->ExitGapView();
+        default:
+            return false;
+        }
+    }
     case HostCommandKind::None:
     default:
         std::cerr << "[Host] Command dispatch skipped: command was not specified." << std::endl;
@@ -266,99 +361,6 @@ bool HostCommandRouter::Impl::LoadVolume(
             }
         });
     return true;
-}
-
-bool HostCommandRouter::Impl::DispatchCrop(
-    HostCommandKind command,
-    const HostCropViewRequest& request,
-    HostCropPreviewMode previewMode) const
-{
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) {
-        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-        return false;
-    }
-
-    switch (command) {
-    case HostCommandKind::CropStart:
-        return bindings->StartCrop(request);
-    case HostCommandKind::CropBox:
-        return bindings->SwitchCropBox(request);
-    case HostCommandKind::CropPlane:
-        return bindings->SwitchCropPlane(request);
-    case HostCommandKind::CropPreview:
-        return bindings->SwitchCropView(
-            request,
-            previewMode);
-    case HostCommandKind::CropApply:
-        return bindings->SendCrop(request);
-    default:
-        return false;
-    }
-}
-
-bool HostCommandRouter::Impl::DispatchCrop(HostCommandKind command) const
-{
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) {
-        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-        return false;
-    }
-
-    switch (command) {
-    case HostCommandKind::CropExit:
-        return bindings->ExitCrop();
-    default:
-        return false;
-    }
-}
-
-bool HostCommandRouter::Impl::DispatchGap(
-    HostCommandKind command,
-    const HostGapViewRequest& request) const
-{
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) {
-        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-        return false;
-    }
-
-    switch (command) {
-    case HostCommandKind::GapStart:
-        return bindings->StartGapView(request);
-    case HostCommandKind::GapSwitch:
-        return bindings->SwitchGapView(request);
-    default:
-        return false;
-    }
-}
-
-bool HostCommandRouter::Impl::DispatchGap(HostCommandKind command) const
-{
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) {
-        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-        return false;
-    }
-
-    switch (command) {
-    case HostCommandKind::GapOverlay:
-        return bindings->SwitchGapLayer();
-    case HostCommandKind::GapExit:
-        return bindings->ExitGapView();
-    default:
-        return false;
-    }
-}
-
-bool HostCommandRouter::Impl::DispatchFeatureExit() const
-{
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) {
-        std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-        return false;
-    }
-    return bindings->ExitFeature();
 }
 
 bool HostCommandRouter::Impl::ExportData(
@@ -491,52 +493,44 @@ InteractionResult HostCommandRouter::Impl::OnHotkey(
     HostRenderViewRole role,
     const HostDataExportConfig& dataExportConfig,
     const HostCommandInputConfig& commandInput,
-    const HostHotkeyBindings& hotkeys,
-    bool& isCropDown,
-    bool& isPlaneDown,
-    bool& isGapDown,
-    bool& isSubmitDown) const
+    const HostHotkeyBindings& hotkeys) const
 {
+    // release 不依赖当前 view 的 feature/context 能力；按物理键清理所有匹配 action，避免跨窗口状态卡住。
+    if (event.vtkEventId == vtkCommand::KeyReleaseEvent) {
+        return ClearHotkeyDown(event, hotkeys)
+            ? InteractionResult{ true, true }
+            : InteractionResult{};
+    }
+
     const HotkeyAction action = GetHotkeyAction(
         event,
         hasFeature,
         hasContext,
         hotkeys);
-    const bool isManaged = action != HotkeyAction::None
+    const bool hasHotkeyDown = GetHotkeyDown(event, hotkeys);
+    const bool isActionReady = action != HotkeyAction::None
         && (action != HotkeyAction::Exit
             || GetHotkeyExitReady(context, hasFeature, hasContext));
+    // 已经接管的物理按键在 release 前持续消费 repeat KeyPress / Char；fresh idle Escape 仍然放行。
+    const bool isManaged = hasHotkeyDown || isActionReady;
 
     if (event.vtkEventId == vtkCommand::CharEvent && isManaged) {
         return { true, true };
     }
 
     if (event.vtkEventId == vtkCommand::KeyPressEvent && isManaged) {
-        if (SendHotkeyPress(
-            action,
-            context,
-            hasFeature,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput,
-            isCropDown,
-            isPlaneDown,
-            isGapDown,
-            isSubmitDown)) {
-            return { true, true };
+        // 业务执行失败也不能把同一次物理按键交给后续 handler；按键是否消费与命令是否成功是两个维度。
+        if (!hasHotkeyDown) {
+            (void)SendHotkeyPress(
+                action,
+                context,
+                hasFeature,
+                hasContext,
+                role,
+                dataExportConfig,
+                commandInput);
         }
         return { true, true };
-    }
-
-    if (event.vtkEventId == vtkCommand::KeyReleaseEvent) {
-        if (SetHotkeyRelease(
-            action,
-            isCropDown,
-            isPlaneDown,
-            isGapDown,
-            isSubmitDown)) {
-            return { true, true };
-        }
     }
 
     return {};
@@ -548,34 +542,34 @@ HostCommandRouter::Impl::HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
     bool hasContext,
     const HostHotkeyBindings& hotkeys) const
 {
-    if (hasContext && GetCharKeyMatched(event, hotkeys.modelSwitchKey)) {
+    if (hasContext && GetHotkeyMatched(event, hotkeys, HotkeyAction::Model)) {
         return HotkeyAction::Model;
     }
-    if (hasContext && GetCharKeyMatched(event, hotkeys.saveTransformedDataKey)) {
+    if (hasContext && GetHotkeyMatched(event, hotkeys, HotkeyAction::ExportVolume)) {
         return HotkeyAction::ExportVolume;
     }
-    if (hasContext && GetCharKeyMatched(event, hotkeys.saveSliceImagesKey)) {
+    if (hasContext && GetHotkeyMatched(event, hotkeys, HotkeyAction::ExportSlices)) {
         return HotkeyAction::ExportSlices;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.cropSwitchKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::CropBox)) {
         return HotkeyAction::CropBox;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.planarSwitchKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::CropPlane)) {
         return HotkeyAction::CropPlane;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.gapSwitchKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::GapSwitch)) {
         return HotkeyAction::GapSwitch;
     }
-    if (!hotkeys.exitKeySym.empty() && event.keySym == hotkeys.exitKeySym) {
+    if (GetHotkeyMatched(event, hotkeys, HotkeyAction::Exit)) {
         return HotkeyAction::Exit;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.keepInsidePreviewKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::KeepPreview)) {
         return HotkeyAction::KeepPreview;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.removeInsidePreviewKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::RemovePreview)) {
         return HotkeyAction::RemovePreview;
     }
-    if (hasFeature && GetCharKeyMatched(event, hotkeys.submitKey)) {
+    if (hasFeature && GetHotkeyMatched(event, hotkeys, HotkeyAction::Submit)) {
         return event.isCtrlDown ? HotkeyAction::Submit : HotkeyAction::SubmitBlock;
     }
     return HotkeyAction::None;
@@ -588,12 +582,13 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
     bool hasContext,
     HostRenderViewRole role,
     const HostDataExportConfig& dataExportConfig,
-    const HostCommandInputConfig& commandInput,
-    bool& isCropDown,
-    bool& isPlaneDown,
-    bool& isGapDown,
-    bool& isSubmitDown) const
+    const HostCommandInputConfig& commandInput) const
 {
+    // 所有 action 共享 router 级 down 状态，避免按键自动重复和跨 view press/release 分叉。
+    if (!SetHotkeyDown(action, true)) {
+        return false;
+    }
+
     switch (action) {
     case HotkeyAction::Model: {
         auto renderContext = context.lock();
@@ -608,49 +603,20 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
     }
     case HotkeyAction::ExportVolume:
     case HotkeyAction::ExportSlices:
-        return SendHotkeyCommand(
-            action,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput);
     case HotkeyAction::CropBox:
-        if (isCropDown) {
-            return false;
-        }
-        isCropDown = true;
-        return SendHotkeyCommand(
-            action,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput);
     case HotkeyAction::CropPlane:
-        if (isPlaneDown) {
-            return false;
-        }
-        isPlaneDown = true;
-        return SendHotkeyCommand(
-            action,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput);
     case HotkeyAction::GapSwitch:
-        if (isGapDown) {
-            return false;
-        }
-        isGapDown = true;
+    case HotkeyAction::KeepPreview:
+    case HotkeyAction::RemovePreview:
+    case HotkeyAction::Submit:
         return SendHotkeyCommand(
             action,
-            hasContext,
             role,
             dataExportConfig,
             commandInput);
     case HotkeyAction::Exit:
         if (hasFeature && SendHotkeyCommand(
             HotkeyAction::Exit,
-            hasContext,
             role,
             dataExportConfig,
             commandInput)) {
@@ -666,65 +632,33 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
             }
         }
         return false;
-    case HotkeyAction::KeepPreview:
-    case HotkeyAction::RemovePreview:
-        return SendHotkeyCommand(
-            action,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput);
-    case HotkeyAction::Submit:
-        if (isSubmitDown) {
-            return false;
-        }
-        isSubmitDown = true;
-        return SendHotkeyCommand(
-            action,
-            hasContext,
-            role,
-            dataExportConfig,
-            commandInput);
     case HotkeyAction::SubmitBlock:
         return true;
     case HotkeyAction::None:
+    case HotkeyAction::Count:
     default:
         return false;
     }
 }
 
-bool HostCommandRouter::Impl::SetHotkeyRelease(
+bool HostCommandRouter::Impl::SetHotkeyDown(
     HotkeyAction action,
-    bool& isCropDown,
-    bool& isPlaneDown,
-    bool& isGapDown,
-    bool& isSubmitDown) const
+    bool isDown) const
 {
-    switch (action) {
-    case HotkeyAction::CropBox:
-        isCropDown = false;
-        return true;
-    case HotkeyAction::CropPlane:
-        isPlaneDown = false;
-        return true;
-    case HotkeyAction::GapSwitch:
-        isGapDown = false;
-        return true;
-    case HotkeyAction::KeepPreview:
-    case HotkeyAction::RemovePreview:
-        return true;
-    case HotkeyAction::Submit:
-    case HotkeyAction::SubmitBlock:
-        isSubmitDown = false;
-        return true;
-    case HotkeyAction::None:
-    case HotkeyAction::Model:
-    case HotkeyAction::ExportVolume:
-    case HotkeyAction::ExportSlices:
-    case HotkeyAction::Exit:
-    default:
+    // Submit 与 SubmitBlock 来自同一物理键；release 时 Ctrl 可能已先松开，因此必须共享状态槽。
+    if (action == HotkeyAction::SubmitBlock) {
+        action = HotkeyAction::Submit;
+    }
+    if (action == HotkeyAction::None || action == HotkeyAction::Count) {
         return false;
     }
+
+    bool& isActionDown = m_isHotkeyDown[static_cast<std::size_t>(action)];
+    if (isActionDown == isDown) {
+        return false;
+    }
+    isActionDown = isDown;
+    return true;
 }
 
 bool HostCommandRouter::Impl::GetHotkeyExitReady(
@@ -747,7 +681,6 @@ bool HostCommandRouter::Impl::GetHotkeyExitReady(
 
 bool HostCommandRouter::Impl::SendHotkeyCommand(
     HotkeyAction action,
-    bool hasContext,
     HostRenderViewRole role,
     const HostDataExportConfig& dataExportConfig,
     const HostCommandInputConfig& commandInput) const
@@ -762,9 +695,6 @@ bool HostCommandRouter::Impl::SendHotkeyCommand(
         request.dataExportConfig.hasSliceExport = false;
         break;
     case HotkeyAction::ExportSlices:
-        if (!hasContext) {
-            break;
-        }
         request.command = HostCommandKind::Export;
         request.dataExportConfig = dataExportConfig;
         request.dataExportConfig.hasVolumeExport = false;
@@ -807,6 +737,7 @@ bool HostCommandRouter::Impl::SendHotkeyCommand(
     case HotkeyAction::None:
     case HotkeyAction::Model:
     case HotkeyAction::SubmitBlock:
+    case HotkeyAction::Count:
     default:
         break;
     }
@@ -823,6 +754,8 @@ bool HostCommandRouter::Impl::AttachHotkeys(
     const HostCommandInputConfig& commandInput,
     const HostHotkeyBindings& hotkeys) const
 {
+    // Hotkeys request 是完整配置快照；重复分发时先撤销旧目标，避免旧 view 继续保留旁路 handler。
+    ClearHotkeys();
     if (!m_renderViews) {
         return false;
     }
@@ -877,12 +810,8 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                 role,
                 dataExportConfig,
                 commandInput,
-                hotkeys,
-                isCropDown = false,
-                isPlaneDown = false,
-                isGapDown = false,
-                isSubmitDown = false
-            ](const InteractionEvent& event) mutable {
+                hotkeys
+            ](const InteractionEvent& event) {
                 return impl->OnHotkey(
                     event,
                     context,
@@ -891,11 +820,7 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                     role,
                     dataExportConfig,
                     commandInput,
-                    hotkeys,
-                    isCropDown,
-                    isPlaneDown,
-                    isGapDown,
-                    isSubmitDown);
+                    hotkeys);
             },
             std::vector<unsigned long>{
                 vtkCommand::KeyPressEvent,

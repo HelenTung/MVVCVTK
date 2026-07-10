@@ -353,26 +353,14 @@ bool CropPreviewPlug::SetVolumeView(
         return true;
     }
 
-    SetVolumeKeep(volumeMapper, referenceService, previewResult);
-    volume->Modified();
-    return true;
-}
-
-void CropPreviewPlug::SetVolumeKeep(
-    vtkVolumeMapper* volumeMapper,
-    const std::shared_ptr<InteractiveService>& referenceService,
-    const OrthogonalCropResult& previewResult) const
-{
-    if (!volumeMapper) {
-        return;
-    }
-
     // 体渲染 mapper 的 clipping planes 需要 world 坐标；
     // 结果只提供标准盒到当前输入模型，world 矩阵来自参考窗口当前主数据。
     volumeMapper->SetClippingPlanes(
         previewResult.GetResolvedGeometryType() == CropShape::Plane
             ? BuildPlaneClip(referenceService, previewResult)
             : BuildBoxClip(referenceService, previewResult));
+    volume->Modified();
+    return true;
 }
 
 bool CropPreviewPlug::SetVolumeRemove(
@@ -534,7 +522,13 @@ bool CropPreviewPlug::SetMeshView(
     auto& targetState = m_targetStates[targetService.get()];
     targetState.mainPreviewMapper = mapper;
     if (removalMode == CropRemovalMode::KeepInside) {
-        SetMeshKeep(mapper, referenceService, previewResult);
+        // PolyData KeepInside 与 volume KeepInside 使用同一套 world clipping planes；
+        // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
+        mapper->SetClippingPlanes(
+            previewResult.GetResolvedGeometryType() == CropShape::Plane
+                ? BuildPlaneClip(referenceService, previewResult)
+                : BuildBoxClip(referenceService, previewResult));
+        mapper->Modified();
         actor->Modified();
         return true;
     }
@@ -542,24 +536,6 @@ bool CropPreviewPlug::SetMeshView(
     return previewResult.GetResolvedGeometryType() == CropShape::Plane
         ? SetMeshPlaneCut(actor, mapper, referenceService, previewResult)
         : SetMeshRemove(actor, mapper, referenceService, previewResult);
-}
-
-void CropPreviewPlug::SetMeshKeep(
-    vtkPolyDataMapper* mapper,
-    const std::shared_ptr<InteractiveService>& referenceService,
-    const OrthogonalCropResult& previewResult) const
-{
-    if (!mapper) {
-        return;
-    }
-
-    // PolyData KeepInside 与 volume KeepInside 使用同一套 world clipping planes；
-    // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
-    mapper->SetClippingPlanes(
-        previewResult.GetResolvedGeometryType() == CropShape::Plane
-            ? BuildPlaneClip(referenceService, previewResult)
-            : BuildBoxClip(referenceService, previewResult));
-    mapper->Modified();
 }
 
 bool CropPreviewPlug::SetMeshRemove(

@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h">
+      <Filter>include</Filter>
+    </ClInclude>
     <Filter Include="include">
       <UniqueIdentifier>{8f420567-63f5-4dc5-a652-ed0bd0f1f31b}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
@@ -29,13 +32,43 @@
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="Fakes\AppService.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\Host\HostCoreServices.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\Host\HostFeatureBindings.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\Host\HostRenderViewSet.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\StdRenderContext.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\vtkCommand.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\vtkRenderWindow.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\vtkSmartPointer.h">
+      <Filter>tests</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp">
       <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="HostCommandRouterTests.cpp">
+      <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="InteractionRouterTests.cpp">
       <Filter>tests</Filter>

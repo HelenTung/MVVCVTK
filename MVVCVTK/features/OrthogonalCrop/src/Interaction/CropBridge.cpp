@@ -55,7 +55,6 @@ public:
 
 private:
     bool GetInputReady();
-    bool GetImageReady(vtkImageData* image) const;
     void ClearPreviewInput();
     void AttachPreview(const std::shared_ptr<InteractiveService>& service);
     std::array<double, 6> GetStartBounds() const;
@@ -73,25 +72,16 @@ private:
     OrthogonalCropRequest BuildPlaneRequest(
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) const;
-    void SetBoxPreview();
-    void SetPlanePreview();
-    void SetPreviewRequest(
-        const OrthogonalCropRequest& volumeRequest,
-        const OrthogonalCropRequest& polyDataRequest);
-    void SwitchBoxView(CropRemovalMode removalMode);
-    void SetPlaneView(CropRemovalMode removalMode);
+    bool SendPreview();
     void ClearPreviewViews();
     void ResetPreview();
     bool GetSubmitReady() const;
     void OnSubmitReload(bool isSuccess);
-    void SendSubmitResult(const OrthogonalCropResult& submitResult);
     static const char* GetFailureReasonText(CropFailure failureReason);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
 
     CropRouter m_backend;
     CropPreviewPlug m_previewPlug;
-    DataVersion m_inputVersion = 0;
-    bool m_hasInputVer = false;
     vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
     vtkRenderWindowInteractor* m_primaryInteractor = nullptr;
     bool m_isCropOn = false;
@@ -139,20 +129,26 @@ void CropBridge::Impl::SetInputImage(
     vtkSmartPointer<vtkImageData> image,
     DataVersion version)
 {
-    if (!GetImageReady(image)) {
+    // version 是 host 的兼容边界；当前 bridge 不据此选择或拒绝输入，避免形成只写不读的镜像状态。
+    (void)version;
+    if (!image || !image->GetScalarPointer()) {
         ClearInputImage();
         return;
     }
-    m_inputVersion = version;
-    m_hasInputVer = true;
+
+    int dims[3] = { 0, 0, 0 };
+    image->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        ClearInputImage();
+        return;
+    }
+
     m_backend.SetInputImage(std::move(image));
 }
 
 void CropBridge::Impl::ClearInputImage()
 {
     m_backend.SetInputImage(vtkSmartPointer<vtkImageData>());
-    m_inputVersion = 0;
-    m_hasInputVer = false;
 }
 
 vtkSmartPointer<vtkImageData> CropBridge::Impl::GetInputImage() const
@@ -181,17 +177,6 @@ bool CropBridge::Impl::GetInputReady()
     }
 
     return false;
-}
-
-bool CropBridge::Impl::GetImageReady(vtkImageData* image) const
-{
-    if (!image || !image->GetScalarPointer()) {
-        return false;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    image->GetDimensions(dims);
-    return dims[0] > 0 && dims[1] > 0 && dims[2] > 0;
 }
 
 void CropBridge::Impl::ClearPreviewInput()
@@ -391,7 +376,7 @@ void CropBridge::Impl::OnBoxWidget(
     m_hasWorldState = true;
     m_lastInteractionPhase = phase;
     if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        SetBoxPreview();
+        (void)SendPreview();
     }
 }
 
@@ -409,7 +394,7 @@ void CropBridge::Impl::OnPlaneWidget(
     m_hasWorldState = true;
     m_lastInteractionPhase = phase;
     if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        SetPlanePreview();
+        (void)SendPreview();
     }
 }
 
@@ -746,43 +731,26 @@ bool CropBridge::Impl::GetCropActive() const
     return m_isCropOn;
 }
 
-void CropBridge::Impl::SetBoxPreview()
+bool CropBridge::Impl::SendPreview()
 {
     if (!m_hasWorldState) {
-        return;
+        return false;
     }
 
-    const auto volumeRequest = BuildBoxRequest(
-        OrthogonalCropOperation::Preview,
-        OrthogonalCropDataSource::VolumeData);
+    // Box 与 Plane 只在 request 的几何真源构造上不同，后续 preview 分发完全共用。
+    const auto volumeRequest = m_currentGeometryType == CropShape::Plane
+        ? BuildPlaneRequest(
+            OrthogonalCropOperation::Preview,
+            OrthogonalCropDataSource::VolumeData)
+        : BuildBoxRequest(
+            OrthogonalCropOperation::Preview,
+            OrthogonalCropDataSource::VolumeData);
     auto polyDataRequest = volumeRequest;
     polyDataRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
-
-    SetPreviewRequest(volumeRequest, polyDataRequest);
-}
-
-void CropBridge::Impl::SetPlanePreview()
-{
-    if (!m_hasWorldState) {
-        return;
-    }
-
-    const auto volumeRequest = BuildPlaneRequest(
-        OrthogonalCropOperation::Preview,
-        OrthogonalCropDataSource::VolumeData);
-    auto polyDataRequest = volumeRequest;
-    polyDataRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
-
-    SetPreviewRequest(volumeRequest, polyDataRequest);
-}
-
-void CropBridge::Impl::SetPreviewRequest(
-    const OrthogonalCropRequest& volumeRequest,
-    const OrthogonalCropRequest& polyDataRequest)
-{
     ClearPreviewInput();
 
     bool hasMainTarget = false;
+    bool isPreviewSent = false;
     for (const auto& target : m_previewRenderTargets) {
         if (!target.first) {
             continue;
@@ -834,63 +802,30 @@ void CropBridge::Impl::SetPreviewRequest(
             continue;
         }
 
-        m_previewPlug.SetPreview(
+        isPreviewSent = m_previewPlug.SetPreview(
             target.first,
             target.second,
             m_referenceRenderService,
             volumePreviewResult,
             hasPolyResult ? &polyResult : nullptr,
-            m_currentRemovalMode);
+            m_currentRemovalMode)
+            || isPreviewSent;
         target.first->SetDirty();
     }
 
     ClearPreviewInput();
+    return isPreviewSent;
 }
 
 void CropBridge::Impl::SwitchPreview(CropRemovalMode removalMode)
 {
-    if (m_currentGeometryType == CropShape::Plane) {
-        SetPlaneView(removalMode);
-        return;
-    }
-
-    SwitchBoxView(removalMode);
-}
-
-void CropBridge::Impl::SwitchBoxView(CropRemovalMode removalMode)
-{
-    // Box 继续保留旧 switch 语义：
-    // A. 同模式再次触发：关闭 preview，并恢复主模型全量显示
-    // B. 切到新模式：更新 removal mode；若当前不在 dragging，则立即刷新一次 preview
     if (!m_isCropOn) {
         return;
     }
 
-    if (m_isPreviewOn && m_currentRemovalMode == removalMode) {
-        // 再次触发同一模式表示关闭 preview，并恢复原始显示内容。
-        m_isPreviewOn = false;
-        ResetPreview();
-        return;
-    }
-
-    m_isPreviewOn = true;
-    m_currentRemovalMode = removalMode;
-
-    if (m_isCropOn
-        && m_lastInteractionPhase != CropInteractionPhase::Dragging) {
-        // 非拖拽阶段才立即刷新；拖拽中依旧等待 EndInteractionEvent 统一触发。
-        SetBoxPreview();
-    }
-}
-
-void CropBridge::Impl::SetPlaneView(CropRemovalMode removalMode)
-{
-    // Plane 模式下 1/2 是明确的半空间选择；
-    // 再次按下当前激活的模式键表示关闭预览并恢复主模型，给用户明确的复原入口。
-    if (!m_isCropOn || m_currentGeometryType != CropShape::Plane) {
-        return;
-    }
-
+    // Box 与 Plane 使用相同的 preview 切换状态机：
+    // A. 同模式再次触发时关闭 preview 并恢复主模型。
+    // B. 切到新模式时更新 removal mode，非拖拽阶段立即刷新。
     if (m_isPreviewOn && m_currentRemovalMode == removalMode) {
         m_isPreviewOn = false;
         ResetPreview();
@@ -900,7 +835,8 @@ void CropBridge::Impl::SetPlaneView(CropRemovalMode removalMode)
     m_isPreviewOn = true;
     m_currentRemovalMode = removalMode;
     if (m_lastInteractionPhase != CropInteractionPhase::Dragging) {
-        SetPlanePreview();
+        // 拖拽中等待 EndInteractionEvent 统一刷新，避免重复执行裁切预览。
+        (void)SendPreview();
     }
 }
 
@@ -1012,11 +948,6 @@ bool CropBridge::Impl::GetSubmitReady() const
         return false;
     }
 
-    if (!m_hasInputVer) {
-        std::cerr << "[OrthogonalCrop] Submit failed: image crop input version is missing." << std::endl;
-        return false;
-    }
-
     if (m_hasReload) {
         std::cerr << "[OrthogonalCrop] Submit ignored: reload is already pending." << std::endl;
         return false;
@@ -1057,12 +988,7 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
         ExitCrop();
     }
 
-    SendSubmitResult(submitOverlayResult);
-}
-
-void CropBridge::Impl::SendSubmitResult(const OrthogonalCropResult& submitResult)
-{
-    if (!submitResult.GetSucceeded()) {
+    if (!submitOverlayResult.GetSucceeded()) {
         return;
     }
 
@@ -1072,8 +998,8 @@ void CropBridge::Impl::SendSubmitResult(const OrthogonalCropResult& submitResult
         }
 
         target.second->SetSliceAxis(target.first->GetNavigationAxis());
-        target.second->SetRemovalMode(submitResult.GetResolvedRemovalMode());
-        target.second->SetCropResult(submitResult);
+        target.second->SetRemovalMode(submitOverlayResult.GetResolvedRemovalMode());
+        target.second->SetCropResult(submitOverlayResult);
         target.first->SetDirty();
     }
 }

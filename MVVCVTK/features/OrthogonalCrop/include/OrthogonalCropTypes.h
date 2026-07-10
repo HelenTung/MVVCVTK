@@ -326,7 +326,41 @@ private:
     std::size_t m_availableRamBytes = 0;
 };
 
+class OrthogonalCropResult;
+
 class OrthogonalCropStatistics {
+public:
+    OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
+    OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
+    CropShape GetResolvedGeometryType() const { return m_resolvedGeometryType; }
+    CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
+
+private:
+    friend class OrthogonalCropResult;
+
+    OrthogonalCropStatistics(
+        OrthogonalCropDataSource dataSource,
+        OrthogonalCropOperation operation,
+        CropShape geometryType,
+        CropRemovalMode removalMode)
+        : m_resolvedDataSource(dataSource)
+        , m_resolvedOperation(operation)
+        , m_resolvedGeometryType(geometryType)
+        , m_resolvedRemovalMode(removalMode)
+    {
+    }
+
+    // 上位机视图需要的数据源类型。
+    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
+    // 上位机视图需要的业务动作类型，如 preview 或 submit。
+    OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
+    // 上位机视图需要的裁切几何类型。
+    CropShape m_resolvedGeometryType = CropShape::Box;
+    // 上位机视图需要的保留语义类型。
+    CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
+};
+
+class OrthogonalCropResult {
 public:
     OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
     void SetResolvedDataSource(OrthogonalCropDataSource dataSource) { m_resolvedDataSource = dataSource; }
@@ -340,98 +374,14 @@ public:
     CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
     void SetResolvedRemovalMode(CropRemovalMode removalMode) { m_resolvedRemovalMode = removalMode; }
 
-    CropFailure GetFailureReason() const { return m_failureReason; }
-    void SetFailureReason(CropFailure failureReason) { m_failureReason = failureReason; }
-
-    const std::string& GetValidationMessage() const { return m_validationMessage; }
-
-    void SetValidationMessage(const std::string& validationMessage) { m_validationMessage = validationMessage; }
-
-    // 从单一 resolved 四元组构造诊断对象；失败原因和文本由具体执行路径追加。
-    static OrthogonalCropStatistics GetResolved(
-        OrthogonalCropDataSource dataSource,
-        OrthogonalCropOperation operation,
-        CropShape geometryType,
-        CropRemovalMode removalMode)
-    {
-        OrthogonalCropStatistics statistics;
-        statistics.SetResolvedDataSource(dataSource);
-        statistics.SetResolvedOperation(operation);
-        statistics.SetResolvedGeometryType(geometryType);
-        statistics.SetResolvedRemovalMode(removalMode);
-        return statistics;
-    }
-
-    static OrthogonalCropStatistics GetResolved(const OrthogonalCropRequest& request)
-    {
-        return GetResolved(
-            request.GetDataSource(),
-            request.GetOperation(),
-            request.GetGeometryType(),
-            request.GetRemovalMode());
-    }
-
-private:
-    // 这次诊断最终落到的数据源；用于日志和上层 UI 提示。
-    OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
-    // 这次诊断真正采用的业务动作，如 preview 或 submit。
-    OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
-    // 这次诊断真正采用的裁切几何类型。
-    CropShape m_resolvedGeometryType = CropShape::Box;
-    // 这次诊断真正采用的保留语义。
-    CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
-    // 诊断阶段发现的失败原因；None 表示校验通过。
-    CropFailure m_failureReason = CropFailure::None;
-    // 给调用方看的统一校验/告警文本；失败时通常直接透传到 result 或 UI 提示。
-    std::string m_validationMessage;
-};
-
-class OrthogonalCropResult {
-public:
-    OrthogonalCropDataSource GetResolvedDataSource() const { return m_resolvedDataSource; }
-    void SetResolvedDataSource(OrthogonalCropDataSource dataSource)
-    {
-        m_resolvedDataSource = dataSource;
-        m_statistics.SetResolvedDataSource(dataSource);
-    }
-
-    OrthogonalCropOperation GetResolvedOperation() const { return m_resolvedOperation; }
-    void SetResolvedOperation(OrthogonalCropOperation operation)
-    {
-        m_resolvedOperation = operation;
-        m_statistics.SetResolvedOperation(operation);
-    }
-
-    CropShape GetResolvedGeometryType() const { return m_resolvedGeometryType; }
-    void SetResolvedGeometryType(CropShape geometryType)
-    {
-        m_resolvedGeometryType = geometryType;
-        m_statistics.SetResolvedGeometryType(geometryType);
-    }
-
-    CropRemovalMode GetResolvedRemovalMode() const { return m_resolvedRemovalMode; }
-    void SetResolvedRemovalMode(CropRemovalMode removalMode)
-    {
-        m_resolvedRemovalMode = removalMode;
-        m_statistics.SetResolvedRemovalMode(removalMode);
-    }
-
     bool GetSucceeded() const { return m_isSucceeded; }
     void SetSucceeded(bool isSucceeded) { m_isSucceeded = isSucceeded; }
 
     CropFailure GetFailureReason() const { return m_failureReason; }
-    void SetFailureReason(CropFailure failureReason)
-    {
-        m_failureReason = failureReason;
-        m_statistics.SetFailureReason(failureReason);
-    }
+    void SetFailureReason(CropFailure failureReason) { m_failureReason = failureReason; }
 
     const std::string& GetMessage() const { return m_message; }
-    void SetMessage(const std::string& message)
-    {
-        m_message = message;
-        m_statistics.SetValidationMessage(message);
-    }
+    void SetMessage(const std::string& message) { m_message = message; }
 
     vtkSmartPointer<vtkImageData> GetSubmitImage() const { return m_submitImage; }
     void SetSubmitImage(vtkSmartPointer<vtkImageData> submitImage) { m_submitImage = std::move(submitImage); }
@@ -448,46 +398,51 @@ public:
     const CropDataModel& GetCropDataModel() const { return m_cropDataModel; }
     void SetCropDataModel(const CropDataModel& cropDataModel) { m_cropDataModel = cropDataModel; }
 
-    const OrthogonalCropStatistics& GetStatistics() const { return m_statistics; }
-    void SetStatistics(const OrthogonalCropStatistics& statistics)
+    // Statistics 只在上位机读取边界按值派生，不参与 router / algorithm / bridge 的执行状态。
+    OrthogonalCropStatistics GetStatistics() const
     {
-        m_statistics = statistics;
-        m_resolvedDataSource = statistics.GetResolvedDataSource();
-        m_resolvedOperation = statistics.GetResolvedOperation();
-        m_resolvedGeometryType = statistics.GetResolvedGeometryType();
-        m_resolvedRemovalMode = statistics.GetResolvedRemovalMode();
-        m_failureReason = statistics.GetFailureReason();
-        m_message = statistics.GetValidationMessage();
-    }
-
-    // result 和 statistics 从同一诊断快照初始化，避免 resolved 身份和失败信息漂移。
-    static OrthogonalCropResult GetResolved(const OrthogonalCropStatistics& statistics)
-    {
-        OrthogonalCropResult result;
-        result.SetStatistics(statistics);
-        return result;
+        return OrthogonalCropStatistics(
+            m_resolvedDataSource,
+            m_resolvedOperation,
+            m_resolvedGeometryType,
+            m_resolvedRemovalMode);
     }
 
     static OrthogonalCropResult GetResolved(const OrthogonalCropRequest& request)
     {
-        return GetResolved(OrthogonalCropStatistics::GetResolved(request));
+        OrthogonalCropResult result;
+        result.SetResolvedDataSource(request.GetDataSource());
+        result.SetResolvedOperation(request.GetOperation());
+        result.SetResolvedGeometryType(request.GetGeometryType());
+        result.SetResolvedRemovalMode(request.GetRemovalMode());
+        return result;
+    }
+
+    // 统一构造失败结果；router 与具体算法只负责选择失败边界，不再各自复制诊断同步流程。
+    static OrthogonalCropResult GetFailure(
+        const OrthogonalCropRequest& request,
+        CropFailure failureReason,
+        const std::string& message,
+        const CropDataModel& cropData = CropDataModel())
+    {
+        auto result = GetResolved(request);
+        result.SetFailureReason(failureReason);
+        result.SetMessage(message);
+        result.SetCropDataModel(cropData);
+        result.SetSucceeded(false);
+        return result;
     }
 
 private:
-    // 以下 resolved / failure / message 字段保留现有对象布局；所有 setter 都与 statistics 双向同步，逻辑上只有一份诊断快照。
-    // 最终执行实际落到的数据源。
+    // resolved 数据类型轴属于执行结果本身；Statistics 只在上位机读取时按值复制。
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
-    // 结果实际采用的业务动作；数据来源由 resolvedDataSource 表达。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
-    // 结果实际采用的裁切几何类型。
     CropShape m_resolvedGeometryType = CropShape::Box;
-    // 结果实际采用的保留语义。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
     // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
     bool m_isSucceeded = false;
-    // 最终失败原因；当 isSucceeded 为 false 时，上层应优先读取它和 message。
+    // 失败原因和消息只属于执行结果，不进入 Statistics 数据类型模型。
     CropFailure m_failureReason = CropFailure::None;
-    // 对当前成功/失败状态的文字解释；可直接给日志或 UI 弹框使用。
     std::string m_message;
     // image submit 链路返回的主数据 image。
     vtkSmartPointer<vtkImageData> m_submitImage;
@@ -499,6 +454,4 @@ private:
     vtkSmartPointer<vtkPolyData> m_outlinePolyData;
     // 这次结果对应的客观几何快照；image submit 后可能已经更新为输出 image 自身的 bounds。
     CropDataModel m_cropDataModel;
-    // 与结果配套的诊断信息；避免调用方再次重复跑一遍诊断。
-    OrthogonalCropStatistics m_statistics;
 };

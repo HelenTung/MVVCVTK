@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\include\Interaction;$(ProjectDir)..\..\MVVCVTK\include\App</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)Fakes;$(ProjectDir)..\..\MVVCVTK\include;$(ProjectDir)..\..\MVVCVTK\include\Interaction;$(ProjectDir)..\..\MVVCVTK\include\App</ProjectIncludePath>
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
@@ -138,15 +138,26 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionEvent.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionResult.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h" />
+    <ClInclude Include="Fakes\AppService.h" />
+    <ClInclude Include="Fakes\Host\HostCoreServices.h" />
+    <ClInclude Include="Fakes\Host\HostFeatureBindings.h" />
+    <ClInclude Include="Fakes\Host\HostRenderViewSet.h" />
+    <ClInclude Include="Fakes\StdRenderContext.h" />
+    <ClInclude Include="Fakes\vtkCommand.h" />
+    <ClInclude Include="Fakes\vtkRenderWindow.h" />
+    <ClInclude Include="Fakes\vtkSmartPointer.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />
+    <ClCompile Include="HostCommandRouterTests.cpp" />
     <ClCompile Include="InteractionRouterTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

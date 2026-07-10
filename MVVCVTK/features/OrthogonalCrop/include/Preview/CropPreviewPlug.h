@@ -63,11 +63,6 @@ private:
         const OrthogonalCropResult& previewResult,
         CropRemovalMode removalMode);
 
-    void SetVolumeKeep(
-        vtkVolumeMapper* volumeMapper,
-        const std::shared_ptr<InteractiveService>& referenceService,
-        const OrthogonalCropResult& previewResult) const;
-
     bool SetVolumeRemove(
         vtkVolume* volume,
         vtkGPUVolumeRayCastMapper* volumeMapper,
@@ -85,11 +80,6 @@ private:
         const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult,
         CropRemovalMode removalMode);
-
-    void SetMeshKeep(
-        vtkPolyDataMapper* mapper,
-        const std::shared_ptr<InteractiveService>& referenceService,
-        const OrthogonalCropResult& previewResult) const;
 
     bool SetMeshRemove(
         vtkActor* actor,
