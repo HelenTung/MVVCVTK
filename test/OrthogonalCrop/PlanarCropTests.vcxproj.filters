@@ -8,6 +8,9 @@
     <Filter Include="include\Algorithms">
       <UniqueIdentifier>{8612763f-2d90-4dab-9119-a4ed23681512}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Interaction">
+      <UniqueIdentifier>{3ec97648-502f-4b55-8247-8678828b9a8e}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Routing">
       <UniqueIdentifier>{0a0648f2-1d60-4d30-bc57-356fb143bf08}</UniqueIdentifier>
     </Filter>
@@ -30,6 +33,9 @@
     <Filter Include="src\Algorithms">
       <UniqueIdentifier>{a023adcb-f04e-4ff1-8b6f-908ad25b0659}</UniqueIdentifier>
     </Filter>
+    <Filter Include="src\Interaction">
+      <UniqueIdentifier>{ad97b68f-53c0-42c4-956a-c078816f0d7e}</UniqueIdentifier>
+    </Filter>
     <Filter Include="src\Routing">
       <UniqueIdentifier>{0bcc8f30-cb17-4b68-a596-308d9b91755a}</UniqueIdentifier>
     </Filter>
@@ -49,6 +55,9 @@
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h">
       <Filter>include\Algorithms</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Interaction\CropCameraState.h">
+      <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>include</Filter>
@@ -78,6 +87,9 @@
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
       <Filter>src\Algorithms</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropCameraState.cpp">
+      <Filter>src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>src\Routing</Filter>

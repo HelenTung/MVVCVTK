@@ -51,7 +51,7 @@ private:
     bool SetCropViews(const HostCropViewRequest& request);
     void OnHostTimer();
     bool SetCropInput();
-    bool GetImageReady(vtkImageData* image) const;
+    static bool GetImageReady(vtkImageData* image);
 
     bool GetGapConfigValid(const HostGapConfig& config) const;
     VoidDetectionParams BuildVoidParams(const HostGapVoidConfig& config) const;
@@ -75,7 +75,7 @@ HostFeatureBindings::Impl::~Impl()
     }
 }
 
-bool HostFeatureBindings::Impl::GetImageReady(vtkImageData* image) const
+bool HostFeatureBindings::Impl::GetImageReady(vtkImageData* image)
 {
     if (!image || !image->GetScalarPointer()) {
         return false;
@@ -179,8 +179,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
         // bridge 只接收 host 注入的 image/version，不反向读取 DataManager。
         m_core.orthogonalCropBridge->SetSubmitReloadHandler(
             [
-                impl = this,
-                bridge = m_core.orthogonalCropBridge,
+                bridge = std::weak_ptr<CropBridge>(m_core.orthogonalCropBridge),
                 sharedDataMgr = m_core.sharedDataMgr,
                 sharedState = m_core.sharedState,
                 renderViewServices = std::move(renderViewServices)
@@ -209,13 +208,13 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 const auto range = sharedDataMgr->GetScalarRange();
                 const auto spacing = sharedDataMgr->GetSpacing();
                 sharedState->SetReloadDataReady(range[0], range[1], spacing);
-                if (bridge) {
+                if (const auto lockedBridge = bridge.lock()) {
                     const auto imageState = sharedDataMgr->GetImageState();
-                    if (impl->GetImageReady(imageState.image)) {
-                        bridge->SetInputImage(imageState.image, imageState.version);
+                    if (GetImageReady(imageState.image)) {
+                        lockedBridge->SetInputImage(imageState.image, imageState.version);
                     }
                     else {
-                        bridge->ClearInputImage();
+                        lockedBridge->ClearInputImage();
                     }
                 }
                 for (const auto& service : renderViewServices) {
@@ -243,6 +242,49 @@ bool HostFeatureBindings::Impl::StartCrop(
     }
 
     return SetCropViews(request);
+}
+
+bool HostFeatureBindings::Impl::SetCropViews(
+    const HostCropViewRequest& request)
+{
+    // 这一步是 host 窗口语义到裁切 bridge 的唯一转换点：
+    // 1. reference view 提供 renderer/interactor，并决定 widget 所在坐标语境。
+    // 2. preview views 只提供 InteractiveService，用于显示预览和刷新 dirty 状态。
+    // 3. 空 preview 不失败，空 reference 必须失败。
+    if (!m_renderViews || !m_core.orthogonalCropBridge) {
+        std::cerr << "[Host] Orthogonal crop activation skipped: host feature bindings are not ready." << std::endl;
+        return false;
+    }
+
+    const auto* referenceView = m_renderViews->GetViewBySelector(
+        request.referenceViewId,
+        request.isReferenceRoleUsed,
+        request.referenceRole);
+
+    if (!referenceView || !referenceView->service || !referenceView->context) {
+        std::cerr << "[Host] Orthogonal crop activation skipped: reference render view is missing." << std::endl;
+        return false;
+    }
+
+    std::vector<const HostRenderViewRuntime*> previewViews =
+        m_renderViews->GetViewsByIdsAndRoles(request.previewViewIds, request.previewViewRoles);
+    if (previewViews.empty() && request.isPreviewViewsUsed) {
+        // 裁切预览目标也必须由请求允许后才退到配置默认值；空请求不全选，避免误把新窗口纳入 preview。
+        previewViews = m_renderViews->GetCropPreviewViews();
+    }
+
+    auto bridge = m_core.orthogonalCropBridge;
+    // 裁切 reference view 按请求中的 id/role 选择，而不是按第几个窗口选择；后续 Qt 多/少窗口布局仍可复用同一 bridge。
+    bridge->SetReferenceRenderService(referenceView->service);
+    bridge->SetReferenceRenderer(referenceView->context->GetRenderer());
+    bridge->SetPrimaryInteractor(referenceView->context->GetInteractor());
+    bridge->SetPreviewRenderServices(m_renderViews->BuildServices(previewViews));
+
+    if (!SetCropInput()) {
+        return false;
+    }
+
+    return true;
 }
 
 bool HostFeatureBindings::Impl::StartGapView(
@@ -474,13 +516,10 @@ void HostFeatureBindings::Impl::AttachHostTimer(
         return;
     }
 
-    const HostRenderViewRuntime* timerView = nullptr;
-    if (!eventPumpConfig.timerViewId.empty()) {
-        timerView = m_renderViews->GetViewById(eventPumpConfig.timerViewId);
-    }
-    else if (eventPumpConfig.isTimerRoleUsed) {
-        timerView = m_renderViews->GetFirstViewByRole(eventPumpConfig.timerViewRole);
-    }
+    const auto* timerView = m_renderViews->GetViewBySelector(
+        eventPumpConfig.timerViewId,
+        eventPumpConfig.isTimerRoleUsed,
+        eventPumpConfig.timerViewRole);
 
     if (!timerView || !timerView->context) {
         std::cerr << "[Host] Timer event pump skipped: explicit timer render view is missing." << std::endl;
@@ -515,52 +554,6 @@ void HostFeatureBindings::Impl::DetachHostTimer()
         context->ClearTimerHandler();
     }
     m_timerContext.reset();
-}
-
-bool HostFeatureBindings::Impl::SetCropViews(
-    const HostCropViewRequest& request)
-{
-    // 这一步是 host 窗口语义到裁切 bridge 的唯一转换点：
-    // 1. reference view 提供 renderer/interactor，并决定 widget 所在坐标语境。
-    // 2. preview views 只提供 InteractiveService，用于显示预览和刷新 dirty 状态。
-    // 3. 空 preview 不失败，空 reference 必须失败。
-    if (!m_renderViews || !m_core.orthogonalCropBridge) {
-        std::cerr << "[Host] Orthogonal crop activation skipped: host feature bindings are not ready." << std::endl;
-        return false;
-    }
-
-    const HostRenderViewRuntime* referenceView = nullptr;
-    if (!request.referenceViewId.empty()) {
-        referenceView = m_renderViews->GetViewById(request.referenceViewId);
-    }
-    else if (request.isReferenceRoleUsed) {
-        referenceView = m_renderViews->GetFirstViewByRole(request.referenceRole);
-    }
-
-    if (!referenceView || !referenceView->service || !referenceView->context) {
-        std::cerr << "[Host] Orthogonal crop activation skipped: reference render view is missing." << std::endl;
-        return false;
-    }
-
-    std::vector<const HostRenderViewRuntime*> previewViews =
-        m_renderViews->GetViewsByIdsAndRoles(request.previewViewIds, request.previewViewRoles);
-    if (previewViews.empty() && request.isPreviewViewsUsed) {
-        // 裁切预览目标也必须由请求允许后才退到配置默认值；空请求不全选，避免误把新窗口纳入 preview。
-        previewViews = m_renderViews->GetCropPreviewViews();
-    }
-
-    auto bridge = m_core.orthogonalCropBridge;
-    // 裁切 reference view 按请求中的 id/role 选择，而不是按第几个窗口选择；后续 Qt 多/少窗口布局仍可复用同一 bridge。
-    bridge->SetReferenceRenderService(referenceView->service);
-    bridge->SetReferenceRenderer(referenceView->context->GetRenderer());
-    bridge->SetPrimaryInteractor(referenceView->context->GetInteractor());
-    bridge->SetPreviewRenderServices(m_renderViews->BuildServices(previewViews));
-
-    if (!SetCropInput()) {
-        return false;
-    }
-
-    return true;
 }
 
 HostFeatureBindings::HostFeatureBindings()

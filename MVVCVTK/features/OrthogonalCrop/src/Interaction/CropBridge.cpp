@@ -46,25 +46,27 @@ public:
     void SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService);
     void SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices);
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
-    void SendSubmit();
     bool SwitchCropBox();
     bool SwitchCropPlane();
     bool ExitCrop();
     bool GetCropActive() const;
     void SwitchPreview(CropRemovalMode removalMode);
+    void SendSubmit();
 
 private:
     bool GetInputReady();
     bool GetImageReady(vtkImageData* image) const;
+    void ClearPreviewInput();
+    void AttachPreview(const std::shared_ptr<InteractiveService>& service);
     std::array<double, 6> GetStartBounds() const;
+    std::array<double, 6> GetWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
+    std::array<double, 6> GetActiveWorldBounds() const;
+    std::array<double, 16> GetWorldToInput() const;
     void OnBoxWidget(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
     void OnPlaneWidget(
         const CropVectorDouble3Array& worldOrigin,
         const CropVectorDouble3Array& worldNormal,
         CropInteractionPhase phase);
-    std::array<double, 6> GetWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
-    std::array<double, 6> GetActiveWorldBounds() const;
-    std::array<double, 16> GetWorldToInput() const;
     OrthogonalCropRequest BuildBoxRequest(
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) const;
@@ -78,21 +80,13 @@ private:
         const OrthogonalCropRequest& polyDataRequest);
     void SwitchBoxView(CropRemovalMode removalMode);
     void SetPlaneView(CropRemovalMode removalMode);
-    bool GetSubmitReady() const;
-    void OnSubmitReload(bool isSuccess);
-    static const char* GetFailureReasonText(CropFailure failureReason);
-    static const char* GetRemovalModeText(CropRemovalMode removalMode);
-    static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
     void ClearPreviewViews();
     void ResetPreview();
-    void ClearPreviewInput();
-    void AttachPreview(const std::shared_ptr<InteractiveService>& service);
-    bool SendPreview(
-        const std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>& target,
-        CropRemovalMode removalMode,
-        const OrthogonalCropResult* volumePreviewResult,
-        const OrthogonalCropResult* polyDataPreviewResult);
+    bool GetSubmitReady() const;
+    void OnSubmitReload(bool isSuccess);
     void SendSubmitResult(const OrthogonalCropResult& submitResult);
+    static const char* GetFailureReasonText(CropFailure failureReason);
+    static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
 
     CropRouter m_backend;
     CropPreviewPlug m_previewPlug;
@@ -177,6 +171,39 @@ void CropBridge::Impl::SetPreferredDataSource(OrthogonalCropDataSource dataSourc
     m_backend.SetPreferredDataSource(dataSource);
 }
 
+bool CropBridge::Impl::GetInputReady()
+{
+    // bridge 只保证“当前至少有一个可用输入”。
+    // 它不在这里做任何坐标折叠；缺 image 输入时不再反向读取 DataManager。
+    // PolyData 可能是上一轮等值面 preview 临时写入 router 的输入，不能因此跳过 image 恢复。
+    if (GetInputImage() || m_backend.GetInputPolyData()) {
+        return true;
+    }
+
+    return false;
+}
+
+bool CropBridge::Impl::GetImageReady(vtkImageData* image) const
+{
+    if (!image || !image->GetScalarPointer()) {
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    image->GetDimensions(dims);
+    return dims[0] > 0 && dims[1] > 0 && dims[2] > 0;
+}
+
+void CropBridge::Impl::ClearPreviewInput()
+{
+    if (m_boundInputPolyData) {
+        m_backend.SetInputPolyData(m_boundInputPolyData);
+        return;
+    }
+
+    m_backend.ClearInputPolyData();
+}
+
 void CropBridge::Impl::SetPrimaryInteractor(vtkRenderWindowInteractor* interactor)
 {
     m_primaryInteractor = interactor;
@@ -218,295 +245,29 @@ void CropBridge::Impl::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
     m_submitReloadHandler = std::move(reloadSubmitter);
 }
 
-void CropBridge::Impl::SendSubmit()
+void CropBridge::Impl::AttachPreview(const std::shared_ptr<InteractiveService>& service)
 {
-    if (!m_submitReloadHandler) {
-        std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
+    if (!service) {
         return;
     }
 
-    if (!GetSubmitReady()) {
+    // 每个窗口只允许挂一份 overlay strategy；重复 service 直接跳过，避免重复 prop 和重复设脏。
+    const auto sameTarget = std::find_if(
+        m_previewRenderTargets.begin(),
+        m_previewRenderTargets.end(),
+        [service](const std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>& target) {
+            return target.first == service;
+        });
+    if (sameTarget != m_previewRenderTargets.end()) {
         return;
     }
 
-    m_cameraState.SetCameraState(m_referenceRenderer);
-    ClearPreviewInput();
-
-    const auto submitRequest = m_currentGeometryType == CropShape::Plane
-        ? BuildPlaneRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData)
-        : BuildBoxRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData);
-    auto submitResult = m_backend.GetResult(submitRequest);
-    if (submitResult.GetFailureReason() != CropFailure::None || !submitResult.GetSucceeded()) {
-        m_cameraState.Clear();
-        std::cerr << "[OrthogonalCrop] Submit failed: "
-            << GetFailureReasonText(submitResult.GetFailureReason());
-        if (!submitResult.GetMessage().empty()) {
-            std::cerr << " - " << submitResult.GetMessage();
-        }
-        std::cerr << std::endl;
-        return;
-    }
-
-    auto submitImage = submitResult.GetSubmitImage();
-    if (!submitImage) {
-        std::cerr << "[OrthogonalCrop] Image submit failed: output image is null." << std::endl;
-        m_cameraState.Clear();
-        m_submitOverlay = OrthogonalCropResult();
-        return;
-    }
-
-    submitResult.SetSubmitImage(vtkSmartPointer<vtkImageData>());
-    m_submitOverlay = submitResult;
-    m_hasReload = true;
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetEnabled(false);
-
-    if (!m_submitReloadHandler(
-            std::move(submitImage),
-            [this](bool isSuccess) {
-                OnSubmitReload(isSuccess);
-            })) {
-        std::cerr << "[OrthogonalCrop] Submit failed: reload request was rejected." << std::endl;
-        ClearPreviewInput();
-        m_submitOverlay = OrthogonalCropResult();
-        m_hasReload = false;
-        m_cameraState.Clear();
-        if (m_isCropOn) {
-            if (m_currentGeometryType == CropShape::Plane) {
-                m_planeWidget.SetEnabled(true);
-            }
-            else {
-                m_boxWidget.SetEnabled(true);
-            }
-        }
-    }
-}
-
-bool CropBridge::Impl::GetSubmitReady() const
-{
-    if (!m_isCropOn || !m_hasWorldState) {
-        std::cerr << "[OrthogonalCrop] Submit failed: crop widget is not active." << std::endl;
-        return false;
-    }
-
-    if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
-        std::cerr << "[OrthogonalCrop] Submit failed: wait until widget dragging finishes." << std::endl;
-        return false;
-    }
-
-    if (!GetInputImage()) {
-        std::cerr << "[OrthogonalCrop] Submit failed: image crop input is missing." << std::endl;
-        return false;
-    }
-
-    if (!m_hasInputVer) {
-        std::cerr << "[OrthogonalCrop] Submit failed: image crop input version is missing." << std::endl;
-        return false;
-    }
-
-    if (m_hasReload) {
-        std::cerr << "[OrthogonalCrop] Submit ignored: reload is already pending." << std::endl;
-        return false;
-    }
-
-    return true;
-}
-
-void CropBridge::Impl::OnSubmitReload(bool isSuccess)
-{
-    if (!isSuccess) {
-        std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
-        ClearPreviewInput();
-        m_submitOverlay = OrthogonalCropResult();
-        m_hasReload = false;
-        m_cameraState.Clear();
-        if (m_isCropOn) {
-            if (m_currentGeometryType == CropShape::Plane) {
-                m_planeWidget.SetEnabled(true);
-            }
-            else {
-                m_boxWidget.SetEnabled(true);
-            }
-        }
-        return;
-    }
-
-    ClearPreviewInput();
-
-    const auto submitOverlayResult = m_submitOverlay;
-    m_submitOverlay = OrthogonalCropResult();
-
-    std::cout << "[OrthogonalCrop] Submit applied to host image data." << std::endl;
-    m_cameraState.ResetCamera(m_referenceRenderer);
-    if (m_hasReload) {
-        m_hasReload = false;
-        m_hasWorldState = false;
-        ExitCrop();
-    }
-
-    SendSubmitResult(submitOverlayResult);
-}
-
-bool CropBridge::Impl::SwitchCropBox()
-{
-    if (!GetInputReady()) {
-        std::cerr << "[OrthogonalCrop] Box crop trigger failed: no active image/polydata input is available yet." << std::endl;
-        return false;
-    }
-
-    if (m_isCropOn) {
-        const auto previousGeometryType = m_currentGeometryType;
-        if (!ExitCrop()) {
-            return false;
-        }
-        if (previousGeometryType == CropShape::Box) {
-            return true;
-        }
-    }
-
-    if (!m_primaryInteractor) {
-        std::cerr << "[OrthogonalCrop] Box crop widget init failed: primary interactor missing." << std::endl;
-        return false;
-    }
-
-    if (!m_hasWorldState) {
-        m_currentWorldBounds = GetStartBounds();
-        m_hasWorldState = true;
-    }
-
-    // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToInputModel 折回 active input model。
-    m_boxWidget.SetInteractor(m_primaryInteractor);
-    m_boxWidget.SetReferenceWorldBounds(GetActiveWorldBounds()); // 初始化widget交互范围
-    m_boxWidget.SetWidgetWorldBounds(m_currentWorldBounds); // 设置实际交互盒子范围有多大
-    if (!m_boxWidget.SetEnabled(true)) {
-        std::cerr << "[OrthogonalCrop] Box crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
-        return false;
-    }
-
-    m_planeWidget.SetEnabled(false);
-    m_currentGeometryType = CropShape::Box;
-    m_isCropOn = true;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Box crop widget active. UI uses vtkBoxWidget2, dataSource = "
-        << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Use host crop commands to preview, submit, or exit." << std::endl;
-    return true;
-}
-
-bool CropBridge::Impl::SwitchCropPlane()
-{
-    if (!GetInputReady()) {
-        std::cerr << "[OrthogonalCrop] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
-        return false;
-    }
-
-    if (m_isCropOn) {
-        const auto previousGeometryType = m_currentGeometryType;
-        if (!ExitCrop()) {
-            return false;
-        }
-        if (previousGeometryType == CropShape::Plane) {
-            return true;
-        }
-    }
-
-    if (!m_primaryInteractor) {
-        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: primary interactor missing." << std::endl;
-        return false;
-    }
-
-    const auto activeWorldBounds = GetActiveWorldBounds();
-    const std::array<double, 3> activeWorldDimensions = {
-        activeWorldBounds[1] - activeWorldBounds[0],
-        activeWorldBounds[3] - activeWorldBounds[2],
-        activeWorldBounds[5] - activeWorldBounds[4]
-    };
-    m_currentWorldPlaneOrigin = {
-        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
-        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
-        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
-    };
-    m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
-    m_worldHalf = {
-        std::max(activeWorldDimensions[0] * kPlaneScale, kPlaneVectorEpsilon),
-        std::max(activeWorldDimensions[1] * kPlaneScale, kPlaneVectorEpsilon)
-    };
-    // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
-    // halfExtents 只保留交互平面的尺度快照，不再驱动算法层生成有限矩形 outline。
-    m_currentWorldBounds = activeWorldBounds;
-    m_hasWorldState = true;
-
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetInteractor(m_primaryInteractor);
-    m_planeWidget.SetReferenceWorldBounds(activeWorldBounds);
-    m_planeWidget.SetWidgetWorldPlane(
-        m_currentWorldPlaneOrigin,
-        m_currentWorldPlaneNormal,
-        m_worldHalf);
-    if (!m_planeWidget.SetEnabled(true)) {
-        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
-        return false;
-    }
-
-    m_currentGeometryType = CropShape::Plane;
-    m_isCropOn = true;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
-        << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Use host crop commands to preview, submit, or exit." << std::endl;
-    return true;
-}
-
-bool CropBridge::Impl::ExitCrop()
-{
-    if (!m_isCropOn) {
-        return false;
-    }
-
-    if (m_hasReload) {
-        std::cout << "[OrthogonalCrop] Crop widget deactivation deferred: image submit reload is pending." << std::endl;
-        return false;
-    }
-
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetEnabled(false);
-    m_hasReload = false;
-    m_isCropOn = false;
-    m_isPreviewOn = false;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Crop widget deactivated. 3D navigation restored." << std::endl;
-    return true;
-}
-
-bool CropBridge::Impl::GetCropActive() const
-{
-    return m_isCropOn;
-}
-
-bool CropBridge::Impl::GetInputReady()
-{
-    // bridge 只保证“当前至少有一个可用输入”。
-    // 它不在这里做任何坐标折叠；缺 image 输入时不再反向读取 DataManager。
-    // PolyData 可能是上一轮等值面 preview 临时写入 router 的输入，不能因此跳过 image 恢复。
-    if (GetInputImage() || m_backend.GetInputPolyData()) {
-        return true;
-    }
-
-    return false;
-}
-
-bool CropBridge::Impl::GetImageReady(vtkImageData* image) const
-{
-    if (!image || !image->GetScalarPointer()) {
-        return false;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    image->GetDimensions(dims);
-    return dims[0] > 0 && dims[1] > 0 && dims[2] > 0;
+    auto overlayStrategy = std::make_shared<CropOverlay>();
+    // preview 目标可以有多个，但裁切 box/outline 只属于 reference 窗口。
+    // 这样其它 3D 窗口仍能显示裁切后的主模型预览，不会再出现第二个可误读为交互控件的 box。
+    overlayStrategy->SetRefVisible(service == m_referenceRenderService);
+    service->AttachOverlayStrategy(overlayStrategy);
+    m_previewRenderTargets.push_back({ service, overlayStrategy });
 }
 
 std::array<double, 6> CropBridge::Impl::GetStartBounds() const
@@ -543,42 +304,6 @@ std::array<double, 6> CropBridge::Impl::GetStartBounds() const
     worldBounds[4] = center[2] - halfExtents[2];
     worldBounds[5] = center[2] + halfExtents[2];
     return worldBounds;
-}
-
-void CropBridge::Impl::OnBoxWidget(
-    const std::array<double, 6>& worldBounds,
-    CropInteractionPhase phase)
-{
-    if (!m_isCropOn || m_currentGeometryType != CropShape::Box) {
-        return;
-    }
-
-    // 交互过程中始终记录最新 world AABB 和 phase，
-    // 但只在 Released 时触发 preview，保持“拖拽只更新显示状态，释放后再统一跑后端”的既有流程。
-    m_currentWorldBounds = worldBounds;
-    m_hasWorldState = true;
-    m_lastInteractionPhase = phase;
-    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        SetBoxPreview();
-    }
-}
-
-void CropBridge::Impl::OnPlaneWidget(
-    const CropVectorDouble3Array& worldOrigin,
-    const CropVectorDouble3Array& worldNormal,
-    CropInteractionPhase phase)
-{
-    if (!m_isCropOn || m_currentGeometryType != CropShape::Plane) {
-        return;
-    }
-
-    m_currentWorldPlaneOrigin = worldOrigin;
-    m_currentWorldPlaneNormal = worldNormal;
-    m_hasWorldState = true;
-    m_lastInteractionPhase = phase;
-    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        SetPlanePreview();
-    }
 }
 
 std::array<double, 6> CropBridge::Impl::GetWorldBounds(
@@ -650,6 +375,42 @@ std::array<double, 16> CropBridge::Impl::GetWorldToInput() const
     std::array<double, 16> worldToInputData = { 0.0 };
     vtkMatrix4x4::DeepCopy(worldToInputData.data(), worldToInputMat);
     return worldToInputData;
+}
+
+void CropBridge::Impl::OnBoxWidget(
+    const std::array<double, 6>& worldBounds,
+    CropInteractionPhase phase)
+{
+    if (!m_isCropOn || m_currentGeometryType != CropShape::Box) {
+        return;
+    }
+
+    // 交互过程中始终记录最新 world AABB 和 phase，
+    // 但只在 Released 时触发 preview，保持“拖拽只更新显示状态，释放后再统一跑后端”的既有流程。
+    m_currentWorldBounds = worldBounds;
+    m_hasWorldState = true;
+    m_lastInteractionPhase = phase;
+    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
+        SetBoxPreview();
+    }
+}
+
+void CropBridge::Impl::OnPlaneWidget(
+    const CropVectorDouble3Array& worldOrigin,
+    const CropVectorDouble3Array& worldNormal,
+    CropInteractionPhase phase)
+{
+    if (!m_isCropOn || m_currentGeometryType != CropShape::Plane) {
+        return;
+    }
+
+    m_currentWorldPlaneOrigin = worldOrigin;
+    m_currentWorldPlaneNormal = worldNormal;
+    m_hasWorldState = true;
+    m_lastInteractionPhase = phase;
+    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
+        SetPlanePreview();
+    }
 }
 
 OrthogonalCropRequest CropBridge::Impl::BuildBoxRequest(
@@ -846,6 +607,145 @@ OrthogonalCropRequest CropBridge::Impl::BuildPlaneRequest(
     return planeRequest;
 }
 
+bool CropBridge::Impl::SwitchCropBox()
+{
+    if (!GetInputReady()) {
+        std::cerr << "[OrthogonalCrop] Box crop trigger failed: no active image/polydata input is available yet." << std::endl;
+        return false;
+    }
+
+    if (m_isCropOn) {
+        const auto previousGeometryType = m_currentGeometryType;
+        if (!ExitCrop()) {
+            return false;
+        }
+        if (previousGeometryType == CropShape::Box) {
+            return true;
+        }
+    }
+
+    if (!m_primaryInteractor) {
+        std::cerr << "[OrthogonalCrop] Box crop widget init failed: primary interactor missing." << std::endl;
+        return false;
+    }
+
+    if (!m_hasWorldState) {
+        m_currentWorldBounds = GetStartBounds();
+        m_hasWorldState = true;
+    }
+
+    // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToInputModel 折回 active input model。
+    m_boxWidget.SetInteractor(m_primaryInteractor);
+    m_boxWidget.SetReferenceWorldBounds(GetActiveWorldBounds()); // 初始化widget交互范围
+    m_boxWidget.SetWidgetWorldBounds(m_currentWorldBounds); // 设置实际交互盒子范围有多大
+    if (!m_boxWidget.SetEnabled(true)) {
+        std::cerr << "[OrthogonalCrop] Box crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
+        return false;
+    }
+
+    m_planeWidget.SetEnabled(false);
+    m_currentGeometryType = CropShape::Box;
+    m_isCropOn = true;
+    m_lastInteractionPhase = CropInteractionPhase::Released;
+    ResetPreview();
+    std::cout << "[OrthogonalCrop] Box crop widget active. UI uses vtkBoxWidget2, dataSource = "
+        << GetDataSourceText(m_backend.GetActiveDataSource())
+        << ". Use host crop commands to preview, submit, or exit." << std::endl;
+    return true;
+}
+
+bool CropBridge::Impl::SwitchCropPlane()
+{
+    if (!GetInputReady()) {
+        std::cerr << "[OrthogonalCrop] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
+        return false;
+    }
+
+    if (m_isCropOn) {
+        const auto previousGeometryType = m_currentGeometryType;
+        if (!ExitCrop()) {
+            return false;
+        }
+        if (previousGeometryType == CropShape::Plane) {
+            return true;
+        }
+    }
+
+    if (!m_primaryInteractor) {
+        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: primary interactor missing." << std::endl;
+        return false;
+    }
+
+    const auto activeWorldBounds = GetActiveWorldBounds();
+    const std::array<double, 3> activeWorldDimensions = {
+        activeWorldBounds[1] - activeWorldBounds[0],
+        activeWorldBounds[3] - activeWorldBounds[2],
+        activeWorldBounds[5] - activeWorldBounds[4]
+    };
+    m_currentWorldPlaneOrigin = {
+        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
+        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
+        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
+    };
+    m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
+    m_worldHalf = {
+        std::max(activeWorldDimensions[0] * kPlaneScale, kPlaneVectorEpsilon),
+        std::max(activeWorldDimensions[1] * kPlaneScale, kPlaneVectorEpsilon)
+    };
+    // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
+    // halfExtents 只保留交互平面的尺度快照，不再驱动算法层生成有限矩形 outline。
+    m_currentWorldBounds = activeWorldBounds;
+    m_hasWorldState = true;
+
+    m_boxWidget.SetEnabled(false);
+    m_planeWidget.SetInteractor(m_primaryInteractor);
+    m_planeWidget.SetReferenceWorldBounds(activeWorldBounds);
+    m_planeWidget.SetWidgetWorldPlane(
+        m_currentWorldPlaneOrigin,
+        m_currentWorldPlaneNormal,
+        m_worldHalf);
+    if (!m_planeWidget.SetEnabled(true)) {
+        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
+        return false;
+    }
+
+    m_currentGeometryType = CropShape::Plane;
+    m_isCropOn = true;
+    m_lastInteractionPhase = CropInteractionPhase::Released;
+    ResetPreview();
+    std::cout << "[OrthogonalCrop] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
+        << GetDataSourceText(m_backend.GetActiveDataSource())
+        << ". Use host crop commands to preview, submit, or exit." << std::endl;
+    return true;
+}
+
+bool CropBridge::Impl::ExitCrop()
+{
+    if (!m_isCropOn) {
+        return false;
+    }
+
+    if (m_hasReload) {
+        std::cout << "[OrthogonalCrop] Crop widget deactivation deferred: image submit reload is pending." << std::endl;
+        return false;
+    }
+
+    m_boxWidget.SetEnabled(false);
+    m_planeWidget.SetEnabled(false);
+    m_hasReload = false;
+    m_isCropOn = false;
+    m_isPreviewOn = false;
+    m_lastInteractionPhase = CropInteractionPhase::Released;
+    ResetPreview();
+    std::cout << "[OrthogonalCrop] Crop widget deactivated. 3D navigation restored." << std::endl;
+    return true;
+}
+
+bool CropBridge::Impl::GetCropActive() const
+{
+    return m_isCropOn;
+}
+
 void CropBridge::Impl::SetBoxPreview()
 {
     if (!m_hasWorldState) {
@@ -903,7 +803,6 @@ void CropBridge::Impl::SetPreviewRequest(
         }
     }
 
-    bool hasPreview = false;
     for (const auto& target : m_previewRenderTargets) {
         if (!target.first || !target.second) {
             continue;
@@ -935,17 +834,14 @@ void CropBridge::Impl::SetPreviewRequest(
             continue;
         }
 
-        SendPreview(
-            target,
-            m_currentRemovalMode,
+        m_previewPlug.SetPreview(
+            target.first,
+            target.second,
+            m_referenceRenderService,
             volumePreviewResult,
-            hasPolyResult ? &polyResult : nullptr);
-        hasPreview = true;
-    }
-
-    if (!hasPreview) {
-        ClearPreviewInput();
-        return;
+            hasPolyResult ? &polyResult : nullptr,
+            m_currentRemovalMode);
+        target.first->SetDirty();
     }
 
     ClearPreviewInput();
@@ -1008,6 +904,180 @@ void CropBridge::Impl::SetPlaneView(CropRemovalMode removalMode)
     }
 }
 
+void CropBridge::Impl::ClearPreviewViews()
+{
+    // 这里只清理 overlay 生命周期；
+    // 主模型 preview 状态由 ResetPreview 收口，避免解绑窗口时意外改动主显示。
+    for (const auto& target : m_previewRenderTargets) {
+        if (target.first && target.second) {
+            target.first->RemoveOverlayStrategy(target.second);
+        }
+    }
+    m_previewPlug.Clear();
+    m_previewRenderTargets.clear();
+    ClearPreviewInput();
+}
+
+void CropBridge::Impl::ResetPreview()
+{
+    // 恢复 preview 涉及 overlay、volume shader 和 polydata clip 三条显示路径；
+    // 统一在这里清空临时状态并标脏，确保关闭 preview 后各窗口回到全模型显示。
+    for (auto& target : m_previewRenderTargets) {
+        m_previewPlug.ResetPreview(target.first, target.second);
+        if (target.first) {
+            target.first->SetDirty();
+        }
+    }
+    ClearPreviewInput();
+}
+
+void CropBridge::Impl::SendSubmit()
+{
+    if (!m_submitReloadHandler) {
+        std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
+        return;
+    }
+
+    if (!GetSubmitReady()) {
+        return;
+    }
+
+    m_cameraState.SetCameraState(m_referenceRenderer);
+    ClearPreviewInput();
+
+    const auto submitRequest = m_currentGeometryType == CropShape::Plane
+        ? BuildPlaneRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData)
+        : BuildBoxRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData);
+    auto submitResult = m_backend.GetResult(submitRequest);
+    if (submitResult.GetFailureReason() != CropFailure::None || !submitResult.GetSucceeded()) {
+        m_cameraState.Clear();
+        std::cerr << "[OrthogonalCrop] Submit failed: "
+            << GetFailureReasonText(submitResult.GetFailureReason());
+        if (!submitResult.GetMessage().empty()) {
+            std::cerr << " - " << submitResult.GetMessage();
+        }
+        std::cerr << std::endl;
+        return;
+    }
+
+    auto submitImage = submitResult.GetSubmitImage();
+    if (!submitImage) {
+        std::cerr << "[OrthogonalCrop] Image submit failed: output image is null." << std::endl;
+        m_cameraState.Clear();
+        m_submitOverlay = OrthogonalCropResult();
+        return;
+    }
+
+    submitResult.SetSubmitImage(vtkSmartPointer<vtkImageData>());
+    m_submitOverlay = submitResult;
+    m_hasReload = true;
+    m_boxWidget.SetEnabled(false);
+    m_planeWidget.SetEnabled(false);
+
+    if (!m_submitReloadHandler(
+            std::move(submitImage),
+            [this](bool isSuccess) {
+                OnSubmitReload(isSuccess);
+            })) {
+        std::cerr << "[OrthogonalCrop] Submit failed: reload request was rejected." << std::endl;
+        ClearPreviewInput();
+        m_submitOverlay = OrthogonalCropResult();
+        m_hasReload = false;
+        m_cameraState.Clear();
+        if (m_isCropOn) {
+            if (m_currentGeometryType == CropShape::Plane) {
+                m_planeWidget.SetEnabled(true);
+            }
+            else {
+                m_boxWidget.SetEnabled(true);
+            }
+        }
+    }
+}
+
+bool CropBridge::Impl::GetSubmitReady() const
+{
+    if (!m_isCropOn || !m_hasWorldState) {
+        std::cerr << "[OrthogonalCrop] Submit failed: crop widget is not active." << std::endl;
+        return false;
+    }
+
+    if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
+        std::cerr << "[OrthogonalCrop] Submit failed: wait until widget dragging finishes." << std::endl;
+        return false;
+    }
+
+    if (!GetInputImage()) {
+        std::cerr << "[OrthogonalCrop] Submit failed: image crop input is missing." << std::endl;
+        return false;
+    }
+
+    if (!m_hasInputVer) {
+        std::cerr << "[OrthogonalCrop] Submit failed: image crop input version is missing." << std::endl;
+        return false;
+    }
+
+    if (m_hasReload) {
+        std::cerr << "[OrthogonalCrop] Submit ignored: reload is already pending." << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+void CropBridge::Impl::OnSubmitReload(bool isSuccess)
+{
+    if (!isSuccess) {
+        std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
+        ClearPreviewInput();
+        m_submitOverlay = OrthogonalCropResult();
+        m_hasReload = false;
+        m_cameraState.Clear();
+        if (m_isCropOn) {
+            if (m_currentGeometryType == CropShape::Plane) {
+                m_planeWidget.SetEnabled(true);
+            }
+            else {
+                m_boxWidget.SetEnabled(true);
+            }
+        }
+        return;
+    }
+
+    ClearPreviewInput();
+
+    const auto submitOverlayResult = m_submitOverlay;
+    m_submitOverlay = OrthogonalCropResult();
+
+    std::cout << "[OrthogonalCrop] Submit applied to host image data." << std::endl;
+    m_cameraState.ResetCamera(m_referenceRenderer);
+    if (m_hasReload) {
+        m_hasReload = false;
+        m_hasWorldState = false;
+        ExitCrop();
+    }
+
+    SendSubmitResult(submitOverlayResult);
+}
+
+void CropBridge::Impl::SendSubmitResult(const OrthogonalCropResult& submitResult)
+{
+    if (!submitResult.GetSucceeded()) {
+        return;
+    }
+
+    for (const auto& target : m_previewRenderTargets) {
+        if (!target.first || !target.second) {
+            continue;
+        }
+
+        target.second->SetSliceAxis(target.first->GetNavigationAxis());
+        target.second->SetRemovalMode(submitResult.GetResolvedRemovalMode());
+        target.second->SetCropResult(submitResult);
+        target.first->SetDirty();
+    }
+}
+
 const char* CropBridge::Impl::GetFailureReasonText(CropFailure failureReason)
 {
     switch (failureReason) {
@@ -1038,18 +1108,6 @@ const char* CropBridge::Impl::GetFailureReasonText(CropFailure failureReason)
     return "Unknown";
 }
 
-const char* CropBridge::Impl::GetRemovalModeText(CropRemovalMode removalMode)
-{
-    switch (removalMode) {
-    case CropRemovalMode::KeepInside:
-        return "KeepInside";
-    case CropRemovalMode::RemoveInside:
-        return "RemoveInside";
-    }
-
-    return "Unknown";
-}
-
 const char* CropBridge::Impl::GetDataSourceText(OrthogonalCropDataSource dataSource)
 {
     switch (dataSource) {
@@ -1061,108 +1119,6 @@ const char* CropBridge::Impl::GetDataSourceText(OrthogonalCropDataSource dataSou
         return "PolyData";
     default:
         return "Unknown";
-    }
-}
-
-void CropBridge::Impl::ClearPreviewViews()
-{
-    // 这里只清理 overlay 生命周期；
-    // 主模型 preview 状态由 ResetPreview 收口，避免解绑窗口时意外改动主显示。
-    for (const auto& target : m_previewRenderTargets) {
-        if (target.first && target.second) {
-            target.first->RemoveOverlayStrategy(target.second);
-        }
-    }
-    m_previewPlug.Clear();
-    m_previewRenderTargets.clear();
-    ClearPreviewInput();
-}
-
-void CropBridge::Impl::ResetPreview()
-{
-    // 恢复 preview 涉及 overlay、volume shader 和 polydata clip 三条显示路径；
-    // 统一在这里清空临时状态并标脏，确保关闭 preview 后各窗口回到全模型显示。
-    for (auto& target : m_previewRenderTargets) {
-        m_previewPlug.ResetPreview(target.first, target.second);
-        if (target.first) {
-            target.first->SetDirty();
-        }
-    }
-    ClearPreviewInput();
-}
-
-void CropBridge::Impl::ClearPreviewInput()
-{
-    if (m_boundInputPolyData) {
-        m_backend.SetInputPolyData(m_boundInputPolyData);
-        return;
-    }
-
-    m_backend.ClearInputPolyData();
-}
-
-void CropBridge::Impl::AttachPreview(const std::shared_ptr<InteractiveService>& service)
-{
-    if (!service) {
-        return;
-    }
-
-    // 每个窗口只允许挂一份 overlay strategy；重复 service 直接跳过，避免重复 prop 和重复设脏。
-    const auto sameTarget = std::find_if(
-        m_previewRenderTargets.begin(),
-        m_previewRenderTargets.end(),
-        [service](const std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>& target) {
-            return target.first == service;
-        });
-    if (sameTarget != m_previewRenderTargets.end()) {
-        return;
-    }
-
-    auto overlayStrategy = std::make_shared<CropOverlay>();
-    // preview 目标可以有多个，但裁切 box/outline 只属于 reference 窗口。
-    // 这样其它 3D 窗口仍能显示裁切后的主模型预览，不会再出现第二个可误读为交互控件的 box。
-    overlayStrategy->SetRefVisible(service == m_referenceRenderService);
-    service->AttachOverlayStrategy(overlayStrategy);
-    m_previewRenderTargets.push_back({ service, overlayStrategy });
-}
-
-bool CropBridge::Impl::SendPreview(
-    const std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>& target,
-    CropRemovalMode removalMode,
-    const OrthogonalCropResult* volumePreviewResult,
-    const OrthogonalCropResult* polyDataPreviewResult)
-{
-    if (!target.first || !target.second) {
-        return false;
-    }
-
-    const bool isMainSet = m_previewPlug.SetPreview(
-        target.first,
-        target.second,
-        m_referenceRenderService,
-        volumePreviewResult,
-        polyDataPreviewResult,
-        removalMode);
-
-    target.first->SetDirty();
-    return isMainSet;
-}
-
-void CropBridge::Impl::SendSubmitResult(const OrthogonalCropResult& submitResult)
-{
-    if (!submitResult.GetSucceeded()) {
-        return;
-    }
-
-    for (const auto& target : m_previewRenderTargets) {
-        if (!target.first || !target.second) {
-            continue;
-        }
-
-        target.second->SetSliceAxis(target.first->GetNavigationAxis());
-        target.second->SetRemovalMode(submitResult.GetResolvedRemovalMode());
-        target.second->SetCropResult(submitResult);
-        target.first->SetDirty();
     }
 }
 

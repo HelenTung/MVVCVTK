@@ -18,28 +18,33 @@
 #include <cstring>
 #include "MemMappedFile.h"
 
+namespace {
+
+std::array<double, 3> GetRasOrigin(
+    const std::array<double, 3>& lpsOrigin,
+    const int dims[3],
+    const std::array<double, 3>& spacing)
+{
+    std::array<double, 3> rasOrigin = {
+        -lpsOrigin[0],
+        -lpsOrigin[1],
+        lpsOrigin[2]
+    };
+
+    if (dims[0] > 0) {
+        rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
+    }
+    if (dims[1] > 0) {
+        rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
+    }
+
+    return rasOrigin;
+}
+
+}
+
 class BaseDataManager::Impl final {
 public:
-    std::array<double, 3> GetRasOrigin(
-        const std::array<double, 3>& lpsOrigin,
-        const int dims[3],
-        const std::array<double, 3>& spacing) const
-    {
-        std::array<double, 3> rasOrigin = {
-            -lpsOrigin[0],
-            -lpsOrigin[1],
-            lpsOrigin[2]
-        };
-
-        if (dims[0] > 0) {
-            rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
-        }
-        if (dims[1] > 0) {
-            rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
-        }
-
-        return rasOrigin;
-    }
 
     bool SetRasScalars(
         const float* src,
@@ -139,10 +144,6 @@ public:
 
 private:
     bool GetExplicitValue(const std::array<float, 3>& values) const;
-    std::array<double, 3> GetRasOrigin(
-        const std::array<double, 3>& lpsOrigin,
-        const int dims[3],
-        const std::array<double, 3>& spacing) const;
     bool SetLpsRasImage(vtkImageData* source, vtkImageData* target) const;
 };
 
@@ -200,6 +201,232 @@ bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
     return true;
 }
 
+bool BaseDataManager::ExportSlices(
+    const std::string& dirPath,
+    Orientation orientation,
+    const WindowLevelParams& windowLevel,
+    const std::array<double, 16>& modelToWorldMatrix)
+{
+
+    if (dirPath.empty()) {
+        std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
+        return false;
+    }
+
+    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        if (!m_vtkImage) return false;
+        imageCopy->ShallowCopy(m_vtkImage);
+    }
+
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
+    worldToModelMatrix->Invert();
+
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(worldToModelMatrix);
+
+    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
+    reslice->SetInputData(imageCopy);
+    reslice->SetResliceTransform(worldToModelTransform);
+    reslice->SetInterpolationModeToLinear();
+    reslice->SetOutputDimensionality(3);
+    reslice->SetAutoCropOutput(true);
+
+    double range[2] = { 0.0, 0.0 };
+    imageCopy->GetScalarRange(range);
+    reslice->SetBackgroundLevel(range[0]);
+
+    try {
+        reslice->Update();
+    }
+    catch (...) {
+        return false;
+    }
+
+    auto outputImage = reslice->GetOutput();
+    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
+        return false;
+    }
+
+    int dims[3] = { 0, 0, 0 };
+    outputImage->GetDimensions(dims);
+    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
+        return false;
+    }
+
+    std::filesystem::path outputDir = std::filesystem::path(dirPath);
+    if (outputDir.has_extension()) {
+        outputDir = outputDir.parent_path() / outputDir.stem();
+    }
+    if (outputDir.empty()) {
+        return false;
+    }
+
+    try {
+        std::filesystem::create_directories(outputDir);
+    }
+    catch (...) {
+        return false;
+    }
+
+    const int sliceAxis = static_cast<int>(orientation); // 与 Orientation 枚举值保持一致
+    const int sliceCount = dims[sliceAxis];
+    const std::array<int, 2> sliceSize = m_impl->GetSliceSize(dims, orientation); // 当前导出图片宽高
+    const int width = sliceSize[0];
+    const int height = sliceSize[1];
+    const int digits = std::max(4, static_cast<int>(std::to_string(std::max(sliceCount - 1, 0)).size()));
+    const std::string orientationName = m_impl->GetOrientName(orientation);
+
+    for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
+        auto sliceImage = vtkSmartPointer<vtkImageData>::New();
+        sliceImage->SetDimensions(width, height, 1);
+        sliceImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+
+        auto* dst = static_cast<unsigned char*>(sliceImage->GetScalarPointer());
+        if (!dst) {
+            return false;
+        }
+        for (int py = 0; py < height; ++py) {
+            for (int px = 0; px < width; ++px) {
+                int x = 0;
+                int y = 0;
+                int z = 0;
+
+                if (orientation == Orientation::Top_down) {
+                    x = px;
+                    y = py;
+                    z = sliceIndex;
+                }
+                else if (orientation == Orientation::Front_back) {
+                    x = px;
+                    y = sliceIndex;
+                    z = py;
+                }
+                else {
+                    x = sliceIndex;
+                    y = px;
+                    z = py;
+                }
+                const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
+                dst[py * width + px] = m_impl->GetWindowGray(value, windowLevel);
+            }
+        }
+
+        std::ostringstream fileName;
+        fileName << orientationName << "_"
+            << std::setw(digits) << std::setfill('0') << sliceIndex
+            << ".png";
+
+        auto writer = vtkSmartPointer<vtkPNGWriter>::New();
+        const std::filesystem::path outputFilePath = outputDir / fileName.str();
+        const std::string vtkFileName = outputFilePath.u8string();
+        writer->SetFileName(vtkFileName.c_str());
+        writer->SetInputData(sliceImage);
+        writer->Write();
+        if (writer->GetErrorCode() != 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool BaseDataManager::ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
+{
+    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    {
+        std::lock_guard<std::mutex> lock(m_dataMutex);
+        if (!m_vtkImage) return false;
+        // 浅拷贝数据指针，避免在主线程引发锁竞争
+        imageCopy->ShallowCopy(m_vtkImage);
+    }
+
+    //  VTK 逆变换矩阵
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
+    worldToModelMatrix->Invert();
+
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(worldToModelMatrix);
+
+    // 利用 vtkImageReslice 进行核心插值运算
+    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
+    reslice->SetInputData(imageCopy);
+    reslice->SetResliceTransform(worldToModelTransform);
+    reslice->SetInterpolationModeToLinear();
+
+    // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。
+    // 这会导致输出的数据维度（Dimensions）发生变化。
+    reslice->SetOutputDimensionality(3);
+
+    reslice->SetAutoCropOutput(true);
+    double range[2];
+    imageCopy->GetScalarRange(range);
+    reslice->SetBackgroundLevel(range[0]); // 取真实的最小标量值
+
+    try {
+        // 更新管线，触发计算
+        reslice->Update();
+    }
+    catch (...) {
+        std::cerr << "[Error] Exception during image reslicing/changing info." << std::endl;
+        return false;
+    }
+
+    auto outputImage = reslice->GetOutput();
+    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
+        std::cerr << "[Error] Reslice produced an empty image!" << std::endl;
+        return false;
+    }
+
+    // 提取维度大小和内存指针
+    int newDims[3];
+    outputImage->GetDimensions(newDims);
+    float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
+
+    if (!outDataPtr) {
+        return false;
+    }
+
+    vtkIdType incs[3];
+    outputImage->GetIncrements(incs);
+
+    std::filesystem::path pathObj(filePath);
+    std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
+    // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
+    std::filesystem::path finalFileName = pathObj.stem();
+    finalFileName += std::string("_") + dimStr;
+    finalFileName += pathObj.extension();
+    std::filesystem::path finalPath = pathObj.parent_path() / finalFileName;
+
+    // 使用 C++ 标准库直接持久化写入裸 raw 数据
+    std::ofstream rawFile(finalPath, std::ios::binary);
+    if (!rawFile.is_open()) {
+        std::cerr << "[Error] Failed to open RAW file for writing: " << filePath << std::endl;
+        return false;
+    }
+
+    // 由于旋转后行尾可能有 Padding（根据 VTK 内部内存布局），不能直接写入整块内存。
+    size_t rowBytes = static_cast<size_t>(newDims[0]) * sizeof(float);
+    for (int z = 0; z < newDims[2]; ++z) {
+        for (int y = 0; y < newDims[1]; ++y) {
+            // 利用真实步长计算出当前行准确的内存起始地址
+            float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
+            // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
+            rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
+        }
+    }
+
+    rawFile.close();
+    std::cout << "[Export] Successfully saved transformed RAW to: " << finalPath.u8string() << "\n"
+        << "[Export] IMPORTANT: New Dimensions are "
+        << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
+
+    return true;
+}
+
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
     // 解析文件名
@@ -238,7 +465,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         static_cast<double>(origin[2])
     };
     m_spacing = lpsSpacing;
-    m_origin = m_impl->GetRasOrigin(lpsOrigin, newDims, m_spacing);
+    m_origin = GetRasOrigin(lpsOrigin, newDims, m_spacing);
 
     // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
@@ -249,7 +476,6 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // 读取数据到新内存
     size_t totalVoxels = static_cast<size_t>(newDims[0]) * static_cast<size_t>(newDims[1]) * static_cast<size_t>(newDims[2]);
-    // float* vtkDataPtr = static_cast<float*>(newImage->GetScalarPointer());
     size_t expectedBytes = totalVoxels * sizeof(float);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
 
@@ -338,7 +564,7 @@ bool RawVolumeDataManager::SetFromBuffer(
         static_cast<double>(origin[1]),
         static_cast<double>(origin[2])
     };
-    const std::array<double, 3> rasOrigin = m_impl->GetRasOrigin(lpsOrigin, rasDims, rasSpacing);
+    const std::array<double, 3> rasOrigin = GetRasOrigin(lpsOrigin, rasDims, rasSpacing);
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
     newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
@@ -436,140 +662,6 @@ bool RawVolumeDataManager::SetCurrentFromPending()
     }
     // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
     // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。
-    return true;
-}
-
-bool BaseDataManager::ExportSlices(
-    const std::string& dirPath,
-    Orientation orientation,
-    const WindowLevelParams& windowLevel,
-    const std::array<double, 16>& modelToWorldMatrix)
-{
-
-    if (dirPath.empty()) {
-        std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
-        return false;
-    }
-
-    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        if (!m_vtkImage) return false;
-        imageCopy->ShallowCopy(m_vtkImage);
-    }
-
-    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
-    worldToModelMatrix->Invert();
-
-    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
-    worldToModelTransform->SetMatrix(worldToModelMatrix);
-
-    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
-    reslice->SetInputData(imageCopy);
-    reslice->SetResliceTransform(worldToModelTransform);
-    reslice->SetInterpolationModeToLinear();
-    reslice->SetOutputDimensionality(3);
-    reslice->SetAutoCropOutput(true);
-
-    double range[2] = { 0.0, 0.0 };
-    imageCopy->GetScalarRange(range);
-    reslice->SetBackgroundLevel(range[0]);
-
-    try {
-        reslice->Update();
-    }
-    catch (...) {
-        return false;
-    }
-
-    auto outputImage = reslice->GetOutput();
-    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
-        return false;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    outputImage->GetDimensions(dims);
-    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        return false;
-    }
-
-    std::filesystem::path outputDir = std::filesystem::path(dirPath);
-    if (outputDir.has_extension()) {
-        outputDir = outputDir.parent_path() / outputDir.stem();
-    }
-    if (outputDir.empty()) {
-        return false;
-    }
-
-    try {
-        std::filesystem::create_directories(outputDir);
-    }
-    catch (...) {
-        return false;
-    }
-
-    const int sliceAxis = static_cast<int>(orientation); // 与 Orientation 枚举值保持一致
-    const int sliceCount = dims[sliceAxis];
-    const std::array<int, 2> sliceSize = m_impl->GetSliceSize(dims, orientation); // 当前导出图片宽高
-    const int width = sliceSize[0];
-    const int height = sliceSize[1];
-    const int digits = std::max(4, static_cast<int>(std::to_string(std::max(sliceCount - 1, 0)).size()));
-    const std::string orientationName = m_impl->GetOrientName(orientation);
-
-    for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
-        auto sliceImage = vtkSmartPointer<vtkImageData>::New();
-        sliceImage->SetDimensions(width, height, 1);
-        sliceImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-
-        auto* dst = static_cast<unsigned char*>(sliceImage->GetScalarPointer());
-        if (!dst) {
-            return false;
-        }
-		// 取裸指针，然后做eigen优化库运算，或者集合openmp 开启 avx2编译指令集加速，以及cuda做并行运算也可以
-		// 现在这里做的是最简单的三重循环，效率不高，后续可以优化
-        for (int py = 0; py < height; ++py) {
-            for (int px = 0; px < width; ++px) {
-                int x = 0;
-                int y = 0;
-                int z = 0;
-
-                if (orientation == Orientation::Top_down) {
-                    x = px;
-                    y = py;
-                    z = sliceIndex;
-                }
-                else if (orientation == Orientation::Front_back) {
-                    x = px;
-                    y = sliceIndex;
-                    z = py;
-                }
-                else {
-                    x = sliceIndex;
-                    y = px;
-                    z = py;
-                }
-                const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
-                dst[py * width + px] = m_impl->GetWindowGray(value, windowLevel);
-            }
-        }
-
-        std::ostringstream fileName;
-        fileName << orientationName << "_"
-            << std::setw(digits) << std::setfill('0') << sliceIndex
-            << ".png";
-
-        auto writer = vtkSmartPointer<vtkPNGWriter>::New();
-        const std::filesystem::path outputFilePath = outputDir / fileName.str();
-        const std::string vtkFileName = outputFilePath.u8string();
-        writer->SetFileName(vtkFileName.c_str());
-        writer->SetInputData(sliceImage);
-        writer->Write();
-        if (writer->GetErrorCode() != 0) {
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -737,27 +829,6 @@ bool TiffVolumeDataManager::Impl::GetExplicitValue(const std::array<float, 3>& v
     });
 }
 
-std::array<double, 3> TiffVolumeDataManager::Impl::GetRasOrigin(
-    const std::array<double, 3>& lpsOrigin,
-    const int dims[3],
-    const std::array<double, 3>& spacing) const
-{
-    std::array<double, 3> rasOrigin = {
-        -lpsOrigin[0],
-        -lpsOrigin[1],
-        lpsOrigin[2]
-    };
-
-    if (dims[0] > 0) {
-        rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
-    }
-    if (dims[1] > 0) {
-        rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
-    }
-
-    return rasOrigin;
-}
-
 bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     vtkImageData* source,
     vtkImageData* target) const
@@ -820,99 +891,5 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     }
 
     target->Modified();
-    return true;
-}
-
-bool BaseDataManager::ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
-{
-    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        if (!m_vtkImage) return false;
-        // 浅拷贝数据指针，避免在主线程引发锁竞争
-        imageCopy->ShallowCopy(m_vtkImage);
-    }
-
-    //  VTK 逆变换矩阵
-    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
-    worldToModelMatrix->Invert();
-
-    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
-    worldToModelTransform->SetMatrix(worldToModelMatrix);
-
-    // 利用 vtkImageReslice 进行核心插值运算
-    auto reslice = vtkSmartPointer<vtkImageReslice>::New();
-    reslice->SetInputData(imageCopy);
-    reslice->SetResliceTransform(worldToModelTransform);
-    reslice->SetInterpolationModeToLinear();
-
-    // VTK 会自动计算旋转后新的 Bounding Box，避免模型的边角被切割。
-    // 这会导致输出的数据维度（Dimensions）发生变化。
-    reslice->SetOutputDimensionality(3);
-
-    reslice->SetAutoCropOutput(true);
-    double range[2];
-    imageCopy->GetScalarRange(range);
-    reslice->SetBackgroundLevel(range[0]); // 取真实的最小标量值
-
-    try {
-        // 更新管线，触发计算
-        reslice->Update();
-    }
-    catch (...) {
-        std::cerr << "[Error] Exception during image reslicing/changing info." << std::endl;
-        return false;
-    }
-
-    auto outputImage = reslice->GetOutput();
-    if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
-        std::cerr << "[Error] Reslice produced an empty image!" << std::endl;
-        return false;
-    }
-
-    // 提取维度大小和内存指针
-    int newDims[3];
-    outputImage->GetDimensions(newDims);
-    float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
-
-    if (!outDataPtr) {
-        return false;
-    }
-
-    vtkIdType incs[3];
-    outputImage->GetIncrements(incs);
-
-    std::filesystem::path pathObj(filePath);
-    std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
-    // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
-    std::filesystem::path finalFileName = pathObj.stem();
-    finalFileName += std::string("_") + dimStr;
-    finalFileName += pathObj.extension();
-    std::filesystem::path finalPath = pathObj.parent_path() / finalFileName;
-
-    // 使用 C++ 标准库直接持久化写入裸 raw 数据
-    std::ofstream rawFile(finalPath, std::ios::binary);
-    if (!rawFile.is_open()) {
-        std::cerr << "[Error] Failed to open RAW file for writing: " << filePath << std::endl;
-        return false;
-    }
-
-	// 由于旋转后行尾可能有 Padding（根据 VTK 内部内存布局），不能直接写入整块内存。
-    size_t rowBytes = static_cast<size_t>(newDims[0]) * sizeof(float);
-    for (int z = 0; z < newDims[2]; ++z) {
-        for (int y = 0; y < newDims[1]; ++y) {
-            // 利用真实步长计算出当前行准确的内存起始地址
-            float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
-            // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
-            rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
-        }
-    }
-
-    rawFile.close();
-    std::cout << "[Export] Successfully saved transformed RAW to: " << finalPath.u8string() << "\n"
-        << "[Export] IMPORTANT: New Dimensions are "
-        << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
-
     return true;
 }

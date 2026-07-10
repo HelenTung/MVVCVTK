@@ -3,15 +3,20 @@
 // 2. 直接调用 backend router，避免窗口/交互器影响算法结果判断。
 // 3. 明确校验 mask 和 submit image 的一致性，防止后续优化只改一条输出链。
 
+#include "Algorithms/OrthogonalCropAlgorithm.h"
+#include "Algorithms/PlanarCropAlgorithm.h"
 #include "Routing/CropRouter.h"
 #include "DataManager.h"
+#include "Interaction/CropCameraState.h"
 #include "InteractionComputeService.h"
 
+#include <vtkCamera.h>
 #include <vtkDataArray.h>
 #include <vtkImageData.h>
 #include <vtkMath.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
+#include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
 
 #include <array>
@@ -251,6 +256,282 @@ void SetExpect(bool isExpected, const std::string& message, int& failureCount)
         std::cerr << message << '\n';
         ++failureCount;
     }
+}
+
+void StartCropFailure(int& failureCount)
+{
+    OrthogonalCropRequest request;
+    request.SetDataSource(OrthogonalCropDataSource::PolyData);
+    request.SetOperation(OrthogonalCropOperation::Preview);
+    request.SetGeometryType(CropShape::Plane);
+    request.SetRemovalMode(CropRemovalMode::RemoveInside);
+
+    CropRouter router;
+    const auto result = router.GetResult(request);
+    const auto& statistics = result.GetStatistics();
+
+    SetExpect(!result.GetSucceeded(), "missing polydata route should fail.", failureCount);
+    SetExpect(
+        result.GetResolvedDataSource() == OrthogonalCropDataSource::PolyData,
+        "failure result must preserve the PolyData source.",
+        failureCount);
+    SetExpect(
+        result.GetResolvedOperation() == OrthogonalCropOperation::Preview,
+        "failure result must preserve the Preview operation.",
+        failureCount);
+    SetExpect(
+        result.GetResolvedGeometryType() == CropShape::Plane,
+        "failure result must preserve the Plane geometry.",
+        failureCount);
+    SetExpect(
+        result.GetResolvedRemovalMode() == CropRemovalMode::RemoveInside,
+        "failure result must preserve the RemoveInside mode.",
+        failureCount);
+    SetExpect(
+        statistics.GetResolvedDataSource() == OrthogonalCropDataSource::PolyData,
+        "failure statistics must preserve the PolyData source.",
+        failureCount);
+    SetExpect(
+        statistics.GetResolvedOperation() == OrthogonalCropOperation::Preview,
+        "failure statistics must preserve the Preview operation.",
+        failureCount);
+    SetExpect(
+        statistics.GetResolvedGeometryType() == CropShape::Plane,
+        "failure statistics must preserve the Plane geometry.",
+        failureCount);
+    SetExpect(
+        statistics.GetResolvedRemovalMode() == CropRemovalMode::RemoveInside,
+        "failure statistics must preserve the RemoveInside mode.",
+        failureCount);
+    SetExpect(
+        result.GetFailureReason() == CropFailure::NoPolyData,
+        "failure result must report NoPolyData.",
+        failureCount);
+    SetExpect(
+        statistics.GetFailureReason() == CropFailure::NoPolyData,
+        "failure statistics must report NoPolyData.",
+        failureCount);
+    SetExpect(
+        result.GetFailureReason() == statistics.GetFailureReason(),
+        "failure result and statistics reasons must stay synchronized.",
+        failureCount);
+    SetExpect(!result.GetMessage().empty(), "failure result message must not be empty.", failureCount);
+    SetExpect(
+        result.GetMessage() == statistics.GetValidationMessage(),
+        "failure result and statistics messages must stay synchronized.",
+        failureCount);
+}
+
+void StartResultSync(int& failureCount)
+{
+    const auto resultExpect = [&failureCount](
+        const OrthogonalCropResult& result,
+        const OrthogonalCropRequest& request,
+        CropFailure failureReason,
+        const std::string& label) {
+        const auto& resultStatistics = result.GetStatistics();
+        SetExpect(
+            result.GetResolvedDataSource() == request.GetDataSource(),
+            label + " result data source must match the request.",
+            failureCount);
+        SetExpect(
+            result.GetResolvedOperation() == request.GetOperation(),
+            label + " result operation must match the request.",
+            failureCount);
+        SetExpect(
+            result.GetResolvedGeometryType() == request.GetGeometryType(),
+            label + " result geometry must match the request.",
+            failureCount);
+        SetExpect(
+            result.GetResolvedRemovalMode() == request.GetRemovalMode(),
+            label + " result removal mode must match the request.",
+            failureCount);
+        SetExpect(
+            resultStatistics.GetResolvedDataSource() == request.GetDataSource(),
+            label + " statistics data source must match the request.",
+            failureCount);
+        SetExpect(
+            resultStatistics.GetResolvedOperation() == request.GetOperation(),
+            label + " statistics operation must match the request.",
+            failureCount);
+        SetExpect(
+            resultStatistics.GetResolvedGeometryType() == request.GetGeometryType(),
+            label + " statistics geometry must match the request.",
+            failureCount);
+        SetExpect(
+            resultStatistics.GetResolvedRemovalMode() == request.GetRemovalMode(),
+            label + " statistics removal mode must match the request.",
+            failureCount);
+        SetExpect(
+            result.GetFailureReason() == failureReason,
+            label + " result failure reason must match the expected value.",
+            failureCount);
+        SetExpect(
+            resultStatistics.GetFailureReason() == failureReason,
+            label + " statistics failure reason must match the expected value.",
+            failureCount);
+        SetExpect(
+            result.GetMessage() == resultStatistics.GetValidationMessage(),
+            label + " result and statistics messages must stay synchronized.",
+            failureCount);
+        if (failureReason != CropFailure::None) {
+            SetExpect(
+                !result.GetMessage().empty(),
+                label + " failure message must not be empty.",
+                failureCount);
+        }
+    };
+    const auto requestFactory = [](
+        CropShape geometryType,
+        OrthogonalCropOperation operation,
+        OrthogonalCropDataSource dataSource) {
+        OrthogonalCropRequest request;
+        request.SetGeometryType(geometryType);
+        request.SetOperation(operation);
+        request.SetDataSource(dataSource);
+        request.SetRemovalMode(CropRemovalMode::KeepInside);
+        return request;
+    };
+
+    auto statistics = OrthogonalCropStatistics::GetResolved(
+        OrthogonalCropDataSource::PolyData,
+        OrthogonalCropOperation::Preview,
+        CropShape::Plane,
+        CropRemovalMode::RemoveInside);
+    statistics.SetFailureReason(CropFailure::NoPolyData);
+    statistics.SetValidationMessage("Synthetic missing polydata.");
+
+    const auto factoryResult = OrthogonalCropResult::GetResolved(statistics);
+    auto factoryRequest = requestFactory(
+        CropShape::Plane,
+        OrthogonalCropOperation::Preview,
+        OrthogonalCropDataSource::PolyData);
+    factoryRequest.SetRemovalMode(CropRemovalMode::RemoveInside);
+    resultExpect(factoryResult, factoryRequest, CropFailure::NoPolyData, "resolved factory");
+
+    OrthogonalCropResult setterResult;
+    setterResult.SetResolvedDataSource(factoryRequest.GetDataSource());
+    setterResult.SetResolvedOperation(factoryRequest.GetOperation());
+    setterResult.SetResolvedGeometryType(factoryRequest.GetGeometryType());
+    setterResult.SetResolvedRemovalMode(factoryRequest.GetRemovalMode());
+    setterResult.SetFailureReason(CropFailure::NoPolyData);
+    setterResult.SetMessage("Synthetic setter failure.");
+    resultExpect(setterResult, factoryRequest, CropFailure::NoPolyData, "result setters");
+
+    auto image = BuildExport();
+    double imageInputBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 }; // image input model 坐标 bounds
+    image->GetBounds(imageInputBounds);
+    const CropBoundsDouble6Array boxInputBounds = {
+        imageInputBounds[0], imageInputBounds[1],
+        imageInputBounds[2], imageInputBounds[3],
+        imageInputBounds[4], imageInputBounds[5]
+    };
+
+    // 1. 先验证 Box 三条合法公开算法路径，防止护栏误拒绝全部请求。
+    // 2. 再按 geometry / operation / dataSource 单轴构造非法 image route。
+    // 3. 最后覆盖 Box / Plane 两个 polydata overload 的非法 route。
+    auto boxPreviewRequest = requestFactory(
+        CropShape::Box,
+        OrthogonalCropOperation::Preview,
+        OrthogonalCropDataSource::VolumeData);
+    boxPreviewRequest.SetBoxBounds(boxInputBounds);
+    const auto boxPreviewResult = OrthogonalCropAlgorithm::GetResult(image, boxPreviewRequest);
+    SetExpect(boxPreviewResult.GetSucceeded(), "valid box preview route should succeed.", failureCount);
+    resultExpect(boxPreviewResult, boxPreviewRequest, CropFailure::None, "valid box preview");
+
+    auto boxSubmitRequest = requestFactory(
+        CropShape::Box,
+        OrthogonalCropOperation::Submit,
+        OrthogonalCropDataSource::ImageData);
+    boxSubmitRequest.SetBoxBounds(boxInputBounds);
+    boxSubmitRequest.SetRemovalMode(CropRemovalMode::RemoveInside);
+    const auto boxSubmitResult = OrthogonalCropAlgorithm::GetResult(image, boxSubmitRequest);
+    SetExpect(boxSubmitResult.GetSucceeded(), "valid box submit route should succeed.", failureCount);
+    SetExpect(boxSubmitResult.GetSubmitImage() != nullptr, "valid box submit must return an image.", failureCount);
+    SetExpect(boxSubmitResult.GetMaskImage() != nullptr, "valid box submit must return a mask.", failureCount);
+    resultExpect(boxSubmitResult, boxSubmitRequest, CropFailure::None, "valid box submit");
+
+    auto boxPolyRequest = requestFactory(
+        CropShape::Box,
+        OrthogonalCropOperation::Preview,
+        OrthogonalCropDataSource::PolyData);
+    boxPolyRequest.SetBoxBounds(boxInputBounds);
+    const auto boxPolyResult = OrthogonalCropAlgorithm::GetResult(
+        boxPreviewResult.GetOutlinePolyData(),
+        boxPolyRequest);
+    SetExpect(boxPolyResult.GetSucceeded(), "valid box polydata route should succeed.", failureCount);
+    resultExpect(boxPolyResult, boxPolyRequest, CropFailure::None, "valid box polydata preview");
+
+    struct DirectRouteCase {
+        const char* label = "";
+        bool isPlaneAlgo = false;
+        bool isPolyInput = false;
+        OrthogonalCropRequest request;
+    };
+    const std::array<DirectRouteCase, 8> routeCases = {{
+        { "box geometry mismatch", false, false, requestFactory(CropShape::Plane, OrthogonalCropOperation::Preview, OrthogonalCropDataSource::VolumeData) },
+        { "box operation mismatch", false, false, requestFactory(CropShape::Box, OrthogonalCropOperation::None, OrthogonalCropDataSource::VolumeData) },
+        { "box source mismatch", false, false, requestFactory(CropShape::Box, OrthogonalCropOperation::Submit, OrthogonalCropDataSource::VolumeData) },
+        { "box polydata mismatch", false, true, requestFactory(CropShape::Box, OrthogonalCropOperation::Submit, OrthogonalCropDataSource::PolyData) },
+        { "plane geometry mismatch", true, false, requestFactory(CropShape::Box, OrthogonalCropOperation::Preview, OrthogonalCropDataSource::VolumeData) },
+        { "plane operation mismatch", true, false, requestFactory(CropShape::Plane, OrthogonalCropOperation::None, OrthogonalCropDataSource::VolumeData) },
+        { "plane source mismatch", true, false, requestFactory(CropShape::Plane, OrthogonalCropOperation::Submit, OrthogonalCropDataSource::VolumeData) },
+        { "plane polydata mismatch", true, true, requestFactory(CropShape::Plane, OrthogonalCropOperation::Submit, OrthogonalCropDataSource::PolyData) }
+    }};
+
+    for (const auto& routeCase : routeCases) {
+        OrthogonalCropResult routeResult;
+        if (routeCase.isPlaneAlgo) {
+            routeResult = routeCase.isPolyInput
+                ? PlanarCropAlgorithm::GetResult(static_cast<vtkPolyData*>(nullptr), routeCase.request)
+                : PlanarCropAlgorithm::GetResult(image, routeCase.request);
+        }
+        else {
+            routeResult = routeCase.isPolyInput
+                ? OrthogonalCropAlgorithm::GetResult(static_cast<vtkPolyData*>(nullptr), routeCase.request)
+                : OrthogonalCropAlgorithm::GetResult(image, routeCase.request);
+        }
+
+        const std::string label = routeCase.label;
+        SetExpect(!routeResult.GetSucceeded(), label + " should fail.", failureCount);
+        resultExpect(routeResult, routeCase.request, CropFailure::NoBackend, label);
+    }
+}
+
+void StartCameraState(int& failureCount)
+{
+    constexpr double savedNear = 0.125;
+    constexpr double savedFar = 987.5;
+    constexpr double changedNear = 12.0;
+    constexpr double changedFar = 24.0;
+
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto camera = vtkSmartPointer<vtkCamera>::New();
+    renderer->SetActiveCamera(camera);
+    camera->SetClippingRange(savedNear, savedFar);
+
+    CropCameraState cameraState;
+    cameraState.SetCameraState(renderer);
+    SetExpect(cameraState.GetSaved(), "camera state should report a saved snapshot.", failureCount);
+
+    camera->SetClippingRange(4.0, 8.0);
+    cameraState.ResetCamera(renderer);
+
+    double restoredRange[2] = { 0.0, 0.0 };
+    camera->GetClippingRange(restoredRange);
+    SetExpect(
+        restoredRange[0] == savedNear && restoredRange[1] == savedFar,
+        "camera reset must restore the exact clipping range.",
+        failureCount);
+    SetExpect(!cameraState.GetSaved(), "camera reset must consume the saved snapshot.", failureCount);
+
+    camera->SetClippingRange(changedNear, changedFar);
+    cameraState.ResetCamera(renderer);
+    camera->GetClippingRange(restoredRange);
+    SetExpect(
+        restoredRange[0] == changedNear && restoredRange[1] == changedFar,
+        "camera reset without a saved snapshot must leave the clipping range unchanged.",
+        failureCount);
 }
 
 void SetResultExpect(
@@ -697,6 +978,9 @@ void StartDataExport(int& failureCount)
 int main()
 {
     int failureCount = 0;
+    StartCropFailure(failureCount);
+    StartResultSync(failureCount);
+    StartCameraState(failureCount);
     StartOblique(failureCount);
     StartDeepCases(failureCount);
     StartBench(failureCount);

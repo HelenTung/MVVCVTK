@@ -42,13 +42,13 @@ public:
     // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
     static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
 
-    // image / volume 共用 image 输入入口；算法只补 cropData、产物和诊断。
+    // image 输入入口只接受 Box + Preview + VolumeData 或 Box + Submit + ImageData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // polydata 输入入口只处理 router 放行的 Box + Preview + PolyData 请求。
+    // polydata 输入入口只接受 Box + Preview + PolyData 请求。
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request);

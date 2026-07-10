@@ -11,26 +11,12 @@
 #include <vtkCommand.h>
 
 #include <algorithm>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
-
-enum class HotkeyAction {
-    None,
-    Model,
-    ExportVolume,
-    ExportSlices,
-    CropBox,
-    CropPlane,
-    GapSwitch,
-    Exit,
-    KeepPreview,
-    RemovePreview,
-    Submit,
-    SubmitBlock
-};
 
 class HostCommandRouter::Impl final {
 public:
@@ -43,6 +29,21 @@ public:
     bool DispatchCommand(HostCommandRouterRequest request) const;
 
 private:
+    enum class HotkeyAction {
+        None,
+        Model,
+        ExportVolume,
+        ExportSlices,
+        CropBox,
+        CropPlane,
+        GapSwitch,
+        Exit,
+        KeepPreview,
+        RemovePreview,
+        Submit,
+        SubmitBlock
+    };
+
     bool DispatchCrop(
         HostCommandKind command,
         const HostCropViewRequest& request,
@@ -53,7 +54,23 @@ private:
         const HostGapViewRequest& request) const;
     bool DispatchGap(HostCommandKind command) const;
     bool DispatchFeatureExit() const;
-    InteractionResult SendHotkey(
+    bool LoadVolume(
+        const InitialVolumeLoadConfig& initialVolume,
+        std::function<void(bool isSuccess)> loadComplete) const;
+    bool ExportData(
+        const HostDataExportConfig& dataExportConfig,
+        std::function<void(bool isSuccess)> onComplete) const;
+    bool SetViewConfig(const HostViewConfig& viewConfig) const;
+    bool GetHotkeyExitReady(
+        const std::weak_ptr<StdRenderContext>& context,
+        bool hasFeature,
+        bool hasContext) const;
+    bool AttachHotkeys(
+        const HostContextInput& renderContextInput,
+        const HostDataExportConfig& dataExportConfig,
+        const HostCommandInputConfig& commandInput,
+        const HostHotkeyBindings& hotkeys) const;
+    InteractionResult OnHotkey(
         const InteractionEvent& event,
         const std::weak_ptr<StdRenderContext>& context,
         bool hasFeature,
@@ -66,28 +83,6 @@ private:
         bool& isPlaneDown,
         bool& isGapDown,
         bool& isSubmitDown) const;
-
-    bool LoadVolume(
-        const InitialVolumeLoadConfig& initialVolume,
-        std::function<void(bool isSuccess)> loadComplete) const;
-    bool ExportData(
-        const HostDataExportConfig& dataExportConfig,
-        std::function<void(bool isSuccess)> onComplete) const;
-    bool SetViewConfig(const HostViewConfig& viewConfig) const;
-    bool AttachHotkeys(
-        const HostContextInput& renderContextInput,
-        const HostDataExportConfig& dataExportConfig,
-        const HostCommandInputConfig& commandInput,
-        const HostHotkeyBindings& hotkeys) const;
-    void SetViewAdded(
-        std::vector<const HostRenderViewRuntime*>& views,
-        const HostRenderViewRuntime* view) const;
-    void SetViewsAdded(
-        std::vector<const HostRenderViewRuntime*>& target,
-        const std::vector<const HostRenderViewRuntime*>& source) const;
-    bool GetViewFound(
-        const std::vector<const HostRenderViewRuntime*>& views,
-        const HostRenderViewRuntime* view) const;
     bool SendHotkeyPress(
         HotkeyAction action,
         const std::weak_ptr<StdRenderContext>& context,
@@ -106,45 +101,24 @@ private:
         bool& isPlaneDown,
         bool& isGapDown,
         bool& isSubmitDown) const;
-    bool SendHotkeyFeature(
+    bool SendHotkeyCommand(
         HotkeyAction action,
-        const HostCommandInputConfig& commandInput) const;
-    HostCommandKind GetHotkeyKind(HotkeyAction action) const;
-    bool ExportHotkeyVolume(const HostDataExportConfig& dataExportConfig) const;
-    bool ExportHotkeySlices(
-        const HostDataExportConfig& dataExportConfig,
         bool hasContext,
-        HostRenderViewRole role) const;
-    bool ExitHotkeyMode(
-        const std::weak_ptr<StdRenderContext>& context,
-        bool hasFeature,
-        bool hasContext) const;
+        HostRenderViewRole role,
+        const HostDataExportConfig& dataExportConfig,
+        const HostCommandInputConfig& commandInput) const;
     HotkeyAction GetHotkeyAction(
         const InteractionEvent& event,
         bool hasFeature,
         bool hasContext,
         const HostHotkeyBindings& hotkeys) const;
-    bool GetHotkeyUse(
-        HotkeyAction action,
-        const std::weak_ptr<StdRenderContext>& context,
-        bool hasFeature,
-        bool hasContext) const;
-    bool GetExitReady(
-        const std::weak_ptr<StdRenderContext>& context,
-        bool hasFeature,
-        bool hasContext) const;
-    bool GetModelOn(const std::weak_ptr<StdRenderContext>& context) const;
-    bool SwitchModel(const std::weak_ptr<StdRenderContext>& context) const;
-
-    char GetUpperAscii(char value) const;
+    bool AttachViews(
+        std::vector<const HostRenderViewRuntime*>& target,
+        const std::vector<const HostRenderViewRuntime*>& source) const;
+    bool GetViewFound(
+        const std::vector<const HostRenderViewRuntime*>& views,
+        const HostRenderViewRuntime* view) const;
     bool GetCharKeyMatched(const InteractionEvent& event, char key) const;
-    bool GetKeySymMatched(const InteractionEvent& event, const std::string& keySym) const;
-    bool GetToolOn(
-        const std::shared_ptr<StdRenderContext>& context,
-        ToolMode mode) const;
-    bool ExitTool(
-        const std::shared_ptr<StdRenderContext>& context,
-        ToolMode mode) const;
 
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
@@ -164,19 +138,12 @@ HostCommandRouter::Impl::Impl(
 
 HostCommandRouter::Impl::~Impl()
 {
+    // 输入 handler 捕获 Impl 地址，必须在 Impl 销毁前解除所有仍存活的回调。
     for (const auto& context : m_hotkeyContexts) {
         if (const auto lockedContext = context.lock()) {
             lockedContext->ClearInputHandler();
         }
     }
-    m_hotkeyContexts.clear();
-}
-
-char HostCommandRouter::Impl::GetUpperAscii(char value) const
-{
-    return (value >= 'a' && value <= 'z')
-        ? static_cast<char>(value - 'a' + 'A')
-        : value;
 }
 
 bool HostCommandRouter::Impl::GetCharKeyMatched(
@@ -187,39 +154,15 @@ bool HostCommandRouter::Impl::GetCharKeyMatched(
         return false;
     }
 
-    const char upperKey = GetUpperAscii(key);
+    const char upperKey = (key >= 'a' && key <= 'z')
+        ? static_cast<char>(key - 'a' + 'A')
+        : key;
     const std::string keySymbol(1, key);
     const std::string upperKeySymbol(1, upperKey);
     return event.keyCode == key
         || event.keyCode == upperKey
         || event.keySym == keySymbol
         || event.keySym == upperKeySymbol;
-}
-
-bool HostCommandRouter::Impl::GetKeySymMatched(
-    const InteractionEvent& event,
-    const std::string& keySym) const
-{
-    return !keySym.empty() && event.keySym == keySym;
-}
-
-bool HostCommandRouter::Impl::GetToolOn(
-    const std::shared_ptr<StdRenderContext>& context,
-    ToolMode mode) const
-{
-    return context && context->GetToolMode() == mode;
-}
-
-bool HostCommandRouter::Impl::ExitTool(
-    const std::shared_ptr<StdRenderContext>& context,
-    ToolMode mode) const
-{
-    if (!GetToolOn(context, mode)) {
-        return false;
-    }
-
-    context->SetToolMode(ToolMode::Navigation);
-    return true;
 }
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) const
@@ -455,13 +398,10 @@ bool HostCommandRouter::Impl::ExportData(
         return false;
     }
 
-    const HostRenderViewRuntime* exportView = nullptr;
-    if (!dataExportConfig.sliceSourceViewId.empty()) {
-        exportView = m_renderViews->GetViewById(dataExportConfig.sliceSourceViewId);
-    }
-    else if (dataExportConfig.isSliceRoleUsed) {
-        exportView = m_renderViews->GetFirstViewByRole(dataExportConfig.sliceSourceRole);
-    }
+    const auto* exportView = m_renderViews->GetViewBySelector(
+        dataExportConfig.sliceSourceViewId,
+        dataExportConfig.isSliceRoleUsed,
+        dataExportConfig.sliceSourceRole);
 
     if (!exportView || !exportView->service) {
         std::cerr << "[Host] Slice image export skipped: source render view is missing." << std::endl;
@@ -500,13 +440,10 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
         return false;
     }
 
-    const HostRenderViewRuntime* targetView = nullptr;
-    if (!viewConfig.viewId.empty()) {
-        targetView = m_renderViews->GetViewById(viewConfig.viewId);
-    }
-    else if (viewConfig.isViewRoleUsed) {
-        targetView = m_renderViews->GetFirstViewByRole(viewConfig.viewRole);
-    }
+    const auto* targetView = m_renderViews->GetViewBySelector(
+        viewConfig.viewId,
+        viewConfig.isViewRoleUsed,
+        viewConfig.viewRole);
 
     if (!targetView || !targetView->service) {
         std::cerr << "[Host] View config skipped: target render view is missing." << std::endl;
@@ -546,7 +483,7 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
     return true;
 }
 
-InteractionResult HostCommandRouter::Impl::SendHotkey(
+InteractionResult HostCommandRouter::Impl::OnHotkey(
     const InteractionEvent& event,
     const std::weak_ptr<StdRenderContext>& context,
     bool hasFeature,
@@ -565,13 +502,15 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
         hasFeature,
         hasContext,
         hotkeys);
-    const bool isManaged = GetHotkeyUse(action, context, hasFeature, hasContext);
+    const bool isManaged = action != HotkeyAction::None
+        && (action != HotkeyAction::Exit
+            || GetHotkeyExitReady(context, hasFeature, hasContext));
 
     if (event.vtkEventId == vtkCommand::CharEvent && isManaged) {
         return { true, true };
     }
 
-    if (event.vtkEventId == vtkCommand::KeyPressEvent) {
+    if (event.vtkEventId == vtkCommand::KeyPressEvent && isManaged) {
         if (SendHotkeyPress(
             action,
             context,
@@ -586,10 +525,7 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
             isSubmitDown)) {
             return { true, true };
         }
-
-        if (isManaged) {
-            return { true, true };
-        }
+        return { true, true };
     }
 
     if (event.vtkEventId == vtkCommand::KeyReleaseEvent) {
@@ -606,7 +542,7 @@ InteractionResult HostCommandRouter::Impl::SendHotkey(
     return {};
 }
 
-HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
+HostCommandRouter::Impl::HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
     const InteractionEvent& event,
     bool hasFeature,
     bool hasContext,
@@ -630,7 +566,7 @@ HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
     if (hasFeature && GetCharKeyMatched(event, hotkeys.gapSwitchKey)) {
         return HotkeyAction::GapSwitch;
     }
-    if (GetKeySymMatched(event, hotkeys.exitKeySym)) {
+    if (!hotkeys.exitKeySym.empty() && event.keySym == hotkeys.exitKeySym) {
         return HotkeyAction::Exit;
     }
     if (hasFeature && GetCharKeyMatched(event, hotkeys.keepInsidePreviewKey)) {
@@ -643,21 +579,6 @@ HotkeyAction HostCommandRouter::Impl::GetHotkeyAction(
         return event.isCtrlDown ? HotkeyAction::Submit : HotkeyAction::SubmitBlock;
     }
     return HotkeyAction::None;
-}
-
-bool HostCommandRouter::Impl::GetHotkeyUse(
-    HotkeyAction action,
-    const std::weak_ptr<StdRenderContext>& context,
-    bool hasFeature,
-    bool hasContext) const
-{
-    if (action == HotkeyAction::None) {
-        return false;
-    }
-    if (action == HotkeyAction::Exit) {
-        return GetExitReady(context, hasFeature, hasContext);
-    }
-    return true;
 }
 
 bool HostCommandRouter::Impl::SendHotkeyPress(
@@ -674,44 +595,96 @@ bool HostCommandRouter::Impl::SendHotkeyPress(
     bool& isSubmitDown) const
 {
     switch (action) {
-    case HotkeyAction::Model:
-        return SwitchModel(context);
+    case HotkeyAction::Model: {
+        auto renderContext = context.lock();
+        if (!renderContext) {
+            return false;
+        }
+        renderContext->SetToolMode(
+            renderContext->GetToolMode() == ToolMode::ModelTransform
+                ? ToolMode::Navigation
+                : ToolMode::ModelTransform);
+        return true;
+    }
     case HotkeyAction::ExportVolume:
-        return ExportHotkeyVolume(dataExportConfig);
     case HotkeyAction::ExportSlices:
-        return ExportHotkeySlices(dataExportConfig, hasContext, role);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::CropBox:
         if (isCropDown) {
             return false;
         }
         isCropDown = true;
-        return SendHotkeyFeature(action, commandInput);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::CropPlane:
         if (isPlaneDown) {
             return false;
         }
         isPlaneDown = true;
-        return SendHotkeyFeature(action, commandInput);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::GapSwitch:
         if (isGapDown) {
             return false;
         }
         isGapDown = true;
-        return SendHotkeyFeature(action, commandInput);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::Exit:
-        if (!GetExitReady(context, hasFeature, hasContext)) {
+        if (hasFeature && SendHotkeyCommand(
+            HotkeyAction::Exit,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput)) {
+            return true;
+        }
+        if (!hasContext) {
             return false;
         }
-        return ExitHotkeyMode(context, hasFeature, hasContext);
+        if (auto renderContext = context.lock()) {
+            if (renderContext->GetToolMode() == ToolMode::ModelTransform) {
+                renderContext->SetToolMode(ToolMode::Navigation);
+                return true;
+            }
+        }
+        return false;
     case HotkeyAction::KeepPreview:
     case HotkeyAction::RemovePreview:
-        return SendHotkeyFeature(action, commandInput);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::Submit:
         if (isSubmitDown) {
             return false;
         }
         isSubmitDown = true;
-        return SendHotkeyFeature(action, commandInput);
+        return SendHotkeyCommand(
+            action,
+            hasContext,
+            role,
+            dataExportConfig,
+            commandInput);
     case HotkeyAction::SubmitBlock:
         return true;
     case HotkeyAction::None:
@@ -754,111 +727,7 @@ bool HostCommandRouter::Impl::SetHotkeyRelease(
     }
 }
 
-bool HostCommandRouter::Impl::GetModelOn(const std::weak_ptr<StdRenderContext>& context) const
-{
-    return GetToolOn(context.lock(), ToolMode::ModelTransform);
-}
-
-bool HostCommandRouter::Impl::SwitchModel(const std::weak_ptr<StdRenderContext>& context) const
-{
-    auto renderContext = context.lock();
-    if (!renderContext) {
-        return false;
-    }
-
-    renderContext->SetToolMode(renderContext->GetToolMode() == ToolMode::ModelTransform
-        ? ToolMode::Navigation
-        : ToolMode::ModelTransform);
-    return true;
-}
-
-HostCommandKind HostCommandRouter::Impl::GetHotkeyKind(HotkeyAction action) const
-{
-    switch (action) {
-    case HotkeyAction::CropBox:
-        return HostCommandKind::CropBox;
-    case HotkeyAction::CropPlane:
-        return HostCommandKind::CropPlane;
-    case HotkeyAction::GapSwitch:
-        return HostCommandKind::GapSwitch;
-    case HotkeyAction::KeepPreview:
-    case HotkeyAction::RemovePreview:
-        return HostCommandKind::CropPreview;
-    case HotkeyAction::Submit:
-        return HostCommandKind::CropApply;
-    case HotkeyAction::None:
-    case HotkeyAction::Model:
-    case HotkeyAction::ExportVolume:
-    case HotkeyAction::ExportSlices:
-    case HotkeyAction::Exit:
-    case HotkeyAction::SubmitBlock:
-    default:
-        return HostCommandKind::None;
-    }
-}
-
-bool HostCommandRouter::Impl::ExportHotkeyVolume(const HostDataExportConfig& dataExportConfig) const
-{
-    auto exportConfig = dataExportConfig;
-    exportConfig.hasVolumeExport = true;
-    exportConfig.hasSliceExport = false;
-    return ExportData(exportConfig, nullptr);
-}
-
-bool HostCommandRouter::Impl::ExportHotkeySlices(
-    const HostDataExportConfig& dataExportConfig,
-    bool hasContext,
-    HostRenderViewRole role) const
-{
-    if (!hasContext) {
-        return false;
-    }
-
-    auto exportConfig = dataExportConfig;
-    exportConfig.hasVolumeExport = false;
-    exportConfig.hasSliceExport = true;
-    if (exportConfig.sliceSourceViewId.empty()
-        && !exportConfig.isSliceRoleUsed) {
-        exportConfig.isSliceRoleUsed = true;
-        exportConfig.sliceSourceRole = role;
-    }
-    return ExportData(exportConfig, nullptr);
-}
-
-bool HostCommandRouter::Impl::SendHotkeyFeature(
-    HotkeyAction action,
-    const HostCommandInputConfig& commandInput) const
-{
-    const HostCommandKind command = GetHotkeyKind(action);
-    if (command == HostCommandKind::None) {
-        return false;
-    }
-
-    switch (action) {
-    case HotkeyAction::CropBox:
-        return DispatchCrop(command, commandInput.cropViewRequest);
-    case HotkeyAction::CropPlane:
-        return DispatchCrop(command, commandInput.cropViewRequest);
-    case HotkeyAction::GapSwitch:
-        return DispatchGap(command, commandInput.gapViewRequest);
-    case HotkeyAction::KeepPreview:
-        return DispatchCrop(
-            command,
-            commandInput.cropViewRequest,
-            HostCropPreviewMode::KeepInside);
-    case HotkeyAction::RemovePreview:
-        return DispatchCrop(
-            command,
-            commandInput.cropViewRequest,
-            HostCropPreviewMode::RemoveInside);
-    case HotkeyAction::Submit:
-        return DispatchCrop(command, commandInput.cropViewRequest);
-    default:
-        return false;
-    }
-}
-
-bool HostCommandRouter::Impl::GetExitReady(
+bool HostCommandRouter::Impl::GetHotkeyExitReady(
     const std::weak_ptr<StdRenderContext>& context,
     bool hasFeature,
     bool hasContext) const
@@ -870,26 +739,82 @@ bool HostCommandRouter::Impl::GetExitReady(
                 || bindings->GetGapView();
         }
     }
-    return hasFeatureActive || (hasContext && GetModelOn(context));
+    const auto renderContext = hasContext ? context.lock() : nullptr;
+    const bool hasModelActive = renderContext
+        && renderContext->GetToolMode() == ToolMode::ModelTransform;
+    return hasFeatureActive || hasModelActive;
 }
 
-bool HostCommandRouter::Impl::ExitHotkeyMode(
-    const std::weak_ptr<StdRenderContext>& context,
-    bool hasFeature,
-    bool hasContext) const
+bool HostCommandRouter::Impl::SendHotkeyCommand(
+    HotkeyAction action,
+    bool hasContext,
+    HostRenderViewRole role,
+    const HostDataExportConfig& dataExportConfig,
+    const HostCommandInputConfig& commandInput) const
 {
-    if (hasFeature) {
-        if (DispatchFeatureExit()) {
-            return true;
+    HostCommandRouterRequest request;
+
+    switch (action) {
+    case HotkeyAction::ExportVolume:
+        request.command = HostCommandKind::Export;
+        request.dataExportConfig = dataExportConfig;
+        request.dataExportConfig.hasVolumeExport = true;
+        request.dataExportConfig.hasSliceExport = false;
+        break;
+    case HotkeyAction::ExportSlices:
+        if (!hasContext) {
+            break;
         }
+        request.command = HostCommandKind::Export;
+        request.dataExportConfig = dataExportConfig;
+        request.dataExportConfig.hasVolumeExport = false;
+        request.dataExportConfig.hasSliceExport = true;
+        if (request.dataExportConfig.sliceSourceViewId.empty()
+            && !request.dataExportConfig.isSliceRoleUsed) {
+            request.dataExportConfig.isSliceRoleUsed = true;
+            request.dataExportConfig.sliceSourceRole = role;
+        }
+        break;
+    case HotkeyAction::CropBox:
+        request.command = HostCommandKind::CropBox;
+        request.cropViewRequest = commandInput.cropViewRequest;
+        break;
+    case HotkeyAction::CropPlane:
+        request.command = HostCommandKind::CropPlane;
+        request.cropViewRequest = commandInput.cropViewRequest;
+        break;
+    case HotkeyAction::GapSwitch:
+        request.command = HostCommandKind::GapSwitch;
+        request.gapViewRequest = commandInput.gapViewRequest;
+        break;
+    case HotkeyAction::KeepPreview:
+        request.command = HostCommandKind::CropPreview;
+        request.cropViewRequest = commandInput.cropViewRequest;
+        request.cropPreviewMode = HostCropPreviewMode::KeepInside;
+        break;
+    case HotkeyAction::RemovePreview:
+        request.command = HostCommandKind::CropPreview;
+        request.cropViewRequest = commandInput.cropViewRequest;
+        request.cropPreviewMode = HostCropPreviewMode::RemoveInside;
+        break;
+    case HotkeyAction::Submit:
+        request.command = HostCommandKind::CropApply;
+        request.cropViewRequest = commandInput.cropViewRequest;
+        break;
+    case HotkeyAction::Exit:
+        request.command = HostCommandKind::FeatureExit;
+        break;
+    case HotkeyAction::None:
+    case HotkeyAction::Model:
+    case HotkeyAction::SubmitBlock:
+    default:
+        break;
     }
-    if (hasContext && GetModelOn(context)) {
-        ExitTool(
-            context.lock(),
-            ToolMode::ModelTransform);
-        return true;
+
+    if (request.command == HostCommandKind::None) {
+        return false;
     }
-    return false;
+    return DispatchCommand(std::move(request));
 }
 
 bool HostCommandRouter::Impl::AttachHotkeys(
@@ -927,9 +852,9 @@ bool HostCommandRouter::Impl::AttachHotkeys(
     }
 
     std::vector<const HostRenderViewRuntime*> keyTargetViews;
-    SetViewsAdded(keyTargetViews, featureTargetViews);
-    SetViewsAdded(keyTargetViews, renderContextTargetViews);
-    if (keyTargetViews.empty()) {
+    const bool hasFeatureView = AttachViews(keyTargetViews, featureTargetViews);
+    const bool hasContextView = AttachViews(keyTargetViews, renderContextTargetViews);
+    if (!hasFeatureView && !hasContextView) {
         return false;
     }
 
@@ -943,10 +868,6 @@ bool HostCommandRouter::Impl::AttachHotkeys(
         const bool hasFeature = GetViewFound(featureTargetViews, view);
         const bool hasContext = GetViewFound(renderContextTargetViews, view);
         const HostRenderViewRole role = view->config.role;
-        auto isCropDown = std::make_shared<bool>(false);
-        auto isPlaneDown = std::make_shared<bool>(false);
-        auto isGapDown = std::make_shared<bool>(false);
-        auto isSubmitDown = std::make_shared<bool>(false);
         view->context->SetInputHandler(
             [
                 impl = this,
@@ -957,12 +878,12 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                 dataExportConfig,
                 commandInput,
                 hotkeys,
-                isCropDown,
-                isPlaneDown,
-                isGapDown,
-                isSubmitDown
-            ](const InteractionEvent& event) {
-                return impl->SendHotkey(
+                isCropDown = false,
+                isPlaneDown = false,
+                isGapDown = false,
+                isSubmitDown = false
+            ](const InteractionEvent& event) mutable {
+                return impl->OnHotkey(
                     event,
                     context,
                     hasFeature,
@@ -971,10 +892,10 @@ bool HostCommandRouter::Impl::AttachHotkeys(
                     dataExportConfig,
                     commandInput,
                     hotkeys,
-                    *isCropDown,
-                    *isPlaneDown,
-                    *isGapDown,
-                    *isSubmitDown);
+                    isCropDown,
+                    isPlaneDown,
+                    isGapDown,
+                    isSubmitDown);
             },
             std::vector<unsigned long>{
                 vtkCommand::KeyPressEvent,
@@ -985,26 +906,19 @@ bool HostCommandRouter::Impl::AttachHotkeys(
     return true;
 }
 
-void HostCommandRouter::Impl::SetViewAdded(
-    std::vector<const HostRenderViewRuntime*>& views,
-    const HostRenderViewRuntime* view) const
-{
-    if (!view) {
-        return;
-    }
-    const auto it = std::find(views.begin(), views.end(), view);
-    if (it == views.end()) {
-        views.push_back(view);
-    }
-}
-
-void HostCommandRouter::Impl::SetViewsAdded(
+bool HostCommandRouter::Impl::AttachViews(
     std::vector<const HostRenderViewRuntime*>& target,
     const std::vector<const HostRenderViewRuntime*>& source) const
 {
+    bool hasAttachedView = false;
     for (const auto* view : source) {
-        SetViewAdded(target, view);
+        if (!view || GetViewFound(target, view)) {
+            continue;
+        }
+        target.push_back(view);
+        hasAttachedView = true;
     }
+    return hasAttachedView;
 }
 
 bool HostCommandRouter::Impl::GetViewFound(

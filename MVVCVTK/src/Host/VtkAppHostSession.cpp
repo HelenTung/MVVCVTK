@@ -36,7 +36,6 @@ public:
     HostCommandRouterRequest BuildRequest(HostCommandKind command) const;
     bool SendCommand(HostCommandRouterRequest request);
 
-    char GetUpperAscii(char value) const;
     std::string BuildKeyLabel(char key) const;
     std::string BuildControlKeyLabel(char key) const;
     std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const;
@@ -66,19 +65,15 @@ bool VtkAppHostSession::Impl::SendCommand(HostCommandRouterRequest request)
     return commandRouter->DispatchCommand(std::move(request));
 }
 
-char VtkAppHostSession::Impl::GetUpperAscii(char value) const
-{
-    return (value >= 'a' && value <= 'z')
-        ? static_cast<char>(value - 'a' + 'A')
-        : value;
-}
-
 std::string VtkAppHostSession::Impl::BuildKeyLabel(char key) const
 {
     if (key == 0) {
         return "<unassigned>";
     }
-    return std::string(1, GetUpperAscii(key));
+    const char labelKey = (key >= 'a' && key <= 'z')
+        ? static_cast<char>(key - 'a' + 'A')
+        : key;
+    return std::string(1, labelKey);
 }
 
 std::string VtkAppHostSession::Impl::BuildControlKeyLabel(char key) const

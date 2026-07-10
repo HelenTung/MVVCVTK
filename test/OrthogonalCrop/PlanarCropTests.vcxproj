@@ -73,7 +73,7 @@
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
-    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib</VtkLibraries>
+    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkRenderingCore-9.4.lib</VtkLibraries>
     <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -151,6 +151,7 @@
   <ItemGroup>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Interaction\CropCameraState.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h" />
@@ -162,6 +163,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropCameraState.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />

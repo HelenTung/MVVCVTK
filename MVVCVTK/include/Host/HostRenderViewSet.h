@@ -27,7 +27,7 @@ struct HostRenderViewRuntime {
 // 2. HostFeatureBindings 只通过 id/role 查询目标窗口，不知道默认五窗口布局。
 // 3. 外部 Qt / 上位机只拿 endpoint，不直接碰 service。
 // 这样它和 StdRenderContext 不重叠：StdRenderContext 负责单窗口渲染对象，HostRenderViewSet 负责多窗口集合语义。
-// 输入事件不在这里安装；独立 VTK 调试热键由 HostCommandRouter 私有 observer 翻译成 host request。
+// 输入事件不在这里安装；独立 VTK 调试热键由 HostCommandRouter::Impl 安装 input handler 并翻译成 host request。
 class HostRenderViewSet {
 public:
     HostRenderViewSet();
@@ -48,6 +48,11 @@ public:
     const HostRenderViewRuntime* GetViewById(const std::string& id) const;
     // role 查找用于“第一个 Primary3D / 切片视图”这类语义选择，不承诺固定窗口序号。
     const HostRenderViewRuntime* GetFirstViewByRole(HostRenderViewRole role) const;
+    // 单视图 selector 统一使用“id 优先，否则按 role fallback”，避免各调用点手写同一判断。
+    const HostRenderViewRuntime* GetViewBySelector(
+        const std::string& id,
+        bool isRoleUsed,
+        HostRenderViewRole role) const;
     // 初始加载和裁切默认参考需要一个可解释的主视图；没有 Primary3D 时按 3D role 再退到首视图。
     const HostRenderViewRuntime* GetPrimaryView() const;
     // standalone VTK 只能有一个阻塞事件循环承载点；Qt host 不调用 Start，因此不受该选择约束。

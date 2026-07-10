@@ -18,6 +18,10 @@ public:
     const std::vector<HostRenderViewRuntime>& GetViews() const;
     const HostRenderViewRuntime* GetViewById(const std::string& id) const;
     const HostRenderViewRuntime* GetFirstViewByRole(HostRenderViewRole role) const;
+    const HostRenderViewRuntime* GetViewBySelector(
+        const std::string& id,
+        bool isRoleUsed,
+        HostRenderViewRole role) const;
     const HostRenderViewRuntime* GetPrimaryView() const;
     const HostRenderViewRuntime* GetStandaloneStartView() const;
     std::vector<const HostRenderViewRuntime*> GetViewsByIdsAndRoles(
@@ -42,13 +46,6 @@ private:
         std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> sharedState,
         std::shared_ptr<IStateEventSource> stateEventSource) const;
-    bool GetIdIncluded(
-        const std::vector<std::string>& selectedIds,
-        const std::string& id) const;
-    bool GetRoleIncluded(
-        const std::vector<HostRenderViewRole>& selectedRoles,
-        HostRenderViewRole role) const;
-
     std::vector<HostRenderViewRuntime> m_views;
 };
 
@@ -87,20 +84,6 @@ std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> HostRe
     }
 
     return std::make_pair(service, context);
-}
-
-bool HostRenderViewSet::Impl::GetIdIncluded(
-    const std::vector<std::string>& selectedIds,
-    const std::string& id) const
-{
-    return std::find(selectedIds.begin(), selectedIds.end(), id) != selectedIds.end();
-}
-
-bool HostRenderViewSet::Impl::GetRoleIncluded(
-    const std::vector<HostRenderViewRole>& selectedRoles,
-    HostRenderViewRole role) const
-{
-    return std::find(selectedRoles.begin(), selectedRoles.end(), role) != selectedRoles.end();
 }
 
 void HostRenderViewSet::Impl::Build(
@@ -157,6 +140,20 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetFirstViewByRole(HostRen
     return nullptr;
 }
 
+const HostRenderViewRuntime* HostRenderViewSet::Impl::GetViewBySelector(
+    const std::string& id,
+    bool isRoleUsed,
+    HostRenderViewRole role) const
+{
+    if (!id.empty()) {
+        return GetViewById(id);
+    }
+    if (isRoleUsed) {
+        return GetFirstViewByRole(role);
+    }
+    return nullptr;
+}
+
 const HostRenderViewRuntime* HostRenderViewSet::Impl::GetPrimaryView() const
 {
     // 先选明确 Primary3D，再退到任意 3D 视图；非标准窗口拓扑也要给裁切和初始加载一个可解释的参考视图。
@@ -193,8 +190,10 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetViewsByIds
 
     // 空 ids/roles 表示宿主没有声明作用域，返回空而不是全选；这样 feature 激活不会因为漏配目标而接管所有窗口。
     for (const auto& view : m_views) {
-        const bool isIdSelected = !ids.empty() && GetIdIncluded(ids, view.config.id);
-        const bool isRoleSelected = !roles.empty() && GetRoleIncluded(roles, view.config.role);
+        const bool isIdSelected = !ids.empty()
+            && std::find(ids.begin(), ids.end(), view.config.id) != ids.end();
+        const bool isRoleSelected = !roles.empty()
+            && std::find(roles.begin(), roles.end(), view.config.role) != roles.end();
         if (isIdSelected || isRoleSelected) {
             selectedViews.push_back(&view);
         }
@@ -349,6 +348,14 @@ const HostRenderViewRuntime* HostRenderViewSet::GetViewById(const std::string& i
 const HostRenderViewRuntime* HostRenderViewSet::GetFirstViewByRole(HostRenderViewRole role) const
 {
     return m_impl->GetFirstViewByRole(role);
+}
+
+const HostRenderViewRuntime* HostRenderViewSet::GetViewBySelector(
+    const std::string& id,
+    bool isRoleUsed,
+    HostRenderViewRole role) const
+{
+    return m_impl->GetViewBySelector(id, isRoleUsed, role);
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::GetPrimaryView() const

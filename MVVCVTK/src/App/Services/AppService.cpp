@@ -167,6 +167,23 @@ bool VizService::Impl::ResetDirty()
     return m_isDirty.exchange(false);
 }
 
+void VizService::Impl::SetPendingFlags(UpdateFlags flags)
+{
+    int old = m_pendingFlags.load();
+    // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
+    // 这样多个线程/回调同时上报更新时，只会不断把新位并进同一个原子整数，不会丢标志。
+    while (!m_pendingFlags.compare_exchange_weak(
+        old, old | static_cast<int>(flags))) {
+    }
+}
+
+void VizService::Impl::SetSyncNeeded()
+{
+    // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
+    m_hasSyncNeed = true;
+    m_isDirty = true;
+}
+
 void VizService::Impl::SetCurrentStrategy(
     std::shared_ptr<AbstractVisualStrategy> newStrategy)
 {
@@ -244,6 +261,24 @@ void VizService::Impl::ClearOverlayStrategies()
     }
     m_overlayStrategies.clear();
     m_isDirty = true;
+}
+
+void VizService::Impl::SetStrategyClear()
+{
+    m_hasCacheClearNeed = true;
+}
+
+void VizService::Impl::ClearStrategyCache()
+{
+    // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
+    // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
+    if (m_currentStrategy && m_renderer) {
+        m_currentStrategy->DetachRenderer(m_renderer);
+        m_currentStrategy = nullptr;
+    }
+
+    ClearOverlayStrategies();
+    m_strategyCache.clear();
 }
 
 VizService::VizService(
@@ -521,6 +556,16 @@ void VizService::Impl::SetRenderBinding(
         }
         m_isDirty = true;
     }
+}
+
+void VizService::Impl::SetRendererBg()
+{
+    if (!m_renderer || !m_sharedState) {
+        return;
+    }
+
+    const auto bg = m_sharedState->GetBackground();
+    m_renderer->SetBackground(bg.r, bg.g, bg.b);
 }
 
 void VizService::Impl::SetStateObserver()
@@ -885,6 +930,21 @@ void VizService::Impl::GetWorldPositionFromModel(const double m[3], double w[3])
     InteractionComputeService::GetWorldPositionFromModel(modelToWorldMatrix, m, w);
 }
 
+void VizService::Impl::SetCursorCenter()
+{
+    if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
+    // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
+    double imgCenter[3] = { 0.0 };
+    auto img = m_dataManager->GetVtkImage();
+    img->GetCenter(imgCenter);
+
+    double imgCenterWorld[3];
+    GetWorldPositionFromModel(imgCenter, imgCenterWorld);
+    m_sharedState->SetCursorRawWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
+    m_sharedState->SetCursorAxis(-1);
+    m_sharedState->SetCursorWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // AbstractAppService — 主线程后处理入口
 // ─────────────────────────────────────────────────────────────────────
@@ -979,6 +1039,17 @@ bool VizService::Impl::SetDataRefreshState(bool& hasLoadEvent)
     }
     hasLoadEvent = true;
     return true;
+}
+
+void VizService::Impl::SetDataRefresh()
+{
+    m_hasDataRefreshNeed = true;
+}
+
+void VizService::Impl::SetLoadFailed()
+{
+    m_hasLoadFailure = true;
+    m_isDirty = true;
 }
 
 void VizService::Impl::SendLoadCallbacks()
@@ -1160,75 +1231,4 @@ std::shared_ptr<AbstractVisualStrategy> VizService::Impl::GetStrategy(VizMode mo
     auto s = StrategyFactory::GetStrategy(mode);
     if (s) m_strategyCache[mode] = s;
     return s;
-}
-
-void VizService::Impl::SetRendererBg()
-{
-    if (!m_renderer || !m_sharedState) {
-        return;
-    }
-
-    const auto bg = m_sharedState->GetBackground();
-    m_renderer->SetBackground(bg.r, bg.g, bg.b);
-}
-
-void VizService::Impl::SetPendingFlags(UpdateFlags flags)
-{
-    int old = m_pendingFlags.load();
-    // compare_exchange_weak 在竞争下允许伪失败，但循环体很小，适合这里做位图 OR 合并。
-    // 这样多个线程/回调同时上报更新时，只会不断把新位并进同一个原子整数，不会丢标志。
-    while (!m_pendingFlags.compare_exchange_weak(
-        old, old | static_cast<int>(flags))) {
-    }
-}
-
-void VizService::Impl::SetDataRefresh()
-{
-    m_hasDataRefreshNeed = true;
-}
-
-void VizService::Impl::SetLoadFailed()
-{
-    m_hasLoadFailure = true;
-    m_isDirty = true;
-}
-
-void VizService::Impl::SetStrategyClear()
-{
-    m_hasCacheClearNeed = true;
-}
-
-void VizService::Impl::ClearStrategyCache()
-{
-    // 清缓存时先把当前 Strategy 从 renderer 上摘掉，再清 overlay 和缓存表，
-    // 这样可以保证下一次重建拿到的是一套完全干净的渲染节点。
-    if (m_currentStrategy && m_renderer) {
-        m_currentStrategy->DetachRenderer(m_renderer);
-        m_currentStrategy = nullptr;
-    }
-
-    ClearOverlayStrategies();
-    m_strategyCache.clear();
-}
-
-void VizService::Impl::SetCursorCenter()
-{
-    if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
-    // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
-    double imgCenter[3] = { 0.0 };
-    auto img = m_dataManager->GetVtkImage();
-    img->GetCenter(imgCenter);
-
-    double imgCenterWorld[3];
-    GetWorldPositionFromModel(imgCenter, imgCenterWorld);
-    m_sharedState->SetCursorRawWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
-    m_sharedState->SetCursorAxis(-1);
-    m_sharedState->SetCursorWorld(imgCenterWorld[0], imgCenterWorld[1], imgCenterWorld[2]);
-}
-
-void VizService::Impl::SetSyncNeeded()
-{
-    // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
-    m_hasSyncNeed = true;
-    m_isDirty = true;
 }

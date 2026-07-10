@@ -94,6 +94,28 @@ void StartFilterCase(int& failureCount)
     SetExpect(count == 0, "Filtered callback should not run.", failureCount);
 }
 
+void StartEmptyFilterCase(int& failureCount)
+{
+    InteractionRouter router;
+    int count = 0;
+
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        [&count](const InteractionEvent&) {
+            ++count;
+            return InteractionResult{ true, true };
+        },
+        std::vector<unsigned long>{}));
+
+    const auto firstResult = router.Dispatch(BuildEvent(401));
+    const auto secondResult = router.Dispatch(BuildEvent(499));
+
+    SetExpect(firstResult.isHandled, "Empty event filter should handle the first event.", failureCount);
+    SetExpect(firstResult.hasVtkAbort, "Empty event filter should abort the first event.", failureCount);
+    SetExpect(secondResult.isHandled, "Empty event filter should handle the second event.", failureCount);
+    SetExpect(secondResult.hasVtkAbort, "Empty event filter should abort the second event.", failureCount);
+    SetExpect(count == 2, "Empty event filter callback should run for both events.", failureCount);
+}
+
 } // namespace
 
 int main()
@@ -102,6 +124,7 @@ int main()
     StartFirstMatchCase(failureCount);
     StartBroadcastCase(failureCount);
     StartFilterCase(failureCount);
+    StartEmptyFilterCase(failureCount);
 
     if (failureCount == 0) {
         std::cout << "Interaction router tests passed.\n";

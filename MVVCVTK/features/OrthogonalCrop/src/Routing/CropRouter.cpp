@@ -317,23 +317,11 @@ OrthogonalCropResult CropRouter::Impl::GetRouterFailureResult(
     CropFailure failureReason,
     const std::string& message) const
 {
-    OrthogonalCropResult result;
-    result.SetResolvedDataSource(request.GetDataSource());
-    result.SetResolvedOperation(request.GetOperation());
-    result.SetResolvedGeometryType(request.GetGeometryType());
-    result.SetResolvedRemovalMode(request.GetRemovalMode());
-
-    OrthogonalCropStatistics statistics;
-    statistics.SetResolvedDataSource(request.GetDataSource());
-    statistics.SetResolvedOperation(request.GetOperation());
-    statistics.SetResolvedGeometryType(request.GetGeometryType());
-    statistics.SetResolvedRemovalMode(request.GetRemovalMode());
+    auto statistics = OrthogonalCropStatistics::GetResolved(request);
     statistics.SetFailureReason(failureReason);
     statistics.SetValidationMessage(message);
 
-    result.SetStatistics(statistics);
-    result.SetFailureReason(failureReason);
-    result.SetMessage(message);
+    auto result = OrthogonalCropResult::GetResolved(statistics);
     result.SetSucceeded(false);
     return result;
 }

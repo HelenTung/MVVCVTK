@@ -36,13 +36,13 @@ enum class PlanarRowSide {
 
 class PlanarCropAlgorithm {
 public:
-    // image / volume 共用 image 输入入口；preview 只返回几何快照，submit 返回 image 与 mask。
+    // image 输入入口只接受 Plane + Preview + VolumeData 或 Plane + Submit + ImageData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,
         const OrthogonalCropRequest& request,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    // polydata 输入入口只处理 router 放行的 Plane + Preview + PolyData 请求。
+    // polydata 输入入口只接受 Plane + Preview + PolyData 请求。
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request);
