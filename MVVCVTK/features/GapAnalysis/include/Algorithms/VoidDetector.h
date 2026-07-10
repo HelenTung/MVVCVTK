@@ -17,21 +17,6 @@
 #include <mutex>
 #include <deque>
 
-// ── 增强型并查集（路径压缩）─────────────────────────────────────────
-struct UnionFind {
-    static int GetRoot(int* parent, int i) noexcept {
-        while (parent[i] != i) {
-            parent[i] = parent[parent[i]]; // 路径减半
-            i = parent[i];
-        }
-        return i;
-    }
-    static void AttachRoot(int* parent, int i, int j) noexcept {
-        int ri = GetRoot(parent, i), rj = GetRoot(parent, j);
-        if (ri != rj) parent[ri] = rj;
-    }
-};
-
 class VoidDetector {
 public:
     // ── Step 1：泛洪填充构建内部掩码 ───────────────────────────────

@@ -5,6 +5,10 @@
 #include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 
+#include "AppState.h"
+#include "DataManager.h"
+#include "Interaction/CropBridge.h"
+#include "Services/GapAnalysisService.h"
 #include "StdRenderContext.h"
 
 #include <iostream>
@@ -40,12 +44,28 @@ public:
     std::string BuildControlKeyLabel(char key) const;
     std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const;
     void SendStartupStatus() const;
+
+private:
+    static HostCoreServices BuildCore();
 };
 
 VtkAppHostSession::Impl::Impl(VtkAppHostSession::Config sessionConfig)
     : config(std::move(sessionConfig))
     , featureBindings(std::make_shared<HostFeatureBindings>())
 {
+}
+
+HostCoreServices VtkAppHostSession::Impl::BuildCore()
+{
+    // 1. 先创建数据与状态真源，让所有视图和 feature 共享同一份会话事实。
+    // 2. 再创建依赖这些真源的交互服务；窗口拓扑仍由 BuildSession 单独组装。
+    HostCoreServices nextCore;
+    nextCore.sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    nextCore.sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
+    nextCore.sharedState = std::make_shared<SharedInteractionState>(nextCore.sharedStateBroadcaster);
+    nextCore.gapAnalysis = std::make_shared<GapAnalysisService>();
+    nextCore.orthogonalCropBridge = std::make_shared<CropBridge>();
+    return nextCore;
 }
 
 HostCommandRouterRequest VtkAppHostSession::Impl::BuildRequest(HostCommandKind command) const
@@ -126,7 +146,7 @@ void VtkAppHostSession::Impl::BuildSession()
     // 1. core services 不知道窗口数量，只建立数据、状态和算法服务生命周期。
     // 2. render view set 负责按 host 配置创建/接管窗口，并对外提供 id/role/endpoint。
     // 3. feature bindings 只注册能力；裁切或孔隙显示必须等宿主命令携带目标窗口后才激活。
-    core = BuildHostCoreServices();
+    core = BuildCore();
     renderViews.Build(core, config.renderViews);
     featureBindings->AttachFeatures(core, renderViews);
     commandRouter = std::make_shared<HostCommandRouter>(

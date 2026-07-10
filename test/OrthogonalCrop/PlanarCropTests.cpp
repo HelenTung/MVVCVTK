@@ -30,6 +30,9 @@
 #include <utility>
 #include <vector>
 
+int GetCropPreviewFailCount();
+int GetAppTaskFailCount();
+
 namespace {
 
 static_assert(std::is_same_v<
@@ -963,6 +966,8 @@ int main()
     StartBench(failureCount);
     StartSliceView(failureCount);
     StartDataExport(failureCount);
+    failureCount += GetCropPreviewFailCount();
+    failureCount += GetAppTaskFailCount();
 
     if (failureCount != 0) {
         std::cerr << "PlanarCropTests failed: " << failureCount << '\n';

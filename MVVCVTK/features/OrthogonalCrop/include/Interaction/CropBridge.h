@@ -75,8 +75,8 @@ public:
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
-    // 执行当前 image submit：构建 request、经 router/algorithm 取结果，再把 submit image 提交到主数据 reload 通道。
-    void SendSubmit();
+    // 执行当前 image submit；只有 reload 请求被接受并进入 pending 状态才返回 true。
+    bool SendSubmit();
 
     // 宿主命令触发的裁切模式 switch 入口。
     bool SwitchCropBox();

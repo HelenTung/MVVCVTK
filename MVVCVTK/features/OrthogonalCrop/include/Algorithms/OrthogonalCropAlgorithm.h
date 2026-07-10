@@ -16,32 +16,10 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
-#include <array>
 #include <cstddef>
-#include <string>
 
 class OrthogonalCropAlgorithm {
 public:
-    // 校验 active input model bounds 与目标裁切 input model bounds 是否满足执行前提。
-    static bool GetBoundsAreValid(
-        const std::array<double, 6>& inputModelBounds,
-        const std::array<double, 6>& cropInputModelBounds,
-        CropFailure& failureReason,
-        std::string& message,
-        bool isPartialOk = false);
-
-    // 把 request 归一化为可执行的 CropDataModel。
-    static bool GetCropDataModel(
-        const std::array<double, 6>& inputModelBounds,
-        const OrthogonalCropRequest& request,
-        CropDataModel& cropData,
-        CropFailure& failureReason,
-        std::string& message,
-        bool isPartialOk = false);
-
-    // 生成 box 3D outline preview polydata，供 overlay 和 3D 预览复用。
-    static vtkSmartPointer<vtkPolyData> GetOutlinePolyData(const CropDataModel& cropData);
-
     // image 输入入口只接受 Box + Preview + VolumeData 或 Box + Submit + ImageData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,

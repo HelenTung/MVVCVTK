@@ -11,6 +11,22 @@
 
 class StdRenderContext {
 public:
+    void SetCameraStyle(VizMode mode)
+    {
+        m_vizMode = mode;
+        ++m_cameraStyleSetCount;
+    }
+
+    VizMode GetVizMode() const
+    {
+        return m_vizMode;
+    }
+
+    int GetCameraStyleSetCount() const
+    {
+        return m_cameraStyleSetCount;
+    }
+
     void SetToolMode(ToolMode mode)
     {
         m_toolMode = mode;
@@ -52,6 +68,8 @@ public:
     }
 
 private:
+    VizMode m_vizMode = VizMode::Volume;
+    int m_cameraStyleSetCount = 0;
     ToolMode m_toolMode = ToolMode::Navigation;
     int m_toolModeSetCount = 0;
     std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;

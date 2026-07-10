@@ -421,8 +421,7 @@ bool HostFeatureBindings::Impl::SendCrop(
         return false;
     }
 
-    m_core.orthogonalCropBridge->SendSubmit();
-    return true;
+    return m_core.orthogonalCropBridge->SendSubmit();
 }
 
 bool HostFeatureBindings::Impl::ExitCrop()

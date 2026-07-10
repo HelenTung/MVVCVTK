@@ -11,6 +11,12 @@
     <Filter Include="include\Interaction">
       <UniqueIdentifier>{3ec97648-502f-4b55-8247-8678828b9a8e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Preview">
+      <UniqueIdentifier>{879dc7a0-d29c-41aa-abf9-035b00ec0a2f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Render">
+      <UniqueIdentifier>{a1baaa1f-e2ae-4050-9e8d-8bf81c42cd95}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Routing">
       <UniqueIdentifier>{0a0648f2-1d60-4d30-bc57-356fb143bf08}</UniqueIdentifier>
     </Filter>
@@ -35,6 +41,12 @@
     </Filter>
     <Filter Include="src\Interaction">
       <UniqueIdentifier>{ad97b68f-53c0-42c4-956a-c078816f0d7e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Preview">
+      <UniqueIdentifier>{67245b7e-0ae4-4652-a170-2e7e53e28c91}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src\Render">
+      <UniqueIdentifier>{1f6a5089-7650-441c-9995-d10a2d394e6c}</UniqueIdentifier>
     </Filter>
     <Filter Include="src\Routing">
       <UniqueIdentifier>{0bcc8f30-cb17-4b68-a596-308d9b91755a}</UniqueIdentifier>
@@ -62,10 +74,22 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Preview\CropPreviewPlug.h">
+      <Filter>include\Preview</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Render\Strategies\CropOverlay.h">
+      <Filter>include\Render</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h">
       <Filter>include\Routing</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h">
+      <Filter>include\App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataExportTaskService.h">
+      <Filter>include\App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppTaskCallbackState.h">
       <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h">
@@ -80,6 +104,9 @@
     <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h">
       <Filter>include\Platform</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Render\Strategies\BaseVisualStrategy.h">
+      <Filter>include\Render</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
@@ -91,14 +118,29 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropCameraState.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp">
+      <Filter>src\Preview</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp">
+      <Filter>src\Render</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>src\Routing</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp">
+      <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp">
       <Filter>src\Platform</Filter>
+    </ClCompile>
+    <ClCompile Include="AppTaskServiceTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="CropPreviewPlugTests.cpp">
+      <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="PlanarCropTests.cpp">
       <Filter>tests</Filter>

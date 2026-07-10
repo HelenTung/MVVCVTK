@@ -1,5 +1,7 @@
 #pragma once
 
+#include "AppTypes.h"
+
 class VizService {
 public:
     template <typename... Args>
@@ -17,9 +19,20 @@ public:
     {
     }
 
-    template <typename... Args>
-    void SetVizMode(Args&&...)
+    void SetVizMode(VizMode mode)
     {
+        m_vizMode = mode;
+        ++m_vizModeSetCount;
+    }
+
+    VizMode GetVizMode() const
+    {
+        return m_vizMode;
+    }
+
+    int GetVizModeSetCount() const
+    {
+        return m_vizModeSetCount;
     }
 
     template <typename... Args>
@@ -56,4 +69,8 @@ public:
     void SetWindowLevel(Args&&...)
     {
     }
+
+private:
+    VizMode m_vizMode = VizMode::Volume;
+    int m_vizModeSetCount = 0;
 };

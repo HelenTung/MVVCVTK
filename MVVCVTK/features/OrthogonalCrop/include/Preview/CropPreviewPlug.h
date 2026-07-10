@@ -7,9 +7,9 @@
 #include <vtkSmartPointer.h>
 
 #include <memory>
-#include <unordered_map>
 
 class vtkActor;
+class vtkAbstractMapper;
 class vtkGPUVolumeRayCastMapper;
 class vtkPlaneCollection;
 class vtkPolyData;
@@ -36,15 +36,7 @@ public:
     vtkSmartPointer<vtkPolyData> GetPreviewData(
         const std::shared_ptr<InteractiveService>& targetService) const;
 
-    void Clear();
-
 private:
-    struct TargetState {
-        // 非拥有引用：只记录上次被 preview 接管的 mapper 身份。
-        // restore 时必须重新从当前 actor 取 mapper，reload/rebuild 可能已释放旧 mapper。
-        vtkPolyDataMapper* mainPreviewMapper = nullptr;
-    };
-
     void ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
 
     void ClearVolumeCut(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const;
@@ -54,6 +46,11 @@ private:
         const OrthogonalCropResult& previewResult) const;
 
     vtkSmartPointer<vtkPlaneCollection> BuildPlaneClip(
+        const std::shared_ptr<InteractiveService>& referenceService,
+        const OrthogonalCropResult& previewResult) const;
+
+    bool SetKeepClip(
+        vtkAbstractMapper* mapper,
         const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
@@ -93,5 +90,4 @@ private:
         const std::shared_ptr<InteractiveService>& referenceService,
         const OrthogonalCropResult& previewResult) const;
 
-    std::unordered_map<InteractiveService*, TargetState> m_targetStates;
 };

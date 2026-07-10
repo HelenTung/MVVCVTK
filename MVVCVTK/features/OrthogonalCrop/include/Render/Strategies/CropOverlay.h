@@ -32,9 +32,6 @@ public:
     // 指定当前窗口是 2D 哪个切片轴，-1 表示 3D 视图。
     void SetSliceAxis(int axis);
 
-    // 记录当前预览模式；颜色不再随模式切换，避免非交互态裁切盒反复变色。
-    void SetRemovalMode(CropRemovalMode removalMode);
-
     // 控制 3D 几何参照线框是否显示；裁切效果、2D mask 和清理链路不受这个开关影响。
     // 为什么由 host/bridge 注入：只有宿主知道哪个窗口是 reference，feature overlay 不能自己猜窗口角色。
     void SetRefVisible(bool isVisible);
@@ -58,12 +55,6 @@ private:
 
     // 把主模型矩阵同步到 overlay prop。
     static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData);
-
-    // 旧的 3D 实体区域 actor；当前固定隐藏，保留对象只是为了少改动既有 prop 生命周期。
-    vtkSmartPointer<vtkActor> m_previewRegionActor;
-
-    // 旧的 3D 实体区域 mapper。
-    vtkSmartPointer<vtkPolyDataMapper> m_previewRegionMapper;
 
     // 裁切盒 outline actor。
     vtkSmartPointer<vtkActor> m_outlineActor;
@@ -94,9 +85,6 @@ private:
 
     // 当前是否已经有 mask image 可显示。
     bool m_hasMaskImage = false;
-
-    // 当前预览模式；裁切保留/移除语义由 preview plug 和算法执行，不再通过颜色表达。
-    CropRemovalMode m_removalMode = CropRemovalMode::KeepInside;
 
     // 是否允许当前窗口显示 3D 几何参照线框。
     // 非 reference 预览窗口仍可显示裁切后的主模型效果，但不再额外画一个像可拖拽 box 的线框。

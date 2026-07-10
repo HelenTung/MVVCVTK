@@ -7,7 +7,6 @@
 #include <vector>
 #include <array>
 #include <cstddef>
-#include <functional>
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -110,43 +109,4 @@ struct GapAnalysisResult {
     std::vector<int>        labelVolume;  // 与体素一一对应，0 = 非空洞
     vtkSmartPointer<vtkImageData> labelImage; // 标签体缓存，分析完成后构建一次，供 2D/3D 后处理复用
     bool                    isSucceeded = false;
-};
-
-class IGapAnalysisService {
-public:
-    virtual ~IGapAnalysisService() = default;
-
-    // ── 插件输入：调用方显式喂入当前图像，模块内部立即复制为稳定体素快照 ──
-    // feature 不反向依赖 App/DataManager；宿主可以在加载完成、重建完成或插件挂载时决定何时刷新输入。
-    virtual bool SetInputImage(vtkSmartPointer<vtkImageData> image) = 0;
-
-    // ── 前处理：设置计算参数（只写，零计算，线程安全）──────────────
-    virtual void SetSurface(const SurfaceParams& p) = 0;
-    virtual void SetAdvanced(const AdvancedSurfaceParams& p) = 0;
-    virtual void SetVoid(const VoidDetectionParams& p) = 0;
-
-    // ── 触发：主动发起后台计算 ────────────────────────────────────────
-    // onComplete 不在后台线程直接执行；后台线程只投递完成状态，调用方应在主线程轮询消费。
-    virtual void StartAsync(
-        std::function<void(bool isSuccess)> onComplete = nullptr) = 0;
-
-    // ── 主线程回调消费：后台只投递完成信号，宿主在主线程轮询点执行回调
-    virtual bool GetDoneEvent() = 0;
-    virtual void SendCallback() = 0;
-
-    // ── 查询：主线程轮询（对齐 GetLoadState 风格）────────────────────
-    virtual GapAnalysisState GetAnalysisState() const = 0;
-
-    // ── 取消（尽力，对齐 CancelLoad 语义）────────────────────────────
-    virtual void StopAsync() {}
-
-    // ── 后处理：主线程消费结果（对齐 PostData_RebuildPipeline 调用点）
-    // 返回空洞区域列表（供 UI 展示）
-    virtual std::vector<VoidRegion> GetVoidRegions() const = 0;
-
-    // 生成空洞 Mesh，供 IsoSurfaceStrategy::SetInputData 消费
-    virtual vtkSmartPointer<vtkPolyData> BuildVoidMesh() const = 0;
-
-    // 生成标签体，供 SliceStrategy::SetInputData 消费
-    virtual vtkSmartPointer<vtkImageData> BuildLabelImage() const = 0;
 };

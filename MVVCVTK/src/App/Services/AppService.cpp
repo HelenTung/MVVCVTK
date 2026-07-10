@@ -2,10 +2,12 @@
 #include "AppDataExportTaskService.h"
 #include "AppDataLoadTaskService.h"
 #include "AppState.h"
-#include "AppStateSyncStrategy.h"
+#include "CompositeStrategy.h"
 #include "DataManager.h"
 #include "InteractionComputeService.h"
-#include "StrategyFactory.h"
+#include "IsoSurfaceStrategy.h"
+#include "SliceStrategy.h"
+#include "VolumeStrategy.h"
 #include <vtkSmartPointer.h>
 #include <algorithm>
 #include <atomic>
@@ -14,6 +16,7 @@
 #include <future>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -21,8 +24,7 @@
 // 构造 / 析构
 // ─────────────────────────────────────────────────────────────────────
 class VizService::Impl final
-    : public IAppStateSyncTarget
-    , public std::enable_shared_from_this<Impl> {
+    : public std::enable_shared_from_this<Impl> {
 public:
     Impl(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state,
@@ -57,7 +59,6 @@ public:
     void ExportSlicesAsync(const std::string& path,
         std::optional<double> rotationAngleDeg,
         std::function<void(bool isSuccess)> onComplete);
-    void StopFileLoad();
     void SetSliceScroll(int delta);
     void SetCursorWorldPosition(double worldPos[3], int axis);
     std::array<double, 3> GetCursorWorld();
@@ -87,6 +88,7 @@ private:
     void SetRenderBinding(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer> ren);
     void SetStateObserver();
+    void SendStateFlags(UpdateFlags flags);
     void SendPendingImage();
     void SendExportCallback();
     bool SetLoadFailureState(bool& hasLoadEvent);
@@ -98,13 +100,13 @@ private:
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void SetRendererBg();
-    void SetStrategyClear() override;
+    void SetStrategyClear();
     void ClearStrategyCache();
-    void SetCursorCenter() override;
-    void SetSyncNeeded() override;
-    void SetPendingFlags(UpdateFlags flags) override;
-    void SetDataRefresh() override;
-    void SetLoadFailed() override;
+    void SetCursorCenter();
+    void SetSyncNeeded();
+    void SetPendingFlags(UpdateFlags flags);
+    void SetDataRefresh();
+    void SetLoadFailed();
     void StartRun(std::packaged_task<void()> task,
         bool hasActiveLoadFuture);
 
@@ -119,7 +121,6 @@ private:
     std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService; // 加载任务构建和加载回调状态
     std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
-    AppStateSyncStrategy m_stateSyncStrategy; // 把状态广播翻译成“重建/清理/增量同步”动作的策略对象
     LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 当前 service 本地待消费的 load 事件来源，避免多个窗口抢同一个 Share pending 标记
     std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
     std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
@@ -390,11 +391,6 @@ void VizService::ExportSlicesAsync(
     m_impl->ExportSlicesAsync(path, rotationAngleDeg, std::move(onComplete));
 }
 
-void VizService::StopFileLoad()
-{
-    m_impl->StopFileLoad();
-}
-
 void VizService::SetSliceScroll(int delta)
 {
     m_impl->SetSliceScroll(delta);
@@ -585,9 +581,36 @@ void VizService::Impl::SetStateObserver()
 
             // 广播回调只做“事件翻译”为主线程可消费的原子标志，
             // 不在这里直接碰 VTK/Strategy，避免后台线程或任意调用线程破坏渲染线程边界。
-            self->m_stateSyncStrategy.SendFlags(flags, *self);
+            self->SendStateFlags(flags);
         }
     );
+}
+
+void VizService::Impl::SendStateFlags(UpdateFlags flags)
+{
+    // 事件翻译只更新主线程可消费的标志；VTK 对象和 Strategy 仍由 timer 主循环处理。
+    if (GetFlagOn(flags, UpdateFlags::DataReady)) {
+        SetStrategyClear();
+        SetCursorCenter();
+        SetPendingFlags(UpdateFlags::All);
+        SetDataRefresh();
+        return;
+    }
+
+    if (GetFlagOn(flags, UpdateFlags::Spacing)) {
+        SetStrategyClear();
+        SetPendingFlags(UpdateFlags::All);
+        SetDataRefresh();
+        return;
+    }
+
+    if (GetFlagOn(flags, UpdateFlags::LoadFailed)) {
+        SetLoadFailed();
+        return;
+    }
+
+    SetPendingFlags(flags);
+    SetSyncNeeded();
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -595,7 +618,12 @@ void VizService::Impl::SetStateObserver()
 // ─────────────────────────────────────────────────────────────────────
 void VizService::Impl::SetVizMode(VizMode mode)
 {
-    m_pendingVizModeInt.store(static_cast<int>(mode));
+    const int nextMode = static_cast<int>(mode);
+    if (m_pendingVizModeInt.exchange(nextMode) == nextMode) {
+        return;
+    }
+    m_hasDataRefreshNeed = true;
+    m_isDirty = true;
 }
 
 void VizService::Impl::SetMaterial(const MaterialParams& mat)
@@ -743,11 +771,6 @@ void VizService::Impl::ExportSlicesAsync(
     if (task) {
         StartRun(std::move(*task), false);
     }
-}
-
-void VizService::Impl::StopFileLoad()
-{
-    // 当前加载流程尚未接入可中断检查，先保留上层控制入口。
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1073,7 +1096,7 @@ void VizService::Impl::BuildPipeline()
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto strategy = GetStrategy(mode);
     if (!strategy) {
-        std::cerr << "[BuildPipeline] StrategyFactory returned null for mode "
+        std::cerr << "[BuildPipeline] No strategy exists for mode "
             << static_cast<int>(mode) << "\n";
         return;
     }
@@ -1228,7 +1251,33 @@ std::shared_ptr<AbstractVisualStrategy> VizService::Impl::GetStrategy(VizMode mo
     auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end()) return it->second;
 
-    auto s = StrategyFactory::GetStrategy(mode);
-    if (s) m_strategyCache[mode] = s;
-    return s;
+    std::shared_ptr<AbstractVisualStrategy> strategy;
+    switch (mode) {
+    case VizMode::Volume:
+        strategy = std::make_shared<VolumeStrategy>();
+        break;
+    case VizMode::IsoSurface:
+        strategy = std::make_shared<IsoSurfaceStrategy>();
+        break;
+    case VizMode::SliceTop_down:
+        strategy = std::make_shared<SliceStrategy>(Orientation::Top_down);
+        break;
+    case VizMode::SliceFront_back:
+        strategy = std::make_shared<SliceStrategy>(Orientation::Front_back);
+        break;
+    case VizMode::SliceLeft_right:
+        strategy = std::make_shared<SliceStrategy>(Orientation::Left_right);
+        break;
+    case VizMode::CompositeVolume:
+        strategy = std::make_shared<CompositeStrategy>(VizMode::CompositeVolume);
+        break;
+    case VizMode::CompositeIsoSurface:
+        strategy = std::make_shared<CompositeStrategy>(VizMode::CompositeIsoSurface);
+        break;
+    default:
+        return nullptr;
+    }
+
+    m_strategyCache[mode] = strategy;
+    return strategy;
 }

@@ -8,9 +8,13 @@
 #include <vtkPNGWriter.h>
 #include <vtkImageData.h>
 
-void HistogramConverter::SetParameter(const std::string& key, double value)
+bool HistogramConverter::SetBinCount(int binCount)
 {
-    if (key == "BinCount" && value > 0.0) m_binCount = static_cast<int>(value);
+    if (binCount <= 0) {
+        return false;
+    }
+    m_binCount = binCount;
+    return true;
 }
 
 vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {

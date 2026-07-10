@@ -32,7 +32,6 @@ public:
     void SendSaveCallback();
 
 private:
-    void SetSaveCallback(std::function<void(bool)> callback);
     void SetSaveCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr);
 
     std::shared_ptr<AbstractDataManager> m_dataManager;

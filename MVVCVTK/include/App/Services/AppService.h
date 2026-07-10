@@ -88,10 +88,6 @@ public:
     LoadState GetFileLoadState() const;
     LoadState GetReloadLoadState() const;
 
-    // 请求尽力取消当前文件流加载；是否生效由后台加载流程自检决定。
-    // 实现依赖对象由 Impl 持有。
-    void StopFileLoad();
-
     // ================================================================
     // 数据导出任务
     // 功能：发起后台保存任务，并把保存完成结果延迟回到主线程。

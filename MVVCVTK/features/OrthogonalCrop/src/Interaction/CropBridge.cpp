@@ -51,7 +51,7 @@ public:
     bool ExitCrop();
     bool GetCropActive() const;
     void SwitchPreview(CropRemovalMode removalMode);
-    void SendSubmit();
+    bool SendSubmit();
 
 private:
     bool GetInputReady();
@@ -849,7 +849,6 @@ void CropBridge::Impl::ClearPreviewViews()
             target.first->RemoveOverlayStrategy(target.second);
         }
     }
-    m_previewPlug.Clear();
     m_previewRenderTargets.clear();
     ClearPreviewInput();
 }
@@ -867,15 +866,15 @@ void CropBridge::Impl::ResetPreview()
     ClearPreviewInput();
 }
 
-void CropBridge::Impl::SendSubmit()
+bool CropBridge::Impl::SendSubmit()
 {
     if (!m_submitReloadHandler) {
         std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
-        return;
+        return false;
     }
 
     if (!GetSubmitReady()) {
-        return;
+        return false;
     }
 
     m_cameraState.SetCameraState(m_referenceRenderer);
@@ -893,7 +892,7 @@ void CropBridge::Impl::SendSubmit()
             std::cerr << " - " << submitResult.GetMessage();
         }
         std::cerr << std::endl;
-        return;
+        return false;
     }
 
     auto submitImage = submitResult.GetSubmitImage();
@@ -901,7 +900,7 @@ void CropBridge::Impl::SendSubmit()
         std::cerr << "[OrthogonalCrop] Image submit failed: output image is null." << std::endl;
         m_cameraState.Clear();
         m_submitOverlay = OrthogonalCropResult();
-        return;
+        return false;
     }
 
     submitResult.SetSubmitImage(vtkSmartPointer<vtkImageData>());
@@ -928,7 +927,10 @@ void CropBridge::Impl::SendSubmit()
                 m_boxWidget.SetEnabled(true);
             }
         }
+        return false;
     }
+
+    return true;
 }
 
 bool CropBridge::Impl::GetSubmitReady() const
@@ -998,7 +1000,6 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
         }
 
         target.second->SetSliceAxis(target.first->GetNavigationAxis());
-        target.second->SetRemovalMode(submitOverlayResult.GetResolvedRemovalMode());
         target.second->SetCropResult(submitOverlayResult);
         target.first->SetDirty();
     }
@@ -1112,9 +1113,9 @@ void CropBridge::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
     m_impl->SetSubmitReloadHandler(std::move(reloadSubmitter));
 }
 
-void CropBridge::SendSubmit()
+bool CropBridge::SendSubmit()
 {
-    m_impl->SendSubmit();
+    return m_impl->SendSubmit();
 }
 
 bool CropBridge::SwitchCropBox()

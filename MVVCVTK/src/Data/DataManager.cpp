@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <iostream>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <vtkStringArray.h>
 #include <vtkTransform.h>
@@ -45,6 +46,16 @@ std::array<double, 3> GetRasOrigin(
 
 class BaseDataManager::Impl final {
 public:
+    Impl()
+        : m_vtkImage(vtkSmartPointer<vtkImageData>::New())
+    {
+    }
+
+    mutable std::mutex m_dataMutex;
+    vtkSmartPointer<vtkImageData> m_vtkImage;
+    std::array<double, 2> m_scalarRange = { 0.0, 0.0 };
+    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 };
+    DataVersion m_dataVersion = 0;
 
     bool SetRasScalars(
         const float* src,
@@ -147,36 +158,50 @@ private:
     bool SetLpsRasImage(vtkImageData* source, vtkImageData* target) const;
 };
 
+class RawVolumeDataManager::Impl final {
+public:
+    mutable std::mutex m_reconMutex; // 保护后台准备、门铃发布和主线程接管这一完整事务
+    vtkSmartPointer<vtkImageData> m_pendingImage;
+    std::array<double, 2> m_pendingScalarRange = { 0.0, 0.0 };
+    std::array<double, 3> m_pendingSpacing = { 1.0, 1.0, 1.0 };
+    bool m_hasPendingImage = false; // 只在 m_reconMutex 内读写，不再需要独立原子状态
+};
+
 BaseDataManager::BaseDataManager()
-    : m_vtkImage(vtkSmartPointer<vtkImageData>::New()),
-      m_impl(std::make_unique<BaseDataManager::Impl>())
+    : m_impl(std::make_unique<BaseDataManager::Impl>())
 {
 }
 
 BaseDataManager::~BaseDataManager() = default;
 
+vtkSmartPointer<vtkImageData> BaseDataManager::GetVtkImage() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return m_impl->m_vtkImage;
+}
+
 std::array<double, 2> BaseDataManager::GetScalarRange() const
 {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    return m_scalarRange;
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return m_impl->m_scalarRange;
 }
 
 std::array<double, 3> BaseDataManager::GetSpacing() const
 {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    return m_imageSpacing;
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return m_impl->m_imageSpacing;
 }
 
 DataVersion BaseDataManager::GetDataVersion() const
 {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    return m_dataVersion;
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return m_impl->m_dataVersion;
 }
 
 ImageState BaseDataManager::GetImageState() const
 {
-    std::lock_guard<std::mutex> lock(m_dataMutex);
-    return { m_vtkImage, m_dataVersion };
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return { m_impl->m_vtkImage, m_impl->m_dataVersion };
 }
 
 bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
@@ -191,11 +216,11 @@ bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
     image->GetSpacing(imageSpacing);
 
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_vtkImage = std::move(image);
-        m_scalarRange = { range[0], range[1] };
-        m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
-        ++m_dataVersion;
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        m_impl->m_vtkImage = std::move(image);
+        m_impl->m_scalarRange = { range[0], range[1] };
+        m_impl->m_imageSpacing = { imageSpacing[0], imageSpacing[1], imageSpacing[2] };
+        ++m_impl->m_dataVersion;
     }
 
     return true;
@@ -215,9 +240,9 @@ bool BaseDataManager::ExportSlices(
 
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        if (!m_vtkImage) return false;
-        imageCopy->ShallowCopy(m_vtkImage);
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        if (!m_impl->m_vtkImage) return false;
+        imageCopy->ShallowCopy(m_impl->m_vtkImage);
     }
 
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -337,10 +362,10 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
 {
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        if (!m_vtkImage) return false;
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        if (!m_impl->m_vtkImage) return false;
         // 浅拷贝数据指针，避免在主线程引发锁竞争
-        imageCopy->ShallowCopy(m_vtkImage);
+        imageCopy->ShallowCopy(m_impl->m_vtkImage);
     }
 
     //  VTK 逆变换矩阵
@@ -427,6 +452,13 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
     return true;
 }
 
+RawVolumeDataManager::RawVolumeDataManager()
+    : m_rawImpl(std::make_unique<RawVolumeDataManager::Impl>())
+{
+}
+
+RawVolumeDataManager::~RawVolumeDataManager() = default;
+
 bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
     // 解析文件名
@@ -447,9 +479,9 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // --- 先释放旧内存，再分配新内存 ---
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        if (m_vtkImage) {
-            m_vtkImage = nullptr;     // 置空防止悬垂指针
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        if (m_impl->m_vtkImage) {
+            m_impl->m_vtkImage = nullptr;     // 置空防止悬垂指针
         }
     }
 
@@ -464,14 +496,14 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         static_cast<double>(origin[1]),
         static_cast<double>(origin[2])
     };
-    m_spacing = lpsSpacing;
-    m_origin = GetRasOrigin(lpsOrigin, newDims, m_spacing);
+    const std::array<double, 3> rasSpacing = lpsSpacing;
+    const std::array<double, 3> rasOrigin = GetRasOrigin(lpsOrigin, newDims, rasSpacing);
 
     // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
-    newImage->SetSpacing(m_spacing[0], m_spacing[1], m_spacing[2]);
-    newImage->SetOrigin(m_origin[0], m_origin[1], m_origin[2]);
+    newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
+    newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
     // 读取数据到新内存
@@ -528,14 +560,11 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 
     // --- 提交  ---
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_vtkImage = std::move(newImage); // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
-        m_dims[0] = newDims[0];
-        m_dims[1] = newDims[1];
-        m_dims[2] = newDims[2];
-        m_scalarRange = { range[0], range[1] };
-        m_imageSpacing = { m_spacing[0], m_spacing[1], m_spacing[2] };
-        ++m_dataVersion;
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        m_impl->m_vtkImage = std::move(newImage); // 指针交换，旧数据若被渲染线程持有则暂存，否则释放
+        m_impl->m_scalarRange = { range[0], range[1] };
+        m_impl->m_imageSpacing = rasSpacing;
+        ++m_impl->m_dataVersion;
     }
     return true;
 }
@@ -585,14 +614,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     // 确保 VTK pipeline 脏标记传播在正确线程触发。
 
     {
-        std::lock_guard<std::mutex> lock(m_reconMutex);
-        m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
-		m_pendingScalarRange = { range[0], range[1] };
-		m_spacing = rasSpacing;
-		m_origin = rasOrigin;
-        m_pendingSpacing = rasSpacing;
+        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
+        m_rawImpl->m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
+        m_rawImpl->m_pendingScalarRange = { range[0], range[1] };
+        m_rawImpl->m_pendingSpacing = rasSpacing;
+        m_rawImpl->m_hasPendingImage = true;
     }
-    m_hasPendingImage.store(true);
 
     return true;
 }
@@ -618,47 +645,43 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
     };
 
     {
-        std::lock_guard<std::mutex> lock(m_reconMutex);
-        m_pendingImage = std::move(image);
-        m_pendingScalarRange = { range[0], range[1] };
-        m_pendingSpacing = imageSpacing;
+        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
+        m_rawImpl->m_pendingImage = std::move(image);
+        m_rawImpl->m_pendingScalarRange = { range[0], range[1] };
+        m_rawImpl->m_pendingSpacing = imageSpacing;
+        m_rawImpl->m_hasPendingImage = true;
     }
-    m_hasPendingImage.store(true);
 
     return true;
 }
 
 bool RawVolumeDataManager::SetCurrentFromPending()
 {
-    if (!m_hasPendingImage.load()) return false;
-
     vtkSmartPointer<vtkImageData> incoming;
     std::array<double, 2> pendingRange = { 0.0, 0.0 };
     std::array<double, 3> pendingSpacing = { 1.0, 1.0, 1.0 };
     {
-        std::lock_guard<std::mutex> lock(m_reconMutex);
-        if (!m_pendingImage) return false;
-        incoming = std::move(m_pendingImage);
-        pendingRange = m_pendingScalarRange;
-        pendingSpacing = m_pendingSpacing;
-        // 先在互斥区内拿走所有权，再清掉原子门铃，保证主线程这一帧只消费一次这批重建结果。
-        m_hasPendingImage.store(false);
+        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
+        // 门铃和 payload 使用同一事务锁，避免锁外检查后后台线程替换 pending image。
+        if (!m_rawImpl->m_hasPendingImage || !m_rawImpl->m_pendingImage) {
+            return false;
+        }
+        incoming = std::move(m_rawImpl->m_pendingImage);
+        pendingRange = m_rawImpl->m_pendingScalarRange;
+        pendingSpacing = m_rawImpl->m_pendingSpacing;
+        // 先在互斥区内拿走所有权，再清掉门铃，保证主线程这一帧只消费一次这批重建结果。
+        m_rawImpl->m_hasPendingImage = false;
     }
 
     // Modified() 在主线程调用（VTK pipeline 脏传播安全）
     incoming->Modified();
 
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        m_vtkImage = incoming;
-        m_dims[0] = incoming->GetDimensions()[0];
-        m_dims[1] = incoming->GetDimensions()[1];
-        m_dims[2] = incoming->GetDimensions()[2];
-        m_spacing = { incoming->GetSpacing()[0], incoming->GetSpacing()[1], incoming->GetSpacing()[2] };
-        m_origin = { incoming->GetOrigin()[0], incoming->GetOrigin()[1], incoming->GetOrigin()[2] };
-        m_scalarRange = pendingRange;
-        m_imageSpacing = pendingSpacing;
-        ++m_dataVersion;
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        m_impl->m_vtkImage = incoming;
+        m_impl->m_scalarRange = pendingRange;
+        m_impl->m_imageSpacing = pendingSpacing;
+        ++m_impl->m_dataVersion;
     }
     // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
     // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。

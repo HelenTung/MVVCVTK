@@ -15,19 +15,17 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildDataTas
     const std::string& path,
     std::function<void(bool isSuccess)> onComplete)
 {
-    SetSaveCallback(std::move(onComplete));
-
     auto dataManager = m_dataManager;
     auto sharedState = m_sharedState;
 
     if (!dataManager || !sharedState) {
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
     if (path.empty()) {
         std::cerr << "[Export] Transformed data export skipped: output path is empty." << std::endl;
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
@@ -36,13 +34,13 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildDataTas
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
     return std::packaged_task<void()>(
-        [dataManager, path, modelToWorld, weakSelf]() mutable
+        [dataManager, path, modelToWorld, weakSelf, onComplete = std::move(onComplete)]() mutable
         {
             const bool isOk = dataManager->ExportData(path, modelToWorld);
 
             auto self = weakSelf.lock();
             if (self) {
-                self->SetSaveCallbackReady(isOk);
+                self->SetSaveCallbackReady(isOk, std::move(onComplete));
             }
         });
 }
@@ -53,25 +51,23 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
     VizMode currentMode,
     std::function<void(bool isSuccess)> onComplete)
 {
-    SetSaveCallback(std::move(onComplete));
-
     auto dataManager = m_dataManager;
     auto sharedState = m_sharedState;
 
     if (!dataManager || !sharedState) {
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
     if (path.empty()) {
         std::cerr << "[Export] Slice image export skipped: output directory is empty." << std::endl;
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
     // 切片导出只接受真实切片视图模式；3D 窗口误触不能退回 Top_down，否则上位机看到的是“成功但方向错误”的隐性失败。
     if (InteractionComputeService::GetSliceAxis(currentMode) < 0) {
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
@@ -85,14 +81,14 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
         cursorWorldSnapshot,
         rotationAngleDeg);
     if (!exportData) {
-        SetSaveCallbackReady(false);
+        SetSaveCallbackReady(false, std::move(onComplete));
         return std::nullopt;
     }
 
     std::weak_ptr<AppDataExportTaskService> weakSelf = shared_from_this();
 
     return std::packaged_task<void()>(
-        [dataManager, path, exportData, currentWindowLevel, weakSelf]() mutable
+        [dataManager, path, exportData, currentWindowLevel, weakSelf, onComplete = std::move(onComplete)]() mutable
         {
             const bool isOk = dataManager->ExportSlices(
                 path,
@@ -102,7 +98,7 @@ std::optional<std::packaged_task<void()>> AppDataExportTaskService::BuildSlicesT
 
             auto self = weakSelf.lock();
             if (self) {
-                self->SetSaveCallbackReady(isOk);
+                self->SetSaveCallbackReady(isOk, std::move(onComplete));
             }
         });
 }
@@ -115,11 +111,6 @@ bool AppDataExportTaskService::ResetSaveCallback()
 void AppDataExportTaskService::SendSaveCallback()
 {
     m_saveCallback.SendCallback();
-}
-
-void AppDataExportTaskService::SetSaveCallback(std::function<void(bool)> callback)
-{
-    m_saveCallback.SetCallback(std::move(callback));
 }
 
 void AppDataExportTaskService::SetSaveCallbackReady(

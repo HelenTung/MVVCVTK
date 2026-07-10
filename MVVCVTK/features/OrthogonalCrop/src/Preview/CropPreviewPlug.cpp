@@ -1,5 +1,6 @@
 #include "Preview/CropPreviewPlug.h"
 
+#include <vtkAbstractMapper.h>
 #include <vtkActor.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkMath.h>
@@ -126,7 +127,6 @@ bool CropPreviewPlug::SetPreview(
     }
 
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
-    overlayStrategy->SetRemovalMode(removalMode);
 
     const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
@@ -176,11 +176,6 @@ vtkSmartPointer<vtkPolyData> CropPreviewPlug::GetPreviewData(
     auto actor = vtkActor::SafeDownCast(targetService->GetMainProp());
     auto mapper = actor ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper()) : nullptr;
     return mapper ? vtkPolyData::SafeDownCast(mapper->GetInput()) : nullptr;
-}
-
-void CropPreviewPlug::Clear()
-{
-    m_targetStates.clear();
 }
 
 void CropPreviewPlug::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volumeMapper) const
@@ -311,6 +306,42 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     return clippingPlanes;
 }
 
+bool CropPreviewPlug::SetKeepClip(
+    vtkAbstractMapper* mapper,
+    const std::shared_ptr<InteractiveService>& referenceService,
+    const OrthogonalCropResult& previewResult) const
+{
+    if (!mapper) {
+        return false;
+    }
+
+    vtkSmartPointer<vtkPlaneCollection> clippingPlanes;
+    int expectedPlaneCount = 0;
+    switch (previewResult.GetResolvedGeometryType()) {
+    case CropShape::Box:
+        clippingPlanes = BuildBoxClip(referenceService, previewResult);
+        expectedPlaneCount = 6;
+        break;
+    case CropShape::Plane:
+        clippingPlanes = BuildPlaneClip(referenceService, previewResult);
+        expectedPlaneCount = 1;
+        break;
+    default:
+        return false;
+    }
+
+    // VTK 对多个 clipping planes 取正半空间交集；数量不足时不能静默报告预览成功，
+    // 否则退化矩阵会让整张 mesh 看起来像“KeepInside 没有生效”。
+    if (!clippingPlanes
+        || clippingPlanes->GetNumberOfItems() != expectedPlaneCount) {
+        return false;
+    }
+
+    mapper->SetClippingPlanes(clippingPlanes);
+    mapper->Modified();
+    return true;
+}
+
 bool CropPreviewPlug::SetVolumeView(
     const std::shared_ptr<InteractiveService>& targetService,
     const std::shared_ptr<InteractiveService>& referenceService,
@@ -353,12 +384,9 @@ bool CropPreviewPlug::SetVolumeView(
         return true;
     }
 
-    // 体渲染 mapper 的 clipping planes 需要 world 坐标；
-    // 结果只提供标准盒到当前输入模型，world 矩阵来自参考窗口当前主数据。
-    volumeMapper->SetClippingPlanes(
-        previewResult.GetResolvedGeometryType() == CropShape::Plane
-            ? BuildPlaneClip(referenceService, previewResult)
-            : BuildBoxClip(referenceService, previewResult));
+    if (!SetKeepClip(volumeMapper, referenceService, previewResult)) {
+        return false;
+    }
     volume->Modified();
     return true;
 }
@@ -457,21 +485,12 @@ bool CropPreviewPlug::SetVolumePlane(
 void CropPreviewPlug::ResetMeshView(
     const std::shared_ptr<InteractiveService>& targetService)
 {
-    auto key = targetService.get();
-    auto state = key ? m_targetStates.find(key) : m_targetStates.end();
-
     if (!targetService) {
-        if (state != m_targetStates.end()) {
-            state->second.mainPreviewMapper = nullptr;
-        }
         return;
     }
 
     auto actor = vtkActor::SafeDownCast(targetService->GetMainProp());
     if (!actor) {
-        if (state != m_targetStates.end()) {
-            state->second.mainPreviewMapper = nullptr;
-        }
         return;
     }
 
@@ -479,9 +498,6 @@ void CropPreviewPlug::ResetMeshView(
     if (mapper) {
         mapper->RemoveAllClippingPlanes();
         mapper->Modified();
-    }
-    if (state != m_targetStates.end()) {
-        state->second.mainPreviewMapper = nullptr;
     }
 
     auto shaderProperty = actor->GetShaderProperty();
@@ -519,16 +535,12 @@ bool CropPreviewPlug::SetMeshView(
     // 每次接管前先清空上一种 polydata 后端表达，避免 KeepInside clipping planes
     // 与 RemoveInside shader discard 在反复切换时互相残留。
     ResetMeshView(targetService);
-    auto& targetState = m_targetStates[targetService.get()];
-    targetState.mainPreviewMapper = mapper;
     if (removalMode == CropRemovalMode::KeepInside) {
-        // PolyData KeepInside 与 volume KeepInside 使用同一套 world clipping planes；
-        // mapper 会把 world planes 转回当前 actor data 坐标，因此只附加状态也能保留裁切效果。
-        mapper->SetClippingPlanes(
-            previewResult.GetResolvedGeometryType() == CropShape::Plane
-                ? BuildPlaneClip(referenceService, previewResult)
-                : BuildBoxClip(referenceService, previewResult));
-        mapper->Modified();
+        // PolyData 与 volume 共享 world clipping-plane 契约；mapper 会把 plane
+        // 转回当前 actor data 坐标，并保留各平面法线指向的正半空间交集。
+        if (!SetKeepClip(mapper, referenceService, previewResult)) {
+            return false;
+        }
         actor->Modified();
         return true;
     }

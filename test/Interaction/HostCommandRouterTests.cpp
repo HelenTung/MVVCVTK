@@ -52,6 +52,27 @@ public:
         return m_router->DispatchCommand(std::move(request));
     }
 
+    bool SetViewConfig(const HostViewConfig& viewConfig)
+    {
+        if (!m_router) {
+            return false;
+        }
+
+        HostCommandRouterRequest request;
+        request.command = HostCommandKind::ViewConfig;
+        request.viewConfig = viewConfig;
+        return m_router->DispatchCommand(std::move(request));
+    }
+
+    std::shared_ptr<VizService> GetViewService(const std::string& id) const
+    {
+        const auto* view = m_views.GetViewBySelector(
+            id,
+            false,
+            HostRenderViewRole::Auxiliary);
+        return view ? view->service : nullptr;
+    }
+
     const std::shared_ptr<HostFeatureBindings>& GetBindings() const
     {
         return m_bindings;
@@ -84,6 +105,67 @@ bool GetExpected(bool isExpected, const char* message)
         std::cerr << message << '\n';
     }
     return isExpected;
+}
+
+bool StartViewModeCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    auto context = std::make_shared<StdRenderContext>();
+    isPassed = GetExpected(
+        fixture.CreateView("mode", HostRenderViewRole::Primary3D, context),
+        "View mode case should create the target view.") && isPassed;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "View mode case should build the router.") && isPassed;
+
+    const auto service = fixture.GetViewService("mode");
+    isPassed = GetExpected(
+        service != nullptr,
+        "View mode case should expose the target service.") && isPassed;
+
+    HostViewConfig viewConfig;
+    viewConfig.viewId = "mode";
+    viewConfig.mode = VizMode::SliceTop_down;
+    isPassed = GetExpected(
+        fixture.SetViewConfig(viewConfig),
+        "View mode case should dispatch the config command.") && isPassed;
+    isPassed = GetExpected(
+        service && service->GetVizModeSetCount() == 1
+            && service->GetVizMode() == VizMode::SliceTop_down,
+        "View mode command should update the service exactly once.") && isPassed;
+    isPassed = GetExpected(
+        context->GetCameraStyleSetCount() == 1
+            && context->GetVizMode() == VizMode::SliceTop_down,
+        "View mode command should update the render context exactly once.") && isPassed;
+    isPassed = GetExpected(
+        service && service->GetVizMode() == context->GetVizMode(),
+        "View mode command should keep service and context modes equal.") && isPassed;
+    return isPassed;
+}
+
+bool StartNoContextModeCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.CreateView("modeNoContext", HostRenderViewRole::Primary3D, nullptr),
+        "Missing-context mode case should create the target view.") && isPassed;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "Missing-context mode case should build the router.") && isPassed;
+
+    const auto service = fixture.GetViewService("modeNoContext");
+    HostViewConfig viewConfig;
+    viewConfig.viewId = "modeNoContext";
+    viewConfig.mode = VizMode::SliceTop_down;
+    isPassed = GetExpected(
+        !fixture.SetViewConfig(viewConfig),
+        "View mode command should reject a target without render context.") && isPassed;
+    isPassed = GetExpected(
+        service && service->GetVizModeSetCount() == 0,
+        "Rejected view mode command should not update the service.") && isPassed;
+    return isPassed;
 }
 
 bool StartModelRepeatCase()
@@ -306,6 +388,8 @@ bool StartSubmitStateCase()
 int GetHostRouterFailCount()
 {
     int failureCount = 0;
+    failureCount += StartViewModeCase() ? 0 : 1;
+    failureCount += StartNoContextModeCase() ? 0 : 1;
     failureCount += StartModelRepeatCase() ? 0 : 1;
     failureCount += StartEscapeRepeatCase() ? 0 : 1;
     failureCount += StartCrossViewReleaseCase() ? 0 : 1;

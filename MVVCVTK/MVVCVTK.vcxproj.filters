@@ -136,9 +136,6 @@
     <Filter Include="include\App\Tasks">
       <UniqueIdentifier>{d3aa9b0c-ec19-4f61-bf3c-20e26d45f2b1}</UniqueIdentifier>
     </Filter>
-    <Filter Include="include\Analysis">
-      <UniqueIdentifier>{28b9861a-e534-4cc1-acfc-d24b4b08e910}</UniqueIdentifier>
-    </Filter>
     <Filter Include="include\Geometry">
       <UniqueIdentifier>{ee720178-1215-4a5d-8284-98f1788f757b}</UniqueIdentifier>
     </Filter>
@@ -157,9 +154,6 @@
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="include\Render\Strategies\CompositeStrategy.h">
-      <Filter>include\Render\Strategies</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Render\Strategies\MultiSliceStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="features\OrthogonalCrop\include\Render\Strategies\CropOverlay.h">
@@ -219,14 +213,8 @@
     <ClInclude Include="include\Interaction\InputCallbackHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="include\Render\StrategyFactory.h">
-      <Filter>include\Render</Filter>
-    </ClInclude>
     <ClInclude Include="include\Render\StdRenderContext.h">
       <Filter>include\Render</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Analysis\VolumeAnalysisService.h">
-      <Filter>include\Analysis</Filter>
     </ClInclude>
     <ClInclude Include="include\App\Services\AppService.h">
       <Filter>include\App\Services</Filter>
@@ -306,9 +294,6 @@
     <ClInclude Include="include\App\AppStateEvents.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="include\App\Services\AppStateSyncStrategy.h">
-      <Filter>include\App\Services</Filter>
-    </ClInclude>
     <ClInclude Include="include\App\AppStateCommands.h">
       <Filter>include\App</Filter>
     </ClInclude>
@@ -321,9 +306,6 @@
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostCommandRouter.cpp">
-      <Filter>src\Host</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Host\HostCoreServices.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostFeatureBindings.cpp">
@@ -342,9 +324,6 @@
       <Filter>src\Render\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\IsoSurfaceStrategy.cpp">
-      <Filter>src\Render\Strategies</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Render\Strategies\MultiSliceStrategy.cpp">
       <Filter>src\Render\Strategies</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp">

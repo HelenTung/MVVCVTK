@@ -454,7 +454,12 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
 
     const auto& service = targetView->service;
     if (viewConfig.mode) {
+        if (!targetView->context) {
+            std::cerr << "[Host] View mode config skipped: render context is missing." << std::endl;
+            return false;
+        }
         service->SetVizMode(*viewConfig.mode);
+        targetView->context->SetCameraStyle(*viewConfig.mode);
     }
     if (viewConfig.material) {
         service->SetMaterial(*viewConfig.material);

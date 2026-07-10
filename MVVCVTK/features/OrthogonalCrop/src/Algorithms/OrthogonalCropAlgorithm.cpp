@@ -39,6 +39,19 @@ public:
     static bool GetBoundsContained(
         const std::array<double, 6>& inputModelBounds,
         const std::array<double, 6>& cropInputModelBounds);
+    static bool GetBoundsAreValid(
+        const std::array<double, 6>& inputModelBounds,
+        const std::array<double, 6>& cropInputModelBounds,
+        CropFailure& failureReason,
+        std::string& message,
+        bool isPartialOk);
+    static bool GetCropDataModel(
+        const std::array<double, 6>& inputModelBounds,
+        const OrthogonalCropRequest& request,
+        CropDataModel& cropData,
+        CropFailure& failureReason,
+        std::string& message,
+        bool isPartialOk);
     static std::array<double, 6> GetBoxBounds(const std::array<double, 16>& boxToInputModelMatrixData);
     static vtkSmartPointer<vtkTransform> GetBoxToInput(const std::array<double, 16>& boxToInputModelMatrixData);
     static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataModel& cropData);
@@ -550,7 +563,7 @@ vtkSmartPointer<vtkPolyData> OrthoCropAlgoImpl::GetOutlineData(const CropDataMod
     output->ShallowCopy(transformFilter->GetOutput());
     return output;
 }
-bool OrthogonalCropAlgorithm::GetBoundsAreValid(
+bool OrthoCropAlgoImpl::GetBoundsAreValid(
     const std::array<double, 6>& inputModelBounds,
     const std::array<double, 6>& cropInputModelBounds,
     CropFailure& failureReason,
@@ -590,7 +603,7 @@ bool OrthogonalCropAlgorithm::GetBoundsAreValid(
     return true;
 }
 
-bool OrthogonalCropAlgorithm::GetCropDataModel(
+bool OrthoCropAlgoImpl::GetCropDataModel(
     const std::array<double, 6>& inputModelBounds,
     const OrthogonalCropRequest& request,
     CropDataModel& cropData,
@@ -661,11 +674,6 @@ std::array<int, 6> OrthoCropAlgoImpl::GetSnappedIndexBounds(vtkImageData* image,
     }
 
     return indexBounds;
-}
-
-vtkSmartPointer<vtkPolyData> OrthogonalCropAlgorithm::GetOutlinePolyData(const CropDataModel& cropData)
-{
-    return OrthoCropAlgoImpl::GetOutlineData(cropData);
 }
 
 OrthogonalCropResult OrthoCropAlgoImpl::GetBoxPreviewResult(
@@ -804,7 +812,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!GetCropDataModel(
+    if (!OrthoCropAlgoImpl::GetCropDataModel(
             OrthoCropAlgoImpl::GetImageModelBounds(image),
             request,
             cropData,
@@ -856,7 +864,7 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!GetCropDataModel(
+    if (!OrthoCropAlgoImpl::GetCropDataModel(
             OrthoCropAlgoImpl::GetPolyBounds(polyData),
             request,
             cropData,

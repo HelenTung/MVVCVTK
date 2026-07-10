@@ -7,7 +7,6 @@
 //
 // 接口层次（从底到顶）：
 //   AbstractDataManager        — 数据 I/O
-//   AbstractDataConverter<I,O> — 数据变换
 //   AbstractVisualStrategy     — 渲染策略
 //   OverlayService             — 图层叠加服务
 //   AbstractAppService         — 基础渲染服务
@@ -59,17 +58,6 @@ public:
     }
     virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
-};
-
-// ─────────────────────────────────────────────────────────────────────
-// AbstractDataConverter<InputT, OutputT>
-// ─────────────────────────────────────────────────────────────────────
-template <typename InputT, typename OutputT>
-class AbstractDataConverter {
-public:
-    virtual ~AbstractDataConverter() = default;
-    virtual vtkSmartPointer<OutputT> GetOutputData(vtkSmartPointer<InputT> input) = 0;
-    virtual void SetParameter(const std::string& key, double value) {}
 };
 
 // ─────────────────────────────────────────────────────────────────────

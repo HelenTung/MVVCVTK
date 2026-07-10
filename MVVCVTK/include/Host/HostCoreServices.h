@@ -7,7 +7,6 @@ class CropBridge;
 class RawVolumeDataManager;
 class SharedInteractionState;
 class SharedStateBroadcaster;
-class VolumeAnalysisService;
 
 // core services 是 host/session 层的“窗口无关”组合结果，由 VtkAppHostSession 创建，
 // 再交给 HostRenderViewSet 和 HostFeatureBindings 共享使用。
@@ -20,14 +19,8 @@ struct HostCoreServices {
     std::shared_ptr<SharedStateBroadcaster> sharedStateBroadcaster;
     // 会话共享状态真源；render view 和 feature 只读/更新这里，不各自缓存加载状态。
     std::shared_ptr<SharedInteractionState> sharedState;
-    // 图像分析服务，例如直方图；它依赖 sharedDataMgr，但不持有窗口。
-    std::shared_ptr<VolumeAnalysisService> imageAnalysis;
     // 孔隙 feature 服务负责计算、显示模式状态和 overlay 生命周期；host 只注入目标和主线程 tick。
     std::shared_ptr<GapAnalysisService> gapAnalysis;
     // 裁切交互桥，连接裁切 feature 与 host 窗口；具体 reference/preview 窗口在激活请求到来后再绑定。
     std::shared_ptr<CropBridge> orthogonalCropBridge;
 };
-
-// 构建一次 session 的窗口无关服务集合。调用方再把它传入窗口层和 feature 绑定层，
-// 因此这里不读取 Config::renderViews，也不安装任何热键。
-HostCoreServices BuildHostCoreServices();

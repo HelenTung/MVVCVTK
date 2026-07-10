@@ -19,22 +19,37 @@ public:
     }
 
     void SetCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr) {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            if (callback) {
-                m_pendingCallback = std::move(callback);
-            }
-            else if (m_callback) {
-                callback = std::move(m_callback);
-                m_callback = nullptr;
-                m_pendingCallback = std::move(callback);
-            }
-            else {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        if (!callback) {
+            if (!m_callback) {
                 return;
             }
-            m_isNextOk = isSuccess;
-            m_hasPendingCallback = true;
+            callback = std::move(m_callback);
+            m_callback = nullptr;
         }
+
+        if (m_pendingCallback) {
+            // 1. 旧闭包和它的结果先按值快照，避免后一个后台任务覆盖前一个结果。
+            // 2. 组合闭包按完成顺序调用，且每个业务回调只接收自己的结果。
+            // 3. 仍只占用现有 pending 槽，主线程继续在锁外一次性执行全部回调。
+            auto priorCallback = std::move(m_pendingCallback);
+            const bool isPriorOk = m_isNextOk;
+            m_pendingCallback = [
+                priorCallback = std::move(priorCallback),
+                isPriorOk,
+                callback = std::move(callback),
+                isSuccess](bool) mutable
+            {
+                priorCallback(isPriorOk);
+                callback(isSuccess);
+            };
+        }
+        else {
+            m_pendingCallback = std::move(callback);
+        }
+
+        m_isNextOk = isSuccess;
+        m_hasPendingCallback = true;
     }
 
     void SendCallback() {
@@ -59,7 +74,7 @@ public:
 private:
     mutable std::mutex m_mutex;
     std::function<void(bool)> m_callback; // 当前业务方注册但尚未触发的回调
-    std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调
-    bool m_isNextOk{ false }; // 与 m_pendingCallback 对应的任务结果快照
+    std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调或组合闭包
+    bool m_isNextOk{ false }; // 单回调的结果快照；组合闭包自行保存每个任务的结果
     std::atomic<bool> m_hasPendingCallback{ false }; // 后台线程只投递结果，主线程在心跳阶段统一执行回调
 };
