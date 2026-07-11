@@ -46,9 +46,11 @@ private:
     std::array<double, 6> GetPolyBounds() const;
     std::size_t GetRamBytes() const;
 
-    // router 持有当前后端输入快照，公开头文件不暴露具体缓存策略。
+    // 当前 image 输入的 VTK 共享 owner；SetInputImage 替换，image/volume 路由读取同一对象。
     vtkSmartPointer<vtkImageData> m_inputImage;
+    // 当前 polydata 输入的 VTK 共享 owner；SetInputPolyData 替换，ClearInputPolyData 释放本侧引用。
     vtkSmartPointer<vtkPolyData> m_inputPolyData;
+    // 调用方选择的首选数据源；GetActiveDataSource 在对应输入缺失时按现有 image、polydata 顺序回退。
     OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::ImageData;
 };
 

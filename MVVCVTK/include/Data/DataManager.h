@@ -6,23 +6,23 @@
 #include <string>
 
 struct ReconBuffer {
-    std::vector<float>    data; // 拷贝自重建输出的连续 float 体素
-    std::array<int, 3>    dims = { 0, 0, 0 }; // LPS 输入的 [X, Y, Z] 体素数
-    std::array<float, 3>  spacing = { 1.f, 1.f, 1.f }; // LPS 物理轴体素间距，单位沿用上游
-    std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // LPS 物理原点，提交到 VTK 前统一转 RAS
+    std::vector<float>    data; // LPS 连续体素，布局为 [z][y][x]、X 最快，期望元素数为 X*Y*Z
+    std::array<int, 3>    dims = { 0, 0, 0 }; // LPS [X, Y, Z] 体素数；任一维为 0 表示空 buffer
+    std::array<float, 3>  spacing = { 1.f, 1.f, 1.f }; // LPS [sx, sy, sz] 物理间距，单位沿用上游
+    std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // LPS [x, y, z] 物理原点，提交 VTK 前转为 RAS
 };
 
 // image 与 version 由 current 事务同锁快照；返回的智能指针不冻结后续 VTK 对象内容。
 struct ImageState {
-    vtkSmartPointer<vtkImageData> image;
-    DataVersion version = 0;
+    vtkSmartPointer<vtkImageData> image; // current image 的共享引用；可为空，且不构成深拷贝
+    DataVersion version = 0; // current 每次成功提交递增；0 表示尚无已提交版本
 };
 
 class BaseDataManager : public AbstractDataManager
 {
 protected:
     class Impl;
-    // Base Impl 独占 current image、range、spacing、version 真源及其事务锁。
+    // 随 BaseDataManager 生命周期独占 current image、range、spacing、version 真源及其事务锁。
     std::unique_ptr<Impl> m_impl;
 
     // 文件/TIFF 同步加载路径直接提交 current 四元组；空 image 不改变现有真源。
@@ -63,7 +63,8 @@ public:
 
 private:
     class Impl;
-    // Raw Impl 只拥有 pending image、派生元数据、门铃及其事务锁，不复制 Base Impl 的 current 状态。
+    // 随 RawVolumeDataManager 生命周期独占 pending image、派生元数据、门铃及其事务锁；
+    // 后台生产完整批次，主线程接管后清门铃，不复制 Base Impl 的 current 状态。
     std::unique_ptr<Impl> m_rawImpl;
 };
 
@@ -78,5 +79,6 @@ public:
 
 private:
     class Impl;
+    // 随 TiffVolumeDataManager 生命周期独占 TIFF 读取与 LPS/RAS 转换实现，不持有 Base current 真源。
     std::unique_ptr<Impl> m_impl;
 };

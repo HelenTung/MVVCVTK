@@ -56,40 +56,31 @@ private:
     // 把主模型矩阵同步到 overlay prop。
     static void SetPropTransform(vtkProp3D* prop, const std::array<double, 16>& modelToWorldMatrixData);
 
-    // 裁切盒 outline actor。
+    // 构造期创建并由本策略与 BaseVisualStrategy prop 列表共同保留的 Box outline pipeline；
+    // mapper 保留最后输入，m_hasOutline/ClearPreview 负责决定其是否可见。
     vtkSmartPointer<vtkActor> m_outlineActor;
-
-    // 裁切盒 outline mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_outlineMapper;
 
-    // polydata 可选裁切结果 actor。
+    // 构造期创建并保留的可选 clipped-polydata pipeline；每次成功 result 替换 mapper 输入和可见性。
     vtkSmartPointer<vtkActor> m_polyDataActor;
-
-    // polydata 可选裁切结果 mapper。
     vtkSmartPointer<vtkPolyDataMapper> m_polyDataMapper;
 
-    // 2D submit mask image slice。
+    // 2D mask pipeline；mapper 通过 VTK 引用计数保留最新 mask，ClearPreview 只关闭可见状态。
     vtkSmartPointer<vtkImageSlice> m_maskSlice;
-
-    // 2D mask slice 对应的 reslice mapper。
     vtkSmartPointer<vtkImageResliceMapper> m_maskMapper;
-
-    // mask 颜色查找表。
+    // 本策略持有的 LUT：0 透明、非零为固定 preview 色，生命周期覆盖整个策略。
     vtkSmartPointer<vtkLookupTable> m_maskLut;
-
-    // 当前切片平面。
+    // mapper 引用的当前切片平面；SetVisualState 用 cursor 和 m_sliceAxis 原地更新。
     vtkSmartPointer<vtkPlane> m_slicePlane;
 
-    // 当前是否已经有 outline 可显示。
+    // 从最新成功 result 派生的 payload 有效位；ClearPreview 清零，但不作为几何真源。
     bool m_hasOutline = false;
-
-    // 当前是否已经有 mask image 可显示。
     bool m_hasMaskImage = false;
 
     // 是否允许当前窗口显示 3D 几何参照线框。
     // 非 reference 预览窗口仍可显示裁切后的主模型效果，但不再额外画一个像可拖拽 box 的线框。
     bool m_isRefVisible = true;
 
-    // 当前窗口切片轴；3D 时通常为 -1。
+    // 当前窗口切片轴：0/1/2 选择轴法线，负值表示 3D；其它正值会使 mask 隐藏。
     int m_sliceAxis = -1;
 };

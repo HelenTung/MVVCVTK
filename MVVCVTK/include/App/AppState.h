@@ -353,37 +353,42 @@ public:
     }
 
 private:
+    // 同时保护 event sink 与下方全部状态 payload；任何外部回调都必须在解锁后执行。
     mutable std::mutex m_mutex;
+    // 共享持有可替换的广播出口；SendFlags 在锁内复制，在锁外调用，避免回调重入同一状态锁。
     std::shared_ptr<IStateEventSink> m_eventSink;
 
-    // 数据生命周期状态
-    LoadState m_dataTrustedState = LoadState::Idle;            // 当前数据可信状态（Idle / Loading / Succeeded / Failed）
-    LoadState m_fileLoadState = LoadState::Idle;               // 当前文件流加载状态（Idle / Loading / Succeeded / Failed）
-    LoadState m_reloadLoadState = LoadState::Idle;             // 当前重载加载状态（Idle / Loading / Succeeded / Failed）
-    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 最近一次待主线程收敛的 load 事件来源
-    std::array<double, 2> m_dataRange = { 0.0, 255.0 };        // 当前体数据标量范围
-    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // 当前体数据 spacing（RAS 世界坐标系）
+    // 数据生命周期状态由加载任务生产、各 VizService 在 DataReady/LoadFailed 广播后读取。
+    LoadState m_dataTrustedState = LoadState::Idle;            // 当前 image 是否可供渲染链消费
+    LoadState m_fileLoadState = LoadState::Idle;               // 文件 I/O 链路的独立终态
+    LoadState m_reloadLoadState = LoadState::Idle;             // buffer pending/提交链路的独立终态
+    // 最近一次终态广播的来源快照；新终态覆盖旧值，各窗口复制后在自己的消费状态中清零。
+    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None;
+    std::array<double, 2> m_dataRange = { 0.0, 255.0 };        // current image 标量范围 [min, max]
+    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // current image 的 RAS [sx, sy, sz]
 
     // 渲染配置状态
-    std::vector<TFNode> m_nodes;                                // 当前体渲染传输函数节点
-    double m_isoValue = 0.0;                                    // 当前等值面阈值
-    MaterialParams m_material;                                  // 当前材质参数
-    BackgroundColor m_background;                               // 当前背景色
-    WindowLevelParams m_windowLevel;                            // 当前切片窗宽/窗位
+    std::vector<TFNode> m_nodes;                                // 当前体渲染传输函数节点真源
+    double m_isoValue = 0.0;                                    // 当前等值面阈值，单位同 data range
+    MaterialParams m_material;                                  // 当前材质快照，增量同步时复制给 Strategy
+    BackgroundColor m_background;                               // 当前归一化 RGB 背景色
+    WindowLevelParams m_windowLevel;                            // 当前窗宽/窗位，单位同 data range
     uint32_t m_visibilityMask = VisFlags::Planes3D
         | VisFlags::Crosshair
-        | VisFlags::Ruler;                                      // 当前辅助元素可见性掩码
+        | VisFlags::Ruler;                                      // VisFlags 组合，SetElementVisible 生产、Strategy 消费
 
     // 交互状态
-    bool m_isInteracting = false;                               // 当前是否处于高频交互中
-    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 };    // 当前联动光标世界坐标
-    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 原始拾取得到的世界坐标
-    int m_cursorAxis = -1;                                      // 当前光标来源轴（-1 表示自由点）
+    bool m_isInteracting = false;                               // press/drag 置位、对应 release 清零的高频交互状态
+    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 };    // 轴约束后的联动点，VTK world [x, y, z]
+    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 约束前拾取点，VTK world [x, y, z]
+    int m_cursorAxis = -1;                                      // 来源轴：0/1/2 为 X/Y/Z，-1 为自由点
 
     // 模型状态
+    // model-to-world 仿射真源，world = M * model；按 vtkMatrix4x4::DeepCopy 的
+    // [m00, m01, ..., m03, m10, ..., m33] 顺序展开。
     std::array<double, 16> m_modelMatrix = {
         1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
-    };                                                         // 当前模型矩阵（列主序 4x4）
+    };
 
     void SendFlags(UpdateFlags flags) {
         std::shared_ptr<IStateEventSink> eventSink;

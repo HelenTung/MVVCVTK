@@ -29,13 +29,13 @@ public:
     CropRouter(CropRouter&&) noexcept;
     CropRouter& operator=(CropRouter&&) noexcept;
 
-    // 绑定 image 输入，供交互桥或 main 在数据加载后注入。
+    // 绑定 image 输入；router 通过 vtkSmartPointer 保持共享引用，直到替换或自身销毁。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
 
     // 返回当前 router 绑定的 image 输入。
     vtkSmartPointer<vtkImageData> GetInputImage() const;
 
-    // 绑定本次 polydata 输入；来源生命周期由调用方负责。
+    // 绑定 polydata 输入；router 通过 vtkSmartPointer 保持共享引用，ClearInputPolyData 显式释放本侧引用。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
 
     // 清空 polydata 输入，避免临时 preview 缓存影响后续 active input 判断。
@@ -62,5 +62,6 @@ public:
 
 private:
     class Impl;
+    // 唯一拥有 router 输入缓存和数据源选择状态；随 CropRouter 移动并在析构时统一释放。
     std::unique_ptr<Impl> m_impl;
 };

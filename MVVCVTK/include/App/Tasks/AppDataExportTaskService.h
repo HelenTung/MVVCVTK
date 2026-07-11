@@ -39,8 +39,11 @@ public:
 private:
     void SetSaveCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr);
 
+    // service 与 packaged_task 共享拥有 DataManager，保证后台重采样/I/O 期间数据入口存活。
     std::shared_ptr<AbstractDataManager> m_dataManager;
+    // 构造任务时读取视觉快照；任务不持有本成员，避免后台观察后续交互状态。
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    // 后台任务是生产者，VizService::SendUpdates 是消费者；状态对象串接同时完成的多个任务。
+    // 后台任务是生产者，VizService::SendUpdates 是消费者；内部 mutex 保护 callback/result payload，
+    // 原子 pending 位由 ResetSaveCallback 清零，多个同时完成的任务按投递顺序串接。
     AppTaskCallbackState m_saveCallback;
 };

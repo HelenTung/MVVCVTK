@@ -81,6 +81,7 @@ public:
     bool GetRoleIsGapOverlayRole(HostRenderViewRole role) const;
 
 private:
+    // view set 独占多窗口 runtime 集合；移动对象时一起转移，外部 endpoint 不获得该所有权。
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };

@@ -104,9 +104,11 @@ struct HostRenderViewEndpoint {
     std::string id;
     // 与 HostRenderViewConfig::role 对应，外部宿主可按角色查找主 3D 或切片窗口。
     HostRenderViewRole role = HostRenderViewRole::Auxiliary;
-    // endpoint 只暴露非拥有指针；真实生命周期由 VtkAppHostSession/外部 Qt window 共同持有。
+    // 非拥有 renderer 观察指针；对象由对应 StdRenderContext 持有，session 销毁或视图集合重建后失效。
     vtkRenderer* renderer = nullptr;
+    // 非拥有窗口观察指针；窗口可能由 StdRenderContext 创建，也可能由 Qt 注入，endpoint 不参与引用计数。
     vtkRenderWindow* renderWindow = nullptr;
+    // 非拥有 interactor 观察指针；其生命周期跟随 renderWindow，外部不得删除或另行启动其事件循环。
     vtkRenderWindowInteractor* interactor = nullptr;
 };
 
@@ -120,13 +122,21 @@ struct HostViewConfig {
     // role fallback 的目标窗口。
     HostRenderViewRole viewRole = HostRenderViewRole::Auxiliary;
 
+    // 存在时同时切换目标 service 的可视化管线和 context 相机样式；缺失时保持当前模式。
     std::optional<VizMode> mode;
+    // 存在时整组写入材质参数；若同一命令还给出 opacity，后者按分发顺序覆盖其中的透明度。
     std::optional<MaterialParams> material;
+    // 存在时写入全局材质透明度，通常取 [0, 1]；host 不裁剪数值，缺失时保持当前值。
     std::optional<double> opacity;
+    // 存在时整体替换传输函数节点；节点 position/opacity/RGB 均按 AppTypes 的归一化契约解释。
     std::optional<std::vector<TFNode>> tfNodes;
+    // 存在时写入等值面标量阈值，单位与当前输入标量一致；缺失时保持当前阈值。
     std::optional<double> iso;
+    // 存在时写入归一化 RGB 背景色，每个分量通常取 [0, 1]。
     std::optional<BackgroundColor> background;
+    // 存在时写入输入图像 X/Y/Z 物理 spacing；数组顺序固定，单位由输入数据协议决定。
     std::optional<std::array<double, 3>> spacing;
+    // 存在时整组写入切片窗宽/窗位，二者单位均与当前输入标量一致。
     std::optional<WindowLevelParams> windowLevel;
 };
 
@@ -224,7 +234,9 @@ struct HostGapVoidConfig {
 // 一次孔隙分析命令的算法参数集合。
 // surface 决定等值面输入阈值，voidDetection 决定孔隙候选筛选；二者随同激活请求一起进入 host binding。
 struct HostGapConfig {
+    // 等值面阈值来源配置；host 校验后转换为 GapAnalysisSurfaceRequest。
     HostGapSurface surface;
+    // 孔隙候选筛选配置；host 校验后转换为 VoidDetectionParams，与 surface 同批次下发。
     HostGapVoidConfig voidDetection;
 };
 

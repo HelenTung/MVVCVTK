@@ -17,18 +17,18 @@ class vtkRenderWindowInteractor;
 // ─────────────────────────────────────────────────────────────────────
 struct InteractionEvent
 {
-    // ── VTK 原始事件 ID（vtkCommand::LeftButtonPressEvent 等） ────────
+    // ── VTK 原始事件 ID（vtkCommand::LeftButtonPressEvent 等）；0 表示未填充 ──
     unsigned long vtkEventId = 0;
 
-    // ── 原始 interactor 指针（供 Handler 在必要时做额外查询，通常不需要） ──
-    // 注意：Handler 不应通过此指针修改 VTK 状态；中止标志由 Router 统一处理
+    // ── 非拥有 interactor 观察指针，仅在当前 Dispatch 调用期间有效 ──────────
+    // Handler 通常不需要查询它，且不得借此修改 VTK 状态；中止标志由 Router 统一处理。
     vtkRenderWindowInteractor* iren = nullptr;
 
     // ── 鼠标屏幕坐标（像素，左下角为原点，与 VTK 约定一致） ───────────
     int x = 0;
     int y = 0;
 
-    // ── 键盘修饰键 ─────────────────────────────────────────────────────
+    // ── 当前事件的键盘修饰键快照；true 表示分发时对应按键处于按下状态 ──────
     bool isShiftDown = false;
     bool isCtrlDown = false;
     bool isAltDown = false;
@@ -37,7 +37,7 @@ struct InteractionEvent
     char        keyCode = 0;    // iren->GetKeyCode()，单字符输入；具体功能键由宿主映射
     std::string keySym;         // iren->GetKeySym()，非字符按键的符号名；具体含义由宿主映射
 
-    // ── 当前渲染/工具模式（由 RenderContext 在分发前填入） ─────────────
-    VizMode  vizMode = VizMode::Volume;
-    ToolMode toolMode = ToolMode::Navigation;
+    // ── RenderContext 在分发前写入的模式快照 ───────────────────────────
+    VizMode  vizMode = VizMode::Volume; // 决定 2D/3D Handler 的视图分支
+    ToolMode toolMode = ToolMode::Navigation; // 决定导航或模型变换路径
 };

@@ -68,16 +68,25 @@ private:
     void OnWidgetEvent(unsigned long eventId);
     void SetVisualState(CropInteractionPhase phase);
 
+    // 非拥有事件源；SetInteractor 注入，启用期间必须有效，Impl 不负责删除。
     vtkRenderWindowInteractor* m_interactor = nullptr;
+    // Impl 持有 widget/representation 的 VTK 引用；widget 同时引用 representation。
     vtkSmartPointer<vtkBoxWidget2> m_widget;
     vtkSmartPointer<vtkBoxRepresentation> m_representation;
+    // Impl 持有 VTK 回调命令；clientData 指回 this，析构时先清空以切断悬空回调入口。
     vtkSmartPointer<vtkCallbackCommand> m_callbackCommand;
+    // 上层回调值副本；VTK 事件线程同步消费，SetBoundsCallback 替换。
     BoundsCallback m_boundsCallback;
+    // 最近一次成功 On/Off 后的逻辑状态；启用前置校验失败时不改写。
     bool m_isEnabled = false;
+    // observer 只懒绑定一次；tag 由 AddObserver 生产，Impl 析构逐项 RemoveObserver。
     bool m_hasObservers = false;
     std::array<unsigned long, 3> m_observerTags = { 0, 0, 0 };
+    // representation 当前 world AABB 派生缓存；交互事件更新，不能表达有向盒旋转姿态。
     std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 最近一次 PlaceWidget 的 world AABB 基准快照；与当前角点一起反解 base-to-current affine。
     std::array<double, 6> m_baseBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 调用方提供的 world AABB 回退值；当前 bounds 无效或首次启用时消费。
     std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 };
 

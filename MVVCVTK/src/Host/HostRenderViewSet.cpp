@@ -46,6 +46,8 @@ private:
         std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> sharedState,
         std::shared_ptr<IStateEventSource> stateEventSource) const;
+    // Impl 是 runtime 集合的唯一容器 owner；查询返回的引用/裸指针只在下一次 Build、移动或析构前有效。
+    // Build 会先 clear 再重新组装 service/context，因此调用方不得跨视图拓扑重建缓存元素地址。
     std::vector<HostRenderViewRuntime> m_views;
 };
 

@@ -11,24 +11,33 @@
 
 class StdRenderContext : public AbstractRenderContext {
 private:
-    std::shared_ptr<InteractiveService> m_interactiveService; // 交互服务入口，Router 最终把事件委托给它更新状态
-    vtkSmartPointer<vtkRenderWindowInteractor>  m_interactor; // VTK 事件源与主循环载体
-    vtkSmartPointer<vtkCallbackCommand>         m_eventCallback; // 统一转发 VTK 事件到当前 RenderContext
-    vtkSmartPointer<vtkPropPicker>              m_picker; // 2D/3D 交互命中检测共用的拾取器
+    // 共享拥有交互服务；Router 内 Handler 只观察裸指针，换绑 service 时立即重建。
+    std::shared_ptr<InteractiveService> m_interactiveService;
+    // 持有当前 interactor 的 VTK 引用；可接管宿主注入对象，替换前移除旧 observer/timer。
+    vtkSmartPointer<vtkRenderWindowInteractor>  m_interactor;
+    // 持有统一 VTK callback；ClientData 非拥有指向 this，析构前先解除全部 observer。
+    vtkSmartPointer<vtkCallbackCommand>         m_eventCallback;
+    // Context 独占引用的共享拾取器；2D/3D Handler 仅持有其裸观察指针。
+    vtkSmartPointer<vtkPropPicker>              m_picker;
 
-    VizMode  m_currentMode = VizMode::Volume; // 当前视图模式，决定相机风格与事件路由目标
-    ToolMode m_toolMode = ToolMode::Navigation; // 当前工具模式，决定事件是否进入模型变换专用路径
+    VizMode  m_currentMode = VizMode::Volume; // SetCameraStyle 写入，并复制到后续事件决定 2D/3D 路由
+    ToolMode m_toolMode = ToolMode::Navigation; // SetToolMode 写入，并复制到事件决定模型变换路径
 
     // ── 路由器（替代原来 OnVTKEvent 里的手写 if-else） ──────────
-    InteractionRouter m_interactionRouter; // 把 Timer / 2D / 3D 交互处理器组织成统一派发链
-    std::vector<unsigned long> m_observerTags; // 当前 interactor 上由本 context 注册的业务 observer
-    unsigned long m_timerObserverTag = 0; // 当前 TimerEvent observer tag，替换 interactor 时精确移除
-    int m_timerId = 0; // CreateRepeatingTimer 返回的 timer id，用于避免重复创建和精确销毁
-    std::function<InteractionResult(const InteractionEvent&)> m_inputHandler; // host 输入适配 hook，不携带 host 或 feature 语义
-    std::vector<unsigned long> m_inputEventIds; // 限定输入 hook 消费的 VTK 事件，避免影响鼠标和 timer 链路
-    std::function<void()> m_timerHandler; // host 主线程 tick hook，TimerEvent 生命周期仍归 RenderContext
+    // 独占按优先级排列的 Handler；service/window/input hook 变化时清空并重建，避免悬空观察指针。
+    InteractionRouter m_interactionRouter;
+    // 当前 interactor 生成的业务 observer tag；替换 interactor 或析构时逐项移除并清空。
+    std::vector<unsigned long> m_observerTags;
+    unsigned long m_timerObserverTag = 0; // TimerEvent observer tag；RemoveTimer 后清零
+    int m_timerId = 0; // CreateRepeatingTimer 返回值；0 表示未创建，RemoveTimer 负责销毁并清零
+    // Context 按值持有 host 输入 hook；空 eventIds 匹配全部事件，设置/清除后重建对应 Handler。
+    std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;
+    std::vector<unsigned long> m_inputEventIds;
+    // Context 按值持有主线程 tick hook；每个 TimerEvent 在 Router 分发后同步调用，Clear 时释放。
+    std::function<void()> m_timerHandler;
 
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
+    // 延迟创建并持有方向轴 widget；始终绑定当前 interactor，Context 析构时释放 VTK 引用。
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
 
     // 外部宿主窗口可能已经带有自己的 interactor；集中接管可以复用同一套路由和 observer 生命周期。

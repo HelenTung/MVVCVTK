@@ -44,5 +44,6 @@ public:
         RouterDispatchMode mode = RouterDispatchMode::FirstMatch);
 
 private:
+    // Router 独占 Handler，vector 顺序即 FirstMatch 优先级；ClearHandlers/析构会销毁全部实例。
     std::vector<std::unique_ptr<IInteractionHandler>> m_handlers;
 };

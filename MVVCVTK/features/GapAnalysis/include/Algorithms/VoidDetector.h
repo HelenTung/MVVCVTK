@@ -19,18 +19,21 @@
 
 class VoidDetector {
 public:
-    // ── Step 1：泛洪填充构建内部掩码 ───────────────────────────────
+    // ── Step 1：从体积六个边界做 6 邻域泛洪；返回 x-fast uint8 mask，1 表示未连通外界的 sub-ISO voxel ──
     static std::vector<uint8_t> CreateInteriorMask(
         const VolumeBuffer& vol,
         float               isoValue);
 
-    // ── Step 2：候选空洞提取（灰度阈值筛选）────────────────────────
+    // ── Step 2：在内部 mask 上应用 grayMax 与六邻域腐蚀，再从幸存种子回长原始候选 ──
+    // 当前只消费 grayMax 与 erosionIterations；grayMin、角度和张量窗口不参与本阶段。
     static std::vector<uint8_t> BuildCandidates(
         const VolumeBuffer& vol,
         const std::vector<uint8_t>& interiorMask,
         const VoidDetectionParams& params);
 
-    // ── Step 3：结构张量场驱动的连通域分析 ─────────────────────────
+    // ── Step 3：按 6 邻域生成连通区域、统计与 x-fast 标签体 ─────────
+    // outLabelVol 会被重建为 dims 乘积个元素；0 为未保留 voxel，正值与返回区域 id 对应。
+    // 当前只消费 minVolumeMM3；未执行结构张量或角度合并。
     static std::vector<VoidRegion> BuildRegions(
         const VolumeBuffer& vol,
         std::vector<uint8_t>& candidateMask,
@@ -82,6 +85,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     std::vector<uint8_t> exterior(total, 0);
 
     struct QNode {
+        // x-fast 扁平 offset，与同一节点的 [x, y, z] index 成对缓存以加速边界分支。
         size_t idx;
         int x, y, z;
     };
@@ -259,7 +263,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
 
     const std::array<long long, 6> offsets6 = { 1, -1, (long long)dx, -(long long)dx, (long long)slice, -(long long)slice };
 
-    // 13个独立方向 (用于表面积计算)
+    // 13 个无符号方向及其反向共同形成 26 邻域穿越计数，只用于近似表面积，不改变 6 邻域连通标签。
     const std::vector<std::array<int, 3>> directions13 = {
         {1,0,0}, {0,1,0}, {0,0,1},
         {1,1,0}, {1,-1,0}, {1,0,1}, {1,0,-1}, {0,1,1}, {0,1,-1},
@@ -360,7 +364,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
                 region.yProjection = (region.bbox[3] - region.bbox[2] + 1) * vol.spacing[1];
                 region.zProjection = (region.bbox[5] - region.bbox[4] + 1) * vol.spacing[2];
 
-                // 5. PCA 分析
+                // 5. PCA：协方差在无 origin 的 physical offset 上计算；平移不改变特征值。
                 double cov[3][3];
                 cov[0][0] = sumXX / region.voxelCount - (sumX / region.voxelCount) * (sumX / region.voxelCount);
                 cov[1][1] = sumYY / region.voxelCount - (sumY / region.voxelCount) * (sumY / region.voxelCount);
@@ -374,7 +378,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
                 double* vecPtr[3] = { eigenVecs[0], eigenVecs[1], eigenVecs[2] };
                 vtkMath::Jacobi(covPtr, eigenVals, vecPtr);
 
-                // 排序特征值 (vtkMath::Jacobi 已经按降序排序)
+                // vtkMath::Jacobi 返回降序特征值，单位为 mm^2；这里保存特征值而不是主轴长度。
                 region.pcaAxes = { eigenVals[0], eigenVals[1], eigenVals[2] };
                 if (eigenVals[0] > 1e-9) {
                     region.elongation = std::sqrt(std::max(0.0, eigenVals[1] / eigenVals[0]));
@@ -384,7 +388,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
                     region.pcaMaxDeviationRatio = (eigenVals[2] > 1e-9) ? (eigenVals[0] / eigenVals[2]) : 0.0;
                 }
 
-                // 6. 投影面积与表面积 (13方向)
+                // 6. 三个轴向占据投影面积，以及 13 方向边界穿越的近似表面积。
                 std::vector<uint8_t> projXY((size_t)(region.bbox[1] - region.bbox[0] + 1) * (region.bbox[3] - region.bbox[2] + 1), 0);
                 std::vector<uint8_t> projXZ((size_t)(region.bbox[1] - region.bbox[0] + 1) * (region.bbox[5] - region.bbox[4] + 1), 0);
                 std::vector<uint8_t> projYZ((size_t)(region.bbox[3] - region.bbox[2] + 1) * (region.bbox[5] - region.bbox[4] + 1), 0);

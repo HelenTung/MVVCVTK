@@ -42,8 +42,12 @@ public:
 private:
     bool GetAnyLoadRunning() const;
 
+    // 与构造出的 packaged_task 共享拥有 DataManager；保证后台 I/O 期间数据入口存活。
     std::shared_ptr<AbstractDataManager> m_dataManager;
+    // 与后台任务共享拥有状态真源；任务只发布 load 终态，不直接触碰渲染对象。
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    AppTaskCallbackState m_fileLoadCallbackState; // 文件流加载完成后由主线程执行业务回调
-    AppTaskCallbackState m_reloadLoadCallbackState; // reload 完成后由主线程执行 submit / UI 回调
+    // Build 阶段登记 callback，主线程完成 DataReady/失败收敛后生产结果，SendUpdates 领取并锁外执行。
+    AppTaskCallbackState m_fileLoadCallbackState;
+    // reload 的 pending image 提交完成后由主线程生产结果，SendUpdates 领取并锁外执行 submit/UI 回调。
+    AppTaskCallbackState m_reloadLoadCallbackState;
 };

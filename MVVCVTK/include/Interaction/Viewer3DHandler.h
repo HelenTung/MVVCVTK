@@ -22,12 +22,14 @@ public:
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
+    // 非拥有观察指针；StdRenderContext 持有 service 与 VTK 对象，Router 重建会先销毁本 Handler。
     InteractiveService* m_service = nullptr;
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
 
-    bool m_isDragging = false; // 是否正在拖拽平面
-    int  m_dragAxis = -1;    // 当前拖拽的轴向（0/1/2 = X/Y/Z）
-    int  m_lastMouseX = 0;     // 上一帧鼠标 X（屏幕像素）
-    int  m_lastMouseY = 0;     // 上一帧鼠标 Y（屏幕像素）
+    bool m_isDragging = false; // 命中参考平面后置位，左键 release 清零
+    int  m_dragAxis = -1;    // 单轴约束：0/1/2 为 world X/Y/Z，-1 表示未拖拽
+    // 上一帧 VTK display 坐标，单位像素、左下角为原点；用于反投影鼠标增量。
+    int  m_lastMouseX = 0;
+    int  m_lastMouseY = 0;
 };

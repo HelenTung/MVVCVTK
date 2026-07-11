@@ -75,15 +75,23 @@ public:
     }
 
     bool GetVoxelReady() const noexcept {
+        // 只检查别名是否非空；dims 与 vector size 的一致性由快照生产方保证。
         return voxelsPtr != nullptr;
     }
 
-    std::vector<float> voxels; // 稳定快照的实际所有者；voxelsPtr 始终指向它的 data()
+    // x-fast 连续体素的唯一数据 owner，offset = x + y*dims[0] + z*dims[0]*dims[1]。
+    // 直接改变该 public vector 的 size/capacity 会绕过别名重绑；生产方应通过 SetOwnedVoxels 或赋值运算更新。
+    std::vector<float> voxels;
+    // 非拥有只读别名；构造、赋值和 SetOwnedVoxels 后重绑到 voxels.data()，空 vector 时为 nullptr。
     const float* voxelsPtr = nullptr;
 
+    // voxel 数量 [dimX, dimY, dimZ]；有效快照要求三项为正且 voxels 至少覆盖三者乘积。
     std::array<int, 3>     dims = { 0, 0, 0 };
+    // 相邻 voxel 的轴向 physical 间距 [x, y, z]；Gap 统计按 mm 解释。
     std::array<double, 3>  spacing = { 1.0, 1.0, 1.0 };
+    // index [0,0,0] 的输入 physical 原点 [x, y, z]，按 mm 解释；快照不保存 image direction。
     std::array<double, 3>  origin = { 0.0, 0.0, 0.0 };
+    // owned voxels 的输入标量域闭区间；显示请求用它解析 DataRangeRatio ISO。
     float                 minVal = 0.f;
     float                 maxVal = 0.f;
 
@@ -115,7 +123,7 @@ public:
         return c0 * (1 - tz) + c1 * tz;
     }
 
-    // ── 三线性插值：世界坐标 (mm) ────────────────────────────────────
+    // ── 三线性插值：轴对齐 input physical 坐标 (mm)；不应用 VTK direction matrix ──
     inline float GetTrilinearValueByWorld(double x, double y, double z) const noexcept {
         return GetTrilinearValueByIndex(
             static_cast<float>((x - origin[0]) / spacing[0]),

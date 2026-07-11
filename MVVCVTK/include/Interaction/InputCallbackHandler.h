@@ -20,6 +20,8 @@ public:
 private:
     bool GetEventMatched(unsigned long eventId) const;
 
+    // Handler 按值拥有外部适配 callback；仅命中 eventIds 后同步调用，捕获对象生命周期由 callback 决定。
     Callback m_callback;
+    // VTK event id 白名单；空数组表示匹配所有送达本 Handler 的事件。
     std::vector<unsigned long> m_eventIds;
 };

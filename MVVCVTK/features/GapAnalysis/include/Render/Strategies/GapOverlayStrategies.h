@@ -14,7 +14,9 @@
 // =====================================================================
 class GapMeshOverlayStrategy : public BaseVisualStrategy {
 private:
+    // 构造期创建的 3D overlay prop；本策略和 BaseVisualStrategy managed-prop 列表共同保留 VTK 引用。
     vtkSmartPointer<vtkActor> m_actor;
+    // actor 使用的 mapper；SetInputData 通过 VTK 引用计数保留最新 void mesh。
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
 
 public:
@@ -54,11 +56,16 @@ public:
 // =====================================================================
 class GapSliceOverlayStrategy : public BaseVisualStrategy {
 private:
+    // 构造期创建的 2D label prop；本策略和 BaseVisualStrategy managed-prop 列表共同保留 VTK 引用。
     vtkSmartPointer<vtkImageSlice> m_slice;
+    // label image reslice mapper；持有最新输入和 SetInputData 创建的 slice plane。
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
+    // 生命周期覆盖整个策略的标签 LUT：0 透明，所有正标签统一为不透明红色。
     vtkSmartPointer<vtkLookupTable> m_lut;
+    // 当前窗口固定轴向；构造后不变，用于选择 plane normal。
     Orientation m_orientation;
-    double m_safeOffset[3] = {0}; // 沿法线微量偏移，防止穿模闪烁
+    // 最近输入 spacing 的 [x,y,z] 缓存；当前固定 0.001 偏移尚未消费它，不是显示位置真源。
+    double m_safeOffset[3] = {0};
 public:
     GapSliceOverlayStrategy(Orientation orient) : m_orientation(orient) {
         m_slice = vtkSmartPointer<vtkImageSlice>::New();

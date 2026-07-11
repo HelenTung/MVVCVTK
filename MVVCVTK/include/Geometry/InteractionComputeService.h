@@ -8,13 +8,15 @@
 #include <optional>
 
 struct SliceExportData {
-    Orientation orientation = Orientation::Top_down;
+    Orientation orientation = Orientation::Top_down; // 由切片 VizMode 选择的导出轴向；默认 Top_down
+    // 提交时的 model-to-world 快照，world = M * model；可已叠加绕 cursorWorld 的可选旋转。
+    // 按 vtkMatrix4x4::DeepCopy 的 [m00, m01, ..., m03, m10, ..., m33] 顺序展开。
     std::array<double, 16> matrix = {
         1,0,0,0,
         0,1,0,0,
         0,0,1,0,
         0,0,0,1
-    }; // 当前切片导出任务应使用的模型到世界坐标矩阵快照
+    };
 };
 
 class InteractionComputeService {

@@ -67,17 +67,26 @@ private:
     void SetPlaneRep();
     void OnWidgetEvent(unsigned long eventId);
 
+    // 非拥有事件源；SetInteractor 注入，启用期间必须有效，Impl 不负责删除。
     vtkRenderWindowInteractor* m_interactor = nullptr;
+    // Impl 持有 widget/representation 的 VTK 引用；widget 同时引用 representation。
     vtkSmartPointer<vtkImplicitPlaneWidget2> m_widget;
     vtkSmartPointer<vtkImplicitPlaneRepresentation> m_representation;
+    // Impl 持有 VTK 回调命令；clientData 指回 this，析构时先清空以切断悬空回调入口。
     vtkSmartPointer<vtkCallbackCommand> m_callbackCommand;
+    // 上层回调值副本；VTK 事件线程同步消费，SetPlaneCallback 替换。
     PlaneCallback m_planeCallback;
+    // 最近一次成功 On/Off 后的逻辑状态；启用前置校验失败时不改写。
     bool m_isEnabled = false;
+    // observer 只懒绑定一次；tag 由 AddObserver 生产，Impl 析构逐项 RemoveObserver。
     bool m_hasObservers = false;
     std::array<unsigned long, 3> m_observerTags = { 0, 0, 0 };
+    // 调用方提供的 world AABB；决定初始中心并限定 representation 的 PlaceWidget 范围。
     std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // 当前 world 平面真源；origin 由 setter/交互更新，normal 始终在写入时归一化。
     CropVectorDouble3Array m_currentWorldOrigin = { 0.0, 0.0, 0.0 };
     CropVectorDouble3Array m_currentWorldNormal = { 0.0, 0.0, 1.0 };
+    // widget 可视半尺寸 [halfWidth, halfHeight]；只决定 PlaceWidget 范围，不限制无限平面裁切。
     std::array<double, 2> m_currentWorldHalfExtents = { 1.0, 1.0 };
 };
 

@@ -19,7 +19,7 @@ class vtkRenderWindowInteractor;
 // 只管理 widget 生命周期、bounds 与交互事件，不关心裁切算法与结果投递。
 class CropBoxWidget {
 public:
-    // 向上层报告 world bounds 与交互阶段的统一回调类型。
+    // 同步报告当前 world AABB（[minX,maxX,minY,maxY,minZ,maxZ]）与交互阶段；回调不转移 widget 所有权。
     using BoundsCallback = std::function<void(const std::array<double, 6>& worldBounds, CropInteractionPhase phase)>;
 
     CropBoxWidget();
@@ -30,7 +30,7 @@ public:
     CropBoxWidget(CropBoxWidget&&) noexcept;
     CropBoxWidget& operator=(CropBoxWidget&&) noexcept;
 
-    // 绑定 widget 所属 interactor。
+    // 绑定非拥有的 interactor；调用方须保证它在 widget 启用期间有效。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
 
     // 设置参考 world bounds；当前 world bounds 无效时会回退到它。
@@ -63,5 +63,6 @@ public:
 
 private:
     class Impl;
+    // 唯一拥有 VTK widget、representation、callback command、observer tag 与交互几何缓存。
     std::unique_ptr<Impl> m_impl;
 };

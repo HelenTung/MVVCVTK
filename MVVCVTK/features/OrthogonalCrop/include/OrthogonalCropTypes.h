@@ -22,9 +22,12 @@
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
 
+// active input model AABB，布局固定为 [minX, maxX, minY, maxY, minZ, maxZ]。
 using CropBoundsDouble6Array = std::array<double, 6>;
+// 三维点或向量，布局固定为 [x, y, z]；具体坐标系由字段名或接口注释限定。
 using CropVectorDouble3Array = std::array<double, 3>;
 using CropMatrixDouble16Array = std::array<double, 16>; // 4x4 仿射变换矩阵，按 VTK DeepCopy 约定展开。
+// 闭区间 voxel index bounds，布局固定为 [minI, maxI, minJ, maxJ, minK, maxK]。
 using CropIndexBoundsInt6Array = std::array<int, 6>;
 
 // 返回 4x4 单位矩阵，作为 request/result 中仿射矩阵字段的默认值。
@@ -175,22 +178,22 @@ public:
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
-    // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // 返回 active input model 单位下的平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // 该值用于保存交互尺度，不参与无限半空间裁切方程。
     const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalf; }
 
-    // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // 写入 active input model 单位下的平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     void SetPlaneHalf(const std::array<double, 2>& planeHalf)
     {
         m_planeHalf = planeHalf;
     }
 
-    // 返回由 boxToInputModelMatrix 派生出的 active input model AABB。
-    // image model 底层由 VTK physical-point API 表达；polyData input model 对应网格自身坐标。
+    // 返回算法校验范围：Box 为 boxToInputModelMatrix 派生的 active input model AABB，
+    // Plane 为本次 active input 的完整 bounds。image model 使用 VTK physical 坐标，polyData model 使用网格自身坐标。
     const CropBoundsDouble6Array& GetInputBounds() const { return m_inputModelBounds; }
 
-    // 写入派生 active input model AABB；算法用它做 bounds 校验、index 吸附和粗范围裁剪。
-    // 它不保留旋转姿态，因此不能替代 boxToInputModelMatrix。
+    // 写入算法校验范围；Box 路径把它作为派生 AABB，Plane 路径保存完整输入 bounds。
+    // 它不保留 Box 旋转姿态，也不定义 Plane 半空间，因此不能替代对应几何真源。
     void SetInputBounds(const CropBoundsDouble6Array& inputModelBounds) { m_inputModelBounds = inputModelBounds; }
 
     // 根据当前 input model bounds 反推 active input model 中的中心点。
@@ -224,13 +227,14 @@ private:
     // Box 几何真源：保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
     // 旋转、缩放、平移都在这里，后端所有精确几何判断以它为准。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
-    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和 widget 尺度快照。
-    // 裁切方程只依赖 center + normal；halfExtents 不再表示可见裁切框，避免把无限半空间误读成有限矩形。
+    // Plane 几何真源：active input model 坐标系下的法线、中心点和 widget 尺度快照；
+    // PlanarCropAlgorithm 会归一化接受的 request，直接调用 SetPlaneNormal 本身不做归一化。
+    // 裁切方程只依赖 center + normal；halfExtents 布局为 [halfWidth, halfHeight]，不限制无限半空间。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
     std::array<double, 2> m_planeHalf = { 1.0, 1.0 };
-    // 保存由 boxToInputModelMatrix 派生出的 active input model AABB；
-    // 它用于快速排除、index 吸附和缓存键比较，不作为有向盒真源。
+    // shape 相关校验范围：Box 保存矩阵派生 AABB，Plane 保存 active input 完整 bounds；
+    // 它只服务校验、index 吸附和粗范围判断，不作为精确几何真源。
     std::array<double, 6> m_inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
 };
 
@@ -267,11 +271,11 @@ public:
         m_planeCenterInInputModel = planeCenterInInputModel;
     }
 
-    // 返回平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // 返回 active input model 单位下的平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     // Plane preview 不再把该值转换为 overlay 方框。
     const std::array<double, 2>& GetPlaneHalf() const { return m_planeHalf; }
 
-    // 写入平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
+    // 写入 active input model 单位下的平面 widget 可视区域半尺寸，布局为 [halfWidth, halfHeight]。
     void SetPlaneHalf(const std::array<double, 2>& planeHalf)
     {
         m_planeHalf = planeHalf;
@@ -310,8 +314,8 @@ public:
 private:
     // Box 几何真源：标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
-    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和 widget 可视半尺寸。
-    // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
+    // Plane 几何真源：active input model 坐标系下的法线、中心点和 widget 可视半尺寸。
+    // half 布局为 [halfWidth, halfHeight]；法线正半空间为 Inside，half 不参与无限平面方程。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
     std::array<double, 2> m_planeHalf = { 1.0, 1.0 };
@@ -351,13 +355,13 @@ private:
     {
     }
 
-    // 上位机视图需要的数据源类型。
+    // 结果实际解析的数据源轴；从 result 按值复制，不保证对应 payload 非空。
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
-    // 上位机视图需要的业务动作类型，如 preview 或 submit。
+    // 结果实际解析的动作轴，如 preview 或 submit。
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
-    // 上位机视图需要的裁切几何类型。
+    // 结果实际解析的几何轴。
     CropShape m_resolvedGeometryType = CropShape::Box;
-    // 上位机视图需要的保留语义类型。
+    // 结果实际解析的 inside/outside 保留轴。
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
 };
 
@@ -435,24 +439,25 @@ public:
     }
 
 private:
-    // resolved 数据类型轴属于执行结果本身；Statistics 只在上位机读取时按值复制。
+    // 算法实际解析的四个请求轴；Statistics 只在读取时按值复制，不能据此推断某类 payload 非空。
     OrthogonalCropDataSource m_resolvedDataSource = OrthogonalCropDataSource::ImageData;
     OrthogonalCropOperation m_resolvedOperation = OrthogonalCropOperation::None;
     CropShape m_resolvedGeometryType = CropShape::Box;
     CropRemovalMode m_resolvedRemovalMode = CropRemovalMode::KeepInside;
-    // 本次结果是否构造成功；false 不一定是崩溃，也可能是被策略性阻断。
+    // 本次结果 payload 是否可消费；false 也覆盖路由拒绝、输入校验或资源不足等正常失败边界。
     bool m_isSucceeded = false;
-    // 失败原因和消息只属于执行结果，不进入 Statistics 数据类型模型。
+    // 结构化失败边界；成功结果通常保持 None。
     CropFailure m_failureReason = CropFailure::None;
+    // 面向日志/UI 的补充诊断文本，不参与路由或成功判定。
     std::string m_message;
-    // image submit 链路返回的主数据 image。
+    // image submit 的引用计数 payload；保留 voxel 复制源值，移除 voxel 写入输入标量最小值。
     vtkSmartPointer<vtkImageData> m_submitImage;
-    // polydata preview 可选返回的裁切网格；render-only 主预览和 image 路径通常为空。
+    // polydata preview 可选的引用计数 artifact；render-only mapper 预览和 image 路径可为空。
     vtkSmartPointer<vtkPolyData> m_clipPolyData;
-    // image submit 链路生成的遮罩图；真正控制 inside/outside 语义。
+    // 与 submit image 对齐的单分量 unsigned-char mask：255 表示保留，0 表示移除。
     vtkSmartPointer<vtkImageData> m_maskImage;
-    // box 3D outline preview 链路生成的裁切盒可视几何；常用于 overlay 或调试显示。
+    // active input model 坐标中的 Box 线框 artifact；Plane 的无限半空间结果不生成该有限轮廓。
     vtkSmartPointer<vtkPolyData> m_outlinePolyData;
-    // 这次结果对应的客观几何快照；image submit 后可能已经更新为输出 image 自身的 bounds。
+    // 结果对应的客观几何快照；Box image submit 可回填输出 bounds，Plane 保留输入 bounds 与平面真源。
     CropDataModel m_cropDataModel;
 };

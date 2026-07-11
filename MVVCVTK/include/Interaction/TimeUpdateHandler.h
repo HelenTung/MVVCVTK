@@ -23,6 +23,7 @@ public:
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
+    // 均为非拥有观察指针；StdRenderContext 持有对应对象，并在 service/window 换绑时重建 Router。
     AbstractAppService* m_service = nullptr;
     vtkRenderWindow* m_renderWindow = nullptr;
 };

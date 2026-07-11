@@ -10,8 +10,8 @@
 using ObserverCallback = std::function<void(UpdateFlags)>; // 状态广播回调：只传递增量标志，不直接暴露 SharedState 内部数据
 
 struct ObserverEntry {
-    std::weak_ptr<void> owner; // 观察者生命周期锚点，owner 失效后对应回调自动清理
-    ObserverCallback callback;
+    std::weak_ptr<void> owner; // 非拥有生命周期锚点；失效条目在注册或广播时清理
+    ObserverCallback callback; // 广播层持有的可调用对象副本；复制出锁后执行
 };
 
 class IStateEventSink {
@@ -73,6 +73,8 @@ public:
     }
 
 private:
+    // 只保护 m_observers 的注册、替换和失效清理；业务 callback 不在此锁内执行。
     mutable std::mutex m_mutex;
-    std::vector<ObserverEntry> m_observers; // 当前活动观察者表，只在广播层维护，不进入业务状态对象
+    // SetObserver 生产条目；同 owner 的旧条目被替换，owner 失效后由后续注册或广播清除。
+    std::vector<ObserverEntry> m_observers;
 };

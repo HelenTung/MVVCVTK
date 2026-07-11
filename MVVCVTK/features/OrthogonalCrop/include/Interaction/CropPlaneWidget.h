@@ -17,7 +17,7 @@ class vtkRenderWindowInteractor;
 // 只管理平面 widget 生命周期、平面参数与交互事件，不关心裁切算法与结果投递。
 class CropPlaneWidget {
 public:
-    // 向上层报告 world 平面与交互阶段的统一回调类型。
+    // 同步报告 world 原点、单位法线与交互阶段；回调只观察快照，不拥有 widget。
     using PlaneCallback = std::function<void(
         const CropVectorDouble3Array& worldOrigin,
         const CropVectorDouble3Array& worldNormal,
@@ -31,7 +31,7 @@ public:
     CropPlaneWidget(CropPlaneWidget&&) noexcept;
     CropPlaneWidget& operator=(CropPlaneWidget&&) noexcept;
 
-    // 绑定 widget 所属 interactor。
+    // 绑定非拥有的 interactor；调用方须保证它在 widget 启用期间有效。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
 
     // 设置参考 world bounds；当前平面无效时会用 bounds 中心初始化原点。
@@ -59,5 +59,6 @@ public:
 
 private:
     class Impl;
+    // 唯一拥有 VTK widget、representation、callback command、observer tag 与 world 平面缓存。
     std::unique_ptr<Impl> m_impl;
 };
