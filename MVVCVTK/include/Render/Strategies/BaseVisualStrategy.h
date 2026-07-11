@@ -11,8 +11,10 @@
 
 class BaseVisualStrategy : public AbstractVisualStrategy {
 protected:
-    std::vector<vtkSmartPointer<vtkProp>> m_managedProps; // 当前策略管理的 VTK 组件列表，供 Attach/Detach 统一处理
-    vtkSmartPointer<vtkImageResample> m_resampleFilter; // 需要降采样时缓存 filter，保证输出端口生命周期稳定
+    // 策略对全部可视 prop 的强引用 owner；renderer 在 Attach 后另持 VTK 引用，Detach 只解除挂载，不销毁本集合。
+    std::vector<vtkSmartPointer<vtkProp>> m_managedProps;
+    // GetDownsampledOutputPort 最近一次创建的 producer；返回端口在下次替换该成员或策略析构前有效。
+    vtkSmartPointer<vtkImageResample> m_resampleFilter;
 
     void AttachProp(vtkSmartPointer<vtkProp> prop)
     {
@@ -73,7 +75,7 @@ protected:
         if (!input) {
             return nullptr;
         }
-        // 降采样集中放在基类，避免 3D 策略各自复制同样的数据降采样逻辑。
+        // targetDim 是输出最大轴的目标体素数；降采样集中放在基类，避免 3D 策略复制同一逻辑。
         m_resampleFilter = ImageProcessor::GetDownsampledImage(input, targetDim);
         return m_resampleFilter ? m_resampleFilter->GetOutputPort() : nullptr;
     }

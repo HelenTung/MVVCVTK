@@ -19,18 +19,29 @@ public:
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override; //
 private:
-    bool GetOpacityChanged(double opacity) const; // 判断是否只需更新 OTF 透明度而无需重建整套 TF
-    void AlignCamera(const std::array<double, 16>& modelMatrix); // 模型变换后保持相机相对观察关系不突变
-    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
-    vtkSmartPointer<vtkVolume> m_volume; // 体渲染主 prop
-    vtkSmartPointer<vtkGPUVolumeRayCastMapper> m_mapper; // GPU 体渲染 mapper，支持 RemoveInside shader discard 预览
-    vtkSmartPointer<vtkImageResample> m_qualityResample; // 静止期 766 分辨率输入
-    vtkSmartPointer<vtkImageResample> m_interactionResample; // 交互期 256 分辨率输入
-    vtkSmartPointer<vtkDataObject> m_lastInput; // 最近一次绑定的数据快照，避免重复喂同一输入
-    vtkWeakPointer<vtkRenderer> m_renderer; // 仅弱引用 renderer，用于更新相机与裁剪面
-    double m_opacity = 1.0;                   // 当前已下发到 OTF 的全局透明度，避免纯光照更新时重复改 OTF
-    double m_dataCenter[3] = { 0.0, 0.0, 0.0 }; // 数据局部中心，模型变换后用于重新对齐相机焦点
-    int m_qualityTargetDim = 766; // 静止期目标分辨率，保留为成员方便后续按策略或配置调整
-    int m_interactionTargetDim = 256; // 交互期目标分辨率，保留为成员方便后续按策略或配置调整
-    bool m_isInteracting = false; // 当前是否处于交互状态
+    // 与最后下发 OTF 的 m_opacity 比较，决定纯材质更新是否需要重建透明度函数。
+    bool GetOpacityChanged(double opacity) const;
+    // modelMatrix 按 input model -> world 解释；相机保持原观察偏移，只把焦点移到变换后数据中心。
+    void AlignCamera(const std::array<double, 16>& modelMatrix);
+    // 坐标轴与体渲染主 prop 均由策略强持有，并登记到 m_managedProps 统一挂载。
+    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
+    vtkSmartPointer<vtkVolume> m_volume;
+    // volume 使用的唯一 GPU mapper；质量/交互输入切换及裁切预览都写入该对象。
+    vtkSmartPointer<vtkGPUVolumeRayCastMapper> m_mapper;
+    // 双重采样 producer 的强引用：静止期最大轴上限 766，交互期最大轴上限 256。
+    vtkSmartPointer<vtkImageResample> m_qualityResample;
+    vtkSmartPointer<vtkImageResample> m_interactionResample;
+    // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
+    vtkSmartPointer<vtkDataObject> m_lastInput;
+    // 非拥有 renderer 弱引用，仅用于相机与 clipping range；renderer 销毁后自动为空。
+    vtkWeakPointer<vtkRenderer> m_renderer;
+    // 最后一次已折算进 OTF 的全局透明度，通常取 [0,1]；TF 重建或 opacity 更新时同步。
+    double m_opacity = 1.0;
+    // 当前输入在 input model 坐标中的中心 [x,y,z]；Transform 时提升到 world 作为相机焦点。
+    double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
+    // ImageProcessor 的最大轴目标体素数；不表示三个轴都固定为该尺寸。
+    int m_qualityTargetDim = 766;
+    int m_interactionTargetDim = 256;
+    // 双管线选择状态：true 使用交互输入，false 使用质量输入；绑定新图像时重置为 false。
+    bool m_isInteracting = false;
 };

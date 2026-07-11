@@ -28,17 +28,27 @@ public:
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override;
 private:
-    void AlignCamera(const std::array<double, 16>& modelMatrix); // 模型矩阵变化后重对齐相机焦点
-    vtkSmartPointer<vtkActor> m_actor; // 等值面主 actor
-    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes; // 坐标轴
-    vtkSmartPointer<vtkFlyingEdges3D> m_qualityIsoFilter; // 静止期 766 分辨率等值面过滤器
-    vtkSmartPointer<vtkFlyingEdges3D> m_interactionIsoFilter; // 交互期粗等值面过滤器
-    vtkSmartPointer<vtkImageResample> m_qualityResample; // 静止期降采样结果
-    vtkSmartPointer<vtkImageResample> m_interactionResample; // 交互期降采样结果
-    vtkSmartPointer<vtkPolyDataMapper> m_mapper; // 包装器数据
-    vtkSmartPointer<vtkDataObject> m_lastInput; // 缓存当前输入，避免重复绑定相同数据触发额外管线更新
-    vtkWeakPointer<vtkRenderer> m_renderer; // 弱引用 renderer，仅用于相机和裁剪范围更新
-    double m_dataCenter[3] = { 0.0, 0.0, 0.0 }; // 当前等值面数据中心，供 Transform 后重定焦使用
-    double m_currentIsoValue = 0.0; // 当前共享状态中的等值面阈值快照
-    bool m_isInteracting = false; // 当前是否处于交互状态
+    // modelMatrix 按 input model -> world 解释；相机只跟随变换后的 m_dataCenter 平移焦点。
+    void AlignCamera(const std::array<double, 16>& modelMatrix);
+    // 等值面主 prop 与坐标轴 prop 均由策略强持有，并登记到基类 m_managedProps 统一挂载。
+    vtkSmartPointer<vtkActor> m_actor;
+    vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
+    // ImageData 路径的双等值面 producer：静止期最大轴上限 766，交互期最大轴上限 256。
+    vtkSmartPointer<vtkFlyingEdges3D> m_qualityIsoFilter;
+    vtkSmartPointer<vtkFlyingEdges3D> m_interactionIsoFilter;
+    // 双重采样 producer 的强引用；分别维持质量/交互过滤器输入端口的生命周期。
+    vtkSmartPointer<vtkImageResample> m_qualityResample;
+    vtkSmartPointer<vtkImageResample> m_interactionResample;
+    // actor 使用的唯一 mapper；输入可在直接 PolyData、质量 filter 输出和交互 filter 输出之间切换。
+    vtkSmartPointer<vtkPolyDataMapper> m_mapper;
+    // 最近一次有效输入的强引用和身份缓存；同一 VTK 对象原地修改不等价于不可变快照。
+    vtkSmartPointer<vtkDataObject> m_lastInput;
+    // 非拥有 renderer 弱引用，仅用于相机与 clipping range；renderer 销毁后自动为空。
+    vtkWeakPointer<vtkRenderer> m_renderer;
+    // 当前输入在 input model 坐标中的中心 [x,y,z]；Transform 时提升到 world 作为相机焦点。
+    double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
+    // 最后一次共享状态等值面阈值，单位与输入标量一致；只向当前活动 filter 下发。
+    double m_currentIsoValue = 0.0;
+    // 双管线选择状态：true 使用 256 交互管线，false 使用 766 质量管线；新 ImageData 重置为 false。
+    bool m_isInteracting = false;
 };

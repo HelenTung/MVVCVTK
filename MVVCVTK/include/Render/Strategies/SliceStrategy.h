@@ -46,16 +46,24 @@ private:
         const std::array<double, 16>& modelMatrix,
         double worldBounds[6]) const; // 把局部数据包围盒映射到当前模型变换后的世界包围盒
 
-    vtkWeakPointer<vtkRenderer> m_renderer; // 当前切片视图依附的 renderer，用于相机和窗口尺寸相关操作 
-    vtkSmartPointer<vtkImageSlice> m_slice; // 切片主显示对象
-    vtkSmartPointer<vtkImageResliceMapper> m_mapper; // 负责按当前切片平面从体数据抽取图像
-    vtkSmartPointer<vtkPlane> m_slicePlane;           // 持久切片平面，保持 mapper 输入关系稳定，仅更新原点与法线
-    vtkSmartPointer<vtkDataObject> m_lastInput;       // 缓存当前输入，避免重复绑定相同数据触发额外管线更新
-    Orientation m_orientation; // 当前切片朝向，决定法线方向、相机姿态与十字线配色
+    // 非拥有 renderer 弱引用，仅供相机和 clipping range 更新；renderer 销毁后自动为空。
+    vtkWeakPointer<vtkRenderer> m_renderer;
+    // 切片主 prop 的强引用 owner；同时登记到 m_managedProps，由 renderer 挂载但不转移策略所有权。
+    vtkSmartPointer<vtkImageSlice> m_slice;
+    // 持有输入 image 和 slice plane 管线连接，按当前平面从体数据抽取二维图像。
+    vtkSmartPointer<vtkImageResliceMapper> m_mapper;
+    // 持久切片平面；SetVisualState 以 world cursor 更新原点，以 orientation 对应主轴更新法线。
+    vtkSmartPointer<vtkPlane> m_slicePlane;
+    // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
+    vtkSmartPointer<vtkDataObject> m_lastInput;
+    // 构造期切片轴：Top_down=Z、Front_back=Y、Left_right=X，同时决定相机和十字线配色。
+    Orientation m_orientation;
 
     // --- 十字线相关 ---
-    vtkSmartPointer<vtkActor> m_vLineActor; // 垂直线
-    vtkSmartPointer<vtkActor> m_hLineActor; // 水平线
-    vtkSmartPointer<vtkLineSource> m_vLineSource; // 十字线垂直段几何源
-    vtkSmartPointer<vtkLineSource> m_hLineSource; // 十字线水平段几何源
+    // 两个 actor 由策略强持有并登记到 m_managedProps；线段坐标由对应 source 输出。
+    vtkSmartPointer<vtkActor> m_vLineActor;
+    vtkSmartPointer<vtkActor> m_hLineActor;
+    // 世界坐标十字线几何 producer；Cursor/Transform 更新端点，actor mapper 保持稳定连接。
+    vtkSmartPointer<vtkLineSource> m_vLineSource;
+    vtkSmartPointer<vtkLineSource> m_hLineSource;
 };

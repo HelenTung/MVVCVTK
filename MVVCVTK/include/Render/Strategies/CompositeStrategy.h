@@ -30,8 +30,12 @@ public:
 private:
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }
 
-    std::shared_ptr<AbstractVisualStrategy> m_mainStrategy; // 主 3D 内容：Volume 或 IsoSurface 二选一
-    std::shared_ptr<AbstractVisualStrategy> m_referencePlanes; // 叠加在主内容上的三向参考平面
-    vtkSmartPointer<vtkDataObject> m_lastInput; // 缓存当前组合输入，避免主策略与参考平面重复接收相同数据
-    VizMode m_mode; // 决定主策略究竟是体渲染还是等值面
+    // 组合策略强拥有主 3D 子策略；构造时按 m_mode 选择 Volume 或 IsoSurface，之后不在运行期替换。
+    std::shared_ptr<AbstractVisualStrategy> m_mainStrategy;
+    // 强拥有三向参考平面子策略；它与主策略接收同一输入和 RenderParams，但分别管理自己的 props。
+    std::shared_ptr<AbstractVisualStrategy> m_referencePlanes;
+    // 最近一次输入的强引用和身份缓存；只避免重复分发同一 VTK 对象，不冻结对象内部数据。
+    vtkSmartPointer<vtkDataObject> m_lastInput;
+    // 构造期模式快照，仅决定主子策略类型：CompositeVolume 或 CompositeIsoSurface。
+    VizMode m_mode;
 };
