@@ -185,6 +185,7 @@ void CropPreviewPlug::ResetVolumeView(vtkVolume* volume, vtkVolumeMapper* volume
         return;
     }
 
+    // SetKeepClip 安装的 plane collection 由 mapper 持有；reset 在同一显示边界统一释放引用。
     volumeMapper->RemoveAllClippingPlanes();
     volumeMapper->CroppingOff();
     volumeMapper->SetCroppingRegionFlagsToSubVolume();
@@ -222,6 +223,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
     if (referenceService) {
+        // reference service 只提供 active input model -> world；缺失时按两坐标系重合处理。
         inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
@@ -275,6 +277,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
     if (referenceService) {
+        // previewResult 的 plane center/normal 位于 active input model，mapper plane 必须提升到 world。
         inputToWorldMat->DeepCopy(referenceService->GetModelMatrix().data());
     }
 
@@ -288,13 +291,14 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     inputToWorld->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
     inputToWorld->TransformNormal(planeNormalInInputModel.data(), worldNormal);
     if (vtkMath::Normalize(worldNormal) <= 1e-12) {
+        // 退化变换无法保留原半空间方向；回退 world +Z 只为提供可用 clipping plane 边界。
         worldNormal[0] = 0.0;
         worldNormal[1] = 0.0;
         worldNormal[2] = 1.0;
     }
 
     // VTK clipping plane 保留法线指向的一侧（与 box 的“法线朝内保留盒内”一致）。
-    // KeepInside 要保留法线正侧，因此直接使用原始法线，不能反转。
+    // 正常路径的 KeepInside 保留原法线正侧，因此不能反转；退化路径使用上方 +Z fallback。
     // 本函数只在 KeepInside 路径调用；RemoveInside 由 shader discard 负责保留法线负侧。
 
     auto plane = vtkSmartPointer<vtkPlane>::New();
@@ -317,6 +321,8 @@ bool CropPreviewPlug::SetKeepClip(
 
     vtkSmartPointer<vtkPlaneCollection> clippingPlanes;
     int expectedPlaneCount = 0;
+    // A. Box 构造 6 个朝内的 world planes，正半空间交集即标准盒内部。
+    // B. Plane 保留原法线指向的 world 正半空间；RemoveInside 不进入本函数。
     switch (previewResult.GetResolvedGeometryType()) {
     case CropShape::Box:
         clippingPlanes = BuildBoxClip(referenceService, previewResult);
@@ -337,6 +343,7 @@ bool CropPreviewPlug::SetKeepClip(
         return false;
     }
 
+    // SetClippingPlanes 让 mapper 持有 collection 的 VTK 引用；局部 smart pointer 退出不影响后续渲染。
     mapper->SetClippingPlanes(clippingPlanes);
     mapper->Modified();
     return true;
@@ -496,6 +503,7 @@ void CropPreviewPlug::ResetMeshView(
 
     auto mapper = vtkPolyDataMapper::SafeDownCast(actor->GetMapper());
     if (mapper) {
+        // 与 volume reset 相同，移除 mapper 持有的 KeepInside plane collection 引用。
         mapper->RemoveAllClippingPlanes();
         mapper->Modified();
     }

@@ -57,6 +57,8 @@ VtkAppHostSession::Impl::Impl(VtkAppHostSession::Config sessionConfig)
 
 HostCoreServices VtkAppHostSession::Impl::BuildCore()
 {
+    // 返回值拥有本次 session 的窗口无关服务；此阶段不读取 renderViews，
+    // 因此所有后续创建的 view 都共享这一组数据、状态和 feature owner。
     // 1. 先创建数据与状态真源，让所有视图和 feature 共享同一份会话事实。
     // 2. 再创建依赖这些真源的交互服务；窗口拓扑仍由 BuildSession 单独组装。
     HostCoreServices nextCore;
@@ -77,12 +79,14 @@ HostCommandRouterRequest VtkAppHostSession::Impl::BuildRequest(HostCommandKind c
 
 bool VtkAppHostSession::Impl::SendCommand(HostCommandRouterRequest request)
 {
+    // request 按值进入并在分发时移动，调用方后续修改原 DTO 不影响已接受命令。
+    // 命令入口允许懒初始化；BuildSession 的 isInitialized 闸门保证装配只执行一次。
     BuildSession();
     if (!commandRouter) {
         std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
         return false;
     }
-    return commandRouter->DispatchCommand(std::move(request));
+    return commandRouter->DispatchCommand(std::move(request)); // 所有 Host 命令的唯一分发路径。
 }
 
 std::string VtkAppHostSession::Impl::BuildKeyLabel(char key) const
@@ -143,17 +147,19 @@ void VtkAppHostSession::Impl::BuildSession()
         return;
     }
 
-    // 1. core services 不知道窗口数量，只建立数据、状态和算法服务生命周期。
-    // 2. render view set 负责按 host 配置创建/接管窗口，并对外提供 id/role/endpoint。
-    // 3. feature bindings 只注册能力；裁切或孔隙显示必须等宿主命令携带目标窗口后才激活。
+    // core 不知道窗口数量，先建立所有 view 将共享的数据、状态和算法生命周期。
     core = BuildCore();
+    // view set 再按 host 配置创建/接管窗口，建立 service/context owner。
     renderViews.Build(core, config.renderViews);
+    // feature 只注入窗口查询与 reload/tick 能力，不因装配而默认激活 Crop/Gap。
     featureBindings->AttachFeatures(core, renderViews);
+    // router 最后创建，保证任何命令都能看到完整 core、views 和 feature。
     commandRouter = std::make_shared<HostCommandRouter>(
         core,
         renderViews,
         featureBindings);
 
+    // 设置初始视图状态并发起可选加载后再初始化 interactor，避免首帧读取半初始化 service。
     renderViews.SetInitialVisibility();
     if (config.initialVolume.isInitialLoadEnabled) {
         auto initialLoadRequest = BuildRequest(HostCommandKind::Load);
@@ -166,6 +172,7 @@ void VtkAppHostSession::Impl::BuildSession()
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     renderViewEndpoints = renderViews.BuildEndpoints();
 
+    // observer 最后安装；isInitialized 只在 hotkey/timer 都绑定完成后置位。
     auto attachHotkeysRequest = BuildRequest(HostCommandKind::Hotkeys);
     attachHotkeysRequest.renderContextInput = config.renderContextInput;
     attachHotkeysRequest.dataExportConfig = config.dataExport;

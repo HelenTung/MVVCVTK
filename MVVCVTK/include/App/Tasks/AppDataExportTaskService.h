@@ -18,17 +18,22 @@ public:
     AppDataExportTaskService(std::shared_ptr<AbstractDataManager> dataManager,
         std::shared_ptr<SharedInteractionState> sharedState);
 
+    // 在调用线程快照 model-to-world 矩阵并构造后台数据导出；依赖或文件路径无效时投递失败回调并返回空。
     std::optional<std::packaged_task<void()>> BuildDataTask(
         const std::string& path,
         std::function<void(bool isSuccess)> onComplete);
 
+    // path 是输出目录；rotationAngleDeg 为可选角度（度），currentMode 必须对应真实切片方向。
+    // 构造阶段快照姿态、世界坐标游标与窗宽窗位，后台只消费这些快照并投递结果。
     std::optional<std::packaged_task<void()>> BuildSlicesTask(
         const std::string& path,
         std::optional<double> rotationAngleDeg,
         VizMode currentMode,
         std::function<void(bool isSuccess)> onComplete);
 
+    // SendUpdates 消费线程领取保存完成门铃。
     bool ResetSaveCallback();
+    // SendUpdates 消费线程接管 payload，并在锁外执行业务回调；本对象不负责切换线程。
     void SendSaveCallback();
 
 private:
@@ -36,5 +41,6 @@ private:
 
     std::shared_ptr<AbstractDataManager> m_dataManager;
     std::shared_ptr<SharedInteractionState> m_sharedState;
-    AppTaskCallbackState m_saveCallback; // 保存完成后由主线程执行业务回调
+    // 后台任务是生产者，VizService::SendUpdates 是消费者；状态对象串接同时完成的多个任务。
+    AppTaskCallbackState m_saveCallback;
 };

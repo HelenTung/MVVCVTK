@@ -32,6 +32,8 @@ class vtkRenderer;
 class CropBridge {
 public:
     // host/session 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
+    // image 是本次 submit 生成并移交给 reload 链的图像；返回值只表示请求是否被接受，
+    // 最终成功与否由 reload 消费者通过 onComplete 回传。
     using ReloadSubmitter = std::function<bool(
         vtkSmartPointer<vtkImageData> image,
         std::function<void(bool isSuccess)> onComplete)>;
@@ -75,7 +77,8 @@ public:
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
-    // 执行当前 image submit；只有 reload 请求被接受并进入 pending 状态才返回 true。
+    // 从当前 widget 几何和 backend image 输入构造 submit request，不复用 preview 结果；
+    // 只有 reload 请求被接受才返回 true，最终结果由完成回调收尾。
     bool SendSubmit();
 
     // 宿主命令触发的裁切模式 switch 入口。
@@ -90,7 +93,7 @@ public:
     // 宿主只需要知道裁切链路是否已激活，用于决定退出命令是否应被裁切消费。
     bool GetCropActive() const;
 
-    // 切换 preview 开关与 removal mode。
+    // 切换 preview 显示意图与 removal mode；拖拽中只记录意图，释放后再执行后端预览。
     void SwitchPreview(CropRemovalMode removalMode);
 
 private:

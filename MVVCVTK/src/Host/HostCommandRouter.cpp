@@ -30,6 +30,8 @@ public:
     bool DispatchCommand(HostCommandRouterRequest request) const;
 
 private:
+    // 一个 action 对应一个逻辑按键状态，而不是一个窗口状态；同一物理键跨 view
+    // press/release 时仍命中同一槽。Count 只用于固定数组长度，不参与命令分发。
     enum class HotkeyAction {
         None,
         Model,
@@ -111,10 +113,14 @@ private:
         const HostRenderViewRuntime* view) const;
     bool GetCharKeyMatched(const InteractionEvent& event, char key) const;
 
+    // 非拥有引用：core 和 view set 由 session 持有，声明顺序保证它们晚于 router 析构。
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
+    // 弱引用避免 router 延长 feature 生命周期；命令入口必须允许绑定层已卸载时 lock 失败。
     std::weak_ptr<HostFeatureBindings> m_featureBindings;
+    // 记录已安装 input handler 的 context，仅用于重配/析构时撤销回调，不延长窗口生命周期。
     mutable std::vector<std::weak_ptr<StdRenderContext>> m_hotkeyContexts;
+    // 首次 KeyPress 置位，匹配的物理 KeyRelease 清零；repeat/Char 在此期间持续被同一 action 消费。
     mutable std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)> m_isHotkeyDown = {};
 };
 
@@ -237,6 +243,8 @@ bool HostCommandRouter::Impl::ClearHotkeyDown(
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) const
 {
+    // request 是按 command 解释的命令快照；只有对应分支的 payload 有效。
+    // Load/Export 的 callback 在此移动给异步服务，feature 命令则先锁定弱引用再进入绑定层。
     switch (request.command) {
     case HostCommandKind::Load:
         return LoadVolume(
@@ -423,6 +431,7 @@ bool HostCommandRouter::Impl::ExportData(
 
 bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) const
 {
+    // optional 字段组成一次命令快照；先完成目标和输入校验，保证拒绝路径没有部分写入。
     const bool hasViewEdit =
         viewConfig.mode.has_value()
         || viewConfig.material.has_value()
@@ -454,6 +463,7 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
 
     const auto& service = targetView->service;
     if (viewConfig.mode) {
+        // mode 同时属于 service 管线意图和 context 输入/相机策略；必须先确认两个 owner 都可写。
         if (!targetView->context) {
             std::cerr << "[Host] View mode config skipped: render context is missing." << std::endl;
             return false;
@@ -461,6 +471,7 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
         service->SetVizMode(*viewConfig.mode);
         targetView->context->SetCameraStyle(*viewConfig.mode);
     }
+    // 其余 optional 字段只有 service 一个 owner，可按请求中实际携带的值独立分发。
     if (viewConfig.material) {
         service->SetMaterial(*viewConfig.material);
     }
@@ -487,7 +498,7 @@ bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) co
             viewConfig.windowLevel->windowWidth,
             viewConfig.windowLevel->windowCenter);
     }
-    return true;
+    return true; // 配置已分发；service 的实际管线同步由后续主线程 tick 消费。
 }
 
 InteractionResult HostCommandRouter::Impl::OnHotkey(

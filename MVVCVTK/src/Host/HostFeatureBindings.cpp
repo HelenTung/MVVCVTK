@@ -58,8 +58,11 @@ private:
     std::optional<Orientation> GetGapSliceOrient(HostRenderViewRole role) const;
     CropRemovalMode GetCropRemovalMode(HostCropPreviewMode mode) const;
 
+    // shared_ptr 集合按值保存，确保 feature 运行期间数据、状态和算法服务仍然存在。
     HostCoreServices m_core;
+    // 非拥有引用：窗口集合由 session 持有，且析构顺序晚于本绑定层。
     const HostRenderViewSet* m_renderViews = nullptr;
+    // Timer context 只用于卸载 observer，不应因 feature tick 延长窗口生命周期。
     std::weak_ptr<StdRenderContext> m_timerContext;
 };
 
@@ -160,6 +163,8 @@ void HostFeatureBindings::Impl::AttachFeatures(
     const HostCoreServices& core,
     const HostRenderViewSet& renderViews)
 {
+    // core 提供会话级共享 owner，renderViews 提供非拥有窗口拓扑；绑定层把两者降级为 feature 能力。
+    // 保存新 owner 后先退出其 Gap 显示，避免复用同一 service 时把上轮 overlay 状态带入新窗口拓扑。
     m_core = core;
     m_renderViews = &renderViews;
     if (m_core.gapAnalysis) {
@@ -176,6 +181,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
 
         // submit 回调只提交新图像和刷新共享状态，不持有窗口角色。
         // bridge 只接收 host 注入的 image/version，不反向读取 DataManager。
+        // reload 能力在这里注入，CropBridge 因而不需要反向依赖 DataManager 或窗口集合。
         m_core.orthogonalCropBridge->SetSubmitReloadHandler(
             [
                 bridge = std::weak_ptr<CropBridge>(m_core.orthogonalCropBridge),
@@ -185,6 +191,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
             ](
                 vtkSmartPointer<vtkImageData> image,
                 std::function<void(bool isSuccess)> onComplete) {
+                // image 是本次 submit 的结果快照；绑定层按 pending commit 流程回写共享数据。
                 if (!sharedDataMgr || !sharedState || !image) {
                     return false;
                 }
@@ -197,6 +204,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
                     return false;
                 }
 
+                // 先标记 reload，再在同一调用链发布/接管 pending image；失败状态不能发布 DataReady。
                 sharedState->SetReloadLoadStarted();
                 if (!sharedDataMgr->SetImageSnapshot(std::move(image))
                     || !sharedDataMgr->SetCurrentFromPending()) {
@@ -204,6 +212,8 @@ void HostFeatureBindings::Impl::AttachFeatures(
                     return false;
                 }
 
+                // current image 成为真源后再更新状态和 bridge 输入，并同步调用各 view 消费刷新；
+                // 此 handler 不切换线程，调用方必须处于允许修改 VTK pipeline 的线程。
                 const auto range = sharedDataMgr->GetScalarRange();
                 const auto spacing = sharedDataMgr->GetSpacing();
                 sharedState->SetReloadDataReady(range[0], range[1], spacing);
@@ -223,9 +233,9 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 }
 
                 if (onComplete) {
-                    onComplete(true);
+                    onComplete(true); // 分发到 CropBridge::OnSubmitReload，恢复 widget/overlay/camera 状态。
                 }
-                return true;
+                return true; // reload handler 已接纳结果；最终成功仍通过 onComplete 分发。
             });
     }
 }
@@ -283,6 +293,8 @@ bool HostFeatureBindings::Impl::StartCrop(
 bool HostFeatureBindings::Impl::StartGapView(
     const HostGapViewRequest& request)
 {
+    // request 同时携带宿主窗口选择和算法参数：target id/role 只在 Host 层解析，
+    // Gap service 接收降级后的 3D/slice OverlayService 列表，不知道窗口编号或布局。
     if (!m_renderViews) {
         std::cerr << "[Host] Gap Analysis display activation skipped: host feature bindings are not ready." << std::endl;
         return false;
@@ -336,6 +348,7 @@ bool HostFeatureBindings::Impl::StartGapView(
         }
     }
 
+    // Host 只分发降级后的 overlay 目标和算法值对象；worker/display 状态由 Gap service 持有。
     return m_core.gapAnalysis->StartView(
         BuildGapSurfaceRequest(request.algorithm->surface),
         BuildVoidParams(request.algorithm->voidDetection),
@@ -417,11 +430,13 @@ bool HostFeatureBindings::Impl::SwitchCropView(
 bool HostFeatureBindings::Impl::SendCrop(
     const HostCropViewRequest& request)
 {
+    // 每次 submit 前重绑 request 指定的 reference/preview 目标并刷新输入版本。
+    // 返回值只表示 reload handler 是否接受本次结果，不保证完成回调或新帧已经发生。
     if (!StartCrop(request)) {
         return false;
     }
 
-    return m_core.orthogonalCropBridge->SendSubmit();
+    return m_core.orthogonalCropBridge->SendSubmit(); // 结果沿 reload handler 分发，拒绝时返回 false。
 }
 
 bool HostFeatureBindings::Impl::ExitCrop()
@@ -495,6 +510,7 @@ bool HostFeatureBindings::Impl::SetCropInput()
 void HostFeatureBindings::Impl::AttachHostTimer(
     const HostTimerEventPumpConfig& eventPumpConfig)
 {
+    // eventPumpConfig 只选择提供主线程 TimerEvent 的 view；它不是 Gap overlay 目标。
     if (!eventPumpConfig.isTimerEnabled || !m_renderViews) {
         DetachHostTimer();
         return;
@@ -511,6 +527,7 @@ void HostFeatureBindings::Impl::AttachHostTimer(
         return;
     }
 
+    // 重配时先卸载旧 handler；m_timerContext 的弱引用不会延长窗口生命周期。
     DetachHostTimer();
     m_timerContext = timerView->context;
     timerView->context->SetTimerHandler([impl = this]() {

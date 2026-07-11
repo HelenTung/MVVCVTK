@@ -114,9 +114,12 @@ private:
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy; // 当前主渲染策略
     vtkSmartPointer<vtkRenderer> m_renderer; // 当前渲染器，所有 VTK 节点挂接都收口到主线程
     vtkSmartPointer<vtkRenderWindow> m_renderWindow; // 当前渲染窗口，用于交互帧率控制
-    std::atomic<bool> m_isDirty{ false }; // 渲染脏位：只驱动下一帧 Render
-    std::atomic<bool> m_hasSyncNeed{ false }; // 同步闸门：状态事件只置位，主线程统一消费
-    std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) }; // 增量更新位图
+    // 状态合并、外部请求或主线程管线操作均可置位；Timer 在 SendUpdates() 后取走并清零。
+    std::atomic<bool> m_isDirty{ false };
+    // 普通状态事件、overlay 挂接与管线重建置位；主线程 SetStrategyState() 用 CAS 领取。
+    std::atomic<bool> m_hasSyncNeed{ false };
+    // 状态事件与 overlay 挂接以按位 OR 合并；主线程 exchange(0)，加载失败清场也会清零。
+    std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
     std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies; // 图层叠加策略列表
     std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService; // 加载任务构建和加载回调状态
     std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
@@ -125,10 +128,14 @@ private:
     std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
     std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
 
-    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) }; // 模式切换快照：前处理阶段可先写入，主线程重建管线时再一次性读取
-    std::atomic<bool> m_hasDataRefreshNeed{ false }; // 管线重建请求：DataReady/Spacing 这类结构性变化只置位，不直接重建
-    std::atomic<bool> m_hasCacheClearNeed{ false }; // 缓存清理请求：Strategy Detach 涉及渲染对象，必须推迟到主线程处理
-    std::atomic<bool> m_hasLoadFailure{ false }; // 失败收敛请求：把后台失败信号汇总到主线程做统一清场
+    // SetVizMode/SetVisualConfig 写入最新快照；管线重建、切片交互和导出读取但不清零。
+    std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
+    // DataReady、Spacing 或模式变化置位；主线程重建前 exchange(false)，失败清场也会清零。
+    std::atomic<bool> m_hasDataRefreshNeed{ false };
+    // 结构变化只发布清缓存请求；主线程在 SendUpdates() 中领取后才 Detach Strategy。
+    std::atomic<bool> m_hasCacheClearNeed{ false };
+    // LoadFailed 发布失败请求并标脏；主线程领取后优先于重建执行统一清场。
+    std::atomic<bool> m_hasLoadFailure{ false };
 
     std::future<void> m_activeLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
     mutable std::mutex m_activeLoadMutex; // 保护 m_activeLoadFuture
@@ -160,11 +167,13 @@ bool VizService::Impl::GetDirty() const
 
 void VizService::Impl::SetDirty()
 {
+    // 外部显式请求只置门铃，实际 Render 仍由 Timer 决定。
     m_isDirty = true;
 }
 
 bool VizService::Impl::ResetDirty()
 {
+    // Timer 在本帧同步完成后领取一次请求；领取之后的新请求留给下一帧。
     return m_isDirty.exchange(false);
 }
 
@@ -266,6 +275,7 @@ void VizService::Impl::ClearOverlayStrategies()
 
 void VizService::Impl::SetStrategyClear()
 {
+    // 事件发布线程只登记请求，Strategy 的 Detach 与缓存销毁延后到主线程。
     m_hasCacheClearNeed = true;
 }
 
@@ -579,8 +589,8 @@ void VizService::Impl::SetStateObserver()
                 self->m_pendingLoadEventKind = self->m_sharedState->GetPendingLoadEventKind();
             }
 
-            // 广播回调只做“事件翻译”为主线程可消费的原子标志，
-            // 不在这里直接碰 VTK/Strategy，避免后台线程或任意调用线程破坏渲染线程边界。
+            // 广播在状态发布线程同步进入：这里只登记主线程工作，不重建或 Detach Strategy。
+            // DataReady 的游标复位是现有例外，它读取已提交图像并再次回写 SharedState。
             self->SendStateFlags(flags);
         }
     );
@@ -588,8 +598,9 @@ void VizService::Impl::SetStateObserver()
 
 void VizService::Impl::SendStateFlags(UpdateFlags flags)
 {
-    // 事件翻译只更新主线程可消费的标志；VTK 对象和 Strategy 仍由 timer 主循环处理。
+    // 把跨层状态事件收敛为主线程邮箱；结构事件与普通增量使用不同消费路径。
     if (GetFlagOn(flags, UpdateFlags::DataReady)) {
+        // A. 新 current image 已发布：复位游标，并请求清缓存、全量同步与管线重建。
         SetStrategyClear();
         SetCursorCenter();
         SetPendingFlags(UpdateFlags::All);
@@ -598,6 +609,7 @@ void VizService::Impl::SendStateFlags(UpdateFlags flags)
     }
 
     if (GetFlagOn(flags, UpdateFlags::Spacing)) {
+        // B. spacing 改变输入几何，不能只做 Strategy 增量写入，必须走结构重建。
         SetStrategyClear();
         SetPendingFlags(UpdateFlags::All);
         SetDataRefresh();
@@ -605,10 +617,12 @@ void VizService::Impl::SendStateFlags(UpdateFlags flags)
     }
 
     if (GetFlagOn(flags, UpdateFlags::LoadFailed)) {
+        // C. 失败只发布清场请求；主线程会跳过同一帧的重建与增量同步。
         SetLoadFailed();
         return;
     }
 
+    // D. 其余状态可合并为增量位图，由下一次 Timer 心跳统一下发。
     SetPendingFlags(flags);
     SetSyncNeeded();
 }
@@ -619,9 +633,11 @@ void VizService::Impl::SendStateFlags(UpdateFlags flags)
 void VizService::Impl::SetVizMode(VizMode mode)
 {
     const int nextMode = static_cast<int>(mode);
+    // 模式快照保留最新值且不清零；同值写入不产生重复重建请求。
     if (m_pendingVizModeInt.exchange(nextMode) == nextMode) {
         return;
     }
+    // 模式变化会更换 Strategy 或输入方向，因此进入结构重建路径并请求下一帧 Render。
     m_hasDataRefreshNeed = true;
     m_isDirty = true;
 }
@@ -665,6 +681,7 @@ void VizService::Impl::SetWindowLevel(double ww, double wc)
 
 void VizService::Impl::SetVisualConfig(const PreInitConfig& cfg)
 {
+    // 先更新供 BuildPipeline/交互读取的模式快照，再由 SharedState 广播具体配置差异。
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
     m_sharedState->SetPreInitConfig(cfg);
 }
@@ -973,21 +990,17 @@ void VizService::Impl::SetCursorCenter()
 // ─────────────────────────────────────────────────────────────────────
 void VizService::Impl::SendUpdates()
 {
-    // 统一主线程后处理链路：
-    // 1. pending image 提交为 current data
-    // 2. 导出回调
-    // 3. 策略缓存清理
-    // 4. 加载失败或 DataReady 管线重建
-    // 5. 普通增量同步
-    // 6. 文件加载 / reload 回调
-
+    // 更新入口按固定阶段收敛 pending/current、完成回调和渲染变更；常规由主线程 Timer 驱动，
+    // Crop reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
+    // 1. 先提交 pending image，再在当前消费线程交付导出完成回调。
     SendPendingImage();
     SendExportCallback();
 
-    // 延迟缓存清理（Detach 必须在主线程）
+    // 2. 领取缓存清理门铃；Detach 与缓存销毁只发生在主线程。
     if (m_hasCacheClearNeed.exchange(false))
         ClearStrategyCache();
 
+    // 3. 失败清场优先于结构重建；成功路径才继续重建并消费普通增量。
     bool hasLoadEvent = false;
     const bool hasLoadFailure = SetLoadFailureState(hasLoadEvent);
     if (!hasLoadFailure) {
@@ -995,20 +1008,22 @@ void VizService::Impl::SendUpdates()
         SetStrategyState();
     }
 
+    // 4. 加载回调最后执行，使业务方观察到的是本轮清场或同步后的状态。
     SendLoadCallbacks();
     if (hasLoadEvent) {
+        // 本 service 已完成该 load 事件的终态处理，清掉本地来源快照。
         m_pendingLoadEventKind = LoadEventKind::None;
     }
 }
 
 void VizService::Impl::SendPendingImage()
 {
-    // 数据源只有一份；pending image 由 DataManager 自己保证只被消费一次。
+    // Timer 尝试把一批 pending 事务提升为 current；DataManager 的事务锁保证同一批只接管一次。
     if (!m_dataManager || !m_dataManager->SetCurrentFromPending()) {
         return;
     }
 
-    // 走和文件加载成功相同的后处理路径。
+    // current 提交成功后才发布 DataReady，后续沿文件加载成功的同一条结构重建路径推进。
     auto img = m_dataManager->GetVtkImage();
     if (!img) {
         m_sharedState->SetReloadLoadFailed();
@@ -1022,7 +1037,7 @@ void VizService::Impl::SendPendingImage()
 
 void VizService::Impl::SendExportCallback()
 {
-    // 导出异步任务回调触发。
+    // Reset 只领取原子门铃；Send 再从互斥区取走闭包，并在当前 SendUpdates 调用线程锁外执行。
     if (m_dataExportTaskService && m_dataExportTaskService->ResetSaveCallback()) {
         m_dataExportTaskService->SendSaveCallback();
     }
@@ -1030,11 +1045,13 @@ void VizService::Impl::SendExportCallback()
 
 bool VizService::Impl::SetLoadFailureState(bool& hasLoadEvent)
 {
+    // exchange(false) 使一个失败请求只进入一次清场；后续失败会重新置位并留待下一帧。
     if (!m_hasLoadFailure.exchange(false)) {
         return false;
     }
 
     const LoadEventKind loadEventKind = m_pendingLoadEventKind;
+    // 清场同时清掉残留重建与增量标志，避免失败后继续使用旧数据重建。
     ClearLoadFail();
     if (m_dataLoadTaskService && loadEventKind == LoadEventKind::File) {
         m_dataLoadTaskService->SetFileLoadCallbackReady(false);
@@ -1042,12 +1059,14 @@ bool VizService::Impl::SetLoadFailureState(bool& hasLoadEvent)
     else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
         m_dataLoadTaskService->SetReloadReady(false);
     }
+    // 该输出只表示本帧处理了 load 终态，供调用方清除事件来源快照。
     hasLoadEvent = true;
     return true;
 }
 
 bool VizService::Impl::SetDataRefreshState(bool& hasLoadEvent)
 {
+    // 领取一次结构重建请求；领取后的新请求由下一帧继续处理。
     if (!m_hasDataRefreshNeed.exchange(false)) {
         return false;
     }
@@ -1060,17 +1079,20 @@ bool VizService::Impl::SetDataRefreshState(bool& hasLoadEvent)
     else if (m_dataLoadTaskService && loadEventKind == LoadEventKind::Reload) {
         m_dataLoadTaskService->SetReloadReady(true);
     }
+    // 模式切换也会进入此处；即使没有 load 来源，仍按既有流程标记本帧处理完成。
     hasLoadEvent = true;
     return true;
 }
 
 void VizService::Impl::SetDataRefresh()
 {
+    // 状态发布线程只置结构重建门铃，不在回调栈内修改渲染管线。
     m_hasDataRefreshNeed = true;
 }
 
 void VizService::Impl::SetLoadFailed()
 {
+    // 失败门铃由状态发布线程生产；同时请求 Render，使主线程清场后刷新空场景。
     m_hasLoadFailure = true;
     m_isDirty = true;
 }
@@ -1093,6 +1115,7 @@ void VizService::Impl::BuildPipeline()
 {
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
+    // 读取最新模式快照但不清除；后续交互和导出仍需使用同一模式。
     VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     auto strategy = GetStrategy(mode);
     if (!strategy) {
@@ -1136,7 +1159,9 @@ void VizService::Impl::BuildPipeline()
 void VizService::Impl::SetStrategyState()
 {
     bool isExpected = true;
+    // CAS 同时领取并清掉同步闸门；没有请求时不触碰 pending 位图。
     if (!m_hasSyncNeed.compare_exchange_strong(isExpected, false)) return;
+    // 当前无 Strategy 时位图仍保留；只有后续再次置同步闸门才会消费。
     if (!m_currentStrategy) return;
 
     // 用 exchange(0) 取走当前整包增量标志，相当于把这一帧前累计的状态改动做一次原子快照。
@@ -1175,8 +1200,8 @@ void VizService::Impl::SetStrategyState()
         overlay->SetVisualState(params, flags);
     }
 
+    // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
     m_isDirty = true;
-    // m_hasSyncNeed = false;
 }
 
 void VizService::Impl::ClearLoadFail()
@@ -1186,10 +1211,8 @@ void VizService::Impl::ClearLoadFail()
     // 清理策略缓存（无有效数据，不应保留旧 Strategy）
     ClearStrategyCache();
 
-    // 重置刷新标记，防止残留 DataReady 触发错误重建
+    // 失败终态取消尚未消费的重建与增量，防止旧 DataReady 在后续帧恢复管线。
     m_hasDataRefreshNeed = false;
-
-	// 重置交互状态
     m_pendingFlags = 0;
 
     // 标脏使渲染器刷新空场景

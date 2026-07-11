@@ -82,20 +82,28 @@ private:
 
     CropRouter m_backend;
     CropPreviewPlug m_previewPlug;
+    // m_boundInputPolyData 是 host 绑定的长期输入；临时 preview mesh 写入 router 后由 ClearPreviewInput 恢复它。
     vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
     vtkRenderWindowInteractor* m_primaryInteractor = nullptr;
+    // 交互生命周期轴：widget 成功启用后置位，显式退出或 submit reload 成功收尾时清零。
     bool m_isCropOn = false;
     CropShape m_currentGeometryType = CropShape::Box;
+    // 几何可用轴：widget 回调或模式初始化后置位；成功 reload 后清零，迫使下一轮重新取输入 bounds。
     bool m_hasWorldState = false;
+    // 预览意图轴：同模式命令可关闭；它不表示任一 target 已成功应用预览。
     bool m_isPreviewOn = false;
+    // 最近交互阶段由 widget 回调更新；Dragging 阻止重型 preview 和 submit，Released 允许消费当前几何。
     CropInteractionPhase m_lastInteractionPhase = CropInteractionPhase::Idle;
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
+    // 以下几何缓存均在 world 坐标；request 构造时才统一折回 active input model。
     std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     CropVectorDouble3Array m_currentWorldPlaneOrigin = { 0.0, 0.0, 0.0 };
     CropVectorDouble3Array m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
-    std::array<double, 2> m_worldHalf = { 1.0, 1.0 };
+    std::array<double, 2> m_worldHalf = { 1.0, 1.0 }; // 平面 widget 的 world 半宽、半高。
+    // submit 事务轴：调用外部 reload 前置位以阻止重入；拒绝或完成回调负责清零。
     bool m_hasReload = false;
     ReloadSubmitter m_submitReloadHandler;
+    // reload pending 期间只保留不含 submit image 的结果元数据，成功后用于分发各 target 的 overlay。
     OrthogonalCropResult m_submitOverlay;
     CropCameraState m_cameraState;
     CropBoxWidget m_boxWidget;
@@ -389,6 +397,7 @@ void CropBridge::Impl::OnPlaneWidget(
         return;
     }
 
+    // 与 Box 共用“持续记录、仅 Released 消费”的交互契约；缓存值仍保持 world 坐标。
     m_currentWorldPlaneOrigin = worldOrigin;
     m_currentWorldPlaneNormal = worldNormal;
     m_hasWorldState = true;
@@ -489,6 +498,7 @@ OrthogonalCropRequest CropBridge::Impl::BuildPlaneRequest(
 
     const double worldOriginPoint[4] = { worldOrigin[0], worldOrigin[1], worldOrigin[2], 1.0 };
     double inputModelOriginPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
+    // 平面中心是点，直接使用 world -> active input model 仿射变换。
     worldToInputMat->MultiplyPoint(worldOriginPoint, inputModelOriginPoint);
     const double invW = std::abs(inputModelOriginPoint[3]) > kPlaneVectorEpsilon
         ? 1.0 / inputModelOriginPoint[3]
@@ -502,6 +512,7 @@ OrthogonalCropRequest CropBridge::Impl::BuildPlaneRequest(
 
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     vtkMatrix4x4::Invert(worldToInputMat, inputToWorldMat);
+    // 法线不能按点或方向向量直接变换；world 法线折回 input model 需使用 inputToWorld 的转置。
     inputToWorldMat->Transpose();
 
     const double worldNormalVector[4] = { worldNormal[0], worldNormal[1], worldNormal[2], 0.0 };
@@ -629,6 +640,7 @@ bool CropBridge::Impl::SwitchCropBox()
     }
 
     m_planeWidget.SetEnabled(false);
+    // 只有 widget 已成功启用后才发布交互态，避免初始化失败留下“已激活”假状态。
     m_currentGeometryType = CropShape::Box;
     m_isCropOn = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
@@ -694,6 +706,7 @@ bool CropBridge::Impl::SwitchCropPlane()
         return false;
     }
 
+    // 只有 widget 已成功启用后才发布交互态，避免初始化失败留下“已激活”假状态。
     m_currentGeometryType = CropShape::Plane;
     m_isCropOn = true;
     m_lastInteractionPhase = CropInteractionPhase::Released;
@@ -710,11 +723,13 @@ bool CropBridge::Impl::ExitCrop()
         return false;
     }
 
+    // reload pending 时 widget 已被禁用，但 submit 元数据仍等待完成回调，不能提前清场。
     if (m_hasReload) {
         std::cout << "[OrthogonalCrop] Crop widget deactivation deferred: image submit reload is pending." << std::endl;
         return false;
     }
 
+    // 正常退出同时清空交互与预览意图；world 几何缓存保留给后续再次激活复用。
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
     m_hasReload = false;
@@ -737,7 +752,7 @@ bool CropBridge::Impl::SendPreview()
         return false;
     }
 
-    // Box 与 Plane 只在 request 的几何真源构造上不同，后续 preview 分发完全共用。
+    // 1. 从当前 widget world 几何构造 request；Box 与 Plane 只在几何真源构造上不同。
     const auto volumeRequest = m_currentGeometryType == CropShape::Plane
         ? BuildPlaneRequest(
             OrthogonalCropOperation::Preview,
@@ -749,6 +764,7 @@ bool CropBridge::Impl::SendPreview()
     polyDataRequest.SetDataSource(OrthogonalCropDataSource::PolyData);
     ClearPreviewInput();
 
+    // 2. 先确认是否存在 3D 主 target；VolumeData 结果只计算一次并在这些 target 间复用。
     bool hasMainTarget = false;
     bool isPreviewSent = false;
     for (const auto& target : m_previewRenderTargets) {
@@ -771,6 +787,7 @@ bool CropBridge::Impl::SendPreview()
         }
     }
 
+    // 3. 每个 target 单独读取当前 actor mesh，路由 PolyData 结果，再由 plug 应用主显示和 overlay。
     for (const auto& target : m_previewRenderTargets) {
         if (!target.first || !target.second) {
             continue;
@@ -813,6 +830,7 @@ bool CropBridge::Impl::SendPreview()
         target.first->SetDirty();
     }
 
+    // 4. 无论有多少 target，结束时都把 router 的临时 mesh 输入恢复为 host 绑定输入。
     ClearPreviewInput();
     return isPreviewSent;
 }
@@ -873,6 +891,7 @@ bool CropBridge::Impl::SendSubmit()
         return false;
     }
 
+    // 1. submit 只消费已激活、非拖拽且具有 image 输入的当前状态；pending reload 会拒绝重入。
     if (!GetSubmitReady()) {
         return false;
     }
@@ -880,6 +899,7 @@ bool CropBridge::Impl::SendSubmit()
     m_cameraState.SetCameraState(m_referenceRenderer);
     ClearPreviewInput();
 
+    // 2. request 直接从当前 widget 几何和 backend image 输入构造，不复用任何 preview result。
     const auto submitRequest = m_currentGeometryType == CropShape::Plane
         ? BuildPlaneRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData)
         : BuildBoxRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData);
@@ -903,12 +923,14 @@ bool CropBridge::Impl::SendSubmit()
         return false;
     }
 
+    // 3. submit image 移交 reload handler；bridge 只保留 overlay 元数据，并在外部调用前关闭 widget、置 pending。
     submitResult.SetSubmitImage(vtkSmartPointer<vtkImageData>());
     m_submitOverlay = submitResult;
     m_hasReload = true;
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
 
+    // A. handler 拒绝表示外部事务从未建立；本地立即清 pending、清元数据并恢复当前 widget。
     if (!m_submitReloadHandler(
             std::move(submitImage),
             [this](bool isSuccess) {
@@ -930,6 +952,7 @@ bool CropBridge::Impl::SendSubmit()
         return false;
     }
 
+    // B. true 只表示 reload handler 接受了请求；成功或失败恢复均由 OnSubmitReload 完成。
     return true;
 }
 
@@ -961,6 +984,7 @@ bool CropBridge::Impl::GetSubmitReady() const
 void CropBridge::Impl::OnSubmitReload(bool isSuccess)
 {
     if (!isSuccess) {
+        // A. reload 失败不提交几何状态：清除 pending 事务并恢复当前模式 widget，允许用户调整后重试。
         std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
         ClearPreviewInput();
         m_submitOverlay = OrthogonalCropResult();
@@ -977,6 +1001,7 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
         return;
     }
 
+    // B. reload 成功后新 image 已成为 host 真源；旧 world 几何失效，退出交互并要求下一轮重建 bounds。
     ClearPreviewInput();
 
     const auto submitOverlayResult = m_submitOverlay;
@@ -994,6 +1019,7 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
         return;
     }
 
+    // submit result 已移除 image payload，只把与新主数据对应的裁切元数据分发给各 overlay target。
     for (const auto& target : m_previewRenderTargets) {
         if (!target.first || !target.second) {
             continue;

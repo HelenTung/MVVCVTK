@@ -51,11 +51,12 @@ public:
     {
     }
 
+    // current 四元组共用提交锁；GetImageState 同锁取 image/version，其他 getter 各自独立取值。
     mutable std::mutex m_dataMutex;
-    vtkSmartPointer<vtkImageData> m_vtkImage;
-    std::array<double, 2> m_scalarRange = { 0.0, 0.0 };
-    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 };
-    DataVersion m_dataVersion = 0;
+    vtkSmartPointer<vtkImageData> m_vtkImage; // 对外 current image 真源
+    std::array<double, 2> m_scalarRange = { 0.0, 0.0 }; // 对应 current image 的标量范围
+    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距，单位沿用输入
+    DataVersion m_dataVersion = 0; // 每次 current 提交递增
 
     bool SetRasScalars(
         const float* src,
@@ -160,11 +161,13 @@ private:
 
 class RawVolumeDataManager::Impl final {
 public:
-    mutable std::mutex m_reconMutex; // 保护后台准备、门铃发布和主线程接管这一完整事务
+    // pending payload 的生产、覆盖与接管共用此锁；它不保护 Base Impl 的 current 四元组。
+    mutable std::mutex m_reconMutex;
     vtkSmartPointer<vtkImageData> m_pendingImage;
     std::array<double, 2> m_pendingScalarRange = { 0.0, 0.0 };
-    std::array<double, 3> m_pendingSpacing = { 1.0, 1.0, 1.0 };
-    bool m_hasPendingImage = false; // 只在 m_reconMutex 内读写，不再需要独立原子状态
+    std::array<double, 3> m_pendingSpacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距，单位沿用输入
+    // 生产者在完整 payload 写入后置位，SetCurrentFromPending() 接管后清零；仅在 m_reconMutex 内读写。
+    bool m_hasPendingImage = false;
 };
 
 BaseDataManager::BaseDataManager()
@@ -216,6 +219,7 @@ bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
     image->GetSpacing(imageSpacing);
 
     {
+        // 同步加载路径在同一临界区更新 current 四元组；跨多个 getter 的调用方仍需自行校验 version。
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
         m_impl->m_vtkImage = std::move(image);
         m_impl->m_scalarRange = { range[0], range[1] };
@@ -575,13 +579,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     const std::array<float, 3>& spacing,
     const std::array<float, 3>& origin)
 {
+    // 后台阶段只构造并发布 pending 事务；current 指针、版本和 VTK 脏传播留给提交阶段。
     if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
         return false;
     }
 
-    // ── 在调用方线程完成唯一一次分配 + 拷贝（只此一次，不再重复）────
-	// 重建注入路径与文件打开路径保持一致：统一在这里完成 LPS -> RAS 物理坐标转换。
-    // vtkImageImport 解决少一次拷贝的问题，更快的读取速度，更快的读取效率
+    // 1. 在调用线程完成分配与唯一一次体素复制，并与文件路径一致地转换 LPS -> RAS 物理坐标。
     const int rasDims[3] = { dims[0], dims[1], dims[2] };
     const std::array<double, 3> rasSpacing = {
         static_cast<double>(spacing[0]),
@@ -610,12 +613,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
-    // Modified() 暂不调用——留到主线程 SetCurrentFromPending() 中调用，
-    // 确保 VTK pipeline 脏标记传播在正确线程触发。
+    // 2. 此处不调用 Modified()；现有消费链在 SetCurrentFromPending() 接管后、提交 current 前触发。
 
     {
         std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        m_rawImpl->m_pendingImage = std::move(newImage);   // 指针赋值，无拷贝
+        // 3. image、range、RAS spacing 与门铃同锁发布；槽未消费时由最新一批完整 payload 覆盖。
+        m_rawImpl->m_pendingImage = std::move(newImage); // 只移动智能指针，不复制体素
         m_rawImpl->m_pendingScalarRange = { range[0], range[1] };
         m_rawImpl->m_pendingSpacing = rasSpacing;
         m_rawImpl->m_hasPendingImage = true;
@@ -626,6 +629,7 @@ bool RawVolumeDataManager::SetFromBuffer(
 
 bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 {
+    // 该入口接收已构造的 VTK image，只校验并发布 pending 快照，不直接替换 current 真源。
     if (!image) {
         return false;
     }
@@ -646,6 +650,7 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 
     {
         std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
+        // 指针、派生 range/spacing 与门铃同锁发布，消费者不会拼接两批快照。
         m_rawImpl->m_pendingImage = std::move(image);
         m_rawImpl->m_pendingScalarRange = { range[0], range[1] };
         m_rawImpl->m_pendingSpacing = imageSpacing;
@@ -657,34 +662,36 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 
 bool RawVolumeDataManager::SetCurrentFromPending()
 {
+    // 消费阶段先从 pending Impl 接管一批事务，再向 Base Impl 提交为 current；两把锁职责不重叠。
     vtkSmartPointer<vtkImageData> incoming;
     std::array<double, 2> pendingRange = { 0.0, 0.0 };
     std::array<double, 3> pendingSpacing = { 1.0, 1.0, 1.0 };
     {
         std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        // 门铃和 payload 使用同一事务锁，避免锁外检查后后台线程替换 pending image。
+        // 1. 门铃和 payload 同锁检查，避免锁外 check-then-act 时生产者替换 pending image。
         if (!m_rawImpl->m_hasPendingImage || !m_rawImpl->m_pendingImage) {
             return false;
         }
+        // 2. 一次移动 image 并复制配套元数据，离开锁后生产者即可发布下一批 pending。
         incoming = std::move(m_rawImpl->m_pendingImage);
         pendingRange = m_rawImpl->m_pendingScalarRange;
         pendingSpacing = m_rawImpl->m_pendingSpacing;
-        // 先在互斥区内拿走所有权，再清掉门铃，保证主线程这一帧只消费一次这批重建结果。
+        // 本批 payload 已被接管，清门铃使后续轮询不会重复提交同一 image。
         m_rawImpl->m_hasPendingImage = false;
     }
 
-    // Modified() 在主线程调用（VTK pipeline 脏传播安全）
+    // 3. 现有调用链在主线程提交前触发 Modified()；不把这一步放进 pending 锁临界区。
     incoming->Modified();
 
     {
+        // 4. current image、range、spacing、version 在 Base 锁内一次提交，对 pending 生产者不形成锁嵌套。
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
         m_impl->m_vtkImage = incoming;
         m_impl->m_scalarRange = pendingRange;
         m_impl->m_imageSpacing = pendingSpacing;
         ++m_impl->m_dataVersion;
     }
-    // 到这里新镜像已经成为当前唯一真源，调用方随后再通过 SharedState 发布 DataReady，
-    // Service 层就能沿着“DataReady -> 请求重建 -> 下一帧消费”的链路继续推进。
+    // 5. 新 image 已成为 DataManager 的 current 真源；调用方随后发布 DataReady，驱动 Service 重建。
     return true;
 }
 

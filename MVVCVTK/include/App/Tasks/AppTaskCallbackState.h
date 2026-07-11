@@ -9,18 +9,20 @@
 // 这个状态对象把“登记回调、后台投递结果、主线程消费执行”拆成三步：
 // 1. 业务入口登记回调；
 // 2. 后台线程只移动回调和结果快照，不执行未知用户代码；
-// 3. 主线程心跳用 exchange 消费一次 pending 位，再在锁外执行回调。
+// 3. 更新消费线程用 exchange 领取一次 pending 位，再在锁外执行回调；本对象不负责切换线程。
 class AppTaskCallbackState
 {
 public:
     void SetCallback(std::function<void(bool)> callback) {
         std::lock_guard<std::mutex> lk(m_mutex);
+        // 加载任务先登记闭包，完成线程随后通过无显式 callback 的 SetCallbackReady() 领取它。
         m_callback = std::move(callback);
     }
 
     void SetCallbackReady(bool isSuccess, std::function<void(bool)> callback = nullptr) {
         std::lock_guard<std::mutex> lk(m_mutex);
         if (!callback) {
+            // A. 未随完成结果携带闭包时，必须从同一互斥区领取先前登记的任务闭包。
             if (!m_callback) {
                 return;
             }
@@ -48,6 +50,7 @@ public:
             m_pendingCallback = std::move(callback);
         }
 
+        // 闭包与结果先在互斥区内组成完整 payload，再发布原子门铃；消费者看到门铃后会在此锁上接管。
         m_isNextOk = isSuccess;
         m_hasPendingCallback = true;
     }
@@ -57,6 +60,7 @@ public:
         bool isSuccess = false;
         {
             std::lock_guard<std::mutex> lk(m_mutex);
+            // 一次接管当前 pending 闭包和对应结果；新的完成投递会留在槽中等待下一次 Send。
             callback = std::move(m_pendingCallback);
             m_pendingCallback = nullptr;
             isSuccess = m_isNextOk;
@@ -68,13 +72,18 @@ public:
     }
 
     bool ResetCallback() {
+        // 这里只领取可轮询的门铃，不在原子位上承载 callback 或结果 payload。
         return m_hasPendingCallback.exchange(false);
     }
 
 private:
     mutable std::mutex m_mutex;
-    std::function<void(bool)> m_callback; // 当前业务方注册但尚未触发的回调
-    std::function<void(bool)> m_pendingCallback; // 已由后台任务准备好、等待主线程执行的回调或组合闭包
-    bool m_isNextOk{ false }; // 单回调的结果快照；组合闭包自行保存每个任务的结果
-    std::atomic<bool> m_hasPendingCallback{ false }; // 后台线程只投递结果，主线程在心跳阶段统一执行回调
+    // 业务方已登记但后台任务尚未领取的闭包，仅在 m_mutex 内移动。
+    std::function<void(bool)> m_callback;
+    // 完成线程已投递、等待更新消费线程接管的单闭包或按完成顺序串接的组合闭包。
+    std::function<void(bool)> m_pendingCallback;
+    // 单闭包使用当前结果；组合闭包把每个任务的结果捕获进各自 closure，不共用此值。
+    bool m_isNextOk{ false };
+    // 完成线程发布，更新消费线程 ResetCallback() 清零；payload 始终由 m_mutex 保护。
+    std::atomic<bool> m_hasPendingCallback{ false };
 };

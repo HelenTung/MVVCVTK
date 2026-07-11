@@ -62,11 +62,12 @@ inline std::array<double, 16> GetBoxMatrixFromBounds(const std::array<double, 6>
     };
 }
 
-// 裁切盒内外的保留/移除语义。
+// 裁切几何的 Inside 由几何轴决定：Box 是标准盒 [-1,1]^3 内部，
+// Plane 是 active input model 中法线指向的正半空间。
 enum class CropRemovalMode {
-    // 保留裁切盒内部内容，移除外部内容。
+    // mapper preview 保留 Box 的 6 个朝内半空间交集，或 Plane 的法线正半空间。
     KeepInside,
-    // 移除裁切盒内部内容，保留外部内容。
+    // shader/submit 移除上述 Inside，保留其余区域。
     RemoveInside
 };
 
@@ -100,15 +101,15 @@ enum class OrthogonalCropOperation {
     Submit
 };
 
-// 裁切交互过程的瞬时状态；主要用于区分“拖拽中”和“已释放”。
+// widget 生产、bridge 消费的瞬时交互轴；它与 preview 开关、submit reload 状态相互独立。
 enum class CropInteractionPhase {
     // 当前没有任何交互发生。
     Idle,
     // 已进入可交互区域，但尚未开始真正拖拽。
     Hover,
-    // 正在拖拽，适合只更新轻量 UI，不做重型 preview。
+    // 正在拖拽；bridge 记录最新 world 几何，但阻止重型 preview 和 submit。
     Dragging,
-    // 一次拖拽刚结束，适合触发正式 preview 或结果提交。
+    // 一次拖拽刚结束；preview 意图开启时由 bridge 消费当前几何，submit 也重新允许。
     Released
 };
 
@@ -309,7 +310,7 @@ public:
 private:
     // Box 几何真源：标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
     std::array<double, 16> m_boxToInputModelMatrix = GetIdentityMatrixArray();
-    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和矩形半尺寸。
+    // Plane 几何真源：active input model 坐标系下的平面法线、中心点和 widget 可视半尺寸。
     // 法线指向正半空间；正半空间在平面裁切语义中视为 Inside。
     CropVectorDouble3Array m_planeNormalInInputModel = { 0.0, 0.0, 1.0 };
     CropVectorDouble3Array m_planeCenterInInputModel = { 0.0, 0.0, 0.0 };
