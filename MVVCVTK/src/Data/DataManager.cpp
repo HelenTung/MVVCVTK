@@ -51,12 +51,17 @@ public:
     {
     }
 
-    // current 四元组共用提交锁；GetImageState 同锁取 image/version，其他 getter 各自独立取值。
+    // [风险] current 四元组虽共用此锁，但 GetVtkImage/GetScalarRange/GetSpacing/GetDataVersion 分别加锁，
+    // 连续调用可能跨越一次提交而拼出不同版本；只有 GetImageState 保证 image/version 来自同一临界区。
     mutable std::mutex m_dataMutex;
-    vtkSmartPointer<vtkImageData> m_vtkImage; // 对外 current image 真源
-    std::array<double, 2> m_scalarRange = { 0.0, 0.0 }; // 对应 current image 的标量范围
-    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距，单位沿用输入
-    DataVersion m_dataVersion = 0; // 每次 current 提交递增
+    // 对外 current image 的强引用真源；getter 返回的 smart pointer 可让旧图像安全越过后续替换。
+    vtkSmartPointer<vtkImageData> m_vtkImage;
+    // 与 current image 同批提交的输入标量闭区间，不可与其它版本的 image 拼接使用。
+    std::array<double, 2> m_scalarRange = { 0.0, 0.0 };
+    // 与 current image 同批提交的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
+    std::array<double, 3> m_imageSpacing = { 1.0, 1.0, 1.0 };
+    // 每次完整 current 提交后递增；跨 getter 校验同批快照时以该版本为边界。
+    DataVersion m_dataVersion = 0;
 
     bool SetRasScalars(
         const float* src,
@@ -161,11 +166,14 @@ private:
 
 class RawVolumeDataManager::Impl final {
 public:
-    // pending payload 的生产、覆盖与接管共用此锁；它不保护 Base Impl 的 current 四元组。
+    // pending 四元组的生产、覆盖与接管共用此锁；它不保护 Base Impl 的 current 四元组。
     mutable std::mutex m_reconMutex;
+    // 最新一批待提交图像的强引用 owner；槽未消费时允许由后一批完整事务覆盖。
     vtkSmartPointer<vtkImageData> m_pendingImage;
+    // 与 m_pendingImage 同批发布的输入标量闭区间。
     std::array<double, 2> m_pendingScalarRange = { 0.0, 0.0 };
-    std::array<double, 3> m_pendingSpacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距，单位沿用输入
+    // 与 m_pendingImage 同批发布的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
+    std::array<double, 3> m_pendingSpacing = { 1.0, 1.0, 1.0 };
     // 生产者在完整 payload 写入后置位，SetCurrentFromPending() 接管后清零；仅在 m_reconMutex 内读写。
     bool m_hasPendingImage = false;
 };

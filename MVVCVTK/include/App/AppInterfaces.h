@@ -146,8 +146,11 @@ public:
 // ─────────────────────────────────────────────────────────────────────
 class AbstractRenderContext {
 protected:
+    // context 强持有稳定 renderer；替换宿主窗口时只迁移该 renderer，避免 service/overlay 落到旧视图。
     vtkSmartPointer<vtkRenderer>        m_renderer;
+    // context 强持有当前宿主 render window；SetRenderWindow 负责解除旧绑定并把 renderer 接入新窗口。
     vtkSmartPointer<vtkRenderWindow>    m_renderWindow;
+    // 与 context 同生命周期保存已绑定 service 的共享 owner；窗口迁移后用它重新下发同一组 VTK 对象。
     std::shared_ptr<AbstractAppService> m_service;
 
 public:

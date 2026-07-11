@@ -80,13 +80,18 @@ private:
     static const char* GetFailureReasonText(CropFailure failureReason);
     static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
 
+    // bridge 值拥有的业务 router；长期 image/polydata 输入及 preview/submit 执行都收口到该实例。
     CropRouter m_backend;
+    // 无持久成员的显示适配器；裁切临时状态写入目标 mapper/shader，并由 ResetPreview 对称清理。
     CropPreviewPlug m_previewPlug;
     // m_boundInputPolyData 是 host 绑定的长期输入；临时 preview mesh 写入 router 后由 ClearPreviewInput 恢复它。
     vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
+    // [风险] 非拥有主交互器；宿主必须保证任一 widget 启用期间有效，并在窗口销毁前解除绑定，
+    // 否则后续 Switch* 重新注入 widget 时会使用悬垂地址。
     vtkRenderWindowInteractor* m_primaryInteractor = nullptr;
     // 交互生命周期轴：widget 成功启用后置位，显式退出或 submit reload 成功收尾时清零。
     bool m_isCropOn = false;
+    // 当前激活 widget 和 request 的几何轴；crop 关闭后保留最后选择，下次 Switch* 会显式覆盖。
     CropShape m_currentGeometryType = CropShape::Box;
     // 几何可用轴：widget 回调或模式初始化后置位；成功 reload 后清零，迫使下一轮重新取输入 bounds。
     bool m_hasWorldState = false;
@@ -94,22 +99,32 @@ private:
     bool m_isPreviewOn = false;
     // 最近交互阶段由 widget 回调更新；Dragging 阻止重型 preview 和 submit，Released 允许消费当前几何。
     CropInteractionPhase m_lastInteractionPhase = CropInteractionPhase::Idle;
+    // preview 与随后 submit 共用的 Inside 保留轴；切换 preview 模式时更新，默认保留几何内部。
     CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
-    // 以下几何缓存均在 world 坐标；request 构造时才统一折回 active input model。
+    // Box 的 world AABB 缓存，布局 [minX,maxX,minY,maxY,minZ,maxZ]；request 构造时折回 active input model。
     std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    // Plane 的 world 几何真源；origin 为平面上一点，normal 由 widget 路径保持单位化并定义 Inside 正侧。
     CropVectorDouble3Array m_currentWorldPlaneOrigin = { 0.0, 0.0, 0.0 };
     CropVectorDouble3Array m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
-    std::array<double, 2> m_worldHalf = { 1.0, 1.0 }; // 平面 widget 的 world 半宽、半高。
+    // 平面 widget 的 world 可视半尺寸 [halfWidth,halfHeight]；不限制后端无限半空间方程。
+    std::array<double, 2> m_worldHalf = { 1.0, 1.0 };
     // submit 事务轴：调用外部 reload 前置位以阻止重入；拒绝或完成回调负责清零。
     bool m_hasReload = false;
+    // 宿主注入并由 std::function 持有的 reload 能力；替换/清空时释放 closure，接受请求后负责回传完成结果。
     ReloadSubmitter m_submitReloadHandler;
     // reload pending 期间只保留不含 submit image 的结果元数据，成功后用于分发各 target 的 overlay。
     OrthogonalCropResult m_submitOverlay;
+    // submit 前缓存 reference renderer 相机；失败时丢弃，成功 reload 后恢复到新数据并清空。
     CropCameraState m_cameraState;
+    // bridge 值拥有两种 widget 控制器及其 VTK callback/representation 生命周期；任一时刻只启用当前几何对应项。
     CropBoxWidget m_boxWidget;
     CropPlaneWidget m_planeWidget;
+    // 几何参照窗口 service 的共享 owner；提供 active input model -> world，且决定 reference overlay 可见性。
     std::shared_ptr<InteractiveService> m_referenceRenderService;
+    // [风险] 非拥有 renderer，仅用于相机快照/恢复；宿主必须让它与 reference service 同步换绑，
+    // 并保证 submit 完成回调前仍有效，否则相机收尾会访问失效视图。
     vtkRenderer* m_referenceRenderer = nullptr;
+    // 每个 preview 目标的 [service, overlay] 共享 owner；ClearPreviewViews 先 Remove 再清空集合。
     std::vector<std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>> m_previewRenderTargets;
 };
 

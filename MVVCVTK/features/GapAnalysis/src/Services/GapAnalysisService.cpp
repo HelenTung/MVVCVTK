@@ -104,7 +104,8 @@ private:
     std::mutex m_callbackMutex;
     // 当前任务尚未完成的 callback；StartAsync 替换，SetCallbackReady 完成时移出。
     std::function<void(bool)> m_completionCallback;
-    // 已完成、等待宿主 SendCallback 领取的 callback；领取时在锁内移出、锁外执行。
+    // [风险] 已完成 callback 只有一个 pending 槽；调用方须在启动下一任务前用 GetDoneEvent/SendCallback
+    // 领取上一终态，否则后一任务完成时会覆盖尚未消费的 m_nextCallback/m_isNextOk。
     std::function<void(bool)> m_nextCallback;
     // 与 m_nextCallback 同一锁事务发布的单任务结果快照。
     bool m_isNextOk = false;
@@ -113,16 +114,21 @@ private:
 
     // inputMutex 保护当前不可变体素快照 shared owner；worker 按值领取 owner 后不再访问该槽。
     mutable std::mutex m_inputMutex;
+    // SetInputImage 深拷贝生成的只读体素 owner；新输入替换槽位，已启动 worker 仍持有自己的旧快照。
     VolumeBufferSnapshot m_inputSnapshot;
 
     // paramsMutex 把三个可变参数对象作为同一份任务配置复制边界。
     mutable std::mutex m_paramsMutex;
+    // 输入标量域表面参数；GetParamSnapshot 按值冻结，worker 当前消费其中 isoValue。
     SurfaceParams m_surfParams;
+    // 法向精化参数的预留值快照；当前 worker 不消费，不能描述为已生效配置。
     AdvancedSurfaceParams m_advParams;
+    // 空隙候选与保留参数；GetParamSnapshot 按值冻结后由当前 worker 消费已接入字段。
     VoidDetectionParams m_voidParams;
 
     // resultMutex 保护完整结果 payload；worker 局部构造后一次性移动提交，读取入口在同锁下复制/构建。
     mutable std::mutex m_resultMutex;
+    // 最近一次 worker 提交的结果真源；新任务启动前清空，mesh/label 显示缓存均从它派生。
     GapAnalysisResult m_result;
 
     // workerMutex 只串行化 std::thread 槽的 join/替换，不保护算法 payload。
@@ -134,15 +140,17 @@ private:
     // 分析执行轴：入口发布 Idle/Running/前置失败，worker 发布终态；它不表达 view/overlay 是否开启。
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
 
-    // 以下显示会话成员不受 mutex 保护，要求宿主命令/display tick 串行调用；worker 不访问。
+    // [风险] 以下显示会话成员不受 mutex 保护；正确性依赖宿主命令与 OnDisplayTick 串行调用，
+    // worker 不访问这些字段，但并发的 StartView/SwitchOverlay/ExitView 仍会形成数据竞争。
     // StartView 过滤并保留 3D target 的 shared owner，ClearDisplayState 统一释放。
     std::vector<std::shared_ptr<OverlayService>> m_meshTargets;
     // 2D target 的 [orientation, service] shared owner；orientation 在创建 slice overlay 时固化。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> m_sliceTargets;
     // 当前已实际 Attach 的 service/strategy 对；SetOverlayOff 逐项 Remove 后清空。
     std::vector<GapOverlayBinding> m_displayOverlayBindings;
-    // 成功结果派生的主线程显示缓存；隐藏 overlay 时保留，退出或新会话时清空。
+    // 成功结果派生的 3D void mesh 强引用缓存；隐藏 overlay 时保留，退出或新会话时清空。
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
+    // 成功结果派生的 2D label image 强引用缓存；沿用输入快照的 dimensions/spacing/origin，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     // StartView 保存的 ISO 来源配方；StartRun 拿到输入 min/max 后解析，结束会话时清空。
     GapAnalysisSurfaceRequest m_displaySurfaceRequest;

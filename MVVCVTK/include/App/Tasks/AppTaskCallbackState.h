@@ -77,6 +77,7 @@ public:
     }
 
 private:
+    // 同时保护 active/pending callback 与 m_isNextOk；原子门铃只发布“有 payload”，不替代此锁。
     mutable std::mutex m_mutex;
     // 业务方已登记但后台任务尚未领取的闭包，仅在 m_mutex 内移动。
     std::function<void(bool)> m_callback;

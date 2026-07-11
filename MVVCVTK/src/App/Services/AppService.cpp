@@ -110,23 +110,37 @@ private:
     void StartRun(std::packaged_task<void()> task,
         bool hasActiveLoadFuture);
 
-    std::shared_ptr<AbstractDataManager> m_dataManager; // 当前体数据源，加载成功后由主线程提交到渲染管线
-    std::shared_ptr<AbstractVisualStrategy> m_currentStrategy; // 当前主渲染策略
-    vtkSmartPointer<vtkRenderer> m_renderer; // 当前渲染器，所有 VTK 节点挂接都收口到主线程
-    vtkSmartPointer<vtkRenderWindow> m_renderWindow; // 当前渲染窗口，用于交互帧率控制
+    // Service 共享持有会话数据源；文件加载后台直接提交 current，reload/buffer 后台只发布 pending，
+    // 再由 SendUpdates 所在线程把 pending 提交为 current。
+    std::shared_ptr<AbstractDataManager> m_dataManager;
+    // 当前主渲染策略的共享 owner；替换前从旧 renderer 脱离，随后由缓存决定是否继续保留。
+    std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
+    // RenderContext 注入的 VTK 强引用；策略/overlay 的 Attach、Detach 和相机更新均以它为目标。
+    vtkSmartPointer<vtkRenderer> m_renderer;
+    // RenderContext 注入的窗口强引用；仅用于渲染节奏与窗口级操作，不拥有当前 Strategy。
+    vtkSmartPointer<vtkRenderWindow> m_renderWindow;
     // 状态合并、外部请求或主线程管线操作均可置位；Timer 在 SendUpdates() 后取走并清零。
     std::atomic<bool> m_isDirty{ false };
     // 普通状态事件、overlay 挂接与管线重建置位；主线程 SetStrategyState() 用 CAS 领取。
     std::atomic<bool> m_hasSyncNeed{ false };
     // 状态事件与 overlay 挂接以按位 OR 合并；主线程 exchange(0)，加载失败清场也会清零。
     std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
-    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies; // 图层叠加策略列表
-    std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService; // 加载任务构建和加载回调状态
-    std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService; // 导出任务构建和保存回调状态
-    std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache; // 已构建过的 Strategy 缓存，避免同模式反复创建渲染对象
-    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None; // 当前 service 本地待消费的 load 事件来源，避免多个窗口抢同一个 Share pending 标记
-    std::shared_ptr<SharedInteractionState> m_sharedState; // 运行期单一状态真源，前处理与交互都回写到这里
-    std::shared_ptr<IStateEventSource> m_stateEventSource; // 状态广播源，Service 通过它订阅 SharedState 的增量事件
+    // 已挂载 overlay 的共享 owner 集合；renderer 另持 VTK prop 引用，Remove/Clear 负责先解除挂载。
+    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;
+    // 加载/重载任务及其 callback 状态的共享 owner；完成 payload 最终由 SendUpdates 消费。
+    std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService;
+    // [风险] 导出任务不进入 m_activeLoadFuture 的析构等待边界；任务强持有 dataManager，因此不会悬垂，
+    // 但 Service 先销毁时 weak completion 无法回投，随任务携带的业务 callback 会被安全丢弃。
+    std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService;
+    // 按 VizMode 强持有已构建 Strategy；清缓存时先 Detach，避免同模式反复创建 VTK pipeline。
+    std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
+    // [风险] DataReady 同步 observer 写入、SendUpdates 读取并清零的非原子本地来源快照；
+    // 正确性依赖宿主串行发布状态事件与更新消费，不能把它视作受相邻 atomic flags 保护。
+    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None;
+    // 会话运行态的共享 owner 与单一事实源；前处理、交互和渲染参数都通过它发布/读取。
+    std::shared_ptr<SharedInteractionState> m_sharedState;
+    // 状态广播源的共享 owner；observer 只 weak-lock Impl，避免事件源反向延长 Service 生命周期。
+    std::shared_ptr<IStateEventSource> m_stateEventSource;
 
     // SetVizMode/SetVisualConfig 写入最新快照；管线重建、切片交互和导出读取但不清零。
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
