@@ -137,8 +137,11 @@ private:
     // LoadFailed 发布失败请求并标脏；主线程领取后优先于重建执行统一清场。
     std::atomic<bool> m_hasLoadFailure{ false };
 
-    std::future<void> m_activeLoadFuture; // 当前活动加载任务的 future，用于析构时等待后台线程结束
-    mutable std::mutex m_activeLoadMutex; // 保护 m_activeLoadFuture
+    // [风险] load/reload detached worker 只使用一个 future 槽；当前 Build*Task 在宿主串行调用时以
+    // GetAnyLoadRunning 和先发布 Loading 状态维持单任务约束，并发进入或绕过该约束会只等待最后记录的 future。
+    std::future<void> m_activeLoadFuture;
+    // 串行化 load/reload future 的替换与析构等待；不保护任务内部数据或 export 线程。
+    mutable std::mutex m_activeLoadMutex;
 };
 
 VizService::Impl::Impl(
