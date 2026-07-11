@@ -1,5 +1,6 @@
 #include "Preview/CropPreviewPlug.h"
 #include "Render/Strategies/CropOverlay.h"
+#include "PlanarTestSuites.h"
 
 #include <vtkActor.h>
 #include <vtkAutoInit.h>
@@ -20,9 +21,10 @@
 VTK_MODULE_INIT(vtkRenderingOpenGL2);
 VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 
-namespace {
+class CropPreviewCases final {
+public:
 
-constexpr double kPlaneTolerance = 1e-9;
+inline static constexpr double kPlaneTolerance = 1e-9;
 
 class CropViewStub final : public InteractiveService {
 public:
@@ -45,7 +47,7 @@ public:
 
     std::array<double, 16> GetModelMatrix() override
     {
-        return GetIdentityMatrixArray();
+        return CropGeometry::GetIdentityMatrix();
     }
 
     int GetNavigationAxis() const override
@@ -123,20 +125,24 @@ bool SetExpect(bool isExpected, const char* message)
 OrthogonalCropResult GetPreviewResult(CropShape geometryType)
 {
     OrthogonalCropRequest request;
-    request.SetDataSource(OrthogonalCropDataSource::PolyData);
-    request.SetOperation(OrthogonalCropOperation::Preview);
-    request.SetGeometryType(geometryType);
-    request.SetRemovalMode(CropRemovalMode::KeepInside);
+    request.dataSource = OrthogonalCropDataSource::PolyData;
+    request.operation = OrthogonalCropOperation::Preview;
+    request.geometryType = geometryType;
+    request.removalMode = CropRemovalMode::KeepInside;
 
     CropDataModel cropData;
-    cropData.SetBoxBounds(GetCanonicalCropBoxBounds());
-    cropData.SetInputBounds(GetCanonicalCropBoxBounds());
-    cropData.SetPlaneCenter({ 0.0, 0.0, 0.0 });
-    cropData.SetPlaneNormal({ 0.0, 0.0, 1.0 });
+    cropData.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(CropGeometry::GetCanonicalBounds());
+    cropData.inputModelBounds = CropGeometry::GetCanonicalBounds();
+    cropData.planeCenterInInputModel = { 0.0, 0.0, 0.0 };
+    cropData.planeNormalInInputModel = { 0.0, 0.0, 1.0 };
 
-    auto result = OrthogonalCropResult::GetResolved(request);
-    result.SetCropDataModel(cropData);
-    result.SetSucceeded(true);
+    OrthogonalCropResult result;
+    result.resolvedDataSource = request.dataSource;
+    result.resolvedOperation = request.operation;
+    result.resolvedGeometryType = request.geometryType;
+    result.resolvedRemovalMode = request.removalMode;
+    result.cropDataModel = cropData;
+    result.isSucceeded = true;
     return result;
 }
 
@@ -251,13 +257,17 @@ bool StartBadShapeCase()
     return isPassed;
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        failureCount += StartBoxKeepCase() ? 0 : 1;
+        failureCount += StartPlaneKeepCase() ? 0 : 1;
+        failureCount += StartBadShapeCase() ? 0 : 1;
+        return failureCount;
+    }
+};
 
-int GetCropPreviewFailCount()
+int CropPreviewSuite::GetFailCount() const
 {
-    int failureCount = 0;
-    failureCount += StartBoxKeepCase() ? 0 : 1;
-    failureCount += StartPlaneKeepCase() ? 0 : 1;
-    failureCount += StartBadShapeCase() ? 0 : 1;
-    return failureCount;
+    return CropPreviewCases().GetFailCount();
 }

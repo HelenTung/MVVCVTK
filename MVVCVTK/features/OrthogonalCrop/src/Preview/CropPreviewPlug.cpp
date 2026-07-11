@@ -134,7 +134,7 @@ bool CropPreviewPlug::SetPreview(
         if (isPolySet) {
             // 主 actor 已经用 mapper clipping 或 shader discard 表达 polydata 预览；
             // overlay 是否显示几何参照由 bridge 按 reference 窗口注入；可选裁切网格 artifact 不参与主预览判定。
-            visibleOverlayResult.SetClipPolyData(nullptr);
+            visibleOverlayResult.clipPolyData = nullptr;
         }
         overlayStrategy->SetCropResult(visibleOverlayResult);
     }
@@ -219,7 +219,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
     const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
     if (referenceService) {
@@ -228,7 +228,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildBoxClip(
     }
 
     auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
+    boxToInputMat->DeepCopy(cropData.boxToInputModelMatrix.data());
 
     // VTK clipping planes 需要 world 坐标；cropData 保存的是 box -> active input model，
     // 所以先还原 box -> world，再把标准盒 6 个面转换成 world plane。
@@ -273,7 +273,7 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     const std::shared_ptr<InteractiveService>& referenceService,
     const OrthogonalCropResult& previewResult) const
 {
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
     if (referenceService) {
@@ -284,8 +284,8 @@ vtkSmartPointer<vtkPlaneCollection> CropPreviewPlug::BuildPlaneClip(
     auto inputToWorld = vtkSmartPointer<vtkTransform>::New();
     inputToWorld->SetMatrix(inputToWorldMat);
 
-    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
+    const auto planeCenterInInputModel = cropData.planeCenterInInputModel;
+    const auto planeNormalInInputModel = cropData.planeNormalInInputModel;
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
     inputToWorld->TransformPoint(planeCenterInInputModel.data(), worldOrigin);
@@ -323,7 +323,7 @@ bool CropPreviewPlug::SetKeepClip(
     int expectedPlaneCount = 0;
     // A. Box 构造 6 个朝内的 world planes，正半空间交集即标准盒内部。
     // B. Plane 保留原法线指向的 world 正半空间；RemoveInside 不进入本函数。
-    switch (previewResult.GetResolvedGeometryType()) {
+    switch (previewResult.resolvedGeometryType) {
     case CropShape::Box:
         clippingPlanes = BuildBoxClip(referenceService, previewResult);
         expectedPlaneCount = 6;
@@ -357,9 +357,9 @@ bool CropPreviewPlug::SetVolumeView(
 {
     if (!targetService
         || targetService->GetNavigationAxis() >= 0
-        || !previewResult.GetSucceeded()
-        || previewResult.GetResolvedDataSource() != OrthogonalCropDataSource::VolumeData
-        || previewResult.GetResolvedOperation() != OrthogonalCropOperation::Preview) {
+        || !previewResult.isSucceeded
+        || previewResult.resolvedDataSource != OrthogonalCropDataSource::VolumeData
+        || previewResult.resolvedOperation != OrthogonalCropOperation::Preview) {
         return false;
     }
 
@@ -377,7 +377,7 @@ bool CropPreviewPlug::SetVolumeView(
 
     if (removalMode == CropRemovalMode::RemoveInside) {
         auto gpuVolumeMapper = vtkGPUVolumeRayCastMapper::SafeDownCast(volumeMapper);
-        const bool isPlane = previewResult.GetResolvedGeometryType() == CropShape::Plane;
+        const bool isPlane = previewResult.resolvedGeometryType == CropShape::Plane;
         const bool isApplied = isPlane
             ? SetVolumePlane(volume, gpuVolumeMapper, previewResult)
             : SetVolumeRemove(volume, gpuVolumeMapper, previewResult);
@@ -407,9 +407,9 @@ bool CropPreviewPlug::SetVolumeRemove(
         return false;
     }
 
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
+    boxToInputMat->DeepCopy(cropData.boxToInputModelMatrix.data());
 
     // RemoveInside shader 在采样点上判断是否落入标准盒 [-1,1]^3。
     // 采样点先由 VTK shader 内置矩阵还原到 active input model，再送入标准盒空间。
@@ -462,7 +462,7 @@ bool CropPreviewPlug::SetVolumePlane(
         return false;
     }
 
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto shaderProperty = volume->GetShaderProperty();
     shaderProperty->AddFragmentShaderReplacement(
         kVolBaseTag,
@@ -470,8 +470,8 @@ bool CropPreviewPlug::SetVolumePlane(
         kVolBaseCode,
         false);
 
-    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
-    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
+    const auto planeNormalInInputModel = cropData.planeNormalInInputModel;
+    const auto planeCenterInInputModel = cropData.planeCenterInInputModel;
 
     auto fragmentUniforms = shaderProperty->GetFragmentCustomUniforms();
     auto inactiveBoxMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
@@ -526,7 +526,7 @@ bool CropPreviewPlug::SetMeshView(
     const OrthogonalCropResult& previewResult,
     CropRemovalMode removalMode)
 {
-    if (!targetService || targetService->GetNavigationAxis() >= 0 || !previewResult.GetSucceeded()) {
+    if (!targetService || targetService->GetNavigationAxis() >= 0 || !previewResult.isSucceeded) {
         return false;
     }
 
@@ -553,7 +553,7 @@ bool CropPreviewPlug::SetMeshView(
         return true;
     }
 
-    return previewResult.GetResolvedGeometryType() == CropShape::Plane
+    return previewResult.resolvedGeometryType == CropShape::Plane
         ? SetMeshPlaneCut(actor, mapper, referenceService, previewResult)
         : SetMeshRemove(actor, mapper, referenceService, previewResult);
 }
@@ -568,9 +568,9 @@ bool CropPreviewPlug::SetMeshRemove(
         return false;
     }
 
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto boxToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToInputMat->DeepCopy(cropData.GetBoxMatrix().data());
+    boxToInputMat->DeepCopy(cropData.boxToInputModelMatrix.data());
 
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
@@ -639,7 +639,7 @@ bool CropPreviewPlug::SetMeshPlaneCut(
         return false;
     }
 
-    const auto& cropData = previewResult.GetCropDataModel();
+    const auto& cropData = previewResult.cropDataModel;
     auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
     inputToWorldMat->Identity();
     if (referenceService) {
@@ -649,8 +649,8 @@ bool CropPreviewPlug::SetMeshPlaneCut(
     auto inputToWorld = vtkSmartPointer<vtkTransform>::New();
     inputToWorld->SetMatrix(inputToWorldMat);
 
-    const auto planeCenterInInputModel = cropData.GetPlaneCenter();
-    const auto planeNormalInInputModel = cropData.GetPlaneNormal();
+    const auto planeCenterInInputModel = cropData.planeCenterInInputModel;
+    const auto planeNormalInInputModel = cropData.planeNormalInInputModel;
     double worldOrigin[3] = { 0.0, 0.0, 0.0 };
     double worldNormal[3] = { 0.0, 0.0, 1.0 };
     inputToWorld->TransformPoint(planeCenterInInputModel.data(), worldOrigin);

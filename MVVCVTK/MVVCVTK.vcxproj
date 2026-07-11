@@ -194,17 +194,16 @@
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
     <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h" />
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropBoxWidget.h" />
-    <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropCameraState.h" />
     <ClInclude Include="features\OrthogonalCrop\include\Routing\CropRouter.h" />
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropBridge.h" />
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropPlaneWidget.h" />
     <ClInclude Include="features\OrthogonalCrop\include\Preview\CropPreviewPlug.h" />
     <ClInclude Include="features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
     <ClInclude Include="include\Render\Strategies\VolumeStrategy.h" />
-    <ClInclude Include="include\App\AppStateCommands.h" />
     <ClInclude Include="include\App\AppStateEvents.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\App\AppState.cpp" />
     <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp" />
     <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp" />
     <ClCompile Include="src\App\Services\AppService.cpp" />
@@ -223,7 +222,6 @@
     <ClCompile Include="src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
-    <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropCameraState.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropBridge.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp" />

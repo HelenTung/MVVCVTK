@@ -12,10 +12,14 @@ struct ReconBuffer {
     std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // LPS [x, y, z] 物理原点，提交 VTK 前转为 RAS
 };
 
-// image 与 version 由 current 事务同锁快照；返回的智能指针不冻结后续 VTK 对象内容。
+// DataManager current/pending 共用的图像身份与 RAS 几何快照。
+// version 为 0 表示尚未提交；成为 current 时由 DataManager 在提交锁内分配单调版本。
 struct ImageState {
-    vtkSmartPointer<vtkImageData> image; // current image 的共享引用；可为空，且不构成深拷贝
-    DataVersion version = 0; // current 每次成功提交递增；0 表示尚无已提交版本
+    vtkSmartPointer<vtkImageData> image;
+    std::array<int, 3> dims; // voxel 数量 [x,y,z]
+    std::array<double, 3> spacing; // RAS 物理轴间距 [x,y,z]
+    std::array<double, 3> origin;  // RAS 物理原点 [x,y,z]
+    DataVersion version;
 };
 
 class BaseDataManager : public AbstractDataManager
@@ -25,7 +29,7 @@ protected:
     // 随 BaseDataManager 生命周期独占 current image、range、spacing、version 真源及其事务锁。
     std::unique_ptr<Impl> m_impl;
 
-    // 文件/TIFF 同步加载路径直接提交 current 四元组；空 image 不改变现有真源。
+    // 文件/TIFF 同步加载路径直接提交完整 current 图像状态；空 image 不改变现有真源。
     bool SetCurrentImage(vtkSmartPointer<vtkImageData> image);
 
 public:
@@ -36,6 +40,8 @@ public:
 
     std::array<double, 2> GetScalarRange() const override;
     std::array<double, 3> GetSpacing() const override;
+    // 原子更新 current image 与 ImageState 的 RAS spacing；值未变化时不递增 version。
+    bool SetSpacing(const std::array<double, 3>& spacing) override;
     DataVersion GetDataVersion() const override;
     ImageState GetImageState() const;
 
@@ -58,7 +64,7 @@ public:
         const std::array<float, 3>& origin) override;
     // 把现成 VTK image 智能指针移入 pending 事务，不做深拷贝，也不提交 current。
     bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
-    // 主线程领取一批 pending payload，触发 Modified() 后在同一临界区提交 current 四元组。
+    // 主线程领取一批 pending payload，触发 Modified() 后提交完整 current 图像状态。
     bool SetCurrentFromPending() override;
 
 private:

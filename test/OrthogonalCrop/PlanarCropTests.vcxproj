@@ -69,11 +69,11 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\App\Tasks;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Geometry;$(ProjectDir)..\..\MVVCVTK\include\Platform;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\include;$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\App\Tasks;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Geometry;$(ProjectDir)..\..\MVVCVTK\include\Platform;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
-    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingImage-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib</VtkLibraries>
+    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingImage-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkInteractionWidgets-9.4.lib</VtkLibraries>
     <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -151,7 +151,6 @@
   <ItemGroup>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h" />
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Interaction\CropCameraState.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Preview\CropPreviewPlug.h" />
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Render\Strategies\CropOverlay.h" />
@@ -164,11 +163,16 @@
     <ClInclude Include="..\..\MVVCVTK\include\Geometry\InteractionComputeService.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Render\Strategies\BaseVisualStrategy.h" />
+    <ClInclude Include="CropBridgeTests.h" />
+    <ClInclude Include="PlanarTestSuites.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropCameraState.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBridge.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
@@ -177,6 +181,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="AppTaskServiceTests.cpp" />
     <ClCompile Include="CropPreviewPlugTests.cpp" />
+    <ClCompile Include="CropBridgeTests.cpp" />
     <ClCompile Include="PlanarCropTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

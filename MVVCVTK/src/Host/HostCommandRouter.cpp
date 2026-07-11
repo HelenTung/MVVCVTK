@@ -341,23 +341,20 @@ bool HostCommandRouter::Impl::LoadVolume(
         return false;
     }
 
-    std::function<bool()> refreshCropInput;
     const auto featureBindings = m_featureBindings;
-    if (const auto lockedBindings = featureBindings.lock()) {
-        refreshCropInput = lockedBindings->BuildCropInput();
-    }
 
     primaryView->service->LoadFileAsync(
         initialVolume.filePath,
         initialVolume.geometry->spacing,
         initialVolume.geometry->origin,
         [
-            refreshCropInput = std::move(refreshCropInput),
             featureBindings,
             loadComplete = std::move(loadComplete)
         ](bool isSuccess) mutable {
-            if (isSuccess && refreshCropInput) {
-                refreshCropInput();
+            if (isSuccess) {
+                if (const auto lockedBindings = featureBindings.lock()) {
+                    lockedBindings->SendCropInput();
+                }
             }
             else if (!isSuccess) {
                 if (const auto lockedBindings = featureBindings.lock()) {

@@ -273,9 +273,6 @@
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropBoxWidget.h">
       <Filter>features\OrthogonalCrop\include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropCameraState.h">
-      <Filter>features\OrthogonalCrop\include\Interaction</Filter>
-    </ClInclude>
     <ClInclude Include="features\OrthogonalCrop\include\Routing\CropRouter.h">
       <Filter>features\OrthogonalCrop\include\Routing</Filter>
     </ClInclude>
@@ -294,11 +291,11 @@
     <ClInclude Include="include\App\AppStateEvents.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="include\App\AppStateCommands.h">
-      <Filter>include\App</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\App\AppState.cpp">
+      <Filter>src\App</Filter>
+    </ClCompile>
     <ClCompile Include="src\App\main.cpp">
       <Filter>src\App</Filter>
     </ClCompile>
@@ -379,9 +376,6 @@
     </ClCompile>
     <ClCompile Include="features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>features\OrthogonalCrop\src\Routing</Filter>
-    </ClCompile>
-    <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropCameraState.cpp">
-      <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropBridge.cpp">
       <Filter>features\OrthogonalCrop\src\Interaction</Filter>

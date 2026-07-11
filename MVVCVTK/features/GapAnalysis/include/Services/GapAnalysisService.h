@@ -32,9 +32,9 @@ public:
     void SetAdvanced(const AdvancedSurfaceParams& params);
     void SetVoid(const VoidDetectionParams& params);
 
-    // 领取当前 VolumeBuffer 与参数副本后启动 worker；当前为 Running 时忽略本次请求。
+    // 领取当前 VolumeBuffer 与参数副本后启动 worker；返回值表示请求是否被真实接纳。
     // 完成链发布执行状态、成功结果和可选 pending callback，调用方通过 GetDoneEvent/SendCallback 消费回调。
-    void StartAsync(std::function<void(bool isSuccess)> onComplete = nullptr);
+    bool StartAsync(std::function<void(bool isSuccess)> onComplete = nullptr);
     // 只发布停止请求，不等待线程退出；已结束的 worker 线程槽由下一次真正启动或析构时 join。
     void StopAsync();
 

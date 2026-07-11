@@ -43,13 +43,12 @@ public:
     bool ExitFeature();
     bool GetCropActive() const;
     void ClearCropInput() const;
-    std::function<bool()> BuildCropInput() const;
+    bool SendCropInput();
     void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
     void DetachHostTimer();
 
 private:
     void OnHostTimer();
-    bool SetCropInput();
     static bool GetImageReady(vtkImageData* image);
 
     bool GetGapConfigValid(const HostGapConfig& config) const;
@@ -220,7 +219,8 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 if (const auto lockedBridge = bridge.lock()) {
                     const auto imageState = sharedDataMgr->GetImageState();
                     if (GetImageReady(imageState.image)) {
-                        lockedBridge->SetInputImage(imageState.image, imageState.version);
+                        lockedBridge->SetInputImage(
+                            imageState.image, imageState.version);
                     }
                     else {
                         lockedBridge->ClearInputImage();
@@ -283,7 +283,7 @@ bool HostFeatureBindings::Impl::StartCrop(
     bridge->SetPrimaryInteractor(referenceView->context->GetInteractor());
     bridge->SetPreviewRenderServices(m_renderViews->BuildServices(previewViews));
 
-    if (!SetCropInput()) {
+    if (!SendCropInput()) {
         return false;
     }
 
@@ -466,31 +466,7 @@ void HostFeatureBindings::Impl::ClearCropInput() const
     }
 }
 
-std::function<bool()> HostFeatureBindings::Impl::BuildCropInput() const
-{
-    // 返回函数而不是立即刷新，是因为初始加载异步完成后才有 vtkImageData；
-    // router 可以把同一刷新点传给加载回调，避免裁切链路自己监听文件 I/O。
-    return [
-        bridge = m_core.orthogonalCropBridge,
-        sharedDataMgr = m_core.sharedDataMgr
-    ]() {
-        if (!bridge || !sharedDataMgr) {
-            return false;
-        }
-
-        const auto imageState = sharedDataMgr->GetImageState();
-        if (!GetImageReady(imageState.image)) {
-            bridge->ClearInputImage();
-            std::cerr << "[Host] Orthogonal crop init failed: input image missing." << std::endl;
-            return false;
-        }
-
-        bridge->SetInputImage(imageState.image, imageState.version);
-        return true;
-    };
-}
-
-bool HostFeatureBindings::Impl::SetCropInput()
+bool HostFeatureBindings::Impl::SendCropInput()
 {
     if (!m_core.orthogonalCropBridge || !m_core.sharedDataMgr) {
         return false;
@@ -503,7 +479,8 @@ bool HostFeatureBindings::Impl::SetCropInput()
         return false;
     }
 
-    m_core.orthogonalCropBridge->SetInputImage(imageState.image, imageState.version);
+    m_core.orthogonalCropBridge->SetInputImage(
+        imageState.image, imageState.version);
     return true;
 }
 
@@ -643,9 +620,9 @@ void HostFeatureBindings::ClearCropInput() const
     m_impl->ClearCropInput();
 }
 
-std::function<bool()> HostFeatureBindings::BuildCropInput()
+bool HostFeatureBindings::SendCropInput()
 {
-    return m_impl->BuildCropInput();
+    return m_impl->SendCropInput();
 }
 
 void HostFeatureBindings::AttachHostTimer(

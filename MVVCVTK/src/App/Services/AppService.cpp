@@ -602,7 +602,7 @@ void VizService::Impl::SetStateObserver()
             auto self = weakSelf.lock();
             if (!self) return;
 
-            if (GetFlagOn(flags, UpdateFlags::DataReady) && self->m_sharedState) {
+            if (((flags & UpdateFlags::DataReady) != UpdateFlags::None) && self->m_sharedState) {
                 self->m_pendingLoadEventKind = self->m_sharedState->GetPendingLoadEventKind();
             }
 
@@ -616,7 +616,7 @@ void VizService::Impl::SetStateObserver()
 void VizService::Impl::SendStateFlags(UpdateFlags flags)
 {
     // 把跨层状态事件收敛为主线程邮箱；结构事件与普通增量使用不同消费路径。
-    if (GetFlagOn(flags, UpdateFlags::DataReady)) {
+    if (((flags & UpdateFlags::DataReady) != UpdateFlags::None)) {
         // A. 新 current image 已发布：复位游标，并请求清缓存、全量同步与管线重建。
         SetStrategyClear();
         SetCursorCenter();
@@ -625,7 +625,7 @@ void VizService::Impl::SendStateFlags(UpdateFlags flags)
         return;
     }
 
-    if (GetFlagOn(flags, UpdateFlags::Spacing)) {
+    if (((flags & UpdateFlags::Spacing) != UpdateFlags::None)) {
         // B. spacing 改变输入几何，不能只做 Strategy 增量写入，必须走结构重建。
         SetStrategyClear();
         SetPendingFlags(UpdateFlags::All);
@@ -633,7 +633,7 @@ void VizService::Impl::SendStateFlags(UpdateFlags flags)
         return;
     }
 
-    if (GetFlagOn(flags, UpdateFlags::LoadFailed)) {
+    if (((flags & UpdateFlags::LoadFailed) != UpdateFlags::None)) {
         // C. 失败只发布清场请求；主线程会跳过同一帧的重建与增量同步。
         SetLoadFailed();
         return;
@@ -688,7 +688,14 @@ void VizService::Impl::SetBackground(const BackgroundColor& bg)
 
 void VizService::Impl::SetSpacing(double sx, double sy, double sz)
 {
+    if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(sz)
+        || sx <= 0.0 || sy <= 0.0 || sz <= 0.0) {
+        return;
+    }
     m_sharedState->SetSpacing(sx, sy, sz);
+    if (m_dataManager) {
+        m_dataManager->SetSpacing({ sx, sy, sz });
+    }
 }
 
 void VizService::Impl::SetWindowLevel(double ww, double wc)
@@ -1144,14 +1151,7 @@ void VizService::Impl::BuildPipeline()
     auto img = m_dataManager ? m_dataManager->GetVtkImage() : nullptr;
     if (img) {
         const auto spacing = m_sharedState->GetSpacing();
-        double currentSpacing[3] = { 1.0, 1.0, 1.0 };
-        img->GetSpacing(currentSpacing);
-        if (std::abs(currentSpacing[0] - spacing[0]) > 1e-6 ||
-            std::abs(currentSpacing[1] - spacing[1]) > 1e-6 ||
-            std::abs(currentSpacing[2] - spacing[2]) > 1e-6)
-        {
-            img->SetSpacing(spacing[0], spacing[1], spacing[2]);
-        }
+        m_dataManager->SetSpacing(spacing);
 
         int dims[3] = { 0, 0, 0 };
         img->GetDimensions(dims);
@@ -1192,13 +1192,13 @@ void VizService::Impl::SetStrategyState()
     }
 
     // 交互状态控制帧率
-    if (GetFlagOn(flags, UpdateFlags::Interaction) && m_renderWindow) {
+    if (((flags & UpdateFlags::Interaction) != UpdateFlags::None) && m_renderWindow) {
         const bool isInteracting = m_sharedState->GetIsInteracting();
         m_renderWindow->SetDesiredUpdateRate(isInteracting ? 15.0 : 0.001);
     }
 
     // 背景色同步（数据无关，直接写渲染器）
-    if (GetFlagOn(flags, UpdateFlags::Background) && m_renderer) {
+    if (((flags & UpdateFlags::Background) != UpdateFlags::None) && m_renderer) {
         SetRendererBg();
         flags = static_cast<UpdateFlags>(
             static_cast<int>(flags) & ~static_cast<int>(UpdateFlags::Background));
@@ -1243,7 +1243,7 @@ RenderParams VizService::Impl::GetRenderParams(UpdateFlags flags) const
     // RenderParams 是当前这一帧需要下发给 Strategy 的“最小快照”，
     // 只按 flags 拿必要字段，避免每次同步都把全部状态搬运一遍。
 
-    if (GetFlagOn(flags, UpdateFlags::Cursor) || GetFlagOn(flags, UpdateFlags::Transform)) {
+    if (((flags & UpdateFlags::Cursor) != UpdateFlags::None) || ((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         auto pos = m_sharedState->GetCursorWorld();
         auto rawPos = m_sharedState->GetCursorRawWorld();
         p.cursor = { pos[0], pos[1], pos[2] };
@@ -1251,21 +1251,21 @@ RenderParams VizService::Impl::GetRenderParams(UpdateFlags flags) const
         p.cursorAxis = m_sharedState->GetCursorAxis();
         p.modelMatrix = m_sharedState->GetModelMatrix();
     }
-    if (GetFlagOn(flags, UpdateFlags::TF)) {
+    if (((flags & UpdateFlags::TF) != UpdateFlags::None)) {
         auto range = m_sharedState->GetDataRange();
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
         m_sharedState->GetTFNodes(p.tfNodes);
     }
 
-    if (GetFlagOn(flags, UpdateFlags::WindowLevel)) {
+    if (((flags & UpdateFlags::WindowLevel) != UpdateFlags::None)) {
         auto range = m_sharedState->GetDataRange();
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
         p.windowLevel = m_sharedState->GetWindowLevel();
     }
 
-    if (GetFlagOn(flags, UpdateFlags::Material)) {
+    if (((flags & UpdateFlags::Material) != UpdateFlags::None)) {
         auto range = m_sharedState->GetDataRange();
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
@@ -1273,13 +1273,13 @@ RenderParams VizService::Impl::GetRenderParams(UpdateFlags flags) const
         m_sharedState->GetTFNodes(p.tfNodes);
     }
 
-    if (GetFlagOn(flags, UpdateFlags::Interaction))
+    if (((flags & UpdateFlags::Interaction) != UpdateFlags::None))
         p.isInteracting = m_sharedState->GetIsInteracting();
 
-    if (GetFlagOn(flags, UpdateFlags::IsoValue))
+    if (((flags & UpdateFlags::IsoValue) != UpdateFlags::None))
         p.isoValue = m_sharedState->GetIsoValue();
 
-    if (GetFlagOn(flags, UpdateFlags::Visibility))
+    if (((flags & UpdateFlags::Visibility) != UpdateFlags::None))
 		p.visibilityMask = m_sharedState->GetVisibilityMask();
 
     return p;

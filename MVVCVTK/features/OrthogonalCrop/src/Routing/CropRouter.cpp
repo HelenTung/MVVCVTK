@@ -40,6 +40,10 @@ public:
     OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
 
 private:
+    static OrthogonalCropResult GetFailure(
+        const OrthogonalCropRequest& request,
+        CropFailure failureReason,
+        const std::string& message);
     OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
     OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
     std::array<double, 6> GetImageModelBounds() const;
@@ -53,6 +57,21 @@ private:
     // 调用方选择的首选数据源；GetActiveDataSource 在对应输入缺失时按现有 image、polydata 顺序回退。
     OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::ImageData;
 };
+
+OrthogonalCropResult CropRouter::Impl::GetFailure(
+    const OrthogonalCropRequest& request,
+    CropFailure failureReason,
+    const std::string& message)
+{
+    OrthogonalCropResult result;
+    result.resolvedDataSource = request.dataSource;
+    result.resolvedOperation = request.operation;
+    result.resolvedGeometryType = request.geometryType;
+    result.resolvedRemovalMode = request.removalMode;
+    result.failureReason = failureReason;
+    result.message = message;
+    return result;
+}
 
 void CropRouter::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image)
 {
@@ -130,17 +149,17 @@ OrthogonalCropRequest CropRouter::Impl::GetDefaultRequest() const
 {
     const auto activeDataSource = GetActiveDataSource();
     OrthogonalCropRequest request;
-    request.SetDataSource(activeDataSource);
-    request.SetRemovalMode(CropRemovalMode::KeepInside);
-    request.SetBoxBounds(GetActiveInputModelBounds());
-    request.SetOperation(OrthogonalCropOperation::Preview);
+    request.dataSource = activeDataSource;
+    request.removalMode = CropRemovalMode::KeepInside;
+    request.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(GetActiveInputModelBounds());
+    request.operation = OrthogonalCropOperation::Preview;
     return request;
 }
 
 OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& request) const
 {
     // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
-    switch (request.GetGeometryType()) {
+    switch (request.geometryType) {
     case CropShape::Box:
         return GetBoxResult(request);
 
@@ -148,7 +167,7 @@ OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& re
         return GetPlaneResult(request);
 
     default:
-        return OrthogonalCropResult::GetFailure(
+        return GetFailure(
             request,
             CropFailure::NoBackend,
             "Router has no executable path for this crop geometry.");
@@ -158,12 +177,12 @@ OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& re
 OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest& request) const
 {
     // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
-    switch (request.GetOperation()) {
+    switch (request.operation) {
     case OrthogonalCropOperation::Preview:
-        switch (request.GetDataSource()) {
+        switch (request.dataSource) {
         case OrthogonalCropDataSource::VolumeData:
             if (!GetInputImage()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed crop route requires image input data.");
@@ -175,7 +194,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoPolyData,
                     "PolyData crop route requires polydata input data.");
@@ -188,10 +207,10 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
         break;
 
     case OrthogonalCropOperation::Submit:
-        switch (request.GetDataSource()) {
+        switch (request.dataSource) {
         case OrthogonalCropDataSource::ImageData:
             if (!GetInputImage()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed crop route requires image input data.");
@@ -210,7 +229,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
         break;
     }
 
-    return OrthogonalCropResult::GetFailure(
+    return GetFailure(
         request,
         CropFailure::NoBackend,
         "Router has no executable path for this crop route.");
@@ -219,12 +238,12 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
 OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropRequest& request) const
 {
     // Plane 路由放行与 Box 相同的主链路：体预览、网格预览、图像提交。
-    switch (request.GetOperation()) {
+    switch (request.operation) {
     case OrthogonalCropOperation::Preview:
-        switch (request.GetDataSource()) {
+        switch (request.dataSource) {
         case OrthogonalCropDataSource::VolumeData:
             if (!GetInputImage()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed planar crop route requires image input data.");
@@ -236,7 +255,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
 
         case OrthogonalCropDataSource::PolyData:
             if (!GetInputPolyData()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoPolyData,
                     "PolyData planar crop route requires polydata input data.");
@@ -249,10 +268,10 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
         break;
 
     case OrthogonalCropOperation::Submit:
-        switch (request.GetDataSource()) {
+        switch (request.dataSource) {
         case OrthogonalCropDataSource::ImageData:
             if (!GetInputImage()) {
-                return OrthogonalCropResult::GetFailure(
+                return GetFailure(
                     request,
                     CropFailure::NoImage,
                     "Image-backed planar crop route requires image input data.");
@@ -271,7 +290,7 @@ OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropReques
         break;
     }
 
-    return OrthogonalCropResult::GetFailure(
+    return GetFailure(
         request,
         CropFailure::NoBackend,
         "Router has no executable path for this planar crop route.");

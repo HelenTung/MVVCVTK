@@ -35,7 +35,7 @@ public:
     void SetSurface(const SurfaceParams& params);
     void SetAdvanced(const AdvancedSurfaceParams& params);
     void SetVoid(const VoidDetectionParams& params);
-    void StartAsync(std::function<void(bool isSuccess)> onComplete);
+    bool StartAsync(std::function<void(bool isSuccess)> onComplete);
     void StopAsync();
     bool GetDoneEvent();
     void SendCallback();
@@ -57,6 +57,13 @@ public:
 
 private:
     using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
+
+    enum class GapViewPhase {
+        Idle,
+        AwaitingInput,
+        AwaitingResult,
+        Consumed
+    };
 
     struct GapParamSnapshot {
         // StartAsync 从 m_paramsMutex 下复制；worker 当前只消费 isoValue。
@@ -104,8 +111,7 @@ private:
     std::mutex m_callbackMutex;
     // 当前任务尚未完成的 callback；StartAsync 替换，SetCallbackReady 完成时移出。
     std::function<void(bool)> m_completionCallback;
-    // [风险] 已完成 callback 只有一个 pending 槽；调用方须在启动下一任务前用 GetDoneEvent/SendCallback
-    // 领取上一终态，否则后一任务完成时会覆盖尚未消费的 m_nextCallback/m_isNextOk。
+    // 已完成 callback 的 pending 槽；存在未消费回调时 StartAsync 拒绝新任务，避免结果被覆盖。
     std::function<void(bool)> m_nextCallback;
     // 与 m_nextCallback 同一锁事务发布的单任务结果快照。
     bool m_isNextOk = false;
@@ -158,16 +164,10 @@ private:
     VoidDetectionParams m_displayVoidParams;
     // 可选 ISO 回调值副本；StartRun 在宿主 display tick 解析后同步调用，ClearDisplayState 释放。
     std::function<void(double isoValue)> m_isoCallback;
-    // 显示会话轴：StartView 接受目标后置位，ExitView/ClearDisplayState 清零。
-    bool m_isViewOn = false;
+    // 显示会话阶段只表达输入等待、结果等待与终态消费，不混入 worker 或 overlay 显隐状态。
+    GapViewPhase m_viewPhase = GapViewPhase::Idle;
     // overlay 可见意图轴：用户可独立切换；关闭只卸载显示，不取消分析或丢弃缓存结果。
     bool m_isOverlayOn = false;
-    // display 启动门铃：StartView 置位，OnDisplayTick 仅在 StartRun 成功接管输入后清零，失败时保留以便重试。
-    bool m_hasRunRequest = false;
-    // 本次显示结果消费轴：失败日志或成功挂载处理一次后置位，下一次 StartView/StartRun 重置。
-    bool m_hasDone = false;
-    // 失败日志去重轴：只抑制同一显示请求的重复日志，不代表分析失败状态。
-    bool m_hasFailLog = false;
 };
 
 void GapAnalysisService::Impl::SetCompletionCallback(std::function<void(bool)> callback)
@@ -265,9 +265,9 @@ void GapAnalysisService::SetVoid(const VoidDetectionParams& params)
     m_impl->SetVoid(params);
 }
 
-void GapAnalysisService::StartAsync(std::function<void(bool isSuccess)> onComplete)
+bool GapAnalysisService::StartAsync(std::function<void(bool isSuccess)> onComplete)
 {
-    m_impl->StartAsync(std::move(onComplete));
+    return m_impl->StartAsync(std::move(onComplete));
 }
 
 void GapAnalysisService::StopAsync()
@@ -379,11 +379,19 @@ void GapAnalysisService::Impl::SetVoid(const VoidDetectionParams& params) {
     m_voidParams = params;
 }
 
-void GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> onComplete) {
+bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> onComplete) {
     // 1. workerMutex 串行化线程对象接管；Running 请求不替换当前任务或 callback。
     std::lock_guard<std::mutex> workerLock(m_workerMutex);
     if (GetAnalysisState() == GapAnalysisState::Running) {
-        return;
+        return false;
+    }
+
+    // pending callback 尚未由宿主消费时拒绝新任务，保证单槽结果不会被后一任务覆盖。
+    {
+        std::lock_guard<std::mutex> callbackLock(m_callbackMutex);
+        if (m_completionCallback || m_nextCallback) {
+            return false;
+        }
     }
 
     // 2. 上一轮已结束线程在复用 std::thread 前必须 join；此处不会与新 worker 并行。
@@ -399,7 +407,7 @@ void GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
     if (!inputSnapshot || !inputSnapshot->GetVoxelReady()) {
         SetAnalysisState(GapAnalysisState::Failed);
         SetCallbackReady(false);
-        return;
+        return false;
     }
 
     {
@@ -417,6 +425,7 @@ void GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
         this,
         std::move(inputSnapshot),
         GetParamSnapshot());
+    return true;
 }
 
 void GapAnalysisService::Impl::StopAsync() {
@@ -492,17 +501,14 @@ bool GapAnalysisService::Impl::StartView(
     m_displaySurfaceRequest = surfaceRequest;
     m_displayVoidParams = voidParams;
     m_isoCallback = std::move(onIsoValueResolved);
-    m_isViewOn = true;
+    m_viewPhase = GapViewPhase::AwaitingInput;
     m_isOverlayOn = true;
-    m_hasRunRequest = true;
-    m_hasDone = false;
-    m_hasFailLog = false;
     std::cout << "[GapAnalysis] Display mode requested. Analysis will start after volume data is ready." << std::endl;
     return true;
 }
 
 bool GapAnalysisService::Impl::SwitchOverlay() {
-    if (!m_isViewOn) {
+    if (m_viewPhase == GapViewPhase::Idle) {
         std::cerr << "[GapAnalysis] Overlay switch ignored: display mode is not active." << std::endl;
         return false;
     }
@@ -526,7 +532,7 @@ bool GapAnalysisService::Impl::SwitchOverlay() {
 }
 
 bool GapAnalysisService::Impl::ExitView() {
-    const bool isActive = m_isViewOn;
+    const bool isActive = m_viewPhase != GapViewPhase::Idle;
     const bool hasCachedResult = m_displayVoidMesh != nullptr || m_displayLabelImage != nullptr;
     // 1. overlay 必须先从各目标卸载，避免 ClearDisplayState 丢失 binding 后无法移除。
     const bool hasRemoved = SetOverlayOff();
@@ -543,27 +549,25 @@ bool GapAnalysisService::Impl::ExitView() {
 }
 
 bool GapAnalysisService::Impl::GetViewOn() const {
-    return m_isViewOn;
+    return m_viewPhase != GapViewPhase::Idle;
 }
 
 void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
-    if (!m_isViewOn) {
+    if (m_viewPhase == GapViewPhase::Idle) {
         return;
     }
 
-    // 1. 启动门铃只有在输入转换、ISO 解析和 StartAsync 均被接管后才清零；无效输入留到下个 tick 重试。
-    if (m_hasRunRequest) {
+    // 1. 只有输入转换、ISO 解析和 worker 启动均被真实接纳，才进入结果等待阶段。
+    if (m_viewPhase == GapViewPhase::AwaitingInput) {
         if (GetAnalysisState() != GapAnalysisState::Running
             && StartRun(std::move(inputImage))) {
-            m_hasRunRequest = false;
-            m_hasDone = false;
-            m_hasFailLog = false;
+            m_viewPhase = GapViewPhase::AwaitingResult;
         }
         return;
     }
 
-    // 2. 同一显示请求的终态只消费一次，避免每个 tick 重复挂载或重复记录失败。
-    if (m_hasDone) {
+    // 2. Consumed 明确表示本显示请求的终态已经处理，后续 tick 不重复挂载或记录失败。
+    if (m_viewPhase == GapViewPhase::Consumed) {
         return;
     }
 
@@ -580,17 +584,14 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
 
     // 4A. 失败只记一次日志并关闭本次消费，不挂载任何 overlay。
     if (state == GapAnalysisState::Failed) {
-        if (!m_hasFailLog) {
-            std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
-            m_hasFailLog = true;
-        }
-        m_hasDone = true;
+        std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
+        m_viewPhase = GapViewPhase::Consumed;
         return;
     }
 
     // 4B. 成功结果在当前 tick 缓存并按 overlay 可见意图挂载；无论目标是否可显示都不重复消费。
     SetDisplayView();
-    m_hasDone = true;
+    m_viewPhase = GapViewPhase::Consumed;
 }
 
 GapAnalysisService::Impl::VolumeBufferSnapshot GapAnalysisService::Impl::GetInputSnapshot() const {
@@ -688,12 +689,11 @@ bool GapAnalysisService::Impl::StartRun(vtkSmartPointer<vtkImageData> inputImage
     surfaceParams.isoValue = static_cast<float>(isoValue);
     SetSurface(surfaceParams);
     SetVoid(m_displayVoidParams);
-    StartAsync(nullptr);
-    return true;
+    return StartAsync(nullptr);
 }
 
 void GapAnalysisService::Impl::SetDisplayView() {
-    if (!m_isViewOn) {
+    if (m_viewPhase == GapViewPhase::Idle) {
         return;
     }
 
@@ -786,12 +786,9 @@ void GapAnalysisService::Impl::ClearDisplayState() {
     m_displaySurfaceRequest = {};
     m_displayVoidParams = {};
     m_isoCallback = nullptr;
-    // 显示、可见意图、启动门铃、终态消费和日志去重是独立轴，在会话结束时一起复位。
-    m_isViewOn = false;
+    // 显示阶段与可见意图在会话结束时一起复位；worker 状态保持独立。
+    m_viewPhase = GapViewPhase::Idle;
     m_isOverlayOn = false;
-    m_hasRunRequest = false;
-    m_hasDone = false;
-    m_hasFailLog = false;
 }
 
 double GapAnalysisService::Impl::GetDisplayIso(const VolumeBuffer& inputSnapshot) const {

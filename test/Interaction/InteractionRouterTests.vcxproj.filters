@@ -56,8 +56,20 @@
     <ClInclude Include="Fakes\vtkSmartPointer.h">
       <Filter>tests</Filter>
     </ClInclude>
+    <ClInclude Include="HostCommandRouterTests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="AppStateTests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="AppStateTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp">
       <Filter>src</Filter>
     </ClCompile>

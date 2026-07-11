@@ -50,7 +50,7 @@ public:
     bool ExitFeature();
     bool GetCropActive() const;
     void ClearCropInput() const;
-    std::function<bool()> BuildCropInput();
+    bool SendCropInput();
 
     // 通用 TimerEvent pump 是 host/session 主线程收敛点；具体 feature 只在 tick 中消费自己的 pending 状态。
     void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);

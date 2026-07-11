@@ -5,6 +5,7 @@
 
 #include "Algorithms/VoidDetector.h"
 #include "Services/GapAnalysisService.h"
+#include "GapDisplayTests.h"
 
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -21,10 +22,11 @@
 #include <thread>
 #include <vector>
 
-namespace {
+class GapAlgorithmSuite final {
+public:
 
-constexpr std::array<int, 3> TestDims = { 7, 7, 7 };
-constexpr double NumericTolerance = 1e-9;
+inline static constexpr std::array<int, 3> TestDims = { 7, 7, 7 };
+inline static constexpr double NumericTolerance = 1e-9;
 
 std::size_t GetLinearIndex(int x, int y, int z, const std::array<int, 3>& dims)
 {
@@ -269,13 +271,24 @@ void StartSnapCase(int& failureCount)
 
     std::atomic<bool> hasCallback{ false };
     std::atomic<bool> isCallbackOk{ false };
-    service.StartAsync([&](bool isSuccess) {
-        hasCallback.store(true);
-        isCallbackOk.store(isSuccess);
-    });
+    SetExpect(
+        service.StartAsync([&](bool isSuccess) {
+            hasCallback.store(true);
+            isCallbackOk.store(isSuccess);
+        }),
+        "gap analysis should report that the first worker request was accepted.",
+        failureCount);
+    SetExpect(
+        !service.StartAsync(nullptr),
+        "gap analysis should reject a second request while the worker is running.",
+        failureCount);
 
     const auto finalState = GetServiceState(service);
     SetExpect(finalState == GapAnalysisState::Succeeded, "gap analysis service should finish successfully.", failureCount);
+    SetExpect(
+        !service.StartAsync(nullptr),
+        "gap analysis should reject a new task until the pending callback is consumed.",
+        failureCount);
     SetExpect(SendDoneEvent(service), "gap analysis service should expose one pending completion callback.", failureCount);
     SetExpect(hasCallback.load(), "gap analysis completion callback should run on explicit consume.", failureCount);
     SetExpect(isCallbackOk.load(), "gap analysis completion callback should report success.", failureCount);
@@ -296,13 +309,19 @@ void StartSnapCase(int& failureCount)
     }
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        StartAlgoCase(failureCount);
+        StartSnapCase(failureCount);
+        return failureCount;
+    }
+};
 
 int main()
 {
-    int failureCount = 0;
-    StartAlgoCase(failureCount);
-    StartSnapCase(failureCount);
+    int failureCount = GapAlgorithmSuite().GetFailCount();
+    failureCount += GapDisplaySuite().GetFailCount();
 
     if (failureCount != 0) {
         std::cerr << "GapAnalysisAlgorithmTests failed: " << failureCount << '\n';

@@ -138,6 +138,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AppStateTests.h" />
+    <ClInclude Include="HostCommandRouterTests.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h" />
@@ -154,6 +156,8 @@
     <ClInclude Include="Fakes\vtkSmartPointer.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp" />
+    <ClCompile Include="AppStateTests.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />

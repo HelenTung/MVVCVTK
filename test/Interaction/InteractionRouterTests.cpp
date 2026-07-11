@@ -1,13 +1,14 @@
 #include "InputCallbackHandler.h"
 #include "InteractionRouter.h"
+#include "AppStateTests.h"
+#include "HostCommandRouterTests.h"
 
 #include <iostream>
 #include <memory>
 #include <vector>
 
-int GetHostRouterFailCount();
-
-namespace {
+class InteractionCases final {
+public:
 
 void SetExpect(bool isExpected, const char* message, int& failureCount)
 {
@@ -118,16 +119,22 @@ void StartEmptyFilterCase(int& failureCount)
     SetExpect(count == 2, "Empty event filter callback should run for both events.", failureCount);
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        StartFirstMatchCase(failureCount);
+        StartBroadcastCase(failureCount);
+        StartFilterCase(failureCount);
+        StartEmptyFilterCase(failureCount);
+        return failureCount;
+    }
+};
 
 int main()
 {
-    int failureCount = 0;
-    StartFirstMatchCase(failureCount);
-    StartBroadcastCase(failureCount);
-    StartFilterCase(failureCount);
-    StartEmptyFilterCase(failureCount);
-    failureCount += GetHostRouterFailCount();
+    int failureCount = InteractionCases().GetFailCount();
+    failureCount += HostRouterSuite().GetFailCount();
+    failureCount += AppStateSuite().GetFailCount();
 
     if (failureCount == 0) {
         std::cout << "Interaction tests passed.\n";

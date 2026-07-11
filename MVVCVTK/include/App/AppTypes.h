@@ -120,10 +120,6 @@ inline UpdateFlags operator&(UpdateFlags a, UpdateFlags b) {
 inline UpdateFlags& operator|=(UpdateFlags& a, UpdateFlags b) {
     a = a | b; return a;
 }
-inline bool GetFlagOn(UpdateFlags flags, UpdateFlags bit) {
-    return (static_cast<int>(flags) & static_cast<int>(bit)) != 0;
-}
-
 // 可视元素位定义
 namespace VisFlags {
     constexpr uint32_t Planes3D = 1 << 0;   // 3D 彩色切平面

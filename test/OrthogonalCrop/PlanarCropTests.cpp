@@ -7,8 +7,9 @@
 #include "Algorithms/PlanarCropAlgorithm.h"
 #include "Routing/CropRouter.h"
 #include "DataManager.h"
-#include "Interaction/CropCameraState.h"
 #include "InteractionComputeService.h"
+#include "CropBridgeTests.h"
+#include "PlanarTestSuites.h"
 
 #include <vtkCamera.h>
 #include <vtkDataArray.h>
@@ -26,21 +27,14 @@
 #include <iostream>
 #include <string>
 #include <system_error>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
-int GetCropPreviewFailCount();
-int GetAppTaskFailCount();
+class PlanarCropSuite final {
+public:
 
-namespace {
-
-static_assert(std::is_same_v<
-    decltype(std::declval<const OrthogonalCropResult&>().GetStatistics()),
-    OrthogonalCropStatistics>);
-
-constexpr double TupleTolerance = 1e-9;
-constexpr double MatrixTolerance = 1e-9;
+inline static constexpr double TupleTolerance = 1e-9;
+inline static constexpr double MatrixTolerance = 1e-9;
 
 struct TestPlane {
     // normal/center 均在 input model physical 坐标系中，和 OrthogonalCropRequest 字段保持同一语义。
@@ -235,13 +229,13 @@ OrthogonalCropRequest BuildPlaneRequest(
     // 请求只表达 image submit 所需的稳定输入：数据源、几何、保留语义和 input model 坐标中的平面。
     // 这里不设置窗口或交互状态，确保测试覆盖算法边界而不是 host 绑定边界。
     OrthogonalCropRequest request;
-    request.SetGeometryType(CropShape::Plane);
-    request.SetOperation(operation);
-    request.SetDataSource(dataSource);
-    request.SetRemovalMode(removalMode);
-    request.SetPlaneNormal(plane.normal);
-    request.SetPlaneCenter(plane.center);
-    request.SetPlaneHalf({ 2.0, 2.0 });
+    request.geometryType = CropShape::Plane;
+    request.operation = operation;
+    request.dataSource = dataSource;
+    request.removalMode = removalMode;
+    request.planeNormalInInputModel = plane.normal;
+    request.planeCenterInInputModel = plane.center;
+    request.planeHalf = { 2.0, 2.0 };
     return request;
 }
 
@@ -259,7 +253,7 @@ OrthogonalCropResult GetPlaneResult(
     return router.GetResult(request);
 }
 
-void SetExpect(bool isExpected, const std::string& message, int& failureCount)
+static void SetExpect(bool isExpected, const std::string& message, int& failureCount)
 {
     if (!isExpected) {
         std::cerr << message << '\n';
@@ -270,53 +264,35 @@ void SetExpect(bool isExpected, const std::string& message, int& failureCount)
 void StartCropFailure(int& failureCount)
 {
     OrthogonalCropRequest request;
-    request.SetDataSource(OrthogonalCropDataSource::PolyData);
-    request.SetOperation(OrthogonalCropOperation::Preview);
-    request.SetGeometryType(CropShape::Plane);
-    request.SetRemovalMode(CropRemovalMode::RemoveInside);
+    request.dataSource = OrthogonalCropDataSource::PolyData;
+    request.operation = OrthogonalCropOperation::Preview;
+    request.geometryType = CropShape::Plane;
+    request.removalMode = CropRemovalMode::RemoveInside;
 
     CropRouter router;
     const auto result = router.GetResult(request);
-    const auto statistics = result.GetStatistics();
-
-    SetExpect(!result.GetSucceeded(), "missing polydata route should fail.", failureCount);
+    SetExpect(!result.isSucceeded, "missing polydata route should fail.", failureCount);
     SetExpect(
-        result.GetResolvedDataSource() == OrthogonalCropDataSource::PolyData,
+        result.resolvedDataSource == OrthogonalCropDataSource::PolyData,
         "failure result must preserve the PolyData source.",
         failureCount);
     SetExpect(
-        result.GetResolvedOperation() == OrthogonalCropOperation::Preview,
+        result.resolvedOperation == OrthogonalCropOperation::Preview,
         "failure result must preserve the Preview operation.",
         failureCount);
     SetExpect(
-        result.GetResolvedGeometryType() == CropShape::Plane,
+        result.resolvedGeometryType == CropShape::Plane,
         "failure result must preserve the Plane geometry.",
         failureCount);
     SetExpect(
-        result.GetResolvedRemovalMode() == CropRemovalMode::RemoveInside,
+        result.resolvedRemovalMode == CropRemovalMode::RemoveInside,
         "failure result must preserve the RemoveInside mode.",
         failureCount);
     SetExpect(
-        statistics.GetResolvedDataSource() == OrthogonalCropDataSource::PolyData,
-        "failure statistics must preserve the PolyData source.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedOperation() == OrthogonalCropOperation::Preview,
-        "failure statistics must preserve the Preview operation.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedGeometryType() == CropShape::Plane,
-        "failure statistics must preserve the Plane geometry.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedRemovalMode() == CropRemovalMode::RemoveInside,
-        "failure statistics must preserve the RemoveInside mode.",
-        failureCount);
-    SetExpect(
-        result.GetFailureReason() == CropFailure::NoPolyData,
+        result.failureReason == CropFailure::NoPolyData,
         "failure result must report NoPolyData.",
         failureCount);
-    SetExpect(!result.GetMessage().empty(), "failure result message must not be empty.", failureCount);
+    SetExpect(!result.message.empty(), "failure result message must not be empty.", failureCount);
 }
 
 void StartResultView(int& failureCount)
@@ -326,46 +302,29 @@ void StartResultView(int& failureCount)
         const OrthogonalCropRequest& request,
         CropFailure failureReason,
         const std::string& label) {
-        const auto resultStatistics = result.GetStatistics();
         SetExpect(
-            result.GetResolvedDataSource() == request.GetDataSource(),
+            result.resolvedDataSource == request.dataSource,
             label + " result data source must match the request.",
             failureCount);
         SetExpect(
-            result.GetResolvedOperation() == request.GetOperation(),
+            result.resolvedOperation == request.operation,
             label + " result operation must match the request.",
             failureCount);
         SetExpect(
-            result.GetResolvedGeometryType() == request.GetGeometryType(),
+            result.resolvedGeometryType == request.geometryType,
             label + " result geometry must match the request.",
             failureCount);
         SetExpect(
-            result.GetResolvedRemovalMode() == request.GetRemovalMode(),
+            result.resolvedRemovalMode == request.removalMode,
             label + " result removal mode must match the request.",
             failureCount);
         SetExpect(
-            resultStatistics.GetResolvedDataSource() == request.GetDataSource(),
-            label + " statistics data source must match the request.",
-            failureCount);
-        SetExpect(
-            resultStatistics.GetResolvedOperation() == request.GetOperation(),
-            label + " statistics operation must match the request.",
-            failureCount);
-        SetExpect(
-            resultStatistics.GetResolvedGeometryType() == request.GetGeometryType(),
-            label + " statistics geometry must match the request.",
-            failureCount);
-        SetExpect(
-            resultStatistics.GetResolvedRemovalMode() == request.GetRemovalMode(),
-            label + " statistics removal mode must match the request.",
-            failureCount);
-        SetExpect(
-            result.GetFailureReason() == failureReason,
+            result.failureReason == failureReason,
             label + " result failure reason must match the expected value.",
             failureCount);
         if (failureReason != CropFailure::None) {
             SetExpect(
-                !result.GetMessage().empty(),
+                !result.message.empty(),
                 label + " failure message must not be empty.",
                 failureCount);
         }
@@ -375,10 +334,10 @@ void StartResultView(int& failureCount)
         OrthogonalCropOperation operation,
         OrthogonalCropDataSource dataSource) {
         OrthogonalCropRequest request;
-        request.SetGeometryType(geometryType);
-        request.SetOperation(operation);
-        request.SetDataSource(dataSource);
-        request.SetRemovalMode(CropRemovalMode::KeepInside);
+        request.geometryType = geometryType;
+        request.operation = operation;
+        request.dataSource = dataSource;
+        request.removalMode = CropRemovalMode::KeepInside;
         return request;
     };
 
@@ -386,20 +345,23 @@ void StartResultView(int& failureCount)
         CropShape::Plane,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::PolyData);
-    factoryRequest.SetRemovalMode(CropRemovalMode::RemoveInside);
-    const auto factoryResult = OrthogonalCropResult::GetFailure(
-        factoryRequest,
-        CropFailure::NoPolyData,
-        "Synthetic missing polydata.");
+    factoryRequest.removalMode = CropRemovalMode::RemoveInside;
+    OrthogonalCropResult factoryResult;
+    factoryResult.resolvedDataSource = factoryRequest.dataSource;
+    factoryResult.resolvedOperation = factoryRequest.operation;
+    factoryResult.resolvedGeometryType = factoryRequest.geometryType;
+    factoryResult.resolvedRemovalMode = factoryRequest.removalMode;
+    factoryResult.failureReason = CropFailure::NoPolyData;
+    factoryResult.message = "Synthetic missing polydata.";
     resultExpect(factoryResult, factoryRequest, CropFailure::NoPolyData, "failure factory");
 
     OrthogonalCropResult setterResult;
-    setterResult.SetResolvedDataSource(factoryRequest.GetDataSource());
-    setterResult.SetResolvedOperation(factoryRequest.GetOperation());
-    setterResult.SetResolvedGeometryType(factoryRequest.GetGeometryType());
-    setterResult.SetResolvedRemovalMode(factoryRequest.GetRemovalMode());
-    setterResult.SetFailureReason(CropFailure::NoPolyData);
-    setterResult.SetMessage("Synthetic setter failure.");
+    setterResult.resolvedDataSource = factoryRequest.dataSource;
+    setterResult.resolvedOperation = factoryRequest.operation;
+    setterResult.resolvedGeometryType = factoryRequest.geometryType;
+    setterResult.resolvedRemovalMode = factoryRequest.removalMode;
+    setterResult.failureReason = CropFailure::NoPolyData;
+    setterResult.message = "Synthetic setter failure.";
     resultExpect(setterResult, factoryRequest, CropFailure::NoPolyData, "result setters");
 
     auto image = BuildExport();
@@ -418,32 +380,32 @@ void StartResultView(int& failureCount)
         CropShape::Box,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::VolumeData);
-    boxPreviewRequest.SetBoxBounds(boxInputBounds);
+    boxPreviewRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
     const auto boxPreviewResult = OrthogonalCropAlgorithm::GetResult(image, boxPreviewRequest);
-    SetExpect(boxPreviewResult.GetSucceeded(), "valid box preview route should succeed.", failureCount);
+    SetExpect(boxPreviewResult.isSucceeded, "valid box preview route should succeed.", failureCount);
     resultExpect(boxPreviewResult, boxPreviewRequest, CropFailure::None, "valid box preview");
 
     auto boxSubmitRequest = requestFactory(
         CropShape::Box,
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    boxSubmitRequest.SetBoxBounds(boxInputBounds);
-    boxSubmitRequest.SetRemovalMode(CropRemovalMode::RemoveInside);
+    boxSubmitRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
+    boxSubmitRequest.removalMode = CropRemovalMode::RemoveInside;
     const auto boxSubmitResult = OrthogonalCropAlgorithm::GetResult(image, boxSubmitRequest);
-    SetExpect(boxSubmitResult.GetSucceeded(), "valid box submit route should succeed.", failureCount);
-    SetExpect(boxSubmitResult.GetSubmitImage() != nullptr, "valid box submit must return an image.", failureCount);
-    SetExpect(boxSubmitResult.GetMaskImage() != nullptr, "valid box submit must return a mask.", failureCount);
+    SetExpect(boxSubmitResult.isSucceeded, "valid box submit route should succeed.", failureCount);
+    SetExpect(boxSubmitResult.submitImage != nullptr, "valid box submit must return an image.", failureCount);
+    SetExpect(boxSubmitResult.maskImage != nullptr, "valid box submit must return a mask.", failureCount);
     resultExpect(boxSubmitResult, boxSubmitRequest, CropFailure::None, "valid box submit");
 
     auto boxPolyRequest = requestFactory(
         CropShape::Box,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::PolyData);
-    boxPolyRequest.SetBoxBounds(boxInputBounds);
+    boxPolyRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
     const auto boxPolyResult = OrthogonalCropAlgorithm::GetResult(
-        boxPreviewResult.GetOutlinePolyData(),
+        boxPreviewResult.outlinePolyData,
         boxPolyRequest);
-    SetExpect(boxPolyResult.GetSucceeded(), "valid box polydata route should succeed.", failureCount);
+    SetExpect(boxPolyResult.isSucceeded, "valid box polydata route should succeed.", failureCount);
     resultExpect(boxPolyResult, boxPolyRequest, CropFailure::None, "valid box polydata preview");
 
     struct DirectRouteCase {
@@ -477,45 +439,9 @@ void StartResultView(int& failureCount)
         }
 
         const std::string label = routeCase.label;
-        SetExpect(!routeResult.GetSucceeded(), label + " should fail.", failureCount);
+        SetExpect(!routeResult.isSucceeded, label + " should fail.", failureCount);
         resultExpect(routeResult, routeCase.request, CropFailure::NoBackend, label);
     }
-}
-
-void StartCameraState(int& failureCount)
-{
-    constexpr double savedNear = 0.125;
-    constexpr double savedFar = 987.5;
-    constexpr double changedNear = 12.0;
-    constexpr double changedFar = 24.0;
-
-    auto renderer = vtkSmartPointer<vtkRenderer>::New();
-    auto camera = vtkSmartPointer<vtkCamera>::New();
-    renderer->SetActiveCamera(camera);
-    camera->SetClippingRange(savedNear, savedFar);
-
-    CropCameraState cameraState;
-    cameraState.SetCameraState(renderer);
-    SetExpect(cameraState.GetSaved(), "camera state should report a saved snapshot.", failureCount);
-
-    camera->SetClippingRange(4.0, 8.0);
-    cameraState.ResetCamera(renderer);
-
-    double restoredRange[2] = { 0.0, 0.0 };
-    camera->GetClippingRange(restoredRange);
-    SetExpect(
-        restoredRange[0] == savedNear && restoredRange[1] == savedFar,
-        "camera reset must restore the exact clipping range.",
-        failureCount);
-    SetExpect(!cameraState.GetSaved(), "camera reset must consume the saved snapshot.", failureCount);
-
-    camera->SetClippingRange(changedNear, changedFar);
-    cameraState.ResetCamera(renderer);
-    camera->GetClippingRange(restoredRange);
-    SetExpect(
-        restoredRange[0] == changedNear && restoredRange[1] == changedFar,
-        "camera reset without a saved snapshot must leave the clipping range unchanged.",
-        failureCount);
 }
 
 void SetResultExpect(
@@ -523,49 +449,31 @@ void SetResultExpect(
     CropRemovalMode removalMode,
     int& failureCount)
 {
-    const auto statistics = result.GetStatistics();
-
-    SetExpect(result.GetSucceeded(), "planar submit should succeed.", failureCount);
+    SetExpect(result.isSucceeded, "planar submit should succeed.", failureCount);
     SetExpect(
-        result.GetResolvedOperation() == OrthogonalCropOperation::Submit,
+        result.resolvedOperation == OrthogonalCropOperation::Submit,
         "planar submit result must resolve to Submit operation.",
         failureCount);
     SetExpect(
-        result.GetResolvedDataSource() == OrthogonalCropDataSource::ImageData,
+        result.resolvedDataSource == OrthogonalCropDataSource::ImageData,
         "planar submit result must resolve to ImageData source.",
         failureCount);
     SetExpect(
-        result.GetResolvedGeometryType() == CropShape::Plane,
+        result.resolvedGeometryType == CropShape::Plane,
         "planar submit result must resolve to Plane geometry.",
         failureCount);
     SetExpect(
-        result.GetResolvedRemovalMode() == removalMode,
+        result.resolvedRemovalMode == removalMode,
         "planar submit result must preserve requested removal mode.",
         failureCount);
     SetExpect(
-        result.GetFailureReason() == CropFailure::None,
+        result.failureReason == CropFailure::None,
         "planar submit result must not report failure.",
         failureCount);
-    SetExpect(
-        statistics.GetResolvedOperation() == OrthogonalCropOperation::Submit,
-        "planar submit statistics must resolve to Submit operation.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedDataSource() == OrthogonalCropDataSource::ImageData,
-        "planar submit statistics must resolve to ImageData source.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedGeometryType() == CropShape::Plane,
-        "planar submit statistics must resolve to Plane geometry.",
-        failureCount);
-    SetExpect(
-        statistics.GetResolvedRemovalMode() == removalMode,
-        "planar submit statistics must preserve requested removal mode.",
-        failureCount);
-    SetExpect(result.GetSubmitImage() != nullptr, "planar submit image must exist.", failureCount);
-    SetExpect(result.GetMaskImage() != nullptr, "planar submit mask must exist.", failureCount);
-    SetExpect(result.GetOutlinePolyData() == nullptr, "planar submit must not return preview plane outline.", failureCount);
-    SetExpect(result.GetClipPolyData() == nullptr, "planar submit must not return preview clip polydata.", failureCount);
+    SetExpect(result.submitImage != nullptr, "planar submit image must exist.", failureCount);
+    SetExpect(result.maskImage != nullptr, "planar submit mask must exist.", failureCount);
+    SetExpect(result.outlinePolyData == nullptr, "planar submit must not return preview plane outline.", failureCount);
+    SetExpect(result.clipPolyData == nullptr, "planar submit must not return preview clip polydata.", failureCount);
 }
 
 void SetPreviewTest(
@@ -581,14 +489,14 @@ void SetPreviewTest(
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::VolumeData);
 
-    SetExpect(result.GetSucceeded(), "planar preview contrast case should succeed.", failureCount);
+    SetExpect(result.isSucceeded, "planar preview contrast case should succeed.", failureCount);
     SetExpect(
-        result.GetResolvedOperation() == OrthogonalCropOperation::Preview,
+        result.resolvedOperation == OrthogonalCropOperation::Preview,
         "planar preview contrast case must resolve to Preview operation.",
         failureCount);
-    SetExpect(result.GetSubmitImage() == nullptr, "planar preview must not return submit image.", failureCount);
-    SetExpect(result.GetMaskImage() == nullptr, "planar preview must not return submit mask.", failureCount);
-    SetExpect(result.GetOutlinePolyData() == nullptr, "planar preview must not return a misleading finite plane outline.", failureCount);
+    SetExpect(result.submitImage == nullptr, "planar preview must not return submit image.", failureCount);
+    SetExpect(result.maskImage == nullptr, "planar preview must not return submit mask.", failureCount);
+    SetExpect(result.outlinePolyData == nullptr, "planar preview must not return a misleading finite plane outline.", failureCount);
 }
 
 void SetSubmitExpect(
@@ -706,18 +614,18 @@ void StartSubmitCase(
         OrthogonalCropDataSource::ImageData);
 
     SetResultExpect(result, removalMode, failureCount);
-    if (!result.GetSucceeded() || !result.GetSubmitImage() || !result.GetMaskImage()) {
+    if (!result.isSucceeded || !result.submitImage || !result.maskImage) {
         return;
     }
 
     SetSubmitExpect(
         image,
-        result.GetSubmitImage(),
-        result.GetMaskImage(),
+        result.submitImage,
+        result.maskImage,
         plane,
         removalMode,
         failureCount);
-    SetBoundExpect(result.GetMaskImage(), boundaryIndex, removalMode, failureCount);
+    SetBoundExpect(result.maskImage, boundaryIndex, removalMode, failureCount);
 }
 
 void StartOblique(int& failureCount)
@@ -758,7 +666,7 @@ double GetSubmitAvgMs(
         removalMode,
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    SetExpect(warmup.GetSucceeded(), "planar submit warmup should succeed.", failureCount);
+    SetExpect(warmup.isSucceeded, "planar submit warmup should succeed.", failureCount);
 
     double totalMilliseconds = 0.0;
     for (int iteration = 0; iteration < iterationCount; ++iteration) {
@@ -770,9 +678,9 @@ double GetSubmitAvgMs(
             OrthogonalCropOperation::Submit,
             OrthogonalCropDataSource::ImageData);
         const auto finish = std::chrono::steady_clock::now();
-        SetExpect(result.GetSucceeded(), "planar submit benchmark should succeed.", failureCount);
+        SetExpect(result.isSucceeded, "planar submit benchmark should succeed.", failureCount);
         SetExpect(
-            result.GetResolvedOperation() == OrthogonalCropOperation::Submit,
+            result.resolvedOperation == OrthogonalCropOperation::Submit,
             "planar submit benchmark must resolve to Submit operation.",
             failureCount);
 
@@ -910,6 +818,59 @@ void StartDataExport(int& failureCount)
         "consuming a pending image should advance the current data version.",
         failureCount);
 
+    const auto currentSnapshot = dataManager.GetImageState();
+    const auto currentRange = dataManager.GetScalarRange();
+    SetExpect(
+        currentSnapshot.image == image
+            && currentSnapshot.dims == std::array<int, 3>{ 3, 4, 2 }
+            && currentSnapshot.spacing == dataManager.GetSpacing()
+            && currentSnapshot.origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+            && currentSnapshot.version == dataManager.GetDataVersion(),
+        "image/dims/spacing/origin/version should be returned as one current snapshot.",
+        failureCount);
+
+    const std::array<double, 3> updatedSpacing = { 0.75, 1.25, 2.5 };
+    SetExpect(
+        dataManager.SetSpacing(updatedSpacing),
+        "current spacing update should be accepted by DataManager.",
+        failureCount);
+    const auto spacingSnapshot = dataManager.GetImageState();
+    const std::array<double, 3> imageSpacing = {
+        spacingSnapshot.image->GetSpacing()[0],
+        spacingSnapshot.image->GetSpacing()[1],
+        spacingSnapshot.image->GetSpacing()[2]
+    };
+    SetExpect(
+        spacingSnapshot.spacing == updatedSpacing
+            && imageSpacing == updatedSpacing
+            && spacingSnapshot.version == currentSnapshot.version + 1,
+        "spacing update must atomically keep vtkImageData, ImageState, and version aligned.",
+        failureCount);
+    SetExpect(
+        dataManager.SetSpacing(updatedSpacing)
+            && dataManager.GetDataVersion() == spacingSnapshot.version,
+        "same spacing update must be a no-op without a new version.",
+        failureCount);
+
+    const auto missingPath = outputRoot / "missing_2x2x2.raw";
+    SetExpect(
+        !dataManager.SetDataLoaded(
+            missingPath.string(),
+            { 1.0f, 1.0f, 1.0f },
+            { 0.0f, 0.0f, 0.0f }),
+        "missing raw input should report failure.",
+        failureCount);
+    const auto afterFailure = dataManager.GetImageState();
+    SetExpect(
+        afterFailure.image == spacingSnapshot.image
+            && afterFailure.dims == spacingSnapshot.dims
+            && afterFailure.spacing == spacingSnapshot.spacing
+            && afterFailure.origin == spacingSnapshot.origin
+            && afterFailure.version == spacingSnapshot.version
+            && dataManager.GetScalarRange() == currentRange,
+        "failed raw load must preserve the complete current transaction.",
+        failureCount);
+
     const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
     SetExpect(
         dataManager.ExportData(rawRequestPath.string(), identity),
@@ -953,21 +914,26 @@ void StartDataExport(int& failureCount)
         failureCount);
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        StartCropFailure(failureCount);
+        StartResultView(failureCount);
+        StartOblique(failureCount);
+        StartDeepCases(failureCount);
+        StartBench(failureCount);
+        StartSliceView(failureCount);
+        StartDataExport(failureCount);
+        return failureCount;
+    }
+};
 
 int main()
 {
-    int failureCount = 0;
-    StartCropFailure(failureCount);
-    StartResultView(failureCount);
-    StartCameraState(failureCount);
-    StartOblique(failureCount);
-    StartDeepCases(failureCount);
-    StartBench(failureCount);
-    StartSliceView(failureCount);
-    StartDataExport(failureCount);
-    failureCount += GetCropPreviewFailCount();
-    failureCount += GetAppTaskFailCount();
+    int failureCount = PlanarCropSuite().GetFailCount();
+    failureCount += CropBridgeSuite().GetFailCount();
+    failureCount += CropPreviewSuite().GetFailCount();
+    failureCount += AppTaskSuite().GetFailCount();
 
     if (failureCount != 0) {
         std::cerr << "PlanarCropTests failed: " << failureCount << '\n';

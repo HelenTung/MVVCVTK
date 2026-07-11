@@ -41,6 +41,7 @@ public:
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
     virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
+    virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;
     virtual DataVersion GetDataVersion() const = 0;
     virtual bool SetDataLoaded(const std::string& filePath,
         const std::array<float, 3>& spacing,

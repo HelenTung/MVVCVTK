@@ -152,10 +152,12 @@
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VoidDetector.h" />
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\GapAnalysisTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h" />
+    <ClInclude Include="GapDisplayTests.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
     <ClCompile Include="GapAnalysisAlgorithmTests.cpp" />
+    <ClCompile Include="GapDisplayTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

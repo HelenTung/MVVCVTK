@@ -1,405 +1,74 @@
 #pragma once
-#include "AppTypes.h"
-#include "AppStateCommands.h"
-#include "AppStateEvents.h"
-#include <vector>
-#include <memory>
-#include <mutex>
-#include <array>
-#include <algorithm>
-#include <cmath>
-#include <atomic>
 
+#include "AppStateEvents.h"
+#include "AppTypes.h"
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+// 跨视图共享的交互状态门面；实现细节收口在 cpp，避免状态锁与比较策略扩散到调用方。
 class SharedInteractionState {
 public:
-    explicit SharedInteractionState(std::shared_ptr<IStateEventSink> eventSink = nullptr)
-        : m_eventSink(std::move(eventSink)) {
-        m_nodes = {
-            { 0.00, 0.0, 0.00, 0.00, 0.00 },
-            { 0.35, 0.0, 0.75, 0.75, 0.75 },
-            { 0.60, 0.6, 0.85, 0.85, 0.85 },
-            { 1.00, 1.0, 0.95, 0.95, 0.95 },
-        };
-    }
+    explicit SharedInteractionState(
+        std::shared_ptr<IStateEventSink> eventSink = nullptr);
+    ~SharedInteractionState();
 
-    void SetEventSink(std::shared_ptr<IStateEventSink> eventSink) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_eventSink = std::move(eventSink);
-    }
+    SharedInteractionState(const SharedInteractionState&) = delete;
+    SharedInteractionState& operator=(const SharedInteractionState&) = delete;
+    SharedInteractionState(SharedInteractionState&&) = delete;
+    SharedInteractionState& operator=(SharedInteractionState&&) = delete;
 
-    // ── 文件流加载状态 ────────────────────────────────────────────
-    void SetFileLoadState(LoadState s) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_fileLoadState = s;
-    }
-    LoadState GetFileLoadState() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_fileLoadState;
-    }
-
-    // ── 重载加载状态 ──────────────────────────────────────────────
-    void SetReloadLoadState(LoadState s) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_reloadLoadState = s;
-    }
-    LoadState GetReloadLoadState() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_reloadLoadState;
-    }
-
-    // ── 数据可信状态 ──────────────────────────────────────────────
-    void SetDataTrustedState(LoadState s) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_dataTrustedState = s;
-    }
-    LoadState GetDataTrustedState() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_dataTrustedState;
-    }
-
-    LoadEventKind GetPendingLoadEventKind() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_pendingLoadEventKind;
-    }
-
-    // ── 文件流加载开始 ────────────────────────────────────────────
-    void SetFileLoadStarted() {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_fileLoadState = LoadState::Loading;
-        m_dataTrustedState = LoadState::Loading;
-    }
-
-    // ── 重载加载开始 ──────────────────────────────────────────────
-    void SetReloadLoadStarted() {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_reloadLoadState = LoadState::Loading;
-    }
-
-    // ── 文件流数据就绪广播 ────────────────────────────────────────
-    // 仅后台文件加载线程调用；写 range / spacing 后广播 DataReady
-    void SetFileDataReady(double rangeMin, double rangeMax,
-        const std::array<double, 3>& spacing) {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_dataRange = { rangeMin, rangeMax };
-            m_spacing = spacing;
-            m_fileLoadState = LoadState::Succeeded;
-            m_dataTrustedState = LoadState::Succeeded;
-            m_pendingLoadEventKind = LoadEventKind::File;
-            m_windowLevel.windowWidth = rangeMax - rangeMin;
-            m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
-        }
-        SendFlags(UpdateFlags::DataReady);
-    }
-
-    // ── 重载数据就绪广播 ──────────────────────────────────────────
-    // 仅后台重载主线程提交调用；写 range / spacing 后广播 DataReady
-    void SetReloadDataReady(double rangeMin, double rangeMax,
-        const std::array<double, 3>& spacing) {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_dataRange = { rangeMin, rangeMax };
-            m_spacing = spacing;
-            m_reloadLoadState = LoadState::Succeeded;
-            m_dataTrustedState = LoadState::Succeeded;
-            m_pendingLoadEventKind = LoadEventKind::Reload;
-            m_windowLevel.windowWidth = rangeMax - rangeMin;
-            m_windowLevel.windowCenter = (rangeMin + rangeMax) * 0.5;
-        }
-        SendFlags(UpdateFlags::DataReady);
-    }
-
-    // ── 文件流加载失败广播 ────────────────────────────────────────
-    // 仅后台文件加载线程调用；设状态后广播 LoadFailed
-    void SetFileLoadFailed() {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_fileLoadState = LoadState::Failed;
-            m_dataTrustedState = LoadState::Failed;
-            m_pendingLoadEventKind = LoadEventKind::File;
-        }
-        SendFlags(UpdateFlags::LoadFailed);
-    }
-
-    // ── 重载加载失败广播 ──────────────────────────────────────────
-    // 仅后台重载线程调用；设状态后广播 LoadFailed
-    void SetReloadLoadFailed() {
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_reloadLoadState = LoadState::Failed;
-            if (m_dataTrustedState != LoadState::Succeeded) {
-                m_dataTrustedState = LoadState::Failed;
-            }
-            m_pendingLoadEventKind = LoadEventKind::Reload;
-        }
-        SendFlags(UpdateFlags::LoadFailed);
-    }
-
-    // ── 批量提交前处理配置（一次加锁 + 一次广播，精确 diff）────────
-    // 只用于完整配置快照；运行期局部设置应走具体 Set* 入口，避免默认字段污染当前状态。
-    void SetPreInitConfig(const PreInitConfig& cfg) {
-        UpdateFlags flags = UpdateFlags::None;
-        {
-            // 先在锁内把本次前处理配置对应的变更位一次性归并出来，
-            // 锁外只做一次广播，避免同一批配置写入触发多次观察者回调。
-            std::lock_guard<std::mutex> lk(m_mutex);
-
-            if (AppStateCommands::SetMaterial(m_material, cfg.material)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Material);
-            }
-
-            if (cfg.hasTF && AppStateCommands::SetTFNodes(m_nodes, cfg.tfNodes)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::TF);
-            }
-
-            if (cfg.hasIso && AppStateCommands::SetScalar(m_isoValue, cfg.isoThreshold)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::IsoValue);
-            }
-
-            if (cfg.hasBgColor && AppStateCommands::SetBackground(m_background, cfg.bgColor)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Background);
-            }
-
-            if (cfg.hasSpacing && AppStateCommands::SetArray(m_spacing, cfg.spacing)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::Spacing);
-            }
-
-            if (cfg.hasWindowLevel && AppStateCommands::SetWindowLevel(m_windowLevel, cfg.windowLevel)) {
-                AppStateCommands::SetFlagsMerged(flags, UpdateFlags::WindowLevel);
-            }
-        }
-        if (flags != UpdateFlags::None)
-            SendFlags(flags);
-    }
-
-    // ── 模型变换矩阵 ──────────────────────────────────────────────
-    void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetArray(m_modelMatrix, modelToWorldMatrix, 1e-9);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Transform);
-    }
-    std::array<double, 16> GetModelMatrix() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_modelMatrix;
-    }
-
-    // ── 标量范围 ──────────────────────────────────────────────────
-    void SetScalarRange(double minv, double maxv) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetArray(m_dataRange, { minv, maxv });
-        }
-        if (hasChanged) SendFlags(UpdateFlags::TF);
-    }
-    std::array<double, 2> GetDataRange() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_dataRange;
-    }
-
-    // ── 传输函数节点 ──────────────────────────────────────────────
-    void SetTFNodes(const std::vector<TFNode>& nodes) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetTFNodes(m_nodes, nodes);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::TF);
-    }
-    void GetTFNodes(std::vector<TFNode>& dest) const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        dest = m_nodes;
-    }
-
-    // ── 等值面阈值 ────────────────────────────────────────────────
-    void SetIsoValue(double val) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetScalar(m_isoValue, val);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::IsoValue);
-    }
-    double GetIsoValue() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_isoValue;
-    }
-
-    // ── 材质参数 ──────────────────────────────────────────────────
-    void SetMaterial(const MaterialParams& mat) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetMaterial(m_material, mat);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Material);
-    }
-    MaterialParams GetMaterial() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_material;
-    }
-
-    // ── 背景色 ──────────────────────────────────────────────
-    void SetBackground(const BackgroundColor& bg) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetBackground(m_background, bg);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Background);
-    }
-    BackgroundColor GetBackground() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_background;
-    }
-
-    // ── 体数据 spacing ──────────────────────────────────────────────
-    void SetSpacing(double sx, double sy, double sz) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetArray(m_spacing, { sx, sy, sz });
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Spacing);
-    }
-
-    std::array<double, 3> GetSpacing() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_spacing;
-    }
-
-    // ── 切片窗宽/窗位（WW/WC，工业 CT 标准）─────────────────────
-    void SetWindowLevel(double ww, double wc) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetWindowLevel(m_windowLevel, { ww, wc });
-        }
-        if (hasChanged) SendFlags(UpdateFlags::WindowLevel);
-    }
-    WindowLevelParams GetWindowLevel() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_windowLevel;
-    }
-
-
-    // ── 交互状态 ──────────────────────────────────────────────────
-    void SetInteracting(bool isInteracting) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetValue(m_isInteracting, isInteracting);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Interaction);
-    }
-    bool GetIsInteracting() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_isInteracting;
-    }
-
-    // ── 光标位置 ──────────────────────────────────────────────────
-    void SetCursorWorld(double x, double y, double z) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetArray(m_cursorWorld, { x, y, z }, 1e-9);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Cursor);
-    }
-
-    void SetCursorRawWorld(double x, double y, double z) {
-        // Raw 光标保留拾取命中的原始世界点，不主动广播；
-        // 它通常作为交互链路中的中间量，等到 CursorWorld 被约束/修正后再统一发布 Cursor 事件。
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_cursorRawWorld = { x, y, z };
-    }
-
-    std::array<double, 3> GetCursorRawWorld() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_cursorRawWorld;
-    }
-
-    void SetCursorAxis(int axis) {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        m_cursorAxis = axis;
-    }
-
-    int GetCursorAxis() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_cursorAxis;
-    }
-
-    std::array<double, 3> GetCursorWorld() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_cursorWorld;
-    }
-
-    // ── 显隐状态 ──────────────────────────────────────────────────────────
-    void SetElementVisible(uint32_t flagBit, bool isVisible) {
-        bool hasChanged = false;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            hasChanged = AppStateCommands::SetVisibilityMask(m_visibilityMask, flagBit, isVisible);
-        }
-        if (hasChanged) SendFlags(UpdateFlags::Visibility);
-    }
-
-    uint32_t GetVisibilityMask() const {
-        std::lock_guard<std::mutex> lk(m_mutex);
-        return m_visibilityMask;
-    }
+    void SetEventSink(std::shared_ptr<IStateEventSink> eventSink);
+    void SetFileLoadState(LoadState state);
+    LoadState GetFileLoadState() const;
+    void SetReloadLoadState(LoadState state);
+    LoadState GetReloadLoadState() const;
+    void SetDataTrustedState(LoadState state);
+    LoadState GetDataTrustedState() const;
+    LoadEventKind GetPendingLoadEventKind() const;
+    void SetFileLoadStarted();
+    void SetReloadLoadStarted();
+    void SetFileDataReady(
+        double rangeMin,
+        double rangeMax,
+        const std::array<double, 3>& spacing);
+    void SetReloadDataReady(
+        double rangeMin,
+        double rangeMax,
+        const std::array<double, 3>& spacing);
+    void SetFileLoadFailed();
+    void SetReloadLoadFailed();
+    void SetPreInitConfig(const PreInitConfig& config);
+    void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix);
+    std::array<double, 16> GetModelMatrix() const;
+    void SetScalarRange(double rangeMin, double rangeMax);
+    std::array<double, 2> GetDataRange() const;
+    void SetTFNodes(const std::vector<TFNode>& nodes);
+    void GetTFNodes(std::vector<TFNode>& destination) const;
+    void SetIsoValue(double value);
+    double GetIsoValue() const;
+    void SetMaterial(const MaterialParams& material);
+    MaterialParams GetMaterial() const;
+    void SetBackground(const BackgroundColor& background);
+    BackgroundColor GetBackground() const;
+    void SetSpacing(double spacingX, double spacingY, double spacingZ);
+    std::array<double, 3> GetSpacing() const;
+    void SetWindowLevel(double windowWidth, double windowCenter);
+    WindowLevelParams GetWindowLevel() const;
+    void SetInteracting(bool isInteracting);
+    bool GetIsInteracting() const;
+    void SetCursorWorld(double worldX, double worldY, double worldZ);
+    void SetCursorRawWorld(double worldX, double worldY, double worldZ);
+    std::array<double, 3> GetCursorRawWorld() const;
+    void SetCursorAxis(int axis);
+    int GetCursorAxis() const;
+    std::array<double, 3> GetCursorWorld() const;
+    void SetElementVisible(uint32_t flagBit, bool isVisible);
+    uint32_t GetVisibilityMask() const;
 
 private:
-    // 同时保护 event sink 与下方全部状态 payload；任何外部回调都必须在解锁后执行。
-    mutable std::mutex m_mutex;
-    // 共享持有可替换的广播出口；SendFlags 在锁内复制，在锁外调用，避免回调重入同一状态锁。
-    std::shared_ptr<IStateEventSink> m_eventSink;
-
-    // 数据生命周期状态由加载任务生产、各 VizService 在 DataReady/LoadFailed 广播后读取。
-    LoadState m_dataTrustedState = LoadState::Idle;            // 当前 image 是否可供渲染链消费
-    LoadState m_fileLoadState = LoadState::Idle;               // 文件 I/O 链路的独立终态
-    LoadState m_reloadLoadState = LoadState::Idle;             // buffer pending/提交链路的独立终态
-    // 最近一次终态广播的来源快照；新终态覆盖旧值，各窗口复制后在自己的消费状态中清零。
-    LoadEventKind m_pendingLoadEventKind = LoadEventKind::None;
-    std::array<double, 2> m_dataRange = { 0.0, 255.0 };        // current image 标量范围 [min, max]
-    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };       // current image 的 RAS [sx, sy, sz]
-
-    // 渲染配置状态
-    std::vector<TFNode> m_nodes;                                // 当前体渲染传输函数节点真源
-    double m_isoValue = 0.0;                                    // 当前等值面阈值，单位同 data range
-    MaterialParams m_material;                                  // 当前材质快照，增量同步时复制给 Strategy
-    BackgroundColor m_background;                               // 当前归一化 RGB 背景色
-    WindowLevelParams m_windowLevel;                            // 当前窗宽/窗位，单位同 data range
-    uint32_t m_visibilityMask = VisFlags::Planes3D
-        | VisFlags::Crosshair
-        | VisFlags::Ruler;                                      // VisFlags 组合，SetElementVisible 生产、Strategy 消费
-
-    // 交互状态
-    bool m_isInteracting = false;                               // press/drag 置位、对应 release 清零的高频交互状态
-    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 };    // 轴约束后的联动点，VTK world [x, y, z]
-    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 约束前拾取点，VTK world [x, y, z]
-    int m_cursorAxis = -1;                                      // 来源轴：0/1/2 为 X/Y/Z，-1 为自由点
-
-    // 模型状态
-    // model-to-world 仿射真源，world = M * model；按 vtkMatrix4x4::DeepCopy 的
-    // [m00, m01, ..., m03, m10, ..., m33] 顺序展开。
-    std::array<double, 16> m_modelMatrix = {
-        1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1
-    };
-
-    void SendFlags(UpdateFlags flags) {
-        std::shared_ptr<IStateEventSink> eventSink;
-        {
-            std::lock_guard<std::mutex> lk(m_mutex);
-            eventSink = m_eventSink;
-        }
-
-        // 先复制 sink 再在锁外广播，避免观察者回调重新进入 SharedInteractionState 时形成锁嵌套。
-        if (eventSink) {
-            eventSink->SendFlags(flags);
-        }
-    }
+    class Impl;
+    std::unique_ptr<Impl> m_impl;
 };

@@ -1,4 +1,5 @@
 #include "Host/HostCommandRouter.h"
+#include "HostCommandRouterTests.h"
 
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeatureBindings.h"
@@ -12,7 +13,8 @@
 #include <string>
 #include <utility>
 
-namespace {
+class HostRouterCases final {
+public:
 
 class HostRouterFixture final {
 public:
@@ -383,16 +385,20 @@ bool StartSubmitStateCase()
     return isPassed;
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        failureCount += StartViewModeCase() ? 0 : 1;
+        failureCount += StartNoContextModeCase() ? 0 : 1;
+        failureCount += StartModelRepeatCase() ? 0 : 1;
+        failureCount += StartEscapeRepeatCase() ? 0 : 1;
+        failureCount += StartCrossViewReleaseCase() ? 0 : 1;
+        failureCount += StartSubmitStateCase() ? 0 : 1;
+        return failureCount;
+    }
+};
 
-int GetHostRouterFailCount()
+int HostRouterSuite::GetFailCount() const
 {
-    int failureCount = 0;
-    failureCount += StartViewModeCase() ? 0 : 1;
-    failureCount += StartNoContextModeCase() ? 0 : 1;
-    failureCount += StartModelRepeatCase() ? 0 : 1;
-    failureCount += StartEscapeRepeatCase() ? 0 : 1;
-    failureCount += StartCrossViewReleaseCase() ? 0 : 1;
-    failureCount += StartSubmitStateCase() ? 0 : 1;
-    return failureCount;
+    return HostRouterCases().GetFailCount();
 }

@@ -1,4 +1,5 @@
 #include "Tasks/AppDataExportTaskService.h"
+#include "PlanarTestSuites.h"
 
 #include <array>
 #include <iostream>
@@ -7,7 +8,8 @@
 #include <string>
 #include <vector>
 
-namespace {
+class AppTaskCases final {
+public:
 
 class ExportDataStub final : public AbstractDataManager
 {
@@ -20,6 +22,11 @@ public:
     DataVersion GetDataVersion() const override
     {
         return 0;
+    }
+
+    bool SetSpacing(const std::array<double, 3>&) override
+    {
+        return false;
     }
 
     bool SetDataLoaded(
@@ -91,11 +98,15 @@ void StartTaskOrder(int& failureCount)
         failureCount);
 }
 
-} // namespace
+    int GetFailCount()
+    {
+        int failureCount = 0;
+        StartTaskOrder(failureCount);
+        return failureCount;
+    }
+};
 
-int GetAppTaskFailCount()
+int AppTaskSuite::GetFailCount() const
 {
-    int failureCount = 0;
-    StartTaskOrder(failureCount);
-    return failureCount;
+    return AppTaskCases().GetFailCount();
 }

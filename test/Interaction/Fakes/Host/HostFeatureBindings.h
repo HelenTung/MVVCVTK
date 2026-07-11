@@ -102,9 +102,9 @@ public:
     {
     }
 
-    std::function<bool()> BuildCropInput()
+    bool SendCropInput()
     {
-        return []() { return true; };
+        return true;
     }
 
 private:

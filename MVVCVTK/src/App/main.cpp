@@ -15,6 +15,8 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 #include "Host/VtkAppHostSession.h"
 
+class AppLaunchConfig final {
+public:
 static std::vector<TFNode> BuildVolumeTF()
 {
     // 这组 transfer function 是 standalone 五视图调试布局的视觉输入；真实上位机应按自己的显示配方下发 WindowConfig。
@@ -137,6 +139,7 @@ static HostGapConfig BuildGapConfig()
     config.voidDetection.erosionIterations = 2;
     return config;
 }
+};
 
 int main()
 {
@@ -153,9 +156,9 @@ int main()
 
     // main 现在扮演“临时上位机适配层”：显式声明调试键位、监听范围和 feature 作用目标。
     // 这样 session/feature 不需要默认假设输入协议，也不会在创建时自动进入某个分析链路。
-    config.hotkeys = BuildHotkeys();
+    config.hotkeys = AppLaunchConfig::BuildHotkeys();
     // standalone 五窗口也是上位机模拟输入的一部分；session 不再保存或暗补固定窗口拓扑。
-    config.renderViews = BuildViewConfigs();
+    config.renderViews = AppLaunchConfig::BuildViewConfigs();
 
     // 这里临时模拟上位机下发“加载体数据”命令，所以文件路径和 RAW 物理元数据都在 main 中显式展开。
     // 后续真实上位机接入时，只替换这些输入值的来源，不把样本事实下沉到 HostSessionTypes 或 feature。
@@ -186,7 +189,7 @@ int main()
     config.commandInput.cropViewRequest.referenceRole = HostRenderViewRole::Primary3D;
     config.commandInput.cropViewRequest.previewViewRoles = standaloneViewRoles;
     config.commandInput.gapViewRequest.targetViewRoles = standaloneViewRoles;
-    config.commandInput.gapViewRequest.algorithm = BuildGapConfig();
+    config.commandInput.gapViewRequest.algorithm = AppLaunchConfig::BuildGapConfig();
 
     // standalone 的 VTK 主循环由 TopDownSlice 窗口承载，所以 host/session 主线程 tick 也显式挂到这个 role。
     // Qt / 上位机接入时应改为自己的主事件泵窗口 id，而不是沿用这里的调试 role。

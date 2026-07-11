@@ -104,14 +104,14 @@ void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
 {
     // 裁切结果在 overlay 层拆成 outline、clipped polydata、mask 三种显示数据；
     // 同一份 result 由当前窗口轴向决定最终可见内容，避免算法层关心窗口类型。
-    if (!result.GetSucceeded()) {
+    if (!result.isSucceeded) {
         ClearPreview();
         return;
     }
 
     // outline 是 host 可选择显示的几何参照；
     // 非 reference 窗口仍可能接收主模型裁切效果，但不再显示另一个裁切 box 线框。
-    auto outline = result.GetOutlinePolyData();
+    auto outline = result.outlinePolyData;
     m_hasOutline = outline && outline->GetNumberOfPoints() > 0;
     if (m_hasOutline) {
         m_outlineMapper->SetInputData(outline);
@@ -119,7 +119,7 @@ void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
 
     // 裁切后的 polydata 是可选 3D overlay artifact；
     // 主 actor 预览默认由 shader / clipping 接管，因此这里允许没有裁切网格。
-    auto clippedPolyData = result.GetClipPolyData();
+    auto clippedPolyData = result.clipPolyData;
     const bool hasPolyData = clippedPolyData && clippedPolyData->GetNumberOfPoints() > 0;
     if (hasPolyData) {
         m_polyDataMapper->SetInputData(clippedPolyData);
@@ -128,7 +128,7 @@ void CropOverlay::SetCropResult(const OrthogonalCropResult& result)
 
     // mask image 只服务 image submit 路径的 2D overlay；
     // 3D 窗口依赖 outline 和主模型 clip，不直接显示 mask。
-    auto maskImage = result.GetMaskImage();
+    auto maskImage = result.maskImage;
     m_hasMaskImage = maskImage != nullptr;
     if (m_hasMaskImage) {
         m_maskMapper->SetInputData(maskImage);
@@ -153,7 +153,7 @@ void CropOverlay::ClearPreview()
 
 void CropOverlay::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
-    if (GetFlagOn(flags, UpdateFlags::Transform)) {
+    if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         // 所有 3D prop 都跟随主模型矩阵，保持 overlay 与主内容严格对齐。
         SetPropTransform(m_outlineActor, params.modelMatrix);
         SetPropTransform(m_polyDataActor, params.modelMatrix);
@@ -166,7 +166,7 @@ void CropOverlay::SetVisualState(const RenderParams& params, UpdateFlags flags)
         return;
     }
 
-    if (GetFlagOn(flags, UpdateFlags::Cursor) || GetFlagOn(flags, UpdateFlags::Transform)) {
+    if (((flags & UpdateFlags::Cursor) != UpdateFlags::None) || ((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         double normal[3] = { 0.0, 0.0, 0.0 };
         if (m_sliceAxis >= 0 && m_sliceAxis < 3) {
             normal[m_sliceAxis] = 1.0;

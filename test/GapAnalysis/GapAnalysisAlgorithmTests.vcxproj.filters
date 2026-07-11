@@ -35,12 +35,18 @@
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h">
       <Filter>include\Services</Filter>
     </ClInclude>
+    <ClInclude Include="GapDisplayTests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp">
       <Filter>src\Services</Filter>
     </ClCompile>
     <ClCompile Include="GapAnalysisAlgorithmTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="GapDisplayTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
   </ItemGroup>
