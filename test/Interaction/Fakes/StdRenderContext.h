@@ -1,8 +1,7 @@
 #pragma once
 
 #include "AppTypes.h"
-#include "Interaction/InteractionEvent.h"
-#include "Interaction/InteractionResult.h"
+#include "Interaction/InteractionTypes.h"
 
 #include <algorithm>
 #include <functional>

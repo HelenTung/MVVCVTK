@@ -143,8 +143,7 @@
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h" />
-    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionEvent.h" />
-    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionResult.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h" />
     <ClInclude Include="Fakes\AppService.h" />
     <ClInclude Include="Fakes\Host\HostCoreServices.h" />

@@ -23,10 +23,7 @@
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionEvent.h">
-      <Filter>include</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionResult.h">
+    <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionTypes.h">
       <Filter>include</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h">

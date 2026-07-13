@@ -1,6 +1,5 @@
 #pragma once
-#include "InteractionEvent.h"
-#include "InteractionResult.h"
+#include "InteractionTypes.h"
 
 // ─────────────────────────────────────────────────────────────────────
 // IInteractionHandler — 交互处理器接口

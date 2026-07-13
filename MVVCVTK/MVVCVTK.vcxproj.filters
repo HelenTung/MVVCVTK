@@ -201,10 +201,7 @@
     <ClInclude Include="include\Interaction\InteractionRouter.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="include\Interaction\InteractionResult.h">
-      <Filter>include\Interaction</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Interaction\InteractionEvent.h">
+    <ClInclude Include="include\Interaction\InteractionTypes.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
     <ClInclude Include="include\Interaction\IInteractionHandler.h">

@@ -177,8 +177,7 @@
     <ClInclude Include="include\Interaction\InputCallbackHandler.h" />
     <ClInclude Include="include\Data\ImageProcessor.h" />
     <ClInclude Include="include\Geometry\InteractionComputeService.h" />
-    <ClInclude Include="include\Interaction\InteractionEvent.h" />
-    <ClInclude Include="include\Interaction\InteractionResult.h" />
+    <ClInclude Include="include\Interaction\InteractionTypes.h" />
     <ClInclude Include="include\Interaction\InteractionRouter.h" />
     <ClInclude Include="include\Render\Strategies\IsoSurfaceStrategy.h" />
     <ClInclude Include="include\Platform\MemMappedFile.h" />

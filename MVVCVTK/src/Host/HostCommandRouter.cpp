@@ -4,8 +4,7 @@
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
-#include "Interaction/InteractionEvent.h"
-#include "Interaction/InteractionResult.h"
+#include "Interaction/InteractionTypes.h"
 #include "StdRenderContext.h"
 
 #include <vtkCommand.h>
