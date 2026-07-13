@@ -50,11 +50,9 @@ public:
     CropBridge(CropBridge&&) noexcept;
     CropBridge& operator=(CropBridge&&) noexcept;
 
-    // 以下接口把 host 注入的 image 输入转发给 backend router；version 保留为 host 兼容参数，
-    // 当前 submit 只以 backend 持有的有效 image 为输入真源，不维护一份镜像版本状态。
-    void SetInputImage(vtkSmartPointer<vtkImageData> image, DataVersion version);
+    // 把 host 注入的 image 输入转发给 backend router；submit 以 backend 的有效 image 为输入真源。
+    void SetInputImage(vtkSmartPointer<vtkImageData> image);
     void ClearInputImage();
-    vtkSmartPointer<vtkImageData> GetInputImage() const;
 
     // 以下一组接口把 polydata 输入转发给 backend router。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);

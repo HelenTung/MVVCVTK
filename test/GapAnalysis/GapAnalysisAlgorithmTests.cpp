@@ -4,12 +4,14 @@
 // 3. 同时测纯算法和 GapAnalysisService 快照，防止 UI/host 改动污染孔隙分析核心边界。
 
 #include "Algorithms/VoidDetector.h"
+#include "Algorithms/VolumeBuffer.h"
 #include "Services/GapAnalysisService.h"
 #include "GapDisplayTests.h"
 
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+#include <vtkWeakPointer.h>
 
 #include <algorithm>
 #include <array>
@@ -18,9 +20,15 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+class GapSnapshotTestService final : public GapAnalysisService {
+public:
+    using GapAnalysisService::SetInputSnapshot;
+};
 
 class GapAlgorithmSuite final {
 public:
@@ -120,6 +128,22 @@ vtkSmartPointer<vtkImageData> BuildTestImage()
     return image;
 }
 
+vtkSmartPointer<vtkImageData> BuildShortImage()
+{
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(TestDims[0], TestDims[1], TestDims[2]);
+    image->SetSpacing(1.0, 1.0, 1.0);
+    image->SetOrigin(0.0, 0.0, 0.0);
+    image->AllocateScalars(VTK_SHORT, 1);
+
+    auto* scalars = static_cast<short*>(image->GetScalarPointer());
+    const auto voxels = BuildTestVoxels();
+    std::transform(voxels.begin(), voxels.end(), scalars,
+        [](float value) { return static_cast<short>(value); });
+    image->Modified();
+    return image;
+}
+
 void SetSolidImage(vtkImageData* image)
 {
     auto* scalars = image ? static_cast<float*>(image->GetScalarPointer()) : nullptr;
@@ -127,8 +151,7 @@ void SetSolidImage(vtkImageData* image)
         return;
     }
 
-    const auto total = static_cast<std::size_t>(image->GetNumberOfPoints());
-    std::fill(scalars, scalars + total, 1.0f);
+    std::fill_n(scalars, image->GetNumberOfPoints(), 1.0f);
     image->Modified();
 }
 
@@ -225,6 +248,71 @@ void StartAlgoCase(int& failureCount)
     }
 }
 
+void StartBufferCase(int& failureCount)
+{
+    // owned 路径复制后必须各自拥有 vector；移动后别名必须重绑，不能保留源对象地址。
+    VolumeBuffer owned;
+    owned.dims = { 2, 1, 1 };
+    owned.SetOwnedVoxels({ 3.0f, 5.0f });
+    VolumeBuffer ownedCopy(owned);
+    SetExpect(ownedCopy.voxelsPtr != owned.voxelsPtr
+        && ownedCopy.GetVoxelValue(1, 0, 0) == 5.0f,
+        "owned VolumeBuffer copy should bind its independent vector.", failureCount);
+
+    VolumeBuffer ownedAssigned;
+    ownedAssigned = owned;
+    SetExpect(ownedAssigned.voxelsPtr != owned.voxelsPtr
+        && ownedAssigned.GetVoxelValue(0, 0, 0) == 3.0f,
+        "owned VolumeBuffer copy assignment should bind its independent vector.", failureCount);
+
+    VolumeBuffer ownedMoved(std::move(ownedCopy));
+    SetExpect(!ownedCopy.GetVoxelReady()
+        && ownedMoved.voxelsPtr == ownedMoved.voxels.data(),
+        "owned VolumeBuffer move should clear the source and rebind moved storage.", failureCount);
+
+    VolumeBuffer ownedMoveAssigned;
+    ownedMoveAssigned = std::move(ownedAssigned);
+    SetExpect(!ownedAssigned.GetVoxelReady()
+        && ownedMoveAssigned.voxelsPtr == ownedMoveAssigned.voxels.data(),
+        "owned VolumeBuffer move assignment should clear the source and rebind moved storage.", failureCount);
+
+    std::weak_ptr<std::vector<float>> weakOwner;
+    {
+        auto sharedVoxels = std::make_shared<std::vector<float>>(
+            std::initializer_list<float>{ 7.0f, 11.0f });
+        weakOwner = sharedVoxels;
+
+        VolumeBuffer shared;
+        shared.dims = { 2, 1, 1 };
+        SetExpect(shared.SetSharedVoxels(sharedVoxels, sharedVoxels->data()),
+            "shared VolumeBuffer should accept an owner and read-only alias.", failureCount);
+        const auto* sharedAddress = sharedVoxels->data();
+        sharedVoxels.reset();
+
+        VolumeBuffer sharedCopy(shared);
+        VolumeBuffer sharedAssigned;
+        sharedAssigned = shared;
+        VolumeBuffer sharedMoved(std::move(shared));
+        VolumeBuffer sharedMoveAssigned;
+        sharedMoveAssigned = std::move(sharedCopy);
+        SetExpect(!weakOwner.expired()
+            && !shared.GetVoxelReady()
+            && !sharedCopy.GetVoxelReady()
+            && sharedAssigned.voxelsPtr == sharedAddress
+            && sharedMoved.voxelsPtr == sharedAddress
+            && sharedMoveAssigned.voxelsPtr == sharedAddress
+            && sharedMoved.GetVoxelValue(1, 0, 0) == 11.0f,
+            "shared VolumeBuffer copies and moves should retain one aliased voxel owner.", failureCount);
+
+        sharedAssigned.SetOwnedVoxels({ 13.0f, 17.0f });
+        SetExpect(sharedAssigned.voxelsPtr == sharedAssigned.voxels.data()
+            && sharedAssigned.voxelsPtr != sharedAddress,
+            "owned voxel replacement should detach the prior shared owner.", failureCount);
+    }
+    SetExpect(weakOwner.expired(),
+        "shared voxel owner should release after the final VolumeBuffer owner exits.", failureCount);
+}
+
 GapAnalysisState GetServiceState(GapAnalysisService& service)
 {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -253,16 +341,17 @@ bool SendDoneEvent(GapAnalysisService& service)
 
 void StartSnapCase(int& failureCount)
 {
-    // service 路径验证异步快照语义：SetInputImage 后后台任务必须读自己的副本，
-    // 否则 UI 线程或 host 后续修改 VTK image 会改变正在运行的分析结果。
+    // 公共入口必须保持隔离语义：同步 DeepCopy 后，源图像污染与释放都不影响 worker。
     auto image = BuildTestImage();
+    vtkWeakPointer<vtkImageData> weakImage;
+    weakImage = image.GetPointer();
     GapAnalysisService service;
 
     SetExpect(service.SetInputImage(image), "gap analysis service should accept the synthetic image.", failureCount);
-
-    // SetInputImage 必须立即复制输入。这里故意篡改原始 VTK 图像，
-    // 如果后台任务仍读外部对象，就会把封闭孔洞误判为不存在。
     SetSolidImage(image);
+    image = nullptr;
+    SetExpect(weakImage == nullptr,
+        "public gap input should not retain the caller's mutable VTK image.", failureCount);
 
     SurfaceParams surfaceParams;
     surfaceParams.isoValue = 0.5f;
@@ -294,7 +383,7 @@ void StartSnapCase(int& failureCount)
     SetExpect(isCallbackOk.load(), "gap analysis completion callback should report success.", failureCount);
 
     const auto regions = service.GetVoidRegions();
-    SetExpect(regions.size() == 1, "gap analysis service should detect one void from the copied snapshot.", failureCount);
+    SetExpect(regions.size() == 1, "gap analysis service should detect one void from the isolated snapshot.", failureCount);
     if (regions.size() == 1) {
         SetRegionExpect(regions.front(), failureCount);
     }
@@ -309,11 +398,68 @@ void StartSnapCase(int& failureCount)
     }
 }
 
+void StartSharedCase(int& failureCount)
+{
+    // 受控宿主入口共享 VTK_FLOAT scalars；调用方释放 smart pointer 后快照 owner 仍覆盖 worker 生命周期。
+    auto image = BuildTestImage();
+    vtkWeakPointer<vtkImageData> weakImage;
+    weakImage = image.GetPointer();
+    GapSnapshotTestService service;
+    SetExpect(service.SetInputSnapshot(image),
+        "gap analysis should accept one controlled read-only snapshot.", failureCount);
+    image = nullptr;
+    SetExpect(weakImage != nullptr,
+        "controlled gap snapshot should retain the aliased VTK image owner.", failureCount);
+
+    SurfaceParams surfaceParams;
+    surfaceParams.isoValue = 0.5f;
+    service.SetSurface(surfaceParams);
+    service.SetVoid(BuildVoidParams());
+    SetExpect(service.StartAsync(nullptr),
+        "gap analysis should start from the controlled shared snapshot.", failureCount);
+    SetExpect(GetServiceState(service) == GapAnalysisState::Succeeded,
+        "gap analysis should finish the controlled shared snapshot.", failureCount);
+    SetExpect(service.GetVoidRegions().size() == 1,
+        "controlled shared snapshot should preserve the synthetic void.", failureCount);
+}
+
+void StartConvertCase(int& failureCount)
+{
+    // 非 float 输入必须在同步入口完成 float 转换；之后调用方改写 VTK scalars 不能污染算法输入。
+    auto image = BuildShortImage();
+    GapAnalysisService service;
+    SetExpect(service.SetInputImage(image),
+        "gap analysis service should accept a short scalar image.", failureCount);
+
+    auto* source = static_cast<short*>(image->GetScalarPointer());
+    std::fill_n(source, image->GetNumberOfPoints(), static_cast<short>(1));
+    image->Modified();
+
+    SurfaceParams surfaceParams;
+    surfaceParams.isoValue = 0.5f;
+    service.SetSurface(surfaceParams);
+    service.SetVoid(BuildVoidParams());
+    SetExpect(service.StartAsync(nullptr),
+        "gap analysis should accept the converted short input.", failureCount);
+    SetExpect(GetServiceState(service) == GapAnalysisState::Succeeded,
+        "gap analysis should finish the converted short input.", failureCount);
+
+    const auto regions = service.GetVoidRegions();
+    SetExpect(regions.size() == 1,
+        "non-float conversion should isolate the worker from later source mutations.", failureCount);
+    if (regions.size() == 1) {
+        SetRegionExpect(regions.front(), failureCount);
+    }
+}
+
     int GetFailCount()
     {
         int failureCount = 0;
         StartAlgoCase(failureCount);
+        StartBufferCase(failureCount);
         StartSnapCase(failureCount);
+        StartSharedCase(failureCount);
+        StartConvertCase(failureCount);
         return failureCount;
     }
 };

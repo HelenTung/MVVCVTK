@@ -15,6 +15,8 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 #include "Host/VtkAppHostSession.h"
 
+namespace {
+
 class AppLaunchConfig final {
 public:
 static std::vector<TFNode> BuildVolumeTF()
@@ -140,6 +142,8 @@ static HostGapConfig BuildGapConfig()
     return config;
 }
 };
+
+}
 
 int main()
 {

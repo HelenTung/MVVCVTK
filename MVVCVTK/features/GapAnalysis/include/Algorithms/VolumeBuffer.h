@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <utility>
 
 class VolumeBuffer {
@@ -17,12 +18,14 @@ public:
 
     VolumeBuffer(const VolumeBuffer& other)
         : voxels(other.voxels),
+          voxelsPtr(nullptr),
           dims(other.dims),
           spacing(other.spacing),
           origin(other.origin),
           minVal(other.minVal),
-          maxVal(other.maxVal) {
-        ResetVoxelPointer();
+          maxVal(other.maxVal),
+          m_voxelOwner(other.m_voxelOwner) {
+        voxelsPtr = m_voxelOwner ? other.voxelsPtr : GetOwnedPointer();
     }
 
     VolumeBuffer& operator=(const VolumeBuffer& other) {
@@ -30,25 +33,24 @@ public:
             return *this;
         }
 
-        voxels = other.voxels;
-        dims = other.dims;
-        spacing = other.spacing;
-        origin = other.origin;
-        minVal = other.minVal;
-        maxVal = other.maxVal;
-        ResetVoxelPointer();
+        VolumeBuffer copy(other);
+        *this = std::move(copy);
         return *this;
     }
 
     VolumeBuffer(VolumeBuffer&& other) noexcept
         : voxels(std::move(other.voxels)),
+          voxelsPtr(other.voxelsPtr),
           dims(other.dims),
           spacing(other.spacing),
           origin(other.origin),
           minVal(other.minVal),
-          maxVal(other.maxVal) {
-        ResetVoxelPointer();
-        other.ResetVoxelPointer();
+          maxVal(other.maxVal),
+          m_voxelOwner(std::move(other.m_voxelOwner)) {
+        if (!m_voxelOwner) {
+            voxelsPtr = GetOwnedPointer();
+        }
+        other.voxelsPtr = nullptr;
     }
 
     VolumeBuffer& operator=(VolumeBuffer&& other) noexcept {
@@ -57,21 +59,39 @@ public:
         }
 
         voxels = std::move(other.voxels);
+        voxelsPtr = other.voxelsPtr;
         dims = other.dims;
         spacing = other.spacing;
         origin = other.origin;
         minVal = other.minVal;
         maxVal = other.maxVal;
-        ResetVoxelPointer();
-        other.ResetVoxelPointer();
+        m_voxelOwner = std::move(other.m_voxelOwner);
+        if (!m_voxelOwner) {
+            voxelsPtr = GetOwnedPointer();
+        }
+        other.voxelsPtr = nullptr;
         return *this;
     }
 
-    // 后台算法只读体素数据，所以快照在进入算法层前一次性拥有数据。
-    // 这样 feature 不需要知道 App/DataManager 生命周期，也不会在 VTK 图像被替换时误读旧指针。
+    // 转换路径独占 float vector；切换所有权模式时必须先释放旧的共享 owner。
     void SetOwnedVoxels(std::vector<float> ownedVoxels) noexcept {
+        m_voxelOwner.reset();
         voxels = std::move(ownedVoxels);
-        ResetVoxelPointer();
+        voxelsPtr = GetOwnedPointer();
+    }
+
+    // 已经是 float 的输入只保存只读别名；类型擦除 owner 负责覆盖整个后台读取期。
+    bool SetSharedVoxels(
+        std::shared_ptr<const void> voxelOwner,
+        const float* sharedVoxels) noexcept {
+        if (!voxelOwner || !sharedVoxels) {
+            return false;
+        }
+
+        std::vector<float>().swap(voxels);
+        m_voxelOwner = std::move(voxelOwner);
+        voxelsPtr = sharedVoxels;
+        return true;
     }
 
     bool GetVoxelReady() const noexcept {
@@ -79,19 +99,19 @@ public:
         return voxelsPtr != nullptr;
     }
 
-    // x-fast 连续体素的唯一数据 owner，offset = x + y*dims[0] + z*dims[0]*dims[1]。
+    // owned 模式的 x-fast 连续体素 owner，offset = x + y*dims[0] + z*dims[0]*dims[1]。
     // 直接改变该 public vector 的 size/capacity 会绕过别名重绑；生产方应通过 SetOwnedVoxels 或赋值运算更新。
     std::vector<float> voxels;
-    // 非拥有只读别名；构造、赋值和 SetOwnedVoxels 后重绑到 voxels.data()，空 vector 时为 nullptr。
+    // 非拥有只读别名；owned 模式指向 voxels，shared 模式由 m_voxelOwner 保证生命周期。
     const float* voxelsPtr = nullptr;
 
-    // voxel 数量 [dimX, dimY, dimZ]；有效快照要求三项为正且 voxels 至少覆盖三者乘积。
+    // voxel 数量 [dimX, dimY, dimZ]；有效快照要求三项为正且 voxelsPtr 至少覆盖三者乘积。
     std::array<int, 3>     dims = { 0, 0, 0 };
     // 相邻 voxel 的轴向 physical 间距 [x, y, z]；Gap 统计按 mm 解释。
     std::array<double, 3>  spacing = { 1.0, 1.0, 1.0 };
     // index [0,0,0] 的输入 physical 原点 [x, y, z]，按 mm 解释；快照不保存 image direction。
     std::array<double, 3>  origin = { 0.0, 0.0, 0.0 };
-    // owned voxels 的输入标量域闭区间；显示请求用它解析 DataRangeRatio ISO。
+    // 输入标量域闭区间；显示请求用它解析 DataRangeRatio ISO。
     float                 minVal = 0.f;
     float                 maxVal = 0.f;
 
@@ -132,7 +152,10 @@ public:
     }
 
 private:
-    void ResetVoxelPointer() noexcept {
-        voxelsPtr = voxels.empty() ? nullptr : voxels.data();
+    const float* GetOwnedPointer() const noexcept {
+        return voxels.empty() ? nullptr : voxels.data();
     }
+
+    // shared 模式的类型擦除生命周期锚点；owned 模式为空并由 voxels 唯一持有数据。
+    std::shared_ptr<const void> m_voxelOwner;
 };

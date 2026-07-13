@@ -40,8 +40,6 @@ public:
     void SendReloadCallback();
 
 private:
-    bool GetAnyLoadRunning() const;
-
     // 与构造出的 packaged_task 共享拥有 DataManager；保证后台 I/O 期间数据入口存活。
     std::shared_ptr<AbstractDataManager> m_dataManager;
     // 与后台任务共享拥有状态真源；任务只发布 load 终态，不直接触碰渲染对象。

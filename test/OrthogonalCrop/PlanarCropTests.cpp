@@ -30,6 +30,11 @@
 #include <utility>
 #include <vector>
 
+class DataManagerTest final : public RawVolumeDataManager {
+public:
+    using BaseDataManager::GetImageSnapshot;
+};
+
 class PlanarCropSuite final {
 public:
 
@@ -792,7 +797,7 @@ void StartSliceView(int& failureCount)
 
 void StartDataExport(int& failureCount)
 {
-    RawVolumeDataManager dataManager;
+    DataManagerTest dataManager;
     auto image = BuildExport();
     const auto identity = GetIdentityData();
     const auto outputRoot = BuildOutputRoot();
@@ -832,12 +837,35 @@ void StartDataExport(int& failureCount)
         "pending image should be isolated in one metadata and version batch.",
         failureCount);
 
-    const auto sharedSnapshot = dataManager.GetImageState();
+    const auto currentOwner = dataManager.GetImageSnapshot();
+    const auto sharedOwner = dataManager.GetImageSnapshot();
     SetExpect(
-        sharedSnapshot.image == currentSnapshot.image
-            && sharedSnapshot.image->GetScalarPointer() == currentSnapshot.image->GetScalarPointer()
-            && sharedSnapshot.version == currentSnapshot.version,
-        "repeated reads of the same version must reuse one isolated image copy.",
+        currentOwner
+            && sharedOwner
+            && currentOwner == sharedOwner
+            && currentOwner->image == sharedOwner->image
+            && currentOwner->image->GetScalarPointer()
+                == sharedOwner->image->GetScalarPointer()
+            && currentOwner->version == currentSnapshot.version,
+        "internal reads of one version must share one immutable snapshot owner.",
+        failureCount);
+
+    const auto sharedSnapshot = dataManager.GetImageState();
+    const auto publicImage = dataManager.GetVtkImage();
+    SetExpect(
+        sharedSnapshot.image != currentSnapshot.image
+            && sharedSnapshot.image->GetScalarPointer() != currentSnapshot.image->GetScalarPointer()
+            && publicImage != sharedSnapshot.image
+            && publicImage->GetScalarPointer() != sharedSnapshot.image->GetScalarPointer()
+            && publicImage != currentOwner->image
+            && publicImage->GetScalarPointer() != currentOwner->image->GetScalarPointer()
+            && sharedSnapshot.dims == currentSnapshot.dims
+            && sharedSnapshot.spacing == currentSnapshot.spacing
+            && sharedSnapshot.origin == currentSnapshot.origin
+            && sharedSnapshot.scalarRange == currentSnapshot.scalarRange
+            && sharedSnapshot.version == currentSnapshot.version
+            && static_cast<float*>(sharedSnapshot.image->GetScalarPointer())[0] == 1.0f,
+        "repeated reads of one version must return independent images with identical batch data.",
         failureCount);
 
     image->SetOrigin(9.0, 8.0, 7.0);
@@ -849,7 +877,26 @@ void StartDataExport(int& failureCount)
         failureCount);
 
     currentSnapshot.image->SetOrigin(6.0, 5.0, 4.0);
+    currentSnapshot.image->SetSpacing(6.0, 5.0, 4.0);
     static_cast<float*>(currentSnapshot.image->GetScalarPointer())[0] = -5678.0f;
+
+    const auto cleanSnapshot = dataManager.GetImageState();
+    const std::array<double, 3> cleanImageSpacing = {
+        cleanSnapshot.image->GetSpacing()[0],
+        cleanSnapshot.image->GetSpacing()[1],
+        cleanSnapshot.image->GetSpacing()[2]
+    };
+    SetExpect(
+        cleanSnapshot.image != currentSnapshot.image
+            && cleanSnapshot.image->GetScalarPointer() != currentSnapshot.image->GetScalarPointer()
+            && cleanSnapshot.origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+            && cleanSnapshot.spacing == std::array<double, 3>{ 1.0, 1.0, 1.0 }
+            && cleanImageSpacing == cleanSnapshot.spacing
+            && static_cast<float*>(cleanSnapshot.image->GetScalarPointer())[0] == 1.0f
+            && cleanSnapshot.scalarRange == currentRange
+            && cleanSnapshot.version == currentSnapshot.version,
+        "mutating one public snapshot must not pollute later reads of the same version.",
+        failureCount);
 
     const std::array<double, 3> updatedSpacing = { 0.75, 1.25, 2.5 };
     SetExpect(
@@ -857,6 +904,7 @@ void StartDataExport(int& failureCount)
         "current spacing update should be accepted by DataManager.",
         failureCount);
     const auto spacingSnapshot = dataManager.GetImageState();
+    const auto spacingOwner = dataManager.GetImageSnapshot();
     const std::array<double, 3> imageSpacing = {
         spacingSnapshot.image->GetSpacing()[0],
         spacingSnapshot.image->GetSpacing()[1],
@@ -872,11 +920,26 @@ void StartDataExport(int& failureCount)
             && spacingSnapshot.image->GetOrigin()[0] == 0.0
             && spacingSnapshot.image->GetOrigin()[1] == 0.0
             && spacingSnapshot.image->GetOrigin()[2] == 0.0
-            && currentSnapshot.image->GetSpacing()[0] == 1.0
-            && currentSnapshot.image->GetSpacing()[1] == 1.0
-            && currentSnapshot.image->GetSpacing()[2] == 1.0
+            && currentSnapshot.image->GetSpacing()[0] == 6.0
+            && currentSnapshot.image->GetSpacing()[1] == 5.0
+            && currentSnapshot.image->GetSpacing()[2] == 4.0
             && spacingSnapshot.version == currentSnapshot.version + 1,
         "spacing update must preserve internal voxels while publishing one isolated version copy.",
+        failureCount);
+    SetExpect(
+        spacingOwner
+            && spacingOwner != currentOwner
+            && spacingOwner->image != currentOwner->image
+            && spacingOwner->image->GetScalarPointer()
+                == currentOwner->image->GetScalarPointer()
+            && spacingOwner->spacing == updatedSpacing
+            && spacingOwner->version == currentOwner->version + 1
+            && currentOwner->spacing == std::array<double, 3>{ 1.0, 1.0, 1.0 }
+            && currentOwner->image->GetSpacing()[0] == 1.0
+            && currentOwner->image->GetSpacing()[1] == 1.0
+            && currentOwner->image->GetSpacing()[2] == 1.0
+            && static_cast<float*>(currentOwner->image->GetScalarPointer())[0] == 1.0f,
+        "a new version must preserve the retired snapshot while sharing read-only voxels.",
         failureCount);
     SetExpect(
         dataManager.SetSpacing(updatedSpacing)
@@ -894,8 +957,8 @@ void StartDataExport(int& failureCount)
         failureCount);
     const auto afterFailure = dataManager.GetImageState();
     SetExpect(
-        afterFailure.image == spacingSnapshot.image
-            && afterFailure.image->GetScalarPointer() == spacingSnapshot.image->GetScalarPointer()
+        afterFailure.image != spacingSnapshot.image
+            && afterFailure.image->GetScalarPointer() != spacingSnapshot.image->GetScalarPointer()
             && afterFailure.dims == spacingSnapshot.dims
             && afterFailure.spacing == spacingSnapshot.spacing
             && afterFailure.origin == spacingSnapshot.origin
@@ -937,6 +1000,39 @@ void StartDataExport(int& failureCount)
     SetExpect(
         GetFileBytes(sliceDir, ".png"),
         "slice image export should create non-empty PNG files.",
+        failureCount);
+
+    auto replacementImage = vtkSmartPointer<vtkImageData>::New();
+    replacementImage->SetDimensions(2, 3, 1);
+    replacementImage->SetSpacing(2.0, 3.0, 4.0);
+    replacementImage->SetOrigin(5.0, 6.0, 7.0);
+    replacementImage->AllocateScalars(VTK_FLOAT, 1);
+    auto* replacementScalars = static_cast<float*>(replacementImage->GetScalarPointer());
+    for (vtkIdType tupleId = 0; tupleId < replacementImage->GetNumberOfPoints(); ++tupleId) {
+        replacementScalars[tupleId] = 77.0f + static_cast<float>(tupleId);
+    }
+    SetExpect(
+        dataManager.SetImageSnapshot(replacementImage)
+            && dataManager.SetCurrentFromPending(),
+        "a second independent image should replace the complete current batch.",
+        failureCount);
+    const auto replacementOwner = dataManager.GetImageSnapshot();
+    SetExpect(
+        replacementOwner
+            && replacementOwner != spacingOwner
+            && replacementOwner->image != spacingOwner->image
+            && replacementOwner->image->GetScalarPointer()
+                != spacingOwner->image->GetScalarPointer()
+            && replacementOwner->dims == std::array<int, 3>{ 2, 3, 1 }
+            && replacementOwner->spacing == std::array<double, 3>{ 2.0, 3.0, 4.0 }
+            && replacementOwner->origin == std::array<double, 3>{ 5.0, 6.0, 7.0 }
+            && replacementOwner->version == spacingOwner->version + 1
+            && static_cast<float*>(replacementOwner->image->GetScalarPointer())[0] == 77.0f
+            && spacingOwner->dims == std::array<int, 3>{ 3, 4, 2 }
+            && spacingOwner->spacing == updatedSpacing
+            && spacingOwner->origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+            && static_cast<float*>(spacingOwner->image->GetScalarPointer())[0] == 1.0f,
+        "replacing voxel storage must preserve the retired snapshot and publish one independent version.",
         failureCount);
 
     std::error_code removeError;

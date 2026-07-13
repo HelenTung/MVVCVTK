@@ -32,8 +32,7 @@
 #include <optional>
 #include <utility>
 
-// DataManager 对外发布的隔离批次；同一 version 共享一份只读消费副本，避免热路径重复复制整卷。
-// 外部修改不会回写内部真源；几何、标量范围与 version 均来自同一次提交。
+// DataManager 原子提交的完整图像批次；几何、标量范围与 version 来自同一次提交。
 struct ImageState {
     vtkSmartPointer<vtkImageData> image;
     std::array<int, 3> dims = { 0, 0, 0 }; // voxel 数量 [x,y,z]
@@ -43,17 +42,29 @@ struct ImageState {
     DataVersion version = 0;
 };
 
+// 受控内部消费链只持有批次 owner，不修改 image；旧 version 随最后一个 owner 释放。
+using ImageSnapshot = std::shared_ptr<const ImageState>;
+
+class VizService;
+class HostFeatureBindings;
+
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
 // ─────────────────────────────────────────────────────────────────────
 class AbstractDataManager {
+protected:
+    friend class VizService;
+    friend class HostFeatureBindings;
+    // 只有受控内部消费链可以取得 current owner；调用方必须把 image 视为只读。
+    virtual ImageSnapshot GetImageSnapshot() const = 0;
+
 public:
     virtual ~AbstractDataManager() = default;
-    // 返回当前 version 的隔离共享 image；仅供读取或连接只读 pipeline，调用方不得写入。
+    // 返回当前 version 的独立 image；调用方可以连接 pipeline，写入也不会回写内部真源。
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual ImageState GetImageState() const = 0;
-    virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
-    virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
+    virtual std::array<double, 2> GetScalarRange() const = 0;
+    virtual std::array<double, 3> GetSpacing() const = 0;
     virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;
     virtual DataVersion GetDataVersion() const = 0;
     virtual bool SetDataLoaded(const std::string& filePath,
@@ -63,15 +74,11 @@ public:
         const float* data,
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) {
-        return false;
-    }
+        const std::array<float, 3>& origin) = 0;
     // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
-    virtual bool SetCurrentFromPending() {
-        return false;
-    }
-    virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) { return false; }
-    virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) { return false; }
+    virtual bool SetCurrentFromPending() = 0;
+    virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) = 0;
+    virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -137,20 +144,18 @@ class InteractiveService
 public:
     ~InteractiveService() override = default;
 
-    virtual void SetSliceScroll(int delta) {}
-    virtual int  GetPlaneAxis(vtkActor* actor) { return -1; }
-    virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) {}
-    virtual std::array<double, 3> GetCursorWorld() { return { 0, 0, 0 }; }
-    virtual void SetInteracting(bool isInteracting) {}
-    virtual vtkProp3D* GetMainProp() { return nullptr; }
-    virtual void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) {}
-    virtual std::array<double, 16> GetModelMatrix() {
-        return { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
-    }
-    virtual int GetNavigationAxis() const { return -1; }
-    virtual WindowLevelParams GetWindowLevel() const { return {}; }
-    virtual void SetElementVisible(uint32_t flagBit, bool isVisible) {}
-    virtual void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) {}
+    virtual void SetSliceScroll(int delta) = 0;
+    virtual int GetPlaneAxis(vtkActor* actor) = 0;
+    virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) = 0;
+    virtual std::array<double, 3> GetCursorWorld() = 0;
+    virtual void SetInteracting(bool isInteracting) = 0;
+    virtual vtkProp3D* GetMainProp() = 0;
+    virtual void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) = 0;
+    virtual std::array<double, 16> GetModelMatrix() = 0;
+    virtual int GetNavigationAxis() const = 0;
+    virtual WindowLevelParams GetWindowLevel() const = 0;
+    virtual void SetElementVisible(uint32_t flagBit, bool isVisible) = 0;
+    virtual void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) = 0;
     virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
 };

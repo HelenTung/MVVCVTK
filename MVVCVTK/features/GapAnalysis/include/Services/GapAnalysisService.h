@@ -13,10 +13,12 @@
 #include <vector>
 
 class OverlayService;
+class HostFeatureBindings;
 
 class GapAnalysisService {
 public:
     GapAnalysisService();
+    // 活动显示会话必须先在绑定宿主线程调用 ExitView；退出后可在任意线程释放最后 owner。
     ~GapAnalysisService();
 
     GapAnalysisService(const GapAnalysisService&) = delete;
@@ -24,10 +26,8 @@ public:
     GapAnalysisService(GapAnalysisService&&) = delete;
     GapAnalysisService& operator=(GapAnalysisService&&) = delete;
 
-    // 输入边界放在插件 API 上，而不是在 feature 内部持有 App/DataManager。
-    // 这样 GapAnalysis 可以随插随拔：宿主只负责在合适时机交付 VTK 图像，后台任务只消费复制后的快照。
+    // 外部可变输入先 DeepCopy，调用返回后修改 metadata/scalars 不会污染分析快照。
     bool SetInputImage(vtkSmartPointer<vtkImageData> image);
-
     void SetSurface(const SurfaceParams& params);
     void SetAdvanced(const AdvancedSurfaceParams& params);
     void SetVoid(const VoidDetectionParams& params);
@@ -51,6 +51,7 @@ public:
 
     // GapAnalysis 显示模式由 feature 持有状态；host 只注入已降级的 overlay 目标和主线程 tick。
     // 本入口清理旧显示后登记新请求并置启动门铃；至少一个有效 target 才接受，worker 由后续 OnDisplayTick 启动。
+    // 首次成功调用绑定当前宿主线程；本组显示会话接口必须继续由该线程调用。
     bool StartView(
         const GapAnalysisSurfaceRequest& surfaceRequest,
         const VoidDetectionParams& voidParams,
@@ -61,8 +62,14 @@ public:
     // 清除显示会话与已挂载 overlay；若 worker 正在执行，仅发布停止请求。
     bool ExitView();
     bool GetViewOn() const;
-    // 宿主主线程 tick：用当前 VTK image 构造不可变输入快照，观察 worker 完成状态，并挂载结果 overlay。
+    // 宿主主线程 tick：非空 image 走公共隔离入口；空 image 复用预先 SetInputSnapshot 的只读输入。
+    // 非绑定线程调用会被拒绝，不读取或修改 VTK/overlay 会话状态。
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+
+protected:
+    friend class HostFeatureBindings;
+    // 仅授权宿主受控只读链；VTK_FLOAT scalars 直接共享，调用方不得再修改 image。
+    bool SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
 
 private:
     class Impl;

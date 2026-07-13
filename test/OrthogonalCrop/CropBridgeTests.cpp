@@ -38,7 +38,7 @@ int CropBridgeSuite::GetFailCount() const
     interactor->SetRenderWindow(renderWindow);
 
     CropBridge bridge;
-    bridge.SetInputImage(image, 1);
+    bridge.SetInputImage(image);
     bridge.SetReferenceRenderer(renderer);
     bridge.SetPrimaryInteractor(interactor);
     expect(bridge.SwitchCropBox(), "Bridge should enter box editing.");

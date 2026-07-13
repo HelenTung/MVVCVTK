@@ -14,7 +14,7 @@ class vtkRenderWindowInteractor;
 // 随后交给 InteractionRouter::Dispatch 分发给各 Handler。
 //
 // 设计约束：
-//   • 纯数据，无虚函数，无动态内存
+//   • 纯数据，无虚函数；keySym 由 std::string 自主管理文本内存
 //   • Handler 通过此结构体获取所有信息，不应再裸访问 iren
 // ─────────────────────────────────────────────────────────────────────
 struct InteractionEvent

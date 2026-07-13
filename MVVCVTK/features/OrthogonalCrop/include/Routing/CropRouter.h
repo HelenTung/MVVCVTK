@@ -32,8 +32,8 @@ public:
     // 绑定 image 输入；router 通过 vtkSmartPointer 保持共享引用，直到替换或自身销毁。
     void SetInputImage(vtkSmartPointer<vtkImageData> image);
 
-    // 返回当前 router 绑定的 image 输入。
-    vtkSmartPointer<vtkImageData> GetInputImage() const;
+    // 只报告 image 输入是否可用，不向 router 外泄漏可变 VTK 对象。
+    bool GetImageReady() const;
 
     // 绑定 polydata 输入；router 通过 vtkSmartPointer 保持共享引用，ClearInputPolyData 显式释放本侧引用。
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
@@ -41,8 +41,8 @@ public:
     // 清空 polydata 输入，避免临时 preview 缓存影响后续 active input 判断。
     void ClearInputPolyData();
 
-    // 返回当前 router 绑定的 polydata 输入。
-    vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
+    // 只报告 polydata 输入是否可用，不向 router 外泄漏可变 VTK 对象。
+    bool GetPolyDataReady() const;
 
     // 设置期望优先使用的数据源；若对应输入不存在，则按当前可用输入回退。
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);

@@ -1,6 +1,8 @@
 #include "AppDataLoadTaskService.h"
 #include <iostream>
+#include <limits>
 #include <utility>
+#include <vector>
 
 AppDataLoadTaskService::AppDataLoadTaskService(
     std::shared_ptr<AbstractDataManager> dataManager,
@@ -17,19 +19,21 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
     std::function<void(bool isSuccess)> onComplete)
 {
     if (!m_sharedState || !m_dataManager) {
-        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        if (onComplete) {
+            m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
         return std::nullopt;
     }
 
-    if (GetAnyLoadRunning()) {
+    if (!m_sharedState->StartLoad(LoadEventKind::File)) {
         std::cerr << "[LoadFileAsync] Loading is already in progress.\n";
-        m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        if (onComplete) {
+            m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
         return std::nullopt;
     }
 
     m_fileLoadCallbackState.SetCallback(std::move(onComplete));
-    // 先写 Loading 状态再返回任务，避免调用方启动线程后 UI 仍短暂看到 Idle。
-    m_sharedState->SetFileLoadStarted();
 
     auto dataManager = m_dataManager;
     auto sharedState = m_sharedState;
@@ -37,27 +41,27 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
     return std::packaged_task<void()>(
         [dataManager, sharedState, path, spacing, origin]() mutable
         {
-            // 后台任务只负责 I/O 和基础数据快照准备；渲染管线重建统一留给主线程。
-            const bool isOk = dataManager->SetDataLoaded(path, spacing, origin);
-
-            if (isOk) {
-                // 文件加载路径直接生成当前 vtkImage；这里可以只发布 DataReady，不碰 renderer / strategy。
-                const auto imageState = dataManager->GetImageState();
-                if (imageState.image) {
+            try {
+                // 后台任务只负责 I/O 和基础数据快照准备；渲染管线重建统一留给主线程。
+                const bool isOk = dataManager->SetDataLoaded(path, spacing, origin);
+                if (isOk) {
+                    // SetDataLoaded 成功即表示 current 批次有效；发布 metadata 不复制整卷 VTK image。
+                    const auto scalarRange = dataManager->GetScalarRange();
                     sharedState->SetFileDataReady(
-                        imageState.scalarRange[0],
-                        imageState.scalarRange[1],
-                        imageState.spacing);
+                        scalarRange[0],
+                        scalarRange[1],
+                        dataManager->GetSpacing());
+                    return;
                 }
-                else {
-                    std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";
-                    sharedState->SetFileLoadFailed();
-                }
-            }
-            else {
                 std::cerr << "[LoadFileAsync] Failed to load: " << path << "\n";
-                sharedState->SetFileLoadFailed();
             }
+            catch (const std::exception& error) {
+                std::cerr << "[LoadFileAsync] Worker failed: " << error.what() << "\n";
+            }
+            catch (...) {
+                std::cerr << "[LoadFileAsync] Worker failed with an unknown exception.\n";
+            }
+            sharedState->SetFileLoadFailed();
         });
 }
 
@@ -68,34 +72,81 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
     const std::array<float, 3>& origin,
     std::function<void(bool isSuccess)> onComplete)
 {
-    if (!m_sharedState || !m_dataManager) {
-        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+    if (!m_sharedState || !m_dataManager || !data) {
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
         return std::nullopt;
     }
 
-    if (GetAnyLoadRunning()) {
-        std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
-        m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
-        return std::nullopt;
-    }
-
-    m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
-    // reload 先进入 pending image 通道；真正替换当前 vtkImage 要等主线程统一消费。
-    m_sharedState->SetReloadLoadStarted();
-
-    auto dataManager = m_dataManager;
-    auto sharedState = m_sharedState;
-
-    return std::packaged_task<void()>(
-        [dataManager, sharedState, data, dims, spacing, origin]() mutable
-        {
-            // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换由主线程消费。
-            const bool isOk = dataManager->SetFromBuffer(data, dims, spacing, origin);
-
-            if (!isOk) {
-                sharedState->SetReloadLoadFailed();
+    std::size_t voxelCount = 1;
+    for (const int dim : dims) {
+        if (dim <= 0
+            || voxelCount > std::numeric_limits<std::size_t>::max()
+                / static_cast<std::size_t>(dim)) {
+            if (onComplete) {
+                m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
             }
-        });
+            return std::nullopt;
+        }
+        voxelCount *= static_cast<std::size_t>(dim);
+    }
+    if (voxelCount > static_cast<std::size_t>(
+        std::numeric_limits<std::ptrdiff_t>::max())) {
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
+    if (!m_sharedState->StartLoad(LoadEventKind::Reload)) {
+        std::cerr << "[ReloadFromBufferAsync] Loading is already in progress.\n";
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
+
+    // admission 成功后才同步接管裸 buffer；函数返回时 worker 不再依赖调用方生命周期。
+    try {
+        auto dataSnapshot = std::make_shared<const std::vector<float>>(
+            data,
+            data + voxelCount);
+        auto dataManager = m_dataManager;
+        auto sharedState = m_sharedState;
+        std::packaged_task<void()> task(
+            [dataManager, sharedState, dataSnapshot, dims, spacing, origin]() mutable
+            {
+                try {
+                    // 在后台线程内只构建待提交镜像；真正的 vtkImage 切换由主线程消费。
+                    if (dataManager->SetFromBuffer(dataSnapshot->data(), dims, spacing, origin)) {
+                        return;
+                    }
+                }
+                catch (const std::exception& error) {
+                    std::cerr << "[ReloadFromBufferAsync] Worker failed: " << error.what() << "\n";
+                }
+                catch (...) {
+                    std::cerr << "[ReloadFromBufferAsync] Worker failed with an unknown exception.\n";
+                }
+                sharedState->SetReloadLoadFailed();
+            });
+        m_reloadLoadCallbackState.SetCallback(std::move(onComplete));
+        return task;
+    }
+    catch (const std::exception&) {
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
+    catch (...) {
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
 }
 
 void AppDataLoadTaskService::SetFileLoadCallbackReady(bool isSuccess)
@@ -126,11 +177,4 @@ void AppDataLoadTaskService::SendFileLoadCallback()
 void AppDataLoadTaskService::SendReloadCallback()
 {
     m_reloadLoadCallbackState.SendCallback();
-}
-
-bool AppDataLoadTaskService::GetAnyLoadRunning() const
-{
-    return m_sharedState
-        && (m_sharedState->GetFileLoadState() == LoadState::Loading
-            || m_sharedState->GetReloadLoadState() == LoadState::Loading);
 }

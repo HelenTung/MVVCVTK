@@ -18,7 +18,7 @@
 
 #include <cstddef>
 
-// 多条裁切链共用的纯几何算法入口；静态类明确表达纯算法职责，不产生对象生命周期。
+// 多条裁切链共用的纯几何算法入口；与正交裁切算法共同保留在本算法文件中。
 class CropGeometryAlgorithm final {
 public:
     CropGeometryAlgorithm() = delete;

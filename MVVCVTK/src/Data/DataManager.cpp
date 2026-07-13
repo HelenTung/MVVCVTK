@@ -57,23 +57,19 @@ public:
         }
         auto nextState = std::make_shared<ImageState>(std::move(state));
         std::shared_ptr<const ImageState> retiredState;
-        std::shared_ptr<const ImageState> retiredPublicState;
         {
             std::lock_guard<std::mutex> lock(m_dataMutex);
             nextState->version = m_current->version + 1;
             retiredState = std::move(m_current);
             m_current = std::move(nextState);
-            retiredPublicState = std::move(m_publicState);
         }
         return true;
     }
 
-    // current ImageState 与 scalar range 共用此锁；GetImageState 是跨字段一致性的读取入口。
+    // current ImageState 与 scalar range 共用此锁；snapshot 是跨字段一致性的读取入口。
     mutable std::mutex m_dataMutex;
-    // current image 从不向外发布；写入只能通过 DataManager 提交新批次。
-    std::shared_ptr<const ImageState> m_current;
-    // 每个 current version 最多发布一份隔离副本；并发首次读取可能并行构造候选，但只保留一份。
-    mutable std::shared_ptr<const ImageState> m_publicState;
+    // current 只向受控内部消费链发布 const owner；写入只能通过 DataManager 提交新批次。
+    ImageSnapshot m_current;
     // 与 current image 同批提交的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
 
     bool SetRasScalars(
@@ -241,7 +237,6 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         nextState->spacing = spacing;
         nextState->version = baseState->version + 1;
         std::shared_ptr<const ImageState> retiredState;
-        std::shared_ptr<const ImageState> retiredPublicState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
             if (m_impl->m_current != baseState) {
@@ -249,7 +244,6 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
             }
             retiredState = std::move(m_impl->m_current);
             m_impl->m_current = std::move(nextState);
-            retiredPublicState = std::move(m_impl->m_publicState);
         }
         return true;
     }
@@ -264,54 +258,53 @@ DataVersion BaseDataManager::GetDataVersion() const
 
 ImageState BaseDataManager::GetImageState() const
 {
-    for (;;) {
-        std::shared_ptr<const ImageState> currentState;
-        {
-            std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-            if (m_impl->m_publicState) {
-                return *m_impl->m_publicState;
-            }
-            currentState = m_impl->m_current;
-        }
-
-        auto publicState = std::make_shared<ImageState>(*currentState);
-        if (publicState->image) {
-            auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-            imageCopy->DeepCopy(publicState->image);
-            publicState->image = std::move(imageCopy);
-        }
-
-        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-        if (m_impl->m_current != currentState) {
-            continue;
-        }
-        if (!m_impl->m_publicState) {
-            m_impl->m_publicState = std::move(publicState);
-        }
-        return *m_impl->m_publicState;
+    const auto currentState = GetImageSnapshot();
+    ImageState publicState = *currentState;
+    if (publicState.image) {
+        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
+        imageCopy->DeepCopy(publicState.image);
+        publicState.image = std::move(imageCopy);
     }
+    return publicState;
 }
 
-bool BaseDataManager::SetCurrentImage(vtkSmartPointer<vtkImageData> image)
+ImageSnapshot BaseDataManager::GetImageSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+    return m_impl->m_current;
+}
+
+bool BaseDataManager::SetFromBuffer(
+    const float*,
+    const std::array<int, 3>&,
+    const std::array<float, 3>&,
+    const std::array<float, 3>&)
+{
+    return false;
+}
+
+bool BaseDataManager::SetCurrentFromPending()
+{
+    return false;
+}
+
+bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image)
 {
     if (!image) {
         return false;
     }
 
-    auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-    imageCopy->DeepCopy(image);
-
     double range[2] = { 0.0, 0.0 };
     double imageSpacing[3] = { 1.0, 1.0, 1.0 };
     double imageOrigin[3] = { 0.0, 0.0, 0.0 };
-    imageCopy->GetScalarRange(range);
-    imageCopy->GetSpacing(imageSpacing);
-    imageCopy->GetOrigin(imageOrigin);
+    image->GetScalarRange(range);
+    image->GetSpacing(imageSpacing);
+    image->GetOrigin(imageOrigin);
 
     int dims[3] = { 0, 0, 0 };
-    imageCopy->GetDimensions(dims);
+    image->GetDimensions(dims);
     return m_impl->SetCurrent({
-        std::move(imageCopy),
+        std::move(image),
         { dims[0], dims[1], dims[2] },
         { imageSpacing[0], imageSpacing[1], imageSpacing[2] },
         { imageOrigin[0], imageOrigin[1], imageOrigin[2] },
@@ -804,7 +797,7 @@ bool TiffVolumeDataManager::SetDataLoaded(
     }
 
     auto image = m_impl->LoadImage(inputPath, spacing, origin);
-    return SetCurrentImage(std::move(image));
+    return SetOwnedImage(std::move(image));
 }
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(

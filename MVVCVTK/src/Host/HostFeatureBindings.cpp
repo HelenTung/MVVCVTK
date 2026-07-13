@@ -194,43 +194,50 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 if (!sharedDataMgr || !sharedState || !image) {
                     return false;
                 }
+                const auto sendViewUpdates = [&renderViewServices]() {
+                    for (const auto& service : renderViewServices) {
+                        if (const auto lockedService = service.lock()) {
+                            lockedService->SendUpdates();
+                        }
+                    }
+                };
 
-                if (sharedState->GetFileLoadState() == LoadState::Loading
-                    || sharedState->GetReloadLoadState() == LoadState::Loading)
-                {
-                    // reload 必须串行，否则裁切 submit 产生的新 image 和后台加载 image 可能抢同一个 shared DataManager。
+                // 原子接纳 reload 后再发布/接管 pending image；失败状态不能发布 DataReady。
+                if (!sharedState->StartLoad(LoadEventKind::Reload)) {
                     std::cerr << "[Host] Orthogonal crop submit failed: reload is already in progress." << std::endl;
                     return false;
                 }
-
-                // 先标记 reload，再在同一调用链发布/接管 pending image；失败状态不能发布 DataReady。
-                sharedState->SetReloadLoadStarted();
                 if (!sharedDataMgr->SetImageSnapshot(std::move(image))
                     || !sharedDataMgr->SetCurrentFromPending()) {
                     sharedState->SetReloadLoadFailed();
+                    sendViewUpdates();
+                    sharedState->ResetLoad(LoadEventKind::Reload);
                     return false;
                 }
 
                 // current image 成为真源后再更新状态和 bridge 输入，并同步调用各 view 消费刷新；
                 // 此 handler 不切换线程，调用方必须处于允许修改 VTK pipeline 的线程。
-                const auto imageState = sharedDataMgr->GetImageState();
+                const auto imageState = sharedDataMgr->GetImageSnapshot();
+                if (!imageState) {
+                    sharedState->SetReloadLoadFailed();
+                    sendViewUpdates();
+                    sharedState->ResetLoad(LoadEventKind::Reload);
+                    return false;
+                }
                 sharedState->SetReloadDataReady(
-                    imageState.scalarRange[0], imageState.scalarRange[1], imageState.spacing);
+                    imageState->scalarRange[0], imageState->scalarRange[1], imageState->spacing);
                 if (const auto lockedBridge = bridge.lock()) {
-                    if (GetImageReady(imageState.image)) {
-                        lockedBridge->SetInputImage(
-                            imageState.image, imageState.version);
+                    if (GetImageReady(imageState->image)) {
+                        lockedBridge->SetInputImage(imageState->image);
                     }
                     else {
                         lockedBridge->ClearInputImage();
                     }
                 }
-                for (const auto& service : renderViewServices) {
-                    if (const auto lockedService = service.lock()) {
-                        lockedService->SendUpdates();
-                    }
-                }
+                sendViewUpdates();
 
+                // 该事务由 Host 接纳，不属于任一 VizService；所有 view 收敛后由 Host 统一释放。
+                sharedState->ResetLoad(LoadEventKind::Reload);
                 if (onComplete) {
                     onComplete(true); // 分发到 CropBridge::OnSubmitReload，恢复 widget/overlay/camera 状态。
                 }
@@ -361,7 +368,15 @@ bool HostFeatureBindings::Impl::StartGapView(
     if (!isStarted) {
         return false;
     }
-    m_core.gapAnalysis->OnDisplayTick(m_core.sharedDataMgr->GetVtkImage());
+    const auto imageState = m_core.sharedDataMgr->GetImageSnapshot();
+    if (!imageState
+        || !GetImageReady(imageState->image)
+        || !m_core.gapAnalysis->SetInputSnapshot(imageState->image)) {
+        m_core.gapAnalysis->ExitView();
+        return false;
+    }
+    // snapshot 已在受控只读入口安装；空 tick 只解析参数并启动 worker，不再复制整卷 float。
+    m_core.gapAnalysis->OnDisplayTick(nullptr);
     return true;
 }
 
@@ -476,15 +491,14 @@ bool HostFeatureBindings::Impl::SendCropInput()
         return false;
     }
 
-    const auto imageState = m_core.sharedDataMgr->GetImageState();
-    if (!GetImageReady(imageState.image)) {
+    const auto imageState = m_core.sharedDataMgr->GetImageSnapshot();
+    if (!imageState || !GetImageReady(imageState->image)) {
         m_core.orthogonalCropBridge->ClearInputImage();
         std::cerr << "[Host] Orthogonal crop init failed: input image missing." << std::endl;
         return false;
     }
 
-    m_core.orthogonalCropBridge->SetInputImage(
-        imageState.image, imageState.version);
+    m_core.orthogonalCropBridge->SetInputImage(imageState->image);
     return true;
 }
 

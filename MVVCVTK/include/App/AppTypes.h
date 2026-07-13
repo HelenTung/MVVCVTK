@@ -107,6 +107,8 @@ enum class UpdateFlags : int {
 	Visibility = 1 << 9,  // 可见性改变      (0x200)
     WindowLevel = 1 << 10,  // 切片窗宽窗位改变   (0x400)
     Spacing = 1 << 11,  // 体数据 spacing 改变 (0x800)
+    FileLoad = 1 << 12,  // load 终态来源：文件加载
+    ReloadLoad = 1 << 13,  // load 终态来源：buffer/reload
     All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background | Spacing | DataReady
 };
 

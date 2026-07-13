@@ -92,6 +92,9 @@
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataExportTaskService.h">
       <Filter>include\App</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataLoadTaskService.h">
+      <Filter>include\App</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppTaskCallbackState.h">
       <Filter>include\App</Filter>
     </ClInclude>
@@ -142,6 +145,16 @@
     <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp">
       <Filter>src</Filter>
     </ClCompile>

@@ -15,12 +15,15 @@ struct ReconBuffer {
 class BaseDataManager : public AbstractDataManager
 {
 protected:
+    friend class VizService;
+    friend class HostFeatureBindings;
     class Impl;
     // 随 BaseDataManager 生命周期独占 current image、range、spacing、version 真源及其事务锁。
     std::unique_ptr<Impl> m_impl;
 
-    // 文件/TIFF 同步加载路径直接提交完整 current 图像状态；空 image 不改变现有真源。
-    bool SetCurrentImage(vtkSmartPointer<vtkImageData> image);
+    // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
+    bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
+    ImageSnapshot GetImageSnapshot() const override;
 
 public:
     BaseDataManager();
@@ -34,6 +37,14 @@ public:
     bool SetSpacing(const std::array<double, 3>& spacing) override;
     DataVersion GetDataVersion() const override;
     ImageState GetImageState() const override;
+
+    // 基础/TIFF 数据源不支持 buffer pending 事务；RawVolumeDataManager 显式覆盖这两个入口。
+    bool SetFromBuffer(
+        const float* data,
+        const std::array<int, 3>& dims,
+        const std::array<float, 3>& spacing,
+        const std::array<float, 3>& origin) override;
+    bool SetCurrentFromPending() override;
 
     bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
     bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;

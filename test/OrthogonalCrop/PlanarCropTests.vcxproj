@@ -69,11 +69,11 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\include;$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\App\Tasks;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Geometry;$(ProjectDir)..\..\MVVCVTK\include\Platform;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\include;$(ProjectDir)..\..\MVVCVTK\features\OrthogonalCrop\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\App\Services;$(ProjectDir)..\..\MVVCVTK\include\App\Tasks;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Geometry;$(ProjectDir)..\..\MVVCVTK\include\Platform;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>
-    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingImage-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkInteractionWidgets-9.4.lib</VtkLibraries>
+    <VtkLibraries>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOImage-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkRenderingAnnotation-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingFreeType-9.4.lib;vtkRenderingImage-9.4.lib;vtkRenderingLOD-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;vtkInteractionStyle-9.4.lib;vtkInteractionWidgets-9.4.lib</VtkLibraries>
     <IntDir>$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -157,6 +157,7 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataExportTaskService.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataLoadTaskService.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppTaskCallbackState.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h" />
@@ -177,7 +178,15 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="AppTaskServiceTests.cpp" />
     <ClCompile Include="CropPreviewPlugTests.cpp" />

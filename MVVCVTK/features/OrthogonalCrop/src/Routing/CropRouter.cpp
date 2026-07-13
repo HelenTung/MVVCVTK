@@ -357,9 +357,9 @@ void CropRouter::SetInputImage(vtkSmartPointer<vtkImageData> image)
     m_impl->SetInputImage(std::move(image));
 }
 
-vtkSmartPointer<vtkImageData> CropRouter::GetInputImage() const
+bool CropRouter::GetImageReady() const
 {
-    return m_impl->GetInputImage();
+    return m_impl->GetInputImage() != nullptr;
 }
 
 void CropRouter::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
@@ -372,9 +372,9 @@ void CropRouter::ClearInputPolyData()
     m_impl->ClearInputPolyData();
 }
 
-vtkSmartPointer<vtkPolyData> CropRouter::GetInputPolyData() const
+bool CropRouter::GetPolyDataReady() const
 {
-    return m_impl->GetInputPolyData();
+    return m_impl->GetInputPolyData() != nullptr;
 }
 
 void CropRouter::SetPreferredDataSource(OrthogonalCropDataSource dataSource)

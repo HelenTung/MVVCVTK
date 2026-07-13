@@ -41,6 +41,28 @@ public:
         return m_mapper;
     }
 
+    void SetSliceScroll(int) override
+    {
+    }
+
+    int GetPlaneAxis(vtkActor*) override
+    {
+        return -1;
+    }
+
+    void SetCursorWorldPosition(double[3], int) override
+    {
+    }
+
+    std::array<double, 3> GetCursorWorld() override
+    {
+        return {};
+    }
+
+    void SetInteracting(bool) override
+    {
+    }
+
     vtkProp3D* GetMainProp() override
     {
         return m_actor;
@@ -51,9 +73,26 @@ public:
         return CropGeometryAlgorithm::GetIdentityMatrix();
     }
 
+    void SetModelMatrix(vtkMatrix4x4*) override
+    {
+    }
+
     int GetNavigationAxis() const override
     {
         return -1;
+    }
+
+    WindowLevelParams GetWindowLevel() const override
+    {
+        return {};
+    }
+
+    void SetElementVisible(uint32_t, bool) override
+    {
+    }
+
+    void SetWindowLevelDrag(int, int, int, int, double, double) override
+    {
     }
 
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override

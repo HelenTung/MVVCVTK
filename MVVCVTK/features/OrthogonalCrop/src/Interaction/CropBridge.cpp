@@ -39,9 +39,8 @@ public:
     Impl();
     ~Impl();
 
-    void SetInputImage(vtkSmartPointer<vtkImageData> image, DataVersion version);
+    void SetInputImage(vtkSmartPointer<vtkImageData> image);
     void ClearInputImage();
-    vtkSmartPointer<vtkImageData> GetInputImage() const;
     void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
     void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
     void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
@@ -176,11 +175,8 @@ CropBridge::Impl::~Impl()
 // 输入由 bridge 透传给 backend router；
 // bridge 自身只管理交互状态，不拥有 image/polydata 后端选择逻辑。
 void CropBridge::Impl::SetInputImage(
-    vtkSmartPointer<vtkImageData> image,
-    DataVersion version)
+    vtkSmartPointer<vtkImageData> image)
 {
-    // version 是 host 的兼容边界；当前 bridge 不据此选择或拒绝输入，避免形成只写不读的镜像状态。
-    (void)version;
     if (!image || !image->GetScalarPointer()) {
         ClearInputImage();
         return;
@@ -201,11 +197,6 @@ void CropBridge::Impl::ClearInputImage()
     m_backend.SetInputImage(vtkSmartPointer<vtkImageData>());
 }
 
-vtkSmartPointer<vtkImageData> CropBridge::Impl::GetInputImage() const
-{
-    return m_backend.GetInputImage();
-}
-
 void CropBridge::Impl::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
     m_boundInputPolyData = std::move(polyData);
@@ -222,7 +213,7 @@ bool CropBridge::Impl::GetInputReady()
     // bridge 只保证“当前至少有一个可用输入”。
     // 它不在这里做任何坐标折叠；缺 image 输入时不再反向读取 DataManager。
     // PolyData 可能是上一轮等值面 preview 临时写入 router 的输入，不能因此跳过 image 恢复。
-    if (GetInputImage() || m_backend.GetInputPolyData()) {
+    if (m_backend.GetImageReady() || m_backend.GetPolyDataReady()) {
         return true;
     }
 
@@ -822,7 +813,7 @@ bool CropBridge::Impl::SendPreview()
 
     OrthogonalCropResult volumeResult;
     bool hasVolumeResult = false;
-    if (GetInputImage() && hasMainTarget) {
+    if (m_backend.GetImageReady() && hasMainTarget) {
         volumeResult = m_backend.GetResult(volumeRequest);
         if (volumeResult.failureReason == CropFailure::None
             && volumeResult.isSucceeded) {
@@ -1071,7 +1062,7 @@ bool CropBridge::Impl::GetSubmitReady() const
         return false;
     }
 
-    if (!GetInputImage()) {
+    if (!m_backend.GetImageReady()) {
         std::cerr << "[OrthogonalCrop] Submit failed: image crop input is missing." << std::endl;
         return false;
     }
@@ -1183,20 +1174,14 @@ CropBridge::CropBridge(CropBridge&&) noexcept = default;
 CropBridge& CropBridge::operator=(CropBridge&&) noexcept = default;
 
 void CropBridge::SetInputImage(
-    vtkSmartPointer<vtkImageData> image,
-    DataVersion version)
+    vtkSmartPointer<vtkImageData> image)
 {
-    m_impl->SetInputImage(std::move(image), version);
+    m_impl->SetInputImage(std::move(image));
 }
 
 void CropBridge::ClearInputImage()
 {
     m_impl->ClearInputImage();
-}
-
-vtkSmartPointer<vtkImageData> CropBridge::GetInputImage() const
-{
-    return m_impl->GetInputImage();
 }
 
 void CropBridge::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)

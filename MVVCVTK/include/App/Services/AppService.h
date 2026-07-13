@@ -137,9 +137,9 @@ public:
     //   1. SetCurrentFromPending -> SetReloadDataReady
     //   2. ResetSaveCallback -> SendSaveCallback
     //   3. 缓存清理请求 -> ClearStrategyCache
-    //   4. LoadFailed/DataReady -> ClearLoadFail/BuildPipeline
-    //   5. 同步请求     -> SetStrategyState
-    //   6. load callback       -> Send*LoadCallback
+    //   4. 完整 load 终态队列 -> ClearLoadFail/BuildPipeline
+    //   5. 非 load 结构请求与策略同步 -> BuildPipeline/SetStrategyState
+    //   6. owner 释放 admission -> Send*LoadCallback；Host-owned 事务由 Host 统一释放
     // ================================================================
     void SendUpdates() override;
     bool GetDirty() const override;
