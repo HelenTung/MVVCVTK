@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-class PlanarCropAlgorithmImpl final {
+class PlanarCropAlgorithm::Impl final {
 public:
     struct VoxelStep {
         // 平面中心经 image physical-to-continuous-index 变换后的 [i, j, k] 坐标。
@@ -136,7 +136,7 @@ public:
         std::size_t availableRamBytes);
 };
 
-OrthogonalCropResult PlanarCropAlgorithmImpl::GetResolved(const OrthogonalCropRequest& request)
+OrthogonalCropResult PlanarCropAlgorithm::Impl::GetResolved(const OrthogonalCropRequest& request)
 {
     OrthogonalCropResult result;
     result.resolvedDataSource = request.dataSource;
@@ -146,7 +146,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetResolved(const OrthogonalCropRe
     return result;
 }
 
-OrthogonalCropResult PlanarCropAlgorithmImpl::GetFailure(
+OrthogonalCropResult PlanarCropAlgorithm::Impl::GetFailure(
     const OrthogonalCropRequest& request,
     CropFailure failureReason,
     const std::string& message,
@@ -159,7 +159,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetFailure(
     return result;
 }
 
-CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetImageModelBounds(vtkImageData* image)
+CropBoundsDouble6Array PlanarCropAlgorithm::Impl::GetImageModelBounds(vtkImageData* image)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!image) {
@@ -175,7 +175,7 @@ CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetImageModelBounds(vtkImageData
     };
 }
 
-CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetPolyBounds(vtkPolyData* polyData)
+CropBoundsDouble6Array PlanarCropAlgorithm::Impl::GetPolyBounds(vtkPolyData* polyData)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     if (!polyData) {
@@ -191,14 +191,14 @@ CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetPolyBounds(vtkPolyData* polyD
     };
 }
 
-bool PlanarCropAlgorithmImpl::GetBoundsValid(const CropBoundsDouble6Array& bounds)
+bool PlanarCropAlgorithm::Impl::GetBoundsValid(const CropBoundsDouble6Array& bounds)
 {
     return bounds[0] < bounds[1]
         && bounds[2] < bounds[3]
         && bounds[4] < bounds[5];
 }
 
-std::size_t PlanarCropAlgorithmImpl::GetVoxelBytes(vtkImageData* image)
+std::size_t PlanarCropAlgorithm::Impl::GetVoxelBytes(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -208,7 +208,7 @@ std::size_t PlanarCropAlgorithmImpl::GetVoxelBytes(vtkImageData* image)
         * static_cast<std::size_t>(image->GetNumberOfScalarComponents());
 }
 
-std::size_t PlanarCropAlgorithmImpl::GetImageVoxelCount(vtkImageData* image)
+std::size_t PlanarCropAlgorithm::Impl::GetImageVoxelCount(vtkImageData* image)
 {
     if (!image) {
         return 0;
@@ -221,7 +221,7 @@ std::size_t PlanarCropAlgorithmImpl::GetImageVoxelCount(vtkImageData* image)
         * static_cast<std::size_t>(std::max(dims[2], 0));
 }
 
-bool PlanarCropAlgorithmImpl::GetNormalizedPlane(
+bool PlanarCropAlgorithm::Impl::GetNormalizedPlane(
     const OrthogonalCropRequest& request,
     CropVectorDouble3Array& planeNormalInInputModel,
     CropVectorDouble3Array& planeCenterInInputModel,
@@ -247,7 +247,7 @@ bool PlanarCropAlgorithmImpl::GetNormalizedPlane(
     return true;
 }
 
-bool PlanarCropAlgorithmImpl::GetPlaneData(
+bool PlanarCropAlgorithm::Impl::GetPlaneData(
     const OrthogonalCropRequest& request,
     const CropBoundsDouble6Array& inputModelBounds,
     CropDataModel& cropData,
@@ -278,7 +278,7 @@ bool PlanarCropAlgorithmImpl::GetPlaneData(
     return true;
 }
 
-bool PlanarCropAlgorithmImpl::GetPointIsOnNormalSide(
+bool PlanarCropAlgorithm::Impl::GetPointIsOnNormalSide(
     const double inputModelPoint[3],
     const CropVectorDouble3Array& planeCenterInInputModel,
     const CropVectorDouble3Array& planeNormalInInputModel)
@@ -292,7 +292,7 @@ bool PlanarCropAlgorithmImpl::GetPointIsOnNormalSide(
     return vtkMath::Dot(offset, planeNormalInInputModel.data()) > 0.0;
 }
 
-PlanarCropAlgorithmImpl::VoxelStep PlanarCropAlgorithmImpl::GetSideStep(
+PlanarCropAlgorithm::Impl::VoxelStep PlanarCropAlgorithm::Impl::GetSideStep(
     vtkImageData* image,
     const CropDataModel& cropData,
     const int dims[3])
@@ -327,7 +327,7 @@ PlanarCropAlgorithmImpl::VoxelStep PlanarCropAlgorithmImpl::GetSideStep(
     return sideStep;
 }
 
-double PlanarCropAlgorithmImpl::GetSideAtIndex(
+double PlanarCropAlgorithm::Impl::GetSideAtIndex(
     const VoxelStep& sideStep,
     int i,
     int j,
@@ -338,7 +338,7 @@ double PlanarCropAlgorithmImpl::GetSideAtIndex(
         + (static_cast<double>(k) - sideStep.planeIndex[2]) * sideStep.kStep;
 }
 
-bool PlanarCropAlgorithmImpl::GetVoxelOnSide(
+bool PlanarCropAlgorithm::Impl::GetVoxelOnSide(
     vtkImageData* image,
     const VoxelStep& sideStep,
     const CropDataModel& cropData,
@@ -357,7 +357,7 @@ bool PlanarCropAlgorithmImpl::GetVoxelOnSide(
         cropData.planeNormalInInputModel);
 }
 
-PlanarCropAlgorithmImpl::RowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
+PlanarCropAlgorithm::Impl::RowSide PlanarCropAlgorithm::Impl::GetPlanarRowSide(
     double rowStartSide,
     double rowEndSide,
     double boundaryEpsilon)
@@ -373,7 +373,7 @@ PlanarCropAlgorithmImpl::RowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
     return RowSide::Mixed;
 }
 
-std::vector<unsigned char> PlanarCropAlgorithmImpl::GetBgBytes(
+std::vector<unsigned char> PlanarCropAlgorithm::Impl::GetBgBytes(
     vtkDataArray* sourceScalars,
     vtkDataArray* submitScalars,
     unsigned char* submitBytes,
@@ -396,7 +396,7 @@ std::vector<unsigned char> PlanarCropAlgorithmImpl::GetBgBytes(
     return backgroundBytes;
 }
 
-void PlanarCropAlgorithmImpl::SetRowBg(
+void PlanarCropAlgorithm::Impl::SetRowBg(
     unsigned char* submitRowPtr,
     const std::vector<unsigned char>& backgroundVoxelBytes,
     int voxelCount)
@@ -414,7 +414,7 @@ void PlanarCropAlgorithmImpl::SetRowBg(
     }
 }
 
-void PlanarCropAlgorithmImpl::SetRowBytes(
+void PlanarCropAlgorithm::Impl::SetRowBytes(
     unsigned char* maskRowPtr,
     unsigned char* submitRowPtr,
     const unsigned char* sourceRowPtr,
@@ -437,7 +437,7 @@ void PlanarCropAlgorithmImpl::SetRowBytes(
         voxelCount);
 }
 
-void PlanarCropAlgorithmImpl::SetVoxelBytes(
+void PlanarCropAlgorithm::Impl::SetVoxelBytes(
     unsigned char* maskPtr,
     unsigned char* submitPtr,
     const unsigned char* sourcePtr,
@@ -457,7 +457,7 @@ void PlanarCropAlgorithmImpl::SetVoxelBytes(
     }
 }
 
-PlanarCropAlgorithmImpl::SubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
+PlanarCropAlgorithm::Impl::SubmitImages PlanarCropAlgorithm::Impl::GetSubmitImages(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
@@ -597,11 +597,11 @@ PlanarCropAlgorithmImpl::SubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
     return images;
 }
 
-OrthogonalCropResult PlanarCropAlgorithmImpl::GetPreviewResult(
+OrthogonalCropResult PlanarCropAlgorithm::Impl::GetPreviewResult(
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request)
 {
-    auto result = PlanarCropAlgorithmImpl::GetResolved(request);
+    auto result = PlanarCropAlgorithm::Impl::GetResolved(request);
 
     // 平面 preview 的真实语义是无限半空间：dot(point - center, normal) 决定保留/移除侧。
     // 之前生成有限矩形 outline 只是显示参照，会误导用户以为裁切只发生在框内，因此这里不再返回 outline。
@@ -610,7 +610,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetPreviewResult(
     return result;
 }
 
-OrthogonalCropResult PlanarCropAlgorithmImpl::GetSubmitResult(
+OrthogonalCropResult PlanarCropAlgorithm::Impl::GetSubmitResult(
     vtkImageData* image,
     const CropDataModel& cropData,
     const OrthogonalCropRequest& request,
@@ -620,7 +620,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetSubmitResult(
     const std::size_t estimatedRamUsageBytes =
         voxelCount * (GetVoxelBytes(image) + sizeof(unsigned char));
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::LowRam,
             "Estimated planar image submit memory usage exceeds currently available RAM.",
@@ -632,7 +632,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetSubmitResult(
         cropData,
         request.removalMode);
     if (!submitImages.submitImage) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::ImageFailed,
             "Failed to build planar image submit image.",
@@ -640,14 +640,14 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetSubmitResult(
     }
 
     if (!submitImages.maskImage) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::MaskFailed,
             "Failed to build planar image submit mask.",
             cropData);
     }
 
-    auto result = PlanarCropAlgorithmImpl::GetResolved(request);
+    auto result = PlanarCropAlgorithm::Impl::GetResolved(request);
 
     result.cropDataModel = cropData;
     result.submitImage = submitImages.submitImage;
@@ -670,34 +670,34 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
         && request.operation == OrthogonalCropOperation::Submit
         && request.dataSource == OrthogonalCropDataSource::ImageData;
     if (!isPreviewRoute && !isSubmitRoute) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::NoBackend,
             "Image algorithm received an unsupported planar crop route.");
     }
 
     if (!image) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::NoImage,
             "Input image is null.");
     }
 
-    const auto inputModelBounds = PlanarCropAlgorithmImpl::GetImageModelBounds(image);
+    const auto inputModelBounds = PlanarCropAlgorithm::Impl::GetImageModelBounds(image);
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!PlanarCropAlgorithmImpl::GetPlaneData(
+    if (!PlanarCropAlgorithm::Impl::GetPlaneData(
             request,
             inputModelBounds,
             cropData,
             failureReason,
             message)) {
-        return PlanarCropAlgorithmImpl::GetFailure(request, failureReason, message);
+        return PlanarCropAlgorithm::Impl::GetFailure(request, failureReason, message);
     }
 
     if (isPreviewRoute) {
-        return PlanarCropAlgorithmImpl::GetPreviewResult(
+        return PlanarCropAlgorithm::Impl::GetPreviewResult(
             cropData,
             request);
     }
@@ -705,7 +705,7 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     const std::size_t availableRamBytes = request.availableRamBytes != 0
         ? request.availableRamBytes
         : fallbackAvailableRamBytes;
-    return PlanarCropAlgorithmImpl::GetSubmitResult(
+    return PlanarCropAlgorithm::Impl::GetSubmitResult(
         image,
         cropData,
         request,
@@ -721,33 +721,33 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
         && request.operation == OrthogonalCropOperation::Preview
         && request.dataSource == OrthogonalCropDataSource::PolyData;
     if (!isPreviewRoute) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::NoBackend,
             "PolyData algorithm received an unsupported planar crop route.");
     }
 
     if (!polyData) {
-        return PlanarCropAlgorithmImpl::GetFailure(
+        return PlanarCropAlgorithm::Impl::GetFailure(
             request,
             CropFailure::NoPolyData,
             "Input polydata is null.");
     }
 
-    const auto inputModelBounds = PlanarCropAlgorithmImpl::GetPolyBounds(polyData);
+    const auto inputModelBounds = PlanarCropAlgorithm::Impl::GetPolyBounds(polyData);
     CropDataModel cropData;
     CropFailure failureReason = CropFailure::None;
     std::string message;
-    if (!PlanarCropAlgorithmImpl::GetPlaneData(
+    if (!PlanarCropAlgorithm::Impl::GetPlaneData(
             request,
             inputModelBounds,
             cropData,
             failureReason,
             message)) {
-        return PlanarCropAlgorithmImpl::GetFailure(request, failureReason, message);
+        return PlanarCropAlgorithm::Impl::GetFailure(request, failureReason, message);
     }
 
-    return PlanarCropAlgorithmImpl::GetPreviewResult(
+    return PlanarCropAlgorithm::Impl::GetPreviewResult(
         cropData,
         request);
 }

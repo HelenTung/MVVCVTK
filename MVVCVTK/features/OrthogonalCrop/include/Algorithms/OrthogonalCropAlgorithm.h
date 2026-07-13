@@ -47,4 +47,7 @@ public:
     static OrthogonalCropResult GetResult(
         vtkPolyData* polyData,
         const OrthogonalCropRequest& request);
+
+private:
+    class Impl;
 };
