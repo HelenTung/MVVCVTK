@@ -24,7 +24,7 @@
 #include <sstream>
 #include <vector>
 
-CropMatrixDouble16Array CropGeometry::GetIdentityMatrix()
+CropMatrixDouble16Array CropGeometryAlgorithm::GetIdentityMatrix()
 {
     return {
         1.0, 0.0, 0.0, 0.0,
@@ -34,12 +34,12 @@ CropMatrixDouble16Array CropGeometry::GetIdentityMatrix()
     };
 }
 
-CropBoundsDouble6Array CropGeometry::GetCanonicalBounds()
+CropBoundsDouble6Array CropGeometryAlgorithm::GetCanonicalBounds()
 {
     return { -1.0, 1.0, -1.0, 1.0, -1.0, 1.0 };
 }
 
-CropMatrixDouble16Array CropGeometry::GetBoxMatrix(
+CropMatrixDouble16Array CropGeometryAlgorithm::GetBoxMatrix(
     const CropBoundsDouble6Array& inputModelBounds)
 {
     const double centerX = (inputModelBounds[0] + inputModelBounds[1]) * 0.5;
@@ -609,7 +609,7 @@ vtkSmartPointer<vtkPolyData> OrthoCropAlgoImpl::GetOutlineData(const CropDataMod
 {
     // box 3D outline preview 的几何真源同样是标准盒 [-1,1]^3 + boxToInputModelMatrix。
     auto cube = vtkSmartPointer<vtkCubeSource>::New();
-    const auto canonicalBounds = CropGeometry::GetCanonicalBounds();
+    const auto canonicalBounds = CropGeometryAlgorithm::GetCanonicalBounds();
     cube->SetBounds(
         canonicalBounds[0], canonicalBounds[1],
         canonicalBounds[2], canonicalBounds[3],
@@ -831,7 +831,7 @@ OrthogonalCropResult OrthoCropAlgoImpl::GetSubmitResult(
             submitBounds[2], submitBounds[3],
             submitBounds[4], submitBounds[5]
         };
-        submitCropData.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(submitInputModelBounds);
+        submitCropData.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(submitInputModelBounds);
         submitCropData.inputModelBounds = submitInputModelBounds;
     }
 

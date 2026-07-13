@@ -1,6 +1,7 @@
 #include "Preview/CropPreviewPlug.h"
 #include "Render/Strategies/CropOverlay.h"
 #include "PlanarTestSuites.h"
+#include "Algorithms/OrthogonalCropAlgorithm.h"
 
 #include <vtkActor.h>
 #include <vtkAutoInit.h>
@@ -47,7 +48,7 @@ public:
 
     std::array<double, 16> GetModelMatrix() override
     {
-        return CropGeometry::GetIdentityMatrix();
+        return CropGeometryAlgorithm::GetIdentityMatrix();
     }
 
     int GetNavigationAxis() const override
@@ -131,8 +132,9 @@ OrthogonalCropResult GetPreviewResult(CropShape geometryType)
     request.removalMode = CropRemovalMode::KeepInside;
 
     CropDataModel cropData;
-    cropData.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(CropGeometry::GetCanonicalBounds());
-    cropData.inputModelBounds = CropGeometry::GetCanonicalBounds();
+    cropData.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(
+        CropGeometryAlgorithm::GetCanonicalBounds());
+    cropData.inputModelBounds = CropGeometryAlgorithm::GetCanonicalBounds();
     cropData.planeCenterInInputModel = { 0.0, 0.0, 0.0 };
     cropData.planeNormalInInputModel = { 0.0, 0.0, 1.0 };
 

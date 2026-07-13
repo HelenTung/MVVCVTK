@@ -19,6 +19,11 @@ public:
         return nullptr;
     }
 
+    ImageState GetImageState() const override
+    {
+        return {};
+    }
+
     DataVersion GetDataVersion() const override
     {
         return 0;

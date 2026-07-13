@@ -380,7 +380,7 @@ void StartResultView(int& failureCount)
         CropShape::Box,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::VolumeData);
-    boxPreviewRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
+    boxPreviewRequest.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(boxInputBounds);
     const auto boxPreviewResult = OrthogonalCropAlgorithm::GetResult(image, boxPreviewRequest);
     SetExpect(boxPreviewResult.isSucceeded, "valid box preview route should succeed.", failureCount);
     resultExpect(boxPreviewResult, boxPreviewRequest, CropFailure::None, "valid box preview");
@@ -389,7 +389,7 @@ void StartResultView(int& failureCount)
         CropShape::Box,
         OrthogonalCropOperation::Submit,
         OrthogonalCropDataSource::ImageData);
-    boxSubmitRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
+    boxSubmitRequest.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(boxInputBounds);
     boxSubmitRequest.removalMode = CropRemovalMode::RemoveInside;
     const auto boxSubmitResult = OrthogonalCropAlgorithm::GetResult(image, boxSubmitRequest);
     SetExpect(boxSubmitResult.isSucceeded, "valid box submit route should succeed.", failureCount);
@@ -401,7 +401,7 @@ void StartResultView(int& failureCount)
         CropShape::Box,
         OrthogonalCropOperation::Preview,
         OrthogonalCropDataSource::PolyData);
-    boxPolyRequest.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(boxInputBounds);
+    boxPolyRequest.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(boxInputBounds);
     const auto boxPolyResult = OrthogonalCropAlgorithm::GetResult(
         boxPreviewResult.outlinePolyData,
         boxPolyRequest);
@@ -801,6 +801,7 @@ void StartDataExport(int& failureCount)
     SetExpect(!createError, "data export test should create its temporary output directory.", failureCount);
 
     const auto initialVersion = dataManager.GetDataVersion();
+    auto* const submittedImage = image.GetPointer();
     SetExpect(
         dataManager.SetImageSnapshot(image),
         "data export setup should accept a synthetic vtkImageData snapshot.",
@@ -821,13 +822,34 @@ void StartDataExport(int& failureCount)
     const auto currentSnapshot = dataManager.GetImageState();
     const auto currentRange = dataManager.GetScalarRange();
     SetExpect(
-        currentSnapshot.image == image
+        image.GetPointer() == submittedImage
+            && currentSnapshot.image != image
+            && currentSnapshot.image->GetScalarPointer() != image->GetScalarPointer()
             && currentSnapshot.dims == std::array<int, 3>{ 3, 4, 2 }
             && currentSnapshot.spacing == dataManager.GetSpacing()
             && currentSnapshot.origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
             && currentSnapshot.version == dataManager.GetDataVersion(),
-        "image/dims/spacing/origin/version should be returned as one current snapshot.",
+        "pending image should be isolated in one metadata and version batch.",
         failureCount);
+
+    const auto sharedSnapshot = dataManager.GetImageState();
+    SetExpect(
+        sharedSnapshot.image == currentSnapshot.image
+            && sharedSnapshot.image->GetScalarPointer() == currentSnapshot.image->GetScalarPointer()
+            && sharedSnapshot.version == currentSnapshot.version,
+        "repeated reads of the same version must reuse one isolated image copy.",
+        failureCount);
+
+    image->SetOrigin(9.0, 8.0, 7.0);
+    static_cast<float*>(image->GetScalarPointer())[0] = -1234.0f;
+    SetExpect(
+        currentSnapshot.origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+            && static_cast<float*>(currentSnapshot.image->GetScalarPointer())[0] == 1.0f,
+        "retained input aliases must not modify the DataManager batch.",
+        failureCount);
+
+    currentSnapshot.image->SetOrigin(6.0, 5.0, 4.0);
+    static_cast<float*>(currentSnapshot.image->GetScalarPointer())[0] = -5678.0f;
 
     const std::array<double, 3> updatedSpacing = { 0.75, 1.25, 2.5 };
     SetExpect(
@@ -843,8 +865,18 @@ void StartDataExport(int& failureCount)
     SetExpect(
         spacingSnapshot.spacing == updatedSpacing
             && imageSpacing == updatedSpacing
+            && spacingSnapshot.image != currentSnapshot.image
+            && spacingSnapshot.image->GetScalarPointer() != currentSnapshot.image->GetScalarPointer()
+            && static_cast<float*>(spacingSnapshot.image->GetScalarPointer())[0] == 1.0f
+            && spacingSnapshot.origin == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+            && spacingSnapshot.image->GetOrigin()[0] == 0.0
+            && spacingSnapshot.image->GetOrigin()[1] == 0.0
+            && spacingSnapshot.image->GetOrigin()[2] == 0.0
+            && currentSnapshot.image->GetSpacing()[0] == 1.0
+            && currentSnapshot.image->GetSpacing()[1] == 1.0
+            && currentSnapshot.image->GetSpacing()[2] == 1.0
             && spacingSnapshot.version == currentSnapshot.version + 1,
-        "spacing update must atomically keep vtkImageData, ImageState, and version aligned.",
+        "spacing update must preserve internal voxels while publishing one isolated version copy.",
         failureCount);
     SetExpect(
         dataManager.SetSpacing(updatedSpacing)
@@ -863,6 +895,7 @@ void StartDataExport(int& failureCount)
     const auto afterFailure = dataManager.GetImageState();
     SetExpect(
         afterFailure.image == spacingSnapshot.image
+            && afterFailure.image->GetScalarPointer() == spacingSnapshot.image->GetScalarPointer()
             && afterFailure.dims == spacingSnapshot.dims
             && afterFailure.spacing == spacingSnapshot.spacing
             && afterFailure.origin == spacingSnapshot.origin

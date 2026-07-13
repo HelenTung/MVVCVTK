@@ -7,6 +7,7 @@
 
 #include "Interaction/CropBridge.h"
 
+#include "Algorithms/OrthogonalCropAlgorithm.h"
 #include "AppInterfaces.h"
 #include "Interaction/CropBoxWidget.h"
 #include "Interaction/CropPlaneWidget.h"
@@ -395,7 +396,7 @@ std::array<double, 6> CropBridge::Impl::GetActiveWorldBounds() const
 std::array<double, 16> CropBridge::Impl::GetWorldToInput() const
 {
     if (!m_referenceRenderService) {
-        return CropGeometry::GetIdentityMatrix();
+        return CropGeometryAlgorithm::GetIdentityMatrix();
     }
 
     // 参考窗口维护的是 active input model -> world 矩阵；裁切 request 需要反向矩阵，
@@ -474,8 +475,8 @@ OrthogonalCropRequest CropBridge::Impl::BuildBoxRequest(
         m_currentWorldBounds[3] - m_currentWorldBounds[2],
         m_currentWorldBounds[5] - m_currentWorldBounds[4]
     };
-    CropMatrixDouble16Array boxToInputModelMatrixData = CropGeometry::GetIdentityMatrix();
-    CropMatrixDouble16Array baseToNowData = CropGeometry::GetIdentityMatrix();
+    CropMatrixDouble16Array boxToInputModelMatrixData = CropGeometryAlgorithm::GetIdentityMatrix();
+    CropMatrixDouble16Array baseToNowData = CropGeometryAlgorithm::GetIdentityMatrix();
 
     // 读取 widget 当前姿态并反解 initialWorld -> currentWorld；
     // 失败时保留默认 request，避免把不完整 widget 状态发给后端。

@@ -151,7 +151,7 @@ OrthogonalCropRequest CropRouter::Impl::GetDefaultRequest() const
     OrthogonalCropRequest request;
     request.dataSource = activeDataSource;
     request.removalMode = CropRemovalMode::KeepInside;
-    request.boxToInputModelMatrix = CropGeometry::GetBoxMatrix(GetActiveInputModelBounds());
+    request.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(GetActiveInputModelBounds());
     request.operation = OrthogonalCropOperation::Preview;
     return request;
 }

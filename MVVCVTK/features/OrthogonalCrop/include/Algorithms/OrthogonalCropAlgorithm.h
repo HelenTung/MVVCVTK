@@ -18,8 +18,25 @@
 
 #include <cstddef>
 
+// 多条裁切链共用的纯几何算法入口；静态类明确表达纯算法职责，不产生对象生命周期。
+class CropGeometryAlgorithm final {
+public:
+    CropGeometryAlgorithm() = delete;
+
+    static CropMatrixDouble16Array GetIdentityMatrix();
+
+    // 标准裁切盒固定为 [-1, 1]^3；所有请求只携带 boxToInputModelMatrix 作为几何真源。
+    static CropBoundsDouble6Array GetCanonicalBounds();
+
+    // 从 active input model 轴对齐 bounds 构造标准盒到 active input model 的矩阵。
+    static CropMatrixDouble16Array GetBoxMatrix(
+        const CropBoundsDouble6Array& inputModelBounds);
+};
+
 class OrthogonalCropAlgorithm {
 public:
+    OrthogonalCropAlgorithm() = delete;
+
     // image 输入入口只接受 Box + Preview + VolumeData 或 Box + Submit + ImageData。
     static OrthogonalCropResult GetResult(
         vtkImageData* image,

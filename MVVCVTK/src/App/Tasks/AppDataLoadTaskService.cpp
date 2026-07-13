@@ -42,11 +42,12 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
 
             if (isOk) {
                 // 文件加载路径直接生成当前 vtkImage；这里可以只发布 DataReady，不碰 renderer / strategy。
-                auto image = dataManager->GetVtkImage();
-                if (image) {
-                    const auto range = dataManager->GetScalarRange();
-                    const auto imageSpacing = dataManager->GetSpacing();
-                    sharedState->SetFileDataReady(range[0], range[1], imageSpacing);
+                const auto imageState = dataManager->GetImageState();
+                if (imageState.image) {
+                    sharedState->SetFileDataReady(
+                        imageState.scalarRange[0],
+                        imageState.scalarRange[1],
+                        imageState.spacing);
                 }
                 else {
                     std::cerr << "[LoadFileAsync] GetVtkImage() returned null after load.\n";

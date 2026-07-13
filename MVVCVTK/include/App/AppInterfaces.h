@@ -32,13 +32,26 @@
 #include <optional>
 #include <utility>
 
+// DataManager 对外发布的隔离批次；同一 version 共享一份只读消费副本，避免热路径重复复制整卷。
+// 外部修改不会回写内部真源；几何、标量范围与 version 均来自同一次提交。
+struct ImageState {
+    vtkSmartPointer<vtkImageData> image;
+    std::array<int, 3> dims = { 0, 0, 0 }; // voxel 数量 [x,y,z]
+    std::array<double, 3> spacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距 [x,y,z]
+    std::array<double, 3> origin = { 0.0, 0.0, 0.0 }; // RAS 物理原点 [x,y,z]
+    std::array<double, 2> scalarRange = { 0.0, 0.0 }; // 当前标量闭区间 [min,max]
+    DataVersion version = 0;
+};
+
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
 // ─────────────────────────────────────────────────────────────────────
 class AbstractDataManager {
 public:
     virtual ~AbstractDataManager() = default;
+    // 返回当前 version 的隔离共享 image；仅供读取或连接只读 pipeline，调用方不得写入。
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
+    virtual ImageState GetImageState() const = 0;
     virtual std::array<double, 2> GetScalarRange() const { return { 0.0, 0.0 }; }
     virtual std::array<double, 3> GetSpacing() const { return { 1.0, 1.0, 1.0 }; }
     virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;

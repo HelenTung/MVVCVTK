@@ -213,11 +213,10 @@ void HostFeatureBindings::Impl::AttachFeatures(
 
                 // current image 成为真源后再更新状态和 bridge 输入，并同步调用各 view 消费刷新；
                 // 此 handler 不切换线程，调用方必须处于允许修改 VTK pipeline 的线程。
-                const auto range = sharedDataMgr->GetScalarRange();
-                const auto spacing = sharedDataMgr->GetSpacing();
-                sharedState->SetReloadDataReady(range[0], range[1], spacing);
+                const auto imageState = sharedDataMgr->GetImageState();
+                sharedState->SetReloadDataReady(
+                    imageState.scalarRange[0], imageState.scalarRange[1], imageState.spacing);
                 if (const auto lockedBridge = bridge.lock()) {
-                    const auto imageState = sharedDataMgr->GetImageState();
                     if (GetImageReady(imageState.image)) {
                         lockedBridge->SetInputImage(
                             imageState.image, imageState.version);
@@ -348,8 +347,8 @@ bool HostFeatureBindings::Impl::StartGapView(
         }
     }
 
-    // Host 只分发降级后的 overlay 目标和算法值对象；worker/display 状态由 Gap service 持有。
-    return m_core.gapAnalysis->StartView(
+    // Host 启动时一次性交付隔离 image；后续 timer 只消费 worker 终态，不查询 feature 私有阶段。
+    const bool isStarted = m_core.gapAnalysis->StartView(
         BuildGapSurfaceRequest(request.algorithm->surface),
         BuildVoidParams(request.algorithm->voidDetection),
         meshOverlayTargets,
@@ -359,6 +358,11 @@ bool HostFeatureBindings::Impl::StartGapView(
                 sharedState->SetIsoValue(isoValue);
             }
         });
+    if (!isStarted) {
+        return false;
+    }
+    m_core.gapAnalysis->OnDisplayTick(m_core.sharedDataMgr->GetVtkImage());
+    return true;
 }
 
 bool HostFeatureBindings::Impl::SwitchGapView(
@@ -519,11 +523,11 @@ void HostFeatureBindings::Impl::OnHostTimer()
     }
 
     // host 只提供主线程 tick 和当前数据快照入口；GapAnalysis 自己判断是否有 pending 显示请求。
-    if (m_core.sharedState->GetDataTrustedState() != LoadState::Succeeded) {
+    if (m_core.sharedState->GetDataTrustedState() != LoadState::Succeeded
+        || !m_core.gapAnalysis->GetViewOn()) {
         return;
     }
-
-    m_core.gapAnalysis->OnDisplayTick(m_core.sharedDataMgr->GetVtkImage());
+    m_core.gapAnalysis->OnDisplayTick(nullptr);
 }
 
 void HostFeatureBindings::Impl::DetachHostTimer()

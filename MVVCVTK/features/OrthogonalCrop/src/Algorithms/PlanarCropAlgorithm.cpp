@@ -23,6 +23,31 @@
 
 class PlanarCropAlgorithmImpl final {
 public:
+    struct VoxelStep {
+        // 平面中心经 image physical-to-continuous-index 变换后的 [i, j, k] 坐标。
+        std::array<double, 3> planeIndex = { 0.0, 0.0, 0.0 };
+        // 单位 i/j/k index 增量在平面单位法线上的有符号 physical 投影。
+        double iStep = 0.0;
+        double jStep = 0.0;
+        double kStep = 0.0;
+        // side = (i-planeIndex[0])*iStep + (j-planeIndex[1])*jStep + (k-planeIndex[2])*kStep；
+        // epsilon 按三轴完整遍历幅度缩放，|side| 不超过它时回退到精确 physical-point 判断。
+        double boundaryEpsilon = 1e-8;
+    };
+
+    struct SubmitImages {
+        // 与输入结构、标量类型和分量数一致；保留 voxel 复制原值，移除 voxel 写入标量范围最小值。
+        vtkSmartPointer<vtkImageData> submitImage;
+        // 与 submitImage 对齐的单分量 VTK_UNSIGNED_CHAR mask：255 为保留，0 为移除。
+        vtkSmartPointer<vtkImageData> maskImage;
+    };
+
+    enum class RowSide {
+        NormalSide,
+        OppositeSide,
+        Mixed
+    };
+
     static constexpr double PlaneEpsilon = 1e-8;
 
     static OrthogonalCropResult GetResolved(const OrthogonalCropRequest& request);
@@ -53,22 +78,22 @@ public:
         const double inputModelPoint[3],
         const CropVectorDouble3Array& planeCenterInInputModel,
         const CropVectorDouble3Array& planeNormalInInputModel);
-    static PlanarVoxelStep GetSideStep(
+    static VoxelStep GetSideStep(
         vtkImageData* image,
         const CropDataModel& cropData,
         const int dims[3]);
     static double GetSideAtIndex(
-        const PlanarVoxelStep& sideStep,
+        const VoxelStep& sideStep,
         int i,
         int j,
         int k);
     static bool GetVoxelOnSide(
         vtkImageData* image,
-        const PlanarVoxelStep& sideStep,
+        const VoxelStep& sideStep,
         const CropDataModel& cropData,
         const int index[3],
         double planeSide);
-    static PlanarRowSide GetPlanarRowSide(
+    static RowSide GetPlanarRowSide(
         double rowStartSide,
         double rowEndSide,
         double boundaryEpsilon);
@@ -97,7 +122,7 @@ public:
         const std::vector<unsigned char>& backgroundVoxelBytes,
         std::size_t bytesPerVoxel,
         bool isVoxelKept);
-    static PlanarSubmitImages GetSubmitImages(
+    static SubmitImages GetSubmitImages(
         vtkImageData* image,
         const CropDataModel& cropData,
         CropRemovalMode removalMode);
@@ -133,6 +158,7 @@ OrthogonalCropResult PlanarCropAlgorithmImpl::GetFailure(
     result.cropDataModel = cropData;
     return result;
 }
+
 CropBoundsDouble6Array PlanarCropAlgorithmImpl::GetImageModelBounds(vtkImageData* image)
 {
     CropBoundsDouble6Array bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
@@ -266,12 +292,12 @@ bool PlanarCropAlgorithmImpl::GetPointIsOnNormalSide(
     return vtkMath::Dot(offset, planeNormalInInputModel.data()) > 0.0;
 }
 
-PlanarVoxelStep PlanarCropAlgorithmImpl::GetSideStep(
+PlanarCropAlgorithmImpl::VoxelStep PlanarCropAlgorithmImpl::GetSideStep(
     vtkImageData* image,
     const CropDataModel& cropData,
     const int dims[3])
 {
-    PlanarVoxelStep sideStep;
+    VoxelStep sideStep;
     if (!image) {
         return sideStep;
     }
@@ -302,7 +328,7 @@ PlanarVoxelStep PlanarCropAlgorithmImpl::GetSideStep(
 }
 
 double PlanarCropAlgorithmImpl::GetSideAtIndex(
-    const PlanarVoxelStep& sideStep,
+    const VoxelStep& sideStep,
     int i,
     int j,
     int k)
@@ -314,7 +340,7 @@ double PlanarCropAlgorithmImpl::GetSideAtIndex(
 
 bool PlanarCropAlgorithmImpl::GetVoxelOnSide(
     vtkImageData* image,
-    const PlanarVoxelStep& sideStep,
+    const VoxelStep& sideStep,
     const CropDataModel& cropData,
     const int index[3],
     double planeSide)
@@ -331,7 +357,7 @@ bool PlanarCropAlgorithmImpl::GetVoxelOnSide(
         cropData.planeNormalInInputModel);
 }
 
-PlanarRowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
+PlanarCropAlgorithmImpl::RowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
     double rowStartSide,
     double rowEndSide,
     double boundaryEpsilon)
@@ -339,12 +365,12 @@ PlanarRowSide PlanarCropAlgorithmImpl::GetPlanarRowSide(
     const double minSide = std::min(rowStartSide, rowEndSide);
     const double maxSide = std::max(rowStartSide, rowEndSide);
     if (minSide > boundaryEpsilon) {
-        return PlanarRowSide::NormalSide;
+        return RowSide::NormalSide;
     }
     if (maxSide < -boundaryEpsilon) {
-        return PlanarRowSide::OppositeSide;
+        return RowSide::OppositeSide;
     }
-    return PlanarRowSide::Mixed;
+    return RowSide::Mixed;
 }
 
 std::vector<unsigned char> PlanarCropAlgorithmImpl::GetBgBytes(
@@ -431,12 +457,12 @@ void PlanarCropAlgorithmImpl::SetVoxelBytes(
     }
 }
 
-PlanarSubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
+PlanarCropAlgorithmImpl::SubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
     vtkImageData* image,
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
 {
-    PlanarSubmitImages images;
+    SubmitImages images;
     if (!image) {
         return images;
     }
@@ -528,8 +554,8 @@ PlanarSubmitImages PlanarCropAlgorithmImpl::GetSubmitImages(
                 rowStartSide,
                 rowEndSide,
                 sideStep.boundaryEpsilon);
-            if (rowSide != PlanarRowSide::Mixed) {
-                const bool isRowInside = rowSide == PlanarRowSide::NormalSide;
+            if (rowSide != RowSide::Mixed) {
+                const bool isRowInside = rowSide == RowSide::NormalSide;
                 const bool isRowKept = isKeepInside ? isRowInside : !isRowInside;
                 SetRowBytes(
                     maskRowPtr,

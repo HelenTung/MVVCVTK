@@ -692,10 +692,10 @@ void VizService::Impl::SetSpacing(double sx, double sy, double sz)
         || sx <= 0.0 || sy <= 0.0 || sz <= 0.0) {
         return;
     }
-    m_sharedState->SetSpacing(sx, sy, sz);
-    if (m_dataManager) {
-        m_dataManager->SetSpacing({ sx, sy, sz });
+    if (m_dataManager && !m_dataManager->SetSpacing({ sx, sy, sz })) {
+        return;
     }
+    m_sharedState->SetSpacing(sx, sy, sz);
 }
 
 void VizService::Impl::SetWindowLevel(double ww, double wc)
@@ -819,14 +819,15 @@ void VizService::Impl::ExportSlicesAsync(
 // ─────────────────────────────────────────────────────────────────────
 void VizService::Impl::SetSliceScroll(int delta)
 {
-    if (!m_sharedState || !m_dataManager || !m_dataManager->GetVtkImage()) return;
+    if (!m_sharedState || !m_dataManager) return;
+    auto img = m_dataManager->GetVtkImage();
+    if (!img) return;
     const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
     const int axis = InteractionComputeService::GetSliceAxis(mode); // 当前切片滚动应推进的模型坐标轴
     if (axis < 0)
 		return;
 
     double space[3] = { 0.0 };
-    auto img = m_dataManager->GetVtkImage();
     img->GetSpacing(space);
 
     auto cursorWorld = m_sharedState->GetCursorWorld();
@@ -848,7 +849,7 @@ void VizService::Impl::SetSliceScroll(int delta)
 
 void VizService::Impl::SetCursorWorldPosition(double worldPos[3], int axis)
 {
-    if (!m_dataManager || !m_dataManager->GetVtkImage() || !m_sharedState) return;
+    if (!m_dataManager || !m_sharedState || !m_dataManager->GetVtkImage()) return;
     auto currentPos = m_sharedState->GetCursorWorld();
     m_sharedState->SetCursorRawWorld(worldPos[0], worldPos[1], worldPos[2]);
     m_sharedState->SetCursorAxis(axis);
@@ -996,10 +997,11 @@ void VizService::Impl::GetWorldPositionFromModel(const double m[3], double w[3])
 
 void VizService::Impl::SetCursorCenter()
 {
-    if (!m_dataManager || !m_dataManager->GetVtkImage()) return;
+    if (!m_dataManager) return;
+    auto img = m_dataManager->GetVtkImage();
+    if (!img) return;
     // DataReady 后把联动光标重置到新体数据中心，避免沿用旧数据上的 cursor 位置导致切片落在无效区域。
     double imgCenter[3] = { 0.0 };
-    auto img = m_dataManager->GetVtkImage();
     img->GetCenter(imgCenter);
 
     double imgCenterWorld[3];
@@ -1048,15 +1050,13 @@ void VizService::Impl::SendPendingImage()
     }
 
     // current 提交成功后才发布 DataReady，后续沿文件加载成功的同一条结构重建路径推进。
-    auto img = m_dataManager->GetVtkImage();
-    if (!img) {
+    const auto imageState = m_dataManager->GetImageState();
+    if (!imageState.image) {
         m_sharedState->SetReloadLoadFailed();
         return;
     }
-
-    const auto range = m_dataManager->GetScalarRange();
-    const auto spacing = m_dataManager->GetSpacing();
-    m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
+    m_sharedState->SetReloadDataReady(
+        imageState.scalarRange[0], imageState.scalarRange[1], imageState.spacing);
 }
 
 void VizService::Impl::SendExportCallback()
@@ -1148,11 +1148,17 @@ void VizService::Impl::BuildPipeline()
         return;
     }
 
-    auto img = m_dataManager ? m_dataManager->GetVtkImage() : nullptr;
+    if (!m_dataManager) {
+        std::cerr << "[BuildPipeline] DataManager is unavailable.\n";
+        return;
+    }
+    const auto spacing = m_sharedState->GetSpacing();
+    if (!m_dataManager->SetSpacing(spacing)) {
+        std::cerr << "[BuildPipeline] Failed to commit image spacing.\n";
+        return;
+    }
+    auto img = m_dataManager->GetVtkImage();
     if (img) {
-        const auto spacing = m_sharedState->GetSpacing();
-        m_dataManager->SetSpacing(spacing);
-
         int dims[3] = { 0, 0, 0 };
         img->GetDimensions(dims);
         if (dims[0] > 0 && dims[1] > 0 && dims[2] > 0) {
