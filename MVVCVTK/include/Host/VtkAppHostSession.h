@@ -18,6 +18,8 @@ public:
     // 构造 session 时整份移入 Impl，BuildSession 只消费该快照；后续显式命令不会回写 Config。
     // 它只描述外部事实和输入协议，不创建对象，因此可安全地在 BuildSession 前完整校验。
     struct Config {
+        // 初始化标志位
+        bool isInitialRenderEnabled = true;
         // standalone hotkey 映射；关闭 standalone 输入时这些值不会被消费。
         HostHotkeyBindings hotkeys;
         // 可选启动加载命令；路径、spacing、origin 必须由宿主显式填入。

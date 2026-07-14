@@ -167,10 +167,15 @@ void VtkAppHostSession::Impl::BuildSession()
         commandRouter->DispatchCommand(std::move(initialLoadRequest));
     }
 
-    renderViews.SendRenderAll();
     renderViews.SetInteractorsReady();
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     renderViewEndpoints = renderViews.BuildEndpoints();
+
+    // 渲染初始化标志位
+    if (config.isInitialRenderEnabled)
+    {
+        renderViews.SendRenderAll();
+    }
 
     // observer 最后安装；isInitialized 只在 hotkey/timer 都绑定完成后置位。
     auto attachHotkeysRequest = BuildRequest(HostCommandKind::Hotkeys);
