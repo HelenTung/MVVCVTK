@@ -8,6 +8,7 @@
 
 #include <vtkCommand.h>
 
+#include <array>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -64,6 +65,11 @@ public:
         request.command = HostCommandKind::ViewConfig;
         request.viewConfig = viewConfig;
         return m_router->DispatchCommand(std::move(request));
+    }
+
+    bool SendRequest(HostCommandRouterRequest request)
+    {
+        return m_router && m_router->DispatchCommand(std::move(request));
     }
 
     std::shared_ptr<VizService> GetViewService(const std::string& id) const
@@ -385,6 +391,188 @@ bool StartSubmitStateCase()
     return isPassed;
 }
 
+bool StartLoadDispatchCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.CreateView("load", HostRenderViewRole::Primary3D, nullptr),
+        "Load case should create a primary view.") && isPassed;
+    isPassed = GetExpected(fixture.BuildRouter(), "Load case should build the router.") && isPassed;
+
+    bool hasCallback = false;
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::Load;
+    request.initialVolume.isInitialLoadEnabled = true;
+    request.initialVolume.filePath = "sample.raw";
+    request.initialVolume.geometry.emplace(
+        std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
+        std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    request.loadComplete = [&hasCallback](bool isSuccess) {
+        hasCallback = isSuccess;
+    };
+
+    isPassed = GetExpected(
+        fixture.SendRequest(std::move(request)),
+        "Load case should accept the valid request.") && isPassed;
+    const auto service = fixture.GetViewService("load");
+    isPassed = GetExpected(
+        service && service->GetLoadCount() == 1
+            && service->GetLoadPath() == "sample.raw",
+        "Load case should call the selected service exactly once.") && isPassed;
+    isPassed = GetExpected(
+        hasCallback && fixture.GetBindings()->GetCropInputCount() == 1,
+        "Load case should forward completion and refresh crop input.") && isPassed;
+    return isPassed;
+}
+
+bool StartVolumeExportCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.CreateView("volume", HostRenderViewRole::Primary3D, nullptr),
+        "Volume export case should create a primary view.") && isPassed;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "Volume export case should build the router.") && isPassed;
+
+    bool hasCallback = false;
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::Export;
+    request.dataExportConfig.hasVolumeExport = true;
+    request.dataExportConfig.transformedDataOutputPath = "volume.raw";
+    request.dataExportComplete = [&hasCallback](bool isSuccess) {
+        hasCallback = isSuccess;
+    };
+    isPassed = GetExpected(
+        fixture.SendRequest(std::move(request)),
+        "Volume export case should accept the request.") && isPassed;
+    const auto service = fixture.GetViewService("volume");
+    isPassed = GetExpected(
+        service && service->GetExportCount() == 1
+            && service->GetExportPath() == "volume.raw"
+            && hasCallback,
+        "Volume export case should call only the volume service path.") && isPassed;
+    return isPassed;
+}
+
+bool StartSliceExportCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.CreateView("slice", HostRenderViewRole::TopDownSlice, nullptr),
+        "Slice export case should create a slice view.") && isPassed;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "Slice export case should build the router.") && isPassed;
+
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::Export;
+    request.dataExportConfig.hasSliceExport = true;
+    request.dataExportConfig.sliceOutputDir = "slices";
+    request.dataExportConfig.sliceSourceViewId = "slice";
+    isPassed = GetExpected(
+        fixture.SendRequest(std::move(request)),
+        "Slice export case should accept the request.") && isPassed;
+    const auto service = fixture.GetViewService("slice");
+    isPassed = GetExpected(
+        service && service->GetSliceCount() == 1
+            && service->GetSlicePath() == "slices"
+            && service->GetExportCount() == 0,
+        "Slice export case should call only the slice service path.") && isPassed;
+    return isPassed;
+}
+
+bool StartCropBoxDispatchCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Crop box case should build the router.");
+    }
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::CropBox;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetCropBoxCount() == 1
+            && fixture.GetBindings()->GetCropStartCount() == 0,
+        "Crop box case should dispatch exactly one box command.");
+}
+
+bool StartCropSendDispatchCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Crop submit case should build the router.");
+    }
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::CropApply;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetCropSendCount() == 1,
+        "Crop submit case should dispatch exactly one submit command.");
+}
+
+bool StartGapDispatchCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Gap start case should build the router.");
+    }
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::GapStart;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetGapStartCount() == 1,
+        "Gap start case should dispatch exactly one start command.");
+}
+
+bool StartGapOverlayCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Gap overlay case should build the router.");
+    }
+    fixture.GetBindings()->SetGapView(true);
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::GapOverlay;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetGapLayerCount() == 1,
+        "Gap overlay case should dispatch exactly one overlay command.");
+}
+
+bool StartCropExitCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Crop exit case should build the router.");
+    }
+    fixture.GetBindings()->SetCropActive(true);
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::CropExit;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetCropExitCount() == 1,
+        "Crop exit case should dispatch exactly one exit command.");
+}
+
+bool StartGapExitCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Gap exit case should build the router.");
+    }
+    fixture.GetBindings()->SetGapView(true);
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::GapExit;
+    const bool isAccepted = fixture.SendRequest(std::move(request));
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetGapExitCount() == 1,
+        "Gap exit case should dispatch exactly one exit command.");
+}
+
     int GetFailCount()
     {
         int failureCount = 0;
@@ -394,6 +582,15 @@ bool StartSubmitStateCase()
         failureCount += StartEscapeRepeatCase() ? 0 : 1;
         failureCount += StartCrossViewReleaseCase() ? 0 : 1;
         failureCount += StartSubmitStateCase() ? 0 : 1;
+        failureCount += StartLoadDispatchCase() ? 0 : 1;
+        failureCount += StartVolumeExportCase() ? 0 : 1;
+        failureCount += StartSliceExportCase() ? 0 : 1;
+        failureCount += StartCropBoxDispatchCase() ? 0 : 1;
+        failureCount += StartCropSendDispatchCase() ? 0 : 1;
+        failureCount += StartGapDispatchCase() ? 0 : 1;
+        failureCount += StartGapOverlayCase() ? 0 : 1;
+        failureCount += StartCropExitCase() ? 0 : 1;
+        failureCount += StartGapExitCase() ? 0 : 1;
         return failureCount;
     }
 };

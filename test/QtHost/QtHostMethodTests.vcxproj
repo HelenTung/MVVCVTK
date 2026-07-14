@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{A19CB7CD-A7DA-4AFB-B987-4139C677CB05}</ProjectGuid>
+    <RootNamespace>QtHostMethodTests</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <ProjectRoot>$(ProjectDir)..\..\MVVCVTK</ProjectRoot>
+    <VtkRoot Condition="'$(VtkRoot)'==''">F:\lib_cv\VTK\lib\vtk_install</VtkRoot>
+    <OpenCvRoot Condition="'$(OpenCvRoot)'==''">F:\lib_cv\cv\opencv\build</OpenCvRoot>
+    <HostDllRoot Condition="'$(HostDllRoot)'==''">F:\CT-1209\DLL</HostDllRoot>
+    <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies;$(ProjectRoot)\features\GapAnalysis\include;$(ProjectRoot)\features\OrthogonalCrop\include</ProjectIncludePath>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <VtkSuffix Condition="'$(Configuration)'=='Debug'">d</VtkSuffix>
+    <OpenCvSuffix Condition="'$(Configuration)'=='Debug'">d</OpenCvSuffix>
+    <LocalDebuggerWorkingDirectory>$(OutDir)</LocalDebuggerWorkingDirectory>
+    <LocalDebuggerEnvironment>PATH=$(VtkRoot)\bin;$(OpenCvRoot)\x64\vc16\bin;%PATH%</LocalDebuggerEnvironment>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;VTK_DEPRECATION_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectIncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(VtkRoot)\lib;$(OpenCvRoot)\x64\vc16\lib;$(HostDllRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(VtkLibraries);opencv_world4120$(OpenCvSuffix).lib;UIPhantomCalib.lib;UIReconstruct3D.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;VTK_DEPRECATION_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectIncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(VtkRoot)\lib;$(OpenCvRoot)\x64\vc16\lib;$(HostDllRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(VtkLibraries);opencv_world4120$(OpenCvSuffix).lib;UIPhantomCalib.lib;UIReconstruct3D.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <PropertyGroup>
+    <VtkLibraries>vtkCommonCore-9.4$(VtkSuffix).lib;vtkCommonDataModel-9.4$(VtkSuffix).lib;vtkCommonExecutionModel-9.4$(VtkSuffix).lib;vtkCommonMath-9.4$(VtkSuffix).lib;vtkCommonTransforms-9.4$(VtkSuffix).lib;vtksys-9.4$(VtkSuffix).lib;vtkFiltersCore-9.4$(VtkSuffix).lib;vtkFiltersGeneral-9.4$(VtkSuffix).lib;vtkFiltersGeometry-9.4$(VtkSuffix).lib;vtkFiltersSources-9.4$(VtkSuffix).lib;vtkIOImage-9.4$(VtkSuffix).lib;vtkImagingCore-9.4$(VtkSuffix).lib;vtkImagingGeneral-9.4$(VtkSuffix).lib;vtkImagingStatistics-9.4$(VtkSuffix).lib;vtkInteractionStyle-9.4$(VtkSuffix).lib;vtkInteractionWidgets-9.4$(VtkSuffix).lib;vtkRenderingAnnotation-9.4$(VtkSuffix).lib;vtkRenderingCore-9.4$(VtkSuffix).lib;vtkRenderingFreeType-9.4$(VtkSuffix).lib;vtkRenderingImage-9.4$(VtkSuffix).lib;vtkRenderingLOD-9.4$(VtkSuffix).lib;vtkRenderingOpenGL2-9.4$(VtkSuffix).lib;vtkRenderingVolume-9.4$(VtkSuffix).lib;vtkRenderingVolumeOpenGL2-9.4$(VtkSuffix).lib</VtkLibraries>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="QtHostCropTests.cpp" />
+    <ClCompile Include="QtHostExportTests.cpp" />
+    <ClCompile Include="QtHostGapTests.cpp" />
+    <ClCompile Include="QtHostLifecycleTests.cpp" />
+    <ClCompile Include="QtHostLoadTests.cpp" />
+    <ClCompile Include="QtHostMethodTests.cpp" />
+    <ClCompile Include="QtHostViewTests.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="QtHostMethodCases.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="QtHostTestCore.vcxproj">
+      <Project>{6D76A467-9899-46D2-A703-E27D6B6889E2}</Project>
+      <LinkLibraryDependencies>true</LinkLibraryDependencies>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

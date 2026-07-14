@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{6D76A467-9899-46D2-A703-E27D6B6889E2}</ProjectGuid>
+    <RootNamespace>QtHostTestCore</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <ProjectRoot>$(ProjectDir)..\..\MVVCVTK</ProjectRoot>
+    <VtkRoot Condition="'$(VtkRoot)'==''">F:\lib_cv\VTK\lib\vtk_install</VtkRoot>
+    <OpenCvRoot Condition="'$(OpenCvRoot)'==''">F:\lib_cv\cv\opencv\build</OpenCvRoot>
+    <HostDllRoot Condition="'$(HostDllRoot)'==''">F:\CT-1209\DLL</HostDllRoot>
+    <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies;$(ProjectRoot)\features\GapAnalysis\include;$(ProjectRoot)\features\OrthogonalCrop\include</ProjectIncludePath>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_LIB;VTK_DEPRECATION_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectIncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_LIB;VTK_DEPRECATION_LEVEL=0;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectIncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Lib>
+      <LinkTimeCodeGeneration>true</LinkTimeCodeGeneration>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostFeatureBindings.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostRenderViewSet.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\VtkAppHostSession.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataConverters.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBridge.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\StdRenderContext.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\TimeUpdateHandler.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer2DHandler.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer3DHandler.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

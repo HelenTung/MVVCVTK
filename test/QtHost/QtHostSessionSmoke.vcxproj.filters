@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Smoke">
+      <UniqueIdentifier>{E19B2547-17F9-439E-91AA-84E0C7038F27}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="QtHostSessionSmoke.cpp">
+      <Filter>Smoke</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
