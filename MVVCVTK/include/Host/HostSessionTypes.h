@@ -112,8 +112,9 @@ struct HostRenderViewEndpoint {
     vtkRenderWindowInteractor* interactor = nullptr;
 };
 
-// 运行期单视图视觉配置命令。字段 optional 表示“本次命令是否下发该值”，
-// 不能复用 PreInitConfig 做局部更新，否则默认 mode/material 会污染当前状态。
+// 运行期单视图配置请求。optional 表示调用方是否要求更新对应字段；
+// 字段存在不代表请求已被接受或底层管线已完成同步。
+// 不能复用 PreInitConfig 做局部更新，否则其默认 mode/material 会覆盖当前状态。
 struct HostViewConfig {
     // 优先按 id 定位目标窗口，适合 Qt widget 已建立 id 映射的场景。
     std::string viewId;
