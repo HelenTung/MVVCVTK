@@ -167,17 +167,16 @@ void VtkAppHostSession::Impl::BuildSession()
         commandRouter->DispatchCommand(std::move(initialLoadRequest));
     }
 
+    // 保持默认 true 的既有首帧时序；Qt 等外部事件循环宿主可显式跳过这一次同步渲染。
+    if (config.isInitialRenderEnabled) {
+        renderViews.SendRenderAll();
+    }
+
     renderViews.SetInteractorsReady();
     // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
     renderViewEndpoints = renderViews.BuildEndpoints();
 
-    // 渲染初始化标志位
-    if (config.isInitialRenderEnabled)
-    {
-        renderViews.SendRenderAll();
-    }
-
-    // observer 最后安装；isInitialized 只在 hotkey/timer 都绑定完成后置位。
+    // hotkey 和 Host Timer 这里只安装 handler；VTK observer 已由 context/interactor 链建立。
     auto attachHotkeysRequest = BuildRequest(HostCommandKind::Hotkeys);
     attachHotkeysRequest.renderContextInput = config.renderContextInput;
     attachHotkeysRequest.dataExportConfig = config.dataExport;

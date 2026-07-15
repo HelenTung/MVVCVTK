@@ -150,6 +150,8 @@ int main()
     vtkSMPTools::Initialize();
 
     VtkAppHostSession::Config config;
+    // standalone 由 Host 先初始化全部视图；Start 仍会在进入事件循环前再渲染承载主循环的视图。
+    config.isInitialRenderEnabled = true;
     const std::vector<HostRenderViewRole> standaloneViewRoles = {
         HostRenderViewRole::Primary3D,
         HostRenderViewRole::Composite3D,

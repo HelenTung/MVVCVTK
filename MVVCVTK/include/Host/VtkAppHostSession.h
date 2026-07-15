@@ -18,8 +18,6 @@ public:
     // 构造 session 时整份移入 Impl，BuildSession 只消费该快照；后续显式命令不会回写 Config。
     // 它只描述外部事实和输入协议，不创建对象，因此可安全地在 BuildSession 前完整校验。
     struct Config {
-        // 初始化标志位
-        bool isInitialRenderEnabled = true;
         // standalone hotkey 映射；关闭 standalone 输入时这些值不会被消费。
         HostHotkeyBindings hotkeys;
         // 可选启动加载命令；路径、spacing、origin 必须由宿主显式填入。
@@ -34,6 +32,8 @@ public:
         HostCommandInputConfig commandInput;
         // host/session 主线程 tick 事件泵配置；standalone/Qt 都必须显式选择承载 TimerEvent 的窗口。
         HostTimerEventPumpConfig timerEventPump;
+        // 追加在聚合末尾以保留旧位置式初始化的成员映射；只控制 BuildSession 主动发送的一次初始化帧。
+        bool isInitialRenderEnabled = true;
     };
 
     explicit VtkAppHostSession(Config config);

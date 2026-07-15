@@ -11,6 +11,8 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkObjectFactory.h>
+#include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 
 #include <cstddef>
@@ -20,6 +22,81 @@
 #include <utility>
 
 namespace {
+
+// 默认 true 路径只验证 Host 是否调用 Render；probe 隔离真实 OpenGL context 和平台 Timer。
+class RenderProbeWindow final : public vtkGenericOpenGLRenderWindow {
+public:
+    static RenderProbeWindow* New();
+    vtkTypeMacro(RenderProbeWindow, vtkGenericOpenGLRenderWindow);
+
+    void Render() override
+    {
+        ++m_renderCount;
+    }
+
+    std::size_t GetRenderCount() const
+    {
+        return m_renderCount;
+    }
+
+protected:
+    RenderProbeWindow() = default;
+    ~RenderProbeWindow() override = default;
+
+private:
+    std::size_t m_renderCount{0};
+};
+
+vtkStandardNewMacro(RenderProbeWindow);
+
+class RenderProbeInteractor final : public vtkRenderWindowInteractor {
+public:
+    static RenderProbeInteractor* New();
+    vtkTypeMacro(RenderProbeInteractor, vtkRenderWindowInteractor);
+
+    void Initialize() override
+    {
+        this->Initialized = 1;
+        this->Enabled = 1;
+    }
+
+protected:
+    RenderProbeInteractor() = default;
+    ~RenderProbeInteractor() override = default;
+
+    int InternalCreateTimer(
+        int timerId, int, unsigned long) override
+    {
+        return timerId;
+    }
+
+    int InternalDestroyTimer(int) override
+    {
+        return 1;
+    }
+};
+
+vtkStandardNewMacro(RenderProbeInteractor);
+
+bool BuildDefaultRenderTest()
+{
+    auto renderWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto interactor = vtkSmartPointer<RenderProbeInteractor>::New();
+    renderWindow->SetInteractor(interactor);
+    interactor->SetRenderWindow(renderWindow);
+    const std::size_t renderCount = renderWindow->GetRenderCount();
+
+    HostRenderViewConfig view;
+    view.id = "render-probe";
+    view.role = HostRenderViewRole::Primary3D;
+    view.renderWindow = renderWindow;
+
+    VtkAppHostSession::Config config;
+    config.renderViews.push_back(std::move(view));
+    VtkAppHostSession session(std::move(config));
+    session.BuildSession();
+    return renderWindow->GetRenderCount() == renderCount + 1;
+}
 
 class SessionFixture final {
 public:
@@ -32,6 +109,10 @@ public:
         m_widget = std::make_unique<QVTKOpenGLNativeWidget>();
         m_widget->setWindowTitle(QStringLiteral("MVVCVTK Qt Host Session Smoke"));
         m_renderWindow = vtkSmartPointer<vtkGenericOpenGLRenderWindow>::New();
+        m_renderCallback = vtkSmartPointer<vtkCallbackCommand>::New();
+        m_renderCallback->SetClientData(this);
+        m_renderCallback->SetCallback(&SessionFixture::OnRenderStart);
+        m_renderWindow->AddObserver(vtkCommand::StartEvent, m_renderCallback);
         m_errorCallback = vtkSmartPointer<vtkCallbackCommand>::New();
         m_errorCallback->SetClientData(this);
         m_errorCallback->SetCallback(&SessionFixture::OnVtkError);
@@ -60,6 +141,8 @@ public:
         view.renderWindow = m_renderWindow;
 
         VtkAppHostSession::Config config;
+        // QVTK 已完成首帧并持有 OpenGL surface，禁止 BuildSession 再主动触发 Host 初始化帧。
+        config.isInitialRenderEnabled = false;
         config.renderViews.push_back(std::move(view));
         config.renderContextInput.isHotkeyEnabled = false;
         config.commandInput.isHotkeyEnabled = false;
@@ -67,7 +150,9 @@ public:
         config.timerEventPump.timerViewId = "primary-3d";
 
         m_session = std::make_unique<VtkAppHostSession>(std::move(config));
+        const std::size_t renderStartCount = m_renderStartCount;
         m_session->BuildSession();
+        const bool hasInitialRender = m_renderStartCount != renderStartCount;
 
         const auto& endpoints = m_session->GetRenderViewEndpoints();
         const auto* endpoint = m_session->GetRenderViewEndpoint("primary-3d");
@@ -81,7 +166,11 @@ public:
             }
             std::cerr << '\n';
         }
-        return m_vtkErrorCount == 0
+        if (hasInitialRender) {
+            std::cerr << "FAIL: Host rendered despite disabled initial frame\n";
+        }
+        return !hasInitialRender
+            && m_vtkErrorCount == 0
             && endpoints.size() == 1
             && endpoint != nullptr
             && primaryEndpoint == endpoint
@@ -113,6 +202,15 @@ public:
     }
 
 private:
+    static void OnRenderStart(
+        vtkObject*, unsigned long, void* clientData, void*)
+    {
+        auto* fixture = static_cast<SessionFixture*>(clientData);
+        if (fixture) {
+            ++fixture->m_renderStartCount;
+        }
+    }
+
     static void OnVtkError(
         vtkObject*, unsigned long, void* clientData, void* callData)
     {
@@ -128,8 +226,10 @@ private:
 
     std::unique_ptr<QVTKOpenGLNativeWidget> m_widget;
     vtkSmartPointer<vtkGenericOpenGLRenderWindow> m_renderWindow;
+    vtkSmartPointer<vtkCallbackCommand> m_renderCallback;
     vtkSmartPointer<vtkCallbackCommand> m_errorCallback;
     std::unique_ptr<VtkAppHostSession> m_session;
+    std::size_t m_renderStartCount{0};
     std::size_t m_vtkErrorCount{0};
     std::string m_vtkErrorText;
 };
@@ -141,6 +241,11 @@ int main(int argc, char* argv[])
     // QVTK surface 格式必须早于 QApplication，和接入指南的构建链保持一致。
     QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat());
     QApplication app(argc, argv);
+
+    if (!BuildDefaultRenderTest()) {
+        std::cerr << "FAIL: default Host initial frame was not rendered once\n";
+        return 5;
+    }
 
     SessionFixture smoke;
     if (!smoke.BuildWindow()) {

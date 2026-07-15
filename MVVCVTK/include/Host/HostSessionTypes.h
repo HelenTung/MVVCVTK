@@ -245,7 +245,7 @@ struct HostGapConfig {
 // session 不再猜测“第一个窗口”或“默认五窗口中的某个窗口”。当前 GapAnalysis 是第一个 tick 使用者，
 // 后续其他异步 feature 也应复用这一条 host/session 事件泵，而不是各自新建 feature 专属 observer。
 struct HostTimerEventPumpConfig {
-    // false 表示不安装 VTK Timer observer；调用方可以稍后接入自己的主线程轮询机制。
+    // false 表示不追加 Host feature timer handler；每个 context 的基础 Timer observer 不受此字段控制。
     bool isTimerEnabled = false;
     // 优先按 id 选择 timer view，适合 Qt 已经建立 widget 到 view id 的映射。
     std::string timerViewId;

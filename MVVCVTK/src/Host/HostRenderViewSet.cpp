@@ -265,7 +265,7 @@ void HostRenderViewSet::Impl::SetInitialVisibility() const
 
 void HostRenderViewSet::Impl::SendRenderAll() const
 {
-    // 初始化末尾先渲染一次，让外部 host 获取 endpoint 后看到的是已创建 renderer/interactor 的窗口。
+    // 按宿主策略发送一次初始化帧；后续业务更新仍由各 context 的 Timer/dirty render 驱动。
     for (const auto& view : m_views) {
         if (view.context) {
             view.context->SendRender();
