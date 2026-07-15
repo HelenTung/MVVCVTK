@@ -497,7 +497,8 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
         return false;
     }
 
-    // 提取维度大小和内存指针
+    // [限制] 当前 RAW 导出路径按单分量 VTK_FLOAT 解释输出；这里未校验 scalar type/component，
+    // 非 float 或多分量输入会被错误解释，不能视作通用 vtkImageData 序列化入口。
     int newDims[3];
     outputImage->GetDimensions(newDims);
     float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
@@ -517,7 +518,7 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
     finalFileName += pathObj.extension();
     std::filesystem::path finalPath = pathObj.parent_path() / finalFileName;
 
-    // 使用 C++ 标准库直接持久化写入裸 raw 数据
+    // 按 x-fast、逐行无 padding 的 float32 裸数据写出，不附带维度、spacing、origin 等元数据。
     std::ofstream rawFile(finalPath, std::ios::binary);
     if (!rawFile.is_open()) {
         std::cerr << "[Error] Failed to open RAW file for writing: " << filePath << std::endl;
@@ -535,6 +536,7 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
         }
     }
 
+    // [风险] 当前实现未检查逐行 write 与 close 后的流状态；磁盘写入中途失败仍会记录成功并返回 true。
     rawFile.close();
     std::cout << "[Export] Successfully saved transformed RAW to: " << finalPath.u8string() << "\n"
         << "[Export] IMPORTANT: New Dimensions are "
@@ -598,8 +600,8 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
     if (mmf.Load(filePath)) {
-        //   - 文件够大 → 只取前 expectedBytes
-        //   - 文件偏小 → 只拷文件实际字节，剩余保持 AllocateScalars 的零值
+        //   - 文件够大：只读取前 expectedBytes。
+        //   - 文件偏小：只复制完整 float；不足 sizeof(float) 的尾字节丢弃，剩余 voxel 保持零值。
         size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
         const size_t copyCount = copyBytes / sizeof(float);
 

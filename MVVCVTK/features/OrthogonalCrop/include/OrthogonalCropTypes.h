@@ -11,7 +11,7 @@
 // 语义边界：
 // - CropDataModel：客观几何快照；
 // - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、裁切几何类型、几何矩阵和保留语义；
-// - OrthogonalCropResult：一次执行结果，预览链返回盒体三维轮廓，图像提交链返回主数据图像和提交 mask。
+// - OrthogonalCropResult：一次执行结果；Box 预览返回三维轮廓，Plane 预览只返回半空间几何，图像提交返回主图像和 mask。
 
 #include <array>
 #include <cstddef>
@@ -98,11 +98,11 @@ enum class CropFailure {
     BadSubmitMode,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     LowRam,
-    // image submit 需要输出 2D mask 时，生成 mask 失败。
+    // image submit 需要输出与提交体数据对齐的三维 mask 时，生成 mask 失败。
     MaskFailed,
     // image submit 需要输出主数据 image 时，生成输出 image 失败。
     ImageFailed,
-    // polydata 预览需要可选裁切网格 artifact 时，生成输出 polydata 失败。
+    // Box 预览需要生成 outlinePolyData 时，轮廓 artifact 生成失败。
     ClipFailed
 };
 

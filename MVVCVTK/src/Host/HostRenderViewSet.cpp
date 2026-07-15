@@ -158,7 +158,8 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetViewBySelector(
 
 const HostRenderViewRuntime* HostRenderViewSet::Impl::GetPrimaryView() const
 {
-    // 先选明确 Primary3D，再退到任意 3D 视图；非标准窗口拓扑也要给裁切和初始加载一个可解释的参考视图。
+    // 初始体加载和体数据导出先选 Primary3D，再退到任意 3D 视图，最后退到首个视图。
+    // 裁切参考视图不走此回退，必须由 HostCropViewRequest 显式指定 id 或 role。
     if (const auto* view = GetFirstViewByRole(HostRenderViewRole::Primary3D)) {
         return view;
     }

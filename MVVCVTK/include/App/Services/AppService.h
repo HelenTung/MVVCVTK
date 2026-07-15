@@ -7,7 +7,7 @@
 //
 // 主线职责：
 //   1. 构造 / 绑定渲染上下文
-//   2. 前处理配置：只写 SharedState，零 VTK 操作
+//   2. 前处理配置：多数只写 SharedState；SetSpacing 还同步更新 DataManager 的 vtkImageData 外壳
 //   3. 加载 / 导出：委托任务服务构建后台任务，主线程统一回调
 //   4. 交互：读取状态、计算结果、回写 SharedState
 //   5. 主线程编排：消费 pending 事件，按顺序触发重建 / 同步 / 回调
@@ -50,8 +50,8 @@ public:
     // ================================================================
     // 视觉配置 — 前处理 / 运行期配置意图
     // 调用时机：SetServiceBound 之后，LoadFileAsync 之前（或之后均可）
-    // 线程安全：写 SharedState（内部 mutex 保护）
-    // 这一组方法只做“配置意图登记”，不直接操作 VTK 原生对象。
+    // 线程语义：多数方法只写带锁的 SharedState；SetSpacing 先提交 DataManager 的 spacing，再广播状态。
+    // 除 SetSpacing 会 ShallowCopy/更新 vtkImageData 外，其余方法只登记配置意图。
     // 实现依赖对象由 Impl 持有。
     // ================================================================
     void SetVizMode(VizMode mode);

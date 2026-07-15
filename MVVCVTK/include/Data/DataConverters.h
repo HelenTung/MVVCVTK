@@ -19,6 +19,6 @@ public:
     void ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
 
 private:
-    // 内部复用：执行 accumulate 并返回频率指针，避免 Process 与 ExportHistogram 重复计算
+    // 内部复用：执行 accumulate 并返回频率指针，供 GetOutputData 与 ExportHistogram 共用同一管线。
     vtkIdType* GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth);
 };

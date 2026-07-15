@@ -117,13 +117,13 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_hLineActor->SetMapper(hMapper);
 
     m_vLineActor->GetProperty()->SetLineWidth(1.5);
-    // 为了防止遮挡，可以关闭深度测试或者稍微抬高一点 Z 值，但 VTK RendererLayer 更好
+    // 十字线使用纯色且关闭光照；SetCrosshair 会沿切片法线偏移一个最小轴 spacing，避免共面闪烁。
     m_vLineActor->GetProperty()->SetLighting(false); // 关闭光照，纯色显示
 
     m_hLineActor->GetProperty()->SetLineWidth(1.5);
     m_hLineActor->GetProperty()->SetLighting(false);
 
-    // 禁用 LUT 映射，交由 UpdateVisuals 动态更新原生 WindowLevel
+    // 不使用 LUT 自身的 scalar range，显示范围由 vtkImageProperty 的 Window/Level 控制。
     m_slice->GetProperty()->SetUseLookupTableScalarRange(0);
     m_mapper->SliceFacesCameraOff(); // 截面永远绝对平行于相机屏幕
     m_mapper->SliceAtFocalPointOff(); // 截面不强制穿过相机焦点，由状态统一驱动
@@ -264,7 +264,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
     // 2. Cursor/Transform 更新切片平面和十字线几何
     // 3. Visibility 控制十字线显隐
 
-    // ── 窗宽/窗位或材质改变 → 重建灰阶 LUT（切片专用）─────────
+    // 窗宽/窗位或材质改变时，直接更新 vtkImageProperty 的 Window/Level；此处不重建 LUT。
     if (((flags & UpdateFlags::WindowLevel) != UpdateFlags::None) || ((flags & UpdateFlags::Material) != UpdateFlags::None))
     {
         if (m_slice && m_slice->GetProperty())

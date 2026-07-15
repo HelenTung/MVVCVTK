@@ -18,11 +18,12 @@ public:
     bool        GetOpen() const { return m_data != nullptr; }
 
 private:
-    // [风险] GetData 裸 view 在 Clear()/析构后失效；Load() 又不会先 Clear 或拒绝已打开对象，
-    // 连续成功 Load 会覆盖地址/平台句柄并泄漏上一映射，因此调用方必须显式 Clear 后再复用。
+    // [风险] GetData 裸 view 在 Clear()/析构后失效；Load() 又不会先 Clear 或拒绝已打开对象。
+    // 连续成功 Load 会覆盖地址/平台句柄并泄漏旧映射；已有映射时再次 Load 若在映射阶段失败，
+    // 旧 m_data/句柄仍保留而 m_size 已被新请求覆盖。调用方必须先 Clear，再复用本对象。
     const void* m_data = nullptr;
     // [风险] 非零 length 未校验是否超过文件大小，POSIX 访问越过 EOF 的映射页可能故障；
-    // 映射失败前若已写入该值，还可能出现 GetOpen()==false 但 GetSize()!=0 的中间状态。
+    // 首次映射失败可出现 GetOpen()==false 但 GetSize()!=0；复用失败时 GetSize() 还可能与旧映射不一致。
     size_t      m_size = 0;
 
 #ifdef _WIN32

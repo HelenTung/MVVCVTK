@@ -26,7 +26,7 @@ public:
     LoadState GetDataTrustedState() const;
     // 在同一锁区内检查并发布唯一 load 事务，避免 File/Reload 并发穿透状态检查。
     bool StartLoad(LoadEventKind loadEventKind);
-    // 主线程完成终态处理后释放对应事务；在此之前 worker 终态不会开放下一次接纳。
+    // 终态消费、任务构造失败或服务销毁兜底时释放对应事务；释放前不会开放下一次接纳。
     bool ResetLoad(LoadEventKind loadEventKind);
     void SetFileDataReady(
         double rangeMin,

@@ -54,7 +54,7 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
     // polydata RemoveInside shader 直接读取 vertexMC 做 box 判定；
-    // 禁用 VBO isShiftDown/scale 才能保证 vertexMC 仍是原始等值面 model 坐标。
+    // 禁用 VBO Shift/Scale 才能保证 vertexMC 保持原始等值面 model 坐标。
     m_mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);
@@ -101,7 +101,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         return;
     }
 
-    // 作为 ImageData (需要��时计算)
+    // ImageData 路径需要实时计算等值面，并分别维护静态质量与交互质量管线。
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
         m_lastInput = data;

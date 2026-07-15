@@ -81,7 +81,7 @@ private:
     // observer 只懒绑定一次；tag 由 AddObserver 生产，Impl 析构逐项 RemoveObserver。
     bool m_hasObservers = false;
     std::array<unsigned long, 3> m_observerTags = { 0, 0, 0 };
-    // 调用方提供的 world AABB；决定初始中心并限定 representation 的 PlaceWidget 范围。
+    // 调用方提供的 world AABB；setter 用其中心重置 origin，启用/放置时只检查其合法性。
     std::array<double, 6> m_referenceWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
     // 当前 world 平面真源；origin 由 setter/交互更新，normal 始终在写入时归一化。
     CropVectorDouble3Array m_currentWorldOrigin = { 0.0, 0.0, 0.0 };
@@ -292,8 +292,8 @@ void CropPlaneWidget::Impl::SetPlaneRep()
         return;
     }
 
-    // VTK 的平面控件只能通过 PlaceWidget bounds 推导显示面大小；
-    // halfExtents 已由 bridge/request 状态给出，这里只把它翻译成围绕当前 origin 的最小可视 AABB。
+    // VTK 平面控件通过 PlaceWidget bounds 推导显示面大小；这里取两个 halfExtent 的较大值，
+    // 围绕当前 origin 构造轴对齐立方体作为可视范围，不保证是有向平面矩形的最小或精确包络。
     const double visualHalfExtent = std::max(
         m_currentWorldHalfExtents[0],
         m_currentWorldHalfExtents[1]);

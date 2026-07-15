@@ -153,8 +153,8 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         }
 
         // 路径 B：调窗拖拽
-        //   水平方向（ΔX > 0 → 向右拖）→ 增大 WW（对比度变强）
-        //   垂直方向（ΔY > 0 → 向上拖）→ 增大 WC（图像变暗/窗位升高）
+        //   水平方向（ΔX > 0，向右拖）增大 WW，使窗内灰度映射斜率降低。
+        //   垂直方向（ΔY > 0，向上拖）从起始 WC 减去正增量，使窗位降低。
         if (m_isDragWindowLevel)
         {
             const int dx = eve.x - m_lastDragX;
@@ -177,7 +177,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             m_service->SetWindowLevelDrag(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
             return { true, true };
         }
-        // zoom放大
+        // 正 totalDy 增大 parallelScale，视图缩小；负 totalDy 减小 scale，视图放大。
         if (m_isRightZoom)
         {
             if (!m_renderer || !m_renderer->GetActiveCamera()) {

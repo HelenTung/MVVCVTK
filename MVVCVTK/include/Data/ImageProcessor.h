@@ -5,10 +5,10 @@
 class ImageProcessor {
 public:
     /**
-     * @brief 如果图像尺寸超过 targetDim，则对其进行降采样，否则返回原图。
-     * @param input 输入图像
-     * @param targetDim 目标最大维度的体素数量（默认 766）
-     * @return 处理后的图像（如果是原图则引用计数+1，如果是新图则是新对象）
+     * @brief 构造连接到 input 的重采样管线；最大维度超过 targetDim 时三轴等比例降采样。
+     * @param input 非拥有输入图像；为空时返回 nullptr
+     * @param targetDim 目标最大维度的体素数量（默认 766）；必须大于 0，当前实现不校验该前置条件
+     * @return 新建的 vtkImageResample filter；无需降采样时三轴倍率均为 1.0，不直接返回 vtkImageData
      */
     static vtkSmartPointer<vtkImageResample> GetDownsampledImage(vtkImageData* input, int targetDim = 766);
 };

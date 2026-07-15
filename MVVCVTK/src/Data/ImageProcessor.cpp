@@ -8,7 +8,7 @@ vtkSmartPointer<vtkImageResample> ImageProcessor::GetDownsampledImage(vtkImageDa
     input->GetDimensions(dims);
     int maxDim = std::max({ dims[0], dims[1], dims[2] });
     auto resample = vtkSmartPointer<vtkImageResample>::New();
-    // 检查是否需要降采样
+    // 无需降采样时仍返回统一的 resample 管线，只把三轴倍率设为 1.0。
     if (maxDim <= targetDim) {
         resample->SetInputData(input);
 		resample->SetAxisMagnificationFactor(0, 1.0);
@@ -20,7 +20,7 @@ vtkSmartPointer<vtkImageResample> ImageProcessor::GetDownsampledImage(vtkImageDa
     // 以最大轴为基准，三轴等比例缩放，保持物理 Bounds 不变
     double factor = static_cast<double>(targetDim) / static_cast<double>(maxDim);
 
-    // --- 执行降采样逻辑 ---
+    // 以同一倍率缩放三轴，避免改变体素的长宽高比例。
     resample->SetInputData(input);
     resample->SetAxisMagnificationFactor(0, factor);
     resample->SetAxisMagnificationFactor(1, factor);

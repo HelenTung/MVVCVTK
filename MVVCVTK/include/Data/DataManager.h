@@ -65,13 +65,13 @@ public:
         const std::array<float, 3>& origin) override;
     // 深拷贝调用方 image 为 pending 隔离批次，不直接提交 current。
     bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
-    // 主线程领取一批 pending payload，触发 Modified() 后提交完整 current 图像状态。
+    // 具备 VTK pipeline 写权限的消费线程领取 pending payload，触发 Modified() 后提交完整 current 图像状态。
     bool SetCurrentFromPending() override;
 
 private:
     class Impl;
     // 随 RawVolumeDataManager 生命周期独占 pending image、派生元数据、门铃及其事务锁；
-    // 后台生产完整批次，主线程接管后清门铃，不复制 Base Impl 的 current 状态。
+    // 后台生产完整批次，消费线程接管后清门铃，不复制 Base Impl 的 current 状态。
     std::unique_ptr<Impl> m_rawImpl;
 };
 

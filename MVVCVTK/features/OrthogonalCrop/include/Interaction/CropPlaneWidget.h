@@ -34,7 +34,7 @@ public:
     // 绑定非拥有的 interactor；调用方须保证它在 widget 启用期间有效。
     void SetInteractor(vtkRenderWindowInteractor* interactor);
 
-    // 设置参考 world bounds；当前平面无效时会用 bounds 中心初始化原点。
+    // 设置参考 world AABB；合法输入会把当前平面 origin 重置为 bounds 中心，启用时以其合法性作为门槛。
     void SetReferenceWorldBounds(const std::array<double, 6>& worldBounds);
 
     // 直接设置当前 widget world 平面。
@@ -51,7 +51,8 @@ public:
     // 设置 world 平面变化回调。
     void SetPlaneCallback(PlaneCallback callback);
 
-    // 开关 widget；打开时会自动补 observer 并 place 到当前 reference bounds。
+    // 开关 widget；打开时补 observer，并按当前 origin 与 halfExtents 构造 PlaceWidget 可视范围。
+    // reference bounds 只参与启用/放置前合法性检查，不直接作为 PlaceWidget 的 bounds。
     bool SetEnabled(bool isEnabled);
 
     // 查询当前 widget 是否开启。

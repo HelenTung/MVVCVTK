@@ -80,7 +80,8 @@ public:
         voxelsPtr = GetOwnedPointer();
     }
 
-    // 已经是 float 的输入只保存只读别名；类型擦除 owner 负责覆盖整个后台读取期。
+    // 已经是 float 的输入只保存只读别名；调用方必须保证 sharedVoxels 指向 voxelOwner 管理的存储，
+    // 且该存储至少覆盖 dims 乘积个 float。本函数只检查两个参数非空，无法验证归属或容量。
     bool SetSharedVoxels(
         std::shared_ptr<const void> voxelOwner,
         const float* sharedVoxels) noexcept {

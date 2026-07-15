@@ -53,8 +53,8 @@ public:
     // 返回当前活跃数据的 input model bounds。
     std::array<double, 6> GetActiveInputModelBounds() const;
 
-    // 构造与当前活跃输入一致的默认 request 模板。
-    // 它只提供初始几何和兜底目标，正式执行前仍由 bridge 写入本次业务选择。
+    // 用当前 active dataSource/bounds 构造 Box + KeepInside + Preview 模板。
+    // ImageData 不支持 Preview；正式执行前 bridge 必须按业务选择改为 Submit，或切换到可预览数据源。
     OrthogonalCropRequest GetDefaultRequest() const;
 
     // 执行当前请求；request 是本次裁切身份和几何的唯一输入来源。

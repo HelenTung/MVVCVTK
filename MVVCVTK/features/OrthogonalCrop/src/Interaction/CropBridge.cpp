@@ -724,8 +724,8 @@ bool CropBridge::Impl::SwitchCropPlane()
         std::max(activeWorldDimensions[0] * kPlaneScale, kPlaneVectorEpsilon),
         std::max(activeWorldDimensions[1] * kPlaneScale, kPlaneVectorEpsilon)
     };
-    // Plane 模式下 reference bounds 只约束 widget 的可视/交互范围；
-    // halfExtents 只保留交互平面的尺度快照，不再驱动算法层生成有限矩形 outline。
+    // reference bounds 提供初始中心和启用合法性门槛；widget 可视范围由 origin 与 halfExtents 构造。
+    // halfExtents 只保留交互平面的尺度快照，不驱动算法层生成有限矩形 outline。
     m_currentWorldBounds = activeWorldBounds;
     m_hasWorldState = true;
 

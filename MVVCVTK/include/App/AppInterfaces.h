@@ -75,7 +75,8 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) = 0;
-    // 后台线程把新体数据准备好后，只通过这个入口交给主线程正式接管并提交到当前 vtkImage。
+    // 后台准备好新体数据后，由具备 VTK pipeline 写权限的消费线程接管并提交为 current；
+    // 通常由主线程 Timer 调用，Host 同步事务也可由其绑定线程调用。
     virtual bool SetCurrentFromPending() = 0;
     virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) = 0;
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;

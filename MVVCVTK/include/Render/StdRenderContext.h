@@ -46,7 +46,7 @@ private:
     void RemoveObservers();
     void AttachTimer();
     void RemoveTimer();
-    // 构建/重建路由表（BindService 和 InitInteractor 后调用）
+    // service、interactor、renderWindow 或输入 hook 变化后重建路由表，刷新 Handler 的观察依赖。
     void BuildInteractionRouter();
     void BuildInteractionEvent(InteractionEvent& eve,
         vtkRenderWindowInteractor* interactor,

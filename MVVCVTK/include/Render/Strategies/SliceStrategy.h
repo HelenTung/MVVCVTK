@@ -29,14 +29,8 @@ public:
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
 private:
-    //    Transform 支持：4 个局部端点经 M 变换到世界空间后提交。
-    //
-    //  cx/cy/cz  — 游标索引（数据空间）
-    //  bounds    — 数据在局部空间的包围盒 [xMin,xMax, yMin,yMax, zMin,zMax]
-    //  origin    — 数据原点
-    //  spacing   — 数据间距
-    //  modelToWorldMatrix — 当前模型矩阵 M（局部→世界）
-    //  safeOffset— 沿法线微量偏移，防穿模闪烁
+    // focusWorld 是世界游标；worldBounds 是模型变换后的世界 AABB。
+    // safeOffset 沿当前切片法线偏移两条线，避免十字线与切片共面闪烁。
     void SetCrosshair(const double focusWorld[3],
         const double worldBounds[6],
         double safeOffset);

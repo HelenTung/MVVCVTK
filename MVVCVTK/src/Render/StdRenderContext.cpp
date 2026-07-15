@@ -11,7 +11,8 @@
 #include <utility>
 
 static constexpr double kDefaultObserverPriority = 0.5;
-static constexpr double kTimerObserverPriority = 1.0; // Timer 事件优先级更高，确保主线程后处理先于同帧普通交互事件收敛
+// 只提高本 callback 在同一次 TimerEvent 的 observer 调用顺序，不保证 Timer 与普通交互事件的跨事件先后。
+static constexpr double kTimerObserverPriority = 1.0;
 static constexpr int kTimerIntervalMs = 33;
 
 // ─────────────────────────────────────────────────────────────────────

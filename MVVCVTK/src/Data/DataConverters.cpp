@@ -47,7 +47,7 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
 void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
     double range[2], binWidth;
-    // 复用 ComputeHistogram，不重复计算
+    // 复用 GetHistogramBuffer 持有的 accumulate 管线；输入未修改时由 VTK 跳过重复计算。
     vtkIdType* freqs = GetHistogramBuffer(input, range, binWidth);
     if (!freqs) return;
 
