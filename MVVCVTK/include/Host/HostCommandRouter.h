@@ -25,7 +25,9 @@ enum class HostCommandKind {
     GapExit,
     Export,
     Hotkeys,
-    ViewConfig
+    ViewConfig,
+    // 追加在末尾，避免改变已有命令枚举值。
+    Reload
 };
 
 // HostCommandRouter 是 host 命令分发器，不是 feature，也不是业务 service。
@@ -60,6 +62,11 @@ struct HostCommandRouterRequest {
     HostContextInput renderContextInput;
     HostCommandInputConfig commandInput;
     HostHotkeyBindings hotkeys;
+
+    // 仅 Reload 有效；payload 自有体素，分发进入 service 后可立即释放。
+    HostVolumeBufferRequest volumeBuffer;
+    // 仅 Reload 有效；Host 前置拒绝不调用，底层 task/admission 拒绝仍可能异步回传 false。
+    std::function<void(bool isSuccess)> reloadComplete;
 };
 
 class HostCommandRouter final : public std::enable_shared_from_this<HostCommandRouter> {

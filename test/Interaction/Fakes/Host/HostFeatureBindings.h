@@ -127,9 +127,11 @@ public:
     int GetGapLayerCount() const { return m_gapLayerCount; }
     int GetGapExitCount() const { return m_gapExitCount; }
     int GetCropInputCount() const { return m_cropInputCount; }
+    int GetCropClearCount() const { return m_cropClearCount; }
 
     void ClearCropInput() const
     {
+        ++m_cropClearCount;
     }
 
     bool SendCropInput()
@@ -153,4 +155,5 @@ private:
     int m_gapLayerCount = 0;
     int m_gapExitCount = 0;
     int m_cropInputCount = 0;
+    mutable int m_cropClearCount = 0;
 };

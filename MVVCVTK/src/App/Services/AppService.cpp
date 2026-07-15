@@ -836,7 +836,24 @@ bool VizService::Impl::ReloadFromBufferAsync(
         m_dataLoadTaskService->SetReloadReady(false);
         return false;
     }
-    StartRun(std::move(*task), true);
+    try {
+        StartRun(std::move(*task), true);
+    }
+    catch (const std::exception& error) {
+        ResetOwnedLoad(LoadEventKind::Reload);
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        m_dataLoadTaskService->SetReloadReady(false);
+        std::cerr << "[ReloadFromBufferAsync] Worker start failed: "
+            << error.what() << '\n';
+        return false;
+    }
+    catch (...) {
+        ResetOwnedLoad(LoadEventKind::Reload);
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        m_dataLoadTaskService->SetReloadReady(false);
+        std::cerr << "[ReloadFromBufferAsync] Worker start failed with an unknown exception.\n";
+        return false;
+    }
     return true;
 }
 

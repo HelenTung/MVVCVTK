@@ -226,6 +226,16 @@ bool VtkAppHostSession::LoadVolume(
     return m_impl->SendCommand(std::move(routerRequest));
 }
 
+bool VtkAppHostSession::ReloadVolume(
+    HostVolumeBufferRequest request,
+    std::function<void(bool isSuccess)> onComplete)
+{
+    auto routerRequest = m_impl->BuildRequest(HostCommandKind::Reload);
+    routerRequest.volumeBuffer = std::move(request);
+    routerRequest.reloadComplete = std::move(onComplete);
+    return m_impl->SendCommand(std::move(routerRequest));
+}
+
 bool VtkAppHostSession::StartCrop(
     const HostCropViewRequest& request)
 {

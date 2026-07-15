@@ -80,6 +80,17 @@ struct InitialVolumeLoadConfig {
     std::optional<VolumeGeometryConfig> geometry;
 };
 
+// 内存重载命令自有一份连续 float 体素，避免异步链借用 Qt / 上位机的临时内存。
+// ReloadVolume 按值接收并移动该 DTO；底层任务在同步接纳阶段再建立工作线程快照。
+struct HostVolumeBufferRequest {
+    // X 变化最快的连续体素；元素数必须严格等于 dimensions 三轴乘积。
+    std::vector<float> voxels;
+    // 体素维度，固定按 X/Y/Z 排列；任一维非正或乘积溢出时拒绝命令。
+    std::array<int, 3> dimensions{ 0, 0, 0 };
+    // 内存数据同样不携带物理坐标；缺少 spacing/origin 时拒绝命令。
+    std::optional<VolumeGeometryConfig> geometry;
+};
+
 // 每个 config 描述一个宿主视图的创建/接管意图，由上位机 / main 填充，由 HostRenderViewSet 消费。
 // 为什么只放窗口事实：窗口数量、role、是否参与预览属于 host 拓扑，不能固化到 feature 插件。
 struct HostRenderViewConfig {

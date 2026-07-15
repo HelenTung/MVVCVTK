@@ -13,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 class HostRouterCases final {
 public:
@@ -426,6 +427,143 @@ bool StartLoadDispatchCase()
     return isPassed;
 }
 
+bool StartReloadDispatchCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.CreateView("reload", HostRenderViewRole::Primary3D, nullptr),
+        "Reload case should create a primary view.") && isPassed;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "Reload case should build the router.") && isPassed;
+    const auto service = fixture.GetViewService("reload");
+    isPassed = GetExpected(
+        service != nullptr,
+        "Reload case should expose the selected service.") && isPassed;
+
+    HostCommandRouterRequest invalidRequest;
+    invalidRequest.command = HostCommandKind::Reload;
+    invalidRequest.volumeBuffer.voxels.assign(7, 1.0f);
+    invalidRequest.volumeBuffer.dimensions = { 2, 2, 2 };
+    invalidRequest.volumeBuffer.geometry.emplace(
+        std::array<float, 3>{ 0.5f, 1.0f, 1.5f },
+        std::array<float, 3>{ 4.0f, 5.0f, 6.0f });
+    bool hasInvalidCallback = false;
+    invalidRequest.reloadComplete = [&hasInvalidCallback](bool) {
+        hasInvalidCallback = true;
+    };
+    isPassed = GetExpected(
+        !fixture.SendRequest(std::move(invalidRequest))
+            && service && service->GetReloadCount() == 0
+            && !hasInvalidCallback,
+        "Reload case should reject a voxel-count mismatch without a callback.") && isPassed;
+
+    HostCommandRouterRequest invalidDimensionsRequest;
+    invalidDimensionsRequest.command = HostCommandKind::Reload;
+    invalidDimensionsRequest.volumeBuffer.voxels.assign(1, 1.0f);
+    invalidDimensionsRequest.volumeBuffer.dimensions = { 1, 0, 1 };
+    invalidDimensionsRequest.volumeBuffer.geometry.emplace(
+        std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
+        std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    isPassed = GetExpected(
+        !fixture.SendRequest(std::move(invalidDimensionsRequest))
+            && service->GetReloadCount() == 0,
+        "Reload case should reject a non-positive dimension.") && isPassed;
+
+    HostCommandRouterRequest missingGeometryRequest;
+    missingGeometryRequest.command = HostCommandKind::Reload;
+    missingGeometryRequest.volumeBuffer.voxels.assign(1, 1.0f);
+    missingGeometryRequest.volumeBuffer.dimensions = { 1, 1, 1 };
+    isPassed = GetExpected(
+        !fixture.SendRequest(std::move(missingGeometryRequest))
+            && service->GetReloadCount() == 0,
+        "Reload case should reject missing geometry.") && isPassed;
+
+    HostCommandRouterRequest request;
+    request.command = HostCommandKind::Reload;
+    request.volumeBuffer.voxels = {
+        0.0f, 1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f, 7.0f
+    };
+    request.volumeBuffer.dimensions = { 2, 2, 2 };
+    request.volumeBuffer.geometry.emplace(
+        std::array<float, 3>{ 0.5f, 1.0f, 1.5f },
+        std::array<float, 3>{ 4.0f, 5.0f, 6.0f });
+    bool hasCallback = false;
+    bool isCallbackSuccess = false;
+    request.reloadComplete = [&hasCallback, &isCallbackSuccess](bool isSuccess) {
+        hasCallback = true;
+        isCallbackSuccess = isSuccess;
+    };
+
+    isPassed = GetExpected(
+        fixture.SendRequest(std::move(request)),
+        "Reload case should synchronously accept a valid request.") && isPassed;
+    isPassed = GetExpected(
+        service && service->GetReloadCount() == 1
+            && service->GetReloadVoxels()
+                == std::vector<float>{ 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f }
+            && service->GetReloadDimensions() == std::array<int, 3>{ 2, 2, 2 }
+            && service->GetReloadSpacing() == std::array<float, 3>{ 0.5f, 1.0f, 1.5f }
+            && service->GetReloadOrigin() == std::array<float, 3>{ 4.0f, 5.0f, 6.0f },
+        "Reload case should forward voxels, dimensions and geometry unchanged.") && isPassed;
+    isPassed = GetExpected(
+        !hasCallback && fixture.GetBindings()->GetCropInputCount() == 0,
+        "Reload admission should not be reported as asynchronous completion.") && isPassed;
+    isPassed = GetExpected(
+        service && service->SendReloadComplete(true)
+            && hasCallback && isCallbackSuccess
+            && fixture.GetBindings()->GetCropInputCount() == 1,
+        "Reload success should forward completion and refresh crop input.") && isPassed;
+
+    HostCommandRouterRequest failedRequest;
+    failedRequest.command = HostCommandKind::Reload;
+    failedRequest.volumeBuffer.voxels.assign(1, 9.0f);
+    failedRequest.volumeBuffer.dimensions = { 1, 1, 1 };
+    failedRequest.volumeBuffer.geometry.emplace(
+        std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
+        std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    bool hasFailureCallback = false;
+    bool isFailureSuccess = true;
+    failedRequest.reloadComplete = [
+        &hasFailureCallback,
+        &isFailureSuccess
+    ](bool isSuccess) {
+        hasFailureCallback = true;
+        isFailureSuccess = isSuccess;
+    };
+    isPassed = GetExpected(
+        fixture.SendRequest(std::move(failedRequest))
+            && service && service->SendReloadComplete(false)
+            && hasFailureCallback && !isFailureSuccess
+            && fixture.GetBindings()->GetCropClearCount() == 0,
+        "Reload failure should preserve current crop input and forward completion.") && isPassed;
+
+    service->SetReloadAccepted(false);
+    HostCommandRouterRequest rejectedRequest;
+    rejectedRequest.command = HostCommandKind::Reload;
+    rejectedRequest.volumeBuffer.voxels.assign(1, 3.0f);
+    rejectedRequest.volumeBuffer.dimensions = { 1, 1, 1 };
+    rejectedRequest.volumeBuffer.geometry.emplace(
+        std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
+        std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    bool hasRejectedCallback = false;
+    rejectedRequest.reloadComplete = [&hasRejectedCallback](bool) {
+        hasRejectedCallback = true;
+    };
+    isPassed = GetExpected(
+        !fixture.SendRequest(std::move(rejectedRequest))
+            && service->GetReloadCount() == 2,
+        "Reload service rejection should propagate its synchronous result.") && isPassed;
+    isPassed = GetExpected(
+        !hasRejectedCallback && service->SendReloadComplete(false)
+            && hasRejectedCallback
+            && fixture.GetBindings()->GetCropClearCount() == 0,
+        "Reload service rejection may deliver a deferred false callback without clearing crop input.") && isPassed;
+    return isPassed;
+}
+
 bool StartVolumeExportCase()
 {
     bool isPassed = true;
@@ -583,6 +721,7 @@ bool StartGapExitCase()
         failureCount += StartCrossViewReleaseCase() ? 0 : 1;
         failureCount += StartSubmitStateCase() ? 0 : 1;
         failureCount += StartLoadDispatchCase() ? 0 : 1;
+        failureCount += StartReloadDispatchCase() ? 0 : 1;
         failureCount += StartVolumeExportCase() ? 0 : 1;
         failureCount += StartSliceExportCase() ? 0 : 1;
         failureCount += StartCropBoxDispatchCase() ? 0 : 1;

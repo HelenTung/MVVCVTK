@@ -51,6 +51,11 @@ public:
     bool LoadVolume(
         const InitialVolumeLoadConfig& request,
         std::function<void(bool isSuccess)> onComplete = nullptr);
+    // 显式内存重载命令；同步返回值只表示是否接纳，最终结果由 onComplete 通知。
+    // request 按值进入以接管大体数据，调用方可用 std::move 避免 Host 边界额外复制。
+    bool ReloadVolume(
+        HostVolumeBufferRequest request,
+        std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 以下是上位机 / Qt host 可以调用的稳定 feature 命令入口。
     // session 只做命令转发和目标窗口解析，不把具体按键或固定五窗口假设写进插件。

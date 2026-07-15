@@ -3,6 +3,7 @@
 #include "Host/VtkAppHostSession.h"
 
 #include <array>
+#include <utility>
 
 int GetLoadFailCount()
 {
@@ -28,6 +29,22 @@ int GetLoadFailCount()
         failureCount += GetCaseResult(
             !session.LoadVolume(request),
             "Load missing path rejection") ? 0 : 1;
+    }
+    {
+        VtkAppHostSession session(VtkAppHostSession::Config{});
+        HostVolumeBufferRequest request;
+        request.voxels.assign(7, 1.0f);
+        request.dimensions = { 2, 2, 2 };
+        request.geometry.emplace(
+            std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
+            std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+        bool hasCallback{false};
+        const bool isAccepted = session.ReloadVolume(
+            std::move(request),
+            [&hasCallback](bool) { hasCallback = true; });
+        failureCount += GetCaseResult(
+            !isAccepted && !hasCallback,
+            "Reload voxel-count rejection") ? 0 : 1;
     }
     return failureCount;
 }

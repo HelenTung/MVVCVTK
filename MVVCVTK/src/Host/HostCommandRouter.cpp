@@ -13,6 +13,7 @@
 #include <array>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -50,6 +51,13 @@ private:
     bool LoadVolume(
         const InitialVolumeLoadConfig& initialVolume,
         std::function<void(bool isSuccess)> loadComplete) const;
+    bool ReloadVolume(
+        HostVolumeBufferRequest volumeBuffer,
+        std::function<void(bool isSuccess)> reloadComplete) const;
+    std::function<void(bool)> BuildLoadComplete(
+        std::function<void(bool isSuccess)> onComplete) const;
+    std::function<void(bool)> BuildReloadComplete(
+        std::function<void(bool isSuccess)> onComplete) const;
     bool ExportData(
         const HostDataExportConfig& dataExportConfig,
         std::function<void(bool isSuccess)> onComplete) const;
@@ -249,6 +257,10 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommandRouterRequest request) 
         return LoadVolume(
             request.initialVolume,
             std::move(request.loadComplete));
+    case HostCommandKind::Reload:
+        return ReloadVolume(
+            std::move(request.volumeBuffer),
+            std::move(request.reloadComplete));
     case HostCommandKind::Export:
         return ExportData(
             request.dataExportConfig,
@@ -340,31 +352,97 @@ bool HostCommandRouter::Impl::LoadVolume(
         return false;
     }
 
-    const auto featureBindings = m_featureBindings;
-
     primaryView->service->LoadFileAsync(
         initialVolume.filePath,
         initialVolume.geometry->spacing,
         initialVolume.geometry->origin,
-        [
-            featureBindings,
-            loadComplete = std::move(loadComplete)
-        ](bool isSuccess) mutable {
-            if (isSuccess) {
-                if (const auto lockedBindings = featureBindings.lock()) {
-                    lockedBindings->SendCropInput();
-                }
-            }
-            else if (!isSuccess) {
-                if (const auto lockedBindings = featureBindings.lock()) {
-                    lockedBindings->ClearCropInput();
-                }
-            }
-            if (loadComplete) {
-                loadComplete(isSuccess);
-            }
-        });
+        BuildLoadComplete(std::move(loadComplete)));
     return true;
+}
+
+bool HostCommandRouter::Impl::ReloadVolume(
+    HostVolumeBufferRequest volumeBuffer,
+    std::function<void(bool isSuccess)> reloadComplete) const
+{
+    if (!m_core || !m_renderViews) {
+        std::cerr << "[Host] Volume buffer reload skipped: host services are not ready.\n";
+        return false;
+    }
+    if (!volumeBuffer.geometry) {
+        std::cerr << "[Host] Volume buffer reload skipped: volume geometry was not specified.\n";
+        return false;
+    }
+
+    std::size_t voxelCount = 1;
+    for (const int dimension : volumeBuffer.dimensions) {
+        if (dimension <= 0
+            || voxelCount > std::numeric_limits<std::size_t>::max()
+                / static_cast<std::size_t>(dimension)) {
+            std::cerr << "[Host] Volume buffer reload skipped: dimensions were invalid.\n";
+            return false;
+        }
+        voxelCount *= static_cast<std::size_t>(dimension);
+    }
+    if (volumeBuffer.voxels.size() != voxelCount) {
+        std::cerr << "[Host] Volume buffer reload skipped: voxel count did not match dimensions.\n";
+        return false;
+    }
+
+    const auto* primaryView = m_renderViews->GetPrimaryView();
+    if (!primaryView || !primaryView->service) {
+        std::cerr << "[Host] Volume buffer reload skipped: primary render view is missing.\n";
+        return false;
+    }
+
+    // service 在返回前复制 voxels，异步任务不会借用 volumeBuffer 的存储。
+    return primaryView->service->ReloadFromBufferAsync(
+        volumeBuffer.voxels.data(),
+        volumeBuffer.dimensions,
+        volumeBuffer.geometry->spacing,
+        volumeBuffer.geometry->origin,
+        BuildReloadComplete(std::move(reloadComplete)));
+}
+
+std::function<void(bool)> HostCommandRouter::Impl::BuildLoadComplete(
+    std::function<void(bool isSuccess)> onComplete) const
+{
+    const auto featureBindings = m_featureBindings;
+    return [
+        featureBindings,
+        onComplete = std::move(onComplete)
+    ](bool isSuccess) mutable {
+        if (const auto lockedBindings = featureBindings.lock()) {
+            if (isSuccess) {
+                lockedBindings->SendCropInput();
+            }
+            else {
+                lockedBindings->ClearCropInput();
+            }
+        }
+        if (onComplete) {
+            onComplete(isSuccess);
+        }
+    };
+}
+
+std::function<void(bool)> HostCommandRouter::Impl::BuildReloadComplete(
+    std::function<void(bool isSuccess)> onComplete) const
+{
+    const auto featureBindings = m_featureBindings;
+    return [
+        featureBindings,
+        onComplete = std::move(onComplete)
+    ](bool isSuccess) mutable {
+        // Reload 失败不会替换 current image，因此保留现有 Crop input；成功后才刷新快照。
+        if (isSuccess) {
+            if (const auto lockedBindings = featureBindings.lock()) {
+                lockedBindings->SendCropInput();
+            }
+        }
+        if (onComplete) {
+            onComplete(isSuccess);
+        }
+    };
 }
 
 bool HostCommandRouter::Impl::ExportData(
