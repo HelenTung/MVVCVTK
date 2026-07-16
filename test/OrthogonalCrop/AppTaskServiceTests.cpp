@@ -2,6 +2,8 @@
 #include "Tasks/AppDataLoadTaskService.h"
 #include "Services/AppService.h"
 #include "AppStateEvents.h"
+#include "DataManager.h"
+#include "VolumeStrategy.h"
 #include "PlanarTestSuites.h"
 
 #include <algorithm>
@@ -9,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -140,9 +143,15 @@ public:
         return true;
     }
 
-    bool SetCurrentFromPending() override
+    bool SetCurrentFromPending(bool& hasPending) override
     {
+        hasPending = false;
         if (!m_hasPending.exchange(false)) {
+            return false;
+        }
+        hasPending = true;
+        m_commitAttemptCount.fetch_add(1);
+        if (m_isCommitFailure) {
             return false;
         }
 
@@ -163,6 +172,13 @@ public:
             m_spacing = { 1.0, 1.0, 1.0 };
         }
         m_version.fetch_add(1);
+        return true;
+    }
+
+    bool ClearPending() override
+    {
+        m_hasPending.store(false);
+        m_clearPendingCount.fetch_add(1);
         return true;
     }
 
@@ -203,6 +219,16 @@ public:
         return m_snapshotReadCount.load();
     }
 
+    int GetCommitAttemptCount() const
+    {
+        return m_commitAttemptCount.load();
+    }
+
+    int GetClearPendingCount() const
+    {
+        return m_clearPendingCount.load();
+    }
+
     void SetLoadThrow(bool isEnabled)
     {
         m_isLoadThrow = isEnabled;
@@ -211,6 +237,11 @@ public:
     void SetBufferThrow(bool isEnabled)
     {
         m_isBufferThrow = isEnabled;
+    }
+
+    void SetCommitFailure(bool isEnabled)
+    {
+        m_isCommitFailure = isEnabled;
     }
 
 private:
@@ -222,8 +253,11 @@ private:
     std::atomic<DataVersion> m_version{ 0 };
     mutable std::atomic<int> m_imageReadCount{ 0 };
     mutable std::atomic<int> m_snapshotReadCount{ 0 };
+    std::atomic<int> m_commitAttemptCount{ 0 };
+    std::atomic<int> m_clearPendingCount{ 0 };
     bool m_isLoadThrow = false;
     bool m_isBufferThrow = false;
+    bool m_isCommitFailure = false;
 };
 
 void SetExpect(bool isExpected, const std::string& message, int& failureCount)
@@ -557,6 +591,147 @@ void StartVizLoadFailure(int& failureCount)
         failureCount);
 }
 
+void StartPendingCommitFailure(int& failureCount)
+{
+    auto dataManager = std::make_shared<ExportDataStub>();
+    auto eventHub = std::make_shared<SharedStateBroadcaster>();
+    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
+    VizService service(dataManager, sharedState, eventHub);
+    service.SetRenderContext(nullptr, nullptr);
+    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
+    std::optional<bool> reloadResult;
+    int callbackCount = 0;
+    dataManager->SetCommitFailure(true);
+
+    const bool isAccepted = service.ReloadFromBufferAsync(
+        reloadSource.data(),
+        { 2, 2, 1 },
+        { 1.0f, 1.0f, 1.0f },
+        { 0.0f, 0.0f, 0.0f },
+        [&](bool isSuccess) {
+            ++callbackCount;
+            reloadResult = isSuccess;
+        });
+    SetExpect(isAccepted, "commit-failure reload should be admitted.", failureCount);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!reloadResult.has_value() && std::chrono::steady_clock::now() < deadline) {
+        service.SendUpdates();
+        std::this_thread::yield();
+    }
+    service.SendUpdates();
+
+    SetExpect(dataManager->GetCommitAttemptCount() == 1,
+        "pending commit failure should consume exactly one pending batch.", failureCount);
+    SetExpect(sharedState->GetReloadLoadState() == LoadState::Failed,
+        "pending commit failure must publish the failed Reload terminal state.", failureCount);
+    SetExpect(reloadResult.has_value() && !*reloadResult && callbackCount == 1,
+        "pending commit failure must deliver callback(false) exactly once.", failureCount);
+    SetExpect(sharedState->StartLoad(LoadEventKind::File),
+        "pending commit failure must release admission before its callback returns.", failureCount);
+    if (sharedState->GetFileLoadState() == LoadState::Loading) {
+        sharedState->SetFileLoadFailed();
+        sharedState->ResetLoad(LoadEventKind::File);
+    }
+}
+
+void StartReloadFailureRender(int& failureCount)
+{
+    auto dataManager = std::make_shared<ExportDataStub>();
+    auto eventHub = std::make_shared<SharedStateBroadcaster>();
+    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
+    sharedState->StartLoad(LoadEventKind::File);
+    sharedState->SetFileDataReady(1.0, 4.0, { 1.0, 1.0, 1.0 });
+    sharedState->ResetLoad(LoadEventKind::File);
+
+    VizService service(dataManager, sharedState, eventHub);
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    service.SetRenderContext(nullptr, renderer);
+    // 使用生产 VolumeStrategy 验证失败路径的真实 strategy/prop 生命周期，
+    // 避免为单个断言额外暴露套件级测试类型。
+    auto strategy = std::make_shared<VolumeStrategy>();
+    service.SetCurrentStrategy(strategy);
+    vtkProp3D* const originalProp = strategy->GetMainProp();
+    SetExpect(renderer->HasViewProp(originalProp) != 0,
+        "render-preservation setup must attach the original prop.", failureCount);
+
+    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
+    std::optional<bool> reloadResult;
+    dataManager->SetBufferThrow(true);
+    SetExpect(service.ReloadFromBufferAsync(
+        reloadSource.data(),
+        { 2, 2, 1 },
+        { 1.0f, 1.0f, 1.0f },
+        { 0.0f, 0.0f, 0.0f },
+        [&](bool isSuccess) { reloadResult = isSuccess; }),
+        "render-preservation reload should be admitted.", failureCount);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!reloadResult.has_value() && std::chrono::steady_clock::now() < deadline) {
+        service.SendUpdates();
+        std::this_thread::yield();
+    }
+
+    SetExpect(reloadResult.has_value() && !*reloadResult,
+        "reload worker failure should deliver callback(false).", failureCount);
+    SetExpect(sharedState->GetDataTrustedState() == LoadState::Succeeded,
+        "reload failure must preserve the trusted current-data state.", failureCount);
+    SetExpect(service.GetMainProp() == originalProp
+        && renderer->HasViewProp(originalProp) != 0,
+        "reload failure must preserve the existing render strategy and prop.", failureCount);
+}
+
+void StartReloadTeardown(int& failureCount)
+{
+    auto dataManager = std::make_shared<ExportDataStub>();
+    auto eventHub = std::make_shared<SharedStateBroadcaster>();
+    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
+    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
+
+    {
+        VizService service(dataManager, sharedState, eventHub);
+        SetExpect(service.ReloadFromBufferAsync(
+            reloadSource.data(),
+            { 2, 2, 1 },
+            { 1.0f, 1.0f, 1.0f },
+            { 0.0f, 0.0f, 0.0f },
+            nullptr),
+            "teardown reload should be admitted.", failureCount);
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!dataManager->GetPendingReady()
+            && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        SetExpect(dataManager->GetPendingReady(),
+            "teardown setup should publish one unconsumed pending batch.", failureCount);
+    }
+
+    SetExpect(!dataManager->GetPendingReady()
+        && dataManager->GetClearPendingCount() == 2,
+        "Reload teardown must clear its pending batch before releasing admission.", failureCount);
+    SetExpect(sharedState->GetReloadLoadState() == LoadState::Failed,
+        "Reload teardown must not leave the shared state at Loading.", failureCount);
+    SetExpect(sharedState->StartLoad(LoadEventKind::File),
+        "Reload teardown must release admission for the next transaction.", failureCount);
+    sharedState->SetFileLoadFailed();
+    sharedState->ResetLoad(LoadEventKind::File);
+}
+
+void StartRawBufferOverflow(int& failureCount)
+{
+    RawVolumeDataManager dataManager;
+    const float source = 1.0f;
+    const int maxDim = std::numeric_limits<int>::max();
+    SetExpect(!dataManager.SetFromBuffer(
+        &source,
+        { maxDim, maxDim, maxDim },
+        { 1.0f, 1.0f, 1.0f },
+        { 0.0f, 0.0f, 0.0f }),
+        "Raw SetFromBuffer must reject voxel-count overflow before VTK allocation.",
+        failureCount);
+}
+
 void StartMultiViewLoad(int& failureCount)
 {
     auto dataManager = std::make_shared<ExportDataStub>();
@@ -678,6 +853,10 @@ void StartMultiViewLoad(int& failureCount)
         StartNullRejection(failureCount);
         StartWorkerFailure(failureCount);
         StartVizLoadFailure(failureCount);
+        StartPendingCommitFailure(failureCount);
+        StartReloadFailureRender(failureCount);
+        StartReloadTeardown(failureCount);
+        StartRawBufferOverflow(failureCount);
         StartMultiViewLoad(failureCount);
         return failureCount;
     }

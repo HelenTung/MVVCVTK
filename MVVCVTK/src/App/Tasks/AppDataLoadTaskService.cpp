@@ -32,6 +32,14 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildLoadFileT
         }
         return std::nullopt;
     }
+    if (!m_dataManager->ClearPending()) {
+        m_sharedState->SetFileLoadFailed();
+        m_sharedState->ResetLoad(LoadEventKind::File);
+        if (onComplete) {
+            m_fileLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
 
     m_fileLoadCallbackState.SetCallback(std::move(onComplete));
 
@@ -105,6 +113,14 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
         }
         return std::nullopt;
     }
+    if (!m_dataManager->ClearPending()) {
+        m_sharedState->SetReloadLoadFailed();
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        if (onComplete) {
+            m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
+        }
+        return std::nullopt;
+    }
 
     // admission 成功后才同步接管裸 buffer；函数返回时 worker 不再依赖调用方生命周期。
     try {
@@ -134,6 +150,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
         return task;
     }
     catch (const std::exception&) {
+        m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         if (onComplete) {
             m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));
@@ -141,6 +158,7 @@ std::optional<std::packaged_task<void()>> AppDataLoadTaskService::BuildReloadFro
         return std::nullopt;
     }
     catch (...) {
+        m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         if (onComplete) {
             m_reloadLoadCallbackState.SetCallbackReady(false, std::move(onComplete));

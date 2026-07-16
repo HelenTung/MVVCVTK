@@ -9,7 +9,9 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <vtkStringArray.h>
 #include <vtkTransform.h>
@@ -50,6 +52,25 @@ public:
         return rasOrigin;
     }
 
+    static std::optional<size_t> GetVoxelCount(const int dims[3])
+    {
+        size_t voxelCount = 1;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (dims[axis] <= 0
+                || voxelCount > std::numeric_limits<size_t>::max()
+                    / static_cast<size_t>(dims[axis])) {
+                return std::nullopt;
+            }
+            voxelCount *= static_cast<size_t>(dims[axis]);
+        }
+        if (voxelCount > std::numeric_limits<size_t>::max() / sizeof(float)
+            || voxelCount > static_cast<size_t>(
+                std::numeric_limits<std::ptrdiff_t>::max())) {
+            return std::nullopt;
+        }
+        return voxelCount;
+    }
+
     bool SetCurrent(ImageState state)
     {
         if (!state.image) {
@@ -78,13 +99,17 @@ public:
         const int dims[3],
         size_t availableCount) const
     {
-        const size_t nx = dims[0] > 0 ? static_cast<size_t>(dims[0]) : 0;
-        const size_t ny = dims[1] > 0 ? static_cast<size_t>(dims[1]) : 0;
-        const size_t nz = dims[2] > 0 ? static_cast<size_t>(dims[2]) : 0;
+        const auto voxelCount = GetVoxelCount(dims);
+        if (!voxelCount) {
+            return false;
+        }
+        const size_t nx = static_cast<size_t>(dims[0]);
+        const size_t ny = static_cast<size_t>(dims[1]);
+        const size_t nz = static_cast<size_t>(dims[2]);
         const size_t sliceSize = nx * ny;
-        const size_t totalCount = sliceSize * nz;
+        const size_t totalCount = *voxelCount;
 
-        if (!dst || totalCount == 0) {
+        if (!dst || totalCount == 0 || availableCount > totalCount) {
             return false;
         }
 
@@ -283,9 +308,15 @@ bool BaseDataManager::SetFromBuffer(
     return false;
 }
 
-bool BaseDataManager::SetCurrentFromPending()
+bool BaseDataManager::SetCurrentFromPending(bool& hasPending)
 {
+    hasPending = false;
     return false;
+}
+
+bool BaseDataManager::ClearPending()
+{
+    return true;
 }
 
 bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image)
@@ -585,6 +616,11 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     const std::array<double, 3> rasOrigin = BaseDataManager::Impl::GetRasOrigin(
         lpsOrigin, newDims, rasSpacing);
 
+    const auto totalVoxels = BaseDataManager::Impl::GetVoxelCount(newDims);
+    if (!totalVoxels) {
+        return false;
+    }
+
     // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
@@ -593,8 +629,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
     // 读取数据到新内存
-    size_t totalVoxels = static_cast<size_t>(newDims[0]) * static_cast<size_t>(newDims[1]) * static_cast<size_t>(newDims[2]);
-    size_t expectedBytes = totalVoxels * sizeof(float);
+    const size_t expectedBytes = *totalVoxels * sizeof(float);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
 
     // 使用 MemMappedFile 替代 std::ifstream读取
@@ -628,7 +663,7 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
         if (!file.is_open()) {
             return false;
         }
-        std::vector<float> srcBuffer(totalVoxels, 0.0f);
+        std::vector<float> srcBuffer(*totalVoxels, 0.0f);
         file.read(reinterpret_cast<char*>(srcBuffer.data()),
             static_cast<std::streamsize>(expectedBytes));
         const size_t readBytes = static_cast<size_t>(file.gcount());
@@ -667,6 +702,10 @@ bool RawVolumeDataManager::SetFromBuffer(
 
     // 1. 在调用线程完成分配与唯一一次体素复制，并与文件路径一致地转换 LPS -> RAS 物理坐标。
     const int rasDims[3] = { dims[0], dims[1], dims[2] };
+    const auto voxelCount = BaseDataManager::Impl::GetVoxelCount(rasDims);
+    if (!voxelCount) {
+        return false;
+    }
     const std::array<double, 3> rasSpacing = {
         static_cast<double>(spacing[0]),
         static_cast<double>(spacing[1]),
@@ -684,12 +723,8 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
     newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);   // 分配（page-fault 在此触发）
-    const size_t total =
-        static_cast<size_t>(dims[0]) *
-        static_cast<size_t>(dims[1]) *
-        static_cast<size_t>(dims[2]);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-    if (!m_impl->SetRasScalars(data, dst, rasDims, total)) {
+    if (!m_impl->SetRasScalars(data, dst, rasDims, *voxelCount)) {
         return false;
     }
     double range[2] = { 0.0, 0.0 };
@@ -756,8 +791,9 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
     return true;
 }
 
-bool RawVolumeDataManager::SetCurrentFromPending()
+bool RawVolumeDataManager::SetCurrentFromPending(bool& hasPending)
 {
+    hasPending = false;
     // 消费阶段先从 pending Impl 接管一批事务，再向 Base Impl 提交为 current；两把锁职责不重叠。
     ImageState incoming;
     {
@@ -766,6 +802,7 @@ bool RawVolumeDataManager::SetCurrentFromPending()
         if (!m_rawImpl->m_pending.image) {
             return false;
         }
+        hasPending = true;
         // 2. 一次移动完整值对象；空 image 同时清除本批门铃。
         incoming = std::move(m_rawImpl->m_pending);
         m_rawImpl->m_pending = {};
@@ -779,6 +816,17 @@ bool RawVolumeDataManager::SetCurrentFromPending()
         return false;
     }
     // 5. 新 image 已成为 DataManager 的 current 真源；调用方随后发布 DataReady，驱动 Service 重建。
+    return true;
+}
+
+bool RawVolumeDataManager::ClearPending()
+{
+    ImageState retiredPending;
+    {
+        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
+        retiredPending = std::move(m_rawImpl->m_pending);
+        m_rawImpl->m_pending = {};
+    }
     return true;
 }
 

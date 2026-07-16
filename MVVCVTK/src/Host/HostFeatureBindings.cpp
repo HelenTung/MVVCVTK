@@ -217,8 +217,10 @@ void HostFeatureBindings::Impl::AttachFeatures(
                     std::cerr << "[Host] Orthogonal crop submit failed: reload is already in progress." << std::endl;
                     return false;
                 }
+                bool hasPending = false;
                 if (!sharedDataMgr->SetImageSnapshot(std::move(image))
-                    || !sharedDataMgr->SetCurrentFromPending()) {
+                    || !sharedDataMgr->SetCurrentFromPending(hasPending)
+                    || !hasPending) {
                     sharedState->SetReloadLoadFailed();
                     sendViewUpdates();
                     sharedState->ResetLoad(LoadEventKind::Reload);

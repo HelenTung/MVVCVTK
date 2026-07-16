@@ -112,7 +112,7 @@ private:
     void SendLoadCallbacks();
     void BuildPipeline();
     void SetStrategyState();
-    void ClearLoadFail();
+    void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
     void SetRendererBg();
@@ -201,6 +201,20 @@ VizService::Impl::~Impl()
     const auto ownedLoadKind = static_cast<LoadEventKind>(
         m_ownedLoadKind.exchange(static_cast<int>(LoadEventKind::None)));
     if (m_sharedState && ownedLoadKind != LoadEventKind::None) {
+        // Reload worker 可能已发布 pending、但 Timer 尚未提交；先销毁 payload，再发布失败终态，
+        // 防止共享 DataManager 在下一事务中提交旧批次。
+        if (ownedLoadKind == LoadEventKind::Reload) {
+            if (m_dataManager) {
+                m_dataManager->ClearPending();
+            }
+            if (m_sharedState->GetReloadLoadState() == LoadState::Loading) {
+                m_sharedState->SetReloadLoadFailed();
+            }
+        }
+        else if (ownedLoadKind == LoadEventKind::File
+            && m_sharedState->GetFileLoadState() == LoadState::Loading) {
+            m_sharedState->SetFileLoadFailed();
+        }
         // Service 销毁后不会再消费 callback，但不能让它已接纳的全局事务永久占用 admission。
         m_sharedState->ResetLoad(ownedLoadKind);
     }
@@ -832,6 +846,7 @@ bool VizService::Impl::ReloadFromBufferAsync(
     }
 
     if (!SetOwnedLoad(LoadEventKind::Reload)) {
+        m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         m_dataLoadTaskService->SetReloadReady(false);
         return false;
@@ -841,6 +856,7 @@ bool VizService::Impl::ReloadFromBufferAsync(
     }
     catch (const std::exception& error) {
         ResetOwnedLoad(LoadEventKind::Reload);
+        m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         m_dataLoadTaskService->SetReloadReady(false);
         std::cerr << "[ReloadFromBufferAsync] Worker start failed: "
@@ -849,6 +865,7 @@ bool VizService::Impl::ReloadFromBufferAsync(
     }
     catch (...) {
         ResetOwnedLoad(LoadEventKind::Reload);
+        m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         m_dataLoadTaskService->SetReloadReady(false);
         std::cerr << "[ReloadFromBufferAsync] Worker start failed with an unknown exception.\n";
@@ -1112,7 +1129,7 @@ void VizService::Impl::SendUpdates()
                 BuildPipeline();
             }
             else {
-                ClearLoadFail();
+                ClearLoadFail(loadNotice.kind);
             }
         }
 
@@ -1145,8 +1162,23 @@ void VizService::Impl::SendUpdates()
 
 void VizService::Impl::SendPendingImage()
 {
+    // pending 只属于仍处于 Loading 的 Reload；File 或已结束事务不得误消费遗留批次。
+    if (!m_sharedState || m_sharedState->GetReloadLoadState() != LoadState::Loading) {
+        return;
+    }
+
     // Timer 尝试把一批 pending 事务提升为 current；DataManager 的事务锁保证同一批只接管一次。
-    if (!m_dataManager || !m_dataManager->SetCurrentFromPending()) {
+    bool hasPending = false;
+    if (!m_dataManager) {
+        return;
+    }
+    const bool isCommitted = m_dataManager->SetCurrentFromPending(hasPending);
+    if (!hasPending) {
+        return;
+    }
+    if (!isCommitted) {
+        // 已领取批次却未能提交时必须形成失败终态，否则 admission 与 callback 会永久悬挂。
+        m_sharedState->SetReloadLoadFailed();
         return;
     }
 
@@ -1349,8 +1381,16 @@ void VizService::Impl::SetStrategyState()
     m_isDirty = true;
 }
 
-void VizService::Impl::ClearLoadFail()
+void VizService::Impl::ClearLoadFail(LoadEventKind loadEventKind)
 {
+    if (loadEventKind == LoadEventKind::Reload
+        && m_sharedState
+        && m_sharedState->GetDataTrustedState() == LoadState::Succeeded) {
+        // Reload 失败不替换 current；保留旧 snapshot/strategy/overlay，使可信数据继续可见。
+        m_isDirty = true;
+        return;
+    }
+
     std::cerr << "[ClearLoadFail] Load failed; clearing pipeline state.\n";
 
     // 清理策略缓存（无有效数据，不应保留旧 Strategy）

@@ -44,7 +44,8 @@ public:
         const std::array<int, 3>& dims,
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) override;
-    bool SetCurrentFromPending() override;
+    bool SetCurrentFromPending(bool& hasPending) override;
+    bool ClearPending() override;
 
     bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
     bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
@@ -66,7 +67,8 @@ public:
     // 深拷贝调用方 image 为 pending 隔离批次，不直接提交 current。
     bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
     // 具备 VTK pipeline 写权限的消费线程领取 pending payload，触发 Modified() 后提交完整 current 图像状态。
-    bool SetCurrentFromPending() override;
+    bool SetCurrentFromPending(bool& hasPending) override;
+    bool ClearPending() override;
 
 private:
     class Impl;

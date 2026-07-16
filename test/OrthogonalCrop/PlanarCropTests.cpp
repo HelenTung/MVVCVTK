@@ -815,8 +815,9 @@ void StartDataExport(int& failureCount)
         dataManager.GetDataVersion() == initialVersion,
         "pending image snapshot should not change the current data version.",
         failureCount);
+    bool hasPending = false;
     SetExpect(
-        dataManager.SetCurrentFromPending(),
+        dataManager.SetCurrentFromPending(hasPending) && hasPending,
         "data export setup should promote the pending image into the current data manager image.",
         failureCount);
     SetExpect(
@@ -1011,9 +1012,11 @@ void StartDataExport(int& failureCount)
     for (vtkIdType tupleId = 0; tupleId < replacementImage->GetNumberOfPoints(); ++tupleId) {
         replacementScalars[tupleId] = 77.0f + static_cast<float>(tupleId);
     }
+    bool hasReplacement = false;
     SetExpect(
         dataManager.SetImageSnapshot(replacementImage)
-            && dataManager.SetCurrentFromPending(),
+            && dataManager.SetCurrentFromPending(hasReplacement)
+            && hasReplacement,
         "a second independent image should replace the complete current batch.",
         failureCount);
     const auto replacementOwner = dataManager.GetImageSnapshot();

@@ -76,8 +76,11 @@ public:
         const std::array<float, 3>& spacing,
         const std::array<float, 3>& origin) = 0;
     // 后台准备好新体数据后，由具备 VTK pipeline 写权限的消费线程接管并提交为 current；
+    // hasPending 与领取动作在同一锁内产生：false 表示当前无批次，true + 返回 false 表示提交失败。
     // 通常由主线程 Timer 调用，Host 同步事务也可由其绑定线程调用。
-    virtual bool SetCurrentFromPending() = 0;
+    virtual bool SetCurrentFromPending(bool& hasPending) = 0;
+    // 销毁尚未提交的完整 pending 批次；无 pending 也视为清理成功。
+    virtual bool ClearPending() = 0;
     virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) = 0;
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;
 };

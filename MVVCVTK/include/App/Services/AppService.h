@@ -134,10 +134,10 @@ public:
     // 作用：按固定顺序消费 pending image、导出回调、缓存清理、加载状态、策略同步和加载回调。
     // 实现依赖对象由 Impl 与基础服务状态共同持有。
     // 固定顺序：
-    //   1. SetCurrentFromPending -> SetReloadDataReady
+    //   1. SetCurrentFromPending -> SetReloadDataReady / SetReloadLoadFailed
     //   2. ResetSaveCallback -> SendSaveCallback
     //   3. 缓存清理请求 -> ClearStrategyCache
-    //   4. 完整 load 终态队列 -> ClearLoadFail/BuildPipeline
+    //   4. 完整 load 终态队列 -> File 清场 / Reload 保留可信旧管线 / BuildPipeline
     //   5. 非 load 结构请求与策略同步 -> BuildPipeline/SetStrategyState
     //   6. owner 释放 admission -> Send*LoadCallback；Host-owned 事务由 Host 统一释放
     // ================================================================
