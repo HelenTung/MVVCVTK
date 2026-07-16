@@ -17,8 +17,15 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
+
+namespace {
+template <typename>
+constexpr bool isUnknownType = false;
+}
 
 class HostFeatureBindings::Impl final {
 public:
@@ -27,12 +34,21 @@ public:
     void AttachFeatures(
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews);
+    bool SendCommand(HostFeatureCommand command);
+    bool GetGapView() const;
+    bool GetCropActive() const;
+    void ClearCropInput() const;
+    bool SendCropInput();
+    void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
+
+private:
+    bool SendCropCommand(const HostCropCommand& command);
+    bool SendGapCommand(const HostGapCommand& command);
     bool StartCrop(const HostCropViewRequest& request);
     bool StartGapView(const HostGapViewRequest& request);
     bool SwitchGapView(const HostGapViewRequest& request);
     bool SwitchGapLayer();
     bool ExitGapView();
-    bool GetGapView() const;
     bool SwitchCropBox(const HostCropViewRequest& request);
     bool SwitchCropPlane(const HostCropViewRequest& request);
     bool SwitchCropView(
@@ -41,13 +57,7 @@ public:
     bool SendCrop(const HostCropViewRequest& request);
     bool ExitCrop();
     bool ExitFeature();
-    bool GetCropActive() const;
-    void ClearCropInput() const;
-    bool SendCropInput();
-    void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
     void DetachHostTimer();
-
-private:
     void OnHostTimer();
     static bool GetImageReady(vtkImageData* image);
 
@@ -380,6 +390,72 @@ bool HostFeatureBindings::Impl::StartGapView(
     return true;
 }
 
+bool HostFeatureBindings::Impl::SendCommand(HostFeatureCommand command)
+{
+    return std::visit(
+        [this](auto&& featureCommand) -> bool {
+            using Command = std::decay_t<decltype(featureCommand)>;
+            if constexpr (std::is_same_v<Command, HostCropCommand>) {
+                return SendCropCommand(featureCommand);
+            }
+            else if constexpr (std::is_same_v<Command, HostGapCommand>) {
+                return SendGapCommand(featureCommand);
+            }
+            else if constexpr (std::is_same_v<Command, HostExitCommand>) {
+                return ExitFeature();
+            }
+            else {
+                static_assert(isUnknownType<Command>, "Unknown host feature command");
+            }
+        },
+        std::move(command));
+}
+
+#if defined(_MSC_VER)
+// 当 action 枚举扩展却未同步分发时直接阻断编译，避免新动作静默失效。
+#pragma warning(push)
+#pragma warning(4 : 4062)
+#pragma warning(error : 4062)
+#endif
+
+bool HostFeatureBindings::Impl::SendCropCommand(const HostCropCommand& command)
+{
+    switch (command.action) {
+    case HostCropAction::Start:
+        return StartCrop(command.request);
+    case HostCropAction::Box:
+        return SwitchCropBox(command.request);
+    case HostCropAction::Plane:
+        return SwitchCropPlane(command.request);
+    case HostCropAction::Preview:
+        return SwitchCropView(command.request, command.previewMode);
+    case HostCropAction::Submit:
+        return SendCrop(command.request);
+    case HostCropAction::Exit:
+        return ExitCrop();
+    }
+    return false;
+}
+
+bool HostFeatureBindings::Impl::SendGapCommand(const HostGapCommand& command)
+{
+    switch (command.action) {
+    case HostGapAction::Start:
+        return StartGapView(command.request);
+    case HostGapAction::Switch:
+        return SwitchGapView(command.request);
+    case HostGapAction::Overlay:
+        return SwitchGapLayer();
+    case HostGapAction::Exit:
+        return ExitGapView();
+    }
+    return false;
+}
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 bool HostFeatureBindings::Impl::SwitchGapView(
     const HostGapViewRequest& request)
 {
@@ -566,66 +642,14 @@ void HostFeatureBindings::AttachFeatures(
     m_impl->AttachFeatures(core, renderViews);
 }
 
-bool HostFeatureBindings::StartCrop(const HostCropViewRequest& request)
+bool HostFeatureBindings::SendCommand(HostFeatureCommand command)
 {
-    return m_impl->StartCrop(request);
-}
-
-bool HostFeatureBindings::StartGapView(const HostGapViewRequest& request)
-{
-    return m_impl->StartGapView(request);
-}
-
-bool HostFeatureBindings::SwitchGapView(const HostGapViewRequest& request)
-{
-    return m_impl->SwitchGapView(request);
-}
-
-bool HostFeatureBindings::SwitchGapLayer()
-{
-    return m_impl->SwitchGapLayer();
-}
-
-bool HostFeatureBindings::ExitGapView()
-{
-    return m_impl->ExitGapView();
+    return m_impl->SendCommand(std::move(command));
 }
 
 bool HostFeatureBindings::GetGapView() const
 {
     return m_impl->GetGapView();
-}
-
-bool HostFeatureBindings::SwitchCropBox(const HostCropViewRequest& request)
-{
-    return m_impl->SwitchCropBox(request);
-}
-
-bool HostFeatureBindings::SwitchCropPlane(const HostCropViewRequest& request)
-{
-    return m_impl->SwitchCropPlane(request);
-}
-
-bool HostFeatureBindings::SwitchCropView(
-    const HostCropViewRequest& request,
-    HostCropPreviewMode previewMode)
-{
-    return m_impl->SwitchCropView(request, previewMode);
-}
-
-bool HostFeatureBindings::SendCrop(const HostCropViewRequest& request)
-{
-    return m_impl->SendCrop(request);
-}
-
-bool HostFeatureBindings::ExitCrop()
-{
-    return m_impl->ExitCrop();
-}
-
-bool HostFeatureBindings::ExitFeature()
-{
-    return m_impl->ExitFeature();
 }
 
 bool HostFeatureBindings::GetCropActive() const

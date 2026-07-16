@@ -1,8 +1,8 @@
 #pragma once
 
 #include "Host/HostCoreServices.h"
+#include "Host/HostCommandTypes.h"
 #include "Host/HostRenderViewSet.h"
-#include "Host/HostSessionTypes.h"
 
 #include <functional>
 #include <memory>
@@ -16,9 +16,7 @@ class StdRenderContext;
 // 1. 初始化只注册能力和回调，不默认进入 feature 模式。
 // 2. 激活请求必须带目标窗口语义，由上位机或 standalone hotkey 显式触发。
 // 3. 具体功能键只存在于 standalone host 输入层，不进入插件代码。
-// 继承 enable_shared_from_this 是为了把 VTK observer 的回调生命周期收敛到 session 持有的 shared_ptr；
-// observer 只保存 weak_ptr，窗口事件晚到时不会反向延长或访问已销毁的 HostFeatureBindings。
-class HostFeatureBindings : public std::enable_shared_from_this<HostFeatureBindings> {
+class HostFeatureBindings final {
 public:
     HostFeatureBindings();
     ~HostFeatureBindings();
@@ -28,26 +26,9 @@ public:
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews);
 
-    // 显式激活裁切链路，只解析参考/预览窗口并刷新输入图像，不负责具体按键语义。
-    bool StartCrop(const HostCropViewRequest& request);
-    // 显式进入孔隙显示链路；只在请求提供目标窗口后才启动一次算法请求。
-    bool StartGapView(const HostGapViewRequest& request);
-    // standalone 输入使用的“进入或切换显示”命令；具体状态由 GapAnalysis feature 自己判断。
-    bool SwitchGapView(const HostGapViewRequest& request);
-    // 临时隐藏/显示已进入模式的孔隙 overlay；不清除算法结果，也不退出显示模式。
-    bool SwitchGapLayer();
-    // 彻底退出孔隙显示模式；清除 overlay 缓存和 pending 请求。
-    bool ExitGapView();
+    // 统一接收领域命令；具体 Crop/Gap action 在 Pimpl 内分发并共享同一 session 生命周期。
+    bool SendCommand(HostFeatureCommand command);
     bool GetGapView() const;
-
-    bool SwitchCropBox(const HostCropViewRequest& request);
-    bool SwitchCropPlane(const HostCropViewRequest& request);
-    bool SwitchCropView(
-        const HostCropViewRequest& request,
-        HostCropPreviewMode previewMode);
-    bool SendCrop(const HostCropViewRequest& request);
-    bool ExitCrop();
-    bool ExitFeature();
     bool GetCropActive() const;
     void ClearCropInput() const;
     bool SendCropInput();

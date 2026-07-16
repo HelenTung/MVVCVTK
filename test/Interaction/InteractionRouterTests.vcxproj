@@ -140,7 +140,10 @@
   <ItemGroup>
     <ClInclude Include="AppStateTests.h" />
     <ClInclude Include="HostCommandRouterTests.h" />
+    <ClInclude Include="HostHotkeyRouterTests.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandTypes.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostHotkeyRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InputCallbackHandler.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionTypes.h" />
@@ -158,9 +161,11 @@
     <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp" />
     <ClCompile Include="AppStateTests.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />
     <ClCompile Include="HostCommandRouterTests.cpp" />
+    <ClCompile Include="HostHotkeyRouterTests.cpp" />
     <ClCompile Include="InteractionRouterTests.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

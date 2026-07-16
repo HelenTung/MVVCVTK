@@ -160,6 +160,8 @@
     <ClInclude Include="include\App\AppState.h" />
     <ClInclude Include="include\App\AppTypes.h" />
     <ClInclude Include="include\Host\HostCommandRouter.h" />
+    <ClInclude Include="include\Host\HostCommandTypes.h" />
+    <ClInclude Include="include\Host\HostHotkeyRouter.h" />
     <ClInclude Include="include\Host\HostCoreServices.h" />
     <ClInclude Include="include\Host\HostFeatureBindings.h" />
     <ClInclude Include="include\Host\HostRenderViewSet.h" />
@@ -207,6 +209,7 @@
     <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp" />
     <ClCompile Include="src\App\Services\AppService.cpp" />
     <ClCompile Include="src\Host\HostCommandRouter.cpp" />
+    <ClCompile Include="src\Host\HostHotkeyRouter.cpp" />
     <ClCompile Include="src\Host\HostFeatureBindings.cpp" />
     <ClCompile Include="src\Host\HostRenderViewSet.cpp" />
     <ClCompile Include="src\Host\VtkAppHostSession.cpp" />

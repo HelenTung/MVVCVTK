@@ -1,89 +1,36 @@
 #pragma once
 
-#include "Host/HostSessionTypes.h"
+#include "Host/HostCommandTypes.h"
 
 #include <functional>
+#include <type_traits>
+#include <utility>
+#include <variant>
 
 class HostFeatureBindings {
 public:
-    bool StartCrop(const HostCropViewRequest&)
+    bool SendCommand(HostFeatureCommand command)
     {
-        ++m_cropStartCount;
-        m_isCropActive = true;
-        return true;
-    }
-
-    bool SwitchCropBox(const HostCropViewRequest&)
-    {
-        ++m_cropBoxCount;
-        m_isCropActive = true;
-        return true;
-    }
-
-    bool SwitchCropPlane(const HostCropViewRequest&)
-    {
-        ++m_cropPlaneCount;
-        m_isCropActive = true;
-        return true;
-    }
-
-    bool SwitchCropView(const HostCropViewRequest&, HostCropPreviewMode)
-    {
-        ++m_cropViewCount;
-        m_isCropActive = true;
-        return true;
-    }
-
-    bool SendCrop(const HostCropViewRequest&)
-    {
-        ++m_cropSendCount;
-        return true;
-    }
-
-    bool ExitCrop()
-    {
-        ++m_cropExitCount;
-        if (!m_isCropActive) {
-            return false;
-        }
-        m_isCropActive = false;
-        return true;
-    }
-
-    bool StartGapView(const HostGapViewRequest&)
-    {
-        ++m_gapStartCount;
-        m_isGapView = true;
-        return true;
-    }
-
-    bool SwitchGapView(const HostGapViewRequest&)
-    {
-        ++m_gapViewCount;
-        m_isGapView = true;
-        return true;
-    }
-
-    bool SwitchGapLayer()
-    {
-        ++m_gapLayerCount;
-        return m_isGapView;
-    }
-
-    bool ExitGapView()
-    {
-        ++m_gapExitCount;
-        if (!m_isGapView) {
-            return false;
-        }
-        m_isGapView = false;
-        return true;
-    }
-
-    bool ExitFeature()
-    {
-        ++m_featureExitCount;
-        return ExitCrop() || ExitGapView();
+        m_lastCommand = command;
+        return std::visit(
+            [this](auto&& featureCommand) -> bool {
+                using Command = std::decay_t<decltype(featureCommand)>;
+                if constexpr (std::is_same_v<Command, HostCropCommand>) {
+                    return SendCropCommand(featureCommand);
+                }
+                else if constexpr (std::is_same_v<Command, HostGapCommand>) {
+                    return SendGapCommand(featureCommand);
+                }
+                else if constexpr (std::is_same_v<Command, HostExitCommand>) {
+                    ++m_featureExitCount;
+                    return ExitCrop() || ExitGapView();
+                }
+                else {
+                    // 新 feature domain 由其专用测试 fake 覆盖；通用 host fake 保持可编译并显式拒绝。
+                    return false;
+                }
+            },
+            std::move(command));
     }
 
     bool GetCropActive() const
@@ -105,6 +52,32 @@ public:
     {
         m_isGapView = isActive;
         return true;
+    }
+
+    bool SetCommandResult(bool isSuccess)
+    {
+        m_isCommandSuccess = isSuccess;
+        return true;
+    }
+
+    const HostGapViewRequest& GetLastGapRequest() const
+    {
+        return m_lastGapRequest;
+    }
+
+    const HostCropViewRequest& GetLastCropRequest() const
+    {
+        return m_lastCropRequest;
+    }
+
+    HostCropPreviewMode GetLastPreviewMode() const
+    {
+        return m_lastPreviewMode;
+    }
+
+    const HostFeatureCommand& GetLastCommand() const
+    {
+        return m_lastCommand;
     }
 
     int GetCropSendCount() const
@@ -141,8 +114,110 @@ public:
     }
 
 private:
+#if defined(_MSC_VER)
+    // 测试 fake 必须与 production 保持同样的 action 穷尽门禁。
+#pragma warning(push)
+#pragma warning(4 : 4062)
+#pragma warning(error : 4062)
+#endif
+
+    bool SendCropCommand(const HostCropCommand& command)
+    {
+        switch (command.action) {
+        case HostCropAction::Start:
+            ++m_cropStartCount;
+            m_lastCropRequest = command.request;
+            return SetCropActive();
+        case HostCropAction::Box:
+            ++m_cropBoxCount;
+            m_lastCropRequest = command.request;
+            return SetCropActive();
+        case HostCropAction::Plane:
+            ++m_cropPlaneCount;
+            m_lastCropRequest = command.request;
+            return SetCropActive();
+        case HostCropAction::Preview:
+            ++m_cropViewCount;
+            m_lastCropRequest = command.request;
+            m_lastPreviewMode = command.previewMode;
+            return SetCropActive();
+        case HostCropAction::Submit:
+            ++m_cropSendCount;
+            m_lastCropRequest = command.request;
+            return m_isCommandSuccess;
+        case HostCropAction::Exit:
+            return ExitCrop();
+        }
+        return false;
+    }
+
+    bool SendGapCommand(const HostGapCommand& command)
+    {
+        switch (command.action) {
+        case HostGapAction::Start:
+            ++m_gapStartCount;
+            m_lastGapRequest = command.request;
+            return SetGapActive();
+        case HostGapAction::Switch:
+            ++m_gapViewCount;
+            m_lastGapRequest = command.request;
+            return SetGapActive();
+        case HostGapAction::Overlay:
+            ++m_gapLayerCount;
+            return m_isCommandSuccess && m_isGapView;
+        case HostGapAction::Exit:
+            return ExitGapView();
+        }
+        return false;
+    }
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+    bool SetCropActive()
+    {
+        if (m_isCommandSuccess) {
+            m_isCropActive = true;
+        }
+        return m_isCommandSuccess;
+    }
+
+    bool SetGapActive()
+    {
+        if (m_isCommandSuccess) {
+            m_isGapView = true;
+        }
+        return m_isCommandSuccess;
+    }
+
+    bool ExitCrop()
+    {
+        ++m_cropExitCount;
+        if (!m_isCommandSuccess || !m_isCropActive) {
+            return false;
+        }
+        m_isCropActive = false;
+        return true;
+    }
+
+    bool ExitGapView()
+    {
+        ++m_gapExitCount;
+        if (!m_isCommandSuccess || !m_isGapView) {
+            return false;
+        }
+        m_isGapView = false;
+        return true;
+    }
+
     bool m_isCropActive = false;
     bool m_isGapView = false;
+    bool m_isCommandSuccess = true;
+    HostCropViewRequest m_lastCropRequest;
+    HostCropPreviewMode m_lastPreviewMode = HostCropPreviewMode::KeepInside;
+    HostGapViewRequest m_lastGapRequest;
+    HostFeatureCommand m_lastCommand;
     int m_cropSendCount = 0;
     int m_featureExitCount = 0;
     int m_cropStartCount = 0;

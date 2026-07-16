@@ -2,6 +2,7 @@
 #include "InteractionRouter.h"
 #include "AppStateTests.h"
 #include "HostCommandRouterTests.h"
+#include "HostHotkeyRouterTests.h"
 
 #include <iostream>
 #include <memory>
@@ -134,6 +135,7 @@ int main()
 {
     int failureCount = InteractionCases().GetFailCount();
     failureCount += HostRouterSuite().GetFailCount();
+    failureCount += HostHotkeySuite().GetFailCount();
     failureCount += AppStateSuite().GetFailCount();
 
     if (failureCount == 0) {

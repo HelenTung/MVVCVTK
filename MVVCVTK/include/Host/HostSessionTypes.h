@@ -25,7 +25,7 @@ enum class HostRenderViewRole {
     Auxiliary
 };
 
-// 独立 VTK 调试入口的输入协议。它由 main 或上位机适配层填充，由 host router Impl 消费。
+// 独立 VTK 调试入口的输入协议。它由 main 或上位机适配层填充，由 HostHotkeyRouter 消费。
 // 为什么不放进 feature：固定按键是宿主交互事实，feature 只暴露 Start/Switch/Exit 等稳定命令。
 // 字段默认保持未分配，是为了让 Qt / 上位机创建 session 后不会隐式继承调试程序的快捷键。
 struct HostHotkeyBindings {
@@ -45,7 +45,7 @@ struct HostHotkeyBindings {
     char keepInsidePreviewKey = 0;
     // 调试预览键：移除平面法向内侧。
     char removeInsidePreviewKey = 0;
-    // 调试提交键的主键位；host router Impl 额外要求 isCtrlDown，避免裸数字键触发 VTK 内建行为。
+    // 调试提交键的主键位；HostHotkeyRouter 额外要求 isCtrlDown，避免裸数字键触发 VTK 内建行为。
     char submitKey = 0;
     // 使用 key symbol 而不是 char，是因为 Escape 这类控制键没有稳定可打印字符。
     std::string exitKeySym;
@@ -185,7 +185,7 @@ struct HostDataExportConfig {
 };
 
 // 裁切激活请求把“参考窗口”和“预览窗口”拆开描述。
-// 调用方：上位机命令或 standalone hotkey；消费方：HostFeatureBindings::ConfigureOrthogonalCrop。
+// 调用方：上位机命令或 standalone hotkey；消费方：HostFeatureBindings::SendCommand（内部按 HostCropCommand 分发）。
 // 参考窗口提供坐标互转与 widget interactor，预览窗口只接收 overlay/dirty 刷新。
 struct HostCropViewRequest {
     // 优先级最高的参考窗口选择方式；适合 Qt 已经拿到具体窗口 id 的场景。
@@ -280,7 +280,7 @@ struct HostGapViewRequest {
     std::optional<HostGapConfig> algorithm;
 };
 
-// 独立 VTK host 的 feature 输入绑定，由 main 配置，由 HostFeatureBindings 安装到指定窗口。
+// 独立 VTK host 的 feature 输入配置，由 main 配置，由 HostHotkeyRouter 安装到指定窗口。
 // 热键监听范围和 feature 激活目标分开写，是为了避免“哪个窗口收键”被误当成“feature 作用在哪些窗口”。
 struct HostCommandInputConfig {
     // false 时不安装 standalone feature input handler；Qt / 上位机应走 VtkAppHostSession 的显式命令。

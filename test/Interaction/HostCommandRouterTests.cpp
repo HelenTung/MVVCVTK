@@ -6,8 +6,6 @@
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
 
-#include <vtkCommand.h>
-
 #include <array>
 #include <iostream>
 #include <memory>
@@ -39,38 +37,14 @@ public:
         return m_router != nullptr;
     }
 
-    bool AttachHotkeys(
-        const HostContextInput& contextInput,
-        const HostCommandInputConfig& commandInput,
-        const HostHotkeyBindings& hotkeys)
-    {
-        if (!m_router) {
-            return false;
-        }
-
-        HostCommandRouterRequest request;
-        request.command = HostCommandKind::Hotkeys;
-        request.renderContextInput = contextInput;
-        request.commandInput = commandInput;
-        request.hotkeys = hotkeys;
-        return m_router->DispatchCommand(std::move(request));
-    }
-
     bool SetViewConfig(const HostViewConfig& viewConfig)
     {
-        if (!m_router) {
-            return false;
-        }
-
-        HostCommandRouterRequest request;
-        request.command = HostCommandKind::ViewConfig;
-        request.viewConfig = viewConfig;
-        return m_router->DispatchCommand(std::move(request));
+        return SendCommand(HostCommand{ HostViewCommand{ viewConfig } });
     }
 
-    bool SendRequest(HostCommandRouterRequest request)
+    bool SendCommand(HostCommand command)
     {
-        return m_router && m_router->DispatchCommand(std::move(request));
+        return m_router && m_router->DispatchCommand(std::move(command));
     }
 
     std::shared_ptr<VizService> GetViewService(const std::string& id) const
@@ -94,26 +68,63 @@ private:
     std::unique_ptr<HostCommandRouter> m_router;
 };
 
-InteractionEvent GetKeyEvent(
-    unsigned long eventId,
-    char keyCode,
-    const char* keySym,
-    bool isCtrlDown = false)
-{
-    InteractionEvent event;
-    event.vtkEventId = eventId;
-    event.keyCode = keyCode;
-    event.keySym = keySym ? keySym : "";
-    event.isCtrlDown = isCtrlDown;
-    return event;
-}
-
 bool GetExpected(bool isExpected, const char* message)
 {
     if (!isExpected) {
         std::cerr << message << '\n';
     }
     return isExpected;
+}
+
+HostCommandInputConfig GetGapInput(const std::string& viewId)
+{
+    HostCommandInputConfig commandInput;
+    commandInput.isHotkeyEnabled = true;
+    commandInput.targetViewIds = { viewId };
+    commandInput.gapViewRequest.targetViewIds = { "gapOverlay" };
+    commandInput.gapViewRequest.targetViewRoles = { HostRenderViewRole::Auxiliary };
+    commandInput.gapViewRequest.isDefaultOverlayUsed = true;
+    commandInput.gapViewRequest.algorithm.emplace();
+    commandInput.gapViewRequest.algorithm->surface.isoMode =
+        HostGapAnalysisIsoMode::AbsoluteValue;
+    commandInput.gapViewRequest.algorithm->surface.dataRangeRatio = 0.25;
+    commandInput.gapViewRequest.algorithm->surface.absoluteIsoValue = 84.0;
+    commandInput.gapViewRequest.algorithm->voidDetection.grayMin = 12.0f;
+    commandInput.gapViewRequest.algorithm->voidDetection.grayMax = 220.0f;
+    commandInput.gapViewRequest.algorithm->voidDetection.minVolumeMM3 = 1.5f;
+    commandInput.gapViewRequest.algorithm->voidDetection.angleThresholdDeg = 28.0f;
+    commandInput.gapViewRequest.algorithm->voidDetection.tensorWindowSize = 5;
+    commandInput.gapViewRequest.algorithm->voidDetection.erosionIterations = 2;
+    return commandInput;
+}
+
+bool GetGapRequestEqual(
+    const HostGapViewRequest& actual,
+    const HostGapViewRequest& expected)
+{
+    if (actual.targetViewIds != expected.targetViewIds
+        || actual.targetViewRoles != expected.targetViewRoles
+        || actual.isDefaultOverlayUsed != expected.isDefaultOverlayUsed
+        || actual.algorithm.has_value() != expected.algorithm.has_value()) {
+        return false;
+    }
+    if (!actual.algorithm) {
+        return true;
+    }
+
+    const auto& actualSurface = actual.algorithm->surface;
+    const auto& expectedSurface = expected.algorithm->surface;
+    const auto& actualVoid = actual.algorithm->voidDetection;
+    const auto& expectedVoid = expected.algorithm->voidDetection;
+    return actualSurface.isoMode == expectedSurface.isoMode
+        && actualSurface.dataRangeRatio == expectedSurface.dataRangeRatio
+        && actualSurface.absoluteIsoValue == expectedSurface.absoluteIsoValue
+        && actualVoid.grayMin == expectedVoid.grayMin
+        && actualVoid.grayMax == expectedVoid.grayMax
+        && actualVoid.minVolumeMM3 == expectedVoid.minVolumeMM3
+        && actualVoid.angleThresholdDeg == expectedVoid.angleThresholdDeg
+        && actualVoid.tensorWindowSize == expectedVoid.tensorWindowSize
+        && actualVoid.erosionIterations == expectedVoid.erosionIterations;
 }
 
 bool StartViewModeCase()
@@ -137,7 +148,7 @@ bool StartViewModeCase()
     viewConfig.viewId = "mode";
     viewConfig.mode = VizMode::SliceTop_down;
     isPassed = GetExpected(
-        fixture.SetViewConfig(viewConfig),
+        fixture.SendCommand(HostCommand{ HostViewCommand{ viewConfig } }),
         "View mode case should dispatch the config command.") && isPassed;
     isPassed = GetExpected(
         service && service->GetVizModeSetCount() == 1
@@ -177,221 +188,6 @@ bool StartNoContextModeCase()
     return isPassed;
 }
 
-bool StartModelRepeatCase()
-{
-    bool isPassed = true;
-    HostRouterFixture fixture;
-    auto context = std::make_shared<StdRenderContext>();
-    isPassed = GetExpected(
-        fixture.CreateView("model", HostRenderViewRole::Primary3D, context),
-        "Model case should create the target view.") && isPassed;
-    isPassed = GetExpected(fixture.BuildRouter(), "Model case should build the router.") && isPassed;
-
-    HostContextInput contextInput;
-    contextInput.isHotkeyEnabled = true;
-    contextInput.targetViewIds = { "model" };
-    HostCommandInputConfig commandInput;
-    HostHotkeyBindings hotkeys;
-    hotkeys.modelSwitchKey = 'm';
-    isPassed = GetExpected(
-        fixture.AttachHotkeys(contextInput, commandInput, hotkeys),
-        "Model case should attach hotkeys.") && isPassed;
-
-    const auto press = GetKeyEvent(vtkCommand::KeyPressEvent, 'm', "m");
-    const auto firstResult = context->OnInput(press);
-    isPassed = GetExpected(
-        firstResult.isHandled && firstResult.hasVtkAbort
-            && context->GetToolMode() == ToolMode::ModelTransform,
-        "First model press should enter model transform mode.") && isPassed;
-    isPassed = GetExpected(
-        context->GetToolModeSetCount() == 1,
-        "First model press should change the tool mode once.") && isPassed;
-
-    const auto repeatResult = context->OnInput(press);
-    isPassed = GetExpected(
-        repeatResult.isHandled && repeatResult.hasVtkAbort,
-        "Repeated model press should remain handled and aborted.") && isPassed;
-    isPassed = GetExpected(
-        context->GetToolMode() == ToolMode::ModelTransform
-            && context->GetToolModeSetCount() == 1,
-        "Repeated model press should not toggle the tool mode again.") && isPassed;
-
-    const auto charResult = context->OnInput(GetKeyEvent(vtkCommand::CharEvent, 'm', "m"));
-    isPassed = GetExpected(
-        charResult.isHandled && charResult.hasVtkAbort
-            && context->GetToolModeSetCount() == 1,
-        "Model CharEvent should be consumed without another toggle.") && isPassed;
-
-    const auto releaseResult = context->OnInput(GetKeyEvent(vtkCommand::KeyReleaseEvent, 'm', "m"));
-    isPassed = GetExpected(
-        releaseResult.isHandled && releaseResult.hasVtkAbort,
-        "Model release should clear and consume the managed key state.") && isPassed;
-
-    context->OnInput(press);
-    isPassed = GetExpected(
-        context->GetToolMode() == ToolMode::Navigation
-            && context->GetToolModeSetCount() == 2,
-        "Next physical model press should toggle exactly once after release.") && isPassed;
-    return isPassed;
-}
-
-bool StartEscapeRepeatCase()
-{
-    bool isPassed = true;
-    HostRouterFixture fixture;
-    auto context = std::make_shared<StdRenderContext>();
-    isPassed = GetExpected(
-        fixture.CreateView("feature", HostRenderViewRole::Primary3D, context),
-        "Escape case should create the target view.") && isPassed;
-    isPassed = GetExpected(fixture.BuildRouter(), "Escape case should build the router.") && isPassed;
-
-    HostContextInput contextInput;
-    HostCommandInputConfig commandInput;
-    commandInput.isHotkeyEnabled = true;
-    commandInput.targetViewIds = { "feature" };
-    HostHotkeyBindings hotkeys;
-    hotkeys.exitKeySym = "Escape";
-    isPassed = GetExpected(
-        fixture.AttachHotkeys(contextInput, commandInput, hotkeys),
-        "Escape case should attach hotkeys.") && isPassed;
-
-    fixture.GetBindings()->SetCropActive(true);
-    const auto escapePress = GetKeyEvent(vtkCommand::KeyPressEvent, 27, "Escape");
-    const auto firstResult = context->OnInput(escapePress);
-    isPassed = GetExpected(
-        firstResult.isHandled && firstResult.hasVtkAbort,
-        "Managed Escape press should be handled and aborted.") && isPassed;
-    isPassed = GetExpected(
-        fixture.GetBindings()->GetFeatureExitCount() == 1
-            && !fixture.GetBindings()->GetCropActive(),
-        "First Escape press should exit the active feature exactly once.") && isPassed;
-
-    const auto repeatResult = context->OnInput(escapePress);
-    isPassed = GetExpected(
-        repeatResult.isHandled && repeatResult.hasVtkAbort
-            && fixture.GetBindings()->GetFeatureExitCount() == 1,
-        "Escape repeat should stay consumed after the last feature exits.") && isPassed;
-
-    const auto charResult = context->OnInput(GetKeyEvent(vtkCommand::CharEvent, 27, "Escape"));
-    isPassed = GetExpected(
-        charResult.isHandled && charResult.hasVtkAbort
-            && fixture.GetBindings()->GetFeatureExitCount() == 1,
-        "Managed Escape CharEvent should stay consumed without another exit.") && isPassed;
-
-    const auto releaseResult = context->OnInput(GetKeyEvent(vtkCommand::KeyReleaseEvent, 27, "Escape"));
-    isPassed = GetExpected(
-        releaseResult.isHandled && releaseResult.hasVtkAbort,
-        "Managed Escape release should clear the down state.") && isPassed;
-
-    const auto idlePress = context->OnInput(escapePress);
-    const auto idleChar = context->OnInput(GetKeyEvent(vtkCommand::CharEvent, 27, "Escape"));
-    isPassed = GetExpected(
-        !idlePress.isHandled && !idlePress.hasVtkAbort
-            && !idleChar.isHandled && !idleChar.hasVtkAbort,
-        "Fresh idle Escape press and CharEvent should remain unhandled.") && isPassed;
-    return isPassed;
-}
-
-bool StartCrossViewReleaseCase()
-{
-    bool isPassed = true;
-    HostRouterFixture fixture;
-    auto contextView = std::make_shared<StdRenderContext>();
-    auto featureView = std::make_shared<StdRenderContext>();
-    isPassed = GetExpected(
-        fixture.CreateView("context", HostRenderViewRole::Primary3D, contextView)
-            && fixture.CreateView("feature", HostRenderViewRole::Auxiliary, featureView),
-        "Cross-view case should create both target views.") && isPassed;
-    isPassed = GetExpected(fixture.BuildRouter(), "Cross-view case should build the router.") && isPassed;
-
-    HostContextInput contextInput;
-    contextInput.isHotkeyEnabled = true;
-    contextInput.targetViewIds = { "context" };
-    HostCommandInputConfig commandInput;
-    commandInput.isHotkeyEnabled = true;
-    commandInput.targetViewIds = { "feature" };
-    HostHotkeyBindings hotkeys;
-    hotkeys.modelSwitchKey = 'm';
-    isPassed = GetExpected(
-        fixture.AttachHotkeys(contextInput, commandInput, hotkeys),
-        "Cross-view case should attach hotkeys.") && isPassed;
-
-    const auto modelPress = GetKeyEvent(vtkCommand::KeyPressEvent, 'm', "m");
-    contextView->OnInput(modelPress);
-    isPassed = GetExpected(
-        contextView->GetToolMode() == ToolMode::ModelTransform
-            && contextView->GetToolModeSetCount() == 1,
-        "Context-only view should handle the first model press.") && isPassed;
-
-    const auto releaseResult = featureView->OnInput(
-        GetKeyEvent(vtkCommand::KeyReleaseEvent, 'm', "m"));
-    isPassed = GetExpected(
-        releaseResult.isHandled && releaseResult.hasVtkAbort,
-        "Feature-only view should clear a model key released after focus moves.") && isPassed;
-
-    contextView->OnInput(modelPress);
-    isPassed = GetExpected(
-        contextView->GetToolMode() == ToolMode::Navigation
-            && contextView->GetToolModeSetCount() == 2,
-        "Model press should work again after cross-view release.") && isPassed;
-    return isPassed;
-}
-
-bool StartSubmitStateCase()
-{
-    bool isPassed = true;
-    HostRouterFixture fixture;
-    auto context = std::make_shared<StdRenderContext>();
-    isPassed = GetExpected(
-        fixture.CreateView("submit", HostRenderViewRole::Primary3D, context),
-        "Submit case should create the target view.") && isPassed;
-    isPassed = GetExpected(fixture.BuildRouter(), "Submit case should build the router.") && isPassed;
-
-    HostContextInput contextInput;
-    HostCommandInputConfig commandInput;
-    commandInput.isHotkeyEnabled = true;
-    commandInput.targetViewIds = { "submit" };
-    HostHotkeyBindings hotkeys;
-    hotkeys.submitKey = '3';
-    isPassed = GetExpected(
-        fixture.AttachHotkeys(contextInput, commandInput, hotkeys),
-        "Submit case should attach hotkeys.") && isPassed;
-
-    const auto ctrlPress = GetKeyEvent(vtkCommand::KeyPressEvent, '3', "3", true);
-    const auto plainPress = GetKeyEvent(vtkCommand::KeyPressEvent, '3', "3", false);
-    const auto firstResult = context->OnInput(ctrlPress);
-    isPassed = GetExpected(
-        firstResult.isHandled && firstResult.hasVtkAbort
-            && fixture.GetBindings()->GetCropSendCount() == 1,
-        "First Ctrl+Submit press should dispatch one crop submit.") && isPassed;
-
-    const auto changedModifierRepeat = context->OnInput(plainPress);
-    const auto charResult = context->OnInput(GetKeyEvent(vtkCommand::CharEvent, '3', "3"));
-    isPassed = GetExpected(
-        changedModifierRepeat.isHandled && changedModifierRepeat.hasVtkAbort
-            && charResult.isHandled && charResult.hasVtkAbort
-            && fixture.GetBindings()->GetCropSendCount() == 1,
-        "SubmitBlock repeat and CharEvent should share the Ctrl+Submit down state.") && isPassed;
-
-    const auto plainRelease = context->OnInput(GetKeyEvent(vtkCommand::KeyReleaseEvent, '3', "3"));
-    isPassed = GetExpected(
-        plainRelease.isHandled && plainRelease.hasVtkAbort,
-        "Submit release without Ctrl should clear the Ctrl+Submit state.") && isPassed;
-
-    context->OnInput(plainPress);
-    context->OnInput(ctrlPress);
-    isPassed = GetExpected(
-        fixture.GetBindings()->GetCropSendCount() == 1,
-        "Ctrl repeat during a plain SubmitBlock press should not dispatch submit.") && isPassed;
-
-    context->OnInput(GetKeyEvent(vtkCommand::KeyReleaseEvent, '3', "3", true));
-    context->OnInput(ctrlPress);
-    isPassed = GetExpected(
-        fixture.GetBindings()->GetCropSendCount() == 2,
-        "Next physical Ctrl+Submit press should dispatch after shared state release.") && isPassed;
-    return isPassed;
-}
-
 bool StartLoadDispatchCase()
 {
     bool isPassed = true;
@@ -401,20 +197,21 @@ bool StartLoadDispatchCase()
         "Load case should create a primary view.") && isPassed;
     isPassed = GetExpected(fixture.BuildRouter(), "Load case should build the router.") && isPassed;
 
-    bool hasCallback = false;
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::Load;
-    request.initialVolume.isInitialLoadEnabled = true;
-    request.initialVolume.filePath = "sample.raw";
-    request.initialVolume.geometry.emplace(
+    int callbackCount = 0;
+    bool isCallbackSuccess = false;
+    HostLoadCommand command;
+    command.request.isInitialLoadEnabled = true;
+    command.request.filePath = "sample.raw";
+    command.request.geometry.emplace(
         std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
         std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
-    request.loadComplete = [&hasCallback](bool isSuccess) {
-        hasCallback = isSuccess;
+    command.onComplete = [&callbackCount, &isCallbackSuccess](bool isSuccess) {
+        ++callbackCount;
+        isCallbackSuccess = isSuccess;
     };
 
     isPassed = GetExpected(
-        fixture.SendRequest(std::move(request)),
+        fixture.SendCommand(HostCommand{ std::move(command) }),
         "Load case should accept the valid request.") && isPassed;
     const auto service = fixture.GetViewService("load");
     isPassed = GetExpected(
@@ -422,8 +219,20 @@ bool StartLoadDispatchCase()
             && service->GetLoadPath() == "sample.raw",
         "Load case should call the selected service exactly once.") && isPassed;
     isPassed = GetExpected(
-        hasCallback && fixture.GetBindings()->GetCropInputCount() == 1,
+        callbackCount == 1 && isCallbackSuccess
+            && fixture.GetBindings()->GetCropInputCount() == 1,
         "Load case should forward completion and refresh crop input.") && isPassed;
+
+    int rejectedCallbackCount = 0;
+    HostLoadCommand rejectedCommand;
+    rejectedCommand.request.isInitialLoadEnabled = true;
+    rejectedCommand.onComplete = [&rejectedCallbackCount](bool) {
+        ++rejectedCallbackCount;
+    };
+    isPassed = GetExpected(
+        !fixture.SendCommand(HostCommand{ std::move(rejectedCommand) })
+            && rejectedCallbackCount == 0,
+        "Rejected Load command should not invoke its callback.") && isPassed;
     return isPassed;
 }
 
@@ -442,63 +251,69 @@ bool StartReloadDispatchCase()
         service != nullptr,
         "Reload case should expose the selected service.") && isPassed;
 
-    HostCommandRouterRequest invalidRequest;
-    invalidRequest.command = HostCommandKind::Reload;
-    invalidRequest.volumeBuffer.voxels.assign(7, 1.0f);
-    invalidRequest.volumeBuffer.dimensions = { 2, 2, 2 };
-    invalidRequest.volumeBuffer.geometry.emplace(
+    HostReloadCommand invalidCommand;
+    invalidCommand.request.voxels.assign(7, 1.0f);
+    invalidCommand.request.dimensions = { 2, 2, 2 };
+    invalidCommand.request.geometry.emplace(
         std::array<float, 3>{ 0.5f, 1.0f, 1.5f },
         std::array<float, 3>{ 4.0f, 5.0f, 6.0f });
-    bool hasInvalidCallback = false;
-    invalidRequest.reloadComplete = [&hasInvalidCallback](bool) {
-        hasInvalidCallback = true;
+    int invalidCallbackCount = 0;
+    invalidCommand.onComplete = [&invalidCallbackCount](bool) {
+        ++invalidCallbackCount;
     };
     isPassed = GetExpected(
-        !fixture.SendRequest(std::move(invalidRequest))
+        !fixture.SendCommand(HostCommand{ std::move(invalidCommand) })
             && service && service->GetReloadCount() == 0
-            && !hasInvalidCallback,
+            && invalidCallbackCount == 0,
         "Reload case should reject a voxel-count mismatch without a callback.") && isPassed;
 
-    HostCommandRouterRequest invalidDimensionsRequest;
-    invalidDimensionsRequest.command = HostCommandKind::Reload;
-    invalidDimensionsRequest.volumeBuffer.voxels.assign(1, 1.0f);
-    invalidDimensionsRequest.volumeBuffer.dimensions = { 1, 0, 1 };
-    invalidDimensionsRequest.volumeBuffer.geometry.emplace(
+    HostReloadCommand invalidDimensionsCommand;
+    invalidDimensionsCommand.request.voxels.assign(1, 1.0f);
+    invalidDimensionsCommand.request.dimensions = { 1, 0, 1 };
+    invalidDimensionsCommand.request.geometry.emplace(
         std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
         std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
+    int invalidDimensionsCallbackCount = 0;
+    invalidDimensionsCommand.onComplete = [&invalidDimensionsCallbackCount](bool) {
+        ++invalidDimensionsCallbackCount;
+    };
     isPassed = GetExpected(
-        !fixture.SendRequest(std::move(invalidDimensionsRequest))
-            && service->GetReloadCount() == 0,
+        !fixture.SendCommand(HostCommand{ std::move(invalidDimensionsCommand) })
+            && service->GetReloadCount() == 0
+            && invalidDimensionsCallbackCount == 0,
         "Reload case should reject a non-positive dimension.") && isPassed;
 
-    HostCommandRouterRequest missingGeometryRequest;
-    missingGeometryRequest.command = HostCommandKind::Reload;
-    missingGeometryRequest.volumeBuffer.voxels.assign(1, 1.0f);
-    missingGeometryRequest.volumeBuffer.dimensions = { 1, 1, 1 };
+    HostReloadCommand missingGeometryCommand;
+    missingGeometryCommand.request.voxels.assign(1, 1.0f);
+    missingGeometryCommand.request.dimensions = { 1, 1, 1 };
+    int missingGeometryCallbackCount = 0;
+    missingGeometryCommand.onComplete = [&missingGeometryCallbackCount](bool) {
+        ++missingGeometryCallbackCount;
+    };
     isPassed = GetExpected(
-        !fixture.SendRequest(std::move(missingGeometryRequest))
-            && service->GetReloadCount() == 0,
+        !fixture.SendCommand(HostCommand{ std::move(missingGeometryCommand) })
+            && service->GetReloadCount() == 0
+            && missingGeometryCallbackCount == 0,
         "Reload case should reject missing geometry.") && isPassed;
 
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::Reload;
-    request.volumeBuffer.voxels = {
+    HostReloadCommand command;
+    command.request.voxels = {
         0.0f, 1.0f, 2.0f, 3.0f,
         4.0f, 5.0f, 6.0f, 7.0f
     };
-    request.volumeBuffer.dimensions = { 2, 2, 2 };
-    request.volumeBuffer.geometry.emplace(
+    command.request.dimensions = { 2, 2, 2 };
+    command.request.geometry.emplace(
         std::array<float, 3>{ 0.5f, 1.0f, 1.5f },
         std::array<float, 3>{ 4.0f, 5.0f, 6.0f });
-    bool hasCallback = false;
+    int callbackCount = 0;
     bool isCallbackSuccess = false;
-    request.reloadComplete = [&hasCallback, &isCallbackSuccess](bool isSuccess) {
-        hasCallback = true;
+    command.onComplete = [&callbackCount, &isCallbackSuccess](bool isSuccess) {
+        ++callbackCount;
         isCallbackSuccess = isSuccess;
     };
 
     isPassed = GetExpected(
-        fixture.SendRequest(std::move(request)),
+        fixture.SendCommand(HostCommand{ std::move(command) }),
         "Reload case should synchronously accept a valid request.") && isPassed;
     isPassed = GetExpected(
         service && service->GetReloadCount() == 1
@@ -509,56 +324,57 @@ bool StartReloadDispatchCase()
             && service->GetReloadOrigin() == std::array<float, 3>{ 4.0f, 5.0f, 6.0f },
         "Reload case should forward voxels, dimensions and geometry unchanged.") && isPassed;
     isPassed = GetExpected(
-        !hasCallback && fixture.GetBindings()->GetCropInputCount() == 0,
+        callbackCount == 0 && fixture.GetBindings()->GetCropInputCount() == 0,
         "Reload admission should not be reported as asynchronous completion.") && isPassed;
     isPassed = GetExpected(
         service && service->SendReloadComplete(true)
-            && hasCallback && isCallbackSuccess
+            && callbackCount == 1 && isCallbackSuccess
+            && !service->SendReloadComplete(true)
             && fixture.GetBindings()->GetCropInputCount() == 1,
         "Reload success should forward completion and refresh crop input.") && isPassed;
 
-    HostCommandRouterRequest failedRequest;
-    failedRequest.command = HostCommandKind::Reload;
-    failedRequest.volumeBuffer.voxels.assign(1, 9.0f);
-    failedRequest.volumeBuffer.dimensions = { 1, 1, 1 };
-    failedRequest.volumeBuffer.geometry.emplace(
+    HostReloadCommand failedCommand;
+    failedCommand.request.voxels.assign(1, 9.0f);
+    failedCommand.request.dimensions = { 1, 1, 1 };
+    failedCommand.request.geometry.emplace(
         std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
         std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
-    bool hasFailureCallback = false;
+    int failureCallbackCount = 0;
     bool isFailureSuccess = true;
-    failedRequest.reloadComplete = [
-        &hasFailureCallback,
+    failedCommand.onComplete = [
+        &failureCallbackCount,
         &isFailureSuccess
     ](bool isSuccess) {
-        hasFailureCallback = true;
+        ++failureCallbackCount;
         isFailureSuccess = isSuccess;
     };
     isPassed = GetExpected(
-        fixture.SendRequest(std::move(failedRequest))
+        fixture.SendCommand(HostCommand{ std::move(failedCommand) })
             && service && service->SendReloadComplete(false)
-            && hasFailureCallback && !isFailureSuccess
+            && failureCallbackCount == 1 && !isFailureSuccess
+            && !service->SendReloadComplete(false)
             && fixture.GetBindings()->GetCropClearCount() == 0,
         "Reload failure should preserve current crop input and forward completion.") && isPassed;
 
     service->SetReloadAccepted(false);
-    HostCommandRouterRequest rejectedRequest;
-    rejectedRequest.command = HostCommandKind::Reload;
-    rejectedRequest.volumeBuffer.voxels.assign(1, 3.0f);
-    rejectedRequest.volumeBuffer.dimensions = { 1, 1, 1 };
-    rejectedRequest.volumeBuffer.geometry.emplace(
+    HostReloadCommand rejectedCommand;
+    rejectedCommand.request.voxels.assign(1, 3.0f);
+    rejectedCommand.request.dimensions = { 1, 1, 1 };
+    rejectedCommand.request.geometry.emplace(
         std::array<float, 3>{ 1.0f, 1.0f, 1.0f },
         std::array<float, 3>{ 0.0f, 0.0f, 0.0f });
-    bool hasRejectedCallback = false;
-    rejectedRequest.reloadComplete = [&hasRejectedCallback](bool) {
-        hasRejectedCallback = true;
+    int rejectedCallbackCount = 0;
+    rejectedCommand.onComplete = [&rejectedCallbackCount](bool) {
+        ++rejectedCallbackCount;
     };
     isPassed = GetExpected(
-        !fixture.SendRequest(std::move(rejectedRequest))
+        !fixture.SendCommand(HostCommand{ std::move(rejectedCommand) })
             && service->GetReloadCount() == 2,
         "Reload service rejection should propagate its synchronous result.") && isPassed;
     isPassed = GetExpected(
-        !hasRejectedCallback && service->SendReloadComplete(false)
-            && hasRejectedCallback
+        rejectedCallbackCount == 0 && service->SendReloadComplete(false)
+            && rejectedCallbackCount == 1
+            && !service->SendReloadComplete(false)
             && fixture.GetBindings()->GetCropClearCount() == 0,
         "Reload service rejection may deliver a deferred false callback without clearing crop input.") && isPassed;
     return isPassed;
@@ -575,23 +391,34 @@ bool StartVolumeExportCase()
         fixture.BuildRouter(),
         "Volume export case should build the router.") && isPassed;
 
-    bool hasCallback = false;
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::Export;
-    request.dataExportConfig.hasVolumeExport = true;
-    request.dataExportConfig.transformedDataOutputPath = "volume.raw";
-    request.dataExportComplete = [&hasCallback](bool isSuccess) {
-        hasCallback = isSuccess;
+    int callbackCount = 0;
+    bool isCallbackSuccess = false;
+    HostExportCommand command;
+    command.request.hasVolumeExport = true;
+    command.request.transformedDataOutputPath = "volume.raw";
+    command.onComplete = [&callbackCount, &isCallbackSuccess](bool isSuccess) {
+        ++callbackCount;
+        isCallbackSuccess = isSuccess;
     };
     isPassed = GetExpected(
-        fixture.SendRequest(std::move(request)),
+        fixture.SendCommand(HostCommand{ std::move(command) }),
         "Volume export case should accept the request.") && isPassed;
     const auto service = fixture.GetViewService("volume");
     isPassed = GetExpected(
         service && service->GetExportCount() == 1
             && service->GetExportPath() == "volume.raw"
-            && hasCallback,
+            && callbackCount == 1 && isCallbackSuccess,
         "Volume export case should call only the volume service path.") && isPassed;
+
+    int rejectedCallbackCount = 0;
+    HostExportCommand rejectedCommand;
+    rejectedCommand.onComplete = [&rejectedCallbackCount](bool) {
+        ++rejectedCallbackCount;
+    };
+    isPassed = GetExpected(
+        !fixture.SendCommand(HostCommand{ std::move(rejectedCommand) })
+            && rejectedCallbackCount == 0,
+        "Rejected Export command should not invoke its callback.") && isPassed;
     return isPassed;
 }
 
@@ -606,21 +433,54 @@ bool StartSliceExportCase()
         fixture.BuildRouter(),
         "Slice export case should build the router.") && isPassed;
 
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::Export;
-    request.dataExportConfig.hasSliceExport = true;
-    request.dataExportConfig.sliceOutputDir = "slices";
-    request.dataExportConfig.sliceSourceViewId = "slice";
+    int callbackCount = 0;
+    bool isCallbackSuccess = false;
+    HostExportCommand command;
+    command.request.hasSliceExport = true;
+    command.request.sliceOutputDir = "slices";
+    command.request.sliceSourceViewId = "slice";
+    command.onComplete = [&callbackCount, &isCallbackSuccess](bool isSuccess) {
+        ++callbackCount;
+        isCallbackSuccess = isSuccess;
+    };
     isPassed = GetExpected(
-        fixture.SendRequest(std::move(request)),
+        fixture.SendCommand(HostCommand{ std::move(command) }),
         "Slice export case should accept the request.") && isPassed;
     const auto service = fixture.GetViewService("slice");
     isPassed = GetExpected(
         service && service->GetSliceCount() == 1
             && service->GetSlicePath() == "slices"
-            && service->GetExportCount() == 0,
+            && service->GetExportCount() == 0
+            && callbackCount == 1 && isCallbackSuccess,
         "Slice export case should call only the slice service path.") && isPassed;
     return isPassed;
+}
+
+bool StartCropDispatchCase()
+{
+    HostRouterFixture fixture;
+    if (!fixture.BuildRouter()) {
+        return GetExpected(false, "Crop start case should build the router.");
+    }
+    HostCropViewRequest cropRequest;
+    cropRequest.referenceViewId = "startRef";
+    cropRequest.previewViewIds = { "startPreview" };
+    cropRequest.isPreviewViewsUsed = true;
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostCropCommand{ HostCropAction::Start, cropRequest } }
+    });
+    const auto& actualRequest = fixture.GetBindings()->GetLastCropRequest();
+    return GetExpected(
+        isAccepted && fixture.GetBindings()->GetCropStartCount() == 1
+            && fixture.GetBindings()->GetCropBoxCount() == 0
+            && fixture.GetBindings()->GetCropPlaneCount() == 0
+            && fixture.GetBindings()->GetCropViewCount() == 0
+            && fixture.GetBindings()->GetCropSendCount() == 0
+            && fixture.GetBindings()->GetCropActive()
+            && actualRequest.referenceViewId == cropRequest.referenceViewId
+            && actualRequest.previewViewIds == cropRequest.previewViewIds
+            && actualRequest.isPreviewViewsUsed == cropRequest.isPreviewViewsUsed,
+        "Crop start case should dispatch one complete start command.");
 }
 
 bool StartCropBoxDispatchCase()
@@ -629,13 +489,21 @@ bool StartCropBoxDispatchCase()
     if (!fixture.BuildRouter()) {
         return GetExpected(false, "Crop box case should build the router.");
     }
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::CropBox;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    HostCropViewRequest cropRequest;
+    cropRequest.referenceViewId = "cropRef";
+    cropRequest.previewViewIds = { "cropPreview" };
+    cropRequest.isPreviewViewsUsed = true;
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostCropCommand{ HostCropAction::Box, cropRequest } }
+    });
+    const auto& actualRequest = fixture.GetBindings()->GetLastCropRequest();
     return GetExpected(
         isAccepted && fixture.GetBindings()->GetCropBoxCount() == 1
-            && fixture.GetBindings()->GetCropStartCount() == 0,
-        "Crop box case should dispatch exactly one box command.");
+            && fixture.GetBindings()->GetCropStartCount() == 0
+            && actualRequest.referenceViewId == cropRequest.referenceViewId
+            && actualRequest.previewViewIds == cropRequest.previewViewIds
+            && actualRequest.isPreviewViewsUsed == cropRequest.isPreviewViewsUsed,
+        "Crop box case should dispatch one complete box command.");
 }
 
 bool StartCropSendDispatchCase()
@@ -644,11 +512,18 @@ bool StartCropSendDispatchCase()
     if (!fixture.BuildRouter()) {
         return GetExpected(false, "Crop submit case should build the router.");
     }
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::CropApply;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    HostCropViewRequest cropRequest;
+    cropRequest.referenceViewId = "submitRef";
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostCropCommand{
+            HostCropAction::Submit,
+            cropRequest
+        } }
+    });
     return GetExpected(
-        isAccepted && fixture.GetBindings()->GetCropSendCount() == 1,
+        isAccepted && fixture.GetBindings()->GetCropSendCount() == 1
+            && fixture.GetBindings()->GetLastCropRequest().referenceViewId
+                == cropRequest.referenceViewId,
         "Crop submit case should dispatch exactly one submit command.");
 }
 
@@ -658,11 +533,15 @@ bool StartGapDispatchCase()
     if (!fixture.BuildRouter()) {
         return GetExpected(false, "Gap start case should build the router.");
     }
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::GapStart;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    const auto gapRequest = GetGapInput("typedGap").gapViewRequest;
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostGapCommand{ HostGapAction::Start, gapRequest } }
+    });
     return GetExpected(
-        isAccepted && fixture.GetBindings()->GetGapStartCount() == 1,
+        isAccepted && fixture.GetBindings()->GetGapStartCount() == 1
+            && GetGapRequestEqual(
+                fixture.GetBindings()->GetLastGapRequest(),
+                gapRequest),
         "Gap start case should dispatch exactly one start command.");
 }
 
@@ -673,12 +552,50 @@ bool StartGapOverlayCase()
         return GetExpected(false, "Gap overlay case should build the router.");
     }
     fixture.GetBindings()->SetGapView(true);
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::GapOverlay;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostGapCommand{ HostGapAction::Overlay } }
+    });
+    fixture.GetBindings()->SetCommandResult(false);
+    const bool isRejected = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostGapCommand{ HostGapAction::Overlay } }
+    });
     return GetExpected(
-        isAccepted && fixture.GetBindings()->GetGapLayerCount() == 1,
-        "Gap overlay case should dispatch exactly one overlay command.");
+        isAccepted && !isRejected
+            && fixture.GetBindings()->GetGapLayerCount() == 2
+            && fixture.GetBindings()->GetGapView(),
+        "Gap overlay case should preserve active state and report business rejection.");
+}
+
+bool StartFeatureExitOrderCase()
+{
+    bool isPassed = true;
+    HostRouterFixture fixture;
+    isPassed = GetExpected(
+        fixture.BuildRouter(),
+        "Feature exit order case should build the router.") && isPassed;
+    fixture.GetBindings()->SetCropActive(true);
+    fixture.GetBindings()->SetGapView(true);
+
+    const bool isFirstAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostExitCommand{} }
+    });
+    isPassed = GetExpected(
+        isFirstAccepted
+            && !fixture.GetBindings()->GetCropActive()
+            && fixture.GetBindings()->GetGapView(),
+        "First feature exit should stop Crop and preserve Gap.") && isPassed;
+
+    const bool isSecondAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostExitCommand{} }
+    });
+    isPassed = GetExpected(
+        isSecondAccepted
+            && !fixture.GetBindings()->GetGapView()
+            && fixture.GetBindings()->GetFeatureExitCount() == 2
+            && fixture.GetBindings()->GetCropExitCount() == 2
+            && fixture.GetBindings()->GetGapExitCount() == 1,
+        "Second feature exit should retry Crop before stopping Gap.") && isPassed;
+    return isPassed;
 }
 
 bool StartCropExitCase()
@@ -688,12 +605,17 @@ bool StartCropExitCase()
         return GetExpected(false, "Crop exit case should build the router.");
     }
     fixture.GetBindings()->SetCropActive(true);
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::CropExit;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostCropCommand{ HostCropAction::Exit } }
+    });
+    const bool isRejected = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostCropCommand{ HostCropAction::Exit } }
+    });
     return GetExpected(
-        isAccepted && fixture.GetBindings()->GetCropExitCount() == 1,
-        "Crop exit case should dispatch exactly one exit command.");
+        isAccepted && !isRejected
+            && fixture.GetBindings()->GetCropExitCount() == 2
+            && !fixture.GetBindings()->GetCropActive(),
+        "Crop exit case should clear active state and reject a second exit.");
 }
 
 bool StartGapExitCase()
@@ -703,12 +625,17 @@ bool StartGapExitCase()
         return GetExpected(false, "Gap exit case should build the router.");
     }
     fixture.GetBindings()->SetGapView(true);
-    HostCommandRouterRequest request;
-    request.command = HostCommandKind::GapExit;
-    const bool isAccepted = fixture.SendRequest(std::move(request));
+    const bool isAccepted = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostGapCommand{ HostGapAction::Exit } }
+    });
+    const bool isRejected = fixture.SendCommand(HostCommand{
+        HostFeatureCommand{ HostGapCommand{ HostGapAction::Exit } }
+    });
     return GetExpected(
-        isAccepted && fixture.GetBindings()->GetGapExitCount() == 1,
-        "Gap exit case should dispatch exactly one exit command.");
+        isAccepted && !isRejected
+            && fixture.GetBindings()->GetGapExitCount() == 2
+            && !fixture.GetBindings()->GetGapView(),
+        "Gap exit case should clear active state and reject a second exit.");
 }
 
     int GetFailCount()
@@ -716,18 +643,16 @@ bool StartGapExitCase()
         int failureCount = 0;
         failureCount += StartViewModeCase() ? 0 : 1;
         failureCount += StartNoContextModeCase() ? 0 : 1;
-        failureCount += StartModelRepeatCase() ? 0 : 1;
-        failureCount += StartEscapeRepeatCase() ? 0 : 1;
-        failureCount += StartCrossViewReleaseCase() ? 0 : 1;
-        failureCount += StartSubmitStateCase() ? 0 : 1;
         failureCount += StartLoadDispatchCase() ? 0 : 1;
         failureCount += StartReloadDispatchCase() ? 0 : 1;
         failureCount += StartVolumeExportCase() ? 0 : 1;
         failureCount += StartSliceExportCase() ? 0 : 1;
+        failureCount += StartCropDispatchCase() ? 0 : 1;
         failureCount += StartCropBoxDispatchCase() ? 0 : 1;
         failureCount += StartCropSendDispatchCase() ? 0 : 1;
         failureCount += StartGapDispatchCase() ? 0 : 1;
         failureCount += StartGapOverlayCase() ? 0 : 1;
+        failureCount += StartFeatureExitOrderCase() ? 0 : 1;
         failureCount += StartCropExitCase() ? 0 : 1;
         failureCount += StartGapExitCase() ? 0 : 1;
         return failureCount;

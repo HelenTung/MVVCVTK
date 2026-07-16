@@ -82,6 +82,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostFeatureBindings.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostRenderViewSet.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\VtkAppHostSession.cpp" />

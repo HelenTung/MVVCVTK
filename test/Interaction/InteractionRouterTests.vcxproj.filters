@@ -4,6 +4,12 @@
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandTypes.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\HostHotkeyRouter.h">
+      <Filter>include</Filter>
+    </ClInclude>
     <Filter Include="include">
       <UniqueIdentifier>{8f420567-63f5-4dc5-a652-ed0bd0f1f31b}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
@@ -56,6 +62,9 @@
     <ClInclude Include="HostCommandRouterTests.h">
       <Filter>tests</Filter>
     </ClInclude>
+    <ClInclude Include="HostHotkeyRouterTests.h">
+      <Filter>tests</Filter>
+    </ClInclude>
     <ClInclude Include="AppStateTests.h">
       <Filter>tests</Filter>
     </ClInclude>
@@ -70,6 +79,9 @@
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -77,6 +89,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="HostCommandRouterTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="HostHotkeyRouterTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="InteractionRouterTests.cpp">

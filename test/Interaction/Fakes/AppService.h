@@ -76,10 +76,11 @@ public:
 
     void ExportSlicesAsync(
         const std::string& path,
-        std::optional<double>,
+        std::optional<double> angleDeg,
         std::function<void(bool isSuccess)> onComplete)
     {
         m_slicePath = path;
+        m_sliceAngleDeg = angleDeg;
         ++m_sliceCount;
         if (onComplete) {
             onComplete(true);
@@ -157,6 +158,11 @@ public:
         return m_slicePath;
     }
 
+    const std::optional<double>& GetSliceAngleDeg() const
+    {
+        return m_sliceAngleDeg;
+    }
+
     template <typename... Args>
     void SetMaterial(Args&&...)
     {
@@ -202,6 +208,7 @@ private:
     std::string m_loadPath;
     std::string m_exportPath;
     std::string m_slicePath;
+    std::optional<double> m_sliceAngleDeg;
     bool m_isReloadAccepted = true;
     std::vector<float> m_reloadVoxels;
     std::array<int, 3> m_reloadDimensions{ 0, 0, 0 };
