@@ -28,16 +28,16 @@ public:
     bool StartLoad(LoadEventKind loadEventKind);
     // 终态消费、任务构造失败或服务销毁兜底时释放对应事务；释放前不会开放下一次接纳。
     bool ResetLoad(LoadEventKind loadEventKind);
-    void SetFileDataReady(
+    bool SetFileDataReady(
         double rangeMin,
         double rangeMax,
         const std::array<double, 3>& spacing);
-    void SetReloadDataReady(
+    bool SetReloadDataReady(
         double rangeMin,
         double rangeMax,
         const std::array<double, 3>& spacing);
-    void SetFileLoadFailed();
-    void SetReloadLoadFailed();
+    bool SetFileLoadFailed();
+    bool SetReloadLoadFailed();
     void SetPreInitConfig(const PreInitConfig& config);
     void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix);
     std::array<double, 16> GetModelMatrix() const;

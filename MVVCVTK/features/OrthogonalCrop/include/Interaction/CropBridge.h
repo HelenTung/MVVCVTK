@@ -29,6 +29,16 @@
 class InteractiveService;
 class vtkRenderer;
 
+struct CropViewRequest final {
+    vtkSmartPointer<vtkImageData> inputImage;
+    vtkSmartPointer<vtkPolyData> inputPolyData;
+    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
+    vtkSmartPointer<vtkRenderWindowInteractor> interactor;
+    vtkSmartPointer<vtkRenderer> renderer;
+    std::shared_ptr<InteractiveService> referenceService;
+    std::vector<std::shared_ptr<InteractiveService>> previewServices;
+};
+
 class CropBridge {
 public:
     // host/session 只注入“如何 reload 主数据”的能力；submit 的时机和生命周期仍由 bridge 控制。
@@ -50,34 +60,17 @@ public:
     CropBridge(CropBridge&&) noexcept;
     CropBridge& operator=(CropBridge&&) noexcept;
 
-    // 把 host 注入的 image 输入转发给 backend router；submit 以 backend 的有效 image 为输入真源。
-    void SetInputImage(vtkSmartPointer<vtkImageData> image);
-    void ClearInputImage();
-
-    // 以下一组接口把 polydata 输入转发给 backend router。
-    void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
-
-    // 设置 backend router 的首选数据源。
-    void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-
-    // 主 interactor 由 3D 参考窗口提供，widget 只会挂到这个 interactor 上。
-    void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
-
-    // 参考渲染器只供算法内部保存/恢复相机状态，不写入 SharedState。
-    void SetReferenceRenderer(vtkRenderer* renderer);
-
-    // 参考渲染服务负责 world / active input model 坐标互转。
-    void SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService);
-
-    // preview 服务列表决定哪些窗口会收到裁切主预览与设脏刷新；几何参照线框只在 reference 目标显示。
-    void SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices);
+    bool StartView(CropViewRequest request);
+    void ClearBindings();
+    // 数据事务完成后只刷新 owning image；窗口绑定仍由完整 CropViewRequest 管理。
+    void SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
 
     // 设置 submit 使用的主数据 reload 能力；bridge 只保存能力函数，不直接依赖具体窗口服务类型。
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
 
     // 从当前 widget 几何和 backend image 输入构造 submit request，不复用 preview 结果；
     // 只有 reload 请求被接受才返回 true，最终结果由完成回调收尾。
-    bool SendSubmit();
+    bool SendSubmit(std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 宿主命令触发的裁切模式 switch 入口。
     bool SwitchCropBox();

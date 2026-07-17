@@ -4,10 +4,10 @@
 
 int GetViewFailCount()
 {
-    VtkAppHostSession session(VtkAppHostSession::Config{});
-    HostViewConfig request;
-    request.viewId = "missing-view";
+    VtkAppHostSession session(HostSessionConfig{});
+    HostViewSetRequest value;
+    value.targetView.viewId = "missing-view";
     return GetCaseResult(
-        !session.SetViewConfig(request),
-        "View empty edit rejection") ? 0 : 1;
+        !session.SendView({ HostViewAction::Set, value }),
+        "View missing target rejection") ? 0 : 1;
 }

@@ -4,8 +4,9 @@
 
 int GetExportFailCount()
 {
-    VtkAppHostSession session(VtkAppHostSession::Config{});
+    VtkAppHostSession session(HostSessionConfig{});
     return GetCaseResult(
-        !session.ExportData({}),
-        "Export flag rejection") ? 0 : 1;
+        !session.SendData({ HostDataAction::ExportVolume,
+            HostVolumeExportRequest{} }),
+        "Export empty path rejection") ? 0 : 1;
 }

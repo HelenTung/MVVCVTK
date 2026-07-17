@@ -133,6 +133,7 @@ public:
     LoadState m_reloadLoadState = LoadState::Idle;
     LoadEventKind m_activeLoadKind = LoadEventKind::None;
     bool m_isLoadPublished = false;
+    bool m_isLoadPublishing = false;
     std::array<double, 2> m_dataRange = { 0.0, 255.0 };
     std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };
     std::vector<TFNode> m_nodes;
@@ -196,6 +197,7 @@ bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
 
     m_impl->m_activeLoadKind = loadEventKind;
     m_impl->m_isLoadPublished = false;
+    m_impl->m_isLoadPublishing = false;
     if (loadEventKind == LoadEventKind::File) {
         m_impl->m_fileLoadState = LoadState::Loading;
         m_impl->m_dataTrustedState = LoadState::Loading;
@@ -213,93 +215,119 @@ bool SharedInteractionState::ResetLoad(LoadEventKind loadEventKind)
         || m_impl->m_activeLoadKind != loadEventKind) {
         return false;
     }
-    const bool isLoading = loadEventKind == LoadEventKind::File
-        ? m_impl->m_fileLoadState == LoadState::Loading
-        : m_impl->m_reloadLoadState == LoadState::Loading;
-    if (!isLoading && !m_impl->m_isLoadPublished) {
+    if (m_impl->m_isLoadPublishing || !m_impl->m_isLoadPublished) {
         return false;
     }
     m_impl->m_activeLoadKind = LoadEventKind::None;
     m_impl->m_isLoadPublished = false;
+    m_impl->m_isLoadPublishing = false;
     return true;
 }
 
-void SharedInteractionState::SetFileDataReady(
+bool SharedInteractionState::SetFileDataReady(
     double rangeMin,
     double rangeMax,
     const std::array<double, 3>& spacing)
 {
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_activeLoadKind != LoadEventKind::File
+            || m_impl->m_isLoadPublishing
+            || m_impl->m_fileLoadState != LoadState::Loading) return false;
+        m_impl->m_isLoadPublishing = true;
         m_impl->m_dataRange = { rangeMin, rangeMax };
         m_impl->m_spacing = spacing;
         m_impl->m_fileLoadState = LoadState::Succeeded;
         m_impl->m_dataTrustedState = LoadState::Succeeded;
         m_impl->m_windowLevel = { rangeMax - rangeMin, (rangeMin + rangeMax) * 0.5 };
     }
-    m_impl->SendFlags(UpdateFlags::DataReady | UpdateFlags::FileLoad);
+    try { m_impl->SendFlags(UpdateFlags::DataReady | UpdateFlags::FileLoad); }
+    catch (...) {}
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind == LoadEventKind::File) {
             m_impl->m_isLoadPublished = true;
         }
+        m_impl->m_isLoadPublishing = false;
     }
+    return true;
 }
 
-void SharedInteractionState::SetReloadDataReady(
+bool SharedInteractionState::SetReloadDataReady(
     double rangeMin,
     double rangeMax,
     const std::array<double, 3>& spacing)
 {
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_activeLoadKind != LoadEventKind::Reload
+            || m_impl->m_isLoadPublishing
+            || m_impl->m_reloadLoadState != LoadState::Loading) return false;
+        m_impl->m_isLoadPublishing = true;
         m_impl->m_dataRange = { rangeMin, rangeMax };
         m_impl->m_spacing = spacing;
         m_impl->m_reloadLoadState = LoadState::Succeeded;
         m_impl->m_dataTrustedState = LoadState::Succeeded;
         m_impl->m_windowLevel = { rangeMax - rangeMin, (rangeMin + rangeMax) * 0.5 };
     }
-    m_impl->SendFlags(UpdateFlags::DataReady | UpdateFlags::ReloadLoad);
+    try { m_impl->SendFlags(UpdateFlags::DataReady | UpdateFlags::ReloadLoad); }
+    catch (...) {}
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind == LoadEventKind::Reload) {
             m_impl->m_isLoadPublished = true;
         }
+        m_impl->m_isLoadPublishing = false;
     }
+    return true;
 }
 
-void SharedInteractionState::SetFileLoadFailed()
+bool SharedInteractionState::SetFileLoadFailed()
 {
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_activeLoadKind != LoadEventKind::File
+            || m_impl->m_isLoadPublishing
+            || m_impl->m_fileLoadState != LoadState::Loading) return false;
+        m_impl->m_isLoadPublishing = true;
         m_impl->m_fileLoadState = LoadState::Failed;
         m_impl->m_dataTrustedState = LoadState::Failed;
     }
-    m_impl->SendFlags(UpdateFlags::LoadFailed | UpdateFlags::FileLoad);
+    try { m_impl->SendFlags(UpdateFlags::LoadFailed | UpdateFlags::FileLoad); }
+    catch (...) {}
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind == LoadEventKind::File) {
             m_impl->m_isLoadPublished = true;
         }
+        m_impl->m_isLoadPublishing = false;
     }
+    return true;
 }
 
-void SharedInteractionState::SetReloadLoadFailed()
+bool SharedInteractionState::SetReloadLoadFailed()
 {
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_activeLoadKind != LoadEventKind::Reload
+            || m_impl->m_isLoadPublishing
+            || m_impl->m_reloadLoadState != LoadState::Loading) return false;
+        m_impl->m_isLoadPublishing = true;
         m_impl->m_reloadLoadState = LoadState::Failed;
         if (m_impl->m_dataTrustedState != LoadState::Succeeded) {
             m_impl->m_dataTrustedState = LoadState::Failed;
         }
     }
-    m_impl->SendFlags(UpdateFlags::LoadFailed | UpdateFlags::ReloadLoad);
+    try { m_impl->SendFlags(UpdateFlags::LoadFailed | UpdateFlags::ReloadLoad); }
+    catch (...) {}
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind == LoadEventKind::Reload) {
             m_impl->m_isLoadPublished = true;
         }
+        m_impl->m_isLoadPublishing = false;
     }
+    return true;
 }
 
 void SharedInteractionState::SetPreInitConfig(const PreInitConfig& config)

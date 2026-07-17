@@ -15,17 +15,11 @@
 #include <array>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
-
-namespace {
-template <typename>
-constexpr bool isUnknownType = false;
-}
 
 class HostFeatureBindings::Impl final {
 public:
@@ -34,36 +28,38 @@ public:
     void AttachFeatures(
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews);
-    bool SendCommand(HostFeatureCommand command);
+    bool StartCrop(const HostCropTargetRequest& request);
+    bool SwitchCropBox(const HostCropTargetRequest& request);
+    bool SwitchCropPlane(const HostCropTargetRequest& request);
+    bool SwitchCropView(const HostCropPreviewRequest& request);
+    bool SendCrop(const HostCropTargetRequest& request, HostCompleteCallback onComplete);
+    bool ExitCrop();
+    bool StartGap(const HostGapStartRequest& request, HostCompleteCallback onComplete);
+    bool SwitchGapLayer();
+    bool ExitGap();
     bool GetGapView() const;
     bool GetCropActive() const;
     void ClearCropInput() const;
     bool SendCropInput();
-    void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
+    bool AttachHostTimer(const HostTimerConfig& config);
 
 private:
-    bool SendCropCommand(const HostCropCommand& command);
-    bool SendGapCommand(const HostGapCommand& command);
-    bool StartCrop(const HostCropViewRequest& request);
-    bool StartGapView(const HostGapViewRequest& request);
-    bool SwitchGapView(const HostGapViewRequest& request);
-    bool SwitchGapLayer();
-    bool ExitGapView();
-    bool SwitchCropBox(const HostCropViewRequest& request);
-    bool SwitchCropPlane(const HostCropViewRequest& request);
-    bool SwitchCropView(
-        const HostCropViewRequest& request,
-        HostCropPreviewMode previewMode);
-    bool SendCrop(const HostCropViewRequest& request);
-    bool ExitCrop();
-    bool ExitFeature();
+    struct SubmitContext final {
+        std::mutex mutex;
+        const HostRenderViewSet* renderViews = nullptr;
+        std::shared_ptr<RawVolumeDataManager> dataManager;
+        std::shared_ptr<SharedInteractionState> sharedState;
+        std::weak_ptr<CropBridge> bridge;
+        std::size_t generation = 0;
+    };
+
     void DetachHostTimer();
     void OnHostTimer();
     static bool GetImageReady(vtkImageData* image);
 
     bool GetGapConfigValid(const HostGapConfig& config) const;
-    VoidDetectionParams BuildVoidParams(const HostGapVoidConfig& config) const;
-    GapAnalysisSurfaceRequest BuildGapSurfaceRequest(const HostGapSurface& config) const;
+    GapVoidParams BuildVoidParams(const HostGapVoidConfig& config) const;
+    GapSurfaceRequest BuildGapSurfaceRequest(const HostGapSurfaceConfig& config) const;
     std::optional<Orientation> GetGapSliceOrient(HostRenderViewRole role) const;
     CropRemovalMode GetCropRemovalMode(HostCropPreviewMode mode) const;
 
@@ -73,16 +69,22 @@ private:
     const HostRenderViewSet* m_renderViews = nullptr;
     // Timer context 只用于卸载 observer，不应因 feature tick 延长窗口生命周期。
     std::weak_ptr<StdRenderContext> m_timerContext;
+    std::shared_ptr<SubmitContext> m_submitContext;
 };
 
 HostFeatureBindings::Impl::~Impl()
 {
     DetachHostTimer();
     if (m_core.orthogonalCropBridge) {
-        m_core.orthogonalCropBridge->SetSubmitReloadHandler(nullptr);
+        m_core.orthogonalCropBridge->ClearBindings();
+    }
+    if (m_submitContext) {
+        std::lock_guard<std::mutex> lock(m_submitContext->mutex);
+        m_submitContext->renderViews = nullptr;
+        ++m_submitContext->generation;
     }
     if (m_core.gapAnalysis) {
-        m_core.gapAnalysis->ExitView();
+        m_core.gapAnalysis->ClearView();
     }
 }
 
@@ -99,6 +101,14 @@ bool HostFeatureBindings::Impl::GetImageReady(vtkImageData* image)
 
 bool HostFeatureBindings::Impl::GetGapConfigValid(const HostGapConfig& config) const
 {
+    if (!std::isfinite(config.surface.dataRangeRatio)
+        || !std::isfinite(config.surface.absoluteIsoValue)
+        || !std::isfinite(config.voidDetection.grayMin)
+        || !std::isfinite(config.voidDetection.grayMax)
+        || !std::isfinite(config.voidDetection.minVolumeMM3)
+        || !std::isfinite(config.voidDetection.angleThresholdDeg)) {
+        return false;
+    }
     if (config.surface.isoMode == HostGapAnalysisIsoMode::DataRangeRatio
         && (config.surface.dataRangeRatio < 0.0 || config.surface.dataRangeRatio > 1.0)) {
         std::cerr << "[Host] Gap Analysis activation skipped: iso data range ratio must be within [0, 1]." << std::endl;
@@ -119,9 +129,9 @@ bool HostFeatureBindings::Impl::GetGapConfigValid(const HostGapConfig& config) c
     return true;
 }
 
-VoidDetectionParams HostFeatureBindings::Impl::BuildVoidParams(const HostGapVoidConfig& config) const
+GapVoidParams HostFeatureBindings::Impl::BuildVoidParams(const HostGapVoidConfig& config) const
 {
-    VoidDetectionParams params;
+    GapVoidParams params;
     params.grayMin = config.grayMin;
     params.grayMax = config.grayMax;
     params.minVolumeMM3 = config.minVolumeMM3;
@@ -131,12 +141,12 @@ VoidDetectionParams HostFeatureBindings::Impl::BuildVoidParams(const HostGapVoid
     return params;
 }
 
-GapAnalysisSurfaceRequest HostFeatureBindings::Impl::BuildGapSurfaceRequest(const HostGapSurface& config) const
+GapSurfaceRequest HostFeatureBindings::Impl::BuildGapSurfaceRequest(const HostGapSurfaceConfig& config) const
 {
-    GapAnalysisSurfaceRequest surfaceRequest;
+    GapSurfaceRequest surfaceRequest;
     surfaceRequest.isoMode = config.isoMode == HostGapAnalysisIsoMode::AbsoluteValue
-        ? GapAnalysisIsoValueMode::AbsoluteValue
-        : GapAnalysisIsoValueMode::DataRangeRatio;
+        ? GapIsoMode::AbsoluteValue
+        : GapIsoMode::DataRangeRatio;
     surfaceRequest.dataRangeRatio = config.dataRangeRatio;
     surfaceRequest.absoluteIsoValue = config.absoluteIsoValue;
     return surfaceRequest;
@@ -177,93 +187,89 @@ void HostFeatureBindings::Impl::AttachFeatures(
     m_core = core;
     m_renderViews = &renderViews;
     if (m_core.gapAnalysis) {
-        m_core.gapAnalysis->ExitView();
+        m_core.gapAnalysis->ClearView();
     }
     if (m_core.orthogonalCropBridge) {
-        // submit 后需要刷新所有现有视图的共享数据，但不应该把“哪些窗口参与 preview”的语义写进 reload。
-        // 因此这里保存弱引用集合，只做数据更新通知；窗口消失时 weak_ptr 自然失效。
-        std::vector<std::weak_ptr<VizService>> renderViewServices;
-        renderViewServices.reserve(renderViews.GetViews().size());
-        for (const auto& view : renderViews.GetViews()) {
-            renderViewServices.push_back(view.service);
-        }
-
-        // submit 回调只提交新图像和刷新共享状态，不持有窗口角色。
-        // bridge 只接收 host 注入的 image/version，不反向读取 DataManager。
-        // reload 能力在这里注入，CropBridge 因而不需要反向依赖 DataManager 或窗口集合。
+        m_submitContext = std::make_shared<SubmitContext>();
+        m_submitContext->renderViews = &renderViews;
+        m_submitContext->dataManager = m_core.sharedDataMgr;
+        m_submitContext->sharedState = m_core.sharedState;
+        m_submitContext->bridge = m_core.orthogonalCropBridge;
+        const std::weak_ptr<SubmitContext> weakContext = m_submitContext;
         m_core.orthogonalCropBridge->SetSubmitReloadHandler(
-            [
-                bridge = std::weak_ptr<CropBridge>(m_core.orthogonalCropBridge),
-                sharedDataMgr = m_core.sharedDataMgr,
-                sharedState = m_core.sharedState,
-                renderViewServices = std::move(renderViewServices)
-            ](
+            [weakContext](
                 vtkSmartPointer<vtkImageData> image,
                 std::function<void(bool isSuccess)> onComplete) {
-                // image 是本次 submit 的结果快照；绑定层按 pending commit 流程回写共享数据。
-                if (!sharedDataMgr || !sharedState || !image) {
-                    return false;
+                const auto context = weakContext.lock();
+                if (!context || !image) return false;
+                const HostRenderViewSet* renderViews = nullptr;
+                std::shared_ptr<RawVolumeDataManager> dataManager;
+                std::shared_ptr<SharedInteractionState> sharedState;
+                std::weak_ptr<CropBridge> bridge;
+                {
+                    std::lock_guard<std::mutex> lock(context->mutex);
+                    renderViews = context->renderViews;
+                    dataManager = context->dataManager;
+                    sharedState = context->sharedState;
+                    bridge = context->bridge;
                 }
-                const auto sendViewUpdates = [&renderViewServices]() {
-                    for (const auto& service : renderViewServices) {
-                        if (const auto lockedService = service.lock()) {
-                            lockedService->SendUpdates();
-                        }
-                    }
-                };
+                if (!renderViews || !dataManager || !sharedState) return false;
 
-                // 原子接纳 reload 后再发布/接管 pending image；失败状态不能发布 DataReady。
                 if (!sharedState->StartLoad(LoadEventKind::Reload)) {
                     std::cerr << "[Host] Orthogonal crop submit failed: reload is already in progress." << std::endl;
                     return false;
                 }
                 bool hasPending = false;
-                if (!sharedDataMgr->SetImageSnapshot(std::move(image))
-                    || !sharedDataMgr->SetCurrentFromPending(hasPending)
+                if (!dataManager->SetImageSnapshot(std::move(image))
+                    || !dataManager->SetCurrentFromPending(hasPending)
                     || !hasPending) {
+                    dataManager->ClearPending();
                     sharedState->SetReloadLoadFailed();
-                    sendViewUpdates();
                     sharedState->ResetLoad(LoadEventKind::Reload);
                     return false;
                 }
 
-                // current image 成为真源后再更新状态和 bridge 输入，并同步调用各 view 消费刷新；
-                // 此 handler 不切换线程，调用方必须处于允许修改 VTK pipeline 的线程。
-                const auto imageState = sharedDataMgr->GetImageSnapshot();
-                if (!imageState) {
+                const auto imageState = dataManager->GetImageSnapshot();
+                bool isPipelineReady = imageState != nullptr;
+                for (const auto& view : renderViews->GetViews()) {
+                    if (!view.service || !view.service->SendReloadUpdate()) {
+                        isPipelineReady = false;
+                    }
+                }
+                if (!imageState || !isPipelineReady) {
                     sharedState->SetReloadLoadFailed();
-                    sendViewUpdates();
                     sharedState->ResetLoad(LoadEventKind::Reload);
                     return false;
                 }
-                sharedState->SetReloadDataReady(
-                    imageState->scalarRange[0], imageState->scalarRange[1], imageState->spacing);
+                if (!sharedState->SetReloadDataReady(
+                    imageState->scalarRange[0], imageState->scalarRange[1], imageState->spacing)) {
+                    sharedState->SetReloadLoadFailed();
+                    sharedState->ResetLoad(LoadEventKind::Reload);
+                    return false;
+                }
                 if (const auto lockedBridge = bridge.lock()) {
                     if (GetImageReady(imageState->image)) {
-                        lockedBridge->SetInputImage(imageState->image);
+                        lockedBridge->SetInputSnapshot(imageState->image);
                     }
                     else {
-                        lockedBridge->ClearInputImage();
+                        lockedBridge->SetInputSnapshot(nullptr);
                     }
                 }
-                sendViewUpdates();
-
-                // 该事务由 Host 接纳，不属于任一 VizService；所有 view 收敛后由 Host 统一释放。
                 sharedState->ResetLoad(LoadEventKind::Reload);
                 if (onComplete) {
-                    onComplete(true); // 分发到 CropBridge::OnSubmitReload，恢复 widget/overlay/camera 状态。
+                    onComplete(true);
                 }
-                return true; // reload handler 已接纳结果；最终成功仍通过 onComplete 分发。
+                return true;
             });
     }
 }
 
 bool HostFeatureBindings::Impl::StartCrop(
-    const HostCropViewRequest& request)
+    const HostCropTargetRequest& request)
 {
     // 裁切至少需要一个 reference view，因为 widget interactor、renderer 和输入模型坐标都来自这一路。
     // preview view 可以为空；那只意味着不显示预览，不影响 reference 链路边界。
-    if (request.referenceViewId.empty() && !request.isReferenceRoleUsed) {
+    if (request.referenceView.viewId.empty() && !request.referenceView.isViewRoleUsed) {
         std::cerr << "[Host] Orthogonal crop activation skipped: reference render view was not specified." << std::endl;
         return false;
     }
@@ -277,10 +283,7 @@ bool HostFeatureBindings::Impl::StartCrop(
         return false;
     }
 
-    const auto* referenceView = m_renderViews->GetViewBySelector(
-        request.referenceViewId,
-        request.isReferenceRoleUsed,
-        request.referenceRole);
+    const auto* referenceView = m_renderViews->GetViewBySelector(request.referenceView);
 
     if (!referenceView || !referenceView->service || !referenceView->context) {
         std::cerr << "[Host] Orthogonal crop activation skipped: reference render view is missing." << std::endl;
@@ -288,28 +291,29 @@ bool HostFeatureBindings::Impl::StartCrop(
     }
 
     std::vector<const HostRenderViewRuntime*> previewViews =
-        m_renderViews->GetViewsByIdsAndRoles(request.previewViewIds, request.previewViewRoles);
+        m_renderViews->GetViewsByTargets(request.previewViews);
     if (previewViews.empty() && request.isPreviewViewsUsed) {
         // 裁切预览目标也必须由请求允许后才退到配置默认值；空请求不全选，避免误把新窗口纳入 preview。
         previewViews = m_renderViews->GetCropPreviewViews();
     }
 
-    auto bridge = m_core.orthogonalCropBridge;
-    // 裁切 reference view 按请求中的 id/role 选择，而不是按第几个窗口选择；后续 Qt 多/少窗口布局仍可复用同一 bridge。
-    bridge->SetReferenceRenderService(referenceView->service);
-    bridge->SetReferenceRenderer(referenceView->context->GetRenderer());
-    bridge->SetPrimaryInteractor(referenceView->context->GetInteractor());
-    bridge->SetPreviewRenderServices(m_renderViews->BuildServices(previewViews));
+    const auto imageState = m_core.sharedDataMgr
+        ? m_core.sharedDataMgr->GetImageSnapshot() : ImageSnapshot{};
+    if (!imageState || !GetImageReady(imageState->image)) return false;
 
-    if (!SendCropInput()) {
-        return false;
-    }
-
-    return true;
+    CropViewRequest viewRequest;
+    viewRequest.inputImage = imageState->image;
+    viewRequest.dataSource = OrthogonalCropDataSource::ImageData;
+    viewRequest.interactor = referenceView->context->GetInteractor();
+    viewRequest.renderer = referenceView->context->GetRenderer();
+    viewRequest.referenceService = referenceView->service;
+    viewRequest.previewServices = m_renderViews->BuildServices(previewViews);
+    return m_core.orthogonalCropBridge->StartView(std::move(viewRequest));
 }
 
-bool HostFeatureBindings::Impl::StartGapView(
-    const HostGapViewRequest& request)
+bool HostFeatureBindings::Impl::StartGap(
+    const HostGapStartRequest& request,
+    HostCompleteCallback onComplete)
 {
     // request 同时携带宿主窗口选择和算法参数：target id/role 只在 Host 层解析，
     // Gap service 接收降级后的 3D/slice OverlayService 列表，不知道窗口编号或布局。
@@ -317,22 +321,22 @@ bool HostFeatureBindings::Impl::StartGapView(
         std::cerr << "[Host] Gap Analysis display activation skipped: host feature bindings are not ready." << std::endl;
         return false;
     }
-    if (request.targetViewIds.empty()
-        && request.targetViewRoles.empty()
+    if (m_timerContext.expired()) {
+        std::cerr << "[Host] Gap Analysis display activation skipped: timer is not attached." << std::endl;
+        return false;
+    }
+    if (request.targetViews.viewIds.empty()
+        && request.targetViews.viewRoles.empty()
         && !request.isDefaultOverlayUsed) {
         std::cerr << "[Host] Gap Analysis display activation skipped: no render view target was requested." << std::endl;
         return false;
     }
-    if (!request.algorithm) {
-        std::cerr << "[Host] Gap Analysis display activation skipped: algorithm parameters were not specified." << std::endl;
-        return false;
-    }
-    if (!GetGapConfigValid(*request.algorithm)) {
+    if (!GetGapConfigValid(request.algorithm)) {
         return false;
     }
 
     std::vector<const HostRenderViewRuntime*> targetViews =
-        m_renderViews->GetViewsByIdsAndRoles(request.targetViewIds, request.targetViewRoles);
+        m_renderViews->GetViewsByTargets(request.targetViews);
     if (targetViews.empty() && request.isDefaultOverlayUsed) {
         // 默认 overlay role 只有在宿主明确允许 fallback 时才使用；空请求不能被解释成全窗口。
         targetViews = m_renderViews->GetGapOverlayViews();
@@ -367,108 +371,18 @@ bool HostFeatureBindings::Impl::StartGapView(
     }
 
     // Host 启动时一次性交付隔离 image；后续 timer 只消费 worker 终态，不查询 feature 私有阶段。
-    const bool isStarted = m_core.gapAnalysis->StartView(
-        BuildGapSurfaceRequest(request.algorithm->surface),
-        BuildVoidParams(request.algorithm->voidDetection),
-        meshOverlayTargets,
-        sliceOverlayTargets,
-        [sharedState = m_core.sharedState](double isoValue) {
-            if (sharedState) {
-                sharedState->SetIsoValue(isoValue);
-            }
-        });
-    if (!isStarted) {
-        return false;
-    }
-    const auto imageState = m_core.sharedDataMgr->GetImageSnapshot();
-    if (!imageState
-        || !GetImageReady(imageState->image)
-        || !m_core.gapAnalysis->SetInputSnapshot(imageState->image)) {
-        m_core.gapAnalysis->ExitView();
-        return false;
-    }
-    // snapshot 已在受控只读入口安装；空 tick 只解析参数并启动 worker，不再复制整卷 float。
-    m_core.gapAnalysis->OnDisplayTick(nullptr);
-    return true;
-}
+    const auto imageState = m_core.sharedDataMgr
+        ? m_core.sharedDataMgr->GetImageSnapshot() : ImageSnapshot{};
+    if (!imageState || !GetImageReady(imageState->image)) return false;
 
-bool HostFeatureBindings::Impl::SendCommand(HostFeatureCommand command)
-{
-    return std::visit(
-        [this](auto&& featureCommand) -> bool {
-            using Command = std::decay_t<decltype(featureCommand)>;
-            if constexpr (std::is_same_v<Command, HostCropCommand>) {
-                return SendCropCommand(featureCommand);
-            }
-            else if constexpr (std::is_same_v<Command, HostGapCommand>) {
-                return SendGapCommand(featureCommand);
-            }
-            else if constexpr (std::is_same_v<Command, HostExitCommand>) {
-                return ExitFeature();
-            }
-            else {
-                static_assert(isUnknownType<Command>, "Unknown host feature command");
-            }
-        },
-        std::move(command));
-}
-
-#if defined(_MSC_VER)
-// 当 action 枚举扩展却未同步分发时直接阻断编译，避免新动作静默失效。
-#pragma warning(push)
-#pragma warning(4 : 4062)
-#pragma warning(error : 4062)
-#endif
-
-bool HostFeatureBindings::Impl::SendCropCommand(const HostCropCommand& command)
-{
-    switch (command.action) {
-    case HostCropAction::Start:
-        return StartCrop(command.request);
-    case HostCropAction::Box:
-        return SwitchCropBox(command.request);
-    case HostCropAction::Plane:
-        return SwitchCropPlane(command.request);
-    case HostCropAction::Preview:
-        return SwitchCropView(command.request, command.previewMode);
-    case HostCropAction::Submit:
-        return SendCrop(command.request);
-    case HostCropAction::Exit:
-        return ExitCrop();
-    }
-    return false;
-}
-
-bool HostFeatureBindings::Impl::SendGapCommand(const HostGapCommand& command)
-{
-    switch (command.action) {
-    case HostGapAction::Start:
-        return StartGapView(command.request);
-    case HostGapAction::Switch:
-        return SwitchGapView(command.request);
-    case HostGapAction::Overlay:
-        return SwitchGapLayer();
-    case HostGapAction::Exit:
-        return ExitGapView();
-    }
-    return false;
-}
-
-#if defined(_MSC_VER)
-#pragma warning(pop)
-#endif
-
-bool HostFeatureBindings::Impl::SwitchGapView(
-    const HostGapViewRequest& request)
-{
-    if (!m_core.gapAnalysis) {
-        std::cerr << "[Host] Gap Analysis display switch skipped: feature service is not ready." << std::endl;
-        return false;
-    }
-
-    return m_core.gapAnalysis->GetViewOn()
-        ? m_core.gapAnalysis->SwitchOverlay()
-        : StartGapView(request);
+    GapViewRequest viewRequest;
+    viewRequest.inputImage = imageState->image;
+    viewRequest.surface = BuildGapSurfaceRequest(request.algorithm.surface);
+    viewRequest.voidParams = BuildVoidParams(request.algorithm.voidDetection);
+    viewRequest.meshTargets = std::move(meshOverlayTargets);
+    viewRequest.sliceTargets = std::move(sliceOverlayTargets);
+    return m_core.gapAnalysis->StartView(
+        std::move(viewRequest), std::move(onComplete));
 }
 
 bool HostFeatureBindings::Impl::SwitchGapLayer()
@@ -480,7 +394,7 @@ bool HostFeatureBindings::Impl::SwitchGapLayer()
     return m_core.gapAnalysis->SwitchOverlay();
 }
 
-bool HostFeatureBindings::Impl::ExitGapView()
+bool HostFeatureBindings::Impl::ExitGap()
 {
     if (!m_core.gapAnalysis) {
         return false;
@@ -494,7 +408,7 @@ bool HostFeatureBindings::Impl::GetGapView() const
 }
 
 bool HostFeatureBindings::Impl::SwitchCropBox(
-    const HostCropViewRequest& request)
+    const HostCropTargetRequest& request)
 {
     // Switch 前先 Start，是为了让上位机切换窗口布局后，裁切 bridge 始终使用最新 reference/preview 目标。
     if (!StartCrop(request)) {
@@ -504,7 +418,7 @@ bool HostFeatureBindings::Impl::SwitchCropBox(
 }
 
 bool HostFeatureBindings::Impl::SwitchCropPlane(
-    const HostCropViewRequest& request)
+    const HostCropTargetRequest& request)
 {
     if (!StartCrop(request)) {
         return false;
@@ -513,19 +427,19 @@ bool HostFeatureBindings::Impl::SwitchCropPlane(
 }
 
 bool HostFeatureBindings::Impl::SwitchCropView(
-    const HostCropViewRequest& request,
-    HostCropPreviewMode previewMode)
+    const HostCropPreviewRequest& request)
 {
-    if (!StartCrop(request)) {
+    if (!StartCrop(request.target)) {
         return false;
     }
 
-    m_core.orthogonalCropBridge->SwitchPreview(GetCropRemovalMode(previewMode));
+    m_core.orthogonalCropBridge->SwitchPreview(GetCropRemovalMode(request.previewMode));
     return true;
 }
 
 bool HostFeatureBindings::Impl::SendCrop(
-    const HostCropViewRequest& request)
+    const HostCropTargetRequest& request,
+    HostCompleteCallback onComplete)
 {
     // 每次 submit 前重绑 request 指定的 reference/preview 目标并刷新输入版本。
     // 返回值只表示 reload handler 是否接受本次结果，不保证完成回调或新帧已经发生。
@@ -533,21 +447,13 @@ bool HostFeatureBindings::Impl::SendCrop(
         return false;
     }
 
-    return m_core.orthogonalCropBridge->SendSubmit(); // 结果沿 reload handler 分发，拒绝时返回 false。
+    return m_core.orthogonalCropBridge->SendSubmit(std::move(onComplete));
 }
 
 bool HostFeatureBindings::Impl::ExitCrop()
 {
     return m_core.orthogonalCropBridge
         && m_core.orthogonalCropBridge->ExitCrop();
-}
-
-bool HostFeatureBindings::Impl::ExitFeature()
-{
-    if (ExitCrop()) {
-        return true;
-    }
-    return ExitGapView();
 }
 
 bool HostFeatureBindings::Impl::GetCropActive() const
@@ -559,7 +465,7 @@ bool HostFeatureBindings::Impl::GetCropActive() const
 void HostFeatureBindings::Impl::ClearCropInput() const
 {
     if (m_core.orthogonalCropBridge) {
-        m_core.orthogonalCropBridge->ClearInputImage();
+        m_core.orthogonalCropBridge->SetInputSnapshot(nullptr);
     }
 }
 
@@ -571,33 +477,29 @@ bool HostFeatureBindings::Impl::SendCropInput()
 
     const auto imageState = m_core.sharedDataMgr->GetImageSnapshot();
     if (!imageState || !GetImageReady(imageState->image)) {
-        m_core.orthogonalCropBridge->ClearInputImage();
+        m_core.orthogonalCropBridge->SetInputSnapshot(nullptr);
         std::cerr << "[Host] Orthogonal crop init failed: input image missing." << std::endl;
         return false;
     }
 
-    m_core.orthogonalCropBridge->SetInputImage(imageState->image);
+    m_core.orthogonalCropBridge->SetInputSnapshot(imageState->image);
     return true;
 }
 
-void HostFeatureBindings::Impl::AttachHostTimer(
-    const HostTimerEventPumpConfig& eventPumpConfig)
+bool HostFeatureBindings::Impl::AttachHostTimer(const HostTimerConfig& config)
 {
     // eventPumpConfig 只选择提供主线程 TimerEvent 的 view；它不是 Gap overlay 目标。
-    if (!eventPumpConfig.isTimerEnabled || !m_renderViews) {
+    if (!config.isTimerEnabled || !m_renderViews) {
         DetachHostTimer();
-        return;
+        return false;
     }
 
-    const auto* timerView = m_renderViews->GetViewBySelector(
-        eventPumpConfig.timerViewId,
-        eventPumpConfig.isTimerRoleUsed,
-        eventPumpConfig.timerViewRole);
+    const auto* timerView = m_renderViews->GetViewBySelector(config.targetView);
 
     if (!timerView || !timerView->context) {
         std::cerr << "[Host] Timer event pump skipped: explicit timer render view is missing." << std::endl;
         DetachHostTimer();
-        return;
+        return false;
     }
 
     // 重配时先卸载旧 handler；m_timerContext 的弱引用不会延长窗口生命周期。
@@ -606,17 +508,17 @@ void HostFeatureBindings::Impl::AttachHostTimer(
     timerView->context->SetTimerHandler([impl = this]() {
         impl->OnHostTimer();
     });
+    return true;
 }
 
 void HostFeatureBindings::Impl::OnHostTimer()
 {
-    if (!m_core.gapAnalysis || !m_core.sharedState || !m_core.sharedDataMgr) {
+    if (!m_core.gapAnalysis) {
         return;
     }
 
     // host 只提供主线程 tick 和当前数据快照入口；GapAnalysis 自己判断是否有 pending 显示请求。
-    if (m_core.sharedState->GetDataTrustedState() != LoadState::Succeeded
-        || !m_core.gapAnalysis->GetViewOn()) {
+    if (!m_core.gapAnalysis->GetDisplayTickNeeded()) {
         return;
     }
     m_core.gapAnalysis->OnDisplayTick(nullptr);
@@ -644,9 +546,53 @@ void HostFeatureBindings::AttachFeatures(
     m_impl->AttachFeatures(core, renderViews);
 }
 
-bool HostFeatureBindings::SendCommand(HostFeatureCommand command)
+bool HostFeatureBindings::StartCrop(const HostCropTargetRequest& request)
 {
-    return m_impl->SendCommand(std::move(command));
+    return m_impl && m_impl->StartCrop(request);
+}
+
+bool HostFeatureBindings::SwitchCropBox(const HostCropTargetRequest& request)
+{
+    return m_impl && m_impl->SwitchCropBox(request);
+}
+
+bool HostFeatureBindings::SwitchCropPlane(const HostCropTargetRequest& request)
+{
+    return m_impl && m_impl->SwitchCropPlane(request);
+}
+
+bool HostFeatureBindings::SwitchCropView(const HostCropPreviewRequest& request)
+{
+    return m_impl && m_impl->SwitchCropView(request);
+}
+
+bool HostFeatureBindings::SendCrop(
+    const HostCropTargetRequest& request,
+    HostCompleteCallback onComplete)
+{
+    return m_impl && m_impl->SendCrop(request, std::move(onComplete));
+}
+
+bool HostFeatureBindings::ExitCrop()
+{
+    return m_impl && m_impl->ExitCrop();
+}
+
+bool HostFeatureBindings::StartGap(
+    const HostGapStartRequest& request,
+    HostCompleteCallback onComplete)
+{
+    return m_impl && m_impl->StartGap(request, std::move(onComplete));
+}
+
+bool HostFeatureBindings::SwitchGapLayer()
+{
+    return m_impl && m_impl->SwitchGapLayer();
+}
+
+bool HostFeatureBindings::ExitGap()
+{
+    return m_impl && m_impl->ExitGap();
 }
 
 bool HostFeatureBindings::GetGapView() const
@@ -669,8 +615,7 @@ bool HostFeatureBindings::SendCropInput()
     return m_impl->SendCropInput();
 }
 
-void HostFeatureBindings::AttachHostTimer(
-    const HostTimerEventPumpConfig& eventPumpConfig)
+bool HostFeatureBindings::AttachHostTimer(const HostTimerConfig& config)
 {
-    m_impl->AttachHostTimer(eventPumpConfig);
+    return m_impl && m_impl->AttachHostTimer(config);
 }

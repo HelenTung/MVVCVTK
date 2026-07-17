@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Host/HostCoreServices.h"
-#include "Host/HostSessionTypes.h"
+#include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
 #include <string>
@@ -39,7 +39,7 @@ public:
     HostRenderViewSet& operator=(HostRenderViewSet&&) noexcept;
 
     // 根据 host 配置构建一次窗口集合；configs 数量就是窗口数量，id 必须由宿主作为稳定外部事实提供。
-    void Build(
+    bool Build(
         const HostCoreServices& core,
         const std::vector<HostRenderViewConfig>& configs);
 
@@ -50,18 +50,15 @@ public:
     const HostRenderViewRuntime* GetFirstViewByRole(HostRenderViewRole role) const;
     // 单视图 selector 统一使用“id 优先，否则按 role fallback”，避免各调用点手写同一判断。
     const HostRenderViewRuntime* GetViewBySelector(
-        const std::string& id,
-        bool isRoleUsed,
-        HostRenderViewRole role) const;
+        const HostViewTarget& target) const;
     // 初始加载和裁切默认参考需要一个可解释的主视图；没有 Primary3D 时按 3D role 再退到首视图。
     const HostRenderViewRuntime* GetPrimaryView() const;
     // standalone VTK 只能有一个阻塞事件循环承载点；Qt host 不调用 Start，因此不受该选择约束。
     const HostRenderViewRuntime* GetStandaloneStartView() const;
 
     // ids 和 roles 是显式作用域并集；二者都为空时返回空，避免漏配请求被解释为全窗口。
-    std::vector<const HostRenderViewRuntime*> GetViewsByIdsAndRoles(
-        const std::vector<std::string>& ids,
-        const std::vector<HostRenderViewRole>& roles) const;
+    std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
+        const HostViewTargets& targets) const;
     // 只有请求允许使用配置默认值时才调用，避免裁切 preview 在未声明目标时接管新窗口。
     std::vector<const HostRenderViewRuntime*> GetCropPreviewViews() const;
     // 孔隙 overlay 默认角色也是显式 fallback；它描述可显示 overlay 的 role，不描述当前窗口数量。

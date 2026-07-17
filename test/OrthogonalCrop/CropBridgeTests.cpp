@@ -1,4 +1,5 @@
 #include "CropBridgeTests.h"
+#include "AppInterfaces.h"
 #include "Interaction/CropBridge.h"
 
 #include <vtkCamera.h>
@@ -11,6 +12,44 @@
 #include <algorithm>
 #include <functional>
 #include <iostream>
+#include <utility>
+
+namespace {
+
+class CropServiceStub final : public InteractiveService {
+public:
+    void SetSliceScroll(int) override {}
+    int GetPlaneAxis(vtkActor*) override { return -1; }
+    void SetCursorWorldPosition(double[3], int) override {}
+    std::array<double, 3> GetCursorWorld() override { return {}; }
+    void SetInteracting(bool) override {}
+    vtkProp3D* GetMainProp() override { return nullptr; }
+    void SetModelMatrix(vtkMatrix4x4*) override {}
+    std::array<double, 16> GetModelMatrix() override
+    {
+        return { 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0 };
+    }
+    int GetNavigationAxis() const override { return -1; }
+    WindowLevelParams GetWindowLevel() const override { return {}; }
+    void SetElementVisible(uint32_t, bool) override {}
+    void SetWindowLevelDrag(int, int, int, int, double, double) override {}
+    void GetModelPositionFromWorld(const double source[3], double target[3]) const override
+    { std::copy_n(source, 3, target); }
+    void GetWorldPositionFromModel(const double source[3], double target[3]) const override
+    { std::copy_n(source, 3, target); }
+    void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
+    void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
+    void ClearOverlayStrategies() override {}
+    void SetRenderContext(vtkSmartPointer<vtkRenderWindow>, vtkSmartPointer<vtkRenderer>) override {}
+    void SendUpdates() override {}
+    bool GetDirty() const override { return false; }
+    void SetDirty() override {}
+    bool ResetDirty() override { return false; }
+    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
+};
+
+} // namespace
 
 int CropBridgeSuite::GetFailCount() const
 {
@@ -38,9 +77,13 @@ int CropBridgeSuite::GetFailCount() const
     interactor->SetRenderWindow(renderWindow);
 
     CropBridge bridge;
-    bridge.SetInputImage(image);
-    bridge.SetReferenceRenderer(renderer);
-    bridge.SetPrimaryInteractor(interactor);
+    CropViewRequest request;
+    request.inputImage = image;
+    request.dataSource = OrthogonalCropDataSource::ImageData;
+    request.renderer = renderer;
+    request.interactor = interactor;
+    request.referenceService = std::make_shared<CropServiceStub>();
+    expect(bridge.StartView(std::move(request)), "Bridge should accept a complete view request.");
     expect(bridge.SwitchCropBox(), "Bridge should enter box editing.");
 
     bridge.SetSubmitReloadHandler(

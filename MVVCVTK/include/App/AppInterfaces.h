@@ -15,6 +15,7 @@
 // =====================================================================
 
 #include "AppTypes.h"
+#include "VolumeTypes.h"
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -67,14 +68,10 @@ public:
     virtual std::array<double, 3> GetSpacing() const = 0;
     virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;
     virtual DataVersion GetDataVersion() const = 0;
-    virtual bool SetDataLoaded(const std::string& filePath,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) = 0;
-    virtual bool SetFromBuffer(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) = 0;
+    virtual bool SetDataLoaded(
+        const std::string& filePath,
+        const VolumeLayout& layout) = 0;
+    virtual bool SetFromBuffer(const VolumeBuffer& buffer) = 0;
     // 后台准备好新体数据后，由具备 VTK pipeline 写权限的消费线程接管并提交为 current；
     // hasPending 与领取动作在同一锁内产生：false 表示当前无批次，true + 返回 false 表示提交失败。
     // 通常由主线程 Timer 调用，Host 同步事务也可由其绑定线程调用。

@@ -14,8 +14,7 @@ int GetLifecycleFailCount()
     view.id = "lifecycle";
     view.role = HostRenderViewRole::Primary3D;
 
-    VtkAppHostSession::Config config;
-    config.isInitialRenderEnabled = false;
+    HostSessionConfig config;
     config.renderViews.push_back(std::move(view));
     auto session = std::make_unique<VtkAppHostSession>(std::move(config));
     session->BuildSession();

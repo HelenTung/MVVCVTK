@@ -20,7 +20,7 @@ enum class GapAnalysisState {
 };
 
 // ── 表面参数（外部手动传入 isoValue，不在此自动估算）───────────────
-struct SurfaceParams {
+struct GapSurfaceParams {
     float isoValue = 0.0f;  // 输入标量域阈值；当前 worker 用它区分低于 ISO 的内部候选。
     float background = 0.0f;  // 预留的背景灰度上限；当前 worker 不读取该字段。
     float material = 0.0f;  // 预留的材料灰度下限；当前 worker 不读取该字段。
@@ -28,16 +28,16 @@ struct SurfaceParams {
 
 // ── 显示请求中的等值面阈值来源 ────────────────────────────────────
 // 这是 GapAnalysis feature 自己的执行语义，不携带 host 窗口、按键或上位机协议细节。
-enum class GapAnalysisIsoValueMode {
+enum class GapIsoMode {
     // 在当前输入标量范围按 min + (max - min) * ratio 解析；feature 不额外钳制 ratio。
     DataRangeRatio,
     // 直接采用输入图像标量域中的 absoluteIsoValue。
     AbsoluteValue
 };
 
-struct GapAnalysisSurfaceRequest {
+struct GapSurfaceRequest {
     // 阈值来源选择器；DataRangeRatio 只读取 ratio，AbsoluteValue 只读取 absoluteIsoValue。
-    GapAnalysisIsoValueMode isoMode = GapAnalysisIsoValueMode::DataRangeRatio;
+    GapIsoMode isoMode = GapIsoMode::DataRangeRatio;
     // DataRangeRatio 下按 min + (max-min)*ratio 解析；当前不钳制范围，默认 0 对应输入最小值。
     double dataRangeRatio = 0.0;
     // AbsoluteValue 下直接使用的输入标量域阈值；其它模式忽略。
@@ -45,7 +45,7 @@ struct GapAnalysisSurfaceRequest {
 };
 
 // ── 高级法向精化参数 ──────────────────────────────────────────────────
-struct AdvancedSurfaceParams {
+struct GapAdvancedParams {
     // 法向精化总开关；当前 worker 尚未接入精化算法，因此本结构全部字段不影响分析结果。
     bool  isEnabled = true;
     // 计划的法向双侧搜索距离；isMillimeter=true 时为 mm，否则为平均 voxel spacing 的倍数。
@@ -63,7 +63,7 @@ struct AdvancedSurfaceParams {
 };
 
 // ── 空洞检测参数 ──────────────────────────────────────────────────────
-struct VoidDetectionParams {
+struct GapVoidParams {
     // 预留的候选灰度下限；当前 BuildCandidates 不读取，不能视作已生效筛选条件。
     float  grayMin = 0.0f;
     // 候选灰度上限，处于输入标量域；内部 mask 中 value <= grayMax 的 voxel 才进入原始候选。

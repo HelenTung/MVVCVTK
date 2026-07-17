@@ -3,7 +3,6 @@
 #include <vtkPointData.h>
 #include <fstream>
 #include <filesystem>
-#include <regex>
 #include <vtkTIFFReader.h>
 #include <algorithm>
 #include <cmath>
@@ -91,6 +90,8 @@ public:
     mutable std::mutex m_dataMutex;
     // current 只向受控内部消费链发布 const owner；写入只能通过 DataManager 提交新批次。
     ImageSnapshot m_current;
+    mutable std::mutex m_pendingMutex;
+    ImageState m_pending{};
     // 与 current image 同批提交的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
 
     bool SetRasScalars(
@@ -190,20 +191,10 @@ class TiffVolumeDataManager::Impl final {
 public:
     vtkSmartPointer<vtkImageData> LoadImage(
         const std::string& inputPath,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin);
+        const VolumeLayout& layout);
 
 private:
-    bool GetExplicitValue(const std::array<float, 3>& values) const;
     bool SetLpsRasImage(vtkImageData* source, vtkImageData* target) const;
-};
-
-class RawVolumeDataManager::Impl final {
-public:
-    // pending 值对象的生产、覆盖与接管共用此锁；它不保护 Base Impl 的 current 状态。
-    mutable std::mutex m_reconMutex;
-    // ImageState 直接承载待提交批次；空 image 表示当前没有 pending 数据。
-    ImageState m_pending{};
 };
 
 BaseDataManager::BaseDataManager()
@@ -300,10 +291,7 @@ ImageSnapshot BaseDataManager::GetImageSnapshot() const
 }
 
 bool BaseDataManager::SetFromBuffer(
-    const float*,
-    const std::array<int, 3>&,
-    const std::array<float, 3>&,
-    const std::array<float, 3>&)
+    const VolumeBuffer&)
 {
     return false;
 }
@@ -311,11 +299,38 @@ bool BaseDataManager::SetFromBuffer(
 bool BaseDataManager::SetCurrentFromPending(bool& hasPending)
 {
     hasPending = false;
-    return false;
+    ImageState incoming;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        if (!m_impl->m_pending.image) return true;
+        hasPending = true;
+        incoming = std::move(m_impl->m_pending);
+        m_impl->m_pending = {};
+    }
+    incoming.image->Modified();
+    return m_impl->SetCurrent(std::move(incoming));
 }
 
 bool BaseDataManager::ClearPending()
 {
+    ImageState retiredPending;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        retiredPending = std::move(m_impl->m_pending);
+        m_impl->m_pending = {};
+    }
+    return true;
+}
+
+bool BaseDataManager::SetPendingImage(ImageState image)
+{
+    if (!image.image) return false;
+    ImageState retiredPending;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        retiredPending = std::move(m_impl->m_pending);
+        m_impl->m_pending = std::move(image);
+    }
     return true;
 }
 
@@ -577,31 +592,28 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
 }
 
 RawVolumeDataManager::RawVolumeDataManager()
-    : m_rawImpl(std::make_unique<RawVolumeDataManager::Impl>())
 {
 }
 
 RawVolumeDataManager::~RawVolumeDataManager() = default;
 
-bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
-    const std::array<float, 3>& spacing, const std::array<float, 3>& origin) {
-    // 解析文件名
-    std::filesystem::path pathObj(filePath);
-    std::string name = pathObj.filename().string();
-    std::regex pattern(R"((\d+)[xX](\d+)[xX](\d+))");
-    std::smatch matches;
-
-    int newDims[3] = { 0, 0, 0 };
-    if (std::regex_search(name, matches, pattern) && matches.size() > 3) {
-        newDims[0] = std::stoi(matches[1].str());
-        newDims[1] = std::stoi(matches[2].str());
-        newDims[2] = std::stoi(matches[3].str());
-    }
-    else {
+bool RawVolumeDataManager::SetDataLoaded(
+    const std::string& filePath,
+    const VolumeLayout& layout)
+{
+    const auto& dimensions = layout.GetDimensions();
+    const int rasDims[3] = {
+        dimensions[0], dimensions[1], dimensions[2]
+    };
+    std::error_code fileError;
+    const auto fileBytes = std::filesystem::file_size(filePath, fileError);
+    if (fileError || fileBytes != layout.GetByteCount()) {
         return false;
     }
 
-	// 打开文件统一把 ITK/LPS 物理坐标转换成 VTK 侧统一使用的 RAS 物理坐标。
+    // 输入 layout 明确描述 LPS 物理空间；加载链只负责转换为内部 RAS 空间。
+    const auto& spacing = layout.GetSpacing();
+    const auto& origin = layout.GetOrigin();
     const std::array<double, 3> lpsSpacing = {
         static_cast<double>(spacing[0]),
         static_cast<double>(spacing[1]),
@@ -614,74 +626,30 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
     };
     const std::array<double, 3> rasSpacing = lpsSpacing;
     const std::array<double, 3> rasOrigin = BaseDataManager::Impl::GetRasOrigin(
-        lpsOrigin, newDims, rasSpacing);
+        lpsOrigin, rasDims, rasSpacing);
 
-    const auto totalVoxels = BaseDataManager::Impl::GetVoxelCount(newDims);
-    if (!totalVoxels) {
-        return false;
-    }
-
-    // 创建全新的 vtkImageData 对象
     auto newImage = vtkSmartPointer<vtkImageData>::New();
-    newImage->SetDimensions(newDims[0], newDims[1], newDims[2]);
+    newImage->SetDimensions(rasDims[0], rasDims[1], rasDims[2]);
     newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
     newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
-    // 读取数据到新内存
-    const size_t expectedBytes = *totalVoxels * sizeof(float);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-
-    // 使用 MemMappedFile 替代 std::ifstream读取
     MemMappedFile mmf;
-    if (mmf.Load(filePath)) {
-        //   - 文件够大：只读取前 expectedBytes。
-        //   - 文件偏小：只复制完整 float；不足 sizeof(float) 的尾字节丢弃，剩余 voxel 保持零值。
-        size_t copyBytes = (mmf.GetSize() < expectedBytes) ? mmf.GetSize() : expectedBytes;
-        const size_t copyCount = copyBytes / sizeof(float);
-
-        if (mmf.GetSize() < expectedBytes) {
-            std::cerr << "[Warn] File size (" << mmf.GetSize()
-                << ") < expected (" << expectedBytes
-                << "). Partial load, remainder zeroed." << std::endl;
-        }
-
-        if (!m_impl->SetRasScalars(
-            reinterpret_cast<const float*>(mmf.GetData()),
-            dst,
-            newDims,
-            copyCount)) {
-            return false;
-        }
-        // mmf 析构时自动 close()
+    if (!mmf.Load(filePath) || mmf.GetSize() != layout.GetByteCount()
+        || !m_impl->SetRasScalars(
+            static_cast<const float*>(mmf.GetData()), dst,
+            rasDims, layout.GetVoxelCount())) {
+        return false;
     }
-    else {
-        // mmap 打开失败，fallback 到原始 ifstream
-        std::cerr << "[Warn] MemMappedFile open failed, fallback to ifstream: "
-            << filePath << std::endl;
-        std::ifstream file(filePath, std::ios::binary);
-        if (!file.is_open()) {
-            return false;
-        }
-        std::vector<float> srcBuffer(*totalVoxels, 0.0f);
-        file.read(reinterpret_cast<char*>(srcBuffer.data()),
-            static_cast<std::streamsize>(expectedBytes));
-        const size_t readBytes = static_cast<size_t>(file.gcount());
-        const size_t readCount = readBytes / sizeof(float);
-        if (!m_impl->SetRasScalars(srcBuffer.data(), dst, newDims, readCount)) {
-            return false;
-        }
-        file.close();
-    }
-
 
     newImage->Modified();
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
-    return m_impl->SetCurrent({
+    return SetPendingImage({
         std::move(newImage),
-        { newDims[0], newDims[1], newDims[2] },
+        dimensions,
         rasSpacing,
         rasOrigin,
         { range[0], range[1] },
@@ -690,22 +658,13 @@ bool RawVolumeDataManager::SetDataLoaded(const std::string& filePath,
 }
 
 bool RawVolumeDataManager::SetFromBuffer(
-    const float* data,
-    const std::array<int, 3>& dims,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin)
+    const VolumeBuffer& buffer)
 {
-    // 后台阶段只构造并发布 pending 事务；current 指针、版本和 VTK 脏传播留给提交阶段。
-    if (!data || dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        return false;
-    }
-
-    // 1. 在调用线程完成分配与唯一一次体素复制，并与文件路径一致地转换 LPS -> RAS 物理坐标。
+    const auto& layout = buffer.GetLayout();
+    const auto& dims = layout.GetDimensions();
+    const auto& spacing = layout.GetSpacing();
+    const auto& origin = layout.GetOrigin();
     const int rasDims[3] = { dims[0], dims[1], dims[2] };
-    const auto voxelCount = BaseDataManager::Impl::GetVoxelCount(rasDims);
-    if (!voxelCount) {
-        return false;
-    }
     const std::array<double, 3> rasSpacing = {
         static_cast<double>(spacing[0]),
         static_cast<double>(spacing[1]),
@@ -722,27 +681,18 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
     newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
     newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
-    newImage->AllocateScalars(VTK_FLOAT, 1);   // 分配（page-fault 在此触发）
+    newImage->AllocateScalars(VTK_FLOAT, 1);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
-    if (!m_impl->SetRasScalars(data, dst, rasDims, *voxelCount)) {
+    if (!m_impl->SetRasScalars(
+        buffer.GetVoxels().data(), dst, rasDims, layout.GetVoxelCount())) {
         return false;
     }
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
-    // 2. 此处不调用 Modified()；现有消费链在 SetCurrentFromPending() 接管后、提交 current 前触发。
-
-    ImageState retiredPending;
-    {
-        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        // 3. 完整 ImageState 同锁发布；槽未消费时由最新一批完整 payload 覆盖。
-        retiredPending = std::move(m_rawImpl->m_pending);
-        m_rawImpl->m_pending = {
-            std::move(newImage), dims, rasSpacing, rasOrigin,
-            { range[0], range[1] }, 0 };
-    }
-
-    return true;
+    return SetPendingImage({
+        std::move(newImage), dims, rasSpacing, rasOrigin,
+        { range[0], range[1] }, 0 });
 }
 
 bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
@@ -774,60 +724,23 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
         imageCopy->GetOrigin()[2]
     };
 
-    ImageState retiredPending;
-    {
-        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        // 入站深拷贝切断调用方别名；完整 ImageState 同锁发布。
-        retiredPending = std::move(m_rawImpl->m_pending);
-        m_rawImpl->m_pending = {
-            std::move(imageCopy),
-            { dims[0], dims[1], dims[2] },
-            imageSpacing,
-            imageOrigin,
-            { range[0], range[1] },
-            0 };
-    }
-
-    return true;
+    return SetPendingImage({
+        std::move(imageCopy),
+        { dims[0], dims[1], dims[2] },
+        imageSpacing,
+        imageOrigin,
+        { range[0], range[1] },
+        0 });
 }
 
 bool RawVolumeDataManager::SetCurrentFromPending(bool& hasPending)
 {
-    hasPending = false;
-    // 消费阶段先从 pending Impl 接管一批事务，再向 Base Impl 提交为 current；两把锁职责不重叠。
-    ImageState incoming;
-    {
-        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        // 1. 门铃和 payload 同锁检查，避免锁外 check-then-act 时生产者替换 pending image。
-        if (!m_rawImpl->m_pending.image) {
-            return false;
-        }
-        hasPending = true;
-        // 2. 一次移动完整值对象；空 image 同时清除本批门铃。
-        incoming = std::move(m_rawImpl->m_pending);
-        m_rawImpl->m_pending = {};
-    }
-
-    // 3. 现有调用链在主线程提交前触发 Modified()；不把这一步放进 pending 锁临界区。
-    incoming.image->Modified();
-
-    // 4. current image、range、spacing、version 在 Base 锁内一次提交，对 pending 生产者不形成锁嵌套。
-    if (!m_impl->SetCurrent(std::move(incoming))) {
-        return false;
-    }
-    // 5. 新 image 已成为 DataManager 的 current 真源；调用方随后发布 DataReady，驱动 Service 重建。
-    return true;
+    return BaseDataManager::SetCurrentFromPending(hasPending);
 }
 
 bool RawVolumeDataManager::ClearPending()
 {
-    ImageState retiredPending;
-    {
-        std::lock_guard<std::mutex> lock(m_rawImpl->m_reconMutex);
-        retiredPending = std::move(m_rawImpl->m_pending);
-        m_rawImpl->m_pending = {};
-    }
-    return true;
+    return BaseDataManager::ClearPending();
 }
 
 TiffVolumeDataManager::TiffVolumeDataManager()
@@ -839,21 +752,31 @@ TiffVolumeDataManager::~TiffVolumeDataManager() = default;
 
 bool TiffVolumeDataManager::SetDataLoaded(
     const std::string& inputPath,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin)
+    const VolumeLayout& layout)
 {
     if (!m_impl) {
         return false;
     }
 
-    auto image = m_impl->LoadImage(inputPath, spacing, origin);
-    return SetOwnedImage(std::move(image));
+    auto image = m_impl->LoadImage(inputPath, layout);
+    if (!image) return false;
+    double range[2] = { 0.0, 0.0 };
+    image->GetScalarRange(range);
+    const auto& dimensions = layout.GetDimensions();
+    double spacing[3] = { 1.0, 1.0, 1.0 };
+    double origin[3] = { 0.0, 0.0, 0.0 };
+    image->GetSpacing(spacing);
+    image->GetOrigin(origin);
+    return SetPendingImage({
+        std::move(image), dimensions,
+        { spacing[0], spacing[1], spacing[2] },
+        { origin[0], origin[1], origin[2] },
+        { range[0], range[1] }, 0 });
 }
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     const std::string& inputPath,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin) {
+    const VolumeLayout& layout) {
     // 路径检查
     std::filesystem::path pathObj(inputPath);
     if (!std::filesystem::exists(pathObj)) {
@@ -965,15 +888,21 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
         return nullptr;
     }
 
+    const auto& expectedDims = layout.GetDimensions();
+    const int* decodedDims = output->GetDimensions();
+    if (decodedDims[0] != expectedDims[0]
+        || decodedDims[1] != expectedDims[1]
+        || decodedDims[2] != expectedDims[2]) {
+        return nullptr;
+    }
+
     // --- 数据提交 (Back Buffer 策略) ---
     auto lpsImage = vtkSmartPointer<vtkImageData>::New();
     lpsImage->ShallowCopy(output);
-    if (GetExplicitValue(spacing)) {
-        lpsImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
-    }
-    if (GetExplicitValue(origin)) {
-        lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
-    }
+    const auto& spacing = layout.GetSpacing();
+    const auto& origin = layout.GetOrigin();
+    lpsImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
+    lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     if (!SetLpsRasImage(lpsImage, newImage)) {
@@ -985,13 +914,6 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 
     std::cout << "[Success] Loaded Volume: " << dims[0] << "x" << dims[1] << "x" << dims[2] << std::endl;
     return newImage;
-}
-
-bool TiffVolumeDataManager::Impl::GetExplicitValue(const std::array<float, 3>& values) const
-{
-    return std::any_of(values.begin(), values.end(), [](const float value) {
-        return value != 0.0f;
-    });
 }
 
 bool TiffVolumeDataManager::Impl::SetLpsRasImage(

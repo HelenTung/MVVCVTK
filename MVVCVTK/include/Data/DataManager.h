@@ -1,16 +1,8 @@
 #pragma once
 #include "AppInterfaces.h"
-#include <vector>
 #include <array>
 #include <memory>
 #include <string>
-
-struct ReconBuffer {
-    std::vector<float>    data; // LPS 连续体素，布局为 [z][y][x]、X 最快，期望元素数为 X*Y*Z
-    std::array<int, 3>    dims = { 0, 0, 0 }; // LPS [X, Y, Z] 体素数；任一维为 0 表示空 buffer
-    std::array<float, 3>  spacing = { 1.f, 1.f, 1.f }; // LPS [sx, sy, sz] 物理间距，单位沿用上游
-    std::array<float, 3>  origin = { 0.f, 0.f, 0.f }; // LPS [x, y, z] 物理原点，提交 VTK 前转为 RAS
-};
 
 class BaseDataManager : public AbstractDataManager
 {
@@ -23,6 +15,7 @@ protected:
 
     // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
     bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
+    bool SetPendingImage(ImageState image);
     ImageSnapshot GetImageSnapshot() const override;
 
 public:
@@ -39,11 +32,7 @@ public:
     ImageState GetImageState() const override;
 
     // 基础/TIFF 数据源不支持 buffer pending 事务；RawVolumeDataManager 显式覆盖这两个入口。
-    bool SetFromBuffer(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) override;
+    bool SetFromBuffer(const VolumeBuffer& buffer) override;
     bool SetCurrentFromPending(bool& hasPending) override;
     bool ClearPending() override;
 
@@ -55,26 +44,17 @@ class RawVolumeDataManager : public BaseDataManager {
 public:
     RawVolumeDataManager();
     ~RawVolumeDataManager() override;
-    bool SetDataLoaded(const std::string& filePath,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) override;
+    bool SetDataLoaded(
+        const std::string& filePath,
+        const VolumeLayout& layout) override;
     // 后台把调用期间有效的连续 float 缓冲复制为 pending image；输入 spacing/origin 属于 LPS 物理空间。
-    bool SetFromBuffer(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) override;
+    bool SetFromBuffer(const VolumeBuffer& buffer) override;
     // 深拷贝调用方 image 为 pending 隔离批次，不直接提交 current。
     bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
     // 具备 VTK pipeline 写权限的消费线程领取 pending payload，触发 Modified() 后提交完整 current 图像状态。
     bool SetCurrentFromPending(bool& hasPending) override;
     bool ClearPending() override;
 
-private:
-    class Impl;
-    // 随 RawVolumeDataManager 生命周期独占 pending image、派生元数据、门铃及其事务锁；
-    // 后台生产完整批次，消费线程接管后清门铃，不复制 Base Impl 的 current 状态。
-    std::unique_ptr<Impl> m_rawImpl;
 };
 
 class TiffVolumeDataManager : public BaseDataManager {
@@ -82,9 +62,9 @@ public:
     TiffVolumeDataManager();
     ~TiffVolumeDataManager() override;
     // 实现加载接口
-    bool SetDataLoaded(const std::string& filePath,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin) override;
+    bool SetDataLoaded(
+        const std::string& filePath,
+        const VolumeLayout& layout) override;
 
 private:
     class Impl;

@@ -48,12 +48,14 @@ public:
     void SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService);
     void SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices);
     void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
+    bool StartView(CropViewRequest request);
+    void ClearBindings();
     bool SwitchCropBox();
     bool SwitchCropPlane();
     bool ExitCrop();
     bool GetCropActive() const;
     void SwitchPreview(CropRemovalMode removalMode);
-    bool SendSubmit();
+    bool SendSubmit(std::function<void(bool isSuccess)> onComplete);
 
 private:
     enum class CropSessionPhase {
@@ -129,6 +131,7 @@ private:
     ReloadSubmitter m_submitReloadHandler;
     // reload pending 期间只保留不含 submit image 的结果元数据，成功后用于分发各 target 的 overlay。
     OrthogonalCropResult m_submitOverlay;
+    std::function<void(bool)> m_submitCallback;
     // submit 前缓存 reference renderer 相机值快照；不持有 renderer/camera 所有权。
     CameraStateSnapshot m_submitCameraState;
     // completion 通过弱引用进入 gate；析构在同一 mutex 下清 owner，避免延迟回调访问已销毁 Impl。
@@ -269,6 +272,43 @@ void CropBridge::Impl::SetPreviewRenderServices(std::vector<std::shared_ptr<Inte
 void CropBridge::Impl::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
 {
     m_submitReloadHandler = std::move(reloadSubmitter);
+}
+
+bool CropBridge::Impl::StartView(CropViewRequest request)
+{
+    if (!request.inputImage || !request.interactor || !request.renderer
+        || !request.referenceService) {
+        return false;
+    }
+    SetInputImage(std::move(request.inputImage));
+    SetInputPolyData(std::move(request.inputPolyData));
+    SetPreferredDataSource(request.dataSource);
+    SetPrimaryInteractor(request.interactor);
+    SetReferenceRenderer(request.renderer);
+    SetReferenceRenderService(std::move(request.referenceService));
+    SetPreviewRenderServices(std::move(request.previewServices));
+    return GetInputReady();
+}
+
+void CropBridge::Impl::ClearBindings()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_reloadGate->mutex);
+        ++m_reloadGate->generation;
+    }
+    m_submitCallback = nullptr;
+    m_submitReloadHandler = nullptr;
+    m_boxWidget.SetEnabled(false);
+    m_planeWidget.SetEnabled(false);
+    m_sessionPhase = CropSessionPhase::Idle;
+    m_isPreviewOn = false;
+    ResetPreview();
+    ClearPreviewViews();
+    ClearInputImage();
+    SetInputPolyData(nullptr);
+    SetPrimaryInteractor(nullptr);
+    SetReferenceRenderer(nullptr);
+    SetReferenceRenderService(nullptr);
 }
 
 void CropBridge::Impl::AttachPreview(const std::shared_ptr<InteractiveService>& service)
@@ -964,7 +1004,7 @@ bool CropBridge::Impl::ClearCamera()
     return hasCamera;
 }
 
-bool CropBridge::Impl::SendSubmit()
+bool CropBridge::Impl::SendSubmit(std::function<void(bool)> onComplete)
 {
     if (!m_submitReloadHandler) {
         std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
@@ -1006,6 +1046,7 @@ bool CropBridge::Impl::SendSubmit()
     // 3. submit image 移交 reload handler；bridge 只保留 overlay 元数据，并在外部调用前关闭 widget、置 pending。
     submitResult.submitImage = vtkSmartPointer<vtkImageData>();
     m_submitOverlay = submitResult;
+    m_submitCallback = std::move(onComplete);
     m_sessionPhase = CropSessionPhase::Reloading;
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
@@ -1017,22 +1058,34 @@ bool CropBridge::Impl::SendSubmit()
         generation = ++m_reloadGate->generation;
     }
     const std::weak_ptr<ReloadGate> weakGate = m_reloadGate;
-    if (!m_submitReloadHandler(
+    bool isAccepted = false;
+    try {
+        isAccepted = m_submitReloadHandler(
             std::move(submitImage),
             [weakGate, generation](bool isSuccess) {
                 const auto gate = weakGate.lock();
-                if (!gate) {
-                    return;
+                if (!gate) return;
+                Impl* owner = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(gate->mutex);
+                    if (!gate->owner || gate->generation != generation) return;
+                    owner = gate->owner;
+                    ++gate->generation;
                 }
-                std::lock_guard<std::mutex> lock(gate->mutex);
-                if (!gate->owner || gate->generation != generation) {
-                    return;
-                }
-                gate->owner->OnSubmitReload(isSuccess);
-            })) {
+                owner->OnSubmitReload(isSuccess);
+            });
+    }
+    catch (const std::exception& error) {
+        std::cerr << "[OrthogonalCrop] Reload handler failed: " << error.what() << std::endl;
+    }
+    catch (...) {
+        std::cerr << "[OrthogonalCrop] Reload handler failed with an unknown exception." << std::endl;
+    }
+    if (!isAccepted) {
         std::cerr << "[OrthogonalCrop] Submit failed: reload request was rejected." << std::endl;
         ClearPreviewInput();
         m_submitOverlay = OrthogonalCropResult();
+        m_submitCallback = nullptr;
         m_sessionPhase = CropSessionPhase::Editing;
         ClearCamera();
         if (m_sessionPhase == CropSessionPhase::Editing) {
@@ -1072,6 +1125,7 @@ bool CropBridge::Impl::GetSubmitReady() const
 
 void CropBridge::Impl::OnSubmitReload(bool isSuccess)
 {
+    auto callback = std::move(m_submitCallback);
     if (!isSuccess) {
         // A. reload 失败不提交几何状态：清除 pending 事务并恢复当前模式 widget，允许用户调整后重试。
         std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
@@ -1086,6 +1140,9 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
             else {
                 m_boxWidget.SetEnabled(true);
             }
+        }
+        if (callback) {
+            try { callback(false); } catch (...) {}
         }
         return;
     }
@@ -1115,6 +1172,9 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
         target.second->SetSliceAxis(target.first->GetNavigationAxis());
         target.second->SetCropResult(submitOverlayResult);
         target.first->SetDirty();
+    }
+    if (callback) {
+        try { callback(true); } catch (...) {}
     }
 }
 
@@ -1173,46 +1233,10 @@ CropBridge::CropBridge(CropBridge&&) noexcept = default;
 
 CropBridge& CropBridge::operator=(CropBridge&&) noexcept = default;
 
-void CropBridge::SetInputImage(
+void CropBridge::SetInputSnapshot(
     vtkSmartPointer<vtkImageData> image)
 {
     m_impl->SetInputImage(std::move(image));
-}
-
-void CropBridge::ClearInputImage()
-{
-    m_impl->ClearInputImage();
-}
-
-void CropBridge::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    m_impl->SetInputPolyData(std::move(polyData));
-}
-
-void CropBridge::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_impl->SetPreferredDataSource(dataSource);
-}
-
-void CropBridge::SetPrimaryInteractor(vtkRenderWindowInteractor* interactor)
-{
-    m_impl->SetPrimaryInteractor(interactor);
-}
-
-void CropBridge::SetReferenceRenderer(vtkRenderer* renderer)
-{
-    m_impl->SetReferenceRenderer(renderer);
-}
-
-void CropBridge::SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService)
-{
-    m_impl->SetReferenceRenderService(std::move(referenceService));
-}
-
-void CropBridge::SetPreviewRenderServices(
-    std::vector<std::shared_ptr<InteractiveService>> previewRenderServices)
-{
-    m_impl->SetPreviewRenderServices(std::move(previewRenderServices));
 }
 
 void CropBridge::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
@@ -1220,9 +1244,19 @@ void CropBridge::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
     m_impl->SetSubmitReloadHandler(std::move(reloadSubmitter));
 }
 
-bool CropBridge::SendSubmit()
+bool CropBridge::SendSubmit(std::function<void(bool)> onComplete)
 {
-    return m_impl->SendSubmit();
+    return m_impl->SendSubmit(std::move(onComplete));
+}
+
+bool CropBridge::StartView(CropViewRequest request)
+{
+    return m_impl->StartView(std::move(request));
+}
+
+void CropBridge::ClearBindings()
+{
+    m_impl->ClearBindings();
 }
 
 bool CropBridge::SwitchCropBox()

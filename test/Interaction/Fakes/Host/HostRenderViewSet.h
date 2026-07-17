@@ -1,7 +1,7 @@
 #pragma once
 
 #include "AppService.h"
-#include "Host/HostSessionTypes.h"
+#include "Host/Types/HostSessionTypes.h"
 #include "StdRenderContext.h"
 
 #include <algorithm>
@@ -43,21 +43,19 @@ public:
     }
 
     const HostRenderViewRuntime* GetViewBySelector(
-        const std::string& id,
-        bool isRoleUsed,
-        HostRenderViewRole role) const
+        const HostViewTarget& target) const
     {
-        if (!id.empty()) {
+        if (!target.viewId.empty()) {
             for (const auto& view : m_views) {
-                if (view.config.id == id) {
+                if (view.config.id == target.viewId) {
                     return &view;
                 }
             }
             return nullptr;
         }
-        if (isRoleUsed) {
+        if (target.isViewRoleUsed) {
             for (const auto& view : m_views) {
-                if (view.config.role == role) {
+                if (view.config.role == target.viewRole) {
                     return &view;
                 }
             }
@@ -65,14 +63,13 @@ public:
         return nullptr;
     }
 
-    std::vector<const HostRenderViewRuntime*> GetViewsByIdsAndRoles(
-        const std::vector<std::string>& ids,
-        const std::vector<HostRenderViewRole>& roles) const
+    std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
+        const HostViewTargets& targets) const
     {
         std::vector<const HostRenderViewRuntime*> selectedViews;
         for (const auto& view : m_views) {
-            const bool isIdSelected = std::find(ids.begin(), ids.end(), view.config.id) != ids.end();
-            const bool isRoleSelected = std::find(roles.begin(), roles.end(), view.config.role) != roles.end();
+            const bool isIdSelected = std::find(targets.viewIds.begin(), targets.viewIds.end(), view.config.id) != targets.viewIds.end();
+            const bool isRoleSelected = std::find(targets.viewRoles.begin(), targets.viewRoles.end(), view.config.role) != targets.viewRoles.end();
             if (isIdSelected || isRoleSelected) {
                 selectedViews.push_back(&view);
             }

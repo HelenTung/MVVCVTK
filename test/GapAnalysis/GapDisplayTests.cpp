@@ -15,11 +15,6 @@
 #include <utility>
 #include <vector>
 
-class GapDisplayTestService final : public GapAnalysisService {
-public:
-    using GapAnalysisService::SetInputSnapshot;
-};
-
 namespace {
 
 class OverlayStub final : public OverlayService {
@@ -74,10 +69,10 @@ int GapDisplaySuite::GetFailCount() const
     std::fill_n(voxels, 125, 100.0f);
     voxels[2 + 5 * (2 + 5 * 2)] = 0.0f;
 
-    GapAnalysisSurfaceRequest surfaceRequest;
-    surfaceRequest.isoMode = GapAnalysisIsoValueMode::AbsoluteValue;
+    GapSurfaceRequest surfaceRequest;
+    surfaceRequest.isoMode = GapIsoMode::AbsoluteValue;
     surfaceRequest.absoluteIsoValue = 50.0;
-    VoidDetectionParams voidParams;
+    GapVoidParams voidParams;
     voidParams.grayMax = 10.0f;
     voidParams.minVolumeMM3 = 0.0;
     voidParams.erosionIterations = 0;
@@ -85,15 +80,19 @@ int GapDisplaySuite::GetFailCount() const
     auto overlay = std::make_shared<OverlayStub>();
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets;
     sliceTargets.emplace_back(Orientation::Top_down, overlay);
-    GapDisplayTestService service;
-    expect(service.StartView(
-        surfaceRequest,
-        voidParams,
-        {},
-        sliceTargets,
-        nullptr), "Gap view should accept one slice target.");
-    expect(service.SetInputSnapshot(image),
-        "Gap view should accept one controlled read-only input snapshot.");
+    GapAnalysisService service;
+    GapViewRequest viewRequest;
+    viewRequest.inputImage = image;
+    viewRequest.surface = surfaceRequest;
+    viewRequest.voidParams = voidParams;
+    viewRequest.sliceTargets = sliceTargets;
+    bool isCompleted = false;
+    bool isCompletionOk = false;
+    expect(service.StartView(std::move(viewRequest),
+        [&](bool isSuccess) {
+            isCompleted = true;
+            isCompletionOk = isSuccess;
+        }), "Gap view should accept one slice target.");
     service.OnDisplayTick(nullptr);
 
     const auto deadline = std::chrono::steady_clock::now()
@@ -106,8 +105,8 @@ int GapDisplaySuite::GetFailCount() const
         "Gap display worker should succeed.");
 
     service.OnDisplayTick(image);
-    expect(overlay->GetAttachCount() == 1,
-        "Terminal tick should attach one overlay.");
+    expect(overlay->GetAttachCount() == 1 && isCompleted && isCompletionOk,
+        "Terminal tick should attach one overlay before completing.");
     expect(service.SwitchOverlay() && overlay->GetRemoveCount() == 1,
         "Hide should detach without discarding the result.");
     expect(service.SwitchOverlay() && overlay->GetAttachCount() == 2,
@@ -144,35 +143,37 @@ int GapDisplaySuite::GetFailCount() const
     }
     expect(service.ExitView() && !service.GetViewOn(),
         "Exit should end the display session.");
+    service.OnDisplayTick(nullptr);
 
-    GapDisplayTestService ownerService;
-    expect(ownerService.StartView(
-        surfaceRequest,
-        voidParams,
-        {},
-        sliceTargets,
-        nullptr), "Owner release view should accept one slice target.");
+    GapAnalysisService ownerService;
     auto ownerImage = vtkSmartPointer<vtkImageData>::New();
     ownerImage->DeepCopy(image);
     vtkWeakPointer<vtkImageData> weakOwner;
     weakOwner = ownerImage.GetPointer();
-    expect(ownerService.SetInputSnapshot(ownerImage),
+    GapViewRequest ownerRequest;
+    ownerRequest.inputImage = ownerImage;
+    ownerRequest.surface = surfaceRequest;
+    ownerRequest.voidParams = voidParams;
+    ownerRequest.sliceTargets = sliceTargets;
+    expect(ownerService.StartView(std::move(ownerRequest)),
         "Owner release view should retain one controlled input snapshot.");
     ownerImage = nullptr;
     expect(weakOwner != nullptr,
         "Controlled input snapshot should retain the image during the display session.");
-    expect(ownerService.ExitView() && weakOwner == nullptr,
-        "Display exit should release its retained input image owner.");
+    expect(ownerService.ExitView(), "Display exit should be accepted.");
+    ownerService.OnDisplayTick(nullptr);
+    expect(weakOwner == nullptr,
+        "Exit completion tick should release its retained input image owner.");
 
     auto teardownService = std::make_shared<GapAnalysisService>();
-    expect(teardownService->StartView(
-        surfaceRequest,
-        voidParams,
-        {},
-        sliceTargets,
-        nullptr), "Teardown view should bind its owner thread.");
-    expect(teardownService->ExitView(),
-        "Owner thread must detach the teardown view before releasing it.");
+    GapViewRequest teardownRequest;
+    teardownRequest.inputImage = image;
+    teardownRequest.surface = surfaceRequest;
+    teardownRequest.voidParams = voidParams;
+    teardownRequest.sliceTargets = sliceTargets;
+    expect(teardownService->StartView(std::move(teardownRequest)),
+        "Teardown view should bind its owner thread.");
+    teardownService->ClearView();
     std::thread releaseThread([serviceOwner = std::move(teardownService)]() mutable {
         serviceOwner.reset();
     });

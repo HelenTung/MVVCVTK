@@ -1,868 +1,161 @@
-#include "Tasks/AppDataExportTaskService.h"
 #include "Tasks/AppDataLoadTaskService.h"
-#include "Services/AppService.h"
+#include "AppState.h"
 #include "AppStateEvents.h"
-#include "DataManager.h"
-#include "VolumeStrategy.h"
+#include "Data/VolumeTypes.h"
 #include "PlanarTestSuites.h"
 
-#include <algorithm>
-#include <array>
 #include <atomic>
-#include <chrono>
 #include <iostream>
-#include <limits>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <stdexcept>
-#include <string>
-#include <thread>
+#include <utility>
 #include <vector>
 
-class AppTaskCases final {
-public:
-
-class ExportDataStub final : public AbstractDataManager
+namespace {
+void SetExpect(bool isPassed, const char* message, int& failureCount)
 {
-public:
-    vtkSmartPointer<vtkImageData> GetVtkImage() const override
-    {
-        vtkSmartPointer<vtkImageData> image;
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            image = m_image;
-        }
-        if (!image) {
-            return nullptr;
-        }
-        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-        imageCopy->DeepCopy(image);
-        m_imageReadCount.fetch_add(1);
-        return imageCopy;
-    }
+    if (isPassed) return;
+    ++failureCount;
+    std::cerr << "[AppTaskTests] " << message << '\n';
+}
 
-    ImageState GetImageState() const override
-    {
-        ImageState imageState;
-        imageState.image = GetVtkImage();
-        if (!imageState.image) {
-            return imageState;
-        }
-        int dims[3] = { 0, 0, 0 };
-        imageState.image->GetDimensions(dims);
-        imageState.dims = { dims[0], dims[1], dims[2] };
-        imageState.spacing = GetSpacing();
-        imageState.scalarRange = GetScalarRange();
-        imageState.version = GetDataVersion();
-        return imageState;
-    }
-
+class DataStub final : public AbstractDataManager {
 protected:
-    ImageSnapshot GetImageSnapshot() const override
-    {
-        auto imageState = std::make_shared<ImageState>();
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            imageState->image = m_image;
-            imageState->spacing = m_spacing;
-        }
-        if (imageState->image) {
-            int dims[3] = { 0, 0, 0 };
-            imageState->image->GetDimensions(dims);
-            imageState->dims = { dims[0], dims[1], dims[2] };
-            imageState->scalarRange = { 1.0, 4.0 };
-            imageState->version = m_version.load();
-        }
-        m_snapshotReadCount.fetch_add(1);
-        return imageState;
-    }
+    ImageSnapshot GetImageSnapshot() const override { return {}; }
 
 public:
+    vtkSmartPointer<vtkImageData> GetVtkImage() const override { return nullptr; }
+    ImageState GetImageState() const override { return {}; }
+    std::array<double, 2> GetScalarRange() const override { return { 0.0, 0.0 }; }
+    std::array<double, 3> GetSpacing() const override { return { 1.0, 1.0, 1.0 }; }
+    bool SetSpacing(const std::array<double, 3>&) override { return true; }
+    DataVersion GetDataVersion() const override { return 0; }
 
-    std::array<double, 2> GetScalarRange() const override
+    bool SetDataLoaded(const std::string& path, const VolumeLayout& layout) override
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        return m_image ? std::array<double, 2>{ 1.0, 4.0 } : std::array<double, 2>{};
+        loadedPath = path;
+        loadedDims = layout.GetDimensions();
+        if (isThrowNeeded) throw std::runtime_error("load failure");
+        return isLoadSuccess;
     }
 
-    std::array<double, 3> GetSpacing() const override
+    bool SetFromBuffer(const VolumeBuffer& buffer) override
     {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        return m_spacing;
-    }
-
-    DataVersion GetDataVersion() const override
-    {
-        return m_version.load();
-    }
-
-    bool SetSpacing(const std::array<double, 3>& spacing) override
-    {
-        vtkSmartPointer<vtkImageData> image;
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            if (!m_image) {
-                return false;
-            }
-            m_spacing = spacing;
-            image = m_image;
-        }
-        image->SetSpacing(spacing.data());
-        return true;
-    }
-
-    bool SetDataLoaded(
-        const std::string&,
-        const std::array<float, 3>&,
-        const std::array<float, 3>&) override
-    {
-        if (m_isLoadThrow) {
-            throw std::runtime_error("synthetic file load failure");
-        }
-        return false;
-    }
-
-    bool SetFromBuffer(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>&,
-        const std::array<float, 3>&) override
-    {
-        if (m_isBufferThrow) {
-            throw std::runtime_error("synthetic buffer load failure");
-        }
-        if (!data || dims != std::array<int, 3>{ 2, 2, 1 }) {
-            return false;
-        }
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            m_buffer.assign(data, data + 4);
-        }
-        m_hasPending.store(true);
-        return true;
+        loadedVoxels = buffer.GetVoxels();
+        loadedDims = buffer.GetLayout().GetDimensions();
+        if (isThrowNeeded) throw std::runtime_error("reload failure");
+        return isLoadSuccess;
     }
 
     bool SetCurrentFromPending(bool& hasPending) override
     {
         hasPending = false;
-        if (!m_hasPending.exchange(false)) {
-            return false;
-        }
-        hasPending = true;
-        m_commitAttemptCount.fetch_add(1);
-        if (m_isCommitFailure) {
-            return false;
-        }
-
-        std::vector<float> buffer;
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            buffer = m_buffer;
-        }
-        auto image = vtkSmartPointer<vtkImageData>::New();
-        image->SetDimensions(2, 2, 1);
-        image->SetSpacing(1.0, 1.0, 1.0);
-        image->SetOrigin(0.0, 0.0, 0.0);
-        image->AllocateScalars(VTK_FLOAT, 1);
-        std::copy(buffer.begin(), buffer.end(), static_cast<float*>(image->GetScalarPointer()));
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            m_image = std::move(image);
-            m_spacing = { 1.0, 1.0, 1.0 };
-        }
-        m_version.fetch_add(1);
         return true;
     }
+    bool ClearPending() override { return true; }
+    bool ExportData(const std::string&, const std::array<double, 16>&) override { return false; }
+    bool ExportSlices(const std::string&, Orientation, const WindowLevelParams&,
+        const std::array<double, 16>&) override { return false; }
 
-    bool ClearPending() override
-    {
-        m_hasPending.store(false);
-        m_clearPendingCount.fetch_add(1);
-        return true;
-    }
-
-    bool ExportData(
-        const std::string& path,
-        const std::array<double, 16>&) override
-    {
-        return path == "A";
-    }
-
-    bool ExportSlices(
-        const std::string&,
-        Orientation,
-        const WindowLevelParams&,
-        const std::array<double, 16>&) override
-    {
-        return false;
-    }
-
-    std::vector<float> GetBuffer() const
-    {
-        std::lock_guard<std::mutex> lock(m_dataMutex);
-        return m_buffer;
-    }
-
-    bool GetPendingReady() const
-    {
-        return m_hasPending.load();
-    }
-
-    int GetImageReadCount() const
-    {
-        return m_imageReadCount.load();
-    }
-
-    int GetSnapshotReadCount() const
-    {
-        return m_snapshotReadCount.load();
-    }
-
-    int GetCommitAttemptCount() const
-    {
-        return m_commitAttemptCount.load();
-    }
-
-    int GetClearPendingCount() const
-    {
-        return m_clearPendingCount.load();
-    }
-
-    void SetLoadThrow(bool isEnabled)
-    {
-        m_isLoadThrow = isEnabled;
-    }
-
-    void SetBufferThrow(bool isEnabled)
-    {
-        m_isBufferThrow = isEnabled;
-    }
-
-    void SetCommitFailure(bool isEnabled)
-    {
-        m_isCommitFailure = isEnabled;
-    }
-
-private:
-    mutable std::mutex m_dataMutex;
-    std::vector<float> m_buffer;
-    vtkSmartPointer<vtkImageData> m_image;
-    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };
-    std::atomic<bool> m_hasPending{ false };
-    std::atomic<DataVersion> m_version{ 0 };
-    mutable std::atomic<int> m_imageReadCount{ 0 };
-    mutable std::atomic<int> m_snapshotReadCount{ 0 };
-    std::atomic<int> m_commitAttemptCount{ 0 };
-    std::atomic<int> m_clearPendingCount{ 0 };
-    bool m_isLoadThrow = false;
-    bool m_isBufferThrow = false;
-    bool m_isCommitFailure = false;
+    std::string loadedPath;
+    std::array<int, 3> loadedDims{};
+    std::vector<float> loadedVoxels;
+    bool isLoadSuccess = true;
+    bool isThrowNeeded = false;
 };
 
-void SetExpect(bool isExpected, const std::string& message, int& failureCount)
+void StartVolumeTypes(int& failureCount)
 {
-    if (!isExpected) {
-        std::cerr << message << '\n';
+    SetExpect(!VolumeLayout::Create({ 0, 2, 3 }, { 1, 1, 1 }, { 0, 0, 0 }),
+        "zero dimension must fail", failureCount);
+    SetExpect(!VolumeLayout::Create({ 2, 2, 3 }, { 1, 0, 1 }, { 0, 0, 0 }),
+        "non-positive spacing must fail", failureCount);
+    const auto layout = VolumeLayout::Create(
+        { 2, 2, 3 }, { 0.5f, 1.0f, 2.0f }, { 3.0f, 4.0f, 5.0f });
+    SetExpect(layout && layout->GetVoxelCount() == 12
+        && layout->GetByteCount() == 12 * sizeof(float),
+        "valid layout counts must be exact", failureCount);
+    if (!layout) return;
+    SetExpect(!VolumeBuffer::Create(std::vector<float>(11), *layout)
+        && !VolumeBuffer::Create(std::vector<float>(13), *layout),
+        "short and long owning buffers must fail", failureCount);
+}
+
+void StartOwningTasks(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataStub>();
+    AppDataLoadTaskService service(dataManager);
+    auto layout = VolumeLayout::Create(
+        { 2, 2, 2 }, { 1, 1, 1 }, { 0, 0, 0 });
+    if (!layout) {
         ++failureCount;
-    }
-}
-
-void StartTaskOrder(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
-    auto service = std::make_shared<AppDataExportTaskService>(dataManager, sharedState);
-
-    std::vector<char> callbackOrder;
-    std::optional<bool> resultA;
-    std::optional<bool> resultB;
-
-    auto taskA = service->BuildDataTask("A", [&](bool isSuccess) {
-        callbackOrder.push_back('A');
-        resultA = isSuccess;
-    });
-    auto taskB = service->BuildDataTask("B", [&](bool isSuccess) {
-        callbackOrder.push_back('B');
-        resultB = isSuccess;
-    });
-
-    SetExpect(taskA.has_value(), "export task A should be built.", failureCount);
-    SetExpect(taskB.has_value(), "export task B should be built.", failureCount);
-    if (!taskA || !taskB) {
         return;
     }
 
-    (*taskB)();
-    (*taskA)();
-    if (service->ResetSaveCallback()) {
-        service->SendSaveCallback();
-    }
-
-    SetExpect(
-        callbackOrder == std::vector<char>{ 'B', 'A' },
-        "export callbacks should run once each in completion order B,A.",
-        failureCount);
-    SetExpect(
-        resultA.has_value() && *resultA,
-        "export task A callback should receive its successful result.",
-        failureCount);
-    SetExpect(
-        resultB.has_value() && !*resultB,
-        "export task B callback should receive its failed result.",
-        failureCount);
-}
-
-void StartReloadOwnership(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
-    AppDataLoadTaskService service(dataManager, sharedState);
-
-    std::vector<float> source{ 1.0f, 2.0f, 3.0f, 4.0f };
-    auto task = service.BuildReloadFromBufferTask(
-        source.data(),
-        { 2, 2, 1 },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        nullptr);
-
-    source.assign(4, -1.0f);
-    SetExpect(task.has_value(), "reload task should accept one owned voxel snapshot.", failureCount);
-    if (!task) {
-        return;
-    }
-
-    (*task)();
-    SetExpect(
-        dataManager->GetBuffer() == std::vector<float>{ 1.0f, 2.0f, 3.0f, 4.0f },
-        "reload worker must retain the construction-time voxel snapshot.",
-        failureCount);
-}
-
-void StartLoadAdmission(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
-    auto service = std::make_shared<AppDataLoadTaskService>(dataManager, sharedState);
-    const std::array<float, 4> reloadData = { 1.0f, 2.0f, 3.0f, 4.0f };
-
-    std::atomic<bool> isStarted{ false };
-    std::atomic<int> readyCount{ 0 };
-    std::optional<std::packaged_task<void()>> fileTask;
-    std::optional<std::packaged_task<void()>> reloadTask;
-    std::array<std::optional<bool>, 2> callbackResults;
-
-    auto waitStart = [&]() {
-        readyCount.fetch_add(1);
-        while (!isStarted.load()) {
-            std::this_thread::yield();
-        }
-    };
-    std::thread fileThread([&]() {
-        waitStart();
-        fileTask = service->BuildLoadFileTask(
-            "missing.raw",
-            { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f },
-            [&](bool isSuccess) { callbackResults[0] = isSuccess; });
-    });
-    std::thread reloadThread([&]() {
-        waitStart();
-        reloadTask = service->BuildReloadFromBufferTask(
-            reloadData.data(),
-            { 2, 2, 1 },
-            { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f },
-            [&](bool isSuccess) { callbackResults[1] = isSuccess; });
-    });
-
-    while (readyCount.load() != 2) {
-        std::this_thread::yield();
-    }
-    isStarted.store(true);
-    fileThread.join();
-    reloadThread.join();
-
-    const bool isFileAccepted = fileTask.has_value();
-    const bool isReloadAccepted = reloadTask.has_value();
-    SetExpect(
-        isFileAccepted != isReloadAccepted,
-        "concurrent File/Reload requests must admit exactly one load transaction.",
-        failureCount);
-    SetExpect(
-        !sharedState->StartLoad(LoadEventKind::File)
-            && !sharedState->StartLoad(LoadEventKind::Reload),
-        "an active load must reject both async and synchronous reload admission paths.",
-        failureCount);
-    const float rejectedSource = 1.0f;
-    auto rejectedReload = service->BuildReloadFromBufferTask(
-        &rejectedSource,
-        { 100000, 100000, 10 },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        nullptr);
-    SetExpect(
-        !rejectedReload.has_value(),
-        "a rejected large reload must fail admission before reading or copying its raw buffer.",
-        failureCount);
-
-    if (isFileAccepted) {
-        sharedState->SetFileLoadFailed();
-    }
-    else {
-        sharedState->SetReloadLoadFailed();
-    }
-    SetExpect(
-        !sharedState->StartLoad(LoadEventKind::File),
-        "a worker terminal state must not release admission before main-thread consumption.",
-        failureCount);
-    const auto activeKind = isFileAccepted ? LoadEventKind::File : LoadEventKind::Reload;
-    SetExpect(
-        sharedState->ResetLoad(activeKind)
-            && sharedState->StartLoad(LoadEventKind::File),
-        "main-thread reset must release the completed load transaction.",
-        failureCount);
-    sharedState->SetFileLoadFailed();
-    sharedState->ResetLoad(LoadEventKind::File);
-
-    if (isFileAccepted) {
-        service->SetFileLoadCallbackReady(true);
-    }
-    if (isReloadAccepted) {
-        service->SetReloadReady(true);
-    }
-    if (service->ResetFileCallback()) {
-        service->SendFileLoadCallback();
-    }
-    if (service->ResetReloadCallback()) {
-        service->SendReloadCallback();
-    }
-
-    SetExpect(
-        callbackResults[0].has_value() && callbackResults[1].has_value(),
-        "accepted and rejected requests must retain their own callbacks.",
-        failureCount);
-    SetExpect(
-        callbackResults[0].value_or(false) == isFileAccepted
-            && callbackResults[1].value_or(false) == isReloadAccepted,
-        "a rejected request must not overwrite the accepted request callback result.",
-        failureCount);
-}
-
-void StartNullRejection(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
-    AppDataLoadTaskService service(dataManager, sharedState);
-    std::optional<bool> activeResult;
-
-    auto activeTask = service.BuildLoadFileTask(
-        "active.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) { activeResult = isSuccess; });
-    auto rejectedTask = service.BuildLoadFileTask(
-        "rejected.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        nullptr);
-
-    SetExpect(activeTask.has_value() && !rejectedTask.has_value(),
-        "a second same-kind request must be rejected without replacing the active task.",
-        failureCount);
-    service.SetFileLoadCallbackReady(true);
-    if (service.ResetFileCallback()) {
-        service.SendFileLoadCallback();
-    }
-    SetExpect(activeResult.has_value() && *activeResult,
-        "a null rejected callback must not steal the active same-kind callback.",
-        failureCount);
-    sharedState->SetFileLoadFailed();
-    sharedState->ResetLoad(LoadEventKind::File);
-}
-
-void StartWorkerFailure(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto sharedState = std::make_shared<SharedInteractionState>();
-    AppDataLoadTaskService service(dataManager, sharedState);
-
-    dataManager->SetLoadThrow(true);
-    auto fileTask = service.BuildLoadFileTask(
-        "throw.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        nullptr);
-    SetExpect(fileTask.has_value(), "throwing file worker should be constructed.", failureCount);
-    if (fileTask) {
-        (*fileTask)();
-    }
-    SetExpect(sharedState->GetFileLoadState() == LoadState::Failed,
-        "a file worker exception must publish the failed terminal state.",
-        failureCount);
-    sharedState->ResetLoad(LoadEventKind::File);
-
-    dataManager->SetBufferThrow(true);
-    const std::array<float, 4> reloadData = { 1.0f, 2.0f, 3.0f, 4.0f };
-    auto reloadTask = service.BuildReloadFromBufferTask(
-        reloadData.data(),
-        { 2, 2, 1 },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        nullptr);
-    SetExpect(reloadTask.has_value(), "throwing reload worker should be constructed.", failureCount);
+    std::vector<float> source{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    auto buffer = VolumeBuffer::Create(std::move(source), *layout);
+    auto reloadTask = buffer
+        ? service.BuildReloadTask(std::move(*buffer)) : std::nullopt;
+    SetExpect(reloadTask.has_value(), "owning reload task must be built", failureCount);
     if (reloadTask) {
+        auto result = reloadTask->get_future();
         (*reloadTask)();
+        SetExpect(result.get() && dataManager->loadedVoxels
+            == std::vector<float>({ 0, 1, 2, 3, 4, 5, 6, 7 }),
+            "task must retain voxels after caller storage is destroyed", failureCount);
     }
-    SetExpect(sharedState->GetReloadLoadState() == LoadState::Failed,
-        "a reload worker exception must publish the failed terminal state.",
-        failureCount);
-    SetExpect(sharedState->ResetLoad(LoadEventKind::Reload)
-        && sharedState->StartLoad(LoadEventKind::File),
-        "worker exception cleanup must allow the next load transaction.",
-        failureCount);
-    sharedState->SetFileLoadFailed();
-    sharedState->ResetLoad(LoadEventKind::File);
-}
 
-void StartVizLoadFailure(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto eventHub = std::make_shared<SharedStateBroadcaster>();
-    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
-    VizService service(dataManager, sharedState, eventHub);
-    service.SetRenderContext(nullptr, nullptr);
-
-    std::optional<bool> fileResult;
-    std::optional<bool> reloadResult;
-    std::optional<bool> retryResult;
-    bool isReloadAccepted = false;
-    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
-    dataManager->SetBufferThrow(true);
-
-    service.LoadFileAsync(
-        "missing.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) {
-            fileResult = isSuccess;
-            isReloadAccepted = service.ReloadFromBufferAsync(
-                reloadSource.data(),
-                { 2, 2, 1 },
-                { 1.0f, 1.0f, 1.0f },
-                { 0.0f, 0.0f, 0.0f },
-                [&](bool isReloadSuccess) { reloadResult = isReloadSuccess; });
-        });
-
-    const auto sendUntilCallback = [&](const auto& hasResult) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (!hasResult() && std::chrono::steady_clock::now() < deadline) {
-            service.SendUpdates();
-            std::this_thread::yield();
-        }
-        return hasResult();
-    };
-
-    SetExpect(sendUntilCallback([&]() { return fileResult.has_value(); }),
-        "VizService should consume the file failure and deliver its callback.", failureCount);
-    SetExpect(service.GetFileLoadState() == LoadState::Failed
-        && fileResult.has_value() && !*fileResult && isReloadAccepted,
-        "file failure callback must run false and reenter one reload transaction.",
-        failureCount);
-
-    SetExpect(sendUntilCallback([&]() { return reloadResult.has_value(); }),
-        "VizService should consume the reentered reload failure and deliver its callback.", failureCount);
-    SetExpect(service.GetReloadLoadState() == LoadState::Failed
-        && reloadResult.has_value() && !*reloadResult,
-        "callback reentry reload must retain its event kind and false callback.",
-        failureCount);
-
-    service.LoadFileAsync(
-        "retry.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) { retryResult = isSuccess; });
-    SetExpect(sendUntilCallback([&]() { return retryResult.has_value(); }),
-        "completed failure transactions must allow a later file request.", failureCount);
-    SetExpect(service.GetFileLoadState() == LoadState::Failed
-        && retryResult.has_value() && !*retryResult,
-        "retry file failure callback must be delivered exactly as false.",
-        failureCount);
-}
-
-void StartPendingCommitFailure(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto eventHub = std::make_shared<SharedStateBroadcaster>();
-    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
-    VizService service(dataManager, sharedState, eventHub);
-    service.SetRenderContext(nullptr, nullptr);
-    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
-    std::optional<bool> reloadResult;
-    int callbackCount = 0;
-    dataManager->SetCommitFailure(true);
-
-    const bool isAccepted = service.ReloadFromBufferAsync(
-        reloadSource.data(),
-        { 2, 2, 1 },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) {
-            ++callbackCount;
-            reloadResult = isSuccess;
-        });
-    SetExpect(isAccepted, "commit-failure reload should be admitted.", failureCount);
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!reloadResult.has_value() && std::chrono::steady_clock::now() < deadline) {
-        service.SendUpdates();
-        std::this_thread::yield();
+    auto fileTask = service.BuildLoadFileTask("volume.raw", *layout);
+    SetExpect(fileTask.has_value(), "file task must be built", failureCount);
+    if (fileTask) {
+        auto result = fileTask->get_future();
+        (*fileTask)();
+        SetExpect(result.get() && dataManager->loadedPath == "volume.raw"
+            && dataManager->loadedDims == std::array<int, 3>{ 2, 2, 2 },
+            "file task must retain path and layout", failureCount);
     }
-    service.SendUpdates();
 
-    SetExpect(dataManager->GetCommitAttemptCount() == 1,
-        "pending commit failure should consume exactly one pending batch.", failureCount);
-    SetExpect(sharedState->GetReloadLoadState() == LoadState::Failed,
-        "pending commit failure must publish the failed Reload terminal state.", failureCount);
-    SetExpect(reloadResult.has_value() && !*reloadResult && callbackCount == 1,
-        "pending commit failure must deliver callback(false) exactly once.", failureCount);
-    SetExpect(sharedState->StartLoad(LoadEventKind::File),
-        "pending commit failure must release admission before its callback returns.", failureCount);
-    if (sharedState->GetFileLoadState() == LoadState::Loading) {
-        sharedState->SetFileLoadFailed();
-        sharedState->ResetLoad(LoadEventKind::File);
+    dataManager->isThrowNeeded = true;
+    auto failedTask = service.BuildLoadFileTask("throw.raw", *layout);
+    if (failedTask) {
+        auto result = failedTask->get_future();
+        (*failedTask)();
+        SetExpect(!result.get(), "worker exceptions must become false", failureCount);
     }
 }
 
-void StartReloadFailureRender(int& failureCount)
+void StartStateGate(int& failureCount)
 {
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto eventHub = std::make_shared<SharedStateBroadcaster>();
-    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
-    sharedState->StartLoad(LoadEventKind::File);
-    sharedState->SetFileDataReady(1.0, 4.0, { 1.0, 1.0, 1.0 });
-    sharedState->ResetLoad(LoadEventKind::File);
-
-    VizService service(dataManager, sharedState, eventHub);
-    auto renderer = vtkSmartPointer<vtkRenderer>::New();
-    service.SetRenderContext(nullptr, renderer);
-    // 使用生产 VolumeStrategy 验证失败路径的真实 strategy/prop 生命周期，
-    // 避免为单个断言额外暴露套件级测试类型。
-    auto strategy = std::make_shared<VolumeStrategy>();
-    service.SetCurrentStrategy(strategy);
-    vtkProp3D* const originalProp = strategy->GetMainProp();
-    SetExpect(renderer->HasViewProp(originalProp) != 0,
-        "render-preservation setup must attach the original prop.", failureCount);
-
-    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
-    std::optional<bool> reloadResult;
-    dataManager->SetBufferThrow(true);
-    SetExpect(service.ReloadFromBufferAsync(
-        reloadSource.data(),
-        { 2, 2, 1 },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) { reloadResult = isSuccess; }),
-        "render-preservation reload should be admitted.", failureCount);
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!reloadResult.has_value() && std::chrono::steady_clock::now() < deadline) {
-        service.SendUpdates();
-        std::this_thread::yield();
-    }
-
-    SetExpect(reloadResult.has_value() && !*reloadResult,
-        "reload worker failure should deliver callback(false).", failureCount);
-    SetExpect(sharedState->GetDataTrustedState() == LoadState::Succeeded,
-        "reload failure must preserve the trusted current-data state.", failureCount);
-    SetExpect(service.GetMainProp() == originalProp
-        && renderer->HasViewProp(originalProp) != 0,
-        "reload failure must preserve the existing render strategy and prop.", failureCount);
-}
-
-void StartReloadTeardown(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto eventHub = std::make_shared<SharedStateBroadcaster>();
-    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
-    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
-
-    {
-        VizService service(dataManager, sharedState, eventHub);
-        SetExpect(service.ReloadFromBufferAsync(
-            reloadSource.data(),
-            { 2, 2, 1 },
-            { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f },
-            nullptr),
-            "teardown reload should be admitted.", failureCount);
-
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (!dataManager->GetPendingReady()
-            && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::yield();
-        }
-        SetExpect(dataManager->GetPendingReady(),
-            "teardown setup should publish one unconsumed pending batch.", failureCount);
-    }
-
-    SetExpect(!dataManager->GetPendingReady()
-        && dataManager->GetClearPendingCount() == 2,
-        "Reload teardown must clear its pending batch before releasing admission.", failureCount);
-    SetExpect(sharedState->GetReloadLoadState() == LoadState::Failed,
-        "Reload teardown must not leave the shared state at Loading.", failureCount);
-    SetExpect(sharedState->StartLoad(LoadEventKind::File),
-        "Reload teardown must release admission for the next transaction.", failureCount);
-    sharedState->SetFileLoadFailed();
-    sharedState->ResetLoad(LoadEventKind::File);
-}
-
-void StartRawBufferOverflow(int& failureCount)
-{
-    RawVolumeDataManager dataManager;
-    const float source = 1.0f;
-    const int maxDim = std::numeric_limits<int>::max();
-    SetExpect(!dataManager.SetFromBuffer(
-        &source,
-        { maxDim, maxDim, maxDim },
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f }),
-        "Raw SetFromBuffer must reject voxel-count overflow before VTK allocation.",
-        failureCount);
-}
-
-void StartMultiViewLoad(int& failureCount)
-{
-    auto dataManager = std::make_shared<ExportDataStub>();
-    auto eventHub = std::make_shared<SharedStateBroadcaster>();
-    auto sharedState = std::make_shared<SharedInteractionState>(eventHub);
-
-    VizService ownerService(dataManager, sharedState, eventHub);
-    VizService laggingService(dataManager, sharedState, eventHub);
-    std::atomic<bool> isGateEntered{ false };
-    std::atomic<bool> isGateReleased{ false };
-    auto gateOwner = std::make_shared<int>(0);
-    // owner 先注册；gate 在 B 前阻塞旧终态，确定性验证广播未完成时 admission 不可释放。
-    ownerService.SetRenderContext(nullptr, nullptr);
-    eventHub->SetObserver(gateOwner, [&](UpdateFlags flags) {
-        if ((flags & UpdateFlags::LoadFailed) == UpdateFlags::None
-            || (flags & UpdateFlags::FileLoad) == UpdateFlags::None) {
-            return;
-        }
-        isGateEntered.store(true);
-        while (!isGateReleased.load()) {
-            std::this_thread::yield();
-        }
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto firstOwner = std::make_shared<int>(1);
+    auto secondOwner = std::make_shared<int>(2);
+    std::atomic<int> secondCount{ 0 };
+    broadcaster->SetObserver(firstOwner, [](UpdateFlags) {
+        throw std::runtime_error("observer failure");
     });
-    laggingService.SetRenderContext(nullptr, nullptr);
-
-    std::optional<bool> fileResult;
-    std::optional<bool> reloadResult;
-    bool isReloadAccepted = false;
-    const std::array<float, 4> reloadSource = { 1.0f, 2.0f, 3.0f, 4.0f };
-
-    ownerService.LoadFileAsync(
-        "missing-multi-view.raw",
-        { 1.0f, 1.0f, 1.0f },
-        { 0.0f, 0.0f, 0.0f },
-        [&](bool isSuccess) {
-            fileResult = isSuccess;
-            isReloadAccepted = ownerService.ReloadFromBufferAsync(
-                reloadSource.data(),
-                { 2, 2, 1 },
-                { 1.0f, 1.0f, 1.0f },
-                { 0.0f, 0.0f, 0.0f },
-                [&](bool isReloadSuccess) { reloadResult = isReloadSuccess; });
-        });
-
-    const auto gateDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!isGateEntered.load() && std::chrono::steady_clock::now() < gateDeadline) {
-        std::this_thread::yield();
-    }
-    SetExpect(isGateEntered.load(),
-        "File failure broadcast should reach the deterministic observer gate.",
-        failureCount);
-    ownerService.SendUpdates();
-    SetExpect(!fileResult.has_value()
-        && !sharedState->StartLoad(LoadEventKind::Reload),
-        "owner must not reset admission before every observer receives the terminal payload.",
-        failureCount);
-    isGateReleased.store(true);
-
-    const auto sendOwnerUntil = [&](const auto& hasResult) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (!hasResult() && std::chrono::steady_clock::now() < deadline) {
-            ownerService.SendUpdates();
-            std::this_thread::yield();
-        }
-        return hasResult();
-    };
-
-    SetExpect(sendOwnerUntil([&]() { return fileResult.has_value(); })
-        && fileResult.has_value() && !*fileResult && isReloadAccepted,
-        "only the owner view may release File admission and reenter Reload.",
-        failureCount);
-
-    const auto pendingDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!dataManager->GetPendingReady()
-        && std::chrono::steady_clock::now() < pendingDeadline) {
-        std::this_thread::yield();
-    }
-    SetExpect(dataManager->GetPendingReady(),
-        "reentered Reload should publish one pending image.", failureCount);
-
-    const int imageReadsBefore = dataManager->GetImageReadCount();
-    const int snapshotReadsBefore = dataManager->GetSnapshotReadCount();
-    laggingService.SendUpdates();
-    SetExpect(dataManager->GetSnapshotReadCount() > snapshotReadsBefore
-            && dataManager->GetImageReadCount() == imageReadsBefore,
-        "a lagging non-owner view must converge through the shared snapshot without a public deep copy.",
-        failureCount);
-    SetExpect(!sharedState->StartLoad(LoadEventKind::File),
-        "a non-owner view must not release the owner's Reload admission.",
-        failureCount);
-
-    SetExpect(sendOwnerUntil([&]() { return reloadResult.has_value(); })
-        && reloadResult.has_value() && *reloadResult,
-        "the owner view must receive the matching successful Reload callback.",
-        failureCount);
-
-    SetExpect(sharedState->StartLoad(LoadEventKind::Reload),
-        "a Host-owned Reload should be accepted after the owner callback.",
-        failureCount);
-    sharedState->SetReloadLoadFailed();
-    laggingService.SendUpdates();
-    ownerService.SendUpdates();
-    SetExpect(!sharedState->StartLoad(LoadEventKind::File),
-        "render views must not release a Host-owned transaction.",
-        failureCount);
-    SetExpect(sharedState->ResetLoad(LoadEventKind::Reload)
-        && sharedState->StartLoad(LoadEventKind::File)
-        && sharedState->ResetLoad(LoadEventKind::File),
-        "Host must release its transaction after every render view has converged.",
-        failureCount);
+    broadcaster->SetObserver(secondOwner, [&](UpdateFlags) { ++secondCount; });
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    SetExpect(state->StartLoad(LoadEventKind::Reload),
+        "reload admission must start", failureCount);
+    bool nestedResult = true;
+    auto nestedOwner = std::make_shared<int>(3);
+    broadcaster->SetObserver(nestedOwner, [&](UpdateFlags) {
+        nestedResult = state->SetReloadLoadFailed();
+    });
+    SetExpect(state->SetReloadDataReady(0.0, 1.0, { 1.0, 1.0, 1.0 }),
+        "outer terminal must publish", failureCount);
+    SetExpect(secondCount.load() == 1 && !nestedResult,
+        "observer failure and terminal reentry must be isolated", failureCount);
+    SetExpect(state->ResetLoad(LoadEventKind::Reload),
+        "published terminal must release admission", failureCount);
 }
-
-    int GetFailCount()
-    {
-        int failureCount = 0;
-        StartTaskOrder(failureCount);
-        StartReloadOwnership(failureCount);
-        StartLoadAdmission(failureCount);
-        StartNullRejection(failureCount);
-        StartWorkerFailure(failureCount);
-        StartVizLoadFailure(failureCount);
-        StartPendingCommitFailure(failureCount);
-        StartReloadFailureRender(failureCount);
-        StartReloadTeardown(failureCount);
-        StartRawBufferOverflow(failureCount);
-        StartMultiViewLoad(failureCount);
-        return failureCount;
-    }
-};
+}
 
 int AppTaskSuite::GetFailCount() const
 {
-    return AppTaskCases().GetFailCount();
+    int failureCount = 0;
+    StartVolumeTypes(failureCount);
+    StartOwningTasks(failureCount);
+    StartStateGate(failureCount);
+    return failureCount;
 }

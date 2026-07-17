@@ -21,23 +21,23 @@ class VoidDetector {
 public:
     // ── Step 1：从体积六个边界做 6 邻域泛洪；返回 x-fast uint8 mask，1 表示未连通外界的 sub-ISO voxel ──
     static std::vector<uint8_t> CreateInteriorMask(
-        const VolumeBuffer& vol,
+        const GapVolumeBuffer& vol,
         float               isoValue);
 
     // ── Step 2：在内部 mask 上应用 grayMax 与六邻域腐蚀，再从幸存种子回长原始候选 ──
     // 当前只消费 grayMax 与 erosionIterations；grayMin、角度和张量窗口不参与本阶段。
     static std::vector<uint8_t> BuildCandidates(
-        const VolumeBuffer& vol,
+        const GapVolumeBuffer& vol,
         const std::vector<uint8_t>& interiorMask,
-        const VoidDetectionParams& params);
+        const GapVoidParams& params);
 
     // ── Step 3：按 6 邻域生成连通区域、统计与 x-fast 标签体 ─────────
     // outLabelVol 会被重建为 dims 乘积个元素；0 为未保留 voxel，正值与返回区域 id 对应。
     // 当前只消费 minVolumeMM3；未执行结构张量或角度合并。
     static std::vector<VoidRegion> BuildRegions(
-        const VolumeBuffer& vol,
+        const GapVolumeBuffer& vol,
         std::vector<uint8_t>& candidateMask,
-        const VoidDetectionParams& params,
+        const GapVoidParams& params,
         std::vector<int>& outLabelVol);
 
 private:
@@ -72,7 +72,7 @@ private:
 //}
 
 inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
-    const VolumeBuffer& vol, float isoValue)
+    const GapVolumeBuffer& vol, float isoValue)
 {
     const int    dx = vol.dims[0];
     const int    dy = vol.dims[1];
@@ -172,9 +172,9 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
 }
 
 inline std::vector<uint8_t> VoidDetector::BuildCandidates(
-    const VolumeBuffer& vol,
+    const GapVolumeBuffer& vol,
     const std::vector<uint8_t>& interiorMask,
-    const VoidDetectionParams& params)
+    const GapVoidParams& params)
 {
     const int dx = vol.dims[0];
     const int dy = vol.dims[1];
@@ -244,9 +244,9 @@ inline std::vector<uint8_t> VoidDetector::BuildCandidates(
 }
 
 inline std::vector<VoidRegion> VoidDetector::BuildRegions(
-    const VolumeBuffer& vol,
+    const GapVolumeBuffer& vol,
     std::vector<uint8_t>& candidateMask,
-    const VoidDetectionParams& params,
+    const GapVoidParams& params,
     std::vector<int>& outLabelVol)
 {
     const int dx = vol.dims[0];

@@ -12,328 +12,148 @@
 #include "Services/GapAnalysisService.h"
 #include "StdRenderContext.h"
 
-#include <iostream>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
 class VtkAppHostSession::Impl final {
 public:
-    // 宿主输入配置的快照；BuildSession 之后不再把 main / 上位机的临时变量带入内部链路。
-    VtkAppHostSession::Config config;
-    // 窗口无关的核心服务集合，生命周期跟随 session。
-    HostCoreServices core;
-    // 当前 session 的窗口集合，负责 id/role 查询和 endpoint 生成。
-    HostRenderViewSet renderViews;
-    // host 到 feature 的绑定层；shared_ptr 是为了让 VTK observer 用 weak_ptr 安全回调。
-    std::shared_ptr<HostFeatureBindings> featureBindings;
-    // host 命令分发器接收 typed variant，并把业务命令送到对应 owner。
-    std::shared_ptr<HostCommandRouter> commandRouter;
-    // BuildSession 后暴露给 Qt / 上位机的非拥有窗口句柄缓存，避免外部看到内部 runtime/service。
-    std::vector<HostRenderViewEndpoint> renderViewEndpoints;
-    // standalone 输入路由最后构造、最先析构，确保先解除 context handler 再释放业务 owner。
-    std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
-    // 防止 Start 或命令入口重复执行组装；命令入口可懒 BuildSession，方便上位机先配置后调用。
-    bool isInitialized = false;
+    explicit Impl(HostSessionConfig sessionConfig)
+        : config(std::move(sessionConfig)),
+          featureBindings(std::make_shared<HostFeatureBindings>()) {}
 
-    explicit Impl(VtkAppHostSession::Config sessionConfig);
-
-    void BuildSession();
+    bool BuildSession();
     bool SendCommand(HostCommand command);
 
-    std::string BuildKeyLabel(char key) const;
-    std::string BuildControlKeyLabel(char key) const;
-    std::string BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const;
-    void SendStartupStatus() const;
+    HostSessionConfig config;
+    HostCoreServices core;
+    HostRenderViewSet renderViews;
+    std::shared_ptr<HostFeatureBindings> featureBindings;
+    std::shared_ptr<HostCommandRouter> commandRouter;
+    std::vector<HostRenderViewEndpoint> endpoints;
+    std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
+    bool isBuilt = false;
+    bool isStarted = false;
 
 private:
     static HostCoreServices BuildCore();
 };
 
-VtkAppHostSession::Impl::Impl(VtkAppHostSession::Config sessionConfig)
-    : config(std::move(sessionConfig))
-    , featureBindings(std::make_shared<HostFeatureBindings>())
-{
-}
-
 HostCoreServices VtkAppHostSession::Impl::BuildCore()
 {
-    // 返回值拥有本次 session 的窗口无关服务；此阶段不读取 renderViews，
-    // 因此所有后续创建的 view 都共享这一组数据、状态和 feature owner。
-    // 1. 先创建数据与状态真源，让所有视图和 feature 共享同一份会话事实。
-    // 2. 再创建依赖这些真源的交互服务；窗口拓扑仍由 BuildSession 单独组装。
-    HostCoreServices nextCore;
-    nextCore.sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-    nextCore.sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
-    nextCore.sharedState = std::make_shared<SharedInteractionState>(nextCore.sharedStateBroadcaster);
-    nextCore.gapAnalysis = std::make_shared<GapAnalysisService>();
-    nextCore.orthogonalCropBridge = std::make_shared<CropBridge>();
-    return nextCore;
+    HostCoreServices value;
+    value.sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    value.sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
+    value.sharedState = std::make_shared<SharedInteractionState>(value.sharedStateBroadcaster);
+    value.gapAnalysis = std::make_shared<GapAnalysisService>();
+    value.orthogonalCropBridge = std::make_shared<CropBridge>();
+    return value;
+}
+
+bool VtkAppHostSession::Impl::BuildSession()
+{
+    if (isBuilt) return true;
+    if (config.renderViews.empty()) return false;
+
+    core = BuildCore();
+    if (!renderViews.Build(core, config.renderViews)) return false;
+    featureBindings->AttachFeatures(core, renderViews);
+    commandRouter = std::make_shared<HostCommandRouter>(core, renderViews, featureBindings);
+    renderViews.SetInitialVisibility();
+    renderViews.SetInteractorsReady();
+    endpoints = renderViews.BuildEndpoints();
+    hotkeyRouter = std::make_unique<HostHotkeyRouter>(
+        renderViews, featureBindings, commandRouter);
+    isBuilt = true;
+    return true;
 }
 
 bool VtkAppHostSession::Impl::SendCommand(HostCommand command)
 {
-    // command 按值进入并在分发时移动，调用方后续修改原 DTO 不影响已接受命令。
-    // 命令入口允许懒初始化；BuildSession 的 isInitialized 闸门保证装配只执行一次。
-    BuildSession();
-    if (!commandRouter) {
-        std::cerr << "[Host] Command dispatch skipped: command router is not ready." << std::endl;
-        return false;
-    }
-    return commandRouter->DispatchCommand(std::move(command)); // 所有 Host 命令的唯一分发路径。
+    return BuildSession() && commandRouter
+        && commandRouter->DispatchCommand(std::move(command));
 }
 
-std::string VtkAppHostSession::Impl::BuildKeyLabel(char key) const
-{
-    if (key == 0) {
-        return "<unassigned>";
-    }
-    const char labelKey = (key >= 'a' && key <= 'z')
-        ? static_cast<char>(key - 'a' + 'A')
-        : key;
-    return std::string(1, labelKey);
-}
-
-std::string VtkAppHostSession::Impl::BuildControlKeyLabel(char key) const
-{
-    if (key == 0) {
-        return "<unassigned>";
-    }
-    return "Ctrl+" + BuildKeyLabel(key);
-}
-
-std::string VtkAppHostSession::Impl::BuildStartupControlsText(const HostHotkeyBindings& hotkeys) const
-{
-    // 控制台文本从 Config 派生，不写死具体键位；这样 main 改模拟输入时提示不会和实际 observer 脱节。
-    return "Controls: "
-        + BuildKeyLabel(hotkeys.modelSwitchKey) + " = switch model transform | "
-        + BuildKeyLabel(hotkeys.saveTransformedDataKey) + " = save transformed data | "
-        + BuildKeyLabel(hotkeys.saveSliceImagesKey) + " = save slice images | "
-        + BuildKeyLabel(hotkeys.cropSwitchKey) + " = switch orthogonal crop box | "
-        + BuildKeyLabel(hotkeys.planarSwitchKey) + " = switch planar crop | "
-        + BuildKeyLabel(hotkeys.gapSwitchKey) + " = enter/switch gap overlays | "
-        + (hotkeys.exitKeySym.empty() ? "<unassigned>" : hotkeys.exitKeySym) + " = exit active crop/gap/model-transform mode | "
-        + BuildKeyLabel(hotkeys.keepInsidePreviewKey) + " = keep inside/normal-side preview | "
-        + BuildKeyLabel(hotkeys.removeInsidePreviewKey) + " = remove inside/normal-side preview | "
-        + BuildControlKeyLabel(hotkeys.submitKey) + " = apply submit";
-}
-
-void VtkAppHostSession::Impl::SendStartupStatus() const
-{
-    const bool hasInitialVolumeLoad =
-        this->config.initialVolume.isInitialLoadEnabled
-        && !this->config.initialVolume.filePath.empty()
-        && this->config.initialVolume.geometry.has_value();
-
-    std::cout << (hasInitialVolumeLoad
-        ? "Application started. Loading data in background...\n"
-        : "Application started. Waiting for host data command...\n");
-    if (config.renderContextInput.isHotkeyEnabled
-        || config.commandInput.isHotkeyEnabled) {
-        // 控制台提示只描述当前独立 VTK host 的真实输入映射；Qt / 上位机关闭热键时不输出固定键位假象。
-        std::cout << BuildStartupControlsText(config.hotkeys) << '\n';
-    }
-}
-
-void VtkAppHostSession::Impl::BuildSession()
-{
-    if (isInitialized) {
-        return;
-    }
-
-    // core 不知道窗口数量，先建立所有 view 将共享的数据、状态和算法生命周期。
-    core = BuildCore();
-    // view set 再按 host 配置创建/接管窗口，建立 service/context owner。
-    renderViews.Build(core, config.renderViews);
-    // feature 只注入窗口查询与 reload/tick 能力，不因装配而默认激活 Crop/Gap。
-    featureBindings->AttachFeatures(core, renderViews);
-    // router 最后创建，保证任何命令都能看到完整 core、views 和 feature。
-    commandRouter = std::make_shared<HostCommandRouter>(
-        core,
-        renderViews,
-        featureBindings);
-
-    // 设置初始视图状态并发起可选加载后再初始化 interactor，避免首帧读取半初始化 service。
-    renderViews.SetInitialVisibility();
-    if (config.initialVolume.isInitialLoadEnabled) {
-        commandRouter->DispatchCommand(HostCommand{ HostLoadCommand{
-            config.initialVolume,
-            nullptr
-        } });
-    }
-
-    // 保持默认 true 的既有首帧时序；Qt 等外部事件循环宿主可显式跳过这一次同步渲染。
-    if (config.isInitialRenderEnabled) {
-        renderViews.SendRenderAll();
-    }
-
-    renderViews.SetInteractorsReady();
-    // endpoint 必须在 interactor 初始化后生成，Qt 接 QVTKOpenGLNativeWidget 时才能拿到完整 renderWindow/interactor。
-    renderViewEndpoints = renderViews.BuildEndpoints();
-
-    // hotkey 和 Host Timer 这里只安装 handler；VTK observer 已由 context/interactor 链建立。
-    hotkeyRouter = std::make_unique<HostHotkeyRouter>(
-        renderViews,
-        featureBindings,
-        commandRouter);
-    hotkeyRouter->AttachHotkeys(
-        config.renderContextInput,
-        config.dataExport,
-        config.commandInput,
-        config.hotkeys);
-    featureBindings->AttachHostTimer(config.timerEventPump);
-    SendStartupStatus();
-
-    isInitialized = true;
-}
-
-VtkAppHostSession::VtkAppHostSession(Config config)
-    : m_impl(std::make_unique<VtkAppHostSession::Impl>(std::move(config)))
-{
-}
+VtkAppHostSession::VtkAppHostSession(HostSessionConfig config)
+    : m_impl(std::make_unique<Impl>(std::move(config))) {}
 
 VtkAppHostSession::~VtkAppHostSession() = default;
-
 VtkAppHostSession::VtkAppHostSession(VtkAppHostSession&&) noexcept = default;
-
 VtkAppHostSession& VtkAppHostSession::operator=(VtkAppHostSession&&) noexcept = default;
 
-void VtkAppHostSession::BuildSession()
+bool VtkAppHostSession::BuildSession()
 {
-    m_impl->BuildSession();
+    return m_impl && m_impl->BuildSession();
 }
 
-void VtkAppHostSession::Start()
+bool VtkAppHostSession::AttachTimer(const HostTimerConfig& config)
 {
-    BuildSession();
-    if (const auto* startView = m_impl->renderViews.GetStandaloneStartView()) {
-        if (startView->context) {
-            // 独立 VTK host 需要一个 interactor 承载主循环；Qt host 可只调用 BuildSession 后接管 endpoints。
-            startView->context->Start();
-        }
-    }
+    return BuildSession() && m_impl->featureBindings
+        && m_impl->featureBindings->AttachHostTimer(config);
 }
 
-bool VtkAppHostSession::LoadVolume(
-    const InitialVolumeLoadConfig& request,
-    std::function<void(bool isSuccess)> onComplete)
+bool VtkAppHostSession::AttachHotkeys(
+    const HostHotkeyConfig& config,
+    HostHotkeyTemplates templates)
 {
-    return m_impl->SendCommand(HostCommand{ HostLoadCommand{
-        request,
-        std::move(onComplete)
-    } });
+    return BuildSession() && m_impl->hotkeyRouter
+        && m_impl->hotkeyRouter->AttachHotkeys(config, std::move(templates));
 }
 
-bool VtkAppHostSession::ReloadVolume(
-    HostVolumeBufferRequest request,
-    std::function<void(bool isSuccess)> onComplete)
+bool VtkAppHostSession::Start()
 {
-    return m_impl->SendCommand(HostCommand{ HostReloadCommand{
-        std::move(request),
-        std::move(onComplete)
-    } });
+    if (!BuildSession() || m_impl->isStarted) return false;
+    const auto* view = m_impl->renderViews.GetStandaloneStartView();
+    if (!view || !view->context) return false;
+    m_impl->renderViews.SendRenderAll();
+    m_impl->isStarted = true;
+    view->context->Start();
+    return true;
 }
 
-bool VtkAppHostSession::StartCrop(
-    const HostCropViewRequest& request)
+bool VtkAppHostSession::SendData(
+    HostDataRequest request, HostCompleteCallback onComplete)
 {
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Start, request }
-    } });
+    return m_impl->SendCommand(HostCommand{ HostDataCommand{
+        std::move(request), std::move(onComplete) } });
 }
 
-bool VtkAppHostSession::SwitchCropBox(
-    const HostCropViewRequest& request)
+bool VtkAppHostSession::SendView(HostViewRequest request)
 {
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Box, request }
-    } });
+    return m_impl->SendCommand(HostCommand{ HostViewCommand{ std::move(request) } });
 }
 
-bool VtkAppHostSession::SwitchCropPlane(
-    const HostCropViewRequest& request)
+bool VtkAppHostSession::SendTool(HostToolRequest request)
 {
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Plane, request }
-    } });
-}
-
-bool VtkAppHostSession::SwitchCropView(
-    const HostCropViewRequest& request,
-    HostCropPreviewMode previewMode)
-{
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Preview, request, previewMode }
-    } });
+    return m_impl->SendCommand(HostCommand{ HostToolCommand{ std::move(request) } });
 }
 
 bool VtkAppHostSession::SendCrop(
-    const HostCropViewRequest& request)
+    HostCropRequest request, HostCompleteCallback onComplete)
 {
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Submit, request }
-    } });
+    return m_impl->SendCommand(HostCommand{ HostCropCommand{
+        std::move(request), std::move(onComplete) } });
 }
 
-bool VtkAppHostSession::ExitCrop()
+bool VtkAppHostSession::SendGap(
+    HostGapRequest request, HostCompleteCallback onComplete)
 {
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostCropCommand{ HostCropAction::Exit }
-    } });
-}
-
-bool VtkAppHostSession::StartGapView(
-    const HostGapViewRequest& request)
-{
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostGapCommand{ HostGapAction::Start, request }
-    } });
-}
-
-bool VtkAppHostSession::SwitchGapLayer()
-{
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostGapCommand{ HostGapAction::Overlay }
-    } });
-}
-
-bool VtkAppHostSession::ExitGapView()
-{
-    return m_impl->SendCommand(HostCommand{ HostFeatureCommand{
-        HostGapCommand{ HostGapAction::Exit }
-    } });
-}
-
-bool VtkAppHostSession::SetViewConfig(const HostViewConfig& config)
-{
-    return m_impl->SendCommand(HostCommand{ HostViewCommand{ config } });
-}
-
-bool VtkAppHostSession::ExportData(
-    const HostDataExportConfig& dataExportConfig,
-    std::function<void(bool isSuccess)> onComplete)
-{
-    return m_impl->SendCommand(HostCommand{ HostExportCommand{
-        dataExportConfig,
-        std::move(onComplete)
-    } });
+    return m_impl->SendCommand(HostCommand{ HostGapCommand{
+        std::move(request), std::move(onComplete) } });
 }
 
 const std::vector<HostRenderViewEndpoint>& VtkAppHostSession::GetRenderViewEndpoints()
 {
     BuildSession();
-    return m_impl->renderViewEndpoints;
+    return m_impl->endpoints;
 }
 
 const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
-    const std::string& id)
+    const std::string& viewId)
 {
     BuildSession();
-    for (const auto& endpoint : m_impl->renderViewEndpoints) {
-        if (endpoint.id == id) {
-            return &endpoint;
-        }
+    for (const auto& endpoint : m_impl->endpoints) {
+        if (endpoint.id == viewId) return &endpoint;
     }
     return nullptr;
 }
@@ -341,17 +161,11 @@ const HostRenderViewEndpoint* VtkAppHostSession::GetRenderViewEndpoint(
 const HostRenderViewEndpoint* VtkAppHostSession::GetPrimaryEndpoint()
 {
     BuildSession();
-    for (const auto& endpoint : m_impl->renderViewEndpoints) {
-        if (endpoint.role == HostRenderViewRole::Primary3D) {
-            return &endpoint;
-        }
+    for (const auto& endpoint : m_impl->endpoints) {
+        if (endpoint.role == HostRenderViewRole::Primary3D) return &endpoint;
     }
-
-    for (const auto& endpoint : m_impl->renderViewEndpoints) {
-        if (endpoint.role == HostRenderViewRole::Composite3D) {
-            return &endpoint;
-        }
+    for (const auto& endpoint : m_impl->endpoints) {
+        if (endpoint.role == HostRenderViewRole::Composite3D) return &endpoint;
     }
-
-    return m_impl->renderViewEndpoints.empty() ? nullptr : &m_impl->renderViewEndpoints.front();
+    return m_impl->endpoints.empty() ? nullptr : &m_impl->endpoints.front();
 }

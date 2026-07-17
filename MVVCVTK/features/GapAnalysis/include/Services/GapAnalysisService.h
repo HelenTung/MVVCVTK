@@ -13,7 +13,14 @@
 #include <vector>
 
 class OverlayService;
-class HostFeatureBindings;
+
+struct GapViewRequest final {
+    vtkSmartPointer<vtkImageData> inputImage;
+    GapSurfaceRequest surface;
+    GapVoidParams voidParams;
+    std::vector<std::shared_ptr<OverlayService>> meshTargets;
+    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets;
+};
 
 class GapAnalysisService {
 public:
@@ -28,9 +35,9 @@ public:
 
     // 外部可变输入先 DeepCopy，调用返回后修改 metadata/scalars 不会污染分析快照。
     bool SetInputImage(vtkSmartPointer<vtkImageData> image);
-    void SetSurface(const SurfaceParams& params);
-    void SetAdvanced(const AdvancedSurfaceParams& params);
-    void SetVoid(const VoidDetectionParams& params);
+    void SetSurface(const GapSurfaceParams& params);
+    void SetAdvanced(const GapAdvancedParams& params);
+    void SetVoid(const GapVoidParams& params);
 
     // 领取当前 VolumeBuffer 与参数副本后启动 worker；返回值表示请求是否被真实接纳。
     // 完成链发布执行状态、成功结果和可选 pending callback，调用方通过 GetDoneEvent/SendCallback 消费回调。
@@ -53,23 +60,17 @@ public:
     // 本入口清理旧显示后登记新请求并置启动门铃；至少一个有效 target 才接受，worker 由后续 OnDisplayTick 启动。
     // 首次成功调用绑定当前宿主线程；本组显示会话接口必须继续由该线程调用。
     bool StartView(
-        const GapAnalysisSurfaceRequest& surfaceRequest,
-        const VoidDetectionParams& voidParams,
-        const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
-        const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
-        std::function<void(double isoValue)> onIsoValueResolved = nullptr);
+        GapViewRequest request,
+        std::function<void(bool isSuccess)> onComplete = nullptr);
     bool SwitchOverlay();
     // 清除显示会话与已挂载 overlay；若 worker 正在执行，仅发布停止请求。
     bool ExitView();
+    void ClearView();
     bool GetViewOn() const;
+    bool GetDisplayTickNeeded() const;
     // 宿主主线程 tick：非空 image 走公共隔离入口；空 image 复用预先 SetInputSnapshot 的只读输入。
     // 非绑定线程调用会被拒绝，不读取或修改 VTK/overlay 会话状态。
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
-
-protected:
-    friend class HostFeatureBindings;
-    // 仅授权宿主受控只读链；VTK_FLOAT scalars 直接共享，调用方不得再修改 image。
-    bool SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
 
 private:
     class Impl;

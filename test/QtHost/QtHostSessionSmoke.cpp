@@ -91,11 +91,11 @@ bool BuildDefaultRenderTest()
     view.role = HostRenderViewRole::Primary3D;
     view.renderWindow = renderWindow;
 
-    VtkAppHostSession::Config config;
+    HostSessionConfig config;
     config.renderViews.push_back(std::move(view));
     VtkAppHostSession session(std::move(config));
     session.BuildSession();
-    return renderWindow->GetRenderCount() == renderCount + 1;
+    return renderWindow->GetRenderCount() == renderCount;
 }
 
 class SessionFixture final {
@@ -135,23 +135,21 @@ public:
         view.window.title = "Qt Host Session Smoke";
         view.window.width = 640;
         view.window.height = 480;
-        view.window.preInitCfg.vizMode = VizMode::CompositeIsoSurface;
-        view.window.preInitCfg.bgColor = { 0.08, 0.12, 0.16 };
-        view.window.preInitCfg.hasBgColor = true;
+        view.window.viewInit.viewMode = HostViewMode::CompositeIsoSurface;
+        view.window.viewInit.background = { 0.08, 0.12, 0.16 };
+        view.window.viewInit.hasBackground = true;
         view.renderWindow = m_renderWindow;
 
-        VtkAppHostSession::Config config;
-        // QVTK 已完成首帧并持有 OpenGL surface，禁止 BuildSession 再主动触发 Host 初始化帧。
-        config.isInitialRenderEnabled = false;
+        HostSessionConfig config;
         config.renderViews.push_back(std::move(view));
-        config.renderContextInput.isHotkeyEnabled = false;
-        config.commandInput.isHotkeyEnabled = false;
-        config.timerEventPump.isTimerEnabled = true;
-        config.timerEventPump.timerViewId = "primary-3d";
 
         m_session = std::make_unique<VtkAppHostSession>(std::move(config));
         const std::size_t renderStartCount = m_renderStartCount;
-        m_session->BuildSession();
+        const bool isBuilt = m_session->BuildSession();
+        HostTimerConfig timer;
+        timer.isTimerEnabled = true;
+        timer.targetView = { "primary-3d", false, HostRenderViewRole::Primary3D };
+        const bool isTimerAttached = m_session->AttachTimer(timer);
         const bool hasInitialRender = m_renderStartCount != renderStartCount;
 
         const auto& endpoints = m_session->GetRenderViewEndpoints();
@@ -166,10 +164,7 @@ public:
             }
             std::cerr << '\n';
         }
-        if (hasInitialRender) {
-            std::cerr << "FAIL: Host rendered despite disabled initial frame\n";
-        }
-        return !hasInitialRender
+        return isBuilt && isTimerAttached && !hasInitialRender
             && m_vtkErrorCount == 0
             && endpoints.size() == 1
             && endpoint != nullptr
@@ -184,8 +179,8 @@ public:
     bool StopHost()
     {
         if (m_session) {
-            m_session->ExitCrop();
-            m_session->ExitGapView();
+            m_session->SendCrop({ HostCropAction::Exit, std::monostate{} });
+            m_session->SendGap({ HostGapAction::Exit, std::monostate{} });
             m_session.reset();
         }
         if (m_widget) {
@@ -243,7 +238,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
 
     if (!BuildDefaultRenderTest()) {
-        std::cerr << "FAIL: default Host initial frame was not rendered once\n";
+        std::cerr << "FAIL: BuildSession unexpectedly rendered the Qt-owned window\n";
         return 5;
     }
 

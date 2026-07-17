@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Host/HostSessionTypes.h"
+#include "Host/Types/HostAdapterTypes.h"
 
 #include <memory>
 
@@ -17,10 +17,8 @@ public:
     ~HostHotkeyRouter();
 
     bool AttachHotkeys(
-        const HostContextInput& renderContextInput,
-        const HostDataExportConfig& dataExportConfig,
-        const HostCommandInputConfig& commandInput,
-        const HostHotkeyBindings& hotkeys);
+        const HostHotkeyConfig& config,
+        HostHotkeyTemplates templates);
     bool ClearHotkeys();
 
 private:

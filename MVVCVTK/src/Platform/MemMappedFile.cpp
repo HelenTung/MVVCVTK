@@ -1,5 +1,6 @@
 #include "MemMappedFile.h"
 #include <cstring>
+#include <limits>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -12,6 +13,7 @@
 #endif
 
 bool MemMappedFile::Load(const std::string& path, size_t length) {
+    Clear();
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING,
@@ -19,63 +21,71 @@ bool MemMappedFile::Load(const std::string& path, size_t length) {
     if (hFile == INVALID_HANDLE_VALUE) return false;
 
     LARGE_INTEGER fileSize{};
-    if (!GetFileSizeEx(hFile, &fileSize)) {
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart <= 0
+        || static_cast<unsigned long long>(fileSize.QuadPart)
+            > static_cast<unsigned long long>((std::numeric_limits<size_t>::max)())) {
         CloseHandle(hFile); return false;
     }
-    m_size = (length == 0) ? static_cast<size_t>(fileSize.QuadPart) : length;
+    const size_t fileBytes = static_cast<size_t>(fileSize.QuadPart);
+    const size_t mapBytes = length == 0 ? fileBytes : length;
+    if (mapBytes == 0 || mapBytes > fileBytes) {
+        CloseHandle(hFile); return false;
+    }
 
     HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!hMap) { CloseHandle(hFile); return false; }
 
-    const void* ptr = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, m_size);
+    const void* ptr = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, mapBytes);
     if (!ptr) { CloseHandle(hMap); CloseHandle(hFile); return false; }
 
     m_hFile = hFile;
     m_hMap = hMap;
     m_data = ptr;
+    m_size = mapBytes;
 #else
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return false;
 
-    if (length == 0) {
-        struct stat st {};
-        if (::fstat(fd, &st) < 0) { ::close(fd); return false; }
-        m_size = static_cast<size_t>(st.st_size);
+    struct stat st {};
+    if (::fstat(fd, &st) < 0 || st.st_size <= 0
+        || static_cast<unsigned long long>(st.st_size)
+            > static_cast<unsigned long long>((std::numeric_limits<size_t>::max)())) {
+        ::close(fd); return false;
     }
-    else {
-        m_size = length;
+    const size_t fileBytes = static_cast<size_t>(st.st_size);
+    const size_t mapBytes = length == 0 ? fileBytes : length;
+    if (mapBytes == 0 || mapBytes > fileBytes) {
+        ::close(fd); return false;
     }
-
-    if (m_size == 0) { ::close(fd); return false; }  // 空文件保护
 
 #ifdef __linux__
     int flags = MAP_PRIVATE | MAP_POPULATE;  // 预读所有页
 #else
     int flags = MAP_PRIVATE;                 // macOS / BSD 兼容
 #endif
-    void* ptr = ::mmap(nullptr, m_size, PROT_READ, flags, fd, 0);
+    void* ptr = ::mmap(nullptr, mapBytes, PROT_READ, flags, fd, 0);
     if (ptr == MAP_FAILED) { ::close(fd); return false; }
 
 #if defined(MADV_SEQUENTIAL)
-    ::madvise(ptr, m_size, MADV_SEQUENTIAL);
+    ::madvise(ptr, mapBytes, MADV_SEQUENTIAL);
 #endif
 
     m_fd = fd;
     m_data = ptr;
+    m_size = mapBytes;
 #endif
     return true;
 }
 
 void MemMappedFile::Clear() {
-    if (!m_data) return;
 #ifdef _WIN32
-    UnmapViewOfFile(m_data);
-    CloseHandle(static_cast<HANDLE>(m_hMap));
-    CloseHandle(static_cast<HANDLE>(m_hFile));
+    if (m_data) UnmapViewOfFile(m_data);
+    if (m_hMap) CloseHandle(static_cast<HANDLE>(m_hMap));
+    if (m_hFile) CloseHandle(static_cast<HANDLE>(m_hFile));
     m_hMap = m_hFile = nullptr;
 #else
-    ::munmap(const_cast<void*>(m_data), m_size);
-    ::close(m_fd);
+    if (m_data) ::munmap(const_cast<void*>(m_data), m_size);
+    if (m_fd >= 0) ::close(m_fd);
     m_fd = -1;
 #endif
     m_data = nullptr;

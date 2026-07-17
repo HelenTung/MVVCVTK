@@ -392,3 +392,6 @@ test/QtHost/smoke*.out
 test/QtHost/smoke*.err
 test/QtHost/x64/
 test/QtHost/QtHostSmoke.pro
+
+# pdf
+pdf/*.pdf

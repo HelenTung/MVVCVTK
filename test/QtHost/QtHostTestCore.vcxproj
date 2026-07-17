@@ -89,6 +89,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataConverters.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />

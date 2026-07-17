@@ -1,369 +1,489 @@
 #include "Host/HostCommandRouter.h"
 
 #include "AppService.h"
+#include "AppTypes.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
+#include "VolumeTypes.h"
 
-#include <functional>
+#include <charconv>
+#include <cctype>
+#include <cmath>
+#include <filesystem>
 #include <iostream>
-#include <limits>
 #include <memory>
-#include <type_traits>
+#include <optional>
 #include <utility>
 #include <variant>
 
-namespace {
-template <typename>
-constexpr bool isUnknownCommand = false;
-}
-
 class HostCommandRouter::Impl final {
 public:
-    Impl(
-        const HostCoreServices& core,
-        const HostRenderViewSet& renderViews,
-        std::shared_ptr<HostFeatureBindings> featureBindings);
-    ~Impl() = default;
+    Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews,
+        std::shared_ptr<HostFeatureBindings> featureBindings)
+        : m_core(&core), m_renderViews(&renderViews),
+          m_featureBindings(std::move(featureBindings)) {}
 
     bool DispatchCommand(HostCommand command) const;
 
 private:
-    bool LoadVolume(
-        InitialVolumeLoadConfig initialVolume,
-        std::function<void(bool isSuccess)> loadComplete) const;
-    bool ReloadVolume(
-        HostVolumeBufferRequest volumeBuffer,
-        std::function<void(bool isSuccess)> reloadComplete) const;
-    std::function<void(bool)> BuildLoadComplete(
-        std::function<void(bool isSuccess)> onComplete) const;
-    std::function<void(bool)> BuildReloadComplete(
-        std::function<void(bool isSuccess)> onComplete) const;
-    bool ExportData(
-        HostDataExportConfig dataExportConfig,
-        std::function<void(bool isSuccess)> onComplete) const;
-    bool SetViewConfig(const HostViewConfig& viewConfig) const;
-    // 非拥有引用：core 和 view set 由 session 持有，声明顺序保证它们晚于 router 析构。
+    bool SendData(HostDataCommand command) const;
+    bool SendView(const HostViewCommand& command) const;
+    bool SendTool(const HostToolCommand& command) const;
+    bool SendCrop(HostCropCommand command) const;
+    bool SendGap(HostGapCommand command) const;
+    bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
+    bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
+    bool ExportVolume(HostVolumeExportRequest request, HostCompleteCallback callback) const;
+    bool ExportSlices(HostSliceExportRequest request, HostCompleteCallback callback) const;
+    std::optional<VolumeLayout> BuildLoadLayout(
+        const HostLoadRequest& request) const;
+    std::optional<std::array<int, 3>> GetRawDims(
+        const std::string& path) const;
+    std::optional<VizMode> GetAppViewMode(HostViewMode mode) const;
+    std::optional<ToolMode> GetAppToolMode(HostToolMode mode) const;
+    std::optional<MaterialParams> BuildAppMaterial(const HostMaterialParams& value) const;
+    std::optional<BackgroundColor> BuildAppBackground(const HostBackgroundColor& value) const;
+    std::optional<WindowLevelParams> BuildAppWindowLevel(const HostWindowLevelParams& value) const;
+    std::optional<std::vector<TFNode>> BuildAppNodes(
+        const std::vector<HostTransferNode>& values) const;
+    HostCompleteCallback BuildLoadComplete(HostCompleteCallback callback) const;
+    HostCompleteCallback BuildReloadComplete(HostCompleteCallback callback) const;
+
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
-    // 弱引用避免 router 延长 feature 生命周期；命令入口必须允许绑定层已卸载时 lock 失败。
     std::weak_ptr<HostFeatureBindings> m_featureBindings;
 };
 
-HostCommandRouter::Impl::Impl(
-    const HostCoreServices& core,
-    const HostRenderViewSet& renderViews,
-    std::shared_ptr<HostFeatureBindings> featureBindings)
-    : m_core(&core)
-    , m_renderViews(&renderViews)
-    , m_featureBindings(std::move(featureBindings))
-{
-}
-
 bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
 {
-    return std::visit(
-        [this](auto&& typedCommand) -> bool {
-            using Command = std::decay_t<decltype(typedCommand)>;
-            if constexpr (std::is_same_v<Command, std::monostate>) {
-                std::cerr << "[Host] Command dispatch skipped: command was not specified." << std::endl;
-                return false;
-            }
-            else if constexpr (std::is_same_v<Command, HostLoadCommand>) {
-                return LoadVolume(
-                    std::move(typedCommand.request),
-                    std::move(typedCommand.onComplete));
-            }
-            else if constexpr (std::is_same_v<Command, HostReloadCommand>) {
-                return ReloadVolume(
-                    std::move(typedCommand.request),
-                    std::move(typedCommand.onComplete));
-            }
-            else if constexpr (std::is_same_v<Command, HostExportCommand>) {
-                return ExportData(
-                    std::move(typedCommand.request),
-                    std::move(typedCommand.onComplete));
-            }
-            else if constexpr (std::is_same_v<Command, HostViewCommand>) {
-                return SetViewConfig(typedCommand.request);
-            }
-            else if constexpr (std::is_same_v<Command, HostFeatureCommand>) {
-                const auto bindings = m_featureBindings.lock();
-                if (!bindings) {
-                    std::cerr << "[Host] Feature command dispatch skipped: feature bindings are not ready." << std::endl;
-                    return false;
-                }
-                return bindings->SendCommand(std::move(typedCommand));
-            }
-            else {
-                static_assert(
-                    isUnknownCommand<Command>,
-                    "Unknown host command");
-            }
-        },
-        std::move(command));
+    if (auto* value = std::get_if<HostDataCommand>(&command)) {
+        return SendData(std::move(*value));
+    }
+    if (const auto* value = std::get_if<HostViewCommand>(&command)) {
+        return SendView(*value);
+    }
+    if (const auto* value = std::get_if<HostToolCommand>(&command)) {
+        return SendTool(*value);
+    }
+    if (auto* value = std::get_if<HostCropCommand>(&command)) {
+        return SendCrop(std::move(*value));
+    }
+    if (auto* value = std::get_if<HostGapCommand>(&command)) {
+        return SendGap(std::move(*value));
+    }
+    return false;
 }
 
-bool HostCommandRouter::Impl::LoadVolume(
-    InitialVolumeLoadConfig initialVolume,
-    std::function<void(bool isSuccess)> loadComplete) const
+bool HostCommandRouter::Impl::SendData(HostDataCommand command) const
 {
-    if (!initialVolume.isInitialLoadEnabled) {
-        return true;
-    }
-    if (!m_core || !m_renderViews) {
-        std::cerr << "[Host] Initial volume load skipped: host services are not ready." << std::endl;
+    switch (command.request.action) {
+    case HostDataAction::LoadFile:
+        if (auto* request = std::get_if<HostLoadRequest>(&command.request.payload)) {
+            return LoadFile(std::move(*request), std::move(command.onComplete));
+        }
+        return false;
+    case HostDataAction::ReloadBuffer:
+        if (auto* request = std::get_if<HostReloadRequest>(&command.request.payload)) {
+            return ReloadBuffer(std::move(*request), std::move(command.onComplete));
+        }
+        return false;
+    case HostDataAction::ExportVolume:
+        if (auto* request = std::get_if<HostVolumeExportRequest>(&command.request.payload)) {
+            return ExportVolume(std::move(*request), std::move(command.onComplete));
+        }
+        return false;
+    case HostDataAction::ExportSlices:
+        if (auto* request = std::get_if<HostSliceExportRequest>(&command.request.payload)) {
+            return ExportSlices(std::move(*request), std::move(command.onComplete));
+        }
+        return false;
+    case HostDataAction::None:
         return false;
     }
-    if (initialVolume.filePath.empty()) {
-        std::cerr << "[Host] Initial volume load skipped: file path was not specified." << std::endl;
-        return false;
-    }
-    if (!initialVolume.geometry) {
-        std::cerr << "[Host] Initial volume load skipped: volume geometry was not specified." << std::endl;
-        return false;
-    }
+    return false;
+}
 
-    const auto* primaryView = m_renderViews->GetPrimaryView();
-    if (!primaryView || !primaryView->service) {
-        std::cerr << "[Host] Initial volume load skipped: primary render view is missing." << std::endl;
+bool HostCommandRouter::Impl::LoadFile(
+    HostLoadRequest request, HostCompleteCallback callback) const
+{
+    if (!m_renderViews || request.filePath.empty()) {
         return false;
     }
+    const auto* view = m_renderViews->GetPrimaryView();
+    if (!view || !view->service) {
+        return false;
+    }
+    auto layout = BuildLoadLayout(request);
+    if (!layout) return false;
+    return view->service->LoadFileAsync(
+        std::move(request.filePath), std::move(*layout),
+        BuildLoadComplete(std::move(callback)));
+}
 
-    primaryView->service->LoadFileAsync(
-        initialVolume.filePath,
-        initialVolume.geometry->spacing,
-        initialVolume.geometry->origin,
-        BuildLoadComplete(std::move(loadComplete)));
+bool HostCommandRouter::Impl::ReloadBuffer(
+    HostReloadRequest request, HostCompleteCallback callback) const
+{
+    if (!m_renderViews) {
+        return false;
+    }
+    const auto* view = m_renderViews->GetPrimaryView();
+    if (!view || !view->service) {
+        return false;
+    }
+    auto layout = VolumeLayout::Create(
+        request.geometry.dimensions,
+        request.geometry.spacing,
+        request.geometry.origin);
+    if (!layout) return false;
+    auto buffer = VolumeBuffer::Create(
+        std::move(request.voxels), std::move(*layout));
+    if (!buffer) return false;
+    return view->service->ReloadFromBufferAsync(
+        std::move(*buffer), BuildReloadComplete(std::move(callback)));
+}
+
+std::optional<VolumeLayout> HostCommandRouter::Impl::BuildLoadLayout(
+    const HostLoadRequest& request) const
+{
+    auto dimensions = request.geometry.dimensions;
+    if (dimensions == std::array<int, 3>{ 0, 0, 0 }) {
+        auto rawDimensions = GetRawDims(request.filePath);
+        if (!rawDimensions) return std::nullopt;
+        dimensions = *rawDimensions;
+    }
+    return VolumeLayout::Create(
+        dimensions, request.geometry.spacing, request.geometry.origin);
+}
+
+std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
+    const std::string& path) const
+{
+    const std::filesystem::path filePath(path);
+    std::string extension = filePath.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    if (extension != ".raw") return std::nullopt;
+
+    const std::string stem = filePath.stem().string();
+    const auto second = stem.find_last_of("xX");
+    if (second == std::string::npos || second + 1 >= stem.size()) {
+        return std::nullopt;
+    }
+    const auto first = stem.find_last_of("xX", second - 1);
+    if (first == std::string::npos || first + 1 == second) {
+        return std::nullopt;
+    }
+    std::size_t firstStart = first;
+    while (firstStart > 0
+        && std::isdigit(static_cast<unsigned char>(stem[firstStart - 1]))) {
+        --firstStart;
+    }
+    if (firstStart == first) return std::nullopt;
+
+    std::array<int, 3> dimensions{};
+    const std::array<std::pair<std::size_t, std::size_t>, 3> fields = {
+        std::pair{ firstStart, first },
+        std::pair{ first + 1, second },
+        std::pair{ second + 1, stem.size() }
+    };
+    for (std::size_t index = 0; index < fields.size(); ++index) {
+        const auto [beginIndex, endIndex] = fields[index];
+        const char* begin = stem.data() + beginIndex;
+        const char* end = stem.data() + endIndex;
+        const auto result = std::from_chars(begin, end, dimensions[index]);
+        if (result.ec != std::errc{} || result.ptr != end
+            || dimensions[index] <= 0) {
+            return std::nullopt;
+        }
+    }
+    return dimensions;
+}
+
+bool HostCommandRouter::Impl::ExportVolume(
+    HostVolumeExportRequest request, HostCompleteCallback callback) const
+{
+    const auto* view = m_renderViews ? m_renderViews->GetPrimaryView() : nullptr;
+    if (!view || !view->service || request.outputPath.empty()) {
+        return false;
+    }
+    view->service->ExportDataAsync(request.outputPath, std::move(callback));
     return true;
 }
 
-bool HostCommandRouter::Impl::ReloadVolume(
-    HostVolumeBufferRequest volumeBuffer,
-    std::function<void(bool isSuccess)> reloadComplete) const
+bool HostCommandRouter::Impl::ExportSlices(
+    HostSliceExportRequest request, HostCompleteCallback callback) const
 {
-    if (!m_core || !m_renderViews) {
-        std::cerr << "[Host] Volume buffer reload skipped: host services are not ready.\n";
+    const auto* view = m_renderViews
+        ? m_renderViews->GetViewBySelector(request.sourceView) : nullptr;
+    if (!view || !view->service || request.outputDir.empty()
+        || !m_renderViews->GetRoleIsSliceView(view->config.role)
+        || (request.angleDeg && !std::isfinite(*request.angleDeg))) {
         return false;
     }
-    if (!volumeBuffer.geometry) {
-        std::cerr << "[Host] Volume buffer reload skipped: volume geometry was not specified.\n";
-        return false;
-    }
-
-    std::size_t voxelCount = 1;
-    for (const int dimension : volumeBuffer.dimensions) {
-        if (dimension <= 0
-            || voxelCount > std::numeric_limits<std::size_t>::max()
-                / static_cast<std::size_t>(dimension)) {
-            std::cerr << "[Host] Volume buffer reload skipped: dimensions were invalid.\n";
-            return false;
-        }
-        voxelCount *= static_cast<std::size_t>(dimension);
-    }
-    if (volumeBuffer.voxels.size() != voxelCount) {
-        std::cerr << "[Host] Volume buffer reload skipped: voxel count did not match dimensions.\n";
-        return false;
-    }
-
-    const auto* primaryView = m_renderViews->GetPrimaryView();
-    if (!primaryView || !primaryView->service) {
-        std::cerr << "[Host] Volume buffer reload skipped: primary render view is missing.\n";
-        return false;
-    }
-
-    // service 在返回前复制 voxels，异步任务不会借用 volumeBuffer 的存储。
-    return primaryView->service->ReloadFromBufferAsync(
-        volumeBuffer.voxels.data(),
-        volumeBuffer.dimensions,
-        volumeBuffer.geometry->spacing,
-        volumeBuffer.geometry->origin,
-        BuildReloadComplete(std::move(reloadComplete)));
-}
-
-std::function<void(bool)> HostCommandRouter::Impl::BuildLoadComplete(
-    std::function<void(bool isSuccess)> onComplete) const
-{
-    const auto featureBindings = m_featureBindings;
-    return [
-        featureBindings,
-        onComplete = std::move(onComplete)
-    ](bool isSuccess) mutable {
-        if (const auto lockedBindings = featureBindings.lock()) {
-            if (isSuccess) {
-                lockedBindings->SendCropInput();
-            }
-            else {
-                lockedBindings->ClearCropInput();
-            }
-        }
-        if (onComplete) {
-            onComplete(isSuccess);
-        }
-    };
-}
-
-std::function<void(bool)> HostCommandRouter::Impl::BuildReloadComplete(
-    std::function<void(bool isSuccess)> onComplete) const
-{
-    const auto featureBindings = m_featureBindings;
-    return [
-        featureBindings,
-        onComplete = std::move(onComplete)
-    ](bool isSuccess) mutable {
-        // Reload 失败不会替换 current image，因此保留现有 Crop input；成功后才刷新快照。
-        if (isSuccess) {
-            if (const auto lockedBindings = featureBindings.lock()) {
-                lockedBindings->SendCropInput();
-            }
-        }
-        if (onComplete) {
-            onComplete(isSuccess);
-        }
-    };
-}
-
-bool HostCommandRouter::Impl::ExportData(
-    HostDataExportConfig dataExportConfig,
-    std::function<void(bool isSuccess)> onComplete) const
-{
-    if (!m_renderViews) {
-        std::cerr << "[Host] Data export skipped: host render views are not ready." << std::endl;
-        return false;
-    }
-
-    if (dataExportConfig.hasVolumeExport == dataExportConfig.hasSliceExport) {
-        std::cerr << "[Host] Data export skipped: exactly one export request flag must be true." << std::endl;
-        return false;
-    }
-
-    if (dataExportConfig.hasVolumeExport) {
-        if (dataExportConfig.transformedDataOutputPath.empty()) {
-            std::cerr << "[Host] Transformed data export skipped: output path was not configured." << std::endl;
-            return false;
-        }
-
-        const auto* exportView = m_renderViews->GetPrimaryView();
-        if (!exportView || !exportView->service) {
-            std::cerr << "[Host] Transformed data export skipped: primary render view is missing." << std::endl;
-            return false;
-        }
-
-        exportView->service->ExportDataAsync(
-            dataExportConfig.transformedDataOutputPath,
-            std::move(onComplete));
-        return true;
-    }
-
-    if (dataExportConfig.sliceOutputDir.empty()) {
-        std::cerr << "[Host] Slice image export skipped: output directory was not configured." << std::endl;
-        return false;
-    }
-
-    const auto* exportView = m_renderViews->GetViewBySelector(
-        dataExportConfig.sliceSourceViewId,
-        dataExportConfig.isSliceRoleUsed,
-        dataExportConfig.sliceSourceRole);
-
-    if (!exportView || !exportView->service) {
-        std::cerr << "[Host] Slice image export skipped: source render view is missing." << std::endl;
-        return false;
-    }
-    if (!m_renderViews->GetRoleIsSliceView(exportView->config.role)) {
-        std::cerr << "[Host] Slice image export skipped: source render view is not a slice view." << std::endl;
-        return false;
-    }
-
-    exportView->service->ExportSlicesAsync(
-        dataExportConfig.sliceOutputDir,
-        dataExportConfig.sliceAngleDeg,
-        std::move(onComplete));
+    view->service->ExportSlicesAsync(
+        request.outputDir, request.angleDeg, std::move(callback));
     return true;
 }
 
-bool HostCommandRouter::Impl::SetViewConfig(const HostViewConfig& viewConfig) const
+std::optional<VizMode> HostCommandRouter::Impl::GetAppViewMode(HostViewMode mode) const
 {
-    // optional 字段组成一次命令快照；先完成目标和输入校验，保证拒绝路径没有部分写入。
-    const bool hasViewEdit =
-        viewConfig.mode.has_value()
-        || viewConfig.material.has_value()
-        || viewConfig.opacity.has_value()
-        || viewConfig.tfNodes.has_value()
-        || viewConfig.iso.has_value()
-        || viewConfig.background.has_value()
-        || viewConfig.spacing.has_value()
-        || viewConfig.windowLevel.has_value();
-
-    if (!m_renderViews) {
-        std::cerr << "[Host] View config skipped: host render views are not ready." << std::endl;
-        return false;
+    switch (mode) {
+    case HostViewMode::Volume: return VizMode::Volume;
+    case HostViewMode::IsoSurface: return VizMode::IsoSurface;
+    case HostViewMode::SliceTopDown: return VizMode::SliceTop_down;
+    case HostViewMode::SliceFrontBack: return VizMode::SliceFront_back;
+    case HostViewMode::SliceLeftRight: return VizMode::SliceLeft_right;
+    case HostViewMode::CompositeVolume: return VizMode::CompositeVolume;
+    case HostViewMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
     }
-    if (!hasViewEdit) {
-        std::cerr << "[Host] View config skipped: no config value was provided." << std::endl;
-        return false;
-    }
-
-    const auto* targetView = m_renderViews->GetViewBySelector(
-        viewConfig.viewId,
-        viewConfig.isViewRoleUsed,
-        viewConfig.viewRole);
-
-    if (!targetView || !targetView->service) {
-        std::cerr << "[Host] View config skipped: target render view is missing." << std::endl;
-        return false;
-    }
-
-    const auto& service = targetView->service;
-    if (viewConfig.mode) {
-        // mode 同时属于 service 管线意图和 context 输入/相机策略；必须先确认两个 owner 都可写。
-        if (!targetView->context) {
-            std::cerr << "[Host] View mode config skipped: render context is missing." << std::endl;
-            return false;
-        }
-        service->SetVizMode(*viewConfig.mode);
-        targetView->context->SetCameraStyle(*viewConfig.mode);
-    }
-    // 其余 optional 字段只有 service 一个 owner，可按请求中实际携带的值独立分发。
-    if (viewConfig.material) {
-        service->SetMaterial(*viewConfig.material);
-    }
-    if (viewConfig.opacity) {
-        service->SetOpacity(*viewConfig.opacity);
-    }
-    if (viewConfig.tfNodes) {
-        service->SetTransferFunction(*viewConfig.tfNodes);
-    }
-    if (viewConfig.iso) {
-        service->SetIsoThreshold(*viewConfig.iso);
-    }
-    if (viewConfig.background) {
-        service->SetBackground(*viewConfig.background);
-    }
-    if (viewConfig.spacing) {
-        service->SetSpacing(
-            (*viewConfig.spacing)[0],
-            (*viewConfig.spacing)[1],
-            (*viewConfig.spacing)[2]);
-    }
-    if (viewConfig.windowLevel) {
-        service->SetWindowLevel(
-            viewConfig.windowLevel->windowWidth,
-            viewConfig.windowLevel->windowCenter);
-    }
-    return true; // 配置已分发；service 的实际管线同步由后续主线程 tick 消费。
+    return std::nullopt;
 }
 
-HostCommandRouter::HostCommandRouter(
-    const HostCoreServices& core,
+std::optional<ToolMode> HostCommandRouter::Impl::GetAppToolMode(HostToolMode mode) const
+{
+    switch (mode) {
+    case HostToolMode::Navigation: return ToolMode::Navigation;
+    case HostToolMode::ModelTransform: return ToolMode::ModelTransform;
+    }
+    return std::nullopt;
+}
+
+std::optional<MaterialParams> HostCommandRouter::Impl::BuildAppMaterial(
+    const HostMaterialParams& value) const
+{
+    if (!std::isfinite(value.ambient) || !std::isfinite(value.diffuse)
+        || !std::isfinite(value.specular) || !std::isfinite(value.specularPower)
+        || !std::isfinite(value.opacity) || value.specularPower < 0.0
+        || value.opacity < 0.0 || value.opacity > 1.0) {
+        return std::nullopt;
+    }
+    return MaterialParams{ value.ambient, value.diffuse, value.specular,
+        value.specularPower, value.opacity, value.isShadeOn };
+}
+
+std::optional<BackgroundColor> HostCommandRouter::Impl::BuildAppBackground(
+    const HostBackgroundColor& value) const
+{
+    if (!std::isfinite(value.r) || !std::isfinite(value.g) || !std::isfinite(value.b)) {
+        return std::nullopt;
+    }
+    return BackgroundColor{ value.r, value.g, value.b };
+}
+
+std::optional<WindowLevelParams> HostCommandRouter::Impl::BuildAppWindowLevel(
+    const HostWindowLevelParams& value) const
+{
+    if (!std::isfinite(value.windowWidth) || value.windowWidth <= 0.0
+        || !std::isfinite(value.windowCenter)) {
+        return std::nullopt;
+    }
+    return WindowLevelParams{ value.windowWidth, value.windowCenter };
+}
+
+std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
+    const std::vector<HostTransferNode>& values) const
+{
+    std::vector<TFNode> result;
+    result.reserve(values.size());
+    for (const auto& value : values) {
+        if (!std::isfinite(value.position) || !std::isfinite(value.opacity)
+            || !std::isfinite(value.r) || !std::isfinite(value.g)
+            || !std::isfinite(value.b)) {
+            return std::nullopt;
+        }
+        result.push_back({ value.position, value.opacity, value.r, value.g, value.b });
+    }
+    return result;
+}
+
+bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
+{
+    if (command.request.action != HostViewAction::Set) {
+        return false;
+    }
+    const auto* request = std::get_if<HostViewSetRequest>(&command.request.payload);
+    const auto* view = request && m_renderViews
+        ? m_renderViews->GetViewBySelector(request->targetView) : nullptr;
+    if (!request || !view || !view->service) {
+        return false;
+    }
+    const auto mode = request->mode ? GetAppViewMode(*request->mode) : std::optional<VizMode>{};
+    const auto material = request->material ? BuildAppMaterial(*request->material)
+        : std::optional<MaterialParams>{};
+    const auto nodes = request->transferNodes ? BuildAppNodes(*request->transferNodes)
+        : std::optional<std::vector<TFNode>>{};
+    const auto background = request->background ? BuildAppBackground(*request->background)
+        : std::optional<BackgroundColor>{};
+    const auto windowLevel = request->windowLevel ? BuildAppWindowLevel(*request->windowLevel)
+        : std::optional<WindowLevelParams>{};
+    if ((request->mode && !mode) || (request->material && !material)
+        || (request->transferNodes && !nodes) || (request->background && !background)
+        || (request->windowLevel && !windowLevel)
+        || (request->opacity && (!std::isfinite(*request->opacity)
+            || *request->opacity < 0.0 || *request->opacity > 1.0))
+        || (request->iso && !std::isfinite(*request->iso))) {
+        return false;
+    }
+    if (mode) {
+        if (!view->context) return false;
+        view->service->SetVizMode(*mode);
+        view->context->SetCameraStyle(*mode);
+    }
+    if (material) view->service->SetMaterial(*material);
+    if (request->opacity) view->service->SetOpacity(*request->opacity);
+    if (nodes) view->service->SetTransferFunction(*nodes);
+    if (request->iso) view->service->SetIsoThreshold(*request->iso);
+    if (background) view->service->SetBackground(*background);
+    if (request->spacing) {
+        const auto& spacing = *request->spacing;
+        if (!std::isfinite(spacing[0]) || spacing[0] <= 0.0
+            || !std::isfinite(spacing[1]) || spacing[1] <= 0.0
+            || !std::isfinite(spacing[2]) || spacing[2] <= 0.0) return false;
+        view->service->SetSpacing(spacing[0], spacing[1], spacing[2]);
+    }
+    if (windowLevel) view->service->SetWindowLevel(
+        windowLevel->windowWidth, windowLevel->windowCenter);
+    return true;
+}
+
+bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
+{
+    const HostViewTarget* target = nullptr;
+    std::optional<HostToolMode> requestedMode;
+    switch (command.request.action) {
+    case HostToolAction::Set:
+        if (const auto* request = std::get_if<HostToolSetRequest>(&command.request.payload)) {
+            target = &request->targetView;
+            requestedMode = request->toolMode;
+        }
+        break;
+    case HostToolAction::Switch:
+        if (const auto* request = std::get_if<HostToolSwitchRequest>(&command.request.payload)) {
+            target = &request->targetView;
+        }
+        break;
+    case HostToolAction::None:
+        break;
+    }
+    const auto* view = target && m_renderViews
+        ? m_renderViews->GetViewBySelector(*target) : nullptr;
+    if (!view || !view->context) return false;
+    ToolMode mode = ToolMode::Navigation;
+    if (requestedMode) {
+        const auto appMode = GetAppToolMode(*requestedMode);
+        if (!appMode) return false;
+        mode = *appMode;
+    } else {
+        mode = view->context->GetToolMode() == ToolMode::Navigation
+            ? ToolMode::ModelTransform : ToolMode::Navigation;
+    }
+    view->context->SetToolMode(mode);
+    return true;
+}
+
+bool HostCommandRouter::Impl::SendCrop(HostCropCommand command) const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) return false;
+    switch (command.request.action) {
+    case HostCropAction::Start:
+        if (!command.onComplete) {
+            if (const auto* value = std::get_if<HostCropTargetRequest>(
+                &command.request.payload)) {
+                return bindings->StartCrop(*value);
+            }
+        }
+        return false;
+    case HostCropAction::Box:
+        if (!command.onComplete) {
+            if (const auto* value = std::get_if<HostCropTargetRequest>(
+                &command.request.payload)) {
+                return bindings->SwitchCropBox(*value);
+            }
+        }
+        return false;
+    case HostCropAction::Plane:
+        if (!command.onComplete) {
+            if (const auto* value = std::get_if<HostCropTargetRequest>(
+                &command.request.payload)) {
+                return bindings->SwitchCropPlane(*value);
+            }
+        }
+        return false;
+    case HostCropAction::Preview:
+        if (!command.onComplete) {
+            if (const auto* value = std::get_if<HostCropPreviewRequest>(
+                &command.request.payload)) {
+                return bindings->SwitchCropView(*value);
+            }
+        }
+        return false;
+    case HostCropAction::Submit:
+        if (const auto* value = std::get_if<HostCropTargetRequest>(
+            &command.request.payload)) {
+            return bindings->SendCrop(*value, std::move(command.onComplete));
+        }
+        return false;
+    case HostCropAction::Exit:
+        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
+            && bindings->ExitCrop();
+    case HostCropAction::None:
+        return false;
+    }
+    return false;
+}
+
+bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
+{
+    const auto bindings = m_featureBindings.lock();
+    if (!bindings) return false;
+    switch (command.request.action) {
+    case HostGapAction::Start:
+        if (const auto* value = std::get_if<HostGapStartRequest>(
+            &command.request.payload)) {
+            return bindings->StartGap(*value, std::move(command.onComplete));
+        }
+        return false;
+    case HostGapAction::Overlay:
+        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
+            && bindings->SwitchGapLayer();
+    case HostGapAction::Exit:
+        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
+            && bindings->ExitGap();
+    case HostGapAction::None:
+        return false;
+    }
+    return false;
+}
+
+HostCompleteCallback HostCommandRouter::Impl::BuildLoadComplete(
+    HostCompleteCallback callback) const
+{
+    const auto bindings = m_featureBindings;
+    return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
+        if (const auto value = bindings.lock()) {
+            if (isSuccess) value->SendCropInput(); else value->ClearCropInput();
+        }
+        if (callback) callback(isSuccess);
+    };
+}
+
+HostCompleteCallback HostCommandRouter::Impl::BuildReloadComplete(
+    HostCompleteCallback callback) const
+{
+    const auto bindings = m_featureBindings;
+    return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
+        if (isSuccess) if (const auto value = bindings.lock()) value->SendCropInput();
+        if (callback) callback(isSuccess);
+    };
+}
+
+HostCommandRouter::HostCommandRouter(const HostCoreServices& core,
     const HostRenderViewSet& renderViews,
     std::shared_ptr<HostFeatureBindings> featureBindings)
-    : m_impl(std::make_unique<HostCommandRouter::Impl>(
-        core,
-        renderViews,
-        std::move(featureBindings)))
-{
-}
+    : m_impl(std::make_unique<Impl>(core, renderViews, std::move(featureBindings))) {}
 
 HostCommandRouter::~HostCommandRouter() = default;
 

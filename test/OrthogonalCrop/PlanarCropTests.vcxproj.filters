@@ -95,13 +95,13 @@
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataLoadTaskService.h">
       <Filter>include\App</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppTaskCallbackState.h">
-      <Filter>include\App</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h">
       <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Data\VolumeTypes.h">
       <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\Geometry\InteractionComputeService.h">
@@ -159,6 +159,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp">
+      <Filter>src\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp">

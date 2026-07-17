@@ -67,7 +67,10 @@ public:
 
         for (auto& callback : callbacks) {
             if (callback) {
-                callback(flags);
+                try { callback(flags); }
+                catch (...) {
+                    // 观察者异常只影响自身，后续观察者仍必须收到同一终态。
+                }
             }
         }
     }

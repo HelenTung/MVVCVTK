@@ -12,6 +12,9 @@
     <Filter Include="include\Host">
       <UniqueIdentifier>{14cd860b-7a52-4f86-850d-74b269948a52}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Host\Types">
+      <UniqueIdentifier>{69d242a1-205b-44f7-bbe6-2772c80d917c}</UniqueIdentifier>
+    </Filter>
     <Filter Include="include\Render\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
@@ -222,10 +225,10 @@
     <ClInclude Include="include\App\Tasks\AppDataLoadTaskService.h">
       <Filter>include\App\Tasks</Filter>
     </ClInclude>
-    <ClInclude Include="include\App\Tasks\AppTaskCallbackState.h">
-      <Filter>include\App\Tasks</Filter>
-    </ClInclude>
     <ClInclude Include="include\Data\DataManager.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Data\VolumeTypes.h">
       <Filter>include\Data</Filter>
     </ClInclude>
     <ClInclude Include="include\Data\DataConverters.h">
@@ -246,8 +249,17 @@
     <ClInclude Include="include\Host\HostCommandRouter.h">
       <Filter>include\Host</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\HostCommandTypes.h">
-      <Filter>include\Host</Filter>
+    <ClInclude Include="include\Host\Types\HostCommandTypes.h">
+      <Filter>include\Host\Types</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\Types\HostAdapterTypes.h">
+      <Filter>include\Host\Types</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\Types\HostRequestTypes.h">
+      <Filter>include\Host\Types</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\Types\HostValueTypes.h">
+      <Filter>include\Host\Types</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\HostHotkeyRouter.h">
       <Filter>include\Host</Filter>
@@ -261,8 +273,8 @@
     <ClInclude Include="include\Host\HostRenderViewSet.h">
       <Filter>include\Host</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\HostSessionTypes.h">
-      <Filter>include\Host</Filter>
+    <ClInclude Include="include\Host\Types\HostSessionTypes.h">
+      <Filter>include\Host\Types</Filter>
     </ClInclude>
     <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
       <Filter>include\Render\Strategies</Filter>
@@ -366,6 +378,9 @@
       <Filter>src\App\Tasks</Filter>
     </ClCompile>
     <ClCompile Include="src\Data\DataManager.cpp">
+      <Filter>src\Data</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Data\VolumeTypes.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
     <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp">

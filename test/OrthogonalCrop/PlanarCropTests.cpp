@@ -949,11 +949,11 @@ void StartDataExport(int& failureCount)
         failureCount);
 
     const auto missingPath = outputRoot / "missing_2x2x2.raw";
+    const auto missingLayout = VolumeLayout::Create(
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f });
     SetExpect(
-        !dataManager.SetDataLoaded(
-            missingPath.string(),
-            { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f }),
+        missingLayout && !dataManager.SetDataLoaded(
+            missingPath.string(), *missingLayout),
         "missing raw input should report failure.",
         failureCount);
     const auto afterFailure = dataManager.GetImageState();

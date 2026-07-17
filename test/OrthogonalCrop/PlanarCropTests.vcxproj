@@ -158,9 +158,9 @@
     <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataExportTaskService.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataLoadTaskService.h" />
-    <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppTaskCallbackState.h" />
     <ClInclude Include="..\..\MVVCVTK\include\App\AppTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Data\DataManager.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Data\VolumeTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Geometry\InteractionComputeService.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Render\Strategies\BaseVisualStrategy.h" />
@@ -186,6 +186,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="AppTaskServiceTests.cpp" />

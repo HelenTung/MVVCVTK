@@ -35,9 +35,9 @@ public:
 
     bool SetInputImage(vtkSmartPointer<vtkImageData> image);
     bool SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
-    void SetSurface(const SurfaceParams& params);
-    void SetAdvanced(const AdvancedSurfaceParams& params);
-    void SetVoid(const VoidDetectionParams& params);
+    void SetSurface(const GapSurfaceParams& params);
+    void SetAdvanced(const GapAdvancedParams& params);
+    void SetVoid(const GapVoidParams& params);
     bool StartAsync(std::function<void(bool isSuccess)> onComplete);
     void StopAsync();
     bool GetDoneEvent();
@@ -47,19 +47,16 @@ public:
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;
 
-    bool StartView(
-        const GapAnalysisSurfaceRequest& surfaceRequest,
-        const VoidDetectionParams& voidParams,
-        const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
-        const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
-        std::function<void(double isoValue)> onIsoValueResolved);
+    bool StartView(GapViewRequest request, std::function<void(bool)> onComplete);
     bool SwitchOverlay();
     bool ExitView();
+    void ClearView();
     bool GetViewOn() const;
+    bool GetDisplayTickNeeded() const;
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
-    using VolumeBufferSnapshot = std::shared_ptr<const VolumeBuffer>;
+    using VolumeBufferSnapshot = std::shared_ptr<const GapVolumeBuffer>;
 
     enum class GapViewPhase {
         Idle,
@@ -70,11 +67,11 @@ private:
 
     struct GapParamSnapshot {
         // StartAsync 从 m_paramsMutex 下复制；worker 当前只消费 isoValue。
-        SurfaceParams surfParams;
+        GapSurfaceParams surfParams;
         // 随任务按值冻结，避免后续 setter 改写；当前 worker 尚未接入法向精化，不消费这些字段。
-        AdvancedSurfaceParams advParams;
+        GapAdvancedParams advParams;
         // 随任务按值冻结；worker 消费 grayMax、erosionIterations 与 minVolumeMM3。
-        VoidDetectionParams voidParams;
+        GapVoidParams voidParams;
     };
 
     struct GapOverlayBinding {
@@ -90,10 +87,10 @@ private:
     bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const;
     bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> image,
-        VolumeBuffer& out) const;
+        GapVolumeBuffer& out) const;
     vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<int>& labelVolume,
-        const VolumeBuffer& volBuf) const;
+        const GapVolumeBuffer& volBuf) const;
 
     VolumeBufferSnapshot GetInputSnapshot() const;
     GapParamSnapshot GetParamSnapshot() const;
@@ -104,7 +101,7 @@ private:
     void SetAnalysisState(GapAnalysisState state);
 
     bool StartRun(vtkSmartPointer<vtkImageData> inputImage);
-    void SetDisplayView();
+    bool SetDisplayView();
     bool SetOverlayOff();
     bool SetStoredView();
     bool ExitViewState();
@@ -112,7 +109,7 @@ private:
     bool SetViewThread();
     bool GetViewThread() const;
     bool ClearViewThread();
-    double GetDisplayIso(const VolumeBuffer& inputSnapshot) const;
+    double GetDisplayIso(const GapVolumeBuffer& inputSnapshot) const;
 
     // callbackMutex 同时保护 active/pending callback 与 pending success payload。
     std::mutex m_callbackMutex;
@@ -133,11 +130,11 @@ private:
     // paramsMutex 把三个可变参数对象作为同一份任务配置复制边界。
     mutable std::mutex m_paramsMutex;
     // 输入标量域表面参数；GetParamSnapshot 按值冻结，worker 当前消费其中 isoValue。
-    SurfaceParams m_surfParams;
+    GapSurfaceParams m_surfParams;
     // 法向精化参数的预留值快照；当前 worker 不消费，不能描述为已生效配置。
-    AdvancedSurfaceParams m_advParams;
+    GapAdvancedParams m_advParams;
     // 空隙候选与保留参数；GetParamSnapshot 按值冻结后由当前 worker 消费已接入字段。
-    VoidDetectionParams m_voidParams;
+    GapVoidParams m_voidParams;
 
     // resultMutex 保护完整结果 payload；读取入口只在锁内取得值或 VTK owner，复制/构建均在锁外。
     mutable std::mutex m_resultMutex;
@@ -167,11 +164,11 @@ private:
     // 成功结果派生的 2D label image 强引用缓存；沿用输入快照的 dimensions/spacing/origin，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     // StartView 保存的 ISO 来源配方；StartRun 拿到输入 min/max 后解析，结束会话时清空。
-    GapAnalysisSurfaceRequest m_displaySurfaceRequest;
+    GapSurfaceRequest m_displaySurfaceRequest;
     // StartView 保存的 void 参数值副本；StartRun 写入 worker 参数槽，结束会话时清空。
-    VoidDetectionParams m_displayVoidParams;
-    // 可选 ISO 回调值副本；StartRun 在宿主 display tick 解析后同步调用，ClearDisplayState 释放。
-    std::function<void(double isoValue)> m_isoCallback;
+    GapVoidParams m_displayVoidParams;
+    std::function<void(bool)> m_viewCallback;
+    bool m_isExitPending = false;
     // 显示会话阶段只表达输入等待、结果等待与终态消费，不混入 worker 或 overlay 显隐状态。
     std::atomic<GapViewPhase> m_viewPhase{ GapViewPhase::Idle };
     // overlay 可见意图轴：用户可独立切换；关闭只卸载显示，不取消分析或丢弃缓存结果。
@@ -267,22 +264,17 @@ bool GapAnalysisService::SetInputImage(vtkSmartPointer<vtkImageData> image)
     return m_impl->SetInputImage(std::move(image));
 }
 
-bool GapAnalysisService::SetInputSnapshot(vtkSmartPointer<vtkImageData> image)
-{
-    return m_impl->SetInputSnapshot(std::move(image));
-}
-
-void GapAnalysisService::SetSurface(const SurfaceParams& params)
+void GapAnalysisService::SetSurface(const GapSurfaceParams& params)
 {
     m_impl->SetSurface(params);
 }
 
-void GapAnalysisService::SetAdvanced(const AdvancedSurfaceParams& params)
+void GapAnalysisService::SetAdvanced(const GapAdvancedParams& params)
 {
     m_impl->SetAdvanced(params);
 }
 
-void GapAnalysisService::SetVoid(const VoidDetectionParams& params)
+void GapAnalysisService::SetVoid(const GapVoidParams& params)
 {
     m_impl->SetVoid(params);
 }
@@ -328,18 +320,10 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::BuildLabelImage() const
 }
 
 bool GapAnalysisService::StartView(
-    const GapAnalysisSurfaceRequest& surfaceRequest,
-    const VoidDetectionParams& voidParams,
-    const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
-    const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
-    std::function<void(double isoValue)> onIsoValueResolved)
+    GapViewRequest request,
+    std::function<void(bool)> onComplete)
 {
-    return m_impl->StartView(
-        surfaceRequest,
-        voidParams,
-        meshOverlayTargets,
-        sliceOverlayTargets,
-        std::move(onIsoValueResolved));
+    return m_impl->StartView(std::move(request), std::move(onComplete));
 }
 
 bool GapAnalysisService::SwitchOverlay()
@@ -352,9 +336,19 @@ bool GapAnalysisService::ExitView()
     return m_impl->ExitView();
 }
 
+void GapAnalysisService::ClearView()
+{
+    m_impl->ClearView();
+}
+
 bool GapAnalysisService::GetViewOn() const
 {
     return m_impl->GetViewOn();
+}
+
+bool GapAnalysisService::GetDisplayTickNeeded() const
+{
+    return m_impl->GetDisplayTickNeeded();
 }
 
 void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
@@ -379,7 +373,7 @@ bool GapAnalysisService::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image
 }
 
 bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> image) {
-    VolumeBuffer snapshot;
+    GapVolumeBuffer snapshot;
     if (!BuildVolumeBuffer(std::move(image), snapshot)) {
         VolumeBufferSnapshot retiredSnapshot;
         {
@@ -397,7 +391,7 @@ bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> im
 
     VolumeBufferSnapshot snapshotPtr;
     try {
-        snapshotPtr = std::make_shared<VolumeBuffer>(std::move(snapshot));
+        snapshotPtr = std::make_shared<GapVolumeBuffer>(std::move(snapshot));
     }
     catch (const std::bad_alloc&) {
         VolumeBufferSnapshot retiredSnapshot;
@@ -434,17 +428,17 @@ bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> im
     return true;
 }
 
-void GapAnalysisService::Impl::SetSurface(const SurfaceParams& params) {
+void GapAnalysisService::Impl::SetSurface(const GapSurfaceParams& params) {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
     m_surfParams = params;
 }
 
-void GapAnalysisService::Impl::SetAdvanced(const AdvancedSurfaceParams& params) {
+void GapAnalysisService::Impl::SetAdvanced(const GapAdvancedParams& params) {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
     m_advParams = params;
 }
 
-void GapAnalysisService::Impl::SetVoid(const VoidDetectionParams& params) {
+void GapAnalysisService::Impl::SetVoid(const GapVoidParams& params) {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
     m_voidParams = params;
 }
@@ -546,13 +540,15 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage() const 
 }
 
 bool GapAnalysisService::Impl::StartView(
-    const GapAnalysisSurfaceRequest& surfaceRequest,
-    const VoidDetectionParams& voidParams,
-    const std::vector<std::shared_ptr<OverlayService>>& meshOverlayTargets,
-    const std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>& sliceOverlayTargets,
-    std::function<void(double isoValue)> onIsoValueResolved) {
+    GapViewRequest request,
+    std::function<void(bool)> onComplete) {
     if (!SetViewThread()) {
         std::cerr << "[GapAnalysis] Display activation rejected: view thread mismatch." << std::endl;
+        return false;
+    }
+    if (GetAnalysisState() == GapAnalysisState::Running
+        || !SetInputSnapshot(std::move(request.inputImage))) {
+        ClearViewThread();
         return false;
     }
     // 新显示请求先卸载旧 overlay；正在运行的 worker 只收到取消请求，线程所有权仍由 StartAsync/析构收口。
@@ -562,16 +558,16 @@ bool GapAnalysisService::Impl::StartView(
     }
 
     m_meshTargets.clear();
-    m_meshTargets.reserve(meshOverlayTargets.size());
-    for (const auto& target : meshOverlayTargets) {
+    m_meshTargets.reserve(request.meshTargets.size());
+    for (auto& target : request.meshTargets) {
         if (target) {
             m_meshTargets.push_back(target);
         }
     }
 
     m_sliceTargets.clear();
-    m_sliceTargets.reserve(sliceOverlayTargets.size());
-    for (const auto& target : sliceOverlayTargets) {
+    m_sliceTargets.reserve(request.sliceTargets.size());
+    for (auto& target : request.sliceTargets) {
         if (target.second) {
             m_sliceTargets.push_back(target);
         }
@@ -587,9 +583,10 @@ bool GapAnalysisService::Impl::StartView(
     // 以下字段发布一份新的显示会话：参数/target 已就绪，但输入快照要等主线程 tick 提供。
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
-    m_displaySurfaceRequest = surfaceRequest;
-    m_displayVoidParams = voidParams;
-    m_isoCallback = std::move(onIsoValueResolved);
+    m_displaySurfaceRequest = request.surface;
+    m_displayVoidParams = request.voidParams;
+    m_viewCallback = std::move(onComplete);
+    m_isExitPending = false;
     m_viewPhase.store(GapViewPhase::AwaitingInput);
     m_isOverlayOn = true;
     std::cout << "[GapAnalysis] Display mode requested. Analysis will start after volume data is ready." << std::endl;
@@ -636,19 +633,10 @@ bool GapAnalysisService::Impl::ExitViewState() {
     // 1. overlay 必须先从各目标卸载，避免 ClearDisplayState 丢失 binding 后无法移除。
     const bool hasRemoved = SetOverlayOff();
     if (isActive) {
-        // 2. 退出只发布 worker 停止请求；不在主线程 tick 中阻塞等待。
+        m_isOverlayOn = false;
+        m_isExitPending = true;
         StopAsync();
     }
-    // 3. 显示会话不再保留输入 owner；worker 已按值持有自己的快照，可继续安全收尾。
-    VolumeBufferSnapshot inputSnapshot;
-    {
-        std::lock_guard<std::mutex> lock(m_inputMutex);
-        inputSnapshot = std::move(m_inputSnapshot);
-    }
-    inputSnapshot.reset();
-    // 4. 清除显示轴和缓存；分析执行轴由 worker 自己发布终态。
-    ClearDisplayState();
-    ClearViewThread();
     if (isActive || hasCachedResult || hasRemoved) {
         std::cout << "[GapAnalysis] Display mode exited. Void overlays are hidden." << std::endl;
     }
@@ -656,7 +644,26 @@ bool GapAnalysisService::Impl::ExitViewState() {
 }
 
 bool GapAnalysisService::Impl::GetViewOn() const {
+    return m_viewPhase.load() != GapViewPhase::Idle && !m_isExitPending;
+}
+
+bool GapAnalysisService::Impl::GetDisplayTickNeeded() const {
     return m_viewPhase.load() != GapViewPhase::Idle;
+}
+
+void GapAnalysisService::Impl::ClearView()
+{
+    StopAsync();
+    StopWorker();
+    SetOverlayOff();
+    m_viewCallback = nullptr;
+    m_isExitPending = false;
+    {
+        std::lock_guard<std::mutex> lock(m_inputMutex);
+        m_inputSnapshot.reset();
+    }
+    ClearDisplayState();
+    ClearViewThread();
 }
 
 void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
@@ -669,6 +676,18 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
 
     // 1. 只有输入转换、ISO 解析和 worker 启动均被真实接纳，才进入结果等待阶段。
     if (m_viewPhase.load() == GapViewPhase::AwaitingInput) {
+        if (m_isExitPending) {
+            auto callback = std::move(m_viewCallback);
+            m_isExitPending = false;
+            {
+                std::lock_guard<std::mutex> lock(m_inputMutex);
+                m_inputSnapshot.reset();
+            }
+            ClearDisplayState();
+            ClearViewThread();
+            if (callback) { try { callback(false); } catch (...) {} }
+            return;
+        }
         if (GetAnalysisState() != GapAnalysisState::Running
             && StartRun(std::move(inputImage))) {
             m_viewPhase.store(GapViewPhase::AwaitingResult);
@@ -683,25 +702,36 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
 
     // 3. 显示线程先用原子执行状态判断是否到达终态；Idle/Running 均没有可消费的终态结果。
     const GapAnalysisState state = GetAnalysisState();
-    if (state == GapAnalysisState::Idle || state == GapAnalysisState::Running) {
+    if (state == GapAnalysisState::Running) {
         return;
     }
+    StopWorker();
 
-    // 可选任务 callback 与结果挂载都由当前宿主 tick 消费；SendCallback 会在 callbackMutex 锁外执行。
-    if (GetDoneEvent()) {
-        SendCallback();
+    auto callback = std::move(m_viewCallback);
+    if (m_isExitPending || state == GapAnalysisState::Idle) {
+        m_isExitPending = false;
+        {
+            std::lock_guard<std::mutex> lock(m_inputMutex);
+            m_inputSnapshot.reset();
+        }
+        ClearDisplayState();
+        ClearViewThread();
+        if (callback) { try { callback(false); } catch (...) {} }
+        return;
     }
 
     // 4A. 失败只记一次日志并关闭本次消费，不挂载任何 overlay。
     if (state == GapAnalysisState::Failed) {
         std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
         m_viewPhase.store(GapViewPhase::Consumed);
+        if (callback) { try { callback(false); } catch (...) {} }
         return;
     }
 
     // 4B. 成功结果在当前 tick 缓存并按 overlay 可见意图挂载；无论目标是否可显示都不重复消费。
-    SetDisplayView();
+    const bool isDisplayed = SetDisplayView();
     m_viewPhase.store(GapViewPhase::Consumed);
+    if (callback) { try { callback(isDisplayed); } catch (...) {} }
 }
 
 GapAnalysisService::Impl::VolumeBufferSnapshot GapAnalysisService::Impl::GetInputSnapshot() const {
@@ -727,7 +757,7 @@ void GapAnalysisService::Impl::StartWorker(
     }
 
     try {
-        const VolumeBuffer& volBuf = *inputSnapshot;
+        const GapVolumeBuffer& volBuf = *inputSnapshot;
 
         // 1. 先从只读体素快照构造内部区域；取消只在阶段边界协作式生效。
         auto interior = VoidDetector::CreateInteriorMask(volBuf, params.surfParams.isoValue);
@@ -788,23 +818,20 @@ bool GapAnalysisService::Impl::StartRun(vtkSmartPointer<vtkImageData> inputImage
         return false;
     }
 
-    // 2. ISO 在本次输入标量范围上解析；回调也在当前 display tick 直接执行，不进入 worker。
+    // 2. ISO 在本次输入标量范围上解析。
     const double isoValue = GetDisplayIso(*inputSnapshot);
-    if (m_isoCallback) {
-        m_isoCallback(isoValue);
-    }
 
     // 3. 写入本次显示参数后启动异步任务；StartAsync 会再次领取输入与参数快照。
-    SurfaceParams surfaceParams;
+    GapSurfaceParams surfaceParams;
     surfaceParams.isoValue = static_cast<float>(isoValue);
     SetSurface(surfaceParams);
     SetVoid(m_displayVoidParams);
     return StartAsync(nullptr);
 }
 
-void GapAnalysisService::Impl::SetDisplayView() {
+bool GapAnalysisService::Impl::SetDisplayView() {
     if (m_viewPhase.load() == GapViewPhase::Idle) {
-        return;
+        return false;
     }
 
     // 主线程先从已提交结果构建显示缓存，再移除旧 binding；overlay 隐藏时缓存仍保留。
@@ -813,10 +840,16 @@ void GapAnalysisService::Impl::SetDisplayView() {
     SetOverlayOff();
     if (!m_isOverlayOn) {
         std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay switch command to show them." << std::endl;
-        return;
+        return true;
     }
 
-    SetStoredView();
+    try {
+        return SetStoredView();
+    }
+    catch (...) {
+        SetOverlayOff();
+        return false;
+    }
 }
 
 bool GapAnalysisService::Impl::SetOverlayOff() {
@@ -895,7 +928,7 @@ void GapAnalysisService::Impl::ClearDisplayState() {
     m_displayLabelImage = nullptr;
     m_displaySurfaceRequest = {};
     m_displayVoidParams = {};
-    m_isoCallback = nullptr;
+    m_viewCallback = nullptr;
     // 显示阶段与可见意图在会话结束时一起复位；worker 状态保持独立。
     m_viewPhase.store(GapViewPhase::Idle);
     m_isOverlayOn = false;
@@ -927,8 +960,8 @@ bool GapAnalysisService::Impl::ClearViewThread()
     return true;
 }
 
-double GapAnalysisService::Impl::GetDisplayIso(const VolumeBuffer& inputSnapshot) const {
-    if (m_displaySurfaceRequest.isoMode == GapAnalysisIsoValueMode::AbsoluteValue) {
+double GapAnalysisService::Impl::GetDisplayIso(const GapVolumeBuffer& inputSnapshot) const {
+    if (m_displaySurfaceRequest.isoMode == GapIsoMode::AbsoluteValue) {
         return m_displaySurfaceRequest.absoluteIsoValue;
     }
 
@@ -940,7 +973,7 @@ double GapAnalysisService::Impl::GetDisplayIso(const VolumeBuffer& inputSnapshot
 
 bool GapAnalysisService::Impl::BuildVolumeBuffer(
     vtkSmartPointer<vtkImageData> image,
-    VolumeBuffer& out) const
+    GapVolumeBuffer& out) const
 {
     if (!image) {
         return false;
@@ -1022,7 +1055,7 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
 
 vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
     const std::vector<int>& labelVolume,
-    const VolumeBuffer& volBuf) const
+    const GapVolumeBuffer& volBuf) const
 {
     if (labelVolume.empty()) {
         return nullptr;

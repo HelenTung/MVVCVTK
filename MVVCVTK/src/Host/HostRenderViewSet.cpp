@@ -3,30 +3,30 @@
 #include "AppInterfaces.h"
 #include "AppService.h"
 #include "AppStateEvents.h"
+#include "AppTypes.h"
 #include "DataManager.h"
 #include "StdRenderContext.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <optional>
 #include <utility>
 
 class HostRenderViewSet::Impl final {
 public:
-    void Build(
+    bool Build(
         const HostCoreServices& core,
         const std::vector<HostRenderViewConfig>& configs);
     const std::vector<HostRenderViewRuntime>& GetViews() const;
     const HostRenderViewRuntime* GetViewById(const std::string& id) const;
     const HostRenderViewRuntime* GetFirstViewByRole(HostRenderViewRole role) const;
     const HostRenderViewRuntime* GetViewBySelector(
-        const std::string& id,
-        bool isRoleUsed,
-        HostRenderViewRole role) const;
+        const HostViewTarget& target) const;
     const HostRenderViewRuntime* GetPrimaryView() const;
     const HostRenderViewRuntime* GetStandaloneStartView() const;
-    std::vector<const HostRenderViewRuntime*> GetViewsByIdsAndRoles(
-        const std::vector<std::string>& ids,
-        const std::vector<HostRenderViewRole>& roles) const;
+    std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
+        const HostViewTargets& targets) const;
     std::vector<const HostRenderViewRuntime*> GetCropPreviewViews() const;
     std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
@@ -41,23 +41,29 @@ public:
 
 private:
     std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> BuildViewPair(
-        const WindowConfig& cfg,
+        const HostWindowConfig& cfg,
         vtkSmartPointer<vtkRenderWindow> renderWindow,
         std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> sharedState,
         std::shared_ptr<IStateEventSource> stateEventSource) const;
+    std::optional<VizMode> GetAppViewMode(HostViewMode mode) const;
+    std::optional<PreInitConfig> BuildAppInit(const HostViewInitConfig& config) const;
     // Impl 是 runtime 集合的唯一容器 owner；查询返回的引用/裸指针只在下一次 Build、移动或析构前有效。
     // Build 会先 clear 再重新组装 service/context，因此调用方不得跨视图拓扑重建缓存元素地址。
     std::vector<HostRenderViewRuntime> m_views;
 };
 
 std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> HostRenderViewSet::Impl::BuildViewPair(
-    const WindowConfig& cfg,
+    const HostWindowConfig& cfg,
     vtkSmartPointer<vtkRenderWindow> renderWindow,
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> sharedState,
     std::shared_ptr<IStateEventSource> stateEventSource) const
 {
+    const auto appInit = BuildAppInit(cfg.viewInit);
+    if (!appInit) {
+        return {};
+    }
     // 1. service 绑定共享数据和状态，负责业务渲染能力。
     // 2. context 绑定 VTK window/interactor，负责单窗口渲染生命周期。
     // 3. 二者在这里组装，是因为 HostRenderViewSet 知道窗口拓扑，但不把 topology 写进 StdRenderContext。
@@ -72,23 +78,74 @@ std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> HostRe
         context->SetRenderWindow(std::move(renderWindow));
     }
     context->SetServiceBound(service);
-    service->SetVisualConfig(cfg.preInitCfg);
+    service->SetVisualConfig(*appInit);
     context->SetWindowTitle(cfg.title);
     context->SetWindowSize(cfg.width, cfg.height);
     context->SetWindowPosition(cfg.posX, cfg.posY);
-    context->SetCameraStyle(cfg.preInitCfg.vizMode);
+    context->SetCameraStyle(appInit->vizMode);
     if (cfg.isAxesVisible) {
         context->SetOrientationAxesVisible(true);
     }
 
-    if (cfg.preInitCfg.hasBgColor) {
-        service->SetBackground(cfg.preInitCfg.bgColor);
+    if (appInit->hasBgColor) {
+        service->SetBackground(appInit->bgColor);
     }
 
     return std::make_pair(service, context);
 }
 
-void HostRenderViewSet::Impl::Build(
+std::optional<VizMode> HostRenderViewSet::Impl::GetAppViewMode(HostViewMode mode) const
+{
+    switch (mode) {
+    case HostViewMode::Volume: return VizMode::Volume;
+    case HostViewMode::IsoSurface: return VizMode::IsoSurface;
+    case HostViewMode::SliceTopDown: return VizMode::SliceTop_down;
+    case HostViewMode::SliceFrontBack: return VizMode::SliceFront_back;
+    case HostViewMode::SliceLeftRight: return VizMode::SliceLeft_right;
+    case HostViewMode::CompositeVolume: return VizMode::CompositeVolume;
+    case HostViewMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
+    }
+    return std::nullopt;
+}
+
+std::optional<PreInitConfig> HostRenderViewSet::Impl::BuildAppInit(
+    const HostViewInitConfig& config) const
+{
+    const auto mode = GetAppViewMode(config.viewMode);
+    const auto isFinite = [](double value) { return std::isfinite(value); };
+    if (!mode || !isFinite(config.material.ambient) || !isFinite(config.material.diffuse)
+        || !isFinite(config.material.specular) || !isFinite(config.material.specularPower)
+        || !isFinite(config.material.opacity) || config.material.opacity < 0.0
+        || config.material.opacity > 1.0 || config.material.specularPower < 0.0) {
+        return std::nullopt;
+    }
+
+    PreInitConfig result;
+    result.vizMode = *mode;
+    result.material = { config.material.ambient, config.material.diffuse,
+        config.material.specular, config.material.specularPower,
+        config.material.opacity, config.material.isShadeOn };
+    result.isoThreshold = config.isoThreshold;
+    result.bgColor = { config.background.r, config.background.g, config.background.b };
+    result.spacing = config.spacing;
+    result.windowLevel = { config.windowLevel.windowWidth, config.windowLevel.windowCenter };
+    result.hasTF = config.hasTransferNodes;
+    result.hasIso = config.hasIso;
+    result.hasBgColor = config.hasBackground;
+    result.hasSpacing = config.hasSpacing;
+    result.hasWindowLevel = config.hasWindowLevel;
+    result.tfNodes.reserve(config.transferNodes.size());
+    for (const auto& node : config.transferNodes) {
+        if (!isFinite(node.position) || !isFinite(node.opacity) || !isFinite(node.r)
+            || !isFinite(node.g) || !isFinite(node.b)) {
+            return std::nullopt;
+        }
+        result.tfNodes.push_back({ node.position, node.opacity, node.r, node.g, node.b });
+    }
+    return result;
+}
+
+bool HostRenderViewSet::Impl::Build(
     const HostCoreServices& core,
     const std::vector<HostRenderViewConfig>& configs)
 {
@@ -108,6 +165,10 @@ void HostRenderViewSet::Impl::Build(
             core.sharedDataMgr,
             core.sharedState,
             core.sharedStateBroadcaster);
+        if (!pair.first || !pair.second) {
+            m_views.clear();
+            return false;
+        }
 
         HostRenderViewRuntime view;
         view.config = std::move(config);
@@ -115,6 +176,7 @@ void HostRenderViewSet::Impl::Build(
         view.context = std::move(pair.second);
         m_views.push_back(std::move(view));
     }
+    return true;
 }
 
 const std::vector<HostRenderViewRuntime>& HostRenderViewSet::Impl::GetViews() const
@@ -143,15 +205,13 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetFirstViewByRole(HostRen
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::Impl::GetViewBySelector(
-    const std::string& id,
-    bool isRoleUsed,
-    HostRenderViewRole role) const
+    const HostViewTarget& target) const
 {
-    if (!id.empty()) {
-        return GetViewById(id);
+    if (!target.viewId.empty()) {
+        return GetViewById(target.viewId);
     }
-    if (isRoleUsed) {
-        return GetFirstViewByRole(role);
+    if (target.isViewRoleUsed) {
+        return GetFirstViewByRole(target.viewRole);
     }
     return nullptr;
 }
@@ -184,19 +244,20 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetStandaloneStartView() c
     return m_views.empty() ? nullptr : &m_views.front();
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetViewsByIdsAndRoles(
-    const std::vector<std::string>& ids,
-    const std::vector<HostRenderViewRole>& roles) const
+std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetViewsByTargets(
+    const HostViewTargets& targets) const
 {
     std::vector<const HostRenderViewRuntime*> selectedViews;
     selectedViews.reserve(m_views.size());
 
     // 空 ids/roles 表示宿主没有声明作用域，返回空而不是全选；这样 feature 激活不会因为漏配目标而接管所有窗口。
     for (const auto& view : m_views) {
-        const bool isIdSelected = !ids.empty()
-            && std::find(ids.begin(), ids.end(), view.config.id) != ids.end();
-        const bool isRoleSelected = !roles.empty()
-            && std::find(roles.begin(), roles.end(), view.config.role) != roles.end();
+        const bool isIdSelected = !targets.viewIds.empty()
+            && std::find(targets.viewIds.begin(), targets.viewIds.end(), view.config.id)
+                != targets.viewIds.end();
+        const bool isRoleSelected = !targets.viewRoles.empty()
+            && std::find(targets.viewRoles.begin(), targets.viewRoles.end(), view.config.role)
+                != targets.viewRoles.end();
         if (isIdSelected || isRoleSelected) {
             selectedViews.push_back(&view);
         }
@@ -331,11 +392,11 @@ HostRenderViewSet::HostRenderViewSet(HostRenderViewSet&&) noexcept = default;
 
 HostRenderViewSet& HostRenderViewSet::operator=(HostRenderViewSet&&) noexcept = default;
 
-void HostRenderViewSet::Build(
+bool HostRenderViewSet::Build(
     const HostCoreServices& core,
     const std::vector<HostRenderViewConfig>& configs)
 {
-    m_impl->Build(core, configs);
+    return m_impl && m_impl->Build(core, configs);
 }
 
 const std::vector<HostRenderViewRuntime>& HostRenderViewSet::GetViews() const
@@ -354,11 +415,9 @@ const HostRenderViewRuntime* HostRenderViewSet::GetFirstViewByRole(HostRenderVie
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::GetViewBySelector(
-    const std::string& id,
-    bool isRoleUsed,
-    HostRenderViewRole role) const
+    const HostViewTarget& target) const
 {
-    return m_impl->GetViewBySelector(id, isRoleUsed, role);
+    return m_impl->GetViewBySelector(target);
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::GetPrimaryView() const
@@ -371,11 +430,10 @@ const HostRenderViewRuntime* HostRenderViewSet::GetStandaloneStartView() const
     return m_impl->GetStandaloneStartView();
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByIdsAndRoles(
-    const std::vector<std::string>& ids,
-    const std::vector<HostRenderViewRole>& roles) const
+std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByTargets(
+    const HostViewTargets& targets) const
 {
-    return m_impl->GetViewsByIdsAndRoles(ids, roles);
+    return m_impl->GetViewsByTargets(targets);
 }
 
 std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetCropPreviewViews() const

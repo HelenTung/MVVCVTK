@@ -19,6 +19,7 @@
 #include <future>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -32,7 +33,8 @@ class VizService::Impl final
 public:
     Impl(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state,
-        std::shared_ptr<IStateEventSource> stateEventSource);
+        std::shared_ptr<IStateEventSource> stateEventSource,
+        VizService::TaskStart taskStart);
     ~Impl();
 
     void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
@@ -48,15 +50,11 @@ public:
     void SetVisualConfig(const PreInitConfig& cfg);
     LoadState GetFileLoadState() const;
     LoadState GetReloadLoadState() const;
-    void LoadFileAsync(const std::string& path,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
+    bool LoadFileAsync(std::string path,
+        VolumeLayout layout,
         std::function<void(bool isSuccess)> onComplete);
     bool ReloadFromBufferAsync(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
+        VolumeBuffer buffer,
         std::function<void(bool isSuccess)> onComplete);
     void ExportDataAsync(const std::string& path,
         std::function<void(bool isSuccess)> onComplete);
@@ -80,6 +78,7 @@ public:
     void GetModelPositionFromWorld(const double w[3], double m[3]) const;
     void GetWorldPositionFromModel(const double m[3], double w[3]) const;
     void SendUpdates();
+    bool SendReloadUpdate();
     bool GetDirty() const;
     void SetDirty();
     bool ResetDirty();
@@ -95,12 +94,27 @@ private:
         bool isStateSet = false;
     };
 
+    struct ActiveTask final {
+        LoadEventKind loadKind = LoadEventKind::None;
+        std::future<bool> result;
+        std::thread worker;
+        std::function<void(bool)> callback;
+    };
+
+    struct Completion final {
+        bool isSuccess = false;
+        std::function<void(bool)> callback;
+    };
+
     void SetRenderBinding(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer> ren);
     void SetStateObserver();
     void SendStateFlags(UpdateFlags flags);
-    void SendPendingImage();
-    void SendExportCallback();
+    void SendTasks();
+    void SendCompletions();
+    void SetTaskResult(ActiveTask task, bool isSuccess);
+    void SetLoadResult(ActiveTask task, bool isSuccess);
+    void SetCompletion(bool isSuccess, std::function<void(bool)> callback);
     bool CreateLoadNotice(
         LoadEventKind loadEventKind,
         bool isSucceeded,
@@ -109,8 +123,7 @@ private:
     bool GetOwnedLoad(LoadEventKind loadEventKind) const;
     bool SetOwnedLoad(LoadEventKind loadEventKind);
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
-    void SendLoadCallbacks();
-    void BuildPipeline();
+    bool BuildPipeline();
     void SetStrategyState();
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
@@ -122,11 +135,12 @@ private:
     void SetSyncNeeded();
     void SetPendingFlags(UpdateFlags flags);
     void SetDataRefresh();
-    void StartRun(std::packaged_task<void()> task,
-        bool hasActiveLoadFuture);
+    bool StartTask(VizService::TaskWork task,
+        LoadEventKind loadKind,
+        std::function<void(bool)> callback);
 
-    // Service 共享持有会话数据源；文件加载后台直接提交 current，reload/buffer 后台只发布 pending，
-    // 再由 SendUpdates 所在线程把 pending 提交为 current。
+    // Service 共享持有会话数据源；File/Reload worker 都只 staging pending，
+    // 再由 SendUpdates 所在线程的 owner 提交为 current。
     std::shared_ptr<AbstractDataManager> m_dataManager;
     // 当前主渲染策略的共享 owner；替换前从旧 renderer 脱离，随后由缓存决定是否继续保留。
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
@@ -142,10 +156,8 @@ private:
     std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
     // 已挂载 overlay 的共享 owner 集合；renderer 另持 VTK prop 引用，Remove/Clear 负责先解除挂载。
     std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;
-    // 加载/重载任务及其 callback 状态的共享 owner；完成 payload 最终由 SendUpdates 消费。
+    // 任务 builder 只准备 bool 结果，不越界发布终态或 callback。
     std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService;
-    // [风险] 导出任务不进入 m_loadFutures 的析构等待边界；任务强持有 dataManager，因此不会悬垂，
-    // 但 Service 先销毁时 weak completion 无法回投，随任务携带的业务 callback 会被安全丢弃。
     std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService;
     // 按 VizMode 强持有已构建 Strategy；清缓存时先 Detach，避免同模式反复创建 VTK pipeline。
     std::map<VizMode, std::shared_ptr<AbstractVisualStrategy>> m_strategyCache;
@@ -167,35 +179,48 @@ private:
     std::atomic<bool> m_hasDataRefreshNeed{ false };
     // 结构变化只发布清缓存请求；主线程在 SendUpdates() 中领取后才 Detach Strategy。
     std::atomic<bool> m_hasCacheClearNeed{ false };
-    // 保存所有已启动 load/reload worker 的完成凭据；状态已发布终态但线程尚未返回时，新任务也不会覆盖旧 owner。
-    std::vector<std::future<void>> m_loadFutures;
-    // 串行化 load/reload future 的登记与析构接管；不保护任务内部数据或 export 线程。
-    mutable std::mutex m_activeLoadMutex;
+    VizService::TaskStart m_taskStart;
+    std::list<ActiveTask> m_activeTasks;
+    mutable std::mutex m_activeTaskMutex;
+    std::deque<Completion> m_completions;
+    mutable std::mutex m_completionMutex;
+    std::function<void(bool)> m_ownedCallback;
+    std::atomic<bool> m_isAccepting{ true };
 };
 
 VizService::Impl::Impl(
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state,
-    std::shared_ptr<IStateEventSource> stateEventSource)
+    std::shared_ptr<IStateEventSource> stateEventSource,
+    VizService::TaskStart taskStart)
     : m_dataManager(std::move(dataMgr))
     , m_sharedState(std::move(state))
     , m_stateEventSource(std::move(stateEventSource))
+    , m_taskStart(std::move(taskStart))
 {
-    m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager, m_sharedState);
+    if (!m_taskStart) {
+        m_taskStart = [](VizService::TaskWork task) {
+            return std::thread(std::move(task));
+        };
+    }
+    m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager);
     m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(m_dataManager, m_sharedState);
 }
 
 VizService::Impl::~Impl()
 {
-    std::vector<std::future<void>> loadFutures;
+    m_isAccepting = false;
+    std::list<ActiveTask> activeTasks;
     {
-        std::lock_guard<std::mutex> lk(m_activeLoadMutex);
-        loadFutures = std::move(m_loadFutures);
+        std::lock_guard<std::mutex> lock(m_activeTaskMutex);
+        activeTasks.splice(activeTasks.end(), m_activeTasks);
     }
-    for (auto& loadFuture : loadFutures) {
-        if (loadFuture.valid()) {
-            loadFuture.wait();
+    for (auto& task : activeTasks) {
+        if (task.result.valid()) {
+            try { (void)task.result.get(); }
+            catch (...) {}
         }
+        if (task.worker.joinable()) task.worker.join();
     }
 
     const auto ownedLoadKind = static_cast<LoadEventKind>(
@@ -203,10 +228,8 @@ VizService::Impl::~Impl()
     if (m_sharedState && ownedLoadKind != LoadEventKind::None) {
         // Reload worker 可能已发布 pending、但 Timer 尚未提交；先销毁 payload，再发布失败终态，
         // 防止共享 DataManager 在下一事务中提交旧批次。
+        if (m_dataManager) m_dataManager->ClearPending();
         if (ownedLoadKind == LoadEventKind::Reload) {
-            if (m_dataManager) {
-                m_dataManager->ClearPending();
-            }
             if (m_sharedState->GetReloadLoadState() == LoadState::Loading) {
                 m_sharedState->SetReloadLoadFailed();
             }
@@ -355,11 +378,13 @@ void VizService::Impl::ClearStrategyCache()
 VizService::VizService(
     std::shared_ptr<AbstractDataManager> dataMgr,
     std::shared_ptr<SharedInteractionState> state,
-    std::shared_ptr<IStateEventSource> stateEventSource)
+    std::shared_ptr<IStateEventSource> stateEventSource,
+    TaskStart taskStart)
     : m_impl(std::make_shared<VizService::Impl>(
         std::move(dataMgr),
         std::move(state),
-        std::move(stateEventSource)))
+        std::move(stateEventSource),
+        std::move(taskStart)))
 {
 }
 
@@ -427,23 +452,21 @@ LoadState VizService::GetReloadLoadState() const
     return m_impl->GetReloadLoadState();
 }
 
-void VizService::LoadFileAsync(
-    const std::string& path,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin,
+bool VizService::LoadFileAsync(
+    std::string path,
+    VolumeLayout layout,
     std::function<void(bool isSuccess)> onComplete)
 {
-    m_impl->LoadFileAsync(path, spacing, origin, std::move(onComplete));
+    return m_impl->LoadFileAsync(
+        std::move(path), std::move(layout), std::move(onComplete));
 }
 
 bool VizService::ReloadFromBufferAsync(
-    const float* data,
-    const std::array<int, 3>& dims,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin,
+    VolumeBuffer buffer,
     std::function<void(bool isSuccess)> onComplete)
 {
-    return m_impl->ReloadFromBufferAsync(data, dims, spacing, origin, std::move(onComplete));
+    return m_impl->ReloadFromBufferAsync(
+        std::move(buffer), std::move(onComplete));
 }
 
 void VizService::ExportDataAsync(
@@ -741,6 +764,11 @@ void VizService::Impl::SetSpacing(double sx, double sy, double sz)
     m_sharedState->SetSpacing(sx, sy, sz);
 }
 
+bool VizService::SendReloadUpdate()
+{
+    return m_impl->SendReloadUpdate();
+}
+
 void VizService::Impl::SetWindowLevel(double ww, double wc)
 {
     m_sharedState->SetWindowLevel(ww, wc);
@@ -766,109 +794,94 @@ LoadState VizService::Impl::GetReloadLoadState() const
     return m_sharedState ? m_sharedState->GetReloadLoadState() : LoadState::Idle;
 }
 
-void VizService::Impl::StartRun(
-    std::packaged_task<void()> task,
-    bool hasActiveLoadFuture)
+bool VizService::Impl::StartTask(
+    VizService::TaskWork task,
+    LoadEventKind loadKind,
+    std::function<void(bool)> callback)
 {
-    if (hasActiveLoadFuture) {
-        std::lock_guard<std::mutex> lk(m_activeLoadMutex);
-        const auto isReady = [](std::future<void>& loadFuture) {
-            return loadFuture.valid()
-                && loadFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-        };
-        m_loadFutures.erase(
-            std::remove_if(m_loadFutures.begin(), m_loadFutures.end(), isReady),
-            m_loadFutures.end());
-        m_loadFutures.push_back(task.get_future());
+    if (!m_isAccepting || !task.valid()) {
+        SetCompletion(false, std::move(callback));
+        return false;
     }
-    // 线程统一 detach，说明 Service 只关心生命周期托管和结果回收，不在调用点阻塞等待后台任务。
-    std::thread(std::move(task)).detach();
+
+    std::lock_guard<std::mutex> lock(m_activeTaskMutex);
+    m_activeTasks.emplace_back();
+    auto entry = std::prev(m_activeTasks.end());
+    try {
+        entry->loadKind = loadKind;
+        entry->result = task.get_future();
+        entry->callback = std::move(callback);
+        auto worker = m_taskStart(std::move(task));
+        if (!worker.joinable()) {
+            auto failedCallback = std::move(entry->callback);
+            m_activeTasks.erase(entry);
+            SetCompletion(false, std::move(failedCallback));
+            return false;
+        }
+        entry->worker = std::move(worker);
+        return true;
+    }
+    catch (...) {
+        auto failedCallback = std::move(entry->callback);
+        m_activeTasks.erase(entry);
+        SetCompletion(false, std::move(failedCallback));
+        return false;
+    }
 }
 
-void VizService::Impl::LoadFileAsync(
-    const std::string& path,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin,
+bool VizService::Impl::LoadFileAsync(
+    std::string path,
+    VolumeLayout layout,
     std::function<void(bool isSuccess)> onComplete)
 {
-    if (!m_dataLoadTaskService) {
-        return;
+    if (!m_isAccepting || !m_dataLoadTaskService) {
+        SetCompletion(false, std::move(onComplete));
+        return false;
     }
-
     auto task = m_dataLoadTaskService->BuildLoadFileTask(
-        path,
-        spacing,
-        origin,
-        std::move(onComplete));
-    if (task) {
-        if (!SetOwnedLoad(LoadEventKind::File)) {
-            m_sharedState->ResetLoad(LoadEventKind::File);
-            m_dataLoadTaskService->SetFileLoadCallbackReady(false);
-            return;
-        }
-        StartRun(std::move(*task), true);
+        std::move(path), std::move(layout));
+    if (!task || !m_sharedState
+        || !m_sharedState->StartLoad(LoadEventKind::File)) {
+        SetCompletion(false, std::move(onComplete));
+        return false;
     }
+    if (!m_dataManager || !m_dataManager->ClearPending()
+        || !SetOwnedLoad(LoadEventKind::File)
+        || !StartTask(std::move(*task), LoadEventKind::File,
+            std::move(onComplete))) {
+        if (m_dataManager) m_dataManager->ClearPending();
+        m_sharedState->SetFileLoadFailed();
+        m_sharedState->ResetLoad(LoadEventKind::File);
+        ResetOwnedLoad(LoadEventKind::File);
+        SetCompletion(false, std::move(onComplete));
+        return false;
+    }
+    return true;
 }
 
 bool VizService::Impl::ReloadFromBufferAsync(
-    const float* data,
-    const std::array<int, 3>& dims,
-    const std::array<float, 3>& spacing,
-    const std::array<float, 3>& origin,
+    VolumeBuffer buffer,
     std::function<void(bool isSuccess)> onComplete)
 {
-    if (!m_dataLoadTaskService || !data) {
+    if (!m_isAccepting || !m_dataLoadTaskService) {
+        SetCompletion(false, std::move(onComplete));
         return false;
     }
-
-    std::size_t voxelCount = 1;
-    for (const int dim : dims) {
-        if (dim <= 0
-            || voxelCount > std::numeric_limits<std::size_t>::max()
-                / static_cast<std::size_t>(dim)) {
-            return false;
-        }
-        voxelCount *= static_cast<std::size_t>(dim);
-    }
-    if (voxelCount > static_cast<std::size_t>(
-        std::numeric_limits<std::ptrdiff_t>::max())) {
+    auto task = m_dataLoadTaskService->BuildReloadTask(std::move(buffer));
+    if (!task || !m_sharedState
+        || !m_sharedState->StartLoad(LoadEventKind::Reload)) {
+        SetCompletion(false, std::move(onComplete));
         return false;
     }
-
-    auto task = m_dataLoadTaskService->BuildReloadFromBufferTask(
-        data,
-        dims,
-        spacing,
-        origin,
-        std::move(onComplete));
-    if (!task) {
-        return false;
-    }
-
-    if (!SetOwnedLoad(LoadEventKind::Reload)) {
+    if (!m_dataManager || !m_dataManager->ClearPending()
+        || !SetOwnedLoad(LoadEventKind::Reload)
+        || !StartTask(std::move(*task), LoadEventKind::Reload,
+            std::move(onComplete))) {
+        if (m_dataManager) m_dataManager->ClearPending();
         m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
-        m_dataLoadTaskService->SetReloadReady(false);
-        return false;
-    }
-    try {
-        StartRun(std::move(*task), true);
-    }
-    catch (const std::exception& error) {
         ResetOwnedLoad(LoadEventKind::Reload);
-        m_sharedState->SetReloadLoadFailed();
-        m_sharedState->ResetLoad(LoadEventKind::Reload);
-        m_dataLoadTaskService->SetReloadReady(false);
-        std::cerr << "[ReloadFromBufferAsync] Worker start failed: "
-            << error.what() << '\n';
-        return false;
-    }
-    catch (...) {
-        ResetOwnedLoad(LoadEventKind::Reload);
-        m_sharedState->SetReloadLoadFailed();
-        m_sharedState->ResetLoad(LoadEventKind::Reload);
-        m_dataLoadTaskService->SetReloadReady(false);
-        std::cerr << "[ReloadFromBufferAsync] Worker start failed with an unknown exception.\n";
+        SetCompletion(false, std::move(onComplete));
         return false;
     }
     return true;
@@ -878,13 +891,11 @@ void VizService::Impl::ExportDataAsync(
     const std::string& path,
     std::function<void(bool isSuccess)> onComplete)
 {
-    if (!m_dataExportTaskService) {
-        return;
-    }
-
-    auto task = m_dataExportTaskService->BuildDataTask(path, std::move(onComplete));
-    if (task) {
-        StartRun(std::move(*task), false);
+    auto task = m_dataExportTaskService
+        ? m_dataExportTaskService->BuildDataTask(path) : std::nullopt;
+    if (!task || !StartTask(
+        std::move(*task), LoadEventKind::None, std::move(onComplete))) {
+        SetCompletion(false, std::move(onComplete));
     }
 }
 
@@ -893,18 +904,13 @@ void VizService::Impl::ExportSlicesAsync(
     std::optional<double> rotationAngleDeg,
     std::function<void(bool isSuccess)> onComplete)
 {
-    if (!m_dataExportTaskService) {
-        return;
-    }
-
     const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    auto task = m_dataExportTaskService->BuildSlicesTask(
-        path,
-        rotationAngleDeg,
-        currentMode,
-        std::move(onComplete));
-    if (task) {
-        StartRun(std::move(*task), false);
+    auto task = m_dataExportTaskService
+        ? m_dataExportTaskService->BuildSlicesTask(
+            path, rotationAngleDeg, currentMode) : std::nullopt;
+    if (!task || !StartTask(
+        std::move(*task), LoadEventKind::None, std::move(onComplete))) {
+        SetCompletion(false, std::move(onComplete));
     }
 }
 
@@ -1111,9 +1117,8 @@ void VizService::Impl::SendUpdates()
 {
     // 更新入口按固定阶段收敛 pending/current、完成回调和渲染变更；常规由主线程 Timer 驱动，
     // Crop reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
-    // 1. 先提交 pending image，再在当前消费线程交付导出完成回调。
-    SendPendingImage();
-    SendExportCallback();
+    // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
+    SendTasks();
 
     // 2. 领取缓存清理门铃；Detach 与缓存销毁只发生在主线程。
     if (m_hasCacheClearNeed.exchange(false))
@@ -1126,7 +1131,10 @@ void VizService::Impl::SendUpdates()
             if (loadNotice.isSucceeded) {
                 ClearStrategyCache();
                 SetPendingFlags(UpdateFlags::All);
-                BuildPipeline();
+                if (!BuildPipeline()) {
+                    loadNotice.isSucceeded = false;
+                    ClearLoadFail(loadNotice.kind);
+                }
             }
             else {
                 ClearLoadFail(loadNotice.kind);
@@ -1142,58 +1150,113 @@ void VizService::Impl::SendUpdates()
             break;
         }
         ResetOwnedLoad(loadNotice.kind);
-        if (m_dataLoadTaskService && loadNotice.kind == LoadEventKind::File) {
-            m_dataLoadTaskService->SetFileLoadCallbackReady(loadNotice.isSucceeded);
-        }
-        else if (m_dataLoadTaskService && loadNotice.kind == LoadEventKind::Reload) {
-            m_dataLoadTaskService->SetReloadReady(loadNotice.isSucceeded);
-        }
+        SetCompletion(loadNotice.isSucceeded, std::move(m_ownedCallback));
     }
 
     // 4. spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
     if (m_hasDataRefreshNeed.exchange(false)) {
-        BuildPipeline();
+        if (!BuildPipeline()) m_hasDataRefreshNeed = true;
     }
     SetStrategyState();
 
     // 5. owner 已释放 admission 后再执行回调，允许业务方安全重入下一次 load。
-    SendLoadCallbacks();
+    SendCompletions();
 }
 
-void VizService::Impl::SendPendingImage()
+bool VizService::Impl::SendReloadUpdate()
 {
-    // pending 只属于仍处于 Loading 的 Reload；File 或已结束事务不得误消费遗留批次。
-    if (!m_sharedState || m_sharedState->GetReloadLoadState() != LoadState::Loading) {
+    if (m_hasCacheClearNeed.exchange(false)) ClearStrategyCache();
+    SetPendingFlags(UpdateFlags::All);
+    return BuildPipeline();
+}
+
+void VizService::Impl::SendTasks()
+{
+    std::list<ActiveTask> readyTasks;
+    {
+        std::lock_guard<std::mutex> lock(m_activeTaskMutex);
+        for (auto entry = m_activeTasks.begin(); entry != m_activeTasks.end();) {
+            const bool isReady = entry->result.valid()
+                && entry->result.wait_for(std::chrono::seconds(0))
+                    == std::future_status::ready;
+            if (!isReady) {
+                ++entry;
+                continue;
+            }
+            const auto ready = entry++;
+            readyTasks.splice(readyTasks.end(), m_activeTasks, ready);
+        }
+    }
+    for (auto& task : readyTasks) {
+        bool isSuccess = false;
+        try { isSuccess = task.result.get(); }
+        catch (...) { isSuccess = false; }
+        if (task.worker.joinable()) task.worker.join();
+        SetTaskResult(std::move(task), isSuccess);
+    }
+}
+
+void VizService::Impl::SetTaskResult(ActiveTask task, bool isSuccess)
+{
+    if (task.loadKind == LoadEventKind::None) {
+        SetCompletion(isSuccess, std::move(task.callback));
         return;
     }
+    SetLoadResult(std::move(task), isSuccess);
+}
 
-    // Timer 尝试把一批 pending 事务提升为 current；DataManager 的事务锁保证同一批只接管一次。
+void VizService::Impl::SetLoadResult(ActiveTask task, bool isSuccess)
+{
     bool hasPending = false;
-    if (!m_dataManager) {
-        return;
+    if (isSuccess && m_dataManager) {
+        isSuccess = m_dataManager->SetCurrentFromPending(hasPending) && hasPending;
     }
-    const bool isCommitted = m_dataManager->SetCurrentFromPending(hasPending);
-    if (!hasPending) {
-        return;
-    }
-    if (!isCommitted) {
-        // 已领取批次却未能提交时必须形成失败终态，否则 admission 与 callback 会永久悬挂。
-        m_sharedState->SetReloadLoadFailed();
-        return;
-    }
+    if (!isSuccess && m_dataManager) m_dataManager->ClearPending();
 
-    // current 提交成功后才发布 DataReady，后续沿文件加载成功的同一条结构重建路径推进。
-    const auto scalarRange = m_dataManager->GetScalarRange();
-    const auto spacing = m_dataManager->GetSpacing();
-    m_sharedState->SetReloadDataReady(
-        scalarRange[0], scalarRange[1], spacing);
+    m_ownedCallback = std::move(task.callback);
+    if (!m_sharedState || !m_dataManager) return;
+    if (isSuccess) {
+        const auto range = m_dataManager->GetScalarRange();
+        const auto spacing = m_dataManager->GetSpacing();
+        if (task.loadKind == LoadEventKind::File) {
+            m_sharedState->SetFileDataReady(range[0], range[1], spacing);
+        }
+        else {
+            m_sharedState->SetReloadDataReady(range[0], range[1], spacing);
+        }
+    }
+    else if (task.loadKind == LoadEventKind::File) {
+        m_sharedState->SetFileLoadFailed();
+    }
+    else {
+        m_sharedState->SetReloadLoadFailed();
+    }
 }
 
-void VizService::Impl::SendExportCallback()
+void VizService::Impl::SetCompletion(
+    bool isSuccess,
+    std::function<void(bool)> callback)
 {
-    // Reset 只领取原子门铃；Send 再从互斥区取走闭包，并在当前 SendUpdates 调用线程锁外执行。
-    if (m_dataExportTaskService && m_dataExportTaskService->ResetSaveCallback()) {
-        m_dataExportTaskService->SendSaveCallback();
+    if (!callback) return;
+    std::lock_guard<std::mutex> lock(m_completionMutex);
+    m_completions.push_back({ isSuccess, std::move(callback) });
+}
+
+void VizService::Impl::SendCompletions()
+{
+    std::deque<Completion> completions;
+    {
+        std::lock_guard<std::mutex> lock(m_completionMutex);
+        completions.swap(m_completions);
+    }
+    for (auto& completion : completions) {
+        try { completion.callback(completion.isSuccess); }
+        catch (const std::exception& error) {
+            std::cerr << "[VizService] Completion failed: " << error.what() << '\n';
+        }
+        catch (...) {
+            std::cerr << "[VizService] Completion failed with an unknown exception.\n";
+        }
     }
 }
 
@@ -1265,72 +1328,62 @@ void VizService::Impl::SetDataRefresh()
     m_hasDataRefreshNeed = true;
 }
 
-void VizService::Impl::SendLoadCallbacks()
-{
-    // 文件加载 / 重载回调延后到策略同步之后，保证上层 submit 回调看到的是主线程收敛后的最终状态。
-    if (m_dataLoadTaskService && m_dataLoadTaskService->ResetFileCallback()) {
-        m_dataLoadTaskService->SendFileLoadCallback();
-    }
-    if (m_dataLoadTaskService && m_dataLoadTaskService->ResetReloadCallback()) {
-        m_dataLoadTaskService->SendReloadCallback();
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // 私有辅助
 // ─────────────────────────────────────────────────────────────────────
-void VizService::Impl::BuildPipeline()
+bool VizService::Impl::BuildPipeline()
 {
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
     // 读取最新模式快照但不清除；后续交互和导出仍需使用同一模式。
-    VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
-    auto strategy = GetStrategy(mode);
-    if (!strategy) {
-        std::cerr << "[BuildPipeline] No strategy exists for mode "
-            << static_cast<int>(mode) << "\n";
-        return;
-    }
+    const auto oldSnapshot = m_renderSnapshot;
+    const auto oldStrategy = m_currentStrategy;
+    try {
+        if (!m_dataManager || !m_sharedState || !m_renderer) {
+            return false;
+        }
+        const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+        auto strategy = GetStrategy(mode);
+        if (!strategy) return false;
 
-    if (!m_dataManager) {
-        std::cerr << "[BuildPipeline] DataManager is unavailable.\n";
-        return;
-    }
-    const auto spacing = m_sharedState->GetSpacing();
-    if (!m_dataManager->SetSpacing(spacing)) {
-        std::cerr << "[BuildPipeline] Failed to commit image spacing.\n";
-        return;
-    }
-    const auto currentSnapshot = m_dataManager->GetImageSnapshot();
-    if (!currentSnapshot) {
-        std::cerr << "[BuildPipeline] DataManager has no current snapshot.\n";
-        return;
-    }
-    if (!m_renderSnapshot
-        || m_renderSnapshot->version != currentSnapshot->version) {
-        m_renderSnapshot = currentSnapshot;
-    }
-    auto img = m_renderSnapshot->image;
-    if (img) {
+        const auto currentSnapshot = m_dataManager->GetImageSnapshot();
+        if (!currentSnapshot || !currentSnapshot->image) return false;
         int dims[3] = { 0, 0, 0 };
-        img->GetDimensions(dims);
-        if (dims[0] > 0 && dims[1] > 0 && dims[2] > 0) {
-            strategy->SetInputData(img);
-            SetCursorCenter();
-        }
-        else {
-            std::cerr << "[BuildPipeline] Image has zero dimension, skipping SetInputData.\n";
-            return;
-        }
+        currentSnapshot->image->GetDimensions(dims);
+        if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) return false;
+
+        // 候选 strategy 先完成输入校验，成功后才替换当前渲染真源。
+        strategy->SetInputData(currentSnapshot->image);
+        SetCurrentStrategy(strategy);
+        m_renderSnapshot = currentSnapshot;
+        SetCursorCenter();
+        SetRendererBg();
+        SetSyncNeeded();
+        return true;
     }
-    else {
-        std::cerr << "[BuildPipeline] DataManager has no valid image.\n";
-        return;
+    catch (const std::exception& error) {
+        std::cerr << "[BuildPipeline] Failed: " << error.what() << '\n';
+    }
+    catch (...) {
+        std::cerr << "[BuildPipeline] Failed with an unknown exception.\n";
     }
 
-    SetCurrentStrategy(strategy);
-    SetRendererBg();
-    SetSyncNeeded(); // 重建后触发一次全量参数同步
+    // 回滚只恢复上一个已提交的 snapshot/strategy，不反写 DataManager current。
+    try {
+        if (m_currentStrategy != oldStrategy && m_currentStrategy && m_renderer) {
+            m_currentStrategy->DetachRenderer(m_renderer);
+        }
+        m_currentStrategy = oldStrategy;
+        if (m_currentStrategy && m_renderer) {
+            m_currentStrategy->AttachRenderer(m_renderer);
+            m_currentStrategy->SetCamera(m_renderer);
+        }
+    }
+    catch (...) {
+        m_currentStrategy = oldStrategy;
+    }
+    m_renderSnapshot = oldSnapshot;
+    return false;
 }
 
 void VizService::Impl::SetStrategyState()

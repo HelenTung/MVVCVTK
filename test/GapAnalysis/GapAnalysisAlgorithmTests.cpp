@@ -25,11 +25,6 @@
 #include <thread>
 #include <vector>
 
-class GapSnapshotTestService final : public GapAnalysisService {
-public:
-    using GapAnalysisService::SetInputSnapshot;
-};
-
 class GapAlgorithmSuite final {
 public:
 
@@ -67,11 +62,11 @@ void SetExpectNear(double actual, double expected, const std::string& message, i
     SetExpect(std::abs(actual - expected) <= NumericTolerance, message, failureCount);
 }
 
-VoidDetectionParams BuildVoidParams()
+GapVoidParams BuildVoidParams()
 {
     // 参数刻意压低 minVolume 并关闭腐蚀，使测试只验证“封闭孔洞识别”本身，
     // 不把经验阈值和后处理策略混进这个单元回归。
-    VoidDetectionParams params;
+    GapVoidParams params;
     params.grayMin = -0.1f;
     params.grayMax = 0.1f;
     params.minVolumeMM3 = 0.0;
@@ -101,9 +96,9 @@ std::vector<float> BuildTestVoxels()
     return voxels;
 }
 
-VolumeBuffer BuildTestVolume()
+GapVolumeBuffer BuildTestVolume()
 {
-    VolumeBuffer volume;
+    GapVolumeBuffer volume;
     volume.dims = TestDims;
     volume.spacing = { 1.0, 1.0, 1.0 };
     volume.origin = { 0.0, 0.0, 0.0 };
@@ -251,26 +246,26 @@ void StartAlgoCase(int& failureCount)
 void StartBufferCase(int& failureCount)
 {
     // owned 路径复制后必须各自拥有 vector；移动后别名必须重绑，不能保留源对象地址。
-    VolumeBuffer owned;
+    GapVolumeBuffer owned;
     owned.dims = { 2, 1, 1 };
     owned.SetOwnedVoxels({ 3.0f, 5.0f });
-    VolumeBuffer ownedCopy(owned);
+    GapVolumeBuffer ownedCopy(owned);
     SetExpect(ownedCopy.voxelsPtr != owned.voxelsPtr
         && ownedCopy.GetVoxelValue(1, 0, 0) == 5.0f,
         "owned VolumeBuffer copy should bind its independent vector.", failureCount);
 
-    VolumeBuffer ownedAssigned;
+    GapVolumeBuffer ownedAssigned;
     ownedAssigned = owned;
     SetExpect(ownedAssigned.voxelsPtr != owned.voxelsPtr
         && ownedAssigned.GetVoxelValue(0, 0, 0) == 3.0f,
         "owned VolumeBuffer copy assignment should bind its independent vector.", failureCount);
 
-    VolumeBuffer ownedMoved(std::move(ownedCopy));
+    GapVolumeBuffer ownedMoved(std::move(ownedCopy));
     SetExpect(!ownedCopy.GetVoxelReady()
         && ownedMoved.voxelsPtr == ownedMoved.voxels.data(),
         "owned VolumeBuffer move should clear the source and rebind moved storage.", failureCount);
 
-    VolumeBuffer ownedMoveAssigned;
+    GapVolumeBuffer ownedMoveAssigned;
     ownedMoveAssigned = std::move(ownedAssigned);
     SetExpect(!ownedAssigned.GetVoxelReady()
         && ownedMoveAssigned.voxelsPtr == ownedMoveAssigned.voxels.data(),
@@ -282,18 +277,18 @@ void StartBufferCase(int& failureCount)
             std::initializer_list<float>{ 7.0f, 11.0f });
         weakOwner = sharedVoxels;
 
-        VolumeBuffer shared;
+        GapVolumeBuffer shared;
         shared.dims = { 2, 1, 1 };
         SetExpect(shared.SetSharedVoxels(sharedVoxels, sharedVoxels->data()),
             "shared VolumeBuffer should accept an owner and read-only alias.", failureCount);
         const auto* sharedAddress = sharedVoxels->data();
         sharedVoxels.reset();
 
-        VolumeBuffer sharedCopy(shared);
-        VolumeBuffer sharedAssigned;
+        GapVolumeBuffer sharedCopy(shared);
+        GapVolumeBuffer sharedAssigned;
         sharedAssigned = shared;
-        VolumeBuffer sharedMoved(std::move(shared));
-        VolumeBuffer sharedMoveAssigned;
+        GapVolumeBuffer sharedMoved(std::move(shared));
+        GapVolumeBuffer sharedMoveAssigned;
         sharedMoveAssigned = std::move(sharedCopy);
         SetExpect(!weakOwner.expired()
             && !shared.GetVoxelReady()
@@ -353,7 +348,7 @@ void StartSnapCase(int& failureCount)
     SetExpect(weakImage == nullptr,
         "public gap input should not retain the caller's mutable VTK image.", failureCount);
 
-    SurfaceParams surfaceParams;
+    GapSurfaceParams surfaceParams;
     surfaceParams.isoValue = 0.5f;
     service.SetSurface(surfaceParams);
     service.SetVoid(BuildVoidParams());
@@ -404,14 +399,14 @@ void StartSharedCase(int& failureCount)
     auto image = BuildTestImage();
     vtkWeakPointer<vtkImageData> weakImage;
     weakImage = image.GetPointer();
-    GapSnapshotTestService service;
-    SetExpect(service.SetInputSnapshot(image),
-        "gap analysis should accept one controlled read-only snapshot.", failureCount);
+    GapAnalysisService service;
+    SetExpect(service.SetInputImage(image),
+        "gap analysis should accept one isolated image snapshot.", failureCount);
     image = nullptr;
-    SetExpect(weakImage != nullptr,
-        "controlled gap snapshot should retain the aliased VTK image owner.", failureCount);
+    SetExpect(weakImage == nullptr,
+        "isolated gap snapshot should not retain the caller image owner.", failureCount);
 
-    SurfaceParams surfaceParams;
+    GapSurfaceParams surfaceParams;
     surfaceParams.isoValue = 0.5f;
     service.SetSurface(surfaceParams);
     service.SetVoid(BuildVoidParams());
@@ -435,7 +430,7 @@ void StartConvertCase(int& failureCount)
     std::fill_n(source, image->GetNumberOfPoints(), static_cast<short>(1));
     image->Modified();
 
-    SurfaceParams surfaceParams;
+    GapSurfaceParams surfaceParams;
     surfaceParams.isoValue = 0.5f;
     service.SetSurface(surfaceParams);
     service.SetVoid(BuildVoidParams());

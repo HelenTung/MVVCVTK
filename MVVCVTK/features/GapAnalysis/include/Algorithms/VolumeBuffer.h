@@ -12,11 +12,11 @@
 #include <memory>
 #include <utility>
 
-class VolumeBuffer {
+class GapVolumeBuffer {
 public:
-    VolumeBuffer() = default;
+    GapVolumeBuffer() = default;
 
-    VolumeBuffer(const VolumeBuffer& other)
+    GapVolumeBuffer(const GapVolumeBuffer& other)
         : voxels(other.voxels),
           voxelsPtr(nullptr),
           dims(other.dims),
@@ -28,17 +28,17 @@ public:
         voxelsPtr = m_voxelOwner ? other.voxelsPtr : GetOwnedPointer();
     }
 
-    VolumeBuffer& operator=(const VolumeBuffer& other) {
+    GapVolumeBuffer& operator=(const GapVolumeBuffer& other) {
         if (this == &other) {
             return *this;
         }
 
-        VolumeBuffer copy(other);
+        GapVolumeBuffer copy(other);
         *this = std::move(copy);
         return *this;
     }
 
-    VolumeBuffer(VolumeBuffer&& other) noexcept
+    GapVolumeBuffer(GapVolumeBuffer&& other) noexcept
         : voxels(std::move(other.voxels)),
           voxelsPtr(other.voxelsPtr),
           dims(other.dims),
@@ -53,7 +53,7 @@ public:
         other.voxelsPtr = nullptr;
     }
 
-    VolumeBuffer& operator=(VolumeBuffer&& other) noexcept {
+    GapVolumeBuffer& operator=(GapVolumeBuffer&& other) noexcept {
         if (this == &other) {
             return *this;
         }

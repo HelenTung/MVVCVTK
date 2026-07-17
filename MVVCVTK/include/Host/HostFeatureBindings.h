@@ -1,7 +1,8 @@
 #pragma once
 
 #include "Host/HostCoreServices.h"
-#include "Host/HostCommandTypes.h"
+#include "Host/Types/HostAdapterTypes.h"
+#include "Host/Types/HostCommandTypes.h"
 #include "Host/HostRenderViewSet.h"
 
 #include <functional>
@@ -26,15 +27,26 @@ public:
         const HostCoreServices& core,
         const HostRenderViewSet& renderViews);
 
-    // 统一接收领域命令；具体 Crop/Gap action 在 Pimpl 内分发并共享同一 session 生命周期。
-    bool SendCommand(HostFeatureCommand command);
+    bool StartCrop(const HostCropTargetRequest& request);
+    bool SwitchCropBox(const HostCropTargetRequest& request);
+    bool SwitchCropPlane(const HostCropTargetRequest& request);
+    bool SwitchCropView(const HostCropPreviewRequest& request);
+    bool SendCrop(
+        const HostCropTargetRequest& request,
+        HostCompleteCallback onComplete);
+    bool ExitCrop();
+    bool StartGap(
+        const HostGapStartRequest& request,
+        HostCompleteCallback onComplete);
+    bool SwitchGapLayer();
+    bool ExitGap();
     bool GetGapView() const;
     bool GetCropActive() const;
     void ClearCropInput() const;
     bool SendCropInput();
 
     // 通用 TimerEvent pump 是 host/session 主线程收敛点；具体 feature 只在 tick 中消费自己的 pending 状态。
-    void AttachHostTimer(const HostTimerEventPumpConfig& eventPumpConfig);
+    bool AttachHostTimer(const HostTimerConfig& config);
 
 private:
     class Impl;

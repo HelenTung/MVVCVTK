@@ -17,9 +17,11 @@
 #include <vtkMatrix4x4.h>
 #include <array>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 class IStateEventSource;
@@ -29,6 +31,8 @@ class VizService
     : public InteractiveService
 {
 public:
+    using TaskWork = std::packaged_task<bool()>;
+    using TaskStart = std::function<std::thread(TaskWork)>;
     // ================================================================
     // 构造 / 析构
     // 功能：绑定 DataManager、SharedInteractionState 与状态事件源三个核心对象。
@@ -36,7 +40,8 @@ public:
     // ================================================================
     VizService(std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> state,
-        std::shared_ptr<IStateEventSource> stateEventSource);
+        std::shared_ptr<IStateEventSource> stateEventSource,
+        TaskStart taskStart = {});
     ~VizService() override;
 
     // ================================================================
@@ -71,17 +76,14 @@ public:
     // 实现依赖对象由 Impl 与基础服务状态共同持有。
     // spacing / origin 必须由宿主数据命令显式传入；RAW 体数据不携带这些物理事实，service 不提供样本默认值。
     // ================================================================
-    void LoadFileAsync(const std::string& path,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
+    bool LoadFileAsync(
+        std::string path,
+        VolumeLayout layout,
         std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 重载入口：从上游重建缓冲区导入体数据，命名显式带 Reload。
     bool ReloadFromBufferAsync(
-        const float* data,
-        const std::array<int, 3>& dims,
-        const std::array<float, 3>& spacing,
-        const std::array<float, 3>& origin,
+        VolumeBuffer buffer,
         std::function<void(bool isSuccess)> onComplete = nullptr);
 
     // 状态查询：当前只对外暴露 File / Reload 两组状态。
@@ -142,6 +144,7 @@ public:
     //   6. owner 释放 admission -> Send*LoadCallback；Host-owned 事务由 Host 统一释放
     // ================================================================
     void SendUpdates() override;
+    bool SendReloadUpdate();
     bool GetDirty() const override;
     void SetDirty() override;
     bool ResetDirty() override;

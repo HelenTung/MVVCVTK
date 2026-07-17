@@ -4,24 +4,16 @@
 
 int GetGapFailCount()
 {
-    int failureCount{0};
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.StartGapView({}),
-            "Gap missing target rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.SwitchGapLayer(),
-            "Gap inactive switch rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.ExitGapView(),
-            "Gap inactive exit rejection") ? 0 : 1;
-    }
+    VtkAppHostSession session(HostSessionConfig{});
+    int failureCount = 0;
+    failureCount += GetCaseResult(
+        !session.SendGap({ HostGapAction::Start, HostGapStartRequest{} }),
+        "Gap missing target rejection") ? 0 : 1;
+    failureCount += GetCaseResult(
+        !session.SendGap({ HostGapAction::Overlay, std::monostate{} }),
+        "Gap inactive switch rejection") ? 0 : 1;
+    failureCount += GetCaseResult(
+        !session.SendGap({ HostGapAction::Exit, std::monostate{} }),
+        "Gap inactive exit rejection") ? 0 : 1;
     return failureCount;
 }

@@ -4,9 +4,15 @@
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandTypes.h">
+    <ClInclude Include="..\..\MVVCVTK\include\Data\VolumeTypes.h">
       <Filter>include</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostCommandTypes.h">
+      <Filter>include</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostAdapterTypes.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostRequestTypes.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostValueTypes.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostHotkeyRouter.h">
       <Filter>include</Filter>
     </ClInclude>
@@ -71,6 +77,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="AppStateTests.cpp">

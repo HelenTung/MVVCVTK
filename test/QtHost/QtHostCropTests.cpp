@@ -4,42 +4,17 @@
 
 int GetCropFailCount()
 {
-    int failureCount{0};
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.StartCrop({}),
-            "Crop start missing reference rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.SwitchCropBox({}),
-            "Crop box missing reference rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.SwitchCropPlane({}),
-            "Crop plane missing reference rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.SwitchCropView({}, HostCropPreviewMode::KeepInside),
-            "Crop preview missing reference rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.SendCrop({}),
-            "Crop submit missing reference rejection") ? 0 : 1;
-    }
-    {
-        VtkAppHostSession session(VtkAppHostSession::Config{});
-        failureCount += GetCaseResult(
-            !session.ExitCrop(),
-            "Crop inactive exit rejection") ? 0 : 1;
-    }
+    VtkAppHostSession session(HostSessionConfig{});
+    int failureCount = 0;
+    const HostCropTargetRequest target;
+    failureCount += GetCaseResult(
+        !session.SendCrop({ HostCropAction::Start, target }),
+        "Crop start missing reference rejection") ? 0 : 1;
+    failureCount += GetCaseResult(
+        !session.SendCrop({ HostCropAction::Preview, target }),
+        "Crop preview payload mismatch rejection") ? 0 : 1;
+    failureCount += GetCaseResult(
+        !session.SendCrop({ HostCropAction::Exit, std::monostate{} }),
+        "Crop inactive exit rejection") ? 0 : 1;
     return failureCount;
 }
