@@ -17,6 +17,8 @@
 #include <mutex>
 #include <deque>
 
+// 空洞分析的纯 CPU 流水线；不持有 VTK/服务状态，所有中间 mask 都与输入体素采用
+// x-fast 布局 `x + y*dimX + z*dimX*dimY`。三个公开步骤必须按顺序消费彼此产物。
 class VoidDetector {
 public:
     // ── Step 1：从体积六个边界做 6 邻域泛洪；返回 x-fast uint8 mask，1 表示未连通外界的 sub-ISO voxel ──
@@ -74,6 +76,8 @@ private:
 inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     const GapVolumeBuffer& vol, float isoValue)
 {
+    // 路径：六个体边界的 sub-ISO voxel 入队 -> 6 邻域泛洪标记 exterior ->
+    // 反转语义，仅保留“低于 iso 且无法连通边界”的内部空隙。
     const int    dx = vol.dims[0];
     const int    dy = vol.dims[1];
     const int    dz = vol.dims[2];
@@ -101,6 +105,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
         };
 
     // 1. 初始化种子：完全对齐原版边界逻辑
+    // 六个面分三组扫描，边/角允许重复调用 push_node，但 exterior 门铃保证只入队一次。
     for (int y = 0; y < dy; ++y) {
         for (int x = 0; x < dx; ++x) {
             push_node(x, y, 0);
@@ -135,6 +140,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
         q.pop_front();
 
         if (curr.x > 0 && curr.x < dx - 1 && curr.y > 0 && curr.y < dy - 1 && curr.z > 0 && curr.z < dz - 1) {
+            // 内部节点可安全使用预计算扁平 offset；坐标随同更新，供其进入边界时切换安全分支。
             for (int k = 0; k < 6; ++k) {
                 size_t nidx = curr.idx + off[k];
                 if (exterior[nidx] == 0 && data[nidx] < isoValue) {
@@ -144,6 +150,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
             }
         }
         else {
+            // 边界节点必须按 x/y/z 检查后重新计算 offset，避免无符号减法越界或跨行回绕。
             for (int k = 0; k < 6; ++k) {
                 int nx = curr.x + dxs[k];
                 int ny = curr.y + dys[k];
@@ -176,6 +183,8 @@ inline std::vector<uint8_t> VoidDetector::BuildCandidates(
     const std::vector<uint8_t>& interiorMask,
     const GapVoidParams& params)
 {
+    // 路径：interior 与 grayMax 求交 -> N 轮六邻域腐蚀得到稳定种子 ->
+    // 沿原始 raw mask 回长，恢复与稳定种子连通的完整候选区域。
     const int dx = vol.dims[0];
     const int dy = vol.dims[1];
     const int dz = vol.dims[2];
@@ -229,6 +238,8 @@ inline std::vector<uint8_t> VoidDetector::BuildCandidates(
 
     const std::array<long long, 6> offsets = { 1, -1, (long long)dx, -(long long)dx,
                                                (long long)slice, -(long long)slice };
+    // [实现边界] 回长沿扁平 offset 检查 `nb < total`，没有同步检查 x/y/z；
+    // 因而这里描述的是现有扁平相邻实现，不能把结果解释为经过严格坐标边界裁剪的 6 邻域。
     while (!bfsQueue.empty()) {
         size_t cur = bfsQueue.front();
         bfsQueue.pop();
@@ -249,6 +260,8 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
     const GapVoidParams& params,
     std::vector<int>& outLabelVol)
 {
+    // 路径：扫描未标记候选 -> BFS 收集单区体素并累计一/二阶矩 -> 按最小体积筛选 ->
+    // 为保留区计算灰度、bbox、PCA、投影面积与近似表面积；被筛掉区的临时标签恢复为 0。
     const int dx = vol.dims[0];
     const int dy = vol.dims[1];
     const int dz = vol.dims[2];
@@ -262,6 +275,8 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
     int currentID = 1;
 
     const std::array<long long, 6> offsets6 = { 1, -1, (long long)dx, -(long long)dx, (long long)slice, -(long long)slice };
+    // [实现边界] 连通 BFS 与候选回长相同，只校验扁平 offset 是否落在总数组内；
+    // 当前行为可能把行/层端点视为相邻，注释与统计解释必须忠实于这一实现。
 
     // 13 个无符号方向及其反向共同形成 26 邻域穿越计数，只用于近似表面积，不改变 6 邻域连通标签。
     const std::vector<std::array<int, 3>> directions13 = {
@@ -344,6 +359,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
             region.volumeMM3 = region.voxelCount * voxelVol;
 
             if (region.volumeMM3 >= params.minVolumeMM3) {
+                // 只有达到阈值的区域才消费 currentID；这样 regions、labelVolume 正标签与 region.id 保持一一对应。
                 // 1. 重心
                 region.centroidMM[0] = sumX / region.voxelCount + vol.origin[0];
                 region.centroidMM[1] = sumY / region.voxelCount + vol.origin[1];
@@ -400,6 +416,9 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
                 size_t crossCount13 = 0;
                 std::vector<float> dists;
                 std::vector<size_t> boundaryVoxels;
+
+                // boundaryVoxels 当前只记录诊断性边界集合，后续公式仅使用 crossCount13；
+                // dists 同样未进入现有统计，不能据此声称已计算边界距离分布。
 
                 for (size_t vIdx : regionVoxels) {
                     int cz = (int)(vIdx / slice);
@@ -462,6 +481,7 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
             }
             else
             {
+                // 小区域在 BFS 时已临时写入 currentID；筛除时必须逐 voxel 回滚，且 currentID 不递增。
                 for (size_t vIdx : regionVoxels) {
                     outLabelVol[vIdx] = 0;
                 }

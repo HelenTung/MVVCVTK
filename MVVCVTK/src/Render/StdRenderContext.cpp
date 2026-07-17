@@ -45,6 +45,7 @@ StdRenderContext::~StdRenderContext()
 
 void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor)
 {
+    // 1. 空对象不改变当前绑定；同一对象只修复 renderWindow 双向关系并补齐 observer。
     if (!interactor) {
         return;
     }
@@ -58,12 +59,14 @@ void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteracto
         return;
     }
 
+    // 2. 真正替换前，timer 与 observer tag 都属于旧 interactor，必须先对称卸载。
     RemoveTimer();
     RemoveObservers();
     m_interactor = std::move(interactor);
     if (m_renderWindow) {
         m_interactor->SetRenderWindow(m_renderWindow);
     }
+    // 3. 新对象重新挂 observer、axes 与 Router 依赖；timer 由 SetInteractorReady 的显式就绪阶段创建。
     // observer 绑定在 interactor 上；替换 interactor 后必须重新挂载，否则 Qt 注入窗口收不到业务事件。
     AttachObservers();
     if (m_axesWidget) {
@@ -410,6 +413,7 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
     long unsigned int eventId,
     void* callData)
 {
+    // 单入口顺序固定为：清旧 abort -> 处理 Exit -> 归一化事件 -> 路由 -> host timer hook -> 写回 abort。
     (void)callData;
 
     if (m_eventCallback) {

@@ -23,6 +23,8 @@
 #include <thread>
 #include <utility>
 
+// GapAnalysis 的并发与显示编排边界：后台 worker 只消费不可变体素/参数快照并一次性提交结果；
+// 宿主 view 线程通过独立状态机消费终态、创建 overlay。分析状态、显示阶段和 overlay 可见意图互不推导。
 class GapAnalysisService::Impl final {
 public:
     Impl() = default;
@@ -59,9 +61,13 @@ private:
     using VolumeBufferSnapshot = std::shared_ptr<const GapVolumeBuffer>;
 
     enum class GapViewPhase {
+        // 没有活动显示会话。
         Idle,
+        // target/配方已保存，等待主线程 tick 提供当前 VTK image。
         AwaitingInput,
+        // worker 已接纳任务，tick 只轮询原子终态。
         AwaitingResult,
+        // 本次终态已回调并处理，后续 tick 不重复挂载或报错。
         Consumed
     };
 
@@ -373,6 +379,10 @@ bool GapAnalysisService::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image
 }
 
 bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> image) {
+    // 输入替换分三条路径：
+    // A. 转换失败：退休旧快照，非 Running 时发布 Failed；运行中任务继续持有自己的旧 owner。
+    // B. owner 分配失败：与转换失败保持相同状态语义。
+    // C. 成功：与 StartAsync 在 workerMutex 下串行，替换输入；非 Running 时同时退休旧结果并回到 Idle。
     GapVolumeBuffer snapshot;
     if (!BuildVolumeBuffer(std::move(image), snapshot)) {
         VolumeBufferSnapshot retiredSnapshot;
@@ -516,6 +526,8 @@ vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh() const {
         labelImage = m_result.labelImage;
     }
 
+    // labelImage 中 0 为背景、正整数为任一区域；等值 0.5 把所有正标签合并成一张空洞外表面。
+    // 结果不保留区域间的标签边界，也不在此计算法线；当前显示路径把它作为 3D overlay 输入。
     auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
     fe->SetInputData(labelImage);
     fe->SetValue(0, 0.5); // label > 0 即为空洞区域
@@ -542,6 +554,8 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage() const 
 bool GapAnalysisService::Impl::StartView(
     GapViewRequest request,
     std::function<void(bool)> onComplete) {
+    // 显示会话建立路径：1. 绑定/校验 host 线程并隔离输入；2. 卸载旧 overlay；
+    // 3. 过滤有效目标；4. 发布参数与 AwaitingInput，实际 worker 延迟到 OnDisplayTick 启动。
     if (!SetViewThread()) {
         std::cerr << "[GapAnalysis] Display activation rejected: view thread mismatch." << std::endl;
         return false;
@@ -552,6 +566,7 @@ bool GapAnalysisService::Impl::StartView(
         return false;
     }
     // 新显示请求先卸载旧 overlay；正在运行的 worker 只收到取消请求，线程所有权仍由 StartAsync/析构收口。
+    // 注意：输入隔离失败发生在卸载之前，调用方不能把 false 理解为旧显示一定已被清除。
     SetOverlayOff();
     if (GetAnalysisState() == GapAnalysisState::Running) {
         StopAsync();
@@ -653,6 +668,8 @@ bool GapAnalysisService::Impl::GetDisplayTickNeeded() const {
 
 void GapAnalysisService::Impl::ClearView()
 {
+    // 清理顺序：先请求取消并 join worker，确认不再写结果后卸载 overlay；随后释放 callback、
+    // 输入快照、显示缓存和 view 线程绑定。调用方必须在已绑定的宿主线程协调活动显示会话。
     StopAsync();
     StopWorker();
     SetOverlayOff();
@@ -747,6 +764,8 @@ GapAnalysisService::Impl::GapParamSnapshot GapAnalysisService::Impl::GetParamSna
 void GapAnalysisService::Impl::StartWorker(
     VolumeBufferSnapshot inputSnapshot,
     GapParamSnapshot params) {
+    // worker 只使用按值参数和共享只读输入快照；中间产物保持局部，完整结果在 resultMutex 下单次发布。
+    // 阶段边界取消映射为 Failed（启动前取消例外映射为 Idle），算法异常同样映射为 Failed。
     bool isSuccess = false;
 
     // worker 尚未进入算法时若快照无效或已收到取消请求，以 Idle 结束并为可选 callback 记录失败。
@@ -866,6 +885,9 @@ bool GapAnalysisService::Impl::SetOverlayOff() {
 }
 
 bool GapAnalysisService::Impl::SetStoredView() {
+    // 1. 先对称卸载旧 binding，保证重复显示/切换可见性不会累积 prop。
+    // 2. mesh 与 label 两类 artifact 独立判定、独立挂载；缺少其中一类不阻止另一类显示。
+    // 3. 每次成功 Attach 都记录同一 service/strategy 对，供 SetOverlayOff 精确 Remove。
     SetOverlayOff();
 
     const bool hasMeshInput = GetMeshVisible(m_displayVoidMesh);
@@ -1007,6 +1029,8 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
 
     double spacing[3] = { 1.0, 1.0, 1.0 };
     image->GetSpacing(spacing);
+    // 此处信任 DataManager 生产的 spacing/origin 已合法，不重复做有限性与非零校验；
+    // 非法 spacing 会在 world->index 插值时造成除零，因此外部 image 必须先经过公共输入验证链。
     out.spacing = { spacing[0], spacing[1], spacing[2] }; // 输入 physical 坐标每 voxel 间距，沿 [x, y, z]。
 
     double origin[3] = { 0.0, 0.0, 0.0 };
@@ -1057,6 +1081,8 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
     const std::vector<int>& labelVolume,
     const GapVolumeBuffer& volBuf) const
 {
+    // labelVolume 与输入共享 x-fast 线性布局；输出固定为单分量 VTK_INT，
+    // 并继承输入 dimensions/spacing/origin，使 slice overlay 可直接复用同一 physical 坐标。
     if (labelVolume.empty()) {
         return nullptr;
     }

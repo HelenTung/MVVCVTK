@@ -28,6 +28,8 @@
 // ─────────────────────────────────────────────────────────────────────
 // 构造 / 析构
 // ─────────────────────────────────────────────────────────────────────
+// 单个视图的应用服务实现：共享 DataManager/State，拥有该视图的 strategy/overlay 与异步任务槽。
+// worker 只准备 pending 数据或导出结果；current 提交、VTK 管线切换和业务 callback 统一由 host tick 收口。
 class VizService::Impl final
     : public std::enable_shared_from_this<Impl> {
 public:
@@ -89,21 +91,21 @@ public:
 
 private:
     struct LoadNotice {
-        LoadEventKind kind = LoadEventKind::None;
-        bool isSucceeded = false;
-        bool isStateSet = false;
+        LoadEventKind kind = LoadEventKind::None; // 区分 File/Reload，决定提交 pending 与失败清场策略。
+        bool isSucceeded = false; // worker/共享状态最终结论，可在管线构建失败时降级为 false。
+        bool isStateSet = false; // true 表示共享终态已发布，仅等待 owner 释放 admission。
     };
 
     struct ActiveTask final {
-        LoadEventKind loadKind = LoadEventKind::None;
-        std::future<bool> result;
-        std::thread worker;
-        std::function<void(bool)> callback;
+        LoadEventKind loadKind = LoadEventKind::None; // None 用于普通导出，File/Reload 需要加载事务收尾。
+        std::future<bool> result; // worker 只返回准备结果，不直接触碰 VTK 管线。
+        std::thread worker; // SendTasks 发现 future ready 后负责 join。
+        std::function<void(bool)> callback; // 延迟到主线程完成提交/管线同步后执行。
     };
 
     struct Completion final {
-        bool isSuccess = false;
-        std::function<void(bool)> callback;
+        bool isSuccess = false; // 已包含 worker、pending 提交和 BuildPipeline 的综合结果。
+        std::function<void(bool)> callback; // SendCompletions 在内部锁外调用，允许安全发起下一事务。
     };
 
     void SetRenderBinding(vtkSmartPointer<vtkRenderWindow> win,
@@ -799,11 +801,13 @@ bool VizService::Impl::StartTask(
     LoadEventKind loadKind,
     std::function<void(bool)> callback)
 {
+    // 1. admission 关闭或 packaged_task 无效时不创建线程，但仍把失败 callback 排入主线程完成队列。
     if (!m_isAccepting || !task.valid()) {
         SetCompletion(false, std::move(callback));
         return false;
     }
 
+    // 2. 先在 active 列表建立 future/callback 槽，再让 taskStart 返回可 join 的 worker owner。
     std::lock_guard<std::mutex> lock(m_activeTaskMutex);
     m_activeTasks.emplace_back();
     auto entry = std::prev(m_activeTasks.end());
@@ -822,6 +826,7 @@ bool VizService::Impl::StartTask(
         return true;
     }
     catch (...) {
+        // 3. 启动异常与不可 join 线程都撤销 active 槽，并统一按异步失败完成，避免遗留半任务。
         auto failedCallback = std::move(entry->callback);
         m_activeTasks.erase(entry);
         SetCompletion(false, std::move(failedCallback));
@@ -834,6 +839,8 @@ bool VizService::Impl::LoadFileAsync(
     VolumeLayout layout,
     std::function<void(bool isSuccess)> onComplete)
 {
+    // File 链：构造任务 -> 领取全局 Load admission -> 清 pending -> 登记 owner -> 启动 worker。
+    // 任一后置步骤失败都会发布 FileFailed、释放 admission/owner，并把 callback 排入完成队列。
     if (!m_isAccepting || !m_dataLoadTaskService) {
         SetCompletion(false, std::move(onComplete));
         return false;
@@ -863,6 +870,7 @@ bool VizService::Impl::ReloadFromBufferAsync(
     VolumeBuffer buffer,
     std::function<void(bool isSuccess)> onComplete)
 {
+    // Reload 使用与 File 相同的 admission/owner 协议，但失败状态允许 SharedState 保留旧可信数据。
     if (!m_isAccepting || !m_dataLoadTaskService) {
         SetCompletion(false, std::move(onComplete));
         return false;
@@ -1172,6 +1180,7 @@ bool VizService::Impl::SendReloadUpdate()
 
 void VizService::Impl::SendTasks()
 {
+    // 1. 锁内只把 ready future 从 active 列表 splice 到局部列表；未完成任务继续由 service 持有。
     std::list<ActiveTask> readyTasks;
     {
         std::lock_guard<std::mutex> lock(m_activeTaskMutex);
@@ -1187,6 +1196,7 @@ void VizService::Impl::SendTasks()
             readyTasks.splice(readyTasks.end(), m_activeTasks, ready);
         }
     }
+    // 2. 锁外读取结果并 join worker，再区分普通任务 callback 与 Load/Reload 提交链。
     for (auto& task : readyTasks) {
         bool isSuccess = false;
         try { isSuccess = task.result.get(); }
@@ -1207,12 +1217,14 @@ void VizService::Impl::SetTaskResult(ActiveTask task, bool isSuccess)
 
 void VizService::Impl::SetLoadResult(ActiveTask task, bool isSuccess)
 {
+    // worker 成功只表示 pending 已准备；这里还必须把 pending 提交为 current，提交失败统一降级为失败。
     bool hasPending = false;
     if (isSuccess && m_dataManager) {
         isSuccess = m_dataManager->SetCurrentFromPending(hasPending) && hasPending;
     }
     if (!isSuccess && m_dataManager) m_dataManager->ClearPending();
 
+    // callback 暂存到 owner 槽，待共享终态广播、各视图管线同步和 admission 释放后再执行。
     m_ownedCallback = std::move(task.callback);
     if (!m_sharedState || !m_dataManager) return;
     if (isSuccess) {
@@ -1244,6 +1256,7 @@ void VizService::Impl::SetCompletion(
 
 void VizService::Impl::SendCompletions()
 {
+    // 整批 swap 后在锁外调用，允许 callback 重入下一任务，也隔离单个 callback 异常。
     std::deque<Completion> completions;
     {
         std::lock_guard<std::mutex> lock(m_completionMutex);

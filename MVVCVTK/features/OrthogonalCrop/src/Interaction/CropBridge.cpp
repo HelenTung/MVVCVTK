@@ -32,6 +32,9 @@ static constexpr double kBoxInitialBoundsScale = 0.60;
 static constexpr double kPlaneScale = 0.35;
 static constexpr double kPlaneVectorEpsilon = 1e-12;
 
+// 裁切 feature 的会话编排器：把 widget 产生的 world 几何折回 active input model，
+// 调用无状态后端生成 preview/submit，并把结果分发到各显示 target。
+// Impl 明确分离三条状态轴：会话阶段、预览意图、最近交互阶段，避免用多个布尔值推导非法组合。
 class CropBridge::Impl final {
 public:
     using ReloadSubmitter = CropBridge::ReloadSubmitter;
@@ -65,8 +68,11 @@ private:
     };
 
     struct ReloadGate {
+        // 只串行化 callback 读取 owner/generation 与析构/清绑定更新 gate 的临界区。
         std::mutex mutex;
+        // 非拥有回指；callback 在锁内读取后仍按现有宿主约定于锁外同步调用 owner。
         Impl* owner = nullptr;
+        // 每次 submit、清绑定或完成消费都会递增；旧 callback 必须因代际不匹配而静默退出。
         std::size_t generation = 0;
     };
 
@@ -202,6 +208,8 @@ void CropBridge::Impl::ClearInputImage()
 
 void CropBridge::Impl::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
 {
+    // 该成员保存宿主长期网格真源；SendPreview 可能暂时把某个 target 的 actor mesh 写入 router，
+    // ClearPreviewInput 必须在每条退出路径把 router 恢复到这里，而不是遗留临时预览输入。
     m_boundInputPolyData = std::move(polyData);
     m_backend.SetInputPolyData(m_boundInputPolyData);
 }
@@ -260,6 +268,8 @@ void CropBridge::Impl::SetReferenceRenderService(std::shared_ptr<InteractiveServ
 
 void CropBridge::Impl::SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices)
 {
+    // target 集合按整批替换：先从旧 service 对称 Remove overlay，再为新集合去重 Attach，
+    // 防止重绑窗口后同一个 prop 被重复挂载。
     ClearPreviewViews();
     m_previewRenderTargets.reserve(previewRenderServices.size());
 
@@ -276,6 +286,8 @@ void CropBridge::Impl::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
 
 bool CropBridge::Impl::StartView(CropViewRequest request)
 {
+    // 初始化契约分三层：输入数据、主交互/参考渲染对象、预览目标集合。
+    // 前四项缺一即拒绝；polydata 与 previewServices 可空，最终由 router 的 image/polydata 就绪态兜底确认。
     if (!request.inputImage || !request.interactor || !request.renderer
         || !request.referenceService) {
         return false;
@@ -292,6 +304,8 @@ bool CropBridge::Impl::StartView(CropViewRequest request)
 
 void CropBridge::Impl::ClearBindings()
 {
+    // 清绑定是完整会话失效点：先推进 generation，使尚未通过 gate 校验的旧 callback 失效，再按
+    // callback -> widget -> preview/overlay -> backend input -> 非拥有 VTK 指针的顺序释放依赖。
     {
         std::lock_guard<std::mutex> lock(m_reloadGate->mutex);
         ++m_reloadGate->generation;
@@ -556,6 +570,9 @@ OrthogonalCropRequest CropBridge::Impl::BuildPlaneRequest(
     OrthogonalCropOperation operation,
     OrthogonalCropDataSource dataSource) const
 {
+    // 请求构造路径：1. 读取 widget world 平面；2. 点按 worldToInput 变换、法线按逆转置变换；
+    // 3. 在 world 平面建立宽高基并变换端点，得到 input-model halfExtents。
+    // 算法裁切只消费 center+normal 的无限半空间，planeHalf 仅保留 widget 显示尺度信息。
     OrthogonalCropRequest planeRequest;
     planeRequest.dataSource = dataSource;
     planeRequest.operation = operation;
@@ -686,6 +703,7 @@ bool CropBridge::Impl::SwitchCropBox()
     }
 
     if (m_sessionPhase != CropSessionPhase::Idle) {
+        // 同几何再次触发等价于关闭当前会话；切换几何则先走统一 Exit 清理，再继续启用新 widget。
         const auto previousGeometryType = m_currentGeometryType;
         if (!ExitCrop()) {
             return false;
@@ -734,6 +752,7 @@ bool CropBridge::Impl::SwitchCropPlane()
     }
 
     if (m_sessionPhase != CropSessionPhase::Idle) {
+        // 与 Box 共用“同类关闭、异类先退出后切换”的入口语义，Reloading 会由 ExitCrop 拒绝。
         const auto previousGeometryType = m_currentGeometryType;
         if (!ExitCrop()) {
             return false;
@@ -1068,6 +1087,8 @@ bool CropBridge::Impl::SendSubmit(std::function<void(bool)> onComplete)
                 Impl* owner = nullptr;
                 {
                     std::lock_guard<std::mutex> lock(gate->mutex);
+                    // owner 与 generation 在同一临界区只完成 gate 时点校验；解锁后的裸 owner 调用
+                    // 仍依赖宿主既有约定：reload completion 不与 CropBridge 析构并发。
                     if (!gate->owner || gate->generation != generation) return;
                     owner = gate->owner;
                     ++gate->generation;
@@ -1157,6 +1178,8 @@ void CropBridge::Impl::OnSubmitReload(bool isSuccess)
     ResetCamera();
     m_sessionPhase = CropSessionPhase::Editing;
     m_hasWorldState = false;
+    // ExitCrop 只接受 Editing；这里先从 Reloading 临时回到 Editing，是为了复用同一套
+    // widget/preview/phase 清理路径，退出完成后的最终状态仍为 Idle。
     ExitCrop();
 
     if (!submitOverlayResult.isSucceeded) {

@@ -15,13 +15,14 @@
 class OverlayService;
 
 struct GapViewRequest final {
-    vtkSmartPointer<vtkImageData> inputImage;
-    GapSurfaceRequest surface;
-    GapVoidParams voidParams;
-    std::vector<std::shared_ptr<OverlayService>> meshTargets;
-    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets;
+    vtkSmartPointer<vtkImageData> inputImage; // 可选 VTK 输入；display tick 经公共隔离入口转换为分析快照。
+    GapSurfaceRequest surface; // 等值面阈值与表面构建参数的本次请求副本。
+    GapVoidParams voidParams; // 灰度、最小体积、方向张量和腐蚀参数快照。
+    std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
+    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets; // 轴向与 2D label overlay 目标配对。
 };
 
+// 孔隙分析的异步 worker 与主线程 overlay 会话编排器；算法只在快照上运行，VTK 挂接集中在 display tick。
 class GapAnalysisService {
 public:
     GapAnalysisService();

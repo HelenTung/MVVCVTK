@@ -5,6 +5,8 @@
 #include <mutex>
 #include <utility>
 
+// SharedInteractionState 的线程安全存储体：setter 在锁内比较并提交值，随后在锁外仅发布 UpdateFlags。
+// 因而观察者拿到的是“哪些维度变化”的通知，实际值仍需通过本类 getter 读取一致快照。
 class SharedInteractionState::Impl {
 public:
     explicit Impl(std::shared_ptr<IStateEventSink> eventSink)
@@ -128,25 +130,25 @@ public:
 
     mutable std::mutex m_mutex;
     std::shared_ptr<IStateEventSink> m_eventSink;
-    LoadState m_dataTrustedState = LoadState::Idle;
-    LoadState m_fileLoadState = LoadState::Idle;
-    LoadState m_reloadLoadState = LoadState::Idle;
-    LoadEventKind m_activeLoadKind = LoadEventKind::None;
-    bool m_isLoadPublished = false;
-    bool m_isLoadPublishing = false;
-    std::array<double, 2> m_dataRange = { 0.0, 255.0 };
-    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 };
-    std::vector<TFNode> m_nodes;
-    double m_isoValue = 0.0;
-    MaterialParams m_material;
-    BackgroundColor m_background;
-    WindowLevelParams m_windowLevel;
-    uint32_t m_visibilityMask = VisFlags::Planes3D | VisFlags::Crosshair | VisFlags::Ruler;
-    bool m_isInteracting = false;
-    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 };
-    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 };
-    int m_cursorAxis = -1;
-    std::array<double, 16> m_modelMatrix = {
+    LoadState m_dataTrustedState = LoadState::Idle; // 当前可供渲染的数据是否可信；Reload 期间可继续为 Succeeded。
+    LoadState m_fileLoadState = LoadState::Idle;    // 文件加载通道的最近状态。
+    LoadState m_reloadLoadState = LoadState::Idle;  // 内存重载通道的最近状态。
+    LoadEventKind m_activeLoadKind = LoadEventKind::None; // 全局 admission：File/Reload 同时最多一个在途事务。
+    bool m_isLoadPublished = false;  // 终态广播已完成，owner 可以 ResetLoad 释放 admission。
+    bool m_isLoadPublishing = false; // 广播窗口保护；防止回调重入提前重置当前事务。
+    std::array<double, 2> m_dataRange = { 0.0, 255.0 }; // 当前标量 min/max，供 TF、ISO 与默认窗宽窗位使用。
+    std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 }; // X/Y/Z 体素物理间距，单位 mm。
+    std::vector<TFNode> m_nodes; // 按数据标量位置定义的颜色/不透明度传递函数控制点。
+    double m_isoValue = 0.0; // 当前等值面阈值，单位与输入标量一致。
+    MaterialParams m_material; // 主策略共享材质参数。
+    BackgroundColor m_background; // renderer 共享背景色。
+    WindowLevelParams m_windowLevel; // 2D slice 共享窗宽/窗位。
+    uint32_t m_visibilityMask = VisFlags::Planes3D | VisFlags::Crosshair | VisFlags::Ruler; // overlay 可见位集合。
+    bool m_isInteracting = false; // 交互期间策略可降低渲染质量/提高刷新率。
+    std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 }; // 约束到当前交互平面后的世界坐标。
+    std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 未约束的拾取世界坐标。
+    int m_cursorAxis = -1; // 当前驱动切片的轴，-1 表示无特定轴；调用方负责传入合法轴域。
+    std::array<double, 16> m_modelMatrix = { // 行主序 4x4 modelToWorld affine。
         1, 0, 0, 0,
         0, 1, 0, 0,
         0, 0, 1, 0,
@@ -188,6 +190,7 @@ LoadState SharedInteractionState::GetDataTrustedState() const
 
 bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
 {
+    // A. 非 File/Reload 或已有事务时拒绝，确保两个加载通道共享一个串行 admission。
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
     if ((loadEventKind != LoadEventKind::File
         && loadEventKind != LoadEventKind::Reload)
@@ -199,10 +202,12 @@ bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
     m_impl->m_isLoadPublished = false;
     m_impl->m_isLoadPublishing = false;
     if (loadEventKind == LoadEventKind::File) {
+        // B. File 会替换数据真源，加载期间 current 不再被标记为可信。
         m_impl->m_fileLoadState = LoadState::Loading;
         m_impl->m_dataTrustedState = LoadState::Loading;
     }
     else {
+        // C. Reload 采用 pending 提交；加载期间仍允许旧 current 保持可信并继续显示。
         m_impl->m_reloadLoadState = LoadState::Loading;
     }
     return true;
@@ -210,6 +215,7 @@ bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
 
 bool SharedInteractionState::ResetLoad(LoadEventKind loadEventKind)
 {
+    // 只有匹配事务且终态已完整广播后才能释放 admission；广播回调重入会被 publishing 拦截。
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
     if (loadEventKind == LoadEventKind::None
         || m_impl->m_activeLoadKind != loadEventKind) {
@@ -229,6 +235,8 @@ bool SharedInteractionState::SetFileDataReady(
     double rangeMax,
     const std::array<double, 3>& spacing)
 {
+    // 终态发布分三段：1. 锁内提交数据派生状态并标记 publishing；
+    // 2. 锁外广播，允许观察者安全回读；3. 再次加锁标记 published，等待 owner ResetLoad。
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind != LoadEventKind::File
@@ -258,6 +266,7 @@ bool SharedInteractionState::SetReloadDataReady(
     double rangeMax,
     const std::array<double, 3>& spacing)
 {
+    // 与 File 成功路径使用同一发布协议；差异是 Reload 直到成功提交才替换 dataTrustedState。
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind != LoadEventKind::Reload
@@ -284,6 +293,7 @@ bool SharedInteractionState::SetReloadDataReady(
 
 bool SharedInteractionState::SetFileLoadFailed()
 {
+    // File 失败意味着没有可信的新真源，因此 file 与 dataTrusted 同时进入 Failed。
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind != LoadEventKind::File
@@ -307,6 +317,7 @@ bool SharedInteractionState::SetFileLoadFailed()
 
 bool SharedInteractionState::SetReloadLoadFailed()
 {
+    // Reload 失败只结束 reload 通道；若旧 current 仍可信，必须保留 dataTrustedState=Succeeded。
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (m_impl->m_activeLoadKind != LoadEventKind::Reload

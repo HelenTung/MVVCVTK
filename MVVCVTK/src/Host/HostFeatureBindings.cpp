@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+// Host 与 feature 的会话级适配器：保存 core owner、解析窗口目标，并把异步/VTK 收尾收敛到 host timer 线程。
 class HostFeatureBindings::Impl final {
 public:
     ~Impl();
@@ -45,12 +46,12 @@ public:
 
 private:
     struct SubmitContext final {
-        std::mutex mutex;
-        const HostRenderViewSet* renderViews = nullptr;
-        std::shared_ptr<RawVolumeDataManager> dataManager;
-        std::shared_ptr<SharedInteractionState> sharedState;
-        std::weak_ptr<CropBridge> bridge;
-        std::size_t generation = 0;
+        std::mutex mutex; // 保护析构清空与 submit handler 取得同一组依赖快照。
+        const HostRenderViewSet* renderViews = nullptr; // 非拥有拓扑；Impl 析构时在锁内置空。
+        std::shared_ptr<RawVolumeDataManager> dataManager; // 提交裁切 image 的 pending/current owner。
+        std::shared_ptr<SharedInteractionState> sharedState; // Reload admission 与终态发布源。
+        std::weak_ptr<CropBridge> bridge; // 成功后回灌新输入，不形成 bridge->handler->bridge 环。
+        std::size_t generation = 0; // 记录 context 失效代次，供生命周期诊断；当前 handler 以 renderViews 置空判失效。
     };
 
     void DetachHostTimer();
@@ -202,6 +203,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 std::function<void(bool isSuccess)> onComplete) {
                 const auto context = weakContext.lock();
                 if (!context || !image) return false;
+                // 1. 在 context 锁内复制会话依赖，后续数据提交、管线更新和回调均在锁外执行。
                 const HostRenderViewSet* renderViews = nullptr;
                 std::shared_ptr<RawVolumeDataManager> dataManager;
                 std::shared_ptr<SharedInteractionState> sharedState;
@@ -215,11 +217,13 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 }
                 if (!renderViews || !dataManager || !sharedState) return false;
 
+                // 2. 领取全局 Reload admission；失败表示另一个 File/Reload 事务仍在途。
                 if (!sharedState->StartLoad(LoadEventKind::Reload)) {
                     std::cerr << "[Host] Orthogonal crop submit failed: reload is already in progress." << std::endl;
                     return false;
                 }
                 bool hasPending = false;
+                // 3. 新 image 先进入 pending，再由本 host 线程原子提交为 current；任一步失败发布 ReloadFailed。
                 if (!dataManager->SetImageSnapshot(std::move(image))
                     || !dataManager->SetCurrentFromPending(hasPending)
                     || !hasPending) {
@@ -230,6 +234,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 }
 
                 const auto imageState = dataManager->GetImageSnapshot();
+                // 4. 每个 view 用同一 current snapshot 重建管线，全部成功后才发布共享 DataReady 终态。
                 bool isPipelineReady = imageState != nullptr;
                 for (const auto& view : renderViews->GetViews()) {
                     if (!view.service || !view.service->SendReloadUpdate()) {
@@ -248,6 +253,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
                     return false;
                 }
                 if (const auto lockedBridge = bridge.lock()) {
+                    // 5. bridge 只在全局提交成功后接收新输入；最后释放 admission 并通知业务回调。
                     if (GetImageReady(imageState->image)) {
                         lockedBridge->SetInputSnapshot(imageState->image);
                     }

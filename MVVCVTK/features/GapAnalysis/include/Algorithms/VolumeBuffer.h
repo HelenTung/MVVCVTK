@@ -12,6 +12,8 @@
 #include <memory>
 #include <utility>
 
+// Gap 算法使用的只读体素快照：既支持自有 vector，也支持由 shared owner 锚定的零拷贝 float 别名。
+// copy/move 会重新绑定 owned 模式的 data 指针，避免 vector 搬迁后 voxelsPtr 指向旧地址。
 class GapVolumeBuffer {
 public:
     GapVolumeBuffer() = default;
@@ -126,6 +128,7 @@ public:
     }
 
     // ── 三线性插值：体素索引坐标 ─────────────────────────────────────
+    // 需要完整 2x2x2 邻域；采样点落在体外或正好位于最外层上边界时返回 0，不做边缘钳制。
     inline float GetTrilinearValueByIndex(float fx, float fy, float fz) const noexcept {
         int x0 = static_cast<int>(std::floor(fx));
         int y0 = static_cast<int>(std::floor(fy));
@@ -145,6 +148,7 @@ public:
     }
 
     // ── 三线性插值：轴对齐 input physical 坐标 (mm)；不应用 VTK direction matrix ──
+    // 有效快照要求 spacing 三分量非零；本访问层信任生产方，不在每次采样时重复校验。
     inline float GetTrilinearValueByWorld(double x, double y, double z) const noexcept {
         return GetTrilinearValueByIndex(
             static_cast<float>((x - origin[0]) / spacing[0]),

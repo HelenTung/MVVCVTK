@@ -105,6 +105,8 @@ void CropRouter::Impl::SetPreferredDataSource(OrthogonalCropDataSource dataSourc
 
 OrthogonalCropDataSource CropRouter::Impl::GetActiveDataSource() const
 {
+    // 选择顺序：1. 首选源对应输入存在时保持首选语义；2. 否则 image 优先、polydata 次之回退；
+    // 3. 两者都不存在时仍返回首选枚举，让后续路由给出与请求一致的缺输入失败原因。
     const bool hasImage = GetInputImage() != nullptr;
     const bool hasPolyData = GetInputPolyData() != nullptr;
 
@@ -177,6 +179,8 @@ OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& re
 OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest& request) const
 {
     // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
+    // A. Preview+VolumeData -> image-backed render preview；B. Preview+PolyData -> mesh preview；
+    // C. Submit+ImageData -> 生成可重载 image；Preview+ImageData 和 Submit+Volume/PolyData 均无后端。
     switch (request.operation) {
     case OrthogonalCropOperation::Preview:
         switch (request.dataSource) {
@@ -238,6 +242,7 @@ OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest&
 OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropRequest& request) const
 {
     // Plane 路由放行与 Box 相同的主链路：体预览、网格预览、图像提交。
+    // 几何算法切换为 PlanarCropAlgorithm，但 operation/dataSource 的合法矩阵与 Box 完全一致。
     switch (request.operation) {
     case OrthogonalCropOperation::Preview:
         switch (request.dataSource) {

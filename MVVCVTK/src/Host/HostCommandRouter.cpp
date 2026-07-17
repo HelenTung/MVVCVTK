@@ -18,6 +18,10 @@
 #include <utility>
 #include <variant>
 
+// 宿主协议到应用服务的唯一命令适配层：
+// - 只做 variant/payload 校验、Host 类型到 App 类型转换和目标视图选择；
+// - 不保存业务状态，也不直接执行裁切/间隙算法；
+// - m_core、m_renderViews 为会话期非拥有观察指针，featureBindings 用 weak_ptr 避免路由器延长插件生命周期。
 class HostCommandRouter::Impl final {
 public:
     Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews,
@@ -58,6 +62,8 @@ private:
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
 {
+    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data/Crop/Gap 是为了把 callback/payload
+    // 的所有权继续下沉，View/Tool 只读请求则保留 const 引用。未知分支统一拒绝，不做默认动作。
     if (auto* value = std::get_if<HostDataCommand>(&command)) {
         return SendData(std::move(*value));
     }
@@ -78,6 +84,8 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
 
 bool HostCommandRouter::Impl::SendData(HostDataCommand command) const
 {
+    // action 与 payload variant 必须形成严格配对；即使 payload 本身类型合法，挂在错误 action 下也拒绝。
+    // callback 只随被接纳的异步入口移动，校验失败时不会被调用。
     switch (command.request.action) {
     case HostDataAction::LoadFile:
         if (auto* request = std::get_if<HostLoadRequest>(&command.request.payload)) {
@@ -160,6 +168,8 @@ std::optional<VolumeLayout> HostCommandRouter::Impl::BuildLoadLayout(
 std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
     const std::string& path) const
 {
+    // 仅为未显式提供 dimensions 的 RAW 请求解析文件名尾部 NxMxK；
+    // 解析从最后两个 x/X 分隔符向前收集第一段连续数字，前缀可包含其它描述文本。
     const std::filesystem::path filePath(path);
     std::string extension = filePath.extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
@@ -188,6 +198,7 @@ std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
         std::pair{ first + 1, second },
         std::pair{ second + 1, stem.size() }
     };
+    // from_chars 必须完整消费每个字段且结果为正，避免部分数字、符号或溢出被静默接受。
     for (std::size_t index = 0; index < fields.size(); ++index) {
         const auto [beginIndex, endIndex] = fields[index];
         const char* begin = stem.data() + beginIndex;
@@ -300,6 +311,9 @@ std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
 
 bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
 {
+    // 1. 先解析目标视图，并把 mode/material/transfer/background/window-level 等 Host 字段转换成 App 值对象。
+    // 2. 上述转换项及 opacity/iso 在写入前统一校验；mode 同时更新 service 状态与 context 相机交互风格。
+    // 3. spacing 沿用既有流程在其它字段写入后单独校验，因此 spacing 非法时返回 false 但前序更新不会回滚。
     if (command.request.action != HostViewAction::Set) {
         return false;
     }
@@ -350,6 +364,8 @@ bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
 
 bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
 {
+    // Set 显式写入请求模式；Switch 不携带模式，在 Navigation/ModelTransform 间轮转。
+    // 两条路径都必须先解析出目标 context，None 或 payload/action 不匹配不会触碰当前工具状态。
     const HostViewTarget* target = nullptr;
     std::optional<HostToolMode> requestedMode;
     switch (command.request.action) {
@@ -385,6 +401,8 @@ bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
 
 bool HostCommandRouter::Impl::SendCrop(HostCropCommand command) const
 {
+    // Crop 命令矩阵：Start/Box/Plane/Preview 是同步状态切换，禁止携带完成回调；
+    // Submit 是唯一允许移动异步回调的分支；Exit 必须使用 monostate，防止忽略意外 payload。
     const auto bindings = m_featureBindings.lock();
     if (!bindings) return false;
     switch (command.request.action) {
@@ -437,6 +455,8 @@ bool HostCommandRouter::Impl::SendCrop(HostCropCommand command) const
 
 bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
 {
+    // Gap Start 可启动分析并携带完成回调；Overlay/Exit 是同步显示状态命令，
+    // 因而要求无 callback 且 payload 为 monostate，避免把未消费参数误判为成功。
     const auto bindings = m_featureBindings.lock();
     if (!bindings) return false;
     switch (command.request.action) {
@@ -461,6 +481,8 @@ bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
 HostCompleteCallback HostCommandRouter::Impl::BuildLoadComplete(
     HostCompleteCallback callback) const
 {
+    // 文件加载成功后刷新裁切输入，失败则显式清除旧输入；无论 feature 是否仍存活，
+    // 原始宿主 callback 都会收到同一个结果。weak_ptr 保证延迟完成不会延长 bindings 生命周期。
     const auto bindings = m_featureBindings;
     return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
         if (const auto value = bindings.lock()) {
@@ -473,6 +495,8 @@ HostCompleteCallback HostCommandRouter::Impl::BuildLoadComplete(
 HostCompleteCallback HostCommandRouter::Impl::BuildReloadComplete(
     HostCompleteCallback callback) const
 {
+    // Reload 失败时不向 CropBridge 回灌新输入；本回调不保证 DataManager current 回退。
+    // 只有成功的新快照才重新广播给裁切 feature，随后再转发业务 callback。
     const auto bindings = m_featureBindings;
     return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
         if (isSuccess) if (const auto value = bindings.lock()) value->SendCropInput();

@@ -42,6 +42,8 @@ CropBoundsDouble6Array CropGeometryAlgorithm::GetCanonicalBounds()
 CropMatrixDouble16Array CropGeometryAlgorithm::GetBoxMatrix(
     const CropBoundsDouble6Array& inputModelBounds)
 {
+    // 标准盒坐标每轴范围为 [-1,1]，因此 scale 取 AABB 半尺寸、translation 取中心；
+    // 结果方向固定为 canonical box -> active input model，不包含 world 变换。
     const double centerX = (inputModelBounds[0] + inputModelBounds[1]) * 0.5;
     const double centerY = (inputModelBounds[2] + inputModelBounds[3]) * 0.5;
     const double centerZ = (inputModelBounds[4] + inputModelBounds[5]) * 0.5;
@@ -57,6 +59,8 @@ CropMatrixDouble16Array CropGeometryAlgorithm::GetBoxMatrix(
     };
 }
 
+// Box 后端的无状态实现集合：先把 request 固化为 CropDataModel，再按 preview/submit 路由
+// 生成轮廓、主图和 mask。AABB 只负责校验与缩小遍历域，精确 inside 始终由逆矩阵回到标准盒判断。
 class OrthogonalCropAlgorithm::Impl final {
 public:
     // 统一的 bounds 比较容差，避免浮点误差导致边界判断抖动。
@@ -313,6 +317,8 @@ std::size_t OrthogonalCropAlgorithm::Impl::GetVoxelBytes(vtkImageData* image)
 
 std::size_t OrthogonalCropAlgorithm::Impl::GetVoxelCount(const std::array<int, 6>& indexBounds)
 {
+    // indexBounds 是三轴闭区间，所以每轴长度必须加 1；调用点保证 bounds 已排序并吸附到有效维度。
+    // 这里不单独做乘法溢出处理，当前结果只用于同一输入图像的 RAM 估算。
     const std::size_t sizeI = static_cast<std::size_t>(indexBounds[1] - indexBounds[0] + 1);
     const std::size_t sizeJ = static_cast<std::size_t>(indexBounds[3] - indexBounds[2] + 1);
     const std::size_t sizeK = static_cast<std::size_t>(indexBounds[5] - indexBounds[4] + 1);
@@ -524,6 +530,10 @@ void OrthogonalCropAlgorithm::Impl::SetRemovedBg(
     CropRemovalMode removalMode,
     const std::array<int, 6>& inputImageIndexBounds)
 {
+    // 路径不变量：
+    // A. KeepInside + axis-aligned 已由 GetExtractedImage 得到纯 ROI，无盒外体素，直接返回。
+    // B. KeepInside + oriented box 遍历整个 compact submit，清除 AABB 内但标准盒外的角部。
+    // C. RemoveInside 保留 full volume，只在 snapped AABB 内把标准盒内部写成背景。
     if (!submitImage) {
         return;
     }
@@ -563,6 +573,8 @@ void OrthogonalCropAlgorithm::Impl::SetRemovedBg(
     const std::vector<double> backgroundTuple(
         static_cast<std::size_t>(componentCount),
         scalarRange[0]);
+
+    // 所有分量统一写输入标量范围最小值；mask 另行记录 255/0，主图本身不引入额外背景常量。
 
     auto inputModelToBoxMatrix = GetInputModelToBoxMatrix(cropData);
     auto indexToPhysicalMatrix = submitImage->GetIndexToPhysicalMatrix();
@@ -780,6 +792,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::Impl::GetSubmitResult(
     const std::size_t estimatedRamUsageBytes = isRemoveInside
         ? fullVoxelCount * (GetVoxelBytes(image) + sizeof(unsigned char))
         : roiVoxelCount * GetVoxelBytes(image);
+    // RemoveInside 必须同时保留整卷主图与整卷 mask；KeepInside 主图缩为 ROI，
+    // compact mask 在后续单独生成，因此这里沿用既有估算口径只计算主图体素字节。
     if (availableRamBytes != 0 && estimatedRamUsageBytes > availableRamBytes) {
         return OrthogonalCropAlgorithm::Impl::GetFailure(
             request,
@@ -824,6 +838,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::Impl::GetSubmitResult(
 
     CropDataModel submitCropData = cropData;
     if (!isRemoveInside) {
+        // KeepInside 输出已变成新 image model：extent 起点归零、origin 移到 ROI 起点。
+        // 因此结果几何快照也改写为输出 AABB，而不能继续暴露原输入中的有向盒矩阵。
         double submitBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
         submitImage->GetBounds(submitBounds);
         const CropBoundsDouble6Array submitInputModelBounds = {
@@ -849,6 +865,8 @@ OrthogonalCropResult OrthogonalCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
+    // 路由拒绝发生在任何几何计算之前：image 入口只接受 Box 的 Volume preview 或 Image submit。
+    // availableRamBytes 优先采用请求显式上限，0 才回退到 router 查询的系统可用内存。
     const bool isPreviewRoute =
         request.geometryType == CropShape::Box
         && request.operation == OrthogonalCropOperation::Preview

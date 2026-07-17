@@ -179,6 +179,8 @@ bool CropBoxWidget::Impl::GetCurrentWorldBox(
     CropVectorDouble3Array& baseSize,
     CropMatrixDouble16Array& baseToNow) const
 {
+    // 输出构造分三步：验证最近一次 PlaceWidget 基准 -> 读取当前有向角点 -> 反解 baseToNow affine。
+    // 任一步失败都不发布部分几何，调用方可以继续使用已有 world AABB 作为兜底。
     if (!m_representation || !GetBoundsAreValid(m_baseBounds)) {
         return false;
     }

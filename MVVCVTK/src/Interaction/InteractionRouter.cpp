@@ -16,6 +16,8 @@ void InteractionRouter::ClearHandlers()
 InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
     RouterDispatchMode mode)
 {
+    // FirstMatch 的“命中”由 isHandled 决定并立即停止；Broadcast 始终遍历完整列表。
+    // 两种模式都 OR 聚合 hasVtkAbort，因此任一路径要求阻止 VTK 默认行为都会保留到调用方。
     InteractionResult aggregated;
 
     for (const auto& handler : m_handlers) {

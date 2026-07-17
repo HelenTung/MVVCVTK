@@ -15,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+// 热键状态只记录“某 action 是否按下”，用于把操作系统/VTK 的重复 KeyPress 压缩成一次命令边沿；
+// 业务目标和参数全部来自 HostHotkeyConfig/Templates，不在输入层推断算法配置。
 class HostHotkeyRouter::Impl final {
 public:
     Impl(const HostRenderViewSet& renderViews,
@@ -30,6 +32,7 @@ public:
 
 private:
     enum class HotkeyAction {
+        // Model 只属于 context 工具输入；其余可执行项属于 command/feature 输入权限。
         None, Model, ExportVolume, ExportSlices, CropBox, CropPlane,
         GapSwitch, Exit, KeepPreview, RemovePreview, Submit, Count
     };
@@ -46,11 +49,11 @@ private:
     bool GetViewFound(const std::vector<const HostRenderViewRuntime*>& views,
         const HostRenderViewRuntime* view) const;
 
-    const HostRenderViewSet* m_renderViews = nullptr;
-    std::weak_ptr<HostFeatureBindings> m_featureBindings;
-    std::weak_ptr<HostCommandRouter> m_commandRouter;
-    std::vector<std::weak_ptr<StdRenderContext>> m_contexts;
-    mutable std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)> m_isDown{};
+    const HostRenderViewSet* m_renderViews = nullptr; // 非拥有；解析配置中的 id/role 目标。
+    std::weak_ptr<HostFeatureBindings> m_featureBindings; // 查询 Crop/Gap 当前模式，不延长 feature 生命周期。
+    std::weak_ptr<HostCommandRouter> m_commandRouter;     // 命令投递能力，失效时热键静默拒绝。
+    std::vector<std::weak_ptr<StdRenderContext>> m_contexts; // 已安装 handler 的 context，用于对称清理。
+    mutable std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)> m_isDown{}; // action 级按下去重状态。
 };
 
 bool HostHotkeyRouter::Impl::GetCharMatched(
@@ -93,6 +96,12 @@ bool HostHotkeyRouter::Impl::SendCommand(
     HotkeyAction action, HostRenderViewRole role,
     const HostHotkeyTemplates& templates) const
 {
+    // 所有分支先锁定统一 router，随后只构造 Host 层 request：
+    // A. Model：以触发窗口 role 为目标，切换 Navigation/ModelTransform。
+    // B. Export：复用模板；切片模板未指定 source 时回退触发窗口 role。
+    // C. Crop：Box/Plane/Submit 复用 target，Preview 额外写 KeepInside/RemoveInside。
+    // D. Gap：已进入显示模式时切 overlay，否则用模板启动分析。
+    // E. Exit：按 Crop -> Gap -> 当前窗口 Navigation 的优先级退出最内层模式。
     const auto router = m_commandRouter.lock();
     if (!router) return false;
 
@@ -192,17 +201,20 @@ InteractionResult HostHotkeyRouter::Impl::OnHotkey(
     bool hasFeature, bool hasContext, const HostHotkeyConfig& config,
     const HostHotkeyTemplates& templates) const
 {
+    // 1. 解析 action 并校验输入作用域：Model 需要 context 权限，其余 action 需要 command 权限。
     const HotkeyAction action = GetHotkeyAction(event, config);
     if (action == HotkeyAction::None) return {};
     if ((action == HotkeyAction::Model && !hasContext)
         || (action != HotkeyAction::Model && !hasFeature)) return {};
 
+    // 2. CharEvent 只消费 VTK 默认行为；Release 清除按下态；其它非 KeyPress 事件不参与命令。
     if (event.vtkEventId == vtkCommand::CharEvent) return { true, true };
     if (event.vtkEventId == vtkCommand::KeyReleaseEvent) {
         SetActionDown(action, false);
         return { true, true };
     }
     if (event.vtkEventId != vtkCommand::KeyPressEvent) return {};
+    // 3. Submit 额外要求 Ctrl；KeyPress 只有从 up->down 的首次边沿真正发命令，重复事件仍被消费。
     if (action == HotkeyAction::Submit && !event.isCtrlDown) return { true, true };
     if (!SetActionDown(action, true)) return { true, true };
     SendCommand(action, role, templates);
@@ -219,10 +231,12 @@ bool HostHotkeyRouter::Impl::GetViewFound(
 bool HostHotkeyRouter::Impl::AttachHotkeys(
     const HostHotkeyConfig& config, HostHotkeyTemplates templates)
 {
+    // 1. 重绑前先卸载全部旧 handler；两个输入域都关闭时，清理成功即视为有效配置。
     ClearHotkeys();
     if (!m_renderViews) return false;
     if (!config.isContextInputEnabled && !config.isCommandInputEnabled) return true;
 
+    // 2. command/context 两组目标独立解析，再按 runtime 指针去重合并；空目标不解释为全选。
     const auto featureViews = config.isCommandInputEnabled
         ? m_renderViews->GetViewsByTargets(config.commandInputViews)
         : std::vector<const HostRenderViewRuntime*>{};
@@ -235,6 +249,7 @@ bool HostHotkeyRouter::Impl::AttachHotkeys(
     }
     if (views.empty()) return false;
 
+    // 3. 每个 context 安装同一组 VTK 键盘事件，但捕获各自 role 与两类权限快照。
     for (const auto* view : views) {
         if (!view || !view->context) continue;
         m_contexts.push_back(view->context);

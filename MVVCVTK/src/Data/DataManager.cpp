@@ -223,6 +223,7 @@ std::array<double, 3> BaseDataManager::GetSpacing() const
 
 bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
 {
+    // 1. spacing 是物理尺度，三个分量都必须有限且严格为正。
     if (!std::all_of(spacing.begin(), spacing.end(), [](double value) {
         return std::isfinite(value) && value > 0.0;
         })) {
@@ -231,6 +232,7 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
 
     constexpr int maxAttempts = 3;
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        // 2. 锁内取得 immutable current 身份，锁外构造候选批次，避免复制/VTK 调用阻塞读线程。
         std::shared_ptr<const ImageState> baseState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
@@ -255,6 +257,7 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         std::shared_ptr<const ImageState> retiredState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+            // 3. 仅当 current 仍是基准对象才提交；并发发布抢先时重试，三次冲突后返回失败。
             if (m_impl->m_current != baseState) {
                 continue;
             }
@@ -298,6 +301,8 @@ bool BaseDataManager::SetFromBuffer(
 
 bool BaseDataManager::SetCurrentFromPending(bool& hasPending)
 {
+    // pending 是单槽 staging：锁内一次性 take，锁外调用 VTK Modified/发布 current。
+    // 这样 worker 只准备候选数据，主线程提交时不会跨 pending 锁进入 VTK。
     hasPending = false;
     ImageState incoming;
     {
@@ -316,6 +321,7 @@ bool BaseDataManager::ClearPending()
     ImageState retiredPending;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        // 锁内只断开 pending 引用；旧候选在离开锁后析构，避免释放大体数据拉长临界区。
         retiredPending = std::move(m_impl->m_pending);
         m_impl->m_pending = {};
     }
@@ -328,6 +334,7 @@ bool BaseDataManager::SetPendingImage(ImageState image)
     ImageState retiredPending;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        // 单槽只保留最新候选；被覆盖批次在离开锁后随 retiredPending 析构。
         retiredPending = std::move(m_impl->m_pending);
         m_impl->m_pending = std::move(image);
     }
@@ -365,6 +372,9 @@ bool BaseDataManager::ExportSlices(
     const WindowLevelParams& windowLevel,
     const std::array<double, 16>& modelToWorldMatrix)
 {
+
+    // 导出路径：1. 固定 current 批次并把 modelToWorld 取逆；2. 重采样到轴对齐体数据；
+    // 3. 按 Orientation 将二维像素映射回 X/Y/Z；4. 应用窗宽窗位并逐层写 PNG。
 
     if (dirPath.empty()) {
         std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
@@ -454,16 +464,19 @@ bool BaseDataManager::ExportSlices(
                 int y = 0;
                 int z = 0;
 
+                // A. TopDown 固定 Z，图片横纵轴映射为 X/Y。
                 if (orientation == Orientation::Top_down) {
                     x = px;
                     y = py;
                     z = sliceIndex;
                 }
+                // B. FrontBack 固定 Y，图片横纵轴映射为 X/Z。
                 else if (orientation == Orientation::Front_back) {
                     x = px;
                     y = sliceIndex;
                     z = py;
                 }
+                // C. LeftRight 固定 X，图片横纵轴映射为 Y/Z。
                 else {
                     x = sliceIndex;
                     y = px;
@@ -495,6 +508,8 @@ bool BaseDataManager::ExportSlices(
 
 bool BaseDataManager::ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
 {
+    // RAW 导出路径：固定 immutable current -> 逆变换重采样 -> 自动裁剪新 bounds ->
+    // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
     std::shared_ptr<const ImageState> currentState;
     {

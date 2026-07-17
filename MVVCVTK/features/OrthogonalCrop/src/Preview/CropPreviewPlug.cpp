@@ -99,6 +99,8 @@ bool CropPreviewPlug::SetPreview(
     const OrthogonalCropResult* polyDataPreviewResult,
     CropRemovalMode removalMode)
 {
+    // 主显示接管顺序固定为：1. 尝试 volume；2. volume 未接管时尝试 polydata；
+    // 3. 无论主显示是否成功，都用传入结果刷新 overlay 几何，最终返回值只代表主显示接管结果。
     if (!targetService || !overlayStrategy) {
         return false;
     }
@@ -128,6 +130,7 @@ bool CropPreviewPlug::SetPreview(
 
     overlayStrategy->SetSliceAxis(targetService->GetNavigationAxis());
 
+    // 这里按“存在 volume 结果”而非“volume 已成功接管”选择 overlay；调用方应保证两类结果属于同一请求几何。
     const OrthogonalCropResult* overlayResult = volumePreviewResult ? volumePreviewResult : polyDataPreviewResult;
     if (overlayResult) {
         auto visibleOverlayResult = *overlayResult;

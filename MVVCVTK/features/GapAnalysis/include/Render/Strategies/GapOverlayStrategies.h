@@ -36,6 +36,7 @@ public:
         AttachProp(m_actor);
     }
 
+    // 只接受 vtkPolyData；类型不匹配时保留 mapper 当前输入，调用方清场应走 overlay detach/clear 生命周期。
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto poly = vtkPolyData::SafeDownCast(data);
         if (poly) {
@@ -89,6 +90,7 @@ public:
         AttachProp(m_slice);
     }
 
+    // 输入 label image 后建立固定轴向切片平面；LUT 把 0 当背景、所有正标签统一显示为红色。
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto img = vtkImageData::SafeDownCast(data);
         if (!img) return;
@@ -107,6 +109,7 @@ public:
         m_mapper->SetSlicePlane(plane);
     }
 
+    // Transform 同步 overlay 的 modelToWorld；Cursor 把 plane origin 移到当前十字线并沿法线微偏移。
     void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
         // 自动跟随主视图的切片滚动和模型变换
         if (((flags & UpdateFlags::Transform) != UpdateFlags::None) || ((flags & UpdateFlags::Cursor) != UpdateFlags::None)) {

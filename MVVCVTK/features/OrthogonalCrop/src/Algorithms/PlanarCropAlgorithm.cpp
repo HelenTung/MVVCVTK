@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+// Plane 后端的无状态实现集合：统一将 request 法线归一化，在 active input model/VTK physical
+// 坐标中计算无限平面的正负半空间，并为 image submit 构造同结构主图与单字节 mask。
 class PlanarCropAlgorithm::Impl final {
 public:
     struct VoxelStep {
@@ -228,6 +230,8 @@ bool PlanarCropAlgorithm::Impl::GetNormalizedPlane(
     CropFailure& failureReason,
     std::string& message)
 {
+    // center 保持 request 中的 active input model 坐标；normal 归一化后才进入所有 side 公式，
+    // 因此 dot 值同时具有有符号 physical distance 语义。零法线沿用现有 BadBounds 失败码。
     planeNormalInInputModel = request.planeNormalInInputModel;
     planeCenterInInputModel = request.planeCenterInInputModel;
 
@@ -254,6 +258,8 @@ bool PlanarCropAlgorithm::Impl::GetPlaneData(
     CropFailure& failureReason,
     std::string& message)
 {
+    // 构造顺序：先验证输入 AABB，再验证/归一化几何，最后一次性写入 cropData。
+    // planeHalf 只保留 widget 可视尺度；裁切方程不使用它，实际几何始终是无限半空间。
     if (!GetBoundsValid(inputModelBounds)) {
         failureReason = CropFailure::BadBounds;
         message = "Input model bounds are invalid.";
@@ -289,6 +295,7 @@ bool PlanarCropAlgorithm::Impl::GetPointIsOnNormalSide(
         inputModelPoint[2] - planeCenterInInputModel[2]
     };
 
+    // Inside 定义为严格正半空间；平面上的点（dot == 0）归入 OppositeSide。
     return vtkMath::Dot(offset, planeNormalInInputModel.data()) > 0.0;
 }
 
@@ -297,6 +304,8 @@ PlanarCropAlgorithm::Impl::VoxelStep PlanarCropAlgorithm::Impl::GetSideStep(
     const CropDataModel& cropData,
     const int dims[3])
 {
+    // 将 physical 平面方程预展开到连续 index 空间：矩阵三列分别表示 i/j/k 单位步长，
+    // 与单位法线点积后即可用线性增量计算整行 side，避免每个体素都执行矩阵变换。
     VoxelStep sideStep;
     if (!image) {
         return sideStep;
@@ -345,6 +354,8 @@ bool PlanarCropAlgorithm::Impl::GetVoxelOnSide(
     const int index[3],
     double planeSide)
 {
+    // 远离边界时直接信任 index 空间线性式；接近零面时回到 VTK physical point 精确重算，
+    // 避免大尺寸遍历累积误差改变边界 voxel 的归属。
     if (std::abs(planeSide) > sideStep.boundaryEpsilon) {
         return planeSide > 0.0;
     }
@@ -462,6 +473,9 @@ PlanarCropAlgorithm::Impl::SubmitImages PlanarCropAlgorithm::Impl::GetSubmitImag
     const CropDataModel& cropData,
     CropRemovalMode removalMode)
 {
+    // 1. 输出主图复制输入结构、标量类型和分量数；mask 复制结构但固定为单分量 UCHAR。
+    // 2. 以 x-fast 的连续内存行作为分类单位：整行同侧走 memcpy/背景快路径，跨面行才逐 voxel 判断。
+    // 3. KeepInside 保留 normal 正侧，RemoveInside 反转该布尔；mask 始终 255=保留、0=移除。
     SubmitImages images;
     if (!image) {
         return images;
@@ -555,6 +569,7 @@ PlanarCropAlgorithm::Impl::SubmitImages PlanarCropAlgorithm::Impl::GetSubmitImag
                 rowEndSide,
                 sideStep.boundaryEpsilon);
             if (rowSide != RowSide::Mixed) {
+                // 两端 side 均越过同一 epsilon 且 side 沿 i 为线性函数，因此整行必在同一半空间。
                 const bool isRowInside = rowSide == RowSide::NormalSide;
                 const bool isRowKept = isKeepInside ? isRowInside : !isRowInside;
                 SetRowBytes(
@@ -570,6 +585,7 @@ PlanarCropAlgorithm::Impl::SubmitImages PlanarCropAlgorithm::Impl::GetSubmitImag
 
             double planeSide = rowStartSide;
             for (int iOffset = 0; iOffset < dims[0]; ++iOffset) {
+                // Mixed 行逐点消费 epsilon 回退；extent 可非零，内存 offset 仍按局部 iOffset 递增。
                 const int index[3] = { extent[0] + iOffset, j, k };
                 const bool isInside = GetVoxelOnSide(
                     image,
@@ -661,6 +677,8 @@ OrthogonalCropResult PlanarCropAlgorithm::GetResult(
     const OrthogonalCropRequest& request,
     std::size_t fallbackAvailableRamBytes)
 {
+    // image 入口只接受 Plane 的 Volume preview 或 Image submit；其它 operation/dataSource 组合
+    // 在读取输入或计算平面之前返回 NoBackend，避免“路由错误但产生了部分 artifact”。
     const bool isPreviewRoute =
         request.geometryType == CropShape::Plane
         && request.operation == OrthogonalCropOperation::Preview
