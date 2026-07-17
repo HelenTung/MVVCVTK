@@ -26,7 +26,7 @@ enum class RouterDispatchMode
 //   router.AttachHandler(std::make_unique<Viewer2DHandler>(...));
 //   ...
 //   InteractionResult r = router.Dispatch(eve, RouterDispatchMode::FirstMatch);
-//   if (r.hasVtkAbort) callback->SetAbortFlag(1);
+//   if (r.isPropagationStopped) callback->SetAbortFlag(1);
 // ─────────────────────────────────────────────────────────────────────
 class InteractionRouter
 {
@@ -38,8 +38,8 @@ public:
     void ClearHandlers();
 
     // 分发事件
-    // - FirstMatch：第一个 isHandled=true 后停止，返回其结果（hasVtkAbort 聚合）
-    // - Broadcast ：所有 Handler 均执行，hasVtkAbort 取 OR 聚合
+    // - FirstMatch：第一个 isHandled=true 后停止，返回其结果（传播停止状态聚合）
+    // - Broadcast ：所有 Handler 均执行，传播停止状态取 OR 聚合
     InteractionResult Dispatch(const InteractionEvent& eve,
         RouterDispatchMode mode = RouterDispatchMode::FirstMatch);
 

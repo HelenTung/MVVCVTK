@@ -13,15 +13,15 @@ public:
 
     InputCallbackHandler(
         Callback callback,
-        std::vector<unsigned long> eventIds);
+        std::vector<InteractionEventKind> eventKinds);
 
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
-    bool GetEventMatched(unsigned long eventId) const;
+    bool GetEventMatched(InteractionEventKind eventKind) const;
 
-    // Handler 按值拥有外部适配 callback；仅命中 eventIds 后同步调用，捕获对象生命周期由 callback 决定。
+    // Handler 按值拥有外部适配 callback；仅命中 eventKinds 后同步调用，捕获对象生命周期由 callback 决定。
     Callback m_callback;
-    // VTK event id 白名单；空数组表示匹配所有送达本 Handler 的事件。
-    std::vector<unsigned long> m_eventIds;
+    // 语义事件白名单；空数组表示匹配所有送达本 Handler 的事件。
+    std::vector<InteractionEventKind> m_eventKinds;
 };

@@ -4,27 +4,38 @@
 
 #include <string>
 
-class vtkRenderWindowInteractor;
+// Interaction 层只传播稳定语义；VTK 原始事件编号由 RenderContext 在适配边界统一转换。
+enum class InteractionEventKind
+{
+    None,
+    Timer,
+    WheelForward,
+    WheelBackward,
+    PrimaryPress,
+    PrimaryRelease,
+    SecondaryPress,
+    SecondaryRelease,
+    PointerMove,
+    KeyPress,
+    KeyRelease,
+    TextInput,
+    ViewInteraction,
+    Exit
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // InteractionEvent — Router 内部流通的统一事件结构体
 //
-// 由 RenderContext（StdRenderContext 或未来的 QtRenderContext）负责
-// 从 vtkRenderWindowInteractor 中提取字段并填充，
-// 随后交给 InteractionRouter::Dispatch 分发给各 Handler。
+// 由 RenderContext 从底层输入对象提取字段并填充，随后交给
+// InteractionRouter::Dispatch 分发给各 Handler。
 //
 // 设计约束：
 //   • 纯数据，无虚函数；keySym 由 std::string 自主管理文本内存
-//   • Handler 通过此结构体获取所有信息，不应再裸访问 iren
+//   • Handler 通过此结构体获取全部输入快照，不依赖底层工具包对象
 // ─────────────────────────────────────────────────────────────────────
 struct InteractionEvent
 {
-    // ── VTK 原始事件 ID（vtkCommand::LeftButtonPressEvent 等）；0 表示未填充 ──
-    unsigned long vtkEventId = 0;
-
-    // ── 非拥有 interactor 观察指针，仅在当前 Dispatch 调用期间有效 ──────────
-    // Handler 通常不需要查询它，且不得借此修改 VTK 状态；中止标志由 Router 统一处理。
-    vtkRenderWindowInteractor* iren = nullptr;
+    InteractionEventKind eventKind = InteractionEventKind::None;
 
     // ── 鼠标屏幕坐标（像素，左下角为原点，与 VTK 约定一致） ───────────
     int x = 0;
@@ -47,12 +58,11 @@ struct InteractionEvent
 // ─────────────────────────────────────────────────────────────────────
 // InteractionResult — Handler::Send() 的返回值
 //
-//   isHandled  = true  → Router 在 FirstMatch 模式下停止向后传递
-//   hasVtkAbort = true  → RenderContext 应对当前 VTK 事件调用 SetAbortFlag(1)
-//                       以阻止 VTK 默认的 interactor style 继续处理
+//   isHandled            = true → Router 在 FirstMatch 模式下停止向后传递
+//   isPropagationStopped = true → RenderContext 应阻止底层事件继续传播
 // ─────────────────────────────────────────────────────────────────────
 struct InteractionResult
 {
     bool isHandled = false; // true 表示已消费；FirstMatch 据此停止，Broadcast 仅做 OR 聚合
-    bool hasVtkAbort = false; // true 由 Router 做 OR 聚合，Context 随后中止 VTK 默认传播
+    bool isPropagationStopped = false; // true 由 Router 做 OR 聚合，Context 随后停止底层传播
 };

@@ -6,8 +6,6 @@
 #include "Interaction/InteractionTypes.h"
 #include "StdRenderContext.h"
 
-#include <vtkCommand.h>
-
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -207,13 +205,13 @@ InteractionResult HostHotkeyRouter::Impl::OnHotkey(
     if ((action == HotkeyAction::Model && !hasContext)
         || (action != HotkeyAction::Model && !hasFeature)) return {};
 
-    // 2. CharEvent 只消费 VTK 默认行为；Release 清除按下态；其它非 KeyPress 事件不参与命令。
-    if (event.vtkEventId == vtkCommand::CharEvent) return { true, true };
-    if (event.vtkEventId == vtkCommand::KeyReleaseEvent) {
+    // 2. TextInput 只消费底层默认行为；Release 清除按下态；其它事件不参与命令。
+    if (event.eventKind == InteractionEventKind::TextInput) return { true, true };
+    if (event.eventKind == InteractionEventKind::KeyRelease) {
         SetActionDown(action, false);
         return { true, true };
     }
-    if (event.vtkEventId != vtkCommand::KeyPressEvent) return {};
+    if (event.eventKind != InteractionEventKind::KeyPress) return {};
     // 3. Submit 额外要求 Ctrl；KeyPress 只有从 up->down 的首次边沿真正发命令，重复事件仍被消费。
     if (action == HotkeyAction::Submit && !event.isCtrlDown) return { true, true };
     if (!SetActionDown(action, true)) return { true, true };
@@ -249,7 +247,7 @@ bool HostHotkeyRouter::Impl::AttachHotkeys(
     }
     if (views.empty()) return false;
 
-    // 3. 每个 context 安装同一组 VTK 键盘事件，但捕获各自 role 与两类权限快照。
+    // 3. 每个 context 安装同一组语义键盘事件，但捕获各自 role 与两类权限快照。
     for (const auto* view : views) {
         if (!view || !view->context) continue;
         m_contexts.push_back(view->context);
@@ -262,7 +260,9 @@ bool HostHotkeyRouter::Impl::AttachHotkeys(
                 return impl->OnHotkey(
                     event, role, hasFeature, hasContext, config, templates);
             },
-            { vtkCommand::KeyPressEvent, vtkCommand::KeyReleaseEvent, vtkCommand::CharEvent });
+            { InteractionEventKind::KeyPress,
+              InteractionEventKind::KeyRelease,
+              InteractionEventKind::TextInput });
     }
     return true;
 }

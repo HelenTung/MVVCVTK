@@ -188,7 +188,7 @@ void StdRenderContext::BuildInteractionRouter()
     if (m_inputHandler) {
         m_interactionRouter.AttachHandler(std::make_unique<InputCallbackHandler>(
             m_inputHandler,
-            m_inputEventIds));
+            m_inputEventKinds));
     }
 
     if (!m_interactiveService) {
@@ -348,10 +348,10 @@ void StdRenderContext::SetToolMode(ToolMode mode)
 
 void StdRenderContext::SetInputHandler(
     std::function<InteractionResult(const InteractionEvent&)> handler,
-    std::vector<unsigned long> eventIds)
+    std::vector<InteractionEventKind> eventKinds)
 {
     m_inputHandler = std::move(handler);
-    m_inputEventIds = std::move(eventIds);
+    m_inputEventKinds = std::move(eventKinds);
     BuildInteractionRouter();
 
 }
@@ -359,7 +359,7 @@ void StdRenderContext::SetInputHandler(
 void StdRenderContext::ClearInputHandler()
 {
     m_inputHandler = nullptr;
-    m_inputEventIds.clear();
+    m_inputEventKinds.clear();
     BuildInteractionRouter();
 
 }
@@ -376,13 +376,47 @@ void StdRenderContext::ClearTimerHandler()
 
 }
 
+InteractionEventKind StdRenderContext::GetEventKind(unsigned long eventId) const
+{
+    // VTK 编码只在这里转换；Router、Handler 和 Host 只接触稳定的交互语义。
+    switch (eventId) {
+    case vtkCommand::TimerEvent:
+        return InteractionEventKind::Timer;
+    case vtkCommand::MouseWheelForwardEvent:
+        return InteractionEventKind::WheelForward;
+    case vtkCommand::MouseWheelBackwardEvent:
+        return InteractionEventKind::WheelBackward;
+    case vtkCommand::LeftButtonPressEvent:
+        return InteractionEventKind::PrimaryPress;
+    case vtkCommand::LeftButtonReleaseEvent:
+        return InteractionEventKind::PrimaryRelease;
+    case vtkCommand::RightButtonPressEvent:
+        return InteractionEventKind::SecondaryPress;
+    case vtkCommand::RightButtonReleaseEvent:
+        return InteractionEventKind::SecondaryRelease;
+    case vtkCommand::MouseMoveEvent:
+        return InteractionEventKind::PointerMove;
+    case vtkCommand::KeyPressEvent:
+        return InteractionEventKind::KeyPress;
+    case vtkCommand::KeyReleaseEvent:
+        return InteractionEventKind::KeyRelease;
+    case vtkCommand::CharEvent:
+        return InteractionEventKind::TextInput;
+    case vtkCommand::InteractionEvent:
+        return InteractionEventKind::ViewInteraction;
+    case vtkCommand::ExitEvent:
+        return InteractionEventKind::Exit;
+    default:
+        return InteractionEventKind::None;
+    }
+}
+
 void StdRenderContext::BuildInteractionEvent(
     InteractionEvent& eve,
     vtkRenderWindowInteractor* interactor,
-    long unsigned int eventId) const
+    InteractionEventKind eventKind) const
 {
-    eve.vtkEventId = eventId;
-    eve.iren = interactor;
+    eve.eventKind = eventKind;
 
     const int* pos = interactor->GetEventPosition();
     if (pos) {
@@ -404,8 +438,8 @@ void StdRenderContext::BuildInteractionEvent(
 // OnVTKEvent —— 统一入口，委托给 Router
 //
 // 这里只做三件事：
-//   1. ExitEvent / 守卫性检查
-//   2. 填充 InteractionEvent → Dispatch → 处理 hasVtkAbort
+//   1. 将 VTK raw id 映射为语义事件并处理 Exit/未知事件
+//   2. 填充 InteractionEvent → Dispatch → 写回传播停止状态
 // ─────────────────────────────────────────────────────────────────────
 }
 
@@ -420,9 +454,14 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
         m_eventCallback->AbortFlagOff();
     }
 
-    // ── ExitEvent：销毁定时器，停止心跳 ─────────────────────────────
-    if (eventId == vtkCommand::ExitEvent) {
+    const InteractionEventKind eventKind = GetEventKind(eventId);
+
+    // Exit 只停止心跳；普通 observer 继续按既有析构/换绑路径对称清理。
+    if (eventKind == InteractionEventKind::Exit) {
         RemoveTimer();
+        return;
+    }
+    if (eventKind == InteractionEventKind::None) {
         return;
     }
 
@@ -431,21 +470,21 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
     if (!iren) return;
 
     InteractionEvent eve;
-    BuildInteractionEvent(eve, iren, eventId);
+    BuildInteractionEvent(eve, iren, eventKind);
 
     // Timer → Broadcast（所有 Handler 均需执行）；其余 → FirstMatch
-    const auto dispatchMode = (eventId == vtkCommand::TimerEvent)
+    const auto dispatchMode = (eventKind == InteractionEventKind::Timer)
         ? RouterDispatchMode::Broadcast
         : RouterDispatchMode::FirstMatch;
 
     const InteractionResult result =
         m_interactionRouter.Dispatch(eve, dispatchMode);
 
-    if (eventId == vtkCommand::TimerEvent && m_timerHandler) {
+    if (eventKind == InteractionEventKind::Timer && m_timerHandler) {
         m_timerHandler();
     }
 
-    if (result.hasVtkAbort && m_eventCallback) {
+    if (result.isPropagationStopped && m_eventCallback) {
         // 业务层已经完整消费该事件时，阻止 VTK 默认相机/窗口行为继续处理，避免双重响应。
         m_eventCallback->SetAbortFlag(1);
     }

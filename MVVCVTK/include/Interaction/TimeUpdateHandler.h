@@ -5,7 +5,7 @@ class AbstractAppService;
 class vtkRenderWindow;
 
 // ─────────────────────────────────────────────────────────────────────
-// TimeUpdateHandler — 处理 VTK TimerEvent（心跳）
+// TimeUpdateHandler — 处理语义化 Timer 事件（心跳）
 //
 // 职责：
 //   1. 驱动 Service::SendUpdates()（数据同步、策略重建）

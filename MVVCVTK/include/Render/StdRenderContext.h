@@ -30,9 +30,9 @@ private:
     std::vector<unsigned long> m_observerTags;
     unsigned long m_timerObserverTag = 0; // TimerEvent observer tag；RemoveTimer 后清零
     int m_timerId = 0; // CreateRepeatingTimer 返回值；0 表示未创建，RemoveTimer 负责销毁并清零
-    // Context 按值持有 host 输入 hook；空 eventIds 匹配全部事件，设置/清除后重建对应 Handler。
+    // Context 按值持有 host 输入 hook；空 eventKinds 匹配全部事件，设置/清除后重建对应 Handler。
     std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;
-    std::vector<unsigned long> m_inputEventIds;
+    std::vector<InteractionEventKind> m_inputEventKinds;
     // Context 按值持有主线程 tick hook；每个 TimerEvent 在 Router 分发后同步调用，Clear 时释放。
     std::function<void()> m_timerHandler;
 
@@ -48,9 +48,10 @@ private:
     void RemoveTimer();
     // service、interactor、renderWindow 或输入 hook 变化后重建路由表，刷新 Handler 的观察依赖。
     void BuildInteractionRouter();
+    InteractionEventKind GetEventKind(unsigned long eventId) const;
     void BuildInteractionEvent(InteractionEvent& eve,
         vtkRenderWindowInteractor* interactor,
-        long unsigned int eventId) const; // 把 VTK 原生事件压平成业务层统一使用的 InteractionEvent
+        InteractionEventKind eventKind) const; // 把底层输入压平成业务层统一使用的 InteractionEvent
 
 public:
     void SetInteractorReady() override;
@@ -66,7 +67,7 @@ public:
     ToolMode GetToolMode() const { return m_toolMode; }
     void SetInputHandler(
         std::function<InteractionResult(const InteractionEvent&)> handler,
-        std::vector<unsigned long> eventIds);
+        std::vector<InteractionEventKind> eventKinds);
     void ClearInputHandler();
     void SetTimerHandler(std::function<void()> handler);
     void ClearTimerHandler();

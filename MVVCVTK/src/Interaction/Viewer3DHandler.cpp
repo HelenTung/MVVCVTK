@@ -1,7 +1,6 @@
 #include "Viewer3DHandler.h"
 #include "AppInterfaces.h"
 #include <vtkActor.h>
-#include <vtkCommand.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -24,7 +23,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     }
 
     if (eve.toolMode == ToolMode::ModelTransform
-        && eve.vtkEventId == vtkCommand::InteractionEvent) {
+        && eve.eventKind == InteractionEventKind::ViewInteraction) {
         vtkProp3D* prop = m_service->GetMainProp();
         if (prop && prop->GetMatrix()) {
             m_service->SetModelMatrix(prop->GetMatrix());
@@ -45,7 +44,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     // 其他鼠标事件继续交给 VTK 默认相机控制，避免把 3D 浏览手感全部吞掉。
 
     // ── 左键按下：拾取切片平面 ────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::LeftButtonPressEvent)
+    if (eve.eventKind == InteractionEventKind::PrimaryPress)
     {
         if (!m_picker || !m_renderer) {
             return {};
@@ -66,7 +65,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                 if (vtkRenderWindow* rw = m_renderer->GetRenderWindow()) {
                     rw->SetDesiredUpdateRate(15.0);
                 }
-                return { true, true };  // hasVtkAbort=true：阻止相机转动
+                return { true, true };  // 停止传播，阻止相机转动
             }
         }
         // 点到主模型或空白处：不消费，让相机交互继续
@@ -74,7 +73,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 左键抬起：结束拖拽 ────────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::LeftButtonReleaseEvent)
+    if (eve.eventKind == InteractionEventKind::PrimaryRelease)
     {
         if (m_isDragging) {
             // 恢复静态高精度渲染（VTK 推荐静态更新率 0.001）
@@ -91,7 +90,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 鼠标移动：平面拖拽 ────────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::MouseMoveEvent)
+    if (eve.eventKind == InteractionEventKind::PointerMove)
     {
         if (!m_isDragging || m_dragAxis == -1 || !m_renderer) {
             return {};

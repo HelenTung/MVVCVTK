@@ -853,14 +853,21 @@ bool VizService::Impl::LoadFileAsync(
         return false;
     }
     if (!m_dataManager || !m_dataManager->ClearPending()
-        || !SetOwnedLoad(LoadEventKind::File)
-        || !StartTask(std::move(*task), LoadEventKind::File,
-            std::move(onComplete))) {
+        || !SetOwnedLoad(LoadEventKind::File)) {
         if (m_dataManager) m_dataManager->ClearPending();
         m_sharedState->SetFileLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::File);
         ResetOwnedLoad(LoadEventKind::File);
         SetCompletion(false, std::move(onComplete));
+        return false;
+    }
+    // StartTask 接管 callback 后也负责所有启动失败完成通知；移交后外层只回滚 load 状态。
+    if (!StartTask(std::move(*task), LoadEventKind::File,
+        std::move(onComplete))) {
+        m_dataManager->ClearPending();
+        m_sharedState->SetFileLoadFailed();
+        m_sharedState->ResetLoad(LoadEventKind::File);
+        ResetOwnedLoad(LoadEventKind::File);
         return false;
     }
     return true;
@@ -882,14 +889,21 @@ bool VizService::Impl::ReloadFromBufferAsync(
         return false;
     }
     if (!m_dataManager || !m_dataManager->ClearPending()
-        || !SetOwnedLoad(LoadEventKind::Reload)
-        || !StartTask(std::move(*task), LoadEventKind::Reload,
-            std::move(onComplete))) {
+        || !SetOwnedLoad(LoadEventKind::Reload)) {
         if (m_dataManager) m_dataManager->ClearPending();
         m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         ResetOwnedLoad(LoadEventKind::Reload);
         SetCompletion(false, std::move(onComplete));
+        return false;
+    }
+    // callback 的失败完成由 StartTask 统一排队，避免在所有权移交后再次访问移动源。
+    if (!StartTask(std::move(*task), LoadEventKind::Reload,
+        std::move(onComplete))) {
+        m_dataManager->ClearPending();
+        m_sharedState->SetReloadLoadFailed();
+        m_sharedState->ResetLoad(LoadEventKind::Reload);
+        ResetOwnedLoad(LoadEventKind::Reload);
         return false;
     }
     return true;
@@ -901,10 +915,12 @@ void VizService::Impl::ExportDataAsync(
 {
     auto task = m_dataExportTaskService
         ? m_dataExportTaskService->BuildDataTask(path) : std::nullopt;
-    if (!task || !StartTask(
-        std::move(*task), LoadEventKind::None, std::move(onComplete))) {
+    if (!task) {
         SetCompletion(false, std::move(onComplete));
+        return;
     }
+    // StartTask 从这里开始独占 callback，并负责启动失败通知。
+    StartTask(std::move(*task), LoadEventKind::None, std::move(onComplete));
 }
 
 void VizService::Impl::ExportSlicesAsync(
@@ -916,10 +932,12 @@ void VizService::Impl::ExportSlicesAsync(
     auto task = m_dataExportTaskService
         ? m_dataExportTaskService->BuildSlicesTask(
             path, rotationAngleDeg, currentMode) : std::nullopt;
-    if (!task || !StartTask(
-        std::move(*task), LoadEventKind::None, std::move(onComplete))) {
+    if (!task) {
         SetCompletion(false, std::move(onComplete));
+        return;
     }
+    // StartTask 从这里开始独占 callback，并负责启动失败通知。
+    StartTask(std::move(*task), LoadEventKind::None, std::move(onComplete));
 }
 
 // ─────────────────────────────────────────────────────────────────────

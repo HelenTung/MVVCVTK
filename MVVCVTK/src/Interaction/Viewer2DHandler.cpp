@@ -1,6 +1,5 @@
 #include "Viewer2DHandler.h"
 #include "AppInterfaces.h"
-#include <vtkCommand.h>
 #include <vtkMath.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
@@ -34,19 +33,19 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     // 滚轮切片、isShiftDown 左键拖十字线、isCtrlDown 左键定轴旋转、右键调窗彼此互斥。
 
     // ── 滚轮切片 ──────────────────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent
-        || eve.vtkEventId == vtkCommand::MouseWheelBackwardEvent)
+    if (eve.eventKind == InteractionEventKind::WheelForward
+        || eve.eventKind == InteractionEventKind::WheelBackward)
     {
         const int step = eve.isCtrlDown ? 10 : 5;
-        const int delta = (eve.vtkEventId == vtkCommand::MouseWheelForwardEvent)
+        const int delta = (eve.eventKind == InteractionEventKind::WheelForward)
             ? step : -step;
         m_service->SetSliceScroll(delta);
         // m_service->SetDirty();
-        return { true, true };  // hasVtkAbort=true：阻止 VTK 默认滚轮相机缩放
+        return { true, true };  // 停止传播，阻止 VTK 默认滚轮相机缩放
     }
 
     // ── 左键按下：isShiftDown → 开始拖拽十字线 ────────────────────────────
-    if (eve.vtkEventId == vtkCommand::LeftButtonPressEvent)
+    if (eve.eventKind == InteractionEventKind::PrimaryPress)
     {
         if (eve.isCtrlDown)
         {
@@ -54,12 +53,12 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
 			m_service->SetInteracting(true);
-			return { true, true };  // hasVtkAbort=true：阻止 VTK 默认 Window/Level
+			return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
         }
         if (eve.isShiftDown) {
             m_isDragCrosshair = true;
             m_service->SetInteracting(true);
-            return { true, true };  // hasVtkAbort=true：阻止 VTK 默认 Window/Level
+            return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
         }
 
         m_isDragWindowLevel = true;
@@ -77,7 +76,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 左键抬起：结束交互 ─────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::LeftButtonReleaseEvent)
+    if (eve.eventKind == InteractionEventKind::PrimaryRelease)
     {
         if (m_isDragCrosshair) {
             m_isDragCrosshair = false;
@@ -99,7 +98,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 右键按下：开始缩放 ─────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::RightButtonPressEvent)
+    if (eve.eventKind == InteractionEventKind::SecondaryPress)
     {
         m_isRightZoom = true;
         m_zoomStartY = eve.y;
@@ -116,7 +115,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 右键抬起：结束缩放 ─────────────────────────────────────────
-    if (eve.vtkEventId == vtkCommand::RightButtonReleaseEvent)
+    if (eve.eventKind == InteractionEventKind::SecondaryRelease)
     {
         if (m_isRightZoom) {
             m_isRightZoom = false;
@@ -127,7 +126,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // ── 鼠标移动：十字线拖拽 / 调窗拖拽 / 缩放 / 定轴旋转 ─────────────
-    if (eve.vtkEventId == vtkCommand::MouseMoveEvent)
+    if (eve.eventKind == InteractionEventKind::PointerMove)
     {
         // 路径 A：十字线拖拽
         if (m_isDragCrosshair)

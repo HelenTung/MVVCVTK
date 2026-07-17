@@ -1,6 +1,5 @@
 #include "TimeUpdateHandler.h"
 #include "AppInterfaces.h"
-#include <vtkCommand.h>
 #include <vtkRenderWindow.h>
 
 TimeUpdateHandler::TimeUpdateHandler(AbstractAppService* service,
@@ -12,7 +11,7 @@ TimeUpdateHandler::TimeUpdateHandler(AbstractAppService* service,
 
 InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
 {
-    if (eve.vtkEventId != vtkCommand::TimerEvent) {
+    if (eve.eventKind != InteractionEventKind::Timer) {
         return {};
     }
 

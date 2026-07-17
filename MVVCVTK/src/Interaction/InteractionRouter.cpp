@@ -17,7 +17,7 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
     RouterDispatchMode mode)
 {
     // FirstMatch 的“命中”由 isHandled 决定并立即停止；Broadcast 始终遍历完整列表。
-    // 两种模式都 OR 聚合 hasVtkAbort，因此任一路径要求阻止 VTK 默认行为都会保留到调用方。
+    // 两种模式都 OR 聚合传播停止状态，因此任一路径提出的停止请求都会保留到调用方。
     InteractionResult aggregated;
 
     for (const auto& handler : m_handlers) {
@@ -27,9 +27,9 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
 
         const InteractionResult result = handler->Send(eve);
 
-        // hasVtkAbort 做 OR 聚合：任一 Handler 要求中止即中止
-        if (result.hasVtkAbort) {
-            aggregated.hasVtkAbort = true;
+        // 传播停止状态做 OR 聚合，与 FirstMatch 的 isHandled 截断条件相互独立。
+        if (result.isPropagationStopped) {
+            aggregated.isPropagationStopped = true;
         }
 
         if (mode == RouterDispatchMode::FirstMatch && result.isHandled) {
