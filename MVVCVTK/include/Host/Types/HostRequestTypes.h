@@ -47,7 +47,7 @@ struct HostDataRequest {
 
 struct HostViewSetRequest {
     HostViewTarget targetView;
-    std::optional<HostViewMode> mode;
+    std::optional<HostRenderMode> mode;
     std::optional<HostMaterialParams> material;
     std::optional<double> opacity;
     std::optional<std::vector<HostTransferNode>> transferNodes;

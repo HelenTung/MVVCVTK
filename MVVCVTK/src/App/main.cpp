@@ -47,7 +47,7 @@ public:
         composite.title = "Window E: Composite Volume";
         composite.width = 600; composite.height = 600;
         composite.posX = 660; composite.posY = 50;
-        composite.viewInit.viewMode = HostViewMode::CompositeVolume;
+        composite.viewInit.viewMode = HostRenderMode::CompositeVolume;
         composite.viewInit.transferNodes = transferNodes;
         composite.viewInit.hasTransferNodes = true;
         composite.viewInit.background = { 0.08, 0.08, 0.12 };
@@ -57,7 +57,7 @@ public:
         topDown.title = "Window B: Top_down Slice";
         topDown.width = 400; topDown.height = 400;
         topDown.posX = 50; topDown.posY = 660;
-        topDown.viewInit.viewMode = HostViewMode::SliceTopDown;
+        topDown.viewInit.viewMode = HostRenderMode::SliceTopDown;
         topDown.viewInit.background = { 0.0, 0.0, 0.0 };
         topDown.viewInit.hasBackground = true;
         topDown.viewInit.windowLevel = { 400.0, 40.0 };
@@ -66,19 +66,19 @@ public:
         HostWindowConfig frontBack = topDown;
         frontBack.title = "Window C: Front_back Slice";
         frontBack.posX = 460;
-        frontBack.viewInit.viewMode = HostViewMode::SliceFrontBack;
+        frontBack.viewInit.viewMode = HostRenderMode::SliceFrontBack;
 
         HostWindowConfig leftRight = topDown;
         leftRight.title = "Window D: Left_right Slice";
         leftRight.posX = 870;
-        leftRight.viewInit.viewMode = HostViewMode::SliceLeftRight;
+        leftRight.viewInit.viewMode = HostRenderMode::SliceLeftRight;
 
         HostWindowConfig primary;
         primary.title = "Window A: Composite IsoSurface";
         primary.width = 600; primary.height = 600;
         primary.posX = 50; primary.posY = 50;
         primary.isAxesVisible = true;
-        primary.viewInit.viewMode = HostViewMode::CompositeIsoSurface;
+        primary.viewInit.viewMode = HostRenderMode::CompositeIsoSurface;
         primary.viewInit.material = { 0.3, 0.6, 0.2, 15.0, 0.4, false };
         primary.viewInit.background = { 0.05, 0.05, 0.05 };
         primary.viewInit.hasBackground = true;

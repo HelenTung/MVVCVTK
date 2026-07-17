@@ -46,7 +46,7 @@ private:
         std::shared_ptr<AbstractDataManager> dataMgr,
         std::shared_ptr<SharedInteractionState> sharedState,
         std::shared_ptr<IStateEventSource> stateEventSource) const;
-    std::optional<VizMode> GetAppViewMode(HostViewMode mode) const;
+    std::optional<VizMode> GetAppViewMode(HostRenderMode mode) const;
     std::optional<PreInitConfig> BuildAppInit(const HostViewInitConfig& config) const;
     // Impl 是 runtime 集合的唯一容器 owner；查询返回的引用/裸指针只在下一次 Build、移动或析构前有效。
     // Build 会先 clear 再重新组装 service/context，因此调用方不得跨视图拓扑重建缓存元素地址。
@@ -94,16 +94,16 @@ std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> HostRe
     return std::make_pair(service, context);
 }
 
-std::optional<VizMode> HostRenderViewSet::Impl::GetAppViewMode(HostViewMode mode) const
+std::optional<VizMode> HostRenderViewSet::Impl::GetAppViewMode(HostRenderMode mode) const
 {
     switch (mode) {
-    case HostViewMode::Volume: return VizMode::Volume;
-    case HostViewMode::IsoSurface: return VizMode::IsoSurface;
-    case HostViewMode::SliceTopDown: return VizMode::SliceTop_down;
-    case HostViewMode::SliceFrontBack: return VizMode::SliceFront_back;
-    case HostViewMode::SliceLeftRight: return VizMode::SliceLeft_right;
-    case HostViewMode::CompositeVolume: return VizMode::CompositeVolume;
-    case HostViewMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
+    case HostRenderMode::Volume: return VizMode::Volume;
+    case HostRenderMode::IsoSurface: return VizMode::IsoSurface;
+    case HostRenderMode::SliceTopDown: return VizMode::SliceTop_down;
+    case HostRenderMode::SliceFrontBack: return VizMode::SliceFront_back;
+    case HostRenderMode::SliceLeftRight: return VizMode::SliceLeft_right;
+    case HostRenderMode::CompositeVolume: return VizMode::CompositeVolume;
+    case HostRenderMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
     }
     return std::nullopt;
 }

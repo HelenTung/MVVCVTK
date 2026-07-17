@@ -135,7 +135,7 @@ public:
         view.window.title = "Qt Host Session Smoke";
         view.window.width = 640;
         view.window.height = 480;
-        view.window.viewInit.viewMode = HostViewMode::CompositeIsoSurface;
+        view.window.viewInit.viewMode = HostRenderMode::CompositeIsoSurface;
         view.window.viewInit.background = { 0.08, 0.12, 0.16 };
         view.window.viewInit.hasBackground = true;
         view.renderWindow = m_renderWindow;

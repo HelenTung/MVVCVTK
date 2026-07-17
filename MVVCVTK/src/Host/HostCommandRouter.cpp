@@ -41,7 +41,7 @@ private:
         const HostLoadRequest& request) const;
     std::optional<std::array<int, 3>> GetRawDims(
         const std::string& path) const;
-    std::optional<VizMode> GetAppViewMode(HostViewMode mode) const;
+    std::optional<VizMode> GetAppViewMode(HostRenderMode mode) const;
     std::optional<ToolMode> GetAppToolMode(HostToolMode mode) const;
     std::optional<MaterialParams> BuildAppMaterial(const HostMaterialParams& value) const;
     std::optional<BackgroundColor> BuildAppBackground(const HostBackgroundColor& value) const;
@@ -227,16 +227,16 @@ bool HostCommandRouter::Impl::ExportSlices(
     return true;
 }
 
-std::optional<VizMode> HostCommandRouter::Impl::GetAppViewMode(HostViewMode mode) const
+std::optional<VizMode> HostCommandRouter::Impl::GetAppViewMode(HostRenderMode mode) const
 {
     switch (mode) {
-    case HostViewMode::Volume: return VizMode::Volume;
-    case HostViewMode::IsoSurface: return VizMode::IsoSurface;
-    case HostViewMode::SliceTopDown: return VizMode::SliceTop_down;
-    case HostViewMode::SliceFrontBack: return VizMode::SliceFront_back;
-    case HostViewMode::SliceLeftRight: return VizMode::SliceLeft_right;
-    case HostViewMode::CompositeVolume: return VizMode::CompositeVolume;
-    case HostViewMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
+    case HostRenderMode::Volume: return VizMode::Volume;
+    case HostRenderMode::IsoSurface: return VizMode::IsoSurface;
+    case HostRenderMode::SliceTopDown: return VizMode::SliceTop_down;
+    case HostRenderMode::SliceFrontBack: return VizMode::SliceFront_back;
+    case HostRenderMode::SliceLeftRight: return VizMode::SliceLeft_right;
+    case HostRenderMode::CompositeVolume: return VizMode::CompositeVolume;
+    case HostRenderMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
     }
     return std::nullopt;
 }

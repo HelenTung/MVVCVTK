@@ -13,7 +13,7 @@ enum class HostRenderViewRole {
     Auxiliary
 };
 
-enum class HostViewMode {
+enum class HostRenderMode {
     Volume,
     IsoSurface,
     SliceTopDown,
@@ -57,7 +57,7 @@ struct HostWindowLevelParams {
 };
 
 struct HostViewInitConfig {
-    HostViewMode viewMode = HostViewMode::IsoSurface;
+    HostRenderMode viewMode = HostRenderMode::IsoSurface;
     HostMaterialParams material;
     std::vector<HostTransferNode> transferNodes;
     double isoThreshold = 0.0;
