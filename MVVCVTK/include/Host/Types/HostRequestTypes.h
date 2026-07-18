@@ -20,7 +20,7 @@ enum class HostGapAnalysisIsoMode { DataRangeRatio, AbsoluteValue };
 enum class HostDataAction { None, LoadFile, ReloadBuffer, ExportVolume, ExportSlices };
 
 struct HostLoadRequest {
-    std::string filePath;
+    std::string filePath; // UTF-8 文件路径。
     HostVolumeGeometry geometry;
 };
 
@@ -29,10 +29,10 @@ struct HostReloadRequest {
     HostVolumeGeometry geometry; // dimensions 的乘积必须与 voxels.size() 一致。
 };
 
-struct HostVolumeExportRequest { std::string outputPath; };
+struct HostVolumeExportRequest { std::string outputPath; /* UTF-8 文件路径。 */ };
 
 struct HostSliceExportRequest {
-    std::string outputDir; // 每层 PNG 的输出目录。
+    std::string outputDir; // UTF-8 输出目录；每层写入 PNG。
     HostViewTarget sourceView{ "", false, HostRenderViewRole::TopDownSlice }; // 决定切片法向与相机朝向。
     std::optional<double> angleDeg; // 可选的平面内旋转角；未提供时保持目标视图当前方向。
 };

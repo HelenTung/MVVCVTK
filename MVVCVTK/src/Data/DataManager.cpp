@@ -1,23 +1,26 @@
 #include "DataManager.h"
+#include "Platform/Path.h"
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
 #include <fstream>
 #include <filesystem>
 #include <vtkTIFFReader.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <sstream>
-#include <vtkStringArray.h>
 #include <vtkTransform.h>
 #include <vtkImageReslice.h>
 #include <vtkImageChangeInformation.h>
 #include <vtkPNGWriter.h>
 #include <vtkImageImport.h>
+#include <vtkImageAppend.h>
 #include <cstring>
 #include "MemMappedFile.h"
 
@@ -79,6 +82,10 @@ public:
         std::shared_ptr<const ImageState> retiredState;
         {
             std::lock_guard<std::mutex> lock(m_dataMutex);
+            if (!m_current
+                || m_current->version == std::numeric_limits<DataVersion>::max()) {
+                return false;
+            }
             nextState->version = m_current->version + 1;
             retiredState = std::move(m_current);
             m_current = std::move(nextState);
@@ -236,11 +243,14 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         std::shared_ptr<const ImageState> baseState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-            if (!m_impl->m_current->image) {
+            if (!m_impl->m_current || !m_impl->m_current->image) {
                 return false;
             }
             if (m_impl->m_current->spacing == spacing) {
                 return true;
+            }
+            if (m_impl->m_current->version == std::numeric_limits<DataVersion>::max()) {
+                return false;
             }
             baseState = m_impl->m_current;
         }
@@ -291,6 +301,32 @@ ImageSnapshot BaseDataManager::GetImageSnapshot() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
     return m_impl->m_current;
+}
+
+bool BaseDataManager::SetCurrentData(
+    const ImageSnapshot& snapshot,
+    DataVersion expectedVersion)
+{
+    if (!snapshot || !snapshot->image
+        || expectedVersion == std::numeric_limits<DataVersion>::max()) {
+        return false;
+    }
+
+    // snapshot 的 image/metadata 是 immutable owner；恢复只复制轻量状态并共享体素，不做整卷复制。
+    auto nextState = std::make_shared<ImageState>(*snapshot);
+    std::shared_ptr<const ImageState> retiredState;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
+        // 只撤销自己刚发布的版本；若已有更新事务抢先，绝不覆盖更晚 current。
+        if (!m_impl->m_current
+            || m_impl->m_current->version != expectedVersion) {
+            return false;
+        }
+        nextState->version = expectedVersion + 1;
+        retiredState = std::move(m_impl->m_current);
+        m_impl->m_current = std::move(nextState);
+    }
+    return true;
 }
 
 bool BaseDataManager::SetFromBuffer(
@@ -426,7 +462,7 @@ bool BaseDataManager::ExportSlices(
         return false;
     }
 
-    std::filesystem::path outputDir = std::filesystem::path(dirPath);
+    std::filesystem::path outputDir = PlatformPath::GetNativePath(dirPath);
     if (outputDir.has_extension()) {
         outputDir = outputDir.parent_path() / outputDir.stem();
     }
@@ -494,7 +530,7 @@ bool BaseDataManager::ExportSlices(
 
         auto writer = vtkSmartPointer<vtkPNGWriter>::New();
         const std::filesystem::path outputFilePath = outputDir / fileName.str();
-        const std::string vtkFileName = outputFilePath.u8string();
+        const std::string vtkFileName = PlatformPath::GetUtf8Path(outputFilePath);
         writer->SetFileName(vtkFileName.c_str());
         writer->SetInputData(sliceImage);
         writer->Write();
@@ -558,8 +594,11 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
         return false;
     }
 
-    // [限制] 当前 RAW 导出路径按单分量 VTK_FLOAT 解释输出；这里未校验 scalar type/component，
-    // 非 float 或多分量输入会被错误解释，不能视作通用 vtkImageData 序列化入口。
+    // RAW 契约固定为单分量 float32；其它标量布局必须显式拒绝，不能按 float* 误解释。
+    if (outputImage->GetScalarType() != VTK_FLOAT
+        || outputImage->GetNumberOfScalarComponents() != 1) {
+        return false;
+    }
     int newDims[3];
     outputImage->GetDimensions(newDims);
     float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
@@ -571,7 +610,7 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
     vtkIdType incs[3];
     outputImage->GetIncrements(incs);
 
-    std::filesystem::path pathObj(filePath);
+    std::filesystem::path pathObj = PlatformPath::GetNativePath(filePath);
     std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
     // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
     std::filesystem::path finalFileName = pathObj.stem();
@@ -594,12 +633,18 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
             float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
             // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
             rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
+            if (!rawFile) {
+                return false;
+            }
         }
     }
 
-    // [风险] 当前实现未检查逐行 write 与 close 后的流状态；磁盘写入中途失败仍会记录成功并返回 true。
     rawFile.close();
-    std::cout << "[Export] Successfully saved transformed RAW to: " << finalPath.u8string() << "\n"
+    if (!rawFile) {
+        return false;
+    }
+    std::cout << "[Export] Successfully saved transformed RAW to: "
+        << PlatformPath::GetUtf8Path(finalPath) << "\n"
         << "[Export] IMPORTANT: New Dimensions are "
         << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
 
@@ -621,7 +666,8 @@ bool RawVolumeDataManager::SetDataLoaded(
         dimensions[0], dimensions[1], dimensions[2]
     };
     std::error_code fileError;
-    const auto fileBytes = std::filesystem::file_size(filePath, fileError);
+    const auto fileBytes = std::filesystem::file_size(
+        PlatformPath::GetNativePath(filePath), fileError);
     if (fileError || fileBytes != layout.GetByteCount()) {
         return false;
     }
@@ -793,32 +839,36 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     const std::string& inputPath,
     const VolumeLayout& layout) {
     // 路径检查
-    std::filesystem::path pathObj(inputPath);
+    const std::filesystem::path pathObj = PlatformPath::GetNativePath(inputPath);
     if (!std::filesystem::exists(pathObj)) {
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
         return nullptr;
     }
 
-    auto reader = vtkSmartPointer<vtkTIFFReader>::New();
-
-
+    vtkSmartPointer<vtkImageData> decodedImage;
     if (std::filesystem::is_directory(pathObj)) {
         //
         std::cout << "[Info] Loading TIFF series from folder: " << inputPath << std::endl;
 
         std::vector<std::string> fileList;
 
-        // 遍历文件夹
-        for (const auto& entry : std::filesystem::directory_iterator(pathObj)) {
-            if (entry.is_regular_file()) {
-                std::string ext = entry.path().extension().string();
-                // 转小写比较，兼容 .TIF 和 .tif
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        try {
+            for (const auto& entry : std::filesystem::directory_iterator(pathObj)) {
+                if (entry.is_regular_file()) {
+                    std::string ext = PlatformPath::GetUtf8Path(entry.path().extension());
+                    // 转小写比较，兼容 .TIF 和 .tif
+                    std::transform(ext.begin(), ext.end(), ext.begin(),
+                        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 
-                if (ext == ".tif" || ext == ".tiff") {
-                    fileList.push_back(entry.path().string());
+                    if (ext == ".tif" || ext == ".tiff") {
+                        fileList.push_back(PlatformPath::GetUtf8Path(entry.path()));
+                    }
                 }
             }
+        }
+        catch (...) {
+            std::cerr << "[Error] Failed to enumerate TIFF directory." << std::endl;
+            return nullptr;
         }
 
         if (fileList.empty()) {
@@ -828,27 +878,37 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 
         auto naturalSort = [](const std::string& s1, const std::string& s2) {
             size_t i = 0, j = 0;
+            const auto isDigit = [](char value) {
+                return std::isdigit(static_cast<unsigned char>(value)) != 0;
+            };
             while (i < s1.size() && j < s2.size()) {
-                // 如果两边当前字符都是数字，提取整个数字进行数值比较
-                if (std::isdigit(s1[i]) && std::isdigit(s2[j])) {
-                    unsigned long long n1 = 0;
-                    unsigned long long n2 = 0;
-
-                    // 解析 s1 中的数字
-                    while (i < s1.size() && std::isdigit(s1[i])) {
-                        n1 = n1 * 10 + (s1[i] - '0');
-                        i++;
+                if (isDigit(s1[i]) && isDigit(s2[j])) {
+                    const size_t digitStart1 = i;
+                    const size_t digitStart2 = j;
+                    while (i < s1.size() && isDigit(s1[i])) {
+                        ++i;
                     }
-                    // 解析 s2 中的数字
-                    while (j < s2.size() && std::isdigit(s2[j])) {
-                        n2 = n2 * 10 + (s2[j] - '0');
-                        j++;
+                    while (j < s2.size() && isDigit(s2[j])) {
+                        ++j;
                     }
-
-                    if (n1 != n2) {
-                        return n1 < n2; // 数值小的在前
+                    size_t significant1 = digitStart1;
+                    size_t significant2 = digitStart2;
+                    while (significant1 < i && s1[significant1] == '0') {
+                        ++significant1;
                     }
-                    // 如果数值相等 (例如 01 和 1)，继续比较后续字符
+                    while (significant2 < j && s2[significant2] == '0') {
+                        ++significant2;
+                    }
+                    const size_t length1 = i - significant1;
+                    const size_t length2 = j - significant2;
+                    if (length1 != length2) {
+                        return length1 < length2;
+                    }
+                    const int digitCompare = s1.compare(
+                        significant1, length1, s2, significant2, length2);
+                    if (digitCompare != 0) {
+                        return digitCompare < 0;
+                    }
                 }
                 else {
                     // 非数字字符，按标准 ASCII 比较
@@ -868,37 +928,95 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
         // 排序
         std::sort(fileList.begin(), fileList.end(), naturalSort);
 
-        // 构造 VTK 字符串数组
-        auto vtkFiles = vtkSmartPointer<vtkStringArray>::New();
-        for (const auto& f : fileList) {
-            vtkFiles->InsertNextValue(f);
+        // 每张 TIFF 独立解码后沿 Z 轴组装，避开批量 SetFileNames 在部分 Windows
+        // libtiff 构建中的跨文件状态损坏；fileList 的自然排序仍是切片顺序真源。
+        auto append = vtkSmartPointer<vtkImageAppend>::New();
+        append->SetAppendAxis(2);
+        std::vector<vtkSmartPointer<vtkImageData>> slices;
+        slices.reserve(fileList.size());
+        int expectedExtent[6] = { 0, -1, 0, -1, 0, -1 };
+        int expectedScalarType = VTK_VOID;
+        int expectedComponents = 0;
+        try {
+            for (const auto& file : fileList) {
+                auto sliceReader = vtkSmartPointer<vtkTIFFReader>::New();
+                sliceReader->SetFileName(file.c_str());
+                if (!sliceReader->CanReadFile(file.c_str())) {
+                    return nullptr;
+                }
+                sliceReader->Update();
+                if (sliceReader->GetErrorCode() != 0
+                    || !sliceReader->GetOutput()
+                    || sliceReader->GetOutput()->GetNumberOfPoints() == 0) {
+                    return nullptr;
+                }
+                auto slice = vtkSmartPointer<vtkImageData>::New();
+                slice->DeepCopy(sliceReader->GetOutput());
+                int sliceExtent[6] = { 0, -1, 0, -1, 0, -1 };
+                slice->GetExtent(sliceExtent);
+                if (slice->GetDimensions()[0] <= 0
+                    || slice->GetDimensions()[1] <= 0
+                    || slice->GetDimensions()[2] != 1) {
+                    return nullptr;
+                }
+                if (slices.empty()) {
+                    std::copy(std::begin(sliceExtent), std::end(sliceExtent), expectedExtent);
+                    expectedScalarType = slice->GetScalarType();
+                    expectedComponents = slice->GetNumberOfScalarComponents();
+                }
+                else if (sliceExtent[0] != expectedExtent[0]
+                    || sliceExtent[1] != expectedExtent[1]
+                    || sliceExtent[2] != expectedExtent[2]
+                    || sliceExtent[3] != expectedExtent[3]
+                    || slice->GetScalarType() != expectedScalarType
+                    || slice->GetNumberOfScalarComponents() != expectedComponents) {
+                    return nullptr;
+                }
+                slices.push_back(slice);
+                append->AddInputData(slice);
+            }
+            append->Update();
         }
-
-        // 设置文件列表
-        reader->SetFileNames(vtkFiles);
+        catch (...) {
+            std::cerr << "[Error] Exception during TIFF series reading." << std::endl;
+            return nullptr;
+        }
+        if (append->GetErrorCode() != 0
+            || !append->GetOutput()
+            || append->GetOutput()->GetNumberOfPoints() == 0) {
+            return nullptr;
+        }
+        decodedImage = vtkSmartPointer<vtkImageData>::New();
+        decodedImage->DeepCopy(append->GetOutput());
     }
     else {
         // 单文件
         std::cout << "[Info] Loading single TIFF file: " << inputPath << std::endl;
-        reader->SetFileName(inputPath.c_str());
+        auto reader = vtkSmartPointer<vtkTIFFReader>::New();
+        const std::string vtkInputPath = PlatformPath::GetUtf8Path(pathObj);
+        reader->SetFileName(vtkInputPath.c_str());
 
-        if (!reader->CanReadFile(inputPath.c_str())) {
+        if (!reader->CanReadFile(vtkInputPath.c_str())) {
             std::cerr << "[Error] VTK cannot read this TIFF file." << std::endl;
             return nullptr;
         }
+        try {
+            reader->Update();
+            if (reader->GetErrorCode() != 0
+                || !reader->GetOutput()
+                || reader->GetOutput()->GetNumberOfPoints() == 0) {
+                return nullptr;
+            }
+        }
+        catch (...) {
+            std::cerr << "[Error] Exception during TIFF reading." << std::endl;
+            return nullptr;
+        }
+        decodedImage = vtkSmartPointer<vtkImageData>::New();
+        decodedImage->DeepCopy(reader->GetOutput());
     }
 
-    // Reader 会自动处理 Origin 和 Spacing (如果有的话)
-    // 如果是序列图片，Reader 会根据文件数量自动设置 Z 轴维度
-    try {
-        reader->Update();
-    }
-    catch (...) {
-        std::cerr << "[Error] Exception during TIFF reading." << std::endl;
-        return nullptr;
-    }
-
-    auto output = reader->GetOutput();
+    auto output = decodedImage;
     if (!output || output->GetDimensions()[0] == 0) {
         return nullptr;
     }

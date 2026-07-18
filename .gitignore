@@ -394,4 +394,5 @@ test/QtHost/x64/
 test/QtHost/QtHostSmoke.pro
 
 # pdf
-pdf/*.pdf
+pdf/
+*.pdf

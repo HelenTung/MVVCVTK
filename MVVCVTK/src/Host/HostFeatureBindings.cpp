@@ -57,6 +57,12 @@ private:
     void DetachHostTimer();
     void OnHostTimer();
     static bool GetImageReady(vtkImageData* image);
+    static bool ResetCropReload(
+        const std::shared_ptr<RawVolumeDataManager>& dataManager,
+        const std::shared_ptr<SharedInteractionState>& sharedState,
+        const ImageSnapshot& oldSnapshot,
+        DataVersion promotedVersion,
+        const std::vector<std::shared_ptr<VizService>>& updatedServices);
 
     bool GetGapConfigValid(const HostGapConfig& config) const;
     GapVoidParams BuildVoidParams(const HostGapVoidConfig& config) const;
@@ -98,6 +104,42 @@ bool HostFeatureBindings::Impl::GetImageReady(vtkImageData* image)
     int dims[3] = { 0, 0, 0 };
     image->GetDimensions(dims);
     return dims[0] > 0 && dims[1] > 0 && dims[2] > 0;
+}
+
+bool HostFeatureBindings::Impl::ResetCropReload(
+    const std::shared_ptr<RawVolumeDataManager>& dataManager,
+    const std::shared_ptr<SharedInteractionState>& sharedState,
+    const ImageSnapshot& oldSnapshot,
+    DataVersion promotedVersion,
+    const std::vector<std::shared_ptr<VizService>>& updatedServices)
+{
+    const bool isRestored = dataManager
+        && dataManager->SetCurrentData(oldSnapshot, promotedVersion);
+    if (!isRestored) {
+        std::cerr << "[Host] Orthogonal crop compensation skipped for promoted version "
+                  << promotedVersion << ": current version changed."
+                  << std::endl;
+    }
+
+    bool isPipelineRestored = true;
+    // CAS 成功时读取恢复的旧 current；CAS 失败时读取更晚 current，避免已更新 view 停留在失败候选。
+    // 失败 view 的 BuildPipeline 会自行恢复其旧 snapshot，因此只重建此前成功的 view。
+    for (const auto& service : updatedServices) {
+        if (!service || !service->SendReloadUpdate()) {
+            isPipelineRestored = false;
+        }
+    }
+    if (!isPipelineRestored) {
+        std::cerr << "[Host] Orthogonal crop compensation for promoted version "
+                  << promotedVersion << " did not restore every view pipeline."
+                  << std::endl;
+    }
+
+    if (sharedState) {
+        sharedState->SetReloadLoadFailed();
+        sharedState->ResetLoad(LoadEventKind::Reload);
+    }
+    return isRestored && isPipelineRestored;
 }
 
 bool HostFeatureBindings::Impl::GetGapConfigValid(const HostGapConfig& config) const
@@ -222,6 +264,7 @@ void HostFeatureBindings::Impl::AttachFeatures(
                     std::cerr << "[Host] Orthogonal crop submit failed: reload is already in progress." << std::endl;
                     return false;
                 }
+                const auto oldSnapshot = dataManager->GetImageSnapshot();
                 bool hasPending = false;
                 // 3. 新 image 先进入 pending，再由本 host 线程原子提交为 current；任一步失败发布 ReloadFailed。
                 if (!dataManager->SetImageSnapshot(std::move(image))
@@ -236,20 +279,31 @@ void HostFeatureBindings::Impl::AttachFeatures(
                 const auto imageState = dataManager->GetImageSnapshot();
                 // 4. 每个 view 用同一 current snapshot 重建管线，全部成功后才发布共享 DataReady 终态。
                 bool isPipelineReady = imageState != nullptr;
+                std::vector<std::shared_ptr<VizService>> updatedServices;
                 for (const auto& view : renderViews->GetViews()) {
                     if (!view.service || !view.service->SendReloadUpdate()) {
                         isPipelineReady = false;
+                        break;
                     }
+                    updatedServices.push_back(view.service);
                 }
                 if (!imageState || !isPipelineReady) {
-                    sharedState->SetReloadLoadFailed();
-                    sharedState->ResetLoad(LoadEventKind::Reload);
+                    ResetCropReload(
+                        dataManager,
+                        sharedState,
+                        oldSnapshot,
+                        imageState ? imageState->version : dataManager->GetDataVersion(),
+                        updatedServices);
                     return false;
                 }
                 if (!sharedState->SetReloadDataReady(
                     imageState->scalarRange[0], imageState->scalarRange[1], imageState->spacing)) {
-                    sharedState->SetReloadLoadFailed();
-                    sharedState->ResetLoad(LoadEventKind::Reload);
+                    ResetCropReload(
+                        dataManager,
+                        sharedState,
+                        oldSnapshot,
+                        imageState->version,
+                        updatedServices);
                     return false;
                 }
                 if (const auto lockedBridge = bridge.lock()) {

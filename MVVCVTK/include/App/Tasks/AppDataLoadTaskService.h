@@ -14,6 +14,7 @@ public:
     explicit AppDataLoadTaskService(
         std::shared_ptr<AbstractDataManager> dataManager);
 
+    // path 为 UTF-8 文件路径。
     std::optional<std::packaged_task<bool()>> BuildLoadFileTask(
         std::string path,
         VolumeLayout layout);

@@ -76,6 +76,7 @@ public:
     // 实现依赖对象由 Impl 与基础服务状态共同持有。
     // spacing / origin 必须由宿主数据命令显式传入；RAW 体数据不携带这些物理事实，service 不提供样本默认值。
     // ================================================================
+    // path 为 UTF-8 路径。
     bool LoadFileAsync(
         std::string path,
         VolumeLayout layout,
@@ -96,6 +97,7 @@ public:
     // 作用：把导出 I/O 与当前渲染线程解耦。
     // 实现依赖对象由 Impl 与基础服务状态共同持有。
     // ================================================================
+    // path 为 UTF-8 文件或目录路径。
     void ExportDataAsync(const std::string& path,
         std::function<void(bool isSuccess)> onComplete = nullptr);
     void ExportSlicesAsync(const std::string& path,

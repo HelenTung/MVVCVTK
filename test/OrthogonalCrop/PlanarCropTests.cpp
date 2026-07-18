@@ -8,6 +8,7 @@
 #include "Routing/CropRouter.h"
 #include "DataManager.h"
 #include "InteractionComputeService.h"
+#include "Platform/Path.h"
 #include "CropBridgeTests.h"
 #include "PlanarTestSuites.h"
 
@@ -16,15 +17,20 @@
 #include <vtkImageData.h>
 #include <vtkMath.h>
 #include <vtkMatrix3x3.h>
+#include <vtkMatrix4x4.h>
 #include <vtkPointData.h>
 #include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
+#include <vtkTIFFWriter.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -33,6 +39,7 @@
 class DataManagerTest final : public RawVolumeDataManager {
 public:
     using BaseDataManager::GetImageSnapshot;
+    using BaseDataManager::SetCurrentData;
 };
 
 class PlanarCropSuite final {
@@ -49,8 +56,9 @@ struct TestPlane {
 
 vtkSmartPointer<vtkImageData> BuildOblique()
 {
-    // 方向矩阵把 image index 轴旋转到 input model physical 坐标：
-    // physicalPoint = origin + direction * (index - extentMin) * spacing。
+    // VTK origin 是 index (0,0,0) 的 image model physical 坐标：
+    // physicalPoint = origin + direction * index * spacing。
+    // extent minima 只定义合法全局 index 域和 point-id 的局部偏移，不从变换公式中相减。
     // 这个场景专门防止 submit 逻辑偷用裸 index 坐标而绕过 VTK 的物理坐标变换。
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(2, 5, -1, 1, 3, 4);
@@ -58,11 +66,12 @@ vtkSmartPointer<vtkImageData> BuildOblique()
     image->SetSpacing(0.5, 1.25, 2.0);
 
     auto direction = vtkSmartPointer<vtkMatrix3x3>::New();
-    direction->SetElement(0, 0, 0.0);
-    direction->SetElement(0, 1, -1.0);
+    const double angle = vtkMath::RadiansFromDegrees(45.0);
+    direction->SetElement(0, 0, std::cos(angle));
+    direction->SetElement(0, 1, -std::sin(angle));
     direction->SetElement(0, 2, 0.0);
-    direction->SetElement(1, 0, 1.0);
-    direction->SetElement(1, 1, 0.0);
+    direction->SetElement(1, 0, std::sin(angle));
+    direction->SetElement(1, 1, std::cos(angle));
     direction->SetElement(1, 2, 0.0);
     direction->SetElement(2, 0, 0.0);
     direction->SetElement(2, 1, 0.0);
@@ -152,7 +161,8 @@ std::filesystem::path BuildOutputRoot()
 {
     const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
     return std::filesystem::temp_directory_path()
-        / ("MVVCVTK_export_tests_" + std::to_string(ticks));
+        / std::filesystem::u8path(
+            std::string(u8"MVVCVTK_路径_tests_") + std::to_string(ticks));
 }
 
 int GetFileCount(
@@ -633,6 +643,303 @@ void StartSubmitCase(
     SetBoundExpect(result.maskImage, boundaryIndex, removalMode, failureCount);
 }
 
+CropMatrixDouble16Array GetIndexBox(vtkImageData* image)
+{
+    auto boxToIndex = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToIndex->Identity();
+    boxToIndex->SetElement(0, 3, 3.5);
+    boxToIndex->SetElement(1, 3, 0.5);
+    boxToIndex->SetElement(2, 3, 3.5);
+
+    auto boxToInputModel = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(
+        image->GetIndexToPhysicalMatrix(), boxToIndex, boxToInputModel);
+    CropMatrixDouble16Array matrix{};
+    vtkMatrix4x4::DeepCopy(matrix.data(), boxToInputModel);
+    return matrix;
+}
+
+CropMatrixDouble16Array GetInputBox(vtkImageData* image)
+{
+    const int centerIndex[3] = { 3, 0, 3 };
+    double center[3] = { 0.0, 0.0, 0.0 };
+    image->TransformIndexToPhysicalPoint(centerIndex, center);
+    return CropGeometryAlgorithm::GetBoxMatrix({
+        center[0] - 1.0, center[0] + 1.0,
+        center[1] - 1.0, center[1] + 1.0,
+        center[2] - 1.2, center[2] + 1.2
+    });
+}
+
+std::array<int, 6> GetBoxIndexBounds(
+    vtkImageData* image,
+    const CropMatrixDouble16Array& boxMatrix)
+{
+    auto boxToInputModel = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModel->DeepCopy(boxMatrix.data());
+    std::array<double, 3> minIndex = {
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max(),
+        std::numeric_limits<double>::max()
+    };
+    std::array<double, 3> maxIndex = {
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::lowest()
+    };
+    for (int sx = 0; sx < 2; ++sx) {
+        for (int sy = 0; sy < 2; ++sy) {
+            for (int sz = 0; sz < 2; ++sz) {
+                const double boxPoint[4] = {
+                    sx == 0 ? -1.0 : 1.0,
+                    sy == 0 ? -1.0 : 1.0,
+                    sz == 0 ? -1.0 : 1.0,
+                    1.0
+                };
+                double physical4[4] = { 0.0, 0.0, 0.0, 0.0 };
+                boxToInputModel->MultiplyPoint(boxPoint, physical4);
+                const double physical[3] = { physical4[0], physical4[1], physical4[2] };
+                double continuous[3] = { 0.0, 0.0, 0.0 };
+                image->TransformPhysicalPointToContinuousIndex(physical, continuous);
+                for (int axis = 0; axis < 3; ++axis) {
+                    minIndex[axis] = std::min(minIndex[axis], continuous[axis]);
+                    maxIndex[axis] = std::max(maxIndex[axis], continuous[axis]);
+                }
+            }
+        }
+    }
+
+    int extent[6] = { 0, -1, 0, -1, 0, -1 };
+    image->GetExtent(extent);
+    std::array<int, 6> bounds{};
+    for (int axis = 0; axis < 3; ++axis) {
+        bounds[axis * 2] = std::clamp(
+            static_cast<int>(std::ceil(minIndex[axis] - 1e-6)),
+            extent[axis * 2], extent[axis * 2 + 1]);
+        bounds[axis * 2 + 1] = std::clamp(
+            static_cast<int>(std::floor(maxIndex[axis] + 1e-6)),
+            extent[axis * 2], extent[axis * 2 + 1]);
+    }
+    return bounds;
+}
+
+bool GetPointInBox(
+    vtkImageData* image,
+    const int index[3],
+    const CropMatrixDouble16Array& boxMatrix)
+{
+    auto boxToInputModel = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModel->DeepCopy(boxMatrix.data());
+    auto inputModelToBox = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(boxToInputModel, inputModelToBox);
+
+    double point[3] = { 0.0, 0.0, 0.0 };
+    image->TransformIndexToPhysicalPoint(index, point);
+    const double point4[4] = { point[0], point[1], point[2], 1.0 };
+    double boxPoint[4] = { 0.0, 0.0, 0.0, 0.0 };
+    inputModelToBox->MultiplyPoint(point4, boxPoint);
+    return std::abs(boxPoint[0]) <= 1.0 + 1e-6
+        && std::abs(boxPoint[1]) <= 1.0 + 1e-6
+        && std::abs(boxPoint[2]) <= 1.0 + 1e-6;
+}
+
+void SetBoxExpect(
+    vtkImageData* sourceImage,
+    const OrthogonalCropResult& result,
+    const CropMatrixDouble16Array& boxMatrix,
+    CropRemovalMode removalMode,
+    int& failureCount)
+{
+    SetExpect(result.isSucceeded, "box submit should succeed.", failureCount);
+    SetExpect(result.submitImage != nullptr, "box submit image must exist.", failureCount);
+    SetExpect(result.maskImage != nullptr, "box mask image must exist.", failureCount);
+    if (!result.isSucceeded || !result.submitImage || !result.maskImage) {
+        return;
+    }
+
+    int sourceExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    int submitExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    int maskExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    sourceImage->GetExtent(sourceExtent);
+    result.submitImage->GetExtent(submitExtent);
+    result.maskImage->GetExtent(maskExtent);
+    const bool isKeepInside = removalMode == CropRemovalMode::KeepInside;
+    const auto expectedBounds = GetBoxIndexBounds(sourceImage, boxMatrix);
+    const int expectedExtent[6] = {
+        isKeepInside ? 0 : sourceExtent[0],
+        isKeepInside ? expectedBounds[1] - expectedBounds[0] : sourceExtent[1],
+        isKeepInside ? 0 : sourceExtent[2],
+        isKeepInside ? expectedBounds[3] - expectedBounds[2] : sourceExtent[3],
+        isKeepInside ? 0 : sourceExtent[4],
+        isKeepInside ? expectedBounds[5] - expectedBounds[4] : sourceExtent[5]
+    };
+    SetExpect(
+        std::equal(std::begin(expectedExtent), std::end(expectedExtent), std::begin(submitExtent)),
+        "box submit extent must match the independent snapped-bounds oracle.",
+        failureCount);
+    if (isKeepInside) {
+        SetExpect(
+            submitExtent[0] == 0 && submitExtent[2] == 0 && submitExtent[4] == 0,
+            "KeepInside output extent must start at zero.",
+            failureCount);
+    }
+    else {
+        SetExpect(
+            std::equal(std::begin(sourceExtent), std::end(sourceExtent), std::begin(submitExtent)),
+            "RemoveInside output must preserve the source extent.",
+            failureCount);
+    }
+    SetExpect(
+        std::equal(std::begin(submitExtent), std::end(submitExtent), std::begin(maskExtent)),
+        "box mask geometry must match the submit image extent.",
+        failureCount);
+
+    int globalStart[3] = {
+        isKeepInside ? expectedBounds[0] : sourceExtent[0],
+        isKeepInside ? expectedBounds[2] : sourceExtent[2],
+        isKeepInside ? expectedBounds[4] : sourceExtent[4]
+    };
+    if (isKeepInside) {
+        double expectedOrigin[3] = { 0.0, 0.0, 0.0 };
+        sourceImage->TransformIndexToPhysicalPoint(globalStart, expectedOrigin);
+        SetExpect(
+            std::abs(result.submitImage->GetOrigin()[0] - expectedOrigin[0]) <= TupleTolerance
+                && std::abs(result.submitImage->GetOrigin()[1] - expectedOrigin[1]) <= TupleTolerance
+                && std::abs(result.submitImage->GetOrigin()[2] - expectedOrigin[2]) <= TupleTolerance,
+            "KeepInside origin must be the first extracted global index physical point.",
+            failureCount);
+    }
+    else {
+        SetExpect(
+            std::abs(result.submitImage->GetOrigin()[0] - sourceImage->GetOrigin()[0])
+                    <= TupleTolerance
+                && std::abs(result.submitImage->GetOrigin()[1] - sourceImage->GetOrigin()[1])
+                    <= TupleTolerance
+                && std::abs(result.submitImage->GetOrigin()[2] - sourceImage->GetOrigin()[2])
+                    <= TupleTolerance,
+            "RemoveInside output must preserve the source origin.",
+            failureCount);
+    }
+
+    for (int axis = 0; axis < 3; ++axis) {
+        SetExpect(
+            std::abs(result.submitImage->GetSpacing()[axis] - sourceImage->GetSpacing()[axis])
+                <= TupleTolerance,
+            "box submit must preserve spacing.",
+            failureCount);
+        SetExpect(
+            std::abs(result.maskImage->GetOrigin()[axis]
+                - result.submitImage->GetOrigin()[axis]) <= TupleTolerance
+                && std::abs(result.maskImage->GetSpacing()[axis]
+                    - result.submitImage->GetSpacing()[axis]) <= TupleTolerance,
+            "box mask must preserve submit origin and spacing.",
+            failureCount);
+        for (int column = 0; column < 3; ++column) {
+            SetExpect(
+                std::abs(result.submitImage->GetDirectionMatrix()->GetElement(axis, column)
+                    - sourceImage->GetDirectionMatrix()->GetElement(axis, column)) <= MatrixTolerance,
+                "box submit must preserve direction.",
+                failureCount);
+            SetExpect(
+                std::abs(result.maskImage->GetDirectionMatrix()->GetElement(axis, column)
+                    - result.submitImage->GetDirectionMatrix()->GetElement(axis, column))
+                    <= MatrixTolerance,
+                "box mask must preserve submit direction.",
+                failureCount);
+        }
+    }
+
+    auto* sourceScalars = sourceImage->GetPointData()->GetScalars();
+    auto* submitScalars = result.submitImage->GetPointData()->GetScalars();
+    auto* maskScalars = result.maskImage->GetPointData()->GetScalars();
+    double scalarRange[2] = { 0.0, 0.0 };
+    sourceImage->GetScalarRange(scalarRange);
+    const int componentCount = sourceScalars->GetNumberOfComponents();
+    std::vector<double> sourceTuple(static_cast<std::size_t>(componentCount));
+    std::vector<double> submitTuple(static_cast<std::size_t>(componentCount));
+
+    vtkIdType actualKeptCount = 0;
+    for (int k = submitExtent[4]; k <= submitExtent[5]; ++k) {
+        for (int j = submitExtent[2]; j <= submitExtent[3]; ++j) {
+            for (int i = submitExtent[0]; i <= submitExtent[1]; ++i) {
+                int submitIndex[3] = { i, j, k };
+                int sourceIndex[3] = {
+                    isKeepInside ? globalStart[0] + i : i,
+                    isKeepInside ? globalStart[1] + j : j,
+                    isKeepInside ? globalStart[2] + k : k
+                };
+                const bool isInside = GetPointInBox(sourceImage, sourceIndex, boxMatrix);
+                const bool isKept = isKeepInside ? isInside : !isInside;
+                const vtkIdType sourceId = sourceImage->ComputePointId(sourceIndex);
+                const vtkIdType submitId = result.submitImage->ComputePointId(submitIndex);
+                const vtkIdType maskId = result.maskImage->ComputePointId(submitIndex);
+                SetExpect(
+                    maskScalars->GetComponent(maskId, 0) == (isKept ? 255.0 : 0.0),
+                    "box mask tuple must match the reference oracle.",
+                    failureCount);
+                if (maskScalars->GetComponent(maskId, 0) == 255.0) {
+                    ++actualKeptCount;
+                }
+                sourceScalars->GetTuple(sourceId, sourceTuple.data());
+                submitScalars->GetTuple(submitId, submitTuple.data());
+                for (int component = 0; component < componentCount; ++component) {
+                    const double expectedValue = isKept
+                        ? sourceTuple[static_cast<std::size_t>(component)]
+                        : scalarRange[0];
+                    SetExpect(
+                        std::abs(submitTuple[static_cast<std::size_t>(component)] - expectedValue)
+                            <= TupleTolerance,
+                        "box submit tuple must match the reference oracle.",
+                        failureCount);
+                }
+            }
+        }
+    }
+
+    vtkIdType expectedKeptCount = 0;
+    for (int k = sourceExtent[4]; k <= sourceExtent[5]; ++k) {
+        for (int j = sourceExtent[2]; j <= sourceExtent[3]; ++j) {
+            for (int i = sourceExtent[0]; i <= sourceExtent[1]; ++i) {
+                int index[3] = { i, j, k };
+                const bool isInside = GetPointInBox(sourceImage, index, boxMatrix);
+                if (isKeepInside ? isInside : !isInside) {
+                    ++expectedKeptCount;
+                }
+            }
+        }
+    }
+    SetExpect(
+        actualKeptCount == expectedKeptCount,
+        "box output must contain every and only source voxel selected by the oracle.",
+        failureCount);
+}
+
+void StartBoxExtent(int& failureCount)
+{
+    auto image = BuildOblique();
+    const std::array<CropMatrixDouble16Array, 2> matrices = {
+        GetIndexBox(image), GetInputBox(image)
+    };
+    SetExpect(
+        GetBoxIndexBounds(image, matrices[0]) == std::array<int, 6>{ 3, 4, 0, 1, 3, 4 },
+        "index-axis box must snap to the expected non-zero global extent.",
+        failureCount);
+    for (const auto& matrix : matrices) {
+        for (const auto removalMode : {
+            CropRemovalMode::KeepInside,
+            CropRemovalMode::RemoveInside }) {
+            OrthogonalCropRequest request;
+            request.geometryType = CropShape::Box;
+            request.operation = OrthogonalCropOperation::Submit;
+            request.dataSource = OrthogonalCropDataSource::ImageData;
+            request.removalMode = removalMode;
+            request.boxToInputModelMatrix = matrix;
+            const auto result = OrthogonalCropAlgorithm::GetResult(image, request);
+            SetBoxExpect(image, result, matrix, removalMode, failureCount);
+        }
+    }
+}
+
 void StartOblique(int& failureCount)
 {
     auto image = BuildOblique();
@@ -953,7 +1260,7 @@ void StartDataExport(int& failureCount)
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f });
     SetExpect(
         missingLayout && !dataManager.SetDataLoaded(
-            missingPath.string(), *missingLayout),
+            missingPath.u8string(), *missingLayout),
         "missing raw input should report failure.",
         failureCount);
     const auto afterFailure = dataManager.GetImageState();
@@ -970,7 +1277,7 @@ void StartDataExport(int& failureCount)
 
     const std::filesystem::path rawRequestPath = outputRoot / "volume.raw";
     SetExpect(
-        dataManager.ExportData(rawRequestPath.string(), identity),
+        dataManager.ExportData(rawRequestPath.u8string(), identity),
         "transformed data export should write a RAW file for synthetic input.",
         failureCount);
     SetExpect(
@@ -991,7 +1298,7 @@ void StartDataExport(int& failureCount)
         "slice image export should reject an empty output directory.",
         failureCount);
     SetExpect(
-        dataManager.ExportSlices(sliceDir.string(), Orientation::Top_down, windowLevel, identity),
+        dataManager.ExportSlices(sliceDir.u8string(), Orientation::Top_down, windowLevel, identity),
         "slice image export should write PNG slices for synthetic input.",
         failureCount);
     SetExpect(
@@ -1002,6 +1309,117 @@ void StartDataExport(int& failureCount)
         GetFileBytes(sliceDir, ".png"),
         "slice image export should create non-empty PNG files.",
         failureCount);
+
+    const std::string utf8RoundTrip = u8"体数据 é sample.raw";
+    SetExpect(
+        PlatformPath::GetUtf8Path(
+            PlatformPath::GetNativePath(utf8RoundTrip)) == utf8RoundTrip,
+        "UTF-8/native path conversion must round-trip without byte loss.",
+        failureCount);
+
+    const auto unicodeRoot = outputRoot / std::filesystem::u8path(u8"体数据_é_测试");
+    std::filesystem::create_directories(unicodeRoot, createError);
+    SetExpect(!createError, "Unicode test directory should be created.", failureCount);
+    const auto unicodeRaw = unicodeRoot / std::filesystem::u8path(u8"输入_2x2x2.raw");
+    {
+        std::ofstream stream(unicodeRaw, std::ios::binary);
+        const std::array<float, 8> values = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        stream.write(
+            reinterpret_cast<const char*>(values.data()),
+            static_cast<std::streamsize>(sizeof(values)));
+    }
+    const auto unicodeLayout = VolumeLayout::Create(
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f });
+    DataManagerTest unicodeManager;
+    bool hasUnicodeRaw = false;
+    SetExpect(
+        unicodeLayout
+            && unicodeManager.SetDataLoaded(unicodeRaw.u8string(), *unicodeLayout)
+            && unicodeManager.SetCurrentFromPending(hasUnicodeRaw)
+            && hasUnicodeRaw,
+        "UTF-8 RAW path must load through the native path boundary.",
+        failureCount);
+    const auto unicodeExport = unicodeRoot / std::filesystem::u8path(u8"导出.raw");
+    SetExpect(
+        unicodeManager.ExportData(unicodeExport.u8string(), identity),
+        "UTF-8 RAW export path must use a native filesystem path.",
+        failureCount);
+    const auto unicodeExportResult = unicodeRoot / std::filesystem::u8path(u8"导出_2X2X2.raw");
+    SetExpect(
+        std::filesystem::exists(unicodeExportResult)
+            && std::filesystem::file_size(unicodeExportResult) == sizeof(float) * 8,
+        "UTF-8 RAW export must create the expected non-empty native file.",
+        failureCount);
+    const auto unicodeSlices = unicodeRoot / std::filesystem::u8path(u8"切片目录");
+    SetExpect(
+        unicodeManager.ExportSlices(
+            unicodeSlices.u8string(),
+            Orientation::Top_down,
+            windowLevel,
+            identity),
+        "UTF-8 PNG paths must reach VTK as UTF-8 bytes.",
+        failureCount);
+    SetExpect(
+        GetFileCount(unicodeSlices, ".png") == 2
+            && GetFileBytes(unicodeSlices, ".png"),
+        "UTF-8 PNG export must create non-empty slices in the Unicode directory.",
+        failureCount);
+
+    const auto writeTiff = [](
+        const std::filesystem::path& path,
+        float value) {
+        auto tiffImage = vtkSmartPointer<vtkImageData>::New();
+        tiffImage->SetDimensions(2, 2, 1);
+        tiffImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+        auto* scalars = static_cast<unsigned char*>(tiffImage->GetScalarPointer());
+        std::fill(scalars, scalars + 4, static_cast<unsigned char>(value));
+        auto writer = vtkSmartPointer<vtkTIFFWriter>::New();
+        const std::string vtkPath = PlatformPath::GetUtf8Path(path);
+        writer->SetFileName(vtkPath.c_str());
+        writer->SetInputData(tiffImage);
+        writer->Write();
+        return writer->GetErrorCode() == 0;
+    };
+    const auto singleTiff = unicodeRoot / std::filesystem::u8path(u8"单张_é.tif");
+    const auto singleLayout = VolumeLayout::Create(
+        { 2, 2, 1 }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f });
+    TiffVolumeDataManager singleTiffManager;
+    bool hasSingleTiff = false;
+    SetExpect(
+        writeTiff(singleTiff, 7.0f)
+            && singleLayout
+            && singleTiffManager.SetDataLoaded(singleTiff.u8string(), *singleLayout)
+            && singleTiffManager.SetCurrentFromPending(hasSingleTiff)
+            && hasSingleTiff,
+        "UTF-8 single TIFF path must load and promote.",
+        failureCount);
+
+    const auto tiffSeries = unicodeRoot / std::filesystem::u8path(u8"序列目录");
+    std::filesystem::create_directories(tiffSeries, createError);
+    const auto tiff2 = tiffSeries / std::filesystem::u8path(u8"切片_2.tif");
+    const auto tiff10 = tiffSeries / std::filesystem::u8path(u8"切片_10.tif");
+    const auto seriesLayout = VolumeLayout::Create(
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, { 0.0f, 0.0f, 0.0f });
+    TiffVolumeDataManager seriesManager;
+    bool hasSeries = false;
+    const bool isSeriesReady = writeTiff(tiff2, 2.0f)
+        && writeTiff(tiff10, 10.0f)
+        && seriesLayout
+        && seriesManager.SetDataLoaded(tiffSeries.u8string(), *seriesLayout)
+        && seriesManager.SetCurrentFromPending(hasSeries)
+        && hasSeries;
+    SetExpect(
+        isSeriesReady,
+        "UTF-8 TIFF directory must load natural numeric order.",
+        failureCount);
+    if (isSeriesReady) {
+        const auto seriesImage = seriesManager.GetVtkImage();
+        SetExpect(
+            seriesImage->GetScalarComponentAsDouble(0, 0, 0, 0) == 2.0
+                && seriesImage->GetScalarComponentAsDouble(0, 0, 1, 0) == 10.0,
+            "TIFF series must sort slice 2 before slice 10.",
+            failureCount);
+    }
 
     auto replacementImage = vtkSmartPointer<vtkImageData>::New();
     replacementImage->SetDimensions(2, 3, 1);
@@ -1038,6 +1456,27 @@ void StartDataExport(int& failureCount)
         "replacing voxel storage must preserve the retired snapshot and publish one independent version.",
         failureCount);
 
+    SetExpect(
+        dataManager.SetCurrentData(spacingOwner, replacementOwner->version),
+        "semantic current restore should accept the exact promoted version.",
+        failureCount);
+    const auto restoredOwner = dataManager.GetImageSnapshot();
+    SetExpect(
+        restoredOwner
+            && restoredOwner->image == spacingOwner->image
+            && restoredOwner->dims == spacingOwner->dims
+            && restoredOwner->spacing == spacingOwner->spacing
+            && restoredOwner->origin == spacingOwner->origin
+            && restoredOwner->scalarRange == spacingOwner->scalarRange
+            && restoredOwner->version == replacementOwner->version + 1,
+        "semantic current restore must reuse the old immutable batch and publish a new version.",
+        failureCount);
+    SetExpect(
+        !dataManager.SetCurrentData(currentOwner, replacementOwner->version)
+            && dataManager.GetImageSnapshot() == restoredOwner,
+        "stale expected version must not overwrite a newer current batch.",
+        failureCount);
+
     std::error_code removeError;
     std::filesystem::remove_all(outputRoot, removeError);
     SetExpect(
@@ -1051,6 +1490,7 @@ void StartDataExport(int& failureCount)
         int failureCount = 0;
         StartCropFailure(failureCount);
         StartResultView(failureCount);
+        StartBoxExtent(failureCount);
         StartOblique(failureCount);
         StartDeepCases(failureCount);
         StartBench(failureCount);

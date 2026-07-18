@@ -29,7 +29,9 @@ public:
         : bindings(std::make_shared<HostFeatureBindings>())
     {
         context = std::make_shared<StdRenderContext>();
+        sliceContext = std::make_shared<StdRenderContext>();
         views.CreateView("primary", HostRenderViewRole::Primary3D, context);
+        views.CreateView("slice", HostRenderViewRole::TopDownSlice, sliceContext);
         router = std::make_unique<HostCommandRouter>(core, views, bindings);
     }
 
@@ -44,10 +46,18 @@ public:
         return view ? view->service : nullptr;
     }
 
+    std::shared_ptr<VizService> GetSliceService() const
+    {
+        const auto* view = views.GetViewBySelector(
+            { "slice", false, HostRenderViewRole::TopDownSlice });
+        return view ? view->service : nullptr;
+    }
+
     HostCoreServices core;
     HostRenderViewSet views;
     std::shared_ptr<HostFeatureBindings> bindings;
     std::shared_ptr<StdRenderContext> context;
+    std::shared_ptr<StdRenderContext> sliceContext;
     std::unique_ptr<HostCommandRouter> router;
 };
 
@@ -67,6 +77,7 @@ void StartDataCases(int& failureCount)
 {
     Fixture fixture;
     auto service = fixture.GetService();
+    auto sliceService = fixture.GetSliceService();
     bool isCallbackSuccess = false;
     SetExpect(SendData(fixture, HostDataAction::LoadFile,
         HostLoadRequest{ "volume.tiff", BuildGeometry() },
@@ -76,6 +87,32 @@ void StartDataCases(int& failureCount)
         "加载应保留布局并完成回调。", failureCount);
     SetExpect(service->GetLoadLayout().GetDimensions() == std::array<int, 3>{ 2, 2, 1 },
         "加载布局维度应完整传递。", failureCount);
+
+    const std::string unicodeLoadPath = u8"C:/体数据 é/输入.tiff";
+    SetExpect(
+        SendData(fixture, HostDataAction::LoadFile,
+            HostLoadRequest{ unicodeLoadPath, BuildGeometry() })
+            && service->GetLoadPath() == unicodeLoadPath,
+        "Host load 路由必须原样保留 UTF-8 路径字节。",
+        failureCount);
+
+    const std::string unicodeExportPath = u8"C:/体数据 é/导出.raw";
+    SetExpect(
+        SendData(fixture, HostDataAction::ExportVolume,
+            HostVolumeExportRequest{ unicodeExportPath })
+            && service->GetExportPath() == unicodeExportPath,
+        "Host volume export 路由必须原样保留 UTF-8 路径字节。",
+        failureCount);
+
+    const std::string unicodeSlicePath = u8"C:/体数据 é/切片";
+    HostSliceExportRequest sliceRequest;
+    sliceRequest.outputDir = unicodeSlicePath;
+    sliceRequest.sourceView.viewId = "slice";
+    SetExpect(
+        SendData(fixture, HostDataAction::ExportSlices, std::move(sliceRequest))
+            && sliceService->GetSlicePath() == unicodeSlicePath,
+        "Host slice export 路由必须原样保留 UTF-8 路径字节。",
+        failureCount);
 
     HostLoadRequest rawRequest{ "scan_3x4x5.raw", BuildGeometry() };
     rawRequest.geometry.dimensions = { 0, 0, 0 };

@@ -99,7 +99,9 @@ public:
     static std::array<double, 6> GetBoxBounds(const std::array<double, 16>& boxToInputModelMatrixData);
     static vtkSmartPointer<vtkTransform> GetBoxToInput(const std::array<double, 16>& boxToInputModelMatrixData);
     static vtkSmartPointer<vtkMatrix4x4> GetInputModelToBoxMatrix(const CropDataModel& cropData);
-    static bool GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData);
+    static bool GetAxisAligned(
+        vtkImageData* image,
+        const std::array<double, 16>& boxToInputModelMatrixData);
     static bool GetPointInBox(const double boxPoint[4]);
     static std::size_t GetVoxelBytes(vtkImageData* image);
     static std::size_t GetVoxelCount(const std::array<int, 6>& indexBounds);
@@ -115,7 +117,8 @@ public:
         vtkImageData* submitImage,
         const CropDataModel& cropData,
         CropRemovalMode removalMode,
-        const std::array<int, 6>& inputImageIndexBounds);
+        const std::array<int, 6>& inputImageIndexBounds,
+        double backgroundValue);
     static vtkSmartPointer<vtkPolyData> GetOutlineData(const CropDataModel& cropData);
     static std::array<int, 6> GetSnappedIndexBounds(vtkImageData* image, const CropDataModel& cropData);
     static OrthogonalCropResult GetBoxPreviewResult(
@@ -268,30 +271,43 @@ vtkSmartPointer<vtkMatrix4x4> OrthogonalCropAlgorithm::Impl::GetInputModelToBoxM
     return inputModelToBoxMatrix;
 }
 
-bool OrthogonalCropAlgorithm::Impl::GetAxisAligned(const std::array<double, 16>& boxToInputModelMatrixData)
+bool OrthogonalCropAlgorithm::Impl::GetAxisAligned(
+    vtkImageData* image,
+    const std::array<double, 16>& boxToInputModelMatrixData)
 {
-    // 判断标准盒的三条局部轴在 input model 中是否仍分别落在单一坐标轴上。
+    if (!image) {
+        return false;
+    }
+
+    auto physicalToIndex = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Invert(image->GetIndexToPhysicalMatrix(), physicalToIndex);
+    auto boxToInputModel = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModel->DeepCopy(boxToInputModelMatrixData.data());
+    auto boxToIndex = vtkSmartPointer<vtkMatrix4x4>::New();
+    vtkMatrix4x4::Multiply4x4(physicalToIndex, boxToInputModel, boxToIndex);
+
+    // 判断标准盒的三条局部轴在 image index 中是否仍分别落在单一坐标轴上。
     // 允许轴交换、90 度旋转和翻转；若某一列混入多个分量，或多个 box 轴占用同一 input model 轴，
     // 就说明存在任意角旋转、剪切或退化，不能走 AABB 快路径。
-    bool isInputAxisUsed[3] = { false, false, false };
+    bool isIndexAxisUsed[3] = { false, false, false };
     for (int boxAxis = 0; boxAxis < 3; ++boxAxis) {
-        int mappedInputModelAxis = -1;
-        for (int inputModelAxis = 0; inputModelAxis < 3; ++inputModelAxis) {
-            const double component = boxToInputModelMatrixData[inputModelAxis * 4 + boxAxis];
+        int mappedIndexAxis = -1;
+        for (int indexAxis = 0; indexAxis < 3; ++indexAxis) {
+            const double component = boxToIndex->GetElement(indexAxis, boxAxis);
             if (std::abs(component) <= BoundsEpsilon) {
                 continue;
             }
 
-            if (mappedInputModelAxis >= 0) {
+            if (mappedIndexAxis >= 0) {
                 return false;
             }
-            mappedInputModelAxis = inputModelAxis;
+            mappedIndexAxis = indexAxis;
         }
 
-        if (mappedInputModelAxis < 0 || isInputAxisUsed[mappedInputModelAxis]) {
+        if (mappedIndexAxis < 0 || isIndexAxisUsed[mappedIndexAxis]) {
             return false;
         }
-        isInputAxisUsed[mappedInputModelAxis] = true;
+        isIndexAxisUsed[mappedIndexAxis] = true;
     }
 
     return true;
@@ -338,14 +354,16 @@ vtkSmartPointer<vtkImageData> OrthogonalCropAlgorithm::Impl::GetMaskImage(
     }
 
     int dims[3] = { 0, 0, 0 };
+    int extent[6] = { 0, -1, 0, -1, 0, -1 };
     image->GetDimensions(dims);
+    image->GetExtent(extent);
 
-    const int minI = std::max(0, indexBounds[0]);
-    const int maxI = std::min(dims[0] - 1, indexBounds[1]);
-    const int minJ = std::max(0, indexBounds[2]);
-    const int maxJ = std::min(dims[1] - 1, indexBounds[3]);
-    const int minK = std::max(0, indexBounds[4]);
-    const int maxK = std::min(dims[2] - 1, indexBounds[5]);
+    const int minI = std::max(extent[0], indexBounds[0]);
+    const int maxI = std::min(extent[1], indexBounds[1]);
+    const int minJ = std::max(extent[2], indexBounds[2]);
+    const int maxJ = std::min(extent[3], indexBounds[3]);
+    const int minK = std::max(extent[4], indexBounds[4]);
+    const int maxK = std::min(extent[5], indexBounds[5]);
     const bool isCompactMask = removalMode == CropRemovalMode::KeepInside;
 
     auto maskImage = vtkSmartPointer<vtkImageData>::New();
@@ -402,8 +420,8 @@ vtkSmartPointer<vtkImageData> OrthogonalCropAlgorithm::Impl::GetMaskImage(
         : totalVoxelCount;
     std::memset(maskPtr, outsideValue, static_cast<std::size_t>(allocatedVoxelCount));
 
-    if (GetAxisAligned(cropData.boxToInputModelMatrix)) {
-        // 标准盒矩阵退化为 input model 轴对齐盒时，snapped AABB 内部整块都属于 inside。
+    if (GetAxisAligned(image, cropData.boxToInputModelMatrix)) {
+        // 标准盒矩阵退化为 image index 轴对齐盒时，snapped AABB 内部整块都属于 inside。
         if (isCompactMask) {
             std::memset(maskPtr, insideValue, static_cast<std::size_t>(allocatedVoxelCount));
         }
@@ -414,9 +432,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropAlgorithm::Impl::GetMaskImage(
                 for (int j = minJ; j <= maxJ; ++j) {
                     // 轴对齐盒的每个有效区间在内存中是连续行；
                     // 直接 memset 整行，避免逐体素写入同一语义值。
-                    const vtkIdType rowStart = static_cast<vtkIdType>(k) * sliceStride
-                        + static_cast<vtkIdType>(j) * rowStride
-                        + minI;
+                    const vtkIdType rowStart = static_cast<vtkIdType>(k - extent[4]) * sliceStride
+                        + static_cast<vtkIdType>(j - extent[2]) * rowStride
+                        + (minI - extent[0]);
                     std::memset(maskPtr + rowStart, insideValue, static_cast<std::size_t>(width));
                 }
             }
@@ -464,9 +482,9 @@ vtkSmartPointer<vtkImageData> OrthogonalCropAlgorithm::Impl::GetMaskImage(
                         ? static_cast<vtkIdType>(k - minK) * sliceStride
                             + static_cast<vtkIdType>(j - minJ) * rowStride
                             + (i - minI)
-                        : static_cast<vtkIdType>(k) * sliceStride
-                            + static_cast<vtkIdType>(j) * rowStride
-                            + i;
+                        : static_cast<vtkIdType>(k - extent[4]) * sliceStride
+                            + static_cast<vtkIdType>(j - extent[2]) * rowStride
+                            + (i - extent[0]);
                     maskPtr[linearIndex] = insideValue;
                 }
 
@@ -528,7 +546,8 @@ void OrthogonalCropAlgorithm::Impl::SetRemovedBg(
     vtkImageData* submitImage,
     const CropDataModel& cropData,
     CropRemovalMode removalMode,
-    const std::array<int, 6>& inputImageIndexBounds)
+    const std::array<int, 6>& inputImageIndexBounds,
+    double backgroundValue)
 {
     // 路径不变量：
     // A. KeepInside + axis-aligned 已由 GetExtractedImage 得到纯 ROI，无盒外体素，直接返回。
@@ -546,7 +565,9 @@ void OrthogonalCropAlgorithm::Impl::SetRemovedBg(
     }
 
     int dims[3] = { 0, 0, 0 };
+    int extent[6] = { 0, -1, 0, -1, 0, -1 };
     submitImage->GetDimensions(dims);
+    submitImage->GetExtent(extent);
     const int componentCount = scalars->GetNumberOfComponents();
     if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0 || componentCount <= 0) {
         return;
@@ -554,25 +575,29 @@ void OrthogonalCropAlgorithm::Impl::SetRemovedBg(
 
     const bool isRemoveInside = removalMode == CropRemovalMode::RemoveInside;
     if (!isRemoveInside
-        && GetAxisAligned(cropData.boxToInputModelMatrix)) {
+        && GetAxisAligned(submitImage, cropData.boxToInputModelMatrix)) {
         return;
     }
 
-    const int minI = isRemoveInside ? std::clamp(inputImageIndexBounds[0], 0, dims[0] - 1) : 0;
-    const int maxI = isRemoveInside ? std::clamp(inputImageIndexBounds[1], 0, dims[0] - 1) : dims[0] - 1;
-    const int minJ = isRemoveInside ? std::clamp(inputImageIndexBounds[2], 0, dims[1] - 1) : 0;
-    const int maxJ = isRemoveInside ? std::clamp(inputImageIndexBounds[3], 0, dims[1] - 1) : dims[1] - 1;
-    const int minK = isRemoveInside ? std::clamp(inputImageIndexBounds[4], 0, dims[2] - 1) : 0;
-    const int maxK = isRemoveInside ? std::clamp(inputImageIndexBounds[5], 0, dims[2] - 1) : dims[2] - 1;
+    const int minI = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[0], extent[0], extent[1]) : extent[0];
+    const int maxI = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[1], extent[0], extent[1]) : extent[1];
+    const int minJ = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[2], extent[2], extent[3]) : extent[2];
+    const int maxJ = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[3], extent[2], extent[3]) : extent[3];
+    const int minK = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[4], extent[4], extent[5]) : extent[4];
+    const int maxK = isRemoveInside
+        ? std::clamp(inputImageIndexBounds[5], extent[4], extent[5]) : extent[5];
     if (minI > maxI || minJ > maxJ || minK > maxK) {
         return;
     }
 
-    double scalarRange[2] = { 0.0, 0.0 };
-    submitImage->GetScalarRange(scalarRange);
     const std::vector<double> backgroundTuple(
         static_cast<std::size_t>(componentCount),
-        scalarRange[0]);
+        backgroundValue);
 
     // 所有分量统一写输入标量范围最小值；mask 另行记录 255/0，主图本身不引入额外背景常量。
 
@@ -700,16 +725,17 @@ std::array<int, 6> OrthogonalCropAlgorithm::Impl::GetSnappedIndexBounds(vtkImage
     // image 路径最终都要落到体素级执行，因此先把已经折叠回 image model 的 bounds
     // 通过 vtkImageData 原生的 image-model -> continuous-index 变换吸附到 index 整数区间。
     // 这里显式变换 8 个角点，避免 direction 非单位矩阵时只按各轴独立换算导致包围盒失真。
-    // 最终结果语义是一个“完整覆盖 crop bounds 的整数 index 包围盒”，供统计和执行路径共用。
+    // 最终结果语义是“体素中心落在有向盒连续 index 范围内”的整数包围盒，供执行路径共用。
     std::array<int, 6> indexBounds = { 0, 0, 0, 0, 0, 0 };
     if (!image) {
         return indexBounds;
     }
 
-    int dims[3] = { 0, 0, 0 };
-    image->GetDimensions(dims);
+    int extent[6] = { 0, -1, 0, -1, 0, -1 };
+    image->GetExtent(extent);
 
-    const auto inputModelBounds = cropData.inputModelBounds;
+    auto boxToInputModel = vtkSmartPointer<vtkMatrix4x4>::New();
+    boxToInputModel->DeepCopy(cropData.boxToInputModelMatrix.data());
     std::array<double, 3> minContinuousIndex = {
         std::numeric_limits<double>::max(),
         std::numeric_limits<double>::max(),
@@ -724,10 +750,16 @@ std::array<int, 6> OrthogonalCropAlgorithm::Impl::GetSnappedIndexBounds(vtkImage
     for (int sx = 0; sx < 2; ++sx) {
         for (int sy = 0; sy < 2; ++sy) {
             for (int sz = 0; sz < 2; ++sz) {
+                const double boxPoint[4] = {
+                    sx == 0 ? -1.0 : 1.0,
+                    sy == 0 ? -1.0 : 1.0,
+                    sz == 0 ? -1.0 : 1.0,
+                    1.0
+                };
+                double inputModelPoint4[4] = { 0.0, 0.0, 0.0, 0.0 };
+                boxToInputModel->MultiplyPoint(boxPoint, inputModelPoint4);
                 const double inputModelPoint[3] = {
-                    inputModelBounds[sx == 0 ? 0 : 1],
-                    inputModelBounds[sy == 0 ? 2 : 3],
-                    inputModelBounds[sz == 0 ? 4 : 5]
+                    inputModelPoint4[0], inputModelPoint4[1], inputModelPoint4[2]
                 };
                 // input model 点落在 index 的哪个连续子区间；VTK API 名里的 PhysicalPoint 对应 image model。
                 double continuousIndex[3] = { 0.0, 0.0, 0.0 };
@@ -741,11 +773,13 @@ std::array<int, 6> OrthogonalCropAlgorithm::Impl::GetSnappedIndexBounds(vtkImage
     }
 
     for (int axis = 0; axis < 3; ++axis) {
-        const int minIndex = static_cast<int>(std::floor(minContinuousIndex[axis] + BoundsEpsilon));
-        const int maxIndex = static_cast<int>(std::ceil(maxContinuousIndex[axis] - BoundsEpsilon));
+        const int minIndex = static_cast<int>(std::ceil(minContinuousIndex[axis] - BoundsEpsilon));
+        const int maxIndex = static_cast<int>(std::floor(maxContinuousIndex[axis] + BoundsEpsilon));
         // axis = 0 表示 X 轴  axis = 1 表示 Y 轴  axis = 2 表示 Z 轴
-        indexBounds[axis * 2 + 0] = std::clamp(std::min(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
-        indexBounds[axis * 2 + 1] = std::clamp(std::max(minIndex, maxIndex), 0, std::max(dims[axis] - 1, 0));
+        indexBounds[axis * 2 + 0] = std::clamp(
+            std::min(minIndex, maxIndex), extent[axis * 2], extent[axis * 2 + 1]);
+        indexBounds[axis * 2 + 1] = std::clamp(
+            std::max(minIndex, maxIndex), extent[axis * 2], extent[axis * 2 + 1]);
     }
 
     return indexBounds;
@@ -817,11 +851,14 @@ OrthogonalCropResult OrthogonalCropAlgorithm::Impl::GetSubmitResult(
             "Failed to build image submit image.",
             cropData);
     }
+    double inputScalarRange[2] = { 0.0, 0.0 };
+    image->GetScalarRange(inputScalarRange);
     SetRemovedBg(
         submitImage,
         cropData,
         removalMode,
-        snappedIndexBounds);
+        snappedIndexBounds,
+        inputScalarRange[0]);
 
     auto submitMaskImage = GetMaskImage(
         image,

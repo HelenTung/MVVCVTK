@@ -171,6 +171,9 @@
     <ClInclude Include="include\Platform\MemMappedFile.h">
       <Filter>include\Platform</Filter>
     </ClInclude>
+    <ClInclude Include="include\Platform\Path.h">
+      <Filter>include\Platform</Filter>
+    </ClInclude>
     <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h">
       <Filter>features\GapAnalysis\include</Filter>
     </ClInclude>

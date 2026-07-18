@@ -1,4 +1,5 @@
 #include "MemMappedFile.h"
+#include "Platform/Path.h"
 #include <cstring>
 #include <limits>
 
@@ -14,8 +15,9 @@
 
 bool MemMappedFile::Load(const std::string& path, size_t length) {
     Clear();
+    const auto nativePath = PlatformPath::GetNativePath(path);
 #ifdef _WIN32
-    HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    HANDLE hFile = CreateFileW(nativePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING,
         FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
@@ -32,7 +34,7 @@ bool MemMappedFile::Load(const std::string& path, size_t length) {
         CloseHandle(hFile); return false;
     }
 
-    HANDLE hMap = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    HANDLE hMap = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!hMap) { CloseHandle(hFile); return false; }
 
     const void* ptr = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, mapBytes);
@@ -43,7 +45,7 @@ bool MemMappedFile::Load(const std::string& path, size_t length) {
     m_data = ptr;
     m_size = mapBytes;
 #else
-    int fd = ::open(path.c_str(), O_RDONLY);
+    int fd = ::open(nativePath.c_str(), O_RDONLY);
     if (fd < 0) return false;
 
     struct stat st {};

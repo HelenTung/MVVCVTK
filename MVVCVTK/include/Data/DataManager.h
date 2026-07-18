@@ -16,6 +16,8 @@ protected:
     // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
     bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
     bool SetPendingImage(ImageState image);
+    // 仅当 current 仍是 expectedVersion 时恢复指定 immutable snapshot，并以新版本发布。
+    bool SetCurrentData(const ImageSnapshot& snapshot, DataVersion expectedVersion);
     ImageSnapshot GetImageSnapshot() const override;
 
 public:
@@ -36,6 +38,7 @@ public:
     bool SetCurrentFromPending(bool& hasPending) override;
     bool ClearPending() override;
 
+    // filePath/dirPath 均为 UTF-8 路径。
     bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
     bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
 };
@@ -44,6 +47,7 @@ class RawVolumeDataManager : public BaseDataManager {
 public:
     RawVolumeDataManager();
     ~RawVolumeDataManager() override;
+    // filePath 为 UTF-8 路径。
     bool SetDataLoaded(
         const std::string& filePath,
         const VolumeLayout& layout) override;
@@ -61,7 +65,7 @@ class TiffVolumeDataManager : public BaseDataManager {
 public:
     TiffVolumeDataManager();
     ~TiffVolumeDataManager() override;
-    // 实现加载接口
+    // filePath 为 UTF-8 路径。
     bool SetDataLoaded(
         const std::string& filePath,
         const VolumeLayout& layout) override;

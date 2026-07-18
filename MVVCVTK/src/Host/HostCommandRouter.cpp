@@ -1,4 +1,5 @@
 #include "Host/HostCommandRouter.h"
+#include "Platform/Path.h"
 
 #include "AppService.h"
 #include "AppTypes.h"
@@ -8,6 +9,7 @@
 #include "StdRenderContext.h"
 #include "VolumeTypes.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <cmath>
@@ -170,13 +172,13 @@ std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
 {
     // 仅为未显式提供 dimensions 的 RAW 请求解析文件名尾部 NxMxK；
     // 解析从最后两个 x/X 分隔符向前收集第一段连续数字，前缀可包含其它描述文本。
-    const std::filesystem::path filePath(path);
-    std::string extension = filePath.extension().string();
+    const std::filesystem::path filePath = PlatformPath::GetNativePath(path);
+    std::string extension = PlatformPath::GetUtf8Path(filePath.extension());
     std::transform(extension.begin(), extension.end(), extension.begin(),
         [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
     if (extension != ".raw") return std::nullopt;
 
-    const std::string stem = filePath.stem().string();
+    const std::string stem = PlatformPath::GetUtf8Path(filePath.stem());
     const auto second = stem.find_last_of("xX");
     if (second == std::string::npos || second + 1 >= stem.size()) {
         return std::nullopt;

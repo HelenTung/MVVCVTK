@@ -15,7 +15,7 @@ public:
     bool SetBinCount(int binCount);
     vtkSmartPointer<vtkTable> GetOutputData(vtkSmartPointer<vtkImageData> input);
 
-    // 直方图转图片
+    // 直方图转图片；filePath 为 UTF-8 路径。
     void ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath);
 
 private:

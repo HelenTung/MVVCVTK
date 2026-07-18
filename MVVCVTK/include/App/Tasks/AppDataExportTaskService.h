@@ -16,11 +16,11 @@ public:
     AppDataExportTaskService(std::shared_ptr<AbstractDataManager> dataManager,
         std::shared_ptr<SharedInteractionState> sharedState);
 
-    // 在调用线程快照 model-to-world 矩阵并构造后台数据导出；依赖或文件路径无效时投递失败回调并返回空。
+    // 在调用线程快照 model-to-world 矩阵并构造后台数据导出；path 为 UTF-8 路径。
     std::optional<std::packaged_task<bool()>> BuildDataTask(
         std::string path);
 
-    // path 是输出目录；rotationAngleDeg 为可选角度（度），currentMode 必须对应真实切片方向。
+    // path 是 UTF-8 输出目录；rotationAngleDeg 为可选角度（度），currentMode 必须对应真实切片方向。
     // 构造阶段快照姿态、世界坐标游标与窗宽窗位，后台只消费这些快照并投递结果。
     std::optional<std::packaged_task<bool()>> BuildSlicesTask(
         std::string path,

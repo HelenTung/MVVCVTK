@@ -68,6 +68,7 @@ public:
     virtual std::array<double, 3> GetSpacing() const = 0;
     virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;
     virtual DataVersion GetDataVersion() const = 0;
+    // 所有 std::string 文件系统路径统一使用 UTF-8 编码。
     virtual bool SetDataLoaded(
         const std::string& filePath,
         const VolumeLayout& layout) = 0;
@@ -78,6 +79,7 @@ public:
     virtual bool SetCurrentFromPending(bool& hasPending) = 0;
     // 销毁尚未提交的完整 pending 批次；无 pending 也视为清理成功。
     virtual bool ClearPending() = 0;
+    // filePath/dirPath 为 UTF-8 路径。
     virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) = 0;
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;
 };

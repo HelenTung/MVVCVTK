@@ -1,4 +1,5 @@
 #include "DataConverters.h"
+#include "Platform/Path.h"
 #include <vtkImageAccumulate.h>
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
@@ -7,6 +8,8 @@
 #include <vtkJPEGWriter.h>
 #include <vtkPNGWriter.h>
 #include <vtkImageData.h>
+#include <algorithm>
+#include <cctype>
 
 bool HistogramConverter::SetBinCount(int binCount)
 {
@@ -80,7 +83,7 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
         }
     }
 
-    const std::filesystem::path outputPath(filePath);
+    const std::filesystem::path outputPath = PlatformPath::GetNativePath(filePath);
     if (outputPath.empty()) {
         return;
     }
@@ -93,12 +96,14 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
             return;
         }
     }
-    std::string ext = outputPath.extension().string();
+    std::string ext = PlatformPath::GetUtf8Path(outputPath.extension());
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+        [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
     vtkSmartPointer<vtkImageWriter> writer;
-    if (ext == ".png" || ext == ".PNG") writer = vtkSmartPointer<vtkPNGWriter>::New();
+    if (ext == ".png") writer = vtkSmartPointer<vtkPNGWriter>::New();
     else writer = vtkSmartPointer<vtkJPEGWriter>::New();
 
-    const std::string vtkFileName = outputPath.u8string();
+    const std::string vtkFileName = PlatformPath::GetUtf8Path(outputPath);
     writer->SetFileName(vtkFileName.c_str());
     writer->SetInputData(canvas);
     writer->Write();
