@@ -148,6 +148,28 @@ bool StartBadInputCase()
     isPassed = SetExpect(
         !CropAlgorithm::BuildPredicateTable({ operation }, 1).isSucceeded,
         "Zero plane normals should be rejected.") && isPassed;
+
+    const auto boxTable =
+        CropAlgorithm::BuildPredicateTable(
+            { BuildBox(7) }, 1);
+    auto malformedBox = *boxTable.predicateTable;
+    malformedBox.rgbaValues[16] = 1.0f;
+    isPassed = SetExpect(
+        !CropAlgorithm::GetPointKept(
+            malformedBox, 1, { 0.0f, 0.0f, 0.0f }),
+        "A non-affine compiled box predicate should be rejected.") && isPassed;
+
+    const auto planeTable =
+        CropAlgorithm::BuildPredicateTable(
+            { BuildPlane(8) }, 1);
+    auto malformedPlane = *planeTable.predicateTable;
+    malformedPlane.rgbaValues[8] = 0.0f;
+    malformedPlane.rgbaValues[9] = 0.0f;
+    malformedPlane.rgbaValues[10] = 0.0f;
+    isPassed = SetExpect(
+        !CropAlgorithm::GetPointKept(
+            malformedPlane, 1, { 0.0f, 0.0f, 1.0f }),
+        "A compiled plane predicate with a zero normal should be rejected.") && isPassed;
     return isPassed;
 }
 
@@ -326,6 +348,27 @@ bool StartImageExportCase()
             && result.maskImage->GetNumberOfScalarComponents() == 1,
         "Image export mask should align non-zero extent/origin/spacing/direction metadata and strict 0/255 truth.") && isPassed;
 
+    auto invalidTransformImage =
+        vtkSmartPointer<vtkImageData>::New();
+    invalidTransformImage->ShallowCopy(image);
+    invalidTransformImage->SetOrigin(
+        std::numeric_limits<double>::infinity(),
+        -2.0,
+        3.0);
+    const auto invalidTransformResult =
+        CropAlgorithm::GetResult(
+            invalidTransformImage,
+            nullptr,
+            request,
+            BuildPayload(
+                request.operations,
+                request.nodeCount));
+    isPassed = SetExpect(
+        !invalidTransformResult.isSucceeded
+            && invalidTransformResult.failureReason
+                == CropFailure::BadInput,
+        "A non-finite VTK index transform should be rejected before materialization.") && isPassed;
+
     auto baselineMask =
         vtkSmartPointer<vtkImageData>::New();
     baselineMask->CopyStructure(image);
@@ -358,6 +401,112 @@ bool StartImageExportCase()
             && mergedValues[1] == 255
             && mergedValues[2] == 0,
         "Repeated CPU crop should AND the new predicate with the baseline mask.") && isPassed;
+
+    auto upperPlane = BuildPlane(2);
+    upperPlane.planeCenterInInputModel = { 2.0, 0.0, 0.0 };
+    upperPlane.planeNormalInInputModel = { -1.0, 0.0, 0.0 };
+    auto fusedRequest = request;
+    fusedRequest.operations = { operation, upperPlane };
+    fusedRequest.nodeCount = fusedRequest.operations.size();
+    const auto fusedResult =
+        CropAlgorithm::GetResult(
+            image,
+            nullptr,
+            fusedRequest,
+            BuildPayload(
+                fusedRequest.operations,
+                fusedRequest.nodeCount));
+    const auto* fusedValues =
+        fusedResult.maskImage
+        ? static_cast<const unsigned char*>(
+            fusedResult.maskImage->GetScalarPointer())
+        : nullptr;
+    isPassed = SetExpect(
+        fusedResult.isSucceeded
+            && fusedValues
+            && fusedValues[0] == 0
+            && fusedValues[1] == 255
+            && fusedValues[2] == 0,
+        "A fused predicate prefix should scan the image once and publish only the final mask.") && isPassed;
+
+    auto slabImage =
+        vtkSmartPointer<vtkImageData>::New();
+    slabImage->SetExtent(-1, 2, 4, 5, 7, 14);
+    slabImage->SetOrigin(0.0, 0.0, 0.0);
+    slabImage->SetSpacing(1.0, 1.0, 1.0);
+    slabImage->AllocateScalars(
+        VTK_UNSIGNED_CHAR, 1);
+    auto slabMask =
+        vtkSmartPointer<vtkImageData>::New();
+    slabMask->CopyStructure(slabImage);
+    slabMask->AllocateScalars(
+        VTK_UNSIGNED_CHAR, 1);
+    for (int k = 7; k <= 14; ++k) {
+        for (int j = 4; j <= 5; ++j) {
+            for (int i = -1; i <= 2; ++i) {
+                auto* maskValue =
+                    static_cast<unsigned char*>(
+                        slabMask->GetScalarPointer(
+                            i, j, k));
+                *maskValue =
+                    (k - 7) % 2 == 0
+                    ? 255 : 0;
+            }
+        }
+    }
+    auto lowerSlabPlane = BuildPlane(3);
+    lowerSlabPlane.planeNormalInInputModel =
+        { 1.0, 0.0, 0.0 };
+    auto upperSlabPlane = BuildPlane(4);
+    upperSlabPlane.planeCenterInInputModel =
+        { 1.5, 0.0, 0.0 };
+    upperSlabPlane.planeNormalInInputModel =
+        { -1.0, 0.0, 0.0 };
+    auto slabRequest = request;
+    slabRequest.operations = {
+        lowerSlabPlane, upperSlabPlane
+    };
+    slabRequest.nodeCount =
+        slabRequest.operations.size();
+    const auto slabResult =
+        CropAlgorithm::GetResult(
+            slabImage,
+            slabMask,
+            slabRequest,
+            BuildPayload(
+                slabRequest.operations,
+                slabRequest.nodeCount));
+    std::size_t slabKeptCount = 0;
+    bool hasExactSlabMask =
+        slabResult.isSucceeded
+        && slabResult.maskImage;
+    for (int k = 7;
+        hasExactSlabMask && k <= 14;
+        ++k) {
+        for (int j = 4; j <= 5; ++j) {
+            for (int i = -1; i <= 2; ++i) {
+                const auto* maskValue =
+                    static_cast<const unsigned char*>(
+                        slabResult.maskImage
+                            ->GetScalarPointer(
+                                i, j, k));
+                const bool isExpected =
+                    i == 1
+                    && (k - 7) % 2 == 0;
+                hasExactSlabMask =
+                    maskValue
+                    && *maskValue
+                        == (isExpected ? 255 : 0);
+                slabKeptCount +=
+                    maskValue && *maskValue != 0
+                    ? 1 : 0;
+            }
+        }
+    }
+    isPassed = SetExpect(
+        hasExactSlabMask
+            && slabKeptCount == 8,
+        "Z-slice fusion should keep deterministic counts for negative extents and an input mask.") && isPassed;
 
     auto removeAll = operation;
     removeAll.planeCenterInInputModel = { 10.0, 0.0, 0.0 };

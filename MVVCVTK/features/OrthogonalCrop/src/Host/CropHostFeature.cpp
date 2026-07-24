@@ -128,6 +128,7 @@ private:
     bool ClearPolyData();
     bool ResetOriginal();
     bool SetImageResult(
+        const ImageSnapshot& sourceSnapshot,
         const ImageSnapshot& expectedSnapshot,
         CropExportResult& result);
     bool ExportCrop(
@@ -466,6 +467,7 @@ bool CropHostFeature::Impl::ClearPolyData()
 }
 
 bool CropHostFeature::Impl::SetImageResult(
+    const ImageSnapshot& sourceSnapshot,
     const ImageSnapshot& expectedSnapshot,
     CropExportResult& result)
 {
@@ -474,6 +476,7 @@ bool CropHostFeature::Impl::SetImageResult(
             != OrthogonalCropDataSource::ImageData
         || !result.imageData
         || !result.maskImage
+        || !sourceSnapshot
         || !expectedSnapshot
         || !m_setImageState
         || !m_getImageSnapshot
@@ -485,6 +488,7 @@ bool CropHostFeature::Impl::SetImageResult(
             << static_cast<int>(result.resolvedDataSource)
             << " hasImage=" << static_cast<bool>(result.imageData)
             << " hasMask=" << static_cast<bool>(result.maskImage)
+            << " hasSource=" << static_cast<bool>(sourceSnapshot)
             << " hasExpected=" << static_cast<bool>(expectedSnapshot)
             << " isPublishing=" << m_isPublishing << '\n';
         return false;
@@ -494,13 +498,17 @@ bool CropHostFeature::Impl::SetImageResult(
         m_bridge->GetCropHistory();
     std::cout << "[Crop][Materialize] result"
         << " resultVersion=" << result.inputVersion
+        << " sourceVersion=" << sourceSnapshot->version
         << " expectedVersion=" << expectedSnapshot->version
         << " prefixNodes=" << result.nodeCount
         << " prefixOps=" << result.operations.size()
         << " | " << GetHistoryText(historyBefore)
         << '\n';
-    if (result.inputVersion != expectedSnapshot->version
-        || result.nodeCount != historyBefore.nodeCount
+    const std::size_t absoluteNodeCount =
+        historyBefore.baseNodeCount
+        + historyBefore.nodeCount;
+    if (result.inputVersion != sourceSnapshot->version
+        || result.nodeCount != absoluteNodeCount
         || result.operations.size() != result.nodeCount) {
         result.isSucceeded = false;
         result.failureReason =
@@ -527,8 +535,7 @@ bool CropHostFeature::Impl::SetImageResult(
         input.inputModelBounds.data());
     if (!m_bridge->StartCropBaseline(
             std::move(input),
-            historyBefore.baseNodeCount
-                + historyBefore.nodeCount)) {
+            absoluteNodeCount)) {
         result.isSucceeded = false;
         result.failureReason = CropFailure::BadInput;
         result.message =
@@ -543,8 +550,7 @@ bool CropHostFeature::Impl::SetImageResult(
     std::cout << "[Crop][Materialize] baseline staged"
         << " nextVersion=" << expectedSnapshot->version + 1
         << " nextBase="
-        << historyBefore.baseNodeCount
-            + historyBefore.nodeCount
+        << absoluteNodeCount
         << " nextActiveOps="
         << historyBefore.operationCount
             - historyBefore.nodeCount
@@ -600,7 +606,7 @@ bool CropHostFeature::Impl::SetImageResult(
     (void)m_bridge->SetCropBaselineComplete();
 
     if (!m_rootImage) {
-        m_rootImage = expectedSnapshot;
+        m_rootImage = sourceSnapshot;
         std::cout
             << "[Crop][Materialize] root captured"
             << " rootVersion=" << m_rootImage->version
@@ -829,7 +835,7 @@ bool CropHostFeature::Impl::SendComplete(
     }
 
     CropHostCallback onComplete;
-    std::optional<CropExportResult> result;
+    CropExportResult result;
     {
         const std::lock_guard<std::mutex> lock(state->mutex);
         const auto current = std::find(
@@ -841,10 +847,10 @@ bool CropHostFeature::Impl::SendComplete(
             return false;
         }
         onComplete = std::move(item->onComplete);
-        result = std::move(item->result);
+        result = std::move(item->result.value());
         state->items.erase(current);
     }
-    onComplete(std::move(*result));
+    onComplete(std::move(result));
     return true;
 }
 
@@ -943,11 +949,43 @@ bool CropHostFeature::Impl::ExportCrop(
         && !expectedSnapshot) {
         return false;
     }
+    const ImageSnapshot sourceSnapshot =
+        target.source == CropHostSource::CurrentImage
+        ? (m_rootImage
+            ? m_rootImage
+            : expectedSnapshot)
+        : ImageSnapshot{};
+    CropInputSnapshot rootInput;
+    if (sourceSnapshot) {
+        rootInput.dataSource =
+            OrthogonalCropDataSource::ImageData;
+        rootInput.inputVersion =
+            sourceSnapshot->version;
+        rootInput.imageData =
+            sourceSnapshot->image;
+        rootInput.validityMask =
+            sourceSnapshot->validityMask;
+        if (!GetImageReady(rootInput.imageData)) {
+            return false;
+        }
+        rootInput.imageData->GetBounds(
+            rootInput.inputModelBounds.data());
+    }
+    else {
+        auto polyRoot = GetCropInput(target);
+        if (!polyRoot) {
+            return false;
+        }
+        rootInput = std::move(*polyRoot);
+    }
     const auto history = m_bridge->GetCropHistory();
     std::cout << "[Crop][Materialize] request"
         << " expectedVersion="
         << (expectedSnapshot
             ? expectedSnapshot->version : 0)
+        << " sourceVersion="
+        << (sourceSnapshot
+            ? sourceSnapshot->version : 0)
         << " | " << GetHistoryText(history)
         << '\n';
     const auto state = m_completeState;
@@ -963,8 +1001,8 @@ bool CropHostFeature::Impl::ExportCrop(
 
     const std::weak_ptr<CompleteState> weakState = state;
     const std::weak_ptr<CompleteItem> weakItem = item;
-    const bool isAccepted = m_bridge->ExportCrop(
-        [this, expectedSnapshot,
+    auto onResult =
+        [this, sourceSnapshot, expectedSnapshot,
             weakState, weakItem](
             CropExportResult result) mutable {
             const auto state = weakState.lock();
@@ -974,6 +1012,7 @@ bool CropHostFeature::Impl::ExportCrop(
                 && result.resolvedDataSource
                     == OrthogonalCropDataSource::ImageData) {
                 if (SetImageResult(
+                        sourceSnapshot,
                         expectedSnapshot, result)) {
                     waitInput = RenderInputStamp{
                         result.imageData.GetPointer(),
@@ -995,7 +1034,10 @@ bool CropHostFeature::Impl::ExportCrop(
                     waitInput)) {
                 return;
             }
-        });
+        };
+    const bool isAccepted = m_bridge->ExportCrop(
+        std::move(rootInput),
+        std::move(onResult));
     if (!isAccepted) {
         bool hasResult = false;
         {

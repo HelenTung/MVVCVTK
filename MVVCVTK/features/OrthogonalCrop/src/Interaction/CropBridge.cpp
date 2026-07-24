@@ -80,6 +80,7 @@ public:
         std::future<CropExportResult> result;
         std::thread worker;
         CropExportCallback callback;
+        CropExportRequest request;
     };
 
     struct PendingBaseline final {
@@ -113,7 +114,9 @@ public:
     CropHistoryState GetCropHistory() const;
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
-    bool ExportCrop(CropExportCallback onComplete);
+    bool ExportCrop(
+        CropInputSnapshot rootInput,
+        CropExportCallback onComplete);
     bool GetExportTickNeeded() const;
     bool SendExportResult();
 
@@ -145,6 +148,7 @@ private:
     void ClearShader();
     void ClearTargets();
     CropExportResult BuildExportFailure(
+        const CropExportRequest& request,
         CropFailure failureReason,
         const char* message) const;
 
@@ -1272,70 +1276,122 @@ CropMatrixDouble16Array CropBridge::Impl::GetWorldToInput() const
 }
 
 CropExportResult CropBridge::Impl::BuildExportFailure(
+    const CropExportRequest& request,
     const CropFailure failureReason,
     const char* message) const
 {
     CropExportResult result;
-    result.resolvedDataSource = m_input.dataSource;
+    result.resolvedDataSource = request.dataSource;
     result.failureReason = failureReason;
-    result.inputVersion = m_input.inputVersion;
-    result.nodeCount = m_cursor;
-    result.operations.assign(m_history.begin(), m_history.begin() + m_cursor);
+    result.inputVersion = request.inputVersion;
+    result.nodeCount = request.nodeCount;
+    result.operations = request.operations;
     result.message = message;
     return result;
 }
 
-bool CropBridge::Impl::ExportCrop(CropExportCallback onComplete)
+bool CropBridge::Impl::ExportCrop(
+    CropInputSnapshot input,
+    CropExportCallback onComplete)
 {
     if (!onComplete) {
         return false;
     }
+
+    CropExportRequest request;
+    request.dataSource = input.dataSource;
+    request.inputVersion = input.inputVersion;
+    const std::size_t absoluteNodeCount =
+        m_baseNodeCount + m_cursor;
+    request.nodeCount = absoluteNodeCount;
+    if (absoluteNodeCount <= m_allHistory.size()) {
+        request.operations.assign(
+            m_allHistory.begin(),
+            m_allHistory.begin() + absoluteNodeCount);
+    }
+
     if (m_exportTask) {
-        onComplete(BuildExportFailure(CropFailure::Busy, "A crop export is already running."));
+        onComplete(BuildExportFailure(
+            request,
+            CropFailure::Busy,
+            "A crop export is already running."));
         return false;
     }
     if (m_pendingShader
         || m_pendingMode
         || m_hasBaseShader
         || m_cursor == 0
+        || request.nodeCount == 0
+        || request.operations.size() != request.nodeCount
+        || m_baseNodeCount + m_history.size()
+            != m_allHistory.size()
+        || input.dataSource != m_input.dataSource
+        || input.inputModelBounds != m_input.inputModelBounds
+        || !CropAlgorithm::GetInputValid(input)
         || !CropAlgorithm::GetInputValid(m_input)
         || m_activePayload.sourceStamp != GetInputStamp(m_input)
         || m_activePayload.nodeCount != m_cursor
         || !m_activePayload.predicateTable) {
-        onComplete(BuildExportFailure(CropFailure::BadInput, "Crop export state is not ready."));
+        onComplete(BuildExportFailure(
+            request,
+            CropFailure::BadInput,
+            "Crop export state is not ready."));
         return false;
     }
 
-    CropExportRequest request;
-    request.dataSource = m_input.dataSource;
-    request.operations.assign(m_history.begin(), m_history.begin() + m_cursor);
-    request.nodeCount = request.operations.size();
-    request.inputVersion = m_input.inputVersion;
+    const auto tableResult =
+        CropAlgorithm::BuildPredicateTable(
+            request.operations,
+            request.nodeCount);
+    if (!tableResult.isSucceeded
+        || !tableResult.predicateTable) {
+        onComplete(BuildExportFailure(
+            request,
+            CropFailure::BadInput,
+            "Crop absolute predicate prefix is invalid."));
+        return false;
+    }
+    CropShaderPayload payload;
+    payload.revision = m_activePayload.revision;
+    payload.sourceStamp = GetInputStamp(input);
+    payload.nodeCount = request.nodeCount;
+    payload.predicateTable =
+        tableResult.predicateTable;
     auto task = m_exportRouter.BuildExportTask(
-        m_input,
-        std::move(request),
-        m_activePayload);
+        input,
+        request,
+        std::move(payload));
     if (!task) {
-        onComplete(BuildExportFailure(CropFailure::VersionMismatch, "Crop export snapshot is inconsistent."));
+        onComplete(BuildExportFailure(
+            request,
+            CropFailure::VersionMismatch,
+            "Crop export snapshot is inconsistent."));
         return false;
     }
 
     ExportTask active;
     active.result = task->get_future();
     active.callback = std::move(onComplete);
+    active.request = std::move(request);
     try {
         active.worker = std::thread(std::move(*task));
     }
     catch (...) {
-        active.callback(BuildExportFailure(CropFailure::WorkerStartFailed, "Crop export worker could not start."));
+        active.callback(BuildExportFailure(
+            active.request,
+            CropFailure::WorkerStartFailed,
+            "Crop export worker could not start."));
         return false;
     }
     if (!active.worker.joinable()) {
-        active.callback(BuildExportFailure(CropFailure::WorkerStartFailed, "Crop export worker is not joinable."));
+        active.callback(BuildExportFailure(
+            active.request,
+            CropFailure::WorkerStartFailed,
+            "Crop export worker is not joinable."));
         return false;
     }
-    // worker 捕获的是当前 committed prefix；在 owner thread 消费结果前，
-    // m_exportTask 同时充当历史事务门，所有会改变 active prefix 的入口均拒绝。
+    // worker 捕获 root 输入与绝对历史前缀；在 owner thread 消费结果前，
+    // m_exportTask 同时充当历史事务门，所有会改变历史前缀的入口均拒绝。
     m_exportTask = std::move(active);
     m_hasDrag = false;
     m_dragStart.reset();
@@ -1343,7 +1399,9 @@ bool CropBridge::Impl::ExportCrop(CropExportCallback onComplete)
     std::cout
         << "[Crop][Materialize] widget frozen"
         << " shape=" << static_cast<int>(m_geometryType)
-        << " node=" << m_cursor
+        << " node=" << m_exportTask->request.nodeCount
+        << " sourceVersion="
+        << m_exportTask->request.inputVersion
         << '\n';
     return true;
 }
@@ -1367,10 +1425,16 @@ bool CropBridge::Impl::SendExportResult()
         result = active.result.get();
     }
     catch (const std::exception& error) {
-        result = BuildExportFailure(CropFailure::WorkerFailed, error.what());
+        result = BuildExportFailure(
+            active.request,
+            CropFailure::WorkerFailed,
+            error.what());
     }
     catch (...) {
-        result = BuildExportFailure(CropFailure::WorkerFailed, "Crop export worker failed with an unknown exception.");
+        result = BuildExportFailure(
+            active.request,
+            CropFailure::WorkerFailed,
+            "Crop export worker failed with an unknown exception.");
     }
     if (active.worker.joinable()) {
         active.worker.join();
@@ -1657,6 +1721,13 @@ bool CropBridge::GetCropBound() const { return m_impl->GetCropBound(); }
 CropHistoryState CropBridge::GetCropHistory() const { return m_impl->GetCropHistory(); }
 bool CropBridge::GetShaderTickNeeded() const { return m_impl->GetShaderTickNeeded(); }
 bool CropBridge::SendShaderCommit() { return m_impl->SendShaderCommit(); }
-bool CropBridge::ExportCrop(CropExportCallback onComplete) { return m_impl->ExportCrop(std::move(onComplete)); }
+bool CropBridge::ExportCrop(
+    CropInputSnapshot rootInput,
+    CropExportCallback onComplete)
+{
+    return m_impl->ExportCrop(
+        std::move(rootInput),
+        std::move(onComplete));
+}
 bool CropBridge::GetExportTickNeeded() const { return m_impl->GetExportTickNeeded(); }
 bool CropBridge::SendExportResult() { return m_impl->SendExportResult(); }

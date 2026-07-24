@@ -56,7 +56,10 @@ public:
 
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
-    bool ExportCrop(CropExportCallback onComplete);
+    // 从 rootInput 对完整 allHistory 前缀做一次融合物化，不生成节点级中间 mask。
+    bool ExportCrop(
+        CropInputSnapshot rootInput,
+        CropExportCallback onComplete);
     bool GetExportTickNeeded() const;
     bool SendExportResult();
 

@@ -413,7 +413,7 @@ int CropBridgeSuite::GetFailCount() const
         reboundService->GetEffectState().activeRevision;
 
     bool hasAsyncResult = false;
-    expect(bridge.ExportCrop([&hasAsyncResult](CropExportResult result) {
+    expect(bridge.ExportCrop(input, [&hasAsyncResult](CropExportResult result) {
         hasAsyncResult = result.inputVersion == 1
             && result.nodeCount == 1
             && result.operations.size() == 1
@@ -480,7 +480,7 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.NextCrop(), "An empty history should not move forward.");
 
     bool hasExportResult = false;
-    expect(!bridge.ExportCrop([&hasExportResult](CropExportResult result) {
+    expect(!bridge.ExportCrop(changedInput, [&hasExportResult](CropExportResult result) {
         hasExportResult = result.failureReason == CropFailure::BadInput;
     }), "Export should reject an empty committed prefix.");
     expect(hasExportResult, "Rejected export should synchronously report its failure.");
@@ -580,6 +580,7 @@ int CropBridgeSuite::GetFailCount() const
 
     bool hasBranchExport = false;
     expect(repeatBridge.ExportCrop(
+        input,
         [&hasBranchExport](CropExportResult result) {
             hasBranchExport = result.nodeCount == 3
                 && result.operations.size() == 3
@@ -628,6 +629,7 @@ int CropBridgeSuite::GetFailCount() const
         "Exit should preserve the committed effect at the current history cursor.");
     bool hasMiddleExport = false;
     expect(repeatBridge.ExportCrop(
+        input,
         [&hasMiddleExport](CropExportResult result) {
             hasMiddleExport = result.nodeCount == 2
                 && result.operations.size() == 2
@@ -719,6 +721,28 @@ int CropBridgeSuite::GetFailCount() const
             && redoneHistory.baseNodeCount == 2
             && redoneHistory.allOperationCount == 3,
         "Redo after materialization should not duplicate or delete allHistory nodes.");
+    bool hasRootExport = false;
+    expect(repeatBridge.ExportCrop(
+        input,
+        [&hasRootExport](CropExportResult result) {
+            hasRootExport = result.inputVersion == 1
+                && result.nodeCount == 3
+                && result.operations.size() == 3
+                && result.operations[0].operationIndex == 1
+                && result.operations[1].operationIndex == 2
+                && result.operations[2].operationIndex == 6;
+        }),
+        "Materialized history should export the absolute prefix directly from the root input.");
+    for (int pollCount = 0;
+        pollCount < 200
+            && !repeatBridge.GetExportTickNeeded();
+        ++pollCount) {
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    expect(repeatBridge.SendExportResult()
+            && hasRootExport,
+        "Root export should fuse A-B-F without publishing or caching intermediate masks.");
 
     auto originalInput = input;
     originalInput.inputVersion = 3;
@@ -839,6 +863,7 @@ int CropBridgeSuite::GetFailCount() const
         "AABBABAB should expose eight committed history operations.");
     bool hasShapeSeq = false;
     expect(zeroBridge.ExportCrop(
+        input,
         [&hasShapeSeq, &isPlaneOp](CropExportResult result) {
             hasShapeSeq = result.nodeCount == isPlaneOp.size()
                 && result.operations.size() == isPlaneOp.size();

@@ -753,6 +753,46 @@ int GetCropFailCount()
     }
     const bool isGapDetached =
         session.DetachFeature(*gapFeature);
+    const bool isSecondModeSet =
+        feature->SendRequest({
+            CropHostAction::Mode,
+            CropHostModeRequest{
+                target,
+                CropRemovalMode::RemoveInside } });
+    const bool isSecondBoxSet =
+        feature->SendRequest({
+            CropHostAction::Box, target });
+    endpoint->renderer->ResetCamera(imageBounds);
+    endpoint->renderWindow->Render();
+    const bool isSecondWidgetSent =
+        SendCropInput(
+            *feature,
+            *endpoint,
+            *timerEndpoint,
+            imageBounds);
+    const auto secondExpected =
+        contextProbe->m_getImageSnapshot();
+    int secondCompleteCount = 0;
+    CropExportResult secondResult;
+    const bool isSecondExported =
+        feature->SendRequest({
+                CropHostAction::Export, target },
+            [&secondCompleteCount, &secondResult](
+                CropExportResult result) {
+                ++secondCompleteCount;
+                secondResult = std::move(result);
+            });
+    for (int poll = 0;
+        secondCompleteCount == 0
+            && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        SendHostTick(*endpoint, *timerEndpoint);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    const auto secondSnapshot =
+        contextProbe->m_getImageSnapshot();
     bool isFinalReloadComplete = false;
     bool isFinalReloadSucceeded = false;
     const bool isFinalReloadSent = SendReload(
@@ -784,16 +824,30 @@ int GetCropFailCount()
             && cropSnapshot
             && cropSnapshot->version
                 == publishExpected->version + 1
+            && isSecondModeSet
+            && isSecondBoxSet
+            && isSecondWidgetSent
+            && secondExpected == cropSnapshot
+            && isSecondExported
+            && secondCompleteCount == 1
+            && secondResult.isSucceeded
+            && secondResult.inputVersion
+                == publishResult.inputVersion
+            && secondResult.nodeCount == 2
+            && secondResult.operations.size() == 2
+            && secondSnapshot
+            && secondSnapshot->version
+                == cropSnapshot->version + 1
             && isFinalReloadSent
             && isFinalReloadComplete
             && isFinalReloadSucceeded
             && finalSnapshot
             && finalSnapshot->version
-                == cropSnapshot->version + 1
-            && finalSnapshot != cropSnapshot
+                == secondSnapshot->version + 1
+            && finalSnapshot != secondSnapshot
             && isGapDetached
             && staleGapCount == 0,
-        "Crop-first order publishes before a later legal Reload becomes current") ? 0 : 1;
+        "Repeated Crop export fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
 
     const bool isBox = feature->SendRequest({
         CropHostAction::Box, target });

@@ -3,6 +3,7 @@
 #include <vtkClipPolyData.h>
 #include <vtkImageData.h>
 #include <vtkImplicitFunction.h>
+#include <vtkMath.h>
 #include <vtkMatrix4x4.h>
 #include <vtkMatrix3x3.h>
 #include <vtkNew.h>
@@ -10,6 +11,7 @@
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+#include <vtkSMPTools.h>
 #include <vtkType.h>
 
 #include <algorithm>
@@ -18,6 +20,7 @@
 #include <cstddef>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -30,7 +33,7 @@ constexpr std::size_t kRamMargin = 16ULL * 1024ULL * 1024ULL;
 
 bool GetFinite(const double value)
 {
-    return std::isfinite(value);
+    return vtkMath::IsFinite(value);
 }
 
 bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
@@ -145,22 +148,28 @@ bool BuildPlaneRows(const CropOpItem& operation, float* values)
     const auto& center = operation.planeCenterInInputModel;
     const auto& normal = operation.planeNormalInInputModel;
     for (int axis = 0; axis < 3; ++axis) {
-        if (!GetFinite(center[axis]) || !GetFinite(normal[axis])) {
+        if (!GetFinite(center[axis])
+            || !GetFinite(normal[axis])
+            || std::abs(center[axis])
+                > static_cast<double>(
+                    std::numeric_limits<float>::max())) {
             return false;
         }
     }
 
-    const double length = std::sqrt(
-        normal[0] * normal[0]
-        + normal[1] * normal[1]
-        + normal[2] * normal[2]);
+    double unitNormal[3] = {
+        normal[0], normal[1], normal[2]
+    };
+    const double length =
+        vtkMath::Normalize(unitNormal);
     if (!GetFinite(length) || length <= kMatrixTolerance) {
         return false;
     }
 
     for (int axis = 0; axis < 3; ++axis) {
         values[axis] = static_cast<float>(center[axis]);
-        values[4 + axis] = static_cast<float>(normal[axis] / length);
+        values[4 + axis] =
+            static_cast<float>(unitNormal[axis]);
     }
     return true;
 }
@@ -194,21 +203,191 @@ CropExportResult BuildExportBase(const CropExportRequest& request)
     return result;
 }
 
+// predicate table 已经是 history 的不可变编译产物；Plan 只在一次物化开始时
+// 验证其结构，体素热循环直接执行，避免每点重复检查表长、tag 和 nodeCount。
+class CropPredicatePlan final {
+public:
+    CropPredicatePlan(
+        const CropPredicateTable& predicateTable,
+        const std::size_t nodeCount)
+        : m_values(predicateTable.rgbaValues.data())
+        , m_nodeCount(nodeCount)
+    {
+        const auto& rgbaValues =
+            predicateTable.rgbaValues;
+        m_isValid =
+            predicateTable.operationCount
+                <= std::numeric_limits<std::size_t>::max()
+                    / kItemSize
+            && rgbaValues.size()
+                == predicateTable.operationCount
+                    * kItemSize
+            && nodeCount
+                <= predicateTable.operationCount;
+        for (std::size_t index = 0;
+            m_isValid && index < nodeCount;
+            ++index) {
+            const auto* values =
+                m_values + index * kItemSize;
+            m_isValid =
+                (values[0] == 0.0f
+                    || values[0] == 1.0f)
+                && (values[1] == 0.0f
+                    || values[1] == 1.0f)
+                && std::all_of(
+                    values,
+                    values + kItemSize,
+                    [](const float value) {
+                        return vtkMath::IsFinite(
+                            static_cast<double>(value));
+                    });
+            if (!m_isValid) {
+                break;
+            }
+            if (values[0] == 0.0f) {
+                const auto* matrix =
+                    values + kTexelSize;
+                m_isValid =
+                    std::abs(matrix[12])
+                        <= kBoxTolerance
+                    && std::abs(matrix[13])
+                        <= kBoxTolerance
+                    && std::abs(matrix[14])
+                        <= kBoxTolerance
+                    && std::abs(matrix[15] - 1.0f)
+                        <= kBoxTolerance;
+                double matrixData[16] = {};
+                for (int valueIndex = 0;
+                    m_isValid && valueIndex < 16;
+                    ++valueIndex) {
+                    matrixData[valueIndex] =
+                        static_cast<double>(
+                            matrix[valueIndex]);
+                }
+                m_isValid = m_isValid
+                    && vtkMatrix4x4::Determinant(
+                        matrixData) != 0.0;
+            }
+            else {
+                double unitNormal[3] = {
+                    static_cast<double>(
+                        values[kTexelSize * 2]),
+                    static_cast<double>(
+                        values[kTexelSize * 2 + 1]),
+                    static_cast<double>(
+                        values[kTexelSize * 2 + 2])
+                };
+                const double length =
+                    vtkMath::Normalize(unitNormal);
+                m_isValid = vtkMath::IsFinite(length)
+                    && length > kMatrixTolerance;
+            }
+        }
+    }
+
+    bool GetValid() const
+    {
+        return m_isValid;
+    }
+
+    bool GetPointKept(
+        const CropPointFloat3Array& inputModelPoint) const
+    {
+        if (!m_isValid
+            || !std::all_of(
+                inputModelPoint.begin(),
+                inputModelPoint.end(),
+                [](const float value) {
+                    return vtkMath::IsFinite(
+                        static_cast<double>(value));
+                })) {
+            return false;
+        }
+        return GetPointKeptUnchecked(
+            inputModelPoint);
+    }
+
+    bool GetPointKeptUnchecked(
+        const CropPointFloat3Array& inputModelPoint) const
+    {
+        for (std::size_t index = 0;
+            index < m_nodeCount;
+            ++index) {
+            const auto* values =
+                m_values + index * kItemSize;
+            bool isInside = false;
+            if (values[0] == 0.0f) {
+                std::array<float, 3> boxPoint = {};
+                for (int row = 0; row < 3; ++row) {
+                    const auto* matrixRow =
+                        values + kTexelSize + row * 4;
+                    boxPoint[row] =
+                        matrixRow[0]
+                            * inputModelPoint[0]
+                        + matrixRow[1]
+                            * inputModelPoint[1]
+                        + matrixRow[2]
+                            * inputModelPoint[2]
+                        + matrixRow[3];
+                }
+                isInside =
+                    std::abs(boxPoint[0])
+                        <= 1.0f + kBoxTolerance
+                    && std::abs(boxPoint[1])
+                        <= 1.0f + kBoxTolerance
+                    && std::abs(boxPoint[2])
+                        <= 1.0f + kBoxTolerance;
+            }
+            else {
+                const auto* center =
+                    values + kTexelSize;
+                const auto* normal =
+                    values + kTexelSize * 2;
+                const float signedDistance =
+                    (inputModelPoint[0] - center[0])
+                        * normal[0]
+                    + (inputModelPoint[1] - center[1])
+                        * normal[1]
+                    + (inputModelPoint[2] - center[2])
+                        * normal[2];
+                isInside = signedDistance > 0.0f;
+            }
+
+            const bool isKept =
+                values[1] == 0.0f
+                ? isInside : !isInside;
+            if (!isKept) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+private:
+    static constexpr std::size_t kItemSize =
+        CropAlgorithm::GetTexelCount()
+        * kTexelSize;
+
+    const float* m_values = nullptr;
+    std::size_t m_nodeCount = 0;
+    bool m_isValid = false;
+};
+
 bool GetPayloadValid(
     const CropExportRequest& request,
     const CropShaderPayload& payload)
 {
+    const bool hasPlan = payload.predicateTable
+        && CropPredicatePlan(
+            *payload.predicateTable,
+            payload.nodeCount).GetValid();
     return request.inputVersion != 0
         && request.operations.size() == request.nodeCount
         && request.nodeCount != 0
         && payload.revision != 0
         && payload.sourceStamp.version == request.inputVersion
         && payload.nodeCount == request.nodeCount
-        && payload.predicateTable
-        && payload.predicateTable->operationCount >= payload.nodeCount
-        && payload.predicateTable->rgbaValues.size()
-            == payload.predicateTable->operationCount
-                * CropAlgorithm::GetTexelCount() * kTexelSize;
+        && hasPlan;
 }
 
 bool GetRamValid(
@@ -224,9 +403,13 @@ bool GetRamValid(
         return true;
     }
 
-    const std::size_t maskBytes = image
-        ? static_cast<std::size_t>(image->GetNumberOfPoints())
-        : 0;
+    const vtkIdType pointCount = image
+        ? image->GetNumberOfPoints() : 0;
+    if (pointCount < 0) {
+        return false;
+    }
+    const std::size_t maskBytes =
+        static_cast<std::size_t>(pointCount);
     const std::size_t tableBytes = payload.predicateTable
         ? payload.predicateTable->rgbaValues.size() * sizeof(float)
         : 0;
@@ -324,11 +507,20 @@ CropTableResult CropAlgorithm::BuildPredicateTable(
     if (nodeCount > operations.size()) {
         return BuildTableFailure(nullptr, "Crop nodeCount exceeds operation count.");
     }
+    constexpr std::size_t itemSize =
+        GetTexelCount() * kTexelSize;
+    if (operations.size()
+        > std::numeric_limits<std::size_t>::max()
+            / itemSize) {
+        return BuildTableFailure(
+            nullptr,
+            "Crop predicate table size overflows.");
+    }
 
     auto predicateTable = std::make_shared<CropPredicateTable>();
     predicateTable->operationCount = operations.size();
     predicateTable->rgbaValues.assign(
-        operations.size() * GetTexelCount() * kTexelSize,
+        operations.size() * itemSize,
         0.0f);
 
     std::unordered_set<std::uint64_t> operationIndices;
@@ -389,52 +581,10 @@ bool CropAlgorithm::GetPointKept(
     const std::size_t nodeCount,
     const CropPointFloat3Array& inputModelPoint)
 {
-    const std::size_t itemSize = GetTexelCount() * kTexelSize;
-    const auto& rgbaValues = predicateTable.rgbaValues;
-    if (predicateTable.operationCount != rgbaValues.size() / itemSize
-        || nodeCount > predicateTable.operationCount
-        || !std::all_of(
-            inputModelPoint.begin(),
-            inputModelPoint.end(),
-            [](const float value) { return std::isfinite(value); })) {
-        return false;
-    }
-
-    for (std::size_t index = 0; index < nodeCount; ++index) {
-        const auto* values = rgbaValues.data() + index * itemSize;
-        bool isInside = false;
-        if (values[0] == 0.0f) {
-            std::array<float, 3> boxPoint = {};
-            for (int row = 0; row < 3; ++row) {
-                const auto* matrixRow = values + kTexelSize + row * 4;
-                boxPoint[row] = matrixRow[0] * inputModelPoint[0]
-                    + matrixRow[1] * inputModelPoint[1]
-                    + matrixRow[2] * inputModelPoint[2]
-                    + matrixRow[3];
-            }
-            isInside = std::abs(boxPoint[0]) <= 1.0f + kBoxTolerance
-                && std::abs(boxPoint[1]) <= 1.0f + kBoxTolerance
-                && std::abs(boxPoint[2]) <= 1.0f + kBoxTolerance;
-        }
-        else if (values[0] == 1.0f) {
-            const auto* center = values + kTexelSize;
-            const auto* normal = values + kTexelSize * 2;
-            const float signedDistance =
-                (inputModelPoint[0] - center[0]) * normal[0]
-                + (inputModelPoint[1] - center[1]) * normal[1]
-                + (inputModelPoint[2] - center[2]) * normal[2];
-            isInside = signedDistance > 0.0f;
-        }
-        else {
-            return false;
-        }
-
-        const bool isKept = values[1] == 0.0f ? isInside : !isInside;
-        if (!isKept) {
-            return false;
-        }
-    }
-    return true;
+    return CropPredicatePlan(
+        predicateTable,
+        nodeCount).GetPointKept(
+            inputModelPoint);
 }
 
 bool CropAlgorithm::GetInputValid(const CropInputSnapshot& input)
@@ -492,6 +642,80 @@ CropExportResult CropAlgorithm::GetResult(
             CropFailure::BadInput,
             "Crop image export request is invalid.");
     }
+
+    int extent[6] = {};
+    image->GetExtent(extent);
+    const vtkIdType xCount =
+        static_cast<vtkIdType>(extent[1])
+        - static_cast<vtkIdType>(extent[0]) + 1;
+    const vtkIdType yCount =
+        static_cast<vtkIdType>(extent[3])
+        - static_cast<vtkIdType>(extent[2]) + 1;
+    const vtkIdType zCount =
+        static_cast<vtkIdType>(extent[5])
+        - static_cast<vtkIdType>(extent[4]) + 1;
+    if (xCount <= 0
+        || yCount <= 0
+        || zCount <= 0
+        || image->GetNumberOfPoints() <= 0) {
+        return BuildExportFailure(
+            request,
+            CropFailure::EmptyResult,
+            "Crop image export has an empty extent.");
+    }
+
+    std::array<double, 12> indexToModel = {};
+    const auto* indexMatrix =
+        image->GetIndexToPhysicalMatrix();
+    if (!indexMatrix) {
+        return BuildExportFailure(
+            request,
+            CropFailure::BadInput,
+            "Crop image index transform is unavailable.");
+    }
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0;
+            column < 4;
+            ++column) {
+            const double value =
+                indexMatrix->GetElement(row, column);
+            if (!vtkMath::IsFinite(value)) {
+                return BuildExportFailure(
+                    request,
+                    CropFailure::BadInput,
+                    "Crop image index transform must be finite.");
+            }
+            indexToModel[
+                static_cast<std::size_t>(
+                    row * 4 + column)] =
+                value;
+        }
+    }
+    for (int cornerIndex = 0;
+        cornerIndex < 8;
+        ++cornerIndex) {
+        const int i = extent[
+            (cornerIndex & 1) != 0 ? 1 : 0];
+        const int j = extent[
+            (cornerIndex & 2) != 0 ? 3 : 2];
+        const int k = extent[
+            (cornerIndex & 4) != 0 ? 5 : 4];
+        double point[3] = {};
+        image->TransformIndexToPhysicalPoint(
+            i, j, k, point);
+        for (const double value : point) {
+            if (!vtkMath::IsFinite(value)
+                || std::abs(value)
+                    > static_cast<double>(
+                        std::numeric_limits<float>::max())) {
+                return BuildExportFailure(
+                    request,
+                    CropFailure::BadInput,
+                    "Crop image coordinates exceed predicate precision.");
+            }
+        }
+    }
+
     if (!GetRamValid(
             image,
             request,
@@ -511,38 +735,116 @@ CropExportResult CropAlgorithm::GetResult(
     maskImage->CopyStructure(image);
     maskImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
 
-    int extent[6] = {};
-    image->GetExtent(extent);
-    std::size_t keptCount = 0;
-    for (int k = extent[4]; k <= extent[5]; ++k) {
-        for (int j = extent[2]; j <= extent[3]; ++j) {
-            for (int i = extent[0]; i <= extent[1]; ++i) {
-                double point[3] = {};
-                image->TransformIndexToPhysicalPoint(i, j, k, point);
-                const CropPointFloat3Array inputModelPoint = {
-                    static_cast<float>(point[0]),
-                    static_cast<float>(point[1]),
-                    static_cast<float>(point[2])
-                };
-                const auto* baselineValue =
-                    validityMask
-                    ? static_cast<const unsigned char*>(
-                        validityMask->GetScalarPointer(
-                            i, j, k))
-                    : nullptr;
-                const bool isKept =
-                    (!baselineValue || *baselineValue != 0)
-                    && GetPointKept(
-                        *payload.predicateTable,
-                        payload.nodeCount,
-                        inputModelPoint);
-                auto* maskValue = static_cast<unsigned char*>(
-                    maskImage->GetScalarPointer(i, j, k));
-                *maskValue = isKept ? 255 : 0;
-                keptCount += isKept ? 1 : 0;
-            }
-        }
+    const auto* inputMask = validityMask
+        ? static_cast<const unsigned char*>(
+            validityMask->GetScalarPointer(
+                extent[0], extent[2], extent[4]))
+        : nullptr;
+    auto* outputMask =
+        static_cast<unsigned char*>(
+            maskImage->GetScalarPointer(
+                extent[0], extent[2], extent[4]));
+    if ((validityMask && !inputMask)
+        || !outputMask) {
+        return BuildExportFailure(
+            request,
+            CropFailure::MaskFailed,
+            "Crop image mask storage is unavailable.");
     }
+
+    vtkIdType inputInc[3] = { 1, 0, 0 };
+    vtkIdType outputInc[3] = { 1, 0, 0 };
+    if (validityMask) {
+        validityMask->GetIncrements(inputInc);
+    }
+    maskImage->GetIncrements(outputInc);
+
+    const CropPredicatePlan predicatePlan(
+        *payload.predicateTable,
+        payload.nodeCount);
+    std::vector<std::size_t> keptBySlice(
+        static_cast<std::size_t>(zCount),
+        0);
+    vtkSMPTools::For(
+        vtkIdType{ 0 },
+        zCount,
+        [&](const vtkIdType first,
+            const vtkIdType last) {
+            for (vtkIdType zOffset = first;
+                zOffset < last;
+                ++zOffset) {
+                const double indexK =
+                    static_cast<double>(extent[4])
+                    + static_cast<double>(zOffset);
+                const auto* inputSlice = inputMask
+                    ? inputMask
+                        + zOffset * inputInc[2]
+                    : nullptr;
+                auto* outputSlice =
+                    outputMask
+                    + zOffset * outputInc[2];
+                std::size_t sliceCount = 0;
+                for (vtkIdType yOffset = 0;
+                    yOffset < yCount;
+                    ++yOffset) {
+                    const double indexJ =
+                        static_cast<double>(extent[2])
+                        + static_cast<double>(yOffset);
+                    const auto* inputRow = inputSlice
+                        ? inputSlice
+                            + yOffset * inputInc[1]
+                        : nullptr;
+                    auto* outputRow =
+                        outputSlice
+                        + yOffset * outputInc[1];
+                    for (vtkIdType xOffset = 0;
+                        xOffset < xCount;
+                        ++xOffset) {
+                        const double indexI =
+                            static_cast<double>(extent[0])
+                            + static_cast<double>(xOffset);
+                        CropPointFloat3Array inputModelPoint = {};
+                        for (int row = 0;
+                            row < 3;
+                            ++row) {
+                            const auto* matrixRow =
+                                indexToModel.data()
+                                + row * 4;
+                            inputModelPoint[row] =
+                                static_cast<float>(
+                                    matrixRow[0] * indexI
+                                    + matrixRow[1] * indexJ
+                                    + matrixRow[2] * indexK
+                                    + matrixRow[3]);
+                        }
+                        const bool hasBaseline =
+                            !inputRow
+                            || inputRow[
+                                xOffset * inputInc[0]]
+                                != 0;
+                        const bool isKept =
+                            hasBaseline
+                            && predicatePlan
+                                .GetPointKeptUnchecked(
+                                inputModelPoint);
+                        outputRow[
+                            xOffset * outputInc[0]] =
+                            isKept ? 255 : 0;
+                        sliceCount +=
+                            isKept ? 1 : 0;
+                    }
+                }
+                keptBySlice[
+                    static_cast<std::size_t>(
+                        zOffset)] =
+                    sliceCount;
+            }
+        });
+    const std::size_t keptCount =
+        std::accumulate(
+            keptBySlice.begin(),
+            keptBySlice.end(),
+            std::size_t{ 0 });
 
     if (keptCount == 0) {
         return BuildExportFailure(

@@ -168,6 +168,14 @@ public:
 
 int main()
 {
+    // 后端切换和初始化都不是线程安全 API；必须在任何 Feature worker 启动前完成。
+    // 构建若未包含 STDThread，则显式回退 Sequential，保持功能可用。
+    const bool isThreaded =
+        vtkSMPTools::SetBackend("STDThread");
+    if (!isThreaded) {
+        (void)vtkSMPTools::SetBackend(
+            "Sequential");
+    }
     vtkSMPTools::Initialize();
 
     const HostViewTargets allViews{ {}, {
