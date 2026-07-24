@@ -7,6 +7,9 @@
     <Filter Include="OrthogonalCrop">
       <UniqueIdentifier>{66BC3933-0E9B-4EF2-95AF-9447C1F1E437}</UniqueIdentifier>
     </Filter>
+    <Filter Include="GapAnalysis">
+      <UniqueIdentifier>{8A1E4A62-A032-4FC2-84C2-4C6DD658951B}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="QtHostCropTests.cpp">
@@ -51,10 +54,22 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>OrthogonalCrop</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Host\GapHostFeature.cpp">
+      <Filter>GapAnalysis</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp">
+      <Filter>GapAnalysis</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="QtHostMethodCases.h">
       <Filter>Tests</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Host\GapHostFeature.h">
+      <Filter>GapAnalysis</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h">
+      <Filter>GapAnalysis</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

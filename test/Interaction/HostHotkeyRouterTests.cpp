@@ -2,7 +2,6 @@
 
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
-#include "Host/HostFeatureBindings.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
@@ -47,9 +46,8 @@ void StartHotkeyCases(int& failureCount)
     const auto* sliceView = views.GetViewBySelector(
         { "slice", false, HostRenderViewRole::TopDownSlice });
     auto sliceService = sliceView ? sliceView->service : nullptr;
-    auto bindings = std::make_shared<HostFeatureBindings>();
     auto commandRouter =
-        std::make_shared<HostCommandRouter>(core, views, bindings);
+        std::make_shared<HostCommandRouter>(core, views);
     HostHotkeyConfig config;
     config.isContextInputEnabled = true;
     config.contextInputViews.viewIds = { "primary" };
@@ -58,16 +56,14 @@ void StartHotkeyCases(int& failureCount)
     config.modelSwitchKey = 'm';
     config.saveTransformedDataKey = 'v';
     config.saveSliceImagesKey = 's';
-    config.gapSwitchKey = 'g';
     config.exitKeySym = "Escape";
     HostHotkeyTemplates templates;
-    templates.gapStart.targetViews.viewIds = { "primary" };
     templates.volumeExportRequest.outputPath = "volume.raw";
     templates.sliceExportRequest.outputDir = "slices";
     templates.sliceExportRequest.sourceView.viewId = "slice";
 
     {
-        HostHotkeyRouter hotkeys(views, bindings, commandRouter);
+        HostHotkeyRouter hotkeys(views, commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(config, templates),
             "合法 hotkey 配置应完成绑定。",
@@ -111,17 +107,42 @@ void StartHotkeyCases(int& failureCount)
             "slice export hotkey 应精确投递一次。",
             failureCount);
 
-        context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'g'));
-        context->OnInput(BuildKey(InteractionEventKind::KeyRelease, 'g'));
+        auto invalidConfig = config;
+        invalidConfig.contextInputViews.viewIds = {
+            "missing" };
+        invalidConfig.commandInputViews.viewIds = {
+            "missing" };
+        const int rollbackModelCount =
+            context->GetToolModeSetCount();
         SetExpect(
-            bindings->GetGapStartCount() == 1 && bindings->GetGapView(),
-            "gap hotkey 应发送一次 typed start 请求。",
+            !hotkeys.AttachHotkeys(
+                invalidConfig, templates),
+            "无法解析目标的 hotkey 重配必须被拒绝。",
             failureCount);
-        context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'g'));
-        context->OnInput(BuildKey(InteractionEventKind::KeyRelease, 'g'));
+        context->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyPress, 'm'));
+        context->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyRelease, 'm'));
         SetExpect(
-            bindings->GetGapLayerCount() == 1,
-            "活动 gap 的相同 hotkey 应切换 overlay。",
+            context->GetToolModeSetCount()
+                == rollbackModelCount + 1,
+            "hotkey 重配失败后应恢复旧 handler。",
+            failureCount);
+
+        HostInputBinding throwingInput;
+        throwingInput.featureId = "feature.throw";
+        throwingInput.targetViews.viewIds = { "primary" };
+        throwingInput.onInput =
+            [](const InteractionEvent&)
+                -> InteractionResult {
+                throw 1;
+            };
+        SetExpect(
+            hotkeys.GetInputPort().AttachInput(
+                std::move(throwingInput)),
+            "Feature 输入异常隔离测试应完成绑定。",
             failureCount);
 
         int featureInputCount = 0;
@@ -147,30 +168,86 @@ void StartHotkeyCases(int& failureCount)
             !hotkeys.GetInputPort().AttachInput(std::move(duplicateInput)),
             "重复 feature id 的 input binding 必须被拒绝。",
             failureCount);
+
+        int stopInputCount = 0;
+        HostInputBinding stopInput;
+        stopInput.featureId = "feature.stop";
+        stopInput.targetViews.viewIds = { "primary" };
+        stopInput.onInput =
+            [&stopInputCount](const InteractionEvent& event) {
+                ++stopInputCount;
+                return InteractionResult{
+                    false,
+                    event.eventKind == InteractionEventKind::KeyPress };
+            };
+        SetExpect(
+            hotkeys.GetInputPort().AttachInput(std::move(stopInput)),
+            "多个 feature input 应能绑定到同一目标视图。",
+            failureCount);
+
+        int sliceInputCount = 0;
+        HostInputBinding sliceInput;
+        sliceInput.featureId = "feature.slice";
+        sliceInput.targetViews.viewIds = { "slice" };
+        sliceInput.onInput =
+            [&sliceInputCount](const InteractionEvent&) {
+                ++sliceInputCount;
+                return InteractionResult{ true, false };
+            };
+        SetExpect(
+            hotkeys.GetInputPort().AttachInput(std::move(sliceInput)),
+            "feature input 应支持独立目标视图。",
+            failureCount);
+
         const auto featureResult =
             context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'x'));
         SetExpect(
-            featureResult.isHandled && !featureResult.isPropagationStopped
-                && featureInputCount == 1,
-            "feature input 应按目标 view 收到通用输入事件。",
+            featureResult.isHandled && featureResult.isPropagationStopped
+                && featureInputCount == 1 && stopInputCount == 1
+                && sliceInputCount == 0,
+            "feature input 应按注册顺序聚合并在 propagation stop 后停止。",
             failureCount);
+
+        const int priorityModelCount = context->GetToolModeSetCount();
+        context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'm'));
+        SetExpect(
+            context->GetToolModeSetCount() == priorityModelCount,
+            "Feature propagation stop 应先于主体 hotkey 生效。",
+            failureCount);
+        context->OnInput(BuildKey(InteractionEventKind::KeyRelease, 'm'));
+
+        sliceContext->OnInput(
+            BuildKey(InteractionEventKind::KeyPress, 'x'));
+        SetExpect(
+            sliceInputCount == 1 && featureInputCount == 3
+                && stopInputCount == 3,
+            "目标视图匹配应隔离不同 Feature binding。",
+            failureCount);
+
         SetExpect(
             hotkeys.GetInputPort().DetachInput("feature.input"),
             "feature input 应支持按 id 对称卸载。",
             failureCount);
+        SetExpect(
+            hotkeys.GetInputPort().DetachInput("feature.stop")
+                && hotkeys.GetInputPort().DetachInput("feature.slice")
+                && hotkeys.GetInputPort().DetachInput("feature.throw"),
+            "多个 feature input 应能对称卸载。",
+            failureCount);
         context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'x'));
         SetExpect(
-            featureInputCount == 1,
+            featureInputCount == 3 && stopInputCount == 3,
             "卸载后 feature input 不应继续收到事件。",
             failureCount);
 
         InteractionEvent escape;
         escape.eventKind = InteractionEventKind::KeyPress;
         escape.keySym = "Escape";
-        context->OnInput(escape);
+        const auto escapeResult = context->OnInput(escape);
         SetExpect(
-            !bindings->GetGapView() && bindings->GetGapExitCount() == 1,
-            "Escape 应优先退出活动 Gap。",
+            escapeResult.isHandled && escapeResult.isPropagationStopped
+                && context->GetToolMode() == ToolMode::Navigation,
+            "主体 Escape 应回到 Navigation。",
             failureCount);
 
         SetExpect(

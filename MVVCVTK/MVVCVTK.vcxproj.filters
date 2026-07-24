@@ -30,6 +30,9 @@
     <Filter Include="features\GapAnalysis\include\Services">
       <UniqueIdentifier>{c7976d87-6825-471b-b609-d54d8e435a4d}</UniqueIdentifier>
     </Filter>
+    <Filter Include="features\GapAnalysis\include\Host">
+      <UniqueIdentifier>{73923de3-a25d-4bb5-962b-12715078ebef}</UniqueIdentifier>
+    </Filter>
     <Filter Include="features\GapAnalysis\include\Algorithms">
       <UniqueIdentifier>{3d2d986a-7cde-4ed5-8441-e55d64eb01e1}</UniqueIdentifier>
     </Filter>
@@ -44,6 +47,9 @@
     </Filter>
     <Filter Include="features\GapAnalysis\src\Services">
       <UniqueIdentifier>{898bb9c1-8c57-4c6e-9ed4-a3a47462b481}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="features\GapAnalysis\src\Host">
+      <UniqueIdentifier>{bc354db6-1248-44bd-b399-9349164df858}</UniqueIdentifier>
     </Filter>
     <Filter Include="features\OrthogonalCrop">
       <UniqueIdentifier>{d7bc8d21-38c0-4f6e-a9c8-cb7cfcc53e26}</UniqueIdentifier>
@@ -282,9 +288,6 @@
     <ClInclude Include="include\Host\HostFeature.h">
       <Filter>include\Host</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\HostFeatureBindings.h">
-      <Filter>include\Host</Filter>
-    </ClInclude>
     <ClInclude Include="include\Host\HostRenderViewSet.h">
       <Filter>include\Host</Filter>
     </ClInclude>
@@ -299,6 +302,9 @@
     </ClInclude>
     <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h">
       <Filter>features\GapAnalysis\include\Services</Filter>
+    </ClInclude>
+    <ClInclude Include="features\GapAnalysis\include\Host\GapHostFeature.h">
+      <Filter>features\GapAnalysis\include\Host</Filter>
     </ClInclude>
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropBoxWidget.h">
       <Filter>features\OrthogonalCrop\include\Interaction</Filter>
@@ -333,9 +339,6 @@
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostHotkeyRouter.cpp">
-      <Filter>src\Host</Filter>
-    </ClCompile>
-    <ClCompile Include="src\Host\HostFeatureBindings.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Host\HostRenderViewSet.cpp">
@@ -400,6 +403,9 @@
     </ClCompile>
     <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp">
       <Filter>features\GapAnalysis\src\Services</Filter>
+    </ClCompile>
+    <ClCompile Include="features\GapAnalysis\src\Host\GapHostFeature.cpp">
+      <Filter>features\GapAnalysis\src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>

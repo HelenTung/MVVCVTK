@@ -9,12 +9,15 @@
 #include <vtkFlyingEdges3D.h>
 #include <vtkImageData.h>
 #include <vtkIntArray.h>
+#include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
 #include <vtkPolyData.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cmath>
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <limits>
@@ -63,8 +66,6 @@ private:
     enum class GapViewPhase {
         // 没有活动显示会话。
         Idle,
-        // target/配方已保存，等待主线程 tick 提供当前 VTK image。
-        AwaitingInput,
         // worker 已接纳任务，tick 只轮询原子终态。
         AwaitingResult,
         // 本次终态已回调并处理，后续 tick 不重复挂载或报错。
@@ -93,7 +94,18 @@ private:
     bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const;
     bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> image,
+        vtkSmartPointer<vtkImageData> validityMask,
         GapVolumeBuffer& out) const;
+    bool BuildInputSnapshot(
+        vtkSmartPointer<vtkImageData> image,
+        vtkSmartPointer<vtkImageData> validityMask,
+        VolumeBufferSnapshot& out) const;
+    bool GetMaskValid(
+        vtkImageData* image,
+        vtkImageData* validityMask) const;
+    bool GetRequestValid(
+        const GapSurfaceRequest& surface,
+        const GapVoidParams& voidParams) const;
     vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<int>& labelVolume,
         const GapVolumeBuffer& volBuf) const;
@@ -106,16 +118,19 @@ private:
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
-    bool StartRun(vtkSmartPointer<vtkImageData> inputImage);
     bool SetDisplayView();
-    bool SetOverlayOff();
+    bool SetOverlayOff() noexcept;
     bool SetStoredView();
     bool ExitViewState();
     void ClearDisplayState();
     bool SetViewThread();
+    bool GetViewBound() const;
+    bool GetViewThreadReady() const;
     bool GetViewThread() const;
     bool ClearViewThread();
-    double GetDisplayIso(const GapVolumeBuffer& inputSnapshot) const;
+    double GetDisplayIso(
+        const GapVolumeBuffer& inputSnapshot,
+        const GapSurfaceRequest& surface) const;
 
     // callbackMutex 同时保护 active/pending callback 与 pending success payload。
     std::mutex m_callbackMutex;
@@ -169,9 +184,9 @@ private:
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     // 成功结果派生的 2D label image 强引用缓存；沿用输入快照的 dimensions/spacing/origin，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
-    // StartView 保存的 ISO 来源配方；StartRun 拿到输入 min/max 后解析，结束会话时清空。
+    // StartView 保存的 ISO 来源配方；接纳 worker 前用冻结输入的 min/max 解析，结束会话时清空。
     GapSurfaceRequest m_displaySurfaceRequest;
-    // StartView 保存的 void 参数值副本；StartRun 写入 worker 参数槽，结束会话时清空。
+    // StartView 保存的 void 参数值副本；接纳 worker 时同步写入参数槽，结束会话时清空。
     GapVoidParams m_displayVoidParams;
     std::function<void(bool)> m_viewCallback;
     bool m_isExitPending = false;
@@ -384,7 +399,7 @@ bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> im
     // B. owner 分配失败：与转换失败保持相同状态语义。
     // C. 成功：与 StartAsync 在 workerMutex 下串行，替换输入；非 Running 时同时退休旧结果并回到 Idle。
     GapVolumeBuffer snapshot;
-    if (!BuildVolumeBuffer(std::move(image), snapshot)) {
+    if (!BuildVolumeBuffer(std::move(image), nullptr, snapshot)) {
         VolumeBufferSnapshot retiredSnapshot;
         {
             std::lock_guard<std::mutex> workerLock(m_workerMutex);
@@ -554,57 +569,142 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage() const 
 bool GapAnalysisService::Impl::StartView(
     GapViewRequest request,
     std::function<void(bool)> onComplete) {
-    // 显示会话建立路径：1. 绑定/校验 host 线程并隔离输入；2. 卸载旧 overlay；
-    // 3. 过滤有效目标；4. 发布参数与 AwaitingInput，实际 worker 延迟到 OnDisplayTick 启动。
-    if (!SetViewThread()) {
+    // 新会话采用“局部准备 -> worker 接纳 -> 可见状态提交”三段事务：
+    // 1. 在不改变旧会话的前提下验证线程、参数、目标并冻结 image+mask。
+    // 2. 串行领取 worker/callback 槽；只有线程对象成功启动才算接纳。
+    // 3. 接纳后才卸载旧 overlay，并一次性提交新 target、callback 和显示阶段。
+    if (!GetViewThreadReady()) {
         std::cerr << "[GapAnalysis] Display activation rejected: view thread mismatch." << std::endl;
         return false;
     }
-    if (GetAnalysisState() == GapAnalysisState::Running
-        || !SetInputSnapshot(std::move(request.inputImage))) {
-        ClearViewThread();
+    if (!GetRequestValid(request.surface, request.voidParams)) {
         return false;
     }
-    // 新显示请求先卸载旧 overlay；正在运行的 worker 只收到取消请求，线程所有权仍由 StartAsync/析构收口。
-    // 注意：输入隔离失败发生在卸载之前，调用方不能把 false 理解为旧显示一定已被清除。
-    SetOverlayOff();
-    if (GetAnalysisState() == GapAnalysisState::Running) {
-        StopAsync();
-    }
 
-    m_meshTargets.clear();
-    m_meshTargets.reserve(request.meshTargets.size());
+    std::vector<std::shared_ptr<OverlayService>> meshTargets;
+    meshTargets.reserve(request.meshTargets.size());
     for (auto& target : request.meshTargets) {
         if (target) {
-            m_meshTargets.push_back(target);
+            meshTargets.push_back(std::move(target));
         }
     }
 
-    m_sliceTargets.clear();
-    m_sliceTargets.reserve(request.sliceTargets.size());
+    std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>>
+        sliceTargets;
+    sliceTargets.reserve(request.sliceTargets.size());
     for (auto& target : request.sliceTargets) {
         if (target.second) {
-            m_sliceTargets.push_back(target);
+            sliceTargets.push_back(std::move(target));
         }
     }
 
-    if (m_meshTargets.empty() && m_sliceTargets.empty()) {
+    if (meshTargets.empty() && sliceTargets.empty()) {
         std::cerr << "[GapAnalysis] Display activation skipped: no overlay target was provided." << std::endl;
-        ClearDisplayState();
-        ClearViewThread();
         return false;
     }
 
-    // 以下字段发布一份新的显示会话：参数/target 已就绪，但输入快照要等主线程 tick 提供。
+    VolumeBufferSnapshot inputSnapshot;
+    if (!BuildInputSnapshot(
+            std::move(request.inputImage),
+            std::move(request.validityMask),
+            inputSnapshot)) {
+        return false;
+    }
+
+    GapParamSnapshot params = GetParamSnapshot();
+    params.surfParams = {};
+    params.surfParams.isoValue = static_cast<float>(
+        GetDisplayIso(*inputSnapshot, request.surface));
+    params.voidParams = request.voidParams;
+    if (!std::isfinite(params.surfParams.isoValue)) {
+        return false;
+    }
+
+    const bool wasViewBound = GetViewBound();
+    if (!SetViewThread()) {
+        return false;
+    }
+
+    GapAnalysisResult retiredResult;
+    {
+        std::lock_guard<std::mutex> workerLock(m_workerMutex);
+        if (GetAnalysisState() == GapAnalysisState::Running
+            || m_viewPhase.load() == GapViewPhase::AwaitingResult
+            || m_isExitPending) {
+            if (!wasViewBound) {
+                ClearViewThread();
+            }
+            return false;
+        }
+
+        std::lock_guard<std::mutex> callbackLock(m_callbackMutex);
+        if (m_completionCallback || m_nextCallback
+            || m_hasCallback.load()) {
+            if (!wasViewBound) {
+                ClearViewThread();
+            }
+            return false;
+        }
+
+        if (m_workerThread.joinable()) {
+            m_workerThread.join();
+        }
+
+        const auto oldState = GetAnalysisState();
+        const bool wasStopping = m_isStopping.load();
+        {
+            std::lock_guard<std::mutex> resultLock(m_resultMutex);
+            retiredResult = std::move(m_result);
+            m_result = {};
+        }
+        m_isStopping.store(false);
+        SetAnalysisState(GapAnalysisState::Running);
+
+        try {
+            m_workerThread = std::thread(
+                &GapAnalysisService::Impl::StartWorker,
+                this,
+                inputSnapshot,
+                params);
+        }
+        catch (...) {
+            {
+                std::lock_guard<std::mutex> resultLock(m_resultMutex);
+                m_result = std::move(retiredResult);
+            }
+            m_isStopping.store(wasStopping);
+            SetAnalysisState(oldState);
+            if (!wasViewBound) {
+                ClearViewThread();
+            }
+            return false;
+        }
+    }
+
+    // worker 已被接纳；RemoveOverlayStrategy 的 noexcept 契约保证旧 overlay 清理不会重新
+    // 打开异常出口，因此从这里开始可以连续提交新会话且不再返回 false。
+    SetOverlayOff();
+    {
+        std::lock_guard<std::mutex> inputLock(m_inputMutex);
+        m_inputSnapshot = inputSnapshot;
+    }
+    {
+        std::lock_guard<std::mutex> paramsLock(m_paramsMutex);
+        m_surfParams = params.surfParams;
+        m_advParams = params.advParams;
+        m_voidParams = params.voidParams;
+    }
+    m_meshTargets = std::move(meshTargets);
+    m_sliceTargets = std::move(sliceTargets);
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
     m_displaySurfaceRequest = request.surface;
     m_displayVoidParams = request.voidParams;
     m_viewCallback = std::move(onComplete);
     m_isExitPending = false;
-    m_viewPhase.store(GapViewPhase::AwaitingInput);
+    m_viewPhase.store(GapViewPhase::AwaitingResult);
     m_isOverlayOn = true;
-    std::cout << "[GapAnalysis] Display mode requested. Analysis will start after volume data is ready." << std::endl;
+    std::cout << "[GapAnalysis] Display mode requested. Analysis worker accepted." << std::endl;
     return true;
 }
 
@@ -668,22 +768,42 @@ bool GapAnalysisService::Impl::GetDisplayTickNeeded() const {
 
 void GapAnalysisService::Impl::ClearView()
 {
+    if (GetViewBound() && !GetViewThread()) {
+        std::cerr << "[GapAnalysis] ClearView rejected: view thread mismatch." << std::endl;
+        return;
+    }
+
     // 清理顺序：先请求取消并 join worker，确认不再写结果后卸载 overlay；随后释放 callback、
     // 输入快照、显示缓存和 view 线程绑定。调用方必须在已绑定的宿主线程协调活动显示会话。
     StopAsync();
     StopWorker();
     SetOverlayOff();
     m_viewCallback = nullptr;
+    {
+        std::lock_guard<std::mutex> callbackLock(m_callbackMutex);
+        m_completionCallback = nullptr;
+        m_nextCallback = nullptr;
+        m_isNextOk = false;
+        m_hasCallback.store(false);
+    }
     m_isExitPending = false;
     {
         std::lock_guard<std::mutex> lock(m_inputMutex);
         m_inputSnapshot.reset();
     }
+    {
+        std::lock_guard<std::mutex> resultLock(m_resultMutex);
+        m_result = {};
+    }
+    SetAnalysisState(GapAnalysisState::Idle);
     ClearDisplayState();
-    ClearViewThread();
+    if (GetViewBound()) {
+        ClearViewThread();
+    }
 }
 
 void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
+    (void)inputImage;
     if (!GetViewThread()) {
         return;
     }
@@ -691,33 +811,12 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         return;
     }
 
-    // 1. 只有输入转换、ISO 解析和 worker 启动均被真实接纳，才进入结果等待阶段。
-    if (m_viewPhase.load() == GapViewPhase::AwaitingInput) {
-        if (m_isExitPending) {
-            auto callback = std::move(m_viewCallback);
-            m_isExitPending = false;
-            {
-                std::lock_guard<std::mutex> lock(m_inputMutex);
-                m_inputSnapshot.reset();
-            }
-            ClearDisplayState();
-            ClearViewThread();
-            if (callback) { try { callback(false); } catch (...) {} }
-            return;
-        }
-        if (GetAnalysisState() != GapAnalysisState::Running
-            && StartRun(std::move(inputImage))) {
-            m_viewPhase.store(GapViewPhase::AwaitingResult);
-        }
-        return;
-    }
-
-    // 2. Consumed 明确表示本显示请求的终态已经处理，后续 tick 不重复挂载或记录失败。
+    // 1. Consumed 明确表示本显示请求的终态已经处理，后续 tick 不重复挂载或记录失败。
     if (m_viewPhase.load() == GapViewPhase::Consumed) {
         return;
     }
 
-    // 3. 显示线程先用原子执行状态判断是否到达终态；Idle/Running 均没有可消费的终态结果。
+    // 2. 显示线程先用原子执行状态判断是否到达终态；Idle/Running 均没有可消费的终态结果。
     const GapAnalysisState state = GetAnalysisState();
     if (state == GapAnalysisState::Running) {
         return;
@@ -737,7 +836,7 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         return;
     }
 
-    // 4A. 失败只记一次日志并关闭本次消费，不挂载任何 overlay。
+    // 3A. 失败只记一次日志并关闭本次消费，不挂载任何 overlay。
     if (state == GapAnalysisState::Failed) {
         std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
         m_viewPhase.store(GapViewPhase::Consumed);
@@ -745,7 +844,7 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         return;
     }
 
-    // 4B. 成功结果在当前 tick 缓存并按 overlay 可见意图挂载；无论目标是否可显示都不重复消费。
+    // 3B. 成功结果在当前 tick 缓存并按 overlay 可见意图挂载；无论目标是否可显示都不重复消费。
     const bool isDisplayed = SetDisplayView();
     m_viewPhase.store(GapViewPhase::Consumed);
     if (callback) { try { callback(isDisplayed); } catch (...) {} }
@@ -826,28 +925,6 @@ void GapAnalysisService::Impl::SetAnalysisState(GapAnalysisState state) {
     m_analysisState.store(static_cast<int>(state));
 }
 
-bool GapAnalysisService::Impl::StartRun(vtkSmartPointer<vtkImageData> inputImage) {
-    // 1A. 普通非空输入保持公共隔离语义；1B. 空输入复用宿主预装的受控只读快照。
-    if (inputImage && !SetGapInput(std::move(inputImage))) {
-        return false;
-    }
-
-    const auto inputSnapshot = GetInputSnapshot();
-    if (!inputSnapshot || !inputSnapshot->GetVoxelReady()) {
-        return false;
-    }
-
-    // 2. ISO 在本次输入标量范围上解析。
-    const double isoValue = GetDisplayIso(*inputSnapshot);
-
-    // 3. 写入本次显示参数后启动异步任务；StartAsync 会再次领取输入与参数快照。
-    GapSurfaceParams surfaceParams;
-    surfaceParams.isoValue = static_cast<float>(isoValue);
-    SetSurface(surfaceParams);
-    SetVoid(m_displayVoidParams);
-    return StartAsync(nullptr);
-}
-
 bool GapAnalysisService::Impl::SetDisplayView() {
     if (m_viewPhase.load() == GapViewPhase::Idle) {
         return false;
@@ -871,7 +948,7 @@ bool GapAnalysisService::Impl::SetDisplayView() {
     }
 }
 
-bool GapAnalysisService::Impl::SetOverlayOff() {
+bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
     bool hasRemoved = false;
     for (const auto& binding : m_displayOverlayBindings) {
         if (!binding.service || !binding.overlayStrategy) {
@@ -966,6 +1043,20 @@ bool GapAnalysisService::Impl::SetViewThread()
     return m_viewThreadId == currentThreadId;
 }
 
+bool GapAnalysisService::Impl::GetViewBound() const
+{
+    std::lock_guard<std::mutex> lock(m_viewThreadMutex);
+    return m_viewThreadId != std::thread::id{};
+}
+
+bool GapAnalysisService::Impl::GetViewThreadReady() const
+{
+    const auto currentThreadId = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(m_viewThreadMutex);
+    return m_viewThreadId == std::thread::id{}
+        || m_viewThreadId == currentThreadId;
+}
+
 bool GapAnalysisService::Impl::GetViewThread() const
 {
     std::lock_guard<std::mutex> lock(m_viewThreadMutex);
@@ -982,22 +1073,150 @@ bool GapAnalysisService::Impl::ClearViewThread()
     return true;
 }
 
-double GapAnalysisService::Impl::GetDisplayIso(const GapVolumeBuffer& inputSnapshot) const {
-    if (m_displaySurfaceRequest.isoMode == GapIsoMode::AbsoluteValue) {
-        return m_displaySurfaceRequest.absoluteIsoValue;
+double GapAnalysisService::Impl::GetDisplayIso(
+    const GapVolumeBuffer& inputSnapshot,
+    const GapSurfaceRequest& surface) const {
+    if (surface.isoMode == GapIsoMode::AbsoluteValue) {
+        return surface.absoluteIsoValue;
     }
 
     // DataRangeRatio 的数学含义：
     // iso = min + (max - min) * ratio。ratio 只表达上位机配方，真实阈值在 feature 拿到当前数据快照后解析。
     return inputSnapshot.minVal
-        + (inputSnapshot.maxVal - inputSnapshot.minVal) * m_displaySurfaceRequest.dataRangeRatio;
+        + (inputSnapshot.maxVal - inputSnapshot.minVal) * surface.dataRangeRatio;
+}
+
+bool GapAnalysisService::Impl::BuildInputSnapshot(
+    vtkSmartPointer<vtkImageData> image,
+    vtkSmartPointer<vtkImageData> validityMask,
+    VolumeBufferSnapshot& out) const
+{
+    out.reset();
+    if (!image || !GetMaskValid(image, validityMask)) {
+        return false;
+    }
+
+    try {
+        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
+        imageCopy->DeepCopy(image);
+
+        vtkSmartPointer<vtkImageData> maskCopy;
+        if (validityMask) {
+            maskCopy = vtkSmartPointer<vtkImageData>::New();
+            maskCopy->DeepCopy(validityMask);
+        }
+
+        GapVolumeBuffer snapshot;
+        if (!BuildVolumeBuffer(
+                std::move(imageCopy),
+                std::move(maskCopy),
+                snapshot)) {
+            return false;
+        }
+        out = std::make_shared<GapVolumeBuffer>(
+            std::move(snapshot));
+        return out && out->GetVoxelReady();
+    }
+    catch (const std::bad_alloc&) {
+        out.reset();
+        return false;
+    }
+}
+
+bool GapAnalysisService::Impl::GetMaskValid(
+    vtkImageData* image,
+    vtkImageData* validityMask) const
+{
+    if (!validityMask) {
+        return true;
+    }
+    if (!image
+        || validityMask->GetScalarType() != VTK_UNSIGNED_CHAR
+        || validityMask->GetNumberOfScalarComponents() != 1
+        || !validityMask->GetScalarPointer()) {
+        return false;
+    }
+
+    int imageExtent[6] = {};
+    int maskExtent[6] = {};
+    double imageOrigin[3] = {};
+    double maskOrigin[3] = {};
+    double imageSpacing[3] = {};
+    double maskSpacing[3] = {};
+    image->GetExtent(imageExtent);
+    validityMask->GetExtent(maskExtent);
+    image->GetOrigin(imageOrigin);
+    validityMask->GetOrigin(maskOrigin);
+    image->GetSpacing(imageSpacing);
+    validityMask->GetSpacing(maskSpacing);
+    for (int index = 0; index < 6; ++index) {
+        if (imageExtent[index] != maskExtent[index]) {
+            return false;
+        }
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        if (imageOrigin[axis] != maskOrigin[axis]
+            || imageSpacing[axis] != maskSpacing[axis]) {
+            return false;
+        }
+    }
+
+    const auto* imageDirection = image->GetDirectionMatrix();
+    const auto* maskDirection = validityMask->GetDirectionMatrix();
+    if (!imageDirection || !maskDirection) {
+        return imageDirection == maskDirection;
+    }
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            if (imageDirection->GetElement(row, column)
+                != maskDirection->GetElement(row, column)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool GapAnalysisService::Impl::GetRequestValid(
+    const GapSurfaceRequest& surface,
+    const GapVoidParams& voidParams) const
+{
+    if (!std::isfinite(surface.dataRangeRatio)
+        || !std::isfinite(surface.absoluteIsoValue)
+        || !std::isfinite(voidParams.grayMin)
+        || !std::isfinite(voidParams.grayMax)
+        || !std::isfinite(voidParams.minVolumeMM3)
+        || !std::isfinite(voidParams.angleThresholdDeg)) {
+        return false;
+    }
+
+    switch (surface.isoMode) {
+    case GapIsoMode::DataRangeRatio:
+        if (surface.dataRangeRatio < 0.0
+            || surface.dataRangeRatio > 1.0) {
+            return false;
+        }
+        break;
+    case GapIsoMode::AbsoluteValue:
+        break;
+    default:
+        return false;
+    }
+
+    return voidParams.grayMin <= voidParams.grayMax
+        && voidParams.minVolumeMM3 >= 0.0
+        && voidParams.angleThresholdDeg >= 0.0f
+        && voidParams.angleThresholdDeg <= 180.0f
+        && voidParams.tensorWindowSize > 0
+        && voidParams.erosionIterations >= 0;
 }
 
 bool GapAnalysisService::Impl::BuildVolumeBuffer(
     vtkSmartPointer<vtkImageData> image,
+    vtkSmartPointer<vtkImageData> validityMask,
     GapVolumeBuffer& out) const
 {
-    if (!image) {
+    if (!image || !GetMaskValid(image, validityMask)) {
         return false;
     }
 
@@ -1025,6 +1244,31 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
         return false;
     }
 
+    if (validityMask) {
+        auto* maskPtr = static_cast<const std::uint8_t*>(
+            validityMask->GetScalarPointer());
+        if (!maskPtr
+            || validityMask->GetPointData()->GetScalars()
+                ->GetNumberOfTuples()
+                < static_cast<vtkIdType>(expectedCount)) {
+            return false;
+        }
+        try {
+            std::shared_ptr<const void> maskOwner =
+                std::make_shared<vtkSmartPointer<vtkImageData>>(
+                    std::move(validityMask));
+            if (!out.SetSharedMask(std::move(maskOwner), maskPtr)) {
+                return false;
+            }
+        }
+        catch (const std::bad_alloc&) {
+            return false;
+        }
+    }
+    else {
+        out.ClearMask();
+    }
+
     out.dims = { dims[0], dims[1], dims[2] }; // voxel index 布局为 [x, y, z]。
 
     double spacing[3] = { 1.0, 1.0, 1.0 };
@@ -1044,9 +1288,19 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
             return false;
         }
 
-        const auto minMax = std::minmax_element(source, source + expectedCount);
-        out.minVal = *minMax.first;
-        out.maxVal = *minMax.second;
+        bool hasValidVoxel = false;
+        float minValue = (std::numeric_limits<float>::max)();
+        float maxValue = (std::numeric_limits<float>::lowest)();
+        for (std::size_t index = 0; index < expectedCount; ++index) {
+            if (!out.GetVoxelValid(index)) {
+                continue;
+            }
+            hasValidVoxel = true;
+            minValue = (std::min)(minValue, source[index]);
+            maxValue = (std::max)(maxValue, source[index]);
+        }
+        out.minVal = hasValidVoxel ? minValue : 0.0f;
+        out.maxVal = hasValidVoxel ? maxValue : 0.0f;
         try {
             std::shared_ptr<const void> imageOwner =
                 std::make_shared<vtkSmartPointer<vtkImageData>>(std::move(image));
@@ -1062,16 +1316,27 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
     try {
         voxels.resize(expectedCount);
         for (std::size_t index = 0; index < expectedCount; ++index) {
-            voxels[index] = static_cast<float>(scalars->GetTuple1(static_cast<vtkIdType>(index)));
+            voxels[index] = static_cast<float>(
+                scalars->GetTuple1(static_cast<vtkIdType>(index)));
         }
     }
     catch (const std::bad_alloc&) {
         return false;
     }
 
-    const auto minMax = std::minmax_element(voxels.begin(), voxels.end());
-    out.minVal = minMax.first == voxels.end() ? 0.0f : *minMax.first;
-    out.maxVal = minMax.second == voxels.end() ? 0.0f : *minMax.second;
+    bool hasValidVoxel = false;
+    float minValue = (std::numeric_limits<float>::max)();
+    float maxValue = (std::numeric_limits<float>::lowest)();
+    for (std::size_t index = 0; index < expectedCount; ++index) {
+        if (!out.GetVoxelValid(index)) {
+            continue;
+        }
+        hasValidVoxel = true;
+        minValue = (std::min)(minValue, voxels[index]);
+        maxValue = (std::max)(maxValue, voxels[index]);
+    }
+    out.minVal = hasValidVoxel ? minValue : 0.0f;
+    out.maxVal = hasValidVoxel ? maxValue : 0.0f;
     out.SetOwnedVoxels(std::move(voxels));
 
     return true;

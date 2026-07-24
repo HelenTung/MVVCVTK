@@ -241,6 +241,34 @@ void StartAlgoCase(int& failureCount)
     if (regions.size() == 1) {
         SetRegionExpect(regions.front(), failureCount);
     }
+
+    auto maskedVolume = BuildTestVolume();
+    std::vector<std::uint8_t> validityMask(
+        maskedVolume.voxels.size(), 255);
+    validityMask[GetLinearIndex(3, 3, 3, TestDims)] = 0;
+    maskedVolume.SetOwnedMask(std::move(validityMask));
+    const auto maskedInterior =
+        VoidDetector::CreateInteriorMask(maskedVolume, 0.5f);
+    SetExpect(GetMaskCount(maskedInterior) == 0,
+        "mask=0 should open the carved void to the analysis exterior.",
+        failureCount);
+    auto maskedCandidates = VoidDetector::BuildCandidates(
+        maskedVolume, maskedInterior, BuildVoidParams());
+    std::vector<int> maskedLabels;
+    const auto maskedRegions = VoidDetector::BuildRegions(
+        maskedVolume,
+        maskedCandidates,
+        BuildVoidParams(),
+        maskedLabels);
+    SetExpect(maskedRegions.empty(),
+        "invalid-domain voxels should not enter gap statistics.",
+        failureCount);
+    SetExpect(std::none_of(
+            maskedLabels.begin(),
+            maskedLabels.end(),
+            [](int label) { return label != 0; }),
+        "invalid-domain voxels should remain zero in the label result.",
+        failureCount);
 }
 
 void StartBufferCase(int& failureCount)
@@ -249,10 +277,14 @@ void StartBufferCase(int& failureCount)
     GapVolumeBuffer owned;
     owned.dims = { 2, 1, 1 };
     owned.SetOwnedVoxels({ 3.0f, 5.0f });
+    owned.SetOwnedMask({ 255, 0 });
     GapVolumeBuffer ownedCopy(owned);
     SetExpect(ownedCopy.voxelsPtr != owned.voxelsPtr
-        && ownedCopy.GetVoxelValue(1, 0, 0) == 5.0f,
-        "owned VolumeBuffer copy should bind its independent vector.", failureCount);
+        && ownedCopy.validMaskPtr != owned.validMaskPtr
+        && ownedCopy.GetVoxelValue(1, 0, 0) == 5.0f
+        && !ownedCopy.GetVoxelValid(1),
+        "owned VolumeBuffer copy should bind independent voxel and mask vectors.",
+        failureCount);
 
     GapVolumeBuffer ownedAssigned;
     ownedAssigned = owned;
@@ -264,6 +296,11 @@ void StartBufferCase(int& failureCount)
     SetExpect(!ownedCopy.GetVoxelReady()
         && ownedMoved.voxelsPtr == ownedMoved.voxels.data(),
         "owned VolumeBuffer move should clear the source and rebind moved storage.", failureCount);
+    SetExpect(ownedCopy.validMaskPtr == nullptr
+        && ownedMoved.validMaskPtr == ownedMoved.validMask.data()
+        && !ownedMoved.GetVoxelValid(1),
+        "owned VolumeBuffer move should clear and rebind the validity mask.",
+        failureCount);
 
     GapVolumeBuffer ownedMoveAssigned;
     ownedMoveAssigned = std::move(ownedAssigned);
@@ -275,12 +312,17 @@ void StartBufferCase(int& failureCount)
     {
         auto sharedVoxels = std::make_shared<std::vector<float>>(
             std::initializer_list<float>{ 7.0f, 11.0f });
+        auto sharedMask = std::make_shared<std::vector<std::uint8_t>>(
+            std::initializer_list<std::uint8_t>{ 255, 0 });
         weakOwner = sharedVoxels;
 
         GapVolumeBuffer shared;
         shared.dims = { 2, 1, 1 };
         SetExpect(shared.SetSharedVoxels(sharedVoxels, sharedVoxels->data()),
             "shared VolumeBuffer should accept an owner and read-only alias.", failureCount);
+        SetExpect(shared.SetSharedMask(sharedMask, sharedMask->data()),
+            "shared VolumeBuffer should accept a mask owner and read-only alias.",
+            failureCount);
         const auto* sharedAddress = sharedVoxels->data();
         sharedVoxels.reset();
 
@@ -296,8 +338,11 @@ void StartBufferCase(int& failureCount)
             && sharedAssigned.voxelsPtr == sharedAddress
             && sharedMoved.voxelsPtr == sharedAddress
             && sharedMoveAssigned.voxelsPtr == sharedAddress
-            && sharedMoved.GetVoxelValue(1, 0, 0) == 11.0f,
-            "shared VolumeBuffer copies and moves should retain one aliased voxel owner.", failureCount);
+            && sharedMoved.GetVoxelValue(1, 0, 0) == 11.0f
+            && !sharedMoved.GetVoxelValid(1)
+            && !sharedMoveAssigned.GetVoxelValid(1),
+            "shared VolumeBuffer copies and moves should retain aliased voxel and mask owners.",
+            failureCount);
 
         sharedAssigned.SetOwnedVoxels({ 13.0f, 17.0f });
         SetExpect(sharedAssigned.voxelsPtr == sharedAssigned.voxels.data()

@@ -1,9 +1,16 @@
 #include "QtHostMethodCases.h"
 
+#include "AppState.h"
+#include "AppStateEvents.h"
+#include "DataManager.h"
 #include "Host/CropHostFeature.h"
+#include "Host/HostCoreServices.h"
+#include "Host/HostFeature.h"
 #include "Host/VtkAppHostSession.h"
+#include "VolumeTypes.h"
 
 #include <vtkCommand.h>
+#include <vtkImageData.h>
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
@@ -12,12 +19,147 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
+
+class ContextProbeFeature final : public HostFeature {
+public:
+    std::string_view GetFeatureId() const noexcept override
+    {
+        return "crop.context.probe";
+    }
+
+    bool AttachHost(
+        const HostFeatureContext& context) override
+    {
+        if (!context.getImageSnapshot
+            || !context.setImageState) {
+            return false;
+        }
+        m_getImageSnapshot = context.getImageSnapshot;
+        m_setImageState = context.setImageState;
+        return true;
+    }
+
+    bool DetachHost() override
+    {
+        m_getImageSnapshot = {};
+        m_setImageState = {};
+        return true;
+    }
+
+    bool OnHostTick() override
+    {
+        return true;
+    }
+
+    std::function<ImageSnapshot()> m_getImageSnapshot;
+    std::function<bool(
+        ImageState,
+        const ImageSnapshot&,
+        ImageSnapshot&)> m_setImageState;
+};
+
+class ThrowingStateSink final : public IStateEventSink {
+public:
+    void SendFlags(UpdateFlags) override
+    {
+        throw 1;
+    }
+};
+
+ImageState GetStateCopy(
+    const ImageSnapshot& snapshot)
+{
+    ImageState state = snapshot
+        ? *snapshot : ImageState{};
+    if (state.image) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->DeepCopy(state.image);
+        state.image = std::move(image);
+    }
+    if (state.validityMask) {
+        auto mask = vtkSmartPointer<vtkImageData>::New();
+        mask->DeepCopy(state.validityMask);
+        state.validityMask = std::move(mask);
+    }
+    return state;
+}
+
+bool GetCoreWriterContract()
+{
+    std::function<ImageSnapshot()> reader;
+    std::function<bool(
+        ImageState,
+        const ImageSnapshot&,
+        ImageSnapshot&)> writer;
+    ImageSnapshot retainedSnapshot;
+    bool isWriterValid = false;
+    {
+        HostCoreServices core;
+        core.sharedDataMgr =
+            std::make_shared<RawVolumeDataManager>();
+        core.sharedState =
+            std::make_shared<SharedInteractionState>(
+                std::make_shared<ThrowingStateSink>());
+
+        const auto layout = VolumeLayout::Create(
+            { 2, 2, 2 },
+            { 1.0f, 1.0f, 1.0f },
+            { 0.0f, 0.0f, 0.0f });
+        const auto buffer = layout
+            ? VolumeBuffer::Create(
+                std::vector<float>(8, 1.0f),
+                *layout)
+            : std::nullopt;
+        bool hasPending = false;
+        if (!buffer
+            || !core.sharedDataMgr->SetFromBuffer(*buffer)
+            || !core.sharedDataMgr->SetCurrentFromPending(
+                hasPending)
+            || !hasPending) {
+            return false;
+        }
+
+        reader = core.GetImageReader();
+        writer = core.GetImageWriter();
+        const auto expectedSnapshot = reader();
+        ImageSnapshot publishedSnapshot;
+        isWriterValid = writer(
+            GetStateCopy(expectedSnapshot),
+            expectedSnapshot,
+            publishedSnapshot);
+        ImageSnapshot stalePublished = publishedSnapshot;
+        const bool isStaleRejected = !writer(
+            GetStateCopy(expectedSnapshot),
+            expectedSnapshot,
+            stalePublished);
+        retainedSnapshot = publishedSnapshot;
+        isWriterValid = isWriterValid
+            && isStaleRejected
+            && !stalePublished
+            && publishedSnapshot
+            && publishedSnapshot->version
+                == expectedSnapshot->version + 1
+            && reader() == publishedSnapshot;
+    }
+
+    ImageSnapshot expiredPublished = retainedSnapshot;
+    const bool isExpiredRejected = !writer(
+        GetStateCopy(retainedSnapshot),
+        retainedSnapshot,
+        expiredPublished);
+    return isWriterValid
+        && !reader()
+        && isExpiredRejected
+        && !expiredPublished;
+}
+
 HostSessionConfig GetCropSessionConfig()
 {
     HostRenderViewConfig view;
@@ -96,13 +238,18 @@ int GetCropFailCount()
     VtkAppHostSession session(GetCropSessionConfig());
     auto feature = std::make_shared<CropHostFeature>(
         GetCropConfig());
+    auto contextProbe =
+        std::make_shared<ContextProbeFeature>();
     const bool isBuilt = session.BuildSession();
     const bool isAttached =
         session.AttachFeature(feature);
+    const bool isProbeAttached =
+        session.AttachFeature(contextProbe);
     const bool isInputAttached =
         session.AttachHotkeys({}, {});
     const auto* endpoint = session.GetPrimaryEndpoint();
-    if (!isBuilt || !isAttached || !isInputAttached
+    if (!isBuilt || !isAttached || !isProbeAttached
+        || !isInputAttached
         || !endpoint
         || !endpoint->interactor
         || !endpoint->renderWindow
@@ -137,6 +284,34 @@ int GetCropFailCount()
             && isReloadComplete
             && isReloadSucceeded,
         "Crop fixture publishes an image through Session data API") ? 0 : 1;
+
+    const auto expectedSnapshot =
+        contextProbe->m_getImageSnapshot();
+    ImageSnapshot publishedSnapshot;
+    const bool isPublished =
+        contextProbe->m_setImageState(
+            GetStateCopy(expectedSnapshot),
+            expectedSnapshot,
+            publishedSnapshot);
+    ImageSnapshot stalePublished = publishedSnapshot;
+    const bool isStaleRejected =
+        !contextProbe->m_setImageState(
+            GetStateCopy(expectedSnapshot),
+            expectedSnapshot,
+            stalePublished);
+    failureCount += GetCaseResult(
+        isPublished
+            && isStaleRejected
+            && !stalePublished
+            && publishedSnapshot
+            && publishedSnapshot->version
+                == expectedSnapshot->version + 1
+            && contextProbe->m_getImageSnapshot()
+                == publishedSnapshot,
+        "Feature context writer enforces snapshot identity and version CAS") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetCoreWriterContract(),
+        "Core writer publishes before notification and weak closures expire safely") ? 0 : 1;
 
     endpoint->interactor->SetKeyEventInformation(
         0, 0, '6', 0, "6");
@@ -252,10 +427,13 @@ int GetCropFailCount()
     const auto useCount = feature.use_count();
     const bool isDetached =
         session.DetachFeature(*feature);
+    const bool isProbeDetached =
+        session.DetachFeature(*contextProbe);
     SendTicks(*endpoint, 1);
     failureCount += GetCaseResult(
         !isPendingAccepted
             && isDetached
+            && isProbeDetached
             && feature.use_count() == useCount
             && !hasDetachedCallback,
         "Crop detach leaves the upper owner alive and suppresses queued callbacks") ? 0 : 1;

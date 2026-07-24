@@ -106,6 +106,12 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
   </ItemGroup>
+  <ItemGroup Label="GapAnalysis">
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Host\GapHostFeature.h" />
+    <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h" />
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Host\GapHostFeature.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
+  </ItemGroup>
   <ItemGroup>
     <ClInclude Include="QtHostMethodCases.h" />
   </ItemGroup>

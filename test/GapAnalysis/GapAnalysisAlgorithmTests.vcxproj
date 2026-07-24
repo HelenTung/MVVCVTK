@@ -147,15 +147,15 @@
       <AdditionalDependencies>$(VtkLibraries);%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
+  <ItemGroup Label="GapAnalysis">
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Algorithms\VoidDetector.h" />
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\GapAnalysisTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\features\GapAnalysis\include\Services\GapAnalysisService.h" />
-    <ClInclude Include="GapDisplayTests.h" />
+    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
+    <ClInclude Include="GapDisplayTests.h" />
     <ClCompile Include="GapAnalysisAlgorithmTests.cpp" />
     <ClCompile Include="GapDisplayTests.cpp" />
   </ItemGroup>

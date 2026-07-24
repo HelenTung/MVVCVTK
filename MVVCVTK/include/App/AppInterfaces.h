@@ -51,7 +51,7 @@ struct ImageState {
 using ImageSnapshot = std::shared_ptr<const ImageState>;
 
 class VizService;
-class HostFeatureBindings;
+struct HostCoreServices;
 
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
@@ -59,7 +59,7 @@ class HostFeatureBindings;
 class AbstractDataManager {
 protected:
     friend class VizService;
-    friend class HostFeatureBindings;
+    friend struct HostCoreServices;
     // 只有受控内部消费链可以取得 current owner；调用方必须把 image 视为只读。
     virtual ImageSnapshot GetImageSnapshot() const = 0;
 
@@ -127,7 +127,9 @@ public:
 
     // 图层叠加管理接口：Overlay 与主 Strategy 共享同一套状态同步节奏，但生命周期可独立增删。
     virtual void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) = 0;
-    virtual void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) = 0;
+    // Remove 是宿主事务的清理屏障；实现必须吞并底层 renderer 异常并完成自身登记移除。
+    virtual void RemoveOverlayStrategy(
+        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept = 0;
     virtual void ClearOverlayStrategies() = 0;
 };
 

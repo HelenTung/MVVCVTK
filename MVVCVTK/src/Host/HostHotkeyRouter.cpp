@@ -1,12 +1,12 @@
 #include "Host/HostHotkeyRouter.h"
 
 #include "Host/HostCommandRouter.h"
-#include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
 
 #include <algorithm>
 #include <array>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -38,10 +38,8 @@ public:
 
     Impl(
         const HostRenderViewSet& renderViews,
-        std::weak_ptr<HostFeatureBindings> featureBindings,
         std::weak_ptr<HostCommandRouter> commandRouter)
         : m_renderViews(&renderViews)
-        , m_featureBindings(std::move(featureBindings))
         , m_commandRouter(std::move(commandRouter))
         , m_inputPort(*this)
     {
@@ -64,7 +62,6 @@ private:
         Model,
         ExportVolume,
         ExportSlices,
-        GapSwitch,
         Exit,
         Count
     };
@@ -98,7 +95,6 @@ private:
     bool SetActionDown(HotkeyAction action, bool isDown);
 
     const HostRenderViewSet* m_renderViews = nullptr;
-    std::weak_ptr<HostFeatureBindings> m_featureBindings;
     std::weak_ptr<HostCommandRouter> m_commandRouter;
     std::vector<HostInputBinding> m_inputBindings;
     std::vector<std::weak_ptr<StdRenderContext>> m_contexts;
@@ -160,9 +156,6 @@ HostHotkeyRouter::Impl::GetHotkeyAction(
     if (GetCharMatched(event, m_config.saveSliceImagesKey)) {
         return HotkeyAction::ExportSlices;
     }
-    if (GetCharMatched(event, m_config.gapSwitchKey)) {
-        return HotkeyAction::GapSwitch;
-    }
     if (!m_config.exitKeySym.empty()
         && event.keySym == m_config.exitKeySym) {
         return HotkeyAction::Exit;
@@ -221,36 +214,13 @@ bool HostHotkeyRouter::Impl::SendCommand(
         command = HostDataCommand{ std::move(request), nullptr };
         break;
     }
-    case HotkeyAction::GapSwitch: {
-        HostGapRequest request;
-        const auto bindings = m_featureBindings.lock();
-        if (bindings && bindings->GetGapView()) {
-            request.action = HostGapAction::Overlay;
-            request.payload = std::monostate{};
-        }
-        else {
-            request.action = HostGapAction::Start;
-            request.payload = m_templates.gapStart;
-        }
-        command = HostGapCommand{ std::move(request), nullptr };
-        break;
-    }
     case HotkeyAction::Exit: {
-        const auto bindings = m_featureBindings.lock();
-        if (bindings && bindings->GetGapView()) {
-            HostGapRequest request;
-            request.action = HostGapAction::Exit;
-            request.payload = std::monostate{};
-            command = HostGapCommand{ std::move(request), nullptr };
-        }
-        else {
-            HostToolRequest request;
-            request.action = HostToolAction::Set;
-            request.payload = HostToolSetRequest{
-                HostViewTarget{ "", true, role },
-                HostToolMode::Navigation };
-            command = HostToolCommand{ std::move(request) };
-        }
+        HostToolRequest request;
+        request.action = HostToolAction::Set;
+        request.payload = HostToolSetRequest{
+            HostViewTarget{ "", true, role },
+            HostToolMode::Navigation };
+        command = HostToolCommand{ std::move(request) };
         break;
     }
     case HotkeyAction::None:
@@ -270,7 +240,16 @@ InteractionResult HostHotkeyRouter::Impl::SendFeatureInput(
             || !GetTargetMatched(binding.targetViews, view)) {
             continue;
         }
-        const auto current = binding.onInput(event);
+        InteractionResult current;
+        try {
+            current = binding.onInput(event);
+        }
+        catch (...) {
+            std::cerr
+                << "[Host] Feature input failed: "
+                << binding.featureId << '\n';
+            continue;
+        }
         result.isHandled = result.isHandled || current.isHandled;
         result.isPropagationStopped =
             result.isPropagationStopped
@@ -438,10 +417,21 @@ bool HostHotkeyRouter::Impl::AttachHotkeys(
     const HostHotkeyConfig& config,
     HostHotkeyTemplates templates)
 {
+    const auto oldConfig = m_config;
+    auto oldTemplates = m_templates;
+    const bool wasConfigured = m_isConfigured;
     m_config = config;
     m_templates = std::move(templates);
     m_isConfigured = true;
-    return AttachContexts();
+    if (AttachContexts()) {
+        return true;
+    }
+
+    m_config = oldConfig;
+    m_templates = std::move(oldTemplates);
+    m_isConfigured = wasConfigured;
+    (void)AttachContexts();
+    return false;
 }
 
 bool HostHotkeyRouter::Impl::ClearHotkeys()
@@ -455,11 +445,9 @@ bool HostHotkeyRouter::Impl::ClearHotkeys()
 
 HostHotkeyRouter::HostHotkeyRouter(
     const HostRenderViewSet& renderViews,
-    std::weak_ptr<HostFeatureBindings> featureBindings,
     std::weak_ptr<HostCommandRouter> commandRouter)
     : m_impl(std::make_unique<Impl>(
         renderViews,
-        std::move(featureBindings),
         std::move(commandRouter)))
 {
 }

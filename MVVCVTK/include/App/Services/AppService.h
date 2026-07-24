@@ -152,7 +152,8 @@ public:
     bool ResetDirty() override;
     void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy) override;
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) override;
-    void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) override;
+    void RemoveOverlayStrategy(
+        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept override;
     void ClearOverlayStrategies() override;
     RenderInputStamp GetRenderInputStamp() const override;
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect) override;

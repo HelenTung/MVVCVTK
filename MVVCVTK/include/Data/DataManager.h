@@ -8,7 +8,7 @@ class BaseDataManager : public AbstractDataManager
 {
 protected:
     friend class VizService;
-    friend class HostFeatureBindings;
+    friend struct HostCoreServices;
     class Impl;
     // 随 BaseDataManager 生命周期独占 current image、range、spacing、version 真源及其事务锁。
     std::unique_ptr<Impl> m_impl;

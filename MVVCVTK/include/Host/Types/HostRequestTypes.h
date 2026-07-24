@@ -14,8 +14,6 @@ struct HostVolumeGeometry {
     std::array<float, 3> origin{};             // 输入体数据的物理原点。
 };
 
-enum class HostGapAnalysisIsoMode { DataRangeRatio, AbsoluteValue };
-
 enum class HostDataAction { None, LoadFile, ReloadBuffer, ExportVolume, ExportSlices };
 
 struct HostLoadRequest {
@@ -75,37 +73,4 @@ using HostToolPayload = std::variant<std::monostate, HostToolSetRequest, HostToo
 struct HostToolRequest {
     HostToolAction action = HostToolAction::None;
     HostToolPayload payload;
-};
-
-struct HostGapSurfaceConfig {
-    HostGapAnalysisIsoMode isoMode = HostGapAnalysisIsoMode::DataRangeRatio; // 选择下面哪个阈值字段生效。
-    double dataRangeRatio = 0.0; // 标量范围内的相对位置，仅在 DataRangeRatio 模式使用。
-    double absoluteIsoValue = 0.0; // 数据标量单位下的绝对等值面阈值。
-};
-
-struct HostGapVoidConfig {
-    float grayMin = 0.0f;            // 候选孔隙灰度闭区间下界。
-    float grayMax = 0.0f;            // 候选孔隙灰度闭区间上界。
-    float minVolumeMM3 = 0.0f;       // 连通域最小物理体积，单位 mm^3。
-    float angleThresholdDeg = 0.0f;  // 结构方向判别阈值，单位度。
-    int tensorWindowSize = 0;        // 局部结构张量窗口边长（体素）。
-    int erosionIterations = 0;       // 表面约束掩膜的腐蚀迭代次数。
-};
-
-struct HostGapConfig {
-    HostGapSurfaceConfig surface;
-    HostGapVoidConfig voidDetection;
-};
-
-struct HostGapStartRequest {
-    HostViewTargets targetViews; // overlay 发布目标；按 host topology 去重并保持拓扑顺序。
-    bool isDefaultOverlayUsed = false; // true 时忽略显式集合，使用 feature 约定的默认视图。
-    HostGapConfig algorithm; // 本次后台分析的完整参数快照。
-};
-
-enum class HostGapAction { None, Start, Overlay, Exit };
-using HostGapPayload = std::variant<std::monostate, HostGapStartRequest>;
-struct HostGapRequest {
-    HostGapAction action = HostGapAction::None;
-    HostGapPayload payload;
 };

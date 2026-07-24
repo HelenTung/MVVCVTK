@@ -155,7 +155,6 @@
     <ClInclude Include="Fakes\AppService.h" />
     <ClInclude Include="Fakes\AppInterfaces.h" />
     <ClInclude Include="Fakes\Host\HostCoreServices.h" />
-    <ClInclude Include="Fakes\Host\HostFeatureBindings.h" />
     <ClInclude Include="Fakes\Host\HostRenderViewSet.h" />
     <ClInclude Include="Fakes\StdRenderContext.h" />
     <ClInclude Include="Fakes\vtkCommand.h" />

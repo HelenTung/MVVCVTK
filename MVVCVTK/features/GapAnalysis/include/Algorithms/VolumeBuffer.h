@@ -9,6 +9,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -21,13 +22,19 @@ public:
     GapVolumeBuffer(const GapVolumeBuffer& other)
         : voxels(other.voxels),
           voxelsPtr(nullptr),
+          validMask(other.validMask),
+          validMaskPtr(nullptr),
           dims(other.dims),
           spacing(other.spacing),
           origin(other.origin),
           minVal(other.minVal),
           maxVal(other.maxVal),
-          m_voxelOwner(other.m_voxelOwner) {
+          m_voxelOwner(other.m_voxelOwner),
+          m_maskOwner(other.m_maskOwner) {
         voxelsPtr = m_voxelOwner ? other.voxelsPtr : GetOwnedPointer();
+        validMaskPtr = m_maskOwner
+            ? other.validMaskPtr
+            : GetOwnedMaskPointer();
     }
 
     GapVolumeBuffer& operator=(const GapVolumeBuffer& other) {
@@ -43,16 +50,23 @@ public:
     GapVolumeBuffer(GapVolumeBuffer&& other) noexcept
         : voxels(std::move(other.voxels)),
           voxelsPtr(other.voxelsPtr),
+          validMask(std::move(other.validMask)),
+          validMaskPtr(other.validMaskPtr),
           dims(other.dims),
           spacing(other.spacing),
           origin(other.origin),
           minVal(other.minVal),
           maxVal(other.maxVal),
-          m_voxelOwner(std::move(other.m_voxelOwner)) {
+          m_voxelOwner(std::move(other.m_voxelOwner)),
+          m_maskOwner(std::move(other.m_maskOwner)) {
         if (!m_voxelOwner) {
             voxelsPtr = GetOwnedPointer();
         }
+        if (!m_maskOwner) {
+            validMaskPtr = GetOwnedMaskPointer();
+        }
         other.voxelsPtr = nullptr;
+        other.validMaskPtr = nullptr;
     }
 
     GapVolumeBuffer& operator=(GapVolumeBuffer&& other) noexcept {
@@ -62,16 +76,23 @@ public:
 
         voxels = std::move(other.voxels);
         voxelsPtr = other.voxelsPtr;
+        validMask = std::move(other.validMask);
+        validMaskPtr = other.validMaskPtr;
         dims = other.dims;
         spacing = other.spacing;
         origin = other.origin;
         minVal = other.minVal;
         maxVal = other.maxVal;
         m_voxelOwner = std::move(other.m_voxelOwner);
+        m_maskOwner = std::move(other.m_maskOwner);
         if (!m_voxelOwner) {
             voxelsPtr = GetOwnedPointer();
         }
+        if (!m_maskOwner) {
+            validMaskPtr = GetOwnedMaskPointer();
+        }
         other.voxelsPtr = nullptr;
+        other.validMaskPtr = nullptr;
         return *this;
     }
 
@@ -97,9 +118,40 @@ public:
         return true;
     }
 
+    // 非空有效域与体素共享 x-fast 布局；0 表示分析域外，非 0 表示有效。
+    void SetOwnedMask(std::vector<std::uint8_t> ownedMask) noexcept {
+        m_maskOwner.reset();
+        validMask = std::move(ownedMask);
+        validMaskPtr = GetOwnedMaskPointer();
+    }
+
+    bool SetSharedMask(
+        std::shared_ptr<const void> maskOwner,
+        const std::uint8_t* sharedMask) noexcept {
+        if (!maskOwner || !sharedMask) {
+            return false;
+        }
+
+        std::vector<std::uint8_t>().swap(validMask);
+        m_maskOwner = std::move(maskOwner);
+        validMaskPtr = sharedMask;
+        return true;
+    }
+
+    // 空 mask 表示整卷有效；清理时必须同时释放别名 owner。
+    void ClearMask() noexcept {
+        std::vector<std::uint8_t>().swap(validMask);
+        m_maskOwner.reset();
+        validMaskPtr = nullptr;
+    }
+
     bool GetVoxelReady() const noexcept {
         // 只检查别名是否非空；dims 与 vector size 的一致性由快照生产方保证。
         return voxelsPtr != nullptr;
+    }
+
+    bool GetVoxelValid(std::size_t index) const noexcept {
+        return !validMaskPtr || validMaskPtr[index] != 0;
     }
 
     // owned 模式的 x-fast 连续体素 owner，offset = x + y*dims[0] + z*dims[0]*dims[1]。
@@ -107,6 +159,9 @@ public:
     std::vector<float> voxels;
     // 非拥有只读别名；owned 模式指向 voxels，shared 模式由 m_voxelOwner 保证生命周期。
     const float* voxelsPtr = nullptr;
+    // 空 vector/空别名表示整卷有效；非空时与 voxels 使用同一 x-fast offset。
+    std::vector<std::uint8_t> validMask;
+    const std::uint8_t* validMaskPtr = nullptr;
 
     // voxel 数量 [dimX, dimY, dimZ]；有效快照要求三项为正且 voxelsPtr 至少覆盖三者乘积。
     std::array<int, 3>     dims = { 0, 0, 0 };
@@ -161,6 +216,11 @@ private:
         return voxels.empty() ? nullptr : voxels.data();
     }
 
+    const std::uint8_t* GetOwnedMaskPointer() const noexcept {
+        return validMask.empty() ? nullptr : validMask.data();
+    }
+
     // shared 模式的类型擦除生命周期锚点；owned 模式为空并由 voxels 唯一持有数据。
     std::shared_ptr<const void> m_voxelOwner;
+    std::shared_ptr<const void> m_maskOwner;
 };

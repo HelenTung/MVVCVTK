@@ -15,7 +15,9 @@
 class OverlayService;
 
 struct GapViewRequest final {
-    vtkSmartPointer<vtkImageData> inputImage; // 可选 VTK 输入；display tick 经公共隔离入口转换为分析快照。
+    vtkSmartPointer<vtkImageData> inputImage; // 必需 VTK 输入；StartView 同步隔离后才接纳 worker。
+    // 与 inputImage 同批次的可空二值有效域；空表示整卷有效，0 表示分析域外。
+    vtkSmartPointer<vtkImageData> validityMask;
     GapSurfaceRequest surface; // 等值面阈值与表面构建参数的本次请求副本。
     GapVoidParams voidParams; // 灰度、最小体积、方向张量和腐蚀参数快照。
     std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
@@ -58,7 +60,8 @@ public:
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;
 
     // GapAnalysis 显示模式由 feature 持有状态；host 只注入已降级的 overlay 目标和主线程 tick。
-    // 本入口清理旧显示后登记新请求并置启动门铃；至少一个有效 target 才接受，worker 由后续 OnDisplayTick 启动。
+    // 本入口先在局部冻结 image+mask、校验参数和 target；返回 true 时 worker 已被接纳。
+    // 任一准备步骤失败时，既有 overlay、callback 和 owner-thread binding 保持不变。
     // 首次成功调用绑定当前宿主线程；本组显示会话接口必须继续由该线程调用。
     bool StartView(
         GapViewRequest request,
@@ -69,7 +72,7 @@ public:
     void ClearView();
     bool GetViewOn() const;
     bool GetDisplayTickNeeded() const;
-    // 宿主主线程 tick：非空 image 走公共隔离入口；空 image 复用预先 SetInputSnapshot 的只读输入。
+    // 宿主主线程 tick 只消费已接纳 worker 的终态；inputImage 保留为兼容形参，不再延迟启动任务。
     // 非绑定线程调用会被拒绝，不读取或修改 VTK/overlay 会话状态。
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 

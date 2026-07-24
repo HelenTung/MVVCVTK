@@ -4,7 +4,6 @@
 
 #include <memory>
 
-class HostFeatureBindings;
 class HostRenderViewSet;
 struct HostCoreServices;
 
@@ -13,8 +12,7 @@ class HostCommandRouter final {
 public:
     HostCommandRouter(
         const HostCoreServices& core,
-        const HostRenderViewSet& renderViews,
-        std::shared_ptr<HostFeatureBindings> featureBindings);
+        const HostRenderViewSet& renderViews);
     ~HostCommandRouter();
 
     bool DispatchCommand(HostCommand command) const;

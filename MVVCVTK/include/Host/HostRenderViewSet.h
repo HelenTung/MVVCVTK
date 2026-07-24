@@ -24,7 +24,7 @@ struct HostRenderViewRuntime {
 // HostRenderViewSet 只回答“有哪些窗口、它们是什么 role、怎样找到目标窗口”。
 // 层级关系：
 // 1. VtkAppHostSession 调用 Build 创建/接管窗口。
-// 2. HostFeatureBindings 只通过 id/role 查询目标窗口，不知道默认五窗口布局。
+// 2. Feature 只通过 id/role 查询目标窗口，不知道默认五窗口布局。
 // 3. 外部 Qt / 上位机只拿 endpoint，不直接碰 service。
 // 这样它和 StdRenderContext 不重叠：StdRenderContext 负责单窗口渲染对象，HostRenderViewSet 负责多窗口集合语义。
 // 输入事件不在这里安装；独立 VTK 调试热键由 HostHotkeyRouter 安装 input handler 并翻译成 typed command。
@@ -59,9 +59,6 @@ public:
     // ids 和 roles 是显式作用域并集；二者都为空时返回空，避免漏配请求被解释为全窗口。
     std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
         const HostViewTargets& targets) const;
-    // 孔隙 overlay 默认角色也是显式 fallback；它描述可显示 overlay 的 role，不描述当前窗口数量。
-    std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
-
     // 可选 Feature 只需要 InteractiveService 列表；在这里降级接口，避免其修改完整 runtime。
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
@@ -73,7 +70,6 @@ public:
 
     bool GetRoleIs3DView(HostRenderViewRole role) const;
     bool GetRoleIsSliceView(HostRenderViewRole role) const;
-    bool GetRoleIsGapOverlayRole(HostRenderViewRole role) const;
 
 private:
     // view set 独占多窗口 runtime 集合；移动对象时一起转移，外部 endpoint 不获得该所有权。

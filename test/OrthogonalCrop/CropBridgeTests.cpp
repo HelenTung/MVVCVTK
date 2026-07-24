@@ -115,7 +115,8 @@ public:
         return effect ? effect->GetState() : RenderEffectState{};
     }
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
-    void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
+    void RemoveOverlayStrategy(
+        std::shared_ptr<AbstractVisualStrategy>) noexcept override {}
     void ClearOverlayStrategies() override {}
     void SetRenderContext(vtkSmartPointer<vtkRenderWindow>, vtkSmartPointer<vtkRenderer>) override {}
     void SendUpdates() override {}

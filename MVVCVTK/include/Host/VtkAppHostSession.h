@@ -12,7 +12,7 @@
 
 class HostFeature;
 
-// 一次 VTK 宿主会话的顶层 owner：惰性组装共享数据/状态服务、窗口拓扑、feature 绑定、
+// 一次 VTK 宿主会话的顶层 owner：惰性组装共享数据/状态服务、窗口拓扑、feature 注册、
 // 命令路由和 standalone 输入适配。外部只通过 HostRequest/Endpoint 交互，不直接依赖 AppService。
 // Endpoint 中的 VTK 裸指针由本会话内部窗口持有；会话移动、重建或析构后不得继续缓存使用。
 class VtkAppHostSession final {
@@ -44,9 +44,6 @@ public:
         HostCompleteCallback onComplete = nullptr);
     bool SendView(HostViewRequest request);
     bool SendTool(HostToolRequest request);
-    bool SendGap(
-        HostGapRequest request,
-        HostCompleteCallback onComplete = nullptr);
 
     // 返回会话内部 endpoint 集合的只读引用；引用和元素地址只在本会话拓扑不变且存活期间有效。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();

@@ -47,9 +47,6 @@
     <ClInclude Include="Fakes\Host\HostCoreServices.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="Fakes\Host\HostFeatureBindings.h">
-      <Filter>tests</Filter>
-    </ClInclude>
     <ClInclude Include="Fakes\Host\HostRenderViewSet.h">
       <Filter>tests</Filter>
     </ClInclude>

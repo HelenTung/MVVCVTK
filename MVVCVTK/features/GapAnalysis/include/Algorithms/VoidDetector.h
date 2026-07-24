@@ -96,32 +96,49 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
 
     std::deque<QNode> q;
 
-    auto push_node = [&](int x, int y, int z) {
+    const auto getOpen = [&](size_t idx) {
+        return !vol.GetVoxelValid(idx) || data[idx] < isoValue;
+    };
+    auto pushNode = [&](int x, int y, int z) {
         size_t idx = (size_t)x + (size_t)y * dx + (size_t)z * slice;
-        if (data[idx] < isoValue && exterior[idx] == 0) {
+        if (getOpen(idx) && exterior[idx] == 0) {
             exterior[idx] = 1;
             q.push_back({ idx, x, y, z });
         }
         };
 
-    // 1. 初始化种子：完全对齐原版边界逻辑
-    // 六个面分三组扫描，边/角允许重复调用 push_node，但 exterior 门铃保证只入队一次。
+    // 1. mask=0 表示分析域外；每个无效 voxel 都是 exterior 种子，使与裁切边界相邻的
+    // 低灰度有效 voxel 能连通域外，而不会被误判为封闭孔隙。
+    for (int z = 0; z < dz; ++z) {
+        for (int y = 0; y < dy; ++y) {
+            for (int x = 0; x < dx; ++x) {
+                const size_t idx = (size_t)x
+                    + (size_t)y * dx
+                    + (size_t)z * slice;
+                if (!vol.GetVoxelValid(idx)) {
+                    pushNode(x, y, z);
+                }
+            }
+        }
+    }
+
+    // 2. 六个面分三组扫描；边/角允许重复调用，但 exterior 门铃保证只入队一次。
     for (int y = 0; y < dy; ++y) {
         for (int x = 0; x < dx; ++x) {
-            push_node(x, y, 0);
-            push_node(x, y, dz - 1);
+            pushNode(x, y, 0);
+            pushNode(x, y, dz - 1);
         }
     }
     for (int z = 1; z < dz - 1; ++z) {
         for (int y = 0; y < dy; ++y) {
-            push_node(0, y, z);
-            push_node(dx - 1, y, z);
+            pushNode(0, y, z);
+            pushNode(dx - 1, y, z);
         }
     }
     for (int z = 1; z < dz - 1; ++z) {
         for (int x = 1; x < dx - 1; ++x) {
-            push_node(x, 0, z);
-            push_node(x, dy - 1, z);
+            pushNode(x, 0, z);
+            pushNode(x, dy - 1, z);
         }
     }
 
@@ -143,7 +160,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
             // 内部节点可安全使用预计算扁平 offset；坐标随同更新，供其进入边界时切换安全分支。
             for (int k = 0; k < 6; ++k) {
                 size_t nidx = curr.idx + off[k];
-                if (exterior[nidx] == 0 && data[nidx] < isoValue) {
+                if (exterior[nidx] == 0 && getOpen(nidx)) {
                     exterior[nidx] = 1;
                     q.push_back({ nidx, curr.x + dxs[k], curr.y + dys[k], curr.z + dzs[k] });
                 }
@@ -157,7 +174,7 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
                 int nz = curr.z + dzs[k];
                 if (nx >= 0 && nx < dx && ny >= 0 && ny < dy && nz >= 0 && nz < dz) {
                     size_t nidx = (size_t)nx + (size_t)ny * dx + (size_t)nz * slice;
-                    if (exterior[nidx] == 0 && data[nidx] < isoValue) {
+                    if (exterior[nidx] == 0 && getOpen(nidx)) {
                         exterior[nidx] = 1;
                         q.push_back({ nidx, nx, ny, nz });
                     }
@@ -167,7 +184,9 @@ inline std::vector<uint8_t> VoidDetector::CreateInteriorMask(
     }
 
     for (long long i = 0; i < (long long)total; ++i) {
-        if (data[i] < isoValue && exterior[i] == 0) {
+        if (vol.GetVoxelValid(static_cast<size_t>(i))
+            && data[i] < isoValue
+            && exterior[i] == 0) {
             exterior[i] = 1; // 内部孔隙
         }
         else {
@@ -196,7 +215,9 @@ inline std::vector<uint8_t> VoidDetector::BuildCandidates(
     vtkSMPTools::For(0, static_cast<vtkIdType>(total),
         [&](vtkIdType begin, vtkIdType end) {
             for (vtkIdType i = begin; i < end; ++i) {
-                if (interiorMask[i] > 0 && vol.voxelsPtr[i] <= params.grayMax) {
+                if (vol.GetVoxelValid(static_cast<size_t>(i))
+                    && interiorMask[i] > 0
+                    && vol.voxelsPtr[i] <= params.grayMax) {
                     raw_mask[i] = 1;
                 }
             }
@@ -288,7 +309,9 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
     std::queue<size_t> q;
 
     for (size_t i = 0; i < total; ++i) {
-        if (candidateMask[i] > 0 && outLabelVol[i] == 0) {
+        if (vol.GetVoxelValid(i)
+            && candidateMask[i] > 0
+            && outLabelVol[i] == 0) {
 
             VoidRegion region;
             region.id = currentID;
@@ -349,7 +372,10 @@ inline std::vector<VoidRegion> VoidDetector::BuildRegions(
 
                 for (long long off : offsets6) {
                     size_t nb = (size_t)((long long)curr + off);
-                    if (nb < total && candidateMask[nb] > 0 && outLabelVol[nb] == 0) {
+                    if (nb < total
+                        && vol.GetVoxelValid(nb)
+                        && candidateMask[nb] > 0
+                        && outLabelVol[nb] == 0) {
                         outLabelVol[nb] = currentID;
                         q.push(nb);
                     }

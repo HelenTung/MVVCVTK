@@ -2,7 +2,6 @@
 
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
-#include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
 
@@ -26,13 +25,12 @@ void SetExpect(bool isExpected, const char* message, int& failureCount)
 class Fixture final {
 public:
     Fixture()
-        : bindings(std::make_shared<HostFeatureBindings>())
     {
         context = std::make_shared<StdRenderContext>();
         sliceContext = std::make_shared<StdRenderContext>();
         views.CreateView("primary", HostRenderViewRole::Primary3D, context);
         views.CreateView("slice", HostRenderViewRole::TopDownSlice, sliceContext);
-        router = std::make_unique<HostCommandRouter>(core, views, bindings);
+        router = std::make_unique<HostCommandRouter>(core, views);
     }
 
     bool Send(HostCommand command) const
@@ -55,7 +53,6 @@ public:
 
     HostCoreServices core;
     HostRenderViewSet views;
-    std::shared_ptr<HostFeatureBindings> bindings;
     std::shared_ptr<StdRenderContext> context;
     std::shared_ptr<StdRenderContext> sliceContext;
     std::unique_ptr<HostCommandRouter> router;
@@ -143,35 +140,11 @@ void StartDataCases(int& failureCount)
         "None data action 必须被拒绝。", failureCount);
 }
 
-void StartFeatureCases(int& failureCount)
-{
-    Fixture fixture;
-    HostGapStartRequest gapStart;
-    gapStart.targetViews.viewIds = { "primary" };
-    bool isGapDone = false;
-    SetExpect(fixture.Send(HostGapCommand{
-        HostGapRequest{ HostGapAction::Start, gapStart },
-        [&isGapDone](bool isSuccess) { isGapDone = isSuccess; } }),
-        "Gap Start + start payload 应被接收。", failureCount);
-    SetExpect(isGapDone && fixture.bindings->GetGapStartCount() == 1,
-        "Gap Start 回调应精确完成一次。", failureCount);
-    SetExpect(fixture.Send(HostGapCommand{
-        HostGapRequest{ HostGapAction::Overlay, std::monostate{} }, nullptr }),
-        "Gap Overlay + monostate 应被接收。", failureCount);
-    SetExpect(!fixture.Send(HostGapCommand{
-        HostGapRequest{ HostGapAction::Overlay, gapStart }, nullptr }),
-        "Gap Overlay + start payload 必须被拒绝。", failureCount);
-    SetExpect(fixture.Send(HostGapCommand{
-        HostGapRequest{ HostGapAction::Exit, std::monostate{} }, nullptr }),
-        "Gap Exit + monostate 应被接收。", failureCount);
-}
-
 } // namespace
 
 int HostRouterSuite::GetFailCount() const
 {
     int failureCount = 0;
     StartDataCases(failureCount);
-    StartFeatureCases(failureCount);
     return failureCount;
 }

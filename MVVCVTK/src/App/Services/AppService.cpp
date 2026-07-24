@@ -88,7 +88,8 @@ public:
         std::shared_ptr<AbstractVisualStrategy> newStrategy,
         bool isRendererAttached = false);
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
-    void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
+    void RemoveOverlayStrategy(
+        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept;
     void ClearOverlayStrategies();
     RenderInputStamp GetRenderInputStamp() const;
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
@@ -359,7 +360,7 @@ void VizService::Impl::AttachOverlayStrategy(
 }
 
 void VizService::Impl::RemoveOverlayStrategy(
-    std::shared_ptr<AbstractVisualStrategy> strategy)
+    std::shared_ptr<AbstractVisualStrategy> strategy) noexcept
 {
     if (!strategy) return;
 
@@ -372,7 +373,13 @@ void VizService::Impl::RemoveOverlayStrategy(
     }
 
     if (m_renderer) {
-        strategy->DetachRenderer(m_renderer);
+        // renderer 是外部策略边界；即使自定义策略清理抛出，service 也必须移除自身登记，
+        // 让上层 Start/Clear 事务不会暴露异常或永久保留强 owner。
+        try {
+            strategy->DetachRenderer(m_renderer);
+        }
+        catch (...) {
+        }
     }
     m_overlayStrategies.erase(it);
     m_isDirty = true;
@@ -666,7 +673,8 @@ void VizService::AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> s
     m_impl->AttachOverlayStrategy(std::move(strategy));
 }
 
-void VizService::RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy)
+void VizService::RemoveOverlayStrategy(
+    std::shared_ptr<AbstractVisualStrategy> strategy) noexcept
 {
     m_impl->RemoveOverlayStrategy(std::move(strategy));
 }

@@ -12,6 +12,11 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
 class FakeHostFeature final : public HostFeature {
@@ -34,9 +39,23 @@ public:
         if (isAttached) {
             return true;
         }
-        if (!context.sendOwnerComplete) {
+        if (!context.sendOwnerComplete
+            || !context.inputPort) {
             return false;
         }
+        HostInputBinding binding;
+        binding.featureId = m_id;
+        binding.targetViews.viewIds = {
+            "lifecycle" };
+        binding.onInput =
+            [](const InteractionEvent&) {
+                return InteractionResult{};
+            };
+        if (!context.inputPort->AttachInput(
+                std::move(binding))) {
+            return false;
+        }
+        m_inputPort = context.inputPort;
         m_sendOwnerComplete = context.sendOwnerComplete;
         isAttached = true;
         ++attachCount;
@@ -51,6 +70,15 @@ public:
         if (!isAttached) {
             return true;
         }
+        ++detachTryCount;
+        if (isDetachFailing) {
+            return false;
+        }
+        if (m_inputPort
+            && !m_inputPort->DetachInput(m_id)) {
+            return false;
+        }
+        m_inputPort = nullptr;
         isAttached = false;
         m_sendOwnerComplete = {};
         ++detachCount;
@@ -75,12 +103,15 @@ public:
     std::string m_id;
     std::function<bool(std::function<void()>)>
         m_sendOwnerComplete;
+    HostInputPort* m_inputPort = nullptr;
     int attachCount = 0;
     int detachCount = 0;
+    int detachTryCount = 0;
     int tickCount = 0;
     bool isAttached = false;
     bool isAttachThrowing = false;
     bool isDetachThrowing = false;
+    bool isDetachFailing = false;
     bool isTickThrowing = false;
 };
 
@@ -93,6 +124,125 @@ HostSessionConfig GetSessionConfig()
     config.renderViews.push_back(std::move(view));
     return config;
 }
+
+bool GetDeathObserved(
+    const std::string_view caseName)
+{
+    if (GetMethodExecutable().empty()
+        || caseName.empty()) {
+        return false;
+    }
+
+#ifdef _WIN32
+    std::string command =
+        "\"" + GetMethodExecutable()
+        + "\" --death "
+        + std::string(caseName);
+    std::vector<char> commandLine(
+        command.begin(), command.end());
+    commandLine.push_back('\0');
+
+    STARTUPINFOA startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessA(
+            nullptr,
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startup,
+            &process)) {
+        return false;
+    }
+
+    constexpr DWORD timeoutMs = 10'000;
+    const DWORD waitResult =
+        WaitForSingleObject(
+            process.hProcess,
+            timeoutMs);
+    DWORD exitCode = 0;
+    if (waitResult == WAIT_OBJECT_0) {
+        (void)GetExitCodeProcess(
+            process.hProcess,
+            &exitCode);
+    }
+    else {
+        (void)TerminateProcess(
+            process.hProcess,
+            87);
+        (void)WaitForSingleObject(
+            process.hProcess,
+            timeoutMs);
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return waitResult == WAIT_OBJECT_0
+        && exitCode == 86;
+#else
+    return false;
+#endif
+}
+}
+
+int StartLifecycleDeathCase(
+    const std::string_view caseName)
+{
+    if (caseName == "detach-failure") {
+        auto session =
+            std::make_unique<VtkAppHostSession>(
+                GetSessionConfig());
+        if (!session->BuildSession()) {
+            return 10;
+        }
+        auto feature =
+            std::make_shared<FakeHostFeature>(
+                "death-detach");
+        feature->isDetachFailing = true;
+        if (!session->AttachFeature(feature)) {
+            return 11;
+        }
+        session.reset();
+        return 0;
+    }
+    if (caseName == "wrong-thread") {
+        auto session =
+            std::make_unique<VtkAppHostSession>(
+                GetSessionConfig());
+        if (!session->BuildSession()) {
+            return 12;
+        }
+        std::thread worker(
+            [session = std::move(session)]() mutable {
+                session.reset();
+            });
+        worker.join();
+        return 0;
+    }
+    if (caseName == "expired-input-detach-failure") {
+        auto session =
+            std::make_unique<VtkAppHostSession>(
+                GetSessionConfig());
+        if (!session->BuildSession()) {
+            return 13;
+        }
+        auto feature =
+            std::make_shared<FakeHostFeature>(
+                "death-expired");
+        if (!session->AttachFeature(feature)
+            || !feature->m_inputPort
+            || !feature->m_inputPort->DetachInput(
+                feature->m_id)) {
+            return 14;
+        }
+        feature.reset();
+        session.reset();
+        return 0;
+    }
+    return 15;
 }
 
 int GetLifecycleFailCount()
@@ -190,6 +340,65 @@ int GetLifecycleFailCount()
     failureCount += GetCaseResult(
         weakFeature.expired(),
         "Detached Feature expires after its upper owner releases it") ? 0 : 1;
+
+    auto retryFeature =
+        std::make_shared<FakeHostFeature>("feature-retry");
+    const bool isRetryAttached =
+        session->AttachFeature(retryFeature);
+    retryFeature->isDetachFailing = true;
+    const bool isFirstDetachRejected =
+        !session->DetachFeature(*retryFeature);
+    retryFeature->isDetachFailing = false;
+    const bool isRetryDetached =
+        session->DetachFeature(*retryFeature);
+    failureCount += GetCaseResult(
+        isRetryAttached
+            && isFirstDetachRejected
+            && isRetryDetached
+            && retryFeature->detachTryCount == 2
+            && retryFeature->detachCount == 1,
+        "Detach failure preserves the weak registry for an owner-thread retry") ? 0 : 1;
+
+    auto expiredFeature =
+        std::make_shared<FakeHostFeature>(
+            "feature-expired");
+    const bool isExpiredAttached =
+        session->AttachFeature(expiredFeature);
+    std::weak_ptr<FakeHostFeature> expiredWeak =
+        expiredFeature;
+    expiredFeature.reset();
+    auto replacement =
+        std::make_shared<FakeHostFeature>(
+            "feature-expired");
+    const bool isBeforeTickRejected =
+        !session->AttachFeature(replacement);
+    if (endpoint && endpoint->interactor) {
+        endpoint->interactor->InvokeEvent(
+            vtkCommand::TimerEvent);
+    }
+    const bool isAfterTickAttached =
+        session->AttachFeature(replacement);
+    const bool isReplacementDetached =
+        session->DetachFeature(*replacement);
+    failureCount += GetCaseResult(
+        isExpiredAttached
+            && expiredWeak.expired()
+            && isBeforeTickRejected
+            && isAfterTickAttached
+            && isReplacementDetached,
+        "Session tick removes an expired weak Feature registration") ? 0 : 1;
+
+    failureCount += GetCaseResult(
+        GetDeathObserved("detach-failure"),
+        "Session destruction fails fast before core teardown when detach fails") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetDeathObserved("wrong-thread"),
+        "Session destruction fails fast on a non-owner thread") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetDeathObserved(
+            "expired-input-detach-failure"),
+        "Session destruction fails fast when an expired "
+        "Feature input cannot detach") ? 0 : 1;
 
     auto fallback =
         std::make_shared<FakeHostFeature>("feature-b");

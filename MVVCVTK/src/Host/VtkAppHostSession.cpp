@@ -3,23 +3,77 @@
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
-#include "Host/HostFeatureBindings.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostRenderViewSet.h"
 
 #include "AppState.h"
 #include "DataManager.h"
-#include "Services/GapAnalysisService.h"
 #include "StdRenderContext.h"
 
 #include <algorithm>
+#include <exception>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+std::function<ImageSnapshot()>
+HostCoreServices::GetImageReader() const
+{
+    const std::weak_ptr<RawVolumeDataManager> weakData =
+        sharedDataMgr;
+    return [weakData]() {
+        const auto data = weakData.lock();
+        return data
+            ? data->GetImageSnapshot()
+            : ImageSnapshot{};
+    };
+}
+
+std::function<bool(
+    ImageState,
+    const ImageSnapshot&,
+    ImageSnapshot&)>
+HostCoreServices::GetImageWriter() const
+{
+    const std::weak_ptr<RawVolumeDataManager> weakData =
+        sharedDataMgr;
+    const std::weak_ptr<SharedInteractionState> weakState =
+        sharedState;
+    return [weakData, weakState](
+        ImageState state,
+        const ImageSnapshot& expectedSnapshot,
+        ImageSnapshot& publishedSnapshot) {
+        publishedSnapshot.reset();
+        const auto data = weakData.lock();
+        const auto sharedState = weakState.lock();
+        if (!data
+            || !sharedState
+            || !expectedSnapshot
+            || !state.image
+            || !data->SetCurrentData(
+                std::move(state),
+                expectedSnapshot,
+                publishedSnapshot)) {
+            return false;
+        }
+
+        // current 已发布；观察者异常不能把成功的 CAS 事务改报为失败。
+        try {
+            (void)sharedState->SetImageDataReady(
+                publishedSnapshot->scalarRange[0],
+                publishedSnapshot->scalarRange[1],
+                publishedSnapshot->spacing);
+        }
+        catch (...) {
+        }
+        return true;
+    };
+}
 
 class VtkAppHostSession::Impl final {
 public:
@@ -36,7 +90,6 @@ public:
 
     explicit Impl(HostSessionConfig sessionConfig)
         : config(std::move(sessionConfig))
-        , featureBindings(std::make_shared<HostFeatureBindings>())
         , ownerCompleteState(
             std::make_shared<OwnerCompleteState>())
     {
@@ -53,7 +106,6 @@ public:
     HostSessionConfig config;
     HostCoreServices core;
     HostRenderViewSet renderViews;
-    std::shared_ptr<HostFeatureBindings> featureBindings;
     std::shared_ptr<HostCommandRouter> commandRouter;
     std::vector<HostRenderViewEndpoint> endpoints;
     std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
@@ -68,7 +120,7 @@ private:
     static HostCoreServices BuildCore();
     void OnHostTimer();
     void DetachTimer();
-    void DetachFeatures();
+    bool DetachFeatures();
 };
 
 HostCoreServices VtkAppHostSession::Impl::BuildCore()
@@ -81,18 +133,22 @@ HostCoreServices VtkAppHostSession::Impl::BuildCore()
     value.sharedState =
         std::make_shared<SharedInteractionState>(
             value.sharedStateBroadcaster);
-    value.gapAnalysis =
-        std::make_shared<GapAnalysisService>();
     return value;
 }
 
 VtkAppHostSession::Impl::~Impl()
 {
+    if (isBuilt
+        && ownerThread != std::this_thread::get_id()) {
+        std::terminate();
+    }
     if (hotkeyRouter) {
         (void)hotkeyRouter->ClearHotkeys();
     }
     DetachTimer();
-    DetachFeatures();
+    if (!DetachFeatures()) {
+        std::terminate();
+    }
     if (ownerCompleteState) {
         const std::lock_guard<std::mutex> lock(
             ownerCompleteState->mutex);
@@ -101,7 +157,6 @@ VtkAppHostSession::Impl::~Impl()
     }
     hotkeyRouter.reset();
     commandRouter.reset();
-    featureBindings.reset();
 }
 
 bool VtkAppHostSession::Impl::BuildSession()
@@ -117,14 +172,13 @@ bool VtkAppHostSession::Impl::BuildSession()
     if (!renderViews.Build(core, config.renderViews)) {
         return false;
     }
-    featureBindings->AttachFeatures(core, renderViews);
     commandRouter = std::make_shared<HostCommandRouter>(
-        core, renderViews, featureBindings);
+        core, renderViews);
     renderViews.SetInitialVisibility();
     renderViews.SetInteractorsReady();
     endpoints = renderViews.BuildEndpoints();
     hotkeyRouter = std::make_unique<HostHotkeyRouter>(
-        renderViews, featureBindings, commandRouter);
+        renderViews, commandRouter);
     ownerThread = std::this_thread::get_id();
     isBuilt = true;
     return true;
@@ -175,22 +229,26 @@ void VtkAppHostSession::Impl::OnHostTimer()
     if (ownerThread != std::this_thread::get_id()) {
         return;
     }
-    try {
-        if (featureBindings) {
-            (void)featureBindings->OnHostTick();
-        }
-    }
-    catch (...) {
-    }
 
     auto output = features.begin();
     for (auto input = features.begin();
         input != features.end(); ++input) {
         auto feature = input->feature.lock();
         if (!feature) {
-            if (hotkeyRouter) {
-                (void)hotkeyRouter->GetInputPort().DetachInput(
-                    input->id);
+            bool isInputDetached = false;
+            try {
+                isInputDetached = hotkeyRouter
+                    && hotkeyRouter->GetInputPort().DetachInput(
+                        input->id);
+            }
+            catch (...) {
+                isInputDetached = false;
+            }
+            if (!isInputDetached) {
+                std::cerr
+                    << "[Host] Expired Feature input detach failed: "
+                    << input->id << '\n';
+                *output++ = *input;
             }
             continue;
         }
@@ -199,6 +257,9 @@ void VtkAppHostSession::Impl::OnHostTimer()
             (void)feature->OnHostTick();
         }
         catch (...) {
+            std::cerr
+                << "[Host] Feature tick failed: "
+                << input->id << '\n';
         }
     }
     features.erase(output, features.end());
@@ -248,28 +309,11 @@ bool VtkAppHostSession::Impl::AttachFeature(
         }
     }
 
-    const std::weak_ptr<HostFeatureBindings> weakBindings =
-        featureBindings;
     HostFeatureContext context;
     context.renderViews = &renderViews;
     context.inputPort = &hotkeyRouter->GetInputPort();
-    context.getImageSnapshot = [weakBindings]() {
-        const auto bindings = weakBindings.lock();
-        return bindings
-            ? bindings->GetImageSnapshot()
-            : ImageSnapshot{};
-    };
-    context.setImageState = [weakBindings](
-        ImageState state,
-        const ImageSnapshot& expectedSnapshot,
-        ImageSnapshot& publishedSnapshot) {
-        const auto bindings = weakBindings.lock();
-        return bindings
-            && bindings->SetImageState(
-                std::move(state),
-                expectedSnapshot,
-                publishedSnapshot);
-    };
+    context.getImageSnapshot = core.GetImageReader();
+    context.setImageState = core.GetImageWriter();
     const std::weak_ptr<OwnerCompleteState> weakCompleteState =
         ownerCompleteState;
     context.sendOwnerComplete = [weakCompleteState](
@@ -333,23 +377,37 @@ bool VtkAppHostSession::Impl::DetachFeature(
     return true;
 }
 
-void VtkAppHostSession::Impl::DetachFeatures()
+bool VtkAppHostSession::Impl::DetachFeatures()
 {
     for (auto entry = features.rbegin();
         entry != features.rend(); ++entry) {
         if (auto feature = entry->feature.lock()) {
             try {
-                (void)feature->DetachHost();
+                if (!feature->DetachHost()) {
+                    return false;
+                }
             }
             catch (...) {
+                return false;
             }
         }
         else if (hotkeyRouter) {
-            (void)hotkeyRouter->GetInputPort().DetachInput(
-                entry->id);
+            try {
+                if (!hotkeyRouter->GetInputPort().DetachInput(
+                        entry->id)) {
+                    return false;
+                }
+            }
+            catch (...) {
+                return false;
+            }
+        }
+        else {
+            return false;
         }
     }
     features.clear();
+    return true;
 }
 
 VtkAppHostSession::VtkAppHostSession(HostSessionConfig config)
@@ -433,15 +491,6 @@ bool VtkAppHostSession::SendTool(HostToolRequest request)
     return m_impl->SendCommand(
         HostCommand{ HostToolCommand{
             std::move(request) } });
-}
-
-bool VtkAppHostSession::SendGap(
-    HostGapRequest request,
-    HostCompleteCallback onComplete)
-{
-    return m_impl->SendCommand(
-        HostCommand{ HostGapCommand{
-            std::move(request), std::move(onComplete) } });
 }
 
 const std::vector<HostRenderViewEndpoint>&

@@ -166,7 +166,6 @@
     <ClInclude Include="include\Host\HostHotkeyRouter.h" />
     <ClInclude Include="include\Host\HostCoreServices.h" />
     <ClInclude Include="include\Host\HostFeature.h" />
-    <ClInclude Include="include\Host\HostFeatureBindings.h" />
     <ClInclude Include="include\Host\HostRenderViewSet.h" />
     <ClInclude Include="include\Host\Types\HostSessionTypes.h" />
     <ClInclude Include="include\Host\VtkAppHostSession.h" />
@@ -177,9 +176,6 @@
     <ClInclude Include="include\Data\DataConverters.h" />
     <ClInclude Include="include\Data\DataManager.h" />
     <ClInclude Include="include\Data\VolumeTypes.h" />
-    <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h" />
-    <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h" />
-    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapOverlayStrategies.h" />
     <ClInclude Include="include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="include\Interaction\InputCallbackHandler.h" />
     <ClInclude Include="include\Data\ImageProcessor.h" />
@@ -191,12 +187,9 @@
     <ClInclude Include="include\Platform\Path.h" />
     <ClInclude Include="include\Render\Strategies\SliceStrategy.h" />
     <ClInclude Include="include\Render\StdRenderContext.h" />
-    <ClInclude Include="features\GapAnalysis\include\Algorithms\SurfaceRefiner.h" />
     <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
-    <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h" />
-    <ClInclude Include="features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
     <ClInclude Include="include\Render\Strategies\VolumeStrategy.h" />
     <ClInclude Include="include\App\AppStateEvents.h" />
   </ItemGroup>
@@ -207,7 +200,6 @@
     <ClCompile Include="src\App\Services\AppService.cpp" />
     <ClCompile Include="src\Host\HostCommandRouter.cpp" />
     <ClCompile Include="src\Host\HostHotkeyRouter.cpp" />
-    <ClCompile Include="src\Host\HostFeatureBindings.cpp" />
     <ClCompile Include="src\Host\HostRenderViewSet.cpp" />
     <ClCompile Include="src\Host\VtkAppHostSession.cpp" />
     <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />
@@ -215,7 +207,6 @@
     <ClCompile Include="src\Data\DataConverters.cpp" />
     <ClCompile Include="src\Data\DataManager.cpp" />
     <ClCompile Include="src\Data\VolumeTypes.cpp" />
-    <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
     <ClCompile Include="src\Data\ImageProcessor.cpp" />
     <ClCompile Include="src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
@@ -228,6 +219,17 @@
     <ClCompile Include="src\Interaction\Viewer2DHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp" />
     <ClCompile Include="src\Render\Strategies\VolumeStrategy.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="GapAnalysis">
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\SurfaceRefiner.h" />
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h" />
+    <ClInclude Include="features\GapAnalysis\include\Algorithms\VolumeBuffer.h" />
+    <ClInclude Include="features\GapAnalysis\include\GapAnalysisTypes.h" />
+    <ClInclude Include="features\GapAnalysis\include\Host\GapHostFeature.h" />
+    <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapOverlayStrategies.h" />
+    <ClInclude Include="features\GapAnalysis\include\Services\GapAnalysisService.h" />
+    <ClCompile Include="features\GapAnalysis\src\Host\GapHostFeature.cpp" />
+    <ClCompile Include="features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
   </ItemGroup>
   <ItemGroup Label="OrthogonalCrop">
     <ClInclude Include="features\OrthogonalCrop\include\Algorithms\CropAlgorithm.h" />

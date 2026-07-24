@@ -4,7 +4,6 @@
 #include "AppService.h"
 #include "AppTypes.h"
 #include "Host/HostCoreServices.h"
-#include "Host/HostFeatureBindings.h"
 #include "Host/HostRenderViewSet.h"
 #include "StdRenderContext.h"
 #include "VolumeTypes.h"
@@ -23,13 +22,11 @@
 // 宿主协议到应用服务的唯一命令适配层：
 // - 只做 variant/payload 校验、Host 类型到 App 类型转换和目标视图选择；
 // - 不保存业务状态，也不直接执行裁切/间隙算法；
-// - m_core、m_renderViews 为会话期非拥有观察指针，featureBindings 用 weak_ptr 避免路由器延长插件生命周期。
+// - m_core、m_renderViews 为会话期非拥有观察指针。
 class HostCommandRouter::Impl final {
 public:
-    Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews,
-        std::shared_ptr<HostFeatureBindings> featureBindings)
-        : m_core(&core), m_renderViews(&renderViews),
-          m_featureBindings(std::move(featureBindings)) {}
+    Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews)
+        : m_core(&core), m_renderViews(&renderViews) {}
 
     bool DispatchCommand(HostCommand command) const;
 
@@ -37,7 +34,6 @@ private:
     bool SendData(HostDataCommand command) const;
     bool SendView(const HostViewCommand& command) const;
     bool SendTool(const HostToolCommand& command) const;
-    bool SendGap(HostGapCommand command) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
     bool ExportVolume(HostVolumeExportRequest request, HostCompleteCallback callback) const;
@@ -56,12 +52,11 @@ private:
 
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
-    std::weak_ptr<HostFeatureBindings> m_featureBindings;
 };
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
 {
-    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data/Gap 是为了把 callback/payload
+    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data 是为了把 callback/payload
     // 的所有权继续下沉，View/Tool 只读请求则保留 const 引用。未知分支统一拒绝，不做默认动作。
     if (auto* value = std::get_if<HostDataCommand>(&command)) {
         return SendData(std::move(*value));
@@ -71,9 +66,6 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
     }
     if (const auto* value = std::get_if<HostToolCommand>(&command)) {
         return SendTool(*value);
-    }
-    if (auto* value = std::get_if<HostGapCommand>(&command)) {
-        return SendGap(std::move(*value));
     }
     return false;
 }
@@ -395,35 +387,9 @@ bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
     return true;
 }
 
-bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
-{
-    // Gap Start 可启动分析并携带完成回调；Overlay/Exit 是同步显示状态命令，
-    // 因而要求无 callback 且 payload 为 monostate，避免把未消费参数误判为成功。
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) return false;
-    switch (command.request.action) {
-    case HostGapAction::Start:
-        if (const auto* value = std::get_if<HostGapStartRequest>(
-            &command.request.payload)) {
-            return bindings->StartGap(*value, std::move(command.onComplete));
-        }
-        return false;
-    case HostGapAction::Overlay:
-        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
-            && bindings->SwitchGapLayer();
-    case HostGapAction::Exit:
-        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
-            && bindings->ExitGap();
-    case HostGapAction::None:
-        return false;
-    }
-    return false;
-}
-
 HostCommandRouter::HostCommandRouter(const HostCoreServices& core,
-    const HostRenderViewSet& renderViews,
-    std::shared_ptr<HostFeatureBindings> featureBindings)
-    : m_impl(std::make_unique<Impl>(core, renderViews, std::move(featureBindings))) {}
+    const HostRenderViewSet& renderViews)
+    : m_impl(std::make_unique<Impl>(core, renderViews)) {}
 
 HostCommandRouter::~HostCommandRouter() = default;
 

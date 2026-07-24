@@ -1,10 +1,20 @@
 #include "QtHostMethodCases.h"
 
 #include <array>
+#include <csignal>
+#include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <string_view>
 
+#ifdef _WIN32
+#include <crtdbg.h>
+#include <windows.h>
+#endif
+
 namespace {
+
+std::string methodExecutable;
 
 struct MethodCase {
     const char* name;
@@ -22,6 +32,16 @@ constexpr std::array<MethodCase, 6> methodCases{{
 
 } // namespace
 
+const std::string& GetMethodExecutable()
+{
+    return methodExecutable;
+}
+
+void SetMethodExecutable(std::string executable)
+{
+    methodExecutable = std::move(executable);
+}
+
 bool GetCaseResult(bool isExpected, const char* caseName)
 {
     std::cout << (isExpected ? "PASS: " : "FAIL: ") << caseName << '\n';
@@ -30,6 +50,36 @@ bool GetCaseResult(bool isExpected, const char* caseName)
 
 int main(int argc, char* argv[])
 {
+    SetMethodExecutable(
+        argc > 0 && argv[0] ? argv[0] : "");
+    if (argc == 3
+        && std::string_view(argv[1]) == "--death") {
+#ifdef _WIN32
+        SetErrorMode(
+            SEM_FAILCRITICALERRORS
+            | SEM_NOGPFAULTERRORBOX);
+        _set_abort_behavior(
+            0,
+            _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+        _CrtSetReportMode(
+            _CRT_WARN,
+            _CRTDBG_MODE_FILE);
+        _CrtSetReportMode(
+            _CRT_ERROR,
+            _CRTDBG_MODE_FILE);
+        _CrtSetReportMode(
+            _CRT_ASSERT,
+            _CRTDBG_MODE_FILE);
+#endif
+        std::signal(SIGABRT, [](int) {
+            std::_Exit(86);
+        });
+        std::set_terminate([]() {
+            std::_Exit(86);
+        });
+        return StartLifecycleDeathCase(argv[2]);
+    }
+
     const bool isAllCases = argc == 1;
     const bool isSingleCase =
         argc == 3 && std::string_view(argv[1]) == "--case";

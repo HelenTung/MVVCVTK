@@ -27,7 +27,6 @@ public:
     const HostRenderViewRuntime* GetStandaloneStartView() const;
     std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
         const HostViewTargets& targets) const;
-    std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
     void SetInitialVisibility() const;
@@ -36,7 +35,6 @@ public:
     std::vector<HostRenderViewEndpoint> BuildEndpoints() const;
     bool GetRoleIs3DView(HostRenderViewRole role) const;
     bool GetRoleIsSliceView(HostRenderViewRole role) const;
-    bool GetRoleIsGapOverlayRole(HostRenderViewRole role) const;
 
 private:
     std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> BuildViewPair(
@@ -265,19 +263,6 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetViewsByTar
     return selectedViews;
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetGapOverlayViews() const
-{
-    // 默认孔隙 overlay 只按 role 判断可显示能力，不按窗口序号或历史五窗口布局判断。
-    std::vector<const HostRenderViewRuntime*> selectedViews;
-    selectedViews.reserve(m_views.size());
-    for (const auto& view : m_views) {
-        if (GetRoleIsGapOverlayRole(view.config.role)) {
-            selectedViews.push_back(&view);
-        }
-    }
-    return selectedViews;
-}
-
 std::vector<std::shared_ptr<InteractiveService>> HostRenderViewSet::Impl::BuildServices(
     const std::vector<const HostRenderViewRuntime*>& views) const
 {
@@ -361,12 +346,6 @@ bool HostRenderViewSet::Impl::GetRoleIsSliceView(HostRenderViewRole role) const
         || role == HostRenderViewRole::LeftRightSlice;
 }
 
-bool HostRenderViewSet::Impl::GetRoleIsGapOverlayRole(HostRenderViewRole role) const
-{
-    // 当前 overlay 分为 3D mesh 和 2D label 两类；其他辅助窗口默认不接收，除非后续扩展新 role 语义。
-    return GetRoleIs3DView(role) || GetRoleIsSliceView(role);
-}
-
 HostRenderViewSet::HostRenderViewSet()
     : m_impl(std::make_unique<HostRenderViewSet::Impl>())
 {
@@ -422,11 +401,6 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByTargets(
     return m_impl->GetViewsByTargets(targets);
 }
 
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetGapOverlayViews() const
-{
-    return m_impl->GetGapOverlayViews();
-}
-
 std::vector<std::shared_ptr<InteractiveService>> HostRenderViewSet::BuildServices(
     const std::vector<const HostRenderViewRuntime*>& views) const
 {
@@ -461,9 +435,4 @@ bool HostRenderViewSet::GetRoleIs3DView(HostRenderViewRole role) const
 bool HostRenderViewSet::GetRoleIsSliceView(HostRenderViewRole role) const
 {
     return m_impl && m_impl->GetRoleIsSliceView(role);
-}
-
-bool HostRenderViewSet::GetRoleIsGapOverlayRole(HostRenderViewRole role) const
-{
-    return m_impl && m_impl->GetRoleIsGapOverlayRole(role);
 }
