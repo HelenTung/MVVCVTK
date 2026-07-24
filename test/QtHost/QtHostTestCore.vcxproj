@@ -34,10 +34,8 @@
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -45,7 +43,7 @@
     <VtkRoot Condition="'$(VtkRoot)'==''">F:\lib_cv\VTK\lib\vtk_install</VtkRoot>
     <OpenCvRoot Condition="'$(OpenCvRoot)'==''">F:\lib_cv\cv\opencv\build</OpenCvRoot>
     <HostDllRoot Condition="'$(HostDllRoot)'==''">F:\CT-1209\DLL</HostDllRoot>
-    <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies;$(ProjectRoot)\features\GapAnalysis\include;$(ProjectRoot)\features\OrthogonalCrop\include</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies;$(ProjectRoot)\features\GapAnalysis\include</ProjectIncludePath>
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
   </PropertyGroup>
@@ -92,19 +90,11 @@
     <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\GapAnalysis\src\Services\GapAnalysisService.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBridge.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\StdRenderContext.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\TimeUpdateHandler.cpp" />

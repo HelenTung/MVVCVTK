@@ -36,6 +36,11 @@ public:
         double rangeMin,
         double rangeMax,
         const std::array<double, 3>& spacing);
+    // 非 load 的数据版本替换：只广播结构刷新，不占用 File/Reload admission。
+    bool SetImageDataReady(
+        double rangeMin,
+        double rangeMax,
+        const std::array<double, 3>& spacing);
     bool SetFileLoadFailed();
     bool SetReloadLoadFailed();
     void SetPreInitConfig(const PreInitConfig& config);

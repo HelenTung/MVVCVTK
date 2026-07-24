@@ -2,6 +2,100 @@
 #include <vtkProperty.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <vtkObjectFactory.h>
+#include <vtkOpenGLPolyDataMapper.h>
+#include <vtkClipPolyData.h>
+#include <vtkImplicitFunction.h>
+#include <vtkImageData.h>
+#include <vtkType.h>
+
+#include <cmath>
+
+class IsoSurfaceStrategy::Mapper final : public vtkOpenGLPolyDataMapper {
+public:
+    static Mapper* New();
+    vtkTypeMacro(Mapper, vtkOpenGLPolyDataMapper);
+
+    void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+    void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
+    {
+        if (m_binding) {
+            (void)m_binding->OnRenderStart(renderer);
+        }
+        this->Superclass::RenderPiece(renderer, actor);
+        if (m_binding) {
+            (void)m_binding->OnRenderStop();
+        }
+    }
+
+private:
+    RenderEffectBinding* m_binding = nullptr;
+};
+
+vtkStandardNewMacro(IsoSurfaceStrategy::Mapper);
+
+class IsoSurfaceStrategy::MaskImplicit final
+    : public vtkImplicitFunction {
+public:
+    static MaskImplicit* New();
+    vtkTypeMacro(MaskImplicit, vtkImplicitFunction);
+
+    bool SetMask(vtkImageData* validityMask)
+    {
+        if (!validityMask
+            || validityMask->GetScalarType()
+                != VTK_UNSIGNED_CHAR
+            || validityMask->GetNumberOfScalarComponents()
+                != 1) {
+            return false;
+        }
+        m_validityMask = validityMask;
+        Modified();
+        return true;
+    }
+
+    double EvaluateFunction(double point[3]) override
+    {
+        if (!m_validityMask) {
+            return -1.0;
+        }
+        double continuousIndex[3] = {};
+        m_validityMask
+            ->TransformPhysicalPointToContinuousIndex(
+                point, continuousIndex);
+        int extent[6] = {};
+        m_validityMask->GetExtent(extent);
+        int index[3] = {};
+        for (int axis = 0; axis < 3; ++axis) {
+            index[axis] = static_cast<int>(
+                std::llround(continuousIndex[axis]));
+            if (index[axis] < extent[axis * 2]
+                || index[axis]
+                    > extent[axis * 2 + 1]) {
+                return -1.0;
+            }
+        }
+        const auto* value =
+            static_cast<const unsigned char*>(
+                m_validityMask->GetScalarPointer(
+                    index[0], index[1], index[2]));
+        return value && *value != 0 ? 1.0 : -1.0;
+    }
+
+    void EvaluateGradient(
+        double[3],
+        double gradient[3]) override
+    {
+        gradient[0] = 0.0;
+        gradient[1] = 0.0;
+        gradient[2] = 0.0;
+    }
+
+private:
+    vtkSmartPointer<vtkImageData> m_validityMask;
+};
+
+vtkStandardNewMacro(IsoSurfaceStrategy::MaskImplicit);
 
 
 static constexpr int kInteractionIsoTargetDim = 256;
@@ -52,10 +146,17 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_qualityIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
     m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    m_mapper = vtkSmartPointer<vtkPolyDataMapper>::New();
-    // polydata RemoveInside shader 直接读取 vertexMC 做 box 判定；
-    // 禁用 VBO Shift/Scale 才能保证 vertexMC 保持原始等值面 model 坐标。
-    m_mapper->SetVBOShiftScaleMethod(vtkPolyDataMapper::DISABLE_SHIFT_SCALE);
+    m_qualityMaskFunc =
+        vtkSmartPointer<MaskImplicit>::New();
+    m_interactionMaskFunc =
+        vtkSmartPointer<MaskImplicit>::New();
+    m_qualityClip =
+        vtkSmartPointer<vtkClipPolyData>::New();
+    m_interactionClip =
+        vtkSmartPointer<vtkClipPolyData>::New();
+    m_mapper = vtkSmartPointer<Mapper>::New();
+    // predicate 直接读取 vertexMC；禁用 VBO Shift/Scale 才能保持 input-model 坐标。
+    m_mapper->SetVBOShiftScaleMethod(vtkOpenGLPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);
     m_actor->GetProperty()->SetInterpolationToPhong();
@@ -69,11 +170,27 @@ IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_qualityIsoFilter->ComputeGradientsOff();
     m_interactionIsoFilter->ComputeNormalsOff();
     m_interactionIsoFilter->ComputeGradientsOff();
+    m_qualityClip->SetInputConnection(
+        m_qualityIsoFilter->GetOutputPort());
+    m_qualityClip->SetClipFunction(
+        m_qualityMaskFunc);
+    m_qualityClip->SetValue(0.0);
+    m_qualityClip->InsideOutOff();
+    m_qualityClip->GenerateClippedOutputOff();
+    m_interactionClip->SetInputConnection(
+        m_interactionIsoFilter->GetOutputPort());
+    m_interactionClip->SetClipFunction(
+        m_interactionMaskFunc);
+    m_interactionClip->SetValue(0.0);
+    m_interactionClip->InsideOutOff();
+    m_interactionClip->GenerateClippedOutputOff();
 
     AttachProp(m_actor);
     AttachProp(m_cubeAxes);
 
 }
+
+IsoSurfaceStrategy::~IsoSurfaceStrategy() = default;
 
 void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (m_lastInput == data) {
@@ -84,6 +201,9 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     if (poly) {
         // 如果上游已经给的是 mesh，则直接走 PolyData 路径，不再重复提等值面。
         m_lastInput = data;
+        m_hasMask = false;
+        m_qualityMask = nullptr;
+        m_interactionMask = nullptr;
         poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
         m_mapper->ScalarVisibilityOff();
@@ -105,6 +225,9 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
         m_lastInput = data;
+        m_hasMask = false;
+        m_qualityMask = nullptr;
+        m_interactionMask = nullptr;
         img->GetCenter(m_dataCenter);
 
         m_qualityResample = ImageProcessor::GetDownsampledImage(img, kQualityIsoTargetDim);
@@ -125,6 +248,63 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_cubeAxes->SetBounds(img->GetBounds());
     }
 
+}
+
+bool IsoSurfaceStrategy::SetActiveInput()
+{
+    if (!m_mapper) {
+        return false;
+    }
+    if (m_hasMask) {
+        auto activeClip = m_isInteracting
+            ? m_interactionClip : m_qualityClip;
+        if (!activeClip) {
+            return false;
+        }
+        m_mapper->SetInputConnection(
+            activeClip->GetOutputPort());
+        return true;
+    }
+    auto activeFilter = m_isInteracting
+        ? m_interactionIsoFilter : m_qualityIsoFilter;
+    if (!activeFilter) {
+        return false;
+    }
+    m_mapper->SetInputConnection(
+        activeFilter->GetOutputPort());
+    return true;
+}
+
+void IsoSurfaceStrategy::SetInputMask(
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    if (!vtkImageData::SafeDownCast(m_lastInput)
+        || !validityMask) {
+        m_hasMask = false;
+        m_qualityMask = nullptr;
+        m_interactionMask = nullptr;
+        (void)SetActiveInput();
+        return;
+    }
+
+    m_qualityMask =
+        ImageProcessor::GetDownsampledMask(
+            validityMask, kQualityIsoTargetDim);
+    m_interactionMask =
+        ImageProcessor::GetDownsampledMask(
+            validityMask, kInteractionIsoTargetDim);
+    if (!m_qualityMask || !m_interactionMask) {
+        m_hasMask = false;
+        (void)SetActiveInput();
+        return;
+    }
+    m_qualityMask->Update();
+    m_interactionMask->Update();
+    m_hasMask = m_qualityMaskFunc->SetMask(
+            m_qualityMask->GetOutput())
+        && m_interactionMaskFunc->SetMask(
+            m_interactionMask->GetOutput());
+    (void)SetActiveInput();
 }
 
 void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -199,7 +379,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
             if (hasInteractionChanged) {
                 // 只有交互态真的切换时才改 mapper 输入，
                 // 避免单纯阈值变化时重复做输入重绑。
-                m_mapper->SetInputConnection(activeIsoFilter->GetOutputPort());
+                (void)SetActiveInput();
             }
         }
     }
@@ -221,4 +401,21 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
 vtkProp3D* IsoSurfaceStrategy::GetMainProp()
 {
     return m_actor;
+}
+
+RenderEffectTarget IsoSurfaceStrategy::GetRenderEffectTarget() const
+{
+    RenderEffectTarget target;
+    target.targetKind = RenderTargetKind::PolyData;
+    target.mapper = m_mapper;
+    target.shaderProperty = m_actor
+        ? m_actor->GetShaderProperty() : nullptr;
+    return target;
+}
+
+void IsoSurfaceStrategy::SetEffectBinding(RenderEffectBinding* binding)
+{
+    if (m_mapper) {
+        m_mapper->SetEffectBinding(binding);
+    }
 }

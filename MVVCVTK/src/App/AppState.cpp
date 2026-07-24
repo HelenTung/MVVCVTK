@@ -291,6 +291,27 @@ bool SharedInteractionState::SetReloadDataReady(
     return true;
 }
 
+bool SharedInteractionState::SetImageDataReady(
+    double rangeMin,
+    double rangeMax,
+    const std::array<double, 3>& spacing)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        m_impl->m_dataRange = { rangeMin, rangeMax };
+        m_impl->m_spacing = spacing;
+        m_impl->m_dataTrustedState = LoadState::Succeeded;
+    }
+    try {
+        m_impl->SendFlags(UpdateFlags::DataReady);
+    }
+    catch (...) {
+        // current 快照已发布；observer 异常不能把成功的 CAS 伪装成失败，
+        // 否则调用方会回滚自己的状态机而 DataManager 已无法回滚。
+    }
+    return true;
+}
+
 bool SharedInteractionState::SetFileLoadFailed()
 {
     // File 失败意味着没有可信的新真源，因此 file 与 dataTrusted 同时进入 Failed。

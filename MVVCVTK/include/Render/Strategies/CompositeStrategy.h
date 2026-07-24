@@ -21,12 +21,23 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
+    void SetInputMask(
+        vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //
+    bool AttachRenderEffect(
+        std::shared_ptr<RenderEffect> effect,
+        RenderBindingUse bindingUse) override;
+    bool DetachRenderEffect(const RenderEffect* effect) override;
+    bool SetRenderInputStamp(RenderInputStamp inputStamp) override;
+    bool SetRenderEffectUse(RenderBindingUse bindingUse) override;
+    RenderEffectState GetRenderEffectState() const override;
+    bool SetRenderEffectCommit(std::uint64_t revision) override;
+    bool ClearRenderEffectStage(std::uint64_t revision) override;
 private:
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }
 

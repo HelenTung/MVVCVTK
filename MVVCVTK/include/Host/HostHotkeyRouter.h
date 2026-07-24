@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Host/HostFeature.h"
 #include "Host/Types/HostAdapterTypes.h"
 
 #include <memory>
@@ -23,6 +24,7 @@ public:
         const HostHotkeyConfig& config,
         HostHotkeyTemplates templates);
     bool ClearHotkeys();
+    HostInputPort& GetInputPort();
 
 private:
     class Impl;

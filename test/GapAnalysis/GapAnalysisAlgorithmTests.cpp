@@ -342,7 +342,7 @@ void StartSnapCase(int& failureCount)
     weakImage = image.GetPointer();
     GapAnalysisService service;
 
-    SetExpect(service.SetInputImage(image), "gap analysis service should accept the synthetic image.", failureCount);
+    SetExpect(service.SetGapInput(image), "gap analysis service should accept the synthetic image.", failureCount);
     SetSolidImage(image);
     image = nullptr;
     SetExpect(weakImage == nullptr,
@@ -400,7 +400,7 @@ void StartSharedCase(int& failureCount)
     vtkWeakPointer<vtkImageData> weakImage;
     weakImage = image.GetPointer();
     GapAnalysisService service;
-    SetExpect(service.SetInputImage(image),
+    SetExpect(service.SetGapInput(image),
         "gap analysis should accept one isolated image snapshot.", failureCount);
     image = nullptr;
     SetExpect(weakImage == nullptr,
@@ -423,7 +423,7 @@ void StartConvertCase(int& failureCount)
     // 非 float 输入必须在同步入口完成 float 转换；之后调用方改写 VTK scalars 不能污染算法输入。
     auto image = BuildShortImage();
     GapAnalysisService service;
-    SetExpect(service.SetInputImage(image),
+    SetExpect(service.SetGapInput(image),
         "gap analysis service should accept a short scalar image.", failureCount);
 
     auto* source = static_cast<short*>(image->GetScalarPointer());

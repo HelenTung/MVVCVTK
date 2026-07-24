@@ -262,7 +262,8 @@ CropInteractionPhase CropPlaneWidget::Impl::GetEventPhase(unsigned long eventId)
 {
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
-        return CropInteractionPhase::Dragging;
+        // 按下选中尚未改变平面；只有后续 Interaction 才算有效拖拽。
+        return CropInteractionPhase::Hover;
     case vtkCommand::InteractionEvent:
         return CropInteractionPhase::Dragging;
     case vtkCommand::EndInteractionEvent:

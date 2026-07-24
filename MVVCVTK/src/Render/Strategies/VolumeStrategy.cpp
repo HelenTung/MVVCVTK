@@ -1,5 +1,6 @@
 #include "VolumeStrategy.h"
-#include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkOpenGLGPUVolumeRayCastMapper.h>
+#include <vtkObjectFactory.h>
 #include <vtkVolumeProperty.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
@@ -7,6 +8,31 @@
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <cmath>
+
+class VolumeStrategy::Mapper final : public vtkOpenGLGPUVolumeRayCastMapper {
+public:
+    static Mapper* New();
+    vtkTypeMacro(Mapper, vtkOpenGLGPUVolumeRayCastMapper);
+
+    void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+
+protected:
+    void GPURender(vtkRenderer* renderer, vtkVolume* volume) override
+    {
+        if (m_binding) {
+            (void)m_binding->OnRenderStart(renderer);
+        }
+        this->Superclass::GPURender(renderer, volume);
+        if (m_binding) {
+            (void)m_binding->OnRenderStop();
+        }
+    }
+
+private:
+    RenderEffectBinding* m_binding = nullptr;
+};
+
+vtkStandardNewMacro(VolumeStrategy::Mapper);
 
 bool VolumeStrategy::GetOpacityChanged(double opacity) const
 {
@@ -54,8 +80,7 @@ void VolumeStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
-    // 固定 GPU mapper：volume RemoveInside 预览需要 shader discard 后端表达。
-    m_mapper = vtkSmartPointer<vtkGPUVolumeRayCastMapper>::New();
+    m_mapper = vtkSmartPointer<Mapper>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
     m_mapper->SetAutoAdjustSampleDistances(true);
@@ -70,6 +95,8 @@ VolumeStrategy::VolumeStrategy() {
     AttachProp(m_cubeAxes);
 }
 
+VolumeStrategy::~VolumeStrategy() = default;
+
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
@@ -83,11 +110,43 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 
     m_qualityResample = ImageProcessor::GetDownsampledImage(img, m_qualityTargetDim);
     m_interactionResample = ImageProcessor::GetDownsampledImage(img, m_interactionTargetDim);
+    m_qualityMask = nullptr;
+    m_interactionMask = nullptr;
+    m_mapper->SetMaskInput(nullptr);
     m_mapper->SetInputConnection(m_qualityResample->GetOutputPort());
     m_isInteracting = false;
 
 	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
     m_cubeAxes->SetBounds(img->GetBounds());
+}
+
+void VolumeStrategy::SetInputMask(
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    m_qualityMask = nullptr;
+    m_interactionMask = nullptr;
+    if (!m_mapper || !validityMask) {
+        if (m_mapper) {
+            m_mapper->SetMaskInput(nullptr);
+        }
+        return;
+    }
+
+    m_qualityMask =
+        ImageProcessor::GetDownsampledMask(
+            validityMask, m_qualityTargetDim);
+    m_interactionMask =
+        ImageProcessor::GetDownsampledMask(
+            validityMask, m_interactionTargetDim);
+    if (!m_qualityMask || !m_interactionMask) {
+        m_mapper->SetMaskInput(nullptr);
+        return;
+    }
+    m_qualityMask->Update();
+    m_interactionMask->Update();
+    m_mapper->SetMaskTypeToBinary();
+    m_mapper->SetMaskInput(
+        m_qualityMask->GetOutput());
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -129,6 +188,12 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
             // TF 改变后需要确保 mapper 仍绑在“当前应该显示”的那一路输入上；
             // 这里不区分是交互切换导致，还是 TF 更新导致，统一按活动输入重绑即可。
             m_mapper->SetInputConnection(activeResample->GetOutputPort());
+            auto activeMask = m_isInteracting
+                ? m_interactionMask : m_qualityMask;
+            m_mapper->SetMaskInput(
+                activeMask
+                ? activeMask->GetOutput()
+                : nullptr);
         }
     }
 
@@ -198,4 +263,21 @@ vtkProp3D* VolumeStrategy::GetMainProp()
 {
     if (!m_volume) return nullptr;
     else return m_volume;
+}
+
+RenderEffectTarget VolumeStrategy::GetRenderEffectTarget() const
+{
+    RenderEffectTarget target;
+    target.targetKind = RenderTargetKind::Volume;
+    target.mapper = m_mapper;
+    target.shaderProperty = m_volume
+        ? m_volume->GetShaderProperty() : nullptr;
+    return target;
+}
+
+void VolumeStrategy::SetEffectBinding(RenderEffectBinding* binding)
+{
+    if (m_mapper) {
+        m_mapper->SetEffectBinding(binding);
+    }
 }

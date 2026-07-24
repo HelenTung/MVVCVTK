@@ -35,7 +35,7 @@ public:
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
 
-    bool SetInputImage(vtkSmartPointer<vtkImageData> image);
+    bool SetGapInput(vtkSmartPointer<vtkImageData> image);
     bool SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
     void SetSurface(const GapSurfaceParams& params);
     void SetAdvanced(const GapAdvancedParams& params);
@@ -265,9 +265,9 @@ GapAnalysisService::GapAnalysisService()
 
 GapAnalysisService::~GapAnalysisService() = default;
 
-bool GapAnalysisService::SetInputImage(vtkSmartPointer<vtkImageData> image)
+bool GapAnalysisService::SetGapInput(vtkSmartPointer<vtkImageData> image)
 {
-    return m_impl->SetInputImage(std::move(image));
+    return m_impl->SetGapInput(std::move(image));
 }
 
 void GapAnalysisService::SetSurface(const GapSurfaceParams& params)
@@ -362,7 +362,7 @@ void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
     m_impl->OnDisplayTick(std::move(inputImage));
 }
 
-bool GapAnalysisService::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image) {
+bool GapAnalysisService::Impl::SetGapInput(vtkSmartPointer<vtkImageData> image) {
     if (!image) {
         return SetInputSnapshot(nullptr);
     }
@@ -828,7 +828,7 @@ void GapAnalysisService::Impl::SetAnalysisState(GapAnalysisState state) {
 
 bool GapAnalysisService::Impl::StartRun(vtkSmartPointer<vtkImageData> inputImage) {
     // 1A. 普通非空输入保持公共隔离语义；1B. 空输入复用宿主预装的受控只读快照。
-    if (inputImage && !SetInputImage(std::move(inputImage))) {
+    if (inputImage && !SetGapInput(std::move(inputImage))) {
         return false;
     }
 

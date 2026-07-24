@@ -31,3 +31,16 @@ vtkSmartPointer<vtkImageResample> ImageProcessor::GetDownsampledImage(vtkImageDa
 
     return resample;
 }
+
+vtkSmartPointer<vtkImageResample>
+ImageProcessor::GetDownsampledMask(
+    vtkImageData* input,
+    int targetDim)
+{
+    auto resample = GetDownsampledImage(
+        input, targetDim);
+    if (resample) {
+        resample->SetInterpolationModeToNearestNeighbor();
+    }
+    return resample;
+}

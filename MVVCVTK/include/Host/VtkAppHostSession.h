@@ -8,6 +8,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <vtkSmartPointer.h>
+
+class HostFeature;
 
 // 一次 VTK 宿主会话的顶层 owner：惰性组装共享数据/状态服务、窗口拓扑、feature 绑定、
 // 命令路由和 standalone 输入适配。外部只通过 HostRequest/Endpoint 交互，不直接依赖 AppService。
@@ -30,18 +33,17 @@ public:
     bool AttachHotkeys(
         const HostHotkeyConfig& config,
         HostHotkeyTemplates templates);
+    bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
+    bool DetachFeature(const HostFeature& feature);
     // 仅用于 standalone VTK 事件循环；Qt host 已有外部事件循环时不调用。
     bool Start();
 
-    // 五组 Send* 只封装 HostCommand 并交给统一 router；Data/Crop/Gap 可携带异步完成回调。
+    // 主体内建 Send* 只封装 HostCommand 并交给统一 router。
     bool SendData(
         HostDataRequest request,
         HostCompleteCallback onComplete = nullptr);
     bool SendView(HostViewRequest request);
     bool SendTool(HostToolRequest request);
-    bool SendCrop(
-        HostCropRequest request,
-        HostCompleteCallback onComplete = nullptr);
     bool SendGap(
         HostGapRequest request,
         HostCompleteCallback onComplete = nullptr);

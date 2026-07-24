@@ -35,7 +35,7 @@ public:
     GapAnalysisService& operator=(GapAnalysisService&&) = delete;
 
     // 外部可变输入先 DeepCopy，调用返回后修改 metadata/scalars 不会污染分析快照。
-    bool SetInputImage(vtkSmartPointer<vtkImageData> image);
+    bool SetGapInput(vtkSmartPointer<vtkImageData> image);
     void SetSurface(const GapSurfaceParams& params);
     void SetAdvanced(const GapAdvancedParams& params);
     void SetVoid(const GapVoidParams& params);

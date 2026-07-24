@@ -7,7 +7,129 @@
 #include <algorithm>
 #include <vtkTransform.h>
 #include <vtkImageResliceMapper.h>
+#include <vtkImageSliceMapper.h>
+#include <vtkImageMask.h>
+#include <vtkObjectFactory.h>
+#include <vtkOpenGLImageSliceMapper.h>
+#include <vtkOpenGLPolyDataMapper.h>
 #include <limits>
+
+namespace {
+class EffectSlicePolyMapper final : public vtkOpenGLPolyDataMapper {
+public:
+    static EffectSlicePolyMapper* New();
+    vtkTypeMacro(EffectSlicePolyMapper, vtkOpenGLPolyDataMapper);
+
+    void SetEffectBinding(
+        RenderEffectBinding* binding,
+        vtkMatrix4x4* localToInput)
+    {
+        m_binding = binding;
+        m_localToInput = localToInput;
+    }
+
+    void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
+    {
+        if (m_binding && m_localToInput) {
+            std::array<double, 16> matrix = {};
+            vtkMatrix4x4::DeepCopy(matrix.data(), m_localToInput);
+            (void)m_binding->SetLocalToInput(matrix);
+            (void)m_binding->OnRenderStart(renderer);
+        }
+        this->Superclass::RenderPiece(renderer, actor);
+        if (m_binding) {
+            (void)m_binding->OnRenderStop();
+        }
+    }
+
+private:
+    RenderEffectBinding* m_binding = nullptr;
+    vtkMatrix4x4* m_localToInput = nullptr;
+};
+
+vtkStandardNewMacro(EffectSlicePolyMapper);
+
+class EffectImageSliceMapper final : public vtkOpenGLImageSliceMapper {
+public:
+    static EffectImageSliceMapper* New();
+    vtkTypeMacro(EffectImageSliceMapper, vtkOpenGLImageSliceMapper);
+
+    bool GetEffectTarget(
+        vtkMatrix4x4* localToInput,
+        RenderEffectTarget& target)
+    {
+        if (!localToInput || !this->PolyDataActor) {
+            return false;
+        }
+        auto* mapper = EffectSlicePolyMapper::SafeDownCast(
+            this->PolyDataActor->GetMapper());
+        if (!mapper) {
+            auto* oldMapper = this->PolyDataActor->GetMapper();
+            if (!oldMapper) {
+                return false;
+            }
+            auto newMapper = vtkSmartPointer<EffectSlicePolyMapper>::New();
+            newMapper->SetInputConnection(oldMapper->GetInputConnection(0, 0));
+            this->PolyDataActor->SetMapper(newMapper);
+            mapper = newMapper;
+        }
+        target.targetKind = RenderTargetKind::Slice;
+        target.mapper = mapper;
+        target.shaderProperty = this->PolyDataActor->GetShaderProperty();
+        vtkMatrix4x4::DeepCopy(target.localToInput.data(), localToInput);
+        return true;
+    }
+
+    bool SetEffectBinding(
+        RenderEffectBinding* binding,
+        vtkMatrix4x4* localToInput)
+    {
+        RenderEffectTarget target;
+        if (!GetEffectTarget(localToInput, target)) {
+            return false;
+        }
+        auto* mapper = EffectSlicePolyMapper::SafeDownCast(target.mapper);
+        if (!mapper) {
+            return false;
+        }
+        mapper->SetEffectBinding(binding, localToInput);
+        return true;
+    }
+};
+
+vtkStandardNewMacro(EffectImageSliceMapper);
+}
+
+class SliceStrategy::Mapper final : public vtkImageResliceMapper {
+public:
+    static Mapper* New();
+    vtkTypeMacro(Mapper, vtkImageResliceMapper);
+
+    bool GetEffectTarget(RenderEffectTarget& target)
+    {
+        auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
+            this->SliceMapper);
+        return sliceMapper
+            && sliceMapper->GetEffectTarget(this->ResliceMatrix, target);
+    }
+
+    bool SetEffectBinding(RenderEffectBinding* binding)
+    {
+        auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
+            this->SliceMapper);
+        return sliceMapper
+            && sliceMapper->SetEffectBinding(binding, this->ResliceMatrix);
+    }
+
+protected:
+    Mapper()
+    {
+        this->SliceMapper->Delete();
+        this->SliceMapper = EffectImageSliceMapper::New();
+    }
+};
+
+vtkStandardNewMacro(SliceStrategy::Mapper);
 
 void SliceStrategy::SetWorldBounds(const double bounds[6],
     const std::array<double, 16>& modelMatrix,
@@ -95,7 +217,7 @@ void SliceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix,
 
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     m_slice = vtkSmartPointer<vtkImageSlice>::New();
-    m_mapper = vtkSmartPointer<vtkImageResliceMapper>::New();
+    m_mapper = vtkSmartPointer<Mapper>::New();
     m_slicePlane = vtkSmartPointer<vtkPlane>::New();
     m_mapper->SetSlicePlane(m_slicePlane);
 
@@ -155,6 +277,8 @@ SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
     AttachProp(m_hLineActor);
 }
 
+SliceStrategy::~SliceStrategy() = default;
+
 void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
@@ -163,6 +287,7 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         return;
     }
     m_lastInput = data;
+    m_maskFilter = nullptr;
 
     m_mapper->SetInputData(img);
 
@@ -171,6 +296,31 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     img->GetCenter(center);
     m_slicePlane->SetOrigin(center);
     m_slice->SetMapper(m_mapper);
+}
+
+void SliceStrategy::SetInputMask(
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    auto* image = vtkImageData::SafeDownCast(
+        m_lastInput);
+    if (!m_mapper || !image || !validityMask) {
+        m_maskFilter = nullptr;
+        if (m_mapper && image) {
+            m_mapper->SetInputData(image);
+        }
+        return;
+    }
+
+    double range[2] = {};
+    image->GetScalarRange(range);
+    m_maskFilter =
+        vtkSmartPointer<vtkImageMask>::New();
+    m_maskFilter->SetInputData(0, image);
+    m_maskFilter->SetMaskInputData(validityMask);
+    m_maskFilter->SetMaskedOutputValue(range[0]);
+    m_maskFilter->NotMaskOff();
+    m_mapper->SetInputConnection(
+        m_maskFilter->GetOutputPort());
 }
 
 void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -325,5 +475,21 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         const int vis = (params.visibilityMask & VisFlags::Crosshair) ? 1 : 0;
         if (m_vLineActor) m_vLineActor->SetVisibility(vis);
         if (m_hLineActor) m_hLineActor->SetVisibility(vis);
+    }
+}
+
+RenderEffectTarget SliceStrategy::GetRenderEffectTarget() const
+{
+    RenderEffectTarget target;
+    if (m_mapper) {
+        (void)m_mapper->GetEffectTarget(target);
+    }
+    return target;
+}
+
+void SliceStrategy::SetEffectBinding(RenderEffectBinding* binding)
+{
+    if (m_mapper) {
+        (void)m_mapper->SetEffectBinding(binding);
     }
 }

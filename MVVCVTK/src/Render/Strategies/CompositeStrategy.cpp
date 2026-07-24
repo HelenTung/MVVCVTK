@@ -73,3 +73,65 @@ void CompositeStrategy::SetVisualState(const RenderParams& params, UpdateFlags f
         m_mainStrategy->SetVisualState(params, flags);
     }
 }
+
+void CompositeStrategy::SetInputMask(
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    if (m_mainStrategy) {
+        m_mainStrategy->SetInputMask(validityMask);
+    }
+    if (m_referencePlanes) {
+        m_referencePlanes->SetInputMask(
+            std::move(validityMask));
+    }
+}
+
+bool CompositeStrategy::AttachRenderEffect(
+    std::shared_ptr<RenderEffect> effect,
+    const RenderBindingUse bindingUse)
+{
+    return m_mainStrategy
+        && m_mainStrategy->AttachRenderEffect(
+            std::move(effect), bindingUse);
+}
+
+bool CompositeStrategy::DetachRenderEffect(const RenderEffect* effect)
+{
+    return m_mainStrategy
+        && m_mainStrategy->DetachRenderEffect(effect);
+}
+
+bool CompositeStrategy::SetRenderInputStamp(
+    const RenderInputStamp inputStamp)
+{
+    return m_mainStrategy
+        && m_mainStrategy->SetRenderInputStamp(inputStamp);
+}
+
+bool CompositeStrategy::SetRenderEffectUse(
+    const RenderBindingUse bindingUse)
+{
+    return m_mainStrategy
+        && m_mainStrategy->SetRenderEffectUse(bindingUse);
+}
+
+RenderEffectState CompositeStrategy::GetRenderEffectState() const
+{
+    return m_mainStrategy
+        ? m_mainStrategy->GetRenderEffectState()
+        : BaseVisualStrategy::GetRenderEffectState();
+}
+
+bool CompositeStrategy::SetRenderEffectCommit(
+    const std::uint64_t revision)
+{
+    return m_mainStrategy
+        && m_mainStrategy->SetRenderEffectCommit(revision);
+}
+
+bool CompositeStrategy::ClearRenderEffectStage(
+    const std::uint64_t revision)
+{
+    return !m_mainStrategy
+        || m_mainStrategy->ClearRenderEffectStage(revision);
+}

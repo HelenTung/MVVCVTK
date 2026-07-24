@@ -146,27 +146,6 @@ void StartDataCases(int& failureCount)
 void StartFeatureCases(int& failureCount)
 {
     Fixture fixture;
-    HostCropTargetRequest cropTarget;
-    cropTarget.referenceView = { "primary", false, HostRenderViewRole::Primary3D };
-    HostCropRequest cropStart{ HostCropAction::Start, cropTarget };
-    SetExpect(fixture.Send(HostCropCommand{ std::move(cropStart), nullptr }),
-        "Crop Start + target payload 应被接收。", failureCount);
-    SetExpect(fixture.bindings->GetCropStartCount() == 1,
-        "Crop Start 应只投递一次。", failureCount);
-    SetExpect(!fixture.Send(HostCropCommand{
-        HostCropRequest{ HostCropAction::Preview, cropTarget }, nullptr }),
-        "Crop Preview + target payload 必须被拒绝。", failureCount);
-    bool isCropDone = false;
-    SetExpect(fixture.Send(HostCropCommand{
-        HostCropRequest{ HostCropAction::Submit, cropTarget },
-        [&isCropDone](bool isSuccess) { isCropDone = isSuccess; } }),
-        "Crop Submit 应接收完成回调。", failureCount);
-    SetExpect(isCropDone && fixture.bindings->GetCropSendCount() == 1,
-        "Crop Submit 回调应精确完成一次。", failureCount);
-    SetExpect(fixture.Send(HostCropCommand{
-        HostCropRequest{ HostCropAction::Exit, std::monostate{} }, nullptr }),
-        "Crop Exit + monostate 应被接收。", failureCount);
-
     HostGapStartRequest gapStart;
     gapStart.targetViews.viewIds = { "primary" };
     bool isGapDone = false;

@@ -14,7 +14,6 @@ struct HostVolumeGeometry {
     std::array<float, 3> origin{};             // 输入体数据的物理原点。
 };
 
-enum class HostCropPreviewMode { KeepInside, RemoveInside };
 enum class HostGapAnalysisIsoMode { DataRangeRatio, AbsoluteValue };
 
 enum class HostDataAction { None, LoadFile, ReloadBuffer, ExportVolume, ExportSlices };
@@ -76,24 +75,6 @@ using HostToolPayload = std::variant<std::monostate, HostToolSetRequest, HostToo
 struct HostToolRequest {
     HostToolAction action = HostToolAction::None;
     HostToolPayload payload;
-};
-
-struct HostCropTargetRequest {
-    HostViewTarget referenceView{ "", false, HostRenderViewRole::Primary3D }; // 交互 widget 所在的权威 3D 视图。
-    HostViewTargets previewViews; // 接收裁切预览的显式目标集合。
-    bool isPreviewViewsUsed = false; // false 时由 host 使用拓扑中允许预览的默认窗口。
-};
-
-struct HostCropPreviewRequest {
-    HostCropTargetRequest target;
-    HostCropPreviewMode previewMode = HostCropPreviewMode::KeepInside;
-};
-
-enum class HostCropAction { None, Start, Box, Plane, Preview, Submit, Exit };
-using HostCropPayload = std::variant<std::monostate, HostCropTargetRequest, HostCropPreviewRequest>;
-struct HostCropRequest {
-    HostCropAction action = HostCropAction::None;
-    HostCropPayload payload;
 };
 
 struct HostGapSurfaceConfig {

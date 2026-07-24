@@ -4,8 +4,11 @@
 #include <vtkSMPTools.h>
 
 #include "Host/VtkAppHostSession.h"
+#include "Host/CropHostFeature.h"
 
 #include <array>
+#include <cstddef>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -102,13 +105,38 @@ public:
         config.modelSwitchKey = 'm';
         config.saveTransformedDataKey = 's';
         config.saveSliceImagesKey = 't';
-        config.cropSwitchKey = 'o';
-        config.planarSwitchKey = 'p';
         config.gapSwitchKey = 'j';
-        config.keepInsidePreviewKey = '1';
-        config.removeInsidePreviewKey = '2';
-        config.submitKey = '3';
         config.exitKeySym = "Escape";
+        return config;
+    }
+
+    static CropHostConfig BuildCrop(
+        const HostViewTargets& targets)
+    {
+        CropHostConfig config;
+        config.defaultTarget.referenceView = {
+            "", true, HostRenderViewRole::Primary3D };
+        config.defaultTarget.targetViews = targets;
+        config.defaultTarget.isTargetViewsUsed = true;
+        config.defaultTarget.isStatusVisible = true;
+        config.inputViews = targets;
+        config.keys.box.keyCode = 'o';
+        config.keys.plane.keyCode = 'p';
+        config.keys.noMode.keyCode = '0';
+        config.keys.keepMode.keyCode = '1';
+        config.keys.removeMode.keyCode = '2';
+        config.keys.exportResult.keyCode = '3';
+        config.keys.exportResult.isCtrlDown = true;
+        config.keys.restoreOriginal.keyCode = '6';
+        config.keys.previous.keyCode = '4';
+        config.keys.next.keyCode = '5';
+        config.keys.exit.keySym = "Escape";
+        for (std::size_t index = 0;
+            index < config.keys.nodes.size(); ++index) {
+            config.keys.nodes[index].keyCode =
+                static_cast<char>('0' + index);
+            config.keys.nodes[index].isAltDown = true;
+        }
         return config;
     }
 
@@ -143,23 +171,31 @@ int main()
     sessionConfig.renderViews = AppLaunchConfig::BuildViews();
     VtkAppHostSession session(std::move(sessionConfig));
     if (!session.BuildSession()) return 1;
+    auto cropFeature = std::make_shared<CropHostFeature>(
+        AppLaunchConfig::BuildCrop(allViews));
+    if (!session.AttachFeature(cropFeature)) return 2;
 
     HostTimerConfig timer;
     timer.isTimerEnabled = true;
     timer.targetView = { "", true, HostRenderViewRole::TopDownSlice };
-    if (!session.AttachTimer(timer)) return 2;
+    if (!session.AttachTimer(timer)) {
+        (void)session.DetachFeature(*cropFeature);
+        return 3;
+    }
 
     HostHotkeyTemplates templates;
-    templates.cropTarget.referenceView = {
-        "", true, HostRenderViewRole::Primary3D };
-    templates.cropTarget.previewViews = allViews;
     templates.gapStart.targetViews = allViews;
     templates.gapStart.algorithm = AppLaunchConfig::BuildGapConfig();
     templates.volumeExportRequest.outputPath =
         "F:\\data\\1000x1000x1000_transformed.raw";
     templates.sliceExportRequest.outputDir =
         "F:\\data\\1000x1000x1000_slice_exports";
-    if (!session.AttachHotkeys(AppLaunchConfig::BuildHotkeys(allViews), templates)) return 3;
+    if (!session.AttachHotkeys(
+            AppLaunchConfig::BuildHotkeys(allViews),
+            templates)) {
+        (void)session.DetachFeature(*cropFeature);
+        return 4;
+    }
 
     HostLoadRequest load;
     load.filePath = "F:\\data\\1000x1000x1000.raw";
@@ -169,7 +205,14 @@ int main()
     HostDataRequest dataRequest;
     dataRequest.action = HostDataAction::LoadFile;
     dataRequest.payload = std::move(load);
-    if (!session.SendData(std::move(dataRequest))) return 4;
+    if (!session.SendData(std::move(dataRequest))) {
+        (void)session.DetachFeature(*cropFeature);
+        return 5;
+    }
 
-    return session.Start() ? 0 : 5;
+    const bool isStarted = session.Start();
+    const bool isDetached =
+        session.DetachFeature(*cropFeature);
+    cropFeature.reset();
+    return isStarted && isDetached ? 0 : 6;
 }

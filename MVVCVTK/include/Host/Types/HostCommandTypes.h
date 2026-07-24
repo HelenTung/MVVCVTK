@@ -15,15 +15,10 @@ struct HostDataCommand {
 struct HostViewCommand { HostViewRequest request; };
 struct HostToolCommand { HostToolRequest request; };
 
-struct HostCropCommand {
-    HostCropRequest request;
-    HostCompleteCallback onComplete;
-};
-
 struct HostGapCommand {
     HostGapRequest request;
     HostCompleteCallback onComplete;
 };
 
 using HostCommand = std::variant<std::monostate, HostDataCommand,
-    HostViewCommand, HostToolCommand, HostCropCommand, HostGapCommand>;
+    HostViewCommand, HostToolCommand, HostGapCommand>;

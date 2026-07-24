@@ -11,4 +11,8 @@ public:
      * @return 新建的 vtkImageResample filter；无需降采样时三轴倍率均为 1.0，不直接返回 vtkImageData
      */
     static vtkSmartPointer<vtkImageResample> GetDownsampledImage(vtkImageData* input, int targetDim = 766);
+    // 二值有效域必须保持 0/255，缩放时固定使用最近邻插值。
+    static vtkSmartPointer<vtkImageResample> GetDownsampledMask(
+        vtkImageData* input,
+        int targetDim = 766);
 };

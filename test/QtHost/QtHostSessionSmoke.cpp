@@ -178,11 +178,7 @@ public:
 
     bool StopHost()
     {
-        if (m_session) {
-            m_session->SendCrop({ HostCropAction::Exit, std::monostate{} });
-            m_session->SendGap({ HostGapAction::Exit, std::monostate{} });
-            m_session.reset();
-        }
+        m_session.reset();
         if (m_widget) {
             m_widget->setRenderWindow(
                 static_cast<vtkGenericOpenGLRenderWindow*>(nullptr));

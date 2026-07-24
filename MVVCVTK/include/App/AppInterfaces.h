@@ -15,6 +15,7 @@
 // =====================================================================
 
 #include "AppTypes.h"
+#include "Render/RenderEffect.h"
 #include "VolumeTypes.h"
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
@@ -36,6 +37,9 @@
 // DataManager 原子提交的完整图像批次；几何、标量范围与 version 来自同一次提交。
 struct ImageState {
     vtkSmartPointer<vtkImageData> image;
+    // 可空的二值有效域；空表示整卷有效。非空时与 image 几何完全一致，
+    // 使用 unsigned char 单分量，0 表示裁掉，255 表示保留。
+    vtkSmartPointer<vtkImageData> validityMask;
     std::array<int, 3> dims = { 0, 0, 0 }; // voxel 数量 [x,y,z]
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 }; // RAS 物理轴间距 [x,y,z]
     std::array<double, 3> origin = { 0.0, 0.0, 0.0 }; // RAS 物理原点 [x,y,z]
@@ -92,6 +96,8 @@ public:
     virtual ~AbstractVisualStrategy() = default;
 
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
+    // 默认策略把空 mask 视为整卷有效；体数据策略按需覆盖并消费二值有效域。
+    virtual void SetInputMask(vtkSmartPointer<vtkImageData> validityMask) {}
     virtual void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
     virtual void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
     virtual void SetCamera(vtkSmartPointer<vtkRenderer> renderer) {}
@@ -101,6 +107,15 @@ public:
     virtual int GetPlaneAxis(vtkActor* actor) { return -1; }
     virtual int GetNavigationAxis() const { return -1; }
     virtual vtkProp3D* GetMainProp() { return nullptr; }
+    virtual bool AttachRenderEffect(
+        std::shared_ptr<RenderEffect> effect,
+        RenderBindingUse bindingUse) = 0;
+    virtual bool DetachRenderEffect(const RenderEffect* effect) = 0;
+    virtual bool SetRenderInputStamp(RenderInputStamp inputStamp) = 0;
+    virtual bool SetRenderEffectUse(RenderBindingUse bindingUse) = 0;
+    virtual RenderEffectState GetRenderEffectState() const = 0;
+    virtual bool SetRenderEffectCommit(std::uint64_t revision) = 0;
+    virtual bool ClearRenderEffectStage(std::uint64_t revision) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -161,6 +176,9 @@ public:
     virtual void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) = 0;
     virtual void GetModelPositionFromWorld(const double worldPos[3], double modelPos[3]) const = 0;
     virtual void GetWorldPositionFromModel(const double modelPos[3], double worldPos[3]) const = 0;
+    virtual RenderInputStamp GetRenderInputStamp() const = 0;
+    virtual bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect) = 0;
+    virtual bool DetachRenderEffect(const RenderEffect* effect) = 0;
 };
 
 // ─────────────────────────────────────────────────────────────────────

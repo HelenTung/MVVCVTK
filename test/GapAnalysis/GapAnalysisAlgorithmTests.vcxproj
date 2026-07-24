@@ -69,7 +69,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
-    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\features\GapAnalysis\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
+    <ProjectIncludePath>$(ProjectDir)..\..\MVVCVTK\include;$(ProjectDir)..\..\MVVCVTK\features\GapAnalysis\include;$(ProjectDir)..\..\MVVCVTK\include\App;$(ProjectDir)..\..\MVVCVTK\include\Data;$(ProjectDir)..\..\MVVCVTK\include\Render\Strategies</ProjectIncludePath>
     <VtkIncludePath>F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4</VtkIncludePath>
     <VtkLibraryPath>F:\lib_cv\VTK\lib\vtk_install\lib</VtkLibraryPath>
     <VtkRuntimePath>F:\lib_cv\VTK\lib\vtk_install\bin</VtkRuntimePath>

@@ -4,6 +4,9 @@
     <Filter Include="Tests">
       <UniqueIdentifier>{0A452D9D-80D4-4544-B172-60ABF911879E}</UniqueIdentifier>
     </Filter>
+    <Filter Include="OrthogonalCrop">
+      <UniqueIdentifier>{66BC3933-0E9B-4EF2-95AF-9447C1F1E437}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="QtHostCropTests.cpp">
@@ -26,6 +29,27 @@
     </ClCompile>
     <ClCompile Include="QtHostViewTests.cpp">
       <Filter>Tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\CropAlgorithm.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Host\CropHostFeature.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBridge.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp">
+      <Filter>OrthogonalCrop</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
+      <Filter>OrthogonalCrop</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

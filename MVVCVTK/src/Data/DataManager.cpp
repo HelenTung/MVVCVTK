@@ -21,6 +21,7 @@
 #include <vtkPNGWriter.h>
 #include <vtkImageImport.h>
 #include <vtkImageAppend.h>
+#include <vtkMatrix3x3.h>
 #include <cstring>
 #include "MemMappedFile.h"
 
@@ -29,6 +30,7 @@ public:
     Impl()
         : m_current(std::make_shared<ImageState>(ImageState{
             vtkSmartPointer<vtkImageData>::New(),
+            {},
             { 0, 0, 0 },
             { 1.0, 1.0, 1.0 },
             { 0.0, 0.0, 0.0 },
@@ -73,9 +75,64 @@ public:
         return voxelCount;
     }
 
+    static bool GetMaskValid(
+        vtkImageData* image,
+        vtkImageData* validityMask)
+    {
+        if (!validityMask) {
+            return true;
+        }
+        if (!image
+            || validityMask->GetScalarType() != VTK_UNSIGNED_CHAR
+            || validityMask->GetNumberOfScalarComponents() != 1
+            || !validityMask->GetScalarPointer()) {
+            return false;
+        }
+
+        int imageExtent[6] = {};
+        int maskExtent[6] = {};
+        double imageOrigin[3] = {};
+        double maskOrigin[3] = {};
+        double imageSpacing[3] = {};
+        double maskSpacing[3] = {};
+        image->GetExtent(imageExtent);
+        validityMask->GetExtent(maskExtent);
+        image->GetOrigin(imageOrigin);
+        validityMask->GetOrigin(maskOrigin);
+        image->GetSpacing(imageSpacing);
+        validityMask->GetSpacing(maskSpacing);
+        for (int index = 0; index < 6; ++index) {
+            if (imageExtent[index] != maskExtent[index]) {
+                return false;
+            }
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (imageOrigin[axis] != maskOrigin[axis]
+                || imageSpacing[axis] != maskSpacing[axis]) {
+                return false;
+            }
+        }
+
+        const auto* imageDirection = image->GetDirectionMatrix();
+        const auto* maskDirection = validityMask->GetDirectionMatrix();
+        if (!imageDirection || !maskDirection) {
+            return imageDirection == maskDirection;
+        }
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                if (imageDirection->GetElement(row, column)
+                    != maskDirection->GetElement(row, column)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     bool SetCurrent(ImageState state)
     {
-        if (!state.image) {
+        if (!state.image
+            || !GetMaskValid(state.image, state.validityMask)) {
             return false;
         }
         auto nextState = std::make_shared<ImageState>(std::move(state));
@@ -262,6 +319,15 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
 
         auto nextState = std::make_shared<ImageState>(*baseState);
         nextState->image = std::move(candidate);
+        if (baseState->validityMask) {
+            auto maskCandidate =
+                vtkSmartPointer<vtkImageData>::New();
+            maskCandidate->ShallowCopy(
+                baseState->validityMask);
+            maskCandidate->SetSpacing(spacing.data());
+            nextState->validityMask =
+                std::move(maskCandidate);
+        }
         nextState->spacing = spacing;
         nextState->version = baseState->version + 1;
         std::shared_ptr<const ImageState> retiredState;
@@ -294,6 +360,11 @@ ImageState BaseDataManager::GetImageState() const
         imageCopy->DeepCopy(publicState.image);
         publicState.image = std::move(imageCopy);
     }
+    if (publicState.validityMask) {
+        auto maskCopy = vtkSmartPointer<vtkImageData>::New();
+        maskCopy->DeepCopy(publicState.validityMask);
+        publicState.validityMask = std::move(maskCopy);
+    }
     return publicState;
 }
 
@@ -304,27 +375,35 @@ ImageSnapshot BaseDataManager::GetImageSnapshot() const
 }
 
 bool BaseDataManager::SetCurrentData(
-    const ImageSnapshot& snapshot,
-    DataVersion expectedVersion)
+    ImageState state,
+    const ImageSnapshot& expectedSnapshot,
+    ImageSnapshot& publishedSnapshot)
 {
-    if (!snapshot || !snapshot->image
-        || expectedVersion == std::numeric_limits<DataVersion>::max()) {
+    publishedSnapshot.reset();
+    if (!expectedSnapshot
+        || !state.image
+        || !Impl::GetMaskValid(
+            state.image, state.validityMask)
+        || expectedSnapshot->version
+            == std::numeric_limits<DataVersion>::max()) {
         return false;
     }
 
-    // snapshot 的 image/metadata 是 immutable owner；恢复只复制轻量状态并共享体素，不做整卷复制。
-    auto nextState = std::make_shared<ImageState>(*snapshot);
+    auto nextState =
+        std::make_shared<ImageState>(std::move(state));
     std::shared_ptr<const ImageState> retiredState;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-        // 只撤销自己刚发布的版本；若已有更新事务抢先，绝不覆盖更晚 current。
-        if (!m_impl->m_current
-            || m_impl->m_current->version != expectedVersion) {
+        // 同时比较 owner 身份与 version，避免 ABA 或并发 load 覆盖更晚 current。
+        if (m_impl->m_current != expectedSnapshot
+            || m_impl->m_current->version
+                != expectedSnapshot->version) {
             return false;
         }
-        nextState->version = expectedVersion + 1;
+        nextState->version = expectedSnapshot->version + 1;
         retiredState = std::move(m_impl->m_current);
         m_impl->m_current = std::move(nextState);
+        publishedSnapshot = m_impl->m_current;
     }
     return true;
 }
@@ -394,6 +473,7 @@ bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image)
     image->GetDimensions(dims);
     return m_impl->SetCurrent({
         std::move(image),
+        {},
         { dims[0], dims[1], dims[2] },
         { imageSpacing[0], imageSpacing[1], imageSpacing[2] },
         { imageOrigin[0], imageOrigin[1], imageOrigin[2] },
@@ -417,7 +497,8 @@ bool BaseDataManager::ExportSlices(
         return false;
     }
 
-    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    auto imageCopy = vtkSmartPointer<vtkImageData>::New();
+    vtkSmartPointer<vtkImageData> maskCopy;
     std::shared_ptr<const ImageState> currentState;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
@@ -425,6 +506,11 @@ bool BaseDataManager::ExportSlices(
     }
     if (!currentState->image) return false;
     imageCopy->ShallowCopy(currentState->image);
+    if (currentState->validityMask) {
+        maskCopy = vtkSmartPointer<vtkImageData>::New();
+        maskCopy->ShallowCopy(
+            currentState->validityMask);
+    }
 
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
@@ -460,6 +546,40 @@ bool BaseDataManager::ExportSlices(
     outputImage->GetDimensions(dims);
     if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
         return false;
+    }
+    int outputExtent[6] = { 0, -1, 0, -1, 0, -1 };
+    outputImage->GetExtent(outputExtent);
+
+    vtkSmartPointer<vtkImageData> outputMask;
+    if (maskCopy) {
+        auto maskReslice =
+            vtkSmartPointer<vtkImageReslice>::New();
+        maskReslice->SetInputData(maskCopy);
+        maskReslice->SetResliceTransform(
+            worldToModelTransform);
+        maskReslice->SetInterpolationModeToNearestNeighbor();
+        maskReslice->SetOutputDimensionality(3);
+        maskReslice->SetBackgroundLevel(0.0);
+        maskReslice->SetOutputOrigin(
+            outputImage->GetOrigin());
+        maskReslice->SetOutputSpacing(
+            outputImage->GetSpacing());
+        maskReslice->SetOutputExtent(
+            outputImage->GetExtent());
+        try {
+            maskReslice->Update();
+        }
+        catch (...) {
+            return false;
+        }
+        outputMask = maskReslice->GetOutput();
+        if (!outputMask
+            || outputMask->GetScalarType()
+                != VTK_UNSIGNED_CHAR
+            || outputMask->GetNumberOfScalarComponents()
+                != 1) {
+            return false;
+        }
     }
 
     std::filesystem::path outputDir = PlatformPath::GetNativePath(dirPath);
@@ -502,24 +622,32 @@ bool BaseDataManager::ExportSlices(
 
                 // A. TopDown 固定 Z，图片横纵轴映射为 X/Y。
                 if (orientation == Orientation::Top_down) {
-                    x = px;
-                    y = py;
-                    z = sliceIndex;
+                    x = outputExtent[0] + px;
+                    y = outputExtent[2] + py;
+                    z = outputExtent[4] + sliceIndex;
                 }
                 // B. FrontBack 固定 Y，图片横纵轴映射为 X/Z。
                 else if (orientation == Orientation::Front_back) {
-                    x = px;
-                    y = sliceIndex;
-                    z = py;
+                    x = outputExtent[0] + px;
+                    y = outputExtent[2] + sliceIndex;
+                    z = outputExtent[4] + py;
                 }
                 // C. LeftRight 固定 X，图片横纵轴映射为 Y/Z。
                 else {
-                    x = sliceIndex;
-                    y = px;
-                    z = py;
+                    x = outputExtent[0] + sliceIndex;
+                    y = outputExtent[2] + px;
+                    z = outputExtent[4] + py;
                 }
-                const double value = outputImage->GetScalarComponentAsDouble(x, y, z, 0);
-                dst[py * width + px] = m_impl->GetWindowGray(value, windowLevel);
+                const bool isValid = !outputMask
+                    || outputMask->GetScalarComponentAsDouble(
+                        x, y, z, 0) != 0.0;
+                const double value =
+                    outputImage->GetScalarComponentAsDouble(
+                        x, y, z, 0);
+                dst[py * width + px] = isValid
+                    ? m_impl->GetWindowGray(
+                        value, windowLevel)
+                    : 0;
             }
         }
 
@@ -710,6 +838,7 @@ bool RawVolumeDataManager::SetDataLoaded(
 
     return SetPendingImage({
         std::move(newImage),
+        {},
         dimensions,
         rasSpacing,
         rasOrigin,
@@ -752,7 +881,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->GetScalarRange(range);
 
     return SetPendingImage({
-        std::move(newImage), dims, rasSpacing, rasOrigin,
+        std::move(newImage), {}, dims, rasSpacing, rasOrigin,
         { range[0], range[1] }, 0 });
 }
 
@@ -787,6 +916,7 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 
     return SetPendingImage({
         std::move(imageCopy),
+        {},
         { dims[0], dims[1], dims[2] },
         imageSpacing,
         imageOrigin,
@@ -829,7 +959,7 @@ bool TiffVolumeDataManager::SetDataLoaded(
     image->GetSpacing(spacing);
     image->GetOrigin(origin);
     return SetPendingImage({
-        std::move(image), dimensions,
+        std::move(image), {}, dimensions,
         { spacing[0], spacing[1], spacing[2] },
         { origin[0], origin[1], origin[2] },
         { range[0], range[1] }, 0 });

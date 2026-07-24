@@ -94,3 +94,11 @@ struct HostViewTargets {
     std::vector<std::string> viewIds;
     std::vector<HostRenderViewRole> viewRoles;
 };
+
+struct HostKeyChord {
+    char keyCode = 0;
+    std::string keySym;
+    bool isCtrlDown = false;
+    bool isAltDown = false;
+    bool isShiftDown = false;
+};

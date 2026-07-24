@@ -4,45 +4,68 @@
 // 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
-// 类型层只保存请求、结果、诊断、失败原因和数据快照；
-// 它不依赖 VizService、Renderer、Interactor 或具体窗口对象，
-// 让前端或 ViewModel 只需要组装 OrthogonalCropRequest 并消费 OrthogonalCropResult。
-//
-// 语义边界：
-// - CropDataModel：客观几何快照；
-// - OrthogonalCropRequest：一次执行请求，携带目标数据源、业务动作、裁切几何类型、几何矩阵和保留语义；
-// - OrthogonalCropResult：一次执行结果；Box 预览返回三维轮廓，Plane 预览只返回半空间几何，图像提交返回主图像和 mask。
+// 类型层只保存公式节点、输入快照、shader transaction 与按需导出结果；
+// 不依赖 VizService、Renderer、Interactor、mapper 或具体窗口对象。
+
+#include "Render/RenderEffect.h"
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+
+struct CropPredicateTable;
+
+struct CropShaderPayload final {
+    std::uint64_t revision = 0;
+    RenderInputStamp sourceStamp;
+    std::size_t nodeCount = 0;
+    std::shared_ptr<const CropPredicateTable> predicateTable;
+};
 
 // active input model AABB，布局固定为 [minX, maxX, minY, maxY, minZ, maxZ]。
 using CropBoundsDouble6Array = std::array<double, 6>;
 // 三维点或向量，布局固定为 [x, y, z]；具体坐标系由字段名或接口注释限定。
 using CropVectorDouble3Array = std::array<double, 3>;
 using CropMatrixDouble16Array = std::array<double, 16>; // 4x4 仿射变换矩阵，按 VTK DeepCopy 约定展开。
+using CropPointFloat3Array = std::array<float, 3>;
 // 闭区间 voxel index bounds，布局固定为 [minI, maxI, minJ, maxJ, minK, maxK]。
 using CropIndexBoundsInt6Array = std::array<int, 6>;
 
 // 裁切几何的 Inside 由几何轴决定：Box 是标准盒 [-1,1]^3 内部，
 // Plane 是 active input model 中法线指向的正半空间。
 enum class CropRemovalMode {
-    // mapper preview 保留 Box 的 6 个朝内半空间交集，或 Plane 的法线正半空间。
+    // 当前 widget 只允许定位，不生成或改写裁切历史。
+    None,
+    // mapper shader 保留 Box 的 6 个朝内半空间交集，或 Plane 的法线正半空间。
     KeepInside,
-    // shader/submit 移除上述 Inside，保留其余区域。
+    // shader/export 移除上述 Inside，保留其余区域。
     RemoveInside
+};
+
+struct CropHistoryState final {
+    std::size_t nodeCount = 0;
+    std::size_t operationCount = 0;
+    CropRemovalMode editMode = CropRemovalMode::None;
+    bool hasEditableOp = false;
+    bool isEditing = false;
+    // allHistory 中已经物化进当前 image+mask 基线的绝对节点数。
+    std::size_t baseNodeCount = 0;
+    // 从原始根数据开始的完整参数历史；包含当前 active history。
+    std::size_t allOperationCount = 0;
 };
 
 // Router 输入侧的数据来源选择。
 enum class OrthogonalCropDataSource {
     // 强制优先走 vtkImageData 路径。
     ImageData,
-    // 体渲染主预览路径；输入仍复用 vtkImageData，只用路由身份区分主预览目标。
+    // 体渲染主路径；输入仍复用 vtkImageData，只用路由身份区分主目标。
     VolumeData,
     // 强制优先走 vtkPolyData 路径。
     PolyData
@@ -58,25 +81,15 @@ enum class CropShape {
     Cylinder
 };
 
-// 一次裁切请求的业务动作；数据处理方法由 dataSource 决定。
-enum class OrthogonalCropOperation {
-    // request 尚未指定可执行动作。
-    None,
-    // 生成 render-only 预览结果；当前只允许 VolumeData / PolyData。
-    Preview,
-    // 提交裁切结果；当前只允许 ImageData，KeepInside / RemoveInside 均可执行。
-    Submit
-};
-
-// widget 生产、bridge 消费的瞬时交互轴；它与 preview 开关、submit reload 状态相互独立。
+// widget 生产、bridge 消费的瞬时交互轴；它与 shader revision、异步导出状态相互独立。
 enum class CropInteractionPhase {
     // 当前没有任何交互发生。
     Idle,
     // 已进入可交互区域，但尚未开始真正拖拽。
     Hover,
-    // 正在拖拽；bridge 记录最新 world 几何，但阻止重型 preview 和 submit。
+    // 正在拖拽；bridge 记录最新 world 几何，但阻止 shader 提交和导出。
     Dragging,
-    // 一次拖拽刚结束；preview 意图开启时由 bridge 消费当前几何，submit 也重新允许。
+    // 一次拖拽刚结束；bridge 消费当前几何，导出也重新允许。
     Released
 };
 
@@ -94,86 +107,73 @@ enum class CropFailure {
     OutOfBounds,
     // 请求三元组没有可执行路径，或与当前算法输入不匹配。
     NoBackend,
-    // image submit 的保留语义无法由当前后端执行。
-    BadSubmitMode,
+    // image export 的保留语义无法由当前后端执行。
+    BadExportMode,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     LowRam,
-    // image submit 需要输出与提交体数据对齐的三维 mask 时，生成 mask 失败。
+    // image export 需要输出与输入体数据对齐的三维 mask 时，生成 mask 失败。
     MaskFailed,
-    // image submit 需要输出主数据 image 时，生成输出 image 失败。
+    // image export 需要输出主数据 image 时，生成输出 image 失败。
     ImageFailed,
-    // Box 预览需要生成 outlinePolyData 时，轮廓 artifact 生成失败。
-    ClipFailed
+    // Box 几何需要生成 outlinePolyData 时，轮廓 artifact 生成失败。
+    ClipFailed,
+    // 公式节点、输入快照或导出参数不满足稳定契约。
+    BadInput,
+    // 有效前缀计算后没有任何点被保留。
+    EmptyResult,
+    // 同一 Bridge 已有一个导出任务执行中。
+    Busy,
+    // 导出请求与捕获输入的版本或数据源不一致。
+    VersionMismatch,
+    // packaged_task 已创建，但 joinable worker 未能启动。
+    WorkerStartFailed,
+    // worker 已启动，但任务以异常终止。
+    WorkerFailed
 };
 
-// 纯几何数据快照：保存裁切盒的稳定后端表达。
-// boxToInputModelMatrix 是标准盒 [-1,1]^3 到 active input model 的唯一几何真源，
-// inputModelBounds 只是从矩阵派生出的外接 AABB，便于校验、吸附和粗粒度执行。
-struct CropDataModel {
-    // Box 几何真源：保存标准盒 [-1,1]^3 到 active input model 的完整 affine；
-    // 旋转、缩放、平移都在这里，后端所有精确几何判断以它为准。
-    CropMatrixDouble16Array boxToInputModelMatrix = {
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0
-    };
-    // Plane 几何真源：active input model 坐标系下的法线、中心点和 widget 尺度快照；
-    // PlanarCropAlgorithm 会在构造结果数据前归一化 request 中的法线。
-    // 裁切方程只依赖 center + normal；halfExtents 布局为 [halfWidth, halfHeight]，不限制无限半空间。
-    CropVectorDouble3Array planeNormalInInputModel = { 0.0, 0.0, 1.0 };
-    CropVectorDouble3Array planeCenterInInputModel = { 0.0, 0.0, 0.0 };
-    std::array<double, 2> planeHalf = { 1.0, 1.0 };
-    // shape 相关校验范围：Box 保存矩阵派生 AABB，Plane 保存 active input 完整 bounds；
-    // 它只服务校验、index 吸附和粗范围判断，不作为精确几何真源。
-    CropBoundsDouble6Array inputModelBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-};
-
-// 一次裁切执行请求：boxToInputModelMatrix 是标准盒 [-1,1]^3 到 active input model 的唯一几何真源。
-struct OrthogonalCropRequest {
-    // Box 几何真源：标准裁切盒 [-1,1]^3 到 active input model 的矩阵。
-    CropMatrixDouble16Array boxToInputModelMatrix = {
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0
-    };
-    // Plane 几何真源：active input model 坐标系下的法线、中心点和 widget 可视半尺寸。
-    // half 布局为 [halfWidth, halfHeight]；法线正半空间为 Inside，half 不参与无限平面方程。
-    CropVectorDouble3Array planeNormalInInputModel = { 0.0, 0.0, 1.0 };
-    CropVectorDouble3Array planeCenterInInputModel = { 0.0, 0.0, 0.0 };
-    std::array<double, 2> planeHalf = { 1.0, 1.0 };
-    // 本次请求的目标数据源。
-    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
-    // 本次请求的业务动作；None 表示还没有可执行目标，避免缺输入时伪装成 preview。
-    OrthogonalCropOperation operation = OrthogonalCropOperation::None;
-    // 本次请求的裁切几何类型；Box / Plane 已接入，Cylinder 仍为预留。
+// history 的唯一节点类型；只保存可序列化数学参数，不保存 VTK 对象或 GPU 资源。
+struct CropOpItem final {
+    std::uint64_t operationIndex = 0;
     CropShape geometryType = CropShape::Box;
-    // inside / outside 的保留语义；影响 image submit 合法性判断和提交 mask 取值。
     CropRemovalMode removalMode = CropRemovalMode::KeepInside;
-    // 可选的可用内存上限；为 0 表示交给后端使用系统 RAM 查询或默认兜底值。
+    CropMatrixDouble16Array boxToInputModelMatrix = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    CropVectorDouble3Array planeCenterInInputModel = { 0.0, 0.0, 0.0 };
+    CropVectorDouble3Array planeNormalInInputModel = { 0.0, 0.0, 1.0 };
+};
+
+// Host 在 owner thread 捕获的不可拆分快照；source/version/pointer/bounds 必须一起换代。
+struct CropInputSnapshot final {
+    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
+    std::uint64_t inputVersion = 0;
+    CropBoundsDouble6Array inputModelBounds = {};
+    vtkSmartPointer<vtkImageData> imageData;
+    vtkSmartPointer<vtkImageData> validityMask;
+    vtkSmartPointer<vtkPolyData> polyData;
+};
+
+struct CropExportRequest final {
+    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
+    std::vector<CropOpItem> operations;
+    std::size_t nodeCount = 0;
+    std::uint64_t inputVersion = 0;
     std::size_t availableRamBytes = 0;
 };
-struct OrthogonalCropResult {
-    // 算法实际解析的四个请求轴；这些身份字段不能用于推断某类 payload 必然非空。
+
+struct CropExportResult final {
     OrthogonalCropDataSource resolvedDataSource = OrthogonalCropDataSource::ImageData;
-    OrthogonalCropOperation resolvedOperation = OrthogonalCropOperation::None;
-    CropShape resolvedGeometryType = CropShape::Box;
-    CropRemovalMode resolvedRemovalMode = CropRemovalMode::KeepInside;
-    // 本次结果 payload 是否可消费；false 也覆盖路由拒绝、输入校验或资源不足等正常失败边界。
     bool isSucceeded = false;
-    // 结构化失败边界；成功结果通常保持 None。
     CropFailure failureReason = CropFailure::None;
-    // 面向日志/UI 的补充诊断文本，不参与路由或成功判定。
+    std::uint64_t failureOperationIndex = 0;
+    std::vector<CropOpItem> operations;
+    std::uint64_t inputVersion = 0;
+    std::size_t nodeCount = 0;
     std::string message;
-    // image submit 的引用计数 payload；保留 voxel 复制源值，移除 voxel 写入输入标量最小值。
-    vtkSmartPointer<vtkImageData> submitImage;
-    // polydata preview 可选的引用计数 artifact；render-only mapper 预览和 image 路径可为空。
-    vtkSmartPointer<vtkPolyData> clipPolyData;
-    // 与 submit image 对齐的单分量 unsigned-char mask：255 表示保留，0 表示移除。
+    vtkSmartPointer<vtkImageData> imageData;
     vtkSmartPointer<vtkImageData> maskImage;
-    // active input model 坐标中的 Box 线框 artifact；Plane 的无限半空间结果不生成该有限轮廓。
-    vtkSmartPointer<vtkPolyData> outlinePolyData;
-    // 结果对应的客观几何快照；Box image submit 可回填输出 bounds，Plane 保留输入 bounds 与平面真源。
-    CropDataModel cropDataModel;
+    vtkSmartPointer<vtkPolyData> polyData;
 };

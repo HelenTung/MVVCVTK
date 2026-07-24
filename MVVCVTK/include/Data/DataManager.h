@@ -16,8 +16,12 @@ protected:
     // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
     bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
     bool SetPendingImage(ImageState image);
-    // 仅当 current 仍是 expectedVersion 时恢复指定 immutable snapshot，并以新版本发布。
-    bool SetCurrentData(const ImageSnapshot& snapshot, DataVersion expectedVersion);
+    // 仅当 current 仍是 expectedSnapshot 时原子发布 image+mask 新批次；
+    // publishedSnapshot 在同一锁内返回实际发布的 owner，禁止提交后再读 current 猜测结果。
+    bool SetCurrentData(
+        ImageState state,
+        const ImageSnapshot& expectedSnapshot,
+        ImageSnapshot& publishedSnapshot);
     ImageSnapshot GetImageSnapshot() const override;
 
 public:

@@ -37,7 +37,6 @@ private:
     bool SendData(HostDataCommand command) const;
     bool SendView(const HostViewCommand& command) const;
     bool SendTool(const HostToolCommand& command) const;
-    bool SendCrop(HostCropCommand command) const;
     bool SendGap(HostGapCommand command) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
@@ -54,8 +53,6 @@ private:
     std::optional<WindowLevelParams> BuildAppWindowLevel(const HostWindowLevelParams& value) const;
     std::optional<std::vector<TFNode>> BuildAppNodes(
         const std::vector<HostTransferNode>& values) const;
-    HostCompleteCallback BuildLoadComplete(HostCompleteCallback callback) const;
-    HostCompleteCallback BuildReloadComplete(HostCompleteCallback callback) const;
 
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
@@ -64,7 +61,7 @@ private:
 
 bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
 {
-    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data/Crop/Gap 是为了把 callback/payload
+    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data/Gap 是为了把 callback/payload
     // 的所有权继续下沉，View/Tool 只读请求则保留 const 引用。未知分支统一拒绝，不做默认动作。
     if (auto* value = std::get_if<HostDataCommand>(&command)) {
         return SendData(std::move(*value));
@@ -74,9 +71,6 @@ bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
     }
     if (const auto* value = std::get_if<HostToolCommand>(&command)) {
         return SendTool(*value);
-    }
-    if (auto* value = std::get_if<HostCropCommand>(&command)) {
-        return SendCrop(std::move(*value));
     }
     if (auto* value = std::get_if<HostGapCommand>(&command)) {
         return SendGap(std::move(*value));
@@ -129,7 +123,7 @@ bool HostCommandRouter::Impl::LoadFile(
     if (!layout) return false;
     return view->service->LoadFileAsync(
         std::move(request.filePath), std::move(*layout),
-        BuildLoadComplete(std::move(callback)));
+        std::move(callback));
 }
 
 bool HostCommandRouter::Impl::ReloadBuffer(
@@ -151,7 +145,7 @@ bool HostCommandRouter::Impl::ReloadBuffer(
         std::move(request.voxels), std::move(*layout));
     if (!buffer) return false;
     return view->service->ReloadFromBufferAsync(
-        std::move(*buffer), BuildReloadComplete(std::move(callback)));
+        std::move(*buffer), std::move(callback));
 }
 
 std::optional<VolumeLayout> HostCommandRouter::Impl::BuildLoadLayout(
@@ -401,60 +395,6 @@ bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
     return true;
 }
 
-bool HostCommandRouter::Impl::SendCrop(HostCropCommand command) const
-{
-    // Crop 命令矩阵：Start/Box/Plane/Preview 是同步状态切换，禁止携带完成回调；
-    // Submit 是唯一允许移动异步回调的分支；Exit 必须使用 monostate，防止忽略意外 payload。
-    const auto bindings = m_featureBindings.lock();
-    if (!bindings) return false;
-    switch (command.request.action) {
-    case HostCropAction::Start:
-        if (!command.onComplete) {
-            if (const auto* value = std::get_if<HostCropTargetRequest>(
-                &command.request.payload)) {
-                return bindings->StartCrop(*value);
-            }
-        }
-        return false;
-    case HostCropAction::Box:
-        if (!command.onComplete) {
-            if (const auto* value = std::get_if<HostCropTargetRequest>(
-                &command.request.payload)) {
-                return bindings->SwitchCropBox(*value);
-            }
-        }
-        return false;
-    case HostCropAction::Plane:
-        if (!command.onComplete) {
-            if (const auto* value = std::get_if<HostCropTargetRequest>(
-                &command.request.payload)) {
-                return bindings->SwitchCropPlane(*value);
-            }
-        }
-        return false;
-    case HostCropAction::Preview:
-        if (!command.onComplete) {
-            if (const auto* value = std::get_if<HostCropPreviewRequest>(
-                &command.request.payload)) {
-                return bindings->SwitchCropView(*value);
-            }
-        }
-        return false;
-    case HostCropAction::Submit:
-        if (const auto* value = std::get_if<HostCropTargetRequest>(
-            &command.request.payload)) {
-            return bindings->SendCrop(*value, std::move(command.onComplete));
-        }
-        return false;
-    case HostCropAction::Exit:
-        return !command.onComplete && std::holds_alternative<std::monostate>(command.request.payload)
-            && bindings->ExitCrop();
-    case HostCropAction::None:
-        return false;
-    }
-    return false;
-}
-
 bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
 {
     // Gap Start 可启动分析并携带完成回调；Overlay/Exit 是同步显示状态命令，
@@ -478,32 +418,6 @@ bool HostCommandRouter::Impl::SendGap(HostGapCommand command) const
         return false;
     }
     return false;
-}
-
-HostCompleteCallback HostCommandRouter::Impl::BuildLoadComplete(
-    HostCompleteCallback callback) const
-{
-    // 文件加载成功后刷新裁切输入，失败则显式清除旧输入；无论 feature 是否仍存活，
-    // 原始宿主 callback 都会收到同一个结果。weak_ptr 保证延迟完成不会延长 bindings 生命周期。
-    const auto bindings = m_featureBindings;
-    return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
-        if (const auto value = bindings.lock()) {
-            if (isSuccess) value->SendCropInput(); else value->ClearCropInput();
-        }
-        if (callback) callback(isSuccess);
-    };
-}
-
-HostCompleteCallback HostCommandRouter::Impl::BuildReloadComplete(
-    HostCompleteCallback callback) const
-{
-    // Reload 失败时不向 CropBridge 回灌新输入；本回调不保证 DataManager current 回退。
-    // 只有成功的新快照才重新广播给裁切 feature，随后再转发业务 callback。
-    const auto bindings = m_featureBindings;
-    return [bindings, callback = std::move(callback)](bool isSuccess) mutable {
-        if (isSuccess) if (const auto value = bindings.lock()) value->SendCropInput();
-        if (callback) callback(isSuccess);
-    };
 }
 
 HostCommandRouter::HostCommandRouter(const HostCoreServices& core,

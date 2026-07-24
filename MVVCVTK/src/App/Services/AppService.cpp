@@ -84,10 +84,15 @@ public:
     bool GetDirty() const;
     void SetDirty();
     bool ResetDirty();
-    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy> newStrategy);
+    void SetCurrentStrategy(
+        std::shared_ptr<AbstractVisualStrategy> newStrategy,
+        bool isRendererAttached = false);
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
     void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
     void ClearOverlayStrategies();
+    RenderInputStamp GetRenderInputStamp() const;
+    bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
+    bool DetachRenderEffect(const RenderEffect* effect);
 
 private:
     struct LoadNotice {
@@ -130,8 +135,8 @@ private:
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> GetStrategy(VizMode mode);
+    std::shared_ptr<AbstractVisualStrategy> CreateStrategy(VizMode mode);
     void SetRendererBg();
-    void SetStrategyClear();
     void ClearStrategyCache();
     void SetCursorCenter();
     void SetSyncNeeded();
@@ -146,6 +151,9 @@ private:
     std::shared_ptr<AbstractDataManager> m_dataManager;
     // 当前主渲染策略的共享 owner；替换前从旧 renderer 脱离，随后由缓存决定是否继续保留。
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
+    // Service 只弱观察可选效果根；Feature 是效果的唯一业务 owner，
+    // Strategy 只强持有由该 root 构造的单目标 binding。
+    std::weak_ptr<RenderEffect> m_renderEffect;
     // RenderContext 注入的 VTK 强引用；策略/overlay 的 Attach、Detach 和相机更新均以它为目标。
     vtkSmartPointer<vtkRenderer> m_renderer;
     // RenderContext 注入的窗口强引用；仅用于渲染节奏与窗口级操作，不拥有当前 Strategy。
@@ -179,8 +187,6 @@ private:
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     // DataReady、Spacing 或模式变化置位；主线程重建前 exchange(false)，失败清场也会清零。
     std::atomic<bool> m_hasDataRefreshNeed{ false };
-    // 结构变化只发布清缓存请求；主线程在 SendUpdates() 中领取后才 Detach Strategy。
-    std::atomic<bool> m_hasCacheClearNeed{ false };
     VizService::TaskStart m_taskStart;
     std::list<ActiveTask> m_activeTasks;
     mutable std::mutex m_activeTaskMutex;
@@ -280,7 +286,8 @@ void VizService::Impl::SetSyncNeeded()
 }
 
 void VizService::Impl::SetCurrentStrategy(
-    std::shared_ptr<AbstractVisualStrategy> newStrategy)
+    std::shared_ptr<AbstractVisualStrategy> newStrategy,
+    const bool isRendererAttached)
 {
     if (m_currentStrategy == newStrategy) {
         if (m_currentStrategy && m_renderer) {
@@ -290,14 +297,38 @@ void VizService::Impl::SetCurrentStrategy(
         return;
     }
 
-    if (m_currentStrategy && m_renderer)
+    auto effect = m_renderEffect.lock();
+    if (m_currentStrategy && m_renderer) {
         m_currentStrategy->DetachRenderer(m_renderer);
+    }
+    if (m_currentStrategy && effect) {
+        (void)m_currentStrategy->DetachRenderEffect(effect.get());
+    }
 
     m_currentStrategy = std::move(newStrategy);
 
-    if (m_currentStrategy && m_renderer) {
-        m_currentStrategy->AttachRenderer(m_renderer);
-        m_currentStrategy->SetCamera(m_renderer);
+    if (m_currentStrategy) {
+        (void)m_currentStrategy->SetRenderInputStamp(
+            GetRenderInputStamp());
+        if (effect) {
+            const auto state = m_currentStrategy->GetRenderEffectState();
+            const bool hasBinding =
+                state.failureReason != RenderEffectFailure::Unsupported;
+            if (hasBinding) {
+                (void)m_currentStrategy->SetRenderEffectUse(
+                    RenderBindingUse::Current);
+            }
+            else {
+                (void)m_currentStrategy->AttachRenderEffect(
+                    effect, RenderBindingUse::Current);
+            }
+        }
+        if (m_renderer && !isRendererAttached) {
+            m_currentStrategy->AttachRenderer(m_renderer);
+        }
+        if (m_renderer) {
+            m_currentStrategy->SetCamera(m_renderer);
+        }
     }
     if (m_renderer)
         m_renderer->ResetCamera();
@@ -358,10 +389,49 @@ void VizService::Impl::ClearOverlayStrategies()
     m_isDirty = true;
 }
 
-void VizService::Impl::SetStrategyClear()
+RenderInputStamp VizService::Impl::GetRenderInputStamp() const
 {
-    // 事件发布线程只登记请求，Strategy 的 Detach 与缓存销毁延后到主线程。
-    m_hasCacheClearNeed = true;
+    RenderInputStamp stamp;
+    if (m_renderSnapshot) {
+        stamp.identity = m_renderSnapshot->image.GetPointer();
+        stamp.version = m_renderSnapshot->version;
+    }
+    return stamp;
+}
+
+bool VizService::Impl::AttachRenderEffect(
+    std::shared_ptr<RenderEffect> effect)
+{
+    if (!effect || !m_renderEffect.expired()) {
+        return false;
+    }
+    m_renderEffect = effect;
+    if (!m_currentStrategy) {
+        return true;
+    }
+    if (!m_currentStrategy->SetRenderInputStamp(GetRenderInputStamp())
+        || !m_currentStrategy->AttachRenderEffect(
+            std::move(effect), RenderBindingUse::Current)) {
+        m_renderEffect.reset();
+        return false;
+    }
+    m_isDirty = true;
+    return true;
+}
+
+bool VizService::Impl::DetachRenderEffect(const RenderEffect* effect)
+{
+    auto currentEffect = m_renderEffect.lock();
+    if (!effect || currentEffect.get() != effect) {
+        return false;
+    }
+    if (m_currentStrategy
+        && !m_currentStrategy->DetachRenderEffect(effect)) {
+        return false;
+    }
+    m_renderEffect.reset();
+    m_isDirty = true;
+    return true;
 }
 
 void VizService::Impl::ClearStrategyCache()
@@ -606,6 +676,21 @@ void VizService::ClearOverlayStrategies()
     m_impl->ClearOverlayStrategies();
 }
 
+RenderInputStamp VizService::GetRenderInputStamp() const
+{
+    return m_impl->GetRenderInputStamp();
+}
+
+bool VizService::AttachRenderEffect(std::shared_ptr<RenderEffect> effect)
+{
+    return m_impl->AttachRenderEffect(std::move(effect));
+}
+
+bool VizService::DetachRenderEffect(const RenderEffect* effect)
+{
+    return m_impl->DetachRenderEffect(effect);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // RenderContext 绑定
 // ─────────────────────────────────────────────────────────────────────
@@ -625,7 +710,11 @@ void VizService::Impl::SetRenderBinding(
     vtkSmartPointer<vtkRenderer> ren)
 {
     auto oldRenderer = m_renderer;
-    if (oldRenderer && oldRenderer != ren) {
+    auto oldWindow = m_renderWindow;
+    const bool isBindingChanged =
+        oldRenderer.GetPointer() != ren.GetPointer()
+        || oldWindow.GetPointer() != win.GetPointer();
+    if (oldRenderer && isBindingChanged) {
         if (m_currentStrategy) {
             m_currentStrategy->DetachRenderer(oldRenderer);
         }
@@ -637,7 +726,7 @@ void VizService::Impl::SetRenderBinding(
     m_renderWindow = std::move(win);
     m_renderer = std::move(ren);
 
-    if (m_renderer) {
+    if (m_renderer && isBindingChanged) {
         if (m_currentStrategy) {
             m_currentStrategy->AttachRenderer(m_renderer);
             m_currentStrategy->SetCamera(m_renderer);
@@ -679,9 +768,12 @@ void VizService::Impl::SetStateObserver()
                 else if ((flags & UpdateFlags::ReloadLoad) != UpdateFlags::None) {
                     loadEventKind = LoadEventKind::Reload;
                 }
-                self->CreateLoadNotice(
-                    loadEventKind,
-                    (flags & UpdateFlags::DataReady) != UpdateFlags::None);
+                if (loadEventKind != LoadEventKind::None) {
+                    self->CreateLoadNotice(
+                        loadEventKind,
+                        (flags & UpdateFlags::DataReady)
+                            != UpdateFlags::None);
+                }
             }
 
             // 广播在状态发布线程同步进入：这里只登记主线程工作，不读取 VTK image 或重建 Strategy。
@@ -693,15 +785,17 @@ void VizService::Impl::SetStateObserver()
 void VizService::Impl::SendStateFlags(UpdateFlags flags)
 {
     // 把跨层状态事件收敛为主线程邮箱；结构事件与普通增量使用不同消费路径。
-    const UpdateFlags loadFlags = UpdateFlags::DataReady | UpdateFlags::LoadFailed;
-    if ((flags & loadFlags) != UpdateFlags::None) {
+    if ((flags & UpdateFlags::LoadFailed) != UpdateFlags::None
+        || ((flags & UpdateFlags::DataReady) != UpdateFlags::None
+            && ((flags & UpdateFlags::FileLoad) != UpdateFlags::None
+                || (flags & UpdateFlags::ReloadLoad) != UpdateFlags::None))) {
         // load 终态的完整语义由主线程从 payload 队列消费，不能再拆回独立布尔门铃。
         return;
     }
 
-    if ((flags & UpdateFlags::Spacing) != UpdateFlags::None) {
+    if ((flags & (UpdateFlags::Spacing | UpdateFlags::DataReady))
+        != UpdateFlags::None) {
         // spacing 改变输入几何，不能只做 Strategy 增量写入，必须走结构重建。
-        SetStrategyClear();
         SetPendingFlags(UpdateFlags::All);
         SetDataRefresh();
         return;
@@ -1142,15 +1236,11 @@ void VizService::Impl::SetCursorCenter()
 void VizService::Impl::SendUpdates()
 {
     // 更新入口按固定阶段收敛 pending/current、完成回调和渲染变更；常规由主线程 Timer 驱动，
-    // Crop reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
+    // 外部 reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
 
-    // 2. 领取缓存清理门铃；Detach 与缓存销毁只发生在主线程。
-    if (m_hasCacheClearNeed.exchange(false))
-        ClearStrategyCache();
-
-    // 3. load 终态按完整 payload 顺序消费；队列锁只覆盖弹出，VTK 与 callback 始终在锁外。
+    // 2. load 终态按完整 payload 顺序消费；队列锁只覆盖弹出，VTK 与 callback 始终在锁外。
     LoadNotice loadNotice;
     while (RemoveLoadNotice(loadNotice)) {
         if (!loadNotice.isStateSet) {
@@ -1179,19 +1269,18 @@ void VizService::Impl::SendUpdates()
         SetCompletion(loadNotice.isSucceeded, std::move(m_ownedCallback));
     }
 
-    // 4. spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
+    // 3. spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
     if (m_hasDataRefreshNeed.exchange(false)) {
         if (!BuildPipeline()) m_hasDataRefreshNeed = true;
     }
     SetStrategyState();
 
-    // 5. owner 已释放 admission 后再执行回调，允许业务方安全重入下一次 load。
+    // 4. owner 已释放 admission 后再执行回调，允许业务方安全重入下一次 load。
     SendCompletions();
 }
 
 bool VizService::Impl::SendReloadUpdate()
 {
-    if (m_hasCacheClearNeed.exchange(false)) ClearStrategyCache();
     SetPendingFlags(UpdateFlags::All);
     return BuildPipeline();
 }
@@ -1369,27 +1458,160 @@ bool VizService::Impl::BuildPipeline()
     // 读取最新模式快照但不清除；后续交互和导出仍需使用同一模式。
     const auto oldSnapshot = m_renderSnapshot;
     const auto oldStrategy = m_currentStrategy;
+    std::shared_ptr<AbstractVisualStrategy> candidateStrategy;
+    auto renderEffect = m_renderEffect.lock();
+    bool isCandidateAttached = false;
     try {
         if (!m_dataManager || !m_sharedState || !m_renderer) {
             return false;
         }
         const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
-        auto strategy = GetStrategy(mode);
-        if (!strategy) return false;
-
         const auto currentSnapshot = m_dataManager->GetImageSnapshot();
         if (!currentSnapshot || !currentSnapshot->image) return false;
         int dims[3] = { 0, 0, 0 };
         currentSnapshot->image->GetDimensions(dims);
         if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) return false;
 
+        // 同模式输入换代时不能原位改写当前可见 Strategy。新建候选，让 image、
+        // mask、stamp 与 effect 在不可见对象上完整收敛后再交换，消除无 mask 中间帧。
+        const bool hasInputChange =
+            oldStrategy
+            && oldSnapshot
+            && currentSnapshot != oldSnapshot;
+        if (hasInputChange && renderEffect && oldStrategy) {
+            const auto effectState =
+                oldStrategy->GetRenderEffectState();
+            if (effectState.status
+                    == RenderEffectStatus::Staged
+                || effectState.status
+                    == RenderEffectStatus::Ready) {
+                // binding 换代不能穿过未完成的 effect 事务；否则 Feature root
+                // 会把旧 staged target 丢失判定为 ContextLost。
+                std::cout
+                    << "[Render][InputSwap] deferred"
+                    << " oldVersion=" << oldSnapshot->version
+                    << " nextVersion="
+                    << currentSnapshot->version
+                    << " status="
+                    << static_cast<int>(effectState.status)
+                    << " revision="
+                    << effectState.stagedRevision
+                    << '\n';
+                return false;
+            }
+        }
+        candidateStrategy = hasInputChange
+            ? CreateStrategy(mode)
+            : GetStrategy(mode);
+        if (!candidateStrategy) return false;
+        if (hasInputChange) {
+            std::cout
+                << "[Render][InputSwap] candidate"
+                << " oldVersion=" << oldSnapshot->version
+                << " nextVersion=" << currentSnapshot->version
+                << " oldStrategy="
+                << static_cast<const void*>(oldStrategy.get())
+                << " nextStrategy="
+                << static_cast<const void*>(candidateStrategy.get())
+                << '\n';
+        }
+
         // 候选 strategy 先完成输入校验，成功后才替换当前渲染真源。
-        strategy->SetInputData(currentSnapshot->image);
-        SetCurrentStrategy(strategy);
+        candidateStrategy->SetInputData(currentSnapshot->image);
+        candidateStrategy->SetInputMask(
+            currentSnapshot->validityMask);
+        const RenderInputStamp inputStamp = {
+            currentSnapshot->image.GetPointer(),
+            currentSnapshot->version
+        };
+        if (!candidateStrategy->SetRenderInputStamp(inputStamp)) {
+            return false;
+        }
+        const bool isStrategyChanged = candidateStrategy != oldStrategy;
+        if (isStrategyChanged && renderEffect) {
+            if (!m_renderWindow
+                || !candidateStrategy->AttachRenderEffect(
+                    renderEffect, RenderBindingUse::Candidate)) {
+                return false;
+            }
+
+            candidateStrategy->AttachRenderer(m_renderer);
+            isCandidateAttached = true;
+            candidateStrategy->SetCamera(m_renderer);
+            candidateStrategy->SetVisualState(
+                GetRenderParams(UpdateFlags::All),
+                UpdateFlags::All);
+
+            // 2. 旧 strategy 保持可见；关闭 swap 后在同一 context 的背缓冲预热候选，
+            //    Render 只用于 texture upload/shader realization，不向窗口发布未裁切帧。
+            const vtkTypeBool isSwapEnabled = m_renderWindow->GetSwapBuffers();
+            m_renderWindow->SwapBuffersOff();
+            try {
+                for (int renderCount = 0; renderCount < 2; ++renderCount) {
+                    m_renderWindow->Render();
+                    if (candidateStrategy->GetRenderEffectState().status
+                        != RenderEffectStatus::Staged) {
+                        break;
+                    }
+                }
+            }
+            catch (...) {
+                m_renderWindow->SetSwapBuffers(isSwapEnabled);
+                throw;
+            }
+            m_renderWindow->SetSwapBuffers(isSwapEnabled);
+
+            // 3. Candidate 只接收 effect root 重放的 committed revision。
+            //    Ready 表示 GPU 预热成功，此时提交同一个 revision 后才可切 Current。
+            const auto effectState =
+                candidateStrategy->GetRenderEffectState();
+            const bool isReadyCommitted =
+                effectState.status == RenderEffectStatus::Ready
+                && effectState.stagedRevision != 0
+                && candidateStrategy->SetRenderEffectCommit(
+                    effectState.stagedRevision);
+            const bool hasNoReplay =
+                effectState.status == RenderEffectStatus::Idle;
+            const bool isAlreadyCommitted =
+                effectState.status == RenderEffectStatus::Committed;
+            if ((!isReadyCommitted && !hasNoReplay && !isAlreadyCommitted)
+                || !candidateStrategy->SetRenderEffectUse(
+                    RenderBindingUse::Current)) {
+                (void)candidateStrategy->ClearRenderEffectStage(
+                    effectState.stagedRevision);
+                candidateStrategy->DetachRenderer(m_renderer);
+                (void)candidateStrategy->DetachRenderEffect(
+                    renderEffect.get());
+                isCandidateAttached = false;
+                return false;
+            }
+        }
+
+        // 4. Commit 与替换之间没有 Render；下一帧只能看见旧 active 或候选已提交的 active。
         m_renderSnapshot = currentSnapshot;
+        SetCurrentStrategy(candidateStrategy, isCandidateAttached);
+        isCandidateAttached = false;
         SetCursorCenter();
         SetRendererBg();
         SetSyncNeeded();
+        if (hasInputChange) {
+            // 输入换代后只保留新 current mode。其它 mode 的隐藏 Strategy 仍强持有
+            // 旧 image/mask，若继续缓存会让历次物化对象无法释放。
+            std::map<VizMode,
+                std::shared_ptr<AbstractVisualStrategy>>
+                nextCache;
+            nextCache.emplace(mode, candidateStrategy);
+            const std::size_t retiredCount =
+                m_strategyCache.size();
+            m_strategyCache.swap(nextCache);
+            std::cout
+                << "[Render][InputSwap] complete"
+                << " version=" << currentSnapshot->version
+                << " currentStrategy="
+                << static_cast<const void*>(candidateStrategy.get())
+                << " retiredCache=" << retiredCount
+                << '\n';
+        }
         return true;
     }
     catch (const std::exception& error) {
@@ -1397,6 +1619,14 @@ bool VizService::Impl::BuildPipeline()
     }
     catch (...) {
         std::cerr << "[BuildPipeline] Failed with an unknown exception.\n";
+    }
+
+    if (isCandidateAttached && candidateStrategy && m_renderer) {
+        candidateStrategy->DetachRenderer(m_renderer);
+        if (renderEffect) {
+            (void)candidateStrategy->DetachRenderEffect(
+                renderEffect.get());
+        }
     }
 
     // 回滚只恢复上一个已提交的 snapshot/strategy，不反写 DataManager current。
@@ -1544,6 +1774,16 @@ std::shared_ptr<AbstractVisualStrategy> VizService::Impl::GetStrategy(VizMode mo
     auto it = m_strategyCache.find(mode);
     if (it != m_strategyCache.end()) return it->second;
 
+    auto strategy = CreateStrategy(mode);
+    if (strategy) {
+        m_strategyCache[mode] = strategy;
+    }
+    return strategy;
+}
+
+std::shared_ptr<AbstractVisualStrategy>
+VizService::Impl::CreateStrategy(const VizMode mode)
+{
     std::shared_ptr<AbstractVisualStrategy> strategy;
     switch (mode) {
     case VizMode::Volume:
@@ -1570,7 +1810,5 @@ std::shared_ptr<AbstractVisualStrategy> VizService::Impl::GetStrategy(VizMode mo
     default:
         return nullptr;
     }
-
-    m_strategyCache[mode] = strategy;
     return strategy;
 }

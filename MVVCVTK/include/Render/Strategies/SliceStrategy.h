@@ -3,7 +3,6 @@
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
-#include <vtkImageResliceMapper.h>
 #include <vtkLineSource.h>
 #include <vtkPlane.h>
 #include <vtkPlaneSource.h>
@@ -14,14 +13,19 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkRenderer.h>
 
+class vtkImageMask;
+
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
 class SliceStrategy : public BaseVisualStrategy {
 public:
     SliceStrategy(Orientation orient);
+    ~SliceStrategy() override;
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
+    void SetInputMask(
+        vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
@@ -29,6 +33,9 @@ public:
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
 private:
+    class Mapper;
+    RenderEffectTarget GetRenderEffectTarget() const override;
+    void SetEffectBinding(RenderEffectBinding* binding) override;
     // focusWorld 是世界游标；worldBounds 是模型变换后的世界 AABB。
     // safeOffset 沿当前切片法线偏移两条线，避免十字线与切片共面闪烁。
     void SetCrosshair(const double focusWorld[3],
@@ -45,7 +52,9 @@ private:
     // 切片主 prop 的强引用 owner；同时登记到 m_managedProps，由 renderer 挂载但不转移策略所有权。
     vtkSmartPointer<vtkImageSlice> m_slice;
     // 持有输入 image 和 slice plane 管线连接，按当前平面从体数据抽取二维图像。
-    vtkSmartPointer<vtkImageResliceMapper> m_mapper;
+    vtkSmartPointer<Mapper> m_mapper;
+    // Slice mapper 无独立 mask 端口；此过滤器按请求 extent 把无效像素写为背景标量。
+    vtkSmartPointer<vtkImageMask> m_maskFilter;
     // 持久切片平面；SetVisualState 以 world cursor 更新原点，以 orientation 对应主轴更新法线。
     vtkSmartPointer<vtkPlane> m_slicePlane;
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。

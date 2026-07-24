@@ -27,7 +27,6 @@ public:
     const HostRenderViewRuntime* GetStandaloneStartView() const;
     std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
         const HostViewTargets& targets) const;
-    std::vector<const HostRenderViewRuntime*> GetCropPreviewViews() const;
     std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
@@ -219,7 +218,7 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetViewBySelector(
 const HostRenderViewRuntime* HostRenderViewSet::Impl::GetPrimaryView() const
 {
     // 初始体加载和体数据导出先选 Primary3D，再退到任意 3D 视图，最后退到首个视图。
-    // 裁切参考视图不走此回退，必须由 HostCropViewRequest 显式指定 id 或 role。
+    // Feature 单目标选择不走此回退，必须显式指定 id 或 role。
     if (const auto* view = GetFirstViewByRole(HostRenderViewRole::Primary3D)) {
         return view;
     }
@@ -263,19 +262,6 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetViewsByTar
         }
     }
 
-    return selectedViews;
-}
-
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::Impl::GetCropPreviewViews() const
-{
-    // isCropPreviewIncluded 是 host 对“配置默认 preview 集合”的声明；只有请求明确允许 fallback 时才会走到这里。
-    std::vector<const HostRenderViewRuntime*> selectedViews;
-    selectedViews.reserve(m_views.size());
-    for (const auto& view : m_views) {
-        if (view.config.isCropPreviewIncluded) {
-            selectedViews.push_back(&view);
-        }
-    }
     return selectedViews;
 }
 
@@ -434,11 +420,6 @@ std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetViewsByTargets(
     const HostViewTargets& targets) const
 {
     return m_impl->GetViewsByTargets(targets);
-}
-
-std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetCropPreviewViews() const
-{
-    return m_impl->GetCropPreviewViews();
 }
 
 std::vector<const HostRenderViewRuntime*> HostRenderViewSet::GetGapOverlayViews() const

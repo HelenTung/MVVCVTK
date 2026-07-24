@@ -1,138 +1,263 @@
 #include "QtHostMethodCases.h"
 
-#include "AppState.h"
-#include "AppService.h"
-#include "DataManager.h"
-#include "Host/HostCoreServices.h"
-#include "Host/HostFeatureBindings.h"
-#include "Host/HostRenderViewSet.h"
-#include "Interaction/CropBridge.h"
-#include "Services/GapAnalysisService.h"
+#include "Host/CropHostFeature.h"
 #include "Host/VtkAppHostSession.h"
 
-#include <vtkImageData.h>
+#include <vtkCommand.h>
+#include <vtkPolyData.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 
+#include <chrono>
+#include <cstddef>
 #include <memory>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
-
-vtkSmartPointer<vtkImageData> GetCropImage()
+HostSessionConfig GetCropSessionConfig()
 {
-    auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetDimensions(3, 4, 2);
-    image->SetOrigin(0.0, 0.0, 0.0);
-    image->SetSpacing(1.0, 1.0, 1.0);
-    image->AllocateScalars(VTK_FLOAT, 1);
-    auto* scalars = static_cast<float*>(image->GetScalarPointer());
-    for (vtkIdType id = 0; id < image->GetNumberOfPoints(); ++id) {
-        scalars[id] = static_cast<float>(id + 1);
+    HostRenderViewConfig view;
+    view.id = "crop-primary";
+    view.role = HostRenderViewRole::Primary3D;
+    view.window.viewInit.viewMode =
+        HostRenderMode::CompositeIsoSurface;
+    view.window.viewInit.hasIso = true;
+    view.window.viewInit.isoThreshold = 0.5;
+    HostSessionConfig config;
+    config.renderViews.push_back(std::move(view));
+    return config;
+}
+
+CropHostConfig GetCropConfig()
+{
+    CropHostConfig config;
+    config.defaultTarget.referenceView = {
+        "crop-primary", false,
+        HostRenderViewRole::Primary3D };
+    config.defaultTarget.targetViews.viewIds = {
+        "crop-primary" };
+    config.defaultTarget.isTargetViewsUsed = true;
+    config.defaultTarget.isStatusVisible = true;
+    config.inputViews.viewIds = { "crop-primary" };
+    config.keys.restoreOriginal.keyCode = '6';
+    return config;
+}
+
+CropHostTarget GetCropTarget()
+{
+    return GetCropConfig().defaultTarget;
+}
+
+bool SendReload(
+    VtkAppHostSession& session,
+    bool& isComplete,
+    bool& isSucceeded)
+{
+    HostReloadRequest reload;
+    reload.voxels.resize(3 * 4 * 2);
+    for (std::size_t index = 0;
+        index < reload.voxels.size(); ++index) {
+        reload.voxels[index] =
+            static_cast<float>(index % 3) * 0.5f;
     }
-    image->Modified();
-    return image;
+    reload.geometry.dimensions = { 3, 4, 2 };
+    reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
+    reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+    HostDataRequest request;
+    request.action = HostDataAction::ReloadBuffer;
+    request.payload = std::move(reload);
+    return session.SendData(
+        std::move(request),
+        [&isComplete, &isSucceeded](const bool value) {
+            isSucceeded = value;
+            isComplete = true;
+        });
+}
+
+void SendTicks(
+    const HostRenderViewEndpoint& endpoint,
+    const int tickCount)
+{
+    for (int tick = 0; tick < tickCount; ++tick) {
+        endpoint.interactor->InvokeEvent(vtkCommand::TimerEvent);
+        endpoint.renderWindow->Render();
+    }
 }
 
 }
 
 int GetCropFailCount()
 {
-    VtkAppHostSession session(HostSessionConfig{});
     int failureCount = 0;
-    const HostCropTargetRequest target;
-    failureCount += GetCaseResult(
-        !session.SendCrop({ HostCropAction::Start, target }),
-        "Crop start missing reference rejection") ? 0 : 1;
-    failureCount += GetCaseResult(
-        !session.SendCrop({ HostCropAction::Preview, target }),
-        "Crop preview payload mismatch rejection") ? 0 : 1;
-    failureCount += GetCaseResult(
-        !session.SendCrop({ HostCropAction::Exit, std::monostate{} }),
-        "Crop inactive exit rejection") ? 0 : 1;
-
-    for (const std::size_t failedViewIndex : { std::size_t{0}, std::size_t{1} }) {
-        HostCoreServices core;
-        core.sharedDataMgr = std::make_shared<RawVolumeDataManager>();
-        core.sharedStateBroadcaster = std::make_shared<SharedStateBroadcaster>();
-        core.sharedState = std::make_shared<SharedInteractionState>(
-            core.sharedStateBroadcaster);
-        core.gapAnalysis = std::make_shared<GapAnalysisService>();
-        core.orthogonalCropBridge = std::make_shared<CropBridge>();
-
-        std::vector<HostRenderViewConfig> configs(2);
-        configs[0].id = "crop-primary";
-        configs[0].role = HostRenderViewRole::Primary3D;
-        configs[1].id = "crop-secondary";
-        configs[1].role = HostRenderViewRole::Primary3D;
-
-        HostRenderViewSet views;
-        if (!GetCaseResult(
-            views.Build(core, configs),
-            "Crop transaction fixture builds real render views")) {
-            ++failureCount;
-            continue;
-        }
-        HostFeatureBindings bindings;
-        bindings.AttachFeatures(core, views);
-        views.SetInteractorsReady();
-
-        auto oldImage = GetCropImage();
-        double oldRange[2] = { 0.0, 0.0 };
-        oldImage->GetScalarRange(oldRange);
-        bool hasPending = false;
-        const bool isCurrentReady = core.sharedState->StartLoad(LoadEventKind::File)
-            && core.sharedDataMgr->SetImageSnapshot(oldImage)
-            && core.sharedDataMgr->SetCurrentFromPending(hasPending)
-            && hasPending
-            && core.sharedState->SetFileDataReady(
-                oldRange[0], oldRange[1], { 1.0, 1.0, 1.0 })
-            && core.sharedState->ResetLoad(LoadEventKind::File);
-        if (!GetCaseResult(
-            isCurrentReady,
-            "Crop transaction fixture establishes trusted old current")) {
-            ++failureCount;
-            continue;
-        }
-
-        HostCropTargetRequest request;
-        request.referenceView.viewId = "crop-primary";
-        const auto before = core.sharedDataMgr->GetImageState();
-        const DataVersion beforeVersion = before.version;
-        bool hasCallback = false;
-
-        if (!GetCaseResult(
-            bindings.SwitchCropBox(request),
-            "Crop transaction fixture enters box editing before submit")) {
-            ++failureCount;
-            continue;
-        }
-        views.GetViews()[failedViewIndex].service->SetRenderContext(nullptr, nullptr);
-        const bool isAccepted = bindings.SendCrop(
-            request,
-            [&hasCallback](bool) { hasCallback = true; });
-
-        const auto after = core.sharedDataMgr->GetImageState();
-        failureCount += GetCaseResult(
-            !isAccepted,
-            "Pipeline failure rejects crop submit") ? 0 : 1;
-        failureCount += GetCaseResult(
-            !hasCallback,
-            "Rejected submit does not publish success callback") ? 0 : 1;
-        failureCount += GetCaseResult(
-            bindings.GetCropActive(),
-            "Failed crop submit remains editable") ? 0 : 1;
-        failureCount += GetCaseResult(
-            after.dims == before.dims
-                && after.spacing == before.spacing
-                && after.origin == before.origin
-                && after.scalarRange == before.scalarRange,
-            "Pipeline failure restores complete previous current batch") ? 0 : 1;
-        failureCount += GetCaseResult(
-            after.version == beforeVersion + 2,
-            "Promote and compensate preserve monotonic DataVersion") ? 0 : 1;
-        failureCount += GetCaseResult(
-            core.sharedState->GetReloadLoadState() == LoadState::Failed,
-            "Pipeline compensation publishes ReloadFailed after restore") ? 0 : 1;
+    VtkAppHostSession session(GetCropSessionConfig());
+    auto feature = std::make_shared<CropHostFeature>(
+        GetCropConfig());
+    const bool isBuilt = session.BuildSession();
+    const bool isAttached =
+        session.AttachFeature(feature);
+    const bool isInputAttached =
+        session.AttachHotkeys({}, {});
+    const auto* endpoint = session.GetPrimaryEndpoint();
+    if (!isBuilt || !isAttached || !isInputAttached
+        || !endpoint
+        || !endpoint->interactor
+        || !endpoint->renderWindow
+        || !endpoint->renderer) {
+        GetCaseResult(false,
+            "Crop fixture builds the public Session/Feature chain");
+        return 1;
     }
+    endpoint->renderWindow->SetOffScreenRendering(1);
+    endpoint->renderWindow->SetSize(200, 200);
+
+    HostTimerConfig timer;
+    timer.isTimerEnabled = true;
+    timer.targetView = {
+        "crop-primary", false,
+        HostRenderViewRole::Primary3D };
+    const bool isTimerAttached = session.AttachTimer(timer);
+    bool isReloadComplete = false;
+    bool isReloadSucceeded = false;
+    const bool isReloadSent = SendReload(
+        session, isReloadComplete, isReloadSucceeded);
+    for (int poll = 0;
+        isReloadSent && !isReloadComplete && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    failureCount += GetCaseResult(
+        isTimerAttached
+            && isReloadSent
+            && isReloadComplete
+            && isReloadSucceeded,
+        "Crop fixture publishes an image through Session data API") ? 0 : 1;
+
+    endpoint->interactor->SetKeyEventInformation(
+        0, 0, '6', 0, "6");
+    const bool isResetKeyHandled =
+        endpoint->interactor->InvokeEvent(
+            vtkCommand::KeyPressEvent) != 0;
+    const bool isResetReleaseHandled =
+        endpoint->interactor->InvokeEvent(
+            vtkCommand::KeyReleaseEvent) != 0;
+    failureCount += GetCaseResult(
+        isResetKeyHandled
+            && isResetReleaseHandled,
+        "6 routes RestoreOriginal without a compatibility shortcut") ? 0 : 1;
+
+    const auto target = GetCropTarget();
+    const bool isStrict = !feature->SendRequest({
+            CropHostAction::None, std::monostate{} })
+        && !feature->SendRequest({
+            CropHostAction::Start,
+            CropHostNodeRequest{ 0 } })
+        && !feature->SendRequest({
+            CropHostAction::Previous,
+            std::monostate{} },
+            [](CropExportResult) {})
+        && !feature->SendRequest({
+            CropHostAction::Export, target });
+    failureCount += GetCaseResult(
+        isStrict,
+        "Crop request matrix rejects None, payload mismatch and illegal callbacks") ? 0 : 1;
+
+    const bool isStarted = feature->SendRequest({
+        CropHostAction::Start, target });
+    const bool isModeSet = feature->SendRequest({
+        CropHostAction::Mode,
+        CropHostModeRequest{
+            target, CropRemovalMode::RemoveInside } });
+    const bool isBoxSet = feature->SendRequest({
+        CropHostAction::Box, target });
+    const double imageBounds[6] = {
+        0.0, 2.0, 0.0, 3.0, 0.0, 1.0 };
+    endpoint->renderer->ResetCamera(imageBounds);
+    endpoint->renderWindow->Render();
+    failureCount += GetCaseResult(
+        isStarted && isModeSet && isBoxSet,
+        "Start, Mode and Box flow through CropHostFeature::SendRequest") ? 0 : 1;
+
+    const bool isPreviousRejected = !feature->SendRequest({
+        CropHostAction::Previous, std::monostate{} });
+    const bool isNextRejected = !feature->SendRequest({
+        CropHostAction::Next, std::monostate{} });
+    const bool isNode = feature->SendRequest({
+        CropHostAction::Node,
+        CropHostNodeRequest{ 0 } });
+    const bool isPlane = feature->SendRequest({
+        CropHostAction::Plane, target });
+    failureCount += GetCaseResult(
+        isPreviousRejected
+            && isNextRejected
+            && isNode
+            && isPlane,
+        "History actions preserve strict state while Node and Plane are accepted") ? 0 : 1;
+
+    bool hasExportFailure = false;
+    const bool isExported = feature->SendRequest({
+            CropHostAction::Export, target },
+        [&hasExportFailure](CropExportResult result) {
+            hasExportFailure =
+                result.failureReason == CropFailure::BadInput;
+        });
+    const bool wasExportDeferred = !hasExportFailure;
+    SendTicks(*endpoint, 1);
+    failureCount += GetCaseResult(
+        !isExported
+            && wasExportDeferred
+            && hasExportFailure,
+        "Export reports an empty committed prefix through the owner-thread queue") ? 0 : 1;
+
+    const bool isExited = feature->SendRequest({
+        CropHostAction::Exit, std::monostate{} });
+    auto firstPolyData =
+        vtkSmartPointer<vtkPolyData>::New();
+    auto nextPolyData =
+        vtkSmartPointer<vtkPolyData>::New();
+    const bool hasPolyDataContract = feature->SendRequest({
+            CropHostAction::SetPolyData,
+            CropHostPolyDataRequest{
+                firstPolyData, 1 } })
+        && !feature->SendRequest({
+            CropHostAction::SetPolyData,
+            CropHostPolyDataRequest{
+                firstPolyData, 2 } })
+        && !feature->SendRequest({
+            CropHostAction::SetPolyData,
+            CropHostPolyDataRequest{
+                nextPolyData, 1 } })
+        && feature->SendRequest({
+            CropHostAction::SetPolyData,
+            CropHostPolyDataRequest{
+                nextPolyData, 2 } })
+        && feature->SendRequest({
+            CropHostAction::ClearPolyData,
+            std::monostate{} });
+    failureCount += GetCaseResult(
+        isExited && hasPolyDataContract,
+        "Exit, SetPolyData and ClearPolyData remain atomic requests") ? 0 : 1;
+
+    bool hasDetachedCallback = false;
+    const bool isPendingAccepted = feature->SendRequest({
+            CropHostAction::Export, target },
+        [&hasDetachedCallback](CropExportResult) {
+            hasDetachedCallback = true;
+        });
+    const auto useCount = feature.use_count();
+    const bool isDetached =
+        session.DetachFeature(*feature);
+    SendTicks(*endpoint, 1);
+    failureCount += GetCaseResult(
+        !isPendingAccepted
+            && isDetached
+            && feature.use_count() == useCount
+            && !hasDetachedCallback,
+        "Crop detach leaves the upper owner alive and suppresses queued callbacks") ? 0 : 1;
     return failureCount;
 }

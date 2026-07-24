@@ -5,20 +5,25 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkImageResample.h>
 #include <vtkRenderer.h>
-#include <vtkGPUVolumeRayCastMapper.h>
 
 // --- 策略 B: 体渲染 ---
 class VolumeStrategy : public BaseVisualStrategy {
 public:
     VolumeStrategy();
+    ~VolumeStrategy() override;
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
+    void SetInputMask(
+        vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override; //
 private:
+    class Mapper;
+    RenderEffectTarget GetRenderEffectTarget() const override;
+    void SetEffectBinding(RenderEffectBinding* binding) override;
     // 与最后下发 OTF 的 m_opacity 比较，决定纯材质更新是否需要重建透明度函数。
     bool GetOpacityChanged(double opacity) const;
     // modelMatrix 按 input model -> world 解释；相机保持原观察偏移，只把焦点移到变换后数据中心。
@@ -27,10 +32,12 @@ private:
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     vtkSmartPointer<vtkVolume> m_volume;
     // volume 使用的唯一 GPU mapper；质量/交互输入切换及裁切预览都写入该对象。
-    vtkSmartPointer<vtkGPUVolumeRayCastMapper> m_mapper;
+    vtkSmartPointer<Mapper> m_mapper;
     // 双重采样 producer 的强引用：静止期最大轴上限 766，交互期最大轴上限 256。
     vtkSmartPointer<vtkImageResample> m_qualityResample;
     vtkSmartPointer<vtkImageResample> m_interactionResample;
+    vtkSmartPointer<vtkImageResample> m_qualityMask;
+    vtkSmartPointer<vtkImageResample> m_interactionMask;
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
     vtkSmartPointer<vtkDataObject> m_lastInput;
     // 非拥有 renderer 弱引用，仅用于相机与 clipping range；renderer 销毁后自动为空。

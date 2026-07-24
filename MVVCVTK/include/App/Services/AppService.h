@@ -154,6 +154,9 @@ public:
     void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) override;
     void RemoveOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy) override;
     void ClearOverlayStrategies() override;
+    RenderInputStamp GetRenderInputStamp() const override;
+    bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect) override;
+    bool DetachRenderEffect(const RenderEffect* effect) override;
 
 private:
     class Impl;

@@ -153,6 +153,7 @@
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h" />
     <ClInclude Include="Fakes\AppService.h" />
+    <ClInclude Include="Fakes\AppInterfaces.h" />
     <ClInclude Include="Fakes\Host\HostCoreServices.h" />
     <ClInclude Include="Fakes\Host\HostFeatureBindings.h" />
     <ClInclude Include="Fakes\Host\HostRenderViewSet.h" />

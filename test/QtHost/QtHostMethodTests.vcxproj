@@ -34,10 +34,8 @@
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -98,6 +96,15 @@
     <ClCompile Include="QtHostLoadTests.cpp" />
     <ClCompile Include="QtHostMethodTests.cpp" />
     <ClCompile Include="QtHostViewTests.cpp" />
+  </ItemGroup>
+  <ItemGroup Label="OrthogonalCrop">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\CropAlgorithm.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Host\CropHostFeature.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBridge.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="QtHostMethodCases.h" />

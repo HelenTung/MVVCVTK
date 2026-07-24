@@ -16,7 +16,6 @@ struct HostRenderViewConfig {
     HostRenderViewRole role = HostRenderViewRole::Auxiliary; // 允许同 role 多窗口，集合查询按拓扑顺序返回。
     HostWindowConfig window; // 窗口尺寸、位置与初始渲染状态。
     vtkSmartPointer<vtkRenderWindow> renderWindow; // 可选外部窗口；为空时 session 自建并拥有窗口。
-    bool isCropPreviewIncluded = true; // 默认 preview 目标选择是否包含本窗口。
     bool isEventLoopEnabled = false; // standalone Start 候选；一个会话必须能解析出唯一启动窗口。
 };
 

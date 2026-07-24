@@ -59,12 +59,10 @@ public:
     // ids 和 roles 是显式作用域并集；二者都为空时返回空，避免漏配请求被解释为全窗口。
     std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
         const HostViewTargets& targets) const;
-    // 只有请求允许使用配置默认值时才调用，避免裁切 preview 在未声明目标时接管新窗口。
-    std::vector<const HostRenderViewRuntime*> GetCropPreviewViews() const;
     // 孔隙 overlay 默认角色也是显式 fallback；它描述可显示 overlay 的 role，不描述当前窗口数量。
     std::vector<const HostRenderViewRuntime*> GetGapOverlayViews() const;
 
-    // 裁切 bridge 只需要 InteractiveService 列表；在这里降级接口，避免 feature 看到完整 runtime。
+    // 可选 Feature 只需要 InteractiveService 列表；在这里降级接口，避免其修改完整 runtime。
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
 

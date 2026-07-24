@@ -68,20 +68,11 @@
     <ClInclude Include="PlanarTestSuites.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h">
-      <Filter>include\Algorithms</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h">
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Algorithms\CropAlgorithm.h">
       <Filter>include\Algorithms</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>include</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Preview\CropPreviewPlug.h">
-      <Filter>include\Preview</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Render\Strategies\CropOverlay.h">
-      <Filter>include\Render</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h">
       <Filter>include\Routing</Filter>
@@ -113,6 +104,9 @@
     <ClInclude Include="..\..\MVVCVTK\include\Render\Strategies\BaseVisualStrategy.h">
       <Filter>include\Render</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Render\CropShaderController.h">
+      <Filter>include\Render</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp">
@@ -127,17 +121,8 @@
     <ClCompile Include="CropBridgeTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\CropAlgorithm.cpp">
       <Filter>src\Algorithms</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
-      <Filter>src\Algorithms</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp">
-      <Filter>src\Preview</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp">
-      <Filter>src\Render</Filter>
     </ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>src\Routing</Filter>
@@ -151,6 +136,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp"><Filter>src</Filter></ClCompile>
@@ -170,7 +156,10 @@
     <ClCompile Include="AppTaskServiceTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
-    <ClCompile Include="CropPreviewPlugTests.cpp">
+    <ClCompile Include="CropAlgorithmTests.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
+    <ClCompile Include="CropShaderPreviewTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>
     <ClCompile Include="PlanarCropTests.cpp">

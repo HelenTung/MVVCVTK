@@ -60,6 +60,9 @@
     <Filter Include="features\OrthogonalCrop\include\Interaction">
       <UniqueIdentifier>{f39040d1-529e-485c-829d-cc4d3d1c7292}</UniqueIdentifier>
     </Filter>
+    <Filter Include="features\OrthogonalCrop\include\Host">
+      <UniqueIdentifier>{8b34d8c8-7e7a-47b0-a348-642bd82f2d4b}</UniqueIdentifier>
+    </Filter>
     <Filter Include="features\OrthogonalCrop\include\Preview">
       <UniqueIdentifier>{7d979643-e210-499f-968c-9c195651ae0e}</UniqueIdentifier>
     </Filter>
@@ -121,6 +124,9 @@
     <Filter Include="features\OrthogonalCrop\src\Interaction">
       <UniqueIdentifier>{cc11d587-a63e-481a-9341-0f51eb1484b2}</UniqueIdentifier>
     </Filter>
+    <Filter Include="features\OrthogonalCrop\src\Host">
+      <UniqueIdentifier>{49e818c5-f37d-4d33-9ec6-3aa3ed7398c8}</UniqueIdentifier>
+    </Filter>
     <Filter Include="features\OrthogonalCrop\src\Preview">
       <UniqueIdentifier>{b57e52b3-f7cc-4ed1-81c7-f878cf8a09ad}</UniqueIdentifier>
     </Filter>
@@ -159,8 +165,11 @@
     <ClInclude Include="include\Render\Strategies\CompositeStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
-    <ClInclude Include="features\OrthogonalCrop\include\Render\Strategies\CropOverlay.h">
-      <Filter>features\OrthogonalCrop\include\Render\Strategies</Filter>
+    <ClInclude Include="features\OrthogonalCrop\include\Render\CropShaderController.h">
+      <Filter>features\OrthogonalCrop\include\Render</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\RenderEffect.h">
+      <Filter>include\Render</Filter>
     </ClInclude>
     <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h">
       <Filter>include\Render\Strategies</Filter>
@@ -183,14 +192,14 @@
     <ClInclude Include="features\GapAnalysis\include\Algorithms\SurfaceRefiner.h">
       <Filter>features\GapAnalysis\include\Algorithms</Filter>
     </ClInclude>
-    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\OrthogonalCropAlgorithm.h">
-      <Filter>features\OrthogonalCrop\include\Algorithms</Filter>
-    </ClInclude>
-    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\PlanarCropAlgorithm.h">
+    <ClInclude Include="features\OrthogonalCrop\include\Algorithms\CropAlgorithm.h">
       <Filter>features\OrthogonalCrop\include\Algorithms</Filter>
     </ClInclude>
     <ClInclude Include="features\OrthogonalCrop\include\OrthogonalCropTypes.h">
       <Filter>features\OrthogonalCrop\include</Filter>
+    </ClInclude>
+    <ClInclude Include="features\OrthogonalCrop\include\Host\CropHostFeature.h">
+      <Filter>features\OrthogonalCrop\include\Host</Filter>
     </ClInclude>
     <ClInclude Include="features\GapAnalysis\include\Algorithms\VoidDetector.h">
       <Filter>features\GapAnalysis\include\Algorithms</Filter>
@@ -270,6 +279,9 @@
     <ClInclude Include="include\Host\HostCoreServices.h">
       <Filter>include\Host</Filter>
     </ClInclude>
+    <ClInclude Include="include\Host\HostFeature.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
     <ClInclude Include="include\Host\HostFeatureBindings.h">
       <Filter>include\Host</Filter>
     </ClInclude>
@@ -299,9 +311,6 @@
     </ClInclude>
     <ClInclude Include="features\OrthogonalCrop\include\Interaction\CropPlaneWidget.h">
       <Filter>features\OrthogonalCrop\include\Interaction</Filter>
-    </ClInclude>
-    <ClInclude Include="features\OrthogonalCrop\include\Preview\CropPreviewPlug.h">
-      <Filter>features\OrthogonalCrop\include\Preview</Filter>
     </ClInclude>
     <ClInclude Include="include\Geometry\InteractionComputeService.h">
       <Filter>include\Geometry</Filter>
@@ -334,6 +343,9 @@
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp">
       <Filter>src\Render\Strategies</Filter>
+    </ClCompile>
+    <ClCompile Include="features\OrthogonalCrop\src\Render\CropShaderController.cpp">
+      <Filter>features\OrthogonalCrop\src\Render</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\SliceStrategy.cpp">
       <Filter>src\Render\Strategies</Filter>
@@ -392,11 +404,11 @@
     <ClCompile Include="src\Data\DataConverters.cpp">
       <Filter>src\Data</Filter>
     </ClCompile>
-    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\OrthogonalCropAlgorithm.cpp">
+    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\CropAlgorithm.cpp">
       <Filter>features\OrthogonalCrop\src\Algorithms</Filter>
     </ClCompile>
-    <ClCompile Include="features\OrthogonalCrop\src\Algorithms\PlanarCropAlgorithm.cpp">
-      <Filter>features\OrthogonalCrop\src\Algorithms</Filter>
+    <ClCompile Include="features\OrthogonalCrop\src\Host\CropHostFeature.cpp">
+      <Filter>features\OrthogonalCrop\src\Host</Filter>
     </ClCompile>
     <ClCompile Include="features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>features\OrthogonalCrop\src\Routing</Filter>
@@ -407,14 +419,8 @@
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropPlaneWidget.cpp">
       <Filter>features\OrthogonalCrop\src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="features\OrthogonalCrop\src\Preview\CropPreviewPlug.cpp">
-      <Filter>features\OrthogonalCrop\src\Preview</Filter>
-    </ClCompile>
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp">
       <Filter>features\OrthogonalCrop\src\Interaction</Filter>
-    </ClCompile>
-    <ClCompile Include="features\OrthogonalCrop\src\Render\Strategies\CropOverlay.cpp">
-      <Filter>features\OrthogonalCrop\src\Render\Strategies</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

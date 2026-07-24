@@ -319,10 +319,10 @@ bool CropBoxWidget::Impl::GetBoundsAreValid(const std::array<double, 6>& bounds)
 
 CropInteractionPhase CropBoxWidget::Impl::GetEventPhase(unsigned long eventId)
 {
-    // Start/Interaction 一律视为拖拽中，只有 End 才切换到 Released。
+    // Start 只表示按下选中；收到 Interaction 后才算真正拖拽，避免空按释放进入 history。
     switch (eventId) {
     case vtkCommand::StartInteractionEvent:
-        return CropInteractionPhase::Dragging;
+        return CropInteractionPhase::Hover;
     case vtkCommand::InteractionEvent:
         return CropInteractionPhase::Dragging;
     case vtkCommand::EndInteractionEvent:
@@ -350,7 +350,9 @@ void CropBoxWidget::Impl::AttachObservers()
 void CropBoxWidget::Impl::OnWidgetEvent(unsigned long eventId)
 {
     const auto interactionPhase = GetEventPhase(eventId);
-    SetVisualState(interactionPhase);
+    SetVisualState(eventId == vtkCommand::StartInteractionEvent
+            ? CropInteractionPhase::Dragging
+            : interactionPhase);
 
     const auto rawBounds = m_representation->GetBounds();
     if (!rawBounds) {

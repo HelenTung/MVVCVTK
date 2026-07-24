@@ -1,1308 +1,1590 @@
-// =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/src/Interaction/CropBridge.cpp
-// 分类: Service / Interaction Bridge Implementation
-// 说明: 维护交互态，构造 preview/submit request，把预览结果分发给 overlay 与 3D 主模型，
-//       并把 submit 结果交给主数据 reload 通道。
-// =====================================================================
-
 #include "Interaction/CropBridge.h"
 
-#include "Algorithms/OrthogonalCropAlgorithm.h"
+#include "Algorithms/CropAlgorithm.h"
 #include "AppInterfaces.h"
 #include "Interaction/CropBoxWidget.h"
 #include "Interaction/CropPlaneWidget.h"
-#include "Preview/CropPreviewPlug.h"
-#include "Render/Strategies/CropOverlay.h"
+#include "Render/CropShaderController.h"
 #include "Routing/CropRouter.h"
 
-#include <vtkBoundingBox.h>
-#include <vtkCamera.h>
-#include <vtkImageData.h>
 #include <vtkMath.h>
 #include <vtkMatrix4x4.h>
-#include <vtkTransform.h>
+#include <vtkNew.h>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <exception>
+#include <future>
 #include <iostream>
-#include <mutex>
+#include <limits>
+#include <optional>
+#include <thread>
 #include <utility>
+#include <vector>
 
-static constexpr double kBoxInitialBoundsScale = 0.60;
-static constexpr double kPlaneScale = 0.35;
-static constexpr double kPlaneVectorEpsilon = 1e-12;
+namespace {
+constexpr double kVectorTolerance = 1.0e-12;
+constexpr double kGeometryTolerance = 1.0e-9;
 
-// 裁切 feature 的会话编排器：把 widget 产生的 world 几何折回 active input model，
-// 调用无状态后端生成 preview/submit，并把结果分发到各显示 target。
-// Impl 明确分离三条状态轴：会话阶段、预览意图、最近交互阶段，避免用多个布尔值推导非法组合。
+bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
+{
+    return bounds[0] < bounds[1]
+        && bounds[2] < bounds[3]
+        && bounds[4] < bounds[5];
+}
+
+RenderInputStamp GetInputStamp(const CropInputSnapshot& input)
+{
+    RenderInputStamp stamp;
+    stamp.version = input.inputVersion;
+    stamp.identity = input.dataSource
+        == OrthogonalCropDataSource::ImageData
+        ? static_cast<const void*>(input.imageData.GetPointer())
+        : static_cast<const void*>(input.polyData.GetPointer());
+    return stamp;
+}
+}
+
 class CropBridge::Impl final {
 public:
-    using ReloadSubmitter = CropBridge::ReloadSubmitter;
+    struct ShaderCandidate final {
+        std::vector<CropOpItem> history;
+        std::size_t cursor = 0;
+        std::optional<std::size_t> draftIndex;
+        std::shared_ptr<const CropPredicateTable> predicateTable;
+    };
+
+    struct TargetBinding final {
+        std::shared_ptr<InteractiveService> service;
+        std::shared_ptr<CropShaderEffect> effect;
+    };
+
+    struct PendingShader final {
+        std::vector<CropOpItem> history;
+        std::size_t cursor = 0;
+        std::optional<std::size_t> draftIndex;
+        CropShaderPayload payload;
+        std::vector<TargetBinding> targets;
+        std::vector<TargetBinding> retiredTargets;
+        std::shared_ptr<InteractiveService> nextReferenceService;
+        vtkRenderWindowInteractor* nextInteractor = nullptr;
+        bool isTargetRebind = false;
+    };
+
+    struct ExportTask final {
+        std::future<CropExportResult> result;
+        std::thread worker;
+        CropExportCallback callback;
+    };
+
+    struct PendingBaseline final {
+        CropInputSnapshot input;
+        std::vector<CropOpItem> activeHistory;
+        std::size_t baseNodeCount = 0;
+    };
 
     Impl();
     ~Impl();
 
-    void SetInputImage(vtkSmartPointer<vtkImageData> image);
-    void ClearInputImage();
-    void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
-    void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-    void SetPrimaryInteractor(vtkRenderWindowInteractor* interactor);
-    void SetReferenceRenderer(vtkRenderer* renderer);
-    void SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService);
-    void SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices);
-    void SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter);
-    bool StartView(CropViewRequest request);
-    void ClearBindings();
-    bool SwitchCropBox();
-    bool SwitchCropPlane();
+    bool StartView(const CropViewRequest& request);
+    bool ClearBindings();
+    bool SetCropInput(CropInputSnapshot input);
+    bool StartCropBaseline(
+        CropInputSnapshot input,
+        std::size_t baseNodeCount);
+    bool SetCropBaselineComplete() noexcept;
+    bool ClearCropBaseline();
+    bool SwitchCrop(CropShape geometryType);
+    bool SetCropMode(CropRemovalMode removalMode);
+    bool PreviousCrop();
+    bool NextCrop();
+    bool SetCropNode(std::size_t nodeCount);
     bool ExitCrop();
     bool GetCropActive() const;
-    void SwitchPreview(CropRemovalMode removalMode);
-    bool SendSubmit(std::function<void(bool isSuccess)> onComplete);
+    CropHistoryState GetCropHistory() const;
+    bool GetShaderTickNeeded() const;
+    bool SendShaderCommit();
+    bool ExportCrop(CropExportCallback onComplete);
+    bool GetExportTickNeeded() const;
+    bool SendExportResult();
 
 private:
-    enum class CropSessionPhase {
-        Idle,
-        Editing,
-        Reloading
-    };
+    void OnBoxWidget(CropInteractionPhase phase);
+    void OnPlaneWidget(CropInteractionPhase phase);
+    bool SetCandidate(CropOpItem operation);
+    bool StartCandidate(CropOpItem operation);
+    bool SendNextOp();
+    bool SendModeUpdate();
+    bool SetPrefix(std::size_t cursor);
+    bool SetShader(ShaderCandidate candidate);
+    std::optional<CropOpItem> BuildBoxOp();
+    std::optional<CropOpItem> BuildPlaneOp();
+    bool GetOpSame(
+        const CropOpItem& first,
+        const CropOpItem& second) const;
+    CropBoundsDouble6Array GetWorldBounds() const;
+    CropMatrixDouble16Array GetWorldToInput() const;
+    bool GetShaderCommitted() const;
+    bool GetTargetsReady() const;
+    bool ClearBaseShader();
+    bool SetWidgetActive(bool isActive);
+    void ClearHistory();
+    void ClearShaderStage();
+    void ClearShader();
+    void ClearTargets();
+    CropExportResult BuildExportFailure(
+        CropFailure failureReason,
+        const char* message) const;
 
-    struct ReloadGate {
-        // 只串行化 callback 读取 owner/generation 与析构/清绑定更新 gate 的临界区。
-        std::mutex mutex;
-        // 非拥有回指；callback 在锁内读取后仍按现有宿主约定于锁外同步调用 owner。
-        Impl* owner = nullptr;
-        // 每次 submit、清绑定或完成消费都会递增；旧 callback 必须因代际不匹配而静默退出。
-        std::size_t generation = 0;
-    };
-
-    bool GetInputReady();
-    void ClearPreviewInput();
-    void AttachPreview(const std::shared_ptr<InteractiveService>& service);
-    std::array<double, 6> GetStartBounds() const;
-    std::array<double, 6> GetWorldBounds(const std::array<double, 6>& activeInputModelBounds) const;
-    std::array<double, 6> GetActiveWorldBounds() const;
-    std::array<double, 16> GetWorldToInput() const;
-    void OnBoxWidget(const std::array<double, 6>& worldBounds, CropInteractionPhase phase);
-    void OnPlaneWidget(
-        const CropVectorDouble3Array& worldOrigin,
-        const CropVectorDouble3Array& worldNormal,
-        CropInteractionPhase phase);
-    OrthogonalCropRequest BuildBoxRequest(
-        OrthogonalCropOperation operation,
-        OrthogonalCropDataSource dataSource) const;
-    OrthogonalCropRequest BuildPlaneRequest(
-        OrthogonalCropOperation operation,
-        OrthogonalCropDataSource dataSource) const;
-    bool SendPreview();
-    void ClearPreviewViews();
-    void ResetPreview();
-    bool GetSubmitReady() const;
-    void OnSubmitReload(bool isSuccess);
-    bool BuildCameraState();
-    bool ResetCamera();
-    bool ClearCamera();
-    static const char* GetFailureReasonText(CropFailure failureReason);
-    static const char* GetDataSourceText(OrthogonalCropDataSource dataSource);
-
-    // bridge 值拥有的业务 router；长期 image/polydata 输入及 preview/submit 执行都收口到该实例。
-    CropRouter m_backend;
-    // 无持久成员的显示适配器；裁切临时状态写入目标 mapper/shader，并由 ResetPreview 对称清理。
-    CropPreviewPlug m_previewPlug;
-    // m_boundInputPolyData 是 host 绑定的长期输入；临时 preview mesh 写入 router 后由 ClearPreviewInput 恢复它。
-    vtkSmartPointer<vtkPolyData> m_boundInputPolyData;
-    // [风险] 非拥有主交互器；宿主必须保证任一 widget 启用期间有效，并在窗口销毁前解除绑定，
-    // 否则后续 Switch* 重新注入 widget 时会使用悬垂地址。
-    vtkRenderWindowInteractor* m_primaryInteractor = nullptr;
-    // 交互会话轴：编辑与 reload 是互斥阶段，不再允许 active/reload 布尔值组合出非法状态。
-    CropSessionPhase m_sessionPhase = CropSessionPhase::Idle;
-    // 当前激活 widget 和 request 的几何轴；crop 关闭后保留最后选择，下次 Switch* 会显式覆盖。
-    CropShape m_currentGeometryType = CropShape::Box;
-    // 几何可用轴：widget 回调或模式初始化后置位；成功 reload 后清零，迫使下一轮重新取输入 bounds。
-    bool m_hasWorldState = false;
-    // 预览意图轴：同模式命令可关闭；它不表示任一 target 已成功应用预览。
-    bool m_isPreviewOn = false;
-    // 最近交互阶段由 widget 回调更新；Dragging 阻止重型 preview 和 submit，Released 允许消费当前几何。
-    CropInteractionPhase m_lastInteractionPhase = CropInteractionPhase::Idle;
-    // preview 与随后 submit 共用的 Inside 保留轴；切换 preview 模式时更新，默认保留几何内部。
-    CropRemovalMode m_currentRemovalMode = CropRemovalMode::KeepInside;
-    // Box 的 world AABB 缓存，布局 [minX,maxX,minY,maxY,minZ,maxZ]；request 构造时折回 active input model。
-    std::array<double, 6> m_currentWorldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    // Plane 的 world 几何真源；origin 为平面上一点，normal 由 widget 路径保持单位化并定义 Inside 正侧。
-    CropVectorDouble3Array m_currentWorldPlaneOrigin = { 0.0, 0.0, 0.0 };
-    CropVectorDouble3Array m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
-    // 平面 widget 的 world 可视半尺寸 [halfWidth,halfHeight]；不限制后端无限半空间方程。
-    std::array<double, 2> m_worldHalf = { 1.0, 1.0 };
-    // 宿主注入并由 std::function 持有的 reload 能力；替换/清空时释放 closure，接受请求后负责回传完成结果。
-    ReloadSubmitter m_submitReloadHandler;
-    // reload pending 期间只保留不含 submit image 的结果元数据，成功后用于分发各 target 的 overlay。
-    OrthogonalCropResult m_submitOverlay;
-    std::function<void(bool)> m_submitCallback;
-    // submit 前缓存 reference renderer 相机值快照；不持有 renderer/camera 所有权。
-    CameraStateSnapshot m_submitCameraState;
-    // completion 通过弱引用进入 gate；析构在同一 mutex 下清 owner，避免延迟回调访问已销毁 Impl。
-    std::shared_ptr<ReloadGate> m_reloadGate;
-    // bridge 值拥有两种 widget 控制器及其 VTK callback/representation 生命周期；任一时刻只启用当前几何对应项。
+    CropRouter m_exportRouter;
     CropBoxWidget m_boxWidget;
     CropPlaneWidget m_planeWidget;
-    // 几何参照窗口 service 的共享 owner；提供 active input model -> world，且决定 reference overlay 可见性。
-    std::shared_ptr<InteractiveService> m_referenceRenderService;
-    // [风险] 非拥有 renderer，仅用于相机快照/恢复；宿主必须让它与 reference service 同步换绑，
-    // 并保证 submit 完成回调前仍有效，否则相机收尾会访问失效视图。
-    vtkRenderer* m_referenceRenderer = nullptr;
-    // 每个 preview 目标的 [service, overlay] 共享 owner；ClearPreviewViews 先 Remove 再清空集合。
-    std::vector<std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>> m_previewRenderTargets;
+    CropInputSnapshot m_input;
+    std::shared_ptr<InteractiveService> m_referenceService;
+    std::vector<TargetBinding> m_targets;
+    std::vector<CropOpItem> m_history;
+    std::vector<CropOpItem> m_allHistory;
+    std::size_t m_cursor = 0;
+    std::size_t m_baseNodeCount = 0;
+    std::optional<std::size_t> m_draftIndex;
+    CropShaderPayload m_activePayload;
+    std::optional<PendingShader> m_pendingShader;
+    std::deque<CropOpItem> m_pendingOps;
+    std::optional<CropRemovalMode> m_pendingMode;
+    std::optional<ExportTask> m_exportTask;
+    std::optional<PendingBaseline> m_pendingBaseline;
+    std::optional<CropOpItem> m_dragStart;
+    CropShape m_geometryType = CropShape::Box;
+    CropRemovalMode m_removalMode = CropRemovalMode::None;
+    bool m_hasDrag = false;
+    bool m_hasBaseShader = false;
+    std::uint64_t m_nextOperationIndex = 1;
+    std::uint64_t m_nextRevision = 1;
+    bool m_isActive = false;
+    bool m_isAccepting = true;
 };
 
 CropBridge::Impl::Impl()
-    : m_reloadGate(std::make_shared<ReloadGate>())
 {
-    m_reloadGate->owner = this;
-    // widget controller 只上报 bounds 和交互阶段；
-    // bridge 接管预览请求构建与结果分发，保持 VTK widget 层不触碰后端业务。
     m_boxWidget.SetBoundsCallback(
-        [this](const std::array<double, 6>& worldBounds, CropInteractionPhase phase) {
-            OnBoxWidget(worldBounds, phase);
+        [this](const CropBoundsDouble6Array&, const CropInteractionPhase phase) {
+            OnBoxWidget(phase);
         });
-
     m_planeWidget.SetPlaneCallback(
-        [this](
-            const CropVectorDouble3Array& worldOrigin,
-            const CropVectorDouble3Array& worldNormal,
-            CropInteractionPhase phase) {
-            OnPlaneWidget(worldOrigin, worldNormal, phase);
+        [this](const CropVectorDouble3Array&, const CropVectorDouble3Array&, const CropInteractionPhase phase) {
+            OnPlaneWidget(phase);
         });
 }
 
 CropBridge::Impl::~Impl()
 {
-    std::lock_guard<std::mutex> lock(m_reloadGate->mutex);
-    m_reloadGate->owner = nullptr;
-    ++m_reloadGate->generation;
-}
-
-// 输入由 bridge 透传给 backend router；
-// bridge 自身只管理交互状态，不拥有 image/polydata 后端选择逻辑。
-void CropBridge::Impl::SetInputImage(
-    vtkSmartPointer<vtkImageData> image)
-{
-    if (!image || !image->GetScalarPointer()) {
-        ClearInputImage();
-        return;
-    }
-
-    int dims[3] = { 0, 0, 0 };
-    image->GetDimensions(dims);
-    if (dims[0] <= 0 || dims[1] <= 0 || dims[2] <= 0) {
-        ClearInputImage();
-        return;
-    }
-
-    m_backend.SetInputImage(std::move(image));
-}
-
-void CropBridge::Impl::ClearInputImage()
-{
-    m_backend.SetInputImage(vtkSmartPointer<vtkImageData>());
-}
-
-void CropBridge::Impl::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    // 该成员保存宿主长期网格真源；SendPreview 可能暂时把某个 target 的 actor mesh 写入 router，
-    // ClearPreviewInput 必须在每条退出路径把 router 恢复到这里，而不是遗留临时预览输入。
-    m_boundInputPolyData = std::move(polyData);
-    m_backend.SetInputPolyData(m_boundInputPolyData);
-}
-
-void CropBridge::Impl::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_backend.SetPreferredDataSource(dataSource);
-}
-
-bool CropBridge::Impl::GetInputReady()
-{
-    // bridge 只保证“当前至少有一个可用输入”。
-    // 它不在这里做任何坐标折叠；缺 image 输入时不再反向读取 DataManager。
-    // PolyData 可能是上一轮等值面 preview 临时写入 router 的输入，不能因此跳过 image 恢复。
-    if (m_backend.GetImageReady() || m_backend.GetPolyDataReady()) {
-        return true;
-    }
-
-    return false;
-}
-
-void CropBridge::Impl::ClearPreviewInput()
-{
-    if (m_boundInputPolyData) {
-        m_backend.SetInputPolyData(m_boundInputPolyData);
-        return;
-    }
-
-    m_backend.ClearInputPolyData();
-}
-
-void CropBridge::Impl::SetPrimaryInteractor(vtkRenderWindowInteractor* interactor)
-{
-    m_primaryInteractor = interactor;
-    m_boxWidget.SetInteractor(interactor);
-    m_planeWidget.SetInteractor(interactor);
-}
-
-void CropBridge::Impl::SetReferenceRenderer(vtkRenderer* renderer)
-{
-    m_referenceRenderer = renderer;
-}
-
-void CropBridge::Impl::SetReferenceRenderService(std::shared_ptr<InteractiveService> referenceService)
-{
-    m_referenceRenderService = std::move(referenceService);
-
-    // reference service 是几何参照线框的唯一显示窗口；
-    // preview target 已经存在时也要同步一次，支持上位机重新绑定 reference 窗口。
-    for (auto& target : m_previewRenderTargets) {
-        if (target.second) {
-            target.second->SetRefVisible(target.first == m_referenceRenderService);
+    m_isAccepting = false;
+    m_isActive = false;
+    m_hasDrag = false;
+    m_boxWidget.SetEnabled(false);
+    m_planeWidget.SetEnabled(false);
+    ClearShader();
+    ClearTargets();
+    if (m_exportTask) {
+        if (m_exportTask->worker.joinable()) {
+            m_exportTask->worker.join();
         }
+        m_exportTask.reset();
     }
 }
 
-void CropBridge::Impl::SetPreviewRenderServices(std::vector<std::shared_ptr<InteractiveService>> previewRenderServices)
+bool CropBridge::Impl::StartView(const CropViewRequest& request)
 {
-    // target 集合按整批替换：先从旧 service 对称 Remove overlay，再为新集合去重 Attach，
-    // 防止重绑窗口后同一个 prop 被重复挂载。
-    ClearPreviewViews();
-    m_previewRenderTargets.reserve(previewRenderServices.size());
-
-    for (const auto& service : previewRenderServices) {
-        AttachPreview(service);
-    }
-
-}
-
-void CropBridge::Impl::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
-{
-    m_submitReloadHandler = std::move(reloadSubmitter);
-}
-
-bool CropBridge::Impl::StartView(CropViewRequest request)
-{
-    // 初始化契约分三层：输入数据、主交互/参考渲染对象、预览目标集合。
-    // 前四项缺一即拒绝；polydata 与 previewServices 可空，最终由 router 的 image/polydata 就绪态兜底确认。
-    if (!request.inputImage || !request.interactor || !request.renderer
+    if (!m_isAccepting
+        || m_exportTask
+        || !request.interactor
+        || !request.renderer
         || !request.referenceService) {
         return false;
     }
-    SetInputImage(std::move(request.inputImage));
-    SetInputPolyData(std::move(request.inputPolyData));
-    SetPreferredDataSource(request.dataSource);
-    SetPrimaryInteractor(request.interactor);
-    SetReferenceRenderer(request.renderer);
-    SetReferenceRenderService(std::move(request.referenceService));
-    SetPreviewRenderServices(std::move(request.previewServices));
-    return GetInputReady();
+    std::vector<std::shared_ptr<InteractiveService>> targetServices;
+    for (const auto& service : request.targetServices) {
+        if (!service) {
+            continue;
+        }
+        const auto duplicate = std::find_if(
+            targetServices.begin(),
+            targetServices.end(),
+            [&service](const auto& current) { return current.get() == service.get(); });
+        if (duplicate == targetServices.end()) {
+            targetServices.push_back(service);
+        }
+    }
+    if (targetServices.empty()) {
+        targetServices.push_back(request.referenceService);
+    }
+    const bool isSameReference =
+        m_referenceService.get()
+        == request.referenceService.get();
+    const bool isSameTargets =
+        targetServices.size() == m_targets.size()
+        && std::all_of(
+            targetServices.begin(),
+            targetServices.end(),
+            [this](const auto& service) {
+                return std::any_of(
+                    m_targets.begin(),
+                    m_targets.end(),
+                    [&service](const auto& target) {
+                        return target.service.get()
+                            == service.get();
+                    });
+            });
+    if (m_pendingShader) {
+        // 历史前缀正在换代时，同一视图的 Start 只是恢复编辑连接；
+        // 它不能因为 GPU revision 尚未提交而拒绝后续 Box/Plane 手势。
+        if (!m_pendingShader->isTargetRebind
+            && (m_isActive || GetShaderCommitted())
+            && isSameReference && isSameTargets) {
+            m_hasDrag = false;
+            m_dragStart.reset();
+            m_boxWidget.SetInteractor(request.interactor);
+            m_planeWidget.SetInteractor(request.interactor);
+            m_isActive = true;
+            return true;
+        }
+        return false;
+    }
+    m_hasDrag = false;
+    m_dragStart.reset();
+
+    std::vector<TargetBinding> targets;
+    std::vector<TargetBinding> createdTargets;
+    for (const auto& service : targetServices) {
+        const auto existing = std::find_if(
+            m_targets.begin(),
+            m_targets.end(),
+            [&service](const TargetBinding& target) {
+                return target.service.get() == service.get();
+            });
+        if (existing != m_targets.end()) {
+            targets.push_back(*existing);
+            continue;
+        }
+        TargetBinding target;
+        target.service = service;
+        target.effect = std::make_shared<CropShaderEffect>();
+        if (!target.service->AttachRenderEffect(target.effect)) {
+            for (const auto& created : createdTargets) {
+                (void)created.service->DetachRenderEffect(
+                    created.effect.get());
+            }
+            return false;
+        }
+        createdTargets.push_back(target);
+        targets.push_back(std::move(target));
+    }
+
+    const bool isShaderCommitted = GetShaderCommitted();
+    if ((m_isActive || isShaderCommitted) && isSameReference && isSameTargets) {
+        m_boxWidget.SetInteractor(request.interactor);
+        m_planeWidget.SetInteractor(request.interactor);
+        m_isActive = true;
+        return true;
+    }
+
+    // 有已提交前缀时，新增目标以同一 table handle 建立新 revision 的 staged/ready/commit；
+    // 只有整体成功后才清退旧目标，避免重绑定中出现部分窗口先失去裁切。
+    if (isShaderCommitted) {
+        const std::uint64_t revision = m_nextRevision++;
+        CropShaderPayload payload = m_activePayload;
+        payload.revision = revision;
+        payload.nodeCount = m_cursor;
+        if (!payload.predicateTable) {
+            return false;
+        }
+        std::vector<TargetBinding> accepted;
+        for (const auto& target : targets) {
+            if (!target.effect
+                || !target.effect->SetCropParams(payload)) {
+                for (const auto& current : accepted) {
+                    (void)current.effect->ClearCropStage(revision);
+                }
+                for (const auto& created : createdTargets) {
+                    (void)created.service->DetachRenderEffect(
+                        created.effect.get());
+                }
+                return false;
+            }
+            accepted.push_back(target);
+        }
+        m_pendingShader = PendingShader{
+            m_history,
+            m_cursor,
+            m_draftIndex,
+            std::move(payload),
+            std::move(accepted),
+            m_targets,
+            request.referenceService,
+            request.interactor,
+            true
+        };
+        m_isActive = true;
+        return true;
+    }
+
+    ClearShader();
+    ClearTargets();
+    m_referenceService = request.referenceService;
+    m_targets = std::move(targets);
+    m_boxWidget.SetInteractor(request.interactor);
+    m_planeWidget.SetInteractor(request.interactor);
+    const auto worldBounds = GetWorldBounds();
+    if (GetBoundsValid(worldBounds)) {
+        m_boxWidget.SetReferenceWorldBounds(worldBounds);
+        m_boxWidget.SetWidgetWorldBounds(worldBounds);
+        m_planeWidget.SetReferenceWorldBounds(worldBounds);
+    }
+    m_isActive = true;
+    return true;
 }
 
-void CropBridge::Impl::ClearBindings()
+bool CropBridge::Impl::ClearBindings()
 {
-    // 清绑定是完整会话失效点：先推进 generation，使尚未通过 gate 校验的旧 callback 失效，再按
-    // callback -> widget -> preview/overlay -> backend input -> 非拥有 VTK 指针的顺序释放依赖。
-    {
-        std::lock_guard<std::mutex> lock(m_reloadGate->mutex);
-        ++m_reloadGate->generation;
-    }
-    m_submitCallback = nullptr;
-    m_submitReloadHandler = nullptr;
+    // VTK Off 可能在拖拽中同步补发 EndInteraction；先关闭业务 gate，
+    // 避免清理过程把未完成交互误写成新的 staged/history 操作。
+    m_isActive = false;
+    m_hasDrag = false;
+    m_dragStart.reset();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
-    m_sessionPhase = CropSessionPhase::Idle;
-    m_isPreviewOn = false;
-    ResetPreview();
-    ClearPreviewViews();
-    ClearInputImage();
-    SetInputPolyData(nullptr);
-    SetPrimaryInteractor(nullptr);
-    SetReferenceRenderer(nullptr);
-    SetReferenceRenderService(nullptr);
+    ClearShader();
+    ClearHistory();
+    m_referenceService.reset();
+    ClearTargets();
+    return true;
 }
 
-void CropBridge::Impl::AttachPreview(const std::shared_ptr<InteractiveService>& service)
+bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
 {
-    if (!service) {
+    if (!m_isAccepting || !CropAlgorithm::GetInputValid(input)) {
+        return false;
+    }
+    if (CropAlgorithm::GetInputSame(m_input, input)) {
+        return true;
+    }
+
+    ClearShader();
+    ClearHistory();
+    m_input = std::move(input);
+    const auto worldBounds = GetWorldBounds();
+    if (GetBoundsValid(worldBounds)) {
+        m_boxWidget.SetReferenceWorldBounds(worldBounds);
+        m_boxWidget.SetWidgetWorldBounds(worldBounds);
+        m_planeWidget.SetReferenceWorldBounds(worldBounds);
+    }
+    return true;
+}
+
+bool CropBridge::Impl::StartCropBaseline(
+    CropInputSnapshot input,
+    const std::size_t baseNodeCount)
+{
+    if (!m_isAccepting
+        || m_exportTask
+        || m_pendingShader
+        || m_pendingMode
+        || m_hasBaseShader
+        || m_pendingBaseline
+        || !CropAlgorithm::GetInputValid(input)
+        || input.dataSource != m_input.dataSource
+        || m_cursor > m_history.size()
+        || baseNodeCount > m_allHistory.size()) {
+        return false;
+    }
+
+    if (m_baseNodeCount + m_history.size()
+            != m_allHistory.size()) {
+        return false;
+    }
+    const std::size_t currentBase =
+        m_baseNodeCount + m_cursor;
+    if (baseNodeCount != 0
+        && baseNodeCount != currentBase) {
+        return false;
+    }
+    m_pendingBaseline = PendingBaseline{
+        std::move(input),
+        std::vector<CropOpItem>(
+            m_allHistory.begin() + baseNodeCount,
+            m_allHistory.end()),
+        baseNodeCount
+    };
+    std::cout
+        << "[Crop][HistoryObjects] baseline staged"
+        << " targetBase=" << baseNodeCount
+        << " currentBase=" << currentBase
+        << " nextActive="
+        << m_pendingBaseline->activeHistory.size()
+        << " allSize=" << m_allHistory.size()
+        << '\n';
+    return true;
+}
+
+bool CropBridge::Impl::SetCropBaselineComplete() noexcept
+{
+    if (!m_pendingBaseline) {
+        // 这是发布后的无失败完成阶段；若预备状态丢失，继续运行会让
+        // DataManager 与裁切历史永久分裂，因此按内部不变量故障终止。
+        std::terminate();
+    }
+    auto baseline = std::move(*m_pendingBaseline);
+    m_pendingBaseline.reset();
+    // 旧 Strategy 在全部新输入 binding 就绪前继续显示物化前 committed 节点；
+    // 立即清 active shader 会让相机交互重绘出原始 base node 0。
+    ClearShaderStage();
+    m_input = std::move(baseline.input);
+    m_history = std::move(
+        baseline.activeHistory);
+    m_cursor = 0;
+    m_baseNodeCount =
+        baseline.baseNodeCount;
+    m_draftIndex.reset();
+    m_activePayload = {};
+    m_pendingOps.clear();
+    m_removalMode = CropRemovalMode::None;
+    m_hasDrag = false;
+    m_dragStart.reset();
+    m_hasBaseShader = true;
+
+    const auto worldBounds = GetWorldBounds();
+    if (GetBoundsValid(worldBounds)) {
+        m_boxWidget.SetReferenceWorldBounds(worldBounds);
+        m_boxWidget.SetWidgetWorldBounds(worldBounds);
+        m_planeWidget.SetReferenceWorldBounds(worldBounds);
+    }
+    for (const auto& target : m_targets) {
+        if (target.service) {
+            target.service->SetDirty();
+        }
+    }
+    (void)ClearBaseShader();
+    std::cout
+        << "[Crop][HistoryObjects] baseline complete"
+        << " activeObject="
+        << static_cast<const void*>(&m_history)
+        << " activeData="
+        << static_cast<const void*>(m_history.data())
+        << " activeNode=" << m_cursor
+        << " activeSize=" << m_history.size()
+        << " allObject="
+        << static_cast<const void*>(&m_allHistory)
+        << " allData="
+        << static_cast<const void*>(m_allHistory.data())
+        << " allSize=" << m_allHistory.size()
+        << " baseNode=" << m_baseNodeCount
+        << '\n';
+    return true;
+}
+
+bool CropBridge::Impl::ClearCropBaseline()
+{
+    m_pendingBaseline.reset();
+    return true;
+}
+
+bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
+{
+    if (!m_isActive
+        || m_exportTask
+        || !CropAlgorithm::GetInputValid(m_input)
+        || (geometryType != CropShape::Box && geometryType != CropShape::Plane)) {
+        return false;
+    }
+    m_geometryType = geometryType;
+    m_hasDrag = false;
+    m_dragStart.reset();
+    // Switch 结束上一条操作的模式编辑权；下一次有效 Released 会追加历史。
+    m_draftIndex.reset();
+    const auto worldBounds = GetWorldBounds();
+    if (!GetBoundsValid(worldBounds)) {
+        return false;
+    }
+
+    bool isEnabled = false;
+    if (geometryType == CropShape::Box) {
+        m_planeWidget.SetEnabled(false);
+        m_boxWidget.SetWidgetWorldBounds(worldBounds);
+        isEnabled = m_boxWidget.SetEnabled(true);
+    }
+    else {
+        m_boxWidget.SetEnabled(false);
+        const CropVectorDouble3Array origin = {
+            (worldBounds[0] + worldBounds[1]) * 0.5,
+            (worldBounds[2] + worldBounds[3]) * 0.5,
+            (worldBounds[4] + worldBounds[5]) * 0.5
+        };
+        const CropVectorDouble3Array normal = { 0.0, 0.0, 1.0 };
+        const std::array<double, 2> half = {
+            (worldBounds[1] - worldBounds[0]) * 0.5,
+            (worldBounds[3] - worldBounds[2]) * 0.5
+        };
+        m_planeWidget.SetWidgetWorldPlane(origin, normal, half);
+        isEnabled = m_planeWidget.SetEnabled(true);
+    }
+    // Widget 仅存在于 reference renderer；切换成功后通过 service 门铃请求
+    // 下一帧，避免依赖 vtkBoxWidget2/vtkImplicitPlaneWidget2 的偶然 Render 副作用。
+    if (isEnabled && m_referenceService) {
+        m_referenceService->SetDirty();
+    }
+    return isEnabled;
+}
+
+bool CropBridge::Impl::SetCropMode(const CropRemovalMode removalMode)
+{
+    if (!m_isActive
+        || m_exportTask
+        || (removalMode != CropRemovalMode::None
+            && removalMode != CropRemovalMode::KeepInside
+            && removalMode != CropRemovalMode::RemoveInside)) {
+        return false;
+    }
+    if (removalMode == m_removalMode) {
+        return true;
+    }
+    m_hasDrag = false;
+    m_dragStart.reset();
+    if (m_pendingShader) {
+        // 当前 revision 已进入 GPU 事务后不能原地改 payload。只记录最新模式，
+        // 待它提交后仍通过 SetShader 更新同一个 editable draft。
+        if (m_pendingShader->draftIndex) {
+            m_pendingMode = removalMode;
+            std::cout
+                << "[Crop][Mode] queued"
+                << " mode=" << static_cast<int>(removalMode)
+                << " revision="
+                << m_pendingShader->payload.revision
+                << " draft="
+                << *m_pendingShader->draftIndex
+                << '\n';
+        }
+        m_removalMode = removalMode;
+        return true;
+    }
+
+    // 已释放的当前 widget 操作仍是可编辑 draft；模式切换必须以新 revision
+    // 同步更新这条 history，而不是延迟到下一次 Released。
+    // None 只暂停当前 widget 对历史的写入，已提交前缀继续显示且不被删除。
+    if (removalMode != CropRemovalMode::None
+        && m_draftIndex && *m_draftIndex < m_cursor) {
+        if (!GetTargetsReady()) {
+            m_pendingMode = removalMode;
+            m_removalMode = removalMode;
+            std::cout
+                << "[Crop][Mode] waiting render input"
+                << " mode=" << static_cast<int>(removalMode)
+                << " draft=" << *m_draftIndex
+                << '\n';
+            return true;
+        }
+        auto candidate = m_history;
+        candidate[*m_draftIndex].removalMode = removalMode;
+        if (!SetShader(ShaderCandidate{
+                std::move(candidate),
+                m_cursor,
+                m_draftIndex,
+                {} })) {
+            return false;
+        }
+    }
+    m_removalMode = removalMode;
+    return true;
+}
+
+void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
+{
+    if (!m_isActive
+        || m_exportTask
+        || m_geometryType != CropShape::Box
+        || m_removalMode == CropRemovalMode::None) {
+        m_hasDrag = false;
+        m_dragStart.reset();
+        return;
+    }
+    if (phase == CropInteractionPhase::Hover) {
+        m_hasDrag = false;
+        m_dragStart = BuildBoxOp();
+        return;
+    }
+    if (phase == CropInteractionPhase::Dragging) {
+        m_hasDrag = true;
+        return;
+    }
+    if (phase != CropInteractionPhase::Released) {
         return;
     }
 
-    // 每个窗口只允许挂一份 overlay strategy；重复 service 直接跳过，避免重复 prop 和重复设脏。
-    const auto sameTarget = std::find_if(
-        m_previewRenderTargets.begin(),
-        m_previewRenderTargets.end(),
-        [service](const std::pair<std::shared_ptr<InteractiveService>, std::shared_ptr<CropOverlay>>& target) {
-            return target.first == service;
+    const bool hasDrag = m_hasDrag;
+    m_hasDrag = false;
+    auto dragStart = std::move(m_dragStart);
+    m_dragStart.reset();
+    if (!hasDrag || !dragStart) {
+        return;
+    }
+    auto operation = BuildBoxOp();
+    if (!operation || GetOpSame(*dragStart, *operation)) {
+        return;
+    }
+    (void)SetCandidate(std::move(*operation));
+}
+
+void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
+{
+    if (!m_isActive
+        || m_exportTask
+        || m_geometryType != CropShape::Plane
+        || m_removalMode == CropRemovalMode::None) {
+        m_hasDrag = false;
+        m_dragStart.reset();
+        return;
+    }
+    if (phase == CropInteractionPhase::Hover) {
+        m_hasDrag = false;
+        m_dragStart = BuildPlaneOp();
+        return;
+    }
+    if (phase == CropInteractionPhase::Dragging) {
+        m_hasDrag = true;
+        return;
+    }
+    if (phase != CropInteractionPhase::Released) {
+        return;
+    }
+
+    const bool hasDrag = m_hasDrag;
+    m_hasDrag = false;
+    auto dragStart = std::move(m_dragStart);
+    m_dragStart.reset();
+    if (!hasDrag || !dragStart) {
+        return;
+    }
+    auto operation = BuildPlaneOp();
+    if (!operation || GetOpSame(*dragStart, *operation)) {
+        return;
+    }
+    (void)SetCandidate(std::move(*operation));
+}
+
+bool CropBridge::Impl::SetCandidate(CropOpItem operation)
+{
+    if (m_exportTask
+        || m_removalMode == CropRemovalMode::None) {
+        return false;
+    }
+    operation.operationIndex = 0;
+    if (m_pendingShader
+        || m_hasBaseShader
+        || !m_pendingOps.empty()
+        || !GetTargetsReady()) {
+        // GPU 只允许单 revision stage；交互仍按 Released 顺序保存，
+        // 当前 revision 或 render input 收敛后再逐条生成 history candidate。
+        m_pendingOps.push_back(std::move(operation));
+        if (!m_pendingShader) {
+            std::cout
+                << "[Crop][Shader] operation queued"
+                << " pendingOps=" << m_pendingOps.size()
+                << " inputVersion=" << m_input.inputVersion
+                << '\n';
+        }
+        return true;
+    }
+    return StartCandidate(std::move(operation));
+}
+
+bool CropBridge::Impl::StartCandidate(CropOpItem operation)
+{
+    operation.operationIndex = m_nextOperationIndex;
+    auto candidate = m_history;
+    // 每次有效 Released 都是一次独立执行；若当前位于历史中间，先丢弃 redo
+    // 分支再追加。m_draftIndex 只允许模式切换改写最新操作，不再吞并后续 Released。
+    candidate.resize(m_cursor);
+    candidate.push_back(operation);
+    const std::size_t candidateCursor = candidate.size();
+    const std::optional<std::size_t> candidateDraft = candidateCursor - 1;
+    if (!SetShader(ShaderCandidate{
+        std::move(candidate),
+        candidateCursor,
+        candidateDraft,
+        {} })) {
+        return false;
+    }
+    ++m_nextOperationIndex;
+    return true;
+}
+
+bool CropBridge::Impl::SendNextOp()
+{
+    if (m_pendingShader
+        || m_hasBaseShader
+        || m_pendingOps.empty()
+        || !GetTargetsReady()) {
+        return false;
+    }
+    auto operation = std::move(m_pendingOps.front());
+    m_pendingOps.pop_front();
+    return StartCandidate(std::move(operation));
+}
+
+bool CropBridge::Impl::SendModeUpdate()
+{
+    if (!m_pendingMode
+        || m_pendingShader
+        || m_hasBaseShader) {
+        return false;
+    }
+    const CropRemovalMode removalMode =
+        *m_pendingMode;
+    if (removalMode == CropRemovalMode::None
+        || !m_draftIndex
+        || *m_draftIndex >= m_cursor) {
+        m_pendingMode.reset();
+        return true;
+    }
+    if (!GetTargetsReady()) {
+        return false;
+    }
+
+    auto candidate = m_history;
+    candidate[*m_draftIndex].removalMode =
+        removalMode;
+    if (!SetShader(ShaderCandidate{
+            std::move(candidate),
+            m_cursor,
+            m_draftIndex,
+            {} })) {
+        return false;
+    }
+    std::cout
+        << "[Crop][Mode] staged"
+        << " mode=" << static_cast<int>(removalMode)
+        << " draft=" << *m_draftIndex
+        << '\n';
+    m_pendingMode.reset();
+    return true;
+}
+
+bool CropBridge::Impl::SetPrefix(const std::size_t cursor)
+{
+    if (m_pendingShader
+        || m_hasBaseShader
+        || cursor > m_history.size()) {
+        return false;
+    }
+    auto predicateTable = m_activePayload.predicateTable;
+    if (!predicateTable || predicateTable->operationCount != m_history.size()) {
+        predicateTable.reset();
+    }
+    return SetShader(ShaderCandidate{
+        m_history,
+        cursor,
+        std::nullopt,
+        std::move(predicateTable) });
+}
+
+bool CropBridge::Impl::SetShader(ShaderCandidate candidate)
+{
+    if (candidate.cursor > candidate.history.size()) {
+        return false;
+    }
+    if (!candidate.predicateTable) {
+        const auto tableResult = CropAlgorithm::BuildPredicateTable(
+            candidate.history,
+            candidate.history.size());
+        if (!tableResult.isSucceeded || !tableResult.predicateTable) {
+            return false;
+        }
+        candidate.predicateTable = tableResult.predicateTable;
+    }
+
+    const std::uint64_t revision = m_nextRevision++;
+    CropShaderPayload payload;
+    payload.revision = revision;
+    payload.sourceStamp = GetInputStamp(m_input);
+    payload.nodeCount = candidate.cursor;
+    payload.predicateTable = candidate.predicateTable;
+    std::vector<TargetBinding> accepted;
+    for (const auto& target : m_targets) {
+        if (!target.effect
+            || !target.effect->SetCropParams(payload)) {
+            for (const auto& current : accepted) {
+                (void)current.effect->ClearCropStage(revision);
+            }
+            return false;
+        }
+        accepted.push_back(target);
+    }
+    if (accepted.empty()) {
+        return false;
+    }
+    m_pendingShader = PendingShader{
+        std::move(candidate.history),
+        candidate.cursor,
+        candidate.draftIndex,
+        std::move(payload),
+        std::move(accepted),
+        {},
+        {},
+        nullptr,
+        false
+    };
+    return true;
+}
+
+bool CropBridge::Impl::PreviousCrop()
+{
+    if (m_exportTask || m_cursor == 0) {
+        std::cout
+            << "[Crop][HistoryObjects] previous rejected"
+            << " exportActive="
+            << static_cast<bool>(m_exportTask)
+            << " activeObject="
+            << static_cast<const void*>(&m_history)
+            << " activeNode=" << m_cursor
+            << " activeSize=" << m_history.size()
+            << " allObject="
+            << static_cast<const void*>(&m_allHistory)
+            << " allSize=" << m_allHistory.size()
+            << " baseNode=" << m_baseNodeCount
+            << '\n';
+        return false;
+    }
+    return SetPrefix(m_cursor - 1);
+}
+
+bool CropBridge::Impl::NextCrop()
+{
+    return !m_exportTask
+        && m_cursor < m_history.size()
+        && SetPrefix(m_cursor + 1);
+}
+
+bool CropBridge::Impl::SetCropNode(const std::size_t nodeCount)
+{
+    if (m_exportTask
+        || m_pendingShader
+        || nodeCount > m_history.size()) {
+        return false;
+    }
+    // 同一节点是成功的幂等请求，不重复创建 shader revision。
+    return nodeCount == m_cursor || SetPrefix(nodeCount);
+}
+
+bool CropBridge::Impl::GetShaderTickNeeded() const
+{
+    return m_pendingShader.has_value()
+        || m_pendingMode.has_value()
+        || m_hasBaseShader
+        || !m_pendingOps.empty();
+}
+
+bool CropBridge::Impl::SendShaderCommit()
+{
+    if (!m_pendingShader) {
+        if (m_hasBaseShader) {
+            if (!ClearBaseShader()) {
+                return false;
+            }
+            return true;
+        }
+        if (m_pendingMode) {
+            if (!SendModeUpdate()) {
+                return false;
+            }
+            if (m_pendingShader) {
+                return false;
+            }
+        }
+        (void)SendNextOp();
+        return false;
+    }
+    bool isReady = true;
+    bool hasFailure = false;
+    for (const auto& target : m_pendingShader->targets) {
+        const auto state = target.effect->GetState();
+        hasFailure = hasFailure
+            || state.status == RenderEffectStatus::Failed;
+        if (state.stagedRevision != m_pendingShader->payload.revision) {
+            isReady = false;
+            continue;
+        }
+        if (state.status == RenderEffectStatus::Staged) {
+            target.service->SetDirty();
+        }
+        isReady = isReady
+            && (state.status == RenderEffectStatus::Ready
+                || state.status == RenderEffectStatus::Committed);
+    }
+    if (!isReady && !hasFailure) {
+        return false;
+    }
+
+    if (hasFailure) {
+        const auto failedState =
+            m_pendingShader->targets.empty()
+            ? RenderEffectState{}
+            : m_pendingShader->targets.front()
+                .effect->GetState();
+        std::cout
+            << "[Crop][Shader] failed"
+            << " revision="
+            << m_pendingShader->payload.revision
+            << " status="
+            << static_cast<int>(failedState.status)
+            << " reason="
+            << static_cast<int>(
+                failedState.failureReason)
+            << " message=\""
+            << failedState.message << "\""
+            << '\n';
+        for (const auto& target : m_pendingShader->targets) {
+            (void)target.effect->ClearCropStage(
+                m_pendingShader->payload.revision);
+        }
+        m_pendingShader.reset();
+        m_pendingOps.clear();
+        m_pendingMode.reset();
+        return false;
+    }
+
+    std::vector<TargetBinding> committedTargets;
+    committedTargets.reserve(
+        m_pendingShader->targets.size());
+    for (const auto& target : m_pendingShader->targets) {
+        if (!target.effect->StartCropCommit(
+                m_pendingShader->payload.revision)) {
+            for (auto committed =
+                    committedTargets.rbegin();
+                committed != committedTargets.rend();
+                ++committed) {
+                (void)committed->effect->ClearCropCommit(
+                    m_pendingShader->payload.revision);
+            }
+            for (const auto& current :
+                m_pendingShader->targets) {
+                (void)current.effect->ClearCropStage(
+                    m_pendingShader->payload.revision);
+            }
+            m_pendingShader.reset();
+            m_pendingOps.clear();
+            m_pendingMode.reset();
+            return false;
+        }
+        committedTargets.push_back(target);
+    }
+    const bool isCommitReady = std::all_of(
+        committedTargets.begin(),
+        committedTargets.end(),
+        [this](const auto& target) {
+            return target.effect->GetCropCommitReady(
+                m_pendingShader->payload.revision);
         });
-    if (sameTarget != m_previewRenderTargets.end()) {
-        return;
+    if (!isCommitReady) {
+        for (auto committed = committedTargets.rbegin();
+            committed != committedTargets.rend();
+            ++committed) {
+            (void)committed->effect->ClearCropCommit(
+                m_pendingShader->payload.revision);
+        }
+        m_pendingShader.reset();
+        m_pendingOps.clear();
+        m_pendingMode.reset();
+        return false;
     }
-
-    auto overlayStrategy = std::make_shared<CropOverlay>();
-    // preview 目标可以有多个，但裁切 box/outline 只属于 reference 窗口。
-    // 这样其它 3D 窗口仍能显示裁切后的主模型预览，不会再出现第二个可误读为交互控件的 box。
-    overlayStrategy->SetRefVisible(service == m_referenceRenderService);
-    service->AttachOverlayStrategy(overlayStrategy);
-    m_previewRenderTargets.push_back({ service, overlayStrategy });
+    for (const auto& target : committedTargets) {
+        if (!target.effect->SetCropComplete(
+                m_pendingShader->payload.revision)) {
+            // 全量预检和完成在 owner thread 同一调用栈内；若此处仍失败，
+            // 说明内部状态机不变量已破坏，不能发布 bridge 侧历史。
+            m_pendingOps.clear();
+            m_pendingShader.reset();
+            m_pendingMode.reset();
+            return false;
+        }
+    }
+    m_history = std::move(m_pendingShader->history);
+    m_cursor = m_pendingShader->cursor;
+    m_draftIndex = m_pendingShader->draftIndex;
+    m_activePayload = m_pendingShader->payload;
+    m_allHistory.resize(m_baseNodeCount);
+    m_allHistory.insert(
+        m_allHistory.end(),
+        m_history.begin(),
+        m_history.end());
+    if (m_pendingShader->isTargetRebind) {
+        for (const auto& retired : m_pendingShader->retiredTargets) {
+            const bool isStillTarget = std::any_of(
+                m_pendingShader->targets.begin(),
+                m_pendingShader->targets.end(),
+                [&retired](const auto& target) {
+                    return target.service.get()
+                        == retired.service.get();
+                });
+            if (retired.service && retired.effect && !isStillTarget) {
+                (void)retired.effect->ClearCropParams();
+                (void)retired.service->DetachRenderEffect(
+                    retired.effect.get());
+            }
+        }
+        m_targets = m_pendingShader->targets;
+        m_referenceService = m_pendingShader->nextReferenceService;
+        m_boxWidget.SetInteractor(m_pendingShader->nextInteractor);
+        m_planeWidget.SetInteractor(m_pendingShader->nextInteractor);
+        const auto worldBounds = GetWorldBounds();
+        if (GetBoundsValid(worldBounds)) {
+            m_boxWidget.SetReferenceWorldBounds(worldBounds);
+            m_boxWidget.SetWidgetWorldBounds(worldBounds);
+            m_planeWidget.SetReferenceWorldBounds(worldBounds);
+        }
+    }
+    // Stage 帧只负责让所有 binding 的资源进入 Ready，仍渲染旧 active；
+    // 两阶段提交完成后必须再次置脏，下一次 Timer 才会发布新的 committed 前缀。
+    for (const auto& target : committedTargets) {
+        if (target.service) {
+            target.service->SetDirty();
+        }
+    }
+    m_pendingShader.reset();
+    if (m_pendingMode) {
+        (void)SendModeUpdate();
+    }
+    if (!m_pendingShader) {
+        (void)SendNextOp();
+    }
+    return true;
 }
 
-std::array<double, 6> CropBridge::Impl::GetStartBounds() const
+std::optional<CropOpItem> CropBridge::Impl::BuildBoxOp()
 {
-    // 默认交互盒在 world 坐标下构造：
-    // 1. 先取当前活跃输入提升到 world 后的完整 bounds
-    // 2. 再按中心等比缩小，得到首次拖拽更容易观察的起始盒
-    // 3. 这只盒子只服务 widget；真正执行时还会折回 active input model
-    std::array<double, 6> worldBounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    const auto activeWorldBounds = GetActiveWorldBounds();
-    if (!(activeWorldBounds[0] < activeWorldBounds[1]
-        && activeWorldBounds[2] < activeWorldBounds[3]
-        && activeWorldBounds[4] < activeWorldBounds[5])) {
-        return worldBounds;
+    CropOpItem operation;
+    operation.geometryType = CropShape::Box;
+    operation.removalMode = m_removalMode;
+
+    CropVectorDouble3Array baseCenter = {};
+    CropVectorDouble3Array baseSize = {};
+    CropMatrixDouble16Array baseToNow = CropAlgorithm::GetIdentityMatrix();
+    if (!m_boxWidget.GetCurrentWorldBox(baseCenter, baseSize, baseToNow)) {
+        return std::nullopt;
     }
 
-    // 60% 不是算法约束，而是交互层的默认起始尺寸：
-    // 它保留四周约 20% 的缩放/拖拽余量，同时避免初始盒过小导致用户难以选中。
-    const std::array<double, 3> center = {
-        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
-        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
-        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
-    };
-    const std::array<double, 3> halfExtents = {
-        (activeWorldBounds[1] - activeWorldBounds[0]) * kBoxInitialBoundsScale * 0.5,
-        (activeWorldBounds[3] - activeWorldBounds[2]) * kBoxInitialBoundsScale * 0.5,
-        (activeWorldBounds[5] - activeWorldBounds[4]) * kBoxInitialBoundsScale * 0.5
-    };
-
-    worldBounds[0] = center[0] - halfExtents[0];
-    worldBounds[1] = center[0] + halfExtents[0];
-    worldBounds[2] = center[1] - halfExtents[1];
-    worldBounds[3] = center[1] + halfExtents[1];
-    worldBounds[4] = center[2] - halfExtents[2];
-    worldBounds[5] = center[2] + halfExtents[2];
-    return worldBounds;
+    vtkNew<vtkMatrix4x4> boxToInitialWorld;
+    boxToInitialWorld->Identity();
+    for (int axis = 0; axis < 3; ++axis) {
+        boxToInitialWorld->SetElement(axis, axis, baseSize[axis] * 0.5);
+        boxToInitialWorld->SetElement(axis, 3, baseCenter[axis]);
+    }
+    vtkNew<vtkMatrix4x4> baseToNowMatrix;
+    baseToNowMatrix->DeepCopy(baseToNow.data());
+    vtkNew<vtkMatrix4x4> boxToWorld;
+    vtkMatrix4x4::Multiply4x4(baseToNowMatrix, boxToInitialWorld, boxToWorld);
+    vtkNew<vtkMatrix4x4> worldToInput;
+    worldToInput->DeepCopy(GetWorldToInput().data());
+    vtkNew<vtkMatrix4x4> boxToInput;
+    vtkMatrix4x4::Multiply4x4(worldToInput, boxToWorld, boxToInput);
+    vtkMatrix4x4::DeepCopy(operation.boxToInputModelMatrix.data(), boxToInput);
+    return operation;
 }
 
-std::array<double, 6> CropBridge::Impl::GetWorldBounds(
-    const std::array<double, 6>& activeInputModelBounds) const
+std::optional<CropOpItem> CropBridge::Impl::BuildPlaneOp()
 {
-    // 这是纯 bounds 级别的 8 角点变换 helper：
-    // 输入是 active input model 轴对齐盒，输出是 widget 使用的 world AABB。
-    // 对 image 路径，input model 底层由 VTK physical-point API 表达。
-    // 显式变换 8 个角点后再回收包围盒，可以避免旋转场景下的逐轴换算失真。
-    if (!m_referenceRenderService) {
-        return activeInputModelBounds;
+    CropOpItem operation;
+    operation.geometryType = CropShape::Plane;
+    operation.removalMode = m_removalMode;
+
+    CropVectorDouble3Array worldOrigin = {};
+    CropVectorDouble3Array worldNormal = { 0.0, 0.0, 1.0 };
+    if (!m_planeWidget.GetCurrentWorldPlane(worldOrigin, worldNormal)) {
+        return std::nullopt;
+    }
+    vtkNew<vtkMatrix4x4> worldToInput;
+    worldToInput->DeepCopy(GetWorldToInput().data());
+    const double worldPoint[4] = { worldOrigin[0], worldOrigin[1], worldOrigin[2], 1.0 };
+    double inputPoint[4] = {};
+    worldToInput->MultiplyPoint(worldPoint, inputPoint);
+    const double inverseW = std::abs(inputPoint[3]) > kVectorTolerance
+        ? 1.0 / inputPoint[3]
+        : 1.0;
+    operation.planeCenterInInputModel = {
+        inputPoint[0] * inverseW,
+        inputPoint[1] * inverseW,
+        inputPoint[2] * inverseW
+    };
+
+    vtkNew<vtkMatrix4x4> inputToWorld;
+    vtkMatrix4x4::Invert(worldToInput, inputToWorld);
+    inputToWorld->Transpose();
+    const double worldVector[4] = { worldNormal[0], worldNormal[1], worldNormal[2], 0.0 };
+    double inputVector[4] = {};
+    inputToWorld->MultiplyPoint(worldVector, inputVector);
+    operation.planeNormalInInputModel = {
+        inputVector[0], inputVector[1], inputVector[2]
+    };
+    if (vtkMath::Normalize(operation.planeNormalInInputModel.data()) <= kVectorTolerance) {
+        return std::nullopt;
+    }
+    return operation;
+}
+
+bool CropBridge::Impl::GetOpSame(
+    const CropOpItem& first,
+    const CropOpItem& second) const
+{
+    if (first.geometryType != second.geometryType) {
+        return false;
+    }
+    const auto getValuesSame = [](const auto& firstValues,
+                                   const auto& secondValues) {
+        return std::equal(
+            firstValues.begin(),
+            firstValues.end(),
+            secondValues.begin(),
+            [](const double firstValue,
+                const double secondValue) {
+                const double scale = std::max({
+                    1.0,
+                    std::abs(firstValue),
+                    std::abs(secondValue)
+                });
+                return std::abs(firstValue - secondValue)
+                    <= kGeometryTolerance * scale;
+            });
+    };
+    if (first.geometryType == CropShape::Box) {
+        return getValuesSame(
+            first.boxToInputModelMatrix,
+            second.boxToInputModelMatrix);
+    }
+    if (first.geometryType == CropShape::Plane) {
+        return getValuesSame(
+                first.planeCenterInInputModel,
+                second.planeCenterInInputModel)
+            && getValuesSame(
+                first.planeNormalInInputModel,
+                second.planeNormalInInputModel);
+    }
+    return false;
+}
+
+CropBoundsDouble6Array CropBridge::Impl::GetWorldBounds() const
+{
+    CropBoundsDouble6Array bounds = {};
+    if (!m_referenceService || !CropAlgorithm::GetInputValid(m_input)) {
+        return bounds;
+    }
+    bounds = {
+        std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest(),
+        std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()
+    };
+    for (int corner = 0; corner < 8; ++corner) {
+        const double modelPoint[3] = {
+            m_input.inputModelBounds[(corner & 1) ? 1 : 0],
+            m_input.inputModelBounds[(corner & 2) ? 3 : 2],
+            m_input.inputModelBounds[(corner & 4) ? 5 : 4]
+        };
+        double worldPoint[3] = {};
+        m_referenceService->GetWorldPositionFromModel(modelPoint, worldPoint);
+        for (int axis = 0; axis < 3; ++axis) {
+            bounds[axis * 2] = std::min(bounds[axis * 2], worldPoint[axis]);
+            bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], worldPoint[axis]);
+        }
+    }
+    return bounds;
+}
+
+CropMatrixDouble16Array CropBridge::Impl::GetWorldToInput() const
+{
+    if (!m_referenceService) {
+        return CropAlgorithm::GetIdentityMatrix();
+    }
+    vtkNew<vtkMatrix4x4> matrix;
+    matrix->DeepCopy(m_referenceService->GetModelMatrix().data());
+    matrix->Invert();
+    CropMatrixDouble16Array values = {};
+    vtkMatrix4x4::DeepCopy(values.data(), matrix);
+    return values;
+}
+
+CropExportResult CropBridge::Impl::BuildExportFailure(
+    const CropFailure failureReason,
+    const char* message) const
+{
+    CropExportResult result;
+    result.resolvedDataSource = m_input.dataSource;
+    result.failureReason = failureReason;
+    result.inputVersion = m_input.inputVersion;
+    result.nodeCount = m_cursor;
+    result.operations.assign(m_history.begin(), m_history.begin() + m_cursor);
+    result.message = message;
+    return result;
+}
+
+bool CropBridge::Impl::ExportCrop(CropExportCallback onComplete)
+{
+    if (!onComplete) {
+        return false;
+    }
+    if (m_exportTask) {
+        onComplete(BuildExportFailure(CropFailure::Busy, "A crop export is already running."));
+        return false;
+    }
+    if (m_pendingShader
+        || m_pendingMode
+        || m_hasBaseShader
+        || m_cursor == 0
+        || !CropAlgorithm::GetInputValid(m_input)
+        || m_activePayload.sourceStamp != GetInputStamp(m_input)
+        || m_activePayload.nodeCount != m_cursor
+        || !m_activePayload.predicateTable) {
+        onComplete(BuildExportFailure(CropFailure::BadInput, "Crop export state is not ready."));
+        return false;
     }
 
-    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    inputToWorldMat->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
+    CropExportRequest request;
+    request.dataSource = m_input.dataSource;
+    request.operations.assign(m_history.begin(), m_history.begin() + m_cursor);
+    request.nodeCount = request.operations.size();
+    request.inputVersion = m_input.inputVersion;
+    auto task = m_exportRouter.BuildExportTask(
+        m_input,
+        std::move(request),
+        m_activePayload);
+    if (!task) {
+        onComplete(BuildExportFailure(CropFailure::VersionMismatch, "Crop export snapshot is inconsistent."));
+        return false;
+    }
 
-    auto inputToWorld = vtkSmartPointer<vtkTransform>::New();
-    inputToWorld->SetMatrix(inputToWorldMat);
+    ExportTask active;
+    active.result = task->get_future();
+    active.callback = std::move(onComplete);
+    try {
+        active.worker = std::thread(std::move(*task));
+    }
+    catch (...) {
+        active.callback(BuildExportFailure(CropFailure::WorkerStartFailed, "Crop export worker could not start."));
+        return false;
+    }
+    if (!active.worker.joinable()) {
+        active.callback(BuildExportFailure(CropFailure::WorkerStartFailed, "Crop export worker is not joinable."));
+        return false;
+    }
+    // worker 捕获的是当前 committed prefix；在 owner thread 消费结果前，
+    // m_exportTask 同时充当历史事务门，所有会改变 active prefix 的入口均拒绝。
+    m_exportTask = std::move(active);
+    m_hasDrag = false;
+    m_dragStart.reset();
+    (void)SetWidgetActive(false);
+    std::cout
+        << "[Crop][Materialize] widget frozen"
+        << " shape=" << static_cast<int>(m_geometryType)
+        << " node=" << m_cursor
+        << '\n';
+    return true;
+}
 
-    vtkBoundingBox worldBounds;
-    for (int ix = 0; ix < 2; ++ix) {
-        for (int iy = 0; iy < 2; ++iy) {
-            for (int iz = 0; iz < 2; ++iz) {
-                const double activeInputModelCorner[3] = {
-                    activeInputModelBounds[ix == 0 ? 0 : 1],
-                    activeInputModelBounds[iy == 0 ? 2 : 3],
-                    activeInputModelBounds[iz == 0 ? 4 : 5]
-                };
-                double worldCorner[3] = { 0.0, 0.0, 0.0 };
-                inputToWorld->TransformPoint(activeInputModelCorner, worldCorner);
-                worldBounds.AddPoint(worldCorner);
+bool CropBridge::Impl::GetExportTickNeeded() const
+{
+    return m_exportTask
+        && m_exportTask->result.valid()
+        && m_exportTask->result.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+}
+
+bool CropBridge::Impl::SendExportResult()
+{
+    if (!GetExportTickNeeded()) {
+        return false;
+    }
+    auto active = std::move(*m_exportTask);
+    m_exportTask.reset();
+    CropExportResult result;
+    try {
+        result = active.result.get();
+    }
+    catch (const std::exception& error) {
+        result = BuildExportFailure(CropFailure::WorkerFailed, error.what());
+    }
+    catch (...) {
+        result = BuildExportFailure(CropFailure::WorkerFailed, "Crop export worker failed with an unknown exception.");
+    }
+    if (active.worker.joinable()) {
+        active.worker.join();
+    }
+    if (active.callback) {
+        active.callback(std::move(result));
+    }
+    if (m_isActive) {
+        (void)SetWidgetActive(true);
+        std::cout
+            << "[Crop][Materialize] widget restored"
+            << " shape="
+            << static_cast<int>(m_geometryType)
+            << " mode="
+            << static_cast<int>(m_removalMode)
+            << " node=" << m_cursor
+            << '\n';
+    }
+    return true;
+}
+
+void CropBridge::Impl::ClearHistory()
+{
+    m_history.clear();
+    m_allHistory.clear();
+    m_cursor = 0;
+    m_baseNodeCount = 0;
+    m_draftIndex.reset();
+    m_removalMode = CropRemovalMode::None;
+    m_hasDrag = false;
+    m_dragStart.reset();
+    m_pendingOps.clear();
+    m_pendingMode.reset();
+    m_hasBaseShader = false;
+    m_activePayload = {};
+    m_pendingShader.reset();
+    m_pendingBaseline.reset();
+}
+
+bool CropBridge::Impl::GetShaderCommitted() const
+{
+    // nodeCount=0 也是一次完整提交的无裁切基线；只要 revision、输入身份和
+    // 不可变 table 一致，重入时就必须保留当前 binding，不能按“无效果”清退。
+    return m_cursor <= m_history.size()
+        && m_activePayload.revision != 0
+        && m_activePayload.sourceStamp == GetInputStamp(m_input)
+        && m_activePayload.nodeCount == m_cursor
+        && m_activePayload.predicateTable
+        && m_activePayload.predicateTable->operationCount == m_history.size();
+}
+
+bool CropBridge::Impl::GetTargetsReady() const
+{
+    if (m_targets.empty()) {
+        return false;
+    }
+    const RenderInputStamp inputStamp =
+        GetInputStamp(m_input);
+    return inputStamp.identity
+        && inputStamp.version != 0
+        && std::all_of(
+            m_targets.begin(),
+            m_targets.end(),
+            [&inputStamp](const auto& target) {
+                return target.service
+                    && target.effect
+                    && target.service
+                        ->GetRenderInputStamp()
+                        == inputStamp;
+            });
+}
+
+bool CropBridge::Impl::ClearBaseShader()
+{
+    if (!m_hasBaseShader) {
+        return true;
+    }
+    if (!GetTargetsReady()) {
+        return false;
+    }
+    bool isCleared = true;
+    for (const auto& target : m_targets) {
+        if (target.effect) {
+            isCleared =
+                target.effect->ClearCropParams()
+                && isCleared;
+        }
+    }
+    if (!isCleared) {
+        return false;
+    }
+    m_hasBaseShader = false;
+    for (const auto& target : m_targets) {
+        if (target.service) {
+            target.service->SetDirty();
+        }
+    }
+    std::cout
+        << "[Crop][Materialize] retired shader cleared"
+        << " inputVersion=" << m_input.inputVersion
+        << " baseNode=" << m_baseNodeCount
+        << " activeNode=" << m_cursor
+        << '\n';
+    return true;
+}
+
+bool CropBridge::Impl::SetWidgetActive(
+    const bool isActive)
+{
+    bool isSet = true;
+    if (!isActive) {
+        const bool isBoxSet =
+            m_boxWidget.SetEnabled(false);
+        const bool isPlaneSet =
+            m_planeWidget.SetEnabled(false);
+        isSet = isBoxSet && isPlaneSet;
+    }
+    else if (m_geometryType == CropShape::Box) {
+        const bool isPlaneSet =
+            m_planeWidget.SetEnabled(false);
+        const bool isBoxSet =
+            m_boxWidget.SetEnabled(true);
+        isSet = isPlaneSet && isBoxSet;
+    }
+    else if (m_geometryType == CropShape::Plane) {
+        const bool isBoxSet =
+            m_boxWidget.SetEnabled(false);
+        const bool isPlaneSet =
+            m_planeWidget.SetEnabled(true);
+        isSet = isBoxSet && isPlaneSet;
+    }
+    else {
+        isSet = false;
+    }
+    if (m_referenceService) {
+        m_referenceService->SetDirty();
+    }
+    return isSet;
+}
+
+void CropBridge::Impl::ClearShaderStage()
+{
+    if (m_pendingShader) {
+        for (const auto& target : m_pendingShader->targets) {
+            (void)target.effect->ClearCropStage(
+                m_pendingShader->payload.revision);
+        }
+        if (m_pendingShader->isTargetRebind) {
+            for (const auto& target : m_pendingShader->targets) {
+                const bool isCurrentTarget = std::any_of(
+                    m_targets.begin(),
+                    m_targets.end(),
+                    [&target](const auto& current) {
+                        return current.service.get()
+                                == target.service.get()
+                            && current.effect.get()
+                                == target.effect.get();
+                    });
+                if (isCurrentTarget || !target.service
+                    || !target.effect) {
+                    continue;
+                }
+                // 重绑定尚未提交时，新 target 只持有 staged/replay 资源；
+                // 取消事务必须把临时 effect 一并拆除，旧 target 继续显示 committed。
+                (void)target.effect->ClearCropParams();
+                (void)target.service->DetachRenderEffect(
+                    target.effect.get());
             }
         }
     }
-
-    double bounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    worldBounds.GetBounds(bounds);
-    return { bounds[0], bounds[1], bounds[2], bounds[3], bounds[4], bounds[5] };
+    m_pendingShader.reset();
+    m_pendingOps.clear();
+    m_pendingMode.reset();
+    m_hasDrag = false;
+    m_dragStart.reset();
 }
 
-std::array<double, 6> CropBridge::Impl::GetActiveWorldBounds() const
+void CropBridge::Impl::ClearShader()
 {
-    // backend/router 暴露的是 active input model bounds；
-    // widget 放在 world 里，所以这里负责做一次 active input model -> world 的包围盒提升。
-    const auto activeInputModelBounds = m_backend.GetActiveInputModelBounds();
-    if (!(activeInputModelBounds[0] < activeInputModelBounds[1]
-        && activeInputModelBounds[2] < activeInputModelBounds[3]
-        && activeInputModelBounds[4] < activeInputModelBounds[5])) {
-        return activeInputModelBounds;
-    }
-
-    return GetWorldBounds(activeInputModelBounds);
-}
-
-std::array<double, 16> CropBridge::Impl::GetWorldToInput() const
-{
-    if (!m_referenceRenderService) {
-        return CropGeometryAlgorithm::GetIdentityMatrix();
-    }
-
-    // 参考窗口维护的是 active input model -> world 矩阵；裁切 request 需要反向矩阵，
-    // 否则 widget 盒和后端 active input model 会落在两个不同坐标系里。
-    // 对 image 路径，active input model 底层由 VTK physical-point API 表达；
-    // 对 polydata 路径，则是主网格自己的 input model 坐标。
-    auto worldToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToInputMat->DeepCopy(m_referenceRenderService->GetModelMatrix().data());
-    worldToInputMat->Invert();
-
-    std::array<double, 16> worldToInputData = { 0.0 };
-    vtkMatrix4x4::DeepCopy(worldToInputData.data(), worldToInputMat);
-    return worldToInputData;
-}
-
-void CropBridge::Impl::OnBoxWidget(
-    const std::array<double, 6>& worldBounds,
-    CropInteractionPhase phase)
-{
-    if (m_sessionPhase != CropSessionPhase::Editing
-        || m_currentGeometryType != CropShape::Box) {
-        return;
-    }
-
-    // 交互过程中始终记录最新 world AABB 和 phase，
-    // 但只在 Released 时触发 preview，保持“拖拽只更新显示状态，释放后再统一跑后端”的既有流程。
-    m_currentWorldBounds = worldBounds;
-    m_hasWorldState = true;
-    m_lastInteractionPhase = phase;
-    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        (void)SendPreview();
-    }
-}
-
-void CropBridge::Impl::OnPlaneWidget(
-    const CropVectorDouble3Array& worldOrigin,
-    const CropVectorDouble3Array& worldNormal,
-    CropInteractionPhase phase)
-{
-    if (m_sessionPhase != CropSessionPhase::Editing
-        || m_currentGeometryType != CropShape::Plane) {
-        return;
-    }
-
-    // 与 Box 共用“持续记录、仅 Released 消费”的交互契约；缓存值仍保持 world 坐标。
-    m_currentWorldPlaneOrigin = worldOrigin;
-    m_currentWorldPlaneNormal = worldNormal;
-    m_hasWorldState = true;
-    m_lastInteractionPhase = phase;
-    if (m_isPreviewOn && phase == CropInteractionPhase::Released) {
-        (void)SendPreview();
-    }
-}
-
-OrthogonalCropRequest CropBridge::Impl::BuildBoxRequest(
-    OrthogonalCropOperation operation,
-    OrthogonalCropDataSource dataSource) const
-{
-    // 先获取当前数据源的默认 request；
-    // image 与 polydata 的 bounds 归一化由后端入口收口，bridge 只补交互盒姿态。
-    auto boxRequest = m_backend.GetDefaultRequest();
-    boxRequest.dataSource = dataSource;
-    boxRequest.operation = operation;
-    boxRequest.geometryType = CropShape::Box;
-    boxRequest.removalMode = m_currentRemovalMode;
-
-    // 准备 widget 有向盒的 world 基准信息；
-    // 默认值来自当前 world AABB，GetCurrentWorldBox 成功时会替换成最近一次 PlaceWidget 的基准盒。
-    CropVectorDouble3Array baseCenter = {
-        (m_currentWorldBounds[0] + m_currentWorldBounds[1]) * 0.5,
-        (m_currentWorldBounds[2] + m_currentWorldBounds[3]) * 0.5,
-        (m_currentWorldBounds[4] + m_currentWorldBounds[5]) * 0.5
-    };
-    CropVectorDouble3Array baseSize = {
-        m_currentWorldBounds[1] - m_currentWorldBounds[0],
-        m_currentWorldBounds[3] - m_currentWorldBounds[2],
-        m_currentWorldBounds[5] - m_currentWorldBounds[4]
-    };
-    CropMatrixDouble16Array boxToInputModelMatrixData = CropGeometryAlgorithm::GetIdentityMatrix();
-    CropMatrixDouble16Array baseToNowData = CropGeometryAlgorithm::GetIdentityMatrix();
-
-    // 读取 widget 当前姿态并反解 initialWorld -> currentWorld；
-    // 失败时保留默认 request，避免把不完整 widget 状态发给后端。
-    if (!m_boxWidget.GetCurrentWorldBox(
-        baseCenter,
-        baseSize,
-        baseToNowData)) {
-        return boxRequest;
-    }
-
-    // boxToInitialWorldMatrix 把固定标准盒 [-1,1]^3 放回 PlaceWidget 时的 world AABB；
-    // 标准盒半径为 1，所以轴向缩放必须使用 baseSize * 0.5。
-    auto boxToInitialWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    boxToInitialWorldMatrix->Identity();
-    for (int axis = 0; axis < 3; ++axis) {
-        boxToInitialWorldMatrix->SetElement(axis, axis, baseSize[axis] * 0.5);
-        boxToInitialWorldMatrix->SetElement(axis, 3, baseCenter[axis]);
-    }
-
-    // baseToNow 表达用户交互造成的姿态变化；
-    // 它接在 boxToInitialWorldMatrix 后面，负责把初始 world AABB 变成当前 world 有向盒。
-    auto baseToNow = vtkSmartPointer<vtkMatrix4x4>::New();
-    baseToNow->DeepCopy(baseToNowData.data());
-
-    // boxToWorldMatrix 是当前裁切盒在 world 中的完整几何；
-    // 组合顺序从右到左读：标准盒先进入初始 world，再应用交互后的 current world 姿态。
-    auto boxToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(baseToNow, boxToInitialWorldMatrix, boxToWorldMatrix);
-
-    // worldToInputMat 把显示层 world 几何折回当前数据输入坐标；
-    // image 使用 physical-point 语义，polydata 使用主网格 input model 语义。
-    auto worldToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToInputMat->DeepCopy(GetWorldToInput().data());
-
-    // boxToInputModelMatrix 是 request 下发给算法层的唯一几何真源；
-    // 算法只消费标准盒到 active input model 的矩阵，不再依赖 widget 或 world 状态。
-    auto boxToInputModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Multiply4x4(worldToInputMat, boxToWorldMatrix, boxToInputModelMatrix);
-    vtkMatrix4x4::DeepCopy(boxToInputModelMatrixData.data(), boxToInputModelMatrix);
-
-    boxRequest.boxToInputModelMatrix = boxToInputModelMatrixData;
-    return boxRequest;
-}
-
-OrthogonalCropRequest CropBridge::Impl::BuildPlaneRequest(
-    OrthogonalCropOperation operation,
-    OrthogonalCropDataSource dataSource) const
-{
-    // 请求构造路径：1. 读取 widget world 平面；2. 点按 worldToInput 变换、法线按逆转置变换；
-    // 3. 在 world 平面建立宽高基并变换端点，得到 input-model halfExtents。
-    // 算法裁切只消费 center+normal 的无限半空间，planeHalf 仅保留 widget 显示尺度信息。
-    OrthogonalCropRequest planeRequest;
-    planeRequest.dataSource = dataSource;
-    planeRequest.operation = operation;
-    planeRequest.geometryType = CropShape::Plane;
-    planeRequest.removalMode = m_currentRemovalMode;
-
-    CropVectorDouble3Array worldOrigin = m_currentWorldPlaneOrigin;
-    CropVectorDouble3Array worldNormal = m_currentWorldPlaneNormal;
-    if (m_planeWidget.GetCurrentWorldPlane(worldOrigin, worldNormal)) {
-        // 以 widget controller 的即时状态为准；缓存值只作为 widget 不可读时的兜底。
-    }
-
-    auto worldToInputMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    worldToInputMat->DeepCopy(GetWorldToInput().data());
-
-    const double worldOriginPoint[4] = { worldOrigin[0], worldOrigin[1], worldOrigin[2], 1.0 };
-    double inputModelOriginPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
-    // 平面中心是点，直接使用 world -> active input model 仿射变换。
-    worldToInputMat->MultiplyPoint(worldOriginPoint, inputModelOriginPoint);
-    const double invW = std::abs(inputModelOriginPoint[3]) > kPlaneVectorEpsilon
-        ? 1.0 / inputModelOriginPoint[3]
-        : 1.0;
-
-    CropVectorDouble3Array planeCenterInInputModel = {
-        inputModelOriginPoint[0] * invW,
-        inputModelOriginPoint[1] * invW,
-        inputModelOriginPoint[2] * invW
-    };
-
-    auto inputToWorldMat = vtkSmartPointer<vtkMatrix4x4>::New();
-    vtkMatrix4x4::Invert(worldToInputMat, inputToWorldMat);
-    // 法线不能按点或方向向量直接变换；world 法线折回 input model 需使用 inputToWorld 的转置。
-    inputToWorldMat->Transpose();
-
-    const double worldNormalVector[4] = { worldNormal[0], worldNormal[1], worldNormal[2], 0.0 };
-    double inputModelNormalVector[4] = { 0.0, 0.0, 1.0, 0.0 };
-    inputToWorldMat->MultiplyPoint(worldNormalVector, inputModelNormalVector);
-
-    CropVectorDouble3Array planeNormalInInputModel = {
-        inputModelNormalVector[0],
-        inputModelNormalVector[1],
-        inputModelNormalVector[2]
-    };
-    if (vtkMath::Normalize(planeNormalInInputModel.data()) <= kPlaneVectorEpsilon) {
-        planeNormalInInputModel = { 0.0, 0.0, 1.0 };
-    }
-
-    double worldNormalData[3] = { worldNormal[0], worldNormal[1], worldNormal[2] };
-    if (vtkMath::Normalize(worldNormalData) <= kPlaneVectorEpsilon) {
-        worldNormalData[0] = 0.0;
-        worldNormalData[1] = 0.0;
-        worldNormalData[2] = 1.0;
-    }
-
-    double referenceUp[3] = { 0.0, 1.0, 0.0 };
-    if (std::abs(vtkMath::Dot(worldNormalData, referenceUp)) > 0.99) {
-        referenceUp[0] = 0.0;
-        referenceUp[1] = 0.0;
-        referenceUp[2] = 1.0;
-    }
-
-    double worldPlaneAxisWidth[3] = { 0.0, 0.0, 0.0 };
-    double worldPlaneAxisHeight[3] = { 0.0, 0.0, 0.0 };
-    vtkMath::Cross(worldNormalData, referenceUp, worldPlaneAxisWidth);
-    if (vtkMath::Normalize(worldPlaneAxisWidth) <= kPlaneVectorEpsilon) {
-        worldPlaneAxisWidth[0] = 1.0;
-        worldPlaneAxisWidth[1] = 0.0;
-        worldPlaneAxisWidth[2] = 0.0;
-    }
-    vtkMath::Cross(worldNormalData, worldPlaneAxisWidth, worldPlaneAxisHeight);
-    if (vtkMath::Normalize(worldPlaneAxisHeight) <= kPlaneVectorEpsilon) {
-        worldPlaneAxisHeight[0] = 0.0;
-        worldPlaneAxisHeight[1] = 1.0;
-        worldPlaneAxisHeight[2] = 0.0;
-    }
-
-    double worldAxisWidthPoint[4] = {
-        worldOrigin[0] + worldPlaneAxisWidth[0] * m_worldHalf[0],
-        worldOrigin[1] + worldPlaneAxisWidth[1] * m_worldHalf[0],
-        worldOrigin[2] + worldPlaneAxisWidth[2] * m_worldHalf[0],
-        1.0
-    };
-    double worldAxisHeightPoint[4] = {
-        worldOrigin[0] + worldPlaneAxisHeight[0] * m_worldHalf[1],
-        worldOrigin[1] + worldPlaneAxisHeight[1] * m_worldHalf[1],
-        worldOrigin[2] + worldPlaneAxisHeight[2] * m_worldHalf[1],
-        1.0
-    };
-    double inputModelAxisWidthPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
-    double inputModelAxisHeightPoint[4] = { 0.0, 0.0, 0.0, 1.0 };
-    worldToInputMat->MultiplyPoint(worldAxisWidthPoint, inputModelAxisWidthPoint);
-    worldToInputMat->MultiplyPoint(worldAxisHeightPoint, inputModelAxisHeightPoint);
-
-    const double widthInvW = std::abs(inputModelAxisWidthPoint[3]) > kPlaneVectorEpsilon
-        ? 1.0 / inputModelAxisWidthPoint[3]
-        : 1.0;
-    const double heightInvW = std::abs(inputModelAxisHeightPoint[3]) > kPlaneVectorEpsilon
-        ? 1.0 / inputModelAxisHeightPoint[3]
-        : 1.0;
-    const double inputWidthVec[3] = {
-        inputModelAxisWidthPoint[0] * widthInvW - planeCenterInInputModel[0],
-        inputModelAxisWidthPoint[1] * widthInvW - planeCenterInInputModel[1],
-        inputModelAxisWidthPoint[2] * widthInvW - planeCenterInInputModel[2]
-    };
-    const double inputHeightVec[3] = {
-        inputModelAxisHeightPoint[0] * heightInvW - planeCenterInInputModel[0],
-        inputModelAxisHeightPoint[1] * heightInvW - planeCenterInInputModel[1],
-        inputModelAxisHeightPoint[2] * heightInvW - planeCenterInInputModel[2]
-    };
-    const std::array<double, 2> planeHalf = {
-        std::max(vtkMath::Norm(inputWidthVec), kPlaneVectorEpsilon),
-        std::max(vtkMath::Norm(inputHeightVec), kPlaneVectorEpsilon)
-    };
-
-    planeRequest.planeCenterInInputModel = planeCenterInInputModel;
-    planeRequest.planeNormalInInputModel = planeNormalInInputModel;
-    // halfExtents 继续随 request 下发，是为了保留 widget 尺度这一层级信息；
-    // 裁切数学只使用 center + normal 的无限半空间，避免再次出现误导性的平面方框。
-    planeRequest.planeHalf = planeHalf;
-    return planeRequest;
-}
-
-bool CropBridge::Impl::SwitchCropBox()
-{
-    if (!GetInputReady()) {
-        std::cerr << "[OrthogonalCrop] Box crop trigger failed: no active image/polydata input is available yet." << std::endl;
-        return false;
-    }
-
-    if (m_sessionPhase != CropSessionPhase::Idle) {
-        // 同几何再次触发等价于关闭当前会话；切换几何则先走统一 Exit 清理，再继续启用新 widget。
-        const auto previousGeometryType = m_currentGeometryType;
-        if (!ExitCrop()) {
-            return false;
-        }
-        if (previousGeometryType == CropShape::Box) {
-            return true;
+    ClearShaderStage();
+    m_hasBaseShader = false;
+    for (const auto& target : m_targets) {
+        if (target.effect) {
+            (void)target.effect->ClearCropParams();
         }
     }
-
-    if (!m_primaryInteractor) {
-        std::cerr << "[OrthogonalCrop] Box crop widget init failed: primary interactor missing." << std::endl;
-        return false;
-    }
-
-    if (!m_hasWorldState) {
-        m_currentWorldBounds = GetStartBounds();
-        m_hasWorldState = true;
-    }
-
-    // 进入交互模式时，widget 使用 world bounds；真正执行时再通过 worldToInputModel 折回 active input model。
-    m_boxWidget.SetInteractor(m_primaryInteractor);
-    m_boxWidget.SetReferenceWorldBounds(GetActiveWorldBounds()); // 初始化widget交互范围
-    m_boxWidget.SetWidgetWorldBounds(m_currentWorldBounds); // 设置实际交互盒子范围有多大
-    if (!m_boxWidget.SetEnabled(true)) {
-        std::cerr << "[OrthogonalCrop] Box crop widget init failed: vtkBoxWidget2 could not be enabled." << std::endl;
-        return false;
-    }
-
-    m_planeWidget.SetEnabled(false);
-    // 只有 widget 已成功启用后才发布交互态，避免初始化失败留下“已激活”假状态。
-    m_currentGeometryType = CropShape::Box;
-    m_sessionPhase = CropSessionPhase::Editing;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Box crop widget active. UI uses vtkBoxWidget2, dataSource = "
-        << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Use host crop commands to preview, submit, or exit." << std::endl;
-    return true;
 }
 
-bool CropBridge::Impl::SwitchCropPlane()
+void CropBridge::Impl::ClearTargets()
 {
-    if (!GetInputReady()) {
-        std::cerr << "[OrthogonalCrop] Planar crop trigger failed: no active image/polydata input is available yet." << std::endl;
-        return false;
-    }
-
-    if (m_sessionPhase != CropSessionPhase::Idle) {
-        // 与 Box 共用“同类关闭、异类先退出后切换”的入口语义，Reloading 会由 ExitCrop 拒绝。
-        const auto previousGeometryType = m_currentGeometryType;
-        if (!ExitCrop()) {
-            return false;
-        }
-        if (previousGeometryType == CropShape::Plane) {
-            return true;
+    for (const auto& target : m_targets) {
+        if (target.service && target.effect) {
+            (void)target.service->DetachRenderEffect(
+                target.effect.get());
         }
     }
-
-    if (!m_primaryInteractor) {
-        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: primary interactor missing." << std::endl;
-        return false;
-    }
-
-    const auto activeWorldBounds = GetActiveWorldBounds();
-    const std::array<double, 3> activeWorldDimensions = {
-        activeWorldBounds[1] - activeWorldBounds[0],
-        activeWorldBounds[3] - activeWorldBounds[2],
-        activeWorldBounds[5] - activeWorldBounds[4]
-    };
-    m_currentWorldPlaneOrigin = {
-        (activeWorldBounds[0] + activeWorldBounds[1]) * 0.5,
-        (activeWorldBounds[2] + activeWorldBounds[3]) * 0.5,
-        (activeWorldBounds[4] + activeWorldBounds[5]) * 0.5
-    };
-    m_currentWorldPlaneNormal = { 0.0, 0.0, 1.0 };
-    m_worldHalf = {
-        std::max(activeWorldDimensions[0] * kPlaneScale, kPlaneVectorEpsilon),
-        std::max(activeWorldDimensions[1] * kPlaneScale, kPlaneVectorEpsilon)
-    };
-    // reference bounds 提供初始中心和启用合法性门槛；widget 可视范围由 origin 与 halfExtents 构造。
-    // halfExtents 只保留交互平面的尺度快照，不驱动算法层生成有限矩形 outline。
-    m_currentWorldBounds = activeWorldBounds;
-    m_hasWorldState = true;
-
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetInteractor(m_primaryInteractor);
-    m_planeWidget.SetReferenceWorldBounds(activeWorldBounds);
-    m_planeWidget.SetWidgetWorldPlane(
-        m_currentWorldPlaneOrigin,
-        m_currentWorldPlaneNormal,
-        m_worldHalf);
-    if (!m_planeWidget.SetEnabled(true)) {
-        std::cerr << "[OrthogonalCrop] Planar crop widget init failed: vtkImplicitPlaneWidget2 could not be enabled." << std::endl;
-        return false;
-    }
-
-    // 只有 widget 已成功启用后才发布交互态，避免初始化失败留下“已激活”假状态。
-    m_currentGeometryType = CropShape::Plane;
-    m_sessionPhase = CropSessionPhase::Editing;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Planar crop widget active. UI uses vtkImplicitPlaneWidget2, dataSource = "
-        << GetDataSourceText(m_backend.GetActiveDataSource())
-        << ". Use host crop commands to preview, submit, or exit." << std::endl;
-    return true;
+    m_targets.clear();
 }
 
 bool CropBridge::Impl::ExitCrop()
 {
-    if (m_sessionPhase == CropSessionPhase::Idle) {
+    if (!m_isActive) {
         return false;
     }
-
-    // reload pending 时 widget 已被禁用，但 submit 元数据仍等待完成回调，不能提前清场。
-    if (m_sessionPhase == CropSessionPhase::Reloading) {
-        std::cout << "[OrthogonalCrop] Crop widget deactivation deferred: image submit reload is pending." << std::endl;
-        return false;
-    }
-
-    // 正常退出同时清空交互与预览意图；world 几何缓存保留给后续再次激活复用。
+    // 先拒绝 widget 回调，再关闭 VTK 控件；Off 期间的结束事件只能清理交互态。
+    m_isActive = false;
+    m_hasDrag = false;
+    m_dragStart.reset();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
-    m_sessionPhase = CropSessionPhase::Idle;
-    m_isPreviewOn = false;
-    m_lastInteractionPhase = CropInteractionPhase::Released;
-    ResetPreview();
-    std::cout << "[OrthogonalCrop] Crop widget deactivated. 3D navigation restored." << std::endl;
+    // Exit 只结束编辑生命周期：取消尚未提交的 staged revision，并冻结当前
+    // committed 前缀；输入换代或 ClearBindings 才负责清除可见裁切结果。
+    ClearShaderStage();
+    m_draftIndex.reset();
+    m_removalMode = CropRemovalMode::None;
+    // 当前 committed 节点保持不变；这里只发布一帧，让 reference renderer
+    // 在 Timer 渲染链中刷新已经关闭的 Box/Plane 控件。
+    if (m_referenceService) {
+        m_referenceService->SetDirty();
+    }
     return true;
 }
 
 bool CropBridge::Impl::GetCropActive() const
 {
-    return m_sessionPhase != CropSessionPhase::Idle;
+    return m_isActive;
 }
 
-bool CropBridge::Impl::SendPreview()
+CropHistoryState CropBridge::Impl::GetCropHistory() const
 {
-    if (!m_hasWorldState) {
-        return false;
-    }
-
-    // 1. 从当前 widget world 几何构造 request；Box 与 Plane 只在几何真源构造上不同。
-    const auto volumeRequest = m_currentGeometryType == CropShape::Plane
-        ? BuildPlaneRequest(
-            OrthogonalCropOperation::Preview,
-            OrthogonalCropDataSource::VolumeData)
-        : BuildBoxRequest(
-            OrthogonalCropOperation::Preview,
-            OrthogonalCropDataSource::VolumeData);
-    auto polyDataRequest = volumeRequest;
-    polyDataRequest.dataSource = OrthogonalCropDataSource::PolyData;
-    ClearPreviewInput();
-
-    // 2. 先确认是否存在 3D 主 target；VolumeData 结果只计算一次并在这些 target 间复用。
-    bool hasMainTarget = false;
-    bool isPreviewSent = false;
-    for (const auto& target : m_previewRenderTargets) {
-        if (!target.first) {
-            continue;
-        }
-
-        if (target.first->GetNavigationAxis() < 0) {
-            hasMainTarget = true;
-        }
-    }
-
-    OrthogonalCropResult volumeResult;
-    bool hasVolumeResult = false;
-    if (m_backend.GetImageReady() && hasMainTarget) {
-        volumeResult = m_backend.GetResult(volumeRequest);
-        if (volumeResult.failureReason == CropFailure::None
-            && volumeResult.isSucceeded) {
-            hasVolumeResult = true;
-        }
-    }
-
-    // 3. 每个 target 单独读取当前 actor mesh，路由 PolyData 结果，再由 plug 应用主显示和 overlay。
-    for (const auto& target : m_previewRenderTargets) {
-        if (!target.first || !target.second) {
-            continue;
-        }
-
-        OrthogonalCropResult polyResult;
-        bool hasPolyResult = false;
-        m_previewPlug.ResetPreview(target.first, target.second);
-
-        const bool isMain3DTarget = target.first->GetNavigationAxis() < 0;
-        const OrthogonalCropResult* volumePreviewResult = isMain3DTarget && hasVolumeResult
-            ? &volumeResult
-            : nullptr;
-
-        if (auto polyData = m_previewPlug.GetPreviewData(target.first)) {
-            m_backend.SetInputPolyData(polyData);
-
-            polyResult = m_backend.GetResult(polyDataRequest);
-            ClearPreviewInput();
-            // PolyData preview 是 render-only 主显示路径；
-            // 有效性由 result 成功与否决定，不再强制要求 clipPolyData artifact。
-            if (polyResult.failureReason == CropFailure::None
-                && polyResult.isSucceeded) {
-                hasPolyResult = true;
-            }
-        }
-
-        if (!volumePreviewResult && !hasPolyResult) {
-            continue;
-        }
-
-        isPreviewSent = m_previewPlug.SetPreview(
-            target.first,
-            target.second,
-            m_referenceRenderService,
-            volumePreviewResult,
-            hasPolyResult ? &polyResult : nullptr,
-            m_currentRemovalMode)
-            || isPreviewSent;
-        target.first->SetDirty();
-    }
-
-    // 4. 无论有多少 target，结束时都把 router 的临时 mesh 输入恢复为 host 绑定输入。
-    ClearPreviewInput();
-    return isPreviewSent;
-}
-
-void CropBridge::Impl::SwitchPreview(CropRemovalMode removalMode)
-{
-    if (m_sessionPhase == CropSessionPhase::Idle) {
-        return;
-    }
-
-    // Box 与 Plane 使用相同的 preview 切换状态机：
-    // A. 同模式再次触发时关闭 preview 并恢复主模型。
-    // B. 切到新模式时更新 removal mode，非拖拽阶段立即刷新。
-    if (m_isPreviewOn && m_currentRemovalMode == removalMode) {
-        m_isPreviewOn = false;
-        ResetPreview();
-        return;
-    }
-
-    m_isPreviewOn = true;
-    m_currentRemovalMode = removalMode;
-    if (m_lastInteractionPhase != CropInteractionPhase::Dragging) {
-        // 拖拽中等待 EndInteractionEvent 统一刷新，避免重复执行裁切预览。
-        (void)SendPreview();
-    }
-}
-
-void CropBridge::Impl::ClearPreviewViews()
-{
-    // 这里只清理 overlay 生命周期；
-    // 主模型 preview 状态由 ResetPreview 收口，避免解绑窗口时意外改动主显示。
-    for (const auto& target : m_previewRenderTargets) {
-        if (target.first && target.second) {
-            target.first->RemoveOverlayStrategy(target.second);
-        }
-    }
-    m_previewRenderTargets.clear();
-    ClearPreviewInput();
-}
-
-void CropBridge::Impl::ResetPreview()
-{
-    // 恢复 preview 涉及 overlay、volume shader 和 polydata clip 三条显示路径；
-    // 统一在这里清空临时状态并标脏，确保关闭 preview 后各窗口回到全模型显示。
-    for (auto& target : m_previewRenderTargets) {
-        m_previewPlug.ResetPreview(target.first, target.second);
-        if (target.first) {
-            target.first->SetDirty();
-        }
-    }
-    ClearPreviewInput();
-}
-
-bool CropBridge::Impl::BuildCameraState()
-{
-    ClearCamera();
-    if (!m_referenceRenderer || !m_referenceRenderer->GetActiveCamera()) {
-        return false;
-    }
-
-    auto* camera = m_referenceRenderer->GetActiveCamera();
-    camera->GetPosition(m_submitCameraState.position.data());
-    camera->GetFocalPoint(m_submitCameraState.focalPoint.data());
-    camera->GetViewUp(m_submitCameraState.viewUp.data());
-    camera->GetClippingRange(m_submitCameraState.clippingRange.data());
-    m_submitCameraState.parallelScale = camera->GetParallelScale();
-    m_submitCameraState.viewAngle = camera->GetViewAngle();
-    m_submitCameraState.isParallelProjection = camera->GetParallelProjection() != 0;
-    m_submitCameraState.isValid = true;
-    return true;
-}
-
-bool CropBridge::Impl::ResetCamera()
-{
-    if (!m_submitCameraState.isValid
-        || !m_referenceRenderer
-        || !m_referenceRenderer->GetActiveCamera()) {
-        return false;
-    }
-
-    auto* camera = m_referenceRenderer->GetActiveCamera();
-    camera->SetPosition(m_submitCameraState.position.data());
-    camera->SetFocalPoint(m_submitCameraState.focalPoint.data());
-    camera->SetViewUp(m_submitCameraState.viewUp.data());
-    camera->SetClippingRange(m_submitCameraState.clippingRange.data());
-    camera->SetParallelScale(m_submitCameraState.parallelScale);
-    camera->SetViewAngle(m_submitCameraState.viewAngle);
-    camera->SetParallelProjection(m_submitCameraState.isParallelProjection ? 1 : 0);
-    ClearCamera();
-    return true;
-}
-
-bool CropBridge::Impl::ClearCamera()
-{
-    const bool hasCamera = m_submitCameraState.isValid;
-    m_submitCameraState = {};
-    return hasCamera;
-}
-
-bool CropBridge::Impl::SendSubmit(std::function<void(bool)> onComplete)
-{
-    if (!m_submitReloadHandler) {
-        std::cerr << "[OrthogonalCrop] Submit failed: submit reload handler is not ready." << std::endl;
-        return false;
-    }
-
-    // 1. submit 只消费已激活、非拖拽且具有 image 输入的当前状态；pending reload 会拒绝重入。
-    if (!GetSubmitReady()) {
-        return false;
-    }
-
-    BuildCameraState();
-    ClearPreviewInput();
-
-    // 2. request 直接从当前 widget 几何和 backend image 输入构造，不复用任何 preview result。
-    const auto submitRequest = m_currentGeometryType == CropShape::Plane
-        ? BuildPlaneRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData)
-        : BuildBoxRequest(OrthogonalCropOperation::Submit, OrthogonalCropDataSource::ImageData);
-    auto submitResult = m_backend.GetResult(submitRequest);
-    if (submitResult.failureReason != CropFailure::None || !submitResult.isSucceeded) {
-        ClearCamera();
-        std::cerr << "[OrthogonalCrop] Submit failed: "
-            << GetFailureReasonText(submitResult.failureReason);
-        if (!submitResult.message.empty()) {
-            std::cerr << " - " << submitResult.message;
-        }
-        std::cerr << std::endl;
-        return false;
-    }
-
-    auto submitImage = submitResult.submitImage;
-    if (!submitImage) {
-        std::cerr << "[OrthogonalCrop] Image submit failed: output image is null." << std::endl;
-        ClearCamera();
-        m_submitOverlay = OrthogonalCropResult();
-        return false;
-    }
-
-    // 3. submit image 移交 reload handler；bridge 只保留 overlay 元数据，并在外部调用前关闭 widget、置 pending。
-    submitResult.submitImage = vtkSmartPointer<vtkImageData>();
-    m_submitOverlay = submitResult;
-    m_submitCallback = std::move(onComplete);
-    m_sessionPhase = CropSessionPhase::Reloading;
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetEnabled(false);
-
-    // A. handler 拒绝表示外部事务从未建立；本地立即清 pending、清元数据并恢复当前 widget。
-    std::size_t generation = 0;
-    {
-        std::lock_guard<std::mutex> lock(m_reloadGate->mutex);
-        generation = ++m_reloadGate->generation;
-    }
-    const std::weak_ptr<ReloadGate> weakGate = m_reloadGate;
-    bool isAccepted = false;
-    try {
-        isAccepted = m_submitReloadHandler(
-            std::move(submitImage),
-            [weakGate, generation](bool isSuccess) {
-                const auto gate = weakGate.lock();
-                if (!gate) return;
-                Impl* owner = nullptr;
-                {
-                    std::lock_guard<std::mutex> lock(gate->mutex);
-                    // owner 与 generation 在同一临界区只完成 gate 时点校验；解锁后的裸 owner 调用
-                    // 仍依赖宿主既有约定：reload completion 不与 CropBridge 析构并发。
-                    if (!gate->owner || gate->generation != generation) return;
-                    owner = gate->owner;
-                    ++gate->generation;
-                }
-                owner->OnSubmitReload(isSuccess);
-            });
-    }
-    catch (const std::exception& error) {
-        std::cerr << "[OrthogonalCrop] Reload handler failed: " << error.what() << std::endl;
-    }
-    catch (...) {
-        std::cerr << "[OrthogonalCrop] Reload handler failed with an unknown exception." << std::endl;
-    }
-    if (!isAccepted) {
-        std::cerr << "[OrthogonalCrop] Submit failed: reload request was rejected." << std::endl;
-        ClearPreviewInput();
-        m_submitOverlay = OrthogonalCropResult();
-        m_submitCallback = nullptr;
-        m_sessionPhase = CropSessionPhase::Editing;
-        ClearCamera();
-        if (m_sessionPhase == CropSessionPhase::Editing) {
-            if (m_currentGeometryType == CropShape::Plane) {
-                m_planeWidget.SetEnabled(true);
-            }
-            else {
-                m_boxWidget.SetEnabled(true);
-            }
-        }
-        return false;
-    }
-
-    // B. true 只表示 reload handler 接受了请求；成功或失败恢复均由 OnSubmitReload 完成。
-    return true;
-}
-
-bool CropBridge::Impl::GetSubmitReady() const
-{
-    if (m_sessionPhase != CropSessionPhase::Editing || !m_hasWorldState) {
-        std::cerr << "[OrthogonalCrop] Submit failed: crop widget is not active." << std::endl;
-        return false;
-    }
-
-    if (m_lastInteractionPhase == CropInteractionPhase::Dragging) {
-        std::cerr << "[OrthogonalCrop] Submit failed: wait until widget dragging finishes." << std::endl;
-        return false;
-    }
-
-    if (!m_backend.GetImageReady()) {
-        std::cerr << "[OrthogonalCrop] Submit failed: image crop input is missing." << std::endl;
-        return false;
-    }
-
-    return true;
-}
-
-void CropBridge::Impl::OnSubmitReload(bool isSuccess)
-{
-    auto callback = std::move(m_submitCallback);
-    if (!isSuccess) {
-        // A. reload 失败不提交几何状态：清除 pending 事务并恢复当前模式 widget，允许用户调整后重试。
-        std::cerr << "[OrthogonalCrop] Submit reload failed." << std::endl;
-        ClearPreviewInput();
-        m_submitOverlay = OrthogonalCropResult();
-        m_sessionPhase = CropSessionPhase::Editing;
-        ClearCamera();
-        if (m_sessionPhase == CropSessionPhase::Editing) {
-            if (m_currentGeometryType == CropShape::Plane) {
-                m_planeWidget.SetEnabled(true);
-            }
-            else {
-                m_boxWidget.SetEnabled(true);
-            }
-        }
-        if (callback) {
-            try { callback(false); } catch (...) {}
-        }
-        return;
-    }
-
-    // B. reload 成功后新 image 已成为 host 真源；旧 world 几何失效，退出交互并要求下一轮重建 bounds。
-    ClearPreviewInput();
-
-    const auto submitOverlayResult = m_submitOverlay;
-    m_submitOverlay = OrthogonalCropResult();
-
-    std::cout << "[OrthogonalCrop] Submit applied to host image data." << std::endl;
-    ResetCamera();
-    m_sessionPhase = CropSessionPhase::Editing;
-    m_hasWorldState = false;
-    // ExitCrop 只接受 Editing；这里先从 Reloading 临时回到 Editing，是为了复用同一套
-    // widget/preview/phase 清理路径，退出完成后的最终状态仍为 Idle。
-    ExitCrop();
-
-    if (!submitOverlayResult.isSucceeded) {
-        return;
-    }
-
-    // submit result 已移除 image payload，只把与新主数据对应的裁切元数据分发给各 overlay target。
-    for (const auto& target : m_previewRenderTargets) {
-        if (!target.first || !target.second) {
-            continue;
-        }
-
-        target.second->SetSliceAxis(target.first->GetNavigationAxis());
-        target.second->SetCropResult(submitOverlayResult);
-        target.first->SetDirty();
-    }
-    if (callback) {
-        try { callback(true); } catch (...) {}
-    }
-}
-
-const char* CropBridge::Impl::GetFailureReasonText(CropFailure failureReason)
-{
-    switch (failureReason) {
-    case CropFailure::None:
-        return "None";
-    case CropFailure::NoImage:
-        return "NoImage";
-    case CropFailure::NoPolyData:
-        return "NoPolyData";
-    case CropFailure::BadBounds:
-        return "BadBounds";
-    case CropFailure::OutOfBounds:
-        return "OutOfBounds";
-    case CropFailure::NoBackend:
-        return "NoBackend";
-    case CropFailure::BadSubmitMode:
-        return "BadSubmitMode";
-    case CropFailure::LowRam:
-        return "LowRam";
-    case CropFailure::MaskFailed:
-        return "MaskFailed";
-    case CropFailure::ImageFailed:
-        return "ImageFailed";
-    case CropFailure::ClipFailed:
-        return "ClipFailed";
-    }
-
-    return "Unknown";
-}
-
-const char* CropBridge::Impl::GetDataSourceText(OrthogonalCropDataSource dataSource)
-{
-    switch (dataSource) {
-    case OrthogonalCropDataSource::ImageData:
-        return "ImageData";
-    case OrthogonalCropDataSource::VolumeData:
-        return "VolumeData";
-    case OrthogonalCropDataSource::PolyData:
-        return "PolyData";
-    default:
-        return "Unknown";
-    }
+    return CropHistoryState{
+        m_cursor,
+        m_history.size(),
+        m_removalMode,
+        m_draftIndex.has_value(),
+        m_isActive,
+        m_baseNodeCount,
+        m_allHistory.size()
+    };
 }
 
 CropBridge::CropBridge()
-    : m_impl(std::make_unique<CropBridge::Impl>())
+    : m_impl(std::make_unique<Impl>())
 {
 }
 
 CropBridge::~CropBridge() = default;
 
-CropBridge::CropBridge(CropBridge&&) noexcept = default;
-
-CropBridge& CropBridge::operator=(CropBridge&&) noexcept = default;
-
-void CropBridge::SetInputSnapshot(
-    vtkSmartPointer<vtkImageData> image)
+bool CropBridge::StartView(const CropViewRequest& request) { return m_impl->StartView(request); }
+bool CropBridge::ClearBindings() { return m_impl->ClearBindings(); }
+bool CropBridge::SetCropInput(CropInputSnapshot input) { return m_impl->SetCropInput(std::move(input)); }
+bool CropBridge::StartCropBaseline(
+    CropInputSnapshot input,
+    const std::size_t baseNodeCount)
 {
-    m_impl->SetInputImage(std::move(image));
+    return m_impl->StartCropBaseline(
+        std::move(input), baseNodeCount);
 }
-
-void CropBridge::SetSubmitReloadHandler(ReloadSubmitter reloadSubmitter)
-{
-    m_impl->SetSubmitReloadHandler(std::move(reloadSubmitter));
-}
-
-bool CropBridge::SendSubmit(std::function<void(bool)> onComplete)
-{
-    return m_impl->SendSubmit(std::move(onComplete));
-}
-
-bool CropBridge::StartView(CropViewRequest request)
-{
-    return m_impl->StartView(std::move(request));
-}
-
-void CropBridge::ClearBindings()
-{
-    m_impl->ClearBindings();
-}
-
-bool CropBridge::SwitchCropBox()
-{
-    return m_impl->SwitchCropBox();
-}
-
-bool CropBridge::SwitchCropPlane()
-{
-    return m_impl->SwitchCropPlane();
-}
-
-bool CropBridge::ExitCrop()
-{
-    return m_impl->ExitCrop();
-}
-
-bool CropBridge::GetCropActive() const
-{
-    return m_impl->GetCropActive();
-}
-
-void CropBridge::SwitchPreview(CropRemovalMode removalMode)
-{
-    m_impl->SwitchPreview(removalMode);
-}
+bool CropBridge::SetCropBaselineComplete() noexcept { return m_impl->SetCropBaselineComplete(); }
+bool CropBridge::ClearCropBaseline() { return m_impl->ClearCropBaseline(); }
+bool CropBridge::SwitchCropBox() { return m_impl->SwitchCrop(CropShape::Box); }
+bool CropBridge::SwitchCropPlane() { return m_impl->SwitchCrop(CropShape::Plane); }
+bool CropBridge::SetCropMode(const CropRemovalMode removalMode) { return m_impl->SetCropMode(removalMode); }
+bool CropBridge::PreviousCrop() { return m_impl->PreviousCrop(); }
+bool CropBridge::NextCrop() { return m_impl->NextCrop(); }
+bool CropBridge::SetCropNode(const std::size_t nodeCount) { return m_impl->SetCropNode(nodeCount); }
+bool CropBridge::ExitCrop() { return m_impl->ExitCrop(); }
+bool CropBridge::GetCropActive() const { return m_impl->GetCropActive(); }
+CropHistoryState CropBridge::GetCropHistory() const { return m_impl->GetCropHistory(); }
+bool CropBridge::GetShaderTickNeeded() const { return m_impl->GetShaderTickNeeded(); }
+bool CropBridge::SendShaderCommit() { return m_impl->SendShaderCommit(); }
+bool CropBridge::ExportCrop(CropExportCallback onComplete) { return m_impl->ExportCrop(std::move(onComplete)); }
+bool CropBridge::GetExportTickNeeded() const { return m_impl->GetExportTickNeeded(); }
+bool CropBridge::SendExportResult() { return m_impl->SendExportResult(); }

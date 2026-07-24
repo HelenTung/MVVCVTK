@@ -1,15 +1,28 @@
 #include "Tasks/AppDataLoadTaskService.h"
+#include "Algorithms/CropAlgorithm.h"
 #include "AppState.h"
 #include "AppStateEvents.h"
+#include "Data/DataManager.h"
 #include "Data/VolumeTypes.h"
 #include "PlanarTestSuites.h"
+#include "Render/CropShaderController.h"
+#include "Services/AppService.h"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#include <vtkImageData.h>
+#include <vtkPNGReader.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
+#include <vtkWeakPointer.h>
 
 namespace {
 void SetExpect(bool isPassed, const char* message, int& failureCount)
@@ -62,6 +75,38 @@ public:
     std::vector<float> loadedVoxels;
     bool isLoadSuccess = true;
     bool isThrowNeeded = false;
+};
+
+class DataManagerProbe final : public BaseDataManager {
+public:
+    bool SetDataLoaded(
+        const std::string&,
+        const VolumeLayout&) override
+    {
+        return false;
+    }
+
+    bool SetInitial(
+        vtkSmartPointer<vtkImageData> image)
+    {
+        return SetOwnedImage(std::move(image));
+    }
+
+    bool SetCandidate(
+        ImageState state,
+        const ImageSnapshot& expectedSnapshot,
+        ImageSnapshot& publishedSnapshot)
+    {
+        return SetCurrentData(
+            std::move(state),
+            expectedSnapshot,
+            publishedSnapshot);
+    }
+
+    ImageSnapshot GetSnapshot() const
+    {
+        return GetImageSnapshot();
+    }
 };
 
 void StartVolumeTypes(int& failureCount)
@@ -149,6 +194,224 @@ void StartStateGate(int& failureCount)
     SetExpect(state->ResetLoad(LoadEventKind::Reload),
         "published terminal must release admission", failureCount);
 }
+
+void StartMaskSnapshot(int& failureCount)
+{
+    DataManagerProbe dataManager;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 1, 1);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    auto* values = static_cast<float*>(
+        image->GetScalarPointer());
+    values[0] = 0.0f;
+    values[1] = 100.0f;
+    SetExpect(dataManager.SetInitial(image),
+        "initial image snapshot should publish",
+        failureCount);
+
+    const auto expected = dataManager.GetSnapshot();
+    auto mask = vtkSmartPointer<vtkImageData>::New();
+    mask->CopyStructure(image);
+    mask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    auto* maskValues =
+        static_cast<unsigned char*>(
+            mask->GetScalarPointer());
+    maskValues[0] = 255;
+    maskValues[1] = 0;
+
+    ImageState candidate = *expected;
+    candidate.validityMask = mask;
+    ImageSnapshot publishedSnapshot;
+    SetExpect(dataManager.SetCandidate(
+            candidate,
+            expected,
+            publishedSnapshot),
+        "image and validity mask should publish as one CAS batch",
+        failureCount);
+    const auto current = dataManager.GetSnapshot();
+    SetExpect(current && publishedSnapshot == current
+            && current->version == expected->version + 1
+            && current->validityMask.GetPointer()
+                == mask.GetPointer(),
+        "published mask should share the current ImageState version",
+        failureCount);
+    const auto currentVersion =
+        current ? current->version : 0;
+    SetExpect(!dataManager.SetCandidate(
+            candidate,
+            expected,
+            publishedSnapshot)
+            && !publishedSnapshot
+            && dataManager.GetDataVersion()
+                == currentVersion,
+        "a stale expected snapshot must not replace current image or mask",
+        failureCount);
+
+    const auto uniqueId =
+        std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+    const auto outputDir =
+        std::filesystem::temp_directory_path()
+        / ("MVVCVTK_mask_"
+            + std::to_string(uniqueId));
+    const std::array<double, 16> identity = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    const bool isExported = dataManager.ExportSlices(
+        outputDir.u8string(),
+        Orientation::Top_down,
+        { 100.0, 50.0 },
+        identity);
+    auto reader = vtkSmartPointer<vtkPNGReader>::New();
+    reader->SetFileName(
+        (outputDir / "Top_down_0000.png")
+            .u8string().c_str());
+    if (isExported) {
+        reader->Update();
+    }
+    auto* output = reader->GetOutput();
+    const auto* outputValues =
+        output && output->GetNumberOfPoints() == 2
+        ? static_cast<const unsigned char*>(
+            output->GetScalarPointer())
+        : nullptr;
+    SetExpect(isExported
+            && outputValues
+            && outputValues[0] == 0
+            && outputValues[1] == 0,
+        "slice export should write mask=0 voxels as background",
+        failureCount);
+    std::error_code error;
+    std::filesystem::remove_all(outputDir, error);
+}
+
+void StartInputSwap(int& failureCount)
+{
+    auto dataManager =
+        std::make_shared<DataManagerProbe>();
+    auto firstImage =
+        vtkSmartPointer<vtkImageData>::New();
+    firstImage->SetDimensions(4, 4, 4);
+    firstImage->AllocateScalars(VTK_FLOAT, 1);
+    SetExpect(dataManager->SetInitial(firstImage),
+        "render input swap needs an initial image",
+        failureCount);
+
+    auto broadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    auto state =
+        std::make_shared<SharedInteractionState>(
+            broadcaster);
+    VizService service(
+        dataManager, state, broadcaster);
+    auto renderer =
+        vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow =
+        vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    service.SetRenderContext(
+        renderWindow, renderer);
+    service.SetVizMode(VizMode::Volume);
+    SetExpect(service.SendReloadUpdate(),
+        "initial render pipeline should build",
+        failureCount);
+    auto* firstProp = service.GetMainProp();
+    service.SetVizMode(VizMode::IsoSurface);
+    SetExpect(service.SendReloadUpdate(),
+        "input swap test should cache a second mode",
+        failureCount);
+    vtkWeakPointer<vtkProp3D> retiredProp =
+        service.GetMainProp();
+    service.SetVizMode(VizMode::Volume);
+    SetExpect(service.SendReloadUpdate()
+            && service.GetMainProp() == firstProp,
+        "input swap test should return to the cached current mode",
+        failureCount);
+    auto cropEffect =
+        std::make_shared<CropShaderEffect>();
+    SetExpect(service.AttachRenderEffect(cropEffect),
+        "input swap test should attach one crop effect",
+        failureCount);
+
+    CropOpItem keepOp;
+    keepOp.operationIndex = 1;
+    keepOp.geometryType = CropShape::Plane;
+    keepOp.removalMode = CropRemovalMode::KeepInside;
+    CropOpItem removeOp = keepOp;
+    removeOp.operationIndex = 2;
+    removeOp.removalMode =
+        CropRemovalMode::RemoveInside;
+    const auto tableResult =
+        CropAlgorithm::BuildPredicateTable(
+            { keepOp, removeOp }, 2);
+    CropShaderPayload payload;
+    payload.revision = 1;
+    payload.sourceStamp =
+        service.GetRenderInputStamp();
+    payload.nodeCount = 2;
+    payload.predicateTable =
+        tableResult.predicateTable;
+    SetExpect(tableResult.isSucceeded
+            && cropEffect->SetCropParams(payload),
+        "KeepInside and RemoveInside should stage before input replacement",
+        failureCount);
+
+    auto nextImage =
+        vtkSmartPointer<vtkImageData>::New();
+    nextImage->DeepCopy(firstImage);
+    auto mask =
+        vtkSmartPointer<vtkImageData>::New();
+    mask->CopyStructure(nextImage);
+    mask->AllocateScalars(
+        VTK_UNSIGNED_CHAR, 1);
+    auto* maskValues =
+        static_cast<unsigned char*>(
+            mask->GetScalarPointer());
+    std::fill_n(
+        maskValues,
+        mask->GetNumberOfPoints(),
+        static_cast<unsigned char>(255));
+    const auto expected =
+        dataManager->GetSnapshot();
+    ImageState candidate = *expected;
+    candidate.image = nextImage;
+    candidate.validityMask = mask;
+    ImageSnapshot published;
+    SetExpect(dataManager->SetCandidate(
+            std::move(candidate),
+            expected,
+            published),
+        "next image and mask should publish",
+        failureCount);
+    SetExpect(!service.SendReloadUpdate(),
+        "input replacement must wait for a staged crop revision",
+        failureCount);
+    SetExpect(service.GetMainProp() == firstProp
+            && cropEffect->GetState().status
+                != RenderEffectStatus::Failed,
+        "deferred input replacement must keep the current crop binding valid",
+        failureCount);
+    SetExpect(cropEffect->ClearCropStage(
+            payload.revision),
+        "input swap test should finish the staged transaction",
+        failureCount);
+    SetExpect(service.SendReloadUpdate(),
+        "same-mode render input should rebuild after the crop transaction",
+        failureCount);
+    auto* nextProp = service.GetMainProp();
+    SetExpect(firstProp
+            && nextProp
+            && firstProp != nextProp,
+        "same-mode input replacement must swap a prepared strategy instead of mutating the visible strategy",
+        failureCount);
+    SetExpect(!retiredProp,
+        "input replacement must release inactive strategies that retain the previous materialized image",
+        failureCount);
+}
 }
 
 int AppTaskSuite::GetFailCount() const
@@ -157,5 +420,7 @@ int AppTaskSuite::GetFailCount() const
     StartVolumeTypes(failureCount);
     StartOwningTasks(failureCount);
     StartStateGate(failureCount);
+    StartMaskSnapshot(failureCount);
+    StartInputSwap(failureCount);
     return failureCount;
 }

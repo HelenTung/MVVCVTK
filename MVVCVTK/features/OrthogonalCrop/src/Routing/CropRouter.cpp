@@ -1,16 +1,6 @@
-// =====================================================================
-// Path: MVVCVTK/features/OrthogonalCrop/src/Routing/CropRouter.cpp
-// 分类: Service / Backend Router Implementation
-// 说明: 按 request 指定的裁切类型 / 动作 / 数据源，把图像 / 体渲染 / 网格请求直接分发到算法层。
-// =====================================================================
-
 #include "Routing/CropRouter.h"
 
-#include "Algorithms/OrthogonalCropAlgorithm.h"
-#include "Algorithms/PlanarCropAlgorithm.h"
-
-#include <vtkImageData.h>
-#include <vtkPolyData.h>
+#include "Algorithms/CropAlgorithm.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -22,319 +12,11 @@
 #endif
 #endif
 
-#include <memory>
-#include <string>
+#include <cstddef>
 #include <utility>
 
-class CropRouter::Impl final {
-public:
-    void SetInputImage(vtkSmartPointer<vtkImageData> image);
-    vtkSmartPointer<vtkImageData> GetInputImage() const;
-    void SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData);
-    void ClearInputPolyData();
-    vtkSmartPointer<vtkPolyData> GetInputPolyData() const;
-    void SetPreferredDataSource(OrthogonalCropDataSource dataSource);
-    OrthogonalCropDataSource GetActiveDataSource() const;
-    std::array<double, 6> GetActiveInputModelBounds() const;
-    OrthogonalCropRequest GetDefaultRequest() const;
-    OrthogonalCropResult GetResult(const OrthogonalCropRequest& request) const;
-
-private:
-    static OrthogonalCropResult GetFailure(
-        const OrthogonalCropRequest& request,
-        CropFailure failureReason,
-        const std::string& message);
-    OrthogonalCropResult GetBoxResult(const OrthogonalCropRequest& request) const;
-    OrthogonalCropResult GetPlaneResult(const OrthogonalCropRequest& request) const;
-    std::array<double, 6> GetImageModelBounds() const;
-    std::array<double, 6> GetPolyBounds() const;
-    std::size_t GetRamBytes() const;
-
-    // 当前 image 输入的 VTK 共享 owner；SetInputImage 替换，image/volume 路由读取同一对象。
-    vtkSmartPointer<vtkImageData> m_inputImage;
-    // 当前 polydata 输入的 VTK 共享 owner；SetInputPolyData 替换，ClearInputPolyData 释放本侧引用。
-    vtkSmartPointer<vtkPolyData> m_inputPolyData;
-    // 调用方选择的首选数据源；GetActiveDataSource 在对应输入缺失时按现有 image、polydata 顺序回退。
-    OrthogonalCropDataSource m_preferredDataSource = OrthogonalCropDataSource::ImageData;
-};
-
-OrthogonalCropResult CropRouter::Impl::GetFailure(
-    const OrthogonalCropRequest& request,
-    CropFailure failureReason,
-    const std::string& message)
-{
-    OrthogonalCropResult result;
-    result.resolvedDataSource = request.dataSource;
-    result.resolvedOperation = request.operation;
-    result.resolvedGeometryType = request.geometryType;
-    result.resolvedRemovalMode = request.removalMode;
-    result.failureReason = failureReason;
-    result.message = message;
-    return result;
-}
-
-void CropRouter::Impl::SetInputImage(vtkSmartPointer<vtkImageData> image)
-{
-    m_inputImage = std::move(image);
-}
-
-vtkSmartPointer<vtkImageData> CropRouter::Impl::GetInputImage() const
-{
-    return m_inputImage;
-}
-
-void CropRouter::Impl::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    m_inputPolyData = std::move(polyData);
-}
-
-void CropRouter::Impl::ClearInputPolyData()
-{
-    m_inputPolyData = nullptr;
-}
-
-vtkSmartPointer<vtkPolyData> CropRouter::Impl::GetInputPolyData() const
-{
-    return m_inputPolyData;
-}
-
-void CropRouter::Impl::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_preferredDataSource = dataSource;
-}
-
-OrthogonalCropDataSource CropRouter::Impl::GetActiveDataSource() const
-{
-    // 选择顺序：1. 首选源对应输入存在时保持首选语义；2. 否则 image 优先、polydata 次之回退；
-    // 3. 两者都不存在时仍返回首选枚举，让后续路由给出与请求一致的缺输入失败原因。
-    const bool hasImage = GetInputImage() != nullptr;
-    const bool hasPolyData = GetInputPolyData() != nullptr;
-
-    if (m_preferredDataSource == OrthogonalCropDataSource::ImageData && hasImage) {
-        return OrthogonalCropDataSource::ImageData;
-    }
-
-    if (m_preferredDataSource == OrthogonalCropDataSource::VolumeData && hasImage) {
-        return OrthogonalCropDataSource::VolumeData;
-    }
-
-    if (m_preferredDataSource == OrthogonalCropDataSource::PolyData && hasPolyData) {
-        return OrthogonalCropDataSource::PolyData;
-    }
-
-    if (hasImage) {
-        return OrthogonalCropDataSource::ImageData;
-    }
-
-    if (hasPolyData) {
-        return OrthogonalCropDataSource::PolyData;
-    }
-
-    return m_preferredDataSource;
-}
-
-std::array<double, 6> CropRouter::Impl::GetActiveInputModelBounds() const
-{
-    std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    switch (GetActiveDataSource()) {
-    case OrthogonalCropDataSource::ImageData:
-    case OrthogonalCropDataSource::VolumeData:
-        return GetImageModelBounds();
-    case OrthogonalCropDataSource::PolyData:
-        return GetPolyBounds();
-    default:
-        return bounds;
-    }
-}
-
-OrthogonalCropRequest CropRouter::Impl::GetDefaultRequest() const
-{
-    const auto activeDataSource = GetActiveDataSource();
-    OrthogonalCropRequest request;
-    request.dataSource = activeDataSource;
-    request.removalMode = CropRemovalMode::KeepInside;
-    request.boxToInputModelMatrix = CropGeometryAlgorithm::GetBoxMatrix(GetActiveInputModelBounds());
-    request.operation = OrthogonalCropOperation::Preview;
-    return request;
-}
-
-OrthogonalCropResult CropRouter::Impl::GetResult(const OrthogonalCropRequest& request) const
-{
-    // 公开入口只分发裁切类型；动作和数据源留在对应几何的内部路由里，避免多套入口表达同一件事。
-    switch (request.geometryType) {
-    case CropShape::Box:
-        return GetBoxResult(request);
-
-    case CropShape::Plane:
-        return GetPlaneResult(request);
-
-    default:
-        return GetFailure(
-            request,
-            CropFailure::NoBackend,
-            "Router has no executable path for this crop geometry.");
-    }
-}
-
-OrthogonalCropResult CropRouter::Impl::GetBoxResult(const OrthogonalCropRequest& request) const
-{
-    // Box 路由只放行当前三种真实路径：体预览、网格预览、图像提交；其它组合统一停在 router。
-    // A. Preview+VolumeData -> image-backed render preview；B. Preview+PolyData -> mesh preview；
-    // C. Submit+ImageData -> 生成可重载 image；Preview+ImageData 和 Submit+Volume/PolyData 均无后端。
-    switch (request.operation) {
-    case OrthogonalCropOperation::Preview:
-        switch (request.dataSource) {
-        case OrthogonalCropDataSource::VolumeData:
-            if (!GetInputImage()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoImage,
-                    "Image-backed crop route requires image input data.");
-            }
-            return OrthogonalCropAlgorithm::GetResult(
-                m_inputImage,
-                request,
-                GetRamBytes());
-
-        case OrthogonalCropDataSource::PolyData:
-            if (!GetInputPolyData()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoPolyData,
-                    "PolyData crop route requires polydata input data.");
-            }
-            return OrthogonalCropAlgorithm::GetResult(m_inputPolyData, request);
-
-        default:
-            break;
-        }
-        break;
-
-    case OrthogonalCropOperation::Submit:
-        switch (request.dataSource) {
-        case OrthogonalCropDataSource::ImageData:
-            if (!GetInputImage()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoImage,
-                    "Image-backed crop route requires image input data.");
-            }
-            return OrthogonalCropAlgorithm::GetResult(
-                m_inputImage,
-                request,
-                GetRamBytes());
-
-        default:
-            break;
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    return GetFailure(
-        request,
-        CropFailure::NoBackend,
-        "Router has no executable path for this crop route.");
-}
-
-OrthogonalCropResult CropRouter::Impl::GetPlaneResult(const OrthogonalCropRequest& request) const
-{
-    // Plane 路由放行与 Box 相同的主链路：体预览、网格预览、图像提交。
-    // 几何算法切换为 PlanarCropAlgorithm，但 operation/dataSource 的合法矩阵与 Box 完全一致。
-    switch (request.operation) {
-    case OrthogonalCropOperation::Preview:
-        switch (request.dataSource) {
-        case OrthogonalCropDataSource::VolumeData:
-            if (!GetInputImage()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoImage,
-                    "Image-backed planar crop route requires image input data.");
-            }
-            return PlanarCropAlgorithm::GetResult(
-                m_inputImage,
-                request,
-                GetRamBytes());
-
-        case OrthogonalCropDataSource::PolyData:
-            if (!GetInputPolyData()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoPolyData,
-                    "PolyData planar crop route requires polydata input data.");
-            }
-            return PlanarCropAlgorithm::GetResult(m_inputPolyData, request);
-
-        default:
-            break;
-        }
-        break;
-
-    case OrthogonalCropOperation::Submit:
-        switch (request.dataSource) {
-        case OrthogonalCropDataSource::ImageData:
-            if (!GetInputImage()) {
-                return GetFailure(
-                    request,
-                    CropFailure::NoImage,
-                    "Image-backed planar crop route requires image input data.");
-            }
-            return PlanarCropAlgorithm::GetResult(
-                m_inputImage,
-                request,
-                GetRamBytes());
-
-        default:
-            break;
-        }
-        break;
-
-    default:
-        break;
-    }
-
-    return GetFailure(
-        request,
-        CropFailure::NoBackend,
-        "Router has no executable path for this planar crop route.");
-}
-
-std::array<double, 6> CropRouter::Impl::GetImageModelBounds() const
-{
-    std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    auto image = GetInputImage();
-    if (!image) {
-        return bounds;
-    }
-
-    double rawBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    image->GetBounds(rawBounds);
-    return {
-        rawBounds[0], rawBounds[1],
-        rawBounds[2], rawBounds[3],
-        rawBounds[4], rawBounds[5]
-    };
-}
-
-std::array<double, 6> CropRouter::Impl::GetPolyBounds() const
-{
-    std::array<double, 6> bounds = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    if (!m_inputPolyData) {
-        return bounds;
-    }
-
-    double rawBounds[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-    m_inputPolyData->GetBounds(rawBounds);
-    return {
-        rawBounds[0], rawBounds[1],
-        rawBounds[2], rawBounds[3],
-        rawBounds[4], rawBounds[5]
-    };
-}
-
-std::size_t CropRouter::Impl::GetRamBytes() const
+namespace {
+std::size_t GetRamBytes()
 {
 #ifdef _WIN32
     MEMORYSTATUSEX memoryStatus = {};
@@ -345,64 +27,39 @@ std::size_t CropRouter::Impl::GetRamBytes() const
 #endif
     return 0;
 }
-
-CropRouter::CropRouter()
-    : m_impl(std::make_unique<CropRouter::Impl>())
-{
 }
 
-CropRouter::~CropRouter() = default;
-
-CropRouter::CropRouter(CropRouter&&) noexcept = default;
-
-CropRouter& CropRouter::operator=(CropRouter&&) noexcept = default;
-
-void CropRouter::SetInputImage(vtkSmartPointer<vtkImageData> image)
+std::optional<std::packaged_task<CropExportResult()>> CropRouter::BuildExportTask(
+    CropInputSnapshot input,
+    CropExportRequest request,
+    CropShaderPayload payload) const
 {
-    m_impl->SetInputImage(std::move(image));
-}
+    if (!CropAlgorithm::GetInputValid(input)
+        || request.dataSource != input.dataSource
+        || request.inputVersion != input.inputVersion
+        || request.operations.size() != request.nodeCount
+        || request.nodeCount == 0
+        || payload.revision == 0
+        || payload.sourceStamp.version != input.inputVersion
+        || payload.nodeCount != request.nodeCount
+        || !payload.predicateTable
+        || payload.predicateTable->operationCount < payload.nodeCount) {
+        return std::nullopt;
+    }
+    if (request.availableRamBytes == 0) {
+        request.availableRamBytes = GetRamBytes();
+    }
 
-bool CropRouter::GetImageReady() const
-{
-    return m_impl->GetInputImage() != nullptr;
-}
-
-void CropRouter::SetInputPolyData(vtkSmartPointer<vtkPolyData> polyData)
-{
-    m_impl->SetInputPolyData(std::move(polyData));
-}
-
-void CropRouter::ClearInputPolyData()
-{
-    m_impl->ClearInputPolyData();
-}
-
-bool CropRouter::GetPolyDataReady() const
-{
-    return m_impl->GetInputPolyData() != nullptr;
-}
-
-void CropRouter::SetPreferredDataSource(OrthogonalCropDataSource dataSource)
-{
-    m_impl->SetPreferredDataSource(dataSource);
-}
-
-OrthogonalCropDataSource CropRouter::GetActiveDataSource() const
-{
-    return m_impl->GetActiveDataSource();
-}
-
-std::array<double, 6> CropRouter::GetActiveInputModelBounds() const
-{
-    return m_impl->GetActiveInputModelBounds();
-}
-
-OrthogonalCropRequest CropRouter::GetDefaultRequest() const
-{
-    return m_impl->GetDefaultRequest();
-}
-
-OrthogonalCropResult CropRouter::GetResult(const OrthogonalCropRequest& request) const
-{
-    return m_impl->GetResult(request);
+    return std::packaged_task<CropExportResult()>(
+        [input = std::move(input), request = std::move(request),
+            payload = std::move(payload)]() mutable {
+            if (request.dataSource == OrthogonalCropDataSource::ImageData) {
+                return CropAlgorithm::GetResult(
+                    input.imageData,
+                    input.validityMask,
+                    request,
+                    payload);
+            }
+            return CropAlgorithm::GetResult(input.polyData, request, payload);
+        });
 }
