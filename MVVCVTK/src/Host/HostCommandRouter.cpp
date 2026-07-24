@@ -31,6 +31,20 @@ public:
     bool DispatchCommand(HostCommand command) const;
 
 private:
+    struct ViewCandidate final {
+        const HostRenderViewRuntime* view = nullptr;
+        std::shared_ptr<VizService> service;
+        std::shared_ptr<StdRenderContext> context;
+        std::optional<VizMode> mode;
+        std::optional<MaterialParams> material;
+        std::optional<double> opacity;
+        std::optional<std::vector<TFNode>> nodes;
+        std::optional<double> iso;
+        std::optional<BackgroundColor> background;
+        std::optional<std::array<double, 3>> spacing;
+        std::optional<WindowLevelParams> windowLevel;
+    };
+
     bool SendData(HostDataCommand command) const;
     bool SendView(const HostViewCommand& command) const;
     bool SendTool(const HostToolCommand& command) const;
@@ -49,6 +63,9 @@ private:
     std::optional<WindowLevelParams> BuildAppWindowLevel(const HostWindowLevelParams& value) const;
     std::optional<std::vector<TFNode>> BuildAppNodes(
         const std::vector<HostTransferNode>& values) const;
+    std::optional<ViewCandidate> BuildViewCandidate(
+        const HostViewSetRequest& request) const;
+    bool GetUnitValid(double value) const;
 
     const HostCoreServices* m_core = nullptr;
     const HostRenderViewSet* m_renderViews = nullptr;
@@ -252,10 +269,12 @@ std::optional<ToolMode> HostCommandRouter::Impl::GetAppToolMode(HostToolMode mod
 std::optional<MaterialParams> HostCommandRouter::Impl::BuildAppMaterial(
     const HostMaterialParams& value) const
 {
-    if (!std::isfinite(value.ambient) || !std::isfinite(value.diffuse)
-        || !std::isfinite(value.specular) || !std::isfinite(value.specularPower)
-        || !std::isfinite(value.opacity) || value.specularPower < 0.0
-        || value.opacity < 0.0 || value.opacity > 1.0) {
+    if (!GetUnitValid(value.ambient)
+        || !GetUnitValid(value.diffuse)
+        || !GetUnitValid(value.specular)
+        || !std::isfinite(value.specularPower)
+        || value.specularPower < 0.0
+        || !GetUnitValid(value.opacity)) {
         return std::nullopt;
     }
     return MaterialParams{ value.ambient, value.diffuse, value.specular,
@@ -265,7 +284,8 @@ std::optional<MaterialParams> HostCommandRouter::Impl::BuildAppMaterial(
 std::optional<BackgroundColor> HostCommandRouter::Impl::BuildAppBackground(
     const HostBackgroundColor& value) const
 {
-    if (!std::isfinite(value.r) || !std::isfinite(value.g) || !std::isfinite(value.b)) {
+    if (!GetUnitValid(value.r) || !GetUnitValid(value.g)
+        || !GetUnitValid(value.b)) {
         return std::nullopt;
     }
     return BackgroundColor{ value.r, value.g, value.b };
@@ -284,12 +304,15 @@ std::optional<WindowLevelParams> HostCommandRouter::Impl::BuildAppWindowLevel(
 std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
     const std::vector<HostTransferNode>& values) const
 {
+    if (values.empty()) return std::nullopt;
+
     std::vector<TFNode> result;
     result.reserve(values.size());
     for (const auto& value : values) {
-        if (!std::isfinite(value.position) || !std::isfinite(value.opacity)
-            || !std::isfinite(value.r) || !std::isfinite(value.g)
-            || !std::isfinite(value.b)) {
+        if (!GetUnitValid(value.position) || !GetUnitValid(value.opacity)
+            || !GetUnitValid(value.r) || !GetUnitValid(value.g)
+            || !GetUnitValid(value.b)
+            || (!result.empty() && value.position < result.back().position)) {
             return std::nullopt;
         }
         result.push_back({ value.position, value.opacity, value.r, value.g, value.b });
@@ -297,56 +320,87 @@ std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
     return result;
 }
 
+std::optional<HostCommandRouter::Impl::ViewCandidate>
+HostCommandRouter::Impl::BuildViewCandidate(
+    const HostViewSetRequest& request) const
+{
+    ViewCandidate candidate;
+    candidate.view = m_renderViews
+        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
+    if (!candidate.view || !candidate.view->service) return std::nullopt;
+
+    candidate.service = candidate.view->service;
+    candidate.context = candidate.view->context;
+    candidate.mode = request.mode ? GetAppViewMode(*request.mode)
+        : std::optional<VizMode>{};
+    candidate.material = request.material ? BuildAppMaterial(*request.material)
+        : std::optional<MaterialParams>{};
+    candidate.opacity = request.opacity;
+    candidate.nodes = request.transferNodes ? BuildAppNodes(*request.transferNodes)
+        : std::optional<std::vector<TFNode>>{};
+    candidate.iso = request.iso;
+    candidate.background = request.background
+        ? BuildAppBackground(*request.background)
+        : std::optional<BackgroundColor>{};
+    candidate.spacing = request.spacing;
+    candidate.windowLevel = request.windowLevel
+        ? BuildAppWindowLevel(*request.windowLevel)
+        : std::optional<WindowLevelParams>{};
+
+    if ((request.mode && (!candidate.mode || !candidate.context))
+        || (request.material && !candidate.material)
+        || (request.opacity && !GetUnitValid(*request.opacity))
+        || (request.transferNodes && !candidate.nodes)
+        || (request.iso && !std::isfinite(*request.iso))
+        || (request.background && !candidate.background)
+        || (request.windowLevel && !candidate.windowLevel)) {
+        return std::nullopt;
+    }
+
+    if (candidate.spacing) {
+        for (const double value : *candidate.spacing) {
+            if (!std::isfinite(value) || value <= 0.0) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    return candidate;
+}
+
+bool HostCommandRouter::Impl::GetUnitValid(double value) const
+{
+    return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+}
+
 bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
 {
-    // 1. 先解析目标视图，并把 mode/material/transfer/background/window-level 等 Host 字段转换成 App 值对象。
-    // 2. 上述转换项及 opacity/iso 在写入前统一校验；mode 同时更新 service 状态与 context 相机交互风格。
-    // 3. spacing 沿用既有流程在其它字段写入后单独校验，因此 spacing 非法时返回 false 但前序更新不会回滚。
-    if (command.request.action != HostViewAction::Set) {
-        return false;
+    // 1. 先在局部候选中解析目标并完成所有字段校验。
+    // 2. 任一字段非法都在 setter 前失败，保证请求不会留下部分状态。
+    // 3. 候选完整后才按稳定顺序提交 service 与相机模式。
+    if (command.request.action != HostViewAction::Set) return false;
+    const auto* request = std::get_if<HostViewSetRequest>(
+        &command.request.payload);
+    if (!request) return false;
+    const auto candidate = BuildViewCandidate(*request);
+    if (!candidate) return false;
+
+    if (candidate->mode) {
+        candidate->service->SetVizMode(*candidate->mode);
+        candidate->context->SetCameraStyle(*candidate->mode);
     }
-    const auto* request = std::get_if<HostViewSetRequest>(&command.request.payload);
-    const auto* view = request && m_renderViews
-        ? m_renderViews->GetViewBySelector(request->targetView) : nullptr;
-    if (!request || !view || !view->service) {
-        return false;
+    if (candidate->material) candidate->service->SetMaterial(*candidate->material);
+    if (candidate->opacity) candidate->service->SetOpacity(*candidate->opacity);
+    if (candidate->nodes) candidate->service->SetTransferFunction(*candidate->nodes);
+    if (candidate->iso) candidate->service->SetIsoThreshold(*candidate->iso);
+    if (candidate->background) candidate->service->SetBackground(*candidate->background);
+    if (candidate->spacing) {
+        const auto& spacing = *candidate->spacing;
+        candidate->service->SetSpacing(spacing[0], spacing[1], spacing[2]);
     }
-    const auto mode = request->mode ? GetAppViewMode(*request->mode) : std::optional<VizMode>{};
-    const auto material = request->material ? BuildAppMaterial(*request->material)
-        : std::optional<MaterialParams>{};
-    const auto nodes = request->transferNodes ? BuildAppNodes(*request->transferNodes)
-        : std::optional<std::vector<TFNode>>{};
-    const auto background = request->background ? BuildAppBackground(*request->background)
-        : std::optional<BackgroundColor>{};
-    const auto windowLevel = request->windowLevel ? BuildAppWindowLevel(*request->windowLevel)
-        : std::optional<WindowLevelParams>{};
-    if ((request->mode && !mode) || (request->material && !material)
-        || (request->transferNodes && !nodes) || (request->background && !background)
-        || (request->windowLevel && !windowLevel)
-        || (request->opacity && (!std::isfinite(*request->opacity)
-            || *request->opacity < 0.0 || *request->opacity > 1.0))
-        || (request->iso && !std::isfinite(*request->iso))) {
-        return false;
-    }
-    if (mode) {
-        if (!view->context) return false;
-        view->service->SetVizMode(*mode);
-        view->context->SetCameraStyle(*mode);
-    }
-    if (material) view->service->SetMaterial(*material);
-    if (request->opacity) view->service->SetOpacity(*request->opacity);
-    if (nodes) view->service->SetTransferFunction(*nodes);
-    if (request->iso) view->service->SetIsoThreshold(*request->iso);
-    if (background) view->service->SetBackground(*background);
-    if (request->spacing) {
-        const auto& spacing = *request->spacing;
-        if (!std::isfinite(spacing[0]) || spacing[0] <= 0.0
-            || !std::isfinite(spacing[1]) || spacing[1] <= 0.0
-            || !std::isfinite(spacing[2]) || spacing[2] <= 0.0) return false;
-        view->service->SetSpacing(spacing[0], spacing[1], spacing[2]);
-    }
-    if (windowLevel) view->service->SetWindowLevel(
-        windowLevel->windowWidth, windowLevel->windowCenter);
+    if (candidate->windowLevel) candidate->service->SetWindowLevel(
+        candidate->windowLevel->windowWidth,
+        candidate->windowLevel->windowCenter);
     return true;
 }
 

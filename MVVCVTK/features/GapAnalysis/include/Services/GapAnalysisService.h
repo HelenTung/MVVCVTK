@@ -55,6 +55,7 @@ public:
 
     GapAnalysisState GetAnalysisState() const;
     std::vector<VoidRegion> GetVoidRegions() const;
+    GapStatistics GetStatistics() const;
 
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;

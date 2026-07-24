@@ -43,6 +43,7 @@ public:
     bool SendRequest(
         GapHostRequest request,
         GapHostCallback onComplete);
+    GapHostState GetState() const;
 
     static constexpr std::string_view FeatureId =
         "GapAnalysis";
@@ -476,6 +477,23 @@ bool GapHostFeature::Impl::SendRequest(
     return false;
 }
 
+GapHostState GapHostFeature::Impl::GetState() const
+{
+    GapHostState state;
+    if (!m_isAttached
+        || !m_service
+        || !GetOwnerThread()
+        || (!m_activeVersion && !m_isExitPending)) {
+        return state;
+    }
+
+    state.analysisState = m_service->GetAnalysisState();
+    state.statistics = m_service->GetStatistics();
+    state.isViewActive = m_service->GetViewOn();
+    state.isExitPending = m_isExitPending;
+    return state;
+}
+
 bool GapHostFeature::Impl::StartView(
     const GapHostStartRequest& start,
     GapHostCallback onComplete)
@@ -671,4 +689,9 @@ bool GapHostFeature::SendRequest(
         && m_impl->SendRequest(
             std::move(request),
             std::move(onComplete));
+}
+
+GapHostState GapHostFeature::GetState() const
+{
+    return m_impl ? m_impl->GetState() : GapHostState{};
 }

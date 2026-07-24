@@ -219,6 +219,42 @@ void SetLabelExpect(vtkImageData* labelImage, int& failureCount)
     SetExpect(labeledVoxelCount == 27, "gap analysis label image should contain 27 labeled voxels.", failureCount);
 }
 
+void SetStatisticsExpect(
+    const GapStatistics& statistics,
+    int& failureCount)
+{
+    constexpr std::size_t totalVoxelCount =
+        static_cast<std::size_t>(TestDims[0])
+        * static_cast<std::size_t>(TestDims[1])
+        * static_cast<std::size_t>(TestDims[2]);
+    constexpr std::size_t voidVoxelCount = 27;
+    SetExpect(
+        statistics.objectVoxelCount
+            == totalVoxelCount - voidVoxelCount,
+        "gap statistics should count object voxels in the frozen valid domain.",
+        failureCount);
+    SetExpect(
+        statistics.voidVoxelCount == voidVoxelCount,
+        "gap statistics should count positive labels from the successful batch.",
+        failureCount);
+    SetExpectNear(
+        statistics.objectVolumeMM3,
+        static_cast<double>(totalVoxelCount - voidVoxelCount),
+        "gap object volume should use the frozen voxel spacing.",
+        failureCount);
+    SetExpectNear(
+        statistics.voidVolumeMM3,
+        static_cast<double>(voidVoxelCount),
+        "gap void volume should use the frozen voxel spacing.",
+        failureCount);
+    SetExpectNear(
+        statistics.porosityRatio,
+        static_cast<double>(voidVoxelCount)
+            / static_cast<double>(totalVoxelCount),
+        "gap porosity should use the same successful valid domain.",
+        failureCount);
+}
+
 void StartAlgoCase(int& failureCount)
 {
     // 纯算法路径不经过 service 或线程，先确认 VoidDetector 的数学结果稳定。
@@ -427,6 +463,7 @@ void StartSnapCase(int& failureCount)
     if (regions.size() == 1) {
         SetRegionExpect(regions.front(), failureCount);
     }
+    SetStatisticsExpect(service.GetStatistics(), failureCount);
 
     SetLabelExpect(service.BuildLabelImage(), failureCount);
 

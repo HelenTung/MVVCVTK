@@ -49,6 +49,7 @@ public:
     void SendCallback();
     GapAnalysisState GetAnalysisState() const;
     std::vector<VoidRegion> GetVoidRegions() const;
+    GapStatistics GetStatistics() const;
     vtkSmartPointer<vtkPolyData> BuildVoidMesh() const;
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;
 
@@ -109,6 +110,10 @@ private:
     vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<int>& labelVolume,
         const GapVolumeBuffer& volBuf) const;
+    bool BuildStatistics(
+        const GapVolumeBuffer& volBuf,
+        const std::vector<int>& labelVolume,
+        GapStatistics& statistics) const;
 
     VolumeBufferSnapshot GetInputSnapshot() const;
     GapParamSnapshot GetParamSnapshot() const;
@@ -330,6 +335,11 @@ std::vector<VoidRegion> GapAnalysisService::GetVoidRegions() const
     return m_impl->GetVoidRegions();
 }
 
+GapStatistics GapAnalysisService::GetStatistics() const
+{
+    return m_impl->GetStatistics();
+}
+
 vtkSmartPointer<vtkPolyData> GapAnalysisService::BuildVoidMesh() const
 {
     return m_impl->BuildVoidMesh();
@@ -529,6 +539,13 @@ GapAnalysisState GapAnalysisService::Impl::GetAnalysisState() const {
 std::vector<VoidRegion> GapAnalysisService::Impl::GetVoidRegions() const {
     std::lock_guard<std::mutex> lk(m_resultMutex);
     return m_result.voids;
+}
+
+GapStatistics GapAnalysisService::Impl::GetStatistics() const
+{
+    std::lock_guard<std::mutex> lock(m_resultMutex);
+    return m_result.isSucceeded
+        ? m_result.statistics : GapStatistics{};
 }
 
 vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh() const {
@@ -811,8 +828,9 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         return;
     }
 
-    // 1. Consumed 明确表示本显示请求的终态已经处理，后续 tick 不重复挂载或记录失败。
-    if (m_viewPhase.load() == GapViewPhase::Consumed) {
+    // 1. Consumed 只阻止重复挂载；退出请求仍必须经过下方 join 与状态清理。
+    if (m_viewPhase.load() == GapViewPhase::Consumed
+        && !m_isExitPending) {
         return;
     }
 
@@ -891,13 +909,18 @@ void GapAnalysisService::Impl::StartWorker(
                     params.voidParams,
                     result.labelVolume);
                 result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
-                result.isSucceeded = true;
-
-                {
-                    std::lock_guard<std::mutex> lk(m_resultMutex);
-                    m_result = std::move(result);
+                if (result.labelImage
+                    && BuildStatistics(
+                        volBuf,
+                        result.labelVolume,
+                        result.statistics)) {
+                    result.isSucceeded = true;
+                    {
+                        std::lock_guard<std::mutex> lk(m_resultMutex);
+                        m_result = std::move(result);
+                    }
+                    isSuccess = true;
                 }
-                isSuccess = true;
             }
         }
     }
@@ -1340,6 +1363,71 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
     out.SetOwnedVoxels(std::move(voxels));
 
     return true;
+}
+
+bool GapAnalysisService::Impl::BuildStatistics(
+    const GapVolumeBuffer& volBuf,
+    const std::vector<int>& labelVolume,
+    GapStatistics& statistics) const
+{
+    statistics = {};
+    const auto dimX = static_cast<std::size_t>(volBuf.dims[0]);
+    const auto dimY = static_cast<std::size_t>(volBuf.dims[1]);
+    const auto dimZ = static_cast<std::size_t>(volBuf.dims[2]);
+    const auto maxCount = (std::numeric_limits<std::size_t>::max)();
+    if (dimX == 0 || dimY == 0 || dimZ == 0
+        || dimX > maxCount / dimY
+        || dimX * dimY > maxCount / dimZ) {
+        return false;
+    }
+
+    const auto voxelCount = dimX * dimY * dimZ;
+    if (labelVolume.size() != voxelCount) {
+        return false;
+    }
+
+    std::size_t validVoxelCount = 0;
+    std::size_t voidVoxelCount = 0;
+    for (std::size_t index = 0; index < voxelCount; ++index) {
+        const bool isValid = volBuf.GetVoxelValid(index);
+        if (isValid) {
+            ++validVoxelCount;
+        }
+        if (labelVolume[index] < 0
+            || (labelVolume[index] > 0 && !isValid)) {
+            return false;
+        }
+        if (labelVolume[index] > 0) {
+            ++voidVoxelCount;
+        }
+    }
+    if (voidVoxelCount > validVoxelCount) {
+        return false;
+    }
+
+    const double voxelVolumeMM3 =
+        volBuf.spacing[0] * volBuf.spacing[1] * volBuf.spacing[2];
+    if (!std::isfinite(voxelVolumeMM3)
+        || voxelVolumeMM3 <= 0.0) {
+        return false;
+    }
+
+    statistics.objectVoxelCount =
+        validVoxelCount - voidVoxelCount;
+    statistics.voidVoxelCount = voidVoxelCount;
+    statistics.objectVolumeMM3 =
+        static_cast<double>(statistics.objectVoxelCount)
+        * voxelVolumeMM3;
+    statistics.voidVolumeMM3 =
+        static_cast<double>(statistics.voidVoxelCount)
+        * voxelVolumeMM3;
+    statistics.porosityRatio = validVoxelCount == 0
+        ? 0.0
+        : static_cast<double>(voidVoxelCount)
+            / static_cast<double>(validVoxelCount);
+    return std::isfinite(statistics.objectVolumeMM3)
+        && std::isfinite(statistics.voidVolumeMM3)
+        && std::isfinite(statistics.porosityRatio);
 }
 
 vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(

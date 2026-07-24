@@ -63,6 +63,7 @@ public:
     bool SendRequest(
         GapHostRequest request,
         GapHostCallback onComplete = nullptr);
+    GapHostState GetState() const;
 
 private:
     class Impl;

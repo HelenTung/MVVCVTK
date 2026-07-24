@@ -189,16 +189,26 @@ int GetGapFailCount()
     auto directFeature =
         std::make_shared<GapHostFeature>(
             GetGapConfig());
+    const auto directInitialState =
+        directFeature->GetState();
     const bool isDirectAttached =
         directFeature->AttachHost(directContext);
     const bool isDuplicateRejected =
         !directFeature->AttachHost(directContext);
     const bool isDirectDetached =
         directFeature->DetachHost();
+    const auto directDetachedState =
+        directFeature->GetState();
     failureCount += GetCaseResult(
-        isDirectAttached
+        directInitialState.analysisState
+                == GapAnalysisState::Idle
+            && !directInitialState.isViewActive
+            && isDirectAttached
             && isDuplicateRejected
             && isDirectDetached
+            && directDetachedState.analysisState
+                == GapAnalysisState::Idle
+            && directDetachedState.statistics.objectVoxelCount == 0
             && directInput.GetAttachCount() == 1
             && directInput.GetDetachCount() == 1,
         "Gap Feature accepts only the first direct AttachHost call") ? 0 : 1;
@@ -271,6 +281,7 @@ int GetGapFailCount()
                 ++firstCompleteCount;
                 isFirstSucceeded = isSuccess;
             });
+    const auto acceptedState = feature->GetState();
     bool hasRejectedCallback = false;
     const bool isSecondRejected =
         !feature->SendRequest(
@@ -289,9 +300,15 @@ int GetGapFailCount()
     }
     failureCount += GetCaseResult(
         isFirstAccepted
+            && acceptedState.analysisState
+                != GapAnalysisState::Idle
+            && acceptedState.isViewActive
+            && !acceptedState.isExitPending
             && isSecondRejected
             && firstCompleteCount == 1
             && isFirstSucceeded
+            && feature->GetState().statistics.voidVoxelCount == 27
+            && feature->GetState().statistics.objectVoxelCount == 98
             && !hasRejectedCallback,
         "Rejected Start preserves the accepted callback generation") ? 0 : 1;
 
@@ -306,12 +323,18 @@ int GetGapFailCount()
     const bool isNextReloadReady =
         GetReloadReady(session, *endpoint);
     SendTicks(*endpoint, 2);
+    const auto staleState = feature->GetState();
     const bool isStaleOverlayRejected =
         !feature->SendRequest({
             GapHostAction::Overlay,
             std::monostate{} });
     failureCount += GetCaseResult(
-        isNextReloadReady && isStaleOverlayRejected,
+        isNextReloadReady
+            && isStaleOverlayRejected
+            && staleState.analysisState == GapAnalysisState::Idle
+            && staleState.statistics.objectVoxelCount == 0
+            && !staleState.isViewActive
+            && !staleState.isExitPending,
         "DataVersion change exits the stale Gap view") ? 0 : 1;
 
     const bool isFirstDetached =
@@ -332,6 +355,7 @@ int GetGapFailCount()
             });
     const bool isDetached =
         session.DetachFeature(*pendingFeature);
+    const auto detachedState = pendingFeature->GetState();
     SendTicks(*endpoint, 2);
     failureCount += GetCaseResult(
         isFirstDetached
@@ -339,7 +363,12 @@ int GetGapFailCount()
             && isPendingAccepted,
         "Gap accepts a pending request before detach") ? 0 : 1;
     failureCount += GetCaseResult(
-        isDetached,
+        isDetached
+            && detachedState.analysisState
+                == GapAnalysisState::Idle
+            && detachedState.statistics.objectVoxelCount == 0
+            && !detachedState.isViewActive
+            && !detachedState.isExitPending,
         "Gap detach succeeds on the Session owner thread") ? 0 : 1;
     failureCount += GetCaseResult(
         pendingFeature.use_count() == pendingUseCount,

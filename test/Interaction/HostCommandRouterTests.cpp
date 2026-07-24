@@ -6,6 +6,7 @@
 #include "StdRenderContext.h"
 
 #include <array>
+#include <limits>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -68,6 +69,87 @@ bool SendData(Fixture& fixture, HostDataAction action, HostDataPayload payload,
 {
     return fixture.Send(HostDataCommand{
         HostDataRequest{ action, std::move(payload) }, std::move(onComplete) });
+}
+
+bool SendView(Fixture& fixture, HostViewSetRequest request)
+{
+    return fixture.Send(HostViewCommand{
+        HostViewRequest{ HostViewAction::Set, std::move(request) } });
+}
+
+HostViewSetRequest BuildViewRequest()
+{
+    HostViewSetRequest request;
+    request.targetView.viewId = "primary";
+    request.mode = HostRenderMode::IsoSurface;
+    request.material = HostMaterialParams{};
+    request.opacity = 0.8;
+    request.transferNodes = std::vector<HostTransferNode>{
+        { 0.0, 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0, 1.0 }
+    };
+    request.iso = 0.5;
+    request.background = HostBackgroundColor{};
+    request.spacing = std::array<double, 3>{ 1.0, 2.0, 3.0 };
+    request.windowLevel = HostWindowLevelParams{};
+    return request;
+}
+
+void StartViewCases(int& failureCount)
+{
+    const auto getIsRejected = [&failureCount](
+        HostViewSetRequest request, const char* message) {
+        Fixture fixture;
+        const auto service = fixture.GetService();
+        SetExpect(!SendView(fixture, std::move(request)), message, failureCount);
+        SetExpect(service->GetViewSetCount() == 0
+                && fixture.context->GetCameraStyleSetCount() == 0,
+            "非法 View 请求不得调用任何 setter。", failureCount);
+    };
+
+    auto request = BuildViewRequest();
+    request.spacing = std::array<double, 3>{ 1.0, 0.0, 3.0 };
+    getIsRejected(std::move(request), "非法 spacing 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.opacity = std::numeric_limits<double>::quiet_NaN();
+    getIsRejected(std::move(request), "NaN opacity 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.iso = std::numeric_limits<double>::infinity();
+    getIsRejected(std::move(request), "Inf iso 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.material->ambient = 1.1;
+    getIsRejected(std::move(request), "越界 material 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.background->b = -0.1;
+    getIsRejected(std::move(request), "越界 background 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.transferNodes = std::vector<HostTransferNode>{};
+    getIsRejected(std::move(request), "显式空 TF 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.transferNodes->at(0).r = 1.1;
+    getIsRejected(std::move(request), "越界 TF node 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.transferNodes->at(0).position = 0.8;
+    request.transferNodes->at(1).position = 0.2;
+    getIsRejected(std::move(request), "下降 TF position 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.windowLevel->windowWidth = 0.0;
+    getIsRejected(std::move(request), "非法 window/level 必须整笔拒绝。");
+
+    Fixture fixture;
+    SetExpect(SendView(fixture, BuildViewRequest()),
+        "全量合法 View 请求应被接收。", failureCount);
+    SetExpect(fixture.GetService()->GetViewSetCount() == 8
+            && fixture.context->GetCameraStyleSetCount() == 1,
+        "合法 View 请求应按完整字段一次提交。", failureCount);
 }
 
 void StartDataCases(int& failureCount)
@@ -146,5 +228,6 @@ int HostRouterSuite::GetFailCount() const
 {
     int failureCount = 0;
     StartDataCases(failureCount);
+    StartViewCases(failureCount);
     return failureCount;
 }

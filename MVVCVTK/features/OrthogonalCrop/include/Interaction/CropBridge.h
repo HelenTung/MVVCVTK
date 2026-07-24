@@ -29,6 +29,10 @@ public:
     CropBridge& operator=(const CropBridge&) = delete;
 
     bool StartView(const CropViewRequest& request);
+    // Host 已冻结输入候选时，把 input 与 view binding 作为一次事务提交。
+    bool StartView(
+        const CropViewRequest& request,
+        CropInputSnapshot input);
     bool ClearBindings();
     bool SetCropInput(CropInputSnapshot input);
     // DataManager 发布前只准备 history 候选；baseNodeCount=0 表示显式恢复原始基线。
@@ -46,6 +50,8 @@ public:
     bool SetCropNode(std::size_t nodeCount);
     bool ExitCrop();
     bool GetCropActive() const;
+    // binding 生命周期独立于 widget 编辑态；Exit 后仍可导航 committed history。
+    bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
 
     bool GetShaderTickNeeded() const;

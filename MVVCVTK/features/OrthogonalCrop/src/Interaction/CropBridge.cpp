@@ -92,6 +92,9 @@ public:
     ~Impl();
 
     bool StartView(const CropViewRequest& request);
+    bool StartView(
+        const CropViewRequest& request,
+        CropInputSnapshot input);
     bool ClearBindings();
     bool SetCropInput(CropInputSnapshot input);
     bool StartCropBaseline(
@@ -106,6 +109,7 @@ public:
     bool SetCropNode(std::size_t nodeCount);
     bool ExitCrop();
     bool GetCropActive() const;
+    bool GetCropBound() const;
     CropHistoryState GetCropHistory() const;
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
@@ -114,6 +118,9 @@ public:
     bool SendExportResult();
 
 private:
+    bool StartViewInput(
+        const CropViewRequest& request,
+        std::optional<CropInputSnapshot> input);
     void OnBoxWidget(CropInteractionPhase phase);
     void OnPlaneWidget(CropInteractionPhase phase);
     bool SetCandidate(CropOpItem operation);
@@ -200,13 +207,32 @@ CropBridge::Impl::~Impl()
 
 bool CropBridge::Impl::StartView(const CropViewRequest& request)
 {
+    return StartViewInput(request, std::nullopt);
+}
+
+bool CropBridge::Impl::StartView(
+    const CropViewRequest& request,
+    CropInputSnapshot input)
+{
+    return StartViewInput(
+        request,
+        std::optional<CropInputSnapshot>{ std::move(input) });
+}
+
+bool CropBridge::Impl::StartViewInput(
+    const CropViewRequest& request,
+    std::optional<CropInputSnapshot> input)
+{
     if (!m_isAccepting
         || m_exportTask
         || !request.interactor
         || !request.renderer
-        || !request.referenceService) {
+        || !request.referenceService
+        || (input && !CropAlgorithm::GetInputValid(*input))) {
         return false;
     }
+    const bool isInputChanged = input
+        && !CropAlgorithm::GetInputSame(m_input, *input);
     std::vector<std::shared_ptr<InteractiveService>> targetServices;
     for (const auto& service : request.targetServices) {
         if (!service) {
@@ -220,8 +246,11 @@ bool CropBridge::Impl::StartView(const CropViewRequest& request)
             targetServices.push_back(service);
         }
     }
-    if (targetServices.empty()) {
+    if (targetServices.empty() && !input) {
         targetServices.push_back(request.referenceService);
+    }
+    if (targetServices.empty()) {
+        return false;
     }
     const bool isSameReference =
         m_referenceService.get()
@@ -243,7 +272,8 @@ bool CropBridge::Impl::StartView(const CropViewRequest& request)
     if (m_pendingShader) {
         // 历史前缀正在换代时，同一视图的 Start 只是恢复编辑连接；
         // 它不能因为 GPU revision 尚未提交而拒绝后续 Box/Plane 手势。
-        if (!m_pendingShader->isTargetRebind
+        if (!isInputChanged
+            && !m_pendingShader->isTargetRebind
             && (m_isActive || GetShaderCommitted())
             && isSameReference && isSameTargets) {
             m_hasDrag = false;
@@ -286,7 +316,9 @@ bool CropBridge::Impl::StartView(const CropViewRequest& request)
     }
 
     const bool isShaderCommitted = GetShaderCommitted();
-    if ((m_isActive || isShaderCommitted) && isSameReference && isSameTargets) {
+    if (!isInputChanged
+        && (m_isActive || isShaderCommitted)
+        && isSameReference && isSameTargets) {
         m_boxWidget.SetInteractor(request.interactor);
         m_planeWidget.SetInteractor(request.interactor);
         m_isActive = true;
@@ -295,7 +327,7 @@ bool CropBridge::Impl::StartView(const CropViewRequest& request)
 
     // 有已提交前缀时，新增目标以同一 table handle 建立新 revision 的 staged/ready/commit；
     // 只有整体成功后才清退旧目标，避免重绑定中出现部分窗口先失去裁切。
-    if (isShaderCommitted) {
+    if (!isInputChanged && isShaderCommitted) {
         const std::uint64_t revision = m_nextRevision++;
         CropShaderPayload payload = m_activePayload;
         payload.revision = revision;
@@ -333,8 +365,26 @@ bool CropBridge::Impl::StartView(const CropViewRequest& request)
         return true;
     }
 
+    // 所有会失败的 target/effect 准备已经完成；从这里开始连续提交输入和 binding。
+    // 输入换代必须同时退休旧 history，不能让旧 predicate table 作用到新数据。
     ClearShader();
-    ClearTargets();
+    if (isInputChanged) {
+        ClearHistory();
+        m_input = std::move(*input);
+    }
+    for (const auto& current : m_targets) {
+        const bool isRetained = std::any_of(
+            targets.begin(),
+            targets.end(),
+            [&current](const auto& target) {
+                return current.service.get() == target.service.get()
+                    && current.effect.get() == target.effect.get();
+            });
+        if (!isRetained && current.service && current.effect) {
+            (void)current.service->DetachRenderEffect(
+                current.effect.get());
+        }
+    }
     m_referenceService = request.referenceService;
     m_targets = std::move(targets);
     m_boxWidget.SetInteractor(request.interactor);
@@ -842,7 +892,10 @@ bool CropBridge::Impl::SetShader(ShaderCandidate candidate)
 
 bool CropBridge::Impl::PreviousCrop()
 {
-    if (m_exportTask || m_cursor == 0) {
+    if (!GetCropBound()
+        || !GetTargetsReady()
+        || m_exportTask
+        || m_cursor == 0) {
         std::cout
             << "[Crop][HistoryObjects] previous rejected"
             << " exportActive="
@@ -863,14 +916,18 @@ bool CropBridge::Impl::PreviousCrop()
 
 bool CropBridge::Impl::NextCrop()
 {
-    return !m_exportTask
+    return GetCropBound()
+        && GetTargetsReady()
+        && !m_exportTask
         && m_cursor < m_history.size()
         && SetPrefix(m_cursor + 1);
 }
 
 bool CropBridge::Impl::SetCropNode(const std::size_t nodeCount)
 {
-    if (m_exportTask
+    if (!GetCropBound()
+        || !GetTargetsReady()
+        || m_exportTask
         || m_pendingShader
         || nodeCount > m_history.size()) {
         return false;
@@ -1542,6 +1599,14 @@ bool CropBridge::Impl::GetCropActive() const
     return m_isActive;
 }
 
+bool CropBridge::Impl::GetCropBound() const
+{
+    // Render input 是否仍匹配由具体 history 动作检查；Host 用结构 binding
+    // 在 Exit 后继续跟踪输入换代，并及时退休旧 history。
+    return m_referenceService
+        && !m_targets.empty();
+}
+
 CropHistoryState CropBridge::Impl::GetCropHistory() const
 {
     return CropHistoryState{
@@ -1563,6 +1628,12 @@ CropBridge::CropBridge()
 CropBridge::~CropBridge() = default;
 
 bool CropBridge::StartView(const CropViewRequest& request) { return m_impl->StartView(request); }
+bool CropBridge::StartView(
+    const CropViewRequest& request,
+    CropInputSnapshot input)
+{
+    return m_impl->StartView(request, std::move(input));
+}
 bool CropBridge::ClearBindings() { return m_impl->ClearBindings(); }
 bool CropBridge::SetCropInput(CropInputSnapshot input) { return m_impl->SetCropInput(std::move(input)); }
 bool CropBridge::StartCropBaseline(
@@ -1582,6 +1653,7 @@ bool CropBridge::NextCrop() { return m_impl->NextCrop(); }
 bool CropBridge::SetCropNode(const std::size_t nodeCount) { return m_impl->SetCropNode(nodeCount); }
 bool CropBridge::ExitCrop() { return m_impl->ExitCrop(); }
 bool CropBridge::GetCropActive() const { return m_impl->GetCropActive(); }
+bool CropBridge::GetCropBound() const { return m_impl->GetCropBound(); }
 CropHistoryState CropBridge::GetCropHistory() const { return m_impl->GetCropHistory(); }
 bool CropBridge::GetShaderTickNeeded() const { return m_impl->GetShaderTickNeeded(); }
 bool CropBridge::SendShaderCommit() { return m_impl->SendShaderCommit(); }

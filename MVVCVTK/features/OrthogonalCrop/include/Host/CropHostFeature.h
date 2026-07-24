@@ -93,6 +93,12 @@ struct CropHostConfig {
 using CropHostCallback =
     std::function<void(CropExportResult)>;
 
+struct CropHostState final {
+    CropHistoryState history;
+    bool isActive = false;
+    bool isPublishing = false;
+};
+
 class CropHostFeature final
     : public HostFeature
     , public std::enable_shared_from_this<CropHostFeature> {
@@ -113,6 +119,7 @@ public:
     bool SendRequest(
         CropHostRequest request,
         CropHostCallback onComplete = nullptr);
+    CropHostState GetState() const;
 
 private:
     class Impl;

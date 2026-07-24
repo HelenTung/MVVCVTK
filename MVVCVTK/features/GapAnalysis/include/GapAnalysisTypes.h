@@ -133,6 +133,15 @@ struct VoidRegion {
 
 };
 
+struct GapStatistics final {
+    // object/void 只统计同一成功分析批次的有效域，体素计数不经窄化转换。
+    std::size_t objectVoxelCount = 0;
+    std::size_t voidVoxelCount = 0;
+    double objectVolumeMM3 = 0.0;
+    double voidVolumeMM3 = 0.0;
+    double porosityRatio = 0.0;
+};
+
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
 struct GapAnalysisResult {
     // 通过 minVolumeMM3 筛选的区域统计；id 与正标签值一一对应。
@@ -141,5 +150,14 @@ struct GapAnalysisResult {
     std::vector<int>        labelVolume;
     // 标签体继承输入快照的 dimensions、spacing 与 origin；worker 构建一次，主线程只读并挂载。
     vtkSmartPointer<vtkImageData> labelImage;
+    // 与 voids、labelVolume 和 labelImage 在同一 worker 提交段发布的聚合统计。
+    GapStatistics statistics;
     bool                    isSucceeded = false; // 只表示分析 payload 有效，不代表 display/overlay 已显示。
+};
+
+struct GapHostState final {
+    GapAnalysisState analysisState = GapAnalysisState::Idle;
+    GapStatistics statistics;
+    bool isViewActive = false;
+    bool isExitPending = false;
 };

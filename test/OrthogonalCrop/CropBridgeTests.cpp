@@ -285,6 +285,31 @@ int CropBridgeSuite::GetFailCount() const
             && firstHistory.operationCount == 1
             && firstHistory.hasEditableOp,
         "The first armed release should expose one current and one total operation.");
+    auto nextImage = vtkSmartPointer<vtkImageData>::New();
+    nextImage->ShallowCopy(image);
+    auto nextInput = input;
+    nextInput.inputVersion = 2;
+    nextInput.imageData = nextImage;
+    auto blockedService = std::make_shared<CropServiceStub>(
+        RenderInputStamp{ nextImage.GetPointer(), 2 },
+        renderer);
+    auto blockedView = view;
+    blockedView.referenceService = blockedService;
+    blockedView.targetServices = { blockedService };
+    CropBridge blockerBridge;
+    expect(blockerBridge.StartView(blockedView),
+        "A blocker bridge should occupy the replacement target.");
+    expect(!bridge.StartView(blockedView, nextInput)
+            && bridge.GetCropActive()
+            && bridge.GetCropHistory().nodeCount
+                == firstHistory.nodeCount
+            && bridge.GetCropHistory().operationCount
+                == firstHistory.operationCount
+            && service->GetEffectState().status
+                == RenderEffectStatus::Committed,
+        "Rejected input and target replacement should preserve the current binding and history.");
+    expect(blockerBridge.ClearBindings(),
+        "The blocker bridge should release the replacement target.");
     expect(bridge.SetCropMode(CropRemovalMode::None)
             && !bridge.GetShaderTickNeeded()
             && bridge.GetCropHistory().editMode == CropRemovalMode::None,
@@ -374,6 +399,18 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.ExitCrop()
             && reboundService->dirtyCount == exitDirtyCount + 1,
         "Repeated exit should not publish another reference frame.");
+    expect(bridge.GetCropBound(),
+        "Exit should preserve the committed target binding.");
+    expect(bridge.PreviousCrop() && bridge.GetShaderTickNeeded(),
+        "Previous should remain available after editing exits.");
+    expect(SendShaderCommit(bridge, renderWindow),
+        "Post-exit Previous should commit the shorter prefix.");
+    expect(bridge.NextCrop() && bridge.GetShaderTickNeeded(),
+        "Next should remain available after editing exits.");
+    expect(SendShaderCommit(bridge, renderWindow),
+        "Post-exit Next should restore the committed prefix.");
+    const auto postExitRevision =
+        reboundService->GetEffectState().activeRevision;
 
     bool hasAsyncResult = false;
     expect(bridge.ExportCrop([&hasAsyncResult](CropExportResult result) {
@@ -394,7 +431,7 @@ int CropBridgeSuite::GetFailCount() const
             && !bridge.GetShaderTickNeeded()
             && reboundService->detachCount == reboundDetachCount
             && reboundService->GetEffectState().activeRevision
-                == reboundRevision,
+                == postExitRevision,
         "Restarting the same view should resume editing without clearing or replaying its committed result.");
     expect(bridge.ExitCrop(), "Bridge should stop resumed editing without clearing its result.");
 
@@ -416,7 +453,7 @@ int CropBridgeSuite::GetFailCount() const
                 == resumedDetachCount + 1
             && reboundService->detachCount == reboundDetachCount
             && reboundService->GetEffectState().activeRevision
-                == reboundRevision,
+                == postExitRevision,
         "Canceling a pending target rebind should detach its temporary effect and preserve the old target.");
     expect(bridge.StartView(resumedView)
             && bridge.GetCropActive()

@@ -115,9 +115,14 @@ public:
     bool SendRequest(
         CropHostRequest request,
         CropHostCallback onComplete);
+    CropHostState GetState() const;
 
 private:
     bool StartCrop(const CropHostTarget& target);
+    std::optional<CropInputSnapshot> GetCropInput(
+        const CropHostTarget& target) const;
+    bool GetTargetsValid(
+        const HostViewTargets& targets) const;
     bool SetCropInput(const CropHostTarget& target);
     bool SetPolyData(CropHostPolyDataRequest request);
     bool ClearPolyData();
@@ -288,21 +293,38 @@ void CropHostFeature::Impl::ClearBorrowed()
 bool CropHostFeature::Impl::SetCropInput(
     const CropHostTarget& target)
 {
-    if (!m_bridge) {
+    auto input = GetCropInput(target);
+    if (!m_bridge || !input) {
         return false;
     }
 
+    const bool hasNewLineage =
+        target.source == CropHostSource::CurrentImage
+        && m_lastImage
+        && (m_lastImage->version != input->inputVersion
+            || m_lastImage->image.GetPointer()
+                != input->imageData.GetPointer());
+    if (!m_bridge->SetCropInput(std::move(*input))) {
+        return false;
+    }
+    if (hasNewLineage) {
+        // 外部 File/Reload 已提交新 current；只有 Bridge 接受新输入后才退休旧物化 lineage。
+        m_rootImage.reset();
+        m_lastImage.reset();
+    }
+    return true;
+}
+
+std::optional<CropInputSnapshot>
+CropHostFeature::Impl::GetCropInput(
+    const CropHostTarget& target) const
+{
     CropInputSnapshot input;
     if (target.source == CropHostSource::CurrentImage) {
         const auto imageState = m_getImageSnapshot
             ? m_getImageSnapshot() : ImageSnapshot{};
         if (!imageState || !GetImageReady(imageState->image)) {
-            return false;
-        }
-        if (m_lastImage && imageState != m_lastImage) {
-            // File/Reload 或其它 owner 事务已替换数据，旧根快照不再属于当前 lineage。
-            m_rootImage.reset();
-            m_lastImage.reset();
+            return std::nullopt;
         }
         input.dataSource =
             OrthogonalCropDataSource::ImageData;
@@ -314,7 +336,7 @@ bool CropHostFeature::Impl::SetCropInput(
     }
     else {
         if (!m_polyData || m_sourceVersion == 0) {
-            return false;
+            return std::nullopt;
         }
         input.dataSource =
             OrthogonalCropDataSource::PolyData;
@@ -323,7 +345,29 @@ bool CropHostFeature::Impl::SetCropInput(
         input.polyData->GetBounds(
             input.inputModelBounds.data());
     }
-    return m_bridge->SetCropInput(std::move(input));
+    return input;
+}
+
+bool CropHostFeature::Impl::GetTargetsValid(
+    const HostViewTargets& targets) const
+{
+    if (!m_renderViews
+        || (targets.viewIds.empty()
+            && targets.viewRoles.empty())) {
+        return false;
+    }
+    for (const auto& viewId : targets.viewIds) {
+        if (viewId.empty()
+            || !m_renderViews->GetViewById(viewId)) {
+            return false;
+        }
+    }
+    for (const auto role : targets.viewRoles) {
+        if (!m_renderViews->GetFirstViewByRole(role)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool CropHostFeature::Impl::StartCrop(
@@ -345,11 +389,17 @@ bool CropHostFeature::Impl::StartCrop(
         return false;
     }
 
-    auto targetViews = m_renderViews->GetViewsByTargets(
-        target.targetViews);
-    if (targetViews.empty() && !target.isTargetViewsUsed) {
-        targetViews = m_renderViews->GetViewsByTargets(
-            m_config.defaultTarget.targetViews);
+    const auto& requestedTargets = target.isTargetViewsUsed
+        ? target.targetViews
+        : m_config.defaultTarget.targetViews;
+    if (!GetTargetsValid(requestedTargets)) {
+        return false;
+    }
+    const auto targetViews =
+        m_renderViews->GetViewsByTargets(requestedTargets);
+    auto input = GetCropInput(target);
+    if (targetViews.empty() || !input) {
+        return false;
     }
 
     CropViewRequest request;
@@ -360,9 +410,22 @@ bool CropHostFeature::Impl::StartCrop(
     request.referenceService = referenceView->service;
     request.targetServices =
         m_renderViews->BuildServices(targetViews);
-    const bool isStarted = SetCropInput(target)
-        && m_bridge->StartView(request);
+    if (request.targetServices.empty()) {
+        return false;
+    }
+    const bool hasNewLineage =
+        target.source == CropHostSource::CurrentImage
+        && m_lastImage
+        && (m_lastImage->version != input->inputVersion
+            || m_lastImage->image.GetPointer()
+                != input->imageData.GetPointer());
+    const bool isStarted = m_bridge->StartView(
+        request, std::move(*input));
     if (isStarted) {
+        if (hasNewLineage) {
+            m_rootImage.reset();
+            m_lastImage.reset();
+        }
         m_activeTarget = target;
         SendStatus();
     }
@@ -1001,13 +1064,17 @@ bool CropHostFeature::Impl::SendRequest(
     case CropHostAction::Previous:
         return SendActionLog(
             "Previous",
-            std::holds_alternative<std::monostate>(
+            m_activeTarget.has_value()
+            && m_bridge->GetCropBound()
+            && std::holds_alternative<std::monostate>(
                 request.payload)
             && m_bridge->PreviousCrop());
     case CropHostAction::Next:
         return SendActionLog(
             "Next",
-            std::holds_alternative<std::monostate>(
+            m_activeTarget.has_value()
+            && m_bridge->GetCropBound()
+            && std::holds_alternative<std::monostate>(
                 request.payload)
             && m_bridge->NextCrop());
     case CropHostAction::Node:
@@ -1015,7 +1082,9 @@ bool CropHostFeature::Impl::SendRequest(
             std::get_if<CropHostNodeRequest>(
                 &request.payload)) {
             const bool isAccepted =
-                m_bridge->SetCropNode(
+                m_activeTarget.has_value()
+                && m_bridge->GetCropBound()
+                && m_bridge->SetCropNode(
                     value->nodeCount);
             std::cout
                 << "[Crop][Request] targetNode="
@@ -1053,7 +1122,6 @@ bool CropHostFeature::Impl::SendRequest(
                 request.payload)) {
             return false;
         }
-        m_activeTarget.reset();
         m_status.reset();
         return SendActionLog(
             "Exit", m_bridge->ExitCrop());
@@ -1061,6 +1129,23 @@ bool CropHostFeature::Impl::SendRequest(
         return false;
     }
     return false;
+}
+
+CropHostState CropHostFeature::Impl::GetState() const
+{
+    CropHostState state;
+    if (!m_isAttached
+        || !m_bridge
+        || m_ownerThread != std::this_thread::get_id()) {
+        return state;
+    }
+
+    // owner thread 上连续读取 history、active 和发布屏障，形成同一时刻的只读快照。
+    state.history = m_bridge->GetCropHistory();
+    state.isActive = m_activeTarget.has_value()
+        && m_bridge->GetCropActive();
+    state.isPublishing = m_isPublishing;
+    return state;
 }
 
 std::optional<std::size_t>
@@ -1215,7 +1300,7 @@ bool CropHostFeature::Impl::OnHostTick()
         || m_isPublishing) {
         return false;
     }
-    if (m_bridge->GetCropActive()
+    if (m_bridge->GetCropBound()
         && m_activeTarget
         && !SetCropInput(*m_activeTarget)) {
         (void)m_bridge->ClearBindings();
@@ -1411,4 +1496,9 @@ bool CropHostFeature::SendRequest(
     return m_impl
         && m_impl->SendRequest(
             std::move(request), std::move(onComplete));
+}
+
+CropHostState CropHostFeature::GetState() const
+{
+    return m_impl ? m_impl->GetState() : CropHostState{};
 }

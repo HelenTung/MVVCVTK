@@ -29,7 +29,7 @@ enum class HostToolMode {
 };
 
 struct HostTransferNode {
-    double position = 0.0; // 数据标量坐标，不是归一化纹理坐标。
+    double position = 0.0; // 当前 scalar range 内的归一化位置，[0,1]。
     double opacity = 0.0;  // 该标量位置的不透明度控制点。
     double r = 0.0; // 颜色通道，按 VTK RGB [0,1] 约定解释。
     double g = 0.0;

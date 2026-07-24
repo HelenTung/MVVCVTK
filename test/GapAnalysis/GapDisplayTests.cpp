@@ -244,6 +244,13 @@ int GapDisplaySuite::GetFailCount() const
             == GapAnalysisState::Succeeded
         && maskService.GetVoidRegions().empty(),
         "Frozen mask=0 voxels should not enter Gap statistics.");
+    const auto maskedStatistics = maskService.GetStatistics();
+    expect(maskedStatistics.objectVoxelCount == 124
+            && maskedStatistics.voidVoxelCount == 0
+            && maskedStatistics.objectVolumeMM3 == 124.0
+            && maskedStatistics.voidVolumeMM3 == 0.0
+            && maskedStatistics.porosityRatio == 0.0,
+        "Gap statistics should use the frozen non-zero validity domain.");
     const auto maskedLabel = maskService.BuildLabelImage();
     const auto* maskedLabels = maskedLabel
         ? static_cast<const int*>(
@@ -258,6 +265,8 @@ int GapDisplaySuite::GetFailCount() const
         && maskedMesh->GetNumberOfCells() == 0,
         "Frozen mask=0 voxels should not enter the Gap void mesh.");
     maskService.ClearView();
+    expect(maskService.GetStatistics().objectVoxelCount == 0,
+        "ClearView should retire the successful statistics batch.");
 
     auto teardownService = std::make_shared<GapAnalysisService>();
     GapViewRequest teardownRequest;

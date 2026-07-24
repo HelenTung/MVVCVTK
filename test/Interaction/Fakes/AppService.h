@@ -65,6 +65,7 @@ public:
     void SetVizMode(VizMode mode) { m_vizMode = mode; ++m_vizModeSetCount; }
     VizMode GetVizMode() const { return m_vizMode; }
     int GetVizModeSetCount() const { return m_vizModeSetCount; }
+    int GetViewSetCount() const { return m_viewSetCount + m_vizModeSetCount; }
     int GetLoadCount() const { return m_loadCount; }
     int GetReloadCount() const { return m_reloadCount; }
     int GetExportCount() const { return m_exportCount; }
@@ -76,17 +77,18 @@ public:
     const std::string& GetSlicePath() const { return m_slicePath; }
     const std::optional<double>& GetSliceAngleDeg() const { return m_sliceAngleDeg; }
 
-    template <typename... Args> void SetMaterial(Args&&...) {}
-    template <typename... Args> void SetOpacity(Args&&...) {}
-    template <typename... Args> void SetTransferFunction(Args&&...) {}
-    template <typename... Args> void SetIsoThreshold(Args&&...) {}
-    template <typename... Args> void SetBackground(Args&&...) {}
-    template <typename... Args> void SetSpacing(Args&&...) {}
-    template <typename... Args> void SetWindowLevel(Args&&...) {}
+    template <typename... Args> void SetMaterial(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetOpacity(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetTransferFunction(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetIsoThreshold(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetBackground(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetSpacing(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> void SetWindowLevel(Args&&...) { ++m_viewSetCount; }
 
 private:
     VizMode m_vizMode = VizMode::Volume;
     int m_vizModeSetCount = 0;
+    int m_viewSetCount = 0;
     int m_loadCount = 0;
     int m_reloadCount = 0;
     int m_exportCount = 0;
