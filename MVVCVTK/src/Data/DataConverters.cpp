@@ -1,7 +1,8 @@
 #include "DataConverters.h"
 #include "Platform/Path.h"
 #include <vtkImageAccumulate.h>
-#include <vtkFloatArray.h>
+#include <vtkDoubleArray.h>
+#include <vtkIdTypeArray.h>
 #include <vtkPointData.h>
 #include <filesystem>
 #include <vtkImageWriter.h>
@@ -10,6 +11,9 @@
 #include <vtkImageData.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
+#include <vector>
 
 bool HistogramConverter::SetBinCount(int binCount)
 {
@@ -27,9 +31,9 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
     if (!frequencies) return nullptr;
 
     auto table = vtkSmartPointer<vtkTable>::New();
-    auto colX = vtkSmartPointer<vtkFloatArray>::New(); colX->SetName("Intensity");
-    auto colY = vtkSmartPointer<vtkFloatArray>::New(); colY->SetName("Frequency");
-    auto colLogY = vtkSmartPointer<vtkFloatArray>::New(); colLogY->SetName("LogFrequency");
+    auto colX = vtkSmartPointer<vtkDoubleArray>::New(); colX->SetName("Intensity");
+    auto colY = vtkSmartPointer<vtkIdTypeArray>::New(); colY->SetName("Frequency");
+    auto colLogY = vtkSmartPointer<vtkDoubleArray>::New(); colLogY->SetName("LogFrequency");
 
     // 预分配避免 InsertNextValue 反复扩容
     colX->SetNumberOfTuples(m_binCount);
@@ -37,10 +41,10 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
     colLogY->SetNumberOfTuples(m_binCount);
 
     for (int i = 0; i < m_binCount; i++) {
-        float val = static_cast<float>(frequencies[i]);
-        colX->SetValue(i, static_cast<float>(range[0] + i * binWidth));
-        colY->SetValue(i, val);
-        colLogY->SetValue(i, std::log(val + 1.0f));
+        const vtkIdType frequency = frequencies[i];
+        colX->SetValue(i, range[0] + static_cast<double>(i) * binWidth);
+        colY->SetValue(i, frequency);
+        colLogY->SetValue(i, std::log(static_cast<double>(frequency) + 1.0));
     }
     table->AddColumn(colX); table->AddColumn(colY); table->AddColumn(colLogY);
     return table;
@@ -54,10 +58,10 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
     vtkIdType* freqs = GetHistogramBuffer(input, range, binWidth);
     if (!freqs) return;
 
-    std::vector<float> logHist(m_binCount);
-    float maxLog = 0.0f;
+    std::vector<double> logHist(m_binCount);
+    double maxLog = 0.0;
     for (int i = 0; i < m_binCount; ++i) {
-        logHist[i] = std::log(static_cast<float>(freqs[i]) + 1.0f);
+        logHist[i] = std::log(static_cast<double>(freqs[i]) + 1.0);
         if (logHist[i] > maxLog) maxLog = logHist[i];
     }
 
@@ -71,7 +75,7 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             int binIdx = (x * m_binCount) / W;
-            int h_limit = static_cast<int>((logHist[binIdx] / (maxLog > 0 ? maxLog : 1.0f)) * H * 0.9);
+            int h_limit = static_cast<int>((logHist[binIdx] / (maxLog > 0.0 ? maxLog : 1.0)) * H * 0.9);
             unsigned char* pix = ptr + (y * W + x) * 3;
 
             if (y < h_limit) { // 填充直方图 (y=0在底部)
@@ -109,7 +113,50 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
     writer->Write();
 }
 
-vtkIdType* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> input, double outRange[2], double& outBinWidth)
+std::optional<double> HistogramConverter::GetHistogramPercentile(
+    vtkImageData* image,
+    double quantile)
+{
+    if (!std::isfinite(quantile) || quantile < 0.0 || quantile > 1.0) {
+        return std::nullopt;
+    }
+
+    double range[2] = { 0.0, 0.0 };
+    double binWidth = 0.0;
+    vtkIdType* frequencies = GetHistogramBuffer(image, range, binWidth);
+    if (!frequencies) {
+        return std::nullopt;
+    }
+    if (quantile == 0.0 || range[0] == range[1]) {
+        return range[0];
+    }
+    if (quantile == 1.0) {
+        return range[1];
+    }
+
+    long double sampleCount = 0.0L;
+    for (int i = 0; i < m_binCount; ++i) {
+        sampleCount += static_cast<long double>(frequencies[i]);
+    }
+    if (sampleCount <= 0.0L) {
+        return std::nullopt;
+    }
+
+    const long double targetRank =
+        std::ceil(static_cast<long double>(quantile) * sampleCount);
+    long double currentRank = 0.0L;
+    for (int i = 0; i < m_binCount; ++i) {
+        currentRank += static_cast<long double>(frequencies[i]);
+        if (currentRank >= targetRank) {
+            const double estimate =
+                range[0] + static_cast<double>(i) * binWidth;
+            return std::clamp(estimate, range[0], range[1]);
+        }
+    }
+    return range[1];
+}
+
+vtkIdType* HistogramConverter::GetHistogramBuffer(vtkImageData* input, double outRange[2], double& outBinWidth)
 {
     if (!input || !input->GetPointData() || !input->GetPointData()->GetScalars() || m_binCount <= 0) {
         outRange[0] = 0.0;
@@ -119,14 +166,34 @@ vtkIdType* HistogramConverter::GetHistogramBuffer(vtkSmartPointer<vtkImageData> 
     }
 
     input->GetScalarRange(outRange);
+    if (!std::isfinite(outRange[0]) || !std::isfinite(outRange[1])
+        || outRange[1] < outRange[0]) {
+        outBinWidth = 0.0;
+        return nullptr;
+    }
+
+    const double rangeWidth = outRange[1] - outRange[0];
+    double binSpacing = 1.0;
+    if (rangeWidth > 0.0 && m_binCount == 1) {
+        outBinWidth = std::nextafter(
+            rangeWidth, std::numeric_limits<double>::infinity());
+        binSpacing = outBinWidth;
+    }
+    else if (rangeWidth > 0.0) {
+        outBinWidth = rangeWidth / static_cast<double>(m_binCount - 1);
+        binSpacing = outBinWidth;
+    }
+    else {
+        outBinWidth = 0.0;
+    }
+
     // 流式连接：input 没变时 VTK pipeline 不会重复计算
     if (!m_accumulate)
 		m_accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
     m_accumulate->SetInputData(input);
     m_accumulate->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
     m_accumulate->SetComponentOrigin(outRange[0], 0, 0);
-    outBinWidth = (outRange[1] - outRange[0]) / static_cast<double>(m_binCount);
-    m_accumulate->SetComponentSpacing(outBinWidth > 0 ? outBinWidth : 1.0, 0, 0);
+    m_accumulate->SetComponentSpacing(binSpacing, 0, 0);
     m_accumulate->Update();
 
     if (!m_accumulate->GetOutput() || !m_accumulate->GetOutput()->GetPointData() || !m_accumulate->GetOutput()->GetPointData()->GetScalars()) {

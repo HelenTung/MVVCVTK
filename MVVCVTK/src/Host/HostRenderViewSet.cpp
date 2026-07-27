@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <utility>
 
@@ -29,6 +30,9 @@ public:
         const HostViewTargets& targets) const;
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
+    bool SetFeatureViews(
+        const std::string& featureId,
+        const std::vector<std::shared_ptr<InteractiveService>>& services);
     void SetInitialVisibility() const;
     void SendRenderAll() const;
     void SetInteractorsReady() const;
@@ -45,9 +49,13 @@ private:
         std::shared_ptr<IStateEventSource> stateEventSource) const;
     std::optional<VizMode> GetAppViewMode(HostRenderMode mode) const;
     std::optional<PreInitConfig> BuildAppInit(const HostViewInitConfig& config) const;
+    std::shared_ptr<VizService> GetViewService(
+        const std::shared_ptr<InteractiveService>& service) const;
     // Impl 是 runtime 集合的唯一容器 owner；查询返回的引用/裸指针只在下一次 Build、移动或析构前有效。
     // Build 会先 clear 再重新组装 service/context，因此调用方不得跨视图拓扑重建缓存元素地址。
     std::vector<HostRenderViewRuntime> m_views;
+    std::map<std::string, std::vector<std::shared_ptr<VizService>>>
+        m_featureViews;
 };
 
 std::pair<std::shared_ptr<VizService>, std::shared_ptr<StdRenderContext>> HostRenderViewSet::Impl::BuildViewPair(
@@ -110,10 +118,29 @@ std::optional<PreInitConfig> HostRenderViewSet::Impl::BuildAppInit(
 {
     const auto mode = GetAppViewMode(config.viewMode);
     const auto isFinite = [](double value) { return std::isfinite(value); };
-    if (!mode || !isFinite(config.material.ambient) || !isFinite(config.material.diffuse)
-        || !isFinite(config.material.specular) || !isFinite(config.material.specularPower)
-        || !isFinite(config.material.opacity) || config.material.opacity < 0.0
-        || config.material.opacity > 1.0 || config.material.specularPower < 0.0) {
+    const auto isUnit = [&isFinite](double value) {
+        return isFinite(value) && value >= 0.0 && value <= 1.0;
+    };
+    if (!mode || !isUnit(config.material.ambient)
+        || !isUnit(config.material.diffuse)
+        || !isUnit(config.material.specular)
+        || !isFinite(config.material.specularPower)
+        || config.material.specularPower < 0.0
+        || !isUnit(config.material.opacity)
+        || (config.hasIso && !isFinite(config.isoThreshold))
+        || (config.hasBackground
+            && (!isUnit(config.background.r)
+                || !isUnit(config.background.g)
+                || !isUnit(config.background.b)))
+        || (config.hasSpacing
+            && (!isFinite(config.spacing[0]) || config.spacing[0] <= 0.0
+                || !isFinite(config.spacing[1]) || config.spacing[1] <= 0.0
+                || !isFinite(config.spacing[2]) || config.spacing[2] <= 0.0))
+        || (config.hasWindowLevel
+            && (!isFinite(config.windowLevel.windowWidth)
+                || config.windowLevel.windowWidth <= 0.0
+                || !isFinite(config.windowLevel.windowCenter)))
+        || (config.hasTransferNodes && config.transferNodes.empty())) {
         return std::nullopt;
     }
 
@@ -131,13 +158,18 @@ std::optional<PreInitConfig> HostRenderViewSet::Impl::BuildAppInit(
     result.hasBgColor = config.hasBackground;
     result.hasSpacing = config.hasSpacing;
     result.hasWindowLevel = config.hasWindowLevel;
-    result.tfNodes.reserve(config.transferNodes.size());
-    for (const auto& node : config.transferNodes) {
-        if (!isFinite(node.position) || !isFinite(node.opacity) || !isFinite(node.r)
-            || !isFinite(node.g) || !isFinite(node.b)) {
-            return std::nullopt;
+    if (config.hasTransferNodes) {
+        result.tfNodes.reserve(config.transferNodes.size());
+        for (const auto& node : config.transferNodes) {
+            if (!isUnit(node.position) || !isUnit(node.opacity)
+                || !isUnit(node.r) || !isUnit(node.g) || !isUnit(node.b)
+                || (!result.tfNodes.empty()
+                    && node.position < result.tfNodes.back().position)) {
+                return std::nullopt;
+            }
+            result.tfNodes.push_back(
+                { node.position, node.opacity, node.r, node.g, node.b });
         }
-        result.tfNodes.push_back({ node.position, node.opacity, node.r, node.g, node.b });
     }
     return result;
 }
@@ -148,6 +180,7 @@ bool HostRenderViewSet::Impl::Build(
 {
     // Build 是窗口拓扑进入 session 的唯一入口；调用方传多少 configs，就创建/接管多少窗口。
     // 这里不补默认五窗口；standalone 调试拓扑由 main 显式传入，真实上位机也走同一条配置链路。
+    m_featureViews.clear();
     m_views.clear();
     m_views.reserve(configs.size());
     for (const auto& requestedConfig : configs) {
@@ -275,6 +308,101 @@ std::vector<std::shared_ptr<InteractiveService>> HostRenderViewSet::Impl::BuildS
         }
     }
     return services;
+}
+
+std::shared_ptr<VizService>
+HostRenderViewSet::Impl::GetViewService(
+    const std::shared_ptr<InteractiveService>& service) const
+{
+    if (!service) {
+        return {};
+    }
+    for (const auto& view : m_views) {
+        if (view.service == service) {
+            return view.service;
+        }
+    }
+    return {};
+}
+
+bool HostRenderViewSet::Impl::SetFeatureViews(
+    const std::string& featureId,
+    const std::vector<std::shared_ptr<InteractiveService>>& services)
+{
+    if (featureId.empty()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<VizService>> nextViews;
+    nextViews.reserve(services.size());
+    for (const auto& service : services) {
+        auto viewService = GetViewService(service);
+        if (!viewService) {
+            return false;
+        }
+        if (std::find(
+                nextViews.begin(),
+                nextViews.end(),
+                viewService)
+                == nextViews.end()) {
+            nextViews.push_back(std::move(viewService));
+        }
+    }
+
+    const auto current = m_featureViews.find(featureId);
+    const std::vector<std::shared_ptr<VizService>> emptyViews;
+    const auto& currentViews = current == m_featureViews.end()
+        ? emptyViews
+        : current->second;
+    const FeatureSource source{ featureId };
+    std::vector<std::shared_ptr<VizService>> removedViews;
+    std::vector<std::shared_ptr<VizService>> addedViews;
+
+    // 1. 按集合差解绑旧目标，再绑定新目标；同一 Feature 的重复声明是幂等的。
+    // 2. 任一 service 拒绝时回滚已完成步骤，确保映射与各 view 的来源集合保持同一事务。
+    for (const auto& service : currentViews) {
+        if (service
+            && std::find(nextViews.begin(), nextViews.end(), service)
+                == nextViews.end()
+            && !service->SetFeatureActive(source, false)) {
+            for (const auto& removed : removedViews) {
+                (void)removed->SetFeatureActive(source, true);
+            }
+            return false;
+        }
+        if (service
+            && std::find(nextViews.begin(), nextViews.end(), service)
+                == nextViews.end()) {
+            removedViews.push_back(service);
+        }
+    }
+    for (const auto& service : nextViews) {
+        if (service
+            && std::find(currentViews.begin(), currentViews.end(), service)
+                == currentViews.end()
+            && !service->SetFeatureActive(source, true)) {
+            for (const auto& added : addedViews) {
+                (void)added->SetFeatureActive(source, false);
+            }
+            for (const auto& removed : removedViews) {
+                (void)removed->SetFeatureActive(source, true);
+            }
+            return false;
+        }
+        if (service
+            && std::find(currentViews.begin(), currentViews.end(), service)
+                == currentViews.end()) {
+            addedViews.push_back(service);
+        }
+    }
+
+    if (nextViews.empty()) {
+        m_featureViews.erase(featureId);
+    }
+    else {
+        m_featureViews[featureId] = std::move(nextViews);
+    }
+    return true;
 }
 
 void HostRenderViewSet::Impl::SetInitialVisibility() const
@@ -405,6 +533,14 @@ std::vector<std::shared_ptr<InteractiveService>> HostRenderViewSet::BuildService
     const std::vector<const HostRenderViewRuntime*>& views) const
 {
     return m_impl->BuildServices(views);
+}
+
+bool HostRenderViewSet::SetFeatureViews(
+    const std::string& featureId,
+    const std::vector<std::shared_ptr<InteractiveService>>& services)
+{
+    return m_impl
+        && m_impl->SetFeatureViews(featureId, services);
 }
 
 void HostRenderViewSet::SetInitialVisibility() const

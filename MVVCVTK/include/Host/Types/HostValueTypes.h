@@ -45,6 +45,33 @@ struct HostMaterialParams {
     bool isShadeOn = false;      // 体渲染是否启用光照着色。
 };
 
+enum class HostMaterialPreset {
+    Soft,
+    Dense,
+    Glossy
+};
+
+enum class HostVolumeQuality {
+    Quality,
+    Custom
+};
+
+struct HostVolumeQualityParams {
+    HostVolumeQuality quality = HostVolumeQuality::Quality;
+    int maxDimension = 766;
+    double sampleDistance = 1.0;
+    bool isJitterOn = true;
+};
+
+struct HostGradientOpacityNode {
+    double gradient = 0.0; // VTK gradient-opacity 原生域中的梯度幅值。
+    double opacity = 0.0;  // 归一化不透明度 [0,1]。
+};
+
+enum class HostTransferPreset {
+    Percentile
+};
+
 struct HostBackgroundColor {
     double r = 0.1; // renderer 背景 RGB，按 [0,1] 解释。
     double g = 0.1;

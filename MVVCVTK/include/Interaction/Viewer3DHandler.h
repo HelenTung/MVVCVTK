@@ -18,6 +18,7 @@ public:
     Viewer3DHandler(InteractiveService* service,
         vtkPropPicker* picker,
         vtkRenderer* renderer);
+    ~Viewer3DHandler() override;
 
     InteractionResult Send(const InteractionEvent& eve) override;
 
@@ -26,6 +27,7 @@ private:
     InteractiveService* m_service = nullptr;
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
+    InteractionSource m_source;
 
     bool m_isDragging = false; // 命中参考平面后置位，左键 release 清零
     int  m_dragAxis = -1;    // 单轴约束：0/1/2 为 world X/Y/Z，-1 表示未拖拽

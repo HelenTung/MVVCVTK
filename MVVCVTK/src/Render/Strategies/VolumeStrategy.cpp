@@ -5,8 +5,10 @@
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkImageResample.h>
+#include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <algorithm>
 #include <cmath>
 
 class VolumeStrategy::Mapper final : public vtkOpenGLGPUVolumeRayCastMapper {
@@ -83,11 +85,14 @@ VolumeStrategy::VolumeStrategy() {
     m_mapper = vtkSmartPointer<Mapper>::New();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
-    m_mapper->SetAutoAdjustSampleDistances(true);
+    m_mapper->SetAutoAdjustSampleDistances(false);
+    m_mapper->SetImageSampleDistance(1.0);
+    m_mapper->SetMinimumImageSampleDistance(1.0);
+    m_mapper->SetMaximumImageSampleDistance(1.0);
     m_volume->SetMapper(m_mapper);
 
     auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
-    volumeProperty->ShadeOn();
+    volumeProperty->ShadeOff();
     volumeProperty->SetInterpolationTypeToLinear();
     m_volume->SetProperty(volumeProperty);
 
@@ -101,21 +106,22 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
-    img->GetCenter(m_dataCenter);
-
-    if (m_lastInput == data && m_mapper && m_mapper->GetInput() == img) {
+    if (m_lastInput == data && GetProducersReady()) {
         return;
     }
+    const auto oldInput = m_lastInput;
+    const auto oldMask = m_lastMask;
     m_lastInput = data;
+    m_lastMask = nullptr;
+    if (!BuildProducers()) {
+        // producer 未提交时恢复期望键；同一输入修正后再次下发仍会重新尝试构建。
+        m_lastInput = oldInput;
+        m_lastMask = oldMask;
+        (void)SetMapperInput();
+        return;
+    }
 
-    m_qualityResample = ImageProcessor::GetDownsampledImage(img, m_qualityTargetDim);
-    m_interactionResample = ImageProcessor::GetDownsampledImage(img, m_interactionTargetDim);
-    m_qualityMask = nullptr;
-    m_interactionMask = nullptr;
-    m_mapper->SetMaskInput(nullptr);
-    m_mapper->SetInputConnection(m_qualityResample->GetOutputPort());
-    m_isInteracting = false;
-
+    img->GetCenter(m_dataCenter);
 	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
     m_cubeAxes->SetBounds(img->GetBounds());
 }
@@ -123,30 +129,258 @@ void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
 void VolumeStrategy::SetInputMask(
     vtkSmartPointer<vtkImageData> validityMask)
 {
-    m_qualityMask = nullptr;
-    m_interactionMask = nullptr;
-    if (!m_mapper || !validityMask) {
-        if (m_mapper) {
-            m_mapper->SetMaskInput(nullptr);
-        }
+    if (m_lastMask == validityMask
+        && GetMasksReady(m_customTargetDim)) {
         return;
+    }
+    const auto oldMask = m_lastMask;
+    const auto oldMaskInput = m_maskInput;
+    const auto oldQualityMask = m_qualityMask;
+    const auto oldCustomMask = m_customMask;
+    const int oldQualityMaskDim = m_qualityMaskDim;
+    const int oldCustomMaskDim = m_customMaskDim;
+    m_lastMask = validityMask;
+    if (!BuildMasks(m_customTargetDim)
+        || !SetMapperInput()) {
+        m_lastMask = oldMask;
+        m_maskInput = oldMaskInput;
+        m_qualityMask = oldQualityMask;
+        m_customMask = oldCustomMask;
+        m_qualityMaskDim = oldQualityMaskDim;
+        m_customMaskDim = oldCustomMaskDim;
+        (void)SetMapperInput();
+        return;
+    }
+}
+
+int VolumeStrategy::GetCustomDim() const
+{
+    return m_quality.quality == VolumeQuality::Custom
+        ? m_quality.maxDimension : 766;
+}
+
+bool VolumeStrategy::GetProducersReady() const
+{
+    return m_qualityResample
+        && m_customResample
+        && m_producerInput == m_lastInput
+        && m_qualityTargetDim == 766
+        && m_customTargetDim == GetCustomDim()
+        && m_isProducerDenoiseOn == m_isDenoiseOn;
+}
+
+bool VolumeStrategy::GetMasksReady(const int customTargetDim) const
+{
+    if (!m_lastMask) {
+        return !m_maskInput
+            && !m_qualityMask
+            && !m_customMask;
+    }
+    return customTargetDim > 0
+        && m_qualityMask
+        && m_customMask
+        && m_maskInput == m_lastMask
+        && m_qualityMaskDim == 766
+        && m_customMaskDim == customTargetDim;
+}
+
+double VolumeStrategy::GetQualityStep(
+    vtkImageResample* qualityResample) const
+{
+    if (!qualityResample) return 0.0;
+    qualityResample->UpdateInformation();
+    const double* spacing = qualityResample->GetOutput()->GetSpacing();
+    const double minSpacing = std::min(
+        { spacing[0], spacing[1], spacing[2] });
+    return std::isfinite(minSpacing) && minSpacing > 0.0
+        ? 0.5 * minSpacing : 0.0;
+}
+
+bool VolumeStrategy::BuildMasks(const int customTargetDim)
+{
+    if (!m_mapper) return false;
+    if (!m_lastMask) {
+        m_qualityMask = nullptr;
+        m_customMask = nullptr;
+        m_maskInput = nullptr;
+        m_qualityMaskDim = 0;
+        m_customMaskDim = 0;
+        m_mapper->SetMaskInput(nullptr);
+        return true;
+    }
+    if (GetMasksReady(customTargetDim)) {
+        return true;
+    }
+    if (customTargetDim <= 0) return false;
+
+    auto qualityMask = ImageProcessor::GetDownsampledMask(
+        m_lastMask, 766);
+    if (!qualityMask) return false;
+    vtkSmartPointer<vtkImageResample> customMask;
+    if (customTargetDim == 766) {
+        customMask = qualityMask;
+    }
+    else {
+        customMask = ImageProcessor::GetDownsampledMask(
+            m_lastMask, customTargetDim);
+        if (!customMask) return false;
+    }
+    qualityMask->Update();
+    if (customMask != qualityMask) {
+        customMask->Update();
+    }
+    m_qualityMask = std::move(qualityMask);
+    m_customMask = std::move(customMask);
+    m_maskInput = m_lastMask;
+    m_qualityMaskDim = 766;
+    m_customMaskDim = customTargetDim;
+    m_mapper->SetMaskTypeToBinary();
+    return true;
+}
+
+bool VolumeStrategy::BuildProducers()
+{
+    auto* image = vtkImageData::SafeDownCast(m_lastInput);
+    if (!image || !m_mapper) return false;
+
+    constexpr int qualityTargetDim = 766;
+    const int customTargetDim = GetCustomDim();
+    if (customTargetDim <= 0) return false;
+    if (GetProducersReady()) {
+        return SetMapperInput();
     }
 
-    m_qualityMask =
-        ImageProcessor::GetDownsampledMask(
-            validityMask, m_qualityTargetDim);
-    m_interactionMask =
-        ImageProcessor::GetDownsampledMask(
-            validityMask, m_interactionTargetDim);
-    if (!m_qualityMask || !m_interactionMask) {
-        m_mapper->SetMaskInput(nullptr);
-        return;
+    vtkAlgorithmOutput* inputPort = nullptr;
+    vtkSmartPointer<vtkImageAnisotropicDiffusion3D> denoiseFilter;
+    if (m_isDenoiseOn) {
+        double range[2] = { 0.0, 0.0 };
+        image->GetScalarRange(range);
+        if (!std::isfinite(range[0]) || !std::isfinite(range[1])
+            || range[1] < range[0]) {
+            return false;
+        }
+        denoiseFilter =
+            vtkSmartPointer<vtkImageAnisotropicDiffusion3D>::New();
+        denoiseFilter->SetInputData(image);
+        denoiseFilter->SetNumberOfIterations(5);
+        denoiseFilter->SetDiffusionFactor(0.125);
+        denoiseFilter->SetDiffusionThreshold(
+            0.02 * std::max(0.0, range[1] - range[0]));
+        denoiseFilter->FacesOn();
+        denoiseFilter->EdgesOff();
+        denoiseFilter->CornersOff();
+        inputPort = denoiseFilter->GetOutputPort();
     }
-    m_qualityMask->Update();
-    m_interactionMask->Update();
-    m_mapper->SetMaskTypeToBinary();
-    m_mapper->SetMaskInput(
-        m_qualityMask->GetOutput());
+
+    auto qualityResample = ImageProcessor::GetDownsampledImage(
+        image, qualityTargetDim, inputPort);
+    if (!qualityResample) return false;
+    vtkSmartPointer<vtkImageResample> customResample;
+    if (customTargetDim == qualityTargetDim) {
+        customResample = qualityResample;
+    }
+    else {
+        customResample = ImageProcessor::GetDownsampledImage(
+            image, customTargetDim, inputPort);
+        if (!customResample) return false;
+    }
+    if (GetQualityStep(qualityResample) <= 0.0) return false;
+
+    const auto oldDenoiseFilter = m_denoiseFilter;
+    const auto oldQualityResample = m_qualityResample;
+    const auto oldCustomResample = m_customResample;
+    const auto oldProducerInput = m_producerInput;
+    const int oldQualityTargetDim = m_qualityTargetDim;
+    const int oldCustomTargetDim = m_customTargetDim;
+    const bool wasProducerDenoiseOn = m_isProducerDenoiseOn;
+    const auto oldMaskInput = m_maskInput;
+    const auto oldQualityMask = m_qualityMask;
+    const auto oldCustomMask = m_customMask;
+    const int oldQualityMaskDim = m_qualityMaskDim;
+    const int oldCustomMaskDim = m_customMaskDim;
+
+    // mask 的结构键不含 denoise；仅 mask 输入或目标尺寸变化时同步重建。
+    if (!GetMasksReady(customTargetDim)
+        && !BuildMasks(customTargetDim)) {
+        return false;
+    }
+
+    m_denoiseFilter = std::move(denoiseFilter);
+    m_qualityResample = std::move(qualityResample);
+    m_customResample = std::move(customResample);
+    m_producerInput = m_lastInput;
+    m_qualityTargetDim = qualityTargetDim;
+    m_customTargetDim = customTargetDim;
+    m_isProducerDenoiseOn = m_isDenoiseOn;
+    if (SetMapperInput()) {
+        return true;
+    }
+
+    m_denoiseFilter = oldDenoiseFilter;
+    m_qualityResample = oldQualityResample;
+    m_customResample = oldCustomResample;
+    m_producerInput = oldProducerInput;
+    m_qualityTargetDim = oldQualityTargetDim;
+    m_customTargetDim = oldCustomTargetDim;
+    m_isProducerDenoiseOn = wasProducerDenoiseOn;
+    m_maskInput = oldMaskInput;
+    m_qualityMask = oldQualityMask;
+    m_customMask = oldCustomMask;
+    m_qualityMaskDim = oldQualityMaskDim;
+    m_customMaskDim = oldCustomMaskDim;
+    return false;
+}
+
+bool VolumeStrategy::SetMapperInput()
+{
+    if (!m_mapper || !GetProducersReady()) return false;
+    const VolumeQuality activeQuality = GetVolumeQuality(
+        m_quality, m_isFeatureActive);
+    const auto activeResample = activeQuality == VolumeQuality::Custom
+        ? m_customResample : m_qualityResample;
+    if (!activeResample) return false;
+    vtkImageData* activeMask = nullptr;
+    if (m_lastMask) {
+        if (!GetMasksReady(m_customTargetDim)) {
+            return false;
+        }
+        const auto maskResample = activeQuality == VolumeQuality::Custom
+            ? m_customMask : m_qualityMask;
+        if (!maskResample) return false;
+        activeMask = maskResample->GetOutput();
+    }
+    m_mapper->SetInputConnection(activeResample->GetOutputPort());
+    m_mapper->SetMaskInput(activeMask);
+    return SetMapperQuality();
+}
+
+bool VolumeStrategy::SetMapperQuality()
+{
+    if (!m_mapper) return false;
+
+    m_mapper->SetAutoAdjustSampleDistances(false);
+    m_mapper->SetImageSampleDistance(1.0);
+    m_mapper->SetMinimumImageSampleDistance(1.0);
+    m_mapper->SetMaximumImageSampleDistance(1.0);
+    switch (GetVolumeQuality(m_quality, m_isFeatureActive)) {
+    case VolumeQuality::Quality: {
+        const double sampleDistance = GetQualityStep(m_qualityResample);
+        if (sampleDistance <= 0.0) return false;
+        m_mapper->SetSampleDistance(sampleDistance);
+        m_mapper->SetUseJittering(true);
+        return true;
+    }
+    case VolumeQuality::Custom:
+        if (m_quality.maxDimension < 1
+            || !std::isfinite(m_quality.sampleDistance)
+            || m_quality.sampleDistance <= 0.0) {
+            return false;
+        }
+        m_mapper->SetSampleDistance(m_quality.sampleDistance);
+        m_mapper->SetUseJittering(m_quality.isJitterOn);
+        return true;
+    }
+    return false;
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -166,35 +400,65 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     auto prop = m_volume->GetProperty();
     const bool hasTfChanged = ((flags & UpdateFlags::TF) != UpdateFlags::None);
     const bool hasMaterialChanged = ((flags & UpdateFlags::Material) != UpdateFlags::None);
+    const bool hasQualityChanged =
+        ((flags & UpdateFlags::Quality) != UpdateFlags::None);
+    const bool hasDenoiseChanged =
+        ((flags & UpdateFlags::Denoise) != UpdateFlags::None);
 
-    // 体渲染这里把 Interaction 与 TF 放在同一个状态收敛块里处理：
-    // 1. 先推导“这一帧结束后”应该处于的交互态 isNextInteracting
-    // 2. 再根据 isNextInteracting 选择当前活动输入 activeResample
-    // 3. 只有在交互态真的切换，或 TF 刷新要求重新绑定当前输入时，才改 mapper 输入
-    // 这样可以保证：
-    // - 交互过程中 TF 高频变化仍然稳定落在 256 预览输入
-    // - 静止期 TF 更新会继续落在 766 质量输入
-    // - 同一帧里若同时出现 TF 与 Interaction，也只按最终状态收口一次
-    if ((hasTfChanged || ((flags & UpdateFlags::Interaction) != UpdateFlags::None)) && m_mapper) {
-        const bool isNextInteracting = ((flags & UpdateFlags::Interaction) != UpdateFlags::None)
-            ? params.isInteracting
-            : m_isInteracting;
-        const bool hasInteractionChanged = (m_isInteracting != isNextInteracting);
+    const VolumeQualityParams oldQuality = m_quality;
+    const bool wasFeatureActive = m_isFeatureActive;
+    const bool wasDenoiseOn = m_isDenoiseOn;
+    const VolumeQuality oldActiveQuality = GetVolumeQuality(
+        m_quality, m_isFeatureActive);
+    const bool isQualityModeValid =
+        params.volumeQuality.quality == VolumeQuality::Quality
+        || params.volumeQuality.quality == VolumeQuality::Custom;
+    const bool isQualityValid = isQualityModeValid
+        && (params.volumeQuality.quality != VolumeQuality::Custom
+        || (params.volumeQuality.maxDimension >= 1
+            && params.volumeQuality.maxDimension <= 16384
+            && std::isfinite(params.volumeQuality.sampleDistance)
+            && params.volumeQuality.sampleDistance > 0.0));
+    if (hasQualityChanged && isQualityValid) {
+        m_quality = params.volumeQuality;
+        m_isFeatureActive = params.isFeatureActive;
+    }
+    if (hasDenoiseChanged) {
+        m_isDenoiseOn = params.isDenoiseOn;
+    }
 
-        m_isInteracting = isNextInteracting;
-
-        auto activeResample = m_isInteracting ? m_interactionResample : m_qualityResample;
-        if (activeResample && (hasInteractionChanged || hasTfChanged)) {
-            // TF 改变后需要确保 mapper 仍绑在“当前应该显示”的那一路输入上；
-            // 这里不区分是交互切换导致，还是 TF 更新导致，统一按活动输入重绑即可。
-            m_mapper->SetInputConnection(activeResample->GetOutputPort());
-            auto activeMask = m_isInteracting
-                ? m_interactionMask : m_qualityMask;
-            m_mapper->SetMaskInput(
-                activeMask
-                ? activeMask->GetOutput()
-                : nullptr);
+    // producer 的结构键只含输入、目标尺寸与 denoise 配置。Feature 进入/退出只在
+    // 已缓存的 Quality/Custom 连接间切换，通用交互状态不触碰体渲染管线。
+    const bool hasProducerConfigChanged =
+        (hasQualityChanged && isQualityValid)
+        || hasDenoiseChanged;
+    bool hasBuildStarted = false;
+    bool hasProducerRebuilt = false;
+    if (hasProducerConfigChanged
+        && m_lastInput
+        && !GetProducersReady()) {
+        hasBuildStarted = true;
+        hasProducerRebuilt = BuildProducers();
+    }
+    bool isPipelineSet = !hasBuildStarted || hasProducerRebuilt;
+    if (!hasBuildStarted && GetProducersReady() && m_mapper) {
+        const VolumeQuality activeQuality = GetVolumeQuality(
+            m_quality, m_isFeatureActive);
+        const bool hasActiveQualityChanged =
+            oldActiveQuality != activeQuality;
+        if (hasActiveQualityChanged || hasTfChanged) {
+            isPipelineSet = SetMapperInput();
         }
+        else if (hasQualityChanged && isQualityValid) {
+            isPipelineSet = SetMapperQuality();
+        }
+    }
+    if (!isPipelineSet) {
+        // 配置与已构建缓存必须一起提交；失败时恢复旧真值和旧 mapper 连接。
+        m_quality = oldQuality;
+        m_isFeatureActive = wasFeatureActive;
+        m_isDenoiseOn = wasDenoiseOn;
+        (void)SetMapperInput();
     }
 
     // TF 与 Material 分开处理的原因是：
@@ -244,6 +508,21 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
 
         if (params.material.isShadeOn) prop->ShadeOn();
         else prop->ShadeOff();
+    }
+
+    if ((flags & UpdateFlags::GradientOpacity) != UpdateFlags::None) {
+        if (params.gradientOpacity.empty()) {
+            prop->SetGradientOpacity(
+                static_cast<vtkPiecewiseFunction*>(nullptr));
+        }
+        else {
+            auto gradient =
+                vtkSmartPointer<vtkPiecewiseFunction>::New();
+            for (const auto& node : params.gradientOpacity) {
+                gradient->AddPoint(node.gradient, node.opacity);
+            }
+            prop->SetGradientOpacity(gradient);
+        }
     }
 
     // 响应变换矩阵

@@ -235,6 +235,8 @@ void VtkAppHostSession::Impl::OnHostTimer()
         input != features.end(); ++input) {
         auto feature = input->feature.lock();
         if (!feature) {
+            const bool isViewsCleared =
+                renderViews.SetFeatureViews(input->id, {});
             bool isInputDetached = false;
             try {
                 isInputDetached = hotkeyRouter
@@ -244,9 +246,9 @@ void VtkAppHostSession::Impl::OnHostTimer()
             catch (...) {
                 isInputDetached = false;
             }
-            if (!isInputDetached) {
+            if (!isViewsCleared || !isInputDetached) {
                 std::cerr
-                    << "[Host] Expired Feature input detach failed: "
+                    << "[Host] Expired Feature cleanup failed: "
                     << input->id << '\n';
                 *output++ = *input;
             }
@@ -314,6 +316,11 @@ bool VtkAppHostSession::Impl::AttachFeature(
     context.inputPort = &hotkeyRouter->GetInputPort();
     context.getImageSnapshot = core.GetImageReader();
     context.setImageState = core.GetImageWriter();
+    context.setActiveViews = [viewSet = &renderViews, id](
+        const std::vector<std::shared_ptr<InteractiveService>>& services) {
+        return viewSet
+            && viewSet->SetFeatureViews(id, services);
+    };
     const std::weak_ptr<OwnerCompleteState> weakCompleteState =
         ownerCompleteState;
     context.sendOwnerComplete = [weakCompleteState](
@@ -332,10 +339,11 @@ bool VtkAppHostSession::Impl::AttachFeature(
 
     try {
         if (!feature->AttachHost(context)) {
+            (void)renderViews.SetFeatureViews(id, {});
             return false;
         }
         features.push_back(
-            FeatureEntry{ std::move(id), feature });
+            FeatureEntry{ id, feature });
     }
     catch (...) {
         try {
@@ -343,6 +351,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         }
         catch (...) {
         }
+        (void)renderViews.SetFeatureViews(id, {});
         return false;
     }
     return true;
@@ -371,6 +380,9 @@ bool VtkAppHostSession::Impl::DetachFeature(
         }
     }
     catch (...) {
+        return false;
+    }
+    if (!renderViews.SetFeatureViews(entry->id, {})) {
         return false;
     }
     features.erase(entry);
@@ -403,6 +415,9 @@ bool VtkAppHostSession::Impl::DetachFeatures()
             }
         }
         else {
+            return false;
+        }
+        if (!renderViews.SetFeatureViews(entry->id, {})) {
             return false;
         }
     }

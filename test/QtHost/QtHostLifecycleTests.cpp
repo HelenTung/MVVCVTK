@@ -1,6 +1,7 @@
 #include "QtHostMethodCases.h"
 
 #include "Host/HostFeature.h"
+#include "Host/HostRenderViewSet.h"
 #include "Host/VtkAppHostSession.h"
 
 #include <vtkCommand.h>
@@ -40,7 +41,9 @@ public:
             return true;
         }
         if (!context.sendOwnerComplete
-            || !context.inputPort) {
+            || !context.renderViews
+            || !context.inputPort
+            || !context.setActiveViews) {
             return false;
         }
         HostInputBinding binding;
@@ -55,8 +58,10 @@ public:
                 std::move(binding))) {
             return false;
         }
+        m_renderViews = context.renderViews;
         m_inputPort = context.inputPort;
         m_sendOwnerComplete = context.sendOwnerComplete;
+        m_setActiveViews = context.setActiveViews;
         isAttached = true;
         ++attachCount;
         return true;
@@ -78,9 +83,11 @@ public:
             && !m_inputPort->DetachInput(m_id)) {
             return false;
         }
+        m_renderViews = nullptr;
         m_inputPort = nullptr;
         isAttached = false;
         m_sendOwnerComplete = {};
+        m_setActiveViews = {};
         ++detachCount;
         return true;
     }
@@ -100,9 +107,30 @@ public:
             && m_sendOwnerComplete(std::move(complete));
     }
 
+    bool SetActiveViews(const HostViewTargets& targets)
+    {
+        if (!m_renderViews) {
+            return false;
+        }
+        const auto views =
+            m_renderViews->GetViewsByTargets(targets);
+        if ((!targets.viewIds.empty()
+                || !targets.viewRoles.empty())
+            && views.empty()) {
+            return false;
+        }
+        return m_setActiveViews
+            && m_setActiveViews(
+                m_renderViews->BuildServices(views));
+    }
+
     std::string m_id;
     std::function<bool(std::function<void()>)>
         m_sendOwnerComplete;
+    std::function<bool(
+        const std::vector<std::shared_ptr<InteractiveService>>&)>
+        m_setActiveViews;
+    const HostRenderViewSet* m_renderViews = nullptr;
     HostInputPort* m_inputPort = nullptr;
     int attachCount = 0;
     int detachCount = 0;
@@ -262,11 +290,24 @@ int GetLifecycleFailCount()
 
     const auto beforeUseCount = feature.use_count();
     const bool isAttached = session->AttachFeature(feature);
+    HostViewTargets activeViews;
+    activeViews.viewIds = { "lifecycle" };
+    HostViewTargets missingViews;
+    missingViews.viewIds = { "missing" };
+    const bool isActiveSet =
+        feature->SetActiveViews(activeViews);
+    const bool isMissingRejected =
+        !feature->SetActiveViews(missingViews);
+    const bool isActiveCleared =
+        feature->SetActiveViews({});
     failureCount += GetCaseResult(
         isAttached
             && feature->attachCount == 1
+            && isActiveSet
+            && isMissingRejected
+            && isActiveCleared
             && feature.use_count() == beforeUseCount,
-        "Session registers only a weak Feature handle") ? 0 : 1;
+        "Session registers a weak Feature and validates active views") ? 0 : 1;
 
     auto crossThreadFeature =
         std::make_shared<FakeHostFeature>("feature-worker");

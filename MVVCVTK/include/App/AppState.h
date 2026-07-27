@@ -50,6 +50,12 @@ public:
     std::array<double, 2> GetDataRange() const;
     void SetTFNodes(const std::vector<TFNode>& nodes);
     void GetTFNodes(std::vector<TFNode>& destination) const;
+    void SetTransferPresetIntent(TransferPreset preset);
+    bool SetTransferPresetNodes(
+        TransferPreset preset,
+        DataVersion dataVersion,
+        const std::vector<TFNode>& nodes);
+    TransferPreset GetTransferPreset() const;
     void SetIsoValue(double value);
     double GetIsoValue() const;
     void SetMaterial(const MaterialParams& material);
@@ -60,7 +66,9 @@ public:
     std::array<double, 3> GetSpacing() const;
     void SetWindowLevel(double windowWidth, double windowCenter);
     WindowLevelParams GetWindowLevel() const;
-    void SetInteracting(bool isInteracting);
+    bool SetInteracting(
+        const InteractionSource& source,
+        bool isInteracting);
     bool GetIsInteracting() const;
     void SetCursorWorld(double worldX, double worldY, double worldZ);
     void SetCursorRawWorld(double worldX, double worldY, double worldZ);

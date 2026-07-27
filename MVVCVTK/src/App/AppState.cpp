@@ -139,12 +139,14 @@ public:
     std::array<double, 2> m_dataRange = { 0.0, 255.0 }; // 当前标量 min/max，供 TF、ISO 与默认窗宽窗位使用。
     std::array<double, 3> m_spacing = { 1.0, 1.0, 1.0 }; // X/Y/Z 体素物理间距，单位 mm。
     std::vector<TFNode> m_nodes; // 按数据标量位置定义的颜色/不透明度传递函数控制点。
+    TransferPreset m_transferPreset = TransferPreset::Manual; // session-wide TF 意图真源。
+    DataVersion m_transferPresetVersion = 0; // 当前 percentile 节点对应的数据版本。
     double m_isoValue = 0.0; // 当前等值面阈值，单位与输入标量一致。
     MaterialParams m_material; // 主策略共享材质参数。
     BackgroundColor m_background; // renderer 共享背景色。
     WindowLevelParams m_windowLevel; // 2D slice 共享窗宽/窗位。
     uint32_t m_visibilityMask = VisFlags::Planes3D | VisFlags::Crosshair | VisFlags::Ruler; // overlay 可见位集合。
-    bool m_isInteracting = false; // 交互期间策略可降低渲染质量/提高刷新率。
+    std::vector<InteractionSource> m_activeSources; // 非空时使用交互刷新率；来源独立退出互不覆盖。
     std::array<double, 3> m_cursorWorld = { 0.0, 0.0, 0.0 }; // 约束到当前交互平面后的世界坐标。
     std::array<double, 3> m_cursorRawWorld = { 0.0, 0.0, 0.0 }; // 未约束的拾取世界坐标。
     int m_cursorAxis = -1; // 当前驱动切片的轴，-1 表示无特定轴；调用方负责传入合法轴域。
@@ -368,7 +370,11 @@ void SharedInteractionState::SetPreInitConfig(const PreInitConfig& config)
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (Impl::SetMaterial(m_impl->m_material, config.material)) flags |= UpdateFlags::Material;
-        if (config.hasTF && Impl::SetTFNodes(m_impl->m_nodes, config.tfNodes)) flags |= UpdateFlags::TF;
+        if (config.hasTF) {
+            m_impl->m_transferPreset = TransferPreset::Manual;
+            m_impl->m_transferPresetVersion = 0;
+            if (Impl::SetTFNodes(m_impl->m_nodes, config.tfNodes)) flags |= UpdateFlags::TF;
+        }
         if (config.hasIso && Impl::SetScalar(m_impl->m_isoValue, config.isoThreshold)) flags |= UpdateFlags::IsoValue;
         if (config.hasBgColor && Impl::SetBackground(m_impl->m_background, config.bgColor)) flags |= UpdateFlags::Background;
         if (config.hasSpacing && Impl::SetArray(m_impl->m_spacing, config.spacing)) flags |= UpdateFlags::Spacing;
@@ -415,6 +421,8 @@ void SharedInteractionState::SetTFNodes(const std::vector<TFNode>& nodes)
     bool hasChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        m_impl->m_transferPreset = TransferPreset::Manual;
+        m_impl->m_transferPresetVersion = 0;
         hasChanged = Impl::SetTFNodes(m_impl->m_nodes, nodes);
     }
     if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
@@ -424,6 +432,45 @@ void SharedInteractionState::GetTFNodes(std::vector<TFNode>& destination) const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
     destination = m_impl->m_nodes;
+}
+
+void SharedInteractionState::SetTransferPresetIntent(TransferPreset preset)
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (m_impl->m_transferPreset == preset) return;
+    m_impl->m_transferPreset = preset;
+    m_impl->m_transferPresetVersion = 0;
+}
+
+bool SharedInteractionState::SetTransferPresetNodes(
+    TransferPreset preset,
+    DataVersion dataVersion,
+    const std::vector<TFNode>& nodes)
+{
+    if (preset == TransferPreset::Manual
+        || dataVersion == 0
+        || nodes.empty()) {
+        return false;
+    }
+
+    bool hasChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_transferPreset != preset
+            || m_impl->m_transferPresetVersion > dataVersion) {
+            return false;
+        }
+        hasChanged = Impl::SetTFNodes(m_impl->m_nodes, nodes);
+        m_impl->m_transferPresetVersion = dataVersion;
+    }
+    if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
+    return true;
+}
+
+TransferPreset SharedInteractionState::GetTransferPreset() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return m_impl->m_transferPreset;
 }
 
 void SharedInteractionState::SetIsoValue(double value)
@@ -510,20 +557,41 @@ WindowLevelParams SharedInteractionState::GetWindowLevel() const
     return m_impl->m_windowLevel;
 }
 
-void SharedInteractionState::SetInteracting(bool isInteracting)
+bool SharedInteractionState::SetInteracting(
+    const InteractionSource& source,
+    bool isInteracting)
 {
-    bool hasChanged = false;
+    if (source.ownerId.empty() || source.channelId.empty()) {
+        return false;
+    }
+
+    bool hasBoundaryChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-        hasChanged = Impl::SetValue(m_impl->m_isInteracting, isInteracting);
+        const bool wasInteracting = !m_impl->m_activeSources.empty();
+        const auto sourceIt = std::find(
+            m_impl->m_activeSources.begin(),
+            m_impl->m_activeSources.end(),
+            source);
+        if (isInteracting && sourceIt == m_impl->m_activeSources.end()) {
+            m_impl->m_activeSources.push_back(source);
+        }
+        else if (!isInteracting && sourceIt != m_impl->m_activeSources.end()) {
+            m_impl->m_activeSources.erase(sourceIt);
+        }
+        hasBoundaryChanged =
+            wasInteracting != !m_impl->m_activeSources.empty();
     }
-    if (hasChanged) m_impl->SendFlags(UpdateFlags::Interaction);
+    if (hasBoundaryChanged) {
+        m_impl->SendFlags(UpdateFlags::RenderRate);
+    }
+    return true;
 }
 
 bool SharedInteractionState::GetIsInteracting() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-    return m_impl->m_isInteracting;
+    return !m_impl->m_activeSources.empty();
 }
 
 void SharedInteractionState::SetCursorWorld(double worldX, double worldY, double worldZ)

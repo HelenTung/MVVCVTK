@@ -212,6 +212,8 @@ void StdRenderContext::BuildInteractionRouter()
 
 void StdRenderContext::SetServiceBound(std::shared_ptr<AbstractAppService> service)
 {
+    // Handler 析构会清理自己的 interaction source；必须在旧 service 强 owner 释放前销毁。
+    m_interactionRouter.ClearHandlers();
     AbstractRenderContext::SetServiceBound(service);
     m_interactiveService =
         std::dynamic_pointer_cast<InteractiveService>(service);

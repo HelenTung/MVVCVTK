@@ -21,6 +21,7 @@ public:
     Viewer2DHandler(InteractiveService* service,
         vtkPropPicker* picker,
         vtkRenderer* renderer);
+    ~Viewer2DHandler() override;
 
     InteractionResult Send(const InteractionEvent& eve) override;
 
@@ -29,6 +30,7 @@ private:
     InteractiveService* m_service = nullptr;
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
+    InteractionSource m_source;
 
     // 四种拖拽状态分别在对应 press 置位、release 清零，并驱动 SharedState 的 interacting 状态。
     bool m_isDragCrosshair = false;  // Shift+左键：拖拽十字线

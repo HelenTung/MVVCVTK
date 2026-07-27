@@ -50,7 +50,21 @@ public:
     int GetPlaneAxis(vtkActor*) override { return -1; }
     void SetCursorWorldPosition(double[3], int) override {}
     std::array<double, 3> GetCursorWorld() override { return {}; }
-    void SetInteracting(bool) override {}
+    bool SetInteracting(
+        const InteractionSource& source,
+        const bool isInteracting) override
+    {
+        const auto sourceIt = std::find(
+            m_sources.begin(), m_sources.end(), source);
+        if (isInteracting && sourceIt == m_sources.end()) {
+            m_sources.push_back(source);
+        }
+        else if (!isInteracting && sourceIt != m_sources.end()) {
+            m_sources.erase(sourceIt);
+        }
+        return true;
+    }
+    bool GetIsInteracting() const { return !m_sources.empty(); }
     vtkProp3D* GetMainProp() override { return nullptr; }
     void SetModelMatrix(vtkMatrix4x4*) override {}
     std::array<double, 16> GetModelMatrix() override
@@ -134,6 +148,7 @@ private:
     vtkSmartPointer<vtkRenderer> m_renderer;
     std::shared_ptr<IsoSurfaceStrategy> m_strategy;
     std::weak_ptr<CropShaderEffect> m_effect;
+    std::vector<InteractionSource> m_sources;
 };
 
 bool SendWidgetInput(
@@ -254,6 +269,8 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.GetShaderTickNeeded()
             && bridge.GetCropHistory().operationCount == 0,
         "Releasing a widget in the non-cropping mode must not create history.");
+    expect(!service->GetIsInteracting(),
+        "A rejected widget release must not retain Interaction.");
     expect(bridge.SetCropMode(CropRemovalMode::KeepInside),
         "KeepInside should arm the current widget for cropping.");
     expect(SendWidgetInput(renderer, interactor, 0),
@@ -266,9 +283,13 @@ int CropBridgeSuite::GetFailCount() const
             && service->GetEffectState().stagedRevision == 0
             && service->GetEffectState().activeRevision == 0,
         "A zero-distance interaction must not create a crop history operation.");
+    expect(!service->GetIsInteracting(),
+        "A zero-distance release must restore static quality immediately.");
     expect(SendWidgetInput(renderer, interactor),
         "Bridge test should release the armed box once.");
-    expect(bridge.GetShaderTickNeeded(), "Released widget geometry should stage one shader revision.");
+    expect(bridge.GetShaderTickNeeded()
+            && service->GetIsInteracting(),
+        "Released widget geometry should keep Interaction while its revision is pending.");
     const auto firstStage = service->GetEffectState();
     expect((firstStage.status == RenderEffectStatus::Staged
                 || firstStage.status == RenderEffectStatus::Ready)
@@ -280,6 +301,8 @@ int CropBridgeSuite::GetFailCount() const
     expect(firstCommit.status == RenderEffectStatus::Committed
             && firstCommit.activeRevision == firstStage.stagedRevision,
         "The original target should expose the committed revision.");
+    expect(!service->GetIsInteracting(),
+        "A completed crop commit should restore static Feature quality.");
     const auto firstHistory = bridge.GetCropHistory();
     expect(firstHistory.nodeCount == 1
             && firstHistory.operationCount == 1
@@ -796,16 +819,19 @@ int CropBridgeSuite::GetFailCount() const
     renderWindow->Render();
     expect(SendWidgetInput(renderer, interactor)
             && lagBridge.GetShaderTickNeeded()
+            && lagService->GetIsInteracting()
             && lagBridge.GetCropHistory().nodeCount == 0
             && lagService->GetEffectState().status
                 == RenderEffectStatus::Idle,
         "A release must wait instead of disappearing while the render input stamp lags.");
     expect(!lagBridge.SendShaderCommit()
             && lagBridge.GetShaderTickNeeded()
+            && lagService->GetIsInteracting()
             && lagService->SetRenderInputStamp(
                 lagStamp)
             && !lagBridge.SendShaderCommit()
-            && lagBridge.GetShaderTickNeeded(),
+            && lagBridge.GetShaderTickNeeded()
+            && lagService->GetIsInteracting(),
         "The retained release should stage after the render input converges.");
     expect(lagBridge.SetCropMode(
                 CropRemovalMode::RemoveInside)
@@ -817,7 +843,8 @@ int CropBridgeSuite::GetFailCount() const
             && lagBridge.GetCropHistory().nodeCount == 1
             && lagBridge.GetCropHistory().operationCount == 1
             && lagBridge.GetCropHistory().editMode
-                == CropRemovalMode::RemoveInside,
+                == CropRemovalMode::RemoveInside
+            && !lagService->GetIsInteracting(),
         "The latest removal mode should commit after the retained release.");
     expect(lagBridge.ClearBindings(),
         "The render-convergence bridge should clear its bindings.");
@@ -964,7 +991,8 @@ int CropBridgeSuite::GetFailCount() const
         "Bridge test should begin a box drag without releasing it.");
     expect(exitDragBridge.ExitCrop()
             && !exitDragBridge.GetShaderTickNeeded()
-            && exitDragBridge.GetCropHistory().operationCount == 0,
+            && exitDragBridge.GetCropHistory().operationCount == 0
+            && !exitDragService->GetIsInteracting(),
         "Exiting during a drag must not create a staged or committed history operation.");
     interactor->InvokeEvent(vtkCommand::LeftButtonReleaseEvent);
     expect(exitDragBridge.ClearBindings(),

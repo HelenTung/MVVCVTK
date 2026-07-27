@@ -6,6 +6,8 @@
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
 #include <vtkMath.h>
+#include <cstdint>
+#include <string>
 
 Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
     vtkPropPicker* picker,
@@ -14,12 +16,32 @@ Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
     , m_picker(picker)
     , m_renderer(renderer)
 {
+    m_source.ownerId = "Viewer3D";
+    m_source.channelId =
+        std::to_string(reinterpret_cast<std::uintptr_t>(this));
+}
+
+Viewer3DHandler::~Viewer3DHandler()
+{
+    if (m_service) {
+        (void)m_service->SetInteracting(m_source, false);
+    }
 }
 
 InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
 {
     if (!m_service) {
         return {};
+    }
+
+    // 模式切换不能吞掉一次已开始拖拽的释放，否则聚合 source 会永久保持 active。
+    if (eve.eventKind == InteractionEventKind::PrimaryRelease
+        && m_isDragging) {
+        (void)m_service->SetInteracting(m_source, false);
+        m_service->SetDirty();
+        m_isDragging = false;
+        m_dragAxis = -1;
+        return { true, true };
     }
 
     if (eve.toolMode == ToolMode::ModelTransform
@@ -59,12 +81,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
                 m_dragAxis = axis;
                 m_lastMouseX = eve.x;   // 记录起始点，供 MouseMove 计算增量
                 m_lastMouseY = eve.y;
-                m_service->SetInteracting(true);
-
-                // 拖拽期间降低更新率，保证流畅
-                if (vtkRenderWindow* rw = m_renderer->GetRenderWindow()) {
-                    rw->SetDesiredUpdateRate(15.0);
-                }
+                (void)m_service->SetInteracting(m_source, true);
                 return { true, true };  // 停止传播，阻止相机转动
             }
         }
@@ -76,11 +93,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     if (eve.eventKind == InteractionEventKind::PrimaryRelease)
     {
         if (m_isDragging) {
-            // 恢复静态高精度渲染（VTK 推荐静态更新率 0.001）
-            if (vtkRenderWindow* rw = m_renderer->GetRenderWindow()) {
-                rw->SetDesiredUpdateRate(0.001);
-            }
-            m_service->SetInteracting(false);
+            (void)m_service->SetInteracting(m_source, false);
             m_service->SetDirty();
             m_isDragging = false;
             m_dragAxis = -1;

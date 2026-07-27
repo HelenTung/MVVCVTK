@@ -168,7 +168,9 @@ public:
     virtual int GetPlaneAxis(vtkActor* actor) = 0;
     virtual void SetCursorWorldPosition(double worldPos[3], int axis = -1) = 0;
     virtual std::array<double, 3> GetCursorWorld() = 0;
-    virtual void SetInteracting(bool isInteracting) = 0;
+    virtual bool SetInteracting(
+        const InteractionSource& source,
+        bool isInteracting) = 0;
     virtual vtkProp3D* GetMainProp() = 0;
     virtual void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) = 0;
     virtual std::array<double, 16> GetModelMatrix() = 0;

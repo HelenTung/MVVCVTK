@@ -186,6 +186,11 @@ int GetGapFailCount()
     directContext.getImageSnapshot = []() {
         return ImageSnapshot{};
     };
+    directContext.setActiveViews =
+        [](const std::vector<
+            std::shared_ptr<InteractiveService>>&) {
+        return true;
+    };
     auto directFeature =
         std::make_shared<GapHostFeature>(
             GetGapConfig());

@@ -23,6 +23,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -141,6 +142,11 @@ private:
     CropMatrixDouble16Array GetWorldToInput() const;
     bool GetShaderCommitted() const;
     bool GetTargetsReady() const;
+    bool SetInteraction(
+        const InteractionSource& source,
+        bool isInteracting);
+    bool ClearDragSources();
+    bool ClearInteractions();
     bool ClearBaseShader();
     bool SetWidgetActive(bool isActive);
     void ClearHistory();
@@ -172,6 +178,9 @@ private:
     std::optional<CropOpItem> m_dragStart;
     CropShape m_geometryType = CropShape::Box;
     CropRemovalMode m_removalMode = CropRemovalMode::None;
+    InteractionSource m_boxSource{ "OrthogonalCrop", "" };
+    InteractionSource m_planeSource{ "OrthogonalCrop", "" };
+    InteractionSource m_commitSource{ "OrthogonalCrop", "" };
     bool m_hasDrag = false;
     bool m_hasBaseShader = false;
     std::uint64_t m_nextOperationIndex = 1;
@@ -182,6 +191,11 @@ private:
 
 CropBridge::Impl::Impl()
 {
+    const std::string bridgeId = std::to_string(
+        reinterpret_cast<std::uintptr_t>(this));
+    m_boxSource.channelId = bridgeId + ":Box";
+    m_planeSource.channelId = bridgeId + ":Plane";
+    m_commitSource.channelId = bridgeId + ":Commit";
     m_boxWidget.SetBoundsCallback(
         [this](const CropBoundsDouble6Array&, const CropInteractionPhase phase) {
             OnBoxWidget(phase);
@@ -197,6 +211,7 @@ CropBridge::Impl::~Impl()
     m_isAccepting = false;
     m_isActive = false;
     m_hasDrag = false;
+    (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
     ClearShader();
@@ -280,6 +295,7 @@ bool CropBridge::Impl::StartViewInput(
             && !m_pendingShader->isTargetRebind
             && (m_isActive || GetShaderCommitted())
             && isSameReference && isSameTargets) {
+            (void)ClearDragSources();
             m_hasDrag = false;
             m_dragStart.reset();
             m_boxWidget.SetInteractor(request.interactor);
@@ -323,6 +339,7 @@ bool CropBridge::Impl::StartViewInput(
     if (!isInputChanged
         && (m_isActive || isShaderCommitted)
         && isSameReference && isSameTargets) {
+        (void)ClearInteractions();
         m_boxWidget.SetInteractor(request.interactor);
         m_planeWidget.SetInteractor(request.interactor);
         m_isActive = true;
@@ -354,6 +371,7 @@ bool CropBridge::Impl::StartViewInput(
             }
             accepted.push_back(target);
         }
+        (void)ClearInteractions();
         m_pendingShader = PendingShader{
             m_history,
             m_cursor,
@@ -371,6 +389,7 @@ bool CropBridge::Impl::StartViewInput(
 
     // 所有会失败的 target/effect 准备已经完成；从这里开始连续提交输入和 binding。
     // 输入换代必须同时退休旧 history，不能让旧 predicate table 作用到新数据。
+    (void)ClearInteractions();
     ClearShader();
     if (isInputChanged) {
         ClearHistory();
@@ -410,6 +429,7 @@ bool CropBridge::Impl::ClearBindings()
     m_isActive = false;
     m_hasDrag = false;
     m_dragStart.reset();
+    (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
     ClearShader();
@@ -428,6 +448,7 @@ bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
         return true;
     }
 
+    (void)ClearInteractions();
     ClearShader();
     ClearHistory();
     m_input = std::move(input);
@@ -558,6 +579,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     m_geometryType = geometryType;
     m_hasDrag = false;
     m_dragStart.reset();
+    (void)ClearDragSources();
     // Switch 结束上一条操作的模式编辑权；下一次有效 Released 会追加历史。
     m_draftIndex.reset();
     const auto worldBounds = GetWorldBounds();
@@ -661,16 +683,19 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
         || m_exportTask
         || m_geometryType != CropShape::Box
         || m_removalMode == CropRemovalMode::None) {
+        (void)SetInteraction(m_boxSource, false);
         m_hasDrag = false;
         m_dragStart.reset();
         return;
     }
     if (phase == CropInteractionPhase::Hover) {
+        (void)SetInteraction(m_boxSource, false);
         m_hasDrag = false;
         m_dragStart = BuildBoxOp();
         return;
     }
     if (phase == CropInteractionPhase::Dragging) {
+        (void)SetInteraction(m_boxSource, true);
         m_hasDrag = true;
         return;
     }
@@ -683,13 +708,16 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
     auto dragStart = std::move(m_dragStart);
     m_dragStart.reset();
     if (!hasDrag || !dragStart) {
+        (void)SetInteraction(m_boxSource, false);
         return;
     }
     auto operation = BuildBoxOp();
     if (!operation || GetOpSame(*dragStart, *operation)) {
+        (void)SetInteraction(m_boxSource, false);
         return;
     }
     (void)SetCandidate(std::move(*operation));
+    (void)SetInteraction(m_boxSource, false);
 }
 
 void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
@@ -698,16 +726,19 @@ void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
         || m_exportTask
         || m_geometryType != CropShape::Plane
         || m_removalMode == CropRemovalMode::None) {
+        (void)SetInteraction(m_planeSource, false);
         m_hasDrag = false;
         m_dragStart.reset();
         return;
     }
     if (phase == CropInteractionPhase::Hover) {
+        (void)SetInteraction(m_planeSource, false);
         m_hasDrag = false;
         m_dragStart = BuildPlaneOp();
         return;
     }
     if (phase == CropInteractionPhase::Dragging) {
+        (void)SetInteraction(m_planeSource, true);
         m_hasDrag = true;
         return;
     }
@@ -720,13 +751,16 @@ void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
     auto dragStart = std::move(m_dragStart);
     m_dragStart.reset();
     if (!hasDrag || !dragStart) {
+        (void)SetInteraction(m_planeSource, false);
         return;
     }
     auto operation = BuildPlaneOp();
     if (!operation || GetOpSame(*dragStart, *operation)) {
+        (void)SetInteraction(m_planeSource, false);
         return;
     }
     (void)SetCandidate(std::move(*operation));
+    (void)SetInteraction(m_planeSource, false);
 }
 
 bool CropBridge::Impl::SetCandidate(CropOpItem operation)
@@ -736,6 +770,11 @@ bool CropBridge::Impl::SetCandidate(CropOpItem operation)
         return false;
     }
     operation.operationIndex = 0;
+    // Released 后先接续独立的 commit source，再由回调释放 Box/Plane source。
+    // 两个 source 的重叠保证共享 Interaction 在排队、stage、commit 期间不中断。
+    if (!SetInteraction(m_commitSource, true)) {
+        return false;
+    }
     if (m_pendingShader
         || m_hasBaseShader
         || !m_pendingOps.empty()
@@ -752,7 +791,13 @@ bool CropBridge::Impl::SetCandidate(CropOpItem operation)
         }
         return true;
     }
-    return StartCandidate(std::move(operation));
+    const bool isStarted = StartCandidate(std::move(operation));
+    if (!isStarted
+        && !m_pendingShader
+        && m_pendingOps.empty()) {
+        (void)SetInteraction(m_commitSource, false);
+    }
+    return isStarted;
 }
 
 bool CropBridge::Impl::StartCandidate(CropOpItem operation)
@@ -786,7 +831,13 @@ bool CropBridge::Impl::SendNextOp()
     }
     auto operation = std::move(m_pendingOps.front());
     m_pendingOps.pop_front();
-    return StartCandidate(std::move(operation));
+    const bool isStarted = StartCandidate(std::move(operation));
+    if (!isStarted
+        && !m_pendingShader
+        && m_pendingOps.empty()) {
+        (void)SetInteraction(m_commitSource, false);
+    }
+    return isStarted;
 }
 
 bool CropBridge::Impl::SendModeUpdate()
@@ -955,6 +1006,11 @@ bool CropBridge::Impl::SendShaderCommit()
             if (!ClearBaseShader()) {
                 return false;
             }
+            if (!m_pendingShader
+                && m_pendingOps.empty()
+                && !m_pendingMode) {
+                (void)SetInteraction(m_commitSource, false);
+            }
             return true;
         }
         if (m_pendingMode) {
@@ -966,6 +1022,11 @@ bool CropBridge::Impl::SendShaderCommit()
             }
         }
         (void)SendNextOp();
+        if (!m_pendingShader
+            && m_pendingOps.empty()
+            && !m_pendingMode) {
+            (void)SetInteraction(m_commitSource, false);
+        }
         return false;
     }
     bool isReady = true;
@@ -1014,6 +1075,7 @@ bool CropBridge::Impl::SendShaderCommit()
         m_pendingShader.reset();
         m_pendingOps.clear();
         m_pendingMode.reset();
+        (void)SetInteraction(m_commitSource, false);
         return false;
     }
 
@@ -1038,6 +1100,7 @@ bool CropBridge::Impl::SendShaderCommit()
             m_pendingShader.reset();
             m_pendingOps.clear();
             m_pendingMode.reset();
+            (void)SetInteraction(m_commitSource, false);
             return false;
         }
         committedTargets.push_back(target);
@@ -1059,6 +1122,7 @@ bool CropBridge::Impl::SendShaderCommit()
         m_pendingShader.reset();
         m_pendingOps.clear();
         m_pendingMode.reset();
+        (void)SetInteraction(m_commitSource, false);
         return false;
     }
     for (const auto& target : committedTargets) {
@@ -1069,6 +1133,7 @@ bool CropBridge::Impl::SendShaderCommit()
             m_pendingOps.clear();
             m_pendingShader.reset();
             m_pendingMode.reset();
+            (void)SetInteraction(m_commitSource, false);
             return false;
         }
     }
@@ -1097,6 +1162,7 @@ bool CropBridge::Impl::SendShaderCommit()
             }
         }
         m_targets = m_pendingShader->targets;
+        (void)ClearInteractions();
         m_referenceService = m_pendingShader->nextReferenceService;
         m_boxWidget.SetInteractor(m_pendingShader->nextInteractor);
         m_planeWidget.SetInteractor(m_pendingShader->nextInteractor);
@@ -1120,6 +1186,11 @@ bool CropBridge::Impl::SendShaderCommit()
     }
     if (!m_pendingShader) {
         (void)SendNextOp();
+    }
+    if (!m_pendingShader
+        && m_pendingOps.empty()
+        && !m_pendingMode) {
+        (void)SetInteraction(m_commitSource, false);
     }
     return true;
 }
@@ -1546,6 +1617,7 @@ bool CropBridge::Impl::SetWidgetActive(
 {
     bool isSet = true;
     if (!isActive) {
+        (void)ClearInteractions();
         const bool isBoxSet =
             m_boxWidget.SetEnabled(false);
         const bool isPlaneSet =
@@ -1610,6 +1682,7 @@ void CropBridge::Impl::ClearShaderStage()
     m_pendingMode.reset();
     m_hasDrag = false;
     m_dragStart.reset();
+    (void)SetInteraction(m_commitSource, false);
 }
 
 void CropBridge::Impl::ClearShader()
@@ -1643,6 +1716,7 @@ bool CropBridge::Impl::ExitCrop()
     m_isActive = false;
     m_hasDrag = false;
     m_dragStart.reset();
+    (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
     // Exit 只结束编辑生命周期：取消尚未提交的 staged revision，并冻结当前
@@ -1656,6 +1730,37 @@ bool CropBridge::Impl::ExitCrop()
         m_referenceService->SetDirty();
     }
     return true;
+}
+
+bool CropBridge::Impl::SetInteraction(
+    const InteractionSource& source,
+    const bool isInteracting)
+{
+    return m_referenceService
+        && m_referenceService->SetInteracting(source, isInteracting);
+}
+
+bool CropBridge::Impl::ClearInteractions()
+{
+    const bool isDragCleared = ClearDragSources();
+    if (!m_referenceService) {
+        return isDragCleared;
+    }
+    const bool isCommitCleared =
+        m_referenceService->SetInteracting(m_commitSource, false);
+    return isDragCleared && isCommitCleared;
+}
+
+bool CropBridge::Impl::ClearDragSources()
+{
+    if (!m_referenceService) {
+        return true;
+    }
+    const bool isBoxCleared =
+        m_referenceService->SetInteracting(m_boxSource, false);
+    const bool isPlaneCleared =
+        m_referenceService->SetInteracting(m_planeSource, false);
+    return isBoxCleared && isPlaneCleared;
 }
 
 bool CropBridge::Impl::GetCropActive() const

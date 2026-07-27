@@ -47,12 +47,17 @@ struct HostViewSetRequest {
     // optional 表示“本次是否写入该维度”；缺省字段必须保留视图当前状态。
     std::optional<HostRenderMode> mode;
     std::optional<HostMaterialParams> material;
+    std::optional<HostMaterialPreset> materialPreset;
     std::optional<double> opacity;
     std::optional<std::vector<HostTransferNode>> transferNodes;
+    std::optional<HostTransferPreset> transferPreset;
     std::optional<double> iso;
     std::optional<HostBackgroundColor> background;
     std::optional<std::array<double, 3>> spacing;
     std::optional<HostWindowLevelParams> windowLevel;
+    std::optional<HostVolumeQualityParams> volumeQuality;
+    std::optional<std::vector<HostGradientOpacityNode>> gradientOpacity;
+    std::optional<bool> isDenoiseOn;
 };
 
 enum class HostViewAction { None, Set };

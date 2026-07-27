@@ -26,6 +26,8 @@ public:
 
     struct ViewCandidate final {
         GapViewRequest request;
+        std::vector<std::shared_ptr<InteractiveService>>
+            activeServices;
         DataVersion version = 0;
     };
 
@@ -76,6 +78,8 @@ private:
     bool ExitView();
     InteractionResult OnInput(
         const InteractionEvent& event);
+    bool SetActiveViews(
+        const std::vector<std::shared_ptr<InteractiveService>>& services) const;
     bool ClearComplete();
     bool ClearBorrowed();
     bool GetOwnerThread() const;
@@ -85,6 +89,9 @@ private:
     const HostRenderViewSet* m_renderViews = nullptr;
     HostInputPort* m_inputPort = nullptr;
     std::function<ImageSnapshot()> m_getImageSnapshot;
+    std::function<bool(
+        const std::vector<std::shared_ptr<InteractiveService>>&)>
+        m_setActiveViews;
     std::shared_ptr<CompleteItem> m_completeItem;
     std::optional<DataVersion> m_activeVersion;
     std::thread::id m_ownerThread;
@@ -275,6 +282,11 @@ GapHostFeature::Impl::GetViewCandidate(
     }
 
     ViewCandidate candidate;
+    candidate.activeServices =
+        m_renderViews->BuildServices(views);
+    if (candidate.activeServices.empty()) {
+        return std::nullopt;
+    }
     candidate.version = snapshot->version;
     candidate.request.inputImage = snapshot->image;
     candidate.request.validityMask =
@@ -319,6 +331,7 @@ bool GapHostFeature::Impl::AttachHost(
     }
     if (!context.renderViews
         || !context.getImageSnapshot
+        || !context.setActiveViews
         || !context.inputPort
         || (m_config.inputViews.viewIds.empty()
             && m_config.inputViews.viewRoles.empty())
@@ -336,6 +349,7 @@ bool GapHostFeature::Impl::AttachHost(
     m_renderViews = context.renderViews;
     m_inputPort = context.inputPort;
     m_getImageSnapshot = context.getImageSnapshot;
+    m_setActiveViews = context.setActiveViews;
     m_ownerThread = std::this_thread::get_id();
 
     HostInputBinding binding;
@@ -389,6 +403,7 @@ bool GapHostFeature::Impl::DetachHost()
     if (m_service) {
         m_service->ClearView();
     }
+    (void)SetActiveViews({});
     m_activeVersion.reset();
     m_renderViews = nullptr;
     m_getImageSnapshot = {};
@@ -430,9 +445,11 @@ bool GapHostFeature::Impl::OnHostTick()
     }
     if (m_isExitPending
         && !m_service->GetDisplayTickNeeded()) {
-        m_activeVersion.reset();
-        m_isExitPending = false;
-        ClearComplete();
+        if (SetActiveViews({})) {
+            m_activeVersion.reset();
+            m_isExitPending = false;
+            ClearComplete();
+        }
     }
     return true;
 }
@@ -516,6 +533,13 @@ bool GapHostFeature::Impl::StartView(
             }
         });
     if (!isAccepted) {
+        return false;
+    }
+    if (!SetActiveViews(candidate->activeServices)) {
+        m_service->ClearView();
+        ClearComplete();
+        m_activeVersion.reset();
+        m_isExitPending = false;
         return false;
     }
 
@@ -620,6 +644,13 @@ InteractionResult GapHostFeature::Impl::OnInput(
     return { true, true };
 }
 
+bool GapHostFeature::Impl::SetActiveViews(
+    const std::vector<std::shared_ptr<InteractiveService>>& services) const
+{
+    return m_setActiveViews
+        && m_setActiveViews(services);
+}
+
 bool GapHostFeature::Impl::ClearComplete()
 {
     if (!m_completeItem) {
@@ -637,9 +668,13 @@ bool GapHostFeature::Impl::ClearComplete()
 
 bool GapHostFeature::Impl::ClearBorrowed()
 {
+    if (m_setActiveViews) {
+        (void)m_setActiveViews({});
+    }
     m_renderViews = nullptr;
     m_inputPort = nullptr;
     m_getImageSnapshot = {};
+    m_setActiveViews = {};
     m_ownerThread = {};
     m_isInputAttached = false;
     ClearComplete();

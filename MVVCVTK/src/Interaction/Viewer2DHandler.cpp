@@ -9,6 +9,8 @@
 #include <vtkMatrix4x4.h>
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
+#include <string>
 
 Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
     vtkPropPicker* picker,
@@ -17,10 +19,40 @@ Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
     , m_picker(picker)
     , m_renderer(renderer)
 {
+    m_source.ownerId = "Viewer2D";
+    m_source.channelId =
+        std::to_string(reinterpret_cast<std::uintptr_t>(this));
+}
+
+Viewer2DHandler::~Viewer2DHandler()
+{
+    if (m_service) {
+        (void)m_service->SetInteracting(m_source, false);
+    }
 }
 
 InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
 {
+    // 模式可在按下与释放之间切换；释放必须先于模式门控清理本 Handler 的 source。
+    if (m_service
+        && eve.eventKind == InteractionEventKind::PrimaryRelease
+        && (m_isDragCrosshair
+            || m_isDragSlice
+            || m_isDragWindowLevel)) {
+        m_isDragCrosshair = false;
+        m_isDragSlice = false;
+        m_isDragWindowLevel = false;
+        (void)m_service->SetInteracting(m_source, false);
+        return { true, true };
+    }
+    if (m_service
+        && eve.eventKind == InteractionEventKind::SecondaryRelease
+        && m_isRightZoom) {
+        m_isRightZoom = false;
+        (void)m_service->SetInteracting(m_source, false);
+        return { true, true };
+    }
+
     const bool isSliceMode =
         eve.vizMode == VizMode::SliceTop_down
         || eve.vizMode == VizMode::SliceFront_back
@@ -52,12 +84,12 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             m_isDragSlice = true;
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
-			m_service->SetInteracting(true);
+			(void)m_service->SetInteracting(m_source, true);
 			return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
         }
         if (eve.isShiftDown) {
             m_isDragCrosshair = true;
-            m_service->SetInteracting(true);
+            (void)m_service->SetInteracting(m_source, true);
             return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
         }
 
@@ -71,7 +103,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         m_startWW = wl.windowWidth;
         m_startWC = wl.windowCenter;
 
-        m_service->SetInteracting(true);
+        (void)m_service->SetInteracting(m_source, true);
         return { true, true };
     }
 
@@ -80,18 +112,18 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (m_isDragCrosshair) {
             m_isDragCrosshair = false;
-            m_service->SetInteracting(false);
+            (void)m_service->SetInteracting(m_source, false);
             return { true, true };
         }
         if (m_isDragSlice)
         {
             m_isDragSlice = false;
-			m_service->SetInteracting(false);
+			(void)m_service->SetInteracting(m_source, false);
 			return { true, true };
         }
         if (m_isDragWindowLevel) {
             m_isDragWindowLevel = false;
-            m_service->SetInteracting(false);
+            (void)m_service->SetInteracting(m_source, false);
             return { true, true };
         }
         return { true, true };
@@ -110,7 +142,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             m_startOriginValue = 1.0;
         }
 
-        m_service->SetInteracting(true);
+        (void)m_service->SetInteracting(m_source, true);
         return { true, true };
     }
 
@@ -119,7 +151,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (m_isRightZoom) {
             m_isRightZoom = false;
-            m_service->SetInteracting(false);
+            (void)m_service->SetInteracting(m_source, false);
             return { true, true };
         }
         return {};

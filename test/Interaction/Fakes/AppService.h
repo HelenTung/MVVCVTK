@@ -66,6 +66,19 @@ public:
     VizMode GetVizMode() const { return m_vizMode; }
     int GetVizModeSetCount() const { return m_vizModeSetCount; }
     int GetViewSetCount() const { return m_viewSetCount + m_vizModeSetCount; }
+    int GetMaterialSetCount() const { return m_materialSetCount; }
+    int GetOpacitySetCount() const { return m_opacitySetCount; }
+    int GetSpacingSetCount() const { return m_spacingSetCount; }
+    int GetQualitySetCount() const { return m_qualitySetCount; }
+    int GetGradientSetCount() const { return m_gradientSetCount; }
+    int GetTransferPresetSetCount() const { return m_transferPresetSetCount; }
+    int GetDenoiseSetCount() const { return m_denoiseSetCount; }
+    const MaterialParams& GetMaterial() const { return m_material; }
+    const VolumeQualityParams& GetVolumeQuality() const { return m_volumeQuality; }
+    const std::vector<GradientOpacityNode>& GetGradientOpacity() const {
+        return m_gradientOpacity;
+    }
+    bool GetDenoiseOn() const { return m_isDenoiseOn; }
     int GetLoadCount() const { return m_loadCount; }
     int GetReloadCount() const { return m_reloadCount; }
     int GetExportCount() const { return m_exportCount; }
@@ -76,19 +89,62 @@ public:
     const std::string& GetExportPath() const { return m_exportPath; }
     const std::string& GetSlicePath() const { return m_slicePath; }
     const std::optional<double>& GetSliceAngleDeg() const { return m_sliceAngleDeg; }
+    void SetSpacingAccepted(bool isAccepted) { m_isSpacingAccepted = isAccepted; }
 
-    template <typename... Args> void SetMaterial(Args&&...) { ++m_viewSetCount; }
-    template <typename... Args> void SetOpacity(Args&&...) { ++m_viewSetCount; }
+    void SetMaterial(const MaterialParams& material) {
+        m_material = material;
+        ++m_materialSetCount;
+        ++m_viewSetCount;
+    }
+    template <typename... Args> void SetOpacity(Args&&...) {
+        ++m_opacitySetCount;
+        ++m_viewSetCount;
+    }
     template <typename... Args> void SetTransferFunction(Args&&...) { ++m_viewSetCount; }
     template <typename... Args> void SetIsoThreshold(Args&&...) { ++m_viewSetCount; }
     template <typename... Args> void SetBackground(Args&&...) { ++m_viewSetCount; }
-    template <typename... Args> void SetSpacing(Args&&...) { ++m_viewSetCount; }
+    template <typename... Args> bool SetSpacing(Args&&...) {
+        ++m_spacingSetCount;
+        if (!m_isSpacingAccepted) return false;
+        ++m_viewSetCount;
+        return true;
+    }
     template <typename... Args> void SetWindowLevel(Args&&...) { ++m_viewSetCount; }
+    bool SetVolumeQuality(const VolumeQualityParams& quality) {
+        m_volumeQuality = quality;
+        ++m_qualitySetCount;
+        ++m_viewSetCount;
+        return true;
+    }
+    bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes) {
+        m_gradientOpacity = nodes;
+        ++m_gradientSetCount;
+        ++m_viewSetCount;
+        return true;
+    }
+    bool SetTransferPreset(TransferPreset) {
+        ++m_transferPresetSetCount;
+        ++m_viewSetCount;
+        return true;
+    }
+    bool SetDenoiseOn(bool isDenoiseOn) {
+        m_isDenoiseOn = isDenoiseOn;
+        ++m_denoiseSetCount;
+        ++m_viewSetCount;
+        return true;
+    }
 
 private:
     VizMode m_vizMode = VizMode::Volume;
     int m_vizModeSetCount = 0;
     int m_viewSetCount = 0;
+    int m_materialSetCount = 0;
+    int m_opacitySetCount = 0;
+    int m_spacingSetCount = 0;
+    int m_qualitySetCount = 0;
+    int m_gradientSetCount = 0;
+    int m_transferPresetSetCount = 0;
+    int m_denoiseSetCount = 0;
     int m_loadCount = 0;
     int m_reloadCount = 0;
     int m_exportCount = 0;
@@ -98,6 +154,11 @@ private:
     std::string m_slicePath;
     std::optional<double> m_sliceAngleDeg;
     bool m_isReloadAccepted = true;
+    bool m_isSpacingAccepted = true;
+    bool m_isDenoiseOn = false;
+    MaterialParams m_material;
+    VolumeQualityParams m_volumeQuality;
+    std::vector<GradientOpacityNode> m_gradientOpacity;
     std::optional<VolumeLayout> m_loadLayout;
     std::optional<VolumeBuffer> m_reloadBuffer;
     std::function<void(bool isSuccess)> m_reloadComplete;

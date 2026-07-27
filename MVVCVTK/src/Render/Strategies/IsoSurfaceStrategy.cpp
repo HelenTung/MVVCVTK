@@ -10,6 +10,7 @@
 #include <vtkType.h>
 
 #include <cmath>
+#include <utility>
 
 class IsoSurfaceStrategy::Mapper final : public vtkOpenGLPolyDataMapper {
 public:
@@ -98,8 +99,7 @@ private:
 vtkStandardNewMacro(IsoSurfaceStrategy::MaskImplicit);
 
 
-static constexpr int kInteractionIsoTargetDim = 256;
-static constexpr int kQualityIsoTargetDim = 766;
+static constexpr int kIsoTargetDim = 766;
 
 
 void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
@@ -144,46 +144,28 @@ void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
-    m_qualityIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    m_interactionIsoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    m_qualityMaskFunc =
-        vtkSmartPointer<MaskImplicit>::New();
-    m_interactionMaskFunc =
-        vtkSmartPointer<MaskImplicit>::New();
-    m_qualityClip =
-        vtkSmartPointer<vtkClipPolyData>::New();
-    m_interactionClip =
-        vtkSmartPointer<vtkClipPolyData>::New();
+    m_isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
+    m_maskFunc = vtkSmartPointer<MaskImplicit>::New();
+    m_clip = vtkSmartPointer<vtkClipPolyData>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
     // predicate 直接读取 vertexMC；禁用 VBO Shift/Scale 才能保持 input-model 坐标。
     m_mapper->SetVBOShiftScaleMethod(vtkOpenGLPolyDataMapper::DISABLE_SHIFT_SCALE);
     // 初始绑定
     m_actor->SetMapper(m_mapper);
-    m_actor->GetProperty()->SetInterpolationToPhong();
+    m_actor->GetProperty()->SetInterpolationToFlat();
 
     m_actor->SetPickable(false); // 等值面不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
 
     // 静态数据
-    m_actor->GetProperty()->SetInterpolationToPhong();
-    m_qualityIsoFilter->ComputeNormalsOff();
-    m_qualityIsoFilter->ComputeGradientsOff();
-    m_interactionIsoFilter->ComputeNormalsOff();
-    m_interactionIsoFilter->ComputeGradientsOff();
-    m_qualityClip->SetInputConnection(
-        m_qualityIsoFilter->GetOutputPort());
-    m_qualityClip->SetClipFunction(
-        m_qualityMaskFunc);
-    m_qualityClip->SetValue(0.0);
-    m_qualityClip->InsideOutOff();
-    m_qualityClip->GenerateClippedOutputOff();
-    m_interactionClip->SetInputConnection(
-        m_interactionIsoFilter->GetOutputPort());
-    m_interactionClip->SetClipFunction(
-        m_interactionMaskFunc);
-    m_interactionClip->SetValue(0.0);
-    m_interactionClip->InsideOutOff();
-    m_interactionClip->GenerateClippedOutputOff();
+    m_actor->GetProperty()->SetInterpolationToFlat();
+    m_isoFilter->ComputeNormalsOff();
+    m_isoFilter->ComputeGradientsOff();
+    m_clip->SetInputConnection(m_isoFilter->GetOutputPort());
+    m_clip->SetClipFunction(m_maskFunc);
+    m_clip->SetValue(0.0);
+    m_clip->InsideOutOff();
+    m_clip->GenerateClippedOutputOff();
 
     AttachProp(m_actor);
     AttachProp(m_cubeAxes);
@@ -202,8 +184,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         // 如果上游已经给的是 mesh，则直接走 PolyData 路径，不再重复提等值面。
         m_lastInput = data;
         m_hasMask = false;
-        m_qualityMask = nullptr;
-        m_interactionMask = nullptr;
+        m_mask = nullptr;
         poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
         m_mapper->ScalarVisibilityOff();
@@ -217,61 +198,53 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         prop->SetDiffuse(0.8);
         prop->SetSpecular(0.15);      // 稍微增加一点高光
         prop->SetSpecularPower(15.0);
-        prop->SetInterpolationToGouraud();
+        prop->SetInterpolationToFlat();
         return;
     }
 
-    // ImageData 路径需要实时计算等值面，并分别维护静态质量与交互质量管线。
+    // ImageData 路径固定维护一条 766 等值面管线；
+    // 交互来源不再拥有独立 producer，也不改 mapper 输入。
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
+        auto resample =
+            ImageProcessor::GetDownsampledImage(img, kIsoTargetDim);
+        if (!resample) {
+            return;
+        }
+
         m_lastInput = data;
         m_hasMask = false;
-        m_qualityMask = nullptr;
-        m_interactionMask = nullptr;
+        m_mask = nullptr;
         img->GetCenter(m_dataCenter);
-
-        m_qualityResample = ImageProcessor::GetDownsampledImage(img, kQualityIsoTargetDim);
-        m_interactionResample = ImageProcessor::GetDownsampledImage(img, kInteractionIsoTargetDim);
-        if (m_qualityResample) {
-            m_qualityIsoFilter->SetInputConnection(m_qualityResample->GetOutputPort());
-        }
-        if (m_interactionResample) {
-            m_interactionIsoFilter->SetInputConnection(m_interactionResample->GetOutputPort());
-        }
+        m_resample = std::move(resample);
+        m_isoFilter->SetInputConnection(
+            m_resample->GetOutputPort());
 
         m_currentIsoValue = 0.0;
-        m_qualityIsoFilter->SetValue(0, m_currentIsoValue);
-        m_interactionIsoFilter->SetValue(0, m_currentIsoValue);
-        m_isInteracting = false;
-        m_mapper->SetInputConnection(m_qualityIsoFilter->GetOutputPort());
+        m_isoFilter->SetValue(0, m_currentIsoValue);
+        m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
         m_mapper->ScalarVisibilityOff();
         m_cubeAxes->SetBounds(img->GetBounds());
     }
 
 }
 
-bool IsoSurfaceStrategy::SetActiveInput()
+bool IsoSurfaceStrategy::SetMapperInput()
 {
     if (!m_mapper) {
         return false;
     }
     if (m_hasMask) {
-        auto activeClip = m_isInteracting
-            ? m_interactionClip : m_qualityClip;
-        if (!activeClip) {
+        if (!m_clip) {
             return false;
         }
-        m_mapper->SetInputConnection(
-            activeClip->GetOutputPort());
+        m_mapper->SetInputConnection(m_clip->GetOutputPort());
         return true;
     }
-    auto activeFilter = m_isInteracting
-        ? m_interactionIsoFilter : m_qualityIsoFilter;
-    if (!activeFilter) {
+    if (!m_isoFilter) {
         return false;
     }
-    m_mapper->SetInputConnection(
-        activeFilter->GetOutputPort());
+    m_mapper->SetInputConnection(m_isoFilter->GetOutputPort());
     return true;
 }
 
@@ -281,30 +254,23 @@ void IsoSurfaceStrategy::SetInputMask(
     if (!vtkImageData::SafeDownCast(m_lastInput)
         || !validityMask) {
         m_hasMask = false;
-        m_qualityMask = nullptr;
-        m_interactionMask = nullptr;
-        (void)SetActiveInput();
+        m_mask = nullptr;
+        (void)SetMapperInput();
         return;
     }
 
-    m_qualityMask =
-        ImageProcessor::GetDownsampledMask(
-            validityMask, kQualityIsoTargetDim);
-    m_interactionMask =
-        ImageProcessor::GetDownsampledMask(
-            validityMask, kInteractionIsoTargetDim);
-    if (!m_qualityMask || !m_interactionMask) {
-        m_hasMask = false;
-        (void)SetActiveInput();
+    auto mask = ImageProcessor::GetDownsampledMask(
+        validityMask, kIsoTargetDim);
+    if (!mask) {
         return;
     }
-    m_qualityMask->Update();
-    m_interactionMask->Update();
-    m_hasMask = m_qualityMaskFunc->SetMask(
-            m_qualityMask->GetOutput())
-        && m_interactionMaskFunc->SetMask(
-            m_interactionMask->GetOutput());
-    (void)SetActiveInput();
+    mask->Update();
+    if (!m_maskFunc->SetMask(mask->GetOutput())) {
+        return;
+    }
+    m_mask = std::move(mask);
+    m_hasMask = true;
+    (void)SetMapperInput();
 }
 
 void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -346,41 +312,12 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         else prop->SetInterpolationToFlat();
     }
 
-    // 等值面这里也采用与体渲染一致的状态收敛思路：
-    // 1. 先计算这一帧最终应落到的交互态 isNextInteracting
-    // 2. 再计算这一帧最终应使用的阈值 nextIsoValue
-    // 3. 根据 isNextInteracting 选择当前活动过滤器 activeIsoFilter
-    // 4. 只在交互态切换或阈值确实变化时，才把最终值下发到活动过滤器
-    // 这样可以保证：
-    // - 拖动期间只更新 256 预览等值面
-    // - 松手后切回 766 质量等值面
-    // - 同一帧同时带有 Interaction 和 IsoValue 时，统一按最终状态收口
-    if (((flags & UpdateFlags::Interaction) != UpdateFlags::None) || ((flags & UpdateFlags::IsoValue) != UpdateFlags::None)) {
-        const bool isNextInteracting = ((flags & UpdateFlags::Interaction) != UpdateFlags::None)
-            ? params.isInteracting
-            : m_isInteracting;
-        const double nextIsoValue = ((flags & UpdateFlags::IsoValue) != UpdateFlags::None)
-            ? params.isoValue
-            : m_currentIsoValue;
-        const bool hasInteractionChanged = (m_isInteracting != isNextInteracting);
-        const bool hasIsoValueChanged = (m_currentIsoValue != nextIsoValue);
-
-        m_isInteracting = isNextInteracting;
-        m_currentIsoValue = nextIsoValue;
-
-        auto activeIsoFilter = m_isInteracting ? m_interactionIsoFilter : m_qualityIsoFilter;
-        if (activeIsoFilter && activeIsoFilter->GetInput()) {
-            if ((hasInteractionChanged || hasIsoValueChanged)
-                && activeIsoFilter->GetValue(0) != m_currentIsoValue) {
-                // 活动过滤器只接收这一帧最终阈值，避免交互过程中两条等值面管线同时重算。
-                activeIsoFilter->SetValue(0, m_currentIsoValue);
-            }
-
-            if (hasInteractionChanged) {
-                // 只有交互态真的切换时才改 mapper 输入，
-                // 避免单纯阈值变化时重复做输入重绑。
-                (void)SetActiveInput();
-            }
+    // 交互来源只改变窗口刷新调度；等值面几何始终来自同一个 766 producer。
+    if ((flags & UpdateFlags::IsoValue) != UpdateFlags::None) {
+        m_currentIsoValue = params.isoValue;
+        if (m_isoFilter && m_isoFilter->GetInput()
+            && m_isoFilter->GetValue(0) != m_currentIsoValue) {
+            m_isoFilter->SetValue(0, m_currentIsoValue);
         }
     }
 

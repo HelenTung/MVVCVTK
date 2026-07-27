@@ -60,14 +60,26 @@ public:
     // 实现依赖对象由 Impl 持有。
     // ================================================================
     void SetVizMode(VizMode mode);
+    VizMode GetVizMode() const;
     void SetMaterial(const MaterialParams& mat);
     void SetOpacity(double opacity);
     void SetTransferFunction(const std::vector<TFNode>& nodes);
     void SetIsoThreshold(double val);
     void SetBackground(const BackgroundColor& bg);
-    void SetSpacing(double sx, double sy, double sz);
+    bool SetSpacing(double sx, double sy, double sz);
     void SetWindowLevel(double ww, double wc);
     void SetVisualConfig(const PreInitConfig& cfg);
+    bool SetVolumeQuality(const VolumeQualityParams& quality);
+    VolumeQualityParams GetVolumeQuality() const;
+    bool SetFeatureActive(
+        const FeatureSource& source,
+        bool isActive);
+    bool GetIsFeatureActive() const;
+    bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes);
+    std::vector<GradientOpacityNode> GetGradientOpacity() const;
+    bool SetTransferPreset(TransferPreset preset);
+    bool SetDenoiseOn(bool isDenoiseOn);
+    bool GetDenoiseOn() const;
 
     // ================================================================
     // 文件流加载 / 重载加载入口
@@ -114,7 +126,9 @@ public:
     void SetSliceScroll(int delta) override;
     void SetCursorWorldPosition(double worldPos[3], int axis = -1) override;
     std::array<double, 3> GetCursorWorld() override;
-    void SetInteracting(bool isInteracting) override;
+    bool SetInteracting(
+        const InteractionSource& source,
+        bool isInteracting) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
     void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;

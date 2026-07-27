@@ -15,6 +15,12 @@
 
 namespace {
 
+static_assert(static_cast<int>(HostVolumeQuality::Quality) == 0);
+static_assert(static_cast<int>(HostVolumeQuality::Custom) == 1);
+static_assert(
+    HostVolumeQualityParams{}.quality
+        == HostVolumeQuality::Quality);
+
 void SetExpect(bool isExpected, const char* message, int& failureCount)
 {
     if (!isExpected) {
@@ -144,12 +150,85 @@ void StartViewCases(int& failureCount)
     request.windowLevel->windowWidth = 0.0;
     getIsRejected(std::move(request), "非法 window/level 必须整笔拒绝。");
 
+    request = BuildViewRequest();
+    request.materialPreset = HostMaterialPreset::Glossy;
+    getIsRejected(
+        std::move(request),
+        "材质 preset 与数值 material/opacity 冲突时必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.transferPreset = HostTransferPreset::Percentile;
+    getIsRejected(
+        std::move(request),
+        "Percentile preset 与手动 TF 冲突时必须整笔拒绝。");
+
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.mode = HostRenderMode::Volume;
+    request.volumeQuality = HostVolumeQualityParams{
+        HostVolumeQuality::Custom, 0, 0.5, false };
+    getIsRejected(std::move(request), "非法 Custom quality 必须整笔拒绝。");
+
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.mode = HostRenderMode::Volume;
+    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
+        { 2.0, 0.2 }, { 1.0, 0.8 }
+    };
+    getIsRejected(std::move(request), "下降 gradient 必须整笔拒绝。");
+
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "slice";
+    request.mode = HostRenderMode::SliceTopDown;
+    request.isDenoiseOn = true;
+    getIsRejected(
+        std::move(request),
+        "Slice 目标不得接收 Volume-only denoise。");
+
     Fixture fixture;
     SetExpect(SendView(fixture, BuildViewRequest()),
         "全量合法 View 请求应被接收。", failureCount);
-    SetExpect(fixture.GetService()->GetViewSetCount() == 8
+    SetExpect(fixture.GetService()->GetViewSetCount() == 7
             && fixture.context->GetCameraStyleSetCount() == 1,
         "合法 View 请求应按完整字段一次提交。", failureCount);
+    SetExpect(fixture.GetService()->GetMaterialSetCount() == 1
+            && fixture.GetService()->GetOpacitySetCount() == 0,
+        "material 与独立 opacity 必须合并成一次 Material 提交。",
+        failureCount);
+
+    Fixture spacingFixture;
+    spacingFixture.GetService()->SetSpacingAccepted(false);
+    SetExpect(!SendView(spacingFixture, BuildViewRequest()),
+        "spacing 运行时拒绝必须向 Router 返回失败。", failureCount);
+    SetExpect(spacingFixture.GetService()->GetSpacingSetCount() == 1
+            && spacingFixture.GetService()->GetViewSetCount() == 0
+            && spacingFixture.context->GetCameraStyleSetCount() == 0,
+        "spacing 失败前不得提交其它 View 状态。", failureCount);
+
+    Fixture extendedFixture;
+    HostViewSetRequest extended;
+    extended.targetView.viewId = "primary";
+    extended.mode = HostRenderMode::Volume;
+    extended.materialPreset = HostMaterialPreset::Glossy;
+    extended.volumeQuality = HostVolumeQualityParams{
+        HostVolumeQuality::Custom, 512, 0.25, true };
+    extended.gradientOpacity = std::vector<HostGradientOpacityNode>{};
+    extended.transferPreset = HostTransferPreset::Percentile;
+    extended.isDenoiseOn = false;
+    SetExpect(SendView(extendedFixture, std::move(extended)),
+        "合法扩展显示契约应一次提交。", failureCount);
+    const auto extendedService = extendedFixture.GetService();
+    SetExpect(extendedService->GetMaterialSetCount() == 1
+            && extendedService->GetMaterial().isShadeOn
+            && extendedService->GetQualitySetCount() == 1
+            && extendedService->GetVolumeQuality().maxDimension == 512
+            && extendedService->GetGradientSetCount() == 1
+            && extendedService->GetGradientOpacity().empty()
+            && extendedService->GetTransferPresetSetCount() == 1
+            && extendedService->GetDenoiseSetCount() == 1
+            && extendedFixture.GetSliceService()->GetViewSetCount() == 0,
+        "扩展字段必须映射到单一目标 service，空 gradient 表示显式清除。",
+        failureCount);
 }
 
 void StartDataCases(int& failureCount)

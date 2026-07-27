@@ -62,6 +62,11 @@ public:
     // 可选 Feature 只需要 InteractiveService 列表；在这里降级接口，避免其修改完整 runtime。
     std::vector<std::shared_ptr<InteractiveService>> BuildServices(
         const std::vector<const HostRenderViewRuntime*>& views) const;
+    // 非空 services 绑定 Feature 的精确活动视图，空 services 解除绑定；
+    // service 必须来自当前 view set，同一视图上的多个 Feature 独立聚合。
+    bool SetFeatureViews(
+        const std::string& featureId,
+        const std::vector<std::shared_ptr<InteractiveService>>& services);
 
     void SetInitialVisibility() const;
     void SendRenderAll() const;

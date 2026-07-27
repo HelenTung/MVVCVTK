@@ -123,6 +123,8 @@ private:
         const CropHostTarget& target) const;
     bool GetTargetsValid(
         const HostViewTargets& targets) const;
+    bool SetActiveViews(
+        const std::vector<std::shared_ptr<InteractiveService>>& services) const;
     bool SetCropInput(const CropHostTarget& target);
     bool SetPolyData(CropHostPolyDataRequest request);
     bool ClearPolyData();
@@ -172,6 +174,9 @@ private:
         ImageState,
         const ImageSnapshot&,
         ImageSnapshot&)> m_setImageState;
+    std::function<bool(
+        const std::vector<std::shared_ptr<InteractiveService>>&)>
+        m_setActiveViews;
     std::function<bool(std::function<void()>)>
         m_sendOwnerComplete;
     vtkSmartPointer<vtkPolyData> m_polyData;
@@ -201,6 +206,7 @@ bool CropHostFeature::Impl::AttachHost(
         || !context.inputPort
         || !context.getImageSnapshot
         || !context.setImageState
+        || !context.setActiveViews
         || !context.sendOwnerComplete) {
         return false;
     }
@@ -209,6 +215,7 @@ bool CropHostFeature::Impl::AttachHost(
     m_inputPort = context.inputPort;
     m_getImageSnapshot = context.getImageSnapshot;
     m_setImageState = context.setImageState;
+    m_setActiveViews = context.setActiveViews;
     m_sendOwnerComplete = context.sendOwnerComplete;
     m_completeState = std::make_shared<CompleteState>();
     m_ownerThread = std::this_thread::get_id();
@@ -245,13 +252,21 @@ bool CropHostFeature::Impl::DetachHost()
         return false;
     }
 
-    if (m_inputPort
-        && (!m_config.inputViews.viewIds.empty()
-            || !m_config.inputViews.viewRoles.empty())) {
-        if (!m_inputPort->DetachInput(kFeatureId)) {
-            return false;
+    bool isInputDetached =
+        m_config.inputViews.viewIds.empty()
+        && m_config.inputViews.viewRoles.empty();
+    if (!isInputDetached && m_inputPort) {
+        try {
+            isInputDetached =
+                m_inputPort->DetachInput(kFeatureId);
+        }
+        catch (...) {
+            isInputDetached = false;
         }
     }
+
+    // 输入解绑失败时 Feature 仍留在 Session 注册表等待重试，但可见状态和质量来源必须先退休，
+    // 避免宿主关闭流程因一个输入端口异常而长期保持 Crop/Quality。
     if (m_completeState) {
         const std::lock_guard<std::mutex> lock(
             m_completeState->mutex);
@@ -267,6 +282,9 @@ bool CropHostFeature::Impl::DetachHost()
     m_activeTarget.reset();
     m_status.reset();
     m_isDown.fill(false);
+    if (!isInputDetached) {
+        return false;
+    }
     m_isAttached = false;
     ClearBorrowed();
     return true;
@@ -274,10 +292,14 @@ bool CropHostFeature::Impl::DetachHost()
 
 void CropHostFeature::Impl::ClearBorrowed()
 {
+    if (m_setActiveViews) {
+        (void)m_setActiveViews({});
+    }
     m_renderViews = nullptr;
     m_inputPort = nullptr;
     m_getImageSnapshot = {};
     m_setImageState = {};
+    m_setActiveViews = {};
     m_sendOwnerComplete = {};
     m_ownerThread = {};
     if (m_completeState) {
@@ -371,6 +393,13 @@ bool CropHostFeature::Impl::GetTargetsValid(
     return true;
 }
 
+bool CropHostFeature::Impl::SetActiveViews(
+    const std::vector<std::shared_ptr<InteractiveService>>& services) const
+{
+    return m_setActiveViews
+        && m_setActiveViews(services);
+}
+
 bool CropHostFeature::Impl::StartCrop(
     const CropHostTarget& target)
 {
@@ -414,6 +443,15 @@ bool CropHostFeature::Impl::StartCrop(
     if (request.targetServices.empty()) {
         return false;
     }
+    auto activeServices = request.targetServices;
+    if (std::find(
+            activeServices.begin(),
+            activeServices.end(),
+            request.referenceService)
+            == activeServices.end()) {
+        activeServices.push_back(
+            request.referenceService);
+    }
     const bool hasNewLineage =
         target.source == CropHostSource::CurrentImage
         && m_lastImage
@@ -423,6 +461,11 @@ bool CropHostFeature::Impl::StartCrop(
     const bool isStarted = m_bridge->StartView(
         request, std::move(*input));
     if (isStarted) {
+        if (!SetActiveViews(activeServices)) {
+            (void)m_bridge->ExitCrop();
+            (void)m_bridge->ClearBindings();
+            return false;
+        }
         if (hasNewLineage) {
             m_rootImage.reset();
             m_lastImage.reset();
@@ -447,6 +490,9 @@ bool CropHostFeature::Impl::SetPolyData(
     if (m_bridge) {
         (void)m_bridge->ClearBindings();
     }
+    if (!SetActiveViews({})) {
+        return false;
+    }
     m_polyData = std::move(request.polyData);
     m_sourceVersion = request.sourceVersion;
     m_activeTarget.reset();
@@ -458,6 +504,9 @@ bool CropHostFeature::Impl::ClearPolyData()
 {
     if (m_bridge) {
         (void)m_bridge->ClearBindings();
+    }
+    if (!SetActiveViews({})) {
+        return false;
     }
     m_polyData = nullptr;
     m_sourceVersion = 0;
@@ -1165,8 +1214,13 @@ bool CropHostFeature::Impl::SendRequest(
             return false;
         }
         m_status.reset();
-        return SendActionLog(
-            "Exit", m_bridge->ExitCrop());
+        {
+            const bool isExited = m_bridge->ExitCrop();
+            const bool isQualityRestored =
+                !isExited || SetActiveViews({});
+            return SendActionLog(
+                "Exit", isExited && isQualityRestored);
+        }
     case CropHostAction::None:
         return false;
     }
@@ -1346,6 +1400,7 @@ bool CropHostFeature::Impl::OnHostTick()
         && m_activeTarget
         && !SetCropInput(*m_activeTarget)) {
         (void)m_bridge->ClearBindings();
+        (void)SetActiveViews({});
         m_activeTarget.reset();
         m_status.reset();
     }

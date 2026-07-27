@@ -1,5 +1,6 @@
 #include "QtHostMethodCases.h"
 
+#include "AppService.h"
 #include "AppState.h"
 #include "AppStateEvents.h"
 #include "DataManager.h"
@@ -7,21 +8,25 @@
 #include "Host/GapHostFeature.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
+#include "Host/HostRenderViewSet.h"
 #include "Host/VtkAppHostSession.h"
 #include "VolumeTypes.h"
 
 #include <vtkCommand.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
+#include <vtkVolume.h>
 
 #include <chrono>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -38,10 +43,12 @@ public:
     bool AttachHost(
         const HostFeatureContext& context) override
     {
-        if (!context.getImageSnapshot
+        if (!context.renderViews
+            || !context.getImageSnapshot
             || !context.setImageState) {
             return false;
         }
+        m_renderViews = context.renderViews;
         m_getImageSnapshot = context.getImageSnapshot;
         m_setImageState = context.setImageState;
         return true;
@@ -49,6 +56,7 @@ public:
 
     bool DetachHost() override
     {
+        m_renderViews = nullptr;
         m_getImageSnapshot = {};
         m_setImageState = {};
         return true;
@@ -59,6 +67,27 @@ public:
         return true;
     }
 
+    bool GetFeatureActive(
+        const std::string& viewId) const
+    {
+        const auto* view = m_renderViews
+            ? m_renderViews->GetViewById(viewId)
+            : nullptr;
+        return view
+            && view->service
+            && view->service->GetIsFeatureActive();
+    }
+
+    std::shared_ptr<VizService> GetViewService(
+        const std::string& viewId) const
+    {
+        const auto* view = m_renderViews
+            ? m_renderViews->GetViewById(viewId)
+            : nullptr;
+        return view ? view->service : nullptr;
+    }
+
+    const HostRenderViewSet* m_renderViews = nullptr;
     std::function<ImageSnapshot()> m_getImageSnapshot;
     std::function<bool(
         ImageState,
@@ -175,6 +204,8 @@ HostSessionConfig GetCropSessionConfig()
     HostRenderViewConfig timerView;
     timerView.id = "crop-timer";
     timerView.role = HostRenderViewRole::Auxiliary;
+    timerView.window.viewInit.viewMode =
+        HostRenderMode::Volume;
     config.renderViews.push_back(std::move(timerView));
     return config;
 }
@@ -456,6 +487,91 @@ int GetCropFailCount()
         isStrict && isInactiveHistoryRejected,
         "Crop request matrix rejects None, payload mismatch and illegal callbacks") ? 0 : 1;
 
+    auto splitTarget = target;
+    splitTarget.referenceView = {
+        "crop-timer", false,
+        HostRenderViewRole::Auxiliary };
+    const bool isSplitStarted = feature->SendRequest({
+        CropHostAction::Start, splitTarget });
+    SendHostTick(*endpoint, *timerEndpoint);
+    const auto splitService =
+        contextProbe->GetViewService("crop-timer");
+    auto* splitVolume = splitService
+        ? vtkVolume::SafeDownCast(
+            splitService->GetMainProp())
+        : nullptr;
+    auto* splitMapper = splitVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            splitVolume->GetMapper())
+        : nullptr;
+    auto* splitQualityInput = splitMapper
+        ? splitMapper->GetInputConnection(0, 0)
+        : nullptr;
+    auto* splitQualityMask = splitMapper
+        ? splitMapper->GetMaskInput()
+        : nullptr;
+    const double splitSampleDistance =
+        splitMapper ? splitMapper->GetSampleDistance() : 0.0;
+    const double splitImageDistance =
+        splitMapper ? splitMapper->GetImageSampleDistance() : 0.0;
+    const auto splitMapperTime =
+        splitMapper ? splitMapper->GetMTime() : 0;
+    // Box/Plane 最终都通过 referenceService 写入同一通用交互轴；
+    // 直接切换该轴可稳定验证 scope 与 producer 锁定，不依赖 VTK picking 偶然性。
+    const InteractionSource splitDragSource{
+        "crop.context.probe", "drag"
+    };
+    const bool isSplitDragSet = splitService
+        && splitService->SetInteracting(
+            splitDragSource, true);
+    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isSplitLocked = splitMapper
+        && splitQualityInput
+        && splitMapper->GetInputConnection(0, 0)
+            == splitQualityInput
+        && splitMapper->GetMaskInput() == splitQualityMask
+        && splitMapper->GetAutoAdjustSampleDistances() == 0
+        && std::abs(splitImageDistance - 1.0) < 1e-12
+        && std::abs(
+            splitMapper->GetMinimumImageSampleDistance() - 1.0)
+            < 1e-12
+        && std::abs(
+            splitMapper->GetMaximumImageSampleDistance() - 1.0)
+            < 1e-12
+        && std::abs(
+            splitMapper->GetImageSampleDistance()
+                - splitImageDistance) < 1e-12
+        && std::abs(
+            splitMapper->GetSampleDistance()
+                - splitSampleDistance) < 1e-12
+        && splitMapper->GetUseJittering() != 0
+        && splitMapper->GetMTime() == splitMapperTime;
+    const bool isSplitDragClear = splitService
+        && splitService->SetInteracting(
+            splitDragSource, false);
+    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isSplitQualityRestored = splitMapper
+        && splitMapper->GetInputConnection(0, 0)
+            == splitQualityInput
+        && splitMapper->GetMaskInput() == splitQualityMask
+        && splitMapper->GetAutoAdjustSampleDistances() == 0
+        && std::abs(
+            splitMapper->GetImageSampleDistance()
+                - splitImageDistance) < 1e-12
+        && splitMapper->GetUseJittering() != 0
+        && splitMapper->GetMTime() == splitMapperTime;
+    failureCount += GetCaseResult(
+        isSplitStarted
+            && contextProbe->GetFeatureActive(
+                "crop-primary")
+            && contextProbe->GetFeatureActive(
+                "crop-timer")
+            && isSplitDragSet
+            && isSplitLocked
+            && isSplitDragClear
+            && isSplitQualityRestored,
+        "Crop keeps Quality input and mapper through split reference drag") ? 0 : 1;
+
     const bool isStarted = feature->SendRequest({
         CropHostAction::Start, target });
     const auto startedState = feature->GetState();
@@ -490,6 +606,10 @@ int GetCropFailCount()
     endpoint->renderWindow->Render();
     failureCount += GetCaseResult(
         isStarted
+            && contextProbe->GetFeatureActive(
+                "crop-primary")
+            && !contextProbe->GetFeatureActive(
+                "crop-timer")
             && startedState.isActive
             && !startedState.isPublishing
             && isDefaultOnlyStarted

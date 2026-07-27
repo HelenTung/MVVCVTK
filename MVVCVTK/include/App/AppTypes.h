@@ -36,6 +36,27 @@ enum class ToolMode {
     ModelTransform      // 模型变换（旋转/缩放/平移）
 };
 
+// 通用交互来源键；主体只比较完整键，不解释 Feature 的 owner/channel 文本。
+struct InteractionSource final {
+    std::string ownerId;
+    std::string channelId;
+
+    bool operator==(const InteractionSource& other) const noexcept
+    {
+        return ownerId == other.ownerId && channelId == other.channelId;
+    }
+};
+
+// 通用 Feature 来源键；App 只比较 id，不解释具体模块名称。
+struct FeatureSource final {
+    std::string id;
+
+    bool operator==(const FeatureSource& other) const noexcept
+    {
+        return id == other.id;
+    }
+};
+
 // --- 通用状态枚举（用于数据可信、文件流加载、重载加载等状态）---
 enum class LoadState {
     Idle,       // 未发起加载
@@ -69,6 +90,46 @@ struct MaterialParams {
     bool   isShadeOn = false;    // true 启用体渲染阴影或等值面 Phong 插值；默认关闭
 };
 
+enum class VolumeQuality {
+    Quality,
+    Custom
+};
+
+struct VolumeQualityParams final {
+    VolumeQuality quality = VolumeQuality::Quality;
+    int maxDimension = 766;
+    double sampleDistance = 1.0;
+    bool isJitterOn = true;
+};
+
+// Feature 只派生临时 Quality，不改写调用方保存的 Quality/Custom 配置。
+inline VolumeQuality GetVolumeQuality(
+    const VolumeQualityParams& configured,
+    bool isFeatureActive) noexcept
+{
+    return isFeatureActive
+        ? VolumeQuality::Quality : configured.quality;
+}
+
+// 刷新调度只反映交互生命周期，不再选择质量档或 producer。
+inline double GetRenderRate(bool isInteracting) noexcept
+{
+    constexpr double staticRate = 0.001;
+    constexpr double fastRate = 15.0;
+    return isInteracting ? fastRate : staticRate;
+}
+
+struct GradientOpacityNode final {
+    double gradient = 0.0; // VTK gradient-opacity 原生域中的梯度幅值，必须非负。
+    double opacity = 0.0;  // 归一化不透明度 [0,1]。
+};
+
+// Scalar TF 是 session-wide 真源；Manual 表示外部节点，Percentile 表示随数据版本重算。
+enum class TransferPreset {
+    Manual,
+    Percentile
+};
+
 // --- 背景色（RGB，0~1）---
 struct BackgroundColor {
     double r = 0.1, g = 0.1, b = 0.1; // 归一化 [r, g, b]，各分量范围 [0.0, 1.0]，默认深灰
@@ -99,7 +160,7 @@ enum class UpdateFlags : int {
     TF = 1 << 1,  // 颜色/透明度改变 (0x02)
     IsoValue = 1 << 2,  // 阈值改变        (0x04)
     Material = 1 << 3,  // 材质参数改变    (0x08)
-    Interaction = 1 << 4,  // 交互状态改变    (0x10)
+    RenderRate = 1 << 4,  // 交互来源边界改变，仅用于同步窗口刷新率 (0x10)
     Transform = 1 << 5,  // 变换矩阵改变    (0x20)
     DataReady = 1 << 6,  // 数据加载成功    (0x40)
     LoadFailed = 1 << 7,  // 数据加载失败    (0x80)
@@ -109,7 +170,12 @@ enum class UpdateFlags : int {
     Spacing = 1 << 11,  // 体数据 spacing 改变 (0x800)
     FileLoad = 1 << 12,  // load 终态来源：文件加载
     ReloadLoad = 1 << 13,  // load 终态来源：buffer/reload
-    All = Cursor | TF | IsoValue | Material | Interaction | Transform | WindowLevel | Visibility | Background | Spacing | DataReady
+    Quality = 1 << 14, // 目标 view 的 Volume producer/mapper 质量配置
+    GradientOpacity = 1 << 15, // 目标 view 的梯度不透明度函数
+    Denoise = 1 << 16, // 目标 view 的仅显示降噪 producer
+    All = Cursor | TF | IsoValue | Material | RenderRate | Transform
+        | WindowLevel | Visibility | Background | Spacing | DataReady
+        | Quality | GradientOpacity | Denoise
 };
 
 // 位运算辅助
@@ -134,10 +200,13 @@ struct RenderParams {
     std::array<double, 3>  cursor = { 0, 0, 0 }; // 轴约束后的联动点，VTK world 坐标 [x, y, z]
     std::array<double, 3>  cursorRaw = { 0, 0, 0 }; // 拾取原始点，VTK world 坐标 [x, y, z]
     int                    cursorAxis = -1; // 光标来源轴：0/1/2 为 X/Y/Z，-1 为自由点或无固定轴
-    bool                   isInteracting = false; // true 表示高频交互中，Strategy 可切换轻量渲染参数
+    bool                   isFeatureActive = false; // true 时锁定 Quality producer 与 mapper；交互只影响刷新调度
     std::vector<TFNode>    tfNodes; // 传输函数节点；position 按 scalarRange 归一化映射
     double                 scalarRange[2] = { 0.0, 255.0 }; // 当前数据标量范围 [min, max]
     MaterialParams         material; // 当前材质快照；默认值来自 MaterialParams
+    VolumeQualityParams    volumeQuality; // 当前 view 的 Volume producer/mapper 质量配置
+    std::vector<GradientOpacityNode> gradientOpacity; // 空数组表示使用 VTK 默认梯度不透明度
+    bool                   isDenoiseOn = false; // true 仅在 Volume 显示 producer 前启用降噪
     double                 isoValue = 0.0; // 等值面阈值，单位与 scalarRange 相同
     WindowLevelParams      windowLevel; // 切片灰度映射快照，单位与 scalarRange 相同
     // model-to-world 仿射矩阵，world = M * model；按 vtkMatrix4x4::DeepCopy 的
@@ -160,7 +229,7 @@ enum class Orientation { Top_down = 2, Front_back = 1, Left_right = 0 };
 struct PreInitConfig {
     VizMode             vizMode = VizMode::IsoSurface; // 无选择 flag；批量配置始终写入当前视图模式
     MaterialParams      material; // 无选择 flag；批量配置始终提交完整材质快照
-    std::vector<TFNode> tfNodes; // hasTF=true 时提交；空数组也是有效的显式配置
+    std::vector<TFNode> tfNodes; // hasTF=true 时提交；显式空数组非法
     double              isoThreshold = 0.0; // hasIso=true 时提交，单位与数据标量相同
     BackgroundColor     bgColor; // hasBgColor=true 时提交，RGB 分量范围 [0.0, 1.0]
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 }; // hasSpacing=true 时提交 RAS [sx, sy, sz]

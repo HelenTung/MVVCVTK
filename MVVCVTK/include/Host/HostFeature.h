@@ -5,10 +5,13 @@
 #include "Interaction/InteractionTypes.h"
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 class HostRenderViewSet;
+class InteractiveService;
 
 struct HostInputBinding final {
     std::string featureId;
@@ -31,6 +34,11 @@ struct HostFeatureContext final {
         ImageState,
         const ImageSnapshot&,
         ImageSnapshot&)> setImageState;
+    // Feature 只上报已经由自身业务解析出的精确参与服务；宿主验证这些服务属于当前
+    // view set，并负责维护活动来源，不向 Feature 暴露质量配置或渲染策略。
+    std::function<bool(
+        const std::vector<std::shared_ptr<InteractiveService>>&)>
+        setActiveViews;
     HostInputPort* inputPort = nullptr;
     std::function<bool(std::function<void()>)> sendOwnerComplete;
 };

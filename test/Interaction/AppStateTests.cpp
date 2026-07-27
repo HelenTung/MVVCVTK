@@ -49,5 +49,57 @@ int AppStateSuite::GetFailCount() const
         std::cerr << "App state must broadcast one spacing diff.\n";
         ++failureCount;
     }
+
+    const InteractionSource viewerSource{ "Viewer2D", "primary" };
+    const InteractionSource cropSource{ "OrthogonalCrop", "box" };
+    if (!state.SetInteracting(viewerSource, true)
+        || !state.SetInteracting(viewerSource, true)
+        || !state.SetInteracting(cropSource, true)
+        || !state.GetIsInteracting()
+        || sink->GetEvents().size() != 3
+        || sink->GetEvents().back() != UpdateFlags::RenderRate) {
+        std::cerr << "Interaction sources must publish only the empty-to-active boundary.\n";
+        ++failureCount;
+    }
+    if (!state.SetInteracting(viewerSource, false)
+        || !state.GetIsInteracting()
+        || sink->GetEvents().size() != 3) {
+        std::cerr << "One source must not clear another active interaction.\n";
+        ++failureCount;
+    }
+    if (!state.SetInteracting(cropSource, false)
+        || state.GetIsInteracting()
+        || sink->GetEvents().size() != 4
+        || sink->GetEvents().back() != UpdateFlags::RenderRate) {
+        std::cerr << "The final source exit must publish the active-to-empty boundary.\n";
+        ++failureCount;
+    }
+    if (state.SetInteracting({ "", "invalid" }, true)
+        || sink->GetEvents().size() != 4) {
+        std::cerr << "Empty interaction identities must be rejected without state changes.\n";
+        ++failureCount;
+    }
+
+    const std::vector<TFNode> presetNodes{
+        { 0.1, 0.0, 0.0, 0.0, 0.0 },
+        { 0.9, 1.0, 1.0, 1.0, 1.0 }
+    };
+    state.SetTransferPresetIntent(TransferPreset::Percentile);
+    if (!state.SetTransferPresetNodes(
+            TransferPreset::Percentile, 7, presetNodes)
+        || state.GetTransferPreset() != TransferPreset::Percentile
+        || sink->GetEvents().size() != 5
+        || sink->GetEvents().back() != UpdateFlags::TF) {
+        std::cerr << "Percentile intent and resolved nodes must commit as shared TF state.\n";
+        ++failureCount;
+    }
+    state.SetTFNodes(presetNodes);
+    if (state.GetTransferPreset() != TransferPreset::Manual
+        || state.SetTransferPresetNodes(
+            TransferPreset::Percentile, 6, presetNodes)
+        || sink->GetEvents().size() != 5) {
+        std::cerr << "Manual TF must cancel preset intent and reject stale preset results.\n";
+        ++failureCount;
+    }
     return failureCount;
 }

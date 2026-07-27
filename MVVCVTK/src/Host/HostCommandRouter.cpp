@@ -43,6 +43,10 @@ private:
         std::optional<BackgroundColor> background;
         std::optional<std::array<double, 3>> spacing;
         std::optional<WindowLevelParams> windowLevel;
+        std::optional<VolumeQualityParams> volumeQuality;
+        std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
+        std::optional<TransferPreset> transferPreset;
+        std::optional<bool> isDenoiseOn;
     };
 
     bool SendData(HostDataCommand command) const;
@@ -59,6 +63,13 @@ private:
     std::optional<VizMode> GetAppViewMode(HostRenderMode mode) const;
     std::optional<ToolMode> GetAppToolMode(HostToolMode mode) const;
     std::optional<MaterialParams> BuildAppMaterial(const HostMaterialParams& value) const;
+    std::optional<MaterialParams> GetMaterialPreset(HostMaterialPreset preset) const;
+    std::optional<VolumeQualityParams> BuildAppQuality(
+        const HostVolumeQualityParams& value) const;
+    std::optional<std::vector<GradientOpacityNode>> BuildAppGradient(
+        const std::vector<HostGradientOpacityNode>& values) const;
+    std::optional<TransferPreset> GetTransferPreset(
+        HostTransferPreset preset) const;
     std::optional<BackgroundColor> BuildAppBackground(const HostBackgroundColor& value) const;
     std::optional<WindowLevelParams> BuildAppWindowLevel(const HostWindowLevelParams& value) const;
     std::optional<std::vector<TFNode>> BuildAppNodes(
@@ -320,6 +331,71 @@ std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
     return result;
 }
 
+std::optional<MaterialParams>
+HostCommandRouter::Impl::GetMaterialPreset(HostMaterialPreset preset) const
+{
+    switch (preset) {
+    case HostMaterialPreset::Soft:
+        return MaterialParams{ 0.25, 0.65, 0.10, 8.0, 0.80, false };
+    case HostMaterialPreset::Dense:
+        return MaterialParams{ 0.10, 0.85, 0.25, 20.0, 1.00, false };
+    case HostMaterialPreset::Glossy:
+        return MaterialParams{ 0.08, 0.65, 0.65, 40.0, 1.00, true };
+    }
+    return std::nullopt;
+}
+
+std::optional<VolumeQualityParams>
+HostCommandRouter::Impl::BuildAppQuality(
+    const HostVolumeQualityParams& value) const
+{
+    switch (value.quality) {
+    case HostVolumeQuality::Quality:
+        return VolumeQualityParams{ VolumeQuality::Quality, 766, 1.0, true };
+    case HostVolumeQuality::Custom:
+        if (value.maxDimension < 1 || value.maxDimension > 16384
+            || !std::isfinite(value.sampleDistance)
+            || value.sampleDistance <= 0.0) {
+            return std::nullopt;
+        }
+        return VolumeQualityParams{
+            VolumeQuality::Custom,
+            value.maxDimension,
+            value.sampleDistance,
+            value.isJitterOn
+        };
+    }
+    return std::nullopt;
+}
+
+std::optional<std::vector<GradientOpacityNode>>
+HostCommandRouter::Impl::BuildAppGradient(
+    const std::vector<HostGradientOpacityNode>& values) const
+{
+    std::vector<GradientOpacityNode> result;
+    result.reserve(values.size());
+    for (const auto& value : values) {
+        if (!std::isfinite(value.gradient) || value.gradient < 0.0
+            || !GetUnitValid(value.opacity)
+            || (!result.empty()
+                && value.gradient < result.back().gradient)) {
+            return std::nullopt;
+        }
+        result.push_back({ value.gradient, value.opacity });
+    }
+    return result;
+}
+
+std::optional<TransferPreset>
+HostCommandRouter::Impl::GetTransferPreset(HostTransferPreset preset) const
+{
+    switch (preset) {
+    case HostTransferPreset::Percentile:
+        return TransferPreset::Percentile;
+    }
+    return std::nullopt;
+}
+
 std::optional<HostCommandRouter::Impl::ViewCandidate>
 HostCommandRouter::Impl::BuildViewCandidate(
     const HostViewSetRequest& request) const
@@ -335,6 +411,9 @@ HostCommandRouter::Impl::BuildViewCandidate(
         : std::optional<VizMode>{};
     candidate.material = request.material ? BuildAppMaterial(*request.material)
         : std::optional<MaterialParams>{};
+    if (request.materialPreset) {
+        candidate.material = GetMaterialPreset(*request.materialPreset);
+    }
     candidate.opacity = request.opacity;
     candidate.nodes = request.transferNodes ? BuildAppNodes(*request.transferNodes)
         : std::optional<std::vector<TFNode>>{};
@@ -346,14 +425,33 @@ HostCommandRouter::Impl::BuildViewCandidate(
     candidate.windowLevel = request.windowLevel
         ? BuildAppWindowLevel(*request.windowLevel)
         : std::optional<WindowLevelParams>{};
+    candidate.volumeQuality = request.volumeQuality
+        ? BuildAppQuality(*request.volumeQuality)
+        : std::optional<VolumeQualityParams>{};
+    candidate.gradientOpacity = request.gradientOpacity
+        ? BuildAppGradient(*request.gradientOpacity)
+        : std::optional<std::vector<GradientOpacityNode>>{};
+    candidate.transferPreset = request.transferPreset
+        ? GetTransferPreset(*request.transferPreset)
+        : std::optional<TransferPreset>{};
+    candidate.isDenoiseOn = request.isDenoiseOn;
 
     if ((request.mode && (!candidate.mode || !candidate.context))
         || (request.material && !candidate.material)
+        || (request.materialPreset && !candidate.material)
         || (request.opacity && !GetUnitValid(*request.opacity))
         || (request.transferNodes && !candidate.nodes)
+        || (request.transferPreset && !candidate.transferPreset)
         || (request.iso && !std::isfinite(*request.iso))
         || (request.background && !candidate.background)
-        || (request.windowLevel && !candidate.windowLevel)) {
+        || (request.windowLevel && !candidate.windowLevel)
+        || (request.volumeQuality && !candidate.volumeQuality)
+        || (request.gradientOpacity && !candidate.gradientOpacity)) {
+        return std::nullopt;
+    }
+    if ((request.materialPreset
+            && (request.material || request.opacity))
+        || (request.transferPreset && request.transferNodes)) {
         return std::nullopt;
     }
 
@@ -363,6 +461,21 @@ HostCommandRouter::Impl::BuildViewCandidate(
                 return std::nullopt;
             }
         }
+    }
+    if (candidate.material && candidate.opacity) {
+        candidate.material->opacity = *candidate.opacity;
+        candidate.opacity.reset();
+    }
+
+    const VizMode effectiveMode = candidate.mode
+        ? *candidate.mode : candidate.service->GetVizMode();
+    const bool isVolumeMode = effectiveMode == VizMode::Volume
+        || effectiveMode == VizMode::CompositeVolume;
+    if (!isVolumeMode
+        && (candidate.volumeQuality
+            || candidate.gradientOpacity
+            || candidate.isDenoiseOn)) {
+        return std::nullopt;
     }
 
     return candidate;
@@ -377,7 +490,8 @@ bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
 {
     // 1. 先在局部候选中解析目标并完成所有字段校验。
     // 2. 任一字段非法都在 setter 前失败，保证请求不会留下部分状态。
-    // 3. 候选完整后才按稳定顺序提交 service 与相机模式。
+    // 3. spacing 是唯一会报告业务失败的写入，必须在其它状态前提交。
+    // 4. spacing 成功后，其余已验证 setter 按不可失败的状态写入语义提交。
     if (command.request.action != HostViewAction::Set) return false;
     const auto* request = std::get_if<HostViewSetRequest>(
         &command.request.payload);
@@ -385,6 +499,13 @@ bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
     const auto candidate = BuildViewCandidate(*request);
     if (!candidate) return false;
 
+    if (candidate->spacing) {
+        const auto& spacing = *candidate->spacing;
+        if (!candidate->service->SetSpacing(
+            spacing[0], spacing[1], spacing[2])) {
+            return false;
+        }
+    }
     if (candidate->mode) {
         candidate->service->SetVizMode(*candidate->mode);
         candidate->context->SetCameraStyle(*candidate->mode);
@@ -394,13 +515,25 @@ bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
     if (candidate->nodes) candidate->service->SetTransferFunction(*candidate->nodes);
     if (candidate->iso) candidate->service->SetIsoThreshold(*candidate->iso);
     if (candidate->background) candidate->service->SetBackground(*candidate->background);
-    if (candidate->spacing) {
-        const auto& spacing = *candidate->spacing;
-        candidate->service->SetSpacing(spacing[0], spacing[1], spacing[2]);
-    }
     if (candidate->windowLevel) candidate->service->SetWindowLevel(
         candidate->windowLevel->windowWidth,
         candidate->windowLevel->windowCenter);
+    if (candidate->volumeQuality) {
+        (void)candidate->service->SetVolumeQuality(
+            *candidate->volumeQuality);
+    }
+    if (candidate->gradientOpacity) {
+        (void)candidate->service->SetGradientOpacity(
+            *candidate->gradientOpacity);
+    }
+    if (candidate->transferPreset) {
+        (void)candidate->service->SetTransferPreset(
+            *candidate->transferPreset);
+    }
+    if (candidate->isDenoiseOn) {
+        (void)candidate->service->SetDenoiseOn(
+            *candidate->isDenoiseOn);
+    }
     return true;
 }
 

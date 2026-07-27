@@ -185,6 +185,7 @@
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataConverters.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />

@@ -3,6 +3,7 @@
 #include "AppDataLoadTaskService.h"
 #include "AppState.h"
 #include "CompositeStrategy.h"
+#include "DataConverters.h"
 #include "DataManager.h"
 #include "InteractionComputeService.h"
 #include "IsoSurfaceStrategy.h"
@@ -42,14 +43,26 @@ public:
     void SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer> ren);
     void SetVizMode(VizMode mode);
+    VizMode GetVizMode() const;
     void SetMaterial(const MaterialParams& mat);
     void SetOpacity(double opacity);
     void SetTransferFunction(const std::vector<TFNode>& nodes);
     void SetIsoThreshold(double val);
     void SetBackground(const BackgroundColor& bg);
-    void SetSpacing(double sx, double sy, double sz);
+    bool SetSpacing(double sx, double sy, double sz);
     void SetWindowLevel(double ww, double wc);
     void SetVisualConfig(const PreInitConfig& cfg);
+    bool SetVolumeQuality(const VolumeQualityParams& quality);
+    VolumeQualityParams GetVolumeQuality() const;
+    bool SetFeatureActive(
+        const FeatureSource& source,
+        bool isActive);
+    bool GetIsFeatureActive() const;
+    bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes);
+    std::vector<GradientOpacityNode> GetGradientOpacity() const;
+    bool SetTransferPreset(TransferPreset preset);
+    bool SetDenoiseOn(bool isDenoiseOn);
+    bool GetDenoiseOn() const;
     LoadState GetFileLoadState() const;
     LoadState GetReloadLoadState() const;
     bool LoadFileAsync(std::string path,
@@ -66,7 +79,9 @@ public:
     void SetSliceScroll(int delta);
     void SetCursorWorldPosition(double worldPos[3], int axis);
     std::array<double, 3> GetCursorWorld();
-    void SetInteracting(bool isInteracting);
+    bool SetInteracting(
+        const InteractionSource& source,
+        bool isInteracting);
     int GetPlaneAxis(vtkActor* actor);
     vtkProp3D* GetMainProp();
     void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix);
@@ -132,6 +147,9 @@ private:
     bool SetOwnedLoad(LoadEventKind loadEventKind);
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
     bool BuildPipeline();
+    bool SetTransferPresetState();
+    std::optional<std::vector<TFNode>> GetTransferPresetNodes(
+        const ImageSnapshot& snapshot);
     void SetStrategyState();
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
@@ -188,6 +206,13 @@ private:
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     // DataReady、Spacing 或模式变化置位；主线程重建前 exchange(false)，失败清场也会清零。
     std::atomic<bool> m_hasDataRefreshNeed{ false };
+    std::atomic<bool> m_hasPresetRefreshNeed{ false };
+    mutable std::mutex m_viewConfigMutex;
+    VolumeQualityParams m_volumeQuality;
+    std::vector<FeatureSource> m_featureSources;
+    std::vector<GradientOpacityNode> m_gradientOpacity;
+    bool m_isDenoiseOn = false;
+    HistogramConverter m_histogram;
     VizService::TaskStart m_taskStart;
     std::list<ActiveTask> m_activeTasks;
     mutable std::mutex m_activeTaskMutex;
@@ -481,6 +506,11 @@ void VizService::SetVizMode(VizMode mode)
     m_impl->SetVizMode(mode);
 }
 
+VizMode VizService::GetVizMode() const
+{
+    return m_impl->GetVizMode();
+}
+
 void VizService::SetMaterial(const MaterialParams& mat)
 {
     m_impl->SetMaterial(mat);
@@ -506,9 +536,9 @@ void VizService::SetBackground(const BackgroundColor& bg)
     m_impl->SetBackground(bg);
 }
 
-void VizService::SetSpacing(double sx, double sy, double sz)
+bool VizService::SetSpacing(double sx, double sy, double sz)
 {
-    m_impl->SetSpacing(sx, sy, sz);
+    return m_impl->SetSpacing(sx, sy, sz);
 }
 
 void VizService::SetWindowLevel(double ww, double wc)
@@ -519,6 +549,54 @@ void VizService::SetWindowLevel(double ww, double wc)
 void VizService::SetVisualConfig(const PreInitConfig& cfg)
 {
     m_impl->SetVisualConfig(cfg);
+}
+
+bool VizService::SetVolumeQuality(const VolumeQualityParams& quality)
+{
+    return m_impl->SetVolumeQuality(quality);
+}
+
+VolumeQualityParams VizService::GetVolumeQuality() const
+{
+    return m_impl->GetVolumeQuality();
+}
+
+bool VizService::SetFeatureActive(
+    const FeatureSource& source,
+    bool isActive)
+{
+    return m_impl->SetFeatureActive(source, isActive);
+}
+
+bool VizService::GetIsFeatureActive() const
+{
+    return m_impl->GetIsFeatureActive();
+}
+
+bool VizService::SetGradientOpacity(
+    const std::vector<GradientOpacityNode>& nodes)
+{
+    return m_impl->SetGradientOpacity(nodes);
+}
+
+std::vector<GradientOpacityNode> VizService::GetGradientOpacity() const
+{
+    return m_impl->GetGradientOpacity();
+}
+
+bool VizService::SetTransferPreset(TransferPreset preset)
+{
+    return m_impl->SetTransferPreset(preset);
+}
+
+bool VizService::SetDenoiseOn(bool isDenoiseOn)
+{
+    return m_impl->SetDenoiseOn(isDenoiseOn);
+}
+
+bool VizService::GetDenoiseOn() const
+{
+    return m_impl->GetDenoiseOn();
 }
 
 LoadState VizService::GetFileLoadState() const
@@ -578,9 +656,11 @@ std::array<double, 3> VizService::GetCursorWorld()
     return m_impl->GetCursorWorld();
 }
 
-void VizService::SetInteracting(bool isInteracting)
+bool VizService::SetInteracting(
+    const InteractionSource& source,
+    bool isInteracting)
 {
-    m_impl->SetInteracting(isInteracting);
+    return m_impl->SetInteracting(source, isInteracting);
 }
 
 int VizService::GetPlaneAxis(vtkActor* actor)
@@ -793,6 +873,9 @@ void VizService::Impl::SetStateObserver()
 void VizService::Impl::SendStateFlags(UpdateFlags flags)
 {
     // 把跨层状态事件收敛为主线程邮箱；结构事件与普通增量使用不同消费路径。
+    if ((flags & UpdateFlags::DataReady) != UpdateFlags::None) {
+        m_hasPresetRefreshNeed = true;
+    }
     if ((flags & UpdateFlags::LoadFailed) != UpdateFlags::None
         || ((flags & UpdateFlags::DataReady) != UpdateFlags::None
             && ((flags & UpdateFlags::FileLoad) != UpdateFlags::None
@@ -829,6 +912,11 @@ void VizService::Impl::SetVizMode(VizMode mode)
     m_isDirty = true;
 }
 
+VizMode VizService::Impl::GetVizMode() const
+{
+    return static_cast<VizMode>(m_pendingVizModeInt.load());
+}
+
 void VizService::Impl::SetMaterial(const MaterialParams& mat)
 {
     m_sharedState->SetMaterial(mat);
@@ -856,16 +944,17 @@ void VizService::Impl::SetBackground(const BackgroundColor& bg)
     m_sharedState->SetBackground(bg);
 }
 
-void VizService::Impl::SetSpacing(double sx, double sy, double sz)
+bool VizService::Impl::SetSpacing(double sx, double sy, double sz)
 {
     if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(sz)
         || sx <= 0.0 || sy <= 0.0 || sz <= 0.0) {
-        return;
+        return false;
     }
     if (m_dataManager && !m_dataManager->SetSpacing({ sx, sy, sz })) {
-        return;
+        return false;
     }
     m_sharedState->SetSpacing(sx, sy, sz);
+    return true;
 }
 
 bool VizService::SendReloadUpdate()
@@ -883,6 +972,169 @@ void VizService::Impl::SetVisualConfig(const PreInitConfig& cfg)
     // 先更新供 BuildPipeline/交互读取的模式快照，再由 SharedState 广播具体配置差异。
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
     m_sharedState->SetPreInitConfig(cfg);
+}
+
+bool VizService::Impl::SetVolumeQuality(
+    const VolumeQualityParams& quality)
+{
+    VolumeQualityParams next = quality;
+    switch (quality.quality) {
+    case VolumeQuality::Quality:
+        next = { VolumeQuality::Quality, 766, 1.0, true };
+        break;
+    case VolumeQuality::Custom:
+        if (quality.maxDimension < 1 || quality.maxDimension > 16384
+            || !std::isfinite(quality.sampleDistance)
+            || quality.sampleDistance <= 0.0) {
+            return false;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        if (m_volumeQuality.quality == next.quality
+            && m_volumeQuality.maxDimension == next.maxDimension
+            && m_volumeQuality.sampleDistance == next.sampleDistance
+            && m_volumeQuality.isJitterOn == next.isJitterOn) {
+            return true;
+        }
+        m_volumeQuality = next;
+    }
+    SetPendingFlags(UpdateFlags::Quality);
+    SetSyncNeeded();
+    return true;
+}
+
+VolumeQualityParams VizService::Impl::GetVolumeQuality() const
+{
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    return m_volumeQuality;
+}
+
+bool VizService::Impl::SetFeatureActive(
+    const FeatureSource& source,
+    bool isActive)
+{
+    if (source.id.empty()) {
+        return false;
+    }
+
+    bool hasBoundaryChanged = false;
+    {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        const bool wasActive = !m_featureSources.empty();
+        const auto sourceIt = std::find(
+            m_featureSources.begin(),
+            m_featureSources.end(),
+            source);
+        if (isActive && sourceIt == m_featureSources.end()) {
+            m_featureSources.push_back(source);
+        }
+        else if (!isActive && sourceIt != m_featureSources.end()) {
+            m_featureSources.erase(sourceIt);
+        }
+        hasBoundaryChanged =
+            wasActive != !m_featureSources.empty();
+    }
+    if (hasBoundaryChanged) {
+        SetPendingFlags(UpdateFlags::Quality);
+        SetSyncNeeded();
+    }
+    return true;
+}
+
+bool VizService::Impl::GetIsFeatureActive() const
+{
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    return !m_featureSources.empty();
+}
+
+bool VizService::Impl::SetGradientOpacity(
+    const std::vector<GradientOpacityNode>& nodes)
+{
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const auto& node = nodes[index];
+        if (!std::isfinite(node.gradient) || node.gradient < 0.0
+            || !std::isfinite(node.opacity)
+            || node.opacity < 0.0 || node.opacity > 1.0
+            || (index > 0
+                && node.gradient < nodes[index - 1].gradient)) {
+            return false;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        const bool isSame = m_gradientOpacity.size() == nodes.size()
+            && std::equal(
+                m_gradientOpacity.begin(),
+                m_gradientOpacity.end(),
+                nodes.begin(),
+                [](const GradientOpacityNode& left,
+                    const GradientOpacityNode& right) {
+                    return left.gradient == right.gradient
+                        && left.opacity == right.opacity;
+                });
+        if (isSame) return true;
+        m_gradientOpacity = nodes;
+    }
+    SetPendingFlags(UpdateFlags::GradientOpacity);
+    SetSyncNeeded();
+    return true;
+}
+
+std::vector<GradientOpacityNode>
+VizService::Impl::GetGradientOpacity() const
+{
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    return m_gradientOpacity;
+}
+
+bool VizService::Impl::SetTransferPreset(TransferPreset preset)
+{
+    if (!m_sharedState || preset != TransferPreset::Percentile) {
+        return false;
+    }
+
+    const auto snapshot = m_dataManager
+        ? m_dataManager->GetImageSnapshot() : nullptr;
+    const auto nodes = snapshot
+        ? GetTransferPresetNodes(snapshot)
+        : std::optional<std::vector<TFNode>>{};
+    m_sharedState->SetTransferPresetIntent(preset);
+    if (!snapshot || !nodes) {
+        return true;
+    }
+    const auto currentSnapshot = m_dataManager
+        ? m_dataManager->GetImageSnapshot() : nullptr;
+    if (currentSnapshot != snapshot) {
+        m_hasPresetRefreshNeed = true;
+        return true;
+    }
+    (void)m_sharedState->SetTransferPresetNodes(
+        preset, currentSnapshot->version, *nodes);
+    return true;
+}
+
+bool VizService::Impl::SetDenoiseOn(bool isDenoiseOn)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        if (m_isDenoiseOn == isDenoiseOn) return true;
+        m_isDenoiseOn = isDenoiseOn;
+    }
+    SetPendingFlags(UpdateFlags::Denoise);
+    SetSyncNeeded();
+    return true;
+}
+
+bool VizService::Impl::GetDenoiseOn() const
+{
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    return m_isDenoiseOn;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1099,9 +1351,11 @@ std::array<double, 3> VizService::Impl::GetCursorWorld()
     return m_sharedState->GetCursorWorld();
 }
 
-void VizService::Impl::SetInteracting(bool isInteracting)
+bool VizService::Impl::SetInteracting(
+    const InteractionSource& source,
+    bool isInteracting)
 {
-    m_sharedState->SetInteracting(isInteracting);
+    return m_sharedState->SetInteracting(source, isInteracting);
 }
 
 int VizService::Impl::GetPlaneAxis(vtkActor* actor)
@@ -1247,6 +1501,12 @@ void VizService::Impl::SendUpdates()
     // 外部 reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
+
+    // Percentile intent 随 DataVersion 重算；各 view 可尝试解析，但 SharedState 只提交同一版本结果。
+    if (m_hasPresetRefreshNeed.exchange(false)
+        && !SetTransferPresetState()) {
+        m_hasPresetRefreshNeed = true;
+    }
 
     // 2. load 终态按完整 payload 顺序消费；队列锁只覆盖弹出，VTK 与 callback 始终在锁外。
     LoadNotice loadNotice;
@@ -1655,6 +1915,67 @@ bool VizService::Impl::BuildPipeline()
     return false;
 }
 
+std::optional<std::vector<TFNode>>
+VizService::Impl::GetTransferPresetNodes(
+    const ImageSnapshot& snapshot)
+{
+    if (!snapshot || !snapshot->image || snapshot->version == 0) {
+        return std::nullopt;
+    }
+
+    const auto low = m_histogram.GetHistogramPercentile(
+        snapshot->image, 0.02);
+    const auto high = m_histogram.GetHistogramPercentile(
+        snapshot->image, 0.98);
+    if (!low || !high || *high < *low) {
+        return std::nullopt;
+    }
+
+    const double rangeMin = snapshot->scalarRange[0];
+    const double rangeMax = snapshot->scalarRange[1];
+    const double rangeWidth = rangeMax - rangeMin;
+    if (!std::isfinite(rangeWidth) || rangeWidth < 0.0) {
+        return std::nullopt;
+    }
+    if (rangeWidth == 0.0) {
+        return std::vector<TFNode>{
+            { 0.0, 1.0, 1.0, 1.0, 1.0 }
+        };
+    }
+
+    double lowPosition = std::clamp(
+        (*low - rangeMin) / rangeWidth, 0.0, 1.0);
+    double highPosition = std::clamp(
+        (*high - rangeMin) / rangeWidth, 0.0, 1.0);
+    if (highPosition <= lowPosition) {
+        lowPosition = 0.0;
+        highPosition = 1.0;
+    }
+    return std::vector<TFNode>{
+        { lowPosition, 0.0, 0.0, 0.0, 0.0 },
+        { highPosition, 1.0, 1.0, 1.0, 1.0 }
+    };
+}
+
+bool VizService::Impl::SetTransferPresetState()
+{
+    if (!m_sharedState
+        || m_sharedState->GetTransferPreset() == TransferPreset::Manual) {
+        return true;
+    }
+    const auto snapshot = m_dataManager
+        ? m_dataManager->GetImageSnapshot() : nullptr;
+    const auto nodes = GetTransferPresetNodes(snapshot);
+    if (!nodes) return false;
+    const auto currentSnapshot = m_dataManager
+        ? m_dataManager->GetImageSnapshot() : nullptr;
+    return currentSnapshot == snapshot
+        && m_sharedState->SetTransferPresetNodes(
+            TransferPreset::Percentile,
+            currentSnapshot->version,
+            *nodes);
+}
+
 void VizService::Impl::SetStrategyState()
 {
     bool isExpected = true;
@@ -1673,11 +1994,19 @@ void VizService::Impl::SetStrategyState()
         return;
     }
 
-    // 交互状态控制帧率
-    if (((flags & UpdateFlags::Interaction) != UpdateFlags::None) && m_renderWindow) {
+    // 刷新率只跟随通用交互生命周期，不参与质量档或 producer 选择。
+    if ((flags & (UpdateFlags::RenderRate | UpdateFlags::Quality))
+            != UpdateFlags::None
+        && m_renderWindow) {
         const bool isInteracting = m_sharedState->GetIsInteracting();
-        m_renderWindow->SetDesiredUpdateRate(isInteracting ? 15.0 : 0.001);
+        m_renderWindow->SetDesiredUpdateRate(
+            GetRenderRate(isInteracting));
     }
+    // RenderRate 在 App 层完成刷新率同步后即消费，不再向 Strategy 透传。
+    // 质量、producer、mask 和 mapper 只由各自稳定业务标志驱动。
+    flags = static_cast<UpdateFlags>(
+        static_cast<int>(flags)
+        & ~static_cast<int>(UpdateFlags::RenderRate));
 
     // 背景色同步（数据无关，直接写渲染器）
     if (((flags & UpdateFlags::Background) != UpdateFlags::None) && m_renderer) {
@@ -1764,8 +2093,18 @@ RenderParams VizService::Impl::GetRenderParams(UpdateFlags flags) const
         m_sharedState->GetTFNodes(p.tfNodes);
     }
 
-    if (((flags & UpdateFlags::Interaction) != UpdateFlags::None))
-        p.isInteracting = m_sharedState->GetIsInteracting();
+    if ((flags & UpdateFlags::Quality) != UpdateFlags::None) {
+        p.isFeatureActive = GetIsFeatureActive();
+        p.volumeQuality = GetVolumeQuality();
+    }
+
+    if ((flags & UpdateFlags::GradientOpacity) != UpdateFlags::None) {
+        p.gradientOpacity = GetGradientOpacity();
+    }
+
+    if ((flags & UpdateFlags::Denoise) != UpdateFlags::None) {
+        p.isDenoiseOn = GetDenoiseOn();
+    }
 
     if (((flags & UpdateFlags::IsoValue) != UpdateFlags::None))
         p.isoValue = m_sharedState->GetIsoValue();
