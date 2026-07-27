@@ -98,6 +98,11 @@ HostViewSetRequest BuildViewRequest()
     request.background = HostBackgroundColor{};
     request.spacing = std::array<double, 3>{ 1.0, 2.0, 3.0 };
     request.windowLevel = HostWindowLevelParams{};
+    request.cursor = HostCursorParams{ { 4.0, 5.0, 6.0 }, 2 };
+    request.visibility = HostVisibilityParams{
+        true, false, true
+    };
+    request.isAxesVisible = true;
     return request;
 }
 
@@ -151,6 +156,15 @@ void StartViewCases(int& failureCount)
     getIsRejected(std::move(request), "非法 window/level 必须整笔拒绝。");
 
     request = BuildViewRequest();
+    request.cursor->world[1] =
+        std::numeric_limits<double>::quiet_NaN();
+    getIsRejected(std::move(request), "非有限 cursor 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.cursor->axis = 3;
+    getIsRejected(std::move(request), "越界 cursor axis 必须整笔拒绝。");
+
+    request = BuildViewRequest();
     request.materialPreset = HostMaterialPreset::Glossy;
     getIsRejected(
         std::move(request),
@@ -188,12 +202,24 @@ void StartViewCases(int& failureCount)
     Fixture fixture;
     SetExpect(SendView(fixture, BuildViewRequest()),
         "全量合法 View 请求应被接收。", failureCount);
-    SetExpect(fixture.GetService()->GetViewSetCount() == 7
-            && fixture.context->GetCameraStyleSetCount() == 1,
+    SetExpect(fixture.GetService()->GetViewSetCount() == 11
+            && fixture.context->GetCameraStyleSetCount() == 1
+            && fixture.context->GetAxesSetCount() == 1,
         "合法 View 请求应按完整字段一次提交。", failureCount);
     SetExpect(fixture.GetService()->GetMaterialSetCount() == 1
             && fixture.GetService()->GetOpacitySetCount() == 0,
         "material 与独立 opacity 必须合并成一次 Material 提交。",
+        failureCount);
+    SetExpect(fixture.GetService()->GetCursorSetCount() == 1
+            && fixture.GetService()->GetCursorWorld()
+                == std::array<double, 3>{ 4.0, 5.0, 6.0 }
+            && fixture.GetService()->GetCursorAxis() == 2
+            && fixture.GetService()->GetVisibilitySetCount() == 3
+            && fixture.GetService()->GetVisibilityMask()
+                == (VisFlags::Planes3D | VisFlags::Ruler)
+            && fixture.context->GetAxesVisible()
+            && fixture.GetService()->GetDirtySetCount() == 1,
+        "cursor、元素显隐与方向轴必须映射到既有 service/context。",
         failureCount);
 
     Fixture spacingFixture;
@@ -228,6 +254,41 @@ void StartViewCases(int& failureCount)
             && extendedService->GetDenoiseSetCount() == 1
             && extendedFixture.GetSliceService()->GetViewSetCount() == 0,
         "扩展字段必须映射到单一目标 service，空 gradient 表示显式清除。",
+        failureCount);
+
+    HostViewResetRequest reset;
+    reset.targetView.viewId = "primary";
+    SetExpect(fixture.Send(HostViewCommand{
+            HostViewRequest{
+                HostViewAction::ResetCamera, std::move(reset) } })
+            && fixture.context->GetCameraResetCount() == 1
+            && fixture.GetService()->GetDirtySetCount() == 2,
+        "ResetCamera 必须只作用于请求目标 context。",
+        failureCount);
+    SetExpect(!fixture.Send(HostViewCommand{
+            HostViewRequest{
+                HostViewAction::ResetCamera, BuildViewRequest() } }),
+        "ResetCamera 与错误 payload 组合必须被拒绝。",
+        failureCount);
+    reset = HostViewResetRequest{};
+    reset.targetView.viewId = "missing";
+    SetExpect(!fixture.Send(HostViewCommand{
+            HostViewRequest{
+                HostViewAction::ResetCamera, std::move(reset) } })
+            && fixture.context->GetCameraResetCount() == 1
+            && fixture.GetService()->GetDirtySetCount() == 2,
+        "ResetCamera 目标未命中时不得复位或标脏。",
+        failureCount);
+    HostViewResetRequest wrongSet;
+    wrongSet.targetView.viewId = "primary";
+    SetExpect(!fixture.Send(HostViewCommand{
+            HostViewRequest{ HostViewAction::Set, std::move(wrongSet) } }),
+        "Set 与错误 payload 组合必须被拒绝。",
+        failureCount);
+    SetExpect(!fixture.Send(HostViewCommand{
+            HostViewRequest{
+                HostViewAction::None, BuildViewRequest() } }),
+        "None action 即使携带合法 payload 也必须被拒绝。",
         failureCount);
 }
 

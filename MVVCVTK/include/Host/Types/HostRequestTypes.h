@@ -42,6 +42,18 @@ struct HostDataRequest {
     HostDataPayload payload;
 };
 
+struct HostCursorParams {
+    std::array<double, 3> world{}; // VTK world 坐标；axis=-1 时三轴全部写入。
+    int axis = -1; // -1 为自由点；0/1/2 保持对应轴的当前联动位置。
+};
+
+struct HostVisibilityParams {
+    // 每个 optional 只控制一个共享可见性位；缺省字段保留当前位。
+    std::optional<bool> isPlanes3DVisible;
+    std::optional<bool> isCrosshairVisible;
+    std::optional<bool> isRulerVisible;
+};
+
 struct HostViewSetRequest {
     HostViewTarget targetView; // 单目标解析遵循 id 优先且失败不回退 role。
     // optional 表示“本次是否写入该维度”；缺省字段必须保留视图当前状态。
@@ -58,10 +70,18 @@ struct HostViewSetRequest {
     std::optional<HostVolumeQualityParams> volumeQuality;
     std::optional<std::vector<HostGradientOpacityNode>> gradientOpacity;
     std::optional<bool> isDenoiseOn;
+    std::optional<HostCursorParams> cursor; // 会话共享 world cursor；数据未就绪时 service 保持现状。
+    std::optional<HostVisibilityParams> visibility; // 会话共享业务元素显隐。
+    std::optional<bool> isAxesVisible; // 目标 context 的世界方向轴 marker。
 };
 
-enum class HostViewAction { None, Set };
-using HostViewPayload = std::variant<std::monostate, HostViewSetRequest>;
+struct HostViewResetRequest {
+    HostViewTarget targetView;
+};
+
+enum class HostViewAction { None, Set, ResetCamera };
+using HostViewPayload = std::variant<std::monostate,
+    HostViewSetRequest, HostViewResetRequest>;
 struct HostViewRequest {
     HostViewAction action = HostViewAction::None;
     HostViewPayload payload;

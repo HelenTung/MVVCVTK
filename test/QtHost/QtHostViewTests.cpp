@@ -832,6 +832,25 @@ int GetViewFailCount()
         !session.SendView({ HostViewAction::Set, value }),
         "View non-finite background rejection") ? 0 : 1;
 
+    value = HostViewSetRequest{};
+    value.targetView.viewId = "view";
+    value.iso = 0.42;
+    value.cursor = HostCursorParams{ { 1.0, 2.0, 3.0 }, -1 };
+    value.visibility = HostVisibilityParams{
+        false, true, false
+    };
+    value.isAxesVisible = true;
+    failureCount += GetCaseResult(
+        session.SendView({ HostViewAction::Set, value }),
+        "Qt Host can set iso, cursor and runtime visibility") ? 0 : 1;
+
+    HostViewResetRequest reset;
+    reset.targetView.viewId = "view";
+    failureCount += GetCaseResult(
+        session.SendView({
+            HostViewAction::ResetCamera, std::move(reset) }),
+        "Qt Host can reset the target camera") ? 0 : 1;
+
     return failureCount
         + GetHistogramFailCount()
         + GetResampleFailCount()

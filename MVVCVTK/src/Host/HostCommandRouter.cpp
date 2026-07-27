@@ -47,10 +47,15 @@ private:
         std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
         std::optional<TransferPreset> transferPreset;
         std::optional<bool> isDenoiseOn;
+        std::optional<HostCursorParams> cursor;
+        std::optional<HostVisibilityParams> visibility;
+        std::optional<bool> isAxesVisible;
     };
 
     bool SendData(HostDataCommand command) const;
     bool SendView(const HostViewCommand& command) const;
+    bool SendViewSet(const HostViewSetRequest& request) const;
+    bool ResetViewCamera(const HostViewResetRequest& request) const;
     bool SendTool(const HostToolCommand& command) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
@@ -435,6 +440,9 @@ HostCommandRouter::Impl::BuildViewCandidate(
         ? GetTransferPreset(*request.transferPreset)
         : std::optional<TransferPreset>{};
     candidate.isDenoiseOn = request.isDenoiseOn;
+    candidate.cursor = request.cursor;
+    candidate.visibility = request.visibility;
+    candidate.isAxesVisible = request.isAxesVisible;
 
     if ((request.mode && (!candidate.mode || !candidate.context))
         || (request.material && !candidate.material)
@@ -446,7 +454,8 @@ HostCommandRouter::Impl::BuildViewCandidate(
         || (request.background && !candidate.background)
         || (request.windowLevel && !candidate.windowLevel)
         || (request.volumeQuality && !candidate.volumeQuality)
-        || (request.gradientOpacity && !candidate.gradientOpacity)) {
+        || (request.gradientOpacity && !candidate.gradientOpacity)
+        || (request.isAxesVisible && !candidate.context)) {
         return std::nullopt;
     }
     if ((request.materialPreset
@@ -460,6 +469,15 @@ HostCommandRouter::Impl::BuildViewCandidate(
             if (!std::isfinite(value) || value <= 0.0) {
                 return std::nullopt;
             }
+        }
+    }
+    if (candidate.cursor) {
+        if (candidate.cursor->axis < -1 || candidate.cursor->axis > 2
+            || !std::all_of(
+                candidate.cursor->world.begin(),
+                candidate.cursor->world.end(),
+                [](double value) { return std::isfinite(value); })) {
+            return std::nullopt;
         }
     }
     if (candidate.material && candidate.opacity) {
@@ -488,15 +506,34 @@ bool HostCommandRouter::Impl::GetUnitValid(double value) const
 
 bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
 {
+    // View action 与 payload 保持严格配对；Set 是状态事务，ResetCamera 是单目标命令。
+    switch (command.request.action) {
+    case HostViewAction::Set:
+        if (const auto* request = std::get_if<HostViewSetRequest>(
+            &command.request.payload)) {
+            return SendViewSet(*request);
+        }
+        return false;
+    case HostViewAction::ResetCamera:
+        if (const auto* request = std::get_if<HostViewResetRequest>(
+            &command.request.payload)) {
+            return ResetViewCamera(*request);
+        }
+        return false;
+    case HostViewAction::None:
+        return false;
+    }
+    return false;
+}
+
+bool HostCommandRouter::Impl::SendViewSet(
+    const HostViewSetRequest& request) const
+{
     // 1. 先在局部候选中解析目标并完成所有字段校验。
     // 2. 任一字段非法都在 setter 前失败，保证请求不会留下部分状态。
     // 3. spacing 是唯一会报告业务失败的写入，必须在其它状态前提交。
     // 4. spacing 成功后，其余已验证 setter 按不可失败的状态写入语义提交。
-    if (command.request.action != HostViewAction::Set) return false;
-    const auto* request = std::get_if<HostViewSetRequest>(
-        &command.request.payload);
-    if (!request) return false;
-    const auto candidate = BuildViewCandidate(*request);
+    auto candidate = BuildViewCandidate(request);
     if (!candidate) return false;
 
     if (candidate->spacing) {
@@ -534,6 +571,49 @@ bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
         (void)candidate->service->SetDenoiseOn(
             *candidate->isDenoiseOn);
     }
+    if (candidate->cursor) {
+        candidate->service->SetCursorWorldPosition(
+            candidate->cursor->world.data(),
+            candidate->cursor->axis);
+    }
+    if (candidate->visibility) {
+        const auto& visibility = *candidate->visibility;
+        if (visibility.isPlanes3DVisible.has_value()) {
+            candidate->service->SetElementVisible(
+                VisFlags::Planes3D,
+                *visibility.isPlanes3DVisible);
+        }
+        if (visibility.isCrosshairVisible.has_value()) {
+            candidate->service->SetElementVisible(
+                VisFlags::Crosshair,
+                *visibility.isCrosshairVisible);
+        }
+        if (visibility.isRulerVisible.has_value()) {
+            candidate->service->SetElementVisible(
+                VisFlags::Ruler,
+                *visibility.isRulerVisible);
+        }
+    }
+    if (candidate->isAxesVisible) {
+        candidate->context->SetOrientationAxesVisible(
+            *candidate->isAxesVisible);
+        // 方向轴属于 context，不发布 SharedState flags；显式标脏让 Qt Timer 产生下一帧。
+        candidate->service->SetDirty();
+    }
+    return true;
+}
+
+bool HostCommandRouter::Impl::ResetViewCamera(
+    const HostViewResetRequest& request) const
+{
+    const auto* view = m_renderViews
+        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
+    if (!view || !view->context || !view->service) {
+        return false;
+    }
+    view->context->ResetCamera();
+    // ResetCamera 只修改 renderer camera，不触发共享状态广播。
+    view->service->SetDirty();
     return true;
 }
 

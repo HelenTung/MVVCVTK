@@ -26,6 +26,32 @@ public:
         return m_cameraStyleSetCount;
     }
 
+    void ResetCamera()
+    {
+        ++m_cameraResetCount;
+    }
+
+    int GetCameraResetCount() const
+    {
+        return m_cameraResetCount;
+    }
+
+    void SetOrientationAxesVisible(bool isVisible)
+    {
+        m_isAxesVisible = isVisible;
+        ++m_axesSetCount;
+    }
+
+    bool GetAxesVisible() const
+    {
+        return m_isAxesVisible;
+    }
+
+    int GetAxesSetCount() const
+    {
+        return m_axesSetCount;
+    }
+
     void SetToolMode(ToolMode mode)
     {
         m_toolMode = mode;
@@ -70,6 +96,9 @@ public:
 private:
     VizMode m_vizMode = VizMode::Volume;
     int m_cameraStyleSetCount = 0;
+    int m_cameraResetCount = 0;
+    bool m_isAxesVisible = false;
+    int m_axesSetCount = 0;
     ToolMode m_toolMode = ToolMode::Navigation;
     int m_toolModeSetCount = 0;
     std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;

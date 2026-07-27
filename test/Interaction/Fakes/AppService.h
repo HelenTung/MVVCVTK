@@ -73,11 +73,17 @@ public:
     int GetGradientSetCount() const { return m_gradientSetCount; }
     int GetTransferPresetSetCount() const { return m_transferPresetSetCount; }
     int GetDenoiseSetCount() const { return m_denoiseSetCount; }
+    int GetCursorSetCount() const { return m_cursorSetCount; }
+    int GetVisibilitySetCount() const { return m_visibilitySetCount; }
+    int GetDirtySetCount() const { return m_dirtySetCount; }
     const MaterialParams& GetMaterial() const { return m_material; }
     const VolumeQualityParams& GetVolumeQuality() const { return m_volumeQuality; }
     const std::vector<GradientOpacityNode>& GetGradientOpacity() const {
         return m_gradientOpacity;
     }
+    const std::array<double, 3>& GetCursorWorld() const { return m_cursorWorld; }
+    int GetCursorAxis() const { return m_cursorAxis; }
+    uint32_t GetVisibilityMask() const { return m_visibilityMask; }
     bool GetDenoiseOn() const { return m_isDenoiseOn; }
     int GetLoadCount() const { return m_loadCount; }
     int GetReloadCount() const { return m_reloadCount; }
@@ -133,6 +139,23 @@ public:
         ++m_viewSetCount;
         return true;
     }
+    void SetCursorWorldPosition(double worldPos[3], int axis) {
+        m_cursorWorld = { worldPos[0], worldPos[1], worldPos[2] };
+        m_cursorAxis = axis;
+        ++m_cursorSetCount;
+        ++m_viewSetCount;
+    }
+    void SetElementVisible(uint32_t flagBit, bool isVisible) {
+        if (isVisible) {
+            m_visibilityMask |= flagBit;
+        }
+        else {
+            m_visibilityMask &= ~flagBit;
+        }
+        ++m_visibilitySetCount;
+        ++m_viewSetCount;
+    }
+    void SetDirty() { ++m_dirtySetCount; }
 
 private:
     VizMode m_vizMode = VizMode::Volume;
@@ -145,6 +168,9 @@ private:
     int m_gradientSetCount = 0;
     int m_transferPresetSetCount = 0;
     int m_denoiseSetCount = 0;
+    int m_cursorSetCount = 0;
+    int m_visibilitySetCount = 0;
+    int m_dirtySetCount = 0;
     int m_loadCount = 0;
     int m_reloadCount = 0;
     int m_exportCount = 0;
@@ -156,9 +182,12 @@ private:
     bool m_isReloadAccepted = true;
     bool m_isSpacingAccepted = true;
     bool m_isDenoiseOn = false;
+    int m_cursorAxis = -1;
+    uint32_t m_visibilityMask = 0;
     MaterialParams m_material;
     VolumeQualityParams m_volumeQuality;
     std::vector<GradientOpacityNode> m_gradientOpacity;
+    std::array<double, 3> m_cursorWorld{};
     std::optional<VolumeLayout> m_loadLayout;
     std::optional<VolumeBuffer> m_reloadBuffer;
     std::function<void(bool isSuccess)> m_reloadComplete;
