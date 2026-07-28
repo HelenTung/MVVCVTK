@@ -7,15 +7,16 @@
 | 项目 | 当前事实 |
 | --- | --- |
 | Host 门面 | `VtkAppHostSession` |
-| 一次性配置 | `HostSessionConfig{renderViews}` |
-| 主体命令 | `SendData/SendView/SendTool` |
+| 一次性配置 | `HostSessionConfig{renderViews, dataExportRequest, sliceExportRequest}`；后两者仅为 standalone 热键缺省值 |
+| Qt 主体门面 | `VtkAppHostSession::SendData/SendView/SendTool` |
+| Host 唯一分发出口 | `HostCommandRouter::DispatchCommand(HostCommand)`；Qt 不直接持有 Router |
 | 可选业务 | Qt 持有 `CropHostFeature` / `GapHostFeature` 并调用各自 `SendRequest/GetState` |
 | Timer | `AttachTimer(HostTimerConfig)` |
 | QVTK widget | `QVTKOpenGLNativeWidget` |
 | render window | `vtkGenericOpenGLRenderWindow` |
 | Qt production target | 尚不存在；本文 adapter 代码均为 `[PROPOSAL]` |
 | 接纳协议 | Feature 捕获不可变 snapshot，以 version/CAS 接纳或退休结果 |
-| 本地实现快照 | 2026-07-27；HEAD `c0b657909bbe150b5b7d39443a0c37b417a27df7` |
+| 本地实现快照 | 2026-07-28；当前工作树 |
 
 代码事实基线：
 
@@ -70,7 +71,8 @@
 规则：
 
 1. Qt、VTK、MVVCVTK 架构统一为 x64；禁止混用 MinGW/Qt6。
-2. Debug/Release 必须匹配 CRT、Qt 库和 `vtkGUISupportQt-9.4[d].lib`。
+2. Debug/Release 必须匹配 CRT、Qt 库和 `vtkGUISupportQt-9.4[d].lib`；数据导出还需要
+   `vtkIOCore`、`vtkIOGeometry` 与 `vtkIOPLY`。
 3. Qt target 使用 C++17、`/utf-8`。当前 Qt 5.14.2 头与 v145 `/permissive-` 不兼容，包含 Qt 头的 target 使用 `<ConformanceMode>false</ConformanceMode>`。
 4. 运行目录同时提供 Qt5 Core/Gui/Widgets/OpenGL、`platforms/qwindows.dll`、VTK、OpenCV 与项目依赖 DLL。
 5. `QSurfaceFormat::setDefaultFormat(QVTKOpenGLNativeWidget::defaultFormat())` 必须早于 `QApplication`。
@@ -88,7 +90,9 @@
 | `QtHostMethodTests.vcxproj` | 六类 load/view/crop/gap/export/lifecycle case；质量与跨域断言分别并入 view/crop/gap |
 | `QtHostTestCore.vcxproj` | test-only production 源码闭包 |
 
-facade case 覆盖拒绝、UTF-8 路径输入以及 Crop 双视图 pipeline 失败补偿；真实 Unicode RAW/TIFF/PNG I/O 由非 Qt DataManager 集成测试覆盖。完整 Qt 异步成功链仍需 production adapter 验收。
+facade case 覆盖拒绝、UTF-8 路径输入、导出请求接纳以及 Crop 双视图 pipeline 失败补偿；
+真实 Unicode RAW/PLY/STL/OBJ I/O 由非 Qt DataManager 集成测试覆盖，Histogram 的
+PNG/JPEG 导出属于另一条链。完整 Qt 异步成功链仍需 production adapter 验收。
 
 QtHost 工程的编译中间目录按项目名隔离，但共享输出目录且依赖 `QtHostTestCore.lib`。为避免并行重建同一依赖产物，以下验收命令串行执行：
 
@@ -153,6 +157,20 @@ flowchart LR
 
 ## 6. 最小 current API 示例
 
+Qt 代码只调用 `VtkAppHostSession` 公共门面，不构造、保存或调用 `HostCommandRouter`。
+`SendData/SendView/SendTool` 只负责把 typed request 封装为 `HostCommand`，随后进入同一个内部
+出口：
+
+```text
+Qt action
+  -> VtkAppHostSession::SendData / SendView / SendTool
+  -> VtkAppHostSession::Impl::SendCommand
+  -> HostCommandRouter::DispatchCommand
+```
+
+Crop/Gap 是可选 Feature，不属于主体 `HostCommand` variant；Qt 对它们调用各自公开
+`SendRequest()`，其内部再进入 Feature 自己的 typed 路由。
+
 ### 6.1 Session 与 Timer
 
 ```cpp
@@ -192,6 +210,10 @@ if (!session->AttachTimer(timer)) {
 ```
 
 `session` 不拥有 Feature 强引用；`crop`、`gap` 必须由 Qt adapter 保存到关闭阶段。`BuildSession()`、Feature attach/detach 与 Feature 的 `SendRequest()/GetState()` 有明确 owner-thread 约束。Session 的 `Send*` 当前没有逐入口 owner-thread 断言，但 Qt adapter 仍必须把所有 Host/Feature 调用串行放在 GUI/VTK 线程，不能把“未检查”理解为线程安全。
+
+`HostSessionConfig::dataExportRequest/sliceExportRequest` 只在调用
+`AttachHotkeys()` 时作为 standalone 导出热键的缺省请求。Qt action 直接构造
+`HostDataRequest`，不会从 Session 配置继承目录、格式或来源。
 
 ### 6.2 Load
 
@@ -396,21 +418,42 @@ Gap 捕获同一个 snapshot 的 image 与有效域 mask。worker 只对 mask �
 ### 6.7 Export
 
 ```cpp
-HostVolumeExportRequest output;
-output.outputPath = outputPath.toUtf8().toStdString();
-session->SendData(
-    { HostDataAction::ExportVolume, std::move(output) },
-    onExportComplete);
+HostDataExportRequest output;
+output.outputPath = outputDir.toUtf8().toStdString(); // UTF-8 目录，不是文件名
+output.format = HostDataExportFormat::Ply;
+HostDataRequest dataExportRequest;
+dataExportRequest.action = HostDataAction::ExportData;
+dataExportRequest.payload = std::move(output);
+session->SendData(std::move(dataExportRequest), onExportComplete);
 
 HostSliceExportRequest slices;
 slices.outputDir = outputDir.toUtf8().toStdString();
 slices.sourceView = {
     "slice-top-down", false, HostRenderViewRole::TopDownSlice
 };
-session->SendData(
-    { HostDataAction::ExportSlices, std::move(slices) },
-    onSlicesComplete);
+HostDataRequest sliceExportRequest;
+sliceExportRequest.action = HostDataAction::ExportSlices;
+sliceExportRequest.payload = std::move(slices);
+session->SendData(std::move(sliceExportRequest), onSlicesComplete);
 ```
+
+数据导出只接受 `Raw/Ply/Stl/Obj`。Router 将显式格式转换为
+`.raw/.ply/.stl/.obj`；若 `format` 缺省，则根据 `sourceView` 对应模式推断：
+Volume/CompositeVolume 为 RAW，IsoSurface/CompositeIsoSurface 为 PLY，slice 模式拒绝。
+Qt 显式请求未提供 selector 时使用 Primary3D；需要从特定窗口模式推断时，应明确设置
+`sourceView`。
+
+App 在接纳调用线程冻结 current image/mask、isoValue 和 model-to-world，后台任务不重新
+读取 current。Data 层创建输出目录，并统一生成
+`<dimX>x<dimY>x<dimZ>_transform.raw/.ply/.stl/.obj`。RAW 导出变换后的 float32 体数据；
+PLY/STL/OBJ 以冻结 iso 构造等值面，按 validity mask 裁切并烘焙 world 变换。上位机不得
+预先拼接具体文件名。
+
+`ExportSlices` 独立写逐层 PNG。Qt 显式请求应设置 `sourceView` 以决定切片法向与相机方向；
+`angleDeg` 缺省时保持目标视图当前方向。若 standalone 需要调试热键，可在
+`HostSessionConfig` 设置目录/可选格式等缺省值后调用 `AttachHotkeys(config)`：数据导出
+只有在格式和 selector 都缺省时才由触发窗口推断，切片导出在 selector 缺省时由触发切片
+窗口补齐来源。热键和 Qt 显式调用最终都进入同一个 `HostCommandRouter::DispatchCommand()`。
 
 ## 7. DTO 语义
 
@@ -519,6 +562,8 @@ Qt target 单独链接 Qt5 Widgets/OpenGL 与 VTK GUISupportQt；Qt 头与 moc/d
 | UI 卡死 | 调用了 session/interactor Start |
 | endpoint window 不同 | widget 与 Host 注入了不同 window 实例 |
 | RAW 失败 | dimensions 非法、文件名哨兵解析失败或字节数不精确 |
+| 导出路径生成错误 | `HostDataExportRequest::outputPath` 必须是目录；文件名由 Data 层生成 |
+| 网格导出失败 | iso 非 finite、model-to-world 非法、mask 全空或等值面结果为空 |
 | Load true 但未完成 | true 只是接纳；等 completion 并检查 Timer |
 | Feature 请求恒 false | 未 `AttachFeature`、非 owner thread，或 Feature 强引用已释放 |
 | Gap Start false | 未 AttachTimer、目标/参数/snapshot 不合法 |
@@ -559,7 +604,8 @@ Qt target 单独链接 Qt5 Widgets/OpenGL 与 VTK GUISupportQt；Qt 头与 moc/d
 - [ ] Crop 显式/默认目标语义、Box/Plane/Mode/history 与 Export CAS 符合状态表。
 - [ ] 世界轴、十字线、3D 平面/标尺未被误接成不存在的 Host 运行期 API。
 - [ ] Gap Start/Overlay/Exit、同版本 image+mask、旧结果退休与 statistics 正确。
-- [ ] Volume/Slice Export completion 正确。
+- [ ] RAW/PLY/STL/OBJ Data Export 与逐层 PNG Slice Export completion 正确。
+- [ ] Data Export 只传目录，落盘文件名符合 `NxMxK_transform.ext`。
 - [ ] 中文、Latin-1 与空格路径经 UTF-8 DTO 完整加载/导出。
 - [ ] 关闭期间无悬空 callback、observer 或 render。
 

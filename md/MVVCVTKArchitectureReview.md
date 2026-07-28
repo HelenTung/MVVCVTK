@@ -5,8 +5,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | 当前架构事实、边界、主链与风险索引 |
-| 源码基线 | HEAD `c0b657909bbe150b5b7d39443a0c37b417a27df7` |
-| 最近核验 | 2026-07-27 |
+| 源码基线 | 2026-07-28 当前工作树 |
+| 最近核验 | 2026-07-28 |
 | 主工程 | `MVVCVTK/MVVCVTK.vcxproj` |
 | 默认验证 | `Debug|x64` / `Release|x64`，不主动验证 32 位 |
 | 非 Qt 测试 | `test/MVVCVTK.Tests.sln` 中 3 个工程 |
@@ -15,7 +15,8 @@
 | Crop 细节 | [OrthogonalCropAlgorithmDesign.md](OrthogonalCropAlgorithmDesign.md) |
 | Qt 接入 | [QtIntegrationGuide.md](QtIntegrationGuide.md) |
 
-`.graphify/graph.json` 只能在 `lastAnalyzedHead` 与当前 HEAD 一致时作为语义证据；`stale=false` 不是充分条件。本轮审查发现旧 branch metadata 曾漏标一个提交，因此下述结论以源码为准。
+`.graphify/graph.json` 只能在增量状态与当前工作树一致时作为语义证据；`stale=false` 不是
+充分条件。本轮在代码与文档核验后执行 `hook-rebuild`，下述接口结论仍以源码为最终真源。
 
 ## 2. 分层
 
@@ -69,9 +70,19 @@ flowchart LR
 
 `HostCommand` 只包含 `monostate` 与上表三类主体 alternative。Crop/Gap 不进入主体 variant，分别由 `CropHostFeature::SendRequest()` 与 `GapHostFeature::SendRequest()` 接收自己的 typed request。不存在嵌套 `HostFeatureCommand`，也不存在 `HostLoadCommand`、`HostReloadCommand`、`HostExportCommand`、`HostExitCommand`。
 
+`VtkAppHostSession::SendData/SendView/SendTool` 只是对外 typed facade：三者都封装
+`HostCommand` 后进入 `VtkAppHostSession::Impl::SendCommand()`。Host 内部唯一主体分发出口是
+`HostCommandRouter::DispatchCommand(HostCommand)`；Qt、main 和 Feature 均不持有 Router。
+
 ### 4.2 Session
 
-`HostSessionConfig` 只含 `renderViews`。Session 的 `BuildSession()` 在空拓扑时返回 `false`，且不渲染；底层 `HostRenderViewSet::Build()` 本身允许空配置，空拓扑门禁属于 Session。`Start()` 才执行 `SendRenderAll()` 并进入 standalone event loop。主体运行期输入经 `SendData/SendView/SendTool`；Timer/Hotkey 分别用 `AttachTimer`、`AttachHotkeys`，Feature 由 composition root 构造并用 `AttachFeature` 注册。
+`HostSessionConfig` 包含 `renderViews`，以及 standalone 导出热键使用的
+`dataExportRequest/sliceExportRequest` 缺省请求。Qt 显式 `SendData()` 不经过这两份配置。
+Session 的 `BuildSession()` 在空拓扑时返回 `false`，且不渲染；底层
+`HostRenderViewSet::Build()` 本身允许空配置，空拓扑门禁属于 Session。`Start()` 才执行
+`SendRenderAll()` 并进入 standalone event loop。主体运行期输入经
+`SendData/SendView/SendTool`；Timer/Hotkey 分别用 `AttachTimer`、`AttachHotkeys`，Feature
+由 composition root 构造并用 `AttachFeature` 注册。
 
 ### 4.3 View Set 事务
 
@@ -138,7 +149,30 @@ sequenceDiagram
 
 RAW load 允许请求提供三轴正 dimensions；只有 `.raw` 且 dimensions 恰为 `{0,0,0}` 时才从文件名末尾推断。文件大小必须与 layout 精确相等。
 
-### 5.3 Crop 物化的第二提交入口
+### 5.3 统一 Data Export
+
+主体只暴露 `HostDataAction::ExportData + HostDataExportRequest`。`outputPath` 是 UTF-8
+输出目录；`HostDataExportFormat` 是 Host 唯一格式基元，当前为
+`Raw/Ply/Stl/Obj`。显式格式在 Router 收敛为规范小写后缀；格式缺省时，Volume 模式推断
+RAW，IsoSurface 模式推断 PLY，slice 模式不能推断体或网格格式。
+
+```mermaid
+flowchart LR
+    Request[HostDataExportRequest] --> Router[HostCommandRouter]
+    Router --> Viz[VizService::ExportDataAsync]
+    Viz --> Task[AppDataExportTaskService]
+    Task --> Snapshot[冻结 image/mask/iso/modelToWorld]
+    Snapshot --> Data[BaseDataManager::ExportData]
+    Data --> Raw[RAW writer]
+    Data --> Mesh[PLY/STL/OBJ writers]
+```
+
+App/Task 只冻结参数并编排异步任务，Data 层才选择 writer、创建目录和拼接文件名。统一文件名
+为 `<dimX>x<dimY>x<dimZ>_transform<extension>`。RAW 输出变换后的 float32 体数据；
+PLY/STL/OBJ 从同一冻结 image、current iso 与 validity mask 构造等值面，烘焙
+model-to-world 后写出。调用方不得传具体文件名，也不得让 Host/App 重复解释格式。
+
+### 5.4 Crop 物化的第二提交入口
 
 Crop Export 物化不走 App worker/mailbox：`CropHostFeature` 从 root snapshot 与历史前缀构建发布任务，经 Host 提供的 expected-snapshot writer 执行 pending -> current -> 各 view `SendReloadUpdate()` -> shared ready -> completion。它与普通 File/Reload 共用 admission 和 DataManager，但不把 Crop command 耦合进主体 Router。
 
@@ -263,6 +297,7 @@ Qt/上位机必须在 GUI/VTK 线程构建 session、发运行期命令和操作
 | 能力 | 现状 | 主要测试缺口 |
 | --- | --- | --- |
 | Host typed protocol | Data/View/Tool 三域 variant + 独立 Feature protocol 已落地 | 正向 Qt facade 链较少 |
+| Data Export | RAW/PLY/STL/OBJ 共用 Host/App/Task 链，Data 层统一命名与 writer 分派 | Qt case 只验 facade/UTF-8；真实文件由 Data 集成测试覆盖 |
 | File/Reload | pending/owner/admission/callback 已收口 | QVTK 端到端 Reload 成功/失败 |
 | Interaction | 统一事件与 router | 新 handler 组合回归 |
 | Render quality | Quality/Custom、固定 ImageSampleDistance、gradient opacity、percentile/material preset、display-only denoise 已落地 | 固定 GPU/golden image 下的主观画质不在当前契约 |
@@ -272,7 +307,10 @@ Qt/上位机必须在 GUI/VTK 线程构建 session、发运行期命令和操作
 | Gap | worker、overlay、callback、timer 链已收口 | Qt 可见终态与关闭竞态 |
 | Qt | QVTK smoke 与单视图 endpoint smoke | production Qt target、五视图、部署 |
 
-QtHost facade 已增加 UTF-8 路径拒绝用例和 Crop 双视图 pipeline 失败补偿；Interaction Router 另验证 UTF-8 DTO 字节不变。
+QtHost facade 已增加 UTF-8 路径拒绝与导出请求接纳用例，以及 Crop 双视图 pipeline
+失败补偿；Interaction Router 另验证四种显式格式、缺省视图推断、热键/显式命令同链和
+UTF-8 DTO 字节不变。Data 集成测试验证 RAW/PLY/STL/OBJ 文件名、world 变换、mask 与非法
+矩阵拒绝。
 
 ## 11. 风险矩阵
 

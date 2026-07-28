@@ -5,15 +5,15 @@
 | 项目 | 当前事实 |
 | --- | --- |
 | 对外门面 | `VtkAppHostSession` |
-| 一次性配置 | `HostSessionConfig`，只保存 `renderViews` |
+| 一次性配置 | `HostSessionConfig`：`renderViews` 与 standalone 导出热键缺省请求 |
 | 主体命令 | `SendData`、`SendView`、`SendTool` |
 | 可选 Feature | composition root 构造并持有 `CropHostFeature` / `GapHostFeature`，Session 通过 `AttachFeature` 注册 |
 | Adapter 入口 | `AttachTimer`、`AttachHotkeys` |
 | Standalone 入口 | `Start` |
 | 主体下游 | Data、App/State、Render |
-| 不负责 | Qt UI、固定窗口数量、具体算法、业务默认参数 |
+| 不负责 | Qt UI、固定窗口数量、具体算法、除 standalone 导出热键以外的业务默认参数 |
 | 接纳协议 | Feature 读取不可变 `ImageSnapshot`，以 expected snapshot 做 CAS 发布 |
-| 本地实现快照 | 2026-07-27；HEAD `c0b657909bbe150b5b7d39443a0c37b417a27df7` |
+| 本地实现快照 | 2026-07-28；当前工作树 |
 
 Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 Session、主体 DTO、Feature 公共类型和 endpoint，不应取得 `VizService`、DataManager 或 feature service 后直接操作。Crop/Gap 不属于主体命令 variant；删去任一 Feature 目录后，主体 Host、Render、App 与 Interaction 仍可独立编译。
 
@@ -101,11 +101,16 @@ std::variant<std::monostate,
 
 主体命令 variant 不包含任何 Feature 命令。主体 action 与 payload variant 必须严格匹配；Feature 使用自己的 typed request，并直接调用各自 `SendRequest()`。
 
+`VtkAppHostSession::SendData/SendView/SendTool` 是宿主公开门面，不是三套 Router。
+它们只把 typed request 封装为 `HostCommand`，统一交给
+`VtkAppHostSession::Impl::SendCommand()`；`HostCommandRouter` 的唯一分发出口是
+`DispatchCommand(HostCommand)`。Qt/main 不直接持有 Router。
+
 | Session API | Action | Payload |
 | --- | --- | --- |
 | `SendData` | `LoadFile` | `HostLoadRequest` |
 | `SendData` | `ReloadBuffer` | `HostReloadRequest` |
-| `SendData` | `ExportVolume` | `HostVolumeExportRequest` |
+| `SendData` | `ExportData` | `HostDataExportRequest` |
 | `SendData` | `ExportSlices` | `HostSliceExportRequest` |
 | `SendView` | `Set` | `HostViewSetRequest` |
 | `SendView` | `ResetCamera` | `HostViewResetRequest` |
@@ -141,7 +146,35 @@ Host/Data 的所有 `std::string` 路径统一为 UTF-8。Router 不改写 DTO �
 
 同步 `false` 可能是 Host 前置拒绝，也可能是 service 接纳失败；后者仍可能排队 completion(false)。关闭阶段必须用 UI generation/QPointer 门禁防止迟到访问。
 
-### 5.3 View Set
+### 5.3 Data Export
+
+`HostDataExportRequest::outputPath` 是 UTF-8 输出目录，不是完整文件名。`format` 是可选
+`HostDataExportFormat`，当前只接受 `Raw/Ply/Stl/Obj`。Router 把显式格式收敛为
+`.raw/.ply/.stl/.obj`；缺省格式时才读取来源视图模式：Volume/CompositeVolume 推断
+RAW，IsoSurface/CompositeIsoSurface 推断 PLY，slice 模式拒绝。
+
+```text
+SendData(ExportData)
+  -> HostCommandRouter::ExportData
+  -> VizService::ExportDataAsync(outputDir, extension)
+  -> AppDataExportTaskService::BuildDataTask
+     冻结 current ImageSnapshot、validity mask、isoValue、modelToWorld
+  -> BaseDataManager::ExportData
+     RAW: 重采样/裁边后写 float32 体数据
+     PLY/STL/OBJ: FlyingEdges 等值面 + mask 裁切 + world 变换 + writer
+```
+
+Data 层统一创建输出目录并生成
+`<dimX>x<dimY>x<dimZ>_transform<extension>`。调用方不得拼接具体文件名。RAW 与网格导出
+走同一个 Host/App/Task 链，只在 Data 层按规范后缀选择不同 writer。后台任务只消费接纳时
+冻结的快照，不重新读取 current，因此导出期间的 Reload、Crop 发布或 iso 修改不会改变
+已接纳任务。
+
+`HostSliceExportRequest` 独立导出逐层 PNG。显式调用可用 `sourceView` 指定切片方向；
+standalone 热键请求未指定 selector 时，由触发热键的切片窗口补齐。`angleDeg` 缺省时保持
+目标切片当前方向。
+
+### 5.4 View Set
 
 `HostViewSetRequest` 命中目标后，即使所有 optional 字段都缺省也会返回 `true` 并保持现状。以下字段在 Router 写入前有校验：
 
@@ -165,7 +198,7 @@ Router 先解析 target、service 和 context，再把全部 optional 转入局�
 
 交互刷新率和采样质量是两条独立状态轴。`Quality/Custom` 决定 Volume producer 与 mapper 参数；`RenderRate` 只在 interaction source 的空/非空边界切换静态/交互刷新频率，不再选择低分辨率 producer。Feature 激活时，Host 通过 `setActiveViews` 上报精确参与视图，App 临时把这些视图派生为固定 `Quality(766)`；退出后恢复进入前保存的 `Quality` 或 `Custom` 配置。拖动只改变刷新调度，不改变 producer 分辨率。
 
-### 5.4 窗宽窗位状态链
+### 5.5 窗宽窗位状态链
 
 `HostWindowLevelParams` 使用 double，默认 WW=400、WC=40。运行期 `SendView(Set)` 要求 WW finite 且 `> 0`、WC finite；请求缺省 `windowLevel` 时保持现状。
 
@@ -190,7 +223,7 @@ target 只选择由哪个 service 发起写入，不产生 per-view 窗宽窗位
 
 [风险] `HostViewInitConfig::windowLevel` 只有 `hasWindowLevel=true` 时写入，但构建期 `BuildAppInit()` 当前没有执行运行期 Router 的 finite/WW>0 校验；非法初始化值可能进入共享状态。现有测试也没有覆盖 Host 正向 WW/WC、SharedState flags 或 SliceStrategy 映射。
 
-### 5.5 Cursor、十字线与可见元素
+### 5.6 Cursor、十字线与可见元素
 
 `SharedInteractionState` 还保存全会话共享的 world cursor、cursor axis 和 visibility mask。
 2D 滚轮沿当前 slice 轴推进 cursor；Shift+左键拖十字线会按 Top/Front/Left 写 Z/Y/X
@@ -297,7 +330,14 @@ Gap 始终读取 DataManager 同一个 current snapshot 中的 image 与 mask，
 
 ## 8. Hotkey 与 Qt 边界
 
-`AttachHotkeys(HostHotkeyConfig, HostHotkeyTemplates)` 只属于 standalone 主体输入适配。Feature 通过 `HostInputPort` 以自己的 feature id 注册输入 binding；过期 weak Feature 会在 Timer 清理输入。Qt 不模拟 Ctrl/Escape，主体直接调用三组 `Send*`，Feature 直接调用各自 `SendRequest()`。
+`AttachHotkeys(HostHotkeyConfig)` 只属于 standalone 主体输入适配。构造 Session 时，
+`HostSessionConfig::dataExportRequest/sliceExportRequest` 为导出热键提供缺省目录、格式、
+角度或可选来源；空输出目录在 HotkeyRouter 内补为 `"."`。数据导出只有在格式和 selector
+都缺省时才用触发窗口模式推断格式；切片导出在 selector 缺省时用触发窗口补齐来源。
+Feature 通过 `HostInputPort` 以自己的 feature id 注册输入 binding；Crop/Gap 热键都翻译为
+各自 typed request，并进入与 Qt 显式调用相同的 `SendRequest()`。过期 weak Feature 会在
+Timer 清理输入。Qt 不模拟 Ctrl/Escape，主体直接调用三组 `Send*`，Feature 直接调用各自
+`SendRequest()`。
 
 Qt 适配顺序：
 
@@ -342,7 +382,8 @@ QtHost case 覆盖 View 全请求原子拒绝、Crop/Reload 两种提交顺序�
 
 - 新主体业务动作先选择现有 Data/View/Tool 领域；可选业务能力优先实现独立 `HostFeature`，不得把 Feature 命令扩张进主体 variant。
 - 新窗口通过 `HostRenderViewConfig` 加入，不在 session 写死数量。
-- 新 adapter 参数放 `HostAdapterTypes`，不混入 `HostSessionConfig`。
+- 新按键/Timer adapter 参数放 `HostAdapterTypes`；只有 standalone 主体热键需要复用的业务
+  请求缺省值才进入 `HostSessionConfig`，不得把 callback 或 Feature 请求模板混入配置。
 - 新 Feature 内部实现不进入主体 Host DTO；Feature 只能通过 `HostFeatureContext` 获取 generic view、snapshot、CAS writer、输入、活动 view 作用域与 owner completion。活动作用域只表达 Feature 生命周期，不暴露质量配置或渲染策略。
 - composition root 可以根据 UI 流程同时持有多个 Feature 并限制按钮，但这只属于产品策略，不得成为数据正确性的必要条件。
 - 异步 worker 不操作 renderer/props；VTK 提交继续在消费线程收口。
