@@ -380,6 +380,7 @@ Local.props
 graphify-out/
 **/graphify-out/
 
+/md/
 *.md
 *.patch
 *.json

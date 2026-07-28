@@ -109,8 +109,9 @@ public:
     // 作用：把导出 I/O 与当前渲染线程解耦。
     // 实现依赖对象由 Impl 与基础服务状态共同持有。
     // ================================================================
-    // path 为 UTF-8 文件或目录路径。
-    void ExportDataAsync(const std::string& path,
+    void ExportDataAsync(
+        std::string outputDir,
+        std::string extension,
         std::function<void(bool isSuccess)> onComplete = nullptr);
     void ExportSlicesAsync(const std::string& path,
         std::optional<double> rotationAngleDeg = std::nullopt,

@@ -45,10 +45,13 @@ public:
 
     bool SendReloadUpdate() { return true; }
 
-    void ExportDataAsync(const std::string& path,
+    void ExportDataAsync(
+        std::string outputDir,
+        std::string extension,
         std::function<void(bool isSuccess)> onComplete)
     {
-        m_exportPath = path;
+        m_exportDir = std::move(outputDir);
+        m_exportExtension = std::move(extension);
         ++m_exportCount;
         if (onComplete) onComplete(true);
     }
@@ -92,7 +95,8 @@ public:
     const std::string& GetLoadPath() const { return m_loadPath; }
     const VolumeLayout& GetLoadLayout() const { return *m_loadLayout; }
     const VolumeBuffer& GetReloadBuffer() const { return *m_reloadBuffer; }
-    const std::string& GetExportPath() const { return m_exportPath; }
+    const std::string& GetExportDir() const { return m_exportDir; }
+    const std::string& GetExportExtension() const { return m_exportExtension; }
     const std::string& GetSlicePath() const { return m_slicePath; }
     const std::optional<double>& GetSliceAngleDeg() const { return m_sliceAngleDeg; }
     void SetSpacingAccepted(bool isAccepted) { m_isSpacingAccepted = isAccepted; }
@@ -176,7 +180,8 @@ private:
     int m_exportCount = 0;
     int m_sliceCount = 0;
     std::string m_loadPath;
-    std::string m_exportPath;
+    std::string m_exportDir;
+    std::string m_exportExtension;
     std::string m_slicePath;
     std::optional<double> m_sliceAngleDeg;
     bool m_isReloadAccepted = true;

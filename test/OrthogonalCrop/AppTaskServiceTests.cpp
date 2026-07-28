@@ -1,3 +1,4 @@
+#include "Tasks/AppDataExportTaskService.h"
 #include "Tasks/AppDataLoadTaskService.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "AppState.h"
@@ -13,15 +14,19 @@
 #include <chrono>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include <vtkImageData.h>
+#include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
+#include <vtkPLYReader.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
+#include <vtkSTLReader.h>
 #include <vtkWeakPointer.h>
 
 namespace {
@@ -34,7 +39,7 @@ void SetExpect(bool isPassed, const char* message, int& failureCount)
 
 class DataStub final : public AbstractDataManager {
 protected:
-    ImageSnapshot GetImageSnapshot() const override { return {}; }
+    ImageSnapshot GetImageSnapshot() const override { return imageSnapshot; }
 
 public:
     vtkSmartPointer<vtkImageData> GetVtkImage() const override { return nullptr; }
@@ -66,10 +71,27 @@ public:
         return true;
     }
     bool ClearPending() override { return true; }
-    bool ExportData(const std::string&, const std::array<double, 16>&) override { return false; }
+    bool ExportData(
+        const ImageSnapshot& snapshot,
+        const std::string& outputDir,
+        const std::string& extension,
+        double isoValue,
+        const std::array<double, 16>&) override
+    {
+        exportedSnapshot = snapshot;
+        exportedDir = outputDir;
+        exportedExtension = extension;
+        exportedIso = isoValue;
+        return true;
+    }
     bool ExportSlices(const std::string&, Orientation, const WindowLevelParams&,
         const std::array<double, 16>&) override { return false; }
 
+    ImageSnapshot imageSnapshot;
+    ImageSnapshot exportedSnapshot;
+    std::string exportedDir;
+    std::string exportedExtension;
+    double exportedIso = 0.0;
     std::string loadedPath;
     std::array<int, 3> loadedDims{};
     std::vector<float> loadedVoxels;
@@ -167,6 +189,208 @@ void StartOwningTasks(int& failureCount)
         (*failedTask)();
         SetExpect(!result.get(), "worker exceptions must become false", failureCount);
     }
+}
+
+vtkSmartPointer<vtkImageData> BuildExportImage()
+{
+    auto image =
+        vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->SetSpacing(0.5, 1.0, 1.5);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    for (int z = 0; z < 4; ++z) {
+        for (int y = 0; y < 4; ++y) {
+            for (int x = 0; x < 4; ++x) {
+                image->SetScalarComponentFromFloat(
+                    x, y, z, 0,
+                    static_cast<float>(x + y + z));
+            }
+        }
+    }
+    return image;
+}
+
+void StartExportSnapshot(int& failureCount)
+{
+    auto dataManager =
+        std::make_shared<DataStub>();
+    auto firstState =
+        std::make_shared<ImageState>();
+    firstState->image = BuildExportImage();
+    firstState->version = 1;
+    dataManager->imageSnapshot = firstState;
+
+    auto broadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    auto state =
+        std::make_shared<SharedInteractionState>(
+            broadcaster);
+    state->SetIsoValue(2.5);
+    AppDataExportTaskService service(
+        dataManager, state);
+    auto task = service.BuildDataTask(
+        "exports", ".ply");
+
+    auto secondState =
+        std::make_shared<ImageState>();
+    secondState->image = BuildExportImage();
+    secondState->version = 2;
+    dataManager->imageSnapshot = secondState;
+    state->SetIsoValue(4.5);
+
+    SetExpect(task.has_value(),
+        "data export task should accept a valid snapshot",
+        failureCount);
+    if (!task) return;
+    auto result = task->get_future();
+    (*task)();
+    SetExpect(result.get()
+            && dataManager->exportedSnapshot
+                == firstState
+            && dataManager->exportedDir
+                == "exports"
+            && dataManager->exportedExtension
+                == ".ply"
+            && dataManager->exportedIso == 2.5,
+        "data export must preserve target and admission-time snapshots",
+        failureCount);
+}
+
+void StartExportFiles(int& failureCount)
+{
+    DataManagerProbe dataManager;
+    SetExpect(
+        dataManager.SetInitial(BuildExportImage()),
+        "data export needs an image snapshot",
+        failureCount);
+    const auto snapshot =
+        dataManager.GetSnapshot();
+    const auto uniqueId =
+        std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+    const auto outputDir =
+        std::filesystem::temp_directory_path()
+        / std::filesystem::u8path(
+            u8"MVVCVTK_网格")
+        / std::to_string(uniqueId);
+    std::error_code error;
+    std::filesystem::create_directories(
+        outputDir, error);
+    const std::array<double, 16> modelToWorld = {
+        1.0, 0.0, 0.0, 10.0,
+        0.0, 1.0, 0.0, 20.0,
+        0.0, 0.0, 1.0, 30.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+
+    const auto plyPath =
+        outputDir / "4x4x4_transform.ply";
+    const auto stlPath =
+        outputDir / "4x4x4_transform.stl";
+    const auto objPath =
+        outputDir / "4x4x4_transform.obj";
+    SetExpect(!error
+            && dataManager.ExportData(
+                snapshot,
+                outputDir.u8string(), ".ply",
+                2.5, modelToWorld)
+            && dataManager.ExportData(
+                snapshot,
+                outputDir.u8string(), ".stl",
+                2.5, modelToWorld)
+            && dataManager.ExportData(
+                snapshot,
+                outputDir.u8string(), ".obj",
+                2.5, modelToWorld),
+        "PLY, STL and OBJ should use one export entry",
+        failureCount);
+
+    auto plyReader =
+        vtkSmartPointer<vtkPLYReader>::New();
+    plyReader->SetFileName(
+        plyPath.u8string().c_str());
+    plyReader->Update();
+    auto stlReader =
+        vtkSmartPointer<vtkSTLReader>::New();
+    stlReader->SetFileName(
+        stlPath.u8string().c_str());
+    stlReader->Update();
+    auto objReader =
+        vtkSmartPointer<vtkOBJReader>::New();
+    objReader->SetFileName(
+        objPath.u8string().c_str());
+    objReader->Update();
+    const auto getIsMeshValid =
+        [](vtkPolyData* mesh) {
+            if (!mesh
+                || mesh->GetNumberOfPoints() == 0
+                || mesh->GetNumberOfCells() == 0) {
+                return false;
+            }
+            double bounds[6] = {};
+            mesh->GetBounds(bounds);
+            return bounds[0] >= 10.0
+                && bounds[2] >= 20.0
+                && bounds[4] >= 30.0;
+        };
+    SetExpect(
+        getIsMeshValid(plyReader->GetOutput())
+            && getIsMeshValid(
+                stlReader->GetOutput())
+            && getIsMeshValid(
+                objReader->GetOutput()),
+        "mesh files should contain baked world coordinates",
+        failureCount);
+
+    SetExpect(
+        dataManager.ExportData(
+            snapshot,
+            outputDir.u8string(), ".raw",
+            2.5, modelToWorld)
+            && std::filesystem::exists(
+                outputDir
+                / "4x4x4_transform.raw"),
+        "Raw should reuse the same export entry",
+        failureCount);
+
+    auto invalidMatrix = modelToWorld;
+    invalidMatrix[0] =
+        std::numeric_limits<double>::quiet_NaN();
+    auto singularMatrix = modelToWorld;
+    singularMatrix[0] = 0.0;
+    SetExpect(
+        !dataManager.ExportData(
+            snapshot, outputDir.u8string(), ".raw",
+            2.5, invalidMatrix)
+            && !dataManager.ExportData(
+                snapshot, outputDir.u8string(), ".raw",
+                2.5, singularMatrix),
+        "Raw should reject non-finite and singular transforms",
+        failureCount);
+
+    auto maskedState =
+        std::make_shared<ImageState>(*snapshot);
+    auto emptyMask =
+        vtkSmartPointer<vtkImageData>::New();
+    emptyMask->CopyStructure(snapshot->image);
+    emptyMask->AllocateScalars(
+        VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(
+            emptyMask->GetScalarPointer()),
+        emptyMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(0));
+    maskedState->validityMask = emptyMask;
+    SetExpect(
+        !dataManager.ExportData(
+            maskedState,
+            outputDir.u8string(), ".ply",
+            2.5, modelToWorld),
+        "mesh export should consume the frozen validity mask",
+        failureCount);
+
+    std::filesystem::remove_all(
+        outputDir, error);
 }
 
 void StartStateGate(int& failureCount)
@@ -419,6 +643,8 @@ int AppTaskSuite::GetFailCount() const
     int failureCount = 0;
     StartVolumeTypes(failureCount);
     StartOwningTasks(failureCount);
+    StartExportSnapshot(failureCount);
+    StartExportFiles(failureCount);
     StartStateGate(failureCount);
     StartMaskSnapshot(failureCount);
     StartInputSwap(failureCount);

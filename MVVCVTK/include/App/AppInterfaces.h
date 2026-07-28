@@ -50,21 +50,15 @@ struct ImageState {
 // 受控内部消费链只持有批次 owner，不修改 image；旧 version 随最后一个 owner 释放。
 using ImageSnapshot = std::shared_ptr<const ImageState>;
 
-class VizService;
-struct HostCoreServices;
-
 // ─────────────────────────────────────────────────────────────────────
 // AbstractDataManager
 // ─────────────────────────────────────────────────────────────────────
 class AbstractDataManager {
-protected:
-    friend class VizService;
-    friend struct HostCoreServices;
-    // 只有受控内部消费链可以取得 current owner；调用方必须把 image 视为只读。
-    virtual ImageSnapshot GetImageSnapshot() const = 0;
-
 public:
     virtual ~AbstractDataManager() = default;
+    // 返回 current 的 const owner；调用方必须把 image/mask 视为只读。
+    virtual ImageSnapshot GetImageSnapshot() const = 0;
+
     // 返回当前 version 的独立 image；调用方可以连接 pipeline，写入也不会回写内部真源。
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
     virtual ImageState GetImageState() const = 0;
@@ -83,8 +77,15 @@ public:
     virtual bool SetCurrentFromPending(bool& hasPending) = 0;
     // 销毁尚未提交的完整 pending 批次；无 pending 也视为清理成功。
     virtual bool ClearPending() = 0;
-    // filePath/dirPath 为 UTF-8 路径。
-    virtual bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) = 0;
+    // 导出任务必须传入接纳时冻结的 imageSnapshot；后台不得重新读取 current。
+    // outputDir 是 UTF-8 目录，extension 是 Host 已收敛的规范小写后缀。
+    virtual bool ExportData(
+        const ImageSnapshot& imageSnapshot,
+        const std::string& outputDir,
+        const std::string& extension,
+        double isoValue,
+        const std::array<double, 16>& modelToWorldMatrix) = 0;
+    // dirPath 为 UTF-8 路径。
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;
 };
 

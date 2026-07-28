@@ -1,25 +1,19 @@
 #pragma once
 
-#include "Host/Types/HostRequestTypes.h"
+#include "Host/Types/HostValueTypes.h"
 
 #include <string>
 
 struct HostHotkeyConfig {
-    // context 输入负责窗口内工具切换；command 输入负责主体数据和退出命令。
+    // context 输入负责窗口内工具切换；command 输入负责数据动作和退出命令。
     bool isContextInputEnabled = false;
     HostViewTargets contextInputViews;
     bool isCommandInputEnabled = false;
     HostViewTargets commandInputViews;
     char modelSwitchKey = 0;
-    char saveTransformedDataKey = 0;
-    char saveSliceImagesKey = 0;
+    char dataExportKey = 0;
+    char sliceExportKey = 0;
     std::string exitKeySym; // 使用 VTK key symbol，支持 Escape 等非字符键。
-};
-
-struct HostHotkeyTemplates {
-    // 热键只选择动作；路径、算法参数和目标窗口均从这些模板复制，避免输入层制造业务默认值。
-    HostVolumeExportRequest volumeExportRequest;
-    HostSliceExportRequest sliceExportRequest;
 };
 
 struct HostTimerConfig {

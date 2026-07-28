@@ -14,18 +14,35 @@ AppDataExportTaskService::AppDataExportTaskService(
 }
 
 std::optional<std::packaged_task<bool()>>
-AppDataExportTaskService::BuildDataTask(std::string path)
+AppDataExportTaskService::BuildDataTask(
+    std::string outputDir,
+    std::string extension)
 {
-    if (!m_dataManager || !m_sharedState || path.empty()) {
+    if (!m_dataManager || !m_sharedState
+        || outputDir.empty() || extension.empty()) {
+        return std::nullopt;
+    }
+    const auto imageSnapshot =
+        m_dataManager->GetImageSnapshot();
+    if (!imageSnapshot || !imageSnapshot->image
+        || imageSnapshot->image->GetNumberOfPoints() == 0) {
         return std::nullopt;
     }
     auto dataManager = m_dataManager;
     const auto modelToWorld = m_sharedState->GetModelMatrix();
+    const double isoValue =
+        m_sharedState->GetIsoValue();
     return std::packaged_task<bool()>(
-        [dataManager, path = std::move(path), modelToWorld]() mutable
+        [dataManager, imageSnapshot,
+         outputDir = std::move(outputDir),
+         extension = std::move(extension),
+         isoValue, modelToWorld]() mutable
         {
             try {
-                return dataManager->ExportData(path, modelToWorld);
+                return dataManager->ExportData(
+                    imageSnapshot, outputDir, extension,
+                    isoValue,
+                    modelToWorld);
             }
             catch (const std::exception& error) {
                 std::cerr << "[Export] Worker failed: " << error.what() << '\n';

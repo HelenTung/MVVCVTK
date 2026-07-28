@@ -29,10 +29,8 @@ public:
     bool BuildSession();
     // 把主线程 TimerEvent pump 绑定到指定视图；重复调用会替换旧 timer handler。
     bool AttachTimer(const HostTimerConfig& config);
-    // 替换指定 context/command 输入窗口上的 VTK 按键 observer。
-    bool AttachHotkeys(
-        const HostHotkeyConfig& config,
-        HostHotkeyTemplates templates);
+    // 替换 standalone 按键 observer；主体热键直接进入统一命令路由。
+    bool AttachHotkeys(const HostHotkeyConfig& config);
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
     // 仅用于 standalone VTK 事件循环；Qt host 已有外部事件循环时不调用。

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -40,7 +41,7 @@ void StartHotkeyCases(int& failureCount)
     auto context = std::make_shared<StdRenderContext>();
     auto sliceContext = std::make_shared<StdRenderContext>();
     views.CreateView("primary", HostRenderViewRole::Primary3D, context);
-    views.CreateView("slice", HostRenderViewRole::TopDownSlice, sliceContext);
+    views.CreateView("slice", HostRenderViewRole::FrontBackSlice, sliceContext);
     const auto* primaryView = views.GetPrimaryView();
     auto service = primaryView ? primaryView->service : nullptr;
     const auto* sliceView = views.GetViewBySelector(
@@ -52,20 +53,20 @@ void StartHotkeyCases(int& failureCount)
     config.isContextInputEnabled = true;
     config.contextInputViews.viewIds = { "primary" };
     config.isCommandInputEnabled = true;
-    config.commandInputViews.viewIds = { "primary" };
+    config.commandInputViews.viewIds = {
+        "primary", "slice" };
     config.modelSwitchKey = 'm';
-    config.saveTransformedDataKey = 'v';
-    config.saveSliceImagesKey = 's';
+    config.dataExportKey = 'v';
+    config.sliceExportKey = 's';
     config.exitKeySym = "Escape";
-    HostHotkeyTemplates templates;
-    templates.volumeExportRequest.outputPath = "volume.raw";
-    templates.sliceExportRequest.outputDir = "slices";
-    templates.sliceExportRequest.sourceView.viewId = "slice";
 
     {
-        HostHotkeyRouter hotkeys(views, commandRouter);
+        HostSliceExportRequest sliceDefaults;
+        sliceDefaults.outputDir = "configured-slices";
+        HostHotkeyRouter hotkeys(
+            views, commandRouter, {}, std::move(sliceDefaults));
         SetExpect(
-            hotkeys.AttachHotkeys(config, templates),
+            hotkeys.AttachHotkeys(config),
             "合法 hotkey 配置应完成绑定。",
             failureCount);
 
@@ -93,18 +94,77 @@ void StartHotkeyCases(int& failureCount)
             "KeyRelease 应只重置按下态。",
             failureCount);
 
-        context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'v'));
-        context->OnInput(BuildKey(InteractionEventKind::KeyRelease, 'v'));
+        result = context->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyPress, 'v'));
+        context->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyRelease, 'v'));
         SetExpect(
-            service && service->GetExportCount() == 1,
-            "volume export hotkey 应精确投递一次。",
+            result.isHandled
+                && result.isPropagationStopped
+                && service
+                && service->GetExportCount() == 1
+                && service->GetExportDir() == "."
+                && service->GetExportExtension() == ".raw",
+            "数据热键应直接下沉到统一命令路由。",
             failureCount);
 
-        context->OnInput(BuildKey(InteractionEventKind::KeyPress, 's'));
-        context->OnInput(BuildKey(InteractionEventKind::KeyRelease, 's'));
+        HostDataExportRequest explicitData;
+        explicitData.outputPath = ".";
+        explicitData.sourceView = {
+            "", true, HostRenderViewRole::Primary3D };
+        HostDataRequest explicitDataRequest;
+        explicitDataRequest.action =
+            HostDataAction::ExportData;
+        explicitDataRequest.payload =
+            std::move(explicitData);
         SetExpect(
-            sliceService && sliceService->GetSliceCount() == 1,
-            "slice export hotkey 应精确投递一次。",
+            commandRouter->DispatchCommand(
+                HostDataCommand{
+                    std::move(explicitDataRequest),
+                    nullptr })
+                && service
+                && service->GetExportCount() == 2
+                && service->GetExportDir() == "."
+                && service->GetExportExtension() == ".raw",
+            "数据热键与显式数据动作必须进入同一命令链。",
+            failureCount);
+
+        result = sliceContext->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyPress, 's'));
+        sliceContext->OnInput(
+            BuildKey(
+                InteractionEventKind::KeyRelease, 's'));
+        SetExpect(
+            result.isHandled
+                && result.isPropagationStopped
+                && sliceService
+                && sliceService->GetSliceCount() == 1
+                && sliceService->GetSlicePath()
+                    == "configured-slices",
+            "切片热键应保留缺省目录，并由触发窗口补齐来源。",
+            failureCount);
+
+        HostSliceExportRequest explicitSlices;
+        explicitSlices.outputDir = ".";
+        explicitSlices.sourceView = {
+            "", true, HostRenderViewRole::FrontBackSlice };
+        HostDataRequest explicitSliceRequest;
+        explicitSliceRequest.action =
+            HostDataAction::ExportSlices;
+        explicitSliceRequest.payload =
+            std::move(explicitSlices);
+        SetExpect(
+            commandRouter->DispatchCommand(
+                HostDataCommand{
+                    std::move(explicitSliceRequest),
+                    nullptr })
+                && sliceService
+                && sliceService->GetSliceCount() == 2
+                && sliceService->GetSlicePath() == ".",
+            "切片热键与显式切片动作必须进入同一命令链。",
             failureCount);
 
         auto invalidConfig = config;
@@ -116,7 +176,7 @@ void StartHotkeyCases(int& failureCount)
             context->GetToolModeSetCount();
         SetExpect(
             !hotkeys.AttachHotkeys(
-                invalidConfig, templates),
+                invalidConfig),
             "无法解析目标的 hotkey 重配必须被拒绝。",
             failureCount);
         context->OnInput(
@@ -261,9 +321,72 @@ void StartHotkeyCases(int& failureCount)
                  .isHandled,
             "清理后输入 handler 不应继续消费事件。",
             failureCount);
+        auto disabledConfig = config;
+        disabledConfig.isCommandInputEnabled = false;
         SetExpect(
-            hotkeys.AttachHotkeys(config, templates),
+            hotkeys.AttachHotkeys(disabledConfig),
+            "关闭 command 热键后仍应保留 context 输入绑定。",
+            failureCount);
+        const auto disabledExport =
+            context->OnInput(
+                BuildKey(InteractionEventKind::KeyPress, 'v'));
+        SetExpect(
+            !disabledExport.isHandled
+                && service
+                && service->GetExportCount() == 2,
+            "未启用 command 热键时不得触发已配置的数据导出动作。",
+            failureCount);
+        SetExpect(
+            hotkeys.AttachHotkeys(config),
             "析构清理测试前应重新绑定 hotkey。",
+            failureCount);
+    }
+
+    {
+        HostDataExportRequest dataExportRequest;
+        dataExportRequest.outputPath = "specified-data";
+        dataExportRequest.format = HostDataExportFormat::Obj;
+        HostSliceExportRequest sliceExportRequest;
+        sliceExportRequest.outputDir = "specified-slices";
+        sliceExportRequest.sourceView = {
+            "slice", false, HostRenderViewRole::Auxiliary };
+        sliceExportRequest.angleDeg = 12.5;
+        HostHotkeyRouter hotkeys(
+            views,
+            commandRouter,
+            std::move(dataExportRequest),
+            std::move(sliceExportRequest));
+        SetExpect(
+            hotkeys.AttachHotkeys(config),
+            "显式导出请求的 hotkey 配置应完成绑定。",
+            failureCount);
+
+        auto result = sliceContext->OnInput(
+            BuildKey(InteractionEventKind::KeyPress, 'v'));
+        sliceContext->OnInput(
+            BuildKey(InteractionEventKind::KeyRelease, 'v'));
+        SetExpect(
+            result.isHandled
+                && result.isPropagationStopped
+                && service
+                && service->GetExportCount() == 3
+                && service->GetExportDir() == "specified-data"
+                && service->GetExportExtension() == ".obj",
+            "显式格式的数据热键不应依赖触发窗口。",
+            failureCount);
+
+        result = context->OnInput(
+            BuildKey(InteractionEventKind::KeyPress, 's'));
+        context->OnInput(
+            BuildKey(InteractionEventKind::KeyRelease, 's'));
+        SetExpect(
+            result.isHandled
+                && result.isPropagationStopped
+                && sliceService
+                && sliceService->GetSliceCount() == 3
+                && sliceService->GetSlicePath() == "specified-slices"
+                && sliceService->GetSliceAngleDeg() == 12.5,
+            "切片热键必须保留构造时指定的目录、来源视图和角度。",
             failureCount);
     }
 

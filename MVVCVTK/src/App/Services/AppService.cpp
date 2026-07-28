@@ -71,7 +71,9 @@ public:
     bool ReloadFromBufferAsync(
         VolumeBuffer buffer,
         std::function<void(bool isSuccess)> onComplete);
-    void ExportDataAsync(const std::string& path,
+    void ExportDataAsync(
+        std::string outputDir,
+        std::string extension,
         std::function<void(bool isSuccess)> onComplete);
     void ExportSlicesAsync(const std::string& path,
         std::optional<double> rotationAngleDeg,
@@ -627,10 +629,13 @@ bool VizService::ReloadFromBufferAsync(
 }
 
 void VizService::ExportDataAsync(
-    const std::string& path,
+    std::string outputDir,
+    std::string extension,
     std::function<void(bool isSuccess)> onComplete)
 {
-    m_impl->ExportDataAsync(path, std::move(onComplete));
+    m_impl->ExportDataAsync(
+        std::move(outputDir), std::move(extension),
+        std::move(onComplete));
 }
 
 void VizService::ExportSlicesAsync(
@@ -1264,11 +1269,14 @@ bool VizService::Impl::ReloadFromBufferAsync(
 }
 
 void VizService::Impl::ExportDataAsync(
-    const std::string& path,
+    std::string outputDir,
+    std::string extension,
     std::function<void(bool isSuccess)> onComplete)
 {
     auto task = m_dataExportTaskService
-        ? m_dataExportTaskService->BuildDataTask(path) : std::nullopt;
+        ? m_dataExportTaskService->BuildDataTask(
+            std::move(outputDir),
+            std::move(extension)) : std::nullopt;
     if (!task) {
         SetCompletion(false, std::move(onComplete));
         return;

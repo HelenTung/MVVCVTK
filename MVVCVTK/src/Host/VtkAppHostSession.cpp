@@ -178,7 +178,10 @@ bool VtkAppHostSession::Impl::BuildSession()
     renderViews.SetInteractorsReady();
     endpoints = renderViews.BuildEndpoints();
     hotkeyRouter = std::make_unique<HostHotkeyRouter>(
-        renderViews, commandRouter);
+        renderViews,
+        commandRouter,
+        config.dataExportRequest,
+        config.sliceExportRequest);
     ownerThread = std::this_thread::get_id();
     isBuilt = true;
     return true;
@@ -448,13 +451,11 @@ bool VtkAppHostSession::AttachTimer(
 }
 
 bool VtkAppHostSession::AttachHotkeys(
-    const HostHotkeyConfig& config,
-    HostHotkeyTemplates templates)
+    const HostHotkeyConfig& config)
 {
     return BuildSession()
         && m_impl->hotkeyRouter
-        && m_impl->hotkeyRouter->AttachHotkeys(
-            config, std::move(templates));
+        && m_impl->hotkeyRouter->AttachHotkeys(config);
 }
 
 bool VtkAppHostSession::AttachFeature(

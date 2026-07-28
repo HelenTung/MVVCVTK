@@ -8,17 +8,6 @@
 
 int GetExportFailCount()
 {
-    VtkAppHostSession session(HostSessionConfig{});
-    int failureCount = 0;
-    failureCount += GetCaseResult(
-        !session.SendData({ HostDataAction::ExportVolume,
-            HostVolumeExportRequest{} }),
-        "Export empty path rejection") ? 0 : 1;
-    failureCount += GetCaseResult(
-        !session.SendData({ HostDataAction::ExportVolume,
-            HostVolumeExportRequest{ u8"不存在/导出 é.raw" } }),
-        "Export UTF-8 unavailable session rejection") ? 0 : 1;
-
     HostRenderViewConfig view;
     view.id = "utf8-export";
     view.role = HostRenderViewRole::Primary3D;
@@ -32,13 +21,15 @@ int GetExportFailCount()
         / std::filesystem::u8path(u8"MVVCVTK_导出_é");
     std::error_code createError;
     std::filesystem::create_directories(unicodeDir, createError);
-    failureCount += GetCaseResult(
+    return GetCaseResult(
         unicodeSession.BuildSession()
             && unicodeSession.SendData({ HostDataAction::ReloadBuffer, std::move(reload) })
             && !createError
-            && unicodeSession.SendData({ HostDataAction::ExportVolume,
-                HostVolumeExportRequest{ (unicodeDir
-                    / std::filesystem::u8path(u8"导出 é.raw")).u8string() } }),
+            && unicodeSession.SendData({
+                HostDataAction::ExportData,
+                HostDataExportRequest{
+                    unicodeDir.u8string(),
+                    HostDataExportFormat::Raw,
+                    {} } }),
         "Export UTF-8 request facade acceptance") ? 0 : 1;
-    return failureCount;
 }

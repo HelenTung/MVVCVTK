@@ -372,7 +372,7 @@ int GetCropFailCount()
     const bool isProbeAttached =
         session.AttachFeature(contextProbe);
     const bool isInputAttached =
-        session.AttachHotkeys({}, {});
+        session.AttachHotkeys({});
     const auto* endpoint = session.GetPrimaryEndpoint();
     const auto* timerEndpoint =
         session.GetRenderViewEndpoint("crop-timer");

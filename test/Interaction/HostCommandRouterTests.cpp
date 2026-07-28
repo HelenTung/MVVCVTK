@@ -20,6 +20,8 @@ static_assert(static_cast<int>(HostVolumeQuality::Custom) == 1);
 static_assert(
     HostVolumeQualityParams{}.quality
         == HostVolumeQuality::Quality);
+static_assert(
+    static_cast<int>(HostDataExportFormat::Raw) == 0);
 
 void SetExpect(bool isExpected, const char* message, int& failureCount)
 {
@@ -315,12 +317,89 @@ void StartDataCases(int& failureCount)
         "Host load 路由必须原样保留 UTF-8 路径字节。",
         failureCount);
 
-    const std::string unicodeExportPath = u8"C:/体数据 é/导出.raw";
+    const std::array exportCases = {
+        std::pair{ HostDataExportFormat::Raw, std::string{ ".raw" } },
+        std::pair{ HostDataExportFormat::Ply, std::string{ ".ply" } },
+        std::pair{ HostDataExportFormat::Stl, std::string{ ".stl" } },
+        std::pair{ HostDataExportFormat::Obj, std::string{ ".obj" } }
+    };
+    for (const auto& [format, suffix] : exportCases) {
+        HostDataExportRequest exportRequest;
+        exportRequest.outputPath =
+            u8"C:/体数据 é/显式导出";
+        exportRequest.format = format;
+        const std::string expectedDir =
+            exportRequest.outputPath;
+        SetExpect(
+            SendData(
+                fixture,
+                HostDataAction::ExportData,
+                std::move(exportRequest))
+                && service->GetExportDir()
+                    == expectedDir
+                && service->GetExportExtension()
+                    == suffix,
+            "显式导出必须把 UTF-8 目录与规范格式后缀沿统一链传递。",
+            failureCount);
+    }
+
+    HostDataExportRequest inferredRaw;
+    inferredRaw.outputPath =
+        u8"C:/体数据 é/窗口推断";
     SetExpect(
-        SendData(fixture, HostDataAction::ExportVolume,
-            HostVolumeExportRequest{ unicodeExportPath })
-            && service->GetExportPath() == unicodeExportPath,
-        "Host volume export 路由必须原样保留 UTF-8 路径字节。",
+        SendData(
+            fixture, HostDataAction::ExportData,
+            std::move(inferredRaw))
+            && service->GetExportDir()
+                == u8"C:/体数据 é/窗口推断"
+            && service->GetExportExtension()
+                == ".raw",
+        "Volume 窗口必须把缺省格式收敛为 RAW。",
+        failureCount);
+
+    service->SetVizMode(VizMode::IsoSurface);
+    HostDataExportRequest inferredMesh;
+    inferredMesh.outputPath =
+        u8"C:/体数据 é/窗口推断";
+    SetExpect(
+        SendData(
+            fixture, HostDataAction::ExportData,
+            std::move(inferredMesh))
+            && service->GetExportDir()
+                == u8"C:/体数据 é/窗口推断"
+            && service->GetExportExtension()
+                == ".ply",
+        "IsoSurface 窗口必须把缺省格式收敛为 PLY。",
+        failureCount);
+
+    service->SetVizMode(VizMode::SliceTop_down);
+    HostDataExportRequest inferredSlice;
+    inferredSlice.outputPath = "exports";
+    SetExpect(
+        !SendData(
+            fixture, HostDataAction::ExportData,
+            std::move(inferredSlice)),
+        "切片窗口不能推断体数据或网格格式。",
+        failureCount);
+
+    HostDataExportRequest invalidFormat;
+    invalidFormat.outputPath = "exports";
+    invalidFormat.format =
+        static_cast<HostDataExportFormat>(99);
+    SetExpect(
+        !SendData(
+            fixture, HostDataAction::ExportData,
+            std::move(invalidFormat)),
+        "显式未知格式必须在 Host 边界被拒绝。",
+        failureCount);
+
+    HostDataExportRequest emptyOutputDir;
+    emptyOutputDir.format = HostDataExportFormat::Raw;
+    SetExpect(
+        !SendData(
+            fixture, HostDataAction::ExportData,
+            std::move(emptyOutputDir)),
+        "空输出目录必须在 Host 边界被拒绝。",
         failureCount);
 
     const std::string unicodeSlicePath = u8"C:/体数据 é/切片";
@@ -345,7 +424,7 @@ void StartDataCases(int& failureCount)
     SetExpect(!SendData(fixture, HostDataAction::LoadFile, std::move(partial)),
         "部分零维度必须被拒绝。", failureCount);
     SetExpect(!SendData(fixture, HostDataAction::LoadFile,
-        HostVolumeExportRequest{ "wrong.raw" }),
+        HostDataExportRequest{ "exports" }),
         "action 与 payload 不匹配必须被拒绝。", failureCount);
 
     std::vector<float> voxels{ 1.0f, 2.0f, 3.0f, 4.0f };

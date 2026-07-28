@@ -7,8 +7,6 @@
 class BaseDataManager : public AbstractDataManager
 {
 protected:
-    friend class VizService;
-    friend struct HostCoreServices;
     class Impl;
     // 随 BaseDataManager 生命周期独占 current image、range、spacing、version 真源及其事务锁。
     std::unique_ptr<Impl> m_impl;
@@ -16,18 +14,17 @@ protected:
     // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
     bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
     bool SetPendingImage(ImageState image);
+public:
+    BaseDataManager();
+    ~BaseDataManager() override;
+
+    ImageSnapshot GetImageSnapshot() const override;
     // 仅当 current 仍是 expectedSnapshot 时原子发布 image+mask 新批次；
     // publishedSnapshot 在同一锁内返回实际发布的 owner，禁止提交后再读 current 猜测结果。
     bool SetCurrentData(
         ImageState state,
         const ImageSnapshot& expectedSnapshot,
         ImageSnapshot& publishedSnapshot);
-    ImageSnapshot GetImageSnapshot() const override;
-
-public:
-    BaseDataManager();
-    ~BaseDataManager() override;
-
     vtkSmartPointer<vtkImageData> GetVtkImage() const override;
 
     std::array<double, 2> GetScalarRange() const override;
@@ -42,8 +39,13 @@ public:
     bool SetCurrentFromPending(bool& hasPending) override;
     bool ClearPending() override;
 
-    // filePath/dirPath 均为 UTF-8 路径。
-    bool ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix) override;
+    bool ExportData(
+        const ImageSnapshot& imageSnapshot,
+        const std::string& outputDir,
+        const std::string& extension,
+        double isoValue,
+        const std::array<double, 16>& modelToWorldMatrix) override;
+    // dirPath 为 UTF-8 路径。
     bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
 };
 

@@ -105,8 +105,8 @@ public:
         config.isCommandInputEnabled = true;
         config.commandInputViews = targets;
         config.modelSwitchKey = 'm';
-        config.saveTransformedDataKey = 's';
-        config.saveSliceImagesKey = 't';
+        config.dataExportKey = 's';
+        config.sliceExportKey = 't';
         config.exitKeySym = "Escape";
         return config;
     }
@@ -187,6 +187,10 @@ int main()
 
     HostSessionConfig sessionConfig;
     sessionConfig.renderViews = AppLaunchConfig::BuildViews();
+    sessionConfig.dataExportRequest.outputPath = "F:\\data";
+    sessionConfig.dataExportRequest.format =
+        HostDataExportFormat::Ply;
+    sessionConfig.sliceExportRequest.outputDir = "F:\\data";
     VtkAppHostSession session(std::move(sessionConfig));
     if (!session.BuildSession()) return 1;
     auto cropFeature = std::make_shared<CropHostFeature>(
@@ -215,14 +219,8 @@ int main()
         return 4;
     }
 
-    HostHotkeyTemplates templates;
-    templates.volumeExportRequest.outputPath =
-        "F:\\data\\1000x1000x1000_transformed.raw";
-    templates.sliceExportRequest.outputDir =
-        "F:\\data\\1000x1000x1000_slice_exports";
     if (!session.AttachHotkeys(
-            AppLaunchConfig::GetHotkeys(allViews),
-            templates)) {
+            AppLaunchConfig::GetHotkeys(allViews))) {
         (void)session.AttachTimer({});
         (void)detachFeatures();
         return 5;
@@ -237,7 +235,7 @@ int main()
     dataRequest.action = HostDataAction::LoadFile;
     dataRequest.payload = std::move(load);
     if (!session.SendData(std::move(dataRequest))) {
-        (void)session.AttachHotkeys({}, {});
+        (void)session.AttachHotkeys({});
         (void)session.AttachTimer({});
         (void)detachFeatures();
         return 6;
@@ -245,7 +243,7 @@ int main()
 
     const bool isStarted = session.Start();
     const bool isHotkeyStopped =
-        session.AttachHotkeys({}, {});
+        session.AttachHotkeys({});
     const bool isTimerStopped =
         session.AttachTimer({});
     const bool isDetached = detachFeatures();

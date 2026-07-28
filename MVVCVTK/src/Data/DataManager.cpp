@@ -2,6 +2,15 @@
 #include "Platform/Path.h"
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
+#include <vtkClipPolyData.h>
+#include <vtkErrorCode.h>
+#include <vtkFlyingEdges3D.h>
+#include <vtkImplicitVolume.h>
+#include <vtkOBJWriter.h>
+#include <vtkPLYWriter.h>
+#include <vtkSTLWriter.h>
+#include <vtkTransformPolyDataFilter.h>
+#include <vtkTriangleFilter.h>
 #include <fstream>
 #include <filesystem>
 #include <vtkTIFFReader.h>
@@ -38,6 +47,21 @@ public:
             0 }))
     {
     }
+
+    static bool ExportRaw(
+        const ImageSnapshot& imageSnapshot,
+        const std::string& outputDir,
+        const std::array<double, 16>& modelToWorldMatrix);
+    static bool ExportMesh(
+        const ImageSnapshot& imageSnapshot,
+        const std::string& outputDir,
+        const std::string& extension,
+        double isoValue,
+        const std::array<double, 16>& modelToWorldMatrix);
+    static std::filesystem::path BuildExportPath(
+        const std::string& outputDir,
+        const int dimensions[3],
+        const std::string& extension);
 
     static std::array<double, 3> GetRasOrigin(
         const std::array<double, 3>& lpsOrigin,
@@ -670,23 +694,106 @@ bool BaseDataManager::ExportSlices(
     return true;
 }
 
-bool BaseDataManager::ExportData(const std::string& filePath, const std::array<double, 16>& modelToWorldMatrix)
+bool BaseDataManager::ExportData(
+    const ImageSnapshot& imageSnapshot,
+    const std::string& outputDir,
+    const std::string& extension,
+    double isoValue,
+    const std::array<double, 16>& modelToWorldMatrix)
 {
-    // RAW 导出路径：固定 immutable current -> 逆变换重采样 -> 自动裁剪新 bounds ->
-    // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
-    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
-    std::shared_ptr<const ImageState> currentState;
-    {
-        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-        currentState = m_impl->m_current;
+    if (!imageSnapshot || !imageSnapshot->image
+        || imageSnapshot->image->GetNumberOfPoints() == 0
+        || outputDir.empty()) {
+        return false;
     }
-    if (!currentState->image) return false;
-    // 私有 current 批次不可变，因此可在锁外建立只读浅拷贝供导出管线使用。
-    imageCopy->ShallowCopy(currentState->image);
+
+    std::string normalizedExtension = extension;
+    std::transform(
+        normalizedExtension.begin(),
+        normalizedExtension.end(),
+        normalizedExtension.begin(),
+        [](unsigned char value) {
+            return static_cast<char>(
+                std::tolower(value));
+        });
+    if (normalizedExtension != ".raw"
+        && normalizedExtension != ".ply"
+        && normalizedExtension != ".stl"
+        && normalizedExtension != ".obj") {
+        return false;
+    }
+
+    const auto nativeOutputDir =
+        PlatformPath::GetNativePath(outputDir);
+    try {
+        std::filesystem::create_directories(
+            nativeOutputDir);
+        if (!std::filesystem::is_directory(
+                nativeOutputDir)) {
+            return false;
+        }
+    }
+    catch (...) {
+        return false;
+    }
+
+    if (normalizedExtension == ".raw") {
+        return Impl::ExportRaw(
+            imageSnapshot, outputDir,
+            modelToWorldMatrix);
+    }
+    return Impl::ExportMesh(
+        imageSnapshot, outputDir,
+        normalizedExtension, isoValue,
+        modelToWorldMatrix);
+}
+
+std::filesystem::path
+BaseDataManager::Impl::BuildExportPath(
+    const std::string& outputDir,
+    const int dimensions[3],
+    const std::string& extension)
+{
+    const std::string fileName =
+        std::to_string(dimensions[0])
+        + "x" + std::to_string(dimensions[1])
+        + "x" + std::to_string(dimensions[2])
+        + "_transform" + extension;
+    return PlatformPath::GetNativePath(outputDir)
+        / std::filesystem::path(fileName);
+}
+
+bool BaseDataManager::Impl::ExportRaw(
+    const ImageSnapshot& imageSnapshot,
+    const std::string& outputDir,
+    const std::array<double, 16>& modelToWorldMatrix)
+{
+    // RAW 导出路径：固定接纳时的 immutable snapshot -> 逆变换重采样 -> 自动裁剪新 bounds ->
+    // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
+    if (!imageSnapshot || !imageSnapshot->image
+        || outputDir.empty()
+        || std::any_of(
+            modelToWorldMatrix.begin(),
+            modelToWorldMatrix.end(),
+            [](double value) {
+                return !std::isfinite(value);
+            })) {
+        return false;
+    }
+    vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
+    // snapshot 批次不可变，因此可建立只读浅拷贝供导出管线使用。
+    imageCopy->ShallowCopy(imageSnapshot->image);
 
     //  VTK 逆变换矩阵
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
+    const double determinant =
+        worldToModelMatrix->Determinant();
+    if (!std::isfinite(determinant)
+        || std::abs(determinant)
+            <= std::numeric_limits<double>::epsilon()) {
+        return false;
+    }
     worldToModelMatrix->Invert();
 
     auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
@@ -738,18 +845,16 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
     vtkIdType incs[3];
     outputImage->GetIncrements(incs);
 
-    std::filesystem::path pathObj = PlatformPath::GetNativePath(filePath);
-    std::string dimStr = std::to_string(newDims[0]) + "X" + std::to_string(newDims[1]) + "X" + std::to_string(newDims[2]);
-    // 组合：所在目录 / (原文件名无后缀 + "_" + 维度 + 原后缀)
-    std::filesystem::path finalFileName = pathObj.stem();
-    finalFileName += std::string("_") + dimStr;
-    finalFileName += pathObj.extension();
-    std::filesystem::path finalPath = pathObj.parent_path() / finalFileName;
+    const auto finalPath = BuildExportPath(
+        outputDir, newDims, ".raw");
 
     // 按 x-fast、逐行无 padding 的 float32 裸数据写出，不附带维度、spacing、origin 等元数据。
     std::ofstream rawFile(finalPath, std::ios::binary);
     if (!rawFile.is_open()) {
-        std::cerr << "[Error] Failed to open RAW file for writing: " << filePath << std::endl;
+        std::cerr
+            << "[Error] Failed to open RAW file for writing: "
+            << PlatformPath::GetUtf8Path(finalPath)
+            << std::endl;
         return false;
     }
 
@@ -777,6 +882,142 @@ bool BaseDataManager::ExportData(const std::string& filePath, const std::array<d
         << newDims[0] << " x " << newDims[1] << " x " << newDims[2] << std::endl;
 
     return true;
+}
+
+bool BaseDataManager::Impl::ExportMesh(
+    const ImageSnapshot& imageSnapshot,
+    const std::string& outputDir,
+    const std::string& extension,
+    double isoValue,
+    const std::array<double, 16>& modelToWorldMatrix)
+{
+    if (!imageSnapshot || !imageSnapshot->image
+        || imageSnapshot->image->GetNumberOfPoints() == 0
+        || outputDir.empty()
+        || !std::isfinite(isoValue)
+        || std::any_of(
+            modelToWorldMatrix.begin(),
+            modelToWorldMatrix.end(),
+            [](double value) {
+                return !std::isfinite(value);
+            })) {
+        return false;
+    }
+
+    // 1. 全分辨率 image 与 mask 来自同一个 ImageState，不读取显示 mapper。
+    auto imageCopy =
+        vtkSmartPointer<vtkImageData>::New();
+    imageCopy->ShallowCopy(imageSnapshot->image);
+    auto isoFilter =
+        vtkSmartPointer<vtkFlyingEdges3D>::New();
+    isoFilter->SetInputData(imageCopy);
+    isoFilter->SetValue(0, isoValue);
+    isoFilter->ComputeNormalsOn();
+    isoFilter->ComputeGradientsOff();
+
+    vtkAlgorithmOutput* surfacePort =
+        isoFilter->GetOutputPort();
+    vtkSmartPointer<vtkImageData> maskCopy;
+    vtkSmartPointer<vtkImplicitVolume> maskFunction;
+    vtkSmartPointer<vtkClipPolyData> maskClip;
+    if (imageSnapshot->validityMask) {
+        maskCopy = vtkSmartPointer<vtkImageData>::New();
+        maskCopy->ShallowCopy(
+            imageSnapshot->validityMask);
+        maskFunction =
+            vtkSmartPointer<vtkImplicitVolume>::New();
+        maskFunction->SetVolume(maskCopy);
+        maskFunction->SetOutValue(-1.0);
+        maskClip =
+            vtkSmartPointer<vtkClipPolyData>::New();
+        maskClip->SetInputConnection(surfacePort);
+        maskClip->SetClipFunction(maskFunction);
+        // 二值 mask 为 0/255；127.5 令边界落在相邻体素中心之间。
+        maskClip->SetValue(127.5);
+        maskClip->InsideOutOff();
+        maskClip->GenerateClippedOutputOff();
+        surfacePort = maskClip->GetOutputPort();
+    }
+
+    // 2. 文件没有 actor，在写出前把 model-to-world 烘焙到点和法向量。
+    auto modelMatrix =
+        vtkSmartPointer<vtkMatrix4x4>::New();
+    modelMatrix->DeepCopy(
+        modelToWorldMatrix.data());
+    auto modelToWorld =
+        vtkSmartPointer<vtkTransform>::New();
+    modelToWorld->SetMatrix(modelMatrix);
+    auto transformFilter =
+        vtkSmartPointer<
+            vtkTransformPolyDataFilter>::New();
+    transformFilter->SetInputConnection(
+        surfacePort);
+    transformFilter->SetTransform(modelToWorld);
+
+    // 3. 三种 writer 共用同一份三角网格；仅在 Data 底层按后缀选择序列化器。
+    auto triangleFilter =
+        vtkSmartPointer<vtkTriangleFilter>::New();
+    triangleFilter->SetInputConnection(
+        transformFilter->GetOutputPort());
+    try {
+        triangleFilter->Update();
+    }
+    catch (...) {
+        std::cerr
+            << "[Export] PolyData generation failed.\n";
+        return false;
+    }
+    vtkPolyData* outputMesh =
+        triangleFilter->GetOutput();
+    if (!outputMesh
+        || outputMesh->GetNumberOfPoints() == 0
+        || outputMesh->GetNumberOfCells() == 0) {
+        return false;
+    }
+
+    int sourceDims[3] = {};
+    imageCopy->GetDimensions(sourceDims);
+    const auto outputPath = BuildExportPath(
+        outputDir, sourceDims, extension);
+    const std::string vtkFileName =
+        PlatformPath::GetUtf8Path(outputPath);
+    int errorCode = vtkErrorCode::NoError;
+    if (extension == ".ply") {
+        auto writer =
+            vtkSmartPointer<vtkPLYWriter>::New();
+        writer->SetFileName(vtkFileName.c_str());
+        writer->SetFileTypeToBinary();
+        writer->SetInputData(outputMesh);
+        writer->Write();
+        errorCode = writer->GetErrorCode();
+    }
+    else if (extension == ".stl") {
+        auto writer =
+            vtkSmartPointer<vtkSTLWriter>::New();
+        writer->SetFileName(vtkFileName.c_str());
+        writer->SetFileTypeToBinary();
+        writer->SetInputData(outputMesh);
+        writer->Write();
+        errorCode = writer->GetErrorCode();
+    }
+    else if (extension == ".obj") {
+        auto writer =
+            vtkSmartPointer<vtkOBJWriter>::New();
+        writer->SetFileName(vtkFileName.c_str());
+        writer->SetInputData(outputMesh);
+        writer->Write();
+        errorCode = writer->GetErrorCode();
+    }
+    else {
+        return false;
+    }
+
+    std::error_code fileError;
+    const auto fileSize =
+        std::filesystem::file_size(
+            outputPath, fileError);
+    return errorCode == vtkErrorCode::NoError
+        && !fileError && fileSize > 0;
 }
 
 RawVolumeDataManager::RawVolumeDataManager()

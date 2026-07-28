@@ -28,6 +28,14 @@ enum class HostToolMode {
     ModelTransform
 };
 
+// Host 导出契约的唯一格式基元；内部链路只透明传递规范后缀，不再定义同义枚举。
+enum class HostDataExportFormat {
+    Raw,
+    Ply,
+    Stl,
+    Obj
+};
+
 struct HostTransferNode {
     double position = 0.0; // 当前 scalar range 内的归一化位置，[0,1]。
     double opacity = 0.0;  // 该标量位置的不透明度控制点。

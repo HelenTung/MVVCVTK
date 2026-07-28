@@ -14,7 +14,7 @@ struct HostVolumeGeometry {
     std::array<float, 3> origin{};             // 输入体数据的物理原点。
 };
 
-enum class HostDataAction { None, LoadFile, ReloadBuffer, ExportVolume, ExportSlices };
+enum class HostDataAction { None, LoadFile, ReloadBuffer, ExportData, ExportSlices };
 
 struct HostLoadRequest {
     std::string filePath; // UTF-8 文件路径。
@@ -26,16 +26,23 @@ struct HostReloadRequest {
     HostVolumeGeometry geometry; // dimensions 的乘积必须与 voxels.size() 一致。
 };
 
-struct HostVolumeExportRequest { std::string outputPath; /* UTF-8 文件路径。 */ };
+struct HostDataExportRequest {
+    std::string outputPath; // UTF-8 输出目录；文件名由 Data 层基于冻结数据生成。
+    // 缺省时由 sourceView 模式收敛：体渲染导出 RAW，等值面导出 PLY。
+    std::optional<HostDataExportFormat> format;
+    // 未指定 selector 时使用 Primary3D。
+    HostViewTarget sourceView;
+};
 
 struct HostSliceExportRequest {
     std::string outputDir; // UTF-8 输出目录；每层写入 PNG。
-    HostViewTarget sourceView{ "", false, HostRenderViewRole::TopDownSlice }; // 决定切片法向与相机朝向。
+    // 热键缺省时由触发窗口补齐；显式请求仅在需要指定切片方向时设置。
+    HostViewTarget sourceView;
     std::optional<double> angleDeg; // 可选的平面内旋转角；未提供时保持目标视图当前方向。
 };
 
 using HostDataPayload = std::variant<std::monostate, HostLoadRequest,
-    HostReloadRequest, HostVolumeExportRequest, HostSliceExportRequest>;
+    HostReloadRequest, HostDataExportRequest, HostSliceExportRequest>;
 
 struct HostDataRequest {
     HostDataAction action = HostDataAction::None;

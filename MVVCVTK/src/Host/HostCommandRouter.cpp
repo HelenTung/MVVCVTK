@@ -59,7 +59,7 @@ private:
     bool SendTool(const HostToolCommand& command) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
-    bool ExportVolume(HostVolumeExportRequest request, HostCompleteCallback callback) const;
+    bool ExportData(HostDataExportRequest request, HostCompleteCallback callback) const;
     bool ExportSlices(HostSliceExportRequest request, HostCompleteCallback callback) const;
     std::optional<VolumeLayout> BuildLoadLayout(
         const HostLoadRequest& request) const;
@@ -118,9 +118,9 @@ bool HostCommandRouter::Impl::SendData(HostDataCommand command) const
             return ReloadBuffer(std::move(*request), std::move(command.onComplete));
         }
         return false;
-    case HostDataAction::ExportVolume:
-        if (auto* request = std::get_if<HostVolumeExportRequest>(&command.request.payload)) {
-            return ExportVolume(std::move(*request), std::move(command.onComplete));
+    case HostDataAction::ExportData:
+        if (auto* request = std::get_if<HostDataExportRequest>(&command.request.payload)) {
+            return ExportData(std::move(*request), std::move(command.onComplete));
         }
         return false;
     case HostDataAction::ExportSlices:
@@ -233,14 +233,64 @@ std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
     return dimensions;
 }
 
-bool HostCommandRouter::Impl::ExportVolume(
-    HostVolumeExportRequest request, HostCompleteCallback callback) const
+bool HostCommandRouter::Impl::ExportData(
+    HostDataExportRequest request, HostCompleteCallback callback) const
 {
-    const auto* view = m_renderViews ? m_renderViews->GetPrimaryView() : nullptr;
-    if (!view || !view->service || request.outputPath.empty()) {
+    if (!m_renderViews || request.outputPath.empty()) {
         return false;
     }
-    view->service->ExportDataAsync(request.outputPath, std::move(callback));
+    const bool hasSource =
+        !request.sourceView.viewId.empty()
+        || request.sourceView.isViewRoleUsed;
+    const auto* view = hasSource
+        ? m_renderViews->GetViewBySelector(
+            request.sourceView)
+        : m_renderViews->GetPrimaryView();
+    if (!view || !view->service) {
+        return false;
+    }
+
+    std::string extension;
+    if (request.format) {
+        // Host 只把唯一格式基元收敛为规范后缀；App/Task 不解释，Data 才选择 writer。
+        switch (*request.format) {
+        case HostDataExportFormat::Raw:
+            extension = ".raw";
+            break;
+        case HostDataExportFormat::Ply:
+            extension = ".ply";
+            break;
+        case HostDataExportFormat::Stl:
+            extension = ".stl";
+            break;
+        case HostDataExportFormat::Obj:
+            extension = ".obj";
+            break;
+        default:
+            return false;
+        }
+    }
+    else {
+        // 缺省格式由来源窗口完整收敛，调用方不再通过目录名暗示格式。
+        switch (view->service->GetVizMode()) {
+        case VizMode::Volume:
+        case VizMode::CompositeVolume:
+            extension = ".raw";
+            break;
+        case VizMode::IsoSurface:
+        case VizMode::CompositeIsoSurface:
+            extension = ".ply";
+            break;
+        case VizMode::SliceTop_down:
+        case VizMode::SliceFront_back:
+        case VizMode::SliceLeft_right:
+            return false;
+        }
+    }
+    view->service->ExportDataAsync(
+        std::move(request.outputPath),
+        std::move(extension),
+        std::move(callback));
     return true;
 }
 

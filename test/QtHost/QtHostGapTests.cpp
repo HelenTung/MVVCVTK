@@ -225,7 +225,7 @@ int GetGapFailCount()
     const bool isBuilt = session.BuildSession();
     const bool isAttached = session.AttachFeature(feature);
     const bool isInputAttached =
-        session.AttachHotkeys({}, {});
+        session.AttachHotkeys({});
     const auto* endpoint = session.GetPrimaryEndpoint();
     if (!isBuilt || !isAttached || !isInputAttached
         || !endpoint
@@ -317,13 +317,23 @@ int GetGapFailCount()
             && !hasRejectedCallback,
         "Rejected Start preserves the accepted callback generation") ? 0 : 1;
 
+    endpoint->interactor->SetKeyEventInformation(
+        0, 0, 'j', 0, "j");
+    const bool isOverlayKeyHandled =
+        endpoint->interactor->InvokeEvent(
+            vtkCommand::KeyPressEvent) != 0;
+    const bool isOverlayReleaseHandled =
+        endpoint->interactor->InvokeEvent(
+            vtkCommand::KeyReleaseEvent) != 0;
     const bool isOverlaySwitched =
         feature->SendRequest({
             GapHostAction::Overlay,
             std::monostate{} });
     failureCount += GetCaseResult(
-        isOverlaySwitched,
-        "Gap overlay is controlled through the real Feature API") ? 0 : 1;
+        isOverlayKeyHandled
+            && isOverlayReleaseHandled
+            && isOverlaySwitched,
+        "Gap 热键与显式请求必须进入同一 Feature 动作链") ? 0 : 1;
 
     const bool isNextReloadReady =
         GetReloadReady(session, *endpoint);

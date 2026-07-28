@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Host/Types/HostValueTypes.h"
+#include "Host/Types/HostRequestTypes.h"
 
 #include <vtkRenderWindow.h>
 #include <vtkSmartPointer.h>
@@ -30,4 +30,7 @@ struct HostRenderViewEndpoint {
 
 struct HostSessionConfig {
     std::vector<HostRenderViewConfig> renderViews; // 声明顺序即 topology 顺序，也决定多目标返回与首选窗口顺序。
+    // standalone 导出热键的缺省参数；触发上下文补齐来源，Qt 显式 SendData 不经过此配置。
+    HostDataExportRequest dataExportRequest;
+    HostSliceExportRequest sliceExportRequest;
 };

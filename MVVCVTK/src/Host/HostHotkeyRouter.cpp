@@ -38,11 +38,22 @@ public:
 
     Impl(
         const HostRenderViewSet& renderViews,
-        std::weak_ptr<HostCommandRouter> commandRouter)
+        std::weak_ptr<HostCommandRouter> commandRouter,
+        HostDataExportRequest dataExportRequest,
+        HostSliceExportRequest sliceExportRequest)
         : m_renderViews(&renderViews)
         , m_commandRouter(std::move(commandRouter))
+        , m_dataExportRequest(std::move(dataExportRequest))
+        , m_sliceExportRequest(std::move(sliceExportRequest))
         , m_inputPort(*this)
     {
+        // 构造阶段只补请求中缺失的目录；format 等已有值或既有缺省语义均保持不变。
+        if (m_dataExportRequest.outputPath.empty()) {
+            m_dataExportRequest.outputPath = ".";
+        }
+        if (m_sliceExportRequest.outputDir.empty()) {
+            m_sliceExportRequest.outputDir = ".";
+        }
     }
 
     ~Impl()
@@ -50,9 +61,7 @@ public:
         ClearContexts();
     }
 
-    bool AttachHotkeys(
-        const HostHotkeyConfig& config,
-        HostHotkeyTemplates templates);
+    bool AttachHotkeys(const HostHotkeyConfig& config);
     bool ClearHotkeys();
     HostInputPort& GetInputPort() { return m_inputPort; }
 
@@ -60,7 +69,7 @@ private:
     enum class HotkeyAction {
         None,
         Model,
-        ExportVolume,
+        ExportData,
         ExportSlices,
         Exit,
         Count
@@ -96,10 +105,11 @@ private:
 
     const HostRenderViewSet* m_renderViews = nullptr;
     std::weak_ptr<HostCommandRouter> m_commandRouter;
+    HostDataExportRequest m_dataExportRequest;
+    HostSliceExportRequest m_sliceExportRequest;
     std::vector<HostInputBinding> m_inputBindings;
     std::vector<std::weak_ptr<StdRenderContext>> m_contexts;
     HostHotkeyConfig m_config;
-    HostHotkeyTemplates m_templates;
     InputPort m_inputPort;
     std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)>
         m_isDown{};
@@ -150,10 +160,10 @@ HostHotkeyRouter::Impl::GetHotkeyAction(
     if (GetCharMatched(event, m_config.modelSwitchKey)) {
         return HotkeyAction::Model;
     }
-    if (GetCharMatched(event, m_config.saveTransformedDataKey)) {
-        return HotkeyAction::ExportVolume;
+    if (GetCharMatched(event, m_config.dataExportKey)) {
+        return HotkeyAction::ExportData;
     }
-    if (GetCharMatched(event, m_config.saveSliceImagesKey)) {
+    if (GetCharMatched(event, m_config.sliceExportKey)) {
         return HotkeyAction::ExportSlices;
     }
     if (!m_config.exitKeySym.empty()
@@ -195,23 +205,34 @@ bool HostHotkeyRouter::Impl::SendCommand(
         command = HostToolCommand{ std::move(request) };
         break;
     }
-    case HotkeyAction::ExportVolume: {
+    case HotkeyAction::ExportData: {
+        auto value = m_dataExportRequest;
+        // 显式格式已经决定底层 writer；只有缺省格式才需要触发窗口参与模式推断。
+        if (!value.format
+            && value.sourceView.viewId.empty()
+            && !value.sourceView.isViewRoleUsed) {
+            value.sourceView = {
+                "", true, role };
+        }
         HostDataRequest request;
-        request.action = HostDataAction::ExportVolume;
-        request.payload = m_templates.volumeExportRequest;
-        command = HostDataCommand{ std::move(request), nullptr };
+        request.action = HostDataAction::ExportData;
+        request.payload = std::move(value);
+        command = HostDataCommand{
+            std::move(request), nullptr };
         break;
     }
     case HotkeyAction::ExportSlices: {
-        auto value = m_templates.sliceExportRequest;
+        auto value = m_sliceExportRequest;
         if (value.sourceView.viewId.empty()
             && !value.sourceView.isViewRoleUsed) {
-            value.sourceView = { "", true, role };
+            value.sourceView = {
+                "", true, role };
         }
         HostDataRequest request;
         request.action = HostDataAction::ExportSlices;
         request.payload = std::move(value);
-        command = HostDataCommand{ std::move(request), nullptr };
+        command = HostDataCommand{
+            std::move(request), nullptr };
         break;
     }
     case HotkeyAction::Exit: {
@@ -414,21 +435,17 @@ bool HostHotkeyRouter::Impl::AttachContexts()
 }
 
 bool HostHotkeyRouter::Impl::AttachHotkeys(
-    const HostHotkeyConfig& config,
-    HostHotkeyTemplates templates)
+    const HostHotkeyConfig& config)
 {
     const auto oldConfig = m_config;
-    auto oldTemplates = m_templates;
     const bool wasConfigured = m_isConfigured;
     m_config = config;
-    m_templates = std::move(templates);
     m_isConfigured = true;
     if (AttachContexts()) {
         return true;
     }
 
     m_config = oldConfig;
-    m_templates = std::move(oldTemplates);
     m_isConfigured = wasConfigured;
     (void)AttachContexts();
     return false;
@@ -439,27 +456,28 @@ bool HostHotkeyRouter::Impl::ClearHotkeys()
     ClearContexts();
     m_isConfigured = false;
     m_config = {};
-    m_templates = {};
     return true;
 }
 
 HostHotkeyRouter::HostHotkeyRouter(
     const HostRenderViewSet& renderViews,
-    std::weak_ptr<HostCommandRouter> commandRouter)
+    std::weak_ptr<HostCommandRouter> commandRouter,
+    HostDataExportRequest dataExportRequest,
+    HostSliceExportRequest sliceExportRequest)
     : m_impl(std::make_unique<Impl>(
         renderViews,
-        std::move(commandRouter)))
+        std::move(commandRouter),
+        std::move(dataExportRequest),
+        std::move(sliceExportRequest)))
 {
 }
 
 HostHotkeyRouter::~HostHotkeyRouter() = default;
 
 bool HostHotkeyRouter::AttachHotkeys(
-    const HostHotkeyConfig& config,
-    HostHotkeyTemplates templates)
+    const HostHotkeyConfig& config)
 {
-    return m_impl
-        && m_impl->AttachHotkeys(config, std::move(templates));
+    return m_impl && m_impl->AttachHotkeys(config);
 }
 
 bool HostHotkeyRouter::ClearHotkeys()
