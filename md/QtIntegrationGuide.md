@@ -7,25 +7,25 @@
 | 项目 | 当前事实 |
 | --- | --- |
 | Host 门面 | `VtkAppHostSession` |
-| 一次性配置 | `HostSessionConfig{renderViews, dataExportRequest, sliceExportRequest}`；后两者仅为 standalone 热键缺省值 |
-| Qt 主体门面 | `VtkAppHostSession::SendData/SendView/SendTool` |
-| Host 唯一分发出口 | `HostCommandRouter::DispatchCommand(HostCommand)`；Qt 不直接持有 Router |
+| 一次性配置 | `HostSessionConfig{renderViews}` |
+| Qt 主体门面 | `VtkAppHostSession::SendRequest(HostRequest&&, callback)` |
+| Host 唯一分发出口 | `HostCommandRouter::Dispatch(HostRequest&&, callback)`；Qt 不直接持有 Router |
 | 可选业务 | Qt 持有 `CropHostFeature` / `GapHostFeature` 并调用各自 `SendRequest/GetState` |
 | Timer | `AttachTimer(HostTimerConfig)` |
 | QVTK widget | `QVTKOpenGLNativeWidget` |
 | render window | `vtkGenericOpenGLRenderWindow` |
 | Qt production target | 尚不存在；本文 adapter 代码均为 `[PROPOSAL]` |
 | 接纳协议 | Feature 捕获不可变 snapshot，以 version/CAS 接纳或退休结果 |
-| 本地实现快照 | 2026-07-28；当前工作树 |
+| 本地实现快照 | 2026-07-29；当前工作树 |
 
 代码事实基线：
 
 - `MVVCVTK/include/Host/VtkAppHostSession.h`
 - `MVVCVTK/include/Host/Types/HostValueTypes.h`
 - `MVVCVTK/include/Host/Types/HostSessionTypes.h`
+- `MVVCVTK/include/Host/Types/HostRequest.h`
 - `MVVCVTK/include/Host/Types/HostRequestTypes.h`
-- `MVVCVTK/include/Host/Types/HostCommandTypes.h`
-- `MVVCVTK/include/Host/Types/HostAdapterTypes.h`
+- `MVVCVTK/include/Host/Types/HostInputTypes.h`
 - `MVVCVTK/include/Host/HostFeature.h`
 - `MVVCVTK/src/Host/VtkAppHostSession.cpp`
 - `MVVCVTK/src/Host/HostCommandRouter.cpp`
@@ -155,305 +155,789 @@ flowchart LR
 
 `AttachTimer()` 会先尝试懒构建 Session，但 Qt 接入仍应保持上面的显式 `BuildSession -> AttachFeature -> AttachTimer` 顺序，便于定位窗口、Feature 与 Timer 各自的失败。其 `true` 只表示 Host hook 已绑定到目标 context，不证明底层 VTK repeating timer 已成功创建。
 
-## 6. 最小 current API 示例
+仓库自带 `src/App/main.cpp` 是另一个独立客户端：其窗口、热键、Crop/Gap 和启动数据默认值
+都属于 standalone 私有装配。Qt adapter 不 include 或调用这些私有 helper，也不等待一个
+统一启动配置对象；它在自己的 composition root 中直接构造 `HostSessionConfig`、具体
+Feature 配置和具体 Request。
 
-Qt 代码只调用 `VtkAppHostSession` 公共门面，不构造、保存或调用 `HostCommandRouter`。
-`SendData/SendView/SendTool` 只负责把 typed request 封装为 `HostCommand`，随后进入同一个内部
-出口：
+## 6. Current API 逐项示例
+
+Qt 只持有 `VtkAppHostSession` 和显式选择的 Feature，不持有 Router 或内部 service。
+主体请求的固定链路是：
 
 ```text
 Qt action
-  -> VtkAppHostSession::SendData / SendView / SendTool
-  -> VtkAppHostSession::Impl::SendCommand
-  -> HostCommandRouter::DispatchCommand
+  -> 具体 Host Request
+  -> VtkAppHostSession::SendRequest
+  -> HostCommandRouter::Dispatch
 ```
 
-Crop/Gap 是可选 Feature，不属于主体 `HostCommand` variant；Qt 对它们调用各自公开
-`SendRequest()`，其内部再进入 Feature 自己的 typed 路由。
+Crop/Gap 不进入主体 Router；Qt 直接调用各自唯一的 `SendRequest()`。下表是本节的公开
+能力覆盖索引：
 
-### 6.1 Session 与 Timer
+| 接口或请求 | 示例 |
+| --- | --- |
+| `BuildSession`、endpoint getters | 6.1 |
+| `AttachFeature`、`DetachFeature`、`AttachTimer` | 6.2 |
+| `AttachHotkeys`、`Start` | 6.3，说明 Qt 禁用边界 |
+| `HostLoadRequest`、`HostReloadRequest` | 6.4 |
+| `HostViewSetRequest` 的全部可选字段、`HostViewResetRequest` | 6.5 |
+| `HostToolSetRequest`、`HostToolSwitchRequest` | 6.6 |
+| `HostDataExportRequest`、`HostSliceExportRequest` | 6.7 |
+| `CropHostFeature::SendRequest/GetState` 的全部有效 Action | 6.8 |
+| `GapHostFeature::SendRequest/GetState` 的全部有效 Action | 6.9 |
+
+以下片段假定都在 Qt GUI/VTK owner thread 内执行。异步回调统一先检查 `QPointer`，再排队
+回到 Qt 对象；同步返回 `true` 只表示请求已接纳。
+
+### 6.1 构建 Session 与查询 endpoint
 
 ```cpp
-HostRenderViewConfig view;
-view.id = "primary-3d";
-view.role = HostRenderViewRole::Primary3D;
-view.window.title = "Primary 3D";
-view.window.isAxesVisible = true; // 仅建窗时启用左下角世界方向轴 marker
-view.window.viewInit.viewMode = HostRenderMode::CompositeIsoSurface;
-view.window.viewInit.background = { 0.08, 0.12, 0.16 };
-view.window.viewInit.hasBackground = true;
-view.renderWindow = genericOpenGlWindow;
+HostRenderViewConfig primaryView;
+primaryView.id = "primary-3d";
+primaryView.role = HostRenderViewRole::Primary3D;
+primaryView.window.title = "Primary 3D";
+primaryView.window.isAxesVisible = true;
+primaryView.window.viewInit.viewMode =
+    HostRenderMode::CompositeIsoSurface;
+primaryView.window.viewInit.background = { 0.08, 0.12, 0.16 };
+primaryView.window.viewInit.hasBackground = true;
+primaryView.renderWindow = genericOpenGlWindow;
+
+HostRenderViewConfig topSlice;
+topSlice.id = "slice-top-down";
+topSlice.role = HostRenderViewRole::TopDownSlice;
+topSlice.window.viewInit.viewMode = HostRenderMode::SliceTopDown;
+topSlice.renderWindow = topSliceWindow;
 
 HostSessionConfig config;
-config.renderViews.push_back(std::move(view));
+config.renderViews.push_back(std::move(primaryView));
+config.renderViews.push_back(std::move(topSlice));
 
-auto session = std::make_unique<VtkAppHostSession>(std::move(config));
+auto session =
+    std::make_unique<VtkAppHostSession>(std::move(config));
 if (!session->BuildSession()) {
     return false;
 }
+```
 
-auto crop = std::make_shared<CropHostFeature>(cropConfig);
-auto gap = std::make_shared<GapHostFeature>(gapConfig);
-if (!session->AttachFeature(crop)
-    || !session->AttachFeature(gap)) {
+`BuildSession()` 幂等；空 topology、重复/非法 view 或任一内部构建失败时返回 `false`。
+Qt 注入的 window 必须已经通过 `QVTKOpenGLNativeWidget::setRenderWindow()` 与 widget
+绑定。
+
+按 id 查询并核对 Qt 与 Host 使用同一 window：
+
+```cpp
+const HostRenderViewEndpoint* endpoint =
+    session->GetRenderViewEndpoint("primary-3d");
+if (!endpoint
+    || endpoint->renderWindow != genericOpenGlWindow.Get()) {
+    return false;
+}
+```
+
+查询 Primary3D 和遍历全部 endpoint：
+
+```cpp
+const HostRenderViewEndpoint* primary =
+    session->GetPrimaryEndpoint();
+if (!primary) {
     return false;
 }
 
-HostTimerConfig timer;
-timer.isTimerEnabled = true;
-timer.targetView = {
+for (const HostRenderViewEndpoint& item
+    : session->GetRenderViewEndpoints()) {
+    qDebug() << QString::fromStdString(item.id);
+}
+```
+
+endpoint 是非拥有句柄，只能在当前 session topology 存活期间使用。
+
+### 6.2 挂载 Feature、Timer 与关闭解绑
+
+先准备 Qt 自己的 Feature 配置；这些配置不来自 standalone `main.cpp`：
+
+```cpp
+const HostViewTarget primary3D{
     "primary-3d", false, HostRenderViewRole::Primary3D
 };
+const HostViewTarget topDown{
+    "slice-top-down", false, HostRenderViewRole::TopDownSlice
+};
+
+CropHostTarget cropTarget;
+cropTarget.referenceView = primary3D;
+cropTarget.targetViews.viewIds = {
+    "primary-3d", "slice-top-down"
+};
+cropTarget.isTargetViewsUsed = true;
+cropTarget.source = CropHostSource::CurrentImage;
+
+CropHostConfig cropConfig;
+cropConfig.defaultTarget = cropTarget;
+cropConfig.inputViews.viewIds = { "primary-3d" };
+
+GapHostStartParams gapStart;
+gapStart.targetViews.viewIds = {
+    "primary-3d", "slice-top-down"
+};
+gapStart.surface.isoMode = GapIsoMode::DataRangeRatio;
+gapStart.surface.dataRangeRatio = 0.55;
+gapStart.voidParams.grayMax = 0.15f;
+gapStart.voidParams.minVolumeMM3 = 0.0001;
+gapStart.voidParams.erosionIterations = 2;
+
+GapHostConfig gapConfig;
+gapConfig.defaultStart = gapStart;
+gapConfig.inputViews.viewIds = { "primary-3d" };
+
+auto crop = std::make_shared<CropHostFeature>(
+    std::move(cropConfig));
+auto gap = std::make_shared<GapHostFeature>(
+    std::move(gapConfig));
+```
+
+Qt adapter 必须强持有两个 `shared_ptr`。Session 只保存 weak Feature：
+
+```cpp
+if (!session->AttachFeature(crop)) {
+    return false;
+}
+if (!session->AttachFeature(gap)) {
+    session->DetachFeature(*crop);
+    return false;
+}
+```
+
+绑定唯一 Host timer hook：
+
+```cpp
+HostTimerConfig timer;
+timer.isTimerEnabled = true;
+timer.targetView = primary3D;
 if (!session->AttachTimer(timer)) {
     return false;
 }
 ```
 
-`session` 不拥有 Feature 强引用；`crop`、`gap` 必须由 Qt adapter 保存到关闭阶段。`BuildSession()`、Feature attach/detach 与 Feature 的 `SendRequest()/GetState()` 有明确 owner-thread 约束。Session 的 `Send*` 当前没有逐入口 owner-thread 断言，但 Qt adapter 仍必须把所有 Host/Feature 调用串行放在 GUI/VTK 线程，不能把“未检查”理解为线程安全。
+`AttachTimer(true)` 只表示 Host hook 绑定成功；Qt 仍需确认 QVTK interactor 的
+TimerEvent 持续到达。关闭阶段先停止新请求，再按 Feature 逐个解绑：
 
-`HostSessionConfig::dataExportRequest/sliceExportRequest` 只在调用
-`AttachHotkeys()` 时作为 standalone 导出热键的缺省请求。Qt action 直接构造
-`HostDataRequest`，不会从 Session 配置继承目录、格式或来源。
+```cpp
+const bool isGapDetached = session->DetachFeature(*gap);
+const bool isCropDetached = session->DetachFeature(*crop);
+if (!isGapDetached || !isCropDetached) {
+    return false;
+}
+gap.reset();
+crop.reset();
+```
 
-### 6.2 Load
+需要替换或移除 Host timer hook 时传 `isTimerEnabled=false`：
+
+```cpp
+HostTimerConfig stopTimer;
+stopTimer.isTimerEnabled = false;
+session->AttachTimer(stopTimer);
+```
+
+### 6.3 `AttachHotkeys` 与 `Start` 的 Qt 边界
+
+生产 Qt action 直接发送具体 Request，通常不调用 `AttachHotkeys()`。只有宿主明确把
+VTK interactor 键盘输入也作为调试入口时才配置它，例如：
+
+```cpp
+HostHotkeyConfig debugKeys;
+debugKeys.isContextInputEnabled = true;
+debugKeys.contextInputViews.viewIds = { "primary-3d" };
+debugKeys.modelSwitchKey = 'm';
+session->AttachHotkeys(debugKeys);
+```
+
+这不会给 Qt action 注入默认路径或请求字段。Qt 不能调用以下接口：
+
+```cpp
+// 禁止：Start() 会进入阻塞的 standalone VTK event loop。
+// session->Start();
+// endpoint->interactor->Start();
+```
+
+Qt 的唯一事件循环是 `QApplication::exec()`。
+
+### 6.4 加载与内存重载
+
+定义一个可复用的 Host completion：
+
+```cpp
+const QPointer<QtHostWindow> owner(this);
+const HostCompleteCallback onHostComplete =
+    [owner](bool isSuccess) {
+        if (!owner) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, isSuccess] {
+                if (owner) {
+                    owner->statusBar()->showMessage(
+                        isSuccess ? "操作完成" : "操作失败");
+                }
+            },
+            Qt::QueuedConnection);
+    };
+```
+
+从 UTF-8 路径加载文件：
 
 ```cpp
 HostLoadRequest load;
-load.filePath = sourcePath.toUtf8().toStdString(); // public std::string 路径固定为 UTF-8
+load.filePath = sourcePath.toUtf8().toStdString();
 load.geometry.dimensions = { sizeX, sizeY, sizeZ };
 load.geometry.spacing = { spacingX, spacingY, spacingZ };
 load.geometry.origin = { originX, originY, originZ };
 
-HostDataRequest request;
-request.action = HostDataAction::LoadFile;
-request.payload = std::move(load);
-
-const QPointer<QtHostWindow> owner(this);
-const bool isAccepted = session->SendData(
-    std::move(request),
-    [owner](bool isSuccess) {
-        if (!owner) return;
-        QMetaObject::invokeMethod(owner, [owner, isSuccess] {
-            if (owner) {
-                owner->statusBar()->showMessage(
-                    isSuccess ? "Load complete" : "Load failed");
-            }
-        }, Qt::QueuedConnection);
-    });
+const bool isLoadAccepted = session->SendRequest(
+    std::move(load), onHostComplete);
 ```
 
-同步 `true` 是接纳，不是完成。若 dimensions 全为零，只有 `.raw` 文件才尝试从文件名末尾 `NxMxK` 推断；部分零或负数拒绝。文件长度必须精确匹配 float32 layout。
+dimensions 全为零时，只有 `.raw` 文件会尝试从文件名末尾 `NxMxK` 推断；部分零、负数或
+文件长度不匹配都会拒绝。
 
-### 6.3 Reload
+从 Qt 已拥有的数据重载：
 
 ```cpp
 HostReloadRequest reload;
-reload.voxels = std::move(voxels);
+reload.voxels = std::move(ownedVoxels);
 reload.geometry.dimensions = { sizeX, sizeY, sizeZ };
 reload.geometry.spacing = { spacingX, spacingY, spacingZ };
 reload.geometry.origin = { originX, originY, originZ };
 
-HostDataRequest request;
-request.action = HostDataAction::ReloadBuffer;
-request.payload = std::move(reload);
-session->SendData(std::move(request), onReloadComplete);
+const bool isReloadAccepted = session->SendRequest(
+    std::move(reload), onHostComplete);
 ```
 
-DTO 自有 voxels；Host 移入 `VolumeBuffer`，worker 不借用 Qt 内存。service 后置拒绝可能同步返回 `false` 后仍排队 completion(false)，callback 必须有关闭门禁。
+`HostReloadRequest` 自有 `voxels`；布局固定为 X 最快的连续 float32，元素数量必须等于
+三维尺寸乘积。Load/Reload 成功会发布新 DataVersion，并按新数据范围重置共享 WW/WC。
 
-### 6.4 View 与 Tool
+### 6.5 View patch：每个字段一个例子
 
-以下 View/Crop 片段假定 topology 还配置了 `slice-top-down` 与 `composite-volume`；若只复制 6.1 的单窗口最小配置，应把 target 改为已存在的 `primary-3d`。
+`HostViewSetRequest` 是 patch：只填写本次要修改的字段，未知或不想修改的值不要构造。
+所有字段先整体校验，任一字段非法时整笔请求零副作用。View Set/Reset 不允许 callback。
+
+切换渲染模式：
 
 ```cpp
-HostViewSetRequest viewSet;
-viewSet.targetView = {
-    "composite-volume", false, HostRenderViewRole::Composite3D
-};
-viewSet.materialPreset = HostMaterialPreset::Glossy;
-viewSet.volumeQuality = HostVolumeQualityParams{
-    HostVolumeQuality::Quality, 766, 1.0, true
-};
-viewSet.gradientOpacity = std::vector<HostGradientOpacityNode>{
-    { 0.0, 0.0 }, { 120.0, 1.0 }
-};
-viewSet.transferPreset = HostTransferPreset::Percentile;
-viewSet.isDenoiseOn = true;
-viewSet.iso = 420.0;
-viewSet.background = HostBackgroundColor{ 0.08, 0.08, 0.12 };
-viewSet.cursor = HostCursorParams{ { 12.0, 24.0, 36.0 }, -1 };
-viewSet.visibility = HostVisibilityParams{
-    false, true, false
-};
-viewSet.isAxesVisible = true;
-session->SendView({ HostViewAction::Set, std::move(viewSet) });
-
-HostViewResetRequest cameraReset;
-cameraReset.targetView = {
-    "primary-3d", false, HostRenderViewRole::Primary3D
-};
-session->SendView({
-    HostViewAction::ResetCamera, std::move(cameraReset)
-});
-
-HostToolSetRequest toolSet;
-toolSet.targetView = {
-    "primary-3d", false, HostRenderViewRole::Primary3D
-};
-toolSet.toolMode = HostToolMode::Navigation;
-session->SendTool({ HostToolAction::Set, std::move(toolSet) });
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.mode = HostRenderMode::IsoSurface;
+session->SendRequest(std::move(request));
 ```
 
-View request 的 optional 全缺省时仍可成功 no-op。Router 会先解析 target/context，把 mode、
-material/preset、opacity、TF/preset、iso、background、spacing、window-level、volume
-quality、gradient opacity、denoise、cursor、元素显隐与方向轴显隐全部转换并校验为候选；任一字段非法时零 setter
-调用，合法请求先提交 spacing 事务，再写入其余已验证状态。volume quality、gradient
-opacity 与 denoise 只允许有效 mode 为 Volume/CompositeVolume；同一请求修改 mode 时按候选
-mode 判断，不能先改 mode 再因后续字段失败留下部分状态。
-
-Volume 画质只保留 `Quality` 与 `Custom`。`Quality` 固定最大轴 766 并启用 jitter；
-`Custom` 使用请求的 maxDimension/sampleDistance/jitter。两档都关闭 VTK 自动采样调整，
-并固定 ImageSampleDistance 为 1。Crop 或 Gap 成功进入后，其参与 view 在静止、拖拽、
-排队和 commit 期间都固定连接 `Quality(766)` producer/mask，并保持固定采样距离与 jitter；
-interaction 只提高刷新频率，不切换 producer，也不修改 mapper 参数。
-Crop 的参与 view 是 reference 与 effect targets 的精确服务并集，但裁切效果仍只作用于
-effect targets。退出、输入失效或 Detach 后恢复进入前配置。例如 `Custom(1000)` 期间进入
-Feature 使用 766，退出后仍恢复 1000 及原 sampleDistance/jitter。此过程不会改写 View
-getter 返回的配置，多个 Feature 重叠时由最后一个退出者触发恢复。
-显式空 `gradientOpacity` 清除自定义函数并恢复 VTK 默认梯度不透明度。Percentile preset
-固定使用 2%/98% histogram 分位点并写入 session-wide scalar TF；后续成功 Reload 会按新
-DataVersion 重算，手动 `transferNodes` 会把 intent 切回 Manual。denoise 只改变显示 producer，
-不修改 DataManager current、validity mask、Crop history 或 Gap snapshot。
-
-窗宽窗位不是 target-local：target 只选择发起写入的 service，WW/WC 实际进入 session 唯一 `SharedInteractionState`，三张 slice 同步更新。当前 3D strategy 不消费 WindowLevel，因此给 3D target 发送也会改共享值，但 3D 画面不变。File/Reload 成功会把 WW/WC 重置为新数据范围默认值；失败和纯 mode rebuild 保留旧值。
-
-运行期范围：material 的 ambient/diffuse/specular/opacity 和 background RGB 位于 `[0,1]`；
-specular power 非负；TF 显式数组非空、五个分量都位于 `[0,1]` 且 position 非降序；
-gradient 必须 finite、非负且非降序，gradient opacity 位于 `[0,1]`；Custom
-`maxDimension` 位于 `[1,16384]` 且 sample distance 为正 finite；spacing 三轴正；WW 正；
-iso/WC 及所有浮点都必须 finite。构建期 `HostViewInitConfig` 使用相同 WW/WC 与 TF
-校验，不再接受显式空、越界或降序 TF。
-
-### 6.5 Crop
+写入完整数值材质：
 
 ```cpp
-CropHostTarget target;
-target.referenceView = {
-    "primary-3d", false, HostRenderViewRole::Primary3D
-};
-target.targetViews.viewIds = {
-    "primary-3d", "composite-volume", "slice-top-down"
-};
-target.isTargetViewsUsed = true;
+HostViewSetRequest request;
+request.targetView = primary3D;
+HostMaterialParams material;
+material.ambient = 0.15;
+material.diffuse = 0.75;
+material.specular = 0.35;
+material.specularPower = 24.0;
+material.opacity = 0.9;
+material.isShadeOn = true;
+request.material = material;
+session->SendRequest(std::move(request));
+```
 
-crop->SendRequest({ CropHostAction::Start, target });
-crop->SendRequest({ CropHostAction::Box, target });
+使用材质预设：
 
-CropHostModeRequest mode;
-mode.target = target;
-mode.removalMode = CropRemovalMode::KeepInside;
-crop->SendRequest({ CropHostAction::Mode, std::move(mode) });
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.materialPreset = HostMaterialPreset::Glossy;
+session->SendRequest(std::move(request));
+```
+
+只修改全局不透明度：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.opacity = 0.4;
+session->SendRequest(std::move(request));
+```
+
+写入手动标量传递函数：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.transferNodes = std::vector<HostTransferNode>{
+    { 0.0, 0.0, 0.0, 0.0, 0.0 },
+    { 0.5, 0.25, 0.2, 0.7, 1.0 },
+    { 1.0, 1.0, 1.0, 1.0, 1.0 }
+};
+session->SendRequest(std::move(request));
+```
+
+使用 2%/98% Percentile 传递函数预设：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.transferPreset = HostTransferPreset::Percentile;
+session->SendRequest(std::move(request));
+```
+
+调节等值面 ISO 阈值：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.iso = 420.0;
+session->SendRequest(std::move(request));
+```
+
+调节目标 renderer 背景：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.background = HostBackgroundColor{ 0.08, 0.08, 0.12 };
+session->SendRequest(std::move(request));
+```
+
+修改体数据 spacing：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.spacing = std::array<double, 3>{ 0.4, 0.4, 1.0 };
+session->SendRequest(std::move(request));
+```
+
+调节窗宽窗位：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = topDown;
+request.windowLevel = HostWindowLevelParams{
+    600.0, // windowWidth
+    120.0  // windowCenter
+};
+session->SendRequest(std::move(request));
+```
+
+WW/WC 属于 session 共享状态，target 只是写入入口；三张 slice 会同步变化。3D strategy
+当前不消费 WW/WC，所以给 3D target 发送也会改共享值，但 3D 画面不变。
+
+设置自定义 Volume 画质：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.mode = HostRenderMode::Volume;
+request.volumeQuality = HostVolumeQualityParams{
+    HostVolumeQuality::Custom, 1000, 0.7, true
+};
+session->SendRequest(std::move(request));
+```
+
+设置梯度不透明度：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.mode = HostRenderMode::Volume;
+request.gradientOpacity =
+    std::vector<HostGradientOpacityNode>{
+        { 0.0, 0.0 }, { 120.0, 1.0 }
+    };
+session->SendRequest(std::move(request));
+```
+
+显式空数组清除自定义梯度不透明度：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.gradientOpacity =
+    std::vector<HostGradientOpacityNode>{};
+session->SendRequest(std::move(request));
+```
+
+启用或关闭显示去噪：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.mode = HostRenderMode::Volume;
+request.isDenoiseOn = true;
+session->SendRequest(std::move(request));
+```
+
+写入共享 world cursor：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = topDown;
+request.cursor = HostCursorParams{
+    { 12.0, 24.0, 36.0 }, -1
+};
+session->SendRequest(std::move(request));
+```
+
+逐项修改共享业务元素显隐：
+
+```cpp
+HostVisibilityParams visibility;
+visibility.isPlanes3DVisible = true;
+visibility.isCrosshairVisible = false;
+visibility.isRulerVisible = true;
+
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.visibility = visibility;
+session->SendRequest(std::move(request));
+```
+
+显示或隐藏目标窗口左下角世界方向轴：
+
+```cpp
+HostViewSetRequest request;
+request.targetView = primary3D;
+request.isAxesVisible = false;
+session->SendRequest(std::move(request));
+```
+
+复位目标相机：
+
+```cpp
+HostViewResetRequest request;
+request.targetView = primary3D;
+session->SendRequest(std::move(request));
+```
+
+材质预设与数值材质/opacity 互斥，TF 预设与手动节点互斥。Volume quality、gradient
+opacity、denoise 只允许候选 mode 为 Volume/CompositeVolume；可在同一 patch 中先提供
+目标 mode。所有浮点必须 finite；spacing 和 WW 必须为正；颜色、opacity 与 TF
+归一化分量位于 `[0,1]`。
+
+### 6.6 Tool 模式
+
+显式写入 Navigation 或 ModelTransform：
+
+```cpp
+HostToolSetRequest request;
+request.targetView = primary3D;
+request.toolMode = HostToolMode::ModelTransform;
+session->SendRequest(std::move(request));
+```
+
+在两个模式间切换：
+
+```cpp
+HostToolSwitchRequest request;
+request.targetView = primary3D;
+session->SendRequest(std::move(request));
+```
+
+Tool Set/Switch 都要求目标 context 存在，也不允许 callback。
+
+### 6.7 数据与切片导出
+
+显式导出 RAW/PLY/STL/OBJ：
+
+```cpp
+HostDataExportRequest request;
+request.outputPath =
+    outputDir.toUtf8().toStdString(); // 目录，不是文件名
+request.format = HostDataExportFormat::Ply;
+request.sourceView = primary3D;
+session->SendRequest(std::move(request), onHostComplete);
+```
+
+`format` 缺省时，Volume/CompositeVolume 推断 RAW，IsoSurface/CompositeIsoSurface
+推断 PLY，slice 模式拒绝。Data 层生成
+`<dimX>x<dimY>x<dimZ>_transform.ext`，Qt 不拼接文件名。
+
+逐层导出切片 PNG，并保持当前切片方向：
+
+```cpp
+HostSliceExportRequest request;
+request.outputDir = outputDir.toUtf8().toStdString();
+request.sourceView = topDown;
+session->SendRequest(std::move(request), onHostComplete);
+```
+
+指定平面内旋转角：
+
+```cpp
+HostSliceExportRequest request;
+request.outputDir = outputDir.toUtf8().toStdString();
+request.sourceView = topDown;
+request.angleDeg = 30.0;
+session->SendRequest(std::move(request), onHostComplete);
+```
+
+导出在接纳线程冻结 image/mask、iso、model-to-world 和方向；后台不重新读取 current。
+
+### 6.8 Crop 全部 Action
+
+所有例子使用 6.2 的 `crop` 与 `cropTarget`。未 Attach、非 owner thread、正在
+`isPublishing`、动作必需字段缺失都会返回 `false`。`None` 是无效哨兵，不发送。
+
+#### 6.8.1 启动新 Box 或 Plane
+
+`Box` 自己会建立/更新 binding 并显示 Box widget，不需要先发送 `Start`：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Box;
+request.target = cropTarget;
+crop->SendRequest(std::move(request));
+```
+
+启动 Plane：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Plane;
+request.target = cropTarget;
+crop->SendRequest(std::move(request));
+```
+
+只建立 binding、不显示新 widget 时使用 Start：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Start;
+request.target = cropTarget;
+crop->SendRequest(std::move(request));
+```
+
+#### 6.8.2 设置保留/移除模式
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Mode;
+request.target = cropTarget;
+request.removalMode = CropRemovalMode::KeepInside;
+crop->SendRequest(std::move(request));
+```
+
+改为 `CropRemovalMode::RemoveInside` 即移除 Box/Plane 的 Inside。
+
+#### 6.8.3 回退、前进与跳转节点
+
+回退到上一个有效节点：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Previous;
+crop->SendRequest(std::move(request));
+```
+
+前进到下一个有效节点：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Next;
+crop->SendRequest(std::move(request));
+```
+
+跳转到相对 history 节点：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Node;
+request.nodeCount = 2;
+crop->SendRequest(std::move(request));
+```
+
+Previous/Next/Node 使用当前已绑定 target，不再重复携带 target；没有 active binding 时拒绝。
+
+#### 6.8.4 物化当前 Crop 结果
+
+BuildResult 是唯一允许且要求 callback 的 Crop Action：
+
+```cpp
+const QPointer<QtHostWindow> owner(this);
+CropHostRequest request;
+request.action = CropHostAction::BuildResult;
+request.target = cropTarget;
 
 crop->SendRequest(
-    { CropHostAction::Export, target },
-    onCropComplete);
+    std::move(request),
+    [owner](CropBuildResult result) {
+        if (!owner) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, isSuccess = result.isSucceeded] {
+                if (owner) {
+                    owner->statusBar()->showMessage(
+                        isSuccess ? "裁切物化完成" : "裁切物化失败");
+                }
+            },
+            Qt::QueuedConnection);
+    });
 ```
 
-目标与状态规则：
+worker 从 root image/root mask 对绝对历史前缀做一次融合，只生成最终 mask。返回 owner
+thread 后用发起时 current snapshot 做 CAS；期间若 Reload 已发布新版本，结果以
+`CropFailure::VersionMismatch` 退休，不覆盖新数据。
 
-- `isTargetViewsUsed=true` 只使用显式 `targetViews`，空集合或未知 id/role 整体拒绝；`false` 只使用 `CropHostConfig::defaultTarget`。
-- reference、所有 target、input view 与输入 snapshot 在任何 widget/shader 变更前全部解析，失败不留下部分 binding。
-- Start 建立 binding；Box/Plane 切换 widget；Mode 设置 KeepInside/RemoveInside；Previous/Next/Node 修改有效 history 前缀。
-- `GetState()` 返回 history、`isActive` 和 `isPublishing`，UI 不读取 Session 内部状态。
-- Export worker 从 root image/root mask 对 `allHistory` 的绝对前缀做一次融合计算，只生成最终 UCHAR mask；开始时的 current snapshot 仅作为 owner thread 的 CAS expected 令牌。Reload 先提交则 Crop 返回 VersionMismatch；Crop 先提交则后续 Reload 可合法覆盖。
-- 物化绝对节点 N 后，N 成为新基线，UI 的相对 history 节点回到 0。Previous 不越过该基线；若仍有 redo 尾部，Next 从 0 继续。RestoreOriginal 才会恢复 root 节点并重新开放完整 redo。
-
-退出：
+#### 6.8.5 注册与清除 PolyData 输入
 
 ```cpp
-crop->SendRequest({ CropHostAction::Exit, std::monostate{} });
+CropHostRequest request;
+request.action = CropHostAction::SetPolyData;
+request.polyData = sourcePolyData;
+request.sourceVersion = nextSourceVersion;
+crop->SendRequest(std::move(request));
 ```
 
-Box 的 Inside 是 canonical `[-1,1]^3` 内部；Plane 的 Inside 是法线严格正半空间。KeepInside 保留 Inside，RemoveInside 移除 Inside。Qt 可以在 `isPublishing` 期间禁用冲突按钮以改善交互，但数据正确性只依赖 CAS，不依赖 UI 时序。
-
-图像物化使用 VTK SMP backend。Standalone `main` 在任何 Feature worker 启动前选择 `STDThread`，不可用时回退 `Sequential`；Qt composition root 若不复用该入口，也必须在创建或启动 Feature worker 前完成同样的一次性 backend 选择与 `vtkSMPTools::Initialize()`，不得在运行期切换。
-
-### 6.6 Gap
+`polyData` 必须非空，version 必须非零且严格递增，同一指针不能换版本重复注册。使用它时
+令 `cropTarget.source = CropHostSource::RegisteredPolyData`。
 
 ```cpp
-GapHostStartRequest start;
+CropHostRequest request;
+request.action = CropHostAction::ClearPolyData;
+crop->SendRequest(std::move(request));
+```
+
+#### 6.8.6 恢复 root、退出与读取状态
+
+恢复首次成功物化前的 root 数据，并重新开放完整 redo：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::RestoreOriginal;
+crop->SendRequest(std::move(request));
+```
+
+退出编辑：
+
+```cpp
+CropHostRequest request;
+request.action = CropHostAction::Exit;
+crop->SendRequest(std::move(request));
+```
+
+读取 UI 状态：
+
+```cpp
+const CropHostState state = crop->GetState();
+ui->previousButton->setEnabled(
+    state.isActive && state.history.nodeCount > 0);
+ui->buildButton->setEnabled(
+    state.isActive && !state.isPublishing);
+```
+
+Qt 可以据 `isPublishing` 禁用冲突按钮，但正确性依赖 version/CAS，不依赖 UI 互斥。
+图像物化使用 VTK SMP；Qt composition root 必须在任何 Feature worker 启动前一次性选择
+backend 并调用 `vtkSMPTools::Initialize()`，运行期不得切换。
+
+### 6.9 Gap 全部 Action
+
+所有例子使用 6.2 的 `gap`。必须先 Attach Feature 和 Timer；`None` 是无效哨兵。
+
+#### 6.9.1 启动计算并调节 Gap ISO
+
+按当前数据范围比例计算阈值：
+
+```cpp
+GapHostStartParams start;
 start.targetViews.viewIds = {
     "primary-3d", "slice-top-down"
 };
 start.surface.isoMode = GapIsoMode::DataRangeRatio;
 start.surface.dataRangeRatio = 0.55;
-start.voidParams.grayMin = -0.22f;
 start.voidParams.grayMax = 0.15f;
-start.voidParams.minVolumeMM3 = 0.0001f;
-start.voidParams.angleThresholdDeg = 30.0f;
-start.voidParams.tensorWindowSize = 1;
+start.voidParams.minVolumeMM3 = 0.0001;
 start.voidParams.erosionIterations = 2;
 
+GapHostRequest request;
+request.action = GapHostAction::Start;
+request.start = std::move(start);
 gap->SendRequest(
-    { GapHostAction::Start, std::move(start) },
-    onGapComplete);
+    std::move(request),
+    [owner = QPointer<QtHostWindow>(this)](bool isSuccess) {
+        if (!owner) {
+            return;
+        }
+        QMetaObject::invokeMethod(
+            owner,
+            [owner, isSuccess] {
+                if (owner) {
+                    owner->statusBar()->showMessage(
+                        isSuccess
+                            ? "Gap 计算完成"
+                            : "Gap 计算失败");
+                }
+            },
+            Qt::QueuedConnection);
+    });
 ```
 
-必须先 `AttachFeature()` 与 `AttachTimer()`。Start 在接纳事务中冻结 image+mask、立即启动 worker，并在成功后保存当前 `activeVersion`；后续 TimerEvent 只轮询/消费终态并交付 completion。旧 `AwaitingInput` phase 已不存在，内部 `AwaitingResult` 也不是公开 `GapHostState`，Qt 不应依赖内部 phase 名称。
+直接指定输入标量域的绝对 ISO：
 
 ```cpp
-gap->SendRequest({ GapHostAction::Overlay, std::monostate{} });
-gap->SendRequest({ GapHostAction::Exit, std::monostate{} });
+GapHostStartParams start = gapStart;
+start.surface.isoMode = GapIsoMode::AbsoluteValue;
+start.surface.absoluteIsoValue = 420.0;
 
+GapHostRequest request;
+request.action = GapHostAction::Start;
+request.start = std::move(start);
+gap->SendRequest(std::move(request));
+```
+
+每次修改 Gap 阈值都要构造新的 Start；请求不做“只改阈值”的 partial patch，因为它启动
+一批新的分析事务。`grayMax`、`minVolumeMM3`、`erosionIterations` 当前生效；
+`grayMin`、角度、tensor window 和高级法向参数仍是预留字段，不应在 UI 中宣称已生效。
+
+#### 6.9.2 隐藏或重新显示 overlay
+
+Overlay 是切换动作，不是显式 bool Set。第一次发送隐藏，再发送一次重新显示：
+
+```cpp
+GapHostRequest request;
+request.action = GapHostAction::Overlay;
+gap->SendRequest(std::move(request));
+```
+
+只有活动 Gap 会话可切换。当前 `GapHostState` 不公开 overlay 可见位；
+`isViewActive` 表示会话可接受 Overlay/Exit，不等于“当前 overlay 可见”。Qt 若需要按钮文案，
+应在每次 `SendRequest(Overlay)` 返回 `true` 后更新自己的显示意图。
+
+#### 6.9.3 退出与读取状态/统计
+
+```cpp
+GapHostRequest request;
+request.action = GapHostAction::Exit;
+gap->SendRequest(std::move(request));
+```
+
+Exit 进入 pending 后继续 pump TimerEvent，直到状态回到 Idle：
+
+```cpp
 const GapHostState state = gap->GetState();
 const GapStatistics stats = state.statistics;
+
+ui->gapExitButton->setEnabled(state.isViewActive);
+ui->porosityLabel->setText(
+    QString::number(stats.porosityRatio));
+const bool isExitDone =
+    state.analysisState == GapAnalysisState::Idle
+    && !state.isExitPending;
 ```
 
-`GapStatistics` 同批返回 `objectVoxelCount`、`voidVoxelCount`、两者的 mm³ 体积和
-`porosityRatio`。`GetState()` 只能在 attached 的 owner thread 读取；其它线程、Detach 后、
-退出完成或版本失配时返回 Idle/零统计。
-
-Gap 捕获同一个 snapshot 的 image 与有效域 mask。worker 只对 mask 内体素统计；返回 owner thread 时若 current version 已变化，旧 callback、overlay 和 statistics 全部退休。`GetState()` 在 exit-pending 暴露 `isExitPending=true`，Qt 继续 pump timer，直到 `analysisState==Idle` 且统计归零。Crop 与 Gap 不互查状态、不互斥；composition root 可以为 UI 体验限制按钮，但不能把该策略当作正确性协议。
-
-### 6.7 Export
-
-```cpp
-HostDataExportRequest output;
-output.outputPath = outputDir.toUtf8().toStdString(); // UTF-8 目录，不是文件名
-output.format = HostDataExportFormat::Ply;
-HostDataRequest dataExportRequest;
-dataExportRequest.action = HostDataAction::ExportData;
-dataExportRequest.payload = std::move(output);
-session->SendData(std::move(dataExportRequest), onExportComplete);
-
-HostSliceExportRequest slices;
-slices.outputDir = outputDir.toUtf8().toStdString();
-slices.sourceView = {
-    "slice-top-down", false, HostRenderViewRole::TopDownSlice
-};
-HostDataRequest sliceExportRequest;
-sliceExportRequest.action = HostDataAction::ExportSlices;
-sliceExportRequest.payload = std::move(slices);
-session->SendData(std::move(sliceExportRequest), onSlicesComplete);
-```
-
-数据导出只接受 `Raw/Ply/Stl/Obj`。Router 将显式格式转换为
-`.raw/.ply/.stl/.obj`；若 `format` 缺省，则根据 `sourceView` 对应模式推断：
-Volume/CompositeVolume 为 RAW，IsoSurface/CompositeIsoSurface 为 PLY，slice 模式拒绝。
-Qt 显式请求未提供 selector 时使用 Primary3D；需要从特定窗口模式推断时，应明确设置
-`sourceView`。
-
-App 在接纳调用线程冻结 current image/mask、isoValue 和 model-to-world，后台任务不重新
-读取 current。Data 层创建输出目录，并统一生成
-`<dimX>x<dimY>x<dimZ>_transform.raw/.ply/.stl/.obj`。RAW 导出变换后的 float32 体数据；
-PLY/STL/OBJ 以冻结 iso 构造等值面，按 validity mask 裁切并烘焙 world 变换。上位机不得
-预先拼接具体文件名。
-
-`ExportSlices` 独立写逐层 PNG。Qt 显式请求应设置 `sourceView` 以决定切片法向与相机方向；
-`angleDeg` 缺省时保持目标视图当前方向。若 standalone 需要调试热键，可在
-`HostSessionConfig` 设置目录/可选格式等缺省值后调用 `AttachHotkeys(config)`：数据导出
-只有在格式和 selector 都缺省时才由触发窗口推断，切片导出在 selector 缺省时由触发切片
-窗口补齐来源。热键和 Qt 显式调用最终都进入同一个 `HostCommandRouter::DispatchCommand()`。
+成功批次同批发布 object/void voxel count、mm³ 体积与 porosity。worker 返回时若 current
+version 已变化，旧 callback、overlay 和 statistics 全部退休。Overlay/Exit 不允许 callback；
+Start callback 可选，但生产 Qt 应使用它报告异步完成。
 
 ## 7. DTO 语义
 
@@ -469,7 +953,7 @@ PLY/STL/OBJ 以冻结 iso 构造等值面，按 validity mask 裁切并烘焙 wo
 与 denoise 是 target-local；material、scalar TF、percentile preset intent、WW/WC 等进入
 session shared state。material preset 在 Router 边界立即解析为共享
 `HostMaterialParams`，不形成第二状态 owner。公共 DTO 不保存独立 camera 状态；
-一次性复位通过 `HostViewAction::ResetCamera + HostViewResetRequest` 发给目标 context。
+一次性复位通过具体 `HostViewResetRequest` 发给目标 context。
 
 Router 校验：
 
@@ -487,7 +971,7 @@ WW/WC、cursor 与 visibility mask 均属于 session shared state，不是每个
 
 ### 7.3 Cursor、可见性与相机命令
 
-| 对象 | Qt/Host 当前控制方式 | 是否可用 `SendView` 运行时切换 |
+| 对象 | Qt/Host 当前控制方式 | 是否可用 Session `SendRequest` 运行时切换 |
 | --- | --- | --- |
 | world cursor | `HostViewSetRequest::cursor` | 是；数据未就绪时保持现状 |
 | 世界方向轴 marker | 建窗初值或 `isAxesVisible` | 是；目标 context |
@@ -496,7 +980,7 @@ WW/WC、cursor 与 visibility mask 均属于 session shared state，不是每个
 | 3D cube axes 标尺 | `visibility.isRulerVisible` | 是；会话共享 bit |
 | 目标相机复位 | `ResetCamera + HostViewResetRequest` | 是；一次性命令 |
 | Crop Box/Plane widget | Start/Box/Plane/Exit 生命周期 | 否，不能独立显隐 |
-| Crop shader/mask | Mode/history/Export/RestoreOriginal 驱动 | 否 |
+| Crop shader/mask | Mode/history/BuildResult/RestoreOriginal 驱动 | 否 |
 
 前三个业务元素仍共享同一 visibility mask，target 只选择写入入口；方向轴与相机复位
 只作用目标 context，并把目标 service 标脏，由既有 Timer 渲染下一帧。production Qt
@@ -505,7 +989,12 @@ Host 命令。
 
 ### 7.4 Gap
 
-Gap Feature 对 ratio/absolute/gray/minVolume/angle 执行 finite 检查；ratio `[0,1]`，absolute ISO 还必须可表示为 float，grayMin <= grayMax，tensorWindowSize > 0，erosionIterations >= 0。输入 scalar 必须 finite，spacing 三轴必须正且 finite。输入 image 与有效域 mask 来自同一 `ImageSnapshot`，不得跨 version 拼接。
+Gap Feature 当前对 ratio/absolute/gray/minVolume/angle 执行 finite 检查；ratio 位于
+`[0,1]`，解析后的 absolute ISO 必须可表示为 float，grayMin <= grayMax，
+tensorWindowSize > 0，erosionIterations >= 0。输入 image 与有效域 mask 来自同一
+`ImageSnapshot`，不得跨 version 拼接。当前 `BuildVolumeBuffer` 尚未完整拒绝非 finite
+scalar、spacing/origin 与 double-to-float 越界；生产 Qt 应先在上位机数据入口拒绝这些
+输入，核心补强由 Gap 生命周期计划继续跟踪。
 
 ## 8. Timer 与线程
 
@@ -513,7 +1002,7 @@ Gap Feature 对 ratio/absolute/gray/minVolume/angle 执行 finite 检查；ratio
 
 线程纪律：
 
-1. widget/window/session 构建和所有 `Send*` 在 Qt GUI/VTK 线程执行；
+1. widget/window/session 构建和所有 `SendRequest` 在 Qt GUI/VTK 线程执行；
 2. 不从 worker 调 Crop、Gap、View 或 render API；
 3. Load/Reload/Export 使用现有 task service，不再包 `QtConcurrent`；
 4. callback 用 `QPointer` + queued invocation；
@@ -566,8 +1055,8 @@ Qt target 单独链接 Qt5 Widgets/OpenGL 与 VTK GUISupportQt；Qt 头与 moc/d
 | 网格导出失败 | iso 非 finite、model-to-world 非法、mask 全空或等值面结果为空 |
 | Load true 但未完成 | true 只是接纳；等 completion 并检查 Timer |
 | Feature 请求恒 false | 未 `AttachFeature`、非 owner thread，或 Feature 强引用已释放 |
-| Gap Start false | 未 AttachTimer、目标/参数/snapshot 不合法 |
-| Gap 完成无 overlay | TimerEvent 未持续进入选定 context |
+| Gap Start false | 目标/参数/snapshot 不合法，或已有活动/待退出会话 |
+| Gap 接纳后不完成/无 overlay | 未 AttachTimer，或 TimerEvent 未持续进入选定 context |
 | quality/gradient/denoise 被拒绝 | 目标或同请求候选 mode 不是 Volume/CompositeVolume，或 Custom/节点参数非法 |
 | Crop 完成 VersionMismatch | 任务期间 Reload/其他 writer 已发布新 current；旧结果按协议退休 |
 | 关闭崩溃 | session 晚于 widget/window 销毁 |
@@ -601,8 +1090,8 @@ Qt target 单独链接 Qt5 Widgets/OpenGL 与 VTK GUISupportQt；Qt 头与 moc/d
 - [ ] ViewSet 全量事务、material/TF preset 互斥和 volume-only 能力检查符合契约。
 - [ ] quality/gradient/denoise 为 per-view，percentile/material 为共享真源，Reload 后 preset 重算正确。
 - [ ] WW/WC 三切片共享、3D 不消费、成功 reload 重置与失败保留均符合预期。
-- [ ] Crop 显式/默认目标语义、Box/Plane/Mode/history 与 Export CAS 符合状态表。
-- [ ] 世界轴、十字线、3D 平面/标尺未被误接成不存在的 Host 运行期 API。
+- [ ] Crop 显式/默认目标语义、Box/Plane/Mode/history 与 BuildResult CAS 符合状态表。
+- [ ] 世界轴、十字线、3D 平面/标尺分别通过当前 View Request 字段控制，没有绕过 Host。
 - [ ] Gap Start/Overlay/Exit、同版本 image+mask、旧结果退休与 statistics 正确。
 - [ ] RAW/PLY/STL/OBJ Data Export 与逐层 PNG Slice Export completion 正确。
 - [ ] Data Export 只传目录，落盘文件名符合 `NxMxK_transform.ext`。

@@ -5,17 +5,17 @@
 | 项目 | 当前事实 |
 | --- | --- |
 | 对外门面 | `VtkAppHostSession` |
-| 一次性配置 | `HostSessionConfig`：`renderViews` 与 standalone 导出热键缺省请求 |
-| 主体命令 | `SendData`、`SendView`、`SendTool` |
+| 一次性配置 | `HostSessionConfig`：只保存 `renderViews` |
+| 主体请求 | 八种具体 `HostRequest` 通过单一 `SendRequest` 进入 Session |
 | 可选 Feature | composition root 构造并持有 `CropHostFeature` / `GapHostFeature`，Session 通过 `AttachFeature` 注册 |
 | Adapter 入口 | `AttachTimer`、`AttachHotkeys` |
 | Standalone 入口 | `Start` |
 | 主体下游 | Data、App/State、Render |
 | 不负责 | Qt UI、固定窗口数量、具体算法、除 standalone 导出热键以外的业务默认参数 |
 | 接纳协议 | Feature 读取不可变 `ImageSnapshot`，以 expected snapshot 做 CAS 发布 |
-| 本地实现快照 | 2026-07-28；当前工作树 |
+| 本地实现快照 | 2026-07-29；当前工作树 |
 
-Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 Session、主体 DTO、Feature 公共类型和 endpoint，不应取得 `VizService`、DataManager 或 feature service 后直接操作。Crop/Gap 不属于主体命令 variant；删去任一 Feature 目录后，主体 Host、Render、App 与 Interaction 仍可独立编译。
+Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 Session、主体 DTO、Feature 公共类型和 endpoint，不应取得 `VizService`、DataManager 或 feature service 后直接操作。Crop/Gap 不属于主体 Request 分发；删去任一 Feature 目录后，主体 Host、Render、App 与 Interaction 仍可独立编译。
 
 ## 2. 当前文件与类型
 
@@ -24,11 +24,11 @@ Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 S
 | `MVVCVTK/include/Host/VtkAppHostSession.h` | 公共门面 |
 | `MVVCVTK/include/Host/Types/HostValueTypes.h` | 视图角色、目标、Host 视觉值类型 |
 | `MVVCVTK/include/Host/Types/HostSessionTypes.h` | 窗口拓扑与 endpoint |
-| `MVVCVTK/include/Host/Types/HostRequestTypes.h` | Data/View/Tool 三个主体业务域的 request |
-| `MVVCVTK/include/Host/Types/HostCommandTypes.h` | 三类主体 typed command 与 completion |
-| `MVVCVTK/include/Host/Types/HostAdapterTypes.h` | Hotkey 与 Timer adapter 配置 |
+| `MVVCVTK/include/Host/Types/HostRequest.h` | 空多态请求基类与公共 completion callback |
+| `MVVCVTK/include/Host/Types/HostRequestTypes.h` | Data/View/Tool 的八种具体 request |
+| `MVVCVTK/include/Host/Types/HostInputTypes.h` | Hotkey 与 Timer 输入配置 |
 | `MVVCVTK/include/Host/HostRenderViewSet.h` | 多视图 owner、选择与 endpoint |
-| `MVVCVTK/include/Host/HostCommandRouter.h` | typed command 分发 |
+| `MVVCVTK/include/Host/HostCommandRouter.h` | 主体具体 Request 分发 |
 | `MVVCVTK/include/Host/HostFeature.h` | Feature 接口、上下文 reader/writer/input/completion port |
 | `MVVCVTK/include/Host/HostHotkeyRouter.h` | standalone 输入适配 |
 | `MVVCVTK/features/OrthogonalCrop/include/Host/CropHostFeature.h` | Crop 可选 Feature 的请求、状态与门面 |
@@ -74,7 +74,7 @@ BuildCore
 
 `BuildSession()` 不调用 `SendRenderAll()`。不存在 `isInitialRenderEnabled`。`Start()` 才会在构建成功后先 `SendRenderAll()`，再让 standalone start view 进入阻塞式 VTK 事件循环。因此 Qt 只调用 `BuildSession()`，绝不能调用 `Start()`。
 
-主体 `Send*`、endpoint getter、`AttachTimer()` 与 `Start()` 都可能触发首次懒构建。`AttachTimer()` 会先调用 `BuildSession()`；`AttachFeature()` 不负责构建，要求 Session 已构建且调用发生在 owner thread。为让失败点和生命周期顺序清晰，应用仍应显式先 `BuildSession()`，再注册 Feature、绑定 Timer。
+主体 `SendRequest()`、endpoint getter、`AttachTimer()` 与 `Start()` 都可能触发首次懒构建。`AttachTimer()` 会先调用 `BuildSession()`；`AttachFeature()` 不负责构建，要求 Session 已构建且调用发生在 owner thread。为让失败点和生命周期顺序清晰，应用仍应显式先 `BuildSession()`，再注册 Feature、绑定 Timer。
 
 ### 3.3 视图配置
 
@@ -88,42 +88,38 @@ context，不进入会话共享状态。
 
 `SetInitialVisibility()` 还会按 role 写会话共享的 `VisFlags`：3D role 关闭 `Planes3D` 与 `Ruler`，slice role 打开 `Crosshair`。注意这三个 flag 分别表示 3D 彩色参考平面、3D cube axes 标尺和 2D 十字线，都不是 orientation marker。由于 visibility mask 是共享状态，构建多个不同 role 时这些写入不是 per-view 配置。
 
-## 4. 当前命令协议
+## 4. 当前请求协议
 
-主体 `HostCommand` 是：
+主体只保留一个无业务字段的多态 `HostRequest` 基类。调用方直接构造具体 Request，
+Session 与 Router 不再构造 `HostCommand`、领域 Action 或 Payload：
 
-```cpp
-std::variant<std::monostate,
-    HostDataCommand,
-    HostViewCommand,
-    HostToolCommand>
+```text
+具体 Host Request
+  -> VtkAppHostSession::SendRequest(HostRequest&&, callback)
+  -> VtkAppHostSession::Impl::SendRequest
+  -> HostCommandRouter::Dispatch(HostRequest&&, callback)
+  -> Data / View / Tool 内部 route
 ```
 
-主体命令 variant 不包含任何 Feature 命令。主体 action 与 payload variant 必须严格匹配；Feature 使用自己的 typed request，并直接调用各自 `SendRequest()`。
+| 业务 | 具体 Request |
+| --- | --- |
+| Load / Reload | `HostLoadRequest` / `HostReloadRequest` |
+| Data / Slice Export | `HostDataExportRequest` / `HostSliceExportRequest` |
+| View Set / Reset | `HostViewSetRequest` / `HostViewResetRequest` |
+| Tool Set / Switch | `HostToolSetRequest` / `HostToolSwitchRequest` |
 
-`VtkAppHostSession::SendData/SendView/SendTool` 是宿主公开门面，不是三套 Router。
-它们只把 typed request 封装为 `HostCommand`，统一交给
-`VtkAppHostSession::Impl::SendCommand()`；`HostCommandRouter` 的唯一分发出口是
-`DispatchCommand(HostCommand)`。Qt/main 不直接持有 Router。
-
-| Session API | Action | Payload |
-| --- | --- | --- |
-| `SendData` | `LoadFile` | `HostLoadRequest` |
-| `SendData` | `ReloadBuffer` | `HostReloadRequest` |
-| `SendData` | `ExportData` | `HostDataExportRequest` |
-| `SendData` | `ExportSlices` | `HostSliceExportRequest` |
-| `SendView` | `Set` | `HostViewSetRequest` |
-| `SendView` | `ResetCamera` | `HostViewResetRequest` |
-| `SendTool` | `Set` / `Switch` | `HostToolSetRequest` / `HostToolSwitchRequest` |
-
-Data 异步动作可携带完成回调。Crop Export 与 Gap Start 的回调分别属于 `CropHostFeature` 和 `GapHostFeature`。
+Router 只在 `Dispatch()` 内按动态类型识别一次；基类本身和未知派生类型拒绝。Session 不
+include 具体 Request 头、不识别业务类型，也不保存 Request 或 callback。Crop/Gap 不进入
+主体 Router：它们各自保留一套 Feature Action、一个 Feature Request 和公开
+`SendRequest()`。Data 异步动作可携带完成回调；Crop BuildResult 与 Gap Start 的回调分别
+属于对应 Feature。
 
 ## 5. 数据链
 
 ### 5.1 File Load
 
 ```text
-SendData(LoadFile)
+SendRequest(HostLoadRequest)
   -> HostCommandRouter::LoadFile
   -> VolumeLayout::Create
      dimensions 全正；或仅 .raw + {0,0,0} 时从文件名末尾 NxMxK 推断
@@ -154,7 +150,7 @@ Host/Data 的所有 `std::string` 路径统一为 UTF-8。Router 不改写 DTO �
 RAW，IsoSurface/CompositeIsoSurface 推断 PLY，slice 模式拒绝。
 
 ```text
-SendData(ExportData)
+SendRequest(HostDataExportRequest)
   -> HostCommandRouter::ExportData
   -> VizService::ExportDataAsync(outputDir, extension)
   -> AppDataExportTaskService::BuildDataTask
@@ -192,7 +188,7 @@ standalone 热键请求未指定 selector 时，由触发热键的切片窗口�
 
 Router 先解析 target、service 和 context，再把全部 optional 转入局部候选并完成所有校验；只有候选完整合法才按固定顺序调用 setter。因此任一晚字段非法都返回 `false`，不会留下 mode、material、TF 等部分更新；合法多字段请求只形成一次统一 view-set 提交。optional 全缺省仍是成功 no-op。
 
-`HostViewAction::ResetCamera` 必须严格搭配 `HostViewResetRequest`，只调用目标 context 的
+`HostViewResetRequest` 以自身具体类型表达相机复位，只调用目标 context 的
 `ResetCamera()`；它不创建 camera 状态副本，也不进入 `SharedInteractionState`。方向轴
 切换与相机复位都会把目标 service 标脏，由既有 Qt/VTK Timer 渲染下一帧。
 
@@ -200,7 +196,9 @@ Router 先解析 target、service 和 context，再把全部 optional 转入局�
 
 ### 5.5 窗宽窗位状态链
 
-`HostWindowLevelParams` 使用 double，默认 WW=400、WC=40。运行期 `SendView(Set)` 要求 WW finite 且 `> 0`、WC finite；请求缺省 `windowLevel` 时保持现状。
+`HostWindowLevelParams` 使用 double，默认 WW=400、WC=40。运行期
+`SendRequest(HostViewSetRequest)` 要求 WW finite 且 `> 0`、WC finite；请求缺省
+`windowLevel` 时保持现状。
 
 ```text
 HostViewSetRequest.windowLevel
@@ -221,7 +219,9 @@ target 只选择由哪个 service 发起写入，不产生 per-view 窗宽窗位
 | File/Reload 失败 | 保留旧值 |
 | 纯 mode/pipeline rebuild | 保留共享值 |
 
-[风险] `HostViewInitConfig::windowLevel` 只有 `hasWindowLevel=true` 时写入，但构建期 `BuildAppInit()` 当前没有执行运行期 Router 的 finite/WW>0 校验；非法初始化值可能进入共享状态。现有测试也没有覆盖 Host 正向 WW/WC、SharedState flags 或 SliceStrategy 映射。
+[测试缺口] `HostRenderViewSet::BuildAppInit()` 与运行期 Router 都会拒绝非 finite 或
+`windowWidth <= 0` 的窗宽窗位；当前剩余缺口是 Host 正向 WW/WC、SharedState flags
+和 SliceStrategy 映射尚无直接回归证据。
 
 ### 5.6 Cursor、十字线与可见元素
 
@@ -241,7 +241,7 @@ mode switch、spacing 引发的结构重建仍会覆盖此前 cursor。
 
 Crosshair 是显式 visibility bit，不由焦点或 cursor 有效性隐式决定。前三个业务元素
 仍是会话共享 bit：target 只选择由哪个 service 发起写入，不把它们变成 per-view 状态。
-方向轴属于目标 context。Qt 只构造 Host DTO 并调用 `SendView`，不取得内部
+方向轴属于目标 context。Qt 只构造具体 Host DTO 并调用 `SendRequest`，不取得内部
 `VizService`/`StdRenderContext`。
 
 [风险] mode switch 不像 reload 一样显式重放 `UpdateFlags::All`。若内部调用方先隐藏 Crosshair，再切到此前未构建的新 Slice strategy，新 actor 是否正确继承共享 visibility mask 当前缺少测试，不能文档化为已保证。
@@ -259,7 +259,7 @@ CropHostRequest
   -> immutable CropShaderPayload
   -> N x VizService / Strategy-local CropShaderController
 
-CropHostAction::Export
+CropHostAction::BuildResult
   -> root ImageSnapshot + allHistory[0, absoluteNode)
   -> immutable predicate plan
   -> vtkSMPTools::For（一次扫描，只生成最终 UCHAR mask）
@@ -280,20 +280,27 @@ CropHostAction::Export
 | Mode | 设置后续默认模式；若当前 draft 已提交，同时更新对应 history 节点并 staged 新 revision，画面不等待下一次 Released |
 | Previous / Next | 只改变物化基线后的相对前缀 `nodeCount`，复用同一 immutable table；不会越过基线回放已写入 mask 的节点 |
 | Node | 将有效节点数设为请求值 |
-| Export | 从 root snapshot 与绝对历史前缀构造一次性 CPU task；owner thread 以当前 expected snapshot 做 CAS，结果通过 typed callback 回传 |
+| BuildResult | 从 root snapshot 与绝对历史前缀构造一次性 CPU task；owner thread 以当前 expected snapshot 做 CAS，结果通过 typed callback 回传 |
 | SetPolyData / ClearPolyData | 注册或清除 immutable PolyData 输入 |
 | RestoreOriginal | 以当前绑定 snapshot 为 expected 值恢复原始 image 状态 |
 | Exit | 关闭 widget、清 history/payload 与所有 target shader |
 
 `GetState()` 返回 `CropHostState{history,isActive,isPublishing}`。它要求 owner thread 且 Feature 仍处于 attached 状态；否则返回零状态。Previous/Next/Node 等 history 动作只在活动 binding 上接纳。
 
-Export 同时冻结两个不同职责的 snapshot：计算始终读取 lineage 的 root image/root mask，并把 `allHistory[0, baseNodeCount + nodeCount)` 编译为一个不可变谓词计划；发布只把开始时的 current snapshot 作为 expected CAS 令牌。图像物化按 z 分片并行，一次遍历直接写出一张最终 UCHAR mask，不生成或缓存节点级中间 mask。发布仅在 DataManager current 仍与 expected snapshot 同一身份/version 时成功；成功原子提交裁切 image、有效域 mask 和新 version。若 Reload 先提交，Crop CAS 返回 VersionMismatch，不覆盖新数据；若 Crop 先提交，稍后的 Reload 仍可按自己的合法 admission 覆盖。两条链不通过互斥锁或跨 Feature 查询决定胜负。
+BuildResult 同时冻结两个不同职责的 snapshot：计算始终读取 lineage 的 root image/root
+mask，并把 `allHistory[0, baseNodeCount + nodeCount)` 编译为一个不可变谓词计划；发布只
+把开始时的 current snapshot 作为 expected CAS 令牌。图像物化按 z 分片并行，一次遍历
+直接写出一张最终 UCHAR mask，不生成或缓存节点级中间 mask。发布仅在 DataManager
+current 仍与 expected snapshot 同一身份/version 时成功；成功原子提交裁切 image、有效域
+mask 和新 version。若 Reload 先提交，Crop CAS 返回 VersionMismatch，不覆盖新数据；
+若 Crop 先提交，稍后的 Reload 仍可按自己的合法 admission 覆盖。两条链不通过互斥锁或
+跨 Feature 查询决定胜负。
 
 物化绝对节点 N 后，N 成为新数据基线：`baseNodeCount=N`、相对 `nodeCount=0`，物化对象不作为新的谓词节点插入历史。此时 Previous 在基线处拒绝；若 N 后仍有 redo 尾部，Next 从相对节点 0 继续。RestoreOriginal 通过同一 CAS writer 恢复 root，并把基线重新设为 0。
 
-RegisteredPolyData 遵循 immutable replacement contract：`CropHostAction::SetPolyData` 只接受严格递增的非零 `sourceVersion`，并要求新 `vtkPolyData` 指针与当前对象不同。调用方若需更新内容，必须先构造新对象或 `DeepCopy` 到新对象后再注册；禁止原地修改已注册对象再只递增 version。这样 shader、history 与异步 Export 读取的是同一不可变快照。
+RegisteredPolyData 遵循 immutable replacement contract：`CropHostAction::SetPolyData` 只接受严格递增的非零 `sourceVersion`，并要求新 `vtkPolyData` 指针与当前对象不同。调用方若需更新内容，必须先构造新对象或 `DeepCopy` 到新对象后再注册；禁止原地修改已注册对象再只递增 version。这样 shader、history 与异步 BuildResult 读取的是同一不可变快照。
 
-裁切 widget、shader discard、3D 参考切平面和世界方向轴是独立对象。Crop 预览不写主体数据链，只有 Export/RestoreOriginal 经过 expected-snapshot writer 发布。
+裁切 widget、shader discard、3D 参考切平面和世界方向轴是独立对象。Crop 预览不写主体数据链，只有 BuildResult/RestoreOriginal 经过 expected-snapshot writer 发布。
 
 ## 7. Gap 与 Timer
 
@@ -330,14 +337,14 @@ Gap 始终读取 DataManager 同一个 current snapshot 中的 image 与 mask，
 
 ## 8. Hotkey 与 Qt 边界
 
-`AttachHotkeys(HostHotkeyConfig)` 只属于 standalone 主体输入适配。构造 Session 时，
-`HostSessionConfig::dataExportRequest/sliceExportRequest` 为导出热键提供缺省目录、格式、
-角度或可选来源；空输出目录在 HotkeyRouter 内补为 `"."`。数据导出只有在格式和 selector
-都缺省时才用触发窗口模式推断格式；切片导出在 selector 缺省时用触发窗口补齐来源。
+`AttachHotkeys(HostHotkeyConfig)` 只属于 standalone 主体输入适配。导出热键的目录、
+格式、角度和可选来源直接属于 `HostHotkeyConfig`；`HostSessionConfig` 不保存这些默认值。
+空输出目录在 HotkeyRouter 内补为 `"."`。数据导出只有在格式和 selector 都缺省时才用
+触发窗口模式推断格式；切片导出在 selector 缺省时用触发窗口补齐来源。
 Feature 通过 `HostInputPort` 以自己的 feature id 注册输入 binding；Crop/Gap 热键都翻译为
 各自 typed request，并进入与 Qt 显式调用相同的 `SendRequest()`。过期 weak Feature 会在
-Timer 清理输入。Qt 不模拟 Ctrl/Escape，主体直接调用三组 `Send*`，Feature 直接调用各自
-`SendRequest()`。
+Timer 清理输入。Qt 不模拟 Ctrl/Escape，主体直接构造具体 Request 并调用 Session
+`SendRequest()`，Feature 直接调用各自 `SendRequest()`。
 
 Qt 适配顺序：
 
@@ -380,10 +387,11 @@ QtHost case 覆盖 View 全请求原子拒绝、Crop/Reload 两种提交顺序�
 
 ## 11. 扩展纪律
 
-- 新主体业务动作先选择现有 Data/View/Tool 领域；可选业务能力优先实现独立 `HostFeature`，不得把 Feature 命令扩张进主体 variant。
+- 新主体业务调用先判断能否由具体 Request 类型表达；可选业务能力优先实现独立
+  `HostFeature`，不得把 Feature 请求扩张进主体 Router。
 - 新窗口通过 `HostRenderViewConfig` 加入，不在 session 写死数量。
-- 新按键/Timer adapter 参数放 `HostAdapterTypes`；只有 standalone 主体热键需要复用的业务
-  请求缺省值才进入 `HostSessionConfig`，不得把 callback 或 Feature 请求模板混入配置。
+- 新按键/Timer 输入参数放 `HostInputTypes`；只有 standalone 主体热键需要的默认字段进入
+  `HostHotkeyConfig`，不得把 callback、完整 Request 原型或 Feature 请求模板混入配置。
 - 新 Feature 内部实现不进入主体 Host DTO；Feature 只能通过 `HostFeatureContext` 获取 generic view、snapshot、CAS writer、输入、活动 view 作用域与 owner completion。活动作用域只表达 Feature 生命周期，不暴露质量配置或渲染策略。
 - composition root 可以根据 UI 流程同时持有多个 Feature 并限制按钮，但这只属于产品策略，不得成为数据正确性的必要条件。
 - 异步 worker 不操作 renderer/props；VTK 提交继续在消费线程收口。

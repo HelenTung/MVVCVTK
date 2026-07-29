@@ -5,8 +5,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | 当前架构事实、边界、主链与风险索引 |
-| 源码基线 | 2026-07-28 当前工作树 |
-| 最近核验 | 2026-07-28 |
+| 源码基线 | 2026-07-29 当前工作树 |
+| 最近核验 | 2026-07-29 |
 | 主工程 | `MVVCVTK/MVVCVTK.vcxproj` |
 | 默认验证 | `Debug|x64` / `Release|x64`，不主动验证 32 位 |
 | 非 Qt 测试 | `test/MVVCVTK.Tests.sln` 中 3 个工程 |
@@ -23,7 +23,7 @@
 | 层 | 核心组件 | 负责 | 不负责 |
 | --- | --- | --- | --- |
 | L0 宿主 | standalone `main`、Qt/上位机 adapter | 窗口与外部事件循环 | feature 业务 |
-| L1 Host | `VtkAppHostSession`、ViewSet、Router、`HostFeature`、HotkeyRouter | 组合、目标解析、主体命令分发、Feature 上下文与 adapter 生命周期 | Feature 业务与算法实现 |
+| L1 Host | `VtkAppHostSession`、ViewSet、Router、`HostFeature`、HotkeyRouter | 组合、目标解析、主体请求分发、Feature 上下文与 adapter 生命周期 | Feature 业务与算法实现 |
 | L2 App | `VizService`、load/export task service | 任务编排、消费线程提交、策略选择 | widget/算法 |
 | L3 State/Data | `SharedInteractionState`、DataManager | 状态真源、flags、versioned current/pending | renderer |
 | L4 Interaction | `StdRenderContext`、`InteractionRouter`、handlers | VTK 事件映射、优先级与传播 | 重型算法 |
@@ -36,10 +36,10 @@
 ```mermaid
 flowchart LR
     Host[Qt / standalone / 上位机] --> Session[VtkAppHostSession]
-    Session --> Command[Data / View / Tool command]
+    Session --> Request[Data / View / Tool concrete request]
     Hotkey[standalone VTK input] --> HotkeyRouter[HostHotkeyRouter]
-    HotkeyRouter --> Command
-    Command --> Router[HostCommandRouter]
+    HotkeyRouter --> Request
+    Request --> Router[HostCommandRouter]
     Router --> App[VizService / Data / State]
     Host --> CropFeature[CropHostFeature]
     Host --> GapFeature[GapHostFeature]
@@ -60,28 +60,37 @@ flowchart LR
 
 ## 4. Host 协议
 
-### 4.1 顶层 command
+### 4.1 单一主体 Request 入口
 
-| alternative | Request | owner |
+主体用一个无业务字段的多态 `HostRequest` 基类统一入口；八个业务动作由八种直接派生的
+具体类型表达：
+
+| 业务 | 具体 Request | owner |
 | --- | --- | --- |
-| `HostDataCommand` | `HostDataRequest` | primary/slice `VizService` |
-| `HostViewCommand` | `HostViewRequest` | target `VizService`/context |
-| `HostToolCommand` | `HostToolRequest` | target context |
+| Load / Reload | `HostLoadRequest` / `HostReloadRequest` | primary `VizService` |
+| Data / Slice Export | `HostDataExportRequest` / `HostSliceExportRequest` | primary/slice `VizService` |
+| View Set / Reset | `HostViewSetRequest` / `HostViewResetRequest` | target `VizService`/context |
+| Tool Set / Switch | `HostToolSetRequest` / `HostToolSwitchRequest` | target context |
 
-`HostCommand` 只包含 `monostate` 与上表三类主体 alternative。Crop/Gap 不进入主体 variant，分别由 `CropHostFeature::SendRequest()` 与 `GapHostFeature::SendRequest()` 接收自己的 typed request。不存在嵌套 `HostFeatureCommand`，也不存在 `HostLoadCommand`、`HostReloadCommand`、`HostExportCommand`、`HostExitCommand`。
+`VtkAppHostSession::SendRequest(HostRequest&&, callback)` 把同一个对象交给
+`VtkAppHostSession::Impl::SendRequest()`，再进入
+`HostCommandRouter::Dispatch(HostRequest&&, callback)`。Router 只在该入口识别一次动态
+类型；Session 不识别具体 Request，也不保存 Request/callback。Qt、main 和 Feature 均不
+持有 Router。
 
-`VtkAppHostSession::SendData/SendView/SendTool` 只是对外 typed facade：三者都封装
-`HostCommand` 后进入 `VtkAppHostSession::Impl::SendCommand()`。Host 内部唯一主体分发出口是
-`HostCommandRouter::DispatchCommand(HostCommand)`；Qt、main 和 Feature 均不持有 Router。
+Crop/Gap 不进入主体分发，分别由 `CropHostFeature::SendRequest()` 与
+`GapHostFeature::SendRequest()` 接收自己的单一 Feature Request。Feature 内可以用一套
+Action 区分模块动作，但不再嵌套 Payload 或动作专属 Request。
 
 ### 4.2 Session
 
-`HostSessionConfig` 包含 `renderViews`，以及 standalone 导出热键使用的
-`dataExportRequest/sliceExportRequest` 缺省请求。Qt 显式 `SendData()` 不经过这两份配置。
+`HostSessionConfig` 只包含 `renderViews`。standalone 导出热键使用的路径、格式、来源和
+角度字段属于 `HostHotkeyConfig`；Qt/上位机显式请求直接构造具体 Request，不继承热键
+默认值。
 Session 的 `BuildSession()` 在空拓扑时返回 `false`，且不渲染；底层
 `HostRenderViewSet::Build()` 本身允许空配置，空拓扑门禁属于 Session。`Start()` 才执行
 `SendRenderAll()` 并进入 standalone event loop。主体运行期输入经
-`SendData/SendView/SendTool`；Timer/Hotkey 分别用 `AttachTimer`、`AttachHotkeys`，Feature
+`SendRequest`；Timer/Hotkey 分别用 `AttachTimer`、`AttachHotkeys`，Feature
 由 composition root 构造并用 `AttachFeature` 注册。
 
 ### 4.3 View Set 事务
@@ -94,8 +103,8 @@ spacing、WW/WC、volume quality、gradient opacity、denoise、cursor、元素�
 `MaterialParams` 更新；material preset 不能和 numeric material/opacity 同时出现，scalar TF
 preset 不能和显式 TF 同时出现。
 
-`ResetCamera` 继续属于同一 `HostViewRequest` action 轴，严格搭配
-`HostViewResetRequest` 并只作用目标 context；方向轴切换与相机复位只标脏既有目标
+`HostViewResetRequest` 以自身具体类型表达一次性相机复位，并只作用目标 context；
+方向轴切换与相机复位只标脏既有目标
 service，不新增 Qt facade 或 camera 状态 owner。
 
 ## 5. State 与 Data
@@ -151,7 +160,7 @@ RAW load 允许请求提供三轴正 dimensions；只有 `.raw` 且 dimensions �
 
 ### 5.3 统一 Data Export
 
-主体只暴露 `HostDataAction::ExportData + HostDataExportRequest`。`outputPath` 是 UTF-8
+主体通过具体 `HostDataExportRequest` 表达数据导出。`outputPath` 是 UTF-8
 输出目录；`HostDataExportFormat` 是 Host 唯一格式基元，当前为
 `Raw/Ply/Stl/Obj`。显式格式在 Router 收敛为规范小写后缀；格式缺省时，Volume 模式推断
 RAW，IsoSurface 模式推断 PLY，slice 模式不能推断体或网格格式。
@@ -174,7 +183,10 @@ model-to-world 后写出。调用方不得传具体文件名，也不得让 Host
 
 ### 5.4 Crop 物化的第二提交入口
 
-Crop Export 物化不走 App worker/mailbox：`CropHostFeature` 从 root snapshot 与历史前缀构建发布任务，经 Host 提供的 expected-snapshot writer 执行 pending -> current -> 各 view `SendReloadUpdate()` -> shared ready -> completion。它与普通 File/Reload 共用 admission 和 DataManager，但不把 Crop command 耦合进主体 Router。
+Crop BuildResult 物化不走 App worker/mailbox：`CropHostFeature` 从 root snapshot 与历史
+前缀构建发布任务，经 Host 提供的 expected-snapshot writer 执行 pending -> current ->
+各 view `SendReloadUpdate()` -> shared ready -> completion。它与普通 File/Reload 共用
+admission 和 DataManager，但不把 Crop Request 耦合进主体 Router。
 
 若 current 已提交后某个 view pipeline rebuild 或共享 Ready 发布失败，writer 先以 promoted version 做 CAS 语义恢复，再重建已接受新 current 的 view，最后发布 ReloadFailed/ResetLoad。恢复会复用旧 immutable snapshot 的 image/metadata，但发布新 version，因此 version 始终单调；CAS 失败表示已有更晚事务，禁止覆盖该 current。
 
@@ -225,13 +237,18 @@ CropHostRequest
   -> CropBridge
   -> CropRouter
   -> CropAlgorithm
-  -> CropShaderPayload / CropExportResult
+  -> CropShaderPayload / CropBuildResult
   -> CropShaderEffect / expected-snapshot writer
 ```
 
-Box 节点使用 `boxToInputModelMatrix`，Plane 节点使用 input-model center/normal。`CropAlgorithm::BuildPredicateTable()` 把当前节点前缀编译为不可变谓词表：预览侧生成 `CropShaderPayload`，物化侧由 `BuildExportTask()` / `GetResult()` 一次扫描生成最终 image、3D validity mask 或 polydata。Display 只消费 payload，不持有 Host 请求。
+Box 节点使用 `boxToInputModelMatrix`，Plane 节点使用 input-model center/normal。
+`CropAlgorithm::BuildPredicateTable()` 把当前节点前缀编译为不可变谓词表：预览侧生成
+`CropShaderPayload`，物化侧由 `BuildResultTask()` / `GetResult()` 一次扫描生成最终
+image、3D validity mask 或 polydata。Display 只消费 shader payload，不持有 Host 请求。
 
-`CropHostAction::SetPolyData/ClearPolyData` 使 RegisteredPolyData 主链可达；注册对象遵循 immutable replacement 与严格递增 `sourceVersion`。Volume preview 使用 shader predicate，Export 根据 `OrthogonalCropDataSource` 选择 image/mask 或 polydata 结果。
+`CropHostAction::SetPolyData/ClearPolyData` 使 RegisteredPolyData 主链可达；注册对象遵循
+immutable replacement 与严格递增 `sourceVersion`。Volume preview 使用 shader
+predicate，BuildResult 根据 `OrthogonalCropDataSource` 选择 image/mask 或 polydata 结果。
 
 Box 对输入 bounds 允许部分交叠；`OutOfBounds` 只在无真实体积交叠或非法 bounds 时出现，不存在“必须完全包含”的物化分支。
 
@@ -249,7 +266,9 @@ Shader 提交使用 staged/commit 事务。Bridge 同时保留 box、plane 与 c
 
 显示层必须区分：reference view 的 Crop widget、Crop result outline/mask、`VisFlags::Planes3D` 的三张彩色参考平面、`VisFlags::Ruler` 的 cube axes、context 的 orientation marker。这些对象没有共同的“轴/平面可见性”开关。
 
-[风险] Crop Bridge 已覆盖 exit-during-drag、零法向 Plane、多 target commit/shader 与 Quality producer/mask/mapper 复用；仍需持续验证 Host facade 的完整动作矩阵，以及 Export 与 Reload 并发时的 version/CAS 竞态。
+[风险] Crop Bridge 已覆盖 exit-during-drag、零法向 Plane、多 target commit/shader 与
+Quality producer/mask/mapper 复用；仍需持续验证 Feature `SendRequest` 的完整动作矩阵，
+以及 BuildResult 与 Reload 并发时的 version/CAS 竞态。
 
 ## 8. Gap
 
@@ -270,9 +289,22 @@ sequenceDiagram
     Gap-->>Host: completion
 ```
 
-`GapHostFeature::SendRequest(Start)` 明确要求已 attach timer。Start 的三段事务会验证并冻结 image+mask、领取 worker/callback 槽并立即启动 worker，接纳后才提交 targets 与显示状态；后续 TimerEvent 只轮询/消费终态。Overlay 只改变显示意图并复用缓存；Exit 设置 pending，后续 display tick Stop/join、清 overlay/result 并收口。公开 `GapHostState` 只暴露 `analysisState`、`statistics`、`isViewActive`、`isExitPending`，不承诺内部 phase 名称。
+Gap 接入必须在 Start 前成功绑定 Host timer；`SendRequest(Start)` 本身无法验证 timer
+是否存在。Start 的三段事务会验证并冻结 image+mask、领取 worker/callback 槽并立即启动
+worker，接纳后才提交 targets 与显示状态；后续 TimerEvent 只轮询/消费终态。Overlay
+只改变显示意图并复用缓存；Exit 设置 pending，后续 display tick Stop/join、清
+overlay/result 并收口。公开 `GapHostState` 只暴露 `analysisState`、`statistics`、
+`isViewActive`、`isExitPending`，不承诺内部 phase 名称。
 
-Gap 使用严格六邻域；检测后孔隙率以高灰材料与闭合 interior 为对象分母、以通过 `minVolumeMM3` 的 retained regions 为分子。Crop 与 Gap 不直接 include、互查状态或同步互斥；二者通过 immutable snapshot、version gate 与 CAS writer 保证并发正确性。Render 的 TF、采样、gradient opacity、jitter 与显示前降噪只作用于显示 producer，Gap snapshot 始终来自 DataManager current。
+Gap 当前仍在 `BuildCandidates` / `BuildRegions` 使用扁平索引
+`±1/±dx/±slice`，只检查总索引范围；行尾和层尾可能误连，坐标安全严格六邻域仍是
+`2026-07-21-gap-analysis-lifecycle-plan.md` 的待实施项。当前统计以最终有效域为分母：
+`voidVoxelCount` 是成功 label volume 中的正标签体素数，
+`objectVoxelCount = validVoxelCount - voidVoxelCount`，
+`porosityRatio = voidVoxelCount / validVoxelCount`。Crop 与 Gap 不直接 include、互查状态
+或同步互斥；二者通过 immutable snapshot、version gate 与 CAS writer 保证并发正确性。
+Render 的 TF、采样、gradient opacity、jitter 与显示前降噪只作用于显示 producer，Gap
+snapshot 始终来自 DataManager current。
 
 ## 9. 线程与所有权
 
@@ -285,7 +317,7 @@ Gap 使用严格六邻域；检测后孔隙率以高灰材料与闭合 interior 
 | endpoint 指针 | 非拥有，不越过 session |
 | File/Reload worker | 只做 I/O/数据准备，不碰 renderer |
 | Gap worker | 只做算法，overlay 由主线程 tick 挂载 |
-| Crop | widget/shader 在 owner thread 提交；Export worker 只执行算法，结果由 Host tick/CAS 收口 |
+| Crop | widget/shader 在 owner thread 提交；BuildResult worker 只执行算法，结果由 Host tick/CAS 收口 |
 | 文件路径 | public/Host/Data `std::string` 一律 UTF-8；OS/filesystem 使用 native path，VTK 9.4.2 KWSys 窄接口显式转回 UTF-8 |
 
 `PlatformPath` 不承诺规避 `SystemTools::Stat` 的 Windows 超长路径限制；超过 `MAX_PATH` 的 VTK reader 行为需单独评估。
@@ -296,14 +328,14 @@ Qt/上位机必须在 GUI/VTK 线程构建 session、发运行期命令和操作
 
 | 能力 | 现状 | 主要测试缺口 |
 | --- | --- | --- |
-| Host typed protocol | Data/View/Tool 三域 variant + 独立 Feature protocol 已落地 | 正向 Qt facade 链较少 |
+| Host typed protocol | 八种具体 Host Request + 单一 Session/Router 入口 + 独立 Feature protocol 已落地 | 正向 Qt facade 链较少 |
 | Data Export | RAW/PLY/STL/OBJ 共用 Host/App/Task 链，Data 层统一命名与 writer 分派 | Qt case 只验 facade/UTF-8；真实文件由 Data 集成测试覆盖 |
 | File/Reload | pending/owner/admission/callback 已收口 | QVTK 端到端 Reload 成功/失败 |
 | Interaction | 统一事件与 router | 新 handler 组合回归 |
 | Render quality | Quality/Custom、固定 ImageSampleDistance、gradient opacity、percentile/material preset、display-only denoise 已落地 | 固定 GPU/golden image 下的主观画质不在当前契约 |
 | Histogram | max-covering bin、`vtkIdType` frequency、double table 与量化 percentile 已落地 | 无原始 scalar 排序的精确 percentile 承诺 |
 | Crop Plane | 方向矩阵、非零 extent、零法向拒绝有测试 | Host facade 完整动作矩阵 |
-| Crop Box | shader/Export、非零 extent、旋转 direction、多目标 commit 已覆盖 | partial/LowRam 与构造失败注入 |
+| Crop Box | shader/BuildResult、非零 extent、旋转 direction、多目标 commit 已覆盖 | partial/LowRam 与构造失败注入 |
 | Gap | worker、overlay、callback、timer 链已收口 | Qt 可见终态与关闭竞态 |
 | Qt | QVTK smoke 与单视图 endpoint smoke | production Qt target、五视图、部署 |
 
@@ -316,7 +348,7 @@ UTF-8 DTO 字节不变。Data 集成测试验证 RAW/PLY/STL/OBJ 文件名、wor
 
 | 优先级 | 风险 | 当前状态 | 验证/动作 |
 | --- | --- | --- | --- |
-| P0 | Crop Export current 已替换后 pipeline 失败 | 已收口 | 双 view 第 0/1 个 rebuild failure 验证 CAS 恢复与 version 单调 |
+| P0 | Crop BuildResult current 已替换后 pipeline 失败 | 已收口 | 双 view 第 0/1 个 rebuild failure 验证 CAS 恢复与 version 单调 |
 | P0 | Box 非零 extent index 假设 | 已收口 | Box × Keep/Remove × index/input-model axis 逐体素 oracle |
 | P0 | 跨层坐标方向混用 | 持续风险 | Box/Plane x image/polydata 固定矩阵 |
 | P1 | callback 被误当同步成功 | 持续风险 | UI 状态区分 accepted/completed |
@@ -340,8 +372,8 @@ UTF-8 DTO 字节不变。Data 集成测试验证 RAW/PLY/STL/OBJ 文件名、wor
 | 新 overlay | result + overlay strategy | overlay 内重算算法 |
 | 新算法 | request/result + algorithm/service | 算法访问 renderer |
 | 新数据源 | DataManager/task service | UI 直接替换 pipeline |
-| 新 Host 领域动作 | 现有领域 action + payload | 为每个动作新增同义 facade |
-| 新 Host 业务域 | 新顶层 command alternative | 复用不相干领域硬塞 payload |
+| 新 Host 业务动作 | 新增或复用具体 Request | Action + Payload 双重表达或同义 facade |
+| 新 Feature 动作 | 既有 Feature Action + 同一个 Feature Request | 动作专属 Request 或第二套 Action |
 | 新宿主窗口 | `HostRenderViewConfig` | 固定窗口序号 |
 | 新 Qt 行为 | Qt adapter | Qt 类型进入 Host/feature |
 
@@ -349,4 +381,6 @@ UTF-8 DTO 字节不变。Data 集成测试验证 RAW/PLY/STL/OBJ 文件名、wor
 
 当前架构的有效主干是：中心化状态、pending/current 事务、统一 interaction event、Strategy 显示隔离、Crop/Gap feature 分层和 typed Host 边界。维护风险主要来自跨层时序与所有权，而不是单个类是否存在。
 
-修改时应沿唯一主链验证：请求构造 -> Router -> owner -> pending/result -> 消费线程 -> display/callback；同时检查失败、teardown 和多视图分支。
+修改时应沿唯一主链验证：具体 Request 构造 -> Session/Router 或 Feature `SendRequest` ->
+owner -> pending/result -> 消费线程 -> display/callback；同时检查失败、teardown 和多视图
+分支。
