@@ -266,20 +266,20 @@ bool StartSnapshotCase()
     return isPassed;
 }
 
-CropExportRequest BuildExportRequest(
+CropBuildParams BuildParams(
     const OrthogonalCropDataSource dataSource,
     const CropOpItem& operation)
 {
-    CropExportRequest request;
-    request.dataSource = dataSource;
-    request.operations = { operation };
-    request.nodeCount = 1;
-    request.inputVersion = 7;
-    request.availableRamBytes = 64ULL * 1024ULL * 1024ULL;
-    return request;
+    CropBuildParams params;
+    params.dataSource = dataSource;
+    params.operations = { operation };
+    params.nodeCount = 1;
+    params.inputVersion = 7;
+    params.availableRamBytes = 64ULL * 1024ULL * 1024ULL;
+    return params;
 }
 
-bool StartImageExportCase()
+bool StartImageBuildCase()
 {
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(2, 2, 3, 5, 4, 4);
@@ -299,14 +299,14 @@ bool StartImageExportCase()
 
     auto operation = BuildPlane(1);
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    const auto request = BuildExportRequest(
+    const auto params = BuildParams(
         OrthogonalCropDataSource::ImageData,
         operation);
     const auto result = CropAlgorithm::GetResult(
         image,
         nullptr,
-        request,
-        BuildPayload(request.operations, request.nodeCount));
+        params,
+        BuildPayload(params.operations, params.nodeCount));
 
     bool isPassed = SetExpect(
         result.isSucceeded
@@ -316,7 +316,7 @@ bool StartImageExportCase()
             && result.operations.size() == 1
             && result.imageData
             && result.maskImage,
-        "Image export should return the captured prefix, image copy, and aligned mask.");
+        "Image build should return the captured prefix, image copy, and aligned mask.");
     if (!result.isSucceeded || !result.imageData || !result.maskImage) {
         return false;
     }
@@ -336,7 +336,7 @@ bool StartImageExportCase()
             && inputValues[0] == 10 && inputValues[1] == 20 && inputValues[2] == 30
             && result.imageData->GetPointData()->GetScalars()
                 == image->GetPointData()->GetScalars(),
-        "Image export should preserve and share the immutable scalar storage.") && isPassed;
+        "Image build should preserve and share the immutable scalar storage.") && isPassed;
     isPassed = SetExpect(
         maskValues[0] == 0 && maskValues[1] == 255 && maskValues[2] == 255
             && std::equal(std::begin(inputExtent), std::end(inputExtent), std::begin(outputExtent))
@@ -346,7 +346,7 @@ bool StartImageExportCase()
             && result.maskImage->GetDirectionMatrix()->GetElement(0, 1) == 1.0
             && result.maskImage->GetScalarType() == VTK_UNSIGNED_CHAR
             && result.maskImage->GetNumberOfScalarComponents() == 1,
-        "Image export mask should align non-zero extent/origin/spacing/direction metadata and strict 0/255 truth.") && isPassed;
+        "Image build mask should align non-zero extent/origin/spacing/direction metadata and strict 0/255 truth.") && isPassed;
 
     auto invalidTransformImage =
         vtkSmartPointer<vtkImageData>::New();
@@ -359,10 +359,10 @@ bool StartImageExportCase()
         CropAlgorithm::GetResult(
             invalidTransformImage,
             nullptr,
-            request,
+            params,
             BuildPayload(
-                request.operations,
-                request.nodeCount));
+                params.operations,
+                params.nodeCount));
     isPassed = SetExpect(
         !invalidTransformResult.isSucceeded
             && invalidTransformResult.failureReason
@@ -384,10 +384,10 @@ bool StartImageExportCase()
         CropAlgorithm::GetResult(
             image,
             baselineMask,
-            request,
+            params,
             BuildPayload(
-                request.operations,
-                request.nodeCount));
+                params.operations,
+                params.nodeCount));
     const auto* mergedValues =
         mergedResult.maskImage
         ? static_cast<const unsigned char*>(
@@ -405,17 +405,17 @@ bool StartImageExportCase()
     auto upperPlane = BuildPlane(2);
     upperPlane.planeCenterInInputModel = { 2.0, 0.0, 0.0 };
     upperPlane.planeNormalInInputModel = { -1.0, 0.0, 0.0 };
-    auto fusedRequest = request;
-    fusedRequest.operations = { operation, upperPlane };
-    fusedRequest.nodeCount = fusedRequest.operations.size();
+    auto fusedParams = params;
+    fusedParams.operations = { operation, upperPlane };
+    fusedParams.nodeCount = fusedParams.operations.size();
     const auto fusedResult =
         CropAlgorithm::GetResult(
             image,
             nullptr,
-            fusedRequest,
+            fusedParams,
             BuildPayload(
-                fusedRequest.operations,
-                fusedRequest.nodeCount));
+                fusedParams.operations,
+                fusedParams.nodeCount));
     const auto* fusedValues =
         fusedResult.maskImage
         ? static_cast<const unsigned char*>(
@@ -462,20 +462,20 @@ bool StartImageExportCase()
         { 1.5, 0.0, 0.0 };
     upperSlabPlane.planeNormalInInputModel =
         { -1.0, 0.0, 0.0 };
-    auto slabRequest = request;
-    slabRequest.operations = {
+    auto slabParams = params;
+    slabParams.operations = {
         lowerSlabPlane, upperSlabPlane
     };
-    slabRequest.nodeCount =
-        slabRequest.operations.size();
+    slabParams.nodeCount =
+        slabParams.operations.size();
     const auto slabResult =
         CropAlgorithm::GetResult(
             slabImage,
             slabMask,
-            slabRequest,
+            slabParams,
             BuildPayload(
-                slabRequest.operations,
-                slabRequest.nodeCount));
+                slabParams.operations,
+                slabParams.nodeCount));
     std::size_t slabKeptCount = 0;
     bool hasExactSlabMask =
         slabResult.isSucceeded
@@ -513,18 +513,18 @@ bool StartImageExportCase()
     const auto emptyResult = CropAlgorithm::GetResult(
         image,
         nullptr,
-        BuildExportRequest(OrthogonalCropDataSource::ImageData, removeAll),
+        BuildParams(OrthogonalCropDataSource::ImageData, removeAll),
         BuildPayload({ removeAll }, 1));
     isPassed = SetExpect(
         !emptyResult.isSucceeded
             && emptyResult.failureReason == CropFailure::EmptyResult
             && !emptyResult.imageData
             && !emptyResult.maskImage,
-        "An all-removed image export should publish EmptyResult without half payloads.") && isPassed;
+        "An all-removed image build should publish EmptyResult without half payloads.") && isPassed;
     return isPassed;
 }
 
-bool StartPolyExportCase()
+bool StartPolyBuildCase()
 {
     vtkNew<vtkCubeSource> cube;
     cube->SetBounds(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0);
@@ -532,13 +532,13 @@ bool StartPolyExportCase()
 
     auto operation = BuildPlane(1);
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    const auto request = BuildExportRequest(
+    const auto params = BuildParams(
         OrthogonalCropDataSource::PolyData,
         operation);
     const auto result = CropAlgorithm::GetResult(
         cube->GetOutput(),
-        request,
-        BuildPayload(request.operations, request.nodeCount));
+        params,
+        BuildPayload(params.operations, params.nodeCount));
     double bounds[6] = {};
     if (result.polyData) {
         result.polyData->GetBounds(bounds);
@@ -551,7 +551,7 @@ bool StartPolyExportCase()
             && result.polyData->GetNumberOfCells() > 0
             && bounds[0] >= -1.0e-6
             && bounds[1] <= 1.0 + 1.0e-6,
-        "PolyData export should DeepCopy one clipped kept half from the temporary pipeline.");
+        "PolyData build should DeepCopy one clipped kept half from the temporary pipeline.");
 }
 
 bool StartRouterTaskCase()
@@ -573,10 +573,10 @@ bool StartRouterTaskCase()
     auto operation = BuildPlane(1);
     operation.planeCenterInInputModel = { -1.0, 0.0, 0.0 };
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    auto request = BuildExportRequest(OrthogonalCropDataSource::ImageData, operation);
+    auto params = BuildParams(OrthogonalCropDataSource::ImageData, operation);
     CropRouter router;
-    const auto payload = BuildPayload(request.operations, request.nodeCount);
-    auto task = router.BuildExportTask(input, request, payload);
+    const auto payload = BuildPayload(params.operations, params.nodeCount);
+    auto task = router.BuildResultTask(input, params, payload);
     bool isPassed = SetExpect(
         task.has_value(),
         "Router should build one value-capturing task for a matching snapshot.");
@@ -588,12 +588,12 @@ bool StartRouterTaskCase()
     const auto result = future.get();
     isPassed = SetExpect(
         result.isSucceeded && result.inputVersion == 7 && result.nodeCount == 1,
-        "Router export task should return the captured input version and prefix.") && isPassed;
+        "Router build task should return the captured input version and prefix.") && isPassed;
 
-    request.inputVersion = 8;
+    params.inputVersion = 8;
     isPassed = SetExpect(
-        !router.BuildExportTask(input, request, payload).has_value(),
-        "Router should reject request/snapshot version mismatch before worker creation.") && isPassed;
+        !router.BuildResultTask(input, params, payload).has_value(),
+        "Router should reject params/snapshot version mismatch before worker creation.") && isPassed;
     return isPassed;
 }
 }
@@ -606,8 +606,8 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartTruthCase() ? 0 : 1;
     failureCount += StartPrefixCase() ? 0 : 1;
     failureCount += StartSnapshotCase() ? 0 : 1;
-    failureCount += StartImageExportCase() ? 0 : 1;
-    failureCount += StartPolyExportCase() ? 0 : 1;
+    failureCount += StartImageBuildCase() ? 0 : 1;
+    failureCount += StartPolyBuildCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
     return failureCount;
 }

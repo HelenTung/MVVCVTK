@@ -29,37 +29,37 @@ std::size_t GetRamBytes()
 }
 }
 
-std::optional<std::packaged_task<CropExportResult()>> CropRouter::BuildExportTask(
+std::optional<std::packaged_task<CropBuildResult()>> CropRouter::BuildResultTask(
     CropInputSnapshot input,
-    CropExportRequest request,
+    CropBuildParams params,
     CropShaderPayload payload) const
 {
     if (!CropAlgorithm::GetInputValid(input)
-        || request.dataSource != input.dataSource
-        || request.inputVersion != input.inputVersion
-        || request.operations.size() != request.nodeCount
-        || request.nodeCount == 0
+        || params.dataSource != input.dataSource
+        || params.inputVersion != input.inputVersion
+        || params.operations.size() != params.nodeCount
+        || params.nodeCount == 0
         || payload.revision == 0
         || payload.sourceStamp.version != input.inputVersion
-        || payload.nodeCount != request.nodeCount
+        || payload.nodeCount != params.nodeCount
         || !payload.predicateTable
         || payload.predicateTable->operationCount < payload.nodeCount) {
         return std::nullopt;
     }
-    if (request.availableRamBytes == 0) {
-        request.availableRamBytes = GetRamBytes();
+    if (params.availableRamBytes == 0) {
+        params.availableRamBytes = GetRamBytes();
     }
 
-    return std::packaged_task<CropExportResult()>(
-        [input = std::move(input), request = std::move(request),
+    return std::packaged_task<CropBuildResult()>(
+        [input = std::move(input), params = std::move(params),
             payload = std::move(payload)]() mutable {
-            if (request.dataSource == OrthogonalCropDataSource::ImageData) {
+            if (params.dataSource == OrthogonalCropDataSource::ImageData) {
                 return CropAlgorithm::GetResult(
                     input.imageData,
                     input.validityMask,
-                    request,
+                    params,
                     payload);
             }
-            return CropAlgorithm::GetResult(input.polyData, request, payload);
+            return CropAlgorithm::GetResult(input.polyData, params, payload);
         });
 }

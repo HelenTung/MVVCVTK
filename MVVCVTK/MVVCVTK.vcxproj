@@ -159,8 +159,8 @@
     <ClInclude Include="include\App\AppState.h" />
     <ClInclude Include="include\App\AppTypes.h" />
     <ClInclude Include="include\Host\HostCommandRouter.h" />
-    <ClInclude Include="include\Host\Types\HostCommandTypes.h" />
-    <ClInclude Include="include\Host\Types\HostAdapterTypes.h" />
+    <ClInclude Include="include\Host\Types\HostInputTypes.h" />
+    <ClInclude Include="include\Host\Types\HostRequest.h" />
     <ClInclude Include="include\Host\Types\HostRequestTypes.h" />
     <ClInclude Include="include\Host\Types\HostValueTypes.h" />
     <ClInclude Include="include\Host\HostHotkeyRouter.h" />

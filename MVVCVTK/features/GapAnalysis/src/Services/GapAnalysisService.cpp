@@ -105,7 +105,7 @@ private:
         vtkImageData* image,
         vtkImageData* validityMask) const;
     bool GetRequestValid(
-        const GapSurfaceRequest& surface,
+        const GapSurfaceConfig& surface,
         const GapVoidParams& voidParams) const;
     vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<int>& labelVolume,
@@ -135,7 +135,7 @@ private:
     bool ClearViewThread();
     double GetDisplayIso(
         const GapVolumeBuffer& inputSnapshot,
-        const GapSurfaceRequest& surface) const;
+        const GapSurfaceConfig& surface) const;
 
     // callbackMutex 同时保护 active/pending callback 与 pending success payload。
     std::mutex m_callbackMutex;
@@ -190,7 +190,7 @@ private:
     // 成功结果派生的 2D label image 强引用缓存；沿用输入快照的 dimensions/spacing/origin，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     // StartView 保存的 ISO 来源配方；接纳 worker 前用冻结输入的 min/max 解析，结束会话时清空。
-    GapSurfaceRequest m_displaySurfaceRequest;
+    GapSurfaceConfig m_displaySurfaceConfig;
     // StartView 保存的 void 参数值副本；接纳 worker 时同步写入参数槽，结束会话时清空。
     GapVoidParams m_displayVoidParams;
     std::function<void(bool)> m_viewCallback;
@@ -715,7 +715,7 @@ bool GapAnalysisService::Impl::StartView(
     m_sliceTargets = std::move(sliceTargets);
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
-    m_displaySurfaceRequest = request.surface;
+    m_displaySurfaceConfig = request.surface;
     m_displayVoidParams = request.voidParams;
     m_viewCallback = std::move(onComplete);
     m_isExitPending = false;
@@ -1048,7 +1048,7 @@ void GapAnalysisService::Impl::ClearDisplayState() {
     m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
-    m_displaySurfaceRequest = {};
+    m_displaySurfaceConfig = {};
     m_displayVoidParams = {};
     m_viewCallback = nullptr;
     // 显示阶段与可见意图在会话结束时一起复位；worker 状态保持独立。
@@ -1098,7 +1098,7 @@ bool GapAnalysisService::Impl::ClearViewThread()
 
 double GapAnalysisService::Impl::GetDisplayIso(
     const GapVolumeBuffer& inputSnapshot,
-    const GapSurfaceRequest& surface) const {
+    const GapSurfaceConfig& surface) const {
     if (surface.isoMode == GapIsoMode::AbsoluteValue) {
         return surface.absoluteIsoValue;
     }
@@ -1201,7 +1201,7 @@ bool GapAnalysisService::Impl::GetMaskValid(
 }
 
 bool GapAnalysisService::Impl::GetRequestValid(
-    const GapSurfaceRequest& surface,
+    const GapSurfaceConfig& surface,
     const GapVoidParams& voidParams) const
 {
     if (!std::isfinite(surface.dataRangeRatio)

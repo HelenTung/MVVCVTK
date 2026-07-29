@@ -3,6 +3,7 @@
 #include "AppService.h"
 #include "DataConverters.h"
 #include "Host/VtkAppHostSession.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "ImageProcessor.h"
 #include "IsoSurfaceStrategy.h"
 #include "VolumeStrategy.h"
@@ -806,22 +807,23 @@ int GetViewFailCount()
     HostViewSetRequest value;
     value.targetView.viewId = "missing-view";
     failureCount += GetCaseResult(
-        !session.SendView({ HostViewAction::Set, value }),
+        !session.SendRequest(std::move(value)),
         "View missing target rejection") ? 0 : 1;
 
+    value = HostViewSetRequest{};
     value.targetView.viewId = "view";
     value.mode = HostRenderMode::IsoSurface;
     value.opacity = 0.7;
     value.spacing = std::array<double, 3>{ 1.0, 0.0, 1.0 };
     failureCount += GetCaseResult(
-        !session.SendView({ HostViewAction::Set, value }),
+        !session.SendRequest(std::move(value)),
         "View late invalid spacing atomic rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
     value.transferNodes = std::vector<HostTransferNode>{};
     failureCount += GetCaseResult(
-        !session.SendView({ HostViewAction::Set, value }),
+        !session.SendRequest(std::move(value)),
         "View explicit empty transfer rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
@@ -829,7 +831,7 @@ int GetViewFailCount()
     value.background = HostBackgroundColor{
         std::numeric_limits<double>::infinity(), 0.0, 0.0 };
     failureCount += GetCaseResult(
-        !session.SendView({ HostViewAction::Set, value }),
+        !session.SendRequest(std::move(value)),
         "View non-finite background rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
@@ -841,14 +843,13 @@ int GetViewFailCount()
     };
     value.isAxesVisible = true;
     failureCount += GetCaseResult(
-        session.SendView({ HostViewAction::Set, value }),
+        session.SendRequest(std::move(value)),
         "Qt Host can set iso, cursor and runtime visibility") ? 0 : 1;
 
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";
     failureCount += GetCaseResult(
-        session.SendView({
-            HostViewAction::ResetCamera, std::move(reset) }),
+        session.SendRequest(std::move(reset)),
         "Qt Host can reset the target camera") ? 0 : 1;
 
     return failureCount

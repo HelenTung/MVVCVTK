@@ -143,8 +143,8 @@
     <ClInclude Include="HostHotkeyRouterTests.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostCommandRouter.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Data\VolumeTypes.h" />
-    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostCommandTypes.h" />
-    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostAdapterTypes.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostInputTypes.h" />
+    <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostRequest.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostRequestTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\Types\HostValueTypes.h" />
     <ClInclude Include="..\..\MVVCVTK\include\Host\HostHotkeyRouter.h" />

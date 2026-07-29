@@ -94,9 +94,9 @@ int GapDisplaySuite::GetFailCount() const
     std::fill_n(voxels, 125, 100.0f);
     voxels[2 + 5 * (2 + 5 * 2)] = 0.0f;
 
-    GapSurfaceRequest surfaceRequest;
-    surfaceRequest.isoMode = GapIsoMode::AbsoluteValue;
-    surfaceRequest.absoluteIsoValue = 50.0;
+    GapSurfaceConfig surfaceConfig;
+    surfaceConfig.isoMode = GapIsoMode::AbsoluteValue;
+    surfaceConfig.absoluteIsoValue = 50.0;
     GapVoidParams voidParams;
     voidParams.grayMax = 10.0f;
     voidParams.minVolumeMM3 = 0.0;
@@ -108,7 +108,7 @@ int GapDisplaySuite::GetFailCount() const
     GapAnalysisService service;
     GapViewRequest viewRequest;
     viewRequest.inputImage = image;
-    viewRequest.surface = surfaceRequest;
+    viewRequest.surface = surfaceConfig;
     viewRequest.voidParams = voidParams;
     viewRequest.sliceTargets = sliceTargets;
     bool isCompleted = false;
@@ -145,7 +145,7 @@ int GapDisplaySuite::GetFailCount() const
     GapViewRequest invalidRequest;
     invalidRequest.inputImage = image;
     invalidRequest.validityMask = invalidMask;
-    invalidRequest.surface = surfaceRequest;
+    invalidRequest.surface = surfaceConfig;
     invalidRequest.voidParams = voidParams;
     invalidRequest.sliceTargets = sliceTargets;
     expect(!service.StartView(std::move(invalidRequest)),
@@ -195,7 +195,7 @@ int GapDisplaySuite::GetFailCount() const
     weakOwner = ownerImage.GetPointer();
     GapViewRequest ownerRequest;
     ownerRequest.inputImage = ownerImage;
-    ownerRequest.surface = surfaceRequest;
+    ownerRequest.surface = surfaceConfig;
     ownerRequest.voidParams = voidParams;
     ownerRequest.sliceTargets = sliceTargets;
     expect(ownerService.StartView(std::move(ownerRequest)),
@@ -223,7 +223,7 @@ int GapDisplaySuite::GetFailCount() const
     GapViewRequest maskRequest;
     maskRequest.inputImage = image;
     maskRequest.validityMask = validityMask;
-    maskRequest.surface = surfaceRequest;
+    maskRequest.surface = surfaceConfig;
     maskRequest.voidParams = voidParams;
     maskRequest.sliceTargets = sliceTargets;
     expect(maskService.StartView(std::move(maskRequest)),
@@ -271,7 +271,7 @@ int GapDisplaySuite::GetFailCount() const
     auto teardownService = std::make_shared<GapAnalysisService>();
     GapViewRequest teardownRequest;
     teardownRequest.inputImage = image;
-    teardownRequest.surface = surfaceRequest;
+    teardownRequest.surface = surfaceConfig;
     teardownRequest.voidParams = voidParams;
     teardownRequest.sliceTargets = sliceTargets;
     expect(teardownService->StartView(std::move(teardownRequest)),
@@ -304,7 +304,7 @@ int GapDisplaySuite::GetFailCount() const
     }
     GapViewRequest blockedRequest;
     blockedRequest.inputImage = image;
-    blockedRequest.surface = surfaceRequest;
+    blockedRequest.surface = surfaceConfig;
     blockedRequest.voidParams = voidParams;
     blockedRequest.sliceTargets = sliceTargets;
     expect(!callbackService.StartView(std::move(blockedRequest)),
@@ -318,7 +318,7 @@ int GapDisplaySuite::GetFailCount() const
 
     GapViewRequest retryRequest;
     retryRequest.inputImage = image;
-    retryRequest.surface = surfaceRequest;
+    retryRequest.surface = surfaceConfig;
     retryRequest.voidParams = voidParams;
     retryRequest.sliceTargets = sliceTargets;
     expect(callbackService.StartView(std::move(retryRequest)),

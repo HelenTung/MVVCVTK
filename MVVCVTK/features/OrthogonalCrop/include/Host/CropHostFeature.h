@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Host/HostFeature.h"
+#include "Host/Types/HostInputTypes.h"
 #include "OrthogonalCropTypes.h"
 
 #include <array>
@@ -8,7 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <variant>
+#include <optional>
 
 #include <vtkSmartPointer.h>
 
@@ -28,7 +29,7 @@ enum class CropHostAction {
     Previous,
     Next,
     Node,
-    Export,
+    BuildResult,
     SetPolyData,
     ClearPolyData,
     RestoreOriginal,
@@ -44,30 +45,13 @@ struct CropHostTarget {
     CropHostSource source = CropHostSource::CurrentImage;
 };
 
-struct CropHostModeRequest {
-    CropHostTarget target;
-    CropRemovalMode removalMode = CropRemovalMode::None;
-};
-
-struct CropHostNodeRequest {
-    std::size_t nodeCount = 0;
-};
-
-struct CropHostPolyDataRequest {
-    vtkSmartPointer<vtkPolyData> polyData;
-    std::uint64_t sourceVersion = 0;
-};
-
-using CropHostPayload = std::variant<
-    std::monostate,
-    CropHostTarget,
-    CropHostModeRequest,
-    CropHostNodeRequest,
-    CropHostPolyDataRequest>;
-
 struct CropHostRequest {
     CropHostAction action = CropHostAction::None;
-    CropHostPayload payload;
+    std::optional<CropHostTarget> target;
+    std::optional<CropRemovalMode> removalMode;
+    std::optional<std::size_t> nodeCount;
+    vtkSmartPointer<vtkPolyData> polyData;
+    std::optional<std::uint64_t> sourceVersion;
 };
 
 struct CropHostKeys {
@@ -78,7 +62,7 @@ struct CropHostKeys {
     HostKeyChord removeMode;
     HostKeyChord previous;
     HostKeyChord next;
-    HostKeyChord exportResult;
+    HostKeyChord buildResult;
     HostKeyChord restoreOriginal;
     HostKeyChord exit;
     std::array<HostKeyChord, 10> nodes;
@@ -90,8 +74,8 @@ struct CropHostConfig {
     CropHostKeys keys;
 };
 
-using CropHostCallback =
-    std::function<void(CropExportResult)>;
+using CropBuildCallback =
+    std::function<void(CropBuildResult)>;
 
 struct CropHostState final {
     CropHistoryState history;
@@ -118,7 +102,7 @@ public:
 
     bool SendRequest(
         CropHostRequest request,
-        CropHostCallback onComplete = nullptr);
+        CropBuildCallback onComplete = nullptr);
     CropHostState GetState() const;
 
 private:

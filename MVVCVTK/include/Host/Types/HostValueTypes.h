@@ -1,8 +1,15 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
+
+struct HostVolumeGeometry {
+    std::array<int, 3> dimensions{ 0, 0, 0 }; // 体素数，顺序固定为 X/Y/Z。
+    std::array<float, 3> spacing{};            // 相邻体素的物理间距，单位 mm。
+    std::array<float, 3> origin{};             // 输入体数据的物理原点。
+};
 
 enum class HostRenderViewRole {
     Primary3D,
@@ -91,30 +98,16 @@ struct HostWindowLevelParams {
     double windowCenter = 40.0; // 标量窗口中心。
 };
 
-struct HostViewInitConfig {
-    // has* 是显式写入位：字段本身保留可用默认值，但只有对应 has* 为 true 时才覆盖策略状态。
-    HostRenderMode viewMode = HostRenderMode::IsoSurface; // 首次构建的主策略模式。
-    HostMaterialParams material; // 始终作为预初始化材质写入。
-    std::vector<HostTransferNode> transferNodes; // hasTransferNodes=true 时替换默认 TF。
-    double isoThreshold = 0.0; // hasIso=true 时使用的数据标量阈值。
-    HostBackgroundColor background;
-    std::array<double, 3> spacing{ 1.0, 1.0, 1.0 };
-    HostWindowLevelParams windowLevel;
-    bool hasTransferNodes = false;
-    bool hasIso = false;
-    bool hasBackground = false;
-    bool hasSpacing = false;
-    bool hasWindowLevel = false;
+struct HostCursorParams {
+    std::array<double, 3> world{}; // VTK world 坐标；axis=-1 时三轴全部写入。
+    int axis = -1; // -1 为自由点；0/1/2 保持对应轴的当前联动位置。
 };
 
-struct HostWindowConfig {
-    std::string title; // context 会尝试写入窗口；外部注入窗口仍可由宿主继续管理标题。
-    int width = 600;
-    int height = 600;
-    int posX = 0;
-    int posY = 0;
-    bool isAxesVisible = false; // 控制方向轴 overlay 的初始可见性。
-    HostViewInitConfig viewInit;
+struct HostVisibilityParams {
+    // 每个 optional 只控制一个共享可见性位；缺省字段保留当前位。
+    std::optional<bool> isPlanes3DVisible;
+    std::optional<bool> isCrosshairVisible;
+    std::optional<bool> isRulerVisible;
 };
 
 // 单目标保持 id 优先且 id 未命中时不回退 role。
@@ -128,12 +121,4 @@ struct HostViewTarget {
 struct HostViewTargets {
     std::vector<std::string> viewIds;
     std::vector<HostRenderViewRole> viewRoles;
-};
-
-struct HostKeyChord {
-    char keyCode = 0;
-    std::string keySym;
-    bool isCtrlDown = false;
-    bool isAltDown = false;
-    bool isShiftDown = false;
 };

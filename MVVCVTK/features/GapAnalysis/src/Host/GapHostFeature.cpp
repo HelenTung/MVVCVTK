@@ -60,7 +60,7 @@ private:
         const HostKeyChord& chord);
     static bool GetChordValid(const HostKeyChord& chord);
     static bool GetStartValid(
-        const GapHostStartRequest& request);
+        const GapHostStartParams& params);
     static bool GetSnapshotValid(
         const ImageSnapshot& snapshot);
     static std::optional<Orientation> GetSliceOrient(
@@ -70,9 +70,9 @@ private:
         bool isSuccess);
 
     std::optional<ViewCandidate> GetViewCandidate(
-        const GapHostStartRequest& start) const;
+        const GapHostStartParams& start) const;
     bool StartView(
-        const GapHostStartRequest& start,
+        const GapHostStartParams& start,
         GapHostCallback onComplete);
     bool SwitchOverlay();
     bool ExitView();
@@ -152,26 +152,26 @@ bool GapHostFeature::Impl::GetChordValid(
 }
 
 bool GapHostFeature::Impl::GetStartValid(
-    const GapHostStartRequest& request)
+    const GapHostStartParams& params)
 {
-    if (request.targetViews.viewIds.empty()
-        && request.targetViews.viewRoles.empty()) {
+    if (params.targetViews.viewIds.empty()
+        && params.targetViews.viewRoles.empty()) {
         return false;
     }
-    if (!std::isfinite(request.surface.dataRangeRatio)
-        || !std::isfinite(request.surface.absoluteIsoValue)
-        || !std::isfinite(request.voidParams.grayMin)
-        || !std::isfinite(request.voidParams.grayMax)
-        || !std::isfinite(request.voidParams.minVolumeMM3)
+    if (!std::isfinite(params.surface.dataRangeRatio)
+        || !std::isfinite(params.surface.absoluteIsoValue)
+        || !std::isfinite(params.voidParams.grayMin)
+        || !std::isfinite(params.voidParams.grayMax)
+        || !std::isfinite(params.voidParams.minVolumeMM3)
         || !std::isfinite(
-            request.voidParams.angleThresholdDeg)) {
+            params.voidParams.angleThresholdDeg)) {
         return false;
     }
 
-    switch (request.surface.isoMode) {
+    switch (params.surface.isoMode) {
     case GapIsoMode::DataRangeRatio:
-        if (request.surface.dataRangeRatio < 0.0
-            || request.surface.dataRangeRatio > 1.0) {
+        if (params.surface.dataRangeRatio < 0.0
+            || params.surface.dataRangeRatio > 1.0) {
             return false;
         }
         break;
@@ -181,13 +181,13 @@ bool GapHostFeature::Impl::GetStartValid(
         return false;
     }
 
-    return request.voidParams.grayMin
-            <= request.voidParams.grayMax
-        && request.voidParams.minVolumeMM3 >= 0.0
-        && request.voidParams.angleThresholdDeg >= 0.0f
-        && request.voidParams.angleThresholdDeg <= 180.0f
-        && request.voidParams.tensorWindowSize > 0
-        && request.voidParams.erosionIterations >= 0;
+    return params.voidParams.grayMin
+            <= params.voidParams.grayMax
+        && params.voidParams.minVolumeMM3 >= 0.0
+        && params.voidParams.angleThresholdDeg >= 0.0f
+        && params.voidParams.angleThresholdDeg <= 180.0f
+        && params.voidParams.tensorWindowSize > 0
+        && params.voidParams.erosionIterations >= 0;
 }
 
 bool GapHostFeature::Impl::GetSnapshotValid(
@@ -261,7 +261,7 @@ bool GapHostFeature::Impl::SendComplete(
 
 std::optional<GapHostFeature::Impl::ViewCandidate>
 GapHostFeature::Impl::GetViewCandidate(
-    const GapHostStartRequest& start) const
+    const GapHostStartParams& start) const
 {
     if (!m_renderViews
         || !m_getImageSnapshot
@@ -466,25 +466,19 @@ bool GapHostFeature::Impl::SendRequest(
 
     switch (request.action) {
     case GapHostAction::Start:
-        if (!std::holds_alternative<GapHostStartRequest>(
-                request.payload)) {
+        if (!request.start) {
             return false;
         }
         return StartView(
-            std::get<GapHostStartRequest>(
-                std::move(request.payload)),
+            *request.start,
             std::move(onComplete));
     case GapHostAction::Overlay:
-        if (onComplete
-            || !std::holds_alternative<std::monostate>(
-                request.payload)) {
+        if (onComplete) {
             return false;
         }
         return SwitchOverlay();
     case GapHostAction::Exit:
-        if (onComplete
-            || !std::holds_alternative<std::monostate>(
-                request.payload)) {
+        if (onComplete) {
             return false;
         }
         return ExitView();
@@ -512,7 +506,7 @@ GapHostState GapHostFeature::Impl::GetState() const
 }
 
 bool GapHostFeature::Impl::StartView(
-    const GapHostStartRequest& start,
+    const GapHostStartParams& start,
     GapHostCallback onComplete)
 {
     auto candidate = GetViewCandidate(start);
@@ -621,7 +615,6 @@ InteractionResult GapHostFeature::Impl::OnInput(
         m_isExitDown = true;
         GapHostRequest request;
         request.action = GapHostAction::Exit;
-        request.payload = std::monostate{};
         (void)SendRequest(std::move(request), nullptr);
         return { true, true };
     }
@@ -634,11 +627,10 @@ InteractionResult GapHostFeature::Impl::OnInput(
     if (m_service->GetViewOn()
         && !m_isExitPending) {
         request.action = GapHostAction::Overlay;
-        request.payload = std::monostate{};
     }
     else {
         request.action = GapHostAction::Start;
-        request.payload = m_config.defaultStart;
+        request.start = m_config.defaultStart;
     }
     (void)SendRequest(std::move(request), nullptr);
     return { true, true };

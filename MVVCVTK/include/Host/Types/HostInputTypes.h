@@ -2,7 +2,16 @@
 
 #include "Host/Types/HostValueTypes.h"
 
+#include <optional>
 #include <string>
+
+struct HostKeyChord {
+    char keyCode = 0;
+    std::string keySym;
+    bool isCtrlDown = false;
+    bool isAltDown = false;
+    bool isShiftDown = false;
+};
 
 struct HostHotkeyConfig {
     // context 输入负责窗口内工具切换；command 输入负责数据动作和退出命令。
@@ -14,6 +23,12 @@ struct HostHotkeyConfig {
     char dataExportKey = 0;
     char sliceExportKey = 0;
     std::string exitKeySym; // 使用 VTK key symbol，支持 Escape 等非字符键。
+    std::string dataExportPath;
+    std::optional<HostDataExportFormat> dataExportFormat;
+    HostViewTarget dataSourceView;
+    std::string sliceExportDir;
+    HostViewTarget sliceSourceView;
+    std::optional<double> sliceAngleDeg;
 };
 
 struct HostTimerConfig {

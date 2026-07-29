@@ -49,15 +49,15 @@ public:
         const CropInputSnapshot& left,
         const CropInputSnapshot& right);
 
-    static CropExportResult GetResult(
+    static CropBuildResult GetResult(
         vtkImageData* image,
         vtkImageData* validityMask,
-        const CropExportRequest& request,
+        const CropBuildParams& params,
         const CropShaderPayload& payload,
         std::size_t fallbackAvailableRamBytes = 0);
 
-    static CropExportResult GetResult(
+    static CropBuildResult GetResult(
         vtkPolyData* polyData,
-        const CropExportRequest& request,
+        const CropBuildParams& params,
         const CropShaderPayload& payload);
 };

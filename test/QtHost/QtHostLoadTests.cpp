@@ -1,6 +1,7 @@
 #include "QtHostMethodCases.h"
 
 #include "Host/VtkAppHostSession.h"
+#include "Host/Types/HostRequestTypes.h"
 
 #include <utility>
 #include <vector>
@@ -9,14 +10,19 @@ int GetLoadFailCount()
 {
     VtkAppHostSession session(HostSessionConfig{});
     int failureCount = 0;
-    HostLoadRequest load;
-    load.geometry = { { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
+    HostLoadRequest missingLoad;
+    missingLoad.geometry = {
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     failureCount += GetCaseResult(
-        !session.SendData({ HostDataAction::LoadFile, load }),
+        !session.SendRequest(std::move(missingLoad)),
         "Load missing path rejection") ? 0 : 1;
-    load.filePath = u8"不存在/体数据 é.raw";
+    HostLoadRequest unicodeLoad;
+    unicodeLoad.geometry = {
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
+    unicodeLoad.filePath = u8"不存在/体数据 é.raw";
     failureCount += GetCaseResult(
-        !session.SendData({ HostDataAction::LoadFile, load }),
+        !session.SendRequest(
+            HostLoadRequest(unicodeLoad)),
         "Load UTF-8 missing path rejection") ? 0 : 1;
 
     HostRenderViewConfig view;
@@ -27,14 +33,16 @@ int GetLoadFailCount()
     VtkAppHostSession unicodeSession(std::move(config));
     failureCount += GetCaseResult(
         unicodeSession.BuildSession()
-            && unicodeSession.SendData({ HostDataAction::LoadFile, load }),
+            && unicodeSession.SendRequest(
+                std::move(unicodeLoad)),
         "Load UTF-8 request facade acceptance") ? 0 : 1;
 
     HostReloadRequest reload;
     reload.voxels.assign(7, 1.0f);
-    reload.geometry = load.geometry;
+    reload.geometry = {
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     failureCount += GetCaseResult(
-        !session.SendData({ HostDataAction::ReloadBuffer, std::move(reload) }),
+        !session.SendRequest(std::move(reload)),
         "Reload voxel-count rejection") ? 0 : 1;
     return failureCount;
 }

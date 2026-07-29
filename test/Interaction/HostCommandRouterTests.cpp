@@ -3,6 +3,7 @@
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "StdRenderContext.h"
 
 #include <array>
@@ -10,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,27 @@ static_assert(
         == HostVolumeQuality::Quality);
 static_assert(
     static_cast<int>(HostDataExportFormat::Raw) == 0);
+static_assert(std::is_polymorphic_v<HostRequest>);
+static_assert(std::has_virtual_destructor_v<HostRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostLoadRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostReloadRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostDataExportRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostSliceExportRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostViewSetRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostViewResetRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostToolSetRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostToolSwitchRequest>);
+static_assert(std::is_final_v<HostLoadRequest>);
+static_assert(std::is_final_v<HostReloadRequest>);
+static_assert(std::is_final_v<HostDataExportRequest>);
+static_assert(std::is_final_v<HostSliceExportRequest>);
+static_assert(std::is_final_v<HostViewSetRequest>);
+static_assert(std::is_final_v<HostViewResetRequest>);
+static_assert(std::is_final_v<HostToolSetRequest>);
+static_assert(std::is_final_v<HostToolSwitchRequest>);
+
+struct UnknownHostRequest final : HostRequest {
+};
 
 void SetExpect(bool isExpected, const char* message, int& failureCount)
 {
@@ -42,9 +65,13 @@ public:
         router = std::make_unique<HostCommandRouter>(core, views);
     }
 
-    bool Send(HostCommand command) const
+    bool Send(
+        HostRequest&& request,
+        HostCompleteCallback onComplete = nullptr) const
     {
-        return router->DispatchCommand(std::move(command));
+        return router->Dispatch(
+            std::move(request),
+            std::move(onComplete));
     }
 
     std::shared_ptr<VizService> GetService() const
@@ -72,17 +99,41 @@ HostVolumeGeometry BuildGeometry()
     return { { 2, 2, 1 }, { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f } };
 }
 
-bool SendData(Fixture& fixture, HostDataAction action, HostDataPayload payload,
+template <typename Request>
+bool SendData(
+    Fixture& fixture,
+    Request request,
     HostCompleteCallback onComplete = nullptr)
 {
-    return fixture.Send(HostDataCommand{
-        HostDataRequest{ action, std::move(payload) }, std::move(onComplete) });
+    static_assert(std::is_base_of_v<HostRequest, Request>);
+    return fixture.Send(
+        std::move(request),
+        std::move(onComplete));
 }
 
 bool SendView(Fixture& fixture, HostViewSetRequest request)
 {
-    return fixture.Send(HostViewCommand{
-        HostViewRequest{ HostViewAction::Set, std::move(request) } });
+    return fixture.Send(std::move(request));
+}
+
+HostLoadRequest GetLoadRequest(
+    std::string filePath,
+    HostVolumeGeometry geometry)
+{
+    HostLoadRequest request;
+    request.filePath = std::move(filePath);
+    request.geometry = std::move(geometry);
+    return request;
+}
+
+HostReloadRequest GetReloadReq(
+    std::vector<float> voxels,
+    HostVolumeGeometry geometry)
+{
+    HostReloadRequest request;
+    request.voxels = std::move(voxels);
+    request.geometry = std::move(geometry);
+    return request;
 }
 
 HostViewSetRequest BuildViewRequest()
@@ -224,6 +275,30 @@ void StartViewCases(int& failureCount)
         "cursor、元素显隐与方向轴必须映射到既有 service/context。",
         failureCount);
 
+    const int viewSetCount =
+        fixture.GetService()->GetViewSetCount();
+    const int materialSetCount =
+        fixture.GetService()->GetMaterialSetCount();
+    const int opacitySetCount =
+        fixture.GetService()->GetOpacitySetCount();
+    const int cameraStyleCount =
+        fixture.context->GetCameraStyleSetCount();
+    HostViewSetRequest isoPatch;
+    isoPatch.targetView.viewId = "primary";
+    isoPatch.iso = 0.42;
+    SetExpect(
+        SendView(fixture, std::move(isoPatch))
+            && fixture.GetService()->GetViewSetCount()
+                == viewSetCount + 1
+            && fixture.GetService()->GetMaterialSetCount()
+                == materialSetCount
+            && fixture.GetService()->GetOpacitySetCount()
+                == opacitySetCount
+            && fixture.context->GetCameraStyleSetCount()
+                == cameraStyleCount,
+        "仅设置 ISO 的 patch 不得改写其它 View 状态。",
+        failureCount);
+
     Fixture spacingFixture;
     spacingFixture.GetService()->SetSpacingAccepted(false);
     SetExpect(!SendView(spacingFixture, BuildViewRequest()),
@@ -260,37 +335,27 @@ void StartViewCases(int& failureCount)
 
     HostViewResetRequest reset;
     reset.targetView.viewId = "primary";
-    SetExpect(fixture.Send(HostViewCommand{
-            HostViewRequest{
-                HostViewAction::ResetCamera, std::move(reset) } })
+    SetExpect(fixture.Send(std::move(reset))
             && fixture.context->GetCameraResetCount() == 1
             && fixture.GetService()->GetDirtySetCount() == 2,
         "ResetCamera 必须只作用于请求目标 context。",
         failureCount);
-    SetExpect(!fixture.Send(HostViewCommand{
-            HostViewRequest{
-                HostViewAction::ResetCamera, BuildViewRequest() } }),
-        "ResetCamera 与错误 payload 组合必须被拒绝。",
-        failureCount);
     reset = HostViewResetRequest{};
     reset.targetView.viewId = "missing";
-    SetExpect(!fixture.Send(HostViewCommand{
-            HostViewRequest{
-                HostViewAction::ResetCamera, std::move(reset) } })
+    SetExpect(!fixture.Send(std::move(reset))
             && fixture.context->GetCameraResetCount() == 1
             && fixture.GetService()->GetDirtySetCount() == 2,
         "ResetCamera 目标未命中时不得复位或标脏。",
         failureCount);
-    HostViewResetRequest wrongSet;
-    wrongSet.targetView.viewId = "primary";
-    SetExpect(!fixture.Send(HostViewCommand{
-            HostViewRequest{ HostViewAction::Set, std::move(wrongSet) } }),
-        "Set 与错误 payload 组合必须被拒绝。",
-        failureCount);
-    SetExpect(!fixture.Send(HostViewCommand{
-            HostViewRequest{
-                HostViewAction::None, BuildViewRequest() } }),
-        "None action 即使携带合法 payload 也必须被拒绝。",
+
+    HostViewSetRequest callbackView;
+    callbackView.targetView.viewId = "primary";
+    int callbackCount = 0;
+    SetExpect(!fixture.Send(
+            std::move(callbackView),
+            [&callbackCount](bool) { ++callbackCount; })
+            && callbackCount == 0,
+        "View 请求携带 callback 必须拒绝且不得调用。",
         failureCount);
 }
 
@@ -300,8 +365,9 @@ void StartDataCases(int& failureCount)
     auto service = fixture.GetService();
     auto sliceService = fixture.GetSliceService();
     bool isCallbackSuccess = false;
-    SetExpect(SendData(fixture, HostDataAction::LoadFile,
-        HostLoadRequest{ "volume.tiff", BuildGeometry() },
+    SetExpect(SendData(
+        fixture,
+        GetLoadRequest("volume.tiff", BuildGeometry()),
         [&isCallbackSuccess](bool isSuccess) { isCallbackSuccess = isSuccess; }),
         "显式布局加载应被接收。", failureCount);
     SetExpect(service->GetLoadCount() == 1 && isCallbackSuccess,
@@ -311,8 +377,9 @@ void StartDataCases(int& failureCount)
 
     const std::string unicodeLoadPath = u8"C:/体数据 é/输入.tiff";
     SetExpect(
-        SendData(fixture, HostDataAction::LoadFile,
-            HostLoadRequest{ unicodeLoadPath, BuildGeometry() })
+        SendData(
+            fixture,
+            GetLoadRequest(unicodeLoadPath, BuildGeometry()))
             && service->GetLoadPath() == unicodeLoadPath,
         "Host load 路由必须原样保留 UTF-8 路径字节。",
         failureCount);
@@ -331,10 +398,7 @@ void StartDataCases(int& failureCount)
         const std::string expectedDir =
             exportRequest.outputPath;
         SetExpect(
-            SendData(
-                fixture,
-                HostDataAction::ExportData,
-                std::move(exportRequest))
+            SendData(fixture, std::move(exportRequest))
                 && service->GetExportDir()
                     == expectedDir
                 && service->GetExportExtension()
@@ -347,9 +411,7 @@ void StartDataCases(int& failureCount)
     inferredRaw.outputPath =
         u8"C:/体数据 é/窗口推断";
     SetExpect(
-        SendData(
-            fixture, HostDataAction::ExportData,
-            std::move(inferredRaw))
+        SendData(fixture, std::move(inferredRaw))
             && service->GetExportDir()
                 == u8"C:/体数据 é/窗口推断"
             && service->GetExportExtension()
@@ -362,9 +424,7 @@ void StartDataCases(int& failureCount)
     inferredMesh.outputPath =
         u8"C:/体数据 é/窗口推断";
     SetExpect(
-        SendData(
-            fixture, HostDataAction::ExportData,
-            std::move(inferredMesh))
+        SendData(fixture, std::move(inferredMesh))
             && service->GetExportDir()
                 == u8"C:/体数据 é/窗口推断"
             && service->GetExportExtension()
@@ -376,9 +436,7 @@ void StartDataCases(int& failureCount)
     HostDataExportRequest inferredSlice;
     inferredSlice.outputPath = "exports";
     SetExpect(
-        !SendData(
-            fixture, HostDataAction::ExportData,
-            std::move(inferredSlice)),
+        !SendData(fixture, std::move(inferredSlice)),
         "切片窗口不能推断体数据或网格格式。",
         failureCount);
 
@@ -387,18 +445,14 @@ void StartDataCases(int& failureCount)
     invalidFormat.format =
         static_cast<HostDataExportFormat>(99);
     SetExpect(
-        !SendData(
-            fixture, HostDataAction::ExportData,
-            std::move(invalidFormat)),
+        !SendData(fixture, std::move(invalidFormat)),
         "显式未知格式必须在 Host 边界被拒绝。",
         failureCount);
 
     HostDataExportRequest emptyOutputDir;
     emptyOutputDir.format = HostDataExportFormat::Raw;
     SetExpect(
-        !SendData(
-            fixture, HostDataAction::ExportData,
-            std::move(emptyOutputDir)),
+        !SendData(fixture, std::move(emptyOutputDir)),
         "空输出目录必须在 Host 边界被拒绝。",
         failureCount);
 
@@ -407,38 +461,78 @@ void StartDataCases(int& failureCount)
     sliceRequest.outputDir = unicodeSlicePath;
     sliceRequest.sourceView.viewId = "slice";
     SetExpect(
-        SendData(fixture, HostDataAction::ExportSlices, std::move(sliceRequest))
+        SendData(fixture, std::move(sliceRequest))
             && sliceService->GetSlicePath() == unicodeSlicePath,
         "Host slice export 路由必须原样保留 UTF-8 路径字节。",
         failureCount);
 
-    HostLoadRequest rawRequest{ "scan_3x4x5.raw", BuildGeometry() };
+    HostLoadRequest rawRequest =
+        GetLoadRequest("scan_3x4x5.raw", BuildGeometry());
     rawRequest.geometry.dimensions = { 0, 0, 0 };
-    SetExpect(SendData(fixture, HostDataAction::LoadFile, std::move(rawRequest)),
+    SetExpect(SendData(fixture, std::move(rawRequest)),
         "全零 raw 维度应仅从锚定后缀推断。", failureCount);
     SetExpect(service->GetLoadLayout().GetDimensions() == std::array<int, 3>{ 3, 4, 5 },
         "raw 后缀维度应正确解析。", failureCount);
 
-    HostLoadRequest partial{ "scan.raw", BuildGeometry() };
+    HostLoadRequest partial =
+        GetLoadRequest("scan.raw", BuildGeometry());
     partial.geometry.dimensions = { 2, 0, 1 };
-    SetExpect(!SendData(fixture, HostDataAction::LoadFile, std::move(partial)),
+    SetExpect(!SendData(fixture, std::move(partial)),
         "部分零维度必须被拒绝。", failureCount);
-    SetExpect(!SendData(fixture, HostDataAction::LoadFile,
-        HostDataExportRequest{ "exports" }),
-        "action 与 payload 不匹配必须被拒绝。", failureCount);
 
     std::vector<float> voxels{ 1.0f, 2.0f, 3.0f, 4.0f };
-    SetExpect(SendData(fixture, HostDataAction::ReloadBuffer,
-        HostReloadRequest{ std::move(voxels), BuildGeometry() }),
+    SetExpect(SendData(
+        fixture,
+        GetReloadReq(std::move(voxels), BuildGeometry())),
         "精确大小的 owning reload 应被接收。", failureCount);
     SetExpect(service->GetReloadBuffer().GetVoxels()
             == std::vector<float>{ 1.0f, 2.0f, 3.0f, 4.0f },
         "reload 必须持有体素快照。", failureCount);
-    SetExpect(!SendData(fixture, HostDataAction::ReloadBuffer,
-        HostReloadRequest{ std::vector<float>{ 1.0f }, BuildGeometry() }),
+    SetExpect(!SendData(
+        fixture,
+        GetReloadReq(std::vector<float>{ 1.0f }, BuildGeometry())),
         "短 buffer 必须被拒绝。", failureCount);
-    SetExpect(!SendData(fixture, HostDataAction::None, std::monostate{}),
-        "None data action 必须被拒绝。", failureCount);
+
+    HostRequest emptyRequest;
+    SetExpect(!fixture.Send(std::move(emptyRequest)),
+        "空 HostRequest 基类必须被拒绝。", failureCount);
+    UnknownHostRequest unknown;
+    SetExpect(!fixture.Send(std::move(unknown)),
+        "未知 HostRequest 派生类型必须被拒绝。", failureCount);
+}
+
+void StartToolCases(int& failureCount)
+{
+    Fixture fixture;
+    HostToolSetRequest setRequest;
+    setRequest.targetView.viewId = "primary";
+    setRequest.toolMode = HostToolMode::ModelTransform;
+    SetExpect(
+        fixture.Send(std::move(setRequest))
+            && fixture.context->GetToolMode()
+                == ToolMode::ModelTransform,
+        "Tool Set 必须写入显式模式。",
+        failureCount);
+
+    HostToolSwitchRequest switchRequest;
+    switchRequest.targetView.viewId = "primary";
+    SetExpect(
+        fixture.Send(std::move(switchRequest))
+            && fixture.context->GetToolMode()
+                == ToolMode::Navigation,
+        "Tool Switch 必须在预设模式间切换。",
+        failureCount);
+
+    HostToolSetRequest callbackTool;
+    callbackTool.targetView.viewId = "primary";
+    int callbackCount = 0;
+    SetExpect(
+        !fixture.Send(
+            std::move(callbackTool),
+            [&callbackCount](bool) { ++callbackCount; })
+            && callbackCount == 0,
+        "Tool 请求携带 callback 必须拒绝且不得调用。",
+        failureCount);
 }
 
 } // namespace
@@ -448,5 +542,6 @@ int HostRouterSuite::GetFailCount() const
     int failureCount = 0;
     StartDataCases(failureCount);
     StartViewCases(failureCount);
+    StartToolCases(failureCount);
     return failureCount;
 }

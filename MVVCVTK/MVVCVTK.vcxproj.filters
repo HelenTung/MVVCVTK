@@ -267,10 +267,10 @@
     <ClInclude Include="include\Host\HostCommandRouter.h">
       <Filter>include\Host</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\Types\HostCommandTypes.h">
+    <ClInclude Include="include\Host\Types\HostInputTypes.h">
       <Filter>include\Host\Types</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\Types\HostAdapterTypes.h">
+    <ClInclude Include="include\Host\Types\HostRequest.h">
       <Filter>include\Host\Types</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\Types\HostRequestTypes.h">

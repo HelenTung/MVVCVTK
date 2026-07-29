@@ -1,4 +1,5 @@
 #include "Host/HostCommandRouter.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "Platform/Path.h"
 
 #include "AppService.h"
@@ -17,10 +18,9 @@
 #include <memory>
 #include <optional>
 #include <utility>
-#include <variant>
 
-// 宿主协议到应用服务的唯一命令适配层：
-// - 只做 variant/payload 校验、Host 类型到 App 类型转换和目标视图选择；
+// 宿主协议到应用服务的唯一请求适配层：
+// - 只做具体 Request 识别、Host 类型到 App 类型转换和目标视图选择；
 // - 不保存业务状态，也不直接执行裁切/间隙算法；
 // - m_core、m_renderViews 为会话期非拥有观察指针。
 class HostCommandRouter::Impl final {
@@ -28,7 +28,9 @@ public:
     Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews)
         : m_core(&core), m_renderViews(&renderViews) {}
 
-    bool DispatchCommand(HostCommand command) const;
+    bool Dispatch(
+        HostRequest&& request,
+        HostCompleteCallback onComplete) const;
 
 private:
     struct ViewCandidate final {
@@ -52,11 +54,10 @@ private:
         std::optional<bool> isAxesVisible;
     };
 
-    bool SendData(HostDataCommand command) const;
-    bool SendView(const HostViewCommand& command) const;
-    bool SendViewSet(const HostViewSetRequest& request) const;
+    bool SetView(const HostViewSetRequest& request) const;
     bool ResetViewCamera(const HostViewResetRequest& request) const;
-    bool SendTool(const HostToolCommand& command) const;
+    bool SetTool(const HostToolSetRequest& request) const;
+    bool SwitchTool(const HostToolSwitchRequest& request) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
     bool ExportData(HostDataExportRequest request, HostCompleteCallback callback) const;
@@ -87,49 +88,45 @@ private:
     const HostRenderViewSet* m_renderViews = nullptr;
 };
 
-bool HostCommandRouter::Impl::DispatchCommand(HostCommand command) const
+bool HostCommandRouter::Impl::Dispatch(
+    HostRequest&& request,
+    HostCompleteCallback onComplete) const
 {
-    // 顶层 variant 只负责把命令送入一个业务轴；移动 Data 是为了把 callback/payload
-    // 的所有权继续下沉，View/Tool 只读请求则保留 const 引用。未知分支统一拒绝，不做默认动作。
-    if (auto* value = std::get_if<HostDataCommand>(&command)) {
-        return SendData(std::move(*value));
+    if (auto* value = dynamic_cast<HostLoadRequest*>(&request)) {
+        return LoadFile(
+            std::move(*value),
+            std::move(onComplete));
     }
-    if (const auto* value = std::get_if<HostViewCommand>(&command)) {
-        return SendView(*value);
+    if (auto* value = dynamic_cast<HostReloadRequest*>(&request)) {
+        return ReloadBuffer(
+            std::move(*value),
+            std::move(onComplete));
     }
-    if (const auto* value = std::get_if<HostToolCommand>(&command)) {
-        return SendTool(*value);
+    if (auto* value = dynamic_cast<HostDataExportRequest*>(&request)) {
+        return ExportData(
+            std::move(*value),
+            std::move(onComplete));
     }
-    return false;
-}
-
-bool HostCommandRouter::Impl::SendData(HostDataCommand command) const
-{
-    // action 与 payload variant 必须形成严格配对；即使 payload 本身类型合法，挂在错误 action 下也拒绝。
-    // callback 只随被接纳的异步入口移动，校验失败时不会被调用。
-    switch (command.request.action) {
-    case HostDataAction::LoadFile:
-        if (auto* request = std::get_if<HostLoadRequest>(&command.request.payload)) {
-            return LoadFile(std::move(*request), std::move(command.onComplete));
-        }
-        return false;
-    case HostDataAction::ReloadBuffer:
-        if (auto* request = std::get_if<HostReloadRequest>(&command.request.payload)) {
-            return ReloadBuffer(std::move(*request), std::move(command.onComplete));
-        }
-        return false;
-    case HostDataAction::ExportData:
-        if (auto* request = std::get_if<HostDataExportRequest>(&command.request.payload)) {
-            return ExportData(std::move(*request), std::move(command.onComplete));
-        }
-        return false;
-    case HostDataAction::ExportSlices:
-        if (auto* request = std::get_if<HostSliceExportRequest>(&command.request.payload)) {
-            return ExportSlices(std::move(*request), std::move(command.onComplete));
-        }
-        return false;
-    case HostDataAction::None:
-        return false;
+    if (auto* value = dynamic_cast<HostSliceExportRequest*>(&request)) {
+        return ExportSlices(
+            std::move(*value),
+            std::move(onComplete));
+    }
+    if (const auto* value = dynamic_cast<const HostViewSetRequest*>(
+        &request)) {
+        return !onComplete && SetView(*value);
+    }
+    if (const auto* value = dynamic_cast<const HostViewResetRequest*>(
+        &request)) {
+        return !onComplete && ResetViewCamera(*value);
+    }
+    if (const auto* value = dynamic_cast<const HostToolSetRequest*>(
+        &request)) {
+        return !onComplete && SetTool(*value);
+    }
+    if (const auto* value = dynamic_cast<const HostToolSwitchRequest*>(
+        &request)) {
+        return !onComplete && SwitchTool(*value);
     }
     return false;
 }
@@ -554,29 +551,7 @@ bool HostCommandRouter::Impl::GetUnitValid(double value) const
     return std::isfinite(value) && value >= 0.0 && value <= 1.0;
 }
 
-bool HostCommandRouter::Impl::SendView(const HostViewCommand& command) const
-{
-    // View action 与 payload 保持严格配对；Set 是状态事务，ResetCamera 是单目标命令。
-    switch (command.request.action) {
-    case HostViewAction::Set:
-        if (const auto* request = std::get_if<HostViewSetRequest>(
-            &command.request.payload)) {
-            return SendViewSet(*request);
-        }
-        return false;
-    case HostViewAction::ResetCamera:
-        if (const auto* request = std::get_if<HostViewResetRequest>(
-            &command.request.payload)) {
-            return ResetViewCamera(*request);
-        }
-        return false;
-    case HostViewAction::None:
-        return false;
-    }
-    return false;
-}
-
-bool HostCommandRouter::Impl::SendViewSet(
+bool HostCommandRouter::Impl::SetView(
     const HostViewSetRequest& request) const
 {
     // 1. 先在局部候选中解析目标并完成所有字段校验。
@@ -667,39 +642,28 @@ bool HostCommandRouter::Impl::ResetViewCamera(
     return true;
 }
 
-bool HostCommandRouter::Impl::SendTool(const HostToolCommand& command) const
+bool HostCommandRouter::Impl::SetTool(
+    const HostToolSetRequest& request) const
 {
-    // Set 显式写入请求模式；Switch 不携带模式，在 Navigation/ModelTransform 间轮转。
-    // 两条路径都必须先解析出目标 context，None 或 payload/action 不匹配不会触碰当前工具状态。
-    const HostViewTarget* target = nullptr;
-    std::optional<HostToolMode> requestedMode;
-    switch (command.request.action) {
-    case HostToolAction::Set:
-        if (const auto* request = std::get_if<HostToolSetRequest>(&command.request.payload)) {
-            target = &request->targetView;
-            requestedMode = request->toolMode;
-        }
-        break;
-    case HostToolAction::Switch:
-        if (const auto* request = std::get_if<HostToolSwitchRequest>(&command.request.payload)) {
-            target = &request->targetView;
-        }
-        break;
-    case HostToolAction::None:
-        break;
-    }
-    const auto* view = target && m_renderViews
-        ? m_renderViews->GetViewBySelector(*target) : nullptr;
+    const auto* view = m_renderViews
+        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
     if (!view || !view->context) return false;
-    ToolMode mode = ToolMode::Navigation;
-    if (requestedMode) {
-        const auto appMode = GetAppToolMode(*requestedMode);
-        if (!appMode) return false;
-        mode = *appMode;
-    } else {
-        mode = view->context->GetToolMode() == ToolMode::Navigation
-            ? ToolMode::ModelTransform : ToolMode::Navigation;
-    }
+    const auto mode = GetAppToolMode(request.toolMode);
+    if (!mode) return false;
+    view->context->SetToolMode(*mode);
+    return true;
+}
+
+bool HostCommandRouter::Impl::SwitchTool(
+    const HostToolSwitchRequest& request) const
+{
+    const auto* view = m_renderViews
+        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
+    if (!view || !view->context) return false;
+    const ToolMode mode =
+        view->context->GetToolMode() == ToolMode::Navigation
+        ? ToolMode::ModelTransform
+        : ToolMode::Navigation;
     view->context->SetToolMode(mode);
     return true;
 }
@@ -710,7 +674,12 @@ HostCommandRouter::HostCommandRouter(const HostCoreServices& core,
 
 HostCommandRouter::~HostCommandRouter() = default;
 
-bool HostCommandRouter::DispatchCommand(HostCommand command) const
+bool HostCommandRouter::Dispatch(
+    HostRequest&& request,
+    HostCompleteCallback onComplete) const
 {
-    return m_impl && m_impl->DispatchCommand(std::move(command));
+    return m_impl
+        && m_impl->Dispatch(
+            std::move(request),
+            std::move(onComplete));
 }

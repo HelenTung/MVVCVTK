@@ -77,11 +77,11 @@ public:
         bool isTargetRebind = false;
     };
 
-    struct ExportTask final {
-        std::future<CropExportResult> result;
+    struct BuildTask final {
+        std::future<CropBuildResult> result;
         std::thread worker;
-        CropExportCallback callback;
-        CropExportRequest request;
+        CropBuildCallback callback;
+        CropBuildParams params;
     };
 
     struct PendingBaseline final {
@@ -115,11 +115,11 @@ public:
     CropHistoryState GetCropHistory() const;
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
-    bool ExportCrop(
+    bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropExportCallback onComplete);
-    bool GetExportTickNeeded() const;
-    bool SendExportResult();
+        CropBuildCallback onComplete);
+    bool GetBuildTickNeeded() const;
+    bool SendBuildResult();
 
 private:
     bool StartViewInput(
@@ -153,12 +153,12 @@ private:
     void ClearShaderStage();
     void ClearShader();
     void ClearTargets();
-    CropExportResult BuildExportFailure(
-        const CropExportRequest& request,
+    CropBuildResult BuildResultFailure(
+        const CropBuildParams& params,
         CropFailure failureReason,
         const char* message) const;
 
-    CropRouter m_exportRouter;
+    CropRouter m_buildRouter;
     CropBoxWidget m_boxWidget;
     CropPlaneWidget m_planeWidget;
     CropInputSnapshot m_input;
@@ -173,7 +173,7 @@ private:
     std::optional<PendingShader> m_pendingShader;
     std::deque<CropOpItem> m_pendingOps;
     std::optional<CropRemovalMode> m_pendingMode;
-    std::optional<ExportTask> m_exportTask;
+    std::optional<BuildTask> m_buildTask;
     std::optional<PendingBaseline> m_pendingBaseline;
     std::optional<CropOpItem> m_dragStart;
     CropShape m_geometryType = CropShape::Box;
@@ -216,11 +216,11 @@ CropBridge::Impl::~Impl()
     m_planeWidget.SetEnabled(false);
     ClearShader();
     ClearTargets();
-    if (m_exportTask) {
-        if (m_exportTask->worker.joinable()) {
-            m_exportTask->worker.join();
+    if (m_buildTask) {
+        if (m_buildTask->worker.joinable()) {
+            m_buildTask->worker.join();
         }
-        m_exportTask.reset();
+        m_buildTask.reset();
     }
 }
 
@@ -243,7 +243,7 @@ bool CropBridge::Impl::StartViewInput(
     std::optional<CropInputSnapshot> input)
 {
     if (!m_isAccepting
-        || m_exportTask
+        || m_buildTask
         || !request.interactor
         || !request.renderer
         || !request.referenceService
@@ -466,7 +466,7 @@ bool CropBridge::Impl::StartCropBaseline(
     const std::size_t baseNodeCount)
 {
     if (!m_isAccepting
-        || m_exportTask
+        || m_buildTask
         || m_pendingShader
         || m_pendingMode
         || m_hasBaseShader
@@ -571,7 +571,7 @@ bool CropBridge::Impl::ClearCropBaseline()
 bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
 {
     if (!m_isActive
-        || m_exportTask
+        || m_buildTask
         || !CropAlgorithm::GetInputValid(m_input)
         || (geometryType != CropShape::Box && geometryType != CropShape::Plane)) {
         return false;
@@ -619,7 +619,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
 bool CropBridge::Impl::SetCropMode(const CropRemovalMode removalMode)
 {
     if (!m_isActive
-        || m_exportTask
+        || m_buildTask
         || (removalMode != CropRemovalMode::None
             && removalMode != CropRemovalMode::KeepInside
             && removalMode != CropRemovalMode::RemoveInside)) {
@@ -680,7 +680,7 @@ bool CropBridge::Impl::SetCropMode(const CropRemovalMode removalMode)
 void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 {
     if (!m_isActive
-        || m_exportTask
+        || m_buildTask
         || m_geometryType != CropShape::Box
         || m_removalMode == CropRemovalMode::None) {
         (void)SetInteraction(m_boxSource, false);
@@ -723,7 +723,7 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
 {
     if (!m_isActive
-        || m_exportTask
+        || m_buildTask
         || m_geometryType != CropShape::Plane
         || m_removalMode == CropRemovalMode::None) {
         (void)SetInteraction(m_planeSource, false);
@@ -765,7 +765,7 @@ void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
 
 bool CropBridge::Impl::SetCandidate(CropOpItem operation)
 {
-    if (m_exportTask
+    if (m_buildTask
         || m_removalMode == CropRemovalMode::None) {
         return false;
     }
@@ -949,12 +949,12 @@ bool CropBridge::Impl::PreviousCrop()
 {
     if (!GetCropBound()
         || !GetTargetsReady()
-        || m_exportTask
+        || m_buildTask
         || m_cursor == 0) {
         std::cout
             << "[Crop][HistoryObjects] previous rejected"
-            << " exportActive="
-            << static_cast<bool>(m_exportTask)
+            << " buildActive="
+            << static_cast<bool>(m_buildTask)
             << " activeObject="
             << static_cast<const void*>(&m_history)
             << " activeNode=" << m_cursor
@@ -973,7 +973,7 @@ bool CropBridge::Impl::NextCrop()
 {
     return GetCropBound()
         && GetTargetsReady()
-        && !m_exportTask
+        && !m_buildTask
         && m_cursor < m_history.size()
         && SetPrefix(m_cursor + 1);
 }
@@ -982,7 +982,7 @@ bool CropBridge::Impl::SetCropNode(const std::size_t nodeCount)
 {
     if (!GetCropBound()
         || !GetTargetsReady()
-        || m_exportTask
+        || m_buildTask
         || m_pendingShader
         || nodeCount > m_history.size()) {
         return false;
@@ -1346,54 +1346,54 @@ CropMatrixDouble16Array CropBridge::Impl::GetWorldToInput() const
     return values;
 }
 
-CropExportResult CropBridge::Impl::BuildExportFailure(
-    const CropExportRequest& request,
+CropBuildResult CropBridge::Impl::BuildResultFailure(
+    const CropBuildParams& params,
     const CropFailure failureReason,
     const char* message) const
 {
-    CropExportResult result;
-    result.resolvedDataSource = request.dataSource;
+    CropBuildResult result;
+    result.resolvedDataSource = params.dataSource;
     result.failureReason = failureReason;
-    result.inputVersion = request.inputVersion;
-    result.nodeCount = request.nodeCount;
-    result.operations = request.operations;
+    result.inputVersion = params.inputVersion;
+    result.nodeCount = params.nodeCount;
+    result.operations = params.operations;
     result.message = message;
     return result;
 }
 
-bool CropBridge::Impl::ExportCrop(
+bool CropBridge::Impl::BuildCropResult(
     CropInputSnapshot input,
-    CropExportCallback onComplete)
+    CropBuildCallback onComplete)
 {
     if (!onComplete) {
         return false;
     }
 
-    CropExportRequest request;
-    request.dataSource = input.dataSource;
-    request.inputVersion = input.inputVersion;
+    CropBuildParams params;
+    params.dataSource = input.dataSource;
+    params.inputVersion = input.inputVersion;
     const std::size_t absoluteNodeCount =
         m_baseNodeCount + m_cursor;
-    request.nodeCount = absoluteNodeCount;
+    params.nodeCount = absoluteNodeCount;
     if (absoluteNodeCount <= m_allHistory.size()) {
-        request.operations.assign(
+        params.operations.assign(
             m_allHistory.begin(),
             m_allHistory.begin() + absoluteNodeCount);
     }
 
-    if (m_exportTask) {
-        onComplete(BuildExportFailure(
-            request,
+    if (m_buildTask) {
+        onComplete(BuildResultFailure(
+            params,
             CropFailure::Busy,
-            "A crop export is already running."));
+            "A crop result build is already running."));
         return false;
     }
     if (m_pendingShader
         || m_pendingMode
         || m_hasBaseShader
         || m_cursor == 0
-        || request.nodeCount == 0
-        || request.operations.size() != request.nodeCount
+        || params.nodeCount == 0
+        || params.operations.size() != params.nodeCount
         || m_baseNodeCount + m_history.size()
             != m_allHistory.size()
         || input.dataSource != m_input.dataSource
@@ -1403,21 +1403,21 @@ bool CropBridge::Impl::ExportCrop(
         || m_activePayload.sourceStamp != GetInputStamp(m_input)
         || m_activePayload.nodeCount != m_cursor
         || !m_activePayload.predicateTable) {
-        onComplete(BuildExportFailure(
-            request,
+        onComplete(BuildResultFailure(
+            params,
             CropFailure::BadInput,
-            "Crop export state is not ready."));
+            "Crop build state is not ready."));
         return false;
     }
 
     const auto tableResult =
         CropAlgorithm::BuildPredicateTable(
-            request.operations,
-            request.nodeCount);
+            params.operations,
+            params.nodeCount);
     if (!tableResult.isSucceeded
         || !tableResult.predicateTable) {
-        onComplete(BuildExportFailure(
-            request,
+        onComplete(BuildResultFailure(
+            params,
             CropFailure::BadInput,
             "Crop absolute predicate prefix is invalid."));
         return false;
@@ -1425,87 +1425,87 @@ bool CropBridge::Impl::ExportCrop(
     CropShaderPayload payload;
     payload.revision = m_activePayload.revision;
     payload.sourceStamp = GetInputStamp(input);
-    payload.nodeCount = request.nodeCount;
+    payload.nodeCount = params.nodeCount;
     payload.predicateTable =
         tableResult.predicateTable;
-    auto task = m_exportRouter.BuildExportTask(
+    auto task = m_buildRouter.BuildResultTask(
         input,
-        request,
+        params,
         std::move(payload));
     if (!task) {
-        onComplete(BuildExportFailure(
-            request,
+        onComplete(BuildResultFailure(
+            params,
             CropFailure::VersionMismatch,
-            "Crop export snapshot is inconsistent."));
+            "Crop build snapshot is inconsistent."));
         return false;
     }
 
-    ExportTask active;
+    BuildTask active;
     active.result = task->get_future();
     active.callback = std::move(onComplete);
-    active.request = std::move(request);
+    active.params = std::move(params);
     try {
         active.worker = std::thread(std::move(*task));
     }
     catch (...) {
-        active.callback(BuildExportFailure(
-            active.request,
+        active.callback(BuildResultFailure(
+            active.params,
             CropFailure::WorkerStartFailed,
-            "Crop export worker could not start."));
+            "Crop build worker could not start."));
         return false;
     }
     if (!active.worker.joinable()) {
-        active.callback(BuildExportFailure(
-            active.request,
+        active.callback(BuildResultFailure(
+            active.params,
             CropFailure::WorkerStartFailed,
-            "Crop export worker is not joinable."));
+            "Crop build worker is not joinable."));
         return false;
     }
     // worker 捕获 root 输入与绝对历史前缀；在 owner thread 消费结果前，
-    // m_exportTask 同时充当历史事务门，所有会改变历史前缀的入口均拒绝。
-    m_exportTask = std::move(active);
+    // m_buildTask 同时充当历史事务门，所有会改变历史前缀的入口均拒绝。
+    m_buildTask = std::move(active);
     m_hasDrag = false;
     m_dragStart.reset();
     (void)SetWidgetActive(false);
     std::cout
         << "[Crop][Materialize] widget frozen"
         << " shape=" << static_cast<int>(m_geometryType)
-        << " node=" << m_exportTask->request.nodeCount
+        << " node=" << m_buildTask->params.nodeCount
         << " sourceVersion="
-        << m_exportTask->request.inputVersion
+        << m_buildTask->params.inputVersion
         << '\n';
     return true;
 }
 
-bool CropBridge::Impl::GetExportTickNeeded() const
+bool CropBridge::Impl::GetBuildTickNeeded() const
 {
-    return m_exportTask
-        && m_exportTask->result.valid()
-        && m_exportTask->result.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    return m_buildTask
+        && m_buildTask->result.valid()
+        && m_buildTask->result.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
 }
 
-bool CropBridge::Impl::SendExportResult()
+bool CropBridge::Impl::SendBuildResult()
 {
-    if (!GetExportTickNeeded()) {
+    if (!GetBuildTickNeeded()) {
         return false;
     }
-    auto active = std::move(*m_exportTask);
-    m_exportTask.reset();
-    CropExportResult result;
+    auto active = std::move(*m_buildTask);
+    m_buildTask.reset();
+    CropBuildResult result;
     try {
         result = active.result.get();
     }
     catch (const std::exception& error) {
-        result = BuildExportFailure(
-            active.request,
+        result = BuildResultFailure(
+            active.params,
             CropFailure::WorkerFailed,
             error.what());
     }
     catch (...) {
-        result = BuildExportFailure(
-            active.request,
+        result = BuildResultFailure(
+            active.params,
             CropFailure::WorkerFailed,
-            "Crop export worker failed with an unknown exception.");
+            "Crop build worker failed with an unknown exception.");
     }
     if (active.worker.joinable()) {
         active.worker.join();
@@ -1826,13 +1826,13 @@ bool CropBridge::GetCropBound() const { return m_impl->GetCropBound(); }
 CropHistoryState CropBridge::GetCropHistory() const { return m_impl->GetCropHistory(); }
 bool CropBridge::GetShaderTickNeeded() const { return m_impl->GetShaderTickNeeded(); }
 bool CropBridge::SendShaderCommit() { return m_impl->SendShaderCommit(); }
-bool CropBridge::ExportCrop(
+bool CropBridge::BuildCropResult(
     CropInputSnapshot rootInput,
-    CropExportCallback onComplete)
+    CropBuildCallback onComplete)
 {
-    return m_impl->ExportCrop(
+    return m_impl->BuildCropResult(
         std::move(rootInput),
         std::move(onComplete));
 }
-bool CropBridge::GetExportTickNeeded() const { return m_impl->GetExportTickNeeded(); }
-bool CropBridge::SendExportResult() { return m_impl->SendExportResult(); }
+bool CropBridge::GetBuildTickNeeded() const { return m_impl->GetBuildTickNeeded(); }
+bool CropBridge::SendBuildResult() { return m_impl->SendBuildResult(); }

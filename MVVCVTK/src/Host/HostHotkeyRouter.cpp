@@ -1,7 +1,9 @@
 #include "Host/HostHotkeyRouter.h"
 
 #include "Host/HostCommandRouter.h"
+#include "Host/HostFeature.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "StdRenderContext.h"
 
 #include <algorithm>
@@ -38,22 +40,11 @@ public:
 
     Impl(
         const HostRenderViewSet& renderViews,
-        std::weak_ptr<HostCommandRouter> commandRouter,
-        HostDataExportRequest dataExportRequest,
-        HostSliceExportRequest sliceExportRequest)
+        std::weak_ptr<HostCommandRouter> commandRouter)
         : m_renderViews(&renderViews)
         , m_commandRouter(std::move(commandRouter))
-        , m_dataExportRequest(std::move(dataExportRequest))
-        , m_sliceExportRequest(std::move(sliceExportRequest))
         , m_inputPort(*this)
     {
-        // 构造阶段只补请求中缺失的目录；format 等已有值或既有缺省语义均保持不变。
-        if (m_dataExportRequest.outputPath.empty()) {
-            m_dataExportRequest.outputPath = ".";
-        }
-        if (m_sliceExportRequest.outputDir.empty()) {
-            m_sliceExportRequest.outputDir = ".";
-        }
     }
 
     ~Impl()
@@ -89,7 +80,7 @@ private:
         const HostRenderViewRuntime& view);
     HotkeyAction GetHotkeyAction(
         const InteractionEvent& event) const;
-    bool SendCommand(
+    bool SendRequest(
         HotkeyAction action,
         HostRenderViewRole role) const;
     bool GetCharMatched(
@@ -105,8 +96,6 @@ private:
 
     const HostRenderViewSet* m_renderViews = nullptr;
     std::weak_ptr<HostCommandRouter> m_commandRouter;
-    HostDataExportRequest m_dataExportRequest;
-    HostSliceExportRequest m_sliceExportRequest;
     std::vector<HostInputBinding> m_inputBindings;
     std::vector<std::weak_ptr<StdRenderContext>> m_contexts;
     HostHotkeyConfig m_config;
@@ -186,7 +175,7 @@ bool HostHotkeyRouter::Impl::SetActionDown(
     return wasDown != isDown;
 }
 
-bool HostHotkeyRouter::Impl::SendCommand(
+bool HostHotkeyRouter::Impl::SendRequest(
     const HotkeyAction action,
     const HostRenderViewRole role) const
 {
@@ -195,60 +184,49 @@ bool HostHotkeyRouter::Impl::SendCommand(
         return false;
     }
 
-    HostCommand command;
     switch (action) {
     case HotkeyAction::Model: {
-        HostToolRequest request;
-        request.action = HostToolAction::Switch;
-        request.payload = HostToolSwitchRequest{
-            HostViewTarget{ "", true, role } };
-        command = HostToolCommand{ std::move(request) };
-        break;
+        HostToolSwitchRequest request;
+        request.targetView = { "", true, role };
+        return router->Dispatch(std::move(request));
     }
     case HotkeyAction::ExportData: {
-        auto value = m_dataExportRequest;
+        HostDataExportRequest request;
+        request.outputPath = m_config.dataExportPath.empty()
+            ? "." : m_config.dataExportPath;
+        request.format = m_config.dataExportFormat;
+        request.sourceView = m_config.dataSourceView;
         // 显式格式已经决定底层 writer；只有缺省格式才需要触发窗口参与模式推断。
-        if (!value.format
-            && value.sourceView.viewId.empty()
-            && !value.sourceView.isViewRoleUsed) {
-            value.sourceView = {
-                "", true, role };
+        if (!request.format
+            && request.sourceView.viewId.empty()
+            && !request.sourceView.isViewRoleUsed) {
+            request.sourceView = { "", true, role };
         }
-        HostDataRequest request;
-        request.action = HostDataAction::ExportData;
-        request.payload = std::move(value);
-        command = HostDataCommand{
-            std::move(request), nullptr };
-        break;
+        return router->Dispatch(std::move(request));
     }
     case HotkeyAction::ExportSlices: {
-        auto value = m_sliceExportRequest;
-        if (value.sourceView.viewId.empty()
-            && !value.sourceView.isViewRoleUsed) {
-            value.sourceView = {
-                "", true, role };
+        HostSliceExportRequest request;
+        request.outputDir = m_config.sliceExportDir.empty()
+            ? "." : m_config.sliceExportDir;
+        request.sourceView = m_config.sliceSourceView;
+        request.angleDeg = m_config.sliceAngleDeg;
+        if (request.sourceView.viewId.empty()
+            && !request.sourceView.isViewRoleUsed) {
+            request.sourceView = { "", true, role };
         }
-        HostDataRequest request;
-        request.action = HostDataAction::ExportSlices;
-        request.payload = std::move(value);
-        command = HostDataCommand{
-            std::move(request), nullptr };
-        break;
+        return router->Dispatch(std::move(request));
     }
     case HotkeyAction::Exit: {
-        HostToolRequest request;
-        request.action = HostToolAction::Set;
-        request.payload = HostToolSetRequest{
-            HostViewTarget{ "", true, role },
-            HostToolMode::Navigation };
-        command = HostToolCommand{ std::move(request) };
-        break;
+        HostToolSetRequest request;
+        request.targetView = { "", true, role };
+        request.toolMode = HostToolMode::Navigation;
+        return router->Dispatch(std::move(request));
     }
     case HotkeyAction::None:
     case HotkeyAction::Count:
         return false;
     }
-    return router->DispatchCommand(std::move(command));
+    return false;
 }
 
 InteractionResult HostHotkeyRouter::Impl::SendFeatureInput(
@@ -315,7 +293,7 @@ InteractionResult HostHotkeyRouter::Impl::OnInput(
     if (!SetActionDown(action, true)) {
         return { true, true };
     }
-    (void)SendCommand(action, view.config.role);
+        (void)SendRequest(action, view.config.role);
     return { true, true };
 }
 
@@ -461,14 +439,10 @@ bool HostHotkeyRouter::Impl::ClearHotkeys()
 
 HostHotkeyRouter::HostHotkeyRouter(
     const HostRenderViewSet& renderViews,
-    std::weak_ptr<HostCommandRouter> commandRouter,
-    HostDataExportRequest dataExportRequest,
-    HostSliceExportRequest sliceExportRequest)
+    std::weak_ptr<HostCommandRouter> commandRouter)
     : m_impl(std::make_unique<Impl>(
         renderViews,
-        std::move(commandRouter),
-        std::move(dataExportRequest),
-        std::move(sliceExportRequest)))
+        std::move(commandRouter)))
 {
 }
 

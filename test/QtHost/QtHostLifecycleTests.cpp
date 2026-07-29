@@ -2,6 +2,7 @@
 
 #include "Host/HostFeature.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
 #include <vtkCommand.h>
@@ -64,7 +65,7 @@ public:
         m_setActiveViews = context.setActiveViews;
         isAttached = true;
         ++attachCount;
-        return true;
+        return !isAttachFailing;
     }
 
     bool DetachHost() override
@@ -137,6 +138,7 @@ public:
     int detachTryCount = 0;
     int tickCount = 0;
     bool isAttached = false;
+    bool isAttachFailing = false;
     bool isAttachThrowing = false;
     bool isDetachThrowing = false;
     bool isDetachFailing = false;
@@ -276,6 +278,36 @@ int StartLifecycleDeathCase(
 int GetLifecycleFailCount()
 {
     int failureCount = 0;
+    VtkAppHostSession emptySession(HostSessionConfig{});
+    HostLoadRequest rejectedLoad;
+    rejectedLoad.filePath = "missing.raw";
+    int rejectedCallbackCount = 0;
+    failureCount += GetCaseResult(
+        !emptySession.SendRequest(
+            std::move(rejectedLoad),
+            [&rejectedCallbackCount](bool) {
+                ++rejectedCallbackCount;
+            })
+            && rejectedCallbackCount == 0,
+        "Session Build failure rejects request without callback") ? 0 : 1;
+
+    VtkAppHostSession moveSource(GetSessionConfig());
+    VtkAppHostSession moveTarget(std::move(moveSource));
+    HostLoadRequest movedLoad;
+    movedLoad.filePath = "missing.raw";
+    int movedCallbackCount = 0;
+    failureCount += GetCaseResult(
+        !moveSource.SendRequest(
+            std::move(movedLoad),
+            [&movedCallbackCount](bool) {
+                ++movedCallbackCount;
+            })
+            && movedCallbackCount == 0
+            && moveSource.GetRenderViewEndpoints().empty()
+            && !moveSource.GetRenderViewEndpoint("lifecycle")
+            && !moveSource.GetPrimaryEndpoint(),
+        "Moved-from Session rejects requests and endpoint access") ? 0 : 1;
+
     auto session = std::make_unique<VtkAppHostSession>(
         GetSessionConfig());
     auto feature = std::make_shared<FakeHostFeature>("feature-a");
@@ -287,6 +319,28 @@ int GetLifecycleFailCount()
     failureCount += GetCaseResult(
         session->BuildSession(),
         "Lifecycle fixture builds a Session") ? 0 : 1;
+
+    auto rejectedAttach =
+        std::make_shared<FakeHostFeature>(
+            "feature-rejected");
+    rejectedAttach->isAttachFailing = true;
+    const bool isRejectedAttach =
+        !session->AttachFeature(rejectedAttach);
+    auto rejectedReplacement =
+        std::make_shared<FakeHostFeature>(
+            "feature-rejected");
+    const bool isRejectedReplacementAttached =
+        session->AttachFeature(rejectedReplacement);
+    const bool isRejectedReplacementDetached =
+        session->DetachFeature(*rejectedReplacement);
+    failureCount += GetCaseResult(
+        isRejectedAttach
+            && rejectedAttach->attachCount == 1
+            && rejectedAttach->detachCount == 1
+            && !rejectedAttach->isAttached
+            && isRejectedReplacementAttached
+            && isRejectedReplacementDetached,
+        "Rejected Feature attach rolls back partial host binding") ? 0 : 1;
 
     const auto beforeUseCount = feature.use_count();
     const bool isAttached = session->AttachFeature(feature);
@@ -311,9 +365,16 @@ int GetLifecycleFailCount()
 
     auto crossThreadFeature =
         std::make_shared<FakeHostFeature>("feature-worker");
+    bool isCrossBuildAccepted = true;
+    bool isCrossRequestAccepted = true;
     bool isCrossAttachAccepted = true;
     bool isCrossDetachAccepted = true;
     std::thread lifecycleWorker([&]() {
+        isCrossBuildAccepted = session->BuildSession();
+        HostViewResetRequest reset;
+        reset.targetView.viewId = "lifecycle";
+        isCrossRequestAccepted =
+            session->SendRequest(std::move(reset));
         isCrossAttachAccepted =
             session->AttachFeature(crossThreadFeature);
         isCrossDetachAccepted =
@@ -321,11 +382,13 @@ int GetLifecycleFailCount()
     });
     lifecycleWorker.join();
     failureCount += GetCaseResult(
-        !isCrossAttachAccepted
+        !isCrossBuildAccepted
+            && !isCrossRequestAccepted
+            && !isCrossAttachAccepted
             && !isCrossDetachAccepted
             && crossThreadFeature->attachCount == 0
             && feature->detachCount == 0,
-        "Feature attach and detach are restricted to the Session owner thread") ? 0 : 1;
+        "Session requests and Feature lifecycle require the owner thread") ? 0 : 1;
 
     auto duplicateId =
         std::make_shared<FakeHostFeature>("feature-a");

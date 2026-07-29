@@ -2,6 +2,7 @@
 
 #include "Host/GapHostFeature.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
 #include <vtkCommand.h>
@@ -107,6 +108,21 @@ GapHostConfig GetGapConfig()
     return config;
 }
 
+GapHostRequest GetGapRequest(const GapHostAction action)
+{
+    GapHostRequest request;
+    request.action = action;
+    return request;
+}
+
+GapHostRequest GetStartRequest(
+    const GapHostStartParams& params)
+{
+    auto request = GetGapRequest(GapHostAction::Start);
+    request.start = params;
+    return request;
+}
+
 bool SendReload(
     VtkAppHostSession& session,
     bool& isComplete,
@@ -133,11 +149,8 @@ bool SendReload(
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
 
-    HostDataRequest request;
-    request.action = HostDataAction::ReloadBuffer;
-    request.payload = std::move(reload);
-    return session.SendData(
-        std::move(request),
+    return session.SendRequest(
+        std::move(reload),
         [&isComplete, &isSucceeded](const bool value) {
             isSucceeded = value;
             isComplete = true;
@@ -153,6 +166,22 @@ void SendTicks(
             vtkCommand::TimerEvent);
         endpoint.renderWindow->Render();
     }
+}
+
+bool GetKeyHandled(
+    const HostRenderViewEndpoint& endpoint,
+    const char keyCode,
+    const char* keySym)
+{
+    endpoint.interactor->SetKeyEventInformation(
+        0, 0, keyCode, 0, keySym);
+    const bool isPressed =
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::KeyPressEvent) != 0;
+    const bool isReleased =
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::KeyReleaseEvent) != 0;
+    return isPressed && isReleased;
 }
 
 bool GetReloadReady(
@@ -191,7 +220,13 @@ int GetGapFailCount()
             std::shared_ptr<InteractiveService>>&) {
         return true;
     };
+    GapHostFeature standaloneFeature(GetGapConfig());
+    const bool isStandaloneRejected =
+        !standaloneFeature.AttachHost(directContext);
     auto directFeature =
+        std::make_shared<GapHostFeature>(
+            GetGapConfig());
+    auto duplicateFeature =
         std::make_shared<GapHostFeature>(
             GetGapConfig());
     const auto directInitialState =
@@ -200,6 +235,8 @@ int GetGapFailCount()
         directFeature->AttachHost(directContext);
     const bool isDuplicateRejected =
         !directFeature->AttachHost(directContext);
+    const bool isDuplicateIdRejected =
+        !duplicateFeature->AttachHost(directContext);
     const bool isDirectDetached =
         directFeature->DetachHost();
     const auto directDetachedState =
@@ -208,19 +245,29 @@ int GetGapFailCount()
         directInitialState.analysisState
                 == GapAnalysisState::Idle
             && !directInitialState.isViewActive
+            && isStandaloneRejected
             && isDirectAttached
             && isDuplicateRejected
+            && isDuplicateIdRejected
             && isDirectDetached
             && directDetachedState.analysisState
                 == GapAnalysisState::Idle
             && directDetachedState.statistics.objectVoxelCount == 0
             && directInput.GetAttachCount() == 1
             && directInput.GetDetachCount() == 1,
-        "Gap Feature accepts only the first direct AttachHost call") ? 0 : 1;
+        "Gap attachment requires shared ownership and preserves one input binding") ? 0 : 1;
 
     VtkAppHostSession session(GetGapSessionConfig());
     auto feature = std::make_shared<GapHostFeature>(
         GetGapConfig());
+    const auto start = GetGapConfig().defaultStart;
+    int unattachedCallbackCount = 0;
+    const bool isUnattachedRejected =
+        !feature->SendRequest(
+            GetStartRequest(start),
+            [&unattachedCallbackCount](bool) {
+                ++unattachedCallbackCount;
+            });
     const auto beforeUseCount = feature.use_count();
     const bool isBuilt = session.BuildSession();
     const bool isAttached = session.AttachFeature(feature);
@@ -251,46 +298,105 @@ int GetGapFailCount()
     failureCount += GetCaseResult(
         isTimerAttached
             && isReloadReady
+            && isUnattachedRejected
+            && unattachedCallbackCount == 0
             && feature.use_count() == beforeUseCount,
         "Session owns no strong Gap Feature handle and publishes input") ? 0 : 1;
 
-    GapHostStartRequest missingTarget =
+    GapHostStartParams missingTarget =
         GetGapConfig().defaultStart;
     missingTarget.targetViews = {};
+    int invalidStartCallbackCount = 0;
     const bool isStrict =
-        !feature->SendRequest({
-            GapHostAction::None, std::monostate{} })
-        && !feature->SendRequest({
-            GapHostAction::Start, std::monostate{} })
-        && !feature->SendRequest({
-            GapHostAction::Start, missingTarget })
-        && !feature->SendRequest({
-            GapHostAction::Overlay, std::monostate{} })
-        && !feature->SendRequest({
-            GapHostAction::Exit, std::monostate{} })
-        && !feature->SendRequest({
-            GapHostAction::Overlay, std::monostate{} },
+        !feature->SendRequest(GetGapRequest(
+            GapHostAction::None))
+        && !feature->SendRequest(GetGapRequest(
+            GapHostAction::Start))
+        && !feature->SendRequest(
+            GetStartRequest(missingTarget),
+            [&invalidStartCallbackCount](bool) {
+                ++invalidStartCallbackCount;
+            })
+        && !feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay))
+        && !feature->SendRequest(GetGapRequest(
+            GapHostAction::Exit))
+        && !feature->SendRequest(
+            GetGapRequest(GapHostAction::Overlay),
             [](bool) {});
+    bool isWrongThreadAccepted = true;
+    int wrongThreadCallbackCount = 0;
+    std::thread wrongThread([&] {
+        isWrongThreadAccepted = feature->SendRequest(
+            GetStartRequest(start),
+            [&wrongThreadCallbackCount](bool) {
+                ++wrongThreadCallbackCount;
+            });
+    });
+    wrongThread.join();
     failureCount += GetCaseResult(
-        isStrict,
-        "Gap request matrix rejects invalid payload, target, callback and inactive actions") ? 0 : 1;
+        isStrict
+            && invalidStartCallbackCount == 0
+            && !isWrongThreadAccepted
+            && wrongThreadCallbackCount == 0
+            && feature->GetState().analysisState
+                == GapAnalysisState::Idle,
+        "Gap request fields, callback actions and owner thread stay strict") ? 0 : 1;
+
+    const bool isHotkeyStartHandled =
+        GetKeyHandled(*endpoint, 'j', "j");
+    for (int poll = 0;
+        feature->GetState().analysisState
+                != GapAnalysisState::Succeeded
+            && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    const auto hotkeyStartState = feature->GetState();
+    const bool isExitKeyHandled =
+        GetKeyHandled(*endpoint, 0, "Escape");
+    for (int poll = 0;
+        feature->GetState().isExitPending
+            && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    const auto hotkeyExitState = feature->GetState();
+    failureCount += GetCaseResult(
+        isHotkeyStartHandled
+            && hotkeyStartState.analysisState
+                == GapAnalysisState::Succeeded
+            && hotkeyStartState.isViewActive
+            && isExitKeyHandled
+            && hotkeyExitState.analysisState
+                == GapAnalysisState::Idle
+            && !hotkeyExitState.isViewActive
+            && !hotkeyExitState.isExitPending,
+        "Gap Start and Exit keys use the same request entry") ? 0 : 1;
 
     int firstCompleteCount = 0;
     bool isFirstSucceeded = false;
-    const auto start = GetGapConfig().defaultStart;
+    const auto ownerThread = std::this_thread::get_id();
+    std::thread::id callbackThread;
     const bool isFirstAccepted =
         feature->SendRequest(
-            { GapHostAction::Start, start },
-            [&firstCompleteCount, &isFirstSucceeded](
+            GetStartRequest(start),
+            [&firstCompleteCount, &isFirstSucceeded,
+                &callbackThread](
                 const bool isSuccess) {
                 ++firstCompleteCount;
                 isFirstSucceeded = isSuccess;
+                callbackThread = std::this_thread::get_id();
             });
     const auto acceptedState = feature->GetState();
     bool hasRejectedCallback = false;
     const bool isSecondRejected =
         !feature->SendRequest(
-            { GapHostAction::Start, start },
+            GetStartRequest(start),
             [&hasRejectedCallback](bool) {
                 hasRejectedCallback = true;
             });
@@ -309,13 +415,21 @@ int GetGapFailCount()
                 != GapAnalysisState::Idle
             && acceptedState.isViewActive
             && !acceptedState.isExitPending
-            && isSecondRejected
-            && firstCompleteCount == 1
+            && isSecondRejected,
+        "Accepted Gap Start keeps its view when a second Start is rejected") ? 0 : 1;
+    failureCount += GetCaseResult(
+        firstCompleteCount == 1
             && isFirstSucceeded
-            && feature->GetState().statistics.voidVoxelCount == 27
-            && feature->GetState().statistics.objectVoxelCount == 98
+            && callbackThread != std::thread::id{}
+            && callbackThread == ownerThread
             && !hasRejectedCallback,
-        "Rejected Start preserves the accepted callback generation") ? 0 : 1;
+        "Gap Start callback runs once on the owner thread") ? 0 : 1;
+    failureCount += GetCaseResult(
+        feature->GetState().statistics.voidVoxelCount == 27
+            && feature->GetState().statistics.objectVoxelCount == 98
+            && feature->GetState().analysisState
+                == GapAnalysisState::Succeeded,
+        "Rejected Gap Start preserves the accepted analysis result") ? 0 : 1;
 
     endpoint->interactor->SetKeyEventInformation(
         0, 0, 'j', 0, "j");
@@ -326,9 +440,8 @@ int GetGapFailCount()
         endpoint->interactor->InvokeEvent(
             vtkCommand::KeyReleaseEvent) != 0;
     const bool isOverlaySwitched =
-        feature->SendRequest({
-            GapHostAction::Overlay,
-            std::monostate{} });
+        feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay));
     failureCount += GetCaseResult(
         isOverlayKeyHandled
             && isOverlayReleaseHandled
@@ -340,9 +453,8 @@ int GetGapFailCount()
     SendTicks(*endpoint, 2);
     const auto staleState = feature->GetState();
     const bool isStaleOverlayRejected =
-        !feature->SendRequest({
-            GapHostAction::Overlay,
-            std::monostate{} });
+        !feature->SendRequest(GetGapRequest(
+            GapHostAction::Overlay));
     failureCount += GetCaseResult(
         isNextReloadReady
             && isStaleOverlayRejected
@@ -364,7 +476,7 @@ int GetGapFailCount()
     bool hasDetachedCallback = false;
     const bool isPendingAccepted =
         pendingFeature->SendRequest(
-            { GapHostAction::Start, start },
+            GetStartRequest(start),
             [&hasDetachedCallback](bool) {
                 hasDetachedCallback = true;
             });
@@ -372,6 +484,13 @@ int GetGapFailCount()
         session.DetachFeature(*pendingFeature);
     const auto detachedState = pendingFeature->GetState();
     SendTicks(*endpoint, 2);
+    int detachedSendCount = 0;
+    const bool isDetachedRequestRejected =
+        !pendingFeature->SendRequest(
+            GetStartRequest(start),
+            [&detachedSendCount](bool) {
+                ++detachedSendCount;
+            });
     failureCount += GetCaseResult(
         isFirstDetached
             && isPendingAttached
@@ -379,6 +498,8 @@ int GetGapFailCount()
         "Gap accepts a pending request before detach") ? 0 : 1;
     failureCount += GetCaseResult(
         isDetached
+            && isDetachedRequestRejected
+            && detachedSendCount == 0
             && detachedState.analysisState
                 == GapAnalysisState::Idle
             && detachedState.statistics.objectVoxelCount == 0

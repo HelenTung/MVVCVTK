@@ -26,7 +26,7 @@ struct GapSurfaceParams {
     float material = 0.0f;  // 预留的材料灰度下限；当前 worker 不读取该字段。
 };
 
-// ── 显示请求中的等值面阈值来源 ────────────────────────────────────
+// ── 显示会话的等值面阈值来源配置 ──────────────────────────────────
 // 这是 GapAnalysis feature 自己的执行语义，不携带 host 窗口、按键或上位机协议细节。
 enum class GapIsoMode {
     // 在当前输入标量范围按 min + (max - min) * ratio 解析；feature 不额外钳制 ratio。
@@ -35,7 +35,7 @@ enum class GapIsoMode {
     AbsoluteValue
 };
 
-struct GapSurfaceRequest {
+struct GapSurfaceConfig {
     // 阈值来源选择器；DataRangeRatio 只读取 ratio，AbsoluteValue 只读取 absoluteIsoValue。
     GapIsoMode isoMode = GapIsoMode::DataRangeRatio;
     // DataRangeRatio 下按 min + (max-min)*ratio 解析；当前不钳制范围，默认 0 对应输入最小值。

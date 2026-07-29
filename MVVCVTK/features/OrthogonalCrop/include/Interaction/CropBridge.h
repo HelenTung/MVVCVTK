@@ -18,7 +18,7 @@ struct CropViewRequest final {
     std::vector<std::shared_ptr<InteractiveService>> targetServices;
 };
 
-using CropExportCallback = std::function<void(CropExportResult)>;
+using CropBuildCallback = std::function<void(CropBuildResult)>;
 
 class CropBridge final {
 public:
@@ -57,11 +57,11 @@ public:
     bool GetShaderTickNeeded() const;
     bool SendShaderCommit();
     // 从 rootInput 对完整 allHistory 前缀做一次融合物化，不生成节点级中间 mask。
-    bool ExportCrop(
+    bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropExportCallback onComplete);
-    bool GetExportTickNeeded() const;
-    bool SendExportResult();
+        CropBuildCallback onComplete);
+    bool GetBuildTickNeeded() const;
+    bool SendBuildResult();
 
 private:
     class Impl;

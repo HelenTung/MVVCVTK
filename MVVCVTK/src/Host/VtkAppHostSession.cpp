@@ -98,7 +98,9 @@ public:
     ~Impl();
 
     bool BuildSession();
-    bool SendCommand(HostCommand command);
+    bool SendRequest(
+        HostRequest&& request,
+        HostCompleteCallback onComplete);
     bool AttachTimer(const HostTimerConfig& timerConfig);
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
@@ -162,7 +164,7 @@ VtkAppHostSession::Impl::~Impl()
 bool VtkAppHostSession::Impl::BuildSession()
 {
     if (isBuilt) {
-        return true;
+        return ownerThread == std::this_thread::get_id();
     }
     if (config.renderViews.empty()) {
         return false;
@@ -179,19 +181,24 @@ bool VtkAppHostSession::Impl::BuildSession()
     endpoints = renderViews.BuildEndpoints();
     hotkeyRouter = std::make_unique<HostHotkeyRouter>(
         renderViews,
-        commandRouter,
-        config.dataExportRequest,
-        config.sliceExportRequest);
+        commandRouter);
     ownerThread = std::this_thread::get_id();
     isBuilt = true;
     return true;
 }
 
-bool VtkAppHostSession::Impl::SendCommand(HostCommand command)
+bool VtkAppHostSession::Impl::SendRequest(
+    HostRequest&& request,
+    HostCompleteCallback onComplete)
 {
-    return BuildSession()
-        && commandRouter
-        && commandRouter->DispatchCommand(std::move(command));
+    if (!BuildSession()
+        || ownerThread != std::this_thread::get_id()
+        || !commandRouter) {
+        return false;
+    }
+    return commandRouter->Dispatch(
+        std::move(request),
+        std::move(onComplete));
 }
 
 void VtkAppHostSession::Impl::DetachTimer()
@@ -340,21 +347,33 @@ bool VtkAppHostSession::Impl::AttachFeature(
         return true;
     };
 
+    const auto clearRejectedAttach = [&]() noexcept {
+        try {
+            (void)feature->DetachHost();
+        }
+        catch (...) {
+        }
+        try {
+            (void)hotkeyRouter->GetInputPort().DetachInput(id);
+        }
+        catch (...) {
+        }
+        try {
+            (void)renderViews.SetFeatureViews(id, {});
+        }
+        catch (...) {
+        }
+    };
     try {
         if (!feature->AttachHost(context)) {
-            (void)renderViews.SetFeatureViews(id, {});
+            clearRejectedAttach();
             return false;
         }
         features.push_back(
             FeatureEntry{ id, feature });
     }
     catch (...) {
-        try {
-            (void)feature->DetachHost();
-        }
-        catch (...) {
-        }
-        (void)renderViews.SetFeatureViews(id, {});
+        clearRejectedAttach();
         return false;
     }
     return true;
@@ -486,33 +505,23 @@ bool VtkAppHostSession::Start()
     return true;
 }
 
-bool VtkAppHostSession::SendData(
-    HostDataRequest request,
+bool VtkAppHostSession::SendRequest(
+    HostRequest&& request,
     HostCompleteCallback onComplete)
 {
-    return m_impl->SendCommand(
-        HostCommand{ HostDataCommand{
-            std::move(request), std::move(onComplete) } });
-}
-
-bool VtkAppHostSession::SendView(HostViewRequest request)
-{
-    return m_impl->SendCommand(
-        HostCommand{ HostViewCommand{
-            std::move(request) } });
-}
-
-bool VtkAppHostSession::SendTool(HostToolRequest request)
-{
-    return m_impl->SendCommand(
-        HostCommand{ HostToolCommand{
-            std::move(request) } });
+    return m_impl
+        && m_impl->SendRequest(
+            std::move(request),
+            std::move(onComplete));
 }
 
 const std::vector<HostRenderViewEndpoint>&
 VtkAppHostSession::GetRenderViewEndpoints()
 {
-    (void)BuildSession();
+    static const std::vector<HostRenderViewEndpoint> empty;
+    if (!m_impl || !BuildSession()) {
+        return empty;
+    }
     return m_impl->endpoints;
 }
 
@@ -520,7 +529,9 @@ const HostRenderViewEndpoint*
 VtkAppHostSession::GetRenderViewEndpoint(
     const std::string& viewId)
 {
-    (void)BuildSession();
+    if (!m_impl || !BuildSession()) {
+        return nullptr;
+    }
     for (const auto& endpoint : m_impl->endpoints) {
         if (endpoint.id == viewId) {
             return &endpoint;
@@ -532,7 +543,9 @@ VtkAppHostSession::GetRenderViewEndpoint(
 const HostRenderViewEndpoint*
 VtkAppHostSession::GetPrimaryEndpoint()
 {
-    (void)BuildSession();
+    if (!m_impl || !BuildSession()) {
+        return nullptr;
+    }
     for (const auto& endpoint : m_impl->endpoints) {
         if (endpoint.role == HostRenderViewRole::Primary3D) {
             return &endpoint;

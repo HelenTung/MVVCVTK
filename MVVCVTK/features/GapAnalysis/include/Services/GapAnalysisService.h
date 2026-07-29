@@ -18,7 +18,7 @@ struct GapViewRequest final {
     vtkSmartPointer<vtkImageData> inputImage; // 必需 VTK 输入；StartView 同步隔离后才接纳 worker。
     // 与 inputImage 同批次的可空二值有效域；空表示整卷有效，0 表示分析域外。
     vtkSmartPointer<vtkImageData> validityMask;
-    GapSurfaceRequest surface; // 等值面阈值与表面构建参数的本次请求副本。
+    GapSurfaceConfig surface; // 等值面阈值来源的本次配置快照。
     GapVoidParams voidParams; // 灰度、最小体积、方向张量和腐蚀参数快照。
     std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets; // 轴向与 2D label overlay 目标配对。

@@ -2,8 +2,10 @@
 
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
+#include "Host/HostFeature.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "StdRenderContext.h"
 
 #include <iostream>
@@ -59,12 +61,10 @@ void StartHotkeyCases(int& failureCount)
     config.dataExportKey = 'v';
     config.sliceExportKey = 's';
     config.exitKeySym = "Escape";
+    config.sliceExportDir = "configured-slices";
 
     {
-        HostSliceExportRequest sliceDefaults;
-        sliceDefaults.outputDir = "configured-slices";
-        HostHotkeyRouter hotkeys(
-            views, commandRouter, {}, std::move(sliceDefaults));
+        HostHotkeyRouter hotkeys(views, commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(config),
             "合法 hotkey 配置应完成绑定。",
@@ -114,16 +114,8 @@ void StartHotkeyCases(int& failureCount)
         explicitData.outputPath = ".";
         explicitData.sourceView = {
             "", true, HostRenderViewRole::Primary3D };
-        HostDataRequest explicitDataRequest;
-        explicitDataRequest.action =
-            HostDataAction::ExportData;
-        explicitDataRequest.payload =
-            std::move(explicitData);
         SetExpect(
-            commandRouter->DispatchCommand(
-                HostDataCommand{
-                    std::move(explicitDataRequest),
-                    nullptr })
+            commandRouter->Dispatch(std::move(explicitData))
                 && service
                 && service->GetExportCount() == 2
                 && service->GetExportDir() == "."
@@ -151,16 +143,8 @@ void StartHotkeyCases(int& failureCount)
         explicitSlices.outputDir = ".";
         explicitSlices.sourceView = {
             "", true, HostRenderViewRole::FrontBackSlice };
-        HostDataRequest explicitSliceRequest;
-        explicitSliceRequest.action =
-            HostDataAction::ExportSlices;
-        explicitSliceRequest.payload =
-            std::move(explicitSlices);
         SetExpect(
-            commandRouter->DispatchCommand(
-                HostDataCommand{
-                    std::move(explicitSliceRequest),
-                    nullptr })
+            commandRouter->Dispatch(std::move(explicitSlices))
                 && sliceService
                 && sliceService->GetSliceCount() == 2
                 && sliceService->GetSlicePath() == ".",
@@ -343,22 +327,19 @@ void StartHotkeyCases(int& failureCount)
     }
 
     {
-        HostDataExportRequest dataExportRequest;
-        dataExportRequest.outputPath = "specified-data";
-        dataExportRequest.format = HostDataExportFormat::Obj;
-        HostSliceExportRequest sliceExportRequest;
-        sliceExportRequest.outputDir = "specified-slices";
-        sliceExportRequest.sourceView = {
+        auto specifiedConfig = config;
+        specifiedConfig.dataExportPath = "specified-data";
+        specifiedConfig.dataExportFormat =
+            HostDataExportFormat::Obj;
+        specifiedConfig.sliceExportDir =
+            "specified-slices";
+        specifiedConfig.sliceSourceView = {
             "slice", false, HostRenderViewRole::Auxiliary };
-        sliceExportRequest.angleDeg = 12.5;
-        HostHotkeyRouter hotkeys(
-            views,
-            commandRouter,
-            std::move(dataExportRequest),
-            std::move(sliceExportRequest));
+        specifiedConfig.sliceAngleDeg = 12.5;
+        HostHotkeyRouter hotkeys(views, commandRouter);
         SetExpect(
-            hotkeys.AttachHotkeys(config),
-            "显式导出请求的 hotkey 配置应完成绑定。",
+            hotkeys.AttachHotkeys(specifiedConfig),
+            "显式导出默认值的 hotkey 配置应完成绑定。",
             failureCount);
 
         auto result = sliceContext->OnInput(

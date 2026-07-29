@@ -1,13 +1,13 @@
 #pragma once
 
-#include "Host/Types/HostCommandTypes.h"
+#include "Host/Types/HostRequest.h"
 
 #include <memory>
 
 class HostRenderViewSet;
 struct HostCoreServices;
 
-// HostCommandRouter 是 typed host 命令分发器，不是 feature，也不是业务 service。
+// HostCommandRouter 是主体请求分发器，不是 feature，也不是业务 service。
 class HostCommandRouter final {
 public:
     HostCommandRouter(
@@ -15,10 +15,12 @@ public:
         const HostRenderViewSet& renderViews);
     ~HostCommandRouter();
 
-    bool DispatchCommand(HostCommand command) const;
+    bool Dispatch(
+        HostRequest&& request,
+        HostCompleteCallback onComplete = nullptr) const;
 
 private:
-    // router 独占业务命令分发实现。
+    // router 独占主体请求分发实现。
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };

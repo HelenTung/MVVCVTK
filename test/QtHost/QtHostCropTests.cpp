@@ -9,6 +9,7 @@
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
 #include "Host/HostRenderViewSet.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 #include "VolumeTypes.h"
 
@@ -24,9 +25,12 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -93,6 +97,19 @@ public:
         ImageState,
         const ImageSnapshot&,
         ImageSnapshot&)> m_setImageState;
+};
+
+class InputPortProbe final : public HostInputPort {
+public:
+    bool AttachInput(HostInputBinding) override
+    {
+        return true;
+    }
+
+    bool DetachInput(std::string_view) override
+    {
+        return true;
+    }
 };
 
 class ThrowingStateSink final : public IStateEventSink {
@@ -221,13 +238,72 @@ CropHostConfig GetCropConfig()
     config.defaultTarget.isTargetViewsUsed = true;
     config.defaultTarget.isStatusVisible = true;
     config.inputViews.viewIds = { "crop-primary" };
-    config.keys.restoreOriginal.keyCode = '6';
+    config.keys.box.keyCode = 'a';
+    config.keys.plane.keyCode = 'b';
+    config.keys.noMode.keyCode = 'c';
+    config.keys.keepMode.keyCode = 'd';
+    config.keys.removeMode.keyCode = 'e';
+    config.keys.previous.keyCode = 'f';
+    config.keys.next.keyCode = 'g';
+    config.keys.buildResult.keyCode = 'h';
+    config.keys.restoreOriginal.keyCode = 'i';
+    config.keys.exit.keyCode = 'j';
+    for (std::size_t index = 0;
+        index < config.keys.nodes.size(); ++index) {
+        config.keys.nodes[index].keyCode =
+            static_cast<char>('0' + index);
+    }
     return config;
 }
 
 CropHostTarget GetCropTarget()
 {
     return GetCropConfig().defaultTarget;
+}
+
+CropHostRequest GetCropRequest(const CropHostAction action)
+{
+    CropHostRequest request;
+    request.action = action;
+    return request;
+}
+
+CropHostRequest GetTargetRequest(
+    const CropHostAction action,
+    const CropHostTarget& target)
+{
+    auto request = GetCropRequest(action);
+    request.target = target;
+    return request;
+}
+
+CropHostRequest GetModeRequest(
+    const CropHostTarget& target,
+    const CropRemovalMode removalMode)
+{
+    auto request = GetTargetRequest(
+        CropHostAction::Mode, target);
+    request.removalMode = removalMode;
+    return request;
+}
+
+CropHostRequest GetNodeRequest(
+    const std::size_t nodeCount)
+{
+    auto request = GetCropRequest(CropHostAction::Node);
+    request.nodeCount = nodeCount;
+    return request;
+}
+
+CropHostRequest GetPolyRequest(
+    vtkSmartPointer<vtkPolyData> polyData,
+    const std::uint64_t sourceVersion)
+{
+    auto request = GetCropRequest(
+        CropHostAction::SetPolyData);
+    request.polyData = std::move(polyData);
+    request.sourceVersion = sourceVersion;
+    return request;
 }
 
 GapHostConfig GetGapConfig()
@@ -265,11 +341,8 @@ bool SendReload(
     reload.geometry.dimensions = { 4, 4, 4 };
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
-    HostDataRequest request;
-    request.action = HostDataAction::ReloadBuffer;
-    request.payload = std::move(reload);
-    return session.SendData(
-        std::move(request),
+    return session.SendRequest(
+        std::move(reload),
         [&isComplete, &isSucceeded](const bool value) {
             isSucceeded = value;
             isComplete = true;
@@ -284,6 +357,22 @@ void SendTicks(
         endpoint.interactor->InvokeEvent(vtkCommand::TimerEvent);
         endpoint.renderWindow->Render();
     }
+}
+
+bool GetKeyHandled(
+    const HostRenderViewEndpoint& endpoint,
+    const char keyCode)
+{
+    const std::string key(1, keyCode);
+    endpoint.interactor->SetKeyEventInformation(
+        0, 0, keyCode, 0, key.c_str());
+    const bool isPressed =
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::KeyPressEvent) != 0;
+    const bool isReleased =
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::KeyReleaseEvent) != 0;
+    return isPressed && isReleased;
 }
 
 void SendHostTick(
@@ -360,6 +449,49 @@ bool SendCropInput(
 int GetCropFailCount()
 {
     int failureCount = 0;
+    const auto target = GetCropTarget();
+    int unattachedCallbackCount = 0;
+    auto unattachedFeature =
+        std::make_shared<CropHostFeature>(GetCropConfig());
+    const bool isUnattachedRejected =
+        !unattachedFeature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
+            [&unattachedCallbackCount](CropBuildResult) {
+                ++unattachedCallbackCount;
+            });
+
+    HostRenderViewSet emptyViews;
+    InputPortProbe inputPort;
+    HostFeatureContext standaloneContext;
+    standaloneContext.renderViews = &emptyViews;
+    standaloneContext.inputPort = &inputPort;
+    standaloneContext.getImageSnapshot = [] {
+        return ImageSnapshot{};
+    };
+    standaloneContext.setImageState = [](
+        ImageState,
+        const ImageSnapshot&,
+        ImageSnapshot&) {
+        return false;
+    };
+    standaloneContext.setActiveViews = [](
+        const std::vector<std::shared_ptr<InteractiveService>>&) {
+        return true;
+    };
+    standaloneContext.sendOwnerComplete =
+        [](std::function<void()>) {
+            return true;
+        };
+    CropHostFeature standaloneFeature(GetCropConfig());
+    const bool isStandaloneRejected =
+        !standaloneFeature.AttachHost(standaloneContext);
+    failureCount += GetCaseResult(
+        isUnattachedRejected
+            && unattachedCallbackCount == 0
+            && isStandaloneRejected,
+        "Crop rejects unattached requests and non-shared attachment") ? 0 : 1;
+
     VtkAppHostSession session(GetCropSessionConfig());
     auto feature = std::make_shared<CropHostFeature>(
         GetCropConfig());
@@ -450,49 +582,93 @@ int GetCropFailCount()
     // 因此不会提前推进后续 Feature worker。
     SendTicks(*endpoint, 2);
 
-    endpoint->interactor->SetKeyEventInformation(
-        0, 0, '6', 0, "6");
-    const bool isResetKeyHandled =
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::KeyPressEvent) != 0;
-    const bool isResetReleaseHandled =
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::KeyReleaseEvent) != 0;
+    const bool isInitialNodeRejected =
+        !feature->SendRequest(GetNodeRequest(0));
+    bool areCommandKeysHandled = true;
+    for (char keyCode = 'a'; keyCode <= 'j'; ++keyCode) {
+        areCommandKeysHandled =
+            GetKeyHandled(*endpoint, keyCode)
+            && areCommandKeysHandled;
+    }
+    bool areNodeKeysHandled = true;
+    for (char keyCode = '0'; keyCode <= '9'; ++keyCode) {
+        areNodeKeysHandled =
+            GetKeyHandled(*endpoint, keyCode)
+            && areNodeKeysHandled;
+    }
     failureCount += GetCaseResult(
-        isResetKeyHandled
-            && isResetReleaseHandled,
-        "6 routes RestoreOriginal without a compatibility shortcut") ? 0 : 1;
+        areCommandKeysHandled && areNodeKeysHandled,
+        "Crop maps every command and node key through one input binding") ? 0 : 1;
 
-    const auto target = GetCropTarget();
-    const bool isStrict = !feature->SendRequest({
-            CropHostAction::None, std::monostate{} })
-        && !feature->SendRequest({
-            CropHostAction::Start,
-            CropHostNodeRequest{ 0 } })
-        && !feature->SendRequest({
-            CropHostAction::Previous,
-            std::monostate{} },
-            [](CropExportResult) {})
-        && !feature->SendRequest({
-            CropHostAction::Export, target });
+    auto modeWithoutValue = GetTargetRequest(
+        CropHostAction::Mode, target);
+    auto buildWithoutTarget = GetCropRequest(
+        CropHostAction::BuildResult);
+    auto polyWithoutVersion = GetCropRequest(
+        CropHostAction::SetPolyData);
+    polyWithoutVersion.polyData =
+        vtkSmartPointer<vtkPolyData>::New();
+    int rejectedBuildCount = 0;
+    const bool isStrict =
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::None))
+        && !feature->SendRequest(GetCropRequest(
+            CropHostAction::Start))
+        && !feature->SendRequest(std::move(modeWithoutValue))
+        && !feature->SendRequest(GetCropRequest(
+            CropHostAction::Node))
+        && !feature->SendRequest(
+            std::move(buildWithoutTarget),
+            [&rejectedBuildCount](CropBuildResult) {
+                ++rejectedBuildCount;
+            })
+        && !feature->SendRequest(std::move(polyWithoutVersion))
+        && !feature->SendRequest(
+            GetCropRequest(CropHostAction::Previous),
+            [](CropBuildResult) {})
+        && !feature->SendRequest(GetTargetRequest(
+            CropHostAction::BuildResult, target));
+    const bool isSyncBuildRejected =
+        !feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
+            [&rejectedBuildCount](CropBuildResult) {
+                ++rejectedBuildCount;
+            });
+    SendHostTick(*endpoint, *timerEndpoint);
     const bool isInactiveHistoryRejected =
-        !feature->SendRequest({
-            CropHostAction::Previous, std::monostate{} })
-        && !feature->SendRequest({
-            CropHostAction::Next, std::monostate{} })
-        && !feature->SendRequest({
-            CropHostAction::Node,
-            CropHostNodeRequest{ 0 } });
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::Previous))
+        && !feature->SendRequest(GetCropRequest(
+            CropHostAction::Next));
+    bool isWrongThreadAccepted = true;
+    int wrongThreadCallbackCount = 0;
+    std::thread wrongThread([&] {
+        isWrongThreadAccepted = feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
+            [&wrongThreadCallbackCount](CropBuildResult) {
+                ++wrongThreadCallbackCount;
+            });
+    });
+    wrongThread.join();
     failureCount += GetCaseResult(
-        isStrict && isInactiveHistoryRejected,
-        "Crop request matrix rejects None, payload mismatch and illegal callbacks") ? 0 : 1;
+        isStrict
+            && isSyncBuildRejected
+            && rejectedBuildCount == 0
+            && isInitialNodeRejected
+            && isInactiveHistoryRejected
+            && !isWrongThreadAccepted
+            && wrongThreadCallbackCount == 0,
+        "Crop request fields and rejected BuildResult callbacks stay strict") ? 0 : 1;
 
     auto splitTarget = target;
     splitTarget.referenceView = {
         "crop-timer", false,
         HostRenderViewRole::Auxiliary };
-    const bool isSplitStarted = feature->SendRequest({
-        CropHostAction::Start, splitTarget });
+    const bool isSplitStarted = feature->SendRequest(
+        GetTargetRequest(
+            CropHostAction::Start, splitTarget));
     SendHostTick(*endpoint, *timerEndpoint);
     const auto splitService =
         contextProbe->GetViewService("crop-timer");
@@ -572,34 +748,33 @@ int GetCropFailCount()
             && isSplitQualityRestored,
         "Crop keeps Quality input and mapper through split reference drag") ? 0 : 1;
 
-    const bool isStarted = feature->SendRequest({
-        CropHostAction::Start, target });
+    const bool isStarted = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Start, target));
     const auto startedState = feature->GetState();
     auto defaultOnlyTarget = target;
     defaultOnlyTarget.isTargetViewsUsed = false;
     defaultOnlyTarget.targetViews.viewIds = {
         "ignored-missing-view" };
     const bool isDefaultOnlyStarted =
-        feature->SendRequest({
-            CropHostAction::Start, defaultOnlyTarget });
+        feature->SendRequest(GetTargetRequest(
+            CropHostAction::Start, defaultOnlyTarget));
     auto emptyExplicitTarget = target;
     emptyExplicitTarget.targetViews = {};
     const bool isEmptyExplicitRejected =
-        !feature->SendRequest({
-            CropHostAction::Start, emptyExplicitTarget });
+        !feature->SendRequest(GetTargetRequest(
+            CropHostAction::Start, emptyExplicitTarget));
     auto unknownExplicitTarget = target;
     unknownExplicitTarget.targetViews.viewIds = {
         "crop-primary", "missing-view" };
     const bool isUnknownExplicitRejected =
-        !feature->SendRequest({
-            CropHostAction::Start, unknownExplicitTarget });
+        !feature->SendRequest(GetTargetRequest(
+            CropHostAction::Start, unknownExplicitTarget));
     const auto preservedState = feature->GetState();
-    const bool isModeSet = feature->SendRequest({
-        CropHostAction::Mode,
-        CropHostModeRequest{
-            target, CropRemovalMode::RemoveInside } });
-    const bool isBoxSet = feature->SendRequest({
-        CropHostAction::Box, target });
+    const bool isModeSet = feature->SendRequest(
+        GetModeRequest(
+            target, CropRemovalMode::RemoveInside));
+    const bool isBoxSet = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Box, target));
     const double imageBounds[6] = {
         0.0, 3.0, 0.0, 3.0, 0.0, 3.0 };
     endpoint->renderer->ResetCamera(imageBounds);
@@ -624,19 +799,19 @@ int GetCropFailCount()
             && isBoxSet,
         "Start, Mode and Box flow through CropHostFeature::SendRequest") ? 0 : 1;
 
-    const bool isPreviousRejected = !feature->SendRequest({
-        CropHostAction::Previous, std::monostate{} });
-    const bool isNextRejected = !feature->SendRequest({
-        CropHostAction::Next, std::monostate{} });
-    const bool isNode = feature->SendRequest({
-        CropHostAction::Node,
-        CropHostNodeRequest{ 0 } });
-    const bool isRearmed = feature->SendRequest({
-        CropHostAction::Mode,
-        CropHostModeRequest{
-            target, CropRemovalMode::RemoveInside } });
-    const bool isBoxRearmed = feature->SendRequest({
-        CropHostAction::Box, target });
+    const bool isPreviousRejected =
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::Previous));
+    const bool isNextRejected =
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::Next));
+    const bool isNode =
+        feature->SendRequest(GetNodeRequest(0));
+    const bool isRearmed = feature->SendRequest(
+        GetModeRequest(
+            target, CropRemovalMode::RemoveInside));
+    const bool isBoxRearmed = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Box, target));
     failureCount += GetCaseResult(
         isPreviousRejected
             && isNextRejected
@@ -659,12 +834,12 @@ int GetCropFailCount()
             && committedState.history.hasEditableOp,
         "Box interaction creates one committed Crop operation") ? 0 : 1;
 
-    const bool isPrevious = feature->SendRequest({
-        CropHostAction::Previous, std::monostate{} });
+    const bool isPrevious = feature->SendRequest(
+        GetCropRequest(CropHostAction::Previous));
     SendHostTick(*endpoint, *timerEndpoint);
     const auto previousState = feature->GetState();
-    const bool isNext = feature->SendRequest({
-        CropHostAction::Next, std::monostate{} });
+    const bool isNext = feature->SendRequest(
+        GetCropRequest(CropHostAction::Next));
     SendHostTick(*endpoint, *timerEndpoint);
     const auto nextState = feature->GetState();
     failureCount += GetCaseResult(
@@ -674,14 +849,14 @@ int GetCropFailCount()
             && nextState.history.nodeCount == 1,
         "Previous and Next move the committed Crop history in both directions") ? 0 : 1;
 
-    const bool isHistoryExited = feature->SendRequest({
-        CropHostAction::Exit, std::monostate{} });
-    const bool isPreviousAfterExit = feature->SendRequest({
-        CropHostAction::Previous, std::monostate{} });
+    const bool isHistoryExited = feature->SendRequest(
+        GetCropRequest(CropHostAction::Exit));
+    const bool isPreviousAfterExit = feature->SendRequest(
+        GetCropRequest(CropHostAction::Previous));
     SendHostTick(*endpoint, *timerEndpoint);
     const auto previousAfterExit = feature->GetState();
-    const bool isNextAfterExit = feature->SendRequest({
-        CropHostAction::Next, std::monostate{} });
+    const bool isNextAfterExit = feature->SendRequest(
+        GetCropRequest(CropHostAction::Next));
     SendHostTick(*endpoint, *timerEndpoint);
     const auto nextAfterExit = feature->GetState();
     failureCount += GetCaseResult(
@@ -696,25 +871,24 @@ int GetCropFailCount()
     const auto cropExpected =
         contextProbe->m_getImageSnapshot();
     int staleCompleteCount = 0;
-    CropExportResult staleResult;
-    const bool isStaleExported =
-        feature->SendRequest({
-                CropHostAction::Export, target },
+    CropBuildResult staleResult;
+    const bool isStaleBuilt =
+        feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
             [&staleCompleteCount, &staleResult](
-                CropExportResult result) {
+                CropBuildResult result) {
                 ++staleCompleteCount;
                 staleResult = std::move(result);
             });
     const bool isPublishPreviousRejected =
-        !feature->SendRequest({
-            CropHostAction::Previous, std::monostate{} });
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::Previous));
     const bool isPublishNextRejected =
-        !feature->SendRequest({
-            CropHostAction::Next, std::monostate{} });
+        !feature->SendRequest(GetCropRequest(
+            CropHostAction::Next));
     const bool isPublishNodeRejected =
-        !feature->SendRequest({
-            CropHostAction::Node,
-            CropHostNodeRequest{ 0 } });
+        !feature->SendRequest(GetNodeRequest(0));
     bool isConflictReloadComplete = false;
     bool isConflictReloadSucceeded = false;
     const bool isConflictReloadSent = SendReload(
@@ -747,7 +921,7 @@ int GetCropFailCount()
         contextProbe->m_getImageSnapshot();
     failureCount += GetCaseResult(
         cropExpected
-            && isStaleExported
+            && isStaleBuilt
             && isPublishPreviousRejected
             && isPublishNextRejected
             && isPublishNodeRejected
@@ -769,14 +943,13 @@ int GetCropFailCount()
         "Reload-first order rejects delayed Crop CAS without partial commit") ? 0 : 1;
 
     SendTicks(*endpoint, 2);
-    const bool isRestarted = feature->SendRequest({
-        CropHostAction::Start, target });
-    const bool isRestartModeSet = feature->SendRequest({
-        CropHostAction::Mode,
-        CropHostModeRequest{
-            target, CropRemovalMode::RemoveInside } });
-    const bool isRestartBoxSet = feature->SendRequest({
-        CropHostAction::Box, target });
+    const bool isRestarted = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Start, target));
+    const bool isRestartModeSet = feature->SendRequest(
+        GetModeRequest(
+            target, CropRemovalMode::RemoveInside));
+    const bool isRestartBoxSet = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Box, target));
     endpoint->renderer->ResetCamera(imageBounds);
     endpoint->renderWindow->Render();
     const bool isNextWidgetSent = SendCropInput(
@@ -802,18 +975,19 @@ int GetCropFailCount()
     const auto publishExpected =
         contextProbe->m_getImageSnapshot();
     int publishCompleteCount = 0;
-    CropExportResult publishResult;
-    const bool isPublishExported =
-        feature->SendRequest({
-                CropHostAction::Export, target },
+    CropBuildResult publishResult;
+    const bool isPublishBuilt =
+        feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
             [&publishCompleteCount, &publishResult](
-                CropExportResult result) {
+                CropBuildResult result) {
                 ++publishCompleteCount;
                 publishResult = std::move(result);
             });
     failureCount += GetCaseResult(
         isGapAttached && isStaleGapAccepted
-            && isPublishExported,
+            && isPublishBuilt,
         "Crop/Gap conflict requests are admitted") ? 0 : 1;
     for (int poll = 0;
         contextProbe->m_getImageSnapshot()
@@ -838,12 +1012,11 @@ int GetCropFailCount()
         gapFeature->GetState();
     const bool isStaleGapOverlayRejected =
         !gapFeature->SendRequest({
-            GapHostAction::Overlay,
-            std::monostate{} });
+            GapHostAction::Overlay });
     failureCount += GetCaseResult(
         isGapAttached
             && isStaleGapAccepted
-            && isPublishExported
+            && isPublishBuilt
             && publishExpected
             && cropSnapshot
             && cropSnapshot != publishExpected
@@ -871,17 +1044,69 @@ int GetCropFailCount()
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
+    const auto exportId =
+        std::chrono::steady_clock::now()
+            .time_since_epoch().count();
+    const auto exportDir =
+        std::filesystem::temp_directory_path()
+        / "MVVCVTK_crop_build"
+        / std::to_string(exportId);
+    HostDataExportRequest exportRequest;
+    exportRequest.outputPath = exportDir.u8string();
+    exportRequest.format = HostDataExportFormat::Raw;
+    int exportCompleteCount = 0;
+    bool isExportSucceeded = false;
+    const bool isExportSent = session.SendRequest(
+        std::move(exportRequest),
+        [&exportCompleteCount, &isExportSucceeded](
+            const bool isSuccess) {
+            ++exportCompleteCount;
+            isExportSucceeded = isSuccess;
+        });
+    for (int poll = 0;
+        isExportSent
+            && exportCompleteCount == 0
+            && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        SendHostTick(*endpoint, *timerEndpoint);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    int exportDimensions[3] = {};
+    if (cropSnapshot && cropSnapshot->image) {
+        cropSnapshot->image->GetDimensions(
+            exportDimensions);
+    }
+    const auto exportPath =
+        exportDir
+        / (std::to_string(exportDimensions[0])
+            + "x"
+            + std::to_string(exportDimensions[1])
+            + "x"
+            + std::to_string(exportDimensions[2])
+            + "_transform.raw");
+    const bool hasExportFile =
+        std::filesystem::exists(exportPath);
+    failureCount += GetCaseResult(
+        publishCompleteCount == 1
+            && publishResult.isSucceeded
+            && isExportSent
+            && exportCompleteCount == 1
+            && isExportSucceeded
+            && hasExportFile,
+        "Crop BuildResult publishes image before independent Host data export") ? 0 : 1;
+    std::error_code removeError;
+    std::filesystem::remove_all(
+        exportDir, removeError);
     const bool isGapDetached =
         session.DetachFeature(*gapFeature);
     const bool isSecondModeSet =
-        feature->SendRequest({
-            CropHostAction::Mode,
-            CropHostModeRequest{
-                target,
-                CropRemovalMode::RemoveInside } });
+        feature->SendRequest(GetModeRequest(
+            target, CropRemovalMode::RemoveInside));
     const bool isSecondBoxSet =
-        feature->SendRequest({
-            CropHostAction::Box, target });
+        feature->SendRequest(GetTargetRequest(
+            CropHostAction::Box, target));
     endpoint->renderer->ResetCamera(imageBounds);
     endpoint->renderWindow->Render();
     const bool isSecondWidgetSent =
@@ -893,12 +1118,13 @@ int GetCropFailCount()
     const auto secondExpected =
         contextProbe->m_getImageSnapshot();
     int secondCompleteCount = 0;
-    CropExportResult secondResult;
-    const bool isSecondExported =
-        feature->SendRequest({
-                CropHostAction::Export, target },
+    CropBuildResult secondResult;
+    const bool isSecondBuilt =
+        feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
             [&secondCompleteCount, &secondResult](
-                CropExportResult result) {
+                CropBuildResult result) {
                 ++secondCompleteCount;
                 secondResult = std::move(result);
             });
@@ -938,7 +1164,7 @@ int GetCropFailCount()
             && isGapAttached
             && isStaleGapAccepted
             && publishExpected
-            && isPublishExported
+            && isPublishBuilt
             && publishCompleteCount == 1
             && publishResult.isSucceeded
             && cropSnapshot
@@ -948,7 +1174,7 @@ int GetCropFailCount()
             && isSecondBoxSet
             && isSecondWidgetSent
             && secondExpected == cropSnapshot
-            && isSecondExported
+            && isSecondBuilt
             && secondCompleteCount == 1
             && secondResult.isSucceeded
             && secondResult.inputVersion
@@ -967,42 +1193,34 @@ int GetCropFailCount()
             && finalSnapshot != secondSnapshot
             && isGapDetached
             && staleGapCount == 0,
-        "Repeated Crop export fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
+        "Repeated Crop build fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
 
-    const bool isBox = feature->SendRequest({
-        CropHostAction::Box, target });
-    const bool isPlaneRestored = feature->SendRequest({
-        CropHostAction::Plane, target });
+    const bool isBox = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Box, target));
+    const bool isPlaneRestored = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Plane, target));
     failureCount += GetCaseResult(
         isBox && isPlaneRestored,
         "Box and Plane remain available after version conflict coverage") ? 0 : 1;
 
-    const bool isExited = feature->SendRequest({
-        CropHostAction::Exit, std::monostate{} });
+    const bool isExited = feature->SendRequest(
+        GetCropRequest(CropHostAction::Exit));
     const auto exitedState = feature->GetState();
     auto firstPolyData =
         vtkSmartPointer<vtkPolyData>::New();
     auto nextPolyData =
         vtkSmartPointer<vtkPolyData>::New();
-    const bool hasPolyDataContract = feature->SendRequest({
-            CropHostAction::SetPolyData,
-            CropHostPolyDataRequest{
-                firstPolyData, 1 } })
-        && !feature->SendRequest({
-            CropHostAction::SetPolyData,
-            CropHostPolyDataRequest{
-                firstPolyData, 2 } })
-        && !feature->SendRequest({
-            CropHostAction::SetPolyData,
-            CropHostPolyDataRequest{
-                nextPolyData, 1 } })
-        && feature->SendRequest({
-            CropHostAction::SetPolyData,
-            CropHostPolyDataRequest{
-                nextPolyData, 2 } })
-        && feature->SendRequest({
-            CropHostAction::ClearPolyData,
-            std::monostate{} });
+    const bool hasPolyDataContract =
+        feature->SendRequest(GetPolyRequest(
+            firstPolyData, 1))
+        && !feature->SendRequest(GetPolyRequest(
+            firstPolyData, 2))
+        && !feature->SendRequest(GetPolyRequest(
+            nextPolyData, 1))
+        && feature->SendRequest(GetPolyRequest(
+            nextPolyData, 2))
+        && feature->SendRequest(GetCropRequest(
+            CropHostAction::ClearPolyData));
     failureCount += GetCaseResult(
         isExited
             && !exitedState.isActive
@@ -1011,9 +1229,10 @@ int GetCropFailCount()
         "Exit, SetPolyData and ClearPolyData remain atomic requests") ? 0 : 1;
 
     bool hasDetachedCallback = false;
-    const bool isPendingAccepted = feature->SendRequest({
-            CropHostAction::Export, target },
-        [&hasDetachedCallback](CropExportResult) {
+    const bool isPendingAccepted = feature->SendRequest(
+        GetTargetRequest(
+            CropHostAction::BuildResult, target),
+        [&hasDetachedCallback](CropBuildResult) {
             hasDetachedCallback = true;
         });
     const auto useCount = feature.use_count();
@@ -1023,10 +1242,20 @@ int GetCropFailCount()
     const bool isProbeDetached =
         session.DetachFeature(*contextProbe);
     SendHostTick(*endpoint, *timerEndpoint);
+    int detachedSendCount = 0;
+    const bool isDetachedRequestRejected =
+        !feature->SendRequest(
+            GetTargetRequest(
+                CropHostAction::BuildResult, target),
+            [&detachedSendCount](CropBuildResult) {
+                ++detachedSendCount;
+            });
     failureCount += GetCaseResult(
         !isPendingAccepted
             && isDetached
             && isProbeDetached
+            && isDetachedRequestRejected
+            && detachedSendCount == 0
             && feature.use_count() == useCount
             && !detachedState.isActive
             && !detachedState.isPublishing

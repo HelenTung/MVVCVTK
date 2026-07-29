@@ -2,10 +2,11 @@
 
 #include "GapAnalysisTypes.h"
 #include "Host/HostFeature.h"
+#include "Host/Types/HostInputTypes.h"
 
 #include <functional>
 #include <memory>
-#include <variant>
+#include <optional>
 
 enum class GapHostAction {
     None,
@@ -14,19 +15,15 @@ enum class GapHostAction {
     Exit
 };
 
-struct GapHostStartRequest {
+struct GapHostStartParams {
     HostViewTargets targetViews;
-    GapSurfaceRequest surface;
+    GapSurfaceConfig surface;
     GapVoidParams voidParams;
 };
 
-using GapHostPayload = std::variant<
-    std::monostate,
-    GapHostStartRequest>;
-
 struct GapHostRequest {
     GapHostAction action = GapHostAction::None;
-    GapHostPayload payload;
+    std::optional<GapHostStartParams> start;
 };
 
 struct GapHostKeys {
@@ -35,7 +32,7 @@ struct GapHostKeys {
 };
 
 struct GapHostConfig {
-    GapHostStartRequest defaultStart;
+    GapHostStartParams defaultStart;
     HostViewTargets inputViews;
     GapHostKeys keys;
 };

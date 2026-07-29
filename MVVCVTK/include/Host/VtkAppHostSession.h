@@ -1,8 +1,7 @@
 #pragma once
 
-#include "Host/Types/HostAdapterTypes.h"
-#include "Host/Types/HostCommandTypes.h"
-#include "Host/Types/HostRequestTypes.h"
+#include "Host/Types/HostInputTypes.h"
+#include "Host/Types/HostRequest.h"
 #include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
@@ -29,19 +28,16 @@ public:
     bool BuildSession();
     // 把主线程 TimerEvent pump 绑定到指定视图；重复调用会替换旧 timer handler。
     bool AttachTimer(const HostTimerConfig& config);
-    // 替换 standalone 按键 observer；主体热键直接进入统一命令路由。
+    // 替换 standalone 按键 observer；主体热键直接进入统一请求路由。
     bool AttachHotkeys(const HostHotkeyConfig& config);
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
     // 仅用于 standalone VTK 事件循环；Qt host 已有外部事件循环时不调用。
     bool Start();
 
-    // 主体内建 Send* 只封装 HostCommand 并交给统一 router。
-    bool SendData(
-        HostDataRequest request,
+    bool SendRequest(
+        HostRequest&& request,
         HostCompleteCallback onComplete = nullptr);
-    bool SendView(HostViewRequest request);
-    bool SendTool(HostToolRequest request);
 
     // 返回会话内部 endpoint 集合的只读引用；引用和元素地址只在本会话拓扑不变且存活期间有效。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();

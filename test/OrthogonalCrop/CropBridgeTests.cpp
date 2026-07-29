@@ -436,18 +436,18 @@ int CropBridgeSuite::GetFailCount() const
         reboundService->GetEffectState().activeRevision;
 
     bool hasAsyncResult = false;
-    expect(bridge.ExportCrop(input, [&hasAsyncResult](CropExportResult result) {
+    expect(bridge.BuildCropResult(input, [&hasAsyncResult](CropBuildResult result) {
         hasAsyncResult = result.inputVersion == 1
             && result.nodeCount == 1
             && result.operations.size() == 1
             && result.operations[0].removalMode == CropRemovalMode::RemoveInside;
-    }), "A committed prefix should start one asynchronous export.");
-    for (int pollCount = 0; pollCount < 200 && !bridge.GetExportTickNeeded(); ++pollCount) {
+    }), "A committed prefix should start one asynchronous build.");
+    for (int pollCount = 0; pollCount < 200 && !bridge.GetBuildTickNeeded(); ++pollCount) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    expect(bridge.SendExportResult(), "A ready export future should be delivered on the owner thread.");
+    expect(bridge.SendBuildResult(), "A ready build future should be delivered on the owner thread.");
     expect(hasAsyncResult,
-        "Async export should preserve the captured mode, version, and committed prefix.");
+        "Async build should preserve the captured mode, version, and committed prefix.");
 
     expect(bridge.StartView(reboundView)
             && bridge.GetCropActive()
@@ -502,11 +502,11 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.PreviousCrop(), "An empty history should not move backward.");
     expect(!bridge.NextCrop(), "An empty history should not move forward.");
 
-    bool hasExportResult = false;
-    expect(!bridge.ExportCrop(changedInput, [&hasExportResult](CropExportResult result) {
-        hasExportResult = result.failureReason == CropFailure::BadInput;
-    }), "Export should reject an empty committed prefix.");
-    expect(hasExportResult, "Rejected export should synchronously report its failure.");
+    bool hasBuildResult = false;
+    expect(!bridge.BuildCropResult(changedInput, [&hasBuildResult](CropBuildResult result) {
+        hasBuildResult = result.failureReason == CropFailure::BadInput;
+    }), "Build should reject an empty committed prefix.");
+    expect(hasBuildResult, "Rejected build should synchronously report its failure.");
     expect(!bridge.GetCropActive(), "Input invalidation should not reactivate crop editing.");
     expect(bridge.ClearBindings(), "Bridge should clear all view bindings.");
 
@@ -601,18 +601,18 @@ int CropBridgeSuite::GetFailCount() const
             && !repeatBridge.NextCrop(),
         "Branch commit should replace A-B-C-D-E with active A-B-F and remove redo.");
 
-    bool hasBranchExport = false;
-    expect(repeatBridge.ExportCrop(
+    bool hasBranchResult = false;
+    expect(repeatBridge.BuildCropResult(
         input,
-        [&hasBranchExport](CropExportResult result) {
-            hasBranchExport = result.nodeCount == 3
+        [&hasBranchResult](CropBuildResult result) {
+            hasBranchResult = result.nodeCount == 3
                 && result.operations.size() == 3
                 && result.operations[0].operationIndex == 1
                 && result.operations[1].operationIndex == 2
                 && result.operations[2].operationIndex == 6
                 && result.operations[2].removalMode
                     == CropRemovalMode::RemoveInside;
-        }), "A-B-F should expose a three-operation export snapshot.");
+        }), "A-B-F should expose a three-operation build snapshot.");
     expect(SendWidgetInput(renderer, interactor, 16)
             && !repeatBridge.GetShaderTickNeeded()
             && repeatBridge.GetCropHistory().nodeCount == 3
@@ -625,14 +625,14 @@ int CropBridgeSuite::GetFailCount() const
         "CPU materialization should freeze the captured active prefix until its result is consumed.");
     for (int pollCount = 0;
         pollCount < 200
-            && !repeatBridge.GetExportTickNeeded();
+            && !repeatBridge.GetBuildTickNeeded();
         ++pollCount) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
-    expect(repeatBridge.SendExportResult()
-            && hasBranchExport,
-        "A-B-F export should use the rebuilt three-operation predicate history.");
+    expect(repeatBridge.SendBuildResult()
+            && hasBranchResult,
+        "A-B-F build should use the rebuilt three-operation predicate history.");
     expect(repeatBridge.SetCropNode(2)
             && SendShaderCommit(repeatBridge, renderWindow),
         "Returning from A-B-F to B should commit the current history cursor.");
@@ -650,24 +650,24 @@ int CropBridgeSuite::GetFailCount() const
             && repeatService->GetEffectState().activeRevision
                 == middleEffect.activeRevision,
         "Exit should preserve the committed effect at the current history cursor.");
-    bool hasMiddleExport = false;
-    expect(repeatBridge.ExportCrop(
+    bool hasMiddleResult = false;
+    expect(repeatBridge.BuildCropResult(
         input,
-        [&hasMiddleExport](CropExportResult result) {
-            hasMiddleExport = result.nodeCount == 2
+        [&hasMiddleResult](CropBuildResult result) {
+            hasMiddleResult = result.nodeCount == 2
                 && result.operations.size() == 2
                 && result.operations[0].operationIndex == 1
                 && result.operations[1].operationIndex == 2;
-        }), "Exit at B should export the current A-B committed prefix.");
+        }), "Exit at B should build the current A-B committed prefix.");
     for (int pollCount = 0;
         pollCount < 200
-            && !repeatBridge.GetExportTickNeeded();
+            && !repeatBridge.GetBuildTickNeeded();
         ++pollCount) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
-    expect(repeatBridge.SendExportResult()
-            && hasMiddleExport,
+    expect(repeatBridge.SendBuildResult()
+            && hasMiddleResult,
         "Exit should keep the current A-B prefix instead of restoring A-B-F.");
 
     auto materializedImage =
@@ -744,28 +744,28 @@ int CropBridgeSuite::GetFailCount() const
             && redoneHistory.baseNodeCount == 2
             && redoneHistory.allOperationCount == 3,
         "Redo after materialization should not duplicate or delete allHistory nodes.");
-    bool hasRootExport = false;
-    expect(repeatBridge.ExportCrop(
+    bool hasRootResult = false;
+    expect(repeatBridge.BuildCropResult(
         input,
-        [&hasRootExport](CropExportResult result) {
-            hasRootExport = result.inputVersion == 1
+        [&hasRootResult](CropBuildResult result) {
+            hasRootResult = result.inputVersion == 1
                 && result.nodeCount == 3
                 && result.operations.size() == 3
                 && result.operations[0].operationIndex == 1
                 && result.operations[1].operationIndex == 2
                 && result.operations[2].operationIndex == 6;
         }),
-        "Materialized history should export the absolute prefix directly from the root input.");
+        "Materialized history should build the absolute prefix directly from the root input.");
     for (int pollCount = 0;
         pollCount < 200
-            && !repeatBridge.GetExportTickNeeded();
+            && !repeatBridge.GetBuildTickNeeded();
         ++pollCount) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
-    expect(repeatBridge.SendExportResult()
-            && hasRootExport,
-        "Root export should fuse A-B-F without publishing or caching intermediate masks.");
+    expect(repeatBridge.SendBuildResult()
+            && hasRootResult,
+        "Root build should fuse A-B-F without publishing or caching intermediate masks.");
 
     auto originalInput = input;
     originalInput.inputVersion = 3;
@@ -889,9 +889,9 @@ int CropBridgeSuite::GetFailCount() const
             && zeroBridge.GetCropHistory().operationCount == 8,
         "AABBABAB should expose eight committed history operations.");
     bool hasShapeSeq = false;
-    expect(zeroBridge.ExportCrop(
+    expect(zeroBridge.BuildCropResult(
         input,
-        [&hasShapeSeq, &isPlaneOp](CropExportResult result) {
+        [&hasShapeSeq, &isPlaneOp](CropBuildResult result) {
             hasShapeSeq = result.nodeCount == isPlaneOp.size()
                 && result.operations.size() == isPlaneOp.size();
             for (std::size_t index = 0;
@@ -903,15 +903,15 @@ int CropBridgeSuite::GetFailCount() const
                 hasShapeSeq = result.operations[index].geometryType
                     == expectedShape;
             }
-        }), "AABBABAB should start an export snapshot.");
+        }), "AABBABAB should start an build snapshot.");
     for (int pollCount = 0;
         pollCount < 200
-            && !zeroBridge.GetExportTickNeeded();
+            && !zeroBridge.GetBuildTickNeeded();
         ++pollCount) {
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
-    expect(zeroBridge.SendExportResult()
+    expect(zeroBridge.SendBuildResult()
             && hasShapeSeq,
         "AABBABAB should preserve the exact Plane/Box operation order.");
     for (std::size_t nodeCount = 8;

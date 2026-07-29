@@ -174,32 +174,32 @@ bool BuildPlaneRows(const CropOpItem& operation, float* values)
     return true;
 }
 
-CropExportResult BuildExportFailure(
-    const CropExportRequest& request,
+CropBuildResult BuildResultFailure(
+    const CropBuildParams& params,
     const CropFailure failureReason,
     const std::string& message,
     const std::uint64_t failureOperationIndex = 0)
 {
-    CropExportResult result;
-    result.resolvedDataSource = request.dataSource;
+    CropBuildResult result;
+    result.resolvedDataSource = params.dataSource;
     result.failureReason = failureReason;
     result.failureOperationIndex = failureOperationIndex;
-    result.inputVersion = request.inputVersion;
-    result.nodeCount = std::min(request.nodeCount, request.operations.size());
+    result.inputVersion = params.inputVersion;
+    result.nodeCount = std::min(params.nodeCount, params.operations.size());
     result.operations.assign(
-        request.operations.begin(),
-        request.operations.begin() + result.nodeCount);
+        params.operations.begin(),
+        params.operations.begin() + result.nodeCount);
     result.message = message;
     return result;
 }
 
-CropExportResult BuildExportBase(const CropExportRequest& request)
+CropBuildResult BuildResultBase(const CropBuildParams& params)
 {
-    CropExportResult result;
-    result.resolvedDataSource = request.dataSource;
-    result.inputVersion = request.inputVersion;
-    result.nodeCount = request.nodeCount;
-    result.operations = request.operations;
+    CropBuildResult result;
+    result.resolvedDataSource = params.dataSource;
+    result.inputVersion = params.inputVersion;
+    result.nodeCount = params.nodeCount;
+    result.operations = params.operations;
     return result;
 }
 
@@ -374,30 +374,30 @@ private:
 };
 
 bool GetPayloadValid(
-    const CropExportRequest& request,
+    const CropBuildParams& params,
     const CropShaderPayload& payload)
 {
     const bool hasPlan = payload.predicateTable
         && CropPredicatePlan(
             *payload.predicateTable,
             payload.nodeCount).GetValid();
-    return request.inputVersion != 0
-        && request.operations.size() == request.nodeCount
-        && request.nodeCount != 0
+    return params.inputVersion != 0
+        && params.operations.size() == params.nodeCount
+        && params.nodeCount != 0
         && payload.revision != 0
-        && payload.sourceStamp.version == request.inputVersion
-        && payload.nodeCount == request.nodeCount
+        && payload.sourceStamp.version == params.inputVersion
+        && payload.nodeCount == params.nodeCount
         && hasPlan;
 }
 
 bool GetRamValid(
     vtkImageData* image,
-    const CropExportRequest& request,
+    const CropBuildParams& params,
     const CropShaderPayload& payload,
     const std::size_t fallbackAvailableRamBytes)
 {
-    const std::size_t availableRamBytes = request.availableRamBytes != 0
-        ? request.availableRamBytes
+    const std::size_t availableRamBytes = params.availableRamBytes != 0
+        ? params.availableRamBytes
         : fallbackAvailableRamBytes;
     if (availableRamBytes == 0) {
         return true;
@@ -620,27 +620,27 @@ bool CropAlgorithm::GetInputSame(
         && left.polyData.GetPointer() == right.polyData.GetPointer();
 }
 
-CropExportResult CropAlgorithm::GetResult(
+CropBuildResult CropAlgorithm::GetResult(
     vtkImageData* image,
     vtkImageData* validityMask,
-    const CropExportRequest& request,
+    const CropBuildParams& params,
     const CropShaderPayload& payload,
     const std::size_t fallbackAvailableRamBytes)
 {
     if (!image || !image->GetPointData() || !image->GetPointData()->GetScalars()) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::NoImage,
-            "Crop export requires image scalars.");
+            "Crop result build requires image scalars.");
     }
     if (!GetMaskValid(image, validityMask)
-        || request.dataSource
+        || params.dataSource
             != OrthogonalCropDataSource::ImageData
-        || !GetPayloadValid(request, payload)) {
-        return BuildExportFailure(
-            request,
+        || !GetPayloadValid(params, payload)) {
+        return BuildResultFailure(
+            params,
             CropFailure::BadInput,
-            "Crop image export request is invalid.");
+            "Crop image build parameters are invalid.");
     }
 
     int extent[6] = {};
@@ -658,18 +658,18 @@ CropExportResult CropAlgorithm::GetResult(
         || yCount <= 0
         || zCount <= 0
         || image->GetNumberOfPoints() <= 0) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::EmptyResult,
-            "Crop image export has an empty extent.");
+            "Crop image build has an empty extent.");
     }
 
     std::array<double, 12> indexToModel = {};
     const auto* indexMatrix =
         image->GetIndexToPhysicalMatrix();
     if (!indexMatrix) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::BadInput,
             "Crop image index transform is unavailable.");
     }
@@ -680,8 +680,8 @@ CropExportResult CropAlgorithm::GetResult(
             const double value =
                 indexMatrix->GetElement(row, column);
             if (!vtkMath::IsFinite(value)) {
-                return BuildExportFailure(
-                    request,
+                return BuildResultFailure(
+                    params,
                     CropFailure::BadInput,
                     "Crop image index transform must be finite.");
             }
@@ -708,8 +708,8 @@ CropExportResult CropAlgorithm::GetResult(
                 || std::abs(value)
                     > static_cast<double>(
                         std::numeric_limits<float>::max())) {
-                return BuildExportFailure(
-                    request,
+                return BuildResultFailure(
+                    params,
                     CropFailure::BadInput,
                     "Crop image coordinates exceed predicate precision.");
             }
@@ -718,13 +718,13 @@ CropExportResult CropAlgorithm::GetResult(
 
     if (!GetRamValid(
             image,
-            request,
+            params,
             payload,
             fallbackAvailableRamBytes)) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::LowRam,
-            "Crop image export exceeds available RAM.");
+            "Crop image build exceeds available RAM.");
     }
 
     auto outputImage = vtkSmartPointer<vtkImageData>::New();
@@ -746,8 +746,8 @@ CropExportResult CropAlgorithm::GetResult(
                 extent[0], extent[2], extent[4]));
     if ((validityMask && !inputMask)
         || !outputMask) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::MaskFailed,
             "Crop image mask storage is unavailable.");
     }
@@ -847,42 +847,42 @@ CropExportResult CropAlgorithm::GetResult(
             std::size_t{ 0 });
 
     if (keptCount == 0) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::EmptyResult,
-            "Crop image export removed every voxel.");
+            "Crop image build removed every voxel.");
     }
 
-    auto result = BuildExportBase(request);
+    auto result = BuildResultBase(params);
     result.isSucceeded = true;
     result.imageData = std::move(outputImage);
     result.maskImage = std::move(maskImage);
     return result;
 }
 
-CropExportResult CropAlgorithm::GetResult(
+CropBuildResult CropAlgorithm::GetResult(
     vtkPolyData* polyData,
-    const CropExportRequest& request,
+    const CropBuildParams& params,
     const CropShaderPayload& payload)
 {
     if (!polyData) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::NoPolyData,
-            "Crop export requires PolyData input.");
+            "Crop result build requires PolyData input.");
     }
-    if (request.dataSource != OrthogonalCropDataSource::PolyData
-        || !GetPayloadValid(request, payload)) {
-        return BuildExportFailure(
-            request,
+    if (params.dataSource != OrthogonalCropDataSource::PolyData
+        || !GetPayloadValid(params, payload)) {
+        return BuildResultFailure(
+            params,
             CropFailure::BadInput,
-            "Crop PolyData export request is invalid.");
+            "Crop PolyData build parameters are invalid.");
     }
 
     vtkNew<CropImplicit> cropFunction;
     if (!cropFunction->SetTable(payload.predicateTable, payload.nodeCount)) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::BadInput,
             "Crop predicate payload is invalid.");
     }
@@ -897,13 +897,13 @@ CropExportResult CropAlgorithm::GetResult(
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->DeepCopy(clip->GetOutput());
     if (output->GetNumberOfPoints() == 0 || output->GetNumberOfCells() == 0) {
-        return BuildExportFailure(
-            request,
+        return BuildResultFailure(
+            params,
             CropFailure::EmptyResult,
-            "Crop PolyData export removed every cell.");
+            "Crop PolyData build removed every cell.");
     }
 
-    auto result = BuildExportBase(request);
+    auto result = BuildResultBase(params);
     result.isSucceeded = true;
     result.polyData = std::move(output);
     return result;

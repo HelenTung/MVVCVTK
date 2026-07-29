@@ -73,8 +73,8 @@ bool GetChordMatched(
 class CropHostFeature::Impl final {
 public:
     struct CompleteItem final {
-        CropHostCallback onComplete;
-        std::optional<CropExportResult> result;
+        CropBuildCallback onComplete;
+        std::optional<CropBuildResult> result;
         std::optional<RenderInputStamp> waitInput;
         bool isQueued = false;
     };
@@ -114,7 +114,7 @@ public:
     bool OnHostTick();
     bool SendRequest(
         CropHostRequest request,
-        CropHostCallback onComplete);
+        CropBuildCallback onComplete);
     CropHostState GetState() const;
 
 private:
@@ -126,23 +126,25 @@ private:
     bool SetActiveViews(
         const std::vector<std::shared_ptr<InteractiveService>>& services) const;
     bool SetCropInput(const CropHostTarget& target);
-    bool SetPolyData(CropHostPolyDataRequest request);
+    bool SetPolyData(
+        vtkSmartPointer<vtkPolyData> polyData,
+        std::uint64_t sourceVersion);
     bool ClearPolyData();
     bool ResetOriginal();
     bool SetImageResult(
         const ImageSnapshot& sourceSnapshot,
         const ImageSnapshot& expectedSnapshot,
-        CropExportResult& result);
-    bool ExportCrop(
+        CropBuildResult& result);
+    bool BuildCropResult(
         const CropHostTarget& target,
-        CropHostCallback onComplete);
+        CropBuildCallback onComplete);
     static bool RemoveComplete(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item);
     static bool SetCompleteResult(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item,
-        CropExportResult result,
+        CropBuildResult result,
         std::optional<RenderInputStamp> waitInput);
     static bool SendComplete(
         const std::shared_ptr<CompleteState>& state,
@@ -202,7 +204,8 @@ bool CropHostFeature::Impl::AttachHost(
             && m_inputPort == context.inputPort
             && m_ownerThread == std::this_thread::get_id();
     }
-    if (!context.renderViews
+    if (owner.weak_from_this().expired()
+        || !context.renderViews
         || !context.inputPort
         || !context.getImageSnapshot
         || !context.setImageState
@@ -477,13 +480,14 @@ bool CropHostFeature::Impl::StartCrop(
 }
 
 bool CropHostFeature::Impl::SetPolyData(
-    CropHostPolyDataRequest request)
+    vtkSmartPointer<vtkPolyData> polyData,
+    const std::uint64_t sourceVersion)
 {
-    if (!request.polyData
-        || request.sourceVersion == 0
+    if (!polyData
+        || sourceVersion == 0
         || (m_sourceVersion != 0
-            && request.sourceVersion <= m_sourceVersion)
-        || request.polyData.GetPointer()
+            && sourceVersion <= m_sourceVersion)
+        || polyData.GetPointer()
             == m_polyData.GetPointer()) {
         return false;
     }
@@ -493,8 +497,8 @@ bool CropHostFeature::Impl::SetPolyData(
     if (!SetActiveViews({})) {
         return false;
     }
-    m_polyData = std::move(request.polyData);
-    m_sourceVersion = request.sourceVersion;
+    m_polyData = std::move(polyData);
+    m_sourceVersion = sourceVersion;
     m_activeTarget.reset();
     m_status.reset();
     return true;
@@ -518,7 +522,7 @@ bool CropHostFeature::Impl::ClearPolyData()
 bool CropHostFeature::Impl::SetImageResult(
     const ImageSnapshot& sourceSnapshot,
     const ImageSnapshot& expectedSnapshot,
-    CropExportResult& result)
+    CropBuildResult& result)
 {
     if (!result.isSucceeded
         || result.resolvedDataSource
@@ -856,7 +860,7 @@ bool CropHostFeature::Impl::RemoveComplete(
 bool CropHostFeature::Impl::SetCompleteResult(
     const std::shared_ptr<CompleteState>& state,
     const std::shared_ptr<CompleteItem>& item,
-    CropExportResult result,
+    CropBuildResult result,
     std::optional<RenderInputStamp> waitInput)
 {
     if (!state || !item) {
@@ -883,8 +887,8 @@ bool CropHostFeature::Impl::SendComplete(
         return false;
     }
 
-    CropHostCallback onComplete;
-    CropExportResult result;
+    CropBuildCallback onComplete;
+    CropBuildResult result;
     {
         const std::lock_guard<std::mutex> lock(state->mutex);
         const auto current = std::find(
@@ -977,9 +981,9 @@ bool CropHostFeature::Impl::SendReadyCompletes()
     return isSent;
 }
 
-bool CropHostFeature::Impl::ExportCrop(
+bool CropHostFeature::Impl::BuildCropResult(
     const CropHostTarget& target,
-    CropHostCallback onComplete)
+    CropBuildCallback onComplete)
 {
     if (!onComplete
         || !m_bridge
@@ -1053,7 +1057,7 @@ bool CropHostFeature::Impl::ExportCrop(
     auto onResult =
         [this, sourceSnapshot, expectedSnapshot,
             weakState, weakItem](
-            CropExportResult result) mutable {
+            CropBuildResult result) mutable {
             const auto state = weakState.lock();
             const auto item = weakItem.lock();
             std::optional<RenderInputStamp> waitInput;
@@ -1084,71 +1088,61 @@ bool CropHostFeature::Impl::ExportCrop(
                 return;
             }
         };
-    const bool isAccepted = m_bridge->ExportCrop(
+    const bool isAccepted = m_bridge->BuildCropResult(
         std::move(rootInput),
         std::move(onResult));
     if (!isAccepted) {
-        bool hasResult = false;
-        {
-            const std::lock_guard<std::mutex> lock(state->mutex);
-            hasResult = item->result.has_value();
-        }
-        if (!hasResult) {
-            (void)RemoveComplete(state, item);
-        }
+        // Bridge 可以在同步校验失败时先回传内部结果；入口返回 false 时必须丢弃，
+        // 保证未接纳请求的外部 callback 永远不会在后续 tick 泄漏。
+        (void)RemoveComplete(state, item);
     }
     return isAccepted;
 }
 
 bool CropHostFeature::Impl::SendRequest(
     CropHostRequest request,
-    CropHostCallback onComplete)
+    CropBuildCallback onComplete)
 {
     if (!m_isAttached
         || m_ownerThread != std::this_thread::get_id()
         || m_isPublishing
-        || (request.action != CropHostAction::Export
-            && onComplete)) {
+        || ((request.action == CropHostAction::BuildResult)
+            != static_cast<bool>(onComplete))) {
         return false;
     }
     switch (request.action) {
     case CropHostAction::Start:
-        if (const auto* value =
-            std::get_if<CropHostTarget>(&request.payload)) {
+        if (request.target) {
             return SendActionLog(
-                "Start", StartCrop(*value));
+                "Start", StartCrop(*request.target));
         }
         return false;
     case CropHostAction::Box:
-        if (const auto* value =
-            std::get_if<CropHostTarget>(&request.payload)) {
+        if (request.target) {
             const bool isAccepted =
-                StartCrop(*value)
+                StartCrop(*request.target)
                 && m_bridge->SwitchCropBox();
             return SendActionLog(
                 "SwitchBox", isAccepted);
         }
         return false;
     case CropHostAction::Plane:
-        if (const auto* value =
-            std::get_if<CropHostTarget>(&request.payload)) {
+        if (request.target) {
             const bool isAccepted =
-                StartCrop(*value)
+                StartCrop(*request.target)
                 && m_bridge->SwitchCropPlane();
             return SendActionLog(
                 "SwitchPlane", isAccepted);
         }
         return false;
     case CropHostAction::Mode:
-        if (const auto* value =
-            std::get_if<CropHostModeRequest>(
-                &request.payload)) {
+        if (request.target && request.removalMode) {
             const bool isAccepted =
-                StartCrop(value->target)
+                StartCrop(*request.target)
                 && m_bridge->SetCropMode(
-                    value->removalMode);
+                    *request.removalMode);
             return SendActionLog(
-                GetModeText(value->removalMode),
+                GetModeText(*request.removalMode),
                 isAccepted);
         }
         return false;
@@ -1157,62 +1151,47 @@ bool CropHostFeature::Impl::SendRequest(
             "Previous",
             m_activeTarget.has_value()
             && m_bridge->GetCropBound()
-            && std::holds_alternative<std::monostate>(
-                request.payload)
             && m_bridge->PreviousCrop());
     case CropHostAction::Next:
         return SendActionLog(
             "Next",
             m_activeTarget.has_value()
             && m_bridge->GetCropBound()
-            && std::holds_alternative<std::monostate>(
-                request.payload)
             && m_bridge->NextCrop());
     case CropHostAction::Node:
-        if (const auto* value =
-            std::get_if<CropHostNodeRequest>(
-                &request.payload)) {
+        if (request.nodeCount) {
             const bool isAccepted =
                 m_activeTarget.has_value()
                 && m_bridge->GetCropBound()
                 && m_bridge->SetCropNode(
-                    value->nodeCount);
+                    *request.nodeCount);
             std::cout
                 << "[Crop][Request] targetNode="
-                << value->nodeCount << '\n';
+                << *request.nodeCount << '\n';
             return SendActionLog(
                 "SetNode", isAccepted);
         }
         return false;
-    case CropHostAction::Export:
-        if (const auto* value =
-            std::get_if<CropHostTarget>(&request.payload)) {
-            return ExportCrop(
-                *value, std::move(onComplete));
+    case CropHostAction::BuildResult:
+        if (request.target) {
+            return BuildCropResult(
+                *request.target, std::move(onComplete));
         }
         return false;
     case CropHostAction::SetPolyData:
-        if (auto* value =
-            std::get_if<CropHostPolyDataRequest>(
-                &request.payload)) {
-            return SetPolyData(std::move(*value));
+        if (request.polyData && request.sourceVersion) {
+            return SetPolyData(
+                std::move(request.polyData),
+                *request.sourceVersion);
         }
         return false;
     case CropHostAction::ClearPolyData:
-        return std::holds_alternative<std::monostate>(
-                request.payload)
-            && ClearPolyData();
+        return ClearPolyData();
     case CropHostAction::RestoreOriginal:
         return SendActionLog(
             "RestoreOriginal",
-            std::holds_alternative<std::monostate>(
-                request.payload)
-            && ResetOriginal());
+            ResetOriginal());
     case CropHostAction::Exit:
-        if (!std::holds_alternative<std::monostate>(
-                request.payload)) {
-            return false;
-        }
         m_status.reset();
         {
             const bool isExited = m_bridge->ExitCrop();
@@ -1257,7 +1236,7 @@ CropHostFeature::Impl::GetKeyIndex(
         &m_config.keys.removeMode,
         &m_config.keys.previous,
         &m_config.keys.next,
-        &m_config.keys.exportResult,
+        &m_config.keys.buildResult,
         &m_config.keys.restoreOriginal,
         &m_config.keys.exit
     };
@@ -1282,12 +1261,12 @@ CropHostRequest CropHostFeature::Impl::GetKeyRequest(
 {
     CropHostRequest request;
     if (keyIndex == 0) {
-        request = { CropHostAction::Box,
-            m_config.defaultTarget };
+        request.action = CropHostAction::Box;
+        request.target = m_config.defaultTarget;
     }
     else if (keyIndex == 1) {
-        request = { CropHostAction::Plane,
-            m_config.defaultTarget };
+        request.action = CropHostAction::Plane;
+        request.target = m_config.defaultTarget;
     }
     else if (keyIndex >= 2 && keyIndex <= 4) {
         CropRemovalMode mode = CropRemovalMode::None;
@@ -1297,34 +1276,29 @@ CropHostRequest CropHostFeature::Impl::GetKeyRequest(
         else if (keyIndex == 4) {
             mode = CropRemovalMode::RemoveInside;
         }
-        request = { CropHostAction::Mode,
-            CropHostModeRequest{
-                m_config.defaultTarget, mode } };
+        request.action = CropHostAction::Mode;
+        request.target = m_config.defaultTarget;
+        request.removalMode = mode;
     }
     else if (keyIndex == 5) {
-        request = { CropHostAction::Previous,
-            std::monostate{} };
+        request.action = CropHostAction::Previous;
     }
     else if (keyIndex == 6) {
-        request = { CropHostAction::Next,
-            std::monostate{} };
+        request.action = CropHostAction::Next;
     }
     else if (keyIndex == 7) {
-        request = { CropHostAction::Export,
-            m_config.defaultTarget };
+        request.action = CropHostAction::BuildResult;
+        request.target = m_config.defaultTarget;
     }
     else if (keyIndex == 8) {
-        request = { CropHostAction::RestoreOriginal,
-            std::monostate{} };
+        request.action = CropHostAction::RestoreOriginal;
     }
     else if (keyIndex == 9) {
-        request = { CropHostAction::Exit,
-            std::monostate{} };
+        request.action = CropHostAction::Exit;
     }
     else {
-        request = { CropHostAction::Node,
-            CropHostNodeRequest{
-                keyIndex - kCommandKeyCount } };
+        request.action = CropHostAction::Node;
+        request.nodeCount = keyIndex - kCommandKeyCount;
     }
     return request;
 }
@@ -1354,9 +1328,9 @@ InteractionResult CropHostFeature::Impl::OnInput(
     }
     m_isDown[*keyIndex] = true;
     auto request = GetKeyRequest(*keyIndex);
-    CropHostCallback callback;
-    if (request.action == CropHostAction::Export) {
-        callback = [](CropExportResult result) {
+    CropBuildCallback callback;
+    if (request.action == CropHostAction::BuildResult) {
+        callback = [](CropBuildResult result) {
             std::cout
                 << "[Crop][Materialize] callback"
                 << " succeeded=" << result.isSucceeded
@@ -1413,8 +1387,8 @@ bool CropHostFeature::Impl::OnHostTick()
             << '\n';
         SendStatus();
     }
-    if (m_bridge->GetExportTickNeeded()) {
-        (void)m_bridge->SendExportResult();
+    if (m_bridge->GetBuildTickNeeded()) {
+        (void)m_bridge->SendBuildResult();
     }
     (void)SendReadyCompletes();
     return true;
@@ -1447,7 +1421,7 @@ const char* CropHostFeature::Impl::GetActionText(
     case CropHostAction::Previous: return "Previous";
     case CropHostAction::Next: return "Next";
     case CropHostAction::Node: return "Node";
-    case CropHostAction::Export: return "Export";
+    case CropHostAction::BuildResult: return "BuildResult";
     case CropHostAction::SetPolyData: return "SetPolyData";
     case CropHostAction::ClearPolyData: return "ClearPolyData";
     case CropHostAction::RestoreOriginal:
@@ -1588,7 +1562,7 @@ bool CropHostFeature::OnHostTick()
 
 bool CropHostFeature::SendRequest(
     CropHostRequest request,
-    CropHostCallback onComplete)
+    CropBuildCallback onComplete)
 {
     return m_impl
         && m_impl->SendRequest(

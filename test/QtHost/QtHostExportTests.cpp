@@ -1,6 +1,7 @@
 #include "QtHostMethodCases.h"
 
 #include "Host/VtkAppHostSession.h"
+#include "Host/Types/HostRequestTypes.h"
 
 #include <filesystem>
 #include <system_error>
@@ -21,15 +22,14 @@ int GetExportFailCount()
         / std::filesystem::u8path(u8"MVVCVTK_导出_é");
     std::error_code createError;
     std::filesystem::create_directories(unicodeDir, createError);
+    HostDataExportRequest exportRequest;
+    exportRequest.outputPath = unicodeDir.u8string();
+    exportRequest.format = HostDataExportFormat::Raw;
     return GetCaseResult(
         unicodeSession.BuildSession()
-            && unicodeSession.SendData({ HostDataAction::ReloadBuffer, std::move(reload) })
+            && unicodeSession.SendRequest(std::move(reload))
             && !createError
-            && unicodeSession.SendData({
-                HostDataAction::ExportData,
-                HostDataExportRequest{
-                    unicodeDir.u8string(),
-                    HostDataExportFormat::Raw,
-                    {} } }),
+            && unicodeSession.SendRequest(
+                std::move(exportRequest)),
         "Export UTF-8 request facade acceptance") ? 0 : 1;
 }

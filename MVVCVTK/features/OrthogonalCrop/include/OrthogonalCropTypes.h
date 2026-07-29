@@ -4,7 +4,7 @@
 // 分类: Math / Data Types
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
-// 类型层只保存公式节点、输入快照、shader transaction 与按需导出结果；
+// 类型层只保存公式节点、输入快照、shader transaction 与按需物化结果；
 // 不依赖 VizService、Renderer、Interactor、mapper 或具体窗口对象。
 
 #include "Render/RenderEffect.h"
@@ -45,7 +45,7 @@ enum class CropRemovalMode {
     None,
     // mapper shader 保留 Box 的 6 个朝内半空间交集，或 Plane 的法线正半空间。
     KeepInside,
-    // shader/export 移除上述 Inside，保留其余区域。
+    // shader/物化移除上述 Inside，保留其余区域。
     RemoveInside
 };
 
@@ -107,13 +107,13 @@ enum class CropFailure {
     OutOfBounds,
     // 请求三元组没有可执行路径，或与当前算法输入不匹配。
     NoBackend,
-    // image export 的保留语义无法由当前后端执行。
-    BadExportMode,
+    // image 物化的保留语义无法由当前后端执行。
+    BadBuildMode,
     // 预估或执行时发现内存不足，无法安全完成裁切。
     LowRam,
-    // image export 需要输出与输入体数据对齐的三维 mask 时，生成 mask 失败。
+    // image 物化需要输出与输入体数据对齐的三维 mask 时，生成 mask 失败。
     MaskFailed,
-    // image export 需要输出主数据 image 时，生成输出 image 失败。
+    // image 物化需要输出主数据 image 时，生成输出 image 失败。
     ImageFailed,
     // Box 几何需要生成 outlinePolyData 时，轮廓 artifact 生成失败。
     ClipFailed,
@@ -156,7 +156,7 @@ struct CropInputSnapshot final {
     vtkSmartPointer<vtkPolyData> polyData;
 };
 
-struct CropExportRequest final {
+struct CropBuildParams final {
     OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
     std::vector<CropOpItem> operations;
     std::size_t nodeCount = 0;
@@ -164,7 +164,7 @@ struct CropExportRequest final {
     std::size_t availableRamBytes = 0;
 };
 
-struct CropExportResult final {
+struct CropBuildResult final {
     OrthogonalCropDataSource resolvedDataSource = OrthogonalCropDataSource::ImageData;
     bool isSucceeded = false;
     CropFailure failureReason = CropFailure::None;
