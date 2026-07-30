@@ -11,6 +11,7 @@
 #include <vtkActor.h>
 #include <vtkAlgorithmOutput.h>
 #include <vtkCellArray.h>
+#include <vtkColorTransferFunction.h>
 #include <vtkDataObject.h>
 #include <vtkDoubleArray.h>
 #include <vtkFlyingEdges3D.h>
@@ -539,6 +540,88 @@ int GetRenderContractFailCount()
             && volume->GetProperty()->GetShade() == 0,
         "Volume constructor follows default ShadeOff") ? 0 : 1;
 
+    constexpr std::array<double, 3> isoColor = {
+        0.75, 0.75, 0.75
+    };
+    const auto getColorMatches = [&isoColor](const double* color) {
+        return color
+            && std::equal(
+                isoColor.begin(),
+                isoColor.end(),
+                color,
+                [](double expected, double actual) {
+                    return std::abs(expected - actual) < 1e-12;
+                });
+    };
+    const std::vector<TFNode> isoNodes{
+        { 0.00, 0.0, 0.75, 0.75, 0.75 },
+        { 0.50, 0.0, 0.75, 0.75, 0.75 },
+        { 0.85, 0.8, 0.75, 0.75, 0.75 },
+        { 1.00, 1.0, 0.75, 0.75, 0.75 }
+    };
+
+    auto* colorMapper = volume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            volume->GetMapper())
+        : nullptr;
+    vtkAlgorithmOutput* colorInput = colorMapper
+        ? colorMapper->GetInputConnection(0, 0) : nullptr;
+    RenderParams colorParams;
+    colorParams.tfNodes = isoNodes;
+    volumeStrategy.SetVisualState(
+        colorParams, UpdateFlags::TF);
+    auto* colorFunction = volume && volume->GetProperty()
+        ? volume->GetProperty()->GetRGBTransferFunction()
+        : nullptr;
+    bool hasVolumeRgb =
+        colorFunction
+        && colorFunction->GetSize()
+            == static_cast<int>(isoNodes.size());
+    for (int index = 0;
+        hasVolumeRgb && index < colorFunction->GetSize();
+        ++index) {
+        double node[6] = {};
+        colorFunction->GetNodeValue(index, node);
+        hasVolumeRgb = getColorMatches(node + 1);
+    }
+    failureCount += GetCaseResult(
+        hasVolumeRgb
+            && colorMapper
+            && colorInput
+            && colorMapper->GetInputConnection(0, 0)
+                == colorInput,
+        "Volume TF accepts the Iso base RGB without rebuilding input") ? 0 : 1;
+
+    const std::vector<TFNode> customNodes{
+        { 0.0, 0.0, 1.0, 0.0, 0.0 },
+        { 1.0, 1.0, 0.0, 0.0, 1.0 }
+    };
+    colorParams.tfNodes = customNodes;
+    volumeStrategy.SetVisualState(
+        colorParams, UpdateFlags::TF);
+    colorFunction = volume && volume->GetProperty()
+        ? volume->GetProperty()->GetRGBTransferFunction()
+        : nullptr;
+    double firstCustom[6] = {};
+    double lastCustom[6] = {};
+    if (colorFunction && colorFunction->GetSize() == 2) {
+        colorFunction->GetNodeValue(0, firstCustom);
+        colorFunction->GetNodeValue(1, lastCustom);
+    }
+    failureCount += GetCaseResult(
+        colorFunction
+            && colorFunction->GetSize() == 2
+            && colorMapper
+            && std::abs(firstCustom[1] - 1.0) < 1e-12
+            && std::abs(firstCustom[2]) < 1e-12
+            && std::abs(firstCustom[3]) < 1e-12
+            && std::abs(lastCustom[1]) < 1e-12
+            && std::abs(lastCustom[2]) < 1e-12
+            && std::abs(lastCustom[3] - 1.0) < 1e-12
+            && colorMapper->GetInputConnection(0, 0)
+                == colorInput,
+        "Explicit Volume TF keeps custom RGB and input identity") ? 0 : 1;
+
     IsoSurfaceStrategy isoStrategy;
     isoStrategy.SetInputData(image);
     auto* actor = vtkActor::SafeDownCast(
@@ -608,9 +691,11 @@ int GetRenderContractFailCount()
         polyStrategy.GetMainProp());
     failureCount += GetCaseResult(
         polyActor && polyActor->GetProperty()
+            && getColorMatches(
+                polyActor->GetProperty()->GetColor())
             && polyActor->GetProperty()->GetInterpolation()
                 == VTK_FLAT,
-        "Iso polydata input keeps default Flat interpolation") ? 0 : 1;
+        "Iso polydata input exposes the base RGB and Flat interpolation") ? 0 : 1;
 
     RenderParams params;
     params.volumeQuality = {
