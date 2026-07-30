@@ -13,7 +13,7 @@
 | 主体下游 | Data、App/State、Render |
 | 不负责 | Qt UI、固定窗口数量、具体算法、除 standalone 导出热键以外的业务默认参数 |
 | 接纳协议 | Feature 读取不可变 `ImageSnapshot`，以 expected snapshot 做 CAS 发布 |
-| 本地实现快照 | 2026-07-29；当前工作树 |
+| 本地实现快照 | 2026-07-30；`5988505f7e4c`；同步前工作树 |
 
 Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 Session、主体 DTO、Feature 公共类型和 endpoint，不应取得 `VizService`、DataManager 或 feature service 后直接操作。Crop/Gap 不属于主体 Request 分发；删去任一 Feature 目录后，主体 Host、Render、App 与 Interaction 仍可独立编译。
 
@@ -98,7 +98,7 @@ Session 与 Router 不再构造 `HostCommand`、领域 Action 或 Payload：
   -> VtkAppHostSession::SendRequest(HostRequest&&, callback)
   -> VtkAppHostSession::Impl::SendRequest
   -> HostCommandRouter::Dispatch(HostRequest&&, callback)
-  -> Data / View / Tool 内部 route
+  -> HostCommandRouter::Impl 对应私有操作方法
 ```
 
 | 业务 | 具体 Request |
@@ -382,6 +382,9 @@ Session 析构会先清 Hotkey、Timer 与所有仍存活 Feature 的 attachment
 | Gap | `test/GapAnalysis` |
 
 `test/MVVCVTK.Tests.sln` 不包含四个 QtHost 工程。四个工程的编译中间目录按项目名隔离，但共享输出目录且依赖 `QtHostTestCore.lib`；为避免并行重建同一依赖产物，验收脚本应串行构建。
+
+QtHost 工程当前固定使用 Qt 5.14.2；`QtHostSmoke.cpp` 同时校验编译期头文件版本和
+运行期 `qVersion()`。更换 Qt 版本前必须先更新工程依赖与该 smoke 契约，不能只替换部署目录。
 
 QtHost case 覆盖 View 全请求原子拒绝、Crop/Reload 两种提交顺序、Gap 旧 worker/callback/statistics/overlay 退休，以及 mask 与 image 同版本输入。模块物理删除验收在两个独立副本中分别删除 `features/OrthogonalCrop`、`features/GapAnalysis`，再构建主体 Interaction 与 QtHost core/smoke 工程。
 

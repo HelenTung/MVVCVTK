@@ -5,8 +5,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | 当前架构事实、边界、主链与风险索引 |
-| 源码基线 | 2026-07-29 当前工作树 |
-| 最近核验 | 2026-07-29 |
+| 源码基线 | 2026-07-30，`5988505f7e4c`，同步前工作树 |
+| 最近核验 | 2026-07-30 |
 | 主工程 | `MVVCVTK/MVVCVTK.vcxproj` |
 | 默认验证 | `Debug|x64` / `Release|x64`，不主动验证 32 位 |
 | 非 Qt 测试 | `test/MVVCVTK.Tests.sln` 中 3 个工程 |
@@ -75,8 +75,9 @@ flowchart LR
 `VtkAppHostSession::SendRequest(HostRequest&&, callback)` 把同一个对象交给
 `VtkAppHostSession::Impl::SendRequest()`，再进入
 `HostCommandRouter::Dispatch(HostRequest&&, callback)`。Router 只在该入口识别一次动态
-类型；Session 不识别具体 Request，也不保存 Request/callback。Qt、main 和 Feature 均不
-持有 Router。
+类型；Session 不识别具体 Request，也不保存 Request/callback。Router 由 Session 内部拥有，
+Qt、main 和 Feature 不取得其所有权；standalone 的 `HostHotkeyRouter` 只以 `weak_ptr`
+观察它并转发匹配后的主体请求。
 
 Crop/Gap 不进入主体分发，分别由 `CropHostFeature::SendRequest()` 与
 `GapHostFeature::SendRequest()` 接收自己的单一 Feature Request。Feature 内可以用一套

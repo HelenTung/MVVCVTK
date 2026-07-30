@@ -3,6 +3,10 @@
 本文面向 Qt Widgets 上位机调用方，按“接口、说明、适用场景、参数、返回值、调用示例”
 逐项说明公开 Host API。
 
+当前手册已按 2026-07-30 的 `5988505f7e4c` 源码复核。仓库使用 Visual Studio
+`.vcxproj` / MSBuild（无 CMake/CTest 入口）、VTK 9.4，并由 `QtHostSmoke.cpp` 强制
+编译期和运行期 Qt 均为 5.14.2。
+
 ## 1. 公共约定
 
 ### 1.1 公开头文件
