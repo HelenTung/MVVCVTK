@@ -100,6 +100,10 @@ public:
     const std::string& GetSlicePath() const { return m_slicePath; }
     const std::optional<double>& GetSliceAngleDeg() const { return m_sliceAngleDeg; }
     void SetSpacingAccepted(bool isAccepted) { m_isSpacingAccepted = isAccepted; }
+    void SetQualityAccepted(bool isAccepted) { m_isQualityAccepted = isAccepted; }
+    void SetGradientAccepted(bool isAccepted) { m_isGradientAccepted = isAccepted; }
+    void SetPresetAccepted(bool isAccepted) { m_isPresetAccepted = isAccepted; }
+    void SetDenoiseAccepted(bool isAccepted) { m_isDenoiseAccepted = isAccepted; }
 
     void SetMaterial(const MaterialParams& material) {
         m_material = material;
@@ -121,25 +125,29 @@ public:
     }
     template <typename... Args> void SetWindowLevel(Args&&...) { ++m_viewSetCount; }
     bool SetVolumeQuality(const VolumeQualityParams& quality) {
-        m_volumeQuality = quality;
         ++m_qualitySetCount;
+        if (!m_isQualityAccepted) return false;
+        m_volumeQuality = quality;
         ++m_viewSetCount;
         return true;
     }
     bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes) {
-        m_gradientOpacity = nodes;
         ++m_gradientSetCount;
+        if (!m_isGradientAccepted) return false;
+        m_gradientOpacity = nodes;
         ++m_viewSetCount;
         return true;
     }
     bool SetTransferPreset(TransferPreset) {
         ++m_transferPresetSetCount;
+        if (!m_isPresetAccepted) return false;
         ++m_viewSetCount;
         return true;
     }
     bool SetDenoiseOn(bool isDenoiseOn) {
-        m_isDenoiseOn = isDenoiseOn;
         ++m_denoiseSetCount;
+        if (!m_isDenoiseAccepted) return false;
+        m_isDenoiseOn = isDenoiseOn;
         ++m_viewSetCount;
         return true;
     }
@@ -186,6 +194,10 @@ private:
     std::optional<double> m_sliceAngleDeg;
     bool m_isReloadAccepted = true;
     bool m_isSpacingAccepted = true;
+    bool m_isQualityAccepted = true;
+    bool m_isGradientAccepted = true;
+    bool m_isPresetAccepted = true;
+    bool m_isDenoiseAccepted = true;
     bool m_isDenoiseOn = false;
     int m_cursorAxis = -1;
     uint32_t m_visibilityMask = 0;

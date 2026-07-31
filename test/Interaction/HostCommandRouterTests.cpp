@@ -245,6 +245,22 @@ void StartViewCases(int& failureCount)
     getIsRejected(std::move(request), "下降 gradient 必须整笔拒绝。");
 
     request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.mode = HostRenderMode::Volume;
+    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
+        { std::numeric_limits<double>::quiet_NaN(), 0.2 }
+    };
+    getIsRejected(std::move(request), "非有限 gradient 必须整笔拒绝。");
+
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.mode = HostRenderMode::Volume;
+    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
+        { 1.0, 1.1 }
+    };
+    getIsRejected(std::move(request), "越界 gradient opacity 必须整笔拒绝。");
+
+    request = HostViewSetRequest{};
     request.targetView.viewId = "slice";
     request.mode = HostRenderMode::SliceTopDown;
     request.isDenoiseOn = true;
@@ -307,6 +323,86 @@ void StartViewCases(int& failureCount)
             && spacingFixture.GetService()->GetViewSetCount() == 0
             && spacingFixture.context->GetCameraStyleSetCount() == 0,
         "spacing 失败前不得提交其它 View 状态。", failureCount);
+
+    Fixture qualityFixture;
+    qualityFixture.GetService()->SetQualityAccepted(false);
+    HostViewSetRequest qualityRequest;
+    qualityRequest.targetView.viewId = "primary";
+    qualityRequest.mode = HostRenderMode::Volume;
+    qualityRequest.material = HostMaterialParams{};
+    qualityRequest.volumeQuality = HostVolumeQualityParams{};
+    qualityRequest.isAxesVisible = true;
+    SetExpect(!SendView(qualityFixture, std::move(qualityRequest)),
+        "quality 运行时拒绝必须向 Router 返回失败。", failureCount);
+    SetExpect(qualityFixture.GetService()->GetQualitySetCount() == 1
+            && qualityFixture.GetService()->GetViewSetCount() == 0
+            && qualityFixture.GetService()->GetMaterialSetCount() == 0
+            && qualityFixture.context->GetCameraStyleSetCount() == 0
+            && qualityFixture.context->GetAxesSetCount() == 0,
+        "quality 失败必须发生在所有 void View setter 之前。",
+        failureCount);
+
+    Fixture gradientFixture;
+    gradientFixture.GetService()->SetGradientAccepted(false);
+    HostViewSetRequest gradientRequest;
+    gradientRequest.targetView.viewId = "primary";
+    gradientRequest.gradientOpacity =
+        std::vector<HostGradientOpacityNode>{};
+    gradientRequest.transferPreset = HostTransferPreset::Percentile;
+    gradientRequest.isDenoiseOn = true;
+    SetExpect(!SendView(gradientFixture, std::move(gradientRequest)),
+        "gradient 运行时拒绝必须向 Router 返回失败。", failureCount);
+    SetExpect(gradientFixture.GetService()->GetGradientSetCount() == 1
+            && gradientFixture.GetService()->GetTransferPresetSetCount() == 0
+            && gradientFixture.GetService()->GetDenoiseSetCount() == 0
+            && gradientFixture.GetService()->GetViewSetCount() == 0,
+        "gradient 失败必须停止后续可失败 setter。",
+        failureCount);
+
+    Fixture presetFixture;
+    presetFixture.GetService()->SetPresetAccepted(false);
+    HostViewSetRequest presetRequest;
+    presetRequest.targetView.viewId = "primary";
+    presetRequest.transferPreset = HostTransferPreset::Percentile;
+    presetRequest.isDenoiseOn = true;
+    SetExpect(!SendView(presetFixture, std::move(presetRequest)),
+        "transfer preset 运行时拒绝必须向 Router 返回失败。",
+        failureCount);
+    SetExpect(presetFixture.GetService()->GetTransferPresetSetCount() == 1
+            && presetFixture.GetService()->GetDenoiseSetCount() == 0
+            && presetFixture.GetService()->GetViewSetCount() == 0,
+        "transfer preset 失败必须停止后续 denoise setter。",
+        failureCount);
+
+    Fixture denoiseFixture;
+    denoiseFixture.GetService()->SetDenoiseAccepted(false);
+    HostViewSetRequest denoiseRequest;
+    denoiseRequest.targetView.viewId = "primary";
+    denoiseRequest.isDenoiseOn = true;
+    SetExpect(!SendView(denoiseFixture, std::move(denoiseRequest)),
+        "denoise 运行时拒绝必须向 Router 返回失败。",
+        failureCount);
+    SetExpect(denoiseFixture.GetService()->GetDenoiseSetCount() == 1
+            && denoiseFixture.GetService()->GetViewSetCount() == 0,
+        "denoise 失败不得记录成功的 View 状态。", failureCount);
+
+    Fixture partialFixture;
+    partialFixture.GetService()->SetGradientAccepted(false);
+    HostViewSetRequest partialRequest;
+    partialRequest.targetView.viewId = "primary";
+    partialRequest.material = HostMaterialParams{};
+    partialRequest.volumeQuality = HostVolumeQualityParams{};
+    partialRequest.gradientOpacity =
+        std::vector<HostGradientOpacityNode>{};
+    SetExpect(!SendView(partialFixture, std::move(partialRequest)),
+        "后续可失败 setter 拒绝必须向 Router 返回失败。",
+        failureCount);
+    SetExpect(partialFixture.GetService()->GetQualitySetCount() == 1
+            && partialFixture.GetService()->GetGradientSetCount() == 1
+            && partialFixture.GetService()->GetViewSetCount() == 1
+            && partialFixture.GetService()->GetMaterialSetCount() == 0,
+        "失败传播不得被误述为可失败 setter 之间的强原子回滚。",
+        failureCount);
 
     Fixture extendedFixture;
     HostViewSetRequest extended;

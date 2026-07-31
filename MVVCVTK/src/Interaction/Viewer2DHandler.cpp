@@ -223,9 +223,9 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             cam->SetParallelScale(nextScale);
             m_renderer->ResetCameraClippingRange();
 
-            if (m_renderer->GetRenderWindow()) {
-                m_renderer->GetRenderWindow()->Render();
-            }
+            // 连续 MouseMove 只更新最终相机状态；可见帧由统一 Timer 消费 dirty，
+            // 避免每个输入事件绕过 33 ms 合并窗口直接渲染。
+            m_service->SetDirty();
 
             return { true, true };
         }

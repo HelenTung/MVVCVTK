@@ -31,6 +31,8 @@ private:
     // modelMatrix 按 input model -> world 解释；相机保持原观察偏移，只把焦点移到变换后数据中心。
     void AlignCamera(const std::array<double, 16>& modelMatrix);
     int GetCustomDim() const;
+    bool GetInputKey(vtkImageData* image) const;
+    bool GetMaskKey(vtkImageData* image) const;
     bool GetProducersReady() const;
     bool GetMasksReady(int customTargetDim) const;
     double GetQualityStep(
@@ -39,6 +41,8 @@ private:
     bool BuildMasks(int customTargetDim);
     bool SetMapperInput();
     bool SetMapperQuality();
+    bool SetInputKey(vtkImageData* image);
+    bool SetMaskKey(vtkImageData* image);
     // 坐标轴与体渲染主 prop 均由策略强持有，并登记到 m_managedProps 统一挂载。
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     vtkSmartPointer<vtkVolume> m_volume;
@@ -67,6 +71,12 @@ private:
     int m_customTargetDim = 0;
     int m_qualityMaskDim = 0;
     int m_customMaskDim = 0;
+    vtkMTimeType m_inputMTime = 0;
+    vtkMTimeType m_maskMTime = 0;
+    std::array<int, 6> m_inputExtent{};
+    std::array<int, 6> m_maskExtent{};
+    std::array<double, 3> m_inputSpacing{};
+    std::array<double, 3> m_maskSpacing{};
     VolumeQualityParams m_quality;
     bool m_isDenoiseOn = false;
     bool m_isProducerDenoiseOn = false;

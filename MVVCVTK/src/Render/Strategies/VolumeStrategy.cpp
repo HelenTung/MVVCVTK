@@ -83,6 +83,9 @@ VolumeStrategy::VolumeStrategy() {
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
+    // 体渲染的材质、gradient opacity 与前向透明度曲线都以 Composite 合成为契约；
+    // 显式固定默认值，避免 VTK 默认策略变化时静默切换显示语义。
+    m_mapper->SetBlendModeToComposite();
     m_volume->SetPickable(false); // 体渲染不可拾取
     m_cubeAxes->SetPickable(false); // 坐标轴不可拾取
     m_mapper->SetAutoAdjustSampleDistances(false);
@@ -139,6 +142,9 @@ void VolumeStrategy::SetInputMask(
     const auto oldCustomMask = m_customMask;
     const int oldQualityMaskDim = m_qualityMaskDim;
     const int oldCustomMaskDim = m_customMaskDim;
+    const vtkMTimeType oldMaskMTime = m_maskMTime;
+    const auto oldMaskExtent = m_maskExtent;
+    const auto oldMaskSpacing = m_maskSpacing;
     m_lastMask = validityMask;
     if (!BuildMasks(m_customTargetDim)
         || !SetMapperInput()) {
@@ -148,6 +154,9 @@ void VolumeStrategy::SetInputMask(
         m_customMask = oldCustomMask;
         m_qualityMaskDim = oldQualityMaskDim;
         m_customMaskDim = oldCustomMaskDim;
+        m_maskMTime = oldMaskMTime;
+        m_maskExtent = oldMaskExtent;
+        m_maskSpacing = oldMaskSpacing;
         (void)SetMapperInput();
         return;
     }
@@ -159,11 +168,41 @@ int VolumeStrategy::GetCustomDim() const
         ? m_quality.maxDimension : 766;
 }
 
+bool VolumeStrategy::GetInputKey(vtkImageData* image) const
+{
+    return image
+        && m_inputMTime == image->GetMTime()
+        && std::equal(
+            m_inputExtent.begin(),
+            m_inputExtent.end(),
+            image->GetExtent())
+        && std::equal(
+            m_inputSpacing.begin(),
+            m_inputSpacing.end(),
+            image->GetSpacing());
+}
+
+bool VolumeStrategy::GetMaskKey(vtkImageData* image) const
+{
+    return image
+        && m_maskMTime == image->GetMTime()
+        && std::equal(
+            m_maskExtent.begin(),
+            m_maskExtent.end(),
+            image->GetExtent())
+        && std::equal(
+            m_maskSpacing.begin(),
+            m_maskSpacing.end(),
+            image->GetSpacing());
+}
+
 bool VolumeStrategy::GetProducersReady() const
 {
+    auto* image = vtkImageData::SafeDownCast(m_lastInput);
     return m_qualityResample
         && m_customResample
         && m_producerInput == m_lastInput
+        && GetInputKey(image)
         && m_qualityTargetDim == 766
         && m_customTargetDim == GetCustomDim()
         && m_isProducerDenoiseOn == m_isDenoiseOn;
@@ -180,8 +219,49 @@ bool VolumeStrategy::GetMasksReady(const int customTargetDim) const
         && m_qualityMask
         && m_customMask
         && m_maskInput == m_lastMask
+        && GetMaskKey(m_lastMask)
         && m_qualityMaskDim == 766
         && m_customMaskDim == customTargetDim;
+}
+
+bool VolumeStrategy::SetInputKey(vtkImageData* image)
+{
+    if (!image) {
+        m_inputMTime = 0;
+        m_inputExtent.fill(0);
+        m_inputSpacing.fill(0.0);
+        return true;
+    }
+    m_inputMTime = image->GetMTime();
+    std::copy_n(
+        image->GetExtent(),
+        m_inputExtent.size(),
+        m_inputExtent.begin());
+    std::copy_n(
+        image->GetSpacing(),
+        m_inputSpacing.size(),
+        m_inputSpacing.begin());
+    return true;
+}
+
+bool VolumeStrategy::SetMaskKey(vtkImageData* image)
+{
+    if (!image) {
+        m_maskMTime = 0;
+        m_maskExtent.fill(0);
+        m_maskSpacing.fill(0.0);
+        return true;
+    }
+    m_maskMTime = image->GetMTime();
+    std::copy_n(
+        image->GetExtent(),
+        m_maskExtent.size(),
+        m_maskExtent.begin());
+    std::copy_n(
+        image->GetSpacing(),
+        m_maskSpacing.size(),
+        m_maskSpacing.begin());
+    return true;
 }
 
 double VolumeStrategy::GetQualityStep(
@@ -205,7 +285,7 @@ bool VolumeStrategy::BuildMasks(const int customTargetDim)
         m_maskInput = nullptr;
         m_qualityMaskDim = 0;
         m_customMaskDim = 0;
-        m_mapper->SetMaskInput(nullptr);
+        (void)SetMaskKey(nullptr);
         return true;
     }
     if (GetMasksReady(customTargetDim)) {
@@ -234,7 +314,7 @@ bool VolumeStrategy::BuildMasks(const int customTargetDim)
     m_maskInput = m_lastMask;
     m_qualityMaskDim = 766;
     m_customMaskDim = customTargetDim;
-    m_mapper->SetMaskTypeToBinary();
+    (void)SetMaskKey(m_lastMask);
     return true;
 }
 
@@ -298,6 +378,12 @@ bool VolumeStrategy::BuildProducers()
     const auto oldCustomMask = m_customMask;
     const int oldQualityMaskDim = m_qualityMaskDim;
     const int oldCustomMaskDim = m_customMaskDim;
+    const vtkMTimeType oldInputMTime = m_inputMTime;
+    const vtkMTimeType oldMaskMTime = m_maskMTime;
+    const auto oldInputExtent = m_inputExtent;
+    const auto oldMaskExtent = m_maskExtent;
+    const auto oldInputSpacing = m_inputSpacing;
+    const auto oldMaskSpacing = m_maskSpacing;
 
     // mask 的结构键不含 denoise；仅 mask 输入或目标尺寸变化时同步重建。
     if (!GetMasksReady(customTargetDim)
@@ -312,6 +398,7 @@ bool VolumeStrategy::BuildProducers()
     m_qualityTargetDim = qualityTargetDim;
     m_customTargetDim = customTargetDim;
     m_isProducerDenoiseOn = m_isDenoiseOn;
+    (void)SetInputKey(image);
     if (SetMapperInput()) {
         return true;
     }
@@ -328,6 +415,12 @@ bool VolumeStrategy::BuildProducers()
     m_customMask = oldCustomMask;
     m_qualityMaskDim = oldQualityMaskDim;
     m_customMaskDim = oldCustomMaskDim;
+    m_inputMTime = oldInputMTime;
+    m_maskMTime = oldMaskMTime;
+    m_inputExtent = oldInputExtent;
+    m_maskExtent = oldMaskExtent;
+    m_inputSpacing = oldInputSpacing;
+    m_maskSpacing = oldMaskSpacing;
     return false;
 }
 
@@ -349,38 +442,50 @@ bool VolumeStrategy::SetMapperInput()
         if (!maskResample) return false;
         activeMask = maskResample->GetOutput();
     }
+    // BuildMasks 只准备缓存；所有可能失败的质量校验也必须先完成，
+    // 再统一提交不会返回失败的 mapper input/mask setter。
+    if (!SetMapperQuality()) return false;
     m_mapper->SetInputConnection(activeResample->GetOutputPort());
+    if (activeMask) {
+        m_mapper->SetMaskTypeToBinary();
+    }
     m_mapper->SetMaskInput(activeMask);
-    return SetMapperQuality();
+    return true;
 }
 
 bool VolumeStrategy::SetMapperQuality()
 {
     if (!m_mapper) return false;
 
-    m_mapper->SetAutoAdjustSampleDistances(false);
-    m_mapper->SetImageSampleDistance(1.0);
-    m_mapper->SetMinimumImageSampleDistance(1.0);
-    m_mapper->SetMaximumImageSampleDistance(1.0);
+    double sampleDistance = 0.0;
+    bool isJitterOn = false;
     switch (GetVolumeQuality(m_quality, m_isFeatureActive)) {
-    case VolumeQuality::Quality: {
-        const double sampleDistance = GetQualityStep(m_qualityResample);
+    case VolumeQuality::Quality:
+        sampleDistance = GetQualityStep(m_qualityResample);
         if (sampleDistance <= 0.0) return false;
-        m_mapper->SetSampleDistance(sampleDistance);
-        m_mapper->SetUseJittering(true);
-        return true;
-    }
+        isJitterOn = true;
+        break;
     case VolumeQuality::Custom:
         if (m_quality.maxDimension < 1
             || !std::isfinite(m_quality.sampleDistance)
             || m_quality.sampleDistance <= 0.0) {
             return false;
         }
-        m_mapper->SetSampleDistance(m_quality.sampleDistance);
-        m_mapper->SetUseJittering(m_quality.isJitterOn);
-        return true;
+        sampleDistance = m_quality.sampleDistance;
+        isJitterOn = m_quality.isJitterOn;
+        break;
+    default:
+        return false;
     }
-    return false;
+
+    // 校验完成后一次提交，失败路径不留下半套采样参数。
+    m_mapper->SetAutoAdjustSampleDistances(false);
+    m_mapper->SetImageSampleDistance(1.0);
+    m_mapper->SetMinimumImageSampleDistance(1.0);
+    m_mapper->SetMaximumImageSampleDistance(1.0);
+    m_mapper->SetSampleDistance(sampleDistance);
+    m_mapper->SetUseJittering(isJitterOn);
+    return true;
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {

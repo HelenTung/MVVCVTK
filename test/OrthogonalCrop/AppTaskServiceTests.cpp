@@ -21,6 +21,8 @@
 #include <vector>
 
 #include <vtkImageData.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
 #include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
 #include <vtkPLYReader.h>
@@ -623,8 +625,32 @@ void StartInputSwap(int& failureCount)
             payload.revision),
         "input swap test should finish the staged transaction",
         failureCount);
-    SetExpect(service.SendReloadUpdate(),
-        "same-mode render input should rebuild after the crop transaction",
+    std::size_t prewarmCount = 0;
+    auto renderCallback =
+        vtkSmartPointer<vtkCallbackCommand>::New();
+    renderCallback->SetClientData(&prewarmCount);
+    renderCallback->SetCallback(
+        [](vtkObject*, unsigned long eventId,
+            void* clientData, void*) {
+            if (eventId == vtkCommand::StartEvent
+                && clientData) {
+                ++(*static_cast<std::size_t*>(clientData));
+            }
+        });
+    const unsigned long renderTag =
+        renderWindow->AddObserver(
+            vtkCommand::StartEvent, renderCallback);
+    const bool isInputRebuilt =
+        service.SendReloadUpdate();
+    renderWindow->RemoveObserver(renderTag);
+    renderCallback->SetClientData(nullptr);
+    std::cout
+        << "DIAG_RENDER_SOURCE: candidate_prewarm="
+        << prewarmCount << '\n';
+    SetExpect(isInputRebuilt
+            && prewarmCount >= 1
+            && prewarmCount <= 2,
+        "same-mode input should use one or two candidate prewarm renders",
         failureCount);
     auto* nextProp = service.GetMainProp();
     SetExpect(firstProp

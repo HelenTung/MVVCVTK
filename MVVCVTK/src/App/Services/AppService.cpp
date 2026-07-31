@@ -1119,9 +1119,8 @@ bool VizService::Impl::SetTransferPreset(TransferPreset preset)
         m_hasPresetRefreshNeed = true;
         return true;
     }
-    (void)m_sharedState->SetTransferPresetNodes(
+    return m_sharedState->SetTransferPresetNodes(
         preset, currentSnapshot->version, *nodes);
-    return true;
 }
 
 bool VizService::Impl::SetDenoiseOn(bool isDenoiseOn)

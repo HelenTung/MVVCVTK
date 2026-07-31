@@ -555,9 +555,10 @@ bool HostCommandRouter::Impl::SetView(
     const HostViewSetRequest& request) const
 {
     // 1. 先在局部候选中解析目标并完成所有字段校验。
-    // 2. 任一字段非法都在 setter 前失败，保证请求不会留下部分状态。
-    // 3. spacing 是唯一会报告业务失败的写入，必须在其它状态前提交。
-    // 4. spacing 成功后，其余已验证 setter 按不可失败的状态写入语义提交。
+    // 2. 可报告失败的 setter 全部排在 void 状态写入前，并逐项传播失败。
+    // 3. 前一个可失败 setter 成功、后一个失败时仍可能留下部分状态；
+    //    此处不把调用顺序优化表述为强原子回滚。
+    // 4. 全部可失败 setter 成功后，再提交其余已验证状态。
     auto candidate = BuildViewCandidate(request);
     if (!candidate) return false;
 
@@ -568,6 +569,27 @@ bool HostCommandRouter::Impl::SetView(
             return false;
         }
     }
+    if (candidate->volumeQuality
+        && !candidate->service->SetVolumeQuality(
+            *candidate->volumeQuality)) {
+        return false;
+    }
+    if (candidate->gradientOpacity
+        && !candidate->service->SetGradientOpacity(
+            *candidate->gradientOpacity)) {
+        return false;
+    }
+    if (candidate->transferPreset
+        && !candidate->service->SetTransferPreset(
+            *candidate->transferPreset)) {
+        return false;
+    }
+    if (candidate->isDenoiseOn
+        && !candidate->service->SetDenoiseOn(
+            *candidate->isDenoiseOn)) {
+        return false;
+    }
+
     if (candidate->mode) {
         candidate->service->SetVizMode(*candidate->mode);
         candidate->context->SetCameraStyle(*candidate->mode);
@@ -580,22 +602,6 @@ bool HostCommandRouter::Impl::SetView(
     if (candidate->windowLevel) candidate->service->SetWindowLevel(
         candidate->windowLevel->windowWidth,
         candidate->windowLevel->windowCenter);
-    if (candidate->volumeQuality) {
-        (void)candidate->service->SetVolumeQuality(
-            *candidate->volumeQuality);
-    }
-    if (candidate->gradientOpacity) {
-        (void)candidate->service->SetGradientOpacity(
-            *candidate->gradientOpacity);
-    }
-    if (candidate->transferPreset) {
-        (void)candidate->service->SetTransferPreset(
-            *candidate->transferPreset);
-    }
-    if (candidate->isDenoiseOn) {
-        (void)candidate->service->SetDenoiseOn(
-            *candidate->isDenoiseOn);
-    }
     if (candidate->cursor) {
         candidate->service->SetCursorWorldPosition(
             candidate->cursor->world.data(),

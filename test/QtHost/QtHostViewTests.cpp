@@ -29,6 +29,7 @@
 #include <vtkTriangle.h>
 #include <vtkStreamingDemandDrivenPipeline.h>
 #include <vtkVolume.h>
+#include <vtkVolumeMapper.h>
 #include <vtkVolumeProperty.h>
 
 #include <algorithm>
@@ -527,6 +528,102 @@ int GetRenderContractFailCount()
             && getMaxDimension(retryMapper) == 8,
         "Failed producer input preserves the old cache and allows retry") ? 0 : 1;
 
+    auto keyImage = vtkSmartPointer<vtkImageData>::New();
+    keyImage->SetDimensions(32, 4, 2);
+    keyImage->SetSpacing(1.0, 1.0, 1.0);
+    keyImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    VolumeStrategy keyStrategy;
+    keyStrategy.SetInputData(keyImage);
+    auto* keyVolume = vtkVolume::SafeDownCast(
+        keyStrategy.GetMainProp());
+    auto* keyMapper = keyVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            keyVolume->GetMapper())
+        : nullptr;
+    vtkSmartPointer<vtkAlgorithmOutput> firstKeyInput =
+        keyMapper ? keyMapper->GetInputConnection(0, 0) : nullptr;
+    keyImage->SetSpacing(2.0, 3.0, 4.0);
+    keyImage->Modified();
+    keyStrategy.SetInputData(keyImage);
+    vtkSmartPointer<vtkAlgorithmOutput> spacingKeyInput =
+        keyMapper ? keyMapper->GetInputConnection(0, 0) : nullptr;
+    if (keyMapper) {
+        keyMapper->Update();
+    }
+    auto* spacingKeyOutput = keyMapper
+        ? vtkImageData::SafeDownCast(keyMapper->GetInput())
+        : nullptr;
+    const bool isSpacingKeyUpdated =
+        firstKeyInput
+        && spacingKeyInput
+        && spacingKeyInput != firstKeyInput
+        && spacingKeyOutput
+        && std::abs(spacingKeyOutput->GetSpacing()[0] - 2.0)
+            < 1e-12
+        && std::abs(spacingKeyOutput->GetSpacing()[1] - 3.0)
+            < 1e-12
+        && std::abs(spacingKeyOutput->GetSpacing()[2] - 4.0)
+            < 1e-12;
+
+    vtkSmartPointer<vtkAlgorithmOutput> dataKeyInput =
+        keyMapper ? keyMapper->GetInputConnection(0, 0) : nullptr;
+    auto* keyScalars = static_cast<unsigned char*>(
+        keyImage->GetScalarPointer());
+    if (keyScalars) {
+        keyScalars[0] = 17;
+    }
+    keyImage->Modified();
+    keyStrategy.SetInputData(keyImage);
+    const bool isDataKeyUpdated =
+        keyMapper
+        && dataKeyInput
+        && keyMapper->GetInputConnection(0, 0)
+            != dataKeyInput.GetPointer();
+
+    vtkSmartPointer<vtkAlgorithmOutput> extentKeyInput =
+        keyMapper ? keyMapper->GetInputConnection(0, 0) : nullptr;
+    keyImage->SetDimensions(16, 4, 2);
+    keyImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    keyImage->Modified();
+    keyStrategy.SetInputData(keyImage);
+    const bool isExtentKeyUpdated =
+        keyMapper
+        && extentKeyInput
+        && keyMapper->GetInputConnection(0, 0)
+            != extentKeyInput.GetPointer()
+        && getMaxDimension(keyMapper) == 16;
+
+    auto keyMask = vtkSmartPointer<vtkImageData>::New();
+    keyMask->CopyStructure(keyImage);
+    keyMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(keyMask->GetScalarPointer()),
+        keyMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(255));
+    keyStrategy.SetInputMask(keyMask);
+    vtkSmartPointer<vtkImageData> firstKeyMask =
+        keyMapper ? keyMapper->GetMaskInput() : nullptr;
+    keyMask->SetSpacing(2.5, 3.0, 4.0);
+    keyMask->Modified();
+    keyStrategy.SetInputMask(keyMask);
+    auto* spacingKeyMask =
+        keyMapper ? keyMapper->GetMaskInput() : nullptr;
+    keyImage->Modified();
+    keyStrategy.SetInputMask(nullptr);
+    auto* failedClearMask =
+        keyMapper ? keyMapper->GetMaskInput() : nullptr;
+    failureCount += GetCaseResult(
+        isSpacingKeyUpdated
+            && isDataKeyUpdated
+            && isExtentKeyUpdated
+            && firstKeyMask
+            && spacingKeyMask
+            && spacingKeyMask != firstKeyMask.GetPointer()
+            && std::abs(spacingKeyMask->GetSpacing()[0] - 2.5)
+                < 1e-12
+            && failedClearMask == spacingKeyMask,
+        "Same-pointer mutations invalidate caches and failed mask clear rolls back") ? 0 : 1;
+
     auto image = BuildFloatImage(
         { 0.0f, 0.0f, 1.0f, 1.0f });
     image->SetDimensions(4, 1, 1);
@@ -564,10 +661,36 @@ int GetRenderContractFailCount()
         ? vtkGPUVolumeRayCastMapper::SafeDownCast(
             volume->GetMapper())
         : nullptr;
+    const vtkMTimeType blendMTime =
+        colorMapper ? colorMapper->GetMTime() : 0;
+    const bool isCompositeBlend = colorMapper
+        && colorMapper->GetBlendMode()
+            == vtkVolumeMapper::COMPOSITE_BLEND;
+    if (colorMapper) {
+        colorMapper->SetBlendModeToComposite();
+    }
+    failureCount += GetCaseResult(
+        isCompositeBlend
+            && colorMapper
+            && colorMapper->GetBlendMode()
+                == vtkVolumeMapper::COMPOSITE_BLEND
+            && colorMapper->GetMTime() == blendMTime,
+        "Volume blend mode is explicit Composite and repeated setting is idempotent") ? 0 : 1;
     vtkAlgorithmOutput* colorInput = colorMapper
         ? colorMapper->GetInputConnection(0, 0) : nullptr;
+    const double colorSampleDistance = colorMapper
+        ? colorMapper->GetSampleDistance() : 0.0;
+    const double colorImageDistance = colorMapper
+        ? colorMapper->GetImageSampleDistance() : 0.0;
+    const int colorAutoAdjust = colorMapper
+        ? colorMapper->GetAutoAdjustSampleDistances() : -1;
+    const int colorJitter = colorMapper
+        ? colorMapper->GetUseJittering() : -1;
     RenderParams colorParams;
     colorParams.tfNodes = isoNodes;
+    colorParams.scalarRange[0] = 10.0;
+    colorParams.scalarRange[1] = 30.0;
+    colorParams.material.opacity = 0.4;
     volumeStrategy.SetVisualState(
         colorParams, UpdateFlags::TF);
     auto* colorFunction = volume && volume->GetProperty()
@@ -577,12 +700,35 @@ int GetRenderContractFailCount()
         colorFunction
         && colorFunction->GetSize()
             == static_cast<int>(isoNodes.size());
+    auto* opacityFunction = volume && volume->GetProperty()
+        ? volume->GetProperty()->GetScalarOpacity()
+        : nullptr;
+    hasVolumeRgb = hasVolumeRgb
+        && opacityFunction
+        && opacityFunction->GetSize()
+            == static_cast<int>(isoNodes.size());
     for (int index = 0;
         hasVolumeRgb && index < colorFunction->GetSize();
         ++index) {
-        double node[6] = {};
-        colorFunction->GetNodeValue(index, node);
-        hasVolumeRgb = getColorMatches(node + 1);
+        double colorNode[6] = {};
+        double opacityNode[4] = {};
+        colorFunction->GetNodeValue(index, colorNode);
+        opacityFunction->GetNodeValue(index, opacityNode);
+        const auto& sourceNode =
+            isoNodes[static_cast<std::size_t>(index)];
+        const double scalarValue =
+            colorParams.scalarRange[0]
+            + sourceNode.position
+                * (colorParams.scalarRange[1]
+                    - colorParams.scalarRange[0]);
+        hasVolumeRgb =
+            getColorMatches(colorNode + 1)
+            && std::abs(colorNode[0] - scalarValue) < 1e-12
+            && std::abs(opacityNode[0] - scalarValue) < 1e-12
+            && std::abs(
+                opacityNode[1]
+                    - sourceNode.opacity
+                        * colorParams.material.opacity) < 1e-12;
     }
     failureCount += GetCaseResult(
         hasVolumeRgb
@@ -590,7 +736,7 @@ int GetRenderContractFailCount()
             && colorInput
             && colorMapper->GetInputConnection(0, 0)
                 == colorInput,
-        "Volume TF accepts the Iso base RGB without rebuilding input") ? 0 : 1;
+        "Volume TF maps base RGB, scalar position, and opacity without rebuilding input") ? 0 : 1;
 
     const std::vector<TFNode> customNodes{
         { 0.0, 0.0, 1.0, 0.0, 0.0 },
@@ -618,9 +764,18 @@ int GetRenderContractFailCount()
             && std::abs(lastCustom[1]) < 1e-12
             && std::abs(lastCustom[2]) < 1e-12
             && std::abs(lastCustom[3] - 1.0) < 1e-12
+            && std::abs(
+                colorMapper->GetSampleDistance()
+                    - colorSampleDistance) < 1e-12
+            && std::abs(
+                colorMapper->GetImageSampleDistance()
+                    - colorImageDistance) < 1e-12
+            && colorMapper->GetAutoAdjustSampleDistances()
+                == colorAutoAdjust
+            && colorMapper->GetUseJittering() == colorJitter
             && colorMapper->GetInputConnection(0, 0)
                 == colorInput,
-        "Explicit Volume TF keeps custom RGB and input identity") ? 0 : 1;
+        "Explicit Volume TF keeps custom RGB, quality, and input identity") ? 0 : 1;
 
     IsoSurfaceStrategy isoStrategy;
     isoStrategy.SetInputData(image);
@@ -715,6 +870,10 @@ int GetRenderContractFailCount()
     auto* gradient = volume && volume->GetProperty()
         ? volume->GetProperty()->GetGradientOpacity()
         : nullptr;
+    double gradientRange[2] = {};
+    if (gradient) {
+        gradient->GetRange(gradientRange);
+    }
     vtkAlgorithmOutput* customInput =
         mapper ? mapper->GetInputConnection(0, 0) : nullptr;
     failureCount += GetCaseResult(
@@ -731,8 +890,17 @@ int GetRenderContractFailCount()
             && std::abs(mapper->GetSampleDistance() - 0.25)
                 < 1e-12
             && mapper->GetUseJittering() != 0
-            && gradient && gradient->GetSize() == 3,
-        "Custom quality and gradient opacity reach VTK properties") ? 0 : 1;
+            && volume->GetProperty()->HasGradientOpacity()
+            && mapper->GetGradientOpacityRangeType()
+                == vtkGPUVolumeRayCastMapper::SCALAR
+            && gradient && gradient->GetSize() == 3
+            && std::abs(gradientRange[0]) < 1e-12
+            && std::abs(gradientRange[1] - 20.0) < 1e-12
+            && std::abs(image->GetScalarRange()[0]) < 1e-12
+            && std::abs(image->GetScalarRange()[1] - 1.0)
+                < 1e-12
+            && std::abs(image->GetSpacing()[0] - 1.0) < 1e-12,
+        "Custom quality and SCALAR gradient opacity reach VTK properties") ? 0 : 1;
 
     params.isFeatureActive = true;
     volumeStrategy.SetVisualState(
@@ -770,10 +938,47 @@ int GetRenderContractFailCount()
     params.gradientOpacity.clear();
     volumeStrategy.SetVisualState(
         params, UpdateFlags::GradientOpacity);
+    const bool hasEmptyGradient =
+        volume->GetProperty()->HasGradientOpacity();
     gradient = volume->GetProperty()->GetGradientOpacity();
     failureCount += GetCaseResult(
-        gradient && gradient->GetSize() == 2,
-        "Empty gradient restores VTK default function") ? 0 : 1;
+        !hasEmptyGradient
+            && gradient
+            && gradient->GetSize() == 2,
+        "Empty gradient disables the custom function before VTK creates its default") ? 0 : 1;
+
+    params.gradientOpacity = {
+        { 5.0, 0.2 }, { 5.0, 0.8 }, { 10.0, 1.0 }
+    };
+    volumeStrategy.SetVisualState(
+        params, UpdateFlags::GradientOpacity);
+    gradient = volume->GetProperty()->GetGradientOpacity();
+    failureCount += GetCaseResult(
+        volume->GetProperty()->HasGradientOpacity()
+            && gradient
+            && gradient->GetSize() == 2
+            && std::abs(gradient->GetValue(5.0) - 0.8)
+                < 1e-12,
+        "Duplicate gradient positions deterministically keep the last opacity") ? 0 : 1;
+
+    RenderParams zeroRangeParams = colorParams;
+    zeroRangeParams.scalarRange[0] = 12.0;
+    zeroRangeParams.scalarRange[1] = 12.0;
+    zeroRangeParams.tfNodes = customNodes;
+    volumeStrategy.SetVisualState(
+        zeroRangeParams, UpdateFlags::TF);
+    colorFunction = volume->GetProperty()->GetRGBTransferFunction();
+    opacityFunction = volume->GetProperty()->GetScalarOpacity();
+    failureCount += GetCaseResult(
+        colorFunction
+            && opacityFunction
+            && colorFunction->GetSize() == 1
+            && opacityFunction->GetSize() == 1
+            && std::abs(colorFunction->GetRange()[0] - 12.0)
+                < 1e-12
+            && std::abs(colorFunction->GetRange()[1] - 12.0)
+                < 1e-12,
+        "Zero-width scalar range collapses TF nodes without invalid values") ? 0 : 1;
 
     constexpr int denoiseDims[3] = { 64, 32, 16 };
     auto noisyImage = vtkSmartPointer<vtkImageData>::New();

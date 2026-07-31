@@ -101,5 +101,18 @@ int AppStateSuite::GetFailCount() const
         std::cerr << "Manual TF must cancel preset intent and reject stale preset results.\n";
         ++failureCount;
     }
+
+    const std::vector<TFNode> manualNodes{
+        { 0.0, 0.0, 0.75, 0.75, 0.75 },
+        { 1.0, 1.0, 0.75, 0.75, 0.75 }
+    };
+    const std::size_t eventCount = sink->GetEvents().size();
+    state.SetTFNodes(manualNodes);
+    state.SetTFNodes(manualNodes);
+    if (sink->GetEvents().size() != eventCount + 1
+        || sink->GetEvents().back() != UpdateFlags::TF) {
+        std::cerr << "Equal TF nodes must not publish a second TF event.\n";
+        ++failureCount;
+    }
     return failureCount;
 }
