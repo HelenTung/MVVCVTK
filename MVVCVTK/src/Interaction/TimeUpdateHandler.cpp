@@ -1,5 +1,6 @@
 #include "TimeUpdateHandler.h"
 #include "AppInterfaces.h"
+#include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkRenderWindow.h>
 
 TimeUpdateHandler::TimeUpdateHandler(AbstractAppService* service,
@@ -31,9 +32,17 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
 
     // 2. 检查渲染脏标记，仅在窗口有效时渲染
     if (hasRenderNeed) {
-        if (m_renderWindow
+        auto* genericWindow =
+            vtkGenericOpenGLRenderWindow::SafeDownCast(
+                m_renderWindow);
+        const bool isNativeWindowReady =
+            m_renderWindow
             && m_renderWindow->GetMapped()
-            && m_renderWindow->GetGenericWindowId())
+            && m_renderWindow->GetGenericWindowId();
+        const bool isQtWindowReady =
+            genericWindow
+            && genericWindow->GetReadyForRendering();
+        if (isNativeWindowReady || isQtWindowReady)
         {
             m_renderWindow->Render();
         }

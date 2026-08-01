@@ -23,6 +23,7 @@
 #include <vtkCellArray.h>
 #include <vtkActor.h>
 #include <vtkImageData.h>
+#include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkMatrix3x3.h>
 #include <vtkNew.h>
 #include <vtkPolyData.h>
@@ -302,6 +303,41 @@ bool StartStrategyCase(
             && committed.activeRevision == payload.revision
             && glGetError() == GL_NO_ERROR,
         strategyName) && isPassed;
+    if (auto* volume = vtkVolume::SafeDownCast(
+            strategy->GetMainProp())) {
+        auto* volumeMapper =
+            vtkGPUVolumeRayCastMapper::SafeDownCast(
+                volume->GetMapper());
+        renderWindow->SetDesiredUpdateRate(
+            GetRenderRate(true));
+        renderWindow->Render();
+        const auto previewState = effect->GetState();
+        const bool isPreviewCommitted =
+            volumeMapper
+            && std::abs(
+                volumeMapper->GetImageSampleDistance()
+                    - 2.0) < 1e-12
+            && previewState.status
+                == RenderEffectStatus::Committed
+            && previewState.activeRevision
+                == payload.revision;
+        renderWindow->SetDesiredUpdateRate(
+            GetRenderRate(false));
+        renderWindow->Render();
+        const auto stillState = effect->GetState();
+        isPassed = SetExpect(
+            isPreviewCommitted
+                && volumeMapper
+                && std::abs(
+                    volumeMapper->GetImageSampleDistance()
+                        - 1.0) < 1e-12
+                && stillState.status
+                    == RenderEffectStatus::Committed
+                && stillState.activeRevision
+                    == payload.revision,
+            "Volume preview must preserve the committed crop effect.")
+            && isPassed;
+    }
     isPassed = SetExpect(effect->ClearCropParams(), strategyName)
         && isPassed;
     renderWindow->Render();

@@ -7,16 +7,19 @@
 #include "Data/VolumeTypes.h"
 #include "PlanarTestSuites.h"
 #include "Render/CropShaderController.h"
+#include "Render/Strategies/VolumeStrategy.h"
 #include "Services/AppService.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,6 +32,8 @@
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkSTLReader.h>
+#include <vtkVolume.h>
+#include <vtkVolumeProperty.h>
 #include <vtkWeakPointer.h>
 
 namespace {
@@ -546,6 +551,32 @@ void StartInputSwap(int& failureCount)
         "initial render pipeline should build",
         failureCount);
     auto* firstProp = service.GetMainProp();
+    bool isWrongThreadAccepted = true;
+    std::thread wrongThread([&] {
+        isWrongThreadAccepted = service.SendReloadUpdate();
+    });
+    wrongThread.join();
+    SetExpect(!isWrongThreadAccepted
+            && service.GetMainProp() == firstProp,
+        "reload from a non-owner thread must not touch the VTK pipeline",
+        failureCount);
+    auto replacementRenderer =
+        vtkSmartPointer<vtkRenderer>::New();
+    auto replacementWindow =
+        vtkSmartPointer<vtkRenderWindow>::New();
+    replacementWindow->SetOffScreenRendering(1);
+    replacementWindow->AddRenderer(
+        replacementRenderer);
+    std::thread wrongBindThread([&] {
+        service.SetRenderContext(
+            replacementWindow,
+            replacementRenderer);
+    });
+    wrongBindThread.join();
+    SetExpect(service.SendReloadUpdate()
+            && service.GetMainProp() == firstProp,
+        "a non-owner thread must not replace the RenderContext owner",
+        failureCount);
     service.SetVizMode(VizMode::IsoSurface);
     SetExpect(service.SendReloadUpdate(),
         "input swap test should cache a second mode",
@@ -662,6 +693,68 @@ void StartInputSwap(int& failureCount)
         "input replacement must release inactive strategies that retain the previous materialized image",
         failureCount);
 }
+
+void StartRenderOwnerGate(int& failureCount)
+{
+    auto dataManager =
+        std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    std::fill_n(
+        static_cast<float*>(image->GetScalarPointer()),
+        image->GetNumberOfPoints(), 1.0F);
+    SetExpect(dataManager->SetInitial(image),
+        "owner gate needs an initial image",
+        failureCount);
+
+    auto broadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    auto state =
+        std::make_shared<SharedInteractionState>(
+            broadcaster);
+    VizService service(
+        dataManager, state, broadcaster);
+    auto strategy = std::make_shared<VolumeStrategy>();
+    auto overlay = std::make_shared<VolumeStrategy>();
+    strategy->SetInputData(image);
+    overlay->SetInputData(image);
+    service.SetCurrentStrategy(strategy);
+    service.AttachOverlayStrategy(overlay);
+
+    auto* volume = vtkVolume::SafeDownCast(
+        strategy->GetMainProp());
+    auto* property = volume ? volume->GetProperty() : nullptr;
+    if (!property) {
+        SetExpect(false,
+            "owner gate needs a volume property",
+            failureCount);
+        return;
+    }
+    const double initialDiffuse = property->GetDiffuse();
+    auto material = state->GetMaterial();
+    material.diffuse = initialDiffuse == 0.23 ? 0.41 : 0.23;
+    service.SetMaterial(material);
+
+    service.SendUpdates();
+    SetExpect(std::abs(property->GetDiffuse()
+                - initialDiffuse) < 1e-12
+            && !service.SendReloadUpdate(),
+        "an unbound service must not submit state to VTK",
+        failureCount);
+
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow =
+        vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    service.SetRenderContext(renderWindow, renderer);
+    service.SendUpdates();
+    SetExpect(std::abs(property->GetDiffuse()
+                - material.diffuse) < 1e-12,
+        "the RenderContext owner must submit pending state",
+        failureCount);
+}
 }
 
 int AppTaskSuite::GetFailCount() const
@@ -673,6 +766,7 @@ int AppTaskSuite::GetFailCount() const
     StartExportFiles(failureCount);
     StartStateGate(failureCount);
     StartMaskSnapshot(failureCount);
+    StartRenderOwnerGate(failureCount);
     StartInputSwap(failureCount);
     return failureCount;
 }

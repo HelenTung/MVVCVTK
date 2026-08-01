@@ -8,19 +8,71 @@
 #include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
+#include <vtkRenderWindow.h>
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <iostream>
+#include <thread>
 
 class VolumeStrategy::Mapper final : public vtkOpenGLGPUVolumeRayCastMapper {
 public:
+    struct QualityState final {
+        bool isAuto = false;
+        double image = 1.0;
+        double minImage = 1.0;
+        double maxImage = 1.0;
+        double ray = 1.0;
+        bool isJitter = true;
+    };
+
     static Mapper* New();
     vtkTypeMacro(Mapper, vtkOpenGLGPUVolumeRayCastMapper);
 
     void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+    bool SetStillQuality(const QualityState& state)
+    {
+        m_qualityThread = std::this_thread::get_id();
+        m_stillQuality = state;
+        return SetPreviewQuality(m_isPreviewActive);
+    }
 
 protected:
     void GPURender(vtkRenderer* renderer, vtkVolume* volume) override
     {
+        auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
+        const bool isPreview =
+            renderWindow
+            && renderWindow->GetDesiredUpdateRate() >= GetRenderRate(true);
+        if (isPreview != m_isPreviewActive) {
+            m_isPreviewActive = isPreview;
+            (void)SetPreviewQuality(isPreview);
+            const std::thread::id renderThread =
+                std::this_thread::get_id();
+            const bool isThreadValid =
+                m_qualityThread == renderThread
+                && m_previewThread == renderThread;
+            if (!isThreadValid) {
+                std::cerr
+                    << "[VolumeQualityThread] owner mismatch"
+                    << " quality="
+                    << std::hash<std::thread::id>{}(
+                        m_qualityThread)
+                    << " preview="
+                    << std::hash<std::thread::id>{}(
+                        m_previewThread)
+                    << " render="
+                    << std::hash<std::thread::id>{}(
+                        renderThread)
+                    << '\n';
+            }
+            if (!isThreadValid && isPreview) {
+                // VTK mapper setter 不允许跨 owner thread 使用；门失败时立即
+                // 恢复静止基线，不让 preview 覆盖继续产品化。
+                m_isPreviewActive = false;
+                (void)SetPreviewQuality(false);
+            }
+        }
         if (m_binding) {
             (void)m_binding->OnRenderStart(renderer);
         }
@@ -31,7 +83,34 @@ protected:
     }
 
 private:
+    bool SetPreviewQuality(bool isPreview)
+    {
+        m_previewThread = std::this_thread::get_id();
+        if (isPreview) {
+            SetAutoAdjustSampleDistances(false);
+            SetImageSampleDistance(2.0);
+            SetMinimumImageSampleDistance(m_stillQuality.minImage);
+            SetMaximumImageSampleDistance(m_stillQuality.maxImage);
+            SetSampleDistance(std::max(
+                m_stillQuality.ray, 2.0 * m_stillQuality.ray));
+            SetUseJittering(m_stillQuality.isJitter);
+            return true;
+        }
+
+        SetAutoAdjustSampleDistances(m_stillQuality.isAuto);
+        SetImageSampleDistance(m_stillQuality.image);
+        SetMinimumImageSampleDistance(m_stillQuality.minImage);
+        SetMaximumImageSampleDistance(m_stillQuality.maxImage);
+        SetSampleDistance(m_stillQuality.ray);
+        SetUseJittering(m_stillQuality.isJitter);
+        return true;
+    }
+
     RenderEffectBinding* m_binding = nullptr;
+    QualityState m_stillQuality;
+    bool m_isPreviewActive = false;
+    std::thread::id m_qualityThread;
+    std::thread::id m_previewThread;
 };
 
 vtkStandardNewMacro(VolumeStrategy::Mapper);
@@ -92,6 +171,8 @@ VolumeStrategy::VolumeStrategy() {
     m_mapper->SetImageSampleDistance(1.0);
     m_mapper->SetMinimumImageSampleDistance(1.0);
     m_mapper->SetMaximumImageSampleDistance(1.0);
+    m_mapper->SetSampleDistance(1.0);
+    m_mapper->SetUseJittering(true);
     m_volume->SetMapper(m_mapper);
 
     auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
@@ -478,14 +559,16 @@ bool VolumeStrategy::SetMapperQuality()
         return false;
     }
 
-    // 校验完成后一次提交，失败路径不留下半套采样参数。
-    m_mapper->SetAutoAdjustSampleDistances(false);
-    m_mapper->SetImageSampleDistance(1.0);
-    m_mapper->SetMinimumImageSampleDistance(1.0);
-    m_mapper->SetMaximumImageSampleDistance(1.0);
-    m_mapper->SetSampleDistance(sampleDistance);
-    m_mapper->SetUseJittering(isJitterOn);
-    return true;
+    // 校验完成后一次更新完整静止基线；Mapper 会按当前 preview 状态
+    // 原子式选择静止值或交互覆盖，失败路径不留下半套采样参数。
+    return m_mapper->SetStillQuality({
+        false,
+        1.0,
+        1.0,
+        1.0,
+        sampleDistance,
+        isJitterOn
+    });
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -524,6 +607,11 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
             && params.volumeQuality.maxDimension <= 16384
             && std::isfinite(params.volumeQuality.sampleDistance)
             && params.volumeQuality.sampleDistance > 0.0));
+    if (hasQualityChanged && !isQualityValid) {
+        // 非法质量请求在触碰任何同帧状态前整体拒绝；TF/material/gradient
+        // 也不能绕过质量事务单独提交。
+        return;
+    }
     if (hasQualityChanged && isQualityValid) {
         m_quality = params.volumeQuality;
         m_isFeatureActive = params.isFeatureActive;
@@ -545,7 +633,9 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
         hasBuildStarted = true;
         hasProducerRebuilt = BuildProducers();
     }
-    bool isPipelineSet = !hasBuildStarted || hasProducerRebuilt;
+    bool isPipelineSet =
+        (!hasQualityChanged || isQualityValid)
+        && (!hasBuildStarted || hasProducerRebuilt);
     if (!hasBuildStarted && GetProducersReady() && m_mapper) {
         const VolumeQuality activeQuality = GetVolumeQuality(
             m_quality, m_isFeatureActive);
@@ -563,7 +653,15 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
         m_quality = oldQuality;
         m_isFeatureActive = wasFeatureActive;
         m_isDenoiseOn = wasDenoiseOn;
-        (void)SetMapperInput();
+        const bool isMapperRestored = SetMapperInput();
+        if (!isMapperRestored) {
+            std::cerr
+                << "[VolumeRollback] mapper input restore failed"
+                << '\n';
+        }
+        // 同一帧中的 TF/material/gradient 必须与 producer/quality 一起提交。
+        // 质量事务失败后立即停止，避免形成“旧输入 + 新视觉函数”的半提交帧。
+        return;
     }
 
     // TF 与 Material 分开处理的原因是：

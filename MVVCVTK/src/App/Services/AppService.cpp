@@ -222,6 +222,18 @@ private:
     mutable std::mutex m_completionMutex;
     std::function<void(bool)> m_ownedCallback;
     std::atomic<bool> m_isAccepting{ true };
+    // RenderContext 绑定线程，也是本 service 访问 VTK 对象的唯一归属线程。
+    // 未绑定时不存在合法提交者，状态可以累积，但不能下发到 Strategy 或 VTK。
+    mutable std::mutex m_ownerMutex;
+    std::thread::id m_ownerThread;
+    bool m_hasOwnerThread = false;
+
+    bool GetIsOwnerThread() const
+    {
+        const std::lock_guard<std::mutex> lock(m_ownerMutex);
+        return m_hasOwnerThread
+            && m_ownerThread == std::this_thread::get_id();
+    }
 };
 
 VizService::Impl::Impl(
@@ -791,6 +803,17 @@ void VizService::Impl::SetRenderContext(
     vtkSmartPointer<vtkRenderWindow> win,
     vtkSmartPointer<vtkRenderer> ren)
 {
+    // 首次绑定确定 VTK 归属线程；后续只能由同一线程更新绑定，
+    // 防止外部线程通过重新注入 RenderContext 绕过提交门。
+    {
+        const std::lock_guard<std::mutex> lock(m_ownerMutex);
+        const auto currentThread = std::this_thread::get_id();
+        if (m_hasOwnerThread && m_ownerThread != currentThread) {
+            return;
+        }
+        m_ownerThread = currentThread;
+        m_hasOwnerThread = true;
+    }
     SetRenderBinding(std::move(win), std::move(ren));
     SetRendererBg();
     if (!m_stateEventSource) return;
@@ -1504,8 +1527,12 @@ void VizService::Impl::SetCursorCenter()
 // ─────────────────────────────────────────────────────────────────────
 void VizService::Impl::SendUpdates()
 {
+    if (!GetIsOwnerThread()) {
+        // 未绑定或非归属线程只可经状态入口累积 pending/dirty，不能直接触碰 VTK 或 strategy。
+        return;
+    }
     // 更新入口按固定阶段收敛 pending/current、完成回调和渲染变更；常规由主线程 Timer 驱动，
-    // 外部 reload handler 也会在调用线程同步进入，因此本函数不提供线程切换保证。
+    // 外部 reload handler 只允许发布 pending，最终提交仍由 owner Timer 消费。
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
 
@@ -1556,6 +1583,9 @@ void VizService::Impl::SendUpdates()
 
 bool VizService::Impl::SendReloadUpdate()
 {
+    if (!GetIsOwnerThread()) {
+        return false;
+    }
     SetPendingFlags(UpdateFlags::All);
     return BuildPipeline();
 }
@@ -1728,6 +1758,9 @@ void VizService::Impl::SetDataRefresh()
 // ─────────────────────────────────────────────────────────────────────
 bool VizService::Impl::BuildPipeline()
 {
+    if (!GetIsOwnerThread()) {
+        return false;
+    }
     // 这一步只处理“结构性变化后的管线重建”：选对 Strategy、喂入最新图像、重新挂接渲染器。
     // 具体材质、TF、窗宽窗位等参数同步故意留到后续增量同步阶段再做。
     // 读取最新模式快照但不清除；后续交互和导出仍需使用同一模式。

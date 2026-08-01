@@ -690,8 +690,6 @@ int GetCropFailCount()
         splitMapper ? splitMapper->GetSampleDistance() : 0.0;
     const double splitImageDistance =
         splitMapper ? splitMapper->GetImageSampleDistance() : 0.0;
-    const auto splitMapperTime =
-        splitMapper ? splitMapper->GetMTime() : 0;
     // Box/Plane 最终都通过 referenceService 写入同一通用交互轴；
     // 直接切换该轴可稳定验证 scope 与 producer 锁定，不依赖 VTK picking 偶然性。
     const InteractionSource splitDragSource{
@@ -715,13 +713,10 @@ int GetCropFailCount()
             splitMapper->GetMaximumImageSampleDistance() - 1.0)
             < 1e-12
         && std::abs(
-            splitMapper->GetImageSampleDistance()
-                - splitImageDistance) < 1e-12
-        && std::abs(
-            splitMapper->GetSampleDistance()
-                - splitSampleDistance) < 1e-12
-        && splitMapper->GetUseJittering() != 0
-        && splitMapper->GetMTime() == splitMapperTime;
+            splitMapper->GetImageSampleDistance() - 2.0) < 1e-12
+        && splitMapper->GetSampleDistance()
+            >= 2.0 * splitSampleDistance
+        && splitMapper->GetUseJittering() != 0;
     const bool isSplitDragClear = splitService
         && splitService->SetInteracting(
             splitDragSource, false);
@@ -734,8 +729,7 @@ int GetCropFailCount()
         && std::abs(
             splitMapper->GetImageSampleDistance()
                 - splitImageDistance) < 1e-12
-        && splitMapper->GetUseJittering() != 0
-        && splitMapper->GetMTime() == splitMapperTime;
+        && splitMapper->GetUseJittering() != 0;
     failureCount += GetCaseResult(
         isSplitStarted
             && contextProbe->GetFeatureActive(

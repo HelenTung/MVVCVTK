@@ -6,14 +6,30 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkInteractorStyleImage.h>
+#include <vtkInteractorStyle.h>
 #include <vtkInteractorStyleTrackballActor.h>
+#include <vtkRenderWindow.h>
 #include <array>
+#include <functional>
+#include <thread>
 #include <utility>
 
 static constexpr double kDefaultObserverPriority = 0.5;
 // 只提高本 callback 在同一次 TimerEvent 的 observer 调用顺序，不保证 Timer 与普通交互事件的跨事件先后。
 static constexpr double kTimerObserverPriority = 1.0;
 static constexpr int kTimerIntervalMs = 33;
+
+struct TimerHandler final {
+    std::thread::id ownerThread;
+    std::function<void()> callback;
+
+    void operator()() const
+    {
+        if (callback) {
+            callback();
+        }
+    }
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // 构造
@@ -40,7 +56,9 @@ StdRenderContext::~StdRenderContext()
 {
     RemoveTimer();
     RemoveObservers();
-
+    if (m_eventCallback) {
+        m_eventCallback->SetClientData(nullptr);
+    }
 }
 
 void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor)
@@ -78,38 +96,61 @@ void StdRenderContext::AttachInteractor(vtkSmartPointer<vtkRenderWindowInteracto
 
 void StdRenderContext::AttachObservers()
 {
-    if (!m_interactor || !m_eventCallback || !m_observerTags.empty()) {
+    if (!m_interactor || !m_eventCallback) {
         return;
     }
 
-    const std::array<unsigned long, 12> events = {
-        vtkCommand::MouseWheelForwardEvent,
-        vtkCommand::MouseWheelBackwardEvent,
-        vtkCommand::LeftButtonPressEvent,
-        vtkCommand::MouseMoveEvent,
-        vtkCommand::LeftButtonReleaseEvent,
-        vtkCommand::KeyPressEvent,
-        vtkCommand::KeyReleaseEvent,
-        vtkCommand::CharEvent,
-        vtkCommand::ExitEvent,
-        vtkCommand::InteractionEvent,
-        vtkCommand::RightButtonPressEvent,
-        vtkCommand::RightButtonReleaseEvent
-    };
+    if (m_observerTags.empty()) {
+        const std::array<unsigned long, 12> events = {
+            vtkCommand::MouseWheelForwardEvent,
+            vtkCommand::MouseWheelBackwardEvent,
+            vtkCommand::LeftButtonPressEvent,
+            vtkCommand::MouseMoveEvent,
+            vtkCommand::LeftButtonReleaseEvent,
+            vtkCommand::KeyPressEvent,
+            vtkCommand::KeyReleaseEvent,
+            vtkCommand::CharEvent,
+            vtkCommand::ExitEvent,
+            vtkCommand::InteractionEvent,
+            vtkCommand::RightButtonPressEvent,
+            vtkCommand::RightButtonReleaseEvent
+        };
 
-    // 所有业务关心的交互事件都先汇入同一个 callback，
-    // 后面再由 RenderContext 按工具模式和 Router 规则细分处理路径。
-    m_observerTags.reserve(events.size());
-    for (const auto eventId : events) {
-        m_observerTags.push_back(
-            m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority));
+        // 所有业务关心的 interactor 事件都先汇入同一个 callback。
+        m_observerTags.reserve(events.size());
+        for (const auto eventId : events) {
+            m_observerTags.push_back(
+                m_interactor->AddObserver(eventId, m_eventCallback, kDefaultObserverPriority));
+        }
     }
 
+    // Start/End 属于当前 vtkInteractorStyle，而不是 interactor。
+    // 绑定前按 callback 移除旧绑定，避免同一 style 被重复 Attach 时重复发布 source。
+    auto* style = m_interactor->GetInteractorStyle();
+    if (style) {
+        style->RemoveObservers(vtkCommand::StartInteractionEvent, m_eventCallback);
+        style->RemoveObservers(vtkCommand::EndInteractionEvent, m_eventCallback);
+        style->AddObserver(vtkCommand::StartInteractionEvent,
+            m_eventCallback, kDefaultObserverPriority);
+        style->AddObserver(vtkCommand::EndInteractionEvent,
+            m_eventCallback, kDefaultObserverPriority);
+    }
 }
 
 void StdRenderContext::RemoveObservers()
 {
+    if (m_interactiveService) {
+        const InteractionSource source{
+            "StdRender", "CameraStyle"
+        };
+        (void)m_interactiveService->SetInteracting(source, false);
+    }
     if (m_interactor) {
+        auto* style = m_interactor->GetInteractorStyle();
+        if (style && m_eventCallback) {
+            style->RemoveObservers(vtkCommand::StartInteractionEvent, m_eventCallback);
+            style->RemoveObservers(vtkCommand::EndInteractionEvent, m_eventCallback);
+        }
         for (const auto tag : m_observerTags) {
             if (tag != 0) {
                 m_interactor->RemoveObserver(tag);
@@ -276,6 +317,7 @@ void StdRenderContext::Start()
 void StdRenderContext::SetCameraStyle(VizMode mode)
 {
     m_currentMode = mode;
+    RemoveObservers();
 
     if (mode == VizMode::SliceTop_down
         || mode == VizMode::SliceFront_back
@@ -291,6 +333,7 @@ void StdRenderContext::SetCameraStyle(VizMode mode)
         auto style = vtkSmartPointer<vtkInteractorStyleTrackballCamera>::New();
         m_interactor->SetInteractorStyle(style);
     }
+    AttachObservers();
 
 // ─────────────────────────────────────────────────────────────────────
 // SetOrientationAxesVisible
@@ -337,8 +380,10 @@ void StdRenderContext::SetToolMode(ToolMode mode)
             vtkProp3D* mainProp = m_interactiveService->GetMainProp();
             if (mainProp) mainProp->SetPickable(true);
         }
+        RemoveObservers();
         auto style = vtkSmartPointer<vtkInteractorStyleTrackballActor>::New();
         m_interactor->SetInteractorStyle(style);
+        AttachObservers();
     }
     else {
         SetCameraStyle(m_currentMode);
@@ -368,8 +413,9 @@ void StdRenderContext::ClearInputHandler()
 
 void StdRenderContext::SetTimerHandler(std::function<void()> handler)
 {
-    m_timerHandler = std::move(handler);
-
+    m_timerHandler = TimerHandler{
+        std::this_thread::get_id(), std::move(handler)
+    };
 }
 
 void StdRenderContext::ClearTimerHandler()
@@ -454,6 +500,43 @@ void StdRenderContext::OnVTKEvent(vtkObject* caller,
 
     if (m_eventCallback) {
         m_eventCallback->AbortFlagOff();
+    }
+
+    auto* style = vtkInteractorStyle::SafeDownCast(caller);
+    const bool isStyleBoundary =
+        style
+        && (eventId == vtkCommand::StartInteractionEvent
+            || eventId == vtkCommand::EndInteractionEvent);
+    if (isStyleBoundary) {
+        // CameraStyle 只描述当前 style 的相机交互事实，不承担具体 Strategy
+        // 的质量决策；Volume mapper 是否降质由其渲染阶段自行判断。
+        if (!m_interactiveService || !m_interactor
+            || style != m_interactor->GetInteractorStyle()) {
+            return;
+        }
+
+        InteractionSource source;
+        source.ownerId = "StdRender";
+        source.channelId = "CameraStyle";
+        const bool isStart = eventId == vtkCommand::StartInteractionEvent;
+        (void)m_interactiveService->SetInteracting(source, isStart);
+        // Qt/QVTK 的 style callback 与其随后触发的默认相机 Render 由同一
+        // owner 线程同步调用；测试探针逐帧核对二者 thread id。Start 在此
+        // 只镜像 rate，不主动 Render，使默认相机首帧即可使用 preview。
+        const auto* timerHandler =
+            m_timerHandler.target<TimerHandler>();
+        const bool isOwnerThread =
+            timerHandler
+            && timerHandler->ownerThread
+                == std::this_thread::get_id();
+        if (isStart && m_renderWindow && isOwnerThread) {
+            m_renderWindow->SetDesiredUpdateRate(
+                GetRenderRate(true));
+        }
+        // End 不直接恢复静止 rate：重叠的 Crop/参考平面 source 仍可能活跃，
+        // 下一次 Timer 依据聚合状态决定 15.0 或 0.001。
+        m_interactiveService->SetDirty();
+        return;
     }
 
     const InteractionEventKind eventKind = GetEventKind(eventId);

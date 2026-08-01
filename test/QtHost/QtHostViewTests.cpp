@@ -5,6 +5,7 @@
 #include "Host/VtkAppHostSession.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "ImageProcessor.h"
+#include "CompositeStrategy.h"
 #include "IsoSurfaceStrategy.h"
 #include "VolumeStrategy.h"
 
@@ -25,6 +26,9 @@
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
 #include <vtkTable.h>
 #include <vtkTriangle.h>
 #include <vtkStreamingDemandDrivenPipeline.h>
@@ -946,6 +950,588 @@ int GetRenderContractFailCount()
             && gradient
             && gradient->GetSize() == 2,
         "Empty gradient disables the custom function before VTK creates its default") ? 0 : 1;
+
+    auto previewImage = vtkSmartPointer<vtkImageData>::New();
+    previewImage->SetDimensions(32, 32, 32);
+    previewImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(previewImage->GetScalarPointer()),
+        previewImage->GetNumberOfPoints(),
+        static_cast<unsigned char>(128));
+    auto previewMask = vtkSmartPointer<vtkImageData>::New();
+    previewMask->CopyStructure(previewImage);
+    previewMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(previewMask->GetScalarPointer()),
+        previewMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(255));
+    VolumeStrategy previewStrategy;
+    previewStrategy.SetInputData(previewImage);
+    previewStrategy.SetInputMask(previewMask);
+    RenderParams previewParams;
+    previewParams.volumeQuality = {
+        VolumeQuality::Custom, 32, 0.25, false
+    };
+    previewParams.isDenoiseOn = true;
+    previewParams.scalarRange[0] = 0.0;
+    previewParams.scalarRange[1] = 255.0;
+    previewParams.tfNodes = {
+        { 0.0, 0.0, 0.1, 0.2, 0.3 },
+        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    };
+    previewParams.gradientOpacity = {
+        { 0.0, 0.0 }, { 64.0, 0.7 }, { 255.0, 1.0 }
+    };
+    previewParams.material = {
+        0.08, 0.65, 0.65, 40.0, 0.85, true
+    };
+    previewStrategy.SetVisualState(
+        previewParams,
+        UpdateFlags::Quality
+            | UpdateFlags::Denoise
+            | UpdateFlags::TF
+            | UpdateFlags::GradientOpacity
+            | UpdateFlags::Material);
+    auto* previewVolume = vtkVolume::SafeDownCast(
+        previewStrategy.GetMainProp());
+    auto* previewMapper = previewVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            previewVolume->GetMapper())
+        : nullptr;
+    auto previewRenderer = vtkSmartPointer<vtkRenderer>::New();
+    auto previewWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    previewWindow->SetOffScreenRendering(1);
+    previewWindow->AddRenderer(previewRenderer);
+    previewStrategy.AttachRenderer(previewRenderer);
+    if (previewVolume) {
+        previewRenderer->AddVolume(previewVolume);
+    }
+    // 首次 Render 会让 VTK producer 完成初始化；预热后再保存 MTime，
+    // 避免把管线初始化误判为交互预览重建。
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewWindow->Render();
+    const int stillAuto = previewMapper
+        ? previewMapper->GetAutoAdjustSampleDistances() : -1;
+    const double stillImage = previewMapper
+        ? previewMapper->GetImageSampleDistance() : 0.0;
+    const double stillMinImage = previewMapper
+        ? previewMapper->GetMinimumImageSampleDistance() : 0.0;
+    const double stillMaxImage = previewMapper
+        ? previewMapper->GetMaximumImageSampleDistance() : 0.0;
+    const double stillRay = previewMapper
+        ? previewMapper->GetSampleDistance() : 0.0;
+    const int stillJitter = previewMapper
+        ? previewMapper->GetUseJittering() : -1;
+    auto* previewInput = previewMapper
+        ? previewMapper->GetInputConnection(0, 0) : nullptr;
+    auto* previewMaskInput = previewMapper
+        ? previewMapper->GetMaskInput() : nullptr;
+    const vtkMTimeType previewProducerTime =
+        previewInput && previewInput->GetProducer()
+            ? previewInput->GetProducer()->GetMTime() : 0;
+    const vtkMTimeType previewMaskTime =
+        previewMaskInput ? previewMaskInput->GetMTime() : 0;
+    auto* previewProperty = previewVolume
+        ? previewVolume->GetProperty() : nullptr;
+    auto* previewColor = previewProperty
+        ? previewProperty->GetRGBTransferFunction() : nullptr;
+    auto* previewOpacity = previewProperty
+        ? previewProperty->GetScalarOpacity() : nullptr;
+    auto* previewGradient = previewProperty
+        ? previewProperty->GetGradientOpacity() : nullptr;
+    const vtkMTimeType previewColorTime =
+        previewColor ? previewColor->GetMTime() : 0;
+    const vtkMTimeType previewOpacityTime =
+        previewOpacity ? previewOpacity->GetMTime() : 0;
+    const vtkMTimeType previewGradientTime =
+        previewGradient ? previewGradient->GetMTime() : 0;
+    const vtkMTimeType previewPropertyTime =
+        previewProperty ? previewProperty->GetMTime() : 0;
+    const vtkIdType previewMemoryBytes = previewMapper
+        ? previewMapper->GetMaxMemoryInBytes() : 0;
+    const double previewMemoryFraction = previewMapper
+        ? previewMapper->GetMaxMemoryFraction() : 0.0;
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
+    previewWindow->Render();
+    const bool isInteractiveMapperQuality =
+        previewMapper
+        && std::abs(previewMapper->GetImageSampleDistance() - 2.0)
+            < 1e-12
+        && previewMapper->GetAutoAdjustSampleDistances() == 0
+        && std::abs(
+            previewMapper->GetMinimumImageSampleDistance()
+                - stillMinImage) < 1e-12
+        && std::abs(
+            previewMapper->GetMaximumImageSampleDistance()
+                - stillMaxImage) < 1e-12
+        && previewMapper->GetSampleDistance()
+            >= 2.0 * stillRay
+        && previewMapper->GetUseJittering() == stillJitter
+        && previewMapper->GetInputConnection(0, 0) == previewInput
+        && previewMapper->GetMaskInput() == previewMaskInput
+        && previewProperty
+        && previewProperty->GetRGBTransferFunction()
+            == previewColor
+        && previewProperty->GetScalarOpacity()
+            == previewOpacity
+        && previewProperty->GetGradientOpacity()
+            == previewGradient
+        && previewProperty->GetMTime() == previewPropertyTime
+        && previewMapper->GetMaxMemoryInBytes()
+            == previewMemoryBytes
+        && std::abs(
+            previewMapper->GetMaxMemoryFraction()
+                - previewMemoryFraction) < 1e-12;
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewWindow->Render();
+    const bool isStillMapperQuality =
+        previewMapper
+        && previewMapper->GetAutoAdjustSampleDistances() == stillAuto
+        && std::abs(
+            previewMapper->GetImageSampleDistance()
+                - stillImage) < 1e-12
+        && std::abs(
+            previewMapper->GetMinimumImageSampleDistance()
+                - stillMinImage) < 1e-12
+        && std::abs(
+            previewMapper->GetMaximumImageSampleDistance()
+                - stillMaxImage) < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance()
+                - stillRay) < 1e-12
+        && previewMapper->GetUseJittering() == stillJitter
+        && previewMapper->GetInputConnection(0, 0) == previewInput
+        && previewMapper->GetMaskInput() == previewMaskInput
+        && previewInput
+        && previewInput->GetProducer()
+        && previewInput->GetProducer()->GetMTime()
+            == previewProducerTime
+        && previewMaskInput
+        && previewMaskInput->GetMTime() == previewMaskTime
+        && previewColor
+        && previewColor->GetMTime() == previewColorTime
+        && previewOpacity
+        && previewOpacity->GetMTime() == previewOpacityTime
+        && previewGradient
+        && previewGradient->GetMTime() == previewGradientTime
+        && previewProperty
+        && previewProperty->GetMTime() == previewPropertyTime
+        && previewMapper->GetMaxMemoryInBytes()
+            == previewMemoryBytes
+        && std::abs(
+            previewMapper->GetMaxMemoryFraction()
+                - previewMemoryFraction) < 1e-12;
+
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
+    previewWindow->Render();
+    const auto* previewCustomInput = previewMapper
+        ? previewMapper->GetInputConnection(0, 0) : nullptr;
+    auto* rollbackColor = previewProperty
+        ? previewProperty->GetRGBTransferFunction() : nullptr;
+    auto* rollbackOpacity = previewProperty
+        ? previewProperty->GetScalarOpacity() : nullptr;
+    auto* rollbackGradient = previewProperty
+        ? previewProperty->GetGradientOpacity() : nullptr;
+    const vtkMTimeType rollbackPropertyTime =
+        previewProperty ? previewProperty->GetMTime() : 0;
+    RenderParams invalidPreviewParams = previewParams;
+    invalidPreviewParams.volumeQuality.maxDimension = 0;
+    invalidPreviewParams.volumeQuality.sampleDistance = -1.0;
+    invalidPreviewParams.tfNodes = {
+        { 0.0, 0.0, 1.0, 0.0, 0.0 },
+        { 1.0, 1.0, 0.0, 1.0, 0.0 }
+    };
+    invalidPreviewParams.gradientOpacity = {
+        { 0.0, 1.0 }, { 255.0, 0.0 }
+    };
+    invalidPreviewParams.material = {
+        0.4, 0.4, 0.4, 4.0, 0.4, false
+    };
+    previewStrategy.SetVisualState(
+        invalidPreviewParams,
+        UpdateFlags::Quality
+            | UpdateFlags::TF
+            | UpdateFlags::GradientOpacity
+            | UpdateFlags::Material);
+    const bool isInvalidPreviewRolledBack =
+        previewMapper
+        && previewMapper->GetInputConnection(0, 0)
+            == previewCustomInput
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 2.0)
+            < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance() - 0.5)
+            < 1e-12
+        && previewMapper->GetUseJittering() == 0
+        && previewProperty
+        && previewProperty->GetRGBTransferFunction()
+            == rollbackColor
+        && previewProperty->GetScalarOpacity()
+            == rollbackOpacity
+        && previewProperty->GetGradientOpacity()
+            == rollbackGradient
+        && previewProperty->GetMTime()
+            == rollbackPropertyTime;
+    if (!isInvalidPreviewRolledBack) {
+        std::cerr
+            << "DIAG_VOLUME_ROLLBACK:"
+            << " input="
+            << (previewMapper
+                && previewMapper->GetInputConnection(0, 0)
+                    == previewCustomInput)
+            << " image="
+            << (previewMapper
+                ? previewMapper->GetImageSampleDistance()
+                : -1.0)
+            << " ray="
+            << (previewMapper
+                ? previewMapper->GetSampleDistance()
+                : -1.0)
+            << " jitter="
+            << (previewMapper
+                ? previewMapper->GetUseJittering() : -1)
+            << " color="
+            << (previewProperty
+                && previewProperty->GetRGBTransferFunction()
+                    == rollbackColor)
+            << " opacity="
+            << (previewProperty
+                && previewProperty->GetScalarOpacity()
+                    == rollbackOpacity)
+            << " gradient="
+            << (previewProperty
+                && previewProperty->GetGradientOpacity()
+                    == rollbackGradient)
+            << " property_time="
+            << (previewProperty
+                && previewProperty->GetMTime()
+                    == rollbackPropertyTime)
+            << '\n';
+    }
+
+    previewParams.isFeatureActive = true;
+    previewStrategy.SetVisualState(
+        previewParams, UpdateFlags::Quality);
+    const auto* featureInput = previewMapper
+        ? previewMapper->GetInputConnection(0, 0) : nullptr;
+    const bool isFeaturePreview =
+        previewMapper
+        && featureInput
+        && featureInput != previewCustomInput
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 2.0)
+            < 1e-12;
+    previewParams.isFeatureActive = false;
+    previewStrategy.SetVisualState(
+        previewParams, UpdateFlags::Quality);
+    const bool isFeaturePreviewRestored =
+        previewMapper
+        && previewMapper->GetInputConnection(0, 0)
+            == previewCustomInput
+        && previewMapper->GetMaskInput() == previewMaskInput
+        && std::abs(
+            previewMapper->GetSampleDistance() - 0.5)
+            < 1e-12
+        && previewMapper->GetUseJittering() == 0;
+
+    previewParams.tfNodes = {
+        { 0.0, 0.0, 0.75, 0.75, 0.75 },
+        { 1.0, 1.0, 0.75, 0.75, 0.75 }
+    };
+    previewParams.gradientOpacity = {
+        { 0.0, 0.0 }, { 255.0, 0.9 }
+    };
+    previewParams.material = {
+        0.25, 0.65, 0.10, 8.0, 0.8, false
+    };
+    previewStrategy.SetVisualState(
+        previewParams,
+        UpdateFlags::TF
+            | UpdateFlags::GradientOpacity
+            | UpdateFlags::Material);
+    auto* updatedColor = previewProperty
+        ? previewProperty->GetRGBTransferFunction() : nullptr;
+    auto* updatedOpacity = previewProperty
+        ? previewProperty->GetScalarOpacity() : nullptr;
+    auto* updatedGradient = previewProperty
+        ? previewProperty->GetGradientOpacity() : nullptr;
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewWindow->Render();
+    const bool isVisualStateRestored =
+        previewMapper
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 1.0)
+            < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance() - 0.25)
+            < 1e-12
+        && previewMapper->GetUseJittering() == 0
+        && previewMapper->GetInputConnection(0, 0)
+            == previewCustomInput
+        && previewMapper->GetMaskInput() == previewMaskInput
+        && previewProperty
+        && previewProperty->GetRGBTransferFunction()
+            == updatedColor
+        && previewProperty->GetScalarOpacity()
+            == updatedOpacity
+        && previewProperty->GetGradientOpacity()
+            == updatedGradient
+        && previewProperty->GetShade() == 0
+        && std::abs(previewProperty->GetAmbient() - 0.25)
+            < 1e-12
+        && std::abs(previewProperty->GetDiffuse() - 0.65)
+            < 1e-12
+        && std::abs(previewProperty->GetSpecular() - 0.10)
+            < 1e-12
+        && std::abs(
+            previewProperty->GetSpecularPower() - 8.0)
+            < 1e-12;
+
+    previewParams.volumeQuality = {
+        VolumeQuality::Quality, 766, 1.0, true
+    };
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewStrategy.SetVisualState(
+        previewParams, UpdateFlags::Quality);
+    previewWindow->Render();
+    vtkSmartPointer<vtkAlgorithmOutput> qualityPreviewInput;
+    if (previewMapper) {
+        qualityPreviewInput =
+            previewMapper->GetInputConnection(0, 0);
+    }
+    const double qualityStillRay = previewMapper
+        ? previewMapper->GetSampleDistance() : 0.0;
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
+    previewWindow->Render();
+    const bool isQualityPreview =
+        previewMapper
+        && qualityPreviewInput.GetPointer()
+        && previewMapper->GetInputConnection(0, 0)
+            == qualityPreviewInput.GetPointer()
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 2.0)
+            < 1e-12
+        && previewMapper->GetSampleDistance()
+            >= 2.0 * qualityStillRay;
+    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewWindow->Render();
+    const bool isQualityRestored =
+        previewMapper
+        && previewMapper->GetInputConnection(0, 0)
+            == qualityPreviewInput.GetPointer()
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 1.0)
+            < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance() - qualityStillRay)
+            < 1e-12;
+
+    previewParams.volumeQuality = {
+        VolumeQuality::Custom, 32, 0.25, false
+    };
+    const std::array<MaterialParams, 3> previewMaterials{{
+        { 0.25, 0.65, 0.10, 8.0, 0.80, false },
+        { 0.10, 0.85, 0.25, 20.0, 1.0, false },
+        { 0.08, 0.65, 0.65, 40.0, 1.0, true }
+    }};
+    bool areMaterialsStable = true;
+    for (const auto& material : previewMaterials) {
+        previewParams.material = material;
+        previewStrategy.SetVisualState(
+            previewParams,
+            UpdateFlags::Quality | UpdateFlags::Material);
+        previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
+        previewWindow->Render();
+        const bool isPreviewStable =
+            previewMapper
+            && previewProperty
+            && std::abs(
+                previewMapper->GetImageSampleDistance() - 2.0)
+                < 1e-12
+            && std::abs(
+                previewMapper->GetSampleDistance() - 0.5)
+                < 1e-12
+            && previewProperty->GetShade()
+                == static_cast<int>(material.isShadeOn)
+            && std::abs(
+                previewProperty->GetAmbient() - material.ambient)
+                < 1e-12
+            && std::abs(
+                previewProperty->GetDiffuse() - material.diffuse)
+                < 1e-12
+            && std::abs(
+                previewProperty->GetSpecular() - material.specular)
+                < 1e-12
+            && std::abs(
+                previewProperty->GetSpecularPower()
+                    - material.specularPower)
+                < 1e-12;
+        previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+        previewWindow->Render();
+        const bool isStillStable =
+            previewMapper
+            && std::abs(
+                previewMapper->GetImageSampleDistance() - 1.0)
+                < 1e-12
+            && std::abs(
+                previewMapper->GetSampleDistance() - 0.25)
+                < 1e-12;
+        areMaterialsStable =
+            isPreviewStable && isStillStable
+            && areMaterialsStable;
+    }
+
+    CompositeStrategy compositeStrategy(
+        VizMode::CompositeVolume);
+    compositeStrategy.SetInputData(previewImage);
+    compositeStrategy.SetInputMask(previewMask);
+    compositeStrategy.SetVisualState(
+        previewParams, UpdateFlags::All);
+    auto compositeRenderer =
+        vtkSmartPointer<vtkRenderer>::New();
+    auto compositeWindow =
+        vtkSmartPointer<vtkRenderWindow>::New();
+    compositeWindow->SetOffScreenRendering(1);
+    compositeWindow->AddRenderer(compositeRenderer);
+    compositeStrategy.AttachRenderer(compositeRenderer);
+    compositeWindow->SetDesiredUpdateRate(
+        GetRenderRate(false));
+    compositeWindow->Render();
+    auto* compositeVolume = vtkVolume::SafeDownCast(
+        compositeStrategy.GetMainProp());
+    auto* compositeMapper = compositeVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            compositeVolume->GetMapper())
+        : nullptr;
+    std::vector<vtkProp*> referenceProps;
+    std::vector<vtkMTimeType> referenceTimes;
+    std::vector<int> referenceVisible;
+    auto* viewProps = compositeRenderer->GetViewProps();
+    if (viewProps) {
+        viewProps->InitTraversal();
+        while (auto* prop = viewProps->GetNextProp()) {
+            if (prop != compositeVolume) {
+                referenceProps.push_back(prop);
+                referenceTimes.push_back(prop->GetMTime());
+                referenceVisible.push_back(
+                    prop->GetVisibility());
+            }
+        }
+    }
+    compositeWindow->SetDesiredUpdateRate(
+        GetRenderRate(true));
+    compositeWindow->Render();
+    bool areReferencePropsStable =
+        !referenceProps.empty()
+        && referenceProps.size()
+            == referenceTimes.size();
+    for (std::size_t index = 0;
+        areReferencePropsStable
+            && index < referenceProps.size();
+        ++index) {
+        areReferencePropsStable =
+            referenceProps[index]
+            && referenceProps[index]->GetMTime()
+                == referenceTimes[index]
+            && referenceProps[index]->GetVisibility()
+                == referenceVisible[index];
+    }
+    const bool isCompositePreview =
+        compositeMapper
+        && std::abs(
+            compositeMapper->GetImageSampleDistance()
+                - 2.0) < 1e-12
+        && std::abs(
+            compositeMapper->GetSampleDistance()
+                - 0.5) < 1e-12
+        && areReferencePropsStable;
+    compositeWindow->SetDesiredUpdateRate(
+        GetRenderRate(false));
+    compositeWindow->Render();
+    const bool isCompositeRestored =
+        compositeMapper
+        && std::abs(
+            compositeMapper->GetImageSampleDistance()
+                - 1.0) < 1e-12
+        && std::abs(
+            compositeMapper->GetSampleDistance()
+                - 0.25) < 1e-12;
+    compositeStrategy.DetachRenderer(
+        compositeRenderer);
+    if (!(isInteractiveMapperQuality
+        && isStillMapperQuality
+        && isInvalidPreviewRolledBack
+        && isFeaturePreview
+        && isFeaturePreviewRestored
+        && isVisualStateRestored
+        && isQualityPreview
+        && isQualityRestored
+        && areMaterialsStable
+        && isCompositePreview
+        && isCompositeRestored)) {
+        std::cerr
+            << "DIAG_VOLUME_PREVIEW:"
+            << " interactive=" << isInteractiveMapperQuality
+            << " still=" << isStillMapperQuality
+            << " rollback=" << isInvalidPreviewRolledBack
+            << " rollback_input="
+            << (previewMapper
+                && previewMapper->GetInputConnection(0, 0)
+                    == previewCustomInput)
+            << " rollback_image="
+            << (previewMapper
+                ? previewMapper->GetImageSampleDistance()
+                : -1.0)
+            << " rollback_ray="
+            << (previewMapper
+                ? previewMapper->GetSampleDistance()
+                : -1.0)
+            << " rollback_jitter="
+            << (previewMapper
+                ? previewMapper->GetUseJittering() : -1)
+            << " rollback_color="
+            << (previewProperty
+                && previewProperty->GetRGBTransferFunction()
+                    == previewColor)
+            << " rollback_opacity="
+            << (previewProperty
+                && previewProperty->GetScalarOpacity()
+                    == previewOpacity)
+            << " rollback_gradient="
+            << (previewProperty
+                && previewProperty->GetGradientOpacity()
+                    == previewGradient)
+            << " rollback_property_time="
+            << (previewProperty
+                && previewProperty->GetMTime()
+                    == previewPropertyTime)
+            << " feature=" << isFeaturePreview
+        << " feature_restore="
+        << isFeaturePreviewRestored
+        << " visual_restore="
+        << isVisualStateRestored
+        << " quality=" << isQualityPreview
+        << " quality_restore=" << isQualityRestored
+        << " materials=" << areMaterialsStable
+        << " composite=" << isCompositePreview
+            << " composite_restore="
+            << isCompositeRestored
+            << '\n';
+    }
+    failureCount += GetCaseResult(
+        isInteractiveMapperQuality
+            && isStillMapperQuality
+            && isInvalidPreviewRolledBack
+            && isFeaturePreview
+            && isFeaturePreviewRestored
+            && isVisualStateRestored
+            && isQualityPreview
+            && isQualityRestored
+            && areMaterialsStable
+            && isCompositePreview
+            && isCompositeRestored,
+        "Volume mapper switches Quality/Custom/material sampling and restores baseline") ? 0 : 1;
 
     params.gradientOpacity = {
         { 5.0, 0.2 }, { 5.0, 0.8 }, { 10.0, 1.0 }
