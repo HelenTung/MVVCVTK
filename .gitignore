@@ -380,8 +380,8 @@ Local.props
 graphify-out/
 **/graphify-out/
 
-/md/
-*.md
+# Ignore all Markdown documents repository-wide.
+*.[mM][dD]
 *.patch
 *.json
 
