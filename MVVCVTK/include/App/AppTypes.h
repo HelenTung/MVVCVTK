@@ -79,6 +79,20 @@ struct TFNode {
     double r, g, b;  // 归一化 RGB 分量，顺序为 [r, g, b]，各分量范围 [0.0, 1.0]
 };
 
+// 数据导出接纳时冻结的完整参数；worker 只消费本值对象，不再读取后续视觉状态。
+struct DataExportParams final {
+    std::string extension;
+    double isoValue = 0.0;
+    std::array<double, 16> modelToWorld = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    std::array<double, 2> scalarRange = { 0.0, 0.0 };
+    std::vector<TFNode> tfNodes;
+};
+
 // --- 材质参数 ---
 struct MaterialParams {
     // 无量纲光照系数，直接传给 VTK 材质；常规有效范围为 [0.0, 1.0]。

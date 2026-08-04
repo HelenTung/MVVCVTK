@@ -3,7 +3,7 @@
 本文面向 Qt Widgets 上位机调用方，按“接口、说明、适用场景、参数、返回值、调用示例”
 逐项说明公开 Host API。
 
-当前手册已按 2026-07-30 的 `5988505f7e4c` 源码复核。仓库使用 Visual Studio
+当前手册已按 2026-08-01 的 `83f9160ab34e` 源码复核。仓库使用 Visual Studio
 `.vcxproj` / MSBuild（无 CMake/CTest 入口）、VTK 9.4，并由 `QtHostSmoke.cpp` 强制
 编译期和运行期 Qt 均为 5.14.2。
 
@@ -531,7 +531,9 @@ const bool isAccepted = session->SendRequest( // 启动异步 buffer 重载。
 | `visibility` | `request.visibility = visibility;` | 每个 optional 只修改一个共享显隐位 |
 | `isAxesVisible` | `request.isAxesVisible = false;` | 只作用目标 context |
 
-Request 会先整体校验；任一已提供字段非法时返回 `false`，不产生部分写入。
+Request 会先整体校验；任一已提供字段非法时在 setter 执行前返回 `false`，不产生部分写入。
+候选合法后会按顺序调用 setter；若前序 setter 已成功而后续可失败 setter 失败，前序状态
+可能保留，当前接口不承诺运行时原子回滚。
 
 **返回值：**
 
@@ -567,7 +569,7 @@ const bool isAccepted = // 保存整个 patch 的同步结果。
 **设置 Volume 质量、gradient opacity 和 denoise：**
 
 ```cpp
-HostViewSetRequest request; // 创建一个原子 View patch。
+HostViewSetRequest request; // 创建一个先统一校验、再顺序提交的 View patch。
 request.targetView = primary3D; // 指定需要修改的 3D 视图。
 request.mode = HostRenderMode::Volume; // 在同一 patch 中先给出合法候选 mode。
 request.volumeQuality = HostVolumeQualityParams{ // 设置自定义体渲染质量。
@@ -582,7 +584,7 @@ request.gradientOpacity = // 设置梯度不透明度节点。
         { 120.0, 1.0 } // 高梯度映射为不透明。
     };
 request.isDenoiseOn = true; // 在同一 Volume patch 中启用去噪。
-const bool isAccepted = // 保存原子 patch 的同步结果。
+const bool isAccepted = // 保存整笔请求的同步结果。
     session->SendRequest(std::move(request)); // 任一字段非法时整笔请求失败。
 ```
 
@@ -713,8 +715,12 @@ const bool isAccepted = session->SendRequest( // 启动异步导出任务。
     onHostComplete); // 接收最终文件写出结果。
 ```
 
-Data 层生成 `<dimX>x<dimY>x<dimZ>_transform.ext`。PLY/STL/OBJ 不携带界面材质、
-传递函数或纹理，Request 也没有颜色参数；屏幕预览颜色不是网格文件的颜色契约。
+Data 层生成 `<dimX>x<dimY>x<dimZ>_transform.ext`。任务接纳时会一起冻结 image/mask、
+iso、model-to-world、scalar range 与 TF。PLY 在真实输出网格的 point scalar 上使用该批
+scalar range/TF 写入三分量 `uchar RGB`；TF 为空时使用数据域灰阶。点、三角面、world
+坐标、法线与 RGB 均来自同一输出网格。RGB 不读取界面材质、灯光、纹理或 framebuffer，
+因此屏幕光照明暗不是文件颜色。OBJ 只承诺几何与法线，STL 只承诺几何；两者不伪造点
+RGB。当前 Host/App/Data 链没有 PDF 导出实现。
 
 ### 3.8 `HostSliceExportRequest`
 

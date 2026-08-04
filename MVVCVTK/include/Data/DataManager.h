@@ -42,9 +42,7 @@ public:
     bool ExportData(
         const ImageSnapshot& imageSnapshot,
         const std::string& outputDir,
-        const std::string& extension,
-        double isoValue,
-        const std::array<double, 16>& modelToWorldMatrix) override;
+        const DataExportParams& params) override;
     // dirPath 为 UTF-8 路径。
     bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) override;
 };

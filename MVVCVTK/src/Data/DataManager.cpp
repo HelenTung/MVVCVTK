@@ -1,8 +1,11 @@
 #include "DataManager.h"
 #include "Platform/Path.h"
+#include <vtkDataArray.h>
 #include <vtkFloatArray.h>
 #include <vtkPointData.h>
+#include <vtkUnsignedCharArray.h>
 #include <vtkClipPolyData.h>
+#include <vtkColorTransferFunction.h>
 #include <vtkErrorCode.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkImplicitVolume.h>
@@ -31,6 +34,7 @@
 #include <vtkImageImport.h>
 #include <vtkImageAppend.h>
 #include <vtkMatrix3x3.h>
+#include <vtkMatrix4x4.h>
 #include <cstring>
 #include "MemMappedFile.h"
 
@@ -55,9 +59,12 @@ public:
     static bool ExportMesh(
         const ImageSnapshot& imageSnapshot,
         const std::string& outputDir,
-        const std::string& extension,
-        double isoValue,
-        const std::array<double, 16>& modelToWorldMatrix);
+        const DataExportParams& params);
+    static bool BuildMeshColors(
+        vtkPolyData* mesh,
+        const DataExportParams& params);
+    static bool GetIsAffine(
+        const std::array<double, 16>& modelToWorld);
     static std::filesystem::path BuildExportPath(
         const std::string& outputDir,
         const int dimensions[3],
@@ -697,17 +704,23 @@ bool BaseDataManager::ExportSlices(
 bool BaseDataManager::ExportData(
     const ImageSnapshot& imageSnapshot,
     const std::string& outputDir,
-    const std::string& extension,
-    double isoValue,
-    const std::array<double, 16>& modelToWorldMatrix)
+    const DataExportParams& params)
 {
     if (!imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0
-        || outputDir.empty()) {
+        || outputDir.empty()
+        || !Impl::GetMaskValid(
+            imageSnapshot->image,
+            imageSnapshot->validityMask)) {
         return false;
     }
 
-    std::string normalizedExtension = extension;
+    // RAW 与网格必须解释同一个数值可逆 affine model-to-world；非法矩阵不得先创建输出目录。
+    if (!Impl::GetIsAffine(params.modelToWorld)) {
+        return false;
+    }
+
+    std::string normalizedExtension = params.extension;
     std::transform(
         normalizedExtension.begin(),
         normalizedExtension.end(),
@@ -740,12 +753,62 @@ bool BaseDataManager::ExportData(
     if (normalizedExtension == ".raw") {
         return Impl::ExportRaw(
             imageSnapshot, outputDir,
-            modelToWorldMatrix);
+            params.modelToWorld);
     }
+    DataExportParams normalizedParams = params;
+    normalizedParams.extension = std::move(
+        normalizedExtension);
     return Impl::ExportMesh(
         imageSnapshot, outputDir,
-        normalizedExtension, isoValue,
-        modelToWorldMatrix);
+        normalizedParams);
+}
+
+bool BaseDataManager::Impl::GetIsAffine(
+    const std::array<double, 16>& modelToWorld)
+{
+    constexpr double affineTolerance = 1e-12;
+    if (std::any_of(
+            modelToWorld.begin(),
+            modelToWorld.end(),
+            [](double value) {
+                return !std::isfinite(value);
+            })
+        || std::abs(modelToWorld[12]) > affineTolerance
+        || std::abs(modelToWorld[13]) > affineTolerance
+        || std::abs(modelToWorld[14]) > affineTolerance
+        || std::abs(modelToWorld[15] - 1.0)
+            > affineTolerance) {
+        return false;
+    }
+
+    // 行范数乘积给出 determinant 的自然尺度；相对判定不会误拒绝合法的小尺度 affine。
+    std::array<double, 3> rowNorms = {};
+    for (int row = 0; row < 3; ++row) {
+        const int offset = row * 4;
+        rowNorms[static_cast<std::size_t>(row)] =
+            std::hypot(
+                std::hypot(
+                    modelToWorld[offset],
+                    modelToWorld[offset + 1]),
+                modelToWorld[offset + 2]);
+    }
+    const double determinantScale =
+        rowNorms[0] * rowNorms[1] * rowNorms[2];
+    if (!std::isfinite(determinantScale)
+        || determinantScale == 0.0) {
+        return false;
+    }
+
+    auto modelMatrix =
+        vtkSmartPointer<vtkMatrix4x4>::New();
+    modelMatrix->DeepCopy(modelToWorld.data());
+    const double determinant =
+        std::abs(modelMatrix->Determinant());
+    constexpr double determinantFactor = 8.0;
+    return std::isfinite(determinant)
+        && determinant > determinantFactor
+            * std::numeric_limits<double>::epsilon()
+            * determinantScale;
 }
 
 std::filesystem::path
@@ -771,13 +834,7 @@ bool BaseDataManager::Impl::ExportRaw(
     // RAW 导出路径：固定接纳时的 immutable snapshot -> 逆变换重采样 -> 自动裁剪新 bounds ->
     // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
     if (!imageSnapshot || !imageSnapshot->image
-        || outputDir.empty()
-        || std::any_of(
-            modelToWorldMatrix.begin(),
-            modelToWorldMatrix.end(),
-            [](double value) {
-                return !std::isfinite(value);
-            })) {
+        || outputDir.empty()) {
         return false;
     }
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
@@ -787,13 +844,6 @@ bool BaseDataManager::Impl::ExportRaw(
     //  VTK 逆变换矩阵
     auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
     worldToModelMatrix->DeepCopy(modelToWorldMatrix.data());
-    const double determinant =
-        worldToModelMatrix->Determinant();
-    if (!std::isfinite(determinant)
-        || std::abs(determinant)
-            <= std::numeric_limits<double>::epsilon()) {
-        return false;
-    }
     worldToModelMatrix->Invert();
 
     auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
@@ -887,20 +937,12 @@ bool BaseDataManager::Impl::ExportRaw(
 bool BaseDataManager::Impl::ExportMesh(
     const ImageSnapshot& imageSnapshot,
     const std::string& outputDir,
-    const std::string& extension,
-    double isoValue,
-    const std::array<double, 16>& modelToWorldMatrix)
+    const DataExportParams& params)
 {
     if (!imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0
         || outputDir.empty()
-        || !std::isfinite(isoValue)
-        || std::any_of(
-            modelToWorldMatrix.begin(),
-            modelToWorldMatrix.end(),
-            [](double value) {
-                return !std::isfinite(value);
-            })) {
+        || !std::isfinite(params.isoValue)) {
         return false;
     }
 
@@ -911,7 +953,7 @@ bool BaseDataManager::Impl::ExportMesh(
     auto isoFilter =
         vtkSmartPointer<vtkFlyingEdges3D>::New();
     isoFilter->SetInputData(imageCopy);
-    isoFilter->SetValue(0, isoValue);
+    isoFilter->SetValue(0, params.isoValue);
     isoFilter->ComputeNormalsOn();
     isoFilter->ComputeGradientsOff();
 
@@ -943,7 +985,7 @@ bool BaseDataManager::Impl::ExportMesh(
     auto modelMatrix =
         vtkSmartPointer<vtkMatrix4x4>::New();
     modelMatrix->DeepCopy(
-        modelToWorldMatrix.data());
+        params.modelToWorld.data());
     auto modelToWorld =
         vtkSmartPointer<vtkTransform>::New();
     modelToWorld->SetMatrix(modelMatrix);
@@ -978,20 +1020,25 @@ bool BaseDataManager::Impl::ExportMesh(
     int sourceDims[3] = {};
     imageCopy->GetDimensions(sourceDims);
     const auto outputPath = BuildExportPath(
-        outputDir, sourceDims, extension);
+        outputDir, sourceDims, params.extension);
     const std::string vtkFileName =
         PlatformPath::GetUtf8Path(outputPath);
     int errorCode = vtkErrorCode::NoError;
-    if (extension == ".ply") {
+    if (params.extension == ".ply") {
+        if (!BuildMeshColors(outputMesh, params)) {
+            return false;
+        }
         auto writer =
             vtkSmartPointer<vtkPLYWriter>::New();
         writer->SetFileName(vtkFileName.c_str());
         writer->SetFileTypeToBinary();
+        writer->SetArrayName("RGB");
+        writer->SetColorModeToDefault();
         writer->SetInputData(outputMesh);
         writer->Write();
         errorCode = writer->GetErrorCode();
     }
-    else if (extension == ".stl") {
+    else if (params.extension == ".stl") {
         auto writer =
             vtkSmartPointer<vtkSTLWriter>::New();
         writer->SetFileName(vtkFileName.c_str());
@@ -1000,7 +1047,7 @@ bool BaseDataManager::Impl::ExportMesh(
         writer->Write();
         errorCode = writer->GetErrorCode();
     }
-    else if (extension == ".obj") {
+    else if (params.extension == ".obj") {
         auto writer =
             vtkSmartPointer<vtkOBJWriter>::New();
         writer->SetFileName(vtkFileName.c_str());
@@ -1018,6 +1065,97 @@ bool BaseDataManager::Impl::ExportMesh(
             outputPath, fileError);
     return errorCode == vtkErrorCode::NoError
         && !fileError && fileSize > 0;
+}
+
+bool BaseDataManager::Impl::BuildMeshColors(
+    vtkPolyData* mesh,
+    const DataExportParams& params)
+{
+    if (!mesh || !mesh->GetPointData()
+        || mesh->GetNumberOfPoints() == 0
+        || !std::isfinite(params.scalarRange[0])
+        || !std::isfinite(params.scalarRange[1])
+        || params.scalarRange[1] < params.scalarRange[0]) {
+        return false;
+    }
+
+    // 1. TF 节点与 scalar range 来自同一次任务接纳；PLY 颜色不读取 renderer 或 framebuffer。
+    auto colorMap =
+        vtkSmartPointer<vtkColorTransferFunction>::New();
+    double previousPosition = -1.0;
+    for (const auto& node : params.tfNodes) {
+        if (!std::isfinite(node.position)
+            || !std::isfinite(node.r)
+            || !std::isfinite(node.g)
+            || !std::isfinite(node.b)
+            || !std::isfinite(node.opacity)
+            || node.position < 0.0 || node.position > 1.0
+            || node.position < previousPosition
+            || node.r < 0.0 || node.r > 1.0
+            || node.g < 0.0 || node.g > 1.0
+            || node.b < 0.0 || node.b > 1.0
+            || node.opacity < 0.0 || node.opacity > 1.0) {
+            return false;
+        }
+        const double scalar = params.scalarRange[0]
+            + node.position
+                * (params.scalarRange[1]
+                    - params.scalarRange[0]);
+        colorMap->AddRGBPoint(
+            scalar, node.r, node.g, node.b);
+        previousPosition = node.position;
+    }
+    if (params.tfNodes.empty()) {
+        // 没有显式 TF 时使用数据域灰阶；常量域使用白色，避免生成未定义颜色。
+        if (params.scalarRange[1] > params.scalarRange[0]) {
+            colorMap->AddRGBPoint(
+                params.scalarRange[0], 0.0, 0.0, 0.0);
+            colorMap->AddRGBPoint(
+                params.scalarRange[1], 1.0, 1.0, 1.0);
+        }
+        else {
+            colorMap->AddRGBPoint(
+                params.scalarRange[0], 1.0, 1.0, 1.0);
+        }
+    }
+
+    // 2. 颜色必须逐点来自最终网格标量；缺失 point scalar 时拒绝，避免静默退化为统一 iso 颜色。
+    vtkDataArray* pointScalars =
+        mesh->GetPointData()->GetScalars();
+    if (!pointScalars
+        || pointScalars->GetNumberOfComponents() < 1
+        || pointScalars->GetNumberOfTuples()
+            != mesh->GetNumberOfPoints()) {
+        return false;
+    }
+    auto colors =
+        vtkSmartPointer<vtkUnsignedCharArray>::New();
+    colors->SetName("RGB");
+    colors->SetNumberOfComponents(3);
+    colors->SetNumberOfTuples(
+        mesh->GetNumberOfPoints());
+    for (vtkIdType pointId = 0;
+        pointId < mesh->GetNumberOfPoints(); ++pointId) {
+        const double scalar =
+            pointScalars->GetComponent(pointId, 0);
+        if (!std::isfinite(scalar)) {
+            return false;
+        }
+        double mapped[3] = {};
+        colorMap->GetColor(scalar, mapped);
+        unsigned char rgb[3] = {};
+        for (int component = 0; component < 3;
+            ++component) {
+            const double normalized = std::clamp(
+                mapped[component], 0.0, 1.0);
+            rgb[component] = static_cast<unsigned char>(
+                std::lround(normalized * 255.0));
+        }
+        colors->SetTypedTuple(pointId, rgb);
+    }
+
+    mesh->GetPointData()->AddArray(colors);
+    return mesh->GetPointData()->SetActiveScalars("RGB") >= 0;
 }
 
 RawVolumeDataManager::RawVolumeDataManager()

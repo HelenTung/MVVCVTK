@@ -5,8 +5,8 @@
 | 项目 | 内容 |
 | --- | --- |
 | 用途 | 当前架构事实、边界、主链与风险索引 |
-| 源码基线 | 2026-07-30，`5988505f7e4c`，同步前工作树 |
-| 最近核验 | 2026-07-30 |
+| 源码基线 | 2026-08-01，`83f9160ab34e`，与 `origin/master` 同步后的干净工作树 |
+| 最近核验 | 2026-08-01 |
 | 主工程 | `MVVCVTK/MVVCVTK.vcxproj` |
 | 默认验证 | `Debug|x64` / `Release|x64`，不主动验证 32 位 |
 | 非 Qt 测试 | `test/MVVCVTK.Tests.sln` 中 3 个工程 |
@@ -99,8 +99,9 @@ Session 的 `BuildSession()` 在空拓扑时返回 `false`，且不渲染；底�
 `HostViewSetRequest` 的 mode、material/preset、opacity、scalar TF/preset、iso、background、
 spacing、WW/WC、volume quality、gradient opacity、denoise、cursor、元素显隐与方向轴显隐
 先统一解析为候选。任一字段
-非法或与目标 mode 能力不匹配时零 setter；合法候选先提交唯一可能报告业务失败的 spacing
-事务，再写入其余已验证状态。material 与独立 opacity 在候选阶段合并为一次
+非法或与目标 mode 能力不匹配时零 setter；合法候选先提交可能报告业务失败的 spacing，
+再按顺序写入其余已验证状态。该顺序不提供运行时原子回滚：若前序 setter 已成功而后续
+setter 失败，前序状态可能保留。material 与独立 opacity 在候选阶段合并为一次
 `MaterialParams` 更新；material preset 不能和 numeric material/opacity 同时出现，scalar TF
 preset 不能和显式 TF 同时出现。
 
@@ -171,7 +172,7 @@ flowchart LR
     Request[HostDataExportRequest] --> Router[HostCommandRouter]
     Router --> Viz[VizService::ExportDataAsync]
     Viz --> Task[AppDataExportTaskService]
-    Task --> Snapshot[冻结 image/mask/iso/modelToWorld]
+    Task --> Snapshot[冻结 image/mask/iso/modelToWorld/scalarRange/TF]
     Snapshot --> Data[BaseDataManager::ExportData]
     Data --> Raw[RAW writer]
     Data --> Mesh[PLY/STL/OBJ writers]
@@ -181,6 +182,12 @@ App/Task 只冻结参数并编排异步任务，Data 层才选择 writer、创�
 为 `<dimX>x<dimY>x<dimZ>_transform<extension>`。RAW 输出变换后的 float32 体数据；
 PLY/STL/OBJ 从同一冻结 image、current iso 与 validity mask 构造等值面，烘焙
 model-to-world 后写出。调用方不得传具体文件名，也不得让 Host/App 重复解释格式。
+
+PLY 的颜色契约属于数据层而非显示层：DataManager 在最终输出网格的 point scalar 上使用
+同一任务冻结的 scalar range 与 TF，生成三分量 `uchar RGB`；TF 为空时退回数据域灰阶。
+该数组与 points、triangles、world coordinates、normals 一起通过 PLY 回读测试核验，不从
+renderer/actor/framebuffer 推导。OBJ 只承诺几何与法线，STL 只承诺几何；两者不写非标准
+点 RGB。当前公共格式和 Data writer 均无 PDF 实现。
 
 ### 5.4 Crop 物化的第二提交入口
 
@@ -330,7 +337,7 @@ Qt/上位机必须在 GUI/VTK 线程构建 session、发运行期命令和操作
 | 能力 | 现状 | 主要测试缺口 |
 | --- | --- | --- |
 | Host typed protocol | 八种具体 Host Request + 单一 Session/Router 入口 + 独立 Feature protocol 已落地 | 正向 Qt facade 链较少 |
-| Data Export | RAW/PLY/STL/OBJ 共用 Host/App/Task 链，Data 层统一命名与 writer 分派 | Qt case 只验 facade/UTF-8；真实文件由 Data 集成测试覆盖 |
+| Data Export | RAW/PLY/STL/OBJ 共用 Host/App/Task 链；PLY RGB 来自冻结 scalar/TF 与真实输出网格 | Qt case 只验 facade/UTF-8；PDF 尚未实现 |
 | File/Reload | pending/owner/admission/callback 已收口 | QVTK 端到端 Reload 成功/失败 |
 | Interaction | 统一事件与 router | 新 handler 组合回归 |
 | Render quality | Quality/Custom、固定 ImageSampleDistance、gradient opacity、percentile/material preset、display-only denoise 已落地 | 固定 GPU/golden image 下的主观画质不在当前契约 |
@@ -342,8 +349,8 @@ Qt/上位机必须在 GUI/VTK 线程构建 session、发运行期命令和操作
 
 QtHost facade 已增加 UTF-8 路径拒绝与导出请求接纳用例，以及 Crop 双视图 pipeline
 失败补偿；Interaction Router 另验证四种显式格式、缺省视图推断、热键/显式命令同链和
-UTF-8 DTO 字节不变。Data 集成测试验证 RAW/PLY/STL/OBJ 文件名、world 变换、mask 与非法
-矩阵拒绝。
+UTF-8 DTO 字节不变。Data 集成测试回读 RAW/PLY/STL/OBJ，验证文件名、点/三角面、world
+坐标、法线、PLY RGB 与灰阶 fallback，并覆盖 mask 与非法矩阵拒绝。
 
 ## 11. 风险矩阵
 

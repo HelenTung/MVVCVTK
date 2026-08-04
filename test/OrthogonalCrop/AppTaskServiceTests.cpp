@@ -11,6 +11,7 @@
 #include "Services/AppService.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -25,13 +26,19 @@
 
 #include <vtkImageData.h>
 #include <vtkCallbackCommand.h>
+#include <vtkCell.h>
 #include <vtkCommand.h>
+#include <vtkDataArray.h>
+#include <vtkFlyingEdges3D.h>
 #include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
 #include <vtkPLYReader.h>
+#include <vtkPointData.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkSTLReader.h>
+#include <vtkTriangleFilter.h>
+#include <vtkUnsignedCharArray.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
 #include <vtkWeakPointer.h>
@@ -81,14 +88,11 @@ public:
     bool ExportData(
         const ImageSnapshot& snapshot,
         const std::string& outputDir,
-        const std::string& extension,
-        double isoValue,
-        const std::array<double, 16>&) override
+        const DataExportParams& params) override
     {
         exportedSnapshot = snapshot;
         exportedDir = outputDir;
-        exportedExtension = extension;
-        exportedIso = isoValue;
+        exportedParams = params;
         return true;
     }
     bool ExportSlices(const std::string&, Orientation, const WindowLevelParams&,
@@ -97,8 +101,7 @@ public:
     ImageSnapshot imageSnapshot;
     ImageSnapshot exportedSnapshot;
     std::string exportedDir;
-    std::string exportedExtension;
-    double exportedIso = 0.0;
+    DataExportParams exportedParams;
     std::string loadedPath;
     std::array<int, 3> loadedDims{};
     std::vector<float> loadedVoxels;
@@ -233,6 +236,18 @@ void StartExportSnapshot(int& failureCount)
         std::make_shared<SharedInteractionState>(
             broadcaster);
     state->SetIsoValue(2.5);
+    const std::array<double, 16> firstMatrix = {
+        1.0, 0.0, 0.0, 10.0,
+        0.0, 1.0, 0.0, 20.0,
+        0.0, 0.0, 1.0, 30.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    state->SetModelMatrix(firstMatrix);
+    state->SetScalarRange(0.0, 9.0);
+    state->SetTFNodes({
+        { 0.0, 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 1.0, 0.0, 1.0, 1.0 }
+    });
     AppDataExportTaskService service(
         dataManager, state);
     auto task = service.BuildDataTask(
@@ -244,6 +259,17 @@ void StartExportSnapshot(int& failureCount)
     secondState->version = 2;
     dataManager->imageSnapshot = secondState;
     state->SetIsoValue(4.5);
+    state->SetModelMatrix({
+        1.0, 0.0, 0.0, -10.0,
+        0.0, 1.0, 0.0, -20.0,
+        0.0, 0.0, 1.0, -30.0,
+        0.0, 0.0, 0.0, 1.0
+    });
+    state->SetScalarRange(-10.0, 10.0);
+    state->SetTFNodes({
+        { 0.0, 1.0, 1.0, 0.0, 0.0 },
+        { 1.0, 1.0, 0.0, 0.0, 1.0 }
+    });
 
     SetExpect(task.has_value(),
         "data export task should accept a valid snapshot",
@@ -256,9 +282,16 @@ void StartExportSnapshot(int& failureCount)
                 == firstState
             && dataManager->exportedDir
                 == "exports"
-            && dataManager->exportedExtension
+            && dataManager->exportedParams.extension
                 == ".ply"
-            && dataManager->exportedIso == 2.5,
+            && dataManager->exportedParams.isoValue == 2.5
+            && dataManager->exportedParams.scalarRange
+                == std::array<double, 2>{ 0.0, 9.0 }
+            && dataManager->exportedParams.modelToWorld
+                == firstMatrix
+            && dataManager->exportedParams.tfNodes.size() == 2
+            && dataManager->exportedParams.tfNodes[0].g == 1.0
+            && dataManager->exportedParams.tfNodes[1].b == 1.0,
         "data export must preserve target and admission-time snapshots",
         failureCount);
 }
@@ -289,6 +322,14 @@ void StartExportFiles(int& failureCount)
         0.0, 0.0, 1.0, 30.0,
         0.0, 0.0, 0.0, 1.0
     };
+    DataExportParams params;
+    params.isoValue = 2.5;
+    params.modelToWorld = modelToWorld;
+    params.scalarRange = { 0.0, 9.0 };
+    params.tfNodes = {
+        { 0.0, 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 1.0, 0.0, 1.0, 1.0 }
+    };
 
     const auto plyPath =
         outputDir / "4x4x4_transform.ply";
@@ -296,19 +337,16 @@ void StartExportFiles(int& failureCount)
         outputDir / "4x4x4_transform.stl";
     const auto objPath =
         outputDir / "4x4x4_transform.obj";
-    SetExpect(!error
-            && dataManager.ExportData(
-                snapshot,
-                outputDir.u8string(), ".ply",
-                2.5, modelToWorld)
-            && dataManager.ExportData(
-                snapshot,
-                outputDir.u8string(), ".stl",
-                2.5, modelToWorld)
-            && dataManager.ExportData(
-                snapshot,
-                outputDir.u8string(), ".obj",
-                2.5, modelToWorld),
+    params.extension = ".ply";
+    const bool isPlySaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.extension = ".stl";
+    const bool isStlSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.extension = ".obj";
+    const bool isObjSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    SetExpect(!error && isPlySaved && isStlSaved && isObjSaved,
         "PLY, STL and OBJ should use one export entry",
         failureCount);
 
@@ -349,11 +387,265 @@ void StartExportFiles(int& failureCount)
         "mesh files should contain baked world coordinates",
         failureCount);
 
+    vtkPolyData* plyMesh = plyReader->GetOutput();
+    auto* plyRgb = plyMesh && plyMesh->GetPointData()
+        ? vtkUnsignedCharArray::SafeDownCast(
+            plyMesh->GetPointData()->GetScalars())
+        : nullptr;
     SetExpect(
-        dataManager.ExportData(
-            snapshot,
-            outputDir.u8string(), ".raw",
-            2.5, modelToWorld)
+        plyRgb && plyRgb->GetName()
+            && std::string(plyRgb->GetName()) == "RGB"
+            && plyRgb->GetNumberOfComponents() == 3
+            && plyRgb->GetNumberOfTuples()
+                == plyMesh->GetNumberOfPoints(),
+        "PLY should round-trip one RGB tuple per mesh point",
+        failureCount);
+    bool isPlyRgbMatched = plyRgb != nullptr;
+    if (plyRgb) {
+        for (vtkIdType pointId = 0;
+            pointId < plyRgb->GetNumberOfTuples();
+            ++pointId) {
+            unsigned char rgb[3] = {};
+            plyRgb->GetTypedTuple(pointId, rgb);
+            isPlyRgbMatched = isPlyRgbMatched
+                && rgb[0] == 0 && rgb[1] == 255
+                && rgb[2] >= 70 && rgb[2] <= 71;
+        }
+    }
+    SetExpect(
+        isPlyRgbMatched,
+        "PLY RGB should match the frozen isosurface-scalar transfer function",
+        failureCount);
+
+    auto expectedIso =
+        vtkSmartPointer<vtkFlyingEdges3D>::New();
+    expectedIso->SetInputData(snapshot->image);
+    expectedIso->SetValue(0, params.isoValue);
+    expectedIso->ComputeNormalsOn();
+    expectedIso->ComputeGradientsOff();
+    auto expectedTriangles =
+        vtkSmartPointer<vtkTriangleFilter>::New();
+    expectedTriangles->SetInputConnection(
+        expectedIso->GetOutputPort());
+    expectedTriangles->Update();
+    vtkPolyData* expectedMesh =
+        expectedTriangles->GetOutput();
+    vtkPolyData* objMesh = objReader->GetOutput();
+    vtkPolyData* stlMesh = stlReader->GetOutput();
+    vtkDataArray* expectedScalars = expectedMesh
+        && expectedMesh->GetPointData()
+        ? expectedMesh->GetPointData()->GetScalars()
+        : nullptr;
+    bool hasExpectedIsoScalars = expectedScalars
+        && expectedScalars->GetNumberOfComponents() > 0
+        && expectedScalars->GetNumberOfTuples()
+            == expectedMesh->GetNumberOfPoints();
+    if (hasExpectedIsoScalars) {
+        for (vtkIdType pointId = 0;
+            pointId < expectedScalars->GetNumberOfTuples();
+            ++pointId) {
+            hasExpectedIsoScalars = hasExpectedIsoScalars
+                && std::abs(
+                    expectedScalars->GetComponent(pointId, 0)
+                        - params.isoValue)
+                    <= 1e-5;
+        }
+    }
+    SetExpect(
+        hasExpectedIsoScalars,
+        "the isosurface fixture should preserve point scalars at the frozen iso",
+        failureCount);
+
+    // writer 可以合法重排 point/cell id；以量化后的世界坐标多重集比较实际几何。
+    using PointKey = std::array<long long, 3>;
+    using TriangleKey = std::array<PointKey, 3>;
+    constexpr double coordinateScale = 1e5;
+    const auto getPointKey =
+        [&](const double point[3], bool isExpected) {
+            PointKey key = {};
+            for (int axis = 0; axis < 3; ++axis) {
+                const double worldValue = point[axis]
+                    + (isExpected
+                        ? modelToWorld[axis * 4 + 3]
+                        : 0.0);
+                key[static_cast<std::size_t>(axis)] =
+                    std::llround(worldValue * coordinateScale);
+            }
+            return key;
+        };
+    const auto getPointKeys =
+        [&](vtkPolyData* mesh, bool isExpected) {
+            std::vector<PointKey> points;
+            if (!mesh || mesh->GetNumberOfPoints() == 0) {
+                return points;
+            }
+            points.reserve(static_cast<std::size_t>(
+                mesh->GetNumberOfPoints()));
+            for (vtkIdType pointId = 0;
+                pointId < mesh->GetNumberOfPoints();
+                ++pointId) {
+                double point[3] = {};
+                mesh->GetPoint(pointId, point);
+                if (!std::isfinite(point[0])
+                    || !std::isfinite(point[1])
+                    || !std::isfinite(point[2])) {
+                    points.clear();
+                    return points;
+                }
+                points.push_back(
+                    getPointKey(point, isExpected));
+            }
+            std::sort(points.begin(), points.end());
+            return points;
+        };
+    const auto expectedPoints =
+        getPointKeys(expectedMesh, true);
+    const bool isGeometryMatched =
+        !expectedPoints.empty()
+        && getPointKeys(plyMesh, false) == expectedPoints
+        && getPointKeys(objMesh, false) == expectedPoints;
+    SetExpect(
+        isGeometryMatched,
+        "PLY and OBJ should round-trip the real world-space mesh point set",
+        failureCount);
+
+    const auto getTriangleKeys =
+        [&](vtkPolyData* mesh, bool isExpected) {
+            std::vector<TriangleKey> triangles;
+            if (!mesh || mesh->GetNumberOfCells() == 0) {
+                return triangles;
+            }
+            triangles.reserve(static_cast<std::size_t>(
+                mesh->GetNumberOfCells()));
+            for (vtkIdType cellId = 0;
+                cellId < mesh->GetNumberOfCells(); ++cellId) {
+                vtkCell* cell = mesh->GetCell(cellId);
+                if (!cell || cell->GetNumberOfPoints() != 3) {
+                    triangles.clear();
+                    return triangles;
+                }
+                TriangleKey triangle = {};
+                for (vtkIdType corner = 0; corner < 3;
+                    ++corner) {
+                    double point[3] = {};
+                    mesh->GetPoint(
+                        cell->GetPointId(corner), point);
+                    if (!std::isfinite(point[0])
+                        || !std::isfinite(point[1])
+                        || !std::isfinite(point[2])) {
+                        triangles.clear();
+                        return triangles;
+                    }
+                    triangle[static_cast<std::size_t>(corner)] =
+                        getPointKey(point, isExpected);
+                }
+                std::sort(triangle.begin(), triangle.end());
+                triangles.push_back(triangle);
+            }
+            std::sort(triangles.begin(), triangles.end());
+            return triangles;
+        };
+    const auto expectedTopology =
+        getTriangleKeys(expectedMesh, true);
+    SetExpect(
+        !expectedTopology.empty()
+            && getTriangleKeys(plyMesh, false)
+                == expectedTopology
+            && getTriangleKeys(objMesh, false)
+                == expectedTopology
+            && getTriangleKeys(stlMesh, false)
+                == expectedTopology,
+        "PLY, OBJ and STL should round-trip the real triangle geometry",
+        failureCount);
+
+    bool isPlyTriangulated = plyMesh != nullptr;
+    if (plyMesh) {
+        for (vtkIdType cellId = 0;
+            cellId < plyMesh->GetNumberOfCells();
+            ++cellId) {
+            vtkCell* cell = plyMesh->GetCell(cellId);
+            isPlyTriangulated = isPlyTriangulated
+                && cell && cell->GetNumberOfPoints() == 3;
+        }
+    }
+    const auto getHasUnitNormals =
+        [](vtkPolyData* mesh) {
+            vtkDataArray* normals = mesh
+                && mesh->GetPointData()
+                ? mesh->GetPointData()->GetNormals()
+                : nullptr;
+            bool hasNormals = normals
+                && normals->GetNumberOfComponents() == 3
+                && normals->GetNumberOfTuples()
+                    == mesh->GetNumberOfPoints();
+            if (!hasNormals) {
+                return false;
+            }
+            for (vtkIdType pointId = 0;
+                pointId < normals->GetNumberOfTuples();
+                ++pointId) {
+                double normal[3] = {};
+                normals->GetTuple(pointId, normal);
+                const double length = std::sqrt(
+                    normal[0] * normal[0]
+                    + normal[1] * normal[1]
+                    + normal[2] * normal[2]);
+                hasNormals = hasNormals
+                    && std::isfinite(length)
+                    && std::abs(length - 1.0) <= 1e-5;
+            }
+            return hasNormals;
+        };
+    SetExpect(
+        isPlyTriangulated
+            && getHasUnitNormals(plyMesh)
+            && getHasUnitNormals(objMesh),
+        "PLY and OBJ should round-trip unit point normals",
+        failureCount);
+
+    params.extension = ".ply";
+    params.tfNodes.clear();
+    const bool isGrayPlySaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    auto grayPlyReader =
+        vtkSmartPointer<vtkPLYReader>::New();
+    grayPlyReader->SetFileName(
+        plyPath.u8string().c_str());
+    grayPlyReader->Update();
+    auto* grayRgb = grayPlyReader->GetOutput()
+        && grayPlyReader->GetOutput()->GetPointData()
+        ? vtkUnsignedCharArray::SafeDownCast(
+            grayPlyReader->GetOutput()
+                ->GetPointData()->GetScalars())
+        : nullptr;
+    bool isGrayRgbMatched = isGrayPlySaved
+        && grayRgb && grayRgb->GetNumberOfComponents() == 3;
+    if (isGrayRgbMatched) {
+        for (vtkIdType pointId = 0;
+            pointId < grayRgb->GetNumberOfTuples();
+            ++pointId) {
+            unsigned char rgb[3] = {};
+            grayRgb->GetTypedTuple(pointId, rgb);
+            isGrayRgbMatched = isGrayRgbMatched
+                && rgb[0] >= 70 && rgb[0] <= 71
+                && rgb[0] == rgb[1]
+                && rgb[1] == rgb[2];
+        }
+    }
+    SetExpect(
+        isGrayRgbMatched,
+        "PLY should use a scalar-range grayscale fallback when no TF is frozen",
+        failureCount);
+
+    params.tfNodes = {
+        { 0.0, 1.0, 0.0, 1.0, 0.0 },
+        { 1.0, 1.0, 0.0, 1.0, 1.0 }
+    };
+    params.extension = ".raw";
+    const bool isRawSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    SetExpect(
+        isRawSaved
             && std::filesystem::exists(
                 outputDir
                 / "4x4x4_transform.raw"),
@@ -365,14 +657,36 @@ void StartExportFiles(int& failureCount)
         std::numeric_limits<double>::quiet_NaN();
     auto singularMatrix = modelToWorld;
     singularMatrix[0] = 0.0;
+    auto projectiveMatrix = modelToWorld;
+    projectiveMatrix[12] = 0.1;
+    auto smallScaleMatrix = modelToWorld;
+    smallScaleMatrix[0] = 1e-8;
+    smallScaleMatrix[5] = 1e-8;
+    smallScaleMatrix[10] = 1e-8;
+    params.extension = ".obj";
+    params.modelToWorld = smallScaleMatrix;
+    const bool isSmallScaleSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.extension = ".raw";
+    params.modelToWorld = invalidMatrix;
+    const bool isInvalidSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.modelToWorld = singularMatrix;
+    const bool isSingularSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.modelToWorld = projectiveMatrix;
+    const bool isProjectiveSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
+    params.extension = ".ply";
+    params.modelToWorld = singularMatrix;
+    const bool isMeshSingularSaved = dataManager.ExportData(
+        snapshot, outputDir.u8string(), params);
     SetExpect(
-        !dataManager.ExportData(
-            snapshot, outputDir.u8string(), ".raw",
-            2.5, invalidMatrix)
-            && !dataManager.ExportData(
-                snapshot, outputDir.u8string(), ".raw",
-                2.5, singularMatrix),
-        "Raw should reject non-finite and singular transforms",
+        isSmallScaleSaved
+            && !isInvalidSaved && !isSingularSaved
+            && !isProjectiveSaved
+            && !isMeshSingularSaved,
+        "data export should accept small affine scales and reject invalid transforms",
         failureCount);
 
     auto maskedState =
@@ -388,12 +702,84 @@ void StartExportFiles(int& failureCount)
         emptyMask->GetNumberOfPoints(),
         static_cast<unsigned char>(0));
     maskedState->validityMask = emptyMask;
+    params.extension = ".ply";
+    params.modelToWorld = modelToWorld;
     SetExpect(
         !dataManager.ExportData(
             maskedState,
-            outputDir.u8string(), ".ply",
-            2.5, modelToWorld),
+            outputDir.u8string(), params),
         "mesh export should consume the frozen validity mask",
+        failureCount);
+
+    auto partialState =
+        std::make_shared<ImageState>(*snapshot);
+    auto partialMask =
+        vtkSmartPointer<vtkImageData>::New();
+    partialMask->CopyStructure(snapshot->image);
+    partialMask->AllocateScalars(
+        VTK_UNSIGNED_CHAR, 1);
+    int maskExtent[6] = {};
+    partialMask->GetExtent(maskExtent);
+    const int firstValidX =
+        (maskExtent[0] + maskExtent[1] + 1) / 2;
+    for (int z = maskExtent[4]; z <= maskExtent[5]; ++z) {
+        for (int y = maskExtent[2]; y <= maskExtent[3]; ++y) {
+            for (int x = maskExtent[0]; x <= maskExtent[1]; ++x) {
+                auto* maskValue = static_cast<unsigned char*>(
+                    partialMask->GetScalarPointer(x, y, z));
+                *maskValue = x >= firstValidX
+                    ? static_cast<unsigned char>(255)
+                    : static_cast<unsigned char>(0);
+            }
+        }
+    }
+    partialState->validityMask = partialMask;
+    const bool isPartialSaved = dataManager.ExportData(
+        partialState, outputDir.u8string(), params);
+    auto partialReader =
+        vtkSmartPointer<vtkPLYReader>::New();
+    partialReader->SetFileName(
+        plyPath.u8string().c_str());
+    partialReader->Update();
+    vtkPolyData* partialMesh = partialReader->GetOutput();
+    SetExpect(
+        isPartialSaved && partialMesh
+            && partialMesh->GetNumberOfCells() > 0
+            && plyMesh
+            && partialMesh->GetNumberOfCells()
+                < plyMesh->GetNumberOfCells(),
+        "a partial validity mask should reduce the exported mesh",
+        failureCount);
+
+    auto mismatchState =
+        std::make_shared<ImageState>(*snapshot);
+    auto mismatchMask =
+        vtkSmartPointer<vtkImageData>::New();
+    mismatchMask->DeepCopy(partialMask);
+    mismatchMask->SetSpacing(2.0, 1.0, 1.0);
+    mismatchState->validityMask = mismatchMask;
+    SetExpect(
+        !dataManager.ExportData(
+            mismatchState,
+            outputDir.u8string(), params),
+        "mesh export should reject mismatched mask geometry",
+        failureCount);
+
+    DataExportParams invalidRangeParams = params;
+    invalidRangeParams.scalarRange = { 9.0, 0.0 };
+    DataExportParams invalidTfParams = params;
+    invalidTfParams.tfNodes = {
+        { 0.8, 1.0, 0.0, 1.0, 0.0 },
+        { 0.2, 1.0, 0.0, 1.0, 1.0 }
+    };
+    SetExpect(
+        !dataManager.ExportData(
+            snapshot, outputDir.u8string(),
+            invalidRangeParams)
+            && !dataManager.ExportData(
+                snapshot, outputDir.u8string(),
+                invalidTfParams),
+        "PLY export should reject invalid scalar and transfer-function metadata",
         failureCount);
 
     std::filesystem::remove_all(

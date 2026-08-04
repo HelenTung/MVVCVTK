@@ -16,7 +16,7 @@ public:
     AppDataExportTaskService(std::shared_ptr<AbstractDataManager> dataManager,
         std::shared_ptr<SharedInteractionState> sharedState);
 
-    // 在调用线程冻结 image/mask、isovalue 与 model-to-world；目录和规范后缀只透明传递。
+    // 在调用线程冻结 image/mask、iso、model-to-world、scalar range 与 TF；目录和规范后缀只透明传递。
     std::optional<std::packaged_task<bool()>> BuildDataTask(
         std::string outputDir,
         std::string extension);

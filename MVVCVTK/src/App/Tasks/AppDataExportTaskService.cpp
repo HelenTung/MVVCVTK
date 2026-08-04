@@ -29,20 +29,20 @@ AppDataExportTaskService::BuildDataTask(
         return std::nullopt;
     }
     auto dataManager = m_dataManager;
-    const auto modelToWorld = m_sharedState->GetModelMatrix();
-    const double isoValue =
-        m_sharedState->GetIsoValue();
+    DataExportParams params;
+    params.extension = std::move(extension);
+    params.isoValue = m_sharedState->GetIsoValue();
+    params.modelToWorld = m_sharedState->GetModelMatrix();
+    params.scalarRange = m_sharedState->GetDataRange();
+    m_sharedState->GetTFNodes(params.tfNodes);
     return std::packaged_task<bool()>(
         [dataManager, imageSnapshot,
          outputDir = std::move(outputDir),
-         extension = std::move(extension),
-         isoValue, modelToWorld]() mutable
+         params = std::move(params)]() mutable
         {
             try {
                 return dataManager->ExportData(
-                    imageSnapshot, outputDir, extension,
-                    isoValue,
-                    modelToWorld);
+                    imageSnapshot, outputDir, params);
             }
             catch (const std::exception& error) {
                 std::cerr << "[Export] Worker failed: " << error.what() << '\n';

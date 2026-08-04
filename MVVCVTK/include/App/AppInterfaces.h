@@ -78,13 +78,11 @@ public:
     // 销毁尚未提交的完整 pending 批次；无 pending 也视为清理成功。
     virtual bool ClearPending() = 0;
     // 导出任务必须传入接纳时冻结的 imageSnapshot；后台不得重新读取 current。
-    // outputDir 是 UTF-8 目录，extension 是 Host 已收敛的规范小写后缀。
+    // outputDir 是 UTF-8 目录；params 一次冻结格式、几何变换与 PLY 颜色映射。
     virtual bool ExportData(
         const ImageSnapshot& imageSnapshot,
         const std::string& outputDir,
-        const std::string& extension,
-        double isoValue,
-        const std::array<double, 16>& modelToWorldMatrix) = 0;
+        const DataExportParams& params) = 0;
     // dirPath 为 UTF-8 路径。
     virtual bool ExportSlices(const std::string& dirPath, Orientation orientation, const WindowLevelParams& windowLevel, const std::array<double, 16>& modelToWorldMatrix) = 0;
 };

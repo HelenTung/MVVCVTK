@@ -13,7 +13,7 @@
 | 主体下游 | Data、App/State、Render |
 | 不负责 | Qt UI、固定窗口数量、具体算法、除 standalone 导出热键以外的业务默认参数 |
 | 接纳协议 | Feature 读取不可变 `ImageSnapshot`，以 expected snapshot 做 CAS 发布 |
-| 本地实现快照 | 2026-07-30；`5988505f7e4c`；同步前工作树 |
+| 本地实现快照 | 2026-08-01；事实基线 `83f9160ab34e`；本节同时描述当前未提交的数据导出保真差异，远端领先/落后均为 `0` |
 
 Host 是宿主适配与组合边界。Qt、standalone 或上位机只应依赖 Session、主体 DTO、Feature 公共类型和 endpoint，不应取得 `VizService`、DataManager 或 feature service 后直接操作。Crop/Gap 不属于主体 Request 分发；删去任一 Feature 目录后，主体 Host、Render、App 与 Interaction 仍可独立编译。
 
@@ -154,10 +154,10 @@ SendRequest(HostDataExportRequest)
   -> HostCommandRouter::ExportData
   -> VizService::ExportDataAsync(outputDir, extension)
   -> AppDataExportTaskService::BuildDataTask
-     冻结 current ImageSnapshot、validity mask、isoValue、modelToWorld
+     冻结 current ImageSnapshot、validity mask、isoValue、modelToWorld、scalarRange、TF
   -> BaseDataManager::ExportData
      RAW: 重采样/裁边后写 float32 体数据
-     PLY/STL/OBJ: FlyingEdges 等值面 + mask 裁切 + world 变换 + writer
+     PLY/STL/OBJ: FlyingEdges 等值面 + mask 裁切 + world 变换 + 三角化 + writer
 ```
 
 Data 层统一创建输出目录并生成
@@ -165,6 +165,12 @@ Data 层统一创建输出目录并生成
 走同一个 Host/App/Task 链，只在 Data 层按规范后缀选择不同 writer。后台任务只消费接纳时
 冻结的快照，不重新读取 current，因此导出期间的 Reload、Crop 发布或 iso 修改不会改变
 已接纳任务。
+
+网格格式只承诺其可稳定表达的数据。PLY 在真实输出网格的 point scalar 上使用同批次冻结的
+scalar range 与 TF 映射三分量 `uchar RGB`，TF 为空时使用数据域灰阶；点、三角面、world
+坐标和法线均来自同一输出网格。RGB 不读取 renderer、actor 或 framebuffer，因此屏幕光照
+产生的明暗不被误写为数据颜色。OBJ 保留几何与法线，STL 只承诺几何，不为两者伪造非标准
+点 RGB。当前 Host 格式枚举及 writer 链均没有 PDF，不能把报告规划描述为已实现能力。
 
 `HostSliceExportRequest` 独立导出逐层 PNG。显式调用可用 `sourceView` 指定切片方向；
 standalone 热键请求未指定 selector 时，由触发热键的切片窗口补齐。`angleDeg` 缺省时保持
@@ -186,7 +192,7 @@ standalone 热键请求未指定 selector 时，由触发热键的切片窗口�
 - gradient 节点的梯度 finite、非负、非降序，不透明度 finite 且位于 `[0,1]`；
 - `volumeQuality`、`gradientOpacity`、`isDenoiseOn` 只允许用于 `Volume` / `CompositeVolume` 的有效候选模式。
 
-Router 先解析 target、service 和 context，再把全部 optional 转入局部候选并完成所有校验；只有候选完整合法才按固定顺序调用 setter。因此任一晚字段非法都返回 `false`，不会留下 mode、material、TF 等部分更新；合法多字段请求只形成一次统一 view-set 提交。optional 全缺省仍是成功 no-op。
+Router 先解析 target、service 和 context，再把全部 optional 转入局部候选并完成字段与能力校验；任一候选字段非法时会在调用 setter 前整笔拒绝，不留下部分更新。候选合法后按固定顺序逐项调用 setter；若前一个 setter 已成功而后续可失败 setter 失败，前序状态可能保留，当前实现不提供运行时原子回滚。optional 全缺省仍是成功 no-op。
 
 `HostViewResetRequest` 以自身具体类型表达相机复位，只调用目标 context 的
 `ResetCamera()`；它不创建 camera 状态副本，也不进入 `SharedInteractionState`。方向轴
