@@ -45,13 +45,21 @@ public:
     void SetVizMode(VizMode mode);
     VizMode GetVizMode() const;
     void SetMaterial(const MaterialParams& mat);
+    MaterialParams GetMaterial() const;
     void SetOpacity(double opacity);
+    double GetOpacity() const;
     void SetTransferFunction(const std::vector<TFNode>& nodes);
+    std::vector<TFNode> GetTransferFunction() const;
     void SetIsoThreshold(double val);
+    double GetIsoThreshold() const;
     void SetBackground(const BackgroundColor& bg);
+    BackgroundColor GetBackground() const;
     bool SetSpacing(double sx, double sy, double sz);
+    std::array<double, 3> GetSpacing() const;
     void SetWindowLevel(double ww, double wc);
     void SetVisualConfig(const PreInitConfig& cfg);
+    PreInitConfig GetVisualConfig() const;
+    std::array<double, 2> GetScalarRange() const;
     bool SetVolumeQuality(const VolumeQualityParams& quality);
     VolumeQualityParams GetVolumeQuality() const;
     bool SetFeatureActive(
@@ -61,6 +69,7 @@ public:
     bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes);
     std::vector<GradientOpacityNode> GetGradientOpacity() const;
     bool SetTransferPreset(TransferPreset preset);
+    TransferPreset GetTransferPreset() const;
     bool SetDenoiseOn(bool isDenoiseOn);
     bool GetDenoiseOn() const;
     LoadState GetFileLoadState() const;
@@ -84,6 +93,7 @@ public:
     bool SetInteracting(
         const InteractionSource& source,
         bool isInteracting);
+    bool GetIsInteracting() const;
     int GetPlaneAxis(vtkActor* actor);
     vtkProp3D* GetMainProp();
     void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix);
@@ -91,6 +101,7 @@ public:
     WindowLevelParams GetWindowLevel() const;
     int GetNavigationAxis() const;
     void SetElementVisible(uint32_t flagBit, bool isVisible);
+    uint32_t GetVisibilityMask() const;
     void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC);
     void SetModelTransform(double translate[3], double rotate[3], double scale[3]);
     void SetModelTransformReset();
@@ -530,9 +541,19 @@ void VizService::SetMaterial(const MaterialParams& mat)
     m_impl->SetMaterial(mat);
 }
 
+MaterialParams VizService::GetMaterial() const
+{
+    return m_impl->GetMaterial();
+}
+
 void VizService::SetOpacity(double opacity)
 {
     m_impl->SetOpacity(opacity);
+}
+
+double VizService::GetOpacity() const
+{
+    return m_impl->GetOpacity();
 }
 
 void VizService::SetTransferFunction(const std::vector<TFNode>& nodes)
@@ -540,9 +561,19 @@ void VizService::SetTransferFunction(const std::vector<TFNode>& nodes)
     m_impl->SetTransferFunction(nodes);
 }
 
+std::vector<TFNode> VizService::GetTransferFunction() const
+{
+    return m_impl->GetTransferFunction();
+}
+
 void VizService::SetIsoThreshold(double val)
 {
     m_impl->SetIsoThreshold(val);
+}
+
+double VizService::GetIsoThreshold() const
+{
+    return m_impl->GetIsoThreshold();
 }
 
 void VizService::SetBackground(const BackgroundColor& bg)
@@ -550,9 +581,19 @@ void VizService::SetBackground(const BackgroundColor& bg)
     m_impl->SetBackground(bg);
 }
 
+BackgroundColor VizService::GetBackground() const
+{
+    return m_impl->GetBackground();
+}
+
 bool VizService::SetSpacing(double sx, double sy, double sz)
 {
     return m_impl->SetSpacing(sx, sy, sz);
+}
+
+std::array<double, 3> VizService::GetSpacing() const
+{
+    return m_impl->GetSpacing();
 }
 
 void VizService::SetWindowLevel(double ww, double wc)
@@ -563,6 +604,16 @@ void VizService::SetWindowLevel(double ww, double wc)
 void VizService::SetVisualConfig(const PreInitConfig& cfg)
 {
     m_impl->SetVisualConfig(cfg);
+}
+
+PreInitConfig VizService::GetVisualConfig() const
+{
+    return m_impl->GetVisualConfig();
+}
+
+std::array<double, 2> VizService::GetScalarRange() const
+{
+    return m_impl->GetScalarRange();
 }
 
 bool VizService::SetVolumeQuality(const VolumeQualityParams& quality)
@@ -601,6 +652,11 @@ std::vector<GradientOpacityNode> VizService::GetGradientOpacity() const
 bool VizService::SetTransferPreset(TransferPreset preset)
 {
     return m_impl->SetTransferPreset(preset);
+}
+
+TransferPreset VizService::GetTransferPreset() const
+{
+    return m_impl->GetTransferPreset();
 }
 
 bool VizService::SetDenoiseOn(bool isDenoiseOn)
@@ -680,6 +736,11 @@ bool VizService::SetInteracting(
     return m_impl->SetInteracting(source, isInteracting);
 }
 
+bool VizService::GetIsInteracting() const
+{
+    return m_impl->GetIsInteracting();
+}
+
 int VizService::GetPlaneAxis(vtkActor* actor)
 {
     return m_impl->GetPlaneAxis(actor);
@@ -713,6 +774,11 @@ int VizService::GetNavigationAxis() const
 void VizService::SetElementVisible(uint32_t flagBit, bool isVisible)
 {
     m_impl->SetElementVisible(flagBit, isVisible);
+}
+
+uint32_t VizService::GetVisibilityMask() const
+{
+    return m_impl->GetVisibilityMask();
 }
 
 void VizService::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)
@@ -950,6 +1016,11 @@ void VizService::Impl::SetMaterial(const MaterialParams& mat)
     m_sharedState->SetMaterial(mat);
 }
 
+MaterialParams VizService::Impl::GetMaterial() const
+{
+    return m_sharedState->GetMaterial();
+}
+
 void VizService::Impl::SetOpacity(double opacity)
 {
     auto mat = m_sharedState->GetMaterial();
@@ -957,9 +1028,21 @@ void VizService::Impl::SetOpacity(double opacity)
     m_sharedState->SetMaterial(mat);
 }
 
+double VizService::Impl::GetOpacity() const
+{
+    return m_sharedState->GetMaterial().opacity;
+}
+
 void VizService::Impl::SetTransferFunction(const std::vector<TFNode>& nodes)
 {
     m_sharedState->SetTFNodes(nodes);
+}
+
+std::vector<TFNode> VizService::Impl::GetTransferFunction() const
+{
+    std::vector<TFNode> nodes;
+    m_sharedState->GetTFNodes(nodes);
+    return nodes;
 }
 
 void VizService::Impl::SetIsoThreshold(double val)
@@ -967,9 +1050,19 @@ void VizService::Impl::SetIsoThreshold(double val)
     m_sharedState->SetIsoValue(val);
 }
 
+double VizService::Impl::GetIsoThreshold() const
+{
+    return m_sharedState->GetIsoValue();
+}
+
 void VizService::Impl::SetBackground(const BackgroundColor& bg)
 {
     m_sharedState->SetBackground(bg);
+}
+
+BackgroundColor VizService::Impl::GetBackground() const
+{
+    return m_sharedState->GetBackground();
 }
 
 bool VizService::Impl::SetSpacing(double sx, double sy, double sz)
@@ -983,6 +1076,11 @@ bool VizService::Impl::SetSpacing(double sx, double sy, double sz)
     }
     m_sharedState->SetSpacing(sx, sy, sz);
     return true;
+}
+
+std::array<double, 3> VizService::Impl::GetSpacing() const
+{
+    return m_sharedState->GetSpacing();
 }
 
 bool VizService::SendReloadUpdate()
@@ -1000,6 +1098,30 @@ void VizService::Impl::SetVisualConfig(const PreInitConfig& cfg)
     // 先更新供 BuildPipeline/交互读取的模式快照，再由 SharedState 广播具体配置差异。
     m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
     m_sharedState->SetPreInitConfig(cfg);
+}
+
+PreInitConfig VizService::Impl::GetVisualConfig() const
+{
+    // 读回的是当前完整状态快照；所有 has 标志置 true，便于宿主直接保存或重新提交。
+    PreInitConfig config;
+    config.vizMode = GetVizMode();
+    config.material = m_sharedState->GetMaterial();
+    m_sharedState->GetTFNodes(config.tfNodes);
+    config.isoThreshold = m_sharedState->GetIsoValue();
+    config.bgColor = m_sharedState->GetBackground();
+    config.spacing = m_sharedState->GetSpacing();
+    config.windowLevel = m_sharedState->GetWindowLevel();
+    config.hasTF = true;
+    config.hasIso = true;
+    config.hasBgColor = true;
+    config.hasSpacing = true;
+    config.hasWindowLevel = true;
+    return config;
+}
+
+std::array<double, 2> VizService::Impl::GetScalarRange() const
+{
+    return m_sharedState->GetScalarRange();
 }
 
 bool VizService::Impl::SetVolumeQuality(
@@ -1144,6 +1266,11 @@ bool VizService::Impl::SetTransferPreset(TransferPreset preset)
     }
     return m_sharedState->SetTransferPresetNodes(
         preset, currentSnapshot->version, *nodes);
+}
+
+TransferPreset VizService::Impl::GetTransferPreset() const
+{
+    return m_sharedState->GetTransferPreset();
 }
 
 bool VizService::Impl::SetDenoiseOn(bool isDenoiseOn)
@@ -1388,6 +1515,11 @@ bool VizService::Impl::SetInteracting(
     return m_sharedState->SetInteracting(source, isInteracting);
 }
 
+bool VizService::Impl::GetIsInteracting() const
+{
+    return m_sharedState->GetIsInteracting();
+}
+
 int VizService::Impl::GetPlaneAxis(vtkActor* actor)
 {
     return m_currentStrategy ? m_currentStrategy->GetPlaneAxis(actor) : -1;
@@ -1432,6 +1564,11 @@ int VizService::Impl::GetNavigationAxis() const
 void VizService::Impl::SetElementVisible(uint32_t flagBit, bool isVisible)
 {
     m_sharedState->SetElementVisible(flagBit, isVisible);
+}
+
+uint32_t VizService::Impl::GetVisibilityMask() const
+{
+    return m_sharedState->GetVisibilityMask();
 }
 
 void VizService::Impl::SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC)

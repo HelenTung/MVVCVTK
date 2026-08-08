@@ -1141,6 +1141,72 @@ void StartRenderOwnerGate(int& failureCount)
         "the RenderContext owner must submit pending state",
         failureCount);
 }
+
+void StartVisualConfigGetters(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataStub>();
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    VizService service(dataManager, state, broadcaster);
+
+    PreInitConfig config;
+    config.vizMode = VizMode::Volume;
+    config.material = { 0.2, 0.6, 0.3, 12.0, 0.8, true };
+    config.tfNodes = {
+        { 0.0, 0.1, 0.2, 0.3, 0.4 },
+        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    };
+    config.isoThreshold = 12.5;
+    config.bgColor = { 0.05, 0.1, 0.15 };
+    config.spacing = { 0.5, 1.0, 1.5 };
+    config.windowLevel = { 80.0, 20.0 };
+    config.hasTF = true;
+    config.hasIso = true;
+    config.hasBgColor = true;
+    config.hasSpacing = true;
+    config.hasWindowLevel = true;
+    service.SetVisualConfig(config);
+    state->SetScalarRange(-4.0, 88.0);
+
+    const auto material = service.GetMaterial();
+    const auto nodes = service.GetTransferFunction();
+    const auto background = service.GetBackground();
+    const auto spacing = service.GetSpacing();
+    const auto windowLevel = service.GetWindowLevel();
+    const auto snapshot = service.GetVisualConfig();
+    const auto scalarRange = service.GetScalarRange();
+    SetExpect(service.GetVizMode() == VizMode::Volume
+            && material.opacity == 0.8
+            && material.isShadeOn
+            && service.GetOpacity() == 0.8
+            && nodes.size() == 2
+            && nodes[1].opacity == 0.9
+            && service.GetIsoThreshold() == 12.5
+            && background.r == 0.05
+            && spacing[2] == 1.5
+            && windowLevel.windowWidth == 80.0
+            && snapshot.hasTF
+            && snapshot.hasIso
+            && snapshot.hasBgColor
+            && snapshot.hasSpacing
+            && snapshot.hasWindowLevel
+            && snapshot.tfNodes.size() == 2
+            && scalarRange == std::array<double, 2>{ -4.0, 88.0 },
+        "VizService getter snapshot must mirror visual setters and scalar range",
+        failureCount);
+
+    const InteractionSource source{ "getter-test", "view" };
+    service.SetInteracting(source, true);
+    service.SetElementVisible(VisFlags::Ruler, false);
+    SetExpect(service.GetIsInteracting()
+            && (service.GetVisibilityMask() & VisFlags::Ruler) == 0,
+        "VizService interaction and visibility getters must mirror state",
+        failureCount);
+    SetExpect(service.SetTransferPreset(TransferPreset::Percentile)
+            && service.GetTransferPreset() == TransferPreset::Percentile,
+        "VizService transfer preset getter must expose the committed intent",
+        failureCount);
+}
 }
 
 int AppTaskSuite::GetFailCount() const
@@ -1154,5 +1220,6 @@ int AppTaskSuite::GetFailCount() const
     StartMaskSnapshot(failureCount);
     StartRenderOwnerGate(failureCount);
     StartInputSwap(failureCount);
+    StartVisualConfigGetters(failureCount);
     return failureCount;
 }

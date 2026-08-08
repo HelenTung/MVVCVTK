@@ -39,6 +39,7 @@ private:
     // ── 坐标轴组件（与路由无关，保留） ───────────────────────────────
     // 延迟创建并持有方向轴 widget；始终绑定当前 interactor，Context 析构时释放 VTK 引用。
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
+    bool m_isAxesVisible = false;
 
     // 外部宿主窗口可能已经带有自己的 interactor；集中接管可以复用同一套路由和 observer 生命周期。
     void AttachInteractor(vtkSmartPointer<vtkRenderWindowInteractor> interactor);
@@ -63,6 +64,7 @@ public:
     // 只替换 VTK render window，不引入 Qt 类型；Qt 生命周期由宿主层负责。
     void SetRenderWindow(vtkSmartPointer<vtkRenderWindow> renderWindow) override;
     void SetOrientationAxesVisible(bool isVisible) override;
+    bool GetOrientationAxesVisible() const { return m_isAxesVisible; }
     void SetToolMode(ToolMode mode);
     ToolMode GetToolMode() const { return m_toolMode; }
     void SetInputHandler(

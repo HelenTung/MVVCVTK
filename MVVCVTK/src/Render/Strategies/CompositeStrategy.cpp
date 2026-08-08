@@ -108,11 +108,25 @@ bool CompositeStrategy::SetRenderInputStamp(
         && m_mainStrategy->SetRenderInputStamp(inputStamp);
 }
 
+RenderInputStamp CompositeStrategy::GetRenderInputStamp() const
+{
+    return m_mainStrategy
+        ? m_mainStrategy->GetRenderInputStamp()
+        : BaseVisualStrategy::GetRenderInputStamp();
+}
+
 bool CompositeStrategy::SetRenderEffectUse(
     const RenderBindingUse bindingUse)
 {
     return m_mainStrategy
         && m_mainStrategy->SetRenderEffectUse(bindingUse);
+}
+
+RenderBindingUse CompositeStrategy::GetRenderEffectUse() const
+{
+    return m_mainStrategy
+        ? m_mainStrategy->GetRenderEffectUse()
+        : BaseVisualStrategy::GetRenderEffectUse();
 }
 
 RenderEffectState CompositeStrategy::GetRenderEffectState() const

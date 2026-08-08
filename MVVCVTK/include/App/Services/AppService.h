@@ -62,13 +62,21 @@ public:
     void SetVizMode(VizMode mode);
     VizMode GetVizMode() const;
     void SetMaterial(const MaterialParams& mat);
+    MaterialParams GetMaterial() const;
     void SetOpacity(double opacity);
+    double GetOpacity() const;
     void SetTransferFunction(const std::vector<TFNode>& nodes);
+    std::vector<TFNode> GetTransferFunction() const;
     void SetIsoThreshold(double val);
+    double GetIsoThreshold() const;
     void SetBackground(const BackgroundColor& bg);
+    BackgroundColor GetBackground() const;
     bool SetSpacing(double sx, double sy, double sz);
+    std::array<double, 3> GetSpacing() const;
     void SetWindowLevel(double ww, double wc);
     void SetVisualConfig(const PreInitConfig& cfg);
+    PreInitConfig GetVisualConfig() const;
+    std::array<double, 2> GetScalarRange() const;
     bool SetVolumeQuality(const VolumeQualityParams& quality);
     VolumeQualityParams GetVolumeQuality() const;
     bool SetFeatureActive(
@@ -78,6 +86,7 @@ public:
     bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes);
     std::vector<GradientOpacityNode> GetGradientOpacity() const;
     bool SetTransferPreset(TransferPreset preset);
+    TransferPreset GetTransferPreset() const;
     bool SetDenoiseOn(bool isDenoiseOn);
     bool GetDenoiseOn() const;
 
@@ -99,7 +108,7 @@ public:
         VolumeBuffer buffer,
         std::function<void(bool isSuccess)> onComplete = nullptr);
 
-    // 状态查询：当前只对外暴露 File / Reload 两组状态。
+    // 状态查询：加载状态与当前视觉配置均通过值快照读回。
     LoadState GetFileLoadState() const;
     LoadState GetReloadLoadState() const;
 
@@ -130,10 +139,12 @@ public:
     bool SetInteracting(
         const InteractionSource& source,
         bool isInteracting) override;
+    bool GetIsInteracting() const;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override;
     void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix) override;
     void SetElementVisible(uint32_t flagBit, bool isVisible) override;
+    uint32_t GetVisibilityMask() const;
     void SetWindowLevelDrag(int totalDx, int totalDy, int viewWidth, int viewHeight, double startWW, double startWC) override;
 
     std::array<double, 16> GetModelMatrix() override;

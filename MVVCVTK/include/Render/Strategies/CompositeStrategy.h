@@ -34,7 +34,9 @@ public:
         RenderBindingUse bindingUse) override;
     bool DetachRenderEffect(const RenderEffect* effect) override;
     bool SetRenderInputStamp(RenderInputStamp inputStamp) override;
+    RenderInputStamp GetRenderInputStamp() const override;
     bool SetRenderEffectUse(RenderBindingUse bindingUse) override;
+    RenderBindingUse GetRenderEffectUse() const override;
     RenderEffectState GetRenderEffectState() const override;
     bool SetRenderEffectCommit(std::uint64_t revision) override;
     bool ClearRenderEffectStage(std::uint64_t revision) override;

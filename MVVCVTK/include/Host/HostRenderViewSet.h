@@ -4,6 +4,7 @@
 #include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,11 @@ public:
     // 单视图 selector 统一使用“id 优先，否则按 role fallback”，避免各调用点手写同一判断。
     const HostRenderViewRuntime* GetViewBySelector(
         const HostViewTarget& target) const;
+    // 返回目标视图的独立业务状态快照；调用方不获得 runtime/service 所有权。
+    std::optional<HostRenderViewState> GetViewState(
+        const HostViewTarget& target) const;
+    // 按拓扑顺序返回全部视图状态快照，容器和节点均为值复制。
+    std::vector<HostRenderViewState> GetViewStates() const;
     // 初始加载和裁切默认参考需要一个可解释的主视图；没有 Primary3D 时按 3D role 再退到首视图。
     const HostRenderViewRuntime* GetPrimaryView() const;
     // standalone VTK 只能有一个阻塞事件循环承载点；Qt host 不调用 Start，因此不受该选择约束。

@@ -5,6 +5,7 @@
 #include <vtkRenderWindow.h>
 #include <vtkSmartPointer.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -43,6 +44,29 @@ struct HostRenderViewConfig {
     HostWindowConfig window; // 窗口尺寸、位置与初始渲染状态。
     vtkSmartPointer<vtkRenderWindow> renderWindow; // 可选外部窗口；为空时 session 自建并拥有窗口。
     bool isEventLoopEnabled = false; // standalone Start 候选；一个会话必须能解析出唯一启动窗口。
+};
+
+// 上位机读取单视图当前状态的值快照；所有容器均为独立副本，不暴露 VizService/SharedState。
+struct HostRenderViewState final {
+    std::string id;
+    HostRenderViewRole role = HostRenderViewRole::Auxiliary;
+    HostRenderMode viewMode = HostRenderMode::IsoSurface;
+    HostMaterialParams material;
+    std::vector<HostTransferNode> transferNodes;
+    double isoThreshold = 0.0;
+    HostBackgroundColor background;
+    std::array<double, 3> spacing{ 1.0, 1.0, 1.0 };
+    HostWindowLevelParams windowLevel;
+    HostTransferPreset transferPreset = HostTransferPreset::Manual;
+    std::array<double, 2> scalarRange{ 0.0, 0.0 };
+    HostVolumeQualityParams volumeQuality;
+    std::vector<HostGradientOpacityNode> gradientOpacity;
+    bool isFeatureActive = false;
+    bool isDenoiseOn = false;
+    bool isInteracting = false;
+    std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };
+    uint32_t visibilityMask = 0;
+    bool isAxesVisible = false;
 };
 
 struct HostRenderViewEndpoint {

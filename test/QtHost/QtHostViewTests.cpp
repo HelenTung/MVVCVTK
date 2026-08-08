@@ -54,6 +54,8 @@ static_assert(static_cast<int>(VolumeQuality::Quality) == 0);
 static_assert(static_cast<int>(VolumeQuality::Custom) == 1);
 static_assert(
     VolumeQualityParams{}.quality == VolumeQuality::Quality);
+static_assert(static_cast<int>(HostTransferPreset::Percentile) == 0);
+static_assert(static_cast<int>(HostTransferPreset::Manual) == 1);
 
 vtkSmartPointer<vtkImageData> BuildFloatImage(
     const std::vector<float>& values)
@@ -1676,6 +1678,23 @@ int GetViewFailCount()
     HostRenderViewConfig view;
     view.id = "view";
     view.role = HostRenderViewRole::Primary3D;
+    view.window.viewInit.viewMode = HostRenderMode::Volume;
+    view.window.viewInit.material = {
+        0.2, 0.6, 0.3, 12.0, 0.8, true
+    };
+    view.window.viewInit.transferNodes = {
+        { 0.0, 0.1, 0.2, 0.3, 0.4 },
+        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    };
+    view.window.viewInit.hasTransferNodes = true;
+    view.window.viewInit.isoThreshold = 0.25;
+    view.window.viewInit.hasIso = true;
+    view.window.viewInit.background = { 0.05, 0.1, 0.15 };
+    view.window.viewInit.hasBackground = true;
+    view.window.viewInit.spacing = { 0.5, 1.0, 1.5 };
+    view.window.viewInit.hasSpacing = true;
+    view.window.viewInit.windowLevel = { 80.0, 20.0 };
+    view.window.viewInit.hasWindowLevel = true;
     config.renderViews.push_back(std::move(view));
     VtkAppHostSession session(std::move(config));
 
@@ -1721,6 +1740,35 @@ int GetViewFailCount()
     failureCount += GetCaseResult(
         session.SendRequest(std::move(value)),
         "Qt Host can set iso, cursor and runtime visibility") ? 0 : 1;
+
+    HostViewTarget stateTarget;
+    stateTarget.viewId = "view";
+    const auto state = session.GetRenderViewState(stateTarget);
+    const auto allStates = session.GetRenderViewStates();
+    const bool isStateReadBack = state.has_value()
+        && state->id == "view"
+        && state->role == HostRenderViewRole::Primary3D
+        && state->viewMode == HostRenderMode::Volume
+        && std::abs(state->material.opacity - 0.8) < 1e-12
+        && state->material.isShadeOn
+        && state->transferNodes.size() == 2
+        && std::abs(state->transferNodes[1].opacity - 0.9) < 1e-12
+        && std::abs(state->isoThreshold - 0.42) < 1e-12
+        && std::abs(state->background.r - 0.05) < 1e-12
+        && std::abs(state->spacing[2] - 1.5) < 1e-12
+        && std::abs(state->windowLevel.windowWidth - 80.0) < 1e-12
+        && state->transferPreset == HostTransferPreset::Manual
+        && std::abs(state->scalarRange[0]) < 1e-12
+        && std::abs(state->scalarRange[1] - 255.0) < 1e-12
+        // 当前用例尚未加载体数据；cursor setter 按既有契约保持原值。
+        && state->cursorWorld == std::array<double, 3>{ 0.0, 0.0, 0.0 }
+        && state->visibilityMask == VisFlags::Crosshair
+        && state->isAxesVisible
+        && allStates.size() == 1
+        && allStates.front().id == "view";
+    failureCount += GetCaseResult(
+        isStateReadBack,
+        "Qt Host can read back the complete view state snapshot") ? 0 : 1;
 
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";

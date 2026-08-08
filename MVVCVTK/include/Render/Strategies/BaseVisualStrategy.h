@@ -131,6 +131,11 @@ public:
         return true;
     }
 
+    RenderInputStamp GetRenderInputStamp() const override
+    {
+        return m_renderInputStamp;
+    }
+
     bool SetRenderEffectUse(const RenderBindingUse bindingUse) override
     {
         if (m_bindingUse == bindingUse) {
@@ -142,6 +147,11 @@ public:
         }
         m_bindingUse = bindingUse;
         return true;
+    }
+
+    RenderBindingUse GetRenderEffectUse() const override
+    {
+        return m_bindingUse;
     }
 
     RenderEffectState GetRenderEffectState() const override

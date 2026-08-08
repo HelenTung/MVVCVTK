@@ -342,6 +342,7 @@ void StdRenderContext::SetCameraStyle(VizMode mode)
 
 void StdRenderContext::SetOrientationAxesVisible(bool isVisible)
 {
+    m_isAxesVisible = isVisible;
     if (isVisible) {
         if (!m_axesWidget) {
             // 坐标轴 widget 延迟初始化，避免在不需要时创建额外的 VTK 组件。

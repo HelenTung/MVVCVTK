@@ -5,6 +5,7 @@
 #include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include <vtkSmartPointer.h>
@@ -43,6 +44,11 @@ public:
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
     const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& viewId);
     const HostRenderViewEndpoint* GetPrimaryEndpoint();
+    // 返回指定视图的独立状态快照；查询失败返回空，不改变既有 SendRequest 流程。
+    std::optional<HostRenderViewState> GetRenderViewState(
+        const HostViewTarget& target);
+    // 按会话拓扑顺序返回所有视图的独立状态快照。
+    std::vector<HostRenderViewState> GetRenderViewStates();
 
 private:
     class Impl;

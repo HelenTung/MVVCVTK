@@ -101,6 +101,9 @@ public:
     bool SendRequest(
         HostRequest&& request,
         HostCompleteCallback onComplete);
+    std::optional<HostRenderViewState> GetRenderViewState(
+        const HostViewTarget& target);
+    std::vector<HostRenderViewState> GetRenderViewStates();
     bool AttachTimer(const HostTimerConfig& timerConfig);
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
@@ -199,6 +202,25 @@ bool VtkAppHostSession::Impl::SendRequest(
     return commandRouter->Dispatch(
         std::move(request),
         std::move(onComplete));
+}
+
+std::optional<HostRenderViewState>
+VtkAppHostSession::Impl::GetRenderViewState(
+    const HostViewTarget& target)
+{
+    if (!BuildSession()) {
+        return std::nullopt;
+    }
+    return renderViews.GetViewState(target);
+}
+
+std::vector<HostRenderViewState>
+VtkAppHostSession::Impl::GetRenderViewStates()
+{
+    if (!BuildSession()) {
+        return {};
+    }
+    return renderViews.GetViewStates();
 }
 
 void VtkAppHostSession::Impl::DetachTimer()
@@ -559,4 +581,20 @@ VtkAppHostSession::GetPrimaryEndpoint()
     }
     return m_impl->endpoints.empty()
         ? nullptr : &m_impl->endpoints.front();
+}
+
+std::optional<HostRenderViewState>
+VtkAppHostSession::GetRenderViewState(
+    const HostViewTarget& target)
+{
+    return m_impl
+        ? m_impl->GetRenderViewState(target)
+        : std::nullopt;
+}
+
+std::vector<HostRenderViewState>
+VtkAppHostSession::GetRenderViewStates()
+{
+    return m_impl ? m_impl->GetRenderViewStates()
+        : std::vector<HostRenderViewState>{};
 }

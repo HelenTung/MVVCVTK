@@ -410,10 +410,15 @@ void SharedInteractionState::SetScalarRange(double rangeMin, double rangeMax)
     if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
 }
 
-std::array<double, 2> SharedInteractionState::GetDataRange() const
+std::array<double, 2> SharedInteractionState::GetScalarRange() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
     return m_impl->m_dataRange;
+}
+
+std::array<double, 2> SharedInteractionState::GetDataRange() const
+{
+    return GetScalarRange();
 }
 
 void SharedInteractionState::SetTFNodes(const std::vector<TFNode>& nodes)

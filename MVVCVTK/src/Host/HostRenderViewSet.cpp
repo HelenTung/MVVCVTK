@@ -24,6 +24,9 @@ public:
     const HostRenderViewRuntime* GetFirstViewByRole(HostRenderViewRole role) const;
     const HostRenderViewRuntime* GetViewBySelector(
         const HostViewTarget& target) const;
+    std::optional<HostRenderViewState> GetViewState(
+        const HostViewTarget& target) const;
+    std::vector<HostRenderViewState> GetViewStates() const;
     const HostRenderViewRuntime* GetPrimaryView() const;
     const HostRenderViewRuntime* GetStandaloneStartView() const;
     std::vector<const HostRenderViewRuntime*> GetViewsByTargets(
@@ -48,7 +51,10 @@ private:
         std::shared_ptr<SharedInteractionState> sharedState,
         std::shared_ptr<IStateEventSource> stateEventSource) const;
     std::optional<VizMode> GetAppViewMode(HostRenderMode mode) const;
+    std::optional<HostRenderMode> GetHostViewMode(VizMode mode) const;
     std::optional<PreInitConfig> BuildAppInit(const HostViewInitConfig& config) const;
+    HostRenderViewState BuildViewState(
+        const HostRenderViewRuntime& view) const;
     std::shared_ptr<VizService> GetViewService(
         const std::shared_ptr<InteractiveService>& service) const;
     // Impl 是 runtime 集合的唯一容器 owner；查询返回的引用/裸指针只在下一次 Build、移动或析构前有效。
@@ -111,6 +117,94 @@ std::optional<VizMode> HostRenderViewSet::Impl::GetAppViewMode(HostRenderMode mo
     case HostRenderMode::CompositeIsoSurface: return VizMode::CompositeIsoSurface;
     }
     return std::nullopt;
+}
+
+std::optional<HostRenderMode>
+HostRenderViewSet::Impl::GetHostViewMode(VizMode mode) const
+{
+    switch (mode) {
+    case VizMode::Volume: return HostRenderMode::Volume;
+    case VizMode::IsoSurface: return HostRenderMode::IsoSurface;
+    case VizMode::SliceTop_down: return HostRenderMode::SliceTopDown;
+    case VizMode::SliceFront_back: return HostRenderMode::SliceFrontBack;
+    case VizMode::SliceLeft_right: return HostRenderMode::SliceLeftRight;
+    case VizMode::CompositeVolume: return HostRenderMode::CompositeVolume;
+    case VizMode::CompositeIsoSurface: return HostRenderMode::CompositeIsoSurface;
+    }
+    return std::nullopt;
+}
+
+HostRenderViewState HostRenderViewSet::Impl::BuildViewState(
+    const HostRenderViewRuntime& view) const
+{
+    HostRenderViewState state;
+    state.id = view.config.id;
+    state.role = view.config.role;
+    if (!view.service) {
+        return state;
+    }
+
+    const auto viewMode = GetHostViewMode(view.service->GetVizMode());
+    if (viewMode) {
+        state.viewMode = *viewMode;
+    }
+    const auto material = view.service->GetMaterial();
+    state.material = {
+        material.ambient,
+        material.diffuse,
+        material.specular,
+        material.specularPower,
+        material.opacity,
+        material.isShadeOn
+    };
+    const auto transferFunction = view.service->GetTransferFunction();
+    state.transferNodes.reserve(transferFunction.size());
+    for (const auto& node : transferFunction) {
+        state.transferNodes.push_back({
+            node.position,
+            node.opacity,
+            node.r,
+            node.g,
+            node.b
+        });
+    }
+    state.isoThreshold = view.service->GetIsoThreshold();
+    const auto background = view.service->GetBackground();
+    state.background = { background.r, background.g, background.b };
+    state.spacing = view.service->GetSpacing();
+    const auto windowLevel = view.service->GetWindowLevel();
+    state.windowLevel = {
+        windowLevel.windowWidth,
+        windowLevel.windowCenter
+    };
+    state.transferPreset = view.service->GetTransferPreset()
+        == TransferPreset::Percentile
+        ? HostTransferPreset::Percentile
+        : HostTransferPreset::Manual;
+    state.scalarRange = view.service->GetScalarRange();
+
+    const auto quality = view.service->GetVolumeQuality();
+    state.volumeQuality = {
+        quality.quality == VolumeQuality::Custom
+            ? HostVolumeQuality::Custom
+            : HostVolumeQuality::Quality,
+        quality.maxDimension,
+        quality.sampleDistance,
+        quality.isJitterOn
+    };
+    const auto gradientOpacity = view.service->GetGradientOpacity();
+    state.gradientOpacity.reserve(gradientOpacity.size());
+    for (const auto& node : gradientOpacity) {
+        state.gradientOpacity.push_back({ node.gradient, node.opacity });
+    }
+    state.isFeatureActive = view.service->GetIsFeatureActive();
+    state.isDenoiseOn = view.service->GetDenoiseOn();
+    state.isInteracting = view.service->GetIsInteracting();
+    state.cursorWorld = view.service->GetCursorWorld();
+    state.visibilityMask = view.service->GetVisibilityMask();
+    state.isAxesVisible = view.context
+        && view.context->GetOrientationAxesVisible();
+    return state;
 }
 
 std::optional<PreInitConfig> HostRenderViewSet::Impl::BuildAppInit(
@@ -244,6 +338,26 @@ const HostRenderViewRuntime* HostRenderViewSet::Impl::GetViewBySelector(
         return GetFirstViewByRole(target.viewRole);
     }
     return nullptr;
+}
+
+std::optional<HostRenderViewState>
+HostRenderViewSet::Impl::GetViewState(
+    const HostViewTarget& target) const
+{
+    const auto* view = GetViewBySelector(target);
+    return view ? std::optional<HostRenderViewState>(BuildViewState(*view))
+        : std::nullopt;
+}
+
+std::vector<HostRenderViewState>
+HostRenderViewSet::Impl::GetViewStates() const
+{
+    std::vector<HostRenderViewState> states;
+    states.reserve(m_views.size());
+    for (const auto& view : m_views) {
+        states.push_back(BuildViewState(view));
+    }
+    return states;
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::Impl::GetPrimaryView() const
@@ -511,6 +625,17 @@ const HostRenderViewRuntime* HostRenderViewSet::GetViewBySelector(
     const HostViewTarget& target) const
 {
     return m_impl->GetViewBySelector(target);
+}
+
+std::optional<HostRenderViewState> HostRenderViewSet::GetViewState(
+    const HostViewTarget& target) const
+{
+    return m_impl->GetViewState(target);
+}
+
+std::vector<HostRenderViewState> HostRenderViewSet::GetViewStates() const
+{
+    return m_impl->GetViewStates();
 }
 
 const HostRenderViewRuntime* HostRenderViewSet::GetPrimaryView() const

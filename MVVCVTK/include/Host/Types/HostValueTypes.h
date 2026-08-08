@@ -84,7 +84,8 @@ struct HostGradientOpacityNode {
 };
 
 enum class HostTransferPreset {
-    Percentile
+    Percentile = 0, // 保留既有 Host 请求的底层值。
+    Manual = 1 // 当前 TF 由 transferNodes 直接控制；也用于状态读回。
 };
 
 struct HostBackgroundColor {

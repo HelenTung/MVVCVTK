@@ -47,6 +47,8 @@ public:
     void SetModelMatrix(const std::array<double, 16>& modelToWorldMatrix);
     std::array<double, 16> GetModelMatrix() const;
     void SetScalarRange(double rangeMin, double rangeMax);
+    std::array<double, 2> GetScalarRange() const;
+    // 兼容既有调用方；新代码应使用与 SetScalarRange 对称的 GetScalarRange。
     std::array<double, 2> GetDataRange() const;
     void SetTFNodes(const std::vector<TFNode>& nodes);
     void GetTFNodes(std::vector<TFNode>& destination) const;

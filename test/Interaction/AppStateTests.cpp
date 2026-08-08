@@ -2,6 +2,7 @@
 
 #include "App/AppState.h"
 
+#include <array>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -47,6 +48,17 @@ int AppStateSuite::GetFailCount() const
     if (sink->GetEvents().size() != 2
         || sink->GetEvents().back() != UpdateFlags::Spacing) {
         std::cerr << "App state must broadcast one spacing diff.\n";
+        ++failureCount;
+    }
+
+    const auto rangeSink = std::make_shared<StateEventSink>();
+    SharedInteractionState rangeState(rangeSink);
+    rangeState.SetScalarRange(-10.0, 42.0);
+    const auto scalarRange = rangeState.GetScalarRange();
+    const auto dataRange = rangeState.GetDataRange();
+    if (scalarRange != std::array<double, 2>{ -10.0, 42.0 }
+        || dataRange != scalarRange) {
+        std::cerr << "Scalar range getter must mirror SetScalarRange and its compatibility alias.\n";
         ++failureCount;
     }
 

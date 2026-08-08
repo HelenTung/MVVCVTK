@@ -111,7 +111,9 @@ public:
         RenderBindingUse bindingUse) = 0;
     virtual bool DetachRenderEffect(const RenderEffect* effect) = 0;
     virtual bool SetRenderInputStamp(RenderInputStamp inputStamp) = 0;
+    virtual RenderInputStamp GetRenderInputStamp() const = 0;
     virtual bool SetRenderEffectUse(RenderBindingUse bindingUse) = 0;
+    virtual RenderBindingUse GetRenderEffectUse() const = 0;
     virtual RenderEffectState GetRenderEffectState() const = 0;
     virtual bool SetRenderEffectCommit(std::uint64_t revision) = 0;
     virtual bool ClearRenderEffectStage(std::uint64_t revision) = 0;
