@@ -2038,6 +2038,10 @@ bool VizService::Impl::BuildPipeline()
         isCandidateAttached = false;
         SetCursorCenter();
         SetRendererBg();
+        if (isStrategyChanged) {
+            // 新建或缓存 Strategy 都不能继承旧对象已消费的增量快照，切换成功后必须完整回放共享状态。
+            SetPendingFlags(UpdateFlags::All);
+        }
         SetSyncNeeded();
         if (hasInputChange) {
             // 输入换代后只保留新 current mode。其它 mode 的隐藏 Strategy 仍强持有

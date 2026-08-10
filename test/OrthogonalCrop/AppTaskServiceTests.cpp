@@ -24,16 +24,18 @@
 #include <utility>
 #include <vector>
 
-#include <vtkImageData.h>
+#include <vtkActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCell.h>
 #include <vtkCommand.h>
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>
+#include <vtkImageData.h>
 #include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
 #include <vtkPLYReader.h>
 #include <vtkPointData.h>
+#include <vtkProperty.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkSTLReader.h>
@@ -1142,6 +1144,77 @@ void StartRenderOwnerGate(int& failureCount)
         failureCount);
 }
 
+void StartStrategySwitchSync(int& failureCount)
+{
+    auto dataManager =
+        std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    std::fill_n(
+        static_cast<float*>(image->GetScalarPointer()),
+        image->GetNumberOfPoints(), 1.0F);
+    SetExpect(dataManager->SetInitial(image),
+        "strategy switch sync needs an initial image",
+        failureCount);
+
+    auto broadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    auto state =
+        std::make_shared<SharedInteractionState>(
+            broadcaster);
+    VizService service(
+        dataManager, state, broadcaster);
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow =
+        vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    service.SetRenderContext(renderWindow, renderer);
+    SetExpect(service.SendReloadUpdate(),
+        "strategy switch sync should build the initial volume pipeline",
+        failureCount);
+    service.SendUpdates();
+
+    auto firstMaterial = state->GetMaterial();
+    firstMaterial.diffuse = 0.23;
+    firstMaterial.opacity = 0.61;
+    service.SetMaterial(firstMaterial);
+    service.SendUpdates();
+
+    service.SetVizMode(VizMode::IsoSurface);
+    service.SendUpdates();
+    auto* isoActor = vtkActor::SafeDownCast(
+        service.GetMainProp());
+    auto* isoProperty = isoActor
+        ? isoActor->GetProperty() : nullptr;
+    SetExpect(isoProperty
+            && std::abs(isoProperty->GetDiffuse()
+                - firstMaterial.diffuse) < 1e-12
+            && std::abs(isoProperty->GetOpacity()
+                - firstMaterial.opacity) < 1e-12,
+        "a new strategy must receive the complete shared visual state",
+        failureCount);
+
+    auto nextMaterial = firstMaterial;
+    nextMaterial.diffuse = 0.41;
+    nextMaterial.opacity = 0.78;
+    service.SetMaterial(nextMaterial);
+    service.SendUpdates();
+
+    service.SetVizMode(VizMode::Volume);
+    service.SendUpdates();
+    auto* volume = vtkVolume::SafeDownCast(
+        service.GetMainProp());
+    auto* volumeProperty = volume
+        ? volume->GetProperty() : nullptr;
+    SetExpect(volumeProperty
+            && std::abs(volumeProperty->GetDiffuse()
+                - nextMaterial.diffuse) < 1e-12,
+        "a cached strategy must replay state changed while it was inactive",
+        failureCount);
+}
+
 void StartVisualConfigGetters(int& failureCount)
 {
     auto dataManager = std::make_shared<DataStub>();
@@ -1219,6 +1292,7 @@ int AppTaskSuite::GetFailCount() const
     StartStateGate(failureCount);
     StartMaskSnapshot(failureCount);
     StartRenderOwnerGate(failureCount);
+    StartStrategySwitchSync(failureCount);
     StartInputSwap(failureCount);
     StartVisualConfigGetters(failureCount);
     return failureCount;
