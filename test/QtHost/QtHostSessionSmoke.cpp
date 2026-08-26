@@ -1,13 +1,11 @@
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostCommandRouter.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "App/AppState.h"
 #include "App/AppStateEvents.h"
-#include "App/Services/AppService.h"
 #include "Data/DataManager.h"
-#include "Render/StdRenderContext.h"
 #include "Interaction/TimeUpdateHandler.h"
 #include "VolumeStrategy.h"
 
@@ -117,6 +115,11 @@ public:
         return m_startCount;
     }
 
+    int GetCreatedTimerId() const
+    {
+        return m_createdTimerId;
+    }
+
 protected:
     RenderProbeInteractor() = default;
     ~RenderProbeInteractor() override = default;
@@ -124,6 +127,7 @@ protected:
     int InternalCreateTimer(
         int timerId, int, unsigned long) override
     {
+        m_createdTimerId = timerId;
         return timerId;
     }
 
@@ -134,57 +138,53 @@ protected:
 
 private:
     std::size_t m_startCount{0};
+    int m_createdTimerId{0};
 };
 
 vtkStandardNewMacro(RenderProbeInteractor);
 
-class TimerProbeService final : public AbstractAppService {
-public:
-    void SetRenderContext(
-        vtkSmartPointer<vtkRenderWindow>,
-        vtkSmartPointer<vtkRenderer>) override
-    {
+bool SendTimer(
+    vtkRenderWindowInteractor* interactor,
+    const int idOffset = 0)
+{
+    if (!interactor) return false;
+    int timerId = interactor->GetTimerEventId();
+    if (auto* probe = RenderProbeInteractor::SafeDownCast(interactor)) {
+        timerId = probe->GetCreatedTimerId();
     }
+    if (timerId == 0) {
+        for (int candidate = 1; candidate <= 64; ++candidate) {
+            if (interactor->GetTimerDuration(candidate) != 0) {
+                timerId = candidate;
+                break;
+            }
+        }
+    }
+    if (timerId == 0) return false;
+    timerId += idOffset;
+    interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
+    return true;
+}
 
-    void SendUpdates() override
+class TimerProbePort final : public RenderUpdatePort {
+public:
+    bool SendUpdates() override
     {
         ++m_updateCount;
+        return true;
     }
 
-    bool GetDirty() const override
-    {
-        return m_isDirty;
-    }
-
-    void SetDirty() override
+    bool SetRenderNeeded() override
     {
         m_isDirty = true;
+        return true;
     }
 
-    bool ResetDirty() override
+    bool ResetRenderNeeded() override
     {
         const bool wasDirty = m_isDirty;
         m_isDirty = false;
         return wasDirty;
-    }
-
-    void SetCurrentStrategy(
-        std::shared_ptr<AbstractVisualStrategy>) override
-    {
-    }
-
-    void AttachOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy>) override
-    {
-    }
-
-    void RemoveOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy>) noexcept override
-    {
-    }
-
-    void ClearOverlayStrategies() override
-    {
     }
 
     std::size_t GetUpdateCount() const
@@ -242,13 +242,6 @@ struct PhaseThreadProbe final {
 
 class PresetRaceData final : public RawVolumeDataManager {
 public:
-    bool SetState(
-        std::shared_ptr<SharedInteractionState> state)
-    {
-        m_state = std::move(state);
-        return !m_state.expired();
-    }
-
     bool SetPresetRace()
     {
         m_readCount = 0;
@@ -256,7 +249,7 @@ public:
         return true;
     }
 
-    ImageSnapshot GetImageSnapshot() const override
+    TrustedImageSnapshot GetImageSnapshot() const override
     {
         auto snapshot =
             RawVolumeDataManager::GetImageSnapshot();
@@ -264,19 +257,13 @@ public:
             return snapshot;
         }
         ++m_readCount;
-        if (m_readCount == 2) {
-            if (const auto state = m_state.lock()) {
-                state->SetTFNodes({
-                    { 0.0, 0.0, 0.75, 0.75, 0.75 },
-                    { 1.0, 1.0, 0.75, 0.75, 0.75 }
-                });
-            }
+        if (m_readCount == 2 && snapshot) {
+            return std::make_shared<TrustedImageState>(*snapshot);
         }
         return snapshot;
     }
 
 private:
-    std::weak_ptr<SharedInteractionState> m_state;
     mutable std::size_t m_readCount{0};
     mutable bool m_isRaceReady{false};
 };
@@ -290,10 +277,6 @@ bool BuildPresetReturnTest()
     auto state =
         std::make_shared<SharedInteractionState>(
             broadcaster);
-    if (!dataManager->SetState(state)) {
-        return false;
-    }
-
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetDimensions(2, 2, 2);
     image->AllocateScalars(VTK_FLOAT, 1);
@@ -328,7 +311,7 @@ bool BuildPresetReturnTest()
     view.window.viewInit.viewMode =
         HostRenderMode::IsoSurface;
     view.renderWindow = renderWindow;
-    HostRenderViewSet views;
+    HostViewRuntimeRegistry views;
     const std::vector<HostRenderViewConfig> configs{
         view
     };
@@ -336,21 +319,25 @@ bool BuildPresetReturnTest()
         || !dataManager->SetPresetRace()) {
         return false;
     }
-    HostCommandRouter router(core, views);
+    HostCommandRouter router(views.GetViewDirectory());
     HostViewSetRequest request;
     request.targetView.viewId = "preset-router";
     request.transferPreset =
         HostTransferPreset::Percentile;
     const bool isPresetAccepted =
         router.Dispatch(std::move(request));
+    HostViewTarget target;
+    target.viewId = "preset-router";
+    const auto finalState = views.GetViewState(target);
     std::cout
         << "DIAG_PRESET: accepted=" << isPresetAccepted
         << " final_preset="
-        << static_cast<int>(state->GetTransferPreset())
+        << (finalState
+            ? static_cast<int>(finalState->transferPreset) : -1)
         << '\n';
-    return !isPresetAccepted
-        && state->GetTransferPreset()
-            == TransferPreset::Manual;
+    return isPresetAccepted && finalState
+        && finalState->transferPreset
+            == HostTransferPreset::Percentile;
 }
 
 bool BuildRenderSourceTest()
@@ -373,7 +360,7 @@ bool BuildRenderSourceTest()
     setView.id = "view-set-source";
     setView.role = HostRenderViewRole::Primary3D;
     setView.renderWindow = setWindow;
-    HostRenderViewSet viewSet;
+    HostViewRuntimeRegistry viewSet;
     const std::vector<HostRenderViewConfig> configs{
         setView
     };
@@ -391,11 +378,16 @@ bool BuildRenderSourceTest()
         vtkSmartPointer<RenderProbeInteractor>::New();
     startWindow->SetInteractor(startInteractor);
     startInteractor->SetRenderWindow(startWindow);
-    StdRenderContext context;
-    context.SetRenderWindow(startWindow);
-    context.Start();
-    const bool hasStartRender =
-        startWindow->GetRenderCount() == 1
+    HostRenderViewConfig startView;
+    startView.id = "context-start-source";
+    startView.role = HostRenderViewRole::Primary3D;
+    startView.renderWindow = startWindow;
+    HostViewRuntimeRegistry startViews;
+    const bool isStartBuilt = startViews.Build(
+        core, std::vector<HostRenderViewConfig>{ startView });
+    const bool hasStartRender = isStartBuilt
+        && startViews.StartStandaloneView()
+        && startWindow->GetRenderCount() == 1
         && startInteractor->GetStartCount() == 1;
 
     auto sessionWindow =
@@ -468,26 +460,51 @@ bool BuildStyleQualityTest()
     view.role = HostRenderViewRole::Primary3D;
     view.window.viewInit.viewMode = HostRenderMode::Volume;
     view.renderWindow = renderWindow;
-    HostRenderViewSet views;
-    if (!views.Build(core, { view })
-        || views.GetViews().size() != 1
-        || !views.GetViews().front().context
-        || !views.GetViews().front().service) {
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, { view })) {
         return false;
     }
-
-    const auto& runtime = views.GetViews().front();
-    auto strategy = std::make_shared<VolumeStrategy>();
-    strategy->SetInputData(image);
-    runtime.service->SetCurrentStrategy(strategy);
+    const HostViewTarget target{
+        "style-quality-probe", false,
+        HostRenderViewRole::Primary3D
+    };
+    const auto endpoints = views.BuildEndpoints();
+    if (endpoints.size() != 1
+        || !endpoints.front().renderer
+        || !endpoints.front().interactor) {
+        return false;
+    }
+    HostCommandRouter router(views.GetViewDirectory());
+    const auto setMode = [&router, &target](
+        const HostRenderMode mode) {
+        HostViewSetRequest request;
+        request.targetView = target;
+        request.mode = mode;
+        return router.Dispatch(std::move(request));
+    };
+    const auto setTool = [&router, &target](
+        const HostToolMode mode) {
+        HostToolSetRequest request;
+        request.targetView = target;
+        request.toolMode = mode;
+        return router.Dispatch(std::move(request));
+    };
+    // 数据在 Host 组合根创建前已提交；用共享事件入口发布一次完整快照，
+    // 再由窄 update port 构建策略，测试不注入具体 App runtime。
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::All);
+    if (!views.SendViewUpdates(target)) {
+        return false;
+    }
     // 交互首帧 rate 镜像只允许在已绑定 owner Timer 的 context 中启用；
     // 这里用同线程 no-op handler 建立与真实 HostTimer 相同的线程门。
-    runtime.context->SetTimerHandler([] {});
-    views.SetInteractorsReady();
-    runtime.context->SetCameraStyle(VizMode::Volume);
+    if (!views.SetTimerHandler(target, [] {})
+        || !views.SetInteractorsReady()
+        || !setMode(HostRenderMode::Volume)) {
+        return false;
+    }
     // 首次 Timer 清理初始化阶段已积累的状态，后续只观察 style source
     // 产生的 RenderRate 边界。
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     auto* oldStyle = vtkInteractorStyle::SafeDownCast(
         interactor->GetInteractorStyle());
     if (!oldStyle) {
@@ -500,19 +517,17 @@ bool BuildStyleQualityTest()
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
     const bool isStartActive =
         core.sharedState->GetIsInteracting();
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isTimerFast =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
     oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
     const bool isEndInactive =
         !core.sharedState->GetIsInteracting();
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isEndStill =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
 
-    auto* camera = runtime.context->GetRenderer()
-        ? runtime.context->GetRenderer()->GetActiveCamera()
-        : nullptr;
+    auto* camera = endpoints.front().renderer->GetActiveCamera();
     if (!camera) {
         return false;
     }
@@ -533,13 +548,15 @@ bool BuildStyleQualityTest()
         std::abs(cameraAfter[0] - cameraBefore[0]) > 1e-9
         || std::abs(cameraAfter[1] - cameraBefore[1]) > 1e-9
         || std::abs(cameraAfter[2] - cameraBefore[2]) > 1e-9;
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
 
     vtkSmartPointer<vtkInteractorStyle> replacedStyle = oldStyle;
     oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
-    runtime.context->SetCameraStyle(VizMode::Volume);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
+    if (!setMode(HostRenderMode::Volume)) {
+        return false;
+    }
+    (void)SendTimer(interactor);
     const bool isReplaceStill =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
     auto* newStyle = vtkInteractorStyle::SafeDownCast(
@@ -549,22 +566,24 @@ bool BuildStyleQualityTest()
     }
 
     replacedStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isOldDetached =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
     newStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isNewAttached =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
     newStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isNewEndStill =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
 
     vtkSmartPointer<vtkInteractorStyle> cameraBeforeTool = newStyle;
     cameraBeforeTool->InvokeEvent(vtkCommand::StartInteractionEvent);
-    runtime.context->SetToolMode(ToolMode::ModelTransform);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    if (!setTool(HostToolMode::ModelTransform)) {
+        return false;
+    }
+    (void)SendTimer(interactor);
     const bool isToolReplaceStill =
         !core.sharedState->GetIsInteracting()
         && renderWindow->GetDesiredUpdateRate()
@@ -584,13 +603,15 @@ bool BuildStyleQualityTest()
         && renderWindow->GetDesiredUpdateRate()
             == GetRenderRate(true);
     actorStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     const bool isToolEndStill =
         !core.sharedState->GetIsInteracting()
         && renderWindow->GetDesiredUpdateRate()
             == GetRenderRate(false);
     vtkSmartPointer<vtkInteractorStyle> replacedActor = actorStyle;
-    runtime.context->SetToolMode(ToolMode::Navigation);
+    if (!setTool(HostToolMode::Navigation)) {
+        return false;
+    }
     replacedActor->InvokeEvent(vtkCommand::StartInteractionEvent);
     const bool isActorDetached =
         !core.sharedState->GetIsInteracting();
@@ -606,11 +627,17 @@ bool BuildStyleQualityTest()
             interactor->GetInteractorStyle());
     styleBeforeInteractor->InvokeEvent(
         vtkCommand::StartInteractionEvent);
-    runtime.context->SetRenderWindow(replacementWindow);
-    runtime.context->SetCameraStyle(VizMode::Volume);
-    runtime.context->SetInteractorReady();
+    const bool isWindowRebound = views.SetViewWindow(
+        "style-quality-probe", replacementWindow);
+    if (!setMode(HostRenderMode::Volume)) {
+        return false;
+    }
+    if (!views.SetInteractorsReady()) {
+        return false;
+    }
     const bool isInteractorReplaceClear =
-        !core.sharedState->GetIsInteracting();
+        isWindowRebound
+        && !core.sharedState->GetIsInteracting();
     styleBeforeInteractor->InvokeEvent(
         vtkCommand::StartInteractionEvent);
     const bool isInteractorOldDetached =
@@ -628,8 +655,7 @@ bool BuildStyleQualityTest()
             == GetRenderRate(true);
     replacementStyle->InvokeEvent(
         vtkCommand::EndInteractionEvent);
-    replacementInteractor->InvokeEvent(
-        vtkCommand::TimerEvent);
+    (void)SendTimer(replacementInteractor);
     const bool isInteractorEndStill =
         !core.sharedState->GetIsInteracting()
         && replacementWindow->GetDesiredUpdateRate()
@@ -638,18 +664,21 @@ bool BuildStyleQualityTest()
     // CameraStyle 描述的是相机交互事实，不属于 Volume 策略。所有使用
     // vtkInteractorStyle 的视图都必须发布同一个 source；具体是否降低
     // mapper 质量由对应 Strategy 自己决定。
-    const std::array<VizMode, 7> cameraModes = {
-        VizMode::Volume,
-        VizMode::IsoSurface,
-        VizMode::SliceTop_down,
-        VizMode::SliceFront_back,
-        VizMode::SliceLeft_right,
-        VizMode::CompositeVolume,
-        VizMode::CompositeIsoSurface
+    const std::array<HostRenderMode, 7> cameraModes = {
+        HostRenderMode::Volume,
+        HostRenderMode::IsoSurface,
+        HostRenderMode::SliceTopDown,
+        HostRenderMode::SliceFrontBack,
+        HostRenderMode::SliceLeftRight,
+        HostRenderMode::CompositeVolume,
+        HostRenderMode::CompositeIsoSurface
     };
     bool isCameraSourceUnified = true;
     for (const auto mode : cameraModes) {
-        runtime.context->SetCameraStyle(mode);
+        if (!setMode(mode)) {
+            isCameraSourceUnified = false;
+            break;
+        }
         auto* modeStyle = vtkInteractorStyle::SafeDownCast(
             replacementInteractor->GetInteractorStyle());
         if (!modeStyle) {
@@ -666,8 +695,7 @@ bool BuildStyleQualityTest()
                 == GetRenderRate(true);
         modeStyle->InvokeEvent(
             vtkCommand::EndInteractionEvent);
-        replacementInteractor->InvokeEvent(
-            vtkCommand::TimerEvent);
+    (void)SendTimer(replacementInteractor);
         const bool isModeStopped =
             !core.sharedState->GetIsInteracting()
             && replacementWindow->GetDesiredUpdateRate()
@@ -756,9 +784,9 @@ bool BuildStyleDestroyTest()
         view.window.viewInit.viewMode =
             HostRenderMode::Volume;
         view.renderWindow = renderWindow;
-        HostRenderViewSet views;
+        HostViewRuntimeRegistry views;
         if (!views.Build(core, { view })
-            || views.GetViews().empty()) {
+            || views.BuildEndpoints().empty()) {
             return false;
         }
         destroyedStyle = vtkInteractorStyle::SafeDownCast(
@@ -782,6 +810,72 @@ bool BuildStyleDestroyTest()
     destroyedStyle->InvokeEvent(
         vtkCommand::EndInteractionEvent);
     return !core.sharedState->GetIsInteracting();
+}
+
+bool BuildLeaseRetryTest()
+{
+    HostCoreServices core;
+    core.sharedDataMgr =
+        std::make_shared<RawVolumeDataManager>();
+    core.sharedStateBroadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    core.sharedState =
+        std::make_shared<SharedInteractionState>(
+            core.sharedStateBroadcaster);
+
+    auto renderWindow =
+        vtkSmartPointer<RenderProbeWindow>::New();
+    auto interactor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    renderWindow->SetInteractor(interactor);
+    interactor->SetRenderWindow(renderWindow);
+
+    HostRenderViewConfig view;
+    view.id = "lease-retry-probe";
+    view.role = HostRenderViewRole::Primary3D;
+    view.window.viewInit.viewMode = HostRenderMode::Volume;
+    view.renderWindow = renderWindow;
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, { view })
+        || !views.SetInteractorsReady()) {
+        return false;
+    }
+
+    const int timerId = interactor->GetCreatedTimerId();
+    if (timerId == 0) {
+        return false;
+    }
+    const bool isTimerRemoved =
+        interactor->DestroyTimer(timerId) != 0;
+    const bool isFirstRejected = isTimerRemoved
+        && !views.StopLease();
+    const bool isRuntimeRetained =
+        views.BuildEndpoints().size() == 1;
+    auto* style = vtkInteractorStyle::SafeDownCast(
+        interactor->GetInteractorStyle());
+    if (style) {
+        style->InvokeEvent(vtkCommand::StartInteractionEvent);
+    }
+    const bool isInteractionRetained = style
+        && core.sharedState->GetIsInteracting();
+    if (style) {
+        style->InvokeEvent(vtkCommand::EndInteractionEvent);
+    }
+    const bool isRetryAccepted = views.StopLease();
+    const bool isIdempotent = views.StopLease();
+    std::cout
+        << "DIAG_LEASE_RETRY: first=" << isFirstRejected
+        << " retained=" << isRuntimeRetained
+        << " interaction=" << isInteractionRetained
+        << " retry=" << isRetryAccepted
+        << " empty=" << views.BuildEndpoints().empty()
+        << '\n';
+    return isFirstRejected
+        && isRuntimeRetained
+        && isInteractionRetained
+        && isRetryAccepted
+        && isIdempotent
+        && views.BuildEndpoints().empty();
 }
 
 bool BuildDefaultRenderTest()
@@ -825,7 +919,7 @@ bool BuildDefaultRenderTest()
     if (!session.SendRequest(std::move(firstRequest))) {
         return false;
     }
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
     if (renderWindow->GetRenderCount() != renderCount + 1) {
         return false;
     }
@@ -838,8 +932,8 @@ bool BuildDefaultRenderTest()
     }
     const std::size_t changedRenderCount =
         renderWindow->GetRenderCount();
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
-    interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(interactor);
+    (void)SendTimer(interactor);
     return renderWindow->GetRenderCount() == changedRenderCount;
 }
 
@@ -879,7 +973,7 @@ bool BuildZoomRenderTest()
     }
 
     // 清空 BuildSession 留下的历史 dirty，再单独测右键缩放的 render 来源。
-    endpoint->interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(endpoint->interactor);
     const std::size_t renderCount = renderWindow->GetRenderCount();
     auto* camera = endpoint->renderer->GetActiveCamera();
     const double startScale = camera->GetParallelScale();
@@ -903,10 +997,10 @@ bool BuildZoomRenderTest()
         renderWindow->GetRenderCount() - renderCount;
     const bool hasNoDirectRender =
         directRenderCount == 0;
-    endpoint->interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(endpoint->interactor);
     const bool hasOneTimerRender =
         renderWindow->GetRenderCount() == renderCount + 1;
-    endpoint->interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(endpoint->interactor);
     std::cout
         << "DIAG: zoom moves=" << moveCount
         << " direct_renders=" << directRenderCount
@@ -1266,8 +1360,7 @@ public:
         for (int poll = 0;
             !isReloadComplete && poll < reloadPollCount;
             ++poll) {
-            endpoint->interactor->InvokeEvent(
-                vtkCommand::TimerEvent);
+            (void)SendTimer(endpoint->interactor);
             endpoint->renderWindow->Render();
             QCoreApplication::processEvents();
             std::this_thread::sleep_for(
@@ -1308,7 +1401,7 @@ public:
             strategy.DetachRenderer(renderer);
             return false;
         }
-        TimerProbeService timerProbe;
+        TimerProbePort timerProbe;
         TimeUpdateHandler timerHandler(
             &timerProbe, endpoint->renderWindow);
         InteractionEvent timerEvent;
@@ -1777,8 +1870,7 @@ public:
             if (!m_session->SendRequest(std::move(request))) {
                 return false;
             }
-            endpoint->interactor->InvokeEvent(
-                vtkCommand::TimerEvent);
+            (void)SendTimer(endpoint->interactor);
             return std::abs(
                 endpoint->renderWindow->GetDesiredUpdateRate()
                     - 0.001) < 1e-12;
@@ -1797,8 +1889,8 @@ public:
                 expectedRate);
             const auto sendTimerFrame = [&]() {
                 // 重复置脏必须由一次 Timer 心跳合并成一次可见 Render。
-                timerProbe.SetDirty();
-                timerProbe.SetDirty();
+                timerProbe.SetRenderNeeded();
+                timerProbe.SetRenderNeeded();
                 (void)timerHandler.Send(timerEvent);
             };
             timerProbe.ResetCount();
@@ -2069,8 +2161,7 @@ public:
 
             // Start callback 只镜像 rate；默认 style 的首帧 Render 必须已消费
             // preview。Timer 随后继续以共享 source 为权威状态。
-            endpoint->interactor->InvokeEvent(
-                vtkCommand::TimerEvent);
+            (void)SendTimer(endpoint->interactor);
             const std::thread::id timerRenderThread =
                 m_lastRenderThread;
             const bool isTimerPreview =
@@ -2113,8 +2204,7 @@ public:
 
             endpoint->interactor->InvokeEvent(
                 vtkCommand::RightButtonReleaseEvent);
-            endpoint->interactor->InvokeEvent(
-                vtkCommand::TimerEvent);
+            (void)SendTimer(endpoint->interactor);
             const bool isStyleRestored =
                 std::abs(
                     mapper->GetImageSampleDistance() - 1.0)
@@ -2187,16 +2277,16 @@ public:
         HostViewSetRequest sliceRequest;
         sliceRequest.targetView.viewId = "primary-3d";
         sliceRequest.mode = HostRenderMode::SliceTopDown;
-        sliceRequest.cursor = HostCursorParams{
-            { 24.0, 25.0, 26.0 }, -1
-        };
         sliceRequest.windowLevel =
             HostWindowLevelParams{ 180.0, 90.0 };
+        HostSessionSetRequest cursorRequest;
+        cursorRequest.cursor = HostCursorParams{
+            { 24.0, 25.0, 26.0 }, -1
+        };
         const bool isSliceSent =
-            m_session->SendRequest(
-                std::move(sliceRequest));
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
+            m_session->SendRequest(std::move(cursorRequest))
+            && m_session->SendRequest(std::move(sliceRequest));
+            (void)SendTimer(endpoint->interactor);
         bool hasSliceProp = false;
         auto* sliceProps = renderer->GetViewProps();
         if (sliceProps) {
@@ -2222,8 +2312,7 @@ public:
         const bool isIsoSent =
             m_session->SendRequest(
                 std::move(isoRequest));
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
+        (void)SendTimer(endpoint->interactor);
         bool hasIsoActor = false;
         auto* isoProps = renderer->GetViewProps();
         if (isoProps) {
@@ -2267,8 +2356,7 @@ public:
         const bool isRestoreSent =
             m_session->SendRequest(
                 std::move(restoreRequest));
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
+        (void)SendTimer(endpoint->interactor);
         areSamplesValid =
             isRestoreSent
             && std::abs(
@@ -2433,7 +2521,8 @@ int main(int argc, char* argv[])
             QStringLiteral("--style-quality-only"))) {
         const bool isStyleQualityValid =
             BuildStyleQualityTest()
-            && BuildStyleDestroyTest();
+            && BuildStyleDestroyTest()
+            && BuildLeaseRetryTest();
         std::cout
             << (isStyleQualityValid
                 ? "PASS: Style interaction quality lifecycle\n"
@@ -2460,6 +2549,11 @@ int main(int argc, char* argv[])
         std::cerr
             << "FAIL: Destroyed style retained a live context callback\n";
         return 8;
+    }
+    if (!BuildLeaseRetryTest()) {
+        std::cerr
+            << "FAIL: Failed input stop released the Host runtime\n";
+        return 9;
     }
     if (!BuildDefaultRenderTest()) {
         std::cerr << "FAIL: BuildSession unexpectedly rendered the Qt-owned window\n";

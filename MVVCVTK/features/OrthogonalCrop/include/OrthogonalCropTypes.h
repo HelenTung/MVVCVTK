@@ -5,9 +5,9 @@
 // OrthogonalCropTypes.h — 正交裁切独立插件纯数据结构
 // =====================================================================
 // 类型层只保存公式节点、输入快照、shader transaction 与按需物化结果；
-// 不依赖 VizService、Renderer、Interactor、mapper 或具体窗口对象。
+// 不依赖 App runtime、Renderer、Interactor、mapper 或具体窗口对象。
 
-#include "Render/RenderEffect.h"
+#include "Render/Contracts/RenderEffect.h"
 
 #include <array>
 #include <cstddef>

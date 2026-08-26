@@ -2,7 +2,7 @@
 
 #include "Algorithms/VolumeBuffer.h"
 #include "Algorithms/VoidDetector.h"
-#include "AppInterfaces.h"
+#include "Render/Contracts/OverlayService.h"
 #include "Render/Strategies/GapOverlayStrategies.h"
 
 #include <vtkDataArray.h>
@@ -171,7 +171,9 @@ private:
     mutable std::mutex m_workerMutex;
     // Impl 唯一拥有的 worker 线程；复用或析构前由 owner 接管点 join，禁止越过 Impl 生命周期。
     std::thread m_workerThread;
-    // 取消请求轴：StopAsync 置位，下一次被接受的 StartAsync 清零；worker 仅在阶段边界观察它。
+    // stopMutex 只线性化取消与终态发布；算法内部仍通过原子值协作式观察。
+    mutable std::mutex m_stopMutex;
+    // 取消请求轴：StopAsync 置位，下一次被接受的 StartAsync 清零。
     std::atomic<bool> m_isStopping{ false };
     // 分析执行轴：入口发布 Idle/Running/前置失败，worker 发布终态；它不表达 view/overlay 是否开启。
     std::atomic<int> m_analysisState{ static_cast<int>(GapAnalysisState::Idle) };
@@ -514,9 +516,13 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
         m_result = {};
     }
 
-    // 3. 结果清场完成后再发布新执行状态；清除的只是上一轮取消请求，不改变显示状态轴。
-    m_isStopping.store(false);
-    SetAnalysisState(GapAnalysisState::Running);
+    // 3. 结果清场完成后再发布新执行状态；与 StopAsync 串行后，
+    // 新任务的取消起点和 Running 状态属于同一提交。
+    {
+        std::lock_guard<std::mutex> stopLock(m_stopMutex);
+        m_isStopping.store(false);
+        SetAnalysisState(GapAnalysisState::Running);
+    }
 
     // 4. worker 只捕获不可变输入快照和参数值副本；共享交互仅为读取取消请求并提交结果、状态和 callback 门铃。
     m_workerThread = std::thread(
@@ -528,7 +534,8 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
 }
 
 void GapAnalysisService::Impl::StopAsync() {
-    // 这里只发布协作式取消；worker 在算法阶段之间观察，调用方不能把返回视为线程已退出。
+    // 取消与 worker 的成功发布线性化；返回仍不表示线程已退出。
+    std::lock_guard<std::mutex> stopLock(m_stopMutex);
     m_isStopping.store(true);
 }
 
@@ -654,19 +661,24 @@ bool GapAnalysisService::Impl::StartView(
             return false;
         }
 
-        std::lock_guard<std::mutex> callbackLock(m_callbackMutex);
-        if (m_completionCallback || m_nextCallback
-            || m_hasCallback.load()) {
-            if (!wasViewBound) {
-                ClearViewThread();
-            }
-            return false;
-        }
-
         if (m_workerThread.joinable()) {
             m_workerThread.join();
         }
 
+        {
+            std::lock_guard<std::mutex> callbackLock(m_callbackMutex);
+            if (m_completionCallback || m_nextCallback
+                || m_hasCallback.load()) {
+                if (!wasViewBound) {
+                    ClearViewThread();
+                }
+                return false;
+            }
+        }
+
+        // 取消锁覆盖 Running 提交和线程接纳；构造失败时可以恢复原状态，
+        // 而不会抹除一个已经返回给调用方的并发 StopAsync。
+        std::lock_guard<std::mutex> stopLock(m_stopMutex);
         const auto oldState = GetAnalysisState();
         const bool wasStopping = m_isStopping.load();
         {
@@ -884,6 +896,7 @@ void GapAnalysisService::Impl::StartWorker(
     // worker 只使用按值参数和共享只读输入快照；中间产物保持局部，完整结果在 resultMutex 下单次发布。
     // 阶段边界取消映射为 Failed（启动前取消例外映射为 Idle），算法异常同样映射为 Failed。
     bool isSuccess = false;
+    GapAnalysisResult result;
 
     // worker 尚未进入算法时若快照无效或已收到取消请求，以 Idle 结束并为可选 callback 记录失败。
     if (!inputSnapshot || !inputSnapshot->GetVoxelReady() || m_isStopping.load()) {
@@ -896,29 +909,30 @@ void GapAnalysisService::Impl::StartWorker(
         const GapVolumeBuffer& volBuf = *inputSnapshot;
 
         // 1. 先从只读体素快照构造内部区域；取消只在阶段边界协作式生效。
-        auto interior = VoidDetector::CreateInteriorMask(volBuf, params.surfParams.isoValue);
+        auto interior = VoidDetector::CreateInteriorMask(
+            volBuf, params.surfParams.isoValue, &m_isStopping);
         if (!m_isStopping.load()) {
             // 2. 候选检测只消费本任务参数副本，不读取随后可能更新的服务参数。
-            auto candidates = VoidDetector::BuildCandidates(volBuf, interior, params.voidParams);
+            auto candidates = VoidDetector::BuildCandidates(
+                volBuf, interior, params.voidParams, &m_isStopping);
             if (!m_isStopping.load()) {
                 // 3. 区域、label volume 与 label image 先在 worker 局部完整构造，再一次性提交。
-                GapAnalysisResult result;
                 result.voids = VoidDetector::BuildRegions(
                     volBuf,
                     candidates,
                     params.voidParams,
-                    result.labelVolume);
-                result.labelImage = BuildLabelImage(result.labelVolume, volBuf);
+                    result.labelVolume,
+                    &m_isStopping);
+                if (!m_isStopping.load()) {
+                    result.labelImage = BuildLabelImage(
+                        result.labelVolume, volBuf);
+                }
                 if (result.labelImage
                     && BuildStatistics(
                         volBuf,
                         result.labelVolume,
                         result.statistics)) {
                     result.isSucceeded = true;
-                    {
-                        std::lock_guard<std::mutex> lk(m_resultMutex);
-                        m_result = std::move(result);
-                    }
                     isSuccess = true;
                 }
             }
@@ -931,9 +945,20 @@ void GapAnalysisService::Impl::StartWorker(
         isSuccess = false;
     }
 
-    // 终态先于可选 callback 门铃发布；宿主观察到门铃时可以读取一致的执行状态和结果。
-    SetAnalysisState(isSuccess ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
-    SetCallbackReady(isSuccess);
+    // 终态发布与 StopAsync 串行：取消若先取得锁，本轮不得再提交成功；
+    // worker 若先提交，StopAsync 只会在完整结果、状态和 callback 门铃发布后返回。
+    {
+        std::lock_guard<std::mutex> stopLock(m_stopMutex);
+        if (m_isStopping.load()) {
+            isSuccess = false;
+        }
+        if (isSuccess) {
+            std::lock_guard<std::mutex> resultLock(m_resultMutex);
+            m_result = std::move(result);
+        }
+        SetAnalysisState(isSuccess ? GapAnalysisState::Succeeded : GapAnalysisState::Failed);
+        SetCallbackReady(isSuccess);
+    }
 }
 
 void GapAnalysisService::Impl::StopWorker() {
@@ -1440,10 +1465,24 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
         return nullptr;
     }
 
-    const auto total = static_cast<std::size_t>(volBuf.dims[0])
-        * static_cast<std::size_t>(volBuf.dims[1])
-        * static_cast<std::size_t>(volBuf.dims[2]);
-    if (labelVolume.size() < total) {
+    if (volBuf.dims[0] <= 0 || volBuf.dims[1] <= 0
+        || volBuf.dims[2] <= 0) {
+        return nullptr;
+    }
+    const auto dimX = static_cast<std::size_t>(volBuf.dims[0]);
+    const auto dimY = static_cast<std::size_t>(volBuf.dims[1]);
+    const auto dimZ = static_cast<std::size_t>(volBuf.dims[2]);
+    if (dimX > std::numeric_limits<std::size_t>::max() / dimY) {
+        return nullptr;
+    }
+    const std::size_t slice = dimX * dimY;
+    if (slice > std::numeric_limits<std::size_t>::max() / dimZ) {
+        return nullptr;
+    }
+    const std::size_t total = slice * dimZ;
+    if (total > static_cast<std::size_t>(
+            std::numeric_limits<vtkIdType>::max())
+        || labelVolume.size() < total) {
         return nullptr;
     }
 

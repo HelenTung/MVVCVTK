@@ -1,0 +1,14 @@
+MVVCVTK NOTICE
+
+No general license to copy, modify, or redistribute the MVVCVTK project
+source code or binaries is granted by this repository. Obtain explicit
+authorization from the project owner before distribution.
+
+The versioned dependency bundle contains third-party software, including
+Qt, OpenCV, VTK, and their transitive dependencies. Their license and
+copyright texts are shipped inside the dependency bundle and the packaged
+SDK. Those terms remain applicable and must be preserved when distribution
+is authorized.
+
+The bundled internal UI components are marked internal-only. Possession of
+the bundle does not grant a right to redistribute those components.

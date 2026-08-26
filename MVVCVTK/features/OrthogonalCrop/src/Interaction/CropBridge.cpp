@@ -1,7 +1,7 @@
 #include "Interaction/CropBridge.h"
 
 #include "Algorithms/CropAlgorithm.h"
-#include "AppInterfaces.h"
+#include "App/Services/FeatureViewService.h"
 #include "Interaction/CropBoxWidget.h"
 #include "Interaction/CropPlaneWidget.h"
 #include "Render/CropShaderController.h"
@@ -51,6 +51,14 @@ RenderInputStamp GetInputStamp(const CropInputSnapshot& input)
 }
 }
 
+class CropBridge::PreparedCommit::Impl final {
+public:
+    void* owner = nullptr;
+    CropInputSnapshot input;
+    std::vector<CropOpItem> activeHistory;
+    std::size_t baseNodeCount = 0;
+};
+
 class CropBridge::Impl final {
 public:
     struct ShaderCandidate final {
@@ -61,7 +69,7 @@ public:
     };
 
     struct TargetBinding final {
-        std::shared_ptr<InteractiveService> service;
+        std::shared_ptr<FeatureViewService> service;
         std::shared_ptr<CropShaderEffect> effect;
     };
 
@@ -72,7 +80,7 @@ public:
         CropShaderPayload payload;
         std::vector<TargetBinding> targets;
         std::vector<TargetBinding> retiredTargets;
-        std::shared_ptr<InteractiveService> nextReferenceService;
+        std::shared_ptr<FeatureViewService> nextReferenceService;
         vtkRenderWindowInteractor* nextInteractor = nullptr;
         bool isTargetRebind = false;
     };
@@ -84,12 +92,6 @@ public:
         CropBuildParams params;
     };
 
-    struct PendingBaseline final {
-        CropInputSnapshot input;
-        std::vector<CropOpItem> activeHistory;
-        std::size_t baseNodeCount = 0;
-    };
-
     Impl();
     ~Impl();
 
@@ -99,11 +101,12 @@ public:
         CropInputSnapshot input);
     bool ClearBindings();
     bool SetCropInput(CropInputSnapshot input);
-    bool StartCropBaseline(
+    std::unique_ptr<PreparedCommit::Impl> BuildCropCommit(
         CropInputSnapshot input,
         std::size_t baseNodeCount);
-    bool SetCropBaselineComplete() noexcept;
-    bool ClearCropBaseline();
+    void SetCropCommit(
+        std::unique_ptr<PreparedCommit::Impl> prepared) noexcept;
+    bool SendCropCommit() noexcept;
     bool SwitchCrop(CropShape geometryType);
     bool SetCropMode(CropRemovalMode removalMode);
     bool PreviousCrop();
@@ -120,6 +123,7 @@ public:
         CropBuildCallback onComplete);
     bool GetBuildTickNeeded() const;
     bool SendBuildResult();
+    bool GetLeaseReady() const;
 
 private:
     bool StartViewInput(
@@ -162,7 +166,8 @@ private:
     CropBoxWidget m_boxWidget;
     CropPlaneWidget m_planeWidget;
     CropInputSnapshot m_input;
-    std::shared_ptr<InteractiveService> m_referenceService;
+    std::shared_ptr<FeatureViewService> m_referenceService;
+    std::weak_ptr<const FeatureViewLease> m_lease;
     std::vector<TargetBinding> m_targets;
     std::vector<CropOpItem> m_history;
     std::vector<CropOpItem> m_allHistory;
@@ -174,7 +179,6 @@ private:
     std::deque<CropOpItem> m_pendingOps;
     std::optional<CropRemovalMode> m_pendingMode;
     std::optional<BuildTask> m_buildTask;
-    std::optional<PendingBaseline> m_pendingBaseline;
     std::optional<CropOpItem> m_dragStart;
     CropShape m_geometryType = CropShape::Box;
     CropRemovalMode m_removalMode = CropRemovalMode::None;
@@ -211,11 +215,16 @@ CropBridge::Impl::~Impl()
     m_isAccepting = false;
     m_isActive = false;
     m_hasDrag = false;
-    (void)ClearInteractions();
-    m_boxWidget.SetEnabled(false);
-    m_planeWidget.SetEnabled(false);
-    ClearShader();
-    ClearTargets();
+    const bool hasBindings = m_referenceService || !m_targets.empty();
+    if (hasBindings) {
+        (void)ClearInteractions();
+        m_boxWidget.SetEnabled(false);
+        m_planeWidget.SetEnabled(false);
+        m_boxWidget.SetInteractor(nullptr);
+        m_planeWidget.SetInteractor(nullptr);
+        ClearShader();
+        ClearTargets();
+    }
     if (m_buildTask) {
         if (m_buildTask->worker.joinable()) {
             m_buildTask->worker.join();
@@ -242,17 +251,28 @@ bool CropBridge::Impl::StartViewInput(
     const CropViewRequest& request,
     std::optional<CropInputSnapshot> input)
 {
+    const auto lease = request.lease.lock();
     if (!m_isAccepting
         || m_buildTask
+        || !lease
+        || !lease->GetIsActive()
+        || !lease->GetIsOwnerThread()
         || !request.interactor
         || !request.renderer
         || !request.referenceService
         || (input && !CropAlgorithm::GetInputValid(*input))) {
         return false;
     }
+    const auto currentLease = m_lease.lock();
+    if (currentLease
+        && currentLease.get() != lease.get()
+        && m_referenceService) {
+        return false;
+    }
+    m_lease = lease;
     const bool isInputChanged = input
         && !CropAlgorithm::GetInputSame(m_input, *input);
-    std::vector<std::shared_ptr<InteractiveService>> targetServices;
+    std::vector<std::shared_ptr<FeatureViewService>> targetServices;
     for (const auto& service : request.targetServices) {
         if (!service) {
             continue;
@@ -424,6 +444,11 @@ bool CropBridge::Impl::StartViewInput(
 
 bool CropBridge::Impl::ClearBindings()
 {
+    const auto lease = m_lease.lock();
+    // StopLease 先关闭业务入口，owner thread 随后仍必须能够完成确定性清理。
+    if (!lease || !lease->GetIsOwnerThread()) {
+        return false;
+    }
     // VTK Off 可能在拖拽中同步补发 EndInteraction；先关闭业务 gate，
     // 避免清理过程把未完成交互误写成新的 staged/history 操作。
     m_isActive = false;
@@ -432,11 +457,22 @@ bool CropBridge::Impl::ClearBindings()
     (void)ClearInteractions();
     m_boxWidget.SetEnabled(false);
     m_planeWidget.SetEnabled(false);
+    m_boxWidget.SetInteractor(nullptr);
+    m_planeWidget.SetInteractor(nullptr);
     ClearShader();
     ClearHistory();
     m_referenceService.reset();
     ClearTargets();
+    m_lease.reset();
     return true;
+}
+
+bool CropBridge::Impl::GetLeaseReady() const
+{
+    const auto lease = m_lease.lock();
+    return lease
+        && lease->GetIsActive()
+        && lease->GetIsOwnerThread();
 }
 
 bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
@@ -461,7 +497,8 @@ bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
     return true;
 }
 
-bool CropBridge::Impl::StartCropBaseline(
+std::unique_ptr<CropBridge::PreparedCommit::Impl>
+CropBridge::Impl::BuildCropCommit(
     CropInputSnapshot input,
     const std::size_t baseNodeCount)
 {
@@ -469,103 +506,115 @@ bool CropBridge::Impl::StartCropBaseline(
         || m_buildTask
         || m_pendingShader
         || m_pendingMode
+        || !m_pendingOps.empty()
         || m_hasBaseShader
-        || m_pendingBaseline
         || !CropAlgorithm::GetInputValid(input)
         || input.dataSource != m_input.dataSource
+        || !GetTargetsReady()
         || m_cursor > m_history.size()
         || baseNodeCount > m_allHistory.size()) {
-        return false;
+        return {};
     }
 
     if (m_baseNodeCount + m_history.size()
             != m_allHistory.size()) {
-        return false;
+        return {};
     }
     const std::size_t currentBase =
         m_baseNodeCount + m_cursor;
     if (baseNodeCount != 0
         && baseNodeCount != currentBase) {
-        return false;
+        return {};
     }
-    m_pendingBaseline = PendingBaseline{
-        std::move(input),
-        std::vector<CropOpItem>(
+
+    std::unique_ptr<PreparedCommit::Impl> prepared;
+    try {
+        prepared = std::make_unique<PreparedCommit::Impl>();
+        prepared->owner = this;
+        prepared->input = std::move(input);
+        prepared->activeHistory = std::vector<CropOpItem>(
             m_allHistory.begin() + baseNodeCount,
-            m_allHistory.end()),
-        baseNodeCount
-    };
+            m_allHistory.end());
+        prepared->baseNodeCount = baseNodeCount;
+    }
+    catch (...) {
+        return {};
+    }
+
     std::cout
-        << "[Crop][HistoryObjects] baseline staged"
+        << "[Crop][HistoryObjects] commit prepared"
         << " targetBase=" << baseNodeCount
         << " currentBase=" << currentBase
         << " nextActive="
-        << m_pendingBaseline->activeHistory.size()
+        << prepared->activeHistory.size()
         << " allSize=" << m_allHistory.size()
         << '\n';
-    return true;
+    return prepared;
 }
 
-bool CropBridge::Impl::SetCropBaselineComplete() noexcept
+void CropBridge::Impl::SetCropCommit(
+    std::unique_ptr<PreparedCommit::Impl> prepared) noexcept
 {
-    if (!m_pendingBaseline) {
-        // 这是发布后的无失败完成阶段；若预备状态丢失，继续运行会让
-        // DataManager 与裁切历史永久分裂，因此按内部不变量故障终止。
+    if (!prepared || prepared->owner != this) {
+        // 令牌由 BuildCropCommit 独占产生；错配属于调用协议破坏，不能在数据发布后降级为普通失败。
         std::terminate();
     }
-    auto baseline = std::move(*m_pendingBaseline);
-    m_pendingBaseline.reset();
-    // 旧 Strategy 在全部新输入 binding 就绪前继续显示物化前 committed 节点；
-    // 立即清 active shader 会让相机交互重绘出原始 base node 0。
-    ClearShaderStage();
-    m_input = std::move(baseline.input);
-    m_history = std::move(
-        baseline.activeHistory);
+
+    m_input = std::move(prepared->input);
+    m_history = std::move(prepared->activeHistory);
     m_cursor = 0;
-    m_baseNodeCount =
-        baseline.baseNodeCount;
+    m_baseNodeCount = prepared->baseNodeCount;
     m_draftIndex.reset();
     m_activePayload = {};
+    m_pendingShader.reset();
     m_pendingOps.clear();
+    m_pendingMode.reset();
     m_removalMode = CropRemovalMode::None;
     m_hasDrag = false;
     m_dragStart.reset();
+    // 旧 Strategy 在全部新输入 binding 就绪前继续显示物化前 committed 节点；
+    // 新 View 输入就绪后由 SendCropCommit/SendShaderCommit 清除旧 shader。
     m_hasBaseShader = true;
-
-    const auto worldBounds = GetWorldBounds();
-    if (GetBoundsValid(worldBounds)) {
-        m_boxWidget.SetReferenceWorldBounds(worldBounds);
-        m_boxWidget.SetWidgetWorldBounds(worldBounds);
-        m_planeWidget.SetReferenceWorldBounds(worldBounds);
-    }
-    for (const auto& target : m_targets) {
-        if (target.service) {
-            target.service->SetDirty();
-        }
-    }
-    (void)ClearBaseShader();
-    std::cout
-        << "[Crop][HistoryObjects] baseline complete"
-        << " activeObject="
-        << static_cast<const void*>(&m_history)
-        << " activeData="
-        << static_cast<const void*>(m_history.data())
-        << " activeNode=" << m_cursor
-        << " activeSize=" << m_history.size()
-        << " allObject="
-        << static_cast<const void*>(&m_allHistory)
-        << " allData="
-        << static_cast<const void*>(m_allHistory.data())
-        << " allSize=" << m_allHistory.size()
-        << " baseNode=" << m_baseNodeCount
-        << '\n';
-    return true;
 }
 
-bool CropBridge::Impl::ClearCropBaseline()
+bool CropBridge::Impl::SendCropCommit() noexcept
 {
-    m_pendingBaseline.reset();
-    return true;
+    try {
+        const auto worldBounds = GetWorldBounds();
+        if (GetBoundsValid(worldBounds)) {
+            m_boxWidget.SetReferenceWorldBounds(worldBounds);
+            m_boxWidget.SetWidgetWorldBounds(worldBounds);
+            m_planeWidget.SetReferenceWorldBounds(worldBounds);
+        }
+        bool isSent = true;
+        for (const auto& target : m_targets) {
+            if (target.service) {
+                isSent = target.service->SetRenderNeeded() && isSent;
+            }
+        }
+        // 新 Strategy 可能尚未消费刚发布的 input；未就绪时保留门铃，
+        // 后续 SendShaderCommit 会重试，而不是把已完成提交改报失败。
+        (void)ClearBaseShader();
+        std::cout
+            << "[Crop][HistoryObjects] commit visible"
+            << " activeObject="
+            << static_cast<const void*>(&m_history)
+            << " activeData="
+            << static_cast<const void*>(m_history.data())
+            << " activeNode=" << m_cursor
+            << " activeSize=" << m_history.size()
+            << " allObject="
+            << static_cast<const void*>(&m_allHistory)
+            << " allData="
+            << static_cast<const void*>(m_allHistory.data())
+            << " allSize=" << m_allHistory.size()
+            << " baseNode=" << m_baseNodeCount
+            << '\n';
+        return isSent;
+    }
+    catch (...) {
+        return false;
+    }
 }
 
 bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
@@ -611,7 +660,7 @@ bool CropBridge::Impl::SwitchCrop(const CropShape geometryType)
     // Widget 仅存在于 reference renderer；切换成功后通过 service 门铃请求
     // 下一帧，避免依赖 vtkBoxWidget2/vtkImplicitPlaneWidget2 的偶然 Render 副作用。
     if (isEnabled && m_referenceService) {
-        m_referenceService->SetDirty();
+        (void)m_referenceService->SetRenderNeeded();
     }
     return isEnabled;
 }
@@ -679,6 +728,9 @@ bool CropBridge::Impl::SetCropMode(const CropRemovalMode removalMode)
 
 void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 {
+    if (!GetLeaseReady()) {
+        return;
+    }
     if (!m_isActive
         || m_buildTask
         || m_geometryType != CropShape::Box
@@ -722,6 +774,9 @@ void CropBridge::Impl::OnBoxWidget(const CropInteractionPhase phase)
 
 void CropBridge::Impl::OnPlaneWidget(const CropInteractionPhase phase)
 {
+    if (!GetLeaseReady()) {
+        return;
+    }
     if (!m_isActive
         || m_buildTask
         || m_geometryType != CropShape::Plane
@@ -1040,7 +1095,7 @@ bool CropBridge::Impl::SendShaderCommit()
             continue;
         }
         if (state.status == RenderEffectStatus::Staged) {
-            target.service->SetDirty();
+            (void)target.service->SetRenderNeeded();
         }
         isReady = isReady
             && (state.status == RenderEffectStatus::Ready
@@ -1177,7 +1232,7 @@ bool CropBridge::Impl::SendShaderCommit()
     // 两阶段提交完成后必须再次置脏，下一次 Timer 才会发布新的 committed 前缀。
     for (const auto& target : committedTargets) {
         if (target.service) {
-            target.service->SetDirty();
+            (void)target.service->SetRenderNeeded();
         }
     }
     m_pendingShader.reset();
@@ -1318,16 +1373,21 @@ CropBoundsDouble6Array CropBridge::Impl::GetWorldBounds() const
         std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()
     };
     for (int corner = 0; corner < 8; ++corner) {
-        const double modelPoint[3] = {
+        const std::array<double, 3> modelPoint = {
             m_input.inputModelBounds[(corner & 1) ? 1 : 0],
             m_input.inputModelBounds[(corner & 2) ? 3 : 2],
             m_input.inputModelBounds[(corner & 4) ? 5 : 4]
         };
-        double worldPoint[3] = {};
-        m_referenceService->GetWorldPositionFromModel(modelPoint, worldPoint);
+        const auto worldPoint =
+            m_referenceService->GetWorldPosition(modelPoint);
+        if (!worldPoint) {
+            return {};
+        }
         for (int axis = 0; axis < 3; ++axis) {
-            bounds[axis * 2] = std::min(bounds[axis * 2], worldPoint[axis]);
-            bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], worldPoint[axis]);
+            bounds[axis * 2] = std::min(
+                bounds[axis * 2], (*worldPoint)[axis]);
+            bounds[axis * 2 + 1] = std::max(
+                bounds[axis * 2 + 1], (*worldPoint)[axis]);
         }
     }
     return bounds;
@@ -1338,8 +1398,13 @@ CropMatrixDouble16Array CropBridge::Impl::GetWorldToInput() const
     if (!m_referenceService) {
         return CropAlgorithm::GetIdentityMatrix();
     }
+    const auto modelToWorld =
+        m_referenceService->GetModelToWorld();
+    if (!modelToWorld) {
+        return CropAlgorithm::GetIdentityMatrix();
+    }
     vtkNew<vtkMatrix4x4> matrix;
-    matrix->DeepCopy(m_referenceService->GetModelMatrix().data());
+    matrix->DeepCopy(modelToWorld->data());
     matrix->Invert();
     CropMatrixDouble16Array values = {};
     vtkMatrix4x4::DeepCopy(values.data(), matrix);
@@ -1542,7 +1607,6 @@ void CropBridge::Impl::ClearHistory()
     m_hasBaseShader = false;
     m_activePayload = {};
     m_pendingShader.reset();
-    m_pendingBaseline.reset();
 }
 
 bool CropBridge::Impl::GetShaderCommitted() const
@@ -1570,11 +1634,12 @@ bool CropBridge::Impl::GetTargetsReady() const
             m_targets.begin(),
             m_targets.end(),
             [&inputStamp](const auto& target) {
-                return target.service
-                    && target.effect
-                    && target.service
-                        ->GetRenderInputStamp()
-                        == inputStamp;
+                if (!target.service || !target.effect) {
+                    return false;
+                }
+                const auto stamp =
+                    target.service->GetRenderInputStamp();
+                return stamp && *stamp == inputStamp;
             });
 }
 
@@ -1600,7 +1665,7 @@ bool CropBridge::Impl::ClearBaseShader()
     m_hasBaseShader = false;
     for (const auto& target : m_targets) {
         if (target.service) {
-            target.service->SetDirty();
+            (void)target.service->SetRenderNeeded();
         }
     }
     std::cout
@@ -1642,7 +1707,7 @@ bool CropBridge::Impl::SetWidgetActive(
         isSet = false;
     }
     if (m_referenceService) {
-        m_referenceService->SetDirty();
+        (void)m_referenceService->SetRenderNeeded();
     }
     return isSet;
 }
@@ -1727,7 +1792,7 @@ bool CropBridge::Impl::ExitCrop()
     // 当前 committed 节点保持不变；这里只发布一帧，让 reference renderer
     // 在 Timer 渲染链中刷新已经关闭的 Box/Plane 控件。
     if (m_referenceService) {
-        m_referenceService->SetDirty();
+        (void)m_referenceService->SetRenderNeeded();
     }
     return true;
 }
@@ -1789,6 +1854,17 @@ CropHistoryState CropBridge::Impl::GetCropHistory() const
     };
 }
 
+CropBridge::PreparedCommit::PreparedCommit(
+    std::unique_ptr<PreparedCommit::Impl> impl) noexcept
+    : m_impl(std::move(impl))
+{
+}
+
+CropBridge::PreparedCommit::~PreparedCommit() = default;
+CropBridge::PreparedCommit::PreparedCommit(PreparedCommit&&) noexcept = default;
+CropBridge::PreparedCommit&
+CropBridge::PreparedCommit::operator=(PreparedCommit&&) noexcept = default;
+
 CropBridge::CropBridge()
     : m_impl(std::make_unique<Impl>())
 {
@@ -1804,35 +1880,103 @@ bool CropBridge::StartView(
     return m_impl->StartView(request, std::move(input));
 }
 bool CropBridge::ClearBindings() { return m_impl->ClearBindings(); }
-bool CropBridge::SetCropInput(CropInputSnapshot input) { return m_impl->SetCropInput(std::move(input)); }
-bool CropBridge::StartCropBaseline(
+bool CropBridge::SetCropInput(CropInputSnapshot input)
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SetCropInput(std::move(input));
+}
+std::optional<CropBridge::PreparedCommit>
+CropBridge::BuildCropCommit(
     CropInputSnapshot input,
     const std::size_t baseNodeCount)
 {
-    return m_impl->StartCropBaseline(
+    if (!m_impl->GetLeaseReady()) return std::nullopt;
+    auto prepared = m_impl->BuildCropCommit(
         std::move(input), baseNodeCount);
+    if (!prepared) return std::nullopt;
+    return PreparedCommit(std::move(prepared));
 }
-bool CropBridge::SetCropBaselineComplete() noexcept { return m_impl->SetCropBaselineComplete(); }
-bool CropBridge::ClearCropBaseline() { return m_impl->ClearCropBaseline(); }
-bool CropBridge::SwitchCropBox() { return m_impl->SwitchCrop(CropShape::Box); }
-bool CropBridge::SwitchCropPlane() { return m_impl->SwitchCrop(CropShape::Plane); }
-bool CropBridge::SetCropMode(const CropRemovalMode removalMode) { return m_impl->SetCropMode(removalMode); }
-bool CropBridge::PreviousCrop() { return m_impl->PreviousCrop(); }
-bool CropBridge::NextCrop() { return m_impl->NextCrop(); }
-bool CropBridge::SetCropNode(const std::size_t nodeCount) { return m_impl->SetCropNode(nodeCount); }
-bool CropBridge::ExitCrop() { return m_impl->ExitCrop(); }
-bool CropBridge::GetCropActive() const { return m_impl->GetCropActive(); }
-bool CropBridge::GetCropBound() const { return m_impl->GetCropBound(); }
-CropHistoryState CropBridge::GetCropHistory() const { return m_impl->GetCropHistory(); }
-bool CropBridge::GetShaderTickNeeded() const { return m_impl->GetShaderTickNeeded(); }
-bool CropBridge::SendShaderCommit() { return m_impl->SendShaderCommit(); }
+void CropBridge::SetCropCommit(PreparedCommit&& prepared) noexcept
+{
+    m_impl->SetCropCommit(std::move(prepared.m_impl));
+}
+bool CropBridge::SendCropCommit() noexcept
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SendCropCommit();
+}
+bool CropBridge::SwitchCropBox()
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SwitchCrop(CropShape::Box);
+}
+bool CropBridge::SwitchCropPlane()
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SwitchCrop(CropShape::Plane);
+}
+bool CropBridge::SetCropMode(const CropRemovalMode removalMode)
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SetCropMode(removalMode);
+}
+bool CropBridge::PreviousCrop()
+{
+    return m_impl->GetLeaseReady() && m_impl->PreviousCrop();
+}
+bool CropBridge::NextCrop()
+{
+    return m_impl->GetLeaseReady() && m_impl->NextCrop();
+}
+bool CropBridge::SetCropNode(const std::size_t nodeCount)
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SetCropNode(nodeCount);
+}
+bool CropBridge::ExitCrop()
+{
+    return m_impl->GetLeaseReady() && m_impl->ExitCrop();
+}
+bool CropBridge::GetCropActive() const
+{
+    return m_impl->GetLeaseReady() && m_impl->GetCropActive();
+}
+bool CropBridge::GetCropBound() const
+{
+    return m_impl->GetLeaseReady() && m_impl->GetCropBound();
+}
+CropHistoryState CropBridge::GetCropHistory() const
+{
+    return m_impl->GetLeaseReady()
+        ? m_impl->GetCropHistory()
+        : CropHistoryState{};
+}
+bool CropBridge::GetShaderTickNeeded() const
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->GetShaderTickNeeded();
+}
+bool CropBridge::SendShaderCommit()
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SendShaderCommit();
+}
 bool CropBridge::BuildCropResult(
     CropInputSnapshot rootInput,
     CropBuildCallback onComplete)
 {
-    return m_impl->BuildCropResult(
+    return m_impl->GetLeaseReady()
+        && m_impl->BuildCropResult(
         std::move(rootInput),
         std::move(onComplete));
 }
-bool CropBridge::GetBuildTickNeeded() const { return m_impl->GetBuildTickNeeded(); }
-bool CropBridge::SendBuildResult() { return m_impl->SendBuildResult(); }
+bool CropBridge::GetBuildTickNeeded() const
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->GetBuildTickNeeded();
+}
+bool CropBridge::SendBuildResult()
+{
+    return m_impl->GetLeaseReady()
+        && m_impl->SendBuildResult();
+}

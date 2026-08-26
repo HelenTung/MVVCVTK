@@ -3,34 +3,49 @@
 #include "Algorithms/CropAlgorithm.h"
 #include "AppState.h"
 #include "AppStateEvents.h"
+#include "App/Services/AppServiceFactory.h"
+#include "App/Services/AppPorts.h"
 #include "Data/DataManager.h"
 #include "Data/VolumeTypes.h"
+#include "Host/HostCommandRouter.h"
+#include "Host/HostCoreServices.h"
+#include "Host/HostViewRuntimeRegistry.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "PlanarTestSuites.h"
 #include "Render/CropShaderController.h"
+#include "Render/Contracts/RenderStrategyFactory.h"
+#include "Render/Strategies/CompositeStrategy.h"
+#include "Render/Strategies/IsoSurfaceStrategy.h"
+#include "Render/Strategies/SliceStrategy.h"
 #include "Render/Strategies/VolumeStrategy.h"
-#include "Services/AppService.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include <vtkActor.h>
+#include <vtkCamera.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCell.h>
 #include <vtkCommand.h>
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkImageData.h>
+#include <vtkMatrix4x4.h>
 #include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
 #include <vtkPLYReader.h>
@@ -53,16 +68,125 @@ void SetExpect(bool isPassed, const char* message, int& failureCount)
     std::cerr << "[AppTaskTests] " << message << '\n';
 }
 
+StrategyCreate GetStrategyFactory()
+{
+    return [](const VizMode mode)
+        -> std::shared_ptr<AbstractVisualStrategy> {
+        switch (mode) {
+        case VizMode::Volume:
+            return std::make_shared<VolumeStrategy>();
+        case VizMode::IsoSurface:
+            return std::make_shared<IsoSurfaceStrategy>();
+        case VizMode::SliceTop_down:
+            return std::make_shared<SliceStrategy>(Orientation::Top_down);
+        case VizMode::SliceFront_back:
+            return std::make_shared<SliceStrategy>(Orientation::Front_back);
+        case VizMode::SliceLeft_right:
+            return std::make_shared<SliceStrategy>(Orientation::Left_right);
+        case VizMode::CompositeVolume:
+            return std::make_shared<CompositeStrategy>(
+                std::make_shared<VolumeStrategy>());
+        case VizMode::CompositeIsoSurface:
+            return std::make_shared<CompositeStrategy>(
+                std::make_shared<IsoSurfaceStrategy>());
+        default:
+            return nullptr;
+        }
+    };
+}
+
+class FailVisualStrategy final : public VolumeStrategy {
+public:
+    explicit FailVisualStrategy(
+        std::shared_ptr<std::atomic<int>> attachCount)
+        : m_attachCount(std::move(attachCount))
+    {
+    }
+
+    void AttachRenderer(
+        vtkSmartPointer<vtkRenderer> renderer) override
+    {
+        if (m_attachCount) ++(*m_attachCount);
+        VolumeStrategy::AttachRenderer(std::move(renderer));
+        throw std::runtime_error("intentional strategy attach failure");
+    }
+
+private:
+    std::shared_ptr<std::atomic<int>> m_attachCount;
+};
+
+struct VisualStateCapture final {
+    RenderParams params;
+    UpdateFlags flags = UpdateFlags::None;
+    int setCount = 0;
+};
+
+class CaptureVisualStrategy final : public VolumeStrategy {
+public:
+    explicit CaptureVisualStrategy(
+        std::shared_ptr<VisualStateCapture> capture)
+        : m_capture(std::move(capture))
+    {
+    }
+
+    void SetVisualState(
+        const RenderParams& params,
+        const UpdateFlags flags) override
+    {
+        if (m_capture) {
+            m_capture->params = params;
+            m_capture->flags = flags;
+            ++m_capture->setCount;
+        }
+        VolumeStrategy::SetVisualState(params, flags);
+    }
+
+private:
+    std::shared_ptr<VisualStateCapture> m_capture;
+};
+
 class DataStub final : public AbstractDataManager {
 protected:
-    ImageSnapshot GetImageSnapshot() const override { return imageSnapshot; }
+    TrustedImageSnapshot GetImageSnapshot() const override { return imageSnapshot; }
 
 public:
     vtkSmartPointer<vtkImageData> GetVtkImage() const override { return nullptr; }
-    ImageState GetImageState() const override { return {}; }
+    TrustedImageState GetImageState() const override { return {}; }
+    std::optional<ImageReadState> GetImageReadState() const override
+    {
+        return std::nullopt;
+    }
+    ImageReadResult GetImageReadResult(std::size_t) const override
+    {
+        return {};
+    }
+    ImageReadResult GetImageReadResult(
+        const ImageReadRequest&,
+        const TaskStopToken&) const override
+    {
+        return {};
+    }
+    ImageReadChunkResult GetImageReadChunk(
+        const ImageReadRequest&,
+        std::size_t,
+        const TaskStopToken&) const override
+    {
+        return {};
+    }
+    bool SetCurrentData(
+        TrustedImageState,
+        const TrustedImageSnapshot&,
+        TrustedImageSnapshot& publishedSnapshot) override
+    {
+        publishedSnapshot.reset();
+        return false;
+    }
     std::array<double, 2> GetScalarRange() const override { return { 0.0, 0.0 }; }
     std::array<double, 3> GetSpacing() const override { return { 1.0, 1.0, 1.0 }; }
-    bool SetSpacing(const std::array<double, 3>&) override { return true; }
+    bool SetSpacing(const std::array<double, 3>& spacing) override
+    {
+        return setSpacingCall ? setSpacingCall(spacing) : true;
+    }
     DataVersion GetDataVersion() const override { return 0; }
 
     bool SetDataLoaded(const std::string& path, const VolumeLayout& layout) override
@@ -88,7 +212,7 @@ public:
     }
     bool ClearPending() override { return true; }
     bool ExportData(
-        const ImageSnapshot& snapshot,
+        const TrustedImageSnapshot& snapshot,
         const std::string& outputDir,
         const DataExportParams& params) override
     {
@@ -97,16 +221,32 @@ public:
         exportedParams = params;
         return true;
     }
+    bool ExportData(
+        const TrustedImageSnapshot& snapshot,
+        const std::string& outputDir,
+        const DataExportParams& params,
+        const TaskStopToken& stopToken) override
+    {
+        if (exportCall) return exportCall(stopToken);
+        return AbstractDataManager::ExportData(
+            snapshot,
+            outputDir,
+            params,
+            stopToken);
+    }
     bool ExportSlices(const std::string&, Orientation, const WindowLevelParams&,
         const std::array<double, 16>&) override { return false; }
 
-    ImageSnapshot imageSnapshot;
-    ImageSnapshot exportedSnapshot;
+    TrustedImageSnapshot imageSnapshot;
+    TrustedImageSnapshot exportedSnapshot;
     std::string exportedDir;
     DataExportParams exportedParams;
     std::string loadedPath;
     std::array<int, 3> loadedDims{};
     std::vector<float> loadedVoxels;
+    std::function<bool(const std::array<double, 3>&)>
+        setSpacingCall;
+    std::function<bool(const TaskStopToken&)> exportCall;
     bool isLoadSuccess = true;
     bool isThrowNeeded = false;
 };
@@ -127,9 +267,9 @@ public:
     }
 
     bool SetCandidate(
-        ImageState state,
-        const ImageSnapshot& expectedSnapshot,
-        ImageSnapshot& publishedSnapshot)
+        TrustedImageState state,
+        const TrustedImageSnapshot& expectedSnapshot,
+        TrustedImageSnapshot& publishedSnapshot)
     {
         return SetCurrentData(
             std::move(state),
@@ -137,7 +277,7 @@ public:
             publishedSnapshot);
     }
 
-    ImageSnapshot GetSnapshot() const
+    TrustedImageSnapshot GetSnapshot() const
     {
         return GetImageSnapshot();
     }
@@ -178,7 +318,7 @@ void StartOwningTasks(int& failureCount)
     SetExpect(reloadTask.has_value(), "owning reload task must be built", failureCount);
     if (reloadTask) {
         auto result = reloadTask->get_future();
-        (*reloadTask)();
+        (*reloadTask)(TaskStopToken{});
         SetExpect(result.get() && dataManager->loadedVoxels
             == std::vector<float>({ 0, 1, 2, 3, 4, 5, 6, 7 }),
             "task must retain voxels after caller storage is destroyed", failureCount);
@@ -188,7 +328,7 @@ void StartOwningTasks(int& failureCount)
     SetExpect(fileTask.has_value(), "file task must be built", failureCount);
     if (fileTask) {
         auto result = fileTask->get_future();
-        (*fileTask)();
+        (*fileTask)(TaskStopToken{});
         SetExpect(result.get() && dataManager->loadedPath == "volume.raw"
             && dataManager->loadedDims == std::array<int, 3>{ 2, 2, 2 },
             "file task must retain path and layout", failureCount);
@@ -198,7 +338,7 @@ void StartOwningTasks(int& failureCount)
     auto failedTask = service.BuildLoadFileTask("throw.raw", *layout);
     if (failedTask) {
         auto result = failedTask->get_future();
-        (*failedTask)();
+        (*failedTask)(TaskStopToken{});
         SetExpect(!result.get(), "worker exceptions must become false", failureCount);
     }
 }
@@ -227,7 +367,7 @@ void StartExportSnapshot(int& failureCount)
     auto dataManager =
         std::make_shared<DataStub>();
     auto firstState =
-        std::make_shared<ImageState>();
+        std::make_shared<TrustedImageState>();
     firstState->image = BuildExportImage();
     firstState->version = 1;
     dataManager->imageSnapshot = firstState;
@@ -237,7 +377,9 @@ void StartExportSnapshot(int& failureCount)
     auto state =
         std::make_shared<SharedInteractionState>(
             broadcaster);
-    state->SetIsoValue(2.5);
+    auto viewState =
+        std::make_shared<ViewPresentationState>();
+    viewState->SetIsoValue(2.5);
     const std::array<double, 16> firstMatrix = {
         1.0, 0.0, 0.0, 10.0,
         0.0, 1.0, 0.0, 20.0,
@@ -246,21 +388,21 @@ void StartExportSnapshot(int& failureCount)
     };
     state->SetModelMatrix(firstMatrix);
     state->SetScalarRange(0.0, 9.0);
-    state->SetTFNodes({
+    viewState->SetTFNodes({
         { 0.0, 1.0, 0.0, 1.0, 0.0 },
         { 1.0, 1.0, 0.0, 1.0, 1.0 }
     });
     AppDataExportTaskService service(
-        dataManager, state);
+        dataManager, state, viewState);
     auto task = service.BuildDataTask(
         "exports", ".ply");
 
     auto secondState =
-        std::make_shared<ImageState>();
+        std::make_shared<TrustedImageState>();
     secondState->image = BuildExportImage();
     secondState->version = 2;
     dataManager->imageSnapshot = secondState;
-    state->SetIsoValue(4.5);
+    viewState->SetIsoValue(4.5);
     state->SetModelMatrix({
         1.0, 0.0, 0.0, -10.0,
         0.0, 1.0, 0.0, -20.0,
@@ -268,7 +410,7 @@ void StartExportSnapshot(int& failureCount)
         0.0, 0.0, 0.0, 1.0
     });
     state->SetScalarRange(-10.0, 10.0);
-    state->SetTFNodes({
+    viewState->SetTFNodes({
         { 0.0, 1.0, 1.0, 0.0, 0.0 },
         { 1.0, 1.0, 0.0, 0.0, 1.0 }
     });
@@ -278,7 +420,7 @@ void StartExportSnapshot(int& failureCount)
         failureCount);
     if (!task) return;
     auto result = task->get_future();
-    (*task)();
+    (*task)(TaskStopToken{});
     SetExpect(result.get()
             && dataManager->exportedSnapshot
                 == firstState
@@ -295,6 +437,152 @@ void StartExportSnapshot(int& failureCount)
             && dataManager->exportedParams.tfNodes[0].g == 1.0
             && dataManager->exportedParams.tfNodes[1].b == 1.0,
         "data export must preserve target and admission-time snapshots",
+        failureCount);
+}
+
+void StartBoundedTasks(int& failureCount)
+{
+    TaskStopSource source;
+    const auto token = source.GetToken();
+    SetExpect(!token.GetIsStopped()
+            && source.Stop()
+            && token.GetIsStopped(),
+        "stop token must share cancellation state",
+        failureCount);
+
+    auto dataManager = std::make_shared<DataStub>();
+    auto imageState = std::make_shared<TrustedImageState>();
+    imageState->image = BuildExportImage();
+    imageState->version = 1;
+    dataManager->imageSnapshot = imageState;
+
+    std::mutex taskMutex;
+    std::condition_variable taskChanged;
+    int startedCount = 0;
+    dataManager->exportCall = [&](const TaskStopToken& stopToken) {
+        std::unique_lock<std::mutex> lock(taskMutex);
+        ++startedCount;
+        taskChanged.notify_all();
+        while (!stopToken.GetIsStopped()) {
+            taskChanged.wait_for(
+                lock, std::chrono::milliseconds(1));
+        }
+        return false;
+    };
+
+    std::atomic<int> workerCount{ 0 };
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState =
+        std::make_shared<SharedInteractionState>(broadcaster);
+    args.eventSource = broadcaster;
+    args.workerStart = [&workerCount](AppWorkerWork work) {
+        ++workerCount;
+        return std::thread(std::move(work));
+    };
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.data || !ports.taskControl) {
+        SetExpect(false,
+            "bounded executor needs data and task control ports",
+            failureCount);
+        return;
+    }
+
+    std::atomic<int> callbackCount{ 0 };
+    const auto callback = [&callbackCount](bool) {
+        ++callbackCount;
+    };
+    const auto first = ports.app.data->ExportDataAsync(
+        "bounded-a", ".raw", callback);
+    const auto second = ports.app.data->ExportDataAsync(
+        "bounded-b", ".raw", callback);
+    bool areWorkersStarted = false;
+    {
+        std::unique_lock<std::mutex> lock(taskMutex);
+        areWorkersStarted = taskChanged.wait_for(
+            lock,
+            std::chrono::seconds(1),
+            [&startedCount] { return startedCount == 2; });
+    }
+    const auto third = ports.app.data->ExportDataAsync(
+        "bounded-c", ".raw", callback);
+    const bool isStopStarted = ports.taskControl->SetTaskStopping();
+    const bool isStopped = ports.taskControl->StopTasks(
+        std::chrono::steady_clock::now()
+            + std::chrono::seconds(1));
+    const auto afterStop = ports.app.data->ExportDataAsync(
+        "bounded-d", ".raw", callback);
+    SetExpect(workerCount.load() == 3
+            && first == TaskAdmissionResult::Accepted
+            && second == TaskAdmissionResult::Accepted
+            && areWorkersStarted
+            && third == TaskAdmissionResult::QueueFull
+            && isStopStarted && isStopped
+            && afterStop == TaskAdmissionResult::Stopping
+            && callbackCount.load() == 0,
+        "fixed workers must bound admission and cooperatively stop",
+        failureCount);
+
+    auto blockedData = std::make_shared<DataStub>();
+    auto blockedState = std::make_shared<TrustedImageState>();
+    blockedState->image = BuildExportImage();
+    blockedState->version = 1;
+    blockedData->imageSnapshot = blockedState;
+    std::mutex blockMutex;
+    std::condition_variable blockChanged;
+    bool isBlockStarted = false;
+    bool isBlockReleased = false;
+    blockedData->exportCall = [&](const TaskStopToken&) {
+        std::unique_lock<std::mutex> lock(blockMutex);
+        isBlockStarted = true;
+        blockChanged.notify_all();
+        blockChanged.wait(lock, [&isBlockReleased] {
+            return isBlockReleased;
+        });
+        return false;
+    };
+
+    auto blockedBroadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    AppServiceArgs blockedArgs;
+    blockedArgs.dataManager = blockedData;
+    blockedArgs.interactionState =
+        std::make_shared<SharedInteractionState>(
+            blockedBroadcaster);
+    blockedArgs.eventSource = blockedBroadcaster;
+    auto blockedPorts = CreateAppPorts(std::move(blockedArgs));
+    const auto blockedAdmission = blockedPorts.app.data
+        ? blockedPorts.app.data->ExportDataAsync(
+            "blocked", ".raw", {})
+        : TaskAdmissionResult::Unavailable;
+    bool didBlockStart = false;
+    {
+        std::unique_lock<std::mutex> lock(blockMutex);
+        didBlockStart = blockChanged.wait_for(
+            lock,
+            std::chrono::seconds(1),
+            [&isBlockStarted] { return isBlockStarted; });
+    }
+    const bool isDeadlineKept = blockedPorts.taskControl
+        && blockedPorts.taskControl->SetTaskStopping()
+        && !blockedPorts.taskControl->StopTasks(
+            std::chrono::steady_clock::now()
+                + std::chrono::milliseconds(50));
+    {
+        const std::lock_guard<std::mutex> lock(blockMutex);
+        isBlockReleased = true;
+    }
+    blockChanged.notify_all();
+    const bool isRetryStopped = blockedPorts.taskControl
+        && blockedPorts.taskControl->StopTasks(
+            std::chrono::steady_clock::now()
+                + std::chrono::seconds(1));
+    SetExpect(blockedAdmission == TaskAdmissionResult::Accepted
+            && didBlockStart
+            && isDeadlineKept
+            && isRetryStopped,
+        "stop deadline must retain a blocked executor for retry",
         failureCount);
 }
 
@@ -692,7 +980,7 @@ void StartExportFiles(int& failureCount)
         failureCount);
 
     auto maskedState =
-        std::make_shared<ImageState>(*snapshot);
+        std::make_shared<TrustedImageState>(*snapshot);
     auto emptyMask =
         vtkSmartPointer<vtkImageData>::New();
     emptyMask->CopyStructure(snapshot->image);
@@ -714,7 +1002,7 @@ void StartExportFiles(int& failureCount)
         failureCount);
 
     auto partialState =
-        std::make_shared<ImageState>(*snapshot);
+        std::make_shared<TrustedImageState>(*snapshot);
     auto partialMask =
         vtkSmartPointer<vtkImageData>::New();
     partialMask->CopyStructure(snapshot->image);
@@ -754,7 +1042,7 @@ void StartExportFiles(int& failureCount)
         failureCount);
 
     auto mismatchState =
-        std::make_shared<ImageState>(*snapshot);
+        std::make_shared<TrustedImageState>(*snapshot);
     auto mismatchMask =
         vtkSmartPointer<vtkImageData>::New();
     mismatchMask->DeepCopy(partialMask);
@@ -838,9 +1126,9 @@ void StartMaskSnapshot(int& failureCount)
     maskValues[0] = 255;
     maskValues[1] = 0;
 
-    ImageState candidate = *expected;
+    TrustedImageState candidate = *expected;
     candidate.validityMask = mask;
-    ImageSnapshot publishedSnapshot;
+    TrustedImageSnapshot publishedSnapshot;
     SetExpect(dataManager.SetCandidate(
             candidate,
             expected,
@@ -852,7 +1140,7 @@ void StartMaskSnapshot(int& failureCount)
             && current->version == expected->version + 1
             && current->validityMask.GetPointer()
                 == mask.GetPointer(),
-        "published mask should share the current ImageState version",
+        "published mask should share the current TrustedImageState version",
         failureCount);
     const auto currentVersion =
         current ? current->version : 0;
@@ -907,6 +1195,360 @@ void StartMaskSnapshot(int& failureCount)
     std::filesystem::remove_all(outputDir, error);
 }
 
+void StartFactoryAdmission(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 2, 2);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    SetExpect(dataManager->SetInitial(image),
+        "factory admission needs an initial image",
+        failureCount);
+
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    const StrategyCreate factory = GetStrategyFactory();
+    SetExpect(std::dynamic_pointer_cast<VolumeStrategy>(
+            factory(VizMode::Volume))
+            && std::dynamic_pointer_cast<IsoSurfaceStrategy>(
+                factory(VizMode::IsoSurface))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                factory(VizMode::SliceTop_down))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                factory(VizMode::SliceFront_back))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                factory(VizMode::SliceLeft_right))
+            && std::dynamic_pointer_cast<CompositeStrategy>(
+                factory(VizMode::CompositeVolume))
+            && std::dynamic_pointer_cast<CompositeStrategy>(
+                factory(VizMode::CompositeIsoSurface)),
+        "test seam should map all seven concrete strategy types",
+        failureCount);
+    SetExpect(std::dynamic_pointer_cast<VolumeStrategy>(
+            CreateRenderStrategy(VizMode::Volume))
+            && std::dynamic_pointer_cast<IsoSurfaceStrategy>(
+                CreateRenderStrategy(VizMode::IsoSurface))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                CreateRenderStrategy(VizMode::SliceTop_down))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                CreateRenderStrategy(VizMode::SliceFront_back))
+            && std::dynamic_pointer_cast<SliceStrategy>(
+                CreateRenderStrategy(VizMode::SliceLeft_right))
+            && std::dynamic_pointer_cast<CompositeStrategy>(
+                CreateRenderStrategy(VizMode::CompositeVolume))
+            && std::dynamic_pointer_cast<CompositeStrategy>(
+                CreateRenderStrategy(VizMode::CompositeIsoSurface))
+            && !CreateRenderStrategy(
+                static_cast<VizMode>(-1)),
+        "Render factory should map seven modes and reject invalid values",
+        failureCount);
+}
+
+void StartObserverGate(int& failureCount)
+{
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    AppServiceArgs args;
+    args.dataManager = std::make_shared<DataStub>();
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    const bool isBound = ports.renderBind
+        && ports.renderBind->SetRenderTarget(
+            renderWindow, renderer);
+
+    std::atomic<bool> isStarted{ false };
+    std::atomic<bool> isStopped{ false };
+    std::atomic<int> sendCount{ 0 };
+    std::thread sender([&]() {
+        isStarted = true;
+        while (!isStopped.load()) {
+            broadcaster->SendFlags(UpdateFlags::Material);
+            ++sendCount;
+        }
+    });
+    while (!isStarted.load()) {
+        std::this_thread::yield();
+    }
+
+    // 析构先关闭 observer gate，并等待已进入的回调离开；随后广播只能清理过期订阅。
+    ports = {};
+    isStopped = true;
+    sender.join();
+    broadcaster->SendFlags(UpdateFlags::Material);
+    SetExpect(isBound && sendCount.load() > 0,
+        "App runtime destruction must close concurrent observer callbacks",
+        failureCount);
+}
+
+void StartCandidateParams(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataStub>();
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    state->SetScalarRange(100.0, 200.0);
+    state->SetCursorRawWorld(9.0, 8.0, 7.0);
+    state->SetCursorWorld(9.0, 8.0, 7.0);
+    state->SetCursorAxis(2);
+
+    auto capture = std::make_shared<VisualStateCapture>();
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    args.strategyCreate = [capture](VizMode)
+        -> std::shared_ptr<AbstractVisualStrategy> {
+        return std::make_shared<CaptureVisualStrategy>(capture);
+    };
+    auto ports = CreateAppPorts(std::move(args));
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->SetSize(32, 32);
+    renderWindow->AddRenderer(renderer);
+    const bool isBound = ports.renderBind
+        && ports.renderBind->SetRenderTarget(
+            renderWindow, renderer);
+
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 2, 2);
+    image->SetSpacing(2.0, 3.0, 4.0);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    const std::array<float, 8> values = {
+        -3.0f, -2.0f, -1.0f, 0.0f,
+        1.0f, 2.0f, 3.0f, 5.0f
+    };
+    std::copy(
+        values.begin(), values.end(),
+        static_cast<float*>(image->GetScalarPointer()));
+    image->GetPointData()->GetScalars()->Modified();
+    image->Modified();
+
+    auto imageState = std::make_shared<TrustedImageState>();
+    imageState->image = image;
+    imageState->dims = { 2, 2, 2 };
+    imageState->spacing = { 2.0, 3.0, 4.0 };
+    imageState->scalarRange = { -3.0, 5.0 };
+    imageState->version = 7;
+    const TrustedImageSnapshot snapshot = imageState;
+    const bool isBuilt = ports.dataStage
+        && ports.dataStage->BuildDataStage(snapshot);
+    const bool hasNextParams = capture->setCount > 0
+        && capture->flags == UpdateFlags::All
+        && capture->params.scalarRange[0] == -3.0
+        && capture->params.scalarRange[1] == 5.0
+        && capture->params.cursor
+            == std::array<double, 3>{ 1.0, 1.5, 2.0 }
+        && capture->params.cursorRaw
+            == std::array<double, 3>{ 1.0, 1.5, 2.0 }
+        && capture->params.cursorAxis == -1
+        && capture->params.windowLevel.windowWidth == 8.0
+        && capture->params.windowLevel.windowCenter == 1.0;
+    const bool isSharedUnchanged =
+        state->GetScalarRange()
+            == std::array<double, 2>{ 100.0, 200.0 }
+        && state->GetCursorWorld()
+            == std::array<double, 3>{ 9.0, 8.0, 7.0 }
+        && state->GetCursorRawWorld()
+            == std::array<double, 3>{ 9.0, 8.0, 7.0 }
+        && state->GetCursorAxis() == 2;
+    const bool isCleared = ports.dataStage
+        && ports.dataStage->ClearDataStage();
+
+    std::fill_n(
+        static_cast<float*>(image->GetScalarPointer()),
+        values.size(), 12.0f);
+    image->GetPointData()->GetScalars()->Modified();
+    image->Modified();
+    imageState = std::make_shared<TrustedImageState>();
+    imageState->image = image;
+    imageState->dims = { 2, 2, 2 };
+    imageState->spacing = { 2.0, 3.0, 4.0 };
+    imageState->scalarRange = { 12.0, 12.0 };
+    imageState->version = 8;
+    const TrustedImageSnapshot constantSnapshot = imageState;
+    const int oldSetCount = capture->setCount;
+    const bool isConstantBuilt = ports.dataStage
+        && ports.dataStage->BuildDataStage(constantSnapshot);
+    const bool hasConstantWindow = capture->setCount > oldSetCount
+        && std::isfinite(
+            capture->params.windowLevel.windowWidth)
+        && capture->params.windowLevel.windowWidth > 0.0
+        && capture->params.windowLevel.windowCenter == 12.0;
+    const bool isConstantCleared = ports.dataStage
+        && ports.dataStage->ClearDataStage();
+
+    SetExpect(isBound
+            && isBuilt
+            && hasNextParams
+            && isSharedUnchanged
+            && isCleared
+            && isConstantBuilt
+            && hasConstantWindow
+            && isConstantCleared,
+        "candidate strategy must receive next data facts and a safe auto window before publish",
+        failureCount);
+}
+
+void StartPipelineRollback(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    SetExpect(dataManager->SetInitial(image),
+        "pipeline rollback needs an initial image",
+        failureCount);
+
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    auto failAttachCount =
+        std::make_shared<std::atomic<int>>(0);
+    const StrategyCreate failFactory =
+        [failAttachCount](const VizMode mode)
+            -> std::shared_ptr<AbstractVisualStrategy> {
+        if (mode == VizMode::Volume) {
+            return std::make_shared<VolumeStrategy>();
+        }
+        if (mode == VizMode::IsoSurface) {
+            return std::make_shared<FailVisualStrategy>(
+                failAttachCount);
+        }
+        return nullptr;
+    };
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    args.strategyCreate = failFactory;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.interaction.update
+        || !ports.interaction.model || !ports.renderBind) {
+        SetExpect(false,
+            "pipeline rollback needs every narrow port",
+            failureCount);
+        return;
+    }
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    AppViewUpdate update;
+    update.mode = VizMode::Volume;
+    SetExpect(ports.renderBind->SetRenderTarget(
+            renderWindow, renderer)
+            && ports.app.view->SendViewUpdate(update)
+            && ports.interaction.update->SendUpdates(),
+        "pipeline rollback should build its committed Volume strategy",
+        failureCount);
+    vtkProp3D* oldProp =
+        ports.interaction.model->GetMainProp();
+    vtkCamera* camera = renderer->GetActiveCamera();
+    camera->SetPosition(11.0, -5.0, 17.0);
+    camera->SetFocalPoint(2.0, 3.0, 4.0);
+    camera->SetViewUp(0.0, 1.0, 0.0);
+    camera->SetClippingRange(0.25, 450.0);
+    camera->SetParallelScale(3.5);
+    camera->SetViewAngle(24.0);
+    camera->ParallelProjectionOff();
+    std::array<double, 3> oldPosition;
+    std::copy_n(
+        camera->GetPosition(),
+        oldPosition.size(),
+        oldPosition.begin());
+    std::array<double, 3> oldFocal;
+    std::copy_n(
+        camera->GetFocalPoint(),
+        oldFocal.size(),
+        oldFocal.begin());
+    std::array<double, 3> oldViewUp;
+    std::copy_n(
+        camera->GetViewUp(),
+        oldViewUp.size(),
+        oldViewUp.begin());
+    std::array<double, 2> oldClip;
+    std::copy_n(
+        camera->GetClippingRange(),
+        oldClip.size(),
+        oldClip.begin());
+    const double oldScale = camera->GetParallelScale();
+    const double oldAngle = camera->GetViewAngle();
+
+    update.mode = VizMode::IsoSurface;
+    const bool isUpdateSent =
+        ports.app.view->SendViewUpdate(update)
+        && ports.interaction.update->SendUpdates();
+    const bool isFailed = isUpdateSent
+        && failAttachCount->load() > 0;
+    camera = renderer->GetActiveCamera();
+    const bool isCameraRestored = camera
+        && std::equal(
+            oldPosition.begin(),
+            oldPosition.end(),
+            camera->GetPosition())
+        && std::equal(
+            oldFocal.begin(),
+            oldFocal.end(),
+            camera->GetFocalPoint())
+        && std::equal(
+            oldViewUp.begin(),
+            oldViewUp.end(),
+            camera->GetViewUp())
+        && std::equal(
+            oldClip.begin(),
+            oldClip.end(),
+            camera->GetClippingRange())
+        && camera->GetParallelScale() == oldScale
+        && camera->GetViewAngle() == oldAngle
+        && camera->GetParallelProjection() == 0;
+    if (!isCameraRestored && camera) {
+        std::cerr << "DIAG_CAMERA_ROLLBACK"
+            << " position=" << camera->GetPosition()[0]
+            << ',' << camera->GetPosition()[1]
+            << ',' << camera->GetPosition()[2]
+            << " focal=" << camera->GetFocalPoint()[0]
+            << ',' << camera->GetFocalPoint()[1]
+            << ',' << camera->GetFocalPoint()[2]
+            << " viewUp=" << camera->GetViewUp()[0]
+            << ',' << camera->GetViewUp()[1]
+            << ',' << camera->GetViewUp()[2]
+            << " clip=" << camera->GetClippingRange()[0]
+            << ',' << camera->GetClippingRange()[1]
+            << " scale=" << camera->GetParallelScale()
+            << " angle=" << camera->GetViewAngle()
+            << " projection=" << camera->GetParallelProjection()
+            << '\n';
+    }
+    SetExpect(isFailed,
+        "fault-injection strategy should make pipeline commit fail",
+        failureCount);
+    SetExpect(oldProp
+            && ports.interaction.model->GetMainProp() == oldProp
+            && renderer->HasViewProp(oldProp),
+        "failed strategy attach must restore the committed prop",
+        failureCount);
+    SetExpect(isCameraRestored,
+        "failed strategy attach must restore the full committed camera",
+        failureCount);
+
+    auto reboundRenderer = vtkSmartPointer<vtkRenderer>::New();
+    auto reboundWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    reboundWindow->SetOffScreenRendering(1);
+    reboundWindow->AddRenderer(reboundRenderer);
+    ports.renderBind->SetRenderTarget(
+        reboundWindow, reboundRenderer);
+    SetExpect(reboundRenderer->GetActiveCamera()
+            && reboundRenderer->GetActiveCamera()
+                ->GetParallelProjection() == 0
+            && ports.interaction.model->GetMainProp() == oldProp,
+        "failed pending mode must not pollute committed-mode renderer rebind",
+        failureCount);
+}
+
 void StartInputSwap(int& failureCount)
 {
     auto dataManager =
@@ -924,28 +1566,44 @@ void StartInputSwap(int& failureCount)
     auto state =
         std::make_shared<SharedInteractionState>(
             broadcaster);
-    VizService service(
-        dataManager, state, broadcaster);
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.interaction.update
+        || !ports.interaction.model || !ports.renderBind
+        || !ports.featureView) {
+        SetExpect(false,
+            "render input swap needs every narrow port",
+            failureCount);
+        return;
+    }
     auto renderer =
         vtkSmartPointer<vtkRenderer>::New();
     auto renderWindow =
         vtkSmartPointer<vtkRenderWindow>::New();
     renderWindow->SetOffScreenRendering(1);
     renderWindow->AddRenderer(renderer);
-    service.SetRenderContext(
+    const bool isBound = ports.renderBind->SetRenderTarget(
         renderWindow, renderer);
-    service.SetVizMode(VizMode::Volume);
-    SetExpect(service.SendReloadUpdate(),
+    AppViewUpdate volumeUpdate;
+    volumeUpdate.mode = VizMode::Volume;
+    broadcaster->SendFlags(UpdateFlags::All);
+    SetExpect(isBound
+            && ports.app.view->SendViewUpdate(volumeUpdate)
+            && ports.interaction.update->SendUpdates(),
         "initial render pipeline should build",
         failureCount);
-    auto* firstProp = service.GetMainProp();
+    auto* firstProp = ports.interaction.model->GetMainProp();
     bool isWrongThreadAccepted = true;
     std::thread wrongThread([&] {
-        isWrongThreadAccepted = service.SendReloadUpdate();
+        isWrongThreadAccepted =
+            ports.interaction.update->SendUpdates();
     });
     wrongThread.join();
     SetExpect(!isWrongThreadAccepted
-            && service.GetMainProp() == firstProp,
+            && ports.interaction.model->GetMainProp() == firstProp,
         "reload from a non-owner thread must not touch the VTK pipeline",
         failureCount);
     auto replacementRenderer =
@@ -955,30 +1613,40 @@ void StartInputSwap(int& failureCount)
     replacementWindow->SetOffScreenRendering(1);
     replacementWindow->AddRenderer(
         replacementRenderer);
+    bool isWrongBindAccepted = true;
     std::thread wrongBindThread([&] {
-        service.SetRenderContext(
+        isWrongBindAccepted = ports.renderBind->SetRenderTarget(
             replacementWindow,
             replacementRenderer);
     });
     wrongBindThread.join();
-    SetExpect(service.SendReloadUpdate()
-            && service.GetMainProp() == firstProp,
+    SetExpect(!isWrongBindAccepted
+            && ports.interaction.model->GetMainProp() == firstProp,
         "a non-owner thread must not replace the RenderContext owner",
         failureCount);
-    service.SetVizMode(VizMode::IsoSurface);
-    SetExpect(service.SendReloadUpdate(),
-        "input swap test should cache a second mode",
+    const auto setMode = [&ports](const VizMode mode) {
+        AppViewUpdate update;
+        update.mode = mode;
+        return ports.app.view->SendViewUpdate(update)
+            && ports.interaction.update->SendUpdates();
+    };
+    vtkWeakPointer<vtkProp3D> retiredVolumeProp = firstProp;
+    SetExpect(setMode(VizMode::IsoSurface)
+            && !retiredVolumeProp
+            && ports.interaction.model->GetMainProp(),
+        "mode switch should commit a fresh strategy and release the old Volume prop",
         failureCount);
-    vtkWeakPointer<vtkProp3D> retiredProp =
-        service.GetMainProp();
-    service.SetVizMode(VizMode::Volume);
-    SetExpect(service.SendReloadUpdate()
-            && service.GetMainProp() == firstProp,
-        "input swap test should return to the cached current mode",
+    vtkWeakPointer<vtkProp3D> retiredIsoProp =
+        ports.interaction.model->GetMainProp();
+    SetExpect(setMode(VizMode::Volume)
+            && !retiredIsoProp
+            && ports.interaction.model->GetMainProp(),
+        "returning to Volume should create a fresh committed strategy",
         failureCount);
+    auto* committedProp = ports.interaction.model->GetMainProp();
     auto cropEffect =
         std::make_shared<CropShaderEffect>();
-    SetExpect(service.AttachRenderEffect(cropEffect),
+    SetExpect(ports.featureView->AttachRenderEffect(cropEffect),
         "input swap test should attach one crop effect",
         failureCount);
 
@@ -993,14 +1661,16 @@ void StartInputSwap(int& failureCount)
     const auto tableResult =
         CropAlgorithm::BuildPredicateTable(
             { keepOp, removeOp }, 2);
+    const auto inputStamp =
+        ports.featureView->GetRenderInputStamp();
     CropShaderPayload payload;
     payload.revision = 1;
-    payload.sourceStamp =
-        service.GetRenderInputStamp();
+    if (inputStamp) payload.sourceStamp = *inputStamp;
     payload.nodeCount = 2;
     payload.predicateTable =
         tableResult.predicateTable;
-    SetExpect(tableResult.isSucceeded
+    SetExpect(inputStamp
+            && tableResult.isSucceeded
             && cropEffect->SetCropParams(payload),
         "KeepInside and RemoveInside should stage before input replacement",
         failureCount);
@@ -1022,63 +1692,121 @@ void StartInputSwap(int& failureCount)
         static_cast<unsigned char>(255));
     const auto expected =
         dataManager->GetSnapshot();
-    ImageState candidate = *expected;
+    TrustedImageState candidate = *expected;
     candidate.image = nextImage;
     candidate.validityMask = mask;
-    ImageSnapshot published;
+    TrustedImageSnapshot published;
     SetExpect(dataManager->SetCandidate(
             std::move(candidate),
             expected,
             published),
         "next image and mask should publish",
         failureCount);
-    SetExpect(!service.SendReloadUpdate(),
-        "input replacement must wait for a staged crop revision",
-        failureCount);
-    SetExpect(service.GetMainProp() == firstProp
+    broadcaster->SendFlags(UpdateFlags::All);
+    SetExpect(ports.interaction.update->SendUpdates()
+            && ports.interaction.model->GetMainProp() == committedProp
             && cropEffect->GetState().status
                 != RenderEffectStatus::Failed,
-        "deferred input replacement must keep the current crop binding valid",
+        "input replacement must wait while keeping the current crop binding valid",
         failureCount);
     SetExpect(cropEffect->ClearCropStage(
             payload.revision),
         "input swap test should finish the staged transaction",
         failureCount);
-    std::size_t prewarmCount = 0;
+    vtkCamera* activeCamera = renderer->GetActiveCamera();
+    activeCamera->SetPosition(8.0, -3.0, 12.0);
+    activeCamera->SetFocalPoint(1.0, 2.0, 3.0);
+    activeCamera->SetViewUp(0.0, 1.0, 0.0);
+    activeCamera->SetClippingRange(0.2, 420.0);
+    activeCamera->SetParallelScale(2.75);
+    activeCamera->SetViewAngle(27.0);
+    activeCamera->ParallelProjectionOff();
+    struct CameraProbe final {
+        vtkCamera* camera = nullptr;
+        std::array<double, 3> position{};
+        std::array<double, 3> focalPoint{};
+        std::array<double, 3> viewUp{};
+        std::array<double, 2> clippingRange{};
+        double parallelScale = 0.0;
+        double viewAngle = 0.0;
+        std::size_t renderCount = 0;
+        bool isStable = true;
+    } cameraProbe;
+    cameraProbe.camera = activeCamera;
+    std::copy_n(
+        activeCamera->GetPosition(),
+        cameraProbe.position.size(),
+        cameraProbe.position.begin());
+    std::copy_n(
+        activeCamera->GetFocalPoint(),
+        cameraProbe.focalPoint.size(),
+        cameraProbe.focalPoint.begin());
+    std::copy_n(
+        activeCamera->GetViewUp(),
+        cameraProbe.viewUp.size(),
+        cameraProbe.viewUp.begin());
+    std::copy_n(
+        activeCamera->GetClippingRange(),
+        cameraProbe.clippingRange.size(),
+        cameraProbe.clippingRange.begin());
+    cameraProbe.parallelScale = activeCamera->GetParallelScale();
+    cameraProbe.viewAngle = activeCamera->GetViewAngle();
     auto renderCallback =
         vtkSmartPointer<vtkCallbackCommand>::New();
-    renderCallback->SetClientData(&prewarmCount);
+    renderCallback->SetClientData(&cameraProbe);
     renderCallback->SetCallback(
         [](vtkObject*, unsigned long eventId,
             void* clientData, void*) {
             if (eventId == vtkCommand::StartEvent
                 && clientData) {
-                ++(*static_cast<std::size_t*>(clientData));
+                auto* probe = static_cast<CameraProbe*>(clientData);
+                ++probe->renderCount;
+                probe->isStable = probe->isStable
+                    && probe->camera
+                    && probe->camera->GetParallelProjection() == 0
+                    && std::equal(
+                        probe->position.begin(),
+                        probe->position.end(),
+                        probe->camera->GetPosition())
+                    && std::equal(
+                        probe->focalPoint.begin(),
+                        probe->focalPoint.end(),
+                        probe->camera->GetFocalPoint())
+                    && std::equal(
+                        probe->viewUp.begin(),
+                        probe->viewUp.end(),
+                        probe->camera->GetViewUp())
+                    && std::equal(
+                        probe->clippingRange.begin(),
+                        probe->clippingRange.end(),
+                        probe->camera->GetClippingRange())
+                    && probe->parallelScale
+                        == probe->camera->GetParallelScale()
+                    && probe->viewAngle
+                        == probe->camera->GetViewAngle();
             }
         });
     const unsigned long renderTag =
         renderWindow->AddObserver(
             vtkCommand::StartEvent, renderCallback);
     const bool isInputRebuilt =
-        service.SendReloadUpdate();
+        ports.interaction.update->SendUpdates();
     renderWindow->RemoveObserver(renderTag);
     renderCallback->SetClientData(nullptr);
     std::cout
         << "DIAG_RENDER_SOURCE: candidate_prewarm="
-        << prewarmCount << '\n';
+        << cameraProbe.renderCount << '\n';
     SetExpect(isInputRebuilt
-            && prewarmCount >= 1
-            && prewarmCount <= 2,
-        "same-mode input should use one or two candidate prewarm renders",
+            && cameraProbe.renderCount >= 1
+            && cameraProbe.renderCount <= 2
+            && cameraProbe.isStable,
+        "candidate prewarm should render without mutating the committed camera",
         failureCount);
-    auto* nextProp = service.GetMainProp();
-    SetExpect(firstProp
+    auto* nextProp = ports.interaction.model->GetMainProp();
+    SetExpect(committedProp
             && nextProp
-            && firstProp != nextProp,
+            && committedProp != nextProp,
         "same-mode input replacement must swap a prepared strategy instead of mutating the visible strategy",
-        failureCount);
-    SetExpect(!retiredProp,
-        "input replacement must release inactive strategies that retain the previous materialized image",
         failureCount);
 }
 
@@ -1101,33 +1829,31 @@ void StartRenderOwnerGate(int& failureCount)
     auto state =
         std::make_shared<SharedInteractionState>(
             broadcaster);
-    VizService service(
-        dataManager, state, broadcaster);
-    auto strategy = std::make_shared<VolumeStrategy>();
-    auto overlay = std::make_shared<VolumeStrategy>();
-    strategy->SetInputData(image);
-    overlay->SetInputData(image);
-    service.SetCurrentStrategy(strategy);
-    service.AttachOverlayStrategy(overlay);
-
-    auto* volume = vtkVolume::SafeDownCast(
-        strategy->GetMainProp());
-    auto* property = volume ? volume->GetProperty() : nullptr;
-    if (!property) {
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.interaction.update
+        || !ports.interaction.model || !ports.renderBind) {
         SetExpect(false,
-            "owner gate needs a volume property",
+            "owner gate needs every narrow port",
             failureCount);
         return;
     }
-    const double initialDiffuse = property->GetDiffuse();
-    auto material = state->GetMaterial();
-    material.diffuse = initialDiffuse == 0.23 ? 0.41 : 0.23;
-    service.SetMaterial(material);
 
-    service.SendUpdates();
-    SetExpect(std::abs(property->GetDiffuse()
-                - initialDiffuse) < 1e-12
-            && !service.SendReloadUpdate(),
+    auto material = state->GetMaterial();
+    material.diffuse = 0.23;
+    AppViewUpdate update;
+    update.mode = VizMode::Volume;
+    update.material = material;
+    const bool isStateSet =
+        ports.app.view->SendViewUpdate(update);
+    broadcaster->SendFlags(UpdateFlags::All);
+
+    SetExpect(isStateSet
+            && !ports.interaction.update->SendUpdates()
+            && !ports.interaction.model->GetMainProp(),
         "an unbound service must not submit state to VTK",
         failureCount);
 
@@ -1136,9 +1862,14 @@ void StartRenderOwnerGate(int& failureCount)
         vtkSmartPointer<vtkRenderWindow>::New();
     renderWindow->SetOffScreenRendering(1);
     renderWindow->AddRenderer(renderer);
-    service.SetRenderContext(renderWindow, renderer);
-    service.SendUpdates();
-    SetExpect(std::abs(property->GetDiffuse()
+    const bool isSubmitted =
+        ports.renderBind->SetRenderTarget(renderWindow, renderer)
+        && ports.interaction.update->SendUpdates();
+    auto* volume = vtkVolume::SafeDownCast(
+        ports.interaction.model->GetMainProp());
+    auto* property = volume ? volume->GetProperty() : nullptr;
+    SetExpect(isSubmitted && property
+            && std::abs(property->GetDiffuse()
                 - material.diffuse) < 1e-12,
         "the RenderContext owner must submit pending state",
         failureCount);
@@ -1163,29 +1894,91 @@ void StartStrategySwitchSync(int& failureCount)
     auto state =
         std::make_shared<SharedInteractionState>(
             broadcaster);
-    VizService service(
-        dataManager, state, broadcaster);
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.interaction.update
+        || !ports.interaction.model || !ports.renderBind) {
+        SetExpect(false,
+            "strategy switch sync needs every narrow port",
+            failureCount);
+        return;
+    }
     auto renderer = vtkSmartPointer<vtkRenderer>::New();
     auto renderWindow =
         vtkSmartPointer<vtkRenderWindow>::New();
     renderWindow->SetOffScreenRendering(1);
     renderWindow->AddRenderer(renderer);
-    service.SetRenderContext(renderWindow, renderer);
-    SetExpect(service.SendReloadUpdate(),
+    AppViewUpdate update;
+    update.mode = VizMode::Volume;
+    SetExpect(ports.renderBind->SetRenderTarget(
+            renderWindow, renderer)
+            && ports.app.view->SendViewUpdate(update)
+            && ports.interaction.update->SendUpdates(),
         "strategy switch sync should build the initial volume pipeline",
         failureCount);
-    service.SendUpdates();
+
+    const std::array<VizMode, 7> modes = {
+        VizMode::Volume,
+        VizMode::IsoSurface,
+        VizMode::SliceTop_down,
+        VizMode::SliceFront_back,
+        VizMode::SliceLeft_right,
+        VizMode::CompositeVolume,
+        VizMode::CompositeIsoSurface
+    };
+    for (const VizMode mode : modes) {
+        update = {};
+        update.mode = mode;
+        ports.app.view->SendViewUpdate(update);
+        ports.interaction.update->SendUpdates();
+        vtkCamera* camera = renderer->GetActiveCamera();
+        const bool isSlice = mode == VizMode::SliceTop_down
+            || mode == VizMode::SliceFront_back
+            || mode == VizMode::SliceLeft_right;
+        bool isOrientationValid = camera != nullptr;
+        if (camera && isSlice) {
+            const double* position = camera->GetPosition();
+            const double* focalPoint = camera->GetFocalPoint();
+            const double* viewUp = camera->GetViewUp();
+            if (mode == VizMode::SliceTop_down) {
+                isOrientationValid = position[2] > focalPoint[2]
+                    && std::abs(viewUp[1] - 1.0) < 1e-12;
+            }
+            else if (mode == VizMode::SliceFront_back) {
+                isOrientationValid = position[1] > focalPoint[1]
+                    && std::abs(viewUp[2] - 1.0) < 1e-12;
+            }
+            else {
+                isOrientationValid = position[0] > focalPoint[0]
+                    && std::abs(viewUp[2] - 1.0) < 1e-12;
+            }
+        }
+        SetExpect((isSlice
+                || ports.interaction.model->GetMainProp())
+                && camera
+                && (camera->GetParallelProjection() != 0) == isSlice
+                && isOrientationValid,
+            "all factory modes should build with service-owned camera semantics",
+            failureCount);
+    }
 
     auto firstMaterial = state->GetMaterial();
     firstMaterial.diffuse = 0.23;
     firstMaterial.opacity = 0.61;
-    service.SetMaterial(firstMaterial);
-    service.SendUpdates();
+    update = {};
+    update.material = firstMaterial;
+    ports.app.view->SendViewUpdate(update);
+    ports.interaction.update->SendUpdates();
 
-    service.SetVizMode(VizMode::IsoSurface);
-    service.SendUpdates();
+    update = {};
+    update.mode = VizMode::IsoSurface;
+    ports.app.view->SendViewUpdate(update);
+    ports.interaction.update->SendUpdates();
     auto* isoActor = vtkActor::SafeDownCast(
-        service.GetMainProp());
+        ports.interaction.model->GetMainProp());
     auto* isoProperty = isoActor
         ? isoActor->GetProperty() : nullptr;
     SetExpect(isoProperty
@@ -1199,13 +1992,17 @@ void StartStrategySwitchSync(int& failureCount)
     auto nextMaterial = firstMaterial;
     nextMaterial.diffuse = 0.41;
     nextMaterial.opacity = 0.78;
-    service.SetMaterial(nextMaterial);
-    service.SendUpdates();
+    update = {};
+    update.material = nextMaterial;
+    ports.app.view->SendViewUpdate(update);
+    ports.interaction.update->SendUpdates();
 
-    service.SetVizMode(VizMode::Volume);
-    service.SendUpdates();
+    update = {};
+    update.mode = VizMode::Volume;
+    ports.app.view->SendViewUpdate(update);
+    ports.interaction.update->SendUpdates();
     auto* volume = vtkVolume::SafeDownCast(
-        service.GetMainProp());
+        ports.interaction.model->GetMainProp());
     auto* volumeProperty = volume
         ? volume->GetProperty() : nullptr;
     SetExpect(volumeProperty
@@ -1213,6 +2010,355 @@ void StartStrategySwitchSync(int& failureCount)
                 - nextMaterial.diffuse) < 1e-12,
         "a cached strategy must replay state changed while it was inactive",
         failureCount);
+
+    vtkCamera* oldCamera = renderer->GetActiveCamera();
+    oldCamera->SetPosition(9.0, -4.0, 13.0);
+    oldCamera->SetFocalPoint(1.0, 2.0, 3.0);
+    oldCamera->SetViewUp(0.0, 1.0, 0.0);
+    oldCamera->ParallelProjectionOff();
+    const std::array<double, 3> reboundPosition = {
+        oldCamera->GetPosition()[0],
+        oldCamera->GetPosition()[1],
+        oldCamera->GetPosition()[2]
+    };
+    const std::array<double, 3> reboundFocal = {
+        oldCamera->GetFocalPoint()[0],
+        oldCamera->GetFocalPoint()[1],
+        oldCamera->GetFocalPoint()[2]
+    };
+
+    update = {};
+    update.mode = VizMode::SliceTop_down;
+    ports.app.view->SendViewUpdate(update);
+    auto reboundRenderer = vtkSmartPointer<vtkRenderer>::New();
+    auto reboundWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    reboundWindow->SetOffScreenRendering(1);
+    reboundWindow->AddRenderer(reboundRenderer);
+    ports.renderBind->SetRenderTarget(
+        reboundWindow, reboundRenderer);
+    vtkCamera* reboundCamera = reboundRenderer->GetActiveCamera();
+    SetExpect(reboundCamera
+            && reboundCamera->GetParallelProjection() == 0
+            && std::equal(
+                reboundPosition.begin(),
+                reboundPosition.end(),
+                reboundCamera->GetPosition())
+            && std::equal(
+                reboundFocal.begin(),
+                reboundFocal.end(),
+                reboundCamera->GetFocalPoint()),
+        "renderer rebind must restore the committed camera and ignore pending mode",
+        failureCount);
+    ports.interaction.update->SendUpdates();
+    SetExpect(reboundCamera->GetParallelProjection() != 0,
+        "pending Slice mode should affect camera only after pipeline commit",
+        failureCount);
+
+    update = {};
+    update.mode = VizMode::Volume;
+    ports.app.view->SendViewUpdate(update);
+    ports.interaction.update->SendUpdates();
+    reboundCamera->SetPosition(8.0, 5.0, 12.0);
+    reboundCamera->SetFocalPoint(1.5, 1.5, 1.5);
+    const std::array<double, 3> cameraOffset = {
+        reboundCamera->GetPosition()[0]
+            - reboundCamera->GetFocalPoint()[0],
+        reboundCamera->GetPosition()[1]
+            - reboundCamera->GetFocalPoint()[1],
+        reboundCamera->GetPosition()[2]
+            - reboundCamera->GetFocalPoint()[2]
+    };
+    std::array<double, 16> modelToWorld = {
+        1.0, 0.0, 0.0, 5.0,
+        0.0, 1.0, 0.0, -2.0,
+        0.0, 0.0, 1.0, 4.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    ports.interaction.model->SetModelMatrix(modelToWorld);
+    ports.interaction.update->SendUpdates();
+    double imageCenter[3] = { 0.0, 0.0, 0.0 };
+    image->GetCenter(imageCenter);
+    const double* transformedFocal = reboundCamera->GetFocalPoint();
+    const double* transformedPosition = reboundCamera->GetPosition();
+    SetExpect(std::abs(transformedFocal[0]
+                - (imageCenter[0] + 5.0)) < 1e-12
+            && std::abs(transformedFocal[1]
+                - (imageCenter[1] - 2.0)) < 1e-12
+            && std::abs(transformedFocal[2]
+                - (imageCenter[2] + 4.0)) < 1e-12
+            && std::abs((transformedPosition[0] - transformedFocal[0])
+                - cameraOffset[0]) < 1e-12
+            && std::abs((transformedPosition[1] - transformedFocal[1])
+                - cameraOffset[1]) < 1e-12
+            && std::abs((transformedPosition[2] - transformedFocal[2])
+                - cameraOffset[2]) < 1e-12,
+        "service-owned Transform camera should move center and preserve view offset",
+        failureCount);
+}
+
+void StartRealCamera(int& failureCount)
+{
+    char* rawPathValue = nullptr;
+    std::size_t rawPathSize = 0;
+    (void)_dupenv_s(
+        &rawPathValue,
+        &rawPathSize,
+        "MVVCVTK_REAL_RAW");
+    const std::unique_ptr<char, decltype(&std::free)> rawPathOwner(
+        rawPathValue,
+        &std::free);
+    const char* rawPathText = rawPathOwner.get();
+    if (!rawPathText || rawPathText[0] == '\0') {
+        std::cout << "REAL_DATA_NOT_REQUESTED\n";
+        return;
+    }
+
+    const std::filesystem::path rawPath =
+        std::filesystem::u8path(rawPathText);
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(rawPath, error)) {
+        std::cerr << "REAL_DATA_MISSING: " << rawPathText << '\n';
+        ++failureCount;
+        return;
+    }
+    constexpr std::uintmax_t expectedSize = 62500000;
+    const std::uintmax_t actualSize =
+        std::filesystem::file_size(rawPath, error);
+    if (error || actualSize != expectedSize) {
+        std::cerr << "REAL_DATA_MISMATCH: size="
+            << actualSize << " expected=" << expectedSize << '\n';
+        ++failureCount;
+        return;
+    }
+
+    const auto layout = VolumeLayout::Create(
+        { 250, 250, 250 },
+        { 0.085F, 0.085F, 0.085F },
+        { 0.0F, 0.0F, 0.0F });
+    if (!layout) {
+        std::cerr << "REAL_DATA_MISMATCH: invalid locked layout\n";
+        ++failureCount;
+        return;
+    }
+
+    auto dataManager = std::make_shared<RawVolumeDataManager>();
+    AppDataLoadTaskService loadService(dataManager);
+    auto loadTask = loadService.BuildLoadFileTask(
+        rawPath.u8string(), *layout);
+    if (!loadTask) {
+        std::cerr << "REAL_DATA_MISMATCH: load task rejected\n";
+        ++failureCount;
+        return;
+    }
+    auto loadResult = loadTask->get_future();
+    (*loadTask)(TaskStopToken{});
+    if (!loadResult.get()) {
+        std::cerr << "REAL_DATA_MISMATCH: production load failed\n";
+        ++failureCount;
+        return;
+    }
+
+    bool hasPending = false;
+    const bool isCommitted = dataManager->SetCurrentFromPending(
+        hasPending);
+    const TrustedImageState imageState = dataManager->GetImageState();
+    const bool isGeometryValid = isCommitted
+        && hasPending
+        && imageState.image
+        && imageState.dims == std::array<int, 3>{ 250, 250, 250 }
+        && std::abs(imageState.spacing[0] - 0.085) < 1e-6
+        && std::abs(imageState.spacing[1] - 0.085) < 1e-6
+        && std::abs(imageState.spacing[2] - 0.085) < 1e-6
+        && std::abs(imageState.origin[0] + 21.165) < 1e-5
+        && std::abs(imageState.origin[1] + 21.165) < 1e-5
+        && std::abs(imageState.origin[2]) < 1e-8
+        && std::abs(imageState.scalarRange[0]
+            - (-0.1316370964050293)) < 1e-7
+        && std::abs(imageState.scalarRange[1]
+            - 0.065924093127250671) < 1e-7;
+    SetExpect(isGeometryValid,
+        "locked RAW should commit the expected RAS geometry and scalar range",
+        failureCount);
+    if (!isGeometryValid) {
+        std::cerr << "REAL_DATA_MISMATCH: committed geometry/range\n";
+        return;
+    }
+
+    const int cameraFailureCount = failureCount;
+    std::size_t vtkErrorCount = 0;
+    auto errorCallback = vtkSmartPointer<vtkCallbackCommand>::New();
+    errorCallback->SetClientData(&vtkErrorCount);
+    errorCallback->SetCallback([](
+        vtkObject*, unsigned long eventId, void* clientData, void*) {
+        if (eventId != vtkCommand::ErrorEvent || !clientData) return;
+        ++(*static_cast<std::size_t*>(clientData));
+    });
+
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    const unsigned long windowErrorTag = renderWindow->AddObserver(
+        vtkCommand::ErrorEvent, errorCallback);
+    renderWindow->SetOffScreenRendering(1);
+
+    HostCoreServices core;
+    core.sharedDataMgr = dataManager;
+    core.sharedState = state;
+    core.sharedStateBroadcaster = broadcaster;
+    HostRenderViewConfig view;
+    view.id = "real-camera";
+    view.role = HostRenderViewRole::Primary3D;
+    view.window.viewInit.viewMode = HostRenderMode::Volume;
+    view.renderWindow = renderWindow;
+    HostViewRuntimeRegistry views;
+    const bool isViewBuilt = views.Build(core, { view });
+    const HostViewTarget target{
+        "real-camera", false, HostRenderViewRole::Primary3D
+    };
+    const auto endpoints = views.BuildEndpoints();
+    auto* renderer = endpoints.size() == 1
+        ? endpoints.front().renderer
+        : nullptr;
+    const unsigned long rendererErrorTag = renderer
+        ? renderer->AddObserver(vtkCommand::ErrorEvent, errorCallback)
+        : 0;
+    if (!isViewBuilt || !renderer) {
+        if (rendererErrorTag != 0) {
+            renderer->RemoveObserver(rendererErrorTag);
+        }
+        renderWindow->RemoveObserver(windowErrorTag);
+        errorCallback->SetClientData(nullptr);
+        std::cerr << "REAL_DATA_VTK_ERROR: host view build failed\n";
+        ++failureCount;
+        return;
+    }
+
+    HostCommandRouter router(views.GetViewDirectory());
+    broadcaster->SendFlags(UpdateFlags::All);
+    SetExpect(views.SendViewUpdates(target),
+        "real camera test should build the production Volume pipeline",
+        failureCount);
+    SetExpect(renderer->GetActiveCamera()->GetParallelProjection() == 0,
+        "real Volume mode should use perspective projection",
+        failureCount);
+
+    const auto sendMode = [&router, &views, &target](
+        const HostRenderMode mode) {
+        HostViewSetRequest request;
+        request.targetView = target;
+        request.mode = mode;
+        return router.Dispatch(std::move(request))
+            && views.SendViewUpdates(target);
+    };
+    SetExpect(sendMode(HostRenderMode::SliceTopDown),
+        "real camera test should switch through the Host value route",
+        failureCount);
+    SetExpect(renderer->GetActiveCamera()->GetParallelProjection() != 0,
+        "real Slice mode should use parallel projection",
+        failureCount);
+    SetExpect(sendMode(HostRenderMode::Volume),
+        "real camera test should restore Volume through the Host value route",
+        failureCount);
+
+    vtkCamera* camera = renderer->GetActiveCamera();
+    camera->SetPosition(10.0, -6.0, 15.0);
+    camera->SetFocalPoint(0.0, 0.0, 0.0);
+    const std::array<double, 3> oldOffset = {
+        camera->GetPosition()[0] - camera->GetFocalPoint()[0],
+        camera->GetPosition()[1] - camera->GetFocalPoint()[1],
+        camera->GetPosition()[2] - camera->GetFocalPoint()[2]
+    };
+    const std::array<double, 16> modelToWorld = {
+        1.0, 0.0, 0.0, 2.5,
+        0.0, 1.0, 0.0, -1.5,
+        0.0, 0.0, 1.0, 3.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    SetExpect(views.SetModelMatrix(target, modelToWorld)
+            && views.SendViewUpdates(target),
+        "real Transform should cross only the Host value boundary",
+        failureCount);
+    renderWindow->Render();
+    double modelCenter[3] = { 0.0, 0.0, 0.0 };
+    imageState.image->GetCenter(modelCenter);
+    const double* focalPoint = camera->GetFocalPoint();
+    const double* position = camera->GetPosition();
+    SetExpect(std::abs(focalPoint[0]
+                - (modelCenter[0] + 2.5)) < 1e-6
+            && std::abs(focalPoint[1]
+                - (modelCenter[1] - 1.5)) < 1e-6
+            && std::abs(focalPoint[2]
+                - (modelCenter[2] + 3.0)) < 1e-6
+            && std::abs((position[0] - focalPoint[0])
+                - oldOffset[0]) < 1e-6
+            && std::abs((position[1] - focalPoint[1])
+                - oldOffset[1]) < 1e-6
+            && std::abs((position[2] - focalPoint[2])
+                - oldOffset[2]) < 1e-6,
+        "real Transform should preserve camera offset at the transformed RAS center",
+        failureCount);
+
+    const std::array<double, 3> savedPosition = {
+        position[0], position[1], position[2]
+    };
+    const std::array<double, 3> savedFocal = {
+        focalPoint[0], focalPoint[1], focalPoint[2]
+    };
+    auto reboundWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    const unsigned long reboundWindowErrorTag =
+        reboundWindow->AddObserver(
+            vtkCommand::ErrorEvent, errorCallback);
+    reboundWindow->SetOffScreenRendering(1);
+    const bool isRebound = views.SetViewWindow(
+        "real-camera", reboundWindow);
+    const auto reboundEndpoints = views.BuildEndpoints();
+    auto* reboundRenderer = reboundEndpoints.size() == 1
+        ? reboundEndpoints.front().renderer
+        : nullptr;
+    const unsigned long reboundRendererErrorTag = reboundRenderer
+        ? reboundRenderer->AddObserver(
+            vtkCommand::ErrorEvent, errorCallback)
+        : 0;
+    reboundWindow->Render();
+    vtkCamera* reboundCamera = reboundRenderer
+        ? reboundRenderer->GetActiveCamera()
+        : nullptr;
+    SetExpect(isRebound
+            && reboundCamera
+            && reboundCamera->GetParallelProjection() == 0
+            && std::equal(
+                savedPosition.begin(),
+                savedPosition.end(),
+                reboundCamera->GetPosition())
+            && std::equal(
+                savedFocal.begin(),
+                savedFocal.end(),
+                reboundCamera->GetFocalPoint()),
+        "real renderer rebind should preserve committed Volume camera state",
+        failureCount);
+
+    const bool hasObservers = rendererErrorTag != 0
+        && windowErrorTag != 0
+        && reboundRendererErrorTag != 0
+        && reboundWindowErrorTag != 0;
+    const bool isCameraValid = hasObservers
+        && vtkErrorCount == 0
+        && failureCount == cameraFailureCount;
+    renderer->RemoveObserver(rendererErrorTag);
+    renderWindow->RemoveObserver(windowErrorTag);
+    if (reboundRenderer) {
+        reboundRenderer->RemoveObserver(reboundRendererErrorTag);
+    }
+    reboundWindow->RemoveObserver(reboundWindowErrorTag);
+    errorCallback->SetClientData(nullptr);
+    if (!isCameraValid) {
+        if (failureCount == cameraFailureCount) ++failureCount;
+        std::cerr << "REAL_DATA_VTK_ERROR: count=" << vtkErrorCount
+            << " observers=" << (hasObservers ? "ready" : "missing")
+            << '\n';
+        return;
+    }
+    std::cout << "REAL_DATA_OK: " << rawPathText << '\n';
 }
 
 void StartVisualConfigGetters(int& failureCount)
@@ -1220,7 +2366,18 @@ void StartVisualConfigGetters(int& failureCount)
     auto dataManager = std::make_shared<DataStub>();
     auto broadcaster = std::make_shared<SharedStateBroadcaster>();
     auto state = std::make_shared<SharedInteractionState>(broadcaster);
-    VizService service(dataManager, state, broadcaster);
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.app.session
+        || !ports.interaction.state) {
+        SetExpect(false,
+            "view state getters need every narrow port",
+            failureCount);
+        return;
+    }
 
     PreInitConfig config;
     config.vizMode = VizMode::Volume;
@@ -1231,53 +2388,261 @@ void StartVisualConfigGetters(int& failureCount)
     };
     config.isoThreshold = 12.5;
     config.bgColor = { 0.05, 0.1, 0.15 };
-    config.spacing = { 0.5, 1.0, 1.5 };
     config.windowLevel = { 80.0, 20.0 };
     config.hasTF = true;
     config.hasIso = true;
     config.hasBgColor = true;
-    config.hasSpacing = true;
     config.hasWindowLevel = true;
-    service.SetVisualConfig(config);
+    AppSessionUpdate sessionUpdate;
+    sessionUpdate.spacing =
+        std::array<double, 3>{ 0.5, 1.0, 1.5 };
+    const bool isConfigSet =
+        ports.app.view->SetViewConfig(config)
+        && ports.app.session->SendSessionUpdate(sessionUpdate);
     state->SetScalarRange(-4.0, 88.0);
 
-    const auto material = service.GetMaterial();
-    const auto nodes = service.GetTransferFunction();
-    const auto background = service.GetBackground();
-    const auto spacing = service.GetSpacing();
-    const auto windowLevel = service.GetWindowLevel();
-    const auto snapshot = service.GetVisualConfig();
-    const auto scalarRange = service.GetScalarRange();
-    SetExpect(service.GetVizMode() == VizMode::Volume
-            && material.opacity == 0.8
-            && material.isShadeOn
-            && service.GetOpacity() == 0.8
-            && nodes.size() == 2
-            && nodes[1].opacity == 0.9
-            && service.GetIsoThreshold() == 12.5
-            && background.r == 0.05
-            && spacing[2] == 1.5
-            && windowLevel.windowWidth == 80.0
-            && snapshot.hasTF
-            && snapshot.hasIso
-            && snapshot.hasBgColor
-            && snapshot.hasSpacing
-            && snapshot.hasWindowLevel
-            && snapshot.tfNodes.size() == 2
-            && scalarRange == std::array<double, 2>{ -4.0, 88.0 },
-        "VizService getter snapshot must mirror visual setters and scalar range",
+    auto viewState = ports.app.view->GetViewState();
+    SetExpect(isConfigSet
+            && viewState.mode == VizMode::Volume
+            && viewState.material.opacity == 0.8
+            && viewState.material.isShadeOn
+            && viewState.transferNodes.size() == 2
+            && viewState.transferNodes[1].opacity == 0.9
+            && viewState.isoThreshold == 12.5
+            && viewState.background.r == 0.05
+            && viewState.spacing[2] == 1.5
+            && viewState.windowLevel.windowWidth == 80.0
+            && viewState.windowLevelMode == WindowLevelMode::Manual
+            && viewState.scalarRange
+                == std::array<double, 2>{ -4.0, 88.0 },
+        "view state snapshot must mirror visual config and scalar range",
+        failureCount);
+
+    const AppViewState manualState = viewState;
+    AppViewUpdate autoWindow;
+    autoWindow.windowLevelMode = WindowLevelMode::Auto;
+    const bool isAutoWindowSet =
+        ports.app.view->SendViewUpdate(autoWindow);
+    const auto autoState = ports.app.view->GetViewState();
+    const bool isManualRestored = ports.app.view->SetViewState(
+        manualState, autoState.revision);
+    const auto restoredState = ports.app.view->GetViewState();
+    SetExpect(isAutoWindowSet
+            && autoState.windowLevelMode == WindowLevelMode::Auto
+            && autoState.windowLevel.windowWidth == 92.0
+            && autoState.windowLevel.windowCenter == 42.0
+            && isManualRestored
+            && restoredState.windowLevelMode
+                == WindowLevelMode::Manual
+            && restoredState.windowLevel.windowWidth == 80.0
+            && restoredState.windowLevel.windowCenter == 20.0,
+        "view snapshot restore must preserve window/level intent",
         failureCount);
 
     const InteractionSource source{ "getter-test", "view" };
-    service.SetInteracting(source, true);
-    service.SetElementVisible(VisFlags::Ruler, false);
-    SetExpect(service.GetIsInteracting()
-            && (service.GetVisibilityMask() & VisFlags::Ruler) == 0,
-        "VizService interaction and visibility getters must mirror state",
+    AppViewUpdate update;
+    AppVisibilityUpdate visibility;
+    visibility.isRulerVisible = false;
+    update.visibility = visibility;
+    const bool isStateSet =
+        ports.interaction.state->SetInteracting(source, true)
+        && ports.app.view->SendViewUpdate(update);
+    viewState = ports.app.view->GetViewState();
+    SetExpect(isStateSet
+            && viewState.isInteracting
+            && (viewState.visibilityMask & VisFlags::Ruler) == 0,
+        "narrow state and view ports must mirror interaction visibility",
         failureCount);
-    SetExpect(service.SetTransferPreset(TransferPreset::Percentile)
-            && service.GetTransferPreset() == TransferPreset::Percentile,
-        "VizService transfer preset getter must expose the committed intent",
+    update = {};
+    update.transferPreset = TransferPreset::Percentile;
+    SetExpect(ports.app.view->SendViewUpdate(update)
+            && ports.app.view->GetViewState().transferPreset
+                == TransferPreset::Percentile,
+        "view port must expose the committed transfer preset intent",
+        failureCount);
+}
+
+void StartViewEventCommit(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataStub>();
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    auto ports = CreateAppPorts(std::move(args));
+    if (!ports.app.view || !ports.app.session) {
+        SetExpect(false,
+            "view event commit needs the narrow view port",
+            failureCount);
+        return;
+    }
+
+    auto observerOwner = std::make_shared<int>(0);
+    int observerCount = 0;
+    UpdateFlags observedFlags = UpdateFlags::None;
+    std::array<double, 3> observedSpacing = {};
+    std::array<double, 3> observedCursor = {};
+    const std::weak_ptr<AppViewPort> weakView = ports.app.view;
+    broadcaster->SetObserver(
+        observerOwner,
+        [&observerCount, &observedFlags,
+            &observedSpacing, &observedCursor, weakView](
+                const UpdateFlags flags) {
+            ++observerCount;
+            observedFlags |= flags;
+            const auto view = weakView.lock();
+            if (view) {
+                const auto viewState = view->GetViewState();
+                observedSpacing = viewState.spacing;
+                observedCursor = viewState.cursorWorld;
+            }
+        });
+
+    const auto baseline = ports.app.view->GetViewState();
+    AppViewUpdate failedUpdate;
+    failedUpdate.background = BackgroundColor{ 0.4, 0.5, 0.6 };
+    failedUpdate.volumeQuality = {
+        VolumeQuality::Custom, 0, 1.0, true };
+    const bool isFailed = !ports.app.view->SendViewUpdate(failedUpdate);
+    const auto restored = ports.app.view->GetViewState();
+    SetExpect(isFailed
+            && restored.background.r == baseline.background.r
+            && restored.volumeQuality.maxDimension
+                == baseline.volumeQuality.maxDimension
+            && observerCount == 0
+            && observedFlags == UpdateFlags::None,
+        "failed compensated view update must not expose observer frames",
+        failureCount);
+
+    AppViewUpdate committedUpdate;
+    committedUpdate.background = BackgroundColor{ 0.1, 0.2, 0.3 };
+    const bool isCommitted =
+        ports.app.view->SendViewUpdate(committedUpdate);
+    SetExpect(isCommitted
+            && observerCount == 0
+            && ports.app.view->GetViewState().revision
+                > baseline.revision,
+        "successful View update must remain local and advance its revision",
+        failureCount);
+
+    observerCount = 0;
+    observedFlags = UpdateFlags::None;
+    AppSessionUpdate initialSession;
+    initialSession.spacing =
+        std::array<double, 3>{ 3.0, 3.0, 3.0 };
+    const bool isSessionSet =
+        ports.app.session->SendSessionUpdate(initialSession);
+    const auto sessionState = ports.app.view->GetViewState();
+    SetExpect(isSessionSet
+            && observerCount == 1
+            && (observedFlags & UpdateFlags::Spacing)
+                != UpdateFlags::None
+            && sessionState.spacing
+                == std::array<double, 3>{ 3.0, 3.0, 3.0 },
+        "Session spacing must publish through the dedicated port.",
+        failureCount);
+
+    observerCount = 0;
+    observedFlags = UpdateFlags::None;
+    std::mutex spacingMutex;
+    std::condition_variable spacingChanged;
+    bool isSpacingEntered = false;
+    bool isSpacingReleased = false;
+    std::array<double, 3> dataSpacing = sessionState.spacing;
+    dataManager->setSpacingCall = [
+        &spacingMutex,
+        &spacingChanged,
+        &isSpacingEntered,
+        &isSpacingReleased,
+        &dataSpacing](const std::array<double, 3>& spacing) {
+        std::unique_lock<std::mutex> lock(spacingMutex);
+        if (spacing == std::array<double, 3>{ 4.0, 4.0, 4.0 }) {
+            isSpacingEntered = true;
+            spacingChanged.notify_all();
+            spacingChanged.wait(lock, [&isSpacingReleased]() {
+                return isSpacingReleased;
+            });
+            return false;
+        }
+        dataSpacing = spacing;
+        return true;
+    };
+    AppSessionUpdate conflictingUpdate;
+    conflictingUpdate.spacing =
+        std::array<double, 3>{ 4.0, 4.0, 4.0 };
+    bool isConflictingAccepted = true;
+    std::thread ownerWriter([&]() {
+        isConflictingAccepted =
+            ports.app.session->SendSessionUpdate(conflictingUpdate);
+    });
+    {
+        std::unique_lock<std::mutex> lock(spacingMutex);
+        spacingChanged.wait(lock, [&isSpacingEntered]() {
+            return isSpacingEntered;
+        });
+    }
+    std::thread concurrentWriter([state]() {
+        state->SetCursorRawWorld(37.0, 38.0, 39.0);
+        state->SetCursorAxis(-1);
+        state->SetCursorWorld(37.0, 38.0, 39.0);
+    });
+    concurrentWriter.join();
+    const int observerCountBeforeClose = observerCount;
+    {
+        const std::lock_guard<std::mutex> lock(spacingMutex);
+        isSpacingReleased = true;
+    }
+    spacingChanged.notify_all();
+    ownerWriter.join();
+    dataManager->setSpacingCall = {};
+    const auto barrierState = ports.app.view->GetViewState();
+    SetExpect(!isConflictingAccepted
+            && observerCountBeforeClose == 0
+            && observerCount == 1
+            && (observedFlags & UpdateFlags::Cursor)
+                != UpdateFlags::None
+            && (observedFlags & UpdateFlags::Spacing)
+                == UpdateFlags::None
+            && barrierState.spacing == sessionState.spacing
+            && observedSpacing == sessionState.spacing
+            && dataSpacing == sessionState.spacing
+            && barrierState.cursorWorld
+                == std::array<double, 3>{ 37.0, 38.0, 39.0 }
+            && observedCursor
+                == std::array<double, 3>{ 37.0, 38.0, 39.0 },
+        "failed Session rollback must preserve a concurrent cursor value",
+        failureCount);
+
+    class ThrowingSink final : public IStateEventSink {
+    public:
+        void SendFlags(UpdateFlags) override
+        {
+            throw std::runtime_error("intentional sink failure");
+        }
+    };
+    auto throwState = std::make_shared<SharedInteractionState>(
+        std::make_shared<ThrowingSink>());
+    AppServiceArgs throwArgs;
+    throwArgs.dataManager = std::make_shared<DataStub>();
+    throwArgs.interactionState = throwState;
+    throwArgs.eventSource = std::make_shared<SharedStateBroadcaster>();
+    auto throwPorts = CreateAppPorts(std::move(throwArgs));
+    AppViewUpdate throwUpdate;
+    throwUpdate.background = BackgroundColor{ 0.2, 0.3, 0.4 };
+    const auto throwBaseline = throwPorts.app.view
+        ? throwPorts.app.view->GetViewState()
+        : AppViewState{};
+    const bool isThrowCommitted = throwPorts.app.view
+        && throwPorts.app.view->SendViewUpdate(throwUpdate);
+    const auto throwCommitted = throwPorts.app.view
+        ? throwPorts.app.view->GetViewState()
+        : AppViewState{};
+    SetExpect(isThrowCommitted
+            && throwCommitted.revision > throwBaseline.revision
+            && throwCommitted.background.r == 0.2,
+        "throwing event sink must not change committed view result",
         failureCount);
 }
 }
@@ -1288,12 +2653,19 @@ int AppTaskSuite::GetFailCount() const
     StartVolumeTypes(failureCount);
     StartOwningTasks(failureCount);
     StartExportSnapshot(failureCount);
+    StartBoundedTasks(failureCount);
     StartExportFiles(failureCount);
     StartStateGate(failureCount);
+    StartObserverGate(failureCount);
+    StartCandidateParams(failureCount);
     StartMaskSnapshot(failureCount);
+    StartFactoryAdmission(failureCount);
+    StartPipelineRollback(failureCount);
     StartRenderOwnerGate(failureCount);
     StartStrategySwitchSync(failureCount);
     StartInputSwap(failureCount);
+    StartRealCamera(failureCount);
     StartVisualConfigGetters(failureCount);
+    StartViewEventCommit(failureCount);
     return failureCount;
 }

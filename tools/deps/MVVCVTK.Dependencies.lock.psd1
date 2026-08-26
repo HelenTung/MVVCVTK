@@ -1,0 +1,10 @@
+@{
+    SchemaVersion = 1
+    PackageId = 'MVVCVTK.Dependencies'
+    PackageVersion = '2026.08.21-deps.1'
+    DirectoryName = '2026.08.21-deps.1-win-x64'
+    FileCount = 15009
+    TotalBytes = [Int64]2052367036
+    TreeSha256 = 'FF65C764B76AAEA60D099B5BF7922D71E49F89418C25FF0CB5FBB1EEA5441316'
+    ManifestSha256 = 'B366C43C783C614B75B8524E84DDE8EB1737DBBD53ECF19BBB0FFCA7C16C46C9'
+}

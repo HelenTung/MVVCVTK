@@ -1,12 +1,11 @@
 #include "HostHotkeyRouterTests.h"
 
 #include "Host/HostCommandRouter.h"
-#include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
 #include "Host/HostHotkeyRouter.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostRoutes.h"
 #include "Host/Types/HostRequestTypes.h"
-#include "StdRenderContext.h"
+#include "ViewContext.h"
 
 #include <iostream>
 #include <memory>
@@ -38,19 +37,15 @@ InteractionEvent BuildKey(
 
 void StartHotkeyCases(int& failureCount)
 {
-    HostCoreServices core;
-    HostRenderViewSet views;
-    auto context = std::make_shared<StdRenderContext>();
-    auto sliceContext = std::make_shared<StdRenderContext>();
-    views.CreateView("primary", HostRenderViewRole::Primary3D, context);
-    views.CreateView("slice", HostRenderViewRole::FrontBackSlice, sliceContext);
-    const auto* primaryView = views.GetPrimaryView();
-    auto service = primaryView ? primaryView->service : nullptr;
-    const auto* sliceView = views.GetViewBySelector(
-        { "slice", false, HostRenderViewRole::TopDownSlice });
-    auto sliceService = sliceView ? sliceView->service : nullptr;
+    auto views = std::make_shared<HostRouteStub>();
+    auto context = std::make_shared<ViewContextStub>();
+    auto sliceContext = std::make_shared<ViewContextStub>();
+    views->CreateView("primary", HostRenderViewRole::Primary3D, context);
+    views->CreateView("slice", HostRenderViewRole::FrontBackSlice, sliceContext);
+    auto service = views->GetState("primary");
+    auto sliceService = views->GetState("slice");
     auto commandRouter =
-        std::make_shared<HostCommandRouter>(core, views);
+        std::make_shared<HostCommandRouter>(views->GetViewDirectory());
     HostHotkeyConfig config;
     config.isContextInputEnabled = true;
     config.contextInputViews.viewIds = { "primary" };
@@ -64,7 +59,8 @@ void StartHotkeyCases(int& failureCount)
     config.sliceExportDir = "configured-slices";
 
     {
-        HostHotkeyRouter hotkeys(views, commandRouter);
+        HostHotkeyRouter hotkeys(
+            views->GetViewDirectory(), commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(config),
             "合法 hotkey 配置应完成绑定。",
@@ -336,7 +332,8 @@ void StartHotkeyCases(int& failureCount)
         specifiedConfig.sliceSourceView = {
             "slice", false, HostRenderViewRole::Auxiliary };
         specifiedConfig.sliceAngleDeg = 12.5;
-        HostHotkeyRouter hotkeys(views, commandRouter);
+        HostHotkeyRouter hotkeys(
+            views->GetViewDirectory(), commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(specifiedConfig),
             "显式导出默认值的 hotkey 配置应完成绑定。",

@@ -77,9 +77,6 @@
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Routing\CropRouter.h">
       <Filter>include\Routing</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\App\AppInterfaces.h">
-      <Filter>include\App</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\include\App\Tasks\AppDataExportTaskService.h">
       <Filter>include\App</Filter>
     </ClInclude>
@@ -101,7 +98,7 @@
     <ClInclude Include="..\..\MVVCVTK\include\Platform\MemMappedFile.h">
       <Filter>include\Platform</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\MVVCVTK\include\Render\Strategies\BaseVisualStrategy.h">
+    <ClInclude Include="..\..\MVVCVTK\include\Render\Support\BaseVisualStrategy.h">
       <Filter>include\Render</Filter>
     </ClInclude>
     <ClInclude Include="..\..\MVVCVTK\features\OrthogonalCrop\include\Render\CropShaderController.h">
@@ -109,6 +106,31 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppServiceFactory.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataConverters.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostViewRuntimeRegistry.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\LoadCommitCoordinator.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\AbstractViewContext.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\ViewContextFactory.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\TimeUpdateHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer2DHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer3DHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\RenderStrategyFactory.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
@@ -127,32 +149,7 @@
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Routing\CropRouter.cpp">
       <Filter>src\Routing</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="..\..\MVVCVTK\features\OrthogonalCrop\src\Render\CropShaderController.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp"><Filter>src</Filter></ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp">
-      <Filter>src\Data</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp">
-      <Filter>src\Data</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp">
-      <Filter>src\Platform</Filter>
-    </ClCompile>
     <ClCompile Include="AppTaskServiceTests.cpp">
       <Filter>tests</Filter>
     </ClCompile>

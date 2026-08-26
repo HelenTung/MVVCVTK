@@ -73,8 +73,6 @@ std::vector<HostRenderViewConfig> BuildViews()
         HostRenderMode::SliceTopDown;
     topDown.viewInit.background = { 0.0, 0.0, 0.0 };
     topDown.viewInit.hasBackground = true;
-    topDown.viewInit.windowLevel = { 400.0, 40.0 };
-    topDown.viewInit.hasWindowLevel = true;
 
     HostWindowConfig frontBack = topDown;
     frontBack.title = "Window C: Front_back Slice";
@@ -282,7 +280,7 @@ int main()
     for (const auto& feature : features) {
         if (!feature || !session.AttachFeature(feature)) {
             if (!clearAttached()) {
-                std::terminate();
+                return 20;
             }
             return 2;
         }
@@ -295,7 +293,7 @@ int main()
         "", true, HostRenderViewRole::TopDownSlice };
     if (!session.AttachTimer(timer)) {
         if (!clearAttached()) {
-            std::terminate();
+            return 21;
         }
         return 3;
     }
@@ -303,7 +301,7 @@ int main()
 
     if (!session.AttachHotkeys(GetHotkeys(allViews))) {
         if (!clearAttached()) {
-            std::terminate();
+            return 22;
         }
         return 4;
     }
@@ -315,9 +313,11 @@ int main()
     load.geometry.spacing = {
         0.02125f, 0.02125f, 0.02125f };
     load.geometry.origin = { 0.0f, 0.0f, 0.0f };
-    if (!session.SendRequest(std::move(load))) {
+    if (!session.SendRequestResult(
+            std::move(load),
+            [](HostResult) {})) {
         if (!clearAttached()) {
-            std::terminate();
+            return 23;
         }
         return 5;
     }
@@ -325,7 +325,7 @@ int main()
     const bool isStarted = session.Start();
     const bool isCleared = clearAttached();
     if (!isCleared) {
-        std::terminate();
+        return 24;
     }
     features.clear();
     return isStarted ? 0 : 6;

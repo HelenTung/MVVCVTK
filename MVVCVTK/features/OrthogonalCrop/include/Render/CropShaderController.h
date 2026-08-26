@@ -1,7 +1,7 @@
 #pragma once
 
 #include "OrthogonalCropTypes.h"
-#include "Render/RenderEffect.h"
+#include "Render/Contracts/RenderEffect.h"
 
 #include <array>
 #include <cstdint>

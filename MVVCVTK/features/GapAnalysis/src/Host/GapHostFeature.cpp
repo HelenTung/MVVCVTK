@@ -1,7 +1,5 @@
 #include "Host/GapHostFeature.h"
 
-#include "AppService.h"
-#include "Host/HostRenderViewSet.h"
 #include "Services/GapAnalysisService.h"
 
 #include <vtkImageData.h>
@@ -26,8 +24,7 @@ public:
 
     struct ViewCandidate final {
         GapViewRequest request;
-        std::vector<std::shared_ptr<InteractiveService>>
-            activeServices;
+        std::vector<std::string> activeViewIds;
         DataVersion version = 0;
     };
 
@@ -62,7 +59,7 @@ private:
     static bool GetStartValid(
         const GapHostStartParams& params);
     static bool GetSnapshotValid(
-        const ImageSnapshot& snapshot);
+        const TrustedImageSnapshot& snapshot);
     static std::optional<Orientation> GetSliceOrient(
         HostRenderViewRole role);
     static bool SendComplete(
@@ -79,19 +76,16 @@ private:
     InteractionResult OnInput(
         const InteractionEvent& event);
     bool SetActiveViews(
-        const std::vector<std::shared_ptr<InteractiveService>>& services) const;
+        const std::vector<std::string>& viewIds) const;
     bool ClearComplete();
     bool ClearBorrowed();
     bool GetOwnerThread() const;
 
     GapHostConfig m_config;
     std::unique_ptr<GapAnalysisService> m_service;
-    const HostRenderViewSet* m_renderViews = nullptr;
-    HostInputPort* m_inputPort = nullptr;
-    std::function<ImageSnapshot()> m_getImageSnapshot;
-    std::function<bool(
-        const std::vector<std::shared_ptr<InteractiveService>>&)>
-        m_setActiveViews;
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<CompleteItem> m_completeItem;
     std::optional<DataVersion> m_activeVersion;
     std::thread::id m_ownerThread;
@@ -191,7 +185,7 @@ bool GapHostFeature::Impl::GetStartValid(
 }
 
 bool GapHostFeature::Impl::GetSnapshotValid(
-    const ImageSnapshot& snapshot)
+    const TrustedImageSnapshot& snapshot)
 {
     if (!snapshot
         || snapshot->version == 0
@@ -263,30 +257,23 @@ std::optional<GapHostFeature::Impl::ViewCandidate>
 GapHostFeature::Impl::GetViewCandidate(
     const GapHostStartParams& start) const
 {
-    if (!m_renderViews
-        || !m_getImageSnapshot
+    if (!m_views
+        || !m_data
         || !GetStartValid(start)) {
         return std::nullopt;
     }
 
-    const auto snapshot = m_getImageSnapshot();
+    const auto snapshot = m_data->GetImageSnapshot();
     if (!GetSnapshotValid(snapshot)) {
         return std::nullopt;
     }
 
-    const auto views =
-        m_renderViews->GetViewsByTargets(
-            start.targetViews);
+    const auto views = m_views->GetViews(start.targetViews);
     if (views.empty()) {
         return std::nullopt;
     }
 
     ViewCandidate candidate;
-    candidate.activeServices =
-        m_renderViews->BuildServices(views);
-    if (candidate.activeServices.empty()) {
-        return std::nullopt;
-    }
     candidate.version = snapshot->version;
     candidate.request.inputImage = snapshot->image;
     candidate.request.validityMask =
@@ -294,24 +281,24 @@ GapHostFeature::Impl::GetViewCandidate(
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
 
-    for (const auto* view : views) {
-        if (!view || !view->service) {
+    for (const auto& view : views) {
+        const auto port = m_views->GetOverlayPort(view.id);
+        if (view.id.empty() || !port) {
             continue;
         }
-        std::shared_ptr<OverlayService> overlay =
-            view->service;
-        if (view->config.role
+        candidate.activeViewIds.push_back(view.id);
+        if (view.role
                 == HostRenderViewRole::Primary3D
-            || view->config.role
+            || view.role
                 == HostRenderViewRole::Composite3D) {
             candidate.request.meshTargets.push_back(
-                std::move(overlay));
+                port);
             continue;
         }
         if (const auto orientation =
-                GetSliceOrient(view->config.role)) {
+                GetSliceOrient(view.role)) {
             candidate.request.sliceTargets.push_back(
-                { *orientation, std::move(overlay) });
+                { *orientation, port });
         }
     }
 
@@ -329,10 +316,9 @@ bool GapHostFeature::Impl::AttachHost(
     if (m_isAttached) {
         return false;
     }
-    if (!context.renderViews
-        || !context.getImageSnapshot
-        || !context.setActiveViews
-        || !context.inputPort
+    if (!context.views
+        || !context.data
+        || !context.host
         || (m_config.inputViews.viewIds.empty()
             && m_config.inputViews.viewRoles.empty())
         || !GetChordValid(m_config.keys.switchOverlay)
@@ -346,10 +332,9 @@ bool GapHostFeature::Impl::AttachHost(
         return false;
     }
 
-    m_renderViews = context.renderViews;
-    m_inputPort = context.inputPort;
-    m_getImageSnapshot = context.getImageSnapshot;
-    m_setActiveViews = context.setActiveViews;
+    m_views = context.views;
+    m_data = context.data;
+    m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
 
     HostInputBinding binding;
@@ -362,7 +347,7 @@ bool GapHostFeature::Impl::AttachHost(
             ? feature->m_impl->OnInput(event)
             : InteractionResult{};
     };
-    if (!m_inputPort->AttachInput(std::move(binding))) {
+    if (!m_host->AttachInput(std::move(binding))) {
         ClearBorrowed();
         return false;
     }
@@ -385,10 +370,10 @@ bool GapHostFeature::Impl::DetachHost()
     }
 
     bool isInputDetached = !m_isInputAttached;
-    if (m_isInputAttached && m_inputPort) {
+    if (m_isInputAttached && m_host) {
         try {
             isInputDetached =
-                m_inputPort->DetachInput(FeatureId);
+                m_host->DetachInput(FeatureId);
         }
         catch (...) {
             isInputDetached = false;
@@ -398,15 +383,15 @@ bool GapHostFeature::Impl::DetachHost()
         }
     }
 
-    // 即使输入端口暂时拒绝移除，也必须先完成强清理；失败重试只保留 inputPort/owner thread。
+    // 即使输入端口暂时拒绝移除，也必须先完成强清理；失败重试只保留 Host 控制能力和 owner thread。
     ClearComplete();
     if (m_service) {
         m_service->ClearView();
     }
     (void)SetActiveViews({});
     m_activeVersion.reset();
-    m_renderViews = nullptr;
-    m_getImageSnapshot = {};
+    m_views.reset();
+    m_data.reset();
     m_isSwitchDown = false;
     m_isExitDown = false;
     m_isExitPending = false;
@@ -429,8 +414,8 @@ bool GapHostFeature::Impl::OnHostTick()
     }
 
     if (m_activeVersion && !m_isExitPending) {
-        const auto snapshot = m_getImageSnapshot
-            ? m_getImageSnapshot() : ImageSnapshot{};
+        const auto snapshot = m_data
+            ? m_data->GetImageSnapshot() : TrustedImageSnapshot{};
         if (!snapshot
             || snapshot->version != *m_activeVersion) {
             ClearComplete();
@@ -529,7 +514,7 @@ bool GapHostFeature::Impl::StartView(
     if (!isAccepted) {
         return false;
     }
-    if (!SetActiveViews(candidate->activeServices)) {
+    if (!SetActiveViews(candidate->activeViewIds)) {
         m_service->ClearView();
         ClearComplete();
         m_activeVersion.reset();
@@ -637,10 +622,10 @@ InteractionResult GapHostFeature::Impl::OnInput(
 }
 
 bool GapHostFeature::Impl::SetActiveViews(
-    const std::vector<std::shared_ptr<InteractiveService>>& services) const
+    const std::vector<std::string>& viewIds) const
 {
-    return m_setActiveViews
-        && m_setActiveViews(services);
+    return m_host
+        && m_host->SetActiveViews(viewIds);
 }
 
 bool GapHostFeature::Impl::ClearComplete()
@@ -660,13 +645,12 @@ bool GapHostFeature::Impl::ClearComplete()
 
 bool GapHostFeature::Impl::ClearBorrowed()
 {
-    if (m_setActiveViews) {
-        (void)m_setActiveViews({});
+    if (m_host) {
+        (void)m_host->SetActiveViews({});
     }
-    m_renderViews = nullptr;
-    m_inputPort = nullptr;
-    m_getImageSnapshot = {};
-    m_setActiveViews = {};
+    m_views.reset();
+    m_data.reset();
+    m_host.reset();
     m_ownerThread = {};
     m_isInputAttached = false;
     ClearComplete();

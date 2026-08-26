@@ -1,7 +1,7 @@
 #pragma once
 #include "IInteractionHandler.h"
+#include "Interaction/InteractionPorts.h"
 
-class InteractiveService;
 class vtkPropPicker;
 class vtkRenderer;
 
@@ -18,7 +18,11 @@ class vtkRenderer;
 class Viewer2DHandler : public IInteractionHandler
 {
 public:
-    Viewer2DHandler(InteractiveService* service,
+    Viewer2DHandler(
+        InteractionStatePort* statePort,
+        SliceInputPort* slicePort,
+        ModelInputPort* modelPort,
+        RenderUpdatePort* updatePort,
         vtkPropPicker* picker,
         vtkRenderer* renderer);
     ~Viewer2DHandler() override;
@@ -26,8 +30,11 @@ public:
     InteractionResult Send(const InteractionEvent& eve) override;
 
 private:
-    // 非拥有观察指针；StdRenderContext 持有 service 与 VTK 对象，Router 重建会先销毁本 Handler。
-    InteractiveService* m_service = nullptr;
+    // 非拥有观察指针；StdViewContext 持有 ports 与 VTK 对象，Router 重建会先销毁本 Handler。
+    InteractionStatePort* m_statePort = nullptr;
+    SliceInputPort* m_slicePort = nullptr;
+    ModelInputPort* m_modelPort = nullptr;
+    RenderUpdatePort* m_updatePort = nullptr;
     vtkPropPicker* m_picker = nullptr;
     vtkRenderer* m_renderer = nullptr;
     InteractionSource m_source;

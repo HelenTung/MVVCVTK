@@ -1,6 +1,5 @@
 #include "SliceStrategy.h"
 #include <vtkPlane.h>
-#include <vtkCamera.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkImageProperty.h>
@@ -12,6 +11,7 @@
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLImageSliceMapper.h>
 #include <vtkOpenGLPolyDataMapper.h>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -20,20 +20,33 @@ public:
     static EffectSlicePolyMapper* New();
     vtkTypeMacro(EffectSlicePolyMapper, vtkOpenGLPolyDataMapper);
 
-    void SetEffectBinding(
-        RenderEffectBinding* binding,
-        vtkMatrix4x4* localToInput)
+    bool SetEffectBinding(RenderEffectBinding* binding)
     {
         m_binding = binding;
-        m_localToInput = localToInput;
+        return true;
+    }
+
+    bool SetWorldToInput(
+        const std::array<double, 16>& worldToInput)
+    {
+        m_worldToInput = worldToInput;
+        return true;
     }
 
     void RenderPiece(vtkRenderer* renderer, vtkActor* actor) override
     {
-        if (m_binding && m_localToInput) {
-            std::array<double, 16> matrix = {};
-            vtkMatrix4x4::DeepCopy(matrix.data(), m_localToInput);
-            (void)m_binding->SetLocalToInput(matrix);
+        if (m_binding && actor && actor->GetMatrix()) {
+            // VTK 在进入内部 PolyData mapper 前才把本帧 SliceToWorld
+            // 写入 actor。必须从实际绘制 actor 取矩阵，再转回输入模型空间；
+            // 不能依赖外层 mapper 上一时刻缓存的 ResliceMatrix。
+            std::array<double, 16> actorToWorld = {};
+            std::array<double, 16> localToInput = {};
+            vtkMatrix4x4::DeepCopy(actorToWorld.data(), actor->GetMatrix());
+            vtkMatrix4x4::Multiply4x4(
+                m_worldToInput.data(),
+                actorToWorld.data(),
+                localToInput.data());
+            (void)m_binding->SetLocalToInput(localToInput);
             (void)m_binding->OnRenderStart(renderer);
         }
         this->Superclass::RenderPiece(renderer, actor);
@@ -44,7 +57,12 @@ public:
 
 private:
     RenderEffectBinding* m_binding = nullptr;
-    vtkMatrix4x4* m_localToInput = nullptr;
+    std::array<double, 16> m_worldToInput = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
 };
 
 vtkStandardNewMacro(EffectSlicePolyMapper);
@@ -56,6 +74,7 @@ public:
 
     bool GetEffectTarget(
         vtkMatrix4x4* localToInput,
+        const std::array<double, 16>& worldToInput,
         RenderEffectTarget& target)
     {
         if (!localToInput || !this->PolyDataActor) {
@@ -73,6 +92,9 @@ public:
             this->PolyDataActor->SetMapper(newMapper);
             mapper = newMapper;
         }
+        if (!mapper->SetWorldToInput(worldToInput)) {
+            return false;
+        }
         target.targetKind = RenderTargetKind::Slice;
         target.mapper = mapper;
         target.shaderProperty = this->PolyDataActor->GetShaderProperty();
@@ -82,18 +104,29 @@ public:
 
     bool SetEffectBinding(
         RenderEffectBinding* binding,
-        vtkMatrix4x4* localToInput)
+        vtkMatrix4x4* localToInput,
+        const std::array<double, 16>& worldToInput)
     {
         RenderEffectTarget target;
-        if (!GetEffectTarget(localToInput, target)) {
+        if (!GetEffectTarget(localToInput, worldToInput, target)) {
             return false;
         }
         auto* mapper = EffectSlicePolyMapper::SafeDownCast(target.mapper);
         if (!mapper) {
             return false;
         }
-        mapper->SetEffectBinding(binding, localToInput);
-        return true;
+        return mapper->SetEffectBinding(binding);
+    }
+
+    bool SetWorldToInput(
+        const std::array<double, 16>& worldToInput)
+    {
+        if (!this->PolyDataActor) {
+            return false;
+        }
+        auto* mapper = EffectSlicePolyMapper::SafeDownCast(
+            this->PolyDataActor->GetMapper());
+        return !mapper || mapper->SetWorldToInput(worldToInput);
     }
 };
 
@@ -110,7 +143,10 @@ public:
         auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
             this->SliceMapper);
         return sliceMapper
-            && sliceMapper->GetEffectTarget(this->ResliceMatrix, target);
+            && sliceMapper->GetEffectTarget(
+                this->ResliceMatrix,
+                m_worldToInput,
+                target);
     }
 
     bool SetEffectBinding(RenderEffectBinding* binding)
@@ -118,7 +154,25 @@ public:
         auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
             this->SliceMapper);
         return sliceMapper
-            && sliceMapper->SetEffectBinding(binding, this->ResliceMatrix);
+            && sliceMapper->SetEffectBinding(
+                binding,
+                this->ResliceMatrix,
+                m_worldToInput);
+    }
+
+    bool SetWorldToInput(
+        const std::array<double, 16>& worldToInput)
+    {
+        if (!std::all_of(
+                worldToInput.begin(),
+                worldToInput.end(),
+                [](const double value) { return std::isfinite(value); })) {
+            return false;
+        }
+        m_worldToInput = worldToInput;
+        auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
+            this->SliceMapper);
+        return !sliceMapper || sliceMapper->SetWorldToInput(worldToInput);
     }
 
 protected:
@@ -127,6 +181,14 @@ protected:
         this->SliceMapper->Delete();
         this->SliceMapper = EffectImageSliceMapper::New();
     }
+
+private:
+    std::array<double, 16> m_worldToInput = {
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
 };
 
 vtkStandardNewMacro(SliceStrategy::Mapper);
@@ -169,50 +231,6 @@ void SliceStrategy::SetWorldBounds(const double bounds[6],
             }
         }
     }
-}
-
-void SliceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix,
-    const double bounds[6])
-{
-    if (!m_renderer || !m_renderer->GetActiveCamera()) return;
-
-    // 切片模式下也沿用“保持相机相对偏移、只更新焦点中心”的策略，
-    // 这样模型旋转或重置后，用户视角不会突然改变观察距离。
-
-    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToWorldMatrix->DeepCopy(modelMatrix.data());
-
-    double modelToWorldInputCenter[4] = {
-        (bounds[0] + bounds[1]) * 0.5,
-        (bounds[2] + bounds[3]) * 0.5,
-        (bounds[4] + bounds[5]) * 0.5,
-        1.0
-    };
-    double modelToWorldOutputCenter[4] = { 0.0, 0.0, 0.0, 1.0 };
-    modelToWorldMatrix->MultiplyPoint(modelToWorldInputCenter, modelToWorldOutputCenter);
-
-    const double invW = std::abs(modelToWorldOutputCenter[3]) > 1e-12 ? 1.0 / modelToWorldOutputCenter[3] : 1.0;
-    double worldCenter[3] = {
-        modelToWorldOutputCenter[0] * invW,
-        modelToWorldOutputCenter[1] * invW,
-        modelToWorldOutputCenter[2] * invW
-    };
-
-    vtkCamera* cam = m_renderer->GetActiveCamera();
-    double oldFocal[3] = { 0.0, 0.0, 0.0 };
-    double oldPosition[3] = { 0.0, 0.0, 0.0 };
-    cam->GetFocalPoint(oldFocal);
-    cam->GetPosition(oldPosition);
-
-    double offset[3] = {
-        oldPosition[0] - oldFocal[0],
-        oldPosition[1] - oldFocal[1],
-        oldPosition[2] - oldFocal[2]
-    };
-
-    cam->SetFocalPoint(worldCenter);
-    cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
-    m_renderer->ResetCameraClippingRange();
 }
 
 SliceStrategy::SliceStrategy(Orientation orient) : m_orientation(orient) {
@@ -332,45 +350,6 @@ void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     ren->SetOcclusionRatio(0.0);
 }
 
-void SliceStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
-    if (!ren) return;
-    vtkCamera* cam = ren->GetActiveCamera();
-    cam->ParallelProjectionOn(); // 开启平行投影
-    double distance = cam->GetDistance();
-
-    double imgCenter[3] = { 0.0, 0.0, 0.0 };
-    if (m_mapper && m_mapper->GetInput()) {
-        m_mapper->GetInput()->GetCenter(imgCenter);
-    }
-
-    // 初次设置
-    cam->SetFocalPoint(imgCenter);
-
-    // 同一个物理坐标系下
-    switch (m_orientation) {
-    case Orientation::Top_down:
-        // Top_down: 从 Z+ 往 -Z 看，屏幕水平=X，屏幕垂直=Y
-        cam->SetPosition(imgCenter[0], imgCenter[1], imgCenter[2] + distance);
-        cam->SetViewUp(0, 1, 0);
-        break;
-
-    case Orientation::Front_back:
-        // Front_back: 从 Y+ 往 -Y 看，屏幕水平=X，屏幕垂直=Z
-        cam->SetPosition(imgCenter[0], imgCenter[1] + distance, imgCenter[2]);
-        cam->SetViewUp(0, 0, 1);
-        break;
-
-    case Orientation::Left_right:
-        // Left_right: 从 X+ 往 -X 看，屏幕水平=Y，屏幕垂直=Z
-        cam->SetPosition(imgCenter[0] + distance, imgCenter[1], imgCenter[2]);
-        cam->SetViewUp(0, 0, 1);
-        break;
-    }
-
-    ren->ResetCamera();
-    ren->ResetCameraClippingRange();
-}
-
 void SliceStrategy::SetCrosshair(const double focusWorld[3],
     const double worldBounds[6],
     double safeOffset)
@@ -442,7 +421,12 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
             auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
             modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
-            if (m_slice)      m_slice->SetUserMatrix(modelToWorldMatrix);
+            if (m_slice) m_slice->SetUserMatrix(modelToWorldMatrix);
+            std::array<double, 16> worldToInput = {};
+            vtkMatrix4x4::Invert(
+                params.modelMatrix.data(),
+                worldToInput.data());
+            (void)m_mapper->SetWorldToInput(worldToInput);
             if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
             if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
         }
@@ -466,9 +450,6 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
             std::min({ spacing[0], spacing[1], spacing[2] });
         SetCrosshair(params.cursor.data(), worldBounds, safeOffset);
 
-        if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
-            AlignCamera(params.modelMatrix, bounds);
-        }
     }
 
     if (((flags & UpdateFlags::Visibility) != UpdateFlags::None)) {

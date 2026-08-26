@@ -1,5 +1,4 @@
 #include "Viewer2DHandler.h"
-#include "AppInterfaces.h"
 #include <vtkMath.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
@@ -12,10 +11,17 @@
 #include <cstdint>
 #include <string>
 
-Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
+Viewer2DHandler::Viewer2DHandler(
+    InteractionStatePort* statePort,
+    SliceInputPort* slicePort,
+    ModelInputPort* modelPort,
+    RenderUpdatePort* updatePort,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
-    : m_service(service)
+    : m_statePort(statePort)
+    , m_slicePort(slicePort)
+    , m_modelPort(modelPort)
+    , m_updatePort(updatePort)
     , m_picker(picker)
     , m_renderer(renderer)
 {
@@ -26,15 +32,26 @@ Viewer2DHandler::Viewer2DHandler(InteractiveService* service,
 
 Viewer2DHandler::~Viewer2DHandler()
 {
-    if (m_service) {
-        (void)m_service->SetInteracting(m_source, false);
+    if (m_statePort) {
+        (void)m_statePort->SetInteracting(m_source, false);
     }
 }
 
 InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
 {
+    const auto getResult = [](
+        const bool isSucceeded,
+        const InteractionFailureReason failureReason,
+        const bool isPropagationStopped = true) {
+        InteractionResult result{ true, isPropagationStopped };
+        result.isSucceeded = isSucceeded;
+        result.failureReason = isSucceeded
+            ? InteractionFailureReason::None : failureReason;
+        return result;
+    };
+
     // 模式可在按下与释放之间切换；释放必须先于模式门控清理本 Handler 的 source。
-    if (m_service
+    if (m_statePort
         && eve.eventKind == InteractionEventKind::PrimaryRelease
         && (m_isDragCrosshair
             || m_isDragSlice
@@ -42,22 +59,28 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         m_isDragCrosshair = false;
         m_isDragSlice = false;
         m_isDragWindowLevel = false;
-        (void)m_service->SetInteracting(m_source, false);
-        return { true, true };
+        return getResult(
+            m_statePort->SetInteracting(m_source, false),
+            InteractionFailureReason::CleanupRejected);
     }
-    if (m_service
+    if (m_statePort
         && eve.eventKind == InteractionEventKind::SecondaryRelease
         && m_isRightZoom) {
         m_isRightZoom = false;
-        (void)m_service->SetInteracting(m_source, false);
-        return { true, true };
+        return getResult(
+            m_statePort->SetInteracting(m_source, false),
+            InteractionFailureReason::CleanupRejected);
     }
 
     const bool isSliceMode =
         eve.vizMode == VizMode::SliceTop_down
         || eve.vizMode == VizMode::SliceFront_back
         || eve.vizMode == VizMode::SliceLeft_right;
-    if (!m_service || !isSliceMode) {
+    if (!m_statePort
+        || !m_slicePort
+        || !m_modelPort
+        || !m_updatePort
+        || !isSliceMode) {
         return {};
     }
 
@@ -71,9 +94,9 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         const int step = eve.isCtrlDown ? 10 : 5;
         const int delta = (eve.eventKind == InteractionEventKind::WheelForward)
             ? step : -step;
-        m_service->SetSliceScroll(delta);
-        // m_service->SetDirty();
-        return { true, true };  // 停止传播，阻止 VTK 默认滚轮相机缩放
+        return getResult(
+            m_slicePort->SetSliceScroll(delta),
+            InteractionFailureReason::StateRejected);
     }
 
     // ── 左键按下：isShiftDown → 开始拖拽十字线 ────────────────────────────
@@ -81,30 +104,36 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (eve.isCtrlDown)
         {
-            m_isDragSlice = true;
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
-			(void)m_service->SetInteracting(m_source, true);
-			return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
+            const bool isStarted =
+                m_statePort->SetInteracting(m_source, true);
+            m_isDragSlice = isStarted;
+			return getResult(
+                isStarted, InteractionFailureReason::StateRejected);
         }
         if (eve.isShiftDown) {
-            m_isDragCrosshair = true;
-            (void)m_service->SetInteracting(m_source, true);
-            return { true, true };  // 停止传播，阻止 VTK 默认 Window/Level
+            const bool isStarted =
+                m_statePort->SetInteracting(m_source, true);
+            m_isDragCrosshair = isStarted;
+            return getResult(
+                isStarted, InteractionFailureReason::StateRejected);
         }
 
-        m_isDragWindowLevel = true;
         m_lastDragX = eve.x;
         m_lastDragY = eve.y;
         m_startDragX = eve.x;
         m_startDragY = eve.y;
 
-        const auto wl = m_service->GetWindowLevel();
+        const auto wl = m_slicePort->GetWindowLevel();
         m_startWW = wl.windowWidth;
         m_startWC = wl.windowCenter;
 
-        (void)m_service->SetInteracting(m_source, true);
-        return { true, true };
+        const bool isStarted =
+            m_statePort->SetInteracting(m_source, true);
+        m_isDragWindowLevel = isStarted;
+        return getResult(
+            isStarted, InteractionFailureReason::StateRejected);
     }
 
     // ── 左键抬起：结束交互 ─────────────────────────────────────
@@ -112,19 +141,22 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (m_isDragCrosshair) {
             m_isDragCrosshair = false;
-            (void)m_service->SetInteracting(m_source, false);
-            return { true, true };
+            return getResult(
+                m_statePort->SetInteracting(m_source, false),
+                InteractionFailureReason::CleanupRejected);
         }
         if (m_isDragSlice)
         {
             m_isDragSlice = false;
-			(void)m_service->SetInteracting(m_source, false);
-			return { true, true };
+			return getResult(
+                m_statePort->SetInteracting(m_source, false),
+                InteractionFailureReason::CleanupRejected);
         }
         if (m_isDragWindowLevel) {
             m_isDragWindowLevel = false;
-            (void)m_service->SetInteracting(m_source, false);
-            return { true, true };
+            return getResult(
+                m_statePort->SetInteracting(m_source, false),
+                InteractionFailureReason::CleanupRejected);
         }
         return { true, true };
     }
@@ -132,7 +164,6 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     // ── 右键按下：开始缩放 ─────────────────────────────────────
     if (eve.eventKind == InteractionEventKind::SecondaryPress)
     {
-        m_isRightZoom = true;
         m_zoomStartY = eve.y;
 
         if (m_renderer && m_renderer->GetActiveCamera()) {
@@ -142,8 +173,11 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             m_startOriginValue = 1.0;
         }
 
-        (void)m_service->SetInteracting(m_source, true);
-        return { true, true };
+        const bool isStarted =
+            m_statePort->SetInteracting(m_source, true);
+        m_isRightZoom = isStarted;
+        return getResult(
+            isStarted, InteractionFailureReason::StateRejected);
     }
 
     // ── 右键抬起：结束缩放 ─────────────────────────────────────────
@@ -151,8 +185,9 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (m_isRightZoom) {
             m_isRightZoom = false;
-            (void)m_service->SetInteracting(m_source, false);
-            return { true, true };
+            return getResult(
+                m_statePort->SetInteracting(m_source, false),
+                InteractionFailureReason::CleanupRejected);
         }
         return {};
     }
@@ -163,24 +198,38 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         // 路径 A：十字线拖拽
         if (m_isDragCrosshair)
         {
-            if (!m_picker || !m_renderer) return {};
-            m_picker->Pick(eve.x, eve.y, 0, m_renderer);
+            if (!m_picker || !m_renderer
+                || !m_picker->Pick(eve.x, eve.y, 0, m_renderer)) {
+                return getResult(
+                    false, InteractionFailureReason::StateRejected);
+            }
             double* worldPos = m_picker->GetPickPosition();
 
             if (worldPos) {
                 // 这里直接写 CursorWorldPosition，让服务层统一完成轴约束、状态广播和后续渲染刷新。
+                bool isCursorSet = false;
                 if (eve.vizMode == VizMode::SliceTop_down) {
-                    m_service->SetCursorWorldPosition(worldPos, 2);
+                    isCursorSet = m_slicePort->SetCursorWorld(
+                        { worldPos[0], worldPos[1], worldPos[2] }, 2);
                 }
                 else if (eve.vizMode == VizMode::SliceFront_back) {
-                    m_service->SetCursorWorldPosition(worldPos, 1);
+                    isCursorSet = m_slicePort->SetCursorWorld(
+                        { worldPos[0], worldPos[1], worldPos[2] }, 1);
                 }
                 else if (eve.vizMode == VizMode::SliceLeft_right) {
-                    m_service->SetCursorWorldPosition(worldPos, 0);
+                    isCursorSet = m_slicePort->SetCursorWorld(
+                        { worldPos[0], worldPos[1], worldPos[2] }, 0);
                 }
-                m_service->SetDirty();
+                if (!isCursorSet) {
+                    return getResult(
+                        false, InteractionFailureReason::StateRejected);
+                }
+                return getResult(
+                    m_updatePort->SetRenderNeeded(),
+                    InteractionFailureReason::RenderRejected);
             }
-            return { true, true };
+            return getResult(
+                false, InteractionFailureReason::StateRejected);
         }
 
         // 路径 B：调窗拖拽
@@ -205,8 +254,15 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 }
             }
 
-            m_service->SetWindowLevelDrag(totalDx, totalDy, viewWidth, viewHeight, m_startWW, m_startWC);
-            return { true, true };
+            return getResult(
+                m_slicePort->SetWindowLevelDrag(
+                    totalDx,
+                    totalDy,
+                    viewWidth,
+                    viewHeight,
+                    m_startWW,
+                    m_startWC),
+                InteractionFailureReason::StateRejected);
         }
         // 正 totalDy 增大 parallelScale，视图缩小；负 totalDy 减小 scale，视图放大。
         if (m_isRightZoom)
@@ -220,14 +276,20 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             const double nextScale = std::max(1e-6, m_startOriginValue * factor);
 
             auto* cam = m_renderer->GetActiveCamera();
+            const double oldScale = cam->GetParallelScale();
             cam->SetParallelScale(nextScale);
             m_renderer->ResetCameraClippingRange();
 
             // 连续 MouseMove 只更新最终相机状态；可见帧由统一 Timer 消费 dirty，
             // 避免每个输入事件绕过 33 ms 合并窗口直接渲染。
-            m_service->SetDirty();
-
-            return { true, true };
+            if (!m_updatePort->SetRenderNeeded()) {
+                cam->SetParallelScale(oldScale);
+                m_renderer->ResetCameraClippingRange();
+                return getResult(
+                    false, InteractionFailureReason::RenderRejected);
+            }
+            return getResult(
+                true, InteractionFailureReason::None);
         }
 
         // 路径C：定轴旋转
@@ -235,7 +297,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         {
             if (!m_renderer)
                 return{true,true};
-			auto cursor = m_service->GetCursorWorld();
+			auto cursor = m_slicePort->GetCursorWorld();
 			// 旋转中心固定取当前十字线位置：先从世界坐标投到屏幕坐标，
 			// 后续鼠标轨迹就能在同一显示平面内稳定计算角度增量。
 			m_renderer->SetWorldPoint(cursor[0], cursor[1], cursor[2], 1.0);
@@ -276,7 +338,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             // 构建“绕十字线中心、沿当前视线法向”的增量旋转，
             // 然后把结果矩阵整包回写给服务层，由服务层继续触发 Transform 链路。
 			auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            auto oldModelToWorld = m_service->GetModelMatrix();
+            auto oldModelToWorld = m_modelPort->GetModelMatrix();
 			modelToWorldMatrix->DeepCopy(oldModelToWorld.data());
 
 			auto transform = vtkSmartPointer<vtkTransform>::New();
@@ -287,10 +349,20 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
             transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点
 
 			// 将旋转后的矩阵同步回服务，触发模型更新
-			m_service->SetModelMatrix(transform->GetMatrix());
+            std::array<double, 16> nextModelToWorld{};
+            const double* nextMatrix = transform->GetMatrix()->GetData();
+            std::copy(
+                nextMatrix,
+                nextMatrix + nextModelToWorld.size(),
+                nextModelToWorld.begin());
+            if (!m_modelPort->SetModelMatrix(nextModelToWorld)) {
+                return getResult(
+                    false, InteractionFailureReason::StateRejected);
+            }
             m_lastRotateX = eve.x;
             m_lastRotateY = eve.y;
-			return { true, true };
+			return getResult(
+                true, InteractionFailureReason::None);
         }
 
         return {};

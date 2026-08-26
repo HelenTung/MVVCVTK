@@ -4,15 +4,13 @@
 
 #include <memory>
 
-class HostRenderViewSet;
-struct HostCoreServices;
+class IHostViewDirectory;
 
 // HostCommandRouter 是主体请求分发器，不是 feature，也不是业务 service。
 class HostCommandRouter final {
 public:
-    HostCommandRouter(
-        const HostCoreServices& core,
-        const HostRenderViewSet& renderViews);
+    explicit HostCommandRouter(
+        std::weak_ptr<IHostViewDirectory> directory);
     ~HostCommandRouter();
 
     bool Dispatch(

@@ -120,7 +120,7 @@ public:
 
 private:
     static void OnShader(vtkObject*, unsigned long, void* clientData, void* callData);
-    void SetProgram(vtkShaderProgram* program);
+    bool SetProgram(vtkShaderProgram* program);
     bool BuildTexture(vtkOpenGLRenderWindow* context);
     void ClearDeferred(vtkOpenGLRenderWindow* context);
 
@@ -237,7 +237,6 @@ bool CropShaderController::Impl::BuildTexture(vtkOpenGLRenderWindow* context)
     if (m_staged.payload.predicateTable == m_active.payload.predicateTable
         && m_active.texture) {
         m_staged.texture = m_active.texture;
-        m_state.status = RenderEffectStatus::Ready;
         return true;
     }
 
@@ -321,7 +320,7 @@ bool CropShaderController::Impl::StartRender(vtkRenderer* renderer)
     // 且会复用既有 table/program，因此必须主动刷新缓存 program 的 uniform。
     if (auto* program = m_program.GetPointer()) {
         auto* shaderCache = context->GetShaderCache();
-        SetProgram(shaderCache
+        (void)SetProgram(shaderCache
                 ? shaderCache->ReadyShaderProgram(program)
                 : nullptr);
     }
@@ -351,29 +350,29 @@ void CropShaderController::Impl::OnShader(
     vtkObject*, unsigned long, void* clientData, void* callData)
 {
     auto* self = static_cast<Impl*>(clientData);
-    self->SetProgram(static_cast<vtkShaderProgram*>(callData));
+    (void)self->SetProgram(static_cast<vtkShaderProgram*>(callData));
 }
 
-void CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
+bool CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
 {
     if (!program) {
-        return;
+        return false;
     }
     m_program = program;
     m_hasProgramSync = true;
-    if (m_staged.payload.revision != 0
-        && m_staged.texture
-        && m_state.status == RenderEffectStatus::Staged) {
-        m_state.status = RenderEffectStatus::Ready;
-    }
     const int nodeCount = m_isActive
         ? static_cast<int>(m_active.payload.nodeCount)
         : 0;
-    program->SetUniformi("mvvcvtk_cropNodeCount", nodeCount);
-    if (m_isActive && m_boundTexture) {
-        program->SetUniformi("mvvcvtk_cropTable", m_boundTexture->GetTextureUnit());
+
+    // 先把谓词关闭；其余任一必需 uniform 更新失败时，本帧继续显示原图，
+    // 不能让旧 nodeCount 搭配新矩阵或新纹理进入半提交状态。
+    bool hasUniforms = program->SetUniformi(
+        "mvvcvtk_cropNodeCount", 0);
+    if (hasUniforms && m_isActive && m_boundTexture) {
+        hasUniforms = program->SetUniformi(
+            "mvvcvtk_cropTable", m_boundTexture->GetTextureUnit());
     }
-    if (m_targetKind == RenderTargetKind::Slice) {
+    if (hasUniforms && m_targetKind == RenderTargetKind::Slice) {
         float localToInput[16] = {};
         // 矩阵按 VTK row-major 保存；glUniformMatrix4fv 的
         // transpose 参数固定为 false，因此上传前必须显式转成 column-major。
@@ -383,8 +382,28 @@ void CropShaderController::Impl::SetProgram(vtkShaderProgram* program)
                     m_localToInput[row * 4 + column]);
             }
         }
-        program->SetUniformMatrix4x4("mvvcvtk_localToInput", localToInput);
+        hasUniforms = program->SetUniformMatrix4x4(
+            "mvvcvtk_localToInput", localToInput);
     }
+    if (hasUniforms && nodeCount > 0) {
+        hasUniforms = program->SetUniformi(
+            "mvvcvtk_cropNodeCount", nodeCount);
+    }
+    if (!hasUniforms) {
+        m_state.status = RenderEffectStatus::Failed;
+        m_state.failureReason = RenderEffectFailure::CompileFailed;
+        m_state.message = "The crop shader program is missing a required uniform.";
+        return false;
+    }
+
+    if (m_staged.payload.revision != 0
+        && m_staged.texture
+        && m_state.status == RenderEffectStatus::Staged) {
+        m_state.status = RenderEffectStatus::Ready;
+        m_state.failureReason = RenderEffectFailure::None;
+        m_state.message.clear();
+    }
+    return true;
 }
 
 bool CropShaderController::Impl::SetCropCommit(const std::uint64_t revision)

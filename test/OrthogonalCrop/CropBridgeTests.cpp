@@ -1,7 +1,6 @@
 #include "CropBridgeTests.h"
 
 #include "Algorithms/CropAlgorithm.h"
-#include "AppInterfaces.h"
 #include "Interaction/CropBridge.h"
 #include "Render/CropShaderController.h"
 #include "Render/Strategies/IsoSurfaceStrategy.h"
@@ -23,7 +22,7 @@
 #include <vector>
 
 namespace {
-class CropServiceStub final : public InteractiveService {
+class CropServiceStub final : public FeatureViewService {
 public:
     CropServiceStub(
         const RenderInputStamp inputStamp,
@@ -46,10 +45,6 @@ public:
         }
     }
 
-    void SetSliceScroll(int) override {}
-    int GetPlaneAxis(vtkActor*) override { return -1; }
-    void SetCursorWorldPosition(double[3], int) override {}
-    std::array<double, 3> GetCursorWorld() override { return {}; }
     bool SetInteracting(
         const InteractionSource& source,
         const bool isInteracting) override
@@ -65,26 +60,20 @@ public:
         return true;
     }
     bool GetIsInteracting() const { return !m_sources.empty(); }
-    vtkProp3D* GetMainProp() override { return nullptr; }
-    void SetModelMatrix(vtkMatrix4x4*) override {}
-    std::array<double, 16> GetModelMatrix() override
+    std::optional<std::array<double, 16>>
+        GetModelToWorld() const override
     {
-        return { 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        return std::array<double, 16>{
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
             0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0 };
     }
-    int GetNavigationAxis() const override { return -1; }
-    WindowLevelParams GetWindowLevel() const override { return {}; }
-    void SetElementVisible(uint32_t, bool) override {}
-    void SetWindowLevelDrag(int, int, int, int, double, double) override {}
-    void GetModelPositionFromWorld(const double source[3], double target[3]) const override
+    std::optional<std::array<double, 3>> GetWorldPosition(
+        const std::array<double, 3>& modelPosition) const override
     {
-        std::copy_n(source, 3, target);
+        return modelPosition;
     }
-    void GetWorldPositionFromModel(const double source[3], double target[3]) const override
-    {
-        std::copy_n(source, 3, target);
-    }
-    RenderInputStamp GetRenderInputStamp() const override
+    std::optional<RenderInputStamp>
+        GetRenderInputStamp() const override
     {
         return m_inputStamp;
     }
@@ -128,16 +117,11 @@ public:
         const auto effect = m_effect.lock();
         return effect ? effect->GetState() : RenderEffectState{};
     }
-    void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
-    void RemoveOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy>) noexcept override {}
-    void ClearOverlayStrategies() override {}
-    void SetRenderContext(vtkSmartPointer<vtkRenderWindow>, vtkSmartPointer<vtkRenderer>) override {}
-    void SendUpdates() override {}
-    bool GetDirty() const override { return false; }
-    void SetDirty() override { ++dirtyCount; }
-    bool ResetDirty() override { return false; }
-    void SetCurrentStrategy(std::shared_ptr<AbstractVisualStrategy>) override {}
+    bool SetRenderNeeded() override
+    {
+        ++dirtyCount;
+        return true;
+    }
 
     int attachCount = 0;
     int detachCount = 0;
@@ -237,8 +221,11 @@ int CropBridgeSuite::GetFailCount() const
     auto service = std::make_shared<CropServiceStub>(
         inputStamp, renderer);
     CropViewRequest view;
+    const auto viewLease = std::make_shared<FeatureViewLease>(
+        std::this_thread::get_id());
     view.renderer = renderer;
     view.interactor = interactor;
+    view.lease = viewLease;
     view.referenceService = service;
     view.targetServices = { service };
 
@@ -678,12 +665,17 @@ int CropBridgeSuite::GetFailCount() const
     materializedInput.imageData = materializedImage;
     const auto visibleRevision =
         repeatService->GetEffectState().activeRevision;
-    expect(repeatBridge.StartCropBaseline(
-                materializedInput, 2)
+    auto materializedCommit = repeatBridge.BuildCropCommit(
+        materializedInput, 2);
+    expect(materializedCommit
             && repeatBridge.GetCropHistory().nodeCount == 2
-            && repeatBridge.GetCropHistory().operationCount == 3
-            && repeatBridge.SetCropBaselineComplete(),
-        "CPU materialization should publish a new active baseline.");
+            && repeatBridge.GetCropHistory().operationCount == 3,
+        "CPU materialization should prepare a new active baseline.");
+    if (materializedCommit) {
+        repeatBridge.SetCropCommit(std::move(*materializedCommit));
+    }
+    expect(materializedCommit && repeatBridge.SendCropCommit(),
+        "CPU materialization should publish its prepared baseline.");
     const auto materializedHistory =
         repeatBridge.GetCropHistory();
     expect(materializedHistory.nodeCount == 0
@@ -769,13 +761,17 @@ int CropBridgeSuite::GetFailCount() const
 
     auto originalInput = input;
     originalInput.inputVersion = 3;
-    expect(repeatBridge.StartCropBaseline(
-                originalInput, 0)
-            && repeatBridge.GetCropHistory().nodeCount == 1
-            && repeatBridge.GetCropHistory().baseNodeCount == 2
-            && repeatService->SetRenderInputStamp(
-                { image.GetPointer(), 3 })
-            && repeatBridge.SetCropBaselineComplete(),
+    auto originalCommit = repeatBridge.BuildCropCommit(
+        originalInput, 0);
+    const bool isOriginalReady = originalCommit
+        && repeatBridge.GetCropHistory().nodeCount == 1
+        && repeatBridge.GetCropHistory().baseNodeCount == 2
+        && repeatService->SetRenderInputStamp(
+            { image.GetPointer(), 3 });
+    if (isOriginalReady) {
+        repeatBridge.SetCropCommit(std::move(*originalCommit));
+    }
+    expect(isOriginalReady && repeatBridge.SendCropCommit(),
         "Switching back to the root snapshot should reactivate the complete history.");
     const auto originalHistory =
         repeatBridge.GetCropHistory();
@@ -1013,6 +1009,7 @@ int CropBridgeSuite::GetFailCount() const
     CropViewRequest multiView;
     multiView.renderer = multiRenderer;
     multiView.interactor = multiInteractor;
+    multiView.lease = viewLease;
     multiView.referenceService = firstTarget;
     multiView.targetServices = {
         firstTarget, secondTarget
@@ -1048,6 +1045,36 @@ int CropBridgeSuite::GetFailCount() const
         "Committing history node zero should request a baseline frame on every current target.");
     expect(multiBridge.ClearBindings(),
         "The multi-target bridge should clear its bindings.");
+
+    auto finishLease = std::make_shared<FeatureViewLease>(
+        std::this_thread::get_id());
+    auto finishService = std::make_shared<CropServiceStub>(
+        inputStamp, multiRenderer);
+    CropViewRequest finishView;
+    finishView.renderer = multiRenderer;
+    finishView.interactor = multiInteractor;
+    finishView.lease = finishLease;
+    finishView.referenceService = finishService;
+    finishView.targetServices = { finishService };
+    CropBridge finishBridge;
+    auto finishInput = input;
+    finishInput.inputVersion = 2;
+    auto finishCommit = finishBridge.StartView(finishView)
+        && finishBridge.SetCropInput(input)
+        ? finishBridge.BuildCropCommit(finishInput, 0)
+        : std::optional<CropBridge::PreparedCommit>{};
+    const bool isFinishPrepared = finishCommit.has_value();
+    if (finishCommit && finishLease->StopLease()) {
+        finishBridge.SetCropCommit(std::move(*finishCommit));
+    }
+    const auto finishHistory = finishBridge.GetCropHistory();
+    expect(isFinishPrepared
+            && !finishLease->GetIsActive()
+            && finishHistory.nodeCount == 0
+            && finishHistory.baseNodeCount == 0,
+        "A prepared crop commit must finish after publish even when its lease has just stopped.");
+    expect(finishBridge.ClearBindings(),
+        "The lease owner should close crop bindings after StopLease.");
     multiWindow->Finalize();
     return failureCount;
 }

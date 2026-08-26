@@ -1,7 +1,7 @@
 #include "QtHostMethodCases.h"
 
 #include "Host/GapHostFeature.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
@@ -11,15 +11,18 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 
-class InputPortStub final : public HostInputPort {
+class HostControlStub final : public FeatureHostControl {
 public:
     bool AttachInput(HostInputBinding binding) override
     {
@@ -57,11 +60,75 @@ public:
         return m_detachCount;
     }
 
+    bool SetActiveViews(
+        const std::vector<std::string>&) override
+    {
+        return true;
+    }
+
+    bool SetViewStatus(
+        const std::vector<std::string>&,
+        const std::string&) override
+    {
+        return true;
+    }
+
+    bool SendOwnerComplete(
+        std::function<void()> complete) override
+    {
+        if (!complete) return false;
+        complete();
+        return true;
+    }
+
 private:
     std::string m_featureId;
     int m_attachCount = 0;
     int m_detachCount = 0;
     bool m_isAttached = false;
+};
+
+class ViewDirectoryStub final : public FeatureViewDirectory {
+public:
+    std::vector<HostFeatureView> GetViews(
+        const HostViewTargets&) const override
+    {
+        return {};
+    }
+
+    std::shared_ptr<FeatureViewService> GetFeaturePort(
+        const std::string&) const override
+    {
+        return {};
+    }
+
+    std::shared_ptr<OverlayService> GetOverlayPort(
+        const std::string&) const override
+    {
+        return {};
+    }
+
+    std::optional<HostInputView> GetInputView(
+        const HostViewTarget&) const override
+    {
+        return std::nullopt;
+    }
+};
+
+class DataPortStub final : public TrustedFeatureDataPort {
+public:
+    TrustedImageSnapshot GetImageSnapshot() const override
+    {
+        return {};
+    }
+
+    bool SetImageState(
+        TrustedImageState,
+        const TrustedImageSnapshot&,
+        TrustedImageSnapshot&) override
+    {
+        return false;
+    }
 };
 
 HostSessionConfig GetGapSessionConfig()
@@ -161,9 +228,19 @@ void SendTicks(
     const HostRenderViewEndpoint& endpoint,
     const int tickCount)
 {
+    int timerId = endpoint.interactor->GetTimerEventId();
+    if (timerId == 0) {
+        for (int candidate = 1; candidate <= 64; ++candidate) {
+            if (endpoint.interactor->GetTimerDuration(candidate) != 0) {
+                timerId = candidate;
+                break;
+            }
+        }
+    }
+    if (timerId == 0) return;
     for (int tick = 0; tick < tickCount; ++tick) {
         endpoint.interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
+            vtkCommand::TimerEvent, &timerId);
         endpoint.renderWindow->Render();
     }
 }
@@ -207,19 +284,13 @@ bool GetReloadReady(
 int GetGapFailCount()
 {
     int failureCount = 0;
-    HostRenderViewSet directViews;
-    InputPortStub directInput;
+    const auto directHost =
+        std::make_shared<HostControlStub>();
     HostFeatureContext directContext;
-    directContext.renderViews = &directViews;
-    directContext.inputPort = &directInput;
-    directContext.getImageSnapshot = []() {
-        return ImageSnapshot{};
-    };
-    directContext.setActiveViews =
-        [](const std::vector<
-            std::shared_ptr<InteractiveService>>&) {
-        return true;
-    };
+    directContext.views =
+        std::make_shared<ViewDirectoryStub>();
+    directContext.data = std::make_shared<DataPortStub>();
+    directContext.host = directHost;
     GapHostFeature standaloneFeature(GetGapConfig());
     const bool isStandaloneRejected =
         !standaloneFeature.AttachHost(directContext);
@@ -253,8 +324,8 @@ int GetGapFailCount()
             && directDetachedState.analysisState
                 == GapAnalysisState::Idle
             && directDetachedState.statistics.objectVoxelCount == 0
-            && directInput.GetAttachCount() == 1
-            && directInput.GetDetachCount() == 1,
+            && directHost->GetAttachCount() == 1
+            && directHost->GetDetachCount() == 1,
         "Gap attachment requires shared ownership and preserves one input binding") ? 0 : 1;
 
     VtkAppHostSession session(GetGapSessionConfig());
@@ -300,8 +371,8 @@ int GetGapFailCount()
             && isReloadReady
             && isUnattachedRejected
             && unattachedCallbackCount == 0
-            && feature.use_count() == beforeUseCount,
-        "Session owns no strong Gap Feature handle and publishes input") ? 0 : 1;
+            && feature.use_count() == beforeUseCount + 1,
+        "Session owns the attached Gap Feature and publishes input") ? 0 : 1;
 
     GapHostStartParams missingTarget =
         GetGapConfig().defaultStart;

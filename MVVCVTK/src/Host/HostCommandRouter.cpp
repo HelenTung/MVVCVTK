@@ -2,18 +2,19 @@
 #include "Host/Types/HostRequestTypes.h"
 #include "Platform/Path.h"
 
-#include "AppService.h"
-#include "AppTypes.h"
-#include "Host/HostCoreServices.h"
-#include "Host/HostRenderViewSet.h"
-#include "StdRenderContext.h"
-#include "VolumeTypes.h"
+#include "App/AppTypes.h"
+#include "App/Services/AppPorts.h"
+#include "Host/HostViewRuntimeRegistry.h"
+#include "Interaction/AbstractViewContext.h"
+#include "Interaction/InteractionPorts.h"
+#include "Data/VolumeTypes.h"
 
 #include <algorithm>
 #include <charconv>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -22,11 +23,13 @@
 // 宿主协议到应用服务的唯一请求适配层：
 // - 只做具体 Request 识别、Host 类型到 App 类型转换和目标视图选择；
 // - 不保存业务状态，也不直接执行裁切/间隙算法；
-// - m_core、m_renderViews 为会话期非拥有观察指针。
+// - 只保存 View runtime 发放的弱目录，不取得 runtime 容器。
 class HostCommandRouter::Impl final {
 public:
-    Impl(const HostCoreServices& core, const HostRenderViewSet& renderViews)
-        : m_core(&core), m_renderViews(&renderViews) {}
+    explicit Impl(std::weak_ptr<IHostViewDirectory> directory)
+        : m_directory(std::move(directory))
+    {
+    }
 
     bool Dispatch(
         HostRequest&& request,
@@ -34,30 +37,34 @@ public:
 
 private:
     struct ViewCandidate final {
-        const HostRenderViewRuntime* view = nullptr;
-        std::shared_ptr<VizService> service;
-        std::shared_ptr<StdRenderContext> context;
+        std::shared_ptr<AppViewPort> viewPort;
+        std::shared_ptr<RenderUpdatePort> updatePort;
+        std::shared_ptr<AbstractViewContext> context;
+        std::function<bool()> stopView;
         std::optional<VizMode> mode;
         std::optional<MaterialParams> material;
         std::optional<double> opacity;
         std::optional<std::vector<TFNode>> nodes;
         std::optional<double> iso;
         std::optional<BackgroundColor> background;
-        std::optional<std::array<double, 3>> spacing;
         std::optional<WindowLevelParams> windowLevel;
         std::optional<VolumeQualityParams> volumeQuality;
         std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
         std::optional<TransferPreset> transferPreset;
         std::optional<bool> isDenoiseOn;
-        std::optional<HostCursorParams> cursor;
         std::optional<HostVisibilityParams> visibility;
         std::optional<bool> isAxesVisible;
     };
 
     bool SetView(const HostViewSetRequest& request) const;
-    bool ResetViewCamera(const HostViewResetRequest& request) const;
+    bool SetSession(const HostSessionSetRequest& request) const;
+    bool ResetView(const HostViewResetRequest& request) const;
     bool SetTool(const HostToolSetRequest& request) const;
     bool SwitchTool(const HostToolSwitchRequest& request) const;
+    std::optional<HostDataRoute> GetDataRoute(
+        const HostViewTarget& target) const;
+    std::optional<HostViewRoute> GetViewRoute(
+        const HostViewTarget& target) const;
     bool LoadFile(HostLoadRequest request, HostCompleteCallback callback) const;
     bool ReloadBuffer(HostReloadRequest request, HostCompleteCallback callback) const;
     bool ExportData(HostDataExportRequest request, HostCompleteCallback callback) const;
@@ -84,14 +91,22 @@ private:
         const HostViewSetRequest& request) const;
     bool GetUnitValid(double value) const;
 
-    const HostCoreServices* m_core = nullptr;
-    const HostRenderViewSet* m_renderViews = nullptr;
+    std::weak_ptr<IHostViewDirectory> m_directory;
 };
 
 bool HostCommandRouter::Impl::Dispatch(
     HostRequest&& request,
     HostCompleteCallback onComplete) const
 {
+    const auto sendSync = [&onComplete](const bool isSucceeded) {
+        if (!onComplete) return isSucceeded;
+        try { onComplete(isSucceeded); }
+        catch (...) {
+            // 同步命令已经完成；调用方回调异常不能把已识别请求改写为拒绝。
+        }
+        return true;
+    };
+
     if (auto* value = dynamic_cast<HostLoadRequest*>(&request)) {
         return LoadFile(
             std::move(*value),
@@ -114,48 +129,71 @@ bool HostCommandRouter::Impl::Dispatch(
     }
     if (const auto* value = dynamic_cast<const HostViewSetRequest*>(
         &request)) {
-        return !onComplete && SetView(*value);
+        return sendSync(SetView(*value));
+    }
+    if (const auto* value = dynamic_cast<const HostSessionSetRequest*>(
+        &request)) {
+        return sendSync(SetSession(*value));
     }
     if (const auto* value = dynamic_cast<const HostViewResetRequest*>(
         &request)) {
-        return !onComplete && ResetViewCamera(*value);
+        return sendSync(ResetView(*value));
     }
     if (const auto* value = dynamic_cast<const HostToolSetRequest*>(
         &request)) {
-        return !onComplete && SetTool(*value);
+        return sendSync(SetTool(*value));
     }
     if (const auto* value = dynamic_cast<const HostToolSwitchRequest*>(
         &request)) {
-        return !onComplete && SwitchTool(*value);
+        return sendSync(SwitchTool(*value));
     }
     return false;
+}
+
+std::optional<HostDataRoute>
+HostCommandRouter::Impl::GetDataRoute(
+    const HostViewTarget& target) const
+{
+    const auto directory = m_directory.lock();
+    return directory
+        ? directory->GetDataRoute(target)
+        : std::optional<HostDataRoute>{};
+}
+
+std::optional<HostViewRoute>
+HostCommandRouter::Impl::GetViewRoute(
+    const HostViewTarget& target) const
+{
+    const auto directory = m_directory.lock();
+    return directory
+        ? directory->GetViewRoute(target)
+        : std::optional<HostViewRoute>{};
 }
 
 bool HostCommandRouter::Impl::LoadFile(
     HostLoadRequest request, HostCompleteCallback callback) const
 {
-    if (!m_renderViews || request.filePath.empty()) {
+    if (request.filePath.empty()) {
         return false;
     }
-    const auto* view = m_renderViews->GetPrimaryView();
-    if (!view || !view->service) {
+    const auto route = GetDataRoute(HostViewTarget{});
+    const auto data = route ? route->data.lock() : nullptr;
+    if (!data) {
         return false;
     }
     auto layout = BuildLoadLayout(request);
     if (!layout) return false;
-    return view->service->LoadFileAsync(
+    return data->LoadFileAsync(
         std::move(request.filePath), std::move(*layout),
-        std::move(callback));
+        std::move(callback)) == TaskAdmissionResult::Accepted;
 }
 
 bool HostCommandRouter::Impl::ReloadBuffer(
     HostReloadRequest request, HostCompleteCallback callback) const
 {
-    if (!m_renderViews) {
-        return false;
-    }
-    const auto* view = m_renderViews->GetPrimaryView();
-    if (!view || !view->service) {
+    const auto route = GetDataRoute(HostViewTarget{});
+    const auto data = route ? route->data.lock() : nullptr;
+    if (!data) {
         return false;
     }
     auto layout = VolumeLayout::Create(
@@ -166,8 +204,9 @@ bool HostCommandRouter::Impl::ReloadBuffer(
     auto buffer = VolumeBuffer::Create(
         std::move(request.voxels), std::move(*layout));
     if (!buffer) return false;
-    return view->service->ReloadFromBufferAsync(
-        std::move(*buffer), std::move(callback));
+    return data->ReloadFromBufferAsync(
+        std::move(*buffer), std::move(callback))
+        == TaskAdmissionResult::Accepted;
 }
 
 std::optional<VolumeLayout> HostCommandRouter::Impl::BuildLoadLayout(
@@ -233,17 +272,12 @@ std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(
 bool HostCommandRouter::Impl::ExportData(
     HostDataExportRequest request, HostCompleteCallback callback) const
 {
-    if (!m_renderViews || request.outputPath.empty()) {
+    if (request.outputPath.empty()) {
         return false;
     }
-    const bool hasSource =
-        !request.sourceView.viewId.empty()
-        || request.sourceView.isViewRoleUsed;
-    const auto* view = hasSource
-        ? m_renderViews->GetViewBySelector(
-            request.sourceView)
-        : m_renderViews->GetPrimaryView();
-    if (!view || !view->service) {
+    const auto route = GetDataRoute(request.sourceView);
+    const auto data = route ? route->data.lock() : nullptr;
+    if (!data) {
         return false;
     }
 
@@ -269,41 +303,49 @@ bool HostCommandRouter::Impl::ExportData(
     }
     else {
         // 缺省格式由来源窗口完整收敛，调用方不再通过目录名暗示格式。
-        switch (view->service->GetVizMode()) {
-        case VizMode::Volume:
-        case VizMode::CompositeVolume:
+        switch (route->mode) {
+        case HostRenderMode::Volume:
+        case HostRenderMode::CompositeVolume:
             extension = ".raw";
             break;
-        case VizMode::IsoSurface:
-        case VizMode::CompositeIsoSurface:
+        case HostRenderMode::IsoSurface:
+        case HostRenderMode::CompositeIsoSurface:
             extension = ".ply";
             break;
-        case VizMode::SliceTop_down:
-        case VizMode::SliceFront_back:
-        case VizMode::SliceLeft_right:
+        case HostRenderMode::SliceTopDown:
+        case HostRenderMode::SliceFrontBack:
+        case HostRenderMode::SliceLeftRight:
             return false;
         }
     }
-    view->service->ExportDataAsync(
+    return data->ExportDataAsync(
         std::move(request.outputPath),
         std::move(extension),
-        std::move(callback));
-    return true;
+        std::move(callback)) == TaskAdmissionResult::Accepted;
 }
 
 bool HostCommandRouter::Impl::ExportSlices(
     HostSliceExportRequest request, HostCompleteCallback callback) const
 {
-    const auto* view = m_renderViews
-        ? m_renderViews->GetViewBySelector(request.sourceView) : nullptr;
-    if (!view || !view->service || request.outputDir.empty()
-        || !m_renderViews->GetRoleIsSliceView(view->config.role)
+    const bool hasSource = !request.sourceView.viewId.empty()
+        || request.sourceView.isViewRoleUsed;
+    const auto route = hasSource
+        ? GetDataRoute(request.sourceView)
+        : std::optional<HostDataRoute>{};
+    const bool isSlice = route
+        && (route->role == HostRenderViewRole::TopDownSlice
+            || route->role == HostRenderViewRole::FrontBackSlice
+            || route->role == HostRenderViewRole::LeftRightSlice);
+    const auto data = route ? route->data.lock() : nullptr;
+    if (!data || request.outputDir.empty()
+        || !isSlice
         || (request.angleDeg && !std::isfinite(*request.angleDeg))) {
         return false;
     }
-    view->service->ExportSlicesAsync(
-        request.outputDir, request.angleDeg, std::move(callback));
-    return true;
+    return data->ExportSlicesAsync(
+        std::move(request.outputDir),
+        request.angleDeg,
+        std::move(callback)) == TaskAdmissionResult::Accepted;
 }
 
 std::optional<VizMode> HostCommandRouter::Impl::GetAppViewMode(HostRenderMode mode) const
@@ -452,13 +494,18 @@ std::optional<HostCommandRouter::Impl::ViewCandidate>
 HostCommandRouter::Impl::BuildViewCandidate(
     const HostViewSetRequest& request) const
 {
-    ViewCandidate candidate;
-    candidate.view = m_renderViews
-        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
-    if (!candidate.view || !candidate.view->service) return std::nullopt;
+    const auto route = GetViewRoute(request.targetView);
+    const auto view = route ? route->view.lock() : nullptr;
+    const auto update = route ? route->update.lock() : nullptr;
+    if (!view || !update) {
+        return std::nullopt;
+    }
 
-    candidate.service = candidate.view->service;
-    candidate.context = candidate.view->context;
+    ViewCandidate candidate;
+    candidate.viewPort = view;
+    candidate.updatePort = update;
+    candidate.context = route->context.lock();
+    candidate.stopView = route->stopView;
     candidate.mode = request.mode ? GetAppViewMode(*request.mode)
         : std::optional<VizMode>{};
     candidate.material = request.material ? BuildAppMaterial(*request.material)
@@ -473,7 +520,6 @@ HostCommandRouter::Impl::BuildViewCandidate(
     candidate.background = request.background
         ? BuildAppBackground(*request.background)
         : std::optional<BackgroundColor>{};
-    candidate.spacing = request.spacing;
     candidate.windowLevel = request.windowLevel
         ? BuildAppWindowLevel(*request.windowLevel)
         : std::optional<WindowLevelParams>{};
@@ -487,7 +533,6 @@ HostCommandRouter::Impl::BuildViewCandidate(
         ? GetTransferPreset(*request.transferPreset)
         : std::optional<TransferPreset>{};
     candidate.isDenoiseOn = request.isDenoiseOn;
-    candidate.cursor = request.cursor;
     candidate.visibility = request.visibility;
     candidate.isAxesVisible = request.isAxesVisible;
 
@@ -511,29 +556,13 @@ HostCommandRouter::Impl::BuildViewCandidate(
         return std::nullopt;
     }
 
-    if (candidate.spacing) {
-        for (const double value : *candidate.spacing) {
-            if (!std::isfinite(value) || value <= 0.0) {
-                return std::nullopt;
-            }
-        }
-    }
-    if (candidate.cursor) {
-        if (candidate.cursor->axis < -1 || candidate.cursor->axis > 2
-            || !std::all_of(
-                candidate.cursor->world.begin(),
-                candidate.cursor->world.end(),
-                [](double value) { return std::isfinite(value); })) {
-            return std::nullopt;
-        }
-    }
     if (candidate.material && candidate.opacity) {
         candidate.material->opacity = *candidate.opacity;
         candidate.opacity.reset();
     }
 
     const VizMode effectiveMode = candidate.mode
-        ? *candidate.mode : candidate.service->GetVizMode();
+        ? *candidate.mode : candidate.viewPort->GetViewState().mode;
     const bool isVolumeMode = effectiveMode == VizMode::Volume
         || effectiveMode == VizMode::CompositeVolume;
     if (!isVolumeMode
@@ -551,132 +580,202 @@ bool HostCommandRouter::Impl::GetUnitValid(double value) const
     return std::isfinite(value) && value >= 0.0 && value <= 1.0;
 }
 
+bool HostCommandRouter::Impl::SetSession(
+    const HostSessionSetRequest& request) const
+{
+    if (!request.spacing && !request.cursor) return false;
+
+    AppSessionUpdate update;
+    update.spacing = request.spacing;
+    if (request.spacing
+        && std::any_of(
+            request.spacing->begin(), request.spacing->end(),
+            [](const double value) {
+                return !std::isfinite(value) || value <= 0.0;
+            })) {
+        return false;
+    }
+    if (request.cursor) {
+        if (request.cursor->axis < -1 || request.cursor->axis > 2
+            || std::any_of(
+                request.cursor->world.begin(),
+                request.cursor->world.end(),
+                [](const double value) {
+                    return !std::isfinite(value);
+                })) {
+            return false;
+        }
+        update.cursorWorld = request.cursor->world;
+        update.cursorAxis = static_cast<AppCursorAxis>(
+            request.cursor->axis);
+    }
+
+    const auto directory = m_directory.lock();
+    const auto session = directory
+        ? directory->GetSessionPort().lock() : nullptr;
+    return session && session->SendSessionUpdate(update);
+}
+
 bool HostCommandRouter::Impl::SetView(
     const HostViewSetRequest& request) const
 {
     // 1. 先在局部候选中解析目标并完成所有字段校验。
-    // 2. 可报告失败的 setter 全部排在 void 状态写入前，并逐项传播失败。
-    // 3. 前一个可失败 setter 成功、后一个失败时仍可能留下部分状态；
-    //    此处不把调用顺序优化表述为强原子回滚。
-    // 4. 全部可失败 setter 成功后，再提交其余已验证状态。
+    // 2. App port 内部以完整快照保证字段级强回滚。
+    // 3. Host 再按 App → camera → axes → dirty 提交，失败按逆序补偿。
+    // 4. 补偿失败时停用目标 view，禁止继续暴露半状态。
     auto candidate = BuildViewCandidate(request);
     if (!candidate) return false;
 
-    if (candidate->spacing) {
-        const auto& spacing = *candidate->spacing;
-        if (!candidate->service->SetSpacing(
-            spacing[0], spacing[1], spacing[2])) {
-            return false;
-        }
+    AppViewUpdate update;
+    update.mode = candidate->mode;
+    update.material = candidate->material;
+    update.opacity = candidate->opacity;
+    update.transferNodes = candidate->nodes;
+    update.isoThreshold = candidate->iso;
+    update.background = candidate->background;
+    update.windowLevel = candidate->windowLevel;
+    update.volumeQuality = candidate->volumeQuality;
+    update.gradientOpacity = candidate->gradientOpacity;
+    update.transferPreset = candidate->transferPreset;
+    update.isDenoiseOn = candidate->isDenoiseOn;
+    if (candidate->visibility) {
+        const auto& visibility = *candidate->visibility;
+        AppVisibilityUpdate appVisibility;
+        appVisibility.isPlanes3DVisible =
+            visibility.isPlanes3DVisible;
+        appVisibility.isCrosshairVisible =
+            visibility.isCrosshairVisible;
+        appVisibility.isRulerVisible =
+            visibility.isRulerVisible;
+        update.visibility = std::move(appVisibility);
     }
-    if (candidate->volumeQuality
-        && !candidate->service->SetVolumeQuality(
-            *candidate->volumeQuality)) {
-        return false;
-    }
-    if (candidate->gradientOpacity
-        && !candidate->service->SetGradientOpacity(
-            *candidate->gradientOpacity)) {
-        return false;
-    }
-    if (candidate->transferPreset
-        && !candidate->service->SetTransferPreset(
-            *candidate->transferPreset)) {
-        return false;
-    }
-    if (candidate->isDenoiseOn
-        && !candidate->service->SetDenoiseOn(
-            *candidate->isDenoiseOn)) {
+
+    const AppViewState oldState = candidate->viewPort->GetViewState();
+    const bool oldAxes = candidate->context
+        && candidate->context->GetOrientationAxesVisible();
+    if (!candidate->viewPort->SendViewUpdate(update)) return false;
+    const AppViewState nextState = candidate->viewPort->GetViewState();
+    if (nextState.revision <= oldState.revision) {
+        if (candidate->stopView) (void)candidate->stopView();
         return false;
     }
 
-    if (candidate->mode) {
-        candidate->service->SetVizMode(*candidate->mode);
-        candidate->context->SetCameraStyle(*candidate->mode);
-    }
-    if (candidate->material) candidate->service->SetMaterial(*candidate->material);
-    if (candidate->opacity) candidate->service->SetOpacity(*candidate->opacity);
-    if (candidate->nodes) candidate->service->SetTransferFunction(*candidate->nodes);
-    if (candidate->iso) candidate->service->SetIsoThreshold(*candidate->iso);
-    if (candidate->background) candidate->service->SetBackground(*candidate->background);
-    if (candidate->windowLevel) candidate->service->SetWindowLevel(
-        candidate->windowLevel->windowWidth,
-        candidate->windowLevel->windowCenter);
-    if (candidate->cursor) {
-        candidate->service->SetCursorWorldPosition(
-            candidate->cursor->world.data(),
-            candidate->cursor->axis);
-    }
-    if (candidate->visibility) {
-        const auto& visibility = *candidate->visibility;
-        if (visibility.isPlanes3DVisible.has_value()) {
-            candidate->service->SetElementVisible(
-                VisFlags::Planes3D,
-                *visibility.isPlanes3DVisible);
+    const auto stopOnRestoreFail = [&]() {
+        if (candidate->stopView) (void)candidate->stopView();
+    };
+    const auto restore = [&](const bool hasAxesChanged) {
+        bool isRestored = true;
+        if (hasAxesChanged && candidate->context) {
+            isRestored = candidate->context
+                ->SetOrientationAxesVisible(oldAxes) && isRestored;
         }
-        if (visibility.isCrosshairVisible.has_value()) {
-            candidate->service->SetElementVisible(
-                VisFlags::Crosshair,
-                *visibility.isCrosshairVisible);
+        if (candidate->mode && candidate->context) {
+            isRestored = candidate->context
+                ->SetCameraStyle(oldState.mode) && isRestored;
         }
-        if (visibility.isRulerVisible.has_value()) {
-            candidate->service->SetElementVisible(
-                VisFlags::Ruler,
-                *visibility.isRulerVisible);
-        }
+        isRestored = candidate->viewPort->SetViewState(
+            oldState, nextState.revision) && isRestored;
+        if (!isRestored) stopOnRestoreFail();
+        return isRestored;
+    };
+
+    if (candidate->mode
+        && !candidate->context->SetCameraStyle(*candidate->mode)) {
+        (void)restore(false);
+        return false;
     }
     if (candidate->isAxesVisible) {
-        candidate->context->SetOrientationAxesVisible(
-            *candidate->isAxesVisible);
+        if (!candidate->context->SetOrientationAxesVisible(
+                *candidate->isAxesVisible)) {
+            (void)restore(true);
+            return false;
+        }
         // 方向轴属于 context，不发布 SharedState flags；显式标脏让 Qt Timer 产生下一帧。
-        candidate->service->SetDirty();
+        if (!candidate->updatePort->SetRenderNeeded()) {
+            (void)restore(true);
+            return false;
+        }
     }
     return true;
 }
 
-bool HostCommandRouter::Impl::ResetViewCamera(
+bool HostCommandRouter::Impl::ResetView(
     const HostViewResetRequest& request) const
 {
-    const auto* view = m_renderViews
-        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
-    if (!view || !view->context || !view->service) {
+    const auto route = GetViewRoute(request.targetView);
+    const auto view = route ? route->view.lock() : nullptr;
+    const auto context = route ? route->context.lock() : nullptr;
+    const auto update = route ? route->update.lock() : nullptr;
+    if (!view || !context || !update) {
         return false;
     }
-    view->context->ResetCamera();
-    // ResetCamera 只修改 renderer camera，不触发共享状态广播。
-    view->service->SetDirty();
-    return true;
+
+    const AppViewState oldState = view->GetViewState();
+    const auto oldCamera = context->GetCameraState();
+    if (!oldCamera) return false;
+
+    AppViewUpdate viewUpdate;
+    viewUpdate.windowLevelMode = WindowLevelMode::Auto;
+    if (!view->SendViewUpdate(viewUpdate)) return false;
+    const AppViewState nextState = view->GetViewState();
+    if (nextState.revision <= oldState.revision) {
+        if (route->stopView) (void)route->stopView();
+        return false;
+    }
+
+    const auto restore = [&](const bool hasCameraChanged) {
+        bool isRestored = true;
+        if (hasCameraChanged) {
+            isRestored = context->SetCameraState(*oldCamera)
+                && isRestored;
+        }
+        isRestored = view->SetViewState(
+            oldState, nextState.revision) && isRestored;
+        if (!isRestored && route->stopView) {
+            (void)route->stopView();
+        }
+        return isRestored;
+    };
+
+    if (!context->ResetCamera()) {
+        (void)restore(true);
+        return false;
+    }
+    // 相机不发布 App 状态事件；显式补帧与窗宽窗位提交组成同一 Host 事务。
+    if (update->SetRenderNeeded()) return true;
+    (void)restore(true);
+    return false;
 }
 
 bool HostCommandRouter::Impl::SetTool(
     const HostToolSetRequest& request) const
 {
-    const auto* view = m_renderViews
-        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
-    if (!view || !view->context) return false;
+    const auto route = GetViewRoute(request.targetView);
+    const auto context = route ? route->context.lock() : nullptr;
+    if (!context) return false;
     const auto mode = GetAppToolMode(request.toolMode);
     if (!mode) return false;
-    view->context->SetToolMode(*mode);
-    return true;
+    return context->SetToolMode(*mode);
 }
 
 bool HostCommandRouter::Impl::SwitchTool(
     const HostToolSwitchRequest& request) const
 {
-    const auto* view = m_renderViews
-        ? m_renderViews->GetViewBySelector(request.targetView) : nullptr;
-    if (!view || !view->context) return false;
+    const auto route = GetViewRoute(request.targetView);
+    const auto context = route ? route->context.lock() : nullptr;
+    if (!context) return false;
     const ToolMode mode =
-        view->context->GetToolMode() == ToolMode::Navigation
+        context->GetToolMode() == ToolMode::Navigation
         ? ToolMode::ModelTransform
         : ToolMode::Navigation;
-    view->context->SetToolMode(mode);
-    return true;
+    return context->SetToolMode(mode);
 }
 
-HostCommandRouter::HostCommandRouter(const HostCoreServices& core,
-    const HostRenderViewSet& renderViews)
-    : m_impl(std::make_unique<Impl>(core, renderViews)) {}
+HostCommandRouter::HostCommandRouter(
+    std::weak_ptr<IHostViewDirectory> directory)
+    : m_impl(std::make_unique<Impl>(std::move(directory)))
+{
+}
 
 HostCommandRouter::~HostCommandRouter() = default;
 

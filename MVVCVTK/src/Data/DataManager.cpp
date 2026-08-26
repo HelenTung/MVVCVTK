@@ -25,8 +25,10 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <vtkTransform.h>
 #include <vtkImageReslice.h>
 #include <vtkImageChangeInformation.h>
@@ -41,7 +43,7 @@
 class BaseDataManager::Impl final {
 public:
     Impl()
-        : m_current(std::make_shared<ImageState>(ImageState{
+        : m_current(std::make_shared<TrustedImageState>(TrustedImageState{
             vtkSmartPointer<vtkImageData>::New(),
             {},
             { 0, 0, 0 },
@@ -53,16 +55,19 @@ public:
     }
 
     static bool ExportRaw(
-        const ImageSnapshot& imageSnapshot,
+        const TrustedImageSnapshot& imageSnapshot,
         const std::string& outputDir,
-        const std::array<double, 16>& modelToWorldMatrix);
+        const std::array<double, 16>& modelToWorldMatrix,
+        const TaskStopToken& stopToken);
     static bool ExportMesh(
-        const ImageSnapshot& imageSnapshot,
+        const TrustedImageSnapshot& imageSnapshot,
         const std::string& outputDir,
-        const DataExportParams& params);
+        const DataExportParams& params,
+        const TaskStopToken& stopToken);
     static bool BuildMeshColors(
         vtkPolyData* mesh,
-        const DataExportParams& params);
+        const DataExportParams& params,
+        const TaskStopToken& stopToken);
     static bool GetIsAffine(
         const std::array<double, 16>& modelToWorld);
     static std::filesystem::path BuildExportPath(
@@ -119,6 +124,14 @@ public:
             || !validityMask->GetScalarPointer()) {
             return false;
         }
+        vtkPointData* const maskData = validityMask->GetPointData();
+        vtkDataArray* const maskScalars = maskData
+            ? maskData->GetScalars() : nullptr;
+        if (!maskScalars
+            || maskScalars->GetNumberOfTuples()
+                != image->GetNumberOfPoints()) {
+            return false;
+        }
 
         int imageExtent[6] = {};
         int maskExtent[6] = {};
@@ -160,14 +173,389 @@ public:
         return true;
     }
 
-    bool SetCurrent(ImageState state)
+    static ImageValueType GetValueType(const int vtkType) noexcept
+    {
+        switch (vtkType) {
+        case VTK_CHAR:
+            return std::numeric_limits<char>::is_signed
+                ? ImageValueType::Int8 : ImageValueType::UInt8;
+        case VTK_SIGNED_CHAR:
+            return ImageValueType::Int8;
+        case VTK_UNSIGNED_CHAR:
+            return ImageValueType::UInt8;
+        case VTK_SHORT:
+            return ImageValueType::Int16;
+        case VTK_UNSIGNED_SHORT:
+            return ImageValueType::UInt16;
+        case VTK_INT:
+            return ImageValueType::Int32;
+        case VTK_UNSIGNED_INT:
+            return ImageValueType::UInt32;
+        case VTK_LONG:
+            return sizeof(long) == sizeof(std::int64_t)
+                ? ImageValueType::Int64 : ImageValueType::Int32;
+        case VTK_UNSIGNED_LONG:
+            return sizeof(unsigned long) == sizeof(std::uint64_t)
+                ? ImageValueType::UInt64 : ImageValueType::UInt32;
+        case VTK_LONG_LONG:
+            return ImageValueType::Int64;
+        case VTK_UNSIGNED_LONG_LONG:
+            return ImageValueType::UInt64;
+        case VTK_FLOAT:
+            return ImageValueType::Float32;
+        case VTK_DOUBLE:
+            return ImageValueType::Float64;
+        default:
+            return ImageValueType::Unknown;
+        }
+    }
+
+    static std::optional<std::size_t>
+        GetArrayByteCount(vtkDataArray* values)
+    {
+        if (!values) return std::nullopt;
+        const vtkIdType valueCount = values->GetDataSize();
+        const int valueBytes = values->GetDataTypeSize();
+        if (valueCount < 0 || valueBytes <= 0
+            || static_cast<std::uint64_t>(valueCount)
+                > std::numeric_limits<std::size_t>::max()
+                    / static_cast<std::size_t>(valueBytes)) {
+            return std::nullopt;
+        }
+
+        return static_cast<std::size_t>(valueCount)
+            * static_cast<std::size_t>(valueBytes);
+    }
+
+    static std::shared_ptr<const std::vector<std::uint8_t>>
+        GetArrayBytes(
+            vtkDataArray* values,
+            const std::size_t byteCount)
+    {
+        if (!values) return {};
+        try {
+            auto bytes =
+                std::make_shared<std::vector<std::uint8_t>>(byteCount);
+            if (byteCount != 0) {
+                const void* const source = values->GetVoidPointer(0);
+                if (!source) return {};
+                std::memcpy(bytes->data(), source, byteCount);
+            }
+            return bytes;
+        }
+        catch (const std::bad_alloc&) {
+            return {};
+        }
+        catch (const std::length_error&) {
+            return {};
+        }
+    }
+
+    struct ReadPlan final {
+        TrustedImageSnapshot snapshot;
+        vtkDataArray* values = nullptr;
+        vtkDataArray* mask = nullptr;
+        std::array<std::size_t, 3> sourceDims = { 0, 0, 0 };
+        std::array<int, 6> sourceExtent = { 0, -1, 0, -1, 0, -1 };
+        ImageReadRegion region;
+        ImageValueType valueType = ImageValueType::Unknown;
+        std::size_t sourceVoxels = 0;
+        std::size_t regionVoxels = 0;
+        std::size_t tupleBytes = 0;
+        std::size_t requiredBytes = 0;
+    };
+
+    struct ReadPlanResult final {
+        ImageReadError error = ImageReadError::InvalidData;
+        std::size_t requiredBytes = 0;
+        std::optional<ReadPlan> plan;
+    };
+
+    static bool GetCheckedProduct(
+        const std::size_t left,
+        const std::size_t right,
+        std::size_t& product) noexcept
+    {
+        product = 0;
+        if (left != 0
+            && right > std::numeric_limits<std::size_t>::max() / left) {
+            return false;
+        }
+        product = left * right;
+        return true;
+    }
+
+    static ReadPlanResult GetReadPlan(
+        TrustedImageSnapshot snapshot,
+        const ImageReadRequest& request)
+    {
+        ReadPlanResult result;
+        if (!snapshot || !snapshot->image) {
+            result.error = ImageReadError::NoImage;
+            return result;
+        }
+
+        ReadPlan plan;
+        plan.snapshot = std::move(snapshot);
+        int dims[3] = {};
+        int extent[6] = {};
+        plan.snapshot->image->GetDimensions(dims);
+        plan.snapshot->image->GetExtent(extent);
+        std::size_t sourceVoxels = 1;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto minIndex = static_cast<std::int64_t>(
+                extent[axis * 2]);
+            const auto maxIndex = static_cast<std::int64_t>(
+                extent[axis * 2 + 1]);
+            const auto extentSize = maxIndex - minIndex + 1;
+            if (dims[axis] <= 0
+                || extentSize != static_cast<std::int64_t>(dims[axis])
+                || plan.snapshot->dims[axis] != dims[axis]) {
+                result.error = ImageReadError::InvalidData;
+                return result;
+            }
+            plan.sourceDims[axis] = static_cast<std::size_t>(dims[axis]);
+            if (!GetCheckedProduct(
+                    sourceVoxels,
+                    plan.sourceDims[axis],
+                    sourceVoxels)) {
+                result.error = ImageReadError::TooLarge;
+                result.requiredBytes =
+                    std::numeric_limits<std::size_t>::max();
+                return result;
+            }
+        }
+        plan.sourceVoxels = sourceVoxels;
+        std::copy_n(extent, plan.sourceExtent.size(),
+            plan.sourceExtent.begin());
+
+        vtkPointData* const pointData =
+            plan.snapshot->image->GetPointData();
+        plan.values = pointData ? pointData->GetScalars() : nullptr;
+        if (!plan.values
+            || plan.values->GetDataTypeSize() <= 0
+            || plan.values->GetNumberOfComponents() <= 0
+            || sourceVoxels > static_cast<std::size_t>(
+                std::numeric_limits<vtkIdType>::max())
+            || plan.values->GetNumberOfTuples()
+                != static_cast<vtkIdType>(sourceVoxels)) {
+            result.error = ImageReadError::InvalidData;
+            return result;
+        }
+        plan.valueType = GetValueType(plan.values->GetDataType());
+        if (plan.valueType == ImageValueType::Unknown) {
+            result.error = ImageReadError::UnsupportedType;
+            return result;
+        }
+
+        const auto componentBytes = static_cast<std::size_t>(
+            plan.values->GetDataTypeSize());
+        const auto componentCount = static_cast<std::size_t>(
+            plan.values->GetNumberOfComponents());
+        if (!GetCheckedProduct(
+                componentBytes, componentCount, plan.tupleBytes)) {
+            result.error = ImageReadError::TooLarge;
+            result.requiredBytes =
+                std::numeric_limits<std::size_t>::max();
+            return result;
+        }
+        std::size_t expectedValueBytes = 0;
+        const auto actualValueBytes = GetArrayByteCount(plan.values);
+        if (!GetCheckedProduct(
+                sourceVoxels, plan.tupleBytes, expectedValueBytes)
+            || !actualValueBytes
+            || *actualValueBytes != expectedValueBytes) {
+            result.error = ImageReadError::InvalidData;
+            return result;
+        }
+
+        if (plan.snapshot->validityMask) {
+            if (!GetMaskValid(
+                    plan.snapshot->image,
+                    plan.snapshot->validityMask)) {
+                result.error = ImageReadError::InvalidData;
+                return result;
+            }
+            vtkPointData* const maskData =
+                plan.snapshot->validityMask->GetPointData();
+            plan.mask = maskData ? maskData->GetScalars() : nullptr;
+            const auto maskBytes = GetArrayByteCount(plan.mask);
+            if (!plan.mask
+                || plan.mask->GetDataType() != VTK_UNSIGNED_CHAR
+                || plan.mask->GetNumberOfComponents() != 1
+                || plan.mask->GetNumberOfTuples()
+                    != static_cast<vtkIdType>(sourceVoxels)
+                || !maskBytes
+                || *maskBytes != sourceVoxels) {
+                result.error = ImageReadError::InvalidData;
+                return result;
+            }
+        }
+
+        plan.region = request.region.value_or(ImageReadRegion{
+            { 0, 0, 0 }, plan.sourceDims });
+        std::size_t regionVoxels = 1;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            const auto offset = plan.region.offset[axis];
+            const auto regionSize = plan.region.size[axis];
+            if (regionSize == 0
+                || offset > plan.sourceDims[axis]
+                || regionSize > plan.sourceDims[axis] - offset) {
+                result.error = ImageReadError::InvalidRegion;
+                return result;
+            }
+            if (!GetCheckedProduct(
+                    regionVoxels, regionSize, regionVoxels)) {
+                result.error = ImageReadError::TooLarge;
+                result.requiredBytes =
+                    std::numeric_limits<std::size_t>::max();
+                return result;
+            }
+        }
+        plan.regionVoxels = regionVoxels;
+
+        std::size_t voxelBytes = plan.tupleBytes;
+        if (plan.mask) {
+            if (voxelBytes == std::numeric_limits<std::size_t>::max()) {
+                result.error = ImageReadError::TooLarge;
+                result.requiredBytes = voxelBytes;
+                return result;
+            }
+            ++voxelBytes;
+        }
+        if (!GetCheckedProduct(
+                regionVoxels, voxelBytes, plan.requiredBytes)) {
+            result.error = ImageReadError::TooLarge;
+            result.requiredBytes =
+                std::numeric_limits<std::size_t>::max();
+            return result;
+        }
+
+        result.error = ImageReadError::None;
+        result.requiredBytes = plan.requiredBytes;
+        result.plan = std::move(plan);
+        return result;
+    }
+
+    static ImageReadState GetReadState(
+        const ReadPlan& plan,
+        const std::size_t voxelOffset,
+        const std::size_t voxelCount)
+    {
+        ImageReadState state;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            state.dims[axis] = static_cast<int>(plan.region.size[axis]);
+            state.extent[axis * 2] = 0;
+            state.extent[axis * 2 + 1] = state.dims[axis] - 1;
+        }
+
+        double sourceOrigin[3] = {};
+        double sourceSpacing[3] = {};
+        plan.snapshot->image->GetOrigin(sourceOrigin);
+        plan.snapshot->image->GetSpacing(sourceSpacing);
+        const auto* direction =
+            plan.snapshot->image->GetDirectionMatrix();
+        for (std::size_t row = 0; row < 3; ++row) {
+            state.spacing[row] = sourceSpacing[row];
+            state.origin[row] = sourceOrigin[row];
+            for (std::size_t column = 0; column < 3; ++column) {
+                const double value = direction
+                    ? direction->GetElement(
+                        static_cast<int>(row),
+                        static_cast<int>(column))
+                    : (row == column ? 1.0 : 0.0);
+                state.direction[row * 3 + column] = value;
+                const auto sourceIndex = static_cast<double>(
+                    static_cast<std::int64_t>(
+                        plan.sourceExtent[column * 2])
+                    + static_cast<std::int64_t>(
+                        plan.region.offset[column]));
+                state.origin[row] += value
+                    * sourceIndex * sourceSpacing[column];
+            }
+        }
+        state.scalarRange = plan.snapshot->scalarRange;
+        state.valueType = plan.valueType;
+        state.componentBytes = static_cast<std::size_t>(
+            plan.values->GetDataTypeSize());
+        state.componentCount = static_cast<std::size_t>(
+            plan.values->GetNumberOfComponents());
+        state.region = plan.region;
+        state.voxelOffset = voxelOffset;
+        state.voxelCount = voxelCount;
+        state.version = plan.snapshot->version;
+        return state;
+    }
+
+    static ImageReadBytes GetReadBytes(
+        const ReadPlan& plan,
+        vtkDataArray* values,
+        const std::size_t voxelBytes,
+        const std::size_t voxelOffset,
+        const std::size_t voxelCount,
+        const TaskStopToken& stopToken)
+    {
+        if (!values || stopToken.GetIsStopped()) return {};
+        std::size_t byteCount = 0;
+        if (!GetCheckedProduct(
+                voxelCount, voxelBytes, byteCount)) {
+            return {};
+        }
+        try {
+            auto bytes =
+                std::make_shared<std::vector<std::uint8_t>>(byteCount);
+            if (byteCount == 0) return bytes;
+            const auto* source = static_cast<const std::uint8_t*>(
+                values->GetVoidPointer(0));
+            if (!source) return {};
+
+            const std::size_t regionX = plan.region.size[0];
+            const std::size_t regionY = plan.region.size[1];
+            const std::size_t regionSlice = regionX * regionY;
+            std::size_t copied = 0;
+            while (copied < voxelCount) {
+                if (stopToken.GetIsStopped()) return {};
+                const std::size_t regionIndex = voxelOffset + copied;
+                const std::size_t localZ = regionIndex / regionSlice;
+                const std::size_t sliceIndex = regionIndex % regionSlice;
+                const std::size_t localY = sliceIndex / regionX;
+                const std::size_t localX = sliceIndex % regionX;
+                const std::size_t rowVoxels = std::min(
+                    voxelCount - copied, regionX - localX);
+
+                const std::size_t sourceX =
+                    plan.region.offset[0] + localX;
+                const std::size_t sourceY =
+                    plan.region.offset[1] + localY;
+                const std::size_t sourceZ =
+                    plan.region.offset[2] + localZ;
+                const std::size_t sourceIndex =
+                    (sourceZ * plan.sourceDims[1] + sourceY)
+                    * plan.sourceDims[0] + sourceX;
+                const std::size_t sourceByte = sourceIndex * voxelBytes;
+                const std::size_t targetByte = copied * voxelBytes;
+                const std::size_t rowBytes = rowVoxels * voxelBytes;
+                std::memcpy(
+                    bytes->data() + targetByte,
+                    source + sourceByte,
+                    rowBytes);
+                copied += rowVoxels;
+            }
+            return stopToken.GetIsStopped() ? ImageReadBytes{} : bytes;
+        }
+        catch (...) {
+            return {};
+        }
+    }
+
+    bool SetCurrent(TrustedImageState state)
     {
         if (!state.image
             || !GetMaskValid(state.image, state.validityMask)) {
             return false;
         }
-        auto nextState = std::make_shared<ImageState>(std::move(state));
-        std::shared_ptr<const ImageState> retiredState;
+        auto nextState = std::make_shared<TrustedImageState>(std::move(state));
+        std::shared_ptr<const TrustedImageState> retiredState;
         {
             std::lock_guard<std::mutex> lock(m_dataMutex);
             if (!m_current
@@ -181,19 +569,20 @@ public:
         return true;
     }
 
-    // current ImageState 与 scalar range 共用此锁；snapshot 是跨字段一致性的读取入口。
+    // current TrustedImageState 与 scalar range 共用此锁；snapshot 是跨字段一致性的读取入口。
     mutable std::mutex m_dataMutex;
     // current 只向受控内部消费链发布 const owner；写入只能通过 DataManager 提交新批次。
-    ImageSnapshot m_current;
+    TrustedImageSnapshot m_current;
     mutable std::mutex m_pendingMutex;
-    ImageState m_pending{};
+    TrustedImageSnapshot m_pending;
     // 与 current image 同批提交的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
 
     bool SetRasScalars(
         const float* src,
         float* dst,
         const int dims[3],
-        size_t availableCount) const
+        size_t availableCount,
+        const TaskStopToken& stopToken) const
     {
         const auto voxelCount = GetVoxelCount(dims);
         if (!voxelCount) {
@@ -205,17 +594,19 @@ public:
         const size_t sliceSize = nx * ny;
         const size_t totalCount = *voxelCount;
 
-        if (!dst || totalCount == 0 || availableCount > totalCount) {
+        if (!dst || totalCount == 0 || availableCount > totalCount
+            || stopToken.GetIsStopped()) {
             return false;
         }
 
         if (!src || availableCount == 0) {
             std::fill(dst, dst + totalCount, 0.0f);
-            return true;
+            return !stopToken.GetIsStopped();
         }
 
         if (availableCount == totalCount) {
             for (size_t z = 0; z < nz; ++z) {
+                if (stopToken.GetIsStopped()) return false;
                 const size_t srcSliceOffset = z * sliceSize;
                 const size_t dstSliceOffset = z * sliceSize;
                 for (size_t y = 0; y < ny; ++y) {
@@ -231,6 +622,10 @@ public:
 
         std::fill(dst, dst + totalCount, 0.0f);
         for (size_t srcIndex = 0; srcIndex < availableCount; ++srcIndex) {
+            if ((srcIndex % sliceSize) == 0
+                && stopToken.GetIsStopped()) {
+                return false;
+            }
             const size_t z = srcIndex / sliceSize;
             const size_t rem = srcIndex % sliceSize;
             const size_t y = rem / nx;
@@ -239,7 +634,7 @@ public:
             dst[dstIndex] = src[srcIndex];
         }
 
-        return true;
+        return !stopToken.GetIsStopped();
     }
 
     std::string GetOrientName(Orientation value) const
@@ -286,10 +681,14 @@ class TiffVolumeDataManager::Impl final {
 public:
     vtkSmartPointer<vtkImageData> LoadImage(
         const std::string& inputPath,
-        const VolumeLayout& layout);
+        const VolumeLayout& layout,
+        const TaskStopToken& stopToken);
 
 private:
-    bool SetLpsRasImage(vtkImageData* source, vtkImageData* target) const;
+    bool SetLpsRasImage(
+        vtkImageData* source,
+        vtkImageData* target,
+        const TaskStopToken& stopToken) const;
 };
 
 BaseDataManager::BaseDataManager()
@@ -328,7 +727,7 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
     constexpr int maxAttempts = 3;
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         // 2. 锁内取得 immutable current 身份，锁外构造候选批次，避免复制/VTK 调用阻塞读线程。
-        std::shared_ptr<const ImageState> baseState;
+        std::shared_ptr<const TrustedImageState> baseState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
             if (!m_impl->m_current || !m_impl->m_current->image) {
@@ -348,7 +747,7 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         candidate->ShallowCopy(baseState->image);
         candidate->SetSpacing(spacing.data());
 
-        auto nextState = std::make_shared<ImageState>(*baseState);
+        auto nextState = std::make_shared<TrustedImageState>(*baseState);
         nextState->image = std::move(candidate);
         if (baseState->validityMask) {
             auto maskCandidate =
@@ -361,7 +760,7 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         }
         nextState->spacing = spacing;
         nextState->version = baseState->version + 1;
-        std::shared_ptr<const ImageState> retiredState;
+        std::shared_ptr<const TrustedImageState> retiredState;
         {
             std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
             // 3. 仅当 current 仍是基准对象才提交；并发发布抢先时重试，三次冲突后返回失败。
@@ -382,10 +781,10 @@ DataVersion BaseDataManager::GetDataVersion() const
     return m_impl->m_current->version;
 }
 
-ImageState BaseDataManager::GetImageState() const
+TrustedImageState BaseDataManager::GetImageState() const
 {
     const auto currentState = GetImageSnapshot();
-    ImageState publicState = *currentState;
+    TrustedImageState publicState = *currentState;
     if (publicState.image) {
         auto imageCopy = vtkSmartPointer<vtkImageData>::New();
         imageCopy->DeepCopy(publicState.image);
@@ -399,16 +798,167 @@ ImageState BaseDataManager::GetImageState() const
     return publicState;
 }
 
-ImageSnapshot BaseDataManager::GetImageSnapshot() const
+std::optional<ImageReadState>
+BaseDataManager::GetImageReadState() const
+{
+    auto result = GetImageReadResult(imageReadLimit);
+    return std::move(result.state);
+}
+
+ImageReadResult BaseDataManager::GetImageReadResult(
+    const std::size_t maxReadBytes) const
+{
+    ImageReadRequest request;
+    request.maxBytes = maxReadBytes;
+    return GetImageReadResult(request, TaskStopToken{});
+}
+
+ImageReadResult BaseDataManager::GetImageReadResult(
+    const ImageReadRequest& request,
+    const TaskStopToken& stopToken) const
+{
+    ImageReadResult result;
+    if (stopToken.GetIsStopped()) {
+        result.error = ImageReadError::Cancelled;
+        return result;
+    }
+    auto planResult = Impl::GetReadPlan(
+        GetImageSnapshot(), request);
+    result.error = planResult.error;
+    result.requiredBytes = planResult.requiredBytes;
+    if (!planResult.plan
+        || planResult.error != ImageReadError::None) {
+        return result;
+    }
+    const auto& plan = *planResult.plan;
+    if (plan.requiredBytes > request.maxBytes) {
+        result.error = ImageReadError::TooLarge;
+        return result;
+    }
+
+    auto state = Impl::GetReadState(
+        plan, 0, plan.regionVoxels);
+    state.values = Impl::GetReadBytes(
+        plan,
+        plan.values,
+        plan.tupleBytes,
+        0,
+        plan.regionVoxels,
+        stopToken);
+    if (!state.values) {
+        result.error = stopToken.GetIsStopped()
+            ? ImageReadError::Cancelled
+            : ImageReadError::CopyFailed;
+        return result;
+    }
+    if (plan.mask) {
+        state.validityMask = Impl::GetReadBytes(
+            plan,
+            plan.mask,
+            1,
+            0,
+            plan.regionVoxels,
+            stopToken);
+        if (!state.validityMask) {
+            result.error = stopToken.GetIsStopped()
+                ? ImageReadError::Cancelled
+                : ImageReadError::CopyFailed;
+            return result;
+        }
+    }
+    result.error = ImageReadError::None;
+    result.state = std::move(state);
+    return result;
+}
+
+ImageReadChunkResult BaseDataManager::GetImageReadChunk(
+    const ImageReadRequest& request,
+    const std::size_t voxelOffset,
+    const TaskStopToken& stopToken) const
+{
+    ImageReadChunkResult result;
+    if (stopToken.GetIsStopped()) {
+        result.error = ImageReadError::Cancelled;
+        return result;
+    }
+    auto planResult = Impl::GetReadPlan(
+        GetImageSnapshot(), request);
+    result.error = planResult.error;
+    result.requiredBytes = planResult.requiredBytes;
+    if (!planResult.plan
+        || planResult.error != ImageReadError::None) {
+        return result;
+    }
+    const auto& plan = *planResult.plan;
+    if (voxelOffset > plan.regionVoxels) {
+        result.error = ImageReadError::InvalidRegion;
+        return result;
+    }
+    if (voxelOffset == plan.regionVoxels) {
+        result.error = ImageReadError::None;
+        result.nextVoxelOffset = voxelOffset;
+        result.isDone = true;
+        return result;
+    }
+
+    const std::size_t voxelBytes = plan.tupleBytes
+        + (plan.mask ? 1U : 0U);
+    const std::size_t chunkBytes = std::min(
+        request.maxBytes, imageChunkLimit);
+    if (chunkBytes < voxelBytes) {
+        result.error = ImageReadError::TooLarge;
+        return result;
+    }
+    const std::size_t voxelCount = std::min(
+        plan.regionVoxels - voxelOffset,
+        chunkBytes / voxelBytes);
+    auto state = Impl::GetReadState(
+        plan, voxelOffset, voxelCount);
+    state.values = Impl::GetReadBytes(
+        plan,
+        plan.values,
+        plan.tupleBytes,
+        voxelOffset,
+        voxelCount,
+        stopToken);
+    if (!state.values) {
+        result.error = stopToken.GetIsStopped()
+            ? ImageReadError::Cancelled
+            : ImageReadError::CopyFailed;
+        return result;
+    }
+    if (plan.mask) {
+        state.validityMask = Impl::GetReadBytes(
+            plan,
+            plan.mask,
+            1,
+            voxelOffset,
+            voxelCount,
+            stopToken);
+        if (!state.validityMask) {
+            result.error = stopToken.GetIsStopped()
+                ? ImageReadError::Cancelled
+                : ImageReadError::CopyFailed;
+            return result;
+        }
+    }
+    result.nextVoxelOffset = voxelOffset + voxelCount;
+    result.isDone = result.nextVoxelOffset == plan.regionVoxels;
+    result.error = ImageReadError::None;
+    result.state = std::move(state);
+    return result;
+}
+
+TrustedImageSnapshot BaseDataManager::GetImageSnapshot() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
     return m_impl->m_current;
 }
 
 bool BaseDataManager::SetCurrentData(
-    ImageState state,
-    const ImageSnapshot& expectedSnapshot,
-    ImageSnapshot& publishedSnapshot)
+    TrustedImageState state,
+    const TrustedImageSnapshot& expectedSnapshot,
+    TrustedImageSnapshot& publishedSnapshot)
 {
     publishedSnapshot.reset();
     if (!expectedSnapshot
@@ -421,8 +971,8 @@ bool BaseDataManager::SetCurrentData(
     }
 
     auto nextState =
-        std::make_shared<ImageState>(std::move(state));
-    std::shared_ptr<const ImageState> retiredState;
+        std::make_shared<TrustedImageState>(std::move(state));
+    std::shared_ptr<const TrustedImageState> retiredState;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
         // 同时比较 owner 身份与 version，避免 ABA 或并发 load 覆盖更晚 current。
@@ -447,24 +997,50 @@ bool BaseDataManager::SetFromBuffer(
 
 bool BaseDataManager::SetCurrentFromPending(bool& hasPending)
 {
-    // pending 是单槽 staging：锁内一次性 take，锁外调用 VTK Modified/发布 current。
-    // 这样 worker 只准备候选数据，主线程提交时不会跨 pending 锁进入 VTK。
-    hasPending = false;
-    ImageState incoming;
+    const auto pending = GetPendingSnapshot();
+    hasPending = pending != nullptr;
+    if (!pending) return true;
+    TrustedImageSnapshot published;
+    return SetCurrentFromPending(pending, published);
+}
+
+TrustedImageSnapshot BaseDataManager::GetPendingSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+    return m_impl->m_pending;
+}
+
+bool BaseDataManager::SetCurrentFromPending(
+    const TrustedImageSnapshot& expectedPending,
+    TrustedImageSnapshot& publishedSnapshot)
+{
+    publishedSnapshot.reset();
+    if (!expectedPending || !expectedPending->image) return false;
+
+    TrustedImageSnapshot retiredState;
     {
-        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
-        if (!m_impl->m_pending.image) return true;
-        hasPending = true;
-        incoming = std::move(m_impl->m_pending);
-        m_impl->m_pending = {};
+        // pending 与 current 在同一临界区完成 CAS 和 owner 转移：失败绝不清除
+        // pending，成功也不复制或修改 VTK payload，保证读者只看到单调版本。
+        std::scoped_lock lock(
+            m_impl->m_dataMutex, m_impl->m_pendingMutex);
+        if (m_impl->m_pending != expectedPending
+            || !m_impl->m_current
+            || m_impl->m_current->version
+                == std::numeric_limits<DataVersion>::max()
+            || expectedPending->version
+                != m_impl->m_current->version + 1) {
+            return false;
+        }
+        retiredState = std::move(m_impl->m_current);
+        m_impl->m_current = std::move(m_impl->m_pending);
+        publishedSnapshot = m_impl->m_current;
     }
-    incoming.image->Modified();
-    return m_impl->SetCurrent(std::move(incoming));
+    return true;
 }
 
 bool BaseDataManager::ClearPending()
 {
-    ImageState retiredPending;
+    TrustedImageSnapshot retiredPending;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
         // 锁内只断开 pending 引用；旧候选在离开锁后析构，避免释放大体数据拉长临界区。
@@ -474,15 +1050,22 @@ bool BaseDataManager::ClearPending()
     return true;
 }
 
-bool BaseDataManager::SetPendingImage(ImageState image)
+bool BaseDataManager::SetPendingImage(TrustedImageState image)
 {
     if (!image.image) return false;
-    ImageState retiredPending;
+    const auto current = GetImageSnapshot();
+    if (!current
+        || current->version == std::numeric_limits<DataVersion>::max()) {
+        return false;
+    }
+    image.version = current->version + 1;
+    auto pending = std::make_shared<TrustedImageState>(std::move(image));
+    TrustedImageSnapshot retiredPending;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
         // 单槽只保留最新候选；被覆盖批次在离开锁后随 retiredPending 析构。
         retiredPending = std::move(m_impl->m_pending);
-        m_impl->m_pending = std::move(image);
+        m_impl->m_pending = std::move(pending);
     }
     return true;
 }
@@ -519,18 +1102,33 @@ bool BaseDataManager::ExportSlices(
     const WindowLevelParams& windowLevel,
     const std::array<double, 16>& modelToWorldMatrix)
 {
+    return ExportSlices(
+        dirPath,
+        orientation,
+        windowLevel,
+        modelToWorldMatrix,
+        TaskStopToken{});
+}
+
+bool BaseDataManager::ExportSlices(
+    const std::string& dirPath,
+    Orientation orientation,
+    const WindowLevelParams& windowLevel,
+    const std::array<double, 16>& modelToWorldMatrix,
+    const TaskStopToken& stopToken)
+{
 
     // 导出路径：1. 固定 current 批次并把 modelToWorld 取逆；2. 重采样到轴对齐体数据；
     // 3. 按 Orientation 将二维像素映射回 X/Y/Z；4. 应用窗宽窗位并逐层写 PNG。
 
-    if (dirPath.empty()) {
+    if (dirPath.empty() || stopToken.GetIsStopped()) {
         std::cerr << "[Export] Slice image export failed: output directory is empty." << std::endl;
         return false;
     }
 
     auto imageCopy = vtkSmartPointer<vtkImageData>::New();
     vtkSmartPointer<vtkImageData> maskCopy;
-    std::shared_ptr<const ImageState> currentState;
+    std::shared_ptr<const TrustedImageState> currentState;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
         currentState = m_impl->m_current;
@@ -567,6 +1165,7 @@ bool BaseDataManager::ExportSlices(
     catch (...) {
         return false;
     }
+    if (stopToken.GetIsStopped()) return false;
 
     auto outputImage = reslice->GetOutput();
     if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
@@ -603,6 +1202,7 @@ bool BaseDataManager::ExportSlices(
         catch (...) {
             return false;
         }
+        if (stopToken.GetIsStopped()) return false;
         outputMask = maskReslice->GetOutput();
         if (!outputMask
             || outputMask->GetScalarType()
@@ -621,6 +1221,7 @@ bool BaseDataManager::ExportSlices(
         return false;
     }
 
+    if (stopToken.GetIsStopped()) return false;
     try {
         std::filesystem::create_directories(outputDir);
     }
@@ -637,6 +1238,7 @@ bool BaseDataManager::ExportSlices(
     const std::string orientationName = m_impl->GetOrientName(orientation);
 
     for (int sliceIndex = 0; sliceIndex < sliceCount; ++sliceIndex) {
+        if (stopToken.GetIsStopped()) return false;
         auto sliceImage = vtkSmartPointer<vtkImageData>::New();
         sliceImage->SetDimensions(width, height, 1);
         sliceImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -646,6 +1248,7 @@ bool BaseDataManager::ExportSlices(
             return false;
         }
         for (int py = 0; py < height; ++py) {
+            if (stopToken.GetIsStopped()) return false;
             for (int px = 0; px < width; ++px) {
                 int x = 0;
                 int y = 0;
@@ -692,8 +1295,10 @@ bool BaseDataManager::ExportSlices(
         const std::string vtkFileName = PlatformPath::GetUtf8Path(outputFilePath);
         writer->SetFileName(vtkFileName.c_str());
         writer->SetInputData(sliceImage);
+        if (stopToken.GetIsStopped()) return false;
         writer->Write();
-        if (writer->GetErrorCode() != 0) {
+        if (writer->GetErrorCode() != 0
+            || stopToken.GetIsStopped()) {
             return false;
         }
     }
@@ -702,13 +1307,27 @@ bool BaseDataManager::ExportSlices(
 }
 
 bool BaseDataManager::ExportData(
-    const ImageSnapshot& imageSnapshot,
+    const TrustedImageSnapshot& imageSnapshot,
     const std::string& outputDir,
     const DataExportParams& params)
+{
+    return ExportData(
+        imageSnapshot,
+        outputDir,
+        params,
+        TaskStopToken{});
+}
+
+bool BaseDataManager::ExportData(
+    const TrustedImageSnapshot& imageSnapshot,
+    const std::string& outputDir,
+    const DataExportParams& params,
+    const TaskStopToken& stopToken)
 {
     if (!imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0
         || outputDir.empty()
+        || stopToken.GetIsStopped()
         || !Impl::GetMaskValid(
             imageSnapshot->image,
             imageSnapshot->validityMask)) {
@@ -749,18 +1368,21 @@ bool BaseDataManager::ExportData(
     catch (...) {
         return false;
     }
+    if (stopToken.GetIsStopped()) return false;
 
     if (normalizedExtension == ".raw") {
         return Impl::ExportRaw(
             imageSnapshot, outputDir,
-            params.modelToWorld);
+            params.modelToWorld,
+            stopToken);
     }
     DataExportParams normalizedParams = params;
     normalizedParams.extension = std::move(
         normalizedExtension);
     return Impl::ExportMesh(
         imageSnapshot, outputDir,
-        normalizedParams);
+        normalizedParams,
+        stopToken);
 }
 
 bool BaseDataManager::Impl::GetIsAffine(
@@ -827,14 +1449,15 @@ BaseDataManager::Impl::BuildExportPath(
 }
 
 bool BaseDataManager::Impl::ExportRaw(
-    const ImageSnapshot& imageSnapshot,
+    const TrustedImageSnapshot& imageSnapshot,
     const std::string& outputDir,
-    const std::array<double, 16>& modelToWorldMatrix)
+    const std::array<double, 16>& modelToWorldMatrix,
+    const TaskStopToken& stopToken)
 {
     // RAW 导出路径：固定接纳时的 immutable snapshot -> 逆变换重采样 -> 自动裁剪新 bounds ->
     // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
     if (!imageSnapshot || !imageSnapshot->image
-        || outputDir.empty()) {
+        || outputDir.empty() || stopToken.GetIsStopped()) {
         return false;
     }
     vtkSmartPointer<vtkImageData> imageCopy = vtkSmartPointer<vtkImageData>::New();
@@ -872,6 +1495,7 @@ bool BaseDataManager::Impl::ExportRaw(
         std::cerr << "[Error] Exception during image reslicing/changing info." << std::endl;
         return false;
     }
+    if (stopToken.GetIsStopped()) return false;
 
     auto outputImage = reslice->GetOutput();
     if (!outputImage || outputImage->GetNumberOfPoints() == 0) {
@@ -911,7 +1535,9 @@ bool BaseDataManager::Impl::ExportRaw(
     // 由于旋转后行尾可能有 Padding（根据 VTK 内部内存布局），不能直接写入整块内存。
     size_t rowBytes = static_cast<size_t>(newDims[0]) * sizeof(float);
     for (int z = 0; z < newDims[2]; ++z) {
+        if (stopToken.GetIsStopped()) return false;
         for (int y = 0; y < newDims[1]; ++y) {
+            if (stopToken.GetIsStopped()) return false;
             // 利用真实步长计算出当前行准确的内存起始地址
             float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
             // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
@@ -923,7 +1549,7 @@ bool BaseDataManager::Impl::ExportRaw(
     }
 
     rawFile.close();
-    if (!rawFile) {
+    if (!rawFile || stopToken.GetIsStopped()) {
         return false;
     }
     std::cout << "[Export] Successfully saved transformed RAW to: "
@@ -935,18 +1561,20 @@ bool BaseDataManager::Impl::ExportRaw(
 }
 
 bool BaseDataManager::Impl::ExportMesh(
-    const ImageSnapshot& imageSnapshot,
+    const TrustedImageSnapshot& imageSnapshot,
     const std::string& outputDir,
-    const DataExportParams& params)
+    const DataExportParams& params,
+    const TaskStopToken& stopToken)
 {
     if (!imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0
         || outputDir.empty()
+        || stopToken.GetIsStopped()
         || !std::isfinite(params.isoValue)) {
         return false;
     }
 
-    // 1. 全分辨率 image 与 mask 来自同一个 ImageState，不读取显示 mapper。
+    // 1. 全分辨率 image 与 mask 来自同一个 TrustedImageState，不读取显示 mapper。
     auto imageCopy =
         vtkSmartPointer<vtkImageData>::New();
     imageCopy->ShallowCopy(imageSnapshot->image);
@@ -1009,6 +1637,7 @@ bool BaseDataManager::Impl::ExportMesh(
             << "[Export] PolyData generation failed.\n";
         return false;
     }
+    if (stopToken.GetIsStopped()) return false;
     vtkPolyData* outputMesh =
         triangleFilter->GetOutput();
     if (!outputMesh
@@ -1025,7 +1654,8 @@ bool BaseDataManager::Impl::ExportMesh(
         PlatformPath::GetUtf8Path(outputPath);
     int errorCode = vtkErrorCode::NoError;
     if (params.extension == ".ply") {
-        if (!BuildMeshColors(outputMesh, params)) {
+        if (!BuildMeshColors(
+                outputMesh, params, stopToken)) {
             return false;
         }
         auto writer =
@@ -1035,6 +1665,7 @@ bool BaseDataManager::Impl::ExportMesh(
         writer->SetArrayName("RGB");
         writer->SetColorModeToDefault();
         writer->SetInputData(outputMesh);
+        if (stopToken.GetIsStopped()) return false;
         writer->Write();
         errorCode = writer->GetErrorCode();
     }
@@ -1044,6 +1675,7 @@ bool BaseDataManager::Impl::ExportMesh(
         writer->SetFileName(vtkFileName.c_str());
         writer->SetFileTypeToBinary();
         writer->SetInputData(outputMesh);
+        if (stopToken.GetIsStopped()) return false;
         writer->Write();
         errorCode = writer->GetErrorCode();
     }
@@ -1052,6 +1684,7 @@ bool BaseDataManager::Impl::ExportMesh(
             vtkSmartPointer<vtkOBJWriter>::New();
         writer->SetFileName(vtkFileName.c_str());
         writer->SetInputData(outputMesh);
+        if (stopToken.GetIsStopped()) return false;
         writer->Write();
         errorCode = writer->GetErrorCode();
     }
@@ -1064,18 +1697,21 @@ bool BaseDataManager::Impl::ExportMesh(
         std::filesystem::file_size(
             outputPath, fileError);
     return errorCode == vtkErrorCode::NoError
-        && !fileError && fileSize > 0;
+        && !fileError && fileSize > 0
+        && !stopToken.GetIsStopped();
 }
 
 bool BaseDataManager::Impl::BuildMeshColors(
     vtkPolyData* mesh,
-    const DataExportParams& params)
+    const DataExportParams& params,
+    const TaskStopToken& stopToken)
 {
     if (!mesh || !mesh->GetPointData()
         || mesh->GetNumberOfPoints() == 0
         || !std::isfinite(params.scalarRange[0])
         || !std::isfinite(params.scalarRange[1])
-        || params.scalarRange[1] < params.scalarRange[0]) {
+        || params.scalarRange[1] < params.scalarRange[0]
+        || stopToken.GetIsStopped()) {
         return false;
     }
 
@@ -1136,6 +1772,10 @@ bool BaseDataManager::Impl::BuildMeshColors(
         mesh->GetNumberOfPoints());
     for (vtkIdType pointId = 0;
         pointId < mesh->GetNumberOfPoints(); ++pointId) {
+        if ((pointId % 4096) == 0
+            && stopToken.GetIsStopped()) {
+            return false;
+        }
         const double scalar =
             pointScalars->GetComponent(pointId, 0);
         if (!std::isfinite(scalar)) {
@@ -1155,7 +1795,8 @@ bool BaseDataManager::Impl::BuildMeshColors(
     }
 
     mesh->GetPointData()->AddArray(colors);
-    return mesh->GetPointData()->SetActiveScalars("RGB") >= 0;
+    return mesh->GetPointData()->SetActiveScalars("RGB") >= 0
+        && !stopToken.GetIsStopped();
 }
 
 RawVolumeDataManager::RawVolumeDataManager()
@@ -1168,6 +1809,16 @@ bool RawVolumeDataManager::SetDataLoaded(
     const std::string& filePath,
     const VolumeLayout& layout)
 {
+    return SetDataLoaded(
+        filePath, layout, TaskStopToken{});
+}
+
+bool RawVolumeDataManager::SetDataLoaded(
+    const std::string& filePath,
+    const VolumeLayout& layout,
+    const TaskStopToken& stopToken)
+{
+    if (stopToken.GetIsStopped()) return false;
     const auto& dimensions = layout.GetDimensions();
     const int rasDims[3] = {
         dimensions[0], dimensions[1], dimensions[2]
@@ -1175,7 +1826,8 @@ bool RawVolumeDataManager::SetDataLoaded(
     std::error_code fileError;
     const auto fileBytes = std::filesystem::file_size(
         PlatformPath::GetNativePath(filePath), fileError);
-    if (fileError || fileBytes != layout.GetByteCount()) {
+    if (fileError || fileBytes != layout.GetByteCount()
+        || stopToken.GetIsStopped()) {
         return false;
     }
 
@@ -1204,10 +1856,11 @@ bool RawVolumeDataManager::SetDataLoaded(
 
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
     MemMappedFile mmf;
-    if (!mmf.Load(filePath) || mmf.GetSize() != layout.GetByteCount()
+    if (!mmf.Load(filePath) || stopToken.GetIsStopped()
+        || mmf.GetSize() != layout.GetByteCount()
         || !m_impl->SetRasScalars(
             static_cast<const float*>(mmf.GetData()), dst,
-            rasDims, layout.GetVoxelCount())) {
+            rasDims, layout.GetVoxelCount(), stopToken)) {
         return false;
     }
 
@@ -1215,6 +1868,7 @@ bool RawVolumeDataManager::SetDataLoaded(
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
+    if (stopToken.GetIsStopped()) return false;
     return SetPendingImage({
         std::move(newImage),
         {},
@@ -1229,6 +1883,14 @@ bool RawVolumeDataManager::SetDataLoaded(
 bool RawVolumeDataManager::SetFromBuffer(
     const VolumeBuffer& buffer)
 {
+    return SetFromBuffer(buffer, TaskStopToken{});
+}
+
+bool RawVolumeDataManager::SetFromBuffer(
+    const VolumeBuffer& buffer,
+    const TaskStopToken& stopToken)
+{
+    if (stopToken.GetIsStopped()) return false;
     const auto& layout = buffer.GetLayout();
     const auto& dims = layout.GetDimensions();
     const auto& spacing = layout.GetSpacing();
@@ -1253,12 +1915,17 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->AllocateScalars(VTK_FLOAT, 1);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
     if (!m_impl->SetRasScalars(
-        buffer.GetVoxels().data(), dst, rasDims, layout.GetVoxelCount())) {
+        buffer.GetVoxels().data(),
+        dst,
+        rasDims,
+        layout.GetVoxelCount(),
+        stopToken)) {
         return false;
     }
     double range[2] = { 0.0, 0.0 };
     newImage->GetScalarRange(range);
 
+    if (stopToken.GetIsStopped()) return false;
     return SetPendingImage({
         std::move(newImage), {}, dims, rasSpacing, rasOrigin,
         { range[0], range[1] }, 0 });
@@ -1324,11 +1991,21 @@ bool TiffVolumeDataManager::SetDataLoaded(
     const std::string& inputPath,
     const VolumeLayout& layout)
 {
-    if (!m_impl) {
+    return SetDataLoaded(
+        inputPath, layout, TaskStopToken{});
+}
+
+bool TiffVolumeDataManager::SetDataLoaded(
+    const std::string& inputPath,
+    const VolumeLayout& layout,
+    const TaskStopToken& stopToken)
+{
+    if (!m_impl || stopToken.GetIsStopped()) {
         return false;
     }
 
-    auto image = m_impl->LoadImage(inputPath, layout);
+    auto image = m_impl->LoadImage(
+        inputPath, layout, stopToken);
     if (!image) return false;
     double range[2] = { 0.0, 0.0 };
     image->GetScalarRange(range);
@@ -1337,6 +2014,7 @@ bool TiffVolumeDataManager::SetDataLoaded(
     double origin[3] = { 0.0, 0.0, 0.0 };
     image->GetSpacing(spacing);
     image->GetOrigin(origin);
+    if (stopToken.GetIsStopped()) return false;
     return SetPendingImage({
         std::move(image), {}, dimensions,
         { spacing[0], spacing[1], spacing[2] },
@@ -1346,10 +2024,12 @@ bool TiffVolumeDataManager::SetDataLoaded(
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     const std::string& inputPath,
-    const VolumeLayout& layout) {
+    const VolumeLayout& layout,
+    const TaskStopToken& stopToken) {
     // 路径检查
     const std::filesystem::path pathObj = PlatformPath::GetNativePath(inputPath);
-    if (!std::filesystem::exists(pathObj)) {
+    if (stopToken.GetIsStopped()
+        || !std::filesystem::exists(pathObj)) {
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
         return nullptr;
     }
@@ -1363,6 +2043,7 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 
         try {
             for (const auto& entry : std::filesystem::directory_iterator(pathObj)) {
+                if (stopToken.GetIsStopped()) return nullptr;
                 if (entry.is_regular_file()) {
                     std::string ext = PlatformPath::GetUtf8Path(entry.path().extension());
                     // 转小写比较，兼容 .TIF 和 .tif
@@ -1448,19 +2129,22 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
         int expectedComponents = 0;
         try {
             for (const auto& file : fileList) {
+                if (stopToken.GetIsStopped()) return nullptr;
                 auto sliceReader = vtkSmartPointer<vtkTIFFReader>::New();
                 sliceReader->SetFileName(file.c_str());
                 if (!sliceReader->CanReadFile(file.c_str())) {
                     return nullptr;
                 }
                 sliceReader->Update();
-                if (sliceReader->GetErrorCode() != 0
+                if (stopToken.GetIsStopped()
+                    || sliceReader->GetErrorCode() != 0
                     || !sliceReader->GetOutput()
                     || sliceReader->GetOutput()->GetNumberOfPoints() == 0) {
                     return nullptr;
                 }
                 auto slice = vtkSmartPointer<vtkImageData>::New();
                 slice->DeepCopy(sliceReader->GetOutput());
+                if (stopToken.GetIsStopped()) return nullptr;
                 int sliceExtent[6] = { 0, -1, 0, -1, 0, -1 };
                 slice->GetExtent(sliceExtent);
                 if (slice->GetDimensions()[0] <= 0
@@ -1484,19 +2168,22 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
                 slices.push_back(slice);
                 append->AddInputData(slice);
             }
+            if (stopToken.GetIsStopped()) return nullptr;
             append->Update();
         }
         catch (...) {
             std::cerr << "[Error] Exception during TIFF series reading." << std::endl;
             return nullptr;
         }
-        if (append->GetErrorCode() != 0
+        if (stopToken.GetIsStopped()
+            || append->GetErrorCode() != 0
             || !append->GetOutput()
             || append->GetOutput()->GetNumberOfPoints() == 0) {
             return nullptr;
         }
         decodedImage = vtkSmartPointer<vtkImageData>::New();
         decodedImage->DeepCopy(append->GetOutput());
+        if (stopToken.GetIsStopped()) return nullptr;
     }
     else {
         // 单文件
@@ -1511,7 +2198,8 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
         }
         try {
             reader->Update();
-            if (reader->GetErrorCode() != 0
+            if (stopToken.GetIsStopped()
+                || reader->GetErrorCode() != 0
                 || !reader->GetOutput()
                 || reader->GetOutput()->GetNumberOfPoints() == 0) {
                 return nullptr;
@@ -1523,6 +2211,7 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
         }
         decodedImage = vtkSmartPointer<vtkImageData>::New();
         decodedImage->DeepCopy(reader->GetOutput());
+        if (stopToken.GetIsStopped()) return nullptr;
     }
 
     auto output = decodedImage;
@@ -1547,7 +2236,8 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
-    if (!SetLpsRasImage(lpsImage, newImage)) {
+    if (!SetLpsRasImage(
+            lpsImage, newImage, stopToken)) {
         return nullptr;
     }
 
@@ -1560,9 +2250,10 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 
 bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     vtkImageData* source,
-    vtkImageData* target) const
+    vtkImageData* target,
+    const TaskStopToken& stopToken) const
 {
-    if (!source || !target) {
+    if (!source || !target || stopToken.GetIsStopped()) {
         return false;
     }
 
@@ -1605,6 +2296,7 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     }
 
     for (size_t z = 0; z < static_cast<size_t>(dims[2]); ++z) {
+        if (stopToken.GetIsStopped()) return false;
         const size_t srcSliceOffset = z * sliceBytes;
         const size_t dstSliceOffset = z * sliceBytes;
         for (size_t y = 0; y < ny; ++y) {
@@ -1620,5 +2312,5 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     }
 
     target->Modified();
-    return true;
+    return !stopToken.GetIsStopped();
 }

@@ -40,17 +40,12 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <ProjectRoot>$(ProjectDir)..\..\MVVCVTK</ProjectRoot>
-    <QtRoot Condition="'$(QtRoot)'=='' and '$(QT_ROOT)'!=''">$(QT_ROOT)</QtRoot>
-    <QtRoot Condition="'$(QtRoot)'==''">D:\qt\5.14.2\msvc2017_64</QtRoot>
-    <VtkRoot Condition="'$(VtkRoot)'==''">F:\lib_cv\VTK\lib\vtk_install</VtkRoot>
-    <OpenCvRoot Condition="'$(OpenCvRoot)'==''">F:\lib_cv\cv\opencv\build</OpenCvRoot>
-    <HostDllRoot Condition="'$(HostDllRoot)'==''">F:\CT-1209\DLL</HostDllRoot>
     <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies</ProjectIncludePath>
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
     <LocalDebuggerCommandArguments>--interactive</LocalDebuggerCommandArguments>
     <LocalDebuggerWorkingDirectory>$(OutDir)</LocalDebuggerWorkingDirectory>
-    <LocalDebuggerEnvironment>PATH=$(QtRoot)\bin;$(VtkRoot)\bin;$(OpenCvRoot)\x64\vc16\bin;%PATH%&#x0A;QT_PLUGIN_PATH=$(QtRoot)\plugins</LocalDebuggerEnvironment>
+    <LocalDebuggerEnvironment>PATH=$(MVVCVTKSdkRuntimePath);%PATH%&#x0A;QT_PLUGIN_PATH=$(MVVCVTKQtPluginPath)</LocalDebuggerEnvironment>
     <VtkSuffix Condition="'$(Configuration)'=='Debug'">d</VtkSuffix>
     <QtSuffix Condition="'$(Configuration)'=='Debug'">d</QtSuffix>
     <OpenCvSuffix Condition="'$(Configuration)'=='Debug'">d</OpenCvSuffix>

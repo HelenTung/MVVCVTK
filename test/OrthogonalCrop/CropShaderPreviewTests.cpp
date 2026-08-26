@@ -54,6 +54,41 @@ bool SetExpect(const bool isExpected, const char* message)
     return isExpected;
 }
 
+bool SetSliceCamera(
+    vtkRenderer* renderer,
+    vtkImageData* image,
+    const Orientation orientation)
+{
+    if (!renderer || !image || !renderer->GetActiveCamera()) {
+        return false;
+    }
+
+    double imageCenter[3] = { 0.0, 0.0, 0.0 };
+    image->GetCenter(imageCenter);
+    vtkCamera* camera = renderer->GetActiveCamera();
+    const double distance = (std::max)(camera->GetDistance(), 1e-6);
+    camera->ParallelProjectionOn();
+    camera->SetFocalPoint(imageCenter);
+    if (orientation == Orientation::Top_down) {
+        camera->SetPosition(
+            imageCenter[0], imageCenter[1], imageCenter[2] + distance);
+        camera->SetViewUp(0.0, 1.0, 0.0);
+    }
+    else if (orientation == Orientation::Front_back) {
+        camera->SetPosition(
+            imageCenter[0], imageCenter[1] + distance, imageCenter[2]);
+        camera->SetViewUp(0.0, 0.0, 1.0);
+    }
+    else {
+        camera->SetPosition(
+            imageCenter[0] + distance, imageCenter[1], imageCenter[2]);
+        camera->SetViewUp(0.0, 0.0, 1.0);
+    }
+    renderer->ResetCamera();
+    renderer->ResetCameraClippingRange();
+    return true;
+}
+
 CropShaderPayload BuildPayload(
     const std::vector<CropOpItem>& operations,
     const std::size_t nodeCount,
@@ -264,7 +299,7 @@ bool StartStrategyCase(
         strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current),
         strategyName) && isPassed;
-    strategy->SetCamera(renderer);
+    renderer->GetActiveCamera()->ParallelProjectionOff();
     renderer->ResetCamera();
     RenderParams params;
     params.scalarRange[0] = 0.0;
@@ -849,13 +884,14 @@ bool SetViewsCommitted(
 
 bool StartSliceCoordinateCase()
 {
-    // 用对称体数据隔离 direction 的旋转影响，再叠加非单位 model matrix。
-    // 每个采样点先经 input-model -> world 投影到对应 MPR 像素，GPU truth
+    // 用真实加载形态覆盖非对称 extent、非零 origin、非单位 spacing、
+    // direction 与 validity mask，再叠加非单位 model matrix。每个采样点先经
+    // input-model -> world 投影到对应 MPR 像素，commit 后第一帧的 GPU truth
     // 必须与相同 float32 predicate table 的 CPU truth 完全一致。
     auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetExtent(-4, 4, -4, 4, -4, 4);
-    image->SetOrigin(0.0, 0.0, 0.0);
-    image->SetSpacing(1.0, 1.0, 1.0);
+    image->SetExtent(2, 9, -3, 4, 5, 12);
+    image->SetOrigin(10.0, -20.0, 30.0);
+    image->SetSpacing(0.5, 1.0, 1.5);
     vtkNew<vtkMatrix3x3> direction;
     direction->Zero();
     direction->SetElement(0, 1, -1.0);
@@ -867,6 +903,31 @@ bool StartSliceCoordinateCase()
         static_cast<float*>(image->GetScalarPointer()),
         image->GetNumberOfPoints(),
         1.0f);
+
+    auto validityMask = vtkSmartPointer<vtkImageData>::New();
+    validityMask->CopyStructure(image);
+    validityMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(validityMask->GetScalarPointer()),
+        validityMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(1));
+
+    double inputBounds[6] = {};
+    image->GetBounds(inputBounds);
+    const CropPointFloat3Array inputCenter = {
+        static_cast<float>((inputBounds[0] + inputBounds[1]) * 0.5),
+        static_cast<float>((inputBounds[2] + inputBounds[3]) * 0.5),
+        static_cast<float>((inputBounds[4] + inputBounds[5]) * 0.5)
+    };
+    const auto getAxisPoint = [
+        &inputBounds,
+        &inputCenter](const int axis, const double ratio) {
+        CropPointFloat3Array point = inputCenter;
+        point[axis] = static_cast<float>(
+            inputBounds[axis * 2]
+            + (inputBounds[axis * 2 + 1] - inputBounds[axis * 2]) * ratio);
+        return point;
+    };
 
     const CropMatrixDouble16Array inputToWorld = {
         1.5, 0.0, 0.0, 10.0,
@@ -882,20 +943,20 @@ bool StartSliceCoordinateCase()
     const std::vector<SliceCase> cases = {
         {
             Orientation::Top_down,
-            { { -3.0f, 0.0f, 0.0f }, { -1.0f, 0.0f, 0.0f },
-              { 1.0f, 0.0f, 0.0f }, { 3.0f, 0.0f, 0.0f } },
+            { getAxisPoint(0, 0.15), getAxisPoint(0, 0.38),
+              getAxisPoint(0, 0.62), getAxisPoint(0, 0.85) },
             "Top-down Slice"
         },
         {
             Orientation::Front_back,
-            { { -3.0f, 0.0f, 0.0f }, { -1.0f, 0.0f, 0.0f },
-              { 1.0f, 0.0f, 0.0f }, { 3.0f, 0.0f, 0.0f } },
+            { getAxisPoint(0, 0.15), getAxisPoint(0, 0.38),
+              getAxisPoint(0, 0.62), getAxisPoint(0, 0.85) },
             "Front-back Slice"
         },
         {
             Orientation::Left_right,
-            { { 0.0f, -3.0f, 0.0f }, { 0.0f, -1.0f, 0.0f },
-              { 0.0f, 1.0f, 0.0f }, { 0.0f, 3.0f, 0.0f } },
+            { getAxisPoint(1, 0.15), getAxisPoint(1, 0.38),
+              getAxisPoint(1, 0.62), getAxisPoint(1, 0.85) },
             "Left-right Slice"
         }
     };
@@ -916,16 +977,24 @@ bool StartSliceCoordinateCase()
         view.m_inputToWorld = inputToWorld;
         view.m_name = sliceCase.m_name;
         view.m_strategy->SetInputData(image);
+        view.m_strategy->SetInputMask(validityMask);
         isPassed = view.m_strategy->SetRenderInputStamp(
             { &inputIdentity, 1 }) && isPassed;
         isPassed = view.m_strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current) && isPassed;
         view.m_strategy->AttachRenderer(view.m_renderer);
-        view.m_strategy->SetCamera(view.m_renderer);
+        isPassed = SetSliceCamera(
+            view.m_renderer,
+            image,
+            sliceCase.m_orientation) && isPassed;
 
         RenderParams params;
         params.modelMatrix = inputToWorld;
-        params.cursor = { inputToWorld[3], inputToWorld[7], inputToWorld[11] };
+        params.cursor = {
+            inputToWorld[0] * inputCenter[0] + inputToWorld[3],
+            inputToWorld[5] * inputCenter[1] + inputToWorld[7],
+            inputToWorld[10] * inputCenter[2] + inputToWorld[11]
+        };
         params.windowLevel.windowWidth = 1.0;
         params.windowLevel.windowCenter = 0.5;
         params.visibilityMask = 0;
@@ -965,6 +1034,9 @@ bool StartSliceCoordinateCase()
 
     CropOpItem plane;
     plane.geometryType = CropShape::Plane;
+    plane.planeCenterInInputModel = {
+        inputCenter[0], inputCenter[1], inputCenter[2]
+    };
     plane.planeNormalInInputModel = { 1.0, 1.0, 1.0 };
     getSharedMatched(plane);
     plane.removalMode = CropRemovalMode::RemoveInside;
@@ -972,10 +1044,13 @@ bool StartSliceCoordinateCase()
 
     CropOpItem box;
     box.geometryType = CropShape::Box;
+    const double halfX = (inputBounds[1] - inputBounds[0]) * 0.25;
+    const double halfY = (inputBounds[3] - inputBounds[2]) * 0.25;
+    const double halfZ = (inputBounds[5] - inputBounds[4]) * 0.25;
     box.boxToInputModelMatrix = {
-        2.0, 0.0, 0.0, 0.0,
-        0.0, 2.0, 0.0, 0.0,
-        0.0, 0.0, 2.0, 0.0,
+        halfX, 0.0, 0.0, inputCenter[0],
+        0.0, halfY, 0.0, inputCenter[1],
+        0.0, 0.0, halfZ, inputCenter[2],
         0.0, 0.0, 0.0, 1.0
     };
     getSharedMatched(box);
@@ -1040,11 +1115,36 @@ bool StartVolumeCoordinateCase()
     params.modelMatrix[3] = 50.0;
     params.modelMatrix[7] = -10.0;
     params.visibilityMask = 0;
+    vtkCamera* camera = renderer->GetActiveCamera();
+    camera->SetPosition(7.0, -2.0, 11.0);
+    camera->SetFocalPoint(1.0, 2.0, 3.0);
+    camera->SetViewUp(0.0, 1.0, 0.0);
+    const std::array<double, 3> oldPosition = {
+        camera->GetPosition()[0],
+        camera->GetPosition()[1],
+        camera->GetPosition()[2]
+    };
+    const std::array<double, 3> oldFocalPoint = {
+        camera->GetFocalPoint()[0],
+        camera->GetFocalPoint()[1],
+        camera->GetFocalPoint()[2]
+    };
     strategy->SetVisualState(
         params,
         UpdateFlags::TF | UpdateFlags::Material
             | UpdateFlags::Transform | UpdateFlags::Visibility);
-    strategy->SetCamera(renderer);
+    isPassed = SetExpect(
+        std::equal(
+            oldPosition.begin(),
+            oldPosition.end(),
+            camera->GetPosition())
+            && std::equal(
+                oldFocalPoint.begin(),
+                oldFocalPoint.end(),
+                camera->GetFocalPoint()),
+        "Direct Strategy transform must not mutate the renderer camera.")
+        && isPassed;
+    camera->ParallelProjectionOff();
     renderer->ResetCamera();
 
     double bounds[6] = {};

@@ -1,7 +1,8 @@
 #include "GapDisplayTests.h"
 
 #include "Services/GapAnalysisService.h"
-#include "AppInterfaces.h"
+#include "Render/Contracts/OverlayService.h"
+#include "Render/Contracts/VisualStrategy.h"
 
 #include <vtkImageData.h>
 #include <vtkSmartPointer.h>

@@ -1,7 +1,9 @@
 #include "QtHostMethodCases.h"
 
+#include "App/AppState.h"
+#include "Data/DataManager.h"
 #include "Host/HostFeature.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
@@ -11,6 +13,8 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -41,10 +45,7 @@ public:
         if (isAttached) {
             return true;
         }
-        if (!context.sendOwnerComplete
-            || !context.renderViews
-            || !context.inputPort
-            || !context.setActiveViews) {
+        if (!context.views || !context.host) {
             return false;
         }
         HostInputBinding binding;
@@ -55,14 +56,12 @@ public:
             [](const InteractionEvent&) {
                 return InteractionResult{};
             };
-        if (!context.inputPort->AttachInput(
+        if (!context.host->AttachInput(
                 std::move(binding))) {
             return false;
         }
-        m_renderViews = context.renderViews;
-        m_inputPort = context.inputPort;
-        m_sendOwnerComplete = context.sendOwnerComplete;
-        m_setActiveViews = context.setActiveViews;
+        m_views = context.views;
+        m_host = context.host;
         isAttached = true;
         ++attachCount;
         return !isAttachFailing;
@@ -80,15 +79,13 @@ public:
         if (isDetachFailing) {
             return false;
         }
-        if (m_inputPort
-            && !m_inputPort->DetachInput(m_id)) {
+        if (m_host
+            && !m_host->DetachInput(m_id)) {
             return false;
         }
-        m_renderViews = nullptr;
-        m_inputPort = nullptr;
+        m_views.reset();
+        m_host.reset();
         isAttached = false;
-        m_sendOwnerComplete = {};
-        m_setActiveViews = {};
         ++detachCount;
         return true;
     }
@@ -104,35 +101,34 @@ public:
 
     bool SendOwnerComplete(std::function<void()> complete)
     {
-        return m_sendOwnerComplete
-            && m_sendOwnerComplete(std::move(complete));
+        return m_host
+            && m_host->SendOwnerComplete(std::move(complete));
     }
 
     bool SetActiveViews(const HostViewTargets& targets)
     {
-        if (!m_renderViews) {
+        if (!m_views || !m_host) {
             return false;
         }
-        const auto views =
-            m_renderViews->GetViewsByTargets(targets);
+        const auto views = m_views->GetViews(targets);
         if ((!targets.viewIds.empty()
                 || !targets.viewRoles.empty())
             && views.empty()) {
             return false;
         }
-        return m_setActiveViews
-            && m_setActiveViews(
-                m_renderViews->BuildServices(views));
+        std::vector<std::string> viewIds;
+        viewIds.reserve(views.size());
+        for (const auto& view : views) {
+            if (!view.id.empty()) {
+                viewIds.push_back(view.id);
+            }
+        }
+        return m_host->SetActiveViews(viewIds);
     }
 
     std::string m_id;
-    std::function<bool(std::function<void()>)>
-        m_sendOwnerComplete;
-    std::function<bool(
-        const std::vector<std::shared_ptr<InteractiveService>>&)>
-        m_setActiveViews;
-    const HostRenderViewSet* m_renderViews = nullptr;
-    HostInputPort* m_inputPort = nullptr;
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    std::shared_ptr<FeatureHostControl> m_host;
     int attachCount = 0;
     int detachCount = 0;
     int detachTryCount = 0;
@@ -155,7 +151,40 @@ HostSessionConfig GetSessionConfig()
     return config;
 }
 
-bool GetDeathObserved(
+HostCoreServices GetCoreServices()
+{
+    HostCoreServices core;
+    core.sharedDataMgr =
+        std::make_shared<RawVolumeDataManager>();
+    core.sharedStateBroadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    core.sharedState =
+        std::make_shared<SharedInteractionState>(
+            core.sharedStateBroadcaster);
+    return core;
+}
+
+bool SendTimer(
+    vtkRenderWindowInteractor* interactor,
+    const int idOffset = 0)
+{
+    if (!interactor) return false;
+    int timerId = interactor->GetTimerEventId();
+    if (timerId == 0) {
+        for (int candidate = 1; candidate <= 64; ++candidate) {
+            if (interactor->GetTimerDuration(candidate) != 0) {
+                timerId = candidate;
+                break;
+            }
+        }
+    }
+    if (timerId == 0) return false;
+    timerId += idOffset;
+    interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
+    return true;
+}
+
+bool GetSafeExit(
     const std::string_view caseName)
 {
     if (GetMethodExecutable().empty()
@@ -211,7 +240,7 @@ bool GetDeathObserved(
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
     return waitResult == WAIT_OBJECT_0
-        && exitCode == 86;
+        && exitCode == 0;
 #else
     return false;
 #endif
@@ -252,32 +281,98 @@ int StartLifecycleDeathCase(
         worker.join();
         return 0;
     }
+    if (caseName == "view-set-thread") {
+        auto views = std::make_unique<HostViewRuntimeRegistry>();
+        const auto config = GetSessionConfig();
+        if (!views->Build(
+                GetCoreServices(), config.renderViews)) {
+            return 13;
+        }
+        std::thread worker(
+            [views = std::move(views)]() mutable {
+                views.reset();
+            });
+        worker.join();
+        return 0;
+    }
     if (caseName == "expired-input-detach-failure") {
         auto session =
             std::make_unique<VtkAppHostSession>(
                 GetSessionConfig());
         if (!session->BuildSession()) {
-            return 13;
+            return 14;
         }
         auto feature =
             std::make_shared<FakeHostFeature>(
                 "death-expired");
         if (!session->AttachFeature(feature)
-            || !feature->m_inputPort
-            || !feature->m_inputPort->DetachInput(
+            || !feature->m_host
+            || !feature->m_host->DetachInput(
                 feature->m_id)) {
-            return 14;
+            return 15;
         }
         feature.reset();
         session.reset();
         return 0;
     }
-    return 15;
+    return 16;
 }
 
 int GetLifecycleFailCount()
 {
     int failureCount = 0;
+    std::weak_ptr<IHostViewDirectory> staleDirectory;
+    std::optional<HostDataRoute> retainedDataRoute;
+    std::optional<HostViewRoute> retainedViewRoute;
+    std::vector<HostInputRoute> retainedInputRoutes;
+    bool isRouteBuilt = false;
+    bool isCrossThreadRejected = false;
+    {
+        HostViewRuntimeRegistry routeOwner;
+        const auto config = GetSessionConfig();
+        isRouteBuilt = routeOwner.Build(
+            GetCoreServices(), config.renderViews);
+        staleDirectory = routeOwner.GetViewDirectory();
+        const auto directory = staleDirectory.lock();
+        HostViewTarget routeTarget;
+        routeTarget.viewId = "lifecycle";
+        HostViewTargets routeTargets;
+        routeTargets.viewIds = { "lifecycle" };
+        retainedDataRoute = directory
+            ? directory->GetDataRoute(routeTarget)
+            : std::optional<HostDataRoute>{};
+        retainedViewRoute = directory
+            ? directory->GetViewRoute(routeTarget)
+            : std::optional<HostViewRoute>{};
+        retainedInputRoutes = directory
+            ? directory->GetInputRoutes(routeTargets)
+            : std::vector<HostInputRoute>{};
+        std::thread crossThread([&]() {
+            const auto current = staleDirectory.lock();
+            isCrossThreadRejected =
+                current
+                && !current->GetDataRoute(routeTarget)
+                && !current->GetViewRoute(routeTarget)
+                && current->GetInputRoutes(routeTargets).empty();
+        });
+        crossThread.join();
+    }
+    failureCount += GetCaseResult(
+        isRouteBuilt
+            && isCrossThreadRejected
+            && retainedDataRoute
+            && retainedDataRoute->data.expired()
+            && retainedViewRoute
+            && retainedViewRoute->view.expired()
+            && retainedViewRoute->update.expired()
+            && retainedViewRoute->context.expired()
+            && retainedInputRoutes.size() == 1
+            && retainedInputRoutes.front().context.expired()
+            && retainedViewRoute->stopView
+            && !retainedViewRoute->stopView()
+            && staleDirectory.expired(),
+        "View routes expire safely after their owner is destroyed") ? 0 : 1;
+
     VtkAppHostSession emptySession(HostSessionConfig{});
     HostLoadRequest rejectedLoad;
     rejectedLoad.filePath = "missing.raw";
@@ -290,6 +385,248 @@ int GetLifecycleFailCount()
             })
             && rejectedCallbackCount == 0,
         "Session Build failure rejects request without callback") ? 0 : 1;
+
+    auto emptyViewConfig = GetSessionConfig();
+    emptyViewConfig.renderViews.front().id.clear();
+    VtkAppHostSession emptyViewSession(
+        std::move(emptyViewConfig));
+    auto duplicateViewConfig = GetSessionConfig();
+    duplicateViewConfig.renderViews.push_back(
+        duplicateViewConfig.renderViews.front());
+    VtkAppHostSession duplicateViewSession(
+        std::move(duplicateViewConfig));
+    failureCount += GetCaseResult(
+        !emptyViewSession.BuildSession()
+            && emptyViewSession.Stop()
+            && emptyViewSession.GetIsStopped()
+            && !duplicateViewSession.BuildSession()
+            && duplicateViewSession.Stop()
+            && duplicateViewSession.GetIsStopped(),
+        "Session rejects empty and duplicate render view IDs before topology commit") ? 0 : 1;
+
+    VtkAppHostSession stopSession(GetSessionConfig());
+    const bool isStopBuilt = stopSession.BuildSession();
+    bool isWorkerStopAccepted = true;
+    std::thread stopWorker([&]() {
+        isWorkerStopAccepted = stopSession.Stop();
+    });
+    stopWorker.join();
+    const auto workerStopState = stopSession.GetStopState();
+    const bool isOwnerStopAccepted = stopSession.Stop();
+    HostViewTarget stoppedTarget;
+    stoppedTarget.viewId = "lifecycle";
+    const auto stoppedRead = stopSession.GetImageReadResult(1024);
+    failureCount += GetCaseResult(
+        isStopBuilt
+            && !isWorkerStopAccepted
+            && workerStopState == HostStopState::StopRequested
+            && isOwnerStopAccepted
+            && stopSession.GetIsStopped()
+            && stopSession.GetStopState() == HostStopState::Stopped
+            && stopSession.GetRenderViewEndpoints().empty()
+            && !stopSession.GetRenderViewEndpoint("lifecycle")
+            && !stopSession.GetPrimaryEndpoint()
+            && !stopSession.GetRenderViewState(stoppedTarget)
+            && stopSession.GetRenderViewStates().empty()
+            && !stopSession.GetImageReadState()
+            && stoppedRead.error == ImageReadError::NoImage
+            && stoppedRead.requiredBytes == 0
+            && !stoppedRead.state
+            && stopSession.GetStopState() == HostStopState::Stopped
+            && stopSession.Stop(),
+        "Session Stop is retryable, idempotent, and getters do not rebuild it") ? 0 : 1;
+
+    std::vector<std::function<void()>> ownerTasks;
+    auto deferredConfig = GetSessionConfig();
+    deferredConfig.sendOwnerTask = [&ownerTasks](
+        std::function<void()> task) {
+        if (!task) return false;
+        ownerTasks.push_back(std::move(task));
+        return true;
+    };
+    auto deferredSession =
+        std::make_unique<VtkAppHostSession>(
+            std::move(deferredConfig));
+    const bool isDeferredBuilt =
+        deferredSession->BuildSession();
+    const auto* deferredEndpoint =
+        deferredSession->GetPrimaryEndpoint();
+    vtkWeakPointer<vtkRenderWindowInteractor> deferredInteractor =
+        deferredEndpoint ? deferredEndpoint->interactor : nullptr;
+    std::thread deferredWorker(
+        [session = std::move(deferredSession)]() mutable {
+            session.reset();
+        });
+    deferredWorker.join();
+    const bool isDeferredQueued = ownerTasks.size() == 1
+        && deferredInteractor;
+    if (!ownerTasks.empty()) {
+        auto ownerTask = std::move(ownerTasks.front());
+        ownerTasks.clear();
+        ownerTask();
+    }
+    failureCount += GetCaseResult(
+        isDeferredBuilt
+            && isDeferredQueued
+            && !deferredInteractor
+            && VtkAppHostSession::GetPendingStopCount() == 0,
+        "Wrong-thread destruction delegates final Stop to the Qt owner executor") ? 0 : 1;
+
+    const auto staleInitialCount =
+        VtkAppHostSession::GetPendingStopCount();
+    std::vector<std::function<void()>> staleTasks;
+    auto staleConfig = GetSessionConfig();
+    staleConfig.sendOwnerTask = [&staleTasks](
+        std::function<void()> task) {
+        if (!task) return false;
+        staleTasks.push_back(std::move(task));
+        return true;
+    };
+    auto staleSession = std::make_unique<VtkAppHostSession>(
+        std::move(staleConfig));
+    const bool isStaleBuilt = staleSession->BuildSession();
+    const auto* staleEndpoint = staleSession->GetPrimaryEndpoint();
+    vtkWeakPointer<vtkRenderWindowInteractor> staleInteractor =
+        staleEndpoint ? staleEndpoint->interactor : nullptr;
+    std::thread staleWorker(
+        [session = std::move(staleSession)]() mutable {
+            session.reset();
+        });
+    staleWorker.join();
+    const bool isStaleQueued = staleTasks.size() == 1
+        && VtkAppHostSession::GetPendingStopCount()
+            == staleInitialCount + 1;
+    const bool isStalePumped =
+        VtkAppHostSession::SendPendingStops();
+    auto liveSession = std::make_unique<VtkAppHostSession>(
+        GetSessionConfig());
+    const bool isLiveBuilt = liveSession->BuildSession();
+    const auto* liveEndpoint = liveSession->GetPrimaryEndpoint();
+    vtkWeakPointer<vtkRenderWindowInteractor> liveInteractor =
+        liveEndpoint ? liveEndpoint->interactor : nullptr;
+    if (!staleTasks.empty()) {
+        auto staleTask = std::move(staleTasks.front());
+        staleTasks.clear();
+        staleTask();
+    }
+    const bool isLiveRetained = liveInteractor
+        && liveSession->GetPrimaryEndpoint() == liveEndpoint;
+    const bool isLiveStopped = liveSession->Stop();
+    failureCount += GetCaseResult(
+        isStaleBuilt
+            && isStaleQueued
+            && isStalePumped
+            && !staleInteractor
+            && isLiveBuilt
+            && isLiveRetained
+            && isLiveStopped
+            && !liveInteractor
+            && VtkAppHostSession::GetPendingStopCount()
+                == staleInitialCount,
+        "A delayed Stop callback is token-idempotent and cannot stop a newer Session") ? 0 : 1;
+
+    const auto getReaperValid = [](
+        const std::optional<bool> isDispatcherThrowing) {
+        const auto initialCount =
+            VtkAppHostSession::GetPendingStopCount();
+        int diagnosticCount = 0;
+        auto config = GetSessionConfig();
+        config.sendDiagnostic = [&diagnosticCount](const std::string&) {
+            ++diagnosticCount;
+        };
+        if (isDispatcherThrowing) {
+            config.sendOwnerTask = [isDispatcherThrowing](
+                std::function<void()>) {
+                if (*isDispatcherThrowing) {
+                    throw std::runtime_error("dispatcher failure");
+                }
+                return false;
+            };
+        }
+        auto session = std::make_unique<VtkAppHostSession>(
+            std::move(config));
+        if (!session->BuildSession()) return false;
+        const auto* endpoint = session->GetPrimaryEndpoint();
+        vtkWeakPointer<vtkRenderWindowInteractor> interactor =
+            endpoint ? endpoint->interactor : nullptr;
+        std::thread worker(
+            [session = std::move(session)]() mutable {
+                session.reset();
+            });
+        worker.join();
+        const bool isRetained = interactor
+            && VtkAppHostSession::GetPendingStopCount()
+                == initialCount + 1;
+        const bool isReleased =
+            VtkAppHostSession::SendPendingStops();
+        return isRetained
+            && isReleased
+            && !interactor
+            && diagnosticCount > 0
+            && VtkAppHostSession::GetPendingStopCount()
+                == initialCount;
+    };
+    failureCount += GetCaseResult(
+        getReaperValid(std::nullopt),
+        "Missing owner dispatcher retains a pumpable StopPending session") ? 0 : 1;
+    failureCount += GetCaseResult(
+        getReaperValid(false),
+        "Rejected owner dispatch remains recoverable by the owner reaper") ? 0 : 1;
+    failureCount += GetCaseResult(
+        getReaperValid(true),
+        "Throwing owner dispatch remains recoverable by the owner reaper") ? 0 : 1;
+
+    const auto pendingBaseCount =
+        VtkAppHostSession::GetPendingStopCount();
+    std::vector<std::function<void()>> retryTasks;
+    auto retryConfig = GetSessionConfig();
+    retryConfig.sendOwnerTask = [&retryTasks](
+        std::function<void()> task) {
+        if (!task) return false;
+        retryTasks.push_back(std::move(task));
+        return true;
+    };
+    auto retrySession = std::make_unique<VtkAppHostSession>(
+        std::move(retryConfig));
+    auto reaperFeature = std::make_shared<FakeHostFeature>(
+        "reaper-retry");
+    reaperFeature->isDetachFailing = true;
+    const bool isRetryBuilt = retrySession->BuildSession()
+        && retrySession->AttachFeature(reaperFeature);
+    const auto* retryEndpoint = retrySession->GetPrimaryEndpoint();
+    vtkWeakPointer<vtkRenderWindowInteractor> retryInteractor =
+        retryEndpoint ? retryEndpoint->interactor : nullptr;
+    std::thread retryWorker(
+        [session = std::move(retrySession)]() mutable {
+            session.reset();
+        });
+    retryWorker.join();
+    const bool isRetryQueued = retryTasks.size() == 1
+        && retryInteractor
+        && VtkAppHostSession::GetPendingStopCount()
+            == pendingBaseCount + 1;
+    if (!retryTasks.empty()) {
+        auto ownerTask = std::move(retryTasks.front());
+        retryTasks.clear();
+        ownerTask();
+    }
+    const bool isFirstStopRetained = retryInteractor
+        && VtkAppHostSession::GetPendingStopCount()
+            == pendingBaseCount + 1;
+    reaperFeature->isDetachFailing = false;
+    const bool isRetryReleased =
+        VtkAppHostSession::SendPendingStops();
+    failureCount += GetCaseResult(
+        isRetryBuilt
+            && isRetryQueued
+            && isFirstStopRetained
+            && isRetryReleased
+            && !retryInteractor
+            && reaperFeature->detachTryCount >= 2
+            && reaperFeature->detachCount == 1
+            && VtkAppHostSession::GetPendingStopCount()
+                == pendingBaseCount,
+        "Deferred Stop failure remains owned and succeeds through owner retry") ? 0 : 1;
 
     VtkAppHostSession moveSource(GetSessionConfig());
     VtkAppHostSession moveTarget(std::move(moveSource));
@@ -360,8 +697,8 @@ int GetLifecycleFailCount()
             && isActiveSet
             && isMissingRejected
             && isActiveCleared
-            && feature.use_count() == beforeUseCount,
-        "Session registers a weak Feature and validates active views") ? 0 : 1;
+            && feature.use_count() == beforeUseCount + 1,
+        "Session owns an attached Feature and validates active views") ? 0 : 1;
 
     auto crossThreadFeature =
         std::make_shared<FakeHostFeature>("feature-worker");
@@ -423,8 +760,13 @@ int GetLifecycleFailCount()
     if (session->AttachTimer(timer)
         && endpoint
         && endpoint->interactor) {
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
+        (void)SendTimer(endpoint->interactor, 1);
+    }
+    failureCount += GetCaseResult(
+        feature->tickCount == 0 && !isComplete,
+        "A foreign timer ID cannot drive the Session tick") ? 0 : 1;
+    if (endpoint && endpoint->interactor) {
+        (void)SendTimer(endpoint->interactor);
     }
     failureCount += GetCaseResult(
         feature->tickCount == 1
@@ -449,19 +791,36 @@ int GetLifecycleFailCount()
         std::make_shared<FakeHostFeature>("feature-retry");
     const bool isRetryAttached =
         session->AttachFeature(retryFeature);
+    HostViewTargets retryViews;
+    retryViews.viewIds = { "lifecycle" };
+    HostViewTarget retryView;
+    retryView.viewId = "lifecycle";
+    const bool isRetryViewSet =
+        retryFeature->SetActiveViews(retryViews);
+    const auto activeRetryState =
+        session->GetRenderViewState(retryView);
     retryFeature->isDetachFailing = true;
     const bool isFirstDetachRejected =
         !session->DetachFeature(*retryFeature);
+    const auto rejectedRetryState =
+        session->GetRenderViewState(retryView);
+    const bool isRetryPending = retryFeature->isAttached;
     retryFeature->isDetachFailing = false;
     const bool isRetryDetached =
         session->DetachFeature(*retryFeature);
     failureCount += GetCaseResult(
         isRetryAttached
+            && isRetryViewSet
+            && activeRetryState
+            && activeRetryState->isFeatureActive
             && isFirstDetachRejected
+            && isRetryPending
+            && rejectedRetryState
+            && rejectedRetryState->isFeatureActive
             && isRetryDetached
             && retryFeature->detachTryCount == 2
             && retryFeature->detachCount == 1,
-        "Detach failure preserves the weak registry for an owner-thread retry") ? 0 : 1;
+        "Detach failure restores active views and preserves the registry for retry") ? 0 : 1;
 
     auto expiredFeature =
         std::make_shared<FakeHostFeature>(
@@ -476,33 +835,38 @@ int GetLifecycleFailCount()
             "feature-expired");
     const bool isBeforeTickRejected =
         !session->AttachFeature(replacement);
-    if (endpoint && endpoint->interactor) {
-        endpoint->interactor->InvokeEvent(
-            vtkCommand::TimerEvent);
-    }
-    const bool isAfterTickAttached =
+    const bool isRetained = !expiredWeak.expired();
+    auto retainedFeature = expiredWeak.lock();
+    const bool isRetainedDetached = retainedFeature
+        && session->DetachFeature(*retainedFeature);
+    retainedFeature.reset();
+    const bool isAfterDetachAttached =
         session->AttachFeature(replacement);
     const bool isReplacementDetached =
         session->DetachFeature(*replacement);
     failureCount += GetCaseResult(
         isExpiredAttached
-            && expiredWeak.expired()
+            && isRetained
             && isBeforeTickRejected
-            && isAfterTickAttached
+            && isRetainedDetached
+            && expiredWeak.expired()
+            && isAfterDetachAttached
             && isReplacementDetached,
-        "Session tick removes an expired weak Feature registration") ? 0 : 1;
+        "Session retains an attached Feature until explicit owner-thread detach") ? 0 : 1;
 
     failureCount += GetCaseResult(
-        GetDeathObserved("detach-failure"),
-        "Session destruction fails fast before core teardown when detach fails") ? 0 : 1;
+        GetSafeExit("detach-failure"),
+        "Detach failure no longer terminates the host process") ? 0 : 1;
     failureCount += GetCaseResult(
-        GetDeathObserved("wrong-thread"),
-        "Session destruction fails fast on a non-owner thread") ? 0 : 1;
+        GetSafeExit("wrong-thread"),
+        "Wrong-thread Session destruction no longer terminates the host process") ? 0 : 1;
     failureCount += GetCaseResult(
-        GetDeathObserved(
+        GetSafeExit("view-set-thread"),
+        "Wrong-thread ViewSet destruction no longer terminates the host process") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetSafeExit(
             "expired-input-detach-failure"),
-        "Session destruction fails fast when an expired "
-        "Feature input cannot detach") ? 0 : 1;
+        "Failed Feature cleanup remains owned without terminating the process") ? 0 : 1;
 
     auto fallback =
         std::make_shared<FakeHostFeature>("feature-b");

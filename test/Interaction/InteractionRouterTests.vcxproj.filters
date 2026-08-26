@@ -39,25 +39,19 @@
     <ClInclude Include="..\..\MVVCVTK\include\Interaction\InteractionRouter.h">
       <Filter>include</Filter>
     </ClInclude>
-    <ClInclude Include="Fakes\AppService.h">
+    <ClInclude Include="Fakes\AppPorts.h">
+      <Filter>tests</Filter>
+    </ClInclude>
+    <ClInclude Include="Fakes\AppInterfaces.h">
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="Fakes\Host\HostCoreServices.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="Fakes\Host\HostRenderViewSet.h">
+    <ClInclude Include="Fakes\Host\HostRoutes.h">
       <Filter>tests</Filter>
     </ClInclude>
-    <ClInclude Include="Fakes\StdRenderContext.h">
-      <Filter>tests</Filter>
-    </ClInclude>
-    <ClInclude Include="Fakes\vtkCommand.h">
-      <Filter>tests</Filter>
-    </ClInclude>
-    <ClInclude Include="Fakes\vtkRenderWindow.h">
-      <Filter>tests</Filter>
-    </ClInclude>
-    <ClInclude Include="Fakes\vtkSmartPointer.h">
+    <ClInclude Include="Fakes\ViewContext.h">
       <Filter>tests</Filter>
     </ClInclude>
     <ClInclude Include="HostCommandRouterTests.h">
@@ -71,26 +65,19 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\AbstractViewContext.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\ViewContextFactory.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\TimeUpdateHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer2DHandler.cpp"><Filter>src</Filter></ClCompile>
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer3DHandler.cpp"><Filter>src</Filter></ClCompile>
     <ClCompile Include="AppStateTests.cpp">
       <Filter>tests</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp">
-      <Filter>src</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp">
-      <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="HostCommandRouterTests.cpp">
       <Filter>tests</Filter>

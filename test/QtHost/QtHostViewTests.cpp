@@ -1,7 +1,11 @@
 #include "QtHostMethodCases.h"
 
-#include "AppService.h"
+#include "App/AppState.h"
+#include "App/AppStateEvents.h"
+#include "App/Services/AppPorts.h"
+#include "App/Services/AppServiceFactory.h"
 #include "DataConverters.h"
+#include "Data/DataManager.h"
 #include "Host/VtkAppHostSession.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "ImageProcessor.h"
@@ -43,6 +47,7 @@
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
 #include <utility>
@@ -334,25 +339,38 @@ int GetRenderContractFailCount()
             && GetRenderRate(true) == 15.0,
         "Quality and Custom are the only effective volume modes") ? 0 : 1;
 
-    VizService featureService(nullptr, nullptr, nullptr);
+    auto eventSource = std::make_shared<SharedStateBroadcaster>();
+    auto appState = std::make_shared<SharedInteractionState>(
+        eventSource);
+    AppServiceArgs serviceArgs;
+    serviceArgs.dataManager =
+        std::make_shared<RawVolumeDataManager>();
+    serviceArgs.interactionState = appState;
+    serviceArgs.eventSource = eventSource;
+    auto servicePorts = CreateAppPorts(
+        std::move(serviceArgs));
     const FeatureSource firstSource{ "feature.first" };
     const FeatureSource secondSource{ "feature.second" };
     const VolumeQualityParams custom1000{
         VolumeQuality::Custom, 1000, 0.25, true
     };
-    const bool isCustomAccepted =
-        featureService.SetVolumeQuality(custom1000);
+    AppViewUpdate qualityUpdate;
+    qualityUpdate.volumeQuality = custom1000;
+    const bool isCustomAccepted = servicePorts.app.view
+        && servicePorts.app.feature
+        && servicePorts.app.view->SendViewUpdate(qualityUpdate);
     const bool hasFeatureAggregate =
         isCustomAccepted
-        && featureService.SetFeatureActive(firstSource, true)
-        && featureService.SetFeatureActive(secondSource, true)
-        && featureService.SetFeatureActive(firstSource, false)
-        && featureService.GetIsFeatureActive()
-        && featureService.SetFeatureActive(secondSource, false)
-        && !featureService.GetIsFeatureActive()
-        && featureService.GetVolumeQuality().quality
+        && servicePorts.app.feature->SetFeatureActive(firstSource, true)
+        && servicePorts.app.feature->SetFeatureActive(secondSource, true)
+        && servicePorts.app.feature->SetFeatureActive(firstSource, false)
+        && servicePorts.app.view->GetViewState().isFeatureActive
+        && servicePorts.app.feature->SetFeatureActive(secondSource, false)
+        && !servicePorts.app.view->GetViewState().isFeatureActive
+        && servicePorts.app.view->GetViewState().volumeQuality.quality
             == VolumeQuality::Custom
-        && featureService.GetVolumeQuality().maxDimension == 1000;
+        && servicePorts.app.view->GetViewState()
+            .volumeQuality.maxDimension == 1000;
     failureCount += GetCaseResult(
         hasFeatureAggregate,
         "Feature sources aggregate without overwriting Custom 1000") ? 0 : 1;
@@ -1385,7 +1403,7 @@ int GetRenderContractFailCount()
     }
 
     CompositeStrategy compositeStrategy(
-        VizMode::CompositeVolume);
+        std::make_shared<VolumeStrategy>());
     compositeStrategy.SetInputData(previewImage);
     compositeStrategy.SetInputMask(previewMask);
     compositeStrategy.SetVisualState(
@@ -1691,11 +1709,13 @@ int GetViewFailCount()
     view.window.viewInit.hasIso = true;
     view.window.viewInit.background = { 0.05, 0.1, 0.15 };
     view.window.viewInit.hasBackground = true;
-    view.window.viewInit.spacing = { 0.5, 1.0, 1.5 };
-    view.window.viewInit.hasSpacing = true;
     view.window.viewInit.windowLevel = { 80.0, 20.0 };
     view.window.viewInit.hasWindowLevel = true;
+    HostRenderViewConfig linkedView = view;
+    linkedView.id = "linked-view";
+    linkedView.role = HostRenderViewRole::Composite3D;
     config.renderViews.push_back(std::move(view));
+    config.renderViews.push_back(std::move(linkedView));
     VtkAppHostSession session(std::move(config));
 
     int failureCount = 0;
@@ -1705,14 +1725,12 @@ int GetViewFailCount()
         !session.SendRequest(std::move(value)),
         "View missing target rejection") ? 0 : 1;
 
-    value = HostViewSetRequest{};
-    value.targetView.viewId = "view";
-    value.mode = HostRenderMode::IsoSurface;
-    value.opacity = 0.7;
-    value.spacing = std::array<double, 3>{ 1.0, 0.0, 1.0 };
+    HostSessionSetRequest sessionValue;
+    sessionValue.spacing =
+        std::array<double, 3>{ 1.0, 0.0, 1.0 };
     failureCount += GetCaseResult(
-        !session.SendRequest(std::move(value)),
-        "View late invalid spacing atomic rejection") ? 0 : 1;
+        !session.SendRequest(std::move(sessionValue)),
+        "Session invalid spacing atomic rejection") ? 0 : 1;
 
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
@@ -1731,44 +1749,82 @@ int GetViewFailCount()
 
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
+    value.mode = HostRenderMode::IsoSurface;
+    value.material = HostMaterialParams{
+        0.3, 0.5, 0.4, 18.0, 0.6, false
+    };
+    value.transferNodes = std::vector<HostTransferNode>{
+        { 0.0, 0.2, 0.8, 0.1, 0.2 },
+        { 1.0, 0.7, 0.2, 0.8, 0.4 }
+    };
     value.iso = 0.42;
-    value.cursor = HostCursorParams{ { 1.0, 2.0, 3.0 }, -1 };
+    value.background = HostBackgroundColor{ 0.2, 0.3, 0.4 };
+    value.windowLevel = HostWindowLevelParams{ 120.0, 60.0 };
     value.visibility = HostVisibilityParams{
-        false, true, false
+        true, false, true
     };
     value.isAxesVisible = true;
     failureCount += GetCaseResult(
         session.SendRequest(std::move(value)),
-        "Qt Host can set iso, cursor and runtime visibility") ? 0 : 1;
+        "Qt Host can set one View presentation state") ? 0 : 1;
+
+    sessionValue = HostSessionSetRequest{};
+    sessionValue.spacing =
+        std::array<double, 3>{ 0.5, 1.0, 1.5 };
+    sessionValue.cursor = HostCursorParams{
+        { 1.0, 2.0, 3.0 }, -1
+    };
+    failureCount += GetCaseResult(
+        session.SendRequest(std::move(sessionValue)),
+        "Qt Host can set Session spacing and cursor") ? 0 : 1;
 
     HostViewTarget stateTarget;
     stateTarget.viewId = "view";
     const auto state = session.GetRenderViewState(stateTarget);
     const auto allStates = session.GetRenderViewStates();
+    const auto linkedState = std::find_if(
+        allStates.begin(), allStates.end(),
+        [](const HostRenderViewState& current) {
+            return current.id == "linked-view";
+        });
     const bool isStateReadBack = state.has_value()
         && state->id == "view"
         && state->role == HostRenderViewRole::Primary3D
-        && state->viewMode == HostRenderMode::Volume
-        && std::abs(state->material.opacity - 0.8) < 1e-12
-        && state->material.isShadeOn
+        && state->viewMode == HostRenderMode::IsoSurface
+        && std::abs(state->material.opacity - 0.6) < 1e-12
+        && !state->material.isShadeOn
         && state->transferNodes.size() == 2
-        && std::abs(state->transferNodes[1].opacity - 0.9) < 1e-12
+        && std::abs(state->transferNodes[1].opacity - 0.7) < 1e-12
         && std::abs(state->isoThreshold - 0.42) < 1e-12
-        && std::abs(state->background.r - 0.05) < 1e-12
+        && std::abs(state->background.r - 0.2) < 1e-12
         && std::abs(state->spacing[2] - 1.5) < 1e-12
-        && std::abs(state->windowLevel.windowWidth - 80.0) < 1e-12
+        && std::abs(state->windowLevel.windowWidth - 120.0) < 1e-12
         && state->transferPreset == HostTransferPreset::Manual
         && std::abs(state->scalarRange[0]) < 1e-12
         && std::abs(state->scalarRange[1] - 255.0) < 1e-12
-        // 当前用例尚未加载体数据；cursor setter 按既有契约保持原值。
-        && state->cursorWorld == std::array<double, 3>{ 0.0, 0.0, 0.0 }
-        && state->visibilityMask == VisFlags::Crosshair
+        // 显式 Host cursor 请求是值状态，即使尚未加载体数据也应可完整回读。
+        && state->cursorWorld == std::array<double, 3>{ 1.0, 2.0, 3.0 }
+        && state->visibilityMask
+            == (VisFlags::Planes3D | VisFlags::Ruler)
         && state->isAxesVisible
-        && allStates.size() == 1
-        && allStates.front().id == "view";
+        && allStates.size() == 2
+        && linkedState != allStates.end()
+        && linkedState->viewMode == HostRenderMode::Volume
+        && std::abs(linkedState->material.opacity - 0.8) < 1e-12
+        && linkedState->material.isShadeOn
+        && linkedState->transferNodes.size() == 2
+        && std::abs(linkedState->transferNodes[1].opacity - 0.9) < 1e-12
+        && std::abs(linkedState->isoThreshold - 0.25) < 1e-12
+        && std::abs(linkedState->background.r - 0.05) < 1e-12
+        && std::abs(linkedState->windowLevel.windowWidth - 80.0) < 1e-12
+        && std::abs(linkedState->spacing[2] - 1.5) < 1e-12
+        && linkedState->cursorWorld
+            == std::array<double, 3>{ 1.0, 2.0, 3.0 }
+        && linkedState->visibilityMask == VisFlags::Crosshair
+        && !linkedState->isAxesVisible;
     failureCount += GetCaseResult(
         isStateReadBack,
-        "Qt Host can read back the complete view state snapshot") ? 0 : 1;
+        "View presentation stays private while Session coordinates propagate") ? 0 : 1;
 
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";

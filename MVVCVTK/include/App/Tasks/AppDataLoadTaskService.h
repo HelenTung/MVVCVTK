@@ -1,7 +1,8 @@
 #pragma once
 
-#include "AppInterfaces.h"
+#include "Data/DataService.h"
 #include "Data/VolumeTypes.h"
+#include "Platform/TaskStopToken.h"
 #include <future>
 #include <memory>
 #include <optional>
@@ -15,11 +16,11 @@ public:
         std::shared_ptr<AbstractDataManager> dataManager);
 
     // path 为 UTF-8 文件路径。
-    std::optional<std::packaged_task<bool()>> BuildLoadFileTask(
+    std::optional<std::packaged_task<bool(TaskStopToken)>> BuildLoadFileTask(
         std::string path,
         VolumeLayout layout);
 
-    std::optional<std::packaged_task<bool()>> BuildReloadTask(
+    std::optional<std::packaged_task<bool(TaskStopToken)>> BuildReloadTask(
         VolumeBuffer buffer);
 
 private:

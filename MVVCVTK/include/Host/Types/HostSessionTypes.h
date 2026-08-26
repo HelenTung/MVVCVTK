@@ -6,6 +6,7 @@
 #include <vtkSmartPointer.h>
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -19,12 +20,10 @@ struct HostViewInitConfig {
     std::vector<HostTransferNode> transferNodes; // hasTransferNodes=true 时替换默认 TF。
     double isoThreshold = 0.0; // hasIso=true 时使用的数据标量阈值。
     HostBackgroundColor background;
-    std::array<double, 3> spacing{ 1.0, 1.0, 1.0 };
     HostWindowLevelParams windowLevel;
     bool hasTransferNodes = false;
     bool hasIso = false;
     bool hasBackground = false;
-    bool hasSpacing = false;
     bool hasWindowLevel = false;
 };
 
@@ -67,6 +66,8 @@ struct HostRenderViewState final {
     std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };
     uint32_t visibilityMask = 0;
     bool isAxesVisible = false;
+    // View 当前渲染批次，仅用于值语义诊断，不暴露 DataManager 或 Strategy identity。
+    std::uint64_t dataVersion = 0;
 };
 
 struct HostRenderViewEndpoint {
@@ -78,6 +79,20 @@ struct HostRenderViewEndpoint {
     vtkRenderWindowInteractor* interactor = nullptr;
 };
 
+enum class HostStopState : std::uint8_t {
+    Stopped,
+    Building,
+    Running,
+    StopRequested,
+    Stopping,
+    StopPending
+};
+
 struct HostSessionConfig {
     std::vector<HostRenderViewConfig> renderViews; // 声明顺序即 topology 顺序，也决定多目标返回与首选窗口顺序。
+    // 可选的 owner-thread 投递器。Qt 宿主可映射到自己的事件循环；
+    // session 在错误线程最终释放时只投递 Stop，不直接访问 VTK。
+    std::function<bool(std::function<void()>)> sendOwnerTask;
+    // 立即消费的生命周期诊断；回调不得抛异常或缓存 message 引用。
+    std::function<void(const std::string& message)> sendDiagnostic;
 };

@@ -1,16 +1,17 @@
 #include "QtHostMethodCases.h"
 
-#include "AppService.h"
 #include "AppState.h"
 #include "AppStateEvents.h"
+#include "App/Services/FeatureViewService.h"
 #include "DataManager.h"
 #include "Host/CropHostFeature.h"
 #include "Host/GapHostFeature.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
+#include "Render/Contracts/OverlayService.h"
 #include "VolumeTypes.h"
 
 #include <vtkCommand.h>
@@ -22,6 +23,7 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkSmartPointer.h>
 #include <vtkVolume.h>
+#include <vtkVolumeCollection.h>
 
 #include <chrono>
 #include <cstddef>
@@ -47,22 +49,18 @@ public:
     bool AttachHost(
         const HostFeatureContext& context) override
     {
-        if (!context.renderViews
-            || !context.getImageSnapshot
-            || !context.setImageState) {
+        if (!context.views || !context.data) {
             return false;
         }
-        m_renderViews = context.renderViews;
-        m_getImageSnapshot = context.getImageSnapshot;
-        m_setImageState = context.setImageState;
+        m_views = context.views;
+        m_data = context.data;
         return true;
     }
 
     bool DetachHost() override
     {
-        m_renderViews = nullptr;
-        m_getImageSnapshot = {};
-        m_setImageState = {};
+        m_views.reset();
+        m_data.reset();
         return true;
     }
 
@@ -71,35 +69,27 @@ public:
         return true;
     }
 
-    bool GetFeatureActive(
+    std::shared_ptr<FeatureViewService> GetViewService(
         const std::string& viewId) const
     {
-        const auto* view = m_renderViews
-            ? m_renderViews->GetViewById(viewId)
+        return m_views && !viewId.empty()
+            ? m_views->GetFeaturePort(viewId)
             : nullptr;
-        return view
-            && view->service
-            && view->service->GetIsFeatureActive();
     }
 
-    std::shared_ptr<VizService> GetViewService(
+    std::shared_ptr<OverlayService> GetViewOverlay(
         const std::string& viewId) const
     {
-        const auto* view = m_renderViews
-            ? m_renderViews->GetViewById(viewId)
+        return m_views && !viewId.empty()
+            ? m_views->GetOverlayPort(viewId)
             : nullptr;
-        return view ? view->service : nullptr;
     }
 
-    const HostRenderViewSet* m_renderViews = nullptr;
-    std::function<ImageSnapshot()> m_getImageSnapshot;
-    std::function<bool(
-        ImageState,
-        const ImageSnapshot&,
-        ImageSnapshot&)> m_setImageState;
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    std::shared_ptr<TrustedFeatureDataPort> m_data;
 };
 
-class InputPortProbe final : public HostInputPort {
+class HostControlProbe final : public FeatureHostControl {
 public:
     bool AttachInput(HostInputBinding) override
     {
@@ -109,6 +99,68 @@ public:
     bool DetachInput(std::string_view) override
     {
         return true;
+    }
+
+    bool SetActiveViews(
+        const std::vector<std::string>&) override
+    {
+        return true;
+    }
+
+    bool SetViewStatus(
+        const std::vector<std::string>&,
+        const std::string&) override
+    {
+        return true;
+    }
+
+    bool SendOwnerComplete(
+        std::function<void()>) override
+    {
+        return true;
+    }
+};
+
+class ViewPortProbe final : public FeatureViewDirectory {
+public:
+    std::vector<HostFeatureView> GetViews(
+        const HostViewTargets&) const override
+    {
+        return {};
+    }
+
+    std::shared_ptr<FeatureViewService> GetFeaturePort(
+        const std::string&) const override
+    {
+        return {};
+    }
+
+    std::shared_ptr<OverlayService> GetOverlayPort(
+        const std::string&) const override
+    {
+        return {};
+    }
+
+    std::optional<HostInputView> GetInputView(
+        const HostViewTarget&) const override
+    {
+        return std::nullopt;
+    }
+};
+
+class DataPortProbe final : public TrustedFeatureDataPort {
+public:
+    TrustedImageSnapshot GetImageSnapshot() const override
+    {
+        return {};
+    }
+
+    bool SetImageState(
+        TrustedImageState,
+        const TrustedImageSnapshot&,
+        TrustedImageSnapshot&) override
+    {
+        return false;
     }
 };
 
@@ -120,11 +172,11 @@ public:
     }
 };
 
-ImageState GetStateCopy(
-    const ImageSnapshot& snapshot)
+TrustedImageState GetStateCopy(
+    const TrustedImageSnapshot& snapshot)
 {
-    ImageState state = snapshot
-        ? *snapshot : ImageState{};
+    TrustedImageState state = snapshot
+        ? *snapshot : TrustedImageState{};
     if (state.image) {
         auto image = vtkSmartPointer<vtkImageData>::New();
         image->DeepCopy(state.image);
@@ -140,12 +192,12 @@ ImageState GetStateCopy(
 
 bool GetCoreWriterContract()
 {
-    std::function<ImageSnapshot()> reader;
+    std::function<TrustedImageSnapshot()> reader;
     std::function<bool(
-        ImageState,
-        const ImageSnapshot&,
-        ImageSnapshot&)> writer;
-    ImageSnapshot retainedSnapshot;
+        TrustedImageState,
+        const TrustedImageSnapshot&,
+        TrustedImageSnapshot&)> writer;
+    TrustedImageSnapshot retainedSnapshot;
     bool isWriterValid = false;
     {
         HostCoreServices core;
@@ -176,12 +228,12 @@ bool GetCoreWriterContract()
         reader = core.GetImageReader();
         writer = core.GetImageWriter();
         const auto expectedSnapshot = reader();
-        ImageSnapshot publishedSnapshot;
+        TrustedImageSnapshot publishedSnapshot;
         isWriterValid = writer(
             GetStateCopy(expectedSnapshot),
             expectedSnapshot,
             publishedSnapshot);
-        ImageSnapshot stalePublished = publishedSnapshot;
+        TrustedImageSnapshot stalePublished = publishedSnapshot;
         const bool isStaleRejected = !writer(
             GetStateCopy(expectedSnapshot),
             expectedSnapshot,
@@ -196,7 +248,7 @@ bool GetCoreWriterContract()
             && reader() == publishedSnapshot;
     }
 
-    ImageSnapshot expiredPublished = retainedSnapshot;
+    TrustedImageSnapshot expiredPublished = retainedSnapshot;
     const bool isExpiredRejected = !writer(
         GetStateCopy(retainedSnapshot),
         retainedSnapshot,
@@ -349,12 +401,29 @@ bool SendReload(
         });
 }
 
+bool SendTimer(vtkRenderWindowInteractor* interactor)
+{
+    if (!interactor) return false;
+    int timerId = interactor->GetTimerEventId();
+    if (timerId == 0) {
+        for (int candidate = 1; candidate <= 64; ++candidate) {
+            if (interactor->GetTimerDuration(candidate) != 0) {
+                timerId = candidate;
+                break;
+            }
+        }
+    }
+    if (timerId == 0) return false;
+    interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
+    return true;
+}
+
 void SendTicks(
     const HostRenderViewEndpoint& endpoint,
     const int tickCount)
 {
     for (int tick = 0; tick < tickCount; ++tick) {
-        endpoint.interactor->InvokeEvent(vtkCommand::TimerEvent);
+        (void)SendTimer(endpoint.interactor);
         endpoint.renderWindow->Render();
     }
 }
@@ -380,7 +449,7 @@ void SendHostTick(
     const HostRenderViewEndpoint& timer)
 {
     primary.renderWindow->Render();
-    timer.interactor->InvokeEvent(vtkCommand::TimerEvent);
+    (void)SendTimer(timer.interactor);
 }
 
 bool SendWidgetInput(
@@ -461,28 +530,13 @@ int GetCropFailCount()
                 ++unattachedCallbackCount;
             });
 
-    HostRenderViewSet emptyViews;
-    InputPortProbe inputPort;
     HostFeatureContext standaloneContext;
-    standaloneContext.renderViews = &emptyViews;
-    standaloneContext.inputPort = &inputPort;
-    standaloneContext.getImageSnapshot = [] {
-        return ImageSnapshot{};
-    };
-    standaloneContext.setImageState = [](
-        ImageState,
-        const ImageSnapshot&,
-        ImageSnapshot&) {
-        return false;
-    };
-    standaloneContext.setActiveViews = [](
-        const std::vector<std::shared_ptr<InteractiveService>>&) {
-        return true;
-    };
-    standaloneContext.sendOwnerComplete =
-        [](std::function<void()>) {
-            return true;
-        };
+    standaloneContext.views =
+        std::make_shared<ViewPortProbe>();
+    standaloneContext.data =
+        std::make_shared<DataPortProbe>();
+    standaloneContext.host =
+        std::make_shared<HostControlProbe>();
     CropHostFeature standaloneFeature(GetCropConfig());
     const bool isStandaloneRejected =
         !standaloneFeature.AttachHost(standaloneContext);
@@ -491,6 +545,47 @@ int GetCropFailCount()
             && unattachedCallbackCount == 0
             && isStandaloneRejected,
         "Crop rejects unattached requests and non-shared attachment") ? 0 : 1;
+
+    std::shared_ptr<FeatureViewService> retiredService;
+    bool isLeaseFixtureReady = false;
+    bool isPortsNarrow = false;
+    bool isWrongThreadRejected = false;
+    {
+        VtkAppHostSession leaseSession(GetCropSessionConfig());
+        auto leaseProbe = std::make_shared<ContextProbeFeature>();
+        const bool isLeaseBuilt = leaseSession.BuildSession();
+        const bool isLeaseAttached =
+            leaseSession.AttachFeature(leaseProbe);
+        retiredService = leaseProbe->GetViewService(
+            "crop-primary");
+        const auto retiredOverlay =
+            leaseProbe->GetViewOverlay("crop-primary");
+        isPortsNarrow = retiredService
+            && retiredOverlay
+            && static_cast<const void*>(retiredService.get())
+                != static_cast<const void*>(retiredOverlay.get());
+        const bool isPortReady = isLeaseBuilt
+            && isLeaseAttached
+            && retiredService
+            && retiredService->SetRenderNeeded();
+        std::thread wrongPortThread([&] {
+            isWrongThreadRejected = retiredService
+                && !retiredService->SetRenderNeeded();
+        });
+        wrongPortThread.join();
+        const bool isLeaseDetached = isLeaseAttached
+            && leaseSession.DetachFeature(*leaseProbe);
+        isLeaseFixtureReady = isPortReady
+            && isLeaseDetached;
+    }
+    const bool isRetiredPortRejected = retiredService
+        && !retiredService->SetRenderNeeded();
+    failureCount += GetCaseResult(
+        isLeaseFixtureReady
+            && isPortsNarrow
+            && isWrongThreadRejected
+            && isRetiredPortRejected,
+        "Feature ports hide App identity and reject wrong-thread or retired leases") ? 0 : 1;
 
     VtkAppHostSession session(GetCropSessionConfig());
     auto feature = std::make_shared<CropHostFeature>(
@@ -552,16 +647,16 @@ int GetCropFailCount()
         "Crop fixture publishes an image through Session data API") ? 0 : 1;
 
     const auto expectedSnapshot =
-        contextProbe->m_getImageSnapshot();
-    ImageSnapshot publishedSnapshot;
+        contextProbe->m_data->GetImageSnapshot();
+    TrustedImageSnapshot publishedSnapshot;
     const bool isPublished =
-        contextProbe->m_setImageState(
+        contextProbe->m_data->SetImageState(
             GetStateCopy(expectedSnapshot),
             expectedSnapshot,
             publishedSnapshot);
-    ImageSnapshot stalePublished = publishedSnapshot;
+    TrustedImageSnapshot stalePublished = publishedSnapshot;
     const bool isStaleRejected =
-        !contextProbe->m_setImageState(
+        !contextProbe->m_data->SetImageState(
             GetStateCopy(expectedSnapshot),
             expectedSnapshot,
             stalePublished);
@@ -572,7 +667,7 @@ int GetCropFailCount()
             && publishedSnapshot
             && publishedSnapshot->version
                 == expectedSnapshot->version + 1
-            && contextProbe->m_getImageSnapshot()
+            && contextProbe->m_data->GetImageSnapshot()
                 == publishedSnapshot,
         "Feature context writer enforces snapshot identity and version CAS") ? 0 : 1;
     failureCount += GetCaseResult(
@@ -672,9 +767,15 @@ int GetCropFailCount()
     SendHostTick(*endpoint, *timerEndpoint);
     const auto splitService =
         contextProbe->GetViewService("crop-timer");
-    auto* splitVolume = splitService
-        ? vtkVolume::SafeDownCast(
-            splitService->GetMainProp())
+    auto* splitVolumes = timerEndpoint
+        && timerEndpoint->renderer
+        ? timerEndpoint->renderer->GetVolumes()
+        : nullptr;
+    if (splitVolumes) {
+        splitVolumes->InitTraversal();
+    }
+    auto* splitVolume = splitVolumes
+        ? splitVolumes->GetNextVolume()
         : nullptr;
     auto* splitMapper = splitVolume
         ? vtkGPUVolumeRayCastMapper::SafeDownCast(
@@ -732,10 +833,14 @@ int GetCropFailCount()
         && splitMapper->GetUseJittering() != 0;
     failureCount += GetCaseResult(
         isSplitStarted
-            && contextProbe->GetFeatureActive(
-                "crop-primary")
-            && contextProbe->GetFeatureActive(
-                "crop-timer")
+            && session.GetRenderViewState({
+                "crop-primary", false,
+                HostRenderViewRole::Auxiliary }).value_or(
+                    HostRenderViewState{}).isFeatureActive
+            && session.GetRenderViewState({
+                "crop-timer", false,
+                HostRenderViewRole::Auxiliary }).value_or(
+                    HostRenderViewState{}).isFeatureActive
             && isSplitDragSet
             && isSplitLocked
             && isSplitDragClear
@@ -775,10 +880,14 @@ int GetCropFailCount()
     endpoint->renderWindow->Render();
     failureCount += GetCaseResult(
         isStarted
-            && contextProbe->GetFeatureActive(
-                "crop-primary")
-            && !contextProbe->GetFeatureActive(
-                "crop-timer")
+            && session.GetRenderViewState({
+                "crop-primary", false,
+                HostRenderViewRole::Auxiliary }).value_or(
+                    HostRenderViewState{}).isFeatureActive
+            && !session.GetRenderViewState({
+                "crop-timer", false,
+                HostRenderViewRole::Auxiliary }).value_or(
+                    HostRenderViewState{}).isFeatureActive
             && startedState.isActive
             && !startedState.isPublishing
             && isDefaultOnlyStarted
@@ -863,7 +972,7 @@ int GetCropFailCount()
         "Exit hides Crop widgets without locking committed history navigation") ? 0 : 1;
 
     const auto cropExpected =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     int staleCompleteCount = 0;
     CropBuildResult staleResult;
     const bool isStaleBuilt =
@@ -901,7 +1010,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto reloadSnapshot =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     for (int poll = 0;
         staleCompleteCount == 0
             && poll < 500;
@@ -912,7 +1021,7 @@ int GetCropFailCount()
     }
     const auto staleState = feature->GetState();
     const auto currentAfterReject =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     failureCount += GetCaseResult(
         cropExpected
             && isStaleBuilt
@@ -967,7 +1076,7 @@ int GetCropFailCount()
                 isStaleGapSucceeded = isSuccess;
             });
     const auto publishExpected =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     int publishCompleteCount = 0;
     CropBuildResult publishResult;
     const bool isPublishBuilt =
@@ -984,7 +1093,7 @@ int GetCropFailCount()
             && isPublishBuilt,
         "Crop/Gap conflict requests are admitted") ? 0 : 1;
     for (int poll = 0;
-        contextProbe->m_getImageSnapshot()
+        contextProbe->m_data->GetImageSnapshot()
                 == publishExpected
             && poll < 500;
         ++poll) {
@@ -994,7 +1103,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto cropSnapshot =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     for (int poll = 0;
         gapFeature->GetState().analysisState
                 != GapAnalysisState::Idle
@@ -1110,7 +1219,7 @@ int GetCropFailCount()
             *timerEndpoint,
             imageBounds);
     const auto secondExpected =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     int secondCompleteCount = 0;
     CropBuildResult secondResult;
     const bool isSecondBuilt =
@@ -1132,7 +1241,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto secondSnapshot =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     bool isFinalReloadComplete = false;
     bool isFinalReloadSucceeded = false;
     const bool isFinalReloadSent = SendReload(
@@ -1149,7 +1258,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto finalSnapshot =
-        contextProbe->m_getImageSnapshot();
+        contextProbe->m_data->GetImageSnapshot();
     failureCount += GetCaseResult(
         isRestarted
             && isRestartModeSet
@@ -1250,7 +1359,7 @@ int GetCropFailCount()
             && isProbeDetached
             && isDetachedRequestRejected
             && detachedSendCount == 0
-            && feature.use_count() == useCount
+            && feature.use_count() + 1 == useCount
             && !detachedState.isActive
             && !detachedState.isPublishing
             && detachedState.history.operationCount == 0

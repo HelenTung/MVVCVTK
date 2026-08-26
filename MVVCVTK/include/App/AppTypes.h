@@ -155,16 +155,10 @@ struct WindowLevelParams {
     double windowCenter = 40.0;  // 标量值域中的窗位中心；默认 40.0
 };
 
-  // --- 渲染相机快照：算法内部临时状态，不写入 SharedState ---
-struct CameraStateSnapshot {
-    bool isValid = false; // false 表示尚未从相机捕获，其余默认字段不得用于恢复
-    std::array<double, 3> position = { 0.0, 0.0, 1.0 }; // 相机在 VTK world 坐标中的 [x, y, z]
-    std::array<double, 3> focalPoint = { 0.0, 0.0, 0.0 }; // 焦点的 VTK world 坐标 [x, y, z]
-    std::array<double, 3> viewUp = { 0.0, 1.0, 0.0 }; // world 坐标中的无量纲上方向 [x, y, z]
-    std::array<double, 2> clippingRange = { 0.1, 1000.0 }; // 相机距离 [near, far]，单位沿用 world
-    double parallelScale = 1.0; // 平行投影视口高度的一半，单位沿用 world；默认 1.0
-    double viewAngle = 30.0; // 透视投影纵向视角，单位度；默认 30.0
-    bool isParallelProjection = false; // true 使用 parallelScale，false 使用 viewAngle
+// Auto 随已提交数据范围重算；任何显式配置或交互写入都会切换为 Manual。
+enum class WindowLevelMode {
+    Auto,
+    Manual
 };
 
 // --- 更新类型位掩码（可组合）---

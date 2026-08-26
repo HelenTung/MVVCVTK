@@ -382,6 +382,7 @@ graphify-out/
 
 # Ignore all Markdown documents repository-wide.
 *.[mM][dD]
+!README.md
 *.patch
 *.json
 
@@ -397,3 +398,6 @@ test/QtHost/QtHostSmoke.pro
 # pdf
 pdf/
 *.pdf
+
+# Downloaded versioned dependency SDK payload
+/sdk/

@@ -1,10 +1,9 @@
 #include "HostCommandRouterTests.h"
 
 #include "Host/HostCommandRouter.h"
-#include "Host/HostCoreServices.h"
-#include "Host/HostRenderViewSet.h"
+#include "Host/HostRoutes.h"
 #include "Host/Types/HostRequestTypes.h"
-#include "StdRenderContext.h"
+#include "ViewContext.h"
 
 #include <array>
 #include <limits>
@@ -31,6 +30,7 @@ static_assert(std::is_base_of_v<HostRequest, HostReloadRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostDataExportRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostSliceExportRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostViewSetRequest>);
+static_assert(std::is_base_of_v<HostRequest, HostSessionSetRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostViewResetRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostToolSetRequest>);
 static_assert(std::is_base_of_v<HostRequest, HostToolSwitchRequest>);
@@ -39,6 +39,7 @@ static_assert(std::is_final_v<HostReloadRequest>);
 static_assert(std::is_final_v<HostDataExportRequest>);
 static_assert(std::is_final_v<HostSliceExportRequest>);
 static_assert(std::is_final_v<HostViewSetRequest>);
+static_assert(std::is_final_v<HostSessionSetRequest>);
 static_assert(std::is_final_v<HostViewResetRequest>);
 static_assert(std::is_final_v<HostToolSetRequest>);
 static_assert(std::is_final_v<HostToolSwitchRequest>);
@@ -58,11 +59,12 @@ class Fixture final {
 public:
     Fixture()
     {
-        context = std::make_shared<StdRenderContext>();
-        sliceContext = std::make_shared<StdRenderContext>();
-        views.CreateView("primary", HostRenderViewRole::Primary3D, context);
-        views.CreateView("slice", HostRenderViewRole::TopDownSlice, sliceContext);
-        router = std::make_unique<HostCommandRouter>(core, views);
+        context = std::make_shared<ViewContextStub>();
+        sliceContext = std::make_shared<ViewContextStub>();
+        views->CreateView("primary", HostRenderViewRole::Primary3D, context);
+        views->CreateView("slice", HostRenderViewRole::TopDownSlice, sliceContext);
+        router = std::make_unique<HostCommandRouter>(
+            views->GetViewDirectory());
     }
 
     bool Send(
@@ -74,23 +76,20 @@ public:
             std::move(onComplete));
     }
 
-    std::shared_ptr<VizService> GetService() const
+    std::shared_ptr<AppPortState> GetService() const
     {
-        const auto* view = views.GetPrimaryView();
-        return view ? view->service : nullptr;
+        return views->GetState("primary");
     }
 
-    std::shared_ptr<VizService> GetSliceService() const
+    std::shared_ptr<AppPortState> GetSliceService() const
     {
-        const auto* view = views.GetViewBySelector(
-            { "slice", false, HostRenderViewRole::TopDownSlice });
-        return view ? view->service : nullptr;
+        return views->GetState("slice");
     }
 
-    HostCoreServices core;
-    HostRenderViewSet views;
-    std::shared_ptr<StdRenderContext> context;
-    std::shared_ptr<StdRenderContext> sliceContext;
+    std::shared_ptr<HostRouteStub> views =
+        std::make_shared<HostRouteStub>();
+    std::shared_ptr<ViewContextStub> context;
+    std::shared_ptr<ViewContextStub> sliceContext;
     std::unique_ptr<HostCommandRouter> router;
 };
 
@@ -112,6 +111,11 @@ bool SendData(
 }
 
 bool SendView(Fixture& fixture, HostViewSetRequest request)
+{
+    return fixture.Send(std::move(request));
+}
+
+bool SendSession(Fixture& fixture, HostSessionSetRequest request)
 {
     return fixture.Send(std::move(request));
 }
@@ -149,9 +153,7 @@ HostViewSetRequest BuildViewRequest()
     };
     request.iso = 0.5;
     request.background = HostBackgroundColor{};
-    request.spacing = std::array<double, 3>{ 1.0, 2.0, 3.0 };
     request.windowLevel = HostWindowLevelParams{};
-    request.cursor = HostCursorParams{ { 4.0, 5.0, 6.0 }, 2 };
     request.visibility = HostVisibilityParams{
         true, false, true
     };
@@ -172,8 +174,14 @@ void StartViewCases(int& failureCount)
     };
 
     auto request = BuildViewRequest();
-    request.spacing = std::array<double, 3>{ 1.0, 0.0, 3.0 };
-    getIsRejected(std::move(request), "非法 spacing 必须整笔拒绝。");
+
+    Fixture invalidSession;
+    HostSessionSetRequest sessionRequest;
+    sessionRequest.spacing =
+        std::array<double, 3>{ 1.0, 0.0, 3.0 };
+    SetExpect(!SendSession(invalidSession, std::move(sessionRequest))
+            && invalidSession.GetService()->GetSpacingSetCount() == 0,
+        "非法 Session spacing 必须整笔拒绝。", failureCount);
 
     request = BuildViewRequest();
     request.opacity = std::numeric_limits<double>::quiet_NaN();
@@ -208,14 +216,18 @@ void StartViewCases(int& failureCount)
     request.windowLevel->windowWidth = 0.0;
     getIsRejected(std::move(request), "非法 window/level 必须整笔拒绝。");
 
-    request = BuildViewRequest();
-    request.cursor->world[1] =
+    sessionRequest = HostSessionSetRequest{};
+    sessionRequest.cursor = HostCursorParams{};
+    sessionRequest.cursor->world[1] =
         std::numeric_limits<double>::quiet_NaN();
-    getIsRejected(std::move(request), "非有限 cursor 必须整笔拒绝。");
+    SetExpect(!SendSession(invalidSession, std::move(sessionRequest)),
+        "非有限 Session cursor 必须整笔拒绝。", failureCount);
 
-    request = BuildViewRequest();
-    request.cursor->axis = 3;
-    getIsRejected(std::move(request), "越界 cursor axis 必须整笔拒绝。");
+    sessionRequest = HostSessionSetRequest{};
+    sessionRequest.cursor = HostCursorParams{};
+    sessionRequest.cursor->axis = 3;
+    SetExpect(!SendSession(invalidSession, std::move(sessionRequest)),
+        "越界 Session cursor axis 必须整笔拒绝。", failureCount);
 
     request = BuildViewRequest();
     request.materialPreset = HostMaterialPreset::Glossy;
@@ -271,7 +283,7 @@ void StartViewCases(int& failureCount)
     Fixture fixture;
     SetExpect(SendView(fixture, BuildViewRequest()),
         "全量合法 View 请求应被接收。", failureCount);
-    SetExpect(fixture.GetService()->GetViewSetCount() == 11
+    SetExpect(fixture.GetService()->GetViewSetCount() == 9
             && fixture.context->GetCameraStyleSetCount() == 1
             && fixture.context->GetAxesSetCount() == 1,
         "合法 View 请求应按完整字段一次提交。", failureCount);
@@ -279,6 +291,14 @@ void StartViewCases(int& failureCount)
             && fixture.GetService()->GetOpacitySetCount() == 0,
         "material 与独立 opacity 必须合并成一次 Material 提交。",
         failureCount);
+    HostSessionSetRequest linkedRequest;
+    linkedRequest.spacing =
+        std::array<double, 3>{ 1.0, 2.0, 3.0 };
+    linkedRequest.cursor = HostCursorParams{
+        { 4.0, 5.0, 6.0 }, 2
+    };
+    SetExpect(SendSession(fixture, std::move(linkedRequest)),
+        "合法 Session 联动请求应被接收。", failureCount);
     SetExpect(fixture.GetService()->GetCursorSetCount() == 1
             && fixture.GetService()->GetCursorWorld()
                 == std::array<double, 3>{ 4.0, 5.0, 6.0 }
@@ -288,7 +308,7 @@ void StartViewCases(int& failureCount)
                 == (VisFlags::Planes3D | VisFlags::Ruler)
             && fixture.context->GetAxesVisible()
             && fixture.GetService()->GetDirtySetCount() == 1,
-        "cursor、元素显隐与方向轴必须映射到既有 service/context。",
+        "Session cursor 与 View 显隐/方向轴必须进入各自端口。",
         failureCount);
 
     const int viewSetCount =
@@ -317,7 +337,10 @@ void StartViewCases(int& failureCount)
 
     Fixture spacingFixture;
     spacingFixture.GetService()->SetSpacingAccepted(false);
-    SetExpect(!SendView(spacingFixture, BuildViewRequest()),
+    HostSessionSetRequest spacingRequest;
+    spacingRequest.spacing =
+        std::array<double, 3>{ 1.0, 2.0, 3.0 };
+    SetExpect(!SendSession(spacingFixture, std::move(spacingRequest)),
         "spacing 运行时拒绝必须向 Router 返回失败。", failureCount);
     SetExpect(spacingFixture.GetService()->GetSpacingSetCount() == 1
             && spacingFixture.GetService()->GetViewSetCount() == 0
@@ -391,7 +414,8 @@ void StartViewCases(int& failureCount)
     HostViewSetRequest partialRequest;
     partialRequest.targetView.viewId = "primary";
     partialRequest.material = HostMaterialParams{};
-    partialRequest.volumeQuality = HostVolumeQualityParams{};
+    partialRequest.volumeQuality = HostVolumeQualityParams{
+        HostVolumeQuality::Custom, 384, 0.25, true };
     partialRequest.gradientOpacity =
         std::vector<HostGradientOpacityNode>{};
     SetExpect(!SendView(partialFixture, std::move(partialRequest)),
@@ -400,9 +424,79 @@ void StartViewCases(int& failureCount)
     SetExpect(partialFixture.GetService()->GetQualitySetCount() == 1
             && partialFixture.GetService()->GetGradientSetCount() == 1
             && partialFixture.GetService()->GetViewSetCount() == 1
-            && partialFixture.GetService()->GetMaterialSetCount() == 0,
-        "失败传播不得被误述为可失败 setter 之间的强原子回滚。",
+            && partialFixture.GetService()->GetMaterialSetCount() == 0
+            && partialFixture.GetService()->GetRevision() == 0
+            && partialFixture.GetService()->GetVolumeQuality().maxDimension
+                != 384,
+        "App 端口内部失败必须恢复完整值状态；计数只记录尝试。",
         failureCount);
+
+    Fixture cameraFail;
+    cameraFail.context->SetCameraFailCount(1);
+    HostViewSetRequest cameraRequest;
+    cameraRequest.targetView.viewId = "primary";
+    cameraRequest.mode = HostRenderMode::IsoSurface;
+    cameraRequest.iso = 0.35;
+    SetExpect(!SendView(cameraFail, std::move(cameraRequest))
+            && cameraFail.GetService()->GetVizMode() == VizMode::Volume
+            && cameraFail.GetService()->GetIsoThreshold() == 0.0
+            && cameraFail.GetService()->GetRevision() == 2
+            && cameraFail.context->GetVizMode() == VizMode::Volume
+            && cameraFail.context->GetCameraStyleSetCount() == 2
+            && cameraFail.GetService()->GetIsAvailable(),
+        "camera 提交失败必须按 revision 恢复 App 与 context。",
+        failureCount);
+
+    Fixture axesFail;
+    axesFail.context->SetAxesFailCount(1);
+    HostViewSetRequest axesRequest;
+    axesRequest.targetView.viewId = "primary";
+    axesRequest.iso = 0.45;
+    axesRequest.isAxesVisible = true;
+    SetExpect(!SendView(axesFail, std::move(axesRequest))
+            && axesFail.GetService()->GetIsoThreshold() == 0.0
+            && axesFail.GetService()->GetRevision() == 2
+            && !axesFail.context->GetAxesVisible()
+            && axesFail.context->GetAxesSetCount() == 2
+            && axesFail.GetService()->GetDirtySetCount() == 0
+            && axesFail.GetService()->GetIsAvailable(),
+        "axes 提交失败必须恢复 App/axes 且不得标脏。",
+        failureCount);
+
+    Fixture dirtyFail;
+    dirtyFail.GetService()->SetDirtyAccepted(false);
+    HostViewSetRequest dirtyRequest;
+    dirtyRequest.targetView.viewId = "primary";
+    dirtyRequest.iso = 0.55;
+    dirtyRequest.isAxesVisible = true;
+    SetExpect(!SendView(dirtyFail, std::move(dirtyRequest))
+            && dirtyFail.GetService()->GetIsoThreshold() == 0.0
+            && dirtyFail.GetService()->GetRevision() == 2
+            && !dirtyFail.context->GetAxesVisible()
+            && dirtyFail.context->GetAxesSetCount() == 2
+            && dirtyFail.GetService()->GetDirtySetCount() == 0,
+        "dirty 拒绝必须逆序恢复 axes 与 App。",
+        failureCount);
+
+    Fixture restoreFail;
+    restoreFail.context->SetCameraFailCount(1);
+    restoreFail.GetService()->SetRestoreAccepted(false);
+    HostViewSetRequest restoreRequest;
+    restoreRequest.targetView.viewId = "primary";
+    restoreRequest.mode = HostRenderMode::IsoSurface;
+    restoreRequest.iso = 0.65;
+    SetExpect(!SendView(restoreFail, std::move(restoreRequest))
+            && !restoreFail.GetService()->GetIsAvailable(),
+        "补偿失败必须停用目标 view。", failureCount);
+    const auto restoreRevision =
+        restoreFail.GetService()->GetRevision();
+    HostViewSetRequest stoppedRequest;
+    stoppedRequest.targetView.viewId = "primary";
+    stoppedRequest.iso = 0.75;
+    SetExpect(!SendView(restoreFail, std::move(stoppedRequest))
+            && restoreFail.GetService()->GetRevision()
+                == restoreRevision,
+        "已停用 view 不得继续接收跨层请求。", failureCount);
 
     Fixture extendedFixture;
     HostViewSetRequest extended;
@@ -444,14 +538,32 @@ void StartViewCases(int& failureCount)
         "ResetCamera 目标未命中时不得复位或标脏。",
         failureCount);
 
+    Fixture resetDirtyFail;
+    resetDirtyFail.GetService()->SetDirtyAccepted(false);
+    HostViewResetRequest resetFailRequest;
+    resetFailRequest.targetView.viewId = "primary";
+    SetExpect(!resetDirtyFail.Send(std::move(resetFailRequest))
+            && resetDirtyFail.context->GetCameraResetCount() == 1
+            && resetDirtyFail.context->GetCameraRestoreCount() == 1
+            && resetDirtyFail.GetService()->GetDirtySetCount() == 0
+            && resetDirtyFail.GetService()->GetIsAvailable(),
+        "ResetCamera 的 dirty 失败必须恢复完整相机快照。",
+        failureCount);
+
     HostViewSetRequest callbackView;
     callbackView.targetView.viewId = "primary";
+    callbackView.opacity = 0.65;
     int callbackCount = 0;
-    SetExpect(!fixture.Send(
+    bool isCallbackSuccess = false;
+    SetExpect(fixture.Send(
             std::move(callbackView),
-            [&callbackCount](bool) { ++callbackCount; })
-            && callbackCount == 0,
-        "View 请求携带 callback 必须拒绝且不得调用。",
+            [&callbackCount, &isCallbackSuccess](const bool isSuccess) {
+                ++callbackCount;
+                isCallbackSuccess = isSuccess;
+            })
+            && callbackCount == 1
+            && isCallbackSuccess,
+        "同步 View 请求必须执行并同步回调一次。",
         failureCount);
 }
 
@@ -622,12 +734,64 @@ void StartToolCases(int& failureCount)
     HostToolSetRequest callbackTool;
     callbackTool.targetView.viewId = "primary";
     int callbackCount = 0;
+    bool isCallbackSuccess = false;
     SetExpect(
-        !fixture.Send(
+        fixture.Send(
             std::move(callbackTool),
-            [&callbackCount](bool) { ++callbackCount; })
-            && callbackCount == 0,
-        "Tool 请求携带 callback 必须拒绝且不得调用。",
+            [&callbackCount, &isCallbackSuccess](const bool isSuccess) {
+                ++callbackCount;
+                isCallbackSuccess = isSuccess;
+            })
+            && callbackCount == 1
+            && isCallbackSuccess,
+        "同步 Tool 请求必须执行并同步回调一次。",
+        failureCount);
+}
+
+void StartContextCases(int& failureCount)
+{
+    Fixture fixture;
+    const auto service = fixture.GetService();
+    std::weak_ptr<ViewContextStub> expiredContext = fixture.context;
+    fixture.context.reset();
+    SetExpect(
+        fixture.views->ClearViewContext("primary")
+            && expiredContext.expired(),
+        "Context 失效夹具必须只保留 route 中的过期 weak_ptr。",
+        failureCount);
+
+    const auto oldRevision = service->GetRevision();
+    HostViewSetRequest viewRequest;
+    viewRequest.targetView.viewId = "primary";
+    viewRequest.mode = HostRenderMode::IsoSurface;
+    viewRequest.isAxesVisible = true;
+    SetExpect(
+        !SendView(fixture, std::move(viewRequest))
+            && service->GetViewSetCount() == 0
+            && service->GetDirtySetCount() == 0
+            && service->GetRevision() == oldRevision,
+        "过期 Context 必须在 mode/axes 事务写入 App 前拒绝。",
+        failureCount);
+
+    HostViewResetRequest resetRequest;
+    resetRequest.targetView.viewId = "primary";
+    SetExpect(
+        !fixture.Send(std::move(resetRequest))
+            && service->GetDirtySetCount() == 0,
+        "过期 Context 的 ResetCamera 不得标记渲染。",
+        failureCount);
+
+    HostToolSetRequest toolRequest;
+    toolRequest.targetView.viewId = "primary";
+    toolRequest.toolMode = HostToolMode::ModelTransform;
+    SetExpect(!fixture.Send(std::move(toolRequest)),
+        "过期 Context 的 Tool Set 必须安全拒绝。",
+        failureCount);
+
+    HostToolSwitchRequest switchRequest;
+    switchRequest.targetView.viewId = "primary";
+    SetExpect(!fixture.Send(std::move(switchRequest)),
+        "过期 Context 的 Tool Switch 必须安全拒绝。",
         failureCount);
 }
 
@@ -639,5 +803,6 @@ int HostRouterSuite::GetFailCount() const
     StartDataCases(failureCount);
     StartViewCases(failureCount);
     StartToolCases(failureCount);
+    StartContextCases(failureCount);
     return failureCount;
 }

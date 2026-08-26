@@ -18,6 +18,12 @@
     <Filter Include="include\Render\Strategies">
       <UniqueIdentifier>{96c734c1-8206-4b3a-ae0b-82bda760adb3}</UniqueIdentifier>
     </Filter>
+    <Filter Include="include\Render\Contracts">
+      <UniqueIdentifier>{90635c3d-b41f-4e68-b280-1d7fb62ab3d1}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="include\Render\Support">
+      <UniqueIdentifier>{9fa29db3-85d2-4a9c-b0c5-11f36df99dd4}</UniqueIdentifier>
+    </Filter>
     <Filter Include="features">
       <UniqueIdentifier>{8a63dd27-4f90-49bc-97df-bf8adfeea6a1}</UniqueIdentifier>
     </Filter>
@@ -174,9 +180,6 @@
     <ClInclude Include="features\OrthogonalCrop\include\Render\CropShaderController.h">
       <Filter>features\OrthogonalCrop\include\Render</Filter>
     </ClInclude>
-    <ClInclude Include="include\Render\RenderEffect.h">
-      <Filter>include\Render</Filter>
-    </ClInclude>
     <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h">
       <Filter>include\Render\Strategies</Filter>
     </ClInclude>
@@ -231,12 +234,6 @@
     <ClInclude Include="include\Interaction\InputCallbackHandler.h">
       <Filter>include\Interaction</Filter>
     </ClInclude>
-    <ClInclude Include="include\Render\StdRenderContext.h">
-      <Filter>include\Render</Filter>
-    </ClInclude>
-    <ClInclude Include="include\App\Services\AppService.h">
-      <Filter>include\App\Services</Filter>
-    </ClInclude>
     <ClInclude Include="include\App\Tasks\AppDataExportTaskService.h">
       <Filter>include\App\Tasks</Filter>
     </ClInclude>
@@ -256,9 +253,6 @@
       <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\App\AppState.h">
-      <Filter>include\App</Filter>
-    </ClInclude>
-    <ClInclude Include="include\App\AppInterfaces.h">
       <Filter>include\App</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\VtkAppHostSession.h">
@@ -288,14 +282,14 @@
     <ClInclude Include="include\Host\HostFeature.h">
       <Filter>include\Host</Filter>
     </ClInclude>
-    <ClInclude Include="include\Host\HostRenderViewSet.h">
+    <ClInclude Include="include\Host\HostViewRuntimeRegistry.h">
+      <Filter>include\Host</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\LoadCommitCoordinator.h">
       <Filter>include\Host</Filter>
     </ClInclude>
     <ClInclude Include="include\Host\Types\HostSessionTypes.h">
       <Filter>include\Host\Types</Filter>
-    </ClInclude>
-    <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h">
-      <Filter>include\Render\Strategies</Filter>
     </ClInclude>
     <ClInclude Include="features\GapAnalysis\include\Render\Strategies\GapOverlayStrategies.h">
       <Filter>features\GapAnalysis\include\Render\Strategies</Filter>
@@ -326,6 +320,62 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="include\App\Services\AppPorts.h">
+      <Filter>include\App\Services</Filter>
+    </ClInclude>
+    <ClInclude Include="include\App\Services\AppServiceFactory.h">
+      <Filter>include\App\Services</Filter>
+    </ClInclude>
+    <ClInclude Include="include\App\Services\DataCommitTypes.h">
+      <Filter>include\App\Services</Filter>
+    </ClInclude>
+    <ClInclude Include="include\App\Services\FeatureViewService.h">
+      <Filter>include\App\Services</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Data\DataService.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Data\ImageReadTypes.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Data\TrustedImageState.h">
+      <Filter>include\Data</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Platform\TaskStopToken.h">
+      <Filter>include\Platform</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Host\Types\HostFeatureViewTypes.h">
+      <Filter>include\Host\Types</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Interaction\AbstractViewContext.h">
+      <Filter>include\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Interaction\ViewContextFactory.h">
+      <Filter>include\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Interaction\InteractionPorts.h">
+      <Filter>include\Interaction</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Contracts\OverlayService.h">
+      <Filter>include\Render\Contracts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Contracts\RenderBindPort.h">
+      <Filter>include\Render\Contracts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Contracts\RenderEffect.h">
+      <Filter>include\Render\Contracts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Contracts\RenderStrategyFactory.h">
+      <Filter>include\Render\Contracts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Contracts\VisualStrategy.h">
+      <Filter>include\Render\Contracts</Filter>
+    </ClInclude>
+    <ClInclude Include="include\Render\Support\BaseVisualStrategy.h">
+      <Filter>include\Render\Support</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="src\App\AppState.cpp">
       <Filter>src\App</Filter>
     </ClCompile>
@@ -341,7 +391,10 @@
     <ClCompile Include="src\Host\HostHotkeyRouter.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
-    <ClCompile Include="src\Host\HostRenderViewSet.cpp">
+    <ClCompile Include="src\Host\HostViewRuntimeRegistry.cpp">
+      <Filter>src\Host</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Host\LoadCommitCoordinator.cpp">
       <Filter>src\Host</Filter>
     </ClCompile>
     <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp">
@@ -383,10 +436,7 @@
     <ClCompile Include="src\Interaction\InputCallbackHandler.cpp">
       <Filter>src\Interaction</Filter>
     </ClCompile>
-    <ClCompile Include="src\Render\StdRenderContext.cpp">
-      <Filter>src\Render</Filter>
-    </ClCompile>
-    <ClCompile Include="src\App\Services\AppService.cpp">
+    <ClCompile Include="src\App\Services\AppServiceFactory.cpp">
       <Filter>src\App\Services</Filter>
     </ClCompile>
     <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp">
@@ -427,6 +477,17 @@
     </ClCompile>
     <ClCompile Include="features\OrthogonalCrop\src\Interaction\CropBoxWidget.cpp">
       <Filter>features\OrthogonalCrop\src\Interaction</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Interaction\AbstractViewContext.cpp">
+      <Filter>src\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Interaction\ViewContextFactory.cpp">
+      <Filter>src\Interaction</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Render\RenderStrategyFactory.cpp">
+      <Filter>src\Render</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

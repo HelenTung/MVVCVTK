@@ -1,17 +1,21 @@
 #pragma once
 
-#include "AppInterfaces.h"
+#include "Data/ImageReadTypes.h"
+#include "Data/TrustedImageState.h"
+#include "Host/Types/HostFeatureViewTypes.h"
 #include "Host/Types/HostValueTypes.h"
 #include "Interaction/InteractionTypes.h"
 
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-class HostRenderViewSet;
-class InteractiveService;
+class FeatureViewService;
+class OverlayService;
 
 struct HostInputBinding final {
     std::string featureId;
@@ -27,20 +31,64 @@ public:
     virtual bool DetachInput(std::string_view featureId) = 0;
 };
 
+class FeatureViewDirectory {
+public:
+    virtual ~FeatureViewDirectory() noexcept = default;
+
+    virtual std::vector<HostFeatureView> GetViews(
+        const HostViewTargets& targets) const = 0;
+    // 视图 DTO 只描述身份；可调用能力按稳定 id 单独发放。
+    virtual std::shared_ptr<FeatureViewService> GetFeaturePort(
+        const std::string& viewId) const = 0;
+    virtual std::shared_ptr<OverlayService> GetOverlayPort(
+        const std::string& viewId) const = 0;
+    virtual std::optional<HostInputView> GetInputView(
+        const HostViewTarget& target) const = 0;
+};
+
+class TrustedFeatureDataPort {
+public:
+    virtual ~TrustedFeatureDataPort() noexcept = default;
+
+    virtual TrustedImageSnapshot GetImageSnapshot() const = 0;
+    virtual bool SetImageState(
+        TrustedImageState imageState,
+        const TrustedImageSnapshot& expected,
+        TrustedImageSnapshot& published) = 0;
+};
+
+// 普通只读端口不暴露 VTK identity；可信 Feature 也通过同一值语义读取边界。
+class ImageReadPort {
+public:
+    virtual ~ImageReadPort() noexcept = default;
+
+    virtual std::optional<ImageReadState> GetImageReadState() const = 0;
+    virtual ImageReadResult GetImageReadResult(
+        const ImageReadRequest& request) const = 0;
+    virtual ImageReadChunkResult GetImageReadChunk(
+        const ImageReadRequest& request,
+        std::size_t voxelOffset) const = 0;
+};
+
+class FeatureHostControl : public HostInputPort {
+public:
+    ~FeatureHostControl() noexcept override = default;
+
+    // Feature 只提交稳定 view id；Host 验证归属并维护活动来源事务。
+    virtual bool SetActiveViews(
+        const std::vector<std::string>& viewIds) = 0;
+    // 状态文本由 Host 映射到窗口；Feature 不获得 context/window 具体对象。
+    virtual bool SetViewStatus(
+        const std::vector<std::string>& viewIds,
+        const std::string& status) = 0;
+    virtual bool SendOwnerComplete(std::function<void()> complete) = 0;
+};
+
 struct HostFeatureContext final {
-    const HostRenderViewSet* renderViews = nullptr;
-    std::function<ImageSnapshot()> getImageSnapshot;
-    std::function<bool(
-        ImageState,
-        const ImageSnapshot&,
-        ImageSnapshot&)> setImageState;
-    // Feature 只上报已经由自身业务解析出的精确参与服务；宿主验证这些服务属于当前
-    // view set，并负责维护活动来源，不向 Feature 暴露质量配置或渲染策略。
-    std::function<bool(
-        const std::vector<std::shared_ptr<InteractiveService>>&)>
-        setActiveViews;
-    HostInputPort* inputPort = nullptr;
-    std::function<bool(std::function<void()>)> sendOwnerComplete;
+    std::shared_ptr<FeatureViewDirectory> views;
+    std::shared_ptr<ImageReadPort> read;
+    std::shared_ptr<TrustedFeatureDataPort> data;
+    std::shared_ptr<FeatureHostControl> host;
 };
 
 class HostFeature {

@@ -1,5 +1,5 @@
 #pragma once
-#include "BaseVisualStrategy.h"
+#include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -27,7 +27,6 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override;
 private:
@@ -36,8 +35,6 @@ private:
     RenderEffectTarget GetRenderEffectTarget() const override;
     void SetEffectBinding(RenderEffectBinding* binding) override;
     bool SetMapperInput();
-    // modelMatrix 按 input model -> world 解释；相机只跟随变换后的 m_dataCenter 平移焦点。
-    void AlignCamera(const std::array<double, 16>& modelMatrix);
     // 等值面主 prop 与坐标轴 prop 均由策略强持有，并登记到基类 m_managedProps 统一挂载。
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;

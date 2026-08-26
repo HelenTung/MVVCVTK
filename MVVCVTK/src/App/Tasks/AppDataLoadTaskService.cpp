@@ -10,18 +10,20 @@ AppDataLoadTaskService::AppDataLoadTaskService(
 {
 }
 
-std::optional<std::packaged_task<bool()>>
+std::optional<std::packaged_task<bool(TaskStopToken)>>
 AppDataLoadTaskService::BuildLoadFileTask(
     std::string path,
     VolumeLayout layout)
 {
     if (!m_dataManager || path.empty()) return std::nullopt;
     auto dataManager = m_dataManager;
-    return std::packaged_task<bool()>(
-        [dataManager, path = std::move(path), layout = std::move(layout)]() mutable
+    return std::packaged_task<bool(TaskStopToken)>(
+        [dataManager, path = std::move(path), layout = std::move(layout)](
+            TaskStopToken stopToken) mutable
         {
             try {
-                return dataManager->SetDataLoaded(path, layout);
+                return dataManager->SetDataLoaded(
+                    path, layout, stopToken);
             }
             catch (const std::exception& error) {
                 std::cerr << "[LoadFileAsync] Worker failed: "
@@ -34,16 +36,18 @@ AppDataLoadTaskService::BuildLoadFileTask(
         });
 }
 
-std::optional<std::packaged_task<bool()>>
+std::optional<std::packaged_task<bool(TaskStopToken)>>
 AppDataLoadTaskService::BuildReloadTask(VolumeBuffer buffer)
 {
     if (!m_dataManager) return std::nullopt;
     auto dataManager = m_dataManager;
-    return std::packaged_task<bool()>(
-        [dataManager, buffer = std::move(buffer)]() mutable
+    return std::packaged_task<bool(TaskStopToken)>(
+        [dataManager, buffer = std::move(buffer)](
+            TaskStopToken stopToken) mutable
         {
             try {
-                return dataManager->SetFromBuffer(buffer);
+                return dataManager->SetFromBuffer(
+                    buffer, stopToken);
             }
             catch (const std::exception& error) {
                 std::cerr << "[ReloadFromBufferAsync] Worker failed: "

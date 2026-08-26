@@ -1,18 +1,27 @@
 #include "Viewer3DHandler.h"
-#include "AppInterfaces.h"
 #include <vtkActor.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
 #include <vtkMath.h>
+#include <vtkMatrix4x4.h>
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 
-Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
+Viewer3DHandler::Viewer3DHandler(
+    InteractionStatePort* statePort,
+    SliceInputPort* slicePort,
+    ModelInputPort* modelPort,
+    RenderUpdatePort* updatePort,
     vtkPropPicker* picker,
     vtkRenderer* renderer)
-    : m_service(service)
+    : m_statePort(statePort)
+    , m_slicePort(slicePort)
+    , m_modelPort(modelPort)
+    , m_updatePort(updatePort)
     , m_picker(picker)
     , m_renderer(renderer)
 {
@@ -23,34 +32,74 @@ Viewer3DHandler::Viewer3DHandler(InteractiveService* service,
 
 Viewer3DHandler::~Viewer3DHandler()
 {
-    if (m_service) {
-        (void)m_service->SetInteracting(m_source, false);
+    if (m_statePort) {
+        (void)m_statePort->SetInteracting(m_source, false);
     }
 }
 
 InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
 {
-    if (!m_service) {
+    const auto getResult = [](
+        const bool isSucceeded,
+        const InteractionFailureReason failureReason,
+        const bool isPropagationStopped = true) {
+        InteractionResult result{ true, isPropagationStopped };
+        result.isSucceeded = isSucceeded;
+        result.failureReason = isSucceeded
+            ? InteractionFailureReason::None : failureReason;
+        return result;
+    };
+
+    if (!m_statePort
+        || !m_slicePort
+        || !m_modelPort
+        || !m_updatePort) {
         return {};
     }
 
     // 模式切换不能吞掉一次已开始拖拽的释放，否则聚合 source 会永久保持 active。
     if (eve.eventKind == InteractionEventKind::PrimaryRelease
         && m_isDragging) {
-        (void)m_service->SetInteracting(m_source, false);
-        m_service->SetDirty();
+        const bool isInteractionSet =
+            m_statePort->SetInteracting(m_source, false);
+        const bool isRenderSet =
+            m_updatePort->SetRenderNeeded();
         m_isDragging = false;
         m_dragAxis = -1;
-        return { true, true };
+        return getResult(
+            isInteractionSet && isRenderSet,
+            isInteractionSet
+                ? InteractionFailureReason::RenderRejected
+                : InteractionFailureReason::CleanupRejected);
     }
 
     if (eve.toolMode == ToolMode::ModelTransform
         && eve.eventKind == InteractionEventKind::ViewInteraction) {
-        vtkProp3D* prop = m_service->GetMainProp();
+        vtkProp3D* prop = m_modelPort->GetMainProp();
         if (prop && prop->GetMatrix()) {
-            m_service->SetModelMatrix(prop->GetMatrix());
-            m_service->SetDirty();
-            return { true, false };
+            const auto oldModelToWorld =
+                m_modelPort->GetModelMatrix();
+            std::array<double, 16> modelToWorld{};
+            const double* matrixData = prop->GetMatrix()->GetData();
+            std::copy(
+                matrixData,
+                matrixData + modelToWorld.size(),
+                modelToWorld.begin());
+            if (!m_modelPort->SetModelMatrix(modelToWorld)) {
+                return getResult(
+                    false,
+                    InteractionFailureReason::StateRejected,
+                    false);
+            }
+            if (!m_updatePort->SetRenderNeeded()) {
+                (void)m_modelPort->SetModelMatrix(oldModelToWorld);
+                return getResult(
+                    false,
+                    InteractionFailureReason::RenderRejected,
+                    false);
+            }
+            return getResult(
+                true, InteractionFailureReason::None, false);
         }
         return {};
     }
@@ -74,15 +123,17 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
 
         if (m_picker->Pick(eve.x, eve.y, 0, m_renderer)) {
             vtkActor* actor = m_picker->GetActor();
-            const int axis = m_service->GetPlaneAxis(actor);
+            const int axis = m_slicePort->GetPlaneAxis(actor);
 
             if (axis != -1) {
-                m_isDragging = true;
-                m_dragAxis = axis;
                 m_lastMouseX = eve.x;   // 记录起始点，供 MouseMove 计算增量
                 m_lastMouseY = eve.y;
-                (void)m_service->SetInteracting(m_source, true);
-                return { true, true };  // 停止传播，阻止相机转动
+                const bool isStarted =
+                    m_statePort->SetInteracting(m_source, true);
+                m_isDragging = isStarted;
+                m_dragAxis = isStarted ? axis : -1;
+                return getResult(
+                    isStarted, InteractionFailureReason::StateRejected);
             }
         }
         // 点到主模型或空白处：不消费，让相机交互继续
@@ -93,11 +144,17 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     if (eve.eventKind == InteractionEventKind::PrimaryRelease)
     {
         if (m_isDragging) {
-            (void)m_service->SetInteracting(m_source, false);
-            m_service->SetDirty();
+            const bool isInteractionSet =
+                m_statePort->SetInteracting(m_source, false);
+            const bool isRenderSet =
+                m_updatePort->SetRenderNeeded();
             m_isDragging = false;
             m_dragAxis = -1;
-            return { true, false };
+            return getResult(
+                isInteractionSet && isRenderSet,
+                isInteractionSet
+                    ? InteractionFailureReason::RenderRejected
+                    : InteractionFailureReason::CleanupRejected);
         }
         return {};
     }
@@ -119,7 +176,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         }
 
         // 获取屏幕二维坐标
-        auto lastWorldPos = m_service->GetCursorWorld();
+        auto lastWorldPos = m_slicePort->GetCursorWorld();
         m_renderer->SetWorldPoint(lastWorldPos[0], lastWorldPos[1], lastWorldPos[2], 1.0);
         m_renderer->WorldToDisplay();
         auto lastDisplay = m_renderer->GetDisplayPoint();
@@ -148,7 +205,7 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         // 增量约束更新：只放开当前拖拽轴，其余轴保持不变，
         // 这样 2D 参考平面在 3D 视图中的拖动仍然遵守单轴切片语义。
         auto deltaAxis = newWorldPos[m_dragAxis] - lastWorldPos[m_dragAxis];
-        double finalWorld[3] = {
+        std::array<double, 3> finalWorld = {
             lastWorldPos[0],
             lastWorldPos[1],
             lastWorldPos[2]
@@ -156,9 +213,16 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         finalWorld[m_dragAxis] += deltaAxis;
 
         // 全量更新
-        m_service->SetCursorWorldPosition(finalWorld, -1);
-
-        return { true, true };
+        if (!m_slicePort->SetCursorWorld(finalWorld, -1)) {
+            return getResult(
+                false, InteractionFailureReason::StateRejected);
+        }
+        if (!m_updatePort->SetRenderNeeded()) {
+            (void)m_slicePort->SetCursorWorld(lastWorldPos, -1);
+            return getResult(
+                false, InteractionFailureReason::RenderRejected);
+        }
+        return getResult(true, InteractionFailureReason::None);
     }
 
     return {};

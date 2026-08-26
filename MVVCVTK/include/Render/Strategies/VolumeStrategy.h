@@ -1,5 +1,5 @@
 #pragma once
-#include "BaseVisualStrategy.h"
+#include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkCubeAxesActor.h>
@@ -19,7 +19,6 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     vtkProp3D* GetMainProp() override; //
 private:
@@ -28,8 +27,6 @@ private:
     void SetEffectBinding(RenderEffectBinding* binding) override;
     // 与最后下发 OTF 的 m_opacity 比较，决定纯材质更新是否需要重建透明度函数。
     bool GetOpacityChanged(double opacity) const;
-    // modelMatrix 按 input model -> world 解释；相机保持原观察偏移，只把焦点移到变换后数据中心。
-    void AlignCamera(const std::array<double, 16>& modelMatrix);
     int GetCustomDim() const;
     bool GetInputKey(vtkImageData* image) const;
     bool GetMaskKey(vtkImageData* image) const;

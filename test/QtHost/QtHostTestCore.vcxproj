@@ -40,9 +40,6 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <ProjectRoot>$(ProjectDir)..\..\MVVCVTK</ProjectRoot>
-    <VtkRoot Condition="'$(VtkRoot)'==''">F:\lib_cv\VTK\lib\vtk_install</VtkRoot>
-    <OpenCvRoot Condition="'$(OpenCvRoot)'==''">F:\lib_cv\cv\opencv\build</OpenCvRoot>
-    <HostDllRoot Condition="'$(HostDllRoot)'==''">F:\CT-1209\DLL</HostDllRoot>
     <ProjectIncludePath>$(ProjectRoot)\include;$(ProjectRoot)\include\App;$(ProjectRoot)\include\App\Services;$(ProjectRoot)\include\App\Tasks;$(ProjectRoot)\include\Data;$(ProjectRoot)\include\Geometry;$(ProjectRoot)\include\Interaction;$(ProjectRoot)\include\Platform;$(ProjectRoot)\include\Render;$(ProjectRoot)\include\Render\Strategies</ProjectIncludePath>
     <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
@@ -78,10 +75,11 @@
     <ClCompile Include="..\..\MVVCVTK\src\App\AppState.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataExportTaskService.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\App\Tasks\AppDataLoadTaskService.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppService.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\App\Services\AppServiceFactory.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostCommandRouter.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\HostHotkeyRouter.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\src\Host\HostRenderViewSet.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\HostViewRuntimeRegistry.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Host\LoadCommitCoordinator.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Host\VtkAppHostSession.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\ColoredPlanesStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\CompositeStrategy.cpp" />
@@ -89,15 +87,17 @@
     <ClCompile Include="..\..\MVVCVTK\src\Data\VolumeTypes.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\DataManager.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Data\ImageProcessor.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\AbstractViewContext.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\InteractionRouter.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Interaction\ViewContextFactory.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\IsoSurfaceStrategy.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Platform\MemMappedFile.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\SliceStrategy.cpp" />
-    <ClCompile Include="..\..\MVVCVTK\src\Render\StdRenderContext.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\TimeUpdateHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer2DHandler.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Interaction\Viewer3DHandler.cpp" />
+    <ClCompile Include="..\..\MVVCVTK\src\Render\RenderStrategyFactory.cpp" />
     <ClCompile Include="..\..\MVVCVTK\src\Render\Strategies\VolumeStrategy.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

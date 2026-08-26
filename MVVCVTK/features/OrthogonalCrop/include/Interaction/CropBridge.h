@@ -1,27 +1,52 @@
 #pragma once
 
 #include "OrthogonalCropTypes.h"
+#include "App/Services/FeatureViewService.h"
 
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
-class InteractiveService;
 class vtkRenderWindowInteractor;
 class vtkRenderer;
 
 struct CropViewRequest final {
     vtkRenderWindowInteractor* interactor = nullptr;
     vtkRenderer* renderer = nullptr;
-    std::shared_ptr<InteractiveService> referenceService;
-    std::vector<std::shared_ptr<InteractiveService>> targetServices;
+    std::weak_ptr<const FeatureViewLease> lease;
+    std::shared_ptr<FeatureViewService> referenceService;
+    std::vector<std::shared_ptr<FeatureViewService>> targetServices;
 };
 
 using CropBuildCallback = std::function<void(CropBuildResult)>;
 
 class CropBridge final {
+private:
+    class Impl;
+
 public:
+    // 发布令牌只拥有已完成分配和验证的历史候选；销毁令牌等价于放弃提交。
+    class PreparedCommit final {
+    public:
+        ~PreparedCommit();
+        PreparedCommit(PreparedCommit&&) noexcept;
+        PreparedCommit& operator=(PreparedCommit&&) noexcept;
+
+        PreparedCommit(const PreparedCommit&) = delete;
+        PreparedCommit& operator=(const PreparedCommit&) = delete;
+
+    private:
+        friend class CropBridge;
+        friend class CropBridge::Impl;
+
+        class Impl;
+        explicit PreparedCommit(std::unique_ptr<Impl> impl) noexcept;
+
+        std::unique_ptr<Impl> m_impl;
+    };
+
     CropBridge();
     ~CropBridge();
 
@@ -35,13 +60,14 @@ public:
         CropInputSnapshot input);
     bool ClearBindings();
     bool SetCropInput(CropInputSnapshot input);
-    // DataManager 发布前只准备 history 候选；baseNodeCount=0 表示显式恢复原始基线。
-    bool StartCropBaseline(
+    // DataManager 发布前完成全部可失败准备；baseNodeCount=0 表示显式恢复原始基线。
+    std::optional<PreparedCommit> BuildCropCommit(
         CropInputSnapshot input,
         std::size_t baseNodeCount);
-    // Start 成功且外部快照发布后调用；完成阶段只移动已准备状态，不允许失败。
-    bool SetCropBaselineComplete() noexcept;
-    bool ClearCropBaseline();
+    // 外部快照成功发布后接管准备令牌；这里只移动内部状态，不检查 lease，也不调用外部端口。
+    void SetCropCommit(PreparedCommit&& prepared) noexcept;
+    // 状态接管后的渲染通知可以延迟重试，不参与数据/历史提交结果。
+    bool SendCropCommit() noexcept;
     bool SwitchCropBox();
     bool SwitchCropPlane();
     bool SetCropMode(CropRemovalMode removalMode);
@@ -64,6 +90,5 @@ public:
     bool SendBuildResult();
 
 private:
-    class Impl;
     std::unique_ptr<Impl> m_impl;
 };

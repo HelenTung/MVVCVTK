@@ -1,20 +1,11 @@
 #include "CompositeStrategy.h"
-#include "VolumeStrategy.h"
-#include "IsoSurfaceStrategy.h"
 #include "ColoredPlanesStrategy.h"
-#include <vtkCamera.h>
 
-CompositeStrategy::CompositeStrategy(VizMode mode) : m_mode(mode) {
-    // 始终创建参考平面
-    m_referencePlanes = std::make_shared<ColoredPlanesStrategy>();
-
-    // 根据模式创建主策略
-    if (m_mode == VizMode::CompositeVolume) {
-        m_mainStrategy = std::make_shared<VolumeStrategy>();
-    }
-    else if (m_mode == VizMode::CompositeIsoSurface) {
-        m_mainStrategy = std::make_shared<IsoSurfaceStrategy>();
-    }
+CompositeStrategy::CompositeStrategy(
+    std::shared_ptr<AbstractVisualStrategy> mainStrategy)
+    : m_mainStrategy(std::move(mainStrategy))
+    , m_referencePlanes(std::make_shared<ColoredPlanesStrategy>())
+{
 }
 
 void CompositeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
@@ -42,13 +33,6 @@ void CompositeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
 void CompositeStrategy::DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) {
     if (m_mainStrategy) m_mainStrategy->DetachRenderer(renderer);
     if (m_referencePlanes) m_referencePlanes->DetachRenderer(renderer);
-}
-
-void CompositeStrategy::SetCamera(vtkSmartPointer<vtkRenderer> renderer) {
-    // 通常 3D 视图使用透视投影
-    if (renderer && renderer->GetActiveCamera()) {
-        renderer->GetActiveCamera()->ParallelProjectionOff();
-    }
 }
 
 int CompositeStrategy::GetPlaneAxis(vtkActor* actor) {

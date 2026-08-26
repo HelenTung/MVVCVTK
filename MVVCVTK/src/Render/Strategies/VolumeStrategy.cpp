@@ -6,7 +6,6 @@
 #include <vtkPiecewiseFunction.h>
 #include <vtkImageResample.h>
 #include <vtkImageAnisotropicDiffusion3D.h>
-#include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <vtkRenderWindow.h>
 #include <algorithm>
@@ -118,44 +117,6 @@ vtkStandardNewMacro(VolumeStrategy::Mapper);
 bool VolumeStrategy::GetOpacityChanged(double opacity) const
 {
     return std::abs(m_opacity - opacity) > 1e-6;
-}
-
-void VolumeStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
-{
-    if (!m_renderer || !m_renderer->GetActiveCamera()) return;
-
-    // 体对象经过模型矩阵变换后，保持相机到焦点的相对偏移不变，
-    // 只把焦点整体搬到新的世界中心，避免用户视角在 Transform 后突然跳变。
-
-    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToWorldMatrix->DeepCopy(modelMatrix.data());
-
-    double modelToWorldInputCenter[4] = { m_dataCenter[0], m_dataCenter[1], m_dataCenter[2], 1.0 };
-    double modelToWorldOutputCenter[4] = { 0.0, 0.0, 0.0, 1.0 };
-    modelToWorldMatrix->MultiplyPoint(modelToWorldInputCenter, modelToWorldOutputCenter);
-
-    const double invW = std::abs(modelToWorldOutputCenter[3]) > 1e-12 ? 1.0 / modelToWorldOutputCenter[3] : 1.0;
-    double worldCenter[3] = {
-        modelToWorldOutputCenter[0] * invW,
-        modelToWorldOutputCenter[1] * invW,
-        modelToWorldOutputCenter[2] * invW
-    };
-
-    vtkCamera* cam = m_renderer->GetActiveCamera();
-    double oldFocal[3] = { 0.0, 0.0, 0.0 };
-    double oldPosition[3] = { 0.0, 0.0, 0.0 };
-    cam->GetFocalPoint(oldFocal);
-    cam->GetPosition(oldPosition);
-
-    double offset[3] = {
-        oldPosition[0] - oldFocal[0],
-        oldPosition[1] - oldFocal[1],
-        oldPosition[2] - oldFocal[2]
-    };
-
-    cam->SetFocalPoint(worldCenter);
-    cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
-    m_renderer->ResetCameraClippingRange();
 }
 
 VolumeStrategy::VolumeStrategy() {
@@ -577,10 +538,6 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void VolumeStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
-    ren->GetActiveCamera()->ParallelProjectionOff();
-}
-
 void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (!m_volume || !m_volume->GetProperty()) return;
@@ -731,7 +688,6 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
     // 响应变换矩阵
     if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         Set3DPropsTransform(params.modelMatrix);
-        AlignCamera(params.modelMatrix);
     }
 
     if (((flags & UpdateFlags::Visibility) != UpdateFlags::None)) {

@@ -1,14 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Debug|Win32">
-      <Configuration>Debug</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
-    <ProjectConfiguration Include="Release|Win32">
-      <Configuration>Release</Configuration>
-      <Platform>Win32</Platform>
-    </ProjectConfiguration>
     <ProjectConfiguration Include="Debug|x64">
       <Configuration>Debug</Configuration>
       <Platform>x64</Platform>
@@ -26,27 +18,16 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
-    <WholeProgramOptimization>true</WholeProgramOptimization>
-    <CharacterSet>Unicode</CharacterSet>
-  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType Condition="'$(MVVCVTKBuildSdk)'!='true'">Application</ConfigurationType>
+    <ConfigurationType Condition="'$(MVVCVTKBuildSdk)'=='true'">StaticLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
+    <ConfigurationType Condition="'$(MVVCVTKBuildSdk)'!='true'">Application</ConfigurationType>
+    <ConfigurationType Condition="'$(MVVCVTKBuildSdk)'=='true'">StaticLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -56,66 +37,35 @@
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared">
   </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
-  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="'$(ImportUserProps)' != 'false' and exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="'$(ImportUserProps)' != 'false' and exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(MVVCVTKBuildSdk)'=='true' and '$(Platform)'=='x64'">
+    <OutDir>$(MVVCVTKSdkBuildRoot)\lib\$(Configuration)\</OutDir>
+    <IntDir>$(MVVCVTKSdkBuildRoot)\obj\$(Configuration)\</IntDir>
+    <TargetName>MVVCVTK</TargetName>
+    <!-- 关闭 /GL，避免 SDK 静态库与消费端编译器小版本绑定。 -->
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+  </PropertyGroup>
   <PropertyGroup>
     <ProjectIncludePath>$(ProjectDir)include;$(ProjectDir)include\App;$(ProjectDir)include\App\Services;$(ProjectDir)include\App\Tasks;$(ProjectDir)include\Data;$(ProjectDir)include\Geometry;$(ProjectDir)include\Interaction;$(ProjectDir)include\Platform;$(ProjectDir)include\Render;$(ProjectDir)include\Render\Strategies;$(ProjectDir)features\GapAnalysis\include;$(ProjectDir)features\OrthogonalCrop\include</ProjectIncludePath>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
-  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
-    <ExternalIncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;F:\lib_cv\cv\opencv\build\include;F:\CT-1209\DLL\include;</ExternalIncludePath>
-    <LibraryWPath>F:\lib_cv\VTK\lib\vtk_install\bin;$(LibraryWPath)</LibraryWPath>
-    <LibraryPath>F:\lib_cv\VTK\lib\vtk_install\bin;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;</ExternalIncludePath>
+    <LibraryWPath>$(VtkRoot)\bin;$(LibraryWPath)</LibraryWPath>
+    <LibraryPath>$(VtkRoot)\bin;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <IncludePath>$(ProjectIncludePath);$(IncludePath)</IncludePath>
-    <ExternalIncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);F:\lib_cv\VTK\lib\vtk_install\include\vtk-9.4;F:\lib_cv\cv\opencv\build\include;F:\CT-1209\DLL\include;</ExternalIncludePath>
-    <LibraryWPath>F:\lib_cv\VTK\lib\vtk_install\bin;$(LibraryWPath)</LibraryWPath>
-    <LibraryPath>F:\lib_cv\VTK\lib\vtk_install\bin;$(LibraryPath)</LibraryPath>
+    <ExternalIncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);$(VtkRoot)\include\vtk-9.4;$(OpenCvRoot)\include;$(HostDllRoot)\include;</ExternalIncludePath>
+    <LibraryWPath>$(VtkRoot)\bin;$(LibraryWPath)</LibraryWPath>
+    <LibraryPath>$(VtkRoot)\bin;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-    </ClCompile>
-    <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-    </Link>
-  </ItemDefinitionGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-    </ClCompile>
-    <Link>
-      <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-    </Link>
-  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -128,7 +78,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>F:\lib_cv\VTK\lib\vtk_install\lib;F:\lib_cv\cv\opencv\build\x64\vc16\lib;F:\CT-1209\DLL\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VtkRoot)\lib;$(OpenCvRoot)\x64\vc16\lib;$(HostDllRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>vtkCommonCore-9.4d.lib;vtkCommonDataModel-9.4d.lib;vtkCommonExecutionModel-9.4d.lib;vtkCommonMath-9.4d.lib;vtkCommonTransforms-9.4d.lib;vtksys-9.4d.lib;vtkFiltersCore-9.4d.lib;vtkFiltersGeneral-9.4d.lib;vtkFiltersGeometry-9.4d.lib;vtkFiltersSources-9.4d.lib;vtkIOCore-9.4d.lib;vtkIOGeometry-9.4d.lib;vtkIOImage-9.4d.lib;vtkIOPLY-9.4d.lib;vtkImagingCore-9.4d.lib;vtkImagingGeneral-9.4d.lib;vtkImagingStatistics-9.4d.lib;vtkInteractionStyle-9.4d.lib;vtkInteractionWidgets-9.4d.lib;vtkRenderingAnnotation-9.4d.lib;vtkRenderingCore-9.4d.lib;vtkRenderingFreeType-9.4d.lib;vtkRenderingImage-9.4d.lib;vtkRenderingLOD-9.4d.lib;vtkRenderingOpenGL2-9.4d.lib;vtkRenderingVolume-9.4d.lib;vtkRenderingVolumeOpenGL2-9.4d.lib;opencv_world4120d.lib;UIPhantomCalib.lib;UIReconstruct3D.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -147,77 +97,105 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>F:\lib_cv\VTK\lib\vtk_install\lib;F:\lib_cv\cv\opencv\build\x64\vc16\lib;F:\CT-1209\DLL\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VtkRoot)\lib;$(OpenCvRoot)\x64\vc16\lib;$(HostDllRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>vtkCommonCore-9.4.lib;vtkCommonDataModel-9.4.lib;vtkCommonExecutionModel-9.4.lib;vtkCommonMath-9.4.lib;vtkCommonTransforms-9.4.lib;vtksys-9.4.lib;vtkFiltersCore-9.4.lib;vtkFiltersGeneral-9.4.lib;vtkFiltersGeometry-9.4.lib;vtkFiltersSources-9.4.lib;vtkIOCore-9.4.lib;vtkIOGeometry-9.4.lib;vtkIOImage-9.4.lib;vtkIOPLY-9.4.lib;vtkImagingCore-9.4.lib;vtkImagingGeneral-9.4.lib;vtkImagingStatistics-9.4.lib;vtkInteractionStyle-9.4.lib;vtkInteractionWidgets-9.4.lib;vtkRenderingAnnotation-9.4.lib;vtkRenderingCore-9.4.lib;vtkRenderingFreeType-9.4.lib;vtkRenderingImage-9.4.lib;vtkRenderingLOD-9.4.lib;vtkRenderingOpenGL2-9.4.lib;vtkRenderingVolume-9.4.lib;vtkRenderingVolumeOpenGL2-9.4.lib;opencv_world4120.lib;UIPhantomCalib.lib;UIReconstruct3D.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(MVVCVTKBuildSdk)'=='true' and '$(Platform)'=='x64'">
+    <ClCompile>
+      <!-- Debug 用 /Z7 内嵌信息；Release 不产出构建机相关 PDB。 -->
+      <DebugInformationFormat Condition="'$(Configuration)'=='Debug'">OldStyle</DebugInformationFormat>
+      <DebugInformationFormat Condition="'$(Configuration)'=='Release'">None</DebugInformationFormat>
+      <ProgramDataBaseFileName>$(IntDir)$(TargetName).pdb</ProgramDataBaseFileName>
+      <MinimalRebuild>false</MinimalRebuild>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="include\App\AppInterfaces.h" />
+    <ClInclude Include="include\App\AppState.h" />
+    <ClInclude Include="include\App\AppStateEvents.h" />
+    <ClInclude Include="include\App\AppTypes.h" />
+    <ClInclude Include="include\App\Services\AppPorts.h" />
+    <ClInclude Include="include\App\Services\AppServiceFactory.h" />
+    <ClInclude Include="include\App\Services\DataCommitTypes.h" />
+    <ClInclude Include="include\App\Services\FeatureViewService.h" />
     <ClInclude Include="include\App\Tasks\AppDataExportTaskService.h" />
     <ClInclude Include="include\App\Tasks\AppDataLoadTaskService.h" />
-    <ClInclude Include="include\App\Services\AppService.h" />
-    <ClInclude Include="include\App\AppState.h" />
-    <ClInclude Include="include\App\AppTypes.h" />
+    <ClInclude Include="include\Data\DataConverters.h" />
+    <ClInclude Include="include\Data\DataManager.h" />
+    <ClInclude Include="include\Data\DataService.h" />
+    <ClInclude Include="include\Data\ImageProcessor.h" />
+    <ClInclude Include="include\Data\ImageReadTypes.h" />
+    <ClInclude Include="include\Data\TrustedImageState.h" />
+    <ClInclude Include="include\Data\VolumeTypes.h" />
+    <ClInclude Include="include\Geometry\InteractionComputeService.h" />
     <ClInclude Include="include\Host\HostCommandRouter.h" />
+    <ClInclude Include="include\Host\HostCoreServices.h" />
+    <ClInclude Include="include\Host\HostFeature.h" />
+    <ClInclude Include="include\Host\HostHotkeyRouter.h" />
+    <ClInclude Include="include\Host\HostViewRuntimeRegistry.h" />
+    <ClInclude Include="include\Host\LoadCommitCoordinator.h" />
+    <ClInclude Include="include\Host\Types\HostFeatureViewTypes.h" />
     <ClInclude Include="include\Host\Types\HostInputTypes.h" />
     <ClInclude Include="include\Host\Types\HostRequest.h" />
     <ClInclude Include="include\Host\Types\HostRequestTypes.h" />
-    <ClInclude Include="include\Host\Types\HostValueTypes.h" />
-    <ClInclude Include="include\Host\HostHotkeyRouter.h" />
-    <ClInclude Include="include\Host\HostCoreServices.h" />
-    <ClInclude Include="include\Host\HostFeature.h" />
-    <ClInclude Include="include\Host\HostRenderViewSet.h" />
     <ClInclude Include="include\Host\Types\HostSessionTypes.h" />
+    <ClInclude Include="include\Host\Types\HostValueTypes.h" />
     <ClInclude Include="include\Host\VtkAppHostSession.h" />
-    <ClInclude Include="include\Render\Strategies\BaseVisualStrategy.h" />
-    <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h" />
-    <ClInclude Include="include\Render\Strategies\CompositeStrategy.h" />
-    <ClInclude Include="include\Render\RenderEffect.h" />
-    <ClInclude Include="include\Data\DataConverters.h" />
-    <ClInclude Include="include\Data\DataManager.h" />
-    <ClInclude Include="include\Data\VolumeTypes.h" />
+    <ClInclude Include="include\Interaction\AbstractViewContext.h" />
     <ClInclude Include="include\Interaction\IInteractionHandler.h" />
     <ClInclude Include="include\Interaction\InputCallbackHandler.h" />
-    <ClInclude Include="include\Data\ImageProcessor.h" />
-    <ClInclude Include="include\Geometry\InteractionComputeService.h" />
-    <ClInclude Include="include\Interaction\InteractionTypes.h" />
+    <ClInclude Include="include\Interaction\InteractionPorts.h" />
     <ClInclude Include="include\Interaction\InteractionRouter.h" />
-    <ClInclude Include="include\Render\Strategies\IsoSurfaceStrategy.h" />
-    <ClInclude Include="include\Platform\MemMappedFile.h" />
-    <ClInclude Include="include\Platform\Path.h" />
-    <ClInclude Include="include\Render\Strategies\SliceStrategy.h" />
-    <ClInclude Include="include\Render\StdRenderContext.h" />
+    <ClInclude Include="include\Interaction\InteractionTypes.h" />
     <ClInclude Include="include\Interaction\TimeUpdateHandler.h" />
+    <ClInclude Include="include\Interaction\ViewContextFactory.h" />
     <ClInclude Include="include\Interaction\Viewer2DHandler.h" />
     <ClInclude Include="include\Interaction\Viewer3DHandler.h" />
+    <ClInclude Include="include\Platform\MemMappedFile.h" />
+    <ClInclude Include="include\Platform\Path.h" />
+    <ClInclude Include="include\Platform\TaskStopToken.h" />
+    <ClInclude Include="include\Render\Contracts\OverlayService.h" />
+    <ClInclude Include="include\Render\Contracts\RenderBindPort.h" />
+    <ClInclude Include="include\Render\Contracts\RenderEffect.h" />
+    <ClInclude Include="include\Render\Contracts\RenderStrategyFactory.h" />
+    <ClInclude Include="include\Render\Contracts\VisualStrategy.h" />
+    <ClInclude Include="include\Render\Support\BaseVisualStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\ColoredPlanesStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\CompositeStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\IsoSurfaceStrategy.h" />
+    <ClInclude Include="include\Render\Strategies\SliceStrategy.h" />
     <ClInclude Include="include\Render\Strategies\VolumeStrategy.h" />
-    <ClInclude Include="include\App\AppStateEvents.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\App\AppState.cpp" />
+    <ClCompile Include="src\App\Services\AppServiceFactory.cpp" />
     <ClCompile Include="src\App\Tasks\AppDataExportTaskService.cpp" />
     <ClCompile Include="src\App\Tasks\AppDataLoadTaskService.cpp" />
-    <ClCompile Include="src\App\Services\AppService.cpp" />
-    <ClCompile Include="src\Host\HostCommandRouter.cpp" />
-    <ClCompile Include="src\Host\HostHotkeyRouter.cpp" />
-    <ClCompile Include="src\Host\HostRenderViewSet.cpp" />
-    <ClCompile Include="src\Host\VtkAppHostSession.cpp" />
-    <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />
-    <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="src\App\main.cpp">
+      <ExcludedFromBuild Condition="'$(MVVCVTKBuildSdk)'=='true'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="src\Data\DataConverters.cpp" />
     <ClCompile Include="src\Data\DataManager.cpp" />
-    <ClCompile Include="src\Data\VolumeTypes.cpp" />
     <ClCompile Include="src\Data\ImageProcessor.cpp" />
+    <ClCompile Include="src\Data\VolumeTypes.cpp" />
+    <ClCompile Include="src\Host\HostCommandRouter.cpp" />
+    <ClCompile Include="src\Host\HostHotkeyRouter.cpp" />
+    <ClCompile Include="src\Host\HostViewRuntimeRegistry.cpp" />
+    <ClCompile Include="src\Host\LoadCommitCoordinator.cpp" />
+    <ClCompile Include="src\Host\VtkAppHostSession.cpp" />
+    <ClCompile Include="src\Interaction\AbstractViewContext.cpp" />
     <ClCompile Include="src\Interaction\InputCallbackHandler.cpp" />
     <ClCompile Include="src\Interaction\InteractionRouter.cpp" />
-    <ClCompile Include="src\Render\Strategies\IsoSurfaceStrategy.cpp" />
-    <ClCompile Include="src\App\main.cpp" />
-    <ClCompile Include="src\Platform\MemMappedFile.cpp" />
-    <ClCompile Include="src\Render\Strategies\SliceStrategy.cpp" />
-    <ClCompile Include="src\Render\StdRenderContext.cpp" />
+    <ClCompile Include="src\Interaction\ViewContextFactory.cpp" />
     <ClCompile Include="src\Interaction\TimeUpdateHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer2DHandler.cpp" />
     <ClCompile Include="src\Interaction\Viewer3DHandler.cpp" />
+    <ClCompile Include="src\Platform\MemMappedFile.cpp" />
+    <ClCompile Include="src\Render\RenderStrategyFactory.cpp" />
+    <ClCompile Include="src\Render\Strategies\ColoredPlanesStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\CompositeStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\IsoSurfaceStrategy.cpp" />
+    <ClCompile Include="src\Render\Strategies\SliceStrategy.cpp" />
     <ClCompile Include="src\Render\Strategies\VolumeStrategy.cpp" />
   </ItemGroup>
   <ItemGroup Label="GapAnalysis">
@@ -248,6 +226,303 @@
     <ClCompile Include="features\OrthogonalCrop\src\Render\CropShaderController.cpp" />
     <ClCompile Include="features\OrthogonalCrop\src\Routing\CropRouter.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="MVVCVTK.Sdk.props" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <PropertyGroup>
+    <MVVCVTKSdkRepoRoot>$([System.IO.Path]::GetFullPath('$(ProjectDir)..\'))</MVVCVTKSdkRepoRoot>
+    <MVVCVTKSdkBaseRoot Condition="'$(MVVCVTKSdkBaseRoot)' == ''">$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkRepoRoot)sdk'))</MVVCVTKSdkBaseRoot>
+    <MVVCVTKSdkBuildBase Condition="'$(MVVCVTKSdkBuildBase)' == ''">$(MVVCVTKSdkBaseRoot)\.build</MVVCVTKSdkBuildBase>
+    <MVVCVTKSdkStageBase Condition="'$(MVVCVTKSdkStageBase)' == ''">$(MVVCVTKSdkBaseRoot)\stage</MVVCVTKSdkStageBase>
+    <MVVCVTKSdkPackageRoot Condition="'$(MVVCVTKSdkPackageRoot)' == ''">$(MVVCVTKSdkBaseRoot)\packages</MVVCVTKSdkPackageRoot>
+    <!-- 兼容旧调用方传入的 MVVCVTKSdkRoot；该值仅映射为 package stage，不再兼作依赖或编译输出。 -->
+    <MVVCVTKSdkLegacyRoot>$(MVVCVTKSdkRoot)</MVVCVTKSdkLegacyRoot>
+    <MVVCVTKSdkManifestScript>
+      $ErrorActionPreference = 'Stop';
+      Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop;
+      function Get-SdkHash([string]$path) { $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { $sha = [Security.Cryptography.SHA256]::Create(); try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', ''); } finally { $sha.Dispose(); } } finally { $stream.Dispose(); } }
+      $root = [IO.Path]::GetFullPath('__SDK_STAGE__');
+      $repo = [IO.Path]::GetFullPath('__SDK_REPO__');
+      $version = '__SDK_VERSION__';
+      $directoryVersion = '__SDK_DIRECTORY__';
+      $gitHash = [string]::Join('', (&amp; git -C $repo rev-parse HEAD));
+      if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the SDK source commit.'; }
+      $gitShort = [string]::Join('', (&amp; git -C $repo rev-parse --short=12 HEAD));
+      if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the SDK short commit.'; }
+      $gitDescribe = [string]::Join('', (&amp; git -C $repo describe --always --dirty));
+      $gitStatus = @(&amp; git -C $repo status --porcelain);
+      if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the SDK source state.'; }
+      $isDirty = $gitStatus.Count -ne 0;
+      $dateVersion = Get-Date -Format 'yyyy.MM.dd';
+      if ($isDirty -and -not [regex]::IsMatch($version, '^\d{4}\.\d{2}\.\d{2}-rev\.\d+$')) { throw 'Dirty SDK builds must use yyyy.MM.dd-rev.N.'; }
+      $cleanVersion = $dateVersion + '-git.' + $gitShort;
+      if (-not $isDirty -and $version -ne $cleanVersion) { throw ('Clean SDK builds must use ' + $cleanVersion + '.'); }
+      $revision = if ($isDirty) { [int]([regex]::Match($version, 'rev\.(\d+)$').Groups[1].Value) } else { $null };
+      $versionKind = if ($isDirty) { 'revision' } else { 'git' };
+      $entryHeaders = @('Host/VtkAppHostSession.h', 'Host/HostFeature.h', 'Host/CropHostFeature.h', 'Host/GapHostFeature.h', 'Data/ImageReadTypes.h', 'Host/Types/HostRequestTypes.h', 'Host/Types/HostValueTypes.h', 'Host/Types/HostSessionTypes.h', 'Host/Types/HostInputTypes.h');
+      $artifactPaths = @('MVVCVTK.Sdk.props', 'include/App/AppTypes.h', 'include/App/Services/FeatureViewService.h', 'include/Data/ImageReadTypes.h', 'include/Data/TrustedImageState.h', 'include/GapAnalysisTypes.h', 'include/Host/CropHostFeature.h', 'include/Host/GapHostFeature.h', 'include/Host/HostFeature.h', 'include/Host/Types/HostFeatureViewTypes.h', 'include/Host/Types/HostInputTypes.h', 'include/Host/Types/HostRequest.h', 'include/Host/Types/HostRequestTypes.h', 'include/Host/Types/HostSessionTypes.h', 'include/Host/Types/HostValueTypes.h', 'include/Host/VtkAppHostSession.h', 'include/Interaction/InteractionTypes.h', 'include/OrthogonalCropTypes.h', 'include/Render/Contracts/OverlayService.h', 'include/Render/Contracts/RenderEffect.h', 'include/Render/Contracts/VisualStrategy.h', 'lib/Debug/MVVCVTK.lib', 'lib/Release/MVVCVTK.lib', 'deps/MVVCVTK.Dependencies.props', 'deps/manifest.json');
+      $artifacts = foreach ($relativePath in $artifactPaths) {
+        $fullPath = Join-Path $root $relativePath;
+        if (-not [IO.File]::Exists($fullPath)) { throw ('SDK artifact is missing: ' + $relativePath); }
+        $file = Get-Item -LiteralPath $fullPath;
+        [ordered]@{ path = $relativePath; bytes = $file.Length; sha256 = (Get-SdkHash $fullPath) };
+      };
+      $depsPath = Join-Path $root 'deps/manifest.json';
+      $deps = Get-Content -LiteralPath $depsPath -Raw | ConvertFrom-Json;
+      if ($deps.packageVersion -ne '__DEPS_VERSION__') { throw 'Dependency manifest version mismatch.'; }
+      $depsRoot = Join-Path $root 'deps';
+      $depsArtifacts = foreach ($file in (Get-ChildItem -LiteralPath $depsRoot -Recurse -File | Sort-Object FullName)) {
+        $relativePath = $file.FullName.Substring($depsRoot.Length + 1).Replace('\', '/');
+        [ordered]@{ path = $relativePath; bytes = $file.Length; sha256 = (Get-SdkHash $file.FullName) };
+      };
+      $manifest = [ordered]@{
+        schemaVersion = 2;
+        packageId = 'MVVCVTK.Sdk';
+        packageVersion = $version;
+        directoryVersion = $directoryVersion;
+        versionSource = [ordered]@{ kind = $versionKind; revision = $revision; baseCommit = $gitHash; gitDescribe = $gitDescribe; isDirty = $isDirty; cleanBuildFormat = 'yyyy.MM.dd-git.&lt;short-commit&gt;' };
+        platform = 'windows';
+        architecture = 'x64';
+        libraryKind = 'static';
+        languageStandard = 'c++17';
+        featureTrust = 'trusted-in-process';
+        abiPolicy = [ordered]@{ compatibility = 'fixed-toolchain'; stableBinaryAbi = $false; platformToolset = 'v145'; msvcToolsVersion = '__TOOLS_VERSION__'; runtimeLibraryDebug = '/MDd'; runtimeLibraryRelease = '/MD'; iteratorDebugLevelDebug = 2; iteratorDebugLevelRelease = 0; wholeProgramOptimization = $false };
+        validatedConsumer = [ordered]@{ buildSystem = 'MSBuild'; platformToolset = 'v145'; windowsTargetPlatformVersion = '10.0' };
+        configurations = [ordered]@{ Debug = [ordered]@{ runtimeLibrary = '/MDd'; iteratorDebugLevel = 2; wholeProgramOptimization = $false; library = 'lib/Debug/MVVCVTK.lib' }; Release = [ordered]@{ runtimeLibrary = '/MD'; iteratorDebugLevel = 0; wholeProgramOptimization = $false; library = 'lib/Release/MVVCVTK.lib' } };
+        consumerProps = 'MVVCVTK.Sdk.props';
+        dependencies = [ordered]@{ packageVersion = $deps.packageVersion; props = 'deps/MVVCVTK.Dependencies.props'; manifest = 'deps/manifest.json'; manifestSha256 = (Get-SdkHash $depsPath); artifactCount = @($depsArtifacts).Count; artifacts = @($depsArtifacts); components = $deps.components };
+        publicSurface = [ordered]@{ entryHeaders = $entryHeaders; headerClosureCount = __HEADER_COUNT__ };
+        archive = [ordered]@{ file = '__ARCHIVE_NAME__'; checksumFile = '__ARCHIVE_NAME__.sha256' };
+        artifacts = @($artifacts);
+      };
+      $json = $manifest | ConvertTo-Json -Depth 10;
+      [IO.File]::WriteAllText((Join-Path $root 'manifest.json'), $json + [Environment]::NewLine, [Text.UTF8Encoding]::new($false));
+    </MVVCVTKSdkManifestScript>
+    <MVVCVTKSdkVerifyScript>
+      $ErrorActionPreference = 'Stop';
+      Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop;
+      function Get-SdkHash([string]$path) { $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { $sha = [Security.Cryptography.SHA256]::Create(); try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', ''); } finally { $sha.Dispose(); } } finally { $stream.Dispose(); } }
+      function Get-SdkPath([string]$base, [string]$relative) { if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative) -or $relative.Contains('\')) { throw ('Unsafe SDK artifact path: ' + $relative); }; $segments = @($relative.Split('/')); if (@($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -ne 0) { throw ('Unsafe SDK artifact path: ' + $relative); }; $basePath = [IO.Path]::GetFullPath($base); $prefix = $basePath; if (-not $prefix.EndsWith([string][IO.Path]::DirectorySeparatorChar)) { $prefix += [IO.Path]::DirectorySeparatorChar; }; $fullPath = [IO.Path]::GetFullPath((Join-Path $basePath $relative)); if (-not $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw ('SDK artifact escapes its root: ' + $relative); }; return $fullPath; }
+     $root = [IO.Path]::GetFullPath('__SDK_STAGE__');
+      $manifestPath = Join-Path $root 'manifest.json';
+      if (-not [IO.File]::Exists($manifestPath)) { throw 'SDK manifest is missing.'; }
+      $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json;
+      if ($manifest.schemaVersion -ne 2 -or $manifest.packageId -ne 'MVVCVTK.Sdk') { throw 'Unsupported SDK manifest schema or package id.'; }
+      if ($manifest.packageVersion -ne '__SDK_VERSION__' -or $manifest.directoryVersion -ne '__SDK_DIRECTORY__') { throw 'SDK package version does not match its requested directory.'; }
+      if ($manifest.platform -ne 'windows' -or $manifest.architecture -ne 'x64' -or $manifest.libraryKind -ne 'static') { throw 'SDK platform or library kind mismatch.'; }
+      if ($manifest.featureTrust -ne 'trusted-in-process') { throw 'SDK Feature trust policy mismatch.'; }
+      if ($manifest.abiPolicy.compatibility -ne 'fixed-toolchain' -or $manifest.abiPolicy.platformToolset -ne 'v145' -or $manifest.abiPolicy.stableBinaryAbi) { throw 'SDK ABI policy is incomplete.'; }
+      if (@($manifest.artifacts | Group-Object path | Where-Object { $_.Count -ne 1 }).Count -ne 0) { throw 'SDK artifact paths must be unique.'; }
+      foreach ($artifact in $manifest.artifacts) {
+        $fullPath = Get-SdkPath $root $artifact.path;
+        if (-not [IO.File]::Exists($fullPath)) { throw ('SDK artifact is missing: ' + $artifact.path); }
+        $file = Get-Item -LiteralPath $fullPath;
+        if ($file.Length -ne $artifact.bytes) { throw ('SDK artifact byte count mismatch: ' + $artifact.path); }
+        $hash = Get-SdkHash $fullPath;
+        if ($hash -ne $artifact.sha256) { throw ('SDK artifact hash mismatch: ' + $artifact.path); }
+      };
+      $declaredHeaders = @($manifest.artifacts | Where-Object { $_.path -like 'include/*.h' } | ForEach-Object { $_.path.Substring(8) } | Sort-Object);
+      $includeRoot = Join-Path $root 'include';
+      $actualHeaders = @(Get-ChildItem -LiteralPath $includeRoot -Recurse -File -Filter '*.h' | ForEach-Object { $_.FullName.Substring($includeRoot.Length + 1).Replace('\', '/') } | Sort-Object);
+      if ($actualHeaders.Count -ne $manifest.publicSurface.headerClosureCount -or $declaredHeaders.Count -ne $actualHeaders.Count) { throw 'SDK public header closure count mismatch.'; }
+      if (@(Compare-Object $declaredHeaders $actualHeaders).Count -ne 0) { throw 'SDK include directory contains a missing or undeclared public header.'; }
+      foreach ($entryHeader in $manifest.publicSurface.entryHeaders) { if ($declaredHeaders -notcontains $entryHeader) { throw ('SDK entry header is outside the declared closure: ' + $entryHeader); } }
+      $declaredLibraries = @('Debug/MVVCVTK.lib', 'Release/MVVCVTK.lib');
+      $libraryRoot = Join-Path $root 'lib';
+      $actualLibraries = @(Get-ChildItem -LiteralPath $libraryRoot -Recurse -File | ForEach-Object { $_.FullName.Substring($libraryRoot.Length + 1).Replace('\', '/') } | Sort-Object);
+      if (@(Compare-Object $declaredLibraries $actualLibraries).Count -ne 0) { throw 'SDK lib directory contains a missing or undeclared artifact.'; }
+      $depsPath = Join-Path $root 'deps/manifest.json';
+      $deps = Get-Content -LiteralPath $depsPath -Raw | ConvertFrom-Json;
+      if ($deps.packageVersion -ne '__DEPS_VERSION__' -or $manifest.dependencies.packageVersion -ne $deps.packageVersion) { throw 'Packaged dependency version mismatch.'; }
+      if ((Get-SdkHash $depsPath) -ne $manifest.dependencies.manifestSha256) { throw 'Packaged dependency manifest hash mismatch.'; }
+      $depsRoot = Join-Path $root 'deps';
+      $declaredDeps = @($manifest.dependencies.artifacts);
+      if (@($declaredDeps | Group-Object path | Where-Object { $_.Count -ne 1 }).Count -ne 0) { throw 'Dependency artifact paths must be unique.'; }
+      $declaredDepPaths = @($declaredDeps | ForEach-Object { $_.path } | Sort-Object);
+      $actualDepPaths = @(Get-ChildItem -LiteralPath $depsRoot -Recurse -File | ForEach-Object { $_.FullName.Substring($depsRoot.Length + 1).Replace('\', '/') } | Sort-Object);
+      if ($declaredDeps.Count -ne $manifest.dependencies.artifactCount -or @(Compare-Object $declaredDepPaths $actualDepPaths).Count -ne 0) { throw 'Packaged dependency artifact closure mismatch.'; }
+      foreach ($artifact in $declaredDeps) {
+        $fullPath = Get-SdkPath $depsRoot $artifact.path;
+        $file = Get-Item -LiteralPath $fullPath;
+        if ($file.Length -ne $artifact.bytes -or (Get-SdkHash $fullPath) -ne $artifact.sha256) { throw ('Packaged dependency artifact mismatch: ' + $artifact.path); }
+      };
+      foreach ($sentinel in $deps.sentinels) {
+        $fullPath = Get-SdkPath $depsRoot $sentinel.path;
+        if (-not [IO.File]::Exists($fullPath)) { throw ('Dependency sentinel is missing: ' + $sentinel.path); }
+        $file = Get-Item -LiteralPath $fullPath;
+        if ($file.Length -ne $sentinel.bytes) { throw ('Dependency sentinel byte count mismatch: ' + $sentinel.path); }
+        if ((Get-SdkHash $fullPath) -ne $sentinel.sha256) { throw ('Dependency sentinel hash mismatch: ' + $sentinel.path); }
+      };
+    </MVVCVTKSdkVerifyScript>
+  </PropertyGroup>
+  <ItemGroup>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\App\AppTypes.h"><SdkPath>App\AppTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\App\Services\FeatureViewService.h"><SdkPath>App\Services\FeatureViewService.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Data\ImageReadTypes.h"><SdkPath>Data\ImageReadTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Data\TrustedImageState.h"><SdkPath>Data\TrustedImageState.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)features\GapAnalysis\include\GapAnalysisTypes.h"><SdkPath>GapAnalysisTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)features\GapAnalysis\include\Host\GapHostFeature.h"><SdkPath>Host\GapHostFeature.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\HostFeature.h"><SdkPath>Host\HostFeature.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostFeatureViewTypes.h"><SdkPath>Host\Types\HostFeatureViewTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostInputTypes.h"><SdkPath>Host\Types\HostInputTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostRequest.h"><SdkPath>Host\Types\HostRequest.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostRequestTypes.h"><SdkPath>Host\Types\HostRequestTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostSessionTypes.h"><SdkPath>Host\Types\HostSessionTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\Types\HostValueTypes.h"><SdkPath>Host\Types\HostValueTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Host\VtkAppHostSession.h"><SdkPath>Host\VtkAppHostSession.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Interaction\InteractionTypes.h"><SdkPath>Interaction\InteractionTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)features\OrthogonalCrop\include\Host\CropHostFeature.h"><SdkPath>Host\CropHostFeature.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)features\OrthogonalCrop\include\OrthogonalCropTypes.h"><SdkPath>OrthogonalCropTypes.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Render\Contracts\OverlayService.h"><SdkPath>Render\Contracts\OverlayService.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Render\Contracts\RenderEffect.h"><SdkPath>Render\Contracts\RenderEffect.h</SdkPath></MVVCVTKSdkPublicHeader>
+    <MVVCVTKSdkPublicHeader Include="$(ProjectDir)include\Render\Contracts\VisualStrategy.h"><SdkPath>Render\Contracts\VisualStrategy.h</SdkPath></MVVCVTKSdkPublicHeader>
+  </ItemGroup>
+  <Target Name="ResolveSdkLayout" Condition="'$(MVVCVTKBuildSdk)'!='true'">
+    <Error Condition="'$(Platform)'!='x64'" Text="MVVCVTK SDK 仅支持 x64；请使用 /p:Platform=x64。" />
+    <Exec Condition="'$(MVVCVTKSdkVersion)'==''"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="Low"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference='Stop'; $repo=[IO.Path]::GetFullPath('$(MVVCVTKSdkRepoRoot)'); $status=@(&amp; git -C $repo status --porcelain); if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect the SDK source state.' }; $date=Get-Date -Format 'yyyy.MM.dd'; if ($status.Count -eq 0) { $short=[string]::Join('', (&amp; git -C $repo rev-parse --short=12 HEAD)); if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the SDK source commit.' }; [Console]::WriteLine($date + '-git.' + $short) } else { [Console]::WriteLine($date + '-rev.' + (Get-Date -Format 'HHmmss')) }&quot;">
+      <Output TaskParameter="ConsoleOutput" ItemName="_MVVCVTKSdkVersionLine" />
+    </Exec>
+    <PropertyGroup>
+      <MVVCVTKSdkVersion Condition="'$(MVVCVTKSdkVersion)'==''">@(_MVVCVTKSdkVersionLine)</MVVCVTKSdkVersion>
+      <MVVCVTKSdkDirectory>$(MVVCVTKSdkVersion)-win-x64</MVVCVTKSdkDirectory>
+      <MVVCVTKSdkBuildRoot Condition="'$(MVVCVTKSdkBuildRoot)'==''">$(MVVCVTKSdkBuildBase)\$(MVVCVTKSdkDirectory)</MVVCVTKSdkBuildRoot>
+      <MVVCVTKSdkStageRoot Condition="'$(MVVCVTKSdkStageRoot)'=='' and '$(MVVCVTKSdkLegacyRoot)'!=''">$(MVVCVTKSdkLegacyRoot)</MVVCVTKSdkStageRoot>
+      <MVVCVTKSdkStageRoot Condition="'$(MVVCVTKSdkStageRoot)'==''">$(MVVCVTKSdkStageBase)\$(MVVCVTKSdkDirectory)</MVVCVTKSdkStageRoot>
+      <MVVCVTKSdkRoot Condition="'$(MVVCVTKSdkRoot)'==''">$(MVVCVTKSdkStageRoot)</MVVCVTKSdkRoot>
+      <MVVCVTKSdkArchiveName Condition="'$(MVVCVTKSdkArchiveName)'==''">MVVCVTK-SDK-$(MVVCVTKSdkDirectory).zip</MVVCVTKSdkArchiveName>
+      <MVVCVTKSdkArchive Condition="'$(MVVCVTKSdkArchive)'==''">$(MVVCVTKSdkPackageRoot)\$(MVVCVTKSdkArchiveName)</MVVCVTKSdkArchive>
+      <MVVCVTKSdkChecksum Condition="'$(MVVCVTKSdkChecksum)'==''">$(MVVCVTKSdkArchive).sha256</MVVCVTKSdkChecksum>
+      <MVVCVTKSdkVerifyBase>$([System.IO.Path]::GetFullPath('$(LOCALAPPDATA)\MVVCVTK-SdkVerify'))</MVVCVTKSdkVerifyBase>
+      <MVVCVTKSdkVerifyRoot Condition="'$(MVVCVTKSdkVerifyRoot)'==''">$(MVVCVTKSdkVerifyBase)\$(MVVCVTKSdkDirectory)</MVVCVTKSdkVerifyRoot>
+      <MVVCVTKSdkVerifyPackage>$(MVVCVTKSdkVerifyRoot)\$(MVVCVTKSdkDirectory)</MVVCVTKSdkVerifyPackage>
+      <MVVCVTKSdkHeaderCount>@(MVVCVTKSdkPublicHeader-&gt;Count())</MVVCVTKSdkHeaderCount>
+      <MVVCVTKSdkManifestCommand>$([System.String]::Copy('$(MVVCVTKSdkManifestScript)').Replace('__SDK_STAGE__', '$(MVVCVTKSdkStageRoot)').Replace('__SDK_REPO__', '$(MVVCVTKSdkRepoRoot)').Replace('__SDK_VERSION__', '$(MVVCVTKSdkVersion)').Replace('__SDK_DIRECTORY__', '$(MVVCVTKSdkDirectory)').Replace('__DEPS_VERSION__', '$(MVVCVTKDepsVersion)').Replace('__TOOLS_VERSION__', '$(VCToolsVersion)').Replace('__HEADER_COUNT__', '$(MVVCVTKSdkHeaderCount)').Replace('__ARCHIVE_NAME__', '$(MVVCVTKSdkArchiveName)').Replace('%0A', ' '))</MVVCVTKSdkManifestCommand>
+      <MVVCVTKSdkVerifyCommand>$([System.String]::Copy('$(MVVCVTKSdkVerifyScript)').Replace('__SDK_STAGE__', '$(MVVCVTKSdkStageRoot)').Replace('__SDK_VERSION__', '$(MVVCVTKSdkVersion)').Replace('__SDK_DIRECTORY__', '$(MVVCVTKSdkDirectory)').Replace('__DEPS_VERSION__', '$(MVVCVTKDepsVersion)').Replace('%0A', ' '))</MVVCVTKSdkVerifyCommand>
+    </PropertyGroup>
+    <Error Condition="'$(MVVCVTKSdkVersion)'==''" Text="无法解析 MVVCVTK SDK 版本。" />
+  </Target>
+  <Target Name="BuildSdk" DependsOnTargets="ResolveSdkLayout" Condition="'$(MVVCVTKBuildSdk)'!='true'">
+    <Error Condition="!Exists('$(MVVCVTKDepsBundleRoot)\MVVCVTK.Dependencies.props')" Text="SDK 依赖源不存在：'$(MVVCVTKDepsBundleRoot)'。请放置版本化依赖包或传入 /p:MVVCVTKDepsBundleRoot=&lt;path&gt;。" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Rebuild" BuildInParallel="false"
+             Properties="Configuration=Debug;Platform=x64;ImportUserProps=false;MVVCVTKBuildSdk=true;MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion);MVVCVTKSdkBuildRoot=$(MVVCVTKSdkBuildRoot);MVVCVTKDepsBundleRoot=$(MVVCVTKDepsBundleRoot);MVVCVTKDepsRoot=$(MVVCVTKDepsBundleRoot)" />
+    <MSBuild Projects="$(MSBuildProjectFullPath)" Targets="Rebuild" BuildInParallel="false"
+             Properties="Configuration=Release;Platform=x64;ImportUserProps=false;MVVCVTKBuildSdk=true;MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion);MVVCVTKSdkBuildRoot=$(MVVCVTKSdkBuildRoot);MVVCVTKDepsBundleRoot=$(MVVCVTKDepsBundleRoot);MVVCVTKDepsRoot=$(MVVCVTKDepsBundleRoot)" />
+  </Target>
+  <Target Name="CleanSdkPackageStage" DependsOnTargets="ResolveSdkLayout">
+    <PropertyGroup>
+      <MVVCVTKSdkStagePath>$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkStageRoot)'))</MVVCVTKSdkStagePath>
+      <MVVCVTKSdkStageBasePath>$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkStageBase)'))</MVVCVTKSdkStageBasePath>
+      <MVVCVTKSdkStagePrefix>$(MVVCVTKSdkStageBasePath)\</MVVCVTKSdkStagePrefix>
+      <MVVCVTKSdkStageSafe>$([System.String]::Copy('$(MVVCVTKSdkStagePath)').StartsWith('$(MVVCVTKSdkStagePrefix)', System.StringComparison.OrdinalIgnoreCase))</MVVCVTKSdkStageSafe>
+    </PropertyGroup>
+    <Error Condition="'$(MVVCVTKSdkStageRoot)'=='' or '$(MVVCVTKSdkStageSafe)'!='True' or '$(MVVCVTKSdkStagePath)'=='$(MVVCVTKSdkStageBasePath)'"
+           Text="拒绝清理不安全的 SDK package stage：'$(MVVCVTKSdkStageRoot)'。自定义 stage 时必须同时指定其父目录 MVVCVTKSdkStageBase。" />
+    <Exec Condition="Exists('$(MVVCVTKSdkStagePath)')"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$item=Get-Item -LiteralPath '$(MVVCVTKSdkStagePath)' -Force; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'SDK package stage cannot be a reparse point.' }&quot;" />
+    <RemoveDir Directories="$(MVVCVTKSdkStagePath)" Condition="Exists('$(MVVCVTKSdkStagePath)')" />
+  </Target>
+  <Target Name="StageSdk" DependsOnTargets="BuildSdk;CleanSdkPackageStage">
+    <PropertyGroup>
+      <MVVCVTKSdkSourcePropsPath>$([System.IO.Path]::GetFullPath('$(ProjectDir)MVVCVTK.Sdk.props'))</MVVCVTKSdkSourcePropsPath>
+      <MVVCVTKDepsSourcePath>$([System.IO.Path]::GetFullPath('$(MVVCVTKDepsBundleRoot)'))</MVVCVTKDepsSourcePath>
+      <MVVCVTKDepsTargetPath>$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkStageRoot)\deps'))</MVVCVTKDepsTargetPath>
+    </PropertyGroup>
+    <Error Condition="!Exists('$(MVVCVTKSdkSourcePropsPath)')" Text="SDK consumer props template is missing: '$(MVVCVTKSdkSourcePropsPath)'." />
+    <Error Condition="'$(MVVCVTKDepsSourcePath)'=='$(MVVCVTKDepsTargetPath)'" Text="SDK dependency input and package output must be different directories." />
+    <MakeDir Directories="$(MVVCVTKSdkStageRoot)\include;$(MVVCVTKSdkStageRoot)\lib\Debug;$(MVVCVTKSdkStageRoot)\lib\Release;$(MVVCVTKSdkStageRoot)\deps" />
+    <Copy SourceFiles="@(MVVCVTKSdkPublicHeader)"
+          DestinationFiles="@(MVVCVTKSdkPublicHeader-&gt;'$(MVVCVTKSdkStageRoot)\include\%(SdkPath)')" />
+    <Copy SourceFiles="$(MVVCVTKSdkSourcePropsPath)"
+          DestinationFiles="$(MVVCVTKSdkStageRoot)\MVVCVTK.Sdk.props" />
+    <Copy SourceFiles="$(MVVCVTKSdkBuildRoot)\lib\Debug\MVVCVTK.lib;$(MVVCVTKSdkBuildRoot)\lib\Release\MVVCVTK.lib"
+          DestinationFiles="$(MVVCVTKSdkStageRoot)\lib\Debug\MVVCVTK.lib;$(MVVCVTKSdkStageRoot)\lib\Release\MVVCVTK.lib" />
+    <ItemGroup>
+      <MVVCVTKDepsFile Include="$(MVVCVTKDepsBundleRoot)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(MVVCVTKDepsFile)"
+          DestinationFiles="@(MVVCVTKDepsFile-&gt;'$(MVVCVTKSdkStageRoot)\deps\%(RecursiveDir)%(Filename)%(Extension)')" />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;&amp; { $(MVVCVTKSdkManifestCommand) }&quot;" />
+  </Target>
+  <Target Name="VerifySdk" DependsOnTargets="StageSdk">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;&amp; { $(MVVCVTKSdkVerifyCommand) }&quot;" />
+  </Target>
+  <Target Name="PackSdk" DependsOnTargets="VerifySdk">
+    <MakeDir Directories="$(MVVCVTKSdkPackageRoot)" />
+    <ZipDirectory SourceDirectory="$(MVVCVTKSdkStageRoot)" DestinationFile="$(MVVCVTKSdkArchive)" Overwrite="true" CompressionLevel="Optimal" />
+    <GetFileHash Files="$(MVVCVTKSdkArchive)" Algorithm="SHA256" MetadataName="Sha256">
+      <Output TaskParameter="Items" ItemName="MVVCVTKSdkArchiveHash" />
+    </GetFileHash>
+    <WriteLinesToFile File="$(MVVCVTKSdkChecksum)"
+                      Lines="@(MVVCVTKSdkArchiveHash-&gt;'%(Sha256)  $(MVVCVTKSdkArchiveName)')"
+                      Overwrite="true" Encoding="UTF-8" />
+  </Target>
+  <Target Name="CleanSdkStage" DependsOnTargets="ResolveSdkLayout">
+    <PropertyGroup>
+      <MVVCVTKSdkVerifyPath>$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkVerifyRoot)'))</MVVCVTKSdkVerifyPath>
+      <MVVCVTKSdkVerifyPrefix>$(MVVCVTKSdkVerifyBase)\</MVVCVTKSdkVerifyPrefix>
+      <MVVCVTKSdkVerifySafe>$([System.String]::Copy('$(MVVCVTKSdkVerifyPath)').StartsWith('$(MVVCVTKSdkVerifyPrefix)', System.StringComparison.OrdinalIgnoreCase))</MVVCVTKSdkVerifySafe>
+      <MVVCVTKSdkPackagePath>$([System.IO.Path]::GetFullPath('$(MVVCVTKSdkStageRoot)'))</MVVCVTKSdkPackagePath>
+    </PropertyGroup>
+    <Error Condition="'$(MVVCVTKSdkVerifyRoot)'=='' or '$(MVVCVTKSdkVerifySafe)'!='True' or '$(MVVCVTKSdkVerifyPath)'=='$(MVVCVTKSdkVerifyBase)' or '$(MVVCVTKSdkVerifyPath)'=='$(MVVCVTKSdkPackagePath)'"
+           Text="拒绝清理不安全的 SDK 验证目录：'$(MVVCVTKSdkVerifyRoot)'。" />
+    <Exec Condition="Exists('$(MVVCVTKSdkVerifyPath)')"
+          Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$item=Get-Item -LiteralPath '$(MVVCVTKSdkVerifyPath)' -Force; if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'SDK verify root cannot be a reparse point.' }&quot;" />
+    <RemoveDir Directories="$(MVVCVTKSdkVerifyPath)" Condition="Exists('$(MVVCVTKSdkVerifyPath)')" />
+  </Target>
+  <Target Name="VerifyCleanRoom" DependsOnTargets="PackSdk;CleanSdkStage">
+    <MakeDir Directories="$(MVVCVTKSdkVerifyPackage);$(MVVCVTKSdkVerifyRoot)\consumer;$(MVVCVTKSdkVerifyRoot)\headers" />
+    <Unzip SourceFiles="$(MVVCVTKSdkArchive)" DestinationFolder="$(MVVCVTKSdkVerifyPackage)" />
+    <ItemGroup>
+      <_MVVCVTKSdkHeaderCheck Include="@(MVVCVTKSdkPublicHeader)">
+        <CheckPath>$(MVVCVTKSdkVerifyRoot)\headers\$([System.String]::Copy('%(SdkPath)').Replace('\', '_')).cpp</CheckPath>
+        <CheckLine>#include &quot;%(SdkPath)&quot;</CheckLine>
+      </_MVVCVTKSdkHeaderCheck>
+      <_MVVCVTKSdkHeaderProjectLine Include="&lt;?xml version=&quot;1.0&quot; encoding=&quot;utf-8&quot;?&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="&lt;Project DefaultTargets=&quot;Build&quot; xmlns=&quot;http://schemas.microsoft.com/developer/msbuild/2003&quot;&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;ItemGroup Label=&quot;ProjectConfigurations&quot;&gt;&lt;ProjectConfiguration Include=&quot;Debug|x64&quot;&gt;&lt;Configuration&gt;Debug&lt;/Configuration&gt;&lt;Platform&gt;x64&lt;/Platform&gt;&lt;/ProjectConfiguration&gt;&lt;ProjectConfiguration Include=&quot;Release|x64&quot;&gt;&lt;Configuration&gt;Release&lt;/Configuration&gt;&lt;Platform&gt;x64&lt;/Platform&gt;&lt;/ProjectConfiguration&gt;&lt;/ItemGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;PropertyGroup Label=&quot;Globals&quot;&gt;&lt;VCProjectVersion&gt;17.0&lt;/VCProjectVersion&gt;&lt;WindowsTargetPlatformVersion&gt;10.0&lt;/WindowsTargetPlatformVersion&gt;&lt;/PropertyGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;Import Project=&quot;$(VCTargetsPath)\Microsoft.Cpp.Default.props&quot; /&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;PropertyGroup Label=&quot;Configuration&quot;&gt;&lt;ConfigurationType&gt;StaticLibrary&lt;/ConfigurationType&gt;&lt;PlatformToolset&gt;v145&lt;/PlatformToolset&gt;&lt;CharacterSet&gt;Unicode&lt;/CharacterSet&gt;&lt;/PropertyGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;Import Project=&quot;$(VCTargetsPath)\Microsoft.Cpp.props&quot; /&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;PropertyGroup Condition=&quot;'%24(Configuration)'=='Debug'&quot;&gt;&lt;OutDir&gt;$(MVVCVTKSdkVerifyRoot)\headers\x64\Debug\&lt;/OutDir&gt;&lt;IntDir&gt;$(MVVCVTKSdkVerifyRoot)\headers\obj\Debug\&lt;/IntDir&gt;&lt;/PropertyGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;PropertyGroup Condition=&quot;'%24(Configuration)'=='Release'&quot;&gt;&lt;OutDir&gt;$(MVVCVTKSdkVerifyRoot)\headers\x64\Release\&lt;/OutDir&gt;&lt;IntDir&gt;$(MVVCVTKSdkVerifyRoot)\headers\obj\Release\&lt;/IntDir&gt;&lt;/PropertyGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;Import Project=&quot;$(MVVCVTKSdkVerifyPackage)\MVVCVTK.Sdk.props&quot; /&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;ItemGroup&gt;&lt;ClCompile Include=&quot;$(MVVCVTKSdkVerifyRoot)\headers\*.cpp&quot; /&gt;&lt;/ItemGroup&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="  &lt;Import Project=&quot;$(VCTargetsPath)\Microsoft.Cpp.targets&quot; /&gt;" />
+      <_MVVCVTKSdkHeaderProjectLine Include="&lt;/Project&gt;" />
+    </ItemGroup>
+    <WriteLinesToFile File="%(_MVVCVTKSdkHeaderCheck.CheckPath)"
+                      Lines="%(_MVVCVTKSdkHeaderCheck.CheckLine)"
+                      Overwrite="true" Encoding="UTF-8" />
+    <WriteLinesToFile File="$(MVVCVTKSdkVerifyRoot)\headers\all_headers.cpp"
+                      Lines="@(_MVVCVTKSdkHeaderCheck-&gt;'%(CheckLine)')"
+                      Overwrite="true" Encoding="UTF-8" />
+    <WriteLinesToFile File="$(MVVCVTKSdkVerifyRoot)\headers\PublicHeaderCheck.vcxproj"
+                      Lines="@(_MVVCVTKSdkHeaderProjectLine)"
+                      Overwrite="true" Encoding="UTF-8" />
+    <MSBuild Projects="$(MVVCVTKSdkVerifyRoot)\headers\PublicHeaderCheck.vcxproj" Targets="Build" BuildInParallel="false"
+             Properties="Configuration=Debug;Platform=x64;ImportDirectoryBuildProps=false;BuildProjectReferences=false;MVVCVTKSdkRoot=$(MVVCVTKSdkVerifyPackage);MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion)" />
+    <MSBuild Projects="$(MVVCVTKSdkVerifyRoot)\headers\PublicHeaderCheck.vcxproj" Targets="Build" BuildInParallel="false"
+             Properties="Configuration=Release;Platform=x64;ImportDirectoryBuildProps=false;BuildProjectReferences=false;MVVCVTKSdkRoot=$(MVVCVTKSdkVerifyPackage);MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion)" />
+    <Copy SourceFiles="$(MVVCVTKSdkRepoRoot)test\QtHost\QtHostSmoke.cpp;$(MVVCVTKSdkRepoRoot)test\QtHost\QtHostSmoke.vcxproj"
+          DestinationFolder="$(MVVCVTKSdkVerifyRoot)\consumer" />
+    <MSBuild Projects="$(MVVCVTKSdkVerifyRoot)\consumer\QtHostSmoke.vcxproj" Targets="Build" BuildInParallel="false"
+             Properties="Configuration=Debug;Platform=x64;ImportDirectoryBuildProps=false;ImportUserProps=false;BuildProjectReferences=false;MVVCVTKSdkRoot=$(MVVCVTKSdkVerifyPackage);MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion)" />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$env:PATH='$(MVVCVTKSdkVerifyPackage)\deps\ui\bin;$(MVVCVTKSdkVerifyPackage)\deps\opencv\x64\vc16\bin;$(MVVCVTKSdkVerifyPackage)\deps\vtk\bin;$(MVVCVTKSdkVerifyPackage)\deps\qt\bin;' + $env:PATH; $env:QT_PLUGIN_PATH='$(MVVCVTKSdkVerifyPackage)\deps\qt\plugins'; &amp; '$(MVVCVTKSdkVerifyRoot)\consumer\x64\Debug\QtHostSmoke.exe'; exit $LASTEXITCODE&quot;" />
+    <MSBuild Projects="$(MVVCVTKSdkVerifyRoot)\consumer\QtHostSmoke.vcxproj" Targets="Build" BuildInParallel="false"
+             Properties="Configuration=Release;Platform=x64;ImportDirectoryBuildProps=false;ImportUserProps=false;BuildProjectReferences=false;MVVCVTKSdkRoot=$(MVVCVTKSdkVerifyPackage);MVVCVTKSdkVersion=$(MVVCVTKSdkVersion);MVVCVTKDepsVersion=$(MVVCVTKDepsVersion)" />
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -Command &quot;$env:PATH='$(MVVCVTKSdkVerifyPackage)\deps\ui\bin;$(MVVCVTKSdkVerifyPackage)\deps\opencv\x64\vc16\bin;$(MVVCVTKSdkVerifyPackage)\deps\vtk\bin;$(MVVCVTKSdkVerifyPackage)\deps\qt\bin;' + $env:PATH; $env:QT_PLUGIN_PATH='$(MVVCVTKSdkVerifyPackage)\deps\qt\plugins'; &amp; '$(MVVCVTKSdkVerifyRoot)\consumer\x64\Release\QtHostSmoke.exe'; exit $LASTEXITCODE&quot;" />
+    <CallTarget Targets="CleanSdkStage" />
+    <OnError ExecuteTargets="CleanSdkStage" />
+  </Target>
+  <Target Name="MVVCVTKCheckSdkPlatform"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MVVCVTKBuildSdk)'=='true' and '$(Platform)'!='x64'">
+    <Error Text="MVVCVTK SDK 仅支持 x64；请使用 /p:Platform=x64。" />
+  </Target>
   <ImportGroup Label="ExtensionTargets" />
 </Project>

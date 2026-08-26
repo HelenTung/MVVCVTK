@@ -1,5 +1,5 @@
 #pragma once
-#include "AppInterfaces.h"
+#include "Render/Contracts/VisualStrategy.h"
 #include "ImageProcessor.h"
 #include <vtkProp.h>
 #include <vtkProp3D.h>
@@ -192,8 +192,8 @@ public:
                 m_effectRenderer->RemoveViewProp(prop);
             }
         }
-        // 基类只处理“把当前策略拥有的 prop 全部挂到 renderer 上”，
-        // 具体背景色、相机或附加 VTK 关系由派生类继续补充。
+        // 基类只处理“把当前策略拥有的 prop 全部挂到 renderer 上”；
+        // 相机由 App 视图 runtime 统一拥有，派生类只补充自身的 VTK 关系。
         for (auto& prop : m_managedProps) {
             renderer->AddViewProp(prop);
         }

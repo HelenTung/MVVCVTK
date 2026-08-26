@@ -1,10 +1,6 @@
 #include "Host/CropHostFeature.h"
 
-#include "AppInterfaces.h"
-#include "AppService.h"
-#include "Host/HostRenderViewSet.h"
 #include "Interaction/CropBridge.h"
-#include "StdRenderContext.h"
 
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -124,7 +120,7 @@ private:
     bool GetTargetsValid(
         const HostViewTargets& targets) const;
     bool SetActiveViews(
-        const std::vector<std::shared_ptr<InteractiveService>>& services) const;
+        const std::vector<std::string>& viewIds) const;
     bool SetCropInput(const CropHostTarget& target);
     bool SetPolyData(
         vtkSmartPointer<vtkPolyData> polyData,
@@ -132,8 +128,8 @@ private:
     bool ClearPolyData();
     bool ResetOriginal();
     bool SetImageResult(
-        const ImageSnapshot& sourceSnapshot,
-        const ImageSnapshot& expectedSnapshot,
+        const TrustedImageSnapshot& sourceSnapshot,
+        const TrustedImageSnapshot& expectedSnapshot,
         CropBuildResult& result);
     bool BuildCropResult(
         const CropHostTarget& target,
@@ -169,23 +165,15 @@ private:
 
     CropHostConfig m_config;
     std::unique_ptr<CropBridge> m_bridge;
-    const HostRenderViewSet* m_renderViews = nullptr;
-    HostInputPort* m_inputPort = nullptr;
-    std::function<ImageSnapshot()> m_getImageSnapshot;
-    std::function<bool(
-        ImageState,
-        const ImageSnapshot&,
-        ImageSnapshot&)> m_setImageState;
-    std::function<bool(
-        const std::vector<std::shared_ptr<InteractiveService>>&)>
-        m_setActiveViews;
-    std::function<bool(std::function<void()>)>
-        m_sendOwnerComplete;
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<FeatureHostControl> m_host;
     vtkSmartPointer<vtkPolyData> m_polyData;
     std::uint64_t m_sourceVersion = 0;
-    ImageSnapshot m_rootImage;
-    ImageSnapshot m_lastImage;
+    TrustedImageSnapshot m_rootImage;
+    TrustedImageSnapshot m_lastImage;
     std::optional<CropHostTarget> m_activeTarget;
+    std::vector<std::string> m_activeViewIds;
     std::optional<CropHistoryState> m_status;
     std::shared_ptr<CompleteState> m_completeState;
     std::thread::id m_ownerThread;
@@ -200,26 +188,21 @@ bool CropHostFeature::Impl::AttachHost(
     const HostFeatureContext& context)
 {
     if (m_isAttached) {
-        return m_renderViews == context.renderViews
-            && m_inputPort == context.inputPort
+        return m_views == context.views
+            && m_data == context.data
+            && m_host == context.host
             && m_ownerThread == std::this_thread::get_id();
     }
     if (owner.weak_from_this().expired()
-        || !context.renderViews
-        || !context.inputPort
-        || !context.getImageSnapshot
-        || !context.setImageState
-        || !context.setActiveViews
-        || !context.sendOwnerComplete) {
+        || !context.views
+        || !context.data
+        || !context.host) {
         return false;
     }
 
-    m_renderViews = context.renderViews;
-    m_inputPort = context.inputPort;
-    m_getImageSnapshot = context.getImageSnapshot;
-    m_setImageState = context.setImageState;
-    m_setActiveViews = context.setActiveViews;
-    m_sendOwnerComplete = context.sendOwnerComplete;
+    m_views = context.views;
+    m_data = context.data;
+    m_host = context.host;
     m_completeState = std::make_shared<CompleteState>();
     m_ownerThread = std::this_thread::get_id();
 
@@ -237,7 +220,7 @@ bool CropHostFeature::Impl::AttachHost(
                 ? feature->m_impl->OnInput(event)
                 : InteractionResult{};
         };
-        if (!m_inputPort->AttachInput(std::move(binding))) {
+        if (!m_host->AttachInput(std::move(binding))) {
             ClearBorrowed();
             return false;
         }
@@ -258,10 +241,10 @@ bool CropHostFeature::Impl::DetachHost()
     bool isInputDetached =
         m_config.inputViews.viewIds.empty()
         && m_config.inputViews.viewRoles.empty();
-    if (!isInputDetached && m_inputPort) {
+    if (!isInputDetached && m_host) {
         try {
             isInputDetached =
-                m_inputPort->DetachInput(kFeatureId);
+                m_host->DetachInput(kFeatureId);
         }
         catch (...) {
             isInputDetached = false;
@@ -283,6 +266,7 @@ bool CropHostFeature::Impl::DetachHost()
         (void)m_bridge->ClearBindings();
     }
     m_activeTarget.reset();
+    m_activeViewIds.clear();
     m_status.reset();
     m_isDown.fill(false);
     if (!isInputDetached) {
@@ -295,15 +279,12 @@ bool CropHostFeature::Impl::DetachHost()
 
 void CropHostFeature::Impl::ClearBorrowed()
 {
-    if (m_setActiveViews) {
-        (void)m_setActiveViews({});
+    if (m_host) {
+        (void)m_host->SetActiveViews({});
     }
-    m_renderViews = nullptr;
-    m_inputPort = nullptr;
-    m_getImageSnapshot = {};
-    m_setImageState = {};
-    m_setActiveViews = {};
-    m_sendOwnerComplete = {};
+    m_views.reset();
+    m_data.reset();
+    m_host.reset();
     m_ownerThread = {};
     if (m_completeState) {
         const std::lock_guard<std::mutex> lock(
@@ -347,8 +328,8 @@ CropHostFeature::Impl::GetCropInput(
 {
     CropInputSnapshot input;
     if (target.source == CropHostSource::CurrentImage) {
-        const auto imageState = m_getImageSnapshot
-            ? m_getImageSnapshot() : ImageSnapshot{};
+        const auto imageState = m_data
+            ? m_data->GetImageSnapshot() : TrustedImageSnapshot{};
         if (!imageState || !GetImageReady(imageState->image)) {
             return std::nullopt;
         }
@@ -377,19 +358,31 @@ CropHostFeature::Impl::GetCropInput(
 bool CropHostFeature::Impl::GetTargetsValid(
     const HostViewTargets& targets) const
 {
-    if (!m_renderViews
+    if (!m_views
         || (targets.viewIds.empty()
             && targets.viewRoles.empty())) {
         return false;
     }
+    const auto views = m_views->GetViews(targets);
+    if (views.empty()) {
+        return false;
+    }
     for (const auto& viewId : targets.viewIds) {
         if (viewId.empty()
-            || !m_renderViews->GetViewById(viewId)) {
+            || std::none_of(
+                views.begin(), views.end(),
+                [&viewId](const HostFeatureView& view) {
+                    return view.id == viewId;
+                })) {
             return false;
         }
     }
     for (const auto role : targets.viewRoles) {
-        if (!m_renderViews->GetFirstViewByRole(role)) {
+        if (std::none_of(
+                views.begin(), views.end(),
+                [role](const HostFeatureView& view) {
+                    return view.role == role;
+                })) {
             return false;
         }
     }
@@ -397,30 +390,30 @@ bool CropHostFeature::Impl::GetTargetsValid(
 }
 
 bool CropHostFeature::Impl::SetActiveViews(
-    const std::vector<std::shared_ptr<InteractiveService>>& services) const
+    const std::vector<std::string>& viewIds) const
 {
-    return m_setActiveViews
-        && m_setActiveViews(services);
+    return m_host
+        && m_host->SetActiveViews(viewIds);
 }
 
 bool CropHostFeature::Impl::StartCrop(
     const CropHostTarget& target)
 {
     if (!m_isAttached
-        || !m_renderViews
+        || !m_views
         || !m_bridge
         || (target.referenceView.viewId.empty()
             && !target.referenceView.isViewRoleUsed)) {
         return false;
     }
-    const auto* referenceView =
-        m_renderViews->GetViewBySelector(
-            target.referenceView);
-    if (!referenceView
-        || !referenceView->service
-        || !referenceView->context) {
+    const auto referenceView =
+        m_views->GetInputView(target.referenceView);
+    if (!referenceView) {
         return false;
     }
+    const auto referencePort =
+        m_views->GetFeaturePort(referenceView->view.id);
+    if (!referencePort) return false;
 
     const auto& requestedTargets = target.isTargetViewsUsed
         ? target.targetViews
@@ -428,32 +421,41 @@ bool CropHostFeature::Impl::StartCrop(
     if (!GetTargetsValid(requestedTargets)) {
         return false;
     }
-    const auto targetViews =
-        m_renderViews->GetViewsByTargets(requestedTargets);
+    const auto targetViews = m_views->GetViews(requestedTargets);
     auto input = GetCropInput(target);
     if (targetViews.empty() || !input) {
         return false;
     }
 
     CropViewRequest request;
-    request.interactor =
-        referenceView->context->GetInteractor();
-    request.renderer =
-        referenceView->context->GetRenderer();
-    request.referenceService = referenceView->service;
-    request.targetServices =
-        m_renderViews->BuildServices(targetViews);
+    request.interactor = referenceView->interactor;
+    request.renderer = referenceView->renderer;
+    request.lease = referenceView->lease;
+    request.referenceService = referencePort;
+    std::vector<std::string> activeViewIds;
+    activeViewIds.reserve(targetViews.size() + 1);
+    for (const auto& view : targetViews) {
+        const auto port = m_views->GetFeaturePort(view.id);
+        if (port) {
+            request.targetServices.push_back(port);
+            if (!view.id.empty()
+                && std::find(
+                    activeViewIds.begin(),
+                    activeViewIds.end(),
+                    view.id) == activeViewIds.end()) {
+                activeViewIds.push_back(view.id);
+            }
+        }
+    }
     if (request.targetServices.empty()) {
         return false;
     }
-    auto activeServices = request.targetServices;
     if (std::find(
-            activeServices.begin(),
-            activeServices.end(),
-            request.referenceService)
-            == activeServices.end()) {
-        activeServices.push_back(
-            request.referenceService);
+            activeViewIds.begin(),
+            activeViewIds.end(),
+            referenceView->view.id)
+            == activeViewIds.end()) {
+        activeViewIds.push_back(referenceView->view.id);
     }
     const bool hasNewLineage =
         target.source == CropHostSource::CurrentImage
@@ -464,7 +466,7 @@ bool CropHostFeature::Impl::StartCrop(
     const bool isStarted = m_bridge->StartView(
         request, std::move(*input));
     if (isStarted) {
-        if (!SetActiveViews(activeServices)) {
+        if (!SetActiveViews(activeViewIds)) {
             (void)m_bridge->ExitCrop();
             (void)m_bridge->ClearBindings();
             return false;
@@ -474,6 +476,7 @@ bool CropHostFeature::Impl::StartCrop(
             m_lastImage.reset();
         }
         m_activeTarget = target;
+        m_activeViewIds = std::move(activeViewIds);
         SendStatus();
     }
     return isStarted;
@@ -500,6 +503,7 @@ bool CropHostFeature::Impl::SetPolyData(
     m_polyData = std::move(polyData);
     m_sourceVersion = sourceVersion;
     m_activeTarget.reset();
+    m_activeViewIds.clear();
     m_status.reset();
     return true;
 }
@@ -515,13 +519,14 @@ bool CropHostFeature::Impl::ClearPolyData()
     m_polyData = nullptr;
     m_sourceVersion = 0;
     m_activeTarget.reset();
+    m_activeViewIds.clear();
     m_status.reset();
     return true;
 }
 
 bool CropHostFeature::Impl::SetImageResult(
-    const ImageSnapshot& sourceSnapshot,
-    const ImageSnapshot& expectedSnapshot,
+    const TrustedImageSnapshot& sourceSnapshot,
+    const TrustedImageSnapshot& expectedSnapshot,
     CropBuildResult& result)
 {
     if (!result.isSucceeded
@@ -531,8 +536,7 @@ bool CropHostFeature::Impl::SetImageResult(
         || !result.maskImage
         || !sourceSnapshot
         || !expectedSnapshot
-        || !m_setImageState
-        || !m_getImageSnapshot
+        || !m_data
         || m_isPublishing) {
         std::cout
             << "[Crop][Materialize] reject invalid result or host state"
@@ -586,15 +590,15 @@ bool CropHostFeature::Impl::SetImageResult(
     input.validityMask = result.maskImage;
     input.imageData->GetBounds(
         input.inputModelBounds.data());
-    if (!m_bridge->StartCropBaseline(
-            std::move(input),
-            absoluteNodeCount)) {
+    auto preparedCommit = m_bridge->BuildCropCommit(
+        std::move(input), absoluteNodeCount);
+    if (!preparedCommit) {
         result.isSucceeded = false;
         result.failureReason = CropFailure::BadInput;
         result.message =
-            "Crop history could not stage the materialized baseline.";
+            "Crop history could not prepare the materialized baseline.";
         std::cout
-            << "[Crop][Materialize] reject baseline staging"
+            << "[Crop][Materialize] reject commit preparation"
             << " | " << GetHistoryText(
                 m_bridge->GetCropHistory())
             << '\n';
@@ -610,13 +614,13 @@ bool CropHostFeature::Impl::SetImageResult(
         << '\n';
 
     const PublishGuard publishGuard(m_isPublishing);
-    ImageState candidate = *expectedSnapshot;
+    TrustedImageState candidate = *expectedSnapshot;
     candidate.image = result.imageData;
     candidate.validityMask = result.maskImage;
     bool isPublished = false;
-    ImageSnapshot publishedSnapshot;
+    TrustedImageSnapshot publishedSnapshot;
     try {
-        isPublished = m_setImageState(
+        isPublished = m_data->SetImageState(
             std::move(candidate),
             expectedSnapshot,
             publishedSnapshot);
@@ -625,7 +629,6 @@ bool CropHostFeature::Impl::SetImageResult(
         isPublished = false;
     }
     if (!isPublished) {
-        (void)m_bridge->ClearCropBaseline();
         result.isSucceeded = false;
         result.failureReason =
             CropFailure::VersionMismatch;
@@ -642,21 +645,9 @@ bool CropHostFeature::Impl::SetImageResult(
         return false;
     }
 
-    if (!publishedSnapshot
-        || publishedSnapshot->version
-            != expectedSnapshot->version + 1
-        || publishedSnapshot->image.GetPointer()
-            != result.imageData.GetPointer()
-        || publishedSnapshot->validityMask.GetPointer()
-            != result.maskImage.GetPointer()) {
-        // setImageState=true 必须携带同一 CAS 临界区内返回的发布令牌。
-        // 违反该宿主契约时不能再按普通失败取消 baseline。
-        std::terminate();
-    }
-
-    // StartCropBaseline 已完成全部可失败校验；CAS 发布后只执行无失败状态交换，
-    // 避免新 image+mask 与旧 history/shader 基线分裂。
-    (void)m_bridge->SetCropBaselineComplete();
+    // TrustedFeatureDataPort 保证 true 与同一 published owner 不可分割；
+    // 从这里开始只接管 move-only 准备令牌，禁止再把已发布事务降级成普通失败。
+    m_bridge->SetCropCommit(std::move(*preparedCommit));
 
     if (!m_rootImage) {
         m_rootImage = sourceSnapshot;
@@ -685,6 +676,7 @@ bool CropHostFeature::Impl::SetImageResult(
         m_lastImage.reset();
     }
     m_lastImage = std::move(publishedSnapshot);
+    (void)m_bridge->SendCropCommit();
     const auto historyAfter =
         m_bridge->GetCropHistory();
     std::cout << "[Crop][Materialize] baseline complete"
@@ -707,23 +699,22 @@ bool CropHostFeature::Impl::ResetOriginal()
 {
     if (!m_rootImage
         || !m_bridge
-        || !m_setImageState
-        || !m_getImageSnapshot
+        || !m_data
         || m_isPublishing) {
         std::cout
             << "[Crop][History] reject root baseline"
             << " hasRoot=" << static_cast<bool>(m_rootImage)
             << " hasBridge=" << static_cast<bool>(m_bridge)
             << " hasPublisher="
-            << static_cast<bool>(m_setImageState)
+            << static_cast<bool>(m_data)
             << " hasSnapshotReader="
-            << static_cast<bool>(m_getImageSnapshot)
+            << static_cast<bool>(m_data)
             << " isPublishing=" << m_isPublishing
             << '\n';
         return false;
     }
     const auto expectedSnapshot =
-        m_getImageSnapshot();
+        m_data->GetImageSnapshot();
     if (!expectedSnapshot
         || (m_lastImage
             && expectedSnapshot != m_lastImage)) {
@@ -765,10 +756,11 @@ bool CropHostFeature::Impl::ResetOriginal()
     input.validityMask = m_rootImage->validityMask;
     input.imageData->GetBounds(
         input.inputModelBounds.data());
-    if (!m_bridge->StartCropBaseline(
-            std::move(input), 0)) {
+    auto preparedCommit = m_bridge->BuildCropCommit(
+        std::move(input), 0);
+    if (!preparedCommit) {
         std::cout
-            << "[Crop][History] reject root baseline staging"
+            << "[Crop][History] reject root commit preparation"
             << " | " << GetHistoryText(
                 m_bridge->GetCropHistory())
             << '\n';
@@ -776,11 +768,11 @@ bool CropHostFeature::Impl::ResetOriginal()
     }
 
     const PublishGuard publishGuard(m_isPublishing);
-    ImageState candidate = *m_rootImage;
+    TrustedImageState candidate = *m_rootImage;
     bool isPublished = false;
-    ImageSnapshot publishedSnapshot;
+    TrustedImageSnapshot publishedSnapshot;
     try {
-        isPublished = m_setImageState(
+        isPublished = m_data->SetImageState(
             std::move(candidate),
             expectedSnapshot,
             publishedSnapshot);
@@ -789,7 +781,6 @@ bool CropHostFeature::Impl::ResetOriginal()
         isPublished = false;
     }
     if (!isPublished) {
-        (void)m_bridge->ClearCropBaseline();
         std::cout
             << "[Crop][History] root CAS publish rejected"
             << " expectedVersion=" << expectedSnapshot->version
@@ -798,19 +789,7 @@ bool CropHostFeature::Impl::ResetOriginal()
             << '\n';
         return false;
     }
-    if (!publishedSnapshot
-        || publishedSnapshot->version
-            != expectedSnapshot->version + 1
-        || publishedSnapshot->image.GetPointer()
-            != m_rootImage->image.GetPointer()
-        || publishedSnapshot->validityMask.GetPointer()
-            != m_rootImage->validityMask.GetPointer()) {
-        // setImageState=true 后只能使用原子发布令牌完成事务，不能二次读取并回退。
-        std::terminate();
-    }
-
-    // baseNode=0 与普通物化复用同一个无失败完成阶段。
-    (void)m_bridge->SetCropBaselineComplete();
+    m_bridge->SetCropCommit(std::move(*preparedCommit));
     if (m_lastImage) {
         std::cout
             << "[Crop][History] retire materialized"
@@ -825,6 +804,7 @@ bool CropHostFeature::Impl::ResetOriginal()
         m_lastImage.reset();
     }
     m_lastImage = std::move(publishedSnapshot);
+    (void)m_bridge->SendCropCommit();
     std::cout << "[Crop][History] root baseline complete"
         << " publishedVersion=" << m_lastImage->version
         << " publishedImage="
@@ -910,8 +890,8 @@ bool CropHostFeature::Impl::SendComplete(
 bool CropHostFeature::Impl::SendReadyCompletes()
 {
     if (!m_completeState
-        || !m_sendOwnerComplete
-        || !m_renderViews) {
+        || !m_host
+        || !m_views) {
         return false;
     }
 
@@ -930,17 +910,23 @@ bool CropHostFeature::Impl::SendReadyCompletes()
             }
             bool isReady = !item->waitInput.has_value();
             if (item->waitInput) {
-                const auto& views =
-                    m_renderViews->GetViews();
+                HostViewTargets targets;
+                targets.viewIds = m_activeViewIds;
+                const auto views = m_views->GetViews(targets);
                 isReady = !views.empty()
                     && std::all_of(
                         views.begin(),
                         views.end(),
-                        [&item](const auto& view) {
-                            return view.service
-                                && view.service
-                                    ->GetRenderInputStamp()
-                                    == *item->waitInput;
+                        [this, &item](const auto& view) {
+                            const auto port =
+                                m_views->GetFeaturePort(view.id);
+                            if (!port) {
+                                return false;
+                            }
+                            const auto stamp =
+                                port->GetRenderInputStamp();
+                            return stamp
+                                && *stamp == *item->waitInput;
                         });
             }
             if (isReady) {
@@ -966,7 +952,7 @@ bool CropHostFeature::Impl::SendReadyCompletes()
             state;
         const std::weak_ptr<CompleteItem> weakItem =
             item;
-        if (m_sendOwnerComplete(
+        if (m_host->SendOwnerComplete(
                 [weakState, weakItem]() {
                     (void)Impl::SendComplete(
                         weakState.lock(),
@@ -989,25 +975,25 @@ bool CropHostFeature::Impl::BuildCropResult(
         || !m_bridge
         || !SetCropInput(target)
         || !m_completeState
-        || !m_sendOwnerComplete) {
+        || !m_host) {
         return false;
     }
 
     const auto expectedSnapshot =
         target.source == CropHostSource::CurrentImage
-        && m_getImageSnapshot
-        ? m_getImageSnapshot()
-        : ImageSnapshot{};
+        && m_data
+        ? m_data->GetImageSnapshot()
+        : TrustedImageSnapshot{};
     if (target.source == CropHostSource::CurrentImage
         && !expectedSnapshot) {
         return false;
     }
-    const ImageSnapshot sourceSnapshot =
+    const TrustedImageSnapshot sourceSnapshot =
         target.source == CropHostSource::CurrentImage
         ? (m_rootImage
             ? m_rootImage
             : expectedSnapshot)
-        : ImageSnapshot{};
+        : TrustedImageSnapshot{};
     CropInputSnapshot rootInput;
     if (sourceSnapshot) {
         rootInput.dataSource =
@@ -1376,6 +1362,7 @@ bool CropHostFeature::Impl::OnHostTick()
         (void)m_bridge->ClearBindings();
         (void)SetActiveViews({});
         m_activeTarget.reset();
+        m_activeViewIds.clear();
         m_status.reset();
     }
     if (m_bridge->GetShaderTickNeeded()
@@ -1459,10 +1446,10 @@ std::string CropHostFeature::Impl::GetHistoryText(
 
 void CropHostFeature::Impl::SendStatus()
 {
-    if (!m_renderViews
-        || !m_activeTarget
+    if (!m_activeTarget
         || !m_activeTarget->isStatusVisible
-        || !m_bridge) {
+        || !m_bridge
+        || !m_host) {
         return;
     }
     const auto state = m_bridge->GetCropHistory();
@@ -1503,31 +1490,7 @@ void CropHostFeature::Impl::SendStatus()
     if (state.hasEditableOp) {
         status << " | Editable";
     }
-    auto views = m_renderViews->GetViewsByTargets(
-        m_activeTarget->targetViews);
-    if (views.empty()
-        && !m_activeTarget->isTargetViewsUsed) {
-        views = m_renderViews->GetViewsByTargets(
-            m_config.defaultTarget.targetViews);
-    }
-    if (views.empty()) {
-        if (const auto* reference =
-            m_renderViews->GetViewBySelector(
-                m_activeTarget->referenceView)) {
-            views.push_back(reference);
-        }
-    }
-    for (const auto* view : views) {
-        if (!view || !view->context) {
-            continue;
-        }
-        std::string title = view->config.window.title;
-        if (!title.empty()) {
-            title += " | ";
-        }
-        title += status.str();
-        view->context->SetWindowTitle(title);
-    }
+    (void)m_host->SetViewStatus(m_activeViewIds, status.str());
     std::cout << "[Crop] " << status.str() << '\n';
     m_status = state;
 }

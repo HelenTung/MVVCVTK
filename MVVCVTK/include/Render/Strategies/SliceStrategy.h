@@ -1,5 +1,5 @@
 #pragma once
-#include "BaseVisualStrategy.h"
+#include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>
@@ -27,7 +27,6 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetCamera(vtkSmartPointer<vtkRenderer> renderer);
     void SetVisualState(const RenderParams& params, UpdateFlags flags);
     int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
@@ -41,8 +40,6 @@ private:
     void SetCrosshair(const double focusWorld[3],
         const double worldBounds[6],
         double safeOffset);
-    void AlignCamera(const std::array<double, 16>& modelMatrix,
-        const double bounds[6]);
     void SetWorldBounds(const double bounds[6],
         const std::array<double, 16>& modelMatrix,
         double worldBounds[6]) const; // 把局部数据包围盒映射到当前模型变换后的世界包围盒

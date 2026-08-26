@@ -31,6 +31,13 @@ InteractionResult InteractionRouter::Dispatch(const InteractionEvent& eve,
         if (result.isPropagationStopped) {
             aggregated.isPropagationStopped = true;
         }
+        if (!result.isSucceeded) {
+            aggregated.isSucceeded = false;
+            if (aggregated.failureReason
+                    == InteractionFailureReason::None) {
+                aggregated.failureReason = result.failureReason;
+            }
+        }
 
         if (mode == RouterDispatchMode::FirstMatch && result.isHandled) {
             aggregated.isHandled = true;

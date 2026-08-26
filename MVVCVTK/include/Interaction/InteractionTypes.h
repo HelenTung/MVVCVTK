@@ -1,6 +1,6 @@
 #pragma once
 
-#include "AppTypes.h"  // VizMode, ToolMode
+#include "App/AppTypes.h"  // VizMode, ToolMode
 
 #include <string>
 
@@ -60,9 +60,20 @@ struct InteractionEvent
 //
 //   isHandled            = true → Router 在 FirstMatch 模式下停止向后传递
 //   isPropagationStopped = true → RenderContext 应阻止底层事件继续传播
+//   isSucceeded          = false → 事件已接管，但底层状态或渲染写入被拒绝
 // ─────────────────────────────────────────────────────────────────────
+enum class InteractionFailureReason {
+    None,
+    StateRejected,
+    RenderRejected,
+    CleanupRejected
+};
+
 struct InteractionResult
 {
     bool isHandled = false; // true 表示已消费；FirstMatch 据此停止，Broadcast 仅做 OR 聚合
     bool isPropagationStopped = false; // true 由 Router 做 OR 聚合，Context 随后停止底层传播
+    bool isSucceeded = true; // 与事件所有权独立；false 时 failureReason 说明失败层级
+    InteractionFailureReason failureReason =
+        InteractionFailureReason::None;
 };

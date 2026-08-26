@@ -4,6 +4,7 @@
 #include "Host/Types/HostValueTypes.h"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,7 +36,7 @@ struct HostSliceExportRequest final : HostRequest {
 
 struct HostViewSetRequest final : HostRequest {
     HostViewTarget targetView; // 单目标解析遵循 id 优先且失败不回退 role。
-    // optional 表示“本次是否写入该维度”；缺省字段必须保留视图当前状态。
+    // 全部字段均为 targetView 私有展示状态；缺省字段保留该 View 当前值。
     std::optional<HostRenderMode> mode;
     std::optional<HostMaterialParams> material;
     std::optional<HostMaterialPreset> materialPreset;
@@ -44,14 +45,18 @@ struct HostViewSetRequest final : HostRequest {
     std::optional<HostTransferPreset> transferPreset;
     std::optional<double> iso;
     std::optional<HostBackgroundColor> background;
-    std::optional<std::array<double, 3>> spacing;
     std::optional<HostWindowLevelParams> windowLevel;
     std::optional<HostVolumeQualityParams> volumeQuality;
     std::optional<std::vector<HostGradientOpacityNode>> gradientOpacity;
     std::optional<bool> isDenoiseOn;
-    std::optional<HostCursorParams> cursor; // 会话共享 world cursor；数据未就绪时 service 保持现状。
-    std::optional<HostVisibilityParams> visibility; // 会话共享业务元素显隐。
+    std::optional<HostVisibilityParams> visibility;
     std::optional<bool> isAxesVisible; // 目标 context 的世界方向轴 marker。
+};
+
+// 数据物理元信息与 world cursor 是 Session 真源；命令不接收 targetView，避免伪装成单 View 写入。
+struct HostSessionSetRequest final : HostRequest {
+    std::optional<std::array<double, 3>> spacing;
+    std::optional<HostCursorParams> cursor;
 };
 
 struct HostViewResetRequest final : HostRequest {

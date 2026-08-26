@@ -20,9 +20,11 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 class GapAlgorithmSuite final {
@@ -105,6 +107,20 @@ GapVolumeBuffer BuildTestVolume()
     volume.minVal = 0.0f;
     volume.maxVal = 1.0f;
     volume.SetOwnedVoxels(BuildTestVoxels());
+    return volume;
+}
+
+GapVolumeBuffer BuildVolume(
+    const std::array<int, 3>& dims,
+    std::vector<float> voxels)
+{
+    GapVolumeBuffer volume;
+    volume.dims = dims;
+    volume.spacing = { 1.0, 1.0, 1.0 };
+    volume.origin = { 0.0, 0.0, 0.0 };
+    volume.minVal = 0.0f;
+    volume.maxVal = 1.0f;
+    volume.SetOwnedVoxels(std::move(voxels));
     return volume;
 }
 
@@ -304,6 +320,234 @@ void StartAlgoCase(int& failureCount)
             maskedLabels.end(),
             [](int label) { return label != 0; }),
         "invalid-domain voxels should remain zero in the label result.",
+        failureCount);
+}
+
+void StartEdgeCase(int& failureCount)
+{
+    // 行尾 index=2 与下一行 index=3 在线性内存中相邻，但坐标并非 6 邻域。
+    const std::array<int, 3> wrapDims{ 3, 2, 1 };
+    auto wrapVolume = BuildVolume(
+        wrapDims, std::vector<float>(6, 0.0f));
+    std::vector<std::uint8_t> wrapMask(6, 0);
+    wrapMask[2] = 1;
+    wrapMask[3] = 1;
+    std::vector<int> wrapLabels;
+    const auto wrapRegions = VoidDetector::BuildRegions(
+        wrapVolume, wrapMask, BuildVoidParams(), wrapLabels);
+    SetExpect(
+        wrapRegions.size() == 2
+            && wrapLabels.size() == 6
+            && wrapLabels[2] > 0
+            && wrapLabels[3] > 0
+            && wrapLabels[2] != wrapLabels[3],
+        "row endpoints must remain separate 6-neighbor regions.",
+        failureCount);
+
+    // 腐蚀只给 3x3x3 块留下稳定种子；行尾延伸点不能跨行回长到孤立点。
+    const std::array<int, 3> growDims{ 5, 6, 5 };
+    const auto growTotal = static_cast<std::size_t>(growDims[0])
+        * static_cast<std::size_t>(growDims[1])
+        * static_cast<std::size_t>(growDims[2]);
+    auto growVolume = BuildVolume(
+        growDims, std::vector<float>(growTotal, 0.0f));
+    std::vector<std::uint8_t> growMask(growTotal, 0);
+    for (int z = 1; z <= 3; ++z) {
+        for (int y = 1; y <= 3; ++y) {
+            for (int x = 1; x <= 3; ++x) {
+                growMask[GetLinearIndex(x, y, z, growDims)] = 1;
+            }
+        }
+    }
+    const auto rowEnd = GetLinearIndex(4, 3, 2, growDims);
+    const auto nextRow = GetLinearIndex(0, 4, 2, growDims);
+    growMask[rowEnd] = 1;
+    growMask[nextRow] = 1;
+    auto growParams = BuildVoidParams();
+    growParams.erosionIterations = 1;
+    const auto grown = VoidDetector::BuildCandidates(
+        growVolume, growMask, growParams);
+    SetExpect(
+        GetMaskCount(grown) == 28
+            && grown[rowEnd] != 0
+            && grown[nextRow] == 0,
+        "candidate growth must not wrap from one row endpoint to the next.",
+        failureCount);
+
+    const std::array<std::array<int, 3>, 4> degenerateDims{
+        std::array<int, 3>{ 1, 1, 1 },
+        std::array<int, 3>{ 3, 1, 1 },
+        std::array<int, 3>{ 1, 3, 1 },
+        std::array<int, 3>{ 1, 1, 3 }
+    };
+    for (const auto& dims : degenerateDims) {
+        const auto total = static_cast<std::size_t>(dims[0])
+            * static_cast<std::size_t>(dims[1])
+            * static_cast<std::size_t>(dims[2]);
+        auto volume = BuildVolume(
+            dims, std::vector<float>(total, 0.0f));
+        const auto interior = VoidDetector::CreateInteriorMask(
+            volume, 0.5f);
+        auto erosionParams = BuildVoidParams();
+        erosionParams.erosionIterations = 1;
+        const auto eroded = VoidDetector::BuildCandidates(
+            volume,
+            std::vector<std::uint8_t>(total, 1),
+            erosionParams);
+        std::vector<std::uint8_t> candidates(total, 1);
+        std::vector<int> labels;
+        const auto regions = VoidDetector::BuildRegions(
+            volume, candidates, BuildVoidParams(), labels);
+        SetExpect(
+            interior.size() == total
+                && GetMaskCount(interior) == 0
+                && eroded.size() == total
+                && GetMaskCount(eroded) == 0
+                && regions.size() == 1
+                && regions.front().voxelCount == total,
+            "degenerate axes must preserve bounded 6-neighbor behavior.",
+            failureCount);
+    }
+
+    const std::array<int, 3> tunnelDims{ 5, 5, 5 };
+    const auto tunnelTotal = static_cast<std::size_t>(tunnelDims[0])
+        * static_cast<std::size_t>(tunnelDims[1])
+        * static_cast<std::size_t>(tunnelDims[2]);
+    std::vector<float> tunnelVoxels(tunnelTotal, 1.0f);
+    for (int x = 0; x <= 2; ++x) {
+        tunnelVoxels[GetLinearIndex(x, 2, 2, tunnelDims)] = 0.0f;
+    }
+    auto tunnelVolume = BuildVolume(
+        tunnelDims, std::move(tunnelVoxels));
+    const auto tunnelInterior = VoidDetector::CreateInteriorMask(
+        tunnelVolume, 0.5f);
+    SetExpect(
+        GetMaskCount(tunnelInterior) == 0,
+        "a coordinate-connected boundary tunnel must remain exterior.",
+        failureCount);
+}
+
+void StartSafetyCase(int& failureCount)
+{
+    auto scaledVolume = BuildTestVolume();
+    scaledVolume.spacing = { 2.0, 3.0, 4.0 };
+    const auto interior = VoidDetector::CreateInteriorMask(
+        scaledVolume, 0.5f);
+    auto candidates = VoidDetector::BuildCandidates(
+        scaledVolume, interior, BuildVoidParams());
+    std::vector<int> labels;
+    const auto regions = VoidDetector::BuildRegions(
+        scaledVolume,
+        candidates,
+        BuildVoidParams(),
+        labels);
+    SetExpect(regions.size() == 1,
+        "anisotropic spacing should preserve one region.",
+        failureCount);
+    if (regions.size() == 1) {
+        const auto& region = regions.front();
+        SetExpectNear(region.volumeMM3, 648.0,
+            "anisotropic voxel volume should multiply all three axes.",
+            failureCount);
+        SetExpectNear(region.centroidMM[0], 6.0,
+            "anisotropic centroid x should use x spacing.",
+            failureCount);
+        SetExpectNear(region.centroidMM[1], 9.0,
+            "anisotropic centroid y should use y spacing.",
+            failureCount);
+        SetExpectNear(region.centroidMM[2], 12.0,
+            "anisotropic centroid z should use z spacing.",
+            failureCount);
+        SetExpectNear(region.projectedAreaXYMM2, 54.0,
+            "XY projection should use x*y spacing.",
+            failureCount);
+        SetExpectNear(region.projectedAreaXZMM2, 72.0,
+            "XZ projection should use x*z spacing.",
+            failureCount);
+        SetExpectNear(region.projectedAreaYZMM2, 108.0,
+            "YZ projection should use y*z spacing.",
+            failureCount);
+    }
+
+    const std::array<std::array<double, 3>, 5> invalidSpacing{
+        std::array<double, 3>{ 0.0, 1.0, 1.0 },
+        std::array<double, 3>{ -1.0, 1.0, 1.0 },
+        std::array<double, 3>{
+            std::numeric_limits<double>::quiet_NaN(), 1.0, 1.0 },
+        std::array<double, 3>{
+            std::numeric_limits<double>::infinity(), 1.0, 1.0 },
+        std::array<double, 3>{
+            std::numeric_limits<double>::max(),
+            std::numeric_limits<double>::max(),
+            1.0 }
+    };
+    for (const auto& spacing : invalidSpacing) {
+        auto invalidVolume = BuildTestVolume();
+        invalidVolume.spacing = spacing;
+        auto invalidCandidates = candidates;
+        std::vector<int> invalidLabels{ 7 };
+        const auto invalidRegions = VoidDetector::BuildRegions(
+            invalidVolume,
+            invalidCandidates,
+            BuildVoidParams(),
+            invalidLabels);
+        SetExpect(invalidRegions.empty() && invalidLabels.empty(),
+            "invalid spacing must fail without publishing labels.",
+            failureCount);
+    }
+
+    const int maxDim = std::numeric_limits<int>::max();
+    const std::array<std::array<int, 3>, 2> invalidDims{
+        std::array<int, 3>{ maxDim, maxDim, maxDim },
+        std::array<int, 3>{ maxDim, maxDim, 3 }
+    };
+    for (const auto& dims : invalidDims) {
+        auto invalidVolume = BuildVolume(
+            dims, std::vector<float>{ 0.0f });
+        SetExpect(VoidDetector::CreateInteriorMask(
+                invalidVolume, 0.5f).empty(),
+            "overflow dimensions must fail before mask allocation.",
+            failureCount);
+        SetExpect(VoidDetector::BuildCandidates(
+                invalidVolume, {}, BuildVoidParams()).empty(),
+            "overflow dimensions must fail before candidate allocation.",
+            failureCount);
+        std::vector<std::uint8_t> invalidCandidates;
+        std::vector<int> invalidLabels{ 7 };
+        SetExpect(VoidDetector::BuildRegions(
+                invalidVolume,
+                invalidCandidates,
+                BuildVoidParams(),
+                invalidLabels).empty()
+                && invalidLabels.empty(),
+            "overflow dimensions must fail before label allocation.",
+            failureCount);
+    }
+
+    std::atomic<bool> isStopping{ true };
+    auto stoppedVolume = BuildTestVolume();
+    const auto stoppedInterior = VoidDetector::CreateInteriorMask(
+        stoppedVolume, 0.5f, &isStopping);
+    const auto stoppedCandidates = VoidDetector::BuildCandidates(
+        stoppedVolume,
+        std::vector<std::uint8_t>(stoppedVolume.voxels.size(), 1),
+        BuildVoidParams(),
+        &isStopping);
+    std::vector<std::uint8_t> stoppedMask(
+        stoppedVolume.voxels.size(), 1);
+    std::vector<int> stoppedLabels{ 7 };
+    const auto stoppedRegions = VoidDetector::BuildRegions(
+        stoppedVolume,
+        stoppedMask,
+        BuildVoidParams(),
+        stoppedLabels,
+        &isStopping);
+    SetExpect(
+        stoppedInterior.empty()
+            && stoppedCandidates.empty()
+            && stoppedRegions.empty()
+            && stoppedLabels.empty(),
+        "cancelled algorithms must stop before publishing partial results.",
         failureCount);
 }
 
@@ -533,6 +777,8 @@ void StartConvertCase(int& failureCount)
     {
         int failureCount = 0;
         StartAlgoCase(failureCount);
+        StartEdgeCase(failureCount);
+        StartSafetyCase(failureCount);
         StartBufferCase(failureCount);
         StartSnapCase(failureCount);
         StartSharedCase(failureCount);

@@ -1,6 +1,5 @@
 #include "IsoSurfaceStrategy.h"
 #include <vtkProperty.h>
-#include <vtkCamera.h>
 #include <vtkMatrix4x4.h>
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLPolyDataMapper.h>
@@ -101,45 +100,6 @@ vtkStandardNewMacro(IsoSurfaceStrategy::MaskImplicit);
 
 static constexpr int kIsoTargetDim = 766;
 
-
-void IsoSurfaceStrategy::AlignCamera(const std::array<double, 16>& modelMatrix)
-{
-    if (!m_renderer || !m_renderer->GetActiveCamera()) return;
-
-    // 与 VolumeStrategy 保持一致：模型变换后相机只跟着焦点中心平移，
-    // 这样 3D 视角感知稳定，不会因为对象移动而瞬间“跳镜头”。
-
-    auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-    modelToWorldMatrix->DeepCopy(modelMatrix.data());
-
-    double modelToWorldInputCenter[4] = { m_dataCenter[0], m_dataCenter[1], m_dataCenter[2], 1.0 };
-    double modelToWorldOutputCenter[4] = { 0.0, 0.0, 0.0, 1.0 };
-    modelToWorldMatrix->MultiplyPoint(modelToWorldInputCenter, modelToWorldOutputCenter);
-
-    const double invW = std::abs(modelToWorldOutputCenter[3]) > 1e-12 ? 1.0 / modelToWorldOutputCenter[3] : 1.0;
-    double worldCenter[3] = {
-        modelToWorldOutputCenter[0] * invW,
-        modelToWorldOutputCenter[1] * invW,
-        modelToWorldOutputCenter[2] * invW
-    };
-
-    vtkCamera* cam = m_renderer->GetActiveCamera();
-    double oldFocal[3] = { 0.0, 0.0, 0.0 };
-    double oldPosition[3] = { 0.0, 0.0, 0.0 };
-    cam->GetFocalPoint(oldFocal);
-    cam->GetPosition(oldPosition);
-
-    double offset[3] = {
-        oldPosition[0] - oldFocal[0],
-        oldPosition[1] - oldFocal[1],
-        oldPosition[2] - oldFocal[2]
-    };
-
-    cam->SetFocalPoint(worldCenter);
-    cam->SetPosition(worldCenter[0] + offset[0], worldCenter[1] + offset[1], worldCenter[2] + offset[2]);
-    m_renderer->ResetCameraClippingRange();
-
-}
 
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
@@ -280,12 +240,6 @@ void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
 
 }
 
-void IsoSurfaceStrategy::SetCamera(vtkSmartPointer<vtkRenderer> ren) {
-    // 3D 模式必须是透视投影
-    ren->GetActiveCamera()->ParallelProjectionOff();
-
-}
-
 void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
 {
     if (!m_actor) return;
@@ -324,7 +278,6 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
     // 响应 UpdateFlags::Transform
     if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         Set3DPropsTransform(params.modelMatrix);
-        AlignCamera(params.modelMatrix);
     }
 
     if (((flags & UpdateFlags::Visibility) != UpdateFlags::None)) {

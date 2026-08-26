@@ -1,5 +1,5 @@
 ﻿#pragma once
-#include "BaseVisualStrategy.h"
+#include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
 #include <vtkImageSlice.h>

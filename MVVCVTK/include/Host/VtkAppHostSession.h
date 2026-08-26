@@ -1,10 +1,12 @@
 #pragma once
 
+#include "Data/ImageReadTypes.h"
 #include "Host/Types/HostInputTypes.h"
 #include "Host/Types/HostRequest.h"
 #include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,10 +37,25 @@ public:
     bool DetachFeature(const HostFeature& feature);
     // 仅用于 standalone VTK 事件循环；Qt host 已有外部事件循环时不调用。
     bool Start();
+    // owner thread 显式停止；幂等且失败后保留未完成阶段，可修复后重试。
+    bool Stop() noexcept;
+    bool GetIsStopped() const noexcept;
+    HostStopState GetStopState() const noexcept;
+    // Qt owner thread 可在 dispatcher 拒绝/抛异常或首次 Stop 失败后显式泵送滞留项。
+    static bool SendPendingStops() noexcept;
+    static std::size_t GetPendingStopCount() noexcept;
 
+    // 兼容旧调用方；SDK consumer 应迁移到结果语义稳定的 SendRequestResult。
+#if defined(MVVCVTK_SDK_CONSUMER)
+    [[deprecated("Use SendRequestResult to separate acceptance from outcome.")]]
+#endif
     bool SendRequest(
         HostRequest&& request,
         HostCompleteCallback onComplete = nullptr);
+    // 推荐接口：投递失败也同步返回一次结构化结果，callback 对每个请求只执行一次。
+    bool SendRequestResult(
+        HostRequest&& request,
+        HostResultCallback onComplete);
 
     // 返回会话内部 endpoint 集合的只读引用；引用和元素地址只在本会话拓扑不变且存活期间有效。
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
@@ -49,6 +66,22 @@ public:
         const HostViewTarget& target);
     // 按会话拓扑顺序返回所有视图的独立状态快照。
     std::vector<HostRenderViewState> GetRenderViewStates();
+    // 深拷贝当前体素为不含 VTK identity 的只读值；无有效体数据时返回空。
+    std::optional<ImageReadState> GetImageReadState();
+    // 扩展接口：在分配前检查同步复制预算，并返回稳定失败原因与所需字节数。
+    ImageReadResult GetImageReadResult(
+        std::size_t maxReadBytes = imageReadLimit);
+    // region 使用相对源图像的半开区间；成功结果的 extent 从 0 开始。
+    ImageReadResult GetImageReadResult(
+        const ImageReadRequest& request);
+    // 每次最多复制 8 MiB，并以 region 内 x-fast voxel offset 续读。
+    ImageReadChunkResult GetImageReadChunk(
+        const ImageReadRequest& request,
+        std::size_t voxelOffset);
+    // worker 只复制不可变快照；结果在 owner timer 上回调。一次会话只接纳一个未回调读取。
+    ImageReadAdmission StartImageRead(
+        ImageReadRequest request,
+        ImageReadCallback onComplete);
 
 private:
     class Impl;

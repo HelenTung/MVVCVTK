@@ -2,5 +2,5 @@
 
 #include <memory>
 
-class ImageState;
-using ImageSnapshot = std::shared_ptr<const ImageState>;
+struct TrustedImageState;
+using TrustedImageSnapshot = std::shared_ptr<const TrustedImageState>;
