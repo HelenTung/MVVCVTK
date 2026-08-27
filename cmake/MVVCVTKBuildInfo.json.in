@@ -1,0 +1,12 @@
+{
+  "cmakeVersion": "@CMAKE_VERSION@",
+  "generator": "@CMAKE_GENERATOR@",
+  "generatorToolset": "@CMAKE_GENERATOR_TOOLSET@",
+  "compilerId": "@CMAKE_CXX_COMPILER_ID@",
+  "compilerVersion": "@CMAKE_CXX_COMPILER_VERSION@",
+  "compilerPath": "@CMAKE_CXX_COMPILER@",
+  "msvcVersion": "@MSVC_VERSION@",
+  "msvcToolsetVersion": "@MSVC_TOOLSET_VERSION@",
+  "windowsSdkVersion": "@CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION@",
+  "releaseInstructionSet": "@MVVCVTK_RELEASE_INSTRUCTION_SET@"
+}

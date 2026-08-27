@@ -32,21 +32,14 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:MVVCVTK_DEPS_URI)) {
             throw 'Repository secret MVVCVTK_DEPS_URI is required.'
           }
-          ./tools/deps/Get-MVVCVTKDependencies.ps1 `
+          ./tools/Get-MVVCVTKDependencies.ps1 `
             -Uri $env:MVVCVTK_DEPS_URI -Force
 
-      - name: Resolve toolchain and runtime
+      - name: Resolve runtime
         shell: pwsh
         run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} `
-            'Microsoft Visual Studio\Installer\vswhere.exe'
-          $msbuild = & $vswhere -latest -products * `
-            -requires Microsoft.Component.MSBuild `
-            -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
-          if (-not $msbuild) { throw 'MSBuild was not found.' }
-          "MSBUILD_PATH=$msbuild" | Add-Content $env:GITHUB_ENV
           $deps = Join-Path $env:GITHUB_WORKSPACE `
-            "sdk\deps\$env:DEPS_VERSION-win-x64"
+            "deps\$env:DEPS_VERSION-win-x64"
           @(
             "$deps\ui\bin",
             "$deps\opencv\x64\vc16\bin",
@@ -55,53 +48,32 @@ jobs:
           ) | Add-Content $env:GITHUB_PATH
           "QT_PLUGIN_PATH=$deps\qt\plugins" | Add-Content $env:GITHUB_ENV
 
-      - name: Build x64 Debug and Release
+      - name: Generate Visual Studio solution and build x64
         shell: pwsh
         run: |
-          foreach ($configuration in @('Debug', 'Release')) {
-            & $env:MSBUILD_PATH ./MVVCVTK.sln /m /t:Rebuild `
-              /p:Configuration=$configuration /p:Platform=x64 `
-              /p:ImportUserProps=false
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & $env:MSBUILD_PATH ./test/MVVCVTK.Tests.sln /m /t:Rebuild `
-              /p:Configuration=$configuration /p:Platform=x64 `
-              /p:ImportUserProps=false
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            foreach ($project in @(
-                './test/QtHost/QtHostMethodTests.vcxproj',
-                './test/QtHost/QtHostSessionSmoke.vcxproj')) {
-              & $env:MSBUILD_PATH $project /m /t:Rebuild `
-                /p:Configuration=$configuration /p:Platform=x64 `
-                /p:ImportUserProps=false
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
+          cmake --preset vs2026-x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build --preset vs2026-debug --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build --preset vs2026-release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Run all x64 tests
+      - name: Run CTest Debug and Release
         shell: pwsh
         run: |
-          foreach ($configuration in @('Debug', 'Release')) {
-            $tests = @(
-              "./test/x64/$configuration/PlanarCropTests.exe",
-              "./test/x64/$configuration/GapAnalysisAlgorithmTests.exe",
-              "./test/Interaction/x64/$configuration/InteractionRouterTests.exe",
-              "./test/QtHost/x64/$configuration/QtHostMethodTests.exe",
-              "./test/QtHost/x64/$configuration/QtHostSessionSmoke.exe"
-            )
-            foreach ($test in $tests) {
-              & $test
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            }
-          }
+          ctest --preset vs2026-debug
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --preset vs2026-release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and package clean-room SDK
         shell: pwsh
         run: |
-          $version = (Get-Date -Format 'yyyy.MM.dd') `
-            + '-rev.' + '${{ github.run_number }}'
-          & $env:MSBUILD_PATH ./MVVCVTK/MVVCVTK.vcxproj /m:1 `
-            /t:VerifyCleanRoom /p:Platform=x64 `
-            /p:ImportUserProps=false /p:MVVCVTKSdkVersion=$version
+          $gitShort = git rev-parse --short=12 HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $version = (Get-Date -Format 'yyyy.MM.dd') + '-git.' + $gitShort
+          ./tools/release/Build-MVVCVTKSdk.ps1 `
+            -PackageRevision $version -SkipTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $artifactRoot = Join-Path $env:RUNNER_TEMP `
             'MVVCVTK-sdk-${{ github.run_id }}'
@@ -110,9 +82,9 @@ jobs:
           }
           [void](New-Item -ItemType Directory -Path $artifactRoot)
           $archive = "MVVCVTK-SDK-$version-win-x64.zip"
-          Copy-Item -LiteralPath "./sdk/packages/$archive" `
+          Copy-Item -LiteralPath "./out/packages/$archive" `
             -Destination $artifactRoot
-          Copy-Item -LiteralPath "./sdk/packages/$archive.sha256" `
+          Copy-Item -LiteralPath "./out/packages/$archive.sha256" `
             -Destination $artifactRoot
 
       - name: Publish SDK artifact

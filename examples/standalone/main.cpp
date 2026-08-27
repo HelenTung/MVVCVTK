@@ -1,6 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 
+#ifndef MVVCVTK_CMAKE_AUTOINIT
 #include <vtkAutoInit.h>
+#endif
 #include <vtkSMPTools.h>
 
 #include "Host/CropHostFeature.h"
@@ -16,10 +18,12 @@
 #include <utility>
 #include <vector>
 
+#ifndef MVVCVTK_CMAKE_AUTOINIT
 VTK_MODULE_INIT(vtkRenderingOpenGL2);
 VTK_MODULE_INIT(vtkInteractionStyle);
 VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 VTK_MODULE_INIT(vtkRenderingFreeType);
+#endif
 
 namespace {
 

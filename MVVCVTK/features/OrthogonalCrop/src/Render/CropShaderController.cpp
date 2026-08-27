@@ -16,7 +16,9 @@
 #include <vtkTextureObject.h>
 #include <vtkType.h>
 #include <vtkWeakPointer.h>
+#ifndef GLAD_API_CALL_EXPORT
 #define GLAD_API_CALL_EXPORT
+#endif
 #include <vtk_glad.h>
 
 #include <algorithm>

@@ -104,7 +104,7 @@ function Assert-Bundle([string]$Root) {
 }
 
 $repoPath = [IO.Path]::GetFullPath($RepoRoot)
-$depsBase = [IO.Path]::GetFullPath((Join-Path $repoPath 'sdk\deps'))
+$depsBase = [IO.Path]::GetFullPath((Join-Path $repoPath 'deps'))
 $repoPrefix = $repoPath.TrimEnd('\') + '\'
 if (-not ($depsBase + '\').StartsWith(
         $repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {

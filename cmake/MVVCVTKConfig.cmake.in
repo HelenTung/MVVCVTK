@@ -1,0 +1,49 @@
+@PACKAGE_INIT@
+
+set(MVVCVTK_VERSION "@PROJECT_VERSION@")
+
+if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+    set(MVVCVTK_FOUND FALSE)
+    set(MVVCVTK_NOT_FOUND_MESSAGE
+        "MVVCVTK @PROJECT_VERSION@ supports Windows x64 only."
+    )
+    return()
+endif()
+if(NOT MSVC)
+    set(MVVCVTK_FOUND FALSE)
+    set(MVVCVTK_NOT_FOUND_MESSAGE
+        "MVVCVTK @PROJECT_VERSION@ requires the MSVC toolchain."
+    )
+    return()
+endif()
+if(NOT DEFINED MSVC_TOOLSET_VERSION
+    OR NOT MSVC_TOOLSET_VERSION STREQUAL "145")
+    set(MVVCVTK_FOUND FALSE)
+    set(MVVCVTK_NOT_FOUND_MESSAGE
+        "MVVCVTK @PROJECT_VERSION@ requires MSVC v145; detected "
+        "'${MSVC_TOOLSET_VERSION}'."
+    )
+    return()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKInternalDependencies.cmake")
+if(DEFINED MVVCVTK_FOUND AND NOT MVVCVTK_FOUND)
+    return()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKTargets.cmake")
+
+foreach(_mvvcvtk_component IN ITEMS
+    Host
+    OrthogonalCrop
+    GapAnalysis
+    SDK
+)
+    if(TARGET MVVCVTK::${_mvvcvtk_component})
+        set(MVVCVTK_${_mvvcvtk_component}_FOUND TRUE)
+    else()
+        set(MVVCVTK_${_mvvcvtk_component}_FOUND FALSE)
+    endif()
+endforeach()
+unset(_mvvcvtk_component)
+
+check_required_components(MVVCVTK)

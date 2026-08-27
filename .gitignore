@@ -14,11 +14,9 @@
 .vcxproj.filters
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
-*.txt
 *.png
 *.csv
 *.raw
-*.txt
 
 # Mono auto generated files
 mono_crash.*
@@ -368,25 +366,31 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
-*.bat
-*.txt
+
+# 仓库本地协作、编辑器与个人辅助文件
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.codex/
+/.vscode/
+/MVVCVTK/git_brach.bat
+/skills-lock.json
 
 Local.props
 **/Local.props
 
-# Local agent / graphify outputs
+# Local graphify outputs
 .graphify/
 **/.graphify/
 graphify-out/
 **/graphify-out/
 
-# Ignore all Markdown documents repository-wide.
-*.[mM][dD]
-!README.md
 *.patch
-*.json
 
 # TEST
+/Makefile.Debug
+/Makefile.Release
+/volume-preview-cross/
 test/QtHost/.qmake.stash
 test/QtHost/Makefile*
 test/QtHost/smoke*.log
@@ -395,9 +399,8 @@ test/QtHost/smoke*.err
 test/QtHost/x64/
 test/QtHost/QtHostSmoke.pro
 
-# pdf
-pdf/
-*.pdf
+# 本地设计、计划与参考资料，不进入 Git 和 SDK 发布闭包
+/md/
 
-# Downloaded versioned dependency SDK payload
-/sdk/
+# Downloaded versioned dependency payload
+/deps/

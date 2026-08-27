@@ -30,7 +30,9 @@
 #include <vtkPoints.h>
 #include <vtkProperty.h>
 #include <vtkWindowToImageFilter.h>
+#ifndef GLAD_API_CALL_EXPORT
 #define GLAD_API_CALL_EXPORT
+#endif
 #include <vtk_glad.h>
 
 #include <algorithm>
