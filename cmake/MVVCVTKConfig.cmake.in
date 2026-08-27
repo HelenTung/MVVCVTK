@@ -32,11 +32,13 @@ if(DEFINED MVVCVTK_FOUND AND NOT MVVCVTK_FOUND)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKTargets.cmake")
 
+# 下列名称是 find_package 的逻辑 target component；安装仍以 Host component 原子交付完整 SDK。
 foreach(_mvvcvtk_component IN ITEMS
+    HostAPI
+    FeatureSPI
     Host
     OrthogonalCrop
     GapAnalysis
-    SDK
 )
     if(TARGET MVVCVTK::${_mvvcvtk_component})
         set(MVVCVTK_${_mvvcvtk_component}_FOUND TRUE)

@@ -1,5 +1,6 @@
 #pragma once
-#include "Render/Support/BaseVisualStrategy.h"
+
+#include "Render/Support/FeatureVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
@@ -12,9 +13,9 @@
 // =====================================================================
 // GapMeshOverlayStrategy — 3D孔隙网格叠加策略 (适用于 Volume/IsoSurface 模式)
 // =====================================================================
-class GapMeshOverlayStrategy : public BaseVisualStrategy {
+class GapMeshOverlayStrategy : public FeatureVisualStrategy {
 private:
-    // 构造期创建的 3D overlay prop；本策略和 BaseVisualStrategy managed-prop 列表共同保留 VTK 引用。
+    // 构造期创建的 3D overlay prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkActor> m_actor;
     // actor 使用的 mapper；SetInputData 通过 VTK 引用计数保留最新 void mesh。
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
@@ -55,9 +56,9 @@ public:
 // =====================================================================
 // GapSliceOverlayStrategy — 2D标签图叠加策略 (适用于 Slice 模式)
 // =====================================================================
-class GapSliceOverlayStrategy : public BaseVisualStrategy {
+class GapSliceOverlayStrategy : public FeatureVisualStrategy {
 private:
-    // 构造期创建的 2D label prop；本策略和 BaseVisualStrategy managed-prop 列表共同保留 VTK 引用。
+    // 构造期创建的 2D label prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkImageSlice> m_slice;
     // label image reslice mapper；持有最新输入和 SetInputData 创建的 slice plane。
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
@@ -65,10 +66,8 @@ private:
     vtkSmartPointer<vtkLookupTable> m_lut;
     // 当前窗口固定轴向；构造后不变，用于选择 plane normal。
     Orientation m_orientation;
-    // 最近输入 spacing 的 [x,y,z] 缓存；当前固定 0.001 偏移尚未消费它，不是显示位置真源。
-    double m_safeOffset[3] = {0};
 public:
-    GapSliceOverlayStrategy(Orientation orient) : m_orientation(orient) {
+    explicit GapSliceOverlayStrategy(Orientation orient) : m_orientation(orient) {
         m_slice = vtkSmartPointer<vtkImageSlice>::New();
         m_mapper = vtkSmartPointer<vtkImageResliceMapper>::New();
         m_slice->SetMapper(m_mapper);
@@ -94,7 +93,6 @@ public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override {
         auto img = vtkImageData::SafeDownCast(data);
         if (!img) return;
-        img->GetSpacing(m_safeOffset);
 
         m_mapper->SetInputData(img);
         m_mapper->SliceFacesCameraOff();
@@ -119,15 +117,15 @@ public:
 
             auto plane = m_mapper->GetSlicePlane();
             if (plane) {
+                constexpr double sliceOffset = 0.001; // VTK world 坐标偏移，避免标签与原切片共面。
                 double worldNormal[3] = { 0.0, 0.0, 0.0 };
                 if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
                 else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
                 else worldNormal[0] = 1.0;
-				//auto dis = std::max({ m_safeOffset[0], m_safeOffset[1], m_safeOffset[2] });
                 double offsetOrigin[3] = {
-                    params.cursor[0] + worldNormal[0] * 0.001,
-                    params.cursor[1] + worldNormal[1] * 0.001,
-                    params.cursor[2] + worldNormal[2] * 0.001
+                    params.cursor[0] + worldNormal[0] * sliceOffset,
+                    params.cursor[1] + worldNormal[1] * sliceOffset,
+                    params.cursor[2] + worldNormal[2] * sliceOffset
                 };
 
                 plane->SetOrigin(offsetOrigin[0], offsetOrigin[1], offsetOrigin[2]);

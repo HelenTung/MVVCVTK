@@ -38,11 +38,19 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 add_subdirectory(MVVCVTK)
-add_subdirectory(examples/standalone)
-set_property(
-    DIRECTORY
-    PROPERTY VS_STARTUP_PROJECT MVVCVTKStandalone
-)
+if(MVVCVTK_BUILD_STANDALONE
+    AND MVVCVTK_BUILD_ORTHOGONAL_CROP
+    AND MVVCVTK_BUILD_GAP_ANALYSIS)
+    add_subdirectory(examples/standalone)
+    set_property(
+        DIRECTORY
+        PROPERTY VS_STARTUP_PROJECT MVVCVTKStandalone
+    )
+elseif(MVVCVTK_BUILD_STANDALONE)
+    message(STATUS
+        "Skipping standalone: it composes both OrthogonalCrop and GapAnalysis."
+    )
+endif()
 
 if(MVVCVTK_BUILD_TESTING)
     enable_testing()

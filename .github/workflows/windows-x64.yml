@@ -84,8 +84,6 @@ jobs:
           $archive = "MVVCVTK-SDK-$version-win-x64.zip"
           Copy-Item -LiteralPath "./out/packages/$archive" `
             -Destination $artifactRoot
-          Copy-Item -LiteralPath "./out/packages/$archive.sha256" `
-            -Destination $artifactRoot
 
       - name: Publish SDK artifact
         uses: actions/upload-artifact@v4

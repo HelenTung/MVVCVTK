@@ -19,10 +19,21 @@ set(MVVCVTK_CROP_API_HEADERS
     include/OrthogonalCropTypes.h
 )
 
+# Feature target 与核心 API 一样只向 build-tree consumer 暴露批准视图。
+ResetSdkStage("${MVVCVTK_CROP_SDK_INCLUDE_DIR}")
+BuildSdkHeaders(
+    MVVCVTK_CROP_STAGED_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
+    ${MVVCVTK_CROP_API_HEADERS}
+)
+
 add_library(mvvcvtk_orthogonal_crop STATIC)
 target_sources(
     mvvcvtk_orthogonal_crop
-    PRIVATE ${MVVCVTK_CROP_SOURCES}
+    PRIVATE
+        ${MVVCVTK_CROP_SOURCES}
+        ${MVVCVTK_CROP_API_HEADERS}
 )
 target_include_directories(
     mvvcvtk_orthogonal_crop
@@ -33,8 +44,6 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Interaction"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Routing"
-        "${MVVCVTK_HOST_INCLUDE_DIR}"
-        ${MVVCVTK_HOST_PRIVATE_INCLUDE_DIRS}
 )
 SetTargetDefaults(mvvcvtk_orthogonal_crop)
 add_library(MVVCVTK::OrthogonalCrop ALIAS mvvcvtk_orthogonal_crop)
@@ -51,8 +60,8 @@ target_sources(
     PUBLIC
         FILE_SET api_headers
         TYPE HEADERS
-        BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        FILES ${MVVCVTK_CROP_API_HEADERS}
+        BASE_DIRS "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
+        FILES ${MVVCVTK_CROP_STAGED_API_HEADERS}
 )
 
 set(
@@ -71,17 +80,17 @@ source_group(
 unset(_mvvcvtk_crop_ide_files)
 unset(MVVCVTK_CROP_SOURCES)
 unset(MVVCVTK_CROP_API_HEADERS)
+unset(MVVCVTK_CROP_STAGED_API_HEADERS)
 target_include_directories(
     mvvcvtk_orthogonal_crop
     PUBLIC
-        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 SetApiDefaults(mvvcvtk_orthogonal_crop)
 target_link_libraries(
     mvvcvtk_orthogonal_crop
     PUBLIC
-        MVVCVTK::Host
+        MVVCVTK::FeatureSPI
         ${MVVCVTK_VTK_PUBLIC_TARGETS}
     PRIVATE
         ${MVVCVTK_VTK_TARGETS}

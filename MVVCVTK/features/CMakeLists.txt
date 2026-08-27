@@ -1,2 +1,11 @@
-add_subdirectory(OrthogonalCrop)
-add_subdirectory(GapAnalysis)
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    add_subdirectory(OrthogonalCrop)
+else()
+    ResetSdkStage("${MVVCVTK_CROP_SDK_INCLUDE_DIR}")
+endif()
+
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    add_subdirectory(GapAnalysis)
+else()
+    ResetSdkStage("${MVVCVTK_GAP_SDK_INCLUDE_DIR}")
+endif()

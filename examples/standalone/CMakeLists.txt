@@ -26,7 +26,9 @@ target_compile_definitions(
 target_link_libraries(
     MVVCVTKStandalone
     PRIVATE
-        MVVCVTK::SDK
+        MVVCVTK::Host
+        MVVCVTK::OrthogonalCrop
+        MVVCVTK::GapAnalysis
         ${MVVCVTK_VTK_TARGETS}
 )
 SetTargetDefaults(MVVCVTKStandalone)

@@ -20,6 +20,7 @@ target_include_directories(
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Algorithms"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Render/Strategies"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Services"

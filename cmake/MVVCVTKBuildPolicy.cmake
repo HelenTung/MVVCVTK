@@ -1,6 +1,9 @@
 include_guard(GLOBAL)
 
 option(MVVCVTK_BUILD_TESTING "Build MVVCVTK tests" ON)
+option(MVVCVTK_BUILD_ORTHOGONAL_CROP "Build OrthogonalCrop feature" ON)
+option(MVVCVTK_BUILD_GAP_ANALYSIS "Build GapAnalysis feature" ON)
+option(MVVCVTK_BUILD_STANDALONE "Build the full standalone example" ON)
 option(MVVCVTK_ENABLE_AVX2 "Enable AVX2 for Release builds" ON)
 
 set(

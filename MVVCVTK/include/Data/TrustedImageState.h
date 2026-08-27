@@ -1,11 +1,10 @@
 #pragma once
 
-#include "App/AppTypes.h"
-
 #include <vtkImageData.h>
 #include <vtkSmartPointer.h>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 
 // 只允许固定工具链内的 DataManager/可信 Feature 共享；VTK 内部可变性不属于普通读取契约。
@@ -16,7 +15,7 @@ struct TrustedImageState final {
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
     std::array<double, 3> origin = { 0.0, 0.0, 0.0 };
     std::array<double, 2> scalarRange = { 0.0, 0.0 };
-    DataVersion version = 0;
+    std::uint64_t version = 0;
 };
 
 using TrustedImageSnapshot =

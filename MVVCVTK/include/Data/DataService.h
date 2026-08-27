@@ -1,5 +1,6 @@
 #pragma once
 
+#include "App/AppTypes.h"
 #include "Data/ImageReadTypes.h"
 #include "Data/TrustedImageState.h"
 #include "Data/VolumeTypes.h"

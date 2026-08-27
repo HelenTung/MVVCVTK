@@ -1,0 +1,51 @@
+#pragma once
+
+#include <cstddef>
+
+// worker 执行轴；Host 只读取已发布状态，不借此控制 overlay 显示。
+enum class GapAnalysisState {
+    Idle,
+    Running,
+    Succeeded,
+    Failed
+};
+
+// Gap Feature 的等值面阈值来源，不携带 Host 窗口或实现对象。
+enum class GapIsoMode {
+    DataRangeRatio,
+    AbsoluteValue
+};
+
+struct GapSurfaceConfig {
+    GapIsoMode isoMode = GapIsoMode::DataRangeRatio;
+    // DataRangeRatio 下按 min + (max-min)*ratio 解析；当前不钳制范围。
+    double dataRangeRatio = 0.0;
+    // AbsoluteValue 下直接使用输入标量域中的阈值。
+    double absoluteIsoValue = 0.0;
+};
+
+struct GapVoidParams {
+    // grayMin、angleThresholdDeg 与 tensorWindowSize 是预留配置，当前 worker 不读取。
+    float grayMin = 0.0f;
+    float grayMax = 0.0f;
+    double minVolumeMM3 = 0.00;
+    float angleThresholdDeg = 40.0f;
+    int tensorWindowSize = 1;
+    // 六邻域腐蚀轮数；小于等于 0 时跳过腐蚀。
+    int erosionIterations = 2;
+};
+
+struct GapStatistics final {
+    std::size_t objectVoxelCount = 0;
+    std::size_t voidVoxelCount = 0;
+    double objectVolumeMM3 = 0.0;
+    double voidVolumeMM3 = 0.0;
+    double porosityRatio = 0.0;
+};
+
+struct GapHostState final {
+    GapAnalysisState analysisState = GapAnalysisState::Idle;
+    GapStatistics statistics;
+    bool isViewActive = false;
+    bool isExitPending = false;
+};

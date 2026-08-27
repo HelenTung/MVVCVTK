@@ -5,7 +5,9 @@
 #include "App/Services/FeatureViewService.h"
 #include "DataManager.h"
 #include "Host/CropHostFeature.h"
+#ifdef MVVCVTK_HAS_GAP_ANALYSIS
 #include "Host/GapHostFeature.h"
+#endif
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
 #include "Host/HostViewRuntimeRegistry.h"
@@ -358,6 +360,7 @@ CropHostRequest GetPolyRequest(
     return request;
 }
 
+#ifdef MVVCVTK_HAS_GAP_ANALYSIS
 GapHostConfig GetGapConfig()
 {
     GapHostConfig config;
@@ -377,6 +380,7 @@ GapHostConfig GetGapConfig()
     config.keys.exit.keySym = "Escape";
     return config;
 }
+#endif
 
 bool SendReload(
     VtkAppHostSession& session,
@@ -675,6 +679,7 @@ int GetCropFailCount()
         "Core writer publishes before notification and weak closures expire safely") ? 0 : 1;
     // 让主视图消费 probe 发布的新 snapshot；主视图不承载 Host timer，
     // 因此不会提前推进后续 Feature worker。
+#ifdef MVVCVTK_HAS_GAP_ANALYSIS
     SendTicks(*endpoint, 2);
 
     const bool isInitialNodeRejected =
@@ -1297,6 +1302,7 @@ int GetCropFailCount()
             && isGapDetached
             && staleGapCount == 0,
         "Repeated Crop build fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
+#endif
 
     const bool isBox = feature->SendRequest(
         GetTargetRequest(CropHostAction::Box, target));

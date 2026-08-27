@@ -10,6 +10,8 @@
 //   • 新增 operator|= / operator&= 辅助
 // =====================================================================
 
+#include "App/ViewTypes.h"
+
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -18,23 +20,6 @@
 #include <functional>
 
 using DataVersion = std::uint64_t;
-
-// --- 可视化模式枚举 ---
-enum class VizMode {
-    Volume,
-    IsoSurface,
-    SliceTop_down,
-    SliceFront_back,
-    SliceLeft_right,
-    CompositeVolume,        // 3D 体渲染 + 切片平面
-    CompositeIsoSurface     // 3D 等值面 + 切片平面
-};
-
-// --- 交互工具枚举 ---
-enum class ToolMode {
-    Navigation,         // 默认漫游/切片浏览
-    ModelTransform      // 模型变换（旋转/缩放/平移）
-};
 
 // 通用交互来源键；主体只比较完整键，不解释 Feature 的 owner/channel 文本。
 struct InteractionSource final {

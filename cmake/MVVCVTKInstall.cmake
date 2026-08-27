@@ -38,54 +38,6 @@ install(
     COMPONENT Host
 )
 
-install(
-    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/msbuild/"
-    DESTINATION "msbuild"
-    COMPONENT Host
-    FILES_MATCHING PATTERN "*.props"
-)
-install(
-    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/qmake/"
-    DESTINATION "qmake"
-    COMPONENT Host
-    FILES_MATCHING PATTERN "*.pri"
-)
-install(
-    FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/Confirm-MVVCVTKSdkIdentity.ps1"
-    DESTINATION "tools"
-    COMPONENT Host
-)
-install(
-    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/consumer/"
-    DESTINATION "examples/CMake"
-    COMPONENT Host
-    FILES_MATCHING
-        PATTERN "CMakeLists.txt"
-        PATTERN "*.cpp"
-)
-install(
-    DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/qt-consumer/"
-    DESTINATION "examples/QtCleanRoom"
-    COMPONENT Host
-    FILES_MATCHING
-        PATTERN "CMakeLists.txt"
-        PATTERN "*.cpp"
-)
-install(
-    FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/msbuild-consumer/MVVCVTKSdkConsumer.vcxproj"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/consumer/main.cpp"
-    DESTINATION "examples/MSBuild"
-    COMPONENT Host
-)
-install(
-    FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/qmake-consumer/MVVCVTKSdkConsumer.pro"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/release/consumer/main.cpp"
-    DESTINATION "examples/Qmake"
-    COMPONENT Host
-)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
     install(
         FILES "${CMAKE_CURRENT_SOURCE_DIR}/README.md"

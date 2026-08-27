@@ -1,7 +1,5 @@
 #pragma once
 
-#include "App/AppTypes.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -96,7 +94,7 @@ struct ImageReadState final {
     std::size_t voxelCount = 0;
     ImageReadBytes values;
     ImageReadBytes validityMask;
-    DataVersion version = 0;
+    std::uint64_t version = 0;
 };
 
 struct ImageReadResult final {

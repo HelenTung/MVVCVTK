@@ -1,14 +1,23 @@
-add_executable(
-    mvvcvtk_host_method_tests
-    QtHostCropTests.cpp
+set(MVVCVTK_HOST_METHOD_SOURCES
     QtHostExportTests.cpp
-    QtHostGapTests.cpp
     QtHostLifecycleTests.cpp
     QtHostLoadTests.cpp
     QtHostMethodCases.h
     QtHostMethodTests.cpp
     QtHostViewTests.cpp
 )
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostCropTests.cpp)
+endif()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostGapTests.cpp)
+endif()
+
+add_executable(
+    mvvcvtk_host_method_tests
+    ${MVVCVTK_HOST_METHOD_SOURCES}
+)
+unset(MVVCVTK_HOST_METHOD_SOURCES)
 
 set_target_properties(
     mvvcvtk_host_method_tests
@@ -22,6 +31,8 @@ target_include_directories(
     mvvcvtk_host_method_tests
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
+        # 白盒测试显式获得 Host 内部头；产品 target 不传播该源码根。
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Services"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Tasks"
@@ -33,20 +44,53 @@ target_include_directories(
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Support"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Algorithms"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Services"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Algorithms"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Interaction"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Routing"
 )
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    target_include_directories(
+        mvvcvtk_host_method_tests
+        PRIVATE
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Algorithms"
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Interaction"
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Render"
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Routing"
+    )
+    target_compile_definitions(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK_HAS_ORTHOGONAL_CROP=1
+    )
+endif()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    target_include_directories(
+        mvvcvtk_host_method_tests
+        PRIVATE
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Algorithms"
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Services"
+    )
+    target_compile_definitions(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK_HAS_GAP_ANALYSIS=1
+    )
+endif()
 
 target_link_libraries(
     mvvcvtk_host_method_tests
     PRIVATE
-        MVVCVTK::SDK
+        MVVCVTK::Host
+        MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
 )
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    target_link_libraries(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK::OrthogonalCrop
+    )
+endif()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    target_link_libraries(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK::GapAnalysis
+    )
+endif()
 
 SetTargetDefaults(mvvcvtk_host_method_tests)
 vtk_module_autoinit(
@@ -77,6 +121,7 @@ target_link_libraries(
     mvvcvtk_qt_host_smoke
     PRIVATE
         MVVCVTK::Host
+        MVVCVTK::FeatureSPI
         Qt5::Core
         Qt5::Gui
         Qt5::Widgets
@@ -113,6 +158,8 @@ set_target_properties(
 target_include_directories(
     mvvcvtk_qt_session_smoke
     PRIVATE
+        # Session smoke 会注入 HostCoreServices，属于仓内白盒测试。
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Data"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Host"
@@ -126,6 +173,7 @@ target_link_libraries(
     mvvcvtk_qt_session_smoke
     PRIVATE
         MVVCVTK::Host
+        MVVCVTKInternal::FeatureSupport
         Qt5::Core
         Qt5::Gui
         Qt5::Widgets

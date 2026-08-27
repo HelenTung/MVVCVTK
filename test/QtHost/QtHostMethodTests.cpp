@@ -1,11 +1,14 @@
 #include "QtHostMethodCases.h"
 
 #include <array>
+#include <cstddef>
 #include <csignal>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #ifdef _WIN32
 #include <crtdbg.h>
@@ -21,14 +24,38 @@ struct MethodCase {
     int (*getFailCount)();
 };
 
-constexpr std::array<MethodCase, 6> methodCases{{
+constexpr std::size_t methodCaseCount =
+    4
+#if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
+    + 1
+#endif
+#if defined(MVVCVTK_HAS_GAP_ANALYSIS)
+    + 1
+#endif
+    ;
+
+constexpr std::array<MethodCase, methodCaseCount> methodCases{{
     { "load", &GetLoadFailCount },
     { "view", &GetViewFailCount },
+#if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
     { "crop", &GetCropFailCount },
+#endif
+#if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     { "gap", &GetGapFailCount },
+#endif
     { "export", &GetExportFailCount },
     { "lifecycle", &GetLifecycleFailCount }
 }};
+
+constexpr std::string_view methodCaseNames =
+    "load|view"
+#if defined(MVVCVTK_HAS_ORTHOGONAL_CROP)
+    "|crop"
+#endif
+#if defined(MVVCVTK_HAS_GAP_ANALYSIS)
+    "|gap"
+#endif
+    "|export|lifecycle";
 
 } // namespace
 
@@ -86,7 +113,7 @@ int main(int argc, char* argv[])
     if (!isAllCases && !isSingleCase) {
         std::cerr
             << "ERROR: use --case "
-            << "load|view|crop|gap|export|lifecycle\n";
+            << methodCaseNames << '\n';
         return 2;
     }
 
@@ -105,7 +132,7 @@ int main(int argc, char* argv[])
     if (!hasSelectedCase) {
         std::cerr
             << "ERROR: unknown case '" << selectedCase << "'; use "
-            << "load|view|crop|gap|export|lifecycle\n";
+            << methodCaseNames << '\n';
         return 2;
     }
     if (failureCount != 0) {

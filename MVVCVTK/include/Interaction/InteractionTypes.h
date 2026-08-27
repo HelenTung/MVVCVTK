@@ -1,6 +1,6 @@
 #pragma once
 
-#include "App/AppTypes.h"  // VizMode, ToolMode
+#include "App/ViewTypes.h"
 
 #include <string>
 
@@ -51,7 +51,7 @@ struct InteractionEvent
     std::string keySym;         // iren->GetKeySym()，非字符按键的符号名；具体含义由宿主映射
 
     // ── RenderContext 在分发前写入的模式快照 ───────────────────────────
-    VizMode  vizMode = VizMode::Volume; // 决定 2D/3D Handler 的视图分支
+    VizMode vizMode = VizMode::Volume; // 决定 2D/3D Handler 的视图分支
     ToolMode toolMode = ToolMode::Navigation; // 决定导航或模型变换路径
 };
 

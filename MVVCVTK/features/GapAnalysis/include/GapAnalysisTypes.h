@@ -4,44 +4,21 @@
 // GapAnalysisTypes.h - 间隙/空洞分析模块纯数据结构与插件接口
 // =====================================================================
 
-#include <vector>
-#include <array>
-#include <cstddef>
+#include "Host/GapHostTypes.h"
+
 #include <vtkSmartPointer.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
 
-// ── worker 执行轴；不表示显示模式或 overlay 是否开启 ────────────────
-enum class GapAnalysisState {
-    Idle,       // 尚未发起，或 worker 在进入算法前消费到停止请求。
-    Running,    // StartAsync 已发布快照，后台 worker 可能正在分阶段计算。
-    Succeeded,  // worker 已提交成功结果，主线程可以读取并挂载显示。
-    Failed      // 输入校验、后台异常，或 worker 在阶段间消费到取消请求；显示 tick 不挂载 overlay。
-};
+#include <array>
+#include <cstddef>
+#include <vector>
 
 // ── 表面参数（外部手动传入 isoValue，不在此自动估算）───────────────
 struct GapSurfaceParams {
     float isoValue = 0.0f;  // 输入标量域阈值；当前 worker 用它区分低于 ISO 的内部候选。
     float background = 0.0f;  // 预留的背景灰度上限；当前 worker 不读取该字段。
     float material = 0.0f;  // 预留的材料灰度下限；当前 worker 不读取该字段。
-};
-
-// ── 显示会话的等值面阈值来源配置 ──────────────────────────────────
-// 这是 GapAnalysis feature 自己的执行语义，不携带 host 窗口、按键或上位机协议细节。
-enum class GapIsoMode {
-    // 在当前输入标量范围按 min + (max - min) * ratio 解析；feature 不额外钳制 ratio。
-    DataRangeRatio,
-    // 直接采用输入图像标量域中的 absoluteIsoValue。
-    AbsoluteValue
-};
-
-struct GapSurfaceConfig {
-    // 阈值来源选择器；DataRangeRatio 只读取 ratio，AbsoluteValue 只读取 absoluteIsoValue。
-    GapIsoMode isoMode = GapIsoMode::DataRangeRatio;
-    // DataRangeRatio 下按 min + (max-min)*ratio 解析；当前不钳制范围，默认 0 对应输入最小值。
-    double dataRangeRatio = 0.0;
-    // AbsoluteValue 下直接使用的输入标量域阈值；其它模式忽略。
-    double absoluteIsoValue = 0.0;
 };
 
 // ── 高级法向精化参数 ──────────────────────────────────────────────────
@@ -62,28 +39,12 @@ struct GapAdvancedParams {
     int   normalSmoothIterations = 0;
 };
 
-// ── 空洞检测参数 ──────────────────────────────────────────────────────
-struct GapVoidParams {
-    // 预留的候选灰度下限；当前 BuildCandidates 不读取，不能视作已生效筛选条件。
-    float  grayMin = 0.0f;
-    // 候选灰度上限，处于输入标量域；内部 mask 中 value <= grayMax 的 voxel 才进入原始候选。
-    float  grayMax = 0.0f;
-    // 连通区域最小保留体积，单位 mm^3；volume >= threshold 时保留，默认 0 不过滤。
-    double minVolumeMM3 = 0.00;
-    // 预留的方向夹角阈值，单位 degree；当前检测器不读取。
-    float  angleThresholdDeg = 40.0f;
-    // 预留的结构张量邻域半径/窗口参数，单位 voxel；当前检测器不读取。
-    int    tensorWindowSize = 1;
-    // 六邻域腐蚀轮数；小于等于 0 时跳过，腐蚀后从幸存种子回长到原始候选连通域。
-    int erosionIterations = 2;
-};
-
 // ── 空洞区域统计结果 ──────────────────────────────────────────────────
 struct VoidRegion {
     // 被保留区域的正标签 ID；从 1 连续编号，并与 labelVolume/labelImage 的正值对应。
     int                  id = 0;
     // 当前六邻域连通候选包含的 voxel 数。
-    size_t               voxelCount = 0;
+    std::size_t          voxelCount = 0;
     // voxelCount * spacingX * spacingY * spacingZ，单位 mm^3。
     double               volumeMM3 = 0.0;
     // 与 volumeMM3 等体积球的直径，单位 mm。
@@ -133,15 +94,6 @@ struct VoidRegion {
 
 };
 
-struct GapStatistics final {
-    // object/void 只统计同一成功分析批次的有效域，体素计数不经窄化转换。
-    std::size_t objectVoxelCount = 0;
-    std::size_t voidVoxelCount = 0;
-    double objectVolumeMM3 = 0.0;
-    double voidVolumeMM3 = 0.0;
-    double porosityRatio = 0.0;
-};
-
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
 struct GapAnalysisResult {
     // 通过 minVolumeMM3 筛选的区域统计；id 与正标签值一一对应。
@@ -153,11 +105,4 @@ struct GapAnalysisResult {
     // 与 voids、labelVolume 和 labelImage 在同一 worker 提交段发布的聚合统计。
     GapStatistics statistics;
     bool                    isSucceeded = false; // 只表示分析 payload 有效，不代表 display/overlay 已显示。
-};
-
-struct GapHostState final {
-    GapAnalysisState analysisState = GapAnalysisState::Idle;
-    GapStatistics statistics;
-    bool isViewActive = false;
-    bool isExitPending = false;
 };
