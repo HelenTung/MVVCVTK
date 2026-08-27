@@ -107,6 +107,53 @@ function Get-RelativePath(
     return $filePath.Substring($prefix.Length).Replace('\', '/')
 }
 
+function Get-HeaderSurface([string]$stageRoot)
+{
+    $surfacePath = Join-Path $stageRoot `
+        'lib\cmake\MVVCVTK\MVVCVTKHeaderSurface.txt'
+    if (-not [IO.File]::Exists($surfacePath)) {
+        throw "SDK header surface metadata is missing: $surfacePath"
+    }
+    $allowedCategories = @(
+        'HostAPI', 'HostSupport',
+        'FeatureSPI', 'FeatureSupport',
+        'OrthogonalCrop', 'GapAnalysis'
+    )
+    $seenEntries = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    $entries = @(
+        foreach ($line in (Get-Content -LiteralPath $surfacePath)) {
+            $match = [regex]::Match($line, '^([^|]+)\|([^|]+)$')
+            if (-not $match.Success) {
+                throw "Invalid SDK header surface entry: $line"
+            }
+            $category = $match.Groups[1].Value
+            $headerPath = $match.Groups[2].Value
+            $segments = @($headerPath.Split('/'))
+            if ($category -notin $allowedCategories -or
+                [IO.Path]::IsPathRooted($headerPath) -or
+                $headerPath.Contains('\') -or
+                $headerPath.Contains(':') -or
+                $headerPath.Contains([char]0) -or
+                -not $headerPath.EndsWith('.h') -or
+                @($segments | Where-Object {
+                        $_ -eq '' -or $_ -eq '.' -or $_ -eq '..'
+                    }).Count -ne 0 -or
+                -not $seenEntries.Add("$category|$headerPath")) {
+                throw "Unsafe or duplicate SDK header surface entry: $line"
+            }
+            [pscustomobject]@{
+                category = $category
+                path = $headerPath
+            }
+        }
+    )
+    if ($entries.Count -eq 0) {
+        throw 'SDK header surface metadata is empty.'
+    }
+    return $entries
+}
+
 $stageRoot = [IO.Path]::GetFullPath($Stage)
 $repoPath = [IO.Path]::GetFullPath($RepoRoot)
 $depsManifestPath = Join-Path $stageRoot 'deps\manifest.json'
@@ -175,28 +222,14 @@ if (-not $isDirty -and $PackageRevision -ne $cleanVersion) {
     throw "Clean SDK builds must use $cleanVersion."
 }
 
-$publicHeaders = @(
-    'App/AppTypes.h'
-    'App/ViewTypes.h'
-    'App/Services/FeatureViewService.h'
-    'Data/ImageReadTypes.h'
-    'Data/TrustedImageState.h'
-    'Host/CropHostFeature.h'
-    'Host/GapHostFeature.h'
-    'Host/GapHostTypes.h'
-    'Host/HostFeature.h'
-    'Host/Types/HostFeatureViewTypes.h'
-    'Host/Types/HostInputTypes.h'
-    'Host/Types/HostRequest.h'
-    'Host/Types/HostRequestTypes.h'
-    'Host/Types/HostSessionTypes.h'
-    'Host/Types/HostValueTypes.h'
-    'Host/VtkAppHostSession.h'
-    'Interaction/InteractionTypes.h'
-    'OrthogonalCropTypes.h'
-    'Render/Contracts/OverlayService.h'
-    'Render/Contracts/RenderEffect.h'
-    'Render/Contracts/VisualStrategy.h'
+$headerSurface = @(Get-HeaderSurface $stageRoot)
+$publicHeaders = @($headerSurface.path | Sort-Object -Unique)
+$entryCategories = @('HostAPI', 'FeatureSPI', 'OrthogonalCrop', 'GapAnalysis')
+$entryHeaders = @(
+    $headerSurface |
+        Where-Object { $_.category -in $entryCategories } |
+        ForEach-Object { $_.path } |
+        Sort-Object -Unique
 )
 $includeRoot = Join-Path $stageRoot 'include'
 $actualHeaders = @(
@@ -207,7 +240,7 @@ $actualHeaders = @(
         Sort-Object
 )
 if (@(Compare-Object ($publicHeaders | Sort-Object) $actualHeaders).Count -ne 0) {
-    throw 'Installed public header closure is not the declared 21-header API.'
+    throw 'Installed public header closure differs from CMake surface metadata.'
 }
 
 $libraryNames = @(
@@ -317,12 +350,7 @@ $manifest = [ordered]@{
         components = $deps.components
     }
     publicSurface = [ordered]@{
-        entryHeaders = @(
-            'Host/VtkAppHostSession.h'
-            'Host/HostFeature.h'
-            'Host/CropHostFeature.h'
-            'Host/GapHostFeature.h'
-        )
+        entryHeaders = $entryHeaders
         headerClosure = $publicHeaders
         headerClosureCount = $publicHeaders.Count
     }
@@ -330,6 +358,12 @@ $manifest = [ordered]@{
         configurations = @('Debug', 'Release')
         installedHeaderCompile = $true
         cmakeConsumer = $true
+        cmakeConsumerMatrix = @(
+            'Host'
+            'Host+OrthogonalCrop'
+            'Host+GapAnalysis'
+            'Host+OrthogonalCrop+GapAnalysis'
+        )
         qtCmakeConsumer = $true
         relocatableMetadata = $true
     }

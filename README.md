@@ -78,7 +78,7 @@ target_link_libraries(app PRIVATE
 
 ## SDK 公开头边界
 
-SDK 的语义入口只有四个：`Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`。安装目录共 21 个批准头；除入口外还包括消费者请求/读取 DTO、Feature SPI，以及入口公开签名所需的物理闭包，它们不是额外顶层模块。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。共享的 `FeatureVisualStrategy` 是 Host/Gap 的内部实现支持，不安装到 SDK。源码 `include/` 整树不属于 SDK 暴露面。
+SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成，并随包写入 `lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt`，不再维护固定头文件数量。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。共享的 `FeatureVisualStrategy` 是 Host/Gap 的内部实现支持，不安装到 SDK。源码 `include/` 整树不属于 SDK 暴露面。
 
 ## 线程与停止规则
 

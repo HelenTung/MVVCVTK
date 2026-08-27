@@ -17,9 +17,6 @@ target_include_directories(
     mvvcvtk_gap_tests
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Algorithms"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Render/Strategies"
@@ -29,6 +26,7 @@ target_include_directories(
 target_link_libraries(
     mvvcvtk_gap_tests
     PRIVATE
+        mvvcvtk_host_test_internal
         MVVCVTK::GapAnalysis
         ${MVVCVTK_VTK_TARGETS}
 )

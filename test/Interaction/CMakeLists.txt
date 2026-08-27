@@ -29,20 +29,12 @@ target_include_directories(
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Fakes"
-        # 白盒测试显式获得 Host 内部头；产品 target 不传播该源码根。
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Services"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Data"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Host"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Interaction"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
 )
 
 target_link_libraries(
     mvvcvtk_interaction_tests
     PRIVATE
+        mvvcvtk_host_test_internal
         MVVCVTK::Host
         ${MVVCVTK_VTK_TARGETS}
 )

@@ -21,19 +21,6 @@ target_include_directories(
     mvvcvtk_crop_tests
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        # 白盒测试显式获得 Host 内部头；产品 target 不传播该源码根。
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Services"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Tasks"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Data"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Geometry"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Host"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Interaction"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Platform"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Support"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Algorithms"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/OrthogonalCrop/include/Interaction"
@@ -44,6 +31,7 @@ target_include_directories(
 target_link_libraries(
     mvvcvtk_crop_tests
     PRIVATE
+        mvvcvtk_host_test_internal
         MVVCVTK::Host
         MVVCVTK::OrthogonalCrop
         MVVCVTKInternal::FeatureSupport

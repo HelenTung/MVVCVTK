@@ -241,26 +241,36 @@ function Start-CMakeConsumer(
     $consumerRoot = Join-Path $verifyBase 'cmake'
     Clear-SafeDirectory $verifyBase $consumerRoot
     $sourceRoot = Join-Path $consumerRoot 'src'
-    $buildRoot = Join-Path $consumerRoot 'build'
     Set-ConsumerSource (Join-Path $repoRoot 'tools\release\consumer') `
         $sourceRoot
-    Start-Command $script:cmakePath @(
-        '-S', $sourceRoot,
-        '-B', $buildRoot,
-        '-G', 'Visual Studio 18 2026',
-        '-A', 'x64',
-        '-T', 'v145,host=x64',
-        "-DMVVCVTK_DIR=$(Join-Path $stage 'lib\cmake\MVVCVTK')"
+    $consumerCases = @(
+        [ordered]@{ name = 'host'; crop = 'OFF'; gap = 'OFF' }
+        [ordered]@{ name = 'host-crop'; crop = 'ON'; gap = 'OFF' }
+        [ordered]@{ name = 'host-gap'; crop = 'OFF'; gap = 'ON' }
+        [ordered]@{ name = 'host-crop-gap'; crop = 'ON'; gap = 'ON' }
     )
-    foreach ($configuration in @('Debug', 'Release')) {
+    foreach ($consumerCase in $consumerCases) {
+        $buildRoot = Join-Path $consumerRoot "build-$($consumerCase.name)"
         Start-Command $script:cmakePath @(
-            '--build', $buildRoot,
-            '--config', $configuration,
-            '--parallel'
+            '-S', $sourceRoot,
+            '-B', $buildRoot,
+            '-G', 'Visual Studio 18 2026',
+            '-A', 'x64',
+            '-T', 'v145,host=x64',
+            "-DMVVCVTK_DIR=$(Join-Path $stage 'lib\cmake\MVVCVTK')",
+            "-DMVVCVTK_CONSUMER_CROP=$($consumerCase.crop)",
+            "-DMVVCVTK_CONSUMER_GAP=$($consumerCase.gap)"
         )
-        Start-RuntimeExecutable (
-            Join-Path $buildRoot "$configuration\mvvcvtk_sdk_consumer.exe") (
-            Join-Path $stage 'deps') $false
+        foreach ($configuration in @('Debug', 'Release')) {
+            Start-Command $script:cmakePath @(
+                '--build', $buildRoot,
+                '--config', $configuration,
+                '--parallel'
+            )
+            Start-RuntimeExecutable (
+                Join-Path $buildRoot "$configuration\mvvcvtk_sdk_consumer.exe") (
+                Join-Path $stage 'deps') $false
+        }
     }
 }
 

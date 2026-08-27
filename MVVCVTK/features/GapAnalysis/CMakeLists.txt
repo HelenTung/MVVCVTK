@@ -8,7 +8,9 @@ set(MVVCVTK_GAP_SOURCES
     src/Services/GapAnalysisService.cpp
 )
 # GapHostFeature 是模块入口，GapHostTypes 是其公开签名的值类型闭包。
-set(MVVCVTK_GAP_API_HEADERS
+SetHeaderSurface(
+    MVVCVTK_GAP_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/GapHostFeature.h
     include/Host/GapHostTypes.h
 )

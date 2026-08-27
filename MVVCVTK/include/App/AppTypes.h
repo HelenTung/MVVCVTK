@@ -11,6 +11,7 @@
 // =====================================================================
 
 #include "App/ViewTypes.h"
+#include "Data/DataVersion.h"
 
 #include <vector>
 #include <array>
@@ -18,8 +19,6 @@
 #include <cstddef>
 #include <string>
 #include <functional>
-
-using DataVersion = std::uint64_t;
 
 // 通用交互来源键；主体只比较完整键，不解释 Feature 的 owner/channel 文本。
 struct InteractionSource final {

@@ -18,6 +18,30 @@ function(SetTestRuntime testName target)
     )
 endfunction()
 
+get_property(
+    MVVCVTK_HOST_TEST_INCLUDE_DIRS
+    GLOBAL PROPERTY MVVCVTK_HOST_PRIVATE_INCLUDE_DIRS
+)
+if(NOT MVVCVTK_HOST_TEST_INCLUDE_DIRS)
+    message(FATAL_ERROR "Host private include surface is unavailable to tests.")
+endif()
+
+# 唯一允许访问 Host 私有头的仓内接口；不安装、不导出，也不传播给产品 target。
+add_library(mvvcvtk_host_test_internal INTERFACE)
+target_include_directories(
+    mvvcvtk_host_test_internal
+    BEFORE
+    INTERFACE
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
+        ${MVVCVTK_HOST_TEST_INCLUDE_DIRS}
+)
+target_compile_features(mvvcvtk_host_test_internal INTERFACE cxx_std_17)
+set_target_properties(
+    mvvcvtk_host_test_internal
+    PROPERTIES FOLDER "MVVCVTK/Tests/Internal"
+)
+unset(MVVCVTK_HOST_TEST_INCLUDE_DIRS)
+
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_subdirectory(OrthogonalCrop)
 endif()

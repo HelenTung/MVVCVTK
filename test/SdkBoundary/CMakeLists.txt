@@ -26,6 +26,36 @@ file(MAKE_DIRECTORY
     "${MVVCVTK_PROBE_SOURCE_DIR}"
 )
 
+function(GetSurfaceHeaders outputName propertyName)
+    get_property(surfaceHeaders GLOBAL PROPERTY "${propertyName}")
+    set(relativeHeaders)
+    foreach(surfaceHeader IN LISTS surfaceHeaders)
+        string(REGEX REPLACE "^include/" "" relativeHeader "${surfaceHeader}")
+        list(APPEND relativeHeaders "${relativeHeader}")
+    endforeach()
+    set(${outputName} "${relativeHeaders}" PARENT_SCOPE)
+endfunction()
+
+GetSurfaceHeaders(MVVCVTK_HOST_ENTRY_HEADERS MVVCVTK_HOST_PUBLIC_HEADERS)
+GetSurfaceHeaders(MVVCVTK_HOST_SUPPORT_HEADERS MVVCVTK_HOST_CLOSURE_HEADERS)
+GetSurfaceHeaders(MVVCVTK_SPI_ENTRY_HEADERS MVVCVTK_FEATURE_SPI_HEADERS)
+GetSurfaceHeaders(
+    MVVCVTK_SPI_SUPPORT_HEADERS
+    MVVCVTK_FEATURE_SPI_CLOSURE_HEADERS
+)
+GetSurfaceHeaders(MVVCVTK_CROP_ENTRY_HEADERS MVVCVTK_CROP_API_HEADERS)
+GetSurfaceHeaders(MVVCVTK_GAP_ENTRY_HEADERS MVVCVTK_GAP_API_HEADERS)
+set(
+    MVVCVTK_HOST_PROBE_HEADERS
+    ${MVVCVTK_HOST_ENTRY_HEADERS}
+    ${MVVCVTK_HOST_SUPPORT_HEADERS}
+)
+set(
+    MVVCVTK_SPI_PROBE_HEADERS
+    ${MVVCVTK_SPI_ENTRY_HEADERS}
+    ${MVVCVTK_SPI_SUPPORT_HEADERS}
+)
+
 # Probe 是构建边界的输入，不是需要长期维护的产品源码；配置时按清单生成。
 function(BuildProbe outputName fileName sourceContent)
     set(probePath "${MVVCVTK_PROBE_SOURCE_DIR}/${fileName}")
@@ -38,11 +68,29 @@ function(BuildProbe outputName fileName sourceContent)
     set(${outputName} "${probePath}" PARENT_SCOPE)
 endfunction()
 
-function(BuildTypeProbe outputName fileName headerName typeName)
-    string(CONCAT probeSource
-        "#include \"${headerName}\"\n\n"
-        "static_assert(sizeof(${typeName}) > 0);\n"
-    )
+function(BuildHeaderProbes outputSources outputDependencies surfaceName dependencyDir)
+    set(probeSources)
+    set(dependencyFiles)
+    foreach(headerName IN LISTS ARGN)
+        get_filename_component(headerStem "${headerName}" NAME_WE)
+        set(probeFile "${surfaceName}${headerStem}HeaderProbe.cpp")
+        BuildProbe(
+            generatedProbe
+            "${probeFile}"
+            "#include \"${headerName}\"\n"
+        )
+        list(APPEND probeSources "${generatedProbe}")
+        list(APPEND dependencyFiles "${dependencyDir}/${probeFile}.json")
+    endforeach()
+    set(${outputSources} "${probeSources}" PARENT_SCOPE)
+    set(${outputDependencies} "${dependencyFiles}" PARENT_SCOPE)
+endfunction()
+
+function(BuildAggregateProbe outputName fileName)
+    set(probeSource)
+    foreach(headerName IN LISTS ARGN)
+        string(APPEND probeSource "#include \"${headerName}\"\n")
+    endforeach()
     BuildProbe(${outputName} "${fileName}" "${probeSource}")
     set(${outputName} "${${outputName}}" PARENT_SCOPE)
 endfunction()
@@ -62,61 +110,46 @@ function(BuildForbiddenProbe outputName fileName)
     set(${outputName} "${${outputName}}" PARENT_SCOPE)
 endfunction()
 
-BuildTypeProbe(
-    MVVCVTK_HOST_REQUEST_PROBE
-    HostRequestTypesHeaderProbe.cpp
-    Host/Types/HostRequestTypes.h
-    HostViewSetRequest
+BuildHeaderProbes(
+    MVVCVTK_HOST_PROBES
+    MVVCVTK_HOST_DEPENDENCY_FILES
+    HostApi
+    "${MVVCVTK_HOST_DEPENDENCY_DIR}"
+    ${MVVCVTK_HOST_PROBE_HEADERS}
 )
-BuildTypeProbe(
-    MVVCVTK_HOST_SESSION_PROBE
-    HostSessionHeaderProbe.cpp
-    Host/VtkAppHostSession.h
-    VtkAppHostSession
+BuildHeaderProbes(
+    MVVCVTK_SPI_PROBES
+    MVVCVTK_SPI_DEPENDENCY_FILES
+    FeatureSpi
+    "${MVVCVTK_SPI_DEPENDENCY_DIR}"
+    ${MVVCVTK_SPI_PROBE_HEADERS}
 )
-BuildProbe(
-    MVVCVTK_FEATURE_SPI_PROBE
-    FeatureSpiHeaderProbe.cpp
-    [=[#include "App/Services/FeatureViewService.h"
-#include "Render/Contracts/OverlayService.h"
-#include "Render/Contracts/RenderEffect.h"
-#include "Render/Contracts/VisualStrategy.h"
-
-static_assert(sizeof(FeatureViewService) > 0);
-static_assert(sizeof(OverlayService) > 0);
-static_assert(sizeof(RenderEffect) > 0);
-static_assert(sizeof(AbstractVisualStrategy) > 0);
-]=]
+BuildHeaderProbes(
+    MVVCVTK_CROP_PROBES
+    MVVCVTK_CROP_DEPENDENCY_FILES
+    CropApi
+    "${MVVCVTK_CROP_DEPENDENCY_DIR}"
+    ${MVVCVTK_CROP_ENTRY_HEADERS}
 )
-BuildTypeProbe(
-    MVVCVTK_HOST_FEATURE_PROBE
-    HostFeatureHeaderProbe.cpp
-    Host/HostFeature.h
-    HostFeature
+BuildHeaderProbes(
+    MVVCVTK_GAP_PROBES
+    MVVCVTK_GAP_DEPENDENCY_FILES
+    GapApi
+    "${MVVCVTK_GAP_DEPENDENCY_DIR}"
+    ${MVVCVTK_GAP_ENTRY_HEADERS}
 )
-BuildTypeProbe(
-    MVVCVTK_CROP_HOST_PROBE
-    CropHostFeatureHeaderProbe.cpp
-    Host/CropHostFeature.h
-    CropHostFeature
+set(
+    MVVCVTK_AGGREGATE_HEADERS
+    ${MVVCVTK_HOST_ENTRY_HEADERS}
+    ${MVVCVTK_SPI_ENTRY_HEADERS}
+    ${MVVCVTK_CROP_ENTRY_HEADERS}
+    ${MVVCVTK_GAP_ENTRY_HEADERS}
 )
-BuildTypeProbe(
-    MVVCVTK_CROP_TYPES_PROBE
-    CropTypesHeaderProbe.cpp
-    OrthogonalCropTypes.h
-    CropBuildResult
-)
-BuildTypeProbe(
-    MVVCVTK_GAP_HOST_PROBE
-    GapHostFeatureHeaderProbe.cpp
-    Host/GapHostFeature.h
-    GapHostFeature
-)
-BuildTypeProbe(
-    MVVCVTK_GAP_TYPES_PROBE
-    GapHostTypesHeaderProbe.cpp
-    Host/GapHostTypes.h
-    GapHostState
+list(REMOVE_DUPLICATES MVVCVTK_AGGREGATE_HEADERS)
+BuildAggregateProbe(
+    MVVCVTK_AGGREGATE_PROBE
+    SdkHeaderAggregateProbe.cpp
+    ${MVVCVTK_AGGREGATE_HEADERS}
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_DATA_PROBE
@@ -153,8 +186,7 @@ BuildForbiddenProbe(
 )
 
 add_library(mvvcvtk_host_header_probes OBJECT
-    "${MVVCVTK_HOST_REQUEST_PROBE}"
-    "${MVVCVTK_HOST_SESSION_PROBE}"
+    ${MVVCVTK_HOST_PROBES}
 )
 SetTargetDefaults(mvvcvtk_host_header_probes)
 target_link_libraries(
@@ -172,30 +204,28 @@ set_target_properties(
         FOLDER "MVVCVTK/Tests"
 )
 
-add_library(mvvcvtk_feature_spi_header_probe OBJECT
-    "${MVVCVTK_FEATURE_SPI_PROBE}"
-    "${MVVCVTK_HOST_FEATURE_PROBE}"
+add_library(mvvcvtk_feature_spi_header_probes OBJECT
+    ${MVVCVTK_SPI_PROBES}
 )
-SetTargetDefaults(mvvcvtk_feature_spi_header_probe)
+SetTargetDefaults(mvvcvtk_feature_spi_header_probes)
 target_link_libraries(
-    mvvcvtk_feature_spi_header_probe
+    mvvcvtk_feature_spi_header_probes
     PRIVATE MVVCVTK::FeatureSPI
 )
 target_compile_options(
-    mvvcvtk_feature_spi_header_probe
+    mvvcvtk_feature_spi_header_probes
     PRIVATE /sourceDependencies "${MVVCVTK_SPI_DEPENDENCY_DIR}"
 )
 set_target_properties(
-    mvvcvtk_feature_spi_header_probe
+    mvvcvtk_feature_spi_header_probes
     PROPERTIES
-        PROJECT_LABEL MVVCVTKFeatureSpiHeaderProbe
+        PROJECT_LABEL MVVCVTKFeatureSpiHeaderProbes
         FOLDER "MVVCVTK/Tests"
 )
 
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_library(mvvcvtk_crop_header_probes OBJECT
-        "${MVVCVTK_CROP_HOST_PROBE}"
-        "${MVVCVTK_CROP_TYPES_PROBE}"
+        ${MVVCVTK_CROP_PROBES}
     )
     SetTargetDefaults(mvvcvtk_crop_header_probes)
     target_link_libraries(
@@ -216,8 +246,7 @@ endif()
 
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     add_library(mvvcvtk_gap_header_probes OBJECT
-        "${MVVCVTK_GAP_HOST_PROBE}"
-        "${MVVCVTK_GAP_TYPES_PROBE}"
+        ${MVVCVTK_GAP_PROBES}
     )
     SetTargetDefaults(mvvcvtk_gap_header_probes)
     target_link_libraries(
@@ -236,132 +265,146 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     )
 endif()
 
-function(SetClosureTest testName dependencyFile stagingRoot)
+add_library(mvvcvtk_sdk_header_aggregate OBJECT
+    "${MVVCVTK_AGGREGATE_PROBE}"
+)
+SetTargetDefaults(mvvcvtk_sdk_header_aggregate)
+target_link_libraries(
+    mvvcvtk_sdk_header_aggregate
+    PRIVATE
+        MVVCVTK::HostAPI
+        MVVCVTK::FeatureSPI
+)
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    target_link_libraries(
+        mvvcvtk_sdk_header_aggregate
+        PRIVATE MVVCVTK::OrthogonalCrop
+    )
+endif()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    target_link_libraries(
+        mvvcvtk_sdk_header_aggregate
+        PRIVATE MVVCVTK::GapAnalysis
+    )
+endif()
+set_target_properties(
+    mvvcvtk_sdk_header_aggregate
+    PROPERTIES
+        PROJECT_LABEL MVVCVTKSdkHeaderAggregate
+        FOLDER "MVVCVTK/Tests"
+)
+
+set(
+    MVVCVTK_CONSUMER_SOURCE
+    "${PROJECT_SOURCE_DIR}/tools/release/consumer/main.cpp"
+)
+function(BuildTreeConsumer targetName testName hasCrop hasGap)
+    add_executable(${targetName} "${MVVCVTK_CONSUMER_SOURCE}")
+    SetTargetDefaults(${targetName})
+    target_compile_definitions(
+        ${targetName}
+        PRIVATE
+            "MVVCVTK_CONSUMER_CROP=${hasCrop}"
+            "MVVCVTK_CONSUMER_GAP=${hasGap}"
+    )
+    target_link_libraries(${targetName} PRIVATE MVVCVTK::Host)
+    if(hasCrop)
+        target_link_libraries(${targetName} PRIVATE MVVCVTK::OrthogonalCrop)
+    endif()
+    if(hasGap)
+        target_link_libraries(${targetName} PRIVATE MVVCVTK::GapAnalysis)
+    endif()
+    set_target_properties(
+        ${targetName}
+        PROPERTIES FOLDER "MVVCVTK/Tests/SdkConsumer"
+    )
+    add_test(NAME ${testName} COMMAND ${targetName})
+    SetTestRuntime(${testName} ${targetName})
+endfunction()
+
+BuildTreeConsumer(
+    mvvcvtk_build_consumer_host
+    SdkBoundary.BuildTree.Host
+    0 0
+)
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
+    BuildTreeConsumer(
+        mvvcvtk_build_consumer_crop
+        SdkBoundary.BuildTree.HostCrop
+        1 0
+    )
+endif()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    BuildTreeConsumer(
+        mvvcvtk_build_consumer_gap
+        SdkBoundary.BuildTree.HostGap
+        0 1
+    )
+endif()
+if(MVVCVTK_BUILD_ORTHOGONAL_CROP AND MVVCVTK_BUILD_GAP_ANALYSIS)
+    BuildTreeConsumer(
+        mvvcvtk_build_consumer_all
+        SdkBoundary.BuildTree.HostCropGap
+        1 1
+    )
+endif()
+
+function(SetClosureTest testName dependencyFiles stagingRoot)
     set(expectedHeaders ${ARGN})
+    list(JOIN dependencyFiles "," dependencyFileCsv)
     list(JOIN expectedHeaders "," expectedHeaderCsv)
     add_test(
         NAME ${testName}
         COMMAND "${CMAKE_COMMAND}"
-            "-DDEPENDENCY_FILE=${dependencyFile}"
+            "-DDEPENDENCY_FILES=${dependencyFileCsv}"
             "-DSTAGING_ROOT=${stagingRoot}"
             "-DEXPECTED_HEADERS=${expectedHeaderCsv}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/VerifyHeaderClosure.cmake"
     )
 endfunction()
 
+set(
+    MVVCVTK_EXPECTED_HOST_STAGE
+    ${MVVCVTK_HOST_ENTRY_HEADERS}
+    ${MVVCVTK_HOST_SUPPORT_HEADERS}
+)
+set(
+    MVVCVTK_EXPECTED_SPI_STAGE
+    ${MVVCVTK_SPI_ENTRY_HEADERS}
+    ${MVVCVTK_SPI_SUPPORT_HEADERS}
+)
+set(MVVCVTK_EXPECTED_CROP_STAGE ${MVVCVTK_CROP_ENTRY_HEADERS})
+set(MVVCVTK_EXPECTED_GAP_STAGE ${MVVCVTK_GAP_ENTRY_HEADERS})
+
 SetClosureTest(
-    SdkBoundary.HostSessionClosure
-    "${MVVCVTK_HOST_DEPENDENCY_DIR}/HostSessionHeaderProbe.cpp.json"
+    SdkBoundary.HostApiClosure
+    "${MVVCVTK_HOST_DEPENDENCY_FILES}"
     "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
-    Data/ImageReadTypes.h
-    Host/Types/HostInputTypes.h
-    Host/Types/HostRequest.h
-    Host/Types/HostSessionTypes.h
-    Host/Types/HostValueTypes.h
-    Host/VtkAppHostSession.h
+    ${MVVCVTK_EXPECTED_HOST_STAGE}
 )
 SetClosureTest(
-    SdkBoundary.HostFeatureClosure
-    "${MVVCVTK_SPI_DEPENDENCY_DIR}/HostFeatureHeaderProbe.cpp.json"
+    SdkBoundary.FeatureSpiClosure
+    "${MVVCVTK_SPI_DEPENDENCY_FILES}"
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
-    App/ViewTypes.h
-    Data/ImageReadTypes.h
-    Data/TrustedImageState.h
-    Host/HostFeature.h
-    Host/Types/HostFeatureViewTypes.h
-    Host/Types/HostValueTypes.h
-    Interaction/InteractionTypes.h
-)
-SetClosureTest(
-    SdkBoundary.HostRequestTypesClosure
-    "${MVVCVTK_HOST_DEPENDENCY_DIR}/HostRequestTypesHeaderProbe.cpp.json"
-    "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
-    Host/Types/HostRequest.h
-    Host/Types/HostRequestTypes.h
-    Host/Types/HostValueTypes.h
-)
-SetClosureTest(
-    SdkBoundary.FeatureSPIClosure
-    "${MVVCVTK_SPI_DEPENDENCY_DIR}/FeatureSpiHeaderProbe.cpp.json"
-    "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
-    App/AppTypes.h
-    App/ViewTypes.h
-    App/Services/FeatureViewService.h
-    Render/Contracts/OverlayService.h
-    Render/Contracts/RenderEffect.h
-    Render/Contracts/VisualStrategy.h
+    ${MVVCVTK_EXPECTED_SPI_STAGE}
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     SetClosureTest(
-        SdkBoundary.CropHostClosure
-        "${MVVCVTK_CROP_DEPENDENCY_DIR}/CropHostFeatureHeaderProbe.cpp.json"
+        SdkBoundary.CropApiClosure
+        "${MVVCVTK_CROP_DEPENDENCY_FILES}"
         "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
-        Host/CropHostFeature.h
-        OrthogonalCropTypes.h
-    )
-    SetClosureTest(
-        SdkBoundary.CropTypesClosure
-        "${MVVCVTK_CROP_DEPENDENCY_DIR}/CropTypesHeaderProbe.cpp.json"
-        "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
-        OrthogonalCropTypes.h
+        ${MVVCVTK_EXPECTED_CROP_STAGE}
     )
 endif()
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     SetClosureTest(
-        SdkBoundary.GapHostClosure
-        "${MVVCVTK_GAP_DEPENDENCY_DIR}/GapHostFeatureHeaderProbe.cpp.json"
+        SdkBoundary.GapApiClosure
+        "${MVVCVTK_GAP_DEPENDENCY_FILES}"
         "${MVVCVTK_GAP_SDK_INCLUDE_DIR}"
-        Host/GapHostFeature.h
-        Host/GapHostTypes.h
-    )
-    SetClosureTest(
-        SdkBoundary.GapHostTypesClosure
-        "${MVVCVTK_GAP_DEPENDENCY_DIR}/GapHostTypesHeaderProbe.cpp.json"
-        "${MVVCVTK_GAP_SDK_INCLUDE_DIR}"
-        Host/GapHostTypes.h
+        ${MVVCVTK_EXPECTED_GAP_STAGE}
     )
 endif()
 
-set(MVVCVTK_EXPECTED_HOST_STAGE
-    Data/ImageReadTypes.h
-    Host/Types/HostInputTypes.h
-    Host/Types/HostRequest.h
-    Host/Types/HostRequestTypes.h
-    Host/Types/HostSessionTypes.h
-    Host/Types/HostValueTypes.h
-    Host/VtkAppHostSession.h
-)
-set(MVVCVTK_EXPECTED_SPI_STAGE
-    App/AppTypes.h
-    App/ViewTypes.h
-    App/Services/FeatureViewService.h
-    Data/ImageReadTypes.h
-    Data/TrustedImageState.h
-    Host/HostFeature.h
-    Host/Types/HostFeatureViewTypes.h
-    Host/Types/HostInputTypes.h
-    Host/Types/HostValueTypes.h
-    Interaction/InteractionTypes.h
-    Render/Contracts/OverlayService.h
-    Render/Contracts/RenderEffect.h
-    Render/Contracts/VisualStrategy.h
-)
-if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
-    set(MVVCVTK_EXPECTED_CROP_STAGE
-        Host/CropHostFeature.h
-        OrthogonalCropTypes.h
-    )
-else()
-    set(MVVCVTK_EXPECTED_CROP_STAGE)
-endif()
-if(MVVCVTK_BUILD_GAP_ANALYSIS)
-    set(MVVCVTK_EXPECTED_GAP_STAGE
-        Host/GapHostFeature.h
-        Host/GapHostTypes.h
-    )
-else()
-    set(MVVCVTK_EXPECTED_GAP_STAGE)
-endif()
 list(JOIN MVVCVTK_EXPECTED_HOST_STAGE "," MVVCVTK_EXPECTED_HOST_STAGE_CSV)
 list(JOIN MVVCVTK_EXPECTED_SPI_STAGE "," MVVCVTK_EXPECTED_SPI_STAGE_CSV)
 list(JOIN MVVCVTK_EXPECTED_CROP_STAGE "," MVVCVTK_EXPECTED_CROP_STAGE_CSV)
@@ -415,10 +458,23 @@ function(SetHostBinaryGuard targetName)
     endif()
 endfunction()
 
-function(SetHeaderGuard sourceFile headerPath stagingRoot)
-    if(EXISTS "${stagingRoot}/${headerPath}")
-        message(FATAL_ERROR
-            "Forbidden SDK header is staged: ${headerPath}"
+function(SetHeaderGuard sourceFile headerPath usageName)
+    set(includeRoots ${ARGN})
+    foreach(includeRoot IN LISTS includeRoots)
+        if(EXISTS "${includeRoot}/${headerPath}")
+            message(FATAL_ERROR
+                "Forbidden SDK header is staged for ${usageName}: ${headerPath}"
+            )
+        endif()
+    endforeach()
+
+    string(TOLOWER "${usageName}" usageId)
+    set(usageTarget "mvvcvtk_${usageId}_negative_usage")
+    if(NOT TARGET ${usageTarget})
+        add_library(${usageTarget} INTERFACE IMPORTED)
+        set_target_properties(
+            ${usageTarget}
+            PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${includeRoots}"
         )
     endif()
     get_filename_component(probeName "${sourceFile}" NAME_WE)
@@ -426,16 +482,17 @@ function(SetHeaderGuard sourceFile headerPath stagingRoot)
         isForbiddenHeaderAccepted
         SOURCES "${sourceFile}"
         CMAKE_FLAGS
-            "-DCMAKE_CXX_STANDARD=17"
-            "-DCMAKE_CXX_STANDARD_REQUIRED=ON"
+            "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
         COMPILE_DEFINITIONS
-            "/I${stagingRoot}"
             "/utf-8"
+        LINK_LIBRARIES ${usageTarget}
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
         OUTPUT_VARIABLE forbiddenCompileOutput
     )
     if(isForbiddenHeaderAccepted)
         message(FATAL_ERROR
-            "${probeName} unexpectedly compiled against the SDK staging root."
+            "${probeName} unexpectedly compiled with ${usageName} usage requirements."
         )
     endif()
     string(FIND "${forbiddenCompileOutput}" "C1083" missingHeaderIndex)
@@ -493,35 +550,43 @@ endif()
 SetHeaderGuard(
     "${MVVCVTK_FORBID_DATA_PROBE}"
     Data/DataManager.h
+    HostApi
     "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_HOST_PROBE}"
     Host/HostViewRuntimeRegistry.h
+    HostApi
     "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_SLICE_PROBE}"
     Render/Strategies/SliceStrategy.h
+    FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_SUPPORT_PROBE}"
     Render/Support/FeatureVisualStrategy.h
+    FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     SetHeaderGuard(
         "${MVVCVTK_FORBID_CROP_PROBE}"
         Algorithms/CropAlgorithm.h
+        CropApi
         "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
+        "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
     )
 endif()
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     SetHeaderGuard(
         "${MVVCVTK_FORBID_GAP_PROBE}"
         Services/GapAnalysisService.h
+        GapApi
         "${MVVCVTK_GAP_SDK_INCLUDE_DIR}"
+        "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
     )
 endif()
 
@@ -533,18 +598,29 @@ unset(MVVCVTK_EXPECTED_GAP_STAGE)
 unset(MVVCVTK_EXPECTED_GAP_STAGE_CSV)
 unset(MVVCVTK_EXPECTED_HOST_STAGE)
 unset(MVVCVTK_EXPECTED_HOST_STAGE_CSV)
-unset(MVVCVTK_CROP_HOST_PROBE)
-unset(MVVCVTK_CROP_TYPES_PROBE)
-unset(MVVCVTK_FEATURE_SPI_PROBE)
+unset(MVVCVTK_AGGREGATE_HEADERS)
+unset(MVVCVTK_AGGREGATE_PROBE)
+unset(MVVCVTK_CONSUMER_SOURCE)
+unset(MVVCVTK_CROP_DEPENDENCY_FILES)
+unset(MVVCVTK_CROP_ENTRY_HEADERS)
+unset(MVVCVTK_CROP_PROBES)
 unset(MVVCVTK_FORBID_CROP_PROBE)
 unset(MVVCVTK_FORBID_DATA_PROBE)
 unset(MVVCVTK_FORBID_GAP_PROBE)
 unset(MVVCVTK_FORBID_HOST_PROBE)
 unset(MVVCVTK_FORBID_SLICE_PROBE)
 unset(MVVCVTK_FORBID_SUPPORT_PROBE)
-unset(MVVCVTK_GAP_HOST_PROBE)
-unset(MVVCVTK_GAP_TYPES_PROBE)
-unset(MVVCVTK_HOST_FEATURE_PROBE)
-unset(MVVCVTK_HOST_REQUEST_PROBE)
-unset(MVVCVTK_HOST_SESSION_PROBE)
+unset(MVVCVTK_GAP_DEPENDENCY_FILES)
+unset(MVVCVTK_GAP_ENTRY_HEADERS)
+unset(MVVCVTK_GAP_PROBES)
+unset(MVVCVTK_HOST_DEPENDENCY_FILES)
+unset(MVVCVTK_HOST_ENTRY_HEADERS)
+unset(MVVCVTK_HOST_PROBES)
+unset(MVVCVTK_HOST_PROBE_HEADERS)
+unset(MVVCVTK_HOST_SUPPORT_HEADERS)
 unset(MVVCVTK_PROBE_SOURCE_DIR)
+unset(MVVCVTK_SPI_DEPENDENCY_FILES)
+unset(MVVCVTK_SPI_ENTRY_HEADERS)
+unset(MVVCVTK_SPI_PROBES)
+unset(MVVCVTK_SPI_PROBE_HEADERS)
+unset(MVVCVTK_SPI_SUPPORT_HEADERS)

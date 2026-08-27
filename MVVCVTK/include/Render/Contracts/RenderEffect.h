@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Data/DataVersion.h"
+
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -13,7 +15,7 @@ class vtkShaderProperty;
 // version 由宿主数据真源提供，二者任一变化都代表旧 effect 不可重放。
 struct RenderInputStamp final {
     const void* identity = nullptr;
-    std::uint64_t version = 0;
+    DataVersion version = 0;
 };
 
 inline bool operator==(

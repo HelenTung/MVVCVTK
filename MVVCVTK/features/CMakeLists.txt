@@ -1,11 +1,13 @@
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_subdirectory(OrthogonalCrop)
 else()
+    set_property(GLOBAL PROPERTY MVVCVTK_CROP_API_HEADERS "")
     ResetSdkStage("${MVVCVTK_CROP_SDK_INCLUDE_DIR}")
 endif()
 
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     add_subdirectory(GapAnalysis)
 else()
+    set_property(GLOBAL PROPERTY MVVCVTK_GAP_API_HEADERS "")
     ResetSdkStage("${MVVCVTK_GAP_SDK_INCLUDE_DIR}")
 endif()

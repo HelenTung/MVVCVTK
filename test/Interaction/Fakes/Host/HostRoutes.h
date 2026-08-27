@@ -1,7 +1,7 @@
 #pragma once
 
 #include "AppPorts.h"
-#include "../../../../MVVCVTK/include/Host/HostViewRuntimeRegistry.h"
+#include "Host/HostViewRuntimeRegistry.h"
 #include "ViewContext.h"
 
 #include <algorithm>

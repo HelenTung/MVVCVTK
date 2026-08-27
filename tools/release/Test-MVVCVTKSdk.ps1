@@ -116,6 +116,46 @@ function Get-SafePath(
     return $fullPath
 }
 
+function Get-HeaderSurface([string]$stageRoot)
+{
+    $surfacePath = Get-SafePath $stageRoot `
+        'lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt'
+    if (-not [IO.File]::Exists($surfacePath)) {
+        throw "SDK header surface metadata is missing: $surfacePath"
+    }
+    $allowedCategories = @(
+        'HostAPI', 'HostSupport',
+        'FeatureSPI', 'FeatureSupport',
+        'OrthogonalCrop', 'GapAnalysis'
+    )
+    $seenEntries = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    $entries = @(
+        foreach ($line in (Get-Content -LiteralPath $surfacePath)) {
+            $match = [regex]::Match($line, '^([^|]+)\|([^|]+)$')
+            if (-not $match.Success) {
+                throw "Invalid SDK header surface entry: $line"
+            }
+            $category = $match.Groups[1].Value
+            $headerPath = $match.Groups[2].Value
+            $null = Get-SafePath $stageRoot "include/$headerPath"
+            if ($category -notin $allowedCategories -or
+                -not $headerPath.EndsWith('.h') -or
+                -not $seenEntries.Add("$category|$headerPath")) {
+                throw "Unsafe or duplicate SDK header surface entry: $line"
+            }
+            [pscustomobject]@{
+                category = $category
+                path = $headerPath
+            }
+        }
+    )
+    if ($entries.Count -eq 0) {
+        throw 'SDK header surface metadata is empty.'
+    }
+    return $entries
+}
+
 $stageRoot = [IO.Path]::GetFullPath($Stage)
 $null = @(Get-SafeTreeItems $stageRoot)
 $manifestPath = Join-Path $stageRoot 'manifest.json'
@@ -138,6 +178,26 @@ if ($manifest.platform -ne 'windows' -or
     $manifest.languageStandard -ne 'c++17' -or
     $manifest.featureTrust -ne 'trusted-in-process') {
     throw 'SDK platform, language, library, or trust policy mismatch.'
+}
+$expectedConsumerMatrix = @(
+    'Host'
+    'Host+OrthogonalCrop'
+    'Host+GapAnalysis'
+    'Host+OrthogonalCrop+GapAnalysis'
+)
+$actualConsumerMatrix = @($manifest.validationPolicy.cmakeConsumerMatrix)
+$consumerMatrixDiff = @(Compare-Object `
+        -ReferenceObject $expectedConsumerMatrix `
+        -DifferenceObject $actualConsumerMatrix)
+if (-not $manifest.validationPolicy.installedHeaderCompile -or
+    -not $manifest.validationPolicy.cmakeConsumer -or
+    -not $manifest.validationPolicy.qtCmakeConsumer -or
+    -not $manifest.validationPolicy.relocatableMetadata -or
+    $actualConsumerMatrix.Count -ne $expectedConsumerMatrix.Count -or
+    @($actualConsumerMatrix | Sort-Object -Unique).Count -ne
+        $actualConsumerMatrix.Count -or
+    $consumerMatrixDiff.Count -ne 0) {
+    throw 'SDK validation policy or consumer matrix is incomplete.'
 }
 if ($manifest.abiPolicy.compatibility -ne 'fixed-toolchain' -or
     $manifest.abiPolicy.platformToolset -ne 'v145' -or
@@ -208,28 +268,14 @@ if (-not $toolsMatch.Success -or
     throw 'SDK manifest toolchain does not match the configured build tree.'
 }
 
-$expectedHeaders = @(
-    'App/AppTypes.h'
-    'App/ViewTypes.h'
-    'App/Services/FeatureViewService.h'
-    'Data/ImageReadTypes.h'
-    'Data/TrustedImageState.h'
-    'Host/CropHostFeature.h'
-    'Host/GapHostFeature.h'
-    'Host/GapHostTypes.h'
-    'Host/HostFeature.h'
-    'Host/Types/HostFeatureViewTypes.h'
-    'Host/Types/HostInputTypes.h'
-    'Host/Types/HostRequest.h'
-    'Host/Types/HostRequestTypes.h'
-    'Host/Types/HostSessionTypes.h'
-    'Host/Types/HostValueTypes.h'
-    'Host/VtkAppHostSession.h'
-    'Interaction/InteractionTypes.h'
-    'OrthogonalCropTypes.h'
-    'Render/Contracts/OverlayService.h'
-    'Render/Contracts/RenderEffect.h'
-    'Render/Contracts/VisualStrategy.h'
+$headerSurface = @(Get-HeaderSurface $stageRoot)
+$expectedHeaders = @($headerSurface.path | Sort-Object -Unique)
+$entryCategories = @('HostAPI', 'FeatureSPI', 'OrthogonalCrop', 'GapAnalysis')
+$expectedEntryHeaders = @(
+    $headerSurface |
+        Where-Object { $_.category -in $entryCategories } |
+        ForEach-Object { $_.path } |
+        Sort-Object -Unique
 )
 $includeRoot = Join-Path $stageRoot 'include'
 $actualHeaders = @(
@@ -238,10 +284,26 @@ $actualHeaders = @(
         Sort-Object
 )
 $declaredHeaders = @($manifest.publicSurface.headerClosure | Sort-Object)
-if ($actualHeaders.Count -ne 21 -or
-    $manifest.publicSurface.headerClosureCount -ne 21 -or
-    @(Compare-Object ($expectedHeaders | Sort-Object) $actualHeaders).Count -ne 0 -or
-    @(Compare-Object $declaredHeaders $actualHeaders).Count -ne 0) {
+$declaredEntryHeaders = @($manifest.publicSurface.entryHeaders | Sort-Object)
+$expectedHeaderDiff = @(Compare-Object `
+        -ReferenceObject ($expectedHeaders | Sort-Object) `
+        -DifferenceObject $actualHeaders)
+$declaredHeaderDiff = @(Compare-Object `
+        -ReferenceObject $declaredHeaders `
+        -DifferenceObject $actualHeaders)
+$entryHeaderDiff = @(Compare-Object `
+        -ReferenceObject $expectedEntryHeaders `
+        -DifferenceObject $declaredEntryHeaders)
+if ($actualHeaders.Count -ne $expectedHeaders.Count -or
+    $manifest.publicSurface.headerClosureCount -ne $expectedHeaders.Count -or
+    $declaredHeaders.Count -ne $actualHeaders.Count -or
+    @($declaredHeaders | Sort-Object -Unique).Count -ne $declaredHeaders.Count -or
+    $declaredEntryHeaders.Count -ne $expectedEntryHeaders.Count -or
+    @($declaredEntryHeaders | Sort-Object -Unique).Count -ne
+        $declaredEntryHeaders.Count -or
+    $expectedHeaderDiff.Count -ne 0 -or
+    $declaredHeaderDiff.Count -ne 0 -or
+    $entryHeaderDiff.Count -ne 0) {
     throw 'SDK public header closure mismatch.'
 }
 foreach ($entryHeader in $manifest.publicSurface.entryHeaders) {
@@ -273,6 +335,7 @@ $requiredPaths = @(
     'lib/cmake/MVVCVTK/MVVCVTKConfigVersion.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKInternalDependencies.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKDependencyPolicy.cmake'
+    'lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt'
     'lib/cmake/MVVCVTK/MVVCVTKTargets.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKTargets-debug.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKTargets-release.cmake'

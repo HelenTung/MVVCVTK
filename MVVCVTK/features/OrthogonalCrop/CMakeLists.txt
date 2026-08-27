@@ -14,7 +14,9 @@ set(MVVCVTK_CROP_SOURCES
     src/Routing/CropRouter.cpp
 )
 # CropHostFeature 是模块入口，OrthogonalCropTypes 是其公开签名的类型闭包。
-set(MVVCVTK_CROP_API_HEADERS
+SetHeaderSurface(
+    MVVCVTK_CROP_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/CropHostFeature.h
     include/OrthogonalCropTypes.h
 )

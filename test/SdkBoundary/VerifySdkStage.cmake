@@ -18,17 +18,28 @@ function(GetStageHeaders outputName stagingRoot)
         GLOB_RECURSE stageHeaders
         LIST_DIRECTORIES false
         RELATIVE "${stagingRoot}"
-        "${stagingRoot}/*.h"
+        "${stagingRoot}/*"
     )
+    list(TRANSFORM stageHeaders TOLOWER)
     list(SORT stageHeaders)
     set(${outputName} "${stageHeaders}" PARENT_SCOPE)
 endfunction()
 
 function(SetStageExpected outputName expectedHeaderCsv)
     string(REPLACE "," ";" stageHeaders "${expectedHeaderCsv}")
-    list(REMOVE_DUPLICATES stageHeaders)
-    list(SORT stageHeaders)
-    set(${outputName} "${stageHeaders}" PARENT_SCOPE)
+    set(headerKeys)
+    foreach(stageHeader IN LISTS stageHeaders)
+        string(TOLOWER "${stageHeader}" headerKey)
+        list(FIND headerKeys "${headerKey}" duplicateIndex)
+        if(NOT duplicateIndex EQUAL -1)
+            message(FATAL_ERROR
+                "Duplicate or case-conflicting staged declaration: ${stageHeader}"
+            )
+        endif()
+        list(APPEND headerKeys "${headerKey}")
+    endforeach()
+    list(SORT headerKeys)
+    set(${outputName} "${headerKeys}" PARENT_SCOPE)
 endfunction()
 
 GetStageHeaders(actualHostHeaders "${HOST_STAGING_ROOT}")

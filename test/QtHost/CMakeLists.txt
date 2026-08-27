@@ -31,19 +31,6 @@ target_include_directories(
     mvvcvtk_host_method_tests
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
-        # 白盒测试显式获得 Host 内部头；产品 target 不传播该源码根。
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Services"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App/Tasks"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Data"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Geometry"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Host"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Interaction"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Platform"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Support"
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     target_include_directories(
@@ -75,6 +62,7 @@ endif()
 target_link_libraries(
     mvvcvtk_host_method_tests
     PRIVATE
+        mvvcvtk_host_test_internal
         MVVCVTK::Host
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
@@ -155,23 +143,10 @@ set_target_properties(
         FOLDER "MVVCVTK/Tests"
 )
 
-target_include_directories(
-    mvvcvtk_qt_session_smoke
-    PRIVATE
-        # Session smoke 会注入 HostCoreServices，属于仓内白盒测试。
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/App"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Data"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Host"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Interaction"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Strategies"
-        "${PROJECT_SOURCE_DIR}/MVVCVTK/include/Render/Support"
-)
-
 target_link_libraries(
     mvvcvtk_qt_session_smoke
     PRIVATE
+        mvvcvtk_host_test_internal
         MVVCVTK::Host
         MVVCVTKInternal::FeatureSupport
         Qt5::Core

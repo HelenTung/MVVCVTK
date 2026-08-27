@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Data/DataVersion.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -94,7 +96,7 @@ struct ImageReadState final {
     std::size_t voxelCount = 0;
     ImageReadBytes values;
     ImageReadBytes validityMask;
-    std::uint64_t version = 0;
+    DataVersion version = 0;
 };
 
 struct ImageReadResult final {
