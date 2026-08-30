@@ -1,75 +1,153 @@
 #include "VolumeStrategy.h"
+#include "Render/Internal/VolumeLodController.h"
+#include "Data/ImageProcessor.h"
+#include <vtkAbstractMapper.h>
+#include <vtkCommand.h>
+#include <vtkInformation.h>
+#include <vtkInformationObjectBaseVectorKey.h>
+#include <vtkNew.h>
 #include <vtkOpenGLGPUVolumeRayCastMapper.h>
+#include <vtkOpenGLRenderPass.h>
 #include <vtkObjectFactory.h>
+#include <vtkShaderProgram.h>
 #include <vtkVolumeProperty.h>
+#include <vtkWeakPointer.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
+#include <vtkImageData.h>
 #include <vtkImageResample.h>
 #include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkMatrix4x4.h>
 #include <vtkRenderWindow.h>
 #include <algorithm>
 #include <cmath>
-#include <functional>
 #include <iostream>
+#include <limits>
 #include <thread>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+namespace {
+constexpr std::size_t maxLodCacheEntries = 3;
+constexpr long double cacheMemoryFraction = 0.25L;
+constexpr long double cacheSourceFraction = 0.65L;
+constexpr double ratioEpsilon = 1e-9;
+// 静止态使用 0.001；所有交互质量档目标均不低于 8 FPS。
+// 用速率区间识别交互，不再用固定 15 FPS 门槛排除 XHigh/Ultra。
+constexpr double previewRateFloor = 1.0;
+}
+#include <windows.h>
+#endif
 
 class VolumeStrategy::Mapper final : public vtkOpenGLGPUVolumeRayCastMapper {
 public:
+    class EffectPass final : public vtkOpenGLRenderPass {
+    public:
+        static EffectPass* New()
+        {
+            return new EffectPass();
+        }
+        vtkTypeMacro(EffectPass, vtkOpenGLRenderPass);
+
+        void Render(const vtkRenderState*) override {}
+
+        bool SetShaderParameters(
+            vtkShaderProgram* program,
+            vtkAbstractMapper* mapper,
+            vtkProp*,
+            vtkOpenGLVertexArrayObject* = nullptr) override
+        {
+            if (!program || !mapper) {
+                return false;
+            }
+            // VTK 的 Volume mapper 在 shader 重建分支不会发送
+            // UpdateShaderEvent；这里拿到的已是 DoGPURender 本帧实际
+            // program，沿用既有事件契约同步可选 effect 的 uniform。
+            mapper->InvokeEvent(
+                vtkCommand::UpdateShaderEvent, program);
+            return true;
+        }
+
+    protected:
+        EffectPass()
+        {
+            // 没有其他 render pass 时保持 Volume 默认的单颜色附件。
+            SetActiveDrawBuffers(1);
+        }
+        ~EffectPass() override = default;
+    };
+
     struct QualityState final {
         bool isAuto = false;
         double image = 1.0;
         double minImage = 1.0;
         double maxImage = 1.0;
         double ray = 1.0;
+        double previewImage = 2.0;
+        double previewRayMultiplier = 1.0;
         bool isJitter = true;
+        bool isPreviewJitter = false;
     };
 
     static Mapper* New();
     vtkTypeMacro(Mapper, vtkOpenGLGPUVolumeRayCastMapper);
 
-    void SetEffectBinding(RenderEffectBinding* binding) { m_binding = binding; }
+    bool SetEffectVolume(vtkVolume* volume)
+    {
+        if (m_effectVolume.GetPointer() == volume) {
+            return true;
+        }
+        const bool isDetached = DetachEffectPass();
+        m_effectVolume = volume;
+        return isDetached && AttachEffectPass();
+    }
+    void SetEffectBinding(RenderEffectBinding* binding)
+    {
+        if (m_binding == binding) {
+            return;
+        }
+        if (!binding) {
+            (void)DetachEffectPass();
+        }
+        m_binding = binding;
+        if (m_binding && !AttachEffectPass()) {
+            std::cerr
+                << "[VolumeEffect] actual shader program hook attach failed\n";
+        }
+    }
     bool SetStillQuality(const QualityState& state)
     {
-        m_qualityThread = std::this_thread::get_id();
+        // Quality/LOD 提交本就受 Strategy owner thread 约束，继续同步更新
+        // 静止基线以保留既有 getter/事务契约；只有高频 preview 切换留在
+        // GPURender 的 OpenGL owner thread。
         m_stillQuality = state;
-        return SetPreviewQuality(m_isPreviewActive);
+        return SetPreviewQuality(m_stillQuality, m_isPreviewActive);
     }
 
 protected:
+    Mapper()
+        : m_effectPass(vtkSmartPointer<EffectPass>::New())
+    {
+    }
+
+    ~Mapper() override
+    {
+        (void)DetachEffectPass();
+    }
+
     void GPURender(vtkRenderer* renderer, vtkVolume* volume) override
     {
-        auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
-        const bool isPreview =
-            renderWindow
-            && renderWindow->GetDesiredUpdateRate() >= GetRenderRate(true);
+        auto* renderWindow = renderer
+            ? renderer->GetRenderWindow() : nullptr;
+        const bool isPreview = renderWindow
+            && renderWindow->GetDesiredUpdateRate()
+                >= previewRateFloor;
         if (isPreview != m_isPreviewActive) {
-            m_isPreviewActive = isPreview;
-            (void)SetPreviewQuality(isPreview);
-            const std::thread::id renderThread =
-                std::this_thread::get_id();
-            const bool isThreadValid =
-                m_qualityThread == renderThread
-                && m_previewThread == renderThread;
-            if (!isThreadValid) {
-                std::cerr
-                    << "[VolumeQualityThread] owner mismatch"
-                    << " quality="
-                    << std::hash<std::thread::id>{}(
-                        m_qualityThread)
-                    << " preview="
-                    << std::hash<std::thread::id>{}(
-                        m_previewThread)
-                    << " render="
-                    << std::hash<std::thread::id>{}(
-                        renderThread)
-                    << '\n';
-            }
-            if (!isThreadValid && isPreview) {
-                // VTK mapper setter 不允许跨 owner thread 使用；门失败时立即
-                // 恢复静止基线，不让 preview 覆盖继续产品化。
-                m_isPreviewActive = false;
-                (void)SetPreviewQuality(false);
+            if (SetPreviewQuality(m_stillQuality, isPreview)) {
+                m_isPreviewActive = isPreview;
             }
         }
         if (m_binding) {
@@ -82,37 +160,157 @@ protected:
     }
 
 private:
-    bool SetPreviewQuality(bool isPreview)
+    bool AttachEffectPass()
     {
-        m_previewThread = std::this_thread::get_id();
+        if (!m_binding || m_isEffectPassAttached) {
+            return true;
+        }
+        auto* volume = m_effectVolume.GetPointer();
+        if (!volume || !m_effectPass) {
+            return false;
+        }
+
+        vtkInformation* info = volume->GetPropertyKeys();
+        if (!info) {
+            vtkNew<vtkInformation> nextInfo;
+            volume->SetPropertyKeys(nextInfo);
+            info = volume->GetPropertyKeys();
+            m_hasEffectKeys = true;
+        }
+        if (!info) {
+            return false;
+        }
+
+        auto* key = vtkOpenGLRenderPass::RenderPasses();
+        const int passCount = info->Length(key);
+        for (int index = 0; index < passCount; ++index) {
+            if (info->Get(key, index) == m_effectPass.GetPointer()) {
+                m_isEffectPassAttached = true;
+                return true;
+            }
+        }
+
+        if (passCount == 0) {
+            info->Append(key, m_effectPass);
+        }
+        else {
+            // VTK 以最后一个 pass 的 ActiveDrawBuffers 决定 preview FBO
+            // 附件数；只用引用计数成对的 Remove/Append 重建短列表，
+            // 把 effect hook 插到末项之前，原有 pass 顺序与最终附件
+            // 契约均保持不变。
+            std::vector<vtkSmartPointer<vtkOpenGLRenderPass>> passes;
+            passes.reserve(passCount);
+            for (int index = 0; index < passCount; ++index) {
+                passes.emplace_back(
+                    static_cast<vtkOpenGLRenderPass*>(
+                        info->Get(key, index)));
+            }
+            for (int index = passCount - 1; index >= 0; --index) {
+                key->Remove(info, index);
+            }
+            for (int index = 0; index < passCount; ++index) {
+                if (index == passCount - 1) {
+                    info->Append(key, m_effectPass);
+                }
+                info->Append(key, passes[index]);
+            }
+        }
+        m_isEffectPassAttached = true;
+        return true;
+    }
+
+    bool DetachEffectPass()
+    {
+        auto* volume = m_effectVolume.GetPointer();
+        auto* info = volume ? volume->GetPropertyKeys() : nullptr;
+        auto* key = vtkOpenGLRenderPass::RenderPasses();
+        if (m_isEffectPassAttached && info) {
+            const int passCount = info->Length(key);
+            for (int index = 0; index < passCount; ++index) {
+                if (info->Get(key, index)
+                    == m_effectPass.GetPointer()) {
+                    key->Remove(info, index);
+                    break;
+                }
+            }
+        }
+        m_isEffectPassAttached = false;
+        if (info && info->Has(key)
+            && info->Length(key) == 0) {
+            key->Remove(info);
+        }
+        if (m_hasEffectKeys && volume && info
+            && info->GetNumberOfKeys() == 0) {
+            volume->SetPropertyKeys(nullptr);
+            info = nullptr;
+        }
+        m_hasEffectKeys = false;
+        if (!info) {
+            return true;
+        }
+        const int passCount = info->Length(key);
+        for (int index = 0; index < passCount; ++index) {
+            if (info->Get(key, index) == m_effectPass.GetPointer()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SetPreviewQuality(
+        const QualityState& quality,
+        const bool isPreview)
+    {
         if (isPreview) {
             SetAutoAdjustSampleDistances(false);
-            SetImageSampleDistance(2.0);
-            SetMinimumImageSampleDistance(m_stillQuality.minImage);
-            SetMaximumImageSampleDistance(m_stillQuality.maxImage);
-            SetSampleDistance(std::max(
-                m_stillQuality.ray, 2.0 * m_stillQuality.ray));
-            SetUseJittering(m_stillQuality.isJitter);
+            SetImageSampleDistance(quality.previewImage);
+            SetMinimumImageSampleDistance(
+                quality.previewImage);
+            SetMaximumImageSampleDistance(
+                quality.previewImage);
+            SetSampleDistance(
+                quality.ray
+                * std::max(
+                    quality.previewRayMultiplier,
+                    1.0));
+            SetUseJittering(quality.isPreviewJitter);
             return true;
         }
 
-        SetAutoAdjustSampleDistances(m_stillQuality.isAuto);
-        SetImageSampleDistance(m_stillQuality.image);
-        SetMinimumImageSampleDistance(m_stillQuality.minImage);
-        SetMaximumImageSampleDistance(m_stillQuality.maxImage);
-        SetSampleDistance(m_stillQuality.ray);
-        SetUseJittering(m_stillQuality.isJitter);
+        SetAutoAdjustSampleDistances(quality.isAuto);
+        SetImageSampleDistance(quality.image);
+        SetMinimumImageSampleDistance(quality.minImage);
+        SetMaximumImageSampleDistance(quality.maxImage);
+        SetSampleDistance(quality.ray);
+        SetUseJittering(quality.isJitter);
         return true;
     }
 
     RenderEffectBinding* m_binding = nullptr;
+    vtkWeakPointer<vtkVolume> m_effectVolume;
+    vtkSmartPointer<EffectPass> m_effectPass;
     QualityState m_stillQuality;
     bool m_isPreviewActive = false;
-    std::thread::id m_qualityThread;
-    std::thread::id m_previewThread;
+    bool m_isEffectPassAttached = false;
+    bool m_hasEffectKeys = false;
 };
 
 vtkStandardNewMacro(VolumeStrategy::Mapper);
+
+struct VolumeStrategy::LodEntry final {
+    vtkSmartPointer<vtkImageData> volume;
+    vtkSmartPointer<vtkImageResample> volumeFilter;
+    vtkSmartPointer<vtkImageData> mask;
+    vtkSmartPointer<vtkImageResample> maskFilter;
+    std::uint64_t dataVersion = 0;
+    std::uint64_t maskVersion = 0;
+    std::array<int, 3> outputDimensions{};
+    std::array<double, 3> outputSpacing{};
+    double dimensionRatio = 1.0;
+    std::uint64_t estimatedBytes = 0;
+    std::uint64_t lastUse = 0;
+    bool isDenoiseOn = false;
+};
 
 bool VolumeStrategy::GetOpacityChanged(double opacity) const
 {
@@ -120,6 +318,7 @@ bool VolumeStrategy::GetOpacityChanged(double opacity) const
 }
 
 VolumeStrategy::VolumeStrategy() {
+    m_lodController = std::make_unique<VolumeLodController>();
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
     m_mapper = vtkSmartPointer<Mapper>::New();
@@ -135,10 +334,12 @@ VolumeStrategy::VolumeStrategy() {
     m_mapper->SetSampleDistance(1.0);
     m_mapper->SetUseJittering(true);
     m_volume->SetMapper(m_mapper);
+    (void)m_mapper->SetEffectVolume(m_volume);
 
     auto volumeProperty = vtkSmartPointer<vtkVolumeProperty>::New();
     volumeProperty->ShadeOff();
     volumeProperty->SetInterpolationTypeToLinear();
+    volumeProperty->SetScalarOpacityUnitDistance(1.0);
     m_volume->SetProperty(volumeProperty);
 
     AttachProp(m_volume);
@@ -147,67 +348,251 @@ VolumeStrategy::VolumeStrategy() {
 
 VolumeStrategy::~VolumeStrategy() = default;
 
-void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
-    auto img = vtkImageData::SafeDownCast(data);
-    if (!img) return;
+void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data)
+{
+    (void)SetVolumeInput(std::move(data), nullptr);
+}
 
-    if (m_lastInput == data && GetProducersReady()) {
-        return;
-    }
-    const auto oldInput = m_lastInput;
-    const auto oldMask = m_lastMask;
-    m_lastInput = data;
-    m_lastMask = nullptr;
-    if (!BuildProducers()) {
-        // producer 未提交时恢复期望键；同一输入修正后再次下发仍会重新尝试构建。
-        m_lastInput = oldInput;
-        m_lastMask = oldMask;
-        (void)SetMapperInput();
-        return;
-    }
-
-    img->GetCenter(m_dataCenter);
-	// 使用原始数据的边界来设置坐标轴范围，确保坐标轴反映真实空间位置
-    m_cubeAxes->SetBounds(img->GetBounds());
+bool VolumeStrategy::SetInputData(
+    vtkSmartPointer<vtkDataObject> data,
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    return SetVolumeInput(
+        std::move(data), std::move(validityMask));
 }
 
 void VolumeStrategy::SetInputMask(
     vtkSmartPointer<vtkImageData> validityMask)
 {
-    if (m_lastMask == validityMask
-        && GetMasksReady(m_customTargetDim)) {
-        return;
-    }
-    const auto oldMask = m_lastMask;
-    const auto oldMaskInput = m_maskInput;
-    const auto oldQualityMask = m_qualityMask;
-    const auto oldCustomMask = m_customMask;
-    const int oldQualityMaskDim = m_qualityMaskDim;
-    const int oldCustomMaskDim = m_customMaskDim;
-    const vtkMTimeType oldMaskMTime = m_maskMTime;
-    const auto oldMaskExtent = m_maskExtent;
-    const auto oldMaskSpacing = m_maskSpacing;
-    m_lastMask = validityMask;
-    if (!BuildMasks(m_customTargetDim)
-        || !SetMapperInput()) {
-        m_lastMask = oldMask;
-        m_maskInput = oldMaskInput;
-        m_qualityMask = oldQualityMask;
-        m_customMask = oldCustomMask;
-        m_qualityMaskDim = oldQualityMaskDim;
-        m_customMaskDim = oldCustomMaskDim;
-        m_maskMTime = oldMaskMTime;
-        m_maskExtent = oldMaskExtent;
-        m_maskSpacing = oldMaskSpacing;
-        (void)SetMapperInput();
-        return;
-    }
+    (void)SetVolumeInput(
+        m_lastInput, std::move(validityMask));
 }
 
-int VolumeStrategy::GetCustomDim() const
+bool VolumeStrategy::SetVolumeInput(
+    vtkSmartPointer<vtkDataObject> data,
+    vtkSmartPointer<vtkImageData> validityMask)
 {
-    return m_quality.quality == VolumeQuality::Custom
-        ? m_quality.maxDimension : 766;
+    auto* image = vtkImageData::SafeDownCast(data);
+    if (!image || !m_lodController) return false;
+    const bool hasInputChanged = m_lastInput != data
+        || !GetInputKey(image);
+    const bool hasMaskChanged = m_lastMask != validityMask
+        || (validityMask && !GetMaskKey(validityMask));
+    if (!hasInputChanged && !hasMaskChanged
+        && GetProducersReady()) {
+        return true;
+    }
+
+    const auto oldInput = m_lastInput;
+    const auto oldMask = m_lastMask;
+    const auto oldDenoise = m_denoiseFilter;
+    const bool isProducerDenoiseOld = m_isProducerDenoiseOn;
+    const vtkMTimeType oldInputMTime = m_inputMTime;
+    const vtkMTimeType oldMaskMTime = m_maskMTime;
+    const auto oldInputExtent = m_inputExtent;
+    const auto oldMaskExtent = m_maskExtent;
+    const auto oldInputSpacing = m_inputSpacing;
+    const auto oldMaskSpacing = m_maskSpacing;
+    const std::uint64_t oldDataVersion = m_dataVersion;
+    const std::uint64_t oldMaskVersion = m_maskVersion;
+    const std::uint64_t oldPlanCount = m_lodPlanCount;
+    const VolumeLodController oldController = *m_lodController;
+
+    m_lastInput = std::move(data);
+    m_lastMask = std::move(validityMask);
+    if (hasInputChanged) ++m_dataVersion;
+    if (hasMaskChanged) ++m_maskVersion;
+    const bool isDenoiseSet = !hasInputChanged
+        && m_isProducerDenoiseOn == m_isDenoiseOn
+        ? true : BuildDenoise();
+    const bool isPlanSet = isDenoiseSet
+        && BuildLodPlan();
+    const auto profile = m_lodController->GetProfile();
+    const bool isPipelineSet = isPlanSet
+        && SetTargetLod(
+            profile.outputDimensions,
+            profile.dimensionRatio);
+    if (!isPipelineSet) {
+        m_lastInput = oldInput;
+        m_lastMask = oldMask;
+        m_denoiseFilter = oldDenoise;
+        m_isProducerDenoiseOn = isProducerDenoiseOld;
+        m_inputMTime = oldInputMTime;
+        m_maskMTime = oldMaskMTime;
+        m_inputExtent = oldInputExtent;
+        m_maskExtent = oldMaskExtent;
+        m_inputSpacing = oldInputSpacing;
+        m_maskSpacing = oldMaskSpacing;
+        m_dataVersion = oldDataVersion;
+        m_maskVersion = oldMaskVersion;
+        m_lodPlanCount = oldPlanCount;
+        *m_lodController = oldController;
+        (void)ClearPendingLod();
+        return false;
+    }
+    (void)SetInputKey(image);
+    (void)SetMaskKey(m_lastMask);
+    image->GetCenter(m_dataCenter);
+    // 坐标轴始终反映原始输入的物理空间，不跟随 LOD dimensions 缩放。
+    m_cubeAxes->SetBounds(image->GetBounds());
+    return true;
+}
+
+std::array<int, 3> VolumeStrategy::GetSourceDims() const
+{
+    auto* image = vtkImageData::SafeDownCast(m_lastInput);
+    if (!image) return {};
+    const int* dimensions = image->GetDimensions();
+    return dimensions
+        ? std::array<int, 3>{
+            dimensions[0], dimensions[1], dimensions[2] }
+        : std::array<int, 3>{};
+}
+
+std::uint64_t VolumeStrategy::GetImageBytes(
+    vtkImageData* image) const
+{
+    if (!image) return 0;
+    const std::uint64_t kibibytes = static_cast<std::uint64_t>(
+        image->GetActualMemorySize());
+    constexpr std::uint64_t bytesPerKib = 1024ULL;
+    return kibibytes
+        <= std::numeric_limits<std::uint64_t>::max()
+            / bytesPerKib
+        ? kibibytes * bytesPerKib : 0ULL;
+}
+
+std::uint64_t VolumeStrategy::GetSourceBytes() const
+{
+    auto* image = vtkImageData::SafeDownCast(m_lastInput);
+    return GetImageBytes(image);
+}
+
+std::uint64_t VolumeStrategy::GetLodBytes(
+    const LodEntry& lod) const
+{
+    // 原生 volume/mask 都只是输入别名，不计入缓存的增量内存。
+    if (!lod.volumeFilter && !lod.maskFilter) return 0;
+    const auto sourceDimensions = GetSourceDims();
+    long double sourceVoxels = 1.0L;
+    long double outputVoxels = 1.0L;
+    for (std::size_t axis = 0;
+        axis < sourceDimensions.size(); ++axis) {
+        if (sourceDimensions[axis] <= 0
+            || lod.outputDimensions[axis] <= 0) {
+            return 0;
+        }
+        sourceVoxels *= static_cast<long double>(
+            sourceDimensions[axis]);
+        outputVoxels *= static_cast<long double>(
+            lod.outputDimensions[axis]);
+    }
+    const std::uint64_t volumeBytes = GetSourceBytes();
+    const std::uint64_t maskBytes = GetImageBytes(m_lastMask);
+    if (volumeBytes == 0
+        || maskBytes
+            > std::numeric_limits<std::uint64_t>::max()
+                - volumeBytes
+        || sourceVoxels <= 0.0L) {
+        return 0;
+    }
+    const long double estimatedBytes =
+        static_cast<long double>(volumeBytes + maskBytes)
+        * outputVoxels / sourceVoxels;
+    const long double maximumBytes = static_cast<long double>(
+        std::numeric_limits<std::uint64_t>::max());
+    if (!std::isfinite(estimatedBytes)
+        || estimatedBytes <= 0.0L) {
+        return 0;
+    }
+    return estimatedBytes >= maximumBytes
+        ? std::numeric_limits<std::uint64_t>::max()
+        : static_cast<std::uint64_t>(std::ceil(estimatedBytes));
+}
+
+std::uint64_t VolumeStrategy::GetCacheBudget() const
+{
+    const std::uint64_t volumeBytes = GetSourceBytes();
+    const std::uint64_t maskBytes = GetImageBytes(m_lastMask);
+    if (volumeBytes == 0
+        || maskBytes
+            > std::numeric_limits<std::uint64_t>::max()
+                - volumeBytes) {
+        return 0;
+    }
+    const std::uint64_t sourceBytes = volumeBytes + maskBytes;
+    const std::uint64_t systemBytes = GetSystemMemoryBytes();
+    const long double fallbackBytes =
+        static_cast<long double>(sourceBytes) * 2.0L;
+    const long double availableBytes = systemBytes > 0
+        ? static_cast<long double>(systemBytes) : fallbackBytes;
+    // 缓存最多占可用物理内存的四分之一，同时不超过当前源数据的 65%。
+    // 活动档即使超过预算也保留，避免为满足预算破坏当前 mapper 输入。
+    const long double budgetBytes = std::min(
+        availableBytes * cacheMemoryFraction,
+        static_cast<long double>(sourceBytes)
+            * cacheSourceFraction);
+    const long double maximumBytes = static_cast<long double>(
+        std::numeric_limits<std::uint64_t>::max());
+    if (!std::isfinite(budgetBytes) || budgetBytes <= 0.0L) {
+        return 0;
+    }
+    return budgetBytes >= maximumBytes
+        ? std::numeric_limits<std::uint64_t>::max()
+        : static_cast<std::uint64_t>(budgetBytes);
+}
+
+std::uint64_t VolumeStrategy::GetSystemMemoryBytes() const
+{
+#if defined(_WIN32)
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status) != 0) {
+        return static_cast<std::uint64_t>(status.ullAvailPhys);
+    }
+#endif
+    return 0;
+}
+
+std::uint64_t VolumeStrategy::GetGpuMemoryBytes() const
+{
+    if (!m_mapper || m_mapper->GetMaxMemoryInBytes() <= 0) return 0;
+    const long double memoryBytes = static_cast<long double>(
+        m_mapper->GetMaxMemoryInBytes())
+        * static_cast<long double>(m_mapper->GetMaxMemoryFraction());
+    if (memoryBytes <= 0.0L) return 0;
+    const long double maximumBytes = static_cast<long double>(
+        std::numeric_limits<std::uint64_t>::max());
+    return memoryBytes >= maximumBytes
+        ? std::numeric_limits<std::uint64_t>::max()
+        : static_cast<std::uint64_t>(memoryBytes);
+}
+
+unsigned int VolumeStrategy::GetCpuThreadCount() const noexcept
+{
+    return std::max(1U, std::thread::hardware_concurrency());
+}
+
+std::array<int, 3> VolumeStrategy::GetLodDimensions(
+    const VolumeQuality quality) const noexcept
+{
+    return m_lodController
+        ? m_lodController->GetProfile(quality).outputDimensions
+        : std::array<int, 3>{};
+}
+
+bool VolumeStrategy::GetQualityValid(
+    const VolumeQuality quality) const
+{
+    switch (quality) {
+    case VolumeQuality::Auto:
+    case VolumeQuality::Low:
+    case VolumeQuality::High:
+    case VolumeQuality::XHigh:
+    case VolumeQuality::Ultra:
+        return true;
+    }
+    return false;
 }
 
 bool VolumeStrategy::GetInputKey(vtkImageData* image) const
@@ -241,29 +626,24 @@ bool VolumeStrategy::GetMaskKey(vtkImageData* image) const
 bool VolumeStrategy::GetProducersReady() const
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
-    return m_qualityResample
-        && m_customResample
-        && m_producerInput == m_lastInput
+    const auto* lod = m_activeLod;
+    const bool isMapperSet = lod && m_mapper
+        && (lod->volumeFilter
+            ? m_mapper->GetInputConnection(0, 0)
+                == lod->volumeFilter->GetOutputPort()
+            : m_mapper->GetInput() == lod->volume.GetPointer())
+        && m_mapper->GetMaskInput() == lod->mask.GetPointer();
+    return lod && lod->volume && isMapperSet
+        && lod->dataVersion == m_dataVersion
+        && lod->maskVersion == m_maskVersion
+        && m_lodController
+        && lod->outputDimensions
+            == m_lodController->GetProfile().outputDimensions
+        && lod->isDenoiseOn == m_isDenoiseOn
         && GetInputKey(image)
-        && m_qualityTargetDim == 766
-        && m_customTargetDim == GetCustomDim()
+        && (!m_lastMask
+            || (lod->mask && GetMaskKey(m_lastMask)))
         && m_isProducerDenoiseOn == m_isDenoiseOn;
-}
-
-bool VolumeStrategy::GetMasksReady(const int customTargetDim) const
-{
-    if (!m_lastMask) {
-        return !m_maskInput
-            && !m_qualityMask
-            && !m_customMask;
-    }
-    return customTargetDim > 0
-        && m_qualityMask
-        && m_customMask
-        && m_maskInput == m_lastMask
-        && GetMaskKey(m_lastMask)
-        && m_qualityMaskDim == 766
-        && m_customMaskDim == customTargetDim;
 }
 
 bool VolumeStrategy::SetInputKey(vtkImageData* image)
@@ -307,229 +687,473 @@ bool VolumeStrategy::SetMaskKey(vtkImageData* image)
 }
 
 double VolumeStrategy::GetQualityStep(
-    vtkImageResample* qualityResample) const
+    const LodEntry& lod) const
 {
-    if (!qualityResample) return 0.0;
-    qualityResample->UpdateInformation();
-    const double* spacing = qualityResample->GetOutput()->GetSpacing();
+    if (!lod.volume || !m_lodController) return 0.0;
     const double minSpacing = std::min(
-        { spacing[0], spacing[1], spacing[2] });
-    return std::isfinite(minSpacing) && minSpacing > 0.0
-        ? 0.5 * minSpacing : 0.0;
+        { lod.outputSpacing[0],
+          lod.outputSpacing[1],
+          lod.outputSpacing[2] });
+    if (!std::isfinite(minSpacing) || minSpacing <= 0.0) {
+        return 0.0;
+    }
+    return m_lodController->GetProfile().stillRayStepFactor
+        * minSpacing;
 }
 
-bool VolumeStrategy::BuildMasks(const int customTargetDim)
+bool VolumeStrategy::BuildLodPlan()
 {
-    if (!m_mapper) return false;
-    if (!m_lastMask) {
-        m_qualityMask = nullptr;
-        m_customMask = nullptr;
-        m_maskInput = nullptr;
-        m_qualityMaskDim = 0;
-        m_customMaskDim = 0;
-        (void)SetMaskKey(nullptr);
-        return true;
-    }
-    if (GetMasksReady(customTargetDim)) {
-        return true;
-    }
-    if (customTargetDim <= 0) return false;
-
-    auto qualityMask = ImageProcessor::GetDownsampledMask(
-        m_lastMask, 766);
-    if (!qualityMask) return false;
-    vtkSmartPointer<vtkImageResample> customMask;
-    if (customTargetDim == 766) {
-        customMask = qualityMask;
-    }
-    else {
-        customMask = ImageProcessor::GetDownsampledMask(
-            m_lastMask, customTargetDim);
-        if (!customMask) return false;
-    }
-    qualityMask->Update();
-    if (customMask != qualityMask) {
-        customMask->Update();
-    }
-    m_qualityMask = std::move(qualityMask);
-    m_customMask = std::move(customMask);
-    m_maskInput = m_lastMask;
-    m_qualityMaskDim = 766;
-    m_customMaskDim = customTargetDim;
-    (void)SetMaskKey(m_lastMask);
+    if (!m_lodController) return false;
+    VolumeLodController::Source source;
+    source.dimensions = GetSourceDims();
+    source.nativeBytes = GetSourceBytes();
+    source.maskBytes = GetImageBytes(m_lastMask);
+    source.systemMemoryBytes = GetSystemMemoryBytes();
+    source.gpuMemoryBytes = GetGpuMemoryBytes();
+    source.cpuThreadCount = GetCpuThreadCount();
+    source.isNativeAliasAllowed = !m_isDenoiseOn;
+    if (!m_lodController->SetSource(source)) return false;
+    ++m_lodPlanCount;
     return true;
 }
 
-bool VolumeStrategy::BuildProducers()
+bool VolumeStrategy::BuildDenoise()
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
-    if (!image || !m_mapper) return false;
-
-    constexpr int qualityTargetDim = 766;
-    const int customTargetDim = GetCustomDim();
-    if (customTargetDim <= 0) return false;
-    if (GetProducersReady()) {
-        return SetMapperInput();
-    }
-
-    vtkAlgorithmOutput* inputPort = nullptr;
-    vtkSmartPointer<vtkImageAnisotropicDiffusion3D> denoiseFilter;
-    if (m_isDenoiseOn) {
-        double range[2] = { 0.0, 0.0 };
-        image->GetScalarRange(range);
-        if (!std::isfinite(range[0]) || !std::isfinite(range[1])
-            || range[1] < range[0]) {
-            return false;
-        }
-        denoiseFilter =
-            vtkSmartPointer<vtkImageAnisotropicDiffusion3D>::New();
-        denoiseFilter->SetInputData(image);
-        denoiseFilter->SetNumberOfIterations(5);
-        denoiseFilter->SetDiffusionFactor(0.125);
-        denoiseFilter->SetDiffusionThreshold(
-            0.02 * std::max(0.0, range[1] - range[0]));
-        denoiseFilter->FacesOn();
-        denoiseFilter->EdgesOff();
-        denoiseFilter->CornersOff();
-        inputPort = denoiseFilter->GetOutputPort();
-    }
-
-    auto qualityResample = ImageProcessor::GetDownsampledImage(
-        image, qualityTargetDim, inputPort);
-    if (!qualityResample) return false;
-    vtkSmartPointer<vtkImageResample> customResample;
-    if (customTargetDim == qualityTargetDim) {
-        customResample = qualityResample;
-    }
-    else {
-        customResample = ImageProcessor::GetDownsampledImage(
-            image, customTargetDim, inputPort);
-        if (!customResample) return false;
-    }
-    if (GetQualityStep(qualityResample) <= 0.0) return false;
-
-    const auto oldDenoiseFilter = m_denoiseFilter;
-    const auto oldQualityResample = m_qualityResample;
-    const auto oldCustomResample = m_customResample;
-    const auto oldProducerInput = m_producerInput;
-    const int oldQualityTargetDim = m_qualityTargetDim;
-    const int oldCustomTargetDim = m_customTargetDim;
-    const bool wasProducerDenoiseOn = m_isProducerDenoiseOn;
-    const auto oldMaskInput = m_maskInput;
-    const auto oldQualityMask = m_qualityMask;
-    const auto oldCustomMask = m_customMask;
-    const int oldQualityMaskDim = m_qualityMaskDim;
-    const int oldCustomMaskDim = m_customMaskDim;
-    const vtkMTimeType oldInputMTime = m_inputMTime;
-    const vtkMTimeType oldMaskMTime = m_maskMTime;
-    const auto oldInputExtent = m_inputExtent;
-    const auto oldMaskExtent = m_maskExtent;
-    const auto oldInputSpacing = m_inputSpacing;
-    const auto oldMaskSpacing = m_maskSpacing;
-
-    // mask 的结构键不含 denoise；仅 mask 输入或目标尺寸变化时同步重建。
-    if (!GetMasksReady(customTargetDim)
-        && !BuildMasks(customTargetDim)) {
-        return false;
-    }
-
-    m_denoiseFilter = std::move(denoiseFilter);
-    m_qualityResample = std::move(qualityResample);
-    m_customResample = std::move(customResample);
-    m_producerInput = m_lastInput;
-    m_qualityTargetDim = qualityTargetDim;
-    m_customTargetDim = customTargetDim;
-    m_isProducerDenoiseOn = m_isDenoiseOn;
-    (void)SetInputKey(image);
-    if (SetMapperInput()) {
+    if (!image) return false;
+    if (!m_isDenoiseOn) {
+        m_denoiseFilter = nullptr;
+        m_isProducerDenoiseOn = false;
         return true;
     }
-
-    m_denoiseFilter = oldDenoiseFilter;
-    m_qualityResample = oldQualityResample;
-    m_customResample = oldCustomResample;
-    m_producerInput = oldProducerInput;
-    m_qualityTargetDim = oldQualityTargetDim;
-    m_customTargetDim = oldCustomTargetDim;
-    m_isProducerDenoiseOn = wasProducerDenoiseOn;
-    m_maskInput = oldMaskInput;
-    m_qualityMask = oldQualityMask;
-    m_customMask = oldCustomMask;
-    m_qualityMaskDim = oldQualityMaskDim;
-    m_customMaskDim = oldCustomMaskDim;
-    m_inputMTime = oldInputMTime;
-    m_maskMTime = oldMaskMTime;
-    m_inputExtent = oldInputExtent;
-    m_maskExtent = oldMaskExtent;
-    m_inputSpacing = oldInputSpacing;
-    m_maskSpacing = oldMaskSpacing;
-    return false;
-}
-
-bool VolumeStrategy::SetMapperInput()
-{
-    if (!m_mapper || !GetProducersReady()) return false;
-    const VolumeQuality activeQuality = GetVolumeQuality(
-        m_quality, m_isFeatureActive);
-    const auto activeResample = activeQuality == VolumeQuality::Custom
-        ? m_customResample : m_qualityResample;
-    if (!activeResample) return false;
-    vtkImageData* activeMask = nullptr;
-    if (m_lastMask) {
-        if (!GetMasksReady(m_customTargetDim)) {
-            return false;
-        }
-        const auto maskResample = activeQuality == VolumeQuality::Custom
-            ? m_customMask : m_qualityMask;
-        if (!maskResample) return false;
-        activeMask = maskResample->GetOutput();
+    double range[2] = { 0.0, 0.0 };
+    image->GetScalarRange(range);
+    if (!std::isfinite(range[0]) || !std::isfinite(range[1])
+        || range[1] < range[0]) {
+        return false;
     }
-    // BuildMasks 只准备缓存；所有可能失败的质量校验也必须先完成，
-    // 再统一提交不会返回失败的 mapper input/mask setter。
-    if (!SetMapperQuality()) return false;
-    m_mapper->SetInputConnection(activeResample->GetOutputPort());
-    if (activeMask) {
-        m_mapper->SetMaskTypeToBinary();
-    }
-    m_mapper->SetMaskInput(activeMask);
+    auto filter =
+        vtkSmartPointer<vtkImageAnisotropicDiffusion3D>::New();
+    filter->SetInputData(image);
+    filter->SetNumberOfIterations(5);
+    filter->SetDiffusionFactor(0.125);
+    filter->SetDiffusionThreshold(
+        0.02 * std::max(0.0, range[1] - range[0]));
+    filter->FacesOn();
+    filter->EdgesOff();
+    filter->CornersOff();
+    m_denoiseFilter = std::move(filter);
+    m_isProducerDenoiseOn = m_isDenoiseOn;
     return true;
 }
 
-bool VolumeStrategy::SetMapperQuality()
+bool VolumeStrategy::BuildPendingLod(
+    const std::array<int, 3>& outputDimensions,
+    const double dimensionRatio)
 {
-    if (!m_mapper) return false;
-
-    double sampleDistance = 0.0;
-    bool isJitterOn = false;
-    switch (GetVolumeQuality(m_quality, m_isFeatureActive)) {
-    case VolumeQuality::Quality:
-        sampleDistance = GetQualityStep(m_qualityResample);
-        if (sampleDistance <= 0.0) return false;
-        isJitterOn = true;
-        break;
-    case VolumeQuality::Custom:
-        if (m_quality.maxDimension < 1
-            || !std::isfinite(m_quality.sampleDistance)
-            || m_quality.sampleDistance <= 0.0) {
-            return false;
-        }
-        sampleDistance = m_quality.sampleDistance;
-        isJitterOn = m_quality.isJitterOn;
-        break;
-    default:
+    auto* image = vtkImageData::SafeDownCast(m_lastInput);
+    if (!image
+        || outputDimensions[0] <= 0
+        || outputDimensions[1] <= 0
+        || outputDimensions[2] <= 0
+        || !std::isfinite(dimensionRatio)
+        || dimensionRatio <= 0.0
+        || dimensionRatio > 1.0) {
         return false;
     }
+    m_pendingLod.reset();
+
+    const bool hasNativeDimensions =
+        outputDimensions == GetSourceDims();
+    vtkSmartPointer<vtkImageData> volume;
+    vtkSmartPointer<vtkImageResample> volumeFilter;
+    if (hasNativeDimensions && !m_denoiseFilter) {
+        // 原生挡位直接复用输入；Auto 命中 1.0 时不再重采样或 DeepCopy 整卷。
+        volume = image;
+    }
+    else {
+        vtkAlgorithmOutput* inputPort = m_denoiseFilter
+            ? m_denoiseFilter->GetOutputPort() : nullptr;
+        volumeFilter = ImageProcessor::CreateScaledImage(
+            image, outputDimensions, inputPort);
+        if (!volumeFilter) return false;
+        ++m_resampleBuildCount;
+        // 完整 scalar 数据由 mapper 的正常 Render 沿 connection 惰性请求；
+        // 目标几何直接由加载期计划计算，不触发 filter Update/UpdateInformation。
+        volume = volumeFilter->GetOutput();
+    }
+    if (!volume || (!volumeFilter
+        && volume->GetNumberOfPoints() <= 0)) {
+        return false;
+    }
+
+    const int* sourceDimensions = image->GetDimensions();
+    const double* sourceSpacing = image->GetSpacing();
+    std::array<double, 3> outputSpacing{};
+    for (std::size_t axis = 0; axis < outputSpacing.size(); ++axis) {
+        if (sourceDimensions[axis] <= 0
+            || !std::isfinite(sourceSpacing[axis])
+            || sourceSpacing[axis] <= 0.0) {
+            return false;
+        }
+        const double axisRatio =
+            static_cast<double>(outputDimensions[axis])
+            / static_cast<double>(sourceDimensions[axis]);
+        outputSpacing[axis] = sourceSpacing[axis] / axisRatio;
+        if (!std::isfinite(outputSpacing[axis])
+            || outputSpacing[axis] <= 0.0) {
+            return false;
+        }
+    }
+
+    vtkSmartPointer<vtkImageData> mask;
+    vtkSmartPointer<vtkImageResample> maskFilter;
+    if (m_lastMask) {
+        if (hasNativeDimensions) {
+            mask = m_lastMask;
+        }
+        else {
+            maskFilter = ImageProcessor::CreateScaledMask(
+                m_lastMask, outputDimensions);
+            if (!maskFilter) return false;
+            ++m_resampleBuildCount;
+            maskFilter->Update();
+            ++m_resampleUpdateCount;
+            mask = maskFilter->GetOutput();
+        }
+    }
+    if (mask) {
+        constexpr double geometryEpsilon = 1e-9;
+        const auto hasSameValues = [geometryEpsilon](
+            const double* left, const double* right) {
+            for (int axis = 0; axis < 3; ++axis) {
+                if (std::abs(left[axis] - right[axis])
+                    > geometryEpsilon) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        const int* maskDimensions = mask->GetDimensions();
+        if (mask->GetNumberOfPoints() <= 0
+            || !maskDimensions
+            || !std::equal(
+                outputDimensions.begin(),
+                outputDimensions.end(),
+                maskDimensions)
+            || !hasSameValues(
+                outputSpacing.data(), mask->GetSpacing())
+            || !hasSameValues(
+                image->GetOrigin(), mask->GetOrigin())) {
+            return false;
+        }
+    }
+
+    auto entry = std::make_unique<LodEntry>();
+    entry->volume = std::move(volume);
+    entry->volumeFilter = std::move(volumeFilter);
+    entry->mask = std::move(mask);
+    entry->maskFilter = std::move(maskFilter);
+    entry->dataVersion = m_dataVersion;
+    entry->maskVersion = m_maskVersion;
+    entry->outputDimensions = outputDimensions;
+    entry->outputSpacing = outputSpacing;
+    entry->dimensionRatio = dimensionRatio;
+    entry->isDenoiseOn = m_isDenoiseOn;
+    if (GetQualityStep(*entry) <= 0.0) return false;
+    entry->estimatedBytes = GetLodBytes(*entry);
+    m_pendingLod = std::move(entry);
+    return true;
+}
+
+bool VolumeStrategy::ClearPendingLod()
+{
+    m_pendingLod.reset();
+    return true;
+}
+
+bool VolumeStrategy::SetTargetLod(
+    const std::array<int, 3>& outputDimensions,
+    const double dimensionRatio)
+{
+    if (!m_lodController) return false;
+    if (auto* cached = GetCachedLod(
+        outputDimensions, dimensionRatio)) {
+        (void)ClearPendingLod();
+        return SwitchLod(*cached)
+            && RemoveUnusedLods();
+    }
+    return BuildPendingLod(outputDimensions, dimensionRatio)
+        && SwitchPendingLod();
+}
+
+VolumeStrategy::LodEntry* VolumeStrategy::GetCachedLod(
+    const std::array<int, 3>& outputDimensions,
+    const double dimensionRatio) const
+{
+    const auto iterator = std::find_if(
+        m_lodCache.begin(),
+        m_lodCache.end(),
+        [&](const auto& cached) {
+            return cached
+                && cached->volume
+                && cached->dataVersion == m_dataVersion
+                && cached->maskVersion == m_maskVersion
+                && cached->outputDimensions == outputDimensions
+                && std::abs(
+                    cached->dimensionRatio - dimensionRatio)
+                    <= ratioEpsilon
+                && cached->isDenoiseOn == m_isDenoiseOn
+                && (!m_lastMask || cached->mask);
+        });
+    return iterator != m_lodCache.end()
+        ? iterator->get() : nullptr;
+}
+
+bool VolumeStrategy::SetMapperInput(const LodEntry& lod)
+{
+    if (!m_mapper || !lod.volume) return false;
+    if (lod.volumeFilter) {
+        m_mapper->SetInputConnection(
+            lod.volumeFilter->GetOutputPort());
+    }
+    else {
+        m_mapper->SetInputData(lod.volume);
+    }
+    vtkImageData* mask = lod.mask;
+    if (mask) m_mapper->SetMaskTypeToBinary();
+    m_mapper->SetMaskInput(mask);
+    const bool isVolumeSet = lod.volumeFilter
+        ? m_mapper->GetInputConnection(0, 0)
+            == lod.volumeFilter->GetOutputPort()
+        : m_mapper->GetInput() == lod.volume.GetPointer();
+    return isVolumeSet && m_mapper->GetMaskInput() == mask;
+}
+
+bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
+{
+    if (!m_mapper || !nextLod.volume) {
+        return false;
+    }
+    if (&nextLod == m_activeLod) {
+        const bool isQualitySet = SetMapperQuality(nextLod);
+        const bool isRatioSet = m_lodController
+            && m_lodController->SetActiveRatio(
+                nextLod.dimensionRatio);
+        if (isQualitySet && isRatioSet) {
+            nextLod.lastUse = ++m_lodUseStamp;
+            return true;
+        }
+        return false;
+    }
+
+    auto* oldLod = m_activeLod;
+    const auto restore = [&]() {
+        if (!oldLod || !oldLod->volume) {
+            m_mapper->SetInputData(
+                static_cast<vtkImageData*>(nullptr));
+            m_mapper->SetMaskInput(nullptr);
+            return false;
+        }
+        return SetMapperInput(*oldLod)
+            && SetMapperQuality(*oldLod);
+    };
+
+    if ((m_lastMask && !nextLod.mask)
+        || !SetMapperQuality(nextLod)) {
+        (void)restore();
+        return false;
+    }
+    if (!SetMapperInput(nextLod)) {
+        (void)restore();
+        return false;
+    }
+    // mapper input 提交只验证 CPU 侧绑定。纹理上传及 VTK 必要的内部
+    // reduction 由紧随其后的正常 Render 完成，不能在状态 setter 中阻塞预加载。
+    if (m_lodController
+        && !m_lodController->SetActiveRatio(
+            nextLod.dimensionRatio)) {
+        if (!restore() && oldLod) {
+            std::cerr
+                << "[VolumeRollback] active mapper restore failed"
+                << '\n';
+        }
+        return false;
+    }
+    m_activeLod = &nextLod;
+    nextLod.lastUse = ++m_lodUseStamp;
+    ++m_mapperInputCount;
+    return true;
+}
+
+bool VolumeStrategy::SwitchPendingLod()
+{
+    if (!m_pendingLod) {
+        return false;
+    }
+    // 先把 pending 交给 cache 独占，再提交 active 观察指针；即使 vector
+    // 分配失败，也不会出现 active 指向即将析构 pending 的窗口。
+    m_lodCache.push_back(std::move(m_pendingLod));
+    auto* nextLod = m_lodCache.back().get();
+    if (!nextLod || !SwitchLod(*nextLod)) {
+        m_pendingLod = std::move(m_lodCache.back());
+        m_lodCache.pop_back();
+        return false;
+    }
+    return RemoveUnusedLods();
+}
+
+bool VolumeStrategy::RemoveUnusedLods()
+{
+    // 新输入、mask 或 denoise 成功提交后再清理旧世代；失败回滚期间
+    // 旧 active 仍由 cache 独占，mapper connection 不会悬空。
+    m_lodCache.erase(
+        std::remove_if(
+            m_lodCache.begin(),
+            m_lodCache.end(),
+            [&](const auto& cached) {
+                return !cached
+                    || (cached.get() != m_activeLod
+                        && (cached->dataVersion != m_dataVersion
+                            || cached->maskVersion != m_maskVersion
+                            || cached->isDenoiseOn
+                                != m_isDenoiseOn));
+            }),
+        m_lodCache.end());
+
+    const std::uint64_t cacheBudget = GetCacheBudget();
+    const auto getCacheBytes = [&]() {
+        std::uint64_t cacheBytes = 0;
+        for (const auto& cached : m_lodCache) {
+            if (!cached
+                || cached->estimatedBytes
+                    > std::numeric_limits<std::uint64_t>::max()
+                        - cacheBytes) {
+                return std::numeric_limits<std::uint64_t>::max();
+            }
+            cacheBytes += cached->estimatedBytes;
+        }
+        return cacheBytes;
+    };
+
+    std::uint64_t cacheBytes = getCacheBytes();
+    while (m_lodCache.size() > maxLodCacheEntries
+        || cacheBytes > cacheBudget) {
+        const auto highDimensions = m_lodController
+            ? m_lodController->GetProfile(
+                VolumeQuality::High).outputDimensions
+            : std::array<int, 3>{};
+        auto victim = m_lodCache.end();
+        for (auto iterator = m_lodCache.begin();
+            iterator != m_lodCache.end(); ++iterator) {
+            if (!*iterator || iterator->get() == m_activeLod) {
+                continue;
+            }
+            if (victim == m_lodCache.end()) {
+                victim = iterator;
+                continue;
+            }
+            const bool isVictimHigh =
+                (*victim)->outputDimensions == highDimensions;
+            const bool isCandidateHigh =
+                (*iterator)->outputDimensions == highDimensions;
+            if ((isVictimHigh && !isCandidateHigh)
+                || (isVictimHigh == isCandidateHigh
+                    && (*iterator)->lastUse < (*victim)->lastUse)) {
+                victim = iterator;
+            }
+        }
+        if (victim == m_lodCache.end()) break;
+        m_lodCache.erase(victim);
+        cacheBytes = getCacheBytes();
+    }
+    return true;
+}
+
+bool VolumeStrategy::SetMapperQuality(const LodEntry& lod)
+{
+    if (!m_mapper || !m_lodController) return false;
+    const double sampleDistance = GetQualityStep(lod);
+    if (!std::isfinite(sampleDistance)
+        || sampleDistance <= 0.0) return false;
 
     // 校验完成后一次更新完整静止基线；Mapper 会按当前 preview 状态
     // 原子式选择静止值或交互覆盖，失败路径不留下半套采样参数。
-    return m_mapper->SetStillQuality({
-        false,
-        1.0,
-        1.0,
-        1.0,
-        sampleDistance,
-        isJitterOn
-    });
+    const auto profile = m_lodController->GetProfile();
+    Mapper::QualityState quality;
+    quality.isAuto = profile.isAutoSampling;
+    quality.image = 1.0;
+    quality.minImage = 1.0;
+    quality.maxImage = profile.maxImageDistance;
+    quality.ray = sampleDistance;
+    quality.previewImage = profile.previewImageDistance;
+    quality.previewRayMultiplier = profile.previewRayFactor;
+    quality.isJitter = profile.isJitterOn;
+    quality.isPreviewJitter = profile.isPreviewJitterOn;
+    return m_mapper->SetStillQuality(quality);
+}
+
+vtkSmartPointer<vtkColorTransferFunction>
+VolumeStrategy::BuildColorTransfer(
+    const RenderParams& params) const
+{
+    const auto& function = params.volumeTransferFunction;
+    if (function.colorNodes.size() < 2) return nullptr;
+
+    auto color = vtkSmartPointer<vtkColorTransferFunction>::New();
+    color->SetColorSpaceToRGB();
+    double previousScalar = function.colorNodes.front().scalar;
+    for (std::size_t index = 0;
+        index < function.colorNodes.size(); ++index) {
+        const auto& node = function.colorNodes[index];
+        const bool isUnit = std::isfinite(node.r)
+            && node.r >= 0.0 && node.r <= 1.0
+            && std::isfinite(node.g)
+            && node.g >= 0.0 && node.g <= 1.0
+            && std::isfinite(node.b)
+            && node.b >= 0.0 && node.b <= 1.0;
+        if (!std::isfinite(node.scalar)
+            || !isUnit
+            || (index > 0 && node.scalar <= previousScalar)) {
+            return nullptr;
+        }
+        color->AddRGBPoint(
+            node.scalar, node.r, node.g, node.b);
+        previousScalar = node.scalar;
+    }
+    return color;
+}
+
+vtkSmartPointer<vtkPiecewiseFunction>
+VolumeStrategy::BuildOpacityTransfer(
+    const RenderParams& params) const
+{
+    const auto& function = params.volumeTransferFunction;
+    if (function.opacityNodes.size() < 2
+        || !std::isfinite(params.material.opacity)
+        || params.material.opacity < 0.0
+        || params.material.opacity > 1.0) {
+        return nullptr;
+    }
+
+    auto opacity = vtkSmartPointer<vtkPiecewiseFunction>::New();
+    double previousScalar = function.opacityNodes.front().scalar;
+    for (std::size_t index = 0;
+        index < function.opacityNodes.size(); ++index) {
+        const auto& node = function.opacityNodes[index];
+        if (!std::isfinite(node.scalar)
+            || !std::isfinite(node.opacity)
+            || node.opacity < 0.0
+            || node.opacity > 1.0
+            || (index > 0 && node.scalar <= previousScalar)) {
+            return nullptr;
+        }
+        opacity->AddPoint(
+            node.scalar,
+            node.opacity * params.material.opacity);
+        previousScalar = node.scalar;
+    }
+    return opacity;
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
@@ -538,150 +1162,200 @@ void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     m_cubeAxes->SetCamera(ren->GetActiveCamera());
 }
 
-void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+bool VolumeStrategy::SetVisualState(
+    const RenderParams& params,
+    const UpdateFlags flags)
 {
-    if (!m_volume || !m_volume->GetProperty()) return;
+    if (!m_volume || !m_volume->GetProperty()) return false;
 
     auto prop = m_volume->GetProperty();
-    const bool hasTfChanged = ((flags & UpdateFlags::TF) != UpdateFlags::None);
-    const bool hasMaterialChanged = ((flags & UpdateFlags::Material) != UpdateFlags::None);
+    const bool hasVolumeTransferChanged =
+        (flags & UpdateFlags::VolumeTransfer)
+            != UpdateFlags::None;
+    const bool hasMaterialChanged =
+        (flags & UpdateFlags::Material) != UpdateFlags::None;
     const bool hasQualityChanged =
-        ((flags & UpdateFlags::Quality) != UpdateFlags::None);
+        (flags & UpdateFlags::Quality) != UpdateFlags::None
+        && m_quality != params.volumeQuality;
+    const bool hasRenderRateChanged =
+        (flags & UpdateFlags::RenderRate) != UpdateFlags::None;
     const bool hasDenoiseChanged =
-        ((flags & UpdateFlags::Denoise) != UpdateFlags::None);
+        (flags & UpdateFlags::Denoise) != UpdateFlags::None
+        && m_isDenoiseOn != params.isDenoiseOn;
+    const bool hasGradientChanged =
+        (flags & UpdateFlags::GradientOpacity)
+            != UpdateFlags::None;
 
-    const VolumeQualityParams oldQuality = m_quality;
-    const bool wasFeatureActive = m_isFeatureActive;
-    const bool wasDenoiseOn = m_isDenoiseOn;
-    const VolumeQuality oldActiveQuality = GetVolumeQuality(
-        m_quality, m_isFeatureActive);
-    const bool isQualityModeValid =
-        params.volumeQuality.quality == VolumeQuality::Quality
-        || params.volumeQuality.quality == VolumeQuality::Custom;
-    const bool isQualityValid = isQualityModeValid
-        && (params.volumeQuality.quality != VolumeQuality::Custom
-        || (params.volumeQuality.maxDimension >= 1
-            && params.volumeQuality.maxDimension <= 16384
-            && std::isfinite(params.volumeQuality.sampleDistance)
-            && params.volumeQuality.sampleDistance > 0.0));
-    if (hasQualityChanged && !isQualityValid) {
-        // 非法质量请求在触碰任何同帧状态前整体拒绝；TF/material/gradient
-        // 也不能绕过质量事务单独提交。
-        return;
+    // 1. 在触碰 controller、mapper 和 VTK property 前构建全部候选值。
+    // 2. 任一候选非法都整帧拒绝，不暴露新颜色+旧透明度。
+    vtkSmartPointer<vtkColorTransferFunction> nextColor;
+    if (hasVolumeTransferChanged) {
+        nextColor = BuildColorTransfer(params);
+        if (!nextColor) return false;
     }
-    if (hasQualityChanged && isQualityValid) {
+
+    const bool hasOpacityChanged = hasVolumeTransferChanged
+        || (hasMaterialChanged
+            && GetOpacityChanged(params.material.opacity));
+    vtkSmartPointer<vtkPiecewiseFunction> nextOpacity;
+    if (hasOpacityChanged) {
+        nextOpacity = BuildOpacityTransfer(params);
+        if (!nextOpacity) return false;
+    }
+
+    const auto isUnit = [](const double value) {
+        return std::isfinite(value)
+            && value >= 0.0 && value <= 1.0;
+    };
+    if (hasMaterialChanged
+        && (!isUnit(params.material.ambient)
+            || !isUnit(params.material.diffuse)
+            || !isUnit(params.material.specular)
+            || !isUnit(params.material.opacity)
+            || !std::isfinite(params.material.specularPower)
+            || params.material.specularPower < 0.0)) {
+        return false;
+    }
+
+    vtkSmartPointer<vtkPiecewiseFunction> nextGradient;
+    if (hasGradientChanged && !params.gradientOpacity.empty()) {
+        nextGradient = vtkSmartPointer<vtkPiecewiseFunction>::New();
+        double previousGradient = params.gradientOpacity.front().gradient;
+        for (std::size_t index = 0;
+            index < params.gradientOpacity.size(); ++index) {
+            const auto& node = params.gradientOpacity[index];
+            if (!std::isfinite(node.gradient)
+                || node.gradient < 0.0
+                || !isUnit(node.opacity)
+                || (index > 0
+                    && node.gradient < previousGradient)) {
+                return false;
+            }
+            nextGradient->AddPoint(
+                node.gradient, node.opacity);
+            previousGradient = node.gradient;
+        }
+    }
+
+    const VolumeQuality oldQuality = m_quality;
+    const bool isDenoiseOld = m_isDenoiseOn;
+    const bool isInteractingOld = m_isInteracting;
+    const std::uint64_t oldPlanCount = m_lodPlanCount;
+    const VolumeLodController oldController = m_lodController
+        ? *m_lodController : VolumeLodController{};
+    if (hasQualityChanged
+        && !GetQualityValid(params.volumeQuality)) {
+        return false;
+    }
+    if (hasQualityChanged) {
         m_quality = params.volumeQuality;
-        m_isFeatureActive = params.isFeatureActive;
+        if (!m_lodController
+            || !m_lodController->SetQuality(m_quality)) {
+            m_quality = oldQuality;
+            return false;
+        }
     }
     if (hasDenoiseChanged) {
         m_isDenoiseOn = params.isDenoiseOn;
     }
-
-    // producer 的结构键只含输入、目标尺寸与 denoise 配置。Feature 进入/退出只在
-    // 已缓存的 Quality/Custom 连接间切换，通用交互状态不触碰体渲染管线。
-    const bool hasProducerConfigChanged =
-        (hasQualityChanged && isQualityValid)
-        || hasDenoiseChanged;
-    bool hasBuildStarted = false;
-    bool hasProducerRebuilt = false;
-    if (hasProducerConfigChanged
-        && m_lastInput
-        && !GetProducersReady()) {
-        hasBuildStarted = true;
-        hasProducerRebuilt = BuildProducers();
+    if (hasRenderRateChanged) {
+        m_isInteracting = params.isInteracting;
     }
-    bool isPipelineSet =
-        (!hasQualityChanged || isQualityValid)
-        && (!hasBuildStarted || hasProducerRebuilt);
-    if (!hasBuildStarted && GetProducersReady() && m_mapper) {
-        const VolumeQuality activeQuality = GetVolumeQuality(
-            m_quality, m_isFeatureActive);
-        const bool hasActiveQualityChanged =
-            oldActiveQuality != activeQuality;
-        if (hasActiveQualityChanged || hasTfChanged) {
-            isPipelineSet = SetMapperInput();
+
+    auto nextProfile = m_lodController
+        ? m_lodController->GetProfile()
+        : VolumeLodController::Profile{};
+    const bool hasLodChanged = m_activeLod
+        && m_activeLod->outputDimensions
+            != nextProfile.outputDimensions;
+    const bool hasProducerConfigChanged =
+        hasLodChanged || hasDenoiseChanged;
+    // preview/still 由 GPURender 在 OpenGL owner thread 根据窗口速率选择；
+    // RenderRate 只更新交互状态和材质，不触发 producer 或 mapper setter。
+    bool isPipelineSet = true;
+    if (isPipelineSet
+        && hasProducerConfigChanged && m_lastInput) {
+        const auto oldDenoise = m_denoiseFilter;
+        const bool isProducerDenoiseOld =
+            m_isProducerDenoiseOn;
+        const bool isDenoiseSet = !hasDenoiseChanged
+            || BuildDenoise();
+        const bool isPlanSet = isDenoiseSet
+            && (!hasDenoiseChanged || BuildLodPlan());
+        if (isPlanSet && hasDenoiseChanged) {
+            nextProfile = m_lodController->GetProfile();
         }
-        else if (hasQualityChanged && isQualityValid) {
-            isPipelineSet = SetMapperQuality();
+        isPipelineSet = isPlanSet
+            && SetTargetLod(
+                nextProfile.outputDimensions,
+                nextProfile.dimensionRatio);
+        if (!isPipelineSet) {
+            m_denoiseFilter = oldDenoise;
+            m_isProducerDenoiseOn = isProducerDenoiseOld;
+            (void)ClearPendingLod();
         }
+    }
+    else if (isPipelineSet
+        && hasQualityChanged
+        && m_activeLod) {
+        isPipelineSet = SetMapperQuality(*m_activeLod);
     }
     if (!isPipelineSet) {
-        // 配置与已构建缓存必须一起提交；失败时恢复旧真值和旧 mapper 连接。
+        // 配置与 pending LOD 必须一起提交；失败时 active 与 mapper 始终保持旧值。
         m_quality = oldQuality;
-        m_isFeatureActive = wasFeatureActive;
-        m_isDenoiseOn = wasDenoiseOn;
-        const bool isMapperRestored = SetMapperInput();
-        if (!isMapperRestored) {
+        m_isDenoiseOn = isDenoiseOld;
+        m_isInteracting = isInteractingOld;
+        m_lodPlanCount = oldPlanCount;
+        if (m_lodController) {
+            *m_lodController = oldController;
+        }
+        const bool isQualityRestored = !m_activeLod
+            || SetMapperQuality(*m_activeLod);
+        if (!isQualityRestored) {
             std::cerr
-                << "[VolumeRollback] mapper input restore failed"
+                << "[VolumeRollback] mapper quality restore failed"
                 << '\n';
         }
         // 同一帧中的 TF/material/gradient 必须与 producer/quality 一起提交。
         // 质量事务失败后立即停止，避免形成“旧输入 + 新视觉函数”的半提交帧。
-        return;
+        return false;
     }
 
-    // TF 与 Material 分开处理的原因是：
-    // TF 变更通常意味着整条颜色/透明度曲线要重建；
-    // 单纯材质变化则尽量只更新光照或全局 opacity，避免重复构造整套传输函数。
-    if (((flags & UpdateFlags::TF) != UpdateFlags::None)) {
-        // 遵循数据类与状态类分离、前后处理分离的思想，离线组装 VTK 函数，避免高频 Modified 触发重新渲染
-        auto newCtf = vtkSmartPointer<vtkColorTransferFunction>::New();
-        auto newOtf = vtkSmartPointer<vtkPiecewiseFunction>::New();
-
-        double min = params.scalarRange[0];
-        double max = params.scalarRange[1];
-        double globalOpacity = params.material.opacity;
-
-        for (const auto& node : params.tfNodes) {
-            double val = min + node.position * (max - min);
-            newCtf->AddRGBPoint(val, node.r, node.g, node.b);
-            newOtf->AddPoint(val, node.opacity * globalOpacity);
-        }
-
-        // 单次应用到底层，避免多次触发重管线
-        prop->SetColor(newCtf);
-        prop->SetScalarOpacity(newOtf);
-        m_opacity = params.material.opacity;
-    }
-
-    if (hasMaterialChanged && !hasTfChanged && GetOpacityChanged(params.material.opacity)) {
-        // 当 TF 没变、只有全局 opacity 变动时，不必重建颜色函数；
-        // 这里只重建 OTF，把当前 opacity 重新折算进已有 TF 节点即可。
-        auto otf = vtkSmartPointer<vtkPiecewiseFunction>::New();
-        const double min = params.scalarRange[0];
-        const double max = params.scalarRange[1];
-        for (const auto& node : params.tfNodes) {
-            const double val = min + node.position * (max - min);
-            otf->AddPoint(val, node.opacity * params.material.opacity);
-        }
-        prop->SetScalarOpacity(otf);
+    // 候选值和 LOD 已全部成功，从这里开始只执行无失败返回的 VTK 写入。
+    // 传输函数更新不触碰 mapper input。
+    if (nextColor) prop->SetColor(nextColor);
+    if (nextOpacity) {
+        prop->SetScalarOpacity(nextOpacity);
         m_opacity = params.material.opacity;
     }
 
     if (hasMaterialChanged) {
-        // 光照相关参数和 TF/OTF 解耦处理，避免纯材质调整时不必要地重建体数据映射函数。
         prop->SetAmbient(params.material.ambient);
         prop->SetDiffuse(params.material.diffuse);
         prop->SetSpecular(params.material.specular);
         prop->SetSpecularPower(params.material.specularPower);
-
-        if (params.material.isShadeOn) prop->ShadeOn();
+        m_isShadeOn = params.material.isShadeOn;
+    }
+    if (hasMaterialChanged || hasRenderRateChanged) {
+        if (m_isShadeOn && !m_isInteracting) prop->ShadeOn();
         else prop->ShadeOff();
     }
 
-    if ((flags & UpdateFlags::GradientOpacity) != UpdateFlags::None) {
-        if (params.gradientOpacity.empty()) {
-            prop->SetGradientOpacity(
-                static_cast<vtkPiecewiseFunction*>(nullptr));
-        }
-        else {
-            auto gradient =
-                vtkSmartPointer<vtkPiecewiseFunction>::New();
-            for (const auto& node : params.gradientOpacity) {
-                gradient->AddPoint(node.gradient, node.opacity);
-            }
-            prop->SetGradientOpacity(gradient);
+    if (hasGradientChanged) {
+        prop->SetGradientOpacity(nextGradient);
+    }
+
+    if (hasRenderRateChanged) {
+        auto* renderWindow = m_renderer
+            ? m_renderer->GetRenderWindow() : nullptr;
+        if (renderWindow) {
+            constexpr double staticRate = 0.001;
+            const auto profile = m_lodController
+                ? m_lodController->GetProfile()
+                : VolumeLodController::Profile{};
+            renderWindow->SetDesiredUpdateRate(
+                m_isInteracting
+                    ? profile.targetFps : staticRate);
         }
     }
 
@@ -695,6 +1369,7 @@ void VolumeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flag
             m_cubeAxes->SetVisibility(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
+    return true;
 }
 
 vtkProp3D* VolumeStrategy::GetMainProp()

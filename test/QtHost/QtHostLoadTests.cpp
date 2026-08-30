@@ -110,6 +110,61 @@ bool SendReload(
     return isComplete && isSucceeded;
 }
 
+bool GetTransferEqual(
+    const HostVolumeTransferFunction& left,
+    const HostVolumeTransferFunction& right)
+{
+    if (left.colorNodes.size() != right.colorNodes.size()
+        || left.opacityNodes.size() != right.opacityNodes.size()) {
+        return false;
+    }
+    for (std::size_t index = 0;
+        index < left.colorNodes.size(); ++index) {
+        const auto& leftNode = left.colorNodes[index];
+        const auto& rightNode = right.colorNodes[index];
+        if (leftNode.scalar != rightNode.scalar
+            || leftNode.r != rightNode.r
+            || leftNode.g != rightNode.g
+            || leftNode.b != rightNode.b) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0;
+        index < left.opacityNodes.size(); ++index) {
+        const auto& leftNode = left.opacityNodes[index];
+        const auto& rightNode = right.opacityNodes[index];
+        if (leftNode.scalar != rightNode.scalar
+            || leftNode.opacity != rightNode.opacity) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GetTransferIncreasing(
+    const HostVolumeTransferFunction& function)
+{
+    if (function.colorNodes.size() < 2
+        || function.opacityNodes.size() < 2) {
+        return false;
+    }
+    for (std::size_t index = 1;
+        index < function.colorNodes.size(); ++index) {
+        if (function.colorNodes[index].scalar
+            <= function.colorNodes[index - 1].scalar) {
+            return false;
+        }
+    }
+    for (std::size_t index = 1;
+        index < function.opacityNodes.size(); ++index) {
+        if (function.opacityNodes[index].scalar
+            <= function.opacityNodes[index - 1].scalar) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool GetStageFinalizeValid()
 {
     class StageStub final : public AppDataStagePort {
@@ -379,6 +434,142 @@ bool GetWindowLevelIntentValid()
         && auxiliaryState->windowLevel.windowCenter == 12.0;
 }
 
+bool GetTransferIntentValid()
+{
+    auto core = GetLoadCore();
+    auto configs = GetLoadViews();
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, configs)
+        || !views.SetInteractorsReady()) {
+        return false;
+    }
+
+    const HostViewTarget primary{
+        "load-primary", false,
+        HostRenderViewRole::Primary3D };
+    HostCommandRouter router(views.GetViewDirectory());
+    if (!SendReload(router, views, GetReload())) return false;
+    const auto initialState = views.GetViewState(primary);
+    if (!initialState
+        || !GetTransferIncreasing(
+            initialState->volumeTransferFunction)
+        || initialState->volumeTransferFunction.colorNodes.size() != 4
+        || initialState->volumeTransferFunction.opacityNodes.size() != 4
+        || initialState->volumeTransferFunction.colorNodes.front().scalar
+            != 0.0
+        || initialState->volumeTransferFunction.colorNodes.back().scalar
+            != 7.0) {
+        return false;
+    }
+
+    HostReloadRequest autoNext = GetReload();
+    autoNext.voxels = {
+        20.0f, 21.0f, 22.0f, 23.0f,
+        24.0f, 25.0f, 26.0f, 27.0f
+    };
+    if (!SendReload(router, views, std::move(autoNext))) return false;
+    const auto autoState = views.GetViewState(primary);
+    if (!autoState
+        || autoState->dataVersion <= initialState->dataVersion
+        || autoState->volumeTransferFunction.colorNodes.size() != 4
+        || autoState->volumeTransferFunction.opacityNodes.size() != 4
+        || autoState->volumeTransferFunction.colorNodes.front().scalar
+            != 20.0
+        || autoState->volumeTransferFunction.colorNodes.back().scalar
+            != 27.0
+        || GetTransferEqual(
+            autoState->volumeTransferFunction,
+            initialState->volumeTransferFunction)) {
+        return false;
+    }
+
+    HostVolumeTransferFunction disjointFunction;
+    disjointFunction.colorNodes = {
+        { 1000.0, 0.1, 0.2, 0.3 },
+        { 2000.0, 0.8, 0.7, 0.6 }
+    };
+    disjointFunction.opacityNodes = {
+        { 1000.0, 0.15 },
+        { 2000.0, 0.85 }
+    };
+    HostViewSetRequest disjointRequest;
+    disjointRequest.targetView = primary;
+    disjointRequest.volumeTransferFunction = disjointFunction;
+    if (router.Dispatch(std::move(disjointRequest))) return false;
+    const auto afterDisjoint = views.GetViewState(primary);
+    if (!afterDisjoint
+        || !GetTransferEqual(
+            afterDisjoint->volumeTransferFunction,
+            autoState->volumeTransferFunction)) {
+        return false;
+    }
+
+    HostVolumeTransferFunction explicitFunction;
+    explicitFunction.colorNodes = {
+        { -100.0, 0.1, 0.2, 0.3 },
+        { 100.0, 0.8, 0.7, 0.6 }
+    };
+    explicitFunction.opacityNodes = {
+        { -80.0, 0.15 },
+        { 120.0, 0.85 }
+    };
+    HostViewSetRequest setRequest;
+    setRequest.targetView = primary;
+    setRequest.volumeTransferFunction = explicitFunction;
+    if (!router.Dispatch(std::move(setRequest))) return false;
+    const auto explicitState = views.GetViewState(primary);
+    if (!explicitState
+        || !GetTransferEqual(
+            explicitState->volumeTransferFunction,
+            explicitFunction)) {
+        return false;
+    }
+
+    HostReloadRequest next = GetReload();
+    next.voxels = {
+        40.0f, 41.0f, 42.0f, 43.0f,
+        44.0f, 45.0f, 46.0f, 47.0f
+    };
+    if (!SendReload(router, views, std::move(next))) return false;
+    const auto reloadedState = views.GetViewState(primary);
+    if (!reloadedState
+        || reloadedState->dataVersion
+            <= explicitState->dataVersion
+        || !GetTransferEqual(
+            reloadedState->volumeTransferFunction,
+            explicitFunction)) {
+        return false;
+    }
+
+    HostVolumeTransferFunction currentFunction;
+    currentFunction.colorNodes = {
+        { 40.0, 0.1, 0.2, 0.3 },
+        { 47.0, 0.8, 0.7, 0.6 }
+    };
+    currentFunction.opacityNodes = {
+        { 40.0, 0.15 },
+        { 47.0, 0.85 }
+    };
+    HostViewSetRequest currentRequest;
+    currentRequest.targetView = primary;
+    currentRequest.volumeTransferFunction = currentFunction;
+    if (!router.Dispatch(std::move(currentRequest))) return false;
+    const auto beforeMismatch = views.GetViewState(primary);
+    HostReloadRequest mismatch = GetReload();
+    mismatch.voxels = {
+        100.0f, 101.0f, 102.0f, 103.0f,
+        104.0f, 105.0f, 106.0f, 107.0f
+    };
+    if (SendReload(router, views, std::move(mismatch))) return false;
+    const auto afterMismatch = views.GetViewState(primary);
+    return beforeMismatch
+        && afterMismatch
+        && afterMismatch->dataVersion == beforeMismatch->dataVersion
+        && GetTransferEqual(
+            afterMismatch->volumeTransferFunction,
+            currentFunction);
+}
+
 bool GetPublishLastValid()
 {
     class GateDataManager final : public RawVolumeDataManager {
@@ -439,7 +630,7 @@ bool GetPublishLastValid()
     bool hasPublishGate = false;
     bool hasReaderSample = false;
     bool hasViewsCommitted = false;
-    bool hasGpuWarmup = false;
+    bool hasNoGpuWarmup = false;
     bool hasSharedUnchangedAtGate = false;
     std::atomic<bool> isWriterDone = false;
     DataVersion minVersion = initial->version;
@@ -477,7 +668,7 @@ bool GetPublishLastValid()
         hasViewsCommitted = states.size() == 2
             && states[0].dataVersion == initial->version + 1
             && states[1].dataVersion == initial->version + 1;
-        hasGpuWarmup = warmupCount >= 2;
+        hasNoGpuWarmup = warmupCount == 0;
         hasSharedUnchangedAtGate =
             core.sharedState->GetDataVersion() == oldSharedVersion
             && core.sharedState->GetCursorWorld() == oldCursor
@@ -550,7 +741,7 @@ bool GetPublishLastValid()
         && !isSucceeded
         && hasPublishGate
         && hasViewsCommitted
-        && hasGpuWarmup
+        && hasNoGpuWarmup
         && hasSharedUnchangedAtGate
         && hasViewsReset
         && current == initial
@@ -565,7 +756,7 @@ bool GetPublishLastValid()
         && !dataManager->GetPendingSnapshot();
 }
 
-bool GetGpuWarmupFailValid()
+bool GetLoadWarmupSkipValid()
 {
     auto core = GetLoadCore();
     HostViewRuntimeRegistry views;
@@ -574,8 +765,10 @@ bool GetGpuWarmupFailValid()
         return false;
     }
     const auto initial = core.sharedDataMgr->GetImageSnapshot();
+    const auto initialStates = views.GetViewStates();
     const auto endpoints = views.BuildEndpoints();
-    if (!initial || endpoints.size() != 2
+    if (!initial || initialStates.size() != 2
+        || endpoints.size() != 2
         || !endpoints[1].renderWindow) {
         return false;
     }
@@ -626,12 +819,13 @@ bool GetGpuWarmupFailValid()
     const auto states = views.GetViewStates();
     return isDispatched
         && isComplete
-        && !isSucceeded
-        && warmupCount >= 1
-        && current == initial
+        && isSucceeded
+        && warmupCount == 0
+        && current
+        && current->version == initial->version + 1
         && states.size() == 2
-        && states[0].dataVersion == initial->version
-        && states[1].dataVersion == initial->version
+        && states[0].dataVersion == current->version
+        && states[1].dataVersion == current->version
         && !core.sharedDataMgr->GetPendingSnapshot();
 }
 
@@ -1106,6 +1300,9 @@ int GetLoadFailCount()
         GetWindowLevelIntentValid(),
         "Window/level auto intent follows data while manual intent survives reload") ? 0 : 1;
     failureCount += GetCaseResult(
+        GetTransferIntentValid(),
+        "Auto transfer follows data while explicit transfer preserves or rejects by scalar range") ? 0 : 1;
+    failureCount += GetCaseResult(
         GetMultiViewLoadValid(true),
         "Multi-view reload failure keeps the previous current snapshot") ? 0 : 1;
     failureCount += GetCaseResult(
@@ -1115,8 +1312,8 @@ int GetLoadFailCount()
         GetStageFinalizeValid(),
         "Published load uses noexcept stage finalization instead of fallible cleanup") ? 0 : 1;
     failureCount += GetCaseResult(
-        GetGpuWarmupFailValid(),
-        "No-effect GPU warm-up ErrorEvent rolls back every view") ? 0 : 1;
+        GetLoadWarmupSkipValid(),
+        "No-effect load skips candidate GPU warm-up Render") ? 0 : 1;
     failureCount += GetCaseResult(
         GetImageReadStateValid(),
         "Read image contract owns immutable bytes without VTK identity") ? 0 : 1;

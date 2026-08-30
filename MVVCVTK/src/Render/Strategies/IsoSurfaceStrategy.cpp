@@ -1,4 +1,5 @@
 #include "IsoSurfaceStrategy.h"
+#include "Data/ImageProcessor.h"
 #include <vtkProperty.h>
 #include <vtkMatrix4x4.h>
 #include <vtkObjectFactory.h>
@@ -8,6 +9,7 @@
 #include <vtkImageData.h>
 #include <vtkType.h>
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -98,9 +100,6 @@ private:
 vtkStandardNewMacro(IsoSurfaceStrategy::MaskImplicit);
 
 
-static constexpr int kIsoTargetDim = 766;
-
-
 IsoSurfaceStrategy::IsoSurfaceStrategy() {
     m_actor = vtkSmartPointer<vtkActor>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
@@ -145,6 +144,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_lastInput = data;
         m_hasMask = false;
         m_mask = nullptr;
+        m_isoRatio = 1.0;
         poly->GetCenter(m_dataCenter);
         m_mapper->SetInputData(poly);
         m_mapper->ScalarVisibilityOff();
@@ -162,12 +162,21 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         return;
     }
 
-    // ImageData 路径固定维护一条 766 等值面管线；
+    // ImageData 路径始终从原始数据生成唯一等值面管线；
     // 交互来源不再拥有独立 producer，也不改 mapper 输入。
     auto img = vtkImageData::SafeDownCast(data);
     if (img) {
+        const int* dimensions = img->GetDimensions();
+        if (!dimensions) return;
+        const int maxDimension = std::max(
+            { dimensions[0], dimensions[1], dimensions[2] });
+        constexpr int maxIsoDimension = 766;
+        const double isoRatio = maxDimension > maxIsoDimension
+            ? static_cast<double>(maxIsoDimension)
+                / static_cast<double>(maxDimension)
+            : 1.0;
         auto resample =
-            ImageProcessor::GetDownsampledImage(img, kIsoTargetDim);
+            ImageProcessor::CreateScaledImage(img, isoRatio);
         if (!resample) {
             return;
         }
@@ -175,6 +184,7 @@ void IsoSurfaceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         m_lastInput = data;
         m_hasMask = false;
         m_mask = nullptr;
+        m_isoRatio = isoRatio;
         img->GetCenter(m_dataCenter);
         m_resample = std::move(resample);
         m_isoFilter->SetInputConnection(
@@ -219,8 +229,8 @@ void IsoSurfaceStrategy::SetInputMask(
         return;
     }
 
-    auto mask = ImageProcessor::GetDownsampledMask(
-        validityMask, kIsoTargetDim);
+    auto mask = ImageProcessor::CreateScaledMask(
+        validityMask, m_isoRatio);
     if (!mask) {
         return;
     }
@@ -240,9 +250,11 @@ void IsoSurfaceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
 
 }
 
-void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+bool IsoSurfaceStrategy::SetVisualState(
+    const RenderParams& params,
+    const UpdateFlags flags)
 {
-    if (!m_actor) return;
+    if (!m_actor) return false;
     auto prop = m_actor->GetProperty();
 
     // 等值面策略主要消费三类状态：
@@ -266,7 +278,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
         else prop->SetInterpolationToFlat();
     }
 
-    // 交互来源只改变窗口刷新调度；等值面几何始终来自同一个 766 producer。
+    // 交互来源只改变窗口刷新调度；等值面几何始终来自原始数据 producer。
     if ((flags & UpdateFlags::IsoValue) != UpdateFlags::None) {
         m_currentIsoValue = params.isoValue;
         if (m_isoFilter && m_isoFilter->GetInput()
@@ -285,7 +297,7 @@ void IsoSurfaceStrategy::SetVisualState(const RenderParams& params, UpdateFlags 
             m_cubeAxes->SetVisibility(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
-
+    return true;
 }
 
 vtkProp3D* IsoSurfaceStrategy::GetMainProp()

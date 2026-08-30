@@ -27,7 +27,9 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetVisualState(const RenderParams& params, UpdateFlags flags);
+    bool SetVisualState(
+        const RenderParams& params,
+        UpdateFlags flags) override;
     vtkProp3D* GetMainProp() override;
 private:
     class Mapper;
@@ -38,7 +40,7 @@ private:
     // 等值面主 prop 与坐标轴 prop 均由策略强持有，并登记到基类 m_managedProps 统一挂载。
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
-    // ImageData 路径固定使用最大轴 766 的单一等值面 producer；
+    // ImageData 路径固定使用原始数据的单一等值面 producer；
     // 通用交互来源只控制刷新调度，不改变几何分辨率或 mapper 输入。
     vtkSmartPointer<vtkFlyingEdges3D> m_isoFilter;
     vtkSmartPointer<vtkImageResample> m_resample;
@@ -55,5 +57,7 @@ private:
     double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
     // 最后一次共享状态等值面阈值，单位与输入标量一致。
     double m_currentIsoValue = 0.0;
+    // ImageData 等值面输入相对原始 dimensions 的固定缩放比例；mask 必须复用同一比例。
+    double m_isoRatio = 1.0;
     bool m_hasMask = false;
 };

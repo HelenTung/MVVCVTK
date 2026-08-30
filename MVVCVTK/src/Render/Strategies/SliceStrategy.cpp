@@ -386,7 +386,9 @@ void SliceStrategy::SetCrosshair(const double focusWorld[3],
     m_hLineSource->Modified();
 }
 
-void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+bool SliceStrategy::SetVisualState(
+    const RenderParams& params,
+    const UpdateFlags flags)
 {
     // SliceStrategy 的状态同步核心分三段：
     // 1. WindowLevel/Material 更新图像显示参数
@@ -410,7 +412,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
 	if (((flags & UpdateFlags::Transform) != UpdateFlags::None) || ((flags & UpdateFlags::Cursor) != UpdateFlags::None))
     {
         auto resliceMapper = vtkImageResliceMapper::SafeDownCast(m_mapper);
-        if (!resliceMapper || !resliceMapper->GetInput()) return;
+        if (!resliceMapper || !resliceMapper->GetInput()) return false;
 
         double spacing[3], bounds[6];
         resliceMapper->GetInput()->GetSpacing(spacing);
@@ -457,6 +459,7 @@ void SliceStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags
         if (m_vLineActor) m_vLineActor->SetVisibility(vis);
         if (m_hLineActor) m_hLineActor->SetVisibility(vis);
     }
+    return true;
 }
 
 RenderEffectTarget SliceStrategy::GetRenderEffectTarget() const

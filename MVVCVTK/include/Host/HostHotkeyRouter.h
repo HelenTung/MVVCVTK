@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Host/Types/HostInputTypes.h"
+#include "Host/Types/HostSessionTypes.h"
 
 #include <memory>
 

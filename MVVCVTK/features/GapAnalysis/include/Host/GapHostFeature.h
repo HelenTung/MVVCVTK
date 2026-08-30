@@ -2,7 +2,6 @@
 
 #include "Host/HostFeature.h"
 #include "Host/GapHostTypes.h"
-#include "Host/Types/HostInputTypes.h"
 
 #include <functional>
 #include <memory>

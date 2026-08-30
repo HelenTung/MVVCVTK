@@ -1,13 +1,36 @@
 #pragma once
 
-#include "Host/Types/HostRequest.h"
 #include "Host/Types/HostValueTypes.h"
+#include "Host/Types/HostViewTypes.h"
 
 #include <array>
-#include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
+
+enum class HostErrorCode {
+    None,
+    SessionNotReady,
+    WrongThread,
+    RequestRejected,
+    OperationFailed
+};
+
+struct HostResult final {
+    bool isSucceeded = false;
+    HostErrorCode errorCode = HostErrorCode::OperationFailed;
+    std::string message;
+};
+
+using HostCompleteCallback =
+    std::function<void(bool isSuccess)>;
+using HostResultCallback =
+    std::function<void(HostResult result)>;
+
+struct HostRequest {
+    virtual ~HostRequest() = default;
+};
 
 struct HostLoadRequest final : HostRequest {
     std::string filePath; // UTF-8 文件路径。
@@ -41,14 +64,12 @@ struct HostViewSetRequest final : HostRequest {
     std::optional<HostMaterialParams> material;
     std::optional<HostMaterialPreset> materialPreset;
     std::optional<double> opacity;
-    std::optional<std::vector<HostTransferNode>> transferNodes;
-    std::optional<HostTransferPreset> transferPreset;
+    std::optional<HostVolumeTransferFunction>
+        volumeTransferFunction;
     std::optional<double> iso;
     std::optional<HostBackgroundColor> background;
     std::optional<HostWindowLevelParams> windowLevel;
-    std::optional<HostVolumeQualityParams> volumeQuality;
-    std::optional<std::vector<HostGradientOpacityNode>> gradientOpacity;
-    std::optional<bool> isDenoiseOn;
+    std::optional<HostVolumeQuality> volumeQuality;
     std::optional<HostVisibilityParams> visibility;
     std::optional<bool> isAxesVisible; // 目标 context 的世界方向轴 marker。
 };

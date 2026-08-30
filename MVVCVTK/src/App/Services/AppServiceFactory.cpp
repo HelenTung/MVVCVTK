@@ -53,13 +53,7 @@ public:
     using TaskWork = AppTaskWork;
     using WorkerStart = AppWorkerStart;
 
-    AppRuntime(std::shared_ptr<AbstractDataManager> dataMgr,
-        std::shared_ptr<SharedInteractionState> state,
-        std::shared_ptr<IStateEventSource> stateEventSource,
-        WorkerStart workerStart,
-        std::shared_ptr<AppTaskExecutor> taskExecutor,
-        StrategyCreate strategyCreate,
-        std::function<bool(LoadEventKind)> setLoadCommit);
+    explicit AppRuntime(AppServiceArgs args);
     ~AppRuntime();
 
     bool SetRenderContext(vtkSmartPointer<vtkRenderWindow> win,
@@ -70,8 +64,14 @@ public:
     MaterialParams GetMaterial() const;
     void SetOpacity(double opacity);
     double GetOpacity() const;
-    void SetTransferFunction(const std::vector<TFNode>& nodes);
-    std::vector<TFNode> GetTransferFunction() const;
+    bool SetVolumeTransferFunction(
+        const VolumeTransferFunction& function);
+    bool SetAutoTransfer(
+        const VolumeTransferFunction& function);
+    bool ResetTransfer(
+        const VolumeTransferFunction& function);
+    VolumeTransferFunction GetVolumeTransferFunction() const;
+    bool GetTransferAuto() const;
     void SetIsoThreshold(double val);
     double GetIsoThreshold() const;
     void SetBackground(const BackgroundColor& bg);
@@ -85,16 +85,14 @@ public:
     void SetVisualConfig(const PreInitConfig& cfg);
     PreInitConfig GetVisualConfig() const;
     std::array<double, 2> GetScalarRange() const;
-    bool SetVolumeQuality(const VolumeQualityParams& quality);
-    VolumeQualityParams GetVolumeQuality() const;
+    bool SetVolumeQuality(VolumeQuality quality);
+    VolumeQuality GetVolumeQuality() const;
     bool SetFeatureActive(
         const FeatureSource& source,
         bool isActive);
     bool GetIsFeatureActive() const;
     bool SetGradientOpacity(const std::vector<GradientOpacityNode>& nodes);
     std::vector<GradientOpacityNode> GetGradientOpacity() const;
-    bool SetTransferPreset(TransferPreset preset);
-    TransferPreset GetTransferPreset() const;
     bool SetDenoiseOn(bool isDenoiseOn);
     bool GetDenoiseOn() const;
     LoadState GetFileLoadState() const;
@@ -145,10 +143,10 @@ public:
         std::shared_ptr<AbstractVisualStrategy> newStrategy,
         VizMode mode,
         bool isRendererAttached = false);
-    void AttachOverlayStrategy(std::shared_ptr<AbstractVisualStrategy> strategy);
-    void RemoveOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept;
-    void ClearOverlayStrategies();
+    bool AttachOverlay(std::shared_ptr<FeatureOverlay> overlay);
+    void RemoveOverlay(
+        std::shared_ptr<FeatureOverlay> overlay) noexcept;
+    void ClearOverlays() noexcept;
     RenderInputStamp GetRenderInputStamp() const;
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
     bool DetachRenderEffect(const RenderEffect* effect);
@@ -168,6 +166,8 @@ public:
         std::chrono::steady_clock::time_point deadline);
 
 private:
+    friend class ViewPortAdapter;
+
     // 相机快照只参与单视图管线事务，不进入 App/Host 公共值类型。
     struct CameraState final {
         bool isValid = false;
@@ -192,6 +192,7 @@ private:
         WindowLevelParams autoWindowLevel;
         VizMode mode = VizMode::Volume;
         bool isEffectAttached = false;
+        bool hasDefaultTransfer = false;
         bool isCommitted = false;
     };
 
@@ -231,6 +232,10 @@ private:
         std::function<void(bool)> callback; // SendCompletions 在内部锁外调用，允许安全发起下一事务。
     };
 
+    struct ActiveFeature final {
+        FeatureSource source;
+    };
+
     bool SetRenderBinding(vtkSmartPointer<vtkRenderWindow> win,
         vtkSmartPointer<vtkRenderer> ren);
     void SetStateObserver();
@@ -249,10 +254,16 @@ private:
     bool SetOwnedLoad(LoadEventKind loadEventKind);
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
     bool BuildPipeline();
-    bool SetTransferPresetState();
-    std::optional<std::vector<TFNode>> GetTransferPresetNodes(
+    std::optional<VolumeTransferFunction> GetDefaultVolumeTransfer(
         const TrustedImageSnapshot& snapshot);
-    void SetStrategyState();
+    bool GetVolumeTransferValid(
+        const VolumeTransferFunction& function) const;
+    bool GetTransferRangeValid(
+        const VolumeTransferFunction& function,
+        const std::array<double, 2>& scalarRange) const;
+    double GetRenderRate(bool isInteracting) const noexcept;
+    VolumeQuality GetTargetQuality() const;
+    bool SetStrategyState();
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
     std::shared_ptr<AbstractVisualStrategy> CreateStrategy(VizMode mode);
@@ -297,7 +308,7 @@ private:
     // 状态事件与 overlay 挂接以按位 OR 合并；主线程 exchange(0)，加载失败清场也会清零。
     std::atomic<int> m_pendingFlags{ static_cast<int>(UpdateFlags::All) };
     // 已挂载 overlay 的共享 owner 集合；renderer 另持 VTK prop 引用，Remove/Clear 负责先解除挂载。
-    std::vector<std::shared_ptr<AbstractVisualStrategy>> m_overlayStrategies;
+    std::vector<std::shared_ptr<FeatureOverlay>> m_overlays;
     // 任务 builder 只准备 bool 结果，不越界发布终态或 callback。
     std::shared_ptr<AppDataLoadTaskService> m_dataLoadTaskService;
     std::shared_ptr<AppDataExportTaskService> m_dataExportTaskService;
@@ -323,13 +334,14 @@ private:
     std::atomic<int> m_pendingVizModeInt{ static_cast<int>(VizMode::IsoSurface) };
     // DataReady、Spacing 或模式变化置位；主线程重建前 exchange(false)，失败清场也会清零。
     std::atomic<bool> m_hasDataRefreshNeed{ false };
-    std::atomic<bool> m_hasPresetRefreshNeed{ false };
     mutable std::mutex m_viewConfigMutex;
-    VolumeQualityParams m_volumeQuality;
-    std::vector<FeatureSource> m_featureSources;
+    VolumeQuality m_requestedQuality = VolumeQuality::Auto;
+    VolumeQuality m_appliedQuality = VolumeQuality::Auto;
+    std::vector<ActiveFeature> m_activeFeatures;
     std::vector<GradientOpacityNode> m_gradientOpacity;
     bool m_isDenoiseOn = false;
-    HistogramConverter m_histogram;
+    // Host 多 View 共享频率缓存，但每个 View 仍独立保存最终 TF 值快照。
+    std::shared_ptr<HistogramConverter> m_histogram;
     std::shared_ptr<AppTaskExecutor> m_taskExecutor;
     std::function<bool(LoadEventKind)> m_setLoadCommit;
     std::optional<DataStage> m_dataStage;
@@ -629,30 +641,26 @@ TaskAdmissionResult SendReadTask(
         : TaskAdmissionResult::Unavailable;
 }
 
-AppRuntime::AppRuntime(
-    std::shared_ptr<AbstractDataManager> dataMgr,
-    std::shared_ptr<SharedInteractionState> state,
-    std::shared_ptr<IStateEventSource> stateEventSource,
-    AppRuntime::WorkerStart workerStart,
-    std::shared_ptr<AppTaskExecutor> taskExecutor,
-    StrategyCreate strategyCreate,
-    std::function<bool(LoadEventKind)> setLoadCommit)
-    : m_dataManager(std::move(dataMgr))
-    , m_strategyCreate(std::move(strategyCreate))
-    , m_sharedState(std::move(state))
-    , m_stateEventSource(std::move(stateEventSource))
+AppRuntime::AppRuntime(AppServiceArgs args)
+    : m_dataManager(std::move(args.dataManager))
+    , m_histogram(args.histogram
+        ? std::move(args.histogram)
+        : std::make_shared<HistogramConverter>())
+    , m_strategyCreate(std::move(args.strategyCreate))
+    , m_sharedState(std::move(args.interactionState))
+    , m_stateEventSource(std::move(args.eventSource))
     , m_observerGate(std::make_shared<ObserverGate>(this))
     , m_viewState(std::make_shared<ViewPresentationState>(m_observerGate))
-    , m_setLoadCommit(std::move(setLoadCommit))
+    , m_setLoadCommit(std::move(args.setLoadCommit))
 {
     if (!m_strategyCreate) {
         m_strategyCreate = [](const VizMode mode) {
             return CreateRenderStrategy(mode);
         };
     }
-    m_taskExecutor = taskExecutor
-        ? std::move(taskExecutor)
-        : CreateAppTaskExecutor(std::move(workerStart));
+    m_taskExecutor = args.taskExecutor
+        ? std::move(args.taskExecutor)
+        : CreateAppTaskExecutor(std::move(args.workerStart));
     m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager);
     m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(
         m_dataManager, m_sharedState, m_viewState);
@@ -973,39 +981,54 @@ void AppRuntime::SetCurrentStrategy(
     m_isDirty = true;
 }
 
-void AppRuntime::AttachOverlayStrategy(
-    std::shared_ptr<AbstractVisualStrategy> strategy)
+bool AppRuntime::AttachOverlay(
+    std::shared_ptr<FeatureOverlay> overlay)
 {
-    if (!strategy) return;
+    if (!overlay) return false;
 
-    const auto sameStrategy = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
-        [strategy](const std::shared_ptr<AbstractVisualStrategy>& current) {
-            return current.get() == strategy.get();
+    const auto sameOverlay = std::find_if(
+        m_overlays.begin(), m_overlays.end(),
+        [overlay](const std::shared_ptr<FeatureOverlay>& current) {
+            return current.get() == overlay.get();
         });
-    if (sameStrategy != m_overlayStrategies.end()) {
-        return;
+    if (sameOverlay != m_overlays.end()) {
+        return false;
     }
 
-    m_overlayStrategies.push_back(strategy);
-    if (m_renderer) {
-        strategy->AttachRenderer(m_renderer);
+    bool isStored = false;
+    try {
+        m_overlays.push_back(overlay);
+        isStored = true;
+        if (m_renderer) {
+            overlay->AttachRenderer(m_renderer);
+        }
+    }
+    catch (...) {
+        if (m_renderer) {
+            try { overlay->DetachRenderer(m_renderer); }
+            catch (...) {}
+        }
+        if (isStored) m_overlays.pop_back();
+        return false;
     }
 
     m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
     m_hasSyncNeed = true;
     m_isDirty = true;
+    return true;
 }
 
-void AppRuntime::RemoveOverlayStrategy(
-    std::shared_ptr<AbstractVisualStrategy> strategy) noexcept
+void AppRuntime::RemoveOverlay(
+    std::shared_ptr<FeatureOverlay> overlay) noexcept
 {
-    if (!strategy) return;
+    if (!overlay) return;
 
-    const auto it = std::find_if(m_overlayStrategies.begin(), m_overlayStrategies.end(),
-        [strategy](const std::shared_ptr<AbstractVisualStrategy>& current) {
-            return current.get() == strategy.get();
+    const auto it = std::find_if(
+        m_overlays.begin(), m_overlays.end(),
+        [overlay](const std::shared_ptr<FeatureOverlay>& current) {
+            return current.get() == overlay.get();
         });
-    if (it == m_overlayStrategies.end()) {
+    if (it == m_overlays.end()) {
         return;
     }
 
@@ -1013,23 +1036,24 @@ void AppRuntime::RemoveOverlayStrategy(
         // renderer 是外部策略边界；即使自定义策略清理抛出，service 也必须移除自身登记，
         // 让上层 Start/Clear 事务不会暴露异常或永久保留强 owner。
         try {
-            strategy->DetachRenderer(m_renderer);
+            overlay->DetachRenderer(m_renderer);
         }
         catch (...) {
         }
     }
-    m_overlayStrategies.erase(it);
+    m_overlays.erase(it);
     m_isDirty = true;
 }
 
-void AppRuntime::ClearOverlayStrategies()
+void AppRuntime::ClearOverlays() noexcept
 {
     if (m_renderer) {
-        for (auto& strategy : m_overlayStrategies) {
-            strategy->DetachRenderer(m_renderer);
+        for (auto& overlay : m_overlays) {
+            try { overlay->DetachRenderer(m_renderer); }
+            catch (...) {}
         }
     }
-    m_overlayStrategies.clear();
+    m_overlays.clear();
     m_isDirty = true;
 }
 
@@ -1093,7 +1117,7 @@ void AppRuntime::ClearStrategies()
     m_currentStrategy.reset();
     m_currentMode.reset();
 
-    ClearOverlayStrategies();
+    ClearOverlays();
 }
 
 bool AppRuntime::SetRenderContext(
@@ -1147,7 +1171,7 @@ bool AppRuntime::SetRenderBinding(
             if (m_currentStrategy) {
                 m_currentStrategy->DetachRenderer(oldRenderer);
             }
-            for (auto& overlay : m_overlayStrategies) {
+            for (auto& overlay : m_overlays) {
                 if (overlay) overlay->DetachRenderer(oldRenderer);
             }
         }
@@ -1157,7 +1181,7 @@ bool AppRuntime::SetRenderBinding(
         if (m_currentStrategy) {
             m_currentStrategy->AttachRenderer(m_renderer);
         }
-        for (auto& overlay : m_overlayStrategies) {
+        for (auto& overlay : m_overlays) {
             if (overlay) overlay->AttachRenderer(m_renderer);
         }
 
@@ -1193,7 +1217,7 @@ bool AppRuntime::SetRenderBinding(
             if (m_currentStrategy) {
                 m_currentStrategy->DetachRenderer(m_renderer);
             }
-            for (auto& overlay : m_overlayStrategies) {
+            for (auto& overlay : m_overlays) {
                 if (overlay) overlay->DetachRenderer(m_renderer);
             }
         }
@@ -1208,7 +1232,7 @@ bool AppRuntime::SetRenderBinding(
             if (m_currentStrategy) {
                 m_currentStrategy->AttachRenderer(m_renderer);
             }
-            for (auto& overlay : m_overlayStrategies) {
+            for (auto& overlay : m_overlays) {
                 if (overlay) overlay->AttachRenderer(m_renderer);
             }
             (void)SetCameraState(oldCamera);
@@ -1307,9 +1331,6 @@ bool AppRuntime::ObserverGate::StopOwner()
 void AppRuntime::SendStateFlags(UpdateFlags flags)
 {
     // 把跨层状态事件收敛为主线程邮箱；结构事件与普通增量使用不同消费路径。
-    if ((flags & UpdateFlags::DataReady) != UpdateFlags::None) {
-        m_hasPresetRefreshNeed = true;
-    }
     if ((flags & UpdateFlags::LoadFailed) != UpdateFlags::None
         || ((flags & UpdateFlags::DataReady) != UpdateFlags::None
             && ((flags & UpdateFlags::FileLoad) != UpdateFlags::None
@@ -1373,16 +1394,118 @@ double AppRuntime::GetOpacity() const
     return m_viewState->GetMaterial().opacity;
 }
 
-void AppRuntime::SetTransferFunction(const std::vector<TFNode>& nodes)
+bool AppRuntime::GetVolumeTransferValid(
+    const VolumeTransferFunction& function) const
 {
-    m_viewState->SetTFNodes(nodes);
+    const auto isUnit = [](const double value) {
+        return std::isfinite(value)
+            && value >= 0.0 && value <= 1.0;
+    };
+    if (function.colorNodes.size() < 2
+        || function.opacityNodes.size() < 2) {
+        return false;
+    }
+
+    double previousScalar = function.colorNodes.front().scalar;
+    for (std::size_t index = 0;
+        index < function.colorNodes.size(); ++index) {
+        const auto& node = function.colorNodes[index];
+        if (!std::isfinite(node.scalar)
+            || !isUnit(node.r) || !isUnit(node.g) || !isUnit(node.b)
+            || (index > 0 && node.scalar <= previousScalar)) {
+            return false;
+        }
+        previousScalar = node.scalar;
+    }
+
+    previousScalar = function.opacityNodes.front().scalar;
+    for (std::size_t index = 0;
+        index < function.opacityNodes.size(); ++index) {
+        const auto& node = function.opacityNodes[index];
+        if (!std::isfinite(node.scalar)
+            || !isUnit(node.opacity)
+            || (index > 0 && node.scalar <= previousScalar)) {
+            return false;
+        }
+        previousScalar = node.scalar;
+    }
+    return true;
 }
 
-std::vector<TFNode> AppRuntime::GetTransferFunction() const
+bool AppRuntime::GetTransferRangeValid(
+    const VolumeTransferFunction& function,
+    const std::array<double, 2>& scalarRange) const
 {
-    std::vector<TFNode> nodes;
-    m_viewState->GetTFNodes(nodes);
-    return nodes;
+    if (!GetVolumeTransferValid(function)
+        || !std::isfinite(scalarRange[0])
+        || !std::isfinite(scalarRange[1])
+        || scalarRange[1] < scalarRange[0]) {
+        return false;
+    }
+    const auto hasOverlap = [&scalarRange](
+        const double lower,
+        const double upper) {
+        return upper >= scalarRange[0]
+            && lower <= scalarRange[1];
+    };
+    return hasOverlap(
+            function.colorNodes.front().scalar,
+            function.colorNodes.back().scalar)
+        && hasOverlap(
+            function.opacityNodes.front().scalar,
+            function.opacityNodes.back().scalar);
+}
+
+bool AppRuntime::SetVolumeTransferFunction(
+    const VolumeTransferFunction& function)
+{
+    const bool hasData = m_renderSnapshot
+        && m_renderSnapshot->image;
+    const bool hasStage = m_dataStage.has_value();
+    return m_viewState
+        && GetVolumeTransferValid(function)
+        && (!hasData
+            || (m_sharedState
+                && GetTransferRangeValid(
+                    function,
+                    m_sharedState->GetScalarRange())))
+        && (!hasStage
+            || GetTransferRangeValid(
+                function,
+                m_dataStage->readyState.scalarRange))
+        && m_viewState->SetVolumeTransferFunction(function);
+}
+
+bool AppRuntime::SetAutoTransfer(
+    const VolumeTransferFunction& function)
+{
+    const bool isEmpty = function.colorNodes.empty()
+        && function.opacityNodes.empty();
+    return m_viewState
+        && (isEmpty || GetVolumeTransferValid(function))
+        && m_viewState->SetAutoTransfer(function);
+}
+
+bool AppRuntime::ResetTransfer(
+    const VolumeTransferFunction& function)
+{
+    const bool isEmpty = function.colorNodes.empty()
+        && function.opacityNodes.empty();
+    return m_viewState
+        && (isEmpty || GetVolumeTransferValid(function))
+        && m_viewState->ResetTransfer(function);
+}
+
+VolumeTransferFunction AppRuntime::GetVolumeTransferFunction() const
+{
+    return m_viewState
+        ? m_viewState->GetVolumeTransferFunction()
+        : VolumeTransferFunction{};
+}
+
+bool AppRuntime::GetTransferAuto() const
+{
+    return !m_viewState || m_viewState->GetTransferAuto();
 }
 
 void AppRuntime::SetIsoThreshold(double val)
@@ -1471,12 +1594,15 @@ PreInitConfig AppRuntime::GetVisualConfig() const
     PreInitConfig config;
     config.vizMode = GetVizMode();
     config.material = m_viewState->GetMaterial();
-    m_viewState->GetTFNodes(config.tfNodes);
+    config.volumeTransferFunction =
+        m_viewState->GetVolumeTransferFunction();
     config.isoThreshold = m_viewState->GetIsoValue();
     config.bgColor = m_viewState->GetBackground();
     config.spacing = m_sharedState->GetSpacing();
     config.windowLevel = m_viewState->GetWindowLevel();
-    config.hasTF = true;
+    config.hasVolumeTransferFunction =
+        !m_viewState->GetTransferAuto()
+        && GetVolumeTransferValid(config.volumeTransferFunction);
     config.hasIso = true;
     config.hasBgColor = true;
     config.hasSpacing = true;
@@ -1491,74 +1617,57 @@ std::array<double, 2> AppRuntime::GetScalarRange() const
     return m_sharedState->GetScalarRange();
 }
 
-bool AppRuntime::SetVolumeQuality(
-    const VolumeQualityParams& quality)
+bool AppRuntime::SetVolumeQuality(const VolumeQuality quality)
 {
-    VolumeQualityParams next = quality;
-    switch (quality.quality) {
-    case VolumeQuality::Quality:
-        next = { VolumeQuality::Quality, 766, 1.0, true };
-        break;
-    case VolumeQuality::Custom:
-        if (quality.maxDimension < 1 || quality.maxDimension > 16384
-            || !std::isfinite(quality.sampleDistance)
-            || quality.sampleDistance <= 0.0) {
-            return false;
-        }
+    switch (quality) {
+    case VolumeQuality::Auto:
+    case VolumeQuality::Low:
+    case VolumeQuality::High:
+    case VolumeQuality::XHigh:
+    case VolumeQuality::Ultra:
         break;
     default:
         return false;
     }
-
     {
         std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-        if (m_volumeQuality.quality == next.quality
-            && m_volumeQuality.maxDimension == next.maxDimension
-            && m_volumeQuality.sampleDistance == next.sampleDistance
-            && m_volumeQuality.isJitterOn == next.isJitterOn) {
-            return true;
-        }
-        m_volumeQuality = next;
+        if (m_requestedQuality == quality) return true;
+        m_requestedQuality = quality;
     }
     SetPendingFlags(UpdateFlags::Quality);
     SetSyncNeeded();
     return true;
 }
 
-VolumeQualityParams AppRuntime::GetVolumeQuality() const
+VolumeQuality AppRuntime::GetVolumeQuality() const
 {
     std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-    return m_volumeQuality;
+    return m_appliedQuality;
+}
+
+VolumeQuality AppRuntime::GetTargetQuality() const
+{
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    return m_requestedQuality;
 }
 
 bool AppRuntime::SetFeatureActive(
     const FeatureSource& source,
     bool isActive)
 {
-    if (source.id.empty()) {
-        return false;
+    if (source.id.empty()) return false;
+    std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+    const auto featureIt = std::find_if(
+        m_activeFeatures.begin(),
+        m_activeFeatures.end(),
+        [&source](const ActiveFeature& feature) {
+            return feature.source == source;
+        });
+    if (isActive && featureIt == m_activeFeatures.end()) {
+        m_activeFeatures.push_back({ source });
     }
-
-    bool hasBoundaryChanged = false;
-    {
-        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-        const bool wasActive = !m_featureSources.empty();
-        const auto sourceIt = std::find(
-            m_featureSources.begin(),
-            m_featureSources.end(),
-            source);
-        if (isActive && sourceIt == m_featureSources.end()) {
-            m_featureSources.push_back(source);
-        }
-        else if (!isActive && sourceIt != m_featureSources.end()) {
-            m_featureSources.erase(sourceIt);
-        }
-        hasBoundaryChanged =
-            wasActive != !m_featureSources.empty();
-    }
-    if (hasBoundaryChanged) {
-        SetPendingFlags(UpdateFlags::Quality);
-        SetSyncNeeded();
+    else if (!isActive && featureIt != m_activeFeatures.end()) {
+        m_activeFeatures.erase(featureIt);
     }
     return true;
 }
@@ -1566,7 +1675,7 @@ bool AppRuntime::SetFeatureActive(
 bool AppRuntime::GetIsFeatureActive() const
 {
     std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-    return !m_featureSources.empty();
+    return !m_activeFeatures.empty();
 }
 
 bool AppRuntime::SetGradientOpacity(
@@ -1608,42 +1717,6 @@ AppRuntime::GetGradientOpacity() const
 {
     std::lock_guard<std::mutex> lock(m_viewConfigMutex);
     return m_gradientOpacity;
-}
-
-bool AppRuntime::SetTransferPreset(TransferPreset preset)
-{
-    if (!m_viewState) {
-        return false;
-    }
-
-    if (preset == TransferPreset::Manual) {
-        m_viewState->SetTransferPresetIntent(preset);
-        return true;
-    }
-    if (preset != TransferPreset::Percentile) return false;
-
-    const auto snapshot = m_dataManager
-        ? m_dataManager->GetImageSnapshot() : nullptr;
-    const auto nodes = snapshot
-        ? GetTransferPresetNodes(snapshot)
-        : std::optional<std::vector<TFNode>>{};
-    m_viewState->SetTransferPresetIntent(preset);
-    if (!snapshot || !nodes) {
-        return true;
-    }
-    const auto currentSnapshot = m_dataManager
-        ? m_dataManager->GetImageSnapshot() : nullptr;
-    if (currentSnapshot != snapshot) {
-        m_hasPresetRefreshNeed = true;
-        return true;
-    }
-    return m_viewState->SetTransferPresetNodes(
-        preset, currentSnapshot->version, *nodes);
-}
-
-TransferPreset AppRuntime::GetTransferPreset() const
-{
-    return m_viewState->GetTransferPreset();
 }
 
 bool AppRuntime::SetDenoiseOn(bool isDenoiseOn)
@@ -2139,12 +2212,6 @@ bool AppRuntime::SendUpdates()
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
 
-    // Percentile intent 随 DataVersion 重算；各 view 可尝试解析，但 SharedState 只提交同一版本结果。
-    if (m_hasPresetRefreshNeed.exchange(false)
-        && !SetTransferPresetState()) {
-        m_hasPresetRefreshNeed = true;
-    }
-
     // 2. load 终态按完整 payload 顺序消费；队列锁只覆盖弹出，VTK 与 callback 始终在锁外。
     LoadNotice loadNotice;
     while (RemoveLoadNotice(loadNotice)) {
@@ -2183,11 +2250,11 @@ bool AppRuntime::SendUpdates()
     if (m_hasDataRefreshNeed.exchange(false)) {
         if (!BuildPipeline()) m_hasDataRefreshNeed = true;
     }
-    SetStrategyState();
+    const bool isStrategySet = SetStrategyState();
 
     // 4. owner 已释放 admission 后再执行回调，允许业务方安全重入下一次 load。
     SendCompletions();
-    return true;
+    return isStrategySet;
 }
 
 bool AppRuntime::SendReloadUpdate()
@@ -2495,7 +2562,7 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
 {
     if (!GetIsOwnerThread() || m_dataStage
         || !snapshot || !snapshot->image
-        || !m_sharedState || !m_renderer) {
+        || !m_sharedState || !m_viewState || !m_renderer) {
         return false;
     }
     int dimensions[3] = {};
@@ -2524,6 +2591,25 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
     stage.nextParams.cursor = stage.readyState.cursorWorld;
     stage.nextParams.cursorRaw = stage.readyState.cursorWorld;
     stage.nextParams.cursorAxis = -1;
+    const bool hasColorTransfer =
+        !stage.nextParams.volumeTransferFunction.colorNodes.empty();
+    const bool hasOpacityTransfer =
+        !stage.nextParams.volumeTransferFunction.opacityNodes.empty();
+    if (m_viewState->GetTransferAuto()) {
+        const auto function = GetDefaultVolumeTransfer(snapshot);
+        if (!function) return false;
+        stage.nextParams.volumeTransferFunction = *function;
+        stage.hasDefaultTransfer = true;
+    }
+    else if (hasColorTransfer != hasOpacityTransfer
+        || !hasColorTransfer
+        || !GetVolumeTransferValid(
+            stage.nextParams.volumeTransferFunction)
+        || !GetTransferRangeValid(
+            stage.nextParams.volumeTransferFunction,
+            stage.readyState.scalarRange)) {
+        return false;
+    }
     const auto autoWindowLevel = GetAutoWindowLevel(
         stage.readyState.scalarRange);
     if (!autoWindowLevel) return false;
@@ -2575,8 +2661,20 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
         errorCallback->SetClientData(nullptr);
     };
     try {
-        stage.nextStrategy->SetInputData(snapshot->image);
-        stage.nextStrategy->SetInputMask(snapshot->validityMask);
+        // 先把 producer 配置写入候选，再设置输入。Volume 因此直接按目标
+        // quality/denoise 构建一次，避免先按默认 Auto 物化后再整卷重建。
+        const UpdateFlags producerFlags =
+            UpdateFlags::Quality | UpdateFlags::Denoise;
+        if (!stage.nextStrategy->SetVisualState(
+                stage.nextParams, producerFlags)) {
+            throw std::runtime_error(
+                "Candidate rejected the producer configuration.");
+        }
+        if (!stage.nextStrategy->SetInputData(
+                snapshot->image, snapshot->validityMask)) {
+            throw std::runtime_error(
+                "Candidate rejected the render input data.");
+        }
         if (!stage.nextStrategy->SetRenderInputStamp({
                 snapshot->image.GetPointer(), snapshot->version })) {
             throw std::runtime_error(
@@ -2592,43 +2690,53 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
             stage.isEffectAttached = true;
         }
 
-        if (!m_renderWindow) {
-            throw std::runtime_error(
-                "Candidate GPU warm-up needs a render window.");
-        }
         stage.nextStrategy->AttachRenderer(m_renderer);
         isRendererAttached = true;
-        stage.nextStrategy->SetVisualState(
-            stage.nextParams, UpdateFlags::All);
-        windowErrorTag = m_renderWindow->AddObserver(
-            vtkCommand::ErrorEvent, errorCallback);
-        rendererErrorTag = m_renderer->AddObserver(
-            vtkCommand::ErrorEvent, errorCallback);
-        if (windowErrorTag == 0 || rendererErrorTag == 0) {
+        if (!stage.nextStrategy->SetVisualState(
+                stage.nextParams, UpdateFlags::All)) {
             throw std::runtime_error(
-                "Candidate GPU error observer attach failed.");
+                "Candidate visual state was rejected.");
         }
-
-        oldSwapState = m_renderWindow->GetSwapBuffers();
-        m_renderWindow->SwapBuffersOff();
-        isSwapOverridden = true;
-        const int renderLimit = effect ? 2 : 1;
-        for (int renderCount = 0;
-            renderCount < renderLimit; ++renderCount) {
-            m_renderWindow->Render();
-            if (hasRenderError) {
+        const auto candidateEffectState = effect
+            ? stage.nextStrategy->GetRenderEffectState()
+            : RenderEffectState{};
+        const bool hasEffectStage = effect
+            && candidateEffectState.status
+                == RenderEffectStatus::Staged;
+        if (hasEffectStage) {
+            if (!m_renderWindow) {
                 throw std::runtime_error(
-                    "Candidate GPU warm-up reported ErrorEvent.");
+                    "Candidate effect warm-up needs a render window.");
             }
-            if (!effect
-                || stage.nextStrategy->GetRenderEffectState().status
+            windowErrorTag = m_renderWindow->AddObserver(
+                vtkCommand::ErrorEvent, errorCallback);
+            rendererErrorTag = m_renderer->AddObserver(
+                vtkCommand::ErrorEvent, errorCallback);
+            if (windowErrorTag == 0 || rendererErrorTag == 0) {
+                throw std::runtime_error(
+                    "Candidate effect error observer attach failed.");
+            }
+
+            oldSwapState = m_renderWindow->GetSwapBuffers();
+            m_renderWindow->SwapBuffersOff();
+            isSwapOverridden = true;
+            constexpr int renderLimit = 2;
+            for (int renderCount = 0;
+                renderCount < renderLimit; ++renderCount) {
+                m_renderWindow->Render();
+                if (hasRenderError) {
+                    throw std::runtime_error(
+                        "Candidate effect warm-up reported ErrorEvent.");
+                }
+                if (stage.nextStrategy->GetRenderEffectState().status
                     != RenderEffectStatus::Staged) {
-                break;
+                    break;
+                }
             }
+            m_renderWindow->SetSwapBuffers(oldSwapState);
+            isSwapOverridden = false;
+            clearErrorWatch();
         }
-        m_renderWindow->SetSwapBuffers(oldSwapState);
-        isSwapOverridden = false;
-        clearErrorWatch();
 
         if (effect) {
             const auto effectState =
@@ -2715,6 +2823,11 @@ bool AppRuntime::SetViewStage(const TrustedImageSnapshot& snapshot)
         m_renderSnapshot = snapshot;
         SetCurrentStrategy(
             m_dataStage->nextStrategy, m_dataStage->mode, false);
+        {
+            std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+            m_appliedQuality =
+                m_dataStage->nextParams.volumeQuality;
+        }
         SetRendererBg();
         SetPendingFlags(UpdateFlags::All);
         SetSyncNeeded();
@@ -2831,22 +2944,20 @@ void AppRuntime::SetDataStageComplete() noexcept
         (void)m_viewState->SetAutoWindowLevel(
             m_dataStage->autoWindowLevel);
     }
+    if (m_dataStage->hasDefaultTransfer && m_viewState) {
+        // 自动值只在 Auto 意图仍有效时写回；加载期间到达的显式 TF
+        // 已经把来源切为 Explicit，不能被旧候选覆盖。
+        (void)m_viewState->SetAutoTransfer(
+            m_dataStage->nextParams.volumeTransferFunction);
+    }
     m_dataStage.reset();
 }
 
-std::optional<std::vector<TFNode>>
-AppRuntime::GetTransferPresetNodes(
+std::optional<VolumeTransferFunction>
+AppRuntime::GetDefaultVolumeTransfer(
     const TrustedImageSnapshot& snapshot)
 {
     if (!snapshot || !snapshot->image || snapshot->version == 0) {
-        return std::nullopt;
-    }
-
-    const auto low = m_histogram.GetHistogramPercentile(
-        snapshot->image, 0.02);
-    const auto high = m_histogram.GetHistogramPercentile(
-        snapshot->image, 0.98);
-    if (!low || !high || *high < *low) {
         return std::nullopt;
     }
 
@@ -2856,52 +2967,92 @@ AppRuntime::GetTransferPresetNodes(
     if (!std::isfinite(rangeWidth) || rangeWidth < 0.0) {
         return std::nullopt;
     }
+    VolumeTransferFunction function;
     if (rangeWidth == 0.0) {
-        return std::vector<TFNode>{
-            { 0.0, 1.0, 1.0, 1.0, 1.0 }
+        double upperScalar = std::nextafter(
+            rangeMin, std::numeric_limits<double>::infinity());
+        double lowerScalar = rangeMin;
+        if (!std::isfinite(upperScalar)) {
+            lowerScalar = std::nextafter(
+                rangeMin,
+                -std::numeric_limits<double>::infinity());
+            upperScalar = rangeMin;
+        }
+        if (!std::isfinite(lowerScalar)
+            || !std::isfinite(upperScalar)
+            || upperScalar <= lowerScalar) {
+            return std::nullopt;
+        }
+        function.colorNodes = {
+            { lowerScalar, 1.0, 1.0, 1.0 },
+            { upperScalar, 1.0, 1.0, 1.0 }
         };
+        function.opacityNodes = {
+            { lowerScalar, 1.0 },
+            { upperScalar, 1.0 }
+        };
+        return function;
     }
 
-    double lowPosition = std::clamp(
-        (*low - rangeMin) / rangeWidth, 0.0, 1.0);
-    double highPosition = std::clamp(
-        (*high - rangeMin) / rangeWidth, 0.0, 1.0);
-    if (highPosition <= lowPosition) {
-        lowPosition = 0.0;
-        highPosition = 1.0;
-    }
-    return std::vector<TFNode>{
-        { lowPosition, 0.0, 0.0, 0.0, 0.0 },
-        { highPosition, 1.0, 1.0, 1.0, 1.0 }
+    constexpr std::array<double, 4> positions{
+        0.0, 0.5, 0.85, 1.0
     };
-}
-
-bool AppRuntime::SetTransferPresetState()
-{
-    if (!m_viewState
-        || m_viewState->GetTransferPreset() == TransferPreset::Manual) {
-        return true;
+    constexpr std::array<double, 4> opacities{
+        0.0, 0.0, 0.8, 1.0
+    };
+    constexpr double defaultColor = 0.75;
+    std::array<double, 4> scalars{};
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+        scalars[index] = index == 0 ? rangeMin
+            : index + 1 == positions.size() ? rangeMax
+            : rangeMin + positions[index] * rangeWidth;
+        if (!std::isfinite(scalars[index])) return std::nullopt;
     }
-    const auto snapshot = m_dataManager
-        ? m_dataManager->GetImageSnapshot() : nullptr;
-    const auto nodes = GetTransferPresetNodes(snapshot);
-    if (!nodes) return false;
-    const auto currentSnapshot = m_dataManager
-        ? m_dataManager->GetImageSnapshot() : nullptr;
-    return currentSnapshot == snapshot
-        && m_viewState->SetTransferPresetNodes(
-            TransferPreset::Percentile,
-            currentSnapshot->version,
-            *nodes);
+    const bool hasDistinctScalars = std::adjacent_find(
+        scalars.begin(), scalars.end(),
+        [](const double left, const double right) {
+            return right <= left;
+        }) == scalars.end();
+    if (!hasDistinctScalars) {
+        function.colorNodes = {
+            { rangeMin, defaultColor, defaultColor, defaultColor },
+            { rangeMax, defaultColor, defaultColor, defaultColor }
+        };
+        function.opacityNodes = {
+            { rangeMin, 0.0 },
+            { rangeMax, 1.0 }
+        };
+        return function;
+    }
+
+    function.colorNodes.reserve(positions.size());
+    function.opacityNodes.reserve(positions.size());
+    for (std::size_t index = 0; index < positions.size(); ++index) {
+        function.colorNodes.push_back({
+            scalars[index], defaultColor, defaultColor, defaultColor });
+        function.opacityNodes.push_back({
+            scalars[index], opacities[index] });
+    }
+    return function;
 }
 
-void AppRuntime::SetStrategyState()
+double AppRuntime::GetRenderRate(
+    const bool isInteracting) const noexcept
+{
+    constexpr double staticRate = 0.001;
+    constexpr double fastRate = 15.0;
+    return isInteracting ? fastRate : staticRate;
+}
+
+bool AppRuntime::SetStrategyState()
 {
     bool isExpected = true;
-    // CAS 同时领取并清掉同步闸门；没有请求时不触碰 pending 位图。
-    if (!m_hasSyncNeed.compare_exchange_strong(isExpected, false)) return;
+    // CAS 同时领取并清掉同步闸门；没有外部请求时无需进入策略计算。
+    if (!m_hasSyncNeed.compare_exchange_strong(isExpected, false)) {
+        return true;
+    }
     // 当前无 Strategy 时位图仍保留；只有后续再次置同步闸门才会消费。
-    if (!m_currentStrategy) return;
+    if (!m_currentStrategy) return true;
 
     // 用 exchange(0) 取走当前整包增量标志，相当于把这一帧前累计的状态改动做一次原子快照。
     // 后续新来的事件会写入新的 m_pendingFlags，留到下一帧继续消费，不会和本次同步互相覆盖。
@@ -2910,10 +3061,12 @@ void AppRuntime::SetStrategyState()
 
     if (flags == UpdateFlags::None) {
         m_hasSyncNeed = false;
-        return;
+        return true;
     }
 
     // 刷新率只跟随通用交互生命周期，不参与质量档或 producer 选择。
+    const double oldDesiredRate = m_renderWindow
+        ? m_renderWindow->GetDesiredUpdateRate() : 0.0;
     if ((flags & (UpdateFlags::RenderRate | UpdateFlags::Quality))
             != UpdateFlags::None
         && m_renderWindow) {
@@ -2921,39 +3074,73 @@ void AppRuntime::SetStrategyState()
         m_renderWindow->SetDesiredUpdateRate(
             GetRenderRate(isInteracting));
     }
-    // RenderRate 在 App 层完成刷新率同步后即消费，不再向 Strategy 透传。
-    // 质量、producer、mask 和 mapper 只由各自稳定业务标志驱动。
-    flags = static_cast<UpdateFlags>(
+    // RenderRate 继续透传给 Strategy，使屏幕采样与慢速 LOD
+    // 提交都能观察交互边界；它不直接更换 mapper input。
+
+    const bool hasBackgroundChanged =
+        (flags & UpdateFlags::Background) != UpdateFlags::None;
+    const UpdateFlags strategyFlags = static_cast<UpdateFlags>(
         static_cast<int>(flags)
-        & ~static_cast<int>(UpdateFlags::RenderRate));
+        & ~static_cast<int>(UpdateFlags::Background));
 
-    // 背景色同步（数据无关，直接写渲染器）
-    if (((flags & UpdateFlags::Background) != UpdateFlags::None) && m_renderer) {
+    RenderParams params;
+    bool isVisualSet = true;
+    if (strategyFlags != UpdateFlags::None) {
+        params = GetRenderParams(strategyFlags);
+        isVisualSet = m_currentStrategy->SetVisualState(
+            params, strategyFlags);
+        if (isVisualSet
+            && (strategyFlags
+                & (UpdateFlags::Cursor | UpdateFlags::Transform))
+                != UpdateFlags::None) {
+            FeatureOverlayState overlayState;
+            overlayState.cursor = params.cursor;
+            overlayState.modelToWorld = params.modelMatrix;
+            for (auto& overlay : m_overlays) {
+                overlay->SetOverlayState(overlayState);
+            }
+        }
+    }
+    if (!isVisualSet) {
+        if (m_renderWindow) {
+            m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
+        }
+        if ((strategyFlags & UpdateFlags::Quality)
+            != UpdateFlags::None) {
+            std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+            m_requestedQuality = m_appliedQuality;
+        }
+        // 失败帧只丢弃 Quality；其余状态仍需在下一帧重试，避免背景、变换
+        // 等标志已从 pending 取出后永久丢失。
+        const UpdateFlags retryFlags = static_cast<UpdateFlags>(
+            static_cast<int>(flags)
+            & ~static_cast<int>(UpdateFlags::Quality));
+        if (retryFlags != UpdateFlags::None) {
+            m_pendingFlags.fetch_or(static_cast<int>(retryFlags));
+            m_hasSyncNeed = true;
+        }
+        return false;
+    }
+    if ((strategyFlags & UpdateFlags::Quality)
+        != UpdateFlags::None) {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        m_appliedQuality = m_requestedQuality;
+    }
+
+    // 背景与主体视觉状态属于同一帧提交；策略拒绝时不得先暴露新背景。
+    if (hasBackgroundChanged && m_renderer) {
         SetRendererBg();
-        flags = static_cast<UpdateFlags>(
-            static_cast<int>(flags) & ~static_cast<int>(UpdateFlags::Background));
-    }
-	// 判断取了背景色标志后剩下的位，如果没有了才标脏，否则继续走 Strategy 同步剩余状态
-    // 避免每次背景色改动都重置全局脏标志导致不必要的渲染刷新。
-    if (flags == UpdateFlags::None) {
-        m_isDirty = true;
-        return;
-    }
-
-    RenderParams params = GetRenderParams(flags);
-    m_currentStrategy->SetVisualState(params, flags);
-
-    for (auto& overlay : m_overlayStrategies) {
-        overlay->SetVisualState(params, flags);
     }
 
     // Strategy 只更新自身 prop；同一 Transform 快照随后由单一 view owner 平移相机中心。
-    if ((flags & UpdateFlags::Transform) != UpdateFlags::None) {
+    if ((strategyFlags & UpdateFlags::Transform)
+        != UpdateFlags::None) {
         (void)SetCameraCenter(params.modelMatrix, m_renderSnapshot);
     }
 
     // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
     m_isDirty = true;
+    return true;
 }
 
 void AppRuntime::ClearLoadFail(LoadEventKind loadEventKind)
@@ -2995,11 +3182,13 @@ RenderParams AppRuntime::GetRenderParams(UpdateFlags flags) const
         p.cursorAxis = m_sharedState->GetCursorAxis();
         p.modelMatrix = m_sharedState->GetModelMatrix();
     }
-    if (((flags & UpdateFlags::TF) != UpdateFlags::None)) {
-        auto range = m_sharedState->GetDataRange();
-        p.scalarRange[0] = range[0];
-        p.scalarRange[1] = range[1];
-        m_viewState->GetTFNodes(p.tfNodes);
+    if ((flags & UpdateFlags::VolumeTransfer)
+        != UpdateFlags::None) {
+        p.volumeTransferFunction =
+            m_viewState->GetVolumeTransferFunction();
+        // material.opacity 是 scalar opacity 的独立倍率，
+        // 传输函数快照必须携带当前材质值。
+        p.material = m_viewState->GetMaterial();
     }
 
     if (((flags & UpdateFlags::WindowLevel) != UpdateFlags::None)) {
@@ -3014,12 +3203,15 @@ RenderParams AppRuntime::GetRenderParams(UpdateFlags flags) const
         p.scalarRange[0] = range[0];
         p.scalarRange[1] = range[1];
         p.material = m_viewState->GetMaterial();
-        m_viewState->GetTFNodes(p.tfNodes);
+        p.volumeTransferFunction =
+            m_viewState->GetVolumeTransferFunction();
     }
 
-    if ((flags & UpdateFlags::Quality) != UpdateFlags::None) {
+    if ((flags & (UpdateFlags::Quality | UpdateFlags::RenderRate))
+        != UpdateFlags::None) {
         p.isFeatureActive = GetIsFeatureActive();
-        p.volumeQuality = GetVolumeQuality();
+        p.isInteracting = m_sharedState->GetIsInteracting();
+        p.volumeQuality = GetTargetQuality();
     }
 
     if ((flags & UpdateFlags::GradientOpacity) != UpdateFlags::None) {
@@ -3144,6 +3336,8 @@ public:
         : m_service(std::move(service))
     {
     }
+
+    ~ViewPortAdapter() override = default;
 
     bool SetViewConfig(const PreInitConfig& config) override
     {
@@ -3304,6 +3498,11 @@ private:
             }
         }
         if (update.opacity && !isUnit(*update.opacity)) return false;
+        if (update.volumeTransferFunction
+            && !m_service->GetVolumeTransferValid(
+                *update.volumeTransferFunction)) {
+            return false;
+        }
         if (update.isoThreshold && !std::isfinite(*update.isoThreshold)) {
             return false;
         }
@@ -3328,6 +3527,18 @@ private:
                 return false;
             }
         }
+        if (update.volumeQuality) {
+            switch (*update.volumeQuality) {
+            case VolumeQuality::Auto:
+            case VolumeQuality::Low:
+            case VolumeQuality::High:
+            case VolumeQuality::XHigh:
+            case VolumeQuality::Ultra:
+                break;
+            default:
+                return false;
+            }
+        }
         return true;
     }
 
@@ -3340,10 +3551,6 @@ private:
         }
         if (update.gradientOpacity
             && !m_service->SetGradientOpacity(*update.gradientOpacity)) {
-            return false;
-        }
-        if (update.transferPreset
-            && !m_service->SetTransferPreset(*update.transferPreset)) {
             return false;
         }
         if (update.isDenoiseOn
@@ -3376,8 +3583,10 @@ private:
         if (update.mode) m_service->SetVizMode(*update.mode);
         if (update.material) m_service->SetMaterial(*update.material);
         if (update.opacity) m_service->SetOpacity(*update.opacity);
-        if (update.transferNodes) {
-            m_service->SetTransferFunction(*update.transferNodes);
+        if (update.volumeTransferFunction
+            && !m_service->SetVolumeTransferFunction(
+                *update.volumeTransferFunction)) {
+            return false;
         }
         if (update.isoThreshold) {
             m_service->SetIsoThreshold(*update.isoThreshold);
@@ -3409,14 +3618,18 @@ private:
         AppViewUpdate update;
         update.mode = state.mode;
         update.material = state.material;
-        update.transferNodes = state.transferNodes;
+        if (!state.isTransferAuto
+            && (!state.volumeTransferFunction.colorNodes.empty()
+            || !state.volumeTransferFunction.opacityNodes.empty())) {
+            update.volumeTransferFunction =
+                state.volumeTransferFunction;
+        }
         update.isoThreshold = state.isoThreshold;
         update.background = state.background;
         update.windowLevel = state.windowLevel;
         update.windowLevelMode = state.windowLevelMode;
         update.volumeQuality = state.volumeQuality;
         update.gradientOpacity = state.gradientOpacity;
-        update.transferPreset = state.transferPreset;
         update.isDenoiseOn = state.isDenoiseOn;
         AppVisibilityUpdate visibility;
         visibility.isPlanes3DVisible =
@@ -3426,7 +3639,12 @@ private:
         visibility.isRulerVisible =
             (state.visibilityMask & VisFlags::Ruler) != 0;
         update.visibility = visibility;
-        return GetUpdateValid(update) && SetUpdate(update);
+        if (!GetUpdateValid(update) || !SetUpdate(update)) {
+            return false;
+        }
+        return !state.isTransferAuto
+            || m_service->ResetTransfer(
+                state.volumeTransferFunction);
     }
 
     AppViewState GetState() const
@@ -3435,13 +3653,14 @@ private:
         if (!m_service) return state;
         state.mode = m_service->GetVizMode();
         state.material = m_service->GetMaterial();
-        state.transferNodes = m_service->GetTransferFunction();
+        state.volumeTransferFunction =
+            m_service->GetVolumeTransferFunction();
+        state.isTransferAuto = m_service->GetTransferAuto();
         state.isoThreshold = m_service->GetIsoThreshold();
         state.background = m_service->GetBackground();
         state.spacing = m_service->GetSpacing();
         state.windowLevel = m_service->GetWindowLevel();
         state.windowLevelMode = m_service->GetWindowLevelMode();
-        state.transferPreset = m_service->GetTransferPreset();
         state.scalarRange = m_service->GetScalarRange();
         state.volumeQuality = m_service->GetVolumeQuality();
         state.gradientOpacity = m_service->GetGradientOpacity();
@@ -3739,25 +3958,24 @@ public:
     {
     }
 
-    void AttachOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy> strategy) override
+    bool AttachOverlay(
+        std::shared_ptr<FeatureOverlay> overlay) override
+    {
+        return m_service
+            && m_service->AttachOverlay(std::move(overlay));
+    }
+
+    void RemoveOverlay(
+        std::shared_ptr<FeatureOverlay> overlay) noexcept override
     {
         if (m_service) {
-            m_service->AttachOverlayStrategy(std::move(strategy));
+            m_service->RemoveOverlay(std::move(overlay));
         }
     }
 
-    void RemoveOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept override
+    void ClearOverlays() noexcept override
     {
-        if (m_service) {
-            m_service->RemoveOverlayStrategy(std::move(strategy));
-        }
-    }
-
-    void ClearOverlayStrategies() override
-    {
-        if (m_service) m_service->ClearOverlayStrategies();
+        if (m_service) m_service->ClearOverlays();
     }
 
 private:
@@ -3797,14 +4015,7 @@ AppFactoryResult CreateAppPorts(AppServiceArgs args)
 
     std::shared_ptr<AppRuntime> service;
     try {
-        service = std::make_shared<AppRuntime>(
-            std::move(args.dataManager),
-            std::move(args.interactionState),
-            std::move(args.eventSource),
-            std::move(args.workerStart),
-            std::move(args.taskExecutor),
-            std::move(args.strategyCreate),
-            std::move(args.setLoadCommit));
+        service = std::make_shared<AppRuntime>(std::move(args));
     }
     catch (const std::exception& error) {
         std::cerr << "[AppRuntime] Worker startup failed: "

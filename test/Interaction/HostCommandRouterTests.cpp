@@ -6,6 +6,7 @@
 #include "ViewContext.h"
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <iostream>
 #include <memory>
@@ -16,11 +17,11 @@
 
 namespace {
 
-static_assert(static_cast<int>(HostVolumeQuality::Quality) == 0);
-static_assert(static_cast<int>(HostVolumeQuality::Custom) == 1);
-static_assert(
-    HostVolumeQualityParams{}.quality
-        == HostVolumeQuality::Quality);
+static_assert(static_cast<int>(HostVolumeQuality::Auto) == 0);
+static_assert(static_cast<int>(HostVolumeQuality::Low) == 1);
+static_assert(static_cast<int>(HostVolumeQuality::High) == 2);
+static_assert(static_cast<int>(HostVolumeQuality::XHigh) == 3);
+static_assert(static_cast<int>(HostVolumeQuality::Ultra) == 4);
 static_assert(
     static_cast<int>(HostDataExportFormat::Raw) == 0);
 static_assert(std::is_polymorphic_v<HostRequest>);
@@ -98,6 +99,8 @@ HostVolumeGeometry BuildGeometry()
     return { { 2, 2, 1 }, { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f } };
 }
 
+HostVolumeTransferFunction GetVolumeTransferFunction();
+
 template <typename Request>
 bool SendData(
     Fixture& fixture,
@@ -147,10 +150,7 @@ HostViewSetRequest BuildViewRequest()
     request.mode = HostRenderMode::IsoSurface;
     request.material = HostMaterialParams{};
     request.opacity = 0.8;
-    request.transferNodes = std::vector<HostTransferNode>{
-        { 0.0, 0.0, 0.0, 0.0, 0.0 },
-        { 1.0, 1.0, 1.0, 1.0, 1.0 }
-    };
+    request.volumeTransferFunction = GetVolumeTransferFunction();
     request.iso = 0.5;
     request.background = HostBackgroundColor{};
     request.windowLevel = HostWindowLevelParams{};
@@ -200,17 +200,27 @@ void StartViewCases(int& failureCount)
     getIsRejected(std::move(request), "越界 background 必须整笔拒绝。");
 
     request = BuildViewRequest();
-    request.transferNodes = std::vector<HostTransferNode>{};
+    request.volumeTransferFunction = HostVolumeTransferFunction{};
     getIsRejected(std::move(request), "显式空 TF 必须整笔拒绝。");
 
     request = BuildViewRequest();
-    request.transferNodes->at(0).r = 1.1;
+    request.volumeTransferFunction->colorNodes.at(0).r = 1.1;
     getIsRejected(std::move(request), "越界 TF node 必须整笔拒绝。");
 
     request = BuildViewRequest();
-    request.transferNodes->at(0).position = 0.8;
-    request.transferNodes->at(1).position = 0.2;
-    getIsRejected(std::move(request), "下降 TF position 必须整笔拒绝。");
+    request.volumeTransferFunction->colorNodes.at(0).scalar = 1000.0;
+    request.volumeTransferFunction->colorNodes.at(1).scalar = 500.0;
+    getIsRejected(std::move(request), "下降 TF scalar 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.volumeTransferFunction->colorNodes.at(1).scalar =
+        request.volumeTransferFunction->colorNodes.at(0).scalar;
+    getIsRejected(std::move(request), "重复 TF color scalar 必须整笔拒绝。");
+
+    request = BuildViewRequest();
+    request.volumeTransferFunction->opacityNodes.at(1).scalar =
+        request.volumeTransferFunction->opacityNodes.at(0).scalar;
+    getIsRejected(std::move(request), "重复 TF opacity scalar 必须整笔拒绝。");
 
     request = BuildViewRequest();
     request.windowLevel->windowWidth = 0.0;
@@ -235,50 +245,19 @@ void StartViewCases(int& failureCount)
         std::move(request),
         "材质 preset 与数值 material/opacity 冲突时必须整笔拒绝。");
 
-    request = BuildViewRequest();
-    request.transferPreset = HostTransferPreset::Percentile;
-    getIsRejected(
-        std::move(request),
-        "Percentile preset 与手动 TF 冲突时必须整笔拒绝。");
-
     request = HostViewSetRequest{};
     request.targetView.viewId = "primary";
     request.mode = HostRenderMode::Volume;
-    request.volumeQuality = HostVolumeQualityParams{
-        HostVolumeQuality::Custom, 0, 0.5, false };
-    getIsRejected(std::move(request), "非法 Custom quality 必须整笔拒绝。");
-
-    request = HostViewSetRequest{};
-    request.targetView.viewId = "primary";
-    request.mode = HostRenderMode::Volume;
-    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
-        { 2.0, 0.2 }, { 1.0, 0.8 }
-    };
-    getIsRejected(std::move(request), "下降 gradient 必须整笔拒绝。");
-
-    request = HostViewSetRequest{};
-    request.targetView.viewId = "primary";
-    request.mode = HostRenderMode::Volume;
-    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
-        { std::numeric_limits<double>::quiet_NaN(), 0.2 }
-    };
-    getIsRejected(std::move(request), "非有限 gradient 必须整笔拒绝。");
-
-    request = HostViewSetRequest{};
-    request.targetView.viewId = "primary";
-    request.mode = HostRenderMode::Volume;
-    request.gradientOpacity = std::vector<HostGradientOpacityNode>{
-        { 1.0, 1.1 }
-    };
-    getIsRejected(std::move(request), "越界 gradient opacity 必须整笔拒绝。");
+    request.volumeQuality = static_cast<HostVolumeQuality>(99);
+    getIsRejected(std::move(request), "非法 quality 枚举必须整笔拒绝。");
 
     request = HostViewSetRequest{};
     request.targetView.viewId = "slice";
     request.mode = HostRenderMode::SliceTopDown;
-    request.isDenoiseOn = true;
+    request.volumeQuality = HostVolumeQuality::High;
     getIsRejected(
         std::move(request),
-        "Slice 目标不得接收 Volume-only denoise。");
+        "Slice 目标不得接收 Volume quality。");
 
     Fixture fixture;
     SetExpect(SendView(fixture, BuildViewRequest()),
@@ -353,7 +332,7 @@ void StartViewCases(int& failureCount)
     qualityRequest.targetView.viewId = "primary";
     qualityRequest.mode = HostRenderMode::Volume;
     qualityRequest.material = HostMaterialParams{};
-    qualityRequest.volumeQuality = HostVolumeQualityParams{};
+    qualityRequest.volumeQuality = HostVolumeQuality::Auto;
     qualityRequest.isAxesVisible = true;
     SetExpect(!SendView(qualityFixture, std::move(qualityRequest)),
         "quality 运行时拒绝必须向 Router 返回失败。", failureCount);
@@ -363,72 +342,6 @@ void StartViewCases(int& failureCount)
             && qualityFixture.context->GetCameraStyleSetCount() == 0
             && qualityFixture.context->GetAxesSetCount() == 0,
         "quality 失败必须发生在所有 void View setter 之前。",
-        failureCount);
-
-    Fixture gradientFixture;
-    gradientFixture.GetService()->SetGradientAccepted(false);
-    HostViewSetRequest gradientRequest;
-    gradientRequest.targetView.viewId = "primary";
-    gradientRequest.gradientOpacity =
-        std::vector<HostGradientOpacityNode>{};
-    gradientRequest.transferPreset = HostTransferPreset::Percentile;
-    gradientRequest.isDenoiseOn = true;
-    SetExpect(!SendView(gradientFixture, std::move(gradientRequest)),
-        "gradient 运行时拒绝必须向 Router 返回失败。", failureCount);
-    SetExpect(gradientFixture.GetService()->GetGradientSetCount() == 1
-            && gradientFixture.GetService()->GetTransferPresetSetCount() == 0
-            && gradientFixture.GetService()->GetDenoiseSetCount() == 0
-            && gradientFixture.GetService()->GetViewSetCount() == 0,
-        "gradient 失败必须停止后续可失败 setter。",
-        failureCount);
-
-    Fixture presetFixture;
-    presetFixture.GetService()->SetPresetAccepted(false);
-    HostViewSetRequest presetRequest;
-    presetRequest.targetView.viewId = "primary";
-    presetRequest.transferPreset = HostTransferPreset::Percentile;
-    presetRequest.isDenoiseOn = true;
-    SetExpect(!SendView(presetFixture, std::move(presetRequest)),
-        "transfer preset 运行时拒绝必须向 Router 返回失败。",
-        failureCount);
-    SetExpect(presetFixture.GetService()->GetTransferPresetSetCount() == 1
-            && presetFixture.GetService()->GetDenoiseSetCount() == 0
-            && presetFixture.GetService()->GetViewSetCount() == 0,
-        "transfer preset 失败必须停止后续 denoise setter。",
-        failureCount);
-
-    Fixture denoiseFixture;
-    denoiseFixture.GetService()->SetDenoiseAccepted(false);
-    HostViewSetRequest denoiseRequest;
-    denoiseRequest.targetView.viewId = "primary";
-    denoiseRequest.isDenoiseOn = true;
-    SetExpect(!SendView(denoiseFixture, std::move(denoiseRequest)),
-        "denoise 运行时拒绝必须向 Router 返回失败。",
-        failureCount);
-    SetExpect(denoiseFixture.GetService()->GetDenoiseSetCount() == 1
-            && denoiseFixture.GetService()->GetViewSetCount() == 0,
-        "denoise 失败不得记录成功的 View 状态。", failureCount);
-
-    Fixture partialFixture;
-    partialFixture.GetService()->SetGradientAccepted(false);
-    HostViewSetRequest partialRequest;
-    partialRequest.targetView.viewId = "primary";
-    partialRequest.material = HostMaterialParams{};
-    partialRequest.volumeQuality = HostVolumeQualityParams{
-        HostVolumeQuality::Custom, 384, 0.25, true };
-    partialRequest.gradientOpacity =
-        std::vector<HostGradientOpacityNode>{};
-    SetExpect(!SendView(partialFixture, std::move(partialRequest)),
-        "后续可失败 setter 拒绝必须向 Router 返回失败。",
-        failureCount);
-    SetExpect(partialFixture.GetService()->GetQualitySetCount() == 1
-            && partialFixture.GetService()->GetGradientSetCount() == 1
-            && partialFixture.GetService()->GetViewSetCount() == 1
-            && partialFixture.GetService()->GetMaterialSetCount() == 0
-            && partialFixture.GetService()->GetRevision() == 0
-            && partialFixture.GetService()->GetVolumeQuality().maxDimension
-                != 384,
-        "App 端口内部失败必须恢复完整值状态；计数只记录尝试。",
         failureCount);
 
     Fixture cameraFail;
@@ -503,25 +416,44 @@ void StartViewCases(int& failureCount)
     extended.targetView.viewId = "primary";
     extended.mode = HostRenderMode::Volume;
     extended.materialPreset = HostMaterialPreset::Glossy;
-    extended.volumeQuality = HostVolumeQualityParams{
-        HostVolumeQuality::Custom, 512, 0.25, true };
-    extended.gradientOpacity = std::vector<HostGradientOpacityNode>{};
-    extended.transferPreset = HostTransferPreset::Percentile;
-    extended.isDenoiseOn = false;
+    extended.volumeQuality = HostVolumeQuality::XHigh;
+    extended.volumeTransferFunction = GetVolumeTransferFunction();
     SetExpect(SendView(extendedFixture, std::move(extended)),
         "合法扩展显示契约应一次提交。", failureCount);
     const auto extendedService = extendedFixture.GetService();
     SetExpect(extendedService->GetMaterialSetCount() == 1
             && extendedService->GetMaterial().isShadeOn
             && extendedService->GetQualitySetCount() == 1
-            && extendedService->GetVolumeQuality().maxDimension == 512
-            && extendedService->GetGradientSetCount() == 1
-            && extendedService->GetGradientOpacity().empty()
-            && extendedService->GetTransferPresetSetCount() == 1
-            && extendedService->GetDenoiseSetCount() == 1
+            && extendedService->GetVolumeQuality()
+                == VolumeQuality::XHigh
+            && extendedService->GetVolumeTransferFunction()
+                .colorNodes.size() == 3
+            && extendedService->GetVolumeTransferFunction()
+                .opacityNodes.size() == 3
             && extendedFixture.GetSliceService()->GetViewSetCount() == 0,
-        "扩展字段必须映射到单一目标 service，空 gradient 表示显式清除。",
+        "材质、质量和完整 TF 必须映射到单一目标 service。",
         failureCount);
+
+    constexpr std::array qualityCases{
+        std::pair{ HostVolumeQuality::Auto, VolumeQuality::Auto },
+        std::pair{ HostVolumeQuality::Low, VolumeQuality::Low },
+        std::pair{ HostVolumeQuality::High, VolumeQuality::High },
+        std::pair{ HostVolumeQuality::XHigh, VolumeQuality::XHigh },
+        std::pair{ HostVolumeQuality::Ultra, VolumeQuality::Ultra }
+    };
+    for (const auto& [hostQuality, appQuality] : qualityCases) {
+        Fixture qualityMapFixture;
+        HostViewSetRequest qualityMap;
+        qualityMap.targetView.viewId = "primary";
+        qualityMap.mode = HostRenderMode::Volume;
+        qualityMap.volumeQuality = hostQuality;
+        SetExpect(
+            SendView(qualityMapFixture, std::move(qualityMap))
+                && qualityMapFixture.GetService()->GetVolumeQuality()
+                    == appQuality,
+            "五档 Host quality 必须无损映射到 App 枚举。",
+            failureCount);
+    }
 
     HostViewResetRequest reset;
     reset.targetView.viewId = "primary";
@@ -748,6 +680,71 @@ void StartToolCases(int& failureCount)
         failureCount);
 }
 
+HostVolumeTransferFunction GetVolumeTransferFunction()
+{
+    HostVolumeTransferFunction function;
+    function.colorNodes = {
+        { -1000.0, 0.0, 0.0, 0.0 },
+        { 500.0, 0.8, 0.6, 0.4 },
+        { 3000.0, 1.0, 1.0, 1.0 }
+    };
+    function.opacityNodes = {
+        { -1000.0, 0.0 },
+        { 250.0, 0.2 },
+        { 3000.0, 1.0 }
+    };
+    return function;
+}
+
+void StartTransferCases(int& failureCount)
+{
+    Fixture fixture;
+    const auto state = fixture.GetService();
+    auto function = GetVolumeTransferFunction();
+
+    HostViewSetRequest request;
+    request.targetView.viewId = "primary";
+    request.volumeTransferFunction = function;
+    SetExpect(fixture.Send(std::move(request))
+            && state->GetVolumeTransferFunction().colorNodes.size() == 3
+            && state->GetVolumeTransferFunction().opacityNodes.size() == 3,
+        "ViewSet 必须提交唯一的完整 scalar TF 快照。",
+        failureCount);
+
+    function.colorNodes[1].g = 0.2;
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.volumeTransferFunction = function;
+    SetExpect(fixture.Send(std::move(request))
+            && std::abs(
+                state->GetVolumeTransferFunction().colorNodes[1].g
+                    - 0.2) < 1e-12,
+        "新的完整 TF 快照必须整体替换。",
+        failureCount);
+
+    function.opacityNodes[1].opacity = 0.7;
+    function.opacityNodes[1].scalar =
+        function.opacityNodes[0].scalar;
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.volumeTransferFunction = function;
+    SetExpect(!fixture.Send(std::move(request))
+            && std::abs(
+                state->GetVolumeTransferFunction().opacityNodes[1].opacity
+                    - 0.2) < 1e-12,
+        "TF 重复 scalar 必须在 Router 边界整笔拒绝。",
+        failureCount);
+
+    function = GetVolumeTransferFunction();
+    function.colorNodes.resize(1);
+    request = HostViewSetRequest{};
+    request.targetView.viewId = "primary";
+    request.volumeTransferFunction = function;
+    SetExpect(!fixture.Send(std::move(request)),
+        "颜色或透明度少于两个节点必须拒绝。",
+        failureCount);
+}
+
 void StartContextCases(int& failureCount)
 {
     Fixture fixture;
@@ -802,6 +799,7 @@ int HostRouterSuite::GetFailCount() const
     int failureCount = 0;
     StartDataCases(failureCount);
     StartViewCases(failureCount);
+    StartTransferCases(failureCount);
     StartToolCases(failureCount);
     StartContextCases(failureCount);
     return failureCount;

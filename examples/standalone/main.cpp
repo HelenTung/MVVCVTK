@@ -4,17 +4,34 @@
 #include <vtkAutoInit.h>
 #endif
 #include <vtkSMPTools.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
+#include <vtkImageData.h>
+#include <vtkNew.h>
+#include <vtkProp.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
+#include <vtkWindowToImageFilter.h>
 
 #include "Host/CropHostFeature.h"
 #include "Host/GapHostFeature.h"
+#include "Host/HostFeature.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
+#include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -27,15 +44,564 @@ VTK_MODULE_INIT(vtkRenderingFreeType);
 
 namespace {
 
-std::vector<HostTransferNode> BuildVolumeTF()
-{
-    return {
-        { 0.00, 0.0, 0.75, 0.75, 0.75 },
-        { 0.50, 0.0, 0.75, 0.75, 0.75 },
-        { 0.85, 0.8, 0.75, 0.75, 0.75 },
-        { 1.00, 1.0, 0.75, 0.75, 0.75 }
+class DragAudit final {
+public:
+    bool Start(VtkAppHostSession& session)
+    {
+        constexpr std::array<std::string_view, 2> viewIds{
+            "primary-3d", "composite-volume"
+        };
+        bool isPassed = true;
+        for (const auto viewId : viewIds) {
+            const auto* endpoint =
+                session.GetRenderViewEndpoint(std::string(viewId));
+            isPassed = endpoint
+                && StartView(*endpoint)
+                && isPassed;
+        }
+        return isPassed;
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+
+    struct RenderProbe final {
+        std::optional<Clock::time_point> start;
+        std::vector<double> samplesMs;
     };
+
+    static void OnRender(
+        vtkObject* caller,
+        const unsigned long eventId,
+        void* clientData,
+        void*)
+    {
+        auto* probe = static_cast<RenderProbe*>(clientData);
+        auto* renderWindow = vtkRenderWindow::SafeDownCast(caller);
+        if (!probe || !renderWindow) return;
+        if (eventId == vtkCommand::StartEvent) {
+            probe->start = Clock::now();
+            return;
+        }
+        if (eventId != vtkCommand::EndEvent || !probe->start) {
+            return;
+        }
+        renderWindow->WaitForCompletion();
+        probe->samplesMs.push_back(
+            std::chrono::duration<double, std::milli>(
+                Clock::now() - *probe->start).count());
+        probe->start.reset();
+    }
+
+    static double GetPercentile(
+        std::vector<double> samples,
+        const double percentile)
+    {
+        if (samples.empty()) return 0.0;
+        std::sort(samples.begin(), samples.end());
+        const auto index = static_cast<std::size_t>(
+            std::clamp(percentile, 0.0, 1.0)
+            * static_cast<double>(samples.size() - 1));
+        return samples[index];
+    }
+
+    static std::vector<unsigned char> GetPixels(
+        const HostRenderViewEndpoint& endpoint)
+    {
+        if (!endpoint.renderWindow) return {};
+        endpoint.renderWindow->Render();
+        endpoint.renderWindow->WaitForCompletion();
+        vtkNew<vtkWindowToImageFilter> capture;
+        capture->SetInput(endpoint.renderWindow);
+        capture->SetInputBufferTypeToRGB();
+        capture->ReadFrontBufferOff();
+        capture->ShouldRerenderOff();
+        capture->Update();
+        auto* output = capture->GetOutput();
+        auto* pixels = output
+            ? static_cast<unsigned char*>(
+                output->GetScalarPointer())
+            : nullptr;
+        const vtkIdType valueCount = output
+            ? output->GetNumberOfPoints()
+                * output->GetNumberOfScalarComponents()
+            : 0;
+        return pixels && valueCount > 0
+            ? std::vector<unsigned char>(
+                pixels, pixels + valueCount)
+            : std::vector<unsigned char>{};
+    }
+
+    static bool GetVisualValid(
+        const std::vector<unsigned char>& background,
+        const std::vector<unsigned char>& pixels)
+    {
+        if (pixels.size() != background.size()
+            || pixels.size() < 3
+            || pixels.size() % 3 != 0) {
+            return false;
+        }
+
+        constexpr int signalThreshold = 8;
+        std::size_t signalPixelCount = 0;
+        for (std::size_t index = 0;
+            index < pixels.size(); index += 3) {
+            int pixelDifference = 0;
+            for (std::size_t component = 0;
+                component < 3; ++component) {
+                pixelDifference = std::max(
+                    pixelDifference,
+                    std::abs(
+                        static_cast<int>(pixels[index + component])
+                        - static_cast<int>(
+                            background[index + component])));
+            }
+            if (pixelDifference > signalThreshold) {
+                ++signalPixelCount;
+            }
+        }
+        const std::size_t pixelCount = pixels.size() / 3;
+        return signalPixelCount * 200 > pixelCount;
+    }
+
+    static bool StartView(const HostRenderViewEndpoint& endpoint)
+    {
+        if (!endpoint.renderer || !endpoint.renderWindow
+            || !endpoint.interactor) {
+            return false;
+        }
+
+        endpoint.renderer->ResetCamera();
+        const auto warmupStart = Clock::now();
+        constexpr int warmupCount = 2;
+        for (int index = 0; index < warmupCount; ++index) {
+            endpoint.renderWindow->Render();
+            endpoint.renderWindow->WaitForCompletion();
+        }
+        const double warmupMs =
+            std::chrono::duration<double, std::milli>(
+                Clock::now() - warmupStart).count();
+
+        std::vector<std::pair<vtkProp*, int>> propStates;
+        auto* props = endpoint.renderer->GetViewProps();
+        if (props) {
+            props->InitTraversal();
+            while (auto* prop = props->GetNextProp()) {
+                propStates.emplace_back(
+                    prop, prop->GetVisibility());
+                prop->VisibilityOff();
+            }
+        }
+        const auto backgroundPixels = GetPixels(endpoint);
+        for (const auto& propState : propStates) {
+            if (propState.first) {
+                propState.first->SetVisibility(propState.second);
+            }
+        }
+        const auto beforePixels = GetPixels(endpoint);
+
+        RenderProbe probe;
+        auto callback = vtkSmartPointer<vtkCallbackCommand>::New();
+        callback->SetClientData(&probe);
+        callback->SetCallback(&DragAudit::OnRender);
+        const unsigned long startTag =
+            endpoint.renderWindow->AddObserver(
+                vtkCommand::StartEvent, callback);
+        const unsigned long endTag =
+            endpoint.renderWindow->AddObserver(
+                vtkCommand::EndEvent, callback);
+        if (startTag == 0 || endTag == 0) {
+            if (startTag != 0) {
+                endpoint.renderWindow->RemoveObserver(startTag);
+            }
+            if (endTag != 0) {
+                endpoint.renderWindow->RemoveObserver(endTag);
+            }
+            callback->SetClientData(nullptr);
+            return false;
+        }
+
+        const int* windowSize = endpoint.renderWindow->GetSize();
+        const int centerX = windowSize ? windowSize[0] / 2 : 300;
+        const int centerY = windowSize ? windowSize[1] / 2 : 300;
+        endpoint.interactor->SetEventPosition(centerX, centerY);
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::LeftButtonPressEvent);
+        probe.samplesMs.clear();
+        probe.start.reset();
+        constexpr int dragSamples = 30;
+        for (int index = 0; index < dragSamples; ++index) {
+            endpoint.interactor->SetEventPosition(
+                centerX + 4 + index % 10 * 3,
+                centerY + 3 + index % 7 * 2);
+            endpoint.interactor->InvokeEvent(
+                vtkCommand::MouseMoveEvent);
+        }
+        const auto dragSamplesMs = probe.samplesMs;
+        endpoint.renderWindow->RemoveObserver(startTag);
+        endpoint.renderWindow->RemoveObserver(endTag);
+        callback->SetClientData(nullptr);
+
+        const auto duringPixels = GetPixels(endpoint);
+        endpoint.interactor->InvokeEvent(
+            vtkCommand::LeftButtonReleaseEvent);
+        const auto afterPixels = GetPixels(endpoint);
+
+        const double p50Ms = GetPercentile(dragSamplesMs, 0.50);
+        const double p95Ms = GetPercentile(dragSamplesMs, 0.95);
+        const double maxMs = GetPercentile(dragSamplesMs, 1.00);
+        const bool isBeforeVisible =
+            GetVisualValid(backgroundPixels, beforePixels);
+        const bool isDuringVisible =
+            GetVisualValid(backgroundPixels, duringPixels);
+        const bool isAfterVisible =
+            GetVisualValid(backgroundPixels, afterPixels);
+        const bool isRenderValid =
+            dragSamplesMs.size()
+                >= static_cast<std::size_t>(dragSamples)
+            && p95Ms > 0.0
+            && p95Ms <= 33.0;
+        const bool isVisualValid = isBeforeVisible
+            && isDuringVisible && isAfterVisible;
+        std::cout
+            << "AUDIT_DRAG: view=" << endpoint.id
+            << " warmup_ms=" << warmupMs
+            << " samples=" << dragSamplesMs.size()
+            << " p50_ms=" << p50Ms
+            << " p95_ms=" << p95Ms
+            << " max_ms=" << maxMs
+            << " visible=" << isBeforeVisible << ','
+            << isDuringVisible << ',' << isAfterVisible
+            << " render_ok=" << isRenderValid
+            << " visual_ok=" << isVisualValid
+            << '\n';
+        return isRenderValid && isVisualValid;
+    }
+};
+
+bool GetArgFound(
+    const int argc,
+    char* argv[],
+    const std::string_view expected)
+{
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] && expected == argv[index]) return true;
+    }
+    return false;
 }
+
+class MainControlFeature final
+    : public HostFeature,
+      public std::enable_shared_from_this<MainControlFeature> {
+public:
+    MainControlFeature(
+        VtkAppHostSession& session,
+        HostViewTarget target,
+        HostViewTargets inputViews)
+        : m_session(session),
+          m_target(std::move(target)),
+          m_inputViews(std::move(inputViews)),
+          m_keys{
+              HostKeyChord{ 'c' },
+              HostKeyChord{ 'c', {}, false, false, true },
+              HostKeyChord{ 'v' },
+              HostKeyChord{ 'v', {}, false, false, true },
+              HostKeyChord{ 'l' },
+              HostKeyChord{ 'l', {}, false, false, true }
+          }
+    {
+    }
+
+    std::string_view GetFeatureId() const noexcept override
+    {
+        return featureId;
+    }
+
+    bool AttachHost(const HostFeatureContext& context) override
+    {
+        if (m_isAttached || !context.host) return false;
+        const auto weakOwner = weak_from_this();
+        if (weakOwner.expired()) return false;
+
+        m_host = context.host;
+        HostInputBinding binding;
+        binding.featureId = std::string(featureId);
+        binding.targetViews = m_inputViews;
+        binding.onInput = [weakOwner](
+            const InteractionEvent& event) {
+            const auto owner = weakOwner.lock();
+            return owner
+                ? owner->OnInput(event)
+                : InteractionResult{};
+        };
+        if (!m_host->AttachInput(std::move(binding))) {
+            m_host.reset();
+            return false;
+        }
+        m_isAttached = true;
+        return true;
+    }
+
+    bool DetachHost() override
+    {
+        if (!m_isAttached) return true;
+        if (m_host
+            && !m_host->DetachInput(featureId)) {
+            return false;
+        }
+        m_isKeyDown.fill(false);
+        m_host.reset();
+        m_isAttached = false;
+        return true;
+    }
+
+    bool OnHostTick() override
+    {
+        return true;
+    }
+
+private:
+    enum class ControlAction : std::uint8_t {
+        ColorUp,
+        ColorDown,
+        OpacityUp,
+        OpacityDown,
+        QualityNext,
+        QualityPrevious,
+        Count
+    };
+
+    static constexpr std::string_view featureId =
+        "main.tf-quality-controls";
+    static constexpr std::size_t actionCount =
+        static_cast<std::size_t>(ControlAction::Count);
+
+    static bool GetCharMatched(
+        const InteractionEvent& event,
+        const char keyCode)
+    {
+        if (keyCode == 0) return false;
+        const char upper = keyCode >= 'a' && keyCode <= 'z'
+            ? static_cast<char>(keyCode - 'a' + 'A')
+            : keyCode;
+        return event.keyCode == keyCode
+            || event.keyCode == upper
+            || event.keySym == std::string(1, keyCode)
+            || event.keySym == std::string(1, upper);
+    }
+
+    static bool GetChordMatched(
+        const InteractionEvent& event,
+        const HostKeyChord& chord)
+    {
+        const bool hasKey = GetCharMatched(
+            event, chord.keyCode)
+            || (!chord.keySym.empty()
+                && event.keySym == chord.keySym);
+        return hasKey
+            && event.isCtrlDown == chord.isCtrlDown
+            && event.isAltDown == chord.isAltDown
+            && event.isShiftDown == chord.isShiftDown;
+    }
+
+    std::optional<ControlAction> GetAction(
+        const InteractionEvent& event) const
+    {
+        for (std::size_t index = 0;
+            index < m_keys.size(); ++index) {
+            if (GetChordMatched(event, m_keys[index])) {
+                return static_cast<ControlAction>(index);
+            }
+        }
+        return std::nullopt;
+    }
+
+    static std::size_t GetEditIndex(
+        const std::size_t nodeCount)
+    {
+        return nodeCount > 2 ? nodeCount - 2 : nodeCount - 1;
+    }
+
+    bool SendViewRequest(HostViewSetRequest request)
+    {
+        // ViewSet 是传输函数和质量偏好的唯一同步写入入口。
+        return m_session.SendRequest(std::move(request));
+    }
+
+    bool SetTransfer(const ControlAction action)
+    {
+        const auto state =
+            m_session.GetRenderViewState(m_target);
+        if (!state) return false;
+
+        const auto& current =
+            state->volumeTransferFunction;
+        auto next = current;
+        std::string_view valueName;
+        double nextValue = 0.0;
+        switch (action) {
+        case ControlAction::ColorUp:
+        case ControlAction::ColorDown: {
+            if (next.colorNodes.empty()) return false;
+            auto& node = next.colorNodes[
+                GetEditIndex(next.colorNodes.size())];
+            const double delta =
+                action == ControlAction::ColorUp ? 0.05 : -0.05;
+            nextValue = std::clamp(node.r + delta, 0.0, 1.0);
+            if (nextValue == node.r) return true;
+            node.r = nextValue;
+            valueName = "color.r";
+            break;
+        }
+        case ControlAction::OpacityUp:
+        case ControlAction::OpacityDown: {
+            if (next.opacityNodes.empty()) return false;
+            auto& node = next.opacityNodes[
+                GetEditIndex(next.opacityNodes.size())];
+            const double delta =
+                action == ControlAction::OpacityUp ? 0.05 : -0.05;
+            nextValue = std::clamp(
+                node.opacity + delta, 0.0, 1.0);
+            if (nextValue == node.opacity) return true;
+            node.opacity = nextValue;
+            valueName = "opacity";
+            break;
+        }
+        default:
+            return false;
+        }
+
+        HostViewSetRequest request;
+        request.targetView = m_target;
+        request.volumeTransferFunction = std::move(next);
+        if (!SendViewRequest(std::move(request))) {
+            return false;
+        }
+        std::cout << "[TF] " << valueName
+            << '=' << nextValue << '\n';
+        return true;
+    }
+
+    static std::size_t GetQualityIndex(
+        const HostVolumeQuality quality)
+    {
+        constexpr std::array<HostVolumeQuality, 5> qualities{
+            HostVolumeQuality::Auto,
+            HostVolumeQuality::Low,
+            HostVolumeQuality::High,
+            HostVolumeQuality::XHigh,
+            HostVolumeQuality::Ultra
+        };
+        const auto found = std::find(
+            qualities.begin(), qualities.end(), quality);
+        return found != qualities.end()
+            ? static_cast<std::size_t>(found - qualities.begin())
+            : 0;
+    }
+
+    bool SwitchQuality(const int direction)
+    {
+        const auto state =
+            m_session.GetRenderViewState(m_target);
+        if (!state || (direction != -1 && direction != 1)) {
+            return false;
+        }
+
+        constexpr std::array<HostVolumeQuality, 5> qualities{
+            HostVolumeQuality::Auto,
+            HostVolumeQuality::Low,
+            HostVolumeQuality::High,
+            HostVolumeQuality::XHigh,
+            HostVolumeQuality::Ultra
+        };
+        constexpr std::array<std::string_view, 5> qualityNames{
+            "Auto", "Low", "High", "XHigh", "Ultra"
+        };
+        const int currentIndex = static_cast<int>(
+            GetQualityIndex(state->volumeQuality));
+        const int nextIndex = (
+            currentIndex + direction
+            + static_cast<int>(qualities.size()))
+            % static_cast<int>(qualities.size());
+
+        HostViewSetRequest request;
+        request.targetView = m_target;
+        request.volumeQuality =
+            qualities[static_cast<std::size_t>(nextIndex)];
+        if (!SendViewRequest(std::move(request))) return false;
+
+        std::cout << "[Quality] "
+            << qualityNames[static_cast<std::size_t>(nextIndex)]
+            << '\n';
+        return true;
+    }
+
+    bool SendControl(const ControlAction action)
+    {
+        switch (action) {
+        case ControlAction::ColorUp:
+        case ControlAction::ColorDown:
+        case ControlAction::OpacityUp:
+        case ControlAction::OpacityDown:
+            return SetTransfer(action);
+        case ControlAction::QualityNext:
+            return SwitchQuality(1);
+        case ControlAction::QualityPrevious:
+            return SwitchQuality(-1);
+        default:
+            return false;
+        }
+    }
+
+    InteractionResult OnInput(
+        const InteractionEvent& event)
+    {
+        const auto action = GetAction(event);
+        if (!action) return {};
+        const auto index = static_cast<std::size_t>(*action);
+
+        if (event.eventKind
+            == InteractionEventKind::KeyRelease) {
+            const bool wasDown = m_isKeyDown[index];
+            m_isKeyDown[index] = false;
+            return wasDown
+                ? InteractionResult{ true, true }
+                : InteractionResult{};
+        }
+        if (event.eventKind
+            == InteractionEventKind::TextInput) {
+            return m_isKeyDown[index]
+                ? InteractionResult{ true, true }
+                : InteractionResult{};
+        }
+        if (event.eventKind
+            != InteractionEventKind::KeyPress) {
+            return {};
+        }
+        if (m_isKeyDown[index]) {
+            return { true, true };
+        }
+
+        m_isKeyDown[index] = true;
+        const bool isSucceeded = SendControl(*action);
+        return {
+            true,
+            true,
+            isSucceeded,
+            isSucceeded
+                ? InteractionFailureReason::None
+                : InteractionFailureReason::StateRejected
+        };
+    }
+
+    VtkAppHostSession& m_session;
+    HostViewTarget m_target;
+    HostViewTargets m_inputViews;
+    std::array<HostKeyChord, actionCount> m_keys;
+    std::array<bool, actionCount> m_isKeyDown{};
+    std::shared_ptr<FeatureHostControl> m_host;
+    bool m_isAttached = false;
+};
 
 HostRenderViewConfig BuildView(
     std::string id,
@@ -53,7 +619,6 @@ HostRenderViewConfig BuildView(
 
 std::vector<HostRenderViewConfig> BuildViews()
 {
-    const auto transferNodes = BuildVolumeTF();
     HostWindowConfig composite;
     composite.title = "Window E: Composite Volume";
     composite.width = 600;
@@ -62,8 +627,6 @@ std::vector<HostRenderViewConfig> BuildViews()
     composite.posY = 50;
     composite.viewInit.viewMode =
         HostRenderMode::CompositeVolume;
-    composite.viewInit.transferNodes = transferNodes;
-    composite.viewInit.hasTransferNodes = true;
     composite.viewInit.background = { 0.08, 0.08, 0.12 };
     composite.viewInit.hasBackground = true;
 
@@ -218,7 +781,7 @@ GapHostConfig GetGapConfig(
 
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
     // 后端切换和初始化都不是线程安全 API；必须在任何 Feature worker 启动前完成。
     // 构建若未包含 STDThread，则显式回退 Sequential，保持功能可用。
@@ -241,6 +804,18 @@ int main()
         return 1;
     }
 
+    const HostViewTarget volumeTarget{
+        "composite-volume",
+        false,
+        HostRenderViewRole::Composite3D
+    };
+    HostViewSetRequest qualityRequest;
+    qualityRequest.targetView = volumeTarget;
+    qualityRequest.volumeQuality = HostVolumeQuality::High;
+    if (!session.SendRequest(std::move(qualityRequest))) {
+        return 1;
+    }
+
     std::vector<std::shared_ptr<HostFeature>> features;
     features.push_back(
         std::make_shared<CropHostFeature>(
@@ -248,6 +823,13 @@ int main()
     features.push_back(
         std::make_shared<GapHostFeature>(
             GetGapConfig(allViews)));
+    HostViewTargets controlViews;
+    controlViews.viewIds.push_back(volumeTarget.viewId);
+    features.push_back(
+        std::make_shared<MainControlFeature>(
+            session,
+            volumeTarget,
+            std::move(controlViews)));
     std::size_t attachedCount = 0;
     bool isTimerAttached = false;
     bool isHotkeyAttached = false;
@@ -311,6 +893,11 @@ int main()
     }
     isHotkeyAttached = true;
 
+    const bool isDragAudit = GetArgFound(
+        argc, argv, "--drag-audit");
+    bool isAuditComplete = false;
+    bool isAuditPassed = false;
+
     HostLoadRequest load;
     load.filePath = "F:\\data\\1000x1000x1000.raw";
     load.geometry.dimensions = { 1000, 1000, 1000 };
@@ -319,12 +906,29 @@ int main()
     load.geometry.origin = { 0.0f, 0.0f, 0.0f };
     if (!session.SendRequestResult(
             std::move(load),
-            [](HostResult) {})) {
+            [&](HostResult result) {
+                if (!isDragAudit) return;
+                isAuditPassed = result.isSucceeded
+                    && DragAudit{}.Start(session);
+                isAuditComplete = true;
+                const auto* loopEndpoint =
+                    session.GetRenderViewEndpoint(
+                        "slice-top-down");
+                if (loopEndpoint && loopEndpoint->interactor) {
+                    loopEndpoint->interactor->TerminateApp();
+                }
+            })) {
         if (!clearAttached()) {
             return 23;
         }
         return 5;
     }
+
+    std::cout
+        << "TF/quality controls for composite-volume:\n"
+        << "  C / Shift+C: color red +/- 0.05\n"
+        << "  V / Shift+V: opacity +/- 0.05\n"
+        << "  L / Shift+L: next / previous quality tier\n";
 
     const bool isStarted = session.Start();
     const bool isCleared = clearAttached();
@@ -332,5 +936,10 @@ int main()
         return 24;
     }
     features.clear();
-    return isStarted ? 0 : 6;
+    if (!isStarted) return 6;
+    if (isDragAudit
+        && (!isAuditComplete || !isAuditPassed)) {
+        return 7;
+    }
+    return 0;
 }

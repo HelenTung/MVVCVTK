@@ -17,15 +17,29 @@
 
 bool HistogramConverter::SetBinCount(int binCount)
 {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (binCount <= 0) {
         return false;
     }
+    if (m_binCount == binCount) return true;
     m_binCount = binCount;
+    m_cachedInput = nullptr;
+    m_cachedFrequencies.clear();
+    m_cachedMTime = 0;
+    m_cachedScalarMTime = 0;
+    m_cachedBinCount = 0;
     return true;
+}
+
+std::uint64_t HistogramConverter::GetBuildCount() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_buildCount;
 }
 
 vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkImageData> input) {
     if (!input) return nullptr;
+    std::lock_guard<std::mutex> lock(m_mutex);
     double range[2], binWidth;
     vtkIdType* frequencies = GetHistogramBuffer(input, range, binWidth);
     if (!frequencies) return nullptr;
@@ -53,16 +67,24 @@ vtkSmartPointer<vtkTable> HistogramConverter::GetOutputData(vtkSmartPointer<vtkI
 
 void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, const std::string& filePath) {
     if (!input) return;
-    double range[2], binWidth;
-    // 复用 GetHistogramBuffer 持有的 accumulate 管线；输入未修改时由 VTK 跳过重复计算。
-    vtkIdType* freqs = GetHistogramBuffer(input, range, binWidth);
-    if (!freqs) return;
-
-    std::vector<double> logHist(m_binCount);
+    int binCount = 0;
+    std::vector<double> logHist;
     double maxLog = 0.0;
-    for (int i = 0; i < m_binCount; ++i) {
-        logHist[i] = std::log(static_cast<double>(freqs[i]) + 1.0);
-        if (logHist[i] > maxLog) maxLog = logHist[i];
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        double range[2], binWidth;
+        // 复用频率缓存；复制对数表后释放锁，不把文件写出纳入缓存临界区。
+        vtkIdType* freqs = GetHistogramBuffer(input, range, binWidth);
+        if (!freqs) return;
+        binCount = m_binCount;
+        logHist.resize(static_cast<std::size_t>(binCount));
+        for (int i = 0; i < binCount; ++i) {
+            logHist[static_cast<std::size_t>(i)] =
+                std::log(static_cast<double>(freqs[i]) + 1.0);
+            if (logHist[static_cast<std::size_t>(i)] > maxLog) {
+                maxLog = logHist[static_cast<std::size_t>(i)];
+            }
+        }
     }
 
     //  800x600 绘图画布大小
@@ -74,7 +96,7 @@ void HistogramConverter::ExportHistogram(vtkSmartPointer<vtkImageData> input, co
 
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
-            int binIdx = (x * m_binCount) / W;
+            int binIdx = (x * binCount) / W;
             int h_limit = static_cast<int>((logHist[binIdx] / (maxLog > 0.0 ? maxLog : 1.0)) * H * 0.9);
             unsigned char* pix = ptr + (y * W + x) * 3;
 
@@ -120,6 +142,7 @@ std::optional<double> HistogramConverter::GetHistogramPercentile(
     if (!std::isfinite(quantile) || quantile < 0.0 || quantile > 1.0) {
         return std::nullopt;
     }
+    std::lock_guard<std::mutex> lock(m_mutex);
 
     double range[2] = { 0.0, 0.0 };
     double binWidth = 0.0;
@@ -165,6 +188,19 @@ vtkIdType* HistogramConverter::GetHistogramBuffer(vtkImageData* input, double ou
         return nullptr;
     }
 
+    auto* inputScalars = input->GetPointData()->GetScalars();
+    if (m_cachedInput.GetPointer() == input
+        && m_cachedMTime == input->GetMTime()
+        && m_cachedScalarMTime == inputScalars->GetMTime()
+        && m_cachedBinCount == m_binCount
+        && m_cachedFrequencies.size()
+            == static_cast<std::size_t>(m_binCount)) {
+        outRange[0] = m_cachedRange[0];
+        outRange[1] = m_cachedRange[1];
+        outBinWidth = m_cachedBinWidth;
+        return m_cachedFrequencies.data();
+    }
+
     input->GetScalarRange(outRange);
     if (!std::isfinite(outRange[0]) || !std::isfinite(outRange[1])
         || outRange[1] < outRange[0]) {
@@ -187,18 +223,32 @@ vtkIdType* HistogramConverter::GetHistogramBuffer(vtkImageData* input, double ou
         outBinWidth = 0.0;
     }
 
-    // 流式连接：input 没变时 VTK pipeline 不会重复计算
-    if (!m_accumulate)
-		m_accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
-    m_accumulate->SetInputData(input);
-    m_accumulate->SetComponentExtent(0, m_binCount - 1, 0, 0, 0, 0);
-    m_accumulate->SetComponentOrigin(outRange[0], 0, 0);
-    m_accumulate->SetComponentSpacing(binSpacing, 0, 0);
-    m_accumulate->Update();
+    // cache miss 才扫描整卷；频率表复制后立即释放 VTK pipeline，避免缓存滞留旧体数据。
+    auto accumulate = vtkSmartPointer<vtkImageAccumulate>::New();
+    accumulate->SetInputData(input);
+    accumulate->SetComponentExtent(
+        0, m_binCount - 1, 0, 0, 0, 0);
+    accumulate->SetComponentOrigin(outRange[0], 0, 0);
+    accumulate->SetComponentSpacing(binSpacing, 0, 0);
+    accumulate->Update();
 
-    if (!m_accumulate->GetOutput() || !m_accumulate->GetOutput()->GetPointData() || !m_accumulate->GetOutput()->GetPointData()->GetScalars()) {
+    auto* output = accumulate->GetOutput();
+    auto* outputScalars = output && output->GetPointData()
+        ? output->GetPointData()->GetScalars() : nullptr;
+    auto* frequencies = outputScalars
+        ? static_cast<vtkIdType*>(output->GetScalarPointer()) : nullptr;
+    if (!frequencies) {
         return nullptr;
     }
 
-    return static_cast<vtkIdType*>(m_accumulate->GetOutput()->GetScalarPointer());
+    m_cachedFrequencies.assign(
+        frequencies, frequencies + m_binCount);
+    m_cachedInput = input;
+    m_cachedMTime = input->GetMTime();
+    m_cachedScalarMTime = inputScalars->GetMTime();
+    m_cachedBinCount = m_binCount;
+    m_cachedRange = { outRange[0], outRange[1] };
+    m_cachedBinWidth = outBinWidth;
+    ++m_buildCount;
+    return m_cachedFrequencies.data();
 }

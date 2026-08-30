@@ -4,7 +4,7 @@
 // GapAnalysisService.h - GapAnalysis 插件编排服务
 // =====================================================================
 
-#include "App/AppTypes.h"
+#include "App/ViewTypes.h"
 #include "GapAnalysisTypes.h"
 
 #include <functional>

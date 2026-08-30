@@ -15,3 +15,10 @@ enum class ToolMode {
     Navigation,         // 默认漫游/切片浏览
     ModelTransform      // 模型变换（旋转/缩放/平移）
 };
+
+// 切片法线轴：Top_down(0,0,1)、Front_back(0,1,0)、Left_right(1,0,0)。
+enum class Orientation {
+    Top_down = 2,
+    Front_back = 1,
+    Left_right = 0
+};

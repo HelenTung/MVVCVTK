@@ -85,8 +85,8 @@ private:
     struct GapOverlayBinding {
         // 已挂载 overlay 的宿主 service 共享 owner；SetOverlayOff 用它执行 Remove 后清空 binding。
         std::shared_ptr<OverlayService> service;
-        // 与 service 中同一策略实例的共享 owner，确保 RemoveOverlayStrategy 前对象仍有效。
-        std::shared_ptr<AbstractVisualStrategy> overlayStrategy;
+        // 与 service 中同一 overlay 实例的共享 owner，确保 RemoveOverlay 前对象仍有效。
+        std::shared_ptr<FeatureOverlay> overlay;
     };
 
     void SetCompletionCallback(std::function<void(bool)> callback);
@@ -710,7 +710,7 @@ bool GapAnalysisService::Impl::StartView(
         }
     }
 
-    // worker 已被接纳；RemoveOverlayStrategy 的 noexcept 契约保证旧 overlay 清理不会重新
+    // worker 已被接纳；RemoveOverlay 的 noexcept 契约保证旧 overlay 清理不会重新
     // 打开异常出口，因此从这里开始可以连续提交新会话且不再返回 false。
     SetOverlayOff();
     {
@@ -999,10 +999,10 @@ bool GapAnalysisService::Impl::SetDisplayView() {
 bool GapAnalysisService::Impl::SetOverlayOff() noexcept {
     bool hasRemoved = false;
     for (const auto& binding : m_displayOverlayBindings) {
-        if (!binding.service || !binding.overlayStrategy) {
+        if (!binding.service || !binding.overlay) {
             continue;
         }
-        binding.service->RemoveOverlayStrategy(binding.overlayStrategy);
+        binding.service->RemoveOverlay(binding.overlay);
         hasRemoved = true;
     }
     m_displayOverlayBindings.clear();
@@ -1027,9 +1027,10 @@ bool GapAnalysisService::Impl::SetStoredView() {
             }
             auto overlay = std::make_shared<GapMeshOverlayStrategy>();
             overlay->SetInputData(m_displayVoidMesh);
-            service->AttachOverlayStrategy(overlay);
-            m_displayOverlayBindings.push_back({ service, overlay });
-            hasMeshAdded = true;
+            if (service->AttachOverlay(overlay)) {
+                m_displayOverlayBindings.push_back({ service, overlay });
+                hasMeshAdded = true;
+            }
         }
     }
 
@@ -1040,9 +1041,10 @@ bool GapAnalysisService::Impl::SetStoredView() {
             }
             auto overlay = std::make_shared<GapSliceOverlayStrategy>(target.first);
             overlay->SetInputData(m_displayLabelImage);
-            target.second->AttachOverlayStrategy(overlay);
-            m_displayOverlayBindings.push_back({ target.second, overlay });
-            hasSliceAdded = true;
+            if (target.second->AttachOverlay(overlay)) {
+                m_displayOverlayBindings.push_back({ target.second, overlay });
+                hasSliceAdded = true;
+            }
         }
     }
 

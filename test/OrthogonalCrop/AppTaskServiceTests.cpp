@@ -5,6 +5,7 @@
 #include "AppStateEvents.h"
 #include "App/Services/AppServiceFactory.h"
 #include "App/Services/AppPorts.h"
+#include "Data/DataConverters.h"
 #include "Data/DataManager.h"
 #include "Data/VolumeTypes.h"
 #include "Host/HostCommandRouter.h"
@@ -129,7 +130,7 @@ public:
     {
     }
 
-    void SetVisualState(
+    bool SetVisualState(
         const RenderParams& params,
         const UpdateFlags flags) override
     {
@@ -138,11 +139,34 @@ public:
             m_capture->flags = flags;
             ++m_capture->setCount;
         }
-        VolumeStrategy::SetVisualState(params, flags);
+        return VolumeStrategy::SetVisualState(params, flags);
     }
 
 private:
     std::shared_ptr<VisualStateCapture> m_capture;
+};
+
+class RejectQualityStrategy final : public VolumeStrategy {
+public:
+    explicit RejectQualityStrategy(
+        std::shared_ptr<std::atomic<int>> rejectCount)
+        : m_rejectCount(std::move(rejectCount))
+    {
+    }
+
+    bool SetVisualState(
+        const RenderParams& params,
+        const UpdateFlags flags) override
+    {
+        if (flags == UpdateFlags::Quality) {
+            if (m_rejectCount) ++(*m_rejectCount);
+            return false;
+        }
+        return VolumeStrategy::SetVisualState(params, flags);
+    }
+
+private:
+    std::shared_ptr<std::atomic<int>> m_rejectCount;
 };
 
 class DataStub final : public AbstractDataManager {
@@ -388,10 +412,16 @@ void StartExportSnapshot(int& failureCount)
     };
     state->SetModelMatrix(firstMatrix);
     state->SetScalarRange(0.0, 9.0);
-    viewState->SetTFNodes({
-        { 0.0, 1.0, 0.0, 1.0, 0.0 },
-        { 1.0, 1.0, 0.0, 1.0, 1.0 }
-    });
+    VolumeTransferFunction firstTransfer;
+    firstTransfer.colorNodes = {
+        { 0.0, 0.0, 1.0, 0.0 },
+        { 9.0, 0.0, 1.0, 1.0 }
+    };
+    firstTransfer.opacityNodes = {
+        { 0.0, 1.0 },
+        { 9.0, 1.0 }
+    };
+    (void)viewState->SetVolumeTransferFunction(firstTransfer);
     AppDataExportTaskService service(
         dataManager, state, viewState);
     auto task = service.BuildDataTask(
@@ -410,10 +440,16 @@ void StartExportSnapshot(int& failureCount)
         0.0, 0.0, 0.0, 1.0
     });
     state->SetScalarRange(-10.0, 10.0);
-    viewState->SetTFNodes({
-        { 0.0, 1.0, 1.0, 0.0, 0.0 },
-        { 1.0, 1.0, 0.0, 0.0, 1.0 }
-    });
+    VolumeTransferFunction secondTransfer;
+    secondTransfer.colorNodes = {
+        { -10.0, 1.0, 0.0, 0.0 },
+        { 10.0, 0.0, 0.0, 1.0 }
+    };
+    secondTransfer.opacityNodes = {
+        { -10.0, 1.0 },
+        { 10.0, 1.0 }
+    };
+    (void)viewState->SetVolumeTransferFunction(secondTransfer);
 
     SetExpect(task.has_value(),
         "data export task should accept a valid snapshot",
@@ -433,9 +469,12 @@ void StartExportSnapshot(int& failureCount)
                 == std::array<double, 2>{ 0.0, 9.0 }
             && dataManager->exportedParams.modelToWorld
                 == firstMatrix
-            && dataManager->exportedParams.tfNodes.size() == 2
-            && dataManager->exportedParams.tfNodes[0].g == 1.0
-            && dataManager->exportedParams.tfNodes[1].b == 1.0,
+            && dataManager->exportedParams
+                .volumeTransferFunction.colorNodes.size() == 2
+            && dataManager->exportedParams
+                .volumeTransferFunction.colorNodes[0].g == 1.0
+            && dataManager->exportedParams
+                .volumeTransferFunction.colorNodes[1].b == 1.0,
         "data export must preserve target and admission-time snapshots",
         failureCount);
 }
@@ -616,9 +655,13 @@ void StartExportFiles(int& failureCount)
     params.isoValue = 2.5;
     params.modelToWorld = modelToWorld;
     params.scalarRange = { 0.0, 9.0 };
-    params.tfNodes = {
-        { 0.0, 1.0, 0.0, 1.0, 0.0 },
-        { 1.0, 1.0, 0.0, 1.0, 1.0 }
+    params.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.0, 1.0, 0.0 },
+        { 9.0, 0.0, 1.0, 1.0 }
+    };
+    params.volumeTransferFunction.opacityNodes = {
+        { 0.0, 1.0 },
+        { 9.0, 1.0 }
     };
 
     const auto plyPath =
@@ -894,7 +937,7 @@ void StartExportFiles(int& failureCount)
         failureCount);
 
     params.extension = ".ply";
-    params.tfNodes.clear();
+    params.volumeTransferFunction.colorNodes.clear();
     const bool isGrayPlySaved = dataManager.ExportData(
         snapshot, outputDir.u8string(), params);
     auto grayPlyReader =
@@ -927,9 +970,13 @@ void StartExportFiles(int& failureCount)
         "PLY should use a scalar-range grayscale fallback when no TF is frozen",
         failureCount);
 
-    params.tfNodes = {
-        { 0.0, 1.0, 0.0, 1.0, 0.0 },
-        { 1.0, 1.0, 0.0, 1.0, 1.0 }
+    params.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.0, 1.0, 0.0 },
+        { 9.0, 0.0, 1.0, 1.0 }
+    };
+    params.volumeTransferFunction.opacityNodes = {
+        { 0.0, 1.0 },
+        { 9.0, 1.0 }
     };
     params.extension = ".raw";
     const bool isRawSaved = dataManager.ExportData(
@@ -1058,9 +1105,13 @@ void StartExportFiles(int& failureCount)
     DataExportParams invalidRangeParams = params;
     invalidRangeParams.scalarRange = { 9.0, 0.0 };
     DataExportParams invalidTfParams = params;
-    invalidTfParams.tfNodes = {
-        { 0.8, 1.0, 0.0, 1.0, 0.0 },
-        { 0.2, 1.0, 0.0, 1.0, 1.0 }
+    invalidTfParams.volumeTransferFunction.colorNodes = {
+        { 8.0, 0.0, 1.0, 0.0 },
+        { 2.0, 0.0, 1.0, 1.0 }
+    };
+    invalidTfParams.volumeTransferFunction.opacityNodes = {
+        { 8.0, 1.0 },
+        { 2.0, 1.0 }
     };
     SetExpect(
         !dataManager.ExportData(
@@ -1296,10 +1347,12 @@ void StartCandidateParams(int& failureCount)
     state->SetCursorAxis(2);
 
     auto capture = std::make_shared<VisualStateCapture>();
+    auto sharedHistogram = std::make_shared<HistogramConverter>();
     AppServiceArgs args;
     args.dataManager = dataManager;
     args.interactionState = state;
     args.eventSource = broadcaster;
+    args.histogram = sharedHistogram;
     args.strategyCreate = [capture](VizMode)
         -> std::shared_ptr<AbstractVisualStrategy> {
         return std::make_shared<CaptureVisualStrategy>(capture);
@@ -1337,6 +1390,31 @@ void StartCandidateParams(int& failureCount)
     const TrustedImageSnapshot snapshot = imageState;
     const bool isBuilt = ports.dataStage
         && ports.dataStage->BuildDataStage(snapshot);
+    auto secondCapture = std::make_shared<VisualStateCapture>();
+    AppServiceArgs secondArgs;
+    secondArgs.dataManager = dataManager;
+    secondArgs.interactionState = state;
+    secondArgs.eventSource = broadcaster;
+    secondArgs.histogram = sharedHistogram;
+    secondArgs.strategyCreate = [secondCapture](VizMode)
+        -> std::shared_ptr<AbstractVisualStrategy> {
+        return std::make_shared<CaptureVisualStrategy>(secondCapture);
+    };
+    auto secondPorts = CreateAppPorts(std::move(secondArgs));
+    auto secondRenderer = vtkSmartPointer<vtkRenderer>::New();
+    auto secondWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    secondWindow->SetOffScreenRendering(1);
+    secondWindow->SetSize(32, 32);
+    secondWindow->AddRenderer(secondRenderer);
+    const bool isSecondBound = secondPorts.renderBind
+        && secondPorts.renderBind->SetRenderTarget(
+            secondWindow, secondRenderer);
+    const bool isSecondBuilt = secondPorts.dataStage
+        && secondPorts.dataStage->BuildDataStage(snapshot);
+    const bool isHistogramSkipped = sharedHistogram
+        && sharedHistogram->GetBuildCount() == 0;
+    const bool isSecondCleared = secondPorts.dataStage
+        && secondPorts.dataStage->ClearDataStage();
     const bool hasNextParams = capture->setCount > 0
         && capture->flags == UpdateFlags::All
         && capture->params.scalarRange[0] == -3.0
@@ -1347,7 +1425,26 @@ void StartCandidateParams(int& failureCount)
             == std::array<double, 3>{ 1.0, 1.5, 2.0 }
         && capture->params.cursorAxis == -1
         && capture->params.windowLevel.windowWidth == 8.0
-        && capture->params.windowLevel.windowCenter == 1.0;
+        && capture->params.windowLevel.windowCenter == 1.0
+        && capture->params.volumeTransferFunction.colorNodes.size() == 4
+        && capture->params.volumeTransferFunction.opacityNodes.size() == 4
+        && capture->params.volumeTransferFunction.colorNodes[0].scalar
+            == -3.0
+        && capture->params.volumeTransferFunction.colorNodes[1].scalar
+            == 1.0
+        && std::abs(
+            capture->params.volumeTransferFunction.colorNodes[2].scalar
+                - 3.8) < 1e-12
+        && capture->params.volumeTransferFunction.colorNodes[3].scalar
+            == 5.0
+        && capture->params.volumeTransferFunction.opacityNodes[0].opacity
+            == 0.0
+        && capture->params.volumeTransferFunction.opacityNodes[1].opacity
+            == 0.0
+        && capture->params.volumeTransferFunction.opacityNodes[2].opacity
+            == 0.8
+        && capture->params.volumeTransferFunction.opacityNodes[3].opacity
+            == 1.0;
     const bool isSharedUnchanged =
         state->GetScalarRange()
             == std::array<double, 2>{ 100.0, 200.0 }
@@ -1379,18 +1476,25 @@ void StartCandidateParams(int& failureCount)
             capture->params.windowLevel.windowWidth)
         && capture->params.windowLevel.windowWidth > 0.0
         && capture->params.windowLevel.windowCenter == 12.0;
+    const bool isConstantScanSkipped = sharedHistogram
+        && sharedHistogram->GetBuildCount() == 0;
     const bool isConstantCleared = ports.dataStage
         && ports.dataStage->ClearDataStage();
 
     SetExpect(isBound
             && isBuilt
+            && isSecondBound
+            && isSecondBuilt
+            && isHistogramSkipped
+            && isSecondCleared
             && hasNextParams
             && isSharedUnchanged
             && isCleared
             && isConstantBuilt
             && hasConstantWindow
+            && isConstantScanSkipped
             && isConstantCleared,
-        "candidate strategy must receive next data facts and a safe auto window before publish",
+        "candidate strategy must use a range-mapped default TF without scanning the volume",
         failureCount);
 }
 
@@ -1546,6 +1650,76 @@ void StartPipelineRollback(int& failureCount)
                 ->GetParallelProjection() == 0
             && ports.interaction.model->GetMainProp() == oldProp,
         "failed pending mode must not pollute committed-mode renderer rebind",
+        failureCount);
+}
+
+void StartQualityRollback(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    if (!dataManager->SetInitial(image)) {
+        SetExpect(false,
+            "quality rollback needs an initial image",
+            failureCount);
+        return;
+    }
+
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    auto rejectCount = std::make_shared<std::atomic<int>>(0);
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    args.strategyCreate = [rejectCount](const VizMode mode)
+        -> std::shared_ptr<AbstractVisualStrategy> {
+        return mode == VizMode::Volume
+            ? std::make_shared<RejectQualityStrategy>(rejectCount)
+            : nullptr;
+    };
+    auto ports = CreateAppPorts(std::move(args));
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    AppViewUpdate modeUpdate;
+    modeUpdate.mode = VizMode::Volume;
+    const bool isBuilt = ports.renderBind
+        && ports.renderBind->SetRenderTarget(
+            renderWindow, renderer)
+        && ports.app.view
+        && ports.app.view->SendViewUpdate(modeUpdate)
+        && ports.interaction.update
+        && ports.interaction.update->SendUpdates();
+    if (!isBuilt) {
+        SetExpect(false,
+            "quality rollback needs a committed Volume strategy",
+            failureCount);
+        return;
+    }
+
+    const auto baseline = ports.app.view->GetViewState();
+    constexpr double oldRate = 7.0;
+    renderWindow->SetDesiredUpdateRate(oldRate);
+    AppViewUpdate qualityUpdate;
+    qualityUpdate.volumeQuality = VolumeQuality::Ultra;
+    const bool isAccepted =
+        ports.app.view->SendViewUpdate(qualityUpdate);
+    const bool isRejected =
+        !ports.interaction.update->SendUpdates();
+    const auto restored = ports.app.view->GetViewState();
+    const bool isNotRetried =
+        ports.interaction.update->SendUpdates();
+    SetExpect(isAccepted
+            && isRejected
+            && isNotRetried
+            && rejectCount->load() == 1
+            && baseline.volumeQuality == VolumeQuality::Auto
+            && restored.volumeQuality == baseline.volumeQuality
+            && renderWindow->GetDesiredUpdateRate() == oldRate,
+        "rejected Ultra must keep the applied quality and render rate without fallback or retry",
         failureCount);
 }
 
@@ -1794,13 +1968,12 @@ void StartInputSwap(int& failureCount)
     renderWindow->RemoveObserver(renderTag);
     renderCallback->SetClientData(nullptr);
     std::cout
-        << "DIAG_RENDER_SOURCE: candidate_prewarm="
+        << "DIAG_RENDER_SOURCE: candidate_render="
         << cameraProbe.renderCount << '\n';
     SetExpect(isInputRebuilt
-            && cameraProbe.renderCount >= 1
-            && cameraProbe.renderCount <= 2
+            && cameraProbe.renderCount == 0
             && cameraProbe.isStable,
-        "candidate prewarm should render without mutating the committed camera",
+        "idle candidate should not render or mutate the committed camera",
         failureCount);
     auto* nextProp = ports.interaction.model->GetMainProp();
     SetExpect(committedProp
@@ -2382,14 +2555,18 @@ void StartVisualConfigGetters(int& failureCount)
     PreInitConfig config;
     config.vizMode = VizMode::Volume;
     config.material = { 0.2, 0.6, 0.3, 12.0, 0.8, true };
-    config.tfNodes = {
-        { 0.0, 0.1, 0.2, 0.3, 0.4 },
-        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    config.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.2, 0.3, 0.4 },
+        { 1.0, 0.8, 0.7, 0.6 }
+    };
+    config.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.1 },
+        { 1.0, 0.9 }
     };
     config.isoThreshold = 12.5;
     config.bgColor = { 0.05, 0.1, 0.15 };
     config.windowLevel = { 80.0, 20.0 };
-    config.hasTF = true;
+    config.hasVolumeTransferFunction = true;
     config.hasIso = true;
     config.hasBgColor = true;
     config.hasWindowLevel = true;
@@ -2406,8 +2583,8 @@ void StartVisualConfigGetters(int& failureCount)
             && viewState.mode == VizMode::Volume
             && viewState.material.opacity == 0.8
             && viewState.material.isShadeOn
-            && viewState.transferNodes.size() == 2
-            && viewState.transferNodes[1].opacity == 0.9
+            && viewState.volumeTransferFunction.opacityNodes.size() == 2
+            && viewState.volumeTransferFunction.opacityNodes[1].opacity == 0.9
             && viewState.isoThreshold == 12.5
             && viewState.background.r == 0.05
             && viewState.spacing[2] == 1.5
@@ -2454,11 +2631,13 @@ void StartVisualConfigGetters(int& failureCount)
         "narrow state and view ports must mirror interaction visibility",
         failureCount);
     update = {};
-    update.transferPreset = TransferPreset::Percentile;
-    SetExpect(ports.app.view->SendViewUpdate(update)
-            && ports.app.view->GetViewState().transferPreset
-                == TransferPreset::Percentile,
-        "view port must expose the committed transfer preset intent",
+    auto invalidTransfer = config.volumeTransferFunction;
+    invalidTransfer.opacityNodes.resize(1);
+    update.volumeTransferFunction = invalidTransfer;
+    SetExpect(!ports.app.view->SendViewUpdate(update)
+            && ports.app.view->GetViewState()
+                .volumeTransferFunction.opacityNodes.size() == 2,
+        "view port must reject an incomplete transfer snapshot",
         failureCount);
 }
 
@@ -2503,14 +2682,12 @@ void StartViewEventCommit(int& failureCount)
     const auto baseline = ports.app.view->GetViewState();
     AppViewUpdate failedUpdate;
     failedUpdate.background = BackgroundColor{ 0.4, 0.5, 0.6 };
-    failedUpdate.volumeQuality = {
-        VolumeQuality::Custom, 0, 1.0, true };
+    failedUpdate.volumeQuality = static_cast<VolumeQuality>(99);
     const bool isFailed = !ports.app.view->SendViewUpdate(failedUpdate);
     const auto restored = ports.app.view->GetViewState();
     SetExpect(isFailed
             && restored.background.r == baseline.background.r
-            && restored.volumeQuality.maxDimension
-                == baseline.volumeQuality.maxDimension
+            && restored.volumeQuality == baseline.volumeQuality
             && observerCount == 0
             && observedFlags == UpdateFlags::None,
         "failed compensated view update must not expose observer frames",
@@ -2661,6 +2838,7 @@ int AppTaskSuite::GetFailCount() const
     StartMaskSnapshot(failureCount);
     StartFactoryAdmission(failureCount);
     StartPipelineRollback(failureCount);
+    StartQualityRollback(failureCount);
     StartRenderOwnerGate(failureCount);
     StartStrategySwitchSync(failureCount);
     StartInputSwap(failureCount);

@@ -813,16 +813,18 @@ int GetCropFailCount()
         && splitMapper->GetAutoAdjustSampleDistances() == 0
         && std::abs(splitImageDistance - 1.0) < 1e-12
         && std::abs(
-            splitMapper->GetMinimumImageSampleDistance() - 1.0)
+            splitMapper->GetMinimumImageSampleDistance() - 4.0)
             < 1e-12
         && std::abs(
-            splitMapper->GetMaximumImageSampleDistance() - 1.0)
+            splitMapper->GetMaximumImageSampleDistance() - 4.0)
             < 1e-12
         && std::abs(
-            splitMapper->GetImageSampleDistance() - 2.0) < 1e-12
-        && splitMapper->GetSampleDistance()
-            >= 2.0 * splitSampleDistance
-        && splitMapper->GetUseJittering() != 0;
+            splitMapper->GetImageSampleDistance() - 4.0)
+            < 1e-12
+        && std::abs(
+            splitMapper->GetSampleDistance()
+                - splitSampleDistance * 4.0) < 1e-12
+        && splitMapper->GetUseJittering() == 0;
     const bool isSplitDragClear = splitService
         && splitService->SetInteracting(
             splitDragSource, false);
@@ -831,10 +833,13 @@ int GetCropFailCount()
         && splitMapper->GetInputConnection(0, 0)
             == splitQualityInput
         && splitMapper->GetMaskInput() == splitQualityMask
-        && splitMapper->GetAutoAdjustSampleDistances() == 0
+        && splitMapper->GetAutoAdjustSampleDistances() != 0
         && std::abs(
             splitMapper->GetImageSampleDistance()
                 - splitImageDistance) < 1e-12
+        && std::abs(
+            splitMapper->GetSampleDistance()
+                - splitSampleDistance) < 1e-12
         && splitMapper->GetUseJittering() != 0;
     failureCount += GetCaseResult(
         isSplitStarted
@@ -850,7 +855,7 @@ int GetCropFailCount()
             && isSplitLocked
             && isSplitDragClear
             && isSplitQualityRestored,
-        "Crop keeps Quality input and mapper through split reference drag") ? 0 : 1;
+        "Crop keeps one quality input and mapper through split reference drag") ? 0 : 1;
 
     const bool isStarted = feature->SendRequest(
         GetTargetRequest(CropHostAction::Start, target));

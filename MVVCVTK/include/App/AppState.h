@@ -29,14 +29,14 @@ public:
         UpdateFlags& pendingFlags);
     void SendUpdateFlags(UpdateFlags flags) noexcept;
     void SetPreInitConfig(const PreInitConfig& config);
-    void SetTFNodes(const std::vector<TFNode>& nodes);
-    void GetTFNodes(std::vector<TFNode>& destination) const;
-    void SetTransferPresetIntent(TransferPreset preset);
-    bool SetTransferPresetNodes(
-        TransferPreset preset,
-        DataVersion dataVersion,
-        const std::vector<TFNode>& nodes);
-    TransferPreset GetTransferPreset() const;
+    bool SetVolumeTransferFunction(
+        const VolumeTransferFunction& function);
+    bool SetAutoTransfer(
+        const VolumeTransferFunction& function);
+    bool ResetTransfer(
+        const VolumeTransferFunction& function);
+    VolumeTransferFunction GetVolumeTransferFunction() const;
+    bool GetTransferAuto() const;
     void SetIsoValue(double value);
     double GetIsoValue() const;
     void SetMaterial(const MaterialParams& material);
@@ -111,14 +111,9 @@ public:
     std::array<double, 2> GetScalarRange() const;
     // 兼容既有调用方；新代码应使用与 SetScalarRange 对称的 GetScalarRange。
     std::array<double, 2> GetDataRange() const;
-    void SetTFNodes(const std::vector<TFNode>& nodes);
-    void GetTFNodes(std::vector<TFNode>& destination) const;
-    void SetTransferPresetIntent(TransferPreset preset);
-    bool SetTransferPresetNodes(
-        TransferPreset preset,
-        DataVersion dataVersion,
-        const std::vector<TFNode>& nodes);
-    TransferPreset GetTransferPreset() const;
+    bool SetVolumeTransferFunction(
+        const VolumeTransferFunction& function);
+    VolumeTransferFunction GetVolumeTransferFunction() const;
     void SetIsoValue(double value);
     double GetIsoValue() const;
     void SetMaterial(const MaterialParams& material);
@@ -152,7 +147,12 @@ private:
     friend class ViewPresentationState;
 
     bool SetAutoWindowLevel(const WindowLevelParams& windowLevel);
+    bool SetAutoTransfer(
+        const VolumeTransferFunction& function);
+    bool ResetTransfer(
+        const VolumeTransferFunction& function);
     bool ResetWindowLevel(const WindowLevelParams& windowLevel);
+    bool GetTransferAuto() const;
     WindowLevelMode GetWindowLevelMode() const;
 
     class Impl;

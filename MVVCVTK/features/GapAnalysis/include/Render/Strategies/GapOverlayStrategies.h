@@ -1,6 +1,7 @@
 #pragma once
 
-#include "Render/Support/FeatureVisualStrategy.h"
+#include "App/ViewTypes.h"
+#include "Render/Support/FeatureOverlayBase.h"
 #include <vtkActor.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
@@ -13,7 +14,7 @@
 // =====================================================================
 // GapMeshOverlayStrategy — 3D孔隙网格叠加策略 (适用于 Volume/IsoSurface 模式)
 // =====================================================================
-class GapMeshOverlayStrategy : public FeatureVisualStrategy {
+class GapMeshOverlayStrategy : public FeatureOverlayBase {
 private:
     // 构造期创建的 3D overlay prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkActor> m_actor;
@@ -45,18 +46,17 @@ public:
         }
     }
 
-    void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
-        // 自动跟随主视图的模型变换（鼠标拖拽旋转平移）
-        if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
-            Set3DPropsTransform(params.modelMatrix);
-        }
+    void SetOverlayState(
+        const FeatureOverlayState& state) override {
+        // 自动跟随主视图的模型变换（鼠标拖拽旋转平移）。
+        Set3DPropsTransform(state.modelToWorld);
     }
 };
 
 // =====================================================================
 // GapSliceOverlayStrategy — 2D标签图叠加策略 (适用于 Slice 模式)
 // =====================================================================
-class GapSliceOverlayStrategy : public FeatureVisualStrategy {
+class GapSliceOverlayStrategy : public FeatureOverlayBase {
 private:
     // 构造期创建的 2D label prop；策略基类与 VTK renderer 共同保留引用。
     vtkSmartPointer<vtkImageSlice> m_slice;
@@ -108,29 +108,28 @@ public:
     }
 
     // Transform 同步 overlay 的 modelToWorld；Cursor 把 plane origin 移到当前十字线并沿法线微偏移。
-    void SetVisualState(const RenderParams& params, UpdateFlags flags) override {
-        // 自动跟随主视图的切片滚动和模型变换
-        if (((flags & UpdateFlags::Transform) != UpdateFlags::None) || ((flags & UpdateFlags::Cursor) != UpdateFlags::None)) {
-            auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
-            m_slice->SetUserMatrix(modelToWorldMatrix);
+    void SetOverlayState(
+        const FeatureOverlayState& state) override {
+        // 自动跟随主视图的切片滚动和模型变换。
+        auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+        modelToWorldMatrix->DeepCopy(state.modelToWorld.data());
+        m_slice->SetUserMatrix(modelToWorldMatrix);
 
-            auto plane = m_mapper->GetSlicePlane();
-            if (plane) {
-                constexpr double sliceOffset = 0.001; // VTK world 坐标偏移，避免标签与原切片共面。
-                double worldNormal[3] = { 0.0, 0.0, 0.0 };
-                if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
-                else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
-                else worldNormal[0] = 1.0;
-                double offsetOrigin[3] = {
-                    params.cursor[0] + worldNormal[0] * sliceOffset,
-                    params.cursor[1] + worldNormal[1] * sliceOffset,
-                    params.cursor[2] + worldNormal[2] * sliceOffset
-                };
+        auto plane = m_mapper->GetSlicePlane();
+        if (plane) {
+            constexpr double sliceOffset = 0.001; // VTK world 坐标偏移，避免标签与原切片共面。
+            double worldNormal[3] = { 0.0, 0.0, 0.0 };
+            if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
+            else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
+            else worldNormal[0] = 1.0;
+            double offsetOrigin[3] = {
+                state.cursor[0] + worldNormal[0] * sliceOffset,
+                state.cursor[1] + worldNormal[1] * sliceOffset,
+                state.cursor[2] + worldNormal[2] * sliceOffset
+            };
 
-                plane->SetOrigin(offsetOrigin[0], offsetOrigin[1], offsetOrigin[2]);
-                plane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
-            }
+            plane->SetOrigin(offsetOrigin[0], offsetOrigin[1], offsetOrigin[2]);
+            plane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
         }
     }
 };

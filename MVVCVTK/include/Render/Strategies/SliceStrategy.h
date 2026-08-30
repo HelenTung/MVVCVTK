@@ -27,7 +27,9 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetVisualState(const RenderParams& params, UpdateFlags flags);
+    bool SetVisualState(
+        const RenderParams& params,
+        UpdateFlags flags) override;
     int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
 

@@ -2,6 +2,8 @@
 
 MVVCVTK 是 Windows x64 上的 C++17 / VTK 体数据可视化宿主。`VtkAppHostSession` 是组合根，负责多视图运行时、加载事务、输入路由、可信 Feature 和统一停止；Crop 与 GapAnalysis 作为可选 Feature 接入，不取得 App 内部对象身份。
 
+Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整快照入口；颜色与透明度节点独立，reload 和 LOD 不重解释显式节点。同一数据版本的默认 percentile histogram 在 Session 内只扫描一次，各 View 仍保存独立 TF 值快照。Volume 质量为 `Auto/Low/High/XHigh/Ultra` 五档；`Low/High/XHigh/Ultra` 固定使用原始 dimensions 的 `25%/50%/75%/100%`，仅 `Auto` 在模型加载时依据系统内存、GPU mapper 预算和 CPU 核心数确定一次，运行期不按帧耗重新定档。非原生 LOD 直接持有已物化 resample output，不再追加整卷 `DeepCopy`。
+
 ## 支持范围
 
 - Windows x64；仓库和 SDK 均不提供 Win32/x86 配置。
@@ -78,7 +80,7 @@ target_link_libraries(app PRIVATE
 
 ## SDK 公开头边界
 
-SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成，并随包写入 `lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt`，不再维护固定头文件数量。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。共享的 `FeatureVisualStrategy` 是 Host/Gap 的内部实现支持，不安装到 SDK。源码 `include/` 整树不属于 SDK 暴露面。
+SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成，并随包写入 `lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt`，不再维护固定头文件数量。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。源码 `include/` 整树不属于 SDK 暴露面。
 
 ## 线程与停止规则
 

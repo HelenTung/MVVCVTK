@@ -28,10 +28,6 @@ public:
     int GetSpacingSetCount() const { return m_spacingSetCount; }
     int GetQualitySetCount() const { return m_qualitySetCount; }
     int GetGradientSetCount() const { return m_gradientSetCount; }
-    int GetTransferPresetSetCount() const
-    {
-        return m_transferPresetSetCount;
-    }
     int GetDenoiseSetCount() const { return m_denoiseSetCount; }
     int GetCursorSetCount() const { return m_cursorSetCount; }
     int GetVisibilitySetCount() const
@@ -60,8 +56,12 @@ public:
         return m_sliceAngleDeg;
     }
     const MaterialParams& GetMaterial() const { return m_material; }
+    const VolumeTransferFunction& GetVolumeTransferFunction() const
+    {
+        return m_volumeTransferFunction;
+    }
     double GetIsoThreshold() const { return m_isoThreshold; }
-    const VolumeQualityParams& GetVolumeQuality() const
+    VolumeQuality GetVolumeQuality() const
     {
         return m_volumeQuality;
     }
@@ -105,10 +105,6 @@ public:
     {
         m_isGradientAccepted = isAccepted;
     }
-    void SetPresetAccepted(const bool isAccepted)
-    {
-        m_isPresetAccepted = isAccepted;
-    }
     void SetDenoiseAccepted(const bool isAccepted)
     {
         m_isDenoiseAccepted = isAccepted;
@@ -136,7 +132,6 @@ private:
     int m_spacingSetCount = 0;
     int m_qualitySetCount = 0;
     int m_gradientSetCount = 0;
-    int m_transferPresetSetCount = 0;
     int m_denoiseSetCount = 0;
     int m_cursorSetCount = 0;
     int m_visibilitySetCount = 0;
@@ -153,7 +148,6 @@ private:
     bool m_isSpacingAccepted = true;
     bool m_isQualityAccepted = true;
     bool m_isGradientAccepted = true;
-    bool m_isPresetAccepted = true;
     bool m_isDenoiseAccepted = true;
     bool m_isRestoreAccepted = true;
     bool m_isDirtyAccepted = true;
@@ -164,14 +158,13 @@ private:
     std::uint32_t m_visibilityMask = 0;
     double m_isoThreshold = 0.0;
     MaterialParams m_material;
-    VolumeQualityParams m_volumeQuality;
+    VolumeQuality m_volumeQuality = VolumeQuality::Auto;
     std::vector<GradientOpacityNode> m_gradientOpacity;
-    std::vector<TFNode> m_transferNodes;
+    VolumeTransferFunction m_volumeTransferFunction;
     BackgroundColor m_background;
     std::array<double, 3> m_spacing{ 1.0, 1.0, 1.0 };
     WindowLevelParams m_windowLevel;
     WindowLevelMode m_windowLevelMode = WindowLevelMode::Auto;
-    TransferPreset m_transferPreset = TransferPreset::Manual;
     std::array<double, 3> m_cursorWorld{};
     std::optional<VolumeLayout> m_loadLayout;
     std::optional<VolumeBuffer> m_reloadBuffer;
@@ -272,12 +265,6 @@ public:
             m_state->m_gradientOpacity = *update.gradientOpacity;
             ++m_state->m_viewSetCount;
         }
-        if (update.transferPreset) {
-            ++m_state->m_transferPresetSetCount;
-            if (!m_state->m_isPresetAccepted) return reject();
-            m_state->m_transferPreset = *update.transferPreset;
-            ++m_state->m_viewSetCount;
-        }
         if (update.isDenoiseOn) {
             ++m_state->m_denoiseSetCount;
             if (!m_state->m_isDenoiseAccepted) return reject();
@@ -299,8 +286,8 @@ public:
             ++m_state->m_opacitySetCount;
             ++m_state->m_viewSetCount;
         }
-        if (update.transferNodes) {
-            m_state->m_transferNodes = *update.transferNodes;
+        if (update.volumeTransferFunction) {
+            m_state->m_volumeTransferFunction = *update.volumeTransferFunction;
             ++m_state->m_viewSetCount;
         }
         if (update.isoThreshold) {
@@ -372,13 +359,12 @@ public:
         if (!m_state) return state;
         state.mode = m_state->m_vizMode;
         state.material = m_state->m_material;
-        state.transferNodes = m_state->m_transferNodes;
+        state.volumeTransferFunction = m_state->m_volumeTransferFunction;
         state.isoThreshold = m_state->m_isoThreshold;
         state.background = m_state->m_background;
         state.spacing = m_state->m_spacing;
         state.windowLevel = m_state->m_windowLevel;
         state.windowLevelMode = m_state->m_windowLevelMode;
-        state.transferPreset = m_state->m_transferPreset;
         state.volumeQuality = m_state->m_volumeQuality;
         state.gradientOpacity = m_state->m_gradientOpacity;
         state.isDenoiseOn = m_state->m_isDenoiseOn;
@@ -395,13 +381,12 @@ private:
     {
         m_state->m_vizMode = state.mode;
         m_state->m_material = state.material;
-        m_state->m_transferNodes = state.transferNodes;
+        m_state->m_volumeTransferFunction = state.volumeTransferFunction;
         m_state->m_isoThreshold = state.isoThreshold;
         m_state->m_background = state.background;
         m_state->m_spacing = state.spacing;
         m_state->m_windowLevel = state.windowLevel;
         m_state->m_windowLevelMode = state.windowLevelMode;
-        m_state->m_transferPreset = state.transferPreset;
         m_state->m_volumeQuality = state.volumeQuality;
         m_state->m_gradientOpacity = state.gradientOpacity;
         m_state->m_isDenoiseOn = state.isDenoiseOn;

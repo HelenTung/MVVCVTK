@@ -92,38 +92,83 @@ int AppStateSuite::GetFailCount() const
         ++failureCount;
     }
 
-    const std::vector<TFNode> presetNodes{
-        { 0.1, 0.0, 0.0, 0.0, 0.0 },
-        { 0.9, 1.0, 1.0, 1.0, 1.0 }
+    VolumeTransferFunction initialFunction;
+    initialFunction.colorNodes = {
+        { 0.1, 0.0, 0.0, 0.0 },
+        { 0.9, 1.0, 1.0, 1.0 }
     };
-    state.SetTransferPresetIntent(TransferPreset::Percentile);
-    if (!state.SetTransferPresetNodes(
-            TransferPreset::Percentile, 7, presetNodes)
-        || state.GetTransferPreset() != TransferPreset::Percentile
+    initialFunction.opacityNodes = {
+        { 0.1, 0.0 },
+        { 0.9, 1.0 }
+    };
+    if (!state.SetVolumeTransferFunction(initialFunction)
         || sink->GetEvents().size() != 5
-        || sink->GetEvents().back() != UpdateFlags::TF) {
-        std::cerr << "Percentile intent and resolved nodes must commit as shared TF state.\n";
+        || sink->GetEvents().back()
+            != UpdateFlags::VolumeTransfer
+        || state.GetVolumeTransferFunction().colorNodes.size() != 2) {
+        std::cerr << "The actual scalar transfer snapshot must be the only TF state.\n";
         ++failureCount;
     }
-    state.SetTFNodes(presetNodes);
-    if (state.GetTransferPreset() != TransferPreset::Manual
-        || state.SetTransferPresetNodes(
-            TransferPreset::Percentile, 6, presetNodes)
-        || sink->GetEvents().size() != 5) {
-        std::cerr << "Manual TF must cancel preset intent and reject stale preset results.\n";
+    (void)state.SetVolumeTransferFunction(initialFunction);
+    if (sink->GetEvents().size() != 5) {
+        std::cerr << "An equal transfer snapshot must be a no-op.\n";
         ++failureCount;
     }
 
-    const std::vector<TFNode> manualNodes{
-        { 0.0, 0.0, 0.75, 0.75, 0.75 },
-        { 1.0, 1.0, 0.75, 0.75, 0.75 }
+    VolumeTransferFunction manualFunction;
+    manualFunction.colorNodes = {
+        { 0.0, 0.75, 0.75, 0.75 },
+        { 1.0, 0.75, 0.75, 0.75 }
+    };
+    manualFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 1.0, 1.0 }
     };
     const std::size_t eventCount = sink->GetEvents().size();
-    state.SetTFNodes(manualNodes);
-    state.SetTFNodes(manualNodes);
+    (void)state.SetVolumeTransferFunction(manualFunction);
+    (void)state.SetVolumeTransferFunction(manualFunction);
     if (sink->GetEvents().size() != eventCount + 1
-        || sink->GetEvents().back() != UpdateFlags::TF) {
+        || sink->GetEvents().back()
+            != UpdateFlags::VolumeTransfer) {
         std::cerr << "Equal TF nodes must not publish a second TF event.\n";
+        ++failureCount;
+    }
+
+    const auto transferSink = std::make_shared<StateEventSink>();
+    ViewPresentationState transferState(transferSink);
+    VolumeTransferFunction autoFunction;
+    autoFunction.colorNodes = {
+        { -20.0, 0.75, 0.75, 0.75 },
+        { 40.0, 0.75, 0.75, 0.75 }
+    };
+    autoFunction.opacityNodes = {
+        { -20.0, 0.0 },
+        { 40.0, 1.0 }
+    };
+    if (!transferState.GetTransferAuto()
+        || !transferState.SetAutoTransfer(autoFunction)
+        || !transferState.GetTransferAuto()
+        || transferState.GetVolumeTransferFunction().colorNodes.size() != 2) {
+        std::cerr << "Auto TF values must keep their auto source.\n";
+        ++failureCount;
+    }
+    const std::size_t autoEventCount = transferSink->GetEvents().size();
+    if (!transferState.SetVolumeTransferFunction(autoFunction)
+        || transferState.GetTransferAuto()
+        || transferSink->GetEvents().size() != autoEventCount + 1
+        || transferSink->GetEvents().back()
+            != UpdateFlags::VolumeTransfer) {
+        std::cerr << "An explicit TF write must change intent even when nodes are equal.\n";
+        ++failureCount;
+    }
+    VolumeTransferFunction nextAuto = autoFunction;
+    nextAuto.colorNodes.back().scalar = 80.0;
+    nextAuto.opacityNodes.back().scalar = 80.0;
+    if (transferState.SetAutoTransfer(nextAuto)
+        || transferState.GetTransferAuto()
+        || transferState.GetVolumeTransferFunction().colorNodes.back().scalar
+            != 40.0) {
+        std::cerr << "An auto refresh must not overwrite explicit TF intent.\n";
         ++failureCount;
     }
     return failureCount;

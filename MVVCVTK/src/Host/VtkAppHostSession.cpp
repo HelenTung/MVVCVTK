@@ -1146,7 +1146,8 @@ bool VtkAppHostSession::Impl::AttachFeature(
         catch (...) {
         }
         try {
-            (void)renderViews.SetFeatureViews(id, {});
+            (void)renderViews.SetFeatureViews(
+                id, {});
         }
         catch (...) {
         }
@@ -1188,7 +1189,8 @@ bool VtkAppHostSession::Impl::DetachFeature(
     // DetachHost 拒绝时恢复精确旧绑定，避免 attached Feature 留在半解绑状态。
     const auto oldViewIds =
         renderViews.GetFeatureViewIds(entry->id);
-    if (!renderViews.SetFeatureViews(entry->id, {})) {
+    if (!renderViews.SetFeatureViews(
+            entry->id, {})) {
         return false;
     }
     bool isDetached = false;
@@ -1199,7 +1201,9 @@ bool VtkAppHostSession::Impl::DetachFeature(
         isDetached = false;
     }
     if (!isDetached) {
-        if (!renderViews.SetFeatureViews(entry->id, oldViewIds)) {
+        if (!renderViews.SetFeatureViews(
+                entry->id,
+                oldViewIds)) {
             std::cerr
                 << "[Host] Feature detach rollback did not restore all views.\n";
             stopState = HostStopState::StopPending;
@@ -1214,7 +1218,8 @@ bool VtkAppHostSession::Impl::DetachFeatures()
 {
     while (!features.empty()) {
         auto& entry = features.back();
-        if (!renderViews.SetFeatureViews(entry.id, {})) {
+        if (!renderViews.SetFeatureViews(
+                entry.id, {})) {
             return false;
         }
         const auto& feature = entry.feature;

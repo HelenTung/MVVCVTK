@@ -60,6 +60,11 @@ VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 
 namespace {
 
+double GetRenderRate(const bool isInteracting) noexcept
+{
+    return isInteracting ? 15.0 : 0.001;
+}
+
 // 默认 true 路径只验证 Host 是否调用 Render；probe 隔离真实 OpenGL context 和平台 Timer。
 class RenderProbeWindow final : public vtkGenericOpenGLRenderWindow {
 public:
@@ -240,38 +245,10 @@ struct PhaseThreadProbe final {
     }
 };
 
-class PresetRaceData final : public RawVolumeDataManager {
-public:
-    bool SetPresetRace()
-    {
-        m_readCount = 0;
-        m_isRaceReady = true;
-        return true;
-    }
-
-    TrustedImageSnapshot GetImageSnapshot() const override
-    {
-        auto snapshot =
-            RawVolumeDataManager::GetImageSnapshot();
-        if (!m_isRaceReady) {
-            return snapshot;
-        }
-        ++m_readCount;
-        if (m_readCount == 2 && snapshot) {
-            return std::make_shared<TrustedImageState>(*snapshot);
-        }
-        return snapshot;
-    }
-
-private:
-    mutable std::size_t m_readCount{0};
-    mutable bool m_isRaceReady{false};
-};
-
-bool BuildPresetReturnTest()
+bool BuildTransferReturnTest()
 {
     auto dataManager =
-        std::make_shared<PresetRaceData>();
+        std::make_shared<RawVolumeDataManager>();
     auto broadcaster =
         std::make_shared<SharedStateBroadcaster>();
     auto state =
@@ -315,29 +292,36 @@ bool BuildPresetReturnTest()
     const std::vector<HostRenderViewConfig> configs{
         view
     };
-    if (!views.Build(core, configs)
-        || !dataManager->SetPresetRace()) {
+    if (!views.Build(core, configs)) {
         return false;
     }
     HostCommandRouter router(views.GetViewDirectory());
     HostViewSetRequest request;
     request.targetView.viewId = "preset-router";
-    request.transferPreset =
-        HostTransferPreset::Percentile;
-    const bool isPresetAccepted =
+    HostVolumeTransferFunction function;
+    function.colorNodes = {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 7.0, 1.0, 1.0, 1.0 }
+    };
+    function.opacityNodes = {
+        { 0.0, 0.0 },
+        { 7.0, 1.0 }
+    };
+    request.volumeTransferFunction = function;
+    const bool isTransferAccepted =
         router.Dispatch(std::move(request));
     HostViewTarget target;
     target.viewId = "preset-router";
     const auto finalState = views.GetViewState(target);
     std::cout
-        << "DIAG_PRESET: accepted=" << isPresetAccepted
-        << " final_preset="
+        << "DIAG_TRANSFER: accepted=" << isTransferAccepted
+        << " color_nodes="
         << (finalState
-            ? static_cast<int>(finalState->transferPreset) : -1)
+            ? finalState->volumeTransferFunction.colorNodes.size() : 0)
         << '\n';
-    return isPresetAccepted && finalState
-        && finalState->transferPreset
-            == HostTransferPreset::Percentile;
+    return isTransferAccepted && finalState
+        && finalState->volumeTransferFunction.colorNodes.size() == 2
+        && finalState->volumeTransferFunction.opacityNodes.size() == 2;
 }
 
 bool BuildRenderSourceTest()
@@ -426,6 +410,7 @@ bool BuildRenderSourceTest()
 
 bool BuildStyleQualityTest()
 {
+    constexpr double volumeTargetFps = 20.0;
     HostCoreServices core;
     auto dataManager =
         std::make_shared<RawVolumeDataManager>();
@@ -512,20 +497,68 @@ bool BuildStyleQualityTest()
     }
 
     renderWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    const std::size_t renderCountBeforeStyle =
+        renderWindow->GetRenderCount();
     oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    const bool isStyleRenderEnabled =
+        interactor->GetEnableRender();
+    interactor->Render();
+    oldStyle->InvokeEvent(vtkCommand::InteractionEvent);
+    const bool isDirectRenderEnabled =
+        renderWindow->GetRenderCount()
+            == renderCountBeforeStyle + 1;
     const bool isStartFast =
         renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
     const bool isStartActive =
         core.sharedState->GetIsInteracting();
     (void)SendTimer(interactor);
     const bool isTimerFast =
-        renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
+        renderWindow->GetDesiredUpdateRate() == volumeTargetFps
+        && renderWindow->GetRenderCount()
+            == renderCountBeforeStyle + 2;
     oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    const bool isStyleRenderKept =
+        interactor->GetEnableRender();
     const bool isEndInactive =
         !core.sharedState->GetIsInteracting();
     (void)SendTimer(interactor);
-    const bool isEndStill =
-        renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
+    const bool isStyleRenderRestored =
+        interactor->GetEnableRender();
+    const bool isEndStill = isStyleRenderRestored
+        && renderWindow->GetDesiredUpdateRate() == GetRenderRate(false);
+
+    oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    const bool isRepeatedStartStable =
+        core.sharedState->GetIsInteracting()
+        && interactor->GetEnableRender();
+    oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    const bool isRepeatedEndStable =
+        isRepeatedStartStable
+        && !core.sharedState->GetIsInteracting()
+        && interactor->GetEnableRender();
+    (void)SendTimer(interactor);
+    const bool isRepeatedBoundaryStable =
+        isRepeatedEndStable && interactor->GetEnableRender();
+
+    oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    const bool isRestartPendingActive =
+        core.sharedState->GetIsInteracting()
+        && interactor->GetEnableRender();
+    (void)SendTimer(interactor);
+    const bool isRestartTimerStable =
+        core.sharedState->GetIsInteracting()
+        && interactor->GetEnableRender();
+    oldStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
+    (void)SendTimer(interactor);
+    const bool isRestartBoundaryStable =
+        isRestartPendingActive
+        && isRestartTimerStable
+        && !core.sharedState->GetIsInteracting()
+        && interactor->GetEnableRender();
 
     auto* camera = endpoints.front().renderer->GetActiveCamera();
     if (!camera) {
@@ -537,6 +570,8 @@ bool BuildStyleQualityTest()
     double cameraBefore[3] = { 0.0, 0.0, 0.0 };
     camera->GetPosition(cameraBefore);
     renderWindow->SetSize(640, 480);
+    const std::size_t cameraRenderCount =
+        renderWindow->GetRenderCount();
     interactor->SetEventPosition(300, 220);
     interactor->InvokeEvent(vtkCommand::LeftButtonPressEvent);
     interactor->SetEventPosition(360, 250);
@@ -548,7 +583,14 @@ bool BuildStyleQualityTest()
         std::abs(cameraAfter[0] - cameraBefore[0]) > 1e-9
         || std::abs(cameraAfter[1] - cameraBefore[1]) > 1e-9
         || std::abs(cameraAfter[2] - cameraBefore[2]) > 1e-9;
+    const std::size_t cameraDirectRenderCount =
+        renderWindow->GetRenderCount();
+    const bool hasCameraDirectRender =
+        cameraDirectRenderCount > cameraRenderCount;
     (void)SendTimer(interactor);
+    const bool hasCameraFinalRender =
+        renderWindow->GetRenderCount()
+            == cameraDirectRenderCount + 1;
 
     vtkSmartPointer<vtkInteractorStyle> replacedStyle = oldStyle;
     oldStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
@@ -572,7 +614,7 @@ bool BuildStyleQualityTest()
     newStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
     (void)SendTimer(interactor);
     const bool isNewAttached =
-        renderWindow->GetDesiredUpdateRate() == GetRenderRate(true);
+        renderWindow->GetDesiredUpdateRate() == volumeTargetFps;
     newStyle->InvokeEvent(vtkCommand::EndInteractionEvent);
     (void)SendTimer(interactor);
     const bool isNewEndStill =
@@ -706,12 +748,32 @@ bool BuildStyleQualityTest()
         }
     }
 
+    auto* exitStyle = vtkInteractorStyle::SafeDownCast(
+        replacementInteractor->GetInteractorStyle());
+    if (!exitStyle) return false;
+    exitStyle->InvokeEvent(vtkCommand::StartInteractionEvent);
+    const bool isExitStartEnabled =
+        core.sharedState->GetIsInteracting()
+        && replacementInteractor->GetEnableRender();
+    replacementInteractor->InvokeEvent(vtkCommand::ExitEvent);
+    const bool isExitRestored = isExitStartEnabled
+        && !core.sharedState->GetIsInteracting()
+        && replacementInteractor->GetEnableRender();
+
     const bool isValid = isStartFast
         && isStartActive
+        && isStyleRenderEnabled
+        && isDirectRenderEnabled
         && isTimerFast
         && isEndInactive
+        && isStyleRenderKept
+        && isStyleRenderRestored
         && isEndStill
+        && isRepeatedBoundaryStable
+        && isRestartBoundaryStable
         && isDefaultCameraActive
+        && hasCameraDirectRender
+        && hasCameraFinalRender
         && isReplaceStill
         && isOldDetached
         && isNewAttached
@@ -725,17 +787,34 @@ bool BuildStyleQualityTest()
         && isInteractorOldDetached
         && isInteractorNewAttached
         && isInteractorEndStill
-        && isCameraSourceUnified;
+        && isCameraSourceUnified
+        && isExitRestored;
     if (!isValid) {
         std::cerr
             << "DIAG_STYLE:"
             << " start_fast=" << isStartFast
             << " start_active=" << isStartActive
+            << " style_render_enabled="
+            << isStyleRenderEnabled
+            << " direct_render_enabled="
+            << isDirectRenderEnabled
             << " timer_fast=" << isTimerFast
             << " end_inactive=" << isEndInactive
+            << " style_render_kept="
+            << isStyleRenderKept
+            << " style_render_restored="
+            << isStyleRenderRestored
             << " end_still=" << isEndStill
+            << " repeated_boundary="
+            << isRepeatedBoundaryStable
+            << " restart_boundary="
+            << isRestartBoundaryStable
             << " default_camera_active="
             << isDefaultCameraActive
+            << " camera_direct_render="
+            << hasCameraDirectRender
+            << " camera_final_render="
+            << hasCameraFinalRender
             << " replace_still=" << isReplaceStill
             << " old_detached=" << isOldDetached
             << " new_attached=" << isNewAttached
@@ -755,6 +834,7 @@ bool BuildStyleQualityTest()
             << isInteractorEndStill
             << " camera_source_unified="
             << isCameraSourceUnified
+            << " exit_restored=" << isExitRestored
             << '\n';
     }
     return isValid;
@@ -908,14 +988,19 @@ bool BuildDefaultRenderTest()
         return false;
     }
 
-    const std::vector<HostTransferNode> nodes{
-        { 0.0, 0.0, 0.75, 0.75, 0.75 },
-        { 1.0, 1.0, 0.75, 0.75, 0.75 }
+    HostVolumeTransferFunction function;
+    function.colorNodes = {
+        { 0.0, 0.75, 0.75, 0.75 },
+        { 1.0, 0.75, 0.75, 0.75 }
+    };
+    function.opacityNodes = {
+        { 0.0, 0.0 },
+        { 1.0, 1.0 }
     };
     HostViewSetRequest firstRequest;
     firstRequest.targetView.viewId = "render-probe";
     firstRequest.mode = HostRenderMode::Volume;
-    firstRequest.transferNodes = nodes;
+    firstRequest.volumeTransferFunction = function;
     if (!session.SendRequest(std::move(firstRequest))) {
         return false;
     }
@@ -926,7 +1011,7 @@ bool BuildDefaultRenderTest()
 
     HostViewSetRequest sameRequest;
     sameRequest.targetView.viewId = "render-probe";
-    sameRequest.transferNodes = nodes;
+    sameRequest.volumeTransferFunction = function;
     if (!session.SendRequest(std::move(sameRequest))) {
         return false;
     }
@@ -1375,19 +1460,32 @@ public:
         RenderParams params;
         params.scalarRange[0] = 0.0;
         params.scalarRange[1] = 255.0;
-        const std::vector<TFNode> currentNodes{
-            { 0.00, 0.0, 0.00, 0.00, 0.00 },
-            { 0.35, 0.0, 0.75, 0.75, 0.75 },
-            { 0.60, 0.6, 0.85, 0.85, 0.85 },
-            { 1.00, 1.0, 0.95, 0.95, 0.95 }
+        VolumeTransferFunction currentFunction;
+        currentFunction.colorNodes = {
+            { 0.00, 0.00, 0.00, 0.00 },
+            { 89.25, 0.75, 0.75, 0.75 },
+            { 153.0, 0.85, 0.85, 0.85 },
+            { 255.0, 0.95, 0.95, 0.95 }
         };
-        const std::vector<TFNode> grayNodes{
-            { 0.0, 0.0, 0.75, 0.75, 0.75 },
-            { 0.5, 0.1, 0.75, 0.75, 0.75 },
-            { 1.0, 0.8, 0.75, 0.75, 0.75 }
+        currentFunction.opacityNodes = {
+            { 0.00, 0.0 },
+            { 89.25, 0.0 },
+            { 153.0, 0.6 },
+            { 255.0, 1.0 }
         };
-        params.tfNodes = grayNodes;
-        strategy.SetVisualState(params, UpdateFlags::TF);
+        VolumeTransferFunction grayFunction;
+        grayFunction.colorNodes = {
+            { 0.0, 0.75, 0.75, 0.75 },
+            { 127.5, 0.75, 0.75, 0.75 },
+            { 255.0, 0.75, 0.75, 0.75 }
+        };
+        grayFunction.opacityNodes = {
+            { 0.0, 0.0 },
+            { 127.5, 0.1 },
+            { 255.0, 0.8 }
+        };
+        params.volumeTransferFunction = grayFunction;
+        strategy.SetVisualState(params, UpdateFlags::VolumeTransfer);
         vtkSmartPointer<vtkRenderer> renderer = endpoint->renderer;
         strategy.AttachRenderer(renderer);
         renderer->ResetCamera();
@@ -1468,12 +1566,15 @@ public:
                 color
                 && opacity
                 && color->GetSize()
-                    == static_cast<int>(params.tfNodes.size())
+                    == static_cast<int>(
+                        params.volumeTransferFunction.colorNodes.size())
                 && opacity->GetSize()
-                    == static_cast<int>(params.tfNodes.size());
+                    == static_cast<int>(
+                        params.volumeTransferFunction.opacityNodes.size());
             for (std::size_t index = 0;
                 areTfNodesValid
-                    && index < params.tfNodes.size();
+                    && index
+                        < params.volumeTransferFunction.colorNodes.size();
                 ++index) {
                 double colorNode[6] = {};
                 double opacityNode[4] = {};
@@ -1481,21 +1582,24 @@ public:
                     static_cast<int>(index), colorNode);
                 opacity->GetNodeValue(
                     static_cast<int>(index), opacityNode);
-                const auto& expected = params.tfNodes[index];
-                const double scalar =
-                    params.scalarRange[0]
-                    + expected.position
-                        * (params.scalarRange[1]
-                            - params.scalarRange[0]);
+                const auto& expectedColor =
+                    params.volumeTransferFunction.colorNodes[index];
+                const auto& expectedOpacity =
+                    params.volumeTransferFunction.opacityNodes[index];
                 areTfNodesValid =
-                    std::abs(colorNode[0] - scalar) < 1e-12
-                    && std::abs(colorNode[1] - expected.r) < 1e-12
-                    && std::abs(colorNode[2] - expected.g) < 1e-12
-                    && std::abs(colorNode[3] - expected.b) < 1e-12
-                    && std::abs(opacityNode[0] - scalar) < 1e-12
+                    std::abs(
+                        colorNode[0] - expectedColor.scalar) < 1e-12
+                    && std::abs(
+                        colorNode[1] - expectedColor.r) < 1e-12
+                    && std::abs(
+                        colorNode[2] - expectedColor.g) < 1e-12
+                    && std::abs(
+                        colorNode[3] - expectedColor.b) < 1e-12
+                    && std::abs(
+                        opacityNode[0] - expectedOpacity.scalar) < 1e-12
                     && std::abs(
                         opacityNode[1]
-                            - expected.opacity
+                            - expectedOpacity.opacity
                                 * material.opacity) < 1e-12;
             }
             bool areGradientNodesValid =
@@ -1572,6 +1676,23 @@ public:
             const bool isVisualValid =
                 visualPixels && visualValueCount > 0
                 && visualSignal > 0;
+            const bool isAutoSampling =
+                params.volumeQuality == VolumeQuality::Auto;
+            double maximumImageDistance = 2.5;
+            switch (params.volumeQuality) {
+            case VolumeQuality::Low:
+                maximumImageDistance = 3.0;
+                break;
+            case VolumeQuality::XHigh:
+                maximumImageDistance = 2.0;
+                break;
+            case VolumeQuality::Ultra:
+                maximumImageDistance = 1.5;
+                break;
+            case VolumeQuality::Auto:
+            case VolumeQuality::High:
+                break;
+            }
             const bool isStateValid =
                 property
                 && color
@@ -1628,11 +1749,12 @@ public:
                     mapper->GetMinimumImageSampleDistance() - 1.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetMaximumImageSampleDistance() - 1.0)
+                    mapper->GetMaximumImageSampleDistance()
+                        - maximumImageDistance)
                     < 1e-12
-                && mapper->GetUseJittering()
-                    == static_cast<int>(
-                        params.volumeQuality.isJitterOn);
+                && mapper->GetAutoAdjustSampleDistances()
+                    == static_cast<int>(isAutoSampling)
+                && mapper->GetUseJittering() != 0;
             const bool isAuxiliaryStateValid =
                 isMaskApplied == isMaskExpected
                 && isDenoiseApplied == isDenoiseExpected
@@ -1656,7 +1778,8 @@ public:
                 << " image_max="
                 << mapper->GetMaximumImageSampleDistance()
                 << " jitter=" << mapper->GetUseJittering()
-                << " max_dim=" << params.volumeQuality.maxDimension
+                << " quality="
+                << static_cast<int>(params.volumeQuality)
                 << " shade=" << property->GetShade()
                 << " ambient=" << property->GetAmbient()
                 << " diffuse=" << property->GetDiffuse()
@@ -1711,28 +1834,27 @@ public:
         // 每次计时前完整恢复策略基线，使 case 只保留名称所指的单一变量。
         const auto setBaseState = [&]() {
             strategy.SetInputMask(nullptr);
-            params.tfNodes = grayNodes;
+            params.volumeTransferFunction = grayFunction;
             params.material = {
                 0.1, 0.7, 0.2, 10.0, 1.0, false
             };
             params.gradientOpacity.clear();
-            params.volumeQuality = {
-                VolumeQuality::Quality, 766, 1.0, true
-            };
+            params.volumeQuality = VolumeQuality::Auto;
             params.isDenoiseOn = false;
+            params.isInteracting = false;
             strategy.SetVisualState(
                 params,
-                UpdateFlags::TF
+                UpdateFlags::VolumeTransfer
                     | UpdateFlags::Material
                     | UpdateFlags::GradientOpacity
                     | UpdateFlags::Quality
-                    | UpdateFlags::Denoise);
-            mapper->SetAutoAdjustSampleDistances(false);
+                    | UpdateFlags::Denoise
+                    | UpdateFlags::RenderRate);
         };
 
         setBaseState();
-        params.tfNodes = currentNodes;
-        strategy.SetVisualState(params, UpdateFlags::TF);
+        params.volumeTransferFunction = currentFunction;
+        strategy.SetVisualState(params, UpdateFlags::VolumeTransfer);
         bool areSamplesValid =
             startSamples("A_current_tf");
         setBaseState();
@@ -1776,23 +1898,19 @@ public:
             startSamples("F_gray_auto") && areSamplesValid;
 
         setBaseState();
-        params.volumeQuality = {
-            VolumeQuality::Custom, 766, 0.5, true
-        };
+        params.volumeQuality = VolumeQuality::XHigh;
         strategy.SetVisualState(
             params, UpdateFlags::Quality);
         areSamplesValid =
-            startSamples("G0_gray_ray_half")
+            startSamples("G0_gray_xhigh")
                 && areSamplesValid;
 
         setBaseState();
-        params.volumeQuality = {
-            VolumeQuality::Custom, 766, 1.0, true
-        };
+        params.volumeQuality = VolumeQuality::Low;
         strategy.SetVisualState(
             params, UpdateFlags::Quality);
         areSamplesValid =
-            startSamples("G1_gray_ray_full")
+            startSamples("G1_gray_low")
                 && areSamplesValid;
 
         setBaseState();
@@ -1882,9 +2000,15 @@ public:
                 bool expectedAuto,
                 double expectedRay,
                 double expectedImage,
+                double expectedMaxImage,
                 bool isPreview,
                 bool isWarmupNeeded,
                 double* phaseP95) {
+            params.isInteracting = isPreview;
+            if (!strategy.SetVisualState(
+                    params, UpdateFlags::RenderRate)) {
+                return false;
+            }
             endpoint->renderWindow->SetDesiredUpdateRate(
                 expectedRate);
             const auto sendTimerFrame = [&]() {
@@ -1939,6 +2063,8 @@ public:
                         mapper->GetImageSampleDistance()
                             - expectedImage)
                         >= 1e-12
+                    || mapper->GetUseJittering()
+                        != static_cast<int>(!isPreview)
                     || isPreview
                         != (endpoint->renderWindow
                                 ->GetDesiredUpdateRate()
@@ -1965,11 +2091,16 @@ public:
                         - expectedImage)
                     < 1e-12
                 && std::abs(
-                    mapper->GetMinimumImageSampleDistance() - 1.0)
+                    mapper->GetMinimumImageSampleDistance()
+                        - (isPreview ? expectedImage : 1.0))
                     < 1e-12
                 && std::abs(
-                    mapper->GetMaximumImageSampleDistance() - 1.0)
-                    < 1e-12;
+                    mapper->GetMaximumImageSampleDistance()
+                        - (isPreview
+                            ? expectedImage : expectedMaxImage))
+                    < 1e-12
+                && mapper->GetUseJittering()
+                    == static_cast<int>(!isPreview);
             const double p95Ms = GetRenderTimeMs(0.95);
             if (phaseP95) {
                 *phaseP95 = p95Ms;
@@ -2001,14 +2132,21 @@ public:
         };
         const auto runInteractionPhases =
             [&](const char* caseName,
-                double rayStep,
+                const VolumeQuality quality,
+                const double previewImage,
+                const double previewRayFactor,
+                const double maximumImage,
                 bool isGainRequired) {
             setBaseState();
-            params.volumeQuality = {
-                VolumeQuality::Custom, 766, rayStep, true
-            };
+            params.volumeQuality = quality;
             strategy.SetVisualState(
                 params, UpdateFlags::Quality);
+            // QualityState 只在 GPURender 的 OpenGL owner thread 提交；
+            // 先渲染一帧，再读取该档静止 ray 基线。
+            endpoint->renderWindow->Render();
+            const double stillRay = mapper->GetSampleDistance();
+            const double previewRay =
+                stillRay * previewRayFactor;
             constexpr std::size_t phaseRounds = 3;
             std::array<double, phaseRounds> staticP95s{};
             std::array<double, phaseRounds> previewP95s{};
@@ -2022,15 +2160,16 @@ public:
                 double afterP95 = 0.0;
                 const bool isBefore = samplePhase(
                     caseName, "before", 0.001,
-                    false, rayStep, 1.0, false,
+                    false, stillRay, 1.0, maximumImage, false,
                     round == 0, &beforeP95);
                 const bool isDuring = samplePhase(
                     caseName, "during", 15.0,
-                    false, 2.0 * rayStep, 2.0, true,
+                    false, previewRay, previewImage,
+                    maximumImage, true,
                     false, &duringP95);
                 const bool isAfter = samplePhase(
                     caseName, "after", 0.001,
-                    false, rayStep, 1.0, false,
+                    false, stillRay, 1.0, maximumImage, false,
                     false, &afterP95);
                 const double staticP95 =
                     std::max(beforeP95, afterP95);
@@ -2091,18 +2230,20 @@ public:
         }
         areSamplesValid =
             runInteractionPhases(
-                "I_fixed_interaction", 1.0, false)
+                "I_low_interaction",
+                VolumeQuality::Low,
+                2.0, 2.0, 3.0, false)
             && areSamplesValid;
         areSamplesValid =
             runInteractionPhases(
-                "J_custom_interaction", 0.25, true)
+                "J_high_interaction",
+                VolumeQuality::High,
+                3.0, 3.0, 2.5, true)
             && areSamplesValid;
 
         const auto runStylePhase = [&]() {
             setBaseState();
-            params.volumeQuality = {
-                VolumeQuality::Custom, 766, 1.0, true
-            };
+            params.volumeQuality = VolumeQuality::Low;
             const std::thread::id qualityThread =
                 std::this_thread::get_id();
             strategy.SetVisualState(
@@ -2110,6 +2251,72 @@ public:
             if (!setVolumeMode()) {
                 return false;
             }
+            endpoint->renderWindow->Render();
+            const double styleStillRay =
+                mapper->GetSampleDistance();
+
+            const auto getVisualPixels = [&]() {
+                endpoint->renderWindow->Render();
+                endpoint->renderWindow->WaitForCompletion();
+                vtkNew<vtkWindowToImageFilter> capture;
+                capture->SetInput(endpoint->renderWindow);
+                capture->SetInputBufferTypeToRGB();
+                capture->ReadFrontBufferOff();
+                capture->ShouldRerenderOff();
+                capture->Update();
+                auto* output = capture->GetOutput();
+                auto* pixels = output
+                    ? static_cast<unsigned char*>(
+                        output->GetScalarPointer())
+                    : nullptr;
+                const vtkIdType valueCount = output
+                    ? output->GetNumberOfPoints()
+                        * output->GetNumberOfScalarComponents()
+                    : 0;
+                return pixels && valueCount > 0
+                    ? std::vector<unsigned char>(
+                        pixels, pixels + valueCount)
+                    : std::vector<unsigned char>{};
+            };
+            const int volumeVisibility = volume->GetVisibility();
+            volume->VisibilityOff();
+            const auto backgroundPixels = getVisualPixels();
+            volume->SetVisibility(volumeVisibility);
+            const auto beforePixels = getVisualPixels();
+            const auto getVolumeVisible = [&](
+                const std::vector<unsigned char>& pixels) {
+                if (pixels.size() != backgroundPixels.size()
+                    || pixels.size() < 3
+                    || pixels.size() % 3 != 0) {
+                    return false;
+                }
+                constexpr int signalThreshold = 8;
+                std::size_t signalPixelCount = 0;
+                for (std::size_t index = 0;
+                    index < pixels.size(); index += 3) {
+                    int pixelDifference = 0;
+                    for (std::size_t component = 0;
+                        component < 3; ++component) {
+                        pixelDifference = std::max(
+                            pixelDifference,
+                            std::abs(
+                                static_cast<int>(
+                                    pixels[index + component])
+                                - static_cast<int>(
+                                    backgroundPixels[
+                                        index + component])));
+                    }
+                    if (pixelDifference > signalThreshold) {
+                        ++signalPixelCount;
+                    }
+                }
+                const std::size_t pixelCount = pixels.size() / 3;
+                // 至少 0.5% 像素必须来自体数据，排除纯背景和单点噪声。
+                return signalPixelCount * 200 > pixelCount;
+            };
+            const bool isBeforeVisible =
+                getVolumeVisible(beforePixels);
+            const std::size_t vtkErrorCount = m_vtkErrorCount;
             auto* style = vtkInteractorStyle::SafeDownCast(
                 endpoint->interactor->GetInteractorStyle());
             if (!style || !ResetRenderStats()) {
@@ -2156,8 +2363,13 @@ public:
                     mapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance() - 2.0)
-                    < 1e-12;
+                    mapper->GetSampleDistance()
+                        - styleStillRay * 2.0)
+                    < 1e-12
+                && mapper->GetUseJittering() == 0;
+            const auto duringPixels = getVisualPixels();
+            const bool isDuringVisible =
+                getVolumeVisible(duringPixels);
 
             // Start callback 只镜像 rate；默认 style 的首帧 Render 必须已消费
             // preview。Timer 随后继续以共享 source 为权威状态。
@@ -2169,8 +2381,10 @@ public:
                     mapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance() - 2.0)
-                    < 1e-12;
+                    mapper->GetSampleDistance()
+                        - styleStillRay * 2.0)
+                    < 1e-12
+                && mapper->GetUseJittering() == 0;
             bool areStyleSamplesValid = ResetRenderStats();
 
             for (int index = 0;
@@ -2196,8 +2410,10 @@ public:
                     mapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance() - 2.0)
-                    < 1e-12;
+                    mapper->GetSampleDistance()
+                        - styleStillRay * 2.0)
+                    < 1e-12
+                && mapper->GetUseJittering() == 0;
             const double p50Ms = GetRenderTimeMs(0.50);
             const double p95Ms = GetRenderTimeMs(0.95);
             const double maxMs = GetRenderTimeMs(1.00);
@@ -2210,8 +2426,16 @@ public:
                     mapper->GetImageSampleDistance() - 1.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance() - 1.0)
-                    < 1e-12;
+                    mapper->GetSampleDistance() - styleStillRay)
+                    < 1e-12
+                && mapper->GetUseJittering() != 0;
+            const auto afterPixels = getVisualPixels();
+            const bool isAfterVisible =
+                getVolumeVisible(afterPixels);
+            const bool isVisualValid = isBeforeVisible
+                && isDuringVisible
+                && isAfterVisible
+                && m_vtkErrorCount == vtkErrorCount;
             const bool isThreadValid =
                 threadProbe.startCount == 1
                 && threadProbe.moveCount
@@ -2246,6 +2470,9 @@ public:
                 << " p95_ms=" << p95Ms
                 << " max_ms=" << maxMs
                 << " restored=" << isStyleRestored
+                << " visible=" << isBeforeVisible << ','
+                << isDuringVisible << ',' << isAfterVisible
+                << " visual_ok=" << isVisualValid
                 << " style_events="
                 << threadProbe.startCount << ','
                 << threadProbe.moveCount << ','
@@ -2262,6 +2489,7 @@ public:
                 && isTimerPreview
                 && isStyleSampleValid
                 && isStyleRestored
+                && isVisualValid
                 && isThreadValid;
         };
         areSamplesValid =
@@ -2530,9 +2758,9 @@ int main(int argc, char* argv[])
         return isStyleQualityValid ? 0 : 7;
     }
 
-    if (!BuildPresetReturnTest()) {
+    if (!BuildTransferReturnTest()) {
         std::cerr
-            << "FAIL: Real preset conflict was not propagated\n";
+            << "FAIL: Complete transfer state was not propagated\n";
         return 3;
     }
     if (!BuildRenderSourceTest()) {

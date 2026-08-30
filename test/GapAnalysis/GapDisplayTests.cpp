@@ -1,8 +1,8 @@
 #include "GapDisplayTests.h"
 
 #include "Services/GapAnalysisService.h"
+#include "Render/Contracts/FeatureOverlay.h"
 #include "Render/Contracts/OverlayService.h"
-#include "Render/Contracts/VisualStrategy.h"
 
 #include <vtkImageData.h>
 #include <vtkSmartPointer.h>
@@ -19,39 +19,40 @@
 namespace {
 
 static_assert(noexcept(
-    std::declval<OverlayService&>().RemoveOverlayStrategy(
-        std::declval<std::shared_ptr<AbstractVisualStrategy>>())),
+    std::declval<OverlayService&>().RemoveOverlay(
+        std::declval<std::shared_ptr<FeatureOverlay>>())),
     "Overlay removal must not reopen the StartView exception boundary.");
 
 class OverlayStub final : public OverlayService {
 public:
-    void AttachOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy> strategy) override
+    bool AttachOverlay(
+        std::shared_ptr<FeatureOverlay> overlay) override
     {
-        m_strategy = std::move(strategy);
+        m_overlay = std::move(overlay);
         ++m_attachCount;
+        return true;
     }
 
-    void RemoveOverlayStrategy(
-        std::shared_ptr<AbstractVisualStrategy> strategy) noexcept override
+    void RemoveOverlay(
+        std::shared_ptr<FeatureOverlay> overlay) noexcept override
     {
-        if (m_strategy != strategy) {
+        if (m_overlay != overlay) {
             return;
         }
-        m_strategy.reset();
+        m_overlay.reset();
         ++m_removeCount;
     }
 
-    void ClearOverlayStrategies() override
+    void ClearOverlays() noexcept override
     {
-        m_strategy.reset();
+        m_overlay.reset();
     }
 
     int GetAttachCount() const { return m_attachCount; }
     int GetRemoveCount() const { return m_removeCount; }
 
 private:
-    std::shared_ptr<AbstractVisualStrategy> m_strategy;
+    std::shared_ptr<FeatureOverlay> m_overlay;
     int m_attachCount = 0;
     int m_removeCount = 0;
 };

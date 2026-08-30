@@ -12,13 +12,8 @@ class SharedInteractionState::Impl {
 public:
     struct ViewValues final {
         std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
-        std::vector<TFNode> nodes{
-            { 0.00, 0.0, 0.00, 0.00, 0.00 },
-            { 0.35, 0.0, 0.75, 0.75, 0.75 },
-            { 0.60, 0.6, 0.85, 0.85, 0.85 },
-            { 1.00, 1.0, 0.95, 0.95, 0.95 } };
-        TransferPreset transferPreset = TransferPreset::Manual;
-        DataVersion transferPresetVersion = 0;
+        VolumeTransferFunction volumeTransferFunction;
+        bool isTransferAuto = true;
         double isoValue = 0.0;
         MaterialParams material;
         BackgroundColor background;
@@ -101,24 +96,57 @@ public:
         return false;
     }
 
-    static bool SetTFNodes(
-        std::vector<TFNode>& current,
-        const std::vector<TFNode>& next)
+    static UpdateFlags SetVolumeTransferFunction(
+        VolumeTransferFunction& current,
+        const VolumeTransferFunction& next)
     {
-        if (current.size() == next.size()) {
-            const bool isSame = std::equal(
-                current.begin(), current.end(), next.begin(),
-                [](const TFNode& left, const TFNode& right) {
-                    return std::abs(left.position - right.position) <= 1e-6
-                        && std::abs(left.opacity - right.opacity) <= 1e-6
+        const auto hasColorChanged = [&]() {
+            if (current.colorNodes.size() != next.colorNodes.size()) {
+                return true;
+            }
+            return !std::equal(
+                current.colorNodes.begin(), current.colorNodes.end(),
+                next.colorNodes.begin(),
+                [](const VolumeTransferFunction::ColorNode& left,
+                    const VolumeTransferFunction::ColorNode& right) {
+                    return std::abs(left.scalar - right.scalar) <= 1e-6
                         && std::abs(left.r - right.r) <= 1e-6
                         && std::abs(left.g - right.g) <= 1e-6
                         && std::abs(left.b - right.b) <= 1e-6;
                 });
-            if (isSame) return false;
+        }();
+        const auto hasOpacityChanged = [&]() {
+            if (current.opacityNodes.size() != next.opacityNodes.size()) {
+                return true;
+            }
+            return !std::equal(
+                current.opacityNodes.begin(), current.opacityNodes.end(),
+                next.opacityNodes.begin(),
+                [](const VolumeTransferFunction::OpacityNode& left,
+                    const VolumeTransferFunction::OpacityNode& right) {
+                    return std::abs(left.scalar - right.scalar) <= 1e-6
+                        && std::abs(left.opacity - right.opacity) <= 1e-6;
+                });
+        }();
+        if (!hasColorChanged && !hasOpacityChanged) {
+            return UpdateFlags::None;
         }
         current = next;
-        return true;
+        return UpdateFlags::VolumeTransfer;
+    }
+
+    static UpdateFlags SetTransfer(
+        ViewValues& view,
+        const VolumeTransferFunction& function,
+        const bool isAuto)
+    {
+        UpdateFlags flags = SetVolumeTransferFunction(
+            view.volumeTransferFunction, function);
+        if (view.isTransferAuto != isAuto) {
+            view.isTransferAuto = isAuto;
+            flags |= UpdateFlags::VolumeTransfer;
+        }
+        return flags;
     }
 
     static bool SetMaterial(MaterialParams& current, const MaterialParams& next)
@@ -602,20 +630,14 @@ void SharedInteractionState::SetPreInitConfig(const PreInitConfig& config)
             flags |= UpdateFlags::Material;
             m_impl->SetViewChanged(UpdateFlags::Material, true);
         }
-        if (config.hasTF) {
-            const bool hasIntentChanged =
-                view.transferPreset != TransferPreset::Manual
-                || view.transferPresetVersion != 0;
-            view.transferPreset = TransferPreset::Manual;
-            view.transferPresetVersion = 0;
-            const bool hasNodesChanged = Impl::SetTFNodes(
-                view.nodes, config.tfNodes);
-            if (hasNodesChanged) {
-                flags |= UpdateFlags::TF;
-            }
+        if (config.hasVolumeTransferFunction) {
+            const UpdateFlags transferFlags =
+                Impl::SetTransfer(
+                    view, config.volumeTransferFunction, false);
+            flags |= transferFlags;
             m_impl->SetViewChanged(
-                UpdateFlags::TF,
-                hasNodesChanged || hasIntentChanged);
+                transferFlags,
+                transferFlags != UpdateFlags::None);
         }
         if (config.hasIso
             && Impl::SetScalar(view.isoValue, config.isoThreshold)) {
@@ -667,12 +689,9 @@ std::array<double, 16> SharedInteractionState::GetModelMatrix() const
 
 void SharedInteractionState::SetScalarRange(double rangeMin, double rangeMax)
 {
-    bool hasChanged = false;
-    {
-        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-        hasChanged = Impl::SetArray(m_impl->m_dataRange, { rangeMin, rangeMax });
-    }
-    if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    (void)Impl::SetArray(
+        m_impl->m_dataRange, { rangeMin, rangeMax });
 }
 
 std::array<double, 2> SharedInteractionState::GetScalarRange() const
@@ -686,77 +705,66 @@ std::array<double, 2> SharedInteractionState::GetDataRange() const
     return GetScalarRange();
 }
 
-void SharedInteractionState::SetTFNodes(const std::vector<TFNode>& nodes)
+bool SharedInteractionState::SetVolumeTransferFunction(
+    const VolumeTransferFunction& function)
 {
-    bool hasChanged = false;
+    UpdateFlags flags = UpdateFlags::None;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         auto& view = m_impl->GetViewValues();
-        const bool hasIntentChanged =
-            view.transferPreset != TransferPreset::Manual
-            || view.transferPresetVersion != 0;
-        view.transferPreset = TransferPreset::Manual;
-        view.transferPresetVersion = 0;
-        hasChanged = Impl::SetTFNodes(view.nodes, nodes);
+        flags = Impl::SetTransfer(view, function, false);
         m_impl->SetViewChanged(
-            UpdateFlags::TF,
-            hasChanged || hasIntentChanged);
+            flags,
+            flags != UpdateFlags::None);
     }
-    if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
-}
-
-void SharedInteractionState::GetTFNodes(std::vector<TFNode>& destination) const
-{
-    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-    destination = m_impl->GetViewValues().nodes;
-}
-
-void SharedInteractionState::SetTransferPresetIntent(TransferPreset preset)
-{
-    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-    auto& view = m_impl->GetViewValues();
-    if (view.transferPreset == preset
-        && view.transferPresetVersion == 0) return;
-    view.transferPreset = preset;
-    view.transferPresetVersion = 0;
-    m_impl->SetViewChanged(UpdateFlags::TF, true);
-}
-
-bool SharedInteractionState::SetTransferPresetNodes(
-    TransferPreset preset,
-    DataVersion dataVersion,
-    const std::vector<TFNode>& nodes)
-{
-    if (preset == TransferPreset::Manual
-        || dataVersion == 0
-        || nodes.empty()) {
-        return false;
-    }
-
-    bool hasChanged = false;
-    {
-        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-        auto& view = m_impl->GetViewValues();
-        if (view.transferPreset != preset
-            || view.transferPresetVersion > dataVersion) {
-            return false;
-        }
-        const bool hasVersionChanged =
-            view.transferPresetVersion != dataVersion;
-        hasChanged = Impl::SetTFNodes(view.nodes, nodes);
-        view.transferPresetVersion = dataVersion;
-        m_impl->SetViewChanged(
-            UpdateFlags::TF,
-            hasChanged || hasVersionChanged);
-    }
-    if (hasChanged) m_impl->SendFlags(UpdateFlags::TF);
+    if (flags != UpdateFlags::None) m_impl->SendFlags(flags);
     return true;
 }
 
-TransferPreset SharedInteractionState::GetTransferPreset() const
+bool SharedInteractionState::SetAutoTransfer(
+    const VolumeTransferFunction& function)
+{
+    UpdateFlags flags = UpdateFlags::None;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        auto& view = m_impl->GetViewValues();
+        if (!view.isTransferAuto) return false;
+        flags = Impl::SetTransfer(view, function, true);
+        m_impl->SetViewChanged(
+            flags,
+            flags != UpdateFlags::None);
+    }
+    if (flags != UpdateFlags::None) m_impl->SendFlags(flags);
+    return true;
+}
+
+bool SharedInteractionState::ResetTransfer(
+    const VolumeTransferFunction& function)
+{
+    UpdateFlags flags = UpdateFlags::None;
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        auto& view = m_impl->GetViewValues();
+        flags = Impl::SetTransfer(view, function, true);
+        m_impl->SetViewChanged(
+            flags,
+            flags != UpdateFlags::None);
+    }
+    if (flags != UpdateFlags::None) m_impl->SendFlags(flags);
+    return true;
+}
+
+VolumeTransferFunction
+SharedInteractionState::GetVolumeTransferFunction() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-    return m_impl->GetViewValues().transferPreset;
+    return m_impl->GetViewValues().volumeTransferFunction;
+}
+
+bool SharedInteractionState::GetTransferAuto() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return m_impl->GetViewValues().isTransferAuto;
 }
 
 void SharedInteractionState::SetIsoValue(double value)
@@ -1094,36 +1102,33 @@ void ViewPresentationState::SetPreInitConfig(
     m_impl->storage.SetPreInitConfig(viewConfig);
 }
 
-void ViewPresentationState::SetTFNodes(
-    const std::vector<TFNode>& nodes)
+bool ViewPresentationState::SetVolumeTransferFunction(
+    const VolumeTransferFunction& function)
 {
-    m_impl->storage.SetTFNodes(nodes);
+    return m_impl->storage.SetVolumeTransferFunction(function);
 }
 
-void ViewPresentationState::GetTFNodes(
-    std::vector<TFNode>& destination) const
+bool ViewPresentationState::SetAutoTransfer(
+    const VolumeTransferFunction& function)
 {
-    m_impl->storage.GetTFNodes(destination);
+    return m_impl->storage.SetAutoTransfer(function);
 }
 
-void ViewPresentationState::SetTransferPresetIntent(
-    const TransferPreset preset)
+bool ViewPresentationState::ResetTransfer(
+    const VolumeTransferFunction& function)
 {
-    m_impl->storage.SetTransferPresetIntent(preset);
+    return m_impl->storage.ResetTransfer(function);
 }
 
-bool ViewPresentationState::SetTransferPresetNodes(
-    const TransferPreset preset,
-    const DataVersion dataVersion,
-    const std::vector<TFNode>& nodes)
+VolumeTransferFunction
+ViewPresentationState::GetVolumeTransferFunction() const
 {
-    return m_impl->storage.SetTransferPresetNodes(
-        preset, dataVersion, nodes);
+    return m_impl->storage.GetVolumeTransferFunction();
 }
 
-TransferPreset ViewPresentationState::GetTransferPreset() const
+bool ViewPresentationState::GetTransferAuto() const
 {
-    return m_impl->storage.GetTransferPreset();
+    return m_impl->storage.GetTransferAuto();
 }
 
 void ViewPresentationState::SetIsoValue(const double value)

@@ -1715,33 +1715,35 @@ bool BaseDataManager::Impl::BuildMeshColors(
         return false;
     }
 
-    // 1. TF 节点与 scalar range 来自同一次任务接纳；PLY 颜色不读取 renderer 或 framebuffer。
+    // 1. 真实 scalar 节点与数据快照在同一次任务接纳时冻结；
+    // PLY 颜色不读取 renderer 或 framebuffer。
     auto colorMap =
         vtkSmartPointer<vtkColorTransferFunction>::New();
-    double previousPosition = -1.0;
-    for (const auto& node : params.tfNodes) {
-        if (!std::isfinite(node.position)
+    double previousScalar = 0.0;
+    const auto& function = params.volumeTransferFunction;
+    if (!function.colorNodes.empty()
+        && function.colorNodes.size() < 2) {
+        return false;
+    }
+    for (std::size_t index = 0;
+        index < function.colorNodes.size(); ++index) {
+        const auto& node = function.colorNodes[index];
+        if (!std::isfinite(node.scalar)
             || !std::isfinite(node.r)
             || !std::isfinite(node.g)
             || !std::isfinite(node.b)
-            || !std::isfinite(node.opacity)
-            || node.position < 0.0 || node.position > 1.0
-            || node.position < previousPosition
             || node.r < 0.0 || node.r > 1.0
             || node.g < 0.0 || node.g > 1.0
             || node.b < 0.0 || node.b > 1.0
-            || node.opacity < 0.0 || node.opacity > 1.0) {
+            || (index > 0
+                && node.scalar <= previousScalar)) {
             return false;
         }
-        const double scalar = params.scalarRange[0]
-            + node.position
-                * (params.scalarRange[1]
-                    - params.scalarRange[0]);
         colorMap->AddRGBPoint(
-            scalar, node.r, node.g, node.b);
-        previousPosition = node.position;
+            node.scalar, node.r, node.g, node.b);
+        previousScalar = node.scalar;
     }
-    if (params.tfNodes.empty()) {
+    if (function.colorNodes.empty()) {
         // 没有显式 TF 时使用数据域灰阶；常量域使用白色，避免生成未定义颜色。
         if (params.scalarRange[1] > params.scalarRange[0]) {
             colorMap->AddRGBPoint(

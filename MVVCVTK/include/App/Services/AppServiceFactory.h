@@ -16,6 +16,7 @@
 
 class IStateEventSource;
 class SharedInteractionState;
+class HistogramConverter;
 
 using AppTaskWork = std::packaged_task<bool(TaskStopToken)>;
 using AppWorkerWork = std::function<void()>;
@@ -35,6 +36,8 @@ struct AppServiceArgs final {
     std::shared_ptr<AbstractDataManager> dataManager;
     std::shared_ptr<SharedInteractionState> interactionState;
     std::shared_ptr<IStateEventSource> eventSource;
+    // 同一 Host Session 的 View 注入同一实例；converter 内部互斥复用 histogram cache。
+    std::shared_ptr<HistogramConverter> histogram;
     // 只在构造固定 worker 时调用；生产默认创建 std::thread，测试可注入启动失败。
     AppWorkerStart workerStart;
     std::shared_ptr<AppTaskExecutor> taskExecutor;

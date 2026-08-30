@@ -10,36 +10,20 @@
 //   • 新增 operator|= / operator&= 辅助
 // =====================================================================
 
+#include "App/FeatureTypes.h"
+#include "App/VolumePresentationTypes.h"
 #include "App/ViewTypes.h"
 #include "Data/DataVersion.h"
 
-#include <vector>
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstddef>
 #include <string>
 #include <functional>
+#include <vector>
 
-// 通用交互来源键；主体只比较完整键，不解释 Feature 的 owner/channel 文本。
-struct InteractionSource final {
-    std::string ownerId;
-    std::string channelId;
-
-    bool operator==(const InteractionSource& other) const noexcept
-    {
-        return ownerId == other.ownerId && channelId == other.channelId;
-    }
-};
-
-// 通用 Feature 来源键；App 只比较 id，不解释具体模块名称。
-struct FeatureSource final {
-    std::string id;
-
-    bool operator==(const FeatureSource& other) const noexcept
-    {
-        return id == other.id;
-    }
-};
 
 // --- 通用状态枚举（用于数据可信、文件流加载、重载加载等状态）---
 enum class LoadState {
@@ -56,13 +40,6 @@ enum class LoadEventKind {
     Reload
 };
 
-// --- 传输函数节点 ---
-struct TFNode {
-    double position; // 标量范围内的归一化位置，[0.0, 1.0] 映射到 [rangeMin, rangeMax]
-    double opacity;  // 节点不透明度，[0.0, 1.0]；体渲染时再乘材质全局 opacity
-    double r, g, b;  // 归一化 RGB 分量，顺序为 [r, g, b]，各分量范围 [0.0, 1.0]
-};
-
 // 数据导出接纳时冻结的完整参数；worker 只消费本值对象，不再读取后续视觉状态。
 struct DataExportParams final {
     std::string extension;
@@ -74,7 +51,7 @@ struct DataExportParams final {
         0.0, 0.0, 0.0, 1.0
     };
     std::array<double, 2> scalarRange = { 0.0, 0.0 };
-    std::vector<TFNode> tfNodes;
+    VolumeTransferFunction volumeTransferFunction;
 };
 
 // --- 材质参数 ---
@@ -86,46 +63,6 @@ struct MaterialParams {
     double specularPower = 10.0; // Phong 高光指数，非负；默认 10.0
     double opacity = 1.0;        // 全局不透明度，[0.0, 1.0]；默认完全不透明
     bool   isShadeOn = false;    // true 启用体渲染阴影或等值面 Phong 插值；默认关闭
-};
-
-enum class VolumeQuality {
-    Quality,
-    Custom
-};
-
-struct VolumeQualityParams final {
-    VolumeQuality quality = VolumeQuality::Quality;
-    int maxDimension = 766;
-    double sampleDistance = 1.0;
-    bool isJitterOn = true;
-};
-
-// Feature 只派生临时 Quality，不改写调用方保存的 Quality/Custom 配置。
-inline VolumeQuality GetVolumeQuality(
-    const VolumeQualityParams& configured,
-    bool isFeatureActive) noexcept
-{
-    return isFeatureActive
-        ? VolumeQuality::Quality : configured.quality;
-}
-
-// 刷新调度只反映交互生命周期，不再选择质量档或 producer。
-inline double GetRenderRate(bool isInteracting) noexcept
-{
-    constexpr double staticRate = 0.001;
-    constexpr double fastRate = 15.0;
-    return isInteracting ? fastRate : staticRate;
-}
-
-struct GradientOpacityNode final {
-    double gradient = 0.0; // VTK gradient-opacity 原生域中的梯度幅值，必须非负。
-    double opacity = 0.0;  // 归一化不透明度 [0,1]。
-};
-
-// Scalar TF 是 session-wide 真源；Manual 表示外部节点，Percentile 表示随数据版本重算。
-enum class TransferPreset {
-    Manual,
-    Percentile
 };
 
 // --- 背景色（RGB，0~1）---
@@ -149,7 +86,7 @@ enum class WindowLevelMode {
 enum class UpdateFlags : int {
     None = 0,
     Cursor = 1 << 0,  // 位置改变        (0x01)
-    TF = 1 << 1,  // 颜色/透明度改变 (0x02)
+    VolumeTransfer = 1 << 1,  // 完整体传输函数快照改变
     IsoValue = 1 << 2,  // 阈值改变        (0x04)
     Material = 1 << 3,  // 材质参数改变    (0x08)
     RenderRate = 1 << 4,  // 交互来源边界改变，仅用于同步窗口刷新率 (0x10)
@@ -165,7 +102,7 @@ enum class UpdateFlags : int {
     Quality = 1 << 14, // 目标 view 的 Volume producer/mapper 质量配置
     GradientOpacity = 1 << 15, // 目标 view 的梯度不透明度函数
     Denoise = 1 << 16, // 目标 view 的仅显示降噪 producer
-    All = Cursor | TF | IsoValue | Material | RenderRate | Transform
+    All = Cursor | VolumeTransfer | IsoValue | Material | RenderRate | Transform
         | WindowLevel | Visibility | Background | Spacing | DataReady
         | Quality | GradientOpacity | Denoise
 };
@@ -192,11 +129,12 @@ struct RenderParams {
     std::array<double, 3>  cursor = { 0, 0, 0 }; // 轴约束后的联动点，VTK world 坐标 [x, y, z]
     std::array<double, 3>  cursorRaw = { 0, 0, 0 }; // 拾取原始点，VTK world 坐标 [x, y, z]
     int                    cursorAxis = -1; // 光标来源轴：0/1/2 为 X/Y/Z，-1 为自由点或无固定轴
-    bool                   isFeatureActive = false; // true 时锁定 Quality producer 与 mapper；交互只影响刷新调度
-    std::vector<TFNode>    tfNodes; // 传输函数节点；position 按 scalarRange 归一化映射
+    bool                   isFeatureActive = false; // 仅作诊断，不参与 Data LOD。
+    bool                   isInteracting = false;
+    VolumeTransferFunction volumeTransferFunction;
     double                 scalarRange[2] = { 0.0, 255.0 }; // 当前数据标量范围 [min, max]
     MaterialParams         material; // 当前材质快照；默认值来自 MaterialParams
-    VolumeQualityParams    volumeQuality; // 当前 view 的 Volume producer/mapper 质量配置
+    VolumeQuality          volumeQuality = VolumeQuality::Auto;
     std::vector<GradientOpacityNode> gradientOpacity; // 空数组表示使用 VTK 默认梯度不透明度
     bool                   isDenoiseOn = false; // true 仅在 Volume 显示 producer 前启用降噪
     double                 isoValue = 0.0; // 等值面阈值，单位与 scalarRange 相同
@@ -213,21 +151,17 @@ struct RenderParams {
         | VisFlags::Ruler; // 默认全部显示
 };
 
-// --- 切片朝向枚举 ---
-// Top_down(0,0,1)  Front_back(0,1,0)  Left_right(1,0,0)
-enum class Orientation { Top_down = 2, Front_back = 1, Left_right = 0 };
-
 // --- 前处理配置快照（批量提交，减少锁争用和广播次数）---
 struct PreInitConfig {
     VizMode             vizMode = VizMode::IsoSurface; // 无选择 flag；批量配置始终写入当前视图模式
     MaterialParams      material; // 无选择 flag；批量配置始终提交完整材质快照
-    std::vector<TFNode> tfNodes; // hasTF=true 时提交；显式空数组非法
+    VolumeTransferFunction volumeTransferFunction;
     double              isoThreshold = 0.0; // hasIso=true 时提交，单位与数据标量相同
     BackgroundColor     bgColor; // hasBgColor=true 时提交，RGB 分量范围 [0.0, 1.0]
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 }; // hasSpacing=true 时提交 RAS [sx, sy, sz]
     WindowLevelParams   windowLevel; // hasWindowLevel=true 时提交，单位与数据标量相同
     // false 表示忽略对应 payload 并保留现状；true 表示显式提交，包括 payload 的默认值。
-    bool                hasTF = false;
+    bool                hasVolumeTransferFunction = false;
     bool                hasIso = false;
     bool                hasBgColor = false;
     bool                hasSpacing = false;

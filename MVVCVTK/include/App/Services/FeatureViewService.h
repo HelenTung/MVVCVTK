@@ -1,6 +1,6 @@
 #pragma once
 
-#include "App/AppTypes.h"
+#include "App/FeatureTypes.h"
 #include "Render/Contracts/RenderEffect.h"
 
 #include <array>

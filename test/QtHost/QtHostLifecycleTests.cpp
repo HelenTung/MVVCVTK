@@ -178,6 +178,7 @@ bool SendTimer(
             }
         }
     }
+
     if (timerId == 0) return false;
     timerId += idOffset;
     interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);

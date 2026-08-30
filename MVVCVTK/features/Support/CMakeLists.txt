@@ -7,7 +7,7 @@ set_target_properties(
 target_sources(
     mvvcvtk_feature_support
     INTERFACE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/FeatureVisualStrategy.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Support/FeatureOverlayBase.h"
 )
 target_include_directories(
     mvvcvtk_feature_support

@@ -1,23 +1,39 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <optional>
-#include <string>
 #include <vector>
+
+enum class HostDataExportFormat {
+    Raw,
+    Ply,
+    Stl,
+    Obj
+};
+
+// Host 只提交真实 scalar 坐标的完整传输函数快照。
+struct HostVolumeTransferFunction final {
+    struct ColorNode final {
+        double scalar = 0.0;
+        double r = 0.0;
+        double g = 0.0;
+        double b = 0.0;
+    };
+
+    struct OpacityNode final {
+        double scalar = 0.0;
+        double opacity = 0.0;
+    };
+
+    std::vector<ColorNode> colorNodes;
+    std::vector<OpacityNode> opacityNodes;
+};
 
 struct HostVolumeGeometry {
     std::array<int, 3> dimensions{ 0, 0, 0 }; // 体素数，顺序固定为 X/Y/Z。
     std::array<float, 3> spacing{};            // 相邻体素的物理间距，单位 mm。
     std::array<float, 3> origin{};             // 输入体数据的物理原点。
-};
-
-enum class HostRenderViewRole {
-    Primary3D,
-    Composite3D,
-    TopDownSlice,
-    FrontBackSlice,
-    LeftRightSlice,
-    Auxiliary
 };
 
 enum class HostRenderMode {
@@ -35,22 +51,6 @@ enum class HostToolMode {
     ModelTransform
 };
 
-// Host 导出契约的唯一格式基元；内部链路只透明传递规范后缀，不再定义同义枚举。
-enum class HostDataExportFormat {
-    Raw,
-    Ply,
-    Stl,
-    Obj
-};
-
-struct HostTransferNode {
-    double position = 0.0; // 当前 scalar range 内的归一化位置，[0,1]。
-    double opacity = 0.0;  // 该标量位置的不透明度控制点。
-    double r = 0.0; // 颜色通道，按 VTK RGB [0,1] 约定解释。
-    double g = 0.0;
-    double b = 0.0;
-};
-
 struct HostMaterialParams {
     double ambient = 0.1;        // 环境光系数。
     double diffuse = 0.7;        // 漫反射系数。
@@ -66,26 +66,13 @@ enum class HostMaterialPreset {
     Glossy
 };
 
-enum class HostVolumeQuality {
-    Quality,
-    Custom
-};
-
-struct HostVolumeQualityParams {
-    HostVolumeQuality quality = HostVolumeQuality::Quality;
-    int maxDimension = 766;
-    double sampleDistance = 1.0;
-    bool isJitterOn = true;
-};
-
-struct HostGradientOpacityNode {
-    double gradient = 0.0; // VTK gradient-opacity 原生域中的梯度幅值。
-    double opacity = 0.0;  // 归一化不透明度 [0,1]。
-};
-
-enum class HostTransferPreset {
-    Percentile = 0, // 保留既有 Host 请求的底层值。
-    Manual = 1 // 当前 TF 由 transferNodes 直接控制；也用于状态读回。
+// Host 只表达产品质量意图；比例、采样、jitter 与资源预算均由 Render 解析。
+enum class HostVolumeQuality : std::uint8_t {
+    Auto,
+    Low,
+    High,
+    XHigh,
+    Ultra
 };
 
 struct HostBackgroundColor {
@@ -109,17 +96,4 @@ struct HostVisibilityParams {
     std::optional<bool> isPlanes3DVisible;
     std::optional<bool> isCrosshairVisible;
     std::optional<bool> isRulerVisible;
-};
-
-// 单目标保持 id 优先且 id 未命中时不回退 role。
-struct HostViewTarget {
-    std::string viewId;
-    bool isViewRoleUsed = false;
-    HostRenderViewRole viewRole = HostRenderViewRole::Auxiliary;
-};
-
-// 多目标按 topology 顺序返回 ids/roles 的去重并集；空集合不表示全选。
-struct HostViewTargets {
-    std::vector<std::string> viewIds;
-    std::vector<HostRenderViewRole> viewRoles;
 };

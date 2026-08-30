@@ -45,17 +45,36 @@ vtkProp3D* CompositeStrategy::GetMainProp()
     else return nullptr;
 }
 
-void CompositeStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+bool CompositeStrategy::SetVisualState(
+    const RenderParams& params,
+    const UpdateFlags flags)
 {
     // 参考平面先同步，这样 3D 主内容与切片参照在同一帧里看到的是一致状态。
-    if (m_referencePlanes) {
-        m_referencePlanes->SetVisualState(params, flags);
+    if (m_referencePlanes
+        && !m_referencePlanes->SetVisualState(params, flags)) {
+        return false;
     }
 
     // 更新主视图
-    if (m_mainStrategy) {
-        m_mainStrategy->SetVisualState(params, flags);
+    return m_mainStrategy
+        && m_mainStrategy->SetVisualState(params, flags);
+}
+
+bool CompositeStrategy::SetInputData(
+    vtkSmartPointer<vtkDataObject> data,
+    vtkSmartPointer<vtkImageData> validityMask)
+{
+    if (!m_mainStrategy
+        || !m_mainStrategy->SetInputData(data, validityMask)) {
+        return false;
     }
+    // 参考平面沿用无失败返回的窄 setter；不能在主体提交后再制造一个可失败分支。
+    if (m_referencePlanes) {
+        m_referencePlanes->SetInputData(data);
+        m_referencePlanes->SetInputMask(validityMask);
+    }
+    m_lastInput = std::move(data);
+    return true;
 }
 
 void CompositeStrategy::SetInputMask(

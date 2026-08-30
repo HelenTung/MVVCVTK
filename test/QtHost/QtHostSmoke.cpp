@@ -65,8 +65,8 @@ public:
             return false;
         }
 
-        // 空策略验证 OverlayService 的完整方法声明已进入 staged closure，且不改变渲染树。
-        overlay->RemoveOverlayStrategy({});
+        // 空 overlay 验证窄契约已进入 staged closure，且不改变渲染树。
+        overlay->RemoveOverlay({});
         m_views = context.views;
         m_read = context.read;
         m_data = context.data;

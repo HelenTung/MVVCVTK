@@ -1,8 +1,7 @@
 #pragma once
 
 #include "Data/ImageReadTypes.h"
-#include "Host/Types/HostInputTypes.h"
-#include "Host/Types/HostRequest.h"
+#include "Host/Types/HostRequestTypes.h"
 #include "Host/Types/HostSessionTypes.h"
 
 #include <memory>

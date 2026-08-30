@@ -92,6 +92,7 @@ private:
     bool RemoveTimer();
     bool BuildInteractionRouter();
     bool SetInputStyle();
+    double GetRenderRate(bool isInteracting) const noexcept;
     InteractionEventKind GetEventKind(unsigned long eventId) const;
     void BuildInteractionEvent(
         InteractionEvent& event,
@@ -116,6 +117,7 @@ private:
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
     bool m_isAxesVisible = false;
     bool m_isCreated = false;
+    bool m_isStyleInteracting = false;
 };
 
 std::shared_ptr<AbstractViewContext> CreateViewContext(
@@ -213,7 +215,7 @@ bool StdViewContext::AttachObservers()
     if (!m_interactor || !m_eventCallback) return false;
 
     if (m_observerTags.empty()) {
-        const std::array<unsigned long, 12> events = {
+        const std::array<unsigned long, 11> events = {
             vtkCommand::MouseWheelForwardEvent,
             vtkCommand::MouseWheelBackwardEvent,
             vtkCommand::LeftButtonPressEvent,
@@ -223,7 +225,6 @@ bool StdViewContext::AttachObservers()
             vtkCommand::KeyReleaseEvent,
             vtkCommand::CharEvent,
             vtkCommand::ExitEvent,
-            vtkCommand::InteractionEvent,
             vtkCommand::RightButtonPressEvent,
             vtkCommand::RightButtonReleaseEvent
         };
@@ -255,7 +256,8 @@ bool StdViewContext::AttachObservers()
         vtkCommand::EndInteractionEvent,
         m_eventCallback,
         kObserverPriority);
-    if (startTag != 0 && endTag != 0) return true;
+    if (startTag != 0
+        && endTag != 0) return true;
 
     (void)RemoveObservers();
     return false;
@@ -288,6 +290,11 @@ bool StdViewContext::RemoveObservers()
         }
     }
     m_observerTags.clear();
+    m_isStyleInteracting = false;
+    if (m_renderWindow) {
+        m_renderWindow->SetDesiredUpdateRate(
+            GetRenderRate(false));
+    }
     return true;
 }
 
@@ -691,16 +698,33 @@ void StdViewContext::OnVTKEvent(
         const InteractionSource source{
             "ViewContext", "CameraStyle"
         };
-        const bool isStart =
-            eventId == vtkCommand::StartInteractionEvent;
-        (void)m_ports.state->SetInteracting(source, isStart);
-
-        if (isStart && m_renderWindow && m_timerHandler) {
-            m_renderWindow->SetDesiredUpdateRate(
-                GetRenderRate(true));
+        if (eventId == vtkCommand::StartInteractionEvent) {
+            // VTK style 自己负责每次相机变换后的即时 Render。这里只发布
+            // 交互边界并置一次 dirty，避免把整段拖动改造成 Timer 补帧。
+            if (m_isStyleInteracting) return;
+            if (!m_ports.state->SetInteracting(source, true)) return;
+            m_isStyleInteracting = true;
+            if (m_renderWindow) {
+                m_renderWindow->SetDesiredUpdateRate(
+                    GetRenderRate(true));
+            }
+            (void)m_ports.update->SetRenderNeeded();
+            return;
         }
-        (void)m_ports.update->SetRenderNeeded();
-        return;
+        if (eventId == vtkCommand::EndInteractionEvent) {
+            if (!m_isStyleInteracting) return;
+            if (m_ports.state->SetInteracting(source, false)) {
+                m_isStyleInteracting = false;
+                if (m_renderWindow) {
+                    m_renderWindow->SetDesiredUpdateRate(
+                        GetRenderRate(false));
+                }
+                // 最终静止质量仍由一次 heartbeat 收口；拖动过程不再按
+                // MouseMove 重复置脏或等待 Timer 才显示。
+                (void)m_ports.update->SetRenderNeeded();
+            }
+            return;
+        }
     }
 
     const auto eventKind = GetEventKind(eventId);
@@ -730,4 +754,12 @@ void StdViewContext::OnVTKEvent(
     if (result.isPropagationStopped && m_eventCallback) {
         m_eventCallback->SetAbortFlag(1);
     }
+}
+
+double StdViewContext::GetRenderRate(
+    const bool isInteracting) const noexcept
+{
+    constexpr double staticRate = 0.001;
+    constexpr double fastRate = 15.0;
+    return isInteracting ? fastRate : staticRate;
 }

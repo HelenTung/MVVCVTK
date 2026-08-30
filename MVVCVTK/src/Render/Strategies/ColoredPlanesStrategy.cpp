@@ -161,7 +161,9 @@ int ColoredPlanesStrategy::GetPlaneAxis(vtkActor* actor) {
     return -1; // 未匹配
 }
 
-void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFlags flags)
+bool ColoredPlanesStrategy::SetVisualState(
+    const RenderParams& params,
+    const UpdateFlags flags)
 {
     if (((flags & UpdateFlags::Cursor) != UpdateFlags::None) || ((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
         // Cursor 与 Transform 任一变化，都需要重新把三张平面放到正确世界位置。
@@ -174,4 +176,5 @@ void ColoredPlanesStrategy::SetVisualState(const RenderParams& params, UpdateFla
             if (m_planeActors[i]) m_planeActors[i]->SetVisibility(vis);
         }
     }
+    return true;
 }

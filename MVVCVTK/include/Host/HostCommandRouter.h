@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Host/Types/HostRequest.h"
+#include "Host/Types/HostRequestTypes.h"
 
 #include <memory>
 

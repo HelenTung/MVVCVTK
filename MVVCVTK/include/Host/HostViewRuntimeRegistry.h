@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Host/HostCoreServices.h"
-#include "Host/Types/HostFeatureViewTypes.h"
+#include "Host/HostFeature.h"
 #include "Host/Types/HostSessionTypes.h"
 
 #include <array>

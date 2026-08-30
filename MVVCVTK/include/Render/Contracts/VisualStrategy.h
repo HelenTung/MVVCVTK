@@ -11,6 +11,7 @@
 #include <vtkSmartPointer.h>
 
 #include <memory>
+#include <utility>
 
 // App 只依赖视觉策略行为；具体 VTK 管线类型留在 Render 层内部。
 class AbstractVisualStrategy {
@@ -20,11 +21,20 @@ public:
     virtual void SetInputData(vtkSmartPointer<vtkDataObject> data) = 0;
     // 空 mask 表示整卷有效；需要有效域的策略自行覆盖。
     virtual void SetInputMask(vtkSmartPointer<vtkImageData>) {}
+    // DataStage 以一笔事务提交 volume 与 mask；普通策略沿用既有两个窄入口。
+    virtual bool SetInputData(
+        vtkSmartPointer<vtkDataObject> data,
+        vtkSmartPointer<vtkImageData> validityMask)
+    {
+        SetInputData(std::move(data));
+        SetInputMask(std::move(validityMask));
+        return true;
+    }
     virtual void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
     virtual void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) = 0;
-    virtual void SetVisualState(
+    virtual bool SetVisualState(
         const RenderParams&,
-        UpdateFlags = UpdateFlags::All) {}
+        UpdateFlags = UpdateFlags::All) { return true; }
     virtual int GetPlaneAxis(vtkActor*) { return -1; }
     virtual int GetNavigationAxis() const { return -1; }
     virtual vtkProp3D* GetMainProp() { return nullptr; }

@@ -1,52 +1,82 @@
-﻿#include "ImageProcessor.h"
+#include "ImageProcessor.h"
 
 #include <algorithm>
+#include <cmath>
 
-vtkSmartPointer<vtkImageResample> ImageProcessor::GetDownsampledImage(
+vtkSmartPointer<vtkImageResample> ImageProcessor::CreateScaledImage(
     vtkImageData* input,
-    int targetDim,
+    const double dimensionRatio,
     vtkAlgorithmOutput* inputPort)
 {
-    if (!input || targetDim <= 0) return nullptr;
-
-    int dims[3];
-    input->GetDimensions(dims);
-    const int maxDim = std::max({ dims[0], dims[1], dims[2] });
-    if (maxDim <= 0) return nullptr;
-    auto resample = vtkSmartPointer<vtkImageResample>::New();
-    resample->SetInterpolationModeToLinear();
-    // 无需降采样时仍返回统一的 resample 管线，只把三轴倍率设为 1.0。
-    if (maxDim <= targetDim) {
-        if (inputPort) resample->SetInputConnection(inputPort);
-        else resample->SetInputData(input);
-		resample->SetAxisMagnificationFactor(0, 1.0);
-		resample->SetAxisMagnificationFactor(1, 1.0);
-        resample->SetAxisMagnificationFactor(2, 1.0);
-        return resample; 
+    if (!input
+        || !std::isfinite(dimensionRatio)
+        || dimensionRatio <= 0.0
+        || dimensionRatio > 1.0) {
+        return nullptr;
     }
 
-    // 以最大轴为基准，三轴等比例缩放，保持物理 Bounds 不变
-    const double factor = static_cast<double>(targetDim) / static_cast<double>(maxDim);
+    int sourceDimensions[3]{};
+    input->GetDimensions(sourceDimensions);
+    std::array<int, 3> targetDimensions{};
+    for (std::size_t axis = 0; axis < targetDimensions.size(); ++axis) {
+        if (sourceDimensions[axis] <= 0) return nullptr;
+        targetDimensions[axis] = std::max(
+            1,
+            static_cast<int>(std::ceil(
+                static_cast<double>(sourceDimensions[axis])
+                * dimensionRatio)));
+    }
+    return CreateScaledImage(input, targetDimensions, inputPort);
+}
 
-    // 以同一倍率缩放三轴，避免改变体素的长宽高比例。
+vtkSmartPointer<vtkImageResample> ImageProcessor::CreateScaledImage(
+    vtkImageData* input,
+    const std::array<int, 3>& targetDimensions,
+    vtkAlgorithmOutput* inputPort)
+{
+    if (!input) return nullptr;
+    int sourceDimensions[3]{};
+    input->GetDimensions(sourceDimensions);
+    for (std::size_t axis = 0; axis < targetDimensions.size(); ++axis) {
+        if (sourceDimensions[axis] <= 0
+            || targetDimensions[axis] <= 0
+            || targetDimensions[axis] > sourceDimensions[axis]) {
+            return nullptr;
+        }
+    }
+
+    auto resample = vtkSmartPointer<vtkImageResample>::New();
+    resample->SetInterpolationModeToLinear();
+    // 每个计划尺寸都相对原始输入计算，禁止基于上一 LOD 累积降采样。
     if (inputPort) resample->SetInputConnection(inputPort);
     else resample->SetInputData(input);
-    resample->SetAxisMagnificationFactor(0, factor);
-    resample->SetAxisMagnificationFactor(1, factor);
-    resample->SetAxisMagnificationFactor(2, factor);
-
-    //resample->Update();
-
+    for (std::size_t axis = 0; axis < targetDimensions.size(); ++axis) {
+        resample->SetAxisMagnificationFactor(
+            static_cast<int>(axis),
+            static_cast<double>(targetDimensions[axis])
+                / static_cast<double>(sourceDimensions[axis]));
+    }
     return resample;
 }
 
 vtkSmartPointer<vtkImageResample>
-ImageProcessor::GetDownsampledMask(
+ImageProcessor::CreateScaledMask(
     vtkImageData* input,
-    int targetDim)
+    const double dimensionRatio)
 {
-    auto resample = GetDownsampledImage(
-        input, targetDim);
+    auto resample = CreateScaledImage(input, dimensionRatio);
+    if (resample) {
+        resample->SetInterpolationModeToNearestNeighbor();
+    }
+    return resample;
+}
+
+vtkSmartPointer<vtkImageResample>
+ImageProcessor::CreateScaledMask(
+    vtkImageData* input,
+    const std::array<int, 3>& targetDimensions)
+{
+    auto resample = CreateScaledImage(input, targetDimensions);
     if (resample) {
         resample->SetInterpolationModeToNearestNeighbor();
     }

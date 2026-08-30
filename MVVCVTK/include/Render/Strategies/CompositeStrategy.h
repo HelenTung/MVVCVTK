@@ -22,11 +22,16 @@ public:
 
     // [Public] 抽象接口实现
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
+    bool SetInputData(
+        vtkSmartPointer<vtkDataObject> data,
+        vtkSmartPointer<vtkImageData> validityMask) override;
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
     void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer);
-    void SetVisualState(const RenderParams& params, UpdateFlags flags);
+    bool SetVisualState(
+        const RenderParams& params,
+        UpdateFlags flags) override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //
     bool AttachRenderEffect(

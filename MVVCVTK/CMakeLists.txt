@@ -282,6 +282,7 @@ set(MVVCVTK_HOST_SOURCES
     include/Render/Strategies/VolumeStrategy.h
     include/Render/Support/BaseVisualStrategy.h
     src/App/AppState.cpp
+    include/App/VolumePresentationTypes.h
     src/App/Services/AppServiceFactory.cpp
     src/App/Tasks/AppDataExportTaskService.cpp
     src/App/Tasks/AppDataLoadTaskService.cpp
@@ -289,6 +290,8 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/DataManager.cpp
     src/Data/ImageProcessor.cpp
     src/Data/VolumeTypes.cpp
+    src/Host/HostTransferCodec.cpp
+    include/Host/Internal/HostTransferCodec.h
     src/Host/HostCommandRouter.cpp
     src/Host/HostHotkeyRouter.cpp
     src/Host/HostViewRuntimeRegistry.cpp
@@ -307,7 +310,10 @@ set(MVVCVTK_HOST_SOURCES
     src/Render/Strategies/CompositeStrategy.cpp
     src/Render/Strategies/IsoSurfaceStrategy.cpp
     src/Render/Strategies/SliceStrategy.cpp
+    src/Render/Strategies/VolumeLodController.cpp
+    include/Render/Internal/VolumeLodController.h
     src/Render/Strategies/VolumeStrategy.cpp
+    src/Render/Support/BaseVisualStrategy.cpp
 )
 # 普通 Host consumer 被正式允许直接包含的稳定入口与请求定义。
 SetHeaderSurface(
@@ -322,9 +328,8 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Data/DataVersion.h
     include/Data/ImageReadTypes.h
-    include/Host/Types/HostInputTypes.h
-    include/Host/Types/HostRequest.h
     include/Host/Types/HostSessionTypes.h
+    include/Host/Types/HostViewTypes.h
     include/Host/Types/HostValueTypes.h
 )
 # Feature 开发者可直接使用的扩展契约，不依赖 Host 实现库。
@@ -333,22 +338,20 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/HostFeature.h
     include/App/Services/FeatureViewService.h
+    include/Render/Contracts/FeatureOverlay.h
     include/Render/Contracts/OverlayService.h
     include/Render/Contracts/RenderEffect.h
-    include/Render/Contracts/VisualStrategy.h
 )
 # Feature SPI 独立携带 HostFeature、交互、可信数据与渲染契约的完整物理闭包。
 SetHeaderSurface(
     MVVCVTK_FEATURE_SPI_CLOSURE_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    include/App/AppTypes.h
+    include/App/FeatureTypes.h
     include/App/ViewTypes.h
     include/Data/DataVersion.h
     include/Data/ImageReadTypes.h
     include/Data/TrustedImageState.h
-    include/Host/Types/HostFeatureViewTypes.h
-    include/Host/Types/HostInputTypes.h
-    include/Host/Types/HostValueTypes.h
+    include/Host/Types/HostViewTypes.h
     include/Interaction/InteractionTypes.h
 )
 

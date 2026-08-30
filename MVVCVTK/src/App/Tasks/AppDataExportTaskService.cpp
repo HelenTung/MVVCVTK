@@ -36,7 +36,8 @@ AppDataExportTaskService::BuildDataTask(
     params.isoValue = m_viewState->GetIsoValue();
     params.modelToWorld = m_sharedState->GetModelMatrix();
     params.scalarRange = m_sharedState->GetDataRange();
-    m_viewState->GetTFNodes(params.tfNodes);
+    params.volumeTransferFunction =
+        m_viewState->GetVolumeTransferFunction();
     return std::packaged_task<bool(TaskStopToken)>(
         [dataManager, imageSnapshot,
          outputDir = std::move(outputDir),

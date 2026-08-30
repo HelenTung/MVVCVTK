@@ -1,43 +1,60 @@
 #pragma once
 
-#include "Data/ImageProcessor.h"
-#include "Render/Support/FeatureVisualStrategy.h"
+#include "Render/Contracts/VisualStrategy.h"
 
 #include <vtkImageResample.h>
+#include <vtkProp.h>
+#include <vtkWeakPointer.h>
 
-#include <algorithm>
+#include <array>
+#include <memory>
+#include <vector>
 
-// Host 内部策略基类只保留数据处理能力；通用 Feature 策略生命周期位于稳定契约层。
-class BaseVisualStrategy : public FeatureVisualStrategy {
+// Host 内部主体策略基类；Feature overlay 不继承或接触该完整渲染契约。
+class BaseVisualStrategy : public AbstractVisualStrategy {
 protected:
-    // 最近一次创建的 producer；返回端口在下次替换该成员或策略析构前有效。
+    std::vector<vtkSmartPointer<vtkProp>> m_managedProps;
+    std::weak_ptr<RenderEffect> m_renderEffect;
+    std::shared_ptr<RenderEffectBinding> m_renderBinding;
+    vtkWeakPointer<vtkRenderer> m_effectRenderer;
+    RenderInputStamp m_renderInputStamp;
+    RenderBindingUse m_bindingUse = RenderBindingUse::Current;
     vtkSmartPointer<vtkImageResample> m_resampleFilter;
 
-    vtkAlgorithmOutput* GetDownsampledOutputPort(
+    void AttachProp(vtkSmartPointer<vtkProp> prop);
+    virtual RenderEffectTarget GetRenderEffectTarget() const;
+    virtual void SetEffectBinding(RenderEffectBinding* binding);
+    bool CreateRenderBinding();
+    void ClearRenderBinding();
+    bool SetEffectLocalToInput(
+        const std::array<double, 16>& localToInput);
+    void Set3DPropsTransform(
+        const std::array<double, 16>& modelToWorld);
+    vtkAlgorithmOutput* GetScaledOutputPort(
         vtkImageData* input,
-        int targetDim = 766)
-    {
-        if (!input) {
-            return nullptr;
-        }
-        m_resampleFilter = ImageProcessor::GetDownsampledImage(
-            input, targetDim);
-        return m_resampleFilter
-            ? m_resampleFilter->GetOutputPort()
-            : nullptr;
-    }
-
+        double dimensionRatio);
     void ClampImageBounds(
         int& x,
         int& y,
         int& z,
-        const int dims[3])
-    {
-        if (!dims) {
-            return;
-        }
-        x = std::max(0, std::min(x, dims[0] - 1));
-        y = std::max(0, std::min(y, dims[1] - 1));
-        z = std::max(0, std::min(z, dims[2] - 1));
-    }
+        const int dims[3]);
+
+public:
+    ~BaseVisualStrategy() override;
+
+    bool AttachRenderEffect(
+        std::shared_ptr<RenderEffect> effect,
+        RenderBindingUse bindingUse) override;
+    bool DetachRenderEffect(const RenderEffect* effect) override;
+    bool SetRenderInputStamp(RenderInputStamp inputStamp) override;
+    RenderInputStamp GetRenderInputStamp() const override;
+    bool SetRenderEffectUse(RenderBindingUse bindingUse) override;
+    RenderBindingUse GetRenderEffectUse() const override;
+    RenderEffectState GetRenderEffectState() const override;
+    bool SetRenderEffectCommit(std::uint64_t revision) override;
+    bool ClearRenderEffectStage(std::uint64_t revision) override;
+    void AttachRenderer(
+        vtkSmartPointer<vtkRenderer> renderer) override;
+    void DetachRenderer(
+        vtkSmartPointer<vtkRenderer> renderer) override;
 };

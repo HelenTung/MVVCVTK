@@ -1,7 +1,6 @@
 #pragma once
 
 #include "Host/HostFeature.h"
-#include "Host/Types/HostInputTypes.h"
 #include "OrthogonalCropTypes.h"
 
 #include <array>

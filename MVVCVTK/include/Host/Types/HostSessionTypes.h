@@ -1,27 +1,53 @@
 #pragma once
 
 #include "Host/Types/HostValueTypes.h"
+#include "Host/Types/HostViewTypes.h"
 
 #include <vtkRenderWindow.h>
 #include <vtkSmartPointer.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 class vtkRenderer;
 class vtkRenderWindowInteractor;
 
+struct HostHotkeyConfig {
+    // context 输入负责窗口内工具切换；command 输入负责数据动作和退出命令。
+    bool isContextInputEnabled = false;
+    HostViewTargets contextInputViews;
+    bool isCommandInputEnabled = false;
+    HostViewTargets commandInputViews;
+    char modelSwitchKey = 0;
+    char dataExportKey = 0;
+    char sliceExportKey = 0;
+    std::string exitKeySym; // 使用 VTK key symbol，支持 Escape 等非字符键。
+    std::string dataExportPath;
+    std::optional<HostDataExportFormat> dataExportFormat;
+    HostViewTarget dataSourceView;
+    std::string sliceExportDir;
+    HostViewTarget sliceSourceView;
+    std::optional<double> sliceAngleDeg;
+};
+
+struct HostTimerConfig {
+    bool isTimerEnabled = false; // false 表示卸载当前 host timer handler。
+    HostViewTarget targetView{ "", false, HostRenderViewRole::Primary3D };
+};
+
 struct HostViewInitConfig {
     // has* 是显式写入位：字段本身保留可用默认值，但只有对应 has* 为 true 时才覆盖策略状态。
     HostRenderMode viewMode = HostRenderMode::IsoSurface; // 首次构建的主策略模式。
     HostMaterialParams material; // 始终作为预初始化材质写入。
-    std::vector<HostTransferNode> transferNodes; // hasTransferNodes=true 时替换默认 TF。
+    HostVolumeTransferFunction volumeTransferFunction;
     double isoThreshold = 0.0; // hasIso=true 时使用的数据标量阈值。
     HostBackgroundColor background;
     HostWindowLevelParams windowLevel;
-    bool hasTransferNodes = false;
+    bool hasVolumeTransferFunction = false;
     bool hasIso = false;
     bool hasBackground = false;
     bool hasWindowLevel = false;
@@ -51,17 +77,14 @@ struct HostRenderViewState final {
     HostRenderViewRole role = HostRenderViewRole::Auxiliary;
     HostRenderMode viewMode = HostRenderMode::IsoSurface;
     HostMaterialParams material;
-    std::vector<HostTransferNode> transferNodes;
+    HostVolumeTransferFunction volumeTransferFunction;
     double isoThreshold = 0.0;
     HostBackgroundColor background;
     std::array<double, 3> spacing{ 1.0, 1.0, 1.0 };
     HostWindowLevelParams windowLevel;
-    HostTransferPreset transferPreset = HostTransferPreset::Manual;
     std::array<double, 2> scalarRange{ 0.0, 0.0 };
-    HostVolumeQualityParams volumeQuality;
-    std::vector<HostGradientOpacityNode> gradientOpacity;
+    HostVolumeQuality volumeQuality = HostVolumeQuality::Auto;
     bool isFeatureActive = false;
-    bool isDenoiseOn = false;
     bool isInteracting = false;
     std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };
     uint32_t visibilityMask = 0;

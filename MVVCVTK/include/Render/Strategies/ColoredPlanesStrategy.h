@@ -18,7 +18,9 @@ public:
     ColoredPlanesStrategy();
 
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override;
-    void SetVisualState(const RenderParams& params, UpdateFlags flags);
+    bool SetVisualState(
+        const RenderParams& params,
+        UpdateFlags flags) override;
     int GetPlaneAxis(vtkActor* actor) override;
 
 private:

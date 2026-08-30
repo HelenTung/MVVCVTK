@@ -2,8 +2,7 @@
 
 #include "Data/ImageReadTypes.h"
 #include "Data/TrustedImageState.h"
-#include "Host/Types/HostFeatureViewTypes.h"
-#include "Host/Types/HostValueTypes.h"
+#include "Host/Types/HostViewTypes.h"
 #include "Interaction/InteractionTypes.h"
 
 #include <cstddef>
@@ -15,7 +14,31 @@
 #include <vector>
 
 class FeatureViewService;
+class FeatureViewLease;
 class OverlayService;
+class vtkRenderer;
+class vtkRenderWindowInteractor;
+
+struct HostFeatureView final {
+    std::string id;
+    HostRenderViewRole role = HostRenderViewRole::Auxiliary;
+};
+
+struct HostInputView final {
+    HostFeatureView view;
+    vtkRenderer* renderer = nullptr;
+    vtkRenderWindowInteractor* interactor = nullptr;
+    std::weak_ptr<const FeatureViewLease> lease;
+};
+
+// 所有 Feature 共用一份输入基元；具体 Feature 的按键集合留在各自模块。
+struct HostKeyChord {
+    char keyCode = 0;
+    std::string keySym;
+    bool isCtrlDown = false;
+    bool isAltDown = false;
+    bool isShiftDown = false;
+};
 
 struct HostInputBinding final {
     std::string featureId;

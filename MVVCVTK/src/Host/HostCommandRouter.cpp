@@ -5,6 +5,7 @@
 #include "App/AppTypes.h"
 #include "App/Services/AppPorts.h"
 #include "Host/HostViewRuntimeRegistry.h"
+#include "Host/Internal/HostTransferCodec.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Interaction/InteractionPorts.h"
 #include "Data/VolumeTypes.h"
@@ -44,14 +45,12 @@ private:
         std::optional<VizMode> mode;
         std::optional<MaterialParams> material;
         std::optional<double> opacity;
-        std::optional<std::vector<TFNode>> nodes;
+        std::optional<VolumeTransferFunction>
+            volumeTransferFunction;
         std::optional<double> iso;
         std::optional<BackgroundColor> background;
         std::optional<WindowLevelParams> windowLevel;
-        std::optional<VolumeQualityParams> volumeQuality;
-        std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
-        std::optional<TransferPreset> transferPreset;
-        std::optional<bool> isDenoiseOn;
+        std::optional<VolumeQuality> volumeQuality;
         std::optional<HostVisibilityParams> visibility;
         std::optional<bool> isAxesVisible;
     };
@@ -77,16 +76,10 @@ private:
     std::optional<ToolMode> GetAppToolMode(HostToolMode mode) const;
     std::optional<MaterialParams> BuildAppMaterial(const HostMaterialParams& value) const;
     std::optional<MaterialParams> GetMaterialPreset(HostMaterialPreset preset) const;
-    std::optional<VolumeQualityParams> BuildAppQuality(
-        const HostVolumeQualityParams& value) const;
-    std::optional<std::vector<GradientOpacityNode>> BuildAppGradient(
-        const std::vector<HostGradientOpacityNode>& values) const;
-    std::optional<TransferPreset> GetTransferPreset(
-        HostTransferPreset preset) const;
+    std::optional<VolumeQuality> GetAppQuality(
+        HostVolumeQuality quality) const;
     std::optional<BackgroundColor> BuildAppBackground(const HostBackgroundColor& value) const;
     std::optional<WindowLevelParams> BuildAppWindowLevel(const HostWindowLevelParams& value) const;
-    std::optional<std::vector<TFNode>> BuildAppNodes(
-        const std::vector<HostTransferNode>& values) const;
     std::optional<ViewCandidate> BuildViewCandidate(
         const HostViewSetRequest& request) const;
     bool GetUnitValid(double value) const;
@@ -406,25 +399,6 @@ std::optional<WindowLevelParams> HostCommandRouter::Impl::BuildAppWindowLevel(
     return WindowLevelParams{ value.windowWidth, value.windowCenter };
 }
 
-std::optional<std::vector<TFNode>> HostCommandRouter::Impl::BuildAppNodes(
-    const std::vector<HostTransferNode>& values) const
-{
-    if (values.empty()) return std::nullopt;
-
-    std::vector<TFNode> result;
-    result.reserve(values.size());
-    for (const auto& value : values) {
-        if (!GetUnitValid(value.position) || !GetUnitValid(value.opacity)
-            || !GetUnitValid(value.r) || !GetUnitValid(value.g)
-            || !GetUnitValid(value.b)
-            || (!result.empty() && value.position < result.back().position)) {
-            return std::nullopt;
-        }
-        result.push_back({ value.position, value.opacity, value.r, value.g, value.b });
-    }
-    return result;
-}
-
 std::optional<MaterialParams>
 HostCommandRouter::Impl::GetMaterialPreset(HostMaterialPreset preset) const
 {
@@ -439,53 +413,21 @@ HostCommandRouter::Impl::GetMaterialPreset(HostMaterialPreset preset) const
     return std::nullopt;
 }
 
-std::optional<VolumeQualityParams>
-HostCommandRouter::Impl::BuildAppQuality(
-    const HostVolumeQualityParams& value) const
+std::optional<VolumeQuality>
+HostCommandRouter::Impl::GetAppQuality(
+    const HostVolumeQuality quality) const
 {
-    switch (value.quality) {
-    case HostVolumeQuality::Quality:
-        return VolumeQualityParams{ VolumeQuality::Quality, 766, 1.0, true };
-    case HostVolumeQuality::Custom:
-        if (value.maxDimension < 1 || value.maxDimension > 16384
-            || !std::isfinite(value.sampleDistance)
-            || value.sampleDistance <= 0.0) {
-            return std::nullopt;
-        }
-        return VolumeQualityParams{
-            VolumeQuality::Custom,
-            value.maxDimension,
-            value.sampleDistance,
-            value.isJitterOn
-        };
-    }
-    return std::nullopt;
-}
-
-std::optional<std::vector<GradientOpacityNode>>
-HostCommandRouter::Impl::BuildAppGradient(
-    const std::vector<HostGradientOpacityNode>& values) const
-{
-    std::vector<GradientOpacityNode> result;
-    result.reserve(values.size());
-    for (const auto& value : values) {
-        if (!std::isfinite(value.gradient) || value.gradient < 0.0
-            || !GetUnitValid(value.opacity)
-            || (!result.empty()
-                && value.gradient < result.back().gradient)) {
-            return std::nullopt;
-        }
-        result.push_back({ value.gradient, value.opacity });
-    }
-    return result;
-}
-
-std::optional<TransferPreset>
-HostCommandRouter::Impl::GetTransferPreset(HostTransferPreset preset) const
-{
-    switch (preset) {
-    case HostTransferPreset::Percentile:
-        return TransferPreset::Percentile;
+    switch (quality) {
+    case HostVolumeQuality::Auto:
+        return VolumeQuality::Auto;
+    case HostVolumeQuality::Low:
+        return VolumeQuality::Low;
+    case HostVolumeQuality::High:
+        return VolumeQuality::High;
+    case HostVolumeQuality::XHigh:
+        return VolumeQuality::XHigh;
+    case HostVolumeQuality::Ultra:
+        return VolumeQuality::Ultra;
     }
     return std::nullopt;
 }
@@ -514,8 +456,11 @@ HostCommandRouter::Impl::BuildViewCandidate(
         candidate.material = GetMaterialPreset(*request.materialPreset);
     }
     candidate.opacity = request.opacity;
-    candidate.nodes = request.transferNodes ? BuildAppNodes(*request.transferNodes)
-        : std::optional<std::vector<TFNode>>{};
+    candidate.volumeTransferFunction =
+        request.volumeTransferFunction
+        ? HostTransferCodec::BuildVolumeTransferFunction(
+            *request.volumeTransferFunction)
+        : std::optional<VolumeTransferFunction>{};
     candidate.iso = request.iso;
     candidate.background = request.background
         ? BuildAppBackground(*request.background)
@@ -524,15 +469,8 @@ HostCommandRouter::Impl::BuildViewCandidate(
         ? BuildAppWindowLevel(*request.windowLevel)
         : std::optional<WindowLevelParams>{};
     candidate.volumeQuality = request.volumeQuality
-        ? BuildAppQuality(*request.volumeQuality)
-        : std::optional<VolumeQualityParams>{};
-    candidate.gradientOpacity = request.gradientOpacity
-        ? BuildAppGradient(*request.gradientOpacity)
-        : std::optional<std::vector<GradientOpacityNode>>{};
-    candidate.transferPreset = request.transferPreset
-        ? GetTransferPreset(*request.transferPreset)
-        : std::optional<TransferPreset>{};
-    candidate.isDenoiseOn = request.isDenoiseOn;
+        ? GetAppQuality(*request.volumeQuality)
+        : std::optional<VolumeQuality>{};
     candidate.visibility = request.visibility;
     candidate.isAxesVisible = request.isAxesVisible;
 
@@ -540,19 +478,18 @@ HostCommandRouter::Impl::BuildViewCandidate(
         || (request.material && !candidate.material)
         || (request.materialPreset && !candidate.material)
         || (request.opacity && !GetUnitValid(*request.opacity))
-        || (request.transferNodes && !candidate.nodes)
-        || (request.transferPreset && !candidate.transferPreset)
+        || (request.volumeTransferFunction
+            && !candidate.volumeTransferFunction)
         || (request.iso && !std::isfinite(*request.iso))
         || (request.background && !candidate.background)
         || (request.windowLevel && !candidate.windowLevel)
         || (request.volumeQuality && !candidate.volumeQuality)
-        || (request.gradientOpacity && !candidate.gradientOpacity)
         || (request.isAxesVisible && !candidate.context)) {
         return std::nullopt;
     }
     if ((request.materialPreset
             && (request.material || request.opacity))
-        || (request.transferPreset && request.transferNodes)) {
+        ) {
         return std::nullopt;
     }
 
@@ -566,9 +503,7 @@ HostCommandRouter::Impl::BuildViewCandidate(
     const bool isVolumeMode = effectiveMode == VizMode::Volume
         || effectiveMode == VizMode::CompositeVolume;
     if (!isVolumeMode
-        && (candidate.volumeQuality
-            || candidate.gradientOpacity
-            || candidate.isDenoiseOn)) {
+        && candidate.volumeQuality) {
         return std::nullopt;
     }
 
@@ -630,14 +565,12 @@ bool HostCommandRouter::Impl::SetView(
     update.mode = candidate->mode;
     update.material = candidate->material;
     update.opacity = candidate->opacity;
-    update.transferNodes = candidate->nodes;
+    update.volumeTransferFunction =
+        candidate->volumeTransferFunction;
     update.isoThreshold = candidate->iso;
     update.background = candidate->background;
     update.windowLevel = candidate->windowLevel;
     update.volumeQuality = candidate->volumeQuality;
-    update.gradientOpacity = candidate->gradientOpacity;
-    update.transferPreset = candidate->transferPreset;
-    update.isDenoiseOn = candidate->isDenoiseOn;
     if (candidate->visibility) {
         const auto& visibility = *candidate->visibility;
         AppVisibilityUpdate appVisibility;

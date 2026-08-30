@@ -73,14 +73,14 @@ struct AppViewUpdate final {
     std::optional<VizMode> mode;
     std::optional<MaterialParams> material;
     std::optional<double> opacity;
-    std::optional<std::vector<TFNode>> transferNodes;
+    std::optional<VolumeTransferFunction>
+        volumeTransferFunction;
     std::optional<double> isoThreshold;
     std::optional<BackgroundColor> background;
     std::optional<WindowLevelParams> windowLevel;
     std::optional<WindowLevelMode> windowLevelMode;
-    std::optional<VolumeQualityParams> volumeQuality;
+    std::optional<VolumeQuality> volumeQuality;
     std::optional<std::vector<GradientOpacityNode>> gradientOpacity;
-    std::optional<TransferPreset> transferPreset;
     std::optional<bool> isDenoiseOn;
     std::optional<AppVisibilityUpdate> visibility;
 };
@@ -88,15 +88,15 @@ struct AppViewUpdate final {
 struct AppViewState final {
     VizMode mode = VizMode::Volume;
     MaterialParams material;
-    std::vector<TFNode> transferNodes;
+    VolumeTransferFunction volumeTransferFunction;
+    bool isTransferAuto = true;
     double isoThreshold = 0.0;
     BackgroundColor background;
     std::array<double, 3> spacing{};
     WindowLevelParams windowLevel;
     WindowLevelMode windowLevelMode = WindowLevelMode::Auto;
-    TransferPreset transferPreset = TransferPreset::Manual;
     std::array<double, 2> scalarRange{};
-    VolumeQualityParams volumeQuality;
+    VolumeQuality volumeQuality = VolumeQuality::Auto;
     std::vector<GradientOpacityNode> gradientOpacity;
     bool isFeatureActive = false;
     bool isDenoiseOn = false;

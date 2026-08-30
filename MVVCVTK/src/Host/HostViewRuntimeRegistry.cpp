@@ -1,9 +1,11 @@
 #include "Host/HostViewRuntimeRegistry.h"
+#include "Host/Internal/HostTransferCodec.h"
 
 #include "App/AppStateEvents.h"
 #include "App/AppTypes.h"
 #include "App/Services/AppPorts.h"
 #include "App/Services/AppServiceFactory.h"
+#include "DataConverters.h"
 #include "Host/LoadCommitCoordinator.h"
 #include "Interaction/AbstractViewContext.h"
 #include "Interaction/InteractionPorts.h"
@@ -178,12 +180,12 @@ private:
         {
         }
 
-        void AttachOverlayStrategy(
-            std::shared_ptr<AbstractVisualStrategy> strategy) override;
-        void RemoveOverlayStrategy(
-            std::shared_ptr<AbstractVisualStrategy> strategy)
+        bool AttachOverlay(
+            std::shared_ptr<FeatureOverlay> overlay) override;
+        void RemoveOverlay(
+            std::shared_ptr<FeatureOverlay> overlay)
             noexcept override;
-        void ClearOverlayStrategies() override;
+        void ClearOverlays() noexcept override;
 
     private:
         std::shared_ptr<OverlayService> GetPort() const;
@@ -200,7 +202,8 @@ private:
     std::optional<HostRenderViewRuntime> BuildView(
         const HostCoreServices& core,
         HostRenderViewConfig config,
-        const std::shared_ptr<AppTaskExecutor>& taskExecutor);
+        const std::shared_ptr<AppTaskExecutor>& taskExecutor,
+        const std::shared_ptr<HistogramConverter>& histogram);
     bool SetViewWindow(
         HostRenderViewRuntime& view,
         vtkSmartPointer<vtkRenderWindow> renderWindow);
@@ -399,24 +402,27 @@ HostViewRuntimeRegistry::Impl::OverlayLeasePort::GetPort() const
     return m_port.lock();
 }
 
-void HostViewRuntimeRegistry::Impl::OverlayLeasePort::AttachOverlayStrategy(
-    std::shared_ptr<AbstractVisualStrategy> strategy)
+bool HostViewRuntimeRegistry::Impl::OverlayLeasePort::AttachOverlay(
+    std::shared_ptr<FeatureOverlay> overlay)
 {
     const auto port = GetPort();
-    if (port) port->AttachOverlayStrategy(std::move(strategy));
+    if (!port) return false;
+    return port->AttachOverlay(std::move(overlay));
 }
 
-void HostViewRuntimeRegistry::Impl::OverlayLeasePort::RemoveOverlayStrategy(
-    std::shared_ptr<AbstractVisualStrategy> strategy) noexcept
+void HostViewRuntimeRegistry::Impl::OverlayLeasePort::RemoveOverlay(
+    std::shared_ptr<FeatureOverlay> overlay) noexcept
 {
     const auto port = GetPort();
-    if (port) port->RemoveOverlayStrategy(std::move(strategy));
+    if (port) port->RemoveOverlay(std::move(overlay));
 }
 
-void HostViewRuntimeRegistry::Impl::OverlayLeasePort::ClearOverlayStrategies()
+void HostViewRuntimeRegistry::Impl::OverlayLeasePort::ClearOverlays() noexcept
 {
     const auto port = GetPort();
-    if (port) port->ClearOverlayStrategies();
+    if (port) {
+        try { port->ClearOverlays(); } catch (...) {}
+    }
 }
 
 bool HostViewRuntimeRegistry::Impl::SetViewWindow(
@@ -471,7 +477,8 @@ std::optional<HostViewRuntimeRegistry::Impl::HostRenderViewRuntime>
 HostViewRuntimeRegistry::Impl::BuildView(
     const HostCoreServices& core,
     HostRenderViewConfig config,
-    const std::shared_ptr<AppTaskExecutor>& taskExecutor)
+    const std::shared_ptr<AppTaskExecutor>& taskExecutor,
+    const std::shared_ptr<HistogramConverter>& histogram)
 {
     const auto appInit = BuildAppInit(config.window.viewInit);
     if (!appInit) return std::nullopt;
@@ -481,6 +488,7 @@ HostViewRuntimeRegistry::Impl::BuildView(
     args.interactionState = core.sharedState;
     args.eventSource = core.sharedStateBroadcaster;
     args.taskExecutor = taskExecutor;
+    args.histogram = histogram;
     const std::weak_ptr<ViewDirectory> directory = m_directory;
     args.setLoadCommit = [directory](const LoadEventKind loadKind) {
         const auto current = directory.lock();
@@ -590,16 +598,9 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
         appState.material.opacity,
         appState.material.isShadeOn
     };
-    state.transferNodes.reserve(appState.transferNodes.size());
-    for (const auto& node : appState.transferNodes) {
-        state.transferNodes.push_back({
-            node.position,
-            node.opacity,
-            node.r,
-            node.g,
-            node.b
-        });
-    }
+    state.volumeTransferFunction =
+        HostTransferCodec::GetHostVolumeTransfer(
+            appState.volumeTransferFunction);
     state.isoThreshold = appState.isoThreshold;
     state.background = {
         appState.background.r,
@@ -611,28 +612,25 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
         appState.windowLevel.windowWidth,
         appState.windowLevel.windowCenter
     };
-    state.transferPreset =
-        appState.transferPreset == TransferPreset::Percentile
-        ? HostTransferPreset::Percentile
-        : HostTransferPreset::Manual;
     state.scalarRange = appState.scalarRange;
-    state.volumeQuality = {
-        appState.volumeQuality.quality == VolumeQuality::Custom
-            ? HostVolumeQuality::Custom
-            : HostVolumeQuality::Quality,
-        appState.volumeQuality.maxDimension,
-        appState.volumeQuality.sampleDistance,
-        appState.volumeQuality.isJitterOn
-    };
-    state.gradientOpacity.reserve(
-        appState.gradientOpacity.size());
-    for (const auto& node : appState.gradientOpacity) {
-        state.gradientOpacity.push_back({
-            node.gradient, node.opacity
-        });
+    switch (appState.volumeQuality) {
+    case VolumeQuality::Auto:
+        state.volumeQuality = HostVolumeQuality::Auto;
+        break;
+    case VolumeQuality::Low:
+        state.volumeQuality = HostVolumeQuality::Low;
+        break;
+    case VolumeQuality::High:
+        state.volumeQuality = HostVolumeQuality::High;
+        break;
+    case VolumeQuality::XHigh:
+        state.volumeQuality = HostVolumeQuality::XHigh;
+        break;
+    case VolumeQuality::Ultra:
+        state.volumeQuality = HostVolumeQuality::Ultra;
+        break;
     }
     state.isFeatureActive = appState.isFeatureActive;
-    state.isDenoiseOn = appState.isDenoiseOn;
     state.isInteracting = appState.isInteracting;
     state.cursorWorld = appState.cursorWorld;
     state.visibilityMask = appState.visibilityMask;
@@ -667,9 +665,7 @@ HostViewRuntimeRegistry::Impl::BuildAppInit(
         || (config.hasWindowLevel
             && (!isFinite(config.windowLevel.windowWidth)
                 || config.windowLevel.windowWidth <= 0.0
-                || !isFinite(config.windowLevel.windowCenter)))
-        || (config.hasTransferNodes
-            && config.transferNodes.empty())) {
+                || !isFinite(config.windowLevel.windowCenter)))) {
         return std::nullopt;
     }
 
@@ -693,29 +689,17 @@ HostViewRuntimeRegistry::Impl::BuildAppInit(
         config.windowLevel.windowWidth,
         config.windowLevel.windowCenter
     };
-    result.hasTF = config.hasTransferNodes;
+    result.hasVolumeTransferFunction =
+        config.hasVolumeTransferFunction;
     result.hasIso = config.hasIso;
     result.hasBgColor = config.hasBackground;
     result.hasWindowLevel = config.hasWindowLevel;
-    if (config.hasTransferNodes) {
-        result.tfNodes.reserve(config.transferNodes.size());
-        for (const auto& node : config.transferNodes) {
-            if (!isUnit(node.position) || !isUnit(node.opacity)
-                || !isUnit(node.r) || !isUnit(node.g)
-                || !isUnit(node.b)
-                || (!result.tfNodes.empty()
-                    && node.position
-                        < result.tfNodes.back().position)) {
-                return std::nullopt;
-            }
-            result.tfNodes.push_back({
-                node.position,
-                node.opacity,
-                node.r,
-                node.g,
-                node.b
-            });
-        }
+    if (config.hasVolumeTransferFunction) {
+        const auto function =
+            HostTransferCodec::BuildVolumeTransferFunction(
+                config.volumeTransferFunction);
+        if (!function) return std::nullopt;
+        result.volumeTransferFunction = *function;
     }
     return result;
 }
@@ -746,9 +730,11 @@ bool HostViewRuntimeRegistry::Impl::Build(
     auto nextLease = std::make_shared<FeatureViewLease>(
         std::this_thread::get_id());
     std::shared_ptr<AppTaskExecutor> nextTaskExecutor;
+    std::shared_ptr<HistogramConverter> nextHistogram;
     try {
         if (!configs.empty()) {
             nextTaskExecutor = CreateAppTaskExecutor();
+            nextHistogram = std::make_shared<HistogramConverter>();
         }
     }
     catch (...) {
@@ -762,7 +748,7 @@ bool HostViewRuntimeRegistry::Impl::Build(
     for (const auto& requestedConfig : configs) {
         auto config = requestedConfig;
         auto view = BuildView(
-            core, std::move(config), nextTaskExecutor);
+            core, std::move(config), nextTaskExecutor, nextHistogram);
         if (!view) return false;
         nextViews.push_back(std::move(*view));
 

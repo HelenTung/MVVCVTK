@@ -13,6 +13,7 @@
 #include <vtkOpenGLPolyDataMapper.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
+#include <vtkShaderProperty.h>
 #include <vtkShaderProgram.h>
 #include <vtkSmartPointer.h>
 #include <vtkTextureObject.h>
@@ -24,11 +25,14 @@
 #include <vtkActor.h>
 #include <vtkImageData.h>
 #include <vtkGPUVolumeRayCastMapper.h>
+#include <vtkInformation.h>
 #include <vtkMatrix3x3.h>
 #include <vtkNew.h>
+#include <vtkOpenGLRenderPass.h>
 #include <vtkPolyData.h>
 #include <vtkPoints.h>
 #include <vtkProperty.h>
+#include <vtkVolume.h>
 #include <vtkWindowToImageFilter.h>
 #ifndef GLAD_API_CALL_EXPORT
 #define GLAD_API_CALL_EXPORT
@@ -47,6 +51,47 @@ VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 namespace {
 constexpr unsigned int kLargeTableWidth = 2565;
 int inputIdentity = 0;
+
+class ProbePass final : public vtkOpenGLRenderPass {
+public:
+    static ProbePass* New()
+    {
+        return new ProbePass();
+    }
+    vtkTypeMacro(ProbePass, vtkOpenGLRenderPass);
+
+    void Render(const vtkRenderState*) override {}
+
+    bool SetShaderParameters(
+        vtkShaderProgram* program,
+        vtkAbstractMapper* mapper,
+        vtkProp*,
+        vtkOpenGLVertexArrayObject* = nullptr) override
+    {
+        ++m_setCount;
+        return program && mapper;
+    }
+
+    int GetSetCount() const noexcept
+    {
+        return m_setCount;
+    }
+
+protected:
+    ProbePass()
+    {
+        SetActiveDrawBuffers(1);
+    }
+    ~ProbePass() override = default;
+
+private:
+    int m_setCount = 0;
+};
+
+double GetRenderRate(const bool isInteracting) noexcept
+{
+    return isInteracting ? 15.0 : 0.001;
+}
 
 bool SetExpect(const bool isExpected, const char* message)
 {
@@ -306,13 +351,17 @@ bool StartStrategyCase(
     RenderParams params;
     params.scalarRange[0] = 0.0;
     params.scalarRange[1] = 1.0;
-    params.tfNodes = {
-        TFNode{ 0.0, 0.0, 0.0, 0.0, 0.0 },
-        TFNode{ 1.0, 1.0, 1.0, 1.0, 1.0 }
+    params.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 }
+    };
+    params.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 1.0, 1.0 }
     };
     strategy->SetVisualState(
         params,
-        UpdateFlags::TF | UpdateFlags::Material | UpdateFlags::WindowLevel);
+        UpdateFlags::VolumeTransfer | UpdateFlags::Material | UpdateFlags::WindowLevel);
     isPassed = SetExpect(effect->SetCropParams(payload), strategyName)
         && isPassed;
     renderWindow->Render();
@@ -349,11 +398,10 @@ bool StartStrategyCase(
             GetRenderRate(true));
         renderWindow->Render();
         const auto previewState = effect->GetState();
+        // Crop 的契约是 preview/still Render 都保持同一 committed
+        // shader payload；具体采样距离由 VolumeStrategy 专项测试负责。
         const bool isPreviewCommitted =
             volumeMapper
-            && std::abs(
-                volumeMapper->GetImageSampleDistance()
-                    - 2.0) < 1e-12
             && previewState.status
                 == RenderEffectStatus::Committed
             && previewState.activeRevision
@@ -365,9 +413,6 @@ bool StartStrategyCase(
         isPassed = SetExpect(
             isPreviewCommitted
                 && volumeMapper
-                && std::abs(
-                    volumeMapper->GetImageSampleDistance()
-                        - 1.0) < 1e-12
                 && stillState.status
                     == RenderEffectStatus::Committed
                 && stillState.activeRevision
@@ -718,6 +763,9 @@ std::array<unsigned char, 3> GetCenterPixel(vtkRenderWindow* renderWindow)
     capture->SetInput(renderWindow);
     capture->SetInputBufferTypeToRGB();
     capture->ReadFrontBufferOff();
+    // 只读取调用方刚完成的帧；默认重绘会悄悄补出第二帧，掩盖
+    // Volume shader 在重建首帧未同步 uniform 的真实问题。
+    capture->ShouldRerenderOff();
     capture->Update();
     int dims[3] = {};
     capture->GetOutput()->GetDimensions(dims);
@@ -1095,25 +1143,47 @@ bool StartVolumeCoordinateCase()
     renderWindow->SetSize(96, 96);
     renderWindow->AddRenderer(renderer);
     strategy->SetInputData(image);
-    bool isPassed = strategy->SetRenderInputStamp(
+    auto* volume = vtkVolume::SafeDownCast(
+        strategy->GetMainProp());
+    vtkNew<ProbePass> probePass;
+    vtkNew<vtkInformation> propertyKeys;
+    propertyKeys->Append(
+        vtkOpenGLRenderPass::RenderPasses(), probePass);
+    if (volume) {
+        volume->SetPropertyKeys(propertyKeys);
+    }
+    bool isPassed = volume
+        && strategy->SetRenderInputStamp(
         { &inputIdentity, 1 })
         && strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current);
     strategy->AttachRenderer(renderer);
+    auto* passKey = vtkOpenGLRenderPass::RenderPasses();
+    auto* attachedKeys = volume
+        ? volume->GetPropertyKeys() : nullptr;
+    isPassed = SetExpect(
+        attachedKeys
+            && attachedKeys->Length(passKey) == 2
+            && attachedKeys->Get(passKey, 1) == probePass,
+        "Volume crop must preserve the existing final render pass while installing its program hook.") && isPassed;
     renderer->RemoveAllViewProps();
     renderer->AddViewProp(strategy->GetMainProp());
 
     RenderParams params;
     params.scalarRange[0] = 0.0;
     params.scalarRange[1] = 1.0;
-    params.tfNodes = {
-        TFNode{ 0.0, 0.0, 1.0, 1.0, 1.0 },
-        TFNode{ 1.0, 1.0, 1.0, 1.0, 1.0 }
+    params.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.0, 1.0, 1.0 },
+        { 1.0, 1.0, 1.0, 1.0 }
+    };
+    params.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 1.0, 1.0 }
     };
     params.material.ambient = 1.0;
     params.material.diffuse = 0.0;
     params.material.specular = 0.0;
-    params.material.isShadeOn = false;
+    params.material.isShadeOn = true;
     params.modelMatrix[3] = 50.0;
     params.modelMatrix[7] = -10.0;
     params.visibilityMask = 0;
@@ -1133,7 +1203,7 @@ bool StartVolumeCoordinateCase()
     };
     strategy->SetVisualState(
         params,
-        UpdateFlags::TF | UpdateFlags::Material
+        UpdateFlags::VolumeTransfer | UpdateFlags::Material
             | UpdateFlags::Transform | UpdateFlags::Visibility);
     isPassed = SetExpect(
         std::equal(
@@ -1179,6 +1249,47 @@ bool StartVolumeCoordinateCase()
             && keptPixel != std::array<unsigned char, 3>{ 0, 0, 0 }
             && rejectedPixel == std::array<unsigned char, 3>{ 0, 0, 0 },
         "Volume texture-to-dataset mapping should honor direction/extent/origin and exclude the prop model matrix.") && isPassed;
+    const auto mapperInputCount = strategy->GetMapperInputCount();
+    const auto resampleUpdateCount =
+        strategy->GetResampleUpdateCount();
+
+    // 交互期会临时关闭光照并切换 preview，退出后再恢复；两次都会
+    // 重建 Volume shader。裁切 uniform 必须写入本帧实际绘制所用的
+    // program，不能只刷新上一帧缓存。
+    params.isInteracting = true;
+    isPassed = strategy->SetVisualState(
+        params, UpdateFlags::RenderRate) && isPassed;
+    renderWindow->Render();
+    const auto interactingPixel = GetCenterPixel(renderWindow);
+    params.isInteracting = false;
+    isPassed = strategy->SetVisualState(
+        params, UpdateFlags::RenderRate) && isPassed;
+    renderWindow->Render();
+    const auto stillPixel = GetCenterPixel(renderWindow);
+    isPassed = SetExpect(
+        interactingPixel == std::array<unsigned char, 3>{ 0, 0, 0 }
+            && stillPixel == std::array<unsigned char, 3>{ 0, 0, 0 },
+        "Volume crop must survive the shader rebuilds caused by interaction quality transitions.") && isPassed;
+
+    auto* shaderProperty = volume ? volume->GetShaderProperty() : nullptr;
+    if (shaderProperty) {
+        shaderProperty->AddFragmentShaderReplacement(
+            "//VTK::RenderToImage::Dec",
+            true,
+            "//VTK::RenderToImage::Dec\nuniform float mvvcvtk_testProgram;\n",
+            false);
+    }
+    renderWindow->Render();
+    const auto rebuiltPixel = GetCenterPixel(renderWindow);
+    isPassed = SetExpect(
+        shaderProperty
+            && rebuiltPixel == std::array<unsigned char, 3>{ 0, 0, 0 },
+        "Volume crop must update the actual program on its shader rebuild frame.") && isPassed;
+    isPassed = SetExpect(
+        probePass->GetSetCount() > 0
+            && strategy->GetMapperInputCount() == mapperInputCount
+            && strategy->GetResampleUpdateCount() == resampleUpdateCount,
+        "Volume crop program sync must not rebuild the LOD producer or replace the mapper input.") && isPassed;
 
     isPassed = SetCropCommitted(
         strategy,
@@ -1190,6 +1301,16 @@ bool StartVolumeCoordinateCase()
     isPassed = SetExpect(
         originalPixel != std::array<unsigned char, 3>{ 0, 0, 0 },
         "Volume history node zero should bypass cropping and restore the source pixels.") && isPassed;
+    isPassed = strategy->DetachRenderEffect(effect.get())
+        && isPassed;
+    auto* detachedKeys = volume
+        ? volume->GetPropertyKeys() : nullptr;
+    isPassed = SetExpect(
+        detachedKeys
+            && detachedKeys->Length(passKey) == 1
+            && detachedKeys->Get(passKey, 0) == probePass,
+        "Detaching Volume crop must restore the pre-existing render-pass list exactly.") && isPassed;
+    strategy->DetachRenderer(renderer);
     renderWindow->Finalize();
     return isPassed;
 }

@@ -172,7 +172,12 @@ BuildForbiddenProbe(
 BuildForbiddenProbe(
     MVVCVTK_FORBID_SUPPORT_PROBE
     ForbiddenFeatureSupportProbe.cpp
-    Render/Support/FeatureVisualStrategy.h
+    Render/Support/FeatureOverlayBase.h
+)
+BuildForbiddenProbe(
+    MVVCVTK_FORBID_VISUAL_STRATEGY_PROBE
+    ForbiddenVisualStrategyProbe.cpp
+    Render/Contracts/VisualStrategy.h
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_CROP_PROBE
@@ -561,13 +566,31 @@ SetHeaderGuard(
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_SLICE_PROBE}"
+    App/AppTypes.h
+    FeatureSpi
+    "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
+)
+SetHeaderGuard(
+    "${MVVCVTK_FORBID_SLICE_PROBE}"
     Render/Strategies/SliceStrategy.h
     FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_SUPPORT_PROBE}"
-    Render/Support/FeatureVisualStrategy.h
+    Render/Support/FeatureOverlayBase.h
+    FeatureSpi
+    "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
+)
+SetHeaderGuard(
+    "${MVVCVTK_FORBID_VISUAL_STRATEGY_PROBE}"
+    Render/Contracts/VisualStrategy.h
+    FeatureSpi
+    "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
+)
+SetHeaderGuard(
+    "${MVVCVTK_FORBID_DATA_PROBE}"
+    Host/Types/HostValueTypes.h
     FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )

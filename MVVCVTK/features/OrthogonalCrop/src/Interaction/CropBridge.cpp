@@ -1106,11 +1106,18 @@ bool CropBridge::Impl::SendShaderCommit()
     }
 
     if (hasFailure) {
-        const auto failedState =
-            m_pendingShader->targets.empty()
-            ? RenderEffectState{}
-            : m_pendingShader->targets.front()
-                .effect->GetState();
+        const auto failedTarget = std::find_if(
+            m_pendingShader->targets.begin(),
+            m_pendingShader->targets.end(),
+            [](const auto& target) {
+                return target.effect
+                    && target.effect->GetState().status
+                        == RenderEffectStatus::Failed;
+            });
+        const auto failedState = failedTarget
+                != m_pendingShader->targets.end()
+            ? failedTarget->effect->GetState()
+            : RenderEffectState{};
         std::cout
             << "[Crop][Shader] failed"
             << " revision="

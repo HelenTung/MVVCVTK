@@ -11,6 +11,7 @@
 #include "ImageProcessor.h"
 #include "CompositeStrategy.h"
 #include "IsoSurfaceStrategy.h"
+#include "Render/Internal/VolumeLodController.h"
 #include "VolumeStrategy.h"
 
 #include <vtkActor.h>
@@ -55,12 +56,16 @@
 
 namespace {
 
-static_assert(static_cast<int>(VolumeQuality::Quality) == 0);
-static_assert(static_cast<int>(VolumeQuality::Custom) == 1);
-static_assert(
-    VolumeQualityParams{}.quality == VolumeQuality::Quality);
-static_assert(static_cast<int>(HostTransferPreset::Percentile) == 0);
-static_assert(static_cast<int>(HostTransferPreset::Manual) == 1);
+static_assert(static_cast<int>(VolumeQuality::Auto) == 0);
+static_assert(static_cast<int>(VolumeQuality::Low) == 1);
+static_assert(static_cast<int>(VolumeQuality::High) == 2);
+static_assert(static_cast<int>(VolumeQuality::XHigh) == 3);
+static_assert(static_cast<int>(VolumeQuality::Ultra) == 4);
+
+double GetRenderRate(const bool isInteracting) noexcept
+{
+    return isInteracting ? 15.0 : 0.001;
+}
 
 vtkSmartPointer<vtkImageData> BuildFloatImage(
     const std::vector<float>& values)
@@ -138,6 +143,7 @@ int GetHistogramFailCount()
     converter.SetBinCount(4);
     auto image = BuildFloatImage({ 0.0f, 1.0f, 2.0f, 3.0f });
     auto table = converter.GetOutputData(image);
+    const std::uint64_t firstBuildCount = converter.GetBuildCount();
     auto* intensity = table
         ? vtkDoubleArray::SafeDownCast(
             table->GetColumnByName("Intensity"))
@@ -166,13 +172,16 @@ int GetHistogramFailCount()
         converter.GetHistogramPercentile(image, 0.0) == 0.0
             && median == 1.0
             && converter.GetHistogramPercentile(image, 1.0) == 3.0
-            && !converter.GetHistogramPercentile(image, -0.1),
-        "Histogram nearest-rank percentile boundaries") ? 0 : 1;
+            && !converter.GetHistogramPercentile(image, -0.1)
+            && firstBuildCount == 1
+            && converter.GetBuildCount() == firstBuildCount,
+        "Histogram reuses one build for percentile boundaries") ? 0 : 1;
 
     auto constantImage = BuildFloatImage(
         { 7.0f, 7.0f, 7.0f, 7.0f });
     failureCount += GetCaseResult(
-        converter.GetHistogramPercentile(constantImage, 0.37) == 7.0,
+        converter.GetHistogramPercentile(constantImage, 0.37) == 7.0
+            && converter.GetBuildCount() == firstBuildCount + 1,
         "Histogram constant-volume percentile") ? 0 : 1;
 
     constexpr int largeCount = 16'777'217;
@@ -192,7 +201,8 @@ int GetHistogramFailCount()
     failureCount += GetCaseResult(
         largeFrequency
             && largeFrequency->GetValue(0)
-                == static_cast<vtkIdType>(largeCount),
+                == static_cast<vtkIdType>(largeCount)
+            && converter.GetBuildCount() == firstBuildCount + 2,
         "Histogram count remains exact above 2^24") ? 0 : 1;
 
     const auto tempDir = std::filesystem::temp_directory_path();
@@ -223,8 +233,12 @@ int GetResampleFailCount()
     image->SetSpacing(0.5, 1.0, 2.0);
     image->SetOrigin(4.0, 5.0, 6.0);
     image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-    auto quality = ImageProcessor::GetDownsampledImage(image, 766);
-    auto custom = ImageProcessor::GetDownsampledImage(image, 256);
+    constexpr double qualityRatio = 0.8;
+    constexpr double customRatio = 256.0 / 900.0;
+    auto quality = ImageProcessor::CreateScaledImage(
+        image, qualityRatio);
+    auto custom = ImageProcessor::CreateScaledImage(
+        image, customRatio);
     if (quality) quality->UpdateInformation();
     if (custom) custom->UpdateInformation();
     int qualityDims[3] = { 0, 0, 0 };
@@ -256,9 +270,9 @@ int GetResampleFailCount()
     }
     const bool isGeometryValid =
         quality && custom
-            && qualityDims[0] == 766
-            && qualityDims[1] == 383
-            && qualityDims[2] == 191
+            && qualityDims[0] == 720
+            && qualityDims[1] == 360
+            && qualityDims[2] == 180
             && customDims[0] == 256
             && customDims[1] == 128
             && customDims[2] == 64
@@ -267,12 +281,12 @@ int GetResampleFailCount()
             && qualityOrigin[0] == 4.0
             && std::abs(
                 qualitySpacing[0]
-                - 0.5 / (766.0 / 900.0)) < 1e-12
+                - 0.5 / qualityRatio) < 1e-12
             && std::abs(
                 qualityOrigin[0]
                 + (qualityDims[0] - 1) * qualitySpacing[0]
-                - (4.0 + 765.0
-                    * (0.5 / (766.0 / 900.0)))) < 1e-9;
+                - (4.0 + 719.0
+                    * (0.5 / qualityRatio))) < 1e-9;
     if (!isGeometryValid) {
         std::cerr << "Resample actual quality="
             << qualityDims[0] << 'x' << qualityDims[1] << 'x'
@@ -286,23 +300,44 @@ int GetResampleFailCount()
     }
     failureCount += GetCaseResult(
         isGeometryValid,
-        "Resample Quality/Custom dimensions and geometry") ? 0 : 1;
+        "Resample preserves original axis ratios and geometry") ? 0 : 1;
 
-    auto mask = ImageProcessor::GetDownsampledMask(image, 256);
+    auto mask = ImageProcessor::CreateScaledMask(
+        image, customRatio);
     failureCount += GetCaseResult(
         mask && mask->GetInterpolationMode()
             == VTK_RESLICE_NEAREST,
         "Validity mask uses nearest interpolation") ? 0 : 1;
     failureCount += GetCaseResult(
-        !ImageProcessor::GetDownsampledImage(image, 0)
-            && !ImageProcessor::GetDownsampledImage(nullptr, 256),
-        "Resample rejects null input and non-positive target") ? 0 : 1;
+        !ImageProcessor::CreateScaledImage(image, 0.0)
+            && !ImageProcessor::CreateScaledImage(nullptr, 1.0)
+            && !ImageProcessor::CreateScaledImage(image, 1.01),
+        "Resample rejects null input and ratios outside (0,1]") ? 0 : 1;
+
+    bool hasInvalidAxisRejected = true;
+    constexpr std::array invalidDimensions{
+        std::array{ 0, 64, 32 },
+        std::array{ 128, 0, 32 },
+        std::array{ 128, 64, 0 }
+    };
+    for (const auto& dimensions : invalidDimensions) {
+        auto invalidImage = vtkSmartPointer<vtkImageData>::New();
+        invalidImage->SetDimensions(
+            dimensions[0], dimensions[1], dimensions[2]);
+        hasInvalidAxisRejected =
+            !ImageProcessor::CreateScaledImage(
+                invalidImage, 0.5)
+            && hasInvalidAxisRejected;
+    }
+    failureCount += GetCaseResult(
+        hasInvalidAxisRejected,
+        "Resample rejects every non-positive source axis") ? 0 : 1;
 
     auto smallImage = vtkSmartPointer<vtkImageData>::New();
     smallImage->SetDimensions(128, 64, 32);
     smallImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     auto smallResample =
-        ImageProcessor::GetDownsampledImage(smallImage, 256);
+        ImageProcessor::CreateScaledImage(smallImage, 1.0);
     smallResample->UpdateInformation();
     int smallExtent[6] = { 0, -1, 0, -1, 0, -1 };
     smallResample->GetOutputInformation(0)->Get(
@@ -312,32 +347,169 @@ int GetResampleFailCount()
         smallExtent[1] - smallExtent[0] + 1 == 128
             && smallExtent[3] - smallExtent[2] + 1 == 64
             && smallExtent[5] - smallExtent[4] + 1 == 32,
-        "Resample does not enlarge input below target") ? 0 : 1;
+        "Ratio 1.0 preserves native dimensions") ? 0 : 1;
+    return failureCount;
+}
+
+int GetLodControlFailCount()
+{
+    int failureCount = 0;
+    VolumeLodController controller;
+    VolumeLodController::Source source;
+    source.dimensions = { 1000, 500, 250 };
+    source.nativeBytes = 500'000'000ULL;
+    source.maskBytes = 125'000'000ULL;
+    source.systemMemoryBytes = 4ULL * 1024ULL * 1024ULL * 1024ULL;
+    source.gpuMemoryBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+    source.cpuThreadCount = 8;
+    const bool isSourceSet = controller.SetSource(source);
+    const auto autoProfile = controller.GetProfile(VolumeQuality::Auto);
+    const auto lowProfile = controller.GetProfile(VolumeQuality::Low);
+    const auto highProfile = controller.GetProfile(VolumeQuality::High);
+    const auto xHighProfile = controller.GetProfile(VolumeQuality::XHigh);
+    const auto ultraProfile = controller.GetProfile(VolumeQuality::Ultra);
+    failureCount += GetCaseResult(
+        isSourceSet
+            && autoProfile.dimensionRatio >= 0.25
+            && autoProfile.dimensionRatio <= 1.0
+            && lowProfile.dimensionRatio == 0.25
+            && lowProfile.outputDimensions
+                == std::array<int, 3>{ 250, 125, 63 }
+            && highProfile.dimensionRatio == 0.50
+            && highProfile.outputDimensions
+                == std::array<int, 3>{ 500, 250, 125 }
+            && highProfile.previewImageDistance == 3.0
+            && highProfile.previewRayFactor == 3.0
+            && !highProfile.isPreviewJitterOn
+            && xHighProfile.dimensionRatio == 0.75
+            && xHighProfile.outputDimensions
+                == std::array<int, 3>{ 750, 375, 188 }
+            && xHighProfile.previewImageDistance == 3.0
+            && xHighProfile.previewRayFactor == 4.0
+            && !xHighProfile.isPreviewJitterOn
+            && ultraProfile.dimensionRatio == 1.0
+            && ultraProfile.outputDimensions == source.dimensions
+            && lowProfile.previewImageDistance == 2.0
+            && lowProfile.previewRayFactor == 2.0
+            && !lowProfile.isPreviewJitterOn
+            && ultraProfile.previewImageDistance == 4.0
+            && ultraProfile.previewRayFactor == 4.0
+            && !ultraProfile.isPreviewJitterOn,
+        "Explicit LOD tiers keep fixed data and preview sampling profiles")
+        ? 0 : 1;
+
+    VolumeLodController::Source abundantSource = source;
+    abundantSource.systemMemoryBytes =
+        8ULL * 1024ULL * 1024ULL * 1024ULL;
+    abundantSource.gpuMemoryBytes =
+        4ULL * 1024ULL * 1024ULL * 1024ULL;
+    abundantSource.cpuThreadCount = 16;
+    abundantSource.isNativeAliasAllowed = false;
+    (void)controller.SetSource(abundantSource);
+    const double abundantRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto lowRamSource = abundantSource;
+    lowRamSource.systemMemoryBytes = 700ULL * 1024ULL * 1024ULL;
+    (void)controller.SetSource(lowRamSource);
+    const double lowRamRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto lowGpuSource = abundantSource;
+    lowGpuSource.gpuMemoryBytes = 700ULL * 1024ULL * 1024ULL;
+    (void)controller.SetSource(lowGpuSource);
+    const double lowGpuRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto lowCpuSource = abundantSource;
+    lowCpuSource.systemMemoryBytes =
+        2100ULL * 1024ULL * 1024ULL;
+    lowCpuSource.cpuThreadCount = 1;
+    (void)controller.SetSource(lowCpuSource);
+    const double lowCpuRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto highCpuSource = lowCpuSource;
+    highCpuSource.cpuThreadCount = 16;
+    (void)controller.SetSource(highCpuSource);
+    const double highCpuRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    failureCount += GetCaseResult(
+        lowRamRatio < abundantRatio
+            && lowGpuRatio < abundantRatio
+            && lowCpuRatio < highCpuRatio,
+        "Load-time Auto plan consumes RAM GPU and CPU resources")
+        ? 0 : 1;
+
+    VolumeLodController::Source firstShape;
+    firstShape.dimensions = { 9, 5, 3 };
+    firstShape.nativeBytes = 540ULL;
+    firstShape.systemMemoryBytes = 1000ULL;
+    firstShape.gpuMemoryBytes = 1000ULL;
+    firstShape.cpuThreadCount = 2;
+    VolumeLodController::Source secondShape = firstShape;
+    secondShape.dimensions = { 15, 3, 3 };
+    const bool isFirstShapeSet = controller.SetSource(firstShape);
+    const auto firstShapeProfile =
+        controller.GetProfile(VolumeQuality::High);
+    const bool isSecondShapeSet = controller.SetSource(secondShape);
+    const auto secondShapeProfile =
+        controller.GetProfile(VolumeQuality::High);
+    VolumeLodController::Source overflowSource;
+    overflowSource.dimensions = { 1, 1, 1 };
+    overflowSource.nativeBytes =
+        std::numeric_limits<std::uint64_t>::max();
+    overflowSource.maskBytes = 1ULL;
+    overflowSource.systemMemoryBytes = 1024ULL;
+    overflowSource.gpuMemoryBytes = 1024ULL;
+    overflowSource.cpuThreadCount = 1;
+    failureCount += GetCaseResult(
+        isFirstShapeSet
+            && isSecondShapeSet
+            && firstShapeProfile.outputDimensions
+                != secondShapeProfile.outputDimensions
+            && !controller.SetSource(overflowSource),
+        "LOD plan uses original dimensions and rejects byte overflow")
+        ? 0 : 1;
+
+    (void)controller.SetSource(source);
+    (void)controller.SetQuality(VolumeQuality::High);
+    const auto stableProfile = controller.GetProfile();
+    (void)controller.SetQuality(VolumeQuality::Low);
+    (void)controller.SetQuality(VolumeQuality::XHigh);
+    (void)controller.SetQuality(VolumeQuality::High);
+    const auto selectedProfile = controller.GetProfile();
+    failureCount += GetCaseResult(
+        stableProfile.dimensionRatio
+                == selectedProfile.dimensionRatio
+            && stableProfile.outputDimensions
+                == selectedProfile.outputDimensions,
+        "Quality switches reuse the immutable load-time LOD plan")
+        ? 0 : 1;
+
+    const bool isUltraSet =
+        controller.SetQuality(VolumeQuality::Ultra);
+    const bool isReducedActiveRejected =
+        !controller.SetActiveRatio(0.5);
+    failureCount += GetCaseResult(
+        isUltraSet
+            && isReducedActiveRejected
+            && controller.GetTargetRatio() == 1.0
+            && controller.GetProfile().outputDimensions
+                == source.dimensions,
+        "Ultra is a strict native-resolution invariant") ? 0 : 1;
     return failureCount;
 }
 
 int GetRenderContractFailCount()
 {
     int failureCount = 0;
-    const std::array configuredModes{
-        VolumeQuality::Quality,
-        VolumeQuality::Custom
+    constexpr std::array configuredQualities{
+        VolumeQuality::Auto,
+        VolumeQuality::Low,
+        VolumeQuality::High,
+        VolumeQuality::XHigh,
+        VolumeQuality::Ultra
     };
-    bool hasEffectiveMatrix = true;
-    for (const auto mode : configuredModes) {
-        VolumeQualityParams configured;
-        configured.quality = mode;
-        hasEffectiveMatrix = hasEffectiveMatrix
-            && GetVolumeQuality(configured, false) == mode
-            && GetVolumeQuality(configured, true)
-                == VolumeQuality::Quality
-            && GetVolumeQuality(configured, false) == mode;
-    }
     failureCount += GetCaseResult(
-        hasEffectiveMatrix
-            && GetRenderRate(false) == 0.001
-            && GetRenderRate(true) == 15.0,
-        "Quality and Custom are the only effective volume modes") ? 0 : 1;
+        configuredQualities.size() == 5,
+        "Volume quality exposes Auto through strict native Ultra") ? 0 : 1;
 
     auto eventSource = std::make_shared<SharedStateBroadcaster>();
     auto appState = std::make_shared<SharedInteractionState>(
@@ -351,35 +523,99 @@ int GetRenderContractFailCount()
         std::move(serviceArgs));
     const FeatureSource firstSource{ "feature.first" };
     const FeatureSource secondSource{ "feature.second" };
-    const VolumeQualityParams custom1000{
-        VolumeQuality::Custom, 1000, 0.25, true
-    };
     AppViewUpdate qualityUpdate;
-    qualityUpdate.volumeQuality = custom1000;
-    const bool isCustomAccepted = servicePorts.app.view
+    qualityUpdate.volumeQuality = VolumeQuality::XHigh;
+    const bool isQualityAccepted = servicePorts.app.view
         && servicePorts.app.feature
         && servicePorts.app.view->SendViewUpdate(qualityUpdate);
     const bool hasFeatureAggregate =
-        isCustomAccepted
-        && servicePorts.app.feature->SetFeatureActive(firstSource, true)
-        && servicePorts.app.feature->SetFeatureActive(secondSource, true)
-        && servicePorts.app.feature->SetFeatureActive(firstSource, false)
+        isQualityAccepted
+        && servicePorts.app.feature->SetFeatureActive(
+            firstSource, true)
+        && servicePorts.app.feature->SetFeatureActive(
+            secondSource, true)
+        && servicePorts.app.feature->SetFeatureActive(
+            firstSource, false)
         && servicePorts.app.view->GetViewState().isFeatureActive
-        && servicePorts.app.feature->SetFeatureActive(secondSource, false)
+        && servicePorts.app.feature->SetFeatureActive(
+            secondSource, false)
         && !servicePorts.app.view->GetViewState().isFeatureActive
-        && servicePorts.app.view->GetViewState().volumeQuality.quality
-            == VolumeQuality::Custom
-        && servicePorts.app.view->GetViewState()
-            .volumeQuality.maxDimension == 1000;
+        && servicePorts.app.view->GetViewState().volumeQuality
+            == VolumeQuality::Auto;
     failureCount += GetCaseResult(
         hasFeatureAggregate,
-        "Feature sources aggregate without overwriting Custom 1000") ? 0 : 1;
+        "Feature sources aggregate while unapplied quality remains unchanged") ? 0 : 1;
+
+    VolumeTransferFunction transferFunction;
+    transferFunction.colorNodes = {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 1.0, 1.0, 1.0, 1.0 }
+    };
+    transferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 1.0, 0.6 }
+    };
+    AppViewUpdate transferUpdate;
+    transferUpdate.volumeTransferFunction = transferFunction;
+    const bool isTransferSet = servicePorts.app.view
+        ->SendViewUpdate(transferUpdate);
+    const auto transferState =
+        servicePorts.app.view->GetViewState();
+    auto incompleteFunction = transferFunction;
+    incompleteFunction.opacityNodes.resize(1);
+    transferUpdate.volumeTransferFunction = incompleteFunction;
+    const bool isIncompleteRejected =
+        !servicePorts.app.view->SendViewUpdate(transferUpdate);
+    auto singleColorFunction = transferFunction;
+    singleColorFunction.colorNodes.resize(1);
+    transferUpdate.volumeTransferFunction = singleColorFunction;
+    const bool isSingleColorRejected =
+        !servicePorts.app.view->SendViewUpdate(transferUpdate);
+    auto duplicateFunction = transferFunction;
+    duplicateFunction.colorNodes[1].scalar =
+        duplicateFunction.colorNodes[0].scalar;
+    transferUpdate.volumeTransferFunction = duplicateFunction;
+    const bool isDuplicateRejected =
+        !servicePorts.app.view->SendViewUpdate(transferUpdate);
+    auto descendingColor = transferFunction;
+    descendingColor.colorNodes[1].scalar = -1.0;
+    transferUpdate.volumeTransferFunction = descendingColor;
+    const bool isColorOrderRejected =
+        !servicePorts.app.view->SendViewUpdate(transferUpdate);
+    auto descendingOpacity = transferFunction;
+    descendingOpacity.opacityNodes[1].scalar = -1.0;
+    transferUpdate.volumeTransferFunction = descendingOpacity;
+    const bool isOpacityOrderRejected =
+        !servicePorts.app.view->SendViewUpdate(transferUpdate);
+    const auto rejectedState =
+        servicePorts.app.view->GetViewState();
+    failureCount += GetCaseResult(
+        isTransferSet
+            && isIncompleteRejected
+            && isSingleColorRejected
+            && isDuplicateRejected
+            && isColorOrderRejected
+            && isOpacityOrderRejected
+            && rejectedState.revision == transferState.revision
+            && rejectedState.volumeTransferFunction.colorNodes.size()
+                == transferState.volumeTransferFunction.colorNodes.size()
+            && rejectedState.volumeTransferFunction.opacityNodes.size()
+                == transferState.volumeTransferFunction.opacityNodes.size()
+            && rejectedState.volumeTransferFunction.colorNodes[1].scalar
+                == transferState.volumeTransferFunction.colorNodes[1].scalar
+            && rejectedState.volumeTransferFunction.opacityNodes[1].scalar
+                == transferState.volumeTransferFunction.opacityNodes[1].scalar
+            && std::abs(
+                transferState.volumeTransferFunction
+                    .opacityNodes.back().opacity - 0.6) < 1e-12,
+        "ViewSet keeps one complete scalar transfer snapshot") ? 0 : 1;
 
     auto dimensionImage = vtkSmartPointer<vtkImageData>::New();
     dimensionImage->SetDimensions(1200, 1, 1);
     dimensionImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     VolumeStrategy dimensionStrategy;
-    dimensionStrategy.SetInputData(dimensionImage);
+    const bool isDimensionInputSet = dimensionStrategy.SetInputData(
+        dimensionImage, nullptr);
     auto* dimensionVolume = vtkVolume::SafeDownCast(
         dimensionStrategy.GetMainProp());
     auto* dimensionMapper = dimensionVolume
@@ -398,83 +634,359 @@ int GetRenderContractFailCount()
         return std::max(
             { dimensions[0], dimensions[1], dimensions[2] });
     };
-    RenderParams dimensionParams;
-    dimensionParams.volumeQuality = custom1000;
-    dimensionStrategy.SetVisualState(
-        dimensionParams, UpdateFlags::Quality);
-    const int customDimension =
-        getMaxDimension(dimensionMapper);
-    dimensionParams.isFeatureActive = true;
-    dimensionStrategy.SetVisualState(
-        dimensionParams, UpdateFlags::Quality);
-    const int featureDimension =
-        getMaxDimension(dimensionMapper);
-    dimensionParams.isFeatureActive = false;
-    dimensionStrategy.SetVisualState(
-        dimensionParams, UpdateFlags::Quality);
-    failureCount += GetCaseResult(
-        customDimension == 1000
-            && featureDimension == 766
-            && getMaxDimension(dimensionMapper) == 1000,
-        "Custom 1000 uses Quality 766 in Feature and restores 1000") ? 0 : 1;
-
-    const auto getFeatureCycleRestored =
-        [&dimensionStrategy, dimensionMapper, &getMaxDimension](
-            const VolumeQualityParams& configured,
-            const int restoredDimension,
-            const double restoredSampleDistance,
-            const bool isJitterExpected) {
-        RenderParams cycleParams;
-        cycleParams.volumeQuality = configured;
-        dimensionStrategy.SetVisualState(
-            cycleParams, UpdateFlags::Quality);
-        cycleParams.isFeatureActive = true;
-        dimensionStrategy.SetVisualState(
-            cycleParams, UpdateFlags::Quality);
-        const bool isFeatureQuality =
-            getMaxDimension(dimensionMapper) == 766
-            && dimensionMapper
-            && dimensionMapper->GetAutoAdjustSampleDistances() == 0
-            && std::abs(
-                dimensionMapper->GetImageSampleDistance() - 1.0)
-                < 1e-12
-            && dimensionMapper->GetUseJittering() != 0;
-        cycleParams.isFeatureActive = false;
-        dimensionStrategy.SetVisualState(
-            cycleParams, UpdateFlags::Quality);
-        return isFeatureQuality
-            && getMaxDimension(dimensionMapper)
-                == restoredDimension
-            && dimensionMapper->GetAutoAdjustSampleDistances() == 0
-            && std::abs(
-                dimensionMapper->GetImageSampleDistance() - 1.0)
-                < 1e-12
-            && (restoredSampleDistance <= 0.0
-                || std::abs(
-                    dimensionMapper->GetSampleDistance()
-                        - restoredSampleDistance) < 1e-12)
-            && (dimensionMapper->GetUseJittering() != 0)
-                == isJitterExpected;
+    const auto getDimensions =
+        [](vtkGPUVolumeRayCastMapper* mapper) {
+        std::array<int, 3> dimensions{};
+        if (!mapper) return dimensions;
+        mapper->Update();
+        auto* input = vtkImageData::SafeDownCast(mapper->GetInput());
+        if (input) {
+            std::copy_n(
+                input->GetDimensions(),
+                dimensions.size(),
+                dimensions.begin());
+        }
+        return dimensions;
     };
+    RenderParams dimensionParams;
+    constexpr std::array qualityProfiles{
+        std::pair{ VolumeQuality::Auto, 2.5 },
+        std::pair{ VolumeQuality::Low, 3.0 },
+        std::pair{ VolumeQuality::High, 2.5 },
+        std::pair{ VolumeQuality::XHigh, 2.0 },
+        std::pair{ VolumeQuality::Ultra, 1.5 }
+    };
+    bool areQualityProfilesSet = dimensionMapper != nullptr;
+    bool isUltraNative = false;
+    const std::uint64_t dimensionPlanCount =
+        dimensionStrategy.GetLodPlanCount();
+    for (const auto& [quality, maximumImageDistance] :
+        qualityProfiles) {
+        dimensionParams.volumeQuality = quality;
+        const std::uint64_t resampleCountBefore =
+            dimensionStrategy.GetResampleBuildCount();
+        const bool isQualitySet = dimensionStrategy.SetVisualState(
+            dimensionParams, UpdateFlags::Quality);
+        const auto plannedDimensions =
+            dimensionStrategy.GetLodDimensions(quality);
+        const bool hasNativeDimensions =
+            plannedDimensions == std::array<int, 3>{ 1200, 1, 1 };
+        const std::uint64_t expectedResampleCount =
+            resampleCountBefore + (hasNativeDimensions ? 0ULL : 1ULL);
+        if (quality == VolumeQuality::Ultra) {
+            isUltraNative = dimensionMapper
+                && dimensionMapper->GetInput()
+                    == dimensionImage.GetPointer()
+            && dimensionStrategy.GetResampleBuildCount()
+                == resampleCountBefore;
+        }
+        areQualityProfilesSet = areQualityProfilesSet
+            && isQualitySet
+            && getDimensions(dimensionMapper)
+                == plannedDimensions
+            && dimensionStrategy.GetResampleBuildCount()
+                == expectedResampleCount
+            && std::abs(
+                dimensionMapper->GetMaximumImageSampleDistance()
+                    - maximumImageDistance) < 1e-12;
+    }
     failureCount += GetCaseResult(
-        getFeatureCycleRestored(
-            { VolumeQuality::Quality, 766, 1.0, true },
-            766, 0.0, true)
-        && getFeatureCycleRestored(
-            { VolumeQuality::Custom, 512, 0.25, false },
-            512, 0.25, false),
-        "Feature mapper restores Quality and Custom") ? 0 : 1;
+        isDimensionInputSet
+            && areQualityProfilesSet
+            && dimensionPlanCount == 1
+            && dimensionStrategy.GetLodPlanCount()
+                == dimensionPlanCount
+            && isUltraNative
+            && dimensionStrategy.GetLodDimensions(
+                VolumeQuality::High)
+                == std::array<int, 3>{ 600, 1, 1 }
+            && dimensionStrategy.GetLodDimensions(
+                VolumeQuality::Ultra)
+                == std::array<int, 3>{ 1200, 1, 1 },
+        "Quality tiers reuse one load-time plan while Ultra stays native") ? 0 : 1;
+
+    auto gpuGateImage = vtkSmartPointer<vtkImageData>::New();
+    gpuGateImage->SetDimensions(64, 64, 64);
+    gpuGateImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(gpuGateImage->GetScalarPointer()),
+        gpuGateImage->GetNumberOfPoints(),
+        static_cast<unsigned char>(128));
+    VolumeStrategy gpuGateStrategy;
+    RenderParams gpuGateParams;
+    gpuGateParams.volumeQuality = VolumeQuality::Low;
+    gpuGateParams.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 255.0, 1.0, 1.0, 1.0 }
+    };
+    gpuGateParams.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 255.0, 1.0 }
+    };
+    const bool isGpuGateConfigured = gpuGateStrategy.SetVisualState(
+        gpuGateParams,
+        UpdateFlags::VolumeTransfer
+            | UpdateFlags::Material
+            | UpdateFlags::Quality);
+    const bool isGpuGateInputSet = gpuGateStrategy.SetInputData(
+        gpuGateImage, nullptr);
+    auto* gpuGateVolume = vtkVolume::SafeDownCast(
+        gpuGateStrategy.GetMainProp());
+    auto* gpuGateMapper = gpuGateVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            gpuGateVolume->GetMapper())
+        : nullptr;
+    auto gpuGateRenderer = vtkSmartPointer<vtkRenderer>::New();
+    auto gpuGateWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    gpuGateWindow->SetOffScreenRendering(1);
+    gpuGateWindow->AddRenderer(gpuGateRenderer);
+    gpuGateStrategy.AttachRenderer(gpuGateRenderer);
+    gpuGateRenderer->ResetCamera();
+    gpuGateWindow->Render();
+    if (gpuGateMapper) {
+        gpuGateMapper->SetMaxMemoryInBytes(1024);
+        gpuGateMapper->SetMaxMemoryFraction(0.1f);
+    }
+    gpuGateParams.volumeQuality = VolumeQuality::Ultra;
+    const bool isGpuGateQualitySet = gpuGateStrategy.SetVisualState(
+        gpuGateParams, UpdateFlags::Quality);
+    failureCount += GetCaseResult(
+        isGpuGateConfigured
+            && isGpuGateInputSet
+            && gpuGateMapper
+            && isGpuGateQualitySet
+            && gpuGateMapper->GetInput() == gpuGateImage.GetPointer(),
+        "LOD switches defer GPU texture loading to the normal Render path") ? 0 : 1;
+
+    VolumeStrategy loadQualityStrategy;
+    RenderParams loadQualityParams = gpuGateParams;
+    loadQualityParams.volumeQuality = VolumeQuality::High;
+    const bool isLoadQualitySet = loadQualityStrategy.SetVisualState(
+        loadQualityParams,
+        UpdateFlags::Quality | UpdateFlags::Denoise);
+    const std::uint64_t loadBuildCount =
+        loadQualityStrategy.GetResampleBuildCount();
+    const bool isLoadQualityInputSet = loadQualityStrategy.SetInputData(
+        dimensionImage, nullptr);
+    const std::uint64_t loadInputBuildCount =
+        loadQualityStrategy.GetResampleBuildCount();
+    const bool isLoadSnapshotSet = loadQualityStrategy.SetVisualState(
+        loadQualityParams, UpdateFlags::All);
+    failureCount += GetCaseResult(
+        isLoadQualitySet
+            && isLoadQualityInputSet
+            && isLoadSnapshotSet
+            && loadInputBuildCount == loadBuildCount + 1
+            && loadQualityStrategy.GetResampleBuildCount()
+                == loadInputBuildCount
+            && loadQualityStrategy.GetResampleUpdateCount() == 0
+            && loadQualityStrategy.GetLodDimensions(
+                VolumeQuality::High)
+                == std::array<int, 3>{ 600, 1, 1 },
+        "Load candidates build the requested Volume quality only once") ? 0 : 1;
+
+    auto lodCacheImage = vtkSmartPointer<vtkImageData>::New();
+    lodCacheImage->SetDimensions(64, 64, 64);
+    lodCacheImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(
+            lodCacheImage->GetScalarPointer()),
+        lodCacheImage->GetNumberOfPoints(),
+        static_cast<unsigned char>(128));
+    VolumeStrategy lodCacheStrategy;
+    RenderParams lodCacheParams;
+    lodCacheParams.volumeQuality = VolumeQuality::High;
+    const bool isHighConfigured = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Quality);
+    const bool isLodCacheInputSet = lodCacheStrategy.SetInputData(
+        lodCacheImage, nullptr);
+    auto* lodCacheVolume = vtkVolume::SafeDownCast(
+        lodCacheStrategy.GetMainProp());
+    auto* lodCacheMapper = lodCacheVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            lodCacheVolume->GetMapper())
+        : nullptr;
+    vtkSmartPointer<vtkAlgorithmOutput> firstHighInput =
+        lodCacheMapper
+            ? lodCacheMapper->GetInputConnection(0, 0) : nullptr;
+    const std::uint64_t firstHighBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    const std::uint64_t firstHighPlanCount =
+        lodCacheStrategy.GetLodPlanCount();
+    lodCacheParams.volumeQuality = VolumeQuality::Low;
+    const bool isFirstLowSet = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Quality);
+    const std::uint64_t firstLowBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    vtkSmartPointer<vtkAlgorithmOutput> firstLowInput =
+        lodCacheMapper
+            ? lodCacheMapper->GetInputConnection(0, 0) : nullptr;
+    lodCacheParams.volumeQuality = VolumeQuality::High;
+    const bool isHighReused = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Quality);
+    const std::uint64_t reusedHighBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    const bool isHighInputReused = lodCacheMapper
+        && lodCacheMapper->GetInputConnection(0, 0)
+            == firstHighInput.GetPointer();
+
+    lodCacheImage->Modified();
+    const bool isLodCacheInputReset = lodCacheStrategy.SetInputData(
+        lodCacheImage, nullptr);
+    const std::uint64_t resetHighBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    lodCacheParams.volumeQuality = VolumeQuality::Low;
+    const bool isLowRebuilt = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Quality);
+    const std::uint64_t resetLowBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    lodCacheParams.isDenoiseOn = true;
+    const bool isDenoiseSet = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Denoise);
+    const std::uint64_t denoiseBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    lodCacheParams.isDenoiseOn = false;
+    const bool isDenoiseReset = lodCacheStrategy.SetVisualState(
+        lodCacheParams, UpdateFlags::Denoise);
+    const std::uint64_t resetDenoiseBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    auto lodCacheMask = vtkSmartPointer<vtkImageData>::New();
+    lodCacheMask->CopyStructure(lodCacheImage);
+    lodCacheMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(
+            lodCacheMask->GetScalarPointer()),
+        lodCacheMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(255));
+    const bool isLodCacheMaskSet = lodCacheStrategy.SetInputData(
+        lodCacheImage, lodCacheMask);
+    const std::uint64_t maskBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    const std::uint64_t maskUpdateCount =
+        lodCacheStrategy.GetResampleUpdateCount();
+    const bool isLodCacheMaskReused = lodCacheStrategy.SetInputData(
+        lodCacheImage, lodCacheMask);
+    const std::uint64_t reusedMaskBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    const std::uint64_t reusedMaskUpdateCount =
+        lodCacheStrategy.GetResampleUpdateCount();
+    auto* lodMaskScalars = static_cast<unsigned char*>(
+        lodCacheMask->GetScalarPointer());
+    if (lodMaskScalars) lodMaskScalars[0] = 0;
+    lodCacheMask->Modified();
+    const bool isLodCacheMaskReset = lodCacheStrategy.SetInputData(
+        lodCacheImage, lodCacheMask);
+    const std::uint64_t resetMaskBuildCount =
+        lodCacheStrategy.GetResampleBuildCount();
+    const std::uint64_t resetMaskUpdateCount =
+        lodCacheStrategy.GetResampleUpdateCount();
+    failureCount += GetCaseResult(
+        isHighConfigured
+            && isLodCacheInputSet
+            && lodCacheMapper
+            && firstHighInput
+            && firstHighBuildCount == 1
+            && firstHighPlanCount == 1
+            && isFirstLowSet
+            && firstLowInput
+            && firstLowInput != firstHighInput
+            && firstLowBuildCount == firstHighBuildCount + 1
+            && isHighReused
+            && isHighInputReused
+            && reusedHighBuildCount == firstLowBuildCount
+            && isLodCacheInputReset
+            && resetHighBuildCount == reusedHighBuildCount + 1
+            && isLowRebuilt
+            && resetLowBuildCount == resetHighBuildCount + 1
+            && isDenoiseSet
+            && denoiseBuildCount == resetLowBuildCount + 1
+            && isDenoiseReset
+            && resetDenoiseBuildCount == denoiseBuildCount + 1
+            && isLodCacheMaskSet
+            && maskBuildCount == resetDenoiseBuildCount + 2
+            && maskUpdateCount == 1
+            && isLodCacheMaskReused
+            && reusedMaskBuildCount == maskBuildCount
+            && reusedMaskUpdateCount == maskUpdateCount
+            && isLodCacheMaskReset
+            && resetMaskBuildCount == maskBuildCount + 2
+            && resetMaskUpdateCount == maskUpdateCount + 1
+            && lodCacheStrategy.GetLodPlanCount()
+                == firstHighPlanCount + 5,
+        "LOD cache builds on first use and invalidates by data mask and denoise")
+        ? 0 : 1;
+
+    VolumeStrategy boundedCacheStrategy;
+    RenderParams boundedCacheParams;
+    boundedCacheParams.volumeQuality = VolumeQuality::High;
+    const bool isBoundedHighSet = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    const bool isBoundedInputSet = boundedCacheStrategy.SetInputData(
+        lodCacheImage, nullptr);
+    auto* boundedVolume = vtkVolume::SafeDownCast(
+        boundedCacheStrategy.GetMainProp());
+    auto* boundedMapper = boundedVolume
+        ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+            boundedVolume->GetMapper())
+        : nullptr;
+    vtkSmartPointer<vtkAlgorithmOutput> boundedHighInput =
+        boundedMapper
+            ? boundedMapper->GetInputConnection(0, 0) : nullptr;
+    boundedCacheParams.volumeQuality = VolumeQuality::Low;
+    const bool isBoundedLowSet = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    boundedCacheParams.volumeQuality = VolumeQuality::High;
+    const bool isBoundedHighReused = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    boundedCacheParams.volumeQuality = VolumeQuality::XHigh;
+    const bool isBoundedXHighSet = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    boundedCacheParams.volumeQuality = VolumeQuality::Ultra;
+    const bool isBoundedUltraSet = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    const std::uint64_t fullCacheBuildCount =
+        boundedCacheStrategy.GetResampleBuildCount();
+    boundedCacheParams.volumeQuality = VolumeQuality::Low;
+    const bool isEvictedLowRebuilt = boundedCacheStrategy.SetVisualState(
+        boundedCacheParams, UpdateFlags::Quality);
+    const std::uint64_t evictedLowBuildCount =
+        boundedCacheStrategy.GetResampleBuildCount();
+    boundedCacheParams.volumeQuality = VolumeQuality::High;
+    const bool isProtectedHighReused =
+        boundedCacheStrategy.SetVisualState(
+            boundedCacheParams, UpdateFlags::Quality);
+    failureCount += GetCaseResult(
+        isBoundedHighSet
+            && isBoundedInputSet
+            && boundedMapper
+            && boundedHighInput
+            && isBoundedLowSet
+            && isBoundedHighReused
+            && isBoundedXHighSet
+            && isBoundedUltraSet
+            && fullCacheBuildCount == 3
+            && isEvictedLowRebuilt
+            && evictedLowBuildCount == fullCacheBuildCount + 1
+            && isProtectedHighReused
+            && boundedCacheStrategy.GetResampleBuildCount()
+                == evictedLowBuildCount
+            && boundedMapper->GetInputConnection(0, 0)
+                == boundedHighInput.GetPointer(),
+        "Bounded LOD cache evicts LRU while retaining reusable High")
+        ? 0 : 1;
 
     auto cacheMask = vtkSmartPointer<vtkImageData>::New();
     cacheMask->CopyStructure(dimensionImage);
     cacheMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
-    std::fill_n(
-        static_cast<unsigned char*>(cacheMask->GetScalarPointer()),
-        dimensionImage->GetNumberOfPoints(),
-        static_cast<unsigned char>(255));
+    auto* cacheMaskScalars = static_cast<unsigned char*>(
+        cacheMask->GetScalarPointer());
+    for (vtkIdType index = 0;
+        index < dimensionImage->GetNumberOfPoints(); ++index) {
+        cacheMaskScalars[index] = index % 2 == 0 ? 0 : 255;
+    }
     VolumeStrategy cacheStrategy;
-    cacheStrategy.SetInputData(dimensionImage);
-    cacheStrategy.SetInputMask(cacheMask);
+    const bool isCacheInputSet = cacheStrategy.SetInputData(
+        dimensionImage, cacheMask);
     auto* cacheVolume = vtkVolume::SafeDownCast(
         cacheStrategy.GetMainProp());
     auto* cacheMapper = cacheVolume
@@ -487,20 +999,56 @@ int GetRenderContractFailCount()
         cacheMapper ? cacheMapper->GetMaskInput() : nullptr;
     const double qualitySampleDistance =
         cacheMapper ? cacheMapper->GetSampleDistance() : 0.0;
-    const auto qualityMapperTime =
-        cacheMapper ? cacheMapper->GetMTime() : 0;
+    const std::uint64_t qualityInputCount =
+        cacheStrategy.GetMapperInputCount();
+    const std::uint64_t qualityBuildCount =
+        cacheStrategy.GetResampleBuildCount();
+    const std::uint64_t qualityUpdateCount =
+        cacheStrategy.GetResampleUpdateCount();
+    const std::uint64_t qualityPlanCount =
+        cacheStrategy.GetLodPlanCount();
+    const bool isNativeAuto =
+        cacheStrategy.GetLodDimensions(VolumeQuality::Auto)
+            == std::array<int, 3>{ 1200, 1, 1 };
+    auto* qualityVolume = cacheMapper
+        ? vtkImageData::SafeDownCast(cacheMapper->GetInput())
+        : nullptr;
+    bool isMaskBinary = qualityMask != nullptr;
+    auto* qualityMaskScalars = qualityMask
+        ? static_cast<unsigned char*>(qualityMask->GetScalarPointer())
+        : nullptr;
+    for (vtkIdType index = 0;
+        isMaskBinary && index < qualityMask->GetNumberOfPoints(); ++index) {
+        isMaskBinary = qualityMaskScalars
+            && (qualityMaskScalars[index] == 0
+                || qualityMaskScalars[index] == 255);
+    }
     const bool isQualityStable =
-        cacheMapper
+        isCacheInputSet
+        && cacheMapper
         && qualityInput
         && qualityMask
-        && cacheMapper->GetAutoAdjustSampleDistances() == 0
+        && qualityVolume
+        && isNativeAuto
+        && qualityVolume == dimensionImage.GetPointer()
+        && qualityMask == cacheMask.GetPointer()
+        && qualityInputCount == 1
+        && qualityPlanCount == 1
+        && qualityBuildCount == 0
+        && qualityUpdateCount == 0
+        && std::equal(
+            qualityVolume->GetExtent(),
+            qualityVolume->GetExtent() + 6,
+            qualityMask->GetExtent())
+        && isMaskBinary
+        && cacheMapper->GetAutoAdjustSampleDistances() != 0
         && std::abs(
             cacheMapper->GetImageSampleDistance() - 1.0) < 1e-12
         && std::abs(
             cacheMapper->GetMinimumImageSampleDistance() - 1.0)
             < 1e-12
         && std::abs(
-            cacheMapper->GetMaximumImageSampleDistance() - 1.0)
+            cacheMapper->GetMaximumImageSampleDistance() - 2.5)
             < 1e-12
         && cacheMapper->GetUseJittering() != 0;
     RenderParams cacheParams;
@@ -513,18 +1061,25 @@ int GetRenderContractFailCount()
             == qualityInput.GetPointer()
         && cacheMapper->GetMaskInput()
             == qualityMask.GetPointer()
-        && getMaxDimension(cacheMapper) == 766
-        && cacheMapper->GetAutoAdjustSampleDistances() == 0
+        && getMaxDimension(cacheMapper) == 1200
+        && cacheMapper->GetAutoAdjustSampleDistances() != 0
         && std::abs(
             cacheMapper->GetImageSampleDistance() - 1.0) < 1e-12
         && std::abs(
             cacheMapper->GetSampleDistance()
                 - qualitySampleDistance) < 1e-12
         && cacheMapper->GetUseJittering() != 0
-        && cacheMapper->GetMTime() == qualityMapperTime;
+        && cacheStrategy.GetMapperInputCount()
+            == qualityInputCount
+        && cacheStrategy.GetResampleBuildCount()
+            == qualityBuildCount
+        && cacheStrategy.GetResampleUpdateCount()
+            == qualityUpdateCount
+        && cacheStrategy.GetLodPlanCount()
+            == qualityPlanCount;
     failureCount += GetCaseResult(
         isQualityStable && isFeatureCacheReused,
-        "Feature reuses the cached Quality producer and mapper") ? 0 : 1;
+        "Auto commits volume and mask once without rebuilding its plan") ? 0 : 1;
 
     VolumeStrategy retryStrategy;
     retryStrategy.SetInputData(dimensionImage);
@@ -545,11 +1100,12 @@ int GetRenderContractFailCount()
     retryImage->SetDimensions(8, 1, 1);
     retryImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     retryStrategy.SetInputData(retryImage);
+    const int retryDimension = getMaxDimension(retryMapper);
     failureCount += GetCaseResult(
         isFailedInputPreserved
             && retryMapper->GetInputConnection(0, 0)
                 != oldRetryInput.GetPointer()
-            && getMaxDimension(retryMapper) == 8,
+            && retryDimension == 8,
         "Failed producer input preserves the old cache and allows retry") ? 0 : 1;
 
     auto keyImage = vtkSmartPointer<vtkImageData>::New();
@@ -580,7 +1136,6 @@ int GetRenderContractFailCount()
     const bool isSpacingKeyUpdated =
         firstKeyInput
         && spacingKeyInput
-        && spacingKeyInput != firstKeyInput
         && spacingKeyOutput
         && std::abs(spacingKeyOutput->GetSpacing()[0] - 2.0)
             < 1e-12
@@ -598,11 +1153,16 @@ int GetRenderContractFailCount()
     }
     keyImage->Modified();
     keyStrategy.SetInputData(keyImage);
+    if (keyMapper) keyMapper->Update();
+    auto* dataKeyOutput = keyMapper
+        ? vtkImageData::SafeDownCast(keyMapper->GetInput())
+        : nullptr;
     const bool isDataKeyUpdated =
         keyMapper
         && dataKeyInput
-        && keyMapper->GetInputConnection(0, 0)
-            != dataKeyInput.GetPointer();
+        && dataKeyOutput
+        && *static_cast<unsigned char*>(
+            dataKeyOutput->GetScalarPointer()) == 17;
 
     vtkSmartPointer<vtkAlgorithmOutput> extentKeyInput =
         keyMapper ? keyMapper->GetInputConnection(0, 0) : nullptr;
@@ -613,8 +1173,6 @@ int GetRenderContractFailCount()
     const bool isExtentKeyUpdated =
         keyMapper
         && extentKeyInput
-        && keyMapper->GetInputConnection(0, 0)
-            != extentKeyInput.GetPointer()
         && getMaxDimension(keyMapper) == 16;
 
     auto keyMask = vtkSmartPointer<vtkImageData>::New();
@@ -627,10 +1185,12 @@ int GetRenderContractFailCount()
     keyStrategy.SetInputMask(keyMask);
     vtkSmartPointer<vtkImageData> firstKeyMask =
         keyMapper ? keyMapper->GetMaskInput() : nullptr;
-    keyMask->SetSpacing(2.5, 3.0, 4.0);
+    auto* keyMaskScalars = static_cast<unsigned char*>(
+        keyMask->GetScalarPointer());
+    if (keyMaskScalars) keyMaskScalars[0] = 0;
     keyMask->Modified();
     keyStrategy.SetInputMask(keyMask);
-    auto* spacingKeyMask =
+    vtkSmartPointer<vtkImageData> nextKeyMask =
         keyMapper ? keyMapper->GetMaskInput() : nullptr;
     keyImage->Modified();
     keyStrategy.SetInputMask(nullptr);
@@ -641,12 +1201,13 @@ int GetRenderContractFailCount()
             && isDataKeyUpdated
             && isExtentKeyUpdated
             && firstKeyMask
-            && spacingKeyMask
-            && spacingKeyMask != firstKeyMask.GetPointer()
-            && std::abs(spacingKeyMask->GetSpacing()[0] - 2.5)
-                < 1e-12
-            && failedClearMask == spacingKeyMask,
-        "Same-pointer mutations invalidate caches and failed mask clear rolls back") ? 0 : 1;
+            && nextKeyMask
+            && nextKeyMask == firstKeyMask.GetPointer()
+            && *static_cast<unsigned char*>(
+                nextKeyMask->GetScalarPointer()) == 0
+            && failedClearMask == nullptr
+            && keyStrategy.GetLodPlanCount() == 7,
+        "Same-pointer mutations rebuild plans while native aliases stay stable") ? 0 : 1;
 
     auto image = BuildFloatImage(
         { 0.0f, 0.0f, 1.0f, 1.0f });
@@ -674,11 +1235,18 @@ int GetRenderContractFailCount()
                     return std::abs(expected - actual) < 1e-12;
                 });
     };
-    const std::vector<TFNode> isoNodes{
-        { 0.00, 0.0, 0.75, 0.75, 0.75 },
-        { 0.50, 0.0, 0.75, 0.75, 0.75 },
-        { 0.85, 0.8, 0.75, 0.75, 0.75 },
-        { 1.00, 1.0, 0.75, 0.75, 0.75 }
+    VolumeTransferFunction isoFunction;
+    isoFunction.colorNodes = {
+        { 10.0, 0.75, 0.75, 0.75 },
+        { 20.0, 0.75, 0.75, 0.75 },
+        { 27.0, 0.75, 0.75, 0.75 },
+        { 30.0, 0.75, 0.75, 0.75 }
+    };
+    isoFunction.opacityNodes = {
+        { 10.0, 0.0 },
+        { 20.0, 0.0 },
+        { 27.0, 0.8 },
+        { 30.0, 1.0 }
     };
 
     auto* colorMapper = volume
@@ -710,27 +1278,33 @@ int GetRenderContractFailCount()
         ? colorMapper->GetAutoAdjustSampleDistances() : -1;
     const int colorJitter = colorMapper
         ? colorMapper->GetUseJittering() : -1;
+    const std::uint64_t tfMapperInputCount =
+        volumeStrategy.GetMapperInputCount();
+    const std::uint64_t tfResampleBuildCount =
+        volumeStrategy.GetResampleBuildCount();
+    const std::uint64_t tfResampleUpdateCount =
+        volumeStrategy.GetResampleUpdateCount();
     RenderParams colorParams;
-    colorParams.tfNodes = isoNodes;
+    colorParams.volumeTransferFunction = isoFunction;
     colorParams.scalarRange[0] = 10.0;
     colorParams.scalarRange[1] = 30.0;
     colorParams.material.opacity = 0.4;
     volumeStrategy.SetVisualState(
-        colorParams, UpdateFlags::TF);
+        colorParams, UpdateFlags::VolumeTransfer);
     auto* colorFunction = volume && volume->GetProperty()
         ? volume->GetProperty()->GetRGBTransferFunction()
         : nullptr;
     bool hasVolumeRgb =
         colorFunction
         && colorFunction->GetSize()
-            == static_cast<int>(isoNodes.size());
+            == static_cast<int>(isoFunction.colorNodes.size());
     auto* opacityFunction = volume && volume->GetProperty()
         ? volume->GetProperty()->GetScalarOpacity()
         : nullptr;
     hasVolumeRgb = hasVolumeRgb
         && opacityFunction
         && opacityFunction->GetSize()
-            == static_cast<int>(isoNodes.size());
+            == static_cast<int>(isoFunction.opacityNodes.size());
     for (int index = 0;
         hasVolumeRgb && index < colorFunction->GetSize();
         ++index) {
@@ -738,20 +1312,19 @@ int GetRenderContractFailCount()
         double opacityNode[4] = {};
         colorFunction->GetNodeValue(index, colorNode);
         opacityFunction->GetNodeValue(index, opacityNode);
-        const auto& sourceNode =
-            isoNodes[static_cast<std::size_t>(index)];
-        const double scalarValue =
-            colorParams.scalarRange[0]
-            + sourceNode.position
-                * (colorParams.scalarRange[1]
-                    - colorParams.scalarRange[0]);
+        const auto& sourceColor =
+            isoFunction.colorNodes[static_cast<std::size_t>(index)];
+        const auto& sourceOpacity =
+            isoFunction.opacityNodes[static_cast<std::size_t>(index)];
         hasVolumeRgb =
             getColorMatches(colorNode + 1)
-            && std::abs(colorNode[0] - scalarValue) < 1e-12
-            && std::abs(opacityNode[0] - scalarValue) < 1e-12
+            && std::abs(
+                colorNode[0] - sourceColor.scalar) < 1e-12
+            && std::abs(
+                opacityNode[0] - sourceOpacity.scalar) < 1e-12
             && std::abs(
                 opacityNode[1]
-                    - sourceNode.opacity
+                    - sourceOpacity.opacity
                         * colorParams.material.opacity) < 1e-12;
     }
     failureCount += GetCaseResult(
@@ -760,15 +1333,17 @@ int GetRenderContractFailCount()
             && colorInput
             && colorMapper->GetInputConnection(0, 0)
                 == colorInput,
-        "Volume TF maps base RGB, scalar position, and opacity without rebuilding input") ? 0 : 1;
+        "Volume TF maps real scalar, RGB, and opacity without rebuilding input") ? 0 : 1;
 
-    const std::vector<TFNode> customNodes{
-        { 0.0, 0.0, 1.0, 0.0, 0.0 },
-        { 1.0, 1.0, 0.0, 0.0, 1.0 }
+    const std::vector<VolumeTransferFunction::ColorNode> customNodes{
+        { 10.0, 1.0, 0.0, 0.0 },
+        { 30.0, 0.0, 0.0, 1.0 }
     };
-    colorParams.tfNodes = customNodes;
-    volumeStrategy.SetVisualState(
-        colorParams, UpdateFlags::TF);
+    colorParams.volumeTransferFunction.colorNodes = customNodes;
+    auto* oldOpacityFunction = opacityFunction;
+    const bool isCompleteTransferSet =
+        volumeStrategy.SetVisualState(
+            colorParams, UpdateFlags::VolumeTransfer);
     colorFunction = volume && volume->GetProperty()
         ? volume->GetProperty()->GetRGBTransferFunction()
         : nullptr;
@@ -798,8 +1373,158 @@ int GetRenderContractFailCount()
                 == colorAutoAdjust
             && colorMapper->GetUseJittering() == colorJitter
             && colorMapper->GetInputConnection(0, 0)
-                == colorInput,
-        "Explicit Volume TF keeps custom RGB, quality, and input identity") ? 0 : 1;
+                == colorInput
+            && volume->GetProperty()->GetScalarOpacity()
+                != oldOpacityFunction
+            && volumeStrategy.GetMapperInputCount()
+                == tfMapperInputCount
+            && volumeStrategy.GetResampleBuildCount()
+                == tfResampleBuildCount
+            && volumeStrategy.GetResampleUpdateCount()
+                == tfResampleUpdateCount
+            && isCompleteTransferSet,
+        "A complete TF snapshot replaces both curves without changing LOD input") ? 0 : 1;
+
+    auto invalidTransferParams = colorParams;
+    auto* oldColorFunction = colorFunction;
+    oldOpacityFunction = volume->GetProperty()->GetScalarOpacity();
+    invalidTransferParams.volumeTransferFunction
+        .opacityNodes[1].scalar =
+            invalidTransferParams.volumeTransferFunction
+                .opacityNodes[0].scalar;
+    const bool isInvalidTransferRejected =
+        !volumeStrategy.SetVisualState(
+            invalidTransferParams,
+            UpdateFlags::VolumeTransfer);
+    failureCount += GetCaseResult(
+        isInvalidTransferRejected
+            && volume->GetProperty()->GetRGBTransferFunction()
+                == oldColorFunction
+            && volume->GetProperty()->GetScalarOpacity()
+                == oldOpacityFunction
+            && colorMapper->GetInputConnection(0, 0) == colorInput
+            && volumeStrategy.GetMapperInputCount()
+                == tfMapperInputCount
+            && volumeStrategy.GetResampleBuildCount()
+                == tfResampleBuildCount
+            && volumeStrategy.GetResampleUpdateCount()
+                == tfResampleUpdateCount,
+        "An invalid opacity curve cannot partially commit a new color curve") ? 0 : 1;
+
+    auto dragParams = colorParams;
+    dragParams.isInteracting = true;
+    volumeStrategy.SetVisualState(
+        dragParams, UpdateFlags::RenderRate);
+    const std::uint64_t dragMapperInputCount =
+        volumeStrategy.GetMapperInputCount();
+    const std::uint64_t dragResampleBuildCount =
+        volumeStrategy.GetResampleBuildCount();
+    const std::uint64_t dragResampleUpdateCount =
+        volumeStrategy.GetResampleUpdateCount();
+    for (int revision = 1; revision <= 1000; ++revision) {
+        dragParams.volumeTransferFunction.colorNodes.back().b =
+            static_cast<double>(revision) / 1000.0;
+        volumeStrategy.SetVisualState(
+            dragParams, UpdateFlags::VolumeTransfer);
+    }
+    const bool isDragPipelineStable =
+        volumeStrategy.GetMapperInputCount()
+            == dragMapperInputCount
+        && volumeStrategy.GetResampleBuildCount()
+            == dragResampleBuildCount
+        && volumeStrategy.GetResampleUpdateCount()
+            == dragResampleUpdateCount
+        && colorMapper->GetInputConnection(0, 0) == colorInput;
+    dragParams.isInteracting = false;
+    volumeStrategy.SetVisualState(
+        dragParams, UpdateFlags::RenderRate);
+    failureCount += GetCaseResult(
+        isDragPipelineStable
+            && volumeStrategy.GetMapperInputCount()
+                == dragMapperInputCount
+            && volumeStrategy.GetResampleBuildCount()
+                == dragResampleBuildCount
+            && volumeStrategy.GetResampleUpdateCount()
+                == dragResampleUpdateCount,
+        "One thousand TF drag snapshots never rebind or rebuild the 3D LOD") ? 0 : 1;
+
+    RenderParams absoluteParams = colorParams;
+    absoluteParams.material.opacity = 0.5;
+    absoluteParams.volumeTransferFunction.colorNodes = {
+        { 12.0, 1.0, 0.0, 0.0 },
+        { 20.0, 0.0, 1.0, 0.0 },
+        { 28.0, 0.0, 0.0, 1.0 }
+    };
+    absoluteParams.volumeTransferFunction.opacityNodes = {
+        { 10.0, 0.0 },
+        { 18.0, 0.3 },
+        { 25.0, 0.8 },
+        { 30.0, 1.0 }
+    };
+    const bool isAbsoluteSet = volumeStrategy.SetVisualState(
+        absoluteParams,
+        UpdateFlags::VolumeTransfer);
+    auto* absoluteColor =
+        volume->GetProperty()->GetRGBTransferFunction();
+    auto* absoluteOpacity =
+        volume->GetProperty()->GetScalarOpacity();
+    failureCount += GetCaseResult(
+        isAbsoluteSet && absoluteColor && absoluteOpacity
+            && absoluteColor->GetSize() == 3
+            && absoluteOpacity->GetSize() == 4
+            && std::abs(absoluteColor->GetRange()[0] - 12.0)
+                < 1e-12
+            && std::abs(absoluteColor->GetRange()[1] - 28.0)
+                < 1e-12
+            && std::abs(absoluteOpacity->GetRange()[0] - 10.0)
+                < 1e-12
+            && std::abs(absoluteOpacity->GetRange()[1] - 30.0)
+                < 1e-12
+            && std::abs(
+                volume->GetProperty()
+                    ->GetScalarOpacityUnitDistance() - 1.0)
+                < 1e-12
+            && volume->GetVisibility() != 0
+            && colorMapper->GetInputConnection(0, 0) == colorInput,
+        "Real scalar nodes keep one stable linear TF semantic") ? 0 : 1;
+
+    constexpr std::array scalarQualities{
+        VolumeQuality::Low,
+        VolumeQuality::High,
+        VolumeQuality::Ultra
+    };
+    bool isAbsoluteLodStable = true;
+    for (std::size_t index = 0;
+        index < scalarQualities.size(); ++index) {
+        auto scalarParams = absoluteParams;
+        scalarParams.volumeQuality = scalarQualities[index];
+        dimensionStrategy.SetVisualState(
+            scalarParams,
+            UpdateFlags::Quality
+                | UpdateFlags::VolumeTransfer);
+        auto* scalarProperty = dimensionVolume
+            ? dimensionVolume->GetProperty() : nullptr;
+        auto* scalarColor = scalarProperty
+            ? scalarProperty->GetRGBTransferFunction() : nullptr;
+        auto* scalarOpacity = scalarProperty
+            ? scalarProperty->GetScalarOpacity() : nullptr;
+        isAbsoluteLodStable = isAbsoluteLodStable
+            && getDimensions(dimensionMapper)
+                == dimensionStrategy.GetLodDimensions(
+                    scalarQualities[index])
+            && scalarColor && scalarOpacity
+            && std::abs(scalarColor->GetRange()[0] - 12.0)
+                < 1e-12
+            && std::abs(scalarColor->GetRange()[1] - 28.0)
+                < 1e-12
+            && std::abs(scalarOpacity->GetRange()[0] - 10.0)
+                < 1e-12
+            && std::abs(scalarOpacity->GetRange()[1] - 30.0)
+                < 1e-12;
+    }
+    failureCount += GetCaseResult(
+        isAbsoluteLodStable,
+        "Absolute scalar nodes stay fixed across quality tiers") ? 0 : 1;
 
     IsoSurfaceStrategy isoStrategy;
     isoStrategy.SetInputData(image);
@@ -849,7 +1574,7 @@ int GetRenderContractFailCount()
             && isoFilter
             && isoMapper->GetInputConnection(0, 0)
                 == isoInput.GetPointer(),
-        "Iso uses one fixed Quality 766 producer") ? 0 : 1;
+        "Iso keeps one lazy producer with the legacy 766 input ceiling") ? 0 : 1;
 
     auto polyData = vtkSmartPointer<vtkPolyData>::New();
     auto points = vtkSmartPointer<vtkPoints>::New();
@@ -877,9 +1602,7 @@ int GetRenderContractFailCount()
         "Iso polydata input exposes the base RGB and Flat interpolation") ? 0 : 1;
 
     RenderParams params;
-    params.volumeQuality = {
-        VolumeQuality::Custom, 512, 0.25, true
-    };
+    params.volumeQuality = VolumeQuality::High;
     params.gradientOpacity = {
         { 0.0, 0.0 }, { 10.0, 0.5 }, { 20.0, 1.0 }
     };
@@ -909,9 +1632,9 @@ int GetRenderContractFailCount()
                 mapper->GetMinimumImageSampleDistance() - 1.0)
                 < 1e-12
             && std::abs(
-                mapper->GetMaximumImageSampleDistance() - 1.0)
+                mapper->GetMaximumImageSampleDistance() - 2.5)
                 < 1e-12
-            && std::abs(mapper->GetSampleDistance() - 0.25)
+            && std::abs(mapper->GetSampleDistance() - 0.75)
                 < 1e-12
             && mapper->GetUseJittering() != 0
             && volume->GetProperty()->HasGradientOpacity()
@@ -924,7 +1647,7 @@ int GetRenderContractFailCount()
             && std::abs(image->GetScalarRange()[1] - 1.0)
                 < 1e-12
             && std::abs(image->GetSpacing()[0] - 1.0) < 1e-12,
-        "Custom quality and SCALAR gradient opacity reach VTK properties") ? 0 : 1;
+        "High quality and SCALAR gradient opacity reach VTK properties") ? 0 : 1;
 
     params.isFeatureActive = true;
     volumeStrategy.SetVisualState(
@@ -934,11 +1657,11 @@ int GetRenderContractFailCount()
     const bool isFeatureQuality =
         mapper
         && featureQualityInput
-        && featureQualityInput != customInput
+        && featureQualityInput == customInput
         && mapper->GetAutoAdjustSampleDistances() == 0
         && std::abs(mapper->GetImageSampleDistance() - 1.0)
             < 1e-12
-        && std::abs(mapper->GetSampleDistance() - 0.5)
+        && std::abs(mapper->GetSampleDistance() - 0.75)
             < 1e-12
         && mapper->GetUseJittering() != 0;
 
@@ -951,13 +1674,13 @@ int GetRenderContractFailCount()
         && mapper->GetAutoAdjustSampleDistances() == 0
         && std::abs(mapper->GetImageSampleDistance() - 1.0)
             < 1e-12
-        && std::abs(mapper->GetSampleDistance() - 0.25)
+        && std::abs(mapper->GetSampleDistance() - 0.75)
             < 1e-12
         && mapper->GetUseJittering() != 0;
     failureCount += GetCaseResult(
         isFeatureQuality
             && isCustomRestored,
-        "Feature uses Quality and restores Custom config") ? 0 : 1;
+        "Feature state leaves the configured quality unchanged") ? 0 : 1;
 
     params.gradientOpacity.clear();
     volumeStrategy.SetVisualState(
@@ -989,15 +1712,17 @@ int GetRenderContractFailCount()
     previewStrategy.SetInputData(previewImage);
     previewStrategy.SetInputMask(previewMask);
     RenderParams previewParams;
-    previewParams.volumeQuality = {
-        VolumeQuality::Custom, 32, 0.25, false
-    };
+    previewParams.volumeQuality = VolumeQuality::XHigh;
     previewParams.isDenoiseOn = true;
     previewParams.scalarRange[0] = 0.0;
     previewParams.scalarRange[1] = 255.0;
-    previewParams.tfNodes = {
-        { 0.0, 0.0, 0.1, 0.2, 0.3 },
-        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    previewParams.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.1, 0.2, 0.3 },
+        { 255.0, 0.8, 0.7, 0.6 }
+    };
+    previewParams.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 255.0, 0.9 }
     };
     previewParams.gradientOpacity = {
         { 0.0, 0.0 }, { 64.0, 0.7 }, { 255.0, 1.0 }
@@ -1009,7 +1734,7 @@ int GetRenderContractFailCount()
         previewParams,
         UpdateFlags::Quality
             | UpdateFlags::Denoise
-            | UpdateFlags::TF
+            | UpdateFlags::VolumeTransfer
             | UpdateFlags::GradientOpacity
             | UpdateFlags::Material);
     auto* previewVolume = vtkVolume::SafeDownCast(
@@ -1030,6 +1755,122 @@ int GetRenderContractFailCount()
     // 避免把管线初始化误判为交互预览重建。
     previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
     previewWindow->Render();
+    const auto setPreviewState = [
+        &previewParams,
+        &previewStrategy,
+        &previewWindow](
+            const bool isInteracting,
+            const double desiredRate) {
+        auto interactionParams = previewParams;
+        interactionParams.isInteracting = isInteracting;
+        const bool isSet = previewStrategy.SetVisualState(
+            interactionParams, UpdateFlags::RenderRate);
+        // 交互状态负责材质语义；mapper 在 GPURender owner thread 根据
+        // 同一边界发布的 DesiredUpdateRate 选择 preview/still 采样。
+        previewWindow->SetDesiredUpdateRate(desiredRate);
+        previewWindow->Render();
+        return isSet;
+    };
+    constexpr std::array previewProfiles{
+        std::pair{
+            VolumeQuality::Low,
+            std::array<double, 2>{ 2.0, 2.0 } },
+        std::pair{
+            VolumeQuality::High,
+            std::array<double, 2>{ 3.0, 3.0 } },
+        std::pair{
+            VolumeQuality::XHigh,
+            std::array<double, 2>{ 3.0, 4.0 } },
+        std::pair{
+            VolumeQuality::Ultra,
+            std::array<double, 2>{ 4.0, 4.0 } }
+    };
+    bool arePreviewProfilesValid = true;
+    for (const auto& [quality, previewQuality] : previewProfiles) {
+        previewParams.volumeQuality = quality;
+        previewParams.isInteracting = false;
+        const bool isQualitySet = previewStrategy.SetVisualState(
+            previewParams,
+            UpdateFlags::Quality | UpdateFlags::RenderRate);
+        previewWindow->Render();
+        auto* profileInput = previewMapper
+            ? previewMapper->GetInputConnection(0, 0) : nullptr;
+        const double profileStillRay = previewMapper
+            ? previewMapper->GetSampleDistance() : 0.0;
+        const bool isPreviewSet = setPreviewState(
+            true, GetRenderRate(true));
+        const bool isPreviewValid = previewMapper
+            && std::abs(
+                previewMapper->GetImageSampleDistance()
+                    - previewQuality[0])
+                < 1e-12
+            && previewMapper->GetAutoAdjustSampleDistances() == 0
+            && std::abs(
+                previewMapper->GetMinimumImageSampleDistance()
+                    - previewQuality[0])
+                < 1e-12
+            && std::abs(
+                previewMapper->GetMaximumImageSampleDistance()
+                    - previewQuality[0])
+                < 1e-12
+            && std::abs(
+                previewMapper->GetSampleDistance()
+                    - previewQuality[1] * profileStillRay) < 1e-12
+            && previewMapper->GetUseJittering() == 0
+            && previewVolume
+            && previewVolume->GetProperty()
+            && previewVolume->GetProperty()->GetShade() == 0
+            && previewMapper->GetInputConnection(0, 0) == profileInput;
+        const bool isStillSet = setPreviewState(
+            false, GetRenderRate(false));
+        const bool isStillValid = previewMapper
+            && std::abs(
+                previewMapper->GetImageSampleDistance() - 1.0)
+                < 1e-12
+            && std::abs(
+                previewMapper->GetSampleDistance() - profileStillRay)
+                < 1e-12
+            && previewMapper->GetUseJittering() != 0
+            && previewVolume
+            && previewVolume->GetProperty()
+            && previewVolume->GetProperty()->GetShade() != 0
+            && previewMapper->GetInputConnection(0, 0) == profileInput;
+        arePreviewProfilesValid = arePreviewProfilesValid
+            && isQualitySet && isPreviewSet && isPreviewValid
+            && isStillSet && isStillValid;
+    }
+    previewParams.volumeQuality = VolumeQuality::XHigh;
+    previewParams.isInteracting = false;
+    previewStrategy.SetVisualState(
+        previewParams,
+        UpdateFlags::Quality | UpdateFlags::RenderRate);
+    previewWindow->Render();
+    auto gpuDragParams = previewParams;
+    gpuDragParams.isInteracting = true;
+    previewStrategy.SetVisualState(
+        gpuDragParams, UpdateFlags::RenderRate);
+    const std::uint64_t gpuDragInputCount =
+        previewStrategy.GetMapperInputCount();
+    const std::uint64_t gpuDragBuildCount =
+        previewStrategy.GetResampleBuildCount();
+    const std::uint64_t gpuDragUpdateCount =
+        previewStrategy.GetResampleUpdateCount();
+    for (int revision = 1; revision <= 1000; ++revision) {
+        gpuDragParams.volumeTransferFunction.colorNodes.back().b =
+            static_cast<double>(revision) / 1000.0;
+        previewStrategy.SetVisualState(
+            gpuDragParams, UpdateFlags::VolumeTransfer);
+    }
+    gpuDragParams.isInteracting = false;
+    previewStrategy.SetVisualState(
+        gpuDragParams, UpdateFlags::RenderRate);
+    const bool isGpuTfStable =
+        previewStrategy.GetMapperInputCount()
+            == gpuDragInputCount
+        && previewStrategy.GetResampleBuildCount()
+            == gpuDragBuildCount
+        && previewStrategy.GetResampleUpdateCount()
+            == gpuDragUpdateCount;
     const int stillAuto = previewMapper
         ? previewMapper->GetAutoAdjustSampleDistances() : -1;
     const double stillImage = previewMapper
@@ -1065,28 +1906,29 @@ int GetRenderContractFailCount()
         previewOpacity ? previewOpacity->GetMTime() : 0;
     const vtkMTimeType previewGradientTime =
         previewGradient ? previewGradient->GetMTime() : 0;
-    const vtkMTimeType previewPropertyTime =
-        previewProperty ? previewProperty->GetMTime() : 0;
     const vtkIdType previewMemoryBytes = previewMapper
         ? previewMapper->GetMaxMemoryInBytes() : 0;
     const double previewMemoryFraction = previewMapper
         ? previewMapper->GetMaxMemoryFraction() : 0.0;
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
-    previewWindow->Render();
+    const bool isPreviewEntered = setPreviewState(
+        true, GetRenderRate(true));
     const bool isInteractiveMapperQuality =
-        previewMapper
-        && std::abs(previewMapper->GetImageSampleDistance() - 2.0)
+        isPreviewEntered
+        && previewMapper
+        && std::abs(
+            previewMapper->GetImageSampleDistance() - 3.0)
             < 1e-12
         && previewMapper->GetAutoAdjustSampleDistances() == 0
         && std::abs(
             previewMapper->GetMinimumImageSampleDistance()
-                - stillMinImage) < 1e-12
+                - 3.0) < 1e-12
         && std::abs(
             previewMapper->GetMaximumImageSampleDistance()
-                - stillMaxImage) < 1e-12
-        && previewMapper->GetSampleDistance()
-            >= 2.0 * stillRay
-        && previewMapper->GetUseJittering() == stillJitter
+                - 3.0) < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance() - 4.0 * stillRay)
+                < 1e-12
+        && previewMapper->GetUseJittering() == 0
         && previewMapper->GetInputConnection(0, 0) == previewInput
         && previewMapper->GetMaskInput() == previewMaskInput
         && previewProperty
@@ -1096,16 +1938,17 @@ int GetRenderContractFailCount()
             == previewOpacity
         && previewProperty->GetGradientOpacity()
             == previewGradient
-        && previewProperty->GetMTime() == previewPropertyTime
+        && previewProperty->GetShade() == 0
         && previewMapper->GetMaxMemoryInBytes()
             == previewMemoryBytes
         && std::abs(
             previewMapper->GetMaxMemoryFraction()
                 - previewMemoryFraction) < 1e-12;
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
-    previewWindow->Render();
+    const bool isPreviewExited = setPreviewState(
+        false, GetRenderRate(false));
     const bool isStillMapperQuality =
-        previewMapper
+        isPreviewExited
+        && previewMapper
         && previewMapper->GetAutoAdjustSampleDistances() == stillAuto
         && std::abs(
             previewMapper->GetImageSampleDistance()
@@ -1135,15 +1978,15 @@ int GetRenderContractFailCount()
         && previewGradient
         && previewGradient->GetMTime() == previewGradientTime
         && previewProperty
-        && previewProperty->GetMTime() == previewPropertyTime
+        && previewProperty->GetShade() != 0
         && previewMapper->GetMaxMemoryInBytes()
             == previewMemoryBytes
         && std::abs(
             previewMapper->GetMaxMemoryFraction()
                 - previewMemoryFraction) < 1e-12;
 
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
-    previewWindow->Render();
+    const bool isRollbackPreviewSet = setPreviewState(
+        true, GetRenderRate(true));
     const auto* previewCustomInput = previewMapper
         ? previewMapper->GetInputConnection(0, 0) : nullptr;
     auto* rollbackColor = previewProperty
@@ -1155,11 +1998,15 @@ int GetRenderContractFailCount()
     const vtkMTimeType rollbackPropertyTime =
         previewProperty ? previewProperty->GetMTime() : 0;
     RenderParams invalidPreviewParams = previewParams;
-    invalidPreviewParams.volumeQuality.maxDimension = 0;
-    invalidPreviewParams.volumeQuality.sampleDistance = -1.0;
-    invalidPreviewParams.tfNodes = {
-        { 0.0, 0.0, 1.0, 0.0, 0.0 },
-        { 1.0, 1.0, 0.0, 1.0, 0.0 }
+    invalidPreviewParams.volumeQuality =
+        static_cast<VolumeQuality>(99);
+    invalidPreviewParams.volumeTransferFunction.colorNodes = {
+        { 0.0, 1.0, 0.0, 0.0 },
+        { 255.0, 0.0, 1.0, 0.0 }
+    };
+    invalidPreviewParams.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 255.0, 1.0 }
     };
     invalidPreviewParams.gradientOpacity = {
         { 0.0, 1.0 }, { 255.0, 0.0 }
@@ -1170,18 +2017,19 @@ int GetRenderContractFailCount()
     previewStrategy.SetVisualState(
         invalidPreviewParams,
         UpdateFlags::Quality
-            | UpdateFlags::TF
+            | UpdateFlags::VolumeTransfer
             | UpdateFlags::GradientOpacity
             | UpdateFlags::Material);
     const bool isInvalidPreviewRolledBack =
-        previewMapper
+        isRollbackPreviewSet
+        && previewMapper
         && previewMapper->GetInputConnection(0, 0)
             == previewCustomInput
         && std::abs(
-            previewMapper->GetImageSampleDistance() - 2.0)
+            previewMapper->GetImageSampleDistance() - 3.0)
             < 1e-12
         && std::abs(
-            previewMapper->GetSampleDistance() - 0.5)
+            previewMapper->GetSampleDistance() - 4.0 * stillRay)
             < 1e-12
         && previewMapper->GetUseJittering() == 0
         && previewProperty
@@ -1191,6 +2039,7 @@ int GetRenderContractFailCount()
             == rollbackOpacity
         && previewProperty->GetGradientOpacity()
             == rollbackGradient
+        && previewProperty->GetShade() == 0
         && previewProperty->GetMTime()
             == rollbackPropertyTime;
     if (!isInvalidPreviewRolledBack) {
@@ -1238,9 +2087,12 @@ int GetRenderContractFailCount()
     const bool isFeaturePreview =
         previewMapper
         && featureInput
-        && featureInput != previewCustomInput
+        && featureInput == previewCustomInput
         && std::abs(
-            previewMapper->GetImageSampleDistance() - 2.0)
+            previewMapper->GetImageSampleDistance() - 3.0)
+            < 1e-12
+        && std::abs(
+            previewMapper->GetSampleDistance() - 4.0 * stillRay)
             < 1e-12;
     previewParams.isFeatureActive = false;
     previewStrategy.SetVisualState(
@@ -1251,13 +2103,19 @@ int GetRenderContractFailCount()
             == previewCustomInput
         && previewMapper->GetMaskInput() == previewMaskInput
         && std::abs(
-            previewMapper->GetSampleDistance() - 0.5)
+            previewMapper->GetSampleDistance() - 4.0 * stillRay)
             < 1e-12
-        && previewMapper->GetUseJittering() == 0;
+        && previewMapper->GetUseJittering() == 0
+        && previewProperty
+        && previewProperty->GetShade() == 0;
 
-    previewParams.tfNodes = {
-        { 0.0, 0.0, 0.75, 0.75, 0.75 },
-        { 1.0, 1.0, 0.75, 0.75, 0.75 }
+    previewParams.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.75, 0.75, 0.75 },
+        { 255.0, 0.75, 0.75, 0.75 }
+    };
+    previewParams.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 255.0, 1.0 }
     };
     previewParams.gradientOpacity = {
         { 0.0, 0.0 }, { 255.0, 0.9 }
@@ -1267,7 +2125,7 @@ int GetRenderContractFailCount()
     };
     previewStrategy.SetVisualState(
         previewParams,
-        UpdateFlags::TF
+        UpdateFlags::VolumeTransfer
             | UpdateFlags::GradientOpacity
             | UpdateFlags::Material);
     auto* updatedColor = previewProperty
@@ -1276,17 +2134,18 @@ int GetRenderContractFailCount()
         ? previewProperty->GetScalarOpacity() : nullptr;
     auto* updatedGradient = previewProperty
         ? previewProperty->GetGradientOpacity() : nullptr;
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
-    previewWindow->Render();
+    const bool isVisualStillSet = setPreviewState(
+        false, GetRenderRate(false));
     const bool isVisualStateRestored =
-        previewMapper
+        isVisualStillSet
+        && previewMapper
         && std::abs(
             previewMapper->GetImageSampleDistance() - 1.0)
             < 1e-12
         && std::abs(
-            previewMapper->GetSampleDistance() - 0.25)
+            previewMapper->GetSampleDistance() - stillRay)
             < 1e-12
-        && previewMapper->GetUseJittering() == 0
+        && previewMapper->GetUseJittering() == stillJitter
         && previewMapper->GetInputConnection(0, 0)
             == previewCustomInput
         && previewMapper->GetMaskInput() == previewMaskInput
@@ -1308,10 +2167,7 @@ int GetRenderContractFailCount()
             previewProperty->GetSpecularPower() - 8.0)
             < 1e-12;
 
-    previewParams.volumeQuality = {
-        VolumeQuality::Quality, 766, 1.0, true
-    };
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
+    previewParams.volumeQuality = VolumeQuality::Auto;
     previewStrategy.SetVisualState(
         previewParams, UpdateFlags::Quality);
     previewWindow->Render();
@@ -1322,34 +2178,56 @@ int GetRenderContractFailCount()
     }
     const double qualityStillRay = previewMapper
         ? previewMapper->GetSampleDistance() : 0.0;
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
-    previewWindow->Render();
+    const bool isQualityPreviewSet = setPreviewState(
+        true, GetRenderRate(true));
     const bool isQualityPreview =
-        previewMapper
+        isQualityPreviewSet
+        && previewMapper
         && qualityPreviewInput.GetPointer()
+        && getMaxDimension(previewMapper) == 32
         && previewMapper->GetInputConnection(0, 0)
             == qualityPreviewInput.GetPointer()
         && std::abs(
-            previewMapper->GetImageSampleDistance() - 2.0)
+            previewMapper->GetImageSampleDistance() - 4.0)
             < 1e-12
-        && previewMapper->GetSampleDistance()
-            >= 2.0 * qualityStillRay;
-    previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
-    previewWindow->Render();
+        && std::abs(
+            previewMapper->GetSampleDistance()
+                - qualityStillRay * 4.0)
+            < 1e-12
+        && previewMapper->GetUseJittering() == 0;
+    const bool isQualityStillSet = setPreviewState(
+        false, GetRenderRate(false));
     const bool isQualityRestored =
-        previewMapper
+        isQualityStillSet
+        && previewMapper
         && previewMapper->GetInputConnection(0, 0)
             == qualityPreviewInput.GetPointer()
+        && getMaxDimension(previewMapper) == 32
         && std::abs(
             previewMapper->GetImageSampleDistance() - 1.0)
             < 1e-12
-        && std::abs(
-            previewMapper->GetSampleDistance() - qualityStillRay)
+            && std::abs(
+                previewMapper->GetSampleDistance() - qualityStillRay)
             < 1e-12;
+    if (!isQualityPreview || !isQualityRestored) {
+        std::cerr
+            << "DIAG_LAZY_QUALITY: max="
+            << getMaxDimension(previewMapper)
+            << " input="
+            << (previewMapper
+                && previewMapper->GetInputConnection(0, 0)
+                    == qualityPreviewInput.GetPointer())
+            << " image="
+            << (previewMapper
+                ? previewMapper->GetImageSampleDistance() : -1.0)
+            << " ray="
+            << (previewMapper
+                ? previewMapper->GetSampleDistance() : -1.0)
+            << " still_ray=" << qualityStillRay
+            << '\n';
+    }
 
-    previewParams.volumeQuality = {
-        VolumeQuality::Custom, 32, 0.25, false
-    };
+    previewParams.volumeQuality = VolumeQuality::XHigh;
     const std::array<MaterialParams, 3> previewMaterials{{
         { 0.25, 0.65, 0.10, 8.0, 0.80, false },
         { 0.10, 0.85, 0.25, 20.0, 1.0, false },
@@ -1361,19 +2239,22 @@ int GetRenderContractFailCount()
         previewStrategy.SetVisualState(
             previewParams,
             UpdateFlags::Quality | UpdateFlags::Material);
-        previewWindow->SetDesiredUpdateRate(GetRenderRate(true));
-        previewWindow->Render();
+        const double materialRay = previewMapper
+            ? previewMapper->GetSampleDistance() : 0.0;
+        const bool isMaterialPreviewSet = setPreviewState(
+            true, GetRenderRate(true));
         const bool isPreviewStable =
-            previewMapper
+            isMaterialPreviewSet
+            && previewMapper
             && previewProperty
             && std::abs(
-                previewMapper->GetImageSampleDistance() - 2.0)
+                previewMapper->GetImageSampleDistance() - 3.0)
                 < 1e-12
             && std::abs(
-                previewMapper->GetSampleDistance() - 0.5)
+                previewMapper->GetSampleDistance() - 4.0 * materialRay)
                 < 1e-12
-            && previewProperty->GetShade()
-                == static_cast<int>(material.isShadeOn)
+            && previewMapper->GetUseJittering() == 0
+            && previewProperty->GetShade() == 0
             && std::abs(
                 previewProperty->GetAmbient() - material.ambient)
                 < 1e-12
@@ -1387,16 +2268,20 @@ int GetRenderContractFailCount()
                 previewProperty->GetSpecularPower()
                     - material.specularPower)
                 < 1e-12;
-        previewWindow->SetDesiredUpdateRate(GetRenderRate(false));
-        previewWindow->Render();
+        const bool isMaterialStillSet = setPreviewState(
+            false, GetRenderRate(false));
         const bool isStillStable =
-            previewMapper
+            isMaterialStillSet
+            && previewMapper
             && std::abs(
                 previewMapper->GetImageSampleDistance() - 1.0)
                 < 1e-12
             && std::abs(
-                previewMapper->GetSampleDistance() - 0.25)
-                < 1e-12;
+                previewMapper->GetSampleDistance() - materialRay)
+                < 1e-12
+            && previewMapper->GetUseJittering() != 0
+            && previewProperty->GetShade()
+                == static_cast<int>(material.isShadeOn);
         areMaterialsStable =
             isPreviewStable && isStillStable
             && areMaterialsStable;
@@ -1424,6 +2309,8 @@ int GetRenderContractFailCount()
         ? vtkGPUVolumeRayCastMapper::SafeDownCast(
             compositeVolume->GetMapper())
         : nullptr;
+    const double compositeStillRay = compositeMapper
+        ? compositeMapper->GetSampleDistance() : 0.0;
     std::vector<vtkProp*> referenceProps;
     std::vector<vtkMTimeType> referenceTimes;
     std::vector<int> referenceVisible;
@@ -1439,6 +2326,10 @@ int GetRenderContractFailCount()
             }
         }
     }
+    auto compositeParams = previewParams;
+    compositeParams.isInteracting = true;
+    const bool isCompositePreviewSet = compositeStrategy.SetVisualState(
+        compositeParams, UpdateFlags::RenderRate);
     compositeWindow->SetDesiredUpdateRate(
         GetRenderRate(true));
     compositeWindow->Render();
@@ -1458,33 +2349,48 @@ int GetRenderContractFailCount()
                 == referenceVisible[index];
     }
     const bool isCompositePreview =
-        compositeMapper
+        isCompositePreviewSet
+        && compositeMapper
         && std::abs(
-            compositeMapper->GetImageSampleDistance()
-                - 2.0) < 1e-12
+            compositeMapper->GetImageSampleDistance() - 3.0)
+            < 1e-12
         && std::abs(
             compositeMapper->GetSampleDistance()
-                - 0.5) < 1e-12
+                - 4.0 * compositeStillRay) < 1e-12
+        && compositeMapper->GetUseJittering() == 0
+        && compositeVolume
+        && compositeVolume->GetProperty()
+        && compositeVolume->GetProperty()->GetShade() == 0
         && areReferencePropsStable;
+    compositeParams.isInteracting = false;
+    const bool isCompositeStillSet = compositeStrategy.SetVisualState(
+        compositeParams, UpdateFlags::RenderRate);
     compositeWindow->SetDesiredUpdateRate(
         GetRenderRate(false));
     compositeWindow->Render();
     const bool isCompositeRestored =
-        compositeMapper
+        isCompositeStillSet
+        && compositeMapper
         && std::abs(
             compositeMapper->GetImageSampleDistance()
                 - 1.0) < 1e-12
         && std::abs(
             compositeMapper->GetSampleDistance()
-                - 0.25) < 1e-12;
+                - compositeStillRay) < 1e-12
+        && compositeMapper->GetUseJittering() != 0
+        && compositeVolume
+        && compositeVolume->GetProperty()
+        && compositeVolume->GetProperty()->GetShade() != 0;
     compositeStrategy.DetachRenderer(
         compositeRenderer);
-    if (!(isInteractiveMapperQuality
+    if (!(arePreviewProfilesValid
+        && isInteractiveMapperQuality
         && isStillMapperQuality
         && isInvalidPreviewRolledBack
         && isFeaturePreview
         && isFeaturePreviewRestored
         && isVisualStateRestored
+        && isGpuTfStable
         && isQualityPreview
         && isQualityRestored
         && areMaterialsStable
@@ -1492,6 +2398,7 @@ int GetRenderContractFailCount()
         && isCompositeRestored)) {
         std::cerr
             << "DIAG_VOLUME_PREVIEW:"
+            << " profiles=" << arePreviewProfilesValid
             << " interactive=" << isInteractiveMapperQuality
             << " still=" << isStillMapperQuality
             << " rollback=" << isInvalidPreviewRolledBack
@@ -1522,15 +2429,15 @@ int GetRenderContractFailCount()
             << (previewProperty
                 && previewProperty->GetGradientOpacity()
                     == previewGradient)
-            << " rollback_property_time="
+            << " rollback_shade="
             << (previewProperty
-                && previewProperty->GetMTime()
-                    == previewPropertyTime)
+                ? previewProperty->GetShade() : -1)
             << " feature=" << isFeaturePreview
         << " feature_restore="
         << isFeaturePreviewRestored
         << " visual_restore="
         << isVisualStateRestored
+        << " gpu_tf_stable=" << isGpuTfStable
         << " quality=" << isQualityPreview
         << " quality_restore=" << isQualityRestored
         << " materials=" << areMaterialsStable
@@ -1540,18 +2447,20 @@ int GetRenderContractFailCount()
             << '\n';
     }
     failureCount += GetCaseResult(
-        isInteractiveMapperQuality
+        arePreviewProfilesValid
+            && isInteractiveMapperQuality
             && isStillMapperQuality
             && isInvalidPreviewRolledBack
             && isFeaturePreview
             && isFeaturePreviewRestored
             && isVisualStateRestored
+            && isGpuTfStable
             && isQualityPreview
             && isQualityRestored
             && areMaterialsStable
             && isCompositePreview
             && isCompositeRestored,
-        "Volume mapper switches Quality/Custom/material sampling and restores baseline") ? 0 : 1;
+        "Volume mapper uses tiered preview sampling without changing active input") ? 0 : 1;
 
     params.gradientOpacity = {
         { 5.0, 0.2 }, { 5.0, 0.8 }, { 10.0, 1.0 }
@@ -1570,21 +2479,25 @@ int GetRenderContractFailCount()
     RenderParams zeroRangeParams = colorParams;
     zeroRangeParams.scalarRange[0] = 12.0;
     zeroRangeParams.scalarRange[1] = 12.0;
-    zeroRangeParams.tfNodes = customNodes;
+    zeroRangeParams.volumeTransferFunction.colorNodes = customNodes;
+    zeroRangeParams.volumeTransferFunction.opacityNodes = {
+        { 10.0, 0.0 },
+        { 30.0, 1.0 }
+    };
     volumeStrategy.SetVisualState(
-        zeroRangeParams, UpdateFlags::TF);
+        zeroRangeParams, UpdateFlags::VolumeTransfer);
     colorFunction = volume->GetProperty()->GetRGBTransferFunction();
     opacityFunction = volume->GetProperty()->GetScalarOpacity();
     failureCount += GetCaseResult(
         colorFunction
             && opacityFunction
-            && colorFunction->GetSize() == 1
-            && opacityFunction->GetSize() == 1
-            && std::abs(colorFunction->GetRange()[0] - 12.0)
+            && colorFunction->GetSize() == 2
+            && opacityFunction->GetSize() == 2
+            && std::abs(colorFunction->GetRange()[0] - 10.0)
                 < 1e-12
-            && std::abs(colorFunction->GetRange()[1] - 12.0)
+            && std::abs(colorFunction->GetRange()[1] - 30.0)
                 < 1e-12,
-        "Zero-width scalar range collapses TF nodes without invalid values") ? 0 : 1;
+        "Data-range changes never reinterpret real scalar TF nodes") ? 0 : 1;
 
     constexpr int denoiseDims[3] = { 64, 32, 16 };
     auto noisyImage = vtkSmartPointer<vtkImageData>::New();
@@ -1665,8 +2578,7 @@ int GetRenderContractFailCount()
         [](double left, double right) {
             return std::abs(left - right) < 1e-9;
         });
-    failureCount += GetCaseResult(
-        denoisedImage
+    const bool isDenoiseValid = denoisedImage
             && denoisedGeometry[0] == denoiseDims[0]
             && denoisedGeometry[1] == denoiseDims[1]
             && denoisedGeometry[2] == denoiseDims[2]
@@ -1676,14 +2588,37 @@ int GetRenderContractFailCount()
                 != imageBeforeDenoise.GetPointer()
             && maskBeforeDenoise
             && denoiseMapper->GetMaskInput()
-                == maskBeforeDenoise.GetPointer()
             && denoisedStats.leftVariance
                 <= inputStats.leftVariance * 0.8
             && denoisedStats.rightVariance
                 <= inputStats.rightVariance * 0.8
             && denoisedContrast >= inputContrast * 0.9
             && noisyImage->GetScalarRange()[0] == inputRange[0]
-            && noisyImage->GetScalarRange()[1] == inputRange[1],
+            && noisyImage->GetScalarRange()[1] == inputRange[1];
+    if (!isDenoiseValid) {
+        std::cerr
+            << "DIAG_LAZY_DENOISE: image="
+            << (denoisedImage != nullptr)
+            << " dims=" << denoisedGeometry[0]
+            << ',' << denoisedGeometry[1]
+            << ',' << denoisedGeometry[2]
+            << " bounds=" << hasSameBounds
+            << " mapper="
+            << (denoiseVolume
+                && denoiseVolume->GetMapper() == mapperIdentity)
+            << " input="
+            << (denoiseMapper
+                && denoiseMapper->GetInputConnection(0, 0)
+                    != imageBeforeDenoise.GetPointer())
+            << " mask="
+            << (denoiseMapper && denoiseMapper->GetMaskInput())
+            << " left_var=" << denoisedStats.leftVariance
+            << " right_var=" << denoisedStats.rightVariance
+            << " contrast=" << denoisedContrast
+            << '\n';
+    }
+    failureCount += GetCaseResult(
+        isDenoiseValid,
         "Denoise reduces ROI noise without changing source geometry or mapper identity") ? 0 : 1;
     return failureCount;
 }
@@ -1700,11 +2635,15 @@ int GetViewFailCount()
     view.window.viewInit.material = {
         0.2, 0.6, 0.3, 12.0, 0.8, true
     };
-    view.window.viewInit.transferNodes = {
-        { 0.0, 0.1, 0.2, 0.3, 0.4 },
-        { 1.0, 0.9, 0.8, 0.7, 0.6 }
+    view.window.viewInit.volumeTransferFunction.colorNodes = {
+        { 0.0, 0.2, 0.3, 0.4 },
+        { 1.0, 0.8, 0.7, 0.6 }
     };
-    view.window.viewInit.hasTransferNodes = true;
+    view.window.viewInit.volumeTransferFunction.opacityNodes = {
+        { 0.0, 0.1 },
+        { 1.0, 0.9 }
+    };
+    view.window.viewInit.hasVolumeTransferFunction = true;
     view.window.viewInit.isoThreshold = 0.25;
     view.window.viewInit.hasIso = true;
     view.window.viewInit.background = { 0.05, 0.1, 0.15 };
@@ -1734,7 +2673,7 @@ int GetViewFailCount()
 
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
-    value.transferNodes = std::vector<HostTransferNode>{};
+    value.volumeTransferFunction = HostVolumeTransferFunction{};
     failureCount += GetCaseResult(
         !session.SendRequest(std::move(value)),
         "View explicit empty transfer rejection") ? 0 : 1;
@@ -1753,10 +2692,16 @@ int GetViewFailCount()
     value.material = HostMaterialParams{
         0.3, 0.5, 0.4, 18.0, 0.6, false
     };
-    value.transferNodes = std::vector<HostTransferNode>{
-        { 0.0, 0.2, 0.8, 0.1, 0.2 },
-        { 1.0, 0.7, 0.2, 0.8, 0.4 }
+    HostVolumeTransferFunction viewFunction;
+    viewFunction.colorNodes = {
+        { 0.0, 0.8, 0.1, 0.2 },
+        { 1.0, 0.2, 0.8, 0.4 }
     };
+    viewFunction.opacityNodes = {
+        { 0.0, 0.2 },
+        { 1.0, 0.7 }
+    };
+    value.volumeTransferFunction = viewFunction;
     value.iso = 0.42;
     value.background = HostBackgroundColor{ 0.2, 0.3, 0.4 };
     value.windowLevel = HostWindowLevelParams{ 120.0, 60.0 };
@@ -1793,13 +2738,15 @@ int GetViewFailCount()
         && state->viewMode == HostRenderMode::IsoSurface
         && std::abs(state->material.opacity - 0.6) < 1e-12
         && !state->material.isShadeOn
-        && state->transferNodes.size() == 2
-        && std::abs(state->transferNodes[1].opacity - 0.7) < 1e-12
+        && state->volumeTransferFunction.colorNodes.size() == 2
+        && state->volumeTransferFunction.opacityNodes.size() == 2
+        && std::abs(
+            state->volumeTransferFunction.opacityNodes[1].opacity - 0.7)
+            < 1e-12
         && std::abs(state->isoThreshold - 0.42) < 1e-12
         && std::abs(state->background.r - 0.2) < 1e-12
         && std::abs(state->spacing[2] - 1.5) < 1e-12
         && std::abs(state->windowLevel.windowWidth - 120.0) < 1e-12
-        && state->transferPreset == HostTransferPreset::Manual
         && std::abs(state->scalarRange[0]) < 1e-12
         && std::abs(state->scalarRange[1] - 255.0) < 1e-12
         // 显式 Host cursor 请求是值状态，即使尚未加载体数据也应可完整回读。
@@ -1812,8 +2759,11 @@ int GetViewFailCount()
         && linkedState->viewMode == HostRenderMode::Volume
         && std::abs(linkedState->material.opacity - 0.8) < 1e-12
         && linkedState->material.isShadeOn
-        && linkedState->transferNodes.size() == 2
-        && std::abs(linkedState->transferNodes[1].opacity - 0.9) < 1e-12
+        && linkedState->volumeTransferFunction.colorNodes.size() == 2
+        && linkedState->volumeTransferFunction.opacityNodes.size() == 2
+        && std::abs(
+            linkedState->volumeTransferFunction.opacityNodes[1].opacity
+                - 0.9) < 1e-12
         && std::abs(linkedState->isoThreshold - 0.25) < 1e-12
         && std::abs(linkedState->background.r - 0.05) < 1e-12
         && std::abs(linkedState->windowLevel.windowWidth - 80.0) < 1e-12
@@ -1826,14 +2776,43 @@ int GetViewFailCount()
         isStateReadBack,
         "View presentation stays private while Session coordinates propagate") ? 0 : 1;
 
+    HostVolumeTransferFunction independentFunction;
+    independentFunction.colorNodes = {
+        { 0.0, 0.0, 0.0, 0.0 },
+        { 255.0, 1.0, 1.0, 1.0 }
+    };
+    independentFunction.opacityNodes = {
+        { 0.0, 0.0 },
+        { 128.0, 0.4 },
+        { 255.0, 1.0 }
+    };
+    value = HostViewSetRequest{};
+    value.targetView = stateTarget;
+    value.volumeTransferFunction = independentFunction;
+    const bool isIndependentSet =
+        session.SendRequest(std::move(value));
+    const auto independentState =
+        session.GetRenderViewState(stateTarget);
+    failureCount += GetCaseResult(
+        isIndependentSet
+            && independentState
+            && independentState->volumeTransferFunction.colorNodes.size() == 2
+            && independentState->volumeTransferFunction.opacityNodes.size() == 3
+            && std::abs(
+                independentState->volumeTransferFunction
+                    .opacityNodes[1].scalar - 128.0)
+                < 1e-12,
+        "State keeps one complete scalar transfer function") ? 0 : 1;
+
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";
     failureCount += GetCaseResult(
         session.SendRequest(std::move(reset)),
         "Qt Host can reset the target camera") ? 0 : 1;
 
-    return failureCount
-        + GetHistogramFailCount()
-        + GetResampleFailCount()
-        + GetRenderContractFailCount();
+    failureCount += GetHistogramFailCount();
+    failureCount += GetResampleFailCount();
+    failureCount += GetLodControlFailCount();
+    failureCount += GetRenderContractFailCount();
+    return failureCount;
 }
