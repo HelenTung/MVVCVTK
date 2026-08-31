@@ -283,7 +283,7 @@ foreach ($metadataFile in $cmakeMetadata) {
 }
 
 $depsRoot = Join-Path $stageRoot 'deps'
-$expectedDependencies = @('opencv', 'vtk')
+$expectedDependencies = @('official', 'third_party')
 $actualDependencies = @(
     Get-ChildItem -LiteralPath $depsRoot -Force |
         ForEach-Object { $_.Name } |
@@ -294,9 +294,53 @@ if (@(Compare-Object `
     throw 'SDK dependency directory closure mismatch.'
 }
 
+$officialRoot = Join-Path $depsRoot 'official'
+$thirdPartyRoot = Join-Path $depsRoot 'third_party'
+$expectedOfficial = @('opencv', 'vtk')
+$actualOfficial = @(
+    Get-ChildItem -LiteralPath $officialRoot -Directory |
+        ForEach-Object { $_.Name } |
+        Sort-Object
+)
+if (@(Compare-Object `
+        ($expectedOfficial | Sort-Object) $actualOfficial).Count -ne 0) {
+    throw 'SDK official dependency closure mismatch.'
+}
+$expectedThirdParty = @('defx')
+$actualThirdParty = @(
+    Get-ChildItem -LiteralPath $thirdPartyRoot -Directory |
+        ForEach-Object { $_.Name } |
+        Sort-Object
+)
+if (@(Compare-Object `
+        ($expectedThirdParty | Sort-Object) $actualThirdParty).Count -ne 0) {
+    throw 'SDK third-party dependency closure mismatch.'
+}
+
+$defxRoot = Join-Path $thirdPartyRoot 'defx'
+$expectedDefXFiles = @(
+    'bin/Debug/DefXAnalysis.dll'
+    'bin/Debug/MVVCVTKGapKernel.dll'
+    'bin/Release/DefXAnalysis.dll'
+    'bin/Release/MVVCVTKGapKernel.dll'
+)
+$actualDefXFiles = @(
+    Get-ChildItem -LiteralPath $defxRoot -Recurse -File |
+        ForEach-Object { Get-RelativePath $defxRoot $_.FullName } |
+        Sort-Object
+)
+if (@(Compare-Object `
+        ($expectedDefXFiles | Sort-Object) $actualDefXFiles).Count -ne 0) {
+    throw 'SDK private DefX runtime closure mismatch.'
+}
+
 foreach ($requiredDependencyPath in @(
-        'deps/vtk/lib/cmake/vtk-9.4/vtk-config.cmake',
-        'deps/opencv/x64/vc16/lib/OpenCVConfig.cmake')) {
+        'deps/third_party/defx/bin/Debug/DefXAnalysis.dll',
+        'deps/third_party/defx/bin/Debug/MVVCVTKGapKernel.dll',
+        'deps/third_party/defx/bin/Release/DefXAnalysis.dll',
+        'deps/third_party/defx/bin/Release/MVVCVTKGapKernel.dll',
+        'deps/official/vtk/lib/cmake/vtk-9.4/vtk-config.cmake',
+        'deps/official/opencv/x64/vc16/lib/OpenCVConfig.cmake')) {
     if (-not [IO.File]::Exists(
             (Get-SafePath $stageRoot $requiredDependencyPath))) {
         throw "SDK dependency is missing: $requiredDependencyPath"

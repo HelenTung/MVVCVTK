@@ -3,7 +3,7 @@ include(CMakeFindDependencyMacro)
 if(DEFINED MVVCVTK_DEPS_ROOT AND NOT MVVCVTK_DEPS_ROOT STREQUAL "")
     set(_mvvcvtk_deps_root "${MVVCVTK_DEPS_ROOT}")
 else()
-    set(_mvvcvtk_deps_root "${PACKAGE_PREFIX_DIR}/deps")
+    set(_mvvcvtk_deps_root "${PACKAGE_PREFIX_DIR}/deps/official")
 endif()
 cmake_path(NORMAL_PATH _mvvcvtk_deps_root)
 

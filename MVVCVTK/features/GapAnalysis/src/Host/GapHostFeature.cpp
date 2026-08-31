@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -154,11 +155,9 @@ bool GapHostFeature::Impl::GetStartValid(
     }
     if (!std::isfinite(params.surface.dataRangeRatio)
         || !std::isfinite(params.surface.absoluteIsoValue)
-        || !std::isfinite(params.voidParams.grayMin)
-        || !std::isfinite(params.voidParams.grayMax)
-        || !std::isfinite(params.voidParams.minVolumeMM3)
-        || !std::isfinite(
-            params.voidParams.angleThresholdDeg)) {
+        || !std::isfinite(params.surface.backgroundMean)
+        || !std::isfinite(params.surface.materialMean)
+        || !std::isfinite(params.voidParams.minVolumeMM3)) {
         return false;
     }
 
@@ -175,13 +174,16 @@ bool GapHostFeature::Impl::GetStartValid(
         return false;
     }
 
-    return params.voidParams.grayMin
-            <= params.voidParams.grayMax
+    return params.surface.backgroundMean
+            <= params.surface.materialMean
         && params.voidParams.minVolumeMM3 >= 0.0
-        && params.voidParams.angleThresholdDeg >= 0.0f
-        && params.voidParams.angleThresholdDeg <= 180.0f
-        && params.voidParams.tensorWindowSize > 0
-        && params.voidParams.erosionIterations >= 0;
+        && params.voidParams.minVolumeMM3
+            <= static_cast<double>(
+                (std::numeric_limits<float>::max)())
+        && (params.voidParams.minVolumeMM3 == 0.0
+            || params.voidParams.minVolumeMM3
+                >= static_cast<double>(
+                    (std::numeric_limits<float>::denorm_min)()));
 }
 
 bool GapHostFeature::Impl::GetSnapshotValid(
@@ -267,6 +269,10 @@ GapHostFeature::Impl::GetViewCandidate(
     if (!GetSnapshotValid(snapshot)) {
         return std::nullopt;
     }
+    // 供应商内核没有 validity mask 入口；拒绝比静默忽略或 Feature 内补算更能保证单一算法真源。
+    if (snapshot->validityMask) {
+        return std::nullopt;
+    }
 
     const auto views = m_views->GetViews(start.targetViews);
     if (views.empty()) {
@@ -276,8 +282,6 @@ GapHostFeature::Impl::GetViewCandidate(
     ViewCandidate candidate;
     candidate.version = snapshot->version;
     candidate.request.inputImage = snapshot->image;
-    candidate.request.validityMask =
-        snapshot->validityMask;
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
 

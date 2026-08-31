@@ -2,6 +2,7 @@
 param(
     [string]$Preset = 'vs2026-x64',
     [string]$PackageRevision,
+    [string]$DefXRoot,
     [switch]$SkipTests,
     [switch]$SkipCleanRoom
 )
@@ -565,17 +566,28 @@ function Clear-BuildEnv()
     }
 }
 
-function Get-RuntimeDirs([string]$depsRoot)
+function Get-RuntimeDirs(
+    [string]$depsRoot,
+    [string]$configuration,
+    [bool]$isGapEnabled)
 {
-    return @(
-        (Join-Path $depsRoot 'opencv\x64\vc16\bin')
-        (Join-Path $depsRoot 'vtk\bin')
+    $runtimeDirs = @(
+        (Join-Path $depsRoot 'official\opencv\x64\vc16\bin')
+        (Join-Path $depsRoot 'official\vtk\bin')
     )
+    if ($isGapEnabled) {
+        $runtimeDirs = @(
+            (Join-Path $depsRoot "third_party\defx\bin\$configuration")
+        ) + $runtimeDirs
+    }
+    return $runtimeDirs
 }
 
 function Start-RuntimeExecutable(
     [string]$executable,
-    [string]$depsRoot)
+    [string]$depsRoot,
+    [string]$configuration,
+    [bool]$isGapEnabled)
 {
     $oldPath = $env:PATH
     $hasPluginPath = Test-Path -LiteralPath Env:QT_PLUGIN_PATH
@@ -586,7 +598,8 @@ function Start-RuntimeExecutable(
             (Join-Path $env:SystemRoot 'System32')
             $env:SystemRoot
         )
-        $env:PATH = (@(Get-RuntimeDirs $depsRoot) + $systemPath) -join ';'
+        $env:PATH = (@(Get-RuntimeDirs $depsRoot $configuration $isGapEnabled) +
+                $systemPath) -join ';'
         if (-not [string]::IsNullOrEmpty($oldPluginPath)) {
             Remove-Item -LiteralPath Env:QT_PLUGIN_PATH
         }
@@ -647,7 +660,8 @@ function Start-CleanRoomProbe(
             Start-RuntimeExecutable (
                 Join-Path $caseBuildRoot `
                     "$configuration\mvvcvtk_clean_room_probe.exe") (
-                Join-Path $stage 'deps')
+                Join-Path $stage 'deps') $configuration (
+                $probeCase.gap -eq 'ON')
         }
     }
 }
@@ -671,8 +685,24 @@ if ([IO.Path]::GetFullPath($verifyBase).StartsWith(
     throw 'Clean-room verification must run outside the source repository.'
 }
 $packageRoot = Join-Path $repoRoot 'out\packages'
-$depsVersion = '2026.08.21-deps.1'
-$depsRoot = Join-Path $repoRoot "deps\$depsVersion-win-x64"
+$depsRoot = Join-Path $repoRoot 'deps\official'
+if ([string]::IsNullOrWhiteSpace($DefXRoot)) {
+    $DefXRoot = Join-Path $repoRoot 'deps\third_party\defx'
+}
+$defxRootPath = [IO.Path]::GetFullPath($DefXRoot)
+foreach ($defxArtifact in @(
+        'include\DefXAnalysisService.h',
+        'include\DefXTypes.h',
+        'bin\Debug\DefXAnalysis.dll',
+        'lib\Debug\DefXAnalysis.lib',
+        'bin\Release\DefXAnalysis.dll',
+        'lib\Release\DefXAnalysis.lib')) {
+    $artifactPath = Join-Path $defxRootPath $defxArtifact
+    if (-not [IO.File]::Exists($artifactPath)) {
+        throw "DefX artifact is missing: $artifactPath"
+    }
+    Get-SafeAncestors $artifactPath
+}
 $script:cmakePath = (Get-Command cmake.exe -CommandType Application `
         -ErrorAction Stop).Source
 $script:gitPath = (Get-Command git.exe -CommandType Application `
@@ -707,7 +737,9 @@ try {
     Clear-BuildEnv
     Start-Command $script:cmakePath @(
         '--preset', $Preset,
-        '-B', $buildRoot
+        '-B', $buildRoot,
+        "-DMVVCVTK_DEPS_ROOT=$depsRoot",
+        "-DMVVCVTK_DEFX_ROOT=$defxRootPath"
     )
     $null = Get-BuildInfo $buildRoot
     foreach ($configuration in @('Debug', 'Release')) {
@@ -749,7 +781,7 @@ try {
             '--prefix', $stage
         )
     }
-    Build-SdkDependencies $depsRoot (Join-Path $stage 'deps')
+    Build-SdkDependencies $depsRoot (Join-Path $stage 'deps\official')
 
     Start-Command $powerShellPath @(
         '-NoProfile',

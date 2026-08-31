@@ -1,11 +1,43 @@
 set(MVVCVTK_GAP_SOURCES
     include/Algorithms/SurfaceRefiner.h
-    include/Algorithms/VoidDetector.h
     include/Algorithms/VolumeBuffer.h
     include/Render/Strategies/GapOverlayStrategies.h
     include/Services/GapAnalysisService.h
     src/Host/GapHostFeature.cpp
     src/Services/GapAnalysisService.cpp
+)
+set(MVVCVTK_GAP_KERNEL_SOURCES
+    src/Services/GapKernelBridge.cpp
+    src/Services/GapKernelBridge.h
+)
+
+add_library(mvvcvtk_gap_kernel MODULE ${MVVCVTK_GAP_KERNEL_SOURCES})
+target_include_directories(
+    mvvcvtk_gap_kernel
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Services"
+)
+target_compile_definitions(
+    mvvcvtk_gap_kernel
+    PRIVATE MVVCVTK_GAP_KERNEL_EXPORTS=1
+)
+target_link_libraries(
+    mvvcvtk_gap_kernel
+    PRIVATE
+        DefX::Analysis
+        ${MVVCVTK_VTK_TARGETS}
+)
+SetTargetDefaults(mvvcvtk_gap_kernel)
+set_target_properties(
+    mvvcvtk_gap_kernel
+    PROPERTIES
+        OUTPUT_NAME MVVCVTKGapKernel
+        PROJECT_LABEL MVVCVTKGapKernel
+        FOLDER "MVVCVTK/Host/Features/Private"
+)
+source_group(
+    TREE "${CMAKE_CURRENT_SOURCE_DIR}"
+    FILES ${MVVCVTK_GAP_KERNEL_SOURCES}
 )
 # GapHostFeature 是模块入口，GapHostTypes 是其公开签名的值类型闭包。
 SetHeaderSurface(
@@ -41,6 +73,7 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Strategies"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Services"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Services"
 )
 SetTargetDefaults(mvvcvtk_gap_analysis)
 add_library(MVVCVTK::GapAnalysis ALIAS mvvcvtk_gap_analysis)
@@ -77,6 +110,7 @@ source_group(
 )
 unset(_mvvcvtk_gap_ide_files)
 unset(MVVCVTK_GAP_SOURCES)
+unset(MVVCVTK_GAP_KERNEL_SOURCES)
 unset(MVVCVTK_GAP_API_HEADERS)
 unset(MVVCVTK_GAP_STAGED_API_HEADERS)
 target_include_directories(
@@ -94,6 +128,8 @@ target_link_libraries(
         "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>"
         ${MVVCVTK_VTK_TARGETS}
 )
+add_dependencies(mvvcvtk_gap_analysis mvvcvtk_gap_kernel)
+
 install(
     TARGETS mvvcvtk_gap_analysis
     EXPORT MVVCVTKTargets
@@ -101,4 +137,16 @@ install(
         COMPONENT Host
     FILE_SET api_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         COMPONENT Host
+)
+install(
+    TARGETS mvvcvtk_gap_kernel
+    LIBRARY DESTINATION "deps/third_party/defx/bin/$<CONFIG>"
+        COMPONENT Host
+    RUNTIME DESTINATION "deps/third_party/defx/bin/$<CONFIG>"
+        COMPONENT Host
+)
+install(
+    IMPORTED_RUNTIME_ARTIFACTS DefX::Analysis
+    RUNTIME DESTINATION "deps/third_party/defx/bin/$<CONFIG>"
+    COMPONENT Host
 )

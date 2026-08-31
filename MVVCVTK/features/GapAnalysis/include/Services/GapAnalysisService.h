@@ -16,10 +16,10 @@ class OverlayService;
 
 struct GapViewRequest final {
     vtkSmartPointer<vtkImageData> inputImage; // 必需 VTK 输入；StartView 同步隔离后才接纳 worker。
-    // 与 inputImage 同批次的可空二值有效域；空表示整卷有效，0 表示分析域外。
+    // 当前私有内核没有有效域接口；仅允许为空，非空请求会被明确拒绝且不会触发本地补算。
     vtkSmartPointer<vtkImageData> validityMask;
-    GapSurfaceConfig surface; // 等值面阈值来源的本次配置快照。
-    GapVoidParams voidParams; // 灰度、最小体积、方向张量和腐蚀参数快照。
+    GapSurfaceConfig surface; // DefX 材料均值与等值面阈值配置快照。
+    GapVoidParams voidParams; // DefX 过滤开关与最小体积参数快照。
     std::vector<std::shared_ptr<OverlayService>> meshTargets; // 接收 3D void mesh overlay 的目标服务。
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets; // 轴向与 2D label overlay 目标配对。
 };
@@ -61,7 +61,7 @@ public:
     vtkSmartPointer<vtkImageData> BuildLabelImage() const;
 
     // GapAnalysis 显示模式由 feature 持有状态；host 只注入已降级的 overlay 目标和主线程 tick。
-    // 本入口先在局部冻结 image+mask、校验参数和 target；返回 true 时 worker 已被接纳。
+    // 本入口先在局部冻结 image、拒绝非空 mask、校验参数和 target；返回 true 时 worker 已被接纳。
     // 任一准备步骤失败时，既有 overlay、callback 和 owner-thread binding 保持不变。
     // 首次成功调用绑定当前宿主线程；本组显示会话接口必须继续由该线程调用。
     bool StartView(

@@ -1,9 +1,17 @@
 #include "Services/GapAnalysisService.h"
 
 #include "Algorithms/VolumeBuffer.h"
-#include "Algorithms/VoidDetector.h"
+#include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Strategies/GapOverlayStrategies.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
 
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>
@@ -24,6 +32,8 @@
 #include <mutex>
 #include <new>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 // GapAnalysis 的并发与显示编排边界：后台 worker 只消费不可变体素/参数快照并一次性提交结果；
@@ -39,7 +49,6 @@ public:
     Impl& operator=(Impl&&) = delete;
 
     bool SetGapInput(vtkSmartPointer<vtkImageData> image);
-    bool SetInputSnapshot(vtkSmartPointer<vtkImageData> image);
     void SetSurface(const GapSurfaceParams& params);
     void SetAdvanced(const GapAdvancedParams& params);
     void SetVoid(const GapVoidParams& params);
@@ -62,7 +71,19 @@ public:
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
-    using VolumeBufferSnapshot = std::shared_ptr<const GapVolumeBuffer>;
+    struct InputData final {
+        GapVolumeBuffer volume;
+        vtkSmartPointer<vtkImageData> image;
+    };
+
+    using InputSnapshot = std::shared_ptr<const InputData>;
+
+    struct KernelBatch final {
+        GapKernelHeader header{};
+        std::vector<GapKernelRegion> regions;
+        std::vector<std::int32_t> labels;
+        std::uint64_t expectedLabelCount = 0;
+    };
 
     enum class GapViewPhase {
         // 没有活动显示会话。
@@ -74,11 +95,11 @@ private:
     };
 
     struct GapParamSnapshot {
-        // StartAsync 从 m_paramsMutex 下复制；worker 当前只消费 isoValue。
+        // StartAsync 从 m_paramsMutex 下复制；worker 将 isoValue 映射为 DefX 表面阈值。
         GapSurfaceParams surfParams;
         // 随任务按值冻结，避免后续 setter 改写；当前 worker 尚未接入法向精化，不消费这些字段。
         GapAdvancedParams advParams;
-        // 随任务按值冻结；worker 消费 grayMax、erosionIterations 与 minVolumeMM3。
+        // 随任务按值冻结；worker 只把灰度边界和最小体积映射给私有算法内核。
         GapVoidParams voidParams;
     };
 
@@ -95,30 +116,34 @@ private:
     bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const;
     bool BuildVolumeBuffer(
         vtkSmartPointer<vtkImageData> image,
-        vtkSmartPointer<vtkImageData> validityMask,
         GapVolumeBuffer& out) const;
     bool BuildInputSnapshot(
         vtkSmartPointer<vtkImageData> image,
         vtkSmartPointer<vtkImageData> validityMask,
-        VolumeBufferSnapshot& out) const;
-    bool GetMaskValid(
+        InputSnapshot& out) const;
+    bool BuildKernelResult(
+        const GapVolumeBuffer& volume,
+        const GapParamSnapshot& params,
         vtkImageData* image,
-        vtkImageData* validityMask) const;
+        KernelBatch& result) const;
+    static std::int32_t MVVCVTK_GAP_KERNEL_CALL SetKernelResult(
+        const GapKernelResultView* result,
+        void* context) noexcept;
+    bool BuildResultPayload(
+        const KernelBatch& batch,
+        vtkImageData* inputImage,
+        GapAnalysisResult& result) const;
     bool GetRequestValid(
         const GapSurfaceConfig& surface,
         const GapVoidParams& voidParams) const;
     vtkSmartPointer<vtkImageData> BuildLabelImage(
-        const std::vector<int>& labelVolume,
-        const GapVolumeBuffer& volBuf) const;
-    bool BuildStatistics(
-        const GapVolumeBuffer& volBuf,
-        const std::vector<int>& labelVolume,
-        GapStatistics& statistics) const;
+        const std::vector<std::int32_t>& labelVolume,
+        vtkImageData* inputImage) const;
 
-    VolumeBufferSnapshot GetInputSnapshot() const;
+    InputSnapshot GetInputSnapshot() const;
     GapParamSnapshot GetParamSnapshot() const;
     void StartWorker(
-        VolumeBufferSnapshot inputSnapshot,
+        InputSnapshot inputSnapshot,
         GapParamSnapshot params);
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
@@ -150,8 +175,8 @@ private:
 
     // inputMutex 保护当前不可变体素快照 shared owner；worker 按值领取 owner 后不再访问该槽。
     mutable std::mutex m_inputMutex;
-    // 两种输入入口最终都提交只读体素 owner；float 共享其受控 VTK owner，转换输入独占 vector。
-    VolumeBufferSnapshot m_inputSnapshot;
+    // 两种输入入口最终都提交同一只读 float VTK 快照及其 VolumeBuffer 别名。
+    InputSnapshot m_inputSnapshot;
 
     // paramsMutex 把三个可变参数对象作为同一份任务配置复制边界。
     mutable std::mutex m_paramsMutex;
@@ -159,7 +184,7 @@ private:
     GapSurfaceParams m_surfParams;
     // 法向精化参数的预留值快照；当前 worker 不消费，不能描述为已生效配置。
     GapAdvancedParams m_advParams;
-    // 空隙候选与保留参数；GetParamSnapshot 按值冻结后由当前 worker 消费已接入字段。
+    // 灰度边界与最小体积由私有内核消费；其余 ABI 保留字段不参与计算。
     GapVoidParams m_voidParams;
 
     // resultMutex 保护完整结果 payload；读取入口只在锁内取得值或 VTK owner，复制/构建均在锁外。
@@ -189,7 +214,7 @@ private:
     std::vector<GapOverlayBinding> m_displayOverlayBindings;
     // 成功结果派生的 3D void mesh 强引用缓存；隐藏 overlay 时保留，退出或新会话时清空。
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
-    // 成功结果派生的 2D label image 强引用缓存；沿用输入快照的 dimensions/spacing/origin，生命周期和 mesh 缓存一致。
+    // 成功结果派生的 2D label image 强引用缓存；完整继承输入快照几何，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     // StartView 保存的 ISO 来源配方；接纳 worker 前用冻结输入的 min/max 解析，结束会话时清空。
     GapSurfaceConfig m_displaySurfaceConfig;
@@ -390,29 +415,14 @@ void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
 }
 
 bool GapAnalysisService::Impl::SetGapInput(vtkSmartPointer<vtkImageData> image) {
-    if (!image) {
-        return SetInputSnapshot(nullptr);
-    }
-
-    // 公共兼容入口不能借用外部可变 VTK 对象；DeepCopy 完成后再进入只读快照链。
-    try {
-        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-        imageCopy->DeepCopy(image);
-        return SetInputSnapshot(std::move(imageCopy));
-    }
-    catch (const std::bad_alloc&) {
-        return SetInputSnapshot(nullptr);
-    }
-}
-
-bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> image) {
     // 输入替换分三条路径：
     // A. 转换失败：退休旧快照，非 Running 时发布 Failed；运行中任务继续持有自己的旧 owner。
     // B. owner 分配失败：与转换失败保持相同状态语义。
     // C. 成功：与 StartAsync 在 workerMutex 下串行，替换输入；非 Running 时同时退休旧结果并回到 Idle。
-    GapVolumeBuffer snapshot;
-    if (!BuildVolumeBuffer(std::move(image), nullptr, snapshot)) {
-        VolumeBufferSnapshot retiredSnapshot;
+    InputSnapshot snapshot;
+    if (!BuildInputSnapshot(std::move(image), nullptr, snapshot)) {
+        InputSnapshot retiredSnapshot;
+        GapAnalysisResult retiredResult;
         {
             std::lock_guard<std::mutex> workerLock(m_workerMutex);
             {
@@ -420,25 +430,9 @@ bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> im
                 retiredSnapshot = std::move(m_inputSnapshot);
             }
             if (GetAnalysisState() != GapAnalysisState::Running) {
-                SetAnalysisState(GapAnalysisState::Failed);
-            }
-        }
-        return false;
-    }
-
-    VolumeBufferSnapshot snapshotPtr;
-    try {
-        snapshotPtr = std::make_shared<GapVolumeBuffer>(std::move(snapshot));
-    }
-    catch (const std::bad_alloc&) {
-        VolumeBufferSnapshot retiredSnapshot;
-        {
-            std::lock_guard<std::mutex> workerLock(m_workerMutex);
-            {
-                std::lock_guard<std::mutex> inputLock(m_inputMutex);
-                retiredSnapshot = std::move(m_inputSnapshot);
-            }
-            if (GetAnalysisState() != GapAnalysisState::Running) {
+                std::lock_guard<std::mutex> resultLock(m_resultMutex);
+                retiredResult = std::move(m_result);
+                m_result = {};
                 SetAnalysisState(GapAnalysisState::Failed);
             }
         }
@@ -446,14 +440,14 @@ bool GapAnalysisService::Impl::SetInputSnapshot(vtkSmartPointer<vtkImageData> im
     }
 
     // 输入、旧结果和执行状态作为一次提交与 StartAsync 串行，不能覆盖刚发布的 Running。
-    VolumeBufferSnapshot retiredSnapshot;
+    InputSnapshot retiredSnapshot;
     GapAnalysisResult retiredResult;
     {
         std::lock_guard<std::mutex> workerLock(m_workerMutex);
         {
             std::lock_guard<std::mutex> inputLock(m_inputMutex);
             retiredSnapshot = std::move(m_inputSnapshot);
-            m_inputSnapshot = std::move(snapshotPtr);
+            m_inputSnapshot = std::move(snapshot);
         }
         if (GetAnalysisState() != GapAnalysisState::Running) {
             std::lock_guard<std::mutex> resultLock(m_resultMutex);
@@ -505,7 +499,8 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
 
     // 输入已由隔离或受控入口固化为 VolumeBuffer；worker 只持有不可变快照 owner。
     auto inputSnapshot = GetInputSnapshot();
-    if (!inputSnapshot || !inputSnapshot->GetVoxelReady()) {
+    if (!inputSnapshot || !inputSnapshot->volume.GetVoxelReady()
+        || !inputSnapshot->image) {
         SetAnalysisState(GapAnalysisState::Failed);
         SetCallbackReady(false);
         return false;
@@ -524,12 +519,20 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
         SetAnalysisState(GapAnalysisState::Running);
     }
 
-    // 4. worker 只捕获不可变输入快照和参数值副本；共享交互仅为读取取消请求并提交结果、状态和 callback 门铃。
-    m_workerThread = std::thread(
-        &GapAnalysisService::Impl::StartWorker,
-        this,
-        std::move(inputSnapshot),
-        GetParamSnapshot());
+    // 4. worker 只捕获不可变输入快照和参数值副本。线程创建失败必须同步回滚 Running，
+    // 否则服务会留下一个永远没有 worker 的假运行状态。
+    try {
+        m_workerThread = std::thread(
+            &GapAnalysisService::Impl::StartWorker,
+            this,
+            std::move(inputSnapshot),
+            GetParamSnapshot());
+    }
+    catch (...) {
+        SetAnalysisState(GapAnalysisState::Failed);
+        SetCallbackReady(false);
+        return false;
+    }
     return true;
 }
 
@@ -627,7 +630,7 @@ bool GapAnalysisService::Impl::StartView(
         return false;
     }
 
-    VolumeBufferSnapshot inputSnapshot;
+    InputSnapshot inputSnapshot;
     if (!BuildInputSnapshot(
             std::move(request.inputImage),
             std::move(request.validityMask),
@@ -638,9 +641,13 @@ bool GapAnalysisService::Impl::StartView(
     GapParamSnapshot params = GetParamSnapshot();
     params.surfParams = {};
     params.surfParams.isoValue = static_cast<float>(
-        GetDisplayIso(*inputSnapshot, request.surface));
+        GetDisplayIso(inputSnapshot->volume, request.surface));
+    params.surfParams.background = request.surface.backgroundMean;
+    params.surfParams.material = request.surface.materialMean;
     params.voidParams = request.voidParams;
-    if (!std::isfinite(params.surfParams.isoValue)) {
+    if (!std::isfinite(params.surfParams.isoValue)
+        || !std::isfinite(params.surfParams.background)
+        || !std::isfinite(params.surfParams.material)) {
         return false;
     }
 
@@ -880,7 +887,7 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
     if (callback) { try { callback(isDisplayed); } catch (...) {} }
 }
 
-GapAnalysisService::Impl::VolumeBufferSnapshot GapAnalysisService::Impl::GetInputSnapshot() const {
+GapAnalysisService::Impl::InputSnapshot GapAnalysisService::Impl::GetInputSnapshot() const {
     std::lock_guard<std::mutex> lk(m_inputMutex);
     return m_inputSnapshot;
 }
@@ -891,51 +898,42 @@ GapAnalysisService::Impl::GapParamSnapshot GapAnalysisService::Impl::GetParamSna
 }
 
 void GapAnalysisService::Impl::StartWorker(
-    VolumeBufferSnapshot inputSnapshot,
+    InputSnapshot inputSnapshot,
     GapParamSnapshot params) {
     // worker 只使用按值参数和共享只读输入快照；中间产物保持局部，完整结果在 resultMutex 下单次发布。
-    // 阶段边界取消映射为 Failed（启动前取消例外映射为 Idle），算法异常同样映射为 Failed。
+    // DefX 同步调用前后及 DTO 投影阶段观察取消；取消和算法异常都映射为 Failed。
     bool isSuccess = false;
     GapAnalysisResult result;
 
-    // worker 尚未进入算法时若快照无效或已收到取消请求，以 Idle 结束并为可选 callback 记录失败。
-    if (!inputSnapshot || !inputSnapshot->GetVoxelReady() || m_isStopping.load()) {
+    if (!inputSnapshot || !inputSnapshot->volume.GetVoxelReady()
+        || !inputSnapshot->image || m_isStopping.load()) {
         SetAnalysisState(GapAnalysisState::Idle);
         SetCallbackReady(false);
         return;
     }
 
     try {
-        const GapVolumeBuffer& volBuf = *inputSnapshot;
+        KernelBatch batch;
 
-        // 1. 先从只读体素快照构造内部区域；取消只在阶段边界协作式生效。
-        auto interior = VoidDetector::CreateInteriorMask(
-            volBuf, params.surfParams.isoValue, &m_isStopping);
-        if (!m_isStopping.load()) {
-            // 2. 候选检测只消费本任务参数副本，不读取随后可能更新的服务参数。
-            auto candidates = VoidDetector::BuildCandidates(
-                volBuf, interior, params.voidParams, &m_isStopping);
-            if (!m_isStopping.load()) {
-                // 3. 区域、label volume 与 label image 先在 worker 局部完整构造，再一次性提交。
-                result.voids = VoidDetector::BuildRegions(
-                    volBuf,
-                    candidates,
-                    params.voidParams,
-                    result.labelVolume,
-                    &m_isStopping);
-                if (!m_isStopping.load()) {
-                    result.labelImage = BuildLabelImage(
-                        result.labelVolume, volBuf);
-                }
-                if (result.labelImage
-                    && BuildStatistics(
-                        volBuf,
-                        result.labelVolume,
-                        result.statistics)) {
-                    result.isSucceeded = true;
-                    isSuccess = true;
-                }
-            }
+        // 1. bridge 在自己的 DLL 内完成唯一一次 DefX 调用，并同步复制 header、region 和原始标签。
+        // DefX 没有取消入口，因此这里只能在调用前后观察停止标志。
+        const bool hasKernelResult = !m_isStopping.load()
+            && BuildKernelResult(
+                inputSnapshot->volume,
+                params,
+                inputSnapshot->image,
+                batch)
+            && !m_isStopping.load();
+
+        // 2. Feature 只验证并投影供应商 DTO；不得再执行阈值、腐蚀、连通域、过滤或重编号。
+        if (hasKernelResult
+            && BuildResultPayload(
+                batch,
+                inputSnapshot->image,
+                result)
+            && !m_isStopping.load()) {
+            result.isSucceeded = true;
+            isSuccess = true;
         }
     }
     catch (const std::exception&) {
@@ -960,7 +958,6 @@ void GapAnalysisService::Impl::StartWorker(
         SetCallbackReady(isSuccess);
     }
 }
-
 void GapAnalysisService::Impl::StopWorker() {
     std::lock_guard<std::mutex> lk(m_workerMutex);
     if (m_workerThread.joinable()) {
@@ -1139,91 +1136,461 @@ double GapAnalysisService::Impl::GetDisplayIso(
 bool GapAnalysisService::Impl::BuildInputSnapshot(
     vtkSmartPointer<vtkImageData> image,
     vtkSmartPointer<vtkImageData> validityMask,
-    VolumeBufferSnapshot& out) const
+    InputSnapshot& out) const
 {
     out.reset();
-    if (!image || !GetMaskValid(image, validityMask)) {
+    // DefX 没有有效域输入。静默忽略或在 Feature 内裁剪标签都会形成第二套算法语义，
+    // 因此任何非空 mask 都在 worker 接纳前明确拒绝。
+    if (!image || validityMask) {
         return false;
     }
 
     try {
-        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-        imageCopy->DeepCopy(image);
-
-        vtkSmartPointer<vtkImageData> maskCopy;
-        if (validityMask) {
-            maskCopy = vtkSmartPointer<vtkImageData>::New();
-            maskCopy->DeepCopy(validityMask);
-        }
-
-        GapVolumeBuffer snapshot;
-        if (!BuildVolumeBuffer(
-                std::move(imageCopy),
-                std::move(maskCopy),
-                snapshot)) {
+        auto* sourceScalars = image->GetPointData()
+            ? image->GetPointData()->GetScalars() : nullptr;
+        if (!sourceScalars
+            || sourceScalars->GetNumberOfComponents() != 1) {
             return false;
         }
-        out = std::make_shared<GapVolumeBuffer>(
-            std::move(snapshot));
-        return out && out->GetVoxelReady();
+
+        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
+        if (sourceScalars->GetDataType() == VTK_FLOAT) {
+            imageCopy->DeepCopy(image);
+        }
+        else {
+            // DefX 固定消费连续 float；非 float 输入在接纳前一次性转换。
+            imageCopy->CopyStructure(image);
+            imageCopy->AllocateScalars(VTK_FLOAT, 1);
+            auto* targetScalars = static_cast<float*>(
+                imageCopy->GetScalarPointer());
+            const auto pointCount = image->GetNumberOfPoints();
+            if (!targetScalars || pointCount <= 0
+                || sourceScalars->GetNumberOfTuples() < pointCount) {
+                return false;
+            }
+            for (vtkIdType index = 0; index < pointCount; ++index) {
+                targetScalars[index] = static_cast<float>(
+                    sourceScalars->GetTuple1(index));
+            }
+            imageCopy->Modified();
+        }
+
+        auto workerImage = imageCopy;
+        GapVolumeBuffer volume;
+        if (!BuildVolumeBuffer(std::move(imageCopy), volume)) {
+            return false;
+        }
+        auto snapshot = std::make_shared<InputData>();
+        snapshot->volume = std::move(volume);
+        snapshot->image = std::move(workerImage);
+        out = std::move(snapshot);
+        return out && out->volume.GetVoxelReady() && out->image;
     }
     catch (const std::bad_alloc&) {
         out.reset();
         return false;
     }
 }
-
-bool GapAnalysisService::Impl::GetMaskValid(
-    vtkImageData* image,
-    vtkImageData* validityMask) const
+std::int32_t MVVCVTK_GAP_KERNEL_CALL
+GapAnalysisService::Impl::SetKernelResult(
+    const GapKernelResultView* result,
+    void* context) noexcept
 {
-    if (!validityMask) {
-        return true;
+    if (!result || !context
+        || result->abiVersion != GapKernelAbiVersion
+        || result->structSize != sizeof(GapKernelResultView)
+        || result->headerSize != sizeof(GapKernelHeader)
+        || result->regionSize != sizeof(GapKernelRegion)
+        || !result->header
+        || (result->regionCount != 0 && !result->regions)
+        || (result->labelCount != 0 && !result->labels)
+        || result->labelCount
+            != static_cast<KernelBatch*>(context)
+                ->expectedLabelCount
+        || result->regionCount > result->labelCount
+        || result->regionCount
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::ptrdiff_t>::max)())
+        || result->labelCount
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::ptrdiff_t>::max)())) {
+        return 0;
     }
-    if (!image
-        || validityMask->GetScalarType() != VTK_UNSIGNED_CHAR
-        || validityMask->GetNumberOfScalarComponents() != 1
-        || !validityMask->GetScalarPointer()) {
+
+    try {
+        KernelBatch batch;
+        batch.expectedLabelCount = result->labelCount;
+        batch.header = *result->header;
+        if (result->regionCount != 0) {
+            batch.regions.assign(
+                result->regions,
+                result->regions
+                    + static_cast<std::size_t>(result->regionCount));
+        }
+        if (result->labelCount != 0) {
+            batch.labels.assign(
+                result->labels,
+                result->labels
+                    + static_cast<std::size_t>(result->labelCount));
+        }
+        *static_cast<KernelBatch*>(context) = std::move(batch);
+        return 1;
+    }
+    catch (...) {
+        return 0;
+    }
+}
+
+bool GapAnalysisService::Impl::BuildKernelResult(
+    const GapVolumeBuffer& volume,
+    const GapParamSnapshot& params,
+    vtkImageData* image,
+    KernelBatch& result) const
+{
+    result = {};
+    if (!image || !volume.GetVoxelReady()
+        || !std::isfinite(volume.minVal)
+        || !std::isfinite(volume.maxVal)
+        || !std::isfinite(params.surfParams.isoValue)
+        || !std::isfinite(params.surfParams.background)
+        || !std::isfinite(params.surfParams.material)
+        || !std::isfinite(params.voidParams.minVolumeMM3)
+        || volume.minVal > volume.maxVal
+        || params.surfParams.background > params.surfParams.material
+        || params.voidParams.minVolumeMM3 < 0.0
+        || params.voidParams.minVolumeMM3
+            > static_cast<double>(
+                (std::numeric_limits<float>::max)())) {
         return false;
     }
 
+    const auto dimX = static_cast<std::uint64_t>(volume.dims[0]);
+    const auto dimY = static_cast<std::uint64_t>(volume.dims[1]);
+    const auto dimZ = static_cast<std::uint64_t>(volume.dims[2]);
+    if (volume.dims[0] <= 0 || volume.dims[1] <= 0
+        || volume.dims[2] <= 0
+        || dimX > (std::numeric_limits<std::uint64_t>::max)() / dimY
+        || dimX * dimY
+            > (std::numeric_limits<std::uint64_t>::max)() / dimZ) {
+        return false;
+    }
+    const auto voxelCount = dimX * dimY * dimZ;
+    if (voxelCount > static_cast<std::uint64_t>(
+            (std::numeric_limits<vtkIdType>::max)())) {
+        return false;
+    }
+    result.expectedLabelCount = voxelCount;
+
+    int imageDims[3] = {};
     int imageExtent[6] = {};
-    int maskExtent[6] = {};
-    double imageOrigin[3] = {};
-    double maskOrigin[3] = {};
     double imageSpacing[3] = {};
-    double maskSpacing[3] = {};
+    double imageOrigin[3] = {};
+    image->GetDimensions(imageDims);
     image->GetExtent(imageExtent);
-    validityMask->GetExtent(maskExtent);
-    image->GetOrigin(imageOrigin);
-    validityMask->GetOrigin(maskOrigin);
     image->GetSpacing(imageSpacing);
-    validityMask->GetSpacing(maskSpacing);
-    for (int index = 0; index < 6; ++index) {
-        if (imageExtent[index] != maskExtent[index]) {
+    image->GetOrigin(imageOrigin);
+    auto* scalars = image->GetPointData()
+        ? image->GetPointData()->GetScalars() : nullptr;
+    if (!scalars || scalars->GetDataType() != VTK_FLOAT
+        || scalars->GetNumberOfComponents() != 1
+        || scalars->GetNumberOfTuples()
+            != static_cast<vtkIdType>(voxelCount)
+        || scalars->GetVoidPointer(0) != volume.voxelsPtr) {
+        return false;
+    }
+
+    GapKernelRequest request{};
+    request.abiVersion = GapKernelAbiVersion;
+    request.structSize = static_cast<std::uint32_t>(
+        sizeof(GapKernelRequest));
+    request.voxelData = volume.voxelsPtr;
+    request.voxelCount = voxelCount;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (imageDims[axis] != volume.dims[axis]
+            || imageSpacing[axis] != volume.spacing[axis]
+            || imageOrigin[axis] != volume.origin[axis]) {
+            return false;
+        }
+        request.dims[axis] = imageDims[axis];
+        request.spacing[axis] = imageSpacing[axis];
+        request.origin[axis] = imageOrigin[axis];
+    }
+    std::copy_n(imageExtent, 6, request.extent);
+
+    const auto* direction = image->GetDirectionMatrix();
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            request.direction[row * 3 + column] = direction
+                ? direction->GetElement(row, column)
+                : static_cast<double>(row == column);
+        }
+    }
+    request.backgroundMean = params.surfParams.background;
+    request.materialMean = params.surfParams.material;
+    request.isoThreshold = params.surfParams.isoValue;
+    request.minVolumeMM3 = static_cast<float>(
+        params.voidParams.minVolumeMM3);
+    request.numberRuns = 1;
+    request.isFilterEnabled = params.voidParams.isFilterEnabled ? 1U : 0U;
+
+    const HMODULE module = LoadLibraryW(L"MVVCVTKGapKernel.dll");
+    if (!module) {
+        std::cerr << "[GapAnalysis] Private kernel runtime is unavailable."
+            << std::endl;
+        return false;
+    }
+
+    const auto buildResult = reinterpret_cast<GapKernelEntry>(
+        GetProcAddress(module, "BuildGapResult"));
+    const bool isBuilt = buildResult
+        && buildResult(
+            &request,
+            &GapAnalysisService::Impl::SetKernelResult,
+            &result) != 0;
+    FreeLibrary(module);
+    if (!isBuilt) {
+        result = {};
+    }
+    return isBuilt;
+}
+bool GapAnalysisService::Impl::BuildResultPayload(
+    const KernelBatch& batch,
+    vtkImageData* inputImage,
+    GapAnalysisResult& result) const
+{
+    result = {};
+    if (!inputImage
+        || batch.header.regionCount < 0
+        || static_cast<std::uint64_t>(batch.header.regionCount)
+            != static_cast<std::uint64_t>(batch.regions.size())
+        || batch.header.totalVoxelCount < 0) {
+        return false;
+    }
+
+    int inputDims[3] = {};
+    int inputExtent[6] = {};
+    inputImage->GetDimensions(inputDims);
+    inputImage->GetExtent(inputExtent);
+    std::uint64_t voxelCount = 1;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (inputDims[axis] <= 0
+            || batch.header.dims[axis] != inputDims[axis]) {
+            return false;
+        }
+        const auto dimension = static_cast<std::uint64_t>(
+            inputDims[axis]);
+        if (voxelCount
+            > (std::numeric_limits<std::uint64_t>::max)()
+                / dimension) {
+            return false;
+        }
+        voxelCount *= dimension;
+    }
+    if (batch.labels.size() != voxelCount
+        || static_cast<std::uint64_t>(
+            batch.header.totalVoxelCount) > voxelCount) {
+        return false;
+    }
+
+    const float headerValues[]{
+        batch.header.materialMean,
+        batch.header.materialStd,
+        batch.header.airMean,
+        batch.header.airStd,
+        batch.header.computedThreshold,
+        batch.header.materialVolumeMM3,
+        batch.header.defectVolumeMM3,
+        batch.header.defectVolumeRatio,
+        batch.header.objectMean,
+        batch.header.objectStd
+    };
+    for (const float value : headerValues) {
+        if (!std::isfinite(value)) {
             return false;
         }
     }
-    for (int axis = 0; axis < 3; ++axis) {
-        if (imageOrigin[axis] != maskOrigin[axis]
-            || imageSpacing[axis] != maskSpacing[axis]) {
+    if (batch.header.materialVolumeMM3 < 0.0f
+        || batch.header.defectVolumeMM3 < 0.0f
+        || batch.header.defectVolumeRatio < 0.0f) {
+        return false;
+    }
+
+    GapAnalysisResult candidate;
+    candidate.voids.reserve(batch.regions.size());
+    std::unordered_set<std::int32_t> regionIds;
+    std::uint64_t voidVoxelCount = 0;
+    for (const auto& source : batch.regions) {
+        if (m_isStopping.load()) {
+            return false;
+        }
+        if (source.id <= 0 || source.voxelCount < 0
+            || !regionIds.insert(source.id).second) {
+            return false;
+        }
+
+        const float regionValues[]{
+            source.volumeMM3,
+            source.equivalentDiameterMM,
+            source.radiusMM,
+            source.diameterMM,
+            source.minGray,
+            source.maxGray,
+            source.meanGray,
+            source.stdDevGray,
+            source.grayDeviation,
+            source.gapMM,
+            source.compactness,
+            source.surfaceAreaMM2,
+            source.sphericity,
+            source.pcaDeviation1,
+            source.pcaDeviation2,
+            source.pcaDeviation3,
+            source.pcaMaxDeviationRatio,
+            source.pcaMinDeviationRatio,
+            source.projectedAreaXMM2,
+            source.projectedAreaYMM2,
+            source.projectedAreaZMM2,
+            source.projectedSizeX,
+            source.projectedSizeY,
+            source.projectedSizeZ,
+            source.defectProbability
+        };
+        for (const float value : regionValues) {
+            if (!std::isfinite(value)) {
+                return false;
+            }
+        }
+        for (const double value : source.centerMM) {
+            if (!std::isfinite(value)) {
+                return false;
+            }
+        }
+        if (source.volumeMM3 < 0.0f
+            || source.equivalentDiameterMM < 0.0f
+            || source.radiusMM < 0.0f
+            || source.diameterMM < 0.0f
+            || source.surfaceAreaMM2 < 0.0f) {
+            return false;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (source.bbox[axis * 2] > source.bbox[axis * 2 + 1]
+                || source.bbox[axis * 2] < inputExtent[axis * 2]
+                || source.bbox[axis * 2 + 1]
+                    > inputExtent[axis * 2 + 1]
+                || source.seedVoxel[axis] < inputExtent[axis * 2]
+                || source.seedVoxel[axis]
+                    > inputExtent[axis * 2 + 1]) {
+                return false;
+            }
+        }
+        const auto count = static_cast<std::uint64_t>(
+            source.voxelCount);
+        if (voidVoxelCount
+            > (std::numeric_limits<std::uint64_t>::max)() - count) {
+            return false;
+        }
+        voidVoxelCount += count;
+
+        VoidRegion region;
+        region.id = source.id;
+        region.voxelCount = source.voxelCount;
+        region.volumeMM3 = source.volumeMM3;
+        region.equivalentDiameterMM = source.equivalentDiameterMM;
+        region.radiusMM = source.radiusMM;
+        region.diameterMM = source.diameterMM;
+        std::copy_n(source.centerMM, 3, region.centerMM.begin());
+        std::copy_n(source.centroidMM, 3, region.centroidMM.begin());
+        std::copy_n(source.bbox, 6, region.bbox.begin());
+        std::copy_n(source.seedVoxel, 3, region.seedVoxel.begin());
+        region.minGray = source.minGray;
+        region.maxGray = source.maxGray;
+        region.meanGray = source.meanGray;
+        region.stdDevGray = source.stdDevGray;
+        region.grayDeviation = source.grayDeviation;
+        region.gapMM = source.gapMM;
+        region.compactness = source.compactness;
+        region.surfaceAreaMM2 = source.surfaceAreaMM2;
+        region.sphericity = source.sphericity;
+        region.pcaDeviation = {
+            source.pcaDeviation1,
+            source.pcaDeviation2,
+            source.pcaDeviation3
+        };
+        region.pcaMaxDeviationRatio =
+            source.pcaMaxDeviationRatio;
+        region.pcaMinDeviationRatio =
+            source.pcaMinDeviationRatio;
+        region.projectedAreaXMM2 = source.projectedAreaXMM2;
+        region.projectedAreaYMM2 = source.projectedAreaYMM2;
+        region.projectedAreaZMM2 = source.projectedAreaZMM2;
+        region.projectedSize = {
+            source.projectedSizeX,
+            source.projectedSizeY,
+            source.projectedSizeZ
+        };
+        region.defectProbability = source.defectProbability;
+        candidate.voids.push_back(region);
+    }
+
+    std::unordered_map<std::int32_t, std::uint64_t> labelCounts;
+    for (std::size_t index = 0; index < batch.labels.size(); ++index) {
+        if ((index & 4095U) == 0U && m_isStopping.load()) {
+            return false;
+        }
+        const auto label = batch.labels[index];
+        if (label < 0
+            || (label > 0
+                && regionIds.find(label) == regionIds.end())) {
+            return false;
+        }
+        if (label > 0) {
+            auto& count = labelCounts[label];
+            if (count
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+                return false;
+            }
+            ++count;
+        }
+    }
+    for (const auto& region : batch.regions) {
+        const auto iterator = labelCounts.find(region.id);
+        const std::uint64_t labelCount = iterator == labelCounts.end()
+            ? 0 : iterator->second;
+        if (labelCount != static_cast<std::uint64_t>(
+                region.voxelCount)) {
             return false;
         }
     }
 
-    const auto* imageDirection = image->GetDirectionMatrix();
-    const auto* maskDirection = validityMask->GetDirectionMatrix();
-    if (!imageDirection || !maskDirection) {
-        return imageDirection == maskDirection;
+    const auto totalVoxelCount = static_cast<std::uint64_t>(
+        batch.header.totalVoxelCount);
+    if (voidVoxelCount > totalVoxelCount
+        || totalVoxelCount
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())
+        || voidVoxelCount
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+        return false;
     }
-    for (int row = 0; row < 3; ++row) {
-        for (int column = 0; column < 3; ++column) {
-            if (imageDirection->GetElement(row, column)
-                != maskDirection->GetElement(row, column)) {
-                return false;
-            }
-        }
+
+    candidate.labelImage = BuildLabelImage(
+        batch.labels, inputImage);
+    if (!candidate.labelImage) {
+        return false;
     }
+    candidate.statistics.objectVoxelCount =
+        static_cast<std::size_t>(
+            totalVoxelCount - voidVoxelCount);
+    candidate.statistics.voidVoxelCount =
+        static_cast<std::size_t>(voidVoxelCount);
+    candidate.statistics.objectVolumeMM3 =
+        static_cast<double>(batch.header.materialVolumeMM3);
+    candidate.statistics.voidVolumeMM3 =
+        static_cast<double>(batch.header.defectVolumeMM3);
+    candidate.statistics.porosityRatio =
+        static_cast<double>(batch.header.defectVolumeRatio);
+    result = std::move(candidate);
     return true;
 }
 
@@ -1233,10 +1600,9 @@ bool GapAnalysisService::Impl::GetRequestValid(
 {
     if (!std::isfinite(surface.dataRangeRatio)
         || !std::isfinite(surface.absoluteIsoValue)
-        || !std::isfinite(voidParams.grayMin)
-        || !std::isfinite(voidParams.grayMax)
-        || !std::isfinite(voidParams.minVolumeMM3)
-        || !std::isfinite(voidParams.angleThresholdDeg)) {
+        || !std::isfinite(surface.backgroundMean)
+        || !std::isfinite(surface.materialMean)
+        || !std::isfinite(voidParams.minVolumeMM3)) {
         return false;
     }
 
@@ -1253,20 +1619,22 @@ bool GapAnalysisService::Impl::GetRequestValid(
         return false;
     }
 
-    return voidParams.grayMin <= voidParams.grayMax
+    return surface.backgroundMean <= surface.materialMean
         && voidParams.minVolumeMM3 >= 0.0
-        && voidParams.angleThresholdDeg >= 0.0f
-        && voidParams.angleThresholdDeg <= 180.0f
-        && voidParams.tensorWindowSize > 0
-        && voidParams.erosionIterations >= 0;
+        && voidParams.minVolumeMM3
+            <= static_cast<double>(
+                (std::numeric_limits<float>::max)())
+        && (voidParams.minVolumeMM3 == 0.0
+            || voidParams.minVolumeMM3
+                >= static_cast<double>(
+                    (std::numeric_limits<float>::denorm_min)()));
 }
 
 bool GapAnalysisService::Impl::BuildVolumeBuffer(
     vtkSmartPointer<vtkImageData> image,
-    vtkSmartPointer<vtkImageData> validityMask,
     GapVolumeBuffer& out) const
 {
-    if (!image || !GetMaskValid(image, validityMask)) {
+    if (!image) {
         return false;
     }
 
@@ -1277,7 +1645,8 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
     }
 
     auto scalars = image->GetPointData() ? image->GetPointData()->GetScalars() : nullptr;
-    if (!scalars || scalars->GetNumberOfComponents() != 1) {
+    if (!scalars || scalars->GetNumberOfComponents() != 1
+        || scalars->GetDataType() != VTK_FLOAT) {
         return false;
     }
 
@@ -1290,34 +1659,12 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
     }
     const auto expectedCount = dimX * dimY * dimZ;
     if (expectedCount > static_cast<std::size_t>((std::numeric_limits<vtkIdType>::max)())
-        || scalars->GetNumberOfTuples() < static_cast<vtkIdType>(expectedCount)) {
+        || scalars->GetNumberOfTuples()
+            != static_cast<vtkIdType>(expectedCount)) {
         return false;
     }
 
-    if (validityMask) {
-        auto* maskPtr = static_cast<const std::uint8_t*>(
-            validityMask->GetScalarPointer());
-        if (!maskPtr
-            || validityMask->GetPointData()->GetScalars()
-                ->GetNumberOfTuples()
-                < static_cast<vtkIdType>(expectedCount)) {
-            return false;
-        }
-        try {
-            std::shared_ptr<const void> maskOwner =
-                std::make_shared<vtkSmartPointer<vtkImageData>>(
-                    std::move(validityMask));
-            if (!out.SetSharedMask(std::move(maskOwner), maskPtr)) {
-                return false;
-            }
-        }
-        catch (const std::bad_alloc&) {
-            return false;
-        }
-    }
-    else {
-        out.ClearMask();
-    }
+    out.ClearMask();
 
     out.dims = { dims[0], dims[1], dims[2] }; // voxel index 布局为 [x, y, z]。
 
@@ -1331,175 +1678,59 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
     image->GetOrigin(origin);
     out.origin = { origin[0], origin[1], origin[2] }; // 输入 physical 坐标原点，沿 [x, y, z]。
 
-    // RawVolumeDataManager 当前产出 VTK_FLOAT；该路径只扫描数值域，不再分配或复制整卷体素。
-    if (scalars->GetDataType() == VTK_FLOAT) {
-        const auto* source = static_cast<const float*>(scalars->GetVoidPointer(0));
-        if (!source) {
-            return false;
-        }
-
-        bool hasValidVoxel = false;
-        float minValue = (std::numeric_limits<float>::max)();
-        float maxValue = (std::numeric_limits<float>::lowest)();
-        for (std::size_t index = 0; index < expectedCount; ++index) {
-            if (!out.GetVoxelValid(index)) {
-                continue;
-            }
-            hasValidVoxel = true;
-            minValue = (std::min)(minValue, source[index]);
-            maxValue = (std::max)(maxValue, source[index]);
-        }
-        out.minVal = hasValidVoxel ? minValue : 0.0f;
-        out.maxVal = hasValidVoxel ? maxValue : 0.0f;
-        try {
-            std::shared_ptr<const void> imageOwner =
-                std::make_shared<vtkSmartPointer<vtkImageData>>(std::move(image));
-            return out.SetSharedVoxels(std::move(imageOwner), source);
-        }
-        catch (const std::bad_alloc&) {
-            return false;
-        }
+    // BuildInputSnapshot 已把所有标量归一到同一份连续 float 快照；这里只扫描数值域并建立只读别名。
+    const auto* source = static_cast<const float*>(
+        scalars->GetVoidPointer(0));
+    if (!source) {
+        return false;
     }
-
-    // 插件接入非 float VTK image 时仍转换成连续 float 存储，算法层无需扩散 scalar 类型分支。
-    std::vector<float> voxels;
-    try {
-        voxels.resize(expectedCount);
-        for (std::size_t index = 0; index < expectedCount; ++index) {
-            voxels[index] = static_cast<float>(
-                scalars->GetTuple1(static_cast<vtkIdType>(index)));
+    float minValue = (std::numeric_limits<float>::max)();
+    float maxValue = (std::numeric_limits<float>::lowest)();
+    for (std::size_t index = 0; index < expectedCount; ++index) {
+        if (!std::isfinite(source[index])) {
+            return false;
         }
+        minValue = (std::min)(minValue, source[index]);
+        maxValue = (std::max)(maxValue, source[index]);
+    }
+    out.minVal = minValue;
+    out.maxVal = maxValue;
+    try {
+        std::shared_ptr<const void> imageOwner =
+            std::make_shared<vtkSmartPointer<vtkImageData>>(
+                std::move(image));
+        return out.SetSharedVoxels(std::move(imageOwner), source);
     }
     catch (const std::bad_alloc&) {
         return false;
     }
-
-    bool hasValidVoxel = false;
-    float minValue = (std::numeric_limits<float>::max)();
-    float maxValue = (std::numeric_limits<float>::lowest)();
-    for (std::size_t index = 0; index < expectedCount; ++index) {
-        if (!out.GetVoxelValid(index)) {
-            continue;
-        }
-        hasValidVoxel = true;
-        minValue = (std::min)(minValue, voxels[index]);
-        maxValue = (std::max)(maxValue, voxels[index]);
-    }
-    out.minVal = hasValidVoxel ? minValue : 0.0f;
-    out.maxVal = hasValidVoxel ? maxValue : 0.0f;
-    out.SetOwnedVoxels(std::move(voxels));
-
-    return true;
-}
-
-bool GapAnalysisService::Impl::BuildStatistics(
-    const GapVolumeBuffer& volBuf,
-    const std::vector<int>& labelVolume,
-    GapStatistics& statistics) const
-{
-    statistics = {};
-    const auto dimX = static_cast<std::size_t>(volBuf.dims[0]);
-    const auto dimY = static_cast<std::size_t>(volBuf.dims[1]);
-    const auto dimZ = static_cast<std::size_t>(volBuf.dims[2]);
-    const auto maxCount = (std::numeric_limits<std::size_t>::max)();
-    if (dimX == 0 || dimY == 0 || dimZ == 0
-        || dimX > maxCount / dimY
-        || dimX * dimY > maxCount / dimZ) {
-        return false;
-    }
-
-    const auto voxelCount = dimX * dimY * dimZ;
-    if (labelVolume.size() != voxelCount) {
-        return false;
-    }
-
-    std::size_t validVoxelCount = 0;
-    std::size_t voidVoxelCount = 0;
-    for (std::size_t index = 0; index < voxelCount; ++index) {
-        const bool isValid = volBuf.GetVoxelValid(index);
-        if (isValid) {
-            ++validVoxelCount;
-        }
-        if (labelVolume[index] < 0
-            || (labelVolume[index] > 0 && !isValid)) {
-            return false;
-        }
-        if (labelVolume[index] > 0) {
-            ++voidVoxelCount;
-        }
-    }
-    if (voidVoxelCount > validVoxelCount) {
-        return false;
-    }
-
-    const double voxelVolumeMM3 =
-        volBuf.spacing[0] * volBuf.spacing[1] * volBuf.spacing[2];
-    if (!std::isfinite(voxelVolumeMM3)
-        || voxelVolumeMM3 <= 0.0) {
-        return false;
-    }
-
-    statistics.objectVoxelCount =
-        validVoxelCount - voidVoxelCount;
-    statistics.voidVoxelCount = voidVoxelCount;
-    statistics.objectVolumeMM3 =
-        static_cast<double>(statistics.objectVoxelCount)
-        * voxelVolumeMM3;
-    statistics.voidVolumeMM3 =
-        static_cast<double>(statistics.voidVoxelCount)
-        * voxelVolumeMM3;
-    statistics.porosityRatio = validVoxelCount == 0
-        ? 0.0
-        : static_cast<double>(voidVoxelCount)
-            / static_cast<double>(validVoxelCount);
-    return std::isfinite(statistics.objectVolumeMM3)
-        && std::isfinite(statistics.voidVolumeMM3)
-        && std::isfinite(statistics.porosityRatio);
 }
 
 vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
-    const std::vector<int>& labelVolume,
-    const GapVolumeBuffer& volBuf) const
+    const std::vector<std::int32_t>& labelVolume,
+    vtkImageData* inputImage) const
 {
-    // labelVolume 与输入共享 x-fast 线性布局；输出固定为单分量 VTK_INT，
-    // 并继承输入 dimensions/spacing/origin，使 slice overlay 可直接复用同一 physical 坐标。
-    if (labelVolume.empty()) {
-        return nullptr;
-    }
-
-    if (volBuf.dims[0] <= 0 || volBuf.dims[1] <= 0
-        || volBuf.dims[2] <= 0) {
-        return nullptr;
-    }
-    const auto dimX = static_cast<std::size_t>(volBuf.dims[0]);
-    const auto dimY = static_cast<std::size_t>(volBuf.dims[1]);
-    const auto dimZ = static_cast<std::size_t>(volBuf.dims[2]);
-    if (dimX > std::numeric_limits<std::size_t>::max() / dimY) {
-        return nullptr;
-    }
-    const std::size_t slice = dimX * dimY;
-    if (slice > std::numeric_limits<std::size_t>::max() / dimZ) {
-        return nullptr;
-    }
-    const std::size_t total = slice * dimZ;
-    if (total > static_cast<std::size_t>(
-            std::numeric_limits<vtkIdType>::max())
-        || labelVolume.size() < total) {
+    // 原始标签值和 x-fast 布局保持不变；CopyStructure 保留完整 extent、spacing、
+    // origin 与 direction，避免 Feature 重新构造几何后产生 overlay 错位。
+    if (!inputImage || labelVolume.empty()
+        || labelVolume.size()
+            > static_cast<std::size_t>(
+                (std::numeric_limits<vtkIdType>::max)())
+        || inputImage->GetNumberOfPoints()
+            != static_cast<vtkIdType>(labelVolume.size())) {
         return nullptr;
     }
 
     auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetDimensions(volBuf.dims[0], volBuf.dims[1], volBuf.dims[2]);
-    image->SetSpacing(volBuf.spacing[0], volBuf.spacing[1], volBuf.spacing[2]);
-    image->SetOrigin(volBuf.origin[0], volBuf.origin[1], volBuf.origin[2]);
+    image->CopyStructure(inputImage);
     image->AllocateScalars(VTK_INT, 1);
-
     auto* labelPtr = static_cast<int*>(image->GetScalarPointer());
     if (!labelPtr) {
         return nullptr;
     }
 
-    std::copy_n(labelVolume.begin(), total, labelPtr);
+    static_assert(sizeof(int) == sizeof(std::int32_t));
+    std::copy(labelVolume.begin(), labelVolume.end(), labelPtr);
     image->Modified();
     return image;
 }

@@ -369,12 +369,10 @@ GapHostConfig GetGapConfig()
     config.defaultStart.surface.isoMode =
         GapIsoMode::DataRangeRatio;
     config.defaultStart.surface.dataRangeRatio = 0.5;
-    config.defaultStart.voidParams.grayMin = 0.0f;
-    config.defaultStart.voidParams.grayMax = 0.25f;
+    config.defaultStart.surface.backgroundMean = 0.0f;
+    config.defaultStart.surface.materialMean = 1.0f;
+    config.defaultStart.voidParams.isFilterEnabled = false;
     config.defaultStart.voidParams.minVolumeMM3 = 0.0;
-    config.defaultStart.voidParams.angleThresholdDeg = 40.0f;
-    config.defaultStart.voidParams.tensorWindowSize = 1;
-    config.defaultStart.voidParams.erosionIterations = 0;
     config.inputViews.viewIds = { "crop-primary" };
     config.keys.switchOverlay.keyCode = 'j';
     config.keys.exit.keySym = "Escape";

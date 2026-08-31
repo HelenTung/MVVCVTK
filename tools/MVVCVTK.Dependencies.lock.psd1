@@ -2,7 +2,7 @@
     SchemaVersion = 1
     PackageId = 'MVVCVTK.Dependencies'
     PackageVersion = '2026.08.21-deps.1'
-    DirectoryName = '2026.08.21-deps.1-win-x64'
+    DirectoryName = 'official'
     FileCount = 15009
     TotalBytes = [Int64]2052367036
     TreeSha256 = 'FF65C764B76AAEA60D099B5BF7922D71E49F89418C25FF0CB5FBB1EEA5441316'

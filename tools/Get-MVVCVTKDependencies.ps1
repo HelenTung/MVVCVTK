@@ -2,7 +2,7 @@
 param(
     [string]$Uri = $env:MVVCVTK_DEPS_URI,
     [string]$ArchivePath,
-    [string]$RepoRoot = (Join-Path $PSScriptRoot '..\..'),
+    [string]$RepoRoot = (Join-Path $PSScriptRoot '..'),
     [switch]$VerifyOnly,
     [switch]$Force
 )
@@ -115,7 +115,7 @@ $destination = [IO.Path]::GetFullPath(
 $depsPrefix = $depsBase.TrimEnd('\') + '\'
 if (-not $destination.StartsWith(
         $depsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Dependency version destination is unsafe.'
+    throw 'Official dependency destination is unsafe.'
 }
 
 if ([IO.Directory]::Exists($destination)) {

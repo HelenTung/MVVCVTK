@@ -10,12 +10,12 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 - CMake 4.2 或更高版本、Visual Studio 18 2026、MSVC `v145`、C++17。
 - 日常源码构建固定使用 Visual Studio 2026 的 MSVC `v145`；Release 制品启用 AVX2。
 - Debug 使用 `/MDd`，Release 使用 `/MD`。
-- SDK 携带 VTK 9.4.2 与 OpenCV 4.12.0；Qt 5.14.2 的头、库、DLL 与 CMake package 由接收方宿主自行提供。完整 VTK 环境保留 QVTK/VTK Qt 适配模块，用于对接宿主 Qt。
+- SDK 携带 VTK 9.4.2、OpenCV 4.12.0，以及仅供 GapAnalysis 私有 bridge 使用的 DefX Debug/Release 运行时；Qt 5.14.2 的头、库、DLL 与 CMake package 由接收方宿主自行提供。完整 VTK 环境保留 QVTK/VTK Qt 适配模块，用于对接宿主 Qt。
 - SDK 是固定工具链静态库，不承诺跨编译器、工具集、运行库或配置的稳定二进制 ABI。
 
 ## 依赖 bootstrap
 
-依赖 bundle 不进入 Git。受控制品服务器保存 `2026.08.21-deps.1-win-x64` ZIP，CI 通过 `MVVCVTK_DEPS_URI` secret 下载；本地也可使用已有归档：
+依赖 bundle 不进入 Git。受控制品服务器保存官方依赖 ZIP，具体版本与内容身份由仓库依赖锁记录；CI 通过 `MVVCVTK_DEPS_URI` secret 下载，本地也可使用已有归档：
 
 ```powershell
 ./tools/Get-MVVCVTKDependencies.ps1 -Uri $env:MVVCVTK_DEPS_URI
@@ -23,9 +23,13 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 ./tools/Get-MVVCVTKDependencies.ps1 -VerifyOnly
 ```
 
-脚本先解包到独立临时目录，拒绝 reparse point，并按规范化相对路径、文件大小和每文件 SHA-256 重算内容树。只有内容树、manifest SHA-256、包版本和平台全部匹配 [依赖锁](tools/MVVCVTK.Dependencies.lock.psd1) 后，才安装到 `deps/2026.08.21-deps.1-win-x64`。更换依赖必须发布新版本并显式更新锁，不能原地替换同名制品。
+脚本先解包到独立临时目录，拒绝 reparse point，并按规范化相对路径、文件大小和每文件 SHA-256 重算内容树。只有内容树、manifest SHA-256、包身份和平台全部匹配 [依赖锁](tools/MVVCVTK.Dependencies.lock.psd1) 后，才安装到官方库总目录 `deps/official`。版本仅属于校验元数据，不再进入目录名；更换依赖必须显式更新锁。
 
-`MVVCVTK/vcpkg.json` 的公共依赖使用固定 git baseline；项目构建所需的 VTK/OpenCV 以及仓库 Qt 测试使用的 Qt 以以上版本化 bundle 为准。内部 UI 不再属于产品构建或 SDK 依赖。
+`MVVCVTK/vcpkg.json` 的公共依赖使用固定 git baseline；项目构建所需的 VTK/OpenCV 以及仓库 Qt 测试使用的 Qt 以 `deps/official` 下的锁定 bundle 为准。内部 UI 不再属于产品构建或 SDK 依赖。
+
+GapAnalysis 的 DefX 作为外部三方环境依赖放在 `MVVCVTK_DEFX_ROOT`（preset 默认 `deps/third_party/defx`）：供应商头位于 `include/`，Debug/Release 的 DLL 位于 `bin/<配置>/`，导入库位于 `lib/<配置>/`。Feature 源码树和仓库根临时 `gap/` 均不作为构建输入；中央依赖模块将工件封装为私有 `DefX::Analysis` 目标。供应商 C++/STL/VTK 接口只在 Feature 内的 `MVVCVTKGapKernel.dll` 兼容层消费，GapAnalysis 主库只接收固定宽度 POD、原始标签和区域/header 副本；兼容层不执行阈值、腐蚀、连通域、过滤或重编号。两套供应商工件必须分别匹配 x64、MSVC 运行库、iterator debug level 和 VTK 9.4.2 配置，禁止跨配置回退。
+
+受控 CI runner 可通过仓库变量 `MVVCVTK_DEFX_ROOT` 指向预装的只读 DefX 根；未配置时使用工作区的 `deps/third_party/defx`。CI 会在配置前核对上述六个工件，第三方内容不由官方依赖下载脚本获取。
 
 ## 构建和测试
 
@@ -40,9 +44,11 @@ ctest --preset vs2026-debug
 ctest --preset vs2026-release
 ```
 
-`MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 本体只进入由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓库测试，不是 Host 的公共依赖，也不进入 SDK；`deps/vtk` 中的 VTK Qt 适配模块仍随完整 VTK 环境交付。
+`MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 本体只进入由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓库测试，不是 Host 的公共依赖，也不进入 SDK；`deps/official/vtk` 中的 VTK Qt 适配模块仍随完整 VTK 环境交付。
 
 `MVVCVTK_BUILD_ORTHOGONAL_CROP`、`MVVCVTK_BUILD_GAP_ANALYSIS` 可分别关闭两个 Feature；`MVVCVTK_BUILD_STANDALONE` 控制示例。Standalone 只有在两个 Feature 都启用时构建，关闭任一 Feature 都不会把示例的组合选择反向施加给 Host 或另一个 Feature。
+
+Standalone 加载数据后可按 `g` 显式发送一次 `GapHostAction::Start`，用于触发当前 Gap/DefX 主链；该入口仍走 `GapHostFeature::SendRequest`，不直接调用私有算法。原有 `j` 键继续由 Gap Feature 自身处理 Start/Overlay 切换。
 
 仓库不维护手写 `.sln`、生产 `.vcxproj` 或测试 `.vcxproj`。`cmake --preset vs2026-x64` 是唯一工程生成入口，Visual Studio 2026 generator 会在 `out/build/vs2026-x64/MVVCVTK.slnx` 生成现代 Solution 文件及其项目。Solution 顶层只保留一个 `MVVCVTK` 组，下面包含默认启动的 `Application/MVVCVTK`、主干 `Host`、Host API/Feature SPI 接口目标、位于 `Host/Features` 的两个扩展库、边界与行为测试以及 CMake 内建目标；三库项目显示各自完整的实现源码和私有头，但 SDK 安装仍只取批准的公开头与单独维护的物理闭包。静态库统一输出到 `lib/<配置>`，应用和测试程序统一输出到 `bin/<配置>`。Windows CI 应在带桌面 OpenGL、v145 和内部依赖访问权的受控 runner 上运行 Debug/Release 全套测试。
 
@@ -50,19 +56,21 @@ ctest --preset vs2026-release
 
 ```powershell
 ./tools/release/Build-MVVCVTKSdk.ps1
+# 可选：覆盖 preset 的 DefX 三方环境根
+./tools/release/Build-MVVCVTKSdk.ps1 -DefXRoot D:\third_party\defx
 ```
 
-发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库，白名单复制 VTK/OpenCV，再在仓库外动态生成一次性 CMake clean-room probe，验证安装态组件矩阵、公开头闭包、私有头隔离和两种配置的运行链。probe 只存在于临时验证目录，不作为仓库源码，也不进入 SDK；Qt 集成由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓内测试负责，不再维护独立的发布态 Qt consumer。
+发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库及 GapAnalysis 私有的分配置 bridge/DefX 运行时，白名单复制 VTK/OpenCV，再在仓库外动态生成一次性 CMake clean-room probe，验证安装态组件矩阵、公开头闭包、私有头隔离和两种配置的消费链接。DefX 实际分析链由仓内 Debug/Release Gap/QtHost 测试覆盖；clean-room probe 只存在于临时验证目录，不作为仓库源码，也不进入 SDK。
 
-stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum 或 manifest。直接执行 `cmake --install` 只安装项目模块和 CMake 消费接口，不复制依赖；完整定向交付由发布脚本把 VTK/OpenCV 放到安装根的 `deps/`。
+stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum 或 manifest。直接执行 `cmake --install` 安装项目模块、CMake 消费接口和 GapAnalysis 私有运行时，不复制 VTK/OpenCV；完整定向交付由发布脚本把 VTK/OpenCV 放到安装根的 `deps/official`。
 
-SDK 根目录只保留 `include/`、`lib/` 和 `deps/`；`deps/` 只含 `vtk/` 与 `opencv/`，CMake package 位于 `lib/cmake/MVVCVTK/`。`lib/<配置>/` 每个配置只含 `MVVCVTKHost.lib`、`MVVCVTKOrthogonalCrop.lib`、`MVVCVTKGapAnalysis.lib`。安装包不携带 Qt 本体、内部 UI、README、NOTICE、manifest、standalone、clean-room 示例、MSBuild/qmake 适配层或验证工具；完整 VTK 目录中的 QVTK/VTK Qt 模块不视为 Qt 本体。
+SDK 根目录只保留 `include/`、`lib/` 和 `deps/`；官方依赖位于 `deps/official/{vtk,opencv}`，三方运行时位于 `deps/third_party/defx`，DefX 供应商头文件和导入库不进入 SDK。CMake package 位于 `lib/cmake/MVVCVTK/`；`lib/<配置>/` 每个配置只含 `MVVCVTKHost.lib`、`MVVCVTKOrthogonalCrop.lib`、`MVVCVTKGapAnalysis.lib`，`MVVCVTKGapKernel.dll` 与 `DefXAnalysis.dll` 只位于 `deps/third_party/defx/bin/<配置>`。安装包不携带 Qt 本体、内部 UI、README、NOTICE、manifest、standalone、clean-room 示例、MSBuild/qmake 适配层或验证工具；完整 VTK 目录中的 QVTK/VTK Qt 模块不视为 Qt 本体。
 
 脏工作树目录名使用 `yyyy.MM.dd-rev.N`；干净工作树目录名使用 `yyyy.MM.dd-git.<short-commit>`。不传 `-PackageRevision` 时脚本按工作树状态生成合法目录名和 ZIP 名，包内不再保存独立版本文件。
 
 ## SDK 消费
 
-CMake consumer 使用 Windows x64、MSVC `v145`，指向安装目录中的包配置并按需选择三个产品模块。包配置只解析导出 target 和同目录的 VTK/OpenCV：
+CMake consumer 使用 Windows x64、MSVC `v145`，指向安装目录中的包配置并按需选择三个产品模块。包配置只解析导出 target 与 VTK/OpenCV；DefX target、头文件和导入库不进入 consumer CMake 图：
 
 ```cmake
 find_package(MVVCVTK CONFIG REQUIRED
@@ -72,6 +80,8 @@ target_link_libraries(app PRIVATE
     MVVCVTK::OrthogonalCrop
     MVVCVTK::GapAnalysis)
 ```
+
+运行含 GapAnalysis 的程序时，PATH 只加入当前配置的 `deps/third_party/defx/bin/<配置>`，并同时加入 `deps/official` 下匹配配置的 VTK/OpenCV runtime 目录；不得把两套同名 `MVVCVTKGapKernel.dll`/`DefXAnalysis.dll` 同时放入搜索路径。
 
 只编译 Host/Feature 头契约的 target 可分别链接 `MVVCVTK::HostAPI` 与
 `MVVCVTK::FeatureSPI`；二者都是自足的纯接口目标，不反向链接 `MVVCVTKHost.lib`。

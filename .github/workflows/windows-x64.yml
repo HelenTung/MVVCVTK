@@ -18,8 +18,8 @@ jobs:
     runs-on: [self-hosted, Windows, X64, mvvcvtk-v145]
     timeout-minutes: 150
     env:
-      DEPS_VERSION: 2026.08.21-deps.1
       MVVCVTK_DEPS_URI: ${{ secrets.MVVCVTK_DEPS_URI }}
+      MVVCVTK_DEFX_ROOT: ${{ vars.MVVCVTK_DEFX_ROOT }}
 
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +38,7 @@ jobs:
       - name: Resolve runtime
         shell: pwsh
         run: |
-          $deps = Join-Path $env:GITHUB_WORKSPACE `
-            "deps\$env:DEPS_VERSION-win-x64"
+          $deps = Join-Path $env:GITHUB_WORKSPACE 'deps\official'
           @(
             "$deps\ui\bin",
             "$deps\opencv\x64\vc16\bin",
@@ -47,11 +46,29 @@ jobs:
             "$deps\qt\bin"
           ) | Add-Content $env:GITHUB_PATH
           "QT_PLUGIN_PATH=$deps\qt\plugins" | Add-Content $env:GITHUB_ENV
+          $defxRoot = $env:MVVCVTK_DEFX_ROOT
+          if ([string]::IsNullOrWhiteSpace($defxRoot)) {
+            $defxRoot = Join-Path $env:GITHUB_WORKSPACE `
+              'deps\third_party\defx'
+          }
+          foreach ($required in @(
+              'include\DefXAnalysisService.h',
+              'include\DefXTypes.h',
+              'bin\Debug\DefXAnalysis.dll',
+              'lib\Debug\DefXAnalysis.lib',
+              'bin\Release\DefXAnalysis.dll',
+              'lib\Release\DefXAnalysis.lib')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $defxRoot $required))) {
+              throw "DefX environment is incomplete: $defxRoot"
+            }
+          }
+          "MVVCVTK_DEFX_ROOT=$defxRoot" | Add-Content $env:GITHUB_ENV
 
       - name: Generate Visual Studio solution and build x64
         shell: pwsh
         run: |
-          cmake --preset vs2026-x64
+          cmake --preset vs2026-x64 `
+            "-DMVVCVTK_DEFX_ROOT=$env:MVVCVTK_DEFX_ROOT"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build --preset vs2026-debug --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -73,7 +90,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $version = (Get-Date -Format 'yyyy.MM.dd') + '-git.' + $gitShort
           ./tools/release/Build-MVVCVTKSdk.ps1 `
-            -PackageRevision $version -SkipTests
+            -PackageRevision $version `
+            -DefXRoot $env:MVVCVTK_DEFX_ROOT -SkipTests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $artifactRoot = Join-Path $env:RUNNER_TEMP `
             'MVVCVTK-sdk-${{ github.run_id }}'

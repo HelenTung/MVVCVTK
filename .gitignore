@@ -405,5 +405,5 @@ gap/
 # 本地设计、计划与参考资料，不进入 Git 和 SDK 发布闭包
 /md/
 
-# Downloaded versioned dependency payload
+# Downloaded official and third-party dependency payloads
 /deps/

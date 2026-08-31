@@ -22,17 +22,16 @@ struct GapSurfaceConfig {
     double dataRangeRatio = 0.0;
     // AbsoluteValue 下直接使用输入标量域中的阈值。
     double absoluteIsoValue = 0.0;
+    // DefX 材料定义的背景与材料均值；Feature 只做请求映射。
+    float backgroundMean = 0.0f;
+    float materialMean = 0.0f;
 };
 
 struct GapVoidParams {
-    // grayMin、angleThresholdDeg 与 tensorWindowSize 是预留配置，当前 worker 不读取。
-    float grayMin = 0.0f;
-    float grayMax = 0.0f;
+    // 显式控制 DefX 过滤；关闭时 minVolumeMM3 不参与筛选。
+    bool isFilterEnabled = false;
+    // DefX 最小缺陷体积，单位 mm^3。
     double minVolumeMM3 = 0.00;
-    float angleThresholdDeg = 40.0f;
-    int tensorWindowSize = 1;
-    // 六邻域腐蚀轮数；小于等于 0 时跳过腐蚀。
-    int erosionIterations = 2;
 };
 
 struct GapStatistics final {

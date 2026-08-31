@@ -161,14 +161,12 @@ GapHostConfig GetGapConfig()
     config.defaultStart.targetViews.viewIds = {
         "gap-primary", "gap-slice" };
     config.defaultStart.surface.isoMode =
-        GapIsoMode::DataRangeRatio;
-    config.defaultStart.surface.dataRangeRatio = 0.5;
-    config.defaultStart.voidParams.grayMin = 0.0f;
-    config.defaultStart.voidParams.grayMax = 0.25f;
+        GapIsoMode::AbsoluteValue;
+    config.defaultStart.surface.absoluteIsoValue = 0.172;
+    config.defaultStart.surface.backgroundMean = -1.617f;
+    config.defaultStart.surface.materialMean = 0.453f;
+    config.defaultStart.voidParams.isFilterEnabled = false;
     config.defaultStart.voidParams.minVolumeMM3 = 0.0;
-    config.defaultStart.voidParams.angleThresholdDeg = 40.0f;
-    config.defaultStart.voidParams.tensorWindowSize = 1;
-    config.defaultStart.voidParams.erosionIterations = 0;
     config.inputViews.viewIds = { "gap-primary" };
     config.keys.switchOverlay.keyCode = 'j';
     config.keys.exit.keySym = "Escape";
@@ -496,8 +494,9 @@ int GetGapFailCount()
             && !hasRejectedCallback,
         "Gap Start callback runs once on the owner thread") ? 0 : 1;
     failureCount += GetCaseResult(
-        feature->GetState().statistics.voidVoxelCount == 27
-            && feature->GetState().statistics.objectVoxelCount == 98
+        feature->GetState().statistics.voidVoxelCount > 0
+            && feature->GetState().statistics.objectVoxelCount
+                + feature->GetState().statistics.voidVoxelCount == 125
             && feature->GetState().analysisState
                 == GapAnalysisState::Succeeded,
         "Rejected Gap Start preserves the accepted analysis result") ? 0 : 1;

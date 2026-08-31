@@ -99,10 +99,11 @@ int GapDisplaySuite::GetFailCount() const
     GapSurfaceConfig surfaceConfig;
     surfaceConfig.isoMode = GapIsoMode::AbsoluteValue;
     surfaceConfig.absoluteIsoValue = 50.0;
+    surfaceConfig.backgroundMean = 0.0f;
+    surfaceConfig.materialMean = 100.0f;
     GapVoidParams voidParams;
-    voidParams.grayMax = 10.0f;
+    voidParams.isFilterEnabled = false;
     voidParams.minVolumeMM3 = 0.0;
-    voidParams.erosionIterations = 0;
 
     auto overlay = std::make_shared<OverlayStub>();
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets;
@@ -212,64 +213,27 @@ int GapDisplaySuite::GetFailCount() const
 
     GapAnalysisService maskService;
     auto validityMask = GetMask(image);
-    auto* maskValues = validityMask
-        ? static_cast<unsigned char*>(
-            validityMask->GetScalarPointer())
-        : nullptr;
-    expect(maskValues != nullptr,
-        "Valid Gap mask should expose unsigned-char scalars.");
-    if (maskValues) {
-        maskValues[2 + 5 * (2 + 5 * 2)] = 0;
-        validityMask->Modified();
-    }
+    const int oldAttachCount = overlay->GetAttachCount();
+    const int oldRemoveCount = overlay->GetRemoveCount();
+    bool hasMaskCallback = false;
     GapViewRequest maskRequest;
     maskRequest.inputImage = image;
     maskRequest.validityMask = validityMask;
     maskRequest.surface = surfaceConfig;
     maskRequest.voidParams = voidParams;
     maskRequest.sliceTargets = sliceTargets;
-    expect(maskService.StartView(std::move(maskRequest)),
-        "Gap view should accept an image and matching validity mask.");
-    if (maskValues) {
-        maskValues[2 + 5 * (2 + 5 * 2)] = 255;
-        validityMask->Modified();
-    }
-    const auto maskDeadline = std::chrono::steady_clock::now()
-        + std::chrono::seconds(5);
-    while (maskService.GetAnalysisState()
-            == GapAnalysisState::Running
-        && std::chrono::steady_clock::now() < maskDeadline) {
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(5));
-    }
-    expect(maskService.GetAnalysisState()
-            == GapAnalysisState::Succeeded
-        && maskService.GetVoidRegions().empty(),
-        "Frozen mask=0 voxels should not enter Gap statistics.");
-    const auto maskedStatistics = maskService.GetStatistics();
-    expect(maskedStatistics.objectVoxelCount == 124
-            && maskedStatistics.voidVoxelCount == 0
-            && maskedStatistics.objectVolumeMM3 == 124.0
-            && maskedStatistics.voidVolumeMM3 == 0.0
-            && maskedStatistics.porosityRatio == 0.0,
-        "Gap statistics should use the frozen non-zero validity domain.");
-    const auto maskedLabel = maskService.BuildLabelImage();
-    const auto* maskedLabels = maskedLabel
-        ? static_cast<const int*>(
-            maskedLabel->GetScalarPointer())
-        : nullptr;
-    expect(maskedLabels
-        && maskedLabels[2 + 5 * (2 + 5 * 2)] == 0,
-        "Frozen mask=0 voxels should remain zero in the Gap label image.");
-    const auto maskedMesh = maskService.BuildVoidMesh();
-    expect(maskedMesh
-        && maskedMesh->GetNumberOfPoints() == 0
-        && maskedMesh->GetNumberOfCells() == 0,
-        "Frozen mask=0 voxels should not enter the Gap void mesh.");
-    maskService.ClearView();
-    expect(maskService.GetStatistics().objectVoxelCount == 0,
-        "ClearView should retire the successful statistics batch.");
-
+    expect(!maskService.StartView(
+            std::move(maskRequest),
+            [&](bool) { hasMaskCallback = true; }),
+        "Gap view must reject every non-null validity mask.");
+    expect(maskService.GetAnalysisState() == GapAnalysisState::Idle
+            && !maskService.GetViewOn()
+            && maskService.GetVoidRegions().empty()
+            && maskService.GetStatistics().voidVoxelCount == 0
+            && overlay->GetAttachCount() == oldAttachCount
+            && overlay->GetRemoveCount() == oldRemoveCount
+            && !hasMaskCallback,
+        "Rejected mask input must not start DefX or mutate overlay/result state.");
     auto teardownService = std::make_shared<GapAnalysisService>();
     GapViewRequest teardownRequest;
     teardownRequest.inputImage = image;
@@ -289,6 +253,8 @@ int GapDisplaySuite::GetFailCount() const
         "Callback cleanup service should accept isolated input.");
     GapSurfaceParams surfaceParams;
     surfaceParams.isoValue = 50.0f;
+    surfaceParams.background = 0.0f;
+    surfaceParams.material = 100.0f;
     callbackService.SetSurface(surfaceParams);
     callbackService.SetVoid(voidParams);
     bool hasLowCallback = false;

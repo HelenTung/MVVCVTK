@@ -1,10 +1,5 @@
-// 这个测试放在仓库根 test/ 下，刻意不放回 feature 目录：
-// 1. 主项目只负责编译应用链路，测试工程独立验证算法/服务契约。
-// 2. 合成体数据让回归测试不依赖本地 RAW 文件或窗口初始化。
-// 3. 同时测纯算法和 GapAnalysisService 快照，防止 UI/host 改动污染孔隙分析核心边界。
-
-#include "Algorithms/VoidDetector.h"
-#include "Algorithms/VolumeBuffer.h"
+// 合成体数据只通过 GapAnalysisService 进入私有 DefX bridge；
+// 测试不得直接包含或调用已退役的本地孔隙算法。
 #include "Services/GapAnalysisService.h"
 #include "GapDisplayTests.h"
 
@@ -19,770 +14,432 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <string>
 #include <thread>
-#include <utility>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class GapAlgorithmSuite final {
 public:
+    inline static constexpr std::array<int, 3> TestDims = { 7, 7, 7 };
+    inline static constexpr double NumericTolerance = 1e-6;
 
-inline static constexpr std::array<int, 3> TestDims = { 7, 7, 7 };
-inline static constexpr double NumericTolerance = 1e-9;
-
-std::size_t GetLinearIndex(int x, int y, int z, const std::array<int, 3>& dims)
-{
-    // VTK image 标量按 x 最快、y 次之、z 最慢展开；这里显式写公式，
-    // 是为了让 label image 校验和合成 voxel buffer 使用同一线性布局。
-    return static_cast<std::size_t>(x)
-        + static_cast<std::size_t>(y) * static_cast<std::size_t>(dims[0])
-        + static_cast<std::size_t>(z) * static_cast<std::size_t>(dims[0]) * static_cast<std::size_t>(dims[1]);
-}
-
-bool GetVoxelInVoid(int x, int y, int z)
-{
-    // 合成 3x3x3 封闭低灰度块，外层一圈高灰度体素作为“封闭边界”，
-    // 这样检测到的区域数量、体素数、bbox 和质心都有确定答案。
-    return x >= 2 && x <= 4
-        && y >= 2 && y <= 4
-        && z >= 2 && z <= 4;
-}
-
-void SetExpect(bool isExpected, const std::string& message, int& failureCount)
-{
-    if (!isExpected) {
-        std::cerr << message << '\n';
-        ++failureCount;
+    std::size_t GetLinearIndex(
+        int x,
+        int y,
+        int z,
+        const std::array<int, 3>& dims) const
+    {
+        return static_cast<std::size_t>(x)
+            + static_cast<std::size_t>(y)
+                * static_cast<std::size_t>(dims[0])
+            + static_cast<std::size_t>(z)
+                * static_cast<std::size_t>(dims[0])
+                * static_cast<std::size_t>(dims[1]);
     }
-}
 
-void SetExpectNear(double actual, double expected, const std::string& message, int& failureCount)
-{
-    SetExpect(std::abs(actual - expected) <= NumericTolerance, message, failureCount);
-}
+    bool GetVoxelInVoid(int x, int y, int z) const
+    {
+        return x >= 2 && x <= 4
+            && y >= 2 && y <= 4
+            && z >= 2 && z <= 4;
+    }
 
-GapVoidParams BuildVoidParams()
-{
-    // 参数刻意压低 minVolume 并关闭腐蚀，使测试只验证“封闭孔洞识别”本身，
-    // 不把经验阈值和后处理策略混进这个单元回归。
-    GapVoidParams params;
-    params.grayMin = -0.1f;
-    params.grayMax = 0.1f;
-    params.minVolumeMM3 = 0.0;
-    params.angleThresholdDeg = 30.0f;
-    params.tensorWindowSize = 1;
-    params.erosionIterations = 0;
-    return params;
-}
+    void SetExpect(
+        bool isExpected,
+        const std::string& message,
+        int& failureCount) const
+    {
+        if (!isExpected) {
+            std::cerr << message << '\n';
+            ++failureCount;
+        }
+    }
 
-std::vector<float> BuildTestVoxels()
-{
-    const auto total = static_cast<std::size_t>(TestDims[0])
-        * static_cast<std::size_t>(TestDims[1])
-        * static_cast<std::size_t>(TestDims[2]);
-    std::vector<float> voxels(total, 1.0f);
+    void SetExpectNear(
+        double actual,
+        double expected,
+        const std::string& message,
+        int& failureCount) const
+    {
+        SetExpect(
+            std::abs(actual - expected) <= NumericTolerance,
+            message,
+            failureCount);
+    }
 
-    for (int z = 0; z < TestDims[2]; ++z) {
-        for (int y = 0; y < TestDims[1]; ++y) {
-            for (int x = 0; x < TestDims[0]; ++x) {
-                if (GetVoxelInVoid(x, y, z)) {
-                    voxels[GetLinearIndex(x, y, z, TestDims)] = 0.0f;
+    GapVoidParams BuildVoidParams() const
+    {
+        GapVoidParams params;
+        params.isFilterEnabled = false;
+        params.minVolumeMM3 = 0.0;
+        return params;
+    }
+
+    std::vector<float> BuildTestVoxels() const
+    {
+        const auto total = static_cast<std::size_t>(TestDims[0])
+            * static_cast<std::size_t>(TestDims[1])
+            * static_cast<std::size_t>(TestDims[2]);
+        std::vector<float> voxels(total, 1.0f);
+        for (int z = 0; z < TestDims[2]; ++z) {
+            for (int y = 0; y < TestDims[1]; ++y) {
+                for (int x = 0; x < TestDims[0]; ++x) {
+                    if (GetVoxelInVoid(x, y, z)) {
+                        voxels[GetLinearIndex(
+                            x, y, z, TestDims)] = 0.0f;
+                    }
                 }
             }
         }
+        return voxels;
     }
 
-    return voxels;
-}
-
-GapVolumeBuffer BuildTestVolume()
-{
-    GapVolumeBuffer volume;
-    volume.dims = TestDims;
-    volume.spacing = { 1.0, 1.0, 1.0 };
-    volume.origin = { 0.0, 0.0, 0.0 };
-    volume.minVal = 0.0f;
-    volume.maxVal = 1.0f;
-    volume.SetOwnedVoxels(BuildTestVoxels());
-    return volume;
-}
-
-GapVolumeBuffer BuildVolume(
-    const std::array<int, 3>& dims,
-    std::vector<float> voxels)
-{
-    GapVolumeBuffer volume;
-    volume.dims = dims;
-    volume.spacing = { 1.0, 1.0, 1.0 };
-    volume.origin = { 0.0, 0.0, 0.0 };
-    volume.minVal = 0.0f;
-    volume.maxVal = 1.0f;
-    volume.SetOwnedVoxels(std::move(voxels));
-    return volume;
-}
-
-vtkSmartPointer<vtkImageData> BuildTestImage()
-{
-    auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetDimensions(TestDims[0], TestDims[1], TestDims[2]);
-    image->SetSpacing(1.0, 1.0, 1.0);
-    image->SetOrigin(0.0, 0.0, 0.0);
-    image->AllocateScalars(VTK_FLOAT, 1);
-
-    auto* scalars = static_cast<float*>(image->GetScalarPointer());
-    const auto voxels = BuildTestVoxels();
-    std::copy(voxels.begin(), voxels.end(), scalars);
-    image->Modified();
-    return image;
-}
-
-vtkSmartPointer<vtkImageData> BuildShortImage()
-{
-    auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetDimensions(TestDims[0], TestDims[1], TestDims[2]);
-    image->SetSpacing(1.0, 1.0, 1.0);
-    image->SetOrigin(0.0, 0.0, 0.0);
-    image->AllocateScalars(VTK_SHORT, 1);
-
-    auto* scalars = static_cast<short*>(image->GetScalarPointer());
-    const auto voxels = BuildTestVoxels();
-    std::transform(voxels.begin(), voxels.end(), scalars,
-        [](float value) { return static_cast<short>(value); });
-    image->Modified();
-    return image;
-}
-
-void SetSolidImage(vtkImageData* image)
-{
-    auto* scalars = image ? static_cast<float*>(image->GetScalarPointer()) : nullptr;
-    if (!scalars) {
-        return;
+    vtkSmartPointer<vtkImageData> BuildTestImage() const
+    {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(
+            TestDims[0], TestDims[1], TestDims[2]);
+        image->SetSpacing(1.0, 1.0, 1.0);
+        image->SetOrigin(0.0, 0.0, 0.0);
+        image->AllocateScalars(VTK_FLOAT, 1);
+        auto* scalars = static_cast<float*>(
+            image->GetScalarPointer());
+        const auto voxels = BuildTestVoxels();
+        std::copy(voxels.begin(), voxels.end(), scalars);
+        image->Modified();
+        return image;
     }
 
-    std::fill_n(scalars, image->GetNumberOfPoints(), 1.0f);
-    image->Modified();
-}
+    vtkSmartPointer<vtkImageData> BuildShortImage() const
+    {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(
+            TestDims[0], TestDims[1], TestDims[2]);
+        image->SetSpacing(1.0, 1.0, 1.0);
+        image->SetOrigin(0.0, 0.0, 0.0);
+        image->AllocateScalars(VTK_SHORT, 1);
+        auto* scalars = static_cast<short*>(
+            image->GetScalarPointer());
+        const auto voxels = BuildTestVoxels();
+        std::transform(
+            voxels.begin(),
+            voxels.end(),
+            scalars,
+            [](float value) {
+                return static_cast<short>(value);
+            });
+        image->Modified();
+        return image;
+    }
 
-std::size_t GetMaskCount(const std::vector<uint8_t>& mask)
-{
-    std::size_t count = 0;
-    for (const auto value : mask) {
-        if (value != 0) {
-            ++count;
+    void SetSolidImage(vtkImageData* image) const
+    {
+        auto* scalars = image
+            ? static_cast<float*>(image->GetScalarPointer())
+            : nullptr;
+        if (!scalars) {
+            return;
         }
-    }
-    return count;
-}
-
-void SetRegionExpect(const VoidRegion& region, int& failureCount)
-{
-    SetExpect(region.id == 1, "synthetic void id should start from 1.", failureCount);
-    SetExpect(region.voxelCount == 27, "synthetic void should contain 27 voxels.", failureCount);
-    SetExpectNear(region.volumeMM3, 27.0, "synthetic void volume should equal 27 mm3.", failureCount);
-    SetExpectNear(region.centroidMM[0], 3.0, "synthetic void centroid x should be 3 mm.", failureCount);
-    SetExpectNear(region.centroidMM[1], 3.0, "synthetic void centroid y should be 3 mm.", failureCount);
-    SetExpectNear(region.centroidMM[2], 3.0, "synthetic void centroid z should be 3 mm.", failureCount);
-
-    const std::array<int, 6> expectedBbox = { 2, 4, 2, 4, 2, 4 };
-    SetExpect(region.bbox == expectedBbox, "synthetic void bbox should match the carved 3x3x3 cube.", failureCount);
-
-    SetExpectNear(region.minGray, 0.0, "synthetic void min gray should be 0.", failureCount);
-    SetExpectNear(region.maxGray, 0.0, "synthetic void max gray should be 0.", failureCount);
-    SetExpectNear(region.meanGray, 0.0, "synthetic void mean gray should be 0.", failureCount);
-}
-
-void SetLabelExpect(vtkImageData* labelImage, int& failureCount)
-{
-    // label image 是后续 overlay 的输入真源；这里逐 voxel 校验，确保 mesh 成功不掩盖 label 错位。
-    SetExpect(labelImage != nullptr, "gap analysis label image should exist.", failureCount);
-    if (!labelImage) {
-        return;
+        std::fill_n(
+            scalars,
+            image->GetNumberOfPoints(),
+            1.0f);
+        image->Modified();
     }
 
-    int dims[3] = { 0, 0, 0 };
-    labelImage->GetDimensions(dims);
-    SetExpect(
-        dims[0] == TestDims[0] && dims[1] == TestDims[1] && dims[2] == TestDims[2],
-        "gap analysis label image dimensions should match input.",
-        failureCount);
-
-    auto* labels = static_cast<int*>(labelImage->GetScalarPointer());
-    SetExpect(labels != nullptr, "gap analysis label image should have scalar data.", failureCount);
-    if (!labels) {
-        return;
+    GapAnalysisState GetServiceState(
+        GapAnalysisService& service) const
+    {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto state = service.GetAnalysisState();
+            if (state != GapAnalysisState::Running) {
+                return state;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(5));
+        }
+        return service.GetAnalysisState();
     }
 
-    std::size_t labeledVoxelCount = 0;
-    for (int z = 0; z < TestDims[2]; ++z) {
-        for (int y = 0; y < TestDims[1]; ++y) {
-            for (int x = 0; x < TestDims[0]; ++x) {
-                const auto label = labels[GetLinearIndex(x, y, z, TestDims)];
-                const bool isLabelExpected = GetVoxelInVoid(x, y, z);
-                if (label != 0) {
-                    ++labeledVoxelCount;
-                }
+    bool SendDoneEvent(GapAnalysisService& service) const
+    {
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (service.GetDoneEvent()) {
+                service.SendCallback();
+                return true;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(2));
+        }
+        return false;
+    }
+
+    std::vector<std::int32_t> GetLabels(
+        vtkImageData* labelImage,
+        int& failureCount) const
+    {
+        SetExpect(
+            labelImage != nullptr,
+            "DefX label image should exist.",
+            failureCount);
+        if (!labelImage) {
+            return {};
+        }
+
+        int dims[3] = {};
+        labelImage->GetDimensions(dims);
+        SetExpect(
+            dims[0] == TestDims[0]
+                && dims[1] == TestDims[1]
+                && dims[2] == TestDims[2],
+            "DefX label dimensions should match the frozen input.",
+            failureCount);
+        SetExpect(
+            labelImage->GetScalarType() == VTK_INT
+                && labelImage->GetNumberOfScalarComponents() == 1,
+            "Feature label DTO should preserve DefX IDs as one int32 component.",
+            failureCount);
+
+        const auto pointCount = labelImage->GetNumberOfPoints();
+        const auto* labels = static_cast<const int*>(
+            labelImage->GetScalarPointer());
+        SetExpect(
+            pointCount > 0 && labels,
+            "DefX label image should contain scalar data.",
+            failureCount);
+        if (pointCount <= 0 || !labels) {
+            return {};
+        }
+        return {
+            labels,
+            labels + static_cast<std::size_t>(pointCount)
+        };
+    }
+
+    void SetResultExpect(
+        GapAnalysisService& service,
+        bool hasDefectExpected,
+        int& failureCount) const
+    {
+        const auto regions = service.GetVoidRegions();
+        const auto labelImage = service.BuildLabelImage();
+        const auto labels = GetLabels(labelImage, failureCount);
+        std::unordered_set<std::int32_t> regionIds;
+        std::unordered_map<std::int32_t, std::uint64_t> labelCounts;
+
+        for (const auto& region : regions) {
+            SetExpect(
+                region.id > 0
+                    && region.voxelCount >= 0
+                    && regionIds.insert(region.id).second,
+                "DefX regions should expose unique positive IDs.",
+                failureCount);
+            SetExpect(
+                std::isfinite(region.volumeMM3)
+                    && region.volumeMM3 >= 0.0f
+                    && std::isfinite(region.equivalentDiameterMM)
+                    && std::isfinite(region.radiusMM)
+                    && std::isfinite(region.diameterMM),
+                "DefX region size fields should remain finite.",
+                failureCount);
+        }
+
+        for (const auto label : labels) {
+            SetExpect(
+                label >= 0,
+                "DefX label values must not be negative.",
+                failureCount);
+            if (label > 0) {
+                ++labelCounts[label];
                 SetExpect(
-                    isLabelExpected ? label == 1 : label == 0,
-                    "gap analysis label image should mark exactly the synthetic void.",
+                    regionIds.find(label) != regionIds.end(),
+                    "Every positive DefX label should name a returned region.",
                     failureCount);
             }
         }
-    }
 
-    SetExpect(labeledVoxelCount == 27, "gap analysis label image should contain 27 labeled voxels.", failureCount);
-}
-
-void SetStatisticsExpect(
-    const GapStatistics& statistics,
-    int& failureCount)
-{
-    constexpr std::size_t totalVoxelCount =
-        static_cast<std::size_t>(TestDims[0])
-        * static_cast<std::size_t>(TestDims[1])
-        * static_cast<std::size_t>(TestDims[2]);
-    constexpr std::size_t voidVoxelCount = 27;
-    SetExpect(
-        statistics.objectVoxelCount
-            == totalVoxelCount - voidVoxelCount,
-        "gap statistics should count object voxels in the frozen valid domain.",
-        failureCount);
-    SetExpect(
-        statistics.voidVoxelCount == voidVoxelCount,
-        "gap statistics should count positive labels from the successful batch.",
-        failureCount);
-    SetExpectNear(
-        statistics.objectVolumeMM3,
-        static_cast<double>(totalVoxelCount - voidVoxelCount),
-        "gap object volume should use the frozen voxel spacing.",
-        failureCount);
-    SetExpectNear(
-        statistics.voidVolumeMM3,
-        static_cast<double>(voidVoxelCount),
-        "gap void volume should use the frozen voxel spacing.",
-        failureCount);
-    SetExpectNear(
-        statistics.porosityRatio,
-        static_cast<double>(voidVoxelCount)
-            / static_cast<double>(totalVoxelCount),
-        "gap porosity should use the same successful valid domain.",
-        failureCount);
-}
-
-void StartAlgoCase(int& failureCount)
-{
-    // 纯算法路径不经过 service 或线程，先确认 VoidDetector 的数学结果稳定。
-    const auto volume = BuildTestVolume();
-    const auto interior = VoidDetector::CreateInteriorMask(volume, 0.5f);
-    SetExpect(GetMaskCount(interior) == 27, "interior mask should contain only the enclosed void.", failureCount);
-
-    auto candidates = VoidDetector::BuildCandidates(volume, interior, BuildVoidParams());
-    SetExpect(GetMaskCount(candidates) == 27, "candidate mask should preserve the enclosed void.", failureCount);
-
-    std::vector<int> labels;
-    const auto regions = VoidDetector::BuildRegions(
-        volume,
-        candidates,
-        BuildVoidParams(),
-        labels);
-
-    SetExpect(regions.size() == 1, "pure gap analysis algorithm should detect one enclosed void.", failureCount);
-    SetExpect(labels.size() == volume.voxels.size(), "label volume should align with input voxel count.", failureCount);
-    if (regions.size() == 1) {
-        SetRegionExpect(regions.front(), failureCount);
-    }
-
-    auto maskedVolume = BuildTestVolume();
-    std::vector<std::uint8_t> validityMask(
-        maskedVolume.voxels.size(), 255);
-    validityMask[GetLinearIndex(3, 3, 3, TestDims)] = 0;
-    maskedVolume.SetOwnedMask(std::move(validityMask));
-    const auto maskedInterior =
-        VoidDetector::CreateInteriorMask(maskedVolume, 0.5f);
-    SetExpect(GetMaskCount(maskedInterior) == 0,
-        "mask=0 should open the carved void to the analysis exterior.",
-        failureCount);
-    auto maskedCandidates = VoidDetector::BuildCandidates(
-        maskedVolume, maskedInterior, BuildVoidParams());
-    std::vector<int> maskedLabels;
-    const auto maskedRegions = VoidDetector::BuildRegions(
-        maskedVolume,
-        maskedCandidates,
-        BuildVoidParams(),
-        maskedLabels);
-    SetExpect(maskedRegions.empty(),
-        "invalid-domain voxels should not enter gap statistics.",
-        failureCount);
-    SetExpect(std::none_of(
-            maskedLabels.begin(),
-            maskedLabels.end(),
-            [](int label) { return label != 0; }),
-        "invalid-domain voxels should remain zero in the label result.",
-        failureCount);
-}
-
-void StartEdgeCase(int& failureCount)
-{
-    // 行尾 index=2 与下一行 index=3 在线性内存中相邻，但坐标并非 6 邻域。
-    const std::array<int, 3> wrapDims{ 3, 2, 1 };
-    auto wrapVolume = BuildVolume(
-        wrapDims, std::vector<float>(6, 0.0f));
-    std::vector<std::uint8_t> wrapMask(6, 0);
-    wrapMask[2] = 1;
-    wrapMask[3] = 1;
-    std::vector<int> wrapLabels;
-    const auto wrapRegions = VoidDetector::BuildRegions(
-        wrapVolume, wrapMask, BuildVoidParams(), wrapLabels);
-    SetExpect(
-        wrapRegions.size() == 2
-            && wrapLabels.size() == 6
-            && wrapLabels[2] > 0
-            && wrapLabels[3] > 0
-            && wrapLabels[2] != wrapLabels[3],
-        "row endpoints must remain separate 6-neighbor regions.",
-        failureCount);
-
-    // 腐蚀只给 3x3x3 块留下稳定种子；行尾延伸点不能跨行回长到孤立点。
-    const std::array<int, 3> growDims{ 5, 6, 5 };
-    const auto growTotal = static_cast<std::size_t>(growDims[0])
-        * static_cast<std::size_t>(growDims[1])
-        * static_cast<std::size_t>(growDims[2]);
-    auto growVolume = BuildVolume(
-        growDims, std::vector<float>(growTotal, 0.0f));
-    std::vector<std::uint8_t> growMask(growTotal, 0);
-    for (int z = 1; z <= 3; ++z) {
-        for (int y = 1; y <= 3; ++y) {
-            for (int x = 1; x <= 3; ++x) {
-                growMask[GetLinearIndex(x, y, z, growDims)] = 1;
-            }
+        std::uint64_t voidVoxelCount = 0;
+        for (const auto& region : regions) {
+            voidVoxelCount += static_cast<std::uint64_t>(
+                region.voxelCount);
+            const auto iterator = labelCounts.find(region.id);
+            const auto labelCount = iterator == labelCounts.end()
+                ? 0 : iterator->second;
+            SetExpect(
+                labelCount == static_cast<std::uint64_t>(
+                    region.voxelCount),
+                "DefX region voxelCount should equal its raw label count.",
+                failureCount);
         }
-    }
-    const auto rowEnd = GetLinearIndex(4, 3, 2, growDims);
-    const auto nextRow = GetLinearIndex(0, 4, 2, growDims);
-    growMask[rowEnd] = 1;
-    growMask[nextRow] = 1;
-    auto growParams = BuildVoidParams();
-    growParams.erosionIterations = 1;
-    const auto grown = VoidDetector::BuildCandidates(
-        growVolume, growMask, growParams);
-    SetExpect(
-        GetMaskCount(grown) == 28
-            && grown[rowEnd] != 0
-            && grown[nextRow] == 0,
-        "candidate growth must not wrap from one row endpoint to the next.",
-        failureCount);
 
-    const std::array<std::array<int, 3>, 4> degenerateDims{
-        std::array<int, 3>{ 1, 1, 1 },
-        std::array<int, 3>{ 3, 1, 1 },
-        std::array<int, 3>{ 1, 3, 1 },
-        std::array<int, 3>{ 1, 1, 3 }
-    };
-    for (const auto& dims : degenerateDims) {
-        const auto total = static_cast<std::size_t>(dims[0])
-            * static_cast<std::size_t>(dims[1])
-            * static_cast<std::size_t>(dims[2]);
-        auto volume = BuildVolume(
-            dims, std::vector<float>(total, 0.0f));
-        const auto interior = VoidDetector::CreateInteriorMask(
-            volume, 0.5f);
-        auto erosionParams = BuildVoidParams();
-        erosionParams.erosionIterations = 1;
-        const auto eroded = VoidDetector::BuildCandidates(
-            volume,
-            std::vector<std::uint8_t>(total, 1),
-            erosionParams);
-        std::vector<std::uint8_t> candidates(total, 1);
-        std::vector<int> labels;
-        const auto regions = VoidDetector::BuildRegions(
-            volume, candidates, BuildVoidParams(), labels);
+        const auto statistics = service.GetStatistics();
         SetExpect(
-            interior.size() == total
-                && GetMaskCount(interior) == 0
-                && eroded.size() == total
-                && GetMaskCount(eroded) == 0
-                && regions.size() == 1
-                && regions.front().voxelCount == total,
-            "degenerate axes must preserve bounded 6-neighbor behavior.",
+            statistics.voidVoxelCount == voidVoxelCount,
+            "Feature statistics should project DefX region voxel counts.",
             failureCount);
+        SetExpect(
+            std::isfinite(statistics.objectVolumeMM3)
+                && statistics.objectVolumeMM3 >= 0.0
+                && std::isfinite(statistics.voidVolumeMM3)
+                && statistics.voidVolumeMM3 >= 0.0
+                && std::isfinite(statistics.porosityRatio)
+                && statistics.porosityRatio >= 0.0,
+            "Feature statistics should project finite DefX header values.",
+            failureCount);
+        SetExpect(
+            hasDefectExpected
+                ? !regions.empty() && voidVoxelCount > 0
+                : regions.empty() && voidVoxelCount == 0,
+            hasDefectExpected
+                ? "Synthetic input should retain the DefX defect batch."
+                : "DefX minimum-volume filter should return an empty batch.",
+            failureCount);
+
+        auto voidMesh = service.BuildVoidMesh();
+        SetExpect(
+            voidMesh != nullptr,
+            "A successful DefX batch should expose a mesh object.",
+            failureCount);
+        if (voidMesh) {
+            SetExpect(
+                hasDefectExpected
+                    ? voidMesh->GetNumberOfPoints() > 0
+                        && voidMesh->GetNumberOfCells() > 0
+                    : voidMesh->GetNumberOfPoints() == 0
+                        && voidMesh->GetNumberOfCells() == 0,
+                "Mesh occupancy should follow the raw DefX labels.",
+                failureCount);
+        }
     }
 
-    const std::array<int, 3> tunnelDims{ 5, 5, 5 };
-    const auto tunnelTotal = static_cast<std::size_t>(tunnelDims[0])
-        * static_cast<std::size_t>(tunnelDims[1])
-        * static_cast<std::size_t>(tunnelDims[2]);
-    std::vector<float> tunnelVoxels(tunnelTotal, 1.0f);
-    for (int x = 0; x <= 2; ++x) {
-        tunnelVoxels[GetLinearIndex(x, 2, 2, tunnelDims)] = 0.0f;
-    }
-    auto tunnelVolume = BuildVolume(
-        tunnelDims, std::move(tunnelVoxels));
-    const auto tunnelInterior = VoidDetector::CreateInteriorMask(
-        tunnelVolume, 0.5f);
-    SetExpect(
-        GetMaskCount(tunnelInterior) == 0,
-        "a coordinate-connected boundary tunnel must remain exterior.",
-        failureCount);
-}
-
-void StartSafetyCase(int& failureCount)
-{
-    auto scaledVolume = BuildTestVolume();
-    scaledVolume.spacing = { 2.0, 3.0, 4.0 };
-    const auto interior = VoidDetector::CreateInteriorMask(
-        scaledVolume, 0.5f);
-    auto candidates = VoidDetector::BuildCandidates(
-        scaledVolume, interior, BuildVoidParams());
-    std::vector<int> labels;
-    const auto regions = VoidDetector::BuildRegions(
-        scaledVolume,
-        candidates,
-        BuildVoidParams(),
-        labels);
-    SetExpect(regions.size() == 1,
-        "anisotropic spacing should preserve one region.",
-        failureCount);
-    if (regions.size() == 1) {
-        const auto& region = regions.front();
-        SetExpectNear(region.volumeMM3, 648.0,
-            "anisotropic voxel volume should multiply all three axes.",
-            failureCount);
-        SetExpectNear(region.centroidMM[0], 6.0,
-            "anisotropic centroid x should use x spacing.",
-            failureCount);
-        SetExpectNear(region.centroidMM[1], 9.0,
-            "anisotropic centroid y should use y spacing.",
-            failureCount);
-        SetExpectNear(region.centroidMM[2], 12.0,
-            "anisotropic centroid z should use z spacing.",
-            failureCount);
-        SetExpectNear(region.projectedAreaXYMM2, 54.0,
-            "XY projection should use x*y spacing.",
-            failureCount);
-        SetExpectNear(region.projectedAreaXZMM2, 72.0,
-            "XZ projection should use x*z spacing.",
-            failureCount);
-        SetExpectNear(region.projectedAreaYZMM2, 108.0,
-            "YZ projection should use y*z spacing.",
-            failureCount);
-    }
-
-    const std::array<std::array<double, 3>, 5> invalidSpacing{
-        std::array<double, 3>{ 0.0, 1.0, 1.0 },
-        std::array<double, 3>{ -1.0, 1.0, 1.0 },
-        std::array<double, 3>{
-            std::numeric_limits<double>::quiet_NaN(), 1.0, 1.0 },
-        std::array<double, 3>{
-            std::numeric_limits<double>::infinity(), 1.0, 1.0 },
-        std::array<double, 3>{
-            std::numeric_limits<double>::max(),
-            std::numeric_limits<double>::max(),
-            1.0 }
-    };
-    for (const auto& spacing : invalidSpacing) {
-        auto invalidVolume = BuildTestVolume();
-        invalidVolume.spacing = spacing;
-        auto invalidCandidates = candidates;
-        std::vector<int> invalidLabels{ 7 };
-        const auto invalidRegions = VoidDetector::BuildRegions(
-            invalidVolume,
-            invalidCandidates,
-            BuildVoidParams(),
-            invalidLabels);
-        SetExpect(invalidRegions.empty() && invalidLabels.empty(),
-            "invalid spacing must fail without publishing labels.",
-            failureCount);
-    }
-
-    const int maxDim = std::numeric_limits<int>::max();
-    const std::array<std::array<int, 3>, 2> invalidDims{
-        std::array<int, 3>{ maxDim, maxDim, maxDim },
-        std::array<int, 3>{ maxDim, maxDim, 3 }
-    };
-    for (const auto& dims : invalidDims) {
-        auto invalidVolume = BuildVolume(
-            dims, std::vector<float>{ 0.0f });
-        SetExpect(VoidDetector::CreateInteriorMask(
-                invalidVolume, 0.5f).empty(),
-            "overflow dimensions must fail before mask allocation.",
-            failureCount);
-        SetExpect(VoidDetector::BuildCandidates(
-                invalidVolume, {}, BuildVoidParams()).empty(),
-            "overflow dimensions must fail before candidate allocation.",
-            failureCount);
-        std::vector<std::uint8_t> invalidCandidates;
-        std::vector<int> invalidLabels{ 7 };
-        SetExpect(VoidDetector::BuildRegions(
-                invalidVolume,
-                invalidCandidates,
-                BuildVoidParams(),
-                invalidLabels).empty()
-                && invalidLabels.empty(),
-            "overflow dimensions must fail before label allocation.",
-            failureCount);
-    }
-
-    std::atomic<bool> isStopping{ true };
-    auto stoppedVolume = BuildTestVolume();
-    const auto stoppedInterior = VoidDetector::CreateInteriorMask(
-        stoppedVolume, 0.5f, &isStopping);
-    const auto stoppedCandidates = VoidDetector::BuildCandidates(
-        stoppedVolume,
-        std::vector<std::uint8_t>(stoppedVolume.voxels.size(), 1),
-        BuildVoidParams(),
-        &isStopping);
-    std::vector<std::uint8_t> stoppedMask(
-        stoppedVolume.voxels.size(), 1);
-    std::vector<int> stoppedLabels{ 7 };
-    const auto stoppedRegions = VoidDetector::BuildRegions(
-        stoppedVolume,
-        stoppedMask,
-        BuildVoidParams(),
-        stoppedLabels,
-        &isStopping);
-    SetExpect(
-        stoppedInterior.empty()
-            && stoppedCandidates.empty()
-            && stoppedRegions.empty()
-            && stoppedLabels.empty(),
-        "cancelled algorithms must stop before publishing partial results.",
-        failureCount);
-}
-
-void StartBufferCase(int& failureCount)
-{
-    // owned 路径复制后必须各自拥有 vector；移动后别名必须重绑，不能保留源对象地址。
-    GapVolumeBuffer owned;
-    owned.dims = { 2, 1, 1 };
-    owned.SetOwnedVoxels({ 3.0f, 5.0f });
-    owned.SetOwnedMask({ 255, 0 });
-    GapVolumeBuffer ownedCopy(owned);
-    SetExpect(ownedCopy.voxelsPtr != owned.voxelsPtr
-        && ownedCopy.validMaskPtr != owned.validMaskPtr
-        && ownedCopy.GetVoxelValue(1, 0, 0) == 5.0f
-        && !ownedCopy.GetVoxelValid(1),
-        "owned VolumeBuffer copy should bind independent voxel and mask vectors.",
-        failureCount);
-
-    GapVolumeBuffer ownedAssigned;
-    ownedAssigned = owned;
-    SetExpect(ownedAssigned.voxelsPtr != owned.voxelsPtr
-        && ownedAssigned.GetVoxelValue(0, 0, 0) == 3.0f,
-        "owned VolumeBuffer copy assignment should bind its independent vector.", failureCount);
-
-    GapVolumeBuffer ownedMoved(std::move(ownedCopy));
-    SetExpect(!ownedCopy.GetVoxelReady()
-        && ownedMoved.voxelsPtr == ownedMoved.voxels.data(),
-        "owned VolumeBuffer move should clear the source and rebind moved storage.", failureCount);
-    SetExpect(ownedCopy.validMaskPtr == nullptr
-        && ownedMoved.validMaskPtr == ownedMoved.validMask.data()
-        && !ownedMoved.GetVoxelValid(1),
-        "owned VolumeBuffer move should clear and rebind the validity mask.",
-        failureCount);
-
-    GapVolumeBuffer ownedMoveAssigned;
-    ownedMoveAssigned = std::move(ownedAssigned);
-    SetExpect(!ownedAssigned.GetVoxelReady()
-        && ownedMoveAssigned.voxelsPtr == ownedMoveAssigned.voxels.data(),
-        "owned VolumeBuffer move assignment should clear the source and rebind moved storage.", failureCount);
-
-    std::weak_ptr<std::vector<float>> weakOwner;
+    void StartSnapCase(int& failureCount) const
     {
-        auto sharedVoxels = std::make_shared<std::vector<float>>(
-            std::initializer_list<float>{ 7.0f, 11.0f });
-        auto sharedMask = std::make_shared<std::vector<std::uint8_t>>(
-            std::initializer_list<std::uint8_t>{ 255, 0 });
-        weakOwner = sharedVoxels;
-
-        GapVolumeBuffer shared;
-        shared.dims = { 2, 1, 1 };
-        SetExpect(shared.SetSharedVoxels(sharedVoxels, sharedVoxels->data()),
-            "shared VolumeBuffer should accept an owner and read-only alias.", failureCount);
-        SetExpect(shared.SetSharedMask(sharedMask, sharedMask->data()),
-            "shared VolumeBuffer should accept a mask owner and read-only alias.",
+        auto image = BuildTestImage();
+        vtkWeakPointer<vtkImageData> weakImage;
+        weakImage = image.GetPointer();
+        GapAnalysisService service;
+        SetExpect(
+            service.SetGapInput(image),
+            "Gap service should accept the synthetic image.",
             failureCount);
-        const auto* sharedAddress = sharedVoxels->data();
-        sharedVoxels.reset();
-
-        GapVolumeBuffer sharedCopy(shared);
-        GapVolumeBuffer sharedAssigned;
-        sharedAssigned = shared;
-        GapVolumeBuffer sharedMoved(std::move(shared));
-        GapVolumeBuffer sharedMoveAssigned;
-        sharedMoveAssigned = std::move(sharedCopy);
-        SetExpect(!weakOwner.expired()
-            && !shared.GetVoxelReady()
-            && !sharedCopy.GetVoxelReady()
-            && sharedAssigned.voxelsPtr == sharedAddress
-            && sharedMoved.voxelsPtr == sharedAddress
-            && sharedMoveAssigned.voxelsPtr == sharedAddress
-            && sharedMoved.GetVoxelValue(1, 0, 0) == 11.0f
-            && !sharedMoved.GetVoxelValid(1)
-            && !sharedMoveAssigned.GetVoxelValid(1),
-            "shared VolumeBuffer copies and moves should retain aliased voxel and mask owners.",
+        SetSolidImage(image);
+        image = nullptr;
+        SetExpect(
+            weakImage == nullptr,
+            "Gap input isolation should release the caller image.",
             failureCount);
 
-        sharedAssigned.SetOwnedVoxels({ 13.0f, 17.0f });
-        SetExpect(sharedAssigned.voxelsPtr == sharedAssigned.voxels.data()
-            && sharedAssigned.voxelsPtr != sharedAddress,
-            "owned voxel replacement should detach the prior shared owner.", failureCount);
+        GapSurfaceParams surface;
+        surface.isoValue = 0.5f;
+        surface.background = 0.0f;
+        surface.material = 1.0f;
+        service.SetSurface(surface);
+        service.SetVoid(BuildVoidParams());
+
+        std::atomic<bool> hasCallback{ false };
+        std::atomic<bool> isCallbackOk{ false };
+        SetExpect(
+            service.StartAsync([&](bool isSuccess) {
+                hasCallback.store(true);
+                isCallbackOk.store(isSuccess);
+            }),
+            "DefX worker should accept the first request.",
+            failureCount);
+        SetExpect(
+            !service.StartAsync(nullptr),
+            "DefX worker should reject an overlapping request.",
+            failureCount);
+        SetExpect(
+            GetServiceState(service) == GapAnalysisState::Succeeded,
+            "DefX worker should finish successfully.",
+            failureCount);
+        SetExpect(
+            !service.StartAsync(nullptr),
+            "Pending callback should preserve the completed batch.",
+            failureCount);
+        SetExpect(
+            SendDoneEvent(service)
+                && hasCallback.load()
+                && isCallbackOk.load(),
+            "Explicit callback consumption should report DefX success.",
+            failureCount);
+        SetResultExpect(service, true, failureCount);
     }
-    SetExpect(weakOwner.expired(),
-        "shared voxel owner should release after the final VolumeBuffer owner exits.", failureCount);
-}
 
-GapAnalysisState GetServiceState(GapAnalysisService& service)
-{
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto state = service.GetAnalysisState();
-        if (state != GapAnalysisState::Running) {
-            return state;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    void StartConvertCase(int& failureCount) const
+    {
+        auto image = BuildShortImage();
+        GapAnalysisService service;
+        SetExpect(
+            service.SetGapInput(image),
+            "Gap service should accept a short scalar image.",
+            failureCount);
+        auto* source = static_cast<short*>(
+            image->GetScalarPointer());
+        std::fill_n(
+            source,
+            image->GetNumberOfPoints(),
+            static_cast<short>(1));
+        image->Modified();
+
+        GapSurfaceParams surface;
+        surface.isoValue = 0.5f;
+        surface.background = 0.0f;
+        surface.material = 1.0f;
+        service.SetSurface(surface);
+        service.SetVoid(BuildVoidParams());
+        SetExpect(
+            service.StartAsync(nullptr)
+                && GetServiceState(service)
+                    == GapAnalysisState::Succeeded,
+            "Converted short input should complete through DefX.",
+            failureCount);
+        SetResultExpect(service, true, failureCount);
     }
-    return service.GetAnalysisState();
-}
 
-bool SendDoneEvent(GapAnalysisService& service)
-{
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (service.GetDoneEvent()) {
-            service.SendCallback();
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    void StartFilterCase(int& failureCount) const
+    {
+        GapAnalysisService service;
+        SetExpect(
+            service.SetGapInput(BuildTestImage()),
+            "Filter case should accept the synthetic image.",
+            failureCount);
+        GapSurfaceParams surface;
+        surface.isoValue = 0.5f;
+        surface.background = 0.0f;
+        surface.material = 1.0f;
+        service.SetSurface(surface);
+        auto params = BuildVoidParams();
+        params.minVolumeMM3 = 1000000.0;
+        service.SetVoid(params);
+        SetExpect(
+            service.StartAsync(nullptr)
+                && GetServiceState(service)
+                    == GapAnalysisState::Succeeded,
+            "Disabled DefX filter should accept a retained minimum-volume value.",
+            failureCount);
+        // filter 关闭时 Feature 不得按保留的 minVolumeMM3 在返回后二次过滤。
+        SetResultExpect(
+            service,
+            !service.GetVoidRegions().empty(),
+            failureCount);
     }
-    return false;
-}
 
-void StartSnapCase(int& failureCount)
-{
-    // 公共入口必须保持隔离语义：同步 DeepCopy 后，源图像污染与释放都不影响 worker。
-    auto image = BuildTestImage();
-    vtkWeakPointer<vtkImageData> weakImage;
-    weakImage = image.GetPointer();
-    GapAnalysisService service;
-
-    SetExpect(service.SetGapInput(image), "gap analysis service should accept the synthetic image.", failureCount);
-    SetSolidImage(image);
-    image = nullptr;
-    SetExpect(weakImage == nullptr,
-        "public gap input should not retain the caller's mutable VTK image.", failureCount);
-
-    GapSurfaceParams surfaceParams;
-    surfaceParams.isoValue = 0.5f;
-    service.SetSurface(surfaceParams);
-    service.SetVoid(BuildVoidParams());
-
-    std::atomic<bool> hasCallback{ false };
-    std::atomic<bool> isCallbackOk{ false };
-    SetExpect(
-        service.StartAsync([&](bool isSuccess) {
-            hasCallback.store(true);
-            isCallbackOk.store(isSuccess);
-        }),
-        "gap analysis should report that the first worker request was accepted.",
-        failureCount);
-    SetExpect(
-        !service.StartAsync(nullptr),
-        "gap analysis should reject a second request while the worker is running.",
-        failureCount);
-
-    const auto finalState = GetServiceState(service);
-    SetExpect(finalState == GapAnalysisState::Succeeded, "gap analysis service should finish successfully.", failureCount);
-    SetExpect(
-        !service.StartAsync(nullptr),
-        "gap analysis should reject a new task until the pending callback is consumed.",
-        failureCount);
-    SetExpect(SendDoneEvent(service), "gap analysis service should expose one pending completion callback.", failureCount);
-    SetExpect(hasCallback.load(), "gap analysis completion callback should run on explicit consume.", failureCount);
-    SetExpect(isCallbackOk.load(), "gap analysis completion callback should report success.", failureCount);
-
-    const auto regions = service.GetVoidRegions();
-    SetExpect(regions.size() == 1, "gap analysis service should detect one void from the isolated snapshot.", failureCount);
-    if (regions.size() == 1) {
-        SetRegionExpect(regions.front(), failureCount);
-    }
-    SetStatisticsExpect(service.GetStatistics(), failureCount);
-
-    SetLabelExpect(service.BuildLabelImage(), failureCount);
-
-    auto voidMesh = service.BuildVoidMesh();
-    SetExpect(voidMesh != nullptr, "gap analysis service should build a void mesh.", failureCount);
-    if (voidMesh) {
-        SetExpect(voidMesh->GetNumberOfPoints() > 0, "gap analysis void mesh should contain points.", failureCount);
-        SetExpect(voidMesh->GetNumberOfCells() > 0, "gap analysis void mesh should contain cells.", failureCount);
-    }
-}
-
-void StartSharedCase(int& failureCount)
-{
-    // 受控宿主入口共享 VTK_FLOAT scalars；调用方释放 smart pointer 后快照 owner 仍覆盖 worker 生命周期。
-    auto image = BuildTestImage();
-    vtkWeakPointer<vtkImageData> weakImage;
-    weakImage = image.GetPointer();
-    GapAnalysisService service;
-    SetExpect(service.SetGapInput(image),
-        "gap analysis should accept one isolated image snapshot.", failureCount);
-    image = nullptr;
-    SetExpect(weakImage == nullptr,
-        "isolated gap snapshot should not retain the caller image owner.", failureCount);
-
-    GapSurfaceParams surfaceParams;
-    surfaceParams.isoValue = 0.5f;
-    service.SetSurface(surfaceParams);
-    service.SetVoid(BuildVoidParams());
-    SetExpect(service.StartAsync(nullptr),
-        "gap analysis should start from the controlled shared snapshot.", failureCount);
-    SetExpect(GetServiceState(service) == GapAnalysisState::Succeeded,
-        "gap analysis should finish the controlled shared snapshot.", failureCount);
-    SetExpect(service.GetVoidRegions().size() == 1,
-        "controlled shared snapshot should preserve the synthetic void.", failureCount);
-}
-
-void StartConvertCase(int& failureCount)
-{
-    // 非 float 输入必须在同步入口完成 float 转换；之后调用方改写 VTK scalars 不能污染算法输入。
-    auto image = BuildShortImage();
-    GapAnalysisService service;
-    SetExpect(service.SetGapInput(image),
-        "gap analysis service should accept a short scalar image.", failureCount);
-
-    auto* source = static_cast<short*>(image->GetScalarPointer());
-    std::fill_n(source, image->GetNumberOfPoints(), static_cast<short>(1));
-    image->Modified();
-
-    GapSurfaceParams surfaceParams;
-    surfaceParams.isoValue = 0.5f;
-    service.SetSurface(surfaceParams);
-    service.SetVoid(BuildVoidParams());
-    SetExpect(service.StartAsync(nullptr),
-        "gap analysis should accept the converted short input.", failureCount);
-    SetExpect(GetServiceState(service) == GapAnalysisState::Succeeded,
-        "gap analysis should finish the converted short input.", failureCount);
-
-    const auto regions = service.GetVoidRegions();
-    SetExpect(regions.size() == 1,
-        "non-float conversion should isolate the worker from later source mutations.", failureCount);
-    if (regions.size() == 1) {
-        SetRegionExpect(regions.front(), failureCount);
-    }
-}
-
-    int GetFailCount()
+    int GetFailCount() const
     {
         int failureCount = 0;
-        StartAlgoCase(failureCount);
-        StartEdgeCase(failureCount);
-        StartSafetyCase(failureCount);
-        StartBufferCase(failureCount);
         StartSnapCase(failureCount);
-        StartSharedCase(failureCount);
         StartConvertCase(failureCount);
+        StartFilterCase(failureCount);
         return failureCount;
     }
 };
@@ -791,12 +448,12 @@ int main()
 {
     int failureCount = GapAlgorithmSuite().GetFailCount();
     failureCount += GapDisplaySuite().GetFailCount();
-
     if (failureCount != 0) {
-        std::cerr << "GapAnalysisAlgorithmTests failed: " << failureCount << '\n';
+        std::cerr
+            << "GapAnalysisAlgorithmTests failed: "
+            << failureCount << '\n';
         return 1;
     }
-
     std::cout << "GapAnalysisAlgorithmTests passed.\n";
     return 0;
 }

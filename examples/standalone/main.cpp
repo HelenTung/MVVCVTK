@@ -30,6 +30,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -297,17 +298,22 @@ public:
     MainControlFeature(
         VtkAppHostSession& session,
         HostViewTarget target,
-        HostViewTargets inputViews)
+        HostViewTargets inputViews,
+        std::weak_ptr<GapHostFeature> gapFeature,
+        GapHostStartParams gapStart)
         : m_session(session),
           m_target(std::move(target)),
           m_inputViews(std::move(inputViews)),
+          m_gapFeature(std::move(gapFeature)),
+          m_gapStart(std::move(gapStart)),
           m_keys{
               HostKeyChord{ 'c' },
               HostKeyChord{ 'c', {}, false, false, true },
               HostKeyChord{ 'v' },
               HostKeyChord{ 'v', {}, false, false, true },
               HostKeyChord{ 'l' },
-              HostKeyChord{ 'l', {}, false, false, true }
+              HostKeyChord{ 'l', {}, false, false, true },
+              HostKeyChord{ 'g' }
           }
     {
     }
@@ -368,6 +374,7 @@ private:
         OpacityDown,
         QualityNext,
         QualityPrevious,
+        StartGap,
         Count
     };
 
@@ -536,6 +543,67 @@ private:
         return true;
     }
 
+    bool SetGapStatus(const std::string& status)
+    {
+        if (!m_host || m_target.viewId.empty()) {
+            return false;
+        }
+        const std::vector<std::string> statusViews{
+            m_target.viewId
+        };
+        return m_host->SetViewStatus(statusViews, status);
+    }
+
+    bool StartGap()
+    {
+        const auto gapFeature = m_gapFeature.lock();
+        if (!gapFeature) {
+            (void)SetGapStatus("Gap: unavailable");
+            std::cerr
+                << "[GapAnalysis] G request rejected: feature unavailable\n"
+                << std::flush;
+            return false;
+        }
+
+        GapHostRequest request;
+        request.action = GapHostAction::Start;
+        request.start = m_gapStart;
+        const auto gapOwner = m_gapFeature;
+        const auto controlOwner = weak_from_this();
+        const bool isAccepted = gapFeature->SendRequest(
+            std::move(request),
+            [gapOwner, controlOwner](const bool isSuccess) {
+                const auto completedFeature = gapOwner.lock();
+                std::ostringstream status;
+                status << "Gap: "
+                    << (isSuccess ? "succeeded" : "failed");
+                if (isSuccess && completedFeature) {
+                    const auto statistics =
+                        completedFeature->GetState().statistics;
+                    status << " | void="
+                        << statistics.voidVoxelCount
+                        << " | object="
+                        << statistics.objectVoxelCount
+                        << " | porosity="
+                        << statistics.porosityRatio;
+                }
+                if (const auto owner = controlOwner.lock()) {
+                    (void)owner->SetGapStatus(status.str());
+                }
+                std::cerr << "[GapAnalysis] "
+                    << status.str() << '\n' << std::flush;
+            });
+        const std::string requestStatus = isAccepted
+            ? "Gap: running"
+            : "Gap: rejected";
+        (void)SetGapStatus(requestStatus);
+        std::cerr << "[GapAnalysis] G request "
+            << (isAccepted ? "accepted; calculation started"
+                           : "rejected; calculation did not start")
+            << '\n' << std::flush;
+        return isAccepted;
+    }
+
     bool SendControl(const ControlAction action)
     {
         switch (action) {
@@ -548,6 +616,8 @@ private:
             return SwitchQuality(1);
         case ControlAction::QualityPrevious:
             return SwitchQuality(-1);
+        case ControlAction::StartGap:
+            return StartGap();
         default:
             return false;
         }
@@ -597,6 +667,8 @@ private:
     VtkAppHostSession& m_session;
     HostViewTarget m_target;
     HostViewTargets m_inputViews;
+    std::weak_ptr<GapHostFeature> m_gapFeature;
+    GapHostStartParams m_gapStart;
     std::array<HostKeyChord, actionCount> m_keys;
     std::array<bool, actionCount> m_isKeyDown{};
     std::shared_ptr<FeatureHostControl> m_host;
@@ -764,15 +836,12 @@ GapHostConfig GetGapConfig(
     GapHostConfig config;
     config.defaultStart.targetViews = targets;
     config.defaultStart.surface.isoMode =
-        GapIsoMode::DataRangeRatio;
-    config.defaultStart.surface.dataRangeRatio = 0.55;
-    config.defaultStart.voidParams.grayMin =
-        -0.2262536138296127f;
-    config.defaultStart.voidParams.grayMax = 0.15f;
-    config.defaultStart.voidParams.minVolumeMM3 = 0.0001;
-    config.defaultStart.voidParams.angleThresholdDeg = 30.0f;
-    config.defaultStart.voidParams.tensorWindowSize = 1;
-    config.defaultStart.voidParams.erosionIterations = 2;
+        GapIsoMode::AbsoluteValue;
+    config.defaultStart.surface.absoluteIsoValue = 0.172;
+    config.defaultStart.surface.backgroundMean = -1.617f;
+    config.defaultStart.surface.materialMean = 0.453f;
+    config.defaultStart.voidParams.isFilterEnabled = false;
+    config.defaultStart.voidParams.minVolumeMM3 = 0.0;
     config.inputViews = targets;
     config.keys.switchOverlay.keyCode = 'j';
     config.keys.exit.keySym = "Escape";
@@ -820,16 +889,20 @@ int main(int argc, char* argv[])
     features.push_back(
         std::make_shared<CropHostFeature>(
             BuildCrop(allViews)));
-    features.push_back(
-        std::make_shared<GapHostFeature>(
-            GetGapConfig(allViews)));
-    HostViewTargets controlViews;
-    controlViews.viewIds.push_back(volumeTarget.viewId);
+    auto gapConfig = GetGapConfig(allViews);
+    auto gapStart = gapConfig.defaultStart;
+    auto gapFeature = std::make_shared<GapHostFeature>(
+        std::move(gapConfig));
+    features.push_back(gapFeature);
+    // G 应在任一 MVVCVTK 窗口获得焦点时都能启动；状态统一显示在 composite-volume 标题栏。
+    auto controlViews = allViews;
     features.push_back(
         std::make_shared<MainControlFeature>(
             session,
             volumeTarget,
-            std::move(controlViews)));
+            std::move(controlViews),
+            gapFeature,
+            std::move(gapStart)));
     std::size_t attachedCount = 0;
     bool isTimerAttached = false;
     bool isHotkeyAttached = false;
@@ -899,10 +972,10 @@ int main(int argc, char* argv[])
     bool isAuditPassed = false;
 
     HostLoadRequest load;
-    load.filePath = "F:\\data\\1000x1000x1000.raw";
-    load.geometry.dimensions = { 1000, 1000, 1000 };
+    load.filePath = "F:\\data\\ct\\1536X1536X1536.raw";
+    load.geometry.dimensions = { 1536, 1536, 1536 };
     load.geometry.spacing = {
-        0.02125f, 0.02125f, 0.02125f };
+        0.1537f, 0.1537f, 0.1537f };
     load.geometry.origin = { 0.0f, 0.0f, 0.0f };
     if (!session.SendRequestResult(
             std::move(load),
@@ -928,7 +1001,8 @@ int main(int argc, char* argv[])
         << "TF/quality controls for composite-volume:\n"
         << "  C / Shift+C: color red +/- 0.05\n"
         << "  V / Shift+V: opacity +/- 0.05\n"
-        << "  L / Shift+L: next / previous quality tier\n";
+        << "  L / Shift+L: next / previous quality tier\n"
+        << "  G: start Gap; watch the composite window title for result\n";
 
     const bool isStarted = session.Start();
     const bool isCleared = clearAttached();

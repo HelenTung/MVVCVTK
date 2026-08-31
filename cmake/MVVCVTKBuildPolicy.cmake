@@ -17,13 +17,6 @@ if(MVVCVTK_BUILD_QT_TESTING AND NOT MVVCVTK_BUILD_TESTING)
     )
 endif()
 
-set(
-    MVVCVTK_DEPS_VERSION
-    "2026.08.21-deps.1"
-    CACHE STRING
-    "Locked MVVCVTK dependency bundle version"
-)
-
 if(DEFINED ENV{MVVCVTK_DEPS_ROOT}
     AND NOT "$ENV{MVVCVTK_DEPS_ROOT}" STREQUAL "")
     set(_mvvcvtk_default_deps "$ENV{MVVCVTK_DEPS_ROOT}")
@@ -35,7 +28,7 @@ else()
     )
     set(
         _mvvcvtk_default_deps
-        "${_mvvcvtk_repo_root}/deps/${MVVCVTK_DEPS_VERSION}-win-x64"
+        "${_mvvcvtk_repo_root}/deps/official"
     )
 endif()
 

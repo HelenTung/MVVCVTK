@@ -14,7 +14,8 @@
       "toolset": "v145,host=x64",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
-        "MVVCVTK_DEPS_ROOT": "${sourceDir}/deps/2026.08.21-deps.1-win-x64",
+        "MVVCVTK_DEPS_ROOT": "${sourceDir}/deps/official",
+        "MVVCVTK_DEFX_ROOT": "${sourceDir}/deps/third_party/defx",
         "MVVCVTK_BUILD_TESTING": true,
         "MVVCVTK_BUILD_QT_TESTING": true,
         "MVVCVTK_ENABLE_AVX2": true

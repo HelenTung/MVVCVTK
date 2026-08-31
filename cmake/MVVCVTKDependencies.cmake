@@ -3,6 +3,25 @@ include_guard(GLOBAL)
 cmake_path(NORMAL_PATH MVVCVTK_DEPS_ROOT OUTPUT_VARIABLE _mvvcvtk_deps_root)
 set(MVVCVTK_DEPS_ROOT "${_mvvcvtk_deps_root}")
 
+if(DEFINED ENV{MVVCVTK_DEFX_ROOT}
+    AND NOT "$ENV{MVVCVTK_DEFX_ROOT}" STREQUAL "")
+    set(_mvvcvtk_defx_default_root "$ENV{MVVCVTK_DEFX_ROOT}")
+else()
+    set(_mvvcvtk_defx_default_root
+        "${PROJECT_SOURCE_DIR}/deps/third_party/defx")
+endif()
+set(
+    MVVCVTK_DEFX_ROOT
+    "${_mvvcvtk_defx_default_root}"
+    CACHE PATH
+    "Root of the external DefX x64 dependency"
+)
+cmake_path(
+    NORMAL_PATH MVVCVTK_DEFX_ROOT
+    OUTPUT_VARIABLE _mvvcvtk_defx_root
+)
+set(MVVCVTK_DEFX_ROOT "${_mvvcvtk_defx_root}")
+
 set(_mvvcvtk_required_paths
     "vtk/lib/cmake/vtk-9.4/vtk-config.cmake"
     "opencv/x64/vc16/lib/OpenCVConfig.cmake"
@@ -19,6 +38,24 @@ foreach(_mvvcvtk_required_path IN LISTS _mvvcvtk_required_paths)
         )
     endif()
 endforeach()
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    set(_mvvcvtk_defx_paths
+        "include/DefXAnalysisService.h"
+        "include/DefXTypes.h"
+        "bin/Debug/DefXAnalysis.dll"
+        "lib/Debug/DefXAnalysis.lib"
+        "bin/Release/DefXAnalysis.dll"
+        "lib/Release/DefXAnalysis.lib"
+    )
+    foreach(_mvvcvtk_defx_path IN LISTS _mvvcvtk_defx_paths)
+        if(NOT EXISTS "${MVVCVTK_DEFX_ROOT}/${_mvvcvtk_defx_path}")
+            message(FATAL_ERROR
+                "DefX dependency is incomplete: ${_mvvcvtk_defx_path}. "
+                "Set MVVCVTK_DEFX_ROOT to the external x64 dependency root."
+            )
+        endif()
+    endforeach()
+endif()
 
 set(MVVCVTK_VTK_COMPONENTS
     CommonCore
@@ -78,6 +115,25 @@ find_package(
     PATHS "${MVVCVTK_DEPS_ROOT}/vtk/lib/cmake/vtk-9.4"
     NO_DEFAULT_PATH
 )
+
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    add_library(DefX::Analysis SHARED IMPORTED GLOBAL)
+    set_target_properties(
+        DefX::Analysis
+        PROPERTIES
+            IMPORTED_CONFIGURATIONS "DEBUG;RELEASE"
+            IMPORTED_LOCATION_DEBUG
+                "${MVVCVTK_DEFX_ROOT}/bin/Debug/DefXAnalysis.dll"
+            IMPORTED_IMPLIB_DEBUG
+                "${MVVCVTK_DEFX_ROOT}/lib/Debug/DefXAnalysis.lib"
+            IMPORTED_LOCATION_RELEASE
+                "${MVVCVTK_DEFX_ROOT}/bin/Release/DefXAnalysis.dll"
+            IMPORTED_IMPLIB_RELEASE
+                "${MVVCVTK_DEFX_ROOT}/lib/Release/DefXAnalysis.lib"
+            INTERFACE_INCLUDE_DIRECTORIES
+                "${MVVCVTK_DEFX_ROOT}/include"
+    )
+endif()
 find_package(
     OpenCV 4.12.0 EXACT
     CONFIG REQUIRED
@@ -105,6 +161,11 @@ set(MVVCVTK_RUNTIME_DIRS
     "${MVVCVTK_DEPS_ROOT}/opencv/x64/vc16/bin"
     "${MVVCVTK_DEPS_ROOT}/vtk/bin"
 )
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    list(PREPEND MVVCVTK_RUNTIME_DIRS
+        "$<IF:$<CONFIG:Debug>,${MVVCVTK_DEFX_ROOT}/bin/Debug,${MVVCVTK_DEFX_ROOT}/bin/Release>"
+    )
+endif()
 set(MVVCVTK_QT_PLUGIN_DIR "")
 if(_mvvcvtk_needs_qt)
     list(APPEND MVVCVTK_RUNTIME_DIRS
@@ -114,6 +175,10 @@ if(_mvvcvtk_needs_qt)
 endif()
 
 unset(_mvvcvtk_deps_root)
+unset(_mvvcvtk_defx_default_root)
+unset(_mvvcvtk_defx_root)
+unset(_mvvcvtk_defx_path)
+unset(_mvvcvtk_defx_paths)
 unset(_mvvcvtk_needs_qt)
 unset(_mvvcvtk_required_path)
 unset(_mvvcvtk_required_paths)
