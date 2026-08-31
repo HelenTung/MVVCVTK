@@ -52,7 +52,7 @@ ctest --preset vs2026-release
 ./tools/release/Build-MVVCVTKSdk.ps1
 ```
 
-发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库，白名单复制 VTK/OpenCV，再以源码树中的 CMake 与 Qt clean-room consumer 验证安装包。Qt clean-room 使用开发依赖中的 Qt，证明接收方提供 Qt 时仍可集成；这些验证源码和 Qt 本身都不进入 SDK。
+发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库，白名单复制 VTK/OpenCV，再在仓库外动态生成一次性 CMake clean-room probe，验证安装态组件矩阵、公开头闭包、私有头隔离和两种配置的运行链。probe 只存在于临时验证目录，不作为仓库源码，也不进入 SDK；Qt 集成由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓内测试负责，不再维护独立的发布态 Qt consumer。
 
 stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum 或 manifest。直接执行 `cmake --install` 只安装项目模块和 CMake 消费接口，不复制依赖；完整定向交付由发布脚本把 VTK/OpenCV 放到安装根的 `deps/`。
 

@@ -400,6 +400,7 @@ test/QtHost/smoke*.out
 test/QtHost/smoke*.err
 test/QtHost/x64/
 test/QtHost/QtHostSmoke.pro
+gap/
 
 # 本地设计、计划与参考资料，不进入 Git 和 SDK 发布闭包
 /md/

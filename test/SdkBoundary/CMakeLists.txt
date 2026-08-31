@@ -154,20 +154,27 @@ BuildAggregateProbe(
 BuildForbiddenProbe(
     MVVCVTK_FORBID_DATA_PROBE
     ForbiddenDataManagerProbe.cpp
-    Host/Types/HostValueTypes.h
     Data/DataManager.h
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_HOST_PROBE
     ForbiddenHostRuntimeProbe.cpp
-    Host/Types/HostValueTypes.h
     Host/HostViewRuntimeRegistry.h
+)
+BuildForbiddenProbe(
+    MVVCVTK_FORBID_APP_TYPES_PROBE
+    ForbiddenAppTypesProbe.cpp
+    App/AppTypes.h
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_SLICE_PROBE
     ForbiddenSliceStrategyProbe.cpp
-    App/AppTypes.h
     Render/Strategies/SliceStrategy.h
+)
+BuildForbiddenProbe(
+    MVVCVTK_FORBID_HOST_VALUE_PROBE
+    ForbiddenHostValueTypesProbe.cpp
+    Host/Types/HostValueTypes.h
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_SUPPORT_PROBE
@@ -298,61 +305,6 @@ set_target_properties(
         PROJECT_LABEL MVVCVTKSdkHeaderAggregate
         FOLDER "MVVCVTK/Tests"
 )
-
-set(
-    MVVCVTK_CONSUMER_SOURCE
-    "${PROJECT_SOURCE_DIR}/tools/release/consumer/main.cpp"
-)
-function(BuildTreeConsumer targetName testName hasCrop hasGap)
-    add_executable(${targetName} "${MVVCVTK_CONSUMER_SOURCE}")
-    SetTargetDefaults(${targetName})
-    target_compile_definitions(
-        ${targetName}
-        PRIVATE
-            "MVVCVTK_CONSUMER_CROP=${hasCrop}"
-            "MVVCVTK_CONSUMER_GAP=${hasGap}"
-    )
-    target_link_libraries(${targetName} PRIVATE MVVCVTK::Host)
-    if(hasCrop)
-        target_link_libraries(${targetName} PRIVATE MVVCVTK::OrthogonalCrop)
-    endif()
-    if(hasGap)
-        target_link_libraries(${targetName} PRIVATE MVVCVTK::GapAnalysis)
-    endif()
-    set_target_properties(
-        ${targetName}
-        PROPERTIES FOLDER "MVVCVTK/Tests/SdkConsumer"
-    )
-    add_test(NAME ${testName} COMMAND ${targetName})
-    SetTestRuntime(${testName} ${targetName})
-endfunction()
-
-BuildTreeConsumer(
-    mvvcvtk_build_consumer_host
-    SdkBoundary.BuildTree.Host
-    0 0
-)
-if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
-    BuildTreeConsumer(
-        mvvcvtk_build_consumer_crop
-        SdkBoundary.BuildTree.HostCrop
-        1 0
-    )
-endif()
-if(MVVCVTK_BUILD_GAP_ANALYSIS)
-    BuildTreeConsumer(
-        mvvcvtk_build_consumer_gap
-        SdkBoundary.BuildTree.HostGap
-        0 1
-    )
-endif()
-if(MVVCVTK_BUILD_ORTHOGONAL_CROP AND MVVCVTK_BUILD_GAP_ANALYSIS)
-    BuildTreeConsumer(
-        mvvcvtk_build_consumer_all
-        SdkBoundary.BuildTree.HostCropGap
-        1 1
-    )
-endif()
 
 function(SetClosureTest testName dependencyFiles stagingRoot)
     set(expectedHeaders ${ARGN})
@@ -486,6 +438,7 @@ function(SetHeaderGuard sourceFile headerPath usageName)
     try_compile(
         isForbiddenHeaderAccepted
         SOURCES "${sourceFile}"
+        NO_CACHE
         CMAKE_FLAGS
             "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY"
         COMPILE_DEFINITIONS
@@ -565,7 +518,7 @@ SetHeaderGuard(
     "${MVVCVTK_HOST_SDK_INCLUDE_DIR}"
 )
 SetHeaderGuard(
-    "${MVVCVTK_FORBID_SLICE_PROBE}"
+    "${MVVCVTK_FORBID_APP_TYPES_PROBE}"
     App/AppTypes.h
     FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
@@ -589,7 +542,7 @@ SetHeaderGuard(
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
 SetHeaderGuard(
-    "${MVVCVTK_FORBID_DATA_PROBE}"
+    "${MVVCVTK_FORBID_HOST_VALUE_PROBE}"
     Host/Types/HostValueTypes.h
     FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
@@ -623,14 +576,15 @@ unset(MVVCVTK_EXPECTED_HOST_STAGE)
 unset(MVVCVTK_EXPECTED_HOST_STAGE_CSV)
 unset(MVVCVTK_AGGREGATE_HEADERS)
 unset(MVVCVTK_AGGREGATE_PROBE)
-unset(MVVCVTK_CONSUMER_SOURCE)
 unset(MVVCVTK_CROP_DEPENDENCY_FILES)
 unset(MVVCVTK_CROP_ENTRY_HEADERS)
 unset(MVVCVTK_CROP_PROBES)
 unset(MVVCVTK_FORBID_CROP_PROBE)
+unset(MVVCVTK_FORBID_APP_TYPES_PROBE)
 unset(MVVCVTK_FORBID_DATA_PROBE)
 unset(MVVCVTK_FORBID_GAP_PROBE)
 unset(MVVCVTK_FORBID_HOST_PROBE)
+unset(MVVCVTK_FORBID_HOST_VALUE_PROBE)
 unset(MVVCVTK_FORBID_SLICE_PROBE)
 unset(MVVCVTK_FORBID_SUPPORT_PROBE)
 unset(MVVCVTK_GAP_DEPENDENCY_FILES)
