@@ -566,21 +566,12 @@ function Clear-BuildEnv()
     }
 }
 
-function Get-RuntimeDirs(
-    [string]$depsRoot,
-    [string]$configuration,
-    [bool]$isGapEnabled)
+function Get-RuntimeDirs([string]$depsRoot)
 {
-    $runtimeDirs = @(
+    return @(
         (Join-Path $depsRoot 'official\opencv\x64\vc16\bin')
         (Join-Path $depsRoot 'official\vtk\bin')
     )
-    if ($isGapEnabled) {
-        $runtimeDirs = @(
-            (Join-Path $depsRoot "third_party\defx\bin\$configuration")
-        ) + $runtimeDirs
-    }
-    return $runtimeDirs
 }
 
 function Start-RuntimeExecutable(
@@ -592,14 +583,29 @@ function Start-RuntimeExecutable(
     $oldPath = $env:PATH
     $hasPluginPath = Test-Path -LiteralPath Env:QT_PLUGIN_PATH
     $oldPluginPath = $env:QT_PLUGIN_PATH
+    $hasGapRuntime = Test-Path -LiteralPath Env:MVVCVTK_GAP_RUNTIME_DIR
+    $oldGapRuntime = $env:MVVCVTK_GAP_RUNTIME_DIR
     $oldLocation = (Get-Location).Path
     try {
         $systemPath = @(
             (Join-Path $env:SystemRoot 'System32')
             $env:SystemRoot
         )
-        $env:PATH = (@(Get-RuntimeDirs $depsRoot $configuration $isGapEnabled) +
+        $env:PATH = (@(Get-RuntimeDirs $depsRoot) +
                 $systemPath) -join ';'
+        if ($isGapEnabled) {
+            $gapRuntime = [IO.Path]::GetFullPath(
+                (Join-Path $depsRoot `
+                    "third_party\defx\bin\$configuration"))
+            if (-not [IO.Directory]::Exists($gapRuntime)) {
+                throw "Gap runtime directory is missing: $gapRuntime"
+            }
+            $env:MVVCVTK_GAP_RUNTIME_DIR = $gapRuntime
+        }
+        else {
+            Remove-Item -LiteralPath Env:MVVCVTK_GAP_RUNTIME_DIR `
+                -ErrorAction SilentlyContinue
+        }
         if (-not [string]::IsNullOrEmpty($oldPluginPath)) {
             Remove-Item -LiteralPath Env:QT_PLUGIN_PATH
         }
@@ -615,6 +621,13 @@ function Start-RuntimeExecutable(
             }
             elseif (-not [string]::IsNullOrEmpty($oldPluginPath)) {
                 $env:QT_PLUGIN_PATH = $oldPluginPath
+            }
+            if (-not $hasGapRuntime) {
+                Remove-Item -LiteralPath Env:MVVCVTK_GAP_RUNTIME_DIR `
+                    -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:MVVCVTK_GAP_RUNTIME_DIR = $oldGapRuntime
             }
         }
         finally {

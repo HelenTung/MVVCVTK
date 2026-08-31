@@ -29,6 +29,8 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 
 GapAnalysis 的 DefX 作为外部三方环境依赖放在 `MVVCVTK_DEFX_ROOT`（preset 默认 `deps/third_party/defx`）：供应商头位于 `include/`，Debug/Release 的 DLL 位于 `bin/<配置>/`，导入库位于 `lib/<配置>/`。Feature 源码树和仓库根临时 `gap/` 均不作为构建输入；中央依赖模块将工件封装为私有 `DefX::Analysis` 目标。供应商 C++/STL/VTK 接口只在 Feature 内的 `MVVCVTKGapKernel.dll` 兼容层消费，GapAnalysis 主库只接收固定宽度 POD、原始标签和区域/header 副本；兼容层不执行阈值、腐蚀、连通域、过滤或重编号。两套供应商工件必须分别匹配 x64、MSVC 运行库、iterator debug level 和 VTK 9.4.2 配置，禁止跨配置回退。
 
+源码构建只把 DefX DLL 复制到生成目录，与私有 kernel 组成运行时对，不改动三方依赖根中的原始文件。GapAnalysis 加载器忽略当前工作目录和 PATH 查找：SDK/外部宿主必须用 `MVVCVTK_GAP_RUNTIME_DIR` 指定当前配置的私有运行时绝对目录；未配置时只接受应用程序同目录中的运行时对。选定后使用绝对路径加载 kernel，并核对实际 bridge 与 DefX 均来自该目录；显式目录非法时不会回退。
+
 受控 CI runner 可通过仓库变量 `MVVCVTK_DEFX_ROOT` 指向预装的只读 DefX 根；未配置时使用工作区的 `deps/third_party/defx`。CI 会在配置前核对上述六个工件，第三方内容不由官方依赖下载脚本获取。
 
 ## 构建和测试
@@ -81,7 +83,7 @@ target_link_libraries(app PRIVATE
     MVVCVTK::GapAnalysis)
 ```
 
-运行含 GapAnalysis 的程序时，PATH 只加入当前配置的 `deps/third_party/defx/bin/<配置>`，并同时加入 `deps/official` 下匹配配置的 VTK/OpenCV runtime 目录；不得把两套同名 `MVVCVTKGapKernel.dll`/`DefXAnalysis.dll` 同时放入搜索路径。
+运行含 GapAnalysis 的程序时，将 `MVVCVTK_GAP_RUNTIME_DIR` 设为当前配置的 `deps/third_party/defx/bin/<配置>` 绝对目录，并把 `deps/official` 下匹配配置的 VTK/OpenCV runtime 目录加入 PATH。私有运行时目录必须同时包含 `MVVCVTKGapKernel.dll` 与 `DefXAnalysis.dll`；GapAnalysis 不从 PATH 或当前工作目录发现这两个 DLL。
 
 只编译 Host/Feature 头契约的 target 可分别链接 `MVVCVTK::HostAPI` 与
 `MVVCVTK::FeatureSPI`；二者都是自足的纯接口目标，不反向链接 `MVVCVTKHost.lib`。

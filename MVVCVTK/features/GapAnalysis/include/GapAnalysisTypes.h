@@ -22,24 +22,6 @@ struct GapSurfaceParams {
     float material = 0.0f;  // DefX 材料定义的材料均值。
 };
 
-// ── 高级法向精化参数 ──────────────────────────────────────────────────
-struct GapAdvancedParams {
-    // 法向精化总开关；当前 worker 尚未接入精化算法，因此本结构全部字段不影响分析结果。
-    bool  isEnabled = true;
-    // 计划的法向双侧搜索距离；isMillimeter=true 时为 mm，否则为平均 voxel spacing 的倍数。
-    float normalSearchDistance = 2.0f;
-    // 距离、步长和最大位移的单位选择：true 为 mm，false 为平均 voxel spacing 倍数。
-    bool  isMillimeter = false;
-    // 计划的法向采样步长，单位由 isMillimeter 选择；必须由未来精化入口校验为正值。
-    float searchStep = 0.5f;
-    // 计划允许的单顶点最大法向位移，单位由 isMillimeter 选择。
-    float maxVertexShift = 2.0f;
-    // 计划接受等值穿越点的最小梯度阈值，处于输入标量/physical distance 域。
-    float gradientThreshold = 0.0f;
-    // 计划在法向位移后执行的平滑迭代次数；大于 0 才启用平滑。
-    int   normalSmoothIterations = 0;
-};
-
 // ── 空洞区域结果 ──────────────────────────────────────────────────────
 struct VoidRegion {
     // 以下字段逐项复制私有算法内核的区域输出；Feature 不重新连通、重编号或派生形状量。

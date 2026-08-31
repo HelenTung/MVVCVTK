@@ -1,6 +1,6 @@
 #include "Services/GapAnalysisService.h"
 
-#include "Algorithms/VolumeBuffer.h"
+#include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Strategies/GapOverlayStrategies.h"
@@ -27,10 +27,13 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <new>
+#include <optional>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,7 +53,6 @@ public:
 
     bool SetGapInput(vtkSmartPointer<vtkImageData> image);
     void SetSurface(const GapSurfaceParams& params);
-    void SetAdvanced(const GapAdvancedParams& params);
     void SetVoid(const GapVoidParams& params);
     bool StartAsync(std::function<void(bool isSuccess)> onComplete);
     void StopAsync();
@@ -71,8 +73,36 @@ public:
     void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
+    class KernelModule final {
+    public:
+        explicit KernelModule(HMODULE module) noexcept
+            : m_module(module)
+        {
+        }
+
+        ~KernelModule() noexcept
+        {
+            if (m_module) {
+                FreeLibrary(m_module);
+            }
+        }
+
+        KernelModule(const KernelModule&) = delete;
+        KernelModule& operator=(const KernelModule&) = delete;
+        KernelModule(KernelModule&&) = delete;
+        KernelModule& operator=(KernelModule&&) = delete;
+
+        HMODULE Get() const noexcept
+        {
+            return m_module;
+        }
+
+    private:
+        HMODULE m_module = nullptr;
+    };
+
     struct InputData final {
-        GapVolumeBuffer volume;
+        GapInputBuffer volume;
         vtkSmartPointer<vtkImageData> image;
     };
 
@@ -97,8 +127,6 @@ private:
     struct GapParamSnapshot {
         // StartAsync 从 m_paramsMutex 下复制；worker 将 isoValue 映射为 DefX 表面阈值。
         GapSurfaceParams surfParams;
-        // 随任务按值冻结，避免后续 setter 改写；当前 worker 尚未接入法向精化，不消费这些字段。
-        GapAdvancedParams advParams;
         // 随任务按值冻结；worker 只把灰度边界和最小体积映射给私有算法内核。
         GapVoidParams voidParams;
     };
@@ -114,15 +142,25 @@ private:
     void SetCallbackReady(bool isSuccess);
     bool GetMeshVisible(vtkSmartPointer<vtkPolyData> voidMesh) const;
     bool GetLabelExtent(vtkSmartPointer<vtkImageData> labelImage) const;
-    bool BuildVolumeBuffer(
+    static std::optional<std::filesystem::path> GetModulePath(
+        HMODULE module);
+    static std::optional<std::filesystem::path> GetRuntimePath(
+        const std::filesystem::path& directory);
+    static std::optional<std::wstring> GetEnvValue(
+        const wchar_t* name);
+    static bool GetPathEqual(
+        const std::filesystem::path& left,
+        const std::filesystem::path& right);
+    static std::optional<std::filesystem::path> GetKernelPath();
+    bool BuildInputBuffer(
         vtkSmartPointer<vtkImageData> image,
-        GapVolumeBuffer& out) const;
+        GapInputBuffer& out) const;
     bool BuildInputSnapshot(
         vtkSmartPointer<vtkImageData> image,
         vtkSmartPointer<vtkImageData> validityMask,
         InputSnapshot& out) const;
     bool BuildKernelResult(
-        const GapVolumeBuffer& volume,
+        const GapInputBuffer& volume,
         const GapParamSnapshot& params,
         vtkImageData* image,
         KernelBatch& result) const;
@@ -159,7 +197,7 @@ private:
     bool GetViewThread() const;
     bool ClearViewThread();
     double GetDisplayIso(
-        const GapVolumeBuffer& inputSnapshot,
+        const GapInputBuffer& inputSnapshot,
         const GapSurfaceConfig& surface) const;
 
     // callbackMutex 同时保护 active/pending callback 与 pending success payload。
@@ -175,15 +213,13 @@ private:
 
     // inputMutex 保护当前不可变体素快照 shared owner；worker 按值领取 owner 后不再访问该槽。
     mutable std::mutex m_inputMutex;
-    // 两种输入入口最终都提交同一只读 float VTK 快照及其 VolumeBuffer 别名。
+    // 两种输入入口最终都提交同一只读 float VTK 快照及其连续体素别名。
     InputSnapshot m_inputSnapshot;
 
-    // paramsMutex 把三个可变参数对象作为同一份任务配置复制边界。
+    // paramsMutex 把两个可变参数对象作为同一份任务配置复制边界。
     mutable std::mutex m_paramsMutex;
     // 输入标量域表面参数；GetParamSnapshot 按值冻结，worker 当前消费其中 isoValue。
     GapSurfaceParams m_surfParams;
-    // 法向精化参数的预留值快照；当前 worker 不消费，不能描述为已生效配置。
-    GapAdvancedParams m_advParams;
     // 灰度边界与最小体积由私有内核消费；其余 ABI 保留字段不参与计算。
     GapVoidParams m_voidParams;
 
@@ -289,6 +325,139 @@ bool GapAnalysisService::Impl::GetLabelExtent(vtkSmartPointer<vtkImageData> labe
     return labelDims[0] > 0 && labelDims[1] > 0 && labelDims[2] > 0;
 }
 
+std::optional<std::filesystem::path>
+GapAnalysisService::Impl::GetModulePath(HMODULE module)
+{
+    constexpr std::size_t initialSize = 1024;
+    constexpr std::size_t maxSize = 32768;
+    std::vector<wchar_t> buffer(initialSize);
+    while (buffer.size() <= maxSize) {
+        SetLastError(ERROR_SUCCESS);
+        const DWORD copied = GetModuleFileNameW(
+            module,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()));
+        if (copied == 0) {
+            return std::nullopt;
+        }
+        if (copied < buffer.size()) {
+            return std::filesystem::path(
+                std::wstring(buffer.data(), copied));
+        }
+        if (buffer.size() == maxSize) {
+            return std::nullopt;
+        }
+        buffer.resize((std::min)(buffer.size() * 2, maxSize));
+    }
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path>
+GapAnalysisService::Impl::GetRuntimePath(
+    const std::filesystem::path& directory)
+{
+    if (directory.empty() || !directory.is_absolute()) {
+        return std::nullopt;
+    }
+
+    std::error_code error;
+    const auto kernelCandidate =
+        directory / L"MVVCVTKGapKernel.dll";
+    if (!std::filesystem::is_regular_file(kernelCandidate, error)
+        || error) {
+        return std::nullopt;
+    }
+    const auto kernelPath = std::filesystem::canonical(
+        kernelCandidate, error);
+    if (error) {
+        return std::nullopt;
+    }
+
+    const auto defxPath =
+        kernelPath.parent_path() / L"DefXAnalysis.dll";
+    if (!std::filesystem::is_regular_file(defxPath, error)
+        || error) {
+        return std::nullopt;
+    }
+    return kernelPath;
+}
+
+std::optional<std::wstring>
+GapAnalysisService::Impl::GetEnvValue(const wchar_t* name)
+{
+    if (!name || *name == L'\0') {
+        return std::nullopt;
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    DWORD bufferSize = GetEnvironmentVariableW(name, nullptr, 0);
+    if (bufferSize == 0) {
+        return GetLastError() == ERROR_ENVVAR_NOT_FOUND
+            ? std::nullopt : std::optional<std::wstring>(L"");
+    }
+
+    for (;;) {
+        std::vector<wchar_t> buffer(bufferSize);
+        const DWORD copied = GetEnvironmentVariableW(
+            name, buffer.data(), bufferSize);
+        if (copied == 0) {
+            return std::wstring{};
+        }
+        if (copied < bufferSize) {
+            return std::wstring(buffer.data(), copied);
+        }
+        bufferSize = copied;
+    }
+}
+
+bool GapAnalysisService::Impl::GetPathEqual(
+    const std::filesystem::path& left,
+    const std::filesystem::path& right)
+{
+    std::error_code error;
+    if (std::filesystem::equivalent(left, right, error) && !error) {
+        return true;
+    }
+
+    const auto leftPath = left.lexically_normal().native();
+    const auto rightPath = right.lexically_normal().native();
+    return CompareStringOrdinal(
+        leftPath.c_str(), static_cast<int>(leftPath.size()),
+        rightPath.c_str(), static_cast<int>(rightPath.size()),
+        TRUE) == CSTR_EQUAL;
+}
+
+std::optional<std::filesystem::path>
+GapAnalysisService::Impl::GetKernelPath()
+{
+    // 1. SDK/宿主通过 Feature 专属环境变量给出受信任绝对目录；
+    // 一旦显式配置，非法路径必须失败，不能再回退到其他搜索来源。
+    const auto runtimeValue = GetEnvValue(
+        L"MVVCVTK_GAP_RUNTIME_DIR");
+    if (runtimeValue) {
+        const std::filesystem::path runtimeDir(*runtimeValue);
+        const auto configuredPath = GetRuntimePath(runtimeDir);
+        if (!configuredPath) {
+            std::wcerr
+                << L"[GapAnalysis] Invalid MVVCVTK_GAP_RUNTIME_DIR: "
+                << runtimeDir.native() << L'\n' << std::flush;
+            return std::nullopt;
+        }
+        return configuredPath;
+    }
+
+    // 2. 源码构建或随应用部署只接受进程目录中的成对 runtime。
+    const auto processPath = GetModulePath(nullptr);
+    if (processPath) {
+        const auto localPath = GetRuntimePath(
+            processPath->parent_path());
+        if (localPath) {
+            return localPath;
+        }
+    }
+    return std::nullopt;
+}
+
 GapAnalysisService::Impl::~Impl()
 {
     if (GetViewOn()) {
@@ -320,11 +489,6 @@ bool GapAnalysisService::SetGapInput(vtkSmartPointer<vtkImageData> image)
 void GapAnalysisService::SetSurface(const GapSurfaceParams& params)
 {
     m_impl->SetSurface(params);
-}
-
-void GapAnalysisService::SetAdvanced(const GapAdvancedParams& params)
-{
-    m_impl->SetAdvanced(params);
 }
 
 void GapAnalysisService::SetVoid(const GapVoidParams& params)
@@ -464,11 +628,6 @@ void GapAnalysisService::Impl::SetSurface(const GapSurfaceParams& params) {
     m_surfParams = params;
 }
 
-void GapAnalysisService::Impl::SetAdvanced(const GapAdvancedParams& params) {
-    std::lock_guard<std::mutex> lk(m_paramsMutex);
-    m_advParams = params;
-}
-
 void GapAnalysisService::Impl::SetVoid(const GapVoidParams& params) {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
     m_voidParams = params;
@@ -497,7 +656,7 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
     // 回调先进入任务槽；输入校验失败时，若存在回调也按同一 pending 通道发布 false。
     SetCompletionCallback(std::move(onComplete));
 
-    // 输入已由隔离或受控入口固化为 VolumeBuffer；worker 只持有不可变快照 owner。
+    // 输入已由隔离入口固化为最小只读快照；worker 只持有不可变 owner。
     auto inputSnapshot = GetInputSnapshot();
     if (!inputSnapshot || !inputSnapshot->volume.GetVoxelReady()
         || !inputSnapshot->image) {
@@ -727,7 +886,6 @@ bool GapAnalysisService::Impl::StartView(
     {
         std::lock_guard<std::mutex> paramsLock(m_paramsMutex);
         m_surfParams = params.surfParams;
-        m_advParams = params.advParams;
         m_voidParams = params.voidParams;
     }
     m_meshTargets = std::move(meshTargets);
@@ -894,7 +1052,7 @@ GapAnalysisService::Impl::InputSnapshot GapAnalysisService::Impl::GetInputSnapsh
 
 GapAnalysisService::Impl::GapParamSnapshot GapAnalysisService::Impl::GetParamSnapshot() const {
     std::lock_guard<std::mutex> lk(m_paramsMutex);
-    return { m_surfParams, m_advParams, m_voidParams };
+    return { m_surfParams, m_voidParams };
 }
 
 void GapAnalysisService::Impl::StartWorker(
@@ -1121,7 +1279,7 @@ bool GapAnalysisService::Impl::ClearViewThread()
 }
 
 double GapAnalysisService::Impl::GetDisplayIso(
-    const GapVolumeBuffer& inputSnapshot,
+    const GapInputBuffer& inputSnapshot,
     const GapSurfaceConfig& surface) const {
     if (surface.isoMode == GapIsoMode::AbsoluteValue) {
         return surface.absoluteIsoValue;
@@ -1176,8 +1334,8 @@ bool GapAnalysisService::Impl::BuildInputSnapshot(
         }
 
         auto workerImage = imageCopy;
-        GapVolumeBuffer volume;
-        if (!BuildVolumeBuffer(std::move(imageCopy), volume)) {
+        GapInputBuffer volume;
+        if (!BuildInputBuffer(std::move(imageCopy), volume)) {
             return false;
         }
         auto snapshot = std::make_shared<InputData>();
@@ -1242,7 +1400,7 @@ GapAnalysisService::Impl::SetKernelResult(
 }
 
 bool GapAnalysisService::Impl::BuildKernelResult(
-    const GapVolumeBuffer& volume,
+    const GapInputBuffer& volume,
     const GapParamSnapshot& params,
     vtkImageData* image,
     KernelBatch& result) const
@@ -1295,7 +1453,7 @@ bool GapAnalysisService::Impl::BuildKernelResult(
         || scalars->GetNumberOfComponents() != 1
         || scalars->GetNumberOfTuples()
             != static_cast<vtkIdType>(voxelCount)
-        || scalars->GetVoidPointer(0) != volume.voxelsPtr) {
+        || scalars->GetVoidPointer(0) != volume.GetVoxelData()) {
         return false;
     }
 
@@ -1303,7 +1461,7 @@ bool GapAnalysisService::Impl::BuildKernelResult(
     request.abiVersion = GapKernelAbiVersion;
     request.structSize = static_cast<std::uint32_t>(
         sizeof(GapKernelRequest));
-    request.voxelData = volume.voxelsPtr;
+    request.voxelData = volume.GetVoxelData();
     request.voxelCount = voxelCount;
     for (int axis = 0; axis < 3; ++axis) {
         if (imageDims[axis] != volume.dims[axis]
@@ -1333,21 +1491,62 @@ bool GapAnalysisService::Impl::BuildKernelResult(
     request.numberRuns = 1;
     request.isFilterEnabled = params.voidParams.isFilterEnabled ? 1U : 0U;
 
-    const HMODULE module = LoadLibraryW(L"MVVCVTKGapKernel.dll");
-    if (!module) {
-        std::cerr << "[GapAnalysis] Private kernel runtime is unavailable."
-            << std::endl;
+    const auto kernelPath = GetKernelPath();
+    if (!kernelPath) {
+        std::cerr
+            << "[GapAnalysis] A unique private kernel runtime was not found.\n"
+            << std::flush;
         return false;
     }
 
+    SetLastError(ERROR_SUCCESS);
+    KernelModule module(LoadLibraryExW(
+        kernelPath->c_str(),
+        nullptr,
+        LOAD_WITH_ALTERED_SEARCH_PATH));
+    if (!module.Get()) {
+        const DWORD error = GetLastError();
+        std::wcerr
+            << L"[GapAnalysis] Private kernel load failed: "
+            << kernelPath->native()
+            << L" | win32=" << error << L'\n' << std::flush;
+        return false;
+    }
+
+    // 完整路径锁定 bridge 本体；加载后再核对实际模块与同目录 DefX，
+    // 防止已加载的同名依赖绕过 runtime 对选择。
+    const auto loadedKernelPath = GetModulePath(module.Get());
+    const HMODULE defxModule = GetModuleHandleW(L"DefXAnalysis.dll");
+    const auto loadedDefxPath = defxModule
+        ? GetModulePath(defxModule) : std::nullopt;
+    const auto expectedDefxPath =
+        kernelPath->parent_path() / L"DefXAnalysis.dll";
+    if (!loadedKernelPath
+        || !GetPathEqual(*kernelPath, *loadedKernelPath)
+        || !loadedDefxPath
+        || !GetPathEqual(expectedDefxPath, *loadedDefxPath)) {
+        std::cerr
+            << "[GapAnalysis] Private kernel runtime identity mismatch.\n"
+            << std::flush;
+        return false;
+    }
+
+    std::wcerr
+        << L"[GapAnalysis] Private kernel loaded: "
+        << loadedKernelPath->native() << L'\n' << std::flush;
     const auto buildResult = reinterpret_cast<GapKernelEntry>(
-        GetProcAddress(module, "BuildGapResult"));
+        GetProcAddress(module.Get(), "BuildGapResult"));
+    if (!buildResult) {
+        std::cerr
+            << "[GapAnalysis] Private kernel entry is unavailable.\n"
+            << std::flush;
+        return false;
+    }
     const bool isBuilt = buildResult
-        && buildResult(
+        (
             &request,
             &GapAnalysisService::Impl::SetKernelResult,
             &result) != 0;
-    FreeLibrary(module);
     if (!isBuilt) {
         result = {};
     }
@@ -1630,9 +1829,9 @@ bool GapAnalysisService::Impl::GetRequestValid(
                     (std::numeric_limits<float>::denorm_min)()));
 }
 
-bool GapAnalysisService::Impl::BuildVolumeBuffer(
+bool GapAnalysisService::Impl::BuildInputBuffer(
     vtkSmartPointer<vtkImageData> image,
-    GapVolumeBuffer& out) const
+    GapInputBuffer& out) const
 {
     if (!image) {
         return false;
@@ -1664,14 +1863,11 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
         return false;
     }
 
-    out.ClearMask();
-
     out.dims = { dims[0], dims[1], dims[2] }; // voxel index 布局为 [x, y, z]。
 
     double spacing[3] = { 1.0, 1.0, 1.0 };
     image->GetSpacing(spacing);
-    // 此处信任 DataManager 生产的 spacing/origin 已合法，不重复做有限性与非零校验；
-    // 非法 spacing 会在 world->index 插值时造成除零，因此外部 image 必须先经过公共输入验证链。
+    // 此处信任 DataManager 生产的 spacing/origin 已合法；DefX 请求入口会再次核对 VTK 几何。
     out.spacing = { spacing[0], spacing[1], spacing[2] }; // 输入 physical 坐标每 voxel 间距，沿 [x, y, z]。
 
     double origin[3] = { 0.0, 0.0, 0.0 };
@@ -1699,7 +1895,7 @@ bool GapAnalysisService::Impl::BuildVolumeBuffer(
         std::shared_ptr<const void> imageOwner =
             std::make_shared<vtkSmartPointer<vtkImageData>>(
                 std::move(image));
-        return out.SetSharedVoxels(std::move(imageOwner), source);
+        return out.SetVoxels(std::move(imageOwner), source);
     }
     catch (const std::bad_alloc&) {
         return false;

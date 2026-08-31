@@ -1,10 +1,9 @@
 set(MVVCVTK_GAP_SOURCES
-    include/Algorithms/SurfaceRefiner.h
-    include/Algorithms/VolumeBuffer.h
     include/Render/Strategies/GapOverlayStrategies.h
     include/Services/GapAnalysisService.h
     src/Host/GapHostFeature.cpp
     src/Services/GapAnalysisService.cpp
+    src/Services/GapInputBuffer.h
 )
 set(MVVCVTK_GAP_KERNEL_SOURCES
     src/Services/GapKernelBridge.cpp
@@ -34,6 +33,16 @@ set_target_properties(
         OUTPUT_NAME MVVCVTKGapKernel
         PROJECT_LABEL MVVCVTKGapKernel
         FOLDER "MVVCVTK/Host/Features/Private"
+)
+# build tree 与 SDK install tree 都让私有 kernel 和 DefX runtime 成对出现；
+# C++ 加载器据此解析唯一绝对路径，不修改外部供应商根中的原始工件。
+add_custom_command(
+    TARGET mvvcvtk_gap_kernel
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_FILE:DefX::Analysis>"
+        "$<TARGET_FILE_DIR:mvvcvtk_gap_kernel>"
+    VERBATIM
 )
 source_group(
     TREE "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -68,7 +77,6 @@ target_include_directories(
     mvvcvtk_gap_analysis
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/Algorithms"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Host"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Strategies"

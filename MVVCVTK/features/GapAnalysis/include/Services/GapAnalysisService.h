@@ -39,10 +39,9 @@ public:
     // 外部可变输入先 DeepCopy，调用返回后修改 metadata/scalars 不会污染分析快照。
     bool SetGapInput(vtkSmartPointer<vtkImageData> image);
     void SetSurface(const GapSurfaceParams& params);
-    void SetAdvanced(const GapAdvancedParams& params);
     void SetVoid(const GapVoidParams& params);
 
-    // 领取当前 VolumeBuffer 与参数副本后启动 worker；返回值表示请求是否被真实接纳。
+    // 领取当前只读输入快照与参数副本后启动 worker；返回值表示请求是否被真实接纳。
     // 完成链发布执行状态、成功结果和可选 pending callback，调用方通过 GetDoneEvent/SendCallback 消费回调。
     bool StartAsync(std::function<void(bool isSuccess)> onComplete = nullptr);
     // 只发布停止请求，不等待线程退出；已结束的 worker 线程槽由下一次真正启动或析构时 join。
