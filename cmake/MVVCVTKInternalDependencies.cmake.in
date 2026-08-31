@@ -1,5 +1,4 @@
 include(CMakeFindDependencyMacro)
-include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKDependencyPolicy.cmake")
 
 if(DEFINED MVVCVTK_DEPS_ROOT AND NOT MVVCVTK_DEPS_ROOT STREQUAL "")
     set(_mvvcvtk_deps_root "${MVVCVTK_DEPS_ROOT}")
@@ -7,7 +6,19 @@ else()
     set(_mvvcvtk_deps_root "${PACKAGE_PREFIX_DIR}/deps")
 endif()
 cmake_path(NORMAL_PATH _mvvcvtk_deps_root)
-LoadMVVCVTKDeps("${_mvvcvtk_deps_root}" "@MVVCVTK_DEPS_VERSION@")
+
+foreach(_mvvcvtk_required_path IN ITEMS
+    "vtk/lib/cmake/vtk-9.4/vtk-config.cmake"
+    "opencv/x64/vc16/lib/OpenCVConfig.cmake"
+)
+    if(NOT EXISTS "${_mvvcvtk_deps_root}/${_mvvcvtk_required_path}")
+        set(MVVCVTK_FOUND FALSE)
+        set(MVVCVTK_NOT_FOUND_MESSAGE
+            "MVVCVTK dependency is missing: ${_mvvcvtk_required_path}"
+        )
+        return()
+    endif()
+endforeach()
 
 find_dependency(
     VTK 9.4.2 EXACT
@@ -31,27 +42,5 @@ if(NOT TARGET opencv_world)
     return()
 endif()
 
-if(NOT TARGET MVVCVTKInternal::OpenCVWorld)
-    add_library(MVVCVTKInternal::OpenCVWorld INTERFACE IMPORTED)
-    set_target_properties(
-        MVVCVTKInternal::OpenCVWorld
-        PROPERTIES INTERFACE_LINK_LIBRARIES opencv_world
-    )
-endif()
-
-foreach(_mvvcvtk_ui_name IN ITEMS UIPhantomCalib UIReconstruct3D)
-    if(NOT TARGET MVVCVTKInternal::${_mvvcvtk_ui_name})
-        add_library(MVVCVTKInternal::${_mvvcvtk_ui_name} UNKNOWN IMPORTED)
-        set_target_properties(
-            MVVCVTKInternal::${_mvvcvtk_ui_name}
-            PROPERTIES
-                IMPORTED_LOCATION
-                    "${_mvvcvtk_deps_root}/ui/lib/${_mvvcvtk_ui_name}.lib"
-                INTERFACE_INCLUDE_DIRECTORIES
-                    "${_mvvcvtk_deps_root}/ui/include"
-        )
-    endif()
-endforeach()
-
 unset(_mvvcvtk_deps_root)
-unset(_mvvcvtk_ui_name)
+unset(_mvvcvtk_required_path)

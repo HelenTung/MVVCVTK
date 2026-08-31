@@ -811,7 +811,7 @@ int main(int argc, char* argv[])
     };
     HostViewSetRequest qualityRequest;
     qualityRequest.targetView = volumeTarget;
-    qualityRequest.volumeQuality = HostVolumeQuality::High;
+    qualityRequest.volumeQuality = HostVolumeQuality::Auto;
     if (!session.SendRequest(std::move(qualityRequest))) {
         return 1;
     }

@@ -16,6 +16,7 @@
       "cacheVariables": {
         "MVVCVTK_DEPS_ROOT": "${sourceDir}/deps/2026.08.21-deps.1-win-x64",
         "MVVCVTK_BUILD_TESTING": true,
+        "MVVCVTK_BUILD_QT_TESTING": true,
         "MVVCVTK_ENABLE_AVX2": true
       }
     }

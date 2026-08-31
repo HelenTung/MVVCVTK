@@ -31,22 +31,9 @@ if(DEFINED MVVCVTK_FOUND AND NOT MVVCVTK_FOUND)
     return()
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/MVVCVTKTargets.cmake")
-set(
-    MVVCVTK_HEADER_SURFACE_FILE
-    "${CMAKE_CURRENT_LIST_DIR}/MVVCVTKHeaderSurface.txt"
-)
-if(NOT EXISTS "${MVVCVTK_HEADER_SURFACE_FILE}")
-    set(MVVCVTK_FOUND FALSE)
-    set(MVVCVTK_NOT_FOUND_MESSAGE
-        "MVVCVTK header surface metadata is missing."
-    )
-    return()
-endif()
 
-# 下列名称是 find_package 的逻辑 target component；安装仍以 Host component 原子交付完整 SDK。
+# 普通调用方只请求三个产品模块；HostAPI 与 FeatureSPI 作为传递 target 一并导出。
 foreach(_mvvcvtk_component IN ITEMS
-    HostAPI
-    FeatureSPI
     Host
     OrthogonalCrop
     GapAnalysis

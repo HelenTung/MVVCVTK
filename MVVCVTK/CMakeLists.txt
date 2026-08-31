@@ -527,9 +527,6 @@ target_link_libraries(
         MVVCVTK::FeatureSPI
         "$<BUILD_INTERFACE:MVVCVTKInternal::FeatureSupport>"
         ${MVVCVTK_VTK_TARGETS}
-        MVVCVTKInternal::OpenCVWorld
-        MVVCVTKInternal::UIPhantomCalib
-        MVVCVTKInternal::UIReconstruct3D
 )
 
 install(
@@ -579,7 +576,7 @@ endforeach()
 unset(_mvvcvtk_core_install_headers)
 unset(_mvvcvtk_install_keys)
 
-# 安装包内的机器可读清单由同一声明源生成，release/consumer 不再复制头名单。
+# 构建树中的机器可读清单由同一声明源生成，供发布验证使用但不进入 SDK。
 SetSurfaceLines(
     _mvvcvtk_host_api_lines
     HostAPI
@@ -629,11 +626,6 @@ file(GENERATE
     OUTPUT "${MVVCVTK_HEADER_SURFACE_FILE}"
     CONTENT "${_mvvcvtk_surface_content}\n"
     NEWLINE_STYLE UNIX
-)
-install(
-    FILES "${MVVCVTK_HEADER_SURFACE_FILE}"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/MVVCVTK"
-    COMPONENT Host
 )
 unset(_mvvcvtk_crop_lines)
 unset(_mvvcvtk_gap_lines)

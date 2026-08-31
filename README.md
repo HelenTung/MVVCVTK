@@ -10,7 +10,7 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 - CMake 4.2 或更高版本、Visual Studio 18 2026、MSVC `v145`、C++17。
 - 日常源码构建固定使用 Visual Studio 2026 的 MSVC `v145`；Release 制品启用 AVX2。
 - Debug 使用 `/MDd`，Release 使用 `/MD`。
-- VTK 9.4.2、OpenCV 4.12.0、Qt 5.14.2，以及授权的内部 UI 依赖。
+- SDK 携带 VTK 9.4.2 与 OpenCV 4.12.0；Qt 5.14.2 的头、库、DLL 与 CMake package 由接收方宿主自行提供。完整 VTK 环境保留 QVTK/VTK Qt 适配模块，用于对接宿主 Qt。
 - SDK 是固定工具链静态库，不承诺跨编译器、工具集、运行库或配置的稳定二进制 ABI。
 
 ## 依赖 bootstrap
@@ -25,7 +25,7 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 
 脚本先解包到独立临时目录，拒绝 reparse point，并按规范化相对路径、文件大小和每文件 SHA-256 重算内容树。只有内容树、manifest SHA-256、包版本和平台全部匹配 [依赖锁](tools/MVVCVTK.Dependencies.lock.psd1) 后，才安装到 `deps/2026.08.21-deps.1-win-x64`。更换依赖必须发布新版本并显式更新锁，不能原地替换同名制品。
 
-`MVVCVTK/vcpkg.json` 的公共依赖使用固定 git baseline；项目构建所需的 VTK/OpenCV/Qt/内部 UI 以以上版本化 bundle 为准。
+`MVVCVTK/vcpkg.json` 的公共依赖使用固定 git baseline；项目构建所需的 VTK/OpenCV 以及仓库 Qt 测试使用的 Qt 以以上版本化 bundle 为准。内部 UI 不再属于产品构建或 SDK 依赖。
 
 ## 构建和测试
 
@@ -40,7 +40,7 @@ ctest --preset vs2026-debug
 ctest --preset vs2026-release
 ```
 
-`MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 只进入 Qt 测试，不是 Host 的公共依赖。
+`MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 本体只进入由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓库测试，不是 Host 的公共依赖，也不进入 SDK；`deps/vtk` 中的 VTK Qt 适配模块仍随完整 VTK 环境交付。
 
 `MVVCVTK_BUILD_ORTHOGONAL_CROP`、`MVVCVTK_BUILD_GAP_ANALYSIS` 可分别关闭两个 Feature；`MVVCVTK_BUILD_STANDALONE` 控制示例。Standalone 只有在两个 Feature 都启用时构建，关闭任一 Feature 都不会把示例的组合选择反向施加给 Host 或另一个 Feature。
 
@@ -52,21 +52,21 @@ ctest --preset vs2026-release
 ./tools/release/Build-MVVCVTKSdk.ps1
 ```
 
-发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库，复制锁定依赖，再以源码树中的 CMake clean-room consumer 验证安装包。版本与 manifest 属于发布阶段，不进入日常 Solution，也不创建第二棵产品 CMake build tree。
+发布脚本复用同一个 CMake preset 构建并测试 Debug/Release，安装三个静态库，白名单复制 VTK/OpenCV，再以源码树中的 CMake 与 Qt clean-room consumer 验证安装包。Qt clean-room 使用开发依赖中的 Qt，证明接收方提供 Qt 时仍可集成；这些验证源码和 Qt 本身都不进入 SDK。
 
-stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum，也不为 SDK 文件维护哈希闭包。直接执行 `cmake --install` 只安装项目模块和 CMake 消费接口，不复制锁定依赖；这种本地安装可在配置 consumer 时显式设置 `MVVCVTK_DEPS_ROOT` 复用仓库依赖。对外交付的自包含 SDK 仍由发布脚本把依赖放到安装根的 `deps/`。
+stage 输出到 `out/stage/<version>-win-x64`，ZIP 输出到 `out/packages`；当前不生成归档 checksum 或 manifest。直接执行 `cmake --install` 只安装项目模块和 CMake 消费接口，不复制依赖；完整定向交付由发布脚本把 VTK/OpenCV 放到安装根的 `deps/`。
 
-SDK 根目录只保留 `manifest.json`、`README.md`、`NOTICE`、`include/`、`lib/` 和 `deps/`；CMake package 位于 `lib/cmake/MVVCVTK/`。`lib/<配置>/` 每个配置只含 `MVVCVTKHost.lib`、`MVVCVTKOrthogonalCrop.lib`、`MVVCVTKGapAnalysis.lib`。安装包不携带 standalone、clean-room 示例、MSBuild/qmake 适配层或身份校验工具。
+SDK 根目录只保留 `include/`、`lib/` 和 `deps/`；`deps/` 只含 `vtk/` 与 `opencv/`，CMake package 位于 `lib/cmake/MVVCVTK/`。`lib/<配置>/` 每个配置只含 `MVVCVTKHost.lib`、`MVVCVTKOrthogonalCrop.lib`、`MVVCVTKGapAnalysis.lib`。安装包不携带 Qt 本体、内部 UI、README、NOTICE、manifest、standalone、clean-room 示例、MSBuild/qmake 适配层或验证工具；完整 VTK 目录中的 QVTK/VTK Qt 模块不视为 Qt 本体。
 
-脏工作树版本必须使用 `yyyy.MM.dd-rev.N`；干净工作树版本由目标解析为 `yyyy.MM.dd-git.<short-commit>`。不传 `-PackageRevision` 时脚本按工作树状态生成合法版本。SDK manifest 只记录版本来源、固定工具链、模块、依赖版本和公开头清单，不承担文件完整性或身份校验。
+脏工作树目录名使用 `yyyy.MM.dd-rev.N`；干净工作树目录名使用 `yyyy.MM.dd-git.<short-commit>`。不传 `-PackageRevision` 时脚本按工作树状态生成合法目录名和 ZIP 名，包内不再保存独立版本文件。
 
 ## SDK 消费
 
-CMake consumer 使用 Windows x64、MSVC `v145`，指向安装目录中的包配置并按需选择模块。当前日常 CMake 消费只解析导出 target 和同目录 `deps/`，不要求 SDK 版本 manifest；版本、归档闭包与制品身份校验留在发布阶段：
+CMake consumer 使用 Windows x64、MSVC `v145`，指向安装目录中的包配置并按需选择三个产品模块。包配置只解析导出 target 和同目录的 VTK/OpenCV：
 
 ```cmake
 find_package(MVVCVTK CONFIG REQUIRED
-    COMPONENTS HostAPI FeatureSPI Host OrthogonalCrop GapAnalysis)
+    COMPONENTS Host OrthogonalCrop GapAnalysis)
 target_link_libraries(app PRIVATE
     MVVCVTK::Host
     MVVCVTK::OrthogonalCrop
@@ -80,7 +80,7 @@ target_link_libraries(app PRIVATE
 
 ## SDK 公开头边界
 
-SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成，并随包写入 `lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt`，不再维护固定头文件数量。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。源码 `include/` 整树不属于 SDK 暴露面。
+SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成。`MVVCVTKHeaderSurface.txt` 只留在构建树供发布验证使用，不进入 SDK。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。源码 `include/` 整树不属于 SDK 暴露面。
 
 ## 线程与停止规则
 
@@ -99,4 +99,4 @@ SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`�
 
 ## 许可证与第三方通知
 
-本仓库当前没有授予项目源码或二进制的通用再分发许可证；获得明确授权前，不应对外分发。版本化依赖 bundle 和 SDK 内保留 Qt、OpenCV、VTK 及其传递依赖的许可证文件。内部 UI 组件标记为 `internal-only`，其使用和再分发必须另行授权。详见 [NOTICE](NOTICE)。
+本仓库当前没有授予项目源码或二进制的通用再分发许可证；获得明确授权前，不应对外分发。最小定向 SDK 不安装 README 或 NOTICE，相关授权与第三方依赖合规仍由交付双方另行确认。仓库内说明详见 [NOTICE](NOTICE)。

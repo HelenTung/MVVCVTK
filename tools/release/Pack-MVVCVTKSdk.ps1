@@ -74,6 +74,15 @@ $packagePath = [IO.Path]::GetFullPath($PackageRoot)
 if (-not [IO.Directory]::Exists($stageRoot)) {
     throw "SDK stage is missing: $stageRoot"
 }
+$stageBase = Split-Path -Parent $stageRoot
+$outRoot = Split-Path -Parent $stageBase
+$expectedPackagePath = [IO.Path]::GetFullPath(
+    (Join-Path $outRoot 'packages'))
+if (-not $packagePath.Equals(
+        $expectedPackagePath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw "SDK package directory must be: $expectedPackagePath"
+}
 $null = @(Get-SafeTreeItems $stageRoot)
 if ([IO.Path]::GetFileName($ArchiveName) -ne $ArchiveName -or
     -not $ArchiveName.EndsWith(
@@ -82,14 +91,15 @@ if ([IO.Path]::GetFileName($ArchiveName) -ne $ArchiveName -or
     throw "Unsafe SDK archive name: $ArchiveName"
 }
 
-$manifestPath = Join-Path $stageRoot 'manifest.json'
-if (-not [IO.File]::Exists($manifestPath)) {
-    throw "SDK manifest is missing: $manifestPath"
-}
-$manifest = Get-Content -LiteralPath $manifestPath -Raw |
-    ConvertFrom-Json
-if ($manifest.archive.file -ne $ArchiveName) {
-    throw 'SDK archive name does not match the manifest.'
+$expectedTopLevel = @('deps', 'include', 'lib')
+$actualTopLevel = @(
+    Get-ChildItem -LiteralPath $stageRoot -Force |
+        ForEach-Object { $_.Name } |
+        Sort-Object
+)
+if (@(Compare-Object `
+        ($expectedTopLevel | Sort-Object) $actualTopLevel).Count -ne 0) {
+    throw 'SDK stage contains an unexpected top-level entry.'
 }
 
 Get-SafeAncestors (Split-Path -Parent $packagePath)
@@ -109,6 +119,8 @@ Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $topDirectory = Split-Path -Leaf $stageRoot
 $expectedEntries = [Collections.Generic.Dictionary[string, long]]::new(
+    [StringComparer]::Ordinal)
+$expectedHashes = [Collections.Generic.Dictionary[string, string]]::new(
     [StringComparer]::Ordinal)
 $stagePrefix = $stageRoot
 if (-not $stagePrefix.EndsWith(
@@ -151,6 +163,15 @@ try {
                 [IO.FileAccess]::Read,
                 [IO.FileShare]::None)
             try {
+                $sourceHasher = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $sourceHash = [BitConverter]::ToString(
+                        $sourceHasher.ComputeHash($inputStream)).Replace('-', '')
+                }
+                finally {
+                    $sourceHasher.Dispose()
+                }
+                $inputStream.Position = 0
                 $entry = $archive.CreateEntry(
                     $entryName,
                     [IO.Compression.CompressionLevel]::Optimal)
@@ -162,6 +183,7 @@ try {
                     $entryStream.Dispose()
                 }
                 $expectedEntries.Add($entryName, $inputStream.Length)
+                $expectedHashes.Add($entryName, $sourceHash)
             }
             finally {
                 $inputStream.Dispose()
@@ -197,6 +219,23 @@ try {
                 -not $expectedEntries.ContainsKey($entry.FullName) -or
                 $entry.Length -ne $expectedEntries[$entry.FullName]) {
                 throw "Unexpected SDK archive entry: $($entry.FullName)"
+            }
+            $entryStream = $entry.Open()
+            try {
+                $entryHasher = [Security.Cryptography.SHA256]::Create()
+                try {
+                    $entryHash = [BitConverter]::ToString(
+                        $entryHasher.ComputeHash($entryStream)).Replace('-', '')
+                }
+                finally {
+                    $entryHasher.Dispose()
+                }
+            }
+            finally {
+                $entryStream.Dispose()
+            }
+            if ($entryHash -ne $expectedHashes[$entry.FullName]) {
+                throw "SDK archive content mismatch: $($entry.FullName)"
             }
         }
     }

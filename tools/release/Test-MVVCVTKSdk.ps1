@@ -7,16 +7,7 @@ param(
     [string]$RepoRoot,
 
     [Parameter(Mandatory = $true)]
-    [string]$BuildRoot,
-
-    [Parameter(Mandatory = $true)]
-    [string]$PackageRevision,
-
-    [Parameter(Mandatory = $true)]
-    [string]$DirectoryVersion,
-
-    [Parameter(Mandatory = $true)]
-    [string]$DepsVersion
+    [string]$BuildRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,13 +107,15 @@ function Get-SafePath(
     return $fullPath
 }
 
-function Get-HeaderSurface([string]$stageRoot)
+function Get-HeaderSurface(
+    [string]$buildRoot,
+    [string]$stageRoot)
 {
-    $surfacePath = Get-SafePath $stageRoot `
-        'lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt'
+    $surfacePath = Join-Path $buildRoot 'MVVCVTKHeaderSurface.txt'
     if (-not [IO.File]::Exists($surfacePath)) {
-        throw "SDK header surface metadata is missing: $surfacePath"
+        throw "Build-tree header surface metadata is missing: $surfacePath"
     }
+    Get-SafeAncestors $surfacePath
     $allowedCategories = @(
         'HostAPI', 'HostSupport',
         'FeatureSPI', 'FeatureSupport',
@@ -158,89 +151,6 @@ function Get-HeaderSurface([string]$stageRoot)
 
 $stageRoot = [IO.Path]::GetFullPath($Stage)
 $null = @(Get-SafeTreeItems $stageRoot)
-$manifestPath = Join-Path $stageRoot 'manifest.json'
-if (-not [IO.File]::Exists($manifestPath)) {
-    throw "SDK manifest is missing: $manifestPath"
-}
-$manifest = Get-Content -LiteralPath $manifestPath -Raw |
-    ConvertFrom-Json
-if ($manifest.schemaVersion -isnot [int] -or
-    $manifest.schemaVersion -ne 1 -or
-    $manifest.packageId -ne 'MVVCVTK.Sdk' -or
-    $manifest.packageKind -ne 'SelfContained' -or
-    $manifest.packageVersion -ne $PackageRevision -or
-    $manifest.directoryVersion -ne $DirectoryVersion) {
-    throw 'Unsupported SDK manifest or package version.'
-}
-if ($manifest.platform -ne 'windows' -or
-    $manifest.architecture -ne 'x64' -or
-    $manifest.libraryKind -ne 'static' -or
-    $manifest.languageStandard -ne 'c++17' -or
-    $manifest.featureTrust -ne 'trusted-in-process') {
-    throw 'SDK platform, language, library, or trust policy mismatch.'
-}
-$expectedConsumerMatrix = @(
-    'Host'
-    'Host+OrthogonalCrop'
-    'Host+GapAnalysis'
-    'Host+OrthogonalCrop+GapAnalysis'
-)
-$actualConsumerMatrix = @($manifest.validationPolicy.cmakeConsumerMatrix)
-$consumerMatrixDiff = @(Compare-Object `
-        -ReferenceObject $expectedConsumerMatrix `
-        -DifferenceObject $actualConsumerMatrix)
-if (-not $manifest.validationPolicy.installedHeaderCompile -or
-    -not $manifest.validationPolicy.cmakeConsumer -or
-    -not $manifest.validationPolicy.qtCmakeConsumer -or
-    -not $manifest.validationPolicy.relocatableMetadata -or
-    $actualConsumerMatrix.Count -ne $expectedConsumerMatrix.Count -or
-    @($actualConsumerMatrix | Sort-Object -Unique).Count -ne
-        $actualConsumerMatrix.Count -or
-    $consumerMatrixDiff.Count -ne 0) {
-    throw 'SDK validation policy or consumer matrix is incomplete.'
-}
-if ($manifest.abiPolicy.compatibility -ne 'fixed-toolchain' -or
-    $manifest.abiPolicy.platformToolset -ne 'v145' -or
-    $manifest.abiPolicy.stableBinaryAbi -isnot [bool] -or
-    $manifest.abiPolicy.stableBinaryAbi -or
-    $manifest.abiPolicy.compilerId -ne 'MSVC' -or
-    $manifest.abiPolicy.compilerVersion -ne '19.51.36246.0' -or
-    [string]$manifest.abiPolicy.msvcVersion -ne '1951' -or
-    $manifest.abiPolicy.msvcToolsVersion -ne '14.51.36231' -or
-    $manifest.abiPolicy.windowsSdkVersion -ne '10.0.26100.0' -or
-    $manifest.abiPolicy.releaseInstructionSet -ne 'AVX2' -or
-    [version]$manifest.abiPolicy.cmakeVersion -lt [version]'4.2' -or
-    $manifest.abiPolicy.cmakeGenerator -ne 'Visual Studio 18 2026' -or
-    $manifest.abiPolicy.cmakeGeneratorToolset -ne 'v145,host=x64' -or
-    $manifest.abiPolicy.runtimeLibraryDebug -ne '/MDd' -or
-    $manifest.abiPolicy.runtimeLibraryRelease -ne '/MD' -or
-    $manifest.abiPolicy.iteratorDebugLevelDebug -ne 2 -or
-    $manifest.abiPolicy.iteratorDebugLevelRelease -ne 0 -or
-    $manifest.abiPolicy.wholeProgramOptimization) {
-    throw 'SDK ABI policy is incomplete.'
-}
-
-$expectedModules = @('GapAnalysis', 'Host', 'OrthogonalCrop')
-$actualModules = @($manifest.modules.PSObject.Properties.Name | Sort-Object)
-if (@(Compare-Object $expectedModules $actualModules).Count -ne 0 -or
-    $manifest.modules.Host.target -ne 'MVVCVTK::Host' -or
-    $manifest.modules.OrthogonalCrop.target -ne 'MVVCVTK::OrthogonalCrop' -or
-    $manifest.modules.GapAnalysis.target -ne 'MVVCVTK::GapAnalysis' -or
-    $manifest.configurations.Debug.runtimeLibrary -ne '/MDd' -or
-    $manifest.configurations.Debug.iteratorDebugLevel -ne 2 -or
-    $manifest.configurations.Release.runtimeLibrary -ne '/MD' -or
-    $manifest.configurations.Release.iteratorDebugLevel -ne 0) {
-    throw 'SDK configuration or module contract mismatch.'
-}
-if ($null -ne $manifest.manifestIdentity -or
-    $null -ne $manifest.artifactClosureIdentity -or
-    $null -ne $manifest.dependencyClosureIdentity -or
-    $null -ne $manifest.artifacts -or
-    $null -ne $manifest.archive.checksumFile -or
-    $null -ne $manifest.dependencies.sourceManifestSha256 -or
-    $null -ne $manifest.dependencies.artifacts) {
-    throw 'Retired SDK hash or artifact identity metadata remains.'
-}
 
 $buildInfoPath = Join-Path $BuildRoot 'MVVCVTKBuildInfo.json'
 if (-not [IO.File]::Exists($buildInfoPath)) {
@@ -252,64 +162,32 @@ $toolsMatch = [regex]::Match(
     [string]$buildInfo.compilerPath,
     'Tools[/\\]MSVC[/\\]([^/\\]+)[/\\]bin')
 if (-not $toolsMatch.Success -or
-    $manifest.abiPolicy.cmakeVersion -ne $buildInfo.cmakeVersion -or
-    $manifest.abiPolicy.cmakeGenerator -ne $buildInfo.generator -or
-    $manifest.abiPolicy.cmakeGeneratorToolset -ne
-        $buildInfo.generatorToolset -or
-    $manifest.abiPolicy.compilerVersion -ne $buildInfo.compilerVersion -or
-    [string]$manifest.abiPolicy.msvcVersion -ne
-        [string]$buildInfo.msvcVersion -or
-    $manifest.abiPolicy.msvcToolsVersion -ne
-        $toolsMatch.Groups[1].Value -or
-    $manifest.abiPolicy.windowsSdkVersion -ne
-        $buildInfo.windowsSdkVersion -or
-    $manifest.abiPolicy.releaseInstructionSet -ne
-        $buildInfo.releaseInstructionSet) {
-    throw 'SDK manifest toolchain does not match the configured build tree.'
+    [version]$buildInfo.cmakeVersion -lt [version]'4.2' -or
+    $buildInfo.generator -ne 'Visual Studio 18 2026' -or
+    $buildInfo.generatorToolset -ne 'v145,host=x64' -or
+    $buildInfo.compilerId -ne 'MSVC' -or
+    $buildInfo.msvcToolsetVersion -ne '145' -or
+    $buildInfo.msvcVersion -notmatch '^195\d$' -or
+    $buildInfo.compilerVersion -notmatch '^19\.5\d\.' -or
+    $buildInfo.windowsSdkVersion -notmatch '^10\.0\.' -or
+    $buildInfo.releaseInstructionSet -ne 'AVX2') {
+    throw 'CMake build information does not match the fixed SDK toolchain.'
 }
 
-$headerSurface = @(Get-HeaderSurface $stageRoot)
+$headerSurface = @(Get-HeaderSurface $BuildRoot $stageRoot)
 $expectedHeaders = @($headerSurface.path | Sort-Object -Unique)
-$entryCategories = @('HostAPI', 'FeatureSPI', 'OrthogonalCrop', 'GapAnalysis')
-$expectedEntryHeaders = @(
-    $headerSurface |
-        Where-Object { $_.category -in $entryCategories } |
-        ForEach-Object { $_.path } |
-        Sort-Object -Unique
-)
 $includeRoot = Join-Path $stageRoot 'include'
 $actualHeaders = @(
     Get-ChildItem -LiteralPath $includeRoot -Recurse -File -Filter '*.h' |
         ForEach-Object { Get-RelativePath $includeRoot $_.FullName } |
         Sort-Object
 )
-$declaredHeaders = @($manifest.publicSurface.headerClosure | Sort-Object)
-$declaredEntryHeaders = @($manifest.publicSurface.entryHeaders | Sort-Object)
 $expectedHeaderDiff = @(Compare-Object `
         -ReferenceObject ($expectedHeaders | Sort-Object) `
         -DifferenceObject $actualHeaders)
-$declaredHeaderDiff = @(Compare-Object `
-        -ReferenceObject $declaredHeaders `
-        -DifferenceObject $actualHeaders)
-$entryHeaderDiff = @(Compare-Object `
-        -ReferenceObject $expectedEntryHeaders `
-        -DifferenceObject $declaredEntryHeaders)
 if ($actualHeaders.Count -ne $expectedHeaders.Count -or
-    $manifest.publicSurface.headerClosureCount -ne $expectedHeaders.Count -or
-    $declaredHeaders.Count -ne $actualHeaders.Count -or
-    @($declaredHeaders | Sort-Object -Unique).Count -ne $declaredHeaders.Count -or
-    $declaredEntryHeaders.Count -ne $expectedEntryHeaders.Count -or
-    @($declaredEntryHeaders | Sort-Object -Unique).Count -ne
-        $declaredEntryHeaders.Count -or
-    $expectedHeaderDiff.Count -ne 0 -or
-    $declaredHeaderDiff.Count -ne 0 -or
-    $entryHeaderDiff.Count -ne 0) {
+    $expectedHeaderDiff.Count -ne 0) {
     throw 'SDK public header closure mismatch.'
-}
-foreach ($entryHeader in $manifest.publicSurface.entryHeaders) {
-    if ($actualHeaders -notcontains $entryHeader) {
-        throw "SDK entry header is outside the closure: $entryHeader"
-    }
 }
 
 $expectedLibraries = @(
@@ -332,16 +210,10 @@ if (@(Compare-Object $expectedLibraries $actualLibraries).Count -ne 0) {
 
 $requiredPaths = @(
     'lib/cmake/MVVCVTK/MVVCVTKConfig.cmake'
-    'lib/cmake/MVVCVTK/MVVCVTKConfigVersion.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKInternalDependencies.cmake'
-    'lib/cmake/MVVCVTK/MVVCVTKDependencyPolicy.cmake'
-    'lib/cmake/MVVCVTK/MVVCVTKHeaderSurface.txt'
     'lib/cmake/MVVCVTK/MVVCVTKTargets.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKTargets-debug.cmake'
     'lib/cmake/MVVCVTK/MVVCVTKTargets-release.cmake'
-    'deps/manifest.json'
-    'README.md'
-    'NOTICE'
 )
 foreach ($requiredPath in $requiredPaths) {
     if (-not [IO.File]::Exists((Get-SafePath $stageRoot $requiredPath))) {
@@ -353,9 +225,6 @@ $expectedTopLevel = @(
     'deps'
     'include'
     'lib'
-    'manifest.json'
-    'NOTICE'
-    'README.md'
 )
 $actualTopLevel = @(
     Get-ChildItem -LiteralPath $stageRoot -Force |
@@ -366,10 +235,20 @@ if (@(Compare-Object ($expectedTopLevel | Sort-Object) $actualTopLevel).Count -n
     throw 'SDK root contains an undeclared compatibility directory or file.'
 }
 
-$cmakeMetadata = @(
-    Get-ChildItem -LiteralPath (
-        Join-Path $stageRoot 'lib\cmake\MVVCVTK') -File
+$cmakeRoot = Join-Path $stageRoot 'lib\cmake\MVVCVTK'
+$cmakeMetadata = @(Get-ChildItem -LiteralPath $cmakeRoot -File)
+$expectedCMakeFiles = @(
+    'MVVCVTKConfig.cmake'
+    'MVVCVTKInternalDependencies.cmake'
+    'MVVCVTKTargets.cmake'
+    'MVVCVTKTargets-debug.cmake'
+    'MVVCVTKTargets-release.cmake'
 )
+$actualCMakeFiles = @($cmakeMetadata.Name | Sort-Object)
+if (@(Compare-Object `
+        ($expectedCMakeFiles | Sort-Object) $actualCMakeFiles).Count -ne 0) {
+    throw 'SDK CMake metadata closure mismatch.'
+}
 $forbiddenRoots = @(
     [IO.Path]::GetFullPath($RepoRoot)
     [IO.Path]::GetFullPath($BuildRoot)
@@ -389,7 +268,12 @@ foreach ($metadataFile in $cmakeMetadata) {
     foreach ($retiredTerm in @(
             'MVVCVTK::FeatureAPI',
             'MVVCVTK::SDK',
-            'MVVCVTKInternal::FeatureSupport')) {
+            'MVVCVTKInternal::FeatureSupport',
+            'MVVCVTKInternal::OpenCVWorld',
+            'MVVCVTKInternal::UIPhantomCalib',
+            'MVVCVTKInternal::UIReconstruct3D',
+            'MVVCVTKDependencyPolicy',
+            'MVVCVTKHeaderSurface')) {
         if ($content.IndexOf(
                 $retiredTerm,
                 [StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -398,49 +282,27 @@ foreach ($metadataFile in $cmakeMetadata) {
     }
 }
 
-if ($manifest.dependencies.packageVersion -ne $DepsVersion -or
-    $manifest.dependencies.bundleMode -ne 'SelfContained') {
-    throw 'Packaged dependency policy mismatch.'
+$depsRoot = Join-Path $stageRoot 'deps'
+$expectedDependencies = @('opencv', 'vtk')
+$actualDependencies = @(
+    Get-ChildItem -LiteralPath $depsRoot -Force |
+        ForEach-Object { $_.Name } |
+        Sort-Object
+)
+if (@(Compare-Object `
+        ($expectedDependencies | Sort-Object) $actualDependencies).Count -ne 0) {
+    throw 'SDK dependency directory closure mismatch.'
 }
-$depsManifestPath = Join-Path $stageRoot 'deps\manifest.json'
-$deps = Get-Content -LiteralPath $depsManifestPath -Raw |
-    ConvertFrom-Json
-$expectedComponents = @{
-    vtk = @('9.4.2', 'msvc-x64')
-    opencv = @('4.12.0', 'vc16-x64')
-    qt = @('5.14.2', 'msvc2017_64')
-    ui = @('ct-1209-sha256', 'qt5-msvc-x64')
-}
-$depConfigs = @($deps.configurations)
-$depComponents = @($deps.components)
-$declaredComponents = @($manifest.dependencies.components)
-if ($deps.schemaVersion -ne 1 -or
-    $deps.packageId -ne 'MVVCVTK.Dependencies' -or
-    $deps.packageVersion -ne $DepsVersion -or
-    $deps.platform -ne 'windows' -or
-    $deps.architecture -ne 'x64' -or
-    $deps.validatedConsumer.platformToolset -ne 'v145' -or
-    $deps.validatedConsumer.windowsTargetPlatformVersion -ne '10.0' -or
-    $depConfigs.Count -ne 2 -or
-    'Debug' -notin $depConfigs -or
-    'Release' -notin $depConfigs -or
-    $depComponents.Count -ne 4) {
-    throw 'Packaged dependency manifest contract mismatch.'
-}
-$depComponentValues = @($depComponents | Sort-Object id |
-        ForEach-Object { "$($_.id)|$($_.version)|$($_.abi)" })
-$declaredComponentValues = @($declaredComponents | Sort-Object id |
-        ForEach-Object { "$($_.id)|$($_.version)|$($_.abi)" })
-if (@(Compare-Object $depComponentValues $declaredComponentValues).Count -ne 0) {
-    throw 'Packaged dependency component declaration mismatch.'
-}
-foreach ($component in $depComponents) {
-    if (-not $expectedComponents.ContainsKey($component.id)) {
-        throw "Unknown packaged dependency component: $($component.id)"
-    }
-    $expected = $expectedComponents[$component.id]
-    if ($component.version -ne $expected[0] -or
-        $component.abi -ne $expected[1]) {
-        throw "Packaged dependency component mismatch: $($component.id)"
+
+foreach ($requiredDependencyPath in @(
+        'deps/vtk/lib/cmake/vtk-9.4/vtk-config.cmake',
+        'deps/opencv/x64/vc16/lib/OpenCVConfig.cmake')) {
+    if (-not [IO.File]::Exists(
+            (Get-SafePath $stageRoot $requiredDependencyPath))) {
+        throw "SDK dependency is missing: $requiredDependencyPath"
     }
 }
+
+Write-Host "MVVCVTK SDK validated: $stageRoot"
+Write-Host "MVVCVTK SDK public headers: $($actualHeaders.Count)"
+Write-Host "MVVCVTK SDK libraries: $($actualLibraries.Count)"

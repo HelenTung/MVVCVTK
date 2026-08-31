@@ -4,12 +4,23 @@ project(MVVCVTKSdkConsumer LANGUAGES CXX)
 
 option(MVVCVTK_CONSUMER_CROP "Link the OrthogonalCrop SDK module." ON)
 option(MVVCVTK_CONSUMER_GAP "Link the GapAnalysis SDK module." ON)
+set(
+    MVVCVTK_VERIFY_SURFACE_FILE
+    ""
+    CACHE FILEPATH
+    "Build-tree MVVCVTK header surface used only by release verification."
+)
+if(NOT EXISTS "${MVVCVTK_VERIFY_SURFACE_FILE}")
+    message(FATAL_ERROR
+        "MVVCVTK verification surface is missing: "
+        "${MVVCVTK_VERIFY_SURFACE_FILE}"
+    )
+endif()
 
-set(_mvvcvtk_components HostAPI Host)
+set(_mvvcvtk_components Host)
 set(_mvvcvtk_links MVVCVTK::Host)
 set(_mvvcvtk_surface_categories HostAPI)
 if(MVVCVTK_CONSUMER_CROP OR MVVCVTK_CONSUMER_GAP)
-    list(APPEND _mvvcvtk_components FeatureSPI)
     list(APPEND _mvvcvtk_surface_categories FeatureSPI)
 endif()
 if(MVVCVTK_CONSUMER_CROP)
@@ -59,7 +70,7 @@ else()
 endif()
 
 file(STRINGS
-    "${MVVCVTK_HEADER_SURFACE_FILE}"
+    "${MVVCVTK_VERIFY_SURFACE_FILE}"
     _mvvcvtk_surface_entries
     ENCODING UTF-8
 )

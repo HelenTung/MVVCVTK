@@ -88,24 +88,34 @@ function Get-SafeTreeItems([string]$root)
     return $items
 }
 
-function Build-DependencyBundle(
+function Build-SdkDependencies(
     [string]$source,
     [string]$destination)
 {
     if (-not [IO.Directory]::Exists($source)) {
         throw "Dependency bundle is missing: $source"
     }
-    $null = @(Get-SafeTreeItems $source)
     Get-SafeAncestors (Split-Path -Parent $destination)
     [IO.Directory]::CreateDirectory($destination) | Out-Null
     Get-SafeAncestors $destination
-    & robocopy.exe $source $destination /E /COPY:DAT /DCOPY:DAT /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
-    $robocopyCode = $LASTEXITCODE
-    if ($robocopyCode -gt 7) {
-        throw "robocopy failed with exit code $robocopyCode."
+
+    foreach ($dependencyName in @('vtk', 'opencv')) {
+        $sourcePath = Join-Path $source $dependencyName
+        $destinationPath = Join-Path $destination $dependencyName
+        if (-not [IO.Directory]::Exists($sourcePath)) {
+            throw "Required SDK dependency is missing: $sourcePath"
+        }
+        $null = @(Get-SafeTreeItems $sourcePath)
+        [IO.Directory]::CreateDirectory($destinationPath) | Out-Null
+        Get-SafeAncestors $destinationPath
+        & robocopy.exe $sourcePath $destinationPath /E /COPY:DAT /DCOPY:DAT /XJ /R:2 /W:1 /NFL /NDL /NJH /NJS /NP
+        $robocopyCode = $LASTEXITCODE
+        if ($robocopyCode -gt 7) {
+            throw "robocopy failed with exit code $robocopyCode."
+        }
+        $global:LASTEXITCODE = 0
+        $null = @(Get-SafeTreeItems $destinationPath)
     }
-    $global:LASTEXITCODE = 0
-    $null = @(Get-SafeTreeItems $destination)
 }
 
 function Set-ConsumerSource(
@@ -199,20 +209,25 @@ function Clear-ConsumerEnv()
     }
 }
 
-function Get-RuntimeDirs([string]$depsRoot)
+function Get-RuntimeDirs(
+    [string]$depsRoot,
+    [string]$qtRoot = '')
 {
-    return @(
-        (Join-Path $depsRoot 'ui\bin')
+    $runtimeDirs = @(
         (Join-Path $depsRoot 'opencv\x64\vc16\bin')
         (Join-Path $depsRoot 'vtk\bin')
-        (Join-Path $depsRoot 'qt\bin')
     )
+    if (-not [string]::IsNullOrWhiteSpace($qtRoot)) {
+        $runtimeDirs += Join-Path $qtRoot 'bin'
+    }
+    return $runtimeDirs
 }
 
 function Start-RuntimeExecutable(
     [string]$executable,
     [string]$depsRoot,
-    [bool]$isQt)
+    [bool]$isQt,
+    [string]$qtRoot = '')
 {
     $oldPath = $env:PATH
     $oldPluginPath = $env:QT_PLUGIN_PATH
@@ -221,9 +236,12 @@ function Start-RuntimeExecutable(
             (Join-Path $env:SystemRoot 'System32')
             $env:SystemRoot
         )
-        $env:PATH = (@(Get-RuntimeDirs $depsRoot) + $systemPath) -join ';'
+        $env:PATH = (@(Get-RuntimeDirs $depsRoot $qtRoot) + $systemPath) -join ';'
         if ($isQt) {
-            $env:QT_PLUGIN_PATH = Join-Path $depsRoot 'qt\plugins'
+            if ([string]::IsNullOrWhiteSpace($qtRoot)) {
+                throw 'Qt runtime root is required for the Qt clean-room consumer.'
+            }
+            $env:QT_PLUGIN_PATH = Join-Path $qtRoot 'plugins'
         }
         Start-Command $executable @()
     }
@@ -236,7 +254,8 @@ function Start-RuntimeExecutable(
 function Start-CMakeConsumer(
     [string]$verifyBase,
     [string]$stage,
-    [string]$repoRoot)
+    [string]$repoRoot,
+    [string]$productBuildRoot)
 {
     $consumerRoot = Join-Path $verifyBase 'cmake'
     Clear-SafeDirectory $verifyBase $consumerRoot
@@ -250,25 +269,26 @@ function Start-CMakeConsumer(
         [ordered]@{ name = 'host-crop-gap'; crop = 'ON'; gap = 'ON' }
     )
     foreach ($consumerCase in $consumerCases) {
-        $buildRoot = Join-Path $consumerRoot "build-$($consumerCase.name)"
+        $caseBuildRoot = Join-Path $consumerRoot "build-$($consumerCase.name)"
         Start-Command $script:cmakePath @(
             '-S', $sourceRoot,
-            '-B', $buildRoot,
+            '-B', $caseBuildRoot,
             '-G', 'Visual Studio 18 2026',
             '-A', 'x64',
             '-T', 'v145,host=x64',
             "-DMVVCVTK_DIR=$(Join-Path $stage 'lib\cmake\MVVCVTK')",
+            "-DMVVCVTK_VERIFY_SURFACE_FILE=$(Join-Path $productBuildRoot 'MVVCVTKHeaderSurface.txt')",
             "-DMVVCVTK_CONSUMER_CROP=$($consumerCase.crop)",
             "-DMVVCVTK_CONSUMER_GAP=$($consumerCase.gap)"
         )
         foreach ($configuration in @('Debug', 'Release')) {
             Start-Command $script:cmakePath @(
-                '--build', $buildRoot,
+                '--build', $caseBuildRoot,
                 '--config', $configuration,
                 '--parallel'
             )
             Start-RuntimeExecutable (
-                Join-Path $buildRoot "$configuration\mvvcvtk_sdk_consumer.exe") (
+                Join-Path $caseBuildRoot "$configuration\mvvcvtk_sdk_consumer.exe") (
                 Join-Path $stage 'deps') $false
         }
     }
@@ -277,7 +297,8 @@ function Start-CMakeConsumer(
 function Start-QtConsumer(
     [string]$verifyBase,
     [string]$stage,
-    [string]$repoRoot)
+    [string]$repoRoot,
+    [string]$devDepsRoot)
 {
     $consumerRoot = Join-Path $verifyBase 'qt-cmake'
     Clear-SafeDirectory $verifyBase $consumerRoot
@@ -285,7 +306,8 @@ function Start-QtConsumer(
     $buildRoot = Join-Path $consumerRoot 'build'
     Set-ConsumerSource (Join-Path $repoRoot 'tools\release\qt-consumer') `
         $sourceRoot
-    $depsRoot = Join-Path $stage 'deps'
+    $stageDepsRoot = Join-Path $stage 'deps'
+    $qtRoot = Join-Path $devDepsRoot 'qt'
     Start-Command $script:cmakePath @(
         '-S', $sourceRoot,
         '-B', $buildRoot,
@@ -293,8 +315,8 @@ function Start-QtConsumer(
         '-A', 'x64',
         '-T', 'v145,host=x64',
         "-DMVVCVTK_DIR=$(Join-Path $stage 'lib\cmake\MVVCVTK')",
-        "-DQt5_DIR=$(Join-Path $depsRoot 'qt\lib\cmake\Qt5')",
-        "-DVTK_DIR=$(Join-Path $depsRoot 'vtk\lib\cmake\vtk-9.4')"
+        "-DQt5_DIR=$(Join-Path $qtRoot 'lib\cmake\Qt5')",
+        "-DVTK_DIR=$(Join-Path $stageDepsRoot 'vtk\lib\cmake\vtk-9.4')"
     )
     foreach ($configuration in @('Debug', 'Release')) {
         Start-Command $script:cmakePath @(
@@ -304,7 +326,7 @@ function Start-QtConsumer(
         )
         Start-RuntimeExecutable (
             Join-Path $buildRoot "$configuration\MVVCVTKQtCleanRoom.exe") (
-            $depsRoot) $true
+            $stageDepsRoot) $true $qtRoot
     }
 }
 
@@ -384,38 +406,16 @@ foreach ($configuration in @('Debug', 'Release')) {
         '--prefix', $stage
     )
 }
-Build-DependencyBundle $depsRoot (Join-Path $stage 'deps')
+Build-SdkDependencies $depsRoot (Join-Path $stage 'deps')
 
-$buildInfo = Get-BuildInfo $buildRoot
-Start-Command $powerShellPath @(
-    '-NoProfile',
-    '-ExecutionPolicy', 'Bypass',
-    '-File', (Join-Path $repoRoot 'tools\release\New-MVVCVTKSdkManifest.ps1'),
-    '-Stage', $stage,
-    '-RepoRoot', $repoRoot,
-    '-PackageRevision', $PackageRevision,
-    '-DirectoryVersion', $directoryVersion,
-    '-DepsVersion', $depsVersion,
-    '-CMakeVersion', $buildInfo.cmakeVersion,
-    '-CMakeGenerator', $buildInfo.generator,
-    '-CMakeGeneratorToolset', $buildInfo.generatorToolset,
-    '-CompilerVersion', $buildInfo.compilerVersion,
-    '-MsvcVersion', $buildInfo.msvcVersion,
-    '-MsvcToolsVersion', $buildInfo.msvcToolsVersion,
-    '-WindowsSdkVersion', $buildInfo.windowsSdkVersion,
-    '-ReleaseInstructionSet', $buildInfo.releaseInstructionSet,
-    '-ArchiveName', $archiveName
-)
+$null = Get-BuildInfo $buildRoot
 Start-Command $powerShellPath @(
     '-NoProfile',
     '-ExecutionPolicy', 'Bypass',
     '-File', (Join-Path $repoRoot 'tools\release\Test-MVVCVTKSdk.ps1'),
     '-Stage', $stage,
     '-RepoRoot', $repoRoot,
-    '-BuildRoot', $buildRoot,
-    '-PackageRevision', $PackageRevision,
-    '-DirectoryVersion', $directoryVersion,
-    '-DepsVersion', $depsVersion
+    '-BuildRoot', $buildRoot
 )
 
 if (-not $SkipCleanRoom) {
@@ -423,8 +423,8 @@ if (-not $SkipCleanRoom) {
     [IO.Directory]::CreateDirectory($verifyBase) | Out-Null
     Get-SafeAncestors $verifyBase
     Clear-ConsumerEnv
-    Start-CMakeConsumer $verifyBase $stage $repoRoot
-    Start-QtConsumer $verifyBase $stage $repoRoot
+    Start-CMakeConsumer $verifyBase $stage $repoRoot $buildRoot
+    Start-QtConsumer $verifyBase $stage $repoRoot $depsRoot
 }
 
 Start-Command $powerShellPath @(
