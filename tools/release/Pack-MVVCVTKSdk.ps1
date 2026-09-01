@@ -102,6 +102,34 @@ if (@(Compare-Object `
     throw 'SDK stage contains an unexpected top-level entry.'
 }
 
+$includeRoot = Join-Path $stageRoot 'include'
+$includeItems = @(Get-ChildItem -LiteralPath $includeRoot -Force)
+$includeEntries = @($includeItems.Name | Sort-Object)
+if (($includeEntries -join '|') -cne 'MVVCVTK' -or
+    @($includeItems | Where-Object { -not $_.PSIsContainer }).Count -ne 0) {
+    throw 'SDK include root must contain only the MVVCVTK directory.'
+}
+$surfaceRoot = Join-Path $includeRoot 'MVVCVTK'
+$surfaceItems = @(Get-ChildItem -LiteralPath $surfaceRoot -Force)
+$surfaceEntries = @($surfaceItems.Name | Sort-Object)
+if (($surfaceEntries -join '|') -cne 'API|SPI' -or
+    @($surfaceItems | Where-Object { -not $_.PSIsContainer }).Count -ne 0) {
+    throw 'MVVCVTK SDK headers must be partitioned into API and SPI.'
+}
+$includePrefix = $includeRoot
+if (-not $includePrefix.EndsWith(
+        [string][IO.Path]::DirectorySeparatorChar)) {
+    $includePrefix += [IO.Path]::DirectorySeparatorChar
+}
+foreach ($header in (
+        Get-ChildItem -LiteralPath $includeRoot -Recurse -File)) {
+    $headerPath = $header.FullName.Substring(
+        $includePrefix.Length).Replace('\', '/')
+    if ($headerPath -cnotmatch '^MVVCVTK/(API|SPI)/.+\.h$') {
+        throw "SDK header is outside the API/SPI partition: $headerPath"
+    }
+}
+
 Get-SafeAncestors (Split-Path -Parent $packagePath)
 [IO.Directory]::CreateDirectory($packagePath) | Out-Null
 Get-SafeAncestors $packagePath

@@ -1,5 +1,9 @@
 set(MVVCVTK_HOST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(
+    MVVCVTK_HOST_SOURCE_API_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-host-source-api-include"
+)
+set(
     MVVCVTK_HOST_SDK_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-sdk-host-include"
 )
@@ -8,12 +12,107 @@ set(
     "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-sdk-feature-spi-include"
 )
 set(
+    MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-feature-source-spi-include"
+)
+set(
     MVVCVTK_CROP_SDK_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/features/OrthogonalCrop/mvvcvtk-sdk-include"
 )
 set(
+    MVVCVTK_CROP_SOURCE_API_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/features/OrthogonalCrop/mvvcvtk-source-api-include"
+)
+set(
     MVVCVTK_GAP_SDK_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/features/GapAnalysis/mvvcvtk-sdk-include"
+)
+set(
+    MVVCVTK_GAP_SOURCE_API_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/features/GapAnalysis/mvvcvtk-source-api-include"
+)
+set(
+    MVVCVTK_SDK_CLOSURE_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-sdk-closure-include"
+)
+
+# 源码头继续使用仓内既有路径；映射表只定义 SDK staging/install 中的物理路径。
+function(SetSdkHeaderMap)
+    set(sourceHeaders)
+    set(sdkHeaders)
+    set(sourceKeys)
+    set(sdkKeys)
+    foreach(headerEntry IN LISTS ARGN)
+        if(NOT headerEntry MATCHES "^([^|]+)\\|([^|]+)$")
+            message(FATAL_ERROR "Invalid SDK header mapping: ${headerEntry}")
+        endif()
+        set(sourceHeader "${CMAKE_MATCH_1}")
+        set(sdkHeader "${CMAKE_MATCH_2}")
+        cmake_path(NORMAL_PATH sourceHeader OUTPUT_VARIABLE normalizedSource)
+        cmake_path(NORMAL_PATH sdkHeader OUTPUT_VARIABLE normalizedSdk)
+        string(FIND "${sourceHeader}" "\\" sourceBackslashIndex)
+        string(FIND "${sdkHeader}" "\\" sdkBackslashIndex)
+        if(NOT normalizedSource STREQUAL sourceHeader
+            OR NOT normalizedSdk STREQUAL sdkHeader
+            OR NOT sourceBackslashIndex EQUAL -1
+            OR NOT sdkBackslashIndex EQUAL -1
+            OR NOT sourceHeader MATCHES "^include/.+\\.h$"
+            OR NOT sdkHeader MATCHES "^MVVCVTK/(API|SPI)/.+\\.h$")
+            message(FATAL_ERROR "Unsafe SDK header mapping: ${headerEntry}")
+        endif()
+
+        string(TOLOWER "${sourceHeader}" sourceKey)
+        string(TOLOWER "${sdkHeader}" sdkKey)
+        list(FIND sourceKeys "${sourceKey}" sourceIndex)
+        list(FIND sdkKeys "${sdkKey}" sdkIndex)
+        if(NOT sourceIndex EQUAL -1 OR NOT sdkIndex EQUAL -1)
+            message(FATAL_ERROR
+                "Duplicate SDK header mapping: ${headerEntry}"
+            )
+        endif()
+        list(APPEND sourceHeaders "${sourceHeader}")
+        list(APPEND sdkHeaders "${sdkHeader}")
+        list(APPEND sourceKeys "${sourceKey}")
+        list(APPEND sdkKeys "${sdkKey}")
+    endforeach()
+    set_property(GLOBAL PROPERTY MVVCVTK_SDK_MAP_SOURCES "${sourceHeaders}")
+    set_property(GLOBAL PROPERTY MVVCVTK_SDK_MAP_TARGETS "${sdkHeaders}")
+endfunction()
+
+function(GetSdkHeaderPath outputName sourceHeader)
+    get_property(sourceHeaders GLOBAL PROPERTY MVVCVTK_SDK_MAP_SOURCES)
+    get_property(sdkHeaders GLOBAL PROPERTY MVVCVTK_SDK_MAP_TARGETS)
+    list(FIND sourceHeaders "${sourceHeader}" headerIndex)
+    if(headerIndex EQUAL -1)
+        message(FATAL_ERROR
+            "SDK header has no install mapping: ${sourceHeader}"
+        )
+    endif()
+    list(GET sdkHeaders ${headerIndex} sdkHeader)
+    set(${outputName} "${sdkHeader}" PARENT_SCOPE)
+endfunction()
+
+SetSdkHeaderMap(
+    "include/Host/VtkAppHostSession.h|MVVCVTK/API/Host/VtkAppHostSession.h"
+    "include/Host/Types/HostRequestTypes.h|MVVCVTK/API/Host/Types/HostRequestTypes.h"
+    "include/Host/Types/HostSessionTypes.h|MVVCVTK/API/Host/Types/HostSessionTypes.h"
+    "include/Host/Types/HostValueTypes.h|MVVCVTK/API/Host/Types/HostValueTypes.h"
+    "include/Host/Types/HostViewTypes.h|MVVCVTK/API/Host/Types/HostViewTypes.h"
+    "include/Data/DataVersion.h|MVVCVTK/API/Data/DataVersion.h"
+    "include/Data/ImageReadTypes.h|MVVCVTK/API/Data/ImageReadTypes.h"
+    "include/Host/HostFeature.h|MVVCVTK/SPI/Host/HostFeature.h"
+    "include/App/Services/FeatureViewService.h|MVVCVTK/SPI/App/Services/FeatureViewService.h"
+    "include/Render/Contracts/FeatureOverlay.h|MVVCVTK/SPI/Render/Contracts/FeatureOverlay.h"
+    "include/Render/Contracts/OverlayService.h|MVVCVTK/SPI/Render/Contracts/OverlayService.h"
+    "include/Render/Contracts/RenderEffect.h|MVVCVTK/SPI/Render/Contracts/RenderEffect.h"
+    "include/App/FeatureTypes.h|MVVCVTK/SPI/App/FeatureTypes.h"
+    "include/App/ViewTypes.h|MVVCVTK/SPI/App/ViewTypes.h"
+    "include/Data/TrustedImageState.h|MVVCVTK/SPI/Data/TrustedImageState.h"
+    "include/Interaction/InteractionTypes.h|MVVCVTK/SPI/Interaction/InteractionTypes.h"
+    "include/Host/CropHostFeature.h|MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h"
+    "include/OrthogonalCropTypes.h|MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h"
+    "include/Host/GapHostFeature.h|MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h"
+    "include/Host/GapHostTypes.h|MVVCVTK/API/Features/GapAnalysis/Host/GapHostTypes.h"
 )
 
 # 源码目录保持原样；所有公开面先经过同一份声明与路径校验，再生成 staging、
@@ -22,6 +121,7 @@ function(SetHeaderSurface outputName sourceRoot)
     file(REAL_PATH "${sourceRoot}" sourceRootReal)
     string(TOLOWER "${sourceRootReal}" comparisonSourceRoot)
     set(surfaceHeaders)
+    set(surfaceSdkHeaders)
     set(surfaceKeys)
     foreach(header IN LISTS ARGN)
         set(headerPath "${header}")
@@ -81,35 +181,78 @@ function(SetHeaderSurface outputName sourceRoot)
         endif()
 
         list(APPEND surfaceHeaders "${normalizedHeader}")
+        GetSdkHeaderPath(sdkHeader "${normalizedHeader}")
+        list(APPEND surfaceSdkHeaders "${sdkHeader}")
         list(APPEND surfaceKeys "${headerKey}")
     endforeach()
     set(${outputName} "${surfaceHeaders}" PARENT_SCOPE)
     set_property(GLOBAL PROPERTY "${outputName}" "${surfaceHeaders}")
+    set_property(
+        GLOBAL PROPERTY
+        "${outputName}_SDK_PATHS"
+        "${surfaceSdkHeaders}"
+    )
 endfunction()
 
 function(GetSdkHeaderPaths outputName stagingRoot)
     set(stagedHeaders)
     set(stagedKeys)
     foreach(header IN LISTS ARGN)
-        string(REGEX REPLACE "^include/" "" relativeHeader "${header}")
-        string(TOLOWER "${relativeHeader}" stagedKey)
+        GetSdkHeaderPath(sdkHeader "${header}")
+        string(TOLOWER "${sdkHeader}" stagedKey)
         list(FIND stagedKeys "${stagedKey}" duplicateIndex)
         if(NOT duplicateIndex EQUAL -1)
             message(FATAL_ERROR
-                "Duplicate SDK staging destination: ${relativeHeader}"
+                "Duplicate SDK staging destination: ${sdkHeader}"
             )
         endif()
-        list(APPEND stagedHeaders "${stagingRoot}/${relativeHeader}")
+        list(APPEND stagedHeaders "${stagingRoot}/${sdkHeader}")
         list(APPEND stagedKeys "${stagedKey}")
     endforeach()
     set(${outputName} "${stagedHeaders}" PARENT_SCOPE)
 endfunction()
 
-# configure_file 会把输入登记为配置依赖，源头变化时由 CMake 刷新副本。
+# SDK 副本只在构建树改写公开 include；仓内源码和 include 路径保持原样。
 function(BuildSdkHeaders outputName sourceRoot stagingRoot)
     set(sourceHeaders ${ARGN})
     GetSdkHeaderPaths(stagedHeaders "${stagingRoot}" ${sourceHeaders})
+    get_property(mapSources GLOBAL PROPERTY MVVCVTK_SDK_MAP_SOURCES)
+    get_property(mapTargets GLOBAL PROPERTY MVVCVTK_SDK_MAP_TARGETS)
     foreach(sourceHeader stagedHeader IN ZIP_LISTS sourceHeaders stagedHeaders)
+        cmake_path(GET stagedHeader PARENT_PATH stagedDirectory)
+        file(MAKE_DIRECTORY "${stagedDirectory}")
+        set(sourcePath "${sourceRoot}/${sourceHeader}")
+        set_property(
+            DIRECTORY APPEND PROPERTY
+            CMAKE_CONFIGURE_DEPENDS "${sourcePath}"
+        )
+        file(READ "${sourcePath}" stagedContent)
+        foreach(mapSource mapTarget IN ZIP_LISTS mapSources mapTargets)
+            string(REGEX REPLACE "^include/" "" sourceInclude "${mapSource}")
+            string(REPLACE
+                "#include \"${sourceInclude}\""
+                "#include \"${mapTarget}\""
+                stagedContent
+                "${stagedContent}"
+            )
+            string(REPLACE
+                "#include <${sourceInclude}>"
+                "#include <${mapTarget}>"
+                stagedContent
+                "${stagedContent}"
+            )
+        endforeach()
+        file(WRITE "${stagedHeader}" "${stagedContent}")
+    endforeach()
+    set(${outputName} "${stagedHeaders}" PARENT_SCOPE)
+endfunction()
+
+# 仓内 Feature 继续按源码 include 名编译；该视图仅存在于 build tree。
+function(BuildSourceHeaders outputName sourceRoot stagingRoot)
+    set(stagedHeaders)
+    foreach(sourceHeader IN LISTS ARGN)
+        string(REGEX REPLACE "^include/" "" relativeHeader "${sourceHeader}")
+        set(stagedHeader "${stagingRoot}/${relativeHeader}")
         cmake_path(GET stagedHeader PARENT_PATH stagedDirectory)
         file(MAKE_DIRECTORY "${stagedDirectory}")
         configure_file(
@@ -117,6 +260,7 @@ function(BuildSdkHeaders outputName sourceRoot stagingRoot)
             "${stagedHeader}"
             COPYONLY
         )
+        list(APPEND stagedHeaders "${stagedHeader}")
     endforeach()
     set(${outputName} "${stagedHeaders}" PARENT_SCOPE)
 endfunction()
@@ -200,14 +344,14 @@ function(ResetSdkStage stagingRoot)
     endif()
 endfunction()
 
-# closure support 随安装包交付，但不进入公开 FILE_SET 元数据。
-function(ExportHeaders componentName)
+# closure support 从已改写的 SDK staging 安装，不读取或改动源码头。
+function(ExportHeaders componentName stagingRoot)
     foreach(header IN LISTS ARGN)
-        string(REGEX REPLACE "^include/" "" relativeHeader "${header}")
-        cmake_path(GET relativeHeader PARENT_PATH relativeDirectory)
+        GetSdkHeaderPath(sdkHeader "${header}")
+        cmake_path(GET sdkHeader PARENT_PATH sdkDirectory)
         install(
-            FILES "${CMAKE_CURRENT_SOURCE_DIR}/${header}"
-            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${relativeDirectory}"
+            FILES "${stagingRoot}/${sdkHeader}"
+            DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/${sdkDirectory}"
             COMPONENT ${componentName}
         )
     endforeach()
@@ -216,8 +360,8 @@ endfunction()
 function(SetSurfaceLines outputName categoryName)
     set(surfaceLines)
     foreach(header IN LISTS ARGN)
-        string(REGEX REPLACE "^include/" "" relativeHeader "${header}")
-        list(APPEND surfaceLines "${categoryName}|${relativeHeader}")
+        GetSdkHeaderPath(sdkHeader "${header}")
+        list(APPEND surfaceLines "${categoryName}|${sdkHeader}")
     endforeach()
     set(${outputName} "${surfaceLines}" PARENT_SCOPE)
 endfunction()
@@ -369,13 +513,29 @@ SetHeaderSurface(
 unset(_mvvcvtk_sdk_closure_headers)
 
 # 每次配置都重建批准视图，避免已移出白名单的旧头残留在 staging 中。
+ResetSdkStage("${MVVCVTK_HOST_SOURCE_API_INCLUDE_DIR}")
 ResetSdkStage("${MVVCVTK_HOST_SDK_INCLUDE_DIR}")
 ResetSdkStage("${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}")
+ResetSdkStage("${MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR}")
+ResetSdkStage("${MVVCVTK_SDK_CLOSURE_INCLUDE_DIR}")
+
+BuildSdkHeaders(
+    MVVCVTK_SDK_STAGED_CLOSURE_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_SDK_CLOSURE_INCLUDE_DIR}"
+    ${MVVCVTK_SDK_CLOSURE_HEADERS}
+)
 
 set(
     _mvvcvtk_host_stage_headers
     ${MVVCVTK_HOST_PUBLIC_HEADERS}
     ${MVVCVTK_HOST_CLOSURE_HEADERS}
+)
+BuildSourceHeaders(
+    MVVCVTK_HOST_SOURCE_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_HOST_SOURCE_API_INCLUDE_DIR}"
+    ${_mvvcvtk_host_stage_headers}
 )
 BuildSdkHeaders(
     MVVCVTK_HOST_STAGED_HEADERS
@@ -399,6 +559,12 @@ BuildSdkHeaders(
     MVVCVTK_FEATURE_STAGED_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
+    ${_mvvcvtk_spi_stage_headers}
+)
+BuildSourceHeaders(
+    MVVCVTK_FEATURE_SOURCE_SPI_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR}"
     ${_mvvcvtk_spi_stage_headers}
 )
 GetSdkHeaderPaths(
@@ -427,7 +593,9 @@ target_sources(
 )
 target_include_directories(
     mvvcvtk_host_api
-    INTERFACE "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    INTERFACE
+        "$<BUILD_INTERFACE:${MVVCVTK_HOST_SOURCE_API_INCLUDE_DIR}>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 SetApiDefaults(mvvcvtk_host_api)
 target_link_libraries(
@@ -460,7 +628,9 @@ target_sources(
 )
 target_include_directories(
     mvvcvtk_feature_spi
-    INTERFACE "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
+    INTERFACE
+        "$<BUILD_INTERFACE:${MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR}>"
+        "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 SetApiDefaults(mvvcvtk_feature_spi)
 target_link_libraries(
@@ -473,7 +643,12 @@ install(
     FILE_SET spi_headers DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
         COMPONENT Host
 )
-ExportHeaders(Host ${MVVCVTK_SDK_CLOSURE_HEADERS})
+
+ExportHeaders(
+    Host
+    "${MVVCVTK_SDK_CLOSURE_INCLUDE_DIR}"
+    ${MVVCVTK_SDK_CLOSURE_HEADERS}
+)
 add_subdirectory(features/Support)
 
 add_library(mvvcvtk_host STATIC)
@@ -562,13 +737,13 @@ foreach(header IN LISTS
     MVVCVTK_CROP_API_HEADERS
     MVVCVTK_GAP_API_HEADERS
 )
-    string(REGEX REPLACE "^include/" "" relativeHeader "${header}")
-    string(TOLOWER "${relativeHeader}" installKey)
+    GetSdkHeaderPath(sdkHeader "${header}")
+    string(TOLOWER "${sdkHeader}" installKey)
     list(FIND _mvvcvtk_install_keys "${installKey}" duplicateIndex)
     if(NOT duplicateIndex EQUAL -1)
         message(FATAL_ERROR
             "Multiple SDK sources target the same installed header: "
-            "${relativeHeader}"
+            "${sdkHeader}"
         )
     endif()
     list(APPEND _mvvcvtk_install_keys "${installKey}")
@@ -660,11 +835,14 @@ set(
 
 unset(MVVCVTK_FEATURE_SPI_HEADERS)
 unset(MVVCVTK_FEATURE_SPI_CLOSURE_HEADERS)
+unset(MVVCVTK_FEATURE_SOURCE_SPI_HEADERS)
 unset(MVVCVTK_FEATURE_STAGED_HEADERS)
 unset(MVVCVTK_FEATURE_STAGED_SPI_HEADERS)
 unset(MVVCVTK_SDK_CLOSURE_HEADERS)
+unset(MVVCVTK_SDK_STAGED_CLOSURE_HEADERS)
 unset(MVVCVTK_HOST_CLOSURE_HEADERS)
 unset(MVVCVTK_HOST_PUBLIC_HEADERS)
+unset(MVVCVTK_HOST_SOURCE_API_HEADERS)
 unset(MVVCVTK_HOST_SOURCES)
 unset(MVVCVTK_HOST_STAGED_HEADERS)
 unset(MVVCVTK_HOST_STAGED_PUBLIC_HEADERS)

@@ -293,6 +293,12 @@ foreach(_mvvcvtk_surface_entry IN LISTS _mvvcvtk_surface_entries)
     endif()
     set(_mvvcvtk_surface_category "${CMAKE_MATCH_1}")
     set(_mvvcvtk_surface_header "${CMAKE_MATCH_2}")
+    if(NOT _mvvcvtk_surface_header MATCHES
+        "^MVVCVTK/(API|SPI)/.+\\.h$")
+        message(FATAL_ERROR
+            "Unpartitioned MVVCVTK SDK header: ${_mvvcvtk_surface_header}"
+        )
+    endif()
     if(_mvvcvtk_surface_category IN_LIST _mvvcvtk_surface_categories)
         string(TOLOWER "${_mvvcvtk_surface_header}" _mvvcvtk_surface_key)
         list(FIND
@@ -391,17 +397,17 @@ endif()
 '@
 
     $mainContent = @'
-#include "Host/VtkAppHostSession.h"
-#include "Host/Types/HostRequestTypes.h"
+#include "MVVCVTK/API/Host/VtkAppHostSession.h"
+#include "MVVCVTK/API/Host/Types/HostRequestTypes.h"
 #include <opencv2/core/utility.hpp>
 
 #if MVVCVTK_PROBE_CROP
-#include "Host/HostFeature.h"
-#include "Host/CropHostFeature.h"
+#include "MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h"
+#include "MVVCVTK/SPI/Host/HostFeature.h"
 #endif
 #if MVVCVTK_PROBE_GAP
-#include "Host/HostFeature.h"
-#include "Host/GapHostFeature.h"
+#include "MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h"
+#include "MVVCVTK/SPI/Host/HostFeature.h"
 #endif
 
 #include <memory>

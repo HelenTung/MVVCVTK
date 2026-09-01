@@ -20,7 +20,6 @@ function(GetStageHeaders outputName stagingRoot)
         RELATIVE "${stagingRoot}"
         "${stagingRoot}/*"
     )
-    list(TRANSFORM stageHeaders TOLOWER)
     list(SORT stageHeaders)
     set(${outputName} "${stageHeaders}" PARENT_SCOPE)
 endfunction()
@@ -38,14 +37,52 @@ function(SetStageExpected outputName expectedHeaderCsv)
         endif()
         list(APPEND headerKeys "${headerKey}")
     endforeach()
-    list(SORT headerKeys)
-    set(${outputName} "${headerKeys}" PARENT_SCOPE)
+    list(SORT stageHeaders)
+    set(${outputName} "${stageHeaders}" PARENT_SCOPE)
+endfunction()
+
+function(SetStageLayout stageName allowedSurfaces)
+    foreach(stageHeader IN LISTS ARGN)
+        if(NOT stageHeader MATCHES "^MVVCVTK/(API|SPI)/.+\\.h$")
+            message(FATAL_ERROR
+                "${stageName} staging contains an unpartitioned SDK path: "
+                "${stageHeader}"
+            )
+        endif()
+        string(
+            REGEX REPLACE
+            "^MVVCVTK/([^/]+)/.*$"
+            "\\1"
+            headerSurface
+            "${stageHeader}"
+        )
+        list(FIND allowedSurfaces "${headerSurface}" surfaceIndex)
+        if(surfaceIndex EQUAL -1)
+            message(FATAL_ERROR
+                "${stageName} staging exposes the wrong SDK surface: "
+                "${stageHeader}"
+            )
+        endif()
+    endforeach()
 endfunction()
 
 GetStageHeaders(actualHostHeaders "${HOST_STAGING_ROOT}")
 GetStageHeaders(actualSpiHeaders "${SPI_STAGING_ROOT}")
 GetStageHeaders(actualCropHeaders "${CROP_STAGING_ROOT}")
 GetStageHeaders(actualGapHeaders "${GAP_STAGING_ROOT}")
+if(NOT actualHostHeaders OR NOT actualSpiHeaders)
+    message(FATAL_ERROR "Required Host/API or Feature/SPI staging is empty.")
+endif()
+if(NOT EXPECTED_CROP_HEADERS STREQUAL "" AND NOT actualCropHeaders)
+    message(FATAL_ERROR "Enabled OrthogonalCrop staging is empty.")
+endif()
+if(NOT EXPECTED_GAP_HEADERS STREQUAL "" AND NOT actualGapHeaders)
+    message(FATAL_ERROR "Enabled GapAnalysis staging is empty.")
+endif()
+SetStageLayout(Host "API" ${actualHostHeaders})
+SetStageLayout(FeatureSPI "API;SPI" ${actualSpiHeaders})
+SetStageLayout(OrthogonalCrop "API" ${actualCropHeaders})
+SetStageLayout(GapAnalysis "API" ${actualGapHeaders})
 SetStageExpected(expectedHostHeaders "${EXPECTED_HOST_HEADERS}")
 SetStageExpected(expectedSpiHeaders "${EXPECTED_SPI_HEADERS}")
 SetStageExpected(expectedCropHeaders "${EXPECTED_CROP_HEADERS}")

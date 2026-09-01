@@ -23,10 +23,17 @@ SetHeaderSurface(
 
 # Feature target 与核心 API 一样只向 build-tree consumer 暴露批准视图。
 ResetSdkStage("${MVVCVTK_CROP_SDK_INCLUDE_DIR}")
+ResetSdkStage("${MVVCVTK_CROP_SOURCE_API_INCLUDE_DIR}")
 BuildSdkHeaders(
     MVVCVTK_CROP_STAGED_API_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${MVVCVTK_CROP_SDK_INCLUDE_DIR}"
+    ${MVVCVTK_CROP_API_HEADERS}
+)
+BuildSourceHeaders(
+    MVVCVTK_CROP_SOURCE_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_CROP_SOURCE_API_INCLUDE_DIR}"
     ${MVVCVTK_CROP_API_HEADERS}
 )
 
@@ -82,10 +89,12 @@ source_group(
 unset(_mvvcvtk_crop_ide_files)
 unset(MVVCVTK_CROP_SOURCES)
 unset(MVVCVTK_CROP_API_HEADERS)
+unset(MVVCVTK_CROP_SOURCE_API_HEADERS)
 unset(MVVCVTK_CROP_STAGED_API_HEADERS)
 target_include_directories(
     mvvcvtk_orthogonal_crop
     PUBLIC
+        "$<BUILD_INTERFACE:${MVVCVTK_CROP_SOURCE_API_INCLUDE_DIR}>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 SetApiDefaults(mvvcvtk_orthogonal_crop)

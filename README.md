@@ -92,7 +92,7 @@ target_link_libraries(app PRIVATE
 
 ## SDK 公开头边界
 
-SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`、`Host/CropHostFeature.h`、`Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 声明生成。`MVVCVTKHeaderSurface.txt` 只留在构建树供发布验证使用，不进入 SDK。`HostAPI`、`FeatureSPI` 和两个 Feature 产品 target 在 build tree 中分别只暴露各自 staging include 根，Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。源码 `include/` 整树不属于 SDK 暴露面。
+SDK 项目头统一位于 `include/MVVCVTK/`，其下只允许 `API/` 与 `SPI/` 两个物理分面。顶层业务入口是 `MVVCVTK/API/Host/VtkAppHostSession.h`、`MVVCVTK/SPI/Host/HostFeature.h`、`MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h`、`MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 映射生成。`MVVCVTKHeaderSurface.txt` 只留在构建树供发布验证使用，不进入 SDK。源码目录和仓内 include 路径保持原样；SDK staging 副本单独改写为安装态路径。Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。
 
 ## 线程与停止规则
 
@@ -105,7 +105,7 @@ SDK 的顶层业务入口是 `Host/VtkAppHostSession.h`、`Host/HostFeature.h`�
 
 ## 图像读取与信任边界
 
-普通调用者只包含 `Data/ImageReadTypes.h`。同步读取支持相对源图像的半开 region；chunk 每次最多复制 8 MiB，并通过 region 内 x-fast voxel offset 续读；`StartImageRead` 在固定 executor 上复制不可变快照并在 owner timer 回调。所有尺寸、字节数、region 边界和 offset 都在分配前检查。
+普通调用者只包含 `MVVCVTK/API/Data/ImageReadTypes.h`。同步读取支持相对源图像的半开 region；chunk 每次最多复制 8 MiB，并通过 region 内 x-fast voxel offset 续读；`StartImageRead` 在固定 executor 上复制不可变快照并在 owner timer 回调。所有尺寸、字节数、region 边界和 offset 都在分配前检查。
 
 外部 Feature 属于 `trusted-in-process` 插件，不是沙箱或安全隔离边界。它可以通过 `TrustedFeatureDataPort` 取得 VTK-backed 不可变快照并执行基于 snapshot identity/version 的 CAS 发布，因此只能加载同一信任域、同一固定 ABI 构建的代码。普通 Session 读取 DTO 不包含 VTK identity 或可写 scalar 指针；只读端口与可信写入端口是不同能力。
 

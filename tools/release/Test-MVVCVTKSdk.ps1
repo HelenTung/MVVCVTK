@@ -133,7 +133,7 @@ function Get-HeaderSurface(
             $headerPath = $match.Groups[2].Value
             $null = Get-SafePath $stageRoot "include/$headerPath"
             if ($category -notin $allowedCategories -or
-                -not $headerPath.EndsWith('.h') -or
+                $headerPath -cnotmatch '^MVVCVTK/(API|SPI)/.+\.h$' -or
                 -not $seenEntries.Add("$category|$headerPath")) {
                 throw "Unsafe or duplicate SDK header surface entry: $line"
             }
@@ -147,6 +147,24 @@ function Get-HeaderSurface(
         throw 'SDK header surface metadata is empty.'
     }
     return $entries
+}
+
+function Set-SdkIncludeLayout([string]$includeRoot)
+{
+    $includeItems = @(Get-ChildItem -LiteralPath $includeRoot -Force)
+    $includeEntries = @($includeItems.Name | Sort-Object)
+    if (($includeEntries -join '|') -cne 'MVVCVTK' -or
+        @($includeItems | Where-Object { -not $_.PSIsContainer }).Count -ne 0) {
+        throw 'SDK include root must contain only the MVVCVTK directory.'
+    }
+
+    $surfaceRoot = Join-Path $includeRoot 'MVVCVTK'
+    $surfaceItems = @(Get-ChildItem -LiteralPath $surfaceRoot -Force)
+    $surfaceEntries = @($surfaceItems.Name | Sort-Object)
+    if (($surfaceEntries -join '|') -cne 'API|SPI' -or
+        @($surfaceItems | Where-Object { -not $_.PSIsContainer }).Count -ne 0) {
+        throw 'MVVCVTK SDK headers must be partitioned into API and SPI.'
+    }
 }
 
 $stageRoot = [IO.Path]::GetFullPath($Stage)
@@ -177,12 +195,14 @@ if (-not $toolsMatch.Success -or
 $headerSurface = @(Get-HeaderSurface $BuildRoot $stageRoot)
 $expectedHeaders = @($headerSurface.path | Sort-Object -Unique)
 $includeRoot = Join-Path $stageRoot 'include'
+Set-SdkIncludeLayout $includeRoot
 $actualHeaders = @(
-    Get-ChildItem -LiteralPath $includeRoot -Recurse -File -Filter '*.h' |
+    Get-ChildItem -LiteralPath $includeRoot -Recurse -File |
         ForEach-Object { Get-RelativePath $includeRoot $_.FullName } |
         Sort-Object
 )
 $expectedHeaderDiff = @(Compare-Object `
+        -CaseSensitive `
         -ReferenceObject ($expectedHeaders | Sort-Object) `
         -DifferenceObject $actualHeaders)
 if ($actualHeaders.Count -ne $expectedHeaders.Count -or

@@ -58,10 +58,17 @@ SetHeaderSurface(
 
 # worker 结果和内部策略继续使用源码树，SDK consumer 只看到 Host 契约。
 ResetSdkStage("${MVVCVTK_GAP_SDK_INCLUDE_DIR}")
+ResetSdkStage("${MVVCVTK_GAP_SOURCE_API_INCLUDE_DIR}")
 BuildSdkHeaders(
     MVVCVTK_GAP_STAGED_API_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${MVVCVTK_GAP_SDK_INCLUDE_DIR}"
+    ${MVVCVTK_GAP_API_HEADERS}
+)
+BuildSourceHeaders(
+    MVVCVTK_GAP_SOURCE_API_HEADERS
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${MVVCVTK_GAP_SOURCE_API_INCLUDE_DIR}"
     ${MVVCVTK_GAP_API_HEADERS}
 )
 
@@ -120,10 +127,12 @@ unset(_mvvcvtk_gap_ide_files)
 unset(MVVCVTK_GAP_SOURCES)
 unset(MVVCVTK_GAP_KERNEL_SOURCES)
 unset(MVVCVTK_GAP_API_HEADERS)
+unset(MVVCVTK_GAP_SOURCE_API_HEADERS)
 unset(MVVCVTK_GAP_STAGED_API_HEADERS)
 target_include_directories(
     mvvcvtk_gap_analysis
     PUBLIC
+        "$<BUILD_INTERFACE:${MVVCVTK_GAP_SOURCE_API_INCLUDE_DIR}>"
         "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>"
 )
 SetApiDefaults(mvvcvtk_gap_analysis)

@@ -27,13 +27,11 @@ file(MAKE_DIRECTORY
 )
 
 function(GetSurfaceHeaders outputName propertyName)
-    get_property(surfaceHeaders GLOBAL PROPERTY "${propertyName}")
-    set(relativeHeaders)
-    foreach(surfaceHeader IN LISTS surfaceHeaders)
-        string(REGEX REPLACE "^include/" "" relativeHeader "${surfaceHeader}")
-        list(APPEND relativeHeaders "${relativeHeader}")
-    endforeach()
-    set(${outputName} "${relativeHeaders}" PARENT_SCOPE)
+    get_property(
+        surfaceHeaders
+        GLOBAL PROPERTY "${propertyName}_SDK_PATHS"
+    )
+    set(${outputName} "${surfaceHeaders}" PARENT_SCOPE)
 endfunction()
 
 GetSurfaceHeaders(MVVCVTK_HOST_ENTRY_HEADERS MVVCVTK_HOST_PUBLIC_HEADERS)
@@ -174,7 +172,7 @@ BuildForbiddenProbe(
 BuildForbiddenProbe(
     MVVCVTK_FORBID_HOST_VALUE_PROBE
     ForbiddenHostValueTypesProbe.cpp
-    Host/Types/HostValueTypes.h
+    MVVCVTK/API/Host/Types/HostValueTypes.h
 )
 BuildForbiddenProbe(
     MVVCVTK_FORBID_SUPPORT_PROBE
@@ -543,7 +541,7 @@ SetHeaderGuard(
 )
 SetHeaderGuard(
     "${MVVCVTK_FORBID_HOST_VALUE_PROBE}"
-    Host/Types/HostValueTypes.h
+    MVVCVTK/API/Host/Types/HostValueTypes.h
     FeatureSpi
     "${MVVCVTK_FEATURE_SPI_INCLUDE_DIR}"
 )
