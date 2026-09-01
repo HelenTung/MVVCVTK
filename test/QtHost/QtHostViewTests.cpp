@@ -50,6 +50,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <utility>
 #include <vector>
@@ -61,6 +62,34 @@ static_assert(static_cast<int>(VolumeQuality::Low) == 1);
 static_assert(static_cast<int>(VolumeQuality::High) == 2);
 static_assert(static_cast<int>(VolumeQuality::XHigh) == 3);
 static_assert(static_cast<int>(VolumeQuality::Ultra) == 4);
+
+class GpuProbeStrategy final : public VolumeStrategy {
+public:
+    bool SetProbeBytes(const std::uint64_t freeBytes) noexcept
+    {
+        m_freeBytes = freeBytes;
+        return true;
+    }
+
+    bool GetQueryOrderValid() const noexcept
+    {
+        return m_isQueryOrderValid;
+    }
+
+private:
+    std::optional<std::uint64_t> GetGpuFreeBytes() const override
+    {
+        const std::uint64_t releaseCount = GetGpuReleaseCount();
+        m_isQueryOrderValid = m_isQueryOrderValid
+            && releaseCount > m_lastQueryReleaseCount;
+        m_lastQueryReleaseCount = releaseCount;
+        return m_freeBytes;
+    }
+
+    std::uint64_t m_freeBytes = 0;
+    mutable std::uint64_t m_lastQueryReleaseCount = 0;
+    mutable bool m_isQueryOrderValid = true;
+};
 
 double GetRenderRate(const bool isInteracting) noexcept
 {
@@ -698,21 +727,27 @@ int GetRenderContractFailCount()
                 == dimensionPlanCount
             && isUltraNative
             && dimensionStrategy.GetLodDimensions(
+                VolumeQuality::Low)
+                == std::array<int, 3>{ 300, 1, 1 }
+            && dimensionStrategy.GetLodDimensions(
                 VolumeQuality::High)
                 == std::array<int, 3>{ 600, 1, 1 }
+            && dimensionStrategy.GetLodDimensions(
+                VolumeQuality::XHigh)
+                == std::array<int, 3>{ 900, 1, 1 }
             && dimensionStrategy.GetLodDimensions(
                 VolumeQuality::Ultra)
                 == std::array<int, 3>{ 1200, 1, 1 },
         "Quality tiers reuse one load-time plan while Ultra stays native") ? 0 : 1;
 
     auto gpuGateImage = vtkSmartPointer<vtkImageData>::New();
-    gpuGateImage->SetDimensions(64, 64, 64);
+    gpuGateImage->SetDimensions(128, 128, 128);
     gpuGateImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     std::fill_n(
         static_cast<unsigned char*>(gpuGateImage->GetScalarPointer()),
         gpuGateImage->GetNumberOfPoints(),
         static_cast<unsigned char>(128));
-    VolumeStrategy gpuGateStrategy;
+    GpuProbeStrategy gpuGateStrategy;
     RenderParams gpuGateParams;
     gpuGateParams.volumeQuality = VolumeQuality::Low;
     gpuGateParams.volumeTransferFunction.colorNodes = {
@@ -743,20 +778,111 @@ int GetRenderContractFailCount()
     gpuGateStrategy.AttachRenderer(gpuGateRenderer);
     gpuGateRenderer->ResetCamera();
     gpuGateWindow->Render();
+    gpuGateWindow->WaitForCompletion();
+    const auto gpuGateLowPartitions =
+        gpuGateStrategy.GetGpuPartitions();
+    vtkSmartPointer<vtkAlgorithmOutput> gpuGateLowInput =
+        gpuGateMapper
+            ? gpuGateMapper->GetInputConnection(0, 0) : nullptr;
+    const std::uint64_t releaseCountBefore =
+        gpuGateStrategy.GetGpuReleaseCount();
+    const std::uint64_t preloadCountBefore =
+        gpuGateStrategy.GetGpuPreloadCount();
+    const std::uint64_t queryCountBefore =
+        gpuGateStrategy.GetGpuQueryCount();
+    const vtkIdType configuredGpuBytes = gpuGateMapper
+        ? gpuGateMapper->GetMaxMemoryInBytes() : 0;
     if (gpuGateMapper) {
-        gpuGateMapper->SetMaxMemoryInBytes(1024);
-        gpuGateMapper->SetMaxMemoryFraction(0.1f);
+        // 运行期有释放后驱动余量时，不得再次被 VTK 的固定 128 MiB
+        // fallback（这里压成 1 byte）覆盖。
+        gpuGateMapper->SetMaxMemoryInBytes(1);
     }
-    gpuGateParams.volumeQuality = VolumeQuality::Ultra;
+    (void)gpuGateStrategy.SetProbeBytes(100ULL * 1024ULL);
+    gpuGateParams.volumeQuality = VolumeQuality::High;
     const bool isGpuGateQualitySet = gpuGateStrategy.SetVisualState(
         gpuGateParams, UpdateFlags::Quality);
+    if (isGpuGateQualitySet) {
+        gpuGateWindow->Render();
+        gpuGateWindow->WaitForCompletion();
+    }
+    const auto gpuGateHighPartitions =
+        gpuGateStrategy.GetGpuPartitions();
+    const bool isGpuGateSwitched = gpuGateMapper
+        && gpuGateMapper->GetInputConnection(0, 0)
+            != gpuGateLowInput.GetPointer()
+        && getDimensions(gpuGateMapper)
+            == std::array<int, 3>{ 64, 64, 64 };
+    gpuGateParams.volumeQuality = VolumeQuality::XHigh;
+    (void)gpuGateStrategy.SetProbeBytes(200ULL * 1024ULL);
+    const bool isGpuGateXHighSet = gpuGateStrategy.SetVisualState(
+        gpuGateParams, UpdateFlags::Quality);
+    if (isGpuGateXHighSet) {
+        gpuGateWindow->Render();
+        gpuGateWindow->WaitForCompletion();
+    }
+    const auto gpuGateXHighPartitions =
+        gpuGateStrategy.GetGpuPartitions();
+    const bool isGpuGateXHighExact = gpuGateMapper
+        && getDimensions(gpuGateMapper)
+            == std::array<int, 3>{ 96, 96, 96 };
+    gpuGateParams.volumeQuality = VolumeQuality::Ultra;
+    (void)gpuGateStrategy.SetProbeBytes(300ULL * 1024ULL);
+    const bool isGpuGateUltraSet = gpuGateStrategy.SetVisualState(
+        gpuGateParams, UpdateFlags::Quality);
+    if (isGpuGateUltraSet) {
+        gpuGateWindow->Render();
+        gpuGateWindow->WaitForCompletion();
+    }
+    const auto gpuGateUltraPartitions =
+        gpuGateStrategy.GetGpuPartitions();
+    const bool isGpuGateUltraExact = gpuGateMapper
+        && getDimensions(gpuGateMapper)
+            == std::array<int, 3>{ 128, 128, 128 };
+    auto* gpuGateUltraInput = gpuGateMapper
+        ? gpuGateMapper->GetInput() : nullptr;
+    (void)gpuGateStrategy.SetProbeBytes(0);
+    gpuGateParams.volumeQuality = VolumeQuality::Low;
+    const bool isTinyBlockRejected =
+        !gpuGateStrategy.SetVisualState(
+            gpuGateParams, UpdateFlags::Quality);
+    const bool isUltraPreserved = gpuGateMapper
+        && gpuGateMapper->GetInput() == gpuGateUltraInput
+        && gpuGateStrategy.GetGpuPartitions()
+            == gpuGateUltraPartitions;
+    if (gpuGateMapper) {
+        gpuGateMapper->SetMaxMemoryInBytes(configuredGpuBytes);
+    }
     failureCount += GetCaseResult(
         isGpuGateConfigured
             && isGpuGateInputSet
             && gpuGateMapper
             && isGpuGateQualitySet
-            && gpuGateMapper->GetInput() == gpuGateImage.GetPointer(),
-        "LOD switches defer GPU texture loading to the normal Render path") ? 0 : 1;
+            && isGpuGateSwitched
+            && gpuGateLowPartitions
+                == std::array<unsigned short, 3>{ 1, 1, 1 }
+            && gpuGateHighPartitions
+                == std::array<unsigned short, 3>{ 2, 2, 2 }
+            && gpuGateStrategy.GetLodDimensions(
+                VolumeQuality::High)
+                == std::array<int, 3>{ 64, 64, 64 }
+            && isGpuGateXHighSet
+            && isGpuGateXHighExact
+            && gpuGateXHighPartitions
+                == std::array<unsigned short, 3>{ 3, 3, 2 }
+            && isGpuGateUltraSet
+            && isGpuGateUltraExact
+            && gpuGateUltraPartitions
+                == std::array<unsigned short, 3>{ 3, 3, 3 }
+            && gpuGateStrategy.GetGpuReleaseCount()
+                == releaseCountBefore + 4
+            && gpuGateStrategy.GetGpuPreloadCount()
+                == preloadCountBefore
+            && gpuGateStrategy.GetGpuQueryCount()
+                == queryCountBefore + 4
+            && gpuGateStrategy.GetQueryOrderValid()
+            && isTinyBlockRejected
+            && isUltraPreserved,
+        "Runtime LOD sizes blocks from free VRAM after eviction") ? 0 : 1;
 
     VolumeStrategy loadQualityStrategy;
     RenderParams loadQualityParams = gpuGateParams;

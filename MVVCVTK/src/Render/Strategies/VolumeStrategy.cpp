@@ -18,9 +18,12 @@
 #include <vtkImageResample.h>
 #include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkMatrix4x4.h>
+#include <vtkOpenGLRenderWindow.h>
 #include <vtkRenderWindow.h>
+#include <vtk_glad.h>
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <thread>
@@ -34,6 +37,8 @@ namespace {
 constexpr std::size_t maxLodCacheEntries = 3;
 constexpr long double cacheMemoryFraction = 0.25L;
 constexpr long double cacheSourceFraction = 0.65L;
+constexpr long double gpuBlockMemoryFraction = 0.5L;
+constexpr std::array<unsigned short, 3> singlePartition{ 1, 1, 1 };
 constexpr double ratioEpsilon = 1e-9;
 // 静止态使用 0.001；所有交互质量档目标均不低于 8 FPS。
 // 用速率区间识别交互，不再用固定 15 FPS 门槛排除 XHigh/Ultra。
@@ -306,6 +311,7 @@ struct VolumeStrategy::LodEntry final {
     std::uint64_t maskVersion = 0;
     std::array<int, 3> outputDimensions{};
     std::array<double, 3> outputSpacing{};
+    std::array<unsigned short, 3> partitions = singlePartition;
     double dimensionRatio = 1.0;
     std::uint64_t estimatedBytes = 0;
     std::uint64_t lastUse = 0;
@@ -402,16 +408,27 @@ bool VolumeStrategy::SetVolumeInput(
     m_lastMask = std::move(validityMask);
     if (hasInputChanged) ++m_dataVersion;
     if (hasMaskChanged) ++m_maskVersion;
-    const bool isDenoiseSet = !hasInputChanged
-        && m_isProducerDenoiseOn == m_isDenoiseOn
-        ? true : BuildDenoise();
-    const bool isPlanSet = isDenoiseSet
-        && BuildLodPlan();
-    const auto profile = m_lodController->GetProfile();
-    const bool isPipelineSet = isPlanSet
-        && SetTargetLod(
-            profile.outputDimensions,
-            profile.dimensionRatio);
+    bool isPipelineSet = false;
+    try {
+        const bool isDenoiseSet = !hasInputChanged
+            && m_isProducerDenoiseOn == m_isDenoiseOn
+            ? true : BuildDenoise();
+        const bool isPlanSet = isDenoiseSet
+            && BuildLodPlan();
+        const auto profile = m_lodController->GetProfile();
+        isPipelineSet = isPlanSet
+            && SetTargetLod(
+                profile.outputDimensions,
+                profile.dimensionRatio);
+    }
+    catch (const std::exception& error) {
+        std::cerr
+            << "[VolumeLod] input pipeline exception: "
+            << error.what() << '\n';
+    }
+    catch (...) {
+        std::cerr << "[VolumeLod] input pipeline unknown exception\n";
+    }
     if (!isPipelineSet) {
         m_lastInput = oldInput;
         m_lastMask = oldMask;
@@ -428,6 +445,13 @@ bool VolumeStrategy::SetVolumeInput(
         m_lodPlanCount = oldPlanCount;
         *m_lodController = oldController;
         (void)ClearPendingLod();
+        const bool isQualityRestored = !m_activeLod
+            || SetMapperQuality(*m_activeLod);
+        if (!isQualityRestored) {
+            std::cerr
+                << "[VolumeRollback] input mapper quality restore failed"
+                << '\n';
+        }
         return false;
     }
     (void)SetInputKey(image);
@@ -473,6 +497,12 @@ std::uint64_t VolumeStrategy::GetLodBytes(
 {
     // 原生 volume/mask 都只是输入别名，不计入缓存的增量内存。
     if (!lod.volumeFilter && !lod.maskFilter) return 0;
+    return GetLodTextureBytes(lod);
+}
+
+std::uint64_t VolumeStrategy::GetLodTextureBytes(
+    const LodEntry& lod) const
+{
     const auto sourceDimensions = GetSourceDims();
     long double sourceVoxels = 1.0L;
     long double outputVoxels = 1.0L;
@@ -508,6 +538,100 @@ std::uint64_t VolumeStrategy::GetLodBytes(
     return estimatedBytes >= maximumBytes
         ? std::numeric_limits<std::uint64_t>::max()
         : static_cast<std::uint64_t>(std::ceil(estimatedBytes));
+}
+
+std::uint64_t VolumeStrategy::GetLodBlockBytes(
+    const LodEntry& lod,
+    const std::array<unsigned short, 3>& partitions) const
+{
+    const std::uint64_t textureBytes = GetLodTextureBytes(lod);
+    if (textureBytes == 0) return 0;
+
+    long double totalVoxels = 1.0L;
+    long double blockVoxels = 1.0L;
+    for (std::size_t axis = 0;
+        axis < lod.outputDimensions.size(); ++axis) {
+        const int dimension = lod.outputDimensions[axis];
+        const unsigned short partitionCount = partitions[axis];
+        if (dimension <= 0 || partitionCount == 0) return 0;
+
+        const std::uint64_t segmentCount = dimension > 1
+            ? static_cast<std::uint64_t>(dimension - 1) : 0ULL;
+        const std::uint64_t maxPartitionCount = segmentCount > 0
+            ? std::min<std::uint64_t>(
+                segmentCount,
+                std::numeric_limits<unsigned short>::max())
+            : 1ULL;
+        if (partitionCount > maxPartitionCount) return 0;
+
+        // VTK 的 block extent 端点均为闭区间；相邻块会共享一个边界体素。
+        const std::uint64_t blockDimension = segmentCount > 0
+            ? (segmentCount + partitionCount - 1ULL)
+                / partitionCount + 1ULL
+            : 1ULL;
+        totalVoxels *= static_cast<long double>(dimension);
+        blockVoxels *= static_cast<long double>(blockDimension);
+    }
+
+    const long double blockBytes =
+        static_cast<long double>(textureBytes)
+        * blockVoxels / totalVoxels;
+    const long double maximumBytes = static_cast<long double>(
+        std::numeric_limits<std::uint64_t>::max());
+    if (!std::isfinite(blockBytes) || blockBytes <= 0.0L) return 0;
+    return blockBytes >= maximumBytes
+        ? std::numeric_limits<std::uint64_t>::max()
+        : static_cast<std::uint64_t>(std::ceil(blockBytes));
+}
+
+std::optional<std::array<unsigned short, 3>>
+VolumeStrategy::GetLodPartitions(
+    const LodEntry& lod,
+    const std::uint64_t blockBudget) const
+{
+    if (blockBudget == 0) return std::nullopt;
+
+    std::array<unsigned short, 3> partitions = singlePartition;
+    std::uint64_t blockBytes = GetLodBlockBytes(lod, partitions);
+    if (blockBytes == 0) return std::nullopt;
+
+    // 每轮选择真正降低最大 block 的最优轴；跳过由于整数取整产生的
+    // 无效 partition 数，最终得到近似均衡而且满足上限的三轴分块。
+    while (blockBytes > blockBudget) {
+        bool hasCandidate = false;
+        auto nextPartitions = partitions;
+        std::uint64_t nextBlockBytes = blockBytes;
+        for (std::size_t axis = 0;
+            axis < lod.outputDimensions.size(); ++axis) {
+            const int dimension = lod.outputDimensions[axis];
+            if (dimension <= 1) continue;
+            const std::uint64_t maxPartitionCount =
+                std::min<std::uint64_t>(
+                    static_cast<std::uint64_t>(dimension - 1),
+                    std::numeric_limits<unsigned short>::max());
+            for (std::uint64_t count =
+                    static_cast<std::uint64_t>(partitions[axis]) + 1ULL;
+                count <= maxPartitionCount; ++count) {
+                auto candidate = partitions;
+                candidate[axis] = static_cast<unsigned short>(count);
+                const std::uint64_t candidateBytes =
+                    GetLodBlockBytes(lod, candidate);
+                if (candidateBytes == 0 || candidateBytes >= blockBytes) {
+                    continue;
+                }
+                if (!hasCandidate || candidateBytes < nextBlockBytes) {
+                    hasCandidate = true;
+                    nextPartitions = candidate;
+                    nextBlockBytes = candidateBytes;
+                }
+                break;
+            }
+        }
+        if (!hasCandidate) return std::nullopt;
+        partitions = nextPartitions;
+        blockBytes = nextBlockBytes;
+    }
+    return partitions;
 }
 
 std::uint64_t VolumeStrategy::GetCacheBudget() const
@@ -568,6 +692,74 @@ std::uint64_t VolumeStrategy::GetGpuMemoryBytes() const
         : static_cast<std::uint64_t>(memoryBytes);
 }
 
+std::uint64_t VolumeStrategy::GetGpuBlockBudget(
+    const std::optional<std::uint64_t> freeBytes) const
+{
+    const std::uint64_t configuredBytes = GetGpuMemoryBytes();
+    long double availableBytes = static_cast<long double>(configuredBytes);
+    if (freeBytes.has_value()) {
+        const long double mapperFraction = m_mapper
+            ? static_cast<long double>(m_mapper->GetMaxMemoryFraction())
+            : 0.0L;
+        // MaxMemoryInBytes 在 VTK 无法探测显卡时会退成固定 128 MiB，
+        // 不能反过来覆盖驱动刚报告的真实剩余容量。运行期只沿用其
+        // fraction 作为保留比例；无厂商扩展时才使用配置值回退。
+        availableBytes = static_cast<long double>(*freeBytes)
+            * mapperFraction;
+    }
+    // 驱动值只是释放完成后的近似快照；mapper fraction 之外再保留一半
+    // 等量空间应对帧缓冲、shader、驱动迁移和下一块重分配。没有绝对
+    // block 常量，实际大小始终随本次剩余显存变化。
+    const long double safeBytes =
+        availableBytes * gpuBlockMemoryFraction;
+    if (!std::isfinite(safeBytes) || safeBytes < 1.0L) return 0;
+    return static_cast<std::uint64_t>(safeBytes);
+}
+
+std::optional<std::uint64_t> VolumeStrategy::GetGpuFreeBytes() const
+{
+    auto* renderer = m_renderer.GetPointer();
+    auto* renderWindow = renderer
+        ? vtkOpenGLRenderWindow::SafeDownCast(
+            renderer->GetRenderWindow())
+        : nullptr;
+    if (!renderWindow || renderWindow->GetNeverRendered() != 0) {
+        return std::nullopt;
+    }
+    renderWindow->MakeCurrent();
+
+    // 清除早先命令留下的 error，随后只判断本次显存查询是否有效。
+    for (int index = 0;
+        index < 8 && glGetError() != GL_NO_ERROR; ++index) {
+    }
+    constexpr std::uint64_t bytesPerKib = 1024ULL;
+    if (GLAD_GL_NVX_gpu_memory_info != 0) {
+        GLint freeKib = 0;
+        glGetIntegerv(
+            GL_GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX,
+            &freeKib);
+        if (glGetError() == GL_NO_ERROR && freeKib >= 0) {
+            return static_cast<std::uint64_t>(freeKib) * bytesPerKib;
+        }
+    }
+
+    for (int index = 0;
+        index < 8 && glGetError() != GL_NO_ERROR; ++index) {
+    }
+    if (GLAD_GL_ATI_meminfo != 0) {
+        GLint freeKib[4] = { 0, 0, 0, 0 };
+        glGetIntegerv(GL_TEXTURE_FREE_MEMORY_ATI, freeKib);
+        if (glGetError() == GL_NO_ERROR && freeKib[0] >= 0) {
+            // 单个流式纹理受最大连续主内存块约束；驱动未提供该值时
+            // 回退到 texture pool 的总空闲量。
+            const GLint usableKib = freeKib[1] > 0
+                ? std::min(freeKib[0], freeKib[1]) : freeKib[0];
+            return static_cast<std::uint64_t>(usableKib) * bytesPerKib;
+        }
+    }
+    return std::nullopt;
+}
+
 unsigned int VolumeStrategy::GetCpuThreadCount() const noexcept
 {
     return std::max(1U, std::thread::hardware_concurrency());
@@ -579,6 +771,12 @@ std::array<int, 3> VolumeStrategy::GetLodDimensions(
     return m_lodController
         ? m_lodController->GetProfile(quality).outputDimensions
         : std::array<int, 3>{};
+}
+
+std::array<unsigned short, 3>
+VolumeStrategy::GetGpuPartitions() const noexcept
+{
+    return m_activeLod ? m_activeLod->partitions : singlePartition;
 }
 
 bool VolumeStrategy::GetQualityValid(
@@ -593,6 +791,28 @@ bool VolumeStrategy::GetQualityValid(
         return true;
     }
     return false;
+}
+
+bool VolumeStrategy::GetCpuBudgetValid(const LodEntry& lod) const
+{
+    const std::uint64_t textureBytes = GetLodTextureBytes(lod);
+    if (textureBytes == 0) return false;
+
+    // 原生挡位直接复用已加载输入，不需要为 resample 保留工作副本。
+    if (!m_denoiseFilter && lod.outputDimensions == GetSourceDims()) {
+        return true;
+    }
+
+    // vtkImageResample 至少需要目标输出和工作区；denoise 还会物化
+    // 全尺寸输出与工作副本。按增量工作集准入，源输入本身已计入当前占用。
+    const std::uint64_t systemBytes = GetSystemMemoryBytes();
+    if (systemBytes == 0) return true;
+    long double workingBytes = static_cast<long double>(textureBytes) * 2.0L;
+    if (m_denoiseFilter) {
+        workingBytes += static_cast<long double>(GetSourceBytes()) * 2.0L;
+    }
+    return std::isfinite(workingBytes)
+        && workingBytes <= static_cast<long double>(systemBytes);
 }
 
 bool VolumeStrategy::GetInputKey(vtkImageData* image) const
@@ -759,6 +979,16 @@ bool VolumeStrategy::BuildPendingLod(
         || !std::isfinite(dimensionRatio)
         || dimensionRatio <= 0.0
         || dimensionRatio > 1.0) {
+        return false;
+    }
+    LodEntry budgetLod;
+    budgetLod.outputDimensions = outputDimensions;
+    if (!GetCpuBudgetValid(budgetLod)) {
+        std::cerr
+            << "[VolumeLod] resource admission rejected"
+            << " target_bytes=" << GetLodTextureBytes(budgetLod)
+            << " system_available=" << GetSystemMemoryBytes()
+            << '\n';
         return false;
     }
     m_pendingLod.reset();
@@ -930,13 +1160,77 @@ bool VolumeStrategy::SetMapperInput(const LodEntry& lod)
     return isVolumeSet && m_mapper->GetMaskInput() == mask;
 }
 
+bool VolumeStrategy::SetGpuPartitions(
+    const std::array<unsigned short, 3>& partitions)
+{
+    if (!m_mapper
+        || std::any_of(
+            partitions.begin(), partitions.end(),
+            [](const unsigned short count) { return count == 0; })) {
+        return false;
+    }
+    m_mapper->SetPartitions(
+        partitions[0], partitions[1], partitions[2]);
+    return true;
+}
+
+bool VolumeStrategy::ClearGpuInput()
+{
+    auto* renderer = m_renderer.GetPointer();
+    auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
+    if (!m_mapper) return false;
+    if (!renderWindow || renderWindow->GetNeverRendered() != 0) return true;
+
+    try {
+        // 切档与 Render 共用 owner thread。等待旧 draw 完成后释放 mapper
+        // 持有的 volume/mask texture，再等待删除提交完成，随后才能采样余量。
+        renderWindow->MakeCurrent();
+        renderWindow->WaitForCompletion();
+        m_mapper->ReleaseGraphicsResources(renderWindow);
+        renderWindow->WaitForCompletion();
+        ++m_gpuReleaseCount;
+        return true;
+    }
+    catch (const std::exception& error) {
+        std::cerr
+            << "[VolumeLod] GPU resource release exception: "
+            << error.what() << '\n';
+    }
+    catch (...) {
+        std::cerr
+            << "[VolumeLod] GPU resource release unknown exception\n";
+    }
+    return false;
+}
+
+bool VolumeStrategy::BuildGpuInput(
+    const std::array<unsigned short, 3>& partitions)
+{
+    auto* renderer = m_renderer.GetPointer();
+    auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
+    if (!m_mapper || !m_volume) return false;
+    if (partitions != singlePartition) {
+        // 多块 PreLoadData 只创建 blocks，尚未执行 RenderSingleInput 的排序；
+        // VTK 9.4 随后会访问空的 SortedVolumeBlocks。必须由正常 Render
+        // 排序并逐块复用同一个 3D texture，不能走同步预加载入口。
+        return true;
+    }
+    if (!renderWindow || renderWindow->GetNeverRendered() != 0) return true;
+
+    // 单块候选已经满足释放后动态预算，可在发布 active 前同步验证。
+    renderWindow->MakeCurrent();
+    ++m_gpuPreloadCount;
+    return m_mapper->PreLoadData(renderer, m_volume);
+}
+
 bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
 {
     if (!m_mapper || !nextLod.volume) {
         return false;
     }
     if (&nextLod == m_activeLod) {
-        const bool isQualitySet = SetMapperQuality(nextLod);
+        const bool isQualitySet = SetGpuPartitions(nextLod.partitions)
+            && SetMapperQuality(nextLod);
         const bool isRatioSet = m_lodController
             && m_lodController->SetActiveRatio(
                 nextLod.dimensionRatio);
@@ -947,29 +1241,103 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
         return false;
     }
 
+    if (!GetCpuBudgetValid(nextLod)
+        || (m_lastMask && !nextLod.mask)) {
+        std::cerr
+            << "[VolumeLod] resource admission rejected"
+            << " target_bytes=" << GetLodTextureBytes(nextLod)
+            << " system_available=" << GetSystemMemoryBytes()
+            << '\n';
+        return false;
+    }
+
     auto* oldLod = m_activeLod;
     const auto restore = [&]() {
         if (!oldLod || !oldLod->volume) {
+            (void)SetGpuPartitions(singlePartition);
             m_mapper->SetInputData(
                 static_cast<vtkImageData*>(nullptr));
             m_mapper->SetMaskInput(nullptr);
             return false;
         }
-        return SetMapperInput(*oldLod)
+        return SetGpuPartitions(oldLod->partitions)
+            && SetMapperInput(*oldLod)
             && SetMapperQuality(*oldLod);
     };
 
-    if ((m_lastMask && !nextLod.mask)
-        || !SetMapperQuality(nextLod)) {
+    // GPU 最终准入只能发生在旧纹理汰换之后；释放前的 free-memory
+    // 快照包含旧档，不能用于决定新档 block 大小。
+    if (!ClearGpuInput()) {
+        return false;
+    }
+    auto* renderer = m_renderer.GetPointer();
+    auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
+    const bool hasRenderedWindow = renderWindow
+        && renderWindow->GetNeverRendered() == 0;
+    std::optional<std::uint64_t> freeBytes;
+    if (hasRenderedWindow) {
+        ++m_gpuQueryCount;
+        freeBytes = GetGpuFreeBytes();
+        if (!freeBytes.has_value()) {
+            std::cerr
+                << "[VolumeLod] GPU free-memory extension unavailable; "
+                << "using configured fallback\n";
+        }
+    }
+    const std::uint64_t blockBudget = GetGpuBlockBudget(freeBytes);
+    const auto nextPartitions = GetLodPartitions(nextLod, blockBudget);
+    if (!nextPartitions.has_value()) {
+        (void)restore();
+        std::cerr
+            << "[VolumeLod] GPU block admission rejected"
+            << " target_bytes=" << GetLodTextureBytes(nextLod)
+            << " free_bytes=" << freeBytes.value_or(0)
+            << " block_budget=" << blockBudget
+            << '\n';
+        return false;
+    }
+
+    const std::uint64_t blockBytes =
+        GetLodBlockBytes(nextLod, *nextPartitions);
+    if (hasRenderedWindow || *nextPartitions != singlePartition) {
+        std::cerr
+            << "[VolumeLod] GPU block plan"
+            << " target_bytes=" << GetLodTextureBytes(nextLod)
+            << " free_bytes=" << freeBytes.value_or(0)
+            << " block_budget=" << blockBudget
+            << " block_bytes=" << blockBytes
+            << " partitions="
+            << (*nextPartitions)[0] << 'x'
+            << (*nextPartitions)[1] << 'x'
+            << (*nextPartitions)[2] << '\n';
+    }
+
+    if (!SetGpuPartitions(*nextPartitions)
+        || !SetMapperQuality(nextLod)
+        || !SetMapperInput(nextLod)) {
         (void)restore();
         return false;
     }
-    if (!SetMapperInput(nextLod)) {
-        (void)restore();
+    bool isGpuBuilt = false;
+    try {
+        isGpuBuilt = BuildGpuInput(*nextPartitions);
+    }
+    catch (const std::exception& error) {
+        std::cerr
+            << "[VolumeLod] GPU preload exception: "
+            << error.what() << '\n';
+    }
+    catch (...) {
+        std::cerr << "[VolumeLod] GPU preload unknown exception\n";
+    }
+    if (!isGpuBuilt) {
+        if (!restore() && oldLod) {
+            std::cerr
+                << "[VolumeRollback] active mapper restore failed"
+                << '\n';
+        }
         return false;
     }
-    // mapper input 提交只验证 CPU 侧绑定。纹理上传及 VTK 必要的内部
-    // reduction 由紧随其后的正常 Render 完成，不能在状态 setter 中阻塞预加载。
     if (m_lodController
         && !m_lodController->SetActiveRatio(
             nextLod.dimensionRatio)) {
@@ -980,6 +1348,7 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
         }
         return false;
     }
+    nextLod.partitions = *nextPartitions;
     m_activeLod = &nextLod;
     nextLod.lastUse = ++m_lodUseStamp;
     ++m_mapperInputCount;
@@ -1278,17 +1647,29 @@ bool VolumeStrategy::SetVisualState(
         const auto oldDenoise = m_denoiseFilter;
         const bool isProducerDenoiseOld =
             m_isProducerDenoiseOn;
-        const bool isDenoiseSet = !hasDenoiseChanged
-            || BuildDenoise();
-        const bool isPlanSet = isDenoiseSet
-            && (!hasDenoiseChanged || BuildLodPlan());
-        if (isPlanSet && hasDenoiseChanged) {
-            nextProfile = m_lodController->GetProfile();
+        try {
+            const bool isDenoiseSet = !hasDenoiseChanged
+                || BuildDenoise();
+            const bool isPlanSet = isDenoiseSet
+                && (!hasDenoiseChanged || BuildLodPlan());
+            if (isPlanSet && hasDenoiseChanged) {
+                nextProfile = m_lodController->GetProfile();
+            }
+            isPipelineSet = isPlanSet
+                && SetTargetLod(
+                    nextProfile.outputDimensions,
+                    nextProfile.dimensionRatio);
         }
-        isPipelineSet = isPlanSet
-            && SetTargetLod(
-                nextProfile.outputDimensions,
-                nextProfile.dimensionRatio);
+        catch (const std::exception& error) {
+            std::cerr
+                << "[VolumeLod] pipeline exception: "
+                << error.what() << '\n';
+            isPipelineSet = false;
+        }
+        catch (...) {
+            std::cerr << "[VolumeLod] pipeline unknown exception\n";
+            isPipelineSet = false;
+        }
         if (!isPipelineSet) {
             m_denoiseFilter = oldDenoise;
             m_isProducerDenoiseOn = isProducerDenoiseOld;

@@ -3060,7 +3060,8 @@ bool AppRuntime::SetStrategyState()
     UpdateFlags flags = static_cast<UpdateFlags>(flagsInt);
 
     if (flags == UpdateFlags::None) {
-        m_hasSyncNeed = false;
+        // CAS 已领取旧门铃；此处不能再次写 false，否则会覆盖 exchange
+        // 之后由并发状态请求置起的新门铃，留下永不消费的 pending flags。
         return true;
     }
 
@@ -3105,16 +3106,24 @@ bool AppRuntime::SetStrategyState()
         if (m_renderWindow) {
             m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
         }
+        bool hasNewQuality = false;
         if ((strategyFlags & UpdateFlags::Quality)
             != UpdateFlags::None) {
             std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-            m_requestedQuality = m_appliedQuality;
+            if (m_requestedQuality == params.volumeQuality) {
+                m_requestedQuality = m_appliedQuality;
+            }
+            else {
+                hasNewQuality = true;
+            }
         }
-        // 失败帧只丢弃 Quality；其余状态仍需在下一帧重试，避免背景、变换
-        // 等标志已从 pending 取出后永久丢失。
-        const UpdateFlags retryFlags = static_cast<UpdateFlags>(
+        // 当前失败的 Quality 不重试；失败期间到达的更新必须保留。
+        UpdateFlags retryFlags = static_cast<UpdateFlags>(
             static_cast<int>(flags)
             & ~static_cast<int>(UpdateFlags::Quality));
+        if (hasNewQuality) {
+            retryFlags = retryFlags | UpdateFlags::Quality;
+        }
         if (retryFlags != UpdateFlags::None) {
             m_pendingFlags.fetch_or(static_cast<int>(retryFlags));
             m_hasSyncNeed = true;
@@ -3123,8 +3132,17 @@ bool AppRuntime::SetStrategyState()
     }
     if ((strategyFlags & UpdateFlags::Quality)
         != UpdateFlags::None) {
+        bool hasNewQuality = false;
         std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-        m_appliedQuality = m_requestedQuality;
+        // applied 必须记录本次交给 Strategy 的不可变快照；若执行期间又
+        // 收到新挡位，则让新值留在 requested 并安排下一帧消费。
+        m_appliedQuality = params.volumeQuality;
+        hasNewQuality = m_requestedQuality != m_appliedQuality;
+        if (hasNewQuality) {
+            m_pendingFlags.fetch_or(
+                static_cast<int>(UpdateFlags::Quality));
+            m_hasSyncNeed = true;
+        }
     }
 
     // 背景与主体视觉状态属于同一帧提交；策略拒绝时不得先暴露新背景。

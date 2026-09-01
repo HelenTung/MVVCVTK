@@ -36,6 +36,13 @@
 #include <utility>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #ifndef MVVCVTK_CMAKE_AUTOINIT
 VTK_MODULE_INIT(vtkRenderingOpenGL2);
 VTK_MODULE_INIT(vtkInteractionStyle);
@@ -291,6 +298,20 @@ bool GetArgFound(
     return false;
 }
 
+bool StopEventLoop(VtkAppHostSession& session)
+{
+    const auto* endpoint = session.GetRenderViewEndpoint(
+        "slice-top-down");
+    const bool isInteractorStopped = endpoint && endpoint->interactor;
+    if (isInteractorStopped) endpoint->interactor->TerminateApp();
+#if defined(_WIN32)
+    // Win32 的 VTK Start() 会重置 pre-start Done；提前投递 WM_QUIT，
+    // 可让随后进入的 GetMessage() 立即退出，也兼容已启动的事件循环。
+    PostQuitMessage(0);
+#endif
+    return isInteractorStopped;
+}
+
 class MainControlFeature final
     : public HostFeature,
       public std::enable_shared_from_this<MainControlFeature> {
@@ -363,7 +384,25 @@ public:
 
     bool OnHostTick() override
     {
+        return SendQualityAudit();
+    }
+
+    bool StartQualityAudit()
+    {
+        if (m_qualityAuditPhase != QualityAuditPhase::None) return false;
+        m_qualityAuditPhase = QualityAuditPhase::SetLow;
+        m_qualityAuditTicks = 0;
         return true;
+    }
+
+    bool GetQualityAuditDone() const noexcept
+    {
+        return m_qualityAuditPhase == QualityAuditPhase::Done;
+    }
+
+    bool GetQualityAuditPassed() const noexcept
+    {
+        return GetQualityAuditDone() && m_isQualityAuditPassed;
     }
 
 private:
@@ -376,6 +415,19 @@ private:
         QualityPrevious,
         StartGap,
         Count
+    };
+
+    enum class QualityAuditPhase : std::uint8_t {
+        None,
+        SetLow,
+        WaitLow,
+        SetHigh,
+        WaitHigh,
+        SetXHigh,
+        WaitXHigh,
+        SetUltra,
+        WaitUltra,
+        Done
     };
 
     static constexpr std::string_view featureId =
@@ -433,6 +485,161 @@ private:
     {
         // ViewSet 是传输函数和质量偏好的唯一同步写入入口。
         return m_session.SendRequest(std::move(request));
+    }
+
+    bool SetQuality(const HostVolumeQuality quality)
+    {
+        HostViewSetRequest request;
+        request.targetView = m_target;
+        request.volumeQuality = quality;
+        return SendViewRequest(std::move(request));
+    }
+
+    bool StartAuditRender()
+    {
+        const auto* endpoint = m_session.GetRenderViewEndpoint(
+            m_target.viewId);
+        if (!endpoint || !endpoint->renderWindow) return false;
+        endpoint->renderWindow->Render();
+        endpoint->renderWindow->WaitForCompletion();
+        return true;
+    }
+
+    bool StopQualityAudit(
+        const bool isPassed,
+        const HostVolumeQuality appliedQuality)
+    {
+        m_isQualityAuditPassed = isPassed && StopEventLoop(m_session);
+        m_qualityAuditPhase = QualityAuditPhase::Done;
+        std::cout
+            << "AUDIT_QUALITY: passed=" << m_isQualityAuditPassed
+            << " applied=" << static_cast<int>(appliedQuality)
+            << " high=" << m_isHighApplied
+            << " xhigh=" << m_isXHighApplied
+            << " ultra=" << m_isUltraApplied
+            << '\n' << std::flush;
+        return m_isQualityAuditPassed;
+    }
+
+    bool SendQualityAudit()
+    {
+        if (m_qualityAuditPhase == QualityAuditPhase::None
+            || m_qualityAuditPhase == QualityAuditPhase::Done) {
+            return true;
+        }
+        const auto state = m_session.GetRenderViewState(m_target);
+        if (!state) {
+            return StopQualityAudit(false, HostVolumeQuality::Auto);
+        }
+
+        constexpr int tickLimit = 10;
+        switch (m_qualityAuditPhase) {
+        case QualityAuditPhase::SetLow:
+            if (!SetQuality(HostVolumeQuality::Low)) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::WaitLow;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::WaitLow:
+            if (state->volumeQuality == HostVolumeQuality::Low) {
+                if (!StartAuditRender()) {
+                    return StopQualityAudit(false, state->volumeQuality);
+                }
+                m_lastAuditQuality = HostVolumeQuality::Low;
+                m_qualityAuditPhase = QualityAuditPhase::SetHigh;
+                m_qualityAuditTicks = 0;
+                return true;
+            }
+            if (++m_qualityAuditTicks > tickLimit) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            return true;
+        case QualityAuditPhase::SetHigh:
+            if (!SetQuality(HostVolumeQuality::High)) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::WaitHigh;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::WaitHigh:
+            if (state->volumeQuality == HostVolumeQuality::High) {
+                if (!StartAuditRender()) {
+                    return StopQualityAudit(false, state->volumeQuality);
+                }
+                m_isHighApplied = true;
+                m_lastAuditQuality = HostVolumeQuality::High;
+                m_qualityAuditPhase = QualityAuditPhase::SetXHigh;
+                m_qualityAuditTicks = 0;
+                return true;
+            }
+            if (++m_qualityAuditTicks <= tickLimit) return true;
+            if (state->volumeQuality != m_lastAuditQuality
+                || !StartAuditRender()) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::SetXHigh;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::SetXHigh:
+            if (!SetQuality(HostVolumeQuality::XHigh)) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::WaitXHigh;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::WaitXHigh:
+            if (state->volumeQuality == HostVolumeQuality::XHigh) {
+                if (!StartAuditRender()) {
+                    return StopQualityAudit(false, state->volumeQuality);
+                }
+                m_isXHighApplied = true;
+                m_lastAuditQuality = HostVolumeQuality::XHigh;
+                m_qualityAuditPhase = QualityAuditPhase::SetUltra;
+                m_qualityAuditTicks = 0;
+                return true;
+            }
+            if (++m_qualityAuditTicks <= tickLimit) return true;
+            if (state->volumeQuality != m_lastAuditQuality
+                || !StartAuditRender()) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::SetUltra;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::SetUltra:
+            if (!SetQuality(HostVolumeQuality::Ultra)) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            m_qualityAuditPhase = QualityAuditPhase::WaitUltra;
+            m_qualityAuditTicks = 0;
+            return true;
+        case QualityAuditPhase::WaitUltra:
+            if (state->volumeQuality == HostVolumeQuality::Ultra) {
+                if (!StartAuditRender()) {
+                    return StopQualityAudit(false, state->volumeQuality);
+                }
+                m_isUltraApplied = true;
+                m_lastAuditQuality = HostVolumeQuality::Ultra;
+                return StopQualityAudit(
+                    m_isHighApplied
+                        && m_isXHighApplied
+                        && m_isUltraApplied,
+                    state->volumeQuality);
+            }
+            if (++m_qualityAuditTicks <= tickLimit) return true;
+            if (state->volumeQuality != m_lastAuditQuality
+                || !StartAuditRender()) {
+                return StopQualityAudit(false, state->volumeQuality);
+            }
+            return StopQualityAudit(
+                m_isHighApplied
+                    && m_isXHighApplied
+                    && m_isUltraApplied,
+                state->volumeQuality);
+        default:
+            return true;
+        }
     }
 
     bool SetTransfer(const ControlAction action)
@@ -673,6 +880,13 @@ private:
     std::array<bool, actionCount> m_isKeyDown{};
     std::shared_ptr<FeatureHostControl> m_host;
     bool m_isAttached = false;
+    QualityAuditPhase m_qualityAuditPhase = QualityAuditPhase::None;
+    HostVolumeQuality m_lastAuditQuality = HostVolumeQuality::Auto;
+    int m_qualityAuditTicks = 0;
+    bool m_isQualityAuditPassed = false;
+    bool m_isHighApplied = false;
+    bool m_isXHighApplied = false;
+    bool m_isUltraApplied = false;
 };
 
 HostRenderViewConfig BuildView(
@@ -913,13 +1127,13 @@ int main(int argc, char* argv[])
     features.push_back(gapFeature);
     // G 应在任一 MVVCVTK 窗口获得焦点时都能启动；状态统一显示在 composite-volume 标题栏。
     auto controlViews = allViews;
-    features.push_back(
-        std::make_shared<MainControlFeature>(
-            session,
-            volumeTarget,
-            std::move(controlViews),
-            gapFeature,
-            std::move(gapStart)));
+    auto controlFeature = std::make_shared<MainControlFeature>(
+        session,
+        volumeTarget,
+        std::move(controlViews),
+        gapFeature,
+        std::move(gapStart));
+    features.push_back(controlFeature);
     std::size_t attachedCount = 0;
     bool isTimerAttached = false;
     bool isHotkeyAttached = false;
@@ -985,6 +1199,15 @@ int main(int argc, char* argv[])
 
     const bool isDragAudit = GetArgFound(
         argc, argv, "--drag-audit");
+    const bool isQualityAudit = GetArgFound(
+        argc, argv, "--quality-audit");
+    if (isDragAudit && isQualityAudit) {
+        std::cerr
+            << "--drag-audit and --quality-audit are mutually exclusive\n";
+        if (!clearAttached()) return 25;
+        features.clear();
+        return 8;
+    }
     bool isAuditComplete = false;
     bool isAuditPassed = false;
 
@@ -996,17 +1219,22 @@ int main(int argc, char* argv[])
     load.geometry.origin = { 0.0f, 0.0f, 0.0f };
     if (!session.SendRequestResult(
             std::move(load),
-            [&](HostResult result) {
-                if (!isDragAudit) return;
-                isAuditPassed = result.isSucceeded
-                    && DragAudit{}.Start(session);
-                isAuditComplete = true;
-                const auto* loopEndpoint =
-                    session.GetRenderViewEndpoint(
-                        "slice-top-down");
-                if (loopEndpoint && loopEndpoint->interactor) {
-                    loopEndpoint->interactor->TerminateApp();
+             [&](HostResult result) {
+                if (isDragAudit) {
+                    isAuditPassed = result.isSucceeded
+                        && DragAudit{}.Start(session);
+                    isAuditComplete = true;
                 }
+                else if (isQualityAudit) {
+                    isAuditPassed = result.isSucceeded
+                        && controlFeature->StartQualityAudit();
+                    if (isAuditPassed) return;
+                    isAuditComplete = true;
+                }
+                else {
+                    return;
+                }
+                (void)StopEventLoop(session);
             })) {
         if (!clearAttached()) {
             return 23;
@@ -1022,13 +1250,17 @@ int main(int argc, char* argv[])
         << "  G: start Gap; watch the composite window title for result\n";
 
     const bool isStarted = session.Start();
+    if (isQualityAudit) {
+        isAuditComplete = controlFeature->GetQualityAuditDone();
+        isAuditPassed = controlFeature->GetQualityAuditPassed();
+    }
     const bool isCleared = clearAttached();
     if (!isCleared) {
         return 24;
     }
     features.clear();
     if (!isStarted) return 6;
-    if (isDragAudit
+    if ((isDragAudit || isQualityAudit)
         && (!isAuditComplete || !isAuditPassed)) {
         return 7;
     }

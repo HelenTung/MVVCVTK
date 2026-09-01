@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class vtkImageAnisotropicDiffusion3D;
@@ -52,6 +53,19 @@ public:
     }
     std::array<int, 3> GetLodDimensions(
         VolumeQuality quality) const noexcept;
+    std::array<unsigned short, 3> GetGpuPartitions() const noexcept;
+    std::uint64_t GetGpuReleaseCount() const noexcept
+    {
+        return m_gpuReleaseCount;
+    }
+    std::uint64_t GetGpuPreloadCount() const noexcept
+    {
+        return m_gpuPreloadCount;
+    }
+    std::uint64_t GetGpuQueryCount() const noexcept
+    {
+        return m_gpuQueryCount;
+    }
 private:
     class Mapper;
     struct LodEntry;
@@ -63,11 +77,23 @@ private:
     std::uint64_t GetImageBytes(vtkImageData* image) const;
     std::uint64_t GetSourceBytes() const;
     std::uint64_t GetLodBytes(const LodEntry& lod) const;
+    std::uint64_t GetLodTextureBytes(const LodEntry& lod) const;
+    std::uint64_t GetLodBlockBytes(
+        const LodEntry& lod,
+        const std::array<unsigned short, 3>& partitions) const;
+    std::optional<std::array<unsigned short, 3>> GetLodPartitions(
+        const LodEntry& lod,
+        std::uint64_t blockBudget) const;
     std::uint64_t GetCacheBudget() const;
     std::uint64_t GetSystemMemoryBytes() const;
     std::uint64_t GetGpuMemoryBytes() const;
+    std::uint64_t GetGpuBlockBudget(
+        std::optional<std::uint64_t> freeBytes) const;
+    // 独立成虚函数只为隔离厂商显存查询，使释放后取样顺序可重复测试。
+    virtual std::optional<std::uint64_t> GetGpuFreeBytes() const;
     unsigned int GetCpuThreadCount() const noexcept;
     bool GetQualityValid(VolumeQuality quality) const;
+    bool GetCpuBudgetValid(const LodEntry& lod) const;
     bool GetInputKey(vtkImageData* image) const;
     bool GetMaskKey(vtkImageData* image) const;
     bool GetProducersReady() const;
@@ -91,8 +117,13 @@ private:
     bool SetVolumeInput(
         vtkSmartPointer<vtkDataObject> data,
         vtkSmartPointer<vtkImageData> validityMask);
+    bool SetGpuPartitions(
+        const std::array<unsigned short, 3>& partitions);
     bool SetMapperInput(const LodEntry& lod);
     bool SetMapperQuality(const LodEntry& lod);
+    bool ClearGpuInput();
+    bool BuildGpuInput(
+        const std::array<unsigned short, 3>& partitions);
     vtkSmartPointer<vtkColorTransferFunction> BuildColorTransfer(
         const RenderParams& params) const;
     vtkSmartPointer<vtkPiecewiseFunction> BuildOpacityTransfer(
@@ -106,7 +137,8 @@ private:
     vtkSmartPointer<Mapper> m_mapper;
     std::unique_ptr<VolumeLodController> m_lodController;
     // cache 独占已触发档位；active 仅观察 cache 中稳定的 LodEntry 地址。
-    // pending 完整构建后才进入 cache，GPU 纹理由正常 Render 惰性加载。
+    // pending 完整构建后才进入 cache；大纹理由正常 Render 分块上传，
+    // 只有单块候选才在发布 active 前通过 PreLoadData 验证。
     std::vector<std::unique_ptr<LodEntry>> m_lodCache;
     LodEntry* m_activeLod = nullptr;
     std::unique_ptr<LodEntry> m_pendingLod;
@@ -139,4 +171,7 @@ private:
     std::uint64_t m_mapperInputCount = 0;
     std::uint64_t m_resampleBuildCount = 0;
     std::uint64_t m_resampleUpdateCount = 0;
+    std::uint64_t m_gpuReleaseCount = 0;
+    std::uint64_t m_gpuPreloadCount = 0;
+    std::uint64_t m_gpuQueryCount = 0;
 };

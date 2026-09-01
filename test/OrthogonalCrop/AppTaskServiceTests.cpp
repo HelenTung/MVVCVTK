@@ -169,6 +169,51 @@ private:
     std::shared_ptr<std::atomic<int>> m_rejectCount;
 };
 
+struct QualitySwitchGate final {
+    std::mutex mutex;
+    std::condition_variable condition;
+    std::vector<VolumeQuality> qualities;
+    bool isArmed = false;
+    bool isStarted = false;
+    bool isReleased = false;
+    bool hasTimedOut = false;
+};
+
+class WaitQualityStrategy final : public VolumeStrategy {
+public:
+    explicit WaitQualityStrategy(
+        std::shared_ptr<QualitySwitchGate> gate)
+        : m_gate(std::move(gate))
+    {
+    }
+
+    bool SetVisualState(
+        const RenderParams& params,
+        const UpdateFlags flags) override
+    {
+        if (m_gate
+            && (flags & UpdateFlags::Quality) != UpdateFlags::None) {
+            std::unique_lock<std::mutex> lock(m_gate->mutex);
+            m_gate->qualities.push_back(params.volumeQuality);
+            if (m_gate->isArmed) {
+                m_gate->isArmed = false;
+                m_gate->isStarted = true;
+                m_gate->condition.notify_all();
+                constexpr auto waitLimit = std::chrono::seconds(5);
+                if (!m_gate->condition.wait_for(
+                        lock, waitLimit,
+                        [&]() { return m_gate->isReleased; })) {
+                    m_gate->hasTimedOut = true;
+                }
+            }
+        }
+        return VolumeStrategy::SetVisualState(params, flags);
+    }
+
+private:
+    std::shared_ptr<QualitySwitchGate> m_gate;
+};
+
 class DataStub final : public AbstractDataManager {
 protected:
     TrustedImageSnapshot GetImageSnapshot() const override { return imageSnapshot; }
@@ -1723,6 +1768,109 @@ void StartQualityRollback(int& failureCount)
         failureCount);
 }
 
+void StartQualityLatest(int& failureCount)
+{
+    auto dataManager = std::make_shared<DataManagerProbe>();
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    if (!dataManager->SetInitial(image)) {
+        SetExpect(false,
+            "quality latest-value test needs an initial image",
+            failureCount);
+        return;
+    }
+
+    auto broadcaster = std::make_shared<SharedStateBroadcaster>();
+    auto state = std::make_shared<SharedInteractionState>(broadcaster);
+    auto gate = std::make_shared<QualitySwitchGate>();
+    AppServiceArgs args;
+    args.dataManager = dataManager;
+    args.interactionState = state;
+    args.eventSource = broadcaster;
+    args.strategyCreate = [gate](const VizMode mode)
+        -> std::shared_ptr<AbstractVisualStrategy> {
+        return mode == VizMode::Volume
+            ? std::make_shared<WaitQualityStrategy>(gate)
+            : nullptr;
+    };
+    auto ports = CreateAppPorts(std::move(args));
+    auto renderer = vtkSmartPointer<vtkRenderer>::New();
+    auto renderWindow = vtkSmartPointer<vtkRenderWindow>::New();
+    renderWindow->SetOffScreenRendering(1);
+    renderWindow->AddRenderer(renderer);
+    AppViewUpdate modeUpdate;
+    modeUpdate.mode = VizMode::Volume;
+    const bool isBuilt = ports.renderBind
+        && ports.renderBind->SetRenderTarget(renderWindow, renderer)
+        && ports.app.view
+        && ports.app.view->SendViewUpdate(modeUpdate)
+        && ports.interaction.update
+        && ports.interaction.update->SendUpdates();
+    if (!isBuilt) {
+        SetExpect(false,
+            "quality latest-value test needs a committed Volume strategy",
+            failureCount);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        gate->isArmed = true;
+    }
+    AppViewUpdate highUpdate;
+    highUpdate.volumeQuality = VolumeQuality::High;
+    const bool isHighAccepted =
+        ports.app.view->SendViewUpdate(highUpdate);
+    bool isLowAccepted = false;
+    bool isGateStarted = false;
+    std::thread lowThread([&]() {
+        {
+            std::unique_lock<std::mutex> lock(gate->mutex);
+            constexpr auto waitLimit = std::chrono::seconds(5);
+            isGateStarted = gate->condition.wait_for(
+                lock, waitLimit,
+                [&]() { return gate->isStarted; });
+        }
+        if (isGateStarted) {
+            AppViewUpdate lowUpdate;
+            lowUpdate.volumeQuality = VolumeQuality::Low;
+            isLowAccepted = ports.app.view->SendViewUpdate(lowUpdate);
+        }
+        {
+            std::lock_guard<std::mutex> lock(gate->mutex);
+            gate->isReleased = true;
+        }
+        gate->condition.notify_all();
+    });
+
+    const bool isHighApplied = ports.interaction.update->SendUpdates();
+    const AppViewState highState = ports.app.view->GetViewState();
+    lowThread.join();
+    const bool isLowApplied = ports.interaction.update->SendUpdates();
+    const AppViewState lowState = ports.app.view->GetViewState();
+    std::vector<VolumeQuality> qualities;
+    bool hasTimedOut = false;
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        qualities = gate->qualities;
+        hasTimedOut = gate->hasTimedOut;
+    }
+    SetExpect(isHighAccepted
+            && isGateStarted
+            && !hasTimedOut
+            && isLowAccepted
+            && isHighApplied
+            && highState.volumeQuality == VolumeQuality::High
+            && isLowApplied
+            && lowState.volumeQuality == VolumeQuality::Low
+            && qualities.size() >= 2
+            && qualities[qualities.size() - 2] == VolumeQuality::High
+            && qualities.back() == VolumeQuality::Low,
+        "applied quality must match each committed mapper snapshot while a newer tier remains pending",
+        failureCount);
+}
+
 void StartInputSwap(int& failureCount)
 {
     auto dataManager =
@@ -2839,6 +2987,7 @@ int AppTaskSuite::GetFailCount() const
     StartFactoryAdmission(failureCount);
     StartPipelineRollback(failureCount);
     StartQualityRollback(failureCount);
+    StartQualityLatest(failureCount);
     StartRenderOwnerGate(failureCount);
     StartStrategySwitchSync(failureCount);
     StartInputSwap(failureCount);

@@ -2,7 +2,9 @@
 
 MVVCVTK 是 Windows x64 上的 C++17 / VTK 体数据可视化宿主。`VtkAppHostSession` 是组合根，负责多视图运行时、加载事务、输入路由、可信 Feature 和统一停止；Crop 与 GapAnalysis 作为可选 Feature 接入，不取得 App 内部对象身份。
 
-Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整快照入口；颜色与透明度节点独立，reload 和 LOD 不重解释显式节点。同一数据版本的默认 percentile histogram 在 Session 内只扫描一次，各 View 仍保存独立 TF 值快照。Volume 质量为 `Auto/Low/High/XHigh/Ultra` 五档；`Low/High/XHigh/Ultra` 固定使用原始 dimensions 的 `25%/50%/75%/100%`，仅 `Auto` 在模型加载时依据系统内存、GPU mapper 预算和 CPU 核心数确定一次，运行期不按帧耗重新定档。非原生 LOD 直接持有已物化 resample output，不再追加整卷 `DeepCopy`。
+Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整快照入口；颜色与透明度节点独立，reload 和 LOD 不重解释显式节点。同一数据版本的默认 percentile histogram 在 Session 内只扫描一次，各 View 仍保存独立 TF 值快照。Volume 质量为 `Auto/Low/High/XHigh/Ultra` 五档；`Low/High/XHigh/Ultra` 固定使用原始 dimensions 的 `25%/50%/75%/100%`，仅 `Auto` 在模型加载时依据系统内存、GPU mapper 预算和 CPU 核心数确定一次，运行期不按帧耗重新定档。非原生 LOD 持有 resample producer/output，由正常渲染按需物化，不再追加整卷 `DeepCopy`。
+
+运行时切换显式质量档采用两阶段提交：固定百分比产生的目标 dimensions 不做资源降级，可用物理内存只约束 CPU resample 工作集。已渲染窗口切档时先等待旧 draw 完成并显式释放 mapper 的旧 volume/mask GPU 资源，再在同一 OpenGL context 查询 NVX/ATI 驱动报告的当前剩余显存；单块预算由这次释放后的剩余容量、mapper 保留比例和等量重分配余量共同计算，不使用固定字节大小。候选超过单块预算时用 VTK `SetPartitions` 保持原 dimensions，并在正常 `Render` 中按视点排序、逐块复用同一 3D texture 上传；只有单块候选使用 `PreLoadData`。厂商显存扩展不可用时才回退到 mapper 配置预算；准入失败则恢复原 active LOD 的 mapper 绑定与已应用质量，后续正常 Render 重新装载旧档。
 
 ## 支持范围
 
@@ -45,6 +47,8 @@ cmake --build --preset vs2026-release
 ctest --preset vs2026-debug
 ctest --preset vs2026-release
 ```
+
+本地大体积质量审计可运行 `out/build/vs2026-x64/bin/Debug/MVVCVTK.exe --quality-audit`；它在硬编码样本加载完成后依次执行 Low、High、XHigh、Ultra 的准入与 Render，并输出各显式档是否实际应用的 `AUDIT_QUALITY` 后退出。审计通过要求 High、XHigh、Ultra 均按固定 dimensions 实际应用；动态 partitions 只能改变 GPU 上传块数，不能缩水、伪装成功或沿用旧质量链路。
 
 `MVVCVTK::Host`、`MVVCVTK::OrthogonalCrop` 和 `MVVCVTK::GapAnalysis` 分别生成独立静态库，不提供把三者固化在一起的 SDK 聚合 target。`examples/standalone/main.cpp` 显式组合这三个模块并生成默认可启动的 `MVVCVTK` 应用，只负责本地演示和运行，不进入 SDK 安装。Qt 本体只进入由 `MVVCVTK_BUILD_QT_TESTING` 控制的仓库测试，不是 Host 的公共依赖，也不进入 SDK；`deps/official/vtk` 中的 VTK Qt 适配模块仍随完整 VTK 环境交付。
 
