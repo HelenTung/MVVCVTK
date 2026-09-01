@@ -265,7 +265,7 @@ foreach ($metadataFile in $cmakeMetadata) {
             throw "Installed CMake metadata contains a build path: $($metadataFile.FullName)"
         }
     }
-    foreach ($retiredTerm in @(
+    foreach ($forbiddenMetadataTerm in @(
             'MVVCVTK::FeatureAPI',
             'MVVCVTK::SDK',
             'MVVCVTKInternal::FeatureSupport',
@@ -273,11 +273,15 @@ foreach ($metadataFile in $cmakeMetadata) {
             'MVVCVTKInternal::UIPhantomCalib',
             'MVVCVTKInternal::UIReconstruct3D',
             'MVVCVTKDependencyPolicy',
-            'MVVCVTKHeaderSurface')) {
+            'MVVCVTKHeaderSurface',
+            'DefX::Analysis',
+            'DefXAnalysisService.h',
+            'DefXTypes.h',
+            'MVVCVTK_DEFX_ROOT')) {
         if ($content.IndexOf(
-                $retiredTerm,
+                $forbiddenMetadataTerm,
                 [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            throw "Installed CMake metadata exposes a retired contract: $retiredTerm"
+            throw "Installed CMake metadata exposes a forbidden contract: $forbiddenMetadataTerm"
         }
     }
 }

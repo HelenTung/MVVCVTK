@@ -161,11 +161,6 @@ set(MVVCVTK_RUNTIME_DIRS
     "${MVVCVTK_DEPS_ROOT}/opencv/x64/vc16/bin"
     "${MVVCVTK_DEPS_ROOT}/vtk/bin"
 )
-if(MVVCVTK_BUILD_GAP_ANALYSIS)
-    list(PREPEND MVVCVTK_RUNTIME_DIRS
-        "$<IF:$<CONFIG:Debug>,${MVVCVTK_DEFX_ROOT}/bin/Debug,${MVVCVTK_DEFX_ROOT}/bin/Release>"
-    )
-endif()
 set(MVVCVTK_QT_PLUGIN_DIR "")
 if(_mvvcvtk_needs_qt)
     list(APPEND MVVCVTK_RUNTIME_DIRS

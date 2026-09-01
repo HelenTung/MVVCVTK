@@ -101,3 +101,10 @@ add_test(
         "-DMVVCVTK_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckGapLegacy.cmake"
 )
+
+add_test(
+    NAME GapAnalysis.DefXBoundary
+    COMMAND "${CMAKE_COMMAND}"
+        "-DMVVCVTK_SOURCE_ROOT=${PROJECT_SOURCE_DIR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckDefXBoundary.cmake"
+)
