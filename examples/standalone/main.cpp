@@ -873,15 +873,32 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    const HostViewTarget primaryTarget{
+        "primary-3d",
+        false,
+        HostRenderViewRole::Primary3D
+    };
     const HostViewTarget volumeTarget{
         "composite-volume",
         false,
         HostRenderViewRole::Composite3D
     };
-    HostViewSetRequest qualityRequest;
-    qualityRequest.targetView = volumeTarget;
-    qualityRequest.volumeQuality = HostVolumeQuality::Auto;
-    if (!session.SendRequest(std::move(qualityRequest))) {
+
+    // Host 初始化会隐藏 3D 参考平面；加载前为两个组合视图恢复可见位。
+    HostVisibilityParams planeVisibility;
+    planeVisibility.isPlanes3DVisible = false;
+    HostViewSetRequest primaryRequest;
+    primaryRequest.targetView = primaryTarget;
+    primaryRequest.visibility = planeVisibility;
+    if (!session.SendRequest(std::move(primaryRequest))) {
+        return 1;
+    }
+
+    HostViewSetRequest volumeRequest;
+    volumeRequest.targetView = volumeTarget;
+    volumeRequest.volumeQuality = HostVolumeQuality::Auto;
+    volumeRequest.visibility = planeVisibility;
+    if (!session.SendRequest(std::move(volumeRequest))) {
         return 1;
     }
 
@@ -972,7 +989,7 @@ int main(int argc, char* argv[])
     bool isAuditPassed = false;
 
     HostLoadRequest load;
-    load.filePath = "F:\\data\\ct\\1536X1536X1536.raw";
+    load.filePath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
     load.geometry.dimensions = { 1536, 1536, 1536 };
     load.geometry.spacing = {
         0.1537f, 0.1537f, 0.1537f };
