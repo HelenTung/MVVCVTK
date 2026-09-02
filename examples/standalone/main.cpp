@@ -761,6 +761,7 @@ private:
         return m_host->SetViewStatus(statusViews, status);
     }
 
+public:
     bool StartGap()
     {
         const auto gapFeature = m_gapFeature.lock();
@@ -811,6 +812,7 @@ private:
         return isAccepted;
     }
 
+private:
     bool SendControl(const ControlAction action)
     {
         switch (action) {
@@ -1045,10 +1047,13 @@ CropHostConfig BuildCrop(
 }
 
 GapHostConfig GetGapConfig(
-    const HostViewTargets& targets)
+    const HostViewTargets& inputViews)
 {
     GapHostConfig config;
-    config.defaultStart.targetViews = targets;
+    // 同一次分析结果同时送入 3D 等值面叠加层与俯视切片叠加层。
+    config.defaultStart.targetViews.viewIds = {
+        "primary-3d", "slice-top-down"
+    };
     config.defaultStart.surface.isoMode =
         GapIsoMode::AbsoluteValue;
     config.defaultStart.surface.absoluteIsoValue = 0.172;
@@ -1056,7 +1061,7 @@ GapHostConfig GetGapConfig(
     config.defaultStart.surface.materialMean = 0.453f;
     config.defaultStart.voidParams.isFilterEnabled = false;
     config.defaultStart.voidParams.minVolumeMM3 = 0.0;
-    config.inputViews = targets;
+    config.inputViews = inputViews;
     config.keys.switchOverlay.keyCode = 'j';
     config.keys.exit.keySym = "Escape";
     return config;
@@ -1114,6 +1119,23 @@ int main(int argc, char* argv[])
     volumeRequest.visibility = planeVisibility;
     if (!session.SendRequest(std::move(volumeRequest))) {
         return 1;
+    }
+
+    // 十字线是各 Slice View 的私有展示状态；3D View 请求不会自动传播该可见性位。
+    constexpr std::array<HostRenderViewRole, 3> sliceRoles{
+        HostRenderViewRole::TopDownSlice,
+        HostRenderViewRole::FrontBackSlice,
+        HostRenderViewRole::LeftRightSlice
+    };
+    HostVisibilityParams crosshairVisibility;
+    crosshairVisibility.isCrosshairVisible = false;
+    for (const auto role : sliceRoles) {
+        HostViewSetRequest sliceRequest;
+        sliceRequest.targetView = { "", true, role };
+        sliceRequest.visibility = crosshairVisibility;
+        if (!session.SendRequest(std::move(sliceRequest))) {
+            return 1;
+        }
     }
 
     std::vector<std::shared_ptr<HostFeature>> features;
@@ -1201,9 +1223,13 @@ int main(int argc, char* argv[])
         argc, argv, "--drag-audit");
     const bool isQualityAudit = GetArgFound(
         argc, argv, "--quality-audit");
-    if (isDragAudit && isQualityAudit) {
+    const bool isGapAuto = GetArgFound(
+        argc, argv, "--gap-auto");
+    if ((isDragAudit && isQualityAudit)
+        || (isGapAuto && (isDragAudit || isQualityAudit))) {
         std::cerr
-            << "--drag-audit and --quality-audit are mutually exclusive\n";
+            << "--drag-audit, --quality-audit and --gap-auto "
+               "are mutually exclusive\n";
         if (!clearAttached()) return 25;
         features.clear();
         return 8;
@@ -1231,6 +1257,17 @@ int main(int argc, char* argv[])
                     if (isAuditPassed) return;
                     isAuditComplete = true;
                 }
+                else if (isGapAuto) {
+                    if (!result.isSucceeded) {
+                        std::cerr
+                            << "[GapAnalysis] data load failed; "
+                               "automatic request skipped\n"
+                            << std::flush;
+                        return;
+                    }
+                    (void)controlFeature->StartGap();
+                    return;
+                }
                 else {
                     return;
                 }
@@ -1247,7 +1284,12 @@ int main(int argc, char* argv[])
         << "  C / Shift+C: color red +/- 0.05\n"
         << "  V / Shift+V: opacity +/- 0.05\n"
         << "  L / Shift+L: next / previous quality tier\n"
-        << "  G: start Gap; watch the composite window title for result\n";
+        << "GapAnalysis controls:\n"
+        << "  G: analyze and show the result in Window A (3D) "
+           "and Window B (slice)\n"
+        << "  J: start if inactive; otherwise hide/show Gap overlays\n"
+        << "  --gap-auto: start Gap automatically after data loading\n"
+        << "  Result statistics are shown in the composite-volume title\n";
 
     const bool isStarted = session.Start();
     if (isQualityAudit) {
