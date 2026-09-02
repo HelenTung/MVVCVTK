@@ -177,12 +177,15 @@ private:
     vtkSmartPointer<vtkImageData> BuildLabelImage(
         const std::vector<std::int32_t>& labelVolume,
         vtkImageData* inputImage) const;
+    vtkSmartPointer<vtkPolyData> BuildVoidMesh(
+        vtkImageData* labelImage) const;
 
     InputSnapshot GetInputSnapshot() const;
     GapParamSnapshot GetParamSnapshot() const;
     void StartWorker(
         InputSnapshot inputSnapshot,
-        GapParamSnapshot params);
+        GapParamSnapshot params,
+        bool isMeshNeeded);
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
@@ -225,7 +228,7 @@ private:
 
     // resultMutex 保护完整结果 payload；读取入口只在锁内取得值或 VTK owner，复制/构建均在锁外。
     mutable std::mutex m_resultMutex;
-    // 最近一次 worker 提交的结果真源；新任务启动前清空，mesh/label 显示缓存均从它派生。
+    // 最近一次 worker 提交的结果真源；新任务启动前清空，label 与按需 mesh 在同一事务中发布。
     GapAnalysisResult m_result;
 
     // workerMutex 只串行化 std::thread 槽的 join/替换，不保护算法 payload。
@@ -248,9 +251,9 @@ private:
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> m_sliceTargets;
     // 当前已实际 Attach 的 service/strategy 对；SetOverlayOff 逐项 Remove 后清空。
     std::vector<GapOverlayBinding> m_displayOverlayBindings;
-    // 成功结果派生的 3D void mesh 强引用缓存；隐藏 overlay 时保留，退出或新会话时清空。
+    // 成功结果中 3D void mesh 的只读强引用；隐藏 overlay 时保留，退出或新会话时清空。
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
-    // 成功结果派生的 2D label image 强引用缓存；完整继承输入快照几何，生命周期和 mesh 缓存一致。
+    // 成功结果中 2D label image 的只读强引用；完整继承输入快照几何，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
     // StartView 保存的 ISO 来源配方；接纳 worker 前用冻结输入的 min/max 解析，结束会话时清空。
     GapSurfaceConfig m_displaySurfaceConfig;
@@ -685,7 +688,8 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
             &GapAnalysisService::Impl::StartWorker,
             this,
             std::move(inputSnapshot),
-            GetParamSnapshot());
+            GetParamSnapshot(),
+            false);
     }
     catch (...) {
         SetAnalysisState(GapAnalysisState::Failed);
@@ -718,23 +722,25 @@ GapStatistics GapAnalysisService::Impl::GetStatistics() const
 }
 
 vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh() const {
+    vtkSmartPointer<vtkPolyData> voidMesh;
     vtkSmartPointer<vtkImageData> labelImage;
     {
         std::lock_guard<std::mutex> lk(m_resultMutex);
         if (!m_result.isSucceeded || !m_result.labelImage) {
             return nullptr;
         }
+        voidMesh = m_result.voidMesh;
         labelImage = m_result.labelImage;
     }
 
-    // labelImage 中 0 为背景、正整数为任一区域；等值 0.5 把所有正标签合并成一张空洞外表面。
-    // 结果不保留区域间的标签边界，也不在此计算法线；当前显示路径把它作为 3D overlay 输入。
-    auto fe = vtkSmartPointer<vtkFlyingEdges3D>::New();
-    fe->SetInputData(labelImage);
-    fe->SetValue(0, 0.5); // label > 0 即为空洞区域
-    fe->ComputeNormalsOff();
-    fe->Update();
-    return fe->GetOutput();
+    if (!voidMesh) {
+        return BuildVoidMesh(labelImage);
+    }
+
+    // 显示缓存保持只读；显式读取 API 返回独立副本，避免调用方修改后污染重新显示。
+    auto meshCopy = vtkSmartPointer<vtkPolyData>::New();
+    meshCopy->DeepCopy(voidMesh);
+    return meshCopy;
 }
 
 vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage() const {
@@ -860,7 +866,8 @@ bool GapAnalysisService::Impl::StartView(
                 &GapAnalysisService::Impl::StartWorker,
                 this,
                 inputSnapshot,
-                params);
+                params,
+                !meshTargets.empty());
         }
         catch (...) {
             {
@@ -1057,7 +1064,8 @@ GapAnalysisService::Impl::GapParamSnapshot GapAnalysisService::Impl::GetParamSna
 
 void GapAnalysisService::Impl::StartWorker(
     InputSnapshot inputSnapshot,
-    GapParamSnapshot params) {
+    GapParamSnapshot params,
+    const bool isMeshNeeded) {
     // worker 只使用按值参数和共享只读输入快照；中间产物保持局部，完整结果在 resultMutex 下单次发布。
     // DefX 同步调用前后及 DTO 投影阶段观察取消；取消和算法异常都映射为 Failed。
     bool isSuccess = false;
@@ -1090,8 +1098,23 @@ void GapAnalysisService::Impl::StartWorker(
                 inputSnapshot->image,
                 result)
             && !m_isStopping.load()) {
-            result.isSucceeded = true;
-            isSuccess = true;
+            // 3D 显示产物在 worker 内按需构建，owner tick 只接管已发布的只读 VTK owner。
+            // mesh 构建失败不否定供应商分析、标签与统计；对应 3D target 在显示阶段单独失败。
+            if (isMeshNeeded) {
+                try {
+                    result.voidMesh = BuildVoidMesh(result.labelImage);
+                }
+                catch (...) {
+                    result.voidMesh = nullptr;
+                }
+            }
+            if (m_isStopping.load()) {
+                result.voidMesh = nullptr;
+            }
+            else {
+                result.isSucceeded = true;
+                isSuccess = true;
+            }
         }
     }
     catch (const std::exception&) {
@@ -1133,9 +1156,15 @@ bool GapAnalysisService::Impl::SetDisplayView() {
         return false;
     }
 
-    // 主线程先从已提交结果构建显示缓存，再移除旧 binding；overlay 隐藏时缓存仍保留。
-    m_displayVoidMesh = BuildVoidMesh();
-    m_displayLabelImage = BuildLabelImage();
+    // owner tick 只接管 worker 已完整发布的只读显示产物，不执行整卷 mesh 提取或标签 DeepCopy。
+    {
+        std::lock_guard<std::mutex> resultLock(m_resultMutex);
+        if (!m_result.isSucceeded || !m_result.labelImage) {
+            return false;
+        }
+        m_displayVoidMesh = m_result.voidMesh;
+        m_displayLabelImage = m_result.labelImage;
+    }
     SetOverlayOff();
     if (!m_isOverlayOn) {
         std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay switch command to show them." << std::endl;
@@ -1929,4 +1958,21 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage(
     std::copy(labelVolume.begin(), labelVolume.end(), labelPtr);
     image->Modified();
     return image;
+}
+
+vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh(
+    vtkImageData* labelImage) const
+{
+    if (!labelImage) {
+        return nullptr;
+    }
+
+    // labelImage 中 0 为背景、正整数为任一区域；等值 0.5 把所有正标签合并成一张空洞外表面。
+    // 结果不保留区域间的标签边界，也不在此计算法线；当前显示路径把它作为 3D overlay 输入。
+    auto filter = vtkSmartPointer<vtkFlyingEdges3D>::New();
+    filter->SetInputData(labelImage);
+    filter->SetValue(0, 0.5); // label > 0 即为空洞区域
+    filter->ComputeNormalsOff();
+    filter->Update();
+    return filter->GetOutput();
 }

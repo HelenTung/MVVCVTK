@@ -64,6 +64,8 @@ struct GapAnalysisResult {
     // 私有内核原始标签 ID 直接写入此 VTK_INT 图；不二值化、重编号或长期保留第二份整卷 vector。
     // 标签体完整继承输入快照的 extent、spacing、origin 与 direction。
     vtkSmartPointer<vtkImageData> labelImage;
+    // 仅在显示请求包含 3D target 时由 worker 从 labelImage 预构建；所有正标签合并为同一外表面。
+    vtkSmartPointer<vtkPolyData> voidMesh;
     // 只由私有内核 header/region 投影，禁止扫描 label 后重算算法统计。
     GapStatistics statistics;
     bool                    isSucceeded = false; // 只表示分析 payload 有效，不代表 display/overlay 已显示。

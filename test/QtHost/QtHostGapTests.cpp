@@ -5,9 +5,13 @@
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
 
+#include <vtkActor.h>
 #include <vtkCommand.h>
+#include <vtkImageSlice.h>
+#include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
 
 #include <chrono>
 #include <cstddef>
@@ -277,6 +281,26 @@ bool GetReloadReady(
     return isSent && isComplete && isSucceeded;
 }
 
+template <typename PropType>
+int GetPropCount(vtkRenderer* renderer)
+{
+    if (!renderer) {
+        return 0;
+    }
+    auto* props = renderer->GetViewProps();
+    if (!props) {
+        return 0;
+    }
+    int count = 0;
+    props->InitTraversal();
+    while (auto* prop = props->GetNextProp()) {
+        if (PropType::SafeDownCast(prop)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 } // namespace
 
 int GetGapFailCount()
@@ -343,10 +367,15 @@ int GetGapFailCount()
     const bool isInputAttached =
         session.AttachHotkeys({});
     const auto* endpoint = session.GetPrimaryEndpoint();
+    const auto* sliceEndpoint =
+        session.GetRenderViewEndpoint("gap-slice");
     if (!isBuilt || !isAttached || !isInputAttached
         || !endpoint
+        || !endpoint->renderer
         || !endpoint->interactor
-        || !endpoint->renderWindow) {
+        || !endpoint->renderWindow
+        || !sliceEndpoint
+        || !sliceEndpoint->renderer) {
         GetCaseResult(
             false,
             "Gap fixture builds the public Session/Feature chain");
@@ -364,6 +393,14 @@ int GetGapFailCount()
         session.AttachTimer(timer);
     const bool isReloadReady =
         GetReloadReady(session, *endpoint);
+    const auto primaryBasePropCount =
+        endpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const auto sliceBasePropCount =
+        sliceEndpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const int primaryBaseActorCount =
+        GetPropCount<vtkActor>(endpoint->renderer);
+    const int sliceBaseImageCount =
+        GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
     failureCount += GetCaseResult(
         isTimerAttached
             && isReloadReady
@@ -423,7 +460,16 @@ int GetGapFailCount()
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
+    SendTicks(*endpoint, 1);
     const auto hotkeyStartState = feature->GetState();
+    const auto hotkeyPrimaryPropCount =
+        endpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const auto hotkeySlicePropCount =
+        sliceEndpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const int hotkeyPrimaryActorCount =
+        GetPropCount<vtkActor>(endpoint->renderer);
+    const int hotkeySliceImageCount =
+        GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
     const bool isExitKeyHandled =
         GetKeyHandled(*endpoint, 0, "Escape");
     for (int poll = 0;
@@ -434,18 +480,43 @@ int GetGapFailCount()
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
+    SendTicks(*endpoint, 1);
     const auto hotkeyExitState = feature->GetState();
+    const auto hotkeyExitPrimaryPropCount =
+        endpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const auto hotkeyExitSlicePropCount =
+        sliceEndpoint->renderer->GetViewProps()->GetNumberOfItems();
+    const int hotkeyExitPrimaryActorCount =
+        GetPropCount<vtkActor>(endpoint->renderer);
+    const int hotkeyExitSliceImageCount =
+        GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
     failureCount += GetCaseResult(
         isHotkeyStartHandled
             && hotkeyStartState.analysisState
                 == GapAnalysisState::Succeeded
             && hotkeyStartState.isViewActive
+            && hotkeyPrimaryPropCount
+                == primaryBasePropCount + 1
+            && hotkeySlicePropCount
+                == sliceBasePropCount + 1
+            && hotkeyPrimaryActorCount
+                == primaryBaseActorCount + 1
+            && hotkeySliceImageCount
+                == sliceBaseImageCount + 1
             && isExitKeyHandled
             && hotkeyExitState.analysisState
                 == GapAnalysisState::Idle
             && !hotkeyExitState.isViewActive
-            && !hotkeyExitState.isExitPending,
-        "Gap Start and Exit keys use the same request entry") ? 0 : 1;
+            && !hotkeyExitState.isExitPending
+            && hotkeyExitPrimaryPropCount
+                == primaryBasePropCount
+            && hotkeyExitSlicePropCount
+                == sliceBasePropCount
+            && hotkeyExitPrimaryActorCount
+                == primaryBaseActorCount
+            && hotkeyExitSliceImageCount
+                == sliceBaseImageCount,
+        "Gap Start reuses one result in mesh and slice views, then Exit removes both") ? 0 : 1;
 
     int firstCompleteCount = 0;
     bool isFirstSucceeded = false;

@@ -4,12 +4,21 @@
 #include "Render/Contracts/FeatureOverlay.h"
 #include "Render/Contracts/OverlayService.h"
 
+#include <vtkActor.h>
 #include <vtkImageData.h>
+#include <vtkImageResliceMapper.h>
+#include <vtkImageSlice.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderer.h>
 #include <vtkSmartPointer.h>
 #include <vtkWeakPointer.h>
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <iostream>
 #include <memory>
 #include <thread>
@@ -28,7 +37,12 @@ public:
     bool AttachOverlay(
         std::shared_ptr<FeatureOverlay> overlay) override
     {
+        if (!overlay) {
+            return false;
+        }
         m_overlay = std::move(overlay);
+        m_overlay->AttachRenderer(m_renderer);
+        m_inputs.push_back(GetAttachedInput());
         ++m_attachCount;
         return true;
     }
@@ -39,20 +53,56 @@ public:
         if (m_overlay != overlay) {
             return;
         }
+        m_overlay->DetachRenderer(m_renderer);
         m_overlay.reset();
         ++m_removeCount;
     }
 
     void ClearOverlays() noexcept override
     {
+        if (m_overlay) {
+            m_overlay->DetachRenderer(m_renderer);
+        }
         m_overlay.reset();
     }
 
     int GetAttachCount() const { return m_attachCount; }
     int GetRemoveCount() const { return m_removeCount; }
+    std::shared_ptr<FeatureOverlay> GetOverlay() const { return m_overlay; }
+    vtkDataObject* GetInput(const std::size_t index) const
+    {
+        return index < m_inputs.size() ? m_inputs[index] : nullptr;
+    }
 
 private:
+    vtkDataObject* GetAttachedInput() const
+    {
+        auto* props = m_renderer->GetViewProps();
+        if (!props) {
+            return nullptr;
+        }
+        props->InitTraversal();
+        vtkProp* prop = nullptr;
+        while (auto* nextProp = props->GetNextProp()) {
+            prop = nextProp;
+        }
+        if (auto* actor = vtkActor::SafeDownCast(prop)) {
+            auto* mapper = vtkPolyDataMapper::SafeDownCast(
+                actor->GetMapper());
+            return mapper ? mapper->GetInput() : nullptr;
+        }
+        if (auto* slice = vtkImageSlice::SafeDownCast(prop)) {
+            auto* mapper = vtkImageResliceMapper::SafeDownCast(
+                slice->GetMapper());
+            return mapper ? mapper->GetInput() : nullptr;
+        }
+        return nullptr;
+    }
+
     std::shared_ptr<FeatureOverlay> m_overlay;
+    vtkSmartPointer<vtkRenderer> m_renderer =
+        vtkSmartPointer<vtkRenderer>::New();
+    std::vector<vtkDataObject*> m_inputs;
     int m_attachCount = 0;
     int m_removeCount = 0;
 };
@@ -75,6 +125,33 @@ vtkSmartPointer<vtkImageData> GetMask(
     std::fill_n(values, mask->GetNumberOfPoints(), value);
     mask->Modified();
     return mask;
+}
+
+bool StartDisplay(
+    GapAnalysisService& service,
+    GapViewRequest request,
+    vtkImageData* image)
+{
+    bool isCompleted = false;
+    bool isSucceeded = false;
+    if (!service.StartView(
+            std::move(request),
+            [&](const bool isSuccess) {
+                isCompleted = true;
+                isSucceeded = isSuccess;
+            })) {
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds(5);
+    while (service.GetAnalysisState() == GapAnalysisState::Running
+        && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    service.OnDisplayTick(image);
+    return service.GetAnalysisState() == GapAnalysisState::Succeeded
+        && isCompleted && isSucceeded;
 }
 
 }
@@ -106,6 +183,7 @@ int GapDisplaySuite::GetFailCount() const
     voidParams.minVolumeMM3 = 0.0;
 
     auto overlay = std::make_shared<OverlayStub>();
+    auto meshOverlay = std::make_shared<OverlayStub>();
     std::vector<std::pair<Orientation, std::shared_ptr<OverlayService>>> sliceTargets;
     sliceTargets.emplace_back(Orientation::Top_down, overlay);
     GapAnalysisService service;
@@ -113,6 +191,7 @@ int GapDisplaySuite::GetFailCount() const
     viewRequest.inputImage = image;
     viewRequest.surface = surfaceConfig;
     viewRequest.voidParams = voidParams;
+    viewRequest.meshTargets.push_back(meshOverlay);
     viewRequest.sliceTargets = sliceTargets;
     bool isCompleted = false;
     bool isCompletionOk = false;
@@ -120,7 +199,7 @@ int GapDisplaySuite::GetFailCount() const
         [&](bool isSuccess) {
             isCompleted = true;
             isCompletionOk = isSuccess;
-        }), "Gap view should accept one slice target.");
+        }), "Gap view should accept mesh and slice targets.");
     expect(service.GetAnalysisState() != GapAnalysisState::Idle,
         "Accepted Gap view should reserve and start its worker before returning.");
     service.OnDisplayTick(nullptr);
@@ -135,12 +214,26 @@ int GapDisplaySuite::GetFailCount() const
         "Gap display worker should succeed.");
 
     service.OnDisplayTick(image);
-    expect(overlay->GetAttachCount() == 1 && isCompleted && isCompletionOk,
-        "Terminal tick should attach one overlay before completing.");
-    expect(service.SwitchOverlay() && overlay->GetRemoveCount() == 1,
-        "Hide should detach without discarding the result.");
-    expect(service.SwitchOverlay() && overlay->GetAttachCount() == 2,
-        "Show should reuse the stored result.");
+    auto* firstSliceInput = overlay->GetInput(0);
+    auto* firstMeshInput = meshOverlay->GetInput(0);
+    expect(overlay->GetAttachCount() == 1
+            && meshOverlay->GetAttachCount() == 1
+            && overlay->GetOverlay()
+            && meshOverlay->GetOverlay()
+            && vtkImageData::SafeDownCast(firstSliceInput)
+            && vtkPolyData::SafeDownCast(firstMeshInput)
+            && isCompleted && isCompletionOk,
+        "Terminal tick should attach one mesh and one slice overlay before completing.");
+    expect(service.SwitchOverlay()
+            && overlay->GetRemoveCount() == 1
+            && meshOverlay->GetRemoveCount() == 1,
+        "Hide should detach both overlays without discarding the result.");
+    expect(service.SwitchOverlay()
+            && overlay->GetAttachCount() == 2
+            && meshOverlay->GetAttachCount() == 2
+            && overlay->GetInput(1) == firstSliceInput
+            && meshOverlay->GetInput(1) == firstMeshInput,
+        "Show should reuse both stored display artifacts.");
 
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
     invalidMask->SetDimensions(4, 5, 5);
@@ -187,9 +280,75 @@ int GapDisplaySuite::GetFailCount() const
             && static_cast<int*>(secondLabelImage->GetScalarPointer())[0] != 99,
             "Mutating one public label image must not pollute later reads.");
     }
+    auto firstVoidMesh = service.BuildVoidMesh();
+    expect(firstVoidMesh && firstVoidMesh->GetNumberOfPoints() > 0,
+        "Gap result should expose one non-empty void mesh copy.");
+    if (firstVoidMesh && firstVoidMesh->GetNumberOfPoints() > 0
+        && firstVoidMesh->GetPoints()) {
+        double firstPoint[3] = {};
+        firstVoidMesh->GetPoint(0, firstPoint);
+        const double changedX = firstPoint[0] + 123.0;
+        firstVoidMesh->GetPoints()->SetPoint(
+            0, changedX, firstPoint[1], firstPoint[2]);
+        firstVoidMesh->Modified();
+        auto secondVoidMesh = service.BuildVoidMesh();
+        double secondPoint[3] = {};
+        if (secondVoidMesh && secondVoidMesh->GetNumberOfPoints() > 0) {
+            secondVoidMesh->GetPoint(0, secondPoint);
+        }
+        expect(secondVoidMesh
+                && secondVoidMesh != firstVoidMesh
+                && secondVoidMesh->GetPoints()
+                    != firstVoidMesh->GetPoints()
+                && secondPoint[0] != changedX,
+            "Mutating one public void mesh must not pollute later reads.");
+    }
     expect(service.ExitView() && !service.GetViewOn(),
         "Exit should end the display session.");
+    expect(overlay->GetRemoveCount() == 2
+            && meshOverlay->GetRemoveCount() == 2,
+        "Exit should remove every attached Gap overlay.");
     service.OnDisplayTick(nullptr);
+
+    auto sliceOnlyOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService sliceOnlyService;
+    GapViewRequest sliceOnlyRequest;
+    sliceOnlyRequest.inputImage = image;
+    sliceOnlyRequest.surface = surfaceConfig;
+    sliceOnlyRequest.voidParams = voidParams;
+    sliceOnlyRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        sliceOnlyOverlay);
+    expect(StartDisplay(
+            sliceOnlyService,
+            std::move(sliceOnlyRequest),
+            image)
+            && sliceOnlyOverlay->GetAttachCount() == 1
+            && vtkImageData::SafeDownCast(
+                sliceOnlyOverlay->GetInput(0)),
+        "Slice-only Gap view should display the shared label result.");
+    expect(sliceOnlyService.ExitView(),
+        "Slice-only Gap view should exit cleanly.");
+    sliceOnlyService.OnDisplayTick(nullptr);
+
+    auto meshOnlyOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService meshOnlyService;
+    GapViewRequest meshOnlyRequest;
+    meshOnlyRequest.inputImage = image;
+    meshOnlyRequest.surface = surfaceConfig;
+    meshOnlyRequest.voidParams = voidParams;
+    meshOnlyRequest.meshTargets.push_back(meshOnlyOverlay);
+    expect(StartDisplay(
+            meshOnlyService,
+            std::move(meshOnlyRequest),
+            image)
+            && meshOnlyOverlay->GetAttachCount() == 1
+            && vtkPolyData::SafeDownCast(
+                meshOnlyOverlay->GetInput(0)),
+        "Mesh-only Gap view should display the worker-built mesh result.");
+    expect(meshOnlyService.ExitView(),
+        "Mesh-only Gap view should exit cleanly.");
+    meshOnlyService.OnDisplayTick(nullptr);
 
     GapAnalysisService ownerService;
     auto ownerImage = vtkSmartPointer<vtkImageData>::New();
