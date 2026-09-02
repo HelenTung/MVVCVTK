@@ -17,6 +17,7 @@
 *.png
 *.csv
 *.raw
+*.zip
 
 # Mono auto generated files
 mono_crash.*
