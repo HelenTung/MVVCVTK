@@ -32,6 +32,10 @@ set(
     "${CMAKE_CURRENT_BINARY_DIR}/features/GapAnalysis/mvvcvtk-source-api-include"
 )
 set(
+    MVVCVTK_PART_SOURCE_API_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/features/PartSegmentation/mvvcvtk-source-api-include"
+)
+set(
     MVVCVTK_SDK_CLOSURE_INCLUDE_DIR
     "${CMAKE_CURRENT_BINARY_DIR}/mvvcvtk-sdk-closure-include"
 )
