@@ -4,21 +4,23 @@
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
+#include <vtkType.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
-#include <iterator>
 #include <limits>
+#include <memory>
 #include <new>
+#include <optional>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 namespace {
 
-constexpr std::size_t stagingBatch = 4096;
-// Phase 1 的每标签 LUT 与离散等值面均为 O(partCount)，必须保持显式上限。
+// 每标签 LUT 与离散等值面均为 O(partCount)，必须保持显式上限。
 constexpr std::uint32_t maxOverlayPartCount = 4096;
 
 bool GetProduct(
@@ -34,54 +36,9 @@ bool GetProduct(
     return true;
 }
 
-bool GetSum(
-    const std::size_t left,
-    const std::size_t right,
-    std::size_t& sum)
-{
-    if (right > std::numeric_limits<std::size_t>::max() - left) {
-        return false;
-    }
-    sum = left + right;
-    return true;
-}
-
-PartFailureReason GetWorkingBudget(
-    const std::size_t voxelCount,
-    const bool hasMask,
-    const std::uint64_t minPartVoxels,
-    const std::size_t maxWorkingBytes)
-{
-    const std::size_t separatedCapacity =
-        voxelCount / 2 + voxelCount % 2;
-    const std::size_t sizeCapacity = minPartVoxels > voxelCount
-        ? 0
-        : voxelCount / static_cast<std::size_t>(minPartVoxels);
-    const std::size_t partCapacity = std::min(
-        separatedCapacity, sizeCapacity);
-    std::size_t valueBytes = 0;
-    std::size_t labelBytes = 0;
-    std::size_t queueBytes = 0;
-    std::size_t catalogBytes = 0;
-    std::size_t totalBytes = 0;
-    if (maxWorkingBytes == 0
-        || !GetProduct(voxelCount, sizeof(double), valueBytes)
-        || !GetProduct(voxelCount, sizeof(std::uint32_t), labelBytes)
-        || !GetProduct(voxelCount, sizeof(std::size_t), queueBytes)
-        || !GetProduct(partCapacity, sizeof(PartRecord), catalogBytes)
-        || !GetSum(valueBytes, hasMask ? voxelCount : 0, totalBytes)
-        || !GetSum(totalBytes, labelBytes, totalBytes)
-        || !GetSum(totalBytes, queueBytes, totalBytes)
-        || !GetSum(totalBytes, catalogBytes, totalBytes)
-        || totalBytes > maxWorkingBytes) {
-        return PartFailureReason::BudgetExceeded;
-    }
-    return PartFailureReason::None;
-}
-
 bool GetImageGeometry(
     vtkImageData& image,
-    PartVolumeData& volume)
+    PartVolumeView& volume)
 {
     int dimensions[3]{};
     int extent[6]{};
@@ -98,6 +55,10 @@ bool GetImageGeometry(
             || !std::isfinite(origin[axis])) {
             return false;
         }
+        const auto extentSize = static_cast<std::int64_t>(
+            extent[axis * 2 + 1])
+            - static_cast<std::int64_t>(extent[axis * 2]) + 1;
+        if (extentSize != dimensions[axis]) return false;
         volume.dimensions[axis] = dimensions[axis];
         volume.spacing[axis] = spacing[axis];
         volume.origin[axis] = origin[axis];
@@ -119,16 +80,112 @@ bool GetImageGeometry(
 }
 
 bool GetSameGeometry(
-    vtkImageData& left,
-    vtkImageData& right)
+    const PartVolumeView& left,
+    const PartVolumeView& right)
 {
-    int leftExtent[6]{};
-    int rightExtent[6]{};
-    left.GetExtent(leftExtent);
-    right.GetExtent(rightExtent);
-    return std::equal(
-        std::begin(leftExtent), std::end(leftExtent),
-        std::begin(rightExtent));
+    return left.extent == right.extent
+        && left.dimensions == right.dimensions
+        && left.spacing == right.spacing
+        && left.origin == right.origin
+        && left.direction == right.direction;
+}
+
+std::optional<PartScalarType> GetScalarType(const int vtkType)
+{
+    switch (vtkType) {
+    case VTK_CHAR:
+        return std::is_signed_v<char>
+            ? PartScalarType::Int8 : PartScalarType::UInt8;
+    case VTK_SIGNED_CHAR:
+        return PartScalarType::Int8;
+    case VTK_UNSIGNED_CHAR:
+        return PartScalarType::UInt8;
+    case VTK_SHORT:
+        return PartScalarType::Int16;
+    case VTK_UNSIGNED_SHORT:
+        return PartScalarType::UInt16;
+    case VTK_INT:
+        return PartScalarType::Int32;
+    case VTK_UNSIGNED_INT:
+        return PartScalarType::UInt32;
+    case VTK_LONG:
+        if constexpr (sizeof(long) == sizeof(std::int32_t)) {
+            return PartScalarType::Int32;
+        }
+        else {
+            return PartScalarType::Int64;
+        }
+    case VTK_UNSIGNED_LONG:
+        if constexpr (sizeof(unsigned long) == sizeof(std::uint32_t)) {
+            return PartScalarType::UInt32;
+        }
+        else {
+            return PartScalarType::UInt64;
+        }
+    case VTK_LONG_LONG:
+        return PartScalarType::Int64;
+    case VTK_UNSIGNED_LONG_LONG:
+        return PartScalarType::UInt64;
+    case VTK_FLOAT:
+        return PartScalarType::Float32;
+    case VTK_DOUBLE:
+        return PartScalarType::Float64;
+    default:
+        return std::nullopt;
+    }
+}
+
+enum class ScalarViewStatus : std::uint8_t {
+    Succeeded,
+    InvalidCount,
+    Unsupported
+};
+
+ScalarViewStatus BuildScalarView(
+    vtkDataArray* scalars,
+    const std::size_t expectedCount,
+    PartScalarView& view)
+{
+    if (!scalars
+        || scalars->GetNumberOfComponents() != 1
+        || !scalars->HasStandardMemoryLayout()) {
+        return ScalarViewStatus::Unsupported;
+    }
+    const auto scalarType = GetScalarType(scalars->GetDataType());
+    if (!scalarType) return ScalarViewStatus::Unsupported;
+
+    const vtkIdType tupleCount = scalars->GetNumberOfTuples();
+    if (tupleCount <= 0
+        || static_cast<unsigned long long>(tupleCount)
+            > std::numeric_limits<std::size_t>::max()
+        || static_cast<std::size_t>(tupleCount) != expectedCount) {
+        return ScalarViewStatus::InvalidCount;
+    }
+    const void* data = scalars->GetVoidPointer(0);
+    if (!data) return ScalarViewStatus::Unsupported;
+    view = { data, expectedCount, *scalarType };
+    return ScalarViewStatus::Succeeded;
+}
+
+std::string BuildBudgetMessage(
+    const std::size_t requiredBytes,
+    const std::size_t maxWorkingBytes)
+{
+    return "Part working-set budget is exceeded: requiredBytes="
+        + std::to_string(requiredBytes)
+        + ", maxWorkingBytes=" + std::to_string(maxWorkingBytes) + ".";
+}
+
+std::string BuildSuccessMessage(const PartAlgorithmMetrics& metrics)
+{
+    return "Part segmentation succeeded: peakWorkingBytes="
+        + std::to_string(metrics.peakWorkingBytes)
+        + ", labelBytes=" + std::to_string(metrics.labelBytes)
+        + ", frontierPeakBytes="
+        + std::to_string(metrics.frontierPeakBytes)
+        + ", filteredPeakBytes="
+        + std::to_string(metrics.filteredPeakBytes)
+        + ", catalogBytes=" + std::to_string(metrics.catalogBytes) + ".";
 }
 
 } // namespace
@@ -169,6 +226,8 @@ PartAdmissionStatus PartSegmentationService::Start(
         return PartAdmissionStatus::InvalidRequest;
     }
     m_cancelRequested.store(false, std::memory_order_release);
+    m_progressPermille.store(0, std::memory_order_relaxed);
+    m_progressRequestId.store(requestId, std::memory_order_release);
     m_job = Job{
         std::move(source), std::move(params), maxWorkingBytes, requestId
     };
@@ -188,6 +247,23 @@ PartSegmentationService::GetComplete()
     auto complete = std::move(m_complete);
     m_complete.reset();
     return complete;
+}
+
+std::optional<double> PartSegmentationService::GetProgress(
+    const std::uint64_t requestId) const noexcept
+{
+    if (requestId == 0
+        || m_progressRequestId.load(std::memory_order_acquire)
+            != requestId) {
+        return std::nullopt;
+    }
+    const std::uint32_t permille =
+        m_progressPermille.load(std::memory_order_acquire);
+    if (m_progressRequestId.load(std::memory_order_acquire)
+        != requestId) {
+        return std::nullopt;
+    }
+    return static_cast<double>(permille) / 1000.0;
 }
 
 bool PartSegmentationService::GetIsBusy() const
@@ -214,6 +290,28 @@ bool PartSegmentationService::Stop(
     lock.unlock();
     if (m_worker.joinable()) m_worker.join();
     return true;
+}
+
+void PartSegmentationService::SetProgress(
+    const std::uint64_t requestId,
+    const double progress) noexcept
+{
+    if (m_progressRequestId.load(std::memory_order_acquire)
+        != requestId) {
+        return;
+    }
+    const double bounded = std::clamp(progress, 0.0, 1.0);
+    const auto target = static_cast<std::uint32_t>(
+        std::lround(bounded * 1000.0));
+    std::uint32_t current =
+        m_progressPermille.load(std::memory_order_relaxed);
+    while (current < target
+        && !m_progressPermille.compare_exchange_weak(
+            current,
+            target,
+            std::memory_order_release,
+            std::memory_order_relaxed)) {
+    }
 }
 
 void PartSegmentationService::WorkerLoop() noexcept
@@ -257,10 +355,9 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
     if (!job.source || !job.source->image) return candidate;
 
     try {
-        // DataManager 以新 TrustedImageState 批次替换 current，已发布 snapshot 的
-        // VTK 标量只读且生命周期由 Feature 保持到 owner thread 消费 candidate。
-        // worker 只做读取与私有值 staging，不修改或销毁 source payload。
-        PartVolumeData volume;
+        // snapshot 是 worker 读取期间唯一的 source owner。这里只建立只读
+        // typed view，不复制整卷 scalar，也不在 worker 修改 VTK 对象。
+        PartVolumeView volume;
         auto* image = job.source->image.GetPointer();
         if (!image || !GetImageGeometry(*image, volume)) {
             candidate.failureReason = PartFailureReason::InvalidGeometry;
@@ -273,73 +370,60 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
 
+        std::size_t voxelCount = 1;
+        for (const int dimension : volume.dimensions) {
+            if (!GetProduct(
+                    voxelCount,
+                    static_cast<std::size_t>(dimension),
+                    voxelCount)) {
+                candidate.failureReason = PartFailureReason::InvalidGeometry;
+                candidate.message = "Part source voxel count overflows.";
+                return candidate;
+            }
+        }
         auto* scalars = image->GetPointData()
             ? image->GetPointData()->GetScalars() : nullptr;
-        if (!scalars || scalars->GetNumberOfComponents() != 1) {
-            candidate.failureReason = PartFailureReason::UnsupportedScalar;
-            candidate.message = "Part source must contain one numeric component.";
+        const ScalarViewStatus sourceStatus =
+            BuildScalarView(scalars, voxelCount, volume.values);
+        if (sourceStatus != ScalarViewStatus::Succeeded) {
+            candidate.failureReason =
+                sourceStatus == ScalarViewStatus::InvalidCount
+                ? PartFailureReason::InvalidGeometry
+                : PartFailureReason::UnsupportedScalar;
+            candidate.message =
+                sourceStatus == ScalarViewStatus::InvalidCount
+                ? "Part source tuple count is inconsistent."
+                : "Part source requires one supported contiguous scalar.";
             return candidate;
         }
-        const vtkIdType tupleCount = scalars->GetNumberOfTuples();
-        if (tupleCount <= 0
-            || static_cast<unsigned long long>(tupleCount)
-                > std::numeric_limits<std::size_t>::max()) {
-            candidate.failureReason = PartFailureReason::InvalidGeometry;
-            candidate.message = "Part source tuple count is invalid.";
-            return candidate;
-        }
-        const std::size_t voxelCount = static_cast<std::size_t>(tupleCount);
 
-        vtkDataArray* maskScalars = nullptr;
         if (job.source->validityMask) {
             auto* mask = job.source->validityMask.GetPointer();
-            if (!mask || !GetSameGeometry(*image, *mask)) {
+            PartVolumeView maskVolume;
+            if (!mask
+                || !GetImageGeometry(*mask, maskVolume)
+                || !GetSameGeometry(volume, maskVolume)) {
                 candidate.failureReason = PartFailureReason::InvalidGeometry;
                 candidate.message = "Part validity geometry is inconsistent.";
                 return candidate;
             }
-            maskScalars = mask->GetPointData()
+            auto* maskScalars = mask->GetPointData()
                 ? mask->GetPointData()->GetScalars() : nullptr;
-            if (!maskScalars
-                || maskScalars->GetNumberOfComponents() != 1
-                || maskScalars->GetNumberOfTuples() != tupleCount) {
-                candidate.failureReason = PartFailureReason::InvalidGeometry;
-                candidate.message = "Part validity data is invalid.";
+            PartScalarView maskView;
+            const ScalarViewStatus maskStatus =
+                BuildScalarView(maskScalars, voxelCount, maskView);
+            if (maskStatus != ScalarViewStatus::Succeeded) {
+                candidate.failureReason =
+                    maskStatus == ScalarViewStatus::InvalidCount
+                    ? PartFailureReason::InvalidGeometry
+                    : PartFailureReason::UnsupportedScalar;
+                candidate.message =
+                    maskStatus == ScalarViewStatus::InvalidCount
+                    ? "Part validity tuple count is inconsistent."
+                    : "Part validity requires one supported contiguous scalar.";
                 return candidate;
             }
-        }
-
-        const auto budgetError = GetWorkingBudget(
-            voxelCount,
-            maskScalars != nullptr,
-            job.params.minPartVoxels,
-            job.maxWorkingBytes);
-        if (budgetError != PartFailureReason::None) {
-            candidate.failureReason = budgetError;
-            candidate.message = "Part working-set budget is exceeded.";
-            return candidate;
-        }
-
-        volume.values.resize(voxelCount);
-        if (maskScalars) volume.validity.resize(voxelCount);
-        for (std::size_t index = 0; index < voxelCount; ++index) {
-            if (index % stagingBatch == 0
-                && m_cancelRequested.load(std::memory_order_acquire)) {
-                candidate.status = PartResultStatus::Cancelled;
-                candidate.failureReason = PartFailureReason::Cancelled;
-                candidate.message = "Part request was cancelled.";
-                return candidate;
-            }
-            volume.values[index] = scalars->GetComponent(
-                static_cast<vtkIdType>(index), 0);
-            if (maskScalars) {
-                const double maskValue = maskScalars->GetComponent(
-                    static_cast<vtkIdType>(index), 0);
-                volume.validity[index] =
-                    std::isfinite(maskValue) && maskValue != 0.0
-                    ? std::uint8_t{ 1 }
-                    : std::uint8_t{ 0 };
-            }
+            volume.validity = maskView;
         }
 
         PartAlgorithmParams params;
@@ -348,10 +432,16 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         params.maxPartCount = maxOverlayPartCount;
         params.maxWorkingBytes = job.maxWorkingBytes;
         auto result = ClassicalPartSegmenter::BuildLabels(
-            volume, params,
+            volume,
+            params,
             [this] {
                 return m_cancelRequested.load(std::memory_order_acquire);
+            },
+            [this, requestId = job.requestId](const double progress) {
+                SetProgress(requestId, progress);
             });
+        candidate.requiredBytes = result.requiredBytes;
+        candidate.metrics = result.metrics;
         if (result.error != PartAlgorithmError::None) {
             if (result.error == PartAlgorithmError::Cancelled) {
                 candidate.status = PartResultStatus::Cancelled;
@@ -360,12 +450,17 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             }
             else if (result.error == PartAlgorithmError::BudgetExceeded) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
-                candidate.message = "Part working-set budget is exceeded.";
+                candidate.message = BuildBudgetMessage(
+                    result.requiredBytes, job.maxWorkingBytes);
             }
             else if (result.error == PartAlgorithmError::LabelOverflow) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
                 candidate.message =
                     "Part count exceeds the bounded overlay limit.";
+            }
+            else if (result.error == PartAlgorithmError::InvalidInput) {
+                candidate.failureReason = PartFailureReason::InvalidGeometry;
+                candidate.message = "Part algorithm input is invalid.";
             }
             else {
                 candidate.failureReason = PartFailureReason::InternalError;
@@ -374,21 +469,25 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
 
+        candidate.labels =
+            std::make_shared<std::vector<std::uint32_t>>(
+                std::move(result.labels));
         candidate.status = PartResultStatus::Succeeded;
         candidate.failureReason = PartFailureReason::None;
-        candidate.message = "Part segmentation succeeded.";
+        candidate.message = BuildSuccessMessage(result.metrics);
         candidate.extent = volume.extent;
         candidate.dimensions = volume.dimensions;
         candidate.spacing = volume.spacing;
         candidate.origin = volume.origin;
         candidate.direction = volume.direction;
-        candidate.labels = std::move(result.labels);
         candidate.parts = std::move(result.parts);
+        SetProgress(job.requestId, 1.0);
         return candidate;
     }
     catch (const std::bad_alloc&) {
         candidate.failureReason = PartFailureReason::BudgetExceeded;
-        candidate.message = "Part allocation failed within the configured budget.";
+        candidate.message =
+            "Part allocation failed within the configured budget.";
     }
     catch (...) {
         candidate.failureReason = PartFailureReason::InternalError;

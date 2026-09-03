@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <string>
 #include <thread>
@@ -31,8 +32,10 @@ struct PartLabelCandidate final {
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     };
-    std::vector<std::uint32_t> labels;
+    std::shared_ptr<std::vector<std::uint32_t>> labels;
     std::vector<PartRecord> parts;
+    std::size_t requiredBytes = 0;
+    PartAlgorithmMetrics metrics;
 };
 
 class PartSegmentationService final {
@@ -51,6 +54,8 @@ public:
         std::uint64_t requestId);
     void StopRequest() noexcept;
     std::optional<PartLabelCandidate> GetComplete();
+    std::optional<double> GetProgress(
+        std::uint64_t requestId) const noexcept;
     bool GetIsBusy() const;
     bool Stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
@@ -64,6 +69,9 @@ private:
 
     void WorkerLoop() noexcept;
     PartLabelCandidate BuildCandidate(const Job& job) noexcept;
+    void SetProgress(
+        std::uint64_t requestId,
+        double progress) noexcept;
 
     mutable std::mutex m_mutex;
     std::condition_variable m_workReady;
@@ -72,6 +80,8 @@ private:
     std::optional<PartLabelCandidate> m_complete;
     std::thread m_worker;
     std::atomic<bool> m_cancelRequested{ false };
+    std::atomic<std::uint64_t> m_progressRequestId{ 0 };
+    std::atomic<std::uint32_t> m_progressPermille{ 0 };
     bool m_isBusy = false;
     bool m_isStopping = false;
     bool m_hasExited = false;

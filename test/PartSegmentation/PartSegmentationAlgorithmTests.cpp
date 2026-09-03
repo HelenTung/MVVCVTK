@@ -21,18 +21,20 @@ bool GetCaseResult(const bool passed, const std::string_view name)
     return passed;
 }
 
-PartVolumeData BuildVolume(
+template<typename Scalar>
+PartVolumeView BuildVolume(
     const std::array<int, 3>& dimensions,
-    std::vector<double> values)
+    const std::vector<Scalar>& values,
+    const PartScalarType scalarType)
 {
-    PartVolumeData volume;
+    PartVolumeView volume;
     volume.dimensions = dimensions;
     volume.extent = {
         0, dimensions[0] - 1,
         0, dimensions[1] - 1,
         0, dimensions[2] - 1
     };
-    volume.values = std::move(values);
+    volume.values = { values.data(), values.size(), scalarType };
     return volume;
 }
 
@@ -49,13 +51,16 @@ int GetPartAlgorithmFailCount()
     PartAlgorithmParams params;
 
     const auto invalid = ClassicalPartSegmenter::BuildLabels(
-        PartVolumeData{}, params);
+        PartVolumeView{}, params);
     failureCount += GetCaseResult(
         invalid.error == PartAlgorithmError::InvalidInput,
         "Empty volume is rejected") ? 0 : 1;
 
+    const std::vector<double> backgroundValues(8, 0.0);
     const auto background = ClassicalPartSegmenter::BuildLabels(
-        BuildVolume({ 2, 2, 2 }, std::vector<double>(8, 0.0)), params);
+        BuildVolume(
+            { 2, 2, 2 }, backgroundValues, PartScalarType::Float64),
+        params);
     failureCount += GetCaseResult(
         background.error == PartAlgorithmError::None
             && background.parts.empty()
@@ -64,7 +69,9 @@ int GetPartAlgorithmFailCount()
                 [](const std::uint32_t label) { return label == 0; }),
         "All-background volume returns no parts") ? 0 : 1;
 
-    auto singleVolume = BuildVolume({ 1, 1, 1 }, { 1.0 });
+    const std::vector<double> singleValues{ 1.0 };
+    auto singleVolume = BuildVolume(
+        { 1, 1, 1 }, singleValues, PartScalarType::Float64);
     singleVolume.spacing = { 2.0, 3.0, 4.0 };
     const auto single = ClassicalPartSegmenter::BuildLabels(
         singleVolume, params);
@@ -76,8 +83,11 @@ int GetPartAlgorithmFailCount()
             && GetNearlyEqual(single.parts[0].physicalVolumeMM3, 24.0),
         "Single foreground voxel produces one deterministic label") ? 0 : 1;
 
+    const std::vector<double> separatedValues{
+        1.0, 1.0, 0.0, 1.0
+    };
     const auto separatedVolume = BuildVolume(
-        { 4, 1, 1 }, { 1.0, 1.0, 0.0, 1.0 });
+        { 4, 1, 1 }, separatedValues, PartScalarType::Float64);
     const auto separated = ClassicalPartSegmenter::BuildLabels(
         separatedVolume, params);
     failureCount += GetCaseResult(
@@ -87,25 +97,37 @@ int GetPartAlgorithmFailCount()
             && separated.parts.size() == 2,
         "Separated foreground regions receive stable labels") ? 0 : 1;
 
+    const std::vector<double> diagonalValues{ 1.0, 0.0, 0.0, 1.0 };
     const auto diagonal = ClassicalPartSegmenter::BuildLabels(
-        BuildVolume({ 2, 2, 1 }, { 1.0, 0.0, 0.0, 1.0 }), params);
+        BuildVolume(
+            { 2, 2, 1 }, diagonalValues, PartScalarType::Float64),
+        params);
     failureCount += GetCaseResult(
         diagonal.error == PartAlgorithmError::None
             && diagonal.parts.size() == 2,
         "Diagonal contact stays disconnected under 6-connectivity") ? 0 : 1;
 
-    auto maskedVolume = BuildVolume({ 2, 1, 1 }, { 1.0, 1.0 });
-    maskedVolume.validity = { 1, 0 };
+    const std::vector<float> maskedValues{ 1.0F, 1.0F };
+    const std::vector<std::uint16_t> maskValues{ 256U, 0U };
+    auto maskedVolume = BuildVolume(
+        { 2, 1, 1 }, maskedValues, PartScalarType::Float32);
+    maskedVolume.validity = PartScalarView{
+        maskValues.data(), maskValues.size(), PartScalarType::UInt16
+    };
     const auto masked = ClassicalPartSegmenter::BuildLabels(
         maskedVolume, params);
     failureCount += GetCaseResult(
         masked.error == PartAlgorithmError::None
             && masked.labels == std::vector<std::uint32_t>{ 1, 0 },
-        "Validity mask excludes invalid foreground") ? 0 : 1;
+        "UInt16 mask keeps finite nonzero value 256") ? 0 : 1;
 
+    const std::vector<double> nonFiniteValues{
+        std::numeric_limits<double>::quiet_NaN(), 1.0
+    };
     const auto nonFinite = ClassicalPartSegmenter::BuildLabels(
-        BuildVolume({ 2, 1, 1 }, {
-            std::numeric_limits<double>::quiet_NaN(), 1.0 }), params);
+        BuildVolume(
+            { 2, 1, 1 }, nonFiniteValues, PartScalarType::Float64),
+        params);
     failureCount += GetCaseResult(
         nonFinite.error == PartAlgorithmError::None
             && nonFinite.labels == std::vector<std::uint32_t>{ 0, 1 },
@@ -122,7 +144,8 @@ int GetPartAlgorithmFailCount()
                 == std::vector<std::uint32_t>{ 1, 1, 0, 0 },
         "Minimum voxel rule removes small parts without label gaps") ? 0 : 1;
 
-    auto offsetVolume = BuildVolume({ 1, 1, 1 }, { 1.0 });
+    auto offsetVolume = BuildVolume(
+        { 1, 1, 1 }, singleValues, PartScalarType::Float64);
     offsetVolume.extent = { 5, 5, 7, 7, 9, 9 };
     offsetVolume.spacing = { 2.0, 1.0, 1.0 };
     offsetVolume.origin = { 1.0, 2.0, 3.0 };
@@ -148,7 +171,8 @@ int GetPartAlgorithmFailCount()
     const auto budget = ClassicalPartSegmenter::BuildLabels(
         singleVolume, budgetParams);
     failureCount += GetCaseResult(
-        budget.error == PartAlgorithmError::BudgetExceeded,
+        budget.error == PartAlgorithmError::BudgetExceeded
+            && budget.requiredBytes > budgetParams.maxWorkingBytes,
         "Working-set budget rejects before allocation") ? 0 : 1;
 
     std::vector<double> checkerValues(27, 0.0);
@@ -163,12 +187,11 @@ int GetPartAlgorithmFailCount()
         }
     }
     PartAlgorithmParams catalogBudgetParams = params;
-    catalogBudgetParams.maxWorkingBytes = 27U
-        * (sizeof(double)
-            + sizeof(std::uint32_t)
-            + sizeof(std::size_t));
+    catalogBudgetParams.maxWorkingBytes =
+        checkerValues.size() * sizeof(std::uint32_t);
     const auto catalogBudget = ClassicalPartSegmenter::BuildLabels(
-        BuildVolume({ 3, 3, 3 }, std::move(checkerValues)),
+        BuildVolume(
+            { 3, 3, 3 }, checkerValues, PartScalarType::Float64),
         catalogBudgetParams);
     failureCount += GetCaseResult(
         catalogBudget.error == PartAlgorithmError::BudgetExceeded,
@@ -193,8 +216,10 @@ int GetPartAlgorithmFailCount()
     exactLimitParams.maxPartCount = exactPartLimit;
     const int exactLimitWidth = static_cast<int>(exactLimitValues.size());
     const auto exactLimit = ClassicalPartSegmenter::BuildLabels(
-        BuildVolume({ exactLimitWidth, 1, 1 },
-            std::move(exactLimitValues)),
+        BuildVolume(
+            { exactLimitWidth, 1, 1 },
+            exactLimitValues,
+            PartScalarType::Float64),
         exactLimitParams);
     failureCount += GetCaseResult(
         exactLimit.error == PartAlgorithmError::None
@@ -217,6 +242,160 @@ int GetPartAlgorithmFailCount()
             && repeated.labels == separated.labels
             && repeated.parts.size() == separated.parts.size(),
         "Repeated run preserves deterministic partition") ? 0 : 1;
+
+    const std::vector<float> floatValues{
+        0.0F, 0.5F, 1.0F, 0.0F,
+        1.0F, 1.0F, 0.0F, 0.0F
+    };
+    const std::vector<double> doubleValues(
+        floatValues.begin(), floatValues.end());
+    const auto* const floatData = floatValues.data();
+    const auto* const doubleData = doubleValues.data();
+    const auto floatResult = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 4, 2, 1 }, floatValues, PartScalarType::Float32),
+        params);
+    const auto doubleResult = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 4, 2, 1 }, doubleValues, PartScalarType::Float64),
+        params);
+    failureCount += GetCaseResult(
+        floatResult.error == PartAlgorithmError::None
+            && doubleResult.error == PartAlgorithmError::None
+            && floatResult.labels == doubleResult.labels
+            && floatResult.parts.size() == doubleResult.parts.size()
+            && floatValues.data() == floatData
+            && doubleValues.data() == doubleData,
+        "Direct float and double views preserve source and match") ? 0 : 1;
+
+    const auto getScalarPass =
+        [&](const auto& values, const PartScalarType scalarType) {
+            const auto result = ClassicalPartSegmenter::BuildLabels(
+                BuildVolume({ 2, 1, 1 }, values, scalarType),
+                params);
+            return result.error == PartAlgorithmError::None
+                && result.labels
+                    == std::vector<std::uint32_t>{ 0U, 1U };
+        };
+    failureCount += GetCaseResult(
+        getScalarPass(
+            std::vector<std::int8_t>{ 0, 1 },
+            PartScalarType::Int8)
+            && getScalarPass(
+                std::vector<std::uint8_t>{ 0, 1 },
+                PartScalarType::UInt8)
+            && getScalarPass(
+                std::vector<std::int16_t>{ 0, 1 },
+                PartScalarType::Int16)
+            && getScalarPass(
+                std::vector<std::uint16_t>{ 0, 1 },
+                PartScalarType::UInt16)
+            && getScalarPass(
+                std::vector<std::int32_t>{ 0, 1 },
+                PartScalarType::Int32)
+            && getScalarPass(
+                std::vector<std::uint32_t>{ 0, 1 },
+                PartScalarType::UInt32)
+            && getScalarPass(
+                std::vector<std::int64_t>{ 0, 1 },
+                PartScalarType::Int64)
+            && getScalarPass(
+                std::vector<std::uint64_t>{ 0, 1 },
+                PartScalarType::UInt64),
+        "All fixed-width integer scalar views are dispatched") ? 0 : 1;
+
+    const std::vector<std::uint64_t> maxUnsigned{
+        std::numeric_limits<std::uint64_t>::max()
+    };
+    PartAlgorithmParams uintBoundaryParams = params;
+    uintBoundaryParams.threshold = std::ldexp(1.0, 64);
+    const auto uintBoundary = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 1, 1, 1 },
+            maxUnsigned,
+            PartScalarType::UInt64),
+        uintBoundaryParams);
+    const std::vector<std::int64_t> maxSigned{
+        std::numeric_limits<std::int64_t>::max()
+    };
+    PartAlgorithmParams intBoundaryParams = params;
+    intBoundaryParams.threshold = std::ldexp(1.0, 63);
+    const auto intBoundary = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 1, 1, 1 },
+            maxSigned,
+            PartScalarType::Int64),
+        intBoundaryParams);
+    failureCount += GetCaseResult(
+        uintBoundary.error == PartAlgorithmError::None
+            && uintBoundary.parts.empty()
+            && uintBoundary.labels
+                == std::vector<std::uint32_t>{ 0U }
+            && intBoundary.error == PartAlgorithmError::None
+            && intBoundary.parts.empty()
+            && intBoundary.labels
+                == std::vector<std::uint32_t>{ 0U },
+        "Integer comparison rejects exclusive 64-bit upper bounds")
+        ? 0 : 1;
+
+    const std::vector<std::uint8_t> maxUInt8{
+        std::numeric_limits<std::uint8_t>::max()
+    };
+    PartAlgorithmParams uint8FractionParams = params;
+    uint8FractionParams.threshold = 255.5;
+    const auto uint8Fraction = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 1, 1, 1 }, maxUInt8, PartScalarType::UInt8),
+        uint8FractionParams);
+    const std::vector<std::int8_t> maxInt8{
+        std::numeric_limits<std::int8_t>::max()
+    };
+    PartAlgorithmParams int8FractionParams = params;
+    int8FractionParams.threshold = 127.5;
+    const auto int8Fraction = ClassicalPartSegmenter::BuildLabels(
+        BuildVolume(
+            { 1, 1, 1 }, maxInt8, PartScalarType::Int8),
+        int8FractionParams);
+    failureCount += GetCaseResult(
+        uint8Fraction.error == PartAlgorithmError::None
+            && uint8Fraction.parts.empty()
+            && int8Fraction.error == PartAlgorithmError::None
+            && int8Fraction.parts.empty(),
+        "Fractional thresholds above integer maxima stay background")
+        ? 0 : 1;
+
+    auto wrongCount = singleVolume;
+    wrongCount.values.valueCount = 0;
+    auto badGeometry = singleVolume;
+    badGeometry.spacing[0] = 0.0;
+    auto badDirection = singleVolume;
+    badDirection.direction[0] =
+        std::numeric_limits<double>::quiet_NaN();
+    const auto wrongCountResult = ClassicalPartSegmenter::BuildLabels(
+        wrongCount, params);
+    const auto badGeometryResult = ClassicalPartSegmenter::BuildLabels(
+        badGeometry, params);
+    const auto badDirectionResult = ClassicalPartSegmenter::BuildLabels(
+        badDirection, params);
+    const std::vector<double> overflowWorldValues{ 1.0, 1.0 };
+    auto overflowWorld = BuildVolume(
+        { 2, 1, 1 }, overflowWorldValues, PartScalarType::Float64);
+    overflowWorld.spacing = { 1.0e308, 1.0e-308, 1.0 };
+    overflowWorld.origin = { 1.0e308, 0.0, 0.0 };
+    const auto overflowWorldResult = ClassicalPartSegmenter::BuildLabels(
+        overflowWorld, params);
+    failureCount += GetCaseResult(
+        wrongCountResult.error == PartAlgorithmError::InvalidInput
+            && badGeometryResult.error == PartAlgorithmError::InvalidInput
+            && badDirectionResult.error == PartAlgorithmError::InvalidInput
+            && overflowWorldResult.error
+                == PartAlgorithmError::InvalidInput
+            && wrongCountResult.labels.empty()
+            && badGeometryResult.labels.empty()
+            && badDirectionResult.labels.empty()
+            && overflowWorldResult.labels.empty(),
+        "Bad pointer count and geometry are rejected before allocation")
+        ? 0 : 1;
 
     return failureCount;
 }

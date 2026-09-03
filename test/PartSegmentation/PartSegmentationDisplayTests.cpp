@@ -8,15 +8,20 @@
 #include <vtkMatrix3x3.h>
 #include <vtkNew.h>
 #include <vtkPlane.h>
+#include <vtkPointData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
+#include <vtkUnsignedIntArray.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <string_view>
+#include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -110,5 +115,30 @@ int GetPartDisplayFailCount()
             && std::abs(normal[2]) < 1e-12,
         "Slice overlay follows the image direction axis") ? 0 : 1;
     rotatedSlice->DetachRenderer(rotatedRenderer);
+
+    static_assert(std::is_same_v<std::uint32_t, unsigned int>);
+    auto candidateOwner =
+        std::make_shared<std::vector<std::uint32_t>>(64, 1U);
+    const std::weak_ptr<std::vector<std::uint32_t>> weakOwner =
+        candidateOwner;
+    auto borrowedImage = vtkSmartPointer<vtkImageData>::New();
+    borrowedImage->SetDimensions(4, 4, 4);
+    auto borrowedScalars =
+        vtkSmartPointer<vtkUnsignedIntArray>::New();
+    borrowedScalars->SetNumberOfComponents(1);
+    borrowedScalars->SetArray(candidateOwner->data(), 64, 1);
+    borrowedImage->GetPointData()->SetScalars(borrowedScalars);
+    auto activeOwner = candidateOwner;
+    candidateOwner.reset();
+    const bool keptAfterCandidate =
+        !weakOwner.expired()
+        && borrowedImage->GetScalarPointer() == activeOwner->data();
+    borrowedImage = nullptr;
+    borrowedScalars = nullptr;
+    activeOwner.reset();
+    failureCount += GetCaseResult(
+        keptAfterCandidate && weakOwner.expired(),
+        "Borrowed VTK labels remain owned until the active image retires")
+        ? 0 : 1;
     return failureCount;
 }

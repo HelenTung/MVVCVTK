@@ -5,15 +5,20 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace {
 
-constexpr std::uint32_t filteredLabel =
+constexpr std::uint32_t unvisitedLabel =
     std::numeric_limits<std::uint32_t>::max();
+constexpr std::uint32_t pendingLabel = unvisitedLabel - 1U;
 constexpr std::size_t cancelBatch = 4096;
+constexpr std::size_t progressBatch = 1024U * 1024U;
+constexpr std::size_t indexChunkSize = 64U * 1024U;
 
 bool GetProduct(
     const std::size_t left,
@@ -45,27 +50,227 @@ bool GetStopped(const std::function<bool()>& getStopRequested)
     return getStopRequested && getStopRequested();
 }
 
-std::array<double, 3> GetWorld(
-    const PartVolumeData& volume,
-    const std::array<double, 3>& image)
+void SendProgress(
+    const PartProgressCallback& sendProgress,
+    const double progress)
 {
-    const std::array<double, 3> scaled{
-        image[0] * volume.spacing[0],
-        image[1] * volume.spacing[1],
-        image[2] * volume.spacing[2]
-    };
-    std::array<double, 3> world{};
-    for (std::size_t row = 0; row < world.size(); ++row) {
-        world[row] = volume.origin[row]
-            + volume.direction[row * 3] * scaled[0]
-            + volume.direction[row * 3 + 1] * scaled[1]
-            + volume.direction[row * 3 + 2] * scaled[2];
+    if (sendProgress) sendProgress(std::clamp(progress, 0.0, 1.0));
+}
+
+bool GetScalarTypeValid(const PartScalarType scalarType)
+{
+    switch (scalarType) {
+    case PartScalarType::Int8:
+    case PartScalarType::UInt8:
+    case PartScalarType::Int16:
+    case PartScalarType::UInt16:
+    case PartScalarType::Int32:
+    case PartScalarType::UInt32:
+    case PartScalarType::Int64:
+    case PartScalarType::UInt64:
+    case PartScalarType::Float32:
+    case PartScalarType::Float64:
+        return true;
     }
-    return world;
+    return false;
+}
+
+class WorkingBudget final {
+public:
+    explicit WorkingBudget(const std::size_t limit) noexcept
+        : m_limit(limit)
+    {
+    }
+
+    bool Add(const std::size_t bytes) noexcept
+    {
+        std::size_t required = 0;
+        if (!GetSum(m_current, bytes, required)) {
+            m_required = std::numeric_limits<std::size_t>::max();
+            return false;
+        }
+        m_required = std::max(m_required, required);
+        if (required > m_limit) return false;
+        m_current = required;
+        m_peak = std::max(m_peak, m_current);
+        return true;
+    }
+
+    void Remove(const std::size_t bytes) noexcept
+    {
+        m_current = bytes <= m_current ? m_current - bytes : 0;
+    }
+
+    void SetOverflow() noexcept
+    {
+        m_required = std::numeric_limits<std::size_t>::max();
+    }
+
+    std::size_t GetPeak() const noexcept
+    {
+        return m_peak;
+    }
+
+    std::size_t GetRequired() const noexcept
+    {
+        return std::max(m_required, m_peak);
+    }
+
+private:
+    std::size_t m_limit = 0;
+    std::size_t m_current = 0;
+    std::size_t m_peak = 0;
+    std::size_t m_required = 0;
+};
+
+class IndexBuffer final {
+private:
+    struct IndexChunk final {
+        std::array<std::size_t, indexChunkSize> values;
+        IndexChunk* next = nullptr;
+    };
+
+public:
+    IndexBuffer() = default;
+
+    ~IndexBuffer() noexcept
+    {
+        auto* chunk = m_first;
+        while (chunk) {
+            auto* next = chunk->next;
+            delete chunk;
+            chunk = next;
+        }
+    }
+
+    IndexBuffer(const IndexBuffer&) = delete;
+    IndexBuffer& operator=(const IndexBuffer&) = delete;
+
+    bool Push(
+        const std::size_t value,
+        WorkingBudget& budget,
+        bool& didGrow)
+    {
+        didGrow = false;
+        if (m_size == m_capacity) {
+            if (m_capacity
+                > std::numeric_limits<std::size_t>::max()
+                    - indexChunkSize) {
+                budget.SetOverflow();
+                return false;
+            }
+            if (!budget.Add(sizeof(IndexChunk))) return false;
+
+            IndexChunk* next = nullptr;
+            try {
+                next = new IndexChunk;
+            }
+            catch (...) {
+                budget.Remove(sizeof(IndexChunk));
+                throw;
+            }
+            if (m_last) {
+                m_last->next = next;
+            }
+            else {
+                m_first = next;
+            }
+            m_last = next;
+            m_capacity += indexChunkSize;
+            ++m_chunkCount;
+            didGrow = true;
+        }
+
+        if (m_size == 0) {
+            m_write = m_first;
+        }
+        else if (m_size % indexChunkSize == 0) {
+            m_write = m_write ? m_write->next : nullptr;
+        }
+        if (!m_write) {
+            budget.SetOverflow();
+            return false;
+        }
+        m_write->values[m_size % indexChunkSize] = value;
+        ++m_size;
+        return true;
+    }
+
+    template<typename SendIndex>
+    bool SendItems(SendIndex&& sendIndex) const
+    {
+        std::size_t remaining = m_size;
+        const auto* chunk = m_first;
+        while (chunk && remaining > 0) {
+            const std::size_t count = std::min(remaining, indexChunkSize);
+            for (std::size_t index = 0; index < count; ++index) {
+                if (!sendIndex(chunk->values[index])) return false;
+            }
+            remaining -= count;
+            chunk = chunk->next;
+        }
+        return remaining == 0;
+    }
+
+    void Clear() noexcept
+    {
+        m_size = 0;
+        m_write = m_first;
+    }
+
+    void Swap(IndexBuffer& other) noexcept
+    {
+        std::swap(m_first, other.m_first);
+        std::swap(m_last, other.m_last);
+        std::swap(m_write, other.m_write);
+        std::swap(m_size, other.m_size);
+        std::swap(m_capacity, other.m_capacity);
+        std::swap(m_chunkCount, other.m_chunkCount);
+    }
+
+    std::size_t GetSize() const noexcept
+    {
+        return m_size;
+    }
+
+    std::size_t GetBytes() const noexcept
+    {
+        return m_chunkCount * sizeof(IndexChunk);
+    }
+
+private:
+    IndexChunk* m_first = nullptr;
+    IndexChunk* m_last = nullptr;
+    IndexChunk* m_write = nullptr;
+    std::size_t m_size = 0;
+    std::size_t m_capacity = 0;
+    std::size_t m_chunkCount = 0;
+};
+
+void SetFailure(
+    PartAlgorithmResult& result,
+    const PartAlgorithmError error,
+    const WorkingBudget& budget)
+{
+    std::vector<std::uint32_t>().swap(result.labels);
+    std::vector<PartRecord>().swap(result.parts);
+    result.error = error;
+    result.requiredBytes = budget.GetRequired();
+    result.metrics.peakWorkingBytes = budget.GetPeak();
+}
+
+void SetFrontierPeak(
+    PartAlgorithmMetrics& metrics,
+    const IndexBuffer& current,
+    const IndexBuffer& next)
+{
+    metrics.frontierPeakBytes = std::max(
+        metrics.frontierPeakBytes,
+        current.GetBytes() + next.GetBytes());
 }
 
 PartAlgorithmError GetVolumeError(
-    const PartVolumeData& volume,
+    const PartVolumeView& volume,
     const PartAlgorithmParams& params,
     std::size_t& voxelCount,
     std::size_t& partCapacity)
@@ -73,8 +278,10 @@ PartAlgorithmError GetVolumeError(
     if (!std::isfinite(params.threshold)
         || params.minPartVoxels == 0
         || params.maxPartCount == 0
-        || params.maxPartCount >= filteredLabel
-        || params.maxWorkingBytes == 0) {
+        || params.maxPartCount >= pendingLabel
+        || params.maxWorkingBytes == 0
+        || !volume.values.data
+        || !GetScalarTypeValid(volume.values.scalarType)) {
         return PartAlgorithmError::InvalidInput;
     }
 
@@ -107,14 +314,19 @@ PartAlgorithmError GetVolumeError(
     if (!std::isfinite(voxelVolume) || voxelVolume <= 0.0) {
         return PartAlgorithmError::InvalidInput;
     }
-    if (product != volume.values.size()
-        || (!volume.validity.empty()
-            && volume.validity.size() != product)) {
+    if (volume.values.valueCount != product) {
+        return PartAlgorithmError::InvalidInput;
+    }
+    if (volume.validity
+        && (!volume.validity->data
+            || volume.validity->valueCount != product
+            || !GetScalarTypeValid(volume.validity->scalarType))) {
         return PartAlgorithmError::InvalidInput;
     }
 
     const std::size_t separatedCapacity = product / 2 + product % 2;
-    const std::size_t sizeCapacity = params.minPartVoxels > product
+    const std::size_t sizeCapacity = params.minPartVoxels
+            > static_cast<std::uint64_t>(product)
         ? 0
         : product / static_cast<std::size_t>(params.minPartVoxels);
     partCapacity = std::min({
@@ -122,37 +334,249 @@ PartAlgorithmError GetVolumeError(
         sizeCapacity,
         static_cast<std::size_t>(params.maxPartCount)
     });
-
-    std::size_t valueBytes = 0;
-    std::size_t labelBytes = 0;
-    std::size_t queueBytes = 0;
-    std::size_t catalogBytes = 0;
-    std::size_t workingBytes = 0;
-    if (!GetProduct(product, sizeof(double), valueBytes)
-        || !GetProduct(product, sizeof(std::uint32_t), labelBytes)
-        || !GetProduct(product, sizeof(std::size_t), queueBytes)
-        || !GetProduct(partCapacity, sizeof(PartRecord), catalogBytes)
-        || !GetSum(valueBytes, volume.validity.size(), workingBytes)
-        || !GetSum(workingBytes, labelBytes, workingBytes)
-        || !GetSum(workingBytes, queueBytes, workingBytes)
-        || !GetSum(workingBytes, catalogBytes, workingBytes)
-        || workingBytes > params.maxWorkingBytes) {
-        return PartAlgorithmError::BudgetExceeded;
-    }
     voxelCount = product;
     return PartAlgorithmError::None;
 }
 
-bool GetForeground(
-    const PartVolumeData& volume,
-    const PartAlgorithmParams& params,
-    const std::size_t index)
+template<typename Scalar>
+bool GetForeground(const Scalar value, const double threshold)
 {
-    if (!volume.validity.empty() && volume.validity[index] == 0) {
-        return false;
+    if constexpr (std::is_floating_point_v<Scalar>) {
+        return std::isfinite(value)
+            && static_cast<long double>(value)
+                >= static_cast<long double>(threshold);
     }
-    const double value = volume.values[index];
-    return std::isfinite(value) && value >= params.threshold;
+    else if constexpr (std::is_unsigned_v<Scalar>) {
+        if (threshold <= 0.0) return true;
+        const double upperExclusive = std::ldexp(
+            1.0, std::numeric_limits<Scalar>::digits);
+        if (threshold >= upperExclusive) return false;
+        const double minimum = std::ceil(threshold);
+        if (minimum >= upperExclusive) return false;
+        return value >= static_cast<Scalar>(minimum);
+    }
+    else {
+        const double lowerInclusive = -std::ldexp(
+            1.0, std::numeric_limits<Scalar>::digits);
+        const double upperExclusive = std::ldexp(
+            1.0, std::numeric_limits<Scalar>::digits);
+        if (threshold <= lowerInclusive) return true;
+        if (threshold >= upperExclusive) return false;
+        const double minimum = std::ceil(threshold);
+        if (minimum >= upperExclusive) return false;
+        return value >= static_cast<Scalar>(minimum);
+    }
+}
+
+template<typename Scalar>
+bool GetMaskValid(const Scalar value)
+{
+    if constexpr (std::is_floating_point_v<Scalar>) {
+        return std::isfinite(value) && value != Scalar{};
+    }
+    return value != Scalar{};
+}
+
+template<typename Scalar>
+Scalar GetScalarValue(
+    const PartScalarView& view,
+    const std::size_t index) noexcept
+{
+    Scalar value{};
+    const auto* bytes = static_cast<const unsigned char*>(view.data);
+    std::memcpy(
+        &value,
+        bytes + index * sizeof(Scalar),
+        sizeof(Scalar));
+    return value;
+}
+
+template<typename Scalar>
+bool SetValueLabels(
+    const PartScalarView& values,
+    const double threshold,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress,
+    const double endProgress)
+{
+    for (std::size_t index = 0; index < values.valueCount; ++index) {
+        if (index % cancelBatch == 0
+            && GetStopped(getStopRequested)) {
+            return false;
+        }
+        labels[index] = GetForeground(
+            GetScalarValue<Scalar>(values, index), threshold)
+            ? unvisitedLabel : 0U;
+        if (index % progressBatch == 0) {
+            SendProgress(
+                sendProgress,
+                endProgress * static_cast<double>(index)
+                    / static_cast<double>(values.valueCount));
+        }
+    }
+    SendProgress(sendProgress, endProgress);
+    return true;
+}
+
+template<typename Scalar>
+bool SetMaskLabels(
+    const PartScalarView& validity,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
+{
+    for (std::size_t index = 0; index < validity.valueCount; ++index) {
+        if (index % cancelBatch == 0
+            && GetStopped(getStopRequested)) {
+            return false;
+        }
+        if (!GetMaskValid(
+                GetScalarValue<Scalar>(validity, index))) {
+            labels[index] = 0U;
+        }
+        if (index % progressBatch == 0) {
+            SendProgress(
+                sendProgress,
+                0.15 + 0.15 * static_cast<double>(index)
+                    / static_cast<double>(validity.valueCount));
+        }
+    }
+    SendProgress(sendProgress, 0.30);
+    return true;
+}
+
+template<typename Scalar>
+bool SetTypedValues(
+    const PartVolumeView& volume,
+    const PartAlgorithmParams& params,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
+{
+    return SetValueLabels<Scalar>(
+        volume.values,
+        params.threshold,
+        labels,
+        getStopRequested,
+        sendProgress,
+        volume.validity ? 0.15 : 0.30);
+}
+
+bool SetTypedValues(
+    const PartVolumeView& volume,
+    const PartAlgorithmParams& params,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
+{
+    switch (volume.values.scalarType) {
+    case PartScalarType::Int8:
+        return SetTypedValues<std::int8_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt8:
+        return SetTypedValues<std::uint8_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int16:
+        return SetTypedValues<std::int16_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt16:
+        return SetTypedValues<std::uint16_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int32:
+        return SetTypedValues<std::int32_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt32:
+        return SetTypedValues<std::uint32_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int64:
+        return SetTypedValues<std::int64_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt64:
+        return SetTypedValues<std::uint64_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float32:
+        return SetTypedValues<float>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float64:
+        return SetTypedValues<double>(
+            volume, params, labels, getStopRequested, sendProgress);
+    }
+    return false;
+}
+
+template<typename Scalar>
+bool SetTypedMask(
+    const PartScalarView& validity,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
+{
+    return SetMaskLabels<Scalar>(
+        validity,
+        labels,
+        getStopRequested,
+        sendProgress);
+}
+
+bool SetTypedMask(
+    const PartScalarView& validity,
+    std::vector<std::uint32_t>& labels,
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
+{
+    switch (validity.scalarType) {
+    case PartScalarType::Int8:
+        return SetTypedMask<std::int8_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt8:
+        return SetTypedMask<std::uint8_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int16:
+        return SetTypedMask<std::int16_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt16:
+        return SetTypedMask<std::uint16_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int32:
+        return SetTypedMask<std::int32_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt32:
+        return SetTypedMask<std::uint32_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int64:
+        return SetTypedMask<std::int64_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt64:
+        return SetTypedMask<std::uint64_t>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float32:
+        return SetTypedMask<float>(
+            validity, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float64:
+        return SetTypedMask<double>(
+            validity, labels, getStopRequested, sendProgress);
+    }
+    return false;
+}
+
+std::array<double, 3> GetWorld(
+    const PartVolumeView& volume,
+    const std::array<double, 3>& image)
+{
+    const std::array<double, 3> scaled{
+        image[0] * volume.spacing[0],
+        image[1] * volume.spacing[1],
+        image[2] * volume.spacing[2]
+    };
+    std::array<double, 3> world{};
+    for (std::size_t row = 0; row < world.size(); ++row) {
+        world[row] = volume.origin[row]
+            + volume.direction[row * 3] * scaled[0]
+            + volume.direction[row * 3 + 1] * scaled[1]
+            + volume.direction[row * 3 + 2] * scaled[2];
+    }
+    return world;
 }
 
 struct PartStats final {
@@ -181,7 +605,7 @@ void SetStats(
 }
 
 PartRecord BuildRecord(
-    const PartVolumeData& volume,
+    const PartVolumeView& volume,
     const PartId partId,
     const std::size_t voxelCount,
     const PartStats& stats)
@@ -239,14 +663,34 @@ PartRecord BuildRecord(
     return record;
 }
 
+bool GetRecordValid(const PartRecord& record)
+{
+    if (record.partId == 0
+        || record.voxelCount == 0
+        || !std::isfinite(record.physicalVolumeMM3)
+        || record.physicalVolumeMM3 <= 0.0) {
+        return false;
+    }
+    return std::all_of(
+            record.worldBounds.begin(),
+            record.worldBounds.end(),
+            [](const double value) { return std::isfinite(value); })
+        && std::all_of(
+            record.centroidWorld.begin(),
+            record.centroidWorld.end(),
+            [](const double value) { return std::isfinite(value); });
+}
+
 } // namespace
 
 PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
-    const PartVolumeData& volume,
+    const PartVolumeView& volume,
     const PartAlgorithmParams& params,
-    const std::function<bool()>& getStopRequested)
+    const std::function<bool()>& getStopRequested,
+    const PartProgressCallback& sendProgress)
 {
     PartAlgorithmResult result;
+    WorkingBudget budget(params.maxWorkingBytes);
     std::size_t voxelCount = 0;
     std::size_t partCapacity = 0;
     const PartAlgorithmError inputError =
@@ -255,119 +699,306 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
         result.error = inputError;
         return result;
     }
+    SendProgress(sendProgress, 0.0);
     if (GetStopped(getStopRequested)) {
         result.error = PartAlgorithmError::Cancelled;
         return result;
     }
 
-    try {
-        result.labels.assign(voxelCount, 0U);
-        result.parts.reserve(partCapacity);
-        std::vector<std::size_t> queue;
-        queue.reserve(voxelCount);
-        PartId nextPartId = 0;
+    std::size_t labelBytes = 0;
+    std::size_t catalogBytes = 0;
+    std::size_t baseBytes = 0;
+    if (!GetProduct(voxelCount, sizeof(std::uint32_t), labelBytes)
+        || !GetProduct(partCapacity, sizeof(PartRecord), catalogBytes)
+        || !GetSum(labelBytes, catalogBytes, baseBytes)) {
+        budget.SetOverflow();
+        SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
+        return result;
+    }
+    if (!budget.Add(baseBytes)) {
+        SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
+        return result;
+    }
 
+    try {
+        result.labels.resize(voxelCount);
+        result.parts.reserve(partCapacity);
+        std::size_t actualLabelBytes = 0;
+        std::size_t actualCatalogBytes = 0;
+        std::size_t actualBaseBytes = 0;
+        if (!GetProduct(
+                result.labels.capacity(),
+                sizeof(std::uint32_t),
+                actualLabelBytes)
+            || !GetProduct(
+                result.parts.capacity(),
+                sizeof(PartRecord),
+                actualCatalogBytes)
+            || !GetSum(
+                actualLabelBytes,
+                actualCatalogBytes,
+                actualBaseBytes)) {
+            budget.SetOverflow();
+            SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
+            return result;
+        }
+        if (actualBaseBytes > baseBytes
+            && !budget.Add(actualBaseBytes - baseBytes)) {
+            SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
+            return result;
+        }
+        result.metrics.labelBytes = actualLabelBytes;
+        result.metrics.catalogBytes = actualCatalogBytes;
+
+        if (!SetTypedValues(
+                volume,
+                params,
+                result.labels,
+                getStopRequested,
+                sendProgress)
+            || (volume.validity
+                && !SetTypedMask(
+                    *volume.validity,
+                    result.labels,
+                    getStopRequested,
+                    sendProgress))) {
+            SetFailure(result, PartAlgorithmError::Cancelled, budget);
+            return result;
+        }
+
+        IndexBuffer currentFrontier;
+        IndexBuffer nextFrontier;
+        IndexBuffer filteredIndices;
+        PartId nextPartId = 0;
+        std::size_t foregroundDone = 0;
         const std::size_t width =
             static_cast<std::size_t>(volume.dimensions[0]);
         const std::size_t height =
             static_cast<std::size_t>(volume.dimensions[1]);
         const std::size_t sliceSize = width * height;
 
-        for (int localZ = 0; localZ < volume.dimensions[2]; ++localZ) {
-            if (GetStopped(getStopRequested)) {
-                result.labels.clear();
-                result.parts.clear();
-                result.error = PartAlgorithmError::Cancelled;
+        for (std::size_t seed = 0; seed < voxelCount; ++seed) {
+            if (seed % cancelBatch == 0
+                && GetStopped(getStopRequested)) {
+                SetFailure(result, PartAlgorithmError::Cancelled, budget);
                 return result;
             }
-            for (int localY = 0; localY < volume.dimensions[1]; ++localY) {
-                for (int localX = 0; localX < volume.dimensions[0]; ++localX) {
-                    const std::size_t seed =
-                        static_cast<std::size_t>(localX)
-                        + width * (static_cast<std::size_t>(localY)
-                            + height * static_cast<std::size_t>(localZ));
-                    if (result.labels[seed] != 0
-                        || !GetForeground(volume, params, seed)) {
-                        continue;
-                    }
+            if (seed % progressBatch == 0) {
+                const std::size_t done = std::max(seed, foregroundDone);
+                SendProgress(
+                    sendProgress,
+                    0.30 + 0.65 * static_cast<double>(done)
+                        / static_cast<double>(voxelCount));
+            }
+            if (result.labels[seed] != unvisitedLabel) continue;
 
-                    queue.clear();
-                    queue.push_back(seed);
-                    result.labels[seed] = filteredLabel;
-                    PartStats stats;
+            currentFrontier.Clear();
+            nextFrontier.Clear();
+            filteredIndices.Clear();
+            bool didGrow = false;
+            if (!currentFrontier.Push(seed, budget, didGrow)) {
+                SetFailure(
+                    result, PartAlgorithmError::BudgetExceeded, budget);
+                return result;
+            }
+            if (didGrow) {
+                SetFrontierPeak(
+                    result.metrics, currentFrontier, nextFrontier);
+            }
+            result.labels[seed] = pendingLabel;
 
-                    for (std::size_t head = 0; head < queue.size(); ++head) {
-                        if (head % cancelBatch == 0
+            PartStats stats;
+            std::size_t componentCount = 0;
+            PartId partId = 0;
+            bool isAccepted = false;
+            PartAlgorithmError traversalError = PartAlgorithmError::None;
+
+            while (currentFrontier.GetSize() > 0) {
+                std::size_t levelIndex = 0;
+                const bool didVisit = currentFrontier.SendItems(
+                    [&](const std::size_t current) {
+                        if (levelIndex % cancelBatch == 0
                             && GetStopped(getStopRequested)) {
-                            result.labels.clear();
-                            result.parts.clear();
-                            result.error = PartAlgorithmError::Cancelled;
-                            return result;
+                            traversalError = PartAlgorithmError::Cancelled;
+                            return false;
                         }
-                        const std::size_t current = queue[head];
+                        ++levelIndex;
+                        ++componentCount;
+                        ++foregroundDone;
+
                         const std::size_t currentZ = current / sliceSize;
                         const std::size_t inSlice = current % sliceSize;
                         const std::size_t currentY = inSlice / width;
                         const std::size_t currentX = inSlice % width;
                         SetStats(stats, {
-                            volume.extent[0] + static_cast<int>(currentX),
-                            volume.extent[2] + static_cast<int>(currentY),
-                            volume.extent[4] + static_cast<int>(currentZ)
+                            volume.extent[0]
+                                + static_cast<int>(currentX),
+                            volume.extent[2]
+                                + static_cast<int>(currentY),
+                            volume.extent[4]
+                                + static_cast<int>(currentZ)
                         });
 
-                        const auto addNeighbor = [&](const std::size_t neighbor) {
-                            if (result.labels[neighbor] == 0
-                                && GetForeground(volume, params, neighbor)) {
-                                result.labels[neighbor] = filteredLabel;
-                                queue.push_back(neighbor);
+                        if (!isAccepted
+                            && static_cast<std::uint64_t>(componentCount)
+                                < params.minPartVoxels) {
+                            bool didFilterGrow = false;
+                            if (!filteredIndices.Push(
+                                    current, budget, didFilterGrow)) {
+                                traversalError =
+                                    PartAlgorithmError::BudgetExceeded;
+                                return false;
                             }
-                        };
-                        if (currentX > 0) addNeighbor(current - 1);
-                        if (currentX + 1 < width) addNeighbor(current + 1);
-                        if (currentY > 0) addNeighbor(current - width);
-                        if (currentY + 1 < height) addNeighbor(current + width);
-                        if (currentZ > 0) addNeighbor(current - sliceSize);
-                        if (currentZ + 1
-                            < static_cast<std::size_t>(volume.dimensions[2])) {
-                            addNeighbor(current + sliceSize);
+                            if (didFilterGrow) {
+                                result.metrics.filteredPeakBytes = std::max(
+                                    result.metrics.filteredPeakBytes,
+                                    filteredIndices.GetBytes());
+                            }
                         }
-                    }
+                        else if (!isAccepted) {
+                            if (nextPartId == params.maxPartCount) {
+                                traversalError =
+                                    PartAlgorithmError::LabelOverflow;
+                                return false;
+                            }
+                            ++nextPartId;
+                            partId = nextPartId;
+                            isAccepted = true;
+                            std::size_t restoreCount = 0;
+                            if (!filteredIndices.SendItems(
+                                    [&](const std::size_t index) {
+                                        if (restoreCount % cancelBatch == 0
+                                            && GetStopped(
+                                                getStopRequested)) {
+                                            traversalError =
+                                                PartAlgorithmError::Cancelled;
+                                            return false;
+                                        }
+                                        ++restoreCount;
+                                        result.labels[index] = partId;
+                                        return true;
+                                    })) {
+                                return false;
+                            }
+                            filteredIndices.Clear();
+                            result.labels[current] = partId;
+                        }
+                        else {
+                            result.labels[current] = partId;
+                        }
 
-                    if (queue.size() < params.minPartVoxels) {
-                        continue;
+                        const auto addNeighbor =
+                            [&](const std::size_t neighbor) {
+                                if (result.labels[neighbor]
+                                    != unvisitedLabel) {
+                                    return true;
+                                }
+                                result.labels[neighbor] = isAccepted
+                                    ? partId : pendingLabel;
+                                bool didNeighborGrow = false;
+                                if (!nextFrontier.Push(
+                                        neighbor,
+                                        budget,
+                                        didNeighborGrow)) {
+                                    traversalError =
+                                        PartAlgorithmError::BudgetExceeded;
+                                    return false;
+                                }
+                                if (didNeighborGrow) {
+                                    SetFrontierPeak(
+                                        result.metrics,
+                                        currentFrontier,
+                                        nextFrontier);
+                                }
+                                return true;
+                            };
+                        if (currentX > 0
+                            && !addNeighbor(current - 1)) return false;
+                        if (currentX + 1 < width
+                            && !addNeighbor(current + 1)) return false;
+                        if (currentY > 0
+                            && !addNeighbor(current - width)) return false;
+                        if (currentY + 1 < height
+                            && !addNeighbor(current + width)) return false;
+                        if (currentZ > 0
+                            && !addNeighbor(current - sliceSize)) return false;
+                        if (currentZ + 1
+                                < static_cast<std::size_t>(
+                                    volume.dimensions[2])
+                            && !addNeighbor(current + sliceSize)) {
+                            return false;
+                        }
+                        return true;
+                    });
+                if (!didVisit) {
+                    if (traversalError == PartAlgorithmError::None) {
+                        traversalError = PartAlgorithmError::InternalError;
                     }
-                    if (nextPartId == params.maxPartCount) {
-                        result.labels.clear();
-                        result.parts.clear();
-                        result.error = PartAlgorithmError::LabelOverflow;
-                        return result;
-                    }
-                    ++nextPartId;
-                    for (const std::size_t index : queue) {
-                        result.labels[index] = nextPartId;
-                    }
-                    result.parts.push_back(BuildRecord(
-                        volume, nextPartId, queue.size(), stats));
+                    SetFailure(result, traversalError, budget);
+                    return result;
                 }
+                currentFrontier.Clear();
+                currentFrontier.Swap(nextFrontier);
+                nextFrontier.Clear();
+                SendProgress(
+                    sendProgress,
+                    0.30 + 0.65
+                        * static_cast<double>(
+                            std::max(seed + 1U, foregroundDone))
+                        / static_cast<double>(voxelCount));
             }
+
+            if (!isAccepted) {
+                std::size_t restoreCount = 0;
+                const bool didRestore = filteredIndices.SendItems(
+                    [&](const std::size_t index) {
+                        if (restoreCount % cancelBatch == 0
+                            && GetStopped(getStopRequested)) {
+                            return false;
+                        }
+                        ++restoreCount;
+                        result.labels[index] = 0U;
+                        return true;
+                    });
+                if (!didRestore) {
+                    SetFailure(
+                        result, PartAlgorithmError::Cancelled, budget);
+                    return result;
+                }
+                continue;
+            }
+            auto record = BuildRecord(
+                volume, partId, componentCount, stats);
+            if (!GetRecordValid(record)) {
+                SetFailure(
+                    result, PartAlgorithmError::InvalidInput, budget);
+                return result;
+            }
+            result.parts.push_back(std::move(record));
         }
 
-        std::replace(
+        SendProgress(sendProgress, 0.95);
+        const bool hasSentinel = std::any_of(
             result.labels.begin(), result.labels.end(),
-            filteredLabel, 0U);
+            [](const std::uint32_t label) {
+                return label == unvisitedLabel || label == pendingLabel;
+            });
+        if (hasSentinel) {
+            SetFailure(result, PartAlgorithmError::InternalError, budget);
+            return result;
+        }
         result.error = PartAlgorithmError::None;
+        result.requiredBytes = budget.GetRequired();
+        result.metrics.peakWorkingBytes = budget.GetPeak();
+        SendProgress(sendProgress, 1.0);
         return result;
     }
     catch (const std::bad_alloc&) {
-        result.labels.clear();
-        result.parts.clear();
-        result.error = PartAlgorithmError::BudgetExceeded;
+        SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
         return result;
     }
     catch (...) {
-        result.labels.clear();
-        result.parts.clear();
-        result.error = PartAlgorithmError::InternalError;
+        SetFailure(result, PartAlgorithmError::InternalError, budget);
         return result;
     }
 }
