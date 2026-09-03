@@ -66,7 +66,7 @@ enum class HostMaterialPreset {
     Glossy
 };
 
-// Host 只表达产品质量意图；比例、采样、jitter 与资源预算均由 Render 解析。
+// Host 只表达主 3D 质量意图；尺寸、采样、jitter 与资源预算均由 Render 解析。
 enum class HostVolumeQuality : std::uint8_t {
     Auto,
     Low,

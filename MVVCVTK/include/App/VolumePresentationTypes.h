@@ -21,7 +21,7 @@ struct VolumeTransferFunction final {
     std::vector<OpacityNode> opacityNodes;
 };
 
-// 只保存产品质量意图；比例、采样与资源策略由 VolumeLodController 持有。
+// 只保存主 3D 质量意图；各 Render strategy 独立解析尺寸、采样与资源策略。
 enum class VolumeQuality : std::uint8_t {
     Auto,
     Low,

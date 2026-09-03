@@ -848,7 +848,7 @@ const bool isAccepted = session->SendRequestResult( // 启动异步 buffer 重�
 | `iso`                    | `request.iso = 420.0;`                                                      | finite                                                                                         |
 | `background`             | `request.background = HostBackgroundColor{0.08, 0.08, 0.12};`               | RGB `[0,1]`                                                                                    |
 | `windowLevel`            | `request.windowLevel = HostWindowLevelParams{600.0, 120.0};`                | width 大于零；center finite                                                                    |
-| `volumeQuality`          | `request.volumeQuality = HostVolumeQuality::Ultra;`                         | 五档 `Auto/Low/High/XHigh/Ultra`；显式四档为 `25%/50%/75%/100%`；只允许 Volume/CompositeVolume |
+| `volumeQuality`          | `request.volumeQuality = HostVolumeQuality::Ultra;`                         | 五档 `Auto/Low/High/XHigh/Ultra`；显式四档为 `25%/50%/75%/100%`；允许四种 Volume/Iso 3D 模式   |
 | `visibility`             | `request.visibility = visibility;`                                          | 每个 optional 只修改目标 View 的一个显隐位                                                     |
 | `isAxesVisible`          | `request.isAxesVisible = false;`                                            | 只作用目标 context                                                                             |
 
@@ -913,11 +913,22 @@ const bool isAccepted = // 保存整笔请求的同步结果。
         std::move(request), onHostResult);
 ```
 
-Volume 质量使用五档 `Auto/Low/High/XHigh/Ultra`。显式四档固定为原始 dimensions 的
-`25%/50%/75%/100%`；`Auto` 只在建立数据 LOD 计划时按系统内存、GPU 可用预算和 CPU
-核心数选择一次 dimensions，不按逐帧耗时改档。运行期切换档位会先释放旧 GPU 输入，再按
-当前 free VRAM 计算安全 block budget 和 partitions；该分块只控制 GPU 准入，不重新计算
-Auto dimensions。交互期只覆盖屏幕采样、ray multiplier 和 jitter，不修改 TF 或 Data LOD。
+主 3D 质量使用五档 `Auto/Low/High/XHigh/Ultra`，适用于 `Volume`、`CompositeVolume`、
+`IsoSurface` 和 `CompositeIsoSurface`。显式四档都固定为原始 dimensions 的
+`25%/50%/75%/100%`，不会在资源不足时静默降为较低档；`Ultra` 必须使用原始 dimensions。
+
+Volume 由自己的 LOD controller 解析档位。`Auto` 在建立数据 LOD 计划时按系统内存、GPU
+可用预算和 CPU 核心数选择一次 dimensions，不按逐帧耗时改档。运行期切换档位会先释放
+旧 GPU 输入，再按当前 free VRAM 计算安全 block budget 和 partitions；该分块只控制 GPU
+准入，不重新计算 Auto dimensions。交互期只覆盖屏幕采样、ray multiplier 和 jitter，
+不修改 TF 或 Data LOD。
+
+Iso 由独立 LOD controller 解析等值面提取输入尺寸，不复用 Volume 的 ray、jitter、GPU
+预算或 partitions。`Auto` 只依据可用系统内存和 CPU 核心数选择一次输入比例。切档时先在
+owner thread 完整物化 image resample、`vtkFlyingEdges3D` 以及可选的 mask resample/clip
+候选；全部成功后才替换稳定 mapper 背后的输入，失败时已应用挡位和旧等值面保持不变。
+`Ultra` 直接使用原始体数据，不再存在 766 最大维度上限。上游直接提供的 PolyData 不做
+体数据降采样，Feature 私有 overlay 也不受主体 Iso 挡位影响。
 
 连续 TF 编辑仍重复发送完整的
 `HostViewSetRequest::volumeTransferFunction` 快照。更新只重建目标 View 的一维颜色/透明度
@@ -1058,7 +1069,8 @@ const bool isAccepted = // 保存同步切换结果。
 | `sourceView` | `HostViewTarget`                      | 否   | 空目标回退 Primary 视图        |
 
 `format` 缺省时，Volume/CompositeVolume 推断 RAW，IsoSurface/CompositeIsoSurface
-推断 PLY；slice mode 不支持 Data Export。
+推断 PLY；slice mode 不支持 Data Export。导出始终读取当前完整数据快照并按原始
+dimensions 生成结果，不读取 Volume/Iso 的展示 LOD。
 
 **结果语义：**
 

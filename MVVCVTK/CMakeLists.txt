@@ -452,6 +452,8 @@ set(MVVCVTK_HOST_SOURCES
     src/Render/RenderStrategyFactory.cpp
     src/Render/Strategies/ColoredPlanesStrategy.cpp
     src/Render/Strategies/CompositeStrategy.cpp
+    src/Render/Strategies/IsoLodController.cpp
+    include/Render/Internal/IsoLodController.h
     src/Render/Strategies/IsoSurfaceStrategy.cpp
     src/Render/Strategies/SliceStrategy.cpp
     src/Render/Strategies/VolumeLodController.cpp

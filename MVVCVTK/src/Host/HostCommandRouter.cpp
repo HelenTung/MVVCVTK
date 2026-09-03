@@ -500,9 +500,11 @@ HostCommandRouter::Impl::BuildViewCandidate(
 
     const VizMode effectiveMode = candidate.mode
         ? *candidate.mode : candidate.viewPort->GetViewState().mode;
-    const bool isVolumeMode = effectiveMode == VizMode::Volume
-        || effectiveMode == VizMode::CompositeVolume;
-    if (!isVolumeMode
+    const bool isQualityMode = effectiveMode == VizMode::Volume
+        || effectiveMode == VizMode::CompositeVolume
+        || effectiveMode == VizMode::IsoSurface
+        || effectiveMode == VizMode::CompositeIsoSurface;
+    if (!isQualityMode
         && candidate.volumeQuality) {
         return std::nullopt;
     }

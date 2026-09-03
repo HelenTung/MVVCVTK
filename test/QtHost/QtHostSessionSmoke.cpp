@@ -2537,10 +2537,15 @@ public:
         isoRequest.targetView.viewId = "primary-3d";
         isoRequest.mode = HostRenderMode::IsoSurface;
         isoRequest.iso = 64.0;
+        isoRequest.volumeQuality = HostVolumeQuality::High;
         const bool isIsoSent =
             m_session->SendRequest(
                 std::move(isoRequest));
         (void)SendTimer(endpoint->interactor);
+        HostViewTarget isoTarget;
+        isoTarget.viewId = "primary-3d";
+        const auto isoState =
+            m_session->GetRenderViewState(isoTarget);
         bool hasIsoActor = false;
         auto* isoProps = renderer->GetViewProps();
         if (isoProps) {
@@ -2553,6 +2558,9 @@ public:
         }
         const bool isIsoStable =
             isIsoSent
+            && isoState
+            && isoState->viewMode == HostRenderMode::IsoSurface
+            && isoState->volumeQuality == HostVolumeQuality::High
             && hasIsoActor
             && std::abs(
                 endpoint->renderWindow
@@ -2581,12 +2589,20 @@ public:
         restoreRequest.targetView.viewId = "primary-3d";
         restoreRequest.mode =
             HostRenderMode::CompositeIsoSurface;
+        restoreRequest.volumeQuality = HostVolumeQuality::Ultra;
         const bool isRestoreSent =
             m_session->SendRequest(
                 std::move(restoreRequest));
         (void)SendTimer(endpoint->interactor);
+        const auto restoreState =
+            m_session->GetRenderViewState(isoTarget);
         areSamplesValid =
             isRestoreSent
+            && restoreState
+            && restoreState->viewMode
+                == HostRenderMode::CompositeIsoSurface
+            && restoreState->volumeQuality
+                == HostVolumeQuality::Ultra
             && std::abs(
                 endpoint->renderWindow->GetDesiredUpdateRate()
                     - 0.001) < 1e-12
