@@ -11,6 +11,7 @@
 #include "ImageProcessor.h"
 #include "CompositeStrategy.h"
 #include "IsoSurfaceStrategy.h"
+#include "Render/Internal/IsoLodController.h"
 #include "Render/Internal/VolumeLodController.h"
 #include "VolumeStrategy.h"
 
@@ -28,6 +29,7 @@
 #include <vtkInformation.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkPoints.h>
+#include <vtkPointData.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
@@ -523,6 +525,77 @@ int GetLodControlFailCount()
             && controller.GetProfile().outputDimensions
                 == source.dimensions,
         "Ultra is a strict native-resolution invariant") ? 0 : 1;
+    return failureCount;
+}
+
+int GetIsoLodControlFailCount()
+{
+    int failureCount = 0;
+    IsoLodController controller;
+    IsoLodController::Source source;
+    source.dimensions = { 3, 2, 1 };
+    source.nativeBytes = 128ULL;
+    source.maskBytes = 64ULL;
+    source.systemMemoryBytes = 64ULL * 1024ULL * 1024ULL;
+    source.cpuThreadCount = 16;
+    const bool isSourceSet = controller.SetSource(source);
+    failureCount += GetCaseResult(
+        isSourceSet
+            && controller.GetProfile(VolumeQuality::Low).outputDimensions
+                == std::array<int, 3>{ 1, 1, 1 }
+            && controller.GetProfile(VolumeQuality::High).outputDimensions
+                == std::array<int, 3>{ 2, 1, 1 }
+            && controller.GetProfile(VolumeQuality::XHigh).outputDimensions
+                == std::array<int, 3>{ 3, 2, 1 }
+            && controller.GetProfile(VolumeQuality::Ultra).outputDimensions
+                == source.dimensions,
+        "Iso LOD keeps exact explicit ratios for small axes") ? 0 : 1;
+
+    auto noProbeSource = source;
+    noProbeSource.dimensions = { 1000, 500, 250 };
+    noProbeSource.nativeBytes = 500'000'000ULL;
+    noProbeSource.maskBytes = 125'000'000ULL;
+    noProbeSource.systemMemoryBytes = 0;
+    noProbeSource.cpuThreadCount = 16;
+    const bool isNoProbeSet = controller.SetSource(noProbeSource);
+    const double noProbeRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto lowCpuSource = noProbeSource;
+    lowCpuSource.systemMemoryBytes =
+        64ULL * 1024ULL * 1024ULL * 1024ULL;
+    lowCpuSource.cpuThreadCount = 0;
+    const bool isLowCpuSet = controller.SetSource(lowCpuSource);
+    const double lowCpuRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    auto abundantSource = lowCpuSource;
+    abundantSource.cpuThreadCount = 16;
+    const bool isAbundantSet = controller.SetSource(abundantSource);
+    const double abundantRatio =
+        controller.GetProfile(VolumeQuality::Auto).dimensionRatio;
+    failureCount += GetCaseResult(
+        isNoProbeSet
+            && noProbeRatio >= 0.25 && noProbeRatio <= 1.0
+            && isLowCpuSet && lowCpuRatio == 0.25
+            && isAbundantSet && abundantRatio == 1.0,
+        "Iso Auto remains bounded across probe failure and CPU limits") ? 0 : 1;
+
+    IsoLodController::Source overflowSource = abundantSource;
+    overflowSource.dimensions = { 1, 1, 1 };
+    overflowSource.nativeBytes =
+        std::numeric_limits<std::uint64_t>::max();
+    overflowSource.maskBytes = 1ULL;
+    const auto stableProfile = controller.GetProfile(VolumeQuality::Ultra);
+    const bool isOverflowRejected =
+        !controller.SetSource(overflowSource);
+    const bool isInvalidQualityRejected =
+        !controller.SetQuality(static_cast<VolumeQuality>(99));
+    failureCount += GetCaseResult(
+        isOverflowRejected
+            && isInvalidQualityRejected
+            && controller.GetProfile(VolumeQuality::Ultra).outputDimensions
+                == stableProfile.outputDimensions
+            && controller.GetQuality() == VolumeQuality::Auto,
+        "Iso LOD rejects overflow and invalid quality without mutation") ? 0 : 1;
     return failureCount;
 }
 
@@ -1663,44 +1736,103 @@ int GetRenderContractFailCount()
         "Iso constructor follows default Flat interpolation") ? 0 : 1;
 
     auto isoImage = vtkSmartPointer<vtkImageData>::New();
-    isoImage->SetDimensions(1200, 2, 2);
+    isoImage->SetDimensions(1200, 40, 40);
     isoImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(isoImage->GetScalarPointer()),
+        isoImage->GetNumberOfPoints(),
+        static_cast<unsigned char>(128));
+    auto isoMask = vtkSmartPointer<vtkImageData>::New();
+    isoMask->SetDimensions(1200, 40, 40);
+    isoMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(isoMask->GetScalarPointer()),
+        isoMask->GetNumberOfPoints(),
+        static_cast<unsigned char>(255));
     IsoSurfaceStrategy isoQualityStrategy;
-    isoQualityStrategy.SetInputData(isoImage);
+    RenderParams isoQualityParams;
+    isoQualityParams.volumeQuality = VolumeQuality::Low;
+    const bool isIsoLowSet = isoQualityStrategy.SetVisualState(
+        isoQualityParams, UpdateFlags::Quality);
+    const bool isIsoInputSet = isoQualityStrategy.SetInputData(
+        isoImage, isoMask);
     auto* isoQualityActor = vtkActor::SafeDownCast(
         isoQualityStrategy.GetMainProp());
     auto* isoMapper = isoQualityActor
         ? vtkPolyDataMapper::SafeDownCast(
             isoQualityActor->GetMapper())
         : nullptr;
-    vtkSmartPointer<vtkAlgorithmOutput> isoInput =
+    vtkMapper* isoMapperIdentity = isoMapper;
+    const std::array isoProfiles{
+        std::pair{
+            VolumeQuality::Low,
+            std::array<int, 3>{ 300, 10, 10 } },
+        std::pair{
+            VolumeQuality::High,
+            std::array<int, 3>{ 600, 20, 20 } },
+        std::pair{
+            VolumeQuality::XHigh,
+            std::array<int, 3>{ 900, 30, 30 } },
+        std::pair{
+            VolumeQuality::Ultra,
+            std::array<int, 3>{ 1200, 40, 40 } }
+    };
+    bool areIsoProfilesValid = isIsoLowSet && isIsoInputSet;
+    for (const auto& [quality, expectedDimensions] : isoProfiles) {
+        isoQualityParams.volumeQuality = quality;
+        const bool isQualitySet = isoQualityStrategy.SetVisualState(
+            isoQualityParams, UpdateFlags::Quality);
+        areIsoProfilesValid = areIsoProfilesValid
+            && isQualitySet
+            && isoQualityStrategy.GetLodDimensions(quality)
+                == expectedDimensions
+            && isoQualityStrategy.GetInputDimensions()
+                == expectedDimensions
+            && isoQualityStrategy.GetMaskDimensions()
+                == expectedDimensions
+            && isoQualityActor->GetMapper() == isoMapperIdentity;
+    }
+    const auto autoDimensions =
+        isoQualityStrategy.GetLodDimensions(VolumeQuality::Auto);
+    const bool isAutoIsoBounded =
+        autoDimensions[0] >= 300 && autoDimensions[0] <= 1200
+        && autoDimensions[1] >= 10 && autoDimensions[1] <= 40
+        && autoDimensions[2] >= 10 && autoDimensions[2] <= 40;
+    vtkSmartPointer<vtkAlgorithmOutput> ultraIsoInput =
         isoMapper ? isoMapper->GetInputConnection(0, 0) : nullptr;
-    auto* isoFilter = isoInput
-        ? vtkFlyingEdges3D::SafeDownCast(
-            isoInput->GetProducer())
-        : nullptr;
-    auto* isoResample = isoFilter
-        && isoFilter->GetInputConnection(0, 0)
-        ? vtkImageResample::SafeDownCast(
-            isoFilter->GetInputConnection(0, 0)->GetProducer())
-        : nullptr;
-    if (isoResample) {
-        isoResample->Update();
-    }
-    int isoDimensions[3] = {};
-    if (isoResample) {
-        isoResample->GetOutput()->GetDimensions(isoDimensions);
-    }
+    isoQualityParams.volumeQuality =
+        static_cast<VolumeQuality>(99);
+    const bool isInvalidIsoRejected =
+        !isoQualityStrategy.SetVisualState(
+            isoQualityParams, UpdateFlags::Quality);
+    auto misalignedMask = vtkSmartPointer<vtkImageData>::New();
+    misalignedMask->SetDimensions(1200, 40, 40);
+    misalignedMask->SetSpacing(2.0, 1.0, 1.0);
+    misalignedMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    const bool isMisalignedMaskRejected =
+        !isoQualityStrategy.SetInputData(
+            isoImage, misalignedMask);
+    const bool isMisalignedRollbackValid = isoMapper
+        && isoMapper->GetInputConnection(0, 0)
+            == ultraIsoInput.GetPointer();
+    isoImage->GetPointData()->GetScalars()->Modified();
+    const bool isSamePointerRebuilt =
+        isoQualityStrategy.SetInputData(isoImage, isoMask);
+    const bool hasSamePointerNewPipeline = isoMapper
+        && isoMapper->GetInputConnection(0, 0)
+            != ultraIsoInput.GetPointer();
     failureCount += GetCaseResult(
-        isoResample
-            && std::max({
-                isoDimensions[0],
-                isoDimensions[1],
-                isoDimensions[2] }) == 766
-            && isoFilter
-            && isoMapper->GetInputConnection(0, 0)
-                == isoInput.GetPointer(),
-        "Iso keeps one lazy producer with the legacy 766 input ceiling") ? 0 : 1;
+        areIsoProfilesValid
+            && isAutoIsoBounded
+            && isInvalidIsoRejected
+            && isMisalignedMaskRejected
+            && isMisalignedRollbackValid
+            && isSamePointerRebuilt
+            && hasSamePointerNewPipeline
+            && isoQualityStrategy.GetQuality()
+                == VolumeQuality::Ultra
+            && isoQualityActor->GetMapper() == isoMapperIdentity,
+        "Iso tiers remove 766 while input and mask failures stay transactional") ? 0 : 1;
 
     auto polyData = vtkSmartPointer<vtkPolyData>::New();
     auto points = vtkSmartPointer<vtkPoints>::New();
@@ -2835,6 +2967,7 @@ int GetViewFailCount()
         true, false, true
     };
     value.isAxesVisible = true;
+    value.volumeQuality = HostVolumeQuality::XHigh;
     failureCount += GetCaseResult(
         session.SendRequest(std::move(value)),
         "Qt Host can set one View presentation state") ? 0 : 1;
@@ -2862,6 +2995,8 @@ int GetViewFailCount()
         && state->id == "view"
         && state->role == HostRenderViewRole::Primary3D
         && state->viewMode == HostRenderMode::IsoSurface
+        // 当前 fixture 没有数据；质量已接收但尚未提交，回读必须保持 applied。
+        && state->volumeQuality == HostVolumeQuality::Auto
         && std::abs(state->material.opacity - 0.6) < 1e-12
         && !state->material.isShadeOn
         && state->volumeTransferFunction.colorNodes.size() == 2
@@ -2930,6 +3065,37 @@ int GetViewFailCount()
                 < 1e-12,
         "State keeps one complete scalar transfer function") ? 0 : 1;
 
+    value = HostViewSetRequest{};
+    value.targetView = stateTarget;
+    value.mode = HostRenderMode::CompositeIsoSurface;
+    value.volumeQuality = HostVolumeQuality::Ultra;
+    const bool isCompositeIsoQualitySet =
+        session.SendRequest(std::move(value));
+    const auto compositeIsoState =
+        session.GetRenderViewState(stateTarget);
+    value = HostViewSetRequest{};
+    value.targetView = stateTarget;
+    value.mode = HostRenderMode::SliceTopDown;
+    value.volumeQuality = HostVolumeQuality::Low;
+    const bool isSliceQualityRejected =
+        !session.SendRequest(std::move(value));
+    const auto preservedIsoState =
+        session.GetRenderViewState(stateTarget);
+    failureCount += GetCaseResult(
+        isCompositeIsoQualitySet
+            && compositeIsoState
+            && compositeIsoState->viewMode
+                == HostRenderMode::CompositeIsoSurface
+            && compositeIsoState->volumeQuality
+                == HostVolumeQuality::Auto
+            && isSliceQualityRejected
+            && preservedIsoState
+            && preservedIsoState->viewMode
+                == HostRenderMode::CompositeIsoSurface
+            && preservedIsoState->volumeQuality
+                == HostVolumeQuality::Auto,
+        "Iso modes accept requested quality while applied state stays transactional") ? 0 : 1;
+
     HostViewResetRequest reset;
     reset.targetView.viewId = "view";
     failureCount += GetCaseResult(
@@ -2939,6 +3105,7 @@ int GetViewFailCount()
     failureCount += GetHistogramFailCount();
     failureCount += GetResampleFailCount();
     failureCount += GetLodControlFailCount();
+    failureCount += GetIsoLodControlFailCount();
     failureCount += GetRenderContractFailCount();
     return failureCount;
 }

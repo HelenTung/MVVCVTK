@@ -6,6 +6,8 @@ Host 只保留一个真实 scalar 坐标的 `HostVolumeTransferFunction` 完整�
 
 运行时切换显式质量档采用两阶段提交：固定百分比产生的目标 dimensions 不做资源降级，可用物理内存只约束 CPU resample 工作集。已渲染窗口切档时先等待旧 draw 完成并显式释放 mapper 的旧 volume/mask GPU 资源，再在同一 OpenGL context 查询 NVX/ATI 驱动报告的当前剩余显存；单块预算由这次释放后的剩余容量、mapper 保留比例和等量重分配余量共同计算，不使用固定字节大小。候选超过单块预算时用 VTK `SetPartitions` 保持原 dimensions，并在正常 `Render` 中按视点排序、逐块复用同一 3D texture 上传；只有单块候选使用 `PreLoadData`。厂商显存扩展不可用时才回退到 mapper 配置预算；准入失败则恢复原 active LOD 的 mapper 绑定与已应用质量，后续正常 Render 重新装载旧档。
 
+`IsoSurface` 与 `CompositeIsoSurface` 沿用同一质量枚举和 `25%/50%/75%/100%` 显式 dimensions，但由独立 Iso LOD 计划器控制等值面提取输入，不复用 Volume 的 ray、jitter、显存和 partitions 策略。切档先完整物化 resample、`vtkFlyingEdges3D` 与可选 mask/clip 候选，成功后才切换稳定 mapper；失败保留旧等值面和已应用挡位。`Ultra` 直接使用原始 dimensions，旧的 766 最大维度限制已移除；PolyData 直通、Feature 私有 overlay 和全分辨率数据导出不受主体 Iso 展示挡位影响。
+
 ## 支持范围
 
 - Windows x64；仓库和 SDK 均不提供 Win32/x86 配置。

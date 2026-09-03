@@ -318,12 +318,14 @@ class MainControlFeature final
 public:
     MainControlFeature(
         VtkAppHostSession& session,
-        HostViewTarget target,
+        HostViewTarget volumeTarget,
+        HostViewTarget isoTarget,
         HostViewTargets inputViews,
         std::weak_ptr<GapHostFeature> gapFeature,
         GapHostStartParams gapStart)
         : m_session(session),
-          m_target(std::move(target)),
+          m_volumeTarget(std::move(volumeTarget)),
+          m_isoTarget(std::move(isoTarget)),
           m_inputViews(std::move(inputViews)),
           m_gapFeature(std::move(gapFeature)),
           m_gapStart(std::move(gapStart)),
@@ -334,6 +336,8 @@ public:
               HostKeyChord{ 'v', {}, false, false, true },
               HostKeyChord{ 'l' },
               HostKeyChord{ 'l', {}, false, false, true },
+              HostKeyChord{ 'i' },
+              HostKeyChord{ 'i', {}, false, false, true },
               HostKeyChord{ 'g' }
           }
     {
@@ -413,6 +417,8 @@ private:
         OpacityDown,
         QualityNext,
         QualityPrevious,
+        IsoQualityNext,
+        IsoQualityPrevious,
         StartGap,
         Count
     };
@@ -487,10 +493,10 @@ private:
         return m_session.SendRequest(std::move(request));
     }
 
-    bool SetQuality(const HostVolumeQuality quality)
+    bool SetAuditQuality(const HostVolumeQuality quality)
     {
         HostViewSetRequest request;
-        request.targetView = m_target;
+        request.targetView = m_volumeTarget;
         request.volumeQuality = quality;
         return SendViewRequest(std::move(request));
     }
@@ -498,7 +504,7 @@ private:
     bool StartAuditRender()
     {
         const auto* endpoint = m_session.GetRenderViewEndpoint(
-            m_target.viewId);
+            m_volumeTarget.viewId);
         if (!endpoint || !endpoint->renderWindow) return false;
         endpoint->renderWindow->Render();
         endpoint->renderWindow->WaitForCompletion();
@@ -527,7 +533,8 @@ private:
             || m_qualityAuditPhase == QualityAuditPhase::Done) {
             return true;
         }
-        const auto state = m_session.GetRenderViewState(m_target);
+        const auto state = m_session.GetRenderViewState(
+            m_volumeTarget);
         if (!state) {
             return StopQualityAudit(false, HostVolumeQuality::Auto);
         }
@@ -535,7 +542,7 @@ private:
         constexpr int tickLimit = 10;
         switch (m_qualityAuditPhase) {
         case QualityAuditPhase::SetLow:
-            if (!SetQuality(HostVolumeQuality::Low)) {
+            if (!SetAuditQuality(HostVolumeQuality::Low)) {
                 return StopQualityAudit(false, state->volumeQuality);
             }
             m_qualityAuditPhase = QualityAuditPhase::WaitLow;
@@ -556,7 +563,7 @@ private:
             }
             return true;
         case QualityAuditPhase::SetHigh:
-            if (!SetQuality(HostVolumeQuality::High)) {
+            if (!SetAuditQuality(HostVolumeQuality::High)) {
                 return StopQualityAudit(false, state->volumeQuality);
             }
             m_qualityAuditPhase = QualityAuditPhase::WaitHigh;
@@ -582,7 +589,7 @@ private:
             m_qualityAuditTicks = 0;
             return true;
         case QualityAuditPhase::SetXHigh:
-            if (!SetQuality(HostVolumeQuality::XHigh)) {
+            if (!SetAuditQuality(HostVolumeQuality::XHigh)) {
                 return StopQualityAudit(false, state->volumeQuality);
             }
             m_qualityAuditPhase = QualityAuditPhase::WaitXHigh;
@@ -608,7 +615,7 @@ private:
             m_qualityAuditTicks = 0;
             return true;
         case QualityAuditPhase::SetUltra:
-            if (!SetQuality(HostVolumeQuality::Ultra)) {
+            if (!SetAuditQuality(HostVolumeQuality::Ultra)) {
                 return StopQualityAudit(false, state->volumeQuality);
             }
             m_qualityAuditPhase = QualityAuditPhase::WaitUltra;
@@ -645,7 +652,7 @@ private:
     bool SetTransfer(const ControlAction action)
     {
         const auto state =
-            m_session.GetRenderViewState(m_target);
+            m_session.GetRenderViewState(m_volumeTarget);
         if (!state) return false;
 
         const auto& current =
@@ -686,7 +693,7 @@ private:
         }
 
         HostViewSetRequest request;
-        request.targetView = m_target;
+        request.targetView = m_volumeTarget;
         request.volumeTransferFunction = std::move(next);
         if (!SendViewRequest(std::move(request))) {
             return false;
@@ -713,10 +720,12 @@ private:
             : 0;
     }
 
-    bool SwitchQuality(const int direction)
+    bool SwitchQuality(
+        const HostViewTarget& target,
+        const int direction)
     {
         const auto state =
-            m_session.GetRenderViewState(m_target);
+            m_session.GetRenderViewState(target);
         if (!state || (direction != -1 && direction != 1)) {
             return false;
         }
@@ -739,12 +748,12 @@ private:
             % static_cast<int>(qualities.size());
 
         HostViewSetRequest request;
-        request.targetView = m_target;
+        request.targetView = target;
         request.volumeQuality =
             qualities[static_cast<std::size_t>(nextIndex)];
         if (!SendViewRequest(std::move(request))) return false;
 
-        std::cout << "[Quality] "
+        std::cout << "[Quality] view=" << target.viewId << ' '
             << qualityNames[static_cast<std::size_t>(nextIndex)]
             << '\n';
         return true;
@@ -752,11 +761,11 @@ private:
 
     bool SetGapStatus(const std::string& status)
     {
-        if (!m_host || m_target.viewId.empty()) {
+        if (!m_host || m_volumeTarget.viewId.empty()) {
             return false;
         }
         const std::vector<std::string> statusViews{
-            m_target.viewId
+            m_volumeTarget.viewId
         };
         return m_host->SetViewStatus(statusViews, status);
     }
@@ -822,9 +831,13 @@ private:
         case ControlAction::OpacityDown:
             return SetTransfer(action);
         case ControlAction::QualityNext:
-            return SwitchQuality(1);
+            return SwitchQuality(m_volumeTarget, 1);
         case ControlAction::QualityPrevious:
-            return SwitchQuality(-1);
+            return SwitchQuality(m_volumeTarget, -1);
+        case ControlAction::IsoQualityNext:
+            return SwitchQuality(m_isoTarget, 1);
+        case ControlAction::IsoQualityPrevious:
+            return SwitchQuality(m_isoTarget, -1);
         case ControlAction::StartGap:
             return StartGap();
         default:
@@ -874,7 +887,8 @@ private:
     }
 
     VtkAppHostSession& m_session;
-    HostViewTarget m_target;
+    HostViewTarget m_volumeTarget;
+    HostViewTarget m_isoTarget;
     HostViewTargets m_inputViews;
     std::weak_ptr<GapHostFeature> m_gapFeature;
     GapHostStartParams m_gapStart;
@@ -1108,6 +1122,7 @@ int main(int argc, char* argv[])
     planeVisibility.isPlanes3DVisible = false;
     HostViewSetRequest primaryRequest;
     primaryRequest.targetView = primaryTarget;
+    primaryRequest.volumeQuality = HostVolumeQuality::Auto;
     primaryRequest.visibility = planeVisibility;
     if (!session.SendRequest(std::move(primaryRequest))) {
         return 1;
@@ -1152,6 +1167,7 @@ int main(int argc, char* argv[])
     auto controlFeature = std::make_shared<MainControlFeature>(
         session,
         volumeTarget,
+        primaryTarget,
         std::move(controlViews),
         gapFeature,
         std::move(gapStart));
@@ -1280,10 +1296,11 @@ int main(int argc, char* argv[])
     }
 
     std::cout
-        << "TF/quality controls for composite-volume:\n"
+        << "TF/quality controls:\n"
         << "  C / Shift+C: color red +/- 0.05\n"
         << "  V / Shift+V: opacity +/- 0.05\n"
-        << "  L / Shift+L: next / previous quality tier\n"
+        << "  L / Shift+L: composite-volume quality next / previous\n"
+        << "  I / Shift+I: CompositeIsoSurface quality next / previous\n"
         << "GapAnalysis controls:\n"
         << "  G: analyze and show the result in Window A (3D) "
            "and Window B (slice)\n"
