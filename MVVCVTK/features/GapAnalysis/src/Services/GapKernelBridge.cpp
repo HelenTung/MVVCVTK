@@ -275,7 +275,7 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             << '\n' << std::flush;
         const auto analysisStart = std::chrono::steady_clock::now();
         const bool isAnalyzed = analysis.SetInputImage(inputImage)
-            && analysis.RunVglCoreAnalysis(analysisRequest);
+            && analysis.RunVglCoreAnalysis(analysisRequest, nullptr);
         const std::chrono::duration<double> elapsed =
             std::chrono::steady_clock::now() - analysisStart;
         std::cerr
