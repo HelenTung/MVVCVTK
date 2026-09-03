@@ -30,6 +30,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -341,6 +342,188 @@ bool GetChordMatched(
         && event.isShiftDown == chord.isShiftDown;
 }
 
+class SceneTreeConsole final {
+public:
+    void Send(VtkAppHostSession& session)
+    {
+        // Host timer 已保证 owner-thread；空集合表示 Session 已不再可读，
+        // 此时不覆盖最后一次有效展示。
+        const auto views = session.GetSceneViewStates();
+        if (views.empty()) return;
+
+        auto text = GetSceneTreeText(views);
+        if (m_lastText && text == *m_lastText) return;
+
+        const auto now = std::chrono::steady_clock::now();
+        constexpr auto sendInterval = std::chrono::milliseconds{ 250 };
+        if (m_lastSend && now - *m_lastSend < sendInterval) return;
+
+        std::cout << text << std::flush;
+        m_lastText = std::move(text);
+        m_lastSend = now;
+    }
+
+    void Clear() noexcept
+    {
+        m_lastText.reset();
+        m_lastSend.reset();
+    }
+
+private:
+    static std::string_view GetViewRoleName(
+        const HostRenderViewRole role) noexcept
+    {
+        switch (role) {
+        case HostRenderViewRole::Primary3D:
+            return "Primary3D";
+        case HostRenderViewRole::Composite3D:
+            return "Composite3D";
+        case HostRenderViewRole::TopDownSlice:
+            return "TopDownSlice";
+        case HostRenderViewRole::FrontBackSlice:
+            return "FrontBackSlice";
+        case HostRenderViewRole::LeftRightSlice:
+            return "LeftRightSlice";
+        case HostRenderViewRole::Auxiliary:
+            return "Auxiliary";
+        }
+        return "Unknown";
+    }
+
+    static std::string_view GetRenderModeName(
+        const HostRenderMode mode) noexcept
+    {
+        switch (mode) {
+        case HostRenderMode::Volume:
+            return "Volume";
+        case HostRenderMode::IsoSurface:
+            return "IsoSurface";
+        case HostRenderMode::SliceTopDown:
+            return "SliceTopDown";
+        case HostRenderMode::SliceFrontBack:
+            return "SliceFrontBack";
+        case HostRenderMode::SliceLeftRight:
+            return "SliceLeftRight";
+        case HostRenderMode::CompositeVolume:
+            return "CompositeVolume";
+        case HostRenderMode::CompositeIsoSurface:
+            return "CompositeIsoSurface";
+        }
+        return "Unknown";
+    }
+
+    static std::string_view GetQualityName(
+        const HostVolumeQuality quality) noexcept
+    {
+        switch (quality) {
+        case HostVolumeQuality::Auto:
+            return "Auto";
+        case HostVolumeQuality::Low:
+            return "Low";
+        case HostVolumeQuality::High:
+            return "High";
+        case HostVolumeQuality::XHigh:
+            return "XHigh";
+        case HostVolumeQuality::Ultra:
+            return "Ultra";
+        }
+        return "Unknown";
+    }
+
+    template<std::size_t valueCount>
+    static std::string GetValuesText(
+        const std::array<double, valueCount>& values)
+    {
+        std::ostringstream text;
+        text << '[';
+        for (std::size_t index = 0; index < values.size(); ++index) {
+            if (index > 0) text << ',';
+            text << std::fixed << std::setprecision(3) << values[index];
+        }
+        text << ']';
+        return text.str();
+    }
+
+    static std::string GetSceneTreeText(
+        const std::vector<HostSceneViewState>& views)
+    {
+        std::ostringstream text;
+        text << std::boolalpha << std::fixed << std::setprecision(3)
+            << "[SceneTree]\n"
+            << "Session views=" << views.size() << '\n';
+
+        for (std::size_t viewIndex = 0;
+            viewIndex < views.size(); ++viewIndex) {
+            const auto& view = views[viewIndex];
+            const bool isLastView = viewIndex + 1 == views.size();
+            const std::string_view viewBranch =
+                isLastView ? "`-- " : "|-- ";
+            const std::string_view childIndent =
+                isLastView ? "    " : "|   ";
+            text << viewBranch
+                << "View id=" << view.id
+                << " role=" << GetViewRoleName(view.role)
+                << " available=" << view.isAvailable << '\n';
+
+            text << childIndent << "|-- Presentation ";
+            if (view.presentation) {
+                const auto& presentation = *view.presentation;
+                text << "revision=" << view.presentationRevision
+                    << " mode=" << GetRenderModeName(
+                        presentation.viewMode)
+                    << " quality=" << GetQualityName(
+                        presentation.volumeQuality)
+                    << " dataVersion=" << presentation.dataVersion
+                    << " visibilityMask="
+                    << presentation.visibilityMask
+                    << " interacting="
+                    << presentation.isInteracting
+                    << '\n';
+            }
+            else {
+                text << "(none)\n";
+            }
+
+            text << childIndent << "|-- Camera ";
+            if (view.camera) {
+                const auto& camera = *view.camera;
+                text << "position=" << GetValuesText(camera.position)
+                    << " focal=" << GetValuesText(camera.focalPoint)
+                    << " viewUp=" << GetValuesText(camera.viewUp)
+                    << " clipping="
+                    << GetValuesText(camera.clippingRange)
+                    << " parallelScale=" << camera.parallelScale
+                    << " viewAngle=" << camera.viewAngle
+                    << " parallel=" << camera.isParallel
+                    << '\n';
+            }
+            else {
+                text << "(none)\n";
+            }
+
+            text << childIndent << "`-- ActiveFeatures";
+            if (view.activeFeatureIds.empty()) {
+                text << " (none)\n";
+                continue;
+            }
+            text << '\n';
+            for (std::size_t featureIndex = 0;
+                featureIndex < view.activeFeatureIds.size();
+                ++featureIndex) {
+                const bool isLastFeature =
+                    featureIndex + 1 == view.activeFeatureIds.size();
+                text << childIndent << "    "
+                    << (isLastFeature ? "`-- " : "|-- ")
+                    << view.activeFeatureIds[featureIndex] << '\n';
+            }
+        }
+        return text.str();
+    }
+
+    std::optional<std::string> m_lastText;
+    std::optional<std::chrono::steady_clock::time_point> m_lastSend;
+};
+
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
 HostReloadRequest BuildPartReload()
 {
@@ -507,6 +690,7 @@ public:
             return false;
         }
         m_isKeyDown.fill(false);
+        m_sceneTree.Clear();
         m_host.reset();
         m_isAttached = false;
         return true;
@@ -514,6 +698,7 @@ public:
 
     bool OnHostTick() override
     {
+        m_sceneTree.Send(m_session);
         return SendQualityAudit();
     }
 
@@ -992,6 +1177,7 @@ private:
     GapHostStartParams m_gapStart;
     std::array<HostKeyChord, actionCount> m_keys;
     std::array<bool, actionCount> m_isKeyDown{};
+    SceneTreeConsole m_sceneTree;
     std::shared_ptr<FeatureHostControl> m_host;
     bool m_isAttached = false;
     QualityAuditPhase m_qualityAuditPhase = QualityAuditPhase::None;
@@ -1740,7 +1926,10 @@ int main(int argc, char* argv[])
            "and Window B (slice)\n"
         << "  J: start if inactive; otherwise hide/show Gap overlays\n"
         << "  --gap-auto: start Gap automatically after data loading\n"
-        << "  Result statistics are shown in the composite-volume title\n";
+        << "  Result statistics are shown in the composite-volume title\n"
+        << "Scene tree:\n"
+        << "  Printed on the first host timer tick and refreshed on "
+           "state changes\n";
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     std::cout
         << "PartSegmentation controls (Window A-D overlays, "

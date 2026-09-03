@@ -87,6 +87,11 @@ public:
         const HostViewTarget& target) const;
     // 按拓扑顺序返回全部视图状态快照，容器和节点均为值复制。
     std::vector<HostRenderViewState> GetViewStates() const;
+    // 精确 id 可返回不可用 View 的 topology identity；role 只选择可用 View。
+    std::optional<HostSceneViewState> GetSceneViewState(
+        const HostViewTarget& target);
+    // 按 topology 顺序返回全部 View；不可用项不读取 App 或 VTK 状态。
+    std::vector<HostSceneViewState> GetSceneViewStates();
     std::weak_ptr<IHostViewDirectory> GetViewDirectory() const;
     std::vector<HostFeatureView> GetFeatureViews(
         const HostViewTargets& targets) const;

@@ -413,14 +413,19 @@ int GetLifecycleFailCount()
     });
     stopWorker.join();
     const auto workerStopState = stopSession.GetStopState();
-    const bool isOwnerStopAccepted = stopSession.Stop();
     HostViewTarget stoppedTarget;
     stoppedTarget.viewId = "lifecycle";
+    const auto requestedStopScene =
+        stopSession.GetSceneViewState(stoppedTarget);
+    const auto requestedStopScenes = stopSession.GetSceneViewStates();
+    const bool isOwnerStopAccepted = stopSession.Stop();
     const auto stoppedRead = stopSession.GetImageReadResult(1024);
     failureCount += GetCaseResult(
         isStopBuilt
             && !isWorkerStopAccepted
             && workerStopState == HostStopState::StopRequested
+            && !requestedStopScene
+            && requestedStopScenes.empty()
             && isOwnerStopAccepted
             && stopSession.GetIsStopped()
             && stopSession.GetStopState() == HostStopState::Stopped
@@ -429,6 +434,8 @@ int GetLifecycleFailCount()
             && !stopSession.GetPrimaryEndpoint()
             && !stopSession.GetRenderViewState(stoppedTarget)
             && stopSession.GetRenderViewStates().empty()
+            && !stopSession.GetSceneViewState(stoppedTarget)
+            && stopSession.GetSceneViewStates().empty()
             && !stopSession.GetImageReadState()
             && stoppedRead.error == ImageReadError::NoImage
             && stoppedRead.requiredBytes == 0
@@ -649,11 +656,17 @@ int GetLifecycleFailCount()
     auto session = std::make_unique<VtkAppHostSession>(
         GetSessionConfig());
     auto feature = std::make_shared<FakeHostFeature>("feature-a");
+    const HostViewTarget unbuiltTarget{
+        "lifecycle", false, HostRenderViewRole::Primary3D };
 
     failureCount += GetCaseResult(
         !session->AttachFeature(feature)
             && feature->attachCount == 0,
         "Feature attach requires an already-built Session") ? 0 : 1;
+    failureCount += GetCaseResult(
+        !session->GetSceneViewState(unbuiltTarget)
+            && session->GetSceneViewStates().empty(),
+        "Scene getters reject an unbuilt Session") ? 0 : 1;
     failureCount += GetCaseResult(
         session->BuildSession(),
         "Lifecycle fixture builds a Session") ? 0 : 1;
@@ -701,12 +714,54 @@ int GetLifecycleFailCount()
             && feature.use_count() == beforeUseCount + 1,
         "Session owns an attached Feature and validates active views") ? 0 : 1;
 
+    auto sceneFeatureA =
+        std::make_shared<FakeHostFeature>("a-scene-feature");
+    auto sceneFeatureZ =
+        std::make_shared<FakeHostFeature>("z-scene-feature");
+    const bool isSceneFeatureASet = session->AttachFeature(sceneFeatureA)
+        && sceneFeatureA->SetActiveViews(activeViews);
+    const bool isSceneFeatureZSet = session->AttachFeature(sceneFeatureZ)
+        && sceneFeatureZ->SetActiveViews(activeViews);
+    const HostViewTarget sceneTarget{
+        "lifecycle", false, HostRenderViewRole::Primary3D };
+    const auto activeScene = session->GetSceneViewState(sceneTarget);
+    const std::vector<std::string> expectedSceneFeatureIds{
+        "a-scene-feature", "z-scene-feature" };
+    sceneFeatureZ->isDetachFailing = true;
+    const bool isSceneDetachRejected =
+        !session->DetachFeature(*sceneFeatureZ);
+    const auto rejectedScene = session->GetSceneViewState(sceneTarget);
+    sceneFeatureZ->isDetachFailing = false;
+    const bool isSceneFeatureZDetached =
+        session->DetachFeature(*sceneFeatureZ);
+    const auto detachedScene = session->GetSceneViewState(sceneTarget);
+    const bool isSceneFeatureADetached =
+        session->DetachFeature(*sceneFeatureA);
+    failureCount += GetCaseResult(
+        isSceneFeatureASet
+            && isSceneFeatureZSet
+            // feature-a 仍只保留 AttachInput；清空 active views 后不得进入场景投影。
+            && feature->isAttached
+            && activeScene
+            && activeScene->activeFeatureIds == expectedSceneFeatureIds
+            && isSceneDetachRejected
+            && rejectedScene
+            && rejectedScene->activeFeatureIds == expectedSceneFeatureIds
+            && isSceneFeatureZDetached
+            && detachedScene
+            && detachedScene->activeFeatureIds
+                == std::vector<std::string>{ "a-scene-feature" }
+            && isSceneFeatureADetached,
+        "Scene snapshot projects sorted active Features and detach rollback") ? 0 : 1;
+
     auto crossThreadFeature =
         std::make_shared<FakeHostFeature>("feature-worker");
     bool isCrossBuildAccepted = true;
     bool isCrossRequestAccepted = true;
     bool isCrossAttachAccepted = true;
     bool isCrossDetachAccepted = true;
+    bool hasCrossScene = true;
+    bool hasCrossScenes = true;
     std::thread lifecycleWorker([&]() {
         isCrossBuildAccepted = session->BuildSession();
         HostViewResetRequest reset;
@@ -717,13 +772,19 @@ int GetLifecycleFailCount()
             session->AttachFeature(crossThreadFeature);
         isCrossDetachAccepted =
             session->DetachFeature(*feature);
+        hasCrossScene = session->GetSceneViewState(sceneTarget).has_value();
+        hasCrossScenes = !session->GetSceneViewStates().empty();
     });
     lifecycleWorker.join();
+    const auto ownerScene = session->GetSceneViewState(sceneTarget);
     failureCount += GetCaseResult(
         !isCrossBuildAccepted
             && !isCrossRequestAccepted
             && !isCrossAttachAccepted
             && !isCrossDetachAccepted
+            && !hasCrossScene
+            && !hasCrossScenes
+            && ownerScene
             && crossThreadFeature->attachCount == 0
             && feature->detachCount == 0,
         "Session requests and Feature lifecycle require the owner thread") ? 0 : 1;

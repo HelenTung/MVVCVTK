@@ -93,6 +93,29 @@ struct HostRenderViewState final {
     std::uint64_t dataVersion = 0;
 };
 
+// Camera 的只读值快照；不携带 vtkCamera identity 或可写能力。
+struct HostCameraState final {
+    std::array<double, 3> position{ 0.0, 0.0, 1.0 };
+    std::array<double, 3> focalPoint{ 0.0, 0.0, 0.0 };
+    std::array<double, 3> viewUp{ 0.0, 1.0, 0.0 };
+    std::array<double, 2> clippingRange{ 0.1, 1000.0 };
+    double parallelScale = 1.0;
+    double viewAngle = 30.0;
+    bool isParallel = false;
+};
+
+// Session 中单个 View 的只读场景投影；缺失项由 optional 明确表达。
+struct HostSceneViewState final {
+    std::string id;
+    HostRenderViewRole role = HostRenderViewRole::Auxiliary;
+    bool isAvailable = false;
+    std::optional<HostRenderViewState> presentation;
+    std::optional<HostCameraState> camera;
+    // 仅表示 App presentation 事务，不覆盖 Camera、Feature 或 Overlay。
+    std::uint64_t presentationRevision = 0;
+    std::vector<std::string> activeFeatureIds;
+};
+
 struct HostRenderViewEndpoint {
     // endpoint 是对 session 内 VTK 对象的非拥有观察视图，不得跨 session 重建或析构缓存。
     std::string id;

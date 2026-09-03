@@ -840,6 +840,282 @@ bool BuildStyleQualityTest()
     return isValid;
 }
 
+bool BuildSceneCameraTest()
+{
+    std::size_t vtkErrorCount = 0;
+    auto errorCallback = vtkSmartPointer<vtkCallbackCommand>::New();
+    errorCallback->SetClientData(&vtkErrorCount);
+    errorCallback->SetCallback([](
+        vtkObject*, unsigned long, void* clientData, void*) {
+        auto* count = static_cast<std::size_t*>(clientData);
+        if (count) ++*count;
+    });
+
+    HostCoreServices core;
+    auto dataManager = std::make_shared<RawVolumeDataManager>();
+    core.sharedDataMgr = dataManager;
+    core.sharedStateBroadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    core.sharedState = std::make_shared<SharedInteractionState>(
+        core.sharedStateBroadcaster);
+
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(4, 4, 4);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    std::fill_n(
+        static_cast<unsigned char*>(image->GetScalarPointer()),
+        image->GetNumberOfPoints(),
+        static_cast<unsigned char>(128));
+    image->Modified();
+    bool hasPending = false;
+    if (!dataManager->SetImageSnapshot(image)
+        || !dataManager->SetCurrentFromPending(hasPending)
+        || !hasPending) {
+        return false;
+    }
+
+    auto renderWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto interactor = vtkSmartPointer<RenderProbeInteractor>::New();
+    renderWindow->SetInteractor(interactor);
+    interactor->SetRenderWindow(renderWindow);
+    const unsigned long sourceErrorTag = renderWindow->AddObserver(
+        vtkCommand::ErrorEvent, errorCallback);
+
+    auto peerWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto peerInteractor = vtkSmartPointer<RenderProbeInteractor>::New();
+    peerWindow->SetInteractor(peerInteractor);
+    peerInteractor->SetRenderWindow(peerWindow);
+
+    HostRenderViewConfig view;
+    view.id = "scene-camera";
+    view.role = HostRenderViewRole::Primary3D;
+    view.window.viewInit.viewMode = HostRenderMode::Volume;
+    view.renderWindow = renderWindow;
+    HostRenderViewConfig peerView = view;
+    peerView.id = "scene-camera-peer";
+    peerView.role = HostRenderViewRole::Composite3D;
+    peerView.renderWindow = peerWindow;
+
+    HostViewRuntimeRegistry views;
+    if (sourceErrorTag == 0 || !views.Build(core, { view, peerView })) {
+        return false;
+    }
+    const HostViewTarget target{
+        "scene-camera", false, HostRenderViewRole::Primary3D };
+    const HostViewTarget peerTarget{
+        "scene-camera-peer", false, HostRenderViewRole::Composite3D };
+    core.sharedStateBroadcaster->SendFlags(UpdateFlags::All);
+    if (!views.SendViewUpdates(target)
+        || !views.SendViewUpdates(peerTarget)
+        || !views.SetFeatureViews(
+            "scene-camera-feature", { "scene-camera" })) {
+        return false;
+    }
+
+    const auto endpoints = views.BuildEndpoints();
+    const auto endpoint = std::find_if(
+        endpoints.begin(), endpoints.end(),
+        [](const HostRenderViewEndpoint& current) {
+            return current.id == "scene-camera";
+        });
+    if (endpoint == endpoints.end() || !endpoint->renderer) {
+        return false;
+    }
+
+    const auto getArrayNear = [](const auto& left, const auto& right) {
+        return std::equal(
+            left.begin(), left.end(), right.begin(),
+            [](const double first, const double second) {
+                return std::abs(first - second) < 1e-12;
+            });
+    };
+    const auto getCameraFrameEqual = [&getArrayNear](
+        const HostCameraState& left,
+        const HostCameraState& right) {
+        return getArrayNear(left.position, right.position)
+            && getArrayNear(left.focalPoint, right.focalPoint)
+            && getArrayNear(left.viewUp, right.viewUp)
+            && std::abs(left.parallelScale - right.parallelScale) < 1e-12
+            && std::abs(left.viewAngle - right.viewAngle) < 1e-12
+            && left.isParallel == right.isParallel;
+    };
+    const auto getCameraEqual = [
+        &getArrayNear, &getCameraFrameEqual](
+        const HostCameraState& left,
+        const HostCameraState& right) {
+        return getCameraFrameEqual(left, right)
+            && getArrayNear(left.clippingRange, right.clippingRange);
+    };
+
+    const auto peerBefore = views.GetSceneViewState(peerTarget);
+    auto* camera = endpoint->renderer->GetActiveCamera();
+    if (!peerBefore || !peerBefore->camera || !camera) return false;
+
+    HostCameraState expectedCamera;
+    expectedCamera.position = { 3.0, 4.0, 5.0 };
+    expectedCamera.focalPoint = { 0.5, 1.0, 1.5 };
+    expectedCamera.viewUp = { 0.0, 1.0, 0.0 };
+    expectedCamera.clippingRange = { 0.25, 500.0 };
+    expectedCamera.parallelScale = 2.5;
+    expectedCamera.viewAngle = 35.0;
+    expectedCamera.isParallel = false;
+    camera->SetPosition(expectedCamera.position.data());
+    camera->SetFocalPoint(expectedCamera.focalPoint.data());
+    camera->SetViewUp(expectedCamera.viewUp.data());
+    camera->SetClippingRange(expectedCamera.clippingRange.data());
+    camera->SetParallelScale(expectedCamera.parallelScale);
+    camera->SetViewAngle(expectedCamera.viewAngle);
+    camera->SetParallelProjection(expectedCamera.isParallel ? 1 : 0);
+
+    const auto sceneBeforeRebind = views.GetSceneViewState(target);
+    const auto peerAfterCamera = views.GetSceneViewState(peerTarget);
+    const bool isCameraProjectionValid = sceneBeforeRebind
+        && sceneBeforeRebind->camera
+        && getCameraEqual(*sceneBeforeRebind->camera, expectedCamera)
+        && peerAfterCamera
+        && peerAfterCamera->camera
+        && !getCameraEqual(*peerAfterCamera->camera, expectedCamera)
+        && getCameraEqual(*peerBefore->camera, *peerAfterCamera->camera);
+
+    auto replacementWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto replacementInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    replacementWindow->SetInteractor(replacementInteractor);
+    replacementInteractor->SetRenderWindow(replacementWindow);
+    const unsigned long replacementErrorTag = replacementWindow->AddObserver(
+        vtkCommand::ErrorEvent, errorCallback);
+    const std::size_t errorsBeforeRebind = vtkErrorCount;
+    const bool isWindowRebound = replacementErrorTag != 0
+        && views.SetViewWindow("scene-camera", replacementWindow);
+    const auto sceneAfterRebind = views.GetSceneViewState(target);
+    const auto peerAfterRebind = views.GetSceneViewState(peerTarget);
+    const auto reboundEndpoints = views.BuildEndpoints();
+    const auto reboundEndpoint = std::find_if(
+        reboundEndpoints.begin(), reboundEndpoints.end(),
+        [](const HostRenderViewEndpoint& current) {
+            return current.id == "scene-camera";
+        });
+    auto* reboundCamera = reboundEndpoint != reboundEndpoints.end()
+        && reboundEndpoint->renderer
+        ? reboundEndpoint->renderer->GetActiveCamera()
+        : nullptr;
+    std::array<double, 2> reboundClipping{};
+    if (reboundCamera && reboundCamera->GetClippingRange()) {
+        std::copy_n(
+            reboundCamera->GetClippingRange(),
+            reboundClipping.size(),
+            reboundClipping.begin());
+    }
+    const bool isSceneIdentityStable = isWindowRebound
+        && sceneBeforeRebind && sceneAfterRebind
+        && sceneBeforeRebind->id == sceneAfterRebind->id
+        && sceneBeforeRebind->role == sceneAfterRebind->role
+        && sceneBeforeRebind->isAvailable == sceneAfterRebind->isAvailable
+        && sceneBeforeRebind->presentation.has_value()
+            == sceneAfterRebind->presentation.has_value()
+        && sceneBeforeRebind->presentationRevision
+            == sceneAfterRebind->presentationRevision
+        && sceneBeforeRebind->activeFeatureIds
+            == std::vector<std::string>{ "scene-camera-feature" }
+        && sceneBeforeRebind->activeFeatureIds
+            == sceneAfterRebind->activeFeatureIds;
+    const bool isCameraRebindStable = sceneBeforeRebind
+        && sceneBeforeRebind->camera
+        && sceneAfterRebind
+        && sceneAfterRebind->camera
+        && getCameraFrameEqual(
+            *sceneBeforeRebind->camera, *sceneAfterRebind->camera)
+        // Rebind 后 VTK 会按新 renderer bounds 重算 clipping；快照必须反映
+        // 当前 active camera，而不是保留可能裁掉新场景的旧范围。
+        && std::isfinite(sceneAfterRebind->camera->clippingRange[0])
+        && std::isfinite(sceneAfterRebind->camera->clippingRange[1])
+        && sceneAfterRebind->camera->clippingRange[0] > 0.0
+        && sceneAfterRebind->camera->clippingRange[1]
+            > sceneAfterRebind->camera->clippingRange[0]
+        && reboundCamera
+        && getArrayNear(
+            sceneAfterRebind->camera->clippingRange,
+            reboundClipping);
+    const bool isPeerRebindStable = peerAfterRebind
+        && peerAfterRebind->camera
+        && getCameraEqual(*peerBefore->camera, *peerAfterRebind->camera)
+        && peerBefore->presentationRevision
+            == peerAfterRebind->presentationRevision;
+    const bool isEndpointRebound = reboundEndpoint != reboundEndpoints.end()
+        && reboundEndpoint->renderer
+        && reboundEndpoint->renderWindow == replacementWindow.GetPointer()
+        && reboundEndpoint->renderWindow != renderWindow.GetPointer()
+        && reboundEndpoint->interactor == replacementInteractor.GetPointer();
+    const bool hasNoRebindError = vtkErrorCount == errorsBeforeRebind;
+    const bool isRebindStable = isSceneIdentityStable
+        && isCameraRebindStable
+        && isPeerRebindStable
+        && isEndpointRebound
+        && hasNoRebindError;
+
+    const bool isFeatureCleared = views.SetFeatureViews(
+        "scene-camera-feature", {});
+    const auto directory = views.GetViewDirectory().lock();
+    const bool isPeerStopped = directory
+        && directory->StopView("scene-camera-peer");
+    const auto stoppedPeer = views.GetSceneViewState(peerTarget);
+    const auto stoppedPeerByRole = views.GetSceneViewState(
+        HostViewTarget{
+            "", true, HostRenderViewRole::Composite3D });
+    const auto stoppedScenes = views.GetSceneViewStates();
+    const auto stoppedPeerInList = std::find_if(
+        stoppedScenes.begin(), stoppedScenes.end(),
+        [](const HostSceneViewState& current) {
+            return current.id == "scene-camera-peer";
+        });
+    const bool isUnavailableTopologyValid = isPeerStopped
+        && stoppedPeer
+        && !stoppedPeer->isAvailable
+        && !stoppedPeerByRole
+        && !stoppedPeer->presentation
+        && !stoppedPeer->camera
+        && stoppedPeer->activeFeatureIds.empty()
+        && stoppedScenes.size() == 2
+        && stoppedScenes[0].id == "scene-camera"
+        && stoppedScenes[1].id == "scene-camera-peer"
+        && stoppedPeerInList != stoppedScenes.end()
+        && !stoppedPeerInList->isAvailable
+        && !stoppedPeerInList->presentation
+        && !stoppedPeerInList->camera;
+
+    const bool isValid = isCameraProjectionValid
+        && isRebindStable
+        && isFeatureCleared
+        && isUnavailableTopologyValid;
+    if (!isValid) {
+        std::cerr
+            << "DIAG_SCENE_CAMERA: projection="
+            << isCameraProjectionValid
+            << " rebind=" << isRebindStable
+            << " identity=" << isSceneIdentityStable
+            << " camera=" << isCameraRebindStable
+            << " peer=" << isPeerRebindStable
+            << " endpoint=" << isEndpointRebound
+            << " no_error=" << hasNoRebindError
+            << " unavailable=" << isUnavailableTopologyValid
+            << " errors=" << vtkErrorCount
+            << " clip_before="
+            << (sceneBeforeRebind && sceneBeforeRebind->camera
+                ? sceneBeforeRebind->camera->clippingRange[0] : -1.0)
+            << ','
+            << (sceneBeforeRebind && sceneBeforeRebind->camera
+                ? sceneBeforeRebind->camera->clippingRange[1] : -1.0)
+            << " clip_after="
+            << (sceneAfterRebind && sceneAfterRebind->camera
+                ? sceneAfterRebind->camera->clippingRange[0] : -1.0)
+            << ','
+            << (sceneAfterRebind && sceneAfterRebind->camera
+                ? sceneAfterRebind->camera->clippingRange[1] : -1.0)
+            << '\n';
+    }
+    return isValid;
+}
+
 bool BuildStyleDestroyTest()
 {
     HostCoreServices core;
@@ -2765,6 +3041,7 @@ int main(int argc, char* argv[])
             QStringLiteral("--style-quality-only"))) {
         const bool isStyleQualityValid =
             BuildStyleQualityTest()
+            && BuildSceneCameraTest()
             && BuildStyleDestroyTest()
             && BuildLeaseRetryTest();
         std::cout
@@ -2788,6 +3065,10 @@ int main(int argc, char* argv[])
         std::cerr
             << "FAIL: Style interaction quality lifecycle was not isolated\n";
         return 7;
+    }
+    if (!BuildSceneCameraTest()) {
+        std::cerr << "FAIL: Scene Camera snapshot or rebind changed\n";
+        return 10;
     }
     if (!BuildStyleDestroyTest()) {
         std::cerr
