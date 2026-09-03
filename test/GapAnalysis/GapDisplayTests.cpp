@@ -5,9 +5,11 @@
 #include "Render/Contracts/OverlayService.h"
 
 #include <vtkActor.h>
+#include <vtkDataArray.h>
 #include <vtkImageData.h>
 #include <vtkImageResliceMapper.h>
 #include <vtkImageSlice.h>
+#include <vtkPointData.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
 #include <vtkPolyDataMapper.h>
@@ -125,6 +127,33 @@ vtkSmartPointer<vtkImageData> GetMask(
     std::fill_n(values, mask->GetNumberOfPoints(), value);
     mask->Modified();
     return mask;
+}
+
+TrustedImageSnapshot BuildTrustedInput(
+    const vtkSmartPointer<vtkImageData>& image)
+{
+    if (!image || !image->GetPointData()
+        || !image->GetPointData()->GetScalars()) {
+        return {};
+    }
+
+    auto snapshot = std::make_shared<TrustedImageState>();
+    snapshot->image = image;
+    int dims[3] = {};
+    double spacing[3] = {};
+    double origin[3] = {};
+    double scalarRange[2] = {};
+    image->GetDimensions(dims);
+    image->GetSpacing(spacing);
+    image->GetOrigin(origin);
+    image->GetScalarRange(scalarRange);
+    snapshot->dims = { dims[0], dims[1], dims[2] };
+    snapshot->spacing = { spacing[0], spacing[1], spacing[2] };
+    snapshot->origin = { origin[0], origin[1], origin[2] };
+    snapshot->scalarRange = {
+        scalarRange[0], scalarRange[1] };
+    snapshot->version = 1;
+    return snapshot;
 }
 
 bool StartDisplay(
@@ -330,6 +359,56 @@ int GapDisplaySuite::GetFailCount() const
     expect(sliceOnlyService.ExitView(),
         "Slice-only Gap view should exit cleanly.");
     sliceOnlyService.OnDisplayTick(nullptr);
+
+    auto trustedOverlay = std::make_shared<OverlayStub>();
+    auto trustedInput = BuildTrustedInput(image);
+    auto* trustedScalars = image->GetPointData()->GetScalars();
+    const auto trustedVoxelCount = static_cast<std::size_t>(
+        image->GetNumberOfPoints());
+    const auto* trustedVoxels = static_cast<const float*>(
+        image->GetScalarPointer());
+    const std::vector<float> trustedValues(
+        trustedVoxels,
+        trustedVoxels + trustedVoxelCount);
+    const int scalarOwners = trustedScalars->GetReferenceCount();
+    GapAnalysisService trustedService;
+    GapViewRequest trustedRequest;
+    trustedRequest.trustedInput = trustedInput;
+    trustedRequest.surface = surfaceConfig;
+    trustedRequest.voidParams = voidParams;
+    trustedRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        trustedOverlay);
+    expect(StartDisplay(
+            trustedService,
+            std::move(trustedRequest),
+            image)
+            && trustedScalars->GetReferenceCount() > scalarOwners,
+        "Trusted Gap input should share the Host scalar array.");
+    expect(trustedService.ExitView(),
+        "Trusted Gap view should exit cleanly.");
+    trustedService.OnDisplayTick(nullptr);
+    expect(trustedScalars->GetReferenceCount() == scalarOwners,
+        "Trusted Gap input should release its scalar owner after exit.");
+    const auto* releasedVoxels = static_cast<const float*>(
+        image->GetScalarPointer());
+    expect(releasedVoxels
+            && std::equal(
+                trustedValues.begin(),
+                trustedValues.end(),
+                releasedVoxels),
+        "Trusted Gap analysis must not modify the shared Host scalars.");
+
+    GapAnalysisService mixedInputService;
+    GapViewRequest mixedInputRequest;
+    mixedInputRequest.trustedInput = trustedInput;
+    mixedInputRequest.inputImage = image;
+    mixedInputRequest.surface = surfaceConfig;
+    mixedInputRequest.voidParams = voidParams;
+    mixedInputRequest.sliceTargets = sliceTargets;
+    expect(!mixedInputService.StartView(
+            std::move(mixedInputRequest)),
+        "Gap view should reject ambiguous trusted and mutable inputs.");
 
     auto meshOnlyOverlay = std::make_shared<OverlayStub>();
     GapAnalysisService meshOnlyService;
