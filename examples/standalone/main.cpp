@@ -20,6 +20,9 @@
 #include "Host/HostFeature.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+#include "Host/PartSegmentationHostFeature.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -312,6 +315,129 @@ bool StopEventLoop(VtkAppHostSession& session)
     return isInteractorStopped;
 }
 
+bool GetKeyMatched(
+    const InteractionEvent& event,
+    const char keyCode)
+{
+    if (keyCode == 0) return false;
+    const char upper = keyCode >= 'a' && keyCode <= 'z'
+        ? static_cast<char>(keyCode - 'a' + 'A')
+        : keyCode;
+    return event.keyCode == keyCode
+        || event.keyCode == upper
+        || event.keySym == std::string(1, keyCode)
+        || event.keySym == std::string(1, upper);
+}
+
+bool GetChordMatched(
+    const InteractionEvent& event,
+    const HostKeyChord& chord)
+{
+    const bool hasKey = GetKeyMatched(event, chord.keyCode)
+        || (!chord.keySym.empty() && event.keySym == chord.keySym);
+    return hasKey
+        && event.isCtrlDown == chord.isCtrlDown
+        && event.isAltDown == chord.isAltDown
+        && event.isShiftDown == chord.isShiftDown;
+}
+
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+HostReloadRequest BuildPartReload()
+{
+    constexpr int side = 32;
+    HostReloadRequest reload;
+    reload.voxels.resize(
+        static_cast<std::size_t>(side) * side * side, 0.0F);
+    for (int z = 0; z < side; ++z) {
+        for (int y = 0; y < side; ++y) {
+            for (int x = 0; x < side; ++x) {
+                const bool isFirst = x >= 2 && x < 10
+                    && y >= 2 && y < 10
+                    && z >= 2 && z < 10;
+                // 让一个零件穿过三个默认中心切片，人工模式启动后可直接观察。
+                const bool isSecond = x >= 12 && x < 20
+                    && y >= 12 && y < 20
+                    && z >= 12 && z < 20;
+                if (!isFirst && !isSecond) continue;
+                const auto index = static_cast<std::size_t>(
+                    x + side * (y + side * z));
+                reload.voxels[index] = 1.0F;
+            }
+        }
+    }
+    reload.geometry.dimensions = { side, side, side };
+    reload.geometry.spacing = { 0.5F, 0.5F, 0.5F };
+    reload.geometry.origin = { 0.0F, 0.0F, 0.0F };
+    return reload;
+}
+
+PartSegmentationConfig GetPartConfig()
+{
+    PartSegmentationConfig config;
+    config.defaultStart.targetViews.viewIds = {
+        "primary-3d",
+        "slice-top-down",
+        "slice-front-back",
+        "slice-left-right"
+    };
+    config.defaultStart.threshold = 0.5;
+    config.defaultStart.minPartVoxels = 8;
+    config.maxWorkingBytes = 64U * 1024U * 1024U;
+    return config;
+}
+
+bool StartPartQtSim(
+    VtkAppHostSession& session,
+    const std::shared_ptr<PartSegmentationHostFeature>& feature,
+    bool& isComplete,
+    bool& isPassed)
+{
+    if (!feature) return false;
+    PartSegmentationRequest request;
+    request.action = PartSegmentationAction::Start;
+    const std::weak_ptr<PartSegmentationHostFeature> weakFeature = feature;
+    const auto admission = feature->SendRequest(
+        std::move(request),
+        [&session, &isComplete, &isPassed, weakFeature](
+            PartSegmentationResult result) {
+            const auto owner = weakFeature.lock();
+            const auto state = owner
+                ? owner->GetState() : PartSegmentationState{};
+            isPassed = result.status == PartResultStatus::Succeeded
+                && result.failureReason == PartFailureReason::None
+                && result.partCount == 2
+                && state.status == PartSegmentationStatus::Succeeded
+                && state.parts.size() == result.partCount
+                && state.resultRevision == result.resultRevision;
+            isComplete = true;
+            std::cout
+                << "QT_PART_RESULT: request=" << result.requestId
+                << " status=" << static_cast<int>(result.status)
+                << " failure=" << static_cast<int>(result.failureReason)
+                << " source=" << result.sourceVersion
+                << " revision=" << result.resultRevision
+                << " parts=" << result.partCount
+                << " passed=" << isPassed
+                << '\n' << std::flush;
+            (void)StopEventLoop(session);
+        });
+    const bool isAccepted =
+        admission.status == PartAdmissionStatus::Accepted;
+    std::cout
+        << "QT_PART_ADMISSION: status="
+        << static_cast<int>(admission.status)
+        << " request=" << admission.requestId
+        << " accepted=" << isAccepted
+        << '\n' << std::flush;
+    if (isAccepted) return true;
+
+    isComplete = true;
+    isPassed = false;
+    (void)StopEventLoop(session);
+    return false;
+}
+#endif
+
 class MainControlFeature final
     : public HostFeature,
       public std::enable_shared_from_this<MainControlFeature> {
@@ -434,34 +560,6 @@ private:
         "main.tf-quality-controls";
     static constexpr std::size_t actionCount =
         static_cast<std::size_t>(ControlAction::Count);
-
-    static bool GetCharMatched(
-        const InteractionEvent& event,
-        const char keyCode)
-    {
-        if (keyCode == 0) return false;
-        const char upper = keyCode >= 'a' && keyCode <= 'z'
-            ? static_cast<char>(keyCode - 'a' + 'A')
-            : keyCode;
-        return event.keyCode == keyCode
-            || event.keyCode == upper
-            || event.keySym == std::string(1, keyCode)
-            || event.keySym == std::string(1, upper);
-    }
-
-    static bool GetChordMatched(
-        const InteractionEvent& event,
-        const HostKeyChord& chord)
-    {
-        const bool hasKey = GetCharMatched(
-            event, chord.keyCode)
-            || (!chord.keySym.empty()
-                && event.keySym == chord.keySym);
-        return hasKey
-            && event.isCtrlDown == chord.isCtrlDown
-            && event.isAltDown == chord.isAltDown
-            && event.isShiftDown == chord.isShiftDown;
-    }
 
     std::optional<ControlAction> GetAction(
         const InteractionEvent& event) const
@@ -891,6 +989,259 @@ private:
     bool m_isUltraApplied = false;
 };
 
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+class PartControlFeature final
+    : public HostFeature,
+      public std::enable_shared_from_this<PartControlFeature> {
+public:
+    PartControlFeature(
+        HostViewTarget statusTarget,
+        HostViewTargets inputViews,
+        std::weak_ptr<PartSegmentationHostFeature> partFeature,
+        PartSegmentationStartParams partStart)
+        : m_statusTarget(std::move(statusTarget)),
+          m_inputViews(std::move(inputViews)),
+          m_partFeature(std::move(partFeature)),
+          m_partStart(std::move(partStart)),
+          m_keys{
+              HostKeyChord{ 'b' },
+              HostKeyChord{ 'b', {}, false, false, true },
+              HostKeyChord{ 'b', {}, true }
+          }
+    {
+    }
+
+    std::string_view GetFeatureId() const noexcept override
+    {
+        return featureId;
+    }
+
+    bool AttachHost(const HostFeatureContext& context) override
+    {
+        if (m_isAttached || !context.host || m_partFeature.expired()) {
+            return false;
+        }
+        const auto weakOwner = weak_from_this();
+        if (weakOwner.expired()) return false;
+
+        m_host = context.host;
+        HostInputBinding binding;
+        binding.featureId = std::string(featureId);
+        binding.targetViews = m_inputViews;
+        binding.onInput = [weakOwner](const InteractionEvent& event) {
+            const auto owner = weakOwner.lock();
+            return owner
+                ? owner->OnInput(event)
+                : InteractionResult{};
+        };
+        if (!m_host->AttachInput(std::move(binding))) {
+            m_host.reset();
+            return false;
+        }
+        m_isAttached = true;
+        return true;
+    }
+
+    bool DetachHost() override
+    {
+        if (!m_isAttached) return true;
+        if (m_host && !m_host->DetachInput(featureId)) return false;
+        m_isKeyDown.fill(false);
+        m_host.reset();
+        m_isAttached = false;
+        return true;
+    }
+
+    bool OnHostTick() override { return true; }
+
+private:
+    enum class ControlAction : std::uint8_t {
+        Start,
+        Toggle,
+        Clear,
+        Count
+    };
+
+    static constexpr std::string_view featureId =
+        "main.part-controls";
+    static constexpr std::size_t actionCount =
+        static_cast<std::size_t>(ControlAction::Count);
+
+    std::optional<ControlAction> GetAction(
+        const InteractionEvent& event) const
+    {
+        for (std::size_t index = 0; index < m_keys.size(); ++index) {
+            if (GetChordMatched(event, m_keys[index])) {
+                return static_cast<ControlAction>(index);
+            }
+        }
+        return std::nullopt;
+    }
+
+    bool SetPartStatus(const std::string& status)
+    {
+        if (!m_host || m_statusTarget.viewId.empty()) return false;
+        return m_host->SetViewStatus(
+            { m_statusTarget.viewId }, status);
+    }
+
+    static std::string_view GetPendingStatus(const ControlAction action)
+    {
+        if (action == ControlAction::Start) return "Part: running";
+        if (action == ControlAction::Toggle) {
+            return "Part: visibility updating";
+        }
+        return "Part: clearing";
+    }
+
+    bool SendPartRequest(
+        PartSegmentationRequest request,
+        const ControlAction action,
+        const std::optional<bool> nextVisibility = std::nullopt)
+    {
+        const auto partFeature = m_partFeature.lock();
+        if (!partFeature) {
+            (void)SetPartStatus("Part: unavailable");
+            std::cerr
+                << "[PartSegmentation] request rejected: feature unavailable\n"
+                << std::flush;
+            return false;
+        }
+
+        (void)SetPartStatus(std::string(GetPendingStatus(action)));
+        const auto partOwner = m_partFeature;
+        const auto controlOwner = weak_from_this();
+        const auto admission = partFeature->SendRequest(
+            std::move(request),
+            [partOwner, controlOwner, action, nextVisibility](
+                PartSegmentationResult result) {
+                const auto completedFeature = partOwner.lock();
+                std::ostringstream status;
+                status << "Part: ";
+                if (result.status == PartResultStatus::Succeeded) {
+                    if (action == ControlAction::Start) {
+                        const auto state = completedFeature
+                            ? completedFeature->GetState()
+                            : PartSegmentationState{};
+                        status << "succeeded | parts=" << result.partCount
+                            << " | revision=" << result.resultRevision
+                            << " | visible=" << state.isOverlayVisible;
+                    }
+                    else if (action == ControlAction::Toggle) {
+                        status << (nextVisibility.value_or(false)
+                            ? "visible" : "hidden");
+                    }
+                    else {
+                        status << "cleared";
+                    }
+                }
+                else {
+                    status
+                        << (result.status == PartResultStatus::Cancelled
+                            ? "cancelled" : "failed")
+                        << " | reason="
+                        << static_cast<int>(result.failureReason);
+                }
+                if (const auto owner = controlOwner.lock()) {
+                    (void)owner->SetPartStatus(status.str());
+                }
+                std::cerr << "[PartSegmentation] "
+                    << status.str() << '\n' << std::flush;
+            });
+        const bool isAccepted =
+            admission.status == PartAdmissionStatus::Accepted;
+        if (!isAccepted) {
+            std::ostringstream status;
+            status << "Part: rejected | admission="
+                << static_cast<int>(admission.status);
+            (void)SetPartStatus(status.str());
+        }
+        std::cerr
+            << "[PartSegmentation] B request "
+            << (isAccepted ? "accepted" : "rejected")
+            << " | action=" << static_cast<int>(action)
+            << " | admission=" << static_cast<int>(admission.status)
+            << '\n' << std::flush;
+        return isAccepted;
+    }
+
+    bool SendControl(const ControlAction action)
+    {
+        PartSegmentationRequest request;
+        if (action == ControlAction::Start) {
+            request.action = PartSegmentationAction::Start;
+            request.start = m_partStart;
+            return SendPartRequest(std::move(request), action);
+        }
+        if (action == ControlAction::Toggle) {
+            const auto partFeature = m_partFeature.lock();
+            if (!partFeature) return false;
+            const bool isVisible =
+                !partFeature->GetState().isOverlayVisible;
+            request.action = PartSegmentationAction::SetVisibility;
+            request.isVisible = isVisible;
+            return SendPartRequest(
+                std::move(request), action, isVisible);
+        }
+        if (action == ControlAction::Clear) {
+            request.action = PartSegmentationAction::Clear;
+            return SendPartRequest(std::move(request), action);
+        }
+        return false;
+    }
+
+    InteractionResult OnInput(const InteractionEvent& event)
+    {
+        if (event.eventKind == InteractionEventKind::KeyRelease
+            && GetKeyMatched(event, 'b')) {
+            const bool wasDown = std::any_of(
+                m_isKeyDown.begin(), m_isKeyDown.end(),
+                [](const bool isDown) { return isDown; });
+            m_isKeyDown.fill(false);
+            return wasDown
+                ? InteractionResult{ true, true }
+                : InteractionResult{};
+        }
+
+        const auto action = GetAction(event);
+        if (!action) return {};
+        const auto index = static_cast<std::size_t>(*action);
+
+        if (event.eventKind == InteractionEventKind::TextInput) {
+            return m_isKeyDown[index]
+                ? InteractionResult{ true, true }
+                : InteractionResult{};
+        }
+        if (event.eventKind != InteractionEventKind::KeyPress) return {};
+        if (std::any_of(
+                m_isKeyDown.begin(), m_isKeyDown.end(),
+                [](const bool isDown) { return isDown; })) {
+            return { true, true };
+        }
+
+        m_isKeyDown[index] = true;
+        const bool isSucceeded = SendControl(*action);
+        return {
+            true,
+            true,
+            isSucceeded,
+            isSucceeded
+                ? InteractionFailureReason::None
+                : InteractionFailureReason::StateRejected
+        };
+    }
+
+    HostViewTarget m_statusTarget;
+    HostViewTargets m_inputViews;
+    std::weak_ptr<PartSegmentationHostFeature> m_partFeature;
+    PartSegmentationStartParams m_partStart;
+    std::array<HostKeyChord, actionCount> m_keys;
+    std::array<bool, actionCount> m_isKeyDown{};
+    std::shared_ptr<FeatureHostControl> m_host;
+    bool m_isAttached = false;
+};
+#endif
+
 HostRenderViewConfig BuildView(
     std::string id,
     const HostRenderViewRole role,
@@ -1147,6 +1498,20 @@ int main(int argc, char* argv[])
     auto gapFeature = std::make_shared<GapHostFeature>(
         std::move(gapConfig));
     features.push_back(gapFeature);
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    auto partConfig = GetPartConfig();
+    auto partStart = partConfig.defaultStart;
+    auto partFeature = std::make_shared<PartSegmentationHostFeature>(
+        std::move(partConfig));
+    features.push_back(partFeature);
+    auto partControlViews = allViews;
+    auto partControlFeature = std::make_shared<PartControlFeature>(
+        volumeTarget,
+        std::move(partControlViews),
+        partFeature,
+        std::move(partStart));
+    features.push_back(partControlFeature);
+#endif
     // G 应在任一 MVVCVTK 窗口获得焦点时都能启动；状态统一显示在 composite-volume 标题栏。
     auto controlViews = allViews;
     auto controlFeature = std::make_shared<MainControlFeature>(
@@ -1225,54 +1590,123 @@ int main(int argc, char* argv[])
         argc, argv, "--quality-audit");
     const bool isGapAuto = GetArgFound(
         argc, argv, "--gap-auto");
-    if ((isDragAudit && isQualityAudit)
-        || (isGapAuto && (isDragAudit || isQualityAudit))) {
+    const bool isPartAuto = GetArgFound(
+        argc, argv, "--part-auto");
+    const bool isPartManual = GetArgFound(
+        argc, argv, "--part-manual");
+    const int runModeCount = static_cast<int>(isDragAudit)
+        + static_cast<int>(isQualityAudit)
+        + static_cast<int>(isGapAuto)
+        + static_cast<int>(isPartAuto)
+        + static_cast<int>(isPartManual);
+    if (runModeCount > 1) {
         std::cerr
-            << "--drag-audit, --quality-audit and --gap-auto "
+            << "--drag-audit, --quality-audit, --gap-auto and "
+               "PartSegmentation run modes "
                "are mutually exclusive\n";
         if (!clearAttached()) return 25;
         features.clear();
         return 8;
     }
+#if !defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    if (isPartAuto || isPartManual) {
+        std::cerr
+            << "PartSegmentation run modes require "
+               "MVVCVTK_BUILD_PART_SEGMENTATION=ON\n";
+        if (!clearAttached()) return 25;
+        features.clear();
+        return 8;
+    }
+#endif
     bool isAuditComplete = false;
     bool isAuditPassed = false;
+    bool isPartComplete = false;
+    bool isPartPassed = false;
+    bool isPartManualReady = false;
 
-    HostLoadRequest load;
-    load.filePath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
-    load.geometry.dimensions = { 1536, 1536, 1536 };
-    load.geometry.spacing = {
-        0.1537f, 0.1537f, 0.1537f };
-    load.geometry.origin = { 0.0f, 0.0f, 0.0f };
-    if (!session.SendRequestResult(
-            std::move(load),
-             [&](HostResult result) {
-                if (isDragAudit) {
-                    isAuditPassed = result.isSucceeded
-                        && DragAudit{}.Start(session);
-                    isAuditComplete = true;
-                }
-                else if (isQualityAudit) {
-                    isAuditPassed = result.isSucceeded
-                        && controlFeature->StartQualityAudit();
-                    if (isAuditPassed) return;
-                    isAuditComplete = true;
-                }
-                else if (isGapAuto) {
-                    if (!result.isSucceeded) {
-                        std::cerr
-                            << "[GapAnalysis] data load failed; "
-                               "automatic request skipped\n"
-                            << std::flush;
-                        return;
-                    }
-                    (void)controlFeature->StartGap();
+    HostResultCallback onDataReady =
+        [&](HostResult result) {
+            if (isDragAudit) {
+                isAuditPassed = result.isSucceeded
+                    && DragAudit{}.Start(session);
+                isAuditComplete = true;
+            }
+            else if (isQualityAudit) {
+                isAuditPassed = result.isSucceeded
+                    && controlFeature->StartQualityAudit();
+                if (isAuditPassed) return;
+                isAuditComplete = true;
+            }
+            else if (isGapAuto) {
+                if (!result.isSucceeded) {
+                    std::cerr
+                        << "[GapAnalysis] data load failed; "
+                           "automatic request skipped\n"
+                        << std::flush;
                     return;
                 }
-                else {
+                (void)controlFeature->StartGap();
+                return;
+            }
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+            else if (isPartAuto) {
+                if (!result.isSucceeded) {
+                    isPartComplete = true;
+                    isPartPassed = false;
+                    std::cerr
+                        << "QT_PART_RESULT: data reload failed; "
+                           "request skipped\n"
+                        << std::flush;
+                    (void)StopEventLoop(session);
                     return;
                 }
-                (void)StopEventLoop(session);
-            })) {
+                (void)StartPartQtSim(
+                    session, partFeature,
+                    isPartComplete, isPartPassed);
+                return;
+            }
+            else if (isPartManual) {
+                isPartManualReady = result.isSucceeded;
+                if (!isPartManualReady) {
+                    std::cerr
+                        << "[PartSegmentation] synthetic data reload failed\n"
+                        << std::flush;
+                    (void)StopEventLoop(session);
+                    return;
+                }
+                std::cout
+                    << "[PartSegmentation] synthetic data ready; "
+                       "press B to start\n"
+                    << std::flush;
+                return;
+            }
+#endif
+            else {
+                return;
+            }
+            (void)StopEventLoop(session);
+        };
+
+    bool isDataAccepted = false;
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    if (isPartAuto || isPartManual) {
+        auto reload = BuildPartReload();
+        isDataAccepted = session.SendRequestResult(
+            std::move(reload), onDataReady);
+    }
+    else
+#endif
+    {
+        HostLoadRequest load;
+        load.filePath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
+        load.geometry.dimensions = { 1536, 1536, 1536 };
+        load.geometry.spacing = {
+            0.1537f, 0.1537f, 0.1537f };
+        load.geometry.origin = { 0.0f, 0.0f, 0.0f };
+        isDataAccepted = session.SendRequestResult(
+            std::move(load), onDataReady);
+    }
+    if (!isDataAccepted) {
         if (!clearAttached()) {
             return 23;
         }
@@ -1290,6 +1724,18 @@ int main(int argc, char* argv[])
         << "  J: start if inactive; otherwise hide/show Gap overlays\n"
         << "  --gap-auto: start Gap automatically after data loading\n"
         << "  Result statistics are shown in the composite-volume title\n";
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    std::cout
+        << "PartSegmentation controls (Window A-D overlays, "
+           "Window E status):\n"
+        << "  B: start Part segmentation\n"
+        << "  Shift+B: hide/show Part overlays\n"
+        << "  Ctrl+B: clear Part result\n"
+        << "  --part-manual: load the small synthetic volume and "
+           "keep the windows open\n"
+        << "  --part-auto: reload a small in-memory volume, submit Start, "
+           "read the final state and exit\n";
+#endif
 
     const bool isStarted = session.Start();
     if (isQualityAudit) {
@@ -1301,10 +1747,16 @@ int main(int argc, char* argv[])
         return 24;
     }
     features.clear();
+    const bool isStopped = session.Stop();
     if (!isStarted) return 6;
+    if (!isStopped) return 26;
     if ((isDragAudit || isQualityAudit)
         && (!isAuditComplete || !isAuditPassed)) {
         return 7;
     }
+    if (isPartAuto && (!isPartComplete || !isPartPassed)) {
+        return 9;
+    }
+    if (isPartManual && !isPartManualReady) return 10;
     return 0;
 }

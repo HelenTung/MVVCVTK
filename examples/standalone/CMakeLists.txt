@@ -31,6 +31,16 @@ target_link_libraries(
         MVVCVTK::GapAnalysis
         ${MVVCVTK_VTK_TARGETS}
 )
+if(MVVCVTK_BUILD_PART_SEGMENTATION)
+    target_compile_definitions(
+        MVVCVTKStandalone
+        PRIVATE MVVCVTK_HAS_PART_SEGMENTATION=1
+    )
+    target_link_libraries(
+        MVVCVTKStandalone
+        PRIVATE MVVCVTK::PartSegmentation
+    )
+endif()
 SetTargetDefaults(MVVCVTKStandalone)
 vtk_module_autoinit(
     TARGETS MVVCVTKStandalone
