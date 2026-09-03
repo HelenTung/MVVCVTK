@@ -4,11 +4,19 @@
 #include "Render/Contracts/OverlayService.h"
 
 #include <vtkImageData.h>
+#include <vtkImageResliceMapper.h>
+#include <vtkImageSlice.h>
+#include <vtkNew.h>
+#include <vtkPointData.h>
+#include <vtkPropCollection.h>
+#include <vtkRenderer.h>
+#include <vtkSOADataArrayTemplate.h>
 #include <vtkSmartPointer.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -65,6 +73,25 @@ public:
     }
     int GetAttachCount() const noexcept { return m_attachCount; }
     int GetRemoveCount() const noexcept { return m_removeCount; }
+    const void* GetLabelPointer() const
+    {
+        if (m_overlays.empty()) return nullptr;
+        vtkNew<vtkRenderer> renderer;
+        const auto& overlay = m_overlays.back();
+        overlay->AttachRenderer(renderer);
+        auto* props = renderer->GetViewProps();
+        props->InitTraversal();
+        auto* slice = vtkImageSlice::SafeDownCast(props->GetNextProp());
+        auto* mapper = slice
+            ? vtkImageResliceMapper::SafeDownCast(slice->GetMapper())
+            : nullptr;
+        auto* image = mapper
+            ? vtkImageData::SafeDownCast(mapper->GetInput())
+            : nullptr;
+        const void* pointer = image ? image->GetScalarPointer() : nullptr;
+        overlay->DetachRenderer(renderer);
+        return pointer;
+    }
 
 private:
     std::vector<std::shared_ptr<FeatureOverlay>> m_overlays;
@@ -309,7 +336,28 @@ TrustedImageSnapshot BuildCheckerSnapshot()
     return state;
 }
 
-PartSegmentationConfig GetConfig()
+TrustedImageSnapshot BuildSoaSnapshot()
+{
+    constexpr int side = 4;
+    constexpr vtkIdType voxelCount = side * side * side;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(side, side, side);
+    vtkNew<vtkSOADataArrayTemplate<float>> scalars;
+    scalars->SetNumberOfComponents(1);
+    scalars->SetNumberOfTuples(voxelCount);
+    scalars->FillComponent(0, 1.0);
+    image->GetPointData()->SetScalars(scalars);
+
+    auto state = std::make_shared<TrustedImageState>();
+    state->image = std::move(image);
+    state->dims = { side, side, side };
+    state->scalarRange = { 1.0, 1.0 };
+    state->version = 5;
+    return state;
+}
+
+PartSegmentationConfig GetConfig(
+    const std::size_t maxWorkingBytes = 512U * 1024U * 1024U)
 {
     PartSegmentationConfig config;
     config.defaultStart.targetViews.viewRoles = {
@@ -320,6 +368,7 @@ PartSegmentationConfig GetConfig()
     };
     config.defaultStart.threshold = 0.5;
     config.defaultStart.minPartVoxels = 1;
+    config.maxWorkingBytes = maxWorkingBytes;
     return config;
 }
 
@@ -332,23 +381,29 @@ PartSegmentationRequest GetRequest(const PartSegmentationAction action)
 
 bool SendTicks(
     PartSegmentationHostFeature& feature,
-    const std::function<bool()>& isComplete)
+    const std::function<bool()>& isComplete,
+    const std::function<void()>& onTick = nullptr)
 {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!isComplete() && std::chrono::steady_clock::now() < deadline) {
         if (!feature.OnHostTick()) return false;
+        if (onTick) onTick();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return isComplete();
 }
 
 struct TestHost final {
-    explicit TestHost(const int side = 8, const DataVersion version = 1)
+    explicit TestHost(
+        const int side = 8,
+        const DataVersion version = 1,
+        const std::size_t maxWorkingBytes = 512U * 1024U * 1024U)
         : views(std::make_shared<ViewDirectoryStub>())
         , data(std::make_shared<DataPortStub>(BuildSnapshot(side, version)))
         , host(std::make_shared<HostControlStub>())
-        , feature(std::make_shared<PartSegmentationHostFeature>(GetConfig()))
+        , feature(std::make_shared<PartSegmentationHostFeature>(
+            GetConfig(maxWorkingBytes)))
     {
     }
 
@@ -391,9 +446,16 @@ int GetPartLifecycleFailCount()
         const auto duplicate = test.feature->SendRequest(
             GetRequest(PartSegmentationAction::Start),
             [&](PartSegmentationResult) { ++duplicateCount; });
+        std::vector<double> progressValues;
         const bool didComplete = SendTicks(
-            *test.feature, [&] { return startResult.has_value(); });
+            *test.feature,
+            [&] { return startResult.has_value(); },
+            [&] {
+                progressValues.push_back(test.feature->GetState().progress);
+            });
         const auto state = test.feature->GetState();
+        const void* const firstLabel =
+            test.views->GetOverlay("part-top")->GetLabelPointer();
 
         failureCount += GetCaseResult(
             isAttached
@@ -408,13 +470,20 @@ int GetPartLifecycleFailCount()
                 && startResult->requestId == start.requestId
                 && startResult->status == PartResultStatus::Succeeded
                 && startResult->partCount == 2
+                && startResult->message.find("peakWorkingBytes=")
+                    != std::string::npos
                 && callbackThread == ownerThread,
             "Accepted Start completes exactly once on the owner thread") ? 0 : 1;
         failureCount += GetCaseResult(
             state.status == PartSegmentationStatus::Succeeded
                 && state.progress == 1.0
+                && !progressValues.empty()
+                && std::is_sorted(
+                    progressValues.begin(), progressValues.end())
+                && progressValues.back() == 1.0
                 && state.parts.size() == 2
                 && state.resultRevision == 1
+                && firstLabel != nullptr
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
             "Successful commit publishes one overlay per supported View") ? 0 : 1;
@@ -432,6 +501,8 @@ int GetPartLifecycleFailCount()
         const bool didReplace = SendTicks(
             *test.feature, [&] { return replaceResult.has_value(); });
         const auto restored = test.feature->GetState();
+        const void* const restoredLabel =
+            test.views->GetOverlay("part-top")->GetLabelPointer();
         failureCount += GetCaseResult(
             replace.status == PartAdmissionStatus::Accepted
                 && didReplace && replaceResult
@@ -441,6 +512,7 @@ int GetPartLifecycleFailCount()
                 && restored.status == PartSegmentationStatus::Succeeded
                 && restored.resultRevision == 1
                 && restored.parts.size() == 2
+                && restoredLabel == firstLabel
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
             "Failed replacement preserves the committed result") ? 0 : 1;
@@ -477,8 +549,30 @@ int GetPartLifecycleFailCount()
                 && showCount == 1
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4
-                && test.feature->GetState().isOverlayVisible,
+                && test.feature->GetState().isOverlayVisible
+                && test.views->GetOverlay("part-top")->GetLabelPointer()
+                    == firstLabel,
             "Visibility on rebinds the committed label image") ? 0 : 1;
+
+        std::optional<PartSegmentationResult> nextResult;
+        const auto next = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) {
+                nextResult = std::move(result);
+            });
+        const bool didCommitNext = SendTicks(
+            *test.feature, [&] { return nextResult.has_value(); });
+        const void* const nextLabel =
+            test.views->GetOverlay("part-top")->GetLabelPointer();
+        failureCount += GetCaseResult(
+            next.status == PartAdmissionStatus::Accepted
+                && didCommitNext && nextResult
+                && nextResult->status == PartResultStatus::Succeeded
+                && nextResult->resultRevision == 2
+                && nextLabel != nullptr
+                && nextLabel != firstLabel,
+            "Successful replacement atomically swaps the label generation")
+            ? 0 : 1;
 
         int clearCount = 0;
         const auto clear = test.feature->SendRequest(
@@ -498,6 +592,61 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
             "Clean lifecycle detaches successfully") ? 0 : 1;
+    }
+
+    {
+        TestHost test(8, 6, 1);
+        const bool isAttached = test.Attach();
+        std::optional<PartSegmentationResult> result;
+        const auto admission = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) {
+                result = std::move(value);
+            });
+        const bool didComplete = SendTicks(
+            *test.feature, [&] { return result.has_value(); });
+        failureCount += GetCaseResult(
+            isAttached
+                && admission.status == PartAdmissionStatus::Accepted
+                && didComplete && result
+                && result->failureReason == PartFailureReason::BudgetExceeded
+                && result->message.find("requiredBytes=")
+                    != std::string::npos
+                && result->message.find("maxWorkingBytes=1")
+                    != std::string::npos
+                && test.feature->GetState().progress < 1.0,
+            "Budget failure reports exact required and configured bytes")
+            ? 0 : 1;
+        failureCount += GetCaseResult(
+            test.feature->DetachHost(),
+            "Budget failure remains detachable") ? 0 : 1;
+    }
+
+    {
+        TestHost test;
+        test.data->SetSnapshot(BuildSoaSnapshot());
+        const bool isAttached = test.Attach();
+        std::optional<PartSegmentationResult> result;
+        const auto admission = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) {
+                result = std::move(value);
+            });
+        const bool didComplete = SendTicks(
+            *test.feature, [&] { return result.has_value(); });
+        failureCount += GetCaseResult(
+            isAttached
+                && admission.status == PartAdmissionStatus::Accepted
+                && didComplete && result
+                && result->status == PartResultStatus::Failed
+                && result->failureReason
+                    == PartFailureReason::UnsupportedScalar
+                && test.views->GetOverlayCount() == 0,
+            "Non-standard scalar layout is rejected without staging")
+            ? 0 : 1;
+        failureCount += GetCaseResult(
+            test.feature->DetachHost(),
+            "Unsupported scalar failure remains detachable") ? 0 : 1;
     }
 
     {
@@ -674,6 +823,49 @@ int GetPartLifecycleFailCount()
     }
 
     {
+        TestHost test;
+        const bool isAttached = test.Attach();
+        std::optional<PartSegmentationResult> result;
+        const auto admission = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) {
+                result = std::move(value);
+            });
+        const bool didComplete = SendTicks(
+            *test.feature, [&] { return result.has_value(); });
+        const void* const committedLabel =
+            test.views->GetOverlay("part-top")->GetLabelPointer();
+        test.host->SetFailActiveViews(true);
+        test.data->SetSnapshot(BuildSnapshot(8, 9));
+        const bool firstStaleTick = test.feature->OnHostTick();
+        const auto pendingCleanup = test.feature->GetState();
+        const bool keptGeneration =
+            test.views->GetOverlayCount() == 4
+            && test.host->GetActiveViews().size() == 4
+            && test.views->GetOverlay("part-top")->GetLabelPointer()
+                == committedLabel;
+        test.host->SetFailActiveViews(false);
+        const bool retryStaleTick = test.feature->OnHostTick();
+        failureCount += GetCaseResult(
+            isAttached
+                && admission.status == PartAdmissionStatus::Accepted
+                && didComplete && result
+                && result->status == PartResultStatus::Succeeded
+                && firstStaleTick
+                && pendingCleanup.status == PartSegmentationStatus::Stale
+                && pendingCleanup.progress == 0.0
+                && keptGeneration
+                && retryStaleTick
+                && test.views->GetOverlayCount() == 0
+                && test.host->GetActiveViews().empty(),
+            "Stale cleanup failure keeps a complete generation and retries")
+            ? 0 : 1;
+        failureCount += GetCaseResult(
+            test.feature->DetachHost(),
+            "Retried stale cleanup remains detachable") ? 0 : 1;
+    }
+
+    {
         TestHost test(8, 11);
         const bool isAttached = test.Attach();
         std::optional<PartSegmentationResult> startResult;
@@ -702,7 +894,8 @@ int GetPartLifecycleFailCount()
                 && startResult->status == PartResultStatus::Cancelled
                 && startResult->failureReason == PartFailureReason::Cancelled
                 && test.feature->GetState().status
-                    == PartSegmentationStatus::Cancelled,
+                    == PartSegmentationStatus::Cancelled
+                && test.feature->GetState().progress < 1.0,
             "Stop cancels an accepted but uncommitted candidate") ? 0 : 1;
         failureCount += GetCaseResult(
             test.feature->DetachHost(),

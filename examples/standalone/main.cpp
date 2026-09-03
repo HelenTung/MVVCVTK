@@ -382,13 +382,32 @@ PartSegmentationConfig GetPartConfig()
     };
     config.defaultStart.threshold = 0.5;
     config.defaultStart.minPartVoxels = 8;
-    config.maxWorkingBytes = 64U * 1024U * 1024U;
+    config.maxWorkingBytes =
+        std::size_t{ 20 } * 1024U * 1024U * 1024U;
     return config;
+}
+
+bool RenderPartViews(VtkAppHostSession& session)
+{
+    const std::array<std::string, 4> viewIds{
+        "primary-3d",
+        "slice-top-down",
+        "slice-front-back",
+        "slice-left-right"
+    };
+    for (const auto& viewId : viewIds) {
+        const auto* endpoint = session.GetRenderViewEndpoint(viewId);
+        if (!endpoint || !endpoint->renderWindow) return false;
+        endpoint->renderWindow->Render();
+        endpoint->renderWindow->WaitForCompletion();
+    }
+    return true;
 }
 
 bool StartPartQtSim(
     VtkAppHostSession& session,
     const std::shared_ptr<PartSegmentationHostFeature>& feature,
+    const std::optional<std::size_t> expectedPartCount,
     bool& isComplete,
     bool& isPassed)
 {
@@ -398,17 +417,33 @@ bool StartPartQtSim(
     const std::weak_ptr<PartSegmentationHostFeature> weakFeature = feature;
     const auto admission = feature->SendRequest(
         std::move(request),
-        [&session, &isComplete, &isPassed, weakFeature](
+        [&session, &isComplete, &isPassed,
+            weakFeature, expectedPartCount](
             PartSegmentationResult result) {
             const auto owner = weakFeature.lock();
             const auto state = owner
                 ? owner->GetState() : PartSegmentationState{};
             isPassed = result.status == PartResultStatus::Succeeded
                 && result.failureReason == PartFailureReason::None
-                && result.partCount == 2
+                && (expectedPartCount
+                    ? result.partCount == *expectedPartCount
+                    : result.partCount > 0)
                 && state.status == PartSegmentationStatus::Succeeded
                 && state.parts.size() == result.partCount
                 && state.resultRevision == result.resultRevision;
+            if (!expectedPartCount && isPassed) {
+                const auto renderStart = std::chrono::steady_clock::now();
+                isPassed = RenderPartViews(session);
+                const auto renderElapsed =
+                    std::chrono::steady_clock::now() - renderStart;
+                std::cout
+                    << "QT_PART_RENDER: passed=" << isPassed
+                    << " elapsed_ms="
+                    << std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                            renderElapsed).count()
+                    << '\n' << std::flush;
+            }
             isComplete = true;
             std::cout
                 << "QT_PART_RESULT: request=" << result.requestId
@@ -417,6 +452,7 @@ bool StartPartQtSim(
                 << " source=" << result.sourceVersion
                 << " revision=" << result.resultRevision
                 << " parts=" << result.partCount
+                << " message=" << result.message
                 << " passed=" << isPassed
                 << '\n' << std::flush;
             (void)StopEventLoop(session);
@@ -1159,8 +1195,13 @@ private:
                 if (const auto owner = controlOwner.lock()) {
                     (void)owner->SetPartStatus(status.str());
                 }
-                std::cerr << "[PartSegmentation] "
-                    << status.str() << '\n' << std::flush;
+                std::cerr
+                    << "[PartSegmentation] " << status.str()
+                    << " | source=" << result.sourceVersion
+                    << " | revision=" << result.resultRevision
+                    << " | parts=" << result.partCount
+                    << " | message=" << result.message << '\n'
+                    << std::flush;
             });
         const bool isAccepted =
             admission.status == PartAdmissionStatus::Accepted;
@@ -1610,11 +1651,14 @@ int main(int argc, char* argv[])
         argc, argv, "--part-auto");
     const bool isPartManual = GetArgFound(
         argc, argv, "--part-manual");
+    const bool isPartProfile = GetArgFound(
+        argc, argv, "--part-profile");
     const int runModeCount = static_cast<int>(isDragAudit)
         + static_cast<int>(isQualityAudit)
         + static_cast<int>(isGapAuto)
         + static_cast<int>(isPartAuto)
-        + static_cast<int>(isPartManual);
+        + static_cast<int>(isPartManual)
+        + static_cast<int>(isPartProfile);
     if (runModeCount > 1) {
         std::cerr
             << "--drag-audit, --quality-audit, --gap-auto and "
@@ -1625,7 +1669,7 @@ int main(int argc, char* argv[])
         return 8;
     }
 #if !defined(MVVCVTK_HAS_PART_SEGMENTATION)
-    if (isPartAuto || isPartManual) {
+    if (isPartAuto || isPartManual || isPartProfile) {
         std::cerr
             << "PartSegmentation run modes require "
                "MVVCVTK_BUILD_PART_SEGMENTATION=ON\n";
@@ -1678,6 +1722,24 @@ int main(int argc, char* argv[])
                 }
                 (void)StartPartQtSim(
                     session, partFeature,
+                    std::size_t{ 2 },
+                    isPartComplete, isPartPassed);
+                return;
+            }
+            else if (isPartProfile) {
+                if (!result.isSucceeded) {
+                    isPartComplete = true;
+                    isPartPassed = false;
+                    std::cerr
+                        << "QT_PART_RESULT: real data load failed; "
+                           "request skipped\n"
+                        << std::flush;
+                    (void)StopEventLoop(session);
+                    return;
+                }
+                (void)StartPartQtSim(
+                    session, partFeature,
+                    std::nullopt,
                     isPartComplete, isPartPassed);
                 return;
             }
@@ -1751,7 +1813,9 @@ int main(int argc, char* argv[])
         << "  --part-manual: load the small synthetic volume and "
            "keep the windows open\n"
         << "  --part-auto: reload a small in-memory volume, submit Start, "
-           "read the final state and exit\n";
+           "read the final state and exit\n"
+        << "  --part-profile: load the configured real RAW, submit Start, "
+           "print resource diagnostics and exit\n";
 #endif
 
     const bool isStarted = session.Start();
@@ -1771,7 +1835,8 @@ int main(int argc, char* argv[])
         && (!isAuditComplete || !isAuditPassed)) {
         return 7;
     }
-    if (isPartAuto && (!isPartComplete || !isPartPassed)) {
+    if ((isPartAuto || isPartProfile)
+        && (!isPartComplete || !isPartPassed)) {
         return 9;
     }
     if (isPartManual && !isPartManualReady) return 10;

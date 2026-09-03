@@ -10,10 +10,12 @@ int GetSuiteFailCount(const std::string_view suite)
     if (suite == "algorithm") return GetPartAlgorithmFailCount();
     if (suite == "lifecycle") return GetPartLifecycleFailCount();
     if (suite == "display") return GetPartDisplayFailCount();
+    if (suite == "scale") return GetPartScaleFailCount();
     if (suite == "all") {
         return GetPartAlgorithmFailCount()
             + GetPartLifecycleFailCount()
-            + GetPartDisplayFailCount();
+            + GetPartDisplayFailCount()
+            + GetPartScaleFailCount();
     }
     return 1;
 }

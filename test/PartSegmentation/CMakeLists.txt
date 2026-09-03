@@ -3,6 +3,7 @@ add_executable(
     PartSegmentationAlgorithmTests.cpp
     PartSegmentationDisplayTests.cpp
     PartSegmentationLifecycleTests.cpp
+    PartSegmentationScaleTests.cpp
     PartSegmentationTestCases.h
     PartSegmentationTests.cpp
 )
@@ -37,7 +38,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_part_suite IN ITEMS algorithm lifecycle display)
+foreach(_mvvcvtk_part_suite IN ITEMS algorithm lifecycle display scale)
     add_test(
         NAME "PartSegmentation.${_mvvcvtk_part_suite}"
         COMMAND mvvcvtk_part_segmentation_tests ${_mvvcvtk_part_suite}

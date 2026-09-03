@@ -6,7 +6,9 @@
 
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
+#include <vtkPointData.h>
 #include <vtkSmartPointer.h>
+#include <vtkUnsignedIntArray.h>
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -60,19 +63,34 @@ std::shared_ptr<FeatureOverlay> CreateOverlay(
     return nullptr;
 }
 
-vtkSmartPointer<vtkImageData> BuildLabelImage(
+struct LabelViewCandidate final {
+    // image 借用 labels 的稳定地址，成员逆序析构必须先释放 image。
+    std::shared_ptr<std::vector<std::uint32_t>> labels;
+    vtkSmartPointer<vtkImageData> image;
+};
+
+LabelViewCandidate BuildLabelView(
     const PartLabelCandidate& candidate)
 {
+    LabelViewCandidate view;
     std::size_t voxelCount = 1;
     for (const int dimension : candidate.dimensions) {
         if (dimension <= 0
             || static_cast<std::size_t>(dimension)
                 > std::numeric_limits<std::size_t>::max() / voxelCount) {
-            return nullptr;
+            return view;
         }
         voxelCount *= static_cast<std::size_t>(dimension);
     }
-    if (voxelCount != candidate.labels.size()) return nullptr;
+    if (!candidate.labels
+        || voxelCount != candidate.labels->size()
+        || voxelCount > static_cast<std::size_t>(
+            std::numeric_limits<vtkIdType>::max())) {
+        return view;
+    }
+    static_assert(
+        std::is_same_v<std::uint32_t, unsigned int>,
+        "The Windows x64 label view requires uint32_t == unsigned int.");
 
     auto image = vtkSmartPointer<vtkImageData>::New();
     image->SetExtent(
@@ -84,15 +102,24 @@ vtkSmartPointer<vtkImageData> BuildLabelImage(
     auto direction = vtkSmartPointer<vtkMatrix3x3>::New();
     direction->DeepCopy(candidate.direction.data());
     image->SetDirectionMatrix(direction);
-    image->AllocateScalars(VTK_UNSIGNED_INT, 1);
-    auto* output = static_cast<unsigned int*>(image->GetScalarPointer());
-    if (!output
-        || static_cast<std::size_t>(image->GetNumberOfPoints())
-            != voxelCount) {
-        return nullptr;
+    if (static_cast<std::size_t>(image->GetNumberOfPoints())
+        != voxelCount) {
+        return view;
     }
-    std::copy(candidate.labels.begin(), candidate.labels.end(), output);
-    return image;
+
+    auto scalars = vtkSmartPointer<vtkUnsignedIntArray>::New();
+    scalars->SetNumberOfComponents(1);
+    // save=1：VTK 不释放用户数组，labels owner 必须长于 image/overlay。
+    scalars->SetArray(
+        candidate.labels->data(),
+        static_cast<vtkIdType>(voxelCount),
+        1);
+    image->GetPointData()->SetScalars(scalars);
+    if (image->GetScalarPointer() != candidate.labels->data()) return view;
+
+    view.labels = candidate.labels;
+    view.image = std::move(image);
+    return view;
 }
 
 PartSegmentationResult BuildResult(
@@ -159,6 +186,7 @@ private:
     void SetRequestRunning(
         std::uint64_t requestId,
         DataVersion sourceVersion);
+    void SetRequestProgress(double progress);
     void SendComplete(
         PartSegmentationCallback callback,
         PartSegmentationResult result) const noexcept;
@@ -185,6 +213,8 @@ private:
     std::unique_ptr<PartSegmentationService> m_service;
     TrustedImageSnapshot m_requestSource;
     TrustedImageSnapshot m_activeSource;
+    // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
+    std::shared_ptr<std::vector<std::uint32_t>> m_labelValues;
     vtkSmartPointer<vtkImageData> m_labelImage;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
@@ -256,6 +286,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     m_requestSource.reset();
     m_activeSource.reset();
     m_labelImage = nullptr;
+    m_labelValues.reset();
     m_requestViews.clear();
     m_activeViews.clear();
     m_startCallback = nullptr;
@@ -288,6 +319,10 @@ bool PartSegmentationHostFeature::Impl::OnHostTick()
         SetSourceStale();
     }
 
+    if (m_activeRequestId != 0) {
+        const auto progress = m_service->GetProgress(m_activeRequestId);
+        if (progress) SetRequestProgress(*progress);
+    }
     auto complete = m_service->GetComplete();
     if (!complete) return true;
     if (complete->requestId != m_activeRequestId) return true;
@@ -480,6 +515,20 @@ void PartSegmentationHostFeature::Impl::SetRequestRunning(
     m_state.progress = 0.0;
 }
 
+void PartSegmentationHostFeature::Impl::SetRequestProgress(
+    const double progress)
+{
+    const std::lock_guard<std::mutex> lock(m_stateMutex);
+    if (m_state.status != PartSegmentationStatus::Running
+        || m_state.requestId != m_activeRequestId) {
+        return;
+    }
+    // 1.0 只表示 owner thread 已提交完整 generation。
+    constexpr double runningLimit = 0.999;
+    m_state.progress = std::max(
+        m_state.progress, std::clamp(progress, 0.0, runningLimit));
+}
+
 void PartSegmentationHostFeature::Impl::SendComplete(
     PartSegmentationCallback callback,
     PartSegmentationResult result) const noexcept
@@ -554,7 +603,7 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         SetState(state);
         return true;
     }
-    if (!m_labelImage || m_activeViews.empty()) {
+    if (!m_labelValues || !m_labelImage || m_activeViews.empty()) {
         state.isOverlayVisible = true;
         SetState(state);
         return true;
@@ -574,6 +623,7 @@ bool PartSegmentationHostFeature::Impl::ClearResult()
 {
     if (!RemoveDisplay()) return false;
     m_labelImage = nullptr;
+    m_labelValues.reset();
     m_activeSource.reset();
     m_activeViews.clear();
     PartSegmentationState state;
@@ -590,9 +640,12 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     state.failureReason = PartFailureReason::SourceChanged;
     state.progress = 0.0;
     SetState(state);
+    // Stale 先表达 source 已失效；显示清理失败时保留完整 generation，
+    // 下一次 owner tick 会重试，避免悬空或半清理。
     if (!RemoveDisplay()) return;
     m_activeSource.reset();
     m_labelImage = nullptr;
+    m_labelValues.reset();
     m_activeViews.clear();
 }
 
@@ -646,18 +699,18 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                 message));
     }
     else {
-        auto labelImage = BuildLabelImage(candidate);
+        auto labelView = BuildLabelView(candidate);
         std::vector<OverlayBinding> nextBindings;
         const bool isVisible = GetState().isOverlayVisible;
         bool isDisplayReady = true;
         if (isVisible) {
             isDisplayReady = AttachDisplay(
-                labelImage, m_requestViews, nextBindings);
+                labelView.image, m_requestViews, nextBindings);
         }
         else if (m_host) {
             isDisplayReady = m_host->SetActiveViews({});
         }
-        if (!labelImage || !isDisplayReady) {
+        if (!labelView.labels || !labelView.image || !isDisplayReady) {
             RemoveBindings(nextBindings);
             SetRequestFailed(PartFailureReason::DisplayFailed);
             SendComplete(
@@ -673,8 +726,11 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         }
         else {
             RemoveBindings(m_bindings);
+            m_labelImage = nullptr;
+            m_labelValues.reset();
             m_bindings = std::move(nextBindings);
-            m_labelImage = std::move(labelImage);
+            m_labelValues = std::move(labelView.labels);
+            m_labelImage = std::move(labelView.image);
             m_activeViews = std::move(m_requestViews);
             m_activeSource = m_requestSource;
             ++m_resultRevision;
@@ -698,7 +754,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                     sourceVersion,
                     m_resultRevision,
                     partCount,
-                    "Part segmentation succeeded."));
+                    candidate.message));
         }
     }
 
