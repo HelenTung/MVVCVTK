@@ -8,6 +8,8 @@ set(MVVCVTK_GAP_SOURCES
 set(MVVCVTK_GAP_KERNEL_SOURCES
     src/Services/GapKernelBridge.cpp
     src/Services/GapKernelBridge.h
+    src/Services/GapKernelLabelView.cpp
+    src/Services/GapKernelLabelView.h
 )
 
 add_library(mvvcvtk_gap_kernel MODULE ${MVVCVTK_GAP_KERNEL_SOURCES})

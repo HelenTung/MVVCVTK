@@ -5,6 +5,7 @@
 // =====================================================================
 
 #include "App/ViewTypes.h"
+#include "Data/TrustedImageState.h"
 #include "GapAnalysisTypes.h"
 
 #include <functional>
@@ -15,7 +16,10 @@
 class OverlayService;
 
 struct GapViewRequest final {
-    vtkSmartPointer<vtkImageData> inputImage; // 必需 VTK 输入；StartView 同步隔离后才接纳 worker。
+    // GapHost 从 TrustedFeatureDataPort 取得的不可变 owner；存在时只共享 scalar，不复制整卷。
+    TrustedImageSnapshot trustedInput;
+    // 低层直接调用使用的可变输入；StartView 同步 DeepCopy 后才接纳 worker。
+    vtkSmartPointer<vtkImageData> inputImage;
     // 当前私有内核没有有效域接口；仅允许为空，非空请求会被明确拒绝且不会触发本地补算。
     vtkSmartPointer<vtkImageData> validityMask;
     GapSurfaceConfig surface; // DefX 材料均值与等值面阈值配置快照。

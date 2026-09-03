@@ -1,4 +1,5 @@
 #include "GapKernelBridge.h"
+#include "GapKernelLabelView.h"
 
 #include "DefXAnalysisService.h"
 
@@ -7,7 +8,6 @@
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
-#include <vtkSetGet.h>
 #include <vtkSmartPointer.h>
 
 #include <algorithm>
@@ -222,59 +222,6 @@ GapKernelRegion BuildRegion(const DefXDefectRegion& source)
     return region;
 }
 
-template <typename TValue>
-bool BuildLabels(
-    const TValue* source,
-    const std::size_t labelCount,
-    std::vector<std::int32_t>& labels)
-{
-    if (!source) {
-        return false;
-    }
-    labels.resize(labelCount);
-    constexpr long double maxLabel =
-        static_cast<long double>(
-            (std::numeric_limits<std::int32_t>::max)());
-    for (std::size_t index = 0; index < labelCount; ++index) {
-        const long double value = static_cast<long double>(source[index]);
-        if (!std::isfinite(value)
-            || value < 0.0L
-            || value > maxLabel
-            || std::trunc(value) != value) {
-            labels.clear();
-            return false;
-        }
-        labels[index] = static_cast<std::int32_t>(value);
-    }
-    return true;
-}
-
-bool BuildLabels(
-    vtkDataArray* scalars,
-    const std::size_t labelCount,
-    std::vector<std::int32_t>& labels)
-{
-    labels.clear();
-    if (!scalars
-        || scalars->GetNumberOfComponents() != 1
-        || scalars->GetNumberOfTuples()
-            != static_cast<vtkIdType>(labelCount)) {
-        return false;
-    }
-
-    bool isBuilt = false;
-    switch (scalars->GetDataType()) {
-        vtkTemplateMacro(
-            isBuilt = BuildLabels(
-                static_cast<const VTK_TT*>(scalars->GetVoidPointer(0)),
-                labelCount,
-                labels));
-    default:
-        break;
-    }
-    return isBuilt;
-}
-
 }
 
 extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
@@ -354,11 +301,20 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             request->voxelCount);
         auto* scalars = labelImage->GetPointData()
             ? labelImage->GetPointData()->GetScalars() : nullptr;
-        std::vector<std::int32_t> labels;
-        if (!BuildLabels(scalars, labelCount, labels)) {
+        GapKernelLabelView labelView;
+        if (!BuildGapKernelLabelView(
+                scalars,
+                labelCount,
+                labelView)) {
             analysis.ReleaseLabelImage();
             return 0;
         }
+        std::cerr
+            << "[GapAnalysis][DefX] labels ready"
+            << " | scalar=" << scalars->GetDataTypeAsString()
+            << " | transfer="
+            << (labelView.GetIsBorrowed() ? "borrowed" : "converted")
+            << '\n' << std::flush;
 
         const auto& sourceRegions = analysis.GetDefectRegions();
         std::vector<GapKernelRegion> regions;
@@ -376,8 +332,8 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             &header,
             regions.empty() ? nullptr : regions.data(),
             static_cast<std::uint64_t>(regions.size()),
-            labels.empty() ? nullptr : labels.data(),
-            static_cast<std::uint64_t>(labels.size())
+            labelView.GetData(),
+            static_cast<std::uint64_t>(labelView.GetCount())
         };
         const std::int32_t isConsumed = sink(&result, context);
         analysis.ReleaseLabelImage();

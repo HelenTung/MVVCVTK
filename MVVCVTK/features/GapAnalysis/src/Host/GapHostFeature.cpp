@@ -281,7 +281,7 @@ GapHostFeature::Impl::GetViewCandidate(
 
     ViewCandidate candidate;
     candidate.version = snapshot->version;
-    candidate.request.inputImage = snapshot->image;
+    candidate.request.trustedInput = snapshot;
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
 

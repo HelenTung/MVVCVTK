@@ -130,6 +130,47 @@ add_test(
 )
 SetTestRuntime(QtHost.Smoke mvvcvtk_qt_host_smoke)
 
+if(MVVCVTK_BUILD_GAP_ANALYSIS)
+    add_executable(
+        mvvcvtk_qt_gap_smoke
+        QtHostGapSmoke.cpp
+    )
+
+    set_target_properties(
+        mvvcvtk_qt_gap_smoke
+        PROPERTIES
+            OUTPUT_NAME QtHostGapSmoke
+            PROJECT_LABEL QtGapSmoke
+            FOLDER "MVVCVTK/Tests"
+    )
+
+    target_link_libraries(
+        mvvcvtk_qt_gap_smoke
+        PRIVATE
+            MVVCVTK::Host
+            MVVCVTK::GapAnalysis
+            Qt5::Core
+            Qt5::Gui
+            Qt5::Widgets
+            Qt5::OpenGL
+            VTK::GUISupportQt
+            ${MVVCVTK_VTK_TARGETS}
+    )
+
+    SetQtTargetDefaults(mvvcvtk_qt_gap_smoke)
+    vtk_module_autoinit(
+        TARGETS mvvcvtk_qt_gap_smoke
+        MODULES ${MVVCVTK_QT_VTK_TARGETS}
+    )
+
+    add_test(
+        NAME QtHost.GapSmoke
+        COMMAND mvvcvtk_qt_gap_smoke
+    )
+    SetTestRuntime(QtHost.GapSmoke mvvcvtk_qt_gap_smoke)
+    set_tests_properties(QtHost.GapSmoke PROPERTIES TIMEOUT 45)
+endif()
+
 add_executable(
     mvvcvtk_qt_session_smoke
     QtHostSessionSmoke.cpp

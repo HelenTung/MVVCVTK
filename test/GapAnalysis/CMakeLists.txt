@@ -4,6 +4,10 @@ function(BuildGapTests target outputName projectLabel)
         GapAnalysisAlgorithmTests.cpp
         GapDisplayTests.cpp
         GapDisplayTests.h
+        GapKernelLabelViewTests.cpp
+        GapKernelLabelViewTests.h
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/src/Services/GapKernelLabelView.cpp"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/src/Services/GapKernelLabelView.h"
     )
 
     set_target_properties(
@@ -21,6 +25,7 @@ function(BuildGapTests target outputName projectLabel)
             "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include"
             "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Render/Strategies"
             "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/include/Services"
+            "${PROJECT_SOURCE_DIR}/MVVCVTK/features/GapAnalysis/src/Services"
     )
 
     target_link_libraries(
@@ -49,6 +54,11 @@ add_test(
     COMMAND mvvcvtk_gap_main_tests
 )
 SetTestRuntime(GapAnalysis.All mvvcvtk_gap_main_tests)
+set_property(
+    TEST GapAnalysis.All
+    PROPERTY PASS_REGULAR_EXPRESSION
+        "\\[GapAnalysis\\]\\[DefX\\] labels ready \\| scalar=int \\| transfer=borrowed"
+)
 
 # 路径回归测试把测试程序放到独立目录，并在当前工作目录放置同名伪 DLL。
 # 生产加载器必须忽略当前目录，只从 Feature 专属的绝对目录加载 runtime 对。

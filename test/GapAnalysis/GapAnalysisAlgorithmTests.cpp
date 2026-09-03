@@ -2,6 +2,7 @@
 // 测试不得直接包含或调用已退役的本地孔隙算法。
 #include "Services/GapAnalysisService.h"
 #include "GapDisplayTests.h"
+#include "GapKernelLabelViewTests.h"
 
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -446,7 +447,8 @@ public:
 
 int main()
 {
-    int failureCount = GapAlgorithmSuite().GetFailCount();
+    int failureCount = GetGapLabelFailCount();
+    failureCount += GapAlgorithmSuite().GetFailCount();
     failureCount += GapDisplaySuite().GetFailCount();
     if (failureCount != 0) {
         std::cerr
