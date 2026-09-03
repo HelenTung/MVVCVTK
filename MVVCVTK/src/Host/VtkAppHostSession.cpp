@@ -491,6 +491,9 @@ public:
     std::optional<HostRenderViewState> GetRenderViewState(
         const HostViewTarget& target);
     std::vector<HostRenderViewState> GetRenderViewStates();
+    std::optional<HostSceneViewState> GetSceneViewState(
+        const HostViewTarget& target);
+    std::vector<HostSceneViewState> GetSceneViewStates();
     std::optional<ImageReadState> GetImageReadState();
     ImageReadResult GetImageReadResult(std::size_t maxReadBytes);
     ImageReadResult GetImageReadResult(
@@ -928,6 +931,27 @@ VtkAppHostSession::Impl::GetRenderViewStates()
         return {};
     }
     return renderViews.GetViewStates();
+}
+
+std::optional<HostSceneViewState>
+VtkAppHostSession::Impl::GetSceneViewState(
+    const HostViewTarget& target)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady()) {
+        return std::nullopt;
+    }
+    return renderViews.GetSceneViewState(target);
+}
+
+std::vector<HostSceneViewState>
+VtkAppHostSession::Impl::GetSceneViewStates()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady()) {
+        return {};
+    }
+    return renderViews.GetSceneViewStates();
 }
 
 bool VtkAppHostSession::Impl::DetachTimer()
@@ -1692,6 +1716,23 @@ VtkAppHostSession::GetRenderViewStates()
 {
     return m_impl ? m_impl->GetRenderViewStates()
         : std::vector<HostRenderViewState>{};
+}
+
+std::optional<HostSceneViewState>
+VtkAppHostSession::GetSceneViewState(
+    const HostViewTarget& target)
+{
+    return m_impl
+        ? m_impl->GetSceneViewState(target)
+        : std::nullopt;
+}
+
+std::vector<HostSceneViewState>
+VtkAppHostSession::GetSceneViewStates()
+{
+    return m_impl
+        ? m_impl->GetSceneViewStates()
+        : std::vector<HostSceneViewState>{};
 }
 
 std::optional<ImageReadState>

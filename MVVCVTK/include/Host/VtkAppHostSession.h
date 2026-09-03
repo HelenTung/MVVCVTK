@@ -65,6 +65,12 @@ public:
         const HostViewTarget& target);
     // 按会话拓扑顺序返回所有视图的独立状态快照。
     std::vector<HostRenderViewState> GetRenderViewStates();
+    // 仅 owner thread 可读；精确 id 可返回 isAvailable=false 的已知 View，
+    // role 仍选择首个可用 View；失败不回退，也不改变 View、Feature 或 VTK 状态。
+    std::optional<HostSceneViewState> GetSceneViewState(
+        const HostViewTarget& target);
+    // 仅 owner thread 可读；按配置顺序返回全部 View，包括当前不可用的 View。
+    std::vector<HostSceneViewState> GetSceneViewStates();
     // 深拷贝当前体素为不含 VTK identity 的只读值；无有效体数据时返回空。
     std::optional<ImageReadState> GetImageReadState();
     // 扩展接口：在分配前检查同步复制预算，并返回稳定失败原因与所需字节数。

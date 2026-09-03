@@ -2916,6 +2916,37 @@ int GetViewFailCount()
     VtkAppHostSession session(std::move(config));
 
     int failureCount = 0;
+    HostViewTarget stateTarget;
+    stateTarget.viewId = "view";
+    const HostViewTarget linkedTarget{
+        "linked-view", false, HostRenderViewRole::Composite3D };
+    const bool isSceneSessionBuilt = session.BuildSession();
+    const auto initialScene = session.GetSceneViewState(stateTarget);
+    const auto linkedSceneByRole = session.GetSceneViewState(
+        HostViewTarget{
+            "", true, HostRenderViewRole::Composite3D });
+    const auto initialScenes = session.GetSceneViewStates();
+    const bool isInitialSceneValid = isSceneSessionBuilt
+        && initialScene
+        && initialScene->id == "view"
+        && initialScene->role == HostRenderViewRole::Primary3D
+        && initialScene->isAvailable
+        && initialScene->presentation
+        && initialScene->camera
+        && linkedSceneByRole
+        && linkedSceneByRole->id == "linked-view"
+        && initialScenes.size() == 2
+        && initialScenes[0].id == "view"
+        && initialScenes[1].id == "linked-view";
+    failureCount += GetCaseResult(
+        isInitialSceneValid,
+        "Scene snapshot keeps topology and value-only View state") ? 0 : 1;
+
+    failureCount += GetCaseResult(
+        !session.GetSceneViewState(HostViewTarget{
+            "missing-view", true, HostRenderViewRole::Primary3D }),
+        "Scene snapshot rejects missing ID without role fallback") ? 0 : 1;
+
     HostViewSetRequest value;
     value.targetView.viewId = "missing-view";
     failureCount += GetCaseResult(
@@ -2944,6 +2975,8 @@ int GetViewFailCount()
         !session.SendRequest(std::move(value)),
         "View non-finite background rejection") ? 0 : 1;
 
+    const auto firstScene = session.GetSceneViewState(stateTarget);
+    const auto firstLinked = session.GetSceneViewState(linkedTarget);
     value = HostViewSetRequest{};
     value.targetView.viewId = "view";
     value.mode = HostRenderMode::IsoSurface;
@@ -2968,9 +3001,20 @@ int GetViewFailCount()
     };
     value.isAxesVisible = true;
     value.volumeQuality = HostVolumeQuality::XHigh;
+    const bool isViewSet = session.SendRequest(std::move(value));
     failureCount += GetCaseResult(
-        session.SendRequest(std::move(value)),
+        isViewSet,
         "Qt Host can set one View presentation state") ? 0 : 1;
+    const auto nextScene = session.GetSceneViewState(stateTarget);
+    const auto nextLinked = session.GetSceneViewState(linkedTarget);
+    failureCount += GetCaseResult(
+        isViewSet
+            && firstScene && nextScene && firstLinked && nextLinked
+            && nextScene->presentationRevision
+                > firstScene->presentationRevision
+            && nextLinked->presentationRevision
+                == firstLinked->presentationRevision,
+        "Scene presentation revision changes only for the target View") ? 0 : 1;
 
     sessionValue = HostSessionSetRequest{};
     sessionValue.spacing =
@@ -2982,8 +3026,6 @@ int GetViewFailCount()
         session.SendRequest(std::move(sessionValue)),
         "Qt Host can set Session spacing and cursor") ? 0 : 1;
 
-    HostViewTarget stateTarget;
-    stateTarget.viewId = "view";
     const auto state = session.GetRenderViewState(stateTarget);
     const auto allStates = session.GetRenderViewStates();
     const auto linkedState = std::find_if(

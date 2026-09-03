@@ -59,6 +59,9 @@ public:
     std::optional<HostRenderViewState> GetViewState(
         const HostViewTarget& target) const;
     std::vector<HostRenderViewState> GetViewStates() const;
+    std::optional<HostSceneViewState> GetSceneViewState(
+        const HostViewTarget& target);
+    std::vector<HostSceneViewState> GetSceneViewStates();
     std::optional<HostDataRoute> GetDataRoute(
         const HostViewTarget& target) const;
     std::optional<HostViewRoute> GetViewRoute(
@@ -215,6 +218,17 @@ private:
         const HostViewInitConfig& config) const;
     HostRenderViewState BuildViewState(
         const HostRenderViewRuntime& view) const;
+    HostRenderViewState BuildViewState(
+        const HostRenderViewRuntime& view,
+        const AppViewState& appState) const;
+    HostSceneViewState BuildSceneViewState(
+        const HostRenderViewRuntime& view) const;
+    const HostRenderViewRuntime* GetSceneViewBySelector(
+        const HostViewTarget& target) const;
+    std::vector<std::string> GetActiveFeatureIds(
+        const HostRenderViewRuntime& view) const;
+    static HostCameraState GetHostCamera(
+        const ViewCameraState& source);
     const ViewLeasePorts* GetLeasePorts(
         const HostRenderViewRuntime* view) const;
 
@@ -588,6 +602,16 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
     if (!view.isAvailable || !view.app.view) return state;
 
     const auto appState = view.app.view->GetViewState();
+    return BuildViewState(view, appState);
+}
+
+HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
+    const HostRenderViewRuntime& view,
+    const AppViewState& appState) const
+{
+    HostRenderViewState state;
+    state.id = view.config.id;
+    state.role = view.config.role;
     const auto viewMode = GetHostViewMode(appState.mode);
     if (viewMode) state.viewMode = *viewMode;
     state.material = {
@@ -637,6 +661,56 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
     state.dataVersion = appState.dataVersion;
     state.isAxesVisible = view.context
         && view.context->GetOrientationAxesVisible();
+    return state;
+}
+
+HostCameraState HostViewRuntimeRegistry::Impl::GetHostCamera(
+    const ViewCameraState& source)
+{
+    HostCameraState target;
+    target.position = source.position;
+    target.focalPoint = source.focalPoint;
+    target.viewUp = source.viewUp;
+    target.clippingRange = source.clippingRange;
+    target.parallelScale = source.parallelScale;
+    target.viewAngle = source.viewAngle;
+    target.isParallel = source.isParallel;
+    return target;
+}
+
+std::vector<std::string>
+HostViewRuntimeRegistry::Impl::GetActiveFeatureIds(
+    const HostRenderViewRuntime& view) const
+{
+    std::vector<std::string> ids;
+    if (!view.app.feature) return ids;
+
+    for (const auto& [featureId, ports] : m_featureViews) {
+        if (std::find(ports.begin(), ports.end(), view.app.feature)
+            != ports.end()) {
+            ids.push_back(featureId);
+        }
+    }
+    return ids;
+}
+
+HostSceneViewState HostViewRuntimeRegistry::Impl::BuildSceneViewState(
+    const HostRenderViewRuntime& view) const
+{
+    HostSceneViewState state;
+    state.id = view.config.id;
+    state.role = view.config.role;
+    state.isAvailable = view.isAvailable;
+    if (!view.isAvailable || !view.app.view) return state;
+
+    const auto appState = view.app.view->GetViewState();
+    state.presentation = BuildViewState(view, appState);
+    state.presentationRevision = appState.revision;
+    if (view.context) {
+        const auto camera = view.context->GetCameraState();
+        if (camera) state.camera = GetHostCamera(*camera);
+    }
+    state.activeFeatureIds = GetActiveFeatureIds(view);
     return state;
 }
 
@@ -817,6 +891,22 @@ HostViewRuntimeRegistry::Impl::GetViewBySelector(
     return nullptr;
 }
 
+const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+HostViewRuntimeRegistry::Impl::GetSceneViewBySelector(
+    const HostViewTarget& target) const
+{
+    if (!target.viewId.empty()) {
+        const auto view = std::find_if(
+            m_views.begin(), m_views.end(),
+            [&target](const HostRenderViewRuntime& current) {
+                return current.config.id == target.viewId;
+            });
+        return view != m_views.end() ? &*view : nullptr;
+    }
+    if (!target.isViewRoleUsed) return nullptr;
+    return GetFirstViewByRole(target.viewRole);
+}
+
 std::optional<HostRenderViewState>
 HostViewRuntimeRegistry::Impl::GetViewState(
     const HostViewTarget& target) const
@@ -834,6 +924,38 @@ HostViewRuntimeRegistry::Impl::GetViewStates() const
     states.reserve(m_views.size());
     for (const auto& view : m_views) {
         if (view.isAvailable) states.push_back(BuildViewState(view));
+    }
+    return states;
+}
+
+std::optional<HostSceneViewState>
+HostViewRuntimeRegistry::Impl::GetSceneViewState(
+    const HostViewTarget& target)
+{
+    if (!m_lease
+        || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread()) {
+        return std::nullopt;
+    }
+    const auto* view = GetSceneViewBySelector(target);
+    return view
+        ? std::optional<HostSceneViewState>(BuildSceneViewState(*view))
+        : std::nullopt;
+}
+
+std::vector<HostSceneViewState>
+HostViewRuntimeRegistry::Impl::GetSceneViewStates()
+{
+    std::vector<HostSceneViewState> states;
+    if (!m_lease
+        || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread()) {
+        return states;
+    }
+
+    states.reserve(m_views.size());
+    for (const auto& view : m_views) {
+        states.push_back(BuildSceneViewState(view));
     }
     return states;
 }
@@ -1585,6 +1707,23 @@ HostViewRuntimeRegistry::GetViewStates() const
     return m_impl
         ? m_impl->GetViewStates()
         : std::vector<HostRenderViewState>{};
+}
+
+std::optional<HostSceneViewState>
+HostViewRuntimeRegistry::GetSceneViewState(
+    const HostViewTarget& target)
+{
+    return m_impl
+        ? m_impl->GetSceneViewState(target)
+        : std::nullopt;
+}
+
+std::vector<HostSceneViewState>
+HostViewRuntimeRegistry::GetSceneViewStates()
+{
+    return m_impl
+        ? m_impl->GetSceneViewStates()
+        : std::vector<HostSceneViewState>{};
 }
 
 std::weak_ptr<IHostViewDirectory>

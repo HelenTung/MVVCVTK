@@ -96,6 +96,8 @@ target_link_libraries(app PRIVATE
 具体 Feature 只公开依赖 `FeatureSPI`；Host 实现公开依赖 `HostAPI`，并在内部使用
 `FeatureSPI`。应用按实际功能显式组合 `Host`、`OrthogonalCrop`、`GapAnalysis`，不通过顶层 SDK target 继承 standalone 的组合选择。
 
+`VtkAppHostSession::GetSceneViewState` 与 `GetSceneViewStates` 只允许在 Session owner thread、Running 状态下读取，并返回不含 VTK identity 的每 View 纯值投影；集合按配置 topology 顺序包含当前不可用 View。`presentationRevision` 只表示 App presentation 事务，不覆盖 Camera、Feature 或 Overlay 变化。`GetRenderViewEndpoint(s)` 仍是独立、受 Session 生命周期约束的 VTK 观察能力；scene snapshot 不是可写 scene graph，也不是 Qt model。
+
 ## SDK 公开头边界
 
 SDK 项目头统一位于 `include/MVVCVTK/`，其下只允许 `API/` 与 `SPI/` 两个物理分面。顶层业务入口是 `MVVCVTK/API/Host/VtkAppHostSession.h`、`MVVCVTK/SPI/Host/HostFeature.h`、`MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h`、`MVVCVTK/API/Features/GapAnalysis/Host/GapHostFeature.h`；完整的 Host API、Feature SPI、Feature 入口和物理支持闭包由同一份 CMake 映射生成。`MVVCVTKHeaderSurface.txt` 只留在构建树供发布验证使用，不进入 SDK。源码目录和仓内 include 路径保持原样；SDK staging 副本单独改写为安装态路径。Feature 产品不能访问 Host 私有 include，也不能把自身 Algorithm、Service、Router 或具体渲染策略泄漏给 consumer。`FeatureOverlayBase` 只作为仓内构建支持，不安装到 SDK；Feature SPI 也不携带 `AppTypes`、`RenderParams` 或主体 `VisualStrategy`。

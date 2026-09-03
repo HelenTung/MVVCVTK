@@ -437,6 +437,12 @@ int main()
         return 1;
     }
 
+    const HostViewTarget sceneTarget{};
+    if (session.GetSceneViewState(sceneTarget)
+        || !session.GetSceneViewStates().empty()) {
+        return 6;
+    }
+
     HostViewSetRequest viewRequest{};
     HostVolumeTransferFunction volumeTransferFunction{};
     volumeTransferFunction.colorNodes = {
