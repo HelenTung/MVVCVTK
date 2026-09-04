@@ -17,8 +17,9 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
-#include <vector>
+#include <memory>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -222,6 +223,45 @@ GapKernelRegion BuildRegion(const DefXDefectRegion& source)
     return region;
 }
 
+struct GapLabelData final {
+    ~GapLabelData() noexcept
+    {
+        analysis.ReleaseLabelImage();
+    }
+
+    DefXAnalysisService analysis;
+    vtkSmartPointer<vtkImageData> labelImage;
+    GapKernelLabelView labelView;
+};
+
+using GapLabelOwner = std::shared_ptr<GapLabelData>;
+
+void* MVVCVTK_GAP_KERNEL_CALL CloneLabelOwner(
+    const void* owner) noexcept
+{
+    if (!owner) {
+        return nullptr;
+    }
+    try {
+        const auto& source = *static_cast<const GapLabelOwner*>(owner);
+        if (!source) {
+            return nullptr;
+        }
+        auto clone = std::make_unique<GapLabelOwner>(source);
+        return clone.release();
+    }
+    catch (...) {
+        return nullptr;
+    }
+}
+
+void MVVCVTK_GAP_KERNEL_CALL ReleaseLabelOwner(
+    void* owner) noexcept
+{
+    std::unique_ptr<GapLabelOwner> release(
+        static_cast<GapLabelOwner*>(owner));
+}
+
 }
 
 extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
@@ -262,7 +302,8 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
         analysisRequest.filter.enabled = request->isFilterEnabled != 0U;
         analysisRequest.filter.minVolume = request->minVolumeMM3;
 
-        DefXAnalysisService analysis;
+        auto labelData = std::make_shared<GapLabelData>();
+        auto& analysis = labelData->analysis;
         std::cerr
             << "[GapAnalysis][DefX] started"
             << " | dims=" << request->dims[0]
@@ -287,33 +328,36 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             return 0;
         }
 
-        auto labelImage = analysis.getLabelImage();
-        if (!labelImage) {
+        labelData->labelImage = analysis.getLabelImage();
+        if (!labelData->labelImage) {
             // 供应商 import library 未导出 BuildLabelImage；factor=1 只复制并保留原标签值。
-            labelImage = analysis.BuildDownsampledLabelImage(1);
+            labelData->labelImage =
+                analysis.BuildDownsampledLabelImage(1);
         }
-        if (!labelImage || !GetGeometryValid(inputImage, labelImage)) {
-            analysis.ReleaseLabelImage();
+        if (!labelData->labelImage
+            || !GetGeometryValid(
+                inputImage,
+                labelData->labelImage)) {
             return 0;
         }
 
         const auto labelCount = static_cast<std::size_t>(
             request->voxelCount);
-        auto* scalars = labelImage->GetPointData()
-            ? labelImage->GetPointData()->GetScalars() : nullptr;
-        GapKernelLabelView labelView;
+        auto* scalars = labelData->labelImage->GetPointData()
+            ? labelData->labelImage->GetPointData()->GetScalars()
+            : nullptr;
         if (!BuildGapKernelLabelView(
                 scalars,
                 labelCount,
-                labelView)) {
-            analysis.ReleaseLabelImage();
+                labelData->labelView)) {
             return 0;
         }
         std::cerr
             << "[GapAnalysis][DefX] labels ready"
             << " | scalar=" << scalars->GetDataTypeAsString()
             << " | transfer="
-            << (labelView.GetIsBorrowed() ? "borrowed" : "converted")
+            << (labelData->labelView.GetIsBorrowed()
+                ? "borrowed" : "converted")
             << '\n' << std::flush;
 
         const auto& sourceRegions = analysis.GetDefectRegions();
@@ -332,11 +376,14 @@ extern "C" std::int32_t MVVCVTK_GAP_KERNEL_CALL BuildGapResult(
             &header,
             regions.empty() ? nullptr : regions.data(),
             static_cast<std::uint64_t>(regions.size()),
-            labelView.GetData(),
-            static_cast<std::uint64_t>(labelView.GetCount())
+            labelData->labelView.GetData(),
+            static_cast<std::uint64_t>(
+                labelData->labelView.GetCount()),
+            &labelData,
+            &CloneLabelOwner,
+            &ReleaseLabelOwner
         };
         const std::int32_t isConsumed = sink(&result, context);
-        analysis.ReleaseLabelImage();
         return isConsumed != 0 ? 1 : 0;
     }
     catch (...) {
