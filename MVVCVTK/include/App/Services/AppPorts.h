@@ -96,7 +96,7 @@ struct AppViewState final {
     WindowLevelParams windowLevel;
     WindowLevelMode windowLevelMode = WindowLevelMode::Auto;
     std::array<double, 2> scalarRange{};
-    VolumeQuality volumeQuality = VolumeQuality::Auto;
+    VolumeQuality volumeQuality = VolumeQuality::Low;
     std::vector<GradientOpacityNode> gradientOpacity;
     bool isFeatureActive = false;
     bool isDenoiseOn = false;

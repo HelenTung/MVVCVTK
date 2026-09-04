@@ -621,7 +621,7 @@ vtkProp3D* IsoSurfaceStrategy::GetMainProp()
 VolumeQuality IsoSurfaceStrategy::GetQuality() const noexcept
 {
     return m_lodController
-        ? m_lodController->GetQuality() : VolumeQuality::Auto;
+        ? m_lodController->GetQuality() : VolumeQuality::Low;
 }
 
 std::array<int, 3> IsoSurfaceStrategy::GetLodDimensions(

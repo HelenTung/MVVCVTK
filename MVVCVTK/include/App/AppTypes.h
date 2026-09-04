@@ -33,7 +33,7 @@ enum class LoadState {
     Failed      // 加载失败
 };
 
-// --- 加载事件来源枚举（用于区分文件流加载和重载加载的失败事件）--- 
+// --- 加载事件来源枚举（用于区分文件流加载和重载加载的失败事件）---
 enum class LoadEventKind {
     None,
     File,
@@ -134,7 +134,7 @@ struct RenderParams {
     VolumeTransferFunction volumeTransferFunction;
     double                 scalarRange[2] = { 0.0, 255.0 }; // 当前数据标量范围 [min, max]
     MaterialParams         material; // 当前材质快照；默认值来自 MaterialParams
-    VolumeQuality          volumeQuality = VolumeQuality::Auto;
+    VolumeQuality          volumeQuality = VolumeQuality::Low;
     std::vector<GradientOpacityNode> gradientOpacity; // 空数组表示使用 VTK 默认梯度不透明度
     bool                   isDenoiseOn = false; // true 仅在 Volume 显示 producer 前启用降噪
     double                 isoValue = 0.0; // 等值面阈值，单位与 scalarRange 相同

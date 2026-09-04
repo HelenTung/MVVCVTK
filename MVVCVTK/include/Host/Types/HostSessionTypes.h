@@ -83,7 +83,7 @@ struct HostRenderViewState final {
     std::array<double, 3> spacing{ 1.0, 1.0, 1.0 };
     HostWindowLevelParams windowLevel;
     std::array<double, 2> scalarRange{ 0.0, 0.0 };
-    HostVolumeQuality volumeQuality = HostVolumeQuality::Auto;
+    HostVolumeQuality volumeQuality = HostVolumeQuality::Low;
     bool isFeatureActive = false;
     bool isInteracting = false;
     std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };

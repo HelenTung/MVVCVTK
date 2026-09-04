@@ -61,5 +61,5 @@ private:
 
     Source m_source;
     std::array<Profile, 5> m_profiles{};
-    VolumeQuality m_quality = VolumeQuality::Auto;
+    VolumeQuality m_quality = VolumeQuality::Low;
 };

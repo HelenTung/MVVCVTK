@@ -532,6 +532,8 @@ int GetIsoLodControlFailCount()
 {
     int failureCount = 0;
     IsoLodController controller;
+    const bool isAutoQualitySet =
+        controller.SetQuality(VolumeQuality::Auto);
     IsoLodController::Source source;
     source.dimensions = { 3, 2, 1 };
     source.nativeBytes = 128ULL;
@@ -590,7 +592,8 @@ int GetIsoLodControlFailCount()
     const bool isInvalidQualityRejected =
         !controller.SetQuality(static_cast<VolumeQuality>(99));
     failureCount += GetCaseResult(
-        isOverflowRejected
+        isAutoQualitySet
+            && isOverflowRejected
             && isInvalidQualityRejected
             && controller.GetProfile(VolumeQuality::Ultra).outputDimensions
                 == stableProfile.outputDimensions
@@ -612,6 +615,14 @@ int GetRenderContractFailCount()
     failureCount += GetCaseResult(
         configuredQualities.size() == 5,
         "Volume quality exposes Auto through strict native Ultra") ? 0 : 1;
+
+    // 这些用例验证 Auto 的原生输入与缓存语义，显式设置质量，
+    // 避免把策略的产品默认档误当成测试前置条件。
+    const auto setAutoQuality = [](VolumeStrategy& strategy) {
+        RenderParams params;
+        params.volumeQuality = VolumeQuality::Auto;
+        return strategy.SetVisualState(params, UpdateFlags::Quality);
+    };
 
     auto eventSource = std::make_shared<SharedStateBroadcaster>();
     auto appState = std::make_shared<SharedInteractionState>(
@@ -716,6 +727,7 @@ int GetRenderContractFailCount()
     dimensionImage->SetDimensions(1200, 1, 1);
     dimensionImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     VolumeStrategy dimensionStrategy;
+    const bool isDimensionAutoSet = setAutoQuality(dimensionStrategy);
     const bool isDimensionInputSet = dimensionStrategy.SetInputData(
         dimensionImage, nullptr);
     auto* dimensionVolume = vtkVolume::SafeDownCast(
@@ -793,7 +805,8 @@ int GetRenderContractFailCount()
                     - maximumImageDistance) < 1e-12;
     }
     failureCount += GetCaseResult(
-        isDimensionInputSet
+        isDimensionAutoSet
+            && isDimensionInputSet
             && areQualityProfilesSet
             && dimensionPlanCount == 1
             && dimensionStrategy.GetLodPlanCount()
@@ -1184,6 +1197,7 @@ int GetRenderContractFailCount()
         cacheMaskScalars[index] = index % 2 == 0 ? 0 : 255;
     }
     VolumeStrategy cacheStrategy;
+    const bool isCacheAutoSet = setAutoQuality(cacheStrategy);
     const bool isCacheInputSet = cacheStrategy.SetInputData(
         dimensionImage, cacheMask);
     auto* cacheVolume = vtkVolume::SafeDownCast(
@@ -1223,7 +1237,8 @@ int GetRenderContractFailCount()
                 || qualityMaskScalars[index] == 255);
     }
     const bool isQualityStable =
-        isCacheInputSet
+        isCacheAutoSet
+        && isCacheInputSet
         && cacheMapper
         && qualityInput
         && qualityMask
@@ -1251,11 +1266,13 @@ int GetRenderContractFailCount()
             < 1e-12
         && cacheMapper->GetUseJittering() != 0;
     RenderParams cacheParams;
+    cacheParams.volumeQuality = VolumeQuality::Auto;
     cacheParams.isFeatureActive = true;
-    cacheStrategy.SetVisualState(
+    const bool isFeatureCacheSet = cacheStrategy.SetVisualState(
         cacheParams, UpdateFlags::Quality);
     const bool isFeatureCacheReused =
-        cacheMapper
+        isFeatureCacheSet
+        && cacheMapper
         && cacheMapper->GetInputConnection(0, 0)
             == qualityInput.GetPointer()
         && cacheMapper->GetMaskInput()
@@ -1281,6 +1298,7 @@ int GetRenderContractFailCount()
         "Auto commits volume and mask once without rebuilding its plan") ? 0 : 1;
 
     VolumeStrategy retryStrategy;
+    const bool isRetryAutoSet = setAutoQuality(retryStrategy);
     retryStrategy.SetInputData(dimensionImage);
     auto* retryVolume = vtkVolume::SafeDownCast(
         retryStrategy.GetMainProp());
@@ -1301,7 +1319,8 @@ int GetRenderContractFailCount()
     retryStrategy.SetInputData(retryImage);
     const int retryDimension = getMaxDimension(retryMapper);
     failureCount += GetCaseResult(
-        isFailedInputPreserved
+        isRetryAutoSet
+            && isFailedInputPreserved
             && retryMapper->GetInputConnection(0, 0)
                 != oldRetryInput.GetPointer()
             && retryDimension == 8,
@@ -1312,6 +1331,7 @@ int GetRenderContractFailCount()
     keyImage->SetSpacing(1.0, 1.0, 1.0);
     keyImage->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
     VolumeStrategy keyStrategy;
+    const bool isKeyAutoSet = setAutoQuality(keyStrategy);
     keyStrategy.SetInputData(keyImage);
     auto* keyVolume = vtkVolume::SafeDownCast(
         keyStrategy.GetMainProp());
@@ -1396,7 +1416,8 @@ int GetRenderContractFailCount()
     auto* failedClearMask =
         keyMapper ? keyMapper->GetMaskInput() : nullptr;
     failureCount += GetCaseResult(
-        isSpacingKeyUpdated
+        isKeyAutoSet
+            && isSpacingKeyUpdated
             && isDataKeyUpdated
             && isExtentKeyUpdated
             && firstKeyMask
@@ -2794,6 +2815,7 @@ int GetRenderContractFailCount()
     const RoiStats inputStats = GetRoiStats(noisyImage);
 
     VolumeStrategy denoiseStrategy;
+    const bool isDenoiseAutoSet = setAutoQuality(denoiseStrategy);
     denoiseStrategy.SetInputData(noisyImage);
     denoiseStrategy.SetInputMask(maskImage);
     auto* denoiseVolume = vtkVolume::SafeDownCast(
@@ -2836,23 +2858,25 @@ int GetRenderContractFailCount()
         [](double left, double right) {
             return std::abs(left - right) < 1e-9;
         });
-    const bool isDenoiseValid = denoisedImage
-            && denoisedGeometry[0] == denoiseDims[0]
-            && denoisedGeometry[1] == denoiseDims[1]
-            && denoisedGeometry[2] == denoiseDims[2]
-            && hasSameBounds
-            && denoiseVolume->GetMapper() == mapperIdentity
-            && denoiseMapper->GetInputConnection(0, 0)
-                != imageBeforeDenoise.GetPointer()
-            && maskBeforeDenoise
-            && denoiseMapper->GetMaskInput()
-            && denoisedStats.leftVariance
-                <= inputStats.leftVariance * 0.8
-            && denoisedStats.rightVariance
-                <= inputStats.rightVariance * 0.8
-            && denoisedContrast >= inputContrast * 0.9
-            && noisyImage->GetScalarRange()[0] == inputRange[0]
-            && noisyImage->GetScalarRange()[1] == inputRange[1];
+    const bool isDenoiseValid =
+        isDenoiseAutoSet
+        && denoisedImage
+        && denoisedGeometry[0] == denoiseDims[0]
+        && denoisedGeometry[1] == denoiseDims[1]
+        && denoisedGeometry[2] == denoiseDims[2]
+        && hasSameBounds
+        && denoiseVolume->GetMapper() == mapperIdentity
+        && denoiseMapper->GetInputConnection(0, 0)
+            != imageBeforeDenoise.GetPointer()
+        && maskBeforeDenoise
+        && denoiseMapper->GetMaskInput()
+        && denoisedStats.leftVariance
+            <= inputStats.leftVariance * 0.8
+        && denoisedStats.rightVariance
+            <= inputStats.rightVariance * 0.8
+        && denoisedContrast >= inputContrast * 0.9
+        && noisyImage->GetScalarRange()[0] == inputRange[0]
+        && noisyImage->GetScalarRange()[1] == inputRange[1];
     if (!isDenoiseValid) {
         std::cerr
             << "DIAG_LAZY_DENOISE: image="
