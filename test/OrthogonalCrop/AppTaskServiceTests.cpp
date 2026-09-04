@@ -28,6 +28,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -46,6 +47,8 @@
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkImageData.h>
+#include <vtkImageReslice.h>
+#include <vtkMatrix3x3.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOBJReader.h>
 #include <vtkPNGReader.h>
@@ -56,6 +59,7 @@
 #include <vtkRenderWindow.h>
 #include <vtkSTLReader.h>
 #include <vtkTriangleFilter.h>
+#include <vtkTransform.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkVolume.h>
 #include <vtkVolumeProperty.h>
@@ -1116,22 +1120,99 @@ void StartExportFiles(int& failureCount)
         }
     }
     partialState->validityMask = partialMask;
-    const bool isPartialSaved = dataManager.ExportData(
-        partialState, outputDir.u8string(), params);
+    const auto partialPlyDir = outputDir / "partial-ply";
+    const auto partialPlyPath =
+        partialPlyDir / "4x4x4_transform.ply";
+    const bool isPartialPlySaved = dataManager.ExportData(
+        partialState, partialPlyDir.u8string(), params);
     auto partialReader =
         vtkSmartPointer<vtkPLYReader>::New();
     partialReader->SetFileName(
-        plyPath.u8string().c_str());
+        partialPlyPath.u8string().c_str());
     partialReader->Update();
     vtkPolyData* partialMesh = partialReader->GetOutput();
+
+    params.extension = ".stl";
+    const auto partialStlDir = outputDir / "partial-stl";
+    const auto partialStlPath =
+        partialStlDir / "4x4x4_transform.stl";
+    const bool isPartialStlSaved = dataManager.ExportData(
+        partialState, partialStlDir.u8string(), params);
+    auto partialStlReader =
+        vtkSmartPointer<vtkSTLReader>::New();
+    partialStlReader->SetFileName(
+        partialStlPath.u8string().c_str());
+    partialStlReader->Update();
+    vtkPolyData* partialStlMesh =
+        partialStlReader->GetOutput();
+
+    params.extension = ".obj";
+    const auto partialObjDir = outputDir / "partial-obj";
+    const auto partialObjPath =
+        partialObjDir / "4x4x4_transform.obj";
+    const bool isPartialObjSaved = dataManager.ExportData(
+        partialState, partialObjDir.u8string(), params);
+    auto partialObjReader =
+        vtkSmartPointer<vtkOBJReader>::New();
+    partialObjReader->SetFileName(
+        partialObjPath.u8string().c_str());
+    partialObjReader->Update();
+    vtkPolyData* partialObjMesh =
+        partialObjReader->GetOutput();
     SetExpect(
-        isPartialSaved && partialMesh
+        isPartialPlySaved
+            && std::filesystem::exists(partialPlyPath)
+            && partialMesh
             && partialMesh->GetNumberOfCells() > 0
             && plyMesh
             && partialMesh->GetNumberOfCells()
-                < plyMesh->GetNumberOfCells(),
-        "a partial validity mask should reduce the exported mesh",
+                < plyMesh->GetNumberOfCells()
+            && isPartialStlSaved
+            && std::filesystem::exists(partialStlPath)
+            && partialStlMesh
+            && partialStlMesh->GetNumberOfCells() > 0
+            && stlMesh
+            && partialStlMesh->GetNumberOfCells()
+                < stlMesh->GetNumberOfCells()
+            && isPartialObjSaved
+            && std::filesystem::exists(partialObjPath)
+            && partialObjMesh
+            && partialObjMesh->GetNumberOfCells() > 0
+            && objMesh
+            && partialObjMesh->GetNumberOfCells()
+                < objMesh->GetNumberOfCells(),
+        "a partial validity mask should reduce every exported mesh format",
         failureCount);
+
+    params.extension = ".raw";
+    const auto partialRawDir = outputDir / "partial-raw";
+    const bool isMaskedRawSaved = dataManager.ExportData(
+        partialState, partialRawDir.u8string(), params);
+    const auto rawPath =
+        partialRawDir / "4x4x4_transform.raw";
+    std::array<float, 64> rawValues = {};
+    std::ifstream rawFile(rawPath, std::ios::binary);
+    rawFile.read(
+        reinterpret_cast<char*>(rawValues.data()),
+        static_cast<std::streamsize>(
+            rawValues.size() * sizeof(float)));
+    const std::streamsize rawBytes = rawFile.gcount();
+    rawFile.close();
+    std::error_code rawSizeError;
+    const auto rawSize = std::filesystem::file_size(
+        rawPath, rawSizeError);
+    SetExpect(
+        isMaskedRawSaved
+            && !rawSizeError
+            && rawSize == rawValues.size() * sizeof(float)
+            && rawBytes
+                == static_cast<std::streamsize>(
+                    rawValues.size() * sizeof(float))
+            && rawValues[1] == 0.0f
+            && rawValues[2] == 2.0f,
+        "RAW export should write masked voxels as background",
+        failureCount);
+    params.extension = ".ply";
 
     auto mismatchState =
         std::make_shared<TrustedImageState>(*snapshot);
@@ -1170,6 +1251,200 @@ void StartExportFiles(int& failureCount)
 
     std::filesystem::remove_all(
         outputDir, error);
+}
+
+void StartTransformedMaskedRaw(int& failureCount)
+{
+    // 生产路径不物化输出 mask；此处仅对小体数据用 VTK nearest
+    // 生成独立参考结果，核对非零 extent、direction 和 affine 变换。
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetExtent(5, 8, -2, 1, 10, 12);
+    image->SetOrigin(3.25, -4.5, 2.75);
+    image->SetSpacing(0.7, 1.1, 1.3);
+    const double direction[9] = {
+        0.0, -1.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    image->SetDirectionMatrix(direction);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    int imageExtent[6] = {};
+    image->GetExtent(imageExtent);
+    for (int z = imageExtent[4]; z <= imageExtent[5]; ++z) {
+        for (int y = imageExtent[2]; y <= imageExtent[3]; ++y) {
+            for (int x = imageExtent[0]; x <= imageExtent[1]; ++x) {
+                const float value = static_cast<float>(
+                    100 * (z - imageExtent[4])
+                    + 10 * (y - imageExtent[2])
+                    + (x - imageExtent[0]));
+                image->SetScalarComponentFromFloat(
+                    x, y, z, 0, value);
+            }
+        }
+    }
+
+    DataManagerProbe dataManager;
+    const bool isInitialSet = dataManager.SetInitial(image);
+    const auto sourceSnapshot = dataManager.GetSnapshot();
+    auto maskedState = sourceSnapshot
+        ? std::make_shared<TrustedImageState>(*sourceSnapshot)
+        : nullptr;
+    auto mask = vtkSmartPointer<vtkImageData>::New();
+    mask->CopyStructure(image);
+    mask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    for (int z = imageExtent[4]; z <= imageExtent[5]; ++z) {
+        for (int y = imageExtent[2]; y <= imageExtent[3]; ++y) {
+            for (int x = imageExtent[0]; x <= imageExtent[1]; ++x) {
+                const int ordinal = x - imageExtent[0]
+                    + 2 * (y - imageExtent[2])
+                    + 3 * (z - imageExtent[4]);
+                auto* maskValue = static_cast<unsigned char*>(
+                    mask->GetScalarPointer(x, y, z));
+                *maskValue = ordinal % 4 == 0
+                    ? static_cast<unsigned char>(0)
+                    : static_cast<unsigned char>(255);
+            }
+        }
+    }
+    if (maskedState) {
+        maskedState->validityMask = mask;
+    }
+
+    constexpr double radians = 0.37;
+    const double cosine = std::cos(radians);
+    const double sine = std::sin(radians);
+    const std::array<double, 16> modelToWorld = {
+        cosine, -sine, 0.0, 7.0,
+        sine, cosine, 0.0, -3.0,
+        0.0, 0.0, 1.0, 5.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    auto worldToModelMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
+    worldToModelMatrix->DeepCopy(modelToWorld.data());
+    worldToModelMatrix->Invert();
+    auto worldToModelTransform = vtkSmartPointer<vtkTransform>::New();
+    worldToModelTransform->SetMatrix(worldToModelMatrix);
+
+    double scalarRange[2] = {};
+    image->GetScalarRange(scalarRange);
+    auto referenceImageReslice =
+        vtkSmartPointer<vtkImageReslice>::New();
+    referenceImageReslice->SetInputData(image);
+    referenceImageReslice->SetResliceTransform(
+        worldToModelTransform);
+    referenceImageReslice->SetInterpolationModeToLinear();
+    referenceImageReslice->SetOutputDimensionality(3);
+    referenceImageReslice->SetAutoCropOutput(true);
+    referenceImageReslice->SetBackgroundLevel(scalarRange[0]);
+    referenceImageReslice->Update();
+    vtkImageData* referenceImage =
+        referenceImageReslice->GetOutput();
+
+    auto referenceMaskReslice =
+        vtkSmartPointer<vtkImageReslice>::New();
+    referenceMaskReslice->SetInputData(mask);
+    referenceMaskReslice->SetResliceTransform(
+        worldToModelTransform);
+    referenceMaskReslice->SetInterpolationModeToNearestNeighbor();
+    referenceMaskReslice->SetOutputDimensionality(3);
+    referenceMaskReslice->SetBackgroundLevel(0.0);
+    if (referenceImage) {
+        referenceMaskReslice->SetOutputOrigin(
+            referenceImage->GetOrigin());
+        referenceMaskReslice->SetOutputSpacing(
+            referenceImage->GetSpacing());
+        referenceMaskReslice->SetOutputDirection(
+            referenceImage->GetDirectionMatrix()->GetData());
+        referenceMaskReslice->SetOutputExtent(
+            referenceImage->GetExtent());
+    }
+    referenceMaskReslice->Update();
+    vtkImageData* referenceMask =
+        referenceMaskReslice->GetOutput();
+
+    int outputDimensions[3] = {};
+    int outputExtent[6] = {};
+    if (referenceImage) {
+        referenceImage->GetDimensions(outputDimensions);
+        referenceImage->GetExtent(outputExtent);
+    }
+    const std::size_t outputVoxelCount =
+        outputDimensions[0] > 0
+            && outputDimensions[1] > 0
+            && outputDimensions[2] > 0
+        ? static_cast<std::size_t>(outputDimensions[0])
+            * static_cast<std::size_t>(outputDimensions[1])
+            * static_cast<std::size_t>(outputDimensions[2])
+        : 0;
+    const auto uniqueId = std::chrono::steady_clock::now()
+        .time_since_epoch().count();
+    const auto outputDir = std::filesystem::temp_directory_path()
+        / "MVVCVTK_transformed_masked_raw"
+        / std::to_string(uniqueId);
+    DataExportParams params;
+    params.extension = ".raw";
+    params.modelToWorld = modelToWorld;
+    const bool isSaved = maskedState
+        && dataManager.ExportData(
+            maskedState, outputDir.u8string(), params);
+    const auto outputPath = outputDir
+        / (std::to_string(outputDimensions[0]) + "x"
+            + std::to_string(outputDimensions[1]) + "x"
+            + std::to_string(outputDimensions[2])
+            + "_transform.raw");
+
+    std::vector<float> actualValues(outputVoxelCount);
+    std::ifstream rawFile(outputPath, std::ios::binary);
+    rawFile.read(
+        reinterpret_cast<char*>(actualValues.data()),
+        static_cast<std::streamsize>(
+            actualValues.size() * sizeof(float)));
+    const std::streamsize actualBytes = rawFile.gcount();
+    rawFile.close();
+    std::error_code sizeError;
+    const auto actualSize = std::filesystem::file_size(
+        outputPath, sizeError);
+
+    bool isContentMatched = referenceImage && referenceMask
+        && outputVoxelCount > 0;
+    bool hasValidVoxel = false;
+    bool hasInvalidVoxel = false;
+    std::size_t linearIndex = 0;
+    constexpr float tolerance = 1e-5f;
+    for (int z = outputExtent[4];
+        isContentMatched && z <= outputExtent[5]; ++z) {
+        for (int y = outputExtent[2];
+            isContentMatched && y <= outputExtent[3]; ++y) {
+            for (int x = outputExtent[0];
+                isContentMatched && x <= outputExtent[1]; ++x) {
+                const bool isValid = referenceMask
+                    ->GetScalarComponentAsDouble(x, y, z, 0) != 0.0;
+                const float expectedValue = isValid
+                    ? static_cast<float>(referenceImage
+                        ->GetScalarComponentAsDouble(x, y, z, 0))
+                    : static_cast<float>(scalarRange[0]);
+                hasValidVoxel = hasValidVoxel || isValid;
+                hasInvalidVoxel = hasInvalidVoxel || !isValid;
+                isContentMatched = linearIndex < actualValues.size()
+                    && std::abs(
+                        actualValues[linearIndex] - expectedValue)
+                        <= tolerance;
+                ++linearIndex;
+            }
+        }
+    }
+    SetExpect(
+        isInitialSet && isSaved && !sizeError
+            && actualSize == outputVoxelCount * sizeof(float)
+            && actualBytes == static_cast<std::streamsize>(
+                outputVoxelCount * sizeof(float))
+            && linearIndex == outputVoxelCount
+            && hasValidVoxel && hasInvalidVoxel
+            && isContentMatched,
+        "transformed RAW mask sampling should match VTK nearest reslicing",
+        failureCount);
+    std::error_code removeError;
+    std::filesystem::remove_all(outputDir, removeError);
 }
 
 void StartStateGate(int& failureCount)
@@ -2980,6 +3255,7 @@ int AppTaskSuite::GetFailCount() const
     StartExportSnapshot(failureCount);
     StartBoundedTasks(failureCount);
     StartExportFiles(failureCount);
+    StartTransformedMaskedRaw(failureCount);
     StartStateGate(failureCount);
     StartObserverGate(failureCount);
     StartCandidateParams(failureCount);

@@ -1454,8 +1454,8 @@ bool BaseDataManager::Impl::ExportRaw(
     const std::array<double, 16>& modelToWorldMatrix,
     const TaskStopToken& stopToken)
 {
-    // RAW 导出路径：固定接纳时的 immutable snapshot -> 逆变换重采样 -> 自动裁剪新 bounds ->
-    // 按 VTK increments 逐行剥离 padding，最终写出无头、X-fast 的 float32 数据。
+    // RAW 导出路径：固定接纳时的 immutable image/mask -> 逆变换到同一输出网格 ->
+    // 把无效体素物化为背景值 -> 按 VTK increments 写出无头、X-fast 的 float32 数据。
     if (!imageSnapshot || !imageSnapshot->image
         || outputDir.empty() || stopToken.GetIsStopped()) {
         return false;
@@ -1483,7 +1483,7 @@ bool BaseDataManager::Impl::ExportRaw(
     reslice->SetOutputDimensionality(3);
 
     reslice->SetAutoCropOutput(true);
-    double range[2];
+    double range[2] = {};
     imageCopy->GetScalarRange(range);
     reslice->SetBackgroundLevel(range[0]); // 取真实的最小标量值
 
@@ -1508,16 +1508,91 @@ bool BaseDataManager::Impl::ExportRaw(
         || outputImage->GetNumberOfScalarComponents() != 1) {
         return false;
     }
-    int newDims[3];
+    int newDims[3] = {};
     outputImage->GetDimensions(newDims);
-    float* outDataPtr = static_cast<float*>(outputImage->GetScalarPointer());
+    if (newDims[0] <= 0 || newDims[1] <= 0 || newDims[2] <= 0) {
+        return false;
+    }
+    int outputExtent[6] = {};
+    outputImage->GetExtent(outputExtent);
+    auto* outDataPtr = static_cast<float*>(
+        outputImage->GetScalarPointer(
+            outputExtent[0], outputExtent[2], outputExtent[4]));
 
     if (!outDataPtr) {
         return false;
     }
 
-    vtkIdType incs[3];
+    vtkIdType incs[3] = {};
     outputImage->GetIncrements(incs);
+
+    const bool hasMask = imageSnapshot->validityMask != nullptr;
+    const unsigned char* maskDataPtr = nullptr;
+    int maskExtent[6] = {};
+    vtkIdType maskIncs[3] = {};
+    std::array<double, 3> maskStart = {};
+    std::array<double, 3> maskStepX = {};
+    std::array<double, 3> maskStepY = {};
+    std::array<double, 3> maskStepZ = {};
+    constexpr double maskRoundTolerance =
+        7.62939453125e-06; // 与 VTK 9.4 nearest interpolator 的 2^-17 容差一致。
+    const float backgroundValue = static_cast<float>(range[0]);
+    if (hasMask) {
+        const auto* outputIndexToPhysical =
+            outputImage->GetIndexToPhysicalMatrix();
+        const auto* maskPhysicalToIndex =
+            imageSnapshot->validityMask->GetPhysicalToIndexMatrix();
+        if (!outputIndexToPhysical || !maskPhysicalToIndex) {
+            return false;
+        }
+
+        auto outputIndexToModel =
+            vtkSmartPointer<vtkMatrix4x4>::New();
+        auto outputIndexToMask =
+            vtkSmartPointer<vtkMatrix4x4>::New();
+        vtkMatrix4x4::Multiply4x4(
+            worldToModelMatrix,
+            outputIndexToPhysical,
+            outputIndexToModel);
+        vtkMatrix4x4::Multiply4x4(
+            maskPhysicalToIndex,
+            outputIndexToModel,
+            outputIndexToMask);
+        for (int row = 0; row < 4; ++row) {
+            for (int column = 0; column < 4; ++column) {
+                if (!std::isfinite(
+                        outputIndexToMask->GetElement(
+                            row, column))) {
+                    return false;
+                }
+            }
+        }
+
+        imageSnapshot->validityMask->GetExtent(maskExtent);
+        imageSnapshot->validityMask->GetIncrements(maskIncs);
+        maskDataPtr = static_cast<const unsigned char*>(
+            imageSnapshot->validityMask->GetScalarPointer(
+                maskExtent[0], maskExtent[2], maskExtent[4]));
+        if (!maskDataPtr) {
+            return false;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            maskStart[static_cast<std::size_t>(axis)] =
+                outputIndexToMask->GetElement(axis, 0)
+                    * static_cast<double>(outputExtent[0])
+                + outputIndexToMask->GetElement(axis, 1)
+                    * static_cast<double>(outputExtent[2])
+                + outputIndexToMask->GetElement(axis, 2)
+                    * static_cast<double>(outputExtent[4])
+                + outputIndexToMask->GetElement(axis, 3);
+            maskStepX[static_cast<std::size_t>(axis)] =
+                outputIndexToMask->GetElement(axis, 0);
+            maskStepY[static_cast<std::size_t>(axis)] =
+                outputIndexToMask->GetElement(axis, 1);
+            maskStepZ[static_cast<std::size_t>(axis)] =
+                outputIndexToMask->GetElement(axis, 2);
+        }
+    }
 
     const auto finalPath = BuildExportPath(
         outputDir, newDims, ".raw");
@@ -1540,6 +1615,61 @@ bool BaseDataManager::Impl::ExportRaw(
             if (stopToken.GetIsStopped()) return false;
             // 利用真实步长计算出当前行准确的内存起始地址
             float* rowPtr = outDataPtr + z * incs[2] + y * incs[1];
+            if (hasMask) {
+                std::array<double, 3> maskIndex = {};
+                for (std::size_t axis = 0; axis < 3; ++axis) {
+                    maskIndex[axis] = maskStart[axis]
+                        + static_cast<double>(y) * maskStepY[axis]
+                        + static_cast<double>(z) * maskStepZ[axis];
+                }
+                for (int x = 0; x < newDims[0]; ++x) {
+                    bool isValid = true;
+                    int sourceIndex[3] = {};
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        const int extentOffset =
+                            static_cast<int>(axis) * 2;
+                        const double value = maskIndex[axis];
+                        const double minValue = static_cast<double>(
+                            maskExtent[extentOffset]) - 0.5;
+                        const double maxValue = static_cast<double>(
+                            maskExtent[extentOffset + 1]) + 0.5;
+                        if (!std::isfinite(value)
+                            || value < minValue
+                            || value > maxValue) {
+                            isValid = false;
+                            break;
+                        }
+                        const double roundedValue = std::floor(
+                            value + 0.5 + maskRoundTolerance);
+                        sourceIndex[axis] = static_cast<int>(
+                            std::clamp(
+                                roundedValue,
+                                static_cast<double>(
+                                    maskExtent[extentOffset]),
+                                static_cast<double>(
+                                    maskExtent[extentOffset + 1])));
+                    }
+                    if (isValid) {
+                        const vtkIdType maskOffset =
+                            static_cast<vtkIdType>(
+                                sourceIndex[0] - maskExtent[0])
+                                * maskIncs[0]
+                            + static_cast<vtkIdType>(
+                                sourceIndex[1] - maskExtent[2])
+                                * maskIncs[1]
+                            + static_cast<vtkIdType>(
+                                sourceIndex[2] - maskExtent[4])
+                                * maskIncs[2];
+                        isValid = maskDataPtr[maskOffset] != 0;
+                    }
+                    if (!isValid) {
+                        rowPtr[x * incs[0]] = backgroundValue;
+                    }
+                    for (std::size_t axis = 0; axis < 3; ++axis) {
+                        maskIndex[axis] += maskStepX[axis];
+                    }
+                }
+            }
             // 每次只写入当前行真正有效的数据宽度（摒弃行尾的 Padding）
             rawFile.write(reinterpret_cast<const char*>(rowPtr), rowBytes);
             if (!rawFile) {

@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <string>
@@ -1257,6 +1258,82 @@ int GetCropFailCount()
             + "_transform.raw");
     const bool hasExportFile =
         std::filesystem::exists(exportPath);
+    const std::size_t exportVoxelCount =
+        exportDimensions[0] > 0
+        && exportDimensions[1] > 0
+        && exportDimensions[2] > 0
+        ? static_cast<std::size_t>(exportDimensions[0])
+            * static_cast<std::size_t>(exportDimensions[1])
+            * static_cast<std::size_t>(exportDimensions[2])
+        : 0;
+    std::vector<float> exportedValues(exportVoxelCount);
+    std::ifstream exportFile(exportPath, std::ios::binary);
+    exportFile.read(
+        reinterpret_cast<char*>(exportedValues.data()),
+        static_cast<std::streamsize>(
+            exportedValues.size() * sizeof(float)));
+    const std::streamsize exportedBytes = exportFile.gcount();
+    exportFile.close();
+    std::error_code exportSizeError;
+    const auto exportedSize = std::filesystem::file_size(
+        exportPath, exportSizeError);
+
+    bool hasCroppedRawContent = false;
+    if (cropSnapshot
+        && cropSnapshot->image
+        && cropSnapshot->validityMask
+        && !exportSizeError
+        && exportedSize
+            == exportedValues.size() * sizeof(float)
+        && exportedBytes
+            == static_cast<std::streamsize>(
+                exportedValues.size() * sizeof(float))) {
+        int extent[6] = {};
+        double scalarRange[2] = {};
+        cropSnapshot->image->GetExtent(extent);
+        cropSnapshot->image->GetScalarRange(scalarRange);
+        std::size_t invalidIndex = exportVoxelCount;
+        std::size_t validIndex = exportVoxelCount;
+        float validValue = 0.0f;
+        std::size_t linearIndex = 0;
+        // 此用例从未改变 Host model matrix，因此 RAW 网格与
+        // crop snapshot 网格一致；另选原值非背景的无效体素，避免假阳性。
+        for (int z = extent[4]; z <= extent[5]; ++z) {
+            for (int y = extent[2]; y <= extent[3]; ++y) {
+                for (int x = extent[0]; x <= extent[1]; ++x) {
+                    const double maskValue = cropSnapshot
+                        ->validityMask->GetScalarComponentAsDouble(
+                            x, y, z, 0);
+                    const double imageValue = cropSnapshot
+                        ->image->GetScalarComponentAsDouble(
+                            x, y, z, 0);
+                    if (invalidIndex == exportVoxelCount
+                        && maskValue == 0.0
+                        && imageValue != scalarRange[0]) {
+                        invalidIndex = linearIndex;
+                    }
+                    if (validIndex == exportVoxelCount
+                        && maskValue != 0.0) {
+                        validIndex = linearIndex;
+                        validValue = static_cast<float>(imageValue);
+                    }
+                    ++linearIndex;
+                }
+            }
+        }
+        constexpr float tolerance = 1e-5f;
+        hasCroppedRawContent =
+            invalidIndex < exportedValues.size()
+            && validIndex < exportedValues.size()
+            && std::abs(
+                exportedValues[invalidIndex]
+                    - static_cast<float>(scalarRange[0]))
+                <= tolerance
+            && std::abs(
+                exportedValues[validIndex] - validValue)
+                <= tolerance
+            && linearIndex == exportedValues.size();
+    }
     failureCount += GetCaseResult(
         publishCompleteCount == 1
             && publishResult.isSucceeded
@@ -1265,6 +1342,9 @@ int GetCropFailCount()
             && isExportSucceeded
             && hasExportFile,
         "Crop BuildResult publishes image before independent Host data export") ? 0 : 1;
+    failureCount += GetCaseResult(
+        hasCroppedRawContent,
+        "Host RAW export materializes the published Crop validity mask") ? 0 : 1;
     std::error_code removeError;
     std::filesystem::remove_all(
         exportDir, removeError);
