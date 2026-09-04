@@ -1962,7 +1962,7 @@ const bool isGapExited =
 **返回值：**
 
 - `true`：请求已接纳且 worker 线程已创建；不代表 runtime、分析或 overlay 已成功。
-- `false`：Feature、线程、输入快照、目标、参数或当前会话状态无效；非空 validity mask 也会被拒绝，因为当前供应商内核没有对应输入。
+- `false`：Feature、线程、输入快照、目标、参数或当前会话状态无效。裁切 validity mask 会在 Feature 私有 float 输入中以有效体素最小值填充后再送入 DefX。
 
 **按数据范围比例启动：**
 

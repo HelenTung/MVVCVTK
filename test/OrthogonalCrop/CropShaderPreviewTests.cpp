@@ -809,6 +809,7 @@ struct SliceTestView final {
         capture->SetInput(m_renderWindow);
         capture->SetInputBufferTypeToRGB();
         capture->ReadFrontBufferOff();
+        capture->ShouldRerenderOff();
         capture->Update();
         for (const auto& modelPoint : modelPoints) {
             if (!GetPointBright(capture->GetOutput(), modelPoint)) {
@@ -830,6 +831,7 @@ struct SliceTestView final {
         capture->SetInput(m_renderWindow);
         capture->SetInputBufferTypeToRGB();
         capture->ReadFrontBufferOff();
+        capture->ShouldRerenderOff();
         capture->Update();
         for (const auto& modelPoint : modelPoints) {
             const bool isGpuKept = GetPointBright(capture->GetOutput(), modelPoint);
@@ -953,6 +955,7 @@ bool StartSliceCoordinateCase()
         static_cast<float*>(image->GetScalarPointer()),
         image->GetNumberOfPoints(),
         1.0f);
+    image->SetScalarComponentFromFloat(2, -3, 5, 0, 0.0f);
 
     auto validityMask = vtkSmartPointer<vtkImageData>::New();
     validityMask->CopyStructure(image);
@@ -961,6 +964,23 @@ bool StartSliceCoordinateCase()
         static_cast<unsigned char*>(validityMask->GetScalarPointer()),
         validityMask->GetNumberOfPoints(),
         static_cast<unsigned char>(1));
+    auto samplingMask = vtkSmartPointer<vtkImageData>::New();
+    samplingMask->CopyStructure(image);
+    samplingMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    const int* samplingExtent = samplingMask->GetExtent();
+    for (int z = samplingExtent[4]; z <= samplingExtent[5]; ++z) {
+        for (int y = samplingExtent[2]; y <= samplingExtent[3]; ++y) {
+            for (int x = samplingExtent[0]; x <= samplingExtent[1]; ++x) {
+                const int relativeSum =
+                    (x - samplingExtent[0])
+                    + (y - samplingExtent[2])
+                    + (z - samplingExtent[4]);
+                samplingMask->SetScalarComponentFromFloat(
+                    x, y, z, 0,
+                    relativeSum % 3 == 0 ? 0.0f : 1.0f);
+            }
+        }
+    }
 
     double inputBounds[6] = {};
     image->GetBounds(inputBounds);
@@ -1027,7 +1047,7 @@ bool StartSliceCoordinateCase()
         view.m_inputToWorld = inputToWorld;
         view.m_name = sliceCase.m_name;
         view.m_strategy->SetInputData(image);
-        view.m_strategy->SetInputMask(validityMask);
+        view.m_strategy->SetInputMask(samplingMask);
         isPassed = view.m_strategy->SetRenderInputStamp(
             { &inputIdentity, 1 }) && isPassed;
         isPassed = view.m_strategy->AttachRenderEffect(
@@ -1054,7 +1074,39 @@ bool StartSliceCoordinateCase()
                 | UpdateFlags::WindowLevel | UpdateFlags::Visibility);
         view.m_renderer->ResetCamera();
         view.m_renderWindow->Render();
-        isPassed = view.GetBaselineMatched(sliceCase.m_modelPoints) && isPassed;
+        const auto samplingDimensions =
+            view.m_strategy->GetMaskWorkingDimensions();
+        const bool isSamplingValid = samplingDimensions[0] > 0
+            && samplingDimensions[1] > 0
+            && samplingDimensions[2] == 1
+            && view.m_strategy->GetMaskWorkingPixelsValid();
+        if (!isSamplingValid) {
+            std::cerr << sliceCase.m_name
+                << " patterned mask diagnostics failed\n";
+        }
+        isPassed = isSamplingValid && isPassed;
+
+        // 替换同几何 mask 后必须在下一帧重建二维输出；后续 effect oracle 使用全有效 mask。
+        view.m_strategy->SetInputMask(validityMask);
+        view.m_renderWindow->Render();
+        const auto maskWorkingDimensions =
+            view.m_strategy->GetMaskWorkingDimensions();
+        const bool isReplacementValid = maskWorkingDimensions[0] > 0
+            && maskWorkingDimensions[1] > 0
+            && maskWorkingDimensions[2] == 1
+            && view.m_strategy->GetMaskWorkingPixelsValid();
+        if (!isReplacementValid) {
+            std::cerr << sliceCase.m_name
+                << " replacement mask diagnostics failed\n";
+        }
+        isPassed = isReplacementValid && isPassed;
+        const bool isBaselineMatched =
+            view.GetBaselineMatched(sliceCase.m_modelPoints);
+        if (!isBaselineMatched) {
+            std::cerr << sliceCase.m_name
+                << " baseline pixels failed\n";
+        }
+        isPassed = isBaselineMatched && isPassed;
         views.push_back(std::move(view));
     }
 

@@ -13,8 +13,6 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkRenderer.h>
 
-class vtkImageMask;
-
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
 class SliceStrategy : public BaseVisualStrategy {
@@ -30,6 +28,10 @@ public:
     bool SetVisualState(
         const RenderParams& params,
         UpdateFlags flags) override;
+    // 私有渲染诊断：mask 工作输出必须保持为当前二维切片，不得退化为全体积副本。
+    std::array<int, 3> GetMaskWorkingDimensions() const;
+    // 私有测试诊断：逐像素核对 mask 最近邻采样和最终 masked slice，扫描范围仅为当前二维输出。
+    bool GetMaskWorkingPixelsValid() const;
     int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
@@ -52,8 +54,6 @@ private:
     vtkSmartPointer<vtkImageSlice> m_slice;
     // 持有输入 image 和 slice plane 管线连接，按当前平面从体数据抽取二维图像。
     vtkSmartPointer<Mapper> m_mapper;
-    // Slice mapper 无独立 mask 端口；此过滤器按请求 extent 把无效像素写为背景标量。
-    vtkSmartPointer<vtkImageMask> m_maskFilter;
     // 持久切片平面；SetVisualState 以 world cursor 更新原点，以 orientation 对应主轴更新法线。
     vtkSmartPointer<vtkPlane> m_slicePlane;
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。

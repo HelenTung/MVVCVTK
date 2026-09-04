@@ -269,11 +269,6 @@ GapHostFeature::Impl::GetViewCandidate(
     if (!GetSnapshotValid(snapshot)) {
         return std::nullopt;
     }
-    // 供应商内核没有 validity mask 入口；拒绝比静默忽略或 Feature 内补算更能保证单一算法真源。
-    if (snapshot->validityMask) {
-        return std::nullopt;
-    }
-
     const auto views = m_views->GetViews(start.targetViews);
     if (views.empty()) {
         return std::nullopt;

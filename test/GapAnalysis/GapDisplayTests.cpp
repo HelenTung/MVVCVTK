@@ -9,6 +9,7 @@
 #include <vtkImageData.h>
 #include <vtkImageResliceMapper.h>
 #include <vtkImageSlice.h>
+#include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
 #include <vtkPoints.h>
 #include <vtkPolyData.h>
@@ -20,8 +21,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -130,7 +133,8 @@ vtkSmartPointer<vtkImageData> GetMask(
 }
 
 TrustedImageSnapshot BuildTrustedInput(
-    const vtkSmartPointer<vtkImageData>& image)
+    const vtkSmartPointer<vtkImageData>& image,
+    vtkSmartPointer<vtkImageData> validityMask = nullptr)
 {
     if (!image || !image->GetPointData()
         || !image->GetPointData()->GetScalars()) {
@@ -139,6 +143,7 @@ TrustedImageSnapshot BuildTrustedInput(
 
     auto snapshot = std::make_shared<TrustedImageState>();
     snapshot->image = image;
+    snapshot->validityMask = std::move(validityMask);
     int dims[3] = {};
     double spacing[3] = {};
     double origin[3] = {};
@@ -241,6 +246,8 @@ int GapDisplaySuite::GetFailCount() const
     }
     expect(service.GetAnalysisState() == GapAnalysisState::Succeeded,
         "Gap display worker should succeed.");
+    expect(service.GetLabelStorageTransferred(),
+        "Gap result should retain the kernel label owner without a second full-volume copy.");
 
     service.OnDisplayTick(image);
     auto* firstSliceInput = overlay->GetInput(0);
@@ -264,6 +271,7 @@ int GapDisplaySuite::GetFailCount() const
             && meshOverlay->GetInput(1) == firstMeshInput,
         "Show should reuse both stored display artifacts.");
 
+    GapAnalysisService invalidMaskService;
     auto invalidMask = vtkSmartPointer<vtkImageData>::New();
     invalidMask->SetDimensions(4, 5, 5);
     invalidMask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -273,12 +281,43 @@ int GapDisplaySuite::GetFailCount() const
     invalidRequest.surface = surfaceConfig;
     invalidRequest.voidParams = voidParams;
     invalidRequest.sliceTargets = sliceTargets;
-    expect(!service.StartView(std::move(invalidRequest)),
+    expect(!invalidMaskService.StartView(
+            std::move(invalidRequest)),
         "Gap view should reject a mask with mismatched geometry.");
+
+    auto invalidTypeMask = vtkSmartPointer<vtkImageData>::New();
+    invalidTypeMask->CopyStructure(image);
+    invalidTypeMask->AllocateScalars(VTK_FLOAT, 1);
+    GapViewRequest invalidTypeRequest;
+    invalidTypeRequest.inputImage = image;
+    invalidTypeRequest.validityMask = invalidTypeMask;
+    invalidTypeRequest.surface = surfaceConfig;
+    invalidTypeRequest.voidParams = voidParams;
+    invalidTypeRequest.sliceTargets = sliceTargets;
+    expect(!invalidMaskService.StartView(
+            std::move(invalidTypeRequest)),
+        "Gap view should reject a non-byte validity mask.");
+
+    auto invalidDirectionMask = GetMask(image);
+    auto invalidDirection = vtkSmartPointer<vtkMatrix3x3>::New();
+    invalidDirection->Identity();
+    invalidDirection->SetElement(0, 0, -1.0);
+    invalidDirectionMask->SetDirectionMatrix(invalidDirection);
+    GapViewRequest invalidDirectionRequest;
+    invalidDirectionRequest.inputImage = image;
+    invalidDirectionRequest.validityMask = invalidDirectionMask;
+    invalidDirectionRequest.surface = surfaceConfig;
+    invalidDirectionRequest.voidParams = voidParams;
+    invalidDirectionRequest.sliceTargets = sliceTargets;
+    expect(!invalidMaskService.StartView(
+            std::move(invalidDirectionRequest)),
+        "Gap view should reject a validity mask with mismatched direction.");
     expect(service.GetViewOn()
+        && invalidMaskService.GetAnalysisState()
+            == GapAnalysisState::Idle
         && overlay->GetAttachCount() == 2
         && overlay->GetRemoveCount() == 1,
-        "Rejected Gap view should preserve the prior overlay session.");
+        "Rejected masks should not disturb the prior overlay session.");
 
     bool isWrongSwitchAccepted = true;
     bool isWrongExitAccepted = true;
@@ -361,7 +400,11 @@ int GapDisplaySuite::GetFailCount() const
     sliceOnlyService.OnDisplayTick(nullptr);
 
     auto trustedOverlay = std::make_shared<OverlayStub>();
-    auto trustedInput = BuildTrustedInput(image);
+    auto trustedMask = GetMask(image);
+    static_cast<unsigned char*>(
+        trustedMask->GetScalarPointer())[0] = 0;
+    trustedMask->Modified();
+    auto trustedInput = BuildTrustedInput(image, trustedMask);
     auto* trustedScalars = image->GetPointData()->GetScalars();
     const auto trustedVoxelCount = static_cast<std::size_t>(
         image->GetNumberOfPoints());
@@ -384,7 +427,7 @@ int GapDisplaySuite::GetFailCount() const
             std::move(trustedRequest),
             image)
             && trustedScalars->GetReferenceCount() > scalarOwners,
-        "Trusted Gap input should share the Host scalar array.");
+        "Trusted Gap input with a validity mask should share the Host scalar array.");
     expect(trustedService.ExitView(),
         "Trusted Gap view should exit cleanly.");
     trustedService.OnDisplayTick(nullptr);
@@ -449,29 +492,195 @@ int GapDisplaySuite::GetFailCount() const
     expect(weakOwner == nullptr,
         "Exit completion should keep the caller image released.");
 
-    GapAnalysisService maskService;
+    auto maskedLowImage = vtkSmartPointer<vtkImageData>::New();
+    maskedLowImage->DeepCopy(image);
+    auto maskedHighImage = vtkSmartPointer<vtkImageData>::New();
+    maskedHighImage->DeepCopy(image);
+    auto maskedNanImage = vtkSmartPointer<vtkImageData>::New();
+    maskedNanImage->DeepCopy(image);
+    static_cast<float*>(maskedLowImage->GetScalarPointer())[0] = -1000.0f;
+    static_cast<float*>(maskedHighImage->GetScalarPointer())[0] = 1000.0f;
+    static_cast<float*>(maskedNanImage->GetScalarPointer())[0] =
+        (std::numeric_limits<float>::quiet_NaN)();
     auto validityMask = GetMask(image);
-    const int oldAttachCount = overlay->GetAttachCount();
-    const int oldRemoveCount = overlay->GetRemoveCount();
-    bool hasMaskCallback = false;
-    GapViewRequest maskRequest;
-    maskRequest.inputImage = image;
-    maskRequest.validityMask = validityMask;
-    maskRequest.surface = surfaceConfig;
-    maskRequest.voidParams = voidParams;
-    maskRequest.sliceTargets = sliceTargets;
-    expect(!maskService.StartView(
-            std::move(maskRequest),
-            [&](bool) { hasMaskCallback = true; }),
-        "Gap view must reject every non-null validity mask.");
-    expect(maskService.GetAnalysisState() == GapAnalysisState::Idle
-            && !maskService.GetViewOn()
-            && maskService.GetVoidRegions().empty()
-            && maskService.GetStatistics().voidVoxelCount == 0
-            && overlay->GetAttachCount() == oldAttachCount
-            && overlay->GetRemoveCount() == oldRemoveCount
-            && !hasMaskCallback,
-        "Rejected mask input must not start DefX or mutate overlay/result state.");
+    static_cast<unsigned char*>(validityMask->GetScalarPointer())[0] = 0;
+    validityMask->Modified();
+
+    GapSurfaceConfig maskedSurface = surfaceConfig;
+    maskedSurface.isoMode = GapIsoMode::DataRangeRatio;
+    maskedSurface.dataRangeRatio = 0.5;
+    auto maskedLowOverlay = std::make_shared<OverlayStub>();
+    auto maskedHighOverlay = std::make_shared<OverlayStub>();
+    auto maskedNanOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService maskedLowService;
+    GapAnalysisService maskedHighService;
+    GapAnalysisService maskedNanService;
+    GapViewRequest maskedLowRequest;
+    maskedLowRequest.inputImage = maskedLowImage;
+    maskedLowRequest.validityMask = validityMask;
+    maskedLowRequest.surface = maskedSurface;
+    maskedLowRequest.voidParams = voidParams;
+    maskedLowRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        maskedLowOverlay);
+    GapViewRequest maskedHighRequest;
+    maskedHighRequest.inputImage = maskedHighImage;
+    maskedHighRequest.validityMask = validityMask;
+    maskedHighRequest.surface = maskedSurface;
+    maskedHighRequest.voidParams = voidParams;
+    maskedHighRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        maskedHighOverlay);
+    GapViewRequest maskedNanRequest;
+    maskedNanRequest.inputImage = maskedNanImage;
+    maskedNanRequest.validityMask = validityMask;
+    maskedNanRequest.surface = maskedSurface;
+    maskedNanRequest.voidParams = voidParams;
+    maskedNanRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        maskedNanOverlay);
+    expect(StartDisplay(
+            maskedLowService,
+            std::move(maskedLowRequest),
+            maskedLowImage)
+            && StartDisplay(
+                maskedHighService,
+                std::move(maskedHighRequest),
+                maskedHighImage)
+            && StartDisplay(
+                maskedNanService,
+                std::move(maskedNanRequest),
+                maskedNanImage),
+        "Gap view should accept an aligned partial validity mask.");
+    auto maskedLowLabels = maskedLowService.BuildLabelImage();
+    auto maskedHighLabels = maskedHighService.BuildLabelImage();
+    auto maskedNanLabels = maskedNanService.BuildLabelImage();
+    const auto labelCount = maskedLowLabels
+        ? maskedLowLabels->GetNumberOfPoints() : 0;
+    const auto* maskedLowLabelValues = maskedLowLabels
+        ? static_cast<const int*>(
+            maskedLowLabels->GetScalarPointer())
+        : nullptr;
+    const auto* maskedHighLabelValues = maskedHighLabels
+        ? static_cast<const int*>(
+            maskedHighLabels->GetScalarPointer())
+        : nullptr;
+    const auto* maskedNanLabelValues = maskedNanLabels
+        ? static_cast<const int*>(
+            maskedNanLabels->GetScalarPointer())
+        : nullptr;
+    expect(maskedLowLabels
+            && maskedHighLabels
+            && maskedNanLabels
+            && maskedLowLabelValues
+            && maskedHighLabelValues
+            && maskedNanLabelValues
+            && labelCount == maskedHighLabels->GetNumberOfPoints()
+            && labelCount == maskedNanLabels->GetNumberOfPoints()
+            && std::equal(
+                maskedLowLabelValues,
+                maskedLowLabelValues + labelCount,
+                maskedHighLabelValues)
+            && std::equal(
+                maskedLowLabelValues,
+                maskedLowLabelValues + labelCount,
+                maskedNanLabelValues)
+            && maskedLowService.GetStatistics().voidVoxelCount
+                == maskedHighService.GetStatistics().voidVoxelCount
+            && maskedLowService.GetStatistics().voidVoxelCount
+                == maskedNanService.GetStatistics().voidVoxelCount,
+        "Mask-out source values must not affect the DefX result or DataRangeRatio domain.");
+    expect(static_cast<const float*>(
+                maskedLowImage->GetScalarPointer())[0] == -1000.0f
+            && static_cast<const float*>(
+                maskedHighImage->GetScalarPointer())[0] == 1000.0f
+            && std::isnan(static_cast<const float*>(
+                maskedNanImage->GetScalarPointer())[0]),
+        "Temporary mask materialization must not modify caller-owned voxels.");
+
+    auto maskedShortImage = vtkSmartPointer<vtkImageData>::New();
+    maskedShortImage->CopyStructure(image);
+    maskedShortImage->AllocateScalars(VTK_SHORT, 1);
+    auto* shortVoxels = static_cast<short*>(
+        maskedShortImage->GetScalarPointer());
+    std::fill_n(shortVoxels, 125, static_cast<short>(100));
+    shortVoxels[0] = 1000;
+    shortVoxels[2 + 5 * (2 + 5 * 2)] = 0;
+    auto maskedShortOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService maskedShortService;
+    GapViewRequest maskedShortRequest;
+    maskedShortRequest.inputImage = maskedShortImage;
+    maskedShortRequest.validityMask = validityMask;
+    maskedShortRequest.surface = maskedSurface;
+    maskedShortRequest.voidParams = voidParams;
+    maskedShortRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        maskedShortOverlay);
+    expect(StartDisplay(
+            maskedShortService,
+            std::move(maskedShortRequest),
+            maskedShortImage),
+        "A masked non-float input should be converted before DefX.");
+    auto maskedShortLabels = maskedShortService.BuildLabelImage();
+    const auto* maskedShortLabelValues = maskedShortLabels
+        ? static_cast<const int*>(
+            maskedShortLabels->GetScalarPointer())
+        : nullptr;
+    expect(maskedShortLabels
+            && maskedHighLabels
+            && maskedShortLabelValues
+            && maskedHighLabelValues
+            && maskedShortLabels->GetNumberOfPoints() == labelCount
+            && std::equal(
+                maskedShortLabelValues,
+                maskedShortLabelValues + labelCount,
+                maskedHighLabelValues)
+            && maskedShortImage->GetScalarType() == VTK_SHORT
+            && static_cast<const short*>(
+                maskedShortImage->GetScalarPointer())[0] == 1000,
+        "Masked conversion must preserve the caller image and the float-path result.");
+    expect(maskedLowService.ExitView()
+            && maskedHighService.ExitView()
+            && maskedNanService.ExitView()
+            && maskedShortService.ExitView(),
+        "Masked Gap views should exit cleanly.");
+    maskedLowService.OnDisplayTick(nullptr);
+    maskedHighService.OnDisplayTick(nullptr);
+    maskedNanService.OnDisplayTick(nullptr);
+    maskedShortService.OnDisplayTick(nullptr);
+
+    auto emptyMask = GetMask(image, 0);
+    GapAnalysisService emptyMaskService;
+    GapViewRequest emptyMaskRequest;
+    emptyMaskRequest.inputImage = image;
+    emptyMaskRequest.validityMask = emptyMask;
+    emptyMaskRequest.surface = surfaceConfig;
+    emptyMaskRequest.voidParams = voidParams;
+    emptyMaskRequest.sliceTargets = sliceTargets;
+    expect(!emptyMaskService.StartView(
+            std::move(emptyMaskRequest)),
+        "Gap view should reject a validity mask with no valid voxels.");
+    expect(emptyMaskService.GetAnalysisState()
+            == GapAnalysisState::Idle
+            && !emptyMaskService.GetViewOn()
+            && emptyMaskService.GetVoidRegions().empty(),
+        "An all-zero mask must fail before DefX or display state changes.");
+
+    auto nonFiniteValidImage = vtkSmartPointer<vtkImageData>::New();
+    nonFiniteValidImage->DeepCopy(image);
+    static_cast<float*>(nonFiniteValidImage->GetScalarPointer())[
+        2 + 5 * (2 + 5 * 2)] =
+            (std::numeric_limits<float>::quiet_NaN)();
+    GapAnalysisService nonFiniteValidService;
+    GapViewRequest nonFiniteValidRequest;
+    nonFiniteValidRequest.inputImage = nonFiniteValidImage;
+    nonFiniteValidRequest.validityMask = validityMask;
+    nonFiniteValidRequest.surface = surfaceConfig;
+    nonFiniteValidRequest.voidParams = voidParams;
+    nonFiniteValidRequest.sliceTargets = sliceTargets;
+    expect(!nonFiniteValidService.StartView(
+            std::move(nonFiniteValidRequest)),
+        "Gap view should reject a non-finite value inside the valid domain.");
     auto teardownService = std::make_shared<GapAnalysisService>();
     GapViewRequest teardownRequest;
     teardownRequest.inputImage = image;

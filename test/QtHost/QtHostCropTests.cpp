@@ -1155,6 +1155,64 @@ int GetCropFailCount()
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
+
+    bool hasCroppedVoxel = false;
+    if (cropSnapshot && cropSnapshot->validityMask) {
+        const auto* maskValues = static_cast<const unsigned char*>(
+            cropSnapshot->validityMask->GetScalarPointer());
+        const auto maskCount =
+            cropSnapshot->validityMask->GetNumberOfPoints();
+        for (vtkIdType index = 0;
+            maskValues && index < maskCount;
+            ++index) {
+            if (maskValues[index] == 0) {
+                hasCroppedVoxel = true;
+                break;
+            }
+        }
+    }
+    int postCropGapCompleteCount = 0;
+    const bool isPostCropGapAccepted =
+        publishCompleteCount == 1
+        && publishResult.isSucceeded
+        && cropSnapshot
+        && cropSnapshot->validityMask
+        && gapFeature->SendRequest(
+            { GapHostAction::Start,
+                GetGapConfig().defaultStart },
+            [&postCropGapCompleteCount](const bool) {
+                ++postCropGapCompleteCount;
+            });
+    const auto postCropGapAcceptedState =
+        gapFeature->GetState();
+    for (int poll = 0;
+        isPostCropGapAccepted
+            && postCropGapCompleteCount == 0
+            && poll < 500;
+        ++poll) {
+        SendTicks(*endpoint, 1);
+        SendHostTick(*endpoint, *timerEndpoint);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    const auto postCropGapState =
+        gapFeature->GetState();
+    const bool isPostCropGapExited =
+        gapFeature->SendRequest({ GapHostAction::Exit });
+    failureCount += GetCaseResult(
+        hasCroppedVoxel
+            && isPostCropGapAccepted
+            && postCropGapAcceptedState.analysisState
+                != GapAnalysisState::Idle
+            && postCropGapAcceptedState.isViewActive
+            && postCropGapCompleteCount == 1
+            && postCropGapState.analysisState
+                == GapAnalysisState::Succeeded
+            && contextProbe->m_data->GetImageSnapshot()
+                == cropSnapshot
+            && isPostCropGapExited,
+        "Gap runs DefX from the materialized Crop baseline with a validity mask") ? 0 : 1;
+
     const auto exportId =
         std::chrono::steady_clock::now()
             .time_since_epoch().count();

@@ -1,13 +1,18 @@
 #include "SliceStrategy.h"
+#include <vtkCamera.h>
+#include <vtkImageData.h>
+#include <vtkImageMask.h>
 #include <vtkPlane.h>
 #include <vtkPolyDataMapper.h>
 #include <vtkProperty.h>
 #include <vtkImageProperty.h>
 #include <algorithm>
 #include <vtkTransform.h>
+#include <vtkImageChangeInformation.h>
+#include <vtkImageReslice.h>
 #include <vtkImageResliceMapper.h>
+#include <vtkImageResliceToColors.h>
 #include <vtkImageSliceMapper.h>
-#include <vtkImageMask.h>
 #include <vtkObjectFactory.h>
 #include <vtkOpenGLImageSliceMapper.h>
 #include <vtkOpenGLPolyDataMapper.h>
@@ -128,6 +133,25 @@ public:
             this->PolyDataActor->GetMapper());
         return !mapper || mapper->SetWorldToInput(worldToInput);
     }
+    bool SetResliceRenderState(
+        vtkMatrix4x4* dataToWorld,
+        const bool isExactPixelMatch,
+        const bool isColorDataPassed,
+        const bool isMatteEnabled,
+        const bool isColorEnabled,
+        const bool isDepthEnabled)
+    {
+        if (!dataToWorld || !this->GetDataToWorldMatrix()) {
+            return false;
+        }
+        this->GetDataToWorldMatrix()->DeepCopy(dataToWorld);
+        this->SetExactPixelMatch(isExactPixelMatch);
+        this->SetPassColorData(isColorDataPassed);
+        this->MatteEnable = isMatteEnabled;
+        this->ColorEnable = isColorEnabled;
+        this->DepthEnable = isDepthEnabled;
+        return true;
+    }
 };
 
 vtkStandardNewMacro(EffectImageSliceMapper);
@@ -175,20 +199,319 @@ public:
         return !sliceMapper || sliceMapper->SetWorldToInput(worldToInput);
     }
 
+    bool SetValidityMask(
+        vtkImageData* validityMask,
+        const double maskedValue)
+    {
+        if (validityMask
+            && (validityMask->GetScalarType() != VTK_UNSIGNED_CHAR
+                || validityMask->GetNumberOfScalarComponents() != 1)) {
+            return false;
+        }
+        if (m_validityMask == validityMask
+            && m_maskedValue == maskedValue) {
+            return true;
+        }
+        m_validityMask = validityMask;
+        m_maskedValue = maskedValue;
+        m_isMaskOutputDirty = true;
+        Modified();
+        return true;
+    }
+
+    std::array<int, 3> GetMaskWorkingDimensions() const
+    {
+        std::array<int, 3> dimensions{};
+        auto* output = m_validityMask && m_maskFilter
+            ? m_maskFilter->GetOutput() : nullptr;
+        if (output) {
+            output->GetDimensions(dimensions.data());
+        }
+        return dimensions;
+    }
+
+    bool GetMaskWorkingPixelsValid() const
+    {
+        auto* sourceMask = m_validityMask.GetPointer();
+        auto* sourceSlice = this->ImageReslice
+            ? this->ImageReslice->GetOutput() : nullptr;
+        auto* maskSlice = m_maskReslice
+            ? m_maskReslice->GetOutput() : nullptr;
+        auto* maskedSlice = m_maskFilter
+            ? m_maskFilter->GetOutput() : nullptr;
+        if (!sourceMask || !sourceSlice || !maskSlice || !maskedSlice
+            || !sourceMask->GetScalarPointer()
+            || !sourceSlice->GetScalarPointer()
+            || !maskSlice->GetScalarPointer()
+            || !maskedSlice->GetScalarPointer()
+            || sourceSlice->GetNumberOfScalarComponents()
+                != maskedSlice->GetNumberOfScalarComponents()
+            || !std::equal(
+                sourceSlice->GetExtent(),
+                sourceSlice->GetExtent() + 6,
+                maskSlice->GetExtent())
+            || !std::equal(
+                sourceSlice->GetExtent(),
+                sourceSlice->GetExtent() + 6,
+                maskedSlice->GetExtent())) {
+            return false;
+        }
+
+        int dimensions[3] = {};
+        maskSlice->GetDimensions(dimensions);
+        if (dimensions[0] <= 0 || dimensions[1] <= 0
+            || dimensions[2] != 1) {
+            return false;
+        }
+
+        const int* outputExtent = maskSlice->GetExtent();
+        const int* sourceExtent = sourceMask->GetExtent();
+        const int componentCount =
+            sourceSlice->GetNumberOfScalarComponents();
+        bool hasInteriorSourceSample = false;
+        for (int z = outputExtent[4]; z <= outputExtent[5]; ++z) {
+            for (int y = outputExtent[2]; y <= outputExtent[3]; ++y) {
+                for (int x = outputExtent[0]; x <= outputExtent[1]; ++x) {
+                    double physicalPoint[3] = {};
+                    maskSlice->TransformIndexToPhysicalPoint(
+                        x, y, z, physicalPoint);
+                    double continuousIndex[3] = {};
+                    sourceMask->TransformPhysicalPointToContinuousIndex(
+                        physicalPoint, continuousIndex);
+                    const int sourceIndex[3] = {
+                        static_cast<int>(std::floor(continuousIndex[0] + 0.5)),
+                        static_cast<int>(std::floor(continuousIndex[1] + 0.5)),
+                        static_cast<int>(std::floor(continuousIndex[2] + 0.5))
+                    };
+                    const bool isInside =
+                        sourceIndex[0] >= sourceExtent[0]
+                        && sourceIndex[0] <= sourceExtent[1]
+                        && sourceIndex[1] >= sourceExtent[2]
+                        && sourceIndex[1] <= sourceExtent[3]
+                        && sourceIndex[2] >= sourceExtent[4]
+                        && sourceIndex[2] <= sourceExtent[5];
+                    const double actualMask =
+                        maskSlice->GetScalarComponentAsDouble(x, y, z, 0);
+                    // vtkImageReslice 的 border 会在边界外半个 voxel 内延拓；这里只对
+                    // 明确落在输入 extent 内的像素核对最近邻来源，边界像素仍在下方核对合成值。
+                    if (isInside) {
+                        hasInteriorSourceSample = true;
+                        const double expectedMask =
+                            sourceMask->GetScalarComponentAsDouble(
+                                sourceIndex[0], sourceIndex[1], sourceIndex[2], 0);
+                        if (actualMask != expectedMask) {
+                            return false;
+                        }
+                    }
+
+                    for (int component = 0;
+                        component < componentCount; ++component) {
+                        const double sourceValue =
+                            sourceSlice->GetScalarComponentAsDouble(
+                                x, y, z, component);
+                        const double expectedValue = actualMask != 0.0
+                            ? sourceValue : m_maskedValue;
+                        const double actualValue =
+                            maskedSlice->GetScalarComponentAsDouble(
+                                x, y, z, component);
+                        if (actualValue != expectedValue) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        return hasInteriorSourceSample;
+    }
+
+    vtkMTimeType GetMTime() override
+    {
+        vtkMTimeType modifiedTime = this->Superclass::GetMTime();
+        if (m_validityMask) {
+            modifiedTime = (std::max)(
+                modifiedTime,
+                m_validityMask->GetMTime());
+        }
+        return modifiedTime;
+    }
+
+    void Render(
+        vtkRenderer* renderer,
+        vtkImageSlice* prop) override
+    {
+        if (!m_validityMask) {
+            this->Superclass::Render(renderer, prop);
+            return;
+        }
+
+        bool isResliceUpdated = false;
+        if (this->ResliceNeedUpdate) {
+            this->ImageReslice->SetInputConnection(
+                this->GetInputConnection(0, 0));
+            this->ImageReslice->UpdateWholeExtent();
+            this->ResliceNeedUpdate = 0;
+            isResliceUpdated = true;
+        }
+
+        const vtkMTimeType maskModifiedTime =
+            m_validityMask->GetMTime();
+        if (isResliceUpdated
+            || m_isMaskOutputDirty
+            || maskModifiedTime != m_builtMaskModifiedTime) {
+            if (!UpdateMaskOutput()) {
+                // 暂时性 pipeline 失败不得把 mapper 永久留在空输入；下一帧重新执行主 reslice 与 mask。
+                this->ResliceNeedUpdate = 1;
+                m_isMaskOutputDirty = true;
+                this->SliceMapper->SetInputData(nullptr);
+                return;
+            }
+
+            // vtkImageResliceMapper 已将当前平面变为二维图像；mask 只在该输出上合成，
+            // 不再让三个 Slice 各自物化一份全体积 float vtkImageMask 输出。
+            this->ChangeInformation->SetInputData(
+                m_maskFilter->GetOutput());
+            const double direction[9] = {
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0
+            };
+            this->ChangeInformation->SetOutputDirection(direction);
+            double origin[4] = { 0.0, 0.0, 0.0, 1.0 };
+            this->ImageReslice->GetOutputOrigin(origin);
+            this->DataToSliceMatrix->MultiplyPoint(origin, origin);
+            this->ChangeInformation->SetOutputOrigin(origin);
+            this->ChangeInformation->UpdateWholeExtent();
+            m_builtMaskModifiedTime = maskModifiedTime;
+            m_isMaskOutputDirty = false;
+        }
+
+        auto* property = prop ? prop->GetProperty() : nullptr;
+        if (property
+            && property->GetCheckerboard()
+            && this->InternalResampleToScreenPixels
+            && !this->SeparateWindowLevelOperation
+            && this->SliceFacesCamera) {
+            this->CheckerboardImage(
+                m_maskFilter->GetOutput(),
+                renderer->GetActiveCamera(),
+                property);
+        }
+
+        auto* sliceMapper = EffectImageSliceMapper::SafeDownCast(
+            this->SliceMapper);
+        if (!sliceMapper
+            || !sliceMapper->SetResliceRenderState(
+                this->SliceToWorldMatrix,
+                this->InternalResampleToScreenPixels != 0,
+                !this->SeparateWindowLevelOperation,
+                this->MatteEnable,
+                this->ColorEnable,
+                this->DepthEnable)) {
+            return;
+        }
+        sliceMapper->SetInputData(
+            this->ChangeInformation->GetOutput());
+        sliceMapper->SetSliceFacesCamera(
+            this->SliceFacesCamera
+            && !this->SeparateWindowLevelOperation);
+        sliceMapper->SetBorder(
+            this->Border
+            || this->InternalResampleToScreenPixels);
+        sliceMapper->SetBackground(
+            this->Background
+            && !(this->SliceFacesCamera
+                && this->InternalResampleToScreenPixels
+                && !this->SeparateWindowLevelOperation));
+        sliceMapper->SetDisplayExtent(
+            this->ImageReslice->GetOutputExtent());
+        sliceMapper->SetNumberOfThreads(
+            this->NumberOfThreads);
+        sliceMapper->SetClippingPlanes(
+            this->ClippingPlanes);
+        sliceMapper->Render(renderer, prop);
+    }
+
 protected:
     Mapper()
     {
         this->SliceMapper->Delete();
         this->SliceMapper = EffectImageSliceMapper::New();
+        m_maskReslice = vtkSmartPointer<vtkImageReslice>::New();
+        m_maskReslice->SetInterpolationModeToNearestNeighbor();
+        m_maskReslice->SetOutputScalarType(VTK_UNSIGNED_CHAR);
+        m_maskReslice->SetBackgroundLevel(0.0);
+        m_maskFilter = vtkSmartPointer<vtkImageMask>::New();
+        m_maskFilter->NotMaskOff();
     }
 
 private:
+    bool UpdateMaskOutput()
+    {
+        auto* sliceImage = this->ImageReslice->GetOutput();
+        if (!m_validityMask
+            || !sliceImage
+            || !sliceImage->GetScalarPointer()
+            || !m_maskReslice
+            || !m_maskFilter) {
+            return false;
+        }
+
+        m_maskReslice->SetInputData(m_validityMask);
+        // vtkImageResliceMapper 通过输出的物理 origin/direction/spacing 描述当前平面；
+        // 同时复制可选 axes/transform，确保未来自定义 reslice 状态也与主图完全一致。
+        m_maskReslice->SetResliceAxes(
+            this->ImageReslice->GetResliceAxes());
+        m_maskReslice->SetResliceTransform(
+            this->ImageReslice->GetResliceTransform());
+        m_maskReslice->SetOutputExtent(
+            this->ImageReslice->GetOutputExtent());
+        m_maskReslice->SetOutputSpacing(
+            this->ImageReslice->GetOutputSpacing());
+        m_maskReslice->SetOutputOrigin(
+            this->ImageReslice->GetOutputOrigin());
+        m_maskReslice->SetOutputDirection(
+            this->ImageReslice->GetOutputDirection());
+        m_maskReslice->SetBorder(this->ImageReslice->GetBorder());
+        m_maskReslice->SetBorderThickness(
+            this->ImageReslice->GetBorderThickness());
+        m_maskReslice->SetWrap(this->ImageReslice->GetWrap());
+        m_maskReslice->SetMirror(this->ImageReslice->GetMirror());
+        m_maskReslice->UpdateWholeExtent();
+        auto* maskSlice = m_maskReslice->GetOutput();
+        if (!maskSlice
+            || !maskSlice->GetScalarPointer()
+            || !std::equal(
+                sliceImage->GetExtent(),
+                sliceImage->GetExtent() + 6,
+                maskSlice->GetExtent())) {
+            return false;
+        }
+
+        m_maskFilter->SetImageInputData(sliceImage);
+        m_maskFilter->SetMaskInputData(maskSlice);
+        m_maskFilter->SetMaskedOutputValue(m_maskedValue);
+        m_maskFilter->UpdateWholeExtent();
+        auto* maskedSlice = m_maskFilter->GetOutput();
+        return maskedSlice
+            && maskedSlice->GetScalarPointer()
+            && std::equal(
+                sliceImage->GetExtent(),
+                sliceImage->GetExtent() + 6,
+                maskedSlice->GetExtent());
+    }
+
     std::array<double, 16> m_worldToInput = {
         1.0, 0.0, 0.0, 0.0,
         0.0, 1.0, 0.0, 0.0,
         0.0, 0.0, 1.0, 0.0,
         0.0, 0.0, 0.0, 1.0
     };
+    vtkSmartPointer<vtkImageData> m_validityMask;
+    vtkSmartPointer<vtkImageReslice> m_maskReslice;
+    vtkSmartPointer<vtkImageMask> m_maskFilter;
+    vtkMTimeType m_builtMaskModifiedTime = 0;
+    bool m_isMaskOutputDirty = true;
+    double m_maskedValue = 0.0;
 };
 
 vtkStandardNewMacro(SliceStrategy::Mapper);
@@ -305,7 +628,7 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
         return;
     }
     m_lastInput = data;
-    m_maskFilter = nullptr;
+    (void)m_mapper->SetValidityMask(nullptr, 0.0);
 
     m_mapper->SetInputData(img);
 
@@ -322,8 +645,8 @@ void SliceStrategy::SetInputMask(
     auto* image = vtkImageData::SafeDownCast(
         m_lastInput);
     if (!m_mapper || !image || !validityMask) {
-        m_maskFilter = nullptr;
         if (m_mapper && image) {
+            (void)m_mapper->SetValidityMask(nullptr, 0.0);
             m_mapper->SetInputData(image);
         }
         return;
@@ -331,14 +654,24 @@ void SliceStrategy::SetInputMask(
 
     double range[2] = {};
     image->GetScalarRange(range);
-    m_maskFilter =
-        vtkSmartPointer<vtkImageMask>::New();
-    m_maskFilter->SetInputData(0, image);
-    m_maskFilter->SetMaskInputData(validityMask);
-    m_maskFilter->SetMaskedOutputValue(range[0]);
-    m_maskFilter->NotMaskOff();
-    m_mapper->SetInputConnection(
-        m_maskFilter->GetOutputPort());
+    if (!m_mapper->SetValidityMask(validityMask, range[0])) {
+        (void)m_mapper->SetValidityMask(nullptr, 0.0);
+    }
+    m_mapper->SetInputData(image);
+}
+
+std::array<int, 3> SliceStrategy::GetMaskWorkingDimensions() const
+{
+    std::array<int, 3> dimensions{};
+    return m_mapper
+        ? m_mapper->GetMaskWorkingDimensions()
+        : dimensions;
+}
+
+bool SliceStrategy::GetMaskWorkingPixelsValid() const
+{
+    return m_mapper
+        && m_mapper->GetMaskWorkingPixelsValid();
 }
 
 void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {

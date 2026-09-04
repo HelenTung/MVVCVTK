@@ -61,7 +61,7 @@ struct VoidRegion {
 struct GapAnalysisResult {
     // 私有内核完成筛选后的原始区域集合。
     std::vector<VoidRegion> voids;
-    // 私有内核原始标签 ID 直接写入此 VTK_INT 图；不二值化、重编号或长期保留第二份整卷 vector。
+    // 此 VTK_INT 图借用并持有私有内核原始标签 owner；不二值化、重编号或复制第二份整卷。
     // 标签体完整继承输入快照的 extent、spacing、origin 与 direction。
     vtkSmartPointer<vtkImageData> labelImage;
     // 仅在显示请求包含 3D target 时由 worker 从 labelImage 预构建；所有正标签合并为同一外表面。
