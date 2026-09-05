@@ -46,6 +46,10 @@ if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::SurfaceDetermination)
 endif()
 SetTargetDefaults(MVVCVTKStandalone)
+if(MVVCVTK_BUILD_MODEL_ROTATION)
+    target_compile_definitions(MVVCVTKStandalone PRIVATE MVVCVTK_HAS_MODEL_ROTATION=1)
+    target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::ModelRotation)
+endif()
 vtk_module_autoinit(
     TARGETS MVVCVTKStandalone
     MODULES ${MVVCVTK_VTK_TARGETS}

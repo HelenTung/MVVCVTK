@@ -126,7 +126,7 @@ public:
     bool GetIsInteracting() const;
     int GetPlaneAxis(vtkActor* actor);
     vtkProp3D* GetMainProp();
-    void SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix);
+    bool SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix);
     std::array<double, 16> GetModelMatrix();
     WindowLevelParams GetWindowLevel() const;
     int GetNavigationAxis() const;
@@ -2159,6 +2159,7 @@ TaskAdmissionResult AppRuntime::ExportDataAsync(
     std::string extension,
     std::function<void(bool isSuccess)> onComplete)
 {
+    if (m_sharedState->GetTransformBusy()) return TaskAdmissionResult::InvalidRequest;
     auto task = m_dataExportTaskService
         ? m_dataExportTaskService->BuildDataTask(
             std::move(outputDir),
@@ -2178,6 +2179,7 @@ TaskAdmissionResult AppRuntime::ExportSlicesAsync(
     std::optional<double> rotationAngleDeg,
     std::function<void(bool isSuccess)> onComplete)
 {
+    if (m_sharedState->GetTransformBusy()) return TaskAdmissionResult::InvalidRequest;
     const VizMode currentMode = GetVizMode();
     auto task = m_dataExportTaskService
         ? m_dataExportTaskService->BuildSlicesTask(
@@ -2302,15 +2304,13 @@ vtkProp3D* AppRuntime::GetMainProp()
     return m_currentStrategy ? m_currentStrategy->GetMainProp() : nullptr;
 }
 
-void AppRuntime::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
+bool AppRuntime::SetModelMatrix(vtkMatrix4x4* modelToWorldMatrix)
 {
-    if (!modelToWorldMatrix) return;
+    if (!modelToWorldMatrix) return false;
 
     std::array<double, 16> matData = { 0 }; // 当前模型矩阵快照，回写 SharedState 使用
     std::memcpy(matData.data(), modelToWorldMatrix->GetData(), 16 * sizeof(double));
-    if (m_sharedState) {
-        m_sharedState->SetModelMatrix(matData);
-    }
+    return m_sharedState && m_sharedState->SetModelMatrix(matData);
 }
 
 std::array<double, 16> AppRuntime::GetModelMatrix()
@@ -3545,21 +3545,27 @@ bool AppRuntime::SetStrategyState()
 
     RenderParams params;
     bool isVisualSet = true;
-    if (strategyFlags != UpdateFlags::None) {
-        params = GetRenderParams(strategyFlags);
-        isVisualSet = m_currentStrategy->SetVisualState(
-            params, strategyFlags);
-        if (isVisualSet
-            && (strategyFlags
-                & (UpdateFlags::Cursor | UpdateFlags::Transform))
-                != UpdateFlags::None) {
-            FeatureOverlayState overlayState;
-            overlayState.cursor = params.cursor;
-            overlayState.modelToWorld = params.modelMatrix;
-            for (auto& overlay : m_overlays) {
-                overlay->SetOverlayState(overlayState);
+    try {
+        if (strategyFlags != UpdateFlags::None) {
+            params = GetRenderParams(strategyFlags);
+            isVisualSet = m_currentStrategy->SetVisualState(
+                params, strategyFlags);
+            if (isVisualSet
+                && (strategyFlags
+                    & (UpdateFlags::Cursor | UpdateFlags::Transform))
+                    != UpdateFlags::None) {
+                FeatureOverlayState overlayState;
+                overlayState.cursor = params.cursor;
+                overlayState.modelToWorld = params.modelMatrix;
+                for (auto& overlay : m_overlays) {
+                    overlay->SetOverlayState(overlayState);
+                }
             }
         }
+    }
+    catch (...) {
+        // 外部策略/overlay 抛错等同于准备失败；下面归还已领取 flags，恢复失败也可重试。
+        isVisualSet = false;
     }
     if (!isVisualSet) {
         if (m_renderWindow && !m_renderServices->isHostDriven) {
@@ -3617,10 +3623,15 @@ bool AppRuntime::SetStrategyState()
         SetRendererBg();
     }
 
-    // Strategy 只更新自身 prop；同一 Transform 快照随后由单一 view owner 平移相机中心。
+    // 受控姿态编辑固定手势相机；既有直接 TRS 请求保留相机中心跟随语义。
     if ((strategyFlags & UpdateFlags::Transform)
         != UpdateFlags::None) {
-        (void)SetCameraCenter(params.modelMatrix, m_renderSnapshot);
+        if (m_sharedState->GetTransformBusy()) {
+            if (m_renderer) m_renderer->ResetCameraClippingRange();
+        }
+        else {
+            (void)SetCameraCenter(params.modelMatrix, m_renderSnapshot);
+        }
     }
 
     // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
@@ -4447,11 +4458,41 @@ private:
     std::shared_ptr<AppRuntime> m_service;
 };
 
-class ModelPortAdapter final : public ModelInputPort {
+class ModelPortAdapter final : public ModelInputPort, public FeatureModelTransformPort {
 public:
-    explicit ModelPortAdapter(std::shared_ptr<AppRuntime> service)
+    ModelPortAdapter(std::shared_ptr<AppRuntime> service,
+        std::weak_ptr<SharedInteractionState> state)
         : m_service(std::move(service))
+        , m_state(std::move(state))
     {
+    }
+
+    std::optional<ModelTransformSnapshot> GetTransformState() const override
+    {
+        const auto state = GetEditState();
+        return state ? std::optional<ModelTransformSnapshot>(state->GetTransformState()) : std::nullopt;
+    }
+    std::optional<std::uint64_t> StartTransform(const ModelTransformSnapshot& expected) override
+    {
+        const auto state = GetEditState();
+        return state ? state->StartTransform("Viewer3D",expected) : std::nullopt;
+    }
+    bool SetTransformPreview(std::uint64_t token,std::uint64_t sequence,
+        const std::array<double,16>& matrix) override
+    {
+        const auto state = GetEditState();
+        return state && state->SetTransformPreview("Viewer3D",token,sequence,matrix);
+    }
+    bool SetTransformCommit(std::uint64_t token,std::uint64_t sequence,
+        const std::array<double,16>& matrix) override
+    {
+        const auto state = GetEditState();
+        return state && state->SetTransformPreview("Viewer3D",token,sequence,matrix,true);
+    }
+    bool StopTransform(std::uint64_t token) override
+    {
+        const auto state = GetEditState();
+        return state && state->StopTransform("Viewer3D",token);
     }
 
     vtkProp3D* GetMainProp() const override
@@ -4472,12 +4513,17 @@ public:
         if (!m_service) return false;
         auto matrix = vtkSmartPointer<vtkMatrix4x4>::New();
         matrix->DeepCopy(modelToWorld.data());
-        m_service->SetModelMatrix(matrix);
-        return true;
+        return m_service->SetModelMatrix(matrix);
     }
 
 private:
+    std::shared_ptr<SharedInteractionState> GetEditState() const
+    {
+        return m_ownerThread == std::this_thread::get_id() ? m_state.lock() : nullptr;
+    }
     std::shared_ptr<AppRuntime> m_service;
+    std::weak_ptr<SharedInteractionState> m_state;
+    std::thread::id m_ownerThread = std::this_thread::get_id();
 };
 
 class RenderBindAdapter final : public RenderBindPort {
@@ -4622,6 +4668,7 @@ private:
 
 AppFactoryResult CreateAppPorts(AppServiceArgs args)
 {
+    const std::weak_ptr<SharedInteractionState> transformState = args.interactionState;
     if (!args.dataManager
         || !args.interactionState
         || !args.eventSource) {
@@ -4658,7 +4705,7 @@ AppFactoryResult CreateAppPorts(AppServiceArgs args)
     result.interaction.slice =
         std::make_shared<SlicePortAdapter>(service);
     result.interaction.model =
-        std::make_shared<ModelPortAdapter>(service);
+        std::make_shared<ModelPortAdapter>(service, transformState);
     result.dataStage =
         std::make_shared<DataStageAdapter>(service);
     result.renderBind =

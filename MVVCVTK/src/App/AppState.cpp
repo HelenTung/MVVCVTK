@@ -6,11 +6,63 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <vtkMatrix4x4.h>
 
 // SharedInteractionState 的线程安全存储体：setter 在锁内比较并提交值，随后在锁外仅发布 UpdateFlags。
 // 因而观察者拿到的是“哪些维度变化”的通知，实际值仍需通过本类 getter 读取一致快照。
 class SharedInteractionState::Impl {
 public:
+    struct TransformCandidate final {
+        std::array<double, 16> matrix;
+        std::array<double, 16> inverse;
+        ModelTransformStatus boundary = ModelTransformStatus::None;
+    };
+
+    static std::optional<std::array<double, 16>> GetTransformInverse(
+        const std::array<double, 16>& matrix)
+    {
+        if (!std::all_of(matrix.begin(), matrix.end(),
+                [](double value) { return std::isfinite(value); })
+            || matrix[12] != 0.0 || matrix[13] != 0.0
+            || matrix[14] != 0.0 || matrix[15] != 1.0) return {};
+        const double determinant = vtkMatrix4x4::Determinant(matrix.data());
+        if (!std::isfinite(determinant) || determinant == 0.0) return {};
+        std::array<double, 16> inverse{};
+        vtkMatrix4x4::Invert(matrix.data(), inverse.data());
+        if (!std::all_of(inverse.begin(), inverse.end(),
+                [](double value) { return std::isfinite(value); })) return {};
+        return inverse;
+    }
+
+    void ClearTransformEdit(ModelTransformStatus status)
+    {
+        if (m_editToken != 0) {
+            m_completedToken = m_editToken;
+            m_completion = status;
+        }
+        m_editToken = 0;
+        m_editOwner.clear();
+        m_editSequence = 0;
+        m_transformPending.reset();
+        m_isEditClosing = false;
+    }
+
+    // Caller holds m_mutex; both file loads and generic primary selection retire old edits.
+    bool ClearTransformForData(const DataReadyState& state)
+    {
+        if (m_dataRevision == state.dataRevision && m_bindingRevision == state.bindingRevision)
+            return false;
+        ClearTransformEdit(ModelTransformStatus::Invalidated);
+        const bool changed = m_modelMatrix != m_committedMatrix;
+        if (changed) {
+            m_modelMatrix = m_committedMatrix;
+            m_modelInverse = m_committedInverse;
+            ++m_transformRevision;
+        }
+        if (m_transformFrozen) m_isTransformFrameValid = false;
+        return changed;
+    }
+
     struct ViewValues final {
         std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
         VolumeTransferFunction volumeTransferFunction;
@@ -292,6 +344,22 @@ public:
         0, 0, 1, 0,
         0, 0, 0, 1
     };
+    std::array<double, 16> m_modelInverse = m_modelMatrix;
+    std::array<double, 16> m_committedMatrix = m_modelMatrix;
+    std::array<double, 16> m_committedInverse = m_modelMatrix;
+    std::uint64_t m_transformRevision = 0;
+    std::uint64_t m_transformGeneration = 0;
+    std::uint64_t m_nextEditToken = 1;
+    std::uint64_t m_editToken = 0;
+    std::uint64_t m_editSequence = 0;
+    std::uint64_t m_completedToken = 0;
+    ModelTransformStatus m_completion = ModelTransformStatus::None;
+    std::string m_editOwner;
+    bool m_isEditClosing = false;
+    std::optional<TransformCandidate> m_transformPending;
+    std::optional<TransformCandidate> m_transformFrozen;
+    std::thread::id m_transformThread;
+    bool m_isTransformFrameValid = true;
 };
 
 // 展示状态复用同一套值比较与 shadow/revision 事务实现，但持有独立存储和独立事件出口。
@@ -550,12 +618,14 @@ void SharedInteractionState::SetDataReady(
     const DataReadyState& state) noexcept
 {
     LoadEventKind loadKind = LoadEventKind::None;
+    bool hasTransformChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         loadKind = m_impl->m_activeLoadKind;
         m_impl->m_isLoadPublishing =
             loadKind == LoadEventKind::File
             || loadKind == LoadEventKind::Reload;
+        hasTransformChanged = m_impl->ClearTransformForData(state);
         m_impl->m_dataRevision = state.dataRevision;
         m_impl->m_bindingRevision = state.bindingRevision;
         m_impl->m_dataRange = state.scalarRange;
@@ -584,6 +654,7 @@ void SharedInteractionState::SetDataReady(
 
     UpdateFlags flags = UpdateFlags::DataReady
         | UpdateFlags::Cursor | UpdateFlags::Spacing;
+    if (hasTransformChanged) flags |= UpdateFlags::Transform;
     if (loadKind == LoadEventKind::File) {
         flags |= UpdateFlags::FileLoad;
     }
@@ -604,9 +675,11 @@ void SharedInteractionState::SetDataReady(
 void SharedInteractionState::SetImageDataReady(
     const DataReadyState& state) noexcept
 {
+    bool hasTransformChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         if (state.bindingRevision <= m_impl->m_bindingRevision) return;
+        hasTransformChanged = m_impl->ClearTransformForData(state);
         m_impl->m_dataRevision = state.dataRevision;
         m_impl->m_bindingRevision = state.bindingRevision;
         m_impl->m_dataRange = state.scalarRange;
@@ -625,8 +698,9 @@ void SharedInteractionState::SetImageDataReady(
         m_impl->SetRealViewChanged(UpdateFlags::Cursor,
             hasRawCursorChanged || hasCursorChanged || hasAxisChanged);
     }
-    m_impl->SendFlags(
-        UpdateFlags::DataReady | UpdateFlags::Cursor | UpdateFlags::Spacing);
+    auto flags = UpdateFlags::DataReady | UpdateFlags::Cursor | UpdateFlags::Spacing;
+    if (hasTransformChanged) flags |= UpdateFlags::Transform;
+    m_impl->SendFlags(flags);
 }
 
 DataRevisionRef SharedInteractionState::GetDataRevision() const
@@ -741,21 +815,175 @@ void SharedInteractionState::SetPreInitConfig(const PreInitConfig& config)
     if (flags != UpdateFlags::None) m_impl->SendFlags(flags);
 }
 
-void SharedInteractionState::SetModelMatrix(
+bool SharedInteractionState::SetModelMatrix(
     const std::array<double, 16>& modelToWorldMatrix)
 {
+    const auto inverse = Impl::GetTransformInverse(modelToWorldMatrix);
+    if (!inverse) return false;
     bool hasChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_editToken || m_impl->m_transformFrozen) return false;
         hasChanged = Impl::SetArray(m_impl->m_modelMatrix, modelToWorldMatrix, 1e-9);
+        if (hasChanged) {
+            m_impl->m_modelInverse = *inverse;
+            m_impl->m_committedMatrix = modelToWorldMatrix;
+            m_impl->m_committedInverse = *inverse;
+            ++m_impl->m_transformRevision;
+        }
     }
     if (hasChanged) m_impl->SendFlags(UpdateFlags::Transform);
+    return true;
 }
 
 std::array<double, 16> SharedInteractionState::GetModelMatrix() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (m_impl->m_transformFrozen && m_impl->m_isTransformFrameValid
+        && m_impl->m_transformThread == std::this_thread::get_id())
+        return m_impl->m_transformFrozen->matrix;
     return m_impl->m_modelMatrix;
+}
+
+ModelTransformSnapshot SharedInteractionState::GetTransformState() const
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    ModelTransformSnapshot state;
+    state.sessionGeneration = m_impl->m_transformGeneration;
+    state.dataRevision = m_impl->m_dataRevision;
+    state.bindingRevision = m_impl->m_bindingRevision;
+    state.transformRevision = m_impl->m_transformRevision;
+    state.modelToWorld = m_impl->m_modelMatrix;
+    state.worldToModel = m_impl->m_modelInverse;
+    state.editToken = m_impl->m_editToken;
+    state.hasPending = m_impl->m_transformPending.has_value();
+    state.completedToken = m_impl->m_completedToken;
+    state.completion = m_impl->m_completion;
+    return state;
+}
+
+void SharedInteractionState::SetTransformGeneration(std::uint64_t generation)
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    m_impl->ClearTransformEdit(ModelTransformStatus::Invalidated);
+    m_impl->m_transformFrozen.reset();
+    m_impl->m_modelMatrix = m_impl->m_committedMatrix;
+    m_impl->m_modelInverse = m_impl->m_committedInverse;
+    m_impl->m_transformGeneration = generation;
+    m_impl->m_transformThread = std::this_thread::get_id();
+}
+
+std::optional<std::uint64_t> SharedInteractionState::StartTransform(
+    const std::string& owner, const ModelTransformSnapshot& expected)
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (owner.empty() || m_impl->m_transformGeneration == 0
+        || m_impl->m_transformThread != std::this_thread::get_id()
+        || m_impl->m_editToken || m_impl->m_transformFrozen
+        || !GetDataRevisionRefValid(m_impl->m_dataRevision)
+        || expected.sessionGeneration != m_impl->m_transformGeneration
+        || expected.dataRevision != m_impl->m_dataRevision
+        || expected.bindingRevision != m_impl->m_bindingRevision
+        || expected.transformRevision != m_impl->m_transformRevision
+        || std::any_of(m_impl->m_activeSources.begin(), m_impl->m_activeSources.end(),
+            [&owner](const InteractionSource& source) { return source.ownerId != owner; })
+        || m_impl->m_nextEditToken == 0) return {};
+    m_impl->m_editOwner = owner;
+    m_impl->m_editToken = m_impl->m_nextEditToken++;
+    m_impl->m_editSequence = 0;
+    return m_impl->m_editToken;
+}
+
+bool SharedInteractionState::SetTransformPreview(
+    const std::string& owner, std::uint64_t token, std::uint64_t sequence,
+    const std::array<double, 16>& matrix, bool isCommit)
+{
+    const auto inverse = Impl::GetTransformInverse(matrix);
+    if (!inverse) return false;
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (!token || token != m_impl->m_editToken || owner != m_impl->m_editOwner
+        || m_impl->m_transformThread != std::this_thread::get_id()
+        || m_impl->m_transformFrozen || m_impl->m_isEditClosing
+        || sequence <= m_impl->m_editSequence) return false;
+    m_impl->m_transformPending = Impl::TransformCandidate{
+        matrix, *inverse, isCommit ? ModelTransformStatus::Committed
+                                 : ModelTransformStatus::None };
+    m_impl->m_editSequence = sequence;
+    m_impl->m_isEditClosing = isCommit;
+    return true;
+}
+
+bool SharedInteractionState::StopTransform(
+    const std::string& owner, std::uint64_t token)
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (!token || token != m_impl->m_editToken || owner != m_impl->m_editOwner
+        || m_impl->m_transformThread != std::this_thread::get_id()
+        || m_impl->m_transformFrozen) return false;
+    // Cancel 可在未冻结前撤回排队 Commit；普通 Preview 永远不能覆盖控制边界。
+    m_impl->m_transformPending = Impl::TransformCandidate{
+        m_impl->m_committedMatrix, m_impl->m_committedInverse,
+        ModelTransformStatus::Cancelled };
+    m_impl->m_isEditClosing = true;
+    return true;
+}
+
+bool SharedInteractionState::StartTransformFrame()
+{
+    {
+        const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_transformFrozen) return false;
+        if (!m_impl->m_transformPending) return true;
+        if (m_impl->m_transformThread != std::this_thread::get_id()) return false;
+        m_impl->m_transformFrozen = m_impl->m_transformPending;
+        m_impl->m_isTransformFrameValid = true;
+    }
+    m_impl->SendFlags(UpdateFlags::Transform);
+    return true;
+}
+
+bool SharedInteractionState::GetTransformFrameValid() const
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return !m_impl->m_transformFrozen || m_impl->m_isTransformFrameValid;
+}
+
+bool SharedInteractionState::SetTransformFrameCommit() noexcept
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    if (!m_impl->m_transformFrozen) return true;
+    if (!m_impl->m_isTransformFrameValid) return false;
+    const auto candidate = *m_impl->m_transformFrozen;
+    if (m_impl->m_modelMatrix != candidate.matrix) ++m_impl->m_transformRevision;
+    m_impl->m_modelMatrix = candidate.matrix;
+    m_impl->m_modelInverse = candidate.inverse;
+    m_impl->m_transformFrozen.reset();
+    m_impl->m_transformPending.reset();
+    if (candidate.boundary == ModelTransformStatus::Committed) {
+        m_impl->m_committedMatrix = candidate.matrix;
+        m_impl->m_committedInverse = candidate.inverse;
+    }
+    if (candidate.boundary != ModelTransformStatus::None)
+        m_impl->ClearTransformEdit(candidate.boundary);
+    return true;
+}
+
+bool SharedInteractionState::ClearTransformFrame() noexcept
+{
+    bool hasFrozen = false;
+    {
+        const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        hasFrozen = m_impl->m_transformFrozen.has_value();
+        m_impl->m_transformFrozen.reset();
+    }
+    if (hasFrozen) m_impl->SendFlags(UpdateFlags::Transform);
+    return hasFrozen;
+}
+
+bool SharedInteractionState::GetTransformBusy() const
+{
+    const std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return m_impl->m_editToken != 0 || m_impl->m_transformFrozen.has_value();
 }
 
 void SharedInteractionState::SetScalarRange(double rangeMin, double rangeMax)
@@ -1081,6 +1309,8 @@ bool SharedInteractionState::SetInteracting(
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
         const bool wasInteracting = !m_impl->m_activeSources.empty();
+        if (isInteracting && m_impl->m_editToken
+            && source.ownerId != m_impl->m_editOwner) return false;
         const auto sourceIt = std::find(
             m_impl->m_activeSources.begin(),
             m_impl->m_activeSources.end(),

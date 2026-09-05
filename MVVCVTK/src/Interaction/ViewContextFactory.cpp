@@ -11,7 +11,7 @@
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkInteractorStyle.h>
 #include <vtkInteractorStyleImage.h>
-#include <vtkInteractorStyleTrackballActor.h>
+#include <vtkInteractorStyleUser.h>
 #include <vtkInteractorStyleTrackballCamera.h>
 #include <vtkOrientationMarkerWidget.h>
 #include <vtkProp3D.h>
@@ -30,7 +30,8 @@
 
 namespace {
 
-constexpr double kObserverPriority = 0.5;
+// 统一输入先于 VTK widget/style；被 Feature 接管的事件不会再次修改 Prop。
+constexpr double kObserverPriority = 1.0;
 constexpr double kHostInjectedObserverPriority = 1.0;
 // 这里只提高同一次 TimerEvent 内的 callback 顺序，不保证跨事件顺序。
 constexpr double kTimerPriority = 1.0;
@@ -546,7 +547,7 @@ bool StdViewContext::SetInputStyle()
 
     if (m_toolMode == ToolMode::ModelTransform) {
         m_interactor->SetInteractorStyle(
-            vtkSmartPointer<vtkInteractorStyleTrackballActor>::New());
+            vtkSmartPointer<vtkInteractorStyleUser>::New());
         return true;
     }
 

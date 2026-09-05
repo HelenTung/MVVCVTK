@@ -602,6 +602,8 @@ BuildSourceHeaders(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${MVVCVTK_FEATURE_SOURCE_SPI_INCLUDE_DIR}"
     ${_mvvcvtk_spi_stage_headers}
+    include/Host/FeatureModelTransformPort.h
+    include/Render/Contracts/SlicePlaneState.h
 )
 GetSdkHeaderPaths(
     MVVCVTK_FEATURE_STAGED_SPI_HEADERS

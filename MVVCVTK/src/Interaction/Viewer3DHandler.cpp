@@ -1,4 +1,5 @@
 #include "Viewer3DHandler.h"
+#include "Host/FeatureModelTransformPort.h"
 #include <vtkActor.h>
 #include <vtkPropPicker.h>
 #include <vtkRenderer.h>
@@ -10,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <cmath>
 
 Viewer3DHandler::Viewer3DHandler(
     InteractionStatePort* statePort,
@@ -32,6 +34,10 @@ Viewer3DHandler::Viewer3DHandler(
 
 Viewer3DHandler::~Viewer3DHandler()
 {
+    if (m_modelToken) {
+        if (auto* port = dynamic_cast<FeatureModelTransformPort*>(m_modelPort))
+            (void)port->StopTransform(m_modelToken);
+    }
     if (m_statePort) {
         (void)m_statePort->SetInteracting(m_source, false);
     }
@@ -49,6 +55,9 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
             ? InteractionFailureReason::None : failureReason;
         return result;
     };
+
+    if (m_isModelDrag || (!m_isDragging && eve.toolMode == ToolMode::ModelTransform))
+        return SetModelDrag(eve);
 
     // 模式切换不能吞掉已开始拖拽的 Release/Cancel。
     const bool isCleanup =
@@ -76,37 +85,6 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         || !m_slicePort
         || !m_modelPort
         || !m_updatePort) {
-        return {};
-    }
-
-    if (eve.toolMode == ToolMode::ModelTransform
-        && eve.eventKind == InteractionEventKind::ViewInteraction) {
-        vtkProp3D* prop = m_modelPort->GetMainProp();
-        if (prop && prop->GetMatrix()) {
-            const auto oldModelToWorld =
-                m_modelPort->GetModelMatrix();
-            std::array<double, 16> modelToWorld{};
-            const double* matrixData = prop->GetMatrix()->GetData();
-            std::copy(
-                matrixData,
-                matrixData + modelToWorld.size(),
-                modelToWorld.begin());
-            if (!m_modelPort->SetModelMatrix(modelToWorld)) {
-                return getResult(
-                    false,
-                    InteractionFailureReason::StateRejected,
-                    false);
-            }
-            if (!m_updatePort->SetRenderNeeded()) {
-                (void)m_modelPort->SetModelMatrix(oldModelToWorld);
-                return getResult(
-                    false,
-                    InteractionFailureReason::RenderRejected,
-                    false);
-            }
-            return getResult(
-                true, InteractionFailureReason::None, false);
-        }
         return {};
     }
 
@@ -234,4 +212,102 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
     }
 
     return {};
+}
+
+InteractionResult Viewer3DHandler::SetModelDrag(const InteractionEvent& event)
+{
+    // 空闲时的广播清理无需编辑能力；例如无数据视图的 StopInput。
+    if (!m_isModelDrag
+        && event.eventKind != InteractionEventKind::PrimaryPress
+        && event.eventKind != InteractionEventKind::SecondaryPress) return {};
+    const auto result = [](bool succeeded) {
+        return InteractionResult{true,true,succeeded, succeeded
+            ? InteractionFailureReason::None : InteractionFailureReason::StateRejected};
+    };
+    if (!m_modelPort || !m_statePort || !m_updatePort || !m_renderer) return result(false);
+    auto* port = dynamic_cast<FeatureModelTransformPort*>(m_modelPort);
+    const auto state = port ? port->GetTransformState() : std::nullopt;
+    if (!state) return result(false);
+    if (m_isModelDrag && state->editToken != m_modelToken) {
+        // 换数据会原子退休旧编辑；迟到鼠标事件只清理自身来源。
+        if (!m_statePort->SetInteracting(m_source,false)) return result(false);
+        m_isModelDrag = false;
+        m_modelToken = 0;
+        return result(true);
+    }
+    const bool isCancel = event.eventKind == InteractionEventKind::Cancel
+        || event.eventKind == InteractionEventKind::Exit
+        || event.toolMode != ToolMode::ModelTransform;
+    if (m_isModelDrag && isCancel) {
+        if (!port->StopTransform(m_modelToken)
+            || !m_statePort->SetInteracting(m_source,false)) return result(false);
+        m_isModelDrag = false;
+        m_modelToken = 0;
+        return result(m_updatePort->SetRenderNeeded());
+    }
+    const bool isPrimary = event.eventKind == InteractionEventKind::PrimaryPress;
+    const bool isSecondary = event.eventKind == InteractionEventKind::SecondaryPress;
+    if (!m_isModelDrag && (isPrimary || isSecondary)) {
+        // 旋转已由上游窄输入能力消费；本层只保留 Shift 平移和 Ctrl+Shift 缩放。
+        if (isPrimary && !event.isShiftDown) return result(false);
+        auto* prop = m_modelPort->GetMainProp();
+        if (!prop || !m_renderer->GetRenderWindow()) return result(false);
+        std::copy_n(prop->GetCenter(), 3, m_modelCenter.begin());
+        m_renderer->SetWorldPoint(m_modelCenter[0],m_modelCenter[1],m_modelCenter[2],1);
+        m_renderer->WorldToDisplay();
+        m_modelDepth = m_renderer->GetDisplayPoint()[2];
+        m_renderer->SetDisplayPoint(event.x,event.y,m_modelDepth);
+        m_renderer->DisplayToWorld();
+        const auto* point = m_renderer->GetWorldPoint();
+        if (!std::isfinite(point[3]) || std::abs(point[3]) < 1e-12) return result(false);
+        for (int axis=0; axis<3; ++axis) m_panStart[axis] = point[axis]/point[3];
+        const auto token = port->StartTransform(*state);
+        if (!token) return result(false);
+        if (!m_statePort->SetInteracting(m_source,true)) {
+            (void)port->StopTransform(*token);
+            return result(false);
+        }
+        m_modelToken = *token;
+        m_modelSequence = 0;
+        m_modelStart = state->modelToWorld;
+        m_isModelScale = isPrimary && event.isCtrlDown;
+        m_isModelSecondary = isSecondary;
+        m_modelStartY = event.y;
+        m_isModelDrag = true;
+        return result(true);
+    }
+    const bool isRelease = event.eventKind == (m_isModelSecondary
+        ? InteractionEventKind::SecondaryRelease : InteractionEventKind::PrimaryRelease);
+    if (m_isModelDrag && (event.eventKind == InteractionEventKind::PointerMove || isRelease)) {
+        auto matrix = m_modelStart;
+        if (m_isModelScale) {
+            const double factor = std::exp(std::clamp(
+                (static_cast<double>(event.y)-m_modelStartY)*0.01,-20.0,20.0));
+            for (int row=0; row<3; ++row) {
+                for (int column=0; column<3; ++column) matrix[row*4+column] *= factor;
+                matrix[row*4+3] = m_modelCenter[row]
+                    + factor*(m_modelStart[row*4+3]-m_modelCenter[row]);
+            }
+        }
+        else {
+            m_renderer->SetDisplayPoint(event.x,event.y,m_modelDepth);
+            m_renderer->DisplayToWorld();
+            const auto* point = m_renderer->GetWorldPoint();
+            if (!std::isfinite(point[3]) || std::abs(point[3]) < 1e-12) return result(false);
+            for (int axis=0; axis<3; ++axis)
+                matrix[axis*4+3] += point[axis]/point[3] - m_panStart[axis];
+        }
+        const bool isSet = isRelease
+            ? port->SetTransformCommit(m_modelToken,m_modelSequence+1,matrix)
+            : port->SetTransformPreview(m_modelToken,m_modelSequence+1,matrix);
+        if (!isSet) return result(false);
+        ++m_modelSequence;
+        if (isRelease) {
+            if (!m_statePort->SetInteracting(m_source,false)) return result(false);
+            m_isModelDrag = false;
+            m_modelToken = 0;
+        }
+        return result(m_updatePort->SetRenderNeeded());
+    }
+    return m_isModelDrag ? result(true) : InteractionResult{};
 }

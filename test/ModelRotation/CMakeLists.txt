@@ -1,0 +1,16 @@
+add_executable(mvvcvtk_model_rotation_tests ModelRotationTests.cpp ModelRotationSessionTests.cpp)
+target_include_directories(mvvcvtk_model_rotation_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/MVVCVTK/features/ModelRotation/include")
+target_link_libraries(mvvcvtk_model_rotation_tests PRIVATE
+    mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTK::ModelRotation
+    ${MVVCVTK_VTK_TARGETS})
+SetTargetDefaults(mvvcvtk_model_rotation_tests)
+vtk_module_autoinit(TARGETS mvvcvtk_model_rotation_tests MODULES ${MVVCVTK_VTK_TARGETS})
+set_target_properties(mvvcvtk_model_rotation_tests PROPERTIES FOLDER "MVVCVTK/Tests")
+add_test(NAME ModelRotation.behavior COMMAND mvvcvtk_model_rotation_tests)
+SetTestRuntime(ModelRotation.behavior mvvcvtk_model_rotation_tests)
+add_executable(mvvcvtk_rotation_header_probe ModelRotationHeaderProbe.cpp)
+target_link_libraries(mvvcvtk_rotation_header_probe PRIVATE MVVCVTK::ModelRotation)
+SetTargetDefaults(mvvcvtk_rotation_header_probe)
+add_test(NAME ModelRotation.independent_link COMMAND mvvcvtk_rotation_header_probe)
+SetTestRuntime(ModelRotation.independent_link mvvcvtk_rotation_header_probe)

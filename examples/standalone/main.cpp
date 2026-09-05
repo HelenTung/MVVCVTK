@@ -21,6 +21,9 @@
 #include "Host/HostFeature.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+#include "Host/ModelRotationHostFeature.h"
+#endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
 #include "Host/PartSegmentationHostFeature.h"
 #endif
@@ -551,6 +554,10 @@ namespace {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         std::cout << "Surface: U estimate ISO50 and apply isovalue, Ctrl+U clear estimate, Alt+U cancel\n";
 #endif
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        std::cout << "Rotation: J enable/leave | drag rotate | Shift+J +15 deg Z | Ctrl+J -15 deg Z | Alt+J undo\n"
+            << "Rotation tool: Shift+drag pan, Ctrl+Shift+drag scale; Escape cancels current drag\n";
+#endif
         std::cout << "M view mode | S export data | T export slices | Escape leave active tool / exit\n"
             << "--demo: small two-object volume for interactive exploration\n"
             << "--demo-audit: exercise the same shortcut routes and exit\n"
@@ -615,6 +622,12 @@ namespace {
                 HostKeyChord{ '7', {}, false, true },
                 HostKeyChord{ '8', {}, false, true },
                 HostKeyChord{ '9', {}, false, true }
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+                , HostKeyChord{ 'j' }
+                , HostKeyChord{ 'j', {}, false, false, true }
+                , HostKeyChord{ 'j', {}, true }
+                , HostKeyChord{ 'j', {}, false, true }
+#endif
             }
         {
         }
@@ -690,6 +703,10 @@ namespace {
         }
 
         void StartDemoFit() { m_isDemoFitPending = true; }
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        void SetRotationFeature(std::weak_ptr<ModelRotationHostFeature> feature)
+        { m_rotationFeature = std::move(feature); }
+#endif
 
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         void SetSurfaceFeature(std::weak_ptr<SurfaceDeterminationHostFeature> feature)
@@ -733,6 +750,9 @@ namespace {
             CropPrevious, CropNext, CropBuildAlias, CropRestoreAlias, CropExit,
             CropNode0, CropNode1, CropNode2, CropNode3, CropNode4,
             CropNode5, CropNode6, CropNode7, CropNode8, CropNode9,
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+            RotationTool, RotationPlus, RotationMinus, RotationUndo,
+#endif
             Count
         };
 
@@ -1380,10 +1400,75 @@ namespace {
         }
 #endif
 
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        bool SetRotationMode(bool isEnabled)
+        {
+            const auto rotation = m_rotationFeature.lock();
+            if (!rotation) return false;
+            const auto crop = m_cropFeature.lock();
+            if (isEnabled && crop && crop->GetState().isActive) {
+                CropHostRequest exit;
+                exit.action = CropHostAction::Exit;
+                if (!crop->SendRequest(std::move(exit))) return false;
+            }
+            ModelRotationRequest request;
+            request.action = ModelRotationAction::SetEnabled;
+            request.isEnabled = false;
+            if (!rotation->SendRequest(request)) return false;
+            for (const auto& view : m_session.GetRenderViewStates()) {
+                HostToolSetRequest tool;
+                tool.targetView.viewId = view.id;
+                tool.toolMode = isEnabled ? HostToolMode::ModelTransform : HostToolMode::Navigation;
+                if (!m_session.SendRequest(std::move(tool))) return false;
+            }
+            request.isEnabled = isEnabled;
+            return rotation->SendRequest(request)
+                && SetDemoStatus(isEnabled ? "Rotation: drag / Escape cancel / J leave" : "Rotation: idle");
+        }
+#endif
+
         bool SendControl(const ControlAction action)
         {
             ++m_controlRevision;
             switch (action) {
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+            case ControlAction::RotationTool:
+            case ControlAction::RotationPlus:
+            case ControlAction::RotationMinus:
+            case ControlAction::RotationUndo: {
+                const auto rotation = m_rotationFeature.lock();
+                if (!rotation) return false;
+                if (action == ControlAction::RotationTool) {
+                    if (m_isRotationQueued || !m_host) return false;
+                    const bool isEnabled = !rotation->GetState().isEnabled;
+                    const auto weak = weak_from_this();
+                    m_isRotationQueued = true;
+                    // Router 正在派发按键时不能替换自身 style；只排一个 owner 控制边界。
+                    if (m_host->SendOwnerComplete([weak,isEnabled] {
+                        if (const auto owner = weak.lock()) {
+                            owner->m_isRotationQueued = false;
+                            if (!owner->SetRotationMode(isEnabled))
+                                (void)owner->SetDemoStatus("Rotation: tool switch rejected");
+                        }
+                    })) return true;
+                    m_isRotationQueued = false;
+                    return false;
+                }
+                // 应用负责工具组合：任何旋转入口先结束 Crop 的 widget 编辑，历史仍保留。
+                const auto crop = m_cropFeature.lock();
+                if (crop && crop->GetState().isActive) {
+                    CropHostRequest exit;
+                    exit.action = CropHostAction::Exit;
+                    if (!crop->SendRequest(std::move(exit))) return false;
+                }
+                ModelRotationRequest request;
+                request.action = action == ControlAction::RotationUndo
+                    ? ModelRotationAction::Undo : ModelRotationAction::Rotate;
+                if (request.action == ModelRotationAction::Rotate)
+                    request.angleDeg = action == ControlAction::RotationPlus ? 15 : -15;
+                return rotation->SendRequest(request);
+            }
+#endif
             case ControlAction::ColorUp:
             case ControlAction::ColorDown:
             case ControlAction::OpacityUp:
@@ -1460,6 +1545,20 @@ namespace {
                 m_appKeyDown.fill(false);
                 return {};
             }
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+            // 应用层在接纳 Crop 命令前结束旋转手势。
+            if (event.eventKind == InteractionEventKind::KeyPress
+                && (GetKeyMatched(event,'o') || GetKeyMatched(event,'p'))) {
+                const auto rotation = m_rotationFeature.lock();
+                if (rotation && rotation->GetState().isEnabled) {
+                    ModelRotationRequest exit;
+                    exit.action = ModelRotationAction::SetEnabled;
+                    exit.isEnabled = false;
+                    if (!rotation->SendRequest(exit))
+                        return {true,true,false,InteractionFailureReason::CleanupRejected};
+                }
+            }
+#endif
             if (event.eventKind == InteractionEventKind::KeyRelease) {
                 bool wasDown = false;
                 const std::array<bool, 4> appMatches{
@@ -1491,6 +1590,11 @@ namespace {
                 if (event.keySym == m_appHotkeys.exitKeySym) appAction = 3;
             }
             if (appAction == 3) {
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+                const auto rotation = m_rotationFeature.lock();
+                if (rotation && rotation->GetState().status == ModelRotationStatus::Dragging)
+                    return {}; // The rotation input binding owns Escape during its gesture.
+#endif
                 const auto crop = m_cropFeature.lock();
                 if (crop && crop->GetState().isActive) appAction = -1;
             }
@@ -1575,6 +1679,10 @@ namespace {
         std::string m_cropStatus;
         std::uint64_t m_controlRevision = 0;
         std::weak_ptr<GapHostFeature> m_gapFeature;
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        std::weak_ptr<ModelRotationHostFeature> m_rotationFeature;
+        bool m_isRotationQueued = false;
+#endif
         GapHostStartParams m_gapStart;
         HostHotkeyConfig m_appHotkeys;
         std::array<bool, 4> m_appKeyDown{};
@@ -2410,6 +2518,12 @@ int main(int argc, char* argv[])
     auto gapFeature = std::make_shared<GapHostFeature>(
         std::move(gapConfig));
     features.push_back(gapFeature);
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+    ModelRotationConfig rotationConfig;
+    rotationConfig.targetViews = allViews;
+    auto rotationFeature = std::make_shared<ModelRotationHostFeature>(rotationConfig);
+    features.push_back(rotationFeature);
+#endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     auto partConfig = GetPartConfig();
     auto partStart = partConfig.defaultStart;
@@ -2447,7 +2561,12 @@ int main(int argc, char* argv[])
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
     controlFeature->SetSurfaceFeature(surfaceFeature);
 #endif
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+    features.insert(features.begin(), controlFeature);
+    controlFeature->SetRotationFeature(rotationFeature);
+#else
     features.push_back(controlFeature);
+#endif
     auto demoAudit = std::make_shared<DemoAuditFeature>(session);
     demoAudit->SetFailureCheck([&]() -> std::string {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
@@ -2537,6 +2656,22 @@ int main(int argc, char* argv[])
         demoAudit->AddStep("crop remove mode", {'2'}, [cropFeature] {
             return cropFeature->GetState().history.editMode == CropRemovalMode::RemoveInside;
         });
+#if defined(MVVCVTK_HAS_MODEL_ROTATION)
+        demoAudit->AddStep("rotation numeric", {'j', {}, false, false, true}, [rotationFeature, cropFeature] {
+            return rotationFeature->GetState().status == ModelRotationStatus::Succeeded
+                && rotationFeature->GetState().undoCount == 1 && !cropFeature->GetState().isActive;
+        });
+        demoAudit->AddStep("rotation undo", {'j', {}, false, true}, [rotationFeature] {
+            return rotationFeature->GetState().status == ModelRotationStatus::Succeeded
+                && rotationFeature->GetState().undoCount == 0;
+        });
+        demoAudit->AddStep("rotation tool", {'j'}, [rotationFeature] {
+            return rotationFeature->GetState().isEnabled;
+        });
+        demoAudit->AddStep("rotation to crop", {'o'}, [rotationFeature, cropFeature] {
+            return !rotationFeature->GetState().isEnabled && cropFeature->GetState().isActive;
+        });
+#endif
         demoAudit->AddStep("final graph", {0, "F2"}, ready);
         features.push_back(demoAudit);
     }

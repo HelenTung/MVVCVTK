@@ -2,6 +2,7 @@
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/HostFrameCoordinator.h"
 #include "Host/HostWorkSignal.h"
+#include "Host/FeatureModelTransformPort.h"
 #include "App/Services/PrimaryDataActivation.h"
 #include "App/AppState.h"
 #include "Data/DataService.h"
@@ -79,6 +80,9 @@ public:
     // StopOwner 后所有跨层调用稳定返回失败。
     class FeatureHostBridge final {
     public:
+        bool GetIsOwnerActive() const noexcept
+        { return GetOwnerPorts().views != nullptr; }
+
         bool StartOwner(
             HostViewRuntimeRegistry& views,
             HostInputPort& input,
@@ -488,20 +492,66 @@ public:
     };
 
     class FeatureHostControlPort final
-        : public FeatureHostControl {
+        : public FeatureHostControl, public FeatureModelTransformPort {
     public:
         FeatureHostControlPort(
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
             std::function<bool(std::function<void()>)> onOwnerComplete,
             std::shared_ptr<FeatureLifetime> lifetime,
-            std::weak_ptr<HostWorkSignal> workSignal)
+            std::weak_ptr<HostWorkSignal> workSignal,
+            std::weak_ptr<SharedInteractionState> state)
             : m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_onOwnerComplete(std::move(onOwnerComplete))
             , m_lifetime(std::move(lifetime))
             , m_workSignal(std::move(workSignal))
+            , m_state(std::move(state))
         {
+        }
+
+        std::optional<ModelTransformSnapshot> GetTransformState() const override
+        {
+            const auto state = GetStateOwner();
+            return state ? std::optional<ModelTransformSnapshot>(
+                state->GetTransformState()) : std::nullopt;
+        }
+
+        std::optional<std::uint64_t> StartTransform(
+            const ModelTransformSnapshot& expected) override
+        {
+            const auto state = GetStateOwner();
+            const auto token = state ? state->StartTransform(m_featureId, expected) : std::nullopt;
+            if (token) (void)SendWorkAvailable();
+            return token;
+        }
+
+        bool SetTransformPreview(std::uint64_t token, std::uint64_t sequence,
+            const std::array<double, 16>& matrix) override
+        {
+            const auto state = GetStateOwner();
+            const bool isSet = state && state->SetTransformPreview(
+                m_featureId, token, sequence, matrix);
+            if (isSet) (void)SendWorkAvailable();
+            return isSet;
+        }
+
+        bool SetTransformCommit(std::uint64_t token, std::uint64_t sequence,
+            const std::array<double, 16>& matrix) override
+        {
+            const auto state = GetStateOwner();
+            const bool isSet = state && state->SetTransformPreview(
+                m_featureId, token, sequence, matrix, true);
+            if (isSet) (void)SendWorkAvailable();
+            return isSet;
+        }
+
+        bool StopTransform(std::uint64_t token) override
+        {
+            const auto state = GetStateOwner();
+            const bool isSet = state && state->StopTransform(m_featureId, token);
+            if (isSet) (void)SendWorkAvailable();
+            return isSet;
         }
 
         bool SetActiveViews(
@@ -641,6 +691,13 @@ public:
         }
 
     private:
+        std::shared_ptr<SharedInteractionState> GetStateOwner() const
+        {
+            const auto bridge = m_bridge.lock();
+            return bridge && bridge->GetIsOwnerActive()
+                && m_lifetime && m_lifetime->isActive.load() ? m_state.lock() : nullptr;
+        }
+
         static bool GetTargetValid(const std::weak_ptr<FeatureHostBridge>& weakBridge,
             const std::shared_ptr<FeatureLifetime>& lifetime, const std::string& id,
             const HostSemanticTarget& target)
@@ -659,6 +716,7 @@ public:
         std::function<bool(std::function<void()>)> m_onOwnerComplete;
         std::shared_ptr<FeatureLifetime> m_lifetime;
         std::weak_ptr<HostWorkSignal> m_workSignal;
+        std::weak_ptr<SharedInteractionState> m_state;
     };
 
     static std::atomic<std::uint64_t> s_nextAttachmentId;
@@ -799,7 +857,7 @@ bool HostFeatureRuntime::Impl::AttachFeature(
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            m_ports.onOwnerComplete, lifetime, m_ports.workSignal);
+            m_ports.onOwnerComplete, lifetime, m_ports.workSignal, m_ports.state);
     }
     catch (...) {
         return false;

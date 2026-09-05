@@ -4,8 +4,6 @@
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 #include <vtkCamera.h>
-#include <vtkTransform.h>
-#include <vtkMatrix4x4.h>
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -51,8 +49,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     };
 
     // 模式可在按下与释放之间切换；Release/Cancel 必须先于模式门控清理 source。
-    const bool isPrimaryActive = m_isDragCrosshair
-        || m_isDragSlice || m_isDragWindowLevel;
+    const bool isPrimaryActive = m_isDragCrosshair || m_isDragWindowLevel;
     const bool isPrimaryCleanup =
         eve.eventKind == InteractionEventKind::PrimaryRelease
         || eve.eventKind == InteractionEventKind::Cancel;
@@ -63,7 +60,6 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 false, InteractionFailureReason::CleanupRejected);
         }
         m_isDragCrosshair = false;
-        m_isDragSlice = false;
         m_isDragWindowLevel = false;
         return getResult(true, InteractionFailureReason::None);
     }
@@ -96,7 +92,7 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     }
 
     // 2D 模式下同一时刻只允许一种主交互语义成立：
-    // 滚轮切片、isShiftDown 左键拖十字线、isCtrlDown 左键定轴旋转、右键调窗彼此互斥。
+    // 旋转由独立 Feature 接管；默认处理滚轮、十字线、调窗和相机缩放。
 
     // ── 滚轮切片 ──────────────────────────────────────────────────────
     if (eve.eventKind == InteractionEventKind::WheelForward
@@ -115,13 +111,8 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     {
         if (eve.isCtrlDown)
         {
-            m_lastRotateX = eve.x;
-            m_lastRotateY = eve.y;
-            const bool isStarted =
-                m_statePort->SetInteracting(m_source, true);
-            m_isDragSlice = isStarted;
-			return getResult(
-                isStarted, InteractionFailureReason::StateRejected);
+            // 未装配旋转 Feature 时也不允许底层 style 修改模型。
+            return getResult(false, InteractionFailureReason::StateRejected);
         }
         if (eve.isShiftDown) {
             const bool isStarted =
@@ -155,14 +146,6 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                 m_statePort->SetInteracting(m_source, false);
             if (isStopped) m_isDragCrosshair = false;
             return getResult(
-                isStopped, InteractionFailureReason::CleanupRejected);
-        }
-        if (m_isDragSlice)
-        {
-            const bool isStopped =
-                m_statePort->SetInteracting(m_source, false);
-            if (isStopped) m_isDragSlice = false;
-			return getResult(
                 isStopped, InteractionFailureReason::CleanupRejected);
         }
         if (m_isDragWindowLevel) {
@@ -304,79 +287,6 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
                     false, InteractionFailureReason::RenderRejected);
             }
             return getResult(
-                true, InteractionFailureReason::None);
-        }
-
-        // 路径C：定轴旋转
-        if (m_isDragSlice)
-        {
-            if (!m_renderer)
-                return{true,true};
-			auto cursor = m_slicePort->GetCursorWorld();
-			// 旋转中心固定取当前十字线位置：先从世界坐标投到屏幕坐标，
-			// 后续鼠标轨迹就能在同一显示平面内稳定计算角度增量。
-			m_renderer->SetWorldPoint(cursor[0], cursor[1], cursor[2], 1.0);
-            m_renderer->WorldToDisplay();
-            auto pos = m_renderer->GetDisplayPoint();
-			double cx = pos[0];
-			double cy = pos[1];
-
-			// 当鼠标太靠近中心点时忽略以免发生抖动跳跃
-            double distSq = (eve.x - cx) * (eve.x - cx) + (eve.y - cy) * (eve.y - cy);
-            if (distSq < 25)
-				return { true, true };
-
-			// 计算旋转增量（单位度）
-			double v2x = eve.x - cx;
-			double v2y = eve.y - cy;
-			double v1x = m_lastRotateX - cx;
-			double v1y = m_lastRotateY - cy;
-			double cross = v1x * v2y - v1y * v2x; // 叉积（判断旋转方向）v1v2sinθ
-			double proj = v1x * v2x + v1y * v2y;   // 点积（计算旋转幅度）v1v2cosθ
-
-            //所有 sin/cos/tan 的输入参数必须是弧度。
-			//所有 asin / acos / atan / atan2 的输出结果必须是弧度，atan2 比 atan 更适合计算两向量之间的夹角，因为它考虑了象限信息，可以正确处理所有情况（包括 v1 或 v2 之一为零的情况）。
-			double deltaAngleRadians = std::atan2(cross, proj);
-            double deltaAngleDeg = vtkMath::DegreesFromRadians(deltaAngleRadians);
-
-			auto cam = m_renderer->GetActiveCamera();
-            double focous[3], campos[3];
-			cam->GetPosition(campos);
-			cam->GetFocalPoint(focous);
-
-            // 是为了提取出正确的旋转轴（Rotation Axis）
-			double viewDir[3] = { focous[0] - campos[0], focous[1] - campos[1], focous[2] - campos[2] };
-			double RotationAxis[3] = { -viewDir[0], -viewDir[1], -viewDir[2] };
-			vtkMath::Normalize(viewDir);
-			vtkMath::Normalize(RotationAxis);
-
-            // 构建“绕十字线中心、沿当前视线法向”的增量旋转，
-            // 然后把结果矩阵整包回写给服务层，由服务层继续触发 Transform 链路。
-			auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            auto oldModelToWorld = m_modelPort->GetModelMatrix();
-			modelToWorldMatrix->DeepCopy(oldModelToWorld.data());
-
-			auto transform = vtkSmartPointer<vtkTransform>::New();
-			transform->SetMatrix(modelToWorldMatrix);
-			transform->PostMultiply();
-			transform->Translate(-cursor[0], -cursor[1], -cursor[2]); // 平移到旋转中心
-			transform->RotateWXYZ(deltaAngleDeg, RotationAxis); // 旋转
-            transform->Translate(cursor[0], cursor[1], cursor[2]); // 平移回原点
-
-			// 将旋转后的矩阵同步回服务，触发模型更新
-            std::array<double, 16> nextModelToWorld{};
-            const double* nextMatrix = transform->GetMatrix()->GetData();
-            std::copy(
-                nextMatrix,
-                nextMatrix + nextModelToWorld.size(),
-                nextModelToWorld.begin());
-            if (!m_modelPort->SetModelMatrix(nextModelToWorld)) {
-                return getResult(
-                    false, InteractionFailureReason::StateRejected);
-            }
-            m_lastRotateX = eve.x;
-            m_lastRotateY = eve.y;
-			return getResult(
                 true, InteractionFailureReason::None);
         }
 

@@ -326,10 +326,22 @@ int GetPartDisplayFailCount()
     }
     failureCount += GetCaseResult(
         mapper
-            && std::abs(normal[0] - 1.0) < 1e-12
+            && std::abs(normal[0]) < 1e-12
             && std::abs(normal[1]) < 1e-12
-            && std::abs(normal[2]) < 1e-12,
-        "Slice overlay follows the image direction axis") ? 0 : 1;
+            && std::abs(normal[2] - 1.0) < 1e-12,
+        "Slice overlay keeps the main world plane for non-identity image direction") ? 0 : 1;
+    FeatureOverlayState rotatedState;
+    rotatedState.cursor = {7,8,9};
+    rotatedState.modelToWorld = {0,-3,0,10, 2,0,0,20, 0,0,4,30, 0,0,0,1};
+    rotatedSlice->SetOverlayState(rotatedState);
+    if (mapper && mapper->GetSlicePlane()) {
+        mapper->GetSlicePlane()->GetNormal(normal);
+        const auto* origin = mapper->GetSlicePlane()->GetOrigin();
+        failureCount += GetCaseResult(normal[0] == 0 && normal[1] == 0 && normal[2] == 1
+            && origin[0] == 7 && origin[1] == 8 && std::abs(origin[2]-9.001)<1e-10
+            && sliceProp->GetUserMatrix()->GetElement(0,1) == -3,
+            "Rotated/scaled label data uses the same world cursor plane") ? 0 : 1;
+    }
     rotatedSlice->DetachRenderer(rotatedRenderer);
 
     static_assert(std::is_same_v<std::uint32_t, unsigned int>);

@@ -11,6 +11,7 @@
 #endif
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
+#include "Host/FeatureModelTransformPort.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
@@ -88,6 +89,7 @@ public:
         }
         m_views = context.views;
         m_data = context.data;
+        m_transform = std::dynamic_pointer_cast<FeatureModelTransformPort>(context.host);
         return true;
     }
 
@@ -95,6 +97,7 @@ public:
     {
         m_views.reset();
         m_data.reset();
+        m_transform.reset();
         return true;
     }
 
@@ -121,6 +124,7 @@ public:
 
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<TrustedDataPort> m_data;
+    std::shared_ptr<FeatureModelTransformPort> m_transform;
 };
 
 class HostControlProbe final : public FeatureHostControl {
@@ -1104,6 +1108,47 @@ int GetCropFailCount()
             && nextAfterExit.history.nodeCount == 1,
         "Exit hides Crop widgets without locking committed history navigation") ? 0 : 1;
 
+    const auto checkPosePreservesCrop = [&]() {
+        const auto& transform = contextProbe->m_transform;
+        const auto before = transform ? transform->GetTransformState() : std::nullopt;
+        const auto inputBefore = contextProbe->m_data->GetPrimaryImage();
+        if (!before || !inputBefore) return false;
+        const auto historyBefore = feature->GetState().history;
+        const auto graphBefore = contextProbe->m_data->GetDataGraph().commitId;
+        const auto maskTime = inputBefore->validityMask
+            ? inputBefore->validityMask->GetMTime() : 0;
+        const auto setPose = [&](const std::array<double,16>& matrix) {
+            const auto snapshot = transform->GetTransformState();
+            const auto token = snapshot ? transform->StartTransform(*snapshot) : std::nullopt;
+            if (!token || !transform->SetTransformCommit(*token,1,matrix)) return false;
+            for (int poll=0; poll<500; ++poll) {
+                SendHostTick(*endpoint,*timerEndpoint);
+                const auto current = transform->GetTransformState();
+                if (current && !current->editToken)
+                    return current->modelToWorld==matrix;
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        };
+        const std::array<double,16> rotated{0,-1,0,0, 1,0,0,0, 0,0,1,0, 0,0,0,1};
+        if (!setPose(rotated)) return false;
+        const auto inputAfter = contextProbe->m_data->GetPrimaryImage();
+        const auto historyAfter = feature->GetState().history;
+        const bool isPreserved = inputAfter
+            && inputAfter->data == inputBefore->data
+            && inputAfter->image == inputBefore->image
+            && inputAfter->validityMask == inputBefore->validityMask
+            && (!inputAfter->validityMask || inputAfter->validityMask->GetMTime()==maskTime)
+            && contextProbe->m_data->GetDataGraph().commitId==graphBefore
+            && historyAfter.nodeCount==historyBefore.nodeCount
+            && historyAfter.operationCount==historyBefore.operationCount;
+        const bool isRestored = setPose(before->modelToWorld);
+        return isPreserved && isRestored;
+    };
+    failureCount += GetCaseResult(
+        nextAfterExit.history.nodeCount==1 && checkPosePreservesCrop(),
+        "Model pose commit preserves Crop committed history and data graph") ? 0 : 1;
+
     const auto cropExpected =
         contextProbe->m_data->GetPrimaryImage();
     tickGate->isPaused = true;
@@ -1411,6 +1456,10 @@ int GetCropFailCount()
             && isPostCropGapExited,
         "Gap runs DefX from the materialized Crop baseline with a validity mask") ? 0 : 1;
 
+    failureCount += GetCaseResult(
+        activeCropSnapshot && activeCropSnapshot->validityMask && checkPosePreservesCrop(),
+        "Model rotation reuses the materialized Crop validity mask without rebuilding data") ? 0 : 1;
+
     const auto exportId =
         std::chrono::steady_clock::now()
             .time_since_epoch().count();
@@ -1493,7 +1542,7 @@ int GetCropFailCount()
         std::size_t validIndex = exportVoxelCount;
         float validValue = 0.0f;
         std::size_t linearIndex = 0;
-        // 此用例从未改变 Host model matrix，因此 RAW 网格与
+        // 此时 Host model matrix 已恢复原姿态，因此 RAW 网格与
         // crop snapshot 网格一致；另选原值非背景的无效体素，避免假阳性。
         for (int z = extent[4]; z <= extent[5]; ++z) {
             for (int y = extent[2]; y <= extent[3]; ++y) {

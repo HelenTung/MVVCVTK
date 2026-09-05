@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -327,6 +328,7 @@ bool VtkAppHostSession::Impl::BuildSession()
             sessionGeneration = nextSessionGeneration++;
         }
         if (nextSessionGeneration == 0) nextSessionGeneration = 1;
+        core.sharedState->SetTransformGeneration(sessionGeneration);
         HostFrameCoordinator::Callbacks frameCallbacks;
         frameCallbacks.collectUpdates = [this]() {
             return renderViews.CollectFrameUpdates();
@@ -339,13 +341,22 @@ bool VtkAppHostSession::Impl::BuildSession()
             return renderViews.SetFrameIntents(intents);
         };
         frameCallbacks.applyFeatureUpdates = [this]() {
-            return renderViews.ApplyFrameUpdates();
+            return core.sharedState->StartTransformFrame()
+                && renderViews.ApplyFrameUpdates();
         };
         frameCallbacks.buildStage = [this](
             const std::uint64_t epoch) {
-            return renderViews.BuildFrameStage(epoch);
+            const auto status = renderViews.BuildFrameStage(epoch);
+            if (!core.sharedState->GetTransformFrameValid())
+                return HostFrameStageStatus::Failed;
+            if (status == HostFrameStageStatus::Unchanged
+                && !core.sharedState->SetTransformFrameCommit())
+                return HostFrameStageStatus::Failed;
+            return status;
         };
         frameCallbacks.setCommit = [this](const std::uint64_t epoch) {
+            if (!core.sharedState->SetTransformFrameCommit())
+                throw std::runtime_error("Model transform input changed before frame commit");
             renderViews.SetFrameCommit(epoch);
         };
         frameCallbacks.sendRender = [this](const std::uint64_t epoch) {
@@ -362,6 +373,10 @@ bool VtkAppHostSession::Impl::BuildSession()
         };
         frameCallbacks.clearStage = [this]() {
             renderViews.ClearFrameStage();
+            if (core.sharedState->ClearTransformFrame()) {
+                // 切回已发布姿态后恢复所有投影；失败仍保留 dirty，帧屏障禁止提前 Render。
+                (void)renderViews.ApplyFrameUpdates();
+            }
         };
         frameCoordinator = std::make_shared<HostFrameCoordinator>(
             sessionGeneration, std::move(frameCallbacks));
