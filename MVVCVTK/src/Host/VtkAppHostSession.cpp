@@ -3,6 +3,8 @@
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
+#include "Host/Internal/HostFeatureRuntime.h"
+#include "Host/Internal/HostImageReadRuntime.h"
 #include "Host/HostFrameCoordinator.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostInputRegistry.h"
@@ -11,7 +13,6 @@
 #include "App/AppState.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
-#include "Data/DataPayloads.h"
 #include "Data/LabelMapReader.h"
 
 #include <algorithm>
@@ -28,135 +29,11 @@
 #include <utility>
 #include <vector>
 
-std::function<std::optional<ImageDescriptor>()> HostCoreServices::GetImageDescriptor() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData = sharedDataMgr;
-    return [weakData]() {
-        const auto data = weakData.lock();
-        return data ? data->GetImageDescriptor() : std::optional<ImageDescriptor>{};
-    };
-}
-
-std::function<std::optional<ImageReadState>()>
-HostCoreServices::GetImageReadState() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData =
-        sharedDataMgr;
-    return [weakData]() {
-        const auto data = weakData.lock();
-        return data
-            ? data->GetImageReadState()
-            : std::optional<ImageReadState>{};
-    };
-}
-
-std::function<ImageReadResult(const ImageReadRequest&)>
-HostCoreServices::GetImageReadResult() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData =
-        sharedDataMgr;
-    return [weakData](const ImageReadRequest& request) {
-        const auto data = weakData.lock();
-        if (data) {
-            return data->GetImageReadResult(
-                request, TaskStopToken{});
-        }
-        return ImageReadResult{};
-    };
-}
-
-std::function<ImageReadChunkResult(
-    const ImageReadRequest&,
-    std::size_t)>
-HostCoreServices::GetImageReadChunk() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData =
-        sharedDataMgr;
-    return [weakData](
-        const ImageReadRequest& request,
-        const std::size_t voxelOffset) {
-        const auto data = weakData.lock();
-        if (data) {
-            return data->GetImageReadChunk(
-                request, voxelOffset, TaskStopToken{});
-        }
-        return ImageReadChunkResult{};
-    };
-}
-
 class VtkAppHostSession::Impl final {
 public:
     using StopToken = std::uint64_t;
 
     struct PendingStopEntry;
-
-    class FeatureCallScope final {
-    public:
-        explicit FeatureCallScope(bool& isCalling) noexcept
-            : m_isCalling(isCalling) { m_isCalling = true; }
-        ~FeatureCallScope() noexcept { m_isCalling = false; }
-        FeatureCallScope(const FeatureCallScope&) = delete;
-        FeatureCallScope& operator=(const FeatureCallScope&) = delete;
-    private:
-        bool& m_isCalling;
-    };
-
-    struct FeatureCompleteEntry final {
-        std::function<void()> complete;
-
-        void Send() noexcept
-        {
-            // 仅 owner thread 消费；先取走终态，重入/本批旧槽位不能重放。
-            auto callback = std::exchange(complete, {});
-            if (!callback) return;
-            try { callback(); }
-            catch (...) {}
-        }
-    };
-
-    struct FeatureLifetime final {
-        std::atomic<bool> isActive{ true };
-        std::weak_ptr<AbstractDataManager> data;
-        // 仅 owner thread 修改；完成队列可跨线程读取 isActive。
-        std::vector<DataObserverId> observers;
-        std::mutex completeMutex;
-        std::vector<std::weak_ptr<FeatureCompleteEntry>> completes;
-
-        void Stop(const bool shouldComplete)
-        {
-            std::vector<std::weak_ptr<FeatureCompleteEntry>> pendingCompletes;
-            {
-                const std::lock_guard<std::mutex> lock(completeMutex);
-                isActive.store(false);
-                pendingCompletes.swap(completes);
-            }
-            const auto manager = data.lock();
-            auto pending = std::move(observers);
-            observers.clear();
-            if (manager) {
-                for (const auto observer : pending) {
-                    // 具体 DataGraphStore 的 false 仅表示该订阅已不存在。
-                    (void)manager->DetachDataChange(observer);
-                }
-            }
-            for (const auto& pendingComplete : pendingCompletes) {
-                const auto entry = pendingComplete.lock();
-                if (!entry) continue;
-                if (shouldComplete) entry->Send();
-                else entry->complete = {};
-            }
-        }
-    };
-
-    struct FeatureEntry final {
-        std::string id;
-        // attached Feature 属于 Session aggregate；只有 Detach/Stop 成功后才释放，
-        // 从而保证 Feature 内的 VTK 绑定始终在 owner thread 上确定性清理。
-        std::shared_ptr<HostFeature> feature;
-        // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
-        bool isHostDetached = false;
-        std::shared_ptr<FeatureLifetime> lifetime;
-    };
 
     class InputEndpoint final : public HostInputEndpoint {
     public:
@@ -176,567 +53,9 @@ public:
     };
 
     struct OwnerCompleteState final {
-        struct ImageReadEntry final {
-            ImageReadCallback callback;
-            std::optional<ImageReadResult> result;
-            bool isReady = false;
-        };
-
         std::mutex mutex;
         std::vector<std::function<void()>> completes;
-        std::shared_ptr<ImageReadEntry> imageRead;
         bool isActive = true;
-    };
-
-    // Feature 只持有窄能力对象；具体 RuntimeRegistry/HotkeyRouter 只在组合根内部可见，
-    // StopOwner 后所有跨层调用稳定返回失败。
-    class FeatureHostBridge final {
-    public:
-        bool StartOwner(
-            HostViewRuntimeRegistry& views,
-            HostInputPort& input,
-            const std::shared_ptr<HostFrameCoordinator>& frames,
-            const std::thread::id ownerThread)
-        {
-            const std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_isActive || !frames) return false;
-            m_views = &views;
-            m_input = &input;
-            m_frames = frames;
-            m_ownerThread = ownerThread;
-            m_isActive = true;
-            return true;
-        }
-
-        bool StopOwner()
-        {
-            const std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_isActive
-                && m_ownerThread != std::this_thread::get_id()) {
-                return false;
-            }
-            m_isActive = false;
-            m_views = nullptr;
-            m_input = nullptr;
-            m_frames.reset();
-            m_ownerThread = {};
-            return true;
-        }
-
-        std::vector<HostFeatureView> GetViews(
-            const HostViewTargets& targets) const
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views ? ports.views->GetFeatureViews(targets)
-                : std::vector<HostFeatureView>{};
-        }
-
-        std::shared_ptr<FeatureViewService> GetFeaturePort(
-            const std::string& viewId) const
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views ? ports.views->GetFeaturePort(viewId)
-                : std::shared_ptr<FeatureViewService>{};
-        }
-
-        std::shared_ptr<OverlayService> GetOverlayPort(
-            const std::string& viewId) const
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views ? ports.views->GetOverlayPort(viewId)
-                : std::shared_ptr<OverlayService>{};
-        }
-
-        std::optional<HostInputView> GetInputView(
-            const HostViewTarget& target) const
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views ? ports.views->GetInputView(target)
-                : std::optional<HostInputView>{};
-        }
-
-        bool SetActiveViews(
-            const std::string& featureId,
-            const std::vector<std::string>& viewIds)
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views
-                && ports.views->SetFeatureViews(featureId, viewIds);
-        }
-
-        bool SetViewStatus(
-            const std::vector<std::string>& viewIds,
-            const std::string& status)
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.views
-                && ports.views->SetViewStatus(viewIds, status);
-        }
-
-        bool SendSceneDelta(
-            const std::string& featureId,
-            FeatureSceneDelta delta)
-        {
-            std::shared_ptr<HostFrameCoordinator> frames;
-            {
-                const std::lock_guard<std::mutex> lock(m_mutex);
-                if (!m_isActive) return false;
-                frames = m_frames.lock();
-            }
-            return frames
-                && frames->Enqueue(featureId, std::move(delta));
-        }
-
-        bool AttachInput(HostInputBinding binding)
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.input
-                && ports.input->AttachInput(std::move(binding));
-        }
-
-        bool DetachInput(
-            const std::string_view featureId)
-        {
-            const OwnerPorts ports = GetOwnerPorts();
-            return ports.input
-                && ports.input->DetachInput(featureId);
-        }
-
-    private:
-        struct OwnerPorts final {
-            HostViewRuntimeRegistry* views = nullptr;
-            HostInputPort* input = nullptr;
-        };
-
-        OwnerPorts GetOwnerPorts() const noexcept
-        {
-            const std::lock_guard<std::mutex> lock(m_mutex);
-            if (!m_isActive || !m_views || !m_input
-                || m_ownerThread != std::this_thread::get_id()) {
-                return {};
-            }
-
-            // StopOwner 只能在同一 owner thread 执行；因此锁外调用期间，
-            // Registry/Input 的借用生命周期稳定，同时避免跨层锁顺序反转。
-            return { m_views, m_input };
-        }
-
-        mutable std::mutex m_mutex;
-        HostViewRuntimeRegistry* m_views = nullptr;
-        HostInputPort* m_input = nullptr;
-        std::weak_ptr<HostFrameCoordinator> m_frames;
-        std::thread::id m_ownerThread;
-        bool m_isActive = false;
-    };
-
-    class FeatureViewDirectoryPort final
-        : public FeatureViewDirectory {
-    public:
-        explicit FeatureViewDirectoryPort(
-            std::weak_ptr<FeatureHostBridge> bridge,
-            std::shared_ptr<FeatureLifetime> lifetime)
-            : m_bridge(std::move(bridge))
-            , m_lifetime(std::move(lifetime))
-        {
-        }
-
-        std::vector<HostFeatureView> GetViews(
-            const HostViewTargets& targets) const override
-        {
-            const auto bridge = GetBridge();
-            return bridge
-                ? bridge->GetViews(targets)
-                : std::vector<HostFeatureView>{};
-        }
-
-        std::shared_ptr<FeatureViewService> GetFeaturePort(
-            const std::string& viewId) const override
-        {
-            const auto bridge = GetBridge();
-            return bridge
-                ? bridge->GetFeaturePort(viewId)
-                : std::shared_ptr<FeatureViewService>{};
-        }
-
-        std::shared_ptr<OverlayService> GetOverlayPort(
-            const std::string& viewId) const override
-        {
-            const auto bridge = GetBridge();
-            return bridge
-                ? bridge->GetOverlayPort(viewId)
-                : std::shared_ptr<OverlayService>{};
-        }
-
-        std::optional<HostInputView> GetInputView(
-            const HostViewTarget& target) const override
-        {
-            const auto bridge = GetBridge();
-            return bridge
-                ? bridge->GetInputView(target)
-                : std::optional<HostInputView>{};
-        }
-
-    private:
-        std::shared_ptr<FeatureHostBridge> GetBridge() const
-        {
-            return m_lifetime->isActive.load() ? m_bridge.lock() : nullptr;
-        }
-
-        std::weak_ptr<FeatureHostBridge> m_bridge;
-        std::shared_ptr<FeatureLifetime> m_lifetime;
-    };
-
-    class FeatureDataPort final
-        : public TrustedDataPort {
-    public:
-        FeatureDataPort(
-            const HostCoreServices& core,
-            const std::thread::id ownerThread,
-            std::shared_ptr<FeatureLifetime> lifetime)
-            : m_data(core.sharedDataMgr)
-            , m_state(core.sharedState)
-            , m_ownerThread(ownerThread)
-            , m_lifetime(std::move(lifetime))
-        {
-        }
-
-        DataGraphSnapshot GetDataGraph() const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetDataGraph() : DataGraphSnapshot{};
-        }
-
-        DataSnapshot GetData(
-            const DataGraphSnapshot& graph,
-            const DataRevisionRef& ref) const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetData(graph, ref) : DataSnapshot{};
-        }
-
-        DataQueryResult GetDataQuery(
-            const DataGraphSnapshot& graph,
-            const DataQuery& query) const override
-        {
-            const auto data = GetReadData();
-            return data
-                ? data->GetDataQuery(graph, query) : DataQueryResult{};
-        }
-
-        std::optional<DataBinding> GetDataBinding(
-            const DataGraphSnapshot& graph,
-            const std::string_view name) const override
-        {
-            const auto data = GetReadData();
-            return data
-                ? data->GetDataBinding(graph, name)
-                : std::optional<DataBinding>{};
-        }
-
-        ProjectDataSnapshot GetProjectData() const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetProjectData() : ProjectDataSnapshot{};
-        }
-
-        DataRelationStatus GetDataRelation(
-            const DataGraphSnapshot& graph,
-            const DataRevisionRef& ref,
-            const std::string_view inputRole,
-            const std::string_view binding) const override
-        {
-            const auto data = GetReadData();
-            return data
-                ? data->GetDataRelation(graph, ref, inputRole, binding)
-                : DataRelationStatus::Unknown;
-        }
-
-        VtkImageGridSnapshot GetImageGrid(
-            const DataGraphSnapshot& graph,
-            const DataRevisionRef& ref) const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetImageGrid(graph, ref) : nullptr;
-        }
-
-        VtkImageGridSnapshot GetPrimaryImage() const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetPrimaryImage() : nullptr;
-        }
-
-        VtkLabelMapSnapshot GetLabelMap(
-            const DataGraphSnapshot& graph,
-            const DataRevisionRef& ref) const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetLabelMap(graph, ref) : nullptr;
-        }
-
-        VtkSurfaceMeshSnapshot GetSurfaceMesh(
-            const DataGraphSnapshot& graph,
-            const DataRevisionRef& ref) const override
-        {
-            const auto data = GetReadData();
-            return data ? data->GetSurfaceMesh(graph, ref) : nullptr;
-        }
-
-        DataEntityId CreateDataEntityId() override
-        {
-            const auto data = GetWriteData();
-            return data ? data->CreateDataEntityId() : DataEntityId{};
-        }
-
-        bool SetDataType(DataTypeDescriptor descriptor) override
-        {
-            const auto data = GetWriteData();
-            return data && data->SetDataType(std::move(descriptor));
-        }
-
-        DataCommitResult SetDataCommit(DataTransaction transaction) override
-        {
-            const bool hasPrimary = std::any_of(
-                transaction.bindings.begin(), transaction.bindings.end(),
-                [](const DataBindingUpdate& update) {
-                    return update.binding == primaryVolumeBinding;
-                });
-            const auto data = GetWriteData();
-            if (!data) {
-                DataCommitResult result;
-                result.message = "Data write requires the Session owner thread.";
-                return result;
-            }
-            auto result = data->SetDataCommit(std::move(transaction));
-            if (!hasPrimary || !result.isActivated
-                || result.status == DataCommitStatus::Rejected) {
-                return result;
-            }
-            const auto state = m_state.lock();
-            const auto primary = data->GetPrimaryImage();
-            const auto* payload = primary && primary->data
-                ? dynamic_cast<const ImageGrid3DPayload*>(
-                    primary->data->payload.get())
-                : nullptr;
-            if (state && primary && primary->binding && payload) {
-                DataReadyState ready;
-                ready.dataRevision = primary->data->self;
-                ready.bindingRevision = primary->binding->revision;
-                ready.scalarRange = payload->GetScalarRange();
-                ready.spacing = payload->GetGeometry().spacing;
-                ready.cursorWorld = state->GetCursorWorld();
-                state->SetDataReady(ready);
-            }
-            return result;
-        }
-
-        DataObserverId AttachDataChange(
-            DataChangeCallback callback) override
-        {
-            const auto data = GetWriteData();
-            if (!data || !callback) return 0;
-            const std::weak_ptr<FeatureLifetime> weakLifetime = m_lifetime;
-            const auto observer = data->AttachDataChange(
-                [weakLifetime, callback = std::move(callback)](
-                    const DataChangeSet& change) {
-                    const auto lifetime = weakLifetime.lock();
-                    if (lifetime && lifetime->isActive.load()) callback(change);
-                });
-            if (observer == 0) return 0;
-            try {
-                m_lifetime->observers.push_back(observer);
-            }
-            catch (...) {
-                data->DetachDataChange(observer);
-                return 0;
-            }
-            return observer;
-        }
-
-        bool DetachDataChange(const DataObserverId observerId) override
-        {
-            const auto data = GetWriteData();
-            if (!data) return false;
-            const auto found = std::find(m_lifetime->observers.begin(),
-                m_lifetime->observers.end(), observerId);
-            if (found == m_lifetime->observers.end()) return false;
-            // 先移除本地记录，闭包析构重入 Detach 时不会重复操作该 ID。
-            m_lifetime->observers.erase(found);
-            return data->DetachDataChange(observerId);
-        }
-
-    private:
-        std::shared_ptr<AbstractDataManager> GetReadData() const
-        {
-            return m_lifetime->isActive.load() ? m_data.lock() : nullptr;
-        }
-
-        std::shared_ptr<AbstractDataManager> GetWriteData() const
-        {
-            if (m_ownerThread == std::thread::id{}
-                || m_ownerThread != std::this_thread::get_id()) {
-                return {};
-            }
-            return GetReadData();
-        }
-
-        std::weak_ptr<AbstractDataManager> m_data;
-        std::weak_ptr<SharedInteractionState> m_state;
-        std::thread::id m_ownerThread;
-        std::shared_ptr<FeatureLifetime> m_lifetime;
-    };
-
-    class FeatureReadPort final : public ImageReadPort {
-    public:
-        FeatureReadPort(const HostCoreServices& core,
-            std::shared_ptr<FeatureLifetime> lifetime)
-            : m_getDescriptor(core.GetImageDescriptor())
-            , m_getReadState(core.GetImageReadState())
-            , m_getReadResult(core.GetImageReadResult())
-            , m_getReadChunk(core.GetImageReadChunk())
-            , m_lifetime(std::move(lifetime))
-        {
-        }
-
-        std::optional<ImageDescriptor> GetImageDescriptor() const override
-        {
-            return m_lifetime->isActive.load() && m_getDescriptor
-                ? m_getDescriptor() : std::optional<ImageDescriptor>{};
-        }
-
-        std::optional<ImageReadState> GetImageReadState() const override
-        {
-            return m_lifetime->isActive.load() && m_getReadState
-                ? m_getReadState()
-                : std::optional<ImageReadState>{};
-        }
-
-        ImageReadResult GetImageReadResult(
-            const ImageReadRequest& request) const override
-        {
-            return m_lifetime->isActive.load() && m_getReadResult
-                ? m_getReadResult(request)
-                : ImageReadResult{};
-        }
-
-        ImageReadChunkResult GetImageReadChunk(
-            const ImageReadRequest& request,
-            const std::size_t voxelOffset) const override
-        {
-            return m_lifetime->isActive.load() && m_getReadChunk
-                ? m_getReadChunk(request, voxelOffset)
-                : ImageReadChunkResult{};
-        }
-
-    private:
-        std::function<std::optional<ImageDescriptor>()> m_getDescriptor;
-        std::function<std::optional<ImageReadState>()> m_getReadState;
-        std::function<ImageReadResult(const ImageReadRequest&)>
-            m_getReadResult;
-        std::function<ImageReadChunkResult(
-            const ImageReadRequest&,
-            std::size_t)> m_getReadChunk;
-        std::shared_ptr<FeatureLifetime> m_lifetime;
-    };
-
-    class FeatureHostControlPort final
-        : public FeatureHostControl {
-    public:
-        FeatureHostControlPort(
-            std::weak_ptr<FeatureHostBridge> bridge,
-            std::string featureId,
-            std::weak_ptr<OwnerCompleteState> completeState,
-            std::shared_ptr<FeatureLifetime> lifetime)
-            : m_bridge(std::move(bridge))
-            , m_featureId(std::move(featureId))
-            , m_completeState(std::move(completeState))
-            , m_lifetime(std::move(lifetime))
-        {
-        }
-
-        bool SetActiveViews(
-            const std::vector<std::string>& viewIds) override
-        {
-            if (!m_lifetime->isActive.load()) return false;
-            const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->SetActiveViews(m_featureId, viewIds);
-        }
-
-        bool SetViewStatus(
-            const std::vector<std::string>& viewIds,
-            const std::string& status) override
-        {
-            if (!m_lifetime->isActive.load()) return false;
-            const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->SetViewStatus(viewIds, status);
-        }
-
-        bool SendSceneDelta(FeatureSceneDelta delta) override
-        {
-            if (!m_lifetime->isActive.load()) return false;
-            const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->SendSceneDelta(
-                    m_featureId, std::move(delta));
-        }
-
-        bool AttachInput(HostInputBinding binding) override
-        {
-            if (!m_lifetime->isActive.load()) return false;
-            if (binding.featureId != m_featureId) {
-                return false;
-            }
-            const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->AttachInput(std::move(binding));
-        }
-
-        bool DetachInput(
-            const std::string_view featureId) override
-        {
-            if (!m_lifetime->isActive.load()) return false;
-            if (featureId != std::string_view(m_featureId)) {
-                return false;
-            }
-            const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->DetachInput(featureId);
-        }
-
-        bool SendOwnerComplete(
-            std::function<void()> complete) override
-        {
-            const auto state = m_completeState.lock();
-            if (!state || !complete || !m_lifetime->isActive.load()) {
-                return false;
-            }
-            const auto lifetime = m_lifetime;
-            const auto entry = std::make_shared<FeatureCompleteEntry>();
-            entry->complete = std::move(complete);
-            std::function<void()> guarded =
-                [lifetime, entry]() {
-                    if (lifetime->isActive.load()) entry->Send();
-                };
-            const std::lock_guard<std::mutex> lock(state->mutex);
-            if (!state->isActive) {
-                return false;
-            }
-            const std::lock_guard<std::mutex> completeLock(lifetime->completeMutex);
-            if (!lifetime->isActive.load()) return false;
-            auto& pending = lifetime->completes;
-            pending.erase(std::remove_if(pending.begin(), pending.end(),
-                [](const auto& value) { return value.expired(); }), pending.end());
-            pending.push_back(entry);
-            state->completes.push_back(std::move(guarded));
-            return true;
-        }
-
-    private:
-        std::weak_ptr<FeatureHostBridge> m_bridge;
-        std::string m_featureId;
-        std::weak_ptr<OwnerCompleteState> m_completeState;
-        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     explicit Impl(HostSessionConfig sessionConfig)
@@ -799,16 +118,15 @@ public:
     std::unique_ptr<HostInputRegistry> inputRegistry;
     std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
     InputEndpoint inputEndpoint;
-    std::vector<FeatureEntry> features;
+    HostFeatureRuntime featureRuntime;
+    std::shared_ptr<HostImageReadRuntime> imageReadRuntime;
     // 保存实际已安装 handler 的目标；补偿失败时允许暂存双绑定并由后续请求重试收敛。
     std::vector<HostViewTarget> timerTargets;
     std::shared_ptr<OwnerCompleteState> ownerCompleteState;
-    std::shared_ptr<FeatureHostBridge> featureBridge;
     std::thread::id ownerThread;
     std::uint64_t nextSessionGeneration = 1;
     bool isBuilt = false;
     bool isStarted = false;
-    bool isFeatureCalling = false;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
     mutable std::recursive_mutex m_sessionMutex;
 
@@ -929,7 +247,7 @@ bool VtkAppHostSession::Impl::BuildSession()
         bool isStopped = false;
         try {
             if (frameCoordinator) frameCoordinator->Stop();
-            if (featureBridge) (void)featureBridge->StopOwner();
+            (void)featureRuntime.StopOwner();
             endpoints.clear();
             const bool isHotkeyStopped =
                 !hotkeyRouter || hotkeyRouter->ClearHotkeys();
@@ -953,6 +271,7 @@ bool VtkAppHostSession::Impl::BuildSession()
             stopState = HostStopState::StopPending;
             return false;
         }
+        imageReadRuntime.reset();
         core = {};
         isBuilt = false;
         isStarted = false;
@@ -1048,14 +367,19 @@ bool VtkAppHostSession::Impl::BuildSession()
             (void)clearBuild();
             return false;
         }
-        if (!featureBridge) {
-            featureBridge = std::make_shared<FeatureHostBridge>();
-        }
-        if (!featureBridge->StartOwner(
-                renderViews,
-                inputRegistry->GetFeaturePort(),
-                frameCoordinator,
-                ownerThread)) {
+        HostFeatureRuntime::Ports featurePorts;
+        featurePorts.views = &renderViews;
+        featurePorts.input = &inputRegistry->GetFeaturePort();
+        featurePorts.data = core.sharedDataMgr;
+        featurePorts.state = core.sharedState;
+        featurePorts.frames = frameCoordinator;
+        featurePorts.ownerThread = ownerThread;
+        const std::weak_ptr<OwnerCompleteState> weakComplete = ownerCompleteState;
+        featurePorts.onOwnerComplete = [weakComplete](std::function<void()> complete) {
+            return SetOwnerComplete(weakComplete.lock(), std::move(complete));
+        };
+        imageReadRuntime = std::make_shared<HostImageReadRuntime>();
+        if (!featureRuntime.StartOwner(std::move(featurePorts))) {
             (void)clearBuild();
             return false;
         }
@@ -1278,105 +602,13 @@ ImageReadChunkResult VtkAppHostSession::Impl::GetImageReadChunk(
 }
 
 ImageReadAdmission VtkAppHostSession::Impl::StartImageRead(
-    ImageReadRequest request,
-    ImageReadCallback onComplete)
+    ImageReadRequest request, ImageReadCallback onComplete)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
     if (!onComplete) return ImageReadAdmission::InvalidRequest;
-    if (!GetIsReady() || !core.sharedDataMgr) {
-        return ImageReadAdmission::Unavailable;
-    }
-    const auto executor = renderViews.GetTaskExecutor();
-    if (!executor || !ownerCompleteState) {
-        return ImageReadAdmission::Unavailable;
-    }
-
-    std::shared_ptr<OwnerCompleteState::ImageReadEntry> entry;
-    try {
-        entry = std::make_shared<
-            OwnerCompleteState::ImageReadEntry>();
-        entry->callback = std::move(onComplete);
-    }
-    catch (...) {
-        return ImageReadAdmission::Unavailable;
-    }
-    {
-        const std::lock_guard<std::mutex> completeLock(
-            ownerCompleteState->mutex);
-        if (!ownerCompleteState->isActive) {
-            return ImageReadAdmission::Stopping;
-        }
-        if (ownerCompleteState->imageRead) {
-            return ImageReadAdmission::Busy;
-        }
-        ownerCompleteState->imageRead = entry;
-    }
-
-    const auto data = core.sharedDataMgr;
-    const std::weak_ptr<OwnerCompleteState> weakComplete =
-        ownerCompleteState;
-    AppTaskWork work;
-    try {
-        work = AppTaskWork([
-            data,
-            request = std::move(request),
-            weakComplete,
-            entry](const TaskStopToken stopToken) mutable {
-            ImageReadResult result;
-            try {
-                result = data->GetImageReadResult(
-                    request, stopToken);
-            }
-            catch (...) {
-                result.error = stopToken.GetIsStopped()
-                    ? ImageReadError::Cancelled
-                    : ImageReadError::CopyFailed;
-            }
-            const auto complete = weakComplete.lock();
-            if (!complete) return false;
-            const std::lock_guard<std::mutex> completeLock(
-                complete->mutex);
-            if (!complete->isActive
-                || complete->imageRead != entry) {
-                return false;
-            }
-            entry->result = std::move(result);
-            entry->isReady = true;
-            return true;
-        });
-    }
-    catch (...) {
-        const std::lock_guard<std::mutex> completeLock(
-            ownerCompleteState->mutex);
-        if (ownerCompleteState->imageRead == entry) {
-            ownerCompleteState->imageRead.reset();
-        }
-        return ImageReadAdmission::Unavailable;
-    }
-
-    const auto admission = SendReadTask(executor, std::move(work));
-    if (admission == TaskAdmissionResult::Accepted) {
-        return ImageReadAdmission::Accepted;
-    }
-    {
-        const std::lock_guard<std::mutex> completeLock(
-            ownerCompleteState->mutex);
-        if (ownerCompleteState->imageRead == entry) {
-            ownerCompleteState->imageRead.reset();
-        }
-    }
-    switch (admission) {
-    case TaskAdmissionResult::InvalidRequest:
-        return ImageReadAdmission::InvalidRequest;
-    case TaskAdmissionResult::Busy:
-        return ImageReadAdmission::Busy;
-    case TaskAdmissionResult::QueueFull:
-        return ImageReadAdmission::QueueFull;
-    case TaskAdmissionResult::Stopping:
-        return ImageReadAdmission::Stopping;
-    default:
-        return ImageReadAdmission::Unavailable;
-    }
+    if (!GetIsReady() || !imageReadRuntime) return ImageReadAdmission::Unavailable;
+    return imageReadRuntime->StartImageRead(core.sharedDataMgr,
+        renderViews.GetTaskExecutor(), std::move(request), std::move(onComplete));
 }
 
 std::optional<HostRenderViewState>
@@ -1506,26 +738,7 @@ bool VtkAppHostSession::Impl::AttachTimer(
 
 void VtkAppHostSession::Impl::SendFeatureTicks() noexcept
 {
-    if (isFeatureCalling) return;
-    const FeatureCallScope scope(isFeatureCalling);
-    auto output = features.begin();
-    for (auto input = features.begin();
-        input != features.end(); ++input) {
-        const auto& feature = input->feature;
-        if (!feature) continue;
-        *output++ = *input;
-        // 已脱离的条目只保留给输入清理重试，不再驱动 Feature 业务。
-        if (input->isHostDetached) continue;
-        try {
-            (void)feature->OnHostTick();
-        }
-        catch (...) {
-            std::cerr
-                << "[Host] Feature tick failed: "
-                << input->id << '\n';
-        }
-    }
-    features.erase(output, features.end());
+    featureRuntime.SendFeatureTicks();
 }
 
 void VtkAppHostSession::Impl::SendOwnerCompletions() noexcept
@@ -1569,222 +782,39 @@ void VtkAppHostSession::Impl::OnHostTimer()
     (void)frames->FlushOnOwnerTick(true);
 }
 
-void VtkAppHostSession::Impl::SendImageReadComplete(
-    const bool isStopping) noexcept
+void VtkAppHostSession::Impl::SendImageReadComplete(const bool isStopping) noexcept
 {
-    ImageReadCallback callback;
-    std::optional<ImageReadResult> result;
-    if (ownerCompleteState) {
-        const std::lock_guard<std::mutex> lock(
-            ownerCompleteState->mutex);
-        const auto& entry = ownerCompleteState->imageRead;
-        if (!entry || (!ownerCompleteState->isActive && !isStopping)) {
-            return;
-        }
-        // StopLease 已停止并 join 共享 executor；若任务尚未来得及写入结果，
-        // owner thread 在关闭 timer 前补齐 Cancelled 终态，Accepted 请求不会失去回调。
-        if (isStopping && (!entry->isReady || !entry->result)) {
-            ImageReadResult cancelled;
-            cancelled.error = ImageReadError::Cancelled;
-            entry->result = std::move(cancelled);
-            entry->isReady = true;
-        }
-        if (entry->isReady && entry->result) {
-            callback = std::move(entry->callback);
-            result = std::move(entry->result);
-            ownerCompleteState->imageRead.reset();
-        }
-    }
-    if (callback && result) {
-        try {
-            callback(std::move(*result));
-        }
-        catch (...) {
-        }
-    }
+    // 回调可重入 Stop/rebuild；局部共享拥有保持当前分发器存活。
+    const auto runtime = imageReadRuntime;
+    if (runtime) runtime->SendComplete(isStopping);
 }
 
-bool VtkAppHostSession::Impl::AttachFeature(
-    const std::shared_ptr<HostFeature>& feature)
+bool VtkAppHostSession::Impl::AttachFeature(const std::shared_ptr<HostFeature>& feature)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!isBuilt
-        || ownerThread != std::this_thread::get_id()
-        || !feature
-        || !inputRegistry || isFeatureCalling) {
-        return false;
-    }
-    const FeatureCallScope scope(isFeatureCalling);
-
-    std::string id;
-    try {
-        id = feature->GetFeatureId();
-    }
-    catch (...) {
-        return false;
-    }
-    if (id.empty()) {
-        return false;
-    }
-    for (const auto& entry : features) {
-        const auto& current = entry.feature;
-        if (entry.id == id
-            || (current && current.get() == feature.get())) {
-            return false;
-        }
-    }
-
-    if (!featureBridge) return false;
-    const std::weak_ptr<FeatureHostBridge> weakBridge =
-        featureBridge;
-    HostFeatureContext context;
-    std::shared_ptr<FeatureLifetime> lifetime;
-    try {
-        lifetime = std::make_shared<FeatureLifetime>();
-        lifetime->data = core.sharedDataMgr;
-        context.views =
-            std::make_shared<FeatureViewDirectoryPort>(weakBridge, lifetime);
-        context.read = std::make_shared<FeatureReadPort>(core, lifetime);
-        context.data = std::make_shared<FeatureDataPort>(core, ownerThread, lifetime);
-        context.host = std::make_shared<FeatureHostControlPort>(
-            weakBridge,
-            id,
-            ownerCompleteState,
-            lifetime);
-    }
-    catch (...) {
-        return false;
-    }
-
-    const auto clearRejectedAttach = [&]() noexcept {
-        try {
-            (void)feature->DetachHost();
-        }
-        catch (...) {
-        }
-        lifetime->Stop(false);
-        try {
-            (void)inputRegistry->GetFeaturePort().DetachInput(id);
-        }
-        catch (...) {
-        }
-        try {
-            (void)renderViews.SetFeatureViews(
-                id, {});
-        }
-        catch (...) {
-        }
-    };
-    try {
-        if (!feature->AttachHost(context)) {
-            clearRejectedAttach();
-            return false;
-        }
-        const auto insertAt = std::lower_bound(
-            features.begin(), features.end(), id,
-            [](const FeatureEntry& entry, const std::string& value) {
-                return entry.id < value;
-            });
-        features.insert(insertAt, FeatureEntry{ id, feature, false, lifetime });
-    }
-    catch (...) {
-        clearRejectedAttach();
-        return false;
-    }
-    return true;
+    return isBuilt && ownerThread == std::this_thread::get_id()
+        && featureRuntime.AttachFeature(feature);
 }
 
-bool VtkAppHostSession::Impl::DetachFeature(
-    const HostFeature& feature)
+bool VtkAppHostSession::Impl::DetachFeature(const HostFeature& feature)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!isBuilt
-        || ownerThread != std::this_thread::get_id()
-        || isFeatureCalling) {
-        return false;
-    }
-    // teardown 和闭包析构可以调用用户代码；拒绝重入 registry 修改，
-    // 防止当前 vector 迭代器在清理中失效。普通完成回调不在此 scope 中。
-    const FeatureCallScope scope(isFeatureCalling);
-    const auto entry = std::find_if(
-        features.begin(),
-        features.end(),
-        [&feature](const FeatureEntry& current) {
-            const auto& value = current.feature;
-            return value && value.get() == &feature;
-        });
-    if (entry == features.end()) {
-        return false;
-    }
-    if (!entry->isHostDetached) {
-        // 先由组合根收回跨视图状态，再允许 Feature 丢弃宿主回调。
-        const auto oldViewIds =
-            renderViews.GetFeatureViewIds(entry->id);
-        if (!renderViews.SetFeatureViews(entry->id, {})) {
-            return false;
-        }
-        bool isDetached = false;
-        try {
-            isDetached = const_cast<HostFeature&>(feature).DetachHost();
-        }
-        catch (...) {
-            isDetached = false;
-        }
-        if (!isDetached) {
-            if (!renderViews.SetFeatureViews(entry->id, oldViewIds)) {
-                std::cerr
-                    << "[Host] Feature detach rollback did not restore all views.\n";
-                stopState = HostStopState::StopPending;
-            }
-            return false;
-        }
-        entry->isHostDetached = true;
-        entry->lifetime->Stop(true);
-    }
-    if (!inputRegistry
-        || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
-        return false;
-    }
-    features.erase(entry);
-    return true;
+    if (!isBuilt || ownerThread != std::this_thread::get_id()) return false;
+    const auto result = featureRuntime.DetachFeature(feature);
+    if (result == HostFeatureRuntime::DetachResult::StopPending)
+        stopState = HostStopState::StopPending;
+    return result == HostFeatureRuntime::DetachResult::Detached;
 }
 
 bool VtkAppHostSession::Impl::DetachFeatures()
 {
-    if (isFeatureCalling) return false;
-    const FeatureCallScope scope(isFeatureCalling);
-    while (!features.empty()) {
-        auto& entry = features.back();
-        if (!entry.isHostDetached) {
-            if (!renderViews.SetFeatureViews(entry.id, {})) {
-                return false;
-            }
-            const auto& feature = entry.feature;
-            if (!feature) return false;
-            try {
-                if (!feature->DetachHost()) {
-                    return false;
-                }
-            }
-            catch (...) {
-                return false;
-            }
-            entry.isHostDetached = true;
-            entry.lifetime->Stop(true);
-        }
-        if (!inputRegistry
-            || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {
-            return false;
-        }
-        features.pop_back();
-    }
-    return true;
+    return featureRuntime.DetachFeatures();
 }
 
 bool VtkAppHostSession::Impl::Stop() noexcept
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (isFeatureCalling) return false;
+    if (featureRuntime.GetIsChanging()) return false;
     if (ownerThread != std::thread::id{}
         && ownerThread != std::this_thread::get_id()) {
         stopState = HostStopState::StopRequested;
@@ -1822,19 +852,19 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         SendOwnerCompletions();
         endpoints.clear();
         timerTargets.clear();
-        if (featureBridge) (void)featureBridge->StopOwner();
+        (void)featureRuntime.StopOwner();
 
         if (ownerCompleteState) {
             const std::lock_guard<std::mutex> lock(
                 ownerCompleteState->mutex);
             ownerCompleteState->isActive = false;
             ownerCompleteState->completes.clear();
-            ownerCompleteState->imageRead.reset();
         }
         hotkeyRouter.reset();
         inputRegistry.reset();
         commandRouter.reset();
         frameCoordinator.reset();
+        imageReadRuntime.reset();
         core = {};
         isBuilt = false;
         isStarted = false;
@@ -1858,7 +888,7 @@ bool VtkAppHostSession::Impl::GetIsStopped() const noexcept
         && !frameCoordinator
         && !hotkeyRouter
         && !inputRegistry
-        && features.empty();
+        && featureRuntime.GetIsEmpty();
 }
 
 bool VtkAppHostSession::Impl::GetIsReady() const noexcept
@@ -2117,8 +1147,7 @@ bool VtkAppHostSession::Start()
     }
     if (!m_impl->frameCoordinator) return false;
     const auto frames = m_impl->frameCoordinator;
-    const auto frameStatus =
-        frames->FlushOnOwnerTick(true);
+    const auto frameStatus = frames->FlushOnOwnerTick(true);
     if (frameStatus
             != HostFrameCoordinator::FlushStatus::Completed
         || !m_impl->GetIsReady() || m_impl->frameCoordinator != frames

@@ -287,6 +287,7 @@ public:
         return m_events;
     }
 
+    std::shared_ptr<FeatureHostControl> GetHostControl() const { return m_host; }
     int GetCancelCount() const noexcept { return m_cancelCount; }
     int GetDetachCount() const noexcept { return m_detachCount; }
     int GetTickCount() const noexcept { return m_tickCount; }
@@ -655,6 +656,38 @@ bool BuildInjectedInputContextTest()
         && isOwnerGatePreserved && isLifecycleRetryable && isStopped;
 }
 
+class TickStopFeature final : public HostFeature {
+public:
+    std::string_view GetFeatureId() const noexcept override { return "tick.stop"; }
+    bool AttachHost(const HostFeatureContext&) override { return true; }
+    bool DetachHost() override { ++detachCount; return true; }
+    bool OnHostTick() override { return onTick ? onTick() : true; }
+    std::function<bool()> onTick;
+    int detachCount = 0;
+};
+
+bool BuildTickStopTest()
+{
+    auto window = vtkSmartPointer<RenderProbeWindow>::New();
+    auto interactor = vtkSmartPointer<RenderProbeInteractor>::New();
+    window->SetInteractor(interactor);
+    interactor->SetRenderWindow(window);
+    HostRenderViewConfig view;
+    view.id = "tick-stop";
+    view.role = HostRenderViewRole::Primary3D;
+    view.renderWindow = window;
+    HostSessionConfig config;
+    config.renderViews = {view};
+    VtkAppHostSession session(std::move(config));
+    auto feature = std::make_shared<TickStopFeature>();
+    bool wasStopped = false;
+    feature->onTick = [&]() { wasStopped = session.Stop(); return wasStopped; };
+    if (!session.BuildSession() || !session.AttachFeature(feature)) return false;
+    // Start 中的第一个 tick 停止会话，不能继续启用输入或访问已释放的帧协调器。
+    return !session.Start() && wasStopped && session.GetIsStopped()
+        && feature->detachCount == 1 && session.Stop();
+}
+
 bool BuildSessionInputEndpointTest()
 {
     auto nativeWindow = vtkSmartPointer<RenderProbeWindow>::New();
@@ -703,6 +736,7 @@ bool BuildSessionInputEndpointTest()
         return false;
     }
 
+    const auto retiredHostControl = feature->GetHostControl();
     HostInputEvent invalid;
     const auto invalidResult = endpoint->SendInput(invalid);
     invalid.viewId = "missing";
@@ -825,6 +859,10 @@ bool BuildSessionInputEndpointTest()
         && !stoppedResult.isSucceeded
         && stoppedResult.errorCode == HostErrorCode::SessionNotReady;
     const bool isRebuilt = session.BuildSession();
+    const bool isRetiredPortClosed = retiredHostControl
+        && !retiredHostControl->SetActiveViews({"session-injected"})
+        && !retiredHostControl->SetViewStatus({"session-injected"}, "retired")
+        && !retiredHostControl->SendOwnerComplete([]() {});
     auto* rebuiltEndpoint = session.GetInputEndpoint();
     auto stopFeature = std::make_shared<SessionInputFeatureProbe>();
     const bool isStopFeatureAttached = isRebuilt && rebuiltEndpoint
@@ -852,6 +890,7 @@ bool BuildSessionInputEndpointTest()
         && isPublicCancelRetryable && isDetachRetryable
         && isPostconditionRetryable
         && isStoppedEndpointRejected
+        && isRetiredPortClosed
         && isActiveCaptureStopped && isMoveContractVisible
         && isRepeatedStopIdempotent;
 }
@@ -4177,6 +4216,10 @@ int main(int argc, char* argv[])
         std::cerr
             << "FAIL: HostInjected input routing was not exclusive or synchronous\n";
         return 18;
+    }
+    if (!BuildTickStopTest()) {
+        std::cerr << "FAIL: Reentrant tick Stop invalidated its active runtime\n";
+        return 14;
     }
     if (!BuildSessionInputEndpointTest()) {
         std::cerr

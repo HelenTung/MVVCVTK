@@ -31,3 +31,11 @@ add_test(
     COMMAND mvvcvtk_host_frame_tests
 )
 SetTestRuntime(Host.FrameCoordinator mvvcvtk_host_frame_tests)
+
+add_executable(mvvcvtk_host_runtime_tests HostRuntimeTests.cpp)
+target_link_libraries(mvvcvtk_host_runtime_tests PRIVATE
+    mvvcvtk_host_test_internal MVVCVTK::Host ${MVVCVTK_VTK_TARGETS})
+SetTargetDefaults(mvvcvtk_host_runtime_tests)
+vtk_module_autoinit(TARGETS mvvcvtk_host_runtime_tests MODULES ${MVVCVTK_VTK_TARGETS})
+add_test(NAME Host.Runtime COMMAND mvvcvtk_host_runtime_tests)
+SetTestRuntime(Host.Runtime mvvcvtk_host_runtime_tests)
