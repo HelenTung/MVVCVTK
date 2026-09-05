@@ -240,7 +240,8 @@ PartAdmissionStatus PartSegmentationService::Start(
     const std::uint64_t requestId,
     PartHistorySnapshot previous,
     const std::uint64_t expectedResultRevision,
-    const std::uint64_t expectedCatalogRevision)
+    const std::uint64_t expectedCatalogRevision,
+    const std::size_t retainedSurfaceBytes)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return PartAdmissionStatus::Stopping;
@@ -271,7 +272,8 @@ PartAdmissionStatus PartSegmentationService::Start(
         requestId,
         std::move(previous),
         expectedResultRevision,
-        expectedCatalogRevision
+        expectedCatalogRevision,
+        retainedSurfaceBytes
     };
     m_workReady.notify_one();
     return PartAdmissionStatus::Accepted;
@@ -472,7 +474,16 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
 
         std::size_t historyBytes = 0;
         if (!GetHistoryBytes(job.previous, historyBytes)
-            || historyBytes >= job.maxWorkingBytes) {
+            || job.retainedSurfaceBytes
+                > std::numeric_limits<std::size_t>::max() - historyBytes) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
+            candidate.message = BuildBudgetMessage(
+                candidate.requiredBytes, job.maxWorkingBytes);
+            return candidate;
+        }
+        historyBytes += job.retainedSurfaceBytes;
+        if (historyBytes >= job.maxWorkingBytes) {
             candidate.failureReason = PartFailureReason::BudgetExceeded;
             candidate.requiredBytes = historyBytes;
             candidate.message = BuildBudgetMessage(
@@ -492,7 +503,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
                 return m_cancelRequested.load(std::memory_order_acquire);
             },
             [this, requestId = job.requestId](const double progress) {
-                SetProgress(requestId, progress);
+                SetProgress(requestId, progress * 0.9);
             });
         candidate.requiredBytes = result.requiredBytes
             > std::numeric_limits<std::size_t>::max() - historyBytes
@@ -536,15 +547,20 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             std::move(result.metricsByLabel);
         lineageRequest.nextResultRevision = job.expectedResultRevision == 0
             ? 1 : job.expectedResultRevision + 1U;
-        lineageRequest.maxWorkingBytes = job.maxWorkingBytes;
+        lineageRequest.maxWorkingBytes =
+            job.maxWorkingBytes - job.retainedSurfaceBytes;
         auto lineage = PartLineageMatcher::BuildCatalog(
             std::move(lineageRequest),
             m_identities,
             [this] {
                 return m_cancelRequested.load(std::memory_order_acquire);
             });
+        const auto lineageRequiredBytes = lineage.requiredBytes
+            > std::numeric_limits<std::size_t>::max() - job.retainedSurfaceBytes
+            ? std::numeric_limits<std::size_t>::max()
+            : lineage.requiredBytes + job.retainedSurfaceBytes;
         candidate.requiredBytes = std::max(
-            candidate.requiredBytes, lineage.requiredBytes);
+            candidate.requiredBytes, lineageRequiredBytes);
         if (!lineage.catalog) {
             candidate.failureReason = lineage.failureReason;
             candidate.status = lineage.failureReason
@@ -553,7 +569,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             candidate.message = lineage.failureReason
                     == PartFailureReason::BudgetExceeded
                 ? BuildBudgetMessage(
-                    lineage.requiredBytes, job.maxWorkingBytes)
+                    lineageRequiredBytes, job.maxWorkingBytes)
                 : lineage.failureReason == PartFailureReason::Cancelled
                     ? "Part request was cancelled."
                     : "Part catalog construction failed.";
@@ -561,14 +577,93 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
         candidate.catalog = std::move(lineage.catalog);
-        candidate.status = PartResultStatus::Succeeded;
-        candidate.failureReason = PartFailureReason::None;
-        candidate.message = BuildSuccessMessage(result.metrics);
         candidate.extent = volume.extent;
         candidate.dimensions = volume.dimensions;
         candidate.spacing = volume.spacing;
         candidate.origin = volume.origin;
         candidate.direction = volume.direction;
+        // 旧标签/目录/表面和新目录在表面提取期间仍存活，先从预算中保留。
+        std::size_t catalogBytes = 0;
+        if (!GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
+            || catalogBytes > std::numeric_limits<std::size_t>::max() - historyBytes) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.requiredBytes = std::numeric_limits<std::size_t>::max();
+            candidate.message = BuildBudgetMessage(
+                candidate.requiredBytes, job.maxWorkingBytes);
+            candidate.catalog.reset();
+            candidate.labels.reset();
+            return candidate;
+        }
+        const std::size_t retainedBytes = historyBytes + catalogBytes;
+        if (retainedBytes >= job.maxWorkingBytes) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.requiredBytes = std::max(candidate.requiredBytes, retainedBytes);
+            candidate.message = BuildBudgetMessage(
+                candidate.requiredBytes, job.maxWorkingBytes);
+            candidate.catalog.reset();
+            candidate.labels.reset();
+            return candidate;
+        }
+
+        PartSurfaceBuildRequest surfaceRequest;
+        surfaceRequest.extent = candidate.extent;
+        surfaceRequest.dimensions = candidate.dimensions;
+        surfaceRequest.spacing = candidate.spacing;
+        surfaceRequest.origin = candidate.origin;
+        surfaceRequest.direction = candidate.direction;
+        surfaceRequest.labels = candidate.labels;
+        surfaceRequest.partCount = static_cast<std::uint32_t>(
+            candidate.catalog->partsByLabel.size() - 1U);
+        surfaceRequest.maxWorkingBytes = job.maxWorkingBytes - retainedBytes;
+        auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
+            surfaceRequest,
+            [this] {
+                return m_cancelRequested.load(std::memory_order_acquire);
+            },
+            [this, requestId = job.requestId](const double progress) {
+                SetProgress(requestId, 0.9 + progress * 0.1);
+            });
+        const auto systemPeakBytes = surfaceResult.requiredBytes
+            > std::numeric_limits<std::size_t>::max() - retainedBytes
+            ? std::numeric_limits<std::size_t>::max()
+            : surfaceResult.requiredBytes + retainedBytes;
+        candidate.requiredBytes = std::max(candidate.requiredBytes, systemPeakBytes);
+        if (surfaceResult.failureReason != PartFailureReason::None
+            || !surfaceResult.product
+            || !surfaceResult.product->surface) {
+            candidate.status = surfaceResult.failureReason
+                    == PartFailureReason::Cancelled
+                ? PartResultStatus::Cancelled
+                : PartResultStatus::Failed;
+            candidate.failureReason = surfaceResult.failureReason
+                    == PartFailureReason::None
+                ? PartFailureReason::InternalError
+                : surfaceResult.failureReason;
+            candidate.message = candidate.failureReason == PartFailureReason::BudgetExceeded
+                ? BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes)
+                : surfaceResult.message;
+            candidate.catalog.reset();
+            candidate.labels.reset();
+            return candidate;
+        }
+        if (systemPeakBytes > job.maxWorkingBytes) {
+            candidate.status = PartResultStatus::Failed;
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.message = BuildBudgetMessage(
+                systemPeakBytes, job.maxWorkingBytes);
+            candidate.catalog.reset();
+            candidate.labels.reset();
+            return candidate;
+        }
+        candidate.surface = std::move(surfaceResult.product);
+        candidate.surfaceBytes = candidate.surface->actualBytes;
+        candidate.metrics.peakWorkingBytes = std::max(
+            candidate.metrics.peakWorkingBytes, candidate.requiredBytes);
+        candidate.status = PartResultStatus::Succeeded;
+        candidate.failureReason = PartFailureReason::None;
+        candidate.message = BuildSuccessMessage(candidate.metrics)
+            + " surfaceBytes="
+            + std::to_string(candidate.surfaceBytes) + ".";
         SetProgress(job.requestId, 1.0);
         return candidate;
     }

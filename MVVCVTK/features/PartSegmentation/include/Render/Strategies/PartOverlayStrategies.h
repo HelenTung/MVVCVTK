@@ -9,7 +9,6 @@
 #include <array>
 
 class vtkActor;
-class vtkDiscreteMarchingCubes;
 class vtkImageData;
 class vtkImageResliceMapper;
 class vtkImageSlice;
@@ -32,10 +31,8 @@ public:
 
 private:
     vtkSmartPointer<vtkActor> m_actor;
-    vtkSmartPointer<vtkDiscreteMarchingCubes> m_surface;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
-    vtkSmartPointer<vtkImageData> m_image;
 };
 
 class PartSliceOverlayStrategy final

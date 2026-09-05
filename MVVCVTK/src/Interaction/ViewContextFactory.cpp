@@ -741,6 +741,7 @@ InteractionResult StdViewContext::SendCancel(
             m_isStyleStopped = true;
         }
         if (!m_isStyleRateRestored) {
+            if (m_ports.update) (void)m_ports.update->SetInteractionPhase();
             if (m_renderWindow) {
                 m_renderWindow->SetDesiredUpdateRate(GetRenderRate(false));
             }
@@ -1004,6 +1005,7 @@ void StdViewContext::OnVTKEvent(
             m_isStyleStateCleared = false;
             m_isStyleStopped = false;
             m_isStyleRateRestored = false;
+            (void)m_ports.update->SetInteractionPhase();
             if (m_renderWindow) {
                 m_renderWindow->SetDesiredUpdateRate(
                     GetRenderRate(true));
@@ -1018,6 +1020,7 @@ void StdViewContext::OnVTKEvent(
                 m_isStyleStateCleared = true;
             }
             if (!m_isStyleRateRestored) {
+                (void)m_ports.update->SetInteractionPhase();
                 if (m_renderWindow) {
                     m_renderWindow->SetDesiredUpdateRate(
                         GetRenderRate(false));

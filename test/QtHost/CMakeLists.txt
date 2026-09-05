@@ -4,7 +4,9 @@ set(MVVCVTK_HOST_METHOD_SOURCES
     QtHostLoadTests.cpp
     QtHostMethodCases.h
     QtHostMethodTests.cpp
+    QtHostRenderProductTests.cpp
     QtHostViewTests.cpp
+    RenderProductTestSupport.h
 )
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostCropTests.cpp)

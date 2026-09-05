@@ -79,7 +79,13 @@ public:
         const HostViewTarget& target) const;
     std::weak_ptr<AppSessionPort> GetSessionPort() const;
     bool StopView(std::string_view viewId);
-    bool SetLoadCommit(LoadEventKind loadKind);
+    LoadCommitResult SetLoadCommit(
+        LoadEventKind loadKind,
+        std::uint64_t transactionRevision,
+        const TrustedImageSnapshot& pending);
+    LoadCommitResult SetLoadCancelled(
+        std::uint64_t transactionRevision,
+        LoadCommitFailure failureReason);
     std::vector<HostInputRoute> GetInputRouteValues(
         const HostViewTargets& targets) const;
     const HostRenderViewRuntime* GetPrimaryView() const;
@@ -155,7 +161,13 @@ private:
             const HostViewTargets& targets) const override;
         bool SetOwnerThread(std::thread::id ownerThread);
         bool StopView(std::string_view viewId) override;
-        bool SetLoadCommit(LoadEventKind loadKind);
+        LoadCommitResult SetLoadCommit(
+            LoadEventKind loadKind,
+            std::uint64_t transactionRevision,
+            const TrustedImageSnapshot& pending);
+        LoadCommitResult SetLoadCancelled(
+            std::uint64_t transactionRevision,
+            LoadCommitFailure failureReason);
         bool StopOwner();
 
     private:
@@ -230,7 +242,8 @@ private:
         const HostCoreServices& core,
         HostRenderViewConfig config,
         const std::shared_ptr<AppTaskExecutor>& taskExecutor,
-        const std::shared_ptr<HistogramConverter>& histogram);
+        const std::shared_ptr<HistogramConverter>& histogram,
+        const std::shared_ptr<RenderStrategyServices>& renderServices);
     bool SetViewWindow(
         HostRenderViewRuntime& view,
         vtkSmartPointer<vtkRenderWindow> renderWindow);
@@ -277,6 +290,7 @@ private:
     std::vector<std::size_t> m_renderOrder;
     std::uint64_t m_sessionGeneration = 0;
     std::uint64_t m_committedEpoch = 0;
+    std::shared_ptr<RenderStrategyServices> m_renderServices;
 };
 
 HostViewRuntimeRegistry::Impl::Impl()
@@ -349,19 +363,41 @@ bool HostViewRuntimeRegistry::Impl::ViewDirectory::StopView(
         && m_owner->StopView(viewId);
 }
 
-bool HostViewRuntimeRegistry::Impl::ViewDirectory::SetLoadCommit(
-    const LoadEventKind loadKind)
+LoadCommitResult
+HostViewRuntimeRegistry::Impl::ViewDirectory::SetLoadCommit(
+    const LoadEventKind loadKind,
+    const std::uint64_t transactionRevision,
+    const TrustedImageSnapshot& pending)
 {
     Impl* owner = nullptr;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (!m_owner || !m_hasOwnerThread
             || m_ownerThread != std::this_thread::get_id()) {
-            return false;
+            return {};
         }
         owner = m_owner;
     }
-    return owner->SetLoadCommit(loadKind);
+    return owner->SetLoadCommit(
+        loadKind, transactionRevision, pending);
+}
+
+LoadCommitResult
+HostViewRuntimeRegistry::Impl::ViewDirectory::SetLoadCancelled(
+    const std::uint64_t transactionRevision,
+    const LoadCommitFailure failureReason)
+{
+    Impl* owner = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_owner || !m_hasOwnerThread
+            || m_ownerThread != std::this_thread::get_id()) {
+            return {};
+        }
+        owner = m_owner;
+    }
+    return owner->SetLoadCancelled(
+        transactionRevision, failureReason);
 }
 
 bool HostViewRuntimeRegistry::Impl::ViewDirectory::StopOwner()
@@ -538,7 +574,8 @@ HostViewRuntimeRegistry::Impl::BuildView(
     const HostCoreServices& core,
     HostRenderViewConfig config,
     const std::shared_ptr<AppTaskExecutor>& taskExecutor,
-    const std::shared_ptr<HistogramConverter>& histogram)
+    const std::shared_ptr<HistogramConverter>& histogram,
+    const std::shared_ptr<RenderStrategyServices>& renderServices)
 {
     const auto appInit = BuildAppInit(config.window.viewInit);
     if (!appInit) return std::nullopt;
@@ -549,10 +586,26 @@ HostViewRuntimeRegistry::Impl::BuildView(
     args.eventSource = core.sharedStateBroadcaster;
     args.taskExecutor = taskExecutor;
     args.histogram = histogram;
+    args.renderServices = renderServices;
     const std::weak_ptr<ViewDirectory> directory = m_directory;
-    args.setLoadCommit = [directory](const LoadEventKind loadKind) {
+    args.setLoadCommit = [directory](
+        const LoadEventKind loadKind,
+        const std::uint64_t transactionRevision,
+        const TrustedImageSnapshot& pending) {
         const auto current = directory.lock();
-        return current && current->SetLoadCommit(loadKind);
+        return current
+            ? current->SetLoadCommit(
+                loadKind, transactionRevision, pending)
+            : LoadCommitResult{};
+    };
+    args.setLoadCancelled = [directory](
+        const std::uint64_t transactionRevision,
+        const LoadCommitFailure failureReason) {
+        const auto current = directory.lock();
+        return current
+            ? current->SetLoadCancelled(
+                transactionRevision, failureReason)
+            : LoadCommitResult{};
     };
     auto ports = CreateAppPorts(std::move(args));
     if (!ports.app.data || !ports.app.view || !ports.app.session
@@ -897,10 +950,21 @@ bool HostViewRuntimeRegistry::Impl::Build(
         std::this_thread::get_id());
     std::shared_ptr<AppTaskExecutor> nextTaskExecutor;
     std::shared_ptr<HistogramConverter> nextHistogram;
+    std::shared_ptr<RenderStrategyServices> nextRenderServices;
     try {
         if (!configs.empty()) {
             nextTaskExecutor = CreateAppTaskExecutor();
             nextHistogram = std::make_shared<HistogramConverter>();
+            const std::weak_ptr<AppTaskExecutor> weakExecutor =
+                nextTaskExecutor;
+            nextRenderServices =
+                std::make_shared<RenderStrategyServices>();
+            nextRenderServices->resources =
+                std::make_shared<RenderResourceCoordinator>(
+                    [weakExecutor](RenderLaneWork work) {
+                        return SendRenderTask(
+                            weakExecutor.lock(), std::move(work));
+                    });
         }
     }
     catch (...) {
@@ -914,7 +978,11 @@ bool HostViewRuntimeRegistry::Impl::Build(
     for (const auto& requestedConfig : configs) {
         auto config = requestedConfig;
         auto view = BuildView(
-            core, std::move(config), nextTaskExecutor, nextHistogram);
+            core,
+            std::move(config),
+            nextTaskExecutor,
+            nextHistogram,
+            nextRenderServices);
         if (!view) return false;
         nextViews.push_back(std::move(*view));
 
@@ -933,6 +1001,10 @@ bool HostViewRuntimeRegistry::Impl::Build(
     m_leasePorts = std::move(nextLeasePorts);
     m_lease = std::move(nextLease);
     m_taskExecutor = std::move(nextTaskExecutor);
+    m_renderServices = std::move(nextRenderServices);
+    if (m_renderServices && m_renderServices->resources) {
+        (void)m_renderServices->resources->AdvanceTopologyRevision();
+    }
     m_loadCommit = std::make_unique<LoadCommitCoordinator>(
         core.sharedDataMgr);
     m_frameIntents.clear();
@@ -1155,19 +1227,24 @@ bool HostViewRuntimeRegistry::Impl::StopView(
     return true;
 }
 
-bool HostViewRuntimeRegistry::Impl::SetLoadCommit(
-    const LoadEventKind loadKind)
+LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
+    const LoadEventKind loadKind,
+    const std::uint64_t transactionRevision,
+    const TrustedImageSnapshot& pending)
 {
     if (!m_loadCommit || m_views.empty()) {
-        return false;
+        return {};
     }
 
     LoadCommitRequest request;
     request.loadKind = loadKind;
+    request.transactionRevision = transactionRevision;
+    request.sourceVersion = pending ? pending->version : 0;
+    request.pending = pending;
     request.stages.reserve(m_views.size());
     for (const auto& view : m_views) {
         if (!view.isAvailable || !view.dataStage) {
-            return false;
+            return {};
         }
         request.stages.push_back(view.dataStage);
     }
@@ -1182,6 +1259,16 @@ bool HostViewRuntimeRegistry::Impl::SetLoadCommit(
         return isStopped;
     };
     return m_loadCommit->SetLoadCommit(request);
+}
+
+LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCancelled(
+    const std::uint64_t transactionRevision,
+    const LoadCommitFailure failureReason)
+{
+    return m_loadCommit
+        ? m_loadCommit->SetLoadCancelled(
+            transactionRevision, failureReason)
+        : LoadCommitResult{};
 }
 
 std::vector<HostInputRoute>
@@ -1927,8 +2014,16 @@ bool HostViewRuntimeRegistry::Impl::SendFrameRender(
         if (view.pendingRenderEpoch != epoch) continue;
         bool isRendered = false;
         try {
+            const auto renderStart = std::chrono::steady_clock::now();
             isRendered = view.isAvailable && view.context
                 && view.context->SendRender();
+            if (isRendered && view.interaction.update) {
+                const auto durationUs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - renderStart).count());
+                view.interaction.update->SetRenderComplete(
+                    std::max<std::uint64_t>(1, durationUs));
+            }
         }
         catch (...) {
             isRendered = false;
@@ -2041,6 +2136,7 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
         m_leasePorts.clear();
         m_views.clear();
         m_loadCommit.reset();
+        m_renderServices.reset();
         m_taskExecutor.reset();
         return true;
     }
@@ -2053,7 +2149,9 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
     constexpr auto taskStopLimit = std::chrono::seconds(2);
     const auto taskDeadline =
         std::chrono::steady_clock::now() + taskStopLimit;
-    bool areTasksStopping = true;
+    bool areTasksStopping = !m_renderServices
+        || !m_renderServices->resources
+        || m_renderServices->resources->StartStop();
     for (auto& view : m_views) {
         areTasksStopping = view.taskControl
             && view.taskControl->SetTaskStopping()
@@ -2063,6 +2161,10 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
     bool areTasksStopped = true;
     for (auto& view : m_views) {
         areTasksStopped = view.taskControl->StopTasks(
+            taskDeadline) && areTasksStopped;
+    }
+    if (m_renderServices && m_renderServices->resources) {
+        areTasksStopped = m_renderServices->resources->Stop(
             taskDeadline) && areTasksStopped;
     }
     if (!areTasksStopped) return false;
@@ -2098,6 +2200,7 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
     for (auto& view : m_views) view.taskControl.reset();
     m_views.clear();
     m_loadCommit.reset();
+    m_renderServices.reset();
     m_taskExecutor.reset();
     m_frameIntents.clear();
     m_frameStage.reset();

@@ -3,6 +3,7 @@
 #include "App/Services/FeatureViewService.h"
 #include "Host/PartSegmentationHostFeature.h"
 #include "Render/Contracts/OverlayService.h"
+#include "Services/PartSegmentationService.h"
 
 #include <vtkImageData.h>
 #include <vtkImageResliceMapper.h>
@@ -534,11 +535,70 @@ struct TestHost final {
     std::shared_ptr<PartSegmentationHostFeature> feature;
 };
 
+bool GetSurfaceRetentionValid()
+{
+    const auto config = GetConfig();
+    const auto source = BuildSnapshot(8, 1);
+    PartSegmentationService probe;
+    const auto getComplete = [&probe]() {
+        std::optional<PartLabelCandidate> result;
+        const auto deadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(5);
+        do {
+            result = probe.GetComplete();
+            if (!result) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (!result && std::chrono::steady_clock::now() < deadline);
+        return result;
+    };
+    if (probe.Start(source, config.defaultStart, config.maxWorkingBytes, 1)
+        != PartAdmissionStatus::Accepted) return false;
+    const auto first = getComplete();
+    if (!first || first->status != PartResultStatus::Succeeded
+        || !first->catalog || first->surfaceBytes == 0) return false;
+    // 测出只保留历史标签/目录时足够的预算，再让真实 Feature 保留旧表面重算。
+    if (probe.Start(source, config.defaultStart, config.maxWorkingBytes, 2,
+            { first->labels, first->catalog },
+            first->catalog->resultRevision, first->catalog->catalogRevision)
+        != PartAdmissionStatus::Accepted) return false;
+    const auto baseline = getComplete();
+    if (!baseline || baseline->status != PartResultStatus::Succeeded
+        || baseline->requiredBytes < first->requiredBytes) return false;
+
+    TestHost test(8, 1, baseline->requiredBytes);
+    if (!test.Attach()) return false;
+    auto result = std::make_shared<std::optional<PartSegmentationResult>>();
+    const auto sendStart = [&]() {
+        result->reset();
+        return test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [result](PartSegmentationResult value) { *result = std::move(value); });
+    };
+    if (sendStart().status != PartAdmissionStatus::Accepted
+        || !SendTicks(*test.feature, [&] { return result->has_value(); })
+        || (*result)->status != PartResultStatus::Succeeded) return false;
+    const auto active = test.feature->GetPartSetSnapshot();
+    const auto overlayCount = test.views->GetOverlayCount();
+    const bool isAccepted = sendStart().status == PartAdmissionStatus::Accepted;
+    const bool didComplete = SendTicks(
+        *test.feature, [&] { return result->has_value(); });
+    const bool isRetained = isAccepted && didComplete && active
+        && (*result)->status == PartResultStatus::Failed
+        && (*result)->failureReason == PartFailureReason::BudgetExceeded
+        && test.feature->GetPartSetSnapshot() == active
+        && test.feature->GetState().status == PartSegmentationStatus::Succeeded
+        && overlayCount == 4 && test.views->GetOverlayCount() == overlayCount;
+    return test.feature->DetachHost() && isRetained;
+}
+
 } // namespace
 
 int GetPartLifecycleFailCount()
 {
     int failureCount = 0;
+    failureCount += GetCaseResult(
+        GetSurfaceRetentionValid(),
+        "Retained surface consumes recompute budget while preserving the active Part result")
+        ? 0 : 1;
 
     {
         TestHost test;
@@ -584,6 +644,8 @@ int GetPartLifecycleFailCount()
                 && startResult->status == PartResultStatus::Succeeded
                 && startResult->partCount == 2
                 && startResult->message.find("peakWorkingBytes=")
+                    != std::string::npos
+                && startResult->message.find("surfaceBytes=")
                     != std::string::npos
                 && callbackThread == ownerThread,
             "Accepted Start completes exactly once on the owner thread") ? 0 : 1;

@@ -465,6 +465,46 @@ void SendHostTick(
     (void)SendTimer(timer.interactor);
 }
 
+bool WaitForRenderInput(
+    const HostRenderViewEndpoint& endpoint,
+    const std::shared_ptr<FeatureViewService>& service,
+    const TrustedImageSnapshot& snapshot)
+{
+    if (!service || !snapshot || !snapshot->image) {
+        return false;
+    }
+    const RenderInputStamp expected{
+        snapshot->image.GetPointer(), snapshot->version
+    };
+    for (int poll = 0; poll < 500; ++poll) {
+        const auto current = service->GetRenderInputStamp();
+        if (current && *current == expected) {
+            return true;
+        }
+        SendTicks(endpoint, 1);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
+bool WaitForCropNode(
+    CropHostFeature& feature,
+    const HostRenderViewEndpoint& primary,
+    const HostRenderViewEndpoint& timer,
+    const std::size_t nodeCount)
+{
+    for (int poll = 0; poll < 500; ++poll) {
+        if (feature.GetState().history.nodeCount == nodeCount) {
+            return true;
+        }
+        SendHostTick(primary, timer);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
+    }
+    return feature.GetState().history.nodeCount == nodeCount;
+}
+
 bool SendWidgetInput(
     const HostRenderViewEndpoint& endpoint,
     const std::array<double, 3>& worldPoint)
@@ -688,10 +728,16 @@ int GetCropFailCount()
     failureCount += GetCaseResult(
         GetCoreWriterContract(),
         "Core writer publishes before notification and weak closures expire safely") ? 0 : 1;
-    // 让主视图消费 probe 发布的新 snapshot；主视图不承载 Host timer，
-    // 因此不会提前推进后续 Feature worker。
+    // 让主视图消费 probe 发布的新 snapshot；产品准备已经异步化，
+    // 因此等待实际 RenderInputStamp，而不是假定两个 tick 足够。
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
-    SendTicks(*timerEndpoint, 2);
+    const bool isPrimaryRenderCurrent = WaitForRenderInput(
+        *timerEndpoint,
+        contextProbe->GetViewService("crop-primary"),
+        publishedSnapshot);
+    failureCount += GetCaseResult(
+        isPrimaryRenderCurrent,
+        "Feature publication converges the primary render input") ? 0 : 1;
 
     const bool isInitialNodeRejected =
         !feature->SendRequest(GetNodeRequest(0));
@@ -929,8 +975,15 @@ int GetCropFailCount()
     const bool isNextRejected =
         !feature->SendRequest(GetCropRequest(
             CropHostAction::Next));
-    const bool isNode =
-        feature->SendRequest(GetNodeRequest(0));
+    bool isNode = false;
+    for (int poll = 0; !isNode && poll < 500; ++poll) {
+        isNode = feature->SendRequest(GetNodeRequest(0));
+        if (!isNode) {
+            SendHostTick(*endpoint, *timerEndpoint);
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1));
+        }
+    }
     const bool isRearmed = feature->SendRequest(
         GetModeRequest(
             target, CropRemovalMode::RemoveInside));
@@ -960,16 +1013,20 @@ int GetCropFailCount()
 
     const bool isPrevious = feature->SendRequest(
         GetCropRequest(CropHostAction::Previous));
-    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isPreviousCommitted = isPrevious
+        && WaitForCropNode(
+            *feature, *endpoint, *timerEndpoint, 0);
     const auto previousState = feature->GetState();
     const bool isNext = feature->SendRequest(
         GetCropRequest(CropHostAction::Next));
-    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isNextCommitted = isNext
+        && WaitForCropNode(
+            *feature, *endpoint, *timerEndpoint, 1);
     const auto nextState = feature->GetState();
     failureCount += GetCaseResult(
-        isPrevious
+        isPreviousCommitted
             && previousState.history.nodeCount == 0
-            && isNext
+            && isNextCommitted
             && nextState.history.nodeCount == 1,
         "Previous and Next move the committed Crop history in both directions") ? 0 : 1;
 
@@ -977,18 +1034,22 @@ int GetCropFailCount()
         GetCropRequest(CropHostAction::Exit));
     const bool isPreviousAfterExit = feature->SendRequest(
         GetCropRequest(CropHostAction::Previous));
-    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isPreviousAfterExitCommitted = isPreviousAfterExit
+        && WaitForCropNode(
+            *feature, *endpoint, *timerEndpoint, 0);
     const auto previousAfterExit = feature->GetState();
     const bool isNextAfterExit = feature->SendRequest(
         GetCropRequest(CropHostAction::Next));
-    SendHostTick(*endpoint, *timerEndpoint);
+    const bool isNextAfterExitCommitted = isNextAfterExit
+        && WaitForCropNode(
+            *feature, *endpoint, *timerEndpoint, 1);
     const auto nextAfterExit = feature->GetState();
     failureCount += GetCaseResult(
         isHistoryExited
             && !previousAfterExit.isActive
-            && isPreviousAfterExit
+            && isPreviousAfterExitCommitted
             && previousAfterExit.history.nodeCount == 0
-            && isNextAfterExit
+            && isNextAfterExitCommitted
             && nextAfterExit.history.nodeCount == 1,
         "Exit hides Crop widgets without locking committed history navigation") ? 0 : 1;
 

@@ -426,6 +426,9 @@ set(MVVCVTK_HOST_SOURCES
     include/Platform/TaskStopToken.h
     include/Render/Contracts/RenderBindPort.h
     include/Render/Contracts/RenderStrategyFactory.h
+    include/Render/Internal/RenderResourceCoordinator.h
+    include/Render/Internal/IsoSurfaceProductBuilder.h
+    include/Render/Internal/VolumeLodProductBuilder.h
     include/Render/Strategies/ColoredPlanesStrategy.h
     include/Render/Strategies/CompositeStrategy.h
     include/Render/Strategies/IsoSurfaceStrategy.h
@@ -460,6 +463,9 @@ set(MVVCVTK_HOST_SOURCES
     src/Interaction/Viewer3DHandler.cpp
     src/Platform/MemMappedFile.cpp
     src/Render/RenderStrategyFactory.cpp
+    src/Render/Internal/RenderResourceCoordinator.cpp
+    src/Render/Internal/IsoSurfaceProductBuilder.cpp
+    src/Render/Internal/VolumeLodProductBuilder.cpp
     src/Render/Strategies/ColoredPlanesStrategy.cpp
     src/Render/Strategies/CompositeStrategy.cpp
     src/Render/Strategies/IsoLodController.cpp

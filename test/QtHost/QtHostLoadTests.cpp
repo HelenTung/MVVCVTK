@@ -35,6 +35,23 @@
 
 namespace {
 
+class PendingProbeDataManager final : public RawVolumeDataManager {
+public:
+    TrustedImageSnapshot GetPendingSnapshot() const override
+    {
+        m_pendingReadCount.fetch_add(1, std::memory_order_relaxed);
+        return RawVolumeDataManager::GetPendingSnapshot();
+    }
+
+    int GetPendingReadCount() const noexcept
+    {
+        return m_pendingReadCount.load(std::memory_order_relaxed);
+    }
+
+private:
+    mutable std::atomic<int> m_pendingReadCount{ 0 };
+};
+
 HostCoreServices GetLoadCore(
     std::shared_ptr<RawVolumeDataManager> dataManager = {})
 {
@@ -206,45 +223,81 @@ bool GetStageFinalizeValid()
         {
         }
 
-        bool BuildDataStage(const TrustedImageSnapshot& snapshot) override
+        DataStageStatus StartDataStage(
+            const TrustedImageSnapshot& snapshot,
+            const std::uint64_t transactionRevision) override
         {
-            if (m_isBuilt || !snapshot) return false;
+            if (m_isBuilt || !snapshot || transactionRevision == 0) {
+                return DataStageStatus::Failed;
+            }
             m_snapshot = snapshot;
+            m_revision = transactionRevision;
             m_isBuilt = true;
-            return true;
+            m_status = DataStageStatus::Preparing;
+            return m_status;
         }
 
-        bool SetViewStage(const TrustedImageSnapshot& snapshot) override
+        DataStageStatus SetDataStageReady(
+            const TrustedImageSnapshot& snapshot,
+            const std::uint64_t transactionRevision) override
+        {
+            if (!m_isBuilt || snapshot != m_snapshot
+                || transactionRevision != m_revision) {
+                return DataStageStatus::Failed;
+            }
+            m_status = DataStageStatus::Ready;
+            return m_status;
+        }
+
+        DataStageStatus GetDataStageStatus(
+            const std::uint64_t transactionRevision) const override
+        {
+            return transactionRevision == m_revision
+                ? m_status : DataStageStatus::Idle;
+        }
+
+        bool SetViewStage(
+            const TrustedImageSnapshot& snapshot,
+            const std::uint64_t transactionRevision) override
         {
             if (!m_isBuilt || m_isCommitted
-                || snapshot != m_snapshot) {
+                || m_status != DataStageStatus::Ready
+                || snapshot != m_snapshot
+                || transactionRevision != m_revision) {
                 return false;
             }
             m_isCommitted = true;
             return true;
         }
 
-        bool ResetViewStage() override
+        bool ResetViewStage(
+            const std::uint64_t transactionRevision) override
         {
+            if (transactionRevision != m_revision) return false;
             ++m_resetCount;
             m_isCommitted = false;
             return true;
         }
 
-        bool ClearDataStage() override
+        bool ClearDataStage(
+            const std::uint64_t transactionRevision) override
         {
+            if (transactionRevision != m_revision) return false;
             ++m_clearCount;
             return false;
         }
 
-        void SetDataStageComplete() noexcept override
+        void SetDataStageComplete(
+            const std::uint64_t transactionRevision) noexcept override
         {
+            if (transactionRevision != m_revision) std::terminate();
             ++m_completeCount;
             m_hasPublished = m_data
                 && m_data->GetImageSnapshot() == m_snapshot;
             m_isCommitted = false;
             m_isBuilt = false;
             m_snapshot.reset();
+            m_status = DataStageStatus::Idle;
         }
 
         bool GetIsComplete() const noexcept
@@ -263,6 +316,8 @@ bool GetStageFinalizeValid()
         int m_completeCount = 0;
         int m_clearCount = 0;
         int m_resetCount = 0;
+        std::uint64_t m_revision = 0;
+        DataStageStatus m_status = DataStageStatus::Idle;
         bool m_hasPublished = false;
         bool m_isBuilt = false;
         bool m_isCommitted = false;
@@ -287,11 +342,17 @@ bool GetStageFinalizeValid()
     auto second = std::make_shared<StageStub>(data);
     LoadCommitRequest request;
     request.loadKind = LoadEventKind::Reload;
+    request.transactionRevision = 1;
+    request.pending = data->GetPendingSnapshot();
+    request.sourceVersion = request.pending
+        ? request.pending->version : 0;
     request.stages = { first, second };
     LoadCommitCoordinator coordinator(data);
-    const bool isCommitted = coordinator.SetLoadCommit(request);
+    const auto preparing = coordinator.SetLoadCommit(request);
+    const auto committed = coordinator.SetLoadCommit(request);
     const auto current = data->GetImageSnapshot();
-    return isCommitted
+    return preparing.status == LoadCommitStatus::Preparing
+        && committed.status == LoadCommitStatus::Succeeded
         && current
         && current != initial
         && current->version == initial->version + 1
@@ -375,6 +436,131 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
         && core.sharedState->GetCursorWorld() == expectedCursor
         && core.sharedState->GetCursorRawWorld() == expectedCursor
         && core.sharedState->GetCursorAxis() == -1;
+}
+
+bool GetReloadReplacementValid()
+{
+    auto dataManager = std::make_shared<PendingProbeDataManager>();
+    auto core = GetLoadCore(dataManager);
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, GetLoadViews())
+        || !views.SetInteractorsReady()) {
+        return false;
+    }
+    const HostViewTarget primary{
+        "load-primary", false,
+        HostRenderViewRole::Primary3D };
+    const HostViewTarget auxiliary{
+        "load-aux", false,
+        HostRenderViewRole::Auxiliary };
+    const auto initial = core.sharedDataMgr->GetImageSnapshot();
+    HostCommandRouter router(views.GetViewDirectory());
+    int firstCallbackCount = 0;
+    bool isFirstSucceeded = true;
+    if (!initial || !router.Dispatch(
+            GetReload(),
+            [&firstCallbackCount, &isFirstSucceeded](const bool value) {
+                ++firstCallbackCount;
+                isFirstSucceeded = value;
+            })) {
+        return false;
+    }
+
+    const int pendingReads = dataManager->GetPendingReadCount();
+    bool hasPreparingWindow = false;
+    for (int poll = 0; poll < 1000 && !hasPreparingWindow; ++poll) {
+        (void)views.SendViewUpdates(primary);
+        hasPreparingWindow =
+            dataManager->GetPendingReadCount() >= pendingReads + 2
+            && firstCallbackCount == 0;
+        if (!hasPreparingWindow) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    HostReloadRequest latest = GetReload();
+    latest.voxels = {
+        20.0f, 21.0f, 22.0f, 23.0f,
+        24.0f, 25.0f, 26.0f, 27.0f
+    };
+    int latestCallbackCount = 0;
+    bool isLatestSucceeded = false;
+    const bool isLatestAccepted = hasPreparingWindow
+        && router.Dispatch(
+            std::move(latest),
+            [&latestCallbackCount, &isLatestSucceeded](const bool value) {
+                ++latestCallbackCount;
+                isLatestSucceeded = value;
+            });
+    std::uint64_t committedEpoch = GetCommittedEpoch(views);
+    for (int poll = 0;
+        isLatestAccepted
+            && (firstCallbackCount == 0 || latestCallbackCount == 0)
+            && poll < 1000;
+        ++poll) {
+        if (!SendFrame(views, committedEpoch)) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    const auto current = core.sharedDataMgr->GetImageSnapshot();
+    double scalarRange[2]{};
+    if (current && current->image) {
+        current->image->GetScalarRange(scalarRange);
+    }
+    return isLatestAccepted
+        && firstCallbackCount == 1
+        && !isFirstSucceeded
+        && latestCallbackCount == 1
+        && isLatestSucceeded
+        && current
+        && current->version == initial->version + 1
+        && scalarRange[0] == 20.0
+        && scalarRange[1] == 27.0
+        && !core.sharedDataMgr->GetPendingSnapshot();
+}
+
+bool GetPreparingStopValid()
+{
+    auto dataManager = std::make_shared<PendingProbeDataManager>();
+    auto core = GetLoadCore(dataManager);
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, GetLoadViews())
+        || !views.SetInteractorsReady()) {
+        return false;
+    }
+    const HostViewTarget primary{
+        "load-primary", false,
+        HostRenderViewRole::Primary3D };
+    const auto initial = core.sharedDataMgr->GetImageSnapshot();
+    HostCommandRouter router(views.GetViewDirectory());
+    int callbackCount = 0;
+    bool isSucceeded = true;
+    if (!initial || !router.Dispatch(
+            GetReload(),
+            [&callbackCount, &isSucceeded](const bool value) {
+                ++callbackCount;
+                isSucceeded = value;
+            })) {
+        return false;
+    }
+
+    const int pendingReads = dataManager->GetPendingReadCount();
+    bool hasPreparingWindow = false;
+    for (int poll = 0; poll < 1000 && !hasPreparingWindow; ++poll) {
+        (void)views.SendViewUpdates(primary);
+        hasPreparingWindow =
+            dataManager->GetPendingReadCount() >= pendingReads + 2
+            && callbackCount == 0;
+        if (!hasPreparingWindow) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    const bool isStopped = hasPreparingWindow && views.StopLease();
+    return isStopped
+        && callbackCount == 1
+        && !isSucceeded
+        && core.sharedDataMgr->GetImageSnapshot() == initial
+        && !core.sharedDataMgr->GetPendingSnapshot();
 }
 
 bool GetWindowLevelIntentValid()
@@ -1318,6 +1504,12 @@ int GetLoadFailCount()
     failureCount += GetCaseResult(
         GetMultiViewLoadValid(false),
         "Multi-view reload publishes one shared version after every stage is ready") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetReloadReplacementValid(),
+        "Reload during prepare cancels the old revision and publishes only the latest") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetPreparingStopValid(),
+        "Stop during prepare cancels products and completes the callback exactly once") ? 0 : 1;
     failureCount += GetCaseResult(
         GetWindowLevelIntentValid(),
         "Window/level auto intent follows data while manual intent survives reload") ? 0 : 1;

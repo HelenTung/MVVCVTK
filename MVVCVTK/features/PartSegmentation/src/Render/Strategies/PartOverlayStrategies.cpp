@@ -2,7 +2,7 @@
 
 #include <vtkActor.h>
 #include <vtkDataArray.h>
-#include <vtkDiscreteMarchingCubes.h>
+#include <vtkDataSet.h>
 #include <vtkImageData.h>
 #include <vtkImageProperty.h>
 #include <vtkImageResliceMapper.h>
@@ -13,6 +13,7 @@
 #include <vtkPlane.h>
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyData.h>
 #include <vtkProperty.h>
 
 #include <algorithm>
@@ -159,11 +160,9 @@ bool SetPartStates(
 
 PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
     : m_actor(vtkSmartPointer<vtkActor>::New())
-    , m_surface(vtkSmartPointer<vtkDiscreteMarchingCubes>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
 {
-    m_mapper->SetInputConnection(m_surface->GetOutputPort());
     m_mapper->SetLookupTable(m_lut);
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetMapper(m_mapper);
@@ -176,10 +175,9 @@ PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
 void PartSurfaceOverlayStrategy::SetInputData(
     vtkSmartPointer<vtkDataObject> data)
 {
-    auto* image = vtkImageData::SafeDownCast(data);
-    if (!image) return;
-    m_image = image;
-    m_surface->SetInputData(image);
+    auto* surface = vtkPolyData::SafeDownCast(data);
+    if (!surface) return;
+    m_mapper->SetInputData(surface);
 }
 
 void PartSurfaceOverlayStrategy::SetOverlayState(
@@ -192,17 +190,11 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
     const PartRenderStateTable& states) noexcept
 {
     try {
-        if (!m_image || !SetLookupTable(*m_lut, states)) return false;
+        if (!m_mapper->GetInput() || !SetLookupTable(*m_lut, states)) return false;
         const auto partCount = static_cast<std::uint32_t>(
             states.statesByLabel.size() - 1U);
-        m_surface->SetNumberOfContours(static_cast<int>(partCount));
-        for (std::uint32_t label = 1; label <= partCount; ++label) {
-            m_surface->SetValue(
-                static_cast<int>(label - 1U),
-                static_cast<double>(label));
-        }
         m_mapper->SetScalarRange(
-            1.0,
+            0.0,
             static_cast<double>(std::max<std::uint32_t>(1U, partCount)));
         return true;
     }

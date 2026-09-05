@@ -251,6 +251,7 @@ private:
     bool AttachDisplay(
         vtkSmartPointer<vtkImageData> labelImage,
         const PartRenderStateTable& renderStates,
+        std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
         const std::vector<HostFeatureView>& views,
         std::vector<OverlayBinding>& nextBindings);
     bool RemoveDisplay();
@@ -277,6 +278,7 @@ private:
     std::shared_ptr<std::vector<PartLabelId>> m_labelValues;
     vtkSmartPointer<vtkImageData> m_labelImage;
     std::shared_ptr<const PartCatalog> m_activeCatalog;
+    std::shared_ptr<const PartSurfaceProduct> m_surfaceProduct;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
@@ -349,6 +351,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     m_service.reset();
     m_requestSource.reset();
     m_activeSource.reset();
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_activeCatalog.reset();
@@ -441,7 +444,8 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
             requestId,
             std::move(previous),
             expectedResultRevision,
-            expectedCatalogRevision);
+            expectedCatalogRevision,
+            m_surfaceProduct ? m_surfaceProduct->actualBytes : 0);
         admission.status = status;
         if (status != PartAdmissionStatus::Accepted) return admission;
 
@@ -923,10 +927,12 @@ bool PartSegmentationHostFeature::Impl::SendSceneDelta(
 bool PartSegmentationHostFeature::Impl::AttachDisplay(
     vtkSmartPointer<vtkImageData> labelImage,
     const PartRenderStateTable& renderStates,
+    std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
     const std::vector<HostFeatureView>& views,
     std::vector<OverlayBinding>& nextBindings)
 {
-    if (!m_views || !m_host || !labelImage || views.empty()) return false;
+    if (!m_views || !m_host || !labelImage || !surfaceProduct
+        || !surfaceProduct->surface || views.empty()) return false;
     std::vector<std::string> viewIds;
     viewIds.reserve(views.size());
     nextBindings.reserve(views.size());
@@ -937,7 +943,12 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
             RemoveBindings(nextBindings);
             return false;
         }
-        candidate.overlay->SetInputData(labelImage);
+        if (view.role == HostRenderViewRole::Primary3D) {
+            candidate.overlay->SetInputData(surfaceProduct->surface);
+        }
+        else {
+            candidate.overlay->SetInputData(labelImage);
+        }
         if (!candidate.control->SetPartStates(renderStates)
             || !service->AttachOverlay(candidate.overlay)) {
             RemoveBindings(nextBindings);
@@ -989,7 +1000,8 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         SetState(state);
         return true;
     }
-    if (!m_labelValues || !m_labelImage || m_activeViews.empty()) {
+    if (!m_labelValues || !m_labelImage || !m_surfaceProduct
+        || m_activeViews.empty()) {
         state.isOverlayVisible = true;
         SetState(state);
         return true;
@@ -1000,7 +1012,11 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
     if (!renderStates) return false;
     std::vector<OverlayBinding> nextBindings;
     if (!AttachDisplay(
-            m_labelImage, *renderStates, m_activeViews, nextBindings)) {
+            m_labelImage,
+            *renderStates,
+            m_surfaceProduct,
+            m_activeViews,
+            nextBindings)) {
         return false;
     }
     RemoveBindings(m_bindings);
@@ -1013,6 +1029,7 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
     if (!RemoveDisplay()) return false;
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_activeCatalog.reset();
@@ -1049,6 +1066,7 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     // 下一次 owner tick 会重试，避免悬空或半清理。
     if (!RemoveDisplay()) return;
     m_activeSource.reset();
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_activeCatalog.reset();
@@ -1134,6 +1152,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             isDisplayReady = AttachDisplay(
                 labelView.image,
                 *nextRenderStates,
+                candidate.surface,
                 m_requestViews,
                 nextBindings);
         }
@@ -1144,6 +1163,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         }
         const bool isFrameReady = !isVisible
             || (labelView.labels && labelView.image
+                && candidate.surface && candidate.surface->surface
                 && isRevisionExpected && isCatalogValid && nextSnapshot
                 && nextRenderStates && isDisplayReady
                 && SendSceneDelta(
@@ -1152,6 +1172,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                     m_requestSource,
                     m_requestViews));
         if (!labelView.labels || !labelView.image
+            || !candidate.surface || !candidate.surface->surface
             || !isRevisionExpected || !isCatalogValid || !nextSnapshot
             || !nextRenderStates
             || !isDisplayReady || !isFrameReady) {
@@ -1186,6 +1207,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         }
         else {
             RemoveBindings(m_bindings);
+            m_surfaceProduct.reset();
             m_labelImage = nullptr;
             m_labelValues.reset();
             m_activeCatalog.reset();
@@ -1193,6 +1215,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             m_labelValues = std::move(labelView.labels);
             m_labelImage = std::move(labelView.image);
             m_activeCatalog = std::move(candidate.catalog);
+            m_surfaceProduct = std::move(candidate.surface);
             m_activeViews = std::move(m_requestViews);
             m_activeSource = m_requestSource;
             PartSegmentationState state;

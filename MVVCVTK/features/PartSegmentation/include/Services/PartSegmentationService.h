@@ -4,6 +4,7 @@
 #include "Data/TrustedImageState.h"
 #include "Host/PartSegmentationHostTypes.h"
 #include "Model/PartLineageMatcher.h"
+#include "Render/Internal/PartSurfaceProductBuilder.h"
 
 #include <array>
 #include <atomic>
@@ -37,6 +38,8 @@ struct PartLabelCandidate final {
     std::shared_ptr<const PartCatalog> catalog;
     std::uint64_t expectedResultRevision = 0;
     std::uint64_t expectedCatalogRevision = 0;
+    std::shared_ptr<const PartSurfaceProduct> surface;
+    std::size_t surfaceBytes = 0;
     std::size_t requiredBytes = 0;
     PartAlgorithmMetrics metrics;
 };
@@ -57,7 +60,8 @@ public:
         std::uint64_t requestId,
         PartHistorySnapshot previous = {},
         std::uint64_t expectedResultRevision = 0,
-        std::uint64_t expectedCatalogRevision = 0);
+        std::uint64_t expectedCatalogRevision = 0,
+        std::size_t retainedSurfaceBytes = 0);
     void StopRequest() noexcept;
     std::optional<PartLabelCandidate> GetComplete();
     std::optional<double> GetProgress(
@@ -74,6 +78,7 @@ private:
         PartHistorySnapshot previous;
         std::uint64_t expectedResultRevision = 0;
         std::uint64_t expectedCatalogRevision = 0;
+        std::size_t retainedSurfaceBytes = 0;
     };
 
     void WorkerLoop() noexcept;

@@ -141,6 +141,8 @@ public:
     bool GetDirty() const;
     void SetDirty();
     bool ResetDirty();
+    bool SetInteractionPhase();
+    void SetRenderComplete(std::uint64_t durationUs) noexcept;
     void SetCurrentStrategy(
         std::shared_ptr<AbstractVisualStrategy> newStrategy,
         VizMode mode,
@@ -152,11 +154,21 @@ public:
     RenderInputStamp GetRenderInputStamp() const;
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
     bool DetachRenderEffect(const RenderEffect* effect);
-    bool BuildDataStage(const TrustedImageSnapshot& snapshot);
-    bool SetViewStage(const TrustedImageSnapshot& snapshot);
-    bool ResetViewStage();
-    bool ClearDataStage();
-    void SetDataStageComplete() noexcept;
+    DataStageStatus StartDataStage(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision);
+    DataStageStatus SetDataStageReady(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision);
+    DataStageStatus GetDataStageStatus(
+        std::uint64_t transactionRevision) const;
+    bool SetViewStage(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision);
+    bool ResetViewStage(std::uint64_t transactionRevision);
+    bool ClearDataStage(std::uint64_t transactionRevision);
+    void SetDataStageComplete(
+        std::uint64_t transactionRevision) noexcept;
     bool StartViewUpdate();
     bool SetViewUpdateCommit(
         bool isCommitted,
@@ -194,8 +206,12 @@ private:
         WindowLevelParams autoWindowLevel;
         VizMode mode = VizMode::Volume;
         bool isEffectAttached = false;
+        bool isRendererAttached = false;
+        bool isPrepared = false;
         bool hasDefaultTransfer = false;
         bool isCommitted = false;
+        std::uint64_t transactionRevision = 0;
+        DataStageStatus status = DataStageStatus::Idle;
     };
 
     class ObserverGate final : public IStateEventSink {
@@ -227,6 +243,14 @@ private:
         LoadEventKind loadKind = LoadEventKind::None; // None 用于普通导出，File/Reload 需要加载事务收尾。
         std::future<bool> result; // worker 只返回准备结果，不直接触碰 VTK 管线。
         std::function<void(bool)> callback; // 延迟到主线程完成提交/管线同步后执行。
+        std::uint64_t transactionRevision = 0;
+    };
+
+    struct PendingLoadCommit final {
+        LoadEventKind loadKind = LoadEventKind::None;
+        std::uint64_t transactionRevision = 0;
+        TrustedImageSnapshot pending;
+        std::function<void(bool)> callback;
     };
 
     struct Completion final {
@@ -245,6 +269,7 @@ private:
     void SendTasks();
     void SetTaskResult(ActiveTask task, bool isSuccess);
     void SetLoadResult(ActiveTask task, bool isSuccess);
+    void SendLoadCommit();
     void SetCompletion(bool isSuccess, std::function<void(bool)> callback);
     bool CreateLoadNotice(
         LoadEventKind loadEventKind,
@@ -254,6 +279,9 @@ private:
     bool GetOwnedLoad(LoadEventKind loadEventKind) const;
     bool SetOwnedLoad(LoadEventKind loadEventKind);
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
+    bool SetPreparingLoadReplaced(
+        LoadEventKind loadEventKind,
+        bool& isReplaced);
     bool BuildPipeline();
     std::optional<VolumeTransferFunction> GetDefaultVolumeTransfer(
         const TrustedImageSnapshot& snapshot);
@@ -264,6 +292,7 @@ private:
         const std::array<double, 2>& scalarRange) const;
     double GetRenderRate(bool isInteracting) const noexcept;
     VolumeQuality GetTargetQuality() const;
+    bool SetProductState();
     bool SetStrategyState();
     void ClearLoadFail(LoadEventKind loadEventKind);
     RenderParams GetRenderParams(UpdateFlags flags) const;
@@ -293,6 +322,7 @@ private:
     std::shared_ptr<AbstractDataManager> m_dataManager;
     // 当前主渲染策略的共享 owner；替换前从旧 renderer 脱离，随后由缓存决定是否继续保留。
     std::shared_ptr<AbstractVisualStrategy> m_currentStrategy;
+    std::uint64_t m_renderNeededProductRevision = 0;
     // 只有 BuildPipeline 成功提交后才更新；renderer 重绑和相机恢复禁止读取 pending mode。
     std::optional<VizMode> m_currentMode;
     // Service 只弱观察可选效果根；Feature 是效果的唯一业务 owner，
@@ -344,8 +374,18 @@ private:
     // Host 多 View 共享频率缓存，但每个 View 仍独立保存最终 TF 值快照。
     std::shared_ptr<HistogramConverter> m_histogram;
     std::shared_ptr<AppTaskExecutor> m_taskExecutor;
-    std::function<bool(LoadEventKind)> m_setLoadCommit;
+    std::shared_ptr<RenderStrategyServices> m_renderServices;
+    bool m_ownsRenderResources = false;
+    std::function<LoadCommitResult(
+        LoadEventKind,
+        std::uint64_t,
+        const TrustedImageSnapshot&)> m_setLoadCommit;
+    std::function<LoadCommitResult(
+        std::uint64_t,
+        LoadCommitFailure)> m_setLoadCancelled;
     std::optional<DataStage> m_dataStage;
+    std::optional<PendingLoadCommit> m_pendingLoadCommit;
+    std::uint64_t m_nextLoadTransactionRevision = 0;
     // Host 多 View 全部清除已提交 stage 后，load owner 取走同版本候选并做一次共享提交。
     std::optional<DataReadyState> m_readyState;
     std::list<ActiveTask> m_activeTasks;
@@ -582,6 +622,7 @@ public:
         : m_workerStart(GetWorkerStart(std::move(workerStart)))
         , m_loadLane(1, 1, m_workerStart)
         , m_exportLane(2, 2, m_workerStart)
+        , m_renderLane(1, 1, m_workerStart)
     {
     }
 
@@ -594,11 +635,17 @@ public:
             : m_loadLane.SendTask(std::move(work));
     }
 
+    TaskAdmissionResult SendRenderTask(AppTaskWork work)
+    {
+        return m_renderLane.SendTask(std::move(work));
+    }
+
     bool StartStop()
     {
         const bool isLoadSet = m_loadLane.StartStop();
         const bool isExportSet = m_exportLane.StartStop();
-        return isLoadSet && isExportSet;
+        const bool isRenderSet = m_renderLane.StartStop();
+        return isLoadSet && isExportSet && isRenderSet;
     }
 
     bool Stop(
@@ -607,7 +654,8 @@ public:
         (void)StartStop();
         const bool isLoadStopped = m_loadLane.Stop(deadline);
         const bool isExportStopped = m_exportLane.Stop(deadline);
-        return isLoadStopped && isExportStopped;
+        const bool isRenderStopped = m_renderLane.Stop(deadline);
+        return isLoadStopped && isExportStopped && isRenderStopped;
     }
 
 private:
@@ -623,6 +671,7 @@ private:
     AppWorkerStart m_workerStart;
     TaskLane m_loadLane;
     TaskLane m_exportLane;
+    TaskLane m_renderLane;
 };
 
 std::shared_ptr<AppTaskExecutor> CreateAppTaskExecutor(
@@ -642,6 +691,15 @@ TaskAdmissionResult SendReadTask(
         : TaskAdmissionResult::Unavailable;
 }
 
+bool SendRenderTask(
+    const std::shared_ptr<AppTaskExecutor>& executor,
+    RenderLaneWork work)
+{
+    return executor
+        && executor->SendRenderTask(std::move(work))
+            == TaskAdmissionResult::Accepted;
+}
+
 AppRuntime::AppRuntime(AppServiceArgs args)
     : m_dataManager(std::move(args.dataManager))
     , m_histogram(args.histogram
@@ -653,15 +711,30 @@ AppRuntime::AppRuntime(AppServiceArgs args)
     , m_observerGate(std::make_shared<ObserverGate>(this))
     , m_viewState(std::make_shared<ViewPresentationState>(m_observerGate))
     , m_setLoadCommit(std::move(args.setLoadCommit))
+    , m_setLoadCancelled(std::move(args.setLoadCancelled))
 {
-    if (!m_strategyCreate) {
-        m_strategyCreate = [](const VizMode mode) {
-            return CreateRenderStrategy(mode);
-        };
-    }
     m_taskExecutor = args.taskExecutor
         ? std::move(args.taskExecutor)
         : CreateAppTaskExecutor(std::move(args.workerStart));
+    m_renderServices = std::move(args.renderServices);
+    if (!m_renderServices) {
+        const std::weak_ptr<AppTaskExecutor> weakExecutor =
+            m_taskExecutor;
+        m_renderServices = std::make_shared<RenderStrategyServices>();
+        m_renderServices->resources =
+            std::make_shared<RenderResourceCoordinator>(
+                [weakExecutor](RenderLaneWork work) {
+                    return SendRenderTask(
+                        weakExecutor.lock(), std::move(work));
+                });
+        m_ownsRenderResources = true;
+    }
+    if (!m_strategyCreate) {
+        const auto renderServices = m_renderServices;
+        m_strategyCreate = [renderServices](const VizMode mode) {
+            return CreateRenderStrategy(mode, renderServices);
+        };
+    }
     m_dataLoadTaskService = std::make_shared<AppDataLoadTaskService>(m_dataManager);
     m_dataExportTaskService = std::make_shared<AppDataExportTaskService>(
         m_dataManager, m_sharedState, m_viewState);
@@ -710,14 +783,37 @@ AppRuntime::~AppRuntime()
 bool AppRuntime::SetTaskStopping()
 {
     m_isAccepting = false;
-    return !m_taskExecutor || m_taskExecutor->StartStop();
+    if (m_pendingLoadCommit) {
+        PendingLoadCommit pending = std::move(*m_pendingLoadCommit);
+        m_pendingLoadCommit.reset();
+        if (m_setLoadCancelled) {
+            (void)m_setLoadCancelled(
+                pending.transactionRevision,
+                LoadCommitFailure::Stopping);
+        }
+        if (m_dataManager) (void)m_dataManager->ClearPending();
+        SetCompletion(false, std::move(pending.callback));
+    }
+    const bool areRenderTasksSet = !m_ownsRenderResources
+        || !m_renderServices
+        || !m_renderServices->resources
+        || m_renderServices->resources->StartStop();
+    const bool areAppTasksSet =
+        !m_taskExecutor || m_taskExecutor->StartStop();
+    return areRenderTasksSet && areAppTasksSet;
 }
 
 bool AppRuntime::StopTasks(
     const std::chrono::steady_clock::time_point deadline)
 {
     (void)SetTaskStopping();
-    if (m_taskExecutor && !m_taskExecutor->Stop(deadline)) {
+    const bool areAppTasksStopped =
+        !m_taskExecutor || m_taskExecutor->Stop(deadline);
+    const bool areRenderTasksStopped = !m_ownsRenderResources
+        || !m_renderServices
+        || !m_renderServices->resources
+        || m_renderServices->resources->Stop(deadline);
+    if (!areAppTasksStopped || !areRenderTasksStopped) {
         return false;
     }
 
@@ -797,6 +893,38 @@ bool AppRuntime::ResetDirty()
 {
     // Timer 在本帧同步完成后领取一次请求；领取之后的新请求留给下一帧。
     return m_isDirty.exchange(false);
+}
+
+void AppRuntime::SetRenderComplete(
+    const std::uint64_t durationUs) noexcept
+{
+    if (m_currentStrategy) {
+        m_currentStrategy->SetFirstRenderDuration(durationUs);
+    }
+}
+
+bool AppRuntime::SetInteractionPhase()
+{
+    if (!GetIsOwnerThread()) return false;
+    if (!m_currentStrategy) return true;
+    const double oldDesiredRate = m_renderWindow
+        ? m_renderWindow->GetDesiredUpdateRate() : 0.0;
+    const bool isInteracting = m_sharedState
+        && m_sharedState->GetIsInteracting();
+    if (m_renderWindow) {
+        m_renderWindow->SetDesiredUpdateRate(
+            GetRenderRate(isInteracting));
+    }
+    const auto params = GetRenderParams(UpdateFlags::RenderRate);
+    if (!m_currentStrategy->SetVisualState(
+            params, UpdateFlags::RenderRate)) {
+        if (m_renderWindow) {
+            m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
+        }
+        return false;
+    }
+    m_isDirty = true;
+    return true;
 }
 
 void AppRuntime::SetPendingFlags(UpdateFlags flags)
@@ -1011,6 +1139,7 @@ void AppRuntime::SetCurrentStrategy(
     }
 
     m_currentStrategy = std::move(newStrategy);
+    m_renderNeededProductRevision = 0;
 
     if (m_currentStrategy) {
         (void)m_currentStrategy->SetRenderInputStamp(
@@ -1178,6 +1307,7 @@ void AppRuntime::ClearStrategies()
         }
     }
     m_currentStrategy.reset();
+    m_renderNeededProductRevision = 0;
     m_currentMode.reset();
 
     ClearOverlays();
@@ -1432,7 +1562,8 @@ void AppRuntime::SetVizMode(VizMode mode)
 
 VizMode AppRuntime::GetVizMode() const
 {
-    return static_cast<VizMode>(m_pendingVizModeInt.load());
+    return m_currentMode.value_or(
+        static_cast<VizMode>(m_pendingVizModeInt.load()));
 }
 
 void AppRuntime::SetMaterial(const MaterialParams& mat)
@@ -1694,7 +1825,8 @@ bool AppRuntime::SetVolumeQuality(const VolumeQuality quality)
     }
     {
         std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-        if (m_requestedQuality == quality) return true;
+        if (m_requestedQuality == quality
+            && quality != VolumeQuality::Auto) return true;
         m_requestedQuality = quality;
     }
     SetPendingFlags(UpdateFlags::Quality);
@@ -1845,6 +1977,15 @@ TaskAdmissionResult AppRuntime::StartTask(
     auto entry = std::prev(m_activeTasks.end());
     try {
         entry->loadKind = loadKind;
+        if (loadKind != LoadEventKind::None) {
+            if (m_nextLoadTransactionRevision
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+                m_activeTasks.erase(entry);
+                return TaskAdmissionResult::Unavailable;
+            }
+            entry->transactionRevision =
+                ++m_nextLoadTransactionRevision;
+        }
         entry->result = task.get_future();
         entry->callback = std::move(callback);
         const auto admission = m_taskExecutor->SendTask(
@@ -1874,11 +2015,17 @@ TaskAdmissionResult AppRuntime::LoadFileAsync(
         std::move(path), std::move(layout));
     if (!task) return TaskAdmissionResult::InvalidRequest;
     if (!m_sharedState) return TaskAdmissionResult::Unavailable;
-    if (!m_sharedState->StartLoad(LoadEventKind::File)) {
+    bool isReplaced = false;
+    if (!SetPreparingLoadReplaced(
+            LoadEventKind::File, isReplaced)) {
+        return TaskAdmissionResult::Busy;
+    }
+    if (!isReplaced
+        && !m_sharedState->StartLoad(LoadEventKind::File)) {
         return TaskAdmissionResult::Busy;
     }
     if (!m_dataManager || !m_dataManager->ClearPending()
-        || !SetOwnedLoad(LoadEventKind::File)) {
+        || (!isReplaced && !SetOwnedLoad(LoadEventKind::File))) {
         if (m_dataManager) m_dataManager->ClearPending();
         m_sharedState->SetFileLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::File);
@@ -1909,11 +2056,17 @@ TaskAdmissionResult AppRuntime::ReloadFromBufferAsync(
     auto task = m_dataLoadTaskService->BuildReloadTask(std::move(buffer));
     if (!task) return TaskAdmissionResult::InvalidRequest;
     if (!m_sharedState) return TaskAdmissionResult::Unavailable;
-    if (!m_sharedState->StartLoad(LoadEventKind::Reload)) {
+    bool isReplaced = false;
+    if (!SetPreparingLoadReplaced(
+            LoadEventKind::Reload, isReplaced)) {
+        return TaskAdmissionResult::Busy;
+    }
+    if (!isReplaced
+        && !m_sharedState->StartLoad(LoadEventKind::Reload)) {
         return TaskAdmissionResult::Busy;
     }
     if (!m_dataManager || !m_dataManager->ClearPending()
-        || !SetOwnedLoad(LoadEventKind::Reload)) {
+        || (!isReplaced && !SetOwnedLoad(LoadEventKind::Reload))) {
         if (m_dataManager) m_dataManager->ClearPending();
         m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
@@ -2275,15 +2428,27 @@ bool AppRuntime::SendUpdates()
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
 
-    return SendPendingUpdates();
+    // 2. Session render lane 只推进 CPU 产品；当前 View 只提交自己的 mailbox。
+    const bool areRenderTasksSent = !m_renderServices
+        || !m_renderServices->resources
+        || m_renderServices->resources->SendTasks();
+    const bool isProductCommitted = !m_currentStrategy
+        || m_currentStrategy->SetProductCommit();
+    const bool isProductStateSet = SetProductState();
+
+    // 3. 发起 View 每个 tick 只推进一次跨 View load transaction。
+    SendLoadCommit();
+
+    const bool isPendingSet = SendPendingUpdates();
+    return areRenderTasksSent && isProductCommitted
+        && isProductStateSet && isPendingSet;
 }
 
 bool AppRuntime::SendPendingUpdates()
 {
     if (!GetIsOwnerThread()) return false;
 
-    // load 终态按完整 payload 顺序消费；Session freeze 后调用本入口时
-    // 不再领取新 worker，只应用 Feature/共享状态已经产生的 pending。
+    // freeze 后只消费已确定的状态，不领取新的 worker 或产品 mailbox。
     LoadNotice loadNotice;
     while (RemoveLoadNotice(loadNotice)) {
         if (!loadNotice.isStateSet) {
@@ -2374,17 +2539,33 @@ void AppRuntime::SetTaskResult(ActiveTask task, bool isSuccess)
 
 void AppRuntime::SetLoadResult(ActiveTask task, bool isSuccess)
 {
-    // worker 成功只表示 pending 已准备；Host 注入时由跨视图候选事务统一提交，
-    // 独立 AppRuntime 则保留原有单视图提交路径。
+    // worker 成功只建立 strong pending transaction；Host 发布由后续 owner
+    // tick 推进，Preparing 期间不发布共享终态或 callback。
+    if (isSuccess && m_dataManager && m_setLoadCommit) {
+        const auto pending = m_dataManager->GetPendingSnapshot();
+        if (pending && pending->image && pending->version != 0
+            && task.transactionRevision != 0) {
+            if (m_pendingLoadCommit && m_setLoadCancelled) {
+                (void)m_setLoadCancelled(
+                    m_pendingLoadCommit->transactionRevision,
+                    LoadCommitFailure::StaleInput);
+            }
+            m_pendingLoadCommit = PendingLoadCommit{
+                task.loadKind,
+                task.transactionRevision,
+                pending,
+                std::move(task.callback)
+            };
+            return;
+        }
+        isSuccess = false;
+    }
+
+    // 独立 AppRuntime 没有跨 View coordinator，继续一次发布 pending。
     bool hasPending = false;
     if (isSuccess && m_dataManager) {
-        if (m_setLoadCommit) {
-            isSuccess = m_setLoadCommit(task.loadKind);
-        }
-        else {
-            isSuccess = m_dataManager->SetCurrentFromPending(hasPending)
-                && hasPending;
-        }
+        isSuccess = m_dataManager->SetCurrentFromPending(hasPending)
+            && hasPending;
     }
     if (!isSuccess && m_dataManager) m_dataManager->ClearPending();
 
@@ -2411,6 +2592,52 @@ void AppRuntime::SetLoadResult(ActiveTask task, bool isSuccess)
         m_sharedState->SetDataReady(readyState);
     }
     else if (task.loadKind == LoadEventKind::File) {
+        m_readyState.reset();
+        m_sharedState->SetFileLoadFailed();
+    }
+    else {
+        m_readyState.reset();
+        m_sharedState->SetReloadLoadFailed();
+    }
+}
+
+void AppRuntime::SendLoadCommit()
+{
+    if (!m_pendingLoadCommit || !m_setLoadCommit) return;
+    auto& pending = *m_pendingLoadCommit;
+    const auto result = m_setLoadCommit(
+        pending.loadKind,
+        pending.transactionRevision,
+        pending.pending);
+    if (result.status == LoadCommitStatus::Preparing) return;
+
+    PendingLoadCommit terminal = std::move(pending);
+    m_pendingLoadCommit.reset();
+    const bool isSuccess = result.status == LoadCommitStatus::Succeeded;
+    if (!isSuccess && m_dataManager) {
+        (void)m_dataManager->ClearPending();
+    }
+    m_ownedCallback = std::move(terminal.callback);
+    if (!m_sharedState || !m_dataManager) return;
+    if (isSuccess) {
+        const auto current = m_dataManager->GetImageSnapshot();
+        DataReadyState readyState;
+        const bool hasStagedState = m_readyState
+            && current
+            && m_readyState->version == current->version;
+        if (hasStagedState) {
+            readyState = *m_readyState;
+        }
+        else if (!GetDataReadyState(current, readyState)) {
+            readyState.version = m_dataManager->GetDataVersion();
+            readyState.scalarRange = m_dataManager->GetScalarRange();
+            readyState.spacing = m_dataManager->GetSpacing();
+            readyState.cursorWorld = m_sharedState->GetCursorWorld();
+        }
+        m_readyState.reset();
+        m_sharedState->SetDataReady(readyState);
+    }
+    else if (terminal.loadKind == LoadEventKind::File) {
         m_readyState.reset();
         m_sharedState->SetFileLoadFailed();
     }
@@ -2495,6 +2722,35 @@ bool AppRuntime::SetOwnedLoad(LoadEventKind loadEventKind)
         m_loadNotices.clear();
     }
     return isOwned;
+}
+
+bool AppRuntime::SetPreparingLoadReplaced(
+    const LoadEventKind loadEventKind,
+    bool& isReplaced)
+{
+    isReplaced = false;
+    if (!m_pendingLoadCommit) return true;
+    if (m_pendingLoadCommit->loadKind != loadEventKind
+        || !m_setLoadCancelled) {
+        return false;
+    }
+
+    const auto cancellation = m_setLoadCancelled(
+        m_pendingLoadCommit->transactionRevision,
+        LoadCommitFailure::StaleInput);
+    if (cancellation.status != LoadCommitStatus::Cancelled
+        || cancellation.transactionRevision
+            != m_pendingLoadCommit->transactionRevision) {
+        return false;
+    }
+
+    PendingLoadCommit replaced = std::move(*m_pendingLoadCommit);
+    m_pendingLoadCommit.reset();
+    m_readyState.reset();
+    if (m_dataManager) (void)m_dataManager->ClearPending();
+    SetCompletion(false, std::move(replaced.callback));
+    isReplaced = true;
+    return true;
 }
 
 bool AppRuntime::GetOwnedLoad(LoadEventKind loadEventKind) const
@@ -2619,27 +2875,53 @@ bool AppRuntime::BuildPipeline()
 {
     if (!GetIsOwnerThread() || !m_dataManager) return false;
     const auto snapshot = m_dataManager->GetImageSnapshot();
-    if (!BuildDataStage(snapshot)) return false;
-    if (!SetViewStage(snapshot)) {
-        (void)ClearDataStage();
+    if (!snapshot) return false;
+    std::uint64_t revision = m_dataStage
+        ? m_dataStage->transactionRevision : 0;
+    if (!m_dataStage) {
+        if (m_nextLoadTransactionRevision
+            == (std::numeric_limits<std::uint64_t>::max)()) {
+            return false;
+        }
+        revision = ++m_nextLoadTransactionRevision;
+        const auto started = StartDataStage(snapshot, revision);
+        if (started == DataStageStatus::Failed
+            || started == DataStageStatus::Cancelled
+            || started == DataStageStatus::Idle) {
+            return false;
+        }
+    }
+    const auto ready = SetDataStageReady(snapshot, revision);
+    if (ready == DataStageStatus::Preparing) return false;
+    if (ready != DataStageStatus::Ready
+        || !SetViewStage(snapshot, revision)) {
+        (void)ClearDataStage(revision);
         return false;
     }
-    SetDataStageComplete();
+    SetDataStageComplete(revision);
     return true;
 }
 
-bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
+DataStageStatus AppRuntime::StartDataStage(
+    const TrustedImageSnapshot& snapshot,
+    const std::uint64_t transactionRevision)
 {
-    if (!GetIsOwnerThread() || m_dataStage
+    if (!GetIsOwnerThread() || transactionRevision == 0
         || !snapshot || !snapshot->image
         || !m_sharedState || !m_viewState || !m_renderer) {
-        return false;
+        return DataStageStatus::Failed;
     }
+    if (m_dataStage) {
+        return m_dataStage->transactionRevision == transactionRevision
+            && m_dataStage->nextSnapshot == snapshot
+            ? m_dataStage->status : DataStageStatus::Failed;
+    }
+
     int dimensions[3] = {};
     snapshot->image->GetDimensions(dimensions);
     if (dimensions[0] <= 0 || dimensions[1] <= 0
         || dimensions[2] <= 0) {
-        return false;
+        return DataStageStatus::Failed;
     }
 
     DataStage stage;
@@ -2649,15 +2931,15 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
     stage.oldMode = m_currentMode;
     stage.oldCamera = GetCameraState();
     stage.mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+    stage.transactionRevision = transactionRevision;
+    stage.status = DataStageStatus::Preparing;
     if (!stage.oldCamera.isValid
         || !GetDataReadyState(snapshot, stage.readyState)) {
-        return false;
+        return DataStageStatus::Failed;
     }
     stage.nextParams = GetRenderParams(UpdateFlags::All);
-    stage.nextParams.scalarRange[0] =
-        stage.readyState.scalarRange[0];
-    stage.nextParams.scalarRange[1] =
-        stage.readyState.scalarRange[1];
+    stage.nextParams.scalarRange[0] = stage.readyState.scalarRange[0];
+    stage.nextParams.scalarRange[1] = stage.readyState.scalarRange[1];
     stage.nextParams.cursor = stage.readyState.cursorWorld;
     stage.nextParams.cursorRaw = stage.readyState.cursorWorld;
     stage.nextParams.cursorAxis = -1;
@@ -2667,7 +2949,7 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
         !stage.nextParams.volumeTransferFunction.opacityNodes.empty();
     if (m_viewState->GetTransferAuto()) {
         const auto function = GetDefaultVolumeTransfer(snapshot);
-        if (!function) return false;
+        if (!function) return DataStageStatus::Failed;
         stage.nextParams.volumeTransferFunction = *function;
         stage.hasDefaultTransfer = true;
     }
@@ -2678,15 +2960,14 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
         || !GetTransferRangeValid(
             stage.nextParams.volumeTransferFunction,
             stage.readyState.scalarRange)) {
-        return false;
+        return DataStageStatus::Failed;
     }
     const auto autoWindowLevel = GetAutoWindowLevel(
         stage.readyState.scalarRange);
-    if (!autoWindowLevel) return false;
+    if (!autoWindowLevel) return DataStageStatus::Failed;
     stage.autoWindowLevel = *autoWindowLevel;
-    if (m_viewState
-        && m_viewState->GetWindowLevelMode()
-            == WindowLevelMode::Auto) {
+    if (m_viewState->GetWindowLevelMode()
+        == WindowLevelMode::Auto) {
         stage.nextParams.windowLevel = stage.autoWindowLevel;
     }
 
@@ -2697,60 +2978,30 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
             stage.oldStrategy->GetRenderEffectState();
         if (effectState.status == RenderEffectStatus::Staged
             || effectState.status == RenderEffectStatus::Ready) {
-            return false;
+            return DataStageStatus::Failed;
         }
     }
 
     stage.nextStrategy = CreateStrategy(stage.mode);
     if (!stage.nextStrategy
         || stage.nextStrategy == stage.oldStrategy) {
-        return false;
+        return DataStageStatus::Failed;
     }
 
-    bool isRendererAttached = false;
-    bool isSwapOverridden = false;
-    vtkTypeBool oldSwapState = 1;
-    bool hasRenderError = false;
-    auto errorCallback = vtkSmartPointer<vtkCallbackCommand>::New();
-    errorCallback->SetClientData(&hasRenderError);
-    errorCallback->SetCallback(
-        [](vtkObject*, unsigned long, void* clientData, void*) {
-            if (clientData) *static_cast<bool*>(clientData) = true;
-        });
-    unsigned long windowErrorTag = 0;
-    unsigned long rendererErrorTag = 0;
-    const auto clearErrorWatch = [&]() {
-        if (m_renderWindow && windowErrorTag != 0) {
-            m_renderWindow->RemoveObserver(windowErrorTag);
-            windowErrorTag = 0;
-        }
-        if (m_renderer && rendererErrorTag != 0) {
-            m_renderer->RemoveObserver(rendererErrorTag);
-            rendererErrorTag = 0;
-        }
-        errorCallback->SetClientData(nullptr);
-    };
     try {
-        // 先把 producer 配置写入候选，再设置输入。Volume 因此直接按目标
-        // quality/denoise 构建一次，避免先按默认 Auto 物化后再整卷重建。
-        const UpdateFlags producerFlags =
-            UpdateFlags::Quality | UpdateFlags::Denoise;
+        constexpr auto producerFlags = static_cast<UpdateFlags>(
+            static_cast<int>(UpdateFlags::Quality)
+            | static_cast<int>(UpdateFlags::Denoise)
+            | static_cast<int>(UpdateFlags::IsoValue));
         if (!stage.nextStrategy->SetVisualState(
-                stage.nextParams, producerFlags)) {
-            throw std::runtime_error(
-                "Candidate rejected the producer configuration.");
-        }
-        if (!stage.nextStrategy->SetInputData(
+                stage.nextParams, producerFlags)
+            || !stage.nextStrategy->SetRenderInputStamp({
+                snapshot->image.GetPointer(), snapshot->version })
+            || !stage.nextStrategy->SetInputData(
                 snapshot->image, snapshot->validityMask)) {
             throw std::runtime_error(
-                "Candidate rejected the render input data.");
+                "Candidate rejected its product request.");
         }
-        if (!stage.nextStrategy->SetRenderInputStamp({
-                snapshot->image.GetPointer(), snapshot->version })) {
-            throw std::runtime_error(
-                "Candidate rejected the render input stamp.");
-        }
-
         if (effect) {
             if (!stage.nextStrategy->AttachRenderEffect(
                     effect, RenderBindingUse::Candidate)) {
@@ -2759,68 +3010,84 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
             }
             stage.isEffectAttached = true;
         }
+        m_dataStage = std::move(stage);
+        return DataStageStatus::Preparing;
+    }
+    catch (const std::exception& error) {
+        std::cerr << "[StartDataStage] Failed: "
+            << error.what() << '\n';
+    }
+    catch (...) {
+        std::cerr
+            << "[StartDataStage] Failed with an unknown exception.\n";
+    }
+    if (stage.nextStrategy && effect && stage.isEffectAttached) {
+        (void)stage.nextStrategy->DetachRenderEffect(effect.get());
+    }
+    return DataStageStatus::Failed;
+}
 
+DataStageStatus AppRuntime::SetDataStageReady(
+    const TrustedImageSnapshot& snapshot,
+    const std::uint64_t transactionRevision)
+{
+    if (!GetIsOwnerThread() || !m_dataStage
+        || transactionRevision == 0
+        || m_dataStage->transactionRevision != transactionRevision
+        || m_dataStage->nextSnapshot != snapshot) {
+        return DataStageStatus::Failed;
+    }
+    auto& stage = *m_dataStage;
+    if (stage.status != DataStageStatus::Preparing) {
+        return stage.status;
+    }
+    if (!stage.nextStrategy->SetProductCommit()) {
+        stage.status = DataStageStatus::Failed;
+        return stage.status;
+    }
+    const auto productState =
+        stage.nextStrategy->GetTransitionState();
+    if (productState.status == RenderProductStatus::Preparing
+        || productState.status == RenderProductStatus::Ready) {
+        return DataStageStatus::Preparing;
+    }
+    if (productState.status == RenderProductStatus::Failed) {
+        stage.status = DataStageStatus::Failed;
+        return stage.status;
+    }
+    if (productState.status == RenderProductStatus::Cancelled) {
+        stage.status = DataStageStatus::Cancelled;
+        return stage.status;
+    }
+
+    const auto effect = m_renderEffect.lock();
+    try {
         stage.nextStrategy->AttachRenderer(m_renderer);
-        isRendererAttached = true;
+        stage.isRendererAttached = true;
+        constexpr int producerBits =
+            static_cast<int>(UpdateFlags::Quality)
+            | static_cast<int>(UpdateFlags::Denoise)
+            | static_cast<int>(UpdateFlags::IsoValue);
+        const auto visualFlags = static_cast<UpdateFlags>(
+            static_cast<int>(UpdateFlags::All) & ~producerBits);
         if (!stage.nextStrategy->SetVisualState(
-                stage.nextParams, UpdateFlags::All)) {
+                stage.nextParams, visualFlags)) {
             throw std::runtime_error(
                 "Candidate visual state was rejected.");
         }
-        const auto candidateEffectState = effect
-            ? stage.nextStrategy->GetRenderEffectState()
-            : RenderEffectState{};
-        const bool hasEffectStage = effect
-            && candidateEffectState.status
-                == RenderEffectStatus::Staged;
-        if (hasEffectStage) {
-            if (!m_renderWindow) {
-                throw std::runtime_error(
-                    "Candidate effect warm-up needs a render window.");
-            }
-            windowErrorTag = m_renderWindow->AddObserver(
-                vtkCommand::ErrorEvent, errorCallback);
-            rendererErrorTag = m_renderer->AddObserver(
-                vtkCommand::ErrorEvent, errorCallback);
-            if (windowErrorTag == 0 || rendererErrorTag == 0) {
-                throw std::runtime_error(
-                    "Candidate effect error observer attach failed.");
-            }
-
-            oldSwapState = m_renderWindow->GetSwapBuffers();
-            m_renderWindow->SwapBuffersOff();
-            isSwapOverridden = true;
-            constexpr int renderLimit = 2;
-            for (int renderCount = 0;
-                renderCount < renderLimit; ++renderCount) {
-                m_renderWindow->Render();
-                if (hasRenderError) {
-                    throw std::runtime_error(
-                        "Candidate effect warm-up reported ErrorEvent.");
-                }
-                if (stage.nextStrategy->GetRenderEffectState().status
-                    != RenderEffectStatus::Staged) {
-                    break;
-                }
-            }
-            m_renderWindow->SetSwapBuffers(oldSwapState);
-            isSwapOverridden = false;
-            clearErrorWatch();
-        }
-
         if (effect) {
             const auto effectState =
                 stage.nextStrategy->GetRenderEffectState();
+            const bool hasNoReplay =
+                effectState.status == RenderEffectStatus::Idle;
+            const bool isCommitted =
+                effectState.status == RenderEffectStatus::Committed;
             const bool isReadyCommitted =
                 effectState.status == RenderEffectStatus::Ready
                 && effectState.stagedRevision != 0
                 && stage.nextStrategy->SetRenderEffectCommit(
                     effectState.stagedRevision);
-            const bool hasNoReplay =
-                effectState.status == RenderEffectStatus::Idle;
-            const bool isCommitted =
-                effectState.status == RenderEffectStatus::Committed;
-            if ((!isReadyCommitted && !hasNoReplay && !isCommitted)
+            if ((!hasNoReplay && !isCommitted && !isReadyCommitted)
                 || !stage.nextStrategy->SetRenderEffectUse(
                     RenderBindingUse::Current)) {
                 throw std::runtime_error(
@@ -2828,56 +3095,49 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
             }
         }
         stage.nextStrategy->DetachRenderer(m_renderer);
-        isRendererAttached = false;
-
-        // 相机计算也在候选阶段验证，随即恢复；两次调用之间没有 Render。
-        m_renderSnapshot = snapshot;
-        if (!SetModeCamera(stage.mode, snapshot)
-            || !SetCameraState(stage.oldCamera)) {
-            throw std::runtime_error(
-                "Candidate camera validation failed.");
-        }
-        m_renderSnapshot = stage.oldSnapshot;
-        m_dataStage = std::move(stage);
-        return true;
+        stage.isRendererAttached = false;
+        stage.isPrepared = true;
+        stage.status = DataStageStatus::Ready;
+        return stage.status;
     }
     catch (const std::exception& error) {
-        std::cerr << "[BuildDataStage] Failed: " << error.what() << '\n';
+        std::cerr << "[SetDataStageReady] Failed: "
+            << error.what() << '\n';
     }
     catch (...) {
-        std::cerr << "[BuildDataStage] Failed with an unknown exception.\n";
+        std::cerr
+            << "[SetDataStageReady] Failed with an unknown exception.\n";
     }
-
-    m_renderSnapshot = stage.oldSnapshot;
-    (void)SetCameraState(stage.oldCamera);
-    try {
-        if (isSwapOverridden && m_renderWindow) {
-            m_renderWindow->SetSwapBuffers(oldSwapState);
-            isSwapOverridden = false;
-        }
-        clearErrorWatch();
-        if (isRendererAttached && stage.nextStrategy) {
+    if (stage.isRendererAttached) {
+        try {
             stage.nextStrategy->DetachRenderer(m_renderer);
         }
-        if (stage.nextStrategy && effect && stage.isEffectAttached) {
-            const auto effectState =
-                stage.nextStrategy->GetRenderEffectState();
-            if (effectState.stagedRevision != 0) {
-                (void)stage.nextStrategy->ClearRenderEffectStage(
-                    effectState.stagedRevision);
-            }
-            (void)stage.nextStrategy->DetachRenderEffect(effect.get());
+        catch (...) {
         }
+        stage.isRendererAttached = false;
     }
-    catch (...) {
-    }
-    return false;
+    stage.status = DataStageStatus::Failed;
+    return stage.status;
 }
 
-bool AppRuntime::SetViewStage(const TrustedImageSnapshot& snapshot)
+DataStageStatus AppRuntime::GetDataStageStatus(
+    const std::uint64_t transactionRevision) const
+{
+    if (!m_dataStage
+        || m_dataStage->transactionRevision != transactionRevision) {
+        return DataStageStatus::Idle;
+    }
+    return m_dataStage->status;
+}
+
+bool AppRuntime::SetViewStage(
+    const TrustedImageSnapshot& snapshot,
+    const std::uint64_t transactionRevision)
 {
     if (!GetIsOwnerThread() || !m_dataStage || !snapshot
         || !snapshot->image || m_dataStage->isCommitted
+        || m_dataStage->status != DataStageStatus::Ready
+        || m_dataStage->transactionRevision != transactionRevision
         || m_dataStage->nextSnapshot->image.GetPointer()
             != snapshot->image.GetPointer()
         || m_dataStage->nextSnapshot->version != snapshot->version) {
@@ -2910,13 +3170,17 @@ bool AppRuntime::SetViewStage(const TrustedImageSnapshot& snapshot)
     catch (...) {
         std::cerr << "[SetViewStage] Failed with an unknown exception.\n";
     }
-    (void)ResetViewStage();
+    (void)ResetViewStage(transactionRevision);
     return false;
 }
 
-bool AppRuntime::ResetViewStage()
+bool AppRuntime::ResetViewStage(
+    const std::uint64_t transactionRevision)
 {
-    if (!GetIsOwnerThread() || !m_dataStage) return false;
+    if (!GetIsOwnerThread() || !m_dataStage
+        || m_dataStage->transactionRevision != transactionRevision) {
+        return false;
+    }
     auto& stage = *m_dataStage;
     const auto effect = m_renderEffect.lock();
     const bool isCandidateCurrent =
@@ -2958,10 +3222,14 @@ bool AppRuntime::ResetViewStage()
     return isReset;
 }
 
-bool AppRuntime::ClearDataStage()
+bool AppRuntime::ClearDataStage(
+    const std::uint64_t transactionRevision)
 {
     if (!GetIsOwnerThread()) return false;
     if (!m_dataStage) return true;
+    if (m_dataStage->transactionRevision != transactionRevision) {
+        return false;
+    }
     if (m_dataStage->isCommitted) {
         // 成功候选只能走 SetDataStageComplete；Clear 专用于失败补偿。
         return false;
@@ -2996,9 +3264,11 @@ bool AppRuntime::ClearDataStage()
     return isCleared;
 }
 
-void AppRuntime::SetDataStageComplete() noexcept
+void AppRuntime::SetDataStageComplete(
+    const std::uint64_t transactionRevision) noexcept
 {
-    if (!m_dataStage || !m_dataStage->isCommitted) {
+    if (!m_dataStage || !m_dataStage->isCommitted
+        || m_dataStage->transactionRevision != transactionRevision) {
         // SetViewStage 成功后到 DataManager 发布之间禁止外部改变 stage；
         // 违反该协议时已无法安全回滚，不能伪装成普通 load 失败。
         std::terminate();
@@ -3202,16 +3472,24 @@ bool AppRuntime::SetStrategyState()
     }
     if ((strategyFlags & UpdateFlags::Quality)
         != UpdateFlags::None) {
-        bool hasNewQuality = false;
-        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
-        // applied 必须记录本次交给 Strategy 的不可变快照；若执行期间又
-        // 收到新挡位，则让新值留在 requested 并安排下一帧消费。
-        m_appliedQuality = params.volumeQuality;
-        hasNewQuality = m_requestedQuality != m_appliedQuality;
-        if (hasNewQuality) {
-            m_pendingFlags.fetch_or(
-                static_cast<int>(UpdateFlags::Quality));
-            m_hasSyncNeed = true;
+        const auto transition =
+            m_currentStrategy->GetTransitionState();
+        if (transition.status == RenderProductStatus::Idle
+            || transition.status == RenderProductStatus::Active) {
+            bool hasNewQuality = false;
+            std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+            // 同步策略立即更新；异步策略的 Preparing 只接纳 requested，
+            // applied 由后续 owner commit 更新。
+            m_appliedQuality = transition.status
+                == RenderProductStatus::Active
+                ? transition.appliedQuality
+                : params.volumeQuality;
+            hasNewQuality = m_requestedQuality != m_appliedQuality;
+            if (hasNewQuality) {
+                m_pendingFlags.fetch_or(
+                    static_cast<int>(UpdateFlags::Quality));
+                m_hasSyncNeed = true;
+            }
         }
     }
 
@@ -3228,6 +3506,55 @@ bool AppRuntime::SetStrategyState()
 
     // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
     m_isDirty = true;
+    return true;
+}
+
+bool AppRuntime::SetProductState()
+{
+    if (!m_currentStrategy) return true;
+    const auto transition =
+        m_currentStrategy->GetTransitionState();
+    if (transition.status == RenderProductStatus::Idle) {
+        return true;
+    }
+
+    if (transition.status == RenderProductStatus::Active
+        && transition.stats.activeRevision
+            == transition.stats.requestRevision
+        && !transition.stats.isPreview) {
+        if (m_renderNeededProductRevision
+            != transition.stats.activeRevision) {
+            m_renderNeededProductRevision =
+                transition.stats.activeRevision;
+            m_isDirty = true;
+        }
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        m_appliedQuality = transition.appliedQuality;
+        if (m_requestedQuality != m_appliedQuality) {
+            m_pendingFlags.fetch_or(
+                static_cast<int>(UpdateFlags::Quality));
+            m_hasSyncNeed = true;
+        }
+        return true;
+    }
+
+    if (transition.status == RenderProductStatus::Active
+        && transition.stats.activeRevision
+            == transition.stats.requestRevision
+        && m_renderNeededProductRevision
+            != transition.stats.activeRevision) {
+        m_renderNeededProductRevision = transition.stats.activeRevision;
+        m_isDirty = true;
+    }
+
+    if (transition.status == RenderProductStatus::Failed
+        || transition.status == RenderProductStatus::Cancelled) {
+        std::lock_guard<std::mutex> lock(m_viewConfigMutex);
+        if (m_requestedQuality == transition.requestedQuality) {
+            m_requestedQuality = m_appliedQuality;
+        }
+        return transition.status != RenderProductStatus::Failed;
+    }
     return true;
 }
 
@@ -3388,30 +3715,59 @@ public:
     {
     }
 
-    bool BuildDataStage(const TrustedImageSnapshot& snapshot) override
+    DataStageStatus StartDataStage(
+        const TrustedImageSnapshot& snapshot,
+        const std::uint64_t transactionRevision) override
     {
-        return m_service && m_service->BuildDataStage(snapshot);
+        return m_service
+            ? m_service->StartDataStage(snapshot, transactionRevision)
+            : DataStageStatus::Failed;
     }
 
-    bool SetViewStage(const TrustedImageSnapshot& snapshot) override
+    DataStageStatus SetDataStageReady(
+        const TrustedImageSnapshot& snapshot,
+        const std::uint64_t transactionRevision) override
     {
-        return m_service && m_service->SetViewStage(snapshot);
+        return m_service
+            ? m_service->SetDataStageReady(snapshot, transactionRevision)
+            : DataStageStatus::Failed;
     }
 
-    bool ResetViewStage() override
+    DataStageStatus GetDataStageStatus(
+        const std::uint64_t transactionRevision) const override
     {
-        return m_service && m_service->ResetViewStage();
+        return m_service
+            ? m_service->GetDataStageStatus(transactionRevision)
+            : DataStageStatus::Idle;
     }
 
-    bool ClearDataStage() override
+    bool SetViewStage(
+        const TrustedImageSnapshot& snapshot,
+        const std::uint64_t transactionRevision) override
     {
-        return m_service && m_service->ClearDataStage();
+        return m_service
+            && m_service->SetViewStage(snapshot, transactionRevision);
     }
 
-    void SetDataStageComplete() noexcept override
+    bool ResetViewStage(
+        const std::uint64_t transactionRevision) override
+    {
+        return m_service
+            && m_service->ResetViewStage(transactionRevision);
+    }
+
+    bool ClearDataStage(
+        const std::uint64_t transactionRevision) override
+    {
+        return m_service
+            && m_service->ClearDataStage(transactionRevision);
+    }
+
+    void SetDataStageComplete(
+        const std::uint64_t transactionRevision) noexcept override
     {
         if (!m_service) std::terminate();
-        m_service->SetDataStageComplete();
+        m_service->SetDataStageComplete(transactionRevision);
     }
 
 private:
@@ -3839,6 +4195,17 @@ public:
     bool ResetRenderNeeded() override
     {
         return m_service && m_service->ResetDirty();
+    }
+
+    bool SetInteractionPhase() override
+    {
+        return m_service && m_service->SetInteractionPhase();
+    }
+
+    void SetRenderComplete(
+        const std::uint64_t durationUs) noexcept override
+    {
+        if (m_service) m_service->SetRenderComplete(durationUs);
     }
 
 private:

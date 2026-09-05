@@ -3,6 +3,7 @@
 #include "App/AppTypes.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 
 class vtkActor;
@@ -19,6 +20,8 @@ public:
     virtual void SendCompletions() = 0;
     virtual bool SetRenderNeeded() = 0;
     virtual bool ResetRenderNeeded() = 0;
+    virtual bool SetInteractionPhase() { return true; }
+    virtual void SetRenderComplete(std::uint64_t) noexcept {}
 };
 
 class InteractionStatePort {
