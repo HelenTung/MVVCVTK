@@ -392,6 +392,19 @@ set_property(
 )
 
 set(MVVCVTK_HOST_SOURCES
+    include/Host/Internal/HostRenderViewRuntime.h
+    src/Host/HostRenderViewRuntime.cpp
+    include/Host/Internal/HostFrameRuntime.h
+    src/Host/HostFrameRuntime.cpp
+    include/App/Services/PrimaryDataActivation.h
+    src/App/Services/PrimaryDataActivation.cpp
+    src/Host/HostCoreServices.cpp
+    include/Host/Internal/HostFeatureRuntime.h
+    src/Host/HostFeatureRuntime.cpp
+    include/Host/Internal/HostImageReadRuntime.h
+    src/Host/HostImageReadRuntime.cpp
+    include/Host/Internal/HostViewTransaction.h
+    src/Host/HostViewTransaction.cpp
     include/App/AppState.h
     include/App/AppStateEvents.h
     include/App/Services/AppPorts.h

@@ -502,6 +502,28 @@ bool GetStopPreemptionValid()
         && probe.completionCount == 0;
 }
 
+bool GetCallbackStopValid()
+{
+    // 每个可重入的提交前阶段停止后，不得再提交或调用 Render。
+    for (int phase = 0; phase < 4; ++phase) {
+        FrameProbe probe;
+        auto callbacks = probe.GetCallbacks();
+        HostFrameCoordinator* owner = nullptr;
+        if (phase == 0) callbacks.collectUpdates = [&]() { owner->Stop(); return true; };
+        if (phase == 1) callbacks.sendFeatureTicks = [&]() { owner->Stop(); };
+        if (phase == 2) callbacks.applyFeatureUpdates = [&]() { owner->Stop(); return true; };
+        if (phase == 3) callbacks.buildStage = [&](std::uint64_t) {
+            owner->Stop(); return HostFrameStageStatus::Ready;
+        };
+        HostFrameCoordinator coordinator(1, std::move(callbacks));
+        owner = &coordinator;
+        if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Stopped
+            || coordinator.GetCommittedEpoch() != 0 || probe.renderAttemptCount != 0
+            || probe.completionCount != 0) return false;
+    }
+    return true;
+}
+
 bool GetInputValidationValid()
 {
     FrameProbe probe;
@@ -530,6 +552,7 @@ int main()
         && GetUnchangedCompletionValid()
         && GetRenderRetryValid()
         && GetStopPreemptionValid()
+        && GetCallbackStopValid()
         && GetInputValidationValid();
     std::cout << (isValid
         ? "PASS: Host frame coordinator protocol\n"

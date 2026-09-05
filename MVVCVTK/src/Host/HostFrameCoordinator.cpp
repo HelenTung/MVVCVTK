@@ -208,7 +208,9 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             ClearStage();
             return FlushStatus::Failed;
         }
+        if (m_isStopped.load()) return FlushStatus::Stopped;
         if (isFeatureTick) m_callbacks.sendFeatureTicks();
+        if (m_isStopped.load()) return FlushStatus::Stopped;
         // 从这一点起，任一 commit 前失败都必须把同一批 intent 放回 inbox。
         // restoreIntents 在 freeze 前置位，因此 mutex 获取异常也走同一恢复出口。
         restoreIntents = true;
@@ -226,6 +228,7 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             return FlushStatus::Failed;
         }
 
+        if (m_isStopped.load()) return FlushStatus::Stopped;
         const auto currentEpoch =
             m_sceneEpoch.load(std::memory_order_acquire);
         if (currentEpoch == std::numeric_limits<std::uint64_t>::max()) {
@@ -236,6 +239,7 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         }
         const auto nextEpoch = currentEpoch + 1;
         const auto stageStatus = m_callbacks.buildStage(nextEpoch);
+        if (m_isStopped.load()) { ClearStage(); return FlushStatus::Stopped; }
         if (stageStatus == HostFrameStageStatus::Failed) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;

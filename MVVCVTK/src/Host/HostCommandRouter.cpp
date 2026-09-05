@@ -1,4 +1,5 @@
 #include "Host/HostCommandRouter.h"
+#include "Host/Internal/HostViewTransaction.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Platform/Path.h"
 
@@ -577,9 +578,7 @@ bool HostCommandRouter::Impl::SetView(
     const HostViewSetRequest& request) const
 {
     // 1. 先在局部候选中解析目标并完成所有字段校验。
-    // 2. App port 内部以完整快照保证字段级强回滚。
-    // 3. Host 再按 App → camera → axes → dirty 提交，失败按逆序补偿。
-    // 4. 补偿失败时停用目标 view，禁止继续暴露半状态。
+    // 2. 将已解析的更新交给私有跨组件事务。
     auto candidate = BuildViewCandidate(request);
     if (!candidate) return false;
 
@@ -605,53 +604,8 @@ bool HostCommandRouter::Impl::SetView(
         update.visibility = std::move(appVisibility);
     }
 
-    const AppViewState oldState = candidate->viewPort->GetViewState();
-    const bool oldAxes = candidate->context
-        && candidate->context->GetOrientationAxesVisible();
-    if (!candidate->viewPort->SendViewUpdate(update)) return false;
-    const AppViewState nextState = candidate->viewPort->GetViewState();
-    if (nextState.revision <= oldState.revision) {
-        if (candidate->stopView) (void)candidate->stopView();
-        return false;
-    }
-
-    const auto stopOnRestoreFail = [&]() {
-        if (candidate->stopView) (void)candidate->stopView();
-    };
-    const auto restore = [&](const bool hasAxesChanged) {
-        bool isRestored = true;
-        if (hasAxesChanged && candidate->context) {
-            isRestored = candidate->context
-                ->SetOrientationAxesVisible(oldAxes) && isRestored;
-        }
-        if (candidate->mode && candidate->context) {
-            isRestored = candidate->context
-                ->SetCameraStyle(oldState.mode) && isRestored;
-        }
-        isRestored = candidate->viewPort->SetViewState(
-            oldState, nextState.revision) && isRestored;
-        if (!isRestored) stopOnRestoreFail();
-        return isRestored;
-    };
-
-    if (candidate->mode
-        && !candidate->context->SetCameraStyle(*candidate->mode)) {
-        (void)restore(false);
-        return false;
-    }
-    if (candidate->isAxesVisible) {
-        if (!candidate->context->SetOrientationAxesVisible(
-                *candidate->isAxesVisible)) {
-            (void)restore(true);
-            return false;
-        }
-        // 方向轴属于 context，不发布 SharedState flags；显式标脏让 Qt Timer 产生下一帧。
-        if (!candidate->updatePort->SetRenderNeeded()) {
-            (void)restore(true);
-            return false;
-        }
-    }
-    return true;
+    return HostViewTransaction(candidate->viewPort, candidate->updatePort,
+        candidate->context, candidate->stopView).SetView(update, candidate->isAxesVisible);
 }
 
 bool HostCommandRouter::Impl::ResetView(
@@ -665,41 +619,7 @@ bool HostCommandRouter::Impl::ResetView(
         return false;
     }
 
-    const AppViewState oldState = view->GetViewState();
-    const auto oldCamera = context->GetCameraState();
-    if (!oldCamera) return false;
-
-    AppViewUpdate viewUpdate;
-    viewUpdate.windowLevelMode = WindowLevelMode::Auto;
-    if (!view->SendViewUpdate(viewUpdate)) return false;
-    const AppViewState nextState = view->GetViewState();
-    if (nextState.revision <= oldState.revision) {
-        if (route->stopView) (void)route->stopView();
-        return false;
-    }
-
-    const auto restore = [&](const bool hasCameraChanged) {
-        bool isRestored = true;
-        if (hasCameraChanged) {
-            isRestored = context->SetCameraState(*oldCamera)
-                && isRestored;
-        }
-        isRestored = view->SetViewState(
-            oldState, nextState.revision) && isRestored;
-        if (!isRestored && route->stopView) {
-            (void)route->stopView();
-        }
-        return isRestored;
-    };
-
-    if (!context->ResetCamera()) {
-        (void)restore(true);
-        return false;
-    }
-    // 相机不发布 App 状态事件；显式补帧与窗宽窗位提交组成同一 Host 事务。
-    if (update->SetRenderNeeded()) return true;
-    (void)restore(true);
-    return false;
+    return HostViewTransaction(view, update, context, route->stopView).ResetView();
 }
 
 bool HostCommandRouter::Impl::SetTool(

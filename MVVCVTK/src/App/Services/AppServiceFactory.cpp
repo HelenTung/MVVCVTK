@@ -1,4 +1,5 @@
 #include "App/Services/AppServiceFactory.h"
+#include "App/Services/PrimaryDataActivation.h"
 #include "App/Services/AppPorts.h"
 #include "App/Services/FeatureViewService.h"
 #include "AppDataExportTaskService.h"
@@ -318,9 +319,6 @@ private:
         const VtkImageGridSnapshot& snapshot);
     void SetRendererBg();
     void ClearStrategies();
-    bool GetDataReadyState(
-        const VtkImageGridSnapshot& snapshot,
-        DataReadyState& state) const;
     std::optional<WindowLevelParams> GetAutoWindowLevel(
         const std::array<double, 2>& scalarRange) const;
     void SetSyncNeeded();
@@ -2377,41 +2375,6 @@ void AppRuntime::GetWorldPositionFromModel(const double m[3], double w[3]) const
     InteractionComputeService::GetWorldPositionFromModel(modelToWorldMatrix, m, w);
 }
 
-bool AppRuntime::GetDataReadyState(
-    const VtkImageGridSnapshot& snapshot,
-    DataReadyState& state) const
-{
-    if (!snapshot || !snapshot->image || !snapshot->data
-        || !snapshot->binding || snapshot->binding->revision == 0) {
-        return false;
-    }
-
-    double imageRange[2] = {};
-    double imageSpacing[3] = {};
-    double imageCenter[3] = {};
-    snapshot->image->GetScalarRange(imageRange);
-    snapshot->image->GetSpacing(imageSpacing);
-    snapshot->image->GetCenter(imageCenter);
-
-    double centerWorld[3] = {};
-    GetWorldPositionFromModel(imageCenter, centerWorld);
-    const auto isFinite = [](const double value) {
-        return std::isfinite(value);
-    };
-    if (!std::all_of(std::begin(imageRange), std::end(imageRange), isFinite)
-        || !std::all_of(std::begin(imageSpacing), std::end(imageSpacing), isFinite)
-        || !std::all_of(std::begin(centerWorld), std::end(centerWorld), isFinite)) {
-        return false;
-    }
-
-    state.dataRevision = snapshot->data->self;
-    state.bindingRevision = snapshot->binding->revision;
-    std::copy_n(imageRange, state.scalarRange.size(), state.scalarRange.begin());
-    std::copy_n(imageSpacing, state.spacing.size(), state.spacing.begin());
-    std::copy_n(centerWorld, state.cursorWorld.size(), state.cursorWorld.begin());
-    return true;
-}
-
 std::optional<WindowLevelParams> AppRuntime::GetAutoWindowLevel(
     const std::array<double, 2>& scalarRange) const
 {
@@ -2605,29 +2568,9 @@ void AppRuntime::SetLoadResult(ActiveTask task, bool isSuccess)
     m_ownedCallback = std::move(task.callback);
     if (!m_sharedState || !m_dataManager) return;
     if (isSuccess) {
-        const auto current = m_dataManager->GetPrimaryImage();
-        DataReadyState readyState;
-        const bool hasStagedState = m_readyState
-            && current
-            && current->data && current->binding
-            && m_readyState->dataRevision == current->data->self
-            && m_readyState->bindingRevision
-                == current->binding->revision;
-        if (hasStagedState) {
-            readyState = *m_readyState;
-        }
-        else if (!GetDataReadyState(current, readyState)) {
-            // current 已完成不可逆发布；此兜底只处理损坏实现，不能把成功 CAS 伪装成失败。
-            readyState.dataRevision = current && current->data
-                ? current->data->self : DataRevisionRef{};
-            readyState.bindingRevision =
-                m_dataManager->GetPrimaryBindingRevision();
-            readyState.scalarRange = m_dataManager->GetScalarRange();
-            readyState.spacing = m_dataManager->GetSpacing();
-            readyState.cursorWorld = m_sharedState->GetCursorWorld();
-        }
+        const auto readyState = std::move(m_readyState);
         m_readyState.reset();
-        m_sharedState->SetDataReady(readyState);
+        PrimaryDataActivation(*m_dataManager, *m_sharedState).SetLoadReady(readyState);
     }
     else if (task.loadKind == LoadEventKind::File) {
         m_readyState.reset();
@@ -2658,26 +2601,9 @@ void AppRuntime::SendLoadCommit()
     m_ownedCallback = std::move(terminal.callback);
     if (!m_sharedState || !m_dataManager) return;
     if (isSuccess) {
-        const auto current = m_dataManager->GetPrimaryImage();
-        DataReadyState readyState;
-        const bool hasStagedState = m_readyState
-            && current
-            && current->data && current->binding
-            && m_readyState->dataRevision == current->data->self
-            && m_readyState->bindingRevision == current->binding->revision;
-        if (hasStagedState) {
-            readyState = *m_readyState;
-        }
-        else if (!GetDataReadyState(current, readyState)) {
-            readyState.dataRevision = current && current->data
-                ? current->data->self : DataRevisionRef{};
-            readyState.bindingRevision = m_dataManager->GetPrimaryBindingRevision();
-            readyState.scalarRange = m_dataManager->GetScalarRange();
-            readyState.spacing = m_dataManager->GetSpacing();
-            readyState.cursorWorld = m_sharedState->GetCursorWorld();
-        }
+        const auto readyState = std::move(m_readyState);
         m_readyState.reset();
-        m_sharedState->SetDataReady(readyState);
+        PrimaryDataActivation(*m_dataManager, *m_sharedState).SetLoadReady(readyState);
     }
     else if (terminal.loadKind == LoadEventKind::File) {
         m_readyState.reset();
@@ -2976,7 +2902,8 @@ DataStageStatus AppRuntime::StartDataStage(
     stage.transactionRevision = transactionRevision;
     stage.status = DataStageStatus::Preparing;
     if (!stage.oldCamera.isValid
-        || !GetDataReadyState(snapshot, stage.readyState)) {
+        || !PrimaryDataActivation::GetDataReadyState(
+            snapshot, m_sharedState.get(), stage.readyState)) {
         return DataStageStatus::Failed;
     }
     stage.nextParams = GetRenderParams(UpdateFlags::All);

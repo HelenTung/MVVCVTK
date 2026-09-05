@@ -1,4 +1,6 @@
 #include "Host/HostViewRuntimeRegistry.h"
+#include "Host/Internal/HostRenderViewRuntime.h"
+#include "Host/Internal/HostFrameRuntime.h"
 #include "Host/Internal/HostTransferCodec.h"
 
 #include "App/AppStateEvents.h"
@@ -29,30 +31,6 @@
 #include <utility>
 
 class HostViewRuntimeRegistry::Impl final {
-    // 完整 runtime 只属于组合根实现；Feature 与头文件都不能取得该身份。
-    struct HostRenderViewRuntime final {
-        HostRenderViewConfig config;
-        AppPorts app;
-        std::shared_ptr<AppDataStagePort> dataStage;
-        InteractionPorts interaction;
-        std::shared_ptr<RenderBindPort> renderBind;
-        std::shared_ptr<FeatureViewService> featureView;
-        std::shared_ptr<OverlayService> overlay;
-        std::shared_ptr<AppTaskControlPort> taskControl;
-        std::shared_ptr<AbstractViewContext> context;
-        std::uint64_t appliedEpoch = 0;
-        std::uint64_t renderedEpoch = 0;
-        std::uint64_t pendingRenderEpoch = 0;
-        bool isAvailable = false;
-    };
-
-    struct FrameStage final {
-        std::uint64_t epoch = 0;
-        std::vector<HostSceneViewState> sceneStates;
-        std::vector<std::size_t> renderOrder;
-        std::vector<bool> renderNeeded;
-    };
-
 public:
     Impl();
     ~Impl();
@@ -249,30 +227,15 @@ private:
         vtkSmartPointer<vtkRenderWindow> renderWindow);
     std::optional<VizMode> GetAppViewMode(
         HostRenderMode mode) const;
-    std::optional<HostRenderMode> GetHostViewMode(
-        VizMode mode) const;
+
     std::optional<PreInitConfig> BuildAppInit(
         const HostViewInitConfig& config) const;
-    HostRenderViewState BuildViewState(
-        const HostRenderViewRuntime& view) const;
-    HostRenderViewState BuildViewState(
-        const HostRenderViewRuntime& view,
-        const AppViewState& appState) const;
-    HostSceneViewState BuildSceneViewState(
-        const HostRenderViewRuntime& view) const;
+
     const HostRenderViewRuntime* GetSceneViewBySelector(
         const HostViewTarget& target) const;
     std::vector<std::string> GetActiveFeatureIds(
         const HostRenderViewRuntime& view) const;
-    std::optional<std::size_t> GetViewIndexById(
-        std::string_view viewId) const;
-    bool GetIntentStampValid(
-        const HostRenderViewRuntime& view,
-        const RenderInputStamp& expected) const;
-    static int GetRenderPriority(
-        const HostSceneViewState& state) noexcept;
-    static HostCameraState GetHostCamera(
-        const ViewCameraState& source);
+
     const ViewLeasePorts* GetLeasePorts(
         const HostRenderViewRuntime* view) const;
 
@@ -284,17 +247,14 @@ private:
     std::shared_ptr<ViewDirectory> m_directory;
     std::unique_ptr<LoadCommitCoordinator> m_loadCommit;
     std::shared_ptr<AppTaskExecutor> m_taskExecutor;
-    std::vector<HostFrameIntent> m_frameIntents;
-    std::optional<FrameStage> m_frameStage;
-    std::vector<HostSceneViewState> m_sceneStates;
-    std::vector<std::size_t> m_renderOrder;
-    std::uint64_t m_sessionGeneration = 0;
-    std::uint64_t m_committedEpoch = 0;
     std::shared_ptr<RenderStrategyServices> m_renderServices;
+    std::unique_ptr<HostFrameRuntime> m_frameRuntime;
 };
 
 HostViewRuntimeRegistry::Impl::Impl()
     : m_directory(std::make_shared<ViewDirectory>(this))
+    , m_frameRuntime(std::make_unique<HostFrameRuntime>(m_views, m_lease,
+        [this](const HostRenderViewRuntime& view) { return GetActiveFeatureIds(view); }))
 {
 }
 
@@ -569,7 +529,7 @@ bool HostViewRuntimeRegistry::Impl::SetViewWindow(
     return false;
 }
 
-std::optional<HostViewRuntimeRegistry::Impl::HostRenderViewRuntime>
+std::optional<HostRenderViewRuntime>
 HostViewRuntimeRegistry::Impl::BuildView(
     const HostCoreServices& core,
     HostRenderViewConfig config,
@@ -673,112 +633,6 @@ HostViewRuntimeRegistry::Impl::GetAppViewMode(
     return std::nullopt;
 }
 
-std::optional<HostRenderMode>
-HostViewRuntimeRegistry::Impl::GetHostViewMode(const VizMode mode) const
-{
-    switch (mode) {
-    case VizMode::Volume: return HostRenderMode::Volume;
-    case VizMode::IsoSurface: return HostRenderMode::IsoSurface;
-    case VizMode::SliceTop_down:
-        return HostRenderMode::SliceTopDown;
-    case VizMode::SliceFront_back:
-        return HostRenderMode::SliceFrontBack;
-    case VizMode::SliceLeft_right:
-        return HostRenderMode::SliceLeftRight;
-    case VizMode::CompositeVolume:
-        return HostRenderMode::CompositeVolume;
-    case VizMode::CompositeIsoSurface:
-        return HostRenderMode::CompositeIsoSurface;
-    }
-    return std::nullopt;
-}
-
-HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
-    const HostRenderViewRuntime& view) const
-{
-    HostRenderViewState state;
-    state.id = view.config.id;
-    state.role = view.config.role;
-    if (!view.isAvailable || !view.app.view) return state;
-
-    const auto appState = view.app.view->GetViewState();
-    return BuildViewState(view, appState);
-}
-
-HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
-    const HostRenderViewRuntime& view,
-    const AppViewState& appState) const
-{
-    HostRenderViewState state;
-    state.id = view.config.id;
-    state.role = view.config.role;
-    const auto viewMode = GetHostViewMode(appState.mode);
-    if (viewMode) state.viewMode = *viewMode;
-    state.material = {
-        appState.material.ambient,
-        appState.material.diffuse,
-        appState.material.specular,
-        appState.material.specularPower,
-        appState.material.opacity,
-        appState.material.isShadeOn
-    };
-    state.volumeTransferFunction =
-        HostTransferCodec::GetHostVolumeTransfer(
-            appState.volumeTransferFunction);
-    state.isoThreshold = appState.isoThreshold;
-    state.background = {
-        appState.background.r,
-        appState.background.g,
-        appState.background.b
-    };
-    state.spacing = appState.spacing;
-    state.windowLevel = {
-        appState.windowLevel.windowWidth,
-        appState.windowLevel.windowCenter
-    };
-    state.scalarRange = appState.scalarRange;
-    switch (appState.volumeQuality) {
-    case VolumeQuality::Auto:
-        state.volumeQuality = HostVolumeQuality::Auto;
-        break;
-    case VolumeQuality::Low:
-        state.volumeQuality = HostVolumeQuality::Low;
-        break;
-    case VolumeQuality::High:
-        state.volumeQuality = HostVolumeQuality::High;
-        break;
-    case VolumeQuality::XHigh:
-        state.volumeQuality = HostVolumeQuality::XHigh;
-        break;
-    case VolumeQuality::Ultra:
-        state.volumeQuality = HostVolumeQuality::Ultra;
-        break;
-    }
-    state.isFeatureActive = appState.isFeatureActive;
-    state.isInteracting = appState.isInteracting;
-    state.cursorWorld = appState.cursorWorld;
-    state.visibilityMask = appState.visibilityMask;
-    state.dataRevision = appState.dataRevision;
-    state.bindingRevision = appState.bindingRevision;
-    state.isAxesVisible = view.context
-        && view.context->GetOrientationAxesVisible();
-    return state;
-}
-
-HostCameraState HostViewRuntimeRegistry::Impl::GetHostCamera(
-    const ViewCameraState& source)
-{
-    HostCameraState target;
-    target.position = source.position;
-    target.focalPoint = source.focalPoint;
-    target.viewUp = source.viewUp;
-    target.clippingRange = source.clippingRange;
-    target.parallelScale = source.parallelScale;
-    target.viewAngle = source.viewAngle;
-    target.isParallel = source.isParallel;
-    return target;
-}
-
 std::vector<std::string>
 HostViewRuntimeRegistry::Impl::GetActiveFeatureIds(
     const HostRenderViewRuntime& view) const
@@ -793,71 +647,6 @@ HostViewRuntimeRegistry::Impl::GetActiveFeatureIds(
         }
     }
     return ids;
-}
-
-std::optional<std::size_t>
-HostViewRuntimeRegistry::Impl::GetViewIndexById(
-    const std::string_view viewId) const
-{
-    for (std::size_t index = 0; index < m_views.size(); ++index) {
-        const auto& id = m_views[index].config.id;
-        if (id.size() == viewId.size()
-            && std::equal(id.begin(), id.end(), viewId.begin())) {
-            return index;
-        }
-    }
-    return std::nullopt;
-}
-
-bool HostViewRuntimeRegistry::Impl::GetIntentStampValid(
-    const HostRenderViewRuntime& view,
-    const RenderInputStamp& expected) const
-{
-    if (expected.dataRevision == DataRevisionRef{}) return true;
-    if (!view.featureView) return false;
-    const auto current = view.featureView->GetRenderInputStamp();
-    return current && *current == expected;
-}
-
-int HostViewRuntimeRegistry::Impl::GetRenderPriority(
-    const HostSceneViewState& state) noexcept
-{
-    if (state.presentation && state.presentation->isInteracting) return 0;
-    switch (state.role) {
-    case HostRenderViewRole::TopDownSlice:
-    case HostRenderViewRole::FrontBackSlice:
-    case HostRenderViewRole::LeftRightSlice:
-        return 1;
-    case HostRenderViewRole::Primary3D:
-        return 2;
-    case HostRenderViewRole::Composite3D:
-        return 3;
-    case HostRenderViewRole::Auxiliary:
-        return 4;
-    }
-    return 4;
-}
-
-HostSceneViewState HostViewRuntimeRegistry::Impl::BuildSceneViewState(
-    const HostRenderViewRuntime& view) const
-{
-    HostSceneViewState state;
-    state.id = view.config.id;
-    state.role = view.config.role;
-    state.isAvailable = view.isAvailable;
-    state.sceneEpoch = view.appliedEpoch;
-    state.renderedEpoch = view.renderedEpoch;
-    if (!view.isAvailable || !view.app.view) return state;
-
-    const auto appState = view.app.view->GetViewState();
-    state.presentation = BuildViewState(view, appState);
-    state.presentationRevision = appState.revision;
-    if (view.context) {
-        const auto camera = view.context->GetCameraState();
-        if (camera) state.camera = GetHostCamera(*camera);
-    }
-    state.activeFeatureIds = GetActiveFeatureIds(view);
-    return state;
 }
 
 std::optional<PreInitConfig>
@@ -1008,16 +797,7 @@ bool HostViewRuntimeRegistry::Impl::Build(
     }
     m_loadCommit = std::make_unique<LoadCommitCoordinator>(
         core.sharedDataMgr);
-    m_frameIntents.clear();
-    m_frameStage.reset();
-    m_renderOrder.clear();
-    m_sessionGeneration = 0;
-    m_committedEpoch = 0;
-    m_sceneStates.clear();
-    m_sceneStates.reserve(m_views.size());
-    for (const auto& view : m_views) {
-        m_sceneStates.push_back(BuildSceneViewState(view));
-    }
+    m_frameRuntime->BuildSceneStates();
     return true;
 }
 
@@ -1027,13 +807,13 @@ HostViewRuntimeRegistry::Impl::~Impl()
     // 避免成员析构在错误线程触达 VTK。
 }
 
-const std::vector<HostViewRuntimeRegistry::Impl::HostRenderViewRuntime>&
+const std::vector<HostRenderViewRuntime>&
 HostViewRuntimeRegistry::Impl::GetViews() const
 {
     return m_views;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetViewById(
     const std::string& id) const
 {
@@ -1043,7 +823,7 @@ HostViewRuntimeRegistry::Impl::GetViewById(
     return nullptr;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetFirstViewByRole(
     const HostRenderViewRole role) const
 {
@@ -1055,7 +835,7 @@ HostViewRuntimeRegistry::Impl::GetFirstViewByRole(
     return nullptr;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetViewBySelector(
     const HostViewTarget& target) const
 {
@@ -1066,7 +846,7 @@ HostViewRuntimeRegistry::Impl::GetViewBySelector(
     return nullptr;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetSceneViewBySelector(
     const HostViewTarget& target) const
 {
@@ -1088,7 +868,7 @@ HostViewRuntimeRegistry::Impl::GetViewState(
 {
     const auto* view = GetViewBySelector(target);
     return view
-        ? std::optional<HostRenderViewState>(BuildViewState(*view))
+        ? std::optional<HostRenderViewState>(view->BuildViewState())
         : std::nullopt;
 }
 
@@ -1098,7 +878,7 @@ HostViewRuntimeRegistry::Impl::GetViewStates() const
     std::vector<HostRenderViewState> states;
     states.reserve(m_views.size());
     for (const auto& view : m_views) {
-        if (view.isAvailable) states.push_back(BuildViewState(view));
+        if (view.isAvailable) states.push_back(view.BuildViewState());
     }
     return states;
 }
@@ -1113,13 +893,11 @@ HostViewRuntimeRegistry::Impl::GetSceneViewState(
         return std::nullopt;
     }
     const auto* view = GetSceneViewBySelector(target);
-    if (!view || m_sceneStates.size() != m_views.size()) {
+    if (!view) {
         return std::nullopt;
     }
     const auto index = static_cast<std::size_t>(view - m_views.data());
-    return index < m_sceneStates.size()
-        ? std::optional<HostSceneViewState>(m_sceneStates[index])
-        : std::nullopt;
+    return m_frameRuntime->GetSceneState(index);
 }
 
 std::vector<HostSceneViewState>
@@ -1130,7 +908,7 @@ HostViewRuntimeRegistry::Impl::GetSceneViewStates()
         || !m_lease->GetIsOwnerThread()) {
         return {};
     }
-    return m_sceneStates;
+    return m_frameRuntime->GetSceneStates();
 }
 
 std::optional<HostDataRoute>
@@ -1146,7 +924,7 @@ HostViewRuntimeRegistry::Impl::GetDataRoute(
         return std::nullopt;
     }
 
-    const auto mode = GetHostViewMode(
+    const auto mode = HostRenderViewRuntime::GetHostViewMode(
         view->app.view->GetViewState().mode);
     if (!mode) return std::nullopt;
 
@@ -1212,19 +990,7 @@ bool HostViewRuntimeRegistry::Impl::StopView(
     }
     found->isAvailable = false;
     const auto index = static_cast<std::size_t>(found - m_views.begin());
-    found->pendingRenderEpoch = 0;
-    found->renderedEpoch = found->appliedEpoch;
-    m_renderOrder.erase(
-        std::remove(m_renderOrder.begin(), m_renderOrder.end(), index),
-        m_renderOrder.end());
-    if (index < m_sceneStates.size()) {
-        auto& state = m_sceneStates[index];
-        state.isAvailable = false;
-        state.renderedEpoch = found->renderedEpoch;
-        state.presentation.reset();
-        state.camera.reset();
-        state.activeFeatureIds.clear();
-    }
+    m_frameRuntime->SetViewUnavailable(index);
     return true;
 }
 
@@ -1292,7 +1058,7 @@ HostViewRuntimeRegistry::Impl::GetInputRouteValues(
     return routes;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetPrimaryView() const
 {
     if (const auto* view = GetFirstViewByRole(
@@ -1311,7 +1077,7 @@ HostViewRuntimeRegistry::Impl::GetPrimaryView() const
     return nullptr;
 }
 
-const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*
+const HostRenderViewRuntime*
 HostViewRuntimeRegistry::Impl::GetStandaloneStartView() const
 {
     for (const auto& view : m_views) {
@@ -1323,7 +1089,7 @@ HostViewRuntimeRegistry::Impl::GetStandaloneStartView() const
     return nullptr;
 }
 
-std::vector<const HostViewRuntimeRegistry::Impl::HostRenderViewRuntime*>
+std::vector<const HostRenderViewRuntime*>
 HostViewRuntimeRegistry::Impl::GetViewsByTargets(
     const HostViewTargets& targets) const
 {
@@ -1744,343 +1510,54 @@ bool HostViewRuntimeRegistry::Impl::SetInputsEnabled(
     return isSet;
 }
 
-bool HostViewRuntimeRegistry::Impl::SetFrameGeneration(
-    const std::uint64_t sessionGeneration)
+bool HostViewRuntimeRegistry::Impl::SetFrameGeneration(std::uint64_t generation)
 {
-    if (sessionGeneration == 0 || !m_lease
-        || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
-        return false;
-    }
-    m_sessionGeneration = sessionGeneration;
-    m_committedEpoch = 0;
-    for (auto& view : m_views) {
-        view.appliedEpoch = 0;
-        view.renderedEpoch = 0;
-        view.pendingRenderEpoch = 0;
-    }
-    for (auto& state : m_sceneStates) {
-        state.sceneEpoch = 0;
-        state.renderedEpoch = 0;
-    }
-    return true;
+    return m_frameRuntime->SetFrameGeneration(generation);
 }
 
-bool HostViewRuntimeRegistry::Impl::SetFrameIntents(
-    const std::vector<HostFrameIntent>& intents)
+bool HostViewRuntimeRegistry::Impl::SetFrameIntents(const std::vector<HostFrameIntent>& intents)
 {
-    if (!m_lease || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()
-        || m_frameStage || !m_frameIntents.empty()) {
-        return false;
-    }
-    try {
-        m_frameIntents = intents;
-        return true;
-    }
-    catch (...) {
-        m_frameIntents.clear();
-        return false;
-    }
+    return m_frameRuntime->SetFrameIntents(intents);
 }
 
 bool HostViewRuntimeRegistry::Impl::CollectFrameUpdates()
 {
-    if (!m_lease || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
-        return false;
-    }
-
-    // 所有 View 先完整应用本轮 pending；任一失败时不领取任何 dirty，
-    // 因而第一个可见 Render 不可能越过全 View apply barrier。
-    for (const auto& view : m_views) {
-        if (!view.isAvailable) continue;
-        if (!view.interaction.update || !view.app.view || !view.context) {
-            return false;
-        }
-        try {
-            if (!view.interaction.update->SendUpdates()) {
-                return false;
-            }
-        }
-        catch (...) {
-            return false;
-        }
-    }
-    return true;
+    return m_frameRuntime->CollectFrameUpdates();
 }
 
 bool HostViewRuntimeRegistry::Impl::ApplyFrameUpdates()
 {
-    if (!m_lease || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
-        return false;
-    }
-    for (const auto& view : m_views) {
-        if (!view.isAvailable) continue;
-        if (!view.interaction.update || !view.app.view || !view.context) {
-            return false;
-        }
-        try {
-            if (!view.interaction.update->SendPendingUpdates()) return false;
-        }
-        catch (...) {
-            return false;
-        }
-    }
-    return true;
+    return m_frameRuntime->ApplyFrameUpdates();
 }
 
-HostFrameStageStatus HostViewRuntimeRegistry::Impl::BuildFrameStage(
-    const std::uint64_t nextEpoch)
+HostFrameStageStatus HostViewRuntimeRegistry::Impl::BuildFrameStage(std::uint64_t epoch)
 {
-    if (nextEpoch == 0 || nextEpoch != m_committedEpoch + 1
-        || !m_lease || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
-        return HostFrameStageStatus::Failed;
-    }
-
-    // Feature intent 必须在 App pending 全部应用之后重新校验输入戳。
-    // FeatureHostControlPort 已把 featureId 固定为当前已附加 Feature，因而
-    // removal delta 允许引用刚刚从 active 集合移除的目标 View。
-    for (const auto& intent : m_frameIntents) {
-        if (intent.featureId.empty()
-            || intent.sessionGeneration != m_sessionGeneration
-            || intent.baseSceneEpoch != m_committedEpoch) {
-            continue;
-        }
-
-        std::vector<std::size_t> targetIndices;
-        targetIndices.reserve(intent.delta.viewIds.size());
-        bool hasInvalidTarget = false;
-        for (const auto& viewId : intent.delta.viewIds) {
-            const auto index = GetViewIndexById(viewId);
-            if (!index || *index >= m_views.size()
-                || !m_views[*index].isAvailable
-                || !m_views[*index].interaction.update
-                || !GetIntentStampValid(
-                    m_views[*index], intent.delta.inputStamp)) {
-                hasInvalidTarget = true;
-                if (intent.delta.scope
-                    != FeatureSceneScope::BestEffort) {
-                    break;
-                }
-                continue;
-            }
-            targetIndices.push_back(*index);
-        }
-        if ((hasInvalidTarget
-                && intent.delta.scope
-                    != FeatureSceneScope::BestEffort)
-            || targetIndices.empty()) {
-            continue;
-        }
-
-        bool isSet = true;
-        for (const auto index : targetIndices) {
-            isSet = m_views[index].interaction.update
-                ->SetRenderNeeded() && isSet;
-        }
-        if (!isSet
-            && intent.delta.scope
-                == FeatureSceneScope::RequiredAllViews) {
-            return HostFrameStageStatus::Failed;
-        }
-    }
-
-    std::vector<bool> renderNeeded(m_views.size(), false);
-    std::vector<std::size_t> dirtyIndices;
-    dirtyIndices.reserve(m_views.size());
-    const auto restoreDirty = [this, &dirtyIndices]() noexcept {
-        for (const auto index : dirtyIndices) {
-            try {
-                if (index < m_views.size()
-                    && m_views[index].interaction.update) {
-                    (void)m_views[index].interaction.update
-                        ->SetRenderNeeded();
-                }
-            }
-            catch (...) {
-            }
-        }
-    };
-    try {
-        for (std::size_t index = 0; index < m_views.size(); ++index) {
-            auto& view = m_views[index];
-            if (!view.isAvailable) continue;
-            if (view.interaction.update->ResetRenderNeeded()) {
-                renderNeeded[index] = true;
-                dirtyIndices.push_back(index);
-            }
-        }
-    }
-    catch (...) {
-        restoreDirty();
-        return HostFrameStageStatus::Failed;
-    }
-    if (dirtyIndices.empty()) {
-        m_frameIntents.clear();
-        return HostFrameStageStatus::Unchanged;
-    }
-
-    try {
-        FrameStage stage;
-        stage.epoch = nextEpoch;
-        stage.renderNeeded = std::move(renderNeeded);
-        stage.renderOrder = dirtyIndices;
-        stage.sceneStates.reserve(m_views.size());
-
-        std::optional<DataRevisionRef> dataRevision;
-        for (std::size_t index = 0; index < m_views.size(); ++index) {
-            auto state = BuildSceneViewState(m_views[index]);
-            if (m_views[index].isAvailable
-                && (!state.presentation || !state.camera)) {
-                restoreDirty();
-                return HostFrameStageStatus::Failed;
-            }
-            if (m_views[index].isAvailable && state.presentation) {
-                const auto currentRevision =
-                    state.presentation->dataRevision;
-                if (GetDataRevisionRefValid(currentRevision)) {
-                    if (dataRevision && *dataRevision != currentRevision) {
-                        restoreDirty();
-                        return HostFrameStageStatus::Failed;
-                    }
-                    dataRevision = currentRevision;
-                }
-            }
-            state.sceneEpoch = nextEpoch;
-            state.renderedEpoch = stage.renderNeeded[index]
-                ? m_views[index].renderedEpoch : nextEpoch;
-            stage.sceneStates.push_back(std::move(state));
-        }
-        std::stable_sort(
-            stage.renderOrder.begin(), stage.renderOrder.end(),
-            [&stage](const std::size_t left, const std::size_t right) {
-                return GetRenderPriority(stage.sceneStates[left])
-                    < GetRenderPriority(stage.sceneStates[right]);
-            });
-        m_frameStage = std::move(stage);
-        return HostFrameStageStatus::Ready;
-    }
-    catch (...) {
-        restoreDirty();
-        return HostFrameStageStatus::Failed;
-    }
+    return m_frameRuntime->BuildFrameStage(epoch);
 }
 
-void HostViewRuntimeRegistry::Impl::SetFrameCommit(
-    const std::uint64_t epoch) noexcept
+void HostViewRuntimeRegistry::Impl::SetFrameCommit(std::uint64_t epoch) noexcept
 {
-    if (!m_frameStage || m_frameStage->epoch != epoch
-        || m_frameStage->sceneStates.size() != m_views.size()
-        || m_frameStage->renderNeeded.size() != m_views.size()) {
-        std::terminate();
-    }
-
-    for (std::size_t index = 0; index < m_views.size(); ++index) {
-        auto& view = m_views[index];
-        if (!view.isAvailable) continue;
-        view.appliedEpoch = epoch;
-        if (m_frameStage->renderNeeded[index]) {
-            view.pendingRenderEpoch = epoch;
-        }
-        else {
-            view.pendingRenderEpoch = 0;
-            view.renderedEpoch = epoch;
-        }
-    }
-    m_sceneStates.swap(m_frameStage->sceneStates);
-    m_renderOrder.swap(m_frameStage->renderOrder);
-    m_frameIntents.clear();
-    m_committedEpoch = epoch;
-    m_frameStage.reset();
+    m_frameRuntime->SetFrameCommit(epoch);
 }
 
-bool HostViewRuntimeRegistry::Impl::SendFrameRender(
-    const std::uint64_t epoch)
+bool HostViewRuntimeRegistry::Impl::SendFrameRender(std::uint64_t epoch)
 {
-    if (epoch == 0 || epoch != m_committedEpoch
-        || !m_lease || !m_lease->GetIsActive()
-        || !m_lease->GetIsOwnerThread()) {
-        return false;
-    }
-
-    for (const auto index : m_renderOrder) {
-        if (index >= m_views.size()) return false;
-        auto& view = m_views[index];
-        if (view.pendingRenderEpoch != epoch) continue;
-        bool isRendered = false;
-        try {
-            const auto renderStart = std::chrono::steady_clock::now();
-            isRendered = view.isAvailable && view.context
-                && view.context->SendRender();
-            if (isRendered && view.interaction.update) {
-                const auto durationUs = static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        std::chrono::steady_clock::now() - renderStart).count());
-                view.interaction.update->SetRenderComplete(
-                    std::max<std::uint64_t>(1, durationUs));
-            }
-        }
-        catch (...) {
-            isRendered = false;
-        }
-        if (!isRendered) continue;
-        view.pendingRenderEpoch = 0;
-        view.renderedEpoch = epoch;
-        if (index < m_sceneStates.size()) {
-            m_sceneStates[index].renderedEpoch = epoch;
-        }
-    }
-
-    if (GetFrameRenderPending()) return false;
-    m_renderOrder.clear();
-    return true;
+    return m_frameRuntime->SendFrameRender(epoch);
 }
 
 bool HostViewRuntimeRegistry::Impl::GetFrameRenderPending() const noexcept
 {
-    return std::any_of(
-        m_views.begin(), m_views.end(),
-        [](const HostRenderViewRuntime& view) {
-            return view.pendingRenderEpoch != 0;
-        });
+    return m_frameRuntime->GetFrameRenderPending();
 }
 
 void HostViewRuntimeRegistry::Impl::SendFrameCompletions() noexcept
 {
-    for (const auto& view : m_views) {
-        try {
-            if (view.isAvailable && view.interaction.update) {
-                view.interaction.update->SendCompletions();
-            }
-        }
-        catch (...) {
-        }
-    }
+    m_frameRuntime->SendFrameCompletions();
 }
 
 void HostViewRuntimeRegistry::Impl::ClearFrameStage() noexcept
 {
-    m_frameIntents.clear();
-    if (!m_frameStage) return;
-    for (const auto index : m_frameStage->renderOrder) {
-        try {
-            if (index < m_views.size()
-                && m_views[index].interaction.update) {
-                (void)m_views[index].interaction.update
-                    ->SetRenderNeeded();
-            }
-        }
-        catch (...) {
-        }
-    }
-    m_frameStage.reset();
+    m_frameRuntime->ClearFrameStage();
 }
 
 bool HostViewRuntimeRegistry::Impl::SetModelMatrix(
@@ -2128,13 +1605,10 @@ HostViewRuntimeRegistry::Impl::GetTaskExecutor() const
 
 bool HostViewRuntimeRegistry::Impl::StopLease()
 {
+    if (m_lease && !m_lease->GetIsOwnerThread()) return false;
+    if (m_frameRuntime->GetIsBusy()) return false;
     if (!m_lease) {
-        m_frameIntents.clear();
-        m_frameStage.reset();
-        m_sceneStates.clear();
-        m_renderOrder.clear();
-        m_sessionGeneration = 0;
-        m_committedEpoch = 0;
+        m_frameRuntime->Clear();
         m_leasePorts.clear();
         m_views.clear();
         m_loadCommit.reset();
@@ -2188,6 +1662,7 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
     // 先确认 lease 已停止，再提交 wrapper/runtime 释放；即使以后
     // StopLease 增加新的失败条件，也不会留下半清理状态。
     if (!m_lease->StopLease()) return false;
+    m_frameRuntime->Clear();
     m_leasePorts.clear();
     m_lease.reset();
 
@@ -2204,12 +1679,7 @@ bool HostViewRuntimeRegistry::Impl::StopLease()
     m_loadCommit.reset();
     m_renderServices.reset();
     m_taskExecutor.reset();
-    m_frameIntents.clear();
-    m_frameStage.reset();
-    m_sceneStates.clear();
-    m_renderOrder.clear();
-    m_sessionGeneration = 0;
-    m_committedEpoch = 0;
+
     return true;
 }
 

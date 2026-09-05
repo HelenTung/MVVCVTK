@@ -1900,12 +1900,18 @@ bool GetHostResultValid()
     }
 
     int imageReadCount = 0;
+    int reentrantReadCount = 0;
+    ImageReadAdmission reentrantAdmission = ImageReadAdmission::Unavailable;
     ImageReadResult imageRead;
     const auto imageAdmission = session.StartImageRead(
         ImageReadRequest{},
-        [&imageReadCount, &imageRead](ImageReadResult value) {
+        [&](ImageReadResult value) {
             ++imageReadCount;
             imageRead = std::move(value);
+            reentrantAdmission = session.StartImageRead(ImageReadRequest{},
+                [&](ImageReadResult next) {
+                    if (next.error == ImageReadError::None) ++reentrantReadCount;
+                });
         });
     int rejectedReadCount = 0;
     const auto busyAdmission = session.StartImageRead(
@@ -1913,7 +1919,7 @@ bool GetHostResultValid()
         [&rejectedReadCount](ImageReadResult) {
             ++rejectedReadCount;
         });
-    for (int poll = 0; imageReadCount == 0
+    for (int poll = 0; (imageReadCount == 0 || reentrantReadCount == 0)
         && poll < pollCount; ++poll) {
         if (!sendTimer()) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1924,6 +1930,8 @@ bool GetHostResultValid()
     if (imageAdmission != ImageReadAdmission::Accepted
         || busyAdmission != ImageReadAdmission::Busy
         || imageReadCount != 1
+        || reentrantAdmission != ImageReadAdmission::Accepted
+        || reentrantReadCount != 1
         || rejectedReadCount != 0
         || imageRead.error != ImageReadError::None
         || !imageRead.state
