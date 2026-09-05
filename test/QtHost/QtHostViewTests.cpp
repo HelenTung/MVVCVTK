@@ -797,7 +797,7 @@ int GetRenderContractFailCount()
             && areQualityProfilesSet
             && dimensionPlanCount == 1
             && dimensionStrategy.GetLodPlanCount()
-                == dimensionPlanCount
+                == dimensionPlanCount + 1
             && isUltraNative
             && dimensionStrategy.GetLodDimensions(
                 VolumeQuality::Low)
@@ -811,7 +811,7 @@ int GetRenderContractFailCount()
             && dimensionStrategy.GetLodDimensions(
                 VolumeQuality::Ultra)
                 == std::array<int, 3>{ 1200, 1, 1 },
-        "Quality tiers reuse one load-time plan while Ultra stays native") ? 0 : 1;
+        "Quality tiers keep fixed dimensions while explicit Auto re-resolves") ? 0 : 1;
 
     auto gpuGateImage = vtkSmartPointer<vtkImageData>::New();
     gpuGateImage->SetDimensions(128, 128, 128);
@@ -978,7 +978,7 @@ int GetRenderContractFailCount()
             && loadInputBuildCount == loadBuildCount + 1
             && loadQualityStrategy.GetResampleBuildCount()
                 == loadInputBuildCount
-            && loadQualityStrategy.GetResampleUpdateCount() == 0
+            && loadQualityStrategy.GetResampleUpdateCount() == 1
             && loadQualityStrategy.GetLodDimensions(
                 VolumeQuality::High)
                 == std::array<int, 3>{ 600, 1, 1 },
@@ -1008,6 +1008,8 @@ int GetRenderContractFailCount()
     vtkSmartPointer<vtkAlgorithmOutput> firstHighInput =
         lodCacheMapper
             ? lodCacheMapper->GetInputConnection(0, 0) : nullptr;
+    vtkSmartPointer<vtkImageData> firstHighProduct = lodCacheMapper
+        ? vtkImageData::SafeDownCast(lodCacheMapper->GetInput()) : nullptr;
     const std::uint64_t firstHighBuildCount =
         lodCacheStrategy.GetResampleBuildCount();
     const std::uint64_t firstHighPlanCount =
@@ -1026,8 +1028,8 @@ int GetRenderContractFailCount()
     const std::uint64_t reusedHighBuildCount =
         lodCacheStrategy.GetResampleBuildCount();
     const bool isHighInputReused = lodCacheMapper
-        && lodCacheMapper->GetInputConnection(0, 0)
-            == firstHighInput.GetPointer();
+        && vtkImageData::SafeDownCast(lodCacheMapper->GetInput())
+            == firstHighProduct.GetPointer();
 
     lodCacheImage->Modified();
     const bool isLodCacheInputReset = lodCacheStrategy.SetInputData(
@@ -1100,16 +1102,16 @@ int GetRenderContractFailCount()
             && isDenoiseSet
             && denoiseBuildCount == resetLowBuildCount + 1
             && isDenoiseReset
-            && resetDenoiseBuildCount == denoiseBuildCount + 1
+            && resetDenoiseBuildCount == denoiseBuildCount
             && isLodCacheMaskSet
             && maskBuildCount == resetDenoiseBuildCount + 2
-            && maskUpdateCount == 1
+            && maskUpdateCount == maskBuildCount
             && isLodCacheMaskReused
             && reusedMaskBuildCount == maskBuildCount
             && reusedMaskUpdateCount == maskUpdateCount
             && isLodCacheMaskReset
             && resetMaskBuildCount == maskBuildCount + 2
-            && resetMaskUpdateCount == maskUpdateCount + 1
+            && resetMaskUpdateCount == maskUpdateCount + 2
             && lodCacheStrategy.GetLodPlanCount()
                 == firstHighPlanCount + 5,
         "LOD cache builds on first use and invalidates by data mask and denoise")
@@ -1131,6 +1133,8 @@ int GetRenderContractFailCount()
     vtkSmartPointer<vtkAlgorithmOutput> boundedHighInput =
         boundedMapper
             ? boundedMapper->GetInputConnection(0, 0) : nullptr;
+    vtkSmartPointer<vtkImageData> boundedHighProduct = boundedMapper
+        ? vtkImageData::SafeDownCast(boundedMapper->GetInput()) : nullptr;
     boundedCacheParams.volumeQuality = VolumeQuality::Low;
     const bool isBoundedLowSet = boundedCacheStrategy.SetVisualState(
         boundedCacheParams, UpdateFlags::Quality);
@@ -1168,10 +1172,10 @@ int GetRenderContractFailCount()
             && evictedLowBuildCount == fullCacheBuildCount + 1
             && isProtectedHighReused
             && boundedCacheStrategy.GetResampleBuildCount()
-                == evictedLowBuildCount
-            && boundedMapper->GetInputConnection(0, 0)
-                == boundedHighInput.GetPointer(),
-        "Bounded LOD cache evicts LRU while retaining reusable High")
+                == evictedLowBuildCount + 1
+            && vtkImageData::SafeDownCast(boundedMapper->GetInput())
+                != boundedHighProduct.GetPointer(),
+        "Bounded typed LOD cache evicts the oldest unowned product")
         ? 0 : 1;
 
     auto cacheMask = vtkSmartPointer<vtkImageData>::New();
@@ -1275,10 +1279,10 @@ int GetRenderContractFailCount()
         && cacheStrategy.GetResampleUpdateCount()
             == qualityUpdateCount
         && cacheStrategy.GetLodPlanCount()
-            == qualityPlanCount;
+            == qualityPlanCount + 1;
     failureCount += GetCaseResult(
         isQualityStable && isFeatureCacheReused,
-        "Auto commits volume and mask once without rebuilding its plan") ? 0 : 1;
+        "Explicit Auto re-resolves without rebuilding unchanged products") ? 0 : 1;
 
     VolumeStrategy retryStrategy;
     retryStrategy.SetInputData(dimensionImage);

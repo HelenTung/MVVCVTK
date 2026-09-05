@@ -1,8 +1,8 @@
 #include "VolumeStrategy.h"
 #include "Render/Internal/VolumeLodController.h"
-#include "Data/ImageProcessor.h"
 #include <vtkAbstractMapper.h>
 #include <vtkCommand.h>
+#include <vtkDataArray.h>
 #include <vtkInformation.h>
 #include <vtkInformationObjectBaseVectorKey.h>
 #include <vtkNew.h>
@@ -15,18 +15,20 @@
 #include <vtkColorTransferFunction.h>
 #include <vtkPiecewiseFunction.h>
 #include <vtkImageData.h>
-#include <vtkImageResample.h>
-#include <vtkImageAnisotropicDiffusion3D.h>
 #include <vtkMatrix4x4.h>
 #include <vtkOpenGLRenderWindow.h>
+#include <vtkPointData.h>
 #include <vtkRenderWindow.h>
 #include <vtk_glad.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <thread>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -34,18 +36,44 @@
 #endif
 
 namespace {
-constexpr std::size_t maxLodCacheEntries = 3;
-constexpr long double cacheMemoryFraction = 0.25L;
-constexpr long double cacheSourceFraction = 0.65L;
 constexpr long double gpuBlockMemoryFraction = 0.5L;
 constexpr std::array<unsigned short, 3> singlePartition{ 1, 1, 1 };
-constexpr double ratioEpsilon = 1e-9;
-// 静止态使用 0.001；所有交互质量档目标均不低于 8 FPS。
-// 用速率区间识别交互，不再用固定 15 FPS 门槛排除 XHigh/Ultra。
-constexpr double previewRateFloor = 1.0;
 }
 #include <windows.h>
 #endif
+
+namespace {
+
+std::optional<std::uint64_t> GetEstimatedImageBytes(
+    vtkImageData* image,
+    const std::array<int, 3>& dimensions) noexcept
+{
+    if (!image) return std::uint64_t{ 0 };
+    std::uint64_t voxelCount = 1;
+    for (const int dimension : dimensions) {
+        if (dimension <= 0
+            || static_cast<std::uint64_t>(dimension)
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    / voxelCount) {
+            return std::nullopt;
+        }
+        voxelCount *= static_cast<std::uint64_t>(dimension);
+    }
+    const int componentCount = image->GetNumberOfScalarComponents();
+    const int scalarSize = image->GetScalarSize();
+    if (componentCount <= 0 || scalarSize <= 0) return std::nullopt;
+    const auto bytesPerVoxel = static_cast<std::uint64_t>(componentCount)
+        * static_cast<std::uint64_t>(scalarSize);
+    if (bytesPerVoxel == 0
+        || voxelCount
+            > (std::numeric_limits<std::uint64_t>::max)()
+                / bytesPerVoxel) {
+        return std::nullopt;
+    }
+    return voxelCount * bytesPerVoxel;
+}
+
+} // namespace
 
 class VolumeStrategy::Mapper final : public vtkOpenGLGPUVolumeRayCastMapper {
 public:
@@ -131,6 +159,13 @@ public:
         m_stillQuality = state;
         return SetPreviewQuality(m_stillQuality, m_isPreviewActive);
     }
+    bool SetPreviewUse(const bool isPreview)
+    {
+        if (isPreview == m_isPreviewActive) return true;
+        if (!SetPreviewQuality(m_stillQuality, isPreview)) return false;
+        m_isPreviewActive = isPreview;
+        return true;
+    }
 
 protected:
     Mapper()
@@ -145,16 +180,6 @@ protected:
 
     void GPURender(vtkRenderer* renderer, vtkVolume* volume) override
     {
-        auto* renderWindow = renderer
-            ? renderer->GetRenderWindow() : nullptr;
-        const bool isPreview = renderWindow
-            && renderWindow->GetDesiredUpdateRate()
-                >= previewRateFloor;
-        if (isPreview != m_isPreviewActive) {
-            if (SetPreviewQuality(m_stillQuality, isPreview)) {
-                m_isPreviewActive = isPreview;
-            }
-        }
         if (m_binding) {
             (void)m_binding->OnRenderStart(renderer);
         }
@@ -303,19 +328,28 @@ private:
 vtkStandardNewMacro(VolumeStrategy::Mapper);
 
 struct VolumeStrategy::LodEntry final {
+    std::shared_ptr<const VolumeLodProduct> product;
     vtkSmartPointer<vtkImageData> volume;
-    vtkSmartPointer<vtkImageResample> volumeFilter;
     vtkSmartPointer<vtkImageData> mask;
-    vtkSmartPointer<vtkImageResample> maskFilter;
-    std::uint64_t dataVersion = 0;
-    std::uint64_t maskVersion = 0;
     std::array<int, 3> outputDimensions{};
     std::array<double, 3> outputSpacing{};
     std::array<unsigned short, 3> partitions = singlePartition;
     double dimensionRatio = 1.0;
     std::uint64_t estimatedBytes = 0;
-    std::uint64_t lastUse = 0;
-    bool isDenoiseOn = false;
+    VolumeQuality requestedQuality = VolumeQuality::Auto;
+};
+
+struct VolumeStrategy::AsyncState final {
+    struct Completion final {
+        std::uint64_t requestRevision = 0;
+        VolumeLodKey key;
+        VolumeLodBuildResult result;
+        double dimensionRatio = 1.0;
+        std::uint64_t cpuPrepareUs = 0;
+    };
+
+    std::mutex mutex;
+    std::optional<Completion> completion;
 };
 
 bool VolumeStrategy::GetOpacityChanged(double opacity) const
@@ -323,7 +357,31 @@ bool VolumeStrategy::GetOpacityChanged(double opacity) const
     return std::abs(m_opacity - opacity) > 1e-6;
 }
 
-VolumeStrategy::VolumeStrategy() {
+VolumeStrategy::VolumeStrategy()
+    : VolumeStrategy(nullptr)
+{
+}
+
+VolumeStrategy::VolumeStrategy(
+    std::shared_ptr<RenderStrategyServices> services)
+    : m_asyncState(std::make_shared<AsyncState>())
+{
+    if (services && services->resources) {
+        m_resources = services->resources;
+        m_taskChannel = m_resources->CreateTaskChannel(
+            RenderProductKind::VolumeLod);
+    }
+    else {
+        m_resources = std::make_shared<RenderResourceCoordinator>(
+            [](RenderLaneWork work) {
+                if (!work.valid()) return false;
+                TaskStopSource stopSource;
+                work(stopSource.GetToken());
+                return true;
+            });
+        m_taskChannel = m_resources->CreateTaskChannel(
+            RenderProductKind::VolumeLod);
+    }
     m_lodController = std::make_unique<VolumeLodController>();
     m_volume = vtkSmartPointer<vtkVolume>::New();
     m_cubeAxes = vtkSmartPointer<vtkCubeAxesActor>::New();
@@ -352,7 +410,17 @@ VolumeStrategy::VolumeStrategy() {
     AttachProp(m_cubeAxes);
 }
 
-VolumeStrategy::~VolumeStrategy() = default;
+VolumeStrategy::~VolumeStrategy()
+{
+    auto* renderer = m_renderer.GetPointer();
+    auto* context = renderer ? renderer->GetRenderWindow() : nullptr;
+    if (m_resources && context) {
+        (void)m_resources->ClearGpuReservation(context, this);
+    }
+    if (m_taskChannel) {
+        (void)m_taskChannel->Stop();
+    }
+}
 
 void VolumeStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data)
 {
@@ -380,46 +448,57 @@ bool VolumeStrategy::SetVolumeInput(
 {
     auto* image = vtkImageData::SafeDownCast(data);
     if (!image || !m_lodController) return false;
-    const bool hasInputChanged = m_lastInput != data
-        || !GetInputKey(image);
-    const bool hasMaskChanged = m_lastMask != validityMask
-        || (validityMask && !GetMaskKey(validityMask));
-    if (!hasInputChanged && !hasMaskChanged
-        && GetProducersReady()) {
-        return true;
-    }
+    if (GetInputCurrent(data, validityMask)) return true;
+    if (m_requestRevision
+        == (std::numeric_limits<std::uint64_t>::max)()) return false;
 
     const auto oldInput = m_lastInput;
     const auto oldMask = m_lastMask;
-    const auto oldDenoise = m_denoiseFilter;
-    const bool isProducerDenoiseOld = m_isProducerDenoiseOn;
     const vtkMTimeType oldInputMTime = m_inputMTime;
     const vtkMTimeType oldMaskMTime = m_maskMTime;
+    const vtkMTimeType oldInputScalarMTime = m_inputScalarMTime;
+    const vtkMTimeType oldMaskScalarMTime = m_maskScalarMTime;
     const auto oldInputExtent = m_inputExtent;
     const auto oldMaskExtent = m_maskExtent;
     const auto oldInputSpacing = m_inputSpacing;
     const auto oldMaskSpacing = m_maskSpacing;
-    const std::uint64_t oldDataVersion = m_dataVersion;
-    const std::uint64_t oldMaskVersion = m_maskVersion;
     const std::uint64_t oldPlanCount = m_lodPlanCount;
+    const std::uint64_t oldTopologyRevision =
+        m_autoTopologyRevision;
+    const std::uint64_t oldBuildCount = m_resampleBuildCount;
+    const std::uint64_t oldUpdateCount = m_resampleUpdateCount;
+    const std::uint64_t oldRequestRevision = m_requestRevision;
+    const auto oldTransition = m_transition;
     const VolumeLodController oldController = *m_lodController;
 
     m_lastInput = std::move(data);
     m_lastMask = std::move(validityMask);
-    if (hasInputChanged) ++m_dataVersion;
-    if (hasMaskChanged) ++m_maskVersion;
+    SetInputTimes(m_lastInput, m_lastMask);
     bool isPipelineSet = false;
     try {
-        const bool isDenoiseSet = !hasInputChanged
-            && m_isProducerDenoiseOn == m_isDenoiseOn
-            ? true : BuildDenoise();
-        const bool isPlanSet = isDenoiseSet
-            && BuildLodPlan();
+        const bool isPlanSet = BuildLodPlan();
         const auto profile = m_lodController->GetProfile();
-        isPipelineSet = isPlanSet
-            && SetTargetLod(
+        const std::uint64_t nextRevision = m_requestRevision + 1;
+        auto request = isPlanSet
+            ? BuildRequest(
+                nextRevision,
+                m_quality,
                 profile.outputDimensions,
-                profile.dimensionRatio);
+                m_isDenoiseOn)
+            : std::nullopt;
+        if (request) {
+            m_requestRevision = nextRevision;
+            m_transition.status = RenderProductStatus::Preparing;
+            m_transition.failureReason = RenderProductFailure::None;
+            m_transition.inputStamp = request->key.inputStamp;
+            m_transition.requestedQuality = m_quality;
+            m_transition.appliedQuality = m_appliedQuality;
+            m_transition.stats.requestRevision = nextRevision;
+            m_transition.stats.resolvedDimensions =
+                profile.outputDimensions;
+            isPipelineSet = StartProduct(
+                std::move(*request), profile.dimensionRatio);
+        }
     }
     catch (const std::exception& error) {
         std::cerr
@@ -432,21 +511,23 @@ bool VolumeStrategy::SetVolumeInput(
     if (!isPipelineSet) {
         m_lastInput = oldInput;
         m_lastMask = oldMask;
-        m_denoiseFilter = oldDenoise;
-        m_isProducerDenoiseOn = isProducerDenoiseOld;
         m_inputMTime = oldInputMTime;
         m_maskMTime = oldMaskMTime;
+        m_inputScalarMTime = oldInputScalarMTime;
+        m_maskScalarMTime = oldMaskScalarMTime;
         m_inputExtent = oldInputExtent;
         m_maskExtent = oldMaskExtent;
         m_inputSpacing = oldInputSpacing;
         m_maskSpacing = oldMaskSpacing;
-        m_dataVersion = oldDataVersion;
-        m_maskVersion = oldMaskVersion;
         m_lodPlanCount = oldPlanCount;
+        m_autoTopologyRevision = oldTopologyRevision;
+        m_resampleBuildCount = oldBuildCount;
+        m_resampleUpdateCount = oldUpdateCount;
+        m_requestRevision = oldRequestRevision;
+        m_transition = oldTransition;
         *m_lodController = oldController;
-        (void)ClearPendingLod();
         const bool isQualityRestored = !m_activeLod
-            || SetMapperQuality(*m_activeLod);
+            || SetMapperQuality(*m_activeLod.get());
         if (!isQualityRestored) {
             std::cerr
                 << "[VolumeRollback] input mapper quality restore failed"
@@ -454,8 +535,6 @@ bool VolumeStrategy::SetVolumeInput(
         }
         return false;
     }
-    (void)SetInputKey(image);
-    (void)SetMaskKey(m_lastMask);
     image->GetCenter(m_dataCenter);
     // 坐标轴始终反映原始输入的物理空间，不跟随 LOD dimensions 缩放。
     m_cubeAxes->SetBounds(image->GetBounds());
@@ -490,14 +569,6 @@ std::uint64_t VolumeStrategy::GetSourceBytes() const
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
     return GetImageBytes(image);
-}
-
-std::uint64_t VolumeStrategy::GetLodBytes(
-    const LodEntry& lod) const
-{
-    // 原生 volume/mask 都只是输入别名，不计入缓存的增量内存。
-    if (!lod.volumeFilter && !lod.maskFilter) return 0;
-    return GetLodTextureBytes(lod);
 }
 
 std::uint64_t VolumeStrategy::GetLodTextureBytes(
@@ -634,38 +705,6 @@ VolumeStrategy::GetLodPartitions(
     return partitions;
 }
 
-std::uint64_t VolumeStrategy::GetCacheBudget() const
-{
-    const std::uint64_t volumeBytes = GetSourceBytes();
-    const std::uint64_t maskBytes = GetImageBytes(m_lastMask);
-    if (volumeBytes == 0
-        || maskBytes
-            > std::numeric_limits<std::uint64_t>::max()
-                - volumeBytes) {
-        return 0;
-    }
-    const std::uint64_t sourceBytes = volumeBytes + maskBytes;
-    const std::uint64_t systemBytes = GetSystemMemoryBytes();
-    const long double fallbackBytes =
-        static_cast<long double>(sourceBytes) * 2.0L;
-    const long double availableBytes = systemBytes > 0
-        ? static_cast<long double>(systemBytes) : fallbackBytes;
-    // 缓存最多占可用物理内存的四分之一，同时不超过当前源数据的 65%。
-    // 活动档即使超过预算也保留，避免为满足预算破坏当前 mapper 输入。
-    const long double budgetBytes = std::min(
-        availableBytes * cacheMemoryFraction,
-        static_cast<long double>(sourceBytes)
-            * cacheSourceFraction);
-    const long double maximumBytes = static_cast<long double>(
-        std::numeric_limits<std::uint64_t>::max());
-    if (!std::isfinite(budgetBytes) || budgetBytes <= 0.0L) {
-        return 0;
-    }
-    return budgetBytes >= maximumBytes
-        ? std::numeric_limits<std::uint64_t>::max()
-        : static_cast<std::uint64_t>(budgetBytes);
-}
-
 std::uint64_t VolumeStrategy::GetSystemMemoryBytes() const
 {
 #if defined(_WIN32)
@@ -793,117 +832,92 @@ bool VolumeStrategy::GetQualityValid(
     return false;
 }
 
-bool VolumeStrategy::GetCpuBudgetValid(const LodEntry& lod) const
+bool VolumeStrategy::GetInputCurrent(
+    vtkDataObject* data,
+    vtkImageData* validityMask) const
 {
-    const std::uint64_t textureBytes = GetLodTextureBytes(lod);
-    if (textureBytes == 0) return false;
-
-    // 原生挡位直接复用已加载输入，不需要为 resample 保留工作副本。
-    if (!m_denoiseFilter && lod.outputDimensions == GetSourceDims()) {
-        return true;
+    if (!data || m_lastInput != data || m_lastMask != validityMask
+        || m_inputMTime != data->GetMTime()) {
+        return false;
     }
-
-    // vtkImageResample 至少需要目标输出和工作区；denoise 还会物化
-    // 全尺寸输出与工作副本。按增量工作集准入，源输入本身已计入当前占用。
-    const std::uint64_t systemBytes = GetSystemMemoryBytes();
-    if (systemBytes == 0) return true;
-    long double workingBytes = static_cast<long double>(textureBytes) * 2.0L;
-    if (m_denoiseFilter) {
-        workingBytes += static_cast<long double>(GetSourceBytes()) * 2.0L;
-    }
-    return std::isfinite(workingBytes)
-        && workingBytes <= static_cast<long double>(systemBytes);
-}
-
-bool VolumeStrategy::GetInputKey(vtkImageData* image) const
-{
+    auto* image = vtkImageData::SafeDownCast(data);
     return image
-        && m_inputMTime == image->GetMTime()
-        && std::equal(
-            m_inputExtent.begin(),
-            m_inputExtent.end(),
-            image->GetExtent())
-        && std::equal(
-            m_inputSpacing.begin(),
-            m_inputSpacing.end(),
-            image->GetSpacing());
+        && m_inputScalarMTime == GetScalarTime(image)
+        && (!validityMask
+            || (m_maskMTime == validityMask->GetMTime()
+                && m_maskScalarMTime
+                    == GetScalarTime(validityMask)));
 }
 
-bool VolumeStrategy::GetMaskKey(vtkImageData* image) const
-{
-    return image
-        && m_maskMTime == image->GetMTime()
-        && std::equal(
-            m_maskExtent.begin(),
-            m_maskExtent.end(),
-            image->GetExtent())
-        && std::equal(
-            m_maskSpacing.begin(),
-            m_maskSpacing.end(),
-            image->GetSpacing());
-}
-
-bool VolumeStrategy::GetProducersReady() const
+bool VolumeStrategy::GetKeyCurrent(const VolumeLodKey& key) const
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
-    const auto* lod = m_activeLod;
-    const bool isMapperSet = lod && m_mapper
-        && (lod->volumeFilter
-            ? m_mapper->GetInputConnection(0, 0)
-                == lod->volumeFilter->GetOutputPort()
-            : m_mapper->GetInput() == lod->volume.GetPointer())
-        && m_mapper->GetMaskInput() == lod->mask.GetPointer();
-    return lod && lod->volume && isMapperSet
-        && lod->dataVersion == m_dataVersion
-        && lod->maskVersion == m_maskVersion
-        && m_lodController
-        && lod->outputDimensions
-            == m_lodController->GetProfile().outputDimensions
-        && lod->isDenoiseOn == m_isDenoiseOn
-        && GetInputKey(image)
-        && (!m_lastMask
-            || (lod->mask && GetMaskKey(m_lastMask)))
-        && m_isProducerDenoiseOn == m_isDenoiseOn;
+    const bool hasCurrentStamp = key.inputStamp == m_renderInputStamp;
+    const bool hasInitialStamp = key.inputStamp.identity == image
+        && key.inputStamp.version == 0;
+    return image
+        && (hasCurrentStamp || hasInitialStamp)
+        && (!key.inputStamp.identity
+            || key.inputStamp.identity == image)
+        && key.maskIdentity == m_lastMask.GetPointer()
+        && key.inputMTime == image->GetMTime()
+        && key.inputScalarMTime == GetScalarTime(image)
+        && key.maskMTime == (m_lastMask ? m_lastMask->GetMTime() : 0)
+        && key.maskScalarMTime == GetScalarTime(m_lastMask);
 }
 
-bool VolumeStrategy::SetInputKey(vtkImageData* image)
+void VolumeStrategy::SetInputTimes(
+    vtkDataObject* data,
+    vtkImageData* validityMask)
 {
-    if (!image) {
-        m_inputMTime = 0;
+    auto* image = vtkImageData::SafeDownCast(data);
+    m_inputMTime = data ? data->GetMTime() : 0;
+    m_maskMTime = validityMask ? validityMask->GetMTime() : 0;
+    m_inputScalarMTime = GetScalarTime(image);
+    m_maskScalarMTime = GetScalarTime(validityMask);
+    if (image) {
+        std::copy_n(
+            image->GetExtent(), m_inputExtent.size(),
+            m_inputExtent.begin());
+        std::copy_n(
+            image->GetSpacing(), m_inputSpacing.size(),
+            m_inputSpacing.begin());
+    }
+    else {
         m_inputExtent.fill(0);
         m_inputSpacing.fill(0.0);
-        return true;
     }
-    m_inputMTime = image->GetMTime();
-    std::copy_n(
-        image->GetExtent(),
-        m_inputExtent.size(),
-        m_inputExtent.begin());
-    std::copy_n(
-        image->GetSpacing(),
-        m_inputSpacing.size(),
-        m_inputSpacing.begin());
-    return true;
-}
-
-bool VolumeStrategy::SetMaskKey(vtkImageData* image)
-{
-    if (!image) {
-        m_maskMTime = 0;
+    if (validityMask) {
+        std::copy_n(
+            validityMask->GetExtent(), m_maskExtent.size(),
+            m_maskExtent.begin());
+        std::copy_n(
+            validityMask->GetSpacing(), m_maskSpacing.size(),
+            m_maskSpacing.begin());
+    }
+    else {
         m_maskExtent.fill(0);
         m_maskSpacing.fill(0.0);
-        return true;
     }
-    m_maskMTime = image->GetMTime();
-    std::copy_n(
-        image->GetExtent(),
-        m_maskExtent.size(),
-        m_maskExtent.begin());
-    std::copy_n(
-        image->GetSpacing(),
-        m_maskSpacing.size(),
-        m_maskSpacing.begin());
-    return true;
+}
+
+vtkMTimeType VolumeStrategy::GetScalarTime(vtkImageData* image) const
+{
+    auto* pointData = image ? image->GetPointData() : nullptr;
+    auto* scalars = pointData ? pointData->GetScalars() : nullptr;
+    return scalars ? scalars->GetMTime() : 0;
+}
+
+double VolumeStrategy::GetDenoiseThreshold(vtkImageData* image) const
+{
+    if (!image) return -1.0;
+    double range[2] = { 0.0, 0.0 };
+    image->GetScalarRange(range);
+    if (!std::isfinite(range[0]) || !std::isfinite(range[1])
+        || range[1] < range[0]) {
+        return -1.0;
+    }
+    return 0.02 * std::max(0.0, range[1] - range[0]);
 }
 
 double VolumeStrategy::GetQualityStep(
@@ -917,7 +931,8 @@ double VolumeStrategy::GetQualityStep(
     if (!std::isfinite(minSpacing) || minSpacing <= 0.0) {
         return 0.0;
     }
-    return m_lodController->GetProfile().stillRayStepFactor
+    return m_lodController->GetProfile(
+        lod.requestedQuality).stillRayStepFactor
         * minSpacing;
 }
 
@@ -930,234 +945,353 @@ bool VolumeStrategy::BuildLodPlan()
     source.maskBytes = GetImageBytes(m_lastMask);
     source.systemMemoryBytes = GetSystemMemoryBytes();
     source.gpuMemoryBytes = GetGpuMemoryBytes();
+    if (m_resources) {
+        const auto resources = m_resources->GetResourceState();
+        std::uint64_t usedBytes = resources.activeBytes;
+        const auto addUsed = [&usedBytes](const std::uint64_t bytes) {
+            if (bytes > (std::numeric_limits<std::uint64_t>::max)()
+                    - usedBytes) {
+                usedBytes =
+                    (std::numeric_limits<std::uint64_t>::max)();
+            }
+            else {
+                usedBytes += bytes;
+            }
+        };
+        addUsed(resources.runningBytes);
+        addUsed(resources.pendingBytes);
+        addUsed(resources.cacheBytes);
+        if (resources.cpuBudgetBytes > usedBytes) {
+            source.systemMemoryBytes =
+                resources.cpuBudgetBytes - usedBytes;
+        }
+        auto* renderer = m_renderer.GetPointer();
+        auto* context = renderer ? renderer->GetRenderWindow() : nullptr;
+        const auto gpu = m_resources->GetGpuResourceState(context);
+        if (gpu.budgetBytes > gpu.reservedBytes) {
+            source.gpuMemoryBytes =
+                gpu.budgetBytes - gpu.reservedBytes;
+        }
+    }
     source.cpuThreadCount = GetCpuThreadCount();
     source.isNativeAliasAllowed = !m_isDenoiseOn;
     if (!m_lodController->SetSource(source)) return false;
+    m_autoTopologyRevision = m_resources
+        ? m_resources->GetTopologyRevision() : 0;
     ++m_lodPlanCount;
     return true;
 }
 
-bool VolumeStrategy::BuildDenoise()
+std::optional<VolumeLodBuildRequest>
+VolumeStrategy::BuildRequest(
+    const std::uint64_t requestRevision,
+    const VolumeQuality requestedQuality,
+    const std::array<int, 3>& outputDimensions,
+    const bool isDenoiseOn) const
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
-    if (!image) return false;
-    if (!m_isDenoiseOn) {
-        m_denoiseFilter = nullptr;
-        m_isProducerDenoiseOn = false;
-        return true;
+    if (!image || requestRevision == 0
+        || std::any_of(
+            outputDimensions.begin(), outputDimensions.end(),
+            [](const int value) { return value <= 0; })) {
+        return std::nullopt;
     }
-    double range[2] = { 0.0, 0.0 };
-    image->GetScalarRange(range);
-    if (!std::isfinite(range[0]) || !std::isfinite(range[1])
-        || range[1] < range[0]) {
-        return false;
-    }
-    auto filter =
-        vtkSmartPointer<vtkImageAnisotropicDiffusion3D>::New();
-    filter->SetInputData(image);
-    filter->SetNumberOfIterations(5);
-    filter->SetDiffusionFactor(0.125);
-    filter->SetDiffusionThreshold(
-        0.02 * std::max(0.0, range[1] - range[0]));
-    filter->FacesOn();
-    filter->EdgesOff();
-    filter->CornersOff();
-    m_denoiseFilter = std::move(filter);
-    m_isProducerDenoiseOn = m_isDenoiseOn;
-    return true;
+    const double denoiseThreshold = isDenoiseOn
+        ? GetDenoiseThreshold(image) : 0.0;
+    if (denoiseThreshold < 0.0) return std::nullopt;
+
+    VolumeLodBuildRequest request;
+    request.requestRevision = requestRevision;
+    request.requestedQuality = requestedQuality;
+    request.input = image;
+    request.mask = m_lastMask;
+    request.key.inputStamp = m_renderInputStamp.identity == image
+        ? m_renderInputStamp : RenderInputStamp{ image, 0 };
+    request.key.maskIdentity = m_lastMask.GetPointer();
+    request.key.inputMTime = image->GetMTime();
+    request.key.inputScalarMTime = GetScalarTime(image);
+    request.key.maskMTime = m_lastMask
+        ? m_lastMask->GetMTime() : 0;
+    request.key.maskScalarMTime = GetScalarTime(m_lastMask);
+    request.key.outputDimensions = outputDimensions;
+    request.key.denoiseThreshold = denoiseThreshold;
+    request.key.isDenoiseOn = isDenoiseOn;
+    return request;
 }
 
-bool VolumeStrategy::BuildPendingLod(
-    const std::array<int, 3>& outputDimensions,
+bool VolumeStrategy::StartProduct(
+    VolumeLodBuildRequest request,
     const double dimensionRatio)
 {
-    auto* image = vtkImageData::SafeDownCast(m_lastInput);
-    if (!image
-        || outputDimensions[0] <= 0
-        || outputDimensions[1] <= 0
-        || outputDimensions[2] <= 0
+    if (!m_asyncState || !request.input
         || !std::isfinite(dimensionRatio)
-        || dimensionRatio <= 0.0
-        || dimensionRatio > 1.0) {
+        || dimensionRatio <= 0.0 || dimensionRatio > 1.0) {
         return false;
     }
-    LodEntry budgetLod;
-    budgetLod.outputDimensions = outputDimensions;
-    if (!GetCpuBudgetValid(budgetLod)) {
-        std::cerr
-            << "[VolumeLod] resource admission rejected"
-            << " target_bytes=" << GetLodTextureBytes(budgetLod)
-            << " system_available=" << GetSystemMemoryBytes()
-            << '\n';
-        return false;
+    if (m_resources) {
+        auto cached = m_resources->GetVolumeProduct(request.key);
+        if (cached) {
+            VolumeLodBuildResult result;
+            result.product = std::move(cached);
+            m_transition.status = RenderProductStatus::Ready;
+            m_transition.failureReason = RenderProductFailure::None;
+            m_transition.inputStamp = request.key.inputStamp;
+            m_transition.requestedQuality = request.requestedQuality;
+            m_transition.appliedQuality = m_appliedQuality;
+            m_transition.stats.requestRevision = request.requestRevision;
+            m_transition.stats.cpuPrepareUs = 0;
+            m_transition.stats.gpuReleaseUs = 0;
+            m_transition.stats.gpuUploadUs = 0;
+            m_transition.stats.firstRenderUs = 0;
+            m_transition.stats.resolvedDimensions =
+                request.key.outputDimensions;
+            m_transition.stats.isCacheHit = true;
+            return SetProduct(
+                request.key, result, dimensionRatio, 0, false);
+        }
     }
-    m_pendingLod.reset();
+    if (!m_taskChannel) return false;
 
+    const auto volumeBytes = GetEstimatedImageBytes(
+        request.input, request.key.outputDimensions);
+    const auto maskEstimate = GetEstimatedImageBytes(
+        request.mask, request.key.outputDimensions);
+    if (!volumeBytes || !maskEstimate) return false;
+    std::uint64_t estimatedBytes = *volumeBytes;
+    const std::uint64_t maskBytes = *maskEstimate;
+    if (maskBytes > (std::numeric_limits<std::uint64_t>::max)()
+            - estimatedBytes) {
+        return false;
+    }
+    estimatedBytes += maskBytes;
+    const auto asyncState = m_asyncState;
+    RenderTaskRequest task;
+    task.requestRevision = request.requestRevision;
+    task.estimatedBytes = estimatedBytes;
+    task.work = [asyncState, request, dimensionRatio](
+                    RenderTaskToken stopToken) {
+        const auto prepareStart = std::chrono::steady_clock::now();
+        auto result = VolumeLodProductBuilder().BuildProduct(
+            request, stopToken);
+        const auto prepareUs = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - prepareStart).count());
+        std::lock_guard<std::mutex> lock(asyncState->mutex);
+        const bool isNewer = !asyncState->completion
+            || asyncState->completion->requestRevision
+                <= request.requestRevision;
+        if (isNewer) {
+            asyncState->completion = AsyncState::Completion{
+                request.requestRevision,
+                request.key,
+                std::move(result),
+                dimensionRatio,
+                prepareUs
+            };
+        }
+    };
+    const auto admission = m_taskChannel->StartTask(std::move(task));
+    if (admission != RenderTaskAdmission::Accepted
+        && admission != RenderTaskAdmission::Replaced) {
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason =
+            admission == RenderTaskAdmission::ResourceRejected
+            ? RenderProductFailure::ResourceRejected
+            : admission == RenderTaskAdmission::Stopping
+                ? RenderProductFailure::Stopping
+                : RenderProductFailure::TaskRejected;
+        m_transition.message = "The volume LOD task was not admitted.";
+        return false;
+    }
+
+    const auto sourceDimensions = GetSourceDims();
     const bool hasNativeDimensions =
-        outputDimensions == GetSourceDims();
-    vtkSmartPointer<vtkImageData> volume;
-    vtkSmartPointer<vtkImageResample> volumeFilter;
-    if (hasNativeDimensions && !m_denoiseFilter) {
-        // 原生挡位直接复用输入；Auto 命中 1.0 时不再重采样或 DeepCopy 整卷。
-        volume = image;
+        request.key.outputDimensions == sourceDimensions;
+    const std::uint64_t scalarPipelineCount =
+        (!hasNativeDimensions || request.key.isDenoiseOn) ? 1ULL : 0ULL;
+    const std::uint64_t maskPipelineCount =
+        (request.mask && !hasNativeDimensions) ? 1ULL : 0ULL;
+    m_resampleBuildCount += scalarPipelineCount + maskPipelineCount;
+    m_resampleUpdateCount += scalarPipelineCount + maskPipelineCount;
+    m_transition.status = RenderProductStatus::Preparing;
+    m_transition.failureReason = RenderProductFailure::None;
+    m_transition.inputStamp = request.key.inputStamp;
+    m_transition.requestedQuality = request.requestedQuality;
+    m_transition.appliedQuality = m_appliedQuality;
+    m_transition.stats.requestRevision = request.requestRevision;
+    m_transition.stats.cpuPrepareUs = 0;
+    m_transition.stats.gpuReleaseUs = 0;
+    m_transition.stats.gpuUploadUs = 0;
+    m_transition.stats.firstRenderUs = 0;
+    m_transition.stats.candidateBytes = estimatedBytes;
+    m_transition.stats.resolvedDimensions =
+        request.key.outputDimensions;
+    m_transition.stats.isCacheHit = false;
+    m_transition.message.clear();
+    return m_taskChannel->GetState().status == RenderProductStatus::Ready
+        ? SetProductCommit() : true;
+}
+
+std::unique_ptr<VolumeStrategy::LodEntry>
+VolumeStrategy::BuildLodEntry(
+    std::shared_ptr<const VolumeLodProduct> product,
+    const double dimensionRatio,
+    const VolumeQuality requestedQuality) const
+{
+    if (!product || !product->volume
+        || !std::isfinite(dimensionRatio)
+        || dimensionRatio <= 0.0 || dimensionRatio > 1.0) {
+        return nullptr;
     }
-    else {
-        vtkAlgorithmOutput* inputPort = m_denoiseFilter
-            ? m_denoiseFilter->GetOutputPort() : nullptr;
-        volumeFilter = ImageProcessor::CreateScaledImage(
-            image, outputDimensions, inputPort);
-        if (!volumeFilter) return false;
-        ++m_resampleBuildCount;
-        // 完整 scalar 数据由 mapper 的正常 Render 沿 connection 惰性请求；
-        // 目标几何直接由加载期计划计算，不触发 filter Update/UpdateInformation。
-        volume = volumeFilter->GetOutput();
-    }
-    if (!volume || (!volumeFilter
-        && volume->GetNumberOfPoints() <= 0)) {
+    const double* spacing = product->volume->GetSpacing();
+    if (!spacing) return nullptr;
+    auto entry = std::make_unique<LodEntry>();
+    entry->product = std::move(product);
+    entry->volume = entry->product->volume;
+    entry->mask = entry->product->mask;
+    entry->outputDimensions = entry->product->outputDimensions;
+    std::copy_n(spacing, entry->outputSpacing.size(),
+        entry->outputSpacing.begin());
+    entry->dimensionRatio = dimensionRatio;
+    entry->estimatedBytes = entry->product->actualBytes;
+    entry->requestedQuality = requestedQuality;
+    return entry;
+}
+
+bool VolumeStrategy::SetProduct(
+    const VolumeLodKey& key,
+    const VolumeLodBuildResult& result,
+    const double dimensionRatio,
+    const std::uint64_t cpuPrepareUs,
+    const bool isChannelReady)
+{
+    const std::uint64_t requestRevision =
+        m_transition.stats.requestRevision;
+    const auto setReadyFailed = [&](
+        const RenderProductFailure failure,
+        const std::string& message) {
+        if (isChannelReady && m_taskChannel && requestRevision != 0) {
+            (void)m_taskChannel->SetReadyFailed(
+                requestRevision, failure, message);
+        }
+    };
+    if (result.failureReason != RenderProductFailure::None
+        || !result.product || !result.product->volume) {
+        m_transition.status =
+            result.failureReason == RenderProductFailure::Cancelled
+            || result.failureReason == RenderProductFailure::Stopping
+            ? RenderProductStatus::Cancelled
+            : RenderProductStatus::Failed;
+        m_transition.failureReason = result.failureReason
+            == RenderProductFailure::None
+            ? RenderProductFailure::BuildFailed
+            : result.failureReason;
+        m_transition.message = result.message;
+        setReadyFailed(
+            m_transition.failureReason, m_transition.message);
         return false;
     }
-
-    const int* sourceDimensions = image->GetDimensions();
-    const double* sourceSpacing = image->GetSpacing();
-    std::array<double, 3> outputSpacing{};
-    for (std::size_t axis = 0; axis < outputSpacing.size(); ++axis) {
-        if (sourceDimensions[axis] <= 0
-            || !std::isfinite(sourceSpacing[axis])
-            || sourceSpacing[axis] <= 0.0) {
-            return false;
-        }
-        const double axisRatio =
-            static_cast<double>(outputDimensions[axis])
-            / static_cast<double>(sourceDimensions[axis]);
-        outputSpacing[axis] = sourceSpacing[axis] / axisRatio;
-        if (!std::isfinite(outputSpacing[axis])
-            || outputSpacing[axis] <= 0.0) {
-            return false;
-        }
+    const std::uint64_t activeRevision = requestRevision;
+    if (!GetKeyCurrent(key) || activeRevision == 0) {
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason = RenderProductFailure::StaleInput;
+        m_transition.message =
+            "The volume LOD product no longer matches its input.";
+        setReadyFailed(
+            m_transition.failureReason, m_transition.message);
+        return false;
     }
-
-    vtkSmartPointer<vtkImageData> mask;
-    vtkSmartPointer<vtkImageResample> maskFilter;
-    if (m_lastMask) {
-        if (hasNativeDimensions) {
-            mask = m_lastMask;
-        }
-        else {
-            maskFilter = ImageProcessor::CreateScaledMask(
-                m_lastMask, outputDimensions);
-            if (!maskFilter) return false;
-            ++m_resampleBuildCount;
-            maskFilter->Update();
-            ++m_resampleUpdateCount;
-            mask = maskFilter->GetOutput();
-        }
+    auto entry = BuildLodEntry(
+        result.product,
+        dimensionRatio,
+        m_transition.requestedQuality);
+    if (!entry) {
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason = RenderProductFailure::BuildFailed;
+        m_transition.message = "The volume LOD product is invalid.";
+        setReadyFailed(
+            m_transition.failureReason, m_transition.message);
+        return false;
     }
-    if (mask) {
-        constexpr double geometryEpsilon = 1e-9;
-        const auto hasSameValues = [geometryEpsilon](
-            const double* left, const double* right) {
-            for (int axis = 0; axis < 3; ++axis) {
-                if (std::abs(left[axis] - right[axis])
-                    > geometryEpsilon) {
-                    return false;
-                }
-            }
-            return true;
-        };
-        const int* maskDimensions = mask->GetDimensions();
-        if (mask->GetNumberOfPoints() <= 0
-            || !maskDimensions
-            || !std::equal(
-                outputDimensions.begin(),
-                outputDimensions.end(),
-                maskDimensions)
-            || !hasSameValues(
-                outputSpacing.data(), mask->GetSpacing())
-            || !hasSameValues(
-                image->GetOrigin(), mask->GetOrigin())) {
-            return false;
-        }
+    const std::uint64_t leaseRevision = isChannelReady
+        ? result.product->requestRevision : activeRevision;
+    const bool isLeaseCommitted = !m_taskChannel
+        || (isChannelReady
+            ? m_taskChannel->SetActiveBytes(
+                leaseRevision,
+                result.product->actualBytes,
+                result.product.get())
+            : m_taskChannel->SetCachedActive(
+                leaseRevision,
+                result.product->actualBytes,
+                result.product.get()));
+    if (!isLeaseCommitted) {
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason =
+            RenderProductFailure::ResourceRejected;
+        m_transition.message =
+            "The volume LOD active lease was rejected.";
+        setReadyFailed(
+            m_transition.failureReason, m_transition.message);
+        return false;
     }
-
-    auto entry = std::make_unique<LodEntry>();
-    entry->volume = std::move(volume);
-    entry->volumeFilter = std::move(volumeFilter);
-    entry->mask = std::move(mask);
-    entry->maskFilter = std::move(maskFilter);
-    entry->dataVersion = m_dataVersion;
-    entry->maskVersion = m_maskVersion;
-    entry->outputDimensions = outputDimensions;
-    entry->outputSpacing = outputSpacing;
-    entry->dimensionRatio = dimensionRatio;
-    entry->isDenoiseOn = m_isDenoiseOn;
-    if (GetQualityStep(*entry) <= 0.0) return false;
-    entry->estimatedBytes = GetLodBytes(*entry);
-    m_pendingLod = std::move(entry);
+    std::uint64_t gpuReleaseUs = 0;
+    std::uint64_t gpuUploadUs = 0;
+    if (!SwitchLod(
+            std::move(entry), gpuReleaseUs, gpuUploadUs)) {
+        if (m_taskChannel) {
+            (void)m_taskChannel->RestoreActiveBytes(
+                leaseRevision);
+        }
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason = RenderProductFailure::CommitFailed;
+        m_transition.message = "The volume LOD GPU commit failed.";
+        m_transition.stats.gpuReleaseUs = gpuReleaseUs;
+        m_transition.stats.gpuUploadUs = gpuUploadUs;
+        return false;
+    }
+    if (m_taskChannel) {
+        (void)m_taskChannel->CompleteActiveBytes(leaseRevision);
+    }
+    if (m_resources) {
+        // active lease 已完整核算；cache 是可选复用层，插入失败不回滚
+        // 已成功的 owner/GPU 提交。
+        (void)m_resources->SetVolumeProduct(
+            key, result.product);
+    }
+    m_appliedQuality = m_transition.requestedQuality;
+    m_transition.status = RenderProductStatus::Active;
+    m_transition.failureReason = RenderProductFailure::None;
+    m_transition.inputStamp = key.inputStamp;
+    m_transition.appliedQuality = m_appliedQuality;
+    m_transition.stats.activeRevision =
+        activeRevision;
+    m_transition.stats.cpuPrepareUs = cpuPrepareUs;
+    m_transition.stats.gpuReleaseUs = gpuReleaseUs;
+    m_transition.stats.gpuUploadUs = gpuUploadUs;
+    m_transition.stats.candidateBytes = 0;
+    m_transition.stats.activeBytes = result.product->actualBytes;
+    m_transition.stats.resolvedDimensions =
+        result.product->outputDimensions;
+    m_transition.stats.partitions = m_activeLod
+        ? m_activeLod->partitions : singlePartition;
+    if (m_resources) {
+        m_transition.stats.cacheBytes =
+            m_resources->GetResourceState().cacheBytes;
+    }
+    m_transition.message.clear();
     return true;
-}
-
-bool VolumeStrategy::ClearPendingLod()
-{
-    m_pendingLod.reset();
-    return true;
-}
-
-bool VolumeStrategy::SetTargetLod(
-    const std::array<int, 3>& outputDimensions,
-    const double dimensionRatio)
-{
-    if (!m_lodController) return false;
-    if (auto* cached = GetCachedLod(
-        outputDimensions, dimensionRatio)) {
-        (void)ClearPendingLod();
-        return SwitchLod(*cached)
-            && RemoveUnusedLods();
-    }
-    return BuildPendingLod(outputDimensions, dimensionRatio)
-        && SwitchPendingLod();
-}
-
-VolumeStrategy::LodEntry* VolumeStrategy::GetCachedLod(
-    const std::array<int, 3>& outputDimensions,
-    const double dimensionRatio) const
-{
-    const auto iterator = std::find_if(
-        m_lodCache.begin(),
-        m_lodCache.end(),
-        [&](const auto& cached) {
-            return cached
-                && cached->volume
-                && cached->dataVersion == m_dataVersion
-                && cached->maskVersion == m_maskVersion
-                && cached->outputDimensions == outputDimensions
-                && std::abs(
-                    cached->dimensionRatio - dimensionRatio)
-                    <= ratioEpsilon
-                && cached->isDenoiseOn == m_isDenoiseOn
-                && (!m_lastMask || cached->mask);
-        });
-    return iterator != m_lodCache.end()
-        ? iterator->get() : nullptr;
 }
 
 bool VolumeStrategy::SetMapperInput(const LodEntry& lod)
 {
     if (!m_mapper || !lod.volume) return false;
-    if (lod.volumeFilter) {
-        m_mapper->SetInputConnection(
-            lod.volumeFilter->GetOutputPort());
-    }
-    else {
-        m_mapper->SetInputData(lod.volume);
-    }
+    m_mapper->SetInputData(lod.volume);
     vtkImageData* mask = lod.mask;
     if (mask) m_mapper->SetMaskTypeToBinary();
     m_mapper->SetMaskInput(mask);
-    const bool isVolumeSet = lod.volumeFilter
-        ? m_mapper->GetInputConnection(0, 0)
-            == lod.volumeFilter->GetOutputPort()
-        : m_mapper->GetInput() == lod.volume.GetPointer();
-    return isVolumeSet && m_mapper->GetMaskInput() == mask;
+    return m_mapper->GetInput() == lod.volume.GetPointer()
+        && m_mapper->GetMaskInput() == mask;
 }
 
 bool VolumeStrategy::SetGpuPartitions(
@@ -1223,35 +1357,20 @@ bool VolumeStrategy::BuildGpuInput(
     return m_mapper->PreLoadData(renderer, m_volume);
 }
 
-bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
+bool VolumeStrategy::SwitchLod(
+    std::unique_ptr<LodEntry> next,
+    std::uint64_t& gpuReleaseUs,
+    std::uint64_t& gpuUploadUs)
 {
-    if (!m_mapper || !nextLod.volume) {
+    gpuReleaseUs = 0;
+    gpuUploadUs = 0;
+    if (!next || !m_mapper || !next->volume
+        || (m_lastMask && !next->mask)) {
         return false;
     }
-    if (&nextLod == m_activeLod) {
-        const bool isQualitySet = SetGpuPartitions(nextLod.partitions)
-            && SetMapperQuality(nextLod);
-        const bool isRatioSet = m_lodController
-            && m_lodController->SetActiveRatio(
-                nextLod.dimensionRatio);
-        if (isQualitySet && isRatioSet) {
-            nextLod.lastUse = ++m_lodUseStamp;
-            return true;
-        }
-        return false;
-    }
+    auto& nextLod = *next;
 
-    if (!GetCpuBudgetValid(nextLod)
-        || (m_lastMask && !nextLod.mask)) {
-        std::cerr
-            << "[VolumeLod] resource admission rejected"
-            << " target_bytes=" << GetLodTextureBytes(nextLod)
-            << " system_available=" << GetSystemMemoryBytes()
-            << '\n';
-        return false;
-    }
-
-    auto* oldLod = m_activeLod;
+    auto* oldLod = m_activeLod.get();
     const auto restore = [&]() {
         if (!oldLod || !oldLod->volume) {
             (void)SetGpuPartitions(singlePartition);
@@ -1267,9 +1386,25 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
 
     // GPU 最终准入只能发生在旧纹理汰换之后；释放前的 free-memory
     // 快照包含旧档，不能用于决定新档 block 大小。
+    const auto releaseStart = std::chrono::steady_clock::now();
     if (!ClearGpuInput()) {
+        gpuReleaseUs = std::max(std::uint64_t{ 1 },
+            static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - releaseStart).count()));
         return false;
     }
+    gpuReleaseUs = std::max(std::uint64_t{ 1 },
+        static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - releaseStart).count()));
+    const auto uploadStart = std::chrono::steady_clock::now();
+    const auto setUploadDuration = [&]() {
+        gpuUploadUs = std::max(std::uint64_t{ 1 },
+            static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - uploadStart).count()));
+    };
     auto* renderer = m_renderer.GetPointer();
     auto* renderWindow = renderer ? renderer->GetRenderWindow() : nullptr;
     const bool hasRenderedWindow = renderWindow
@@ -1294,6 +1429,7 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
             << " free_bytes=" << freeBytes.value_or(0)
             << " block_budget=" << blockBudget
             << '\n';
+        setUploadDuration();
         return false;
     }
 
@@ -1312,10 +1448,48 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
             << (*nextPartitions)[2] << '\n';
     }
 
+    const void* contextIdentity = renderWindow;
+    RenderGpuResourceState oldGpuState;
+    const std::uint64_t oldGpuBytes = oldLod
+        ? GetLodBlockBytes(*oldLod, oldLod->partitions) : 0;
+    bool hasGpuLease = false;
+    const auto restoreGpuLease = [&]() {
+        if (!m_resources || !contextIdentity) return true;
+        (void)m_resources->ClearGpuReservation(
+            contextIdentity, this);
+        if (oldGpuState.budgetBytes > 0) {
+            (void)m_resources->SetGpuContextBudget(
+                contextIdentity, oldGpuState.budgetBytes);
+        }
+        return oldGpuBytes == 0
+            || m_resources->SetGpuReservation(
+                contextIdentity, this, oldGpuBytes);
+    };
+    if (m_resources && contextIdentity) {
+        oldGpuState = m_resources->GetGpuResourceState(
+            contextIdentity);
+        (void)m_resources->ClearGpuReservation(
+            contextIdentity, this);
+        const std::uint64_t contextBudget = blockBudget;
+        hasGpuLease = contextBudget > 0
+            && m_resources->SetGpuContextBudget(
+                contextIdentity, contextBudget)
+            && m_resources->SetGpuReservation(
+                contextIdentity, this, blockBytes);
+        if (!hasGpuLease) {
+            (void)restoreGpuLease();
+            (void)restore();
+            setUploadDuration();
+            return false;
+        }
+    }
+
     if (!SetGpuPartitions(*nextPartitions)
         || !SetMapperQuality(nextLod)
         || !SetMapperInput(nextLod)) {
+        if (hasGpuLease) (void)restoreGpuLease();
         (void)restore();
+        setUploadDuration();
         return false;
     }
     bool isGpuBuilt = false;
@@ -1331,111 +1505,31 @@ bool VolumeStrategy::SwitchLod(LodEntry& nextLod)
         std::cerr << "[VolumeLod] GPU preload unknown exception\n";
     }
     if (!isGpuBuilt) {
+        if (hasGpuLease) (void)restoreGpuLease();
         if (!restore() && oldLod) {
             std::cerr
                 << "[VolumeRollback] active mapper restore failed"
                 << '\n';
         }
+        setUploadDuration();
         return false;
     }
     if (m_lodController
         && !m_lodController->SetActiveRatio(
             nextLod.dimensionRatio)) {
+        if (hasGpuLease) (void)restoreGpuLease();
         if (!restore() && oldLod) {
             std::cerr
                 << "[VolumeRollback] active mapper restore failed"
                 << '\n';
         }
+        setUploadDuration();
         return false;
     }
     nextLod.partitions = *nextPartitions;
-    m_activeLod = &nextLod;
-    nextLod.lastUse = ++m_lodUseStamp;
+    m_activeLod = std::move(next);
     ++m_mapperInputCount;
-    return true;
-}
-
-bool VolumeStrategy::SwitchPendingLod()
-{
-    if (!m_pendingLod) {
-        return false;
-    }
-    // 先把 pending 交给 cache 独占，再提交 active 观察指针；即使 vector
-    // 分配失败，也不会出现 active 指向即将析构 pending 的窗口。
-    m_lodCache.push_back(std::move(m_pendingLod));
-    auto* nextLod = m_lodCache.back().get();
-    if (!nextLod || !SwitchLod(*nextLod)) {
-        m_pendingLod = std::move(m_lodCache.back());
-        m_lodCache.pop_back();
-        return false;
-    }
-    return RemoveUnusedLods();
-}
-
-bool VolumeStrategy::RemoveUnusedLods()
-{
-    // 新输入、mask 或 denoise 成功提交后再清理旧世代；失败回滚期间
-    // 旧 active 仍由 cache 独占，mapper connection 不会悬空。
-    m_lodCache.erase(
-        std::remove_if(
-            m_lodCache.begin(),
-            m_lodCache.end(),
-            [&](const auto& cached) {
-                return !cached
-                    || (cached.get() != m_activeLod
-                        && (cached->dataVersion != m_dataVersion
-                            || cached->maskVersion != m_maskVersion
-                            || cached->isDenoiseOn
-                                != m_isDenoiseOn));
-            }),
-        m_lodCache.end());
-
-    const std::uint64_t cacheBudget = GetCacheBudget();
-    const auto getCacheBytes = [&]() {
-        std::uint64_t cacheBytes = 0;
-        for (const auto& cached : m_lodCache) {
-            if (!cached
-                || cached->estimatedBytes
-                    > std::numeric_limits<std::uint64_t>::max()
-                        - cacheBytes) {
-                return std::numeric_limits<std::uint64_t>::max();
-            }
-            cacheBytes += cached->estimatedBytes;
-        }
-        return cacheBytes;
-    };
-
-    std::uint64_t cacheBytes = getCacheBytes();
-    while (m_lodCache.size() > maxLodCacheEntries
-        || cacheBytes > cacheBudget) {
-        const auto highDimensions = m_lodController
-            ? m_lodController->GetProfile(
-                VolumeQuality::High).outputDimensions
-            : std::array<int, 3>{};
-        auto victim = m_lodCache.end();
-        for (auto iterator = m_lodCache.begin();
-            iterator != m_lodCache.end(); ++iterator) {
-            if (!*iterator || iterator->get() == m_activeLod) {
-                continue;
-            }
-            if (victim == m_lodCache.end()) {
-                victim = iterator;
-                continue;
-            }
-            const bool isVictimHigh =
-                (*victim)->outputDimensions == highDimensions;
-            const bool isCandidateHigh =
-                (*iterator)->outputDimensions == highDimensions;
-            if ((isVictimHigh && !isCandidateHigh)
-                || (isVictimHigh == isCandidateHigh
-                    && (*iterator)->lastUse < (*victim)->lastUse)) {
-                victim = iterator;
-            }
-        }
-        if (victim == m_lodCache.end()) break;
-        m_lodCache.erase(victim);
-        cacheBytes = getCacheBytes();
-    }
+    setUploadDuration();
     return true;
 }
 
@@ -1448,7 +1542,8 @@ bool VolumeStrategy::SetMapperQuality(const LodEntry& lod)
 
     // 校验完成后一次更新完整静止基线；Mapper 会按当前 preview 状态
     // 原子式选择静止值或交互覆盖，失败路径不留下半套采样参数。
-    const auto profile = m_lodController->GetProfile();
+    const auto profile = m_lodController->GetProfile(
+        lod.requestedQuality);
     Mapper::QualityState quality;
     quality.isAuto = profile.isAutoSampling;
     quality.image = 1.0;
@@ -1526,9 +1621,30 @@ VolumeStrategy::BuildOpacityTransfer(
 }
 
 void VolumeStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
+    auto* oldRenderer = m_renderer.GetPointer();
+    auto* oldContext = oldRenderer
+        ? oldRenderer->GetRenderWindow() : nullptr;
+    auto* nextContext = ren ? ren->GetRenderWindow() : nullptr;
+    if (m_resources && oldContext && oldContext != nextContext) {
+        (void)m_resources->ClearGpuReservation(oldContext, this);
+    }
     BaseVisualStrategy::AttachRenderer(ren);
     m_renderer = ren;
-    m_cubeAxes->SetCamera(ren->GetActiveCamera());
+    m_cubeAxes->SetCamera(ren ? ren->GetActiveCamera() : nullptr);
+}
+
+void VolumeStrategy::DetachRenderer(
+    vtkSmartPointer<vtkRenderer> renderer)
+{
+    auto* current = m_renderer.GetPointer();
+    auto* context = current ? current->GetRenderWindow() : nullptr;
+    if (m_resources && context) {
+        (void)m_resources->ClearGpuReservation(context, this);
+    }
+    BaseVisualStrategy::DetachRenderer(renderer);
+    if (current == renderer.GetPointer()) {
+        m_renderer = nullptr;
+    }
 }
 
 bool VolumeStrategy::SetVisualState(
@@ -1543,9 +1659,11 @@ bool VolumeStrategy::SetVisualState(
             != UpdateFlags::None;
     const bool hasMaterialChanged =
         (flags & UpdateFlags::Material) != UpdateFlags::None;
-    const bool hasQualityChanged =
-        (flags & UpdateFlags::Quality) != UpdateFlags::None
-        && m_quality != params.volumeQuality;
+    const bool hasQualityRequest =
+        (flags & UpdateFlags::Quality) != UpdateFlags::None;
+    const bool hasQualityChanged = hasQualityRequest
+        && (m_quality != params.volumeQuality
+            || params.volumeQuality == VolumeQuality::Auto);
     const bool hasRenderRateChanged =
         (flags & UpdateFlags::RenderRate) != UpdateFlags::None;
     const bool hasDenoiseChanged =
@@ -1607,58 +1725,121 @@ bool VolumeStrategy::SetVisualState(
     }
 
     const VolumeQuality oldQuality = m_quality;
+    const VolumeQuality oldAppliedQuality = m_appliedQuality;
     const bool isDenoiseOld = m_isDenoiseOn;
     const bool isInteractingOld = m_isInteracting;
+    const auto oldPhase = m_interactionPhase;
     const std::uint64_t oldPlanCount = m_lodPlanCount;
+    const std::uint64_t oldRequestRevision = m_requestRevision;
+    const VolumeQuality oldActiveQuality = m_activeLod
+        ? m_activeLod->requestedQuality : m_appliedQuality;
     const VolumeLodController oldController = m_lodController
         ? *m_lodController : VolumeLodController{};
+    const std::uint64_t topologyRevision = m_resources
+        ? m_resources->GetTopologyRevision() : 0;
     if (hasQualityChanged
         && !GetQualityValid(params.volumeQuality)) {
         return false;
     }
-    if (hasQualityChanged) {
-        m_quality = params.volumeQuality;
-        if (!m_lodController
-            || !m_lodController->SetQuality(m_quality)) {
-            m_quality = oldQuality;
-            return false;
+    if (!m_lodController) return false;
+    VolumeLodController nextController = *m_lodController;
+    const VolumeQuality nextQuality = hasQualityChanged
+        ? params.volumeQuality : m_quality;
+    const bool nextDenoise = hasDenoiseChanged
+        ? params.isDenoiseOn : m_isDenoiseOn;
+    const bool nextInteracting = hasRenderRateChanged
+        ? params.isInteracting : m_isInteracting;
+    if (hasQualityChanged
+        && !nextController.SetQuality(nextQuality)) {
+        return false;
+    }
+    const bool hasAutoRefresh = nextQuality == VolumeQuality::Auto
+        && ((hasQualityRequest
+                && params.volumeQuality == VolumeQuality::Auto)
+            || topologyRevision != m_autoTopologyRevision);
+    if ((hasDenoiseChanged || hasAutoRefresh) && m_lastInput) {
+        VolumeLodController::Source source;
+        source.dimensions = GetSourceDims();
+        source.nativeBytes = GetSourceBytes();
+        source.maskBytes = GetImageBytes(m_lastMask);
+        source.systemMemoryBytes = GetSystemMemoryBytes();
+        source.gpuMemoryBytes = GetGpuMemoryBytes();
+        if (m_resources) {
+            const auto resources = m_resources->GetResourceState();
+            std::uint64_t usedBytes = resources.activeBytes;
+            for (const auto bytes : {
+                    resources.runningBytes,
+                    resources.pendingBytes,
+                    resources.cacheBytes }) {
+                if (bytes
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - usedBytes) {
+                    usedBytes =
+                        (std::numeric_limits<std::uint64_t>::max)();
+                    break;
+                }
+                usedBytes += bytes;
+            }
+            if (resources.cpuBudgetBytes > usedBytes) {
+                source.systemMemoryBytes =
+                    resources.cpuBudgetBytes - usedBytes;
+            }
+            auto* renderer = m_renderer.GetPointer();
+            auto* context = renderer
+                ? renderer->GetRenderWindow() : nullptr;
+            const auto gpu = m_resources->GetGpuResourceState(context);
+            if (gpu.budgetBytes > gpu.reservedBytes) {
+                source.gpuMemoryBytes =
+                    gpu.budgetBytes - gpu.reservedBytes;
+            }
         }
-    }
-    if (hasDenoiseChanged) {
-        m_isDenoiseOn = params.isDenoiseOn;
-    }
-    if (hasRenderRateChanged) {
-        m_isInteracting = params.isInteracting;
+        source.cpuThreadCount = GetCpuThreadCount();
+        source.isNativeAliasAllowed = !nextDenoise;
+        if (!nextController.SetSource(source)) return false;
     }
 
-    auto nextProfile = m_lodController
-        ? m_lodController->GetProfile()
-        : VolumeLodController::Profile{};
+    const auto nextProfile = nextController.GetProfile();
     const bool hasLodChanged = m_activeLod
         && m_activeLod->outputDimensions
             != nextProfile.outputDimensions;
     const bool hasProducerConfigChanged =
         hasLodChanged || hasDenoiseChanged;
-    // preview/still 由 GPURender 在 OpenGL owner thread 根据窗口速率选择；
-    // RenderRate 只更新交互状态和材质，不触发 producer 或 mapper setter。
     bool isPipelineSet = true;
-    if (isPipelineSet
-        && hasProducerConfigChanged && m_lastInput) {
-        const auto oldDenoise = m_denoiseFilter;
-        const bool isProducerDenoiseOld =
-            m_isProducerDenoiseOn;
+    m_quality = nextQuality;
+    m_isDenoiseOn = nextDenoise;
+    m_isInteracting = nextInteracting;
+    m_interactionPhase = nextInteracting
+        ? RenderInteractionPhase::Interactive
+        : RenderInteractionPhase::Still;
+    *m_lodController = nextController;
+    if ((hasDenoiseChanged || hasAutoRefresh) && m_lastInput) {
+        ++m_lodPlanCount;
+    }
+
+    if (hasProducerConfigChanged && m_lastInput) {
         try {
-            const bool isDenoiseSet = !hasDenoiseChanged
-                || BuildDenoise();
-            const bool isPlanSet = isDenoiseSet
-                && (!hasDenoiseChanged || BuildLodPlan());
-            if (isPlanSet && hasDenoiseChanged) {
-                nextProfile = m_lodController->GetProfile();
+            if (m_requestRevision
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+                isPipelineSet = false;
             }
-            isPipelineSet = isPlanSet
-                && SetTargetLod(
+            else {
+                const std::uint64_t nextRevision =
+                    m_requestRevision + 1;
+                auto request = BuildRequest(
+                    nextRevision,
+                    nextQuality,
                     nextProfile.outputDimensions,
-                    nextProfile.dimensionRatio);
+                    nextDenoise);
+                if (!request) {
+                    isPipelineSet = false;
+                }
+                else {
+                    m_requestRevision = nextRevision;
+                    isPipelineSet = StartProduct(
+                        std::move(*request),
+                        nextProfile.dimensionRatio);
+                }
+            }
         }
         catch (const std::exception& error) {
             std::cerr
@@ -1670,36 +1851,49 @@ bool VolumeStrategy::SetVisualState(
             std::cerr << "[VolumeLod] pipeline unknown exception\n";
             isPipelineSet = false;
         }
-        if (!isPipelineSet) {
-            m_denoiseFilter = oldDenoise;
-            m_isProducerDenoiseOn = isProducerDenoiseOld;
-            (void)ClearPendingLod();
+    }
+    else if (hasQualityChanged
+        && m_activeLod) {
+        m_activeLod->requestedQuality = nextQuality;
+        isPipelineSet = SetMapperQuality(*m_activeLod);
+        if (isPipelineSet) {
+            m_appliedQuality = nextQuality;
+            m_transition.appliedQuality = nextQuality;
         }
     }
-    else if (isPipelineSet
-        && hasQualityChanged
-        && m_activeLod) {
-        isPipelineSet = SetMapperQuality(*m_activeLod);
+    if (isPipelineSet && hasRenderRateChanged) {
+        isPipelineSet = m_mapper
+            && m_mapper->SetPreviewUse(nextInteracting);
+        m_transition.stats.isPreview = nextInteracting;
     }
     if (!isPipelineSet) {
-        // 配置与 pending LOD 必须一起提交；失败时 active 与 mapper 始终保持旧值。
         m_quality = oldQuality;
+        m_appliedQuality = oldAppliedQuality;
         m_isDenoiseOn = isDenoiseOld;
         m_isInteracting = isInteractingOld;
+        m_interactionPhase = oldPhase;
         m_lodPlanCount = oldPlanCount;
+        m_requestRevision = oldRequestRevision;
         if (m_lodController) {
             *m_lodController = oldController;
         }
+        if (m_activeLod) {
+            m_activeLod->requestedQuality = oldActiveQuality;
+        }
         const bool isQualityRestored = !m_activeLod
             || SetMapperQuality(*m_activeLod);
+        if (m_mapper) {
+            (void)m_mapper->SetPreviewUse(isInteractingOld);
+        }
         if (!isQualityRestored) {
             std::cerr
                 << "[VolumeRollback] mapper quality restore failed"
                 << '\n';
         }
-        // 同一帧中的 TF/material/gradient 必须与 producer/quality 一起提交。
-        // 质量事务失败后立即停止，避免形成“旧输入 + 新视觉函数”的半提交帧。
         return false;
+    }
+    if (hasAutoRefresh) {
+        m_autoTopologyRevision = topologyRevision;
     }
 
     // 候选值和 LOD 已全部成功，从这里开始只执行无失败返回的 VTK 写入。
@@ -1751,6 +1945,75 @@ bool VolumeStrategy::SetVisualState(
                 (params.visibilityMask & VisFlags::Ruler) ? 1 : 0);
     }
     return true;
+}
+
+bool VolumeStrategy::SetProductCommit()
+{
+    if (!m_taskChannel || !m_asyncState) return true;
+    const auto channelState = m_taskChannel->GetState();
+    if (channelState.stats.requestRevision
+            == m_transition.stats.requestRevision
+        && (channelState.status == RenderProductStatus::Failed
+            || channelState.status == RenderProductStatus::Cancelled)) {
+        m_transition.status = channelState.status;
+        m_transition.failureReason = channelState.failureReason;
+        m_transition.message = channelState.message;
+        return channelState.status != RenderProductStatus::Failed;
+    }
+    if (channelState.status != RenderProductStatus::Ready
+        || channelState.stats.requestRevision
+            != m_transition.stats.requestRevision) {
+        return true;
+    }
+
+    std::optional<AsyncState::Completion> completion;
+    {
+        std::lock_guard<std::mutex> lock(m_asyncState->mutex);
+        if (m_asyncState->completion
+            && m_asyncState->completion->requestRevision
+                == m_transition.stats.requestRevision) {
+            completion = std::move(m_asyncState->completion);
+            m_asyncState->completion.reset();
+        }
+        else if (m_asyncState->completion
+            && m_asyncState->completion->requestRevision
+                < m_transition.stats.requestRevision) {
+            m_asyncState->completion.reset();
+        }
+    }
+    return !completion
+        || SetProduct(
+            completion->key,
+            completion->result,
+            completion->dimensionRatio,
+            completion->cpuPrepareUs,
+            true);
+}
+
+RenderTransitionState VolumeStrategy::GetTransitionState() const
+{
+    auto state = m_transition;
+    if (m_taskChannel) {
+        const auto channelState = m_taskChannel->GetState();
+        if (channelState.stats.requestRevision
+            == state.stats.requestRevision) {
+            state.stats.candidateBytes =
+                channelState.stats.candidateBytes;
+            state.stats.cacheBytes = channelState.stats.cacheBytes;
+        }
+    }
+    return state;
+}
+
+void VolumeStrategy::SetFirstRenderDuration(
+    const std::uint64_t durationUs) noexcept
+{
+    if (m_transition.status == RenderProductStatus::Active
+        && m_transition.stats.activeRevision != 0
+        && m_transition.stats.firstRenderUs == 0) {
+        m_transition.stats.firstRenderUs = std::max(
+            durationUs, std::uint64_t{ 1 });
+    }
 }
 
 vtkProp3D* VolumeStrategy::GetMainProp()

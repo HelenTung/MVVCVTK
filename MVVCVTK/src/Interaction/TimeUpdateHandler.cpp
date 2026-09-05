@@ -2,6 +2,8 @@
 #include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkRenderWindow.h>
 
+#include <chrono>
+
 TimeUpdateHandler::TimeUpdateHandler(RenderUpdatePort* updatePort,
     vtkRenderWindow* renderWindow)
     : m_updatePort(updatePort)
@@ -46,7 +48,13 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
             && genericWindow->GetReadyForRendering();
         if (isNativeWindowReady || isQtWindowReady)
         {
+            const auto renderStart = std::chrono::steady_clock::now();
             m_renderWindow->Render();
+            const auto renderUs = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - renderStart).count());
+            m_updatePort->SetRenderComplete(
+                renderUs == 0 ? std::uint64_t{ 1 } : renderUs);
         }
         else {
             (void)m_updatePort->SetRenderNeeded();

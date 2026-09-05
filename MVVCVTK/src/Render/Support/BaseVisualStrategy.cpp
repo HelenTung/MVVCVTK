@@ -108,6 +108,17 @@ BaseVisualStrategy::~BaseVisualStrategy()
     ClearRenderBinding();
 }
 
+bool BaseVisualStrategy::SetProductCommit()
+{
+    return true;
+}
+
+RenderTransitionState
+BaseVisualStrategy::GetTransitionState() const
+{
+    return {};
+}
+
 bool BaseVisualStrategy::AttachRenderEffect(
     std::shared_ptr<RenderEffect> effect,
     const RenderBindingUse bindingUse)

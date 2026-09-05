@@ -5,10 +5,12 @@ set(MVVCVTK_PART_API_HEADERS
 set(MVVCVTK_PART_SOURCES
     include/Algorithms/ClassicalPartSegmenter.h
     include/Render/Strategies/PartOverlayStrategies.h
+    include/Render/Internal/PartSurfaceProductBuilder.h
     include/Services/PartSegmentationService.h
     src/Algorithms/ClassicalPartSegmenter.cpp
     src/Host/PartSegmentationHostFeature.cpp
     src/Render/Strategies/PartOverlayStrategies.cpp
+    src/Render/Internal/PartSurfaceProductBuilder.cpp
     src/Services/PartSegmentationService.cpp
 )
 

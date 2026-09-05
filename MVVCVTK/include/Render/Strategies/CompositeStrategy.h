@@ -1,4 +1,5 @@
 #pragma once
+#include "Render/Strategies/ColoredPlanesStrategy.h"
 #include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -12,6 +13,8 @@
 #include <vtkCubeAxesActor.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkPolyDataMapper.h>
+
+#include <optional>
 
 
 // --- 组合策略: 体渲染/等值面 + 切片平面 ---
@@ -32,6 +35,9 @@ public:
     bool SetVisualState(
         const RenderParams& params,
         UpdateFlags flags) override;
+    bool SetProductCommit() override;
+    RenderTransitionState GetTransitionState() const override;
+    void SetFirstRenderDuration(std::uint64_t durationUs) noexcept override;
     int GetPlaneAxis(vtkActor* actor) override;
     vtkProp3D* GetMainProp() override; //
     bool AttachRenderEffect(
@@ -46,12 +52,17 @@ public:
     bool SetRenderEffectCommit(std::uint64_t revision) override;
     bool ClearRenderEffectStage(std::uint64_t revision) override;
 private:
+    struct PendingReference final {
+        ColoredPlaneStage stage;
+        std::uint64_t requestRevision = 0;
+    };
     std::shared_ptr<AbstractVisualStrategy> GetMainStrategy() { return m_mainStrategy; }
 
     // 组合策略强拥有由 Render factory 注入的主 3D 子策略；它不认识具体类型。
     std::shared_ptr<AbstractVisualStrategy> m_mainStrategy;
     // 强拥有三向参考平面子策略；它与主策略接收同一输入和 RenderParams，但分别管理自己的 props。
-    std::shared_ptr<AbstractVisualStrategy> m_referencePlanes;
+    std::shared_ptr<ColoredPlanesStrategy> m_referencePlanes;
+    std::optional<PendingReference> m_pendingReference;
     // 最近一次输入的强引用和身份缓存；只避免重复分发同一 VTK 对象，不冻结对象内部数据。
     vtkSmartPointer<vtkDataObject> m_lastInput;
 };

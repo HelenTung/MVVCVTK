@@ -31,6 +31,7 @@ target_link_libraries(
         MVVCVTK::PartSegmentation
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
+        Psapi
 )
 SetTargetDefaults(mvvcvtk_part_segmentation_tests)
 vtk_module_autoinit(

@@ -1,17 +1,23 @@
 #include "PartSegmentationTestCases.h"
 
 #include "Render/Strategies/PartOverlayStrategies.h"
+#include "Render/Internal/PartSurfaceProductBuilder.h"
 
+#include <vtkActor.h>
 #include <vtkImageData.h>
 #include <vtkImageResliceMapper.h>
 #include <vtkImageSlice.h>
 #include <vtkMatrix3x3.h>
 #include <vtkNew.h>
 #include <vtkPlane.h>
+#include <vtkPolyDataMapper.h>
 #include <vtkPointData.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkUnsignedIntArray.h>
+
+#include <windows.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -43,24 +49,110 @@ vtkSmartPointer<vtkImageData> BuildLabelImage()
     return image;
 }
 
+std::uint64_t GetWorkingSetBytes() noexcept
+{
+    PROCESS_MEMORY_COUNTERS counters{};
+    counters.cb = sizeof(counters);
+    return GetProcessMemoryInfo(
+        GetCurrentProcess(), &counters, sizeof(counters))
+        ? static_cast<std::uint64_t>(counters.WorkingSetSize)
+        : 0;
+}
+
 } // namespace
 
 int GetPartDisplayFailCount()
 {
     int failureCount = 0;
     const auto labels = BuildLabelImage();
+    auto surfaceLabels =
+        std::make_shared<std::vector<std::uint32_t>>(64, 0U);
+    for (int z = 1; z <= 2; ++z) {
+        for (int y = 1; y <= 2; ++y) {
+            for (int x = 1; x <= 2; ++x) {
+                (*surfaceLabels)[static_cast<std::size_t>(
+                    x + 4 * (y + 4 * z))] = 1U;
+            }
+        }
+    }
+    PartSurfaceBuildRequest surfaceRequest;
+    surfaceRequest.extent = { 0, 3, 0, 3, 0, 3 };
+    surfaceRequest.dimensions = { 4, 4, 4 };
+    surfaceRequest.labels = surfaceLabels;
+    surfaceRequest.partCount = 1;
+    surfaceRequest.maxWorkingBytes = 1024U * 1024U;
+    const std::uint64_t surfaceRssBefore = GetWorkingSetBytes();
+    std::uint64_t surfaceRssPeak = surfaceRssBefore;
+    const auto surfaceProduct = PartSurfaceProductBuilder::BuildProduct(
+        surfaceRequest, {},
+        [&surfaceRssPeak](double) {
+            surfaceRssPeak = std::max(
+                surfaceRssPeak, GetWorkingSetBytes());
+        });
+    const std::uint64_t surfaceRssAfter = GetWorkingSetBytes();
+    std::cout
+        << "PART_SURFACE_RSS: before=" << surfaceRssBefore
+        << " peak=" << surfaceRssPeak
+        << " after=" << surfaceRssAfter
+        << " product="
+        << (surfaceProduct.product
+            ? surfaceProduct.product->actualBytes : 0)
+        << '\n';
 
     vtkNew<vtkRenderer> surfaceRenderer;
     auto surface = std::make_shared<PartSurfaceOverlayStrategy>();
-    surface->SetInputData(labels);
+    if (surfaceProduct.product) {
+        surface->SetInputData(surfaceProduct.product->surface);
+    }
     surface->AttachRenderer(surfaceRenderer);
+    vtkNew<vtkRenderer> secondSurfaceRenderer;
+    auto secondSurface =
+        std::make_shared<PartSurfaceOverlayStrategy>();
+    if (surfaceProduct.product) {
+        secondSurface->SetInputData(surfaceProduct.product->surface);
+    }
+    secondSurface->AttachRenderer(secondSurfaceRenderer);
+    auto getSurfaceInput = [](vtkRenderer* renderer) {
+        auto* props = renderer ? renderer->GetViewProps() : nullptr;
+        if (!props) return static_cast<vtkPolyData*>(nullptr);
+        props->InitTraversal();
+        auto* actor = vtkActor::SafeDownCast(props->GetNextProp());
+        auto* mapper = actor
+            ? vtkPolyDataMapper::SafeDownCast(actor->GetMapper())
+            : nullptr;
+        return mapper ? mapper->GetInput() : nullptr;
+    };
     failureCount += GetCaseResult(
-        surfaceRenderer->GetViewProps()->GetNumberOfItems() == 1,
-        "Surface overlay uses one aggregate prop") ? 0 : 1;
+        surfaceProduct.failureReason == PartFailureReason::None
+            && surfaceProduct.product
+            && surfaceProduct.product->surface
+            && surfaceProduct.product->surface->GetNumberOfCells() > 0
+            && surfaceProduct.product->actualBytes > 0
+            && surfaceRssBefore > 0
+            && surfaceRssPeak >= surfaceRssBefore
+            && surfaceRssAfter > 0
+            && surfaceRenderer->GetViewProps()->GetNumberOfItems() == 1
+            && secondSurfaceRenderer->GetViewProps()
+                ->GetNumberOfItems() == 1
+            && getSurfaceInput(surfaceRenderer)
+                == surfaceProduct.product->surface.GetPointer()
+            && getSurfaceInput(secondSurfaceRenderer)
+                == surfaceProduct.product->surface.GetPointer(),
+        "Surface overlays share one materialized polydata product") ? 0 : 1;
     surface->DetachRenderer(surfaceRenderer);
+    secondSurface->DetachRenderer(secondSurfaceRenderer);
     failureCount += GetCaseResult(
         surfaceRenderer->GetViewProps()->GetNumberOfItems() == 0,
         "Surface overlay detaches its aggregate prop") ? 0 : 1;
+
+    const auto cancelledSurface =
+        PartSurfaceProductBuilder::BuildProduct(
+            surfaceRequest, [] { return true; }, {});
+    failureCount += GetCaseResult(
+        cancelledSurface.failureReason == PartFailureReason::Cancelled
+            && !cancelledSurface.product,
+        "Cancelled surface extraction publishes no partial product")
+        ? 0 : 1;
 
     constexpr std::array<Orientation, 3> orientations{
         Orientation::Top_down,

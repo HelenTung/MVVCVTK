@@ -1,17 +1,26 @@
 ﻿#pragma once
 #include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
-#include <vtkVolume.h>
-#include <vtkImageSlice.h>
-#include <vtkImageResliceMapper.h>
-#include <vtkLineSource.h>
-#include <vtkPlane.h>
 #include <vtkPlaneSource.h>
-#include <vtkColorTransferFunction.h>
-#include <vtkPiecewiseFunction.h>
-#include <vtkCubeAxesActor.h>
-#include <vtkFlyingEdges3D.h>
-#include <vtkPolyDataMapper.h>
+
+#include <array>
+#include <cstdint>
+#include <optional>
+
+struct ColoredPlaneStage final {
+    std::array<std::array<double, 3>, 3> origins{};
+    std::array<std::array<double, 3>, 3> point1{};
+    std::array<std::array<double, 3>, 3> point2{};
+    std::array<double, 6> worldBounds{};
+    std::array<double, 6> inputBounds{};
+    std::array<double, 16> modelMatrix{};
+    vtkMTimeType inputGeometryMTime = 0;
+    int visibility = 1;
+    bool hasGeometry = false;
+    bool hasInputGeometrySnapshot = false;
+    bool hasTransformCache = false;
+    bool hasVisibility = false;
+};
 
 class ColoredPlanesStrategy : public BaseVisualStrategy {
 public:
@@ -21,13 +30,23 @@ public:
     bool SetVisualState(
         const RenderParams& params,
         UpdateFlags flags) override;
+    std::optional<ColoredPlaneStage> BuildVisualStage(
+        const RenderParams& params,
+        UpdateFlags flags) const;
+    bool SetVisualCommit(const ColoredPlaneStage& stage);
     int GetPlaneAxis(vtkActor* actor) override;
+    std::uint64_t GetWorldBoundsBuildCount() const noexcept
+    {
+        return m_worldBoundsBuildCount;
+    }
 
 private:
     // cursorWorld 位于世界坐标；modelMatrix 按 input model -> world 解释，用于重算世界 AABB。
-    void SetAllPositions(const double cursorWorld[3], const std::array<double, 16>& modelMatrix);
+    static bool BuildWorldBounds(
+        const double bounds[6],
+        const std::array<double, 16>& modelMatrix,
+        std::array<double, 6>& worldBounds);
     // 输出布局固定为 [minX,maxX,minY,maxY,minZ,maxZ]，表示变换后 8 个角点的世界 AABB。
-    void SetWorldBounds(const std::array<double, 16>& modelMatrix, double worldBounds[6]) const;
 
     // 三组数组共享索引：0=X/Left_right(YZ)，1=Y/Front_back(XZ)，2=Z/Top_down(XY)。
     // actor/source 均由策略强持有；actor 还登记进 m_managedProps，source 由各 actor mapper 的管线引用。
@@ -43,4 +62,14 @@ private:
     double m_spacing[3] = { 0 };
     // 输入模型坐标 X/Y/Z origin；只用于首次建立三张参考平面的轴向锚点。
     double m_origin[3] = { 0 };
+    std::array<double, 6> m_worldBounds{};
+    std::array<double, 16> m_modelMatrix{
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    vtkMTimeType m_inputGeometryMTime = 0;
+    std::uint64_t m_worldBoundsBuildCount = 0;
+    bool m_hasTransformCache = false;
 };

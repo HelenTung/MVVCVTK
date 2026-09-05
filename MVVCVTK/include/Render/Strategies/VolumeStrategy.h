@@ -1,4 +1,5 @@
 #pragma once
+#include "Render/Internal/VolumeLodProductBuilder.h"
 #include "Render/Support/BaseVisualStrategy.h"
 #include <vtkActor.h>
 #include <vtkVolume.h>
@@ -9,10 +10,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <vector>
+#include <mutex>
 
-class vtkImageAnisotropicDiffusion3D;
-class vtkImageResample;
 class vtkColorTransferFunction;
 class vtkPiecewiseFunction;
 class VolumeLodController;
@@ -21,6 +20,8 @@ class VolumeLodController;
 class VolumeStrategy : public BaseVisualStrategy {
 public:
     VolumeStrategy();
+    explicit VolumeStrategy(
+        std::shared_ptr<RenderStrategyServices> services);
     ~VolumeStrategy() override;
 
     // [Public] 抽象接口实现
@@ -31,9 +32,13 @@ public:
     void SetInputMask(
         vtkSmartPointer<vtkImageData> validityMask) override;
     void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer);
+    void DetachRenderer(vtkSmartPointer<vtkRenderer> renderer) override;
     bool SetVisualState(
         const RenderParams& params,
         UpdateFlags flags) override;
+    bool SetProductCommit() override;
+    RenderTransitionState GetTransitionState() const override;
+    void SetFirstRenderDuration(std::uint64_t durationUs) noexcept override;
     vtkProp3D* GetMainProp() override; //
     std::uint64_t GetMapperInputCount() const noexcept
     {
@@ -69,6 +74,7 @@ public:
 private:
     class Mapper;
     struct LodEntry;
+    struct AsyncState;
     RenderEffectTarget GetRenderEffectTarget() const override;
     void SetEffectBinding(RenderEffectBinding* binding) override;
     // 与最后下发 OTF 的 m_opacity 比较，决定纯材质更新是否需要重建透明度函数。
@@ -76,7 +82,6 @@ private:
     std::array<int, 3> GetSourceDims() const;
     std::uint64_t GetImageBytes(vtkImageData* image) const;
     std::uint64_t GetSourceBytes() const;
-    std::uint64_t GetLodBytes(const LodEntry& lod) const;
     std::uint64_t GetLodTextureBytes(const LodEntry& lod) const;
     std::uint64_t GetLodBlockBytes(
         const LodEntry& lod,
@@ -84,7 +89,6 @@ private:
     std::optional<std::array<unsigned short, 3>> GetLodPartitions(
         const LodEntry& lod,
         std::uint64_t blockBudget) const;
-    std::uint64_t GetCacheBudget() const;
     std::uint64_t GetSystemMemoryBytes() const;
     std::uint64_t GetGpuMemoryBytes() const;
     std::uint64_t GetGpuBlockBudget(
@@ -93,27 +97,40 @@ private:
     virtual std::optional<std::uint64_t> GetGpuFreeBytes() const;
     unsigned int GetCpuThreadCount() const noexcept;
     bool GetQualityValid(VolumeQuality quality) const;
-    bool GetCpuBudgetValid(const LodEntry& lod) const;
-    bool GetInputKey(vtkImageData* image) const;
-    bool GetMaskKey(vtkImageData* image) const;
-    bool GetProducersReady() const;
+    bool GetInputCurrent(
+        vtkDataObject* data,
+        vtkImageData* validityMask) const;
+    bool GetKeyCurrent(const VolumeLodKey& key) const;
+    void SetInputTimes(
+        vtkDataObject* data,
+        vtkImageData* validityMask);
+    vtkMTimeType GetScalarTime(vtkImageData* image) const;
+    double GetDenoiseThreshold(vtkImageData* image) const;
     double GetQualityStep(
         const LodEntry& lod) const;
     bool BuildLodPlan();
-    bool BuildDenoise();
-    bool BuildPendingLod(
+    std::optional<VolumeLodBuildRequest> BuildRequest(
+        std::uint64_t requestRevision,
+        VolumeQuality requestedQuality,
         const std::array<int, 3>& outputDimensions,
+        bool isDenoiseOn) const;
+    bool StartProduct(
+        VolumeLodBuildRequest request,
         double dimensionRatio);
-    bool ClearPendingLod();
-    bool SetTargetLod(
-        const std::array<int, 3>& outputDimensions,
-        double dimensionRatio);
-    LodEntry* GetCachedLod(
-        const std::array<int, 3>& outputDimensions,
-        double dimensionRatio) const;
-    bool SwitchLod(LodEntry& lod);
-    bool SwitchPendingLod();
-    bool RemoveUnusedLods();
+    bool SetProduct(
+        const VolumeLodKey& key,
+        const VolumeLodBuildResult& result,
+        double dimensionRatio,
+        std::uint64_t cpuPrepareUs,
+        bool isChannelReady);
+    std::unique_ptr<LodEntry> BuildLodEntry(
+        std::shared_ptr<const VolumeLodProduct> product,
+        double dimensionRatio,
+        VolumeQuality requestedQuality) const;
+    bool SwitchLod(
+        std::unique_ptr<LodEntry> lod,
+        std::uint64_t& gpuReleaseUs,
+        std::uint64_t& gpuUploadUs);
     bool SetVolumeInput(
         vtkSmartPointer<vtkDataObject> data,
         vtkSmartPointer<vtkImageData> validityMask);
@@ -128,21 +145,17 @@ private:
         const RenderParams& params) const;
     vtkSmartPointer<vtkPiecewiseFunction> BuildOpacityTransfer(
         const RenderParams& params) const;
-    bool SetInputKey(vtkImageData* image);
-    bool SetMaskKey(vtkImageData* image);
     // 坐标轴与体渲染主 prop 均由策略强持有，并登记到 m_managedProps 统一挂载。
     vtkSmartPointer<vtkCubeAxesActor> m_cubeAxes;
     vtkSmartPointer<vtkVolume> m_volume;
     // volume 使用的唯一 GPU mapper；质量档位只影响内部 LOD 与采样策略。
     vtkSmartPointer<Mapper> m_mapper;
     std::unique_ptr<VolumeLodController> m_lodController;
-    // cache 独占已触发档位；active 仅观察 cache 中稳定的 LodEntry 地址。
-    // pending 完整构建后才进入 cache；大纹理由正常 Render 分块上传，
-    // 只有单块候选才在发布 active 前通过 PreLoadData 验证。
-    std::vector<std::unique_ptr<LodEntry>> m_lodCache;
-    LodEntry* m_activeLod = nullptr;
-    std::unique_ptr<LodEntry> m_pendingLod;
-    vtkSmartPointer<vtkImageAnisotropicDiffusion3D> m_denoiseFilter;
+    std::shared_ptr<RenderResourceCoordinator> m_resources;
+    std::shared_ptr<RenderTaskChannel> m_taskChannel;
+    std::shared_ptr<AsyncState> m_asyncState;
+    // 只保留已提交的不可变 CPU 产品；候选由 worker mailbox 暂存。
+    std::unique_ptr<LodEntry> m_activeLod;
     // 最近一次有效输入的强引用和身份缓存；只避免重复绑定，不冻结 vtkImageData 内部内容。
     vtkSmartPointer<vtkDataObject> m_lastInput;
     vtkSmartPointer<vtkImageData> m_lastMask;
@@ -154,20 +167,24 @@ private:
     double m_dataCenter[3] = { 0.0, 0.0, 0.0 };
     vtkMTimeType m_inputMTime = 0;
     vtkMTimeType m_maskMTime = 0;
+    vtkMTimeType m_inputScalarMTime = 0;
+    vtkMTimeType m_maskScalarMTime = 0;
     std::array<int, 6> m_inputExtent{};
     std::array<int, 6> m_maskExtent{};
     std::array<double, 3> m_inputSpacing{};
     std::array<double, 3> m_maskSpacing{};
-    std::uint64_t m_dataVersion = 0;
-    std::uint64_t m_maskVersion = 0;
     VolumeQuality m_quality = VolumeQuality::Auto;
+    VolumeQuality m_appliedQuality = VolumeQuality::Auto;
     bool m_isDenoiseOn = false;
-    bool m_isProducerDenoiseOn = false;
     bool m_isInteracting = false;
     // 保存用户期望的静止材质；交互期可临时 ShadeOff，退出后精确恢复。
     bool m_isShadeOn = false;
     std::uint64_t m_lodPlanCount = 0;
-    std::uint64_t m_lodUseStamp = 0;
+    std::uint64_t m_autoTopologyRevision = 0;
+    RenderTransitionState m_transition;
+    std::uint64_t m_requestRevision = 0;
+    RenderInteractionPhase m_interactionPhase =
+        RenderInteractionPhase::Still;
     std::uint64_t m_mapperInputCount = 0;
     std::uint64_t m_resampleBuildCount = 0;
     std::uint64_t m_resampleUpdateCount = 0;

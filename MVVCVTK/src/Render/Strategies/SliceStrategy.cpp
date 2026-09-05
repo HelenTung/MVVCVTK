@@ -624,13 +624,26 @@ void SliceStrategy::SetInputData(vtkSmartPointer<vtkDataObject> data) {
     auto img = vtkImageData::SafeDownCast(data);
     if (!img) return;
 
-    if (m_lastInput == data && m_mapper->GetInput()) {
+    const vtkMTimeType geometryMTime = img->GetMTime();
+    if (m_lastInput == data && m_mapper->GetInput()
+        && m_inputGeometryMTime == geometryMTime) {
         return;
     }
+    const bool isSameInput = m_lastInput == data
+        && m_mapper->GetInput();
     m_lastInput = data;
-    (void)m_mapper->SetValidityMask(nullptr, 0.0);
-
-    m_mapper->SetInputData(img);
+    m_inputGeometryMTime = geometryMTime;
+    std::copy_n(
+        img->GetBounds(), m_inputBounds.size(),
+        m_inputBounds.begin());
+    std::copy_n(
+        img->GetSpacing(), m_inputSpacing.size(),
+        m_inputSpacing.begin());
+    m_hasTransformCache = false;
+    if (!isSameInput) {
+        (void)m_mapper->SetValidityMask(nullptr, 0.0);
+        m_mapper->SetInputData(img);
+    }
 
     // 初次绑定数据时，把切片平面放到图像中心，后续真正的位置再由 Cursor 状态驱动。
     double center[3];
@@ -677,10 +690,6 @@ bool SliceStrategy::GetMaskWorkingPixelsValid() const
 void SliceStrategy::AttachRenderer(vtkSmartPointer<vtkRenderer> ren) {
     BaseVisualStrategy::AttachRenderer(ren); //
     m_renderer = ren;
-    // 开启深度剥离，让 alpha<1 的像素正确透明（不影响不透明渲染）
-    ren->SetUseDepthPeeling(1);
-    ren->SetMaximumNumberOfPeels(4);
-    ren->SetOcclusionRatio(0.0);
 }
 
 void SliceStrategy::SetCrosshair(const double focusWorld[3],
@@ -723,74 +732,108 @@ bool SliceStrategy::SetVisualState(
     const RenderParams& params,
     const UpdateFlags flags)
 {
-    // SliceStrategy 的状态同步核心分三段：
-    // 1. WindowLevel/Material 更新图像显示参数
-    // 2. Cursor/Transform 更新切片平面和十字线几何
-    // 3. Visibility 控制十字线显隐
-
-    // 窗宽/窗位或材质改变时，直接更新 vtkImageProperty 的 Window/Level；此处不重建 LUT。
-    if (((flags & UpdateFlags::WindowLevel) != UpdateFlags::None) || ((flags & UpdateFlags::Material) != UpdateFlags::None))
-    {
-        if (m_slice && m_slice->GetProperty())
-        {
-            auto imgProp = m_slice->GetProperty();
-            imgProp->SetOpacity(1.0);
-            // imgProp->SetOpacity(params.material.opacity);
-            imgProp->SetColorWindow(params.windowLevel.windowWidth);
-            imgProp->SetColorLevel(params.windowLevel.windowCenter);
-            // 切片无光照，不设 ambient/diffuse（与 vtkImageProperty 语义一致）
+    if ((flags & UpdateFlags::WindowLevel) != UpdateFlags::None
+        || (flags & UpdateFlags::Material) != UpdateFlags::None) {
+        if (m_slice && m_slice->GetProperty()) {
+            auto* property = m_slice->GetProperty();
+            property->SetOpacity(1.0);
+            property->SetColorWindow(params.windowLevel.windowWidth);
+            property->SetColorLevel(params.windowLevel.windowCenter);
         }
     }
 
-	if (((flags & UpdateFlags::Transform) != UpdateFlags::None) || ((flags & UpdateFlags::Cursor) != UpdateFlags::None))
-    {
-        auto resliceMapper = vtkImageResliceMapper::SafeDownCast(m_mapper);
-        if (!resliceMapper || !resliceMapper->GetInput()) return false;
+    const bool hasGeometryUpdate =
+        (flags & UpdateFlags::Transform) != UpdateFlags::None
+        || (flags & UpdateFlags::Cursor) != UpdateFlags::None;
+    if (hasGeometryUpdate) {
+        auto* image = vtkImageData::SafeDownCast(m_lastInput);
+        auto* resliceMapper =
+            vtkImageResliceMapper::SafeDownCast(m_mapper);
+        if (!image || !resliceMapper || !resliceMapper->GetInput()) {
+            return false;
+        }
+        if (image->GetMTime() != m_inputGeometryMTime) {
+            m_inputGeometryMTime = image->GetMTime();
+            std::copy_n(
+                image->GetBounds(), m_inputBounds.size(),
+                m_inputBounds.begin());
+            std::copy_n(
+                image->GetSpacing(), m_inputSpacing.size(),
+                m_inputSpacing.begin());
+            m_hasTransformCache = false;
+        }
 
-        double spacing[3], bounds[6];
-        resliceMapper->GetInput()->GetSpacing(spacing);
-        resliceMapper->GetInput()->GetBounds(bounds);
-        double worldBounds[6] = { 0.0 };
-        SetWorldBounds(bounds, params.modelMatrix, worldBounds);
-
-        if (((flags & UpdateFlags::Transform) != UpdateFlags::None)) {
-            auto modelToWorldMatrix = vtkSmartPointer<vtkMatrix4x4>::New();
-            modelToWorldMatrix->DeepCopy(params.modelMatrix.data());
-            if (m_slice) m_slice->SetUserMatrix(modelToWorldMatrix);
-            std::array<double, 16> worldToInput = {};
+        const bool needsTransformCache = !m_hasTransformCache
+            || m_modelMatrix != params.modelMatrix;
+        if (needsTransformCache) {
+            std::array<double, 6> worldBounds{};
+            SetWorldBounds(
+                m_inputBounds.data(), params.modelMatrix,
+                worldBounds.data());
+            if (!std::all_of(
+                    worldBounds.begin(), worldBounds.end(),
+                    [](const double value) {
+                        return std::isfinite(value);
+                    })) {
+                return false;
+            }
+            std::array<double, 16> worldToInput{};
             vtkMatrix4x4::Invert(
-                params.modelMatrix.data(),
-                worldToInput.data());
-            (void)m_mapper->SetWorldToInput(worldToInput);
+                params.modelMatrix.data(), worldToInput.data());
+            if (!std::all_of(
+                    worldToInput.begin(), worldToInput.end(),
+                    [](const double value) {
+                        return std::isfinite(value);
+                    })) {
+                return false;
+            }
+            auto modelToWorld =
+                vtkSmartPointer<vtkMatrix4x4>::New();
+            modelToWorld->DeepCopy(params.modelMatrix.data());
+            if (m_slice) m_slice->SetUserMatrix(modelToWorld);
+            if (!m_mapper->SetWorldToInput(worldToInput)) return false;
             if (m_vLineActor) m_vLineActor->SetUserMatrix(nullptr);
             if (m_hLineActor) m_hLineActor->SetUserMatrix(nullptr);
+            m_worldBounds = worldBounds;
+            m_modelMatrix = params.modelMatrix;
+            m_hasTransformCache = true;
+            ++m_worldBoundsBuildCount;
+            ++m_inverseBuildCount;
         }
 
-        // 切片法线始终固定在视图朝向轴上；
-        // 交互移动的是切片平面原点，不是法线方向本身。
         double worldNormal[3] = { 0.0, 0.0, 0.0 };
-        if (m_orientation == Orientation::Top_down) worldNormal[2] = 1.0;
-        else if (m_orientation == Orientation::Front_back) worldNormal[1] = 1.0;
-        else worldNormal[0] = 1.0;
-
-        auto slicePlane = resliceMapper->GetSlicePlane();
-        if (!slicePlane) {
-            slicePlane = vtkSmartPointer<vtkPlane>::New();
-            resliceMapper->SetSlicePlane(slicePlane);
+        if (m_orientation == Orientation::Top_down) {
+            worldNormal[2] = 1.0;
         }
-        slicePlane->SetOrigin(params.cursor[0], params.cursor[1], params.cursor[2]);
-        slicePlane->SetNormal(worldNormal[0], worldNormal[1], worldNormal[2]);
+        else if (m_orientation == Orientation::Front_back) {
+            worldNormal[1] = 1.0;
+        }
+        else {
+            worldNormal[0] = 1.0;
+        }
+        auto* slicePlane = resliceMapper->GetSlicePlane();
+        if (!slicePlane) {
+            auto nextPlane = vtkSmartPointer<vtkPlane>::New();
+            resliceMapper->SetSlicePlane(nextPlane);
+            slicePlane = nextPlane;
+        }
+        slicePlane->SetOrigin(params.cursor.data());
+        slicePlane->SetNormal(worldNormal);
 
-        const double safeOffset =
-            std::min({ spacing[0], spacing[1], spacing[2] });
-        SetCrosshair(params.cursor.data(), worldBounds, safeOffset);
-
+        const double safeOffset = std::min({
+            m_inputSpacing[0],
+            m_inputSpacing[1],
+            m_inputSpacing[2]
+        });
+        SetCrosshair(
+            params.cursor.data(), m_worldBounds.data(), safeOffset);
     }
 
-    if (((flags & UpdateFlags::Visibility) != UpdateFlags::None)) {
-        const int vis = (params.visibilityMask & VisFlags::Crosshair) ? 1 : 0;
-        if (m_vLineActor) m_vLineActor->SetVisibility(vis);
-        if (m_hLineActor) m_hLineActor->SetVisibility(vis);
+    if ((flags & UpdateFlags::Visibility) != UpdateFlags::None) {
+        const int visibility =
+            (params.visibilityMask & VisFlags::Crosshair) ? 1 : 0;
+        if (m_vLineActor) m_vLineActor->SetVisibility(visibility);
+        if (m_hLineActor) m_hLineActor->SetVisibility(visibility);
     }
     return true;
 }

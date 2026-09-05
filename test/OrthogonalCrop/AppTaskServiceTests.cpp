@@ -73,6 +73,20 @@ void SetExpect(bool isPassed, const char* message, int& failureCount)
     std::cerr << "[AppTaskTests] " << message << '\n';
 }
 
+bool SendUpdatesUntil(
+    const std::shared_ptr<RenderUpdatePort>& update,
+    const std::function<bool()>& predicate = {})
+{
+    if (!update) return false;
+    constexpr int attemptLimit = 2000;
+    for (int attempt = 0; attempt < attemptLimit; ++attempt) {
+        const bool isSent = update->SendUpdates();
+        if (isSent && (!predicate || predicate())) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return false;
+}
+
 StrategyCreate GetStrategyFactory()
 {
     return [](const VizMode mode)
@@ -601,7 +615,7 @@ void StartBoundedTasks(int& failureCount)
             + std::chrono::seconds(1));
     const auto afterStop = ports.app.data->ExportDataAsync(
         "bounded-d", ".raw", callback);
-    SetExpect(workerCount.load() == 3
+    SetExpect(workerCount.load() == 4
             && first == TaskAdmissionResult::Accepted
             && second == TaskAdmissionResult::Accepted
             && areWorkersStarted
@@ -1708,8 +1722,14 @@ void StartCandidateParams(int& failureCount)
     imageState->scalarRange = { -3.0, 5.0 };
     imageState->version = 7;
     const TrustedImageSnapshot snapshot = imageState;
+    constexpr std::uint64_t firstStageRevision = 1;
     const bool isBuilt = ports.dataStage
-        && ports.dataStage->BuildDataStage(snapshot);
+        && ports.dataStage->StartDataStage(
+            snapshot, firstStageRevision)
+            == DataStageStatus::Preparing
+        && ports.dataStage->SetDataStageReady(
+            snapshot, firstStageRevision)
+            == DataStageStatus::Ready;
     auto secondCapture = std::make_shared<VisualStateCapture>();
     AppServiceArgs secondArgs;
     secondArgs.dataManager = dataManager;
@@ -1730,13 +1750,16 @@ void StartCandidateParams(int& failureCount)
         && secondPorts.renderBind->SetRenderTarget(
             secondWindow, secondRenderer);
     const bool isSecondBuilt = secondPorts.dataStage
-        && secondPorts.dataStage->BuildDataStage(snapshot);
+        && secondPorts.dataStage->StartDataStage(snapshot, 2)
+            == DataStageStatus::Preparing
+        && secondPorts.dataStage->SetDataStageReady(snapshot, 2)
+            == DataStageStatus::Ready;
     const bool isHistogramSkipped = sharedHistogram
         && sharedHistogram->GetBuildCount() == 0;
     const bool isSecondCleared = secondPorts.dataStage
-        && secondPorts.dataStage->ClearDataStage();
+        && secondPorts.dataStage->ClearDataStage(2);
     const bool hasNextParams = capture->setCount > 0
-        && capture->flags == UpdateFlags::All
+        && capture->flags != UpdateFlags::None
         && capture->params.scalarRange[0] == -3.0
         && capture->params.scalarRange[1] == 5.0
         && capture->params.cursor
@@ -1774,7 +1797,7 @@ void StartCandidateParams(int& failureCount)
             == std::array<double, 3>{ 9.0, 8.0, 7.0 }
         && state->GetCursorAxis() == 2;
     const bool isCleared = ports.dataStage
-        && ports.dataStage->ClearDataStage();
+        && ports.dataStage->ClearDataStage(firstStageRevision);
 
     std::fill_n(
         static_cast<float*>(image->GetScalarPointer()),
@@ -1790,7 +1813,10 @@ void StartCandidateParams(int& failureCount)
     const TrustedImageSnapshot constantSnapshot = imageState;
     const int oldSetCount = capture->setCount;
     const bool isConstantBuilt = ports.dataStage
-        && ports.dataStage->BuildDataStage(constantSnapshot);
+        && ports.dataStage->StartDataStage(constantSnapshot, 3)
+            == DataStageStatus::Preparing
+        && ports.dataStage->SetDataStageReady(constantSnapshot, 3)
+            == DataStageStatus::Ready;
     const bool hasConstantWindow = capture->setCount > oldSetCount
         && std::isfinite(
             capture->params.windowLevel.windowWidth)
@@ -1799,7 +1825,7 @@ void StartCandidateParams(int& failureCount)
     const bool isConstantScanSkipped = sharedHistogram
         && sharedHistogram->GetBuildCount() == 0;
     const bool isConstantCleared = ports.dataStage
-        && ports.dataStage->ClearDataStage();
+        && ports.dataStage->ClearDataStage(3);
 
     SetExpect(isBound
             && isBuilt
@@ -2387,7 +2413,12 @@ void StartInputSwap(int& failureCount)
         renderWindow->AddObserver(
             vtkCommand::StartEvent, renderCallback);
     const bool isInputRebuilt =
-        ports.interaction.update->SendUpdates();
+        SendUpdatesUntil(
+            ports.interaction.update,
+            [&]() {
+                return ports.interaction.model->GetMainProp()
+                    != committedProp;
+            });
     renderWindow->RemoveObserver(renderTag);
     renderCallback->SetClientData(nullptr);
     std::cout
@@ -2460,7 +2491,11 @@ void StartRenderOwnerGate(int& failureCount)
     renderWindow->AddRenderer(renderer);
     const bool isSubmitted =
         ports.renderBind->SetRenderTarget(renderWindow, renderer)
-        && ports.interaction.update->SendUpdates();
+        && SendUpdatesUntil(
+            ports.interaction.update,
+            [&]() {
+                return ports.interaction.model->GetMainProp() != nullptr;
+            });
     auto* volume = vtkVolume::SafeDownCast(
         ports.interaction.model->GetMainProp());
     auto* property = volume ? volume->GetProperty() : nullptr;
@@ -2512,7 +2547,12 @@ void StartStrategySwitchSync(int& failureCount)
     SetExpect(ports.renderBind->SetRenderTarget(
             renderWindow, renderer)
             && ports.app.view->SendViewUpdate(update)
-            && ports.interaction.update->SendUpdates(),
+            && SendUpdatesUntil(
+                ports.interaction.update,
+                [&]() {
+                    return ports.interaction.model->GetMainProp()
+                        != nullptr;
+                }),
         "strategy switch sync should build the initial volume pipeline",
         failureCount);
 
@@ -2529,11 +2569,42 @@ void StartStrategySwitchSync(int& failureCount)
         update = {};
         update.mode = mode;
         ports.app.view->SendViewUpdate(update);
-        ports.interaction.update->SendUpdates();
-        vtkCamera* camera = renderer->GetActiveCamera();
         const bool isSlice = mode == VizMode::SliceTop_down
             || mode == VizMode::SliceFront_back
             || mode == VizMode::SliceLeft_right;
+        (void)SendUpdatesUntil(
+            ports.interaction.update,
+            [&]() {
+                auto* prop = ports.interaction.model->GetMainProp();
+                auto* activeCamera = renderer->GetActiveCamera();
+                if (isSlice) {
+                    if (!activeCamera
+                        || activeCamera->GetParallelProjection() == 0) {
+                        return false;
+                    }
+                    const double* position = activeCamera->GetPosition();
+                    const double* focalPoint = activeCamera->GetFocalPoint();
+                    const double* viewUp = activeCamera->GetViewUp();
+                    if (mode == VizMode::SliceTop_down) {
+                        return position[2] > focalPoint[2]
+                            && std::abs(viewUp[1] - 1.0) < 1e-12;
+                    }
+                    if (mode == VizMode::SliceFront_back) {
+                        return position[1] > focalPoint[1]
+                            && std::abs(viewUp[2] - 1.0) < 1e-12;
+                    }
+                    return position[0] > focalPoint[0]
+                        && std::abs(viewUp[2] - 1.0) < 1e-12;
+                }
+                if (mode == VizMode::Volume
+                    || mode == VizMode::CompositeVolume) {
+                    return vtkVolume::SafeDownCast(prop) != nullptr;
+                }
+                return vtkActor::SafeDownCast(prop) != nullptr
+                    && activeCamera
+                    && activeCamera->GetParallelProjection() == 0;
+            });
+        vtkCamera* camera = renderer->GetActiveCamera();
         bool isOrientationValid = camera != nullptr;
         if (camera && isSlice) {
             const double* position = camera->GetPosition();
@@ -2571,8 +2642,17 @@ void StartStrategySwitchSync(int& failureCount)
 
     update = {};
     update.mode = VizMode::IsoSurface;
+    auto* strategyBeforeIso =
+        ports.interaction.model->GetMainProp();
     ports.app.view->SendViewUpdate(update);
-    ports.interaction.update->SendUpdates();
+    (void)SendUpdatesUntil(
+        ports.interaction.update,
+        [&]() {
+            return vtkActor::SafeDownCast(
+                    ports.interaction.model->GetMainProp()) != nullptr
+                && ports.interaction.model->GetMainProp()
+                    != strategyBeforeIso;
+        });
     auto* isoActor = vtkActor::SafeDownCast(
         ports.interaction.model->GetMainProp());
     auto* isoProperty = isoActor
@@ -2596,7 +2676,12 @@ void StartStrategySwitchSync(int& failureCount)
     update = {};
     update.mode = VizMode::Volume;
     ports.app.view->SendViewUpdate(update);
-    ports.interaction.update->SendUpdates();
+    (void)SendUpdatesUntil(
+        ports.interaction.update,
+        [&]() {
+            return vtkVolume::SafeDownCast(
+                ports.interaction.model->GetMainProp()) != nullptr;
+        });
     auto* volume = vtkVolume::SafeDownCast(
         ports.interaction.model->GetMainProp());
     auto* volumeProperty = volume
@@ -2645,7 +2730,11 @@ void StartStrategySwitchSync(int& failureCount)
                 reboundCamera->GetFocalPoint()),
         "renderer rebind must restore the committed camera and ignore pending mode",
         failureCount);
-    ports.interaction.update->SendUpdates();
+    (void)SendUpdatesUntil(
+        ports.interaction.update,
+        [&]() {
+            return reboundCamera->GetParallelProjection() != 0;
+        });
     SetExpect(reboundCamera->GetParallelProjection() != 0,
         "pending Slice mode should affect camera only after pipeline commit",
         failureCount);
@@ -2653,7 +2742,12 @@ void StartStrategySwitchSync(int& failureCount)
     update = {};
     update.mode = VizMode::Volume;
     ports.app.view->SendViewUpdate(update);
-    ports.interaction.update->SendUpdates();
+    (void)SendUpdatesUntil(
+        ports.interaction.update,
+        [&]() {
+            return vtkVolume::SafeDownCast(
+                ports.interaction.model->GetMainProp()) != nullptr;
+        });
     reboundCamera->SetPosition(8.0, 5.0, 12.0);
     reboundCamera->SetFocalPoint(1.5, 1.5, 1.5);
     const std::array<double, 3> cameraOffset = {

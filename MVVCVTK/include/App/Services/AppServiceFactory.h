@@ -7,6 +7,7 @@
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Contracts/RenderBindPort.h"
 #include "Render/Contracts/RenderStrategyFactory.h"
+#include "Render/Internal/RenderResourceCoordinator.h"
 #include "Platform/TaskStopToken.h"
 
 #include <functional>
@@ -31,6 +32,10 @@ std::shared_ptr<AppTaskExecutor> CreateAppTaskExecutor(
 TaskAdmissionResult SendReadTask(
     const std::shared_ptr<AppTaskExecutor>& executor,
     AppTaskWork work);
+// Render 产品复用独立的单 worker lane；bool 只表示 lane 是否接纳。
+bool SendRenderTask(
+    const std::shared_ptr<AppTaskExecutor>& executor,
+    RenderLaneWork work);
 
 struct AppServiceArgs final {
     std::shared_ptr<AbstractDataManager> dataManager;
@@ -41,9 +46,16 @@ struct AppServiceArgs final {
     // 只在构造固定 worker 时调用；生产默认创建 std::thread，测试可注入启动失败。
     AppWorkerStart workerStart;
     std::shared_ptr<AppTaskExecutor> taskExecutor;
+    std::shared_ptr<RenderStrategyServices> renderServices;
     StrategyCreate strategyCreate;
     // Host 可选注入跨视图统一提交；未注入时保留单 AppRuntime 的独立使用路径。
-    std::function<bool(LoadEventKind)> setLoadCommit;
+    std::function<LoadCommitResult(
+        LoadEventKind,
+        std::uint64_t,
+        const TrustedImageSnapshot&)> setLoadCommit;
+    std::function<LoadCommitResult(
+        std::uint64_t,
+        LoadCommitFailure)> setLoadCancelled;
 };
 
 // 该结果只在 Host 组合入口解包；每个字段均为不同 adapter identity。

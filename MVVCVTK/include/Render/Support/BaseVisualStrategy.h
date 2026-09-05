@@ -42,6 +42,8 @@ protected:
 public:
     ~BaseVisualStrategy() override;
 
+    bool SetProductCommit() override;
+    RenderTransitionState GetTransitionState() const override;
     bool AttachRenderEffect(
         std::shared_ptr<RenderEffect> effect,
         RenderBindingUse bindingUse) override;

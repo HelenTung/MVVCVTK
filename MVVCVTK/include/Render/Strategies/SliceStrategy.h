@@ -13,6 +13,9 @@
 #include <vtkPolyDataMapper.h>
 #include <vtkRenderer.h>
 
+#include <array>
+#include <cstdint>
+
 // --- 策略 C: 2D 切片 (MPR) ---
 // index = z*dx*dy + y*dx + x
 class SliceStrategy : public BaseVisualStrategy {
@@ -32,6 +35,14 @@ public:
     std::array<int, 3> GetMaskWorkingDimensions() const;
     // 私有测试诊断：逐像素核对 mask 最近邻采样和最终 masked slice，扫描范围仅为当前二维输出。
     bool GetMaskWorkingPixelsValid() const;
+    std::uint64_t GetWorldBoundsBuildCount() const noexcept
+    {
+        return m_worldBoundsBuildCount;
+    }
+    std::uint64_t GetInverseBuildCount() const noexcept
+    {
+        return m_inverseBuildCount;
+    }
     int GetNavigationAxis() const override { return (int)m_orientation; }
     // [Public] 业务必需接口：供 Service 查询交互轴向
 
@@ -68,4 +79,17 @@ private:
     // 世界坐标十字线几何 producer；Cursor/Transform 更新端点，actor mapper 保持稳定连接。
     vtkSmartPointer<vtkLineSource> m_vLineSource;
     vtkSmartPointer<vtkLineSource> m_hLineSource;
+    std::array<double, 6> m_inputBounds{};
+    std::array<double, 3> m_inputSpacing{ 1.0, 1.0, 1.0 };
+    std::array<double, 6> m_worldBounds{};
+    std::array<double, 16> m_modelMatrix{
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    };
+    vtkMTimeType m_inputGeometryMTime = 0;
+    std::uint64_t m_worldBoundsBuildCount = 0;
+    std::uint64_t m_inverseBuildCount = 0;
+    bool m_hasTransformCache = false;
 };

@@ -7,10 +7,22 @@
 #include <algorithm>
 #include <utility>
 
+namespace {
+
+void SetTransparencyEnvironment(vtkRenderer& renderer)
+{
+    renderer.SetUseDepthPeeling(1);
+    renderer.SetMaximumNumberOfPeels(4);
+    renderer.SetOcclusionRatio(0.0);
+}
+
+} // namespace
+
 AbstractViewContext::AbstractViewContext()
     : m_renderer(vtkSmartPointer<vtkRenderer>::New())
     , m_renderWindow(vtkSmartPointer<vtkRenderWindow>::New())
 {
+    SetTransparencyEnvironment(*m_renderer.GetPointer());
     m_renderWindow->AddRenderer(m_renderer);
 }
 
@@ -32,7 +44,10 @@ bool AbstractViewContext::SetRenderWindow(
         m_renderWindow->RemoveRenderer(m_renderer);
     }
     m_renderWindow = std::move(renderWindow);
-    if (m_renderer) m_renderWindow->AddRenderer(m_renderer);
+    if (m_renderer) {
+        SetTransparencyEnvironment(*m_renderer.GetPointer());
+        m_renderWindow->AddRenderer(m_renderer);
+    }
     return true;
 }
 

@@ -557,7 +557,6 @@ namespace {
         {
             if (m_qualityAuditPhase != QualityAuditPhase::None) return false;
             m_qualityAuditPhase = QualityAuditPhase::SetLow;
-            m_qualityAuditTicks = 0;
             return true;
         }
 
@@ -673,26 +672,32 @@ namespace {
                 return StopQualityAudit(false, HostVolumeQuality::Auto);
             }
 
-            constexpr int tickLimit = 10;
+            constexpr auto phaseWaitLimit = std::chrono::minutes(2);
+            const auto setWaitPhase = [&](const QualityAuditPhase phase) {
+                m_qualityAuditPhase = phase;
+                m_qualityAuditDeadline =
+                    std::chrono::steady_clock::now() + phaseWaitLimit;
+            };
+            const auto hasTimedOut = [&]() {
+                return std::chrono::steady_clock::now()
+                    >= m_qualityAuditDeadline;
+            };
             switch (m_qualityAuditPhase) {
             case QualityAuditPhase::SetLow:
                 if (!SetAuditQuality(HostVolumeQuality::Low)) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::WaitLow;
-                m_qualityAuditTicks = 0;
+                setWaitPhase(QualityAuditPhase::WaitLow);
                 return true;
             case QualityAuditPhase::WaitLow:
                 if (state->volumeQuality == HostVolumeQuality::Low) {
                     if (!StartAuditRender()) {
                         return StopQualityAudit(false, state->volumeQuality);
                     }
-                    m_lastAuditQuality = HostVolumeQuality::Low;
                     m_qualityAuditPhase = QualityAuditPhase::SetHigh;
-                    m_qualityAuditTicks = 0;
                     return true;
                 }
-                if (++m_qualityAuditTicks > tickLimit) {
+                if (hasTimedOut()) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
                 return true;
@@ -700,8 +705,7 @@ namespace {
                 if (!SetAuditQuality(HostVolumeQuality::High)) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::WaitHigh;
-                m_qualityAuditTicks = 0;
+                setWaitPhase(QualityAuditPhase::WaitHigh);
                 return true;
             case QualityAuditPhase::WaitHigh:
                 if (state->volumeQuality == HostVolumeQuality::High) {
@@ -709,25 +713,18 @@ namespace {
                         return StopQualityAudit(false, state->volumeQuality);
                     }
                     m_isHighApplied = true;
-                    m_lastAuditQuality = HostVolumeQuality::High;
                     m_qualityAuditPhase = QualityAuditPhase::SetXHigh;
-                    m_qualityAuditTicks = 0;
                     return true;
                 }
-                if (++m_qualityAuditTicks <= tickLimit) return true;
-                if (state->volumeQuality != m_lastAuditQuality
-                    || !StartAuditRender()) {
+                if (hasTimedOut()) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::SetXHigh;
-                m_qualityAuditTicks = 0;
                 return true;
             case QualityAuditPhase::SetXHigh:
                 if (!SetAuditQuality(HostVolumeQuality::XHigh)) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::WaitXHigh;
-                m_qualityAuditTicks = 0;
+                setWaitPhase(QualityAuditPhase::WaitXHigh);
                 return true;
             case QualityAuditPhase::WaitXHigh:
                 if (state->volumeQuality == HostVolumeQuality::XHigh) {
@@ -735,25 +732,18 @@ namespace {
                         return StopQualityAudit(false, state->volumeQuality);
                     }
                     m_isXHighApplied = true;
-                    m_lastAuditQuality = HostVolumeQuality::XHigh;
                     m_qualityAuditPhase = QualityAuditPhase::SetUltra;
-                    m_qualityAuditTicks = 0;
                     return true;
                 }
-                if (++m_qualityAuditTicks <= tickLimit) return true;
-                if (state->volumeQuality != m_lastAuditQuality
-                    || !StartAuditRender()) {
+                if (hasTimedOut()) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::SetUltra;
-                m_qualityAuditTicks = 0;
                 return true;
             case QualityAuditPhase::SetUltra:
                 if (!SetAuditQuality(HostVolumeQuality::Ultra)) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                m_qualityAuditPhase = QualityAuditPhase::WaitUltra;
-                m_qualityAuditTicks = 0;
+                setWaitPhase(QualityAuditPhase::WaitUltra);
                 return true;
             case QualityAuditPhase::WaitUltra:
                 if (state->volumeQuality == HostVolumeQuality::Ultra) {
@@ -761,23 +751,16 @@ namespace {
                         return StopQualityAudit(false, state->volumeQuality);
                     }
                     m_isUltraApplied = true;
-                    m_lastAuditQuality = HostVolumeQuality::Ultra;
                     return StopQualityAudit(
                         m_isHighApplied
                         && m_isXHighApplied
                         && m_isUltraApplied,
                         state->volumeQuality);
                 }
-                if (++m_qualityAuditTicks <= tickLimit) return true;
-                if (state->volumeQuality != m_lastAuditQuality
-                    || !StartAuditRender()) {
+                if (hasTimedOut()) {
                     return StopQualityAudit(false, state->volumeQuality);
                 }
-                return StopQualityAudit(
-                    m_isHighApplied
-                    && m_isXHighApplied
-                    && m_isUltraApplied,
-                    state->volumeQuality);
+                return true;
             default:
                 return true;
             }
@@ -1031,8 +1014,7 @@ namespace {
         std::shared_ptr<FeatureHostControl> m_host;
         bool m_isAttached = false;
         QualityAuditPhase m_qualityAuditPhase = QualityAuditPhase::None;
-        HostVolumeQuality m_lastAuditQuality = HostVolumeQuality::Auto;
-        int m_qualityAuditTicks = 0;
+        std::chrono::steady_clock::time_point m_qualityAuditDeadline{};
         bool m_isQualityAuditPassed = false;
         bool m_isHighApplied = false;
         bool m_isXHighApplied = false;

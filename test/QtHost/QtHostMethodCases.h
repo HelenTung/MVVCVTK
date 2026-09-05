@@ -8,6 +8,7 @@ const std::string& GetMethodExecutable();
 void SetMethodExecutable(std::string executable);
 
 int GetLoadFailCount();
+int GetRenderProductFailCount();
 int GetViewFailCount();
 int GetCropFailCount();
 int GetGapFailCount();

@@ -472,6 +472,8 @@ int GetPartLifecycleFailCount()
                 && startResult->partCount == 2
                 && startResult->message.find("peakWorkingBytes=")
                     != std::string::npos
+                && startResult->message.find("surfaceBytes=")
+                    != std::string::npos
                 && callbackThread == ownerThread,
             "Accepted Start completes exactly once on the owner thread") ? 0 : 1;
         failureCount += GetCaseResult(

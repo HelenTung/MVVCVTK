@@ -49,15 +49,74 @@ bool CompositeStrategy::SetVisualState(
     const RenderParams& params,
     const UpdateFlags flags)
 {
-    // 参考平面先同步，这样 3D 主内容与切片参照在同一帧里看到的是一致状态。
-    if (m_referencePlanes
-        && !m_referencePlanes->SetVisualState(params, flags)) {
+    if (!m_mainStrategy || !m_referencePlanes) return false;
+    const auto referenceStage =
+        m_referencePlanes->BuildVisualStage(params, flags);
+    if (!referenceStage
+        || !m_mainStrategy->SetVisualState(params, flags)) {
         return false;
     }
 
-    // 更新主视图
+    const auto state = m_mainStrategy->GetTransitionState();
+    if (state.status == RenderProductStatus::Failed
+        || state.status == RenderProductStatus::Cancelled) {
+        m_pendingReference.reset();
+        return false;
+    }
+    if (state.status == RenderProductStatus::Preparing
+        || state.status == RenderProductStatus::Ready) {
+        if (state.stats.requestRevision == 0) return false;
+        m_pendingReference = PendingReference{
+            *referenceStage, state.stats.requestRevision
+        };
+        return true;
+    }
+
+    m_pendingReference.reset();
+    return m_referencePlanes->SetVisualCommit(*referenceStage);
+}
+
+bool CompositeStrategy::SetProductCommit()
+{
+    if (!m_mainStrategy || !m_mainStrategy->SetProductCommit()) {
+        m_pendingReference.reset();
+        return false;
+    }
+    const auto state = m_mainStrategy->GetTransitionState();
+    if (state.status == RenderProductStatus::Failed
+        || state.status == RenderProductStatus::Cancelled) {
+        m_pendingReference.reset();
+        return state.status == RenderProductStatus::Cancelled;
+    }
+    if (!m_pendingReference) return true;
+    if (state.status != RenderProductStatus::Active) return true;
+    if (state.stats.activeRevision
+        != m_pendingReference->requestRevision) {
+        if (state.stats.activeRevision
+            > m_pendingReference->requestRevision) {
+            m_pendingReference.reset();
+        }
+        return true;
+    }
+    const auto stage = std::move(m_pendingReference->stage);
+    m_pendingReference.reset();
+    return m_referencePlanes
+        && m_referencePlanes->SetVisualCommit(stage);
+}
+
+RenderTransitionState CompositeStrategy::GetTransitionState() const
+{
     return m_mainStrategy
-        && m_mainStrategy->SetVisualState(params, flags);
+        ? m_mainStrategy->GetTransitionState()
+        : RenderTransitionState{};
+}
+
+void CompositeStrategy::SetFirstRenderDuration(
+    const std::uint64_t durationUs) noexcept
+{
+    if (m_mainStrategy) {
+        m_mainStrategy->SetFirstRenderDuration(durationUs);
+    }
 }
 
 bool CompositeStrategy::SetInputData(

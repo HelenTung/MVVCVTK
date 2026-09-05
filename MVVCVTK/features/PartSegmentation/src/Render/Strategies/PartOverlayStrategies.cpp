@@ -2,7 +2,7 @@
 
 #include <vtkActor.h>
 #include <vtkDataArray.h>
-#include <vtkDiscreteMarchingCubes.h>
+#include <vtkDataSet.h>
 #include <vtkImageData.h>
 #include <vtkImageProperty.h>
 #include <vtkImageResliceMapper.h>
@@ -13,6 +13,7 @@
 #include <vtkPlane.h>
 #include <vtkPointData.h>
 #include <vtkPolyDataMapper.h>
+#include <vtkPolyData.h>
 #include <vtkProperty.h>
 
 #include <algorithm>
@@ -24,10 +25,10 @@ namespace {
 
 constexpr std::uint32_t maxOverlayPartCount = 4096;
 
-std::uint32_t GetPartCount(vtkImageData& image)
+std::uint32_t GetPartCount(vtkDataSet& data)
 {
-    auto* scalars = image.GetPointData()
-        ? image.GetPointData()->GetScalars() : nullptr;
+    auto* scalars = data.GetPointData()
+        ? data.GetPointData()->GetScalars() : nullptr;
     if (!scalars || scalars->GetNumberOfComponents() != 1) return 0;
     double range[2]{};
     scalars->GetRange(range);
@@ -108,11 +109,9 @@ bool SetLookupTable(
 
 PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
     : m_actor(vtkSmartPointer<vtkActor>::New())
-    , m_surface(vtkSmartPointer<vtkDiscreteMarchingCubes>::New())
     , m_mapper(vtkSmartPointer<vtkPolyDataMapper>::New())
     , m_lut(vtkSmartPointer<vtkLookupTable>::New())
 {
-    m_mapper->SetInputConnection(m_surface->GetOutputPort());
     m_mapper->SetLookupTable(m_lut);
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetMapper(m_mapper);
@@ -125,19 +124,12 @@ PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
 void PartSurfaceOverlayStrategy::SetInputData(
     vtkSmartPointer<vtkDataObject> data)
 {
-    auto* image = vtkImageData::SafeDownCast(data);
-    if (!image) return;
-    const std::uint32_t partCount = GetPartCount(*image);
+    auto* surface = vtkPolyData::SafeDownCast(data);
+    if (!surface) return;
+    const std::uint32_t partCount = GetPartCount(*surface);
     if (!SetLookupTable(*m_lut, partCount)) return;
 
-    m_surface->SetInputData(image);
-    m_surface->SetNumberOfContours(static_cast<int>(partCount));
-    for (std::uint32_t partId = 1;
-        partId <= partCount; ++partId) {
-        m_surface->SetValue(
-            static_cast<int>(partId - 1),
-            static_cast<double>(partId));
-    }
+    m_mapper->SetInputData(surface);
     m_mapper->SetScalarRange(
         1.0, static_cast<double>(std::max<std::uint32_t>(1U, partCount)));
 }

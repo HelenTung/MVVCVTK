@@ -192,19 +192,40 @@ public:
         return wasDirty;
     }
 
+    void SetRenderComplete(
+        const std::uint64_t durationUs) noexcept override
+    {
+        ++m_renderCompleteCount;
+        m_lastRenderUs = durationUs;
+    }
+
     std::size_t GetUpdateCount() const
     {
         return m_updateCount;
     }
 
+    std::size_t GetRenderCompleteCount() const
+    {
+        return m_renderCompleteCount;
+    }
+
+    std::uint64_t GetLastRenderUs() const
+    {
+        return m_lastRenderUs;
+    }
+
     void ResetCount()
     {
         m_updateCount = 0;
+        m_renderCompleteCount = 0;
+        m_lastRenderUs = 0;
         m_isDirty = false;
     }
 
 private:
     std::size_t m_updateCount{0};
+    std::size_t m_renderCompleteCount{0};
+    std::uint64_t m_lastRenderUs{0};
     bool m_isDirty{false};
 };
 
@@ -1898,23 +1919,13 @@ public:
             if (maskInput) {
                 maskInput->GetScalarRange(maskRange);
             }
-            const auto inputConnection =
-                mapper ? mapper->GetInputConnection(0, 0) : nullptr;
-            vtkAlgorithm* inputProducer =
-                inputConnection ? inputConnection->GetProducer()
-                    : nullptr;
-            const auto producerInputConnection =
-                inputProducer
-                ? inputProducer->GetInputConnection(0, 0)
+            auto* mapperInput = mapper
+                ? vtkImageData::SafeDownCast(mapper->GetInput())
                 : nullptr;
-            vtkAlgorithm* producerInput =
-                producerInputConnection
-                ? producerInputConnection->GetProducer()
-                : nullptr;
-            const bool isDenoiseApplied =
-                producerInput
-                && producerInput->IsA(
-                    "vtkImageAnisotropicDiffusion3D");
+            // CPU product 已与 producer graph 断开；降噪验证改看独立
+            // image identity，不能再沿 mapper connection 反查旧 filter。
+            const bool isDenoiseApplied = params.isDenoiseOn
+                && mapperInput && mapperInput != image;
             const bool isMaskApplied =
                 maskInput
                 && maskInput->GetScalarType()
@@ -2035,7 +2046,7 @@ public:
                 isMaskApplied == isMaskExpected
                 && isDenoiseApplied == isDenoiseExpected
                 && (!isMaskExpected || mapper->GetMaskInput())
-                && (!isDenoiseExpected || producerInput);
+                && (!isDenoiseExpected || mapperInput != image);
             std::cout
                 << "BENCH: case=" << caseName
                 << " volume_dims=" << sideLength
@@ -2257,6 +2268,16 @@ public:
         areSamplesValid =
             startSamples("denoise", false, true) && areSamplesValid;
 
+        const auto getSessionVolume = [&]() {
+            auto* props = renderer->GetViewProps();
+            if (!props) return static_cast<vtkVolume*>(nullptr);
+            props->InitTraversal();
+            while (auto* prop = props->GetNextProp()) {
+                auto* candidate = vtkVolume::SafeDownCast(prop);
+                if (candidate && candidate != volume) return candidate;
+            }
+            return static_cast<vtkVolume*>(nullptr);
+        };
         const auto setVolumeMode = [&]() {
             HostViewSetRequest request;
             request.targetView.viewId = "primary-3d";
@@ -2264,10 +2285,28 @@ public:
             if (!m_session->SendRequest(std::move(request))) {
                 return false;
             }
-            (void)SendTimer(endpoint->interactor);
-            return std::abs(
-                endpoint->renderWindow->GetDesiredUpdateRate()
-                    - 0.001) < 1e-12;
+            const auto deadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(10);
+            do {
+                (void)SendTimer(endpoint->interactor);
+                QApplication::processEvents();
+                HostViewTarget target;
+                target.viewId = "primary-3d";
+                const auto state = m_session->GetRenderViewState(target);
+                auto* sessionVolume = getSessionVolume();
+                if (state
+                    && state->viewMode == HostRenderMode::Volume
+                    && sessionVolume
+                    && sessionVolume->GetMapper()
+                    && std::abs(
+                        endpoint->renderWindow->GetDesiredUpdateRate()
+                            - 0.001) < 1e-12) {
+                    return true;
+                }
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now() < deadline);
+            return false;
         };
         const auto samplePhase =
             [&](const char* caseName,
@@ -2309,6 +2348,9 @@ public:
                         == static_cast<std::size_t>(
                             warmupCount)
                     && timerProbe.GetUpdateCount()
+                        == static_cast<std::size_t>(
+                            warmupCount)
+                    && timerProbe.GetRenderCompleteCount()
                         == static_cast<std::size_t>(
                             warmupCount)
                     && m_renderStartCount == m_renderEndCount
@@ -2353,6 +2395,9 @@ public:
                 && m_renderStarts.empty()
                 && timerProbe.GetUpdateCount()
                     == static_cast<std::size_t>(sampleCount)
+                && timerProbe.GetRenderCompleteCount()
+                    == static_cast<std::size_t>(sampleCount)
+                && timerProbe.GetLastRenderUs() > 0
                 && std::abs(
                     endpoint->renderWindow
                         ->GetDesiredUpdateRate()
@@ -2490,7 +2535,7 @@ public:
             strategy.DetachRenderer(renderer);
             return false;
         }
-        std::vector<std::pair<vtkProp*, int>>
+        std::vector<std::pair<vtkSmartPointer<vtkProp>, int>>
             hiddenProps;
         auto* interactionProps = renderer->GetViewProps();
         if (interactionProps) {
@@ -2519,17 +2564,48 @@ public:
 
         const auto runStylePhase = [&]() {
             setBaseState();
-            params.volumeQuality = VolumeQuality::Low;
             const std::thread::id qualityThread =
                 std::this_thread::get_id();
-            strategy.SetVisualState(
-                params, UpdateFlags::Quality);
             if (!setVolumeMode()) {
+                return false;
+            }
+            HostViewSetRequest qualityRequest;
+            qualityRequest.targetView.viewId = "primary-3d";
+            qualityRequest.volumeQuality = HostVolumeQuality::Low;
+            if (!m_session->SendRequest(std::move(qualityRequest))) {
+                return false;
+            }
+            vtkVolume* styleVolume = nullptr;
+            vtkGPUVolumeRayCastMapper* styleMapper = nullptr;
+            bool isStyleQualityReady = false;
+            const auto qualityDeadline = std::chrono::steady_clock::now()
+                + std::chrono::seconds(10);
+            do {
+                (void)SendTimer(endpoint->interactor);
+                QApplication::processEvents();
+                styleVolume = getSessionVolume();
+                styleMapper = styleVolume
+                    ? vtkGPUVolumeRayCastMapper::SafeDownCast(
+                        styleVolume->GetMapper())
+                    : nullptr;
+                HostViewTarget target;
+                target.viewId = "primary-3d";
+                const auto state = m_session->GetRenderViewState(target);
+                if (state && styleMapper
+                    && state->volumeQuality == HostVolumeQuality::Low) {
+                    isStyleQualityReady = true;
+                    break;
+                }
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(1));
+            } while (std::chrono::steady_clock::now()
+                < qualityDeadline);
+            if (!isStyleQualityReady || !styleVolume || !styleMapper) {
                 return false;
             }
             endpoint->renderWindow->Render();
             const double styleStillRay =
-                mapper->GetSampleDistance();
+                styleMapper->GetSampleDistance();
 
             const auto getVisualPixels = [&]() {
                 endpoint->renderWindow->Render();
@@ -2555,9 +2631,12 @@ public:
                     : std::vector<unsigned char>{};
             };
             const int volumeVisibility = volume->GetVisibility();
+            const int styleVolumeVisibility =
+                styleVolume->GetVisibility();
             volume->VisibilityOff();
+            styleVolume->VisibilityOff();
             const auto backgroundPixels = getVisualPixels();
-            volume->SetVisibility(volumeVisibility);
+            styleVolume->VisibilityOn();
             const auto beforePixels = getVisualPixels();
             const auto getVolumeVisible = [&](
                 const std::vector<unsigned char>& pixels) {
@@ -2636,31 +2715,31 @@ public:
                 m_lastRenderThread;
             const bool isFirstFramePreview =
                 std::abs(
-                    mapper->GetImageSampleDistance() - 2.0)
+                    styleMapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance()
+                    styleMapper->GetSampleDistance()
                         - styleStillRay * 2.0)
                     < 1e-12
-                && mapper->GetUseJittering() == 0;
+                && styleMapper->GetUseJittering() == 0;
             const auto duringPixels = getVisualPixels();
             const bool isDuringVisible =
                 getVolumeVisible(duringPixels);
 
-            // Start callback 只镜像 rate；默认 style 的首帧 Render 必须已消费
-            // preview。Timer 随后继续以共享 source 为权威状态。
+            // Start callback 只镜像 rate；业务 preview 由下一次 owner
+            // Timer 显式提交，不能由 DesiredUpdateRate 在 mapper 内推断。
             (void)SendTimer(endpoint->interactor);
             const std::thread::id timerRenderThread =
                 m_lastRenderThread;
             const bool isTimerPreview =
                 std::abs(
-                    mapper->GetImageSampleDistance() - 2.0)
+                    styleMapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance()
+                    styleMapper->GetSampleDistance()
                         - styleStillRay * 2.0)
                     < 1e-12
-                && mapper->GetUseJittering() == 0;
+                && styleMapper->GetUseJittering() == 0;
             bool areStyleSamplesValid = ResetRenderStats();
 
             for (int index = 0;
@@ -2683,13 +2762,13 @@ public:
                 && m_renderStartCount == m_renderEndCount
                 && m_renderStarts.empty()
                 && std::abs(
-                    mapper->GetImageSampleDistance() - 2.0)
+                    styleMapper->GetImageSampleDistance() - 2.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance()
+                    styleMapper->GetSampleDistance()
                         - styleStillRay * 2.0)
                     < 1e-12
-                && mapper->GetUseJittering() == 0;
+                && styleMapper->GetUseJittering() == 0;
             const double p50Ms = GetRenderTimeMs(0.50);
             const double p95Ms = GetRenderTimeMs(0.95);
             const double maxMs = GetRenderTimeMs(1.00);
@@ -2699,15 +2778,17 @@ public:
             (void)SendTimer(endpoint->interactor);
             const bool isStyleRestored =
                 std::abs(
-                    mapper->GetImageSampleDistance() - 1.0)
+                    styleMapper->GetImageSampleDistance() - 1.0)
                     < 1e-12
                 && std::abs(
-                    mapper->GetSampleDistance() - styleStillRay)
+                    styleMapper->GetSampleDistance() - styleStillRay)
                     < 1e-12
-                && mapper->GetUseJittering() != 0;
+                && styleMapper->GetUseJittering() != 0;
             const auto afterPixels = getVisualPixels();
             const bool isAfterVisible =
                 getVolumeVisible(afterPixels);
+            styleVolume->SetVisibility(styleVolumeVisibility);
+            volume->SetVisibility(volumeVisibility);
             const bool isVisualValid = isBeforeVisible
                 && isDuringVisible
                 && isAfterVisible
@@ -2817,21 +2898,33 @@ public:
         const bool isIsoSent =
             m_session->SendRequest(
                 std::move(isoRequest));
-        (void)SendTimer(endpoint->interactor);
-        HostViewTarget isoTarget;
-        isoTarget.viewId = "primary-3d";
-        const auto isoState =
-            m_session->GetRenderViewState(isoTarget);
+        std::optional<HostRenderViewState> isoState;
         bool hasIsoActor = false;
-        auto* isoProps = renderer->GetViewProps();
-        if (isoProps) {
-            isoProps->InitTraversal();
-            while (auto* prop = isoProps->GetNextProp()) {
-                hasIsoActor =
-                    vtkActor::SafeDownCast(prop)
-                    || hasIsoActor;
+        const auto isoDeadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(10);
+        do {
+            (void)SendTimer(endpoint->interactor);
+            QApplication::processEvents();
+            HostViewTarget isoTarget;
+            isoTarget.viewId = "primary-3d";
+            isoState = m_session->GetRenderViewState(isoTarget);
+            hasIsoActor = false;
+            auto* isoProps = renderer->GetViewProps();
+            if (isoProps) {
+                isoProps->InitTraversal();
+                while (auto* prop = isoProps->GetNextProp()) {
+                    hasIsoActor = vtkActor::SafeDownCast(prop)
+                        || hasIsoActor;
+                }
             }
-        }
+            if (isoState
+                && isoState->viewMode == HostRenderMode::IsoSurface
+                && isoState->volumeQuality == HostVolumeQuality::High
+                && hasIsoActor) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < isoDeadline);
         const bool isIsoStable =
             isIsoSent
             && isoState
@@ -2869,9 +2962,24 @@ public:
         const bool isRestoreSent =
             m_session->SendRequest(
                 std::move(restoreRequest));
-        (void)SendTimer(endpoint->interactor);
-        const auto restoreState =
-            m_session->GetRenderViewState(isoTarget);
+        std::optional<HostRenderViewState> restoreState;
+        const auto restoreDeadline = std::chrono::steady_clock::now()
+            + std::chrono::seconds(10);
+        do {
+            (void)SendTimer(endpoint->interactor);
+            QApplication::processEvents();
+            HostViewTarget restoreTarget;
+            restoreTarget.viewId = "primary-3d";
+            restoreState = m_session->GetRenderViewState(restoreTarget);
+            if (restoreState
+                && restoreState->viewMode
+                    == HostRenderMode::CompositeIsoSurface
+                && restoreState->volumeQuality
+                    == HostVolumeQuality::Ultra) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < restoreDeadline);
         areSamplesValid =
             isRestoreSent
             && restoreState

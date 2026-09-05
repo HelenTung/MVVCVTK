@@ -438,7 +438,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
                 return m_cancelRequested.load(std::memory_order_acquire);
             },
             [this, requestId = job.requestId](const double progress) {
-                SetProgress(requestId, progress);
+                SetProgress(requestId, progress * 0.9);
             });
         candidate.requiredBytes = result.requiredBytes;
         candidate.metrics = result.metrics;
@@ -469,18 +469,87 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
 
-        candidate.labels =
-            std::make_shared<std::vector<std::uint32_t>>(
-                std::move(result.labels));
-        candidate.status = PartResultStatus::Succeeded;
-        candidate.failureReason = PartFailureReason::None;
-        candidate.message = BuildSuccessMessage(result.metrics);
         candidate.extent = volume.extent;
         candidate.dimensions = volume.dimensions;
         candidate.spacing = volume.spacing;
         candidate.origin = volume.origin;
         candidate.direction = volume.direction;
         candidate.parts = std::move(result.parts);
+        candidate.labels =
+            std::make_shared<std::vector<std::uint32_t>>(
+                std::move(result.labels));
+
+        PartSurfaceBuildRequest surfaceRequest;
+        surfaceRequest.extent = candidate.extent;
+        surfaceRequest.dimensions = candidate.dimensions;
+        surfaceRequest.spacing = candidate.spacing;
+        surfaceRequest.origin = candidate.origin;
+        surfaceRequest.direction = candidate.direction;
+        surfaceRequest.labels = candidate.labels;
+        surfaceRequest.partCount = static_cast<std::uint32_t>(
+            candidate.parts.size());
+        surfaceRequest.maxWorkingBytes = job.maxWorkingBytes;
+        auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
+            surfaceRequest,
+            [this] {
+                return m_cancelRequested.load(std::memory_order_acquire);
+            },
+            [this, requestId = job.requestId](const double progress) {
+                SetProgress(requestId, 0.9 + progress * 0.1);
+            });
+        candidate.requiredBytes = std::max(
+            candidate.requiredBytes, surfaceResult.requiredBytes);
+        if (surfaceResult.failureReason != PartFailureReason::None
+            || !surfaceResult.product
+            || !surfaceResult.product->surface) {
+            candidate.status = surfaceResult.failureReason
+                    == PartFailureReason::Cancelled
+                ? PartResultStatus::Cancelled
+                : PartResultStatus::Failed;
+            candidate.failureReason = surfaceResult.failureReason
+                    == PartFailureReason::None
+                ? PartFailureReason::InternalError
+                : surfaceResult.failureReason;
+            candidate.message = surfaceResult.message;
+            candidate.parts.clear();
+            candidate.labels.reset();
+            return candidate;
+        }
+        std::size_t systemPeakBytes = surfaceResult.requiredBytes;
+        if (result.metrics.catalogBytes
+            > std::numeric_limits<std::size_t>::max()
+                - systemPeakBytes) {
+            candidate.status = PartResultStatus::Failed;
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.requiredBytes =
+                std::numeric_limits<std::size_t>::max();
+            candidate.message = BuildBudgetMessage(
+                candidate.requiredBytes, job.maxWorkingBytes);
+            candidate.parts.clear();
+            candidate.labels.reset();
+            return candidate;
+        }
+        systemPeakBytes += result.metrics.catalogBytes;
+        candidate.requiredBytes = std::max(
+            candidate.requiredBytes, systemPeakBytes);
+        if (systemPeakBytes > job.maxWorkingBytes) {
+            candidate.status = PartResultStatus::Failed;
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.message = BuildBudgetMessage(
+                systemPeakBytes, job.maxWorkingBytes);
+            candidate.parts.clear();
+            candidate.labels.reset();
+            return candidate;
+        }
+        candidate.surface = std::move(surfaceResult.product);
+        candidate.surfaceBytes = candidate.surface->actualBytes;
+        candidate.metrics.peakWorkingBytes = std::max(
+            candidate.metrics.peakWorkingBytes, systemPeakBytes);
+        candidate.status = PartResultStatus::Succeeded;
+        candidate.failureReason = PartFailureReason::None;
+        candidate.message = BuildSuccessMessage(candidate.metrics)
+            + " surfaceBytes="
+            + std::to_string(candidate.surfaceBytes) + ".";
         SetProgress(job.requestId, 1.0);
         return candidate;
     }

@@ -3,6 +3,7 @@
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Data/TrustedImageState.h"
 #include "Host/PartSegmentationHostTypes.h"
+#include "Render/Internal/PartSurfaceProductBuilder.h"
 
 #include <array>
 #include <atomic>
@@ -33,6 +34,8 @@ struct PartLabelCandidate final {
         0.0, 0.0, 1.0
     };
     std::shared_ptr<std::vector<std::uint32_t>> labels;
+    std::shared_ptr<const PartSurfaceProduct> surface;
+    std::size_t surfaceBytes = 0;
     std::vector<PartRecord> parts;
     std::size_t requiredBytes = 0;
     PartAlgorithmMetrics metrics;

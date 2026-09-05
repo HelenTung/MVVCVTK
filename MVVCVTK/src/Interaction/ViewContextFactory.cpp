@@ -704,6 +704,7 @@ void StdViewContext::OnVTKEvent(
             if (m_isStyleInteracting) return;
             if (!m_ports.state->SetInteracting(source, true)) return;
             m_isStyleInteracting = true;
+            (void)m_ports.update->SetInteractionPhase();
             if (m_renderWindow) {
                 m_renderWindow->SetDesiredUpdateRate(
                     GetRenderRate(true));

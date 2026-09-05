@@ -2,6 +2,7 @@
 
 #include "App/AppTypes.h"
 #include "Render/Contracts/RenderEffect.h"
+#include "Render/Internal/RenderResourceCoordinator.h"
 
 #include <vtkActor.h>
 #include <vtkDataObject.h>
@@ -35,6 +36,9 @@ public:
     virtual bool SetVisualState(
         const RenderParams&,
         UpdateFlags = UpdateFlags::All) { return true; }
+    virtual bool SetProductCommit() { return true; }
+    virtual RenderTransitionState GetTransitionState() const { return {}; }
+    virtual void SetFirstRenderDuration(std::uint64_t) noexcept {}
     virtual int GetPlaneAxis(vtkActor*) { return -1; }
     virtual int GetNavigationAxis() const { return -1; }
     virtual vtkProp3D* GetMainProp() { return nullptr; }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/AppTypes.h"
+#include "App/Services/DataCommitTypes.h"
 #include "Data/TrustedImageState.h"
 #include "Data/VolumeTypes.h"
 
@@ -151,13 +152,23 @@ class AppDataStagePort {
 public:
     virtual ~AppDataStagePort() = default;
 
-    // 强顺序协议：1. Build 候选；2. Set 到 View；
-    // 3A. 失败时 Reset View 后 Clear 候选；3B. 数据发布后以 noexcept 完成状态接管。
-    virtual bool BuildDataStage(const TrustedImageSnapshot& snapshot) = 0;
-    virtual bool SetViewStage(const TrustedImageSnapshot& snapshot) = 0;
-    virtual bool ResetViewStage() = 0;
-    virtual bool ClearDataStage() = 0;
-    virtual void SetDataStageComplete() noexcept = 0;
+    virtual DataStageStatus StartDataStage(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision) = 0;
+    virtual DataStageStatus SetDataStageReady(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision) = 0;
+    virtual DataStageStatus GetDataStageStatus(
+        std::uint64_t transactionRevision) const = 0;
+    virtual bool SetViewStage(
+        const TrustedImageSnapshot& snapshot,
+        std::uint64_t transactionRevision) = 0;
+    virtual bool ResetViewStage(
+        std::uint64_t transactionRevision) = 0;
+    virtual bool ClearDataStage(
+        std::uint64_t transactionRevision) = 0;
+    virtual void SetDataStageComplete(
+        std::uint64_t transactionRevision) noexcept = 0;
 };
 
 struct AppPorts final {

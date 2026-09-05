@@ -192,6 +192,7 @@ private:
         PartSegmentationResult result) const noexcept;
     bool AttachDisplay(
         vtkSmartPointer<vtkImageData> labelImage,
+        std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
         const std::vector<HostFeatureView>& views,
         std::vector<OverlayBinding>& nextBindings);
     bool RemoveDisplay();
@@ -216,6 +217,7 @@ private:
     // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
     std::shared_ptr<std::vector<std::uint32_t>> m_labelValues;
     vtkSmartPointer<vtkImageData> m_labelImage;
+    std::shared_ptr<const PartSurfaceProduct> m_surfaceProduct;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
@@ -285,6 +287,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     m_service.reset();
     m_requestSource.reset();
     m_activeSource.reset();
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_requestViews.clear();
@@ -543,10 +546,12 @@ void PartSegmentationHostFeature::Impl::SendComplete(
 
 bool PartSegmentationHostFeature::Impl::AttachDisplay(
     vtkSmartPointer<vtkImageData> labelImage,
+    std::shared_ptr<const PartSurfaceProduct> surfaceProduct,
     const std::vector<HostFeatureView>& views,
     std::vector<OverlayBinding>& nextBindings)
 {
-    if (!m_views || !m_host || !labelImage || views.empty()) return false;
+    if (!m_views || !m_host || !labelImage || !surfaceProduct
+        || !surfaceProduct->surface || views.empty()) return false;
     std::vector<std::string> viewIds;
     viewIds.reserve(views.size());
     nextBindings.reserve(views.size());
@@ -557,7 +562,12 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
             RemoveBindings(nextBindings);
             return false;
         }
-        overlay->SetInputData(labelImage);
+        if (view.role == HostRenderViewRole::Primary3D) {
+            overlay->SetInputData(surfaceProduct->surface);
+        }
+        else {
+            overlay->SetInputData(labelImage);
+        }
         if (!service->AttachOverlay(overlay)) {
             RemoveBindings(nextBindings);
             return false;
@@ -603,13 +613,18 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         SetState(state);
         return true;
     }
-    if (!m_labelValues || !m_labelImage || m_activeViews.empty()) {
+    if (!m_labelValues || !m_labelImage || !m_surfaceProduct
+        || m_activeViews.empty()) {
         state.isOverlayVisible = true;
         SetState(state);
         return true;
     }
     std::vector<OverlayBinding> nextBindings;
-    if (!AttachDisplay(m_labelImage, m_activeViews, nextBindings)) {
+    if (!AttachDisplay(
+            m_labelImage,
+            m_surfaceProduct,
+            m_activeViews,
+            nextBindings)) {
         return false;
     }
     RemoveBindings(m_bindings);
@@ -622,6 +637,7 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
     if (!RemoveDisplay()) return false;
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_activeSource.reset();
@@ -644,6 +660,7 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     // 下一次 owner tick 会重试，避免悬空或半清理。
     if (!RemoveDisplay()) return;
     m_activeSource.reset();
+    m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
     m_activeViews.clear();
@@ -705,12 +722,17 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         bool isDisplayReady = true;
         if (isVisible) {
             isDisplayReady = AttachDisplay(
-                labelView.image, m_requestViews, nextBindings);
+                labelView.image,
+                candidate.surface,
+                m_requestViews,
+                nextBindings);
         }
         else if (m_host) {
             isDisplayReady = m_host->SetActiveViews({});
         }
-        if (!labelView.labels || !labelView.image || !isDisplayReady) {
+        if (!labelView.labels || !labelView.image
+            || !candidate.surface || !candidate.surface->surface
+            || !isDisplayReady) {
             RemoveBindings(nextBindings);
             SetRequestFailed(PartFailureReason::DisplayFailed);
             SendComplete(
@@ -726,11 +748,13 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         }
         else {
             RemoveBindings(m_bindings);
+            m_surfaceProduct.reset();
             m_labelImage = nullptr;
             m_labelValues.reset();
             m_bindings = std::move(nextBindings);
             m_labelValues = std::move(labelView.labels);
             m_labelImage = std::move(labelView.image);
+            m_surfaceProduct = std::move(candidate.surface);
             m_activeViews = std::move(m_requestViews);
             m_activeSource = m_requestSource;
             ++m_resultRevision;
