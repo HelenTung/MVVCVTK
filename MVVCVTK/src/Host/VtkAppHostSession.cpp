@@ -455,7 +455,7 @@ public:
                 ready.scalarRange = payload->GetScalarRange();
                 ready.spacing = payload->GetGeometry().spacing;
                 ready.cursorWorld = state->GetCursorWorld();
-                state->SetDataReady(ready);
+                state->SetImageDataReady(ready);
             }
             return result;
         }

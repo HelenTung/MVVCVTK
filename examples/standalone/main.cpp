@@ -596,7 +596,22 @@ namespace {
                 HostKeyChord{ 0, "F5" },
                 HostKeyChord{ 'u' },
                 HostKeyChord{ 'u', {}, true },
-                HostKeyChord{ 'u', {}, false, true }
+                HostKeyChord{ 'u', {}, false, true },
+                HostKeyChord{ 'o' }, HostKeyChord{ 'p' },
+                HostKeyChord{ '0' }, HostKeyChord{ '1' }, HostKeyChord{ '2' },
+                HostKeyChord{ '4' }, HostKeyChord{ '5' },
+                HostKeyChord{ '3', {}, true }, HostKeyChord{ '6' },
+                HostKeyChord{ 0, "Escape" },
+                HostKeyChord{ '0', {}, false, true },
+                HostKeyChord{ '1', {}, false, true },
+                HostKeyChord{ '2', {}, false, true },
+                HostKeyChord{ '3', {}, false, true },
+                HostKeyChord{ '4', {}, false, true },
+                HostKeyChord{ '5', {}, false, true },
+                HostKeyChord{ '6', {}, false, true },
+                HostKeyChord{ '7', {}, false, true },
+                HostKeyChord{ '8', {}, false, true },
+                HostKeyChord{ '9', {}, false, true }
             }
         {
         }
@@ -640,6 +655,7 @@ namespace {
                 return false;
             }
             m_isKeyDown.fill(false);
+            m_cropStatus.clear();
             m_host.reset();
             m_data.reset();
             m_isAttached = false;
@@ -665,6 +681,7 @@ namespace {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
             SendSurfaceProgress();
 #endif
+            SendCropStatus();
             return SendQualityAudit();
         }
 
@@ -708,6 +725,10 @@ namespace {
             RestoreCropSource,
             Help, Data, Labels, Scenes, FitViews,
             SurfaceStart, SurfaceClear, SurfaceStop,
+            CropBox, CropPlane, CropNoMode, CropKeepMode, CropRemoveMode,
+            CropPrevious, CropNext, CropBuildAlias, CropRestoreAlias, CropExit,
+            CropNode0, CropNode1, CropNode2, CropNode3, CropNode4,
+            CropNode5, CropNode6, CropNode7, CropNode8, CropNode9,
             Count
         };
 
@@ -1083,59 +1104,93 @@ namespace {
             return isAccepted;
         }
 
-        bool SendCrop(const CropHostAction action)
+        void SendCropStatus()
         {
-            const auto cropFeature = m_cropFeature.lock();
-            if (!cropFeature) {
-                std::cerr
-                    << "[OrthogonalCrop] request rejected: feature unavailable\n"
-                    << std::flush;
-                return false;
+            const auto crop = m_cropFeature.lock();
+            if (!m_isAttached || !crop || !m_host) return;
+            const auto state = crop->GetState();
+            if (!state.isActive) {
+                m_cropStatus.clear();
+                return;
             }
+            const auto& history = state.history;
+            const char* mode = !history.isEditing ? "Frozen"
+                : history.editMode == CropRemovalMode::KeepInside ? "KeepInside"
+                : history.editMode == CropRemovalMode::RemoveInside ? "RemoveInside" : "Idle";
+            std::ostringstream status;
+            status << "Crop active " << history.nodeCount << '/' << history.operationCount
+                << " | base " << history.baseNodeCount << " | all " << history.allOperationCount
+                << " | " << mode;
+            if (history.hasEditableOp) status << " | Editable";
+            if (status.str() != m_cropStatus && SetDemoStatus(status.str())) {
+                m_cropStatus = status.str();
+            }
+        }
 
+        bool SetCropData(const bool useResult)
+        {
+            const auto crop = m_cropFeature.lock();
+            const auto descriptor = m_session.GetImageDescriptor();
+            if (!crop || !descriptor) return false;
+            const auto state = crop->GetState();
+            HostDataSelectRequest request;
+            request.dataRevision = useResult ? state.outputRevision : state.sourceRevision;
+            request.expectedBindingRevision = descriptor->bindingRevision;
+            const bool isSucceeded = m_session.SendRequest(std::move(request));
+            (void)SetDemoStatus(isSucceeded
+                ? (useResult ? "Crop result selected" : "Crop source selected")
+                : "Data selection rejected");
+            return isSucceeded;
+        }
+
+        bool SendCrop(
+            const CropHostAction action,
+            std::optional<CropRemovalMode> removalMode = {},
+            std::optional<std::size_t> nodeCount = {})
+        {
+            const auto crop = m_cropFeature.lock();
+            if (!crop) return false;
             CropHostRequest request;
             request.action = action;
-            if (action == CropHostAction::BuildResult) {
-                const bool isAccepted = cropFeature->SendRequest(
-                    std::move(request),
-                    [](CropBuildResult result) {
-                        std::cerr
-                            << "[OrthogonalCrop] BuildResult"
-                            << " | succeeded=" << result.isSucceeded
-                            << " | failure="
-                            << static_cast<int>(result.failureReason)
-                            << " | commit=" << result.commitId
-                            << " | source_generation="
-                            << result.sourceRevision.generation
-                            << " | recipe_generation="
-                            << result.recipeRevision.generation
-                            << " | output_generation="
-                            << result.outputRevision.generation
-                            << " | message=" << result.message << '\n'
-                            << std::flush;
-                    });
-                std::cerr
-                    << "[OrthogonalCrop] BuildResult request "
-                    << (isAccepted ? "accepted" : "rejected") << '\n'
-                    << std::flush;
-                return isAccepted;
+            request.removalMode = removalMode;
+            request.nodeCount = nodeCount;
+            if (action == CropHostAction::Start || action == CropHostAction::Box
+                || action == CropHostAction::Plane || action == CropHostAction::Mode
+                || action == CropHostAction::BuildResult) {
+                CropHostTarget target;
+                target.inputBinding = std::string(primaryVolumeBinding);
+                target.referenceView = m_isoTarget;
+                target.targetViews = m_inputViews;
+                request.target = std::move(target);
             }
-
-            const bool isAccepted = cropFeature->SendRequest(
-                std::move(request));
-            const auto state = cropFeature->GetState();
-            std::cerr
-                << "[OrthogonalCrop] action="
-                << static_cast<int>(action)
-                << " | accepted=" << isAccepted
-                << " | commit=" << state.commitId
-                << " | source_generation="
-                << state.sourceRevision.generation
-                << " | recipe_generation="
-                << state.recipeRevision.generation
-                << " | output_generation="
-                << state.outputRevision.generation << '\n'
-                << std::flush;
+            CropBuildCallback onComplete;
+            if (action == CropHostAction::BuildResult) {
+                const auto weakOwner = weak_from_this();
+                const auto controlRevision = m_controlRevision;
+                onComplete = [weakOwner, controlRevision](CropBuildResult result) {
+                    const auto owner = weakOwner.lock();
+                    if (!owner || !owner->m_isAttached) return;
+                    std::ostringstream status;
+                    status << "Crop result " << (result.isSucceeded ? "ready" : "failed")
+                        << " | commit=" << result.commitId
+                        << " | source=" << result.sourceRevision.generation
+                        << " | recipe=" << result.recipeRevision.generation
+                        << " | output=" << result.outputRevision.generation
+                        << " | " << result.message;
+                    const auto crop = owner->m_cropFeature.lock();
+                    if (owner->m_controlRevision == controlRevision
+                        && crop && crop->GetState().isActive) {
+                        (void)owner->SetDemoStatus(status.str());
+                    }
+                    std::cout << "[OrthogonalCrop] " << status.str() << '\n';
+                };
+            }
+            const bool isAccepted = crop->SendRequest(std::move(request), std::move(onComplete));
+            std::cout << "[OrthogonalCrop] action=" << static_cast<int>(action)
+                << " accepted=" << isAccepted << '\n';
+            if (!isAccepted) (void)SetDemoStatus("Crop request rejected");
+            else if (action == CropHostAction::Exit) (void)SetDemoStatus("Crop editing ended");
+            else SendCropStatus();
             return isAccepted;
         }
 
@@ -1323,6 +1378,7 @@ namespace {
 
         bool SendControl(const ControlAction action)
         {
+            ++m_controlRevision;
             switch (action) {
             case ControlAction::ColorUp:
             case ControlAction::ColorDown:
@@ -1364,12 +1420,29 @@ namespace {
 #endif
             case ControlAction::StartGap:
                 return StartGap();
+            case ControlAction::CropBuildAlias:
             case ControlAction::BuildCropResult:
                 return SendCrop(CropHostAction::BuildResult);
             case ControlAction::SetCropPrimary:
-                return SendCrop(CropHostAction::SetPrimaryResult);
+                return SetCropData(true);
+            case ControlAction::CropRestoreAlias:
             case ControlAction::RestoreCropSource:
-                return SendCrop(CropHostAction::RestoreOriginal);
+                return SetCropData(false);
+            case ControlAction::CropBox: return SendCrop(CropHostAction::Box);
+            case ControlAction::CropPlane: return SendCrop(CropHostAction::Plane);
+            case ControlAction::CropNoMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::None);
+            case ControlAction::CropKeepMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::KeepInside);
+            case ControlAction::CropRemoveMode: return SendCrop(CropHostAction::Mode, CropRemovalMode::RemoveInside);
+            case ControlAction::CropPrevious: return SendCrop(CropHostAction::Previous);
+            case ControlAction::CropNext: return SendCrop(CropHostAction::Next);
+            case ControlAction::CropExit: return SendCrop(CropHostAction::Exit);
+            case ControlAction::CropNode0: case ControlAction::CropNode1:
+            case ControlAction::CropNode2: case ControlAction::CropNode3:
+            case ControlAction::CropNode4: case ControlAction::CropNode5:
+            case ControlAction::CropNode6: case ControlAction::CropNode7:
+            case ControlAction::CropNode8: case ControlAction::CropNode9:
+                return SendCrop(CropHostAction::Node, {},
+                    static_cast<std::size_t>(action) - static_cast<std::size_t>(ControlAction::CropNode0));
             default:
                 return false;
             }
@@ -1378,6 +1451,10 @@ namespace {
         InteractionResult OnInput(
             const InteractionEvent& event)
         {
+            if (event.eventKind == InteractionEventKind::Cancel) {
+                m_isKeyDown.fill(false);
+                return {};
+            }
             if (event.eventKind == InteractionEventKind::KeyRelease) {
                 bool wasDown = false;
                 for (std::size_t index = 0; index < m_keys.size(); ++index) {
@@ -1391,6 +1468,10 @@ namespace {
             }
             const auto action = GetAction(event);
             if (!action) return {};
+            if (*action == ControlAction::CropExit) {
+                const auto crop = m_cropFeature.lock();
+                if (!crop || !crop->GetState().isActive) return {};
+            }
             const auto index = static_cast<std::size_t>(*action);
 
             if (event.eventKind
@@ -1425,6 +1506,8 @@ namespace {
         bool m_isDemoFitPending = false;
         HostViewTargets m_inputViews;
         std::weak_ptr<CropHostFeature> m_cropFeature;
+        std::string m_cropStatus;
+        std::uint64_t m_controlRevision = 0;
         std::weak_ptr<GapHostFeature> m_gapFeature;
         GapHostStartParams m_gapStart;
         std::array<HostKeyChord, actionCount> m_keys;
@@ -2072,36 +2155,6 @@ namespace {
         return config;
     }
 
-    CropHostConfig BuildCrop(
-        const HostViewTargets& targets)
-    {
-        CropHostConfig config;
-        config.defaultTarget.referenceView = {
-            "", true, HostRenderViewRole::Primary3D };
-        config.defaultTarget.targetViews = targets;
-        config.defaultTarget.isTargetViewsUsed = true;
-        config.defaultTarget.isStatusVisible = true;
-        config.inputViews = targets;
-        config.keys.box.keyCode = 'o';
-        config.keys.plane.keyCode = 'p';
-        config.keys.noMode.keyCode = '0';
-        config.keys.keepMode.keyCode = '1';
-        config.keys.removeMode.keyCode = '2';
-        config.keys.buildResult.keyCode = '3';
-        config.keys.buildResult.isCtrlDown = true;
-        config.keys.restoreOriginal.keyCode = '6';
-        config.keys.previous.keyCode = '4';
-        config.keys.next.keyCode = '5';
-        config.keys.exit.keySym = "Escape";
-        for (std::size_t index = 0;
-            index < config.keys.nodes.size(); ++index) {
-            config.keys.nodes[index].keyCode =
-                static_cast<char>('0' + index);
-            config.keys.nodes[index].isAltDown = true;
-        }
-        return config;
-    }
-
     GapHostConfig GetGapConfig(
         const HostViewTargets& inputViews)
     {
@@ -2214,8 +2267,7 @@ int main(int argc, char* argv[])
     }
 
     std::vector<std::shared_ptr<HostFeature>> features;
-    auto cropFeature = std::make_shared<CropHostFeature>(
-        BuildCrop(allViews));
+    auto cropFeature = std::make_shared<CropHostFeature>();
     features.push_back(cropFeature);
     auto gapConfig = GetGapConfig(allViews);
     if (isDemo || isDemoAudit) {
@@ -2346,7 +2398,13 @@ int main(int argc, char* argv[])
 #endif
         });
         demoAudit->AddStep("crop box", {'o'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("crop keep mode", {'1'}, [cropFeature] {
+            return cropFeature->GetState().history.editMode == CropRemovalMode::KeepInside;
+        });
         demoAudit->AddStep("crop plane", {'p'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("crop remove mode", {'2'}, [cropFeature] {
+            return cropFeature->GetState().history.editMode == CropRemovalMode::RemoveInside;
+        });
         demoAudit->AddStep("final graph", {0, "F2"}, ready);
         features.push_back(demoAudit);
     }

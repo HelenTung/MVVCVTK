@@ -19,6 +19,9 @@ class ViewPortStub;
 // 三个窄 fake 共享测试状态，但 concrete identity 始终彼此独立。
 class AppPortState final {
 public:
+    DataRevisionRef selectedData;
+    DataBindingRevision expectedSelection = 0;
+    int selectionCount = 0;
     int GetViewSetCount() const
     {
         return m_viewSetCount + m_vizModeSetCount;
@@ -403,6 +406,17 @@ public:
     explicit SessionPortStub(std::shared_ptr<AppPortState> state)
         : m_state(std::move(state))
     {
+    }
+
+    bool SetPrimaryData(
+        const DataRevisionRef& dataRevision,
+        const DataBindingRevision expectedBindingRevision) override
+    {
+        if (!m_state) return false;
+        m_state->selectedData = dataRevision;
+        m_state->expectedSelection = expectedBindingRevision;
+        ++m_state->selectionCount;
+        return true;
     }
 
     bool SendSessionUpdate(

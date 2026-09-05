@@ -492,6 +492,129 @@ bool GetReentrantLoadValid()
         && !data.GetLoadStage();
 }
 
+bool GetDataSelectionValid()
+{
+    auto core = GetLoadCore();
+    if (!SetPrimaryBaseline(core)) return false;
+    const auto first = core.sharedDataMgr->GetPrimaryImage();
+    if (!SetPrimaryBaseline(core)) return false;
+    const auto second = core.sharedDataMgr->GetPrimaryImage();
+    if (!first || !second) return false;
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, GetLoadViews()) || !views.SetInteractorsReady()) return false;
+    HostCommandRouter router(views.GetViewDirectory());
+    const auto select = [&](const DataRevisionRef& ref, DataBindingRevision expected) {
+        HostDataSelectRequest request;
+        request.dataRevision = ref;
+        request.expectedBindingRevision = expected;
+        return router.Dispatch(std::move(request));
+    };
+    const auto current = [&] { return core.sharedDataMgr->GetPrimaryImage(); };
+    auto epoch = GetCommittedEpoch(views);
+    int observed = 0;
+    const auto observer = core.sharedDataMgr->AttachDataChange(
+        [&](const DataChangeSet&) { ++observed; });
+    const auto initialCommit = core.sharedDataMgr->GetDataGraph().commitId;
+    bool valid = select(second->data->self, second->binding->revision)
+        && observed == 0 && core.sharedDataMgr->GetDataGraph().commitId == initialCommit
+        && !select({}, second->binding->revision)
+        && !select({ first->data->self.entityId, 999999 }, second->binding->revision)
+        && select(first->data->self, second->binding->revision);
+    const auto selectedFirst = current();
+    valid = valid && selectedFirst && selectedFirst->data == first->data
+        && selectedFirst->binding->revision == second->binding->revision + 1
+        && core.sharedState->GetDataRevision() == first->data->self
+        && !select(second->data->self, second->binding->revision);
+    if (!selectedFirst) return false;
+    valid = valid && select(second->data->self, selectedFirst->binding->revision);
+    const auto selectedSecond = current();
+    if (!selectedSecond) return false;
+    valid = valid && !select(first->data->self, second->binding->revision)
+        && observed == 2 && first->data->self == first->binding->target;
+    core.sharedDataMgr->DetachDataChange(observer);
+
+    // 非图像修订拒绝，且不污染当前图像、裁切或任何结果槽。
+    const auto meshEntity = core.sharedDataMgr->CreateDataEntityId();
+    DataTransaction mesh;
+    mesh.outputs.push_back(DataRevisionDraft{
+        meshEntity, 0, DataTypes::surfaceMesh, {},
+        std::make_shared<const SurfaceMeshPayload>(
+            std::vector<double>{ 0,0,0, 1,0,0, 0,1,0 },
+            std::vector<std::uint64_t>{ 0,1,2 }), {} });
+    const auto meshCommit = core.sharedDataMgr->SetDataCommit(std::move(mesh));
+    valid = valid && meshCommit.status == DataCommitStatus::Succeeded
+        && !select({ meshEntity, 1 }, selectedSecond->binding->revision)
+        && current()->data->self == second->data->self;
+
+    // 入队/发布窗口均由同一 load admission 保护，选择不得伪报 load 成功。
+    for (const auto kind : { LoadEventKind::File, LoadEventKind::Reload }) {
+        valid = core.sharedState->StartLoad(kind) && valid;
+        valid = !select(first->data->self, current()->binding->revision) && valid;
+        valid = core.sharedState->GetIsLoadActive()
+            && (kind == LoadEventKind::File ? core.sharedState->GetFileLoadState()
+                : core.sharedState->GetReloadLoadState()) == LoadState::Loading && valid;
+        if (kind == LoadEventKind::File) core.sharedState->SetFileLoadFailed();
+        else core.sharedState->SetReloadLoadFailed();
+        valid = core.sharedState->ResetLoad(kind) && valid;
+    }
+
+    // 发布 observer 重入第二次选择，外层不得覆盖其更新的 DataReady 身份。
+    bool hasReentered = false;
+    bool innerSucceeded = false;
+    const auto nestedObserver = core.sharedDataMgr->AttachDataChange(
+        [&](const DataChangeSet&) {
+            if (hasReentered) return;
+            hasReentered = true;
+            innerSucceeded = select(second->data->self, current()->binding->revision);
+        });
+    const bool outerSucceeded = select(first->data->self, current()->binding->revision);
+    core.sharedDataMgr->DetachDataChange(nestedObserver);
+    const auto latest = current();
+    valid = valid && outerSucceeded && innerSucceeded && latest
+        && latest->data->self == second->data->self
+        && core.sharedState->GetDataRevision() == latest->data->self
+        && core.sharedState->GetDataBindingRevision() == latest->binding->revision;
+
+    // callback 在完成后可以继续选择；重复完成或持锁调用会被次数/最终状态暴露。
+    int callbackCount = 0;
+    HostDataSelectRequest request;
+    request.dataRevision = first->data->self;
+    request.expectedBindingRevision = current()->binding->revision;
+    valid = router.Dispatch(std::move(request), [&](bool succeeded) {
+        ++callbackCount;
+        valid = select(second->data->self, current()->binding->revision) && succeeded && valid;
+    }) && valid;
+    valid = callbackCount == 1 && valid;
+    const auto expected = current();
+    bool rendered = false;
+    for (int poll = 0; poll < 500 && !rendered; ++poll) {
+        views.ApplyFrameUpdates();
+        SendFrame(views, epoch);
+        const auto states = views.GetViewStates();
+        rendered = states.size() == 2 && std::all_of(states.begin(), states.end(),
+            [&](const HostRenderViewState& state) {
+                return state.dataRevision == expected->data->self
+                    && state.bindingRevision == expected->binding->revision;
+            });
+        if (!rendered) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    valid = rendered && valid;
+    bool wrongThreadAccepted = true;
+    std::thread wrongThread([&] {
+        wrongThreadAccepted = select(first->data->self, expected->binding->revision);
+    });
+    wrongThread.join();
+    valid = !wrongThreadAccepted && valid;
+    bool stoppedDuringPublish = false;
+    const auto stopObserver = core.sharedDataMgr->AttachDataChange(
+        [&](const DataChangeSet&) { stoppedDuringPublish = views.StopLease(); });
+    const bool selectedDuringStop = select(first->data->self, expected->binding->revision);
+    core.sharedDataMgr->DetachDataChange(stopObserver);
+    return selectedDuringStop && stoppedDuringPublish
+        && current()->data->self == first->data->self
+        && !select(second->data->self, current()->binding->revision) && valid;
+}
+
 bool GetMultiViewLoadValid(const bool isAuxStopped)
 {
     auto core = GetLoadCore();
@@ -1982,6 +2105,8 @@ int GetLoadFailCount()
 {
     VtkAppHostSession session(HostSessionConfig{});
     int failureCount = 0;
+    failureCount += GetCaseResult(GetDataSelectionValid(),
+        "Generic primary selection preserves history, CAS, load admission, reentry and scene sync") ? 0 : 1;
     HostLoadRequest missingLoad;
     missingLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };

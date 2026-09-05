@@ -125,14 +125,18 @@ public:
 
 class HostControlProbe final : public FeatureHostControl {
 public:
+    int inputCalls = 0;
+    int statusCalls = 0;
     bool AttachInput(HostInputBinding) override
     {
-        return true;
+        ++inputCalls;
+        return false;
     }
 
     bool DetachInput(std::string_view) override
     {
-        return true;
+        ++inputCalls;
+        return false;
     }
 
     bool SetActiveViews(
@@ -145,6 +149,7 @@ public:
         const std::vector<std::string>&,
         const std::string&) override
     {
+        ++statusCalls;
         return true;
     }
 
@@ -264,38 +269,23 @@ HostSessionConfig GetCropSessionConfig()
     return config;
 }
 
-CropHostConfig GetCropConfig()
-{
-    CropHostConfig config;
-    config.defaultTarget.referenceView = {
-        "crop-primary", false,
-        HostRenderViewRole::Primary3D };
-    config.defaultTarget.targetViews.viewIds = {
-        "crop-primary" };
-    config.defaultTarget.isTargetViewsUsed = true;
-    config.defaultTarget.isStatusVisible = true;
-    config.inputViews.viewIds = { "crop-primary" };
-    config.keys.box.keyCode = 'a';
-    config.keys.plane.keyCode = 'b';
-    config.keys.noMode.keyCode = 'c';
-    config.keys.keepMode.keyCode = 'd';
-    config.keys.removeMode.keyCode = 'e';
-    config.keys.previous.keyCode = 'f';
-    config.keys.next.keyCode = 'g';
-    config.keys.buildResult.keyCode = 'h';
-    config.keys.restoreOriginal.keyCode = 'i';
-    config.keys.exit.keyCode = 'j';
-    for (std::size_t index = 0;
-        index < config.keys.nodes.size(); ++index) {
-        config.keys.nodes[index].keyCode =
-            static_cast<char>('0' + index);
-    }
-    return config;
-}
-
 CropHostTarget GetCropTarget()
 {
-    return GetCropConfig().defaultTarget;
+    CropHostTarget target;
+    target.inputBinding = std::string(primaryVolumeBinding);
+    target.referenceView = { "crop-primary", false, HostRenderViewRole::Primary3D };
+    target.targetViews.viewIds = { "crop-primary" };
+    return target;
+}
+
+bool SetSelectedData(VtkAppHostSession& session, const DataRevisionRef& ref)
+{
+    const auto descriptor = session.GetImageDescriptor();
+    if (!descriptor) return false;
+    HostDataSelectRequest request;
+    request.dataRevision = ref;
+    request.expectedBindingRevision = descriptor->bindingRevision;
+    return session.SendRequest(std::move(request));
 }
 
 CropHostRequest GetCropRequest(const CropHostAction action)
@@ -545,7 +535,7 @@ int GetCropFailCount()
     const auto target = GetCropTarget();
     int unattachedCallbackCount = 0;
     auto unattachedFeature =
-        std::make_shared<CropHostFeature>(GetCropConfig());
+        std::make_shared<CropHostFeature>();
     const bool isUnattachedRejected =
         !unattachedFeature->SendRequest(
             GetTargetRequest(
@@ -561,14 +551,19 @@ int GetCropFailCount()
         std::make_shared<DataPortProbe>();
     standaloneContext.host =
         std::make_shared<HostControlProbe>();
-    CropHostFeature standaloneFeature(GetCropConfig());
+    CropHostFeature standaloneFeature;
     const bool isStandaloneRejected =
         !standaloneFeature.AttachHost(standaloneContext);
+    const auto narrowFeature = std::make_shared<CropHostFeature>();
+    const auto controlProbe = std::dynamic_pointer_cast<HostControlProbe>(standaloneContext.host);
+    const bool isInputIndependent = narrowFeature->AttachHost(standaloneContext)
+        && narrowFeature->DetachHost() && narrowFeature->DetachHost()
+        && controlProbe && controlProbe->inputCalls == 0 && controlProbe->statusCalls == 0;
     failureCount += GetCaseResult(
         isUnattachedRejected
             && unattachedCallbackCount == 0
-            && isStandaloneRejected,
-        "Crop rejects unattached requests and non-shared attachment") ? 0 : 1;
+            && isStandaloneRejected && isInputIndependent,
+        "Crop rejects invalid ownership and needs no application input or status port") ? 0 : 1;
 
     std::shared_ptr<FeatureViewService> retiredService;
     bool isLeaseFixtureReady = false;
@@ -612,8 +607,7 @@ int GetCropFailCount()
         "Feature ports hide App identity and reject wrong-thread or retired leases") ? 0 : 1;
 
     VtkAppHostSession session(GetCropSessionConfig());
-    auto feature = std::make_shared<CropHostFeature>(
-        GetCropConfig());
+    auto feature = std::make_shared<CropHostFeature>();
     auto tickGate = std::make_shared<CropTickGate>(feature);
     const auto initialState = feature->GetState();
     auto contextProbe =
@@ -770,8 +764,10 @@ int GetCropFailCount()
         std::move(unknownInput));
     const auto beforeUnknownStart =
         contextProbe->m_data->GetDataGraph();
+    auto unsupportedTarget = GetCropTarget();
+    unsupportedTarget.inputBinding = std::string(cropInputBinding);
     const bool isUnknownInputRejected = !feature->SendRequest(
-        GetTargetRequest(CropHostAction::Start, GetCropTarget()));
+        GetTargetRequest(CropHostAction::Start, unsupportedTarget));
     const auto afterUnknownStart =
         contextProbe->m_data->GetDataGraph();
     DataTransaction clearUnknown;
@@ -802,24 +798,18 @@ int GetCropFailCount()
 
     const bool isInitialNodeRejected =
         !feature->SendRequest(GetNodeRequest(0));
-    bool areCommandKeysHandled = true;
+    const auto beforeKeys = feature->GetState();
     for (char keyCode = 'a'; keyCode <= 'j'; ++keyCode) {
-        areCommandKeysHandled =
-            GetKeyHandled(*endpoint, keyCode)
-            && areCommandKeysHandled;
+        (void)GetKeyHandled(*endpoint, keyCode);
     }
-    bool areNodeKeysHandled = true;
-    for (char keyCode = '0'; keyCode <= '9'; ++keyCode) {
-        areNodeKeysHandled =
-            GetKeyHandled(*endpoint, keyCode)
-            && areNodeKeysHandled;
-    }
+    const auto afterKeys = feature->GetState();
     failureCount += GetCaseResult(
-        areCommandKeysHandled && areNodeKeysHandled,
-        "Crop maps every command and node key through one input binding") ? 0 : 1;
+        !afterKeys.isActive && beforeKeys.history.nodeCount == afterKeys.history.nodeCount,
+        "Crop alone does not interpret application shortcut keys") ? 0 : 1;
 
     auto modeWithoutValue = GetTargetRequest(
         CropHostAction::Mode, target);
+    auto invalidMode = GetModeRequest(target, static_cast<CropRemovalMode>(999));
     auto buildWithoutTarget = GetCropRequest(
         CropHostAction::BuildResult);
     auto polyWithoutVersion = GetCropRequest(
@@ -828,7 +818,10 @@ int GetCropFailCount()
         vtkSmartPointer<vtkPolyData>::New();
     int rejectedBuildCount = 0;
     const bool isStrict =
-        !feature->SendRequest(GetCropRequest(
+        !feature->SendRequest(std::move(invalidMode))
+        && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(9)))
+        && !feature->SendRequest(GetCropRequest(static_cast<CropHostAction>(12)))
+        && !feature->SendRequest(GetCropRequest(
             CropHostAction::None))
         && !feature->SendRequest(GetCropRequest(
             CropHostAction::Start))
@@ -978,13 +971,10 @@ int GetCropFailCount()
     const bool isStarted = feature->SendRequest(
         GetTargetRequest(CropHostAction::Start, target));
     const auto startedState = feature->GetState();
-    auto defaultOnlyTarget = target;
-    defaultOnlyTarget.isTargetViewsUsed = false;
-    defaultOnlyTarget.targetViews.viewIds = {
-        "ignored-missing-view" };
-    const bool isDefaultOnlyStarted =
-        feature->SendRequest(GetTargetRequest(
-            CropHostAction::Start, defaultOnlyTarget));
+    auto noInputTarget = target;
+    noInputTarget.inputBinding.clear();
+    const bool isMissingInputRejected = !feature->SendRequest(
+        GetTargetRequest(CropHostAction::Start, noInputTarget));
     auto emptyExplicitTarget = target;
     emptyExplicitTarget.targetViews = {};
     const bool isEmptyExplicitRejected =
@@ -1018,7 +1008,7 @@ int GetCropFailCount()
                     HostRenderViewState{}).isFeatureActive
             && startedState.isActive
             && !startedState.isPublishing
-            && isDefaultOnlyStarted
+            && isMissingInputRejected
             && isEmptyExplicitRejected
             && isUnknownExplicitRejected
             && preservedState.isActive
@@ -1256,8 +1246,7 @@ int GetCropFailCount()
         ? contextProbe->m_data->GetImageGrid(
             resultGraph, publishResult.outputRevision)
         : VtkImageGridSnapshot{};
-    const bool isPrimarySet = feature->SendRequest(
-        GetCropRequest(CropHostAction::SetPrimaryResult));
+    const bool isPrimarySet = SetSelectedData(session, publishResult.outputRevision);
     const auto cropSnapshot =
         contextProbe->m_data->GetPrimaryImage();
     for (int poll = 0;
@@ -1319,12 +1308,10 @@ int GetCropFailCount()
             && isStaleGapOverlayRejected,
         "Crop build is non-destructive and explicit promotion invalidates stale Gap input") ? 0 : 1;
 
-    const bool isSourceRestored = feature->SendRequest(
-        GetCropRequest(CropHostAction::RestoreOriginal));
+    const bool isSourceRestored = SetSelectedData(session, publishResult.sourceRevision);
     const auto restoredSourceSnapshot =
         contextProbe->m_data->GetPrimaryImage();
-    const bool isCropRepromoted = feature->SendRequest(
-        GetCropRequest(CropHostAction::SetPrimaryResult));
+    const bool isCropRepromoted = SetSelectedData(session, publishResult.outputRevision);
     const auto activeCropSnapshot =
         contextProbe->m_data->GetPrimaryImage();
     failureCount += GetCaseResult(
@@ -1345,7 +1332,7 @@ int GetCropFailCount()
                 == publishResult.outputRevision
             && activeCropSnapshot->binding->revision
                 == restoredSourceSnapshot->binding->revision + 1,
-        "RestoreOriginal and SetPrimaryResult use Binding-only ABA-safe transactions") ? 0 : 1;
+        "Generic Host selection restores source and chooses result with binding-only CAS") ? 0 : 1;
 
     for (int poll = 0;
         publishCompleteCount == 0
@@ -1671,8 +1658,16 @@ int GetCropFailCount()
     firstPolyData->DeepCopy(cube->GetOutput());
     auto nextPolyData = vtkSmartPointer<vtkPolyData>::New();
     nextPolyData->DeepCopy(cube->GetOutput());
-    const bool hasPolyDataContract =
-        feature->SendRequest(GetPolyRequest(firstPolyData))
+    const auto beforeMesh = session.GetImageDescriptor();
+    const bool isMeshRegistered = feature->SendRequest(GetPolyRequest(firstPolyData));
+    auto meshTarget = target;
+    meshTarget.inputBinding = std::string(cropInputBinding);
+    const bool isMeshStarted = feature->SendRequest(
+        GetTargetRequest(CropHostAction::Start, meshTarget));
+    const auto afterMesh = session.GetImageDescriptor();
+    const bool hasPolyDataContract = isMeshRegistered && isMeshStarted
+        && beforeMesh && afterMesh && beforeMesh->dataRevision == afterMesh->dataRevision
+        && beforeMesh->bindingRevision == afterMesh->bindingRevision
         && feature->SendRequest(GetPolyRequest(nextPolyData))
         && feature->SendRequest(GetCropRequest(
             CropHostAction::ClearPolyData));

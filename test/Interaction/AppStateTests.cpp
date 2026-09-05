@@ -49,6 +49,32 @@ DataReadyState GetDataReadyState(
 int AppStateSuite::GetFailCount() const
 {
     int failureCount = 0;
+    for (const auto kind : { LoadEventKind::File, LoadEventKind::Reload }) {
+        const auto readySink = std::make_shared<StateEventSink>();
+        SharedInteractionState selectionState(readySink);
+        const auto first = GetDataReadyState({ 1.0, 2.0, 3.0 }, 1, 1);
+        const auto latest = GetDataReadyState({ 4.0, 5.0, 6.0 }, 1, 3, 2);
+        selectionState.SetImageDataReady(first);
+        const bool started = selectionState.StartLoad(kind);
+        const auto oldTrusted = selectionState.GetDataTrustedState();
+        selectionState.SetImageDataReady(latest);
+        const auto eventCount = readySink->GetEvents().size();
+        selectionState.SetImageDataReady(first);
+        selectionState.SetImageDataReady(latest);
+        if (!started || !selectionState.GetIsLoadActive()
+            || selectionState.GetDataTrustedState() != oldTrusted
+            || (kind == LoadEventKind::File
+                ? selectionState.GetFileLoadState() : selectionState.GetReloadLoadState())
+                != LoadState::Loading
+            || selectionState.ResetLoad(kind)
+            || selectionState.GetDataRevision() != latest.dataRevision
+            || selectionState.GetDataBindingRevision() != latest.bindingRevision
+            || selectionState.GetSpacing() != latest.spacing
+            || readySink->GetEvents().size() != eventCount) {
+            std::cerr << "Non-load selection must preserve load admission and reject stale ready state.\n";
+            ++failureCount;
+        }
+    }
     const auto sink = std::make_shared<StateEventSink>();
     SharedInteractionState state(sink);
 
