@@ -2,6 +2,7 @@
 
 #include "App/AppState.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
 #include "Host/HostFeature.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
@@ -39,6 +40,7 @@ public:
 
     bool AttachHost(const HostFeatureContext& context) override
     {
+        savedContext = context;
         if (isAttachThrowing) {
             throw 1;
         }
@@ -127,6 +129,7 @@ public:
     }
 
     std::string m_id;
+    HostFeatureContext savedContext;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<FeatureHostControl> m_host;
     int attachCount = 0;
@@ -849,6 +852,138 @@ int GetLifecycleFailCount()
             && isComplete
             && completeThread == ownerThread,
         "Session tick calls the Feature and drains completion on the owner thread") ? 0 : 1;
+
+    {
+        // 故意保存旧端口：同 ID 重新挂载不能恢复旧实例的写入和回调资格。
+        auto scoped = std::make_shared<FakeHostFeature>("feature-scoped");
+        const bool isScopedAttached = session->AttachFeature(scoped);
+        const auto oldPorts = scoped->savedContext;
+        int oldNotifications = 0;
+        int oldCompletions = 0;
+        bool hasDetached = false;
+        bool isLateComplete = false;
+        const auto oldObserver = oldPorts.data->AttachDataChange(
+            [&](const DataChangeSet&) { ++oldNotifications; });
+        const bool isOldQueued = oldPorts.host->SendOwnerComplete(
+            [&]() { ++oldCompletions; isLateComplete = hasDetached; });
+        scoped->isDetachFailing = true;
+        const bool isScopedRetry = !session->DetachFeature(*scoped)
+            && GetDataEntityIdValid(oldPorts.data->CreateDataEntityId());
+        scoped->isDetachFailing = false;
+        bool isReentryRejected = false;
+        struct ReleaseProbe final {
+            VtkAppHostSession& session;
+            const std::shared_ptr<FakeHostFeature>& feature;
+            bool& isRejected;
+            ReleaseProbe(VtkAppHostSession& host,
+                const std::shared_ptr<FakeHostFeature>& attached, bool& rejected)
+                : session(host), feature(attached), isRejected(rejected) {}
+            ~ReleaseProbe()
+            {
+                isRejected = !session.DetachFeature(*feature)
+                    && !session.AttachFeature(feature) && !session.Stop();
+            }
+        };
+        auto releaseProbe = std::make_shared<ReleaseProbe>(
+            *session, scoped, isReentryRejected);
+        oldPorts.data->AttachDataChange(
+            [releaseProbe](const DataChangeSet&) { (void)releaseProbe; });
+        releaseProbe.reset();
+        const bool isScopedDetached = session->DetachFeature(*scoped);
+        hasDetached = isScopedDetached;
+        const bool isScopedReattached = session->AttachFeature(scoped);
+        const auto newPorts = scoped->savedContext;
+        int newNotifications = 0;
+        int newCompletions = 0;
+        const auto newObserver = newPorts.data->AttachDataChange(
+            [&](const DataChangeSet&) { ++newNotifications; });
+        const bool isNewQueued = newPorts.host->SendOwnerComplete(
+            [&]() { ++newCompletions; });
+        const auto createCommit = [](const std::shared_ptr<TrustedDataPort>& port) {
+            DataRevisionDraft draft;
+            draft.entityId = port->CreateDataEntityId();
+            draft.type = DataTypes::recordTable;
+            draft.payload = std::make_shared<const RecordTablePayload>(
+                DataTypes::recordTable, "lifecycle",
+                std::vector<RecordColumn>{
+                    { "value", std::vector<std::uint64_t>{ 1 } } });
+            DataTransaction transaction;
+            transaction.outputs.push_back(std::move(draft));
+            return transaction;
+        };
+        // 用新端口生成合法事务，使拒绝确实来自旧挂载门禁。
+        const auto staleCommit = oldPorts.data->SetDataCommit(createCommit(newPorts.data));
+        const auto freshCommit = newPorts.data->SetDataCommit(createCommit(newPorts.data));
+        const auto staleObserver = oldPorts.data->AttachDataChange(
+            [&](const DataChangeSet&) { ++oldNotifications; });
+        const bool isStaleQueued = oldPorts.host->SendOwnerComplete(
+            [&]() { ++oldCompletions; });
+        (void)SendTimer(endpoint->interactor);
+        failureCount += GetCaseResult(
+            isScopedAttached && oldObserver != 0 && isOldQueued
+                && isScopedRetry && isScopedDetached && isScopedReattached
+                && isReentryRejected
+                && newObserver != 0 && isNewQueued
+                && staleCommit.status == DataCommitStatus::Rejected
+                && freshCommit.status == DataCommitStatus::Succeeded
+                && staleObserver == 0 && !isStaleQueued
+                && !GetDataEntityIdValid(oldPorts.data->CreateDataEntityId())
+                && !oldPorts.data->GetDataGraph().view
+                && oldPorts.views->GetViews({}).empty()
+                && !oldPorts.host->SetViewStatus({ "lifecycle" }, "stale")
+                && oldNotifications == 0 && oldCompletions == 1 && !isLateComplete
+                && newNotifications == 1 && newCompletions == 1,
+            "Detach drains accepted completions before return and reattach revokes old ports") ? 0 : 1;
+
+        // A 的数据回调中 Detach B；B 已进入本批通知快照也不能再回调。
+        auto notifyA = std::make_shared<FakeHostFeature>("notify-a");
+        auto notifyB = std::make_shared<FakeHostFeature>("notify-b");
+        session->AttachFeature(notifyA);
+        session->AttachFeature(notifyB);
+        bool isNotifyDetached = false;
+        bool isNotifyCalled = false;
+        bool isCompleteCalled = false;
+        bool isCompleteLate = false;
+        const auto notifyFirst = notifyA->savedContext.data->AttachDataChange([&](const DataChangeSet&) {
+            isNotifyDetached = session->DetachFeature(*notifyB);
+        });
+        const auto notifyObserver = notifyB->savedContext.data->AttachDataChange(
+            [&](const DataChangeSet&) { isNotifyCalled = true; });
+        const bool isForeignDetached = notifyA->savedContext.data->DetachDataChange(notifyObserver);
+        newPorts.data->SetDataCommit(createCommit(newPorts.data));
+        // 完成队列也先复制一批；B 在 Detach 返回前完成，旧槽位不能再次调用。
+        session->AttachFeature(notifyB);
+        bool isCompleteDetached = false;
+        notifyA->SendOwnerComplete([&]() {
+            isCompleteDetached = session->DetachFeature(*notifyB);
+        });
+        notifyB->SendOwnerComplete([&]() {
+            isCompleteLate = isCompleteCalled || isCompleteDetached;
+            isCompleteCalled = true;
+        });
+        (void)SendTimer(endpoint->interactor);
+        failureCount += GetCaseResult(
+            !isForeignDetached && isNotifyDetached && !isNotifyCalled
+                && isCompleteDetached && isCompleteCalled && !isCompleteLate,
+            "Detach skips unsubscribed observers and drains batch completions exactly once") ? 0 : 1;
+        // 基线失败时也清理测试闭包，避免后续用例接触已离开作用域的引用。
+        oldPorts.data->DetachDataChange(oldObserver);
+        if (staleObserver != 0) oldPorts.data->DetachDataChange(staleObserver);
+        newPorts.data->DetachDataChange(newObserver);
+        notifyA->savedContext.data->DetachDataChange(notifyFirst);
+        notifyB->savedContext.data->DetachDataChange(notifyObserver);
+        session->DetachFeature(*notifyA);
+        session->DetachFeature(*scoped);
+
+        auto rejected = std::make_shared<FakeHostFeature>("rejected-ports");
+        rejected->isAttachFailing = true;
+        const bool isAttachRejected = !session->AttachFeature(rejected);
+        failureCount += GetCaseResult(
+            isAttachRejected
+                && !GetDataEntityIdValid(rejected->savedContext.data->CreateDataEntityId())
+                && !rejected->savedContext.host->SendOwnerComplete([]() {}),
+            "Failed attach revokes retained ports") ? 0 : 1;
+    }
 
     std::weak_ptr<FakeHostFeature> weakFeature = feature;
     const bool isDetached =
