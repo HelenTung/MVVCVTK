@@ -64,7 +64,8 @@ void PrimaryDataActivation::SetReady(
         ready.spacing = m_data.GetSpacing();
         ready.cursorWorld = m_state.GetCursorWorld();
     }
-    m_state.SetDataReady(ready);
+    if (isLoad) m_state.SetDataReady(ready);
+    else m_state.SetImageDataReady(ready);
 }
 
 bool PrimaryDataActivation::GetDataReadyState(

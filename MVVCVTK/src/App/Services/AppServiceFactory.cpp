@@ -7,6 +7,7 @@
 #include "AppState.h"
 #include "DataConverters.h"
 #include "DataManager.h"
+#include "Data/DataPayloads.h"
 #include "InteractionComputeService.h"
 #include "Interaction/InteractionPorts.h"
 #include "Render/Contracts/OverlayService.h"
@@ -177,6 +178,9 @@ public:
         UpdateFlags& pendingFlags);
     void SendViewUpdateFlags(UpdateFlags flags) noexcept;
     bool SendSessionUpdate(const AppSessionUpdate& update);
+    bool SetPrimaryData(
+        const DataRevisionRef& dataRevision,
+        DataBindingRevision expectedBindingRevision);
     bool SetTaskStopping();
     bool StopTasks(
         std::chrono::steady_clock::time_point deadline);
@@ -2792,6 +2796,63 @@ void AppRuntime::SendViewUpdateFlags(
     }
 }
 
+bool AppRuntime::SetPrimaryData(
+    const DataRevisionRef& dataRevision,
+    const DataBindingRevision expectedBindingRevision)
+{
+    if (!GetIsOwnerThread() || !m_isAccepting.load()
+        || !m_dataManager || !m_sharedState
+        || m_sharedState->GetIsLoadActive()
+        || !GetDataRevisionRefValid(dataRevision)) {
+        return false;
+    }
+
+    // 1. 所有可能失败的身份、类型与 VTK 输入检查在正式绑定提交前完成。
+    const auto graph = m_dataManager->GetDataGraph();
+    const auto primary = m_dataManager->GetDataBinding(graph, primaryVolumeBinding);
+    if ((primary ? primary->revision : 0) != expectedBindingRevision) return false;
+    const auto data = m_dataManager->GetData(graph, dataRevision);
+    const auto* payload = data
+        ? dynamic_cast<const ImageGrid3DPayload*>(data->payload.get()) : nullptr;
+    if (!graph.view || !payload || !payload->GetValid()
+        || payload->GetComponentCount() != 1) return false;
+    const auto facets = graph.view->GetDataFacets(data->type);
+    if (std::find(facets.begin(), facets.end(), DataFacets::scalarGrid3D)
+        == facets.end()) return false;
+    const auto candidate = m_dataManager->GetImageGrid(graph, dataRevision);
+    if (!candidate || !candidate->image
+        || !candidate->image->GetScalarPointer()) return false;
+    if (primary && primary->target == dataRevision) return true;
+
+    DataTransaction transaction;
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding), expectedBindingRevision, true,
+        primary ? primary->target : std::optional<DataRevisionRef>{}, dataRevision });
+    const auto result = m_dataManager->SetDataCommit(std::move(transaction));
+    if (result.status != DataCommitStatus::Succeeded) return false;
+
+    // 2. observer 可重入选择/加载/Stop；重新读取真源，不用旧候选覆盖新的选择。
+    // 绑定已提交，后续展示失败不能把正式事务反报为失败。
+    if (m_isAccepting.load()) {
+        const auto latestGraph = m_dataManager->GetDataGraph();
+        const auto latest = m_dataManager->GetDataBinding(latestGraph, primaryVolumeBinding);
+        const auto current = latest && latest->target
+            ? m_dataManager->GetData(latestGraph, *latest->target) : nullptr;
+        const auto* currentPayload = current
+            ? dynamic_cast<const ImageGrid3DPayload*>(current->payload.get()) : nullptr;
+        if (latest && currentPayload) {
+            DataReadyState ready;
+            ready.dataRevision = current->self;
+            ready.bindingRevision = latest->revision;
+            ready.scalarRange = currentPayload->GetScalarRange();
+            ready.spacing = currentPayload->GetGeometry().spacing;
+            ready.cursorWorld = m_sharedState->GetCursorWorld();
+            m_sharedState->SetImageDataReady(ready);
+        }
+    }
+    return true;
+}
+
 bool AppRuntime::SendSessionUpdate(
     const AppSessionUpdate& update)
 {
@@ -4193,6 +4254,16 @@ public:
     explicit SessionPortAdapter(std::shared_ptr<AppRuntime> service)
         : m_service(std::move(service))
     {
+    }
+
+    bool SetPrimaryData(
+        const DataRevisionRef& dataRevision,
+        const DataBindingRevision expectedBindingRevision) override
+    {
+        // owner thread 串行执行；提交会调用 observer，不能持有重入路径所需的锁。
+        const auto service = m_service;
+        return service && service->SetPrimaryData(
+            dataRevision, expectedBindingRevision);
     }
 
     bool SendSessionUpdate(

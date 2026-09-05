@@ -471,7 +471,7 @@ int main()
 
 #if MVVCVTK_PROBE_CROP
     const std::shared_ptr<HostFeature> crop =
-        std::make_shared<CropHostFeature>(CropHostConfig{});
+        std::make_shared<CropHostFeature>();
     if (!crop || crop->GetFeatureId()
             != std::string_view{ "OrthogonalCrop" }) {
         return 2;

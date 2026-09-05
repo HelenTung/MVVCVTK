@@ -59,6 +59,7 @@ private:
 
     bool SetView(const HostViewSetRequest& request) const;
     bool SetSession(const HostSessionSetRequest& request) const;
+    bool SetPrimaryData(const HostDataSelectRequest& request) const;
     bool ResetView(const HostViewResetRequest& request) const;
     bool SetTool(const HostToolSetRequest& request) const;
     bool SwitchTool(const HostToolSwitchRequest& request) const;
@@ -145,6 +146,10 @@ bool HostCommandRouter::Impl::Dispatch(
     if (const auto* value = dynamic_cast<const HostSessionSetRequest*>(
         &request)) {
         return sendDisplay(SetSession(*value), nullptr);
+    }
+    if (const auto* value = dynamic_cast<const HostDataSelectRequest*>(
+        &request)) {
+        return sendSync(SetPrimaryData(*value));
     }
     if (const auto* value = dynamic_cast<const HostViewResetRequest*>(
         &request)) {
@@ -607,6 +612,17 @@ HostCommandRouter::Impl::BuildViewCandidate(
 bool HostCommandRouter::Impl::GetUnitValid(double value) const
 {
     return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+}
+
+bool HostCommandRouter::Impl::SetPrimaryData(
+    const HostDataSelectRequest& request) const
+{
+    if (!GetDataRevisionRefValid(request.dataRevision)) return false;
+    const auto directory = m_directory.lock();
+    const auto session = directory
+        ? directory->GetSessionPort().lock() : nullptr;
+    return session && session->SetPrimaryData(
+        request.dataRevision, request.expectedBindingRevision);
 }
 
 bool HostCommandRouter::Impl::SetSession(

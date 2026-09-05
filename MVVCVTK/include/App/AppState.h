@@ -82,6 +82,7 @@ public:
     LoadState GetFileLoadState() const;
     LoadState GetReloadLoadState() const;
     LoadState GetDataTrustedState() const;
+    bool GetIsLoadActive() const;
     // 在同一锁区内检查并发布唯一 load 事务，避免 File/Reload 并发穿透状态检查。
     bool StartLoad(LoadEventKind loadEventKind);
     // 终态消费、任务构造失败或服务销毁兜底时释放对应事务；释放前不会开放下一次接纳。
@@ -102,6 +103,8 @@ public:
     // DataManager current 已最终发布后的无失败入口；一次锁内同步提交
     // data ref/binding revision/range/spacing/cursor/load state，锁外仅广播一个聚合事件。
     void SetDataReady(const DataReadyState& state) noexcept;
+    // 非加载的绑定发布；不结束重入启动的 File/Reload，不覆盖更新的绑定状态。
+    void SetImageDataReady(const DataReadyState& state) noexcept;
     DataRevisionRef GetDataRevision() const;
     DataBindingRevision GetDataBindingRevision() const;
     bool SetFileLoadFailed();

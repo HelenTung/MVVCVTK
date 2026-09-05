@@ -407,6 +407,12 @@ LoadState SharedInteractionState::GetDataTrustedState() const
     return m_impl->m_dataTrustedState;
 }
 
+bool SharedInteractionState::GetIsLoadActive() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return m_impl->m_activeLoadKind != LoadEventKind::None;
+}
+
 bool SharedInteractionState::StartLoad(LoadEventKind loadEventKind)
 {
     // A. 非 File/Reload 或已有事务时拒绝，确保两个加载通道共享一个串行 admission。
@@ -593,6 +599,34 @@ void SharedInteractionState::SetDataReady(
         }
         m_impl->m_isLoadPublishing = false;
     }
+}
+
+void SharedInteractionState::SetImageDataReady(
+    const DataReadyState& state) noexcept
+{
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (state.bindingRevision <= m_impl->m_bindingRevision) return;
+        m_impl->m_dataRevision = state.dataRevision;
+        m_impl->m_bindingRevision = state.bindingRevision;
+        m_impl->m_dataRange = state.scalarRange;
+        auto& view = m_impl->m_viewValues;
+        const bool hasSpacingChanged = Impl::SetArray(view.spacing, state.spacing);
+        const bool hasRawCursorChanged = Impl::SetArray(
+            view.cursorRawWorld, state.cursorWorld, 1e-9);
+        const bool hasCursorChanged = Impl::SetArray(
+            view.cursorWorld, state.cursorWorld, 1e-9);
+        const bool hasAxisChanged = view.cursorAxis != -1;
+        view.cursorAxis = -1;
+        if (m_impl->m_activeLoadKind == LoadEventKind::None) {
+            m_impl->m_dataTrustedState = LoadState::Succeeded;
+        }
+        m_impl->SetRealViewChanged(UpdateFlags::Spacing, hasSpacingChanged);
+        m_impl->SetRealViewChanged(UpdateFlags::Cursor,
+            hasRawCursorChanged || hasCursorChanged || hasAxisChanged);
+    }
+    m_impl->SendFlags(
+        UpdateFlags::DataReady | UpdateFlags::Cursor | UpdateFlags::Spacing);
 }
 
 DataRevisionRef SharedInteractionState::GetDataRevision() const

@@ -125,6 +125,9 @@ struct AppSessionUpdate final {
 class AppSessionPort {
 public:
     virtual ~AppSessionPort() = default;
+    virtual bool SetPrimaryData(
+        const DataRevisionRef& dataRevision,
+        DataBindingRevision expectedBindingRevision) = 0;
     virtual bool SendSessionUpdate(
         const AppSessionUpdate& update) = 0;
 };

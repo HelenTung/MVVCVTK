@@ -88,6 +88,14 @@ struct HostReloadRequest final : HostRequest {
     ImageMetadata metadata;
 };
 
+// 选择已发布的精确图像修订；只修改 primary 绑定，不生成新数据或裁切历史。
+// expectedBindingRevision 来自调用方观察到的主绑定，0 仅匹配尚不存在的绑定。
+// 成功表示数据选择已提交并通知刷新，不表示所有视图已完成 Render。
+struct HostDataSelectRequest final : HostRequest {
+    DataRevisionRef dataRevision;
+    DataBindingRevision expectedBindingRevision = 0;
+};
+
 struct HostDataExportRequest final : HostRequest {
     std::string outputPath; // UTF-8 输出目录；文件名由 Data 层基于冻结数据生成。
     // 缺省时由 sourceView 模式收敛：体渲染导出 RAW，等值面导出 PLY。

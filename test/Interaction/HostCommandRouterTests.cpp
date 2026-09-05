@@ -915,6 +915,36 @@ void StartDisplayCases(int& failureCount)
 int HostRouterSuite::GetFailCount() const
 {
     int failureCount = 0;
+    {
+        Fixture fixture;
+        HostDataSelectRequest request;
+        request.dataRevision.entityId.bytes[0] = 7;
+        request.dataRevision.generation = 3;
+        request.expectedBindingRevision = 11;
+        const auto selected = request.dataRevision;
+        int completed = 0;
+        SetExpect(fixture.Send(std::move(request), [&](bool succeeded) {
+                completed += succeeded ? 1 : 100;
+            }) && completed == 1
+                && fixture.GetService()->selectedData == selected
+                && fixture.GetService()->expectedSelection == 11
+                && fixture.GetService()->selectionCount == 1
+                && fixture.GetSliceService()->selectionCount == 0,
+            "通用数据选择必须完整路由到 Session port 并恰好完成一次。", failureCount);
+        SetExpect(!fixture.Send(HostDataSelectRequest{})
+                && fixture.GetService()->selectionCount == 1,
+            "空修订在数据写入前拒绝。", failureCount);
+        int rejectedCount = 0;
+        SetExpect(fixture.Send(HostDataSelectRequest{}, [&](bool succeeded) {
+                rejectedCount += succeeded ? 100 : 1;
+            }) && rejectedCount == 1 && fixture.GetService()->selectionCount == 1,
+            "有 callback 的同步请求返回接纳，失败结果只完成一次。", failureCount);
+        HostCommandRouter retired(std::weak_ptr<IHostViewDirectory>{});
+        request = {};
+        request.dataRevision = selected;
+        SetExpect(!retired.Dispatch(std::move(request)),
+            "失效的 Session port 不得执行数据选择。", failureCount);
+    }
     StartDataCases(failureCount);
     StartViewCases(failureCount);
     StartTransferCases(failureCount);

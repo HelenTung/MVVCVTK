@@ -3,12 +3,12 @@
 #include "Host/HostFeature.h"
 #include "OrthogonalCropTypes.h"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 #include <vtkSmartPointer.h>
 
@@ -24,19 +24,16 @@ enum class CropHostAction {
     Next,
     Node,
     BuildResult,
-    SetPrimaryResult,
-    SetPolyData,
+    SetPolyData = 10,
     ClearPolyData,
-    RestoreOriginal,
-    Exit
+    Exit = 13
 };
 
 struct CropHostTarget {
-    HostViewTarget referenceView{
-        "", true, HostRenderViewRole::Primary3D };
+    // 应用选择输入角色和视图；空绑定、空 selector 或空目标集合均拒绝。
+    std::string inputBinding;
+    HostViewTarget referenceView;
     HostViewTargets targetViews;
-    bool isTargetViewsUsed = false;
-    bool isStatusVisible = false;
 };
 
 struct CropHostRequest {
@@ -45,26 +42,6 @@ struct CropHostRequest {
     std::optional<CropRemovalMode> removalMode;
     std::optional<std::size_t> nodeCount;
     vtkSmartPointer<vtkPolyData> polyData;
-};
-
-struct CropHostKeys {
-    HostKeyChord box;
-    HostKeyChord plane;
-    HostKeyChord noMode;
-    HostKeyChord keepMode;
-    HostKeyChord removeMode;
-    HostKeyChord previous;
-    HostKeyChord next;
-    HostKeyChord buildResult;
-    HostKeyChord restoreOriginal;
-    HostKeyChord exit;
-    std::array<HostKeyChord, 10> nodes;
-};
-
-struct CropHostConfig {
-    CropHostTarget defaultTarget;
-    HostViewTargets inputViews;
-    CropHostKeys keys;
 };
 
 using CropBuildCallback =
@@ -84,7 +61,7 @@ class CropHostFeature final
     : public HostFeature
     , public std::enable_shared_from_this<CropHostFeature> {
 public:
-    explicit CropHostFeature(CropHostConfig config);
+    CropHostFeature();
     ~CropHostFeature() noexcept override;
 
     CropHostFeature(const CropHostFeature&) = delete;
