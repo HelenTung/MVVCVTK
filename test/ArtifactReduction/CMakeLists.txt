@@ -8,6 +8,7 @@ set_target_properties(mvvcvtk_tomopy_reference PROPERTIES C_STANDARD 11
 add_library(mvvcvtk_artifact_header_probe OBJECT ArtifactReductionHeaderProbe.cpp)
 target_link_libraries(mvvcvtk_artifact_header_probe PRIVATE MVVCVTK::ArtifactReduction)
 SetTargetDefaults(mvvcvtk_artifact_header_probe)
+set_target_properties(mvvcvtk_artifact_header_probe PROPERTIES FOLDER "MVVCVTK/Tests/HeaderProbes")
 
 add_executable(mvvcvtk_artifact_tests ArtifactReductionTests.cpp
     ArtifactAlgorithmTests.cpp ArtifactLifecycleTests.cpp ArtifactNativeTests.cpp)
@@ -19,6 +20,7 @@ target_link_libraries(mvvcvtk_artifact_tests PRIVATE
     mvvcvtk_host_test_internal MVVCVTK::Host MVVCVTK::ArtifactReduction
     mvvcvtk_tomopy_ring mvvcvtk_tomopy_reference VTK::ImagingGeneral ${MVVCVTK_VTK_TARGETS})
 SetTargetDefaults(mvvcvtk_artifact_tests)
+set_target_properties(mvvcvtk_artifact_tests PROPERTIES FOLDER "MVVCVTK/Tests")
 vtk_module_autoinit(TARGETS mvvcvtk_artifact_tests MODULES ${MVVCVTK_VTK_TARGETS})
 foreach(suite IN ITEMS native algorithm lifecycle)
     add_test(NAME "ArtifactReduction.${suite}" COMMAND mvvcvtk_artifact_tests ${suite})

@@ -16,6 +16,7 @@
 #include <vtkRenderer.h>
 #include <vtkWindowToImageFilter.h>
 
+#include "FeatureTestControls.h"
 #include "Host/CropHostFeature.h"
 #include "Host/GapHostFeature.h"
 #include "Host/HostFeature.h"
@@ -29,6 +30,13 @@
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
 #include "Host/SurfaceDeterminationHostFeature.h"
+#endif
+
+#if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
+#include "Host/MetrologyAlignmentHostFeature.h"
+#endif
+#if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
+#include "Host/ArtifactReductionHostFeature.h"
 #endif
 
 #include <algorithm>
@@ -406,7 +414,7 @@ namespace {
             config.maxWorkingBytes = static_cast<std::size_t>(std::min<ULONGLONG>(
                 48U * gibibyte, memory.ullAvailPhys / 2U));
 #endif
-        std::cout << "[Part] working budget bytes=" << config.maxWorkingBytes << '\n';
+        std::cout << "[零件分割] 工作内存预算（字节）=" << config.maxWorkingBytes << '\n';
         return config;
     }
 
@@ -531,7 +539,7 @@ namespace {
 
     std::string GetRevisionText(const DataRevisionRef& revision)
     {
-        if (!GetDataRevisionRefValid(revision)) return "none";
+        if (!GetDataRevisionRefValid(revision)) return "无";
         std::ostringstream text;
         text << std::hex << std::setfill('0');
         for (const auto value : revision.entityId.bytes) text << std::setw(2) << static_cast<unsigned int>(value);
@@ -541,28 +549,29 @@ namespace {
 
     void PrintDemoHelp()
     {
-        std::cout << "\n=== Integrated feature demo (focus any viewer) ===\n"
-            << "F1 help | F2 image descriptor + DataGraph | F3 label maps + sample values | F4 scene/frame state | F5 fit views\n"
-            << "Crop: O box, P plane, 1 keep inside, 2 remove inside; drag widget before building\n"
-            << "      Ctrl+7 build result, Ctrl+8 display result, Ctrl+9 restore source, 4/5 undo/redo\n"
-            << "Gap: G analyze, J hide/show\n"
-            << "Rendering: L/Shift+L volume quality, I/Shift+I iso quality, C/Shift+C color, V/Shift+V opacity\n";
+        std::cout << "\n=== 集成功能演示（请先激活任一视图窗口）===\n"
+            << "F1 帮助 | F2 图像描述与数据图 | F3 标签图与采样值 | F4 场景与帧状态 | F5 适配视图\n"
+            << "裁剪：O 方框，P 平面，1 保留内部，2 移除内部；生成结果前先拖动控件\n"
+            << "      Ctrl+7 生成结果，Ctrl+8 显示结果，Ctrl+9 恢复源数据，4/5 撤销/重做\n"
+            << "孔隙分析：G 开始分析，H 隐藏/显示\n"
+            << "渲染：L/Shift+L 体渲染质量，I/Shift+I 等值面质量，C/Shift+C 颜色，V/Shift+V 不透明度\n";
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-        std::cout << "Parts: B analyze, Shift+B hide/show all, Ctrl+B clear, Alt+B cancel\n"
-            << "       N/Shift+N select next/previous, Ctrl+H hide/show selected, Ctrl+R mark reviewed\n";
+        std::cout << "零件分割：B 开始分析，Shift+B 隐藏/显示全部，Ctrl+B 清除，Alt+B 取消\n"
+            << "          N/Shift+N 选择下一个/上一个，Ctrl+H 隐藏/显示所选零件，Ctrl+R 标记已审核\n";
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-        std::cout << "Surface: U estimate ISO50 and apply isovalue, Ctrl+U clear estimate, Alt+U cancel\n";
+        std::cout << "表面确定：U 估计 ISO50 并应用等值面阈值，Ctrl+U 清除估计，Alt+U 取消\n";
 #endif
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
-        std::cout << "Rotation: J enable/leave | drag rotate | Shift+J +15 deg Z | Ctrl+J -15 deg Z | Alt+J undo\n"
-            << "Rotation tool: Shift+drag pan, Ctrl+Shift+drag scale; Escape cancels current drag\n";
+        std::cout << "模型旋转：J 启用/退出 | 拖动旋转 | Shift+J 绕 Z 轴旋转 +15 度 | Ctrl+J 绕 Z 轴旋转 -15 度 | Alt+J 撤销\n"
+            << "旋转工具：Shift+拖动平移，Ctrl+Shift+拖动缩放；Escape 取消当前拖动\n";
 #endif
-        std::cout << "M view mode | S export data | T export slices | Escape leave active tool / exit\n"
-            << "--demo: small two-object volume for interactive exploration\n"
-            << "--demo-audit: exercise the same shortcut routes and exit\n"
-            << "--real-audit: run U then B on the main real-data input, measure owner responsiveness\n"
-            << "Results/progress appear in window titles; F2/F3/F4 print details here.\n" << std::flush;
+        std::cout << "M 切换视图模式 | S 导出数据 | T 导出切片 | Escape 退出当前工具/退出程序\n"
+            << "--demo：使用包含两个对象的小型体数据进行交互演示\n"
+            << "--demo-audit：通过上述快捷键执行验证后退出\n"
+            << "--real-audit：使用主程序的真实输入数据依次执行 U、B，并测量主线程响应时间\n"
+            << "结果和进度显示在窗口标题中；按 F2/F3/F4 可在此处输出详情。\n" << std::flush;
+        PrintFeatureTestHelp();
     }
 
     class MainControlFeature final
@@ -960,7 +969,7 @@ namespace {
                 nextValue = std::clamp(node.r + delta, 0.0, 1.0);
                 if (nextValue == node.r) return true;
                 node.r = nextValue;
-                valueName = "color.r";
+                valueName = "颜色红色分量";
                 break;
             }
             case ControlAction::OpacityUp:
@@ -974,7 +983,7 @@ namespace {
                     node.opacity + delta, 0.0, 1.0);
                 if (nextValue == node.opacity) return true;
                 node.opacity = nextValue;
-                valueName = "opacity";
+                valueName = "不透明度";
                 break;
             }
             default:
@@ -987,7 +996,7 @@ namespace {
             if (!SendViewRequest(std::move(request))) {
                 return false;
             }
-            std::cout << "[TF] " << valueName
+            std::cout << "[传递函数] " << valueName
                 << '=' << nextValue << '\n';
             return true;
         }
@@ -1027,7 +1036,7 @@ namespace {
                 HostVolumeQuality::Ultra
             };
             constexpr std::array<std::string_view, 5> qualityNames{
-                "Auto", "Low", "High", "XHigh", "Ultra"
+                "自动", "低", "高", "超高", "极高"
             };
             const int currentIndex = static_cast<int>(
                 GetQualityIndex(state->volumeQuality));
@@ -1042,7 +1051,7 @@ namespace {
                 qualities[static_cast<std::size_t>(nextIndex)];
             if (!SendViewRequest(std::move(request))) return false;
 
-            std::cout << "[Quality] view=" << target.viewId << ' '
+            std::cout << "[渲染质量] 视图=" << target.viewId << ' '
                 << qualityNames[static_cast<std::size_t>(nextIndex)]
                 << '\n';
             return true;
@@ -1064,9 +1073,9 @@ namespace {
         {
             const auto gapFeature = m_gapFeature.lock();
             if (!gapFeature) {
-                (void)SetDemoStatus("Gap: unavailable");
+                (void)SetDemoStatus("孔隙分析：功能不可用");
                 std::cerr
-                    << "[GapAnalysis] G request rejected: feature unavailable\n"
+                    << "[孔隙分析] G 请求被拒绝：功能不可用\n"
                     << std::flush;
                 return false;
             }
@@ -1085,45 +1094,45 @@ namespace {
                             == GapResultStatus::SucceededWithDisplayFailure;
                     const auto completedFeature = gapOwner.lock();
                     std::ostringstream status;
-                    status << "Gap: "
-                        << (isSuccess ? "succeeded" : "failed");
+                    status << "孔隙分析："
+                        << (isSuccess ? "成功" : "失败");
                     if (isSuccess && completedFeature) {
                         const auto statistics =
                             completedFeature->GetState().statistics;
-                        status << " | void="
+                        status << " | 孔隙体素数="
                             << statistics.voidVoxelCount
-                            << " | object="
+                            << " | 对象体素数="
                             << statistics.objectVoxelCount
-                            << " | porosity="
+                            << " | 孔隙率="
                             << statistics.porosityRatio;
                     }
                     if (const auto owner = controlOwner.lock()) {
                         (void)owner->SetDemoStatus(status.str());
                     }
-                    std::cerr << "[GapAnalysis] "
+                    std::cerr << "[孔隙分析] "
                         << status.str()
-                        << " | commit=" << result.commitId
-                        << " | source_generation="
+                        << " | 提交编号=" << result.commitId
+                        << " | 源数据版本="
                         << result.sourceRevision.generation
-                        << " | label_generation="
+                        << " | 标签版本="
                         << result.labelMap.generation
-                        << " | void_table_generation="
+                        << " | 孔隙表版本="
                         << result.voidTable.generation
-                        << " | mesh_generation="
+                        << " | 网格版本="
                         << result.voidMesh.generation
-                        << " | statistics_generation="
+                        << " | 统计版本="
                         << result.statisticsData.generation
-                        << " | result_generation="
+                        << " | 结果版本="
                         << result.resultSet.generation
                         << '\n' << std::flush;
                 });
             const std::string requestStatus = isAccepted
-                ? "Gap: running"
-                : "Gap: rejected";
+                ? "孔隙分析：计算中"
+                : "孔隙分析：请求被拒绝";
             (void)SetDemoStatus(requestStatus);
-            std::cerr << "[GapAnalysis] G request "
-                << (isAccepted ? "accepted; calculation started"
-                    : "rejected; calculation did not start")
+            std::cerr << "[孔隙分析] G 请求"
+                << (isAccepted ? "已接受；计算已开始"
+                    : "被拒绝；计算未开始")
                 << '\n' << std::flush;
             return isAccepted;
         }
@@ -1138,14 +1147,14 @@ namespace {
                 return;
             }
             const auto& history = state.history;
-            const char* mode = !history.isEditing ? "Frozen"
-                : history.editMode == CropRemovalMode::KeepInside ? "KeepInside"
-                : history.editMode == CropRemovalMode::RemoveInside ? "RemoveInside" : "Idle";
+            const char* mode = !history.isEditing ? "已冻结"
+                : history.editMode == CropRemovalMode::KeepInside ? "保留内部"
+                : history.editMode == CropRemovalMode::RemoveInside ? "移除内部" : "空闲";
             std::ostringstream status;
-            status << "Crop active " << history.nodeCount << '/' << history.operationCount
-                << " | base " << history.baseNodeCount << " | all " << history.allOperationCount
+            status << "裁剪已激活 " << history.nodeCount << '/' << history.operationCount
+                << " | 基础节点数 " << history.baseNodeCount << " | 全部操作数 " << history.allOperationCount
                 << " | " << mode;
-            if (history.hasEditableOp) status << " | Editable";
+            if (history.hasEditableOp) status << " | 可编辑";
             if (status.str() != m_cropStatus && SetDemoStatus(status.str())) {
                 m_cropStatus = status.str();
             }
@@ -1162,8 +1171,8 @@ namespace {
             request.expectedBindingRevision = descriptor->bindingRevision;
             const bool isSucceeded = m_session.SendRequest(std::move(request));
             (void)SetDemoStatus(isSucceeded
-                ? (useResult ? "Crop result selected" : "Crop source selected")
-                : "Data selection rejected");
+                ? (useResult ? "已选择裁剪结果" : "已选择裁剪源数据")
+                : "数据选择被拒绝");
             return isSucceeded;
         }
 
@@ -1195,25 +1204,25 @@ namespace {
                     const auto owner = weakOwner.lock();
                     if (!owner || !owner->m_isAttached) return;
                     std::ostringstream status;
-                    status << "Crop result " << (result.isSucceeded ? "ready" : "failed")
-                        << " | commit=" << result.commitId
-                        << " | source=" << result.sourceRevision.generation
-                        << " | recipe=" << result.recipeRevision.generation
-                        << " | output=" << result.outputRevision.generation
+                    status << "裁剪结果" << (result.isSucceeded ? "已就绪" : "失败")
+                        << " | 提交编号=" << result.commitId
+                        << " | 源数据版本=" << result.sourceRevision.generation
+                        << " | 裁剪方案版本=" << result.recipeRevision.generation
+                        << " | 输出版本=" << result.outputRevision.generation
                         << " | " << result.message;
                     const auto crop = owner->m_cropFeature.lock();
                     if (owner->m_controlRevision == controlRevision
                         && crop && crop->GetState().isActive) {
                         (void)owner->SetDemoStatus(status.str());
                     }
-                    std::cout << "[OrthogonalCrop] " << status.str() << '\n';
+                    std::cout << "[正交裁剪] " << status.str() << '\n';
                 };
             }
             const bool isAccepted = crop->SendRequest(std::move(request), std::move(onComplete));
-            std::cout << "[OrthogonalCrop] action=" << static_cast<int>(action)
-                << " accepted=" << isAccepted << '\n';
-            if (!isAccepted) (void)SetDemoStatus("Crop request rejected");
-            else if (action == CropHostAction::Exit) (void)SetDemoStatus("Crop editing ended");
+            std::cout << "[正交裁剪] 操作=" << static_cast<int>(action)
+                << " 已接受=" << isAccepted << '\n';
+            if (!isAccepted) (void)SetDemoStatus("裁剪请求被拒绝");
+            else if (action == CropHostAction::Exit) (void)SetDemoStatus("裁剪编辑已结束");
             else SendCropStatus();
             return isAccepted;
         }
@@ -1223,27 +1232,27 @@ namespace {
         {
             const auto descriptor = m_session.GetImageDescriptor();
             if (!descriptor || !m_data) {
-                (void)SetDemoStatus("Demo: waiting for image");
+                (void)SetDemoStatus("演示：等待图像加载");
                 return false;
             }
             const auto graph = m_data->GetDataGraph();
             if (!graph.view) return false;
-            std::cout << "[Image] dataset=" << descriptor->metadata.identity.datasetId
-                << " dims=" << descriptor->dims[0] << 'x' << descriptor->dims[1] << 'x' << descriptor->dims[2]
-                << " spacing=" << descriptor->spacing[0] << ',' << descriptor->spacing[1] << ',' << descriptor->spacing[2]
-                << " range=" << descriptor->scalarRange[0] << ',' << descriptor->scalarRange[1]
-                << " quantity=" << descriptor->metadata.scalar.quantity << " unit=" << descriptor->metadata.scalar.unit
-                << " source=" << descriptor->metadata.source.uri
-                << " revision=" << GetRevisionText(descriptor->dataRevision) << '\n';
+            std::cout << "[图像] 数据集=" << descriptor->metadata.identity.datasetId
+                << " 尺寸=" << descriptor->dims[0] << 'x' << descriptor->dims[1] << 'x' << descriptor->dims[2]
+                << " 体素间距=" << descriptor->spacing[0] << ',' << descriptor->spacing[1] << ',' << descriptor->spacing[2]
+                << " 数值范围=" << descriptor->scalarRange[0] << ',' << descriptor->scalarRange[1]
+                << " 物理量=" << descriptor->metadata.scalar.quantity << " 单位=" << descriptor->metadata.scalar.unit
+                << " 来源=" << descriptor->metadata.source.uri
+                << " 版本=" << GetRevisionText(descriptor->dataRevision) << '\n';
             const auto bindings = graph.view->GetDataBindings();
-            std::cout << "[DataGraph] commit=" << graph.commitId << " bindings=" << bindings.size() << '\n';
+            std::cout << "[数据图] 提交编号=" << graph.commitId << " 绑定数=" << bindings.size() << '\n';
             for (const auto& binding : bindings) {
                 if (!binding.target) continue;
                 const auto data = graph.view->GetData(*binding.target);
                 std::cout << "  " << binding.name << " -> " << GetRevisionText(*binding.target)
-                    << " binding_revision=" << binding.revision;
+                    << " 绑定版本=" << binding.revision;
                 if (data) {
-                    std::cout << " type=" << data->type.name;
+                    std::cout << " 类型=" << data->type.name;
                     for (const auto& input : data->inputs)
                         std::cout << " | " << input.role << "=" << GetRevisionText(input.source);
                 }
@@ -1251,7 +1260,7 @@ namespace {
             }
             std::ostringstream status;
             status << descriptor->metadata.identity.datasetId << " | " << descriptor->dims[0] << 'x'
-                << descriptor->dims[1] << 'x' << descriptor->dims[2] << " | graph=" << graph.commitId;
+                << descriptor->dims[1] << 'x' << descriptor->dims[2] << " | 数据图提交编号=" << graph.commitId;
             (void)SetDemoStatus(status.str());
             return true;
         }
@@ -1259,7 +1268,7 @@ namespace {
         bool PrintLabels()
         {
             const auto labels = m_session.GetLabelMapDescriptors();
-            std::cout << "[LabelMap] active=" << labels.size() << " (run B or G first)\n";
+            std::cout << "[标签图] 当前数量=" << labels.size() << "（请先按 B 或 G 运行分析）\n";
             bool isPassed = true;
             for (const auto& label : labels) {
                 LabelMapReadRequest request;
@@ -1267,9 +1276,9 @@ namespace {
                 request.expectedRevision = label.dataRevision;
                 request.maxBytes = 8 * label.componentBytes;
                 const auto chunk = m_session.GetLabelMapReadChunk(request, 0);
-                std::cout << "  " << label.id << " dataset=" << label.datasetId
-                    << " source=" << GetRevisionText(label.sourceRevision)
-                    << " revision=" << GetRevisionText(label.dataRevision) << " samples=";
+                std::cout << "  " << label.id << " 数据集=" << label.datasetId
+                    << " 来源=" << GetRevisionText(label.sourceRevision)
+                    << " 版本=" << GetRevisionText(label.dataRevision) << " 采样值=";
                 const auto printValues = [&](auto value) {
                     using Value = decltype(value);
                     if (!chunk.state || !chunk.state->values) return;
@@ -1292,9 +1301,9 @@ namespace {
                 default: break;
                 }
                 isPassed = isPassed && chunk.error == LabelMapError::None;
-                std::cout << "read_status=" << static_cast<int>(chunk.error) << '\n';
+                std::cout << "读取状态=" << static_cast<int>(chunk.error) << '\n';
             }
-            (void)SetDemoStatus("Label maps: " + std::to_string(labels.size()) + " | details in console (F3)");
+            (void)SetDemoStatus("标签图：" + std::to_string(labels.size()) + " | 详情见控制台（F3）");
             return isPassed;
         }
 
@@ -1302,15 +1311,15 @@ namespace {
         {
             const auto scenes = m_session.GetSceneViewStates();
             for (const auto& scene : scenes) {
-                std::cout << "[Scene] " << scene.id << " committed=" << scene.sceneEpoch
-                    << " rendered=" << scene.renderedEpoch << " features=";
+                std::cout << "[场景] " << scene.id << " 已提交帧版本=" << scene.sceneEpoch
+                    << " 已渲染帧版本=" << scene.renderedEpoch << " 功能=";
                 for (const auto& id : scene.activeFeatureIds) std::cout << id << ' ';
-                if (scene.presentation) std::cout << " quality=" << static_cast<int>(scene.presentation->volumeQuality)
-                    << " interacting=" << scene.presentation->isInteracting
-                    << " input=" << GetRevisionText(scene.presentation->dataRevision);
+                if (scene.presentation) std::cout << " 渲染质量=" << static_cast<int>(scene.presentation->volumeQuality)
+                    << " 正在交互=" << scene.presentation->isInteracting
+                    << " 输入=" << GetRevisionText(scene.presentation->dataRevision);
                 std::cout << '\n';
             }
-            (void)SetDemoStatus("Scene/frame snapshots: " + std::to_string(scenes.size()) + " views | details in console (F4)");
+            (void)SetDemoStatus("场景/帧快照：" + std::to_string(scenes.size()) + " 个视图 | 详情见控制台（F4）");
             return !scenes.empty();
         }
 
@@ -1318,12 +1327,12 @@ namespace {
         static std::string_view GetMethodName(SurfaceDeterminationMethod method)
         {
             switch (method) {
-            case SurfaceDeterminationMethod::GlobalIsoPreview: return "GlobalIsoPreview";
-            case SurfaceDeterminationMethod::LocalAdaptiveIso50: return "LocalAdaptiveIso50";
-            case SurfaceDeterminationMethod::GradientPeak: return "GradientPeak";
-            case SurfaceDeterminationMethod::AutomaticIso50: return "AutomaticIso50";
+            case SurfaceDeterminationMethod::GlobalIsoPreview: return "全局等值面预览";
+            case SurfaceDeterminationMethod::LocalAdaptiveIso50: return "局部自适应 ISO50";
+            case SurfaceDeterminationMethod::GradientPeak: return "梯度峰值";
+            case SurfaceDeterminationMethod::AutomaticIso50: return "自动 ISO50";
             }
-            return "Unknown";
+            return "未知";
         }
 
         bool SendSurface(ControlAction action)
@@ -1350,10 +1359,10 @@ namespace {
                     std::ostringstream text;
                     const auto feature = owner->m_surfaceFeature.lock();
                     const auto outcome = result.status != SurfaceResultStatus::Succeeded
-                        ? (result.status == SurfaceResultStatus::Cancelled ? "cancelled" : "failed")
-                        : action == ControlAction::SurfaceClear ? "cleared"
-                        : "ready";
-                    text << "Surface: " << outcome;
+                        ? (result.status == SurfaceResultStatus::Cancelled ? "已取消" : "失败")
+                        : action == ControlAction::SurfaceClear ? "已清除"
+                        : "已就绪";
+                    text << "表面确定：" << outcome;
                     if (action == ControlAction::SurfaceStart && result.status == SurfaceResultStatus::Succeeded
                         && result.isoEstimate) {
                         const auto image = owner->m_session.GetImageDescriptor();
@@ -1362,17 +1371,17 @@ namespace {
                         request.iso = result.isoEstimate->isoValue;
                         const bool isApplied = image && image->dataRevision == result.sourceRevision
                             && owner->m_session.SendRequest(std::move(request));
-                        text << " | isovalue=" << result.isoEstimate->isoValue
-                            << (isApplied ? " applied" : " apply rejected")
-                            << " | samples=" << result.isoEstimate->sampleCount;
+                        text << " | 等值面阈值=" << result.isoEstimate->isoValue
+                            << (isApplied ? " 已应用" : " 应用被拒绝")
+                            << " | 采样数=" << result.isoEstimate->sampleCount;
                     }
                     (void)owner->SetDemoStatus(text.str());
-                    std::cout << "[Surface] " << text.str() << " | reason=" << static_cast<int>(result.failureReason)
+                    std::cout << "[表面确定] " << text.str() << " | 原因=" << static_cast<int>(result.failureReason)
                         << " | " << result.message << '\n' << std::flush;
                 }
             });
             if (admission.status != SurfaceAdmissionStatus::Accepted) {
-                (void)SetDemoStatus("Surface request rejected: " + std::to_string(static_cast<int>(admission.status)));
+                (void)SetDemoStatus("表面确定请求被拒绝：" + std::to_string(static_cast<int>(admission.status)));
                 return false;
             }
             if (action == ControlAction::SurfaceStart) m_surfaceRunningMethod = m_surfaceMethod;
@@ -1389,12 +1398,12 @@ namespace {
             m_surfaceStage = state.stage;
             m_surfaceProgress = progress;
             std::ostringstream status;
-            status << "Surface: " << GetMethodName(m_surfaceRunningMethod) << " | " << progress << "%";
+            status << "表面确定：" << GetMethodName(m_surfaceRunningMethod) << " | " << progress << "%";
             const auto generation = feature->GetSurfaceSnapshot();
             if (generation && generation->isoEstimate)
-                status << " | isovalue=" << generation->isoEstimate->isoValue;
+                status << " | 等值面阈值=" << generation->isoEstimate->isoValue;
             else if (m_surfaceRunningMethod != SurfaceDeterminationMethod::AutomaticIso50)
-                status << " | points=" << state.pointCount << " | objects=" << state.objectCount;
+                status << " | 点数=" << state.pointCount << " | 对象数=" << state.objectCount;
             if (!state.errorMessage.empty()) status << " | " << state.errorMessage;
             (void)SetDemoStatus(status.str());
         }
@@ -1423,7 +1432,7 @@ namespace {
             }
             request.isEnabled = isEnabled;
             return rotation->SendRequest(request)
-                && SetDemoStatus(isEnabled ? "Rotation: drag / Escape cancel / J leave" : "Rotation: idle");
+                && SetDemoStatus(isEnabled ? "模型旋转：拖动旋转 / Escape 取消 / J 退出" : "模型旋转：空闲");
         }
 #endif
 
@@ -1448,7 +1457,7 @@ namespace {
                         if (const auto owner = weak.lock()) {
                             owner->m_isRotationQueued = false;
                             if (!owner->SetRotationMode(isEnabled))
-                                (void)owner->SetDemoStatus("Rotation: tool switch rejected");
+                                (void)owner->SetDemoStatus("模型旋转：工具切换被拒绝");
                         }
                     })) return true;
                     m_isRotationQueued = false;
@@ -1484,7 +1493,7 @@ namespace {
                 return SwitchQuality(m_isoTarget, -1);
             case ControlAction::Help:
                 PrintDemoHelp();
-                (void)SetDemoStatus("F1 help | F2 data | F3 labels | F4 frames | F5 fit | U surface | B parts | G gap");
+                (void)SetDemoStatus("F1 帮助 | F2 数据 | F3 标签 | F4 帧状态 | F5 适配视图 | U 表面 | B 零件 | G 孔隙");
                 return true;
             case ControlAction::Data: return PrintData();
             case ControlAction::Labels: return PrintLabels();
@@ -1504,7 +1513,7 @@ namespace {
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
                 return SendSurface(action);
 #else
-                (void)SetDemoStatus("SurfaceDetermination is not enabled in this build");
+                (void)SetDemoStatus("当前构建未启用表面确定功能");
                 return false;
 #endif
             case ControlAction::StartGap:
@@ -1742,7 +1751,7 @@ namespace {
             const int progress = static_cast<int>(state.progress * 100.0);
             if (state.status == PartSegmentationStatus::Running && progress != m_progress) {
                 m_progress = progress;
-                (void)SetPartStatus("Part: " + std::to_string(progress) + "% | Alt+B cancels");
+                (void)SetPartStatus("零件分割：" + std::to_string(progress) + "% | Alt+B 取消");
             }
             return true;
         }
@@ -1821,11 +1830,11 @@ namespace {
 
         static std::string_view GetPendingStatus(const ControlAction action)
         {
-            if (action == ControlAction::Start) return "Part: running";
+            if (action == ControlAction::Start) return "零件分割：运行中";
             if (action == ControlAction::Toggle) {
-                return "Part: visibility updating";
+                return "零件分割：正在更新显示状态";
             }
-            return action == ControlAction::Stop ? "Part: cancelling" : "Part: clearing";
+            return action == ControlAction::Stop ? "零件分割：正在取消" : "零件分割：正在清除";
         }
 
         bool SendPartRequest(
@@ -1835,9 +1844,9 @@ namespace {
         {
             const auto partFeature = m_partFeature.lock();
             if (!partFeature) {
-                (void)SetPartStatus("Part: unavailable");
+                (void)SetPartStatus("零件分割：功能不可用");
                 std::cerr
-                    << "[PartSegmentation] request rejected: feature unavailable\n"
+                    << "[零件分割] 请求被拒绝：功能不可用\n"
                     << std::flush;
                 return false;
             }
@@ -1851,67 +1860,67 @@ namespace {
                     PartSegmentationResult result) {
                         const auto completedFeature = partOwner.lock();
                         std::ostringstream status;
-                        status << "Part: ";
+                        status << "零件分割：";
                         if (result.status == PartResultStatus::Succeeded) {
                             if (action == ControlAction::Start) {
                                 const auto state = completedFeature
                                     ? completedFeature->GetState()
                                     : PartSegmentationState{};
-                                status << "succeeded | parts=" << result.partCount
-                                    << " | result_generation="
+                                status << "成功 | 零件数=" << result.partCount
+                                    << " | 结果版本="
                                     << result.resultSet.generation
-                                    << " | commit=" << result.commitId
-                                    << " | visible=" << state.isOverlayVisible;
+                                    << " | 提交编号=" << result.commitId
+                                    << " | 可见=" << state.isOverlayVisible;
                             }
                             else if (action == ControlAction::Toggle) {
                                 status << (nextVisibility.value_or(false)
-                                    ? "visible" : "hidden");
+                                    ? "已显示" : "已隐藏");
                             }
                             else {
-                                status << (action == ControlAction::Stop ? "cancellation requested" : "cleared");
+                                status << (action == ControlAction::Stop ? "已请求取消" : "已清除");
                             }
                         }
                         else if (result.status == PartResultStatus::SucceededWithDisplayFailure) {
-                            status << "data ready; display failed | parts=" << result.partCount;
+                            status << "数据已就绪；显示失败 | 零件数=" << result.partCount;
                         }
                         else {
                             status
                                 << (result.status == PartResultStatus::Cancelled
-                                    ? "cancelled" : "failed")
-                                << " | reason="
+                                    ? "已取消" : "失败")
+                                << " | 原因="
                                 << static_cast<int>(result.failureReason);
                         }
                         if (const auto owner = controlOwner.lock()) {
                             (void)owner->SetPartStatus(status.str());
                         }
                         std::cerr
-                            << "[PartSegmentation] " << status.str()
-                            << " | source_generation="
+                            << "[零件分割] " << status.str()
+                            << " | 源数据版本="
                             << result.sourceRevision.generation
-                            << " | label_generation="
+                            << " | 标签版本="
                             << result.labelMap.generation
-                            << " | table_generation="
+                            << " | 零件表版本="
                             << result.partTable.generation
-                            << " | result_generation="
+                            << " | 结果版本="
                             << result.resultSet.generation
-                            << " | commit=" << result.commitId
-                            << " | parts=" << result.partCount
-                            << " | message=" << result.message << '\n'
+                            << " | 提交编号=" << result.commitId
+                            << " | 零件数=" << result.partCount
+                            << " | 消息=" << result.message << '\n'
                             << std::flush;
                 });
             const bool isAccepted =
                 admission.status == PartAdmissionStatus::Accepted;
             if (!isAccepted) {
                 std::ostringstream status;
-                status << "Part: rejected | admission="
+                status << "零件分割：请求被拒绝 | 接纳状态="
                     << static_cast<int>(admission.status);
                 (void)SetPartStatus(status.str());
             }
             std::cerr
-                << "[PartSegmentation] B request "
-                << (isAccepted ? "accepted" : "rejected")
-                << " | action=" << static_cast<int>(action)
-                << " | admission=" << static_cast<int>(admission.status)
+                << "[零件分割] B 请求"
+                << (isAccepted ? "已接受" : "被拒绝")
+                << " | 操作=" << static_cast<int>(action)
+                << " | 接纳状态=" << static_cast<int>(admission.status)
                 << '\n' << std::flush;
             return isAccepted;
         }
@@ -1921,7 +1930,7 @@ namespace {
             const auto feature = m_partFeature.lock();
             const auto snapshot = feature ? feature->GetPartSetSnapshot() : nullptr;
             if (!snapshot || snapshot->isStale || snapshot->parts.empty()) {
-                (void)SetPartStatus("Part: press B to create a current result first");
+                (void)SetPartStatus("零件分割：请先按 B 生成当前结果");
                 return false;
             }
             const auto selected = std::find_if(snapshot->parts.begin(), snapshot->parts.end(),
@@ -1939,7 +1948,7 @@ namespace {
                 ? feature->SetPreviousPart(snapshot->catalogRevision)
                 : feature->SetPartState(part.binding, patch, snapshot->catalogRevision);
             if (result.status != PartMutationStatus::Succeeded) {
-                (void)SetPartStatus("Part edit rejected: " + std::to_string(static_cast<int>(result.status)));
+                (void)SetPartStatus("零件编辑被拒绝：" + std::to_string(static_cast<int>(result.status)));
                 return false;
             }
             const auto current = feature->GetPartSetSnapshot();
@@ -1951,13 +1960,13 @@ namespace {
                 });
             if (updated == current->parts.end()) return false;
             std::ostringstream status;
-            status << "Part " << updated->labelId << " | selected=" << updated->presentation.isSelected
-                << " visible=" << updated->presentation.isVisible << " reviewed=" << updated->userState.isReviewed
-                << " volume=" << updated->metrics.physicalVolumeMM3;
+            status << "零件 " << updated->labelId << " | 已选中=" << updated->presentation.isSelected
+                << " 可见=" << updated->presentation.isVisible << " 已审核=" << updated->userState.isReviewed
+                << " 体积=" << updated->metrics.physicalVolumeMM3;
             (void)SetPartStatus(status.str());
-            std::cout << "[Part] " << status.str() << " | stable_id="
+            std::cout << "[零件] " << status.str() << " | 稳定标识="
                 << updated->binding.object.objectId.high << ':' << updated->binding.object.objectId.low
-                << " | catalog=" << current->catalogRevision << '\n';
+                << " | 目录版本=" << current->catalogRevision << '\n';
             return true;
         }
 
@@ -1987,16 +1996,16 @@ namespace {
                     const auto reserveBytes = std::min<ULONGLONG>(std::uint64_t{8} << 30U,
                         memory.ullTotalPhys / 8U);
                     if (memory.ullAvailPhys < newLabelBytes + reserveBytes) {
-                        (void)SetPartStatus("Part: insufficient available RAM for another full-resolution result");
-                        std::cerr << "[Part] memory admission rejected: newLabelBytes=" << newLabelBytes
-                            << " availableBytes=" << memory.ullAvailPhys << '\n';
+                        (void)SetPartStatus("零件分割：可用内存不足，无法生成另一份全分辨率结果");
+                        std::cerr << "[零件分割] 内存准入被拒绝：新标签所需字节数=" << newLabelBytes
+                            << " 可用字节数=" << memory.ullAvailPhys << '\n';
                         return false;
                     }
                 }
 #endif
                 m_progress = -1;
                 request.start = start;
-                std::cout << "[Part] using current isovalue=" << start.threshold << '\n' << std::flush;
+                std::cout << "[零件分割] 使用当前等值面阈值=" << start.threshold << '\n' << std::flush;
                 return SendPartRequest(std::move(request), action);
             }
             if (action == ControlAction::Toggle) {
@@ -2165,14 +2174,14 @@ namespace {
             if (m_getFailure) {
                 const auto failure = m_getFailure();
                 if (!failure.empty()) {
-                    std::cerr << "[DemoAudit] " << failure << '\n';
+                    std::cerr << "[演示验证] " << failure << '\n';
                     Finish(false);
                     return;
                 }
             }
             auto& step = m_steps[m_index];
             if (!m_isSent) {
-                std::cout << "[DemoAudit] " << step.name << '\n' << std::flush;
+                std::cout << "[演示验证] " << step.name << '\n' << std::flush;
                 m_stepStarted = std::chrono::steady_clock::now();
                 if (!SendKey(step.key)) { Finish(false); return; }
                 m_isSent = true;
@@ -2180,10 +2189,10 @@ namespace {
                 return;
             }
             if (!step.ready || step.ready()) {
-                std::cout << "[DemoAudit] completed=" << step.name << " elapsed_ms="
+                std::cout << "[演示验证] 已完成=" << step.name << " 耗时（毫秒）="
                     << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_stepStarted).count() << '\n';
-                if ((step.name == "part select" || step.name == "surface threshold")
-                    && !SaveView(step.name == "part select" ? "parts" : "surface")) { Finish(false); return; }
+                if ((step.name == "选择零件" || step.name == "表面阈值")
+                    && !SaveView(step.name == "选择零件" ? "parts" : "surface")) { Finish(false); return; }
                 ++m_index;
                 m_isSent = false;
                 return;
@@ -2223,7 +2232,7 @@ namespace {
     std::vector<HostRenderViewConfig> BuildViews()
     {
         HostWindowConfig composite;
-        composite.title = "Window E: Composite Volume";
+        composite.title = "窗口 E：组合体渲染";
         composite.width = 600;
         composite.height = 600;
         composite.posX = 660;
@@ -2234,7 +2243,7 @@ namespace {
         composite.viewInit.hasBackground = true;
 
         HostWindowConfig topDown;
-        topDown.title = "Window B: Top_down Slice";
+        topDown.title = "窗口 B：上下方向切片";
         topDown.width = 400;
         topDown.height = 400;
         topDown.posX = 50;
@@ -2245,19 +2254,19 @@ namespace {
         topDown.viewInit.hasBackground = true;
 
         HostWindowConfig frontBack = topDown;
-        frontBack.title = "Window C: Front_back Slice";
+        frontBack.title = "窗口 C：前后方向切片";
         frontBack.posX = 460;
         frontBack.viewInit.viewMode =
             HostRenderMode::SliceFrontBack;
 
         HostWindowConfig leftRight = topDown;
-        leftRight.title = "Window D: Left_right Slice";
+        leftRight.title = "窗口 D：左右方向切片";
         leftRight.posX = 870;
         leftRight.viewInit.viewMode =
             HostRenderMode::SliceLeftRight;
 
         HostWindowConfig primary;
-        primary.title = "Window A: Composite IsoSurface";
+        primary.title = "窗口 A：组合等值面";
         primary.width = 600;
         primary.height = 600;
         primary.posX = 50;
@@ -2347,7 +2356,7 @@ namespace {
         config.defaultStart.voidParams.isFilterEnabled = false;
         config.defaultStart.voidParams.minVolumeMM3 = 0.0;
         config.inputViews = inputViews;
-        config.keys.switchOverlay.keyCode = 'j';
+        config.keys.switchOverlay.keyCode = 'h';
         config.keys.exit.keySym = "Escape";
         return config;
     }
@@ -2413,10 +2422,23 @@ namespace {
 
 int main(int argc, char* argv[])
 {
+#if defined(_WIN32)
+    // 源码与窄字符串均使用 UTF-8，控制台采用相同编码显示中文。
+    (void)SetConsoleOutputCP(CP_UTF8);
+#endif
+    FeatureTestOptions toolOptions;
+    try { toolOptions = GetFeatureTestOptions(argc, argv); }
+    catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        PrintFeatureTestHelp();
+        return 2;
+    }
+    const bool isFeatureAudit = GetArgFound(argc, argv, "--feature-audit");
+
     const bool isHostDriven = GetArgFound(argc, argv, "--host-driven");
     const auto hasHostWork = std::make_shared<std::atomic<bool>>(true);
     const bool isDemo = GetArgFound(argc, argv, "--demo");
-    const bool isDemoAudit = GetArgFound(argc, argv, "--demo-audit");
+    const bool isDemoAudit = GetArgFound(argc, argv, "--demo-audit") || isFeatureAudit;
     const bool isRealAudit = GetArgFound(argc, argv, "--real-audit");
     // 后端切换和初始化都不是线程安全 API；必须在任何 Feature worker 启动前完成。
     // 构建若未包含 STDThread，则显式回退 Sequential，保持功能可用。
@@ -2526,6 +2548,9 @@ int main(int argc, char* argv[])
 #endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     auto partConfig = GetPartConfig();
+    partConfig.maxHistoryBytes = toolOptions.budgetBytes;
+    partConfig.maxWorkingBytes = std::max(partConfig.maxWorkingBytes, toolOptions.budgetBytes);
+    partConfig.isSelectionEnabled = GetArgFound(argc, argv, "--part-picking");
     auto partStart = partConfig.defaultStart;
     auto partFeature = std::make_shared<PartSegmentationHostFeature>(
         std::move(partConfig));
@@ -2543,7 +2568,7 @@ int main(int argc, char* argv[])
     SurfaceDeterminationConfig surfaceConfig;
     surfaceConfig.defaultStart.targetViews.viewIds = { primaryTarget.viewId };
     surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::AutomaticIso50;
-    surfaceConfig.maxWorkingBytes = 64U * 1024U * 1024U;
+    surfaceConfig.maxWorkingBytes = toolOptions.budgetBytes;
     auto surfaceFeature = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
     features.push_back(surfaceFeature);
 #endif
@@ -2567,37 +2592,63 @@ int main(int argc, char* argv[])
 #else
     features.push_back(controlFeature);
 #endif
+    FeatureTestBindings toolBindings;
+    toolBindings.crop = cropFeature;
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    toolBindings.parts = partFeature;
+#endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+    toolBindings.surface = surfaceFeature;
+#endif
+#if defined(MVVCVTK_HAS_METROLOGY_ALIGNMENT)
+    AlignmentConfig alignmentConfig;
+    alignmentConfig.targetViews.viewIds = {primaryTarget.viewId};
+    auto alignmentFeature = std::make_shared<MetrologyAlignmentHostFeature>(alignmentConfig);
+    toolBindings.alignment = alignmentFeature;
+    features.push_back(alignmentFeature);
+#endif
+#if defined(MVVCVTK_HAS_ARTIFACT_REDUCTION)
+    ArtifactConfig artifactConfig;
+    artifactConfig.memoryBudgetBytes = toolOptions.budgetBytes;
+    artifactConfig.publishBudgetBytes = toolOptions.budgetBytes;
+    auto artifactFeature = std::make_shared<ArtifactReductionHostFeature>(artifactConfig);
+    toolBindings.artifact = artifactFeature;
+    features.push_back(artifactFeature);
+#endif
+    auto featureTools = std::make_shared<FeatureTestControls>(session, toolBindings, toolOptions, allViews);
+    features.push_back(featureTools);
     auto demoAudit = std::make_shared<DemoAuditFeature>(session);
     demoAudit->SetFailureCheck([&]() -> std::string {
+        if (isFeatureAudit && !featureTools->GetFailure().empty()) return featureTools->GetFailure();
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
         if (surfaceFeature->GetState().stage == SurfaceDeterminationStage::Failed)
             return surfaceFeature->GetState().errorMessage;
 #endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
         if (partFeature->GetState().status == PartSegmentationStatus::Failed)
-            return "Part failed; see callback reason and message.";
+            return "零件分割失败；请查看回调中的原因和消息。";
 #endif
         return {};
     });
     if (isDemoAudit) {
         const auto ready = [] { return true; };
-        demoAudit->AddStep("help", {0, "F1"}, ready);
-        demoAudit->AddStep("image and graph", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
-        demoAudit->AddStep("frame snapshot", {0, "F4"}, [&session] { return session.GetSceneViewStates().size() == 5; });
-        demoAudit->AddStep("volume quality", {'l'}, [&session, volumeTarget] {
+        demoAudit->AddStep("帮助", {0, "F1"}, ready);
+        demoAudit->AddStep("图像与数据图", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
+        demoAudit->AddStep("帧快照", {0, "F4"}, [&session] { return session.GetSceneViewStates().size() == 5; });
+        demoAudit->AddStep("体渲染质量", {'l'}, [&session, volumeTarget] {
             const auto state = session.GetRenderViewState(volumeTarget);
             return state && state->volumeQuality == HostVolumeQuality::High;
         });
-        demoAudit->AddStep("iso quality", {'i'}, [&session, primaryTarget] {
+        demoAudit->AddStep("等值面质量", {'i'}, [&session, primaryTarget] {
             const auto state = session.GetRenderViewState(primaryTarget);
             return state && state->volumeQuality == HostVolumeQuality::High;
         });
-        demoAudit->AddStep("fit views", {0, "F5"}, [&session, primaryTarget] {
+        demoAudit->AddStep("适配视图", {0, "F5"}, [&session, primaryTarget] {
             const auto scene = session.GetSceneViewState(primaryTarget);
             return scene && scene->camera && scene->camera->parallelScale > 1.0;
         });
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-        demoAudit->AddStep("part start", {'b'}, [partFeature] {
+        demoAudit->AddStep("开始零件分割", {'b'}, [partFeature] {
             const auto state = partFeature->GetState();
             return state.status == PartSegmentationStatus::Succeeded && state.partCount == 2;
         });
@@ -2608,78 +2659,82 @@ int main(int argc, char* argv[])
                 [](const PartSnapshot& part) { return part.presentation.isSelected; });
             return found == set->parts.end() ? std::nullopt : std::optional<PartSnapshot>{*found};
         };
-        demoAudit->AddStep("part select", {'n'}, [selectedPart] { return selectedPart().has_value(); });
-        demoAudit->AddStep("part previous wraps", {'n', {}, false, false, true}, [selectedPart] {
+        demoAudit->AddStep("选择零件", {'n'}, [selectedPart] { return selectedPart().has_value(); });
+        demoAudit->AddStep("循环选择上一个零件", {'n', {}, false, false, true}, [selectedPart] {
             const auto part = selectedPart(); return part && part->labelId == 2;
         });
-        demoAudit->AddStep("part previous", {'n', {}, false, false, true}, [selectedPart] {
+        demoAudit->AddStep("选择上一个零件", {'n', {}, false, false, true}, [selectedPart] {
             const auto part = selectedPart(); return part && part->labelId == 1;
         });
-        demoAudit->AddStep("part review", {'r', {}, true}, [selectedPart] {
+        demoAudit->AddStep("审核零件", {'r', {}, true}, [selectedPart] {
             const auto part = selectedPart(); return part && part->userState.isReviewed;
         });
-        demoAudit->AddStep("part hide", {'h', {}, true}, [selectedPart] {
+        demoAudit->AddStep("隐藏零件", {'h', {}, true}, [selectedPart] {
             const auto part = selectedPart(); return part && !part->presentation.isVisible;
         });
-        demoAudit->AddStep("part show", {'h', {}, true}, [selectedPart] {
+        demoAudit->AddStep("显示零件", {'h', {}, true}, [selectedPart] {
             const auto part = selectedPart(); return part && part->presentation.isVisible;
         });
-        demoAudit->AddStep("part hide all", {'b', {}, false, false, true}, [partFeature] { return !partFeature->GetState().isOverlayVisible; });
-        demoAudit->AddStep("part show all", {'b', {}, false, false, true}, [partFeature] { return partFeature->GetState().isOverlayVisible; });
+        demoAudit->AddStep("隐藏全部零件", {'b', {}, false, false, true}, [partFeature] { return !partFeature->GetState().isOverlayVisible; });
+        demoAudit->AddStep("显示全部零件", {'b', {}, false, false, true}, [partFeature] { return partFeature->GetState().isOverlayVisible; });
 #endif
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-        demoAudit->AddStep("surface threshold", {'u'}, [surfaceFeature, &session, primaryTarget] {
+        demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
             const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
             const auto view = session.GetRenderViewState(primaryTarget);
             return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
                 && snapshot && snapshot->isoEstimate && view
                 && view->isoThreshold == snapshot->isoEstimate->isoValue;
         });
-        demoAudit->AddStep("surface clear", {'u', {}, true}, [surfaceFeature] { return !surfaceFeature->GetSurfaceSnapshot(); });
+        demoAudit->AddStep("清除表面估计", {'u', {}, true}, [surfaceFeature] { return !surfaceFeature->GetSurfaceSnapshot(); });
 #endif
-        demoAudit->AddStep("gap start", {'g'}, [gapFeature] {
+        demoAudit->AddStep("开始孔隙分析", {'g'}, [gapFeature] {
             const auto state = gapFeature->GetState();
             return state.analysisState == GapAnalysisState::Succeeded && GetDataRevisionRefValid(state.labelMap);
         });
-        demoAudit->AddStep("label maps", {0, "F3"}, [&session] {
+        demoAudit->AddStep("标签图", {0, "F3"}, [&session] {
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
             return session.GetLabelMapDescriptors().size() == 2;
 #else
             return session.GetLabelMapDescriptors().size() == 1;
 #endif
         });
-        demoAudit->AddStep("crop box", {'o'}, [cropFeature] { return cropFeature->GetState().isActive; });
-        demoAudit->AddStep("crop keep mode", {'1'}, [cropFeature] {
+        demoAudit->AddStep("方框裁剪", {'o'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("裁剪保留模式", {'1'}, [cropFeature] {
             return cropFeature->GetState().history.editMode == CropRemovalMode::KeepInside;
         });
-        demoAudit->AddStep("crop plane", {'p'}, [cropFeature] { return cropFeature->GetState().isActive; });
-        demoAudit->AddStep("crop remove mode", {'2'}, [cropFeature] {
+        demoAudit->AddStep("平面裁剪", {'p'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("裁剪移除模式", {'2'}, [cropFeature] {
             return cropFeature->GetState().history.editMode == CropRemovalMode::RemoveInside;
         });
 #if defined(MVVCVTK_HAS_MODEL_ROTATION)
-        demoAudit->AddStep("rotation numeric", {'j', {}, false, false, true}, [rotationFeature, cropFeature] {
+        demoAudit->AddStep("数值旋转", {'j', {}, false, false, true}, [rotationFeature, cropFeature] {
             return rotationFeature->GetState().status == ModelRotationStatus::Succeeded
                 && rotationFeature->GetState().undoCount == 1 && !cropFeature->GetState().isActive;
         });
-        demoAudit->AddStep("rotation undo", {'j', {}, false, true}, [rotationFeature] {
+        demoAudit->AddStep("撤销旋转", {'j', {}, false, true}, [rotationFeature] {
             return rotationFeature->GetState().status == ModelRotationStatus::Succeeded
                 && rotationFeature->GetState().undoCount == 0;
         });
-        demoAudit->AddStep("rotation tool", {'j'}, [rotationFeature] {
+        demoAudit->AddStep("旋转工具", {'j'}, [rotationFeature] {
             return rotationFeature->GetState().isEnabled;
         });
-        demoAudit->AddStep("rotation to crop", {'o'}, [rotationFeature, cropFeature] {
+        demoAudit->AddStep("从旋转切换到裁剪", {'o'}, [rotationFeature, cropFeature] {
             return !rotationFeature->GetState().isEnabled && cropFeature->GetState().isActive;
         });
 #endif
-        demoAudit->AddStep("final graph", {0, "F2"}, ready);
+        if (isFeatureAudit) {
+            for (auto& step : featureTools->GetAuditSteps())
+                demoAudit->AddStep(std::move(step.name), std::move(step.key), std::move(step.ready));
+        }
+        demoAudit->AddStep("最终数据图", {0, "F2"}, ready);
         features.push_back(demoAudit);
     }
 
     if (isRealAudit) {
-        demoAudit->AddStep("real image", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
+        demoAudit->AddStep("真实图像", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
-        demoAudit->AddStep("surface threshold", {'u'}, [surfaceFeature, &session, primaryTarget] {
+        demoAudit->AddStep("表面阈值", {'u'}, [surfaceFeature, &session, primaryTarget] {
             const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
             const auto view = session.GetRenderViewState(primaryTarget);
             return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
@@ -2688,26 +2743,26 @@ int main(int argc, char* argv[])
         });
 #endif
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-        demoAudit->AddStep("part start", {'b'}, [partFeature] {
+        demoAudit->AddStep("开始零件分割", {'b'}, [partFeature] {
             return partFeature->GetState().status == PartSegmentationStatus::Succeeded
                 && partFeature->GetState().partCount > 0;
         });
-        demoAudit->AddStep("part select", {'n'}, [partFeature] {
+        demoAudit->AddStep("选择零件", {'n'}, [partFeature] {
             const auto snapshot = partFeature->GetPartSetSnapshot();
             return snapshot && std::any_of(snapshot->parts.begin(), snapshot->parts.end(),
                 [](const PartSnapshot& part) { return part.presentation.isSelected; });
         });
-        demoAudit->AddStep("real labels", {0, "F3"}, [&session] { return !session.GetLabelMapDescriptors().empty(); });
-        demoAudit->AddStep("part restart", {'b'}, [partFeature] {
+        demoAudit->AddStep("真实标签图", {0, "F3"}, [&session] { return !session.GetLabelMapDescriptors().empty(); });
+        demoAudit->AddStep("重新开始零件分割", {'b'}, [partFeature] {
             return partFeature->GetState().status == PartSegmentationStatus::Running;
         });
-        demoAudit->AddStep("part cancel preserves result", {'b', {}, false, true}, [partFeature] {
+        demoAudit->AddStep("取消零件分割并保留结果", {'b', {}, false, true}, [partFeature] {
             const auto state = partFeature->GetState();
             return state.status == PartSegmentationStatus::Succeeded && state.resultRevision == 1
                 && partFeature->GetPartSetSnapshot() && state.partCount > 0;
         });
 #endif
-        demoAudit->AddStep("real frames", {0, "F4"}, [] { return true; });
+        demoAudit->AddStep("真实数据帧状态", {0, "F4"}, [] { return true; });
         features.push_back(demoAudit);
     }
 
@@ -2796,9 +2851,9 @@ int main(int argc, char* argv[])
         + static_cast<int>(isDemo) + static_cast<int>(isDemoAudit) + static_cast<int>(isRealAudit);
     if (runModeCount > 1) {
         std::cerr
-            << "--drag-audit, --quality-audit, --gap-auto and "
-            "PartSegmentation / demo run modes "
-            "are mutually exclusive\n";
+            << "--drag-audit、--quality-audit、--gap-auto 与"
+            "零件分割/演示运行模式"
+            "互斥，只能选择一种\n";
         if (!clearAttached()) return 25;
         features.clear();
         return 8;
@@ -2806,7 +2861,7 @@ int main(int argc, char* argv[])
 #if !defined(MVVCVTK_HAS_PART_SEGMENTATION)
     if (isPartAuto || isPartManual || isPartProfile) {
         std::cerr
-            << "PartSegmentation run modes require "
+            << "零件分割运行模式要求启用 "
             "MVVCVTK_BUILD_PART_SEGMENTATION=ON\n";
         if (!clearAttached()) return 25;
         features.clear();
@@ -2825,11 +2880,11 @@ int main(int argc, char* argv[])
         if (result.isSucceeded) controlFeature->StartDemoFit();
         if (isDemo || isDemoAudit || isRealAudit) {
             if (!result.isSucceeded) {
-                std::cerr << "[Demo] data load failed: " << result.message << '\n';
+                std::cerr << "[演示] 数据加载失败：" << result.message << '\n';
                 (void)StopEventLoop(session);
                 return;
             }
-            std::cout << "[Demo] data ready. Press B / G / U to show features; F1 for all keys.\n" << std::flush;
+            std::cout << "[演示] 数据已就绪。按 B / G / U 体验功能；按 F1 查看全部快捷键。\n" << std::flush;
             isDemoReady = true;
             if (isDemoAudit || isRealAudit) demoAudit->Start();
             return;
@@ -2848,8 +2903,8 @@ int main(int argc, char* argv[])
         else if (isGapAuto) {
             if (!result.isSucceeded) {
                 std::cerr
-                    << "[GapAnalysis] data load failed; "
-                    "automatic request skipped\n"
+                    << "[孔隙分析] 数据加载失败；"
+                    "已跳过自动请求\n"
                     << std::flush;
                 return;
             }
@@ -2862,8 +2917,8 @@ int main(int argc, char* argv[])
                 isPartComplete = true;
                 isPartPassed = false;
                 std::cerr
-                    << "QT_PART_RESULT: data reload failed; "
-                    "request skipped\n"
+                    << "QT_PART_RESULT: 数据重新加载失败；"
+                    "已跳过请求\n"
                     << std::flush;
                 (void)StopEventLoop(session);
                 return;
@@ -2879,8 +2934,8 @@ int main(int argc, char* argv[])
                 isPartComplete = true;
                 isPartPassed = false;
                 std::cerr
-                    << "QT_PART_RESULT: real data load failed; "
-                    "request skipped\n"
+                    << "QT_PART_RESULT: 真实数据加载失败；"
+                    "已跳过请求\n"
                     << std::flush;
                 (void)StopEventLoop(session);
                 return;
@@ -2895,14 +2950,14 @@ int main(int argc, char* argv[])
             isPartManualReady = result.isSucceeded;
             if (!isPartManualReady) {
                 std::cerr
-                    << "[PartSegmentation] synthetic data reload failed\n"
+                    << "[零件分割] 合成数据重新加载失败\n"
                     << std::flush;
                 (void)StopEventLoop(session);
                 return;
             }
             std::cout
-                << "[PartSegmentation] synthetic data ready; "
-                "press B to start\n"
+                << "[零件分割] 合成数据已就绪；"
+                "按 B 开始\n"
                 << std::flush;
             return;
         }

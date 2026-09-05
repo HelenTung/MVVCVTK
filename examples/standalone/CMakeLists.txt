@@ -1,6 +1,8 @@
 add_executable(
     MVVCVTKStandalone
     main.cpp
+    FeatureTestControls.h
+    FeatureTestControls.cpp
 )
 set_target_properties(
     MVVCVTKStandalone
@@ -49,6 +51,14 @@ SetTargetDefaults(MVVCVTKStandalone)
 if(MVVCVTK_BUILD_MODEL_ROTATION)
     target_compile_definitions(MVVCVTKStandalone PRIVATE MVVCVTK_HAS_MODEL_ROTATION=1)
     target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::ModelRotation)
+endif()
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    target_compile_definitions(MVVCVTKStandalone PRIVATE MVVCVTK_HAS_METROLOGY_ALIGNMENT=1)
+    target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::MetrologyAlignment)
+endif()
+if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
+    target_compile_definitions(MVVCVTKStandalone PRIVATE MVVCVTK_HAS_ARTIFACT_REDUCTION=1)
+    target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::ArtifactReduction)
 endif()
 vtk_module_autoinit(
     TARGETS MVVCVTKStandalone

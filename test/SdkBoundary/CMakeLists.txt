@@ -211,7 +211,7 @@ set_target_properties(
     mvvcvtk_host_header_probes
     PROPERTIES
         PROJECT_LABEL MVVCVTKHostHeaderProbes
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/Tests/HeaderProbes"
 )
 
 add_library(mvvcvtk_feature_spi_header_probes OBJECT
@@ -230,7 +230,7 @@ set_target_properties(
     mvvcvtk_feature_spi_header_probes
     PROPERTIES
         PROJECT_LABEL MVVCVTKFeatureSpiHeaderProbes
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/Tests/HeaderProbes"
 )
 
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
@@ -250,7 +250,7 @@ if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
         mvvcvtk_crop_header_probes
         PROPERTIES
             PROJECT_LABEL MVVCVTKCropHeaderProbes
-            FOLDER "MVVCVTK/Tests"
+            FOLDER "MVVCVTK/Tests/HeaderProbes"
     )
 endif()
 
@@ -271,7 +271,7 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
         mvvcvtk_gap_header_probes
         PROPERTIES
             PROJECT_LABEL MVVCVTKGapHeaderProbes
-            FOLDER "MVVCVTK/Tests"
+            FOLDER "MVVCVTK/Tests/HeaderProbes"
     )
 endif()
 
@@ -301,7 +301,7 @@ set_target_properties(
     mvvcvtk_sdk_header_aggregate
     PROPERTIES
         PROJECT_LABEL MVVCVTKSdkHeaderAggregate
-        FOLDER "MVVCVTK/Tests"
+        FOLDER "MVVCVTK/Tests/HeaderProbes"
 )
 
 function(SetClosureTest testName dependencyFiles stagingRoot)
