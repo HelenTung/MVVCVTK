@@ -1,0 +1,15 @@
+TomoPy private reconstructed-image ring kernel
+Repository: https://github.com/tomopy/tomopy
+Commit: 3377fed68103959e37a849309a096a9919b0bc97
+Original source: source/libtomo/misc/remove_ring.c
+Original SHA256: B7ECAF54213FC82303052203D7174E7FCE55D993EAE5D1B7406AB2CA946CA877
+Original header: include/libtomo/remove_ring.h
+Original header SHA256: 9029AA3CA5B0E5BDC6AD62764A58AF47BE9EC93BB7D6CA7B4ADA606A63CEBD5C
+License SHA256: D5B1F7E449968FDEA766A541DBA50DA9116AC3B1B246921037D20E14C132CB40
+Modified version: mvvcvtk-1, 2026-09-06
+Changes: private helper symbols; single-slice status API; checked dimensions,
+allocation failures and sample indices; atomic failure before output writes;
+bounded parameter domain; injectable calloc-like allocator for negative tests.
+Normal-domain median/azimuthal filtering and polar math retained from upstream.
+This is a modified version, not the unmodified ANL distribution.
+Repository-only dependency; not installed or exported in MVVCVTK SDK.

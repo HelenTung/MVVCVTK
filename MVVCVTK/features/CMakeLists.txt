@@ -35,3 +35,7 @@ endif()
 if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
     add_subdirectory(MetrologyAlignment)
 endif()
+
+if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
+    add_subdirectory(ArtifactReduction)
+endif()
