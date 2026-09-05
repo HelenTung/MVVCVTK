@@ -295,6 +295,7 @@ private:
     bool SetVisibility(bool isVisible);
     bool ClearResult();
     void SetSourceStale();
+    void SetBindingStale();
     void SetRequestComplete(PartLabelCandidate candidate);
     void SetRequestFailed(PartFailureReason reason);
 
@@ -309,6 +310,7 @@ private:
     std::unique_ptr<PartSegmentationService> m_service;
     VtkImageGridSnapshot m_requestSource;
     DataBinding m_requestResultBinding;
+    DataBinding m_resultBinding;
     VtkLabelMapSnapshot m_activeLabels;
     VtkImageGridSnapshot m_activeSource;
     // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
@@ -417,6 +419,7 @@ bool PartSegmentationHostFeature::Impl::OnHostTick()
     if (!m_isAttached || !GetIsOwnerThread() || !m_service || !m_data) {
         return false;
     }
+    SetBindingStale();
     const auto state = GetState();
     if (GetDataRevisionRefValid(state.resultSet)) {
         const auto graph = m_data->GetDataGraph();
@@ -452,6 +455,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         admission.status = PartAdmissionStatus::Unavailable;
         return admission;
     }
+    SetBindingStale();
     if (request.action == PartSegmentationAction::Start) {
         if (m_service->GetIsBusy() || m_activeRequestId != 0) {
             admission.status = PartAdmissionStatus::Busy;
@@ -626,6 +630,7 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPreviousPart(
     if (!m_isAttached || !GetIsOwnerThread() || !m_service) {
         return { PartMutationStatus::Unavailable, 0 };
     }
+    SetBindingStale();
     const auto state = GetState();
     if (m_service->GetIsBusy() || m_activeRequestId != 0) {
         return { PartMutationStatus::Busy, state.catalogRevision };
@@ -661,6 +666,7 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
         result.status = PartMutationStatus::Unavailable;
         return result;
     }
+    SetBindingStale();
     if (m_service->GetIsBusy() || m_activeRequestId != 0) {
         result.status = PartMutationStatus::Busy;
         result.catalogRevision = GetState().catalogRevision;
@@ -880,6 +886,7 @@ bool PartSegmentationHostFeature::Impl::SetCatalogCommit(
         expected.revision, true, expected.target, resultRef });
     const auto committed = m_data->SetDataCommit(std::move(transaction));
     if (committed.status != DataCommitStatus::Succeeded) return false;
+    m_resultBinding = committed.bindings.back();
     // CreateSnapshot 与 Store 共享的只有这个已隔离、不可变的目录 owner。
     m_catalogView = catalogPayload->GetCatalog();
     state.commitId = committed.commitId;
@@ -1214,7 +1221,8 @@ bool PartSegmentationHostFeature::Impl::ClearResult()
     const auto current = GetState();
     const auto graph = m_data ? m_data->GetDataGraph() : DataGraphSnapshot{};
     const auto binding = GetResultBinding(graph);
-    if (binding && binding->target && *binding->target == current.resultSet) {
+    if (binding && binding->target && *binding->target == current.resultSet
+        && binding->revision == m_resultBinding.revision) {
         DataTransaction transaction;
         transaction.bindings.push_back({ std::string(partResultBinding),
             binding->revision, true, binding->target, {} });
@@ -1233,6 +1241,24 @@ bool PartSegmentationHostFeature::Impl::ClearResult()
     state.isOverlayVisible = GetState().isOverlayVisible;
     SetPublishedState(std::move(state), {});
     return isDisplayRemoved;
+}
+
+void PartSegmentationHostFeature::Impl::SetBindingStale()
+{
+    const auto state = GetState();
+    if (!GetDataRevisionRefValid(state.resultSet) || !m_data) return;
+    const auto binding = GetResultBinding(m_data->GetDataGraph());
+    if (binding && binding->revision == m_resultBinding.revision
+        && binding->target == m_resultBinding.target) return;
+    if (m_activeRequestId != 0 && m_service) {
+        // 旧展示已退休后，允许显式新请求基于外部新绑定重新计算；只有
+        // 本请求接纳之后的再次换绑才取消它，不能用旧投影版本反复取消新任务。
+        if (binding && binding->revision == m_requestResultBinding.revision
+            && binding->target == m_requestResultBinding.target) return;
+        m_isStopRequested = true;
+        m_service->StopRequest();
+    }
+    SetSourceStale();
 }
 
 void PartSegmentationHostFeature::Impl::SetSourceStale()
@@ -1448,6 +1474,8 @@ void PartSegmentationHostFeature::Impl::SetRequestFailed(
         return;
     }
     const std::lock_guard<std::mutex> lock(m_stateMutex);
+    // 外部绑定已经退休旧投影时，旧任务的取消不能恢复 request 前的成功态。
+    if (m_state.status == PartSegmentationStatus::Stale) return;
     if (m_stateBeforeRequest.status == PartSegmentationStatus::Idle) {
         m_state = m_stateBeforeRequest;
         m_state.status = reason == PartFailureReason::Cancelled

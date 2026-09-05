@@ -883,7 +883,8 @@ bool VtkAppHostSession::Impl::BuildSession()
         frameCallbacks.getRenderPending = [this]() {
             return renderViews.GetFrameRenderPending();
         };
-        frameCallbacks.sendCompletions = [this]() {
+        frameCallbacks.sendCompletions = []() {};
+        frameCallbacks.sendReadyCompletions = [this]() {
             renderViews.SendFrameCompletions();
             SendOwnerCompletions();
             SendImageReadComplete(false);
@@ -986,7 +987,12 @@ bool VtkAppHostSession::Impl::SendRequest(
     }
     return commandRouter->Dispatch(
         std::move(request),
-        std::move(renderedComplete));
+        std::move(renderedComplete),
+        [frames = frameCoordinator](HostCommandRouter::DisplayCheck getApplied,
+            HostCompleteCallback complete) {
+            return frames && frames->SendDisplayComplete(
+                std::move(getApplied), std::move(complete));
+        });
 }
 
 bool VtkAppHostSession::Impl::SendRequestResult(
@@ -1424,7 +1430,8 @@ void VtkAppHostSession::Impl::OnViewTimer()
         || !frameCoordinator || !timerTargets.empty()) {
         return;
     }
-    (void)frameCoordinator->FlushOnOwnerTick(true);
+    const auto frames = frameCoordinator;
+    (void)frames->FlushOnOwnerTick(true);
 }
 
 void VtkAppHostSession::Impl::OnHostTimer()
@@ -1434,7 +1441,8 @@ void VtkAppHostSession::Impl::OnHostTimer()
         || !frameCoordinator) {
         return;
     }
-    (void)frameCoordinator->FlushOnOwnerTick(true);
+    const auto frames = frameCoordinator;
+    (void)frames->FlushOnOwnerTick(true);
 }
 
 void VtkAppHostSession::Impl::SendImageReadComplete(
@@ -1969,10 +1977,12 @@ bool VtkAppHostSession::Start()
         return false;
     }
     if (!m_impl->frameCoordinator) return false;
+    const auto frames = m_impl->frameCoordinator;
     const auto frameStatus =
-        m_impl->frameCoordinator->FlushOnOwnerTick(true);
+        frames->FlushOnOwnerTick(true);
     if (frameStatus
             != HostFrameCoordinator::FlushStatus::Completed
+        || !m_impl->GetIsReady() || m_impl->frameCoordinator != frames
         || !m_impl->renderViews.SetInputsEnabled(true)) {
         (void)m_impl->renderViews.SetInputsEnabled(false);
         return false;

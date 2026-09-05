@@ -517,6 +517,188 @@ bool GetInputValidationValid()
         && !coordinator.Enqueue("feature", std::move(targetMany));
 }
 
+bool GetDisplayBatchValid()
+{
+    FrameProbe probe;
+    probe.isRenderSent = false;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    std::vector<int> completed;
+    const auto ready = []() -> std::optional<bool> { return true; };
+    if (!coordinator.SendDisplayComplete(ready, [&](bool value) { completed.push_back(value ? 1 : -1); })
+        || coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::RenderPending
+        || !completed.empty()) return false;
+    if (!coordinator.SendDisplayComplete(ready, [&](bool value) { completed.push_back(value ? 2 : -2); })) return false;
+    probe.isRenderSent = true;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || completed != std::vector<int>{1}) return false;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
+        && completed == std::vector<int>{1, 2};
+}
+
+bool GetDisplayReentryValid()
+{
+    FrameProbe probe;
+    auto callbacks = probe.GetCallbacks();
+    HostFrameCoordinator* frames = nullptr;
+    bool isEnqueued = false;
+    int completed = 0;
+    const auto ready = []() -> std::optional<bool> { return true; };
+    callbacks.collectUpdates = [&] {
+        if (!isEnqueued) {
+            isEnqueued = frames->SendDisplayComplete(ready, [&](bool value) {
+                if (value) ++completed;
+                (void)frames->SendDisplayComplete(ready, [&](bool next) { if (next) ++completed; });
+            });
+        }
+        return true;
+    };
+    HostFrameCoordinator coordinator(1, std::move(callbacks));
+    frames = &coordinator;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || !isEnqueued || completed != 0) return false;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || completed != 1) return false;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
+        && completed == 2;
+}
+
+bool GetDisplayPendingValid()
+{
+    FrameProbe probe;
+    std::optional<bool> applied;
+    int completed = 0;
+    bool result = true;
+    int readyCount = 0;
+    auto callbacks = probe.GetCallbacks();
+    callbacks.sendReadyCompletions = [&] { ++readyCount; };
+    HostFrameCoordinator coordinator(1, std::move(callbacks));
+    if (!coordinator.SendDisplayComplete([&] { return applied; }, [&](bool value) {
+        ++completed;
+        result = value;
+    })) return false;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || completed != 0 || readyCount != 1) return false;
+    probe.isRenderSent = false;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::RenderPending
+        || readyCount != 2) return false;
+    coordinator.Stop();
+    coordinator.Stop();
+    return completed == 1 && !result
+        && !coordinator.SendDisplayComplete([]() -> std::optional<bool> { return true; }, [](bool) {});
+}
+
+bool GetDisplayDecisionValid()
+{
+    FrameProbe probe;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    bool isApplied = true;
+    int completed = 0;
+    if (!coordinator.SendDisplayComplete([&]() -> std::optional<bool> { return isApplied; },
+            [&](bool value) { if (value) ++completed; isApplied = false; })
+        || !coordinator.SendDisplayComplete([&]() -> std::optional<bool> { return isApplied; },
+            [&](bool value) { if (value) ++completed; })) return false;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
+        && completed == 2;
+}
+
+bool GetDisplayFailureValid()
+{
+    FrameProbe probe;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    int failed = 0;
+    int succeeded = 0;
+    if (!coordinator.SendDisplayComplete([]() -> std::optional<bool> { return std::nullopt; }, [](bool) {})
+        || !coordinator.SendDisplayComplete([]() -> std::optional<bool> { return false; },
+            [&](bool value) { if (!value) ++failed; })
+        || !coordinator.SendDisplayComplete([]() -> std::optional<bool> { return true; },
+            [&](bool value) { if (value) ++succeeded; })) return false;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || failed != 1 || succeeded != 1) return false;
+    coordinator.Stop();
+    return failed == 1 && succeeded == 1;
+}
+
+bool GetRenderStopValid()
+{
+    FrameProbe probe;
+    auto callbacks = probe.GetCallbacks();
+    HostFrameCoordinator* frames = nullptr;
+    callbacks.sendRender = [&](std::uint64_t) { frames->Stop(); return false; };
+    HostFrameCoordinator coordinator(1, std::move(callbacks));
+    frames = &coordinator;
+    int cancelled = 0;
+    if (!coordinator.SendDisplayComplete([]() -> std::optional<bool> { return true; },
+        [&](bool value) { if (!value) ++cancelled; })) return false;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Stopped
+        && cancelled == 1;
+}
+
+bool GetDisplayCapacityValid()
+{
+    FrameProbe probe;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    std::size_t count = 0;
+    const auto waiting = []() -> std::optional<bool> { return std::nullopt; };
+    const auto complete = [&](bool value) { if (!value) ++count; };
+    for (std::size_t index = 0; index < 1024; ++index) {
+        if (!coordinator.SendDisplayComplete(waiting, complete)) return false;
+    }
+    if (coordinator.SendDisplayComplete(waiting, complete)) return false;
+    coordinator.Stop();
+    return count == 1024;
+}
+
+bool GetDisplayApplyFailureValid()
+{
+    FrameProbe probe;
+    probe.isCollectSet = false;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    int completed = 0;
+    if (!coordinator.SendDisplayComplete([]() -> std::optional<bool> { return false; },
+        [&](bool value) { if (!value) ++completed; })) return false;
+    return coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Failed
+        && completed == 1 && probe.renderAttemptCount == 0;
+}
+
+bool GetDisplayReentryBounded()
+{
+    FrameProbe probe;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    std::size_t admitted = 0;
+    const auto waiting = []() -> std::optional<bool> { return std::nullopt; };
+    if (!coordinator.SendDisplayComplete([]() -> std::optional<bool> { return true; }, [&](bool) {
+        for (std::size_t index = 0; index < 1024; ++index) {
+            if (coordinator.SendDisplayComplete(waiting, [](bool) {})) ++admitted;
+        }
+    })) return false;
+    for (std::size_t index = 1; index < 1024; ++index) {
+        if (!coordinator.SendDisplayComplete(waiting, [](bool) {})) return false;
+    }
+    const auto status = coordinator.FlushOnOwnerTick(true);
+    coordinator.Stop();
+    return status == HostFrameCoordinator::FlushStatus::Completed && admitted == 1;
+}
+
+bool GetDisplayUnchangedValid()
+{
+    FrameProbe probe;
+    probe.stageStatus = HostFrameStageStatus::Unchanged;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    int completed = 0;
+    const auto ready = []() -> std::optional<bool> { return true; };
+    const auto onComplete = [&](bool value) { if (value) ++completed; };
+    if (!coordinator.SendDisplayComplete(ready, onComplete)
+        || coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || completed != 0) return false;
+    probe.stageStatus = HostFrameStageStatus::Ready;
+    if (coordinator.FlushOnOwnerTick(true) != HostFrameCoordinator::FlushStatus::Completed
+        || completed != 1 || probe.renderAttemptCount != 1) return false;
+    probe.stageStatus = HostFrameStageStatus::Unchanged;
+    return coordinator.SendDisplayComplete(ready, onComplete)
+        && coordinator.FlushOnOwnerTick(true) == HostFrameCoordinator::FlushStatus::Completed
+        && completed == 2 && probe.renderAttemptCount == 1;
+}
+
 } // namespace
 
 int main()
@@ -530,7 +712,17 @@ int main()
         && GetUnchangedCompletionValid()
         && GetRenderRetryValid()
         && GetStopPreemptionValid()
-        && GetInputValidationValid();
+        && GetInputValidationValid()
+        && GetDisplayBatchValid()
+        && GetDisplayReentryValid()
+        && GetDisplayPendingValid()
+        && GetDisplayDecisionValid()
+        && GetDisplayFailureValid()
+        && GetRenderStopValid()
+        && GetDisplayCapacityValid()
+        && GetDisplayApplyFailureValid()
+        && GetDisplayUnchangedValid()
+        && GetDisplayReentryBounded();
     std::cout << (isValid
         ? "PASS: Host frame coordinator protocol\n"
         : "FAIL: Host frame coordinator protocol\n");

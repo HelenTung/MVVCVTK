@@ -56,6 +56,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -89,7 +90,10 @@ public:
     void Render() override
     {
         ++m_renderCount;
+        if (m_isRenderRejected) throw std::runtime_error("Injected render failure");
     }
+
+    void SetRenderRejected(bool isRejected) { m_isRenderRejected = isRejected; }
 
     std::size_t GetRenderCount() const
     {
@@ -110,6 +114,7 @@ protected:
 
 private:
     std::size_t m_renderCount{0};
+    bool m_isRenderRejected = false;
 };
 
 vtkStandardNewMacro(RenderProbeWindow);
@@ -1124,6 +1129,46 @@ bool BuildRenderSourceTest()
     return hasViewSetRender
         && hasStartRender
         && hasSessionStart;
+}
+
+bool BuildCompletionRetryTest()
+{
+    auto window = vtkSmartPointer<RenderProbeWindow>::New();
+    auto interactor = vtkSmartPointer<RenderProbeInteractor>::New();
+    window->SetInteractor(interactor);
+    interactor->SetRenderWindow(window);
+    HostRenderViewConfig view;
+    view.id = "completion-primary";
+    view.role = HostRenderViewRole::Primary3D;
+    view.renderWindow = window;
+    HostSessionConfig config;
+    config.renderViews = { view };
+    VtkAppHostSession session(std::move(config));
+    HostTimerConfig timer;
+    timer.isTimerEnabled = true;
+    timer.targetView.viewId = view.id;
+    if (!session.BuildSession() || !session.AttachTimer(timer) || !session.Start()) return false;
+    std::vector<int> completes;
+    const auto send = [&](int id) {
+        HostViewSetRequest request;
+        request.targetView.viewId = view.id;
+        request.background = HostBackgroundColor{ 0.1 * id, 0.2, 0.3 };
+        return session.SendRequest(std::move(request), [&, id](bool isSucceeded) {
+            completes.push_back(isSucceeded ? id : -id);
+        });
+    };
+    window->SetRenderRejected(true);
+    if (!send(1) || !SendTimer(interactor) || !completes.empty()) return false;
+    const auto pending = session.GetSceneViewState({ view.id });
+    if (!pending || pending->renderedEpoch >= pending->sceneEpoch || !send(2)) return false;
+    window->SetRenderRejected(false);
+    if (!SendTimer(interactor) || completes.size() != 1) return false;
+    const auto retried = session.GetSceneViewState({ view.id });
+    if (!retried || retried->sceneEpoch != pending->sceneEpoch
+        || retried->renderedEpoch != pending->sceneEpoch) return false;
+    if (!SendTimer(interactor) || completes.size() != 2 || completes.back() != 2) return false;
+    if (!send(3) || !session.Stop() || completes.size() != 3 || completes.back() != -3) return false;
+    return true;
 }
 
 bool BuildCoordinatedFrameProtocolTest()
@@ -4120,7 +4165,7 @@ int main(int argc, char* argv[])
             << "FAIL: Render sources were not isolated\n";
         return 4;
     }
-    if (!BuildCoordinatedFrameProtocolTest()) {
+    if (!BuildCompletionRetryTest() || !BuildCoordinatedFrameProtocolTest()) {
         std::cerr
             << "FAIL: Coordinated Session frame protocol changed\n";
         return 11;

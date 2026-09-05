@@ -34,7 +34,8 @@ public:
 
     bool Dispatch(
         HostRequest&& request,
-        HostCompleteCallback onComplete) const;
+        HostCompleteCallback onComplete,
+        DisplayCallback onDisplay) const;
 
 private:
     struct ViewCandidate final {
@@ -83,13 +84,17 @@ private:
     std::optional<ViewCandidate> BuildViewCandidate(
         const HostViewSetRequest& request) const;
     bool GetUnitValid(double value) const;
+    DisplayCheck BuildDisplayCheck(
+        const HostViewTarget* target,
+        std::optional<VolumeQuality> quality = std::nullopt) const;
 
     std::weak_ptr<IHostViewDirectory> m_directory;
 };
 
 bool HostCommandRouter::Impl::Dispatch(
     HostRequest&& request,
-    HostCompleteCallback onComplete) const
+    HostCompleteCallback onComplete,
+    DisplayCallback onDisplay) const
 {
     const auto sendSync = [&onComplete](const bool isSucceeded) {
         if (!onComplete) return isSucceeded;
@@ -98,6 +103,17 @@ bool HostCommandRouter::Impl::Dispatch(
             // 同步命令已经完成；调用方回调异常不能把已识别请求改写为拒绝。
         }
         return true;
+    };
+    const auto sendDisplay = [&](const bool isSucceeded,
+        const HostViewTarget* target,
+        const std::optional<VolumeQuality> quality = std::nullopt) {
+        if (!isSucceeded || !onComplete || !onDisplay) return sendSync(isSucceeded);
+        try {
+            if (onDisplay(BuildDisplayCheck(target, quality), onComplete)) return true;
+        }
+        catch (...) {}
+        // 状态事务已经接纳；完成队列拒绝不能丢弃终态或反报 admission。
+        return sendSync(false);
     };
 
     if (auto* value = dynamic_cast<HostLoadRequest*>(&request)) {
@@ -122,15 +138,16 @@ bool HostCommandRouter::Impl::Dispatch(
     }
     if (const auto* value = dynamic_cast<const HostViewSetRequest*>(
         &request)) {
-        return sendSync(SetView(*value));
+        return sendDisplay(SetView(*value), &value->targetView,
+            value->volumeQuality ? GetAppQuality(*value->volumeQuality) : std::nullopt);
     }
     if (const auto* value = dynamic_cast<const HostSessionSetRequest*>(
         &request)) {
-        return sendSync(SetSession(*value));
+        return sendDisplay(SetSession(*value), nullptr);
     }
     if (const auto* value = dynamic_cast<const HostViewResetRequest*>(
         &request)) {
-        return sendSync(ResetView(*value));
+        return sendDisplay(ResetView(*value), &value->targetView);
     }
     if (const auto* value = dynamic_cast<const HostToolSetRequest*>(
         &request)) {
@@ -141,6 +158,60 @@ bool HostCommandRouter::Impl::Dispatch(
         return sendSync(SwitchTool(*value));
     }
     return false;
+}
+
+HostCommandRouter::DisplayCheck HostCommandRouter::Impl::BuildDisplayCheck(
+    const HostViewTarget* target,
+    const std::optional<VolumeQuality> quality) const
+{
+    const auto directory = m_directory.lock();
+    if (!directory) return []() -> std::optional<bool> { return false; };
+    std::vector<std::pair<HostViewTarget, AppViewState>> expected;
+    const auto capture = [&](HostViewTarget selector) {
+        const auto route = directory->GetViewRoute(selector);
+        const auto port = route ? route->view.lock() : nullptr;
+        if (!route || !port) return false;
+        selector.viewId = route->id;
+        expected.emplace_back(std::move(selector), port->GetViewState());
+        return true;
+    };
+    if (target) {
+        if (!capture(*target)) return []() -> std::optional<bool> { return false; };
+    }
+    else {
+        HostViewTargets targets;
+        targets.viewRoles = { HostRenderViewRole::Primary3D,
+            HostRenderViewRole::Composite3D, HostRenderViewRole::TopDownSlice,
+            HostRenderViewRole::FrontBackSlice, HostRenderViewRole::LeftRightSlice,
+            HostRenderViewRole::Auxiliary };
+        for (const auto& route : directory->GetInputRoutes(targets)) {
+            if (!capture(HostViewTarget{ route.id })) {
+                return []() -> std::optional<bool> { return false; };
+            }
+        }
+    }
+    const bool isSession = target == nullptr;
+    return [weakDirectory = m_directory, expected = std::move(expected),
+        quality, isSession]() -> std::optional<bool> {
+        const auto current = weakDirectory.lock();
+        if (!current || expected.empty()) return false;
+        bool isPending = false;
+        for (const auto& item : expected) {
+            const auto route = current->GetViewRoute(item.first);
+            const auto port = route ? route->view.lock() : nullptr;
+            if (!port) return false;
+            const auto state = port->GetViewState();
+            if (state.revision != item.second.revision) return false;
+            if (isSession && (state.spacing != item.second.spacing
+                || state.cursorWorld != item.second.cursorWorld
+                || state.cursorAxis != item.second.cursorAxis)) return false;
+            isPending = isPending || state.isPresentationPending;
+            if (!state.isPresentationPending && state.hasPresentationFailed) return false;
+            if (!state.isPresentationPending && quality && *quality != VolumeQuality::Auto
+                && state.volumeQuality != *quality) return false;
+        }
+        return isPending ? std::nullopt : std::optional<bool>{ true };
+    };
 }
 
 std::optional<HostDataRoute>
@@ -736,10 +807,11 @@ HostCommandRouter::~HostCommandRouter() = default;
 
 bool HostCommandRouter::Dispatch(
     HostRequest&& request,
-    HostCompleteCallback onComplete) const
+    HostCompleteCallback onComplete,
+    DisplayCallback onDisplay) const
 {
     return m_impl
         && m_impl->Dispatch(
             std::move(request),
-            std::move(onComplete));
+            std::move(onComplete), std::move(onDisplay));
 }

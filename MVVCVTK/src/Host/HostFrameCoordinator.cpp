@@ -80,14 +80,18 @@ void NormalizeIntents(std::vector<HostFrameIntent>& intents) noexcept
 
 class FlushGuard final {
 public:
-    explicit FlushGuard(bool& isFlushing) noexcept
+    FlushGuard(bool& isFlushing,
+        const std::function<void()>& sendReady) noexcept
         : m_isFlushing(isFlushing)
+        , m_sendReady(sendReady)
     {
         m_isFlushing = true;
     }
 
     ~FlushGuard()
     {
+        try { if (m_sendReady) m_sendReady(); }
+        catch (...) {}
         m_isFlushing = false;
     }
 
@@ -96,6 +100,7 @@ public:
 
 private:
     bool& m_isFlushing;
+    const std::function<void()>& m_sendReady;
 };
 
 } // namespace
@@ -186,7 +191,7 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         return FlushStatus::Failed;
     }
     if (m_isFlushing) return FlushStatus::Deferred;
-    FlushGuard guard(m_isFlushing);
+    FlushGuard guard(m_isFlushing, m_callbacks.sendReadyCompletions);
     std::vector<HostFrameIntent> intents;
     bool restoreIntents = false;
 
@@ -194,7 +199,10 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         // 已发布 epoch 的 Render 是当前唯一终态门；成功前不接纳下一普通 batch。
         if (m_hasPendingCompletion || m_callbacks.getRenderPending()) {
             const auto epoch = m_sceneEpoch.load(std::memory_order_acquire);
-            if (!m_callbacks.sendRender(epoch)) {
+            const bool isRendered = m_callbacks.sendRender(epoch);
+            if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
+            if (!isRendered) {
+                SendDisplayCompletions(false);
                 return FlushStatus::RenderPending;
             }
             if (m_hasPendingCompletion) {
@@ -204,11 +212,16 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             return FlushStatus::Completed;
         }
 
+        // 冻结发生在首次 apply 之前。旧帧重试不会到达这里；本轮任一回调
+        // 中接纳的新请求只进入 pending，不能借用当前 Render 的完成证据。
+        m_frameCompletes.splice(m_frameCompletes.end(), m_pendingCompletes);
         if (!m_callbacks.collectUpdates()) {
             ClearStage();
+            SendDisplayCompletions(false);
             return FlushStatus::Failed;
         }
         if (isFeatureTick) m_callbacks.sendFeatureTicks();
+        if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
         // 从这一点起，任一 commit 前失败都必须把同一批 intent 放回 inbox。
         // restoreIntents 在 freeze 前置位，因此 mutex 获取异常也走同一恢复出口。
         restoreIntents = true;
@@ -217,12 +230,14 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             RestoreIntents(std::move(intents));
             restoreIntents = false;
             ClearStage();
+            SendDisplayCompletions(false);
             return FlushStatus::Failed;
         }
         if (isFeatureTick && !m_callbacks.applyFeatureUpdates()) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;
             ClearStage();
+            SendDisplayCompletions(false);
             return FlushStatus::Failed;
         }
 
@@ -236,10 +251,12 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         }
         const auto nextEpoch = currentEpoch + 1;
         const auto stageStatus = m_callbacks.buildStage(nextEpoch);
+        if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
         if (stageStatus == HostFrameStageStatus::Failed) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;
             ClearStage();
+            SendDisplayCompletions(false);
             return FlushStatus::Failed;
         }
         if (stageStatus == HostFrameStageStatus::Unchanged) {
@@ -254,7 +271,10 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         m_sceneEpoch.store(nextEpoch, std::memory_order_release);
         AdvancePendingBaseEpoch(currentEpoch, nextEpoch);
         m_hasPendingCompletion = true;
-        if (!m_callbacks.sendRender(nextEpoch)) {
+        const bool isRendered = m_callbacks.sendRender(nextEpoch);
+        if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
+        if (!isRendered) {
+            SendDisplayCompletions(false);
             return FlushStatus::RenderPending;
         }
         SendCompletions();
@@ -262,6 +282,8 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         return FlushStatus::Completed;
     }
     catch (...) {
+        if (m_isStopped.load(std::memory_order_acquire)) return FlushStatus::Stopped;
+        SendDisplayCompletions(false);
         // 若 epoch 已发布，异常属于 Render/notification 之后的失败，不能回滚。
         if (m_hasPendingCompletion) return FlushStatus::RenderPending;
         if (restoreIntents) RestoreIntents(std::move(intents));
@@ -323,7 +345,12 @@ void HostFrameCoordinator::Stop() noexcept
     }
     catch (...) {
     }
-    if (m_ownerThread == std::this_thread::get_id()) ClearStage();
+    if (m_ownerThread == std::this_thread::get_id()) {
+        m_hasPendingCompletion = false;
+        ClearStage();
+        m_frameCompletes.splice(m_frameCompletes.end(), m_pendingCompletes);
+        SendDisplayCompletions();
+    }
 }
 
 std::uint64_t HostFrameCoordinator::GetCommittedEpoch() const noexcept
@@ -338,10 +365,64 @@ std::uint64_t HostFrameCoordinator::GetSessionGeneration() const noexcept
 
 void HostFrameCoordinator::SendCompletions() noexcept
 {
+    // Unchanged 只复用此前已完成的场景；从未提交/渲染过的初始状态
+    // 不能作为展示成功证据。明确失败的条目仍独立收口。
+    SendDisplayCompletions(m_sceneEpoch.load(std::memory_order_acquire) != 0);
     try {
         m_callbacks.sendCompletions();
     }
     catch (...) {
+    }
+}
+
+bool HostFrameCoordinator::SendDisplayComplete(
+    std::function<std::optional<bool>()> getApplied,
+    std::function<void(bool)> onComplete)
+{
+    constexpr std::size_t completionLimit = 1024;
+    if (m_ownerThread != std::this_thread::get_id()
+        || m_isStopped.load(std::memory_order_acquire)
+        || !getApplied || !onComplete
+        || m_completeCount >= completionLimit) {
+        return false;
+    }
+    try {
+        m_pendingCompletes.push_back({
+            std::move(getApplied), std::move(onComplete), std::nullopt });
+        ++m_completeCount;
+        return true;
+    }
+    catch (...) { return false; }
+}
+
+void HostFrameCoordinator::SendDisplayCompletions(const bool isRendered) noexcept
+{
+    std::list<CompleteEntry> completes;
+    completes.splice(completes.end(), m_frameCompletes);
+    // 先冻结本帧全部判定，再调用用户代码；前一个 callback 改变 View
+    // 不能反向改变后一个请求已经取得的完成证据。
+    for (auto& entry : completes) {
+        try {
+            entry.result = m_isStopped.load(std::memory_order_acquire)
+                ? std::optional<bool>{ false } : entry.getApplied();
+        }
+        catch (...) { entry.result = false; }
+    }
+    while (!completes.empty()) {
+        auto current = completes.begin();
+        const bool isStopped = m_isStopped.load(std::memory_order_acquire);
+        if (!isStopped && (!current->result.has_value()
+            || (!isRendered && *current->result))) {
+            auto& pending = isRendered ? m_pendingCompletes : m_frameCompletes;
+            pending.splice(pending.end(), completes, current);
+            continue;
+        }
+        auto callback = std::move(current->onComplete);
+        const bool isSucceeded = !isStopped && current->result.value_or(false);
+        completes.erase(current);
+        --m_completeCount;
+        try { callback(isSucceeded); }
+        catch (...) {}
     }
 }
 

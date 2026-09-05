@@ -375,6 +375,8 @@ private:
     bool GetSourceSame() const;
     bool SetCompletedResult(const GapAnalysisResult& candidate);
     bool ClearResultBinding();
+    bool GetResultCurrent() const;
+    void SetBindingStale();
     void SetFailedResult(GapResultStatus status, std::string message);
     InteractionResult OnInput(
         const InteractionEvent& event);
@@ -394,6 +396,7 @@ private:
     std::vector<std::string> m_activeViewIds;
     VtkImageGridSnapshot m_requestSource;
     DataBinding m_requestResultBinding;
+    DataBinding m_resultBinding;
     GapHostState m_state;
     std::thread::id m_ownerThread;
     std::uint64_t m_nextSceneRequestId = 1;
@@ -815,6 +818,7 @@ bool GapHostFeature::Impl::OnHostTick()
         return false;
     }
 
+    SetBindingStale();
     if (m_service->GetDisplayTickNeeded()) {
         m_service->OnDisplayTick(nullptr);
     }
@@ -875,6 +879,7 @@ bool GapHostFeature::Impl::SendRequest(
         return false;
     }
 
+    SetBindingStale();
     switch (request.action) {
     case GapHostAction::Start:
         if (!request.start) {
@@ -908,6 +913,9 @@ GapHostState GapHostFeature::Impl::GetState() const
     }
 
     auto state = m_state;
+    if (GetDataRevisionRefValid(state.resultSet) && !GetResultCurrent()) {
+        state.analysisState = GapAnalysisState::Stale;
+    }
     state.isViewActive = m_service->GetViewOn();
     state.isExitPending = m_isExitPending;
     return state;
@@ -1149,6 +1157,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
         return false;
     }
 
+    m_resultBinding = commit.bindings.back();
     GapHostState state;
     state.analysisState = GapAnalysisState::Succeeded;
     state.statistics = candidate.statistics;
@@ -1192,9 +1201,11 @@ bool GapHostFeature::Impl::ClearResultBinding()
     const auto binding = m_data->GetDataBinding(graph, gapResultBinding);
     if (!binding || !binding->target) return true;
     const bool ownsState = GetDataRevisionRefValid(m_state.resultSet)
-        && *binding->target == m_state.resultSet;
+        && *binding->target == m_state.resultSet
+        && binding->revision == m_resultBinding.revision;
     const bool ownsRequest = m_requestResultBinding.target
-        && *binding->target == *m_requestResultBinding.target;
+        && *binding->target == *m_requestResultBinding.target
+        && binding->revision == m_requestResultBinding.revision;
     if (!ownsState && !ownsRequest) return true;
     DataTransaction transaction;
     transaction.bindings.push_back(DataBindingUpdate{
@@ -1203,8 +1214,31 @@ bool GapHostFeature::Impl::ClearResultBinding()
         true,
         binding->target,
         {} });
-    return m_data->SetDataCommit(std::move(transaction)).status
-        == DataCommitStatus::Succeeded;
+    const auto committed = m_data->SetDataCommit(std::move(transaction));
+    if (committed.status != DataCommitStatus::Succeeded) return false;
+    // 主动退出清空的是自己观察到的绑定；不要在下一 tick 将自己的清空
+    // 误认成外部换绑，从而改写已经成功的固定分析结果。
+    m_resultBinding = committed.bindings.back();
+    return true;
+}
+
+bool GapHostFeature::Impl::GetResultCurrent() const
+{
+    const auto binding = m_data
+        ? m_data->GetDataBinding(m_data->GetDataGraph(), gapResultBinding) : std::nullopt;
+    return binding && binding->revision == m_resultBinding.revision
+        && binding->target == m_resultBinding.target;
+}
+
+void GapHostFeature::Impl::SetBindingStale()
+{
+    if (!GetDataRevisionRefValid(m_state.resultSet) || GetResultCurrent()) return;
+    // 正式历史仍然可读；外部换绑后不能继续显示旧结果，也不能清空外部新绑定。
+    m_state.analysisState = GapAnalysisState::Stale;
+    if (m_service && m_service->GetViewOn() && m_service->ExitView()) {
+        m_isExitPending = true;
+    }
+    (void)ClearComplete();
 }
 
 void GapHostFeature::Impl::SetFailedResult(

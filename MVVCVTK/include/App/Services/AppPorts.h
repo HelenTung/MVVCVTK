@@ -110,6 +110,9 @@ struct AppViewState final {
     DataBindingRevision bindingRevision = 0;
     // 每次成功提交完整 View 事务后单调递增，用于拒绝陈旧补偿。
     std::uint64_t revision = 0;
+    // 仅用于 Host 私有完成门禁；不进入公开展示 DTO，也不成为可写状态。
+    bool isPresentationPending = false;
+    bool hasPresentationFailed = false;
 };
 
 // Session 级命令只承载数据坐标与跨视图联动状态，不包含任一 View 的展示参数。
