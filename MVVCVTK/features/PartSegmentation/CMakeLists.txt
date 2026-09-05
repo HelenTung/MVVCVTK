@@ -3,6 +3,8 @@ set(MVVCVTK_PART_API_HEADERS
     include/Host/PartSegmentationHostTypes.h
 )
 set(MVVCVTK_PART_SOURCES
+    include/Algorithms/PartLabelEditor.h
+    src/Algorithms/PartLabelEditor.cpp
     include/Algorithms/ClassicalPartSegmenter.h
     include/Model/PartCatalog.h
     include/Model/PartIdentityFactory.h

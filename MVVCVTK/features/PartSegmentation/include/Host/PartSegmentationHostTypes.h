@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 using PartLabelId = std::uint32_t;
@@ -318,14 +320,17 @@ enum class PartAdmissionStatus : std::uint8_t {
     InvalidRequest,
     Busy,
     Stopping,
-    Unavailable
+    Unavailable,
+    RevisionConflict,
+    BudgetExceeded
 };
 
 enum class PartResultStatus : std::uint8_t {
     Succeeded,
     SucceededWithDisplayFailure,
     Cancelled,
-    Failed
+    Failed,
+    PreviewReady
 };
 
 enum class PartFailureReason : std::uint8_t {
@@ -337,7 +342,13 @@ enum class PartFailureReason : std::uint8_t {
     Cancelled,
     SourceChanged,
     DisplayFailed,
-    InternalError
+    InternalError,
+    InvalidEdit,
+    ConstraintConflict,
+    UnassignedVoxels,
+    RevisionConflict,
+    NoChange,
+    TimedOut
 };
 
 enum class PartSegmentationStatus : std::uint8_t {
@@ -347,7 +358,96 @@ enum class PartSegmentationStatus : std::uint8_t {
     Failed,
     Cancelled,
     Stale,
-    Stopping
+    Stopping,
+    Committing
+};
+
+// 编辑坐标均属于原始数据网格；extent 含端点，物理位置使用 mm。
+struct PartEditScope final {
+    std::optional<std::array<int, 6>> extent;
+    std::optional<DataRevisionRef> roiMask;
+    std::vector<PartBindingRef> protectedParts;
+    std::optional<DataRevisionRef> protectionMask;
+};
+
+struct PartBrushPlane final {
+    std::array<double, 3> origin{};
+    std::array<double, 3> normal{ 0.0, 0.0, 1.0 };
+    double thicknessMM = 1.0;
+};
+
+struct PartBrushEdit final {
+    PartBindingRef target;
+    bool isErase = false;
+    double radiusMM = 1.0;
+    std::vector<std::array<double, 3>> sourcePoints;
+    std::optional<PartBrushPlane> slice;
+    std::vector<PartBindingRef> overwriteParts;
+    bool isBackgroundAllowed = true;
+};
+
+struct PartFillEdit final {
+    PartBindingRef target;
+    std::array<int, 3> seed{};
+};
+
+struct PartIslandEdit final {
+    PartBindingRef target;
+    std::uint64_t minIslandVoxels = 1;
+};
+
+struct PartGrowEdit final {
+    PartBindingRef target;
+    std::vector<std::array<int, 3>> seeds;
+    double minimum = 0.0;
+    double maximum = 1.0;
+    std::vector<PartBindingRef> overwriteParts;
+    bool isBackgroundAllowed = true;
+};
+
+struct PartSplitSeed final {
+    std::array<int, 3> imageIndex{};
+    // 必须覆盖连续的 1..N，表示子对象序号，不是标签或 PartObjectId。
+    std::uint32_t target = 0;
+};
+
+struct PartBarrier final {
+    std::array<int, 3> imageIndex{};
+    // 无向邻接边：imageIndex 与沿 axis 正向的相邻体素，不删除端点。
+    std::uint8_t axis = 0;
+};
+
+struct PartSplitEdit final {
+    PartBindingRef target;
+    std::vector<PartSplitSeed> seeds;
+    std::vector<PartBarrier> barriers;
+};
+
+struct PartMergeEdit final {
+    std::vector<PartBindingRef> parts;
+};
+
+struct PartHistoryEdit final {
+    bool isRedo = false;
+};
+
+using PartEditOperation = std::variant<PartBrushEdit, PartFillEdit,
+    PartIslandEdit, PartGrowEdit, PartSplitEdit, PartMergeEdit, PartHistoryEdit>;
+
+struct PartEditRequest final {
+    DataRevisionRef expectedLabelMap;
+    std::uint64_t expectedCatalogRevision = 0;
+    PartEditScope scope;
+    PartEditOperation operation;
+};
+
+struct PartEditPreview final {
+    std::uint64_t previewId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef baseLabels;
+    // 临时候选，不是正式 DataGraph 修订；共享冻结 owner，不允许写入别名。
+    std::shared_ptr<const std::vector<PartLabelId>> labels;
+    std::shared_ptr<const PartSetSnapshot> parts;
 };
 
 struct PartSegmentationStartParams final {
@@ -360,6 +460,9 @@ struct PartSegmentationConfig final {
     PartSegmentationStartParams defaultStart;
     std::size_t maxWorkingBytes = 512U * 1024U * 1024U;
     bool isOverlayVisible = true;
+    std::size_t maxHistoryBytes = 256U * 1024U * 1024U;
+    std::size_t maxUndoSteps = 16;
+    std::uint64_t editTimeoutMs = 30000;
 };
 
 struct PartSegmentationRequest final {
