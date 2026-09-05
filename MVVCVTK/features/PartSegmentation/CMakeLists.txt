@@ -4,10 +4,17 @@ set(MVVCVTK_PART_API_HEADERS
 )
 set(MVVCVTK_PART_SOURCES
     include/Algorithms/ClassicalPartSegmenter.h
+    include/Model/PartCatalog.h
+    include/Model/PartIdentityFactory.h
+    include/Model/PartLineageMatcher.h
+    include/Render/PartRenderStateTable.h
     include/Render/Strategies/PartOverlayStrategies.h
     include/Services/PartSegmentationService.h
     src/Algorithms/ClassicalPartSegmenter.cpp
     src/Host/PartSegmentationHostFeature.cpp
+    src/Model/PartCatalog.cpp
+    src/Model/PartIdentityFactory.cpp
+    src/Model/PartLineageMatcher.cpp
     src/Render/Strategies/PartOverlayStrategies.cpp
     src/Services/PartSegmentationService.cpp
 )
@@ -39,6 +46,7 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Algorithms"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Host"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/Model"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Render/Strategies"
         "${CMAKE_CURRENT_SOURCE_DIR}/include/Services"

@@ -11,6 +11,7 @@ int GetLoadFailCount();
 int GetViewFailCount();
 int GetCropFailCount();
 int GetGapFailCount();
+int GetPartSceneFailCount();
 int GetExportFailCount();
 int GetLifecycleFailCount();
 int StartLifecycleDeathCase(std::string_view caseName);

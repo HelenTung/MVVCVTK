@@ -50,13 +50,13 @@ int GetPartScaleFailCount()
         params);
     const bool hasNoSentinel = std::none_of(
         dense.labels.begin(), dense.labels.end(),
-        [](const std::uint32_t label) {
+        [](const PartLabelId label) {
             return label >= std::numeric_limits<std::uint32_t>::max() - 1U;
         });
     failureCount += GetCaseResult(
         dense.error == PartAlgorithmError::None
-            && dense.parts.size() == 1
-            && dense.parts[0].voxelCount == denseValues.size()
+            && dense.metricsByLabel.size() == 2
+            && dense.metricsByLabel[1].voxelCount == denseValues.size()
             && denseValues.data() == sourceData
             && hasNoSentinel
             && dense.metrics.labelBytes
@@ -85,7 +85,7 @@ int GetPartScaleFailCount()
         failureCount += GetCaseResult(
             limited.error == PartAlgorithmError::BudgetExceeded
                 && limited.labels.empty()
-                && limited.parts.empty()
+                && limited.metricsByLabel.empty()
                 && limited.requiredBytes > exactBudget.maxWorkingBytes,
             "One byte below the measured peak is rejected transactionally")
             ? 0 : 1;
@@ -102,10 +102,10 @@ int GetPartScaleFailCount()
         filteredParams);
     failureCount += GetCaseResult(
         filtered.error == PartAlgorithmError::None
-            && filtered.parts.empty()
+            && filtered.metricsByLabel.size() == 1
             && std::all_of(
                 filtered.labels.begin(), filtered.labels.end(),
-                [](const std::uint32_t label) { return label == 0; })
+                [](const PartLabelId label) { return label == 0; })
             && filtered.metrics.filteredPeakBytes
                 >= filteredValues.size() * sizeof(std::size_t),
         "All-filtered component restores labels within measured storage")
@@ -123,8 +123,8 @@ int GetPartScaleFailCount()
         });
     failureCount += GetCaseResult(
         thin.error == PartAlgorithmError::None
-            && thin.parts.size() == 1
-            && thin.parts[0].voxelCount == thinValues.size()
+            && thin.metricsByLabel.size() == 2
+            && thin.metricsByLabel[1].voxelCount == thinValues.size()
             && !progressValues.empty()
             && std::is_sorted(
                 progressValues.begin(), progressValues.end())
@@ -159,10 +159,10 @@ int GetPartScaleFailCount()
         params);
     failureCount += GetCaseResult(
         snake.error == PartAlgorithmError::None
-            && snake.parts.size() == 1
+            && snake.metricsByLabel.size() == 2
             && std::all_of(
                 snake.labels.begin(), snake.labels.end(),
-                [](const std::uint32_t label) {
+                [](const PartLabelId label) {
                     return label == 0U || label == 1U;
                 }),
         "Serpentine one-voxel path remains one Face6 component") ? 0 : 1;
@@ -182,7 +182,7 @@ int GetPartScaleFailCount()
     failureCount += GetCaseResult(
         classifyCancelled.error == PartAlgorithmError::Cancelled
             && classifyCancelled.labels.empty()
-            && classifyCancelled.parts.empty(),
+            && classifyCancelled.metricsByLabel.empty(),
         "Classification cancellation publishes no partial result") ? 0 : 1;
 
     bool stopConnectivity = false;
@@ -200,7 +200,7 @@ int GetPartScaleFailCount()
     failureCount += GetCaseResult(
         connectivityCancelled.error == PartAlgorithmError::Cancelled
             && connectivityCancelled.labels.empty()
-            && connectivityCancelled.parts.empty(),
+            && connectivityCancelled.metricsByLabel.empty(),
         "Frontier cancellation publishes no partial result") ? 0 : 1;
 
     const std::vector<float> restoreValues{ 1.0F };
@@ -218,7 +218,7 @@ int GetPartScaleFailCount()
     failureCount += GetCaseResult(
         restoreCancelled.error == PartAlgorithmError::Cancelled
             && restoreCancelled.labels.empty()
-            && restoreCancelled.parts.empty(),
+            && restoreCancelled.metricsByLabel.empty(),
         "Filtered-label restoration cancellation is transactional") ? 0 : 1;
 
     return failureCount;

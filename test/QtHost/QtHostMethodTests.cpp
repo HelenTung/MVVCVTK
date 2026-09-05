@@ -32,6 +32,9 @@ constexpr std::size_t methodCaseCount =
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     + 1
 #endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    + 1
+#endif
     ;
 
 constexpr std::array<MethodCase, methodCaseCount> methodCases{{
@@ -42,6 +45,9 @@ constexpr std::array<MethodCase, methodCaseCount> methodCases{{
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     { "gap", &GetGapFailCount },
+#endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    { "part-scene", &GetPartSceneFailCount },
 #endif
     { "export", &GetExportFailCount },
     { "lifecycle", &GetLifecycleFailCount }
@@ -54,6 +60,9 @@ constexpr std::string_view methodCaseNames =
 #endif
 #if defined(MVVCVTK_HAS_GAP_ANALYSIS)
     "|gap"
+#endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+    "|part-scene"
 #endif
     "|export|lifecycle";
 

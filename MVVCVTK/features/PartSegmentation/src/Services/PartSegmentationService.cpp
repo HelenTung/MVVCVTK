@@ -188,6 +188,29 @@ std::string BuildSuccessMessage(const PartAlgorithmMetrics& metrics)
         + ", catalogBytes=" + std::to_string(metrics.catalogBytes) + ".";
 }
 
+bool GetHistoryBytes(
+    const PartHistorySnapshot& previous,
+    std::size_t& historyBytes)
+{
+    historyBytes = 0;
+    if (!previous.labels && !previous.catalog) return true;
+    if (!previous.labels || !previous.catalog) return false;
+
+    std::size_t labelBytes = 0;
+    std::size_t catalogBytes = 0;
+    if (!GetProduct(
+            previous.labels->capacity(), sizeof(PartLabelId), labelBytes)
+        || !GetPartCatalogStorageBytes(
+            *previous.catalog, catalogBytes)
+        || catalogBytes > std::numeric_limits<std::size_t>::max()
+            - labelBytes) {
+        historyBytes = std::numeric_limits<std::size_t>::max();
+        return false;
+    }
+    historyBytes = labelBytes + catalogBytes;
+    return true;
+}
+
 } // namespace
 
 PartSegmentationService::PartSegmentationService()
@@ -214,7 +237,10 @@ PartAdmissionStatus PartSegmentationService::Start(
     TrustedImageSnapshot source,
     PartSegmentationStartParams params,
     const std::size_t maxWorkingBytes,
-    const std::uint64_t requestId)
+    const std::uint64_t requestId,
+    PartHistorySnapshot previous,
+    const std::uint64_t expectedResultRevision,
+    const std::uint64_t expectedCatalogRevision)
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_isStopping) return PartAdmissionStatus::Stopping;
@@ -222,14 +248,30 @@ PartAdmissionStatus PartSegmentationService::Start(
     if (!source || !source->image || requestId == 0
         || !std::isfinite(params.threshold)
         || params.minPartVoxels == 0
-        || maxWorkingBytes == 0) {
+        || maxWorkingBytes == 0
+        || (static_cast<bool>(previous.labels)
+            != static_cast<bool>(previous.catalog))
+        || (previous.catalog
+            && (previous.catalog->resultRevision
+                    != expectedResultRevision
+                || previous.catalog->catalogRevision
+                    != expectedCatalogRevision))
+        || (!previous.catalog
+            && (expectedResultRevision != 0
+                || expectedCatalogRevision != 0))) {
         return PartAdmissionStatus::InvalidRequest;
     }
     m_cancelRequested.store(false, std::memory_order_release);
     m_progressPermille.store(0, std::memory_order_relaxed);
     m_progressRequestId.store(requestId, std::memory_order_release);
     m_job = Job{
-        std::move(source), std::move(params), maxWorkingBytes, requestId
+        std::move(source),
+        std::move(params),
+        maxWorkingBytes,
+        requestId,
+        std::move(previous),
+        expectedResultRevision,
+        expectedCatalogRevision
     };
     m_workReady.notify_one();
     return PartAdmissionStatus::Accepted;
@@ -350,6 +392,8 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
     PartLabelCandidate candidate;
     candidate.requestId = job.requestId;
     candidate.sourceVersion = job.source ? job.source->version : 0;
+    candidate.expectedResultRevision = job.expectedResultRevision;
+    candidate.expectedCatalogRevision = job.expectedCatalogRevision;
     candidate.failureReason = PartFailureReason::InvalidSource;
     candidate.message = "Part source is unavailable.";
     if (!job.source || !job.source->image) return candidate;
@@ -426,11 +470,21 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             volume.validity = maskView;
         }
 
+        std::size_t historyBytes = 0;
+        if (!GetHistoryBytes(job.previous, historyBytes)
+            || historyBytes >= job.maxWorkingBytes) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.requiredBytes = historyBytes;
+            candidate.message = BuildBudgetMessage(
+                historyBytes, job.maxWorkingBytes);
+            return candidate;
+        }
+
         PartAlgorithmParams params;
         params.threshold = job.params.threshold;
         params.minPartVoxels = job.params.minPartVoxels;
         params.maxPartCount = maxOverlayPartCount;
-        params.maxWorkingBytes = job.maxWorkingBytes;
+        params.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
         auto result = ClassicalPartSegmenter::BuildLabels(
             volume,
             params,
@@ -440,7 +494,10 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             [this, requestId = job.requestId](const double progress) {
                 SetProgress(requestId, progress);
             });
-        candidate.requiredBytes = result.requiredBytes;
+        candidate.requiredBytes = result.requiredBytes
+            > std::numeric_limits<std::size_t>::max() - historyBytes
+            ? std::numeric_limits<std::size_t>::max()
+            : result.requiredBytes + historyBytes;
         candidate.metrics = result.metrics;
         if (result.error != PartAlgorithmError::None) {
             if (result.error == PartAlgorithmError::Cancelled) {
@@ -451,7 +508,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             else if (result.error == PartAlgorithmError::BudgetExceeded) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
                 candidate.message = BuildBudgetMessage(
-                    result.requiredBytes, job.maxWorkingBytes);
+                    candidate.requiredBytes, job.maxWorkingBytes);
             }
             else if (result.error == PartAlgorithmError::LabelOverflow) {
                 candidate.failureReason = PartFailureReason::BudgetExceeded;
@@ -470,8 +527,40 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         }
 
         candidate.labels =
-            std::make_shared<std::vector<std::uint32_t>>(
+            std::make_shared<std::vector<PartLabelId>>(
                 std::move(result.labels));
+        PartLineageRequest lineageRequest;
+        lineageRequest.previous = job.previous;
+        lineageRequest.currentLabels = candidate.labels;
+        lineageRequest.currentMetricsByLabel =
+            std::move(result.metricsByLabel);
+        lineageRequest.nextResultRevision = job.expectedResultRevision == 0
+            ? 1 : job.expectedResultRevision + 1U;
+        lineageRequest.maxWorkingBytes = job.maxWorkingBytes;
+        auto lineage = PartLineageMatcher::BuildCatalog(
+            std::move(lineageRequest),
+            m_identities,
+            [this] {
+                return m_cancelRequested.load(std::memory_order_acquire);
+            });
+        candidate.requiredBytes = std::max(
+            candidate.requiredBytes, lineage.requiredBytes);
+        if (!lineage.catalog) {
+            candidate.failureReason = lineage.failureReason;
+            candidate.status = lineage.failureReason
+                    == PartFailureReason::Cancelled
+                ? PartResultStatus::Cancelled : PartResultStatus::Failed;
+            candidate.message = lineage.failureReason
+                    == PartFailureReason::BudgetExceeded
+                ? BuildBudgetMessage(
+                    lineage.requiredBytes, job.maxWorkingBytes)
+                : lineage.failureReason == PartFailureReason::Cancelled
+                    ? "Part request was cancelled."
+                    : "Part catalog construction failed.";
+            candidate.labels.reset();
+            return candidate;
+        }
+        candidate.catalog = std::move(lineage.catalog);
         candidate.status = PartResultStatus::Succeeded;
         candidate.failureReason = PartFailureReason::None;
         candidate.message = BuildSuccessMessage(result.metrics);
@@ -480,7 +569,6 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         candidate.spacing = volume.spacing;
         candidate.origin = volume.origin;
         candidate.direction = volume.direction;
-        candidate.parts = std::move(result.parts);
         SetProgress(job.requestId, 1.0);
         return candidate;
     }
