@@ -1,5 +1,6 @@
 #include "Host/PartSegmentationHostFeature.h"
 
+#include "App/Services/FeatureViewService.h"
 #include "Render/Strategies/PartOverlayStrategies.h"
 #include "Render/PartRenderStateTable.h"
 #include "Render/Contracts/OverlayService.h"
@@ -13,6 +14,7 @@
 #include <vtkUnsignedIntArray.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -233,9 +235,19 @@ private:
         std::uint64_t requestId,
         DataVersion sourceVersion);
     void SetRequestProgress(double progress);
-    void SendComplete(
+    void QueueComplete(
         PartSegmentationCallback callback,
-        PartSegmentationResult result) const noexcept;
+        PartSegmentationResult result,
+        std::optional<RenderInputStamp> requiredInput = {},
+        std::vector<std::string> requiredViewIds = {}) const noexcept;
+    static std::vector<std::string> GetViewIds(
+        const std::vector<HostFeatureView>& views);
+    bool SendSceneDelta(
+        std::uint64_t requestId,
+        FeatureScenePriority priority,
+        const TrustedImageSnapshot& source,
+        const std::vector<HostFeatureView>& views) const;
+    void CancelQueuedCompletes() noexcept;
     bool AttachDisplay(
         vtkSmartPointer<vtkImageData> labelImage,
         const PartRenderStateTable& renderStates,
@@ -269,6 +281,9 @@ private:
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
     PartSegmentationCallback m_startCallback;
+    mutable std::mutex m_pendingCompleteMutex;
+    mutable std::vector<std::weak_ptr<PartSegmentationResult>>
+        m_pendingCompleteResults;
     std::thread::id m_ownerThread;
     std::uint64_t m_nextRequestId = 1;
     std::uint64_t m_activeRequestId = 0;
@@ -317,7 +332,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     if (m_startCallback) {
         auto callback = std::move(m_startCallback);
         const auto state = GetState();
-        SendComplete(
+        QueueComplete(
             std::move(callback),
             BuildResult(
                 m_activeRequestId,
@@ -328,6 +343,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
                 state.partCount,
                 "Part request was cancelled by detach."));
     }
+    CancelQueuedCompletes();
     if (!RemoveDisplay()) return false;
 
     m_service.reset();
@@ -446,7 +462,7 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         m_isStopRequested = m_activeRequestId != 0;
         m_service->StopRequest();
         const auto state = GetState();
-        SendComplete(
+        QueueComplete(
             std::move(onComplete),
             BuildResult(
                 requestId,
@@ -468,9 +484,28 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         && request.isVisible) {
         const std::uint64_t requestId = GetNextRequestId();
         admission = { PartAdmissionStatus::Accepted, requestId };
-        const bool isSucceeded = SetVisibility(*request.isVisible);
+        const bool hadVisibleDisplay = !m_bindings.empty();
+        const auto deltaSource = m_activeSource;
+        const auto deltaViews = m_activeViews;
+        bool isSucceeded = SetVisibility(*request.isVisible);
+        const bool hasVisibleChange = isSucceeded
+            && hadVisibleDisplay != !m_bindings.empty();
+        if (hasVisibleChange) {
+            isSucceeded = SendSceneDelta(
+                requestId,
+                FeatureScenePriority::Overlay,
+                deltaSource,
+                deltaViews);
+        }
         const auto state = GetState();
-        SendComplete(
+        const std::optional<RenderInputStamp> requiredInput =
+            isSucceeded && hasVisibleChange && deltaSource
+            ? std::optional<RenderInputStamp>(RenderInputStamp{
+                deltaSource->image.GetPointer(), deltaSource->version })
+            : std::nullopt;
+        const auto requiredViewIds = requiredInput
+            ? GetViewIds(deltaViews) : std::vector<std::string>{};
+        QueueComplete(
             std::move(onComplete),
             BuildResult(
                 requestId,
@@ -482,7 +517,9 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
                 state.resultRevision,
                 state.partCount,
                 isSucceeded ? "Part visibility was updated."
-                            : "Part visibility update failed."));
+                            : "Part visibility update failed."),
+            requiredInput,
+            requiredViewIds);
         return admission;
     }
 
@@ -490,8 +527,25 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         const std::uint64_t requestId = GetNextRequestId();
         admission = { PartAdmissionStatus::Accepted, requestId };
         const auto previousState = GetState();
-        const bool isSucceeded = ClearResult();
-        SendComplete(
+        const bool hadVisibleDisplay = !m_bindings.empty();
+        const auto deltaSource = m_activeSource;
+        const auto deltaViews = m_activeViews;
+        bool isSucceeded = ClearResult();
+        if (isSucceeded && hadVisibleDisplay) {
+            isSucceeded = SendSceneDelta(
+                requestId,
+                FeatureScenePriority::Overlay,
+                deltaSource,
+                deltaViews);
+        }
+        const std::optional<RenderInputStamp> requiredInput =
+            isSucceeded && hadVisibleDisplay && deltaSource
+            ? std::optional<RenderInputStamp>(RenderInputStamp{
+                deltaSource->image.GetPointer(), deltaSource->version })
+            : std::nullopt;
+        const auto requiredViewIds = requiredInput
+            ? GetViewIds(deltaViews) : std::vector<std::string>{};
+        QueueComplete(
             std::move(onComplete),
             BuildResult(
                 requestId,
@@ -503,7 +557,9 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
                 previousState.resultRevision,
                 0,
                 isSucceeded ? "Part result was cleared."
-                            : "Part result clear failed."));
+                            : "Part result clear failed."),
+            requiredInput,
+            requiredViewIds);
         return admission;
     }
     return admission;
@@ -587,6 +643,29 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
                 PartMutationStatus::DisplayFailed,
                 m_activeCatalog->catalogRevision
             };
+        }
+
+        const bool hasPresentationPatch = patch.isVisible || patch.isSelected
+            || patch.opacity || patch.color;
+        if (!controls.empty() && hasPresentationPatch) {
+            bool isFrameAccepted = false;
+            try {
+                isFrameAccepted = SendSceneDelta(
+                    GetNextRequestId(),
+                    FeatureScenePriority::Overlay,
+                    m_activeSource,
+                    m_activeViews);
+            }
+            catch (...) {
+            }
+            if (!isFrameAccepted) {
+                // 帧意图与目录候选必须一起接纳；拒绝时恢复各 View 的显示状态。
+                (void)SetPartStates(controls, *previousStates, *nextStates);
+                return {
+                    PartMutationStatus::DisplayFailed,
+                    m_activeCatalog->catalogRevision
+                };
+            }
         }
 
         m_activeCatalog = std::move(candidate);
@@ -697,16 +776,148 @@ void PartSegmentationHostFeature::Impl::SetRequestProgress(
         m_state.progress, std::clamp(progress, 0.0, runningLimit));
 }
 
-void PartSegmentationHostFeature::Impl::SendComplete(
+void PartSegmentationHostFeature::Impl::QueueComplete(
     PartSegmentationCallback callback,
-    PartSegmentationResult result) const noexcept
+    PartSegmentationResult result,
+    std::optional<RenderInputStamp> requiredInput,
+    std::vector<std::string> requiredViewIds) const noexcept
 {
     if (!callback) return;
     try {
-        callback(std::move(result));
+        auto sharedCallback =
+            std::make_shared<PartSegmentationCallback>(std::move(callback));
+        auto sharedResult =
+            std::make_shared<PartSegmentationResult>(std::move(result));
+        auto isSent = std::make_shared<std::atomic<bool>>(false);
+        {
+            const std::lock_guard<std::mutex> lock(
+                m_pendingCompleteMutex);
+            m_pendingCompleteResults.erase(
+                std::remove_if(
+                    m_pendingCompleteResults.begin(),
+                    m_pendingCompleteResults.end(),
+                    [](const auto& current) { return current.expired(); }),
+                m_pendingCompleteResults.end());
+            m_pendingCompleteResults.push_back(sharedResult);
+        }
+        const std::weak_ptr<TrustedFeatureDataPort> weakData = m_data;
+        const std::weak_ptr<FeatureViewDirectory> weakViews = m_views;
+        const auto send = [sharedCallback, sharedResult, isSent,
+            weakData, weakViews, requiredInput,
+            requiredViewIds = std::move(requiredViewIds)]() noexcept {
+            if (isSent->exchange(true, std::memory_order_acq_rel)) return;
+            if (requiredInput
+                && sharedResult->status == PartResultStatus::Succeeded) {
+                const auto data = weakData.lock();
+                const auto current = data
+                    ? data->GetImageSnapshot() : TrustedImageSnapshot{};
+                if (!current
+                    || current->image.GetPointer()
+                        != requiredInput->identity
+                    || current->version != requiredInput->version) {
+                    sharedResult->status = PartResultStatus::Failed;
+                    sharedResult->failureReason =
+                        PartFailureReason::SourceChanged;
+                    sharedResult->message =
+                        "Part source changed before rendered completion.";
+                }
+                else {
+                    const auto views = weakViews.lock();
+                    const bool areViewsCurrent = views
+                        && !requiredViewIds.empty()
+                        && std::all_of(
+                            requiredViewIds.begin(), requiredViewIds.end(),
+                            [&views, &requiredInput](const auto& viewId) {
+                                const auto port =
+                                    views->GetFeaturePort(viewId);
+                                const auto stamp = port
+                                    ? port->GetRenderInputStamp()
+                                    : std::optional<RenderInputStamp>{};
+                                return stamp && *stamp == *requiredInput;
+                            });
+                    if (!areViewsCurrent) {
+                        sharedResult->status = PartResultStatus::Failed;
+                        sharedResult->failureReason =
+                            PartFailureReason::DisplayFailed;
+                        sharedResult->message =
+                            "Part target view changed before rendered completion.";
+                    }
+                }
+            }
+            try { (*sharedCallback)(std::move(*sharedResult)); }
+            catch (...) {}
+        };
+        if (!m_host || !m_host->SendOwnerComplete(send)) {
+            if (sharedResult->status == PartResultStatus::Succeeded) {
+                sharedResult->status = PartResultStatus::Cancelled;
+                sharedResult->failureReason = PartFailureReason::Cancelled;
+                sharedResult->message =
+                    "Part completion was cancelled while stopping.";
+            }
+            send();
+        }
     }
     catch (...) {
+        try { callback(std::move(result)); }
+        catch (...) {}
     }
+}
+
+std::vector<std::string> PartSegmentationHostFeature::Impl::GetViewIds(
+    const std::vector<HostFeatureView>& views)
+{
+    std::vector<std::string> viewIds;
+    viewIds.reserve(views.size());
+    for (const auto& view : views) {
+        if (view.id.empty()
+            || std::find(viewIds.begin(), viewIds.end(), view.id)
+                != viewIds.end()) {
+            continue;
+        }
+        viewIds.push_back(view.id);
+    }
+    return viewIds;
+}
+
+void PartSegmentationHostFeature::Impl::CancelQueuedCompletes() noexcept
+{
+    const std::lock_guard<std::mutex> lock(m_pendingCompleteMutex);
+    for (const auto& weakResult : m_pendingCompleteResults) {
+        const auto result = weakResult.lock();
+        if (!result || result->status != PartResultStatus::Succeeded) {
+            continue;
+        }
+        result->status = PartResultStatus::Cancelled;
+        result->failureReason = PartFailureReason::Cancelled;
+        result->message = "Part completion was cancelled while detaching.";
+    }
+    m_pendingCompleteResults.erase(
+        std::remove_if(
+            m_pendingCompleteResults.begin(),
+            m_pendingCompleteResults.end(),
+            [](const auto& current) { return current.expired(); }),
+        m_pendingCompleteResults.end());
+}
+
+bool PartSegmentationHostFeature::Impl::SendSceneDelta(
+    const std::uint64_t requestId,
+    const FeatureScenePriority priority,
+    const TrustedImageSnapshot& source,
+    const std::vector<HostFeatureView>& views) const
+{
+    if (!m_host || requestId == 0 || !source || !source->image
+        || source->version == 0 || views.empty()) {
+        return false;
+    }
+    FeatureSceneDelta delta;
+    delta.requestId = requestId;
+    delta.priority = priority;
+    delta.scope = FeatureSceneScope::RequiredAllViews;
+    delta.inputStamp = {
+        source->image.GetPointer(), source->version };
+    delta.viewIds = GetViewIds(views);
+    return !delta.viewIds.empty()
+        && m_host->SendSceneDelta(std::move(delta));
 }
 
 bool PartSegmentationHostFeature::Impl::AttachDisplay(
@@ -855,7 +1066,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
 
     if (m_isSourceChanged || !GetSourceSame(m_requestSource)) {
         SetRequestFailed(PartFailureReason::SourceChanged);
-        SendComplete(
+        QueueComplete(
             std::move(callback),
             BuildResult(
                 requestId,
@@ -868,7 +1079,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
     }
     else if (m_isStopRequested) {
         SetRequestFailed(PartFailureReason::Cancelled);
-        SendComplete(
+        QueueComplete(
             std::move(callback),
             BuildResult(
                 requestId,
@@ -883,7 +1094,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
         const PartFailureReason reason = candidate.failureReason;
         const std::string message = candidate.message;
         SetRequestFailed(reason);
-        SendComplete(
+        QueueComplete(
             std::move(callback),
             BuildResult(
                 requestId,
@@ -931,18 +1142,36 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             && m_host) {
             isDisplayReady = m_host->SetActiveViews({});
         }
+        const bool isFrameReady = !isVisible
+            || (labelView.labels && labelView.image
+                && isRevisionExpected && isCatalogValid && nextSnapshot
+                && nextRenderStates && isDisplayReady
+                && SendSceneDelta(
+                    requestId,
+                    FeatureScenePriority::Scene,
+                    m_requestSource,
+                    m_requestViews));
         if (!labelView.labels || !labelView.image
             || !isRevisionExpected || !isCatalogValid || !nextSnapshot
             || !nextRenderStates
-            || !isDisplayReady) {
+            || !isDisplayReady || !isFrameReady) {
             RemoveBindings(nextBindings);
+            std::vector<std::string> previousViewIds;
+            if (!m_bindings.empty()) {
+                previousViewIds.reserve(m_activeViews.size());
+                for (const auto& view : m_activeViews) {
+                    if (!view.id.empty()) previousViewIds.push_back(view.id);
+                }
+            }
+            if (m_host) {
+                (void)m_host->SetActiveViews(previousViewIds);
+            }
             const PartFailureReason reason = !isRevisionExpected
+                || !isCatalogValid || !nextSnapshot || !nextRenderStates
                 ? PartFailureReason::InternalError
-                : !isCatalogValid || !nextSnapshot
-                    ? PartFailureReason::InternalError
-                    : PartFailureReason::DisplayFailed;
+                : PartFailureReason::DisplayFailed;
             SetRequestFailed(reason);
-            SendComplete(
+            QueueComplete(
                 std::move(callback),
                 BuildResult(
                     requestId,
@@ -979,7 +1208,15 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             state.isOverlayVisible = isVisible;
             const std::size_t partCount = state.partCount;
             SetPublishedState(std::move(state), nextSnapshot);
-            SendComplete(
+            const std::optional<RenderInputStamp> requiredInput = isVisible
+                ? std::optional<RenderInputStamp>(RenderInputStamp{
+                    m_activeSource->image.GetPointer(),
+                    m_activeSource->version })
+                : std::nullopt;
+            const auto requiredViewIds = requiredInput
+                ? GetViewIds(m_activeViews)
+                : std::vector<std::string>{};
+            QueueComplete(
                 std::move(callback),
                 BuildResult(
                     requestId,
@@ -988,7 +1225,9 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                     sourceVersion,
                     nextSnapshot->resultRevision,
                     partCount,
-                    candidate.message));
+                candidate.message),
+                requiredInput,
+                requiredViewIds);
         }
     }
 

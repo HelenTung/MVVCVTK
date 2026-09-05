@@ -132,13 +132,14 @@ bool PumpUntil(
     const HostRenderViewEndpoint& timer,
     Predicate predicate)
 {
+    // 首次建立两个窗口的渲染上下文；之后只驱动已显式绑定的 Session timer。
+    if (primary.renderWindow->GetNeverRendered()) primary.renderWindow->Render();
+    if (timer.renderWindow->GetNeverRendered()) timer.renderWindow->Render();
     for (int poll = 0; poll < 1000; ++poll) {
         if (predicate()) return true;
-        if (!SendTimer(primary.interactor)
-            || !SendTimer(timer.interactor)) {
+        if (!SendTimer(timer.interactor)) {
             return false;
         }
-        primary.renderWindow->Render();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return predicate();
@@ -150,25 +151,28 @@ bool Reload(
     const HostRenderViewEndpoint& timer,
     HostReloadRequest reload)
 {
-    bool isComplete = false;
-    bool isSucceeded = false;
+    struct Completion final {
+        bool isComplete = false;
+        bool isSucceeded = false;
+    };
+    const auto completion = std::make_shared<Completion>();
     const bool isAccepted = session.SendRequest(
         std::move(reload),
-        [&isComplete, &isSucceeded](const bool value) {
-            isSucceeded = value;
-            isComplete = true;
+        [completion](const bool value) {
+            completion->isSucceeded = value;
+            completion->isComplete = true;
         });
     const bool isPumped = isAccepted
-        && PumpUntil(primary, timer, [&isComplete] { return isComplete; });
-    if (!isAccepted || !isPumped || !isSucceeded) {
+        && PumpUntil(primary, timer, [completion] { return completion->isComplete; });
+    if (!isAccepted || !isPumped || !completion->isSucceeded) {
         std::cerr
             << "Part reload diagnostic: accepted=" << isAccepted
             << " pumped=" << isPumped
-            << " complete=" << isComplete
-            << " succeeded=" << isSucceeded
+            << " complete=" << completion->isComplete
+            << " succeeded=" << completion->isSucceeded
             << '\n';
     }
-    return isAccepted && isPumped && isSucceeded;
+    return isAccepted && isPumped && completion->isSucceeded;
 }
 
 std::optional<PartSegmentationResult> StartPart(
@@ -176,19 +180,19 @@ std::optional<PartSegmentationResult> StartPart(
     const HostRenderViewEndpoint& primary,
     const HostRenderViewEndpoint& timer)
 {
-    std::optional<PartSegmentationResult> result;
+    const auto result = std::make_shared<std::optional<PartSegmentationResult>>();
     PartSegmentationRequest request;
     request.action = PartSegmentationAction::Start;
     const auto admission = feature.SendRequest(
         std::move(request),
-        [&result](PartSegmentationResult value) {
-            result = std::move(value);
+        [result](PartSegmentationResult value) {
+            *result = std::move(value);
         });
     if (admission.status != PartAdmissionStatus::Accepted
-        || !PumpUntil(primary, timer, [&result] { return result.has_value(); })) {
+        || !PumpUntil(primary, timer, [result] { return result->has_value(); })) {
         return std::nullopt;
     }
-    return result;
+    return *result;
 }
 
 bool HasFeature(
@@ -290,6 +294,8 @@ int GetPartSceneFailCount()
     }
     primary->renderWindow->SetOffScreenRendering(1);
     timer->renderWindow->SetOffScreenRendering(1);
+    primary->interactor->Initialize();
+    timer->interactor->Initialize();
     HostTimerConfig timerConfig;
     timerConfig.isTimerEnabled = true;
     timerConfig.targetView = {
@@ -298,7 +304,8 @@ int GetPartSceneFailCount()
     if (!isTimerAttached) {
         std::cerr << "Part timer diagnostic: attach failed\n";
     }
-    const bool isLoaded = isTimerAttached
+    const bool isStarted = isTimerAttached && session.Start();
+    const bool isLoaded = isStarted
         && Reload(session, *primary, *timer, GetReload());
     const auto firstResult = isLoaded
         ? StartPart(*feature, *primary, *timer)
@@ -388,6 +395,15 @@ int GetPartSceneFailCount()
             && isOnlyTargetChanged,
         "Part mutation changes only the joined Part node and catalog revision") ? 0 : 1;
 
+    const bool isFrameSent = SendTimer(timer->interactor);
+    const auto renderedMutation = session.GetSceneViewState({
+        primaryViewId, false, HostRenderViewRole::Primary3D });
+    failureCount += GetCaseResult(
+        isFrameSent && renderedMutation
+            && renderedMutation->sceneEpoch > primaryScene->sceneEpoch
+            && renderedMutation->renderedEpoch == renderedMutation->sceneEpoch,
+        "Part presentation mutation renders through the owner frame") ? 0 : 1;
+
     const auto replacementResult = StartPart(*feature, *primary, *timer);
     const auto replacementSnapshot = feature->GetPartSetSnapshot();
     const auto* replacementPart = replacementSnapshot
@@ -433,21 +449,22 @@ int GetPartSceneFailCount()
             && !HasFeature(*staleScene, featureId),
         "Source replacement retains a read-only stale subtree and removes display") ? 0 : 1;
 
-    bool isClearComplete = false;
-    bool isClearSucceeded = false;
+    const auto clearResult =
+        std::make_shared<std::optional<PartSegmentationResult>>();
     PartSegmentationRequest clear;
     clear.action = PartSegmentationAction::Clear;
     const auto clearAdmission = feature->SendRequest(
         std::move(clear),
-        [&isClearComplete, &isClearSucceeded](PartSegmentationResult result) {
-            isClearSucceeded = result.status == PartResultStatus::Succeeded;
-            isClearComplete = true;
+        [clearResult](PartSegmentationResult result) {
+            *clearResult = std::move(result);
         });
+    const bool isClearPumped = clearAdmission.status == PartAdmissionStatus::Accepted
+        && PumpUntil(*primary, *timer, [clearResult] { return clearResult->has_value(); });
     const auto clearedTree = BuildTree(feature->GetPartSetSnapshot());
     failureCount += GetCaseResult(
         clearAdmission.status == PartAdmissionStatus::Accepted
-            && isClearComplete
-            && isClearSucceeded
+            && isClearPumped && clearResult->has_value()
+            && clearResult->value().status == PartResultStatus::Succeeded
             && !feature->GetPartSetSnapshot()
             && !clearedTree.partSet,
         "Clear removes the joined PartSet subtree") ? 0 : 1;

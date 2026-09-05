@@ -32,7 +32,8 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
     // needRender: 本帧是否存在待消费的渲染请求，先原子消费，避免渲染期间的新脏标记被误清掉
     const bool hasRenderNeed = m_updatePort->ResetRenderNeeded();
 
-    // 2. 检查渲染脏标记，仅在窗口有效时渲染
+    // 2. 检查渲染脏标记，仅在窗口有效时渲染。
+    bool isFrameComplete = true;
     if (hasRenderNeed) {
         auto* genericWindow =
             vtkGenericOpenGLRenderWindow::SafeDownCast(
@@ -46,11 +47,24 @@ InteractionResult TimeUpdateHandler::Send(const InteractionEvent& eve)
             && genericWindow->GetReadyForRendering();
         if (isNativeWindowReady || isQtWindowReady)
         {
-            m_renderWindow->Render();
+            try {
+                m_renderWindow->Render();
+            }
+            catch (...) {
+                (void)m_updatePort->SetRenderNeeded();
+                isFrameComplete = false;
+            }
         }
         else {
             (void)m_updatePort->SetRenderNeeded();
+            isFrameComplete = false;
         }
+    }
+
+    // 3. 单 View 本地 frame 也统一使用 Rendered 语义；待重试帧不提前回调。
+    if (isFrameComplete) {
+        try { m_updatePort->SendCompletions(); }
+        catch (...) {}
     }
 
     return { true, false };

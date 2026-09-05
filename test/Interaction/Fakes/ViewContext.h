@@ -103,6 +103,11 @@ public:
     }
 
     bool SetInteractorReady() override { return true; }
+    bool SetInputEnabled(const bool isEnabled) override
+    {
+        m_isInputEnabled = isEnabled;
+        return true;
+    }
     bool Start() override { return true; }
     bool StopInput() override
     {
@@ -139,4 +144,5 @@ private:
     std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;
     std::vector<InteractionEventKind> m_inputEventKinds;
     std::function<void()> m_timerHandler;
+    bool m_isInputEnabled = false;
 };

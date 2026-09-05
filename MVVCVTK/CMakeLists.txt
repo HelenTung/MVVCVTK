@@ -406,6 +406,7 @@ set(MVVCVTK_HOST_SOURCES
     include/Geometry/InteractionComputeService.h
     include/Host/HostCommandRouter.h
     include/Host/HostCoreServices.h
+    include/Host/HostFrameCoordinator.h
     include/Host/HostHotkeyRouter.h
     include/Host/HostViewRuntimeRegistry.h
     include/Host/LoadCommitCoordinator.h
@@ -441,6 +442,7 @@ set(MVVCVTK_HOST_SOURCES
     src/Host/HostTransferCodec.cpp
     include/Host/Internal/HostTransferCodec.h
     src/Host/HostCommandRouter.cpp
+    src/Host/HostFrameCoordinator.cpp
     src/Host/HostHotkeyRouter.cpp
     src/Host/HostViewRuntimeRegistry.cpp
     src/Host/LoadCommitCoordinator.cpp

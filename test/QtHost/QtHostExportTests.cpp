@@ -47,6 +47,7 @@ int GetExportFailCount()
             });
     const bool isTimerSet = isReloadSent
         && unicodeSession.AttachTimer(timer);
+    const bool isStarted = isTimerSet && unicodeSession.Start();
     const auto* endpoint = unicodeSession.GetPrimaryEndpoint();
     const auto sendTimer = [endpoint]() {
         if (!endpoint || !endpoint->interactor) return false;
@@ -65,7 +66,7 @@ int GetExportFailCount()
         return true;
     };
     constexpr int pollCount = 1000;
-    for (int poll = 0; isTimerSet && !isReloadComplete
+    for (int poll = 0; isStarted && !isReloadComplete
         && poll < pollCount; ++poll) {
         if (!sendTimer()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -86,6 +87,7 @@ int GetExportFailCount()
     return GetCaseResult(
         isBuilt
             && isReloadSent
+            && isStarted
             && isReloadComplete
             && isReloadSucceeded
             && isExportSent

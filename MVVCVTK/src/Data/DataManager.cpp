@@ -974,11 +974,14 @@ bool BaseDataManager::SetCurrentData(
         std::make_shared<TrustedImageState>(std::move(state));
     std::shared_ptr<const TrustedImageState> retiredState;
     {
-        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-        // 同时比较 owner 身份与 version，避免 ABA 或并发 load 覆盖更晚 current。
+        std::scoped_lock lock(
+            m_impl->m_dataMutex, m_impl->m_pendingMutex);
+        // Feature/current CAS 与 Load pending 建立共享同一锁域。已有 P1 数据
+        // 候选时，旧版本 P3 结果不得越过它发布，也不能留下同版本 pending。
         if (m_impl->m_current != expectedSnapshot
             || m_impl->m_current->version
-                != expectedSnapshot->version) {
+                != expectedSnapshot->version
+            || m_impl->m_pending) {
             return false;
         }
         nextState->version = expectedSnapshot->version + 1;
@@ -1053,16 +1056,17 @@ bool BaseDataManager::ClearPending()
 bool BaseDataManager::SetPendingImage(TrustedImageState image)
 {
     if (!image.image) return false;
-    const auto current = GetImageSnapshot();
-    if (!current
-        || current->version == std::numeric_limits<DataVersion>::max()) {
-        return false;
-    }
-    image.version = current->version + 1;
     auto pending = std::make_shared<TrustedImageState>(std::move(image));
     TrustedImageSnapshot retiredPending;
     {
-        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
+        std::scoped_lock lock(
+            m_impl->m_dataMutex, m_impl->m_pendingMutex);
+        if (!m_impl->m_current
+            || m_impl->m_current->version
+                == std::numeric_limits<DataVersion>::max()) {
+            return false;
+        }
+        pending->version = m_impl->m_current->version + 1;
         // 单槽只保留最新候选；被覆盖批次在离开锁后随 retiredPending 析构。
         retiredPending = std::move(m_impl->m_pending);
         m_impl->m_pending = std::move(pending);

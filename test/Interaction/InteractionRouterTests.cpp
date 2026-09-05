@@ -19,6 +19,8 @@ namespace {
 class TestUpdatePort final : public RenderUpdatePort {
 public:
     bool SendUpdates() override { return true; }
+    bool SendPendingUpdates() override { return true; }
+    void SendCompletions() override {}
     bool SetRenderNeeded() override { return true; }
     bool ResetRenderNeeded() override { return false; }
 };

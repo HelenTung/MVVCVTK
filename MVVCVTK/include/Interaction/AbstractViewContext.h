@@ -44,6 +44,7 @@ public:
 
     virtual bool SetCameraStyle(VizMode mode) = 0;
     virtual bool SetInteractorReady() = 0;
+    virtual bool SetInputEnabled(bool isEnabled) = 0;
     virtual bool Start() = 0;
     virtual bool StopInput() = 0;
     virtual bool SetWindowSize(int width, int height);

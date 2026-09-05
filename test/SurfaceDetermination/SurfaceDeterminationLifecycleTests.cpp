@@ -153,6 +153,11 @@ public:
         return true;
     }
 
+    bool SendSceneDelta(FeatureSceneDelta delta) override
+    {
+        return delta.requestId != 0 && !delta.viewIds.empty();
+    }
+
     bool SendOwnerComplete(std::function<void()> complete) override
     {
         if (!complete) return false;

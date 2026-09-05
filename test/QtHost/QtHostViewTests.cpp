@@ -18,6 +18,7 @@
 #include <vtkActor.h>
 #include <vtkAlgorithmOutput.h>
 #include <vtkCellArray.h>
+#include <vtkCommand.h>
 #include <vtkColorTransferFunction.h>
 #include <vtkDataObject.h>
 #include <vtkDoubleArray.h>
@@ -36,6 +37,7 @@
 #include <vtkPropCollection.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
 #include <vtkTable.h>
 #include <vtkTriangle.h>
 #include <vtkStreamingDemandDrivenPipeline.h>
@@ -58,6 +60,23 @@
 #include <vector>
 
 namespace {
+
+bool SendSessionTimer(vtkRenderWindowInteractor* interactor)
+{
+    if (!interactor) return false;
+    int timerId = interactor->GetTimerEventId();
+    if (timerId == 0) {
+        for (int candidate = 1; candidate <= 64; ++candidate) {
+            if (interactor->GetTimerDuration(candidate) != 0) {
+                timerId = candidate;
+                break;
+            }
+        }
+    }
+    if (timerId == 0) return false;
+    interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
+    return true;
+}
 
 static_assert(static_cast<int>(VolumeQuality::Auto) == 0);
 static_assert(static_cast<int>(VolumeQuality::Low) == 1);
@@ -2945,12 +2964,14 @@ int GetViewFailCount()
     const HostViewTarget linkedTarget{
         "linked-view", false, HostRenderViewRole::Composite3D };
     const bool isSceneSessionBuilt = session.BuildSession();
+    const bool isSceneSessionStarted =
+        isSceneSessionBuilt && session.Start();
     const auto initialScene = session.GetSceneViewState(stateTarget);
     const auto linkedSceneByRole = session.GetSceneViewState(
         HostViewTarget{
             "", true, HostRenderViewRole::Composite3D });
     const auto initialScenes = session.GetSceneViewStates();
-    const bool isInitialSceneValid = isSceneSessionBuilt
+    const bool isInitialSceneValid = isSceneSessionStarted
         && initialScene
         && initialScene->id == "view"
         && initialScene->role == HostRenderViewRole::Primary3D
@@ -3029,10 +3050,14 @@ int GetViewFailCount()
     failureCount += GetCaseResult(
         isViewSet,
         "Qt Host can set one View presentation state") ? 0 : 1;
+    const auto* sceneEndpoint = session.GetPrimaryEndpoint();
+    const bool isSceneFlushed = sceneEndpoint
+        && SendSessionTimer(sceneEndpoint->interactor);
     const auto nextScene = session.GetSceneViewState(stateTarget);
     const auto nextLinked = session.GetSceneViewState(linkedTarget);
     failureCount += GetCaseResult(
         isViewSet
+            && isSceneFlushed
             && firstScene && nextScene && firstLinked && nextLinked
             && nextScene->presentationRevision
                 > firstScene->presentationRevision
