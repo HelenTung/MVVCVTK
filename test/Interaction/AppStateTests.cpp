@@ -3,8 +3,12 @@
 #include "App/AppState.h"
 
 #include <array>
+#include <chrono>
+#include <future>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -24,6 +28,21 @@ public:
 private:
     std::vector<UpdateFlags> m_events;
 };
+
+DataReadyState GetDataReadyState(
+    const std::array<double, 3>& spacing,
+    const DataGeneration generation,
+    const DataBindingRevision bindingRevision,
+    const std::uint8_t identityByte = 1)
+{
+    DataReadyState state;
+    state.dataRevision.entityId.bytes[0] = identityByte;
+    state.dataRevision.generation = generation;
+    state.bindingRevision = bindingRevision;
+    state.scalarRange = { -10.0, 42.0 };
+    state.spacing = spacing;
+    return state;
+}
 
 }
 
@@ -48,6 +67,123 @@ int AppStateSuite::GetFailCount() const
     if (sink->GetEvents().size() != 2
         || sink->GetEvents().back() != UpdateFlags::Spacing) {
         std::cerr << "App state must broadcast one spacing diff.\n";
+        ++failureCount;
+    }
+
+    const auto identitySink = std::make_shared<StateEventSink>();
+    SharedInteractionState identityState(identitySink);
+    const auto committedIdentity = GetDataReadyState(
+        { 2.0, 2.0, 2.0 }, 4, 7);
+    const bool didCommitIdentity = identityState.SetSpacingData(
+        committedIdentity.spacing,
+        [&](const std::array<double, 3>&) {
+            return std::optional<DataReadyState>{ committedIdentity };
+        });
+    if (!didCommitIdentity
+        || identityState.GetSpacing() != committedIdentity.spacing
+        || identityState.GetDataRevision()
+            != committedIdentity.dataRevision
+        || identityState.GetDataBindingRevision()
+            != committedIdentity.bindingRevision
+        || identitySink->GetEvents().size() != 1
+        || identitySink->GetEvents().front()
+            != (UpdateFlags::Spacing | UpdateFlags::DataReady)) {
+        std::cerr << "Spacing commits must publish their DataGraph identity atomically.\n";
+        ++failureCount;
+    }
+
+    SharedInteractionState concurrentSpacingState(nullptr);
+    std::promise<void> dataWriteEntered;
+    auto dataWriteEnteredFuture = dataWriteEntered.get_future();
+    std::promise<void> releaseDataWrite;
+    auto releaseDataWriteFuture = releaseDataWrite.get_future();
+    bool didSetSpacingData = false;
+    std::thread dataWriter([&] {
+        didSetSpacingData = concurrentSpacingState.SetSpacingData(
+            { 2.0, 2.0, 2.0 },
+            [&](const std::array<double, 3>&) {
+                dataWriteEntered.set_value();
+                releaseDataWriteFuture.wait();
+                return std::optional<DataReadyState>{
+                    GetDataReadyState({ 2.0, 2.0, 2.0 }, 2, 2) };
+            });
+    });
+    dataWriteEnteredFuture.wait();
+    std::promise<void> directWriteStarted;
+    auto directWriteStartedFuture = directWriteStarted.get_future();
+    std::promise<void> directWriteComplete;
+    auto directWriteCompleteFuture = directWriteComplete.get_future();
+    std::thread directWriter([&] {
+        directWriteStarted.set_value();
+        concurrentSpacingState.SetSpacing(3.0, 3.0, 3.0);
+        directWriteComplete.set_value();
+    });
+    directWriteStartedFuture.wait();
+    const bool didDirectWriteComplete = directWriteCompleteFuture.wait_for(
+        std::chrono::milliseconds(100)) == std::future_status::ready;
+    releaseDataWrite.set_value();
+    dataWriter.join();
+    directWriter.join();
+    if (!didSetSpacingData || !didDirectWriteComplete
+        || concurrentSpacingState.GetSpacing()
+            != std::array<double, 3>{ 2.0, 2.0, 2.0 }
+        || concurrentSpacingState.GetDataRevision()
+            != GetDataReadyState({ 2.0, 2.0, 2.0 }, 2, 2).dataRevision) {
+        std::cerr << "A completed data commit must remain the spacing linearization point.\n";
+        ++failureCount;
+    }
+
+    SharedInteractionState identityRaceState(nullptr);
+    std::promise<void> identityCallbackEntered;
+    auto identityCallbackEnteredFuture = identityCallbackEntered.get_future();
+    std::promise<void> releaseIdentityCallback;
+    auto releaseIdentityCallbackFuture = releaseIdentityCallback.get_future();
+    bool didAcceptStaleIdentity = true;
+    std::thread identityWriter([&] {
+        didAcceptStaleIdentity = identityRaceState.SetSpacingData(
+            { 2.0, 2.0, 2.0 },
+            [&](const std::array<double, 3>&) {
+                identityCallbackEntered.set_value();
+                releaseIdentityCallbackFuture.wait();
+                return std::optional<DataReadyState>{
+                    GetDataReadyState({ 2.0, 2.0, 2.0 }, 2, 2) };
+            });
+    });
+    identityCallbackEnteredFuture.wait();
+    const auto winningIdentity = GetDataReadyState(
+        { 5.0, 5.0, 5.0 }, 9, 11, 2);
+    identityRaceState.SetDataReady(winningIdentity);
+    releaseIdentityCallback.set_value();
+    identityWriter.join();
+    if (didAcceptStaleIdentity
+        || identityRaceState.GetDataRevision()
+            != winningIdentity.dataRevision
+        || identityRaceState.GetDataBindingRevision()
+            != winningIdentity.bindingRevision
+        || identityRaceState.GetSpacing() != winningIdentity.spacing) {
+        std::cerr << "A newer primary identity must reject a stale spacing completion.\n";
+        ++failureCount;
+    }
+
+    SharedInteractionState reentrantSpacingState(nullptr);
+    bool didAcceptInnerDataWrite = true;
+    const bool didAcceptOuterDataWrite = reentrantSpacingState.SetSpacingData(
+        { 2.0, 2.0, 2.0 },
+        [&](const std::array<double, 3>&) {
+            didAcceptInnerDataWrite = reentrantSpacingState.SetSpacingData(
+                { 3.0, 3.0, 3.0 },
+                [&](const std::array<double, 3>&) {
+                    return std::optional<DataReadyState>{
+                        GetDataReadyState({ 3.0, 3.0, 3.0 }, 3, 3) };
+                });
+            reentrantSpacingState.SetSpacing(4.0, 4.0, 4.0);
+            return std::optional<DataReadyState>{
+                GetDataReadyState({ 2.0, 2.0, 2.0 }, 2, 2) };
+        });
+    if (!didAcceptOuterDataWrite || didAcceptInnerDataWrite
+        || reentrantSpacingState.GetSpacing()
+            != std::array<double, 3>{ 2.0, 2.0, 2.0 }) {
+        std::cerr << "Reentrant spacing data writes must be rejected without deadlock.\n";
         ++failureCount;
     }
 

@@ -2,7 +2,6 @@ add_executable(
     mvvcvtk_interaction_tests
     AppStateTests.cpp
     AppStateTests.h
-    Fakes/AppInterfaces.h
     Fakes/AppPorts.h
     Fakes/Host/HostCoreServices.h
     Fakes/Host/HostRoutes.h

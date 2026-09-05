@@ -22,6 +22,7 @@ public:
         SurfaceDeterminationHostFeature&&) = delete;
 
     std::string_view GetFeatureId() const noexcept override;
+    FeatureDataContract GetDataContract() const override;
     bool AttachHost(const HostFeatureContext& context) override;
     bool DetachHost() override;
     bool OnHostTick() override;

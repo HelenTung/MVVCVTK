@@ -46,7 +46,7 @@ bool GetPartCatalogStorageBytes(
     std::size_t& storageBytes) noexcept;
 std::shared_ptr<const PartSetSnapshot> BuildPartSetSnapshot(
     const PartCatalog& catalog,
-    DataVersion sourceVersion,
+    DataRevisionRef sourceRevision,
     bool isStale);
 PartMutationResult SetPartCatalogState(
     PartCatalog& catalog,

@@ -112,6 +112,7 @@ bool GetVolumeKeyEqual(
     const VolumeLodKey& right) noexcept
 {
     return left.inputStamp == right.inputStamp
+        && left.inputIdentity == right.inputIdentity
         && left.maskIdentity == right.maskIdentity
         && left.inputMTime == right.inputMTime
         && left.inputScalarMTime == right.inputScalarMTime
@@ -128,6 +129,7 @@ bool GetIsoKeyEqual(
     const IsoSurfaceKey& right) noexcept
 {
     return left.inputStamp == right.inputStamp
+        && left.inputIdentity == right.inputIdentity
         && left.maskIdentity == right.maskIdentity
         && left.inputMTime == right.inputMTime
         && left.inputScalarMTime == right.inputScalarMTime

@@ -1,12 +1,22 @@
 #include "Host/GapHostFeature.h"
 
 #include "App/Services/FeatureViewService.h"
+#include "Data/DataPayloads.h"
 #include "Services/GapAnalysisService.h"
 
+#include <vtkCellArray.h>
+#include <vtkDataArray.h>
+#include <vtkIdList.h>
 #include <vtkImageData.h>
+#include <vtkPointData.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkTriangleFilter.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -16,12 +26,294 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+constexpr std::string_view featureId = "GapAnalysis";
+constexpr std::string_view gapResultBinding =
+    "analysis.gaps.active";
+const DataTypeId gapVoidTableType{
+    "org.mvvcvtk.gap-analysis.void-table", 1 };
+const DataTypeId gapStatisticsType{
+    "org.mvvcvtk.gap-analysis.statistics", 1 };
+const DataTypeId gapResultSetType{
+    "org.mvvcvtk.gap-analysis.result-set", 1 };
+const DataFacetId gapVoidRecordsFacet{ "tabular-gap-void-records" };
+const DataFacetId gapStatisticsFacet{ "tabular-gap-statistics" };
+
+std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
+    vtkImageData* labels,
+    const GridGeometry3D& geometry)
+{
+    const auto voxelCount = GetGridVoxelCount(geometry);
+    auto* scalars = labels && labels->GetPointData()
+        ? labels->GetPointData()->GetScalars() : nullptr;
+    if (!voxelCount || !scalars
+        || scalars->GetNumberOfComponents() != 1
+        || scalars->GetNumberOfTuples()
+            != static_cast<vtkIdType>(*voxelCount)) {
+        return {};
+    }
+    auto values = std::make_shared<std::vector<std::uint32_t>>(*voxelCount);
+    for (std::size_t index = 0; index < *voxelCount; ++index) {
+        const double value = scalars->GetComponent(
+            static_cast<vtkIdType>(index), 0);
+        if (!std::isfinite(value) || value < 0.0
+            || value > std::numeric_limits<std::uint32_t>::max()
+            || std::floor(value) != value) {
+            return {};
+        }
+        (*values)[index] = static_cast<std::uint32_t>(value);
+    }
+    auto payload = std::make_shared<const LabelMap3DPayload>(
+        geometry, std::move(values));
+    return payload->GetValid() ? payload : nullptr;
+}
+
+std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
+    vtkPolyData* mesh)
+{
+    if (!mesh) return {};
+    auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
+    triangles->SetInputData(mesh);
+    triangles->PassLinesOff();
+    triangles->PassVertsOff();
+    triangles->Update();
+    auto* output = triangles->GetOutput();
+    if (!output) return {};
+
+    std::vector<double> vertices;
+    if (auto* points = output->GetPoints()) {
+        vertices.resize(
+            static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
+        for (vtkIdType index = 0;
+            index < points->GetNumberOfPoints(); ++index) {
+            points->GetPoint(
+                index,
+                vertices.data() + static_cast<std::size_t>(index) * 3);
+        }
+    }
+    else if (output->GetNumberOfPoints() != 0) {
+        return {};
+    }
+
+    std::vector<std::uint64_t> cells;
+    if (auto* polys = output->GetPolys()) {
+        auto ids = vtkSmartPointer<vtkIdList>::New();
+        polys->InitTraversal();
+        while (polys->GetNextCell(ids)) {
+            if (ids->GetNumberOfIds() != 3) return {};
+            for (vtkIdType index = 0; index < 3; ++index) {
+                const auto value = ids->GetId(index);
+                if (value < 0) return {};
+                cells.push_back(static_cast<std::uint64_t>(value));
+            }
+        }
+    }
+    else if (output->GetNumberOfCells() != 0) {
+        return {};
+    }
+    auto payload = std::make_shared<const SurfaceMeshPayload>(
+        std::move(vertices), std::move(cells));
+    return payload->GetValid() ? payload : nullptr;
+}
+
+std::shared_ptr<const RecordTablePayload> CreateVoidTable(
+    const std::vector<VoidRegion>& regions)
+{
+    std::vector<std::int64_t> ids;
+    std::vector<std::int64_t> voxelCounts;
+    std::vector<double> volumes;
+    std::vector<double> equivalentDiameters;
+    std::vector<double> radii;
+    std::vector<double> diameters;
+    std::vector<std::array<double, 3>> centers;
+    std::vector<std::array<std::int64_t, 3>> centroids;
+    std::vector<std::array<std::int64_t, 6>> boxes;
+    std::vector<std::array<std::int64_t, 3>> seeds;
+    std::vector<double> minimumGrayValues;
+    std::vector<double> maximumGrayValues;
+    std::vector<double> meanGrayValues;
+    std::vector<double> grayStandardDeviations;
+    std::vector<double> grayDeviations;
+    std::vector<double> gaps;
+    std::vector<double> compactnessValues;
+    std::vector<double> surfaceAreas;
+    std::vector<double> sphericityValues;
+    std::vector<std::array<double, 3>> pcaDeviations;
+    std::vector<double> pcaMaximumDeviationRatios;
+    std::vector<double> pcaMinimumDeviationRatios;
+    std::vector<double> projectedAreasX;
+    std::vector<double> projectedAreasY;
+    std::vector<double> projectedAreasZ;
+    std::vector<std::array<double, 3>> projectedSizes;
+    std::vector<double> probabilities;
+    ids.reserve(regions.size());
+    voxelCounts.reserve(regions.size());
+    volumes.reserve(regions.size());
+    equivalentDiameters.reserve(regions.size());
+    radii.reserve(regions.size());
+    diameters.reserve(regions.size());
+    centers.reserve(regions.size());
+    centroids.reserve(regions.size());
+    boxes.reserve(regions.size());
+    seeds.reserve(regions.size());
+    minimumGrayValues.reserve(regions.size());
+    maximumGrayValues.reserve(regions.size());
+    meanGrayValues.reserve(regions.size());
+    grayStandardDeviations.reserve(regions.size());
+    grayDeviations.reserve(regions.size());
+    gaps.reserve(regions.size());
+    compactnessValues.reserve(regions.size());
+    surfaceAreas.reserve(regions.size());
+    sphericityValues.reserve(regions.size());
+    pcaDeviations.reserve(regions.size());
+    pcaMaximumDeviationRatios.reserve(regions.size());
+    pcaMinimumDeviationRatios.reserve(regions.size());
+    projectedAreasX.reserve(regions.size());
+    projectedAreasY.reserve(regions.size());
+    projectedAreasZ.reserve(regions.size());
+    projectedSizes.reserve(regions.size());
+    probabilities.reserve(regions.size());
+    for (const auto& region : regions) {
+        ids.push_back(region.id);
+        voxelCounts.push_back(region.voxelCount);
+        volumes.push_back(region.volumeMM3);
+        equivalentDiameters.push_back(region.equivalentDiameterMM);
+        radii.push_back(region.radiusMM);
+        diameters.push_back(region.diameterMM);
+        centers.push_back(region.centerMM);
+        std::array<std::int64_t, 3> centroid{};
+        std::transform(
+            region.centroidMM.begin(), region.centroidMM.end(),
+            centroid.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        centroids.push_back(centroid);
+        std::array<std::int64_t, 6> box{};
+        std::transform(
+            region.bbox.begin(), region.bbox.end(), box.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        boxes.push_back(box);
+        std::array<std::int64_t, 3> seed{};
+        std::transform(
+            region.seedVoxel.begin(), region.seedVoxel.end(), seed.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        seeds.push_back(seed);
+        minimumGrayValues.push_back(region.minGray);
+        maximumGrayValues.push_back(region.maxGray);
+        meanGrayValues.push_back(region.meanGray);
+        grayStandardDeviations.push_back(region.stdDevGray);
+        grayDeviations.push_back(region.grayDeviation);
+        gaps.push_back(region.gapMM);
+        compactnessValues.push_back(region.compactness);
+        surfaceAreas.push_back(region.surfaceAreaMM2);
+        sphericityValues.push_back(region.sphericity);
+        pcaDeviations.push_back({
+            static_cast<double>(region.pcaDeviation[0]),
+            static_cast<double>(region.pcaDeviation[1]),
+            static_cast<double>(region.pcaDeviation[2]) });
+        pcaMaximumDeviationRatios.push_back(
+            region.pcaMaxDeviationRatio);
+        pcaMinimumDeviationRatios.push_back(
+            region.pcaMinDeviationRatio);
+        projectedAreasX.push_back(region.projectedAreaXMM2);
+        projectedAreasY.push_back(region.projectedAreaYMM2);
+        projectedAreasZ.push_back(region.projectedAreaZMM2);
+        projectedSizes.push_back({
+            static_cast<double>(region.projectedSize[0]),
+            static_cast<double>(region.projectedSize[1]),
+            static_cast<double>(region.projectedSize[2]) });
+        probabilities.push_back(region.defectProbability);
+    }
+    auto table = std::make_shared<const RecordTablePayload>(
+        gapVoidTableType,
+        "gap-analysis.void-regions",
+        std::vector<RecordColumn>{
+            { "void-id", std::move(ids) },
+            { "voxel-count", std::move(voxelCounts) },
+            { "volume-mm3", std::move(volumes) },
+            { "equivalent-diameter-mm", std::move(equivalentDiameters) },
+            { "radius-mm", std::move(radii) },
+            { "diameter-mm", std::move(diameters) },
+            { "center-mm", std::move(centers) },
+            { "centroid-mm", std::move(centroids) },
+            { "voxel-bbox", std::move(boxes) },
+            { "seed-voxel", std::move(seeds) },
+            { "gray-min", std::move(minimumGrayValues) },
+            { "gray-max", std::move(maximumGrayValues) },
+            { "gray-mean", std::move(meanGrayValues) },
+            { "gray-standard-deviation",
+              std::move(grayStandardDeviations) },
+            { "gray-deviation", std::move(grayDeviations) },
+            { "gap-mm", std::move(gaps) },
+            { "compactness", std::move(compactnessValues) },
+            { "surface-area-mm2", std::move(surfaceAreas) },
+            { "sphericity", std::move(sphericityValues) },
+            { "pca-deviation", std::move(pcaDeviations) },
+            { "pca-maximum-deviation-ratio",
+              std::move(pcaMaximumDeviationRatios) },
+            { "pca-minimum-deviation-ratio",
+              std::move(pcaMinimumDeviationRatios) },
+            { "projected-area-x-mm2", std::move(projectedAreasX) },
+            { "projected-area-y-mm2", std::move(projectedAreasY) },
+            { "projected-area-z-mm2", std::move(projectedAreasZ) },
+            { "projected-size-voxel", std::move(projectedSizes) },
+            { "defect-probability", std::move(probabilities) } });
+    return table->GetValid() ? table : nullptr;
+}
+
+std::shared_ptr<const RecordTablePayload> CreateStatisticsTable(
+    const GapStatistics& statistics)
+{
+    auto table = std::make_shared<const RecordTablePayload>(
+        gapStatisticsType,
+        "gap-analysis.statistics",
+        std::vector<RecordColumn>{
+            { "object-voxel-count",
+              std::vector<std::uint64_t>{ statistics.objectVoxelCount } },
+            { "void-voxel-count",
+              std::vector<std::uint64_t>{ statistics.voidVoxelCount } },
+            { "object-volume-mm3",
+              std::vector<double>{ statistics.objectVolumeMM3 } },
+            { "void-volume-mm3",
+              std::vector<double>{ statistics.voidVolumeMM3 } },
+            { "porosity-ratio",
+              std::vector<double>{ statistics.porosityRatio } } });
+    return table->GetValid() ? table : nullptr;
+}
+
+GapHostResult BuildHostResult(
+    const GapHostState& state,
+    const GapResultStatus status,
+    std::string message)
+{
+    GapHostResult result;
+    result.status = status;
+    result.commitId = state.commitId;
+    result.sourceRevision = state.sourceRevision;
+    result.labelMap = state.labelMap;
+    result.voidTable = state.voidTable;
+    result.voidMesh = state.voidMesh;
+    result.statisticsData = state.statisticsData;
+    result.resultSet = state.resultSet;
+    result.statistics = state.statistics;
+    result.message = std::move(message);
+    return result;
+}
+
+} // namespace
+
 class GapHostFeature::Impl final {
 public:
     struct CompleteItem final {
         std::mutex mutex;
         GapHostCallback onComplete;
-        std::optional<bool> result;
+        std::optional<GapHostResult> result;
         bool isActive = true;
         bool isQueued = false;
         bool isSent = false;
@@ -30,7 +322,8 @@ public:
     struct ViewCandidate final {
         GapViewRequest request;
         std::vector<std::string> activeViewIds;
-        DataVersion version = 0;
+        VtkImageGridSnapshot source;
+        DataBinding resultBinding;
     };
 
     explicit Impl(GapHostConfig config)
@@ -64,12 +357,12 @@ private:
     static bool GetStartValid(
         const GapHostStartParams& params);
     static bool GetSnapshotValid(
-        const TrustedImageSnapshot& snapshot);
+        const VtkImageGridSnapshot& snapshot);
     static std::optional<Orientation> GetSliceOrient(
         HostRenderViewRole role);
     static bool SendComplete(
         const std::shared_ptr<CompleteItem>& item,
-        bool isSuccess);
+        GapHostResult result);
     bool QueueComplete(
         const std::shared_ptr<CompleteItem>& item);
     bool SendSceneDelta(FeatureScenePriority priority);
@@ -82,6 +375,11 @@ private:
         GapHostCallback onComplete);
     bool SwitchOverlay();
     bool ExitView();
+    bool SetDataTypes();
+    bool GetSourceSame() const;
+    bool SetCompletedResult(const GapAnalysisResult& candidate);
+    bool ClearResultBinding();
+    void SetFailedResult(GapResultStatus status, std::string message);
     InteractionResult OnInput(
         const InteractionEvent& event);
     bool SetActiveViews(
@@ -93,18 +391,21 @@ private:
     GapHostConfig m_config;
     std::unique_ptr<GapAnalysisService> m_service;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<CompleteItem> m_completeItem;
-    std::optional<DataVersion> m_activeVersion;
     std::optional<RenderInputStamp> m_activeInput;
     std::vector<std::string> m_activeViewIds;
+    VtkImageGridSnapshot m_requestSource;
+    DataBinding m_requestResultBinding;
+    GapHostState m_state;
     std::thread::id m_ownerThread;
     std::uint64_t m_nextSceneRequestId = 1;
     std::uint64_t m_activeRequestId = 0;
     bool m_isSwitchDown = false;
     bool m_isExitDown = false;
     bool m_isExitPending = false;
+    bool m_isRequestPending = false;
     bool m_isInputAttached = false;
     bool m_isAttached = false;
 };
@@ -199,25 +500,26 @@ bool GapHostFeature::Impl::GetStartValid(
 }
 
 bool GapHostFeature::Impl::GetSnapshotValid(
-    const TrustedImageSnapshot& snapshot)
+    const VtkImageGridSnapshot& snapshot)
 {
-    if (!snapshot
-        || snapshot->version == 0
+    const auto* payload = snapshot && snapshot->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(
+            snapshot->data->payload.get())
+        : nullptr;
+    if (!snapshot || !snapshot->data || !snapshot->binding
+        || !snapshot->binding->target
+        || *snapshot->binding->target != snapshot->data->self
+        || !payload || !payload->GetValid()
         || !GetImageReady(snapshot->image)
-        || !std::isfinite(snapshot->scalarRange[0])
-        || !std::isfinite(snapshot->scalarRange[1])
-        || snapshot->scalarRange[0]
-            > snapshot->scalarRange[1]) {
+        || payload->GetComponentCount() != 1) {
         return false;
     }
 
+    const auto& geometry = payload->GetGeometry();
     int dimensions[3] = {};
     snapshot->image->GetDimensions(dimensions);
     for (int axis = 0; axis < 3; ++axis) {
-        if (dimensions[axis] != snapshot->dims[axis]
-            || !std::isfinite(snapshot->spacing[axis])
-            || snapshot->spacing[axis] <= 0.0
-            || !std::isfinite(snapshot->origin[axis])) {
+        if (dimensions[axis] != geometry.dimensions[axis]) {
             return false;
         }
     }
@@ -242,7 +544,7 @@ GapHostFeature::Impl::GetSliceOrient(
 
 bool GapHostFeature::Impl::SendComplete(
     const std::shared_ptr<CompleteItem>& item,
-    const bool isSuccess)
+    GapHostResult result)
 {
     if (!item) {
         return false;
@@ -259,7 +561,7 @@ bool GapHostFeature::Impl::SendComplete(
     }
     if (callback) {
         try {
-            callback(isSuccess);
+            callback(std::move(result));
         }
         catch (...) {
         }
@@ -271,57 +573,52 @@ bool GapHostFeature::Impl::QueueComplete(
     const std::shared_ptr<CompleteItem>& item)
 {
     if (!item) return false;
-    bool result = false;
-    bool hasCallback = false;
     {
         const std::lock_guard<std::mutex> lock(item->mutex);
-        if (!item->isActive || item->isQueued
-            || item->isSent || !item->result) {
-            return false;
-        }
-        result = *item->result;
-        hasCallback = static_cast<bool>(item->onComplete);
+        if (!item->isActive || item->isQueued || item->isSent || !item->result) return false;
         item->isQueued = true;
     }
-    if (!hasCallback) {
-        return SendComplete(item, result);
-    }
-
     const auto expectedInput = m_activeInput;
-    const auto expectedViewIds = m_activeViewIds;
-    const std::weak_ptr<TrustedFeatureDataPort> weakData = m_data;
+    const auto expectedViews = m_activeViewIds;
+    const std::weak_ptr<TrustedDataPort> weakData = m_data;
     const std::weak_ptr<FeatureViewDirectory> weakViews = m_views;
-    const auto send = [item, expectedInput, expectedViewIds,
-        weakData, weakViews]() noexcept {
-        bool finalResult = false;
+    const auto send = [item, expectedInput, expectedViews, weakData, weakViews]() noexcept {
+        GapHostResult result;
         {
             const std::lock_guard<std::mutex> lock(item->mutex);
-            if (item->result) finalResult = *item->result;
+            if (!item->result) return;
+            result = *item->result;
         }
-        if (finalResult && expectedInput) {
+        if (result.status == GapResultStatus::Succeeded && expectedInput) {
             const auto data = weakData.lock();
-            const auto current = data
-                ? data->GetImageSnapshot() : TrustedImageSnapshot{};
-            finalResult = current
-                && current->image.GetPointer() == expectedInput->identity
-                && current->version == expectedInput->version;
+            const auto source = data ? data->GetPrimaryImage() : nullptr;
             const auto views = weakViews.lock();
-            finalResult = finalResult && views
-                && !expectedViewIds.empty()
-                && std::all_of(
-                    expectedViewIds.begin(), expectedViewIds.end(),
+            if (!source || !source->data
+                || source->data->self != expectedInput->dataRevision) {
+                result.status = GapResultStatus::SourceChanged;
+                result.message = "Gap source changed before rendered completion.";
+            }
+            else if (!views || expectedViews.empty()
+                || !std::all_of(expectedViews.begin(), expectedViews.end(),
                     [&views, &expectedInput](const auto& viewId) {
                         const auto port = views->GetFeaturePort(viewId);
-                        const auto stamp = port
-                            ? port->GetRenderInputStamp()
+                        const auto stamp = port ? port->GetRenderInputStamp()
                             : std::optional<RenderInputStamp>{};
                         return stamp && *stamp == *expectedInput;
-                    });
+                    })) {
+                result.status = GapResultStatus::SucceededWithDisplayFailure;
+                result.message = "Gap target changed before rendered completion.";
+            }
         }
-        (void)SendComplete(item, finalResult);
+        (void)SendComplete(item, std::move(result));
     };
     if (!m_host || !m_host->SendOwnerComplete(send)) {
-        (void)SendComplete(item, false);
+        {
+            const std::lock_guard<std::mutex> lock(item->mutex);
+            item->result->status = GapResultStatus::Failed;
+            item->result->message = "Gap completion cancelled while stopping.";
+        }
+        send();
         return false;
     }
     return true;
@@ -360,7 +657,7 @@ GapHostFeature::Impl::GetViewCandidate(
         return std::nullopt;
     }
 
-    const auto snapshot = m_data->GetImageSnapshot();
+    const auto snapshot = m_data->GetPrimaryImage();
     if (!GetSnapshotValid(snapshot)) {
         return std::nullopt;
     }
@@ -370,8 +667,13 @@ GapHostFeature::Impl::GetViewCandidate(
     }
 
     ViewCandidate candidate;
-    candidate.version = snapshot->version;
-    candidate.request.trustedInput = snapshot;
+    candidate.source = snapshot;
+    candidate.request.graphInput = snapshot;
+    candidate.resultBinding.name = std::string(gapResultBinding);
+    if (const auto binding = m_data->GetDataBinding(
+            snapshot->graph, gapResultBinding)) {
+        candidate.resultBinding = *binding;
+    }
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
 
@@ -430,6 +732,10 @@ bool GapHostFeature::Impl::AttachHost(
     m_data = context.data;
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
+    if (!SetDataTypes()) {
+        ClearBorrowed();
+        return false;
+    }
 
     HostInputBinding binding;
     binding.featureId = std::string(FeatureId);
@@ -451,6 +757,8 @@ bool GapHostFeature::Impl::AttachHost(
     m_isSwitchDown = false;
     m_isExitDown = false;
     m_isExitPending = false;
+    m_isRequestPending = false;
+    m_state = {};
     return true;
 }
 
@@ -483,7 +791,11 @@ bool GapHostFeature::Impl::DetachHost()
         m_service->ClearView();
     }
     (void)SetActiveViews({});
-    m_activeVersion.reset();
+    (void)ClearResultBinding();
+    m_requestSource.reset();
+    m_requestResultBinding = {};
+    m_state = {};
+    m_isRequestPending = false;
     m_views.reset();
     m_data.reset();
     m_isSwitchDown = false;
@@ -507,13 +819,39 @@ bool GapHostFeature::Impl::OnHostTick()
         return false;
     }
 
-    if (m_activeVersion && !m_isExitPending) {
-        const auto snapshot = m_data
-            ? m_data->GetImageSnapshot() : TrustedImageSnapshot{};
-        if (!snapshot || !m_activeInput
-            || snapshot->image.GetPointer() != m_activeInput->identity
-            || snapshot->version != *m_activeVersion
-            || snapshot->version != m_activeInput->version) {
+    if (m_service->GetDisplayTickNeeded()) {
+        m_service->OnDisplayTick(nullptr);
+    }
+
+    if (m_isRequestPending) {
+        const auto analysisState = m_service->GetAnalysisState();
+        if (analysisState == GapAnalysisState::Succeeded) {
+            GapAnalysisResult candidate;
+            if (m_service->GetCompletedResult(candidate)) {
+                (void)SetCompletedResult(candidate);
+            }
+        }
+        else if (analysisState == GapAnalysisState::Failed
+            || analysisState == GapAnalysisState::Idle) {
+            SetFailedResult(
+                GapResultStatus::Failed,
+                "Gap analysis failed before data publication.");
+        }
+    }
+
+    if (!m_isRequestPending
+        && !m_isExitPending
+        && GetDataRevisionRefValid(m_state.resultSet)
+        && m_data) {
+        const auto graph = m_data->GetDataGraph();
+        if (m_data->GetDataRelation(
+                graph,
+                m_state.resultSet,
+                "source-volume",
+                primaryVolumeBinding)
+            == DataRelationStatus::OutOfDateRelativeToCurrentBinding) {
+            (void)ClearResultBinding();
+            m_state.analysisState = GapAnalysisState::Stale;
             ClearComplete();
             if (m_service->ExitView()) {
                 m_isExitPending = true;
@@ -521,26 +859,9 @@ bool GapHostFeature::Impl::OnHostTick()
         }
     }
 
-    if (m_service->GetDisplayTickNeeded()) {
-        const bool hasVisibleDelta =
-            m_service->OnDisplayTick(nullptr);
-        if (hasVisibleDelta && !SendSceneDelta(
-                FeatureScenePriority::Overlay)) {
-            if (m_completeItem) {
-                const std::lock_guard<std::mutex> lock(
-                    m_completeItem->mutex);
-                m_completeItem->result = false;
-            }
-        }
-        (void)QueueComplete(m_completeItem);
-    }
     if (m_isExitPending
         && !m_service->GetDisplayTickNeeded()) {
         if (SetActiveViews({})) {
-            m_activeVersion.reset();
-            m_activeInput.reset();
-            m_activeViewIds.clear();
-            m_activeRequestId = 0;
             m_isExitPending = false;
             ClearComplete();
         }
@@ -584,16 +905,13 @@ bool GapHostFeature::Impl::SendRequest(
 
 GapHostState GapHostFeature::Impl::GetState() const
 {
-    GapHostState state;
     if (!m_isAttached
         || !m_service
-        || !GetOwnerThread()
-        || (!m_activeVersion && !m_isExitPending)) {
-        return state;
+        || !GetOwnerThread()) {
+        return {};
     }
 
-    state.analysisState = m_service->GetAnalysisState();
-    state.statistics = m_service->GetStatistics();
+    auto state = m_state;
     state.isViewActive = m_service->GetViewOn();
     state.isExitPending = m_isExitPending;
     return state;
@@ -611,38 +929,32 @@ bool GapHostFeature::Impl::StartView(
     auto completeItem =
         std::make_shared<CompleteItem>();
     completeItem->onComplete = std::move(onComplete);
-    const std::weak_ptr<CompleteItem> weakItem =
-        completeItem;
-    const RenderInputStamp inputStamp{
-        candidate->request.trustedInput->image.GetPointer(),
-        candidate->request.trustedInput->version };
     const bool isAccepted = m_service->StartView(
-        std::move(candidate->request),
-        [weakItem](bool isSuccess) {
-            if (const auto item = weakItem.lock()) {
-                const std::lock_guard<std::mutex> lock(item->mutex);
-                if (item->isActive && !item->isSent) {
-                    item->result = isSuccess;
-                }
-            }
-        });
+        std::move(candidate->request));
     if (!isAccepted) {
         return false;
     }
     if (!SetActiveViews(candidate->activeViewIds)) {
         m_service->ClearView();
         ClearComplete();
-        m_activeVersion.reset();
+        m_requestSource.reset();
+        m_requestResultBinding = {};
+        m_isRequestPending = false;
         m_isExitPending = false;
         return false;
     }
 
     ClearComplete();
     m_completeItem = std::move(completeItem);
-    m_activeVersion = candidate->version;
-    m_activeInput = inputStamp;
+    m_activeInput = RenderInputStamp{ candidate->source->data->self };
     m_activeViewIds = std::move(candidate->activeViewIds);
     m_activeRequestId = GetNextSceneRequestId();
+    m_requestSource = std::move(candidate->source);
+    m_requestResultBinding = std::move(candidate->resultBinding);
+    m_state = {};
+    m_state.analysisState = GapAnalysisState::Running;
+    m_state.sourceRevision = m_requestSource->data->self;
+    m_isRequestPending = true;
     m_isExitPending = false;
     return true;
 }
@@ -661,15 +973,269 @@ bool GapHostFeature::Impl::ExitView()
 {
     if (m_isExitPending
         || !m_service
-        || !m_service->GetViewOn()
-        || !m_service->ExitView()) {
+        || !m_service->GetViewOn()) {
         return false;
+    }
+    if (!ClearResultBinding()) return false;
+    const bool isExited = m_service->ExitView();
+    if (!isExited) return false;
+    if (m_isRequestPending) {
+        SetFailedResult(
+            GapResultStatus::Failed,
+            "Gap analysis was cancelled before publication.");
     }
     const bool isDeltaSent = SendSceneDelta(
         FeatureScenePriority::Overlay);
     ClearComplete();
     m_isExitPending = true;
     return isDeltaSent;
+}
+
+bool GapHostFeature::Impl::SetDataTypes()
+{
+    if (!m_data) return false;
+    const auto setType = [this](
+        const DataTypeId& type,
+        DataTypeDescriptor descriptor) {
+        const auto graph = m_data->GetDataGraph();
+        return (graph.view
+                && !graph.view->GetDataFacets(type).empty())
+            || m_data->SetDataType(std::move(descriptor));
+    };
+    return setType(
+            gapVoidTableType,
+            GetRecordTableDescriptor(
+                gapVoidTableType,
+                { DataFacets::tabularRecords, gapVoidRecordsFacet }))
+        && setType(
+            gapStatisticsType,
+            GetRecordTableDescriptor(
+                gapStatisticsType,
+                { DataFacets::tabularRecords, gapStatisticsFacet }))
+        && setType(
+            gapResultSetType,
+            GetDataCollectionDescriptor(gapResultSetType));
+}
+
+bool GapHostFeature::Impl::GetSourceSame() const
+{
+    if (!m_data || !m_requestSource || !m_requestSource->data
+        || !m_requestSource->binding) {
+        return false;
+    }
+    const auto current = m_data->GetPrimaryImage();
+    return current && current->data && current->binding
+        && current->data->self == m_requestSource->data->self
+        && current->binding->revision
+            == m_requestSource->binding->revision;
+}
+
+bool GapHostFeature::Impl::SetCompletedResult(
+    const GapAnalysisResult& candidate)
+{
+    if (!m_isRequestPending || !m_data || !m_requestSource
+        || !m_requestSource->data || !m_requestSource->binding) {
+        return false;
+    }
+    const auto* sourcePayload = dynamic_cast<const ImageGrid3DPayload*>(
+        m_requestSource->data->payload.get());
+    if (!candidate.isSucceeded || !sourcePayload
+        || !sourcePayload->GetValid()) {
+        SetFailedResult(
+            GapResultStatus::Failed,
+            "Gap result candidate is invalid.");
+        return false;
+    }
+
+    auto labels = CreateLabelPayload(
+        candidate.labelImage, sourcePayload->GetGeometry());
+    auto mesh = CreateMeshPayload(candidate.voidMesh);
+    auto voids = CreateVoidTable(candidate.voids);
+    auto statistics = CreateStatisticsTable(candidate.statistics);
+    if (!labels || !mesh || !voids || !statistics) {
+        SetFailedResult(
+            GapResultStatus::Failed,
+            "Gap result payload construction failed.");
+        return false;
+    }
+
+    const auto labelEntity = m_data->CreateDataEntityId();
+    const auto voidEntity = m_data->CreateDataEntityId();
+    const auto meshEntity = m_data->CreateDataEntityId();
+    const auto statisticsEntity = m_data->CreateDataEntityId();
+    const auto resultEntity = m_data->CreateDataEntityId();
+    const DataRevisionRef labelRef{ labelEntity, 1 };
+    const DataRevisionRef voidRef{ voidEntity, 1 };
+    const DataRevisionRef meshRef{ meshEntity, 1 };
+    const DataRevisionRef statisticsRef{ statisticsEntity, 1 };
+    const DataRevisionRef resultRef{ resultEntity, 1 };
+    auto resultSet = std::make_shared<const DataCollectionPayload>(
+        gapResultSetType,
+        std::vector<DataCollectionEntry>{
+            { "labels", labelRef },
+            { "void-regions", voidRef },
+            { "void-surface", meshRef },
+            { "statistics", statisticsRef } });
+    if (!resultSet->GetValid()) {
+        SetFailedResult(
+            GapResultStatus::Failed,
+            "Gap result-set construction failed.");
+        return false;
+    }
+
+    const auto sourceRef = m_requestSource->data->self;
+    DataExpectation sourceExpectation;
+    sourceExpectation.kind = DataExpectationKind::Binding;
+    sourceExpectation.binding = std::string(primaryVolumeBinding);
+    sourceExpectation.expectedBindingRevision =
+        m_requestSource->binding->revision;
+    sourceExpectation.isTargetChecked = true;
+    sourceExpectation.expectedTarget = sourceRef;
+
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(sourceExpectation));
+    transaction.outputs = {
+        DataRevisionDraft{
+            labelEntity, 0, DataTypes::labelMap3D,
+            { DataInputRef{ "source-volume", sourceRef } },
+            std::move(labels),
+            DataProvenance{
+                std::string(featureId), "analyze-labels", "1", "{}" } },
+        DataRevisionDraft{
+            voidEntity, 0, gapVoidTableType,
+            { DataInputRef{ "source-volume", sourceRef },
+              DataInputRef{ "labels", labelRef } },
+            std::move(voids),
+            DataProvenance{
+                std::string(featureId), "project-void-regions", "1", "{}" } },
+        DataRevisionDraft{
+            meshEntity, 0, DataTypes::surfaceMesh,
+            { DataInputRef{ "source-volume", sourceRef },
+              DataInputRef{ "labels", labelRef } },
+            std::move(mesh),
+            DataProvenance{
+                std::string(featureId), "extract-void-surface", "1", "{}" } },
+        DataRevisionDraft{
+            statisticsEntity, 0, gapStatisticsType,
+            { DataInputRef{ "source-volume", sourceRef },
+              DataInputRef{ "labels", labelRef },
+              DataInputRef{ "void-regions", voidRef } },
+            std::move(statistics),
+            DataProvenance{
+                std::string(featureId), "project-statistics", "1", "{}" } },
+        DataRevisionDraft{
+            resultEntity, 0, gapResultSetType,
+            { DataInputRef{ "source-volume", sourceRef },
+              DataInputRef{ "labels", labelRef },
+              DataInputRef{ "void-regions", voidRef },
+              DataInputRef{ "void-surface", meshRef },
+              DataInputRef{ "statistics", statisticsRef } },
+            std::move(resultSet),
+            DataProvenance{
+                std::string(featureId), "collect-results", "1", "{}" } }
+    };
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(gapResultBinding),
+        m_requestResultBinding.revision,
+        true,
+        m_requestResultBinding.target,
+        resultRef });
+
+    const auto commit = m_data->SetDataCommit(std::move(transaction));
+    if (commit.status != DataCommitStatus::Succeeded) {
+        SetFailedResult(
+            GetSourceSame()
+                ? GapResultStatus::Failed
+                : GapResultStatus::SourceChanged,
+            GetSourceSame()
+                ? "Gap data transaction was rejected."
+                : "Gap source changed before publication.");
+        return false;
+    }
+
+    GapHostState state;
+    state.analysisState = GapAnalysisState::Succeeded;
+    state.statistics = candidate.statistics;
+    state.commitId = commit.commitId;
+    state.sourceRevision = sourceRef;
+    state.labelMap = labelRef;
+    state.voidTable = voidRef;
+    state.voidMesh = meshRef;
+    state.statisticsData = statisticsRef;
+    state.resultSet = resultRef;
+    m_state = state;
+
+    const auto graph = m_data->GetDataGraph();
+    auto labelView = m_data->GetLabelMap(graph, labelRef);
+    auto meshView = m_data->GetSurfaceMesh(graph, meshRef);
+    bool isDisplayed = m_service->SetCommittedView(
+        std::move(labelView), std::move(meshView));
+    if (isDisplayed) isDisplayed = SendSceneDelta(FeatureScenePriority::Overlay);
+    const auto callback = m_completeItem;
+    m_isRequestPending = false;
+    m_requestSource.reset();
+    m_requestResultBinding = {};
+    if (callback) {
+        {
+            const std::lock_guard<std::mutex> lock(callback->mutex);
+            callback->result = BuildHostResult(m_state,
+                isDisplayed ? GapResultStatus::Succeeded
+                    : GapResultStatus::SucceededWithDisplayFailure,
+                isDisplayed ? "Gap data committed and displayed."
+                    : "Gap data committed; display attach failed.");
+        }
+        (void)QueueComplete(callback);
+    }
+    return true;
+}
+
+bool GapHostFeature::Impl::ClearResultBinding()
+{
+    if (!m_data) return false;
+    const auto graph = m_data->GetDataGraph();
+    const auto binding = m_data->GetDataBinding(graph, gapResultBinding);
+    if (!binding || !binding->target) return true;
+    const bool ownsState = GetDataRevisionRefValid(m_state.resultSet)
+        && *binding->target == m_state.resultSet;
+    const bool ownsRequest = m_requestResultBinding.target
+        && *binding->target == *m_requestResultBinding.target;
+    if (!ownsState && !ownsRequest) return true;
+    DataTransaction transaction;
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(gapResultBinding),
+        binding->revision,
+        true,
+        binding->target,
+        {} });
+    return m_data->SetDataCommit(std::move(transaction)).status
+        == DataCommitStatus::Succeeded;
+}
+
+void GapHostFeature::Impl::SetFailedResult(
+    const GapResultStatus status,
+    std::string message)
+{
+    if (!m_isRequestPending) return;
+    m_state.analysisState = status == GapResultStatus::SourceChanged
+        ? GapAnalysisState::Stale
+        : GapAnalysisState::Failed;
+    const auto callback = m_completeItem;
+    m_isRequestPending = false;
+    m_service->SetViewCommitFailed();
+    if (status == GapResultStatus::SourceChanged
+        && m_service->GetViewOn()
+        && m_service->ExitView()) {
+        m_isExitPending = true;
+    }
+    m_requestSource.reset();
+    m_requestResultBinding = {};
+    if (callback) {
+        {
+            const std::lock_guard<std::mutex> lock(callback->mutex);
+            callback->result = BuildHostResult(m_state, status, std::move(message));
+        }
+        (void)QueueComplete(callback);
+    }
 }
 
 InteractionResult GapHostFeature::Impl::OnInput(
@@ -757,7 +1323,8 @@ bool GapHostFeature::Impl::ClearComplete()
     const auto item = std::move(m_completeItem);
     {
         const std::lock_guard<std::mutex> lock(item->mutex);
-        if (!item->isSent) item->result = false;
+        if (!item->isSent) item->result = BuildHostResult(
+            m_state, GapResultStatus::Failed, "Gap completion was cancelled before presentation.");
     }
     (void)QueueComplete(item);
     return true;
@@ -777,6 +1344,10 @@ bool GapHostFeature::Impl::ClearBorrowed()
     m_activeInput.reset();
     m_activeViewIds.clear();
     m_activeRequestId = 0;
+    m_requestSource.reset();
+    m_requestResultBinding = {};
+    m_isRequestPending = false;
+    ClearComplete();
     return true;
 }
 
@@ -796,6 +1367,30 @@ GapHostFeature::~GapHostFeature() noexcept = default;
 std::string_view GapHostFeature::GetFeatureId() const noexcept
 {
     return Impl::FeatureId;
+}
+
+FeatureDataContract GapHostFeature::GetDataContract() const
+{
+    return FeatureDataContract{
+        { DataInputSpec{
+            "source-volume", DataFacets::scalarGrid3D, true } },
+        {
+            DataOutputSpec{
+                "labels", DataTypes::labelMap3D,
+                { DataFacets::labelMap3D } },
+            DataOutputSpec{
+                "void-regions", gapVoidTableType,
+                { DataFacets::tabularRecords, gapVoidRecordsFacet } },
+            DataOutputSpec{
+                "void-surface", DataTypes::surfaceMesh,
+                { DataFacets::surfaceMesh } },
+            DataOutputSpec{
+                "statistics", gapStatisticsType,
+                { DataFacets::tabularRecords, gapStatisticsFacet } },
+            DataOutputSpec{
+                "result-set", gapResultSetType,
+                { DataFacets::dataCollection } }
+        } };
 }
 
 bool GapHostFeature::AttachHost(

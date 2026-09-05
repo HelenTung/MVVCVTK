@@ -42,7 +42,7 @@ struct TestPartSetNode final {
 };
 
 struct TestVolumeNode final {
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
     std::optional<TestPartSetNode> partSet;
 };
 
@@ -210,7 +210,7 @@ TestVolumeNode BuildTree(
 {
     TestVolumeNode volume;
     if (!snapshot) return volume;
-    volume.sourceVersion = snapshot->sourceVersion;
+    volume.sourceRevision = snapshot->sourceRevision;
     TestPartSetNode partSet;
     partSet.partSetId = snapshot->partSetId;
     partSet.resultRevision = snapshot->resultRevision;
@@ -233,7 +233,7 @@ bool GetTreeMatchesSnapshot(
     const PartSetSnapshot& snapshot)
 {
     if (!tree.partSet
-        || tree.sourceVersion != snapshot.sourceVersion
+        || tree.sourceRevision != snapshot.sourceRevision
         || tree.partSet->partSetId != snapshot.partSetId
         || tree.partSet->resultRevision != snapshot.resultRevision
         || tree.partSet->catalogRevision != snapshot.catalogRevision
@@ -358,8 +358,8 @@ int GetPartSceneFailCount()
         "Host-side value tree mirrors Volume, PartSet, and Part snapshots") ? 0 : 1;
 
     const auto presentationRevision = primaryScene->presentationRevision;
-    const auto dataVersion = primaryScene->presentation
-        ? primaryScene->presentation->dataVersion : 0;
+    const auto dataRevision = primaryScene->presentation
+        ? primaryScene->presentation->dataRevision : DataRevisionRef{};
     const auto firstObject = firstSnapshot->parts.front().binding.object.objectId;
     PartStatePatch patch;
     patch.name = "reviewed-primary-part";
@@ -391,7 +391,7 @@ int GetPartSceneFailCount()
             && mutatedScene
             && mutatedScene->presentationRevision == presentationRevision
             && mutatedScene->presentation
-            && mutatedScene->presentation->dataVersion == dataVersion
+            && mutatedScene->presentation->dataRevision == dataRevision
             && isOnlyTargetChanged,
         "Part mutation changes only the joined Part node and catalog revision") ? 0 : 1;
 

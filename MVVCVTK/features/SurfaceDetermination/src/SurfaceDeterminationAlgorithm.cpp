@@ -1,4 +1,5 @@
 #include "SurfaceDeterminationAlgorithm.h"
+#include "Data/DataPayloads.h"
 
 #include <vtkBox.h>
 #include <vtkCellArray.h>
@@ -383,15 +384,20 @@ bool GetSameGeometry(
 }
 
 SurfaceFailureReason BuildVolumeView(
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     VolumeView& volume,
     std::string& message)
 {
-    if (!source || !source->image || source->version == 0) {
+    if (!source || !source->image || !source->data
+        || !GetDataRevisionRefValid(source->data->self)) {
         message = "Surface source is unavailable.";
         return SurfaceFailureReason::InvalidSource;
     }
     auto* image = source->image.GetPointer();
+    const auto* payload = dynamic_cast<const ImageGrid3DPayload*>(
+        source->data->payload.get());
+    if (!payload) return SurfaceFailureReason::InvalidSource;
+    const auto& sourceGeometry = payload->GetGeometry();
     int dimensions[3]{};
     int extent[6]{};
     double spacing[3]{};
@@ -407,12 +413,12 @@ SurfaceFailureReason BuildVolumeView(
             - static_cast<std::int64_t>(extent[axis * 2]) + 1;
         if (dimensions[axis] < 2
             || extentSize != dimensions[axis]
-            || source->dims[axis] != dimensions[axis]
+            || sourceGeometry.dimensions[axis] != dimensions[axis]
             || !std::isfinite(spacing[axis])
             || spacing[axis] <= 0.0
             || !std::isfinite(origin[axis])
-            || spacing[axis] != source->spacing[axis]
-            || origin[axis] != source->origin[axis]
+            || spacing[axis] != sourceGeometry.spacing[axis]
+            || origin[axis] != sourceGeometry.origin[axis]
             || !GetProduct(
                 voxelCount,
                 static_cast<std::size_t>(dimensions[axis]),
@@ -2138,14 +2144,14 @@ void AddObjectResult(
 }
 
 SurfaceAlgorithmResult BuildSurfaceImpl(
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     const SurfaceDeterminationStartParams& inputParams,
     const std::size_t maxWorkingBytes,
     const SurfaceCancelCheck& getCancelled,
     const SurfaceProgressCallback& onProgress)
 {
     SurfaceAlgorithmResult result;
-    result.sourceVersion = source ? source->version : 0;
+    result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
     result.method = inputParams.method;
     SendProgress(
         onProgress, SurfaceDeterminationStage::Preparing, 0.01);
@@ -2377,7 +2383,7 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
 } // namespace
 
 SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     const SurfaceDeterminationStartParams& params,
     const std::size_t maxWorkingBytes,
     const SurfaceCancelCheck& getCancelled,
@@ -2393,7 +2399,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     }
     catch (const std::bad_alloc&) {
         SurfaceAlgorithmResult result;
-        result.sourceVersion = source ? source->version : 0;
+        result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
         result.method = params.method;
         result.failureReason = SurfaceFailureReason::BudgetExceeded;
         result.message = "Surface allocation failed within the configured budget.";
@@ -2401,7 +2407,7 @@ SurfaceAlgorithmResult SurfaceDeterminationAlgorithm::BuildSurface(
     }
     catch (...) {
         SurfaceAlgorithmResult result;
-        result.sourceVersion = source ? source->version : 0;
+        result.sourceRevision = source && source->data ? source->data->self : DataRevisionRef{};
         result.method = params.method;
         result.failureReason = SurfaceFailureReason::InternalError;
         result.message = "Surface determination raised an internal error.";

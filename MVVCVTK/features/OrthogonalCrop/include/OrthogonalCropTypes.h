@@ -7,6 +7,7 @@
 // 类型层只保存公式节点、输入快照、shader transaction 与按需物化结果；
 // 不依赖 App runtime、Renderer、Interactor、mapper 或具体窗口对象。
 
+#include "Host/TrustedDataPort.h"
 #include "Render/Contracts/RenderEffect.h"
 
 #include <array>
@@ -15,10 +16,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#include <vtkImageData.h>
-#include <vtkPolyData.h>
-#include <vtkSmartPointer.h>
 
 struct CropPredicateTable;
 
@@ -59,16 +56,6 @@ struct CropHistoryState final {
     std::size_t baseNodeCount = 0;
     // 从原始根数据开始的完整参数历史；包含当前 active history。
     std::size_t allOperationCount = 0;
-};
-
-// Router 输入侧的数据来源选择。
-enum class OrthogonalCropDataSource {
-    // 强制优先走 vtkImageData 路径。
-    ImageData,
-    // 体渲染主路径；输入仍复用 vtkImageData，只用路由身份区分主目标。
-    VolumeData,
-    // 强制优先走 vtkPolyData 路径。
-    PolyData
 };
 
 // 裁切几何类型；router 用它和数据源、动作一起决定可执行路径。
@@ -146,34 +133,31 @@ struct CropOpItem final {
     CropVectorDouble3Array planeNormalInInputModel = { 0.0, 0.0, 1.0 };
 };
 
-// Host 在 owner thread 捕获的不可拆分快照；source/version/pointer/bounds 必须一起换代。
+// Host 在 owner thread 从同一图快照捕获的不可拆分快照；正式 ref、binding 与 typed view 一起换代。
 struct CropInputSnapshot final {
-    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
-    std::uint64_t inputVersion = 0;
+    DataGraphSnapshot graph;
+    std::optional<DataBinding> binding;
+    DataSnapshot data;
     CropBoundsDouble6Array inputModelBounds = {};
-    vtkSmartPointer<vtkImageData> imageData;
-    vtkSmartPointer<vtkImageData> validityMask;
-    vtkSmartPointer<vtkPolyData> polyData;
+    VtkImageGridSnapshot image;
+    VtkSurfaceMeshSnapshot mesh;
 };
 
 struct CropBuildParams final {
-    OrthogonalCropDataSource dataSource = OrthogonalCropDataSource::ImageData;
+    DataRevisionRef sourceRevision;
     std::vector<CropOpItem> operations;
     std::size_t nodeCount = 0;
-    std::uint64_t inputVersion = 0;
     std::size_t availableRamBytes = 0;
 };
 
 struct CropBuildResult final {
-    OrthogonalCropDataSource resolvedDataSource = OrthogonalCropDataSource::ImageData;
     bool isSucceeded = false;
     CropFailure failureReason = CropFailure::None;
     std::uint64_t failureOperationIndex = 0;
-    std::vector<CropOpItem> operations;
-    std::uint64_t inputVersion = 0;
     std::size_t nodeCount = 0;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef recipeRevision;
+    DataRevisionRef outputRevision;
     std::string message;
-    vtkSmartPointer<vtkImageData> imageData;
-    vtkSmartPointer<vtkImageData> maskImage;
-    vtkSmartPointer<vtkPolyData> polyData;
 };

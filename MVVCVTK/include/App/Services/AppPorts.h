@@ -2,7 +2,7 @@
 
 #include "App/AppTypes.h"
 #include "App/Services/DataCommitTypes.h"
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 #include "Data/VolumeTypes.h"
 
 #include <array>
@@ -106,7 +106,8 @@ struct AppViewState final {
     AppCursorAxis cursorAxis = AppCursorAxis::Free;
     std::uint32_t visibilityMask = 0;
     // 当前 View 已提交 Strategy 使用的数据版本；允许 Host 诊断发布顺序，不暴露 Strategy 对象。
-    DataVersion dataVersion = 0;
+    DataRevisionRef dataRevision;
+    DataBindingRevision bindingRevision = 0;
     // 每次成功提交完整 View 事务后单调递增，用于拒绝陈旧补偿。
     std::uint64_t revision = 0;
 };
@@ -153,15 +154,15 @@ public:
     virtual ~AppDataStagePort() = default;
 
     virtual DataStageStatus StartDataStage(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         std::uint64_t transactionRevision) = 0;
     virtual DataStageStatus SetDataStageReady(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         std::uint64_t transactionRevision) = 0;
     virtual DataStageStatus GetDataStageStatus(
         std::uint64_t transactionRevision) const = 0;
     virtual bool SetViewStage(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         std::uint64_t transactionRevision) = 0;
     virtual bool ResetViewStage(
         std::uint64_t transactionRevision) = 0;

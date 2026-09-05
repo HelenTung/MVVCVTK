@@ -21,7 +21,7 @@ namespace {
 using namespace SurfaceTest;
 
 SurfaceAlgorithmResult Build(
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     const SurfaceDeterminationStartParams& params,
     const std::size_t budget = 64U * 1024U * 1024U)
 {
@@ -287,7 +287,7 @@ void TestNoiseAndParameterValidation(Checks& checks)
     invalidTypeState.validityMask = BuildMaskLike(
         *invalidTypeState.image, VTK_FLOAT);
     const auto invalidTypeResult = Build(
-        std::make_shared<const TrustedImageState>(
+        std::make_shared<const VtkImageGridView>(
             std::move(invalidTypeState)),
         GetParams());
     checks.Get(
@@ -300,7 +300,7 @@ void TestNoiseAndParameterValidation(Checks& checks)
         *invalidGeometryState.image, VTK_UNSIGNED_CHAR);
     invalidGeometryState.validityMask->SetSpacing(2.0, 1.0, 1.0);
     const auto invalidGeometryResult = Build(
-        std::make_shared<const TrustedImageState>(
+        std::make_shared<const VtkImageGridView>(
             std::move(invalidGeometryState)),
         GetParams());
     checks.Get(

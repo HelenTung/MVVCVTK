@@ -1,3 +1,4 @@
+#include "../TestDataPort.h"
 #include "QtHostMethodCases.h"
 #include "RenderProductTestSupport.h"
 
@@ -289,7 +290,8 @@ IsoSurfaceBuildRequest GetIsoRequest(
     request.requestRevision = revision;
     request.requestedQuality = quality;
     request.input = image;
-    request.key.inputStamp = { image.GetPointer(), 1 };
+    request.key.inputStamp = { GetTestDataRef(1) };
+    request.key.inputIdentity = image.GetPointer();
     request.key.inputMTime = image->GetMTime();
     request.key.inputScalarMTime =
         image->GetPointData()->GetScalars()->GetMTime();
@@ -374,7 +376,7 @@ int GetIsoStrategyTaskFailCount()
         initialParams, UpdateFlags::Quality);
     auto image = BuildIsoImage();
     const bool isStampSet = strategy.SetRenderInputStamp({
-        image.GetPointer(), 1 });
+        GetTestDataRef(1) });
     const bool isInputSet = strategy.SetInputData(image, nullptr);
     const bool isInitialSent = lane->SendOne();
     const bool isInitialCommitted = strategy.SetProductCommit();
@@ -455,7 +457,8 @@ VolumeLodBuildRequest GetVolumeRequest(
     request.requestedQuality = quality;
     request.input = image;
     request.mask = mask;
-    request.key.inputStamp = { image.GetPointer(), 1 };
+    request.key.inputStamp = { GetTestDataRef(1) };
+    request.key.inputIdentity = image.GetPointer();
     request.key.maskIdentity = mask.GetPointer();
     request.key.inputMTime = image->GetMTime();
     request.key.inputScalarMTime =
@@ -570,7 +573,7 @@ int GetVolumeStrategyTaskFailCount()
         initialParams, UpdateFlags::Quality);
     auto image = BuildIsoImage();
     const bool isStampSet = strategy.SetRenderInputStamp({
-        image.GetPointer(), 1 });
+        GetTestDataRef(1) });
     const bool isInputSet = strategy.SetInputData(image, nullptr);
     const bool isInitialSent = lane->SendOne();
     const bool isInitialCommitted = strategy.SetProductCommit();
@@ -654,7 +657,7 @@ std::shared_ptr<VolumeLodProduct> BuildCachedVolumeProduct(
 {
     auto product = std::make_shared<VolumeLodProduct>();
     product->requestRevision = revision;
-    product->inputStamp = { image.GetPointer(), 1 };
+    product->inputStamp = { GetTestDataRef(1) };
     product->requestedQuality = VolumeQuality::High;
     product->outputDimensions = { 12, 12, 12 };
     product->volume = image;
@@ -877,7 +880,7 @@ int GetSharedCacheAndGpuFailCount()
     const bool isInitialQualitySet = firstView.SetVisualState(
         initialParams, UpdateFlags::Quality)
         && secondView.SetVisualState(initialParams, UpdateFlags::Quality);
-    const RenderInputStamp stamp{ image.GetPointer(), 9 };
+    const RenderInputStamp stamp{ GetTestDataRef(9) };
     const bool isFirstStampSet = firstView.SetRenderInputStamp(stamp);
     const bool isSecondStampSet = secondView.SetRenderInputStamp(stamp);
     const bool isFirstInputSet = firstView.SetInputData(image, nullptr);

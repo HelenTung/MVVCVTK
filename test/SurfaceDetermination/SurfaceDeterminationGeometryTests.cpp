@@ -21,7 +21,7 @@ namespace {
 using namespace SurfaceTest;
 
 SurfaceAlgorithmResult Build(
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     const SurfaceDeterminationStartParams& params)
 {
     return SurfaceDeterminationAlgorithm::BuildSurface(

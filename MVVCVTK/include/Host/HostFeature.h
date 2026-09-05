@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Data/ImageReadTypes.h"
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 #include "Host/Types/HostViewTypes.h"
 #include "Interaction/InteractionTypes.h"
 #include "Render/Contracts/RenderEffect.h"
@@ -71,17 +71,6 @@ public:
         const HostViewTarget& target) const = 0;
 };
 
-class TrustedFeatureDataPort {
-public:
-    virtual ~TrustedFeatureDataPort() noexcept = default;
-
-    virtual TrustedImageSnapshot GetImageSnapshot() const = 0;
-    virtual bool SetImageState(
-        TrustedImageState imageState,
-        const TrustedImageSnapshot& expected,
-        TrustedImageSnapshot& published) = 0;
-};
-
 // 普通只读端口不暴露 VTK identity；可信 Feature 也通过同一值语义读取边界。
 class ImageReadPort {
 public:
@@ -136,7 +125,7 @@ public:
 struct HostFeatureContext final {
     std::shared_ptr<FeatureViewDirectory> views;
     std::shared_ptr<ImageReadPort> read;
-    std::shared_ptr<TrustedFeatureDataPort> data;
+    std::shared_ptr<TrustedDataPort> data;
     std::shared_ptr<FeatureHostControl> host;
 };
 
@@ -145,6 +134,8 @@ public:
     virtual ~HostFeature() noexcept = default;
 
     virtual std::string_view GetFeatureId() const noexcept = 0;
+    // 纯控制/展示 Feature 可以没有数据契约；产生或消费正式数据的 Feature 显式覆盖。
+    virtual FeatureDataContract GetDataContract() const { return {}; }
     virtual bool AttachHost(const HostFeatureContext& context) = 0;
     virtual bool DetachHost() = 0;
     virtual bool OnHostTick() = 0;

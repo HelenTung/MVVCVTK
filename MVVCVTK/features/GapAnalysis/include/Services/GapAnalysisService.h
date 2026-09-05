@@ -5,8 +5,8 @@
 // =====================================================================
 
 #include "App/ViewTypes.h"
-#include "Data/TrustedImageState.h"
 #include "GapAnalysisTypes.h"
+#include "Host/TrustedDataPort.h"
 
 #include <functional>
 #include <memory>
@@ -16,8 +16,8 @@
 class OverlayService;
 
 struct GapViewRequest final {
-    // GapHost 从 TrustedFeatureDataPort 取得的不可变 owner；存在时只共享 scalar，不复制整卷。
-    TrustedImageSnapshot trustedInput;
+    // GapHost 从 DataGraph 取得的不可变 typed view；存在时只共享 scalar，不复制整卷。
+    VtkImageGridSnapshot graphInput;
     // 低层直接调用使用的可变输入；StartView 同步 DeepCopy image/mask 后才接纳 worker。
     vtkSmartPointer<vtkImageData> inputImage;
     // 非零表示有效体素；DefX 暂无对应入口，worker 会在私有 float 副本中以有效体素最小值填充无效域。
@@ -83,6 +83,15 @@ public:
     // 返回 true 表示本次 tick 已挂接新的可见 overlay；Host 据此提交
     // coordinated scene delta。失败/隐藏结果仍会消费终态 callback。
     bool OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+
+    // owner thread 在 worker 到达成功终态后领取候选；候选尚未成为正式数据。
+    bool GetCompletedResult(GapAnalysisResult& result);
+    // 仅接纳从已提交 revision 重新解析出的 view；显示失败不改变正式数据。
+    bool SetCommittedView(
+        VtkLabelMapSnapshot labels,
+        VtkSurfaceMeshSnapshot mesh);
+    // 数据事务失败时关闭本轮显示消费，但保留历史 revision 的可查询性。
+    void SetViewCommitFailed();
 
 private:
     class Impl;

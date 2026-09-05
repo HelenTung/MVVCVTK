@@ -42,6 +42,7 @@ target_link_libraries(
     mvvcvtk_surface_determination_tests
     PRIVATE
         mvvcvtk_host_test_internal
+        MVVCVTK::Host
         MVVCVTK::SurfaceDetermination
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}

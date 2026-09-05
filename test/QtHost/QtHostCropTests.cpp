@@ -1,4 +1,5 @@
 #include "QtHostMethodCases.h"
+#include "../TestDataPort.h"
 
 #include "AppState.h"
 #include "AppStateEvents.h"
@@ -17,6 +18,7 @@
 #include "VolumeTypes.h"
 
 #include <vtkCommand.h>
+#include <vtkCubeSource.h>
 #include <vtkGPUVolumeRayCastMapper.h>
 #include <vtkImageData.h>
 #include <vtkPolyData.h>
@@ -41,6 +43,27 @@
 #include <vector>
 
 namespace {
+
+constexpr std::string_view cropInputBinding =
+    "feature.crop.input";
+
+// 显式控制 Feature 完成阶段，保证异步 Reload 的 CAS 先于 Crop 提交。
+class CropTickGate final : public HostFeature {
+public:
+    explicit CropTickGate(std::shared_ptr<CropHostFeature> feature)
+        : m_feature(std::move(feature)) {}
+    std::string_view GetFeatureId() const noexcept override
+    { return m_feature->GetFeatureId(); }
+    FeatureDataContract GetDataContract() const override
+    { return m_feature->GetDataContract(); }
+    bool AttachHost(const HostFeatureContext& context) override
+    { return m_feature->AttachHost(context); }
+    bool DetachHost() override { return m_feature->DetachHost(); }
+    bool OnHostTick() override { return isPaused || m_feature->OnHostTick(); }
+    bool isPaused = false;
+private:
+    std::shared_ptr<CropHostFeature> m_feature;
+};
 
 class ContextProbeFeature final : public HostFeature {
 public:
@@ -89,7 +112,7 @@ public:
     }
 
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
 };
 
 class HostControlProbe final : public FeatureHostControl {
@@ -161,20 +184,22 @@ public:
     }
 };
 
-class DataPortProbe final : public TrustedFeatureDataPort {
+using DataPortProbe = TestDataPort;
+
+class UnknownCropPayload final : public IDataPayload {
 public:
-    TrustedImageSnapshot GetImageSnapshot() const override
+    DataTypeId GetDataType() const override
     {
-        return {};
+        return Type;
     }
 
-    bool SetImageState(
-        TrustedImageState,
-        const TrustedImageSnapshot&,
-        TrustedImageSnapshot&) override
+    std::shared_ptr<const IDataPayload> CreateSnapshot() const override
     {
-        return false;
+        return std::make_shared<const UnknownCropPayload>();
     }
+
+    inline static const DataTypeId Type{
+        "test.crop.unsupported", 1 };
 };
 
 class ThrowingStateSink final : public IStateEventSink {
@@ -185,91 +210,30 @@ public:
     }
 };
 
-TrustedImageState GetStateCopy(
-    const TrustedImageSnapshot& snapshot)
-{
-    TrustedImageState state = snapshot
-        ? *snapshot : TrustedImageState{};
-    if (state.image) {
-        auto image = vtkSmartPointer<vtkImageData>::New();
-        image->DeepCopy(state.image);
-        state.image = std::move(image);
-    }
-    if (state.validityMask) {
-        auto mask = vtkSmartPointer<vtkImageData>::New();
-        mask->DeepCopy(state.validityMask);
-        state.validityMask = std::move(mask);
-    }
-    return state;
-}
-
 bool GetCoreWriterContract()
 {
-    std::function<TrustedImageSnapshot()> reader;
-    std::function<bool(
-        TrustedImageState,
-        const TrustedImageSnapshot&,
-        TrustedImageSnapshot&)> writer;
-    TrustedImageSnapshot retainedSnapshot;
-    bool isWriterValid = false;
-    {
-        HostCoreServices core;
-        core.sharedDataMgr =
-            std::make_shared<RawVolumeDataManager>();
-        core.sharedState =
-            std::make_shared<SharedInteractionState>(
-                std::make_shared<ThrowingStateSink>());
-
-        const auto layout = VolumeLayout::Create(
-            { 2, 2, 2 },
-            { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f });
-        const auto buffer = layout
-            ? VolumeBuffer::Create(
-                std::vector<float>(8, 1.0f),
-                *layout)
-            : std::nullopt;
-        bool hasPending = false;
-        if (!buffer
-            || !core.sharedDataMgr->SetFromBuffer(*buffer)
-            || !core.sharedDataMgr->SetCurrentFromPending(
-                hasPending)
-            || !hasPending) {
-            return false;
-        }
-
-        reader = core.GetImageReader();
-        writer = core.GetImageWriter();
-        const auto expectedSnapshot = reader();
-        TrustedImageSnapshot publishedSnapshot;
-        isWriterValid = writer(
-            GetStateCopy(expectedSnapshot),
-            expectedSnapshot,
-            publishedSnapshot);
-        TrustedImageSnapshot stalePublished = publishedSnapshot;
-        const bool isStaleRejected = !writer(
-            GetStateCopy(expectedSnapshot),
-            expectedSnapshot,
-            stalePublished);
-        retainedSnapshot = publishedSnapshot;
-        isWriterValid = isWriterValid
-            && isStaleRejected
-            && !stalePublished
-            && publishedSnapshot
-            && publishedSnapshot->version
-                == expectedSnapshot->version + 1
-            && reader() == publishedSnapshot;
-    }
-
-    TrustedImageSnapshot expiredPublished = retainedSnapshot;
-    const bool isExpiredRejected = !writer(
-        GetStateCopy(retainedSnapshot),
-        retainedSnapshot,
-        expiredPublished);
-    return isWriterValid
-        && !reader()
-        && isExpiredRejected
-        && !expiredPublished;
+    TestDataPort data;
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(2, 2, 2);
+    image->AllocateScalars(VTK_FLOAT, 1);
+    const auto first = data.SetPrimaryImage(image);
+    if (!first || !first->binding) return false;
+    const auto staleBinding = *first->binding;
+    const auto second = data.SetPrimaryImage(image);
+    if (!second || !second->binding) return false;
+    DataTransaction stale;
+    stale.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        staleBinding.revision,
+        true,
+        staleBinding.target,
+        first->data->self });
+    const auto rejected = data.SetDataCommit(std::move(stale));
+    const auto current = data.GetPrimaryImage();
+    return rejected.status == DataCommitStatus::Rejected
+        && current && current->binding
+        && current->data->self == second->data->self
+        && current->binding->revision > staleBinding.revision;
 }
 
 HostSessionConfig GetCropSessionConfig()
@@ -361,13 +325,11 @@ CropHostRequest GetNodeRequest(
 }
 
 CropHostRequest GetPolyRequest(
-    vtkSmartPointer<vtkPolyData> polyData,
-    const std::uint64_t sourceVersion)
+    vtkSmartPointer<vtkPolyData> polyData)
 {
     auto request = GetCropRequest(
         CropHostAction::SetPolyData);
     request.polyData = std::move(polyData);
-    request.sourceVersion = sourceVersion;
     return request;
 }
 
@@ -468,13 +430,13 @@ void SendHostTick(
 bool WaitForRenderInput(
     const HostRenderViewEndpoint& endpoint,
     const std::shared_ptr<FeatureViewService>& service,
-    const TrustedImageSnapshot& snapshot)
+    const VtkImageGridSnapshot& snapshot)
 {
     if (!service || !snapshot || !snapshot->image) {
         return false;
     }
     const RenderInputStamp expected{
-        snapshot->image.GetPointer(), snapshot->version
+        snapshot->data->self
     };
     for (int poll = 0; poll < 500; ++poll) {
         const auto current = service->GetRenderInputStamp();
@@ -643,12 +605,13 @@ int GetCropFailCount()
     VtkAppHostSession session(GetCropSessionConfig());
     auto feature = std::make_shared<CropHostFeature>(
         GetCropConfig());
+    auto tickGate = std::make_shared<CropTickGate>(feature);
     const auto initialState = feature->GetState();
     auto contextProbe =
         std::make_shared<ContextProbeFeature>();
     const bool isBuilt = session.BuildSession();
     const bool isAttached =
-        session.AttachFeature(feature);
+        session.AttachFeature(tickGate);
     const bool isProbeAttached =
         session.AttachFeature(contextProbe);
     const bool isInputAttached =
@@ -702,34 +665,123 @@ int GetCropFailCount()
         "Crop fixture publishes an image through Session data API") ? 0 : 1;
 
     const auto expectedSnapshot =
-        contextProbe->m_data->GetImageSnapshot();
-    TrustedImageSnapshot publishedSnapshot;
-    const bool isPublished =
-        contextProbe->m_data->SetImageState(
-            GetStateCopy(expectedSnapshot),
-            expectedSnapshot,
-            publishedSnapshot);
-    TrustedImageSnapshot stalePublished = publishedSnapshot;
-    const bool isStaleRejected =
-        !contextProbe->m_data->SetImageState(
-            GetStateCopy(expectedSnapshot),
-            expectedSnapshot,
-            stalePublished);
+        contextProbe->m_data->GetPrimaryImage();
+    const DataRevisionRef nextRef{
+        expectedSnapshot->data->self.entityId,
+        expectedSnapshot->data->self.generation + 1 };
+    const auto buildReplacement = [&]() {
+        DataTransaction transaction;
+        transaction.outputs.push_back(DataRevisionDraft{
+            expectedSnapshot->data->self.entityId,
+            expectedSnapshot->data->self.generation,
+            expectedSnapshot->data->type,
+            expectedSnapshot->data->inputs,
+            expectedSnapshot->data->payload,
+            expectedSnapshot->data->provenance });
+        transaction.bindings.push_back(DataBindingUpdate{
+            std::string(primaryVolumeBinding),
+            expectedSnapshot->binding->revision,
+            true,
+            expectedSnapshot->binding->target,
+            nextRef });
+        return transaction;
+    };
+    DataCommitResult wrongThreadWrite;
+    std::thread wrongDataThread([&] {
+        wrongThreadWrite = contextProbe->m_data->SetDataCommit(
+            buildReplacement());
+    });
+    wrongDataThread.join();
+    const auto throwingObserver = contextProbe->m_data->AttachDataChange(
+        [](const DataChangeSet&) { throw 1; });
+    DataCommitId observedCommit = 0;
+    const auto readingObserver = contextProbe->m_data->AttachDataChange(
+        [&contextProbe, &observedCommit](const DataChangeSet& change) {
+            const auto graph = contextProbe->m_data->GetDataGraph();
+            if (graph.commitId == change.commitId) {
+                observedCommit = change.commitId;
+            }
+        });
+    const auto published = contextProbe->m_data->SetDataCommit(
+        buildReplacement());
+    const bool isPublishedInputApplied = WaitForRenderInput(
+        *timerEndpoint, contextProbe->GetViewService("crop-primary"),
+        contextProbe->m_data->GetPrimaryImage());
+    const bool areObserversDetached =
+        contextProbe->m_data->DetachDataChange(throwingObserver)
+        && contextProbe->m_data->DetachDataChange(readingObserver);
+    const auto stale = contextProbe->m_data->SetDataCommit(
+        buildReplacement());
+    const auto publishedSnapshot =
+        contextProbe->m_data->GetPrimaryImage();
+    const auto publishedGraph = contextProbe->m_data->GetDataGraph();
+    const auto hostDataState = session.GetRenderViewState({
+        "crop-primary", false, HostRenderViewRole::Primary3D });
     failureCount += GetCaseResult(
-        isPublished
-            && isStaleRejected
-            && !stalePublished
+        wrongThreadWrite.status == DataCommitStatus::Rejected
+            && isPublishedInputApplied
+            && published.status == DataCommitStatus::Succeeded
+            && stale.status == DataCommitStatus::Rejected
+            && observedCommit == published.commitId
+            && areObserversDetached
             && publishedSnapshot
-            && publishedSnapshot->version
-                == expectedSnapshot->version + 1
-            && contextProbe->m_data->GetImageSnapshot()
-                == publishedSnapshot,
-        "Feature context writer enforces snapshot identity and version CAS") ? 0 : 1;
+            && publishedSnapshot->data->self == nextRef
+            && publishedSnapshot->binding->revision
+                == expectedSnapshot->binding->revision + 1
+            && !contextProbe->m_data->GetData(
+                expectedSnapshot->graph, nextRef)
+            && contextProbe->m_data->GetData(publishedGraph, nextRef)
+            && hostDataState
+            && hostDataState->dataRevision == nextRef
+            && hostDataState->bindingRevision
+                == publishedSnapshot->binding->revision,
+        "Feature Data Port enforces owner thread, snapshot, observer and Binding CAS") ? 0 : 1;
     failureCount += GetCaseResult(
         GetCoreWriterContract(),
         "Core writer publishes before notification and weak closures expire safely") ? 0 : 1;
-    // 让主视图消费 probe 发布的新 snapshot；产品准备已经异步化，
-    // 因此等待实际 RenderInputStamp，而不是假定两个 tick 足够。
+
+    const bool isUnknownTypeRegistered =
+        contextProbe->m_data->SetDataType(DataTypeDescriptor{
+            UnknownCropPayload::Type,
+            { DataFacetId{ "unsupported-crop-input" } },
+            [](const IDataPayload& payload, std::string&) {
+                return dynamic_cast<const UnknownCropPayload*>(&payload)
+                    != nullptr;
+            } });
+    const auto unknownEntity =
+        contextProbe->m_data->CreateDataEntityId();
+    const DataRevisionRef unknownRef{ unknownEntity, 1 };
+    DataTransaction unknownInput;
+    unknownInput.outputs.push_back(DataRevisionDraft{
+        unknownEntity, 0, UnknownCropPayload::Type, {},
+        std::make_shared<const UnknownCropPayload>(), std::nullopt });
+    unknownInput.bindings.push_back(DataBindingUpdate{
+        std::string(cropInputBinding), 0, true, {}, unknownRef });
+    const auto unknownCommit = contextProbe->m_data->SetDataCommit(
+        std::move(unknownInput));
+    const auto beforeUnknownStart =
+        contextProbe->m_data->GetDataGraph();
+    const bool isUnknownInputRejected = !feature->SendRequest(
+        GetTargetRequest(CropHostAction::Start, GetCropTarget()));
+    const auto afterUnknownStart =
+        contextProbe->m_data->GetDataGraph();
+    DataTransaction clearUnknown;
+    clearUnknown.bindings.push_back(DataBindingUpdate{
+        std::string(cropInputBinding), 1, true, unknownRef, {} });
+    const auto clearUnknownResult = contextProbe->m_data->SetDataCommit(
+        std::move(clearUnknown));
+    failureCount += GetCaseResult(
+        isUnknownTypeRegistered
+            && unknownCommit.status == DataCommitStatus::Succeeded
+            && isUnknownInputRejected
+            && beforeUnknownStart.commitId == afterUnknownStart.commitId
+            && !feature->GetState().isActive
+            && clearUnknownResult.status == DataCommitStatus::Succeeded
+            && contextProbe->m_data->GetPrimaryImage()->data->self
+                == nextRef,
+        "Crop rejects unsupported facets without publishing partial state") ? 0 : 1;
+    // 让主视图消费 probe 发布的新 snapshot；主视图不承载 Host timer，
+    // 因此不会提前推进后续 Feature worker。
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
     const bool isPrimaryRenderCurrent = WaitForRenderInput(
         *timerEndpoint,
@@ -1054,7 +1106,8 @@ int GetCropFailCount()
         "Exit hides Crop widgets without locking committed history navigation") ? 0 : 1;
 
     const auto cropExpected =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
+    tickGate->isPaused = true;
     int staleCompleteCount = 0;
     CropBuildResult staleResult;
     const bool isStaleBuilt =
@@ -1085,14 +1138,14 @@ int GetCropFailCount()
             && !isConflictReloadComplete
             && poll < 500;
         ++poll) {
-        // 主视图没有 Session timer handler，因此这里只允许 AppService
-        // 先提交 Reload，不消费 Crop worker。
+        // 正常推进统一 Host 帧；仅延迟 Crop 的完成阶段。
         SendTicks(*timerEndpoint, 1);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
     const auto reloadSnapshot =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
+    tickGate->isPaused = false;
     for (int poll = 0;
         staleCompleteCount == 0
             && poll < 500;
@@ -1103,7 +1156,7 @@ int GetCropFailCount()
     }
     const auto staleState = feature->GetState();
     const auto currentAfterReject =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     failureCount += GetCaseResult(
         cropExpected
             && isStaleBuilt
@@ -1114,13 +1167,17 @@ int GetCropFailCount()
             && isConflictReloadComplete
             && isConflictReloadSucceeded
             && reloadSnapshot
-            && reloadSnapshot->version
-                == cropExpected->version + 1
+            && reloadSnapshot->binding->revision
+                == cropExpected->binding->revision + 1
+            && reloadSnapshot->data->self
+                != cropExpected->data->self
             && staleCompleteCount == 1
             && !staleResult.isSucceeded
             && staleResult.failureReason
                 == CropFailure::VersionMismatch
-            && currentAfterReject == reloadSnapshot
+            && currentAfterReject
+            && currentAfterReject->data->self
+                == reloadSnapshot->data->self
             && staleState.history.nodeCount == 0
             && staleState.history.operationCount == 0
             && staleState.history.baseNodeCount == 0
@@ -1147,18 +1204,18 @@ int GetCropFailCount()
     const bool isGapAttached =
         session.AttachFeature(gapFeature);
     int staleGapCount = 0;
-    bool isStaleGapSucceeded = false;
+    GapHostResult staleGapResult;
     const bool isStaleGapAccepted =
         gapFeature->SendRequest(
             { GapHostAction::Start,
                 GetGapConfig().defaultStart },
-            [&staleGapCount, &isStaleGapSucceeded](
-                const bool isSuccess) {
+            [&staleGapCount, &staleGapResult](
+                GapHostResult result) {
                 ++staleGapCount;
-                isStaleGapSucceeded = isSuccess;
+                staleGapResult = std::move(result);
             });
     const auto publishExpected =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     int publishCompleteCount = 0;
     CropBuildResult publishResult;
     const bool isPublishBuilt =
@@ -1175,26 +1232,55 @@ int GetCropFailCount()
             && isPublishBuilt,
         "Crop/Gap conflict requests are admitted") ? 0 : 1;
     for (int poll = 0;
-        contextProbe->m_data->GetImageSnapshot()
-                == publishExpected
-            && poll < 500;
+        publishCompleteCount == 0 && poll < 500;
         ++poll) {
         endpoint->renderWindow->Render();
-        (void)feature->OnHostTick();
+        SendTicks(*endpoint, 1);
+        SendHostTick(*endpoint, *timerEndpoint);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
+    const auto primaryAfterBuild =
+        contextProbe->m_data->GetPrimaryImage();
+    const auto resultGraph = contextProbe->m_data->GetDataGraph();
+    const auto derivedCrop = publishResult.isSucceeded
+        ? contextProbe->m_data->GetImageGrid(
+            resultGraph, publishResult.outputRevision)
+        : VtkImageGridSnapshot{};
+    const bool isPrimarySet = feature->SendRequest(
+        GetCropRequest(CropHostAction::SetPrimaryResult));
     const auto cropSnapshot =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     for (int poll = 0;
-        gapFeature->GetState().analysisState
-                != GapAnalysisState::Idle
-            && poll < 10;
+        (staleGapCount == 0
+            || gapFeature->GetState().analysisState
+                != GapAnalysisState::Stale
+            || gapFeature->GetState().isExitPending)
+            && poll < 500;
         ++poll) {
-        (void)gapFeature->OnHostTick();
+        SendHostTick(*endpoint, *timerEndpoint);
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(1));
     }
     const auto staleGapState =
         gapFeature->GetState();
+    const bool hasGapCommittedFirst =
+        staleGapResult.status == GapResultStatus::Succeeded
+        || staleGapResult.status
+            == GapResultStatus::SucceededWithDisplayFailure;
+    const bool hasCropCommittedFirst =
+        staleGapResult.status == GapResultStatus::SourceChanged;
+    const bool hasSerializedGapOutcome =
+        (hasGapCommittedFirst
+            && staleGapResult.commitId != 0
+            && GetDataRevisionRefValid(staleGapResult.resultSet)
+            && staleGapState.resultSet == staleGapResult.resultSet)
+        || (hasCropCommittedFirst
+            && staleGapResult.commitId == 0
+            && !GetDataRevisionRefValid(staleGapResult.resultSet)
+            && !GetDataRevisionRefValid(staleGapState.resultSet)
+            && staleGapState.statistics.objectVoxelCount == 0
+            && staleGapState.statistics.voidVoxelCount == 0);
     const bool isStaleGapOverlayRejected =
         !gapFeature->SendRequest({
             GapHostAction::Overlay });
@@ -1203,26 +1289,60 @@ int GetCropFailCount()
             && isStaleGapAccepted
             && isPublishBuilt
             && publishExpected
+            && primaryAfterBuild
+            && primaryAfterBuild->data->self
+                == publishExpected->data->self
+            && derivedCrop && derivedCrop->validityMask
+            && isPrimarySet
             && cropSnapshot
-            && cropSnapshot != publishExpected
-            && cropSnapshot->version
-                == publishExpected->version + 1
-            && staleGapCount == 0
-            && !isStaleGapSucceeded
+            && cropSnapshot->data->self
+                == publishResult.outputRevision
+            && cropSnapshot->binding->revision
+                == publishExpected->binding->revision + 1
+            && staleGapCount == 1
             && staleGapState.analysisState
-                == GapAnalysisState::Idle
-            && staleGapState.statistics.objectVoxelCount == 0
-            && staleGapState.statistics.voidVoxelCount == 0
+                == GapAnalysisState::Stale
             && !staleGapState.isViewActive
             && !staleGapState.isExitPending
+            && hasSerializedGapOutcome
+            && GetDataRevisionRefValid(publishResult.recipeRevision)
+            && GetDataRevisionRefValid(publishResult.outputRevision)
             && isStaleGapOverlayRejected,
-        "Crop publication retires pending Gap result before display or callback") ? 0 : 1;
+        "Crop build is non-destructive and explicit promotion invalidates stale Gap input") ? 0 : 1;
+
+    const bool isSourceRestored = feature->SendRequest(
+        GetCropRequest(CropHostAction::RestoreOriginal));
+    const auto restoredSourceSnapshot =
+        contextProbe->m_data->GetPrimaryImage();
+    const bool isCropRepromoted = feature->SendRequest(
+        GetCropRequest(CropHostAction::SetPrimaryResult));
+    const auto activeCropSnapshot =
+        contextProbe->m_data->GetPrimaryImage();
+    failureCount += GetCaseResult(
+        publishExpected
+            && cropSnapshot
+            && derivedCrop
+            && isSourceRestored
+            && restoredSourceSnapshot
+            && restoredSourceSnapshot->data == publishExpected->data
+            && restoredSourceSnapshot->data->self
+                == publishResult.sourceRevision
+            && restoredSourceSnapshot->binding->revision
+                == cropSnapshot->binding->revision + 1
+            && isCropRepromoted
+            && activeCropSnapshot
+            && activeCropSnapshot->data == derivedCrop->data
+            && activeCropSnapshot->data->self
+                == publishResult.outputRevision
+            && activeCropSnapshot->binding->revision
+                == restoredSourceSnapshot->binding->revision + 1,
+        "RestoreOriginal and SetPrimaryResult use Binding-only ABA-safe transactions") ? 0 : 1;
 
     for (int poll = 0;
         publishCompleteCount == 0
             && poll < 500;
         ++poll) {
-        // Gap 已按新 DataVersion 退休；此后才让主视图消费 Crop
+        // Gap 已按新的 primary Binding 关系退休；此后才让主视图消费 Crop
         // 批次并由 Session 投递 Crop 成功 callback。
         SendTicks(*timerEndpoint, 1);
         SendHostTick(*endpoint, *timerEndpoint);
@@ -1231,11 +1351,11 @@ int GetCropFailCount()
     }
 
     bool hasCroppedVoxel = false;
-    if (cropSnapshot && cropSnapshot->validityMask) {
+    if (activeCropSnapshot && activeCropSnapshot->validityMask) {
         const auto* maskValues = static_cast<const unsigned char*>(
-            cropSnapshot->validityMask->GetScalarPointer());
+            activeCropSnapshot->validityMask->GetScalarPointer());
         const auto maskCount =
-            cropSnapshot->validityMask->GetNumberOfPoints();
+            activeCropSnapshot->validityMask->GetNumberOfPoints();
         for (vtkIdType index = 0;
             maskValues && index < maskCount;
             ++index) {
@@ -1249,12 +1369,12 @@ int GetCropFailCount()
     const bool isPostCropGapAccepted =
         publishCompleteCount == 1
         && publishResult.isSucceeded
-        && cropSnapshot
-        && cropSnapshot->validityMask
+        && activeCropSnapshot
+        && activeCropSnapshot->validityMask
         && gapFeature->SendRequest(
             { GapHostAction::Start,
                 GetGapConfig().defaultStart },
-            [&postCropGapCompleteCount](const bool) {
+            [&postCropGapCompleteCount](GapHostResult) {
                 ++postCropGapCompleteCount;
             });
     const auto postCropGapAcceptedState =
@@ -1282,8 +1402,8 @@ int GetCropFailCount()
             && postCropGapCompleteCount == 1
             && postCropGapState.analysisState
                 == GapAnalysisState::Succeeded
-            && contextProbe->m_data->GetImageSnapshot()
-                == cropSnapshot
+            && contextProbe->m_data->GetPrimaryImage()->data->self
+                == activeCropSnapshot->data->self
             && isPostCropGapExited,
         "Gap runs DefX from the materialized Crop baseline with a validity mask") ? 0 : 1;
 
@@ -1317,8 +1437,8 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     int exportDimensions[3] = {};
-    if (cropSnapshot && cropSnapshot->image) {
-        cropSnapshot->image->GetDimensions(
+    if (activeCropSnapshot && activeCropSnapshot->image) {
+        activeCropSnapshot->image->GetDimensions(
             exportDimensions);
     }
     const auto exportPath =
@@ -1352,9 +1472,9 @@ int GetCropFailCount()
         exportPath, exportSizeError);
 
     bool hasCroppedRawContent = false;
-    if (cropSnapshot
-        && cropSnapshot->image
-        && cropSnapshot->validityMask
+    if (activeCropSnapshot
+        && activeCropSnapshot->image
+        && activeCropSnapshot->validityMask
         && !exportSizeError
         && exportedSize
             == exportedValues.size() * sizeof(float)
@@ -1363,8 +1483,8 @@ int GetCropFailCount()
                 exportedValues.size() * sizeof(float))) {
         int extent[6] = {};
         double scalarRange[2] = {};
-        cropSnapshot->image->GetExtent(extent);
-        cropSnapshot->image->GetScalarRange(scalarRange);
+        activeCropSnapshot->image->GetExtent(extent);
+        activeCropSnapshot->image->GetScalarRange(scalarRange);
         std::size_t invalidIndex = exportVoxelCount;
         std::size_t validIndex = exportVoxelCount;
         float validValue = 0.0f;
@@ -1374,10 +1494,10 @@ int GetCropFailCount()
         for (int z = extent[4]; z <= extent[5]; ++z) {
             for (int y = extent[2]; y <= extent[3]; ++y) {
                 for (int x = extent[0]; x <= extent[1]; ++x) {
-                    const double maskValue = cropSnapshot
+                    const double maskValue = activeCropSnapshot
                         ->validityMask->GetScalarComponentAsDouble(
                             x, y, z, 0);
-                    const double imageValue = cropSnapshot
+                    const double imageValue = activeCropSnapshot
                         ->image->GetScalarComponentAsDouble(
                             x, y, z, 0);
                     if (invalidIndex == exportVoxelCount
@@ -1438,7 +1558,7 @@ int GetCropFailCount()
             *timerEndpoint,
             imageBounds);
     const auto secondExpected =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     int secondCompleteCount = 0;
     CropBuildResult secondResult;
     const bool isSecondBuilt =
@@ -1460,7 +1580,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto secondSnapshot =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     bool isFinalReloadComplete = false;
     bool isFinalReloadSucceeded = false;
     const bool isFinalReloadSent = SendReload(
@@ -1477,7 +1597,7 @@ int GetCropFailCount()
             std::chrono::milliseconds(1));
     }
     const auto finalSnapshot =
-        contextProbe->m_data->GetImageSnapshot();
+        contextProbe->m_data->GetPrimaryImage();
     failureCount += GetCaseResult(
         isRestarted
             && isRestartModeSet
@@ -1489,34 +1609,40 @@ int GetCropFailCount()
             && isPublishBuilt
             && publishCompleteCount == 1
             && publishResult.isSucceeded
-            && cropSnapshot
-            && cropSnapshot->version
-                == publishExpected->version + 1
+            && activeCropSnapshot
+            && activeCropSnapshot->data->self
+                == publishResult.outputRevision
             && isSecondModeSet
             && isSecondBoxSet
             && isSecondWidgetSent
-            && secondExpected == cropSnapshot
+            && secondExpected
+            && secondExpected->data->self
+                == activeCropSnapshot->data->self
             && isSecondBuilt
             && secondCompleteCount == 1
             && secondResult.isSucceeded
-            && secondResult.inputVersion
-                == publishResult.inputVersion
-            && secondResult.nodeCount == 2
-            && secondResult.operations.size() == 2
+            && secondResult.sourceRevision
+                == publishResult.outputRevision
+            && secondResult.nodeCount == 1
+            && GetDataRevisionRefValid(secondResult.recipeRevision)
+            && GetDataRevisionRefValid(secondResult.outputRevision)
             && secondSnapshot
-            && secondSnapshot->version
-                == cropSnapshot->version + 1
+            && secondSnapshot->data->self
+                == activeCropSnapshot->data->self
+            && secondSnapshot->binding->revision
+                == activeCropSnapshot->binding->revision
             && isFinalReloadSent
             && isFinalReloadComplete
             && isFinalReloadSucceeded
             && finalSnapshot
-            && finalSnapshot->version
-                == secondSnapshot->version + 1
-            && finalSnapshot != secondSnapshot
+            && finalSnapshot->binding->revision
+                == secondSnapshot->binding->revision + 1
+            && finalSnapshot->data->self
+                != secondSnapshot->data->self
             && isGapDetached
             && staleGapCount == 1
-            && !isStaleGapSucceeded,
-        "Repeated Crop build fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
+            && hasSerializedGapOutcome,
+        "Repeated Crop build forms an explicit data DAG before a later legal Reload") ? 0 : 1;
 #endif
 
     const bool isBox = feature->SendRequest(
@@ -1530,19 +1656,15 @@ int GetCropFailCount()
     const bool isExited = feature->SendRequest(
         GetCropRequest(CropHostAction::Exit));
     const auto exitedState = feature->GetState();
-    auto firstPolyData =
-        vtkSmartPointer<vtkPolyData>::New();
-    auto nextPolyData =
-        vtkSmartPointer<vtkPolyData>::New();
+    auto cube = vtkSmartPointer<vtkCubeSource>::New();
+    cube->Update();
+    auto firstPolyData = vtkSmartPointer<vtkPolyData>::New();
+    firstPolyData->DeepCopy(cube->GetOutput());
+    auto nextPolyData = vtkSmartPointer<vtkPolyData>::New();
+    nextPolyData->DeepCopy(cube->GetOutput());
     const bool hasPolyDataContract =
-        feature->SendRequest(GetPolyRequest(
-            firstPolyData, 1))
-        && !feature->SendRequest(GetPolyRequest(
-            firstPolyData, 2))
-        && !feature->SendRequest(GetPolyRequest(
-            nextPolyData, 1))
-        && feature->SendRequest(GetPolyRequest(
-            nextPolyData, 2))
+        feature->SendRequest(GetPolyRequest(firstPolyData))
+        && feature->SendRequest(GetPolyRequest(nextPolyData))
         && feature->SendRequest(GetCropRequest(
             CropHostAction::ClearPolyData));
     failureCount += GetCaseResult(
@@ -1550,7 +1672,7 @@ int GetCropFailCount()
             && !exitedState.isActive
             && !exitedState.isPublishing
             && hasPolyDataContract,
-        "Exit, SetPolyData and ClearPolyData remain atomic requests") ? 0 : 1;
+        "SetPolyData publishes isolated mesh revisions and Clear removes only its Binding") ? 0 : 1;
 
     bool hasDetachedCallback = false;
     const bool isPendingAccepted = feature->SendRequest(
@@ -1561,7 +1683,8 @@ int GetCropFailCount()
         });
     const auto useCount = feature.use_count();
     const bool isDetached =
-        session.DetachFeature(*feature);
+        session.DetachFeature(*tickGate);
+    tickGate.reset();
     const auto detachedState = feature->GetState();
     const bool isProbeDetached =
         session.DetachFeature(*contextProbe);

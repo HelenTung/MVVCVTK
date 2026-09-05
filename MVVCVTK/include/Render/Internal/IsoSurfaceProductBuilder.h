@@ -14,6 +14,7 @@
 
 struct IsoSurfaceKey final {
     RenderInputStamp inputStamp;
+    const void* inputIdentity = nullptr;
     const void* maskIdentity = nullptr;
     vtkMTimeType inputMTime = 0;
     vtkMTimeType inputScalarMTime = 0;

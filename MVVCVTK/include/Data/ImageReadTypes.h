@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/DataVersion.h"
+#include "Data/DataGraphTypes.h"
 
 #include <array>
 #include <cstddef>
@@ -9,20 +9,6 @@
 #include <memory>
 #include <optional>
 #include <vector>
-
-enum class ImageValueType {
-    Unknown,
-    Int8,
-    UInt8,
-    Int16,
-    UInt16,
-    Int32,
-    UInt32,
-    Int64,
-    UInt64,
-    Float32,
-    Float64
-};
 
 enum class ImageByteOrder {
     Native
@@ -96,7 +82,8 @@ struct ImageReadState final {
     std::size_t voxelCount = 0;
     ImageReadBytes values;
     ImageReadBytes validityMask;
-    DataVersion version = 0;
+    DataRevisionRef dataRevision;
+    DataBindingRevision bindingRevision = 0;
 };
 
 struct ImageReadResult final {

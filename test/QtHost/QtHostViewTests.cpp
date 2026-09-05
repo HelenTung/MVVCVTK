@@ -3075,9 +3075,16 @@ int GetViewFailCount()
     sessionValue.cursor = HostCursorParams{
         { 1.0, 2.0, 3.0 }, -1
     };
+    const bool isNoDataSpacingRejected =
+        !session.SendRequest(std::move(sessionValue));
+    sessionValue = HostSessionSetRequest{};
+    sessionValue.cursor = HostCursorParams{
+        { 1.0, 2.0, 3.0 }, -1
+    };
     failureCount += GetCaseResult(
-        session.SendRequest(std::move(sessionValue)),
-        "Qt Host can set Session spacing and cursor") ? 0 : 1;
+        isNoDataSpacingRejected
+            && session.SendRequest(std::move(sessionValue)),
+        "Session rejects spacing without primary data while cursor remains independently writable") ? 0 : 1;
 
     const auto state = session.GetRenderViewState(stateTarget);
     const auto allStates = session.GetRenderViewStates();
@@ -3101,11 +3108,11 @@ int GetViewFailCount()
             < 1e-12
         && std::abs(state->isoThreshold - 0.42) < 1e-12
         && std::abs(state->background.r - 0.2) < 1e-12
-        && std::abs(state->spacing[2] - 1.5) < 1e-12
+        && std::abs(state->spacing[2] - 1.0) < 1e-12
         && std::abs(state->windowLevel.windowWidth - 120.0) < 1e-12
         && std::abs(state->scalarRange[0]) < 1e-12
         && std::abs(state->scalarRange[1] - 255.0) < 1e-12
-        // 显式 Host cursor 请求是值状态，即使尚未加载体数据也应可完整回读。
+        // spacing 需要正式 ImageGrid；独立 cursor 是值状态，仍可完整传播。
         && state->cursorWorld == std::array<double, 3>{ 1.0, 2.0, 3.0 }
         && state->visibilityMask
             == (VisFlags::Planes3D | VisFlags::Ruler)
@@ -3123,7 +3130,7 @@ int GetViewFailCount()
         && std::abs(linkedState->isoThreshold - 0.25) < 1e-12
         && std::abs(linkedState->background.r - 0.05) < 1e-12
         && std::abs(linkedState->windowLevel.windowWidth - 80.0) < 1e-12
-        && std::abs(linkedState->spacing[2] - 1.5) < 1e-12
+        && std::abs(linkedState->spacing[2] - 1.0) < 1e-12
         && linkedState->cursorWorld
             == std::array<double, 3>{ 1.0, 2.0, 3.0 }
         && linkedState->visibilityMask == VisFlags::Crosshair

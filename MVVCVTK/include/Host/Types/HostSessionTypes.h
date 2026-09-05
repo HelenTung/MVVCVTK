@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Data/DataGraphTypes.h"
+
 #include "Host/Types/HostValueTypes.h"
 #include "Host/Types/HostViewTypes.h"
 
@@ -95,8 +97,9 @@ struct HostRenderViewState final {
     std::array<double, 3> cursorWorld{ 0.0, 0.0, 0.0 };
     uint32_t visibilityMask = 0;
     bool isAxesVisible = false;
-    // View 当前渲染批次，仅用于值语义诊断，不暴露 DataManager 或 Strategy identity。
-    std::uint64_t dataVersion = 0;
+    // View 当前渲染输入的确定修订与 primary Binding 时钟。
+    DataRevisionRef dataRevision;
+    DataBindingRevision bindingRevision = 0;
 };
 
 // Camera 的只读值快照；不携带 vtkCamera identity 或可写能力。

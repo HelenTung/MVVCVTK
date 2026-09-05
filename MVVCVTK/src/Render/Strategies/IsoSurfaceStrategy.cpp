@@ -223,8 +223,8 @@ bool IsoSurfaceStrategy::SetIsoInput(
     request.requestedQuality = nextController.GetQuality();
     request.input = image;
     request.mask = validityMask;
-    request.key.inputStamp = m_renderInputStamp.identity == image
-        ? m_renderInputStamp : RenderInputStamp{ image, 0 };
+    request.key.inputStamp = m_renderInputStamp;
+    request.key.inputIdentity = image;
     request.key.maskIdentity = validityMask.GetPointer();
     request.key.inputMTime = image->GetMTime();
     request.key.inputScalarMTime = GetScalarTime(image);
@@ -321,6 +321,7 @@ IsoSurfaceStrategy::BuildRequest(
     request.isPreview = isPreview;
     request.key.inputStamp = m_renderInputStamp;
     request.key.maskIdentity = m_lastMask.GetPointer();
+    request.key.inputIdentity = image;
     request.key.inputMTime = image->GetMTime();
     request.key.inputScalarMTime = GetScalarTime(image);
     request.key.maskMTime = m_lastMask
@@ -546,12 +547,8 @@ bool IsoSurfaceStrategy::GetKeyCurrent(
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
     const bool hasCurrentStamp = key.inputStamp == m_renderInputStamp;
-    const bool hasInitialStamp = key.inputStamp.identity == image
-        && key.inputStamp.version == 0;
     return image
-        && (hasCurrentStamp || hasInitialStamp)
-        && (!key.inputStamp.identity
-            || key.inputStamp.identity == image)
+        && hasCurrentStamp && key.inputIdentity == image
         && key.maskIdentity == m_lastMask.GetPointer()
         && key.inputMTime == image->GetMTime()
         && key.inputScalarMTime == GetScalarTime(image)

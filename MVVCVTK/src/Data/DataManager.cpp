@@ -1,7 +1,11 @@
 #include "DataManager.h"
+#include "Data/DataGraphStore.h"
+#include "Data/DataPayloads.h"
+#include "Data/VtkDataBridge.h"
 #include "Platform/Path.h"
 #include <vtkDataArray.h>
 #include <vtkFloatArray.h>
+#include <vtkImageData.h>
 #include <vtkPointData.h>
 #include <vtkUnsignedCharArray.h>
 #include <vtkClipPolyData.h>
@@ -43,24 +47,18 @@
 class BaseDataManager::Impl final {
 public:
     Impl()
-        : m_current(std::make_shared<TrustedImageState>(TrustedImageState{
-            vtkSmartPointer<vtkImageData>::New(),
-            {},
-            { 0, 0, 0 },
-            { 1.0, 1.0, 1.0 },
-            { 0.0, 0.0, 0.0 },
-            { 0.0, 0.0 },
-            0 }))
+        : m_graph(std::make_shared<DataGraphStore>())
+        , m_vtk(std::make_shared<VtkDataBridge>())
     {
     }
 
     static bool ExportRaw(
-        const TrustedImageSnapshot& imageSnapshot,
+        const VtkImageGridSnapshot& imageSnapshot,
         const std::string& outputDir,
         const std::array<double, 16>& modelToWorldMatrix,
         const TaskStopToken& stopToken);
     static bool ExportMesh(
-        const TrustedImageSnapshot& imageSnapshot,
+        const VtkImageGridSnapshot& imageSnapshot,
         const std::string& outputDir,
         const DataExportParams& params,
         const TaskStopToken& stopToken);
@@ -252,7 +250,7 @@ public:
     }
 
     struct ReadPlan final {
-        TrustedImageSnapshot snapshot;
+        VtkImageGridSnapshot snapshot;
         vtkDataArray* values = nullptr;
         vtkDataArray* mask = nullptr;
         std::array<std::size_t, 3> sourceDims = { 0, 0, 0 };
@@ -286,7 +284,7 @@ public:
     }
 
     static ReadPlanResult GetReadPlan(
-        TrustedImageSnapshot snapshot,
+        VtkImageGridSnapshot snapshot,
         const ImageReadRequest& request)
     {
         ReadPlanResult result;
@@ -310,7 +308,7 @@ public:
             const auto extentSize = maxIndex - minIndex + 1;
             if (dims[axis] <= 0
                 || extentSize != static_cast<std::int64_t>(dims[axis])
-                || plan.snapshot->dims[axis] != dims[axis]) {
+                || !plan.snapshot->data) {
                 result.error = ImageReadError::InvalidData;
                 return result;
             }
@@ -474,7 +472,13 @@ public:
                     * sourceIndex * sourceSpacing[column];
             }
         }
-        state.scalarRange = plan.snapshot->scalarRange;
+        const auto* imagePayload = plan.snapshot->data
+            ? dynamic_cast<const ImageGrid3DPayload*>(
+                plan.snapshot->data->payload.get())
+            : nullptr;
+        state.scalarRange = imagePayload
+            ? imagePayload->GetScalarRange()
+            : std::array<double, 2>{ 0.0, 0.0 };
         state.valueType = plan.valueType;
         state.componentBytes = static_cast<std::size_t>(
             plan.values->GetDataTypeSize());
@@ -483,7 +487,10 @@ public:
         state.region = plan.region;
         state.voxelOffset = voxelOffset;
         state.voxelCount = voxelCount;
-        state.version = plan.snapshot->version;
+        state.dataRevision = plan.snapshot->data
+            ? plan.snapshot->data->self : DataRevisionRef{};
+        state.bindingRevision = plan.snapshot->binding
+            ? plan.snapshot->binding->revision : 0;
         return state;
     }
 
@@ -548,34 +555,10 @@ public:
         }
     }
 
-    bool SetCurrent(TrustedImageState state)
-    {
-        if (!state.image
-            || !GetMaskValid(state.image, state.validityMask)) {
-            return false;
-        }
-        auto nextState = std::make_shared<TrustedImageState>(std::move(state));
-        std::shared_ptr<const TrustedImageState> retiredState;
-        {
-            std::lock_guard<std::mutex> lock(m_dataMutex);
-            if (!m_current
-                || m_current->version == std::numeric_limits<DataVersion>::max()) {
-                return false;
-            }
-            nextState->version = m_current->version + 1;
-            retiredState = std::move(m_current);
-            m_current = std::move(nextState);
-        }
-        return true;
-    }
-
-    // current TrustedImageState 与 scalar range 共用此锁；snapshot 是跨字段一致性的读取入口。
-    mutable std::mutex m_dataMutex;
-    // current 只向受控内部消费链发布 const owner；写入只能通过 DataManager 提交新批次。
-    TrustedImageSnapshot m_current;
-    mutable std::mutex m_pendingMutex;
-    TrustedImageSnapshot m_pending;
-    // 与 current image 同批提交的 RAS 物理轴间距 [x,y,z]，单位沿用输入。
+    std::shared_ptr<DataGraphStore> m_graph;
+    std::shared_ptr<VtkDataBridge> m_vtk;
+    mutable std::mutex m_loadMutex;
+    DataLoadStageSnapshot m_loadStage;
 
     bool SetRasScalars(
         const float* src,
@@ -698,21 +681,140 @@ BaseDataManager::BaseDataManager()
 
 BaseDataManager::~BaseDataManager() = default;
 
+DataGraphSnapshot BaseDataManager::GetDataGraph() const
+{
+    return m_impl->m_graph->GetDataGraph();
+}
+
+DataSnapshot BaseDataManager::GetData(
+    const DataGraphSnapshot& graph,
+    const DataRevisionRef& ref) const
+{
+    return m_impl->m_graph->GetData(graph, ref);
+}
+
+DataQueryResult BaseDataManager::GetDataQuery(
+    const DataGraphSnapshot& graph,
+    const DataQuery& query) const
+{
+    return m_impl->m_graph->GetDataQuery(graph, query);
+}
+
+std::optional<DataBinding> BaseDataManager::GetDataBinding(
+    const DataGraphSnapshot& graph,
+    const std::string_view name) const
+{
+    return m_impl->m_graph->GetDataBinding(graph, name);
+}
+
+ProjectDataSnapshot BaseDataManager::GetProjectData() const
+{
+    return m_impl->m_graph->GetProjectData();
+}
+
+DataRelationStatus BaseDataManager::GetDataRelation(
+    const DataGraphSnapshot& graph,
+    const DataRevisionRef& data,
+    const std::string_view inputRole,
+    const std::string_view binding) const
+{
+    return graph.view
+        ? graph.view->GetDataRelation(data, inputRole, binding)
+        : DataRelationStatus::Unknown;
+}
+
+VtkImageGridSnapshot BaseDataManager::GetImageGrid(
+    const DataGraphSnapshot& graph,
+    const DataRevisionRef& ref) const
+{
+    auto view = m_impl->m_vtk->GetImageGrid(GetData(graph, ref));
+    if (!view) return {};
+    // 别名 owner 同时保留 bridge View 与其 DataRevision，避免包装视图使弱缓存过早失效。
+    return std::make_shared<const VtkImageGridView>(VtkImageGridView{
+        graph, {}, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+}
+
+VtkImageGridSnapshot BaseDataManager::GetPrimaryImage() const
+{
+    const auto graph = GetDataGraph();
+    const auto binding = GetDataBinding(graph, primaryVolumeBinding);
+    if (!binding || !binding->target) return {};
+    auto view = m_impl->m_vtk->GetImageGrid(
+        GetData(graph, *binding->target));
+    if (!view) return {};
+    return std::make_shared<const VtkImageGridView>(VtkImageGridView{
+        graph, binding, DataSnapshot(view, view->data.get()), view->image, view->validityMask });
+}
+
+VtkLabelMapSnapshot BaseDataManager::GetLabelMap(
+    const DataGraphSnapshot& graph,
+    const DataRevisionRef& ref) const
+{
+    return m_impl->m_vtk->GetLabelMap(GetData(graph, ref));
+}
+
+VtkSurfaceMeshSnapshot BaseDataManager::GetSurfaceMesh(
+    const DataGraphSnapshot& graph,
+    const DataRevisionRef& ref) const
+{
+    return m_impl->m_vtk->GetSurfaceMesh(GetData(graph, ref));
+}
+
+DataEntityId BaseDataManager::CreateDataEntityId()
+{
+    return m_impl->m_graph->CreateDataEntityId();
+}
+
+bool BaseDataManager::SetDataType(DataTypeDescriptor descriptor)
+{
+    return m_impl->m_graph->SetDataType(std::move(descriptor));
+}
+
+DataCommitResult BaseDataManager::SetDataCommit(DataTransaction transaction)
+{
+    return m_impl->m_graph->SetDataCommit(std::move(transaction));
+}
+
+DataObserverId BaseDataManager::AttachDataChange(
+    DataChangeCallback callback)
+{
+    return m_impl->m_graph->AttachDataChange(std::move(callback));
+}
+
+bool BaseDataManager::DetachDataChange(const DataObserverId observerId)
+{
+    return m_impl->m_graph->DetachDataChange(observerId);
+}
+
 vtkSmartPointer<vtkImageData> BaseDataManager::GetVtkImage() const
 {
-    return GetImageState().image;
+    const auto current = GetPrimaryImage();
+    if (!current || !current->image) return {};
+    auto copy = vtkSmartPointer<vtkImageData>::New();
+    copy->DeepCopy(current->image);
+    return copy;
 }
 
 std::array<double, 2> BaseDataManager::GetScalarRange() const
 {
-    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-    return m_impl->m_current->scalarRange;
+    const auto current = GetPrimaryImage();
+    const auto* payload = current && current->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(current->data->payload.get())
+        : nullptr;
+    return payload
+        ? payload->GetScalarRange()
+        : std::array<double, 2>{ 0.0, 0.0 };
 }
 
 std::array<double, 3> BaseDataManager::GetSpacing() const
 {
-    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-    return m_impl->m_current->spacing;
+    const auto current = GetPrimaryImage();
+    const auto* payload = current && current->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(current->data->payload.get())
+        : nullptr;
+    return payload
+        ? payload->GetGeometry().spacing
+        : std::array<double, 3>{ 1.0, 1.0, 1.0 };
 }
 
 bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
@@ -724,78 +826,50 @@ bool BaseDataManager::SetSpacing(const std::array<double, 3>& spacing)
         return false;
     }
 
-    constexpr int maxAttempts = 3;
-    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
-        // 2. 锁内取得 immutable current 身份，锁外构造候选批次，避免复制/VTK 调用阻塞读线程。
-        std::shared_ptr<const TrustedImageState> baseState;
-        {
-            std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-            if (!m_impl->m_current || !m_impl->m_current->image) {
-                return false;
-            }
-            if (m_impl->m_current->spacing == spacing) {
-                return true;
-            }
-            if (m_impl->m_current->version == std::numeric_limits<DataVersion>::max()) {
-                return false;
-            }
-            baseState = m_impl->m_current;
-        }
+    const auto current = GetPrimaryImage();
+    const auto* payload = current && current->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(current->data->payload.get())
+        : nullptr;
+    if (!payload || !current->binding) return false;
+    if (payload->GetGeometry().spacing == spacing) return true;
 
-        // spacing 只修改 VTK 外壳；scalar 在版本间保持只读共享，避免复制整卷 voxel。
-        auto candidate = vtkSmartPointer<vtkImageData>::New();
-        candidate->ShallowCopy(baseState->image);
-        candidate->SetSpacing(spacing.data());
-
-        auto nextState = std::make_shared<TrustedImageState>(*baseState);
-        nextState->image = std::move(candidate);
-        if (baseState->validityMask) {
-            auto maskCandidate =
-                vtkSmartPointer<vtkImageData>::New();
-            maskCandidate->ShallowCopy(
-                baseState->validityMask);
-            maskCandidate->SetSpacing(spacing.data());
-            nextState->validityMask =
-                std::move(maskCandidate);
-        }
-        nextState->spacing = spacing;
-        nextState->version = baseState->version + 1;
-        std::shared_ptr<const TrustedImageState> retiredState;
-        {
-            std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-            // 3. 仅当 current 仍是基准对象才提交；并发发布抢先时重试，三次冲突后返回失败。
-            if (m_impl->m_current != baseState) {
-                continue;
-            }
-            retiredState = std::move(m_impl->m_current);
-            m_impl->m_current = std::move(nextState);
-        }
-        return true;
-    }
-    return false;
+    auto geometry = payload->GetGeometry();
+    geometry.spacing = spacing;
+    auto nextPayload = payload->CreateGeometrySnapshot(std::move(geometry));
+    if (!nextPayload || !nextPayload->GetValid()) return false;
+    const DataRevisionRef nextRef{
+        current->data->self.entityId,
+        current->data->self.generation + 1 };
+    DataExpectation inputExpectation;
+    inputExpectation.kind = DataExpectationKind::Binding;
+    inputExpectation.binding = std::string(primaryVolumeBinding);
+    inputExpectation.expectedBindingRevision = current->binding->revision;
+    inputExpectation.isTargetChecked = true;
+    inputExpectation.expectedTarget = current->data->self;
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(inputExpectation));
+    transaction.outputs.push_back(DataRevisionDraft{
+        current->data->self.entityId,
+        current->data->self.generation,
+        DataTypes::imageGrid3D,
+        current->data->inputs,
+        std::move(nextPayload),
+        DataProvenance{
+            "org.mvvcvtk.host", "set-spacing", "1", "{}" } });
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        current->binding->revision,
+        true,
+        current->data->self,
+        nextRef });
+    return SetDataCommit(std::move(transaction)).status
+        == DataCommitStatus::Succeeded;
 }
 
-DataVersion BaseDataManager::GetDataVersion() const
+DataBindingRevision BaseDataManager::GetPrimaryBindingRevision() const
 {
-    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-    return m_impl->m_current->version;
-}
-
-TrustedImageState BaseDataManager::GetImageState() const
-{
-    const auto currentState = GetImageSnapshot();
-    TrustedImageState publicState = *currentState;
-    if (publicState.image) {
-        auto imageCopy = vtkSmartPointer<vtkImageData>::New();
-        imageCopy->DeepCopy(publicState.image);
-        publicState.image = std::move(imageCopy);
-    }
-    if (publicState.validityMask) {
-        auto maskCopy = vtkSmartPointer<vtkImageData>::New();
-        maskCopy->DeepCopy(publicState.validityMask);
-        publicState.validityMask = std::move(maskCopy);
-    }
-    return publicState;
+    const auto primary = GetPrimaryImage();
+    return primary && primary->binding ? primary->binding->revision : 0;
 }
 
 std::optional<ImageReadState>
@@ -823,7 +897,7 @@ ImageReadResult BaseDataManager::GetImageReadResult(
         return result;
     }
     auto planResult = Impl::GetReadPlan(
-        GetImageSnapshot(), request);
+        GetPrimaryImage(), request);
     result.error = planResult.error;
     result.requiredBytes = planResult.requiredBytes;
     if (!planResult.plan
@@ -882,7 +956,7 @@ ImageReadChunkResult BaseDataManager::GetImageReadChunk(
         return result;
     }
     auto planResult = Impl::GetReadPlan(
-        GetImageSnapshot(), request);
+        GetPrimaryImage(), request);
     result.error = planResult.error;
     result.requiredBytes = planResult.requiredBytes;
     if (!planResult.plan
@@ -949,155 +1023,141 @@ ImageReadChunkResult BaseDataManager::GetImageReadChunk(
     return result;
 }
 
-TrustedImageSnapshot BaseDataManager::GetImageSnapshot() const
-{
-    std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-    return m_impl->m_current;
-}
-
-bool BaseDataManager::SetCurrentData(
-    TrustedImageState state,
-    const TrustedImageSnapshot& expectedSnapshot,
-    TrustedImageSnapshot& publishedSnapshot)
-{
-    publishedSnapshot.reset();
-    if (!expectedSnapshot
-        || !state.image
-        || !Impl::GetMaskValid(
-            state.image, state.validityMask)
-        || expectedSnapshot->version
-            == std::numeric_limits<DataVersion>::max()) {
-        return false;
-    }
-
-    auto nextState =
-        std::make_shared<TrustedImageState>(std::move(state));
-    std::shared_ptr<const TrustedImageState> retiredState;
-    {
-        std::scoped_lock lock(
-            m_impl->m_dataMutex, m_impl->m_pendingMutex);
-        // Feature/current CAS 与 Load pending 建立共享同一锁域。已有 P1 数据
-        // 候选时，旧版本 P3 结果不得越过它发布，也不能留下同版本 pending。
-        if (m_impl->m_current != expectedSnapshot
-            || m_impl->m_current->version
-                != expectedSnapshot->version
-            || m_impl->m_pending) {
-            return false;
-        }
-        nextState->version = expectedSnapshot->version + 1;
-        retiredState = std::move(m_impl->m_current);
-        m_impl->m_current = std::move(nextState);
-        publishedSnapshot = m_impl->m_current;
-    }
-    return true;
-}
-
 bool BaseDataManager::SetFromBuffer(
     const VolumeBuffer&)
 {
     return false;
 }
 
-bool BaseDataManager::SetCurrentFromPending(bool& hasPending)
+DataLoadStageSnapshot BaseDataManager::GetLoadStage() const
 {
-    const auto pending = GetPendingSnapshot();
-    hasPending = pending != nullptr;
-    if (!pending) return true;
-    TrustedImageSnapshot published;
-    return SetCurrentFromPending(pending, published);
+    std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+    return m_impl->m_loadStage;
 }
 
-TrustedImageSnapshot BaseDataManager::GetPendingSnapshot() const
+bool BaseDataManager::SetLoadCommit(
+    const DataLoadStageSnapshot& expectedStage,
+    VtkImageGridSnapshot& published)
 {
-    std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
-    return m_impl->m_pending;
-}
-
-bool BaseDataManager::SetCurrentFromPending(
-    const TrustedImageSnapshot& expectedPending,
-    TrustedImageSnapshot& publishedSnapshot)
-{
-    publishedSnapshot.reset();
-    if (!expectedPending || !expectedPending->image) return false;
-
-    TrustedImageSnapshot retiredState;
+    published.reset();
+    if (!expectedStage || !expectedStage->image
+        || !expectedStage->image->data) {
+        return false;
+    }
     {
-        // pending 与 current 在同一临界区完成 CAS 和 owner 转移：失败绝不清除
-        // pending，成功也不复制或修改 VTK payload，保证读者只看到单调版本。
-        std::scoped_lock lock(
-            m_impl->m_dataMutex, m_impl->m_pendingMutex);
-        if (m_impl->m_pending != expectedPending
-            || !m_impl->m_current
-            || m_impl->m_current->version
-                == std::numeric_limits<DataVersion>::max()
-            || expectedPending->version
-                != m_impl->m_current->version + 1) {
-            return false;
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        if (m_impl->m_loadStage != expectedStage) return false;
+    }
+
+    DataExpectation expectation;
+    expectation.kind = DataExpectationKind::Binding;
+    expectation.binding = std::string(primaryVolumeBinding);
+    expectation.expectedBindingRevision =
+        expectedStage->expectedPrimary.revision;
+    expectation.isTargetChecked = true;
+    expectation.expectedTarget = expectedStage->expectedPrimary.target;
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(expectation));
+    transaction.outputs.push_back(expectedStage->output);
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        expectedStage->expectedPrimary.revision,
+        true,
+        expectedStage->expectedPrimary.target,
+        expectedStage->outputRef });
+    // 在不可逆提交前准备 View owner；通知重入后仍返回本次正式提交的冻结图。
+    auto committedView = std::make_shared<VtkImageGridView>(*expectedStage->image);
+    // 同时保留正式修订和已准备的 VTK view，避免提交后弱缓存失效重建体数据。
+    auto retained = std::make_shared<std::pair<DataSnapshot, VtkImageGridSnapshot>>(
+        DataSnapshot{}, expectedStage->image);
+    const auto result = SetDataCommit(std::move(transaction));
+    if (result.status != DataCommitStatus::Succeeded
+        || result.published.size() != 1
+        || result.published.front()->self != expectedStage->outputRef) {
+        return false;
+    }
+    committedView->graph = result.graph;
+    retained->first = result.published.front();
+    committedView->data = DataSnapshot(retained, retained->first.get());
+    published = std::move(committedView);
+    {
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        if (m_impl->m_loadStage == expectedStage) {
+            m_impl->m_loadStage.reset();
         }
-        retiredState = std::move(m_impl->m_current);
-        m_impl->m_current = std::move(m_impl->m_pending);
-        publishedSnapshot = m_impl->m_current;
     }
     return true;
 }
 
-bool BaseDataManager::ClearPending()
+bool BaseDataManager::ClearLoadStage()
 {
-    TrustedImageSnapshot retiredPending;
-    {
-        std::lock_guard<std::mutex> lock(m_impl->m_pendingMutex);
-        // 锁内只断开 pending 引用；旧候选在离开锁后析构，避免释放大体数据拉长临界区。
-        retiredPending = std::move(m_impl->m_pending);
-        m_impl->m_pending = {};
-    }
+    std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+    m_impl->m_loadStage.reset();
     return true;
 }
 
-bool BaseDataManager::SetPendingImage(TrustedImageState image)
+bool BaseDataManager::SetLoadImage(
+    vtkSmartPointer<vtkImageData> image,
+    vtkSmartPointer<vtkImageData> validityMask,
+    DataProvenance provenance)
 {
-    if (!image.image) return false;
-    auto pending = std::make_shared<TrustedImageState>(std::move(image));
-    TrustedImageSnapshot retiredPending;
+    if (!image || !Impl::GetMaskValid(image, validityMask)) return false;
+    auto payload = m_impl->m_vtk->CreateImagePayload(image, validityMask);
+    if (!payload) return false;
+    const auto graph = GetDataGraph();
+    const auto current = GetDataBinding(graph, primaryVolumeBinding);
+    const DataBinding expected = current.value_or(DataBinding{
+        std::string(primaryVolumeBinding), {}, 0 });
+    const auto entityId = CreateDataEntityId();
+    if (!GetDataEntityIdValid(entityId)) return false;
+    const DataRevisionRef outputRef{ entityId, 1 };
+    if (provenance.producerId.empty()) {
+        provenance = DataProvenance{
+            "org.mvvcvtk.host", "load-volume", "1", "{}" };
+    }
+    DataRevisionDraft output{
+        entityId,
+        0,
+        DataTypes::imageGrid3D,
+        {},
+        std::move(payload),
+        std::move(provenance) };
+    auto candidate = std::make_shared<const DataRevision>(DataRevision{
+        outputRef,
+        output.type,
+        output.inputs,
+        output.payload,
+        output.provenance });
+    auto view = m_impl->m_vtk->GetImageGrid(candidate);
+    if (!view) return false;
+    const DataBinding nextBinding{
+        std::string(primaryVolumeBinding),
+        outputRef,
+        expected.revision + 1 };
+    auto stage = std::make_shared<const DataLoadStage>(DataLoadStage{
+        graph,
+        expected,
+        std::move(output),
+        outputRef,
+        std::make_shared<const VtkImageGridView>(VtkImageGridView{
+            graph,
+            nextBinding,
+            DataSnapshot(view, view->data.get()),
+            view->image,
+            view->validityMask }) });
     {
-        std::scoped_lock lock(
-            m_impl->m_dataMutex, m_impl->m_pendingMutex);
-        if (!m_impl->m_current
-            || m_impl->m_current->version
-                == std::numeric_limits<DataVersion>::max()) {
-            return false;
-        }
-        pending->version = m_impl->m_current->version + 1;
-        // 单槽只保留最新候选；被覆盖批次在离开锁后随 retiredPending 析构。
-        retiredPending = std::move(m_impl->m_pending);
-        m_impl->m_pending = std::move(pending);
+        std::lock_guard<std::mutex> lock(m_impl->m_loadMutex);
+        m_impl->m_loadStage = std::move(stage);
     }
     return true;
 }
 
 bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image)
 {
-    if (!image) {
-        return false;
-    }
-
-    double range[2] = { 0.0, 0.0 };
-    double imageSpacing[3] = { 1.0, 1.0, 1.0 };
-    double imageOrigin[3] = { 0.0, 0.0, 0.0 };
-    image->GetScalarRange(range);
-    image->GetSpacing(imageSpacing);
-    image->GetOrigin(imageOrigin);
-
-    int dims[3] = { 0, 0, 0 };
-    image->GetDimensions(dims);
-    return m_impl->SetCurrent({
-        std::move(image),
-        {},
-        { dims[0], dims[1], dims[2] },
-        { imageSpacing[0], imageSpacing[1], imageSpacing[2] },
-        { imageOrigin[0], imageOrigin[1], imageOrigin[2] },
-        { range[0], range[1] },
-        0
-    });
+    if (!SetLoadImage(std::move(image))) return false;
+    const auto stage = GetLoadStage();
+    VtkImageGridSnapshot published;
+    return SetLoadCommit(stage, published) && published;
 }
 
 bool BaseDataManager::ExportSlices(
@@ -1132,12 +1192,8 @@ bool BaseDataManager::ExportSlices(
 
     auto imageCopy = vtkSmartPointer<vtkImageData>::New();
     vtkSmartPointer<vtkImageData> maskCopy;
-    std::shared_ptr<const TrustedImageState> currentState;
-    {
-        std::lock_guard<std::mutex> lock(m_impl->m_dataMutex);
-        currentState = m_impl->m_current;
-    }
-    if (!currentState->image) return false;
+    const auto currentState = GetPrimaryImage();
+    if (!currentState || !currentState->image) return false;
     imageCopy->ShallowCopy(currentState->image);
     if (currentState->validityMask) {
         maskCopy = vtkSmartPointer<vtkImageData>::New();
@@ -1311,7 +1367,7 @@ bool BaseDataManager::ExportSlices(
 }
 
 bool BaseDataManager::ExportData(
-    const TrustedImageSnapshot& imageSnapshot,
+    const VtkImageGridSnapshot& imageSnapshot,
     const std::string& outputDir,
     const DataExportParams& params)
 {
@@ -1323,7 +1379,7 @@ bool BaseDataManager::ExportData(
 }
 
 bool BaseDataManager::ExportData(
-    const TrustedImageSnapshot& imageSnapshot,
+    const VtkImageGridSnapshot& imageSnapshot,
     const std::string& outputDir,
     const DataExportParams& params,
     const TaskStopToken& stopToken)
@@ -1453,7 +1509,7 @@ BaseDataManager::Impl::BuildExportPath(
 }
 
 bool BaseDataManager::Impl::ExportRaw(
-    const TrustedImageSnapshot& imageSnapshot,
+    const VtkImageGridSnapshot& imageSnapshot,
     const std::string& outputDir,
     const std::array<double, 16>& modelToWorldMatrix,
     const TaskStopToken& stopToken)
@@ -1695,7 +1751,7 @@ bool BaseDataManager::Impl::ExportRaw(
 }
 
 bool BaseDataManager::Impl::ExportMesh(
-    const TrustedImageSnapshot& imageSnapshot,
+    const VtkImageGridSnapshot& imageSnapshot,
     const std::string& outputDir,
     const DataExportParams& params,
     const TaskStopToken& stopToken)
@@ -1708,7 +1764,7 @@ bool BaseDataManager::Impl::ExportMesh(
         return false;
     }
 
-    // 1. 全分辨率 image 与 mask 来自同一个 TrustedImageState，不读取显示 mapper。
+    // 1. 全分辨率 image 与 mask 来自同一个 DataRevision typed view，不读取显示 mapper。
     auto imageCopy =
         vtkSmartPointer<vtkImageData>::New();
     imageCopy->ShallowCopy(imageSnapshot->image);
@@ -2005,15 +2061,7 @@ bool RawVolumeDataManager::SetDataLoaded(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetPendingImage({
-        std::move(newImage),
-        {},
-        dimensions,
-        rasSpacing,
-        rasOrigin,
-        { range[0], range[1] },
-        0
-    });
+    return SetLoadImage(std::move(newImage));
 }
 
 bool RawVolumeDataManager::SetFromBuffer(
@@ -2062,9 +2110,7 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetPendingImage({
-        std::move(newImage), {}, dims, rasSpacing, rasOrigin,
-        { range[0], range[1] }, 0 });
+    return SetLoadImage(std::move(newImage));
 }
 
 bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
@@ -2096,24 +2142,7 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
         imageCopy->GetOrigin()[2]
     };
 
-    return SetPendingImage({
-        std::move(imageCopy),
-        {},
-        { dims[0], dims[1], dims[2] },
-        imageSpacing,
-        imageOrigin,
-        { range[0], range[1] },
-        0 });
-}
-
-bool RawVolumeDataManager::SetCurrentFromPending(bool& hasPending)
-{
-    return BaseDataManager::SetCurrentFromPending(hasPending);
-}
-
-bool RawVolumeDataManager::ClearPending()
-{
-    return BaseDataManager::ClearPending();
+    return SetLoadImage(std::move(imageCopy));
 }
 
 TiffVolumeDataManager::TiffVolumeDataManager()
@@ -2151,11 +2180,7 @@ bool TiffVolumeDataManager::SetDataLoaded(
     image->GetSpacing(spacing);
     image->GetOrigin(origin);
     if (stopToken.GetIsStopped()) return false;
-    return SetPendingImage({
-        std::move(image), {}, dimensions,
-        { spacing[0], spacing[1], spacing[2] },
-        { origin[0], origin[1], origin[2] },
-        { range[0], range[1] }, 0 });
+    return SetLoadImage(std::move(image));
 }
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(

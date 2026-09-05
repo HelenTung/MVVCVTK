@@ -1,4 +1,5 @@
 #include "Host/SurfaceDeterminationHostFeature.h"
+#include "Data/DataPayloads.h"
 
 #include "Render/Contracts/OverlayService.h"
 #include "SurfaceDeterminationService.h"
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -32,6 +34,7 @@ namespace {
 
 constexpr std::string_view featureId = "SurfaceDetermination";
 constexpr std::size_t completionBatchLimit = 8;
+constexpr std::string_view surfaceResultBinding = "analysis.surface-determination.active";
 
 bool GetTargetsUsed(const HostViewTargets& targets)
 {
@@ -229,7 +232,7 @@ SurfaceDeterminationResult BuildResult(
     const std::uint64_t requestId,
     const SurfaceResultStatus status,
     const SurfaceFailureReason failureReason,
-    const DataVersion sourceVersion,
+    const DataRevisionRef sourceRevision,
     const std::uint64_t resultRevision,
     const std::uint64_t pointCount,
     const std::uint32_t objectCount,
@@ -239,7 +242,7 @@ SurfaceDeterminationResult BuildResult(
     result.requestId = requestId;
     result.status = status;
     result.failureReason = failureReason;
-    result.sourceVersion = sourceVersion;
+    result.sourceRevision = sourceRevision;
     result.resultRevision = resultRevision;
     result.pointCount = pointCount;
     result.objectCount = objectCount;
@@ -275,7 +278,7 @@ private:
     };
 
     struct RequestEntry final {
-        TrustedImageSnapshot source;
+        VtkImageGridSnapshot source;
         std::vector<HostFeatureView> views;
         SurfaceDeterminationCallback onComplete;
         bool isSourceChanged = false;
@@ -283,7 +286,7 @@ private:
 
     bool GetIsOwnerThread() const noexcept;
     std::uint64_t GetNextRequestId() noexcept;
-    bool GetSourceSame(const TrustedImageSnapshot& source) const;
+    bool GetSourceSame(const VtkImageGridSnapshot& source) const;
     std::vector<HostFeatureView> GetTargetViews(
         const HostViewTargets& targets) const;
     static std::vector<std::string> GetViewIds(
@@ -291,7 +294,7 @@ private:
     void SetState(SurfaceDeterminationState state);
     void SetRequestRunning(
         std::uint64_t requestId,
-        DataVersion sourceVersion,
+        DataRevisionRef sourceRevision,
         bool isFirstRequest);
     void SetRequestProgress(const SurfaceRequestProgress& progress);
     void SendComplete(
@@ -300,13 +303,14 @@ private:
     bool BuildBindings(
         vtkSmartPointer<vtkPolyData> displayData,
         const std::vector<HostFeatureView>& views,
-        const TrustedImageSnapshot& source,
+        const VtkImageGridSnapshot& source,
         std::vector<OverlayBinding>& bindings);
     static void RemoveBindings(
         std::vector<OverlayBinding>& bindings) noexcept;
     bool RemoveDisplay();
     bool SetVisibility(bool isVisible);
     bool ClearResult();
+    bool ClearResultBinding();
     void SetSourceStale();
     void SetRequestComplete(SurfaceJobComplete complete);
     void SetRequestFailed(
@@ -322,12 +326,12 @@ private:
     SurfaceDeterminationState m_state;
     SurfaceDeterminationState m_stateBeforeRequest;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     std::unique_ptr<SurfaceDeterminationService> m_service;
     SurfaceGenerationStore m_store;
     std::map<std::uint64_t, RequestEntry> m_requests;
-    TrustedImageSnapshot m_activeSource;
+    VtkImageGridSnapshot m_activeSource;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
     vtkSmartPointer<vtkPolyData> m_displayData;
@@ -337,6 +341,7 @@ private:
     std::uint64_t m_resultRevision = 0;
     bool m_isAttached = false;
     bool m_isStaleCleanupPending = false;
+    std::shared_ptr<std::atomic<bool>> m_completeActive;
 };
 
 bool SurfaceDeterminationHostFeature::Impl::AttachHost(
@@ -346,6 +351,16 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
         || !GetConfigValid(m_config)) {
         return false;
     }
+    const auto graph = context.data->GetDataGraph();
+    if (!graph.view || (graph.view->GetDataFacets(surfaceGenerationType).empty()
+        && !context.data->SetDataType(DataTypeDescriptor{
+            surfaceGenerationType, { surfaceGenerationFacet },
+            [](const IDataPayload& value, std::string&) {
+                const auto* payload = dynamic_cast<const SurfaceGenerationPayload*>(&value);
+                const auto generation = payload ? payload->GetGeneration() : nullptr;
+                return generation && generation->points && generation->triangleIndices
+                    && generation->objects && GetDataRevisionRefValid(generation->sourceRevision);
+            } }))) return false;
     try {
         m_service = std::make_unique<SurfaceDeterminationService>();
     }
@@ -356,6 +371,7 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
     m_data = context.data;
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
+    m_completeActive = std::make_shared<std::atomic<bool>>(true);
     m_isAttached = true;
     return true;
 }
@@ -364,6 +380,7 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
 {
     if (!m_isAttached) return true;
     if (!GetIsOwnerThread() || !m_service) return false;
+    if (m_completeActive) m_completeActive->store(false);
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
         m_state.stage = SurfaceDeterminationStage::Stopping;
@@ -380,7 +397,7 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
                 item.first,
                 SurfaceResultStatus::Cancelled,
                 SurfaceFailureReason::Cancelled,
-                request.source ? request.source->version : 0,
+                request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
                 m_resultRevision,
                 0,
                 0,
@@ -388,9 +405,7 @@ bool SurfaceDeterminationHostFeature::Impl::DetachHost()
     }
     m_requests.clear();
     m_latestRequestId = 0;
-    if (!RemoveDisplay()) return false;
-
-    m_store.ClearGeneration();
+    if (!ClearResult()) return false;
     m_activeSource.reset();
     m_activeViews.clear();
     m_service.reset();
@@ -454,7 +469,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         if (!GetStartValid(params)) return admission;
         auto targetViews = GetTargetViews(params.targetViews);
         if (targetViews.empty()) return admission;
-        auto source = m_data ? m_data->GetImageSnapshot() : nullptr;
+        auto source = m_data ? m_data->GetPrimaryImage() : nullptr;
         if (!source || !source->image) {
             admission.status = SurfaceAdmissionStatus::Unavailable;
             return admission;
@@ -491,7 +506,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
         m_latestRequestId = requestId;
         SetRequestRunning(
             requestId,
-            requestItem->second.source->version,
+            requestItem->second.source->data->self,
             isFirstRequest);
         return admission;
     }
@@ -517,7 +532,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 controlRequestId,
                 SurfaceResultStatus::Succeeded,
                 SurfaceFailureReason::None,
-                state.sourceVersion,
+                state.sourceRevision,
                 m_resultRevision,
                 state.pointCount,
                 state.objectCount,
@@ -549,7 +564,7 @@ SurfaceDeterminationHostFeature::Impl::SendRequest(
                 requestId,
                 SurfaceResultStatus::Succeeded,
                 SurfaceFailureReason::None,
-                state.sourceVersion,
+                state.sourceRevision,
                 state.resultRevision,
                 state.pointCount,
                 state.objectCount,
@@ -585,12 +600,13 @@ SurfaceDeterminationHostFeature::Impl::GetNextRequestId() noexcept
 }
 
 bool SurfaceDeterminationHostFeature::Impl::GetSourceSame(
-    const TrustedImageSnapshot& source) const
+    const VtkImageGridSnapshot& source) const
 {
-    const auto current = m_data ? m_data->GetImageSnapshot() : nullptr;
+    const auto current = m_data ? m_data->GetPrimaryImage() : nullptr;
     return current && source
-        && current.get() == source.get()
-        && current->version == source->version;
+        && current->data && source->data && current->binding && source->binding
+        && current->data->self == source->data->self
+        && current->binding->revision == source->binding->revision;
 }
 
 std::vector<HostFeatureView>
@@ -640,7 +656,7 @@ void SurfaceDeterminationHostFeature::Impl::SetState(
 
 void SurfaceDeterminationHostFeature::Impl::SetRequestRunning(
     const std::uint64_t requestId,
-    const DataVersion sourceVersion,
+    const DataRevisionRef sourceRevision,
     const bool isFirstRequest)
 {
     const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -648,7 +664,7 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestRunning(
     m_state.stage = SurfaceDeterminationStage::Preparing;
     m_state.failureReason = SurfaceFailureReason::None;
     m_state.requestId = requestId;
-    m_state.sourceVersion = sourceVersion;
+    m_state.sourceRevision = sourceRevision;
     m_state.progress01 = 0.0;
     m_state.errorMessage.clear();
 }
@@ -668,7 +684,34 @@ void SurfaceDeterminationHostFeature::Impl::SendComplete(
 {
     if (!callback) return;
     try {
-        callback(std::move(result));
+        const auto active = m_completeActive;
+        const std::weak_ptr<TrustedDataPort> data = m_data;
+        const auto pending = std::make_shared<SurfaceDeterminationResult>(std::move(result));
+        const auto send = [active, data, pending, callback = std::move(callback)]() mutable {
+            if (pending->status == SurfaceResultStatus::Succeeded) {
+                if (!active || !active->load()) {
+                    pending->status = SurfaceResultStatus::Cancelled;
+                    pending->failureReason = SurfaceFailureReason::Cancelled;
+                }
+                else if (GetDataRevisionRefValid(pending->sourceRevision)) {
+                    const auto port = data.lock();
+                    const auto source = port ? port->GetPrimaryImage() : nullptr;
+                    if (!source || !source->data || source->data->self != pending->sourceRevision) {
+                        pending->status = SurfaceResultStatus::Failed;
+                        pending->failureReason = SurfaceFailureReason::SourceChanged;
+                    }
+                }
+            }
+            try { callback(std::move(*pending)); } catch (...) {}
+        };
+        if (!m_host || !m_host->SendOwnerComplete(send)) {
+            if (pending->status == SurfaceResultStatus::Succeeded) {
+                pending->status = SurfaceResultStatus::Cancelled;
+                pending->failureReason = SurfaceFailureReason::Cancelled;
+            }
+            auto fallback = send;
+            fallback();
+        }
     }
     catch (...) {
     }
@@ -677,7 +720,7 @@ void SurfaceDeterminationHostFeature::Impl::SendComplete(
 bool SurfaceDeterminationHostFeature::Impl::BuildBindings(
     vtkSmartPointer<vtkPolyData> displayData,
     const std::vector<HostFeatureView>& views,
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     std::vector<OverlayBinding>& bindings)
 {
     if (!displayData || !source || !source->image || !m_views) return false;
@@ -758,6 +801,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetVisibility(
 
 bool SurfaceDeterminationHostFeature::Impl::ClearResult()
 {
+    if (!ClearResultBinding()) return false;
     if (!RemoveDisplay()) return false;
     m_store.ClearGeneration();
     m_activeSource.reset();
@@ -768,8 +812,24 @@ bool SurfaceDeterminationHostFeature::Impl::ClearResult()
     return true;
 }
 
+bool SurfaceDeterminationHostFeature::Impl::ClearResultBinding()
+{
+    const auto generation = m_store.GetGeneration();
+    if (!generation || !m_data) return true;
+    const auto binding = m_data->GetDataBinding(m_data->GetDataGraph(), surfaceResultBinding);
+    if (!binding || binding->target != std::optional<DataRevisionRef>{generation->dataRevision}) return true;
+    DataTransaction transaction;
+    transaction.bindings.push_back({ std::string(surfaceResultBinding),
+        binding->revision, true, binding->target, {} });
+    return m_data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
+}
+
 void SurfaceDeterminationHostFeature::Impl::SetSourceStale()
 {
+    if (!ClearResultBinding()) {
+        m_isStaleCleanupPending = true;
+        return;
+    }
     const auto previousState = GetState();
     m_store.ClearGeneration();
     m_activeSource.reset();
@@ -781,7 +841,7 @@ void SurfaceDeterminationHostFeature::Impl::SetSourceStale()
     stale.failureReason = SurfaceFailureReason::SourceChanged;
     stale.requestId = m_latestRequestId != 0
         ? m_latestRequestId : previousState.requestId;
-    stale.sourceVersion = previousState.sourceVersion;
+    stale.sourceRevision = previousState.sourceRevision;
     stale.resultRevision = m_resultRevision;
     stale.isOverlayVisible = isVisible;
     stale.errorMessage = "Surface source changed before commit.";
@@ -862,7 +922,7 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
             complete.requestId,
             callbackStatus,
             callbackReason,
-            request.source ? request.source->version : 0,
+            request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
             state.resultRevision,
             state.pointCount,
             state.objectCount,
@@ -908,7 +968,11 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     if (!displayData) return false;
 
     SurfaceGenerationSnapshot generation;
-    generation.sourceVersion = result.sourceVersion;
+    const DataRevisionRef meshRef{ m_data->CreateDataEntityId(), 1 };
+    const DataRevisionRef generationRef{ m_data->CreateDataEntityId(), 1 };
+    generation.dataRevision = generationRef;
+    generation.meshRevision = meshRef;
+    generation.sourceRevision = result.sourceRevision;
     generation.resultRevision = m_resultRevision + 1;
     generation.parameterFingerprint = result.parameterFingerprint;
     generation.algorithmRevision = result.algorithmRevision;
@@ -926,6 +990,38 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         std::make_shared<const SurfaceGenerationSnapshot>(
             std::move(generation));
 
+    std::vector<double> vertices;
+    vertices.reserve(stagedGeneration->points->size() * 3U);
+    for (const auto& point : *stagedGeneration->points) {
+        vertices.insert(vertices.end(), point.positionModel.begin(), point.positionModel.end());
+    }
+    std::vector<std::uint64_t> triangles(stagedGeneration->triangleIndices->begin(),
+        stagedGeneration->triangleIndices->end());
+    const auto mesh = std::make_shared<const SurfaceMeshPayload>(
+        std::move(vertices), std::move(triangles));
+    if (!mesh->GetValid()) return false;
+    const auto expected = m_data->GetDataBinding(request.source->graph, surfaceResultBinding)
+        .value_or(DataBinding{ std::string(surfaceResultBinding), {}, 0 });
+    DataExpectation sourceExpected;
+    sourceExpected.kind = DataExpectationKind::Binding;
+    sourceExpected.binding = std::string(primaryVolumeBinding);
+    sourceExpected.expectedBindingRevision = request.source->binding->revision;
+    sourceExpected.isTargetChecked = true;
+    sourceExpected.expectedTarget = request.source->data->self;
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(sourceExpected));
+    const DataInputRef sourceInput{ "source-volume", request.source->data->self };
+    const DataProvenance provenance{ std::string(featureId), "determine-surface",
+        std::to_string(stagedGeneration->algorithmRevision),
+        std::to_string(stagedGeneration->parameterFingerprint) };
+    transaction.outputs = {
+        { meshRef.entityId, 0, DataTypes::surfaceMesh, { sourceInput }, mesh, provenance },
+        { generationRef.entityId, 0, surfaceGenerationType,
+            { sourceInput, { "mesh", meshRef } },
+            std::make_shared<const SurfaceGenerationPayload>(stagedGeneration), provenance } };
+    transaction.bindings.push_back({ std::string(surfaceResultBinding),
+        expected.revision, true, expected.target, generationRef });
+
     const bool isVisible = GetState().isOverlayVisible;
     std::vector<OverlayBinding> nextBindings;
     if (isVisible
@@ -940,14 +1036,13 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         RemoveBindings(nextBindings);
         return false;
     }
-    try {
-        m_store.SetGeneration(stagedGeneration);
-    }
-    catch (...) {
+    const auto committed = m_data->SetDataCommit(std::move(transaction));
+    if (committed.status != DataCommitStatus::Succeeded) {
         (void)m_host->SetActiveViews(previousViewIds);
         RemoveBindings(nextBindings);
         return false;
     }
+    m_store.SetGeneration(committed.published.back());
 
     RemoveBindings(m_bindings);
     m_bindings = std::move(nextBindings);
@@ -958,7 +1053,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     SurfaceDeterminationState ready;
     ready.stage = SurfaceDeterminationStage::Ready;
     ready.requestId = requestId;
-    ready.sourceVersion = stagedGeneration->sourceVersion;
+    ready.sourceRevision = stagedGeneration->sourceRevision;
     ready.resultRevision = stagedGeneration->resultRevision;
     ready.progress01 = 1.0;
     ready.pointCount = stagedGeneration->points->size();
@@ -971,7 +1066,23 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     ready.nonManifoldObjectCount = result.nonManifoldObjectCount;
     ready.isOverlayVisible = isVisible;
     SetState(std::move(ready));
+    if (isVisible && m_host) {
+        FeatureSceneDelta delta;
+        delta.requestId = requestId;
+        delta.priority = FeatureScenePriority::Scene;
+        delta.scope = FeatureSceneScope::RequiredAllViews;
+        delta.inputStamp = { request.source->data->self };
+        delta.viewIds = nextViewIds;
+        (void)m_host->SendSceneDelta(std::move(delta));
+    }
     return true;
+}
+
+FeatureDataContract SurfaceDeterminationHostFeature::GetDataContract() const
+{
+    return { { { "source-volume", DataFacets::scalarGrid3D, true } },
+        { { "mesh", DataTypes::surfaceMesh, { DataFacets::surfaceMesh } },
+          { "generation", surfaceGenerationType, { surfaceGenerationFacet } } } };
 }
 
 SurfaceDeterminationHostFeature::SurfaceDeterminationHostFeature(

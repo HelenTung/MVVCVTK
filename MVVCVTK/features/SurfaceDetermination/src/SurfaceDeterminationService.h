@@ -34,7 +34,7 @@ public:
         const SurfaceDeterminationService&) = delete;
 
     SurfaceAdmissionStatus Start(
-        TrustedImageSnapshot source,
+        VtkImageGridSnapshot source,
         SurfaceDeterminationStartParams params,
         std::size_t maxWorkingBytes,
         std::uint64_t requestId);
@@ -47,7 +47,7 @@ public:
 
 private:
     struct Job final {
-        TrustedImageSnapshot source;
+        VtkImageGridSnapshot source;
         SurfaceDeterminationStartParams params;
         std::size_t maxWorkingBytes = 0;
         std::uint64_t requestId = 0;

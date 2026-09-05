@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/DataVersion.h"
+#include "Data/DataGraphTypes.h"
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
@@ -230,7 +230,7 @@ inline bool operator!=(
 
 struct PartSetSnapshot final {
     PartSetId partSetId;
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
     std::uint64_t resultRevision = 0;
     std::uint64_t catalogRevision = 0;
     bool isStale = false;
@@ -244,7 +244,7 @@ inline bool operator==(
     const PartSetSnapshot& right)
 {
     return left.partSetId == right.partSetId
-        && left.sourceVersion == right.sourceVersion
+        && left.sourceRevision == right.sourceRevision
         && left.resultRevision == right.resultRevision
         && left.catalogRevision == right.catalogRevision
         && left.isStale == right.isStale
@@ -323,6 +323,7 @@ enum class PartAdmissionStatus : std::uint8_t {
 
 enum class PartResultStatus : std::uint8_t {
     Succeeded,
+    SucceededWithDisplayFailure,
     Cancelled,
     Failed
 };
@@ -373,11 +374,16 @@ struct PartSegmentationAdmission final {
 };
 
 struct PartSegmentationResult final {
+    std::uint64_t resultRevision = 0;
+    std::uint64_t catalogRevision = 0;
     std::uint64_t requestId = 0;
     PartResultStatus status = PartResultStatus::Failed;
     PartFailureReason failureReason = PartFailureReason::InternalError;
-    DataVersion sourceVersion = 0;
-    std::uint64_t resultRevision = 0;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef labelMap;
+    DataRevisionRef partTable;
+    DataRevisionRef resultSet;
     std::size_t partCount = 0;
     std::string message;
 };
@@ -390,11 +396,15 @@ struct PartSegmentationState final {
     PartSegmentationStatus status = PartSegmentationStatus::Idle;
     PartFailureReason failureReason = PartFailureReason::None;
     std::uint64_t requestId = 0;
-    DataVersion sourceVersion = 0;
     PartSetId partSetId;
     std::uint64_t resultRevision = 0;
     std::uint64_t catalogRevision = 0;
     std::size_t partCount = 0;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef labelMap;
+    DataRevisionRef partTable;
+    DataRevisionRef resultSet;
     double progress = 0.0;
     bool isOverlayVisible = true;
 };

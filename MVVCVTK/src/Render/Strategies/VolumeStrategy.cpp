@@ -853,12 +853,8 @@ bool VolumeStrategy::GetKeyCurrent(const VolumeLodKey& key) const
 {
     auto* image = vtkImageData::SafeDownCast(m_lastInput);
     const bool hasCurrentStamp = key.inputStamp == m_renderInputStamp;
-    const bool hasInitialStamp = key.inputStamp.identity == image
-        && key.inputStamp.version == 0;
     return image
-        && (hasCurrentStamp || hasInitialStamp)
-        && (!key.inputStamp.identity
-            || key.inputStamp.identity == image)
+        && hasCurrentStamp && key.inputIdentity == image
         && key.maskIdentity == m_lastMask.GetPointer()
         && key.inputMTime == image->GetMTime()
         && key.inputScalarMTime == GetScalarTime(image)
@@ -1005,8 +1001,8 @@ VolumeStrategy::BuildRequest(
     request.requestedQuality = requestedQuality;
     request.input = image;
     request.mask = m_lastMask;
-    request.key.inputStamp = m_renderInputStamp.identity == image
-        ? m_renderInputStamp : RenderInputStamp{ image, 0 };
+    request.key.inputStamp = m_renderInputStamp;
+    request.key.inputIdentity = image;
     request.key.maskIdentity = m_lastMask.GetPointer();
     request.key.inputMTime = image->GetMTime();
     request.key.inputScalarMTime = GetScalarTime(image);

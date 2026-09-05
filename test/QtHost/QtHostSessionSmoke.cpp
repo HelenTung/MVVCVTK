@@ -972,10 +972,11 @@ bool BuildTransferReturnTest()
                 static_cast<float>(index);
     }
     image->Modified();
-    bool hasPending = false;
+    VtkImageGridSnapshot published;
     if (!dataManager->SetImageSnapshot(image)
-        || !dataManager->SetCurrentFromPending(hasPending)
-        || !hasPending) {
+        || !dataManager->GetLoadStage()
+        || !dataManager->SetLoadCommit(
+            dataManager->GetLoadStage(), published)) {
         return false;
     }
 
@@ -1312,10 +1313,11 @@ bool BuildStyleQualityTest()
         image->GetNumberOfPoints(),
         static_cast<unsigned char>(128));
     image->Modified();
-    bool hasPending = false;
+    VtkImageGridSnapshot published;
     if (!dataManager->SetImageSnapshot(image)
-        || !dataManager->SetCurrentFromPending(hasPending)
-        || !hasPending) {
+        || !dataManager->GetLoadStage()
+        || !dataManager->SetLoadCommit(
+            dataManager->GetLoadStage(), published)) {
         return false;
     }
 
@@ -1752,10 +1754,11 @@ bool BuildSceneCameraTest()
         image->GetNumberOfPoints(),
         static_cast<unsigned char>(128));
     image->Modified();
-    bool hasPending = false;
+    VtkImageGridSnapshot published;
     if (!dataManager->SetImageSnapshot(image)
-        || !dataManager->SetCurrentFromPending(hasPending)
-        || !hasPending) {
+        || !dataManager->GetLoadStage()
+        || !dataManager->SetLoadCommit(
+            dataManager->GetLoadStage(), published)) {
         return false;
     }
 

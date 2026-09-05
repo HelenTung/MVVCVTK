@@ -4,6 +4,7 @@
 #include "Data/DataManager.h"
 
 #include <algorithm>
+#include <vtkImageData.h>
 #include <iostream>
 #include <utility>
 
@@ -22,7 +23,7 @@ LoadCommitResult GetResult(
         status,
         failure,
         request.transactionRevision,
-        request.sourceVersion
+        request.sourceRevision
     };
 }
 
@@ -79,10 +80,11 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
         (request.loadKind == LoadEventKind::File
             || request.loadKind == LoadEventKind::Reload)
         && request.transactionRevision != 0
-        && request.sourceVersion != 0
+        && GetDataRevisionRefValid(request.sourceRevision)
         && request.pending
         && request.pending->image
-        && request.pending->version == request.sourceVersion
+        && request.pending->data
+        && request.pending->data->self == request.sourceRevision
         && m_dataManager
         && !request.stages.empty()
         && std::all_of(
@@ -95,8 +97,8 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
             LoadCommitFailure::InvalidRequest);
     }
 
-    const auto currentPending = m_dataManager->GetPendingSnapshot();
-    if (currentPending != request.pending) {
+    const auto currentStage = m_dataManager->GetLoadStage();
+    if (!currentStage || currentStage->image != request.pending) {
         return GetResult(
             request,
             LoadCommitStatus::Failed,
@@ -146,7 +148,7 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
         return SetLoadCommit(request);
     }
     if (active.pending != request.pending
-        || active.sourceVersion != request.sourceVersion
+        || active.sourceRevision != request.sourceRevision
         || !GetSameStages(active.stages, request.stages)) {
         const auto stale = active;
         (void)ClearStages(stale, false, 0);
@@ -202,9 +204,10 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCommit(
             LoadCommitFailure::CommitFailed);
     }
 
-    TrustedImageSnapshot published;
-    if (!m_dataManager->SetCurrentFromPending(active.pending, published)
-        || !published || published != active.pending) {
+    VtkImageGridSnapshot published;
+    if (!m_dataManager->SetLoadCommit(currentStage, published)
+        || !published || !published->data
+        || published->data->self != active.sourceRevision) {
         const auto terminal = active;
         (void)ClearStages(terminal, true, committedCount);
         m_transaction.reset();
@@ -239,7 +242,7 @@ LoadCommitResult LoadCommitCoordinator::SetLoadCancelled(
         return result;
     }
     const auto terminal = m_transaction->request;
-    result.sourceVersion = terminal.sourceVersion;
+    result.sourceRevision = terminal.sourceRevision;
     (void)ClearStages(terminal, false, 0);
     m_transaction.reset();
     return result;

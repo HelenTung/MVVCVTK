@@ -1,13 +1,24 @@
 #pragma once
 
+#include "Data/DataGraphTypes.h"
+
 #include <cstddef>
+#include <string>
 
 // worker 执行轴；Host 只读取已发布状态，不借此控制 overlay 显示。
 enum class GapAnalysisState {
     Idle,
     Running,
     Succeeded,
-    Failed
+    Failed,
+    Stale
+};
+
+enum class GapResultStatus {
+    Succeeded,
+    SucceededWithDisplayFailure,
+    Failed,
+    SourceChanged
 };
 
 // Gap Feature 的等值面阈值来源，不携带 Host 窗口或实现对象。
@@ -45,6 +56,26 @@ struct GapStatistics final {
 struct GapHostState final {
     GapAnalysisState analysisState = GapAnalysisState::Idle;
     GapStatistics statistics;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef labelMap;
+    DataRevisionRef voidTable;
+    DataRevisionRef voidMesh;
+    DataRevisionRef statisticsData;
+    DataRevisionRef resultSet;
     bool isViewActive = false;
     bool isExitPending = false;
+};
+
+struct GapHostResult final {
+    GapResultStatus status = GapResultStatus::Failed;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef labelMap;
+    DataRevisionRef voidTable;
+    DataRevisionRef voidMesh;
+    DataRevisionRef statisticsData;
+    DataRevisionRef resultSet;
+    GapStatistics statistics;
+    std::string message;
 };

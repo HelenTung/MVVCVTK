@@ -1,3 +1,4 @@
+#include "../TestDataPort.h"
 #include "PartSegmentationTestCases.h"
 
 #include "Model/PartCatalog.h"
@@ -75,11 +76,11 @@ int GetPartCatalogFailCount()
             && GetPartCatalogValid(catalog, labels),
         "Part catalog reserves label zero and forms a bijection") ? 0 : 1;
 
-    const auto snapshot = BuildPartSetSnapshot(catalog, 42, false);
+    const auto snapshot = BuildPartSetSnapshot(catalog, GetTestDataRef(42), false);
     failureCount += GetCaseResult(
         snapshot
             && snapshot->partSetId == catalog.partSetId
-            && snapshot->sourceVersion == 42
+            && snapshot->sourceRevision == GetTestDataRef(42)
             && snapshot->resultRevision == 1
             && snapshot->catalogRevision == 1
             && !snapshot->isStale

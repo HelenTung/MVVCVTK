@@ -50,7 +50,15 @@ VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 
 namespace {
 constexpr unsigned int kLargeTableWidth = 2565;
-int inputIdentity = 0;
+
+DataRevisionRef GetRenderRevision(
+    const std::uint64_t generation,
+    const std::uint8_t entityKey = 1)
+{
+    DataEntityId entity;
+    entity.bytes[0] = entityKey;
+    return { entity, generation };
+}
 
 class ProbePass final : public vtkOpenGLRenderPass {
 public:
@@ -140,14 +148,14 @@ CropShaderPayload BuildPayload(
     const std::vector<CropOpItem>& operations,
     const std::size_t nodeCount,
     const std::uint64_t revision,
-    const std::uint64_t inputVersion = 1)
+    const std::uint64_t sourceGeneration = 1)
 {
     const auto tableResult = CropAlgorithm::BuildPredicateTable(
         operations,
         operations.size());
     CropShaderPayload payload;
     payload.revision = revision;
-    payload.sourceStamp = { &inputIdentity, inputVersion };
+    payload.sourceStamp = { GetRenderRevision(sourceGeneration) };
     payload.nodeCount = nodeCount;
     payload.predicateTable = tableResult.predicateTable;
     return payload;
@@ -488,7 +496,6 @@ bool StartEffectLifeCase()
     auto polyData = vtkSmartPointer<vtkPolyData>::New();
     polyData->DeepCopy(cube->GetOutput());
 
-    int mismatchedIdentity = 0;
     auto rollbackEffect = std::make_shared<CropShaderEffect>();
     auto firstStrategy = std::make_shared<IsoSurfaceStrategy>();
     auto secondStrategy = std::make_shared<IsoSurfaceStrategy>();
@@ -497,9 +504,9 @@ bool StartEffectLifeCase()
     firstStrategy->SetInputData(polyData);
     secondStrategy->SetInputData(polyData);
     bool isPassed = firstStrategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && secondStrategy->SetRenderInputStamp(
-            { &mismatchedIdentity, 1 })
+            { GetRenderRevision(1, 2) })
         && firstStrategy->AttachRenderEffect(
             rollbackEffect, RenderBindingUse::Current)
         && secondStrategy->AttachRenderEffect(
@@ -522,7 +529,7 @@ bool StartEffectLifeCase()
         "A mismatched Current target should roll back every accepted stage.")
         && isPassed;
     isPassed = secondStrategy->SetRenderInputStamp(
-        { &inputIdentity, 1 }) && isPassed;
+        { GetRenderRevision(1) }) && isPassed;
     const auto detachedPayload = BuildPayload({ keep }, 1, 2);
     isPassed = rollbackEffect->SetCropParams(detachedPayload)
         && isPassed;
@@ -551,7 +558,7 @@ bool StartEffectLifeCase()
     currentWindow->AddRenderer(currentRenderer);
     current->SetInputData(polyData);
     isPassed = current->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && current->AttachRenderEffect(
             effect, RenderBindingUse::Current)
         && isPassed;
@@ -571,7 +578,7 @@ bool StartEffectLifeCase()
     candidateWindow->AddRenderer(candidateRenderer);
     candidate->SetInputData(polyData);
     isPassed = candidate->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && candidate->AttachRenderEffect(
             effect, RenderBindingUse::Candidate)
         && isPassed;
@@ -669,9 +676,9 @@ bool StartEffectAtomicCase()
     firstStrategy->SetInputData(polyData);
     secondStrategy->SetInputData(polyData);
     bool isPassed = firstStrategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && secondStrategy->SetRenderInputStamp(
-            { &inputIdentity, 1 })
+            { GetRenderRevision(1) })
         && firstStrategy->AttachRenderEffect(
             firstEffect, RenderBindingUse::Current)
         && secondStrategy->AttachRenderEffect(
@@ -1049,7 +1056,7 @@ bool StartSliceCoordinateCase()
         view.m_strategy->SetInputData(image);
         view.m_strategy->SetInputMask(samplingMask);
         isPassed = view.m_strategy->SetRenderInputStamp(
-            { &inputIdentity, 1 }) && isPassed;
+            { GetRenderRevision(1) }) && isPassed;
         isPassed = view.m_strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current) && isPassed;
         view.m_strategy->AttachRenderer(view.m_renderer);
@@ -1206,7 +1213,7 @@ bool StartVolumeCoordinateCase()
     }
     bool isPassed = volume
         && strategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current);
     strategy->AttachRenderer(renderer);
@@ -1383,7 +1390,7 @@ bool StartPixelTransactionCase()
     renderWindow->SetSize(64, 64);
     renderWindow->AddRenderer(renderer);
     bool isPassed = strategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current);
     strategy->AttachRenderer(renderer);
@@ -1458,7 +1465,7 @@ bool StartLargeTableCase()
     renderWindow->SetSize(16, 16);
     renderWindow->AddRenderer(renderer);
     bool isPassed = strategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current);
     strategy->AttachRenderer(renderer);
@@ -1507,7 +1514,7 @@ bool GetPointGridMatched(
         operations.size());
     CropShaderPayload payload;
     payload.revision = revision;
-    payload.sourceStamp = { &inputIdentity, 1 };
+    payload.sourceStamp = { GetRenderRevision(1) };
     payload.nodeCount = nodeCount;
     payload.predicateTable = table.predicateTable;
     const bool isStaged = table.isSucceeded
@@ -1608,7 +1615,7 @@ bool StartPointGridTruthCase()
     renderWindow->SetSize(180, 80);
     renderWindow->AddRenderer(renderer);
     bool isPassed = strategy->SetRenderInputStamp(
-        { &inputIdentity, 1 })
+        { GetRenderRevision(1) })
         && strategy->AttachRenderEffect(
             effect, RenderBindingUse::Current);
     strategy->AttachRenderer(renderer);

@@ -102,7 +102,7 @@ SetSdkHeaderMap(
     "include/Host/Types/HostSessionTypes.h|MVVCVTK/API/Host/Types/HostSessionTypes.h"
     "include/Host/Types/HostValueTypes.h|MVVCVTK/API/Host/Types/HostValueTypes.h"
     "include/Host/Types/HostViewTypes.h|MVVCVTK/API/Host/Types/HostViewTypes.h"
-    "include/Data/DataVersion.h|MVVCVTK/API/Data/DataVersion.h"
+    "include/Data/DataGraphTypes.h|MVVCVTK/API/Data/DataGraphTypes.h"
     "include/Data/ImageReadTypes.h|MVVCVTK/API/Data/ImageReadTypes.h"
     "include/Host/HostFeature.h|MVVCVTK/SPI/Host/HostFeature.h"
     "include/App/Services/FeatureViewService.h|MVVCVTK/SPI/App/Services/FeatureViewService.h"
@@ -111,7 +111,8 @@ SetSdkHeaderMap(
     "include/Render/Contracts/RenderEffect.h|MVVCVTK/SPI/Render/Contracts/RenderEffect.h"
     "include/App/FeatureTypes.h|MVVCVTK/SPI/App/FeatureTypes.h"
     "include/App/ViewTypes.h|MVVCVTK/SPI/App/ViewTypes.h"
-    "include/Data/TrustedImageState.h|MVVCVTK/SPI/Data/TrustedImageState.h"
+    "include/Data/DataPayloads.h|MVVCVTK/SPI/Data/DataPayloads.h"
+    "include/Host/TrustedDataPort.h|MVVCVTK/SPI/Host/TrustedDataPort.h"
     "include/Interaction/InteractionTypes.h|MVVCVTK/SPI/Interaction/InteractionTypes.h"
     "include/Host/CropHostFeature.h|MVVCVTK/API/Features/OrthogonalCrop/Host/CropHostFeature.h"
     "include/OrthogonalCropTypes.h|MVVCVTK/API/Features/OrthogonalCrop/OrthogonalCropTypes.h"
@@ -488,7 +489,7 @@ SetHeaderSurface(
 SetHeaderSurface(
     MVVCVTK_HOST_CLOSURE_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    include/Data/DataVersion.h
+    include/Data/DataGraphTypes.h
     include/Data/ImageReadTypes.h
     include/Host/Types/HostSessionTypes.h
     include/Host/Types/HostViewTypes.h
@@ -499,6 +500,7 @@ SetHeaderSurface(
     MVVCVTK_FEATURE_SPI_HEADERS
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/Host/HostFeature.h
+    include/Host/TrustedDataPort.h
     include/App/Services/FeatureViewService.h
     include/Render/Contracts/FeatureOverlay.h
     include/Render/Contracts/OverlayService.h
@@ -510,9 +512,9 @@ SetHeaderSurface(
     "${CMAKE_CURRENT_SOURCE_DIR}"
     include/App/FeatureTypes.h
     include/App/ViewTypes.h
-    include/Data/DataVersion.h
+    include/Data/DataGraphTypes.h
+    include/Data/DataPayloads.h
     include/Data/ImageReadTypes.h
-    include/Data/TrustedImageState.h
     include/Host/Types/HostViewTypes.h
     include/Interaction/InteractionTypes.h
 )
@@ -669,10 +671,57 @@ ExportHeaders(
 )
 add_subdirectory(features/Support)
 
+# DataCore 统一数据身份、修订、DAG、Binding 与事务；它是仓内实现依赖，
+# 不安装、不导出，也不改变三个 SDK 产品 component 与库闭包。
+add_library(mvvcvtk_data_core OBJECT
+    include/Data/DataGraphTypes.h
+    include/Data/DataPayloads.h
+    include/Data/DataGraphStore.h
+    src/Data/DataGraphStore.cpp
+)
+add_library(MVVCVTKInternal::DataCore ALIAS mvvcvtk_data_core)
+target_include_directories(
+    mvvcvtk_data_core
+    PUBLIC "$<BUILD_INTERFACE:${MVVCVTK_HOST_INCLUDE_DIR}>"
+)
+SetTargetDefaults(mvvcvtk_data_core)
+set_target_properties(
+    mvvcvtk_data_core
+    PROPERTIES
+        PROJECT_LABEL MVVCVTKDataCore
+        FOLDER "MVVCVTK/Host/Internal"
+)
+
+add_library(mvvcvtk_vtk_data_bridge OBJECT
+    include/Data/VtkDataBridge.h
+    include/Host/TrustedDataPort.h
+    src/Data/VtkDataBridge.cpp
+)
+add_library(
+    MVVCVTKInternal::VtkDataBridge ALIAS mvvcvtk_vtk_data_bridge
+)
+target_include_directories(
+    mvvcvtk_vtk_data_bridge
+    PUBLIC "$<BUILD_INTERFACE:${MVVCVTK_HOST_INCLUDE_DIR}>"
+)
+SetTargetDefaults(mvvcvtk_vtk_data_bridge)
+target_link_libraries(
+    mvvcvtk_vtk_data_bridge
+    PRIVATE ${MVVCVTK_VTK_TARGETS}
+)
+set_target_properties(
+    mvvcvtk_vtk_data_bridge
+    PROPERTIES
+        PROJECT_LABEL MVVCVTKVtkDataBridge
+        FOLDER "MVVCVTK/Host/Internal"
+)
+
 add_library(mvvcvtk_host STATIC)
 target_sources(
     mvvcvtk_host
     PRIVATE
+        $<TARGET_OBJECTS:mvvcvtk_data_core>
+        $<TARGET_OBJECTS:mvvcvtk_vtk_data_bridge>
         ${MVVCVTK_HOST_SOURCES}
         ${MVVCVTK_HOST_PUBLIC_HEADERS}
         ${MVVCVTK_HOST_CLOSURE_HEADERS}

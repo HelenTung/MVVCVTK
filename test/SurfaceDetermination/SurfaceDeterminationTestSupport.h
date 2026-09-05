@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/TrustedImageState.h"
+#include "../TestDataPort.h"
 #include "Host/SurfaceDeterminationHostTypes.h"
 
 #include <vtkDataArray.h>
@@ -62,7 +62,7 @@ inline Point3 GetModelPoint(
     };
 }
 
-inline TrustedImageSnapshot BuildSnapshot(
+inline VtkImageGridSnapshot BuildSnapshot(
     const std::array<int, 3>& dimensions,
     const std::array<double, 3>& spacing,
     const std::array<double, 3>& origin,
@@ -70,7 +70,7 @@ inline TrustedImageSnapshot BuildSnapshot(
     const int scalarType,
     const ScalarField& getScalar,
     const ValidityField& getValidity = {},
-    const DataVersion version = 1,
+    const std::uint64_t version = 1,
     const std::array<int, 3>& extentMinimum = { 0, 0, 0 })
 {
     auto image = vtkSmartPointer<vtkImageData>::New();
@@ -116,17 +116,15 @@ inline TrustedImageSnapshot BuildSnapshot(
         }
     }
 
-    double range[2]{};
-    scalars->GetRange(range);
-    TrustedImageState state;
-    state.image = std::move(image);
-    state.validityMask = std::move(mask);
-    state.dims = dimensions;
-    state.spacing = spacing;
-    state.origin = origin;
-    state.scalarRange = { range[0], range[1] };
-    state.version = version;
-    return std::make_shared<const TrustedImageState>(std::move(state));
+    VtkDataBridge bridge;
+    const auto payload = bridge.CreateImagePayload(image, mask);
+    if (!payload) return {};
+    const auto ref = GetTestDataRef(version);
+    const auto data = std::make_shared<const DataRevision>(DataRevision{
+        ref, DataTypes::imageGrid3D, {}, payload, {} });
+    return std::make_shared<const VtkImageGridView>(VtkImageGridView{
+        {}, DataBinding{ std::string(primaryVolumeBinding), ref, 1 },
+        data, std::move(image), std::move(mask) });
 }
 
 inline double GetSmoothInside(
@@ -139,7 +137,7 @@ inline double GetSmoothInside(
         * 0.5 * (1.0 - std::tanh(signedDistance / blur));
 }
 
-inline TrustedImageSnapshot BuildPlane(
+inline VtkImageGridSnapshot BuildPlane(
     const int scalarType = VTK_FLOAT,
     const double boundary = 15.35,
     const std::array<double, 3>& spacing = { 1.0, 1.0, 1.0 },
@@ -164,7 +162,7 @@ inline TrustedImageSnapshot BuildPlane(
         validity);
 }
 
-inline TrustedImageSnapshot BuildSphere(
+inline VtkImageGridSnapshot BuildSphere(
     const int scalarType = VTK_FLOAT,
     const Point3& center = { 15.5, 15.5, 15.5 },
     const double radius = 8.0,

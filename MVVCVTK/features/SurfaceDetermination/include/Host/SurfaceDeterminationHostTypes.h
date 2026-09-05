@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/DataVersion.h"
+#include "Data/DataGraphTypes.h"
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
@@ -113,7 +113,9 @@ struct SurfaceObjectRecord final {
 };
 
 struct SurfaceGenerationSnapshot final {
-    DataVersion sourceVersion = 0;
+    DataRevisionRef dataRevision;
+    DataRevisionRef meshRevision;
+    DataRevisionRef sourceRevision;
     std::uint64_t resultRevision = 0;
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = 0;
@@ -217,7 +219,7 @@ struct SurfaceDeterminationResult final {
     std::uint64_t requestId = 0;
     SurfaceResultStatus status = SurfaceResultStatus::Failed;
     SurfaceFailureReason failureReason = SurfaceFailureReason::InternalError;
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
     std::uint64_t resultRevision = 0;
     std::uint64_t pointCount = 0;
     std::uint32_t objectCount = 0;
@@ -232,7 +234,7 @@ struct SurfaceDeterminationState final {
     SurfaceDeterminationStage stage = SurfaceDeterminationStage::Idle;
     SurfaceFailureReason failureReason = SurfaceFailureReason::None;
     std::uint64_t requestId = 0;
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
     std::uint64_t resultRevision = 0;
     double progress01 = 0.0;
     std::uint64_t pointCount = 0;

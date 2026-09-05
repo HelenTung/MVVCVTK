@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 #include "Host/SurfaceDeterminationHostTypes.h"
 
 #include <cstddef>
@@ -21,7 +21,7 @@ struct SurfaceAlgorithmResult final {
     SurfaceFailureReason failureReason =
         SurfaceFailureReason::InternalError;
     std::string message;
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
     std::uint64_t parameterFingerprint = 0;
     std::uint32_t algorithmRevision = 1;
     SurfaceDeterminationMethod method =
@@ -41,7 +41,7 @@ struct SurfaceAlgorithmResult final {
 class SurfaceDeterminationAlgorithm final {
 public:
     static SurfaceAlgorithmResult BuildSurface(
-        const TrustedImageSnapshot& source,
+        const VtkImageGridSnapshot& source,
         const SurfaceDeterminationStartParams& params,
         std::size_t maxWorkingBytes,
         const SurfaceCancelCheck& getCancelled,

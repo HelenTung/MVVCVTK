@@ -82,7 +82,7 @@ public:
     LoadCommitResult SetLoadCommit(
         LoadEventKind loadKind,
         std::uint64_t transactionRevision,
-        const TrustedImageSnapshot& pending);
+        const VtkImageGridSnapshot& pending);
     LoadCommitResult SetLoadCancelled(
         std::uint64_t transactionRevision,
         LoadCommitFailure failureReason);
@@ -164,7 +164,7 @@ private:
         LoadCommitResult SetLoadCommit(
             LoadEventKind loadKind,
             std::uint64_t transactionRevision,
-            const TrustedImageSnapshot& pending);
+            const VtkImageGridSnapshot& pending);
         LoadCommitResult SetLoadCancelled(
             std::uint64_t transactionRevision,
             LoadCommitFailure failureReason);
@@ -367,7 +367,7 @@ LoadCommitResult
 HostViewRuntimeRegistry::Impl::ViewDirectory::SetLoadCommit(
     const LoadEventKind loadKind,
     const std::uint64_t transactionRevision,
-    const TrustedImageSnapshot& pending)
+    const VtkImageGridSnapshot& pending)
 {
     Impl* owner = nullptr;
     {
@@ -591,7 +591,7 @@ HostViewRuntimeRegistry::Impl::BuildView(
     args.setLoadCommit = [directory](
         const LoadEventKind loadKind,
         const std::uint64_t transactionRevision,
-        const TrustedImageSnapshot& pending) {
+        const VtkImageGridSnapshot& pending) {
         const auto current = directory.lock();
         return current
             ? current->SetLoadCommit(
@@ -758,7 +758,8 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
     state.isInteracting = appState.isInteracting;
     state.cursorWorld = appState.cursorWorld;
     state.visibilityMask = appState.visibilityMask;
-    state.dataVersion = appState.dataVersion;
+    state.dataRevision = appState.dataRevision;
+    state.bindingRevision = appState.bindingRevision;
     state.isAxesVisible = view.context
         && view.context->GetOrientationAxesVisible();
     return state;
@@ -812,7 +813,7 @@ bool HostViewRuntimeRegistry::Impl::GetIntentStampValid(
     const HostRenderViewRuntime& view,
     const RenderInputStamp& expected) const
 {
-    if (!expected.identity && expected.version == 0) return true;
+    if (expected.dataRevision == DataRevisionRef{}) return true;
     if (!view.featureView) return false;
     const auto current = view.featureView->GetRenderInputStamp();
     return current && *current == expected;
@@ -1230,7 +1231,7 @@ bool HostViewRuntimeRegistry::Impl::StopView(
 LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
     const LoadEventKind loadKind,
     const std::uint64_t transactionRevision,
-    const TrustedImageSnapshot& pending)
+    const VtkImageGridSnapshot& pending)
 {
     if (!m_loadCommit || m_views.empty()) {
         return {};
@@ -1239,7 +1240,8 @@ LoadCommitResult HostViewRuntimeRegistry::Impl::SetLoadCommit(
     LoadCommitRequest request;
     request.loadKind = loadKind;
     request.transactionRevision = transactionRevision;
-    request.sourceVersion = pending ? pending->version : 0;
+    request.sourceRevision = pending && pending->data
+        ? pending->data->self : DataRevisionRef{};
     request.pending = pending;
     request.stages.reserve(m_views.size());
     for (const auto& view : m_views) {
@@ -1932,7 +1934,7 @@ HostFrameStageStatus HostViewRuntimeRegistry::Impl::BuildFrameStage(
         stage.renderOrder = dirtyIndices;
         stage.sceneStates.reserve(m_views.size());
 
-        std::optional<std::uint64_t> dataVersion;
+        std::optional<DataRevisionRef> dataRevision;
         for (std::size_t index = 0; index < m_views.size(); ++index) {
             auto state = BuildSceneViewState(m_views[index]);
             if (m_views[index].isAvailable
@@ -1941,14 +1943,14 @@ HostFrameStageStatus HostViewRuntimeRegistry::Impl::BuildFrameStage(
                 return HostFrameStageStatus::Failed;
             }
             if (m_views[index].isAvailable && state.presentation) {
-                const auto currentVersion =
-                    state.presentation->dataVersion;
-                if (currentVersion != 0) {
-                    if (dataVersion && *dataVersion != currentVersion) {
+                const auto currentRevision =
+                    state.presentation->dataRevision;
+                if (GetDataRevisionRefValid(currentRevision)) {
+                    if (dataRevision && *dataRevision != currentRevision) {
                         restoreDirty();
                         return HostFrameStageStatus::Failed;
                     }
-                    dataVersion = currentVersion;
+                    dataRevision = currentRevision;
                 }
             }
             state.sceneEpoch = nextEpoch;

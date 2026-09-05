@@ -1,5 +1,6 @@
 #include "Tasks/AppDataExportTaskService.h"
 #include "Tasks/AppDataLoadTaskService.h"
+#include "../TestDataPort.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "AppState.h"
 #include "AppStateEvents.h"
@@ -7,6 +8,8 @@
 #include "App/Services/AppPorts.h"
 #include "Data/DataConverters.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
+#include "Data/VtkDataBridge.h"
 #include "Data/VolumeTypes.h"
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
@@ -232,49 +235,14 @@ private:
     std::shared_ptr<QualitySwitchGate> m_gate;
 };
 
-class DataStub final : public AbstractDataManager {
-protected:
-    TrustedImageSnapshot GetImageSnapshot() const override { return imageSnapshot; }
-
+class DataStub final : public BaseDataManager {
 public:
-    vtkSmartPointer<vtkImageData> GetVtkImage() const override { return nullptr; }
-    TrustedImageState GetImageState() const override { return {}; }
-    std::optional<ImageReadState> GetImageReadState() const override
-    {
-        return std::nullopt;
-    }
-    ImageReadResult GetImageReadResult(std::size_t) const override
-    {
-        return {};
-    }
-    ImageReadResult GetImageReadResult(
-        const ImageReadRequest&,
-        const TaskStopToken&) const override
-    {
-        return {};
-    }
-    ImageReadChunkResult GetImageReadChunk(
-        const ImageReadRequest&,
-        std::size_t,
-        const TaskStopToken&) const override
-    {
-        return {};
-    }
-    bool SetCurrentData(
-        TrustedImageState,
-        const TrustedImageSnapshot&,
-        TrustedImageSnapshot& publishedSnapshot) override
-    {
-        publishedSnapshot.reset();
-        return false;
-    }
-    std::array<double, 2> GetScalarRange() const override { return { 0.0, 0.0 }; }
-    std::array<double, 3> GetSpacing() const override { return { 1.0, 1.0, 1.0 }; }
     bool SetSpacing(const std::array<double, 3>& spacing) override
     {
-        return setSpacingCall ? setSpacingCall(spacing) : true;
+        if (setSpacingCall) return setSpacingCall(spacing);
+        return GetPrimaryImage()
+            ? BaseDataManager::SetSpacing(spacing) : true;
     }
-    DataVersion GetDataVersion() const override { return 0; }
 
     bool SetDataLoaded(const std::string& path, const VolumeLayout& layout) override
     {
@@ -289,17 +257,35 @@ public:
         loadedVoxels = buffer.GetVoxels();
         loadedDims = buffer.GetLayout().GetDimensions();
         if (isThrowNeeded) throw std::runtime_error("reload failure");
-        return isLoadSuccess;
+        if (!isLoadSuccess) return false;
+        const auto& layout = buffer.GetLayout();
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(layout.GetDimensions().data());
+        image->SetSpacing(
+            layout.GetSpacing()[0],
+            layout.GetSpacing()[1],
+            layout.GetSpacing()[2]);
+        image->SetOrigin(
+            layout.GetOrigin()[0],
+            layout.GetOrigin()[1],
+            layout.GetOrigin()[2]);
+        image->AllocateScalars(VTK_FLOAT, 1);
+        auto* values = static_cast<float*>(image->GetScalarPointer());
+        if (!values) return false;
+        std::copy(loadedVoxels.begin(), loadedVoxels.end(), values);
+        return SetLoadImage(std::move(image));
     }
 
-    bool SetCurrentFromPending(bool& hasPending) override
+    bool SetFromBuffer(
+        const VolumeBuffer& buffer,
+        const TaskStopToken& stopToken) override
     {
-        hasPending = false;
-        return true;
+        return !stopToken.GetIsStopped()
+            && SetFromBuffer(buffer)
+            && !stopToken.GetIsStopped();
     }
-    bool ClearPending() override { return true; }
     bool ExportData(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         const std::string& outputDir,
         const DataExportParams& params) override
     {
@@ -309,7 +295,7 @@ public:
         return true;
     }
     bool ExportData(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         const std::string& outputDir,
         const DataExportParams& params,
         const TaskStopToken& stopToken) override
@@ -324,8 +310,7 @@ public:
     bool ExportSlices(const std::string&, Orientation, const WindowLevelParams&,
         const std::array<double, 16>&) override { return false; }
 
-    TrustedImageSnapshot imageSnapshot;
-    TrustedImageSnapshot exportedSnapshot;
+    VtkImageGridSnapshot exportedSnapshot;
     std::string exportedDir;
     DataExportParams exportedParams;
     std::string loadedPath;
@@ -336,6 +321,16 @@ public:
     std::function<bool(const TaskStopToken&)> exportCall;
     bool isLoadSuccess = true;
     bool isThrowNeeded = false;
+
+    bool SetPrimaryForTest(
+        vtkSmartPointer<vtkImageData> image,
+        vtkSmartPointer<vtkImageData> mask = {})
+    {
+        if (!SetLoadImage(std::move(image), std::move(mask))) return false;
+        const auto stage = GetLoadStage();
+        VtkImageGridSnapshot published;
+        return stage && SetLoadCommit(stage, published) && published;
+    }
 };
 
 class DataManagerProbe final : public BaseDataManager {
@@ -348,26 +343,51 @@ public:
     }
 
     bool SetInitial(
-        vtkSmartPointer<vtkImageData> image)
+        vtkSmartPointer<vtkImageData> image,
+        vtkSmartPointer<vtkImageData> mask = {})
     {
-        return SetOwnedImage(std::move(image));
+        if (!mask) return SetOwnedImage(std::move(image));
+        if (!SetLoadImage(std::move(image), std::move(mask))) return false;
+        const auto stage = GetLoadStage();
+        VtkImageGridSnapshot published;
+        return stage && SetLoadCommit(stage, published) && published;
     }
 
     bool SetCandidate(
-        TrustedImageState state,
-        const TrustedImageSnapshot& expectedSnapshot,
-        TrustedImageSnapshot& publishedSnapshot)
+        vtkImageData* image,
+        vtkImageData* mask,
+        const VtkImageGridSnapshot& expected,
+        VtkImageGridSnapshot& published)
     {
-        return SetCurrentData(
-            std::move(state),
-            expectedSnapshot,
-            publishedSnapshot);
+        published.reset();
+        auto payload = m_bridge.CreateImagePayload(image, mask);
+        if (!payload || !expected || !expected->binding) return false;
+        const auto entity = CreateDataEntityId();
+        const DataRevisionRef ref{ entity, 1 };
+        DataTransaction transaction;
+        transaction.outputs.push_back(DataRevisionDraft{
+            entity, 0, DataTypes::imageGrid3D, {}, std::move(payload), {} });
+        transaction.bindings.push_back(DataBindingUpdate{
+            std::string(primaryVolumeBinding),
+            expected->binding->revision,
+            true,
+            expected->binding->target,
+            ref });
+        if (SetDataCommit(std::move(transaction)).status
+            != DataCommitStatus::Succeeded) {
+            return false;
+        }
+        published = GetPrimaryImage();
+        return published != nullptr;
     }
 
-    TrustedImageSnapshot GetSnapshot() const
+    VtkImageGridSnapshot GetPrimary() const
     {
-        return GetImageSnapshot();
+        return GetPrimaryImage();
     }
+
+private:
+    VtkDataBridge m_bridge;
 };
 
 void StartVolumeTypes(int& failureCount)
@@ -453,11 +473,8 @@ void StartExportSnapshot(int& failureCount)
 {
     auto dataManager =
         std::make_shared<DataStub>();
-    auto firstState =
-        std::make_shared<TrustedImageState>();
-    firstState->image = BuildExportImage();
-    firstState->version = 1;
-    dataManager->imageSnapshot = firstState;
+    (void)dataManager->SetPrimaryForTest(BuildExportImage());
+    const auto firstState = dataManager->GetPrimaryImage();
 
     auto broadcaster =
         std::make_shared<SharedStateBroadcaster>();
@@ -490,11 +507,7 @@ void StartExportSnapshot(int& failureCount)
     auto task = service.BuildDataTask(
         "exports", ".ply");
 
-    auto secondState =
-        std::make_shared<TrustedImageState>();
-    secondState->image = BuildExportImage();
-    secondState->version = 2;
-    dataManager->imageSnapshot = secondState;
+    (void)dataManager->SetPrimaryForTest(BuildExportImage());
     viewState->SetIsoValue(4.5);
     state->SetModelMatrix({
         1.0, 0.0, 0.0, -10.0,
@@ -522,7 +535,9 @@ void StartExportSnapshot(int& failureCount)
     (*task)(TaskStopToken{});
     SetExpect(result.get()
             && dataManager->exportedSnapshot
-                == firstState
+            && firstState
+            && dataManager->exportedSnapshot->data->self
+                == firstState->data->self
             && dataManager->exportedDir
                 == "exports"
             && dataManager->exportedParams.extension
@@ -553,10 +568,7 @@ void StartBoundedTasks(int& failureCount)
         failureCount);
 
     auto dataManager = std::make_shared<DataStub>();
-    auto imageState = std::make_shared<TrustedImageState>();
-    imageState->image = BuildExportImage();
-    imageState->version = 1;
-    dataManager->imageSnapshot = imageState;
+    (void)dataManager->SetPrimaryForTest(BuildExportImage());
 
     std::mutex taskMutex;
     std::condition_variable taskChanged;
@@ -627,10 +639,7 @@ void StartBoundedTasks(int& failureCount)
         failureCount);
 
     auto blockedData = std::make_shared<DataStub>();
-    auto blockedState = std::make_shared<TrustedImageState>();
-    blockedState->image = BuildExportImage();
-    blockedState->version = 1;
-    blockedData->imageSnapshot = blockedState;
+    (void)blockedData->SetPrimaryForTest(BuildExportImage());
     std::mutex blockMutex;
     std::condition_variable blockChanged;
     bool isBlockStarted = false;
@@ -696,7 +705,7 @@ void StartExportFiles(int& failureCount)
         "data export needs an image snapshot",
         failureCount);
     const auto snapshot =
-        dataManager.GetSnapshot();
+        dataManager.GetPrimary();
     const auto uniqueId =
         std::chrono::steady_clock::now()
             .time_since_epoch().count();
@@ -1089,8 +1098,6 @@ void StartExportFiles(int& failureCount)
         "data export should accept small affine scales and reject invalid transforms",
         failureCount);
 
-    auto maskedState =
-        std::make_shared<TrustedImageState>(*snapshot);
     auto emptyMask =
         vtkSmartPointer<vtkImageData>::New();
     emptyMask->CopyStructure(snapshot->image);
@@ -1101,7 +1108,9 @@ void StartExportFiles(int& failureCount)
             emptyMask->GetScalarPointer()),
         emptyMask->GetNumberOfPoints(),
         static_cast<unsigned char>(0));
-    maskedState->validityMask = emptyMask;
+    DataManagerProbe maskedData;
+    (void)maskedData.SetInitial(snapshot->image, emptyMask);
+    const auto maskedState = maskedData.GetPrimary();
     params.extension = ".ply";
     params.modelToWorld = modelToWorld;
     SetExpect(
@@ -1111,8 +1120,6 @@ void StartExportFiles(int& failureCount)
         "mesh export should consume the frozen validity mask",
         failureCount);
 
-    auto partialState =
-        std::make_shared<TrustedImageState>(*snapshot);
     auto partialMask =
         vtkSmartPointer<vtkImageData>::New();
     partialMask->CopyStructure(snapshot->image);
@@ -1133,7 +1140,9 @@ void StartExportFiles(int& failureCount)
             }
         }
     }
-    partialState->validityMask = partialMask;
+    DataManagerProbe partialData;
+    (void)partialData.SetInitial(snapshot->image, partialMask);
+    const auto partialState = partialData.GetPrimary();
     const auto partialPlyDir = outputDir / "partial-ply";
     const auto partialPlyPath =
         partialPlyDir / "4x4x4_transform.ply";
@@ -1228,13 +1237,13 @@ void StartExportFiles(int& failureCount)
         failureCount);
     params.extension = ".ply";
 
-    auto mismatchState =
-        std::make_shared<TrustedImageState>(*snapshot);
     auto mismatchMask =
         vtkSmartPointer<vtkImageData>::New();
     mismatchMask->DeepCopy(partialMask);
     mismatchMask->SetSpacing(2.0, 1.0, 1.0);
-    mismatchState->validityMask = mismatchMask;
+    DataManagerProbe mismatchData;
+    (void)mismatchData.SetInitial(snapshot->image, mismatchMask);
+    const auto mismatchState = mismatchData.GetPrimary();
     SetExpect(
         !dataManager.ExportData(
             mismatchState,
@@ -1299,10 +1308,7 @@ void StartTransformedMaskedRaw(int& failureCount)
 
     DataManagerProbe dataManager;
     const bool isInitialSet = dataManager.SetInitial(image);
-    const auto sourceSnapshot = dataManager.GetSnapshot();
-    auto maskedState = sourceSnapshot
-        ? std::make_shared<TrustedImageState>(*sourceSnapshot)
-        : nullptr;
+    const auto sourceSnapshot = dataManager.GetPrimary();
     auto mask = vtkSmartPointer<vtkImageData>::New();
     mask->CopyStructure(image);
     mask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -1320,9 +1326,9 @@ void StartTransformedMaskedRaw(int& failureCount)
             }
         }
     }
-    if (maskedState) {
-        maskedState->validityMask = mask;
-    }
+    DataManagerProbe maskedData;
+    const bool isMaskedSet = maskedData.SetInitial(image, mask);
+    const auto maskedState = maskedData.GetPrimary();
 
     constexpr double radians = 0.37;
     const double cosine = std::cos(radians);
@@ -1501,7 +1507,7 @@ void StartMaskSnapshot(int& failureCount)
         "initial image snapshot should publish",
         failureCount);
 
-    const auto expected = dataManager.GetSnapshot();
+    const auto expected = dataManager.GetPrimary();
     auto mask = vtkSmartPointer<vtkImageData>::New();
     mask->CopyStructure(image);
     mask->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
@@ -1511,31 +1517,34 @@ void StartMaskSnapshot(int& failureCount)
     maskValues[0] = 255;
     maskValues[1] = 0;
 
-    TrustedImageState candidate = *expected;
-    candidate.validityMask = mask;
-    TrustedImageSnapshot publishedSnapshot;
+    VtkImageGridSnapshot publishedSnapshot;
     SetExpect(dataManager.SetCandidate(
-            candidate,
+            image,
+            mask,
             expected,
             publishedSnapshot),
         "image and validity mask should publish as one CAS batch",
         failureCount);
-    const auto current = dataManager.GetSnapshot();
-    SetExpect(current && publishedSnapshot == current
-            && current->version == expected->version + 1
+    const auto current = dataManager.GetPrimary();
+    SetExpect(current && publishedSnapshot
+            && publishedSnapshot->data->self == current->data->self
+            && current->binding->revision
+                == expected->binding->revision + 1
+            && current->validityMask
             && current->validityMask.GetPointer()
-                == mask.GetPointer(),
-        "published mask should share the current TrustedImageState version",
+                != mask.GetPointer(),
+        "published mask should share one immutable image revision",
         failureCount);
-    const auto currentVersion =
-        current ? current->version : 0;
+    const auto currentBindingRevision = current && current->binding
+        ? current->binding->revision : 0;
     SetExpect(!dataManager.SetCandidate(
-            candidate,
+            image,
+            mask,
             expected,
             publishedSnapshot)
             && !publishedSnapshot
-            && dataManager.GetDataVersion()
-                == currentVersion,
+            && dataManager.GetPrimaryBindingRevision()
+                == currentBindingRevision,
         "a stale expected snapshot must not replace current image or mask",
         failureCount);
 
@@ -1715,13 +1724,8 @@ void StartCandidateParams(int& failureCount)
     image->GetPointData()->GetScalars()->Modified();
     image->Modified();
 
-    auto imageState = std::make_shared<TrustedImageState>();
-    imageState->image = image;
-    imageState->dims = { 2, 2, 2 };
-    imageState->spacing = { 2.0, 3.0, 4.0 };
-    imageState->scalarRange = { -3.0, 5.0 };
-    imageState->version = 7;
-    const TrustedImageSnapshot snapshot = imageState;
+    (void)dataManager->SetPrimaryForTest(image);
+    const auto snapshot = dataManager->GetPrimaryImage();
     constexpr std::uint64_t firstStageRevision = 1;
     const bool isBuilt = ports.dataStage
         && ports.dataStage->StartDataStage(
@@ -1804,13 +1808,8 @@ void StartCandidateParams(int& failureCount)
         values.size(), 12.0f);
     image->GetPointData()->GetScalars()->Modified();
     image->Modified();
-    imageState = std::make_shared<TrustedImageState>();
-    imageState->image = image;
-    imageState->dims = { 2, 2, 2 };
-    imageState->spacing = { 2.0, 3.0, 4.0 };
-    imageState->scalarRange = { 12.0, 12.0 };
-    imageState->version = 8;
-    const TrustedImageSnapshot constantSnapshot = imageState;
+    (void)dataManager->SetPrimaryForTest(image);
+    const auto constantSnapshot = dataManager->GetPrimaryImage();
     const int oldSetCount = capture->setCount;
     const bool isConstantBuilt = ports.dataStage
         && ports.dataStage->StartDataStage(constantSnapshot, 3)
@@ -2314,13 +2313,11 @@ void StartInputSwap(int& failureCount)
         mask->GetNumberOfPoints(),
         static_cast<unsigned char>(255));
     const auto expected =
-        dataManager->GetSnapshot();
-    TrustedImageState candidate = *expected;
-    candidate.image = nextImage;
-    candidate.validityMask = mask;
-    TrustedImageSnapshot published;
+        dataManager->GetPrimary();
+    VtkImageGridSnapshot published;
     SetExpect(dataManager->SetCandidate(
-            std::move(candidate),
+            nextImage,
+            mask,
             expected,
             published),
         "next image and mask should publish",
@@ -2848,23 +2845,27 @@ void StartRealCamera(int& failureCount)
         return;
     }
 
-    bool hasPending = false;
-    const bool isCommitted = dataManager->SetCurrentFromPending(
-        hasPending);
-    const TrustedImageState imageState = dataManager->GetImageState();
+    const auto loadStage = dataManager->GetLoadStage();
+    VtkImageGridSnapshot imageState;
+    const bool isCommitted = loadStage
+        && dataManager->SetLoadCommit(loadStage, imageState);
+    const auto* imagePayload = imageState && imageState->data
+        ? dynamic_cast<const ImageGrid3DPayload*>(
+            imageState->data->payload.get())
+        : nullptr;
     const bool isGeometryValid = isCommitted
-        && hasPending
-        && imageState.image
-        && imageState.dims == std::array<int, 3>{ 250, 250, 250 }
-        && std::abs(imageState.spacing[0] - 0.085) < 1e-6
-        && std::abs(imageState.spacing[1] - 0.085) < 1e-6
-        && std::abs(imageState.spacing[2] - 0.085) < 1e-6
-        && std::abs(imageState.origin[0] + 21.165) < 1e-5
-        && std::abs(imageState.origin[1] + 21.165) < 1e-5
-        && std::abs(imageState.origin[2]) < 1e-8
-        && std::abs(imageState.scalarRange[0]
+        && imageState && imageState->image && imagePayload
+        && imagePayload->GetGeometry().dimensions
+            == std::array<int, 3>{ 250, 250, 250 }
+        && std::abs(imagePayload->GetGeometry().spacing[0] - 0.085) < 1e-6
+        && std::abs(imagePayload->GetGeometry().spacing[1] - 0.085) < 1e-6
+        && std::abs(imagePayload->GetGeometry().spacing[2] - 0.085) < 1e-6
+        && std::abs(imagePayload->GetGeometry().origin[0] + 21.165) < 1e-5
+        && std::abs(imagePayload->GetGeometry().origin[1] + 21.165) < 1e-5
+        && std::abs(imagePayload->GetGeometry().origin[2]) < 1e-8
+        && std::abs(imagePayload->GetScalarRange()[0]
             - (-0.1316370964050293)) < 1e-7
-        && std::abs(imageState.scalarRange[1]
+        && std::abs(imagePayload->GetScalarRange()[1]
             - 0.065924093127250671) < 1e-7;
     SetExpect(isGeometryValid,
         "locked RAW should commit the expected RAS geometry and scalar range",
@@ -2970,7 +2971,7 @@ void StartRealCamera(int& failureCount)
         failureCount);
     renderWindow->Render();
     double modelCenter[3] = { 0.0, 0.0, 0.0 };
-    imageState.image->GetCenter(modelCenter);
+    imageState->image->GetCenter(modelCenter);
     const double* focalPoint = camera->GetFocalPoint();
     const double* position = camera->GetPosition();
     SetExpect(std::abs(focalPoint[0]
@@ -3161,6 +3162,8 @@ void StartVisualConfigGetters(int& failureCount)
 void StartViewEventCommit(int& failureCount)
 {
     auto dataManager = std::make_shared<DataStub>();
+    const bool hasPrimary = dataManager->SetPrimaryForTest(BuildExportImage());
+    const auto primaryBeforeSpacing = dataManager->GetPrimaryImage();
     auto broadcaster = std::make_shared<SharedStateBroadcaster>();
     auto state = std::make_shared<SharedInteractionState>(broadcaster);
     AppServiceArgs args;
@@ -3229,13 +3232,25 @@ void StartViewEventCommit(int& failureCount)
     const bool isSessionSet =
         ports.app.session->SendSessionUpdate(initialSession);
     const auto sessionState = ports.app.view->GetViewState();
-    SetExpect(isSessionSet
+    const auto primaryAfterSpacing = dataManager->GetPrimaryImage();
+    SetExpect(hasPrimary && primaryBeforeSpacing && primaryAfterSpacing
+            && isSessionSet
             && observerCount == 1
             && (observedFlags & UpdateFlags::Spacing)
                 != UpdateFlags::None
+            && (observedFlags & UpdateFlags::DataReady)
+                != UpdateFlags::None
+            && primaryAfterSpacing->data->self
+                != primaryBeforeSpacing->data->self
+            && primaryAfterSpacing->binding->revision
+                > primaryBeforeSpacing->binding->revision
+            && state->GetDataRevision()
+                == primaryAfterSpacing->data->self
+            && state->GetDataBindingRevision()
+                == primaryAfterSpacing->binding->revision
             && sessionState.spacing
                 == std::array<double, 3>{ 3.0, 3.0, 3.0 },
-        "Session spacing must publish through the dedicated port.",
+        "Session spacing must publish its DataGraph identity through the dedicated port.",
         failureCount);
 
     observerCount = 0;

@@ -5,13 +5,11 @@
 #include "Render/PartRenderStateTable.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Model/PartCatalog.h"
+#include "Data/DataPayloads.h"
 #include "Services/PartSegmentationService.h"
 
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
-#include <vtkPointData.h>
-#include <vtkSmartPointer.h>
-#include <vtkUnsignedIntArray.h>
 
 #include <algorithm>
 #include <atomic>
@@ -24,14 +22,42 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <thread>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace {
 
 constexpr std::string_view featureId = "PartSegmentation";
+constexpr std::string_view partResultBinding =
+    "analysis.parts.active";
+const DataTypeId partTableType{
+    "org.mvvcvtk.part-segmentation.part-table", 1 };
+const DataTypeId partResultSetType{
+    "org.mvvcvtk.part-segmentation.result-set", 1 };
+const DataFacetId partRecordsFacet{ "tabular-part-records" };
+const DataTypeId partCatalogType{
+    "org.mvvcvtk.part-segmentation.catalog", 1 };
+const DataFacetId partCatalogFacet{ "stable-part-catalog" };
+
+// 目录仅由图中的不可变修订持有；Feature 缓存的是该载荷的只读投影。
+class PartCatalogPayload final : public IDataPayload {
+public:
+    explicit PartCatalogPayload(const PartCatalog& catalog)
+        : m_catalog(std::make_shared<const PartCatalog>(catalog)) {}
+    DataTypeId GetDataType() const override { return partCatalogType; }
+    std::shared_ptr<const IDataPayload> CreateSnapshot() const override
+    {
+        return std::make_shared<const PartCatalogPayload>(*this);
+    }
+    const std::shared_ptr<const PartCatalog>& GetCatalog() const noexcept
+    {
+        return m_catalog;
+    }
+private:
+    std::shared_ptr<const PartCatalog> m_catalog;
+};
 
 bool GetTargetsUsed(const HostViewTargets& targets)
 {
@@ -111,71 +137,78 @@ PartOverlayCandidate CreateOverlay(
     return {};
 }
 
-struct LabelViewCandidate final {
-    // image 借用 labels 的稳定地址，成员逆序析构必须先释放 image。
-    std::shared_ptr<std::vector<PartLabelId>> labels;
-    vtkSmartPointer<vtkImageData> image;
-};
-
-LabelViewCandidate BuildLabelView(
-    const PartLabelCandidate& candidate)
+GridGeometry3D GetLabelGeometry(const PartLabelCandidate& candidate)
 {
-    LabelViewCandidate view;
-    std::size_t voxelCount = 1;
-    for (const int dimension : candidate.dimensions) {
-        if (dimension <= 0
-            || static_cast<std::size_t>(dimension)
-                > std::numeric_limits<std::size_t>::max() / voxelCount) {
-            return view;
-        }
-        voxelCount *= static_cast<std::size_t>(dimension);
-    }
-    if (!candidate.labels
-        || voxelCount != candidate.labels->size()
-        || voxelCount > static_cast<std::size_t>(
-            std::numeric_limits<vtkIdType>::max())) {
-        return view;
-    }
-    static_assert(
-        std::is_same_v<std::uint32_t, unsigned int>,
-        "The Windows x64 label view requires uint32_t == unsigned int.");
+    GridGeometry3D geometry;
+    geometry.extent = candidate.extent;
+    geometry.dimensions = candidate.dimensions;
+    geometry.spacing = candidate.spacing;
+    geometry.origin = candidate.origin;
+    geometry.direction = candidate.direction;
+    return geometry;
+}
 
-    auto image = vtkSmartPointer<vtkImageData>::New();
-    image->SetExtent(
-        candidate.extent[0], candidate.extent[1],
-        candidate.extent[2], candidate.extent[3],
-        candidate.extent[4], candidate.extent[5]);
-    image->SetSpacing(candidate.spacing.data());
-    image->SetOrigin(candidate.origin.data());
-    auto direction = vtkSmartPointer<vtkMatrix3x3>::New();
-    direction->DeepCopy(candidate.direction.data());
-    image->SetDirectionMatrix(direction);
-    if (static_cast<std::size_t>(image->GetNumberOfPoints())
-        != voxelCount) {
-        return view;
+std::shared_ptr<const RecordTablePayload> CreatePartTable(
+    const PartCatalog& catalog)
+{
+    std::vector<std::uint64_t> ids;
+    std::vector<std::uint64_t> voxelCounts;
+    std::vector<double> volumes;
+    std::vector<std::array<std::int64_t, 6>> extents;
+    std::vector<std::array<double, 6>> bounds;
+    std::vector<std::array<double, 3>> centroids;
+    std::vector<double> confidence;
+    std::vector<std::uint8_t> reviewed;
+    std::vector<std::uint8_t> edited;
+    ids.reserve((catalog.partsByLabel.size() - 1U));
+    voxelCounts.reserve((catalog.partsByLabel.size() - 1U));
+    volumes.reserve((catalog.partsByLabel.size() - 1U));
+    extents.reserve((catalog.partsByLabel.size() - 1U));
+    bounds.reserve((catalog.partsByLabel.size() - 1U));
+    centroids.reserve((catalog.partsByLabel.size() - 1U));
+    confidence.reserve((catalog.partsByLabel.size() - 1U));
+    reviewed.reserve((catalog.partsByLabel.size() - 1U));
+    edited.reserve((catalog.partsByLabel.size() - 1U));
+    for (std::size_t index = 1; index < catalog.partsByLabel.size(); ++index) {
+        const auto& entry = catalog.partsByLabel[index];
+        const auto& part = entry.metrics;
+        ids.push_back(entry.labelId);
+        voxelCounts.push_back(part.voxelCount);
+        volumes.push_back(part.physicalVolumeMM3);
+        std::array<std::int64_t, 6> extent{};
+        std::transform(
+            part.voxelExtent.begin(), part.voxelExtent.end(),
+            extent.begin(),
+            [](const int value) { return static_cast<std::int64_t>(value); });
+        extents.push_back(extent);
+        bounds.push_back(part.inputPhysicalBounds);
+        centroids.push_back(part.centroidInputPhysical);
+        confidence.push_back(part.confidence.value_or(
+            std::numeric_limits<double>::quiet_NaN()));
+        reviewed.push_back(entry.userState.isReviewed ? 1U : 0U);
+        edited.push_back(false ? 1U : 0U);
     }
-
-    auto scalars = vtkSmartPointer<vtkUnsignedIntArray>::New();
-    scalars->SetNumberOfComponents(1);
-    // save=1：VTK 不释放用户数组，labels owner 必须长于 image/overlay。
-    scalars->SetArray(
-        candidate.labels->data(),
-        static_cast<vtkIdType>(voxelCount),
-        1);
-    image->GetPointData()->SetScalars(scalars);
-    if (image->GetScalarPointer() != candidate.labels->data()) return view;
-
-    view.labels = candidate.labels;
-    view.image = std::move(image);
-    return view;
+    auto table = std::make_shared<const RecordTablePayload>(
+        partTableType,
+        "part-segmentation.parts",
+        std::vector<RecordColumn>{
+            { "part-id", std::move(ids) },
+            { "voxel-count", std::move(voxelCounts) },
+            { "physical-volume-mm3", std::move(volumes) },
+            { "voxel-extent", std::move(extents) },
+            { "world-bounds", std::move(bounds) },
+            { "centroid-world", std::move(centroids) },
+            { "confidence", std::move(confidence) },
+            { "is-reviewed", std::move(reviewed) },
+            { "is-edited", std::move(edited) } });
+    return table->GetValid() ? table : nullptr;
 }
 
 PartSegmentationResult BuildResult(
+    const PartSegmentationState& state,
     const std::uint64_t requestId,
     const PartResultStatus status,
     const PartFailureReason failureReason,
-    const DataVersion sourceVersion,
-    const std::uint64_t resultRevision,
     const std::size_t partCount,
     std::string message)
 {
@@ -183,8 +216,13 @@ PartSegmentationResult BuildResult(
     result.requestId = requestId;
     result.status = status;
     result.failureReason = failureReason;
-    result.sourceVersion = sourceVersion;
-    result.resultRevision = resultRevision;
+    result.resultRevision = state.resultRevision;
+    result.catalogRevision = state.catalogRevision;
+    result.commitId = state.commitId;
+    result.sourceRevision = state.sourceRevision;
+    result.labelMap = state.labelMap;
+    result.partTable = state.partTable;
+    result.resultSet = state.resultSet;
     result.partCount = partCount;
     result.message = std::move(message);
     return result;
@@ -225,15 +263,21 @@ private:
     std::uint64_t GetNextRequestId() noexcept;
     std::vector<HostFeatureView> GetTargetViews(
         const HostViewTargets& targets) const;
-    bool GetSourceSame(const TrustedImageSnapshot& source) const;
-    bool GetHistorySourceSame(const TrustedImageSnapshot& source) const;
+    bool GetSourceSame(const VtkImageGridSnapshot& source) const;
+    bool GetHistorySourceSame(const VtkImageGridSnapshot& source) const;
+    std::optional<DataBinding> GetResultBinding(const DataGraphSnapshot& graph) const;
+    bool SetDataTypes();
+    bool SetCatalogCommit(const PartCatalog& catalog,
+        const VtkImageGridSnapshot& source, const DataBinding& expected,
+        const std::shared_ptr<const LabelMap3DPayload>& labels,
+        PartSegmentationState& state);
     void SetState(PartSegmentationState state);
     void SetPublishedState(
         PartSegmentationState state,
         std::shared_ptr<const PartSetSnapshot> snapshot);
     void SetRequestRunning(
         std::uint64_t requestId,
-        DataVersion sourceVersion);
+        const DataRevisionRef& source);
     void SetRequestProgress(double progress);
     void QueueComplete(
         PartSegmentationCallback callback,
@@ -245,7 +289,7 @@ private:
     bool SendSceneDelta(
         std::uint64_t requestId,
         FeatureScenePriority priority,
-        const TrustedImageSnapshot& source,
+        const VtkImageGridSnapshot& source,
         const std::vector<HostFeatureView>& views) const;
     void CancelQueuedCompletes() noexcept;
     bool AttachDisplay(
@@ -269,15 +313,17 @@ private:
     PartSegmentationState m_stateBeforeRequest;
     std::shared_ptr<const PartSetSnapshot> m_publicSnapshot;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     std::unique_ptr<PartSegmentationService> m_service;
-    TrustedImageSnapshot m_requestSource;
-    TrustedImageSnapshot m_activeSource;
+    VtkImageGridSnapshot m_requestSource;
+    DataBinding m_requestResultBinding;
+    VtkLabelMapSnapshot m_activeLabels;
+    VtkImageGridSnapshot m_activeSource;
     // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
-    std::shared_ptr<std::vector<PartLabelId>> m_labelValues;
+    std::shared_ptr<const std::vector<PartLabelId>> m_labelValues;
     vtkSmartPointer<vtkImageData> m_labelImage;
-    std::shared_ptr<const PartCatalog> m_activeCatalog;
+    std::shared_ptr<const PartCatalog> m_catalogView;
     std::shared_ptr<const PartSurfaceProduct> m_surfaceProduct;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
@@ -292,6 +338,7 @@ private:
     bool m_isAttached = false;
     bool m_isSourceChanged = false;
     bool m_isStopRequested = false;
+    bool m_isActiveViewClearPending = false;
 };
 
 bool PartSegmentationHostFeature::Impl::AttachHost(
@@ -303,16 +350,22 @@ bool PartSegmentationHostFeature::Impl::AttachHost(
         || m_config.defaultStart.minPartVoxels == 0) {
         return false;
     }
+    m_data = context.data;
+    if (!SetDataTypes()) {
+        m_data.reset();
+        return false;
+    }
     try {
         m_service = std::make_unique<PartSegmentationService>();
     }
     catch (...) {
+        m_data.reset();
         return false;
     }
     m_views = context.views;
-    m_data = context.data;
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
+    m_isActiveViewClearPending = false;
     m_isAttached = true;
     return true;
 }
@@ -321,7 +374,6 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
 {
     if (!m_isAttached) return true;
     if (!GetIsOwnerThread() || !m_service) return false;
-
     m_isStopRequested = m_activeRequestId != 0;
     {
         const std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -330,23 +382,20 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
     if (!m_service->Stop(deadline)) return false;
-
     if (m_startCallback) {
-        auto callback = std::move(m_startCallback);
         const auto state = GetState();
         QueueComplete(
-            std::move(callback),
+            std::move(m_startCallback),
             BuildResult(
+                state,
                 m_activeRequestId,
                 PartResultStatus::Cancelled,
                 PartFailureReason::Cancelled,
-                m_requestSource ? m_requestSource->version : 0,
-                state.resultRevision,
                 state.partCount,
                 "Part request was cancelled by detach."));
     }
     CancelQueuedCompletes();
-    if (!RemoveDisplay()) return false;
+    if (!ClearResult()) return false;
 
     m_service.reset();
     m_requestSource.reset();
@@ -354,7 +403,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
-    m_activeCatalog.reset();
+    m_catalogView.reset();
     m_requestViews.clear();
     m_activeViews.clear();
     m_startCallback = nullptr;
@@ -377,23 +426,28 @@ bool PartSegmentationHostFeature::Impl::OnHostTick()
     if (!m_isAttached || !GetIsOwnerThread() || !m_service || !m_data) {
         return false;
     }
-
-    if (m_activeSource && !GetSourceSame(m_activeSource)) {
-        SetSourceStale();
+    const auto state = GetState();
+    if (GetDataRevisionRefValid(state.resultSet)) {
+        const auto graph = m_data->GetDataGraph();
+        if (m_data->GetDataRelation(
+                graph,
+                state.resultSet,
+                "source-volume",
+                primaryVolumeBinding)
+            == DataRelationStatus::OutOfDateRelativeToCurrentBinding) {
+            SetSourceStale();
+        }
     }
     if (m_requestSource && !GetSourceSame(m_requestSource)) {
         m_isSourceChanged = true;
         m_service->StopRequest();
-        SetSourceStale();
     }
-
     if (m_activeRequestId != 0) {
         const auto progress = m_service->GetProgress(m_activeRequestId);
         if (progress) SetRequestProgress(*progress);
     }
     auto complete = m_service->GetComplete();
-    if (!complete) return true;
-    if (complete->requestId != m_activeRequestId) return true;
+    if (!complete || complete->requestId != m_activeRequestId) return true;
     SetRequestComplete(std::move(*complete));
     return true;
 }
@@ -403,11 +457,10 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
     PartSegmentationCallback onComplete)
 {
     PartSegmentationAdmission admission;
-    if (!m_isAttached || !GetIsOwnerThread() || !m_service) {
+    if (!m_isAttached || !GetIsOwnerThread() || !m_service || !m_data) {
         admission.status = PartAdmissionStatus::Unavailable;
         return admission;
     }
-
     if (request.action == PartSegmentationAction::Start) {
         if (m_service->GetIsBusy() || m_activeRequestId != 0) {
             admission.status = PartAdmissionStatus::Busy;
@@ -421,9 +474,8 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         }
         auto targetViews = GetTargetViews(params.targetViews);
         if (targetViews.empty()) return admission;
-
-        auto source = m_data ? m_data->GetImageSnapshot() : nullptr;
-        if (!source || !source->image) {
+        auto source = m_data->GetPrimaryImage();
+        if (!source || !source->image || !source->data || !source->binding) {
             admission.status = PartAdmissionStatus::Unavailable;
             return admission;
         }
@@ -433,9 +485,9 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         std::uint64_t expectedCatalogRevision = 0;
         if (GetHistorySourceSame(source)) {
             previous.labels = m_labelValues;
-            previous.catalog = m_activeCatalog;
-            expectedResultRevision = m_activeCatalog->resultRevision;
-            expectedCatalogRevision = m_activeCatalog->catalogRevision;
+            previous.catalog = m_catalogView;
+            expectedResultRevision = m_catalogView->resultRevision;
+            expectedCatalogRevision = m_catalogView->catalogRevision;
         }
         const auto status = m_service->Start(
             source,
@@ -448,20 +500,21 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
             m_surfaceProduct ? m_surfaceProduct->actualBytes : 0);
         admission.status = status;
         if (status != PartAdmissionStatus::Accepted) return admission;
-
         admission.requestId = requestId;
+        m_requestResultBinding = GetResultBinding(source->graph).value_or(
+            DataBinding{ std::string(partResultBinding), {}, 0 });
         m_requestSource = std::move(source);
         m_requestViews = std::move(targetViews);
         m_startCallback = std::move(onComplete);
         m_activeRequestId = requestId;
         m_isSourceChanged = false;
         m_isStopRequested = false;
-        SetRequestRunning(requestId, m_requestSource->version);
+        SetRequestRunning(requestId, m_requestSource->data->self);
         return admission;
     }
 
     if (request.action == PartSegmentationAction::Stop) {
-        const std::uint64_t requestId = GetNextRequestId();
+        const auto requestId = GetNextRequestId();
         admission = { PartAdmissionStatus::Accepted, requestId };
         m_isStopRequested = m_activeRequestId != 0;
         m_service->StopRequest();
@@ -469,24 +522,21 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         QueueComplete(
             std::move(onComplete),
             BuildResult(
+                state,
                 requestId,
                 PartResultStatus::Succeeded,
                 PartFailureReason::None,
-                state.sourceVersion,
-                state.resultRevision,
                 state.partCount,
                 "Part stop was requested."));
         return admission;
     }
-
     if (m_service->GetIsBusy() || m_activeRequestId != 0) {
         admission.status = PartAdmissionStatus::Busy;
         return admission;
     }
-
     if (request.action == PartSegmentationAction::SetVisibility
         && request.isVisible) {
-        const std::uint64_t requestId = GetNextRequestId();
+        const auto requestId = GetNextRequestId();
         admission = { PartAdmissionStatus::Accepted, requestId };
         const bool hadVisibleDisplay = !m_bindings.empty();
         const auto deltaSource = m_activeSource;
@@ -505,20 +555,19 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         const std::optional<RenderInputStamp> requiredInput =
             isSucceeded && hasVisibleChange && deltaSource
             ? std::optional<RenderInputStamp>(RenderInputStamp{
-                deltaSource->image.GetPointer(), deltaSource->version })
+                deltaSource->data->self })
             : std::nullopt;
         const auto requiredViewIds = requiredInput
             ? GetViewIds(deltaViews) : std::vector<std::string>{};
         QueueComplete(
             std::move(onComplete),
             BuildResult(
+                state,
                 requestId,
                 isSucceeded ? PartResultStatus::Succeeded
-                            : PartResultStatus::Failed,
+                    : PartResultStatus::Failed,
                 isSucceeded ? PartFailureReason::None
                             : PartFailureReason::DisplayFailed,
-                state.sourceVersion,
-                state.resultRevision,
                 state.partCount,
                 isSucceeded ? "Part visibility was updated."
                             : "Part visibility update failed."),
@@ -526,9 +575,8 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
             requiredViewIds);
         return admission;
     }
-
     if (request.action == PartSegmentationAction::Clear) {
-        const std::uint64_t requestId = GetNextRequestId();
+        const auto requestId = GetNextRequestId();
         admission = { PartAdmissionStatus::Accepted, requestId };
         const auto previousState = GetState();
         const bool hadVisibleDisplay = !m_bindings.empty();
@@ -545,20 +593,19 @@ PartSegmentationAdmission PartSegmentationHostFeature::Impl::SendRequest(
         const std::optional<RenderInputStamp> requiredInput =
             isSucceeded && hadVisibleDisplay && deltaSource
             ? std::optional<RenderInputStamp>(RenderInputStamp{
-                deltaSource->image.GetPointer(), deltaSource->version })
+                deltaSource->data->self })
             : std::nullopt;
         const auto requiredViewIds = requiredInput
             ? GetViewIds(deltaViews) : std::vector<std::string>{};
         QueueComplete(
             std::move(onComplete),
             BuildResult(
+                previousState,
                 requestId,
                 isSucceeded ? PartResultStatus::Succeeded
-                            : PartResultStatus::Failed,
+                    : PartResultStatus::Failed,
                 isSucceeded ? PartFailureReason::None
                             : PartFailureReason::DisplayFailed,
-                0,
-                previousState.resultRevision,
                 0,
                 isSucceeded ? "Part result was cleared."
                             : "Part result clear failed."),
@@ -609,30 +656,30 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
         result.catalogRevision = currentSnapshot->catalogRevision;
         return result;
     }
-    if (!currentSnapshot || !m_activeCatalog || !m_labelValues) {
+    if (!currentSnapshot || !m_catalogView || !m_labelValues) {
         result.status = PartMutationStatus::Unavailable;
         return result;
     }
 
     try {
-        auto candidate = std::make_shared<PartCatalog>(*m_activeCatalog);
+        auto candidate = std::make_shared<PartCatalog>(*m_catalogView);
         result = SetPartCatalogState(
             *candidate, part, patch, expectedCatalogRevision);
         if (result.status != PartMutationStatus::Succeeded
             || result.catalogRevision
-                == m_activeCatalog->catalogRevision) {
+                == m_catalogView->catalogRevision) {
             return result;
         }
 
         const auto previousStates =
-            BuildPartRenderStateTable(*m_activeCatalog);
+            BuildPartRenderStateTable(*m_catalogView);
         const auto nextStates = BuildPartRenderStateTable(*candidate);
         const auto nextSnapshot = BuildPartSetSnapshot(
-            *candidate, currentSnapshot->sourceVersion, false);
+            *candidate, currentSnapshot->sourceRevision, false);
         if (!previousStates || !nextStates || !nextSnapshot) {
             return {
                 PartMutationStatus::DisplayFailed,
-                m_activeCatalog->catalogRevision
+                m_catalogView->catalogRevision
             };
         }
 
@@ -645,7 +692,7 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
             && !SetPartStates(controls, *nextStates, *previousStates)) {
             return {
                 PartMutationStatus::DisplayFailed,
-                m_activeCatalog->catalogRevision
+                m_catalogView->catalogRevision
             };
         }
 
@@ -667,21 +714,25 @@ PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
                 (void)SetPartStates(controls, *previousStates, *nextStates);
                 return {
                     PartMutationStatus::DisplayFailed,
-                    m_activeCatalog->catalogRevision
+                    m_catalogView->catalogRevision
                 };
             }
         }
 
-        m_activeCatalog = std::move(candidate);
-        auto state = GetState();
-        state.catalogRevision = result.catalogRevision;
-        SetPublishedState(std::move(state), nextSnapshot);
+        auto nextState = GetState();
+        const auto binding = GetResultBinding(m_data->GetDataGraph());
+        if (!binding || binding->target != std::optional<DataRevisionRef>{state.resultSet}
+            || !SetCatalogCommit(*candidate, m_activeSource, *binding, {}, nextState)) {
+            (void)SetPartStates(controls, *previousStates, *nextStates);
+            return { PartMutationStatus::RevisionConflict, state.catalogRevision };
+        }
+        SetPublishedState(std::move(nextState), nextSnapshot);
         return result;
     }
     catch (...) {
         result.status = PartMutationStatus::DisplayFailed;
-        result.catalogRevision = m_activeCatalog
-            ? m_activeCatalog->catalogRevision : 0;
+        result.catalogRevision = m_catalogView
+            ? m_catalogView->catalogRevision : 0;
         return result;
     }
 }
@@ -694,8 +745,7 @@ bool PartSegmentationHostFeature::Impl::GetIsOwnerThread() const noexcept
 
 std::uint64_t PartSegmentationHostFeature::Impl::GetNextRequestId() noexcept
 {
-    const std::uint64_t requestId = m_nextRequestId;
-    ++m_nextRequestId;
+    const auto requestId = m_nextRequestId++;
     if (m_nextRequestId == 0) m_nextRequestId = 1;
     return requestId == 0 ? GetNextRequestId() : requestId;
 }
@@ -714,26 +764,126 @@ PartSegmentationHostFeature::Impl::GetTargetViews(
 }
 
 bool PartSegmentationHostFeature::Impl::GetSourceSame(
-    const TrustedImageSnapshot& source) const
+    const VtkImageGridSnapshot& source) const
 {
-    if (!m_data || !source) return false;
-    const auto current = m_data->GetImageSnapshot();
-    return current
-        && current.get() == source.get()
-        && current->version == source->version;
+    if (!m_data || !source || !source->data || !source->binding) return false;
+    const auto current = m_data->GetPrimaryImage();
+    return current && current->data && current->binding
+        && current->data->self == source->data->self
+        && current->binding->revision == source->binding->revision;
+}
+
+std::optional<DataBinding>
+PartSegmentationHostFeature::Impl::GetResultBinding(
+    const DataGraphSnapshot& graph) const
+{
+    return m_data
+        ? m_data->GetDataBinding(graph, partResultBinding)
+        : std::optional<DataBinding>{};
+}
+
+bool PartSegmentationHostFeature::Impl::SetDataTypes()
+{
+    if (!m_data) return false;
+    auto graph = m_data->GetDataGraph();
+    const auto hasType = [&graph](const DataTypeId& type) {
+        return graph.view && !graph.view->GetDataFacets(type).empty();
+    };
+    const bool hasTable = hasType(partTableType)
+        || m_data->SetDataType(GetRecordTableDescriptor(
+            partTableType,
+            { DataFacets::tabularRecords, partRecordsFacet }));
+    graph = m_data->GetDataGraph();
+    const bool hasResult = hasType(partResultSetType)
+        || m_data->SetDataType(GetDataCollectionDescriptor(
+            partResultSetType));
+    graph = m_data->GetDataGraph();
+    const bool hasCatalog = hasType(partCatalogType)
+        || m_data->SetDataType(DataTypeDescriptor{
+            partCatalogType, { partCatalogFacet },
+            [](const IDataPayload& value, std::string&) {
+                const auto* payload = dynamic_cast<const PartCatalogPayload*>(&value);
+                const auto catalog = payload ? payload->GetCatalog() : nullptr;
+                return catalog && GetPartSetIdValid(catalog->partSetId)
+                    && catalog->resultRevision != 0 && catalog->catalogRevision != 0;
+            } });
+    return hasTable && hasResult && hasCatalog;
+}
+
+bool PartSegmentationHostFeature::Impl::SetCatalogCommit(
+    const PartCatalog& catalog,
+    const VtkImageGridSnapshot& source,
+    const DataBinding& expected,
+    const std::shared_ptr<const LabelMap3DPayload>& labels,
+    PartSegmentationState& state)
+{
+    if (!m_data || !source || !source->data || !source->binding) return false;
+    const auto table = CreatePartTable(catalog);
+    const auto catalogPayload = std::make_shared<const PartCatalogPayload>(catalog);
+    if (!table || (labels && !labels->GetValid())) return false;
+    const auto createRef = [this]() {
+        return DataRevisionRef{ m_data->CreateDataEntityId(), 1 };
+    };
+    const auto labelRef = labels ? createRef() : state.labelMap;
+    const auto tableRef = createRef();
+    const auto catalogRef = createRef();
+    const auto resultRef = createRef();
+    if (!GetDataRevisionRefValid(labelRef)) return false;
+    const DataInputRef sourceInput{ "source-volume", source->data->self };
+    const DataInputRef labelInput{ "labels", labelRef };
+    const DataProvenance provenance{
+        std::string(featureId), labels ? "segment" : "edit-catalog", "1", "{}" };
+    DataTransaction transaction;
+    DataExpectation sourceExpected;
+    sourceExpected.kind = DataExpectationKind::Binding;
+    sourceExpected.binding = std::string(primaryVolumeBinding);
+    sourceExpected.expectedBindingRevision = source->binding->revision;
+    sourceExpected.isTargetChecked = true;
+    sourceExpected.expectedTarget = source->data->self;
+    transaction.expectations.push_back(std::move(sourceExpected));
+    if (labels) transaction.outputs.push_back({
+        labelRef.entityId, 0, DataTypes::labelMap3D,
+        { sourceInput }, labels, provenance });
+    transaction.outputs.push_back({ tableRef.entityId, 0, partTableType,
+        { sourceInput, labelInput }, table, provenance });
+    transaction.outputs.push_back({ catalogRef.entityId, 0, partCatalogType,
+        { sourceInput, labelInput }, catalogPayload, provenance });
+    const auto collection = std::make_shared<const DataCollectionPayload>(
+        partResultSetType, std::vector<DataCollectionEntry>{
+            { "labels", labelRef }, { "parts", tableRef }, { "catalog", catalogRef } });
+    transaction.outputs.push_back({ resultRef.entityId, 0, partResultSetType,
+        { sourceInput, labelInput, { "parts", tableRef }, { "catalog", catalogRef } },
+        collection, provenance });
+    transaction.bindings.push_back({ std::string(partResultBinding),
+        expected.revision, true, expected.target, resultRef });
+    const auto committed = m_data->SetDataCommit(std::move(transaction));
+    if (committed.status != DataCommitStatus::Succeeded) return false;
+    // CreateSnapshot 与 Store 共享的只有这个已隔离、不可变的目录 owner。
+    m_catalogView = catalogPayload->GetCatalog();
+    state.commitId = committed.commitId;
+    state.sourceRevision = source->data->self;
+    state.labelMap = labelRef;
+    state.partTable = tableRef;
+    state.resultSet = resultRef;
+    state.partSetId = catalog.partSetId;
+    state.resultRevision = catalog.resultRevision;
+    state.catalogRevision = catalog.catalogRevision;
+    state.partCount = catalog.partsByLabel.size() - 1U;
+    return true;
 }
 
 bool PartSegmentationHostFeature::Impl::GetHistorySourceSame(
-    const TrustedImageSnapshot& source) const
+    const VtkImageGridSnapshot& source) const
 {
     return source
         && source->image
         && m_activeSource
-        && m_activeSource.get() == source.get()
-        && m_activeSource->version == source->version
+        && source->data && m_activeSource->data
+        && m_activeSource->data->self == source->data->self
+        && GetSourceSame(m_activeSource)
         && m_labelValues
         && m_labelImage
-        && m_activeCatalog
+        && m_catalogView
         && GetImageGeometrySame(*source->image, *m_labelImage);
 }
 
@@ -755,14 +905,14 @@ void PartSegmentationHostFeature::Impl::SetPublishedState(
 
 void PartSegmentationHostFeature::Impl::SetRequestRunning(
     const std::uint64_t requestId,
-    const DataVersion sourceVersion)
+    const DataRevisionRef& source)
 {
     const std::lock_guard<std::mutex> lock(m_stateMutex);
     m_stateBeforeRequest = m_state;
     m_state.status = PartSegmentationStatus::Running;
     m_state.failureReason = PartFailureReason::None;
     m_state.requestId = requestId;
-    m_state.sourceVersion = sourceVersion;
+    m_state.sourceRevision = source;
     m_state.progress = 0.0;
 }
 
@@ -774,7 +924,6 @@ void PartSegmentationHostFeature::Impl::SetRequestProgress(
         || m_state.requestId != m_activeRequestId) {
         return;
     }
-    // 1.0 只表示 owner thread 已提交完整 generation。
     constexpr double runningLimit = 0.999;
     m_state.progress = std::max(
         m_state.progress, std::clamp(progress, 0.0, runningLimit));
@@ -804,7 +953,7 @@ void PartSegmentationHostFeature::Impl::QueueComplete(
                 m_pendingCompleteResults.end());
             m_pendingCompleteResults.push_back(sharedResult);
         }
-        const std::weak_ptr<TrustedFeatureDataPort> weakData = m_data;
+        const std::weak_ptr<TrustedDataPort> weakData = m_data;
         const std::weak_ptr<FeatureViewDirectory> weakViews = m_views;
         const auto send = [sharedCallback, sharedResult, isSent,
             weakData, weakViews, requiredInput,
@@ -814,11 +963,10 @@ void PartSegmentationHostFeature::Impl::QueueComplete(
                 && sharedResult->status == PartResultStatus::Succeeded) {
                 const auto data = weakData.lock();
                 const auto current = data
-                    ? data->GetImageSnapshot() : TrustedImageSnapshot{};
+                    ? data->GetPrimaryImage() : VtkImageGridSnapshot{};
                 if (!current
-                    || current->image.GetPointer()
-                        != requiredInput->identity
-                    || current->version != requiredInput->version) {
+                    || !current->data
+                    || current->data->self != requiredInput->dataRevision) {
                     sharedResult->status = PartResultStatus::Failed;
                     sharedResult->failureReason =
                         PartFailureReason::SourceChanged;
@@ -906,11 +1054,11 @@ void PartSegmentationHostFeature::Impl::CancelQueuedCompletes() noexcept
 bool PartSegmentationHostFeature::Impl::SendSceneDelta(
     const std::uint64_t requestId,
     const FeatureScenePriority priority,
-    const TrustedImageSnapshot& source,
+    const VtkImageGridSnapshot& source,
     const std::vector<HostFeatureView>& views) const
 {
     if (!m_host || requestId == 0 || !source || !source->image
-        || source->version == 0 || views.empty()) {
+        || !source->data || !GetDataRevisionRefValid(source->data->self) || views.empty()) {
         return false;
     }
     FeatureSceneDelta delta;
@@ -918,7 +1066,7 @@ bool PartSegmentationHostFeature::Impl::SendSceneDelta(
     delta.priority = priority;
     delta.scope = FeatureSceneScope::RequiredAllViews;
     delta.inputStamp = {
-        source->image.GetPointer(), source->version };
+        source->data->self };
     delta.viewIds = GetViewIds(views);
     return !delta.viewIds.empty()
         && m_host->SendSceneDelta(std::move(delta));
@@ -963,18 +1111,25 @@ bool PartSegmentationHostFeature::Impl::AttachDisplay(
         viewIds.push_back(view.id);
     }
     if (!m_host->SetActiveViews(viewIds)) {
+        m_isActiveViewClearPending = true;
         RemoveBindings(nextBindings);
         return false;
     }
+    m_isActiveViewClearPending = false;
     return true;
 }
 
 bool PartSegmentationHostFeature::Impl::RemoveDisplay()
 {
-    const bool hasDisplay = !m_bindings.empty() || !m_activeViews.empty();
-    if (hasDisplay && m_host && !m_host->SetActiveViews({})) return false;
+    const bool needsActiveViewClear =
+        !m_bindings.empty() || m_isActiveViewClearPending;
+    const bool isActiveViewCleared = !needsActiveViewClear
+        || (m_host && m_host->SetActiveViews({}));
+    m_isActiveViewClearPending = !isActiveViewCleared;
+    // Host 元数据同步失败也不能让已退休的数据继续留在画面上；
+    // pending 标记保留下一次 tick/detach 的重试能力。
     RemoveBindings(m_bindings);
-    return true;
+    return isActiveViewCleared;
 }
 
 void PartSegmentationHostFeature::Impl::RemoveBindings(
@@ -993,21 +1148,27 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
     const bool isVisible)
 {
     auto state = GetState();
-    if (state.isOverlayVisible == isVisible) return true;
+    if (state.isOverlayVisible == isVisible) {
+        if (!isVisible) return m_isActiveViewClearPending ? RemoveDisplay() : true;
+        if (!m_bindings.empty() || state.status == PartSegmentationStatus::Stale
+            || !GetDataRevisionRefValid(state.resultSet)) return true;
+    }
     if (!isVisible) {
-        if (!RemoveDisplay()) return false;
+        const bool isDisplayRemoved = RemoveDisplay();
         state.isOverlayVisible = false;
-        SetState(state);
-        return true;
+        SetState(std::move(state));
+        return isDisplayRemoved;
     }
     if (!m_labelValues || !m_labelImage || !m_surfaceProduct
         || m_activeViews.empty()) {
+        if (GetDataRevisionRefValid(state.resultSet)
+            && state.status != PartSegmentationStatus::Stale) return false;
         state.isOverlayVisible = true;
-        SetState(state);
+        SetState(std::move(state));
         return true;
     }
-    const auto renderStates = m_activeCatalog
-        ? BuildPartRenderStateTable(*m_activeCatalog)
+    const auto renderStates = m_catalogView
+        ? BuildPartRenderStateTable(*m_catalogView)
         : std::optional<PartRenderStateTable>{};
     if (!renderStates) return false;
     std::vector<OverlayBinding> nextBindings;
@@ -1022,29 +1183,43 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
     RemoveBindings(m_bindings);
     m_bindings = std::move(nextBindings);
     state.isOverlayVisible = true;
-    SetState(state);
+    SetState(std::move(state));
     return true;
 }
 
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
-    if (!RemoveDisplay()) return false;
+    const auto current = GetState();
+    const auto graph = m_data ? m_data->GetDataGraph() : DataGraphSnapshot{};
+    const auto binding = GetResultBinding(graph);
+    if (binding && binding->target && *binding->target == current.resultSet) {
+        DataTransaction transaction;
+        transaction.bindings.push_back({ std::string(partResultBinding),
+            binding->revision, true, binding->target, {} });
+        if (m_data->SetDataCommit(std::move(transaction)).status
+            != DataCommitStatus::Succeeded) return false;
+    }
+    const bool isDisplayRemoved = RemoveDisplay();
+    m_activeLabels.reset();
     m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
-    m_activeCatalog.reset();
+    m_catalogView.reset();
     m_activeSource.reset();
     m_activeViews.clear();
     PartSegmentationState state;
     state.isOverlayVisible = GetState().isOverlayVisible;
     SetPublishedState(std::move(state), {});
-    return true;
+    return isDisplayRemoved;
 }
 
 void PartSegmentationHostFeature::Impl::SetSourceStale()
 {
-    if (!m_activeSource && !m_requestSource) return;
     auto state = GetState();
+    if (!GetDataRevisionRefValid(state.resultSet)
+        && !m_requestSource) {
+        return;
+    }
     state.status = PartSegmentationStatus::Stale;
     state.failureReason = PartFailureReason::SourceChanged;
     state.progress = 0.0;
@@ -1069,7 +1244,7 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     m_surfaceProduct.reset();
     m_labelImage = nullptr;
     m_labelValues.reset();
-    m_activeCatalog.reset();
+    m_catalogView.reset();
     m_activeViews.clear();
 }
 
@@ -1077,188 +1252,168 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
     PartLabelCandidate candidate)
 {
     auto callback = std::move(m_startCallback);
-    const std::uint64_t requestId = m_activeRequestId;
-    const DataVersion sourceVersion = m_requestSource
-        ? m_requestSource->version : candidate.sourceVersion;
-    const auto activeState = GetState();
-
+    const auto requestId = m_activeRequestId;
+    PartResultStatus resultStatus = candidate.status;
+    PartFailureReason reason = candidate.failureReason;
+    std::string message = candidate.message;
+    std::optional<RenderInputStamp> requiredInput;
+    std::vector<std::string> requiredViews;
+    bool isCommitted = false;
+    auto nextState = GetState();
     if (m_isSourceChanged || !GetSourceSame(m_requestSource)) {
-        SetRequestFailed(PartFailureReason::SourceChanged);
-        QueueComplete(
-            std::move(callback),
-            BuildResult(
-                requestId,
-                PartResultStatus::Failed,
-                PartFailureReason::SourceChanged,
-                sourceVersion,
-                activeState.resultRevision,
-                GetState().partCount,
-                "Part source changed before commit."));
+        resultStatus = PartResultStatus::Failed;
+        reason = PartFailureReason::SourceChanged;
+        message = "Part source changed before commit.";
     }
     else if (m_isStopRequested) {
-        SetRequestFailed(PartFailureReason::Cancelled);
-        QueueComplete(
-            std::move(callback),
-            BuildResult(
-                requestId,
-                PartResultStatus::Cancelled,
-                PartFailureReason::Cancelled,
-                sourceVersion,
-                activeState.resultRevision,
-                GetState().partCount,
-                "Part request was cancelled."));
+        resultStatus = PartResultStatus::Cancelled;
+        reason = PartFailureReason::Cancelled;
+        message = "Part request was cancelled.";
     }
-    else if (candidate.status != PartResultStatus::Succeeded) {
-        const PartFailureReason reason = candidate.failureReason;
-        const std::string message = candidate.message;
-        SetRequestFailed(reason);
-        QueueComplete(
-            std::move(callback),
-            BuildResult(
-                requestId,
-                candidate.status,
-                reason,
-                sourceVersion,
-                activeState.resultRevision,
-                GetState().partCount,
-                message));
-    }
-    else {
-        auto labelView = BuildLabelView(candidate);
-        const bool hasExpectedCatalog = candidate.expectedResultRevision != 0
-            || candidate.expectedCatalogRevision != 0;
-        const bool isRevisionExpected = hasExpectedCatalog
-            ? m_activeCatalog
-                && m_activeCatalog->resultRevision
-                    == candidate.expectedResultRevision
-                && m_activeCatalog->catalogRevision
-                    == candidate.expectedCatalogRevision
-            : !m_activeCatalog;
-        const bool isCatalogValid = candidate.catalog
-            && candidate.labels
-            && GetPartCatalogValid(*candidate.catalog, *candidate.labels);
-        const auto nextSnapshot = isCatalogValid
-            ? BuildPartSetSnapshot(*candidate.catalog, sourceVersion, false)
-            : std::shared_ptr<const PartSetSnapshot>{};
-        const auto nextRenderStates = isCatalogValid
-            ? BuildPartRenderStateTable(*candidate.catalog)
-            : std::optional<PartRenderStateTable>{};
-        std::vector<OverlayBinding> nextBindings;
-        const bool isVisible = activeState.isOverlayVisible;
-        bool isDisplayReady = true;
-        if (isRevisionExpected && isCatalogValid && nextSnapshot
-            && nextRenderStates
-            && isVisible) {
-            isDisplayReady = AttachDisplay(
-                labelView.image,
-                *nextRenderStates,
-                candidate.surface,
-                m_requestViews,
-                nextBindings);
-        }
-        else if (isRevisionExpected && isCatalogValid && nextSnapshot
-            && nextRenderStates
-            && m_host) {
-            isDisplayReady = m_host->SetActiveViews({});
-        }
-        const bool isFrameReady = !isVisible
-            || (labelView.labels && labelView.image
-                && candidate.surface && candidate.surface->surface
-                && isRevisionExpected && isCatalogValid && nextSnapshot
-                && nextRenderStates && isDisplayReady
-                && SendSceneDelta(
-                    requestId,
-                    FeatureScenePriority::Scene,
-                    m_requestSource,
-                    m_requestViews));
-        if (!labelView.labels || !labelView.image
-            || !candidate.surface || !candidate.surface->surface
-            || !isRevisionExpected || !isCatalogValid || !nextSnapshot
-            || !nextRenderStates
-            || !isDisplayReady || !isFrameReady) {
-            RemoveBindings(nextBindings);
-            std::vector<std::string> previousViewIds;
-            if (!m_bindings.empty()) {
-                previousViewIds.reserve(m_activeViews.size());
-                for (const auto& view : m_activeViews) {
-                    if (!view.id.empty()) previousViewIds.push_back(view.id);
+    else if (candidate.status == PartResultStatus::Succeeded) {
+        try {
+            const bool hasExpected = candidate.expectedResultRevision != 0
+                || candidate.expectedCatalogRevision != 0;
+            const bool isExpected = hasExpected
+                ? m_catalogView
+                    && m_catalogView->resultRevision == candidate.expectedResultRevision
+                    && m_catalogView->catalogRevision == candidate.expectedCatalogRevision
+                : !m_catalogView;
+            if (!isExpected || !candidate.catalog || !candidate.labels
+                || !candidate.surface || !candidate.surface->surface
+                || !GetPartCatalogValid(*candidate.catalog, *candidate.labels)) {
+                throw std::runtime_error("Part candidate is invalid.");
+            }
+            // 算法峰值之外，提交阶段还会冻结标签、目录和表格，并建立 VTK 标签视图。
+            // 按两阶段峰值之和保守预留，拒绝时尚未分配这些副本或写入图。
+            std::size_t requiredBytes = candidate.requiredBytes;
+            const auto addBytes = [&requiredBytes](std::size_t count, std::size_t width) {
+                const auto limit = std::numeric_limits<std::size_t>::max();
+                if (width != 0 && count > (limit - requiredBytes) / width) {
+                    requiredBytes = limit;
+                    return false;
                 }
+                requiredBytes += count * width;
+                return true;
+            };
+            std::size_t catalogBytes = 0;
+            // 每行覆盖 table 的原始列与冻结副本，以及公开目录与渲染状态投影。
+            constexpr std::size_t rowBytes = 2U * (2U * sizeof(std::uint64_t)
+                + 3U * sizeof(double) + 6U * sizeof(std::int64_t)
+                + 9U * sizeof(double) + 2U * sizeof(std::uint8_t))
+                + sizeof(PartSnapshot) + sizeof(PartRenderState);
+            const bool hasBudget = GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
+                && addBytes(candidate.labels->size(), 2U * sizeof(PartLabelId))
+                && addBytes(m_labelValues ? m_labelValues->size() : 0U, sizeof(PartLabelId))
+                && addBytes(2U, catalogBytes)
+                && addBytes(candidate.catalog->partsByLabel.size(), rowBytes)
+                && addBytes(1U, 9U * sizeof(RecordColumn)
+                    + 4U * sizeof(DataRevision) + 16U * sizeof(DataInputRef)
+                    + sizeof(DataCollectionPayload) + sizeof(PartSetSnapshot))
+                && requiredBytes <= m_config.maxWorkingBytes;
+            if (!hasBudget) {
+                reason = PartFailureReason::BudgetExceeded;
+                throw std::runtime_error("Part graph publication budget exceeded: requiredBytes="
+                    + std::to_string(requiredBytes) + ", maxWorkingBytes="
+                    + std::to_string(m_config.maxWorkingBytes) + ".");
             }
-            if (m_host) {
-                (void)m_host->SetActiveViews(previousViewIds);
+            message += " graphPublicationBytes=" + std::to_string(requiredBytes) + ".";
+            const auto publicSnapshot = BuildPartSetSnapshot(
+                *candidate.catalog, m_requestSource->data->self, false);
+            const auto renderStates = BuildPartRenderStateTable(*candidate.catalog);
+            const auto labels = std::make_shared<const LabelMap3DPayload>(
+                GetLabelGeometry(candidate), candidate.labels);
+            if (!publicSnapshot || !renderStates
+                || !SetCatalogCommit(*candidate.catalog, m_requestSource,
+                    m_requestResultBinding, labels, nextState)) {
+                reason = PartFailureReason::SourceChanged;
+                throw std::runtime_error("Part graph transaction was rejected.");
             }
-            const PartFailureReason reason = !isRevisionExpected
-                || !isCatalogValid || !nextSnapshot || !nextRenderStates
-                ? PartFailureReason::InternalError
-                : PartFailureReason::DisplayFailed;
-            SetRequestFailed(reason);
-            QueueComplete(
-                std::move(callback),
-                BuildResult(
-                    requestId,
-                    PartResultStatus::Failed,
-                    reason,
-                    sourceVersion,
-                    activeState.resultRevision,
-                    GetState().partCount,
-                    reason == PartFailureReason::DisplayFailed
-                        ? "Part display candidate failed."
-                        : "Part catalog candidate became invalid."));
-        }
-        else {
+            isCommitted = true;
+            // 正式数据已经发布；之后的显示失败只能报告 presentation failure。
+            nextState.status = PartSegmentationStatus::Succeeded;
+            nextState.failureReason = PartFailureReason::None;
+            nextState.requestId = requestId;
+            nextState.progress = 1.0;
+            SetPublishedState(nextState, publicSnapshot);
+            m_isActiveViewClearPending = m_isActiveViewClearPending || !m_bindings.empty();
             RemoveBindings(m_bindings);
-            m_surfaceProduct.reset();
             m_labelImage = nullptr;
             m_labelValues.reset();
-            m_activeCatalog.reset();
-            m_bindings = std::move(nextBindings);
-            m_labelValues = std::move(labelView.labels);
-            m_labelImage = std::move(labelView.image);
-            m_activeCatalog = std::move(candidate.catalog);
+            m_activeLabels.reset();
             m_surfaceProduct = std::move(candidate.surface);
-            m_activeViews = std::move(m_requestViews);
+            m_activeViews = m_requestViews;
             m_activeSource = m_requestSource;
-            PartSegmentationState state;
-            state.status = PartSegmentationStatus::Succeeded;
-            state.failureReason = PartFailureReason::None;
-            state.requestId = requestId;
-            state.sourceVersion = sourceVersion;
-            state.partSetId = nextSnapshot->partSetId;
-            state.resultRevision = nextSnapshot->resultRevision;
-            state.catalogRevision = nextSnapshot->catalogRevision;
-            state.partCount = nextSnapshot->parts.size();
-            state.progress = 1.0;
-            state.isOverlayVisible = isVisible;
-            const std::size_t partCount = state.partCount;
-            SetPublishedState(std::move(state), nextSnapshot);
-            const std::optional<RenderInputStamp> requiredInput = isVisible
-                ? std::optional<RenderInputStamp>(RenderInputStamp{
-                    m_activeSource->image.GetPointer(),
-                    m_activeSource->version })
-                : std::nullopt;
-            const auto requiredViewIds = requiredInput
-                ? GetViewIds(m_activeViews)
-                : std::vector<std::string>{};
-            QueueComplete(
-                std::move(callback),
-                BuildResult(
-                    requestId,
-                    PartResultStatus::Succeeded,
-                    PartFailureReason::None,
-                    sourceVersion,
-                    nextSnapshot->resultRevision,
-                    partCount,
-                candidate.message),
-                requiredInput,
-                requiredViewIds);
+            const auto graph = m_data->GetDataGraph();
+            const auto labelData = m_data->GetData(graph, nextState.labelMap);
+            const auto labelPayload = labelData
+                ? std::dynamic_pointer_cast<const LabelMap3DPayload>(labelData->payload)
+                : nullptr;
+            auto labelView = m_data->GetLabelMap(graph, nextState.labelMap);
+            RemoveBindings(m_bindings);
+            m_labelImage = nullptr;
+            m_labelValues = labelPayload ? labelPayload->GetLabels() : nullptr;
+            m_activeLabels = std::move(labelView);
+            m_labelImage = m_activeLabels ? m_activeLabels->labels : nullptr;
+            bool isDisplayed = m_labelImage && m_labelValues;
+            if (nextState.isOverlayVisible && isDisplayed) {
+                isDisplayed = AttachDisplay(m_labelImage, *renderStates,
+                    m_surfaceProduct, m_activeViews, m_bindings);
+                isDisplayed = isDisplayed && SendSceneDelta(requestId,
+                    FeatureScenePriority::Scene, m_activeSource, m_activeViews);
+            }
+            else if (!nextState.isOverlayVisible) {
+                isDisplayed = RemoveDisplay();
+            }
+            if (!isDisplayed) {
+                (void)RemoveDisplay();
+                nextState.failureReason = PartFailureReason::DisplayFailed;
+                SetState(nextState);
+                resultStatus = PartResultStatus::SucceededWithDisplayFailure;
+                reason = PartFailureReason::DisplayFailed;
+                message = "Part data committed; display can be retried.";
+            }
+            else {
+                resultStatus = PartResultStatus::Succeeded;
+                reason = PartFailureReason::None;
+                if (nextState.isOverlayVisible) {
+                    requiredInput = RenderInputStamp{ m_activeSource->data->self };
+                    requiredViews = GetViewIds(m_activeViews);
+                }
+            }
+        }
+        catch (const std::exception& error) {
+            resultStatus = isCommitted ? PartResultStatus::SucceededWithDisplayFailure
+                : PartResultStatus::Failed;
+            reason = isCommitted ? PartFailureReason::DisplayFailed
+                : reason == PartFailureReason::SourceChanged
+                    || reason == PartFailureReason::BudgetExceeded ? reason
+                : PartFailureReason::InternalError;
+            message = error.what();
+        }
+        catch (...) {
+            resultStatus = isCommitted ? PartResultStatus::SucceededWithDisplayFailure
+                : PartResultStatus::Failed;
+            reason = isCommitted ? PartFailureReason::DisplayFailed
+                : PartFailureReason::InternalError;
+            message = "Part graph publication or display failed.";
         }
     }
-
+    if (!isCommitted) SetRequestFailed(reason);
+    else if (reason == PartFailureReason::DisplayFailed) {
+        nextState.failureReason = reason;
+        SetState(nextState);
+    }
+    const auto state = GetState();
+    auto result = BuildResult(state, requestId, resultStatus, reason,
+        state.partCount, std::move(message));
     m_requestSource.reset();
     m_requestViews.clear();
     m_activeRequestId = 0;
     m_isSourceChanged = false;
     m_isStopRequested = false;
+    QueueComplete(std::move(callback), std::move(result),
+        requiredInput, std::move(requiredViews));
 }
 
 void PartSegmentationHostFeature::Impl::SetRequestFailed(
@@ -1276,8 +1431,8 @@ void PartSegmentationHostFeature::Impl::SetRequestFailed(
             : PartSegmentationStatus::Failed;
         m_state.failureReason = reason;
         m_state.requestId = m_activeRequestId;
-        m_state.sourceVersion = m_requestSource
-            ? m_requestSource->version : 0;
+        m_state.sourceRevision = m_requestSource && m_requestSource->data
+            ? m_requestSource->data->self : DataRevisionRef{};
         m_state.progress = 0.0;
         return;
     }
@@ -1295,6 +1450,24 @@ PartSegmentationHostFeature::~PartSegmentationHostFeature() noexcept = default;
 std::string_view PartSegmentationHostFeature::GetFeatureId() const noexcept
 {
     return featureId;
+}
+
+FeatureDataContract PartSegmentationHostFeature::GetDataContract() const
+{
+    return FeatureDataContract{
+        { DataInputSpec{ "source-volume", DataFacets::scalarGrid3D, true } },
+        { DataOutputSpec{
+              "labels", DataTypes::labelMap3D,
+              { DataFacets::labelMap3D } },
+          DataOutputSpec{
+              "parts", partTableType,
+              { DataFacets::tabularRecords, partRecordsFacet } },
+          DataOutputSpec{
+              "catalog", partCatalogType, { partCatalogFacet } },
+          DataOutputSpec{
+              "result-set", partResultSetType,
+              { DataFacets::dataCollection } } }
+    };
 }
 
 bool PartSegmentationHostFeature::AttachHost(

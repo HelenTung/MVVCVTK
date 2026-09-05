@@ -2,7 +2,7 @@
 
 #include "App/AppTypes.h"
 #include "App/Services/DataCommitTypes.h"
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 
 #include <cstdint>
 #include <functional>
@@ -15,8 +15,8 @@ class AppDataStagePort;
 struct LoadCommitRequest final {
     LoadEventKind loadKind = LoadEventKind::None;
     std::uint64_t transactionRevision = 0;
-    DataVersion sourceVersion = 0;
-    TrustedImageSnapshot pending;
+    DataRevisionRef sourceRevision;
+    VtkImageGridSnapshot pending;
     std::vector<std::shared_ptr<AppDataStagePort>> stages;
     std::function<bool()> stopViews;
 };

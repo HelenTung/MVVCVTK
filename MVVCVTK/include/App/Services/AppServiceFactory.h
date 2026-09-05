@@ -52,7 +52,7 @@ struct AppServiceArgs final {
     std::function<LoadCommitResult(
         LoadEventKind,
         std::uint64_t,
-        const TrustedImageSnapshot&)> setLoadCommit;
+        const VtkImageGridSnapshot&)> setLoadCommit;
     std::function<LoadCommitResult(
         std::uint64_t,
         LoadCommitFailure)> setLoadCancelled;

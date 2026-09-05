@@ -1,4 +1,5 @@
 #include "SurfaceDeterminationService.h"
+#include <vtkImageData.h>
 
 #include <algorithm>
 #include <cmath>
@@ -47,7 +48,7 @@ SurfaceDeterminationService::~SurfaceDeterminationService() noexcept
 }
 
 SurfaceAdmissionStatus SurfaceDeterminationService::Start(
-    TrustedImageSnapshot source,
+    VtkImageGridSnapshot source,
     SurfaceDeterminationStartParams params,
     const std::size_t maxWorkingBytes,
     const std::uint64_t requestId)
@@ -183,7 +184,7 @@ SurfaceJobComplete SurfaceDeterminationService::BuildCancelled(
     complete.requestId = job.requestId;
     complete.result.status = SurfaceResultStatus::Cancelled;
     complete.result.failureReason = SurfaceFailureReason::Cancelled;
-    complete.result.sourceVersion = job.source ? job.source->version : 0;
+    complete.result.sourceRevision = job.source && job.source->data ? job.source->data->self : DataRevisionRef{};
     complete.result.method = job.params.method;
     return complete;
 }

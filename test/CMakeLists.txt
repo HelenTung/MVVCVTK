@@ -43,6 +43,8 @@ set_target_properties(
 unset(MVVCVTK_HOST_TEST_INCLUDE_DIRS)
 
 add_subdirectory(Host)
+add_subdirectory(DataGraph)
+
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_subdirectory(OrthogonalCrop)
 endif()

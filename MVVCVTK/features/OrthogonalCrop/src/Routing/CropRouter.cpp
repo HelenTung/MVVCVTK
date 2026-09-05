@@ -29,18 +29,19 @@ std::size_t GetRamBytes()
 }
 }
 
-std::optional<std::packaged_task<CropBuildResult()>> CropRouter::BuildResultTask(
+std::optional<std::packaged_task<CropMaterializationCandidate()>>
+CropRouter::BuildResultTask(
     CropInputSnapshot input,
     CropBuildParams params,
     CropShaderPayload payload) const
 {
     if (!CropAlgorithm::GetInputValid(input)
-        || params.dataSource != input.dataSource
-        || params.inputVersion != input.inputVersion
+        || !input.data
+        || params.sourceRevision != input.data->self
         || params.operations.size() != params.nodeCount
         || params.nodeCount == 0
         || payload.revision == 0
-        || payload.sourceStamp.version != input.inputVersion
+        || payload.sourceStamp.dataRevision != input.data->self
         || payload.nodeCount != params.nodeCount
         || !payload.predicateTable
         || payload.predicateTable->operationCount < payload.nodeCount) {
@@ -50,16 +51,19 @@ std::optional<std::packaged_task<CropBuildResult()>> CropRouter::BuildResultTask
         params.availableRamBytes = GetRamBytes();
     }
 
-    return std::packaged_task<CropBuildResult()>(
+    return std::packaged_task<CropMaterializationCandidate()>(
         [input = std::move(input), params = std::move(params),
             payload = std::move(payload)]() mutable {
-            if (params.dataSource == OrthogonalCropDataSource::ImageData) {
+            if (input.image) {
                 return CropAlgorithm::GetResult(
-                    input.imageData,
-                    input.validityMask,
+                    input.image->image,
+                    input.image->validityMask,
                     params,
                     payload);
             }
-            return CropAlgorithm::GetResult(input.polyData, params, payload);
+            return CropAlgorithm::GetResult(
+                input.mesh ? input.mesh->mesh.GetPointer() : nullptr,
+                params,
+                payload);
         });
 }

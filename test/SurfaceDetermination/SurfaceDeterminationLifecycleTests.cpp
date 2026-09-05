@@ -95,42 +95,13 @@ public:
     std::shared_ptr<OverlayStub> overlay = std::make_shared<OverlayStub>();
 };
 
-class DataPortStub final : public TrustedFeatureDataPort {
+class DataPortStub final : public TestDataPort {
 public:
-    explicit DataPortStub(TrustedImageSnapshot initial)
-        : current(std::move(initial))
+    explicit DataPortStub(VtkImageGridSnapshot initial) { SetCurrent(std::move(initial)); }
+    void SetCurrent(VtkImageGridSnapshot next)
     {
+        if (next) (void)SetPrimaryImage(next->image, next->validityMask);
     }
-
-    TrustedImageSnapshot GetImageSnapshot() const override
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        return current;
-    }
-
-    bool SetImageState(
-        TrustedImageState imageState,
-        const TrustedImageSnapshot& expected,
-        TrustedImageSnapshot& published) override
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        if (!expected || current.get() != expected.get()) return false;
-        imageState.version = expected->version + 1;
-        current = std::make_shared<const TrustedImageState>(
-            std::move(imageState));
-        published = current;
-        return true;
-    }
-
-    void SetCurrent(TrustedImageSnapshot next)
-    {
-        const std::lock_guard<std::mutex> lock(mutex);
-        current = std::move(next);
-    }
-
-private:
-    mutable std::mutex mutex;
-    TrustedImageSnapshot current;
 };
 
 class HostControlStub final : public FeatureHostControl {
@@ -170,7 +141,7 @@ public:
 };
 
 struct TestHost final {
-    explicit TestHost(TrustedImageSnapshot source)
+    explicit TestHost(VtkImageGridSnapshot source)
         : data(std::make_shared<DataPortStub>(std::move(source)))
     {
         context.views = views;
@@ -269,7 +240,7 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         "successful request reaches Ready");
     checks.Get(
         snapshot && snapshot->resultRevision == 1
-            && snapshot->sourceVersion == 1,
+            && snapshot->sourceRevision == testHost.data->GetPrimaryImage()->data->self,
         "successful request publishes immutable generation");
     checks.Get(
         testHost.views->overlay->overlays.size() == 1
@@ -414,9 +385,8 @@ void TestSourceStaleAndRollback(Checks& checks)
             ++staleCount;
         });
     auto replacementState = *BuildSphere();
-    replacementState.version = 2;
     staleHost.data->SetCurrent(
-        std::make_shared<const TrustedImageState>(
+        std::make_shared<const VtkImageGridView>(
             std::move(replacementState)));
     checks.Get(
         WaitUntil(*staleFeature, [&] { return staleCount.load() == 1; }),
@@ -447,15 +417,14 @@ void TestSourceStaleAndRollback(Checks& checks)
         "active stale baseline generation completes");
     const auto readyState = activeStaleFeature->GetState();
     auto nextState = *BuildSphere();
-    nextState.version = 2;
     activeStaleHost.data->SetCurrent(
-        std::make_shared<const TrustedImageState>(std::move(nextState)));
+        std::make_shared<const VtkImageGridView>(std::move(nextState)));
     checks.Get(activeStaleFeature->OnHostTick(), "active stale tick succeeds");
     const auto activeStaleState = activeStaleFeature->GetState();
     checks.Get(
         activeStaleState.stage == SurfaceDeterminationStage::Stale
             && activeStaleState.requestId == readyState.requestId
-            && activeStaleState.sourceVersion == readyState.sourceVersion
+            && activeStaleState.sourceRevision == readyState.sourceRevision
             && !activeStaleFeature->GetSurfaceSnapshot()
             && activeStaleHost.views->overlay->overlays.empty(),
         "source change retires an already active generation and display");
@@ -543,7 +512,7 @@ void TestCompletionCapacity(Checks& checks)
         ++completionCount;
         completionIds.insert(complete->requestId);
         completionFieldsValid = completionFieldsValid
-            && complete->result.sourceVersion == source->version
+            && complete->result.sourceRevision == source->data->self
             && ((complete->result.status == SurfaceResultStatus::Succeeded
                     && complete->result.failureReason
                         == SurfaceFailureReason::None)

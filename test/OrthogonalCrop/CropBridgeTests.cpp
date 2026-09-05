@@ -1,4 +1,5 @@
 #include "CropBridgeTests.h"
+#include "../TestDataPort.h"
 
 #include "Algorithms/CropAlgorithm.h"
 #include "Interaction/CropBridge.h"
@@ -22,6 +23,22 @@
 #include <vector>
 
 namespace {
+CropInputSnapshot BuildGraphInput(
+    TestDataPort& data,
+    vtkImageData* image,
+    const CropBoundsDouble6Array& bounds)
+{
+    const auto view = data.SetPrimaryImage(image);
+    CropInputSnapshot input;
+    if (!view) return input;
+    input.graph = view->graph;
+    input.binding = view->binding;
+    input.data = view->data;
+    input.inputModelBounds = bounds;
+    input.image = view;
+    return input;
+}
+
 class CropServiceStub final : public FeatureViewService {
 public:
     CropServiceStub(
@@ -217,7 +234,10 @@ int CropBridgeSuite::GetFailCount() const
     renderWindow->AddRenderer(renderer);
     interactor->SetRenderWindow(renderWindow);
 
-    const RenderInputStamp inputStamp = { image.GetPointer(), 1 };
+    TestDataPort data;
+    auto input = BuildGraphInput(
+        data, image, { 0.0, 3.0, 0.0, 3.0, 0.0, 3.0 });
+    const RenderInputStamp inputStamp = { input.data->self };
     auto service = std::make_shared<CropServiceStub>(
         inputStamp, renderer);
     CropViewRequest view;
@@ -232,11 +252,6 @@ int CropBridgeSuite::GetFailCount() const
     CropBridge bridge;
     expect(bridge.StartView(view), "Bridge should accept a complete view request.");
 
-    CropInputSnapshot input;
-    input.dataSource = OrthogonalCropDataSource::ImageData;
-    input.inputVersion = 1;
-    input.inputModelBounds = { 0.0, 3.0, 0.0, 3.0, 0.0, 3.0 };
-    input.imageData = image;
     expect(bridge.SetCropInput(input), "Bridge should accept an immutable input snapshot.");
     expect(bridge.SwitchCropBox(), "Bridge should enter box editing.");
     const int switchDirtyCount = service->dirtyCount;
@@ -297,11 +312,10 @@ int CropBridgeSuite::GetFailCount() const
         "The first armed release should expose one current and one total operation.");
     auto nextImage = vtkSmartPointer<vtkImageData>::New();
     nextImage->ShallowCopy(image);
-    auto nextInput = input;
-    nextInput.inputVersion = 2;
-    nextInput.imageData = nextImage;
+    auto nextInput = BuildGraphInput(
+        data, nextImage, input.inputModelBounds);
     auto blockedService = std::make_shared<CropServiceStub>(
-        RenderInputStamp{ nextImage.GetPointer(), 2 },
+        RenderInputStamp{ nextInput.data->self },
         renderer);
     auto blockedView = view;
     blockedView.referenceService = blockedService;
@@ -423,8 +437,8 @@ int CropBridgeSuite::GetFailCount() const
         reboundService->GetEffectState().activeRevision;
 
     bool hasAsyncResult = false;
-    expect(bridge.BuildCropResult(input, [&hasAsyncResult](CropBuildResult result) {
-        hasAsyncResult = result.inputVersion == 1
+    expect(bridge.BuildCropResult(input, [&hasAsyncResult, &input](CropMaterializationCandidate result) {
+        hasAsyncResult = result.sourceRevision == input.data->self
             && result.nodeCount == 1
             && result.operations.size() == 1
             && result.operations[0].removalMode == CropRemovalMode::RemoveInside;
@@ -477,10 +491,10 @@ int CropBridgeSuite::GetFailCount() const
         "Restart target commit should retire the previous target only after the replacement is committed.");
     expect(bridge.ExitCrop(), "Bridge should stop replacement-target editing while preserving its result.");
 
-    auto changedInput = input;
-    changedInput.inputVersion = 2;
+    auto changedInput = BuildGraphInput(
+        data, image, input.inputModelBounds);
     expect(resumedService->SetRenderInputStamp(
-        { image.GetPointer(), changedInput.inputVersion }),
+        { changedInput.data->self }),
         "Target service should publish the replacement input stamp.");
     expect(bridge.SetCropInput(changedInput), "Input version change should publish a new snapshot.");
     expect(resumedService->GetEffectState().status
@@ -490,7 +504,7 @@ int CropBridgeSuite::GetFailCount() const
     expect(!bridge.NextCrop(), "An empty history should not move forward.");
 
     bool hasBuildResult = false;
-    expect(!bridge.BuildCropResult(changedInput, [&hasBuildResult](CropBuildResult result) {
+    expect(!bridge.BuildCropResult(changedInput, [&hasBuildResult](CropMaterializationCandidate result) {
         hasBuildResult = result.failureReason == CropFailure::BadInput;
     }), "Build should reject an empty committed prefix.");
     expect(hasBuildResult, "Rejected build should synchronously report its failure.");
@@ -591,7 +605,7 @@ int CropBridgeSuite::GetFailCount() const
     bool hasBranchResult = false;
     expect(repeatBridge.BuildCropResult(
         input,
-        [&hasBranchResult](CropBuildResult result) {
+        [&hasBranchResult](CropMaterializationCandidate result) {
             hasBranchResult = result.nodeCount == 3
                 && result.operations.size() == 3
                 && result.operations[0].operationIndex == 1
@@ -640,7 +654,7 @@ int CropBridgeSuite::GetFailCount() const
     bool hasMiddleResult = false;
     expect(repeatBridge.BuildCropResult(
         input,
-        [&hasMiddleResult](CropBuildResult result) {
+        [&hasMiddleResult](CropMaterializationCandidate result) {
             hasMiddleResult = result.nodeCount == 2
                 && result.operations.size() == 2
                 && result.operations[0].operationIndex == 1
@@ -660,9 +674,8 @@ int CropBridgeSuite::GetFailCount() const
     auto materializedImage =
         vtkSmartPointer<vtkImageData>::New();
     materializedImage->ShallowCopy(image);
-    auto materializedInput = input;
-    materializedInput.inputVersion = 2;
-    materializedInput.imageData = materializedImage;
+    auto materializedInput = BuildGraphInput(
+        data, materializedImage, input.inputModelBounds);
     const auto visibleRevision =
         repeatService->GetEffectState().activeRevision;
     auto materializedCommit = repeatBridge.BuildCropCommit(
@@ -692,7 +705,7 @@ int CropBridgeSuite::GetFailCount() const
                 == visibleRevision,
         "The old Strategy should keep the current committed node visible until the new render input converges.");
     expect(repeatService->SetRenderInputStamp(
-                { materializedImage.GetPointer(), 2 })
+                { materializedInput.data->self })
             && repeatBridge.SendShaderCommit()
             && !repeatBridge.GetShaderTickNeeded()
             && repeatService->GetEffectState().status
@@ -739,8 +752,8 @@ int CropBridgeSuite::GetFailCount() const
     bool hasRootResult = false;
     expect(repeatBridge.BuildCropResult(
         input,
-        [&hasRootResult](CropBuildResult result) {
-            hasRootResult = result.inputVersion == 1
+        [&hasRootResult, &input](CropMaterializationCandidate result) {
+            hasRootResult = result.sourceRevision == input.data->self
                 && result.nodeCount == 3
                 && result.operations.size() == 3
                 && result.operations[0].operationIndex == 1
@@ -759,15 +772,15 @@ int CropBridgeSuite::GetFailCount() const
             && hasRootResult,
         "Root build should fuse A-B-F without publishing or caching intermediate masks.");
 
-    auto originalInput = input;
-    originalInput.inputVersion = 3;
+    auto originalInput = BuildGraphInput(
+        data, image, input.inputModelBounds);
     auto originalCommit = repeatBridge.BuildCropCommit(
         originalInput, 0);
     const bool isOriginalReady = originalCommit
         && repeatBridge.GetCropHistory().nodeCount == 1
         && repeatBridge.GetCropHistory().baseNodeCount == 2
         && repeatService->SetRenderInputStamp(
-            { image.GetPointer(), 3 });
+            { originalInput.data->self });
     if (isOriginalReady) {
         repeatBridge.SetCropCommit(std::move(*originalCommit));
     }
@@ -797,11 +810,10 @@ int CropBridgeSuite::GetFailCount() const
     lagView.targetServices = { lagService };
     auto lagImage = vtkSmartPointer<vtkImageData>::New();
     lagImage->ShallowCopy(image);
-    auto lagInput = input;
-    lagInput.inputVersion = 4;
-    lagInput.imageData = lagImage;
+    auto lagInput = BuildGraphInput(
+        data, lagImage, input.inputModelBounds);
     const RenderInputStamp lagStamp = {
-        lagImage.GetPointer(), 4
+        lagInput.data->self
     };
     CropBridge lagBridge;
     expect(lagBridge.StartView(lagView)
@@ -887,7 +899,7 @@ int CropBridgeSuite::GetFailCount() const
     bool hasShapeSeq = false;
     expect(zeroBridge.BuildCropResult(
         input,
-        [&hasShapeSeq, &isPlaneOp](CropBuildResult result) {
+        [&hasShapeSeq, &isPlaneOp](CropMaterializationCandidate result) {
             hasShapeSeq = result.nodeCount == isPlaneOp.size()
                 && result.operations.size() == isPlaneOp.size();
             for (std::size_t index = 0;
@@ -1057,8 +1069,8 @@ int CropBridgeSuite::GetFailCount() const
     finishView.referenceService = finishService;
     finishView.targetServices = { finishService };
     CropBridge finishBridge;
-    auto finishInput = input;
-    finishInput.inputVersion = 2;
+    auto finishInput = BuildGraphInput(
+        data, image, input.inputModelBounds);
     auto finishCommit = finishBridge.StartView(finishView)
         && finishBridge.SetCropInput(input)
         ? finishBridge.BuildCropCommit(finishInput, 0)

@@ -297,7 +297,7 @@ bool GetPartCatalogStorageBytes(
 
 std::shared_ptr<const PartSetSnapshot> BuildPartSetSnapshot(
     const PartCatalog& catalog,
-    const DataVersion sourceVersion,
+    const DataRevisionRef sourceRevision,
     const bool isStale)
 {
     try {
@@ -310,7 +310,7 @@ std::shared_ptr<const PartSetSnapshot> BuildPartSetSnapshot(
 
         auto snapshot = std::make_shared<PartSetSnapshot>();
         snapshot->partSetId = catalog.partSetId;
-        snapshot->sourceVersion = sourceVersion;
+        snapshot->sourceRevision = sourceRevision;
         snapshot->resultRevision = catalog.resultRevision;
         snapshot->catalogRevision = catalog.catalogRevision;
         snapshot->isStale = isStale;

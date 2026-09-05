@@ -113,8 +113,9 @@ bool HostFrameCoordinator::Enqueue(
     std::string featureId,
     FeatureSceneDelta delta)
 {
-    const bool hasStampIdentity = delta.inputStamp.identity != nullptr;
-    const bool hasStampVersion = delta.inputStamp.version != 0;
+    const bool hasStampIdentity = GetDataEntityIdValid(
+        delta.inputStamp.dataRevision.entityId);
+    const bool hasStampVersion = delta.inputStamp.dataRevision.generation != 0;
     if (featureId.empty() || delta.requestId == 0
         || delta.viewIds.empty()
         || hasStampIdentity != hasStampVersion

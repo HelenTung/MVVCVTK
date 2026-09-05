@@ -31,6 +31,7 @@ target_link_libraries(
     mvvcvtk_part_segmentation_tests
     PRIVATE
         mvvcvtk_host_test_internal
+        MVVCVTK::Host
         MVVCVTK::PartSegmentation
         MVVCVTKInternal::FeatureSupport
         ${MVVCVTK_VTK_TARGETS}
