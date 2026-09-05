@@ -1243,13 +1243,50 @@ DataSnapshot SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
 
     std::vector<double> vertices;
     vertices.reserve(stagedGeneration->points->size() * 3U);
+    // 通用网格发布测量消费者所需的最小质量信息。无效项使用有限占位值，
+    // measurement.valid 是解释其余字段的前置条件；它不代表完整计量不确定度。
+    constexpr std::size_t qualityBytesPerPoint = 7U * sizeof(double) * 2U;
+    if (stagedGeneration->points->size()
+        > m_config.maxWorkingBytes / qualityBytesPerPoint) return {};
+    std::vector<MeshAttribute> attributes{
+        { "measurement.valid", 1, {} },
+        { "measurement.fit-residual", 1, {} },
+        { "measurement.support-ratio", 1, {} },
+        { "measurement.localization-sigma", 1, {} },
+        { "measurement.normal", 3, {} }
+    };
+    for (auto& attribute : attributes) {
+        attribute.values.reserve(
+            stagedGeneration->points->size() * attribute.componentCount);
+    }
     for (const auto& point : *stagedGeneration->points) {
         vertices.insert(vertices.end(), point.positionModel.begin(), point.positionModel.end());
+        double normalLength = 0.0;
+        for (const auto value : point.normalModel) {
+            normalLength += static_cast<double>(value) * value;
+        }
+        normalLength = std::sqrt(normalLength);
+        const bool hasQuality = std::isfinite(point.fitResidual)
+            && std::isfinite(point.validSupportRatio)
+            && std::isfinite(point.estimatedLocalizationSigma)
+            && std::isfinite(normalLength) && normalLength > 1e-12
+            && point.fitResidual >= 0.0F
+            && point.validSupportRatio > 0.0F && point.validSupportRatio <= 1.0F
+            && point.estimatedLocalizationSigma >= 0.0F;
+        const bool isValid = hasQuality && point.flags == SurfacePointFlags::None
+            && stagedGeneration->method != SurfaceDeterminationMethod::GlobalIsoPreview;
+        attributes[0].values.push_back(isValid ? 1.0 : 0.0);
+        attributes[1].values.push_back(hasQuality ? point.fitResidual : 0.0);
+        attributes[2].values.push_back(hasQuality ? point.validSupportRatio : 0.0);
+        attributes[3].values.push_back(hasQuality ? point.estimatedLocalizationSigma : 0.0);
+        for (const auto value : point.normalModel) {
+            attributes[4].values.push_back(hasQuality ? value / normalLength : 0.0);
+        }
     }
     std::vector<std::uint64_t> triangles(stagedGeneration->triangleIndices->begin(),
         stagedGeneration->triangleIndices->end());
     const auto mesh = std::make_shared<const SurfaceMeshPayload>(
-        std::move(vertices), std::move(triangles));
+        std::move(vertices), std::move(triangles), std::move(attributes));
     if (!isThresholdOnly && !mesh->GetValid()) return {};
     const auto& expected = request.resultBinding;
     DataExpectation sourceExpected;

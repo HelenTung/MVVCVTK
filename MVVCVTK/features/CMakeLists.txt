@@ -31,3 +31,7 @@ if(MVVCVTK_BUILD_MODEL_ROTATION)
 else()
     ResetSdkStage("${CMAKE_CURRENT_BINARY_DIR}/ModelRotation/mvvcvtk-source-api-include")
 endif()
+
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    add_subdirectory(MetrologyAlignment)
+endif()
