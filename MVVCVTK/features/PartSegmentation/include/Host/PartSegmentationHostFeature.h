@@ -32,6 +32,11 @@ public:
         PartSegmentationRequest request,
         PartSegmentationCallback onComplete = nullptr);
     PartSegmentationState GetState() const;
+    std::shared_ptr<const PartSetSnapshot> GetPartSetSnapshot() const;
+    PartMutationResult SetPartState(
+        const PartBindingRef& part,
+        const PartStatePatch& patch,
+        std::uint64_t expectedCatalogRevision);
 
 private:
     class Impl;

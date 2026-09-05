@@ -8,12 +8,16 @@ namespace {
 int GetSuiteFailCount(const std::string_view suite)
 {
     if (suite == "algorithm") return GetPartAlgorithmFailCount();
+    if (suite == "catalog") return GetPartCatalogFailCount();
     if (suite == "lifecycle") return GetPartLifecycleFailCount();
+    if (suite == "lineage") return GetPartLineageFailCount();
     if (suite == "display") return GetPartDisplayFailCount();
     if (suite == "scale") return GetPartScaleFailCount();
     if (suite == "all") {
         return GetPartAlgorithmFailCount()
+            + GetPartCatalogFailCount()
             + GetPartLifecycleFailCount()
+            + GetPartLineageFailCount()
             + GetPartDisplayFailCount()
             + GetPartScaleFailCount();
     }

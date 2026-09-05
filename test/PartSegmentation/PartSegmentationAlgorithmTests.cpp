@@ -63,7 +63,7 @@ int GetPartAlgorithmFailCount()
         params);
     failureCount += GetCaseResult(
         background.error == PartAlgorithmError::None
-            && background.parts.empty()
+            && background.metricsByLabel.size() == 1
             && std::all_of(
                 background.labels.begin(), background.labels.end(),
                 [](const std::uint32_t label) { return label == 0; }),
@@ -77,10 +77,12 @@ int GetPartAlgorithmFailCount()
         singleVolume, params);
     failureCount += GetCaseResult(
         single.error == PartAlgorithmError::None
-            && single.labels == std::vector<std::uint32_t>{ 1 }
-            && single.parts.size() == 1
-            && single.parts[0].voxelCount == 1
-            && GetNearlyEqual(single.parts[0].physicalVolumeMM3, 24.0),
+            && single.labels == std::vector<PartLabelId>{ 1 }
+            && single.metricsByLabel.size() == 2
+            && single.metricsByLabel[0].voxelCount == 0
+            && single.metricsByLabel[1].voxelCount == 1
+            && GetNearlyEqual(
+                single.metricsByLabel[1].physicalVolumeMM3, 24.0),
         "Single foreground voxel produces one deterministic label") ? 0 : 1;
 
     const std::vector<double> separatedValues{
@@ -93,8 +95,8 @@ int GetPartAlgorithmFailCount()
     failureCount += GetCaseResult(
         separated.error == PartAlgorithmError::None
             && separated.labels
-                == std::vector<std::uint32_t>{ 1, 1, 0, 2 }
-            && separated.parts.size() == 2,
+                == std::vector<PartLabelId>{ 1, 1, 0, 2 }
+            && separated.metricsByLabel.size() == 3,
         "Separated foreground regions receive stable labels") ? 0 : 1;
 
     const std::vector<double> diagonalValues{ 1.0, 0.0, 0.0, 1.0 };
@@ -104,7 +106,7 @@ int GetPartAlgorithmFailCount()
         params);
     failureCount += GetCaseResult(
         diagonal.error == PartAlgorithmError::None
-            && diagonal.parts.size() == 2,
+            && diagonal.metricsByLabel.size() == 3,
         "Diagonal contact stays disconnected under 6-connectivity") ? 0 : 1;
 
     const std::vector<float> maskedValues{ 1.0F, 1.0F };
@@ -118,7 +120,7 @@ int GetPartAlgorithmFailCount()
         maskedVolume, params);
     failureCount += GetCaseResult(
         masked.error == PartAlgorithmError::None
-            && masked.labels == std::vector<std::uint32_t>{ 1, 0 },
+            && masked.labels == std::vector<PartLabelId>{ 1, 0 },
         "UInt16 mask keeps finite nonzero value 256") ? 0 : 1;
 
     const std::vector<double> nonFiniteValues{
@@ -130,7 +132,7 @@ int GetPartAlgorithmFailCount()
         params);
     failureCount += GetCaseResult(
         nonFinite.error == PartAlgorithmError::None
-            && nonFinite.labels == std::vector<std::uint32_t>{ 0, 1 },
+            && nonFinite.labels == std::vector<PartLabelId>{ 0, 1 },
         "Non-finite scalar is background") ? 0 : 1;
 
     PartAlgorithmParams filteredParams = params;
@@ -139,9 +141,9 @@ int GetPartAlgorithmFailCount()
         separatedVolume, filteredParams);
     failureCount += GetCaseResult(
         filtered.error == PartAlgorithmError::None
-            && filtered.parts.size() == 1
+            && filtered.metricsByLabel.size() == 2
             && filtered.labels
-                == std::vector<std::uint32_t>{ 1, 1, 0, 0 },
+                == std::vector<PartLabelId>{ 1, 1, 0, 0 },
         "Minimum voxel rule removes small parts without label gaps") ? 0 : 1;
 
     auto offsetVolume = BuildVolume(
@@ -158,13 +160,16 @@ int GetPartAlgorithmFailCount()
         offsetVolume, params);
     failureCount += GetCaseResult(
         offset.error == PartAlgorithmError::None
-            && offset.parts.size() == 1
-            && offset.parts[0].voxelExtent
+            && offset.metricsByLabel.size() == 2
+            && offset.metricsByLabel[1].voxelExtent
                 == std::array<int, 6>{ 5, 5, 7, 7, 9, 9 }
-            && GetNearlyEqual(offset.parts[0].centroidWorld[0], -9.0)
-            && GetNearlyEqual(offset.parts[0].centroidWorld[1], 9.0)
-            && GetNearlyEqual(offset.parts[0].centroidWorld[2], 12.0),
-        "Non-zero extent and direction map catalog to world") ? 0 : 1;
+            && GetNearlyEqual(
+                offset.metricsByLabel[1].centroidInputPhysical[0], -9.0)
+            && GetNearlyEqual(
+                offset.metricsByLabel[1].centroidInputPhysical[1], 9.0)
+            && GetNearlyEqual(
+                offset.metricsByLabel[1].centroidInputPhysical[2], 12.0),
+        "Non-zero extent maps metrics to input physical space") ? 0 : 1;
 
     PartAlgorithmParams budgetParams = params;
     budgetParams.maxWorkingBytes = 1;
@@ -203,7 +208,7 @@ int GetPartAlgorithmFailCount()
         separatedVolume, overflowParams);
     failureCount += GetCaseResult(
         overflow.error == PartAlgorithmError::LabelOverflow,
-        "PartId limit rejects label overflow") ? 0 : 1;
+        "Part label limit rejects label overflow") ? 0 : 1;
 
     constexpr std::uint32_t exactPartLimit = 4096;
     std::vector<double> exactLimitValues(
@@ -223,16 +228,16 @@ int GetPartAlgorithmFailCount()
         exactLimitParams);
     failureCount += GetCaseResult(
         exactLimit.error == PartAlgorithmError::None
-            && exactLimit.parts.size() == exactPartLimit
-            && exactLimit.parts.back().partId == exactPartLimit,
-        "PartId limit accepts the exact configured count") ? 0 : 1;
+            && exactLimit.metricsByLabel.size() == exactPartLimit + 1U
+            && exactLimit.metricsByLabel.back().voxelCount == 1,
+        "Part label limit accepts the exact configured count") ? 0 : 1;
 
     const auto cancelled = ClassicalPartSegmenter::BuildLabels(
         separatedVolume, params, [] { return true; });
     failureCount += GetCaseResult(
         cancelled.error == PartAlgorithmError::Cancelled
             && cancelled.labels.empty()
-            && cancelled.parts.empty(),
+            && cancelled.metricsByLabel.empty(),
         "Cancellation publishes no partial labels") ? 0 : 1;
 
     const auto repeated = ClassicalPartSegmenter::BuildLabels(
@@ -240,7 +245,7 @@ int GetPartAlgorithmFailCount()
     failureCount += GetCaseResult(
         repeated.error == PartAlgorithmError::None
             && repeated.labels == separated.labels
-            && repeated.parts.size() == separated.parts.size(),
+            && repeated.metricsByLabel == separated.metricsByLabel,
         "Repeated run preserves deterministic partition") ? 0 : 1;
 
     const std::vector<float> floatValues{
@@ -263,7 +268,7 @@ int GetPartAlgorithmFailCount()
         floatResult.error == PartAlgorithmError::None
             && doubleResult.error == PartAlgorithmError::None
             && floatResult.labels == doubleResult.labels
-            && floatResult.parts.size() == doubleResult.parts.size()
+            && floatResult.metricsByLabel == doubleResult.metricsByLabel
             && floatValues.data() == floatData
             && doubleValues.data() == doubleData,
         "Direct float and double views preserve source and match") ? 0 : 1;
@@ -275,7 +280,7 @@ int GetPartAlgorithmFailCount()
                 params);
             return result.error == PartAlgorithmError::None
                 && result.labels
-                    == std::vector<std::uint32_t>{ 0U, 1U };
+                    == std::vector<PartLabelId>{ 0U, 1U };
         };
     failureCount += GetCaseResult(
         getScalarPass(
@@ -294,7 +299,7 @@ int GetPartAlgorithmFailCount()
                 std::vector<std::int32_t>{ 0, 1 },
                 PartScalarType::Int32)
             && getScalarPass(
-                std::vector<std::uint32_t>{ 0, 1 },
+                std::vector<PartLabelId>{ 0, 1 },
                 PartScalarType::UInt32)
             && getScalarPass(
                 std::vector<std::int64_t>{ 0, 1 },
@@ -328,13 +333,13 @@ int GetPartAlgorithmFailCount()
         intBoundaryParams);
     failureCount += GetCaseResult(
         uintBoundary.error == PartAlgorithmError::None
-            && uintBoundary.parts.empty()
+            && uintBoundary.metricsByLabel.size() == 1
             && uintBoundary.labels
-                == std::vector<std::uint32_t>{ 0U }
+                == std::vector<PartLabelId>{ 0U }
             && intBoundary.error == PartAlgorithmError::None
-            && intBoundary.parts.empty()
+            && intBoundary.metricsByLabel.size() == 1
             && intBoundary.labels
-                == std::vector<std::uint32_t>{ 0U },
+                == std::vector<PartLabelId>{ 0U },
         "Integer comparison rejects exclusive 64-bit upper bounds")
         ? 0 : 1;
 
@@ -358,9 +363,9 @@ int GetPartAlgorithmFailCount()
         int8FractionParams);
     failureCount += GetCaseResult(
         uint8Fraction.error == PartAlgorithmError::None
-            && uint8Fraction.parts.empty()
+            && uint8Fraction.metricsByLabel.size() == 1
             && int8Fraction.error == PartAlgorithmError::None
-            && int8Fraction.parts.empty(),
+            && int8Fraction.metricsByLabel.size() == 1,
         "Fractional thresholds above integer maxima stay background")
         ? 0 : 1;
 

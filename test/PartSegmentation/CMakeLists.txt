@@ -1,8 +1,10 @@
 add_executable(
     mvvcvtk_part_segmentation_tests
     PartSegmentationAlgorithmTests.cpp
+    PartSegmentationCatalogTests.cpp
     PartSegmentationDisplayTests.cpp
     PartSegmentationLifecycleTests.cpp
+    PartSegmentationLineageTests.cpp
     PartSegmentationScaleTests.cpp
     PartSegmentationTestCases.h
     PartSegmentationTests.cpp
@@ -20,6 +22,7 @@ target_include_directories(
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include/Algorithms"
+        "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include/Model"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include/Render"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include/Render/Strategies"
         "${PROJECT_SOURCE_DIR}/MVVCVTK/features/PartSegmentation/include/Services"
@@ -38,7 +41,7 @@ vtk_module_autoinit(
     MODULES ${MVVCVTK_VTK_TARGETS}
 )
 
-foreach(_mvvcvtk_part_suite IN ITEMS algorithm lifecycle display scale)
+foreach(_mvvcvtk_part_suite IN ITEMS algorithm catalog lifecycle lineage display scale)
     add_test(
         NAME "PartSegmentation.${_mvvcvtk_part_suite}"
         COMMAND mvvcvtk_part_segmentation_tests ${_mvvcvtk_part_suite}

@@ -74,8 +74,8 @@ struct PartAlgorithmResult final {
     PartAlgorithmError error = PartAlgorithmError::InvalidInput;
     std::size_t requiredBytes = 0;
     PartAlgorithmMetrics metrics;
-    std::vector<std::uint32_t> labels;
-    std::vector<PartRecord> parts;
+    std::vector<PartLabelId> labels;
+    std::vector<PartMetrics> metricsByLabel;
 };
 
 class ClassicalPartSegmenter final {

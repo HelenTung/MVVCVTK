@@ -3,6 +3,7 @@
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Data/TrustedImageState.h"
 #include "Host/PartSegmentationHostTypes.h"
+#include "Model/PartLineageMatcher.h"
 
 #include <array>
 #include <atomic>
@@ -32,8 +33,10 @@ struct PartLabelCandidate final {
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     };
-    std::shared_ptr<std::vector<std::uint32_t>> labels;
-    std::vector<PartRecord> parts;
+    std::shared_ptr<std::vector<PartLabelId>> labels;
+    std::shared_ptr<const PartCatalog> catalog;
+    std::uint64_t expectedResultRevision = 0;
+    std::uint64_t expectedCatalogRevision = 0;
     std::size_t requiredBytes = 0;
     PartAlgorithmMetrics metrics;
 };
@@ -51,7 +54,10 @@ public:
         TrustedImageSnapshot source,
         PartSegmentationStartParams params,
         std::size_t maxWorkingBytes,
-        std::uint64_t requestId);
+        std::uint64_t requestId,
+        PartHistorySnapshot previous = {},
+        std::uint64_t expectedResultRevision = 0,
+        std::uint64_t expectedCatalogRevision = 0);
     void StopRequest() noexcept;
     std::optional<PartLabelCandidate> GetComplete();
     std::optional<double> GetProgress(
@@ -65,6 +71,9 @@ private:
         PartSegmentationStartParams params;
         std::size_t maxWorkingBytes = 0;
         std::uint64_t requestId = 0;
+        PartHistorySnapshot previous;
+        std::uint64_t expectedResultRevision = 0;
+        std::uint64_t expectedCatalogRevision = 0;
     };
 
     void WorkerLoop() noexcept;
@@ -82,6 +91,7 @@ private:
     std::atomic<bool> m_cancelRequested{ false };
     std::atomic<std::uint64_t> m_progressRequestId{ 0 };
     std::atomic<std::uint32_t> m_progressPermille{ 0 };
+    PartIdentityFactory m_identities;
     bool m_isBusy = false;
     bool m_isStopping = false;
     bool m_hasExited = false;

@@ -24,20 +24,6 @@ namespace {
 
 constexpr std::uint32_t maxOverlayPartCount = 4096;
 
-std::uint32_t GetPartCount(vtkImageData& image)
-{
-    auto* scalars = image.GetPointData()
-        ? image.GetPointData()->GetScalars() : nullptr;
-    if (!scalars || scalars->GetNumberOfComponents() != 1) return 0;
-    double range[2]{};
-    scalars->GetRange(range);
-    if (!std::isfinite(range[1]) || range[1] <= 0.0
-        || range[1] > static_cast<double>(maxOverlayPartCount)) {
-        return 0;
-    }
-    return static_cast<std::uint32_t>(std::floor(range[1]));
-}
-
 std::array<double, 3> GetImageNormal(
     vtkImageData& image,
     const Orientation orientation)
@@ -68,43 +54,108 @@ std::array<double, 3> GetImageNormal(
     return normal;
 }
 
-void SetPartColor(
-    vtkLookupTable& table,
-    const std::uint32_t partId)
-{
-    const std::uint32_t hash = partId * 2654435761U;
-    const double red = 0.25 + 0.75
-        * static_cast<double>((hash >> 16) & 0xffU) / 255.0;
-    const double green = 0.25 + 0.75
-        * static_cast<double>((hash >> 8) & 0xffU) / 255.0;
-    const double blue = 0.25 + 0.75
-        * static_cast<double>(hash & 0xffU) / 255.0;
-    table.SetTableValue(
-        static_cast<vtkIdType>(partId), red, green, blue, 0.85);
-}
-
 bool SetLookupTable(
     vtkLookupTable& table,
-    const std::uint32_t partCount)
+    const PartRenderStateTable& states)
 {
-    if (partCount >= static_cast<std::uint32_t>(
-            std::numeric_limits<int>::max())) {
+    if (states.statesByLabel.empty()
+        || states.statesByLabel.size() - 1U > maxOverlayPartCount
+        || states.statesByLabel.size()
+            > static_cast<std::size_t>(
+                std::numeric_limits<vtkIdType>::max())) {
         return false;
     }
     table.SetNumberOfTableValues(
-        static_cast<vtkIdType>(partCount) + 1);
-    table.SetTableRange(0.0, static_cast<double>(
-        std::max<std::uint32_t>(1U, partCount)));
-    table.SetTableValue(0, 0.0, 0.0, 0.0, 0.0);
-    for (std::uint32_t partId = 1;
-        partId <= partCount; ++partId) {
-        SetPartColor(table, partId);
+        static_cast<vtkIdType>(states.statesByLabel.size()));
+    table.SetTableRange(
+        0.0,
+        static_cast<double>(std::max<std::size_t>(
+            1U, states.statesByLabel.size() - 1U)));
+    for (std::size_t index = 0;
+        index < states.statesByLabel.size(); ++index) {
+        const auto& color = states.statesByLabel[index].color;
+        table.SetTableValue(
+            static_cast<vtkIdType>(index),
+            color[0], color[1], color[2], color[3]);
     }
     table.Build();
     return true;
 }
 
 } // namespace
+
+std::optional<PartRenderStateTable> BuildPartRenderStateTable(
+    const PartCatalog& catalog)
+{
+    if (!GetPartSetIdValid(catalog.partSetId)
+        || catalog.resultRevision == 0
+        || catalog.catalogRevision == 0
+        || catalog.partsByLabel.empty()
+        || catalog.partsByLabel.size() - 1U > maxOverlayPartCount) {
+        return std::nullopt;
+    }
+    try {
+        PartRenderStateTable table;
+        table.statesByLabel.resize(catalog.partsByLabel.size());
+        for (std::size_t index = 1;
+            index < catalog.partsByLabel.size(); ++index) {
+            const auto& entry = catalog.partsByLabel[index];
+            if (entry.labelId != static_cast<PartLabelId>(index)
+                || !GetPartObjectIdValid(entry.objectId)) {
+                return std::nullopt;
+            }
+            auto& state = table.statesByLabel[index];
+            state.color = entry.presentation.color;
+            state.color[3] = entry.presentation.isVisible
+                ? state.color[3] * entry.presentation.opacity : 0.0;
+            state.isSelected = entry.presentation.isSelected;
+            if (state.isSelected && state.color[3] > 0.0) {
+                // 选择高亮只改变本次 LUT 投影，不改变目录中的稳定颜色。
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    state.color[channel] =
+                        0.5 + 0.5 * state.color[channel];
+                }
+            }
+        }
+        return table;
+    }
+    catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool SetPartStates(
+    const std::vector<std::shared_ptr<PartOverlayControl>>& controls,
+    const PartRenderStateTable& next,
+    const PartRenderStateTable& previous) noexcept
+{
+    std::size_t appliedCount = 0;
+    for (const auto& control : controls) {
+        if (!control) {
+            while (appliedCount > 0) {
+                --appliedCount;
+                if (controls[appliedCount]) {
+                    (void)controls[appliedCount]->SetPartStates(previous);
+                }
+            }
+            return false;
+        }
+        if (!control->SetPartStates(next)) {
+            // control 可以在返回 false 前触及内部 VTK 状态；失败项也做
+            // best-effort 恢复，再逆序恢复此前已经完整应用的 View。
+            (void)control->SetPartStates(previous);
+            while (appliedCount > 0) {
+                --appliedCount;
+                if (controls[appliedCount]) {
+                    (void)controls[appliedCount]->SetPartStates(previous);
+                }
+            }
+            return false;
+        }
+        ++appliedCount;
+    }
+    return true;
+}
 
 PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
     : m_actor(vtkSmartPointer<vtkActor>::New())
@@ -116,7 +167,7 @@ PartSurfaceOverlayStrategy::PartSurfaceOverlayStrategy()
     m_mapper->SetLookupTable(m_lut);
     m_mapper->SetResolveCoincidentTopologyToPolygonOffset();
     m_actor->SetMapper(m_mapper);
-    m_actor->GetProperty()->SetOpacity(0.85);
+    m_actor->GetProperty()->SetOpacity(1.0);
     m_actor->GetProperty()->SetLighting(false);
     m_actor->SetPickable(false);
     AttachProp(m_actor);
@@ -127,25 +178,37 @@ void PartSurfaceOverlayStrategy::SetInputData(
 {
     auto* image = vtkImageData::SafeDownCast(data);
     if (!image) return;
-    const std::uint32_t partCount = GetPartCount(*image);
-    if (!SetLookupTable(*m_lut, partCount)) return;
-
+    m_image = image;
     m_surface->SetInputData(image);
-    m_surface->SetNumberOfContours(static_cast<int>(partCount));
-    for (std::uint32_t partId = 1;
-        partId <= partCount; ++partId) {
-        m_surface->SetValue(
-            static_cast<int>(partId - 1),
-            static_cast<double>(partId));
-    }
-    m_mapper->SetScalarRange(
-        1.0, static_cast<double>(std::max<std::uint32_t>(1U, partCount)));
 }
 
 void PartSurfaceOverlayStrategy::SetOverlayState(
     const FeatureOverlayState& state)
 {
     Set3DPropsTransform(state.modelToWorld);
+}
+
+bool PartSurfaceOverlayStrategy::SetPartStates(
+    const PartRenderStateTable& states) noexcept
+{
+    try {
+        if (!m_image || !SetLookupTable(*m_lut, states)) return false;
+        const auto partCount = static_cast<std::uint32_t>(
+            states.statesByLabel.size() - 1U);
+        m_surface->SetNumberOfContours(static_cast<int>(partCount));
+        for (std::uint32_t label = 1; label <= partCount; ++label) {
+            m_surface->SetValue(
+                static_cast<int>(label - 1U),
+                static_cast<double>(label));
+        }
+        m_mapper->SetScalarRange(
+            1.0,
+            static_cast<double>(std::max<std::uint32_t>(1U, partCount)));
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
 }
 
 PartSliceOverlayStrategy::PartSliceOverlayStrategy(
@@ -172,7 +235,6 @@ void PartSliceOverlayStrategy::SetInputData(
 {
     auto* image = vtkImageData::SafeDownCast(data);
     if (!image) return;
-    SetLookupTable(*image);
     m_mapper->SetInputData(image);
 
     double center[3]{};
@@ -197,7 +259,13 @@ void PartSliceOverlayStrategy::SetOverlayState(
     m_plane->SetNormal(m_normal.data());
 }
 
-void PartSliceOverlayStrategy::SetLookupTable(vtkImageData& image)
+bool PartSliceOverlayStrategy::SetPartStates(
+    const PartRenderStateTable& states) noexcept
 {
-    (void)::SetLookupTable(*m_lut, GetPartCount(image));
+    try {
+        return SetLookupTable(*m_lut, states);
+    }
+    catch (...) {
+        return false;
+    }
 }

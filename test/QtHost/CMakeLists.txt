@@ -12,6 +12,9 @@ endif()
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostGapTests.cpp)
 endif()
+if(MVVCVTK_BUILD_PART_SEGMENTATION)
+    list(APPEND MVVCVTK_HOST_METHOD_SOURCES QtHostPartSceneTests.cpp)
+endif()
 
 add_executable(
     mvvcvtk_host_method_tests
@@ -58,6 +61,12 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
         PRIVATE MVVCVTK_HAS_GAP_ANALYSIS=1
     )
 endif()
+if(MVVCVTK_BUILD_PART_SEGMENTATION)
+    target_compile_definitions(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK_HAS_PART_SEGMENTATION=1
+    )
+endif()
 
 target_link_libraries(
     mvvcvtk_host_method_tests
@@ -77,6 +86,12 @@ if(MVVCVTK_BUILD_GAP_ANALYSIS)
     target_link_libraries(
         mvvcvtk_host_method_tests
         PRIVATE MVVCVTK::GapAnalysis
+    )
+endif()
+if(MVVCVTK_BUILD_PART_SEGMENTATION)
+    target_link_libraries(
+        mvvcvtk_host_method_tests
+        PRIVATE MVVCVTK::PartSegmentation
     )
 endif()
 

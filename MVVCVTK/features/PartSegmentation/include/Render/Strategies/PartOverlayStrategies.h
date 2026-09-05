@@ -1,6 +1,7 @@
 #pragma once
 
 #include "App/ViewTypes.h"
+#include "Render/PartRenderStateTable.h"
 #include "Render/Support/FeatureOverlayBase.h"
 
 #include <vtkSmartPointer.h>
@@ -16,7 +17,9 @@ class vtkLookupTable;
 class vtkPlane;
 class vtkPolyDataMapper;
 
-class PartSurfaceOverlayStrategy final : public FeatureOverlayBase {
+class PartSurfaceOverlayStrategy final
+    : public FeatureOverlayBase
+    , public PartOverlayControl {
 public:
     PartSurfaceOverlayStrategy();
 
@@ -24,15 +27,20 @@ public:
         vtkSmartPointer<vtkDataObject> data) override;
     void SetOverlayState(
         const FeatureOverlayState& state) override;
+    bool SetPartStates(
+        const PartRenderStateTable& states) noexcept override;
 
 private:
     vtkSmartPointer<vtkActor> m_actor;
     vtkSmartPointer<vtkDiscreteMarchingCubes> m_surface;
     vtkSmartPointer<vtkPolyDataMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;
+    vtkSmartPointer<vtkImageData> m_image;
 };
 
-class PartSliceOverlayStrategy final : public FeatureOverlayBase {
+class PartSliceOverlayStrategy final
+    : public FeatureOverlayBase
+    , public PartOverlayControl {
 public:
     explicit PartSliceOverlayStrategy(Orientation orientation);
 
@@ -40,10 +48,10 @@ public:
         vtkSmartPointer<vtkDataObject> data) override;
     void SetOverlayState(
         const FeatureOverlayState& state) override;
+    bool SetPartStates(
+        const PartRenderStateTable& states) noexcept override;
 
 private:
-    void SetLookupTable(vtkImageData& image);
-
     vtkSmartPointer<vtkImageSlice> m_slice;
     vtkSmartPointer<vtkImageResliceMapper> m_mapper;
     vtkSmartPointer<vtkLookupTable> m_lut;

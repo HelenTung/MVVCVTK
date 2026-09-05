@@ -423,14 +423,25 @@ namespace {
                     const auto owner = weakFeature.lock();
                     const auto state = owner
                         ? owner->GetState() : PartSegmentationState{};
+                    const auto snapshot = owner
+                        ? owner->GetPartSetSnapshot() : nullptr;
+                    const auto* firstPart = snapshot
+                        && !snapshot->parts.empty()
+                        ? &snapshot->parts.front() : nullptr;
                     isPassed = result.status == PartResultStatus::Succeeded
                         && result.failureReason == PartFailureReason::None
                         && (expectedPartCount
                             ? result.partCount == *expectedPartCount
                             : result.partCount > 0)
                         && state.status == PartSegmentationStatus::Succeeded
-                        && state.parts.size() == result.partCount
-                        && state.resultRevision == result.resultRevision;
+                        && state.partCount == result.partCount
+                        && state.resultRevision == result.resultRevision
+                        && snapshot
+                        && snapshot->partSetId == state.partSetId
+                        && snapshot->resultRevision == state.resultRevision
+                        && snapshot->catalogRevision == state.catalogRevision
+                        && snapshot->parts.size() == state.partCount
+                        && firstPart;
                     if (!expectedPartCount && isPassed) {
                         const auto renderStart = std::chrono::steady_clock::now();
                         isPassed = RenderPartViews(session);
@@ -451,7 +462,16 @@ namespace {
                         << " failure=" << static_cast<int>(result.failureReason)
                         << " source=" << result.sourceVersion
                         << " revision=" << result.resultRevision
+                        << " catalog_revision=" << state.catalogRevision
                         << " parts=" << result.partCount
+                        << " part_set_high=" << state.partSetId.high
+                        << " part_set_low=" << state.partSetId.low
+                        << " first_object_high=" << (firstPart
+                            ? firstPart->binding.object.objectId.high : 0)
+                        << " first_object_low=" << (firstPart
+                            ? firstPart->binding.object.objectId.low : 0)
+                        << " first_label=" << (firstPart
+                            ? firstPart->labelId : 0)
                         << " message=" << result.message
                         << " passed=" << isPassed
                         << '\n' << std::flush;

@@ -252,8 +252,8 @@ void SetFailure(
     const PartAlgorithmError error,
     const WorkingBudget& budget)
 {
-    std::vector<std::uint32_t>().swap(result.labels);
-    std::vector<PartRecord>().swap(result.parts);
+    std::vector<PartLabelId>().swap(result.labels);
+    std::vector<PartMetrics>().swap(result.metricsByLabel);
     result.error = error;
     result.requiredBytes = budget.GetRequired();
     result.metrics.peakWorkingBytes = budget.GetPeak();
@@ -395,7 +395,7 @@ template<typename Scalar>
 bool SetValueLabels(
     const PartScalarView& values,
     const double threshold,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress,
     const double endProgress)
@@ -422,7 +422,7 @@ bool SetValueLabels(
 template<typename Scalar>
 bool SetMaskLabels(
     const PartScalarView& validity,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
@@ -450,7 +450,7 @@ template<typename Scalar>
 bool SetTypedValues(
     const PartVolumeView& volume,
     const PartAlgorithmParams& params,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
@@ -466,7 +466,7 @@ bool SetTypedValues(
 bool SetTypedValues(
     const PartVolumeView& volume,
     const PartAlgorithmParams& params,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
@@ -508,7 +508,7 @@ bool SetTypedValues(
 template<typename Scalar>
 bool SetTypedMask(
     const PartScalarView& validity,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
@@ -521,7 +521,7 @@ bool SetTypedMask(
 
 bool SetTypedMask(
     const PartScalarView& validity,
-    std::vector<std::uint32_t>& labels,
+    std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
@@ -560,7 +560,7 @@ bool SetTypedMask(
     return false;
 }
 
-std::array<double, 3> GetWorld(
+std::array<double, 3> GetInputPhysical(
     const PartVolumeView& volume,
     const std::array<double, 3>& image)
 {
@@ -569,14 +569,14 @@ std::array<double, 3> GetWorld(
         image[1] * volume.spacing[1],
         image[2] * volume.spacing[2]
     };
-    std::array<double, 3> world{};
-    for (std::size_t row = 0; row < world.size(); ++row) {
-        world[row] = volume.origin[row]
+    std::array<double, 3> physical{};
+    for (std::size_t row = 0; row < physical.size(); ++row) {
+        physical[row] = volume.origin[row]
             + volume.direction[row * 3] * scaled[0]
             + volume.direction[row * 3 + 1] * scaled[1]
             + volume.direction[row * 3 + 2] * scaled[2];
     }
-    return world;
+    return physical;
 }
 
 struct PartStats final {
@@ -604,21 +604,19 @@ void SetStats(
     }
 }
 
-PartRecord BuildRecord(
+PartMetrics BuildMetrics(
     const PartVolumeView& volume,
-    const PartId partId,
     const std::size_t voxelCount,
     const PartStats& stats)
 {
-    PartRecord record;
-    record.partId = partId;
-    record.voxelCount = static_cast<std::uint64_t>(voxelCount);
-    record.physicalVolumeMM3 = static_cast<double>(voxelCount)
+    PartMetrics metrics;
+    metrics.voxelCount = static_cast<std::uint64_t>(voxelCount);
+    metrics.physicalVolumeMM3 = static_cast<double>(voxelCount)
         * std::abs(
             volume.spacing[0]
             * volume.spacing[1]
             * volume.spacing[2]);
-    record.voxelExtent = {
+    metrics.voxelExtent = {
         stats.minimum[0], stats.maximum[0],
         stats.minimum[1], stats.maximum[1],
         stats.minimum[2], stats.maximum[2]
@@ -629,9 +627,9 @@ PartRecord BuildRecord(
         centroidImage[axis] = static_cast<double>(
             stats.indexSum[axis] / static_cast<long double>(voxelCount));
     }
-    record.centroidWorld = GetWorld(volume, centroidImage);
+    metrics.centroidInputPhysical = GetInputPhysical(volume, centroidImage);
 
-    record.worldBounds = {
+    metrics.inputPhysicalBounds = {
         std::numeric_limits<double>::infinity(),
         -std::numeric_limits<double>::infinity(),
         std::numeric_limits<double>::infinity(),
@@ -650,34 +648,35 @@ PartRecord BuildRecord(
                     static_cast<double>(zSide == 0
                         ? stats.minimum[2] : stats.maximum[2])
                 };
-                const auto world = GetWorld(volume, image);
+                const auto physical = GetInputPhysical(volume, image);
                 for (std::size_t axis = 0; axis < 3; ++axis) {
-                    record.worldBounds[axis * 2] = std::min(
-                        record.worldBounds[axis * 2], world[axis]);
-                    record.worldBounds[axis * 2 + 1] = std::max(
-                        record.worldBounds[axis * 2 + 1], world[axis]);
+                    metrics.inputPhysicalBounds[axis * 2] = std::min(
+                        metrics.inputPhysicalBounds[axis * 2],
+                        physical[axis]);
+                    metrics.inputPhysicalBounds[axis * 2 + 1] = std::max(
+                        metrics.inputPhysicalBounds[axis * 2 + 1],
+                        physical[axis]);
                 }
             }
         }
     }
-    return record;
+    return metrics;
 }
 
-bool GetRecordValid(const PartRecord& record)
+bool GetMetricsValid(const PartMetrics& metrics)
 {
-    if (record.partId == 0
-        || record.voxelCount == 0
-        || !std::isfinite(record.physicalVolumeMM3)
-        || record.physicalVolumeMM3 <= 0.0) {
+    if (metrics.voxelCount == 0
+        || !std::isfinite(metrics.physicalVolumeMM3)
+        || metrics.physicalVolumeMM3 <= 0.0) {
         return false;
     }
     return std::all_of(
-            record.worldBounds.begin(),
-            record.worldBounds.end(),
+            metrics.inputPhysicalBounds.begin(),
+            metrics.inputPhysicalBounds.end(),
             [](const double value) { return std::isfinite(value); })
         && std::all_of(
-            record.centroidWorld.begin(),
-            record.centroidWorld.end(),
+            metrics.centroidInputPhysical.begin(),
+            metrics.centroidInputPhysical.end(),
             [](const double value) { return std::isfinite(value); });
 }
 
@@ -708,8 +707,10 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
     std::size_t labelBytes = 0;
     std::size_t catalogBytes = 0;
     std::size_t baseBytes = 0;
-    if (!GetProduct(voxelCount, sizeof(std::uint32_t), labelBytes)
-        || !GetProduct(partCapacity, sizeof(PartRecord), catalogBytes)
+    const std::size_t metricsCapacity = partCapacity + 1U;
+    if (!GetProduct(voxelCount, sizeof(PartLabelId), labelBytes)
+        || !GetProduct(
+            metricsCapacity, sizeof(PartMetrics), catalogBytes)
         || !GetSum(labelBytes, catalogBytes, baseBytes)) {
         budget.SetOverflow();
         SetFailure(result, PartAlgorithmError::BudgetExceeded, budget);
@@ -722,17 +723,18 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
 
     try {
         result.labels.resize(voxelCount);
-        result.parts.reserve(partCapacity);
+        result.metricsByLabel.reserve(metricsCapacity);
+        result.metricsByLabel.emplace_back();
         std::size_t actualLabelBytes = 0;
         std::size_t actualCatalogBytes = 0;
         std::size_t actualBaseBytes = 0;
         if (!GetProduct(
                 result.labels.capacity(),
-                sizeof(std::uint32_t),
+                sizeof(PartLabelId),
                 actualLabelBytes)
             || !GetProduct(
-                result.parts.capacity(),
-                sizeof(PartRecord),
+                result.metricsByLabel.capacity(),
+                sizeof(PartMetrics),
                 actualCatalogBytes)
             || !GetSum(
                 actualLabelBytes,
@@ -769,7 +771,7 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
         IndexBuffer currentFrontier;
         IndexBuffer nextFrontier;
         IndexBuffer filteredIndices;
-        PartId nextPartId = 0;
+        PartLabelId nextPartId = 0;
         std::size_t foregroundDone = 0;
         const std::size_t width =
             static_cast<std::size_t>(volume.dimensions[0]);
@@ -809,7 +811,7 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
 
             PartStats stats;
             std::size_t componentCount = 0;
-            PartId partId = 0;
+            PartLabelId partId = 0;
             bool isAccepted = false;
             PartAlgorithmError traversalError = PartAlgorithmError::None;
 
@@ -967,20 +969,21 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
                 }
                 continue;
             }
-            auto record = BuildRecord(
-                volume, partId, componentCount, stats);
-            if (!GetRecordValid(record)) {
+            auto metrics = BuildMetrics(volume, componentCount, stats);
+            if (!GetMetricsValid(metrics)
+                || result.metricsByLabel.size()
+                    != static_cast<std::size_t>(partId)) {
                 SetFailure(
                     result, PartAlgorithmError::InvalidInput, budget);
                 return result;
             }
-            result.parts.push_back(std::move(record));
+            result.metricsByLabel.push_back(std::move(metrics));
         }
 
         SendProgress(sendProgress, 0.95);
         const bool hasSentinel = std::any_of(
             result.labels.begin(), result.labels.end(),
-            [](const std::uint32_t label) {
+            [](const PartLabelId label) {
                 return label == unvisitedLabel || label == pendingLabel;
             });
         if (hasSentinel) {

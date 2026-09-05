@@ -454,6 +454,7 @@ int GetPartLifecycleFailCount()
                 progressValues.push_back(test.feature->GetState().progress);
             });
         const auto state = test.feature->GetState();
+        const auto firstSnapshot = test.feature->GetPartSetSnapshot();
         const void* const firstLabel =
             test.views->GetOverlay("part-top")->GetLabelPointer();
 
@@ -481,8 +482,17 @@ int GetPartLifecycleFailCount()
                 && std::is_sorted(
                     progressValues.begin(), progressValues.end())
                 && progressValues.back() == 1.0
-                && state.parts.size() == 2
+                && state.partCount == 2
                 && state.resultRevision == 1
+                && state.catalogRevision == 1
+                && firstSnapshot
+                && firstSnapshot->partSetId == state.partSetId
+                && firstSnapshot->resultRevision == 1
+                && firstSnapshot->catalogRevision == 1
+                && firstSnapshot->parts.size() == 2
+                && firstSnapshot->partSetId != PartSetId{}
+                && firstSnapshot->parts[0].binding.object.objectId
+                    != PartObjectId{}
                 && firstLabel != nullptr
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
@@ -501,6 +511,7 @@ int GetPartLifecycleFailCount()
         const bool didReplace = SendTicks(
             *test.feature, [&] { return replaceResult.has_value(); });
         const auto restored = test.feature->GetState();
+        const auto restoredSnapshot = test.feature->GetPartSetSnapshot();
         const void* const restoredLabel =
             test.views->GetOverlay("part-top")->GetLabelPointer();
         failureCount += GetCaseResult(
@@ -511,7 +522,9 @@ int GetPartLifecycleFailCount()
                     == PartFailureReason::DisplayFailed
                 && restored.status == PartSegmentationStatus::Succeeded
                 && restored.resultRevision == 1
-                && restored.parts.size() == 2
+                && restored.catalogRevision == 1
+                && restored.partCount == 2
+                && restoredSnapshot == firstSnapshot
                 && restoredLabel == firstLabel
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
@@ -564,11 +577,20 @@ int GetPartLifecycleFailCount()
             *test.feature, [&] { return nextResult.has_value(); });
         const void* const nextLabel =
             test.views->GetOverlay("part-top")->GetLabelPointer();
+        const auto nextSnapshot = test.feature->GetPartSetSnapshot();
         failureCount += GetCaseResult(
             next.status == PartAdmissionStatus::Accepted
                 && didCommitNext && nextResult
                 && nextResult->status == PartResultStatus::Succeeded
                 && nextResult->resultRevision == 2
+                && nextSnapshot
+                && nextSnapshot != firstSnapshot
+                && nextSnapshot->partSetId == firstSnapshot->partSetId
+                && nextSnapshot->catalogRevision == 2
+                && nextSnapshot->parts[0].binding.object.objectId
+                    == firstSnapshot->parts[0].binding.object.objectId
+                && nextSnapshot->parts[1].binding.object.objectId
+                    == firstSnapshot->parts[1].binding.object.objectId
                 && nextLabel != nullptr
                 && nextLabel != firstLabel,
             "Successful replacement atomically swaps the label generation")
@@ -585,10 +607,29 @@ int GetPartLifecycleFailCount()
             clear.status == PartAdmissionStatus::Accepted
                 && clearCount == 1
                 && cleared.status == PartSegmentationStatus::Idle
-                && cleared.parts.empty()
+                && cleared.partCount == 0
+                && !test.feature->GetPartSetSnapshot()
                 && test.views->GetOverlayCount() == 0
                 && test.host->GetActiveViews().empty(),
             "Clear retires the catalog and display") ? 0 : 1;
+        std::optional<PartSegmentationResult> restartedResult;
+        const auto restarted = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) {
+                restartedResult = std::move(result);
+            });
+        const bool didRestart = SendTicks(
+            *test.feature, [&] { return restartedResult.has_value(); });
+        const auto restartedSnapshot = test.feature->GetPartSetSnapshot();
+        failureCount += GetCaseResult(
+            restarted.status == PartAdmissionStatus::Accepted
+                && didRestart && restartedResult
+                && restartedResult->status == PartResultStatus::Succeeded
+                && restartedSnapshot
+                && restartedSnapshot->partSetId != firstSnapshot->partSetId
+                && restartedSnapshot->resultRevision == 1
+                && restartedSnapshot->catalogRevision == 1,
+            "Clear makes the next result a new PartSet generation") ? 0 : 1;
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
             "Clean lifecycle detaches successfully") ? 0 : 1;
@@ -620,6 +661,129 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
             "Budget failure remains detachable") ? 0 : 1;
+    }
+
+    {
+        TestHost test;
+        const bool isAttached = test.Attach();
+        std::optional<PartSegmentationResult> firstResult;
+        const auto first = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) {
+                firstResult = std::move(result);
+            });
+        const bool didComplete = SendTicks(
+            *test.feature, [&] { return firstResult.has_value(); });
+        const auto firstSnapshot = test.feature->GetPartSetSnapshot();
+        PartStatePatch namePatch;
+        namePatch.name = "retained name";
+        namePatch.isReviewed = true;
+        const auto named = firstSnapshot
+            ? test.feature->SetPartState(
+                firstSnapshot->parts[0].binding,
+                namePatch,
+                firstSnapshot->catalogRevision)
+            : PartMutationResult{};
+        const auto namedSnapshot = test.feature->GetPartSetSnapshot();
+        const auto namedAgain = namedSnapshot
+            ? test.feature->SetPartState(
+                namedSnapshot->parts[0].binding,
+                namePatch,
+                namedSnapshot->catalogRevision)
+            : PartMutationResult{};
+        failureCount += GetCaseResult(
+            isAttached
+                && first.status == PartAdmissionStatus::Accepted
+                && didComplete && firstResult && firstSnapshot
+                && named.status == PartMutationStatus::Succeeded
+                && named.catalogRevision == 2
+                && namedSnapshot
+                && namedSnapshot != firstSnapshot
+                && namedSnapshot->resultRevision == 1
+                && namedSnapshot->parts[0].userState.name == "retained name"
+                && namedSnapshot->parts[0].userState.isReviewed
+                && namedAgain.status == PartMutationStatus::Succeeded
+                && namedAgain.catalogRevision == 2,
+            "Part state mutation is immutable, versioned, and idempotent")
+            ? 0 : 1;
+
+        PartStatePatch selectPatch;
+        selectPatch.isSelected = true;
+        const auto selectedFirst = test.feature->SetPartState(
+            namedSnapshot->parts[0].binding,
+            selectPatch,
+            namedSnapshot->catalogRevision);
+        const auto selectedSnapshot = test.feature->GetPartSetSnapshot();
+        const auto selectedSecond = test.feature->SetPartState(
+            selectedSnapshot->parts[1].binding,
+            selectPatch,
+            selectedSnapshot->catalogRevision);
+        const auto finalSelection = test.feature->GetPartSetSnapshot();
+        failureCount += GetCaseResult(
+            selectedFirst.status == PartMutationStatus::Succeeded
+                && selectedSecond.status == PartMutationStatus::Succeeded
+                && finalSelection
+                && !finalSelection->parts[0].presentation.isSelected
+                && finalSelection->parts[1].presentation.isSelected
+                && test.feature->GetState().resultRevision == 1,
+            "Part selection remains singular without changing result revision")
+            ? 0 : 1;
+
+        PartMutationResult wrongThread;
+        std::thread mutationCaller([&] {
+            PartStatePatch patch;
+            patch.isVisible = false;
+            wrongThread = test.feature->SetPartState(
+                finalSelection->parts[0].binding,
+                patch,
+                finalSelection->catalogRevision);
+        });
+        mutationCaller.join();
+
+        std::optional<PartSegmentationResult> replacementResult;
+        const auto replacement = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) {
+                replacementResult = std::move(result);
+            });
+        PartStatePatch busyPatch;
+        busyPatch.isVisible = false;
+        const auto busyMutation = test.feature->SetPartState(
+            finalSelection->parts[0].binding,
+            busyPatch,
+            finalSelection->catalogRevision);
+        const bool didReplace = SendTicks(
+            *test.feature, [&] { return replacementResult.has_value(); });
+        const auto replacedSnapshot = test.feature->GetPartSetSnapshot();
+        failureCount += GetCaseResult(
+            wrongThread.status == PartMutationStatus::Unavailable
+                && replacement.status == PartAdmissionStatus::Accepted
+                && busyMutation.status == PartMutationStatus::Busy
+                && didReplace && replacementResult && replacedSnapshot
+                && replacedSnapshot->resultRevision == 2
+                && replacedSnapshot->catalogRevision == 5
+                && replacedSnapshot->parts[0].userState.name
+                    == "retained name"
+                && replacedSnapshot->parts[0].userState.isReviewed
+                && replacedSnapshot->parts[1].presentation.isSelected,
+            "Exact continuation retains state and rejects concurrent mutation")
+            ? 0 : 1;
+
+        test.data->SetSnapshot(BuildSnapshot(8, 2));
+        const bool didStale = test.feature->OnHostTick();
+        const auto staleSnapshot = test.feature->GetPartSetSnapshot();
+        const auto staleMutation = staleSnapshot
+            ? test.feature->SetPartState(
+                staleSnapshot->parts[0].binding,
+                busyPatch,
+                staleSnapshot->catalogRevision)
+            : PartMutationResult{};
+        failureCount += GetCaseResult(
+            didStale && staleSnapshot && staleSnapshot->isStale
+                && staleMutation.status
+                    == PartMutationStatus::StaleReference
+                && test.feature->DetachHost(),
+            "Stale snapshot remains readable but rejects mutation") ? 0 : 1;
     }
 
     {
@@ -713,7 +877,7 @@ int GetPartLifecycleFailCount()
                 && pendingClear.status == PartAdmissionStatus::Busy
                 && didComplete
                 && state.status == PartSegmentationStatus::Succeeded
-                && state.parts.size() == 2
+                && state.partCount == 2
                 && test.views->GetOverlayCount() == 4,
             "Finite nonzero masks keep voxels without integer truncation") ? 0 : 1;
         const auto clear = test.feature->SendRequest(
@@ -796,6 +960,7 @@ int GetPartLifecycleFailCount()
             *test.feature, [&] { return result.has_value(); });
         test.data->SetSnapshot(BuildSnapshot(8, 2));
         const bool staleTick = test.feature->OnHostTick();
+        const auto staleSnapshot = test.feature->GetPartSetSnapshot();
         auto hide = GetRequest(PartSegmentationAction::SetVisibility);
         hide.isVisible = false;
         const auto hideAdmission = test.feature->SendRequest(
@@ -812,6 +977,9 @@ int GetPartLifecycleFailCount()
                 && staleTick
                 && test.feature->GetState().status
                     == PartSegmentationStatus::Stale
+                && staleSnapshot
+                && staleSnapshot->isStale
+                && staleSnapshot->sourceVersion == 1
                 && hideAdmission.status == PartAdmissionStatus::Accepted
                 && showAdmission.status == PartAdmissionStatus::Accepted
                 && test.views->GetOverlayCount() == 0
