@@ -207,5 +207,6 @@ private:
 };
 
 struct RenderStrategyServices final {
+    bool isHostDriven = false;
     std::shared_ptr<RenderResourceCoordinator> resources;
 };

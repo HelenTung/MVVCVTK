@@ -8,6 +8,7 @@
 #include <vtkAxesActor.h>
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
+#include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkInteractorStyle.h>
 #include <vtkInteractorStyleImage.h>
 #include <vtkInteractorStyleTrackballActor.h>
@@ -76,7 +77,7 @@ private:
 
 class StdViewContext final : public AbstractViewContext {
 public:
-    StdViewContext(InteractionPorts ports, bool isHostInjected);
+    StdViewContext(InteractionPorts ports, bool isHostInjected, bool isHostDriven);
     ~StdViewContext() override;
     static void RemoveContext(
         AbstractViewContext* context) noexcept;
@@ -169,6 +170,14 @@ private:
     bool m_isStyleRateRestored = false;
     bool m_isCancellingStyle = false;
     const bool m_isHostInjected = false;
+    const bool m_isHostDriven = false;
+    bool m_oldEnableRender = true;
+    double m_oldDesiredRate = 15.0;
+    double m_oldStillRate = 0.0001;
+    vtkSmartPointer<vtkRenderWindow> m_observedWindow;
+    unsigned long m_windowObserverTag = 0;
+    std::array<int, 2> m_windowSize{};
+    bool m_isWindowReady = false;
     bool m_isSendingInput = false;
     bool m_hasInjectedResult = false;
     InteractionResult m_injectedResult;
@@ -176,14 +185,14 @@ private:
 
 std::shared_ptr<AbstractViewContext> CreateViewContext(
     InteractionPorts ports,
-    const bool isHostInjected)
+    const bool isHostInjected, const bool isHostDriven)
 {
     if (!ports.update || !ports.state
         || !ports.slice || !ports.model) {
         return nullptr;
     }
     std::shared_ptr<AbstractViewContext> context(
-        new StdViewContext(std::move(ports), isHostInjected),
+        new StdViewContext(std::move(ports), isHostInjected, isHostDriven),
         &StdViewContext::RemoveContext);
     const auto* value = static_cast<StdViewContext*>(context.get());
     return value->GetIsCreated() ? std::move(context) : nullptr;
@@ -191,9 +200,10 @@ std::shared_ptr<AbstractViewContext> CreateViewContext(
 
 StdViewContext::StdViewContext(
     InteractionPorts ports,
-    const bool isHostInjected)
+    const bool isHostInjected, const bool isHostDriven)
     : m_ports(std::move(ports))
     , m_isHostInjected(isHostInjected)
+    , m_isHostDriven(isHostDriven)
 {
     if (m_renderWindow) {
         // 叠加层和透明材质都依赖稳定的 alpha/depth 行为。
@@ -254,7 +264,21 @@ bool StdViewContext::AttachInteractor(
     m_isInteractorReady = false;
 
     // 2. 修复 window/interactor 双向关系，再恢复 style、pickable 与 axes。
+    if (m_interactor && m_isHostDriven) {
+        m_interactor->SetEnableRender(m_oldEnableRender);
+        m_interactor->SetDesiredUpdateRate(m_oldDesiredRate);
+        m_interactor->SetStillUpdateRate(m_oldStillRate);
+    }
     m_interactor = std::move(interactor);
+    m_oldEnableRender = m_interactor->GetEnableRender();
+    m_oldDesiredRate = m_interactor->GetDesiredUpdateRate();
+    m_oldStillRate = m_interactor->GetStillUpdateRate();
+    if (m_isHostDriven) {
+        m_interactor->EnableRenderOff();
+        const double rate = m_renderWindow->GetDesiredUpdateRate();
+        m_interactor->SetDesiredUpdateRate(rate);
+        m_interactor->SetStillUpdateRate(rate);
+    }
     if (m_renderWindow) {
         m_interactor->SetRenderWindow(m_renderWindow);
     }
@@ -279,7 +303,7 @@ bool StdViewContext::AttachObservers()
     if (!m_interactor || !m_eventCallback) return false;
 
     if (m_observerTags.empty()) {
-        const std::array<unsigned long, 11> events = {
+        const std::array<unsigned long, 13> events = {
             vtkCommand::MouseWheelForwardEvent,
             vtkCommand::MouseWheelBackwardEvent,
             vtkCommand::LeftButtonPressEvent,
@@ -290,7 +314,9 @@ bool StdViewContext::AttachObservers()
             vtkCommand::CharEvent,
             vtkCommand::ExitEvent,
             vtkCommand::RightButtonPressEvent,
-            vtkCommand::RightButtonReleaseEvent
+            vtkCommand::RightButtonReleaseEvent,
+            vtkCommand::RenderEvent,
+            vtkCommand::WindowResizeEvent
         };
 
         m_observerTags.reserve(events.size());
@@ -305,6 +331,17 @@ bool StdViewContext::AttachObservers()
             }
             m_observerTags.push_back(tag);
         }
+    }
+
+    if (m_isHostDriven && m_windowObserverTag == 0) {
+        m_observedWindow = m_renderWindow;
+        const auto* size = m_renderWindow->GetSize();
+        m_windowSize = {size[0], size[1]};
+        auto* generic = vtkGenericOpenGLRenderWindow::SafeDownCast(m_renderWindow);
+        m_isWindowReady = !generic || generic->GetReadyForRendering();
+        m_windowObserverTag = m_observedWindow->AddObserver(
+            vtkCommand::ModifiedEvent, m_eventCallback);
+        if (m_windowObserverTag == 0) return false;
     }
 
     // Start/End 是当前 style 的事件；换 style 后必须重新挂载。
@@ -347,7 +384,11 @@ bool StdViewContext::RemoveObservers()
         }
     }
     m_observerTags.clear();
-    if (m_renderWindow) {
+    if (m_observedWindow && m_windowObserverTag != 0)
+        m_observedWindow->RemoveObserver(m_windowObserverTag);
+    m_windowObserverTag = 0;
+    m_observedWindow = nullptr;
+    if (m_renderWindow && !m_isHostDriven) {
         m_renderWindow->SetDesiredUpdateRate(
             GetRenderRate(false));
     }
@@ -356,6 +397,7 @@ bool StdViewContext::RemoveObservers()
 
 bool StdViewContext::AttachTimer()
 {
+    if (m_isHostDriven) return true;
     if (!m_interactor || !m_eventCallback) return false;
 
     const int oldTimerId = m_timerId;
@@ -413,6 +455,7 @@ bool StdViewContext::RemoveTimer()
 bool StdViewContext::SetInteractorReady()
 {
     if (!GetIsOwnerThread() || !m_interactor) return false;
+    if (m_isHostDriven) m_interactor->EnableRenderOff();
     if (m_renderWindow) {
         m_interactor->SetRenderWindow(m_renderWindow);
     }
@@ -458,7 +501,7 @@ bool StdViewContext::RebuildInteractionRouter(
     try {
         InteractionRouter candidate;
         // 顺序就是 FirstMatch 优先级；Timer 使用 Broadcast 单独处理。
-        if (!candidate.AttachHandler(
+        if (!m_isHostDriven && !candidate.AttachHandler(
                 std::make_unique<TimeUpdateHandler>(
                     m_ports.update.get(), m_renderWindow.GetPointer()))) {
             return false;
@@ -566,6 +609,7 @@ bool StdViewContext::SetRenderWindow(
 
 bool StdViewContext::Start()
 {
+    if (m_isHostDriven) return false;
     if (!GetIsOwnerThread()
         || !m_renderWindow || !m_interactor) {
         return false;
@@ -590,6 +634,11 @@ bool StdViewContext::StopInput()
     if (!RemoveObservers()) return false;
     if (!m_interactionRouter.ClearHandlers()) return false;
     m_isInteractorReady = false;
+    if (m_isHostDriven && m_interactor) {
+        m_interactor->SetEnableRender(m_oldEnableRender);
+        m_interactor->SetDesiredUpdateRate(m_oldDesiredRate);
+        m_interactor->SetStillUpdateRate(m_oldStillRate);
+    }
     return true;
 }
 
@@ -742,7 +791,7 @@ InteractionResult StdViewContext::SendCancel(
         }
         if (!m_isStyleRateRestored) {
             if (m_ports.update) (void)m_ports.update->SetInteractionPhase();
-            if (m_renderWindow) {
+            if (m_renderWindow && !m_isHostDriven) {
                 m_renderWindow->SetDesiredUpdateRate(GetRenderRate(false));
             }
             m_isStyleRateRestored = true;
@@ -959,6 +1008,26 @@ void StdViewContext::OnVTKEvent(
     if (!GetIsOwnerThread()) return;
     if (m_eventCallback) m_eventCallback->AbortFlagOff();
 
+    if (m_isHostDriven && caller == m_observedWindow
+        && eventId == vtkCommand::ModifiedEvent) {
+        const auto* size = m_observedWindow->GetSize();
+        const std::array<int, 2> nextSize{size[0], size[1]};
+        auto* generic = vtkGenericOpenGLRenderWindow::SafeDownCast(m_observedWindow);
+        const bool isReady = !generic || generic->GetReadyForRendering();
+        const bool hasChanged = nextSize != m_windowSize
+            || (isReady && !m_isWindowReady);
+        m_windowSize = nextSize;
+        m_isWindowReady = isReady;
+        if (hasChanged && m_ports.update)
+            (void)m_ports.update->SetRenderNeeded();
+        return;
+    }
+    if (m_isHostDriven && (eventId == vtkCommand::RenderEvent
+        || eventId == vtkCommand::WindowResizeEvent)) {
+        if (m_ports.update) (void)m_ports.update->SetRenderNeeded();
+        return;
+    }
+
     if (eventId == vtkCommand::TimerEvent) {
         if (!callData || m_timerId == 0
             || *static_cast<const int*>(callData) != m_timerId) {
@@ -1006,7 +1075,7 @@ void StdViewContext::OnVTKEvent(
             m_isStyleStopped = false;
             m_isStyleRateRestored = false;
             (void)m_ports.update->SetInteractionPhase();
-            if (m_renderWindow) {
+            if (m_renderWindow && !m_isHostDriven) {
                 m_renderWindow->SetDesiredUpdateRate(
                     GetRenderRate(true));
             }
@@ -1021,7 +1090,7 @@ void StdViewContext::OnVTKEvent(
             }
             if (!m_isStyleRateRestored) {
                 (void)m_ports.update->SetInteractionPhase();
-                if (m_renderWindow) {
+                if (m_renderWindow && !m_isHostDriven) {
                     m_renderWindow->SetDesiredUpdateRate(
                         GetRenderRate(false));
                 }

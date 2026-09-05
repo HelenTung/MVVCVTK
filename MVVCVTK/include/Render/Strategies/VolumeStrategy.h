@@ -177,6 +177,7 @@ private:
     VolumeQuality m_appliedQuality = VolumeQuality::Auto;
     bool m_isDenoiseOn = false;
     bool m_isInteracting = false;
+    bool m_isHostDriven = false;
     // 保存用户期望的静止材质；交互期可临时 ShadeOff，退出后精确恢复。
     bool m_isShadeOn = false;
     std::uint64_t m_lodPlanCount = 0;

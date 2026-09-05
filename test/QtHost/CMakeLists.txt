@@ -148,6 +148,27 @@ add_test(
 )
 SetTestRuntime(QtHost.Smoke mvvcvtk_qt_host_smoke)
 
+add_executable(mvvcvtk_qt_host_scheduling_tests QtHostSchedulingTests.cpp)
+target_link_libraries(mvvcvtk_qt_host_scheduling_tests PRIVATE
+    MVVCVTK::Host MVVCVTK::FeatureSPI
+    Qt5::Core Qt5::Gui Qt5::Widgets Qt5::OpenGL
+    VTK::GUISupportQt ${MVVCVTK_VTK_TARGETS})
+SetQtTargetDefaults(mvvcvtk_qt_host_scheduling_tests)
+set_target_properties(mvvcvtk_qt_host_scheduling_tests PROPERTIES
+    FOLDER "MVVCVTK/Tests")
+vtk_module_autoinit(TARGETS mvvcvtk_qt_host_scheduling_tests
+    MODULES ${MVVCVTK_QT_VTK_TARGETS})
+add_test(NAME QtHost.Scheduling COMMAND mvvcvtk_qt_host_scheduling_tests)
+SetTestRuntime(QtHost.Scheduling mvvcvtk_qt_host_scheduling_tests)
+foreach(feature_spec IN ITEMS "GAP;GapAnalysis" "CROP;OrthogonalCrop" "PART;PartSegmentation" "SURFACE;SurfaceDetermination")
+    list(GET feature_spec 0 test_key)
+    list(GET feature_spec 1 feature_target)
+    if(TARGET MVVCVTK::${feature_target})
+        target_link_libraries(mvvcvtk_qt_host_scheduling_tests PRIVATE MVVCVTK::${feature_target})
+        target_compile_definitions(mvvcvtk_qt_host_scheduling_tests PRIVATE MVVCVTK_TEST_${test_key})
+    endif()
+endforeach()
+
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     add_executable(
         mvvcvtk_qt_gap_smoke

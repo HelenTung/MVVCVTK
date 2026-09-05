@@ -178,6 +178,17 @@ void HostFrameCoordinator::FreezeIntents(
 HostFrameCoordinator::FlushStatus
 HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
 {
+    return SendFrame(isFeatureTick, true);
+}
+
+HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendUpdates()
+{
+    return SendFrame(true, false);
+}
+
+HostFrameCoordinator::FlushStatus HostFrameCoordinator::SendFrame(
+    const bool isFeatureTick, const bool isRenderEnabled)
+{
     if (m_isStopped.load(std::memory_order_acquire)) {
         return FlushStatus::Stopped;
     }
@@ -191,8 +202,9 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
     bool restoreIntents = false;
 
     try {
-        // 已发布 epoch 的 Render 是当前唯一终态门；成功前不接纳下一普通 batch。
-        if (m_hasPendingCompletion || m_callbacks.getRenderPending()) {
+        // 原生驱动仍以 Render 作为帧终态；宿主驱动的更新不等待该门。
+        if (isRenderEnabled
+            && (m_hasPendingCompletion || m_callbacks.getRenderPending())) {
             const auto epoch = m_sceneEpoch.load(std::memory_order_acquire);
             if (!m_callbacks.sendRender(epoch)) {
                 return FlushStatus::RenderPending;
@@ -208,7 +220,11 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             ClearStage();
             return FlushStatus::Failed;
         }
+        if (m_isStopped.load(std::memory_order_acquire))
+            return FlushStatus::Stopped;
         if (isFeatureTick) m_callbacks.sendFeatureTicks();
+        if (m_isStopped.load(std::memory_order_acquire))
+            return FlushStatus::Stopped;
         // 从这一点起，任一 commit 前失败都必须把同一批 intent 放回 inbox。
         // restoreIntents 在 freeze 前置位，因此 mutex 获取异常也走同一恢复出口。
         restoreIntents = true;
@@ -219,6 +235,8 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             ClearStage();
             return FlushStatus::Failed;
         }
+        if (m_isStopped.load(std::memory_order_acquire))
+            return FlushStatus::Stopped;
         if (isFeatureTick && !m_callbacks.applyFeatureUpdates()) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;
@@ -226,6 +244,8 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
             return FlushStatus::Failed;
         }
 
+        if (m_isStopped.load(std::memory_order_acquire))
+            return FlushStatus::Stopped;
         const auto currentEpoch =
             m_sceneEpoch.load(std::memory_order_acquire);
         if (currentEpoch == std::numeric_limits<std::uint64_t>::max()) {
@@ -236,6 +256,10 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         }
         const auto nextEpoch = currentEpoch + 1;
         const auto stageStatus = m_callbacks.buildStage(nextEpoch);
+        if (m_isStopped.load(std::memory_order_acquire)) {
+            ClearStage();
+            return FlushStatus::Stopped;
+        }
         if (stageStatus == HostFrameStageStatus::Failed) {
             RestoreIntents(std::move(intents));
             restoreIntents = false;
@@ -245,7 +269,8 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         if (stageStatus == HostFrameStageStatus::Unchanged) {
             restoreIntents = false;
             SendCompletions();
-            return FlushStatus::Completed;
+            return m_isStopped.load(std::memory_order_acquire)
+                ? FlushStatus::Stopped : FlushStatus::Completed;
         }
 
         // setCommit 的目标实现必须 noexcept；全量 stage 已完成，之后不再回滚。
@@ -253,6 +278,11 @@ HostFrameCoordinator::FlushOnOwnerTick(const bool isFeatureTick)
         restoreIntents = false;
         m_sceneEpoch.store(nextEpoch, std::memory_order_release);
         AdvancePendingBaseEpoch(currentEpoch, nextEpoch);
+        if (!isRenderEnabled) {
+            SendCompletions();
+            return m_isStopped.load(std::memory_order_acquire)
+                ? FlushStatus::Stopped : FlushStatus::Completed;
+        }
         m_hasPendingCompletion = true;
         if (!m_callbacks.sendRender(nextEpoch)) {
             return FlushStatus::RenderPending;

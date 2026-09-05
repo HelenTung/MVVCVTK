@@ -14,6 +14,8 @@ class SharedStateBroadcaster;
 // 为什么独立成结构体：窗口数量、输入协议和 feature 激活会随上位机变化，但数据源与共享状态
 // 的生命周期应只跟一次 session 绑定，避免每个窗口各自创建一套 DataManager。
 struct HostCoreServices {
+    bool isHostDriven = false;
+    std::function<void()> onWorkAvailable;
     // 会话唯一体数据管理器；加载与 feature 原子发布都通过它访问同一份图像批次。
     std::shared_ptr<AbstractDataManager> sharedDataMgr;
     // 状态事件源，向各视图广播加载、重载和交互状态变化。

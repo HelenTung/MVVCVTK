@@ -63,6 +63,13 @@ if(MVVCVTK_BUILD_QT_TESTING)
 endif()
 add_subdirectory(SdkBoundary)
 
+if(TARGET MVVCVTKStandalone)
+    add_test(NAME Host.StandaloneScheduling
+        COMMAND MVVCVTKStandalone --host-driven --demo-audit)
+    SetTestRuntime(Host.StandaloneScheduling MVVCVTKStandalone)
+    set_tests_properties(Host.StandaloneScheduling PROPERTIES TIMEOUT 120)
+endif()
+
 if(MVVCVTK_BUILD_GAP_ANALYSIS)
     # 所有子目录创建完成后检查完整目标图；DefX 只能由私有 kernel 直接消费。
     if(NOT TARGET DefX::Analysis)

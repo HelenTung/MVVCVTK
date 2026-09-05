@@ -366,6 +366,7 @@ VolumeStrategy::VolumeStrategy(
     std::shared_ptr<RenderStrategyServices> services)
     : m_asyncState(std::make_shared<AsyncState>())
 {
+    m_isHostDriven = services && services->isHostDriven;
     if (services && services->resources) {
         m_resources = services->resources;
         m_taskChannel = m_resources->CreateTaskChannel(
@@ -1916,7 +1917,7 @@ bool VolumeStrategy::SetVisualState(
         prop->SetGradientOpacity(nextGradient);
     }
 
-    if (hasRenderRateChanged) {
+    if (hasRenderRateChanged && !m_isHostDriven) {
         auto* renderWindow = m_renderer
             ? m_renderer->GetRenderWindow() : nullptr;
         if (renderWindow) {

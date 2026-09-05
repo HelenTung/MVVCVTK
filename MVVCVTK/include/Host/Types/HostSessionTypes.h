@@ -56,7 +56,7 @@ struct HostViewInitConfig {
 };
 
 struct HostWindowConfig {
-    std::string title; // context 会尝试写入窗口；外部注入窗口仍可由宿主继续管理标题。
+    std::string title; // Native/自建窗口应用；HostDriven 外部窗口由宿主管理布局和标题。
     int width = 600;
     int height = 600;
     int posX = 0;
@@ -147,6 +147,38 @@ enum class HostStopState : std::uint8_t {
     StopPending
 };
 
+enum class HostDriveMode : std::uint8_t { Native, HostDriven };
+enum class HostUpdateStatus : std::uint8_t {
+    Completed, Deferred, Failed, Stopped
+};
+enum class HostRenderStatus : std::uint8_t {
+    Unchanged, Rendered, Deferred, Failed, Stopped
+};
+
+struct HostUpdateResult final {
+    HostUpdateStatus status = HostUpdateStatus::Failed;
+    std::uint64_t sceneEpoch = 0;
+    std::vector<std::string> renderViewIds;
+};
+
+struct HostRenderRequest final {
+    // 精确 ID 集合；空集合不绘制，未知/重复 ID 整批拒绝。
+    std::vector<std::string> viewIds;
+    double desiredUpdateRate = 0.001; // VTK 时间预算率，不是 FPS。
+};
+
+struct HostViewRenderResult final {
+    std::string viewId;
+    HostRenderStatus status = HostRenderStatus::Failed;
+    std::uint64_t sceneEpoch = 0;
+    std::uint64_t durationUs = 0;
+};
+
+struct HostRenderResult final {
+    HostRenderStatus status = HostRenderStatus::Failed;
+    std::vector<HostViewRenderResult> views;
+};
+
 struct HostSessionConfig {
     std::vector<HostRenderViewConfig> renderViews; // 声明顺序即 topology 顺序，也决定多目标返回与首选窗口顺序。
     // 可选的 owner-thread 投递器。Qt 宿主可映射到自己的事件循环；
@@ -154,4 +186,10 @@ struct HostSessionConfig {
     std::function<bool(std::function<void()>)> sendOwnerTask;
     // 立即消费的生命周期诊断；回调不得抛异常或缓存 message 引用。
     std::function<void(const std::string& message)> sendDiagnostic;
+    // 构建时冻结；HostDriven 不创建周期 timer，也不由 style 即时 Render。
+    HostDriveMode driveMode = HostDriveMode::Native;
+    // 仅 HostDriven 使用。任意线程的可合并门铃；可能在发送函数返回前调用。只能线程安全地排队，
+    // 不得同步调用 Session 或抛异常。接收对象须活到 Stop；已排队任务自行
+    // 检查 Session 生命周期。Stop 前接纳的在途通知允许晚到。
+    std::function<void()> onWorkAvailable;
 };

@@ -59,6 +59,7 @@ public:
 
 class CropBridge::Impl final {
 public:
+    std::function<void()> onWorkAvailable;
     struct ShaderCandidate final {
         std::vector<CropOpItem> history;
         std::size_t cursor = 0;
@@ -361,6 +362,7 @@ bool CropBridge::Impl::StartViewInput(
         m_boxWidget.SetInteractor(request.interactor);
         m_planeWidget.SetInteractor(request.interactor);
         m_isActive = true;
+        try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
         return true;
     }
 
@@ -402,6 +404,7 @@ bool CropBridge::Impl::StartViewInput(
             true
         };
         m_isActive = true;
+        try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
         return true;
     }
 
@@ -997,6 +1000,7 @@ bool CropBridge::Impl::SetShader(ShaderCandidate candidate)
         nullptr,
         false
     };
+    try { if (onWorkAvailable) onWorkAvailable(); } catch (...) {}
     return true;
 }
 
@@ -1518,7 +1522,12 @@ bool CropBridge::Impl::BuildCropResult(
     active.callback = std::move(onComplete);
     active.params = std::move(params);
     try {
-        active.worker = std::thread(std::move(*task));
+        active.worker = std::thread(
+            [task = std::move(*task), onWork = onWorkAvailable]() mutable {
+                task();
+                // packaged_task 返回后 future 才 ready。
+                try { if (onWork) onWork(); } catch (...) {}
+            });
     }
     catch (...) {
         active.callback(BuildResultFailure(
@@ -1987,4 +1996,9 @@ bool CropBridge::SendBuildResult()
 {
     return m_impl->GetLeaseReady()
         && m_impl->SendBuildResult();
+}
+
+void CropBridge::SetWorkAvailable(std::function<void()> onWorkAvailable)
+{
+    m_impl->onWorkAvailable = std::move(onWorkAvailable);
 }

@@ -4,6 +4,7 @@ param(
     [string]$PackageRevision,
     [string]$DepsRoot,
     [string]$DefXRoot,
+    [string]$VerifyRoot,
     [switch]$SkipTests,
     [switch]$SkipCleanRoom
 )
@@ -698,16 +699,14 @@ if (-not [regex]::IsMatch($Preset, '^[A-Za-z0-9][A-Za-z0-9._-]*$')) {
 }
 $buildRoot = Join-Path $repoRoot "out\build\$Preset"
 $stageBase = Join-Path $repoRoot 'out\stage'
-$verifyBase = Join-Path (
-    Split-Path -Parent $repoRoot) 'MVVCVTK-sdk-verify'
-$repoPrefix = [IO.Path]::GetFullPath($repoRoot)
-if (-not $repoPrefix.EndsWith(
-    [string][IO.Path]::DirectorySeparatorChar)) {
-    $repoPrefix += [IO.Path]::DirectorySeparatorChar
+$verifyBase = if ([string]::IsNullOrWhiteSpace($VerifyRoot)) {
+    Join-Path (Split-Path -Parent $repoRoot) 'MVVCVTK-sdk-verify'
 }
-if ([IO.Path]::GetFullPath($verifyBase).StartsWith(
-    $repoPrefix,
-    [StringComparison]::OrdinalIgnoreCase)) {
+else {
+    # 并行工作树显式隔离 clean-room；不改变 SDK stage/ZIP 的闭包。
+    [IO.Path]::GetFullPath($VerifyRoot)
+}
+if (Get-IsPathWithin $repoRoot $verifyBase) {
     throw 'Clean-room verification must run outside the source repository.'
 }
 $packageRoot = Join-Path $repoRoot 'out\packages'

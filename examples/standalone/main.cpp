@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -568,7 +569,8 @@ namespace {
             HostViewTargets inputViews,
             std::weak_ptr<CropHostFeature> cropFeature,
             std::weak_ptr<GapHostFeature> gapFeature,
-            GapHostStartParams gapStart)
+            GapHostStartParams gapStart,
+            HostHotkeyConfig appHotkeys)
             : m_session(session),
             m_volumeTarget(std::move(volumeTarget)),
             m_isoTarget(std::move(isoTarget)),
@@ -576,6 +578,7 @@ namespace {
             m_cropFeature(std::move(cropFeature)),
             m_gapFeature(std::move(gapFeature)),
             m_gapStart(std::move(gapStart)),
+            m_appHotkeys(std::move(appHotkeys)),
             m_keys{
                 HostKeyChord{ 'c' },
                 HostKeyChord{ 'c', {}, false, false, true },
@@ -1378,6 +1381,56 @@ namespace {
         InteractionResult OnInput(
             const InteractionEvent& event)
         {
+            int appAction = -1;
+            if (m_appHotkeys.isContextInputEnabled
+                && GetKeyMatched(event, m_appHotkeys.modelSwitchKey)) appAction = 0;
+            if (m_appHotkeys.isCommandInputEnabled) {
+                if (GetKeyMatched(event, m_appHotkeys.dataExportKey)) appAction = 1;
+                if (GetKeyMatched(event, m_appHotkeys.sliceExportKey)) appAction = 2;
+                if (event.keySym == m_appHotkeys.exitKeySym) appAction = 3;
+            }
+            if (appAction >= 0 && !event.isCtrlDown
+                && !event.isAltDown && !event.isShiftDown) {
+                if (event.eventKind == InteractionEventKind::KeyRelease) {
+                    m_appKeyDown[appAction] = false;
+                    return {true, true};
+                }
+                if (event.eventKind == InteractionEventKind::TextInput)
+                    return {true, true};
+                if (event.eventKind == InteractionEventKind::KeyPress) {
+                    if (m_appKeyDown[appAction]) return {true, true};
+                    m_appKeyDown[appAction] = true;
+                    bool isSent = false;
+                    if (appAction == 0) {
+                        HostToolSwitchRequest request;
+                        request.targetView.viewId = event.viewId;
+                        isSent = m_session.SendRequest(std::move(request));
+                    }
+                    else if (appAction == 1) {
+                        HostDataExportRequest request;
+                        request.outputPath = m_appHotkeys.dataExportPath;
+                        request.format = m_appHotkeys.dataExportFormat;
+                        request.sourceView = m_appHotkeys.dataSourceView;
+                        isSent = m_session.SendRequest(std::move(request));
+                    }
+                    else if (appAction == 2) {
+                        HostSliceExportRequest request;
+                        request.outputDir = m_appHotkeys.sliceExportDir;
+                        request.sourceView.viewId = event.viewId;
+                        request.angleDeg = m_appHotkeys.sliceAngleDeg;
+                        isSent = m_session.SendRequest(std::move(request));
+                    }
+                    else {
+                        HostToolSetRequest request;
+                        request.targetView.viewId = event.viewId;
+                        request.toolMode = HostToolMode::Navigation;
+                        isSent = m_session.SendRequest(std::move(request));
+                    }
+                    return {true, true, isSent, isSent
+                        ? InteractionFailureReason::None
+                        : InteractionFailureReason::StateRejected};
+                }
+            }
             if (event.eventKind == InteractionEventKind::KeyRelease) {
                 bool wasDown = false;
                 for (std::size_t index = 0; index < m_keys.size(); ++index) {
@@ -1427,6 +1480,8 @@ namespace {
         std::weak_ptr<CropHostFeature> m_cropFeature;
         std::weak_ptr<GapHostFeature> m_gapFeature;
         GapHostStartParams m_gapStart;
+        HostHotkeyConfig m_appHotkeys;
+        std::array<bool, 4> m_appKeyDown{};
         std::array<HostKeyChord, actionCount> m_keys;
         std::array<bool, actionCount> m_isKeyDown{};
         std::shared_ptr<FeatureHostControl> m_host;
@@ -2123,10 +2178,69 @@ namespace {
         return config;
     }
 
+
+    bool StartDrivenSession(VtkAppHostSession& session,
+        const std::shared_ptr<std::atomic<bool>>& hasWork,
+        const bool isContinuous)
+    {
+        const auto* endpoint = session.GetRenderViewEndpoint("slice-top-down");
+        if (!endpoint || !endpoint->interactor) return false;
+        vtkSmartPointer<vtkRenderWindowInteractor> interactor = endpoint->interactor;
+        std::vector<std::string> pendingViews;
+        auto nextFrame = std::chrono::steady_clock::now();
+        constexpr auto framePeriod = std::chrono::microseconds(16667);
+        std::function<void()> onTick = [&] {
+            if (hasWork->exchange(false) || isContinuous) {
+                const auto update = session.SendUpdates();
+                if (update.status == HostUpdateStatus::Completed)
+                    pendingViews = update.renderViewIds;
+                else if (update.status == HostUpdateStatus::Failed)
+                    hasWork->store(true); // 示例侧按原生时钟重试，SDK 不自启 timer。
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (pendingViews.empty() || now < nextFrame) return;
+            nextFrame = now + framePeriod; // 以开始时刻限频，不叠加绘制耗时。
+            HostRenderRequest request;
+            request.viewIds = pendingViews;
+            const auto states = session.GetRenderViewStates();
+            const bool isInteracting = std::any_of(states.begin(), states.end(),
+                [](const HostRenderViewState& state) { return state.isInteracting; });
+            request.desiredUpdateRate = isInteracting ? 15.0 : 0.001;
+            const auto rendered = session.SendRender(request);
+            for (const auto& view : rendered.views) {
+                if (view.status == HostRenderStatus::Rendered
+                    || view.status == HostRenderStatus::Unchanged)
+                    pendingViews.erase(std::remove(pendingViews.begin(),
+                        pendingViews.end(), view.viewId), pendingViews.end());
+            }
+        };
+        onTick();
+        vtkNew<vtkCallbackCommand> callback;
+        callback->SetClientData(&onTick);
+        callback->SetCallback([](vtkObject*, unsigned long, void* data, void*) {
+            try { (*static_cast<std::function<void()>*>(data))(); }
+            catch (...) {}
+        });
+        const auto tag = interactor->AddObserver(vtkCommand::TimerEvent, callback);
+        const int timerId = interactor->CreateRepeatingTimer(16);
+        if (tag == 0 || timerId == 0) {
+            if (tag != 0) interactor->RemoveObserver(tag);
+            if (timerId != 0) (void)interactor->DestroyTimer(timerId);
+            return false;
+        }
+        bool isStarted = true;
+        try { interactor->Start(); }
+        catch (...) { isStarted = false; }
+        interactor->RemoveObserver(tag);
+        return interactor->DestroyTimer(timerId) != 0 && isStarted;
+    }
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
+    const bool isHostDriven = GetArgFound(argc, argv, "--host-driven");
+    const auto hasHostWork = std::make_shared<std::atomic<bool>>(true);
     const bool isDemo = GetArgFound(argc, argv, "--demo");
     const bool isDemoAudit = GetArgFound(argc, argv, "--demo-audit");
     const bool isRealAudit = GetArgFound(argc, argv, "--real-audit");
@@ -2157,6 +2271,10 @@ int main(int argc, char* argv[])
     const HostViewTargets allViews =
         GetAllViews(renderViews);
     HostSessionConfig sessionConfig;
+    if (isHostDriven) {
+        sessionConfig.driveMode = HostDriveMode::HostDriven;
+        sessionConfig.onWorkAvailable = [hasHostWork] { hasHostWork->store(true); };
+    }
     sessionConfig.renderViews =
         std::move(renderViews);
     VtkAppHostSession session(
@@ -2259,7 +2377,8 @@ int main(int argc, char* argv[])
         std::move(controlViews),
         cropFeature,
         gapFeature,
-        std::move(gapStart));
+        std::move(gapStart),
+        isHostDriven ? GetHotkeys(allViews) : HostHotkeyConfig{});
 #if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
     controlFeature->SetSurfaceFeature(surfaceFeature);
 #endif
@@ -2434,21 +2553,21 @@ int main(int argc, char* argv[])
     timer.isTimerEnabled = true;
     timer.targetView = {
         "", true, HostRenderViewRole::TopDownSlice };
-    if (!session.AttachTimer(timer)) {
+    if (!isHostDriven && !session.AttachTimer(timer)) {
         if (!clearAttached()) {
             return 21;
         }
         return 3;
     }
-    isTimerAttached = true;
+    isTimerAttached = !isHostDriven;
 
-    if (!session.AttachHotkeys(GetHotkeys(allViews))) {
+    if (!isHostDriven && !session.AttachHotkeys(GetHotkeys(allViews))) {
         if (!clearAttached()) {
             return 22;
         }
         return 4;
     }
-    isHotkeyAttached = true;
+    isHotkeyAttached = !isHostDriven;
 
     const bool isDragAudit = GetArgFound(
         argc, argv, "--drag-audit");
@@ -2618,7 +2737,10 @@ int main(int argc, char* argv[])
 
     PrintDemoHelp();
 
-    const bool isStarted = session.Start();
+    const bool isStarted = isHostDriven
+        ? StartDrivenSession(session, hasHostWork,
+            isDemoAudit || isRealAudit || isQualityAudit)
+        : session.Start();
     if (isQualityAudit) {
         isAuditComplete = controlFeature->GetQualityAuditDone();
         isAuditPassed = controlFeature->GetQualityAuditPassed();

@@ -4,6 +4,7 @@
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
 #include "Host/HostFrameCoordinator.h"
+#include "Host/HostWorkSignal.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostInputRegistry.h"
 #include "Host/HostViewRuntimeRegistry.h"
@@ -97,6 +98,7 @@ public:
         std::shared_ptr<HostFeature> feature;
         // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
         bool isHostDetached = false;
+        std::shared_ptr<std::atomic<bool>> isWorkActive;
     };
 
     class InputEndpoint final : public HostInputEndpoint {
@@ -124,6 +126,7 @@ public:
         };
 
         std::mutex mutex;
+        std::weak_ptr<HostWorkSignal> workSignal;
         std::vector<std::function<void()>> completes;
         std::shared_ptr<ImageReadEntry> imageRead;
         bool isActive = true;
@@ -544,8 +547,10 @@ public:
         FeatureHostControlPort(
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
-            std::weak_ptr<OwnerCompleteState> completeState)
-            : m_bridge(std::move(bridge))
+            std::weak_ptr<OwnerCompleteState> completeState,
+            std::shared_ptr<std::atomic<bool>> isWorkActive)
+            : m_isWorkActive(std::move(isWorkActive))
+            , m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_completeState(std::move(completeState))
         {
@@ -571,9 +576,10 @@ public:
         bool SendSceneDelta(FeatureSceneDelta delta) override
         {
             const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->SendSceneDelta(
-                    m_featureId, std::move(delta));
+            const bool isSent = bridge
+                && bridge->SendSceneDelta(m_featureId, std::move(delta));
+            if (isSent) (void)SendWorkAvailable();
+            return isSent;
         }
 
         bool AttachInput(HostInputBinding binding) override
@@ -600,19 +606,19 @@ public:
         bool SendOwnerComplete(
             std::function<void()> complete) override
         {
+            return Impl::SetOwnerComplete(m_completeState.lock(), std::move(complete));
+        }
+
+        bool SendWorkAvailable() override
+        {
+            if (!m_isWorkActive || !m_isWorkActive->load()) return false;
             const auto state = m_completeState.lock();
-            if (!state || !complete) {
-                return false;
-            }
-            const std::lock_guard<std::mutex> lock(state->mutex);
-            if (!state->isActive) {
-                return false;
-            }
-            state->completes.push_back(std::move(complete));
-            return true;
+            const auto signal = state ? state->workSignal.lock() : nullptr;
+            return signal && signal->SendWorkAvailable();
         }
 
     private:
+        std::shared_ptr<std::atomic<bool>> m_isWorkActive;
         std::weak_ptr<FeatureHostBridge> m_bridge;
         std::string m_featureId;
         std::weak_ptr<OwnerCompleteState> m_completeState;
@@ -629,6 +635,8 @@ public:
     ~Impl();
 
     bool BuildSession();
+    HostUpdateResult SendUpdates();
+    HostRenderResult SendRender(const HostRenderRequest& request);
     bool SendRequest(
         HostRequest&& request,
         HostCompleteCallback onComplete);
@@ -687,6 +695,9 @@ public:
     std::uint64_t nextSessionGeneration = 1;
     bool isBuilt = false;
     bool isStarted = false;
+    bool isFrameExecuting = false;
+    bool isRendering = false;
+    std::shared_ptr<HostWorkSignal> workSignal;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
     mutable std::recursive_mutex m_sessionMutex;
 
@@ -703,7 +714,7 @@ private:
     void SendDiagnostic(const std::string& message) const noexcept;
     void SendImageReadComplete(bool isStopping) noexcept;
     void SendFeatureTicks() noexcept;
-    void SendOwnerCompletions() noexcept;
+    void SendOwnerCompletions(bool isStopping = false) noexcept;
     void OnViewTimer();
     void OnHostTimer();
     bool DetachTimer();
@@ -746,9 +757,13 @@ bool VtkAppHostSession::Impl::SetOwnerComplete(
 {
     if (!state || !complete) return false;
     try {
-        const std::lock_guard<std::mutex> lock(state->mutex);
-        if (!state->isActive) return false;
-        state->completes.push_back(std::move(complete));
+        {
+            const std::lock_guard<std::mutex> lock(state->mutex);
+            if (!state->isActive) return false;
+            state->completes.push_back(std::move(complete));
+        }
+        if (const auto signal = state->workSignal.lock())
+            (void)signal->SendWorkAvailable();
     }
     catch (...) {
         return false;
@@ -781,7 +796,9 @@ bool VtkAppHostSession::Impl::BuildSession()
         return stopState.load() == HostStopState::Running
             && ownerThread == std::this_thread::get_id();
     }
-    if (config.renderViews.empty()) {
+    if (config.renderViews.empty()
+        || (config.driveMode != HostDriveMode::Native
+            && config.driveMode != HostDriveMode::HostDriven)) {
         return false;
     }
     if (stopState.load() != HostStopState::Stopped) {
@@ -839,7 +856,19 @@ bool VtkAppHostSession::Impl::BuildSession()
         return true;
     };
     try {
+        workSignal = std::make_shared<HostWorkSignal>(
+            config.driveMode == HostDriveMode::HostDriven
+                ? config.onWorkAvailable : std::function<void()>{});
+        ownerCompleteState->workSignal = workSignal;
         core = BuildCore();
+        core.isHostDriven = config.driveMode == HostDriveMode::HostDriven;
+        if (core.isHostDriven) {
+            const std::weak_ptr<HostWorkSignal> weakSignal = workSignal;
+            core.onWorkAvailable = [weakSignal] {
+                if (const auto signal = weakSignal.lock())
+                    (void)signal->SendWorkAvailable();
+            };
+        }
         if (!renderViews.Build(core, config.renderViews)) {
             (void)clearBuild();
             return false;
@@ -895,8 +924,8 @@ bool VtkAppHostSession::Impl::BuildSession()
             sessionGeneration, std::move(frameCallbacks));
         if (!frameCoordinator
             || !renderViews.SetFrameGeneration(sessionGeneration)
-            || !renderViews.SetFrameHandlers(
-                [this]() { OnViewTimer(); })
+            || (!core.isHostDriven && !renderViews.SetFrameHandlers(
+                [this]() { OnViewTimer(); }))
             || !renderViews.SetInputsEnabled(false)
             || !renderViews.SetInteractorsReady()) {
             (void)clearBuild();
@@ -938,6 +967,13 @@ bool VtkAppHostSession::Impl::BuildSession()
         }
         isBuilt = true;
         stopState = HostStopState::Running;
+        if (core.isHostDriven) {
+            if (!renderViews.SetInputsEnabled(true)) {
+                (void)clearBuild();
+                return false;
+            }
+            (void)workSignal->SendWorkAvailable();
+        }
         if (!config.sendOwnerTask) {
             SendDiagnostic(
                 "[Host] Session has no owner dispatcher; call Stop() on the owner thread before destruction.");
@@ -955,7 +991,7 @@ bool VtkAppHostSession::Impl::SendRequest(
     HostCompleteCallback onComplete)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!BuildSession()
+    if (!BuildSession() || isRendering
         || ownerThread != std::this_thread::get_id()
         || !commandRouter) {
         return false;
@@ -984,9 +1020,10 @@ bool VtkAppHostSession::Impl::SendRequest(
             }
         };
     }
-    return commandRouter->Dispatch(
-        std::move(request),
-        std::move(renderedComplete));
+    const bool isSent = commandRouter->Dispatch(
+        std::move(request), std::move(renderedComplete));
+    if (isSent && workSignal) (void)workSignal->SendWorkAvailable();
+    return isSent;
 }
 
 bool VtkAppHostSession::Impl::SendRequestResult(
@@ -1061,7 +1098,7 @@ HostInputResult VtkAppHostSession::Impl::SendInput(
             "Host input must run on the session owner thread." };
     }
     // endpoint 从不惰性构建 Session，避免未绑定时由任意调用线程篡取 owner。
-    if (!isBuilt || stopState.load() != HostStopState::Running
+    if (!isBuilt || isRendering || stopState.load() != HostStopState::Running
         || !inputRegistry) {
         return {
             false,
@@ -1321,6 +1358,7 @@ bool VtkAppHostSession::Impl::AttachTimer(
     if (!timerConfig.isTimerEnabled) {
         return DetachTimer();
     }
+    if (config.driveMode == HostDriveMode::HostDriven) return false;
     const auto getTargetSame = [](
         const HostViewTarget& first,
         const HostViewTarget& second) {
@@ -1398,13 +1436,13 @@ void VtkAppHostSession::Impl::SendFeatureTicks() noexcept
     features.erase(output, features.end());
 }
 
-void VtkAppHostSession::Impl::SendOwnerCompletions() noexcept
+void VtkAppHostSession::Impl::SendOwnerCompletions(const bool isStopping) noexcept
 {
     std::vector<std::function<void()>> completes;
     if (ownerCompleteState) {
         const std::lock_guard<std::mutex> lock(
             ownerCompleteState->mutex);
-        if (ownerCompleteState->isActive) {
+        if (ownerCompleteState->isActive || isStopping) {
             completes.swap(ownerCompleteState->completes);
         }
     }
@@ -1420,7 +1458,8 @@ void VtkAppHostSession::Impl::SendOwnerCompletions() noexcept
 void VtkAppHostSession::Impl::OnViewTimer()
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (ownerThread != std::this_thread::get_id()
+    if (config.driveMode == HostDriveMode::HostDriven
+        || ownerThread != std::this_thread::get_id()
         || !frameCoordinator || !timerTargets.empty()) {
         return;
     }
@@ -1430,7 +1469,8 @@ void VtkAppHostSession::Impl::OnViewTimer()
 void VtkAppHostSession::Impl::OnHostTimer()
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (ownerThread != std::this_thread::get_id()
+    if (config.driveMode == HostDriveMode::HostDriven
+        || ownerThread != std::this_thread::get_id()
         || !frameCoordinator) {
         return;
     }
@@ -1476,7 +1516,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
     const std::shared_ptr<HostFeature>& feature)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!isBuilt
+    if (!isBuilt || isFrameExecuting
         || ownerThread != std::this_thread::get_id()
         || !feature
         || !inputRegistry) {
@@ -1505,6 +1545,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
     const std::weak_ptr<FeatureHostBridge> weakBridge =
         featureBridge;
     HostFeatureContext context;
+    const auto isWorkActive = std::make_shared<std::atomic<bool>>(true);
     try {
         context.views =
             std::make_shared<FeatureViewDirectoryPort>(weakBridge);
@@ -1513,13 +1554,14 @@ bool VtkAppHostSession::Impl::AttachFeature(
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            ownerCompleteState);
+            ownerCompleteState, isWorkActive);
     }
     catch (...) {
         return false;
     }
 
     const auto clearRejectedAttach = [&]() noexcept {
+        isWorkActive->store(false);
         try {
             (void)feature->DetachHost();
         }
@@ -1547,7 +1589,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
             [](const FeatureEntry& entry, const std::string& value) {
                 return entry.id < value;
             });
-        features.insert(insertAt, FeatureEntry{ id, feature, false });
+        features.insert(insertAt, FeatureEntry{ id, feature, false, isWorkActive });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1560,7 +1602,7 @@ bool VtkAppHostSession::Impl::DetachFeature(
     const HostFeature& feature)
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (!isBuilt
+    if (!isBuilt || isFrameExecuting
         || ownerThread != std::this_thread::get_id()) {
         return false;
     }
@@ -1597,6 +1639,7 @@ bool VtkAppHostSession::Impl::DetachFeature(
             return false;
         }
         entry->isHostDetached = true;
+        if (entry->isWorkActive) entry->isWorkActive->store(false);
     }
     if (!inputRegistry
         || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
@@ -1625,6 +1668,7 @@ bool VtkAppHostSession::Impl::DetachFeatures()
                 return false;
             }
             entry.isHostDetached = true;
+            if (entry.isWorkActive) entry.isWorkActive->store(false);
         }
         if (!inputRegistry
             || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {
@@ -1638,12 +1682,19 @@ bool VtkAppHostSession::Impl::DetachFeatures()
 bool VtkAppHostSession::Impl::Stop() noexcept
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (stopState.load() == HostStopState::Stopping) return false;
     if (ownerThread != std::thread::id{}
         && ownerThread != std::this_thread::get_id()) {
         stopState = HostStopState::StopRequested;
         return false;
     }
 
+    if (workSignal) workSignal->Stop();
+    if (isFrameExecuting) {
+        stopState = HostStopState::StopRequested;
+        if (frameCoordinator) frameCoordinator->Stop();
+        return false;
+    }
     stopState = HostStopState::Stopping;
     try {
         // P0 首先关闭普通 frame admission 与输入 gate；清理失败时保持
@@ -1671,8 +1722,14 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         }
         // StopLease 成功后 timer 与 executor 都已停止；必须在任何后续可失败清理前，
         // 由当前 owner thread 兑现已接纳图像读取的唯一终态回调。
+        // 先关闭 completion admission，再排空已接纳队列；回调重入和并发晚到
+        // 不得返回成功后被下面的清理丢弃。
+        if (ownerCompleteState) {
+            const std::lock_guard<std::mutex> completeLock(ownerCompleteState->mutex);
+            ownerCompleteState->isActive = false;
+        }
         SendImageReadComplete(true);
-        SendOwnerCompletions();
+        SendOwnerCompletions(true);
         endpoints.clear();
         timerTargets.clear();
         if (featureBridge) (void)featureBridge->StopOwner();
@@ -1944,6 +2001,8 @@ bool VtkAppHostSession::AttachHotkeys(
     const std::lock_guard<std::recursive_mutex> lock(
         m_impl->m_sessionMutex);
     return BuildSession()
+        && (m_impl->config.driveMode == HostDriveMode::Native
+            || (!config.isContextInputEnabled && !config.isCommandInputEnabled))
         && m_impl->hotkeyRouter
         && m_impl->hotkeyRouter->AttachHotkeys(config);
 }
@@ -1965,7 +2024,8 @@ bool VtkAppHostSession::Start()
     if (!m_impl) return false;
     const std::lock_guard<std::recursive_mutex> lock(
         m_impl->m_sessionMutex);
-    if (!BuildSession() || m_impl->isStarted) {
+    if (!BuildSession() || m_impl->isStarted
+        || m_impl->config.driveMode == HostDriveMode::HostDriven) {
         return false;
     }
     if (!m_impl->frameCoordinator) return false;
@@ -2201,4 +2261,87 @@ LabelMapReadResult VtkAppHostSession::GetLabelMapReadResult(const LabelMapReadRe
 LabelMapReadChunkResult VtkAppHostSession::GetLabelMapReadChunk(const LabelMapReadRequest& request, std::size_t voxelOffset)
 {
     return m_impl ? m_impl->GetLabelMapReadChunk(request, voxelOffset) : LabelMapReadChunkResult{ LabelMapError::Unavailable, 0, 0, false, {} };
+}
+
+
+HostUpdateResult VtkAppHostSession::Impl::SendUpdates()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    HostUpdateResult result;
+    if (!isBuilt || stopState.load() != HostStopState::Running) {
+        result.status = HostUpdateStatus::Stopped;
+        return result;
+    }
+    if (config.driveMode != HostDriveMode::HostDriven
+        || ownerThread != std::this_thread::get_id()) return result;
+    if (isFrameExecuting) {
+        result.status = HostUpdateStatus::Deferred;
+        return result;
+    }
+    isFrameExecuting = true;
+    if (workSignal) workSignal->SendUpdates();
+    const auto frames = frameCoordinator;
+    try {
+        const auto status = frames->SendUpdates();
+        result.sceneEpoch = frames->GetCommittedEpoch();
+        result.renderViewIds = renderViews.GetRenderViewIds();
+        switch (status) {
+        case HostFrameCoordinator::FlushStatus::Completed:
+            result.status = HostUpdateStatus::Completed; break;
+        case HostFrameCoordinator::FlushStatus::Deferred:
+        case HostFrameCoordinator::FlushStatus::RenderPending:
+            result.status = HostUpdateStatus::Deferred; break;
+        case HostFrameCoordinator::FlushStatus::Stopped:
+            result.status = HostUpdateStatus::Stopped; break;
+        default: break;
+        }
+    }
+    catch (...) { result.status = HostUpdateStatus::Failed; }
+    isFrameExecuting = false;
+    if (stopState.load() == HostStopState::StopRequested) {
+        (void)Stop();
+        result.status = HostUpdateStatus::Stopped;
+        result.renderViewIds.clear();
+    }
+    return result;
+}
+
+HostRenderResult VtkAppHostSession::Impl::SendRender(
+    const HostRenderRequest& request)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    HostRenderResult result;
+    if (!isBuilt || stopState.load() != HostStopState::Running) {
+        result.status = HostRenderStatus::Stopped;
+        return result;
+    }
+    if (config.driveMode != HostDriveMode::HostDriven
+        || ownerThread != std::this_thread::get_id()) return result;
+    if (isFrameExecuting) {
+        result.status = HostRenderStatus::Deferred;
+        return result;
+    }
+    isFrameExecuting = true;
+    isRendering = true;
+    try { result = renderViews.SendFrameRender(request, [this] {
+        return stopState.load() == HostStopState::Running;
+    }); }
+    catch (...) { result.status = HostRenderStatus::Failed; }
+    isRendering = false;
+    isFrameExecuting = false;
+    if (stopState.load() == HostStopState::StopRequested) {
+        (void)Stop();
+        result.status = HostRenderStatus::Stopped;
+    }
+    return result;
+}
+
+HostUpdateResult VtkAppHostSession::SendUpdates()
+{
+    return m_impl ? m_impl->SendUpdates() : HostUpdateResult{HostUpdateStatus::Stopped};
+}
+
+HostRenderResult VtkAppHostSession::SendRender(const HostRenderRequest& request)
+{
+    return m_impl ? m_impl->SendRender(request) : HostRenderResult{HostRenderStatus::Stopped};
 }

@@ -409,6 +409,7 @@ set(MVVCVTK_HOST_SOURCES
     include/Host/HostCommandRouter.h
     include/Host/HostCoreServices.h
     include/Host/HostFrameCoordinator.h
+    include/Host/HostWorkSignal.h
     include/Host/HostHotkeyRouter.h
     include/Host/HostInputRegistry.h
     include/Host/HostViewRuntimeRegistry.h
