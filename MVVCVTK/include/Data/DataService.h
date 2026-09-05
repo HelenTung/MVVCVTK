@@ -26,6 +26,7 @@ public:
     ~AbstractDataManager() noexcept override = default;
 
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
+    virtual std::optional<ImageDescriptor> GetImageDescriptor() const = 0;
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;
     virtual ImageReadResult GetImageReadResult(
         std::size_t maxReadBytes = imageReadLimit) const = 0;

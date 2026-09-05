@@ -21,7 +21,8 @@ public:
 
     std::shared_ptr<const ImageGrid3DPayload> CreateImagePayload(
         vtkImageData* image,
-        vtkImageData* validityMask = nullptr) const;
+        vtkImageData* validityMask = nullptr,
+        ImageMetadata metadata = {}) const;
     std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
         vtkImageData* labels) const;
     std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(

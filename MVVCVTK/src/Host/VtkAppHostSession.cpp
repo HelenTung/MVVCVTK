@@ -12,6 +12,7 @@
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
 #include "Data/DataPayloads.h"
+#include "Data/LabelMapReader.h"
 
 #include <algorithm>
 #include <atomic>
@@ -26,6 +27,15 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+std::function<std::optional<ImageDescriptor>()> HostCoreServices::GetImageDescriptor() const
+{
+    const std::weak_ptr<AbstractDataManager> weakData = sharedDataMgr;
+    return [weakData]() {
+        const auto data = weakData.lock();
+        return data ? data->GetImageDescriptor() : std::optional<ImageDescriptor>{};
+    };
+}
 
 std::function<std::optional<ImageReadState>()>
 HostCoreServices::GetImageReadState() const
@@ -482,10 +492,16 @@ public:
     class FeatureReadPort final : public ImageReadPort {
     public:
         explicit FeatureReadPort(const HostCoreServices& core)
-            : m_getReadState(core.GetImageReadState())
+            : m_getDescriptor(core.GetImageDescriptor())
+            , m_getReadState(core.GetImageReadState())
             , m_getReadResult(core.GetImageReadResult())
             , m_getReadChunk(core.GetImageReadChunk())
         {
+        }
+
+        std::optional<ImageDescriptor> GetImageDescriptor() const override
+        {
+            return m_getDescriptor ? m_getDescriptor() : std::optional<ImageDescriptor>{};
         }
 
         std::optional<ImageReadState> GetImageReadState() const override
@@ -513,6 +529,7 @@ public:
         }
 
     private:
+        std::function<std::optional<ImageDescriptor>()> m_getDescriptor;
         std::function<std::optional<ImageReadState>()> m_getReadState;
         std::function<ImageReadResult(const ImageReadRequest&)>
             m_getReadResult;
@@ -625,6 +642,11 @@ public:
     std::optional<HostSceneViewState> GetSceneViewState(
         const HostViewTarget& target);
     std::vector<HostSceneViewState> GetSceneViewStates();
+    std::optional<ImageDescriptor> GetImageDescriptor();
+    std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
+    std::optional<LabelMapDescriptor> GetLabelMapDescriptor(const std::string& id);
+    LabelMapReadResult GetLabelMapReadResult(const LabelMapReadRequest& request);
+    LabelMapReadChunkResult GetLabelMapReadChunk(const LabelMapReadRequest& request, std::size_t voxelOffset);
     std::optional<ImageReadState> GetImageReadState();
     ImageReadResult GetImageReadResult(std::size_t maxReadBytes);
     ImageReadResult GetImageReadResult(
@@ -1049,6 +1071,41 @@ HostInputResult VtkAppHostSession::Impl::SendInput(
             "Host session is not ready for input." };
     }
     return inputRegistry->SendInput(event);
+}
+
+std::optional<ImageDescriptor> VtkAppHostSession::Impl::GetImageDescriptor()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return core.sharedDataMgr->GetImageDescriptor();
+}
+
+std::vector<LabelMapDescriptor> VtkAppHostSession::Impl::GetLabelMapDescriptors()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return LabelMapReader(core.sharedDataMgr->GetDataGraph()).GetDescriptors();
+}
+
+std::optional<LabelMapDescriptor> VtkAppHostSession::Impl::GetLabelMapDescriptor(const std::string& id)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return {};
+    return LabelMapReader(core.sharedDataMgr->GetDataGraph()).GetDescriptor(id);
+}
+
+LabelMapReadResult VtkAppHostSession::Impl::GetLabelMapReadResult(const LabelMapReadRequest& request)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return { LabelMapError::Unavailable, 0, {} };
+    return LabelMapReader(core.sharedDataMgr->GetDataGraph()).GetReadResult(request);
+}
+
+LabelMapReadChunkResult VtkAppHostSession::Impl::GetLabelMapReadChunk(const LabelMapReadRequest& request, std::size_t voxelOffset)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) return { LabelMapError::Unavailable, 0, 0, false, {} };
+    return LabelMapReader(core.sharedDataMgr->GetDataGraph()).GetReadChunk(request, voxelOffset);
 }
 
 std::optional<ImageReadState>
@@ -2119,4 +2176,29 @@ ImageReadAdmission VtkAppHostSession::StartImageRead(
         ? m_impl->StartImageRead(
             std::move(request), std::move(onComplete))
         : ImageReadAdmission::Unavailable;
+}
+
+std::optional<ImageDescriptor> VtkAppHostSession::GetImageDescriptor()
+{
+    return m_impl ? m_impl->GetImageDescriptor() : std::optional<ImageDescriptor>{};
+}
+
+std::vector<LabelMapDescriptor> VtkAppHostSession::GetLabelMapDescriptors()
+{
+    return m_impl ? m_impl->GetLabelMapDescriptors() : std::vector<LabelMapDescriptor>{};
+}
+
+std::optional<LabelMapDescriptor> VtkAppHostSession::GetLabelMapDescriptor(const std::string& id)
+{
+    return m_impl ? m_impl->GetLabelMapDescriptor(id) : std::optional<LabelMapDescriptor>{};
+}
+
+LabelMapReadResult VtkAppHostSession::GetLabelMapReadResult(const LabelMapReadRequest& request)
+{
+    return m_impl ? m_impl->GetLabelMapReadResult(request) : LabelMapReadResult{ LabelMapError::Unavailable, 0, {} };
+}
+
+LabelMapReadChunkResult VtkAppHostSession::GetLabelMapReadChunk(const LabelMapReadRequest& request, std::size_t voxelOffset)
+{
+    return m_impl ? m_impl->GetLabelMapReadChunk(request, voxelOffset) : LabelMapReadChunkResult{ LabelMapError::Unavailable, 0, 0, false, {} };
 }

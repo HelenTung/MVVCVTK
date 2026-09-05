@@ -346,6 +346,9 @@ namespace {
     {
         constexpr int side = 32;
         HostReloadRequest reload;
+        reload.metadata.identity.datasetId = "standalone-part-synthetic";
+        reload.metadata.source.kind = ImageSourceKind::Memory;
+        reload.metadata.source.uri = "memory://standalone-part-synthetic";
         reload.voxels.resize(
             static_cast<std::size_t>(side) * side * side, 0.0F);
         for (int z = 0; z < side; ++z) {
@@ -1894,6 +1897,10 @@ int main(int argc, char* argv[])
         load.geometry.spacing = {
             0.1537f, 0.1537f, 0.1537f };
         load.geometry.origin = { 0.0f, 0.0f, 0.0f };
+        load.metadata.identity.datasetId =
+            "standalone-ct-1536x1536x1536";
+        load.metadata.source.kind = ImageSourceKind::RawFile;
+        load.metadata.source.uri = load.filePath;
         isDataAccepted = session.SendRequestResult(
             std::move(load), onDataReady);
     }

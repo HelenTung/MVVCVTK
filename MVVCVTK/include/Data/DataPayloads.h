@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Data/DataGraphTypes.h"
+#include "Data/ImageReadTypes.h"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -117,13 +119,15 @@ public:
         std::size_t componentCount,
         DataBytes values,
         DataBytes validityMask = {},
-        std::array<double, 2> scalarRange = { 0.0, 0.0 })
+        std::array<double, 2> scalarRange = { 0.0, 0.0 },
+        ImageMetadata metadata = {})
         : m_geometry(std::move(geometry))
         , m_valueType(valueType)
         , m_componentCount(componentCount)
         , m_values(GetDataBytesSnapshot(values))
         , m_validityMask(GetDataBytesSnapshot(validityMask))
         , m_scalarRange(scalarRange)
+        , m_metadata(std::move(metadata))
     {
     }
 
@@ -144,6 +148,7 @@ public:
     std::size_t GetComponentCount() const noexcept { return m_componentCount; }
     const DataBytes& GetValues() const noexcept { return m_values; }
     const DataBytes& GetValidityMask() const noexcept { return m_validityMask; }
+    const ImageMetadata& GetMetadata() const noexcept { return m_metadata; }
     const std::array<double, 2>& GetScalarRange() const noexcept
     {
         return m_scalarRange;
@@ -160,6 +165,7 @@ public:
                     m_values,
                     m_validityMask,
                     m_scalarRange,
+                    m_metadata,
                     SnapshotUse{}));
         }
         catch (...) {
@@ -178,6 +184,7 @@ public:
                     m_values,
                     GetDataBytesSnapshot(validityMask),
                     m_scalarRange,
+                    m_metadata,
                     SnapshotUse{}));
         }
         catch (...) {
@@ -217,6 +224,7 @@ private:
         DataBytes values,
         DataBytes validityMask,
         const std::array<double, 2> scalarRange,
+        ImageMetadata metadata,
         SnapshotUse)
         : m_geometry(std::move(geometry))
         , m_valueType(valueType)
@@ -224,6 +232,7 @@ private:
         , m_values(std::move(values))
         , m_validityMask(std::move(validityMask))
         , m_scalarRange(scalarRange)
+        , m_metadata(std::move(metadata))
     {
     }
 
@@ -233,6 +242,7 @@ private:
     DataBytes m_values;
     DataBytes m_validityMask;
     std::array<double, 2> m_scalarRange = { 0.0, 0.0 };
+    ImageMetadata m_metadata;
 };
 
 struct LabelDefinition final {
@@ -241,17 +251,38 @@ struct LabelDefinition final {
     std::array<double, 4> color = { 1.0, 1.0, 1.0, 1.0 };
 };
 
+using LabelMapValues = std::variant<
+    std::shared_ptr<const std::vector<std::int8_t>>,
+    std::shared_ptr<const std::vector<std::uint8_t>>,
+    std::shared_ptr<const std::vector<std::int16_t>>,
+    std::shared_ptr<const std::vector<std::uint16_t>>,
+    std::shared_ptr<const std::vector<std::int32_t>>,
+    std::shared_ptr<const std::vector<std::uint32_t>>,
+    std::shared_ptr<const std::vector<std::int64_t>>,
+    std::shared_ptr<const std::vector<std::uint64_t>>>;
+
 class LabelMap3DPayload final : public IDataPayload {
 public:
     LabelMap3DPayload(
         GridGeometry3D geometry,
-        std::shared_ptr<const std::vector<std::uint32_t>> labels,
-        std::vector<LabelDefinition> definitions = {})
+        LabelMapValues labels,
+        std::vector<LabelDefinition> definitions = {},
+        std::string id = {},
+        std::string displayName = {})
         : m_geometry(std::move(geometry))
-        , m_labels(labels
-            ? std::make_shared<const std::vector<std::uint32_t>>(*labels)
-            : std::shared_ptr<const std::vector<std::uint32_t>>{})
+        , m_labels(std::visit([](const auto& values) -> LabelMapValues {
+            using Owner = std::decay_t<decltype(values)>;
+            using Values = typename Owner::element_type;
+            return values ? Owner{ std::make_shared<Values>(*values) } : Owner{};
+        }, labels))
         , m_definitions(std::move(definitions))
+        , m_id(std::move(id))
+        , m_displayName(std::move(displayName))
+        , m_scalarRange(std::visit([](const auto& values) {
+            if (!values || values->empty()) return std::array<double, 2>{0, 0};
+            const auto bounds = std::minmax_element(values->begin(), values->end());
+            return std::array<double, 2>{static_cast<double>(*bounds.first), static_cast<double>(*bounds.second)};
+        }, m_labels))
     {
     }
 
@@ -267,8 +298,34 @@ public:
     }
 
     const GridGeometry3D& GetGeometry() const noexcept { return m_geometry; }
-    const std::shared_ptr<const std::vector<std::uint32_t>>&
-        GetLabels() const noexcept { return m_labels; }
+    std::shared_ptr<const std::vector<std::uint32_t>> GetLabels() const noexcept
+    {
+        const auto* values = std::get_if<std::shared_ptr<const std::vector<std::uint32_t>>>(&m_labels);
+        return values ? *values : nullptr;
+    }
+    const LabelMapValues& GetValues() const noexcept { return m_labels; }
+    const std::string& GetId() const noexcept { return m_id; }
+    const std::string& GetDisplayName() const noexcept { return m_displayName; }
+    const std::array<double, 2>& GetScalarRange() const noexcept { return m_scalarRange; }
+    ImageValueType GetValueType() const noexcept
+    {
+        constexpr std::array<ImageValueType, 8> types{
+            ImageValueType::Int8, ImageValueType::UInt8,
+            ImageValueType::Int16, ImageValueType::UInt16,
+            ImageValueType::Int32, ImageValueType::UInt32,
+            ImageValueType::Int64, ImageValueType::UInt64 };
+        return types[m_labels.index()];
+    }
+    std::size_t GetValueCount() const noexcept
+    {
+        return std::visit([](const auto& values) { return values ? values->size() : 0U; }, m_labels);
+    }
+    const void* GetValueData() const noexcept
+    {
+        return std::visit([](const auto& values) -> const void* {
+            return values ? values->data() : nullptr;
+        }, m_labels);
+    }
     const std::vector<LabelDefinition>& GetDefinitions() const noexcept
     {
         return m_definitions;
@@ -276,8 +333,11 @@ public:
     bool GetValid() const noexcept
     {
         const auto voxelCount = GetGridVoxelCount(m_geometry);
-        if (!voxelCount || !m_labels || m_labels->size() != *voxelCount
-            || !GetGridGeometryValid(m_geometry)) {
+        if (!voxelCount || !GetValueData() || GetValueCount() != *voxelCount
+            || !GetGridGeometryValid(m_geometry)
+            || m_id.size() > labelMapIdByteLimit
+            || m_displayName.size() > labelMapNameByteLimit
+            || m_id.empty() != m_displayName.empty()) {
             return false;
         }
         for (const auto& definition : m_definitions) {
@@ -296,8 +356,11 @@ public:
 
 private:
     GridGeometry3D m_geometry;
-    std::shared_ptr<const std::vector<std::uint32_t>> m_labels;
+    LabelMapValues m_labels;
     std::vector<LabelDefinition> m_definitions;
+    std::string m_id;
+    std::string m_displayName;
+    std::array<double, 2> m_scalarRange;
 };
 
 struct MeshAttribute final {

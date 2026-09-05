@@ -32,6 +32,14 @@ public:
             : std::optional<DataBinding>{ found->second };
     }
 
+    std::vector<DataBinding> GetDataBindings() const override
+    {
+        std::vector<DataBinding> result;
+        result.reserve(bindings.size());
+        for (const auto& entry : bindings) result.push_back(entry.second);
+        return result;
+    }
+
     DataQueryResult GetDataQuery(const DataQuery& query) const override
     {
         DataQueryResult result;
@@ -552,6 +560,28 @@ DataCommitResult DataGraphStore::SetDataCommit(
                     return GetRejected(
                         DataCommitFailure::MissingInput,
                         "Data output input is invalid, duplicated, or missing.");
+                }
+                // 内置标签的 source-volume 契约必须引用同一网格；与节点和绑定一起原子验证。
+                const auto labels = std::dynamic_pointer_cast<const LabelMap3DPayload>(draft.payload);
+                if (labels && input.role == "source-volume") {
+                    const auto stagedSource = provisional.find(input.source);
+                    const auto sourcePayload = stagedSource != provisional.end()
+                        ? drafts[stagedSource->second].payload
+                        : current->GetData(input.source)->payload;
+                    const auto image = std::dynamic_pointer_cast<const ImageGrid3DPayload>(sourcePayload);
+                    if (!image) return GetRejected(DataCommitFailure::PayloadInvalid,
+                        "Label source-volume is not an image grid.");
+                    const auto& sourceGrid = image->GetGeometry();
+                    const auto& labelGrid = labels->GetGeometry();
+                    if (sourceGrid.extent != labelGrid.extent
+                        || sourceGrid.dimensions != labelGrid.dimensions
+                        || sourceGrid.spacing != labelGrid.spacing
+                        || sourceGrid.origin != labelGrid.origin
+                        || sourceGrid.direction != labelGrid.direction
+                        || sourceGrid.coordinateFrame != labelGrid.coordinateFrame) {
+                        return GetRejected(DataCommitFailure::PayloadInvalid,
+                            "Label geometry differs from its source-volume.");
+                    }
                 }
             }
         }

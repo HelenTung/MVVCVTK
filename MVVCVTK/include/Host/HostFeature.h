@@ -75,6 +75,7 @@ public:
 class ImageReadPort {
 public:
     virtual ~ImageReadPort() noexcept = default;
+    virtual std::optional<ImageDescriptor> GetImageDescriptor() const = 0;
 
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;
     virtual ImageReadResult GetImageReadResult(

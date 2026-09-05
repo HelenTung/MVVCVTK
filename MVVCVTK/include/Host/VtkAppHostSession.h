@@ -74,6 +74,8 @@ public:
     // 仅 owner thread 可读；按配置顺序返回全部 View，包括当前不可用的 View。
     std::vector<HostSceneViewState> GetSceneViewStates();
     // 深拷贝当前体素为不含 VTK identity 的只读值；无有效体数据时返回空。
+    // metadata-only 查询不复制体素；几何为加载边界转换后的规范 RAS。
+    std::optional<ImageDescriptor> GetImageDescriptor();
     std::optional<ImageReadState> GetImageReadState();
     // 扩展接口：在分配前检查同步复制预算，并返回稳定失败原因与所需字节数。
     ImageReadResult GetImageReadResult(
@@ -89,6 +91,15 @@ public:
     ImageReadAdmission StartImageRead(
         ImageReadRequest request,
         ImageReadCallback onComplete);
+    // LabelMap 是 DataGraph 中的独立修订；普通读取只返回值副本。
+    std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
+    std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+        const std::string& id);
+    LabelMapReadResult GetLabelMapReadResult(
+        const LabelMapReadRequest& request);
+    LabelMapReadChunkResult GetLabelMapReadChunk(
+        const LabelMapReadRequest& request,
+        std::size_t voxelOffset);
 
 private:
     class Impl;

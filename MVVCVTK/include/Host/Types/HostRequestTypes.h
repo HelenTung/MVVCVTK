@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Data/ImageReadTypes.h"
 #include "Host/Types/HostValueTypes.h"
 #include "Host/Types/HostViewTypes.h"
 
@@ -78,11 +79,13 @@ struct HostRequest {
 struct HostLoadRequest final : HostRequest {
     std::string filePath; // UTF-8 文件路径。
     HostVolumeGeometry geometry;
+    ImageMetadata metadata;
 };
 
 struct HostReloadRequest final : HostRequest {
     std::vector<float> voxels; // X 最快、随后 Y/Z 的连续 float32 标量；请求对象拥有其存储。
     HostVolumeGeometry geometry; // dimensions 的乘积必须与 voxels.size() 一致。
+    ImageMetadata metadata;
 };
 
 struct HostDataExportRequest final : HostRequest {

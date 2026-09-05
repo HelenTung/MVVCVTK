@@ -90,6 +90,17 @@ bool SendUpdatesUntil(
     return false;
 }
 
+ImageMetadata GetTestMetadata(const ImageSourceKind kind)
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "app-task-dataset";
+    metadata.source.kind = kind;
+    metadata.source.uri = kind == ImageSourceKind::Memory
+        ? "memory://app-task-dataset"
+        : "file://app-task-dataset";
+    return metadata;
+}
+
 StrategyCreate GetStrategyFactory()
 {
     return [](const VizMode mode)
@@ -392,12 +403,22 @@ private:
 
 void StartVolumeTypes(int& failureCount)
 {
-    SetExpect(!VolumeLayout::Create({ 0, 2, 3 }, { 1, 1, 1 }, { 0, 0, 0 }),
+    const auto direction = std::array<double, 9>{
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    SetExpect(!VolumeLayout::Create(
+            { 0, 2, 3 }, { 1, 1, 1 }, { 0, 0, 0 },
+            direction, GetTestMetadata(ImageSourceKind::Memory)),
         "zero dimension must fail", failureCount);
-    SetExpect(!VolumeLayout::Create({ 2, 2, 3 }, { 1, 0, 1 }, { 0, 0, 0 }),
+    SetExpect(!VolumeLayout::Create(
+            { 2, 2, 3 }, { 1, 0, 1 }, { 0, 0, 0 },
+            direction, GetTestMetadata(ImageSourceKind::Memory)),
         "non-positive spacing must fail", failureCount);
     const auto layout = VolumeLayout::Create(
-        { 2, 2, 3 }, { 0.5f, 1.0f, 2.0f }, { 3.0f, 4.0f, 5.0f });
+        { 2, 2, 3 }, { 0.5f, 1.0f, 2.0f }, { 3.0f, 4.0f, 5.0f },
+        direction, GetTestMetadata(ImageSourceKind::Memory));
     SetExpect(layout && layout->GetVoxelCount() == 12
         && layout->GetByteCount() == 12 * sizeof(float),
         "valid layout counts must be exact", failureCount);
@@ -412,7 +433,12 @@ void StartOwningTasks(int& failureCount)
     auto dataManager = std::make_shared<DataStub>();
     AppDataLoadTaskService service(dataManager);
     auto layout = VolumeLayout::Create(
-        { 2, 2, 2 }, { 1, 1, 1 }, { 0, 0, 0 });
+        { 2, 2, 2 }, { 1, 1, 1 }, { 0, 0, 0 },
+        std::array<double, 9>{
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0 },
+        GetTestMetadata(ImageSourceKind::Memory));
     if (!layout) {
         ++failureCount;
         return;
@@ -2821,7 +2847,12 @@ void StartRealCamera(int& failureCount)
     const auto layout = VolumeLayout::Create(
         { 250, 250, 250 },
         { 0.085F, 0.085F, 0.085F },
-        { 0.0F, 0.0F, 0.0F });
+        { 0.0F, 0.0F, 0.0F },
+        std::array<double, 9>{
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0 },
+        GetTestMetadata(ImageSourceKind::RawFile));
     if (!layout) {
         std::cerr << "REAL_DATA_MISMATCH: invalid locked layout\n";
         ++failureCount;

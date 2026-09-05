@@ -95,14 +95,14 @@ bool GetLabelRoundTripValid()
     labels->SetDimensions(2, 1, 1);
     labels->AllocateScalars(VTK_INT, 1);
     auto* values = static_cast<int*>(labels->GetScalarPointer());
-    values[0] = 0;
+    values[0] = -7;
     values[1] = 42;
     VtkDataBridge bridge;
     const auto payload = bridge.CreateLabelPayload(labels);
     const auto definedPayload = payload
         ? std::make_shared<const LabelMap3DPayload>(
             payload->GetGeometry(),
-            payload->GetLabels(),
+            payload->GetValues(),
             std::vector<LabelDefinition>{
                 LabelDefinition{
                     42, "part", { 0.1, 0.2, 0.3, 0.4 } } })
@@ -114,7 +114,7 @@ bool GetLabelRoundTripValid()
         ? dynamic_cast<const LabelMap3DPayload*>(snapshot->payload.get())
         : nullptr;
     const auto* output = view
-        ? static_cast<const unsigned int*>(view->labels->GetScalarPointer())
+        ? static_cast<const std::int32_t*>(view->labels->GetScalarPointer())
         : nullptr;
     return Check(
         payload && definedPayload && stored
@@ -123,8 +123,9 @@ bool GetLabelRoundTripValid()
             && stored->GetDefinitions().size() == 1
             && stored->GetDefinitions().front().value == 42
             && stored->GetDefinitions().front().name == "part"
-            && payload->GetLabels()->at(1) == 42
-            && view && output && output[0] == 0 && output[1] == 42,
+            && payload->GetValueType() == ImageValueType::Int32
+            && static_cast<const std::int32_t*>(payload->GetValueData())[1] == 42
+            && view && output && output[0] == -7 && output[1] == 42,
         "label geometry, definitions, or round trip failed");
 }
 

@@ -354,6 +354,7 @@ public:
     virtual DataSnapshot GetData(const DataRevisionRef& ref) const = 0;
     virtual std::optional<DataBinding> GetDataBinding(
         std::string_view name) const = 0;
+    virtual std::vector<DataBinding> GetDataBindings() const = 0;
     virtual DataQueryResult GetDataQuery(const DataQuery& query) const = 0;
     virtual std::vector<DataRevisionRef> GetDerivedData(
         const DataRevisionRef& source) const = 0;

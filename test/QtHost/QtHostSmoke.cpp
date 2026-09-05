@@ -306,6 +306,9 @@ int main(int argc, char* argv[])
         };
         reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
         reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+        reload.metadata.identity.datasetId = "qt-host-smoke";
+        reload.metadata.source.kind = ImageSourceKind::Memory;
+        reload.metadata.source.uri = "memory://qt-host-smoke";
         reload.voxels.resize(
             sideLength * sideLength * sideLength);
         for (std::size_t index = 0;

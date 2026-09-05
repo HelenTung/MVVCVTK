@@ -82,6 +82,9 @@ HostReloadRequest GetReload(const bool isReplacementSource = false)
 {
     constexpr int side = 8;
     HostReloadRequest reload;
+    reload.metadata.identity.datasetId = isReplacementSource ? "part-scene-replacement" : "part-scene-source";
+    reload.metadata.source.kind = ImageSourceKind::Memory;
+    reload.metadata.source.uri = "memory://" + reload.metadata.identity.datasetId;
     reload.voxels.resize(
         static_cast<std::size_t>(side) * side * side,
         isReplacementSource ? 0.1F : 0.0F);

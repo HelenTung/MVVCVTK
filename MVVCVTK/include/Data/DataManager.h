@@ -6,15 +6,21 @@
 #include <memory>
 #include <string>
 
+class ImageGrid3DPayload;
+
 class BaseDataManager : public AbstractDataManager {
 protected:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 
-    bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
+    bool SetOwnedImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata = {});
     bool SetLoadImage(
         vtkSmartPointer<vtkImageData> image,
         vtkSmartPointer<vtkImageData> validityMask = {},
+        DataProvenance provenance = {},
+        ImageMetadata metadata = {});
+
+    bool SetLoadPayload(std::shared_ptr<const ImageGrid3DPayload> payload,
         DataProvenance provenance = {});
 
 public:
@@ -54,6 +60,7 @@ public:
     bool DetachDataChange(DataObserverId observerId) override;
 
     vtkSmartPointer<vtkImageData> GetVtkImage() const override;
+    std::optional<ImageDescriptor> GetImageDescriptor() const override;
     std::array<double, 2> GetScalarRange() const override;
     std::array<double, 3> GetSpacing() const override;
     bool SetSpacing(const std::array<double, 3>& spacing) override;
@@ -113,7 +120,7 @@ public:
     bool SetFromBuffer(
         const VolumeBuffer& buffer,
         const TaskStopToken& stopToken) override;
-    bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
+    bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata);
 };
 
 class TiffVolumeDataManager : public BaseDataManager {

@@ -64,6 +64,14 @@ public:
 private:
     std::shared_ptr<CropHostFeature> m_feature;
 };
+ImageMetadata GetCropTestMetadata()
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "qt-host-crop-dataset";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://qt-host-crop-dataset";
+    return metadata;
+}
 
 class ContextProbeFeature final : public HostFeature {
 public:
@@ -368,6 +376,7 @@ bool SendReload(
     reload.geometry.dimensions = { 4, 4, 4 };
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+    reload.metadata = GetCropTestMetadata();
     return session.SendRequest(
         std::move(reload),
         [&isComplete, &isSucceeded](const bool value) {

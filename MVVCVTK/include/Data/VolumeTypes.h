@@ -1,21 +1,30 @@
 #pragma once
 
+#include "Data/ImageReadTypes.h"
+
 #include <array>
 #include <cstddef>
 #include <optional>
 #include <vector>
 
-// float32 三维体数据的已验证几何描述；Create 同时计算并校验 voxel/byte 数，避免调用方重复乘法溢出。
+// 所有请求与可信发布入口共用同一 metadata 约束；byteSize 为 0 仍表示待加载边界解析。
+bool GetImageMetadataValid(const ImageMetadata& metadata) noexcept;
+
+// float32 三维输入的已验证 LPS 几何与 metadata；两者作为一个值沿异步加载链传递。
 class VolumeLayout final {
 public:
     static std::optional<VolumeLayout> Create(
         std::array<int, 3> dimensions,
         std::array<float, 3> spacing,
-        std::array<float, 3> origin);
+        std::array<float, 3> origin,
+        std::array<double, 9> direction,
+        ImageMetadata metadata);
 
     const std::array<int, 3>& GetDimensions() const noexcept;
     const std::array<float, 3>& GetSpacing() const noexcept;
     const std::array<float, 3>& GetOrigin() const noexcept;
+    const std::array<double, 9>& GetDirection() const noexcept;
+    const ImageMetadata& GetMetadata() const noexcept;
     std::size_t GetVoxelCount() const noexcept;
     std::size_t GetByteCount() const noexcept;
 
@@ -24,12 +33,16 @@ private:
         std::array<int, 3> dimensions,
         std::array<float, 3> spacing,
         std::array<float, 3> origin,
+        std::array<double, 9> direction,
+        ImageMetadata metadata,
         std::size_t voxelCount,
         std::size_t byteCount) noexcept;
 
     std::array<int, 3> m_dimensions{}; // X/Y/Z 体素数，均为正数。
     std::array<float, 3> m_spacing{};  // X/Y/Z 物理间距，有限且大于零。
     std::array<float, 3> m_origin{};   // 物理原点，必须为有限值。
+    std::array<double, 9> m_direction{}; // 行主序正交方向余弦矩阵。
+    ImageMetadata m_metadata;
     std::size_t m_voxelCount = 0;      // dimensions 安全乘积。
     std::size_t m_byteCount = 0;       // voxelCount * sizeof(float) 的安全乘积。
 };

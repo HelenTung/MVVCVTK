@@ -66,6 +66,15 @@ VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 
 namespace {
 
+ImageMetadata GetSessionSmokeMetadata()
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "qt-session-smoke-dataset";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://qt-session-smoke-dataset";
+    return metadata;
+}
+
 double GetRenderRate(const bool isInteracting) noexcept
 {
     return isInteracting ? 15.0 : 0.001;
@@ -973,7 +982,7 @@ bool BuildTransferReturnTest()
     }
     image->Modified();
     VtkImageGridSnapshot published;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(image, GetSessionSmokeMetadata())
         || !dataManager->GetLoadStage()
         || !dataManager->SetLoadCommit(
             dataManager->GetLoadStage(), published)) {
@@ -1314,7 +1323,7 @@ bool BuildStyleQualityTest()
         static_cast<unsigned char>(128));
     image->Modified();
     VtkImageGridSnapshot published;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(image, GetSessionSmokeMetadata())
         || !dataManager->GetLoadStage()
         || !dataManager->SetLoadCommit(
             dataManager->GetLoadStage(), published)) {
@@ -1755,7 +1764,7 @@ bool BuildSceneCameraTest()
         static_cast<unsigned char>(128));
     image->Modified();
     VtkImageGridSnapshot published;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(image, GetSessionSmokeMetadata())
         || !dataManager->GetLoadStage()
         || !dataManager->SetLoadCommit(
             dataManager->GetLoadStage(), published)) {
@@ -2668,6 +2677,7 @@ public:
         reload.geometry.origin = {
             0.0f, 0.0f, 0.0f
         };
+        reload.metadata = GetSessionSmokeMetadata();
         bool isReloadComplete = false;
         bool isReloadSucceeded = false;
         if (!m_session->SendRequest(

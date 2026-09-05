@@ -22,6 +22,7 @@ struct HostCoreServices {
     std::shared_ptr<SharedInteractionState> sharedState;
 
     // 返回不含 VTK identity 的默认预算深拷贝只读值，供 Qt 普通读取者使用。
+    std::function<std::optional<ImageDescriptor>()> GetImageDescriptor() const;
     std::function<std::optional<ImageReadState>()>
         GetImageReadState() const;
     // 调用方显式给出同步复制预算，并获得 TooLarge/CopyFailed 等稳定原因。

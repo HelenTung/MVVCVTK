@@ -166,7 +166,10 @@ HostCommandRouter::Impl::GetViewRoute(
 bool HostCommandRouter::Impl::LoadFile(
     HostLoadRequest request, HostCompleteCallback callback) const
 {
-    if (request.filePath.empty()) {
+    if (request.filePath.empty()
+        || (request.metadata.source.kind != ImageSourceKind::RawFile
+            && request.metadata.source.kind
+                != ImageSourceKind::TiffSeries)) {
         return false;
     }
     const auto route = GetDataRoute(HostViewTarget{});
@@ -184,6 +187,9 @@ bool HostCommandRouter::Impl::LoadFile(
 bool HostCommandRouter::Impl::ReloadBuffer(
     HostReloadRequest request, HostCompleteCallback callback) const
 {
+    if (request.metadata.source.kind != ImageSourceKind::Memory) {
+        return false;
+    }
     const auto route = GetDataRoute(HostViewTarget{});
     const auto data = route ? route->data.lock() : nullptr;
     if (!data) {
@@ -192,7 +198,9 @@ bool HostCommandRouter::Impl::ReloadBuffer(
     auto layout = VolumeLayout::Create(
         request.geometry.dimensions,
         request.geometry.spacing,
-        request.geometry.origin);
+        request.geometry.origin,
+        request.geometry.direction,
+        std::move(request.metadata));
     if (!layout) return false;
     auto buffer = VolumeBuffer::Create(
         std::move(request.voxels), std::move(*layout));
@@ -207,12 +215,24 @@ std::optional<VolumeLayout> HostCommandRouter::Impl::BuildLoadLayout(
 {
     auto dimensions = request.geometry.dimensions;
     if (dimensions == std::array<int, 3>{ 0, 0, 0 }) {
+        if (request.metadata.source.kind
+            != ImageSourceKind::RawFile) {
+            return std::nullopt;
+        }
         auto rawDimensions = GetRawDims(request.filePath);
         if (!rawDimensions) return std::nullopt;
         dimensions = *rawDimensions;
     }
+    ImageMetadata metadata = request.metadata;
+    if (metadata.source.uri.empty()) {
+        metadata.source.uri = request.filePath;
+    }
     return VolumeLayout::Create(
-        dimensions, request.geometry.spacing, request.geometry.origin);
+        dimensions,
+        request.geometry.spacing,
+        request.geometry.origin,
+        request.geometry.direction,
+        std::move(metadata));
 }
 
 std::optional<std::array<int, 3>> HostCommandRouter::Impl::GetRawDims(

@@ -17,6 +17,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -48,24 +49,19 @@ std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
     auto* scalars = labels && labels->GetPointData()
         ? labels->GetPointData()->GetScalars() : nullptr;
     if (!voxelCount || !scalars
+        || scalars->GetDataType() != VTK_INT
+        || !scalars->GetVoidPointer(0)
         || scalars->GetNumberOfComponents() != 1
         || scalars->GetNumberOfTuples()
             != static_cast<vtkIdType>(*voxelCount)) {
         return {};
     }
-    auto values = std::make_shared<std::vector<std::uint32_t>>(*voxelCount);
-    for (std::size_t index = 0; index < *voxelCount; ++index) {
-        const double value = scalars->GetComponent(
-            static_cast<vtkIdType>(index), 0);
-        if (!std::isfinite(value) || value < 0.0
-            || value > std::numeric_limits<std::uint32_t>::max()
-            || std::floor(value) != value) {
-            return {};
-        }
-        (*values)[index] = static_cast<std::uint32_t>(value);
-    }
+    if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(std::int32_t)) return {};
+    auto values = std::make_shared<std::vector<std::int32_t>>(*voxelCount);
+    std::memcpy(values->data(), scalars->GetVoidPointer(0), values->size() * sizeof(std::int32_t));
     auto payload = std::make_shared<const LabelMap3DPayload>(
-        geometry, std::move(values));
+        geometry, LabelMapValues{ std::shared_ptr<const std::vector<std::int32_t>>(std::move(values)) },
+        std::vector<LabelDefinition>{}, "GapAnalysis.labels", "Gap analysis");
     return payload->GetValid() ? payload : nullptr;
 }
 

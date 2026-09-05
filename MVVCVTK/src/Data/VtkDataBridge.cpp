@@ -192,7 +192,8 @@ VtkDataBridge::~VtkDataBridge() = default;
 std::shared_ptr<const ImageGrid3DPayload>
 VtkDataBridge::CreateImagePayload(
     vtkImageData* image,
-    vtkImageData* validityMask) const
+    vtkImageData* validityMask,
+    ImageMetadata metadata) const
 {
     try {
         const auto geometry = GetGridGeometry(image);
@@ -241,7 +242,8 @@ VtkDataBridge::CreateImagePayload(
             static_cast<std::size_t>(scalars->GetNumberOfComponents()),
             std::move(values),
             std::move(maskBytes),
-            std::array<double, 2>{ range[0], range[1] });
+            std::array<double, 2>{ range[0], range[1] },
+            std::move(metadata));
         return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {
@@ -264,21 +266,29 @@ VtkDataBridge::CreateLabelPayload(vtkImageData* labels) const
                 != static_cast<vtkIdType>(*voxelCount)) {
             return {};
         }
-        auto values = std::make_shared<std::vector<std::uint32_t>>(
-            *voxelCount);
-        for (std::size_t index = 0; index < *voxelCount; ++index) {
-            const double value = scalars->GetComponent(
-                static_cast<vtkIdType>(index), 0);
-            if (!std::isfinite(value) || value < 0.0
-                || value > std::numeric_limits<std::uint32_t>::max()
-                || std::floor(value) != value) {
-                return {};
-            }
-            (*values)[index] = static_cast<std::uint32_t>(value);
+        const auto* source = scalars->GetVoidPointer(0);
+        if (!source) return {};
+        // 按原始整数类型复制，保留负标签和超出 double 精确范围的 64 位值。
+        const auto create = [&](auto value) -> std::shared_ptr<const LabelMap3DPayload> {
+            using Integer = decltype(value);
+            if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(Integer)) return {};
+            auto values = std::make_shared<std::vector<Integer>>(*voxelCount);
+            std::memcpy(values->data(), source, values->size() * sizeof(Integer));
+            auto payload = std::make_shared<const LabelMap3DPayload>(
+                *geometry, LabelMapValues{ std::shared_ptr<const std::vector<Integer>>(std::move(values)) });
+            return payload->GetValid() ? payload : nullptr;
+        };
+        switch (GetImageValueType(scalars->GetDataType())) {
+        case ImageValueType::Int8: return create(std::int8_t{});
+        case ImageValueType::UInt8: return create(std::uint8_t{});
+        case ImageValueType::Int16: return create(std::int16_t{});
+        case ImageValueType::UInt16: return create(std::uint16_t{});
+        case ImageValueType::Int32: return create(std::int32_t{});
+        case ImageValueType::UInt32: return create(std::uint32_t{});
+        case ImageValueType::Int64: return create(std::int64_t{});
+        case ImageValueType::UInt64: return create(std::uint64_t{});
+        default: return {};
         }
-        auto payload = std::make_shared<const LabelMap3DPayload>(
-            *geometry, std::move(values));
-        return payload->GetValid() ? payload : nullptr;
     }
     catch (...) {
         return {};
@@ -389,13 +399,15 @@ VtkLabelMapSnapshot VtkDataBridge::GetLabelMap(DataSnapshot data) const
     }
     const auto* payload = dynamic_cast<const LabelMap3DPayload*>(
         data->payload.get());
-    if (!payload || !payload->GetValid() || !payload->GetLabels()) return {};
-    const auto byteCount = payload->GetLabels()->size() * sizeof(std::uint32_t);
+    if (!payload || !payload->GetValid()) return {};
+    const auto valueBytes = GetImageValueBytes(payload->GetValueType());
+    if (valueBytes == 0 || payload->GetValueCount() > std::numeric_limits<std::size_t>::max() / valueBytes) return {};
+    const auto byteCount = payload->GetValueCount() * valueBytes;
     const auto labels = BuildImageShell(
         payload->GetGeometry(),
-        VTK_UNSIGNED_INT,
+        GetVtkValueType(payload->GetValueType()),
         1,
-        reinterpret_cast<const std::uint8_t*>(payload->GetLabels()->data()),
+        static_cast<const std::uint8_t*>(payload->GetValueData()),
         byteCount);
     if (!labels) return {};
     auto view = std::make_shared<const VtkLabelMapView>(VtkLabelMapView{

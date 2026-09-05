@@ -243,6 +243,9 @@ bool SendReload(
     reload.geometry.dimensions = { side, side, side };
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+    reload.metadata.identity.datasetId = "qt-host-gap-tests";
+    reload.metadata.source.kind = ImageSourceKind::Memory;
+    reload.metadata.source.uri = "memory://qt-host-gap-tests";
 
     return session.SendRequest(
         std::move(reload),
@@ -570,6 +573,11 @@ int GetGapFailCount()
         GetPropCount<vtkActor>(endpoint->renderer);
     const int hotkeySliceImageCount =
         GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
+    const auto hotkeyMaps = session.GetLabelMapDescriptors();
+    LabelMapReadRequest hotkeyReadRequest;
+    hotkeyReadRequest.id = "GapAnalysis.labels";
+    const auto hotkeyRead = session.GetLabelMapReadResult(
+        hotkeyReadRequest);
     const bool isExitKeyHandled =
         GetKeyHandled(*endpoint, 0, "Escape");
     for (int poll = 0;
@@ -604,6 +612,17 @@ int GetGapFailCount()
                 == primaryBaseActorCount + 1
             && hotkeySliceImageCount
                 == sliceBaseImageCount + 1
+            && hotkeyMaps.size() == 1
+            && hotkeyMaps.front().id == "GapAnalysis.labels"
+            && hotkeyMaps.front().producerFeatureId == "GapAnalysis"
+            && hotkeyMaps.front().datasetId == "qt-host-gap-tests"
+            && hotkeyMaps.front().valueType == ImageValueType::Int32
+            && hotkeyMaps.front().voxelCount == 125
+            && hotkeyRead.error == LabelMapError::None
+            && hotkeyRead.state
+            && hotkeyRead.state->values
+            && hotkeyRead.state->values->size()
+                == 125 * sizeof(std::int32_t)
             && isExitKeyHandled
             && hotkeyExitState.analysisState
                 == GapAnalysisState::Succeeded
@@ -630,7 +649,8 @@ int GetGapFailCount()
             && hotkeyExitPrimaryActorCount
                 == primaryBaseActorCount
             && hotkeyExitSliceImageCount
-                == sliceBaseImageCount,
+                == sliceBaseImageCount
+            && session.GetLabelMapDescriptors().empty(),
         "Gap Start reuses one result in mesh and slice views, then Exit removes both") ? 0 : 1;
 
     int firstCompleteCount = 0;
@@ -687,7 +707,8 @@ int GetGapFailCount()
             && feature->GetState().statistics.objectVoxelCount
                 + feature->GetState().statistics.voidVoxelCount == 125
             && feature->GetState().analysisState
-                == GapAnalysisState::Succeeded,
+                == GapAnalysisState::Succeeded
+            && session.GetLabelMapDescriptors().size() == 1,
         "Rejected Gap Start preserves the accepted analysis result") ? 0 : 1;
 
     endpoint->interactor->SetKeyEventInformation(
@@ -704,7 +725,8 @@ int GetGapFailCount()
     failureCount += GetCaseResult(
         isOverlayKeyHandled
             && isOverlayReleaseHandled
-            && isOverlaySwitched,
+            && isOverlaySwitched
+            && session.GetLabelMapDescriptors().size() == 1,
         "Gap 热键与显式请求必须进入同一 Feature 动作链") ? 0 : 1;
 
     const bool isNextReloadReady =
@@ -720,7 +742,8 @@ int GetGapFailCount()
             && staleState.analysisState == GapAnalysisState::Stale
             && staleState.statistics.objectVoxelCount > 0
             && !staleState.isViewActive
-            && !staleState.isExitPending,
+            && !staleState.isExitPending
+            && session.GetLabelMapDescriptors().empty(),
         "Primary Binding change exits the stale Gap view without deleting history") ? 0 : 1;
 
     const bool isFirstDetached =

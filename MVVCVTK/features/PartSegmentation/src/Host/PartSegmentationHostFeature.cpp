@@ -1322,7 +1322,9 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                 *candidate.catalog, m_requestSource->data->self, false);
             const auto renderStates = BuildPartRenderStateTable(*candidate.catalog);
             const auto labels = std::make_shared<const LabelMap3DPayload>(
-                GetLabelGeometry(candidate), candidate.labels);
+                GetLabelGeometry(candidate),
+                LabelMapValues{ std::shared_ptr<const std::vector<std::uint32_t>>(candidate.labels) },
+                std::vector<LabelDefinition>{}, "PartSegmentation.labels", "Part segmentation");
             if (!publicSnapshot || !renderStates
                 || !SetCatalogCommit(*candidate.catalog, m_requestSource,
                     m_requestResultBinding, labels, nextState)) {

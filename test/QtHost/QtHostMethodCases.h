@@ -15,4 +15,5 @@ int GetGapFailCount();
 int GetPartSceneFailCount();
 int GetExportFailCount();
 int GetLifecycleFailCount();
+int GetLabelMapFailCount();
 int StartLifecycleDeathCase(std::string_view caseName);

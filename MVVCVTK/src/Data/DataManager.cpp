@@ -73,21 +73,89 @@ public:
         const int dimensions[3],
         const std::string& extension);
 
-    static std::array<double, 3> GetRasOrigin(
-        const std::array<double, 3>& lpsOrigin,
-        const int dims[3],
-        const std::array<double, 3>& spacing)
-    {
-        std::array<double, 3> rasOrigin = {
-            -lpsOrigin[0], -lpsOrigin[1], lpsOrigin[2]
+    struct RasGeometry final {
+        std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
+        std::array<double, 3> origin = { 0.0, 0.0, 0.0 };
+        std::array<double, 9> direction = {
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
         };
-        if (dims[0] > 0) {
-            rasOrigin[0] -= static_cast<double>(dims[0] - 1) * spacing[0];
+    };
+
+    static RasGeometry GetRasGeometry(const VolumeLayout& layout)
+    {
+        const auto& dimensions = layout.GetDimensions();
+        const auto& inputSpacing = layout.GetSpacing();
+        const auto& inputOrigin = layout.GetOrigin();
+        const auto& inputDirection = layout.GetDirection();
+        constexpr std::array<double, 3> lpsToRas = {
+            -1.0, -1.0, 1.0
+        };
+
+        RasGeometry result;
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            result.spacing[axis] = static_cast<double>(
+                inputSpacing[axis]);
         }
-        if (dims[1] > 0) {
-            rasOrigin[1] -= static_cast<double>(dims[1] - 1) * spacing[1];
+        for (std::size_t row = 0; row < 3; ++row) {
+            double lastSourcePoint = static_cast<double>(
+                inputOrigin[row]);
+            for (std::size_t column = 0; column < 2; ++column) {
+                lastSourcePoint += inputDirection[row * 3 + column]
+                    * result.spacing[column]
+                    * static_cast<double>(dimensions[column] - 1);
+            }
+            result.origin[row] = lpsToRas[row] * lastSourcePoint;
+            for (std::size_t column = 0; column < 3; ++column) {
+                result.direction[row * 3 + column] =
+                    lpsToRas[row]
+                    * inputDirection[row * 3 + column]
+                    * lpsToRas[column];
+            }
         }
-        return rasOrigin;
+        return result;
+    }
+
+    static void SetDirection(
+        vtkImageData& image,
+        const std::array<double, 9>& direction)
+    {
+        auto matrix = vtkSmartPointer<vtkMatrix3x3>::New();
+        for (std::size_t row = 0; row < 3; ++row) {
+            for (std::size_t column = 0; column < 3; ++column) {
+                matrix->SetElement(
+                    static_cast<int>(row),
+                    static_cast<int>(column),
+                    direction[row * 3 + column]);
+            }
+        }
+        image.SetDirectionMatrix(matrix);
+    }
+
+    static std::optional<ImageMetadata> GetResolvedMetadata(
+        ImageMetadata metadata,
+        const ImageSourceKind expectedKind,
+        const std::uint64_t actualByteSize)
+    {
+        if (!GetImageMetadataValid(metadata)
+            || metadata.source.kind != expectedKind
+            || actualByteSize == 0
+            || (metadata.source.byteSize != 0
+                && metadata.source.byteSize != actualByteSize)) {
+            return std::nullopt;
+        }
+        metadata.source.byteSize = actualByteSize;
+        return metadata;
+    }
+
+    static std::optional<ImageMetadata> GetResolvedMetadata(
+        const VolumeLayout& layout,
+        const ImageSourceKind expectedKind,
+        const std::uint64_t actualByteSize)
+    {
+        return GetResolvedMetadata(
+            layout.GetMetadata(), expectedKind, actualByteSize);
     }
 
     static std::optional<size_t> GetVoxelCount(const int dims[3])
@@ -665,12 +733,14 @@ public:
     vtkSmartPointer<vtkImageData> LoadImage(
         const std::string& inputPath,
         const VolumeLayout& layout,
-        const TaskStopToken& stopToken);
+        const TaskStopToken& stopToken,
+        std::uint64_t& sourceByteSize);
 
 private:
     bool SetLpsRasImage(
         vtkImageData* source,
         vtkImageData* target,
+        const VolumeLayout& layout,
         const TaskStopToken& stopToken) const;
 };
 
@@ -784,6 +854,30 @@ DataObserverId BaseDataManager::AttachDataChange(
 bool BaseDataManager::DetachDataChange(const DataObserverId observerId)
 {
     return m_impl->m_graph->DetachDataChange(observerId);
+}
+
+std::optional<ImageDescriptor> BaseDataManager::GetImageDescriptor() const
+{
+    const auto graph = GetDataGraph();
+    const auto binding = GetDataBinding(graph, primaryVolumeBinding);
+    const auto data = binding && binding->target ? GetData(graph, *binding->target) : nullptr;
+    const auto payload = data ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(data->payload) : nullptr;
+    if (!payload || !payload->GetValid()) return std::nullopt;
+    const auto& geometry = payload->GetGeometry();
+    ImageDescriptor result;
+    result.metadata = payload->GetMetadata();
+    result.extent = geometry.extent;
+    result.dims = geometry.dimensions;
+    result.spacing = geometry.spacing;
+    result.origin = geometry.origin;
+    result.direction = geometry.direction;
+    result.scalarRange = payload->GetScalarRange();
+    result.valueType = payload->GetValueType();
+    result.componentBytes = GetImageValueBytes(result.valueType);
+    result.componentCount = payload->GetComponentCount();
+    result.dataRevision = data->self;
+    result.bindingRevision = binding->revision;
+    return result;
 }
 
 vtkSmartPointer<vtkImageData> BaseDataManager::GetVtkImage() const
@@ -1099,11 +1193,19 @@ bool BaseDataManager::ClearLoadStage()
 bool BaseDataManager::SetLoadImage(
     vtkSmartPointer<vtkImageData> image,
     vtkSmartPointer<vtkImageData> validityMask,
-    DataProvenance provenance)
+    DataProvenance provenance,
+    ImageMetadata metadata)
 {
     if (!image || !Impl::GetMaskValid(image, validityMask)) return false;
-    auto payload = m_impl->m_vtk->CreateImagePayload(image, validityMask);
-    if (!payload) return false;
+    auto payload = m_impl->m_vtk->CreateImagePayload(image, validityMask, std::move(metadata));
+    return payload && SetLoadPayload(std::move(payload), std::move(provenance));
+}
+
+bool BaseDataManager::SetLoadPayload(
+    std::shared_ptr<const ImageGrid3DPayload> payload,
+    DataProvenance provenance)
+{
+    if (!payload || !payload->GetValid()) return false;
     const auto graph = GetDataGraph();
     const auto current = GetDataBinding(graph, primaryVolumeBinding);
     const DataBinding expected = current.value_or(DataBinding{
@@ -1152,9 +1254,9 @@ bool BaseDataManager::SetLoadImage(
     return true;
 }
 
-bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image)
+bool BaseDataManager::SetOwnedImage(vtkSmartPointer<vtkImageData> image, ImageMetadata metadata)
 {
-    if (!SetLoadImage(std::move(image))) return false;
+    if (!SetLoadImage(std::move(image), {}, {}, std::move(metadata))) return false;
     const auto stage = GetLoadStage();
     VtkImageGridSnapshot published;
     return SetLoadCommit(stage, published) && published;
@@ -2011,6 +2113,23 @@ bool RawVolumeDataManager::SetDataLoaded(
     const TaskStopToken& stopToken)
 {
     if (stopToken.GetIsStopped()) return false;
+    if (layout.GetMetadata().source.kind
+        == ImageSourceKind::TiffSeries) {
+        TiffVolumeDataManager tiffLoader;
+        if (!tiffLoader.SetDataLoaded(
+                filePath, layout, stopToken)) {
+            return false;
+        }
+        const auto candidate = tiffLoader.GetLoadStage();
+        if (!candidate || stopToken.GetIsStopped()) return false;
+        const auto payload = std::dynamic_pointer_cast<const ImageGrid3DPayload>(
+            candidate->output.payload);
+        return payload && SetLoadPayload(payload, candidate->output.provenance.value_or(DataProvenance{}));
+    }
+    if (layout.GetMetadata().source.kind
+        != ImageSourceKind::RawFile) {
+        return false;
+    }
     const auto& dimensions = layout.GetDimensions();
     const int rasDims[3] = {
         dimensions[0], dimensions[1], dimensions[2]
@@ -2019,31 +2138,27 @@ bool RawVolumeDataManager::SetDataLoaded(
     const auto fileBytes = std::filesystem::file_size(
         PlatformPath::GetNativePath(filePath), fileError);
     if (fileError || fileBytes != layout.GetByteCount()
+        || fileBytes > std::numeric_limits<std::uint64_t>::max()
         || stopToken.GetIsStopped()) {
         return false;
     }
 
+    const auto metadata = BaseDataManager::Impl::GetResolvedMetadata(
+        layout,
+        ImageSourceKind::RawFile,
+        static_cast<std::uint64_t>(fileBytes));
+    if (!metadata) return false;
+
     // 输入 layout 明确描述 LPS 物理空间；加载链只负责转换为内部 RAS 空间。
-    const auto& spacing = layout.GetSpacing();
-    const auto& origin = layout.GetOrigin();
-    const std::array<double, 3> lpsSpacing = {
-        static_cast<double>(spacing[0]),
-        static_cast<double>(spacing[1]),
-        static_cast<double>(spacing[2])
-    };
-    const std::array<double, 3> lpsOrigin = {
-        static_cast<double>(origin[0]),
-        static_cast<double>(origin[1]),
-        static_cast<double>(origin[2])
-    };
-    const std::array<double, 3> rasSpacing = lpsSpacing;
-    const std::array<double, 3> rasOrigin = BaseDataManager::Impl::GetRasOrigin(
-        lpsOrigin, rasDims, rasSpacing);
+    const auto rasGeometry =
+        BaseDataManager::Impl::GetRasGeometry(layout);
 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(rasDims[0], rasDims[1], rasDims[2]);
-    newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
-    newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
+    newImage->SetSpacing(rasGeometry.spacing.data());
+    newImage->SetOrigin(rasGeometry.origin.data());
+    BaseDataManager::Impl::SetDirection(
+        *newImage, rasGeometry.direction);
     newImage->AllocateScalars(VTK_FLOAT, 1);
 
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
@@ -2061,7 +2176,7 @@ bool RawVolumeDataManager::SetDataLoaded(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(newImage));
+    return SetLoadImage(std::move(newImage), {}, {}, *metadata);
 }
 
 bool RawVolumeDataManager::SetFromBuffer(
@@ -2077,25 +2192,23 @@ bool RawVolumeDataManager::SetFromBuffer(
     if (stopToken.GetIsStopped()) return false;
     const auto& layout = buffer.GetLayout();
     const auto& dims = layout.GetDimensions();
-    const auto& spacing = layout.GetSpacing();
-    const auto& origin = layout.GetOrigin();
+    if (layout.GetMetadata().source.kind != ImageSourceKind::Memory) {
+        return false;
+    }
     const int rasDims[3] = { dims[0], dims[1], dims[2] };
-    const std::array<double, 3> rasSpacing = {
-        static_cast<double>(spacing[0]),
-        static_cast<double>(spacing[1]),
-        static_cast<double>(spacing[2])
-    };
-    const std::array<double, 3> lpsOrigin = {
-        static_cast<double>(origin[0]),
-        static_cast<double>(origin[1]),
-        static_cast<double>(origin[2])
-    };
-    const std::array<double, 3> rasOrigin = BaseDataManager::Impl::GetRasOrigin(
-        lpsOrigin, rasDims, rasSpacing);
+    const auto metadata = BaseDataManager::Impl::GetResolvedMetadata(
+        layout,
+        ImageSourceKind::Memory,
+        static_cast<std::uint64_t>(layout.GetByteCount()));
+    if (!metadata) return false;
+    const auto rasGeometry =
+        BaseDataManager::Impl::GetRasGeometry(layout);
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     newImage->SetDimensions(dims[0], dims[1], dims[2]);
-    newImage->SetSpacing(rasSpacing[0], rasSpacing[1], rasSpacing[2]);
-    newImage->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
+    newImage->SetSpacing(rasGeometry.spacing.data());
+    newImage->SetOrigin(rasGeometry.origin.data());
+    BaseDataManager::Impl::SetDirection(
+        *newImage, rasGeometry.direction);
     newImage->AllocateScalars(VTK_FLOAT, 1);
     float* dst = static_cast<float*>(newImage->GetScalarPointer());
     if (!m_impl->SetRasScalars(
@@ -2110,10 +2223,12 @@ bool RawVolumeDataManager::SetFromBuffer(
     newImage->GetScalarRange(range);
 
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(newImage));
+    return SetLoadImage(std::move(newImage), {}, {}, *metadata);
 }
 
-bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
+bool RawVolumeDataManager::SetImageSnapshot(
+    vtkSmartPointer<vtkImageData> image,
+    ImageMetadata metadata)
 {
     // 该入口接收已构造的 VTK image，只校验并发布 pending 快照，不直接替换 current 真源。
     if (!image) {
@@ -2131,18 +2246,22 @@ bool RawVolumeDataManager::SetImageSnapshot(vtkSmartPointer<vtkImageData> image)
 
     double range[2] = { 0.0, 0.0 };
     imageCopy->GetScalarRange(range);
-    const std::array<double, 3> imageSpacing = {
-        imageCopy->GetSpacing()[0],
-        imageCopy->GetSpacing()[1],
-        imageCopy->GetSpacing()[2]
-    };
-    const std::array<double, 3> imageOrigin = {
-        imageCopy->GetOrigin()[0],
-        imageCopy->GetOrigin()[1],
-        imageCopy->GetOrigin()[2]
-    };
-
-    return SetLoadImage(std::move(imageCopy));
+    vtkPointData* const pointData = imageCopy->GetPointData();
+    vtkDataArray* const scalars = pointData
+        ? pointData->GetScalars() : nullptr;
+    const auto byteCount = BaseDataManager::Impl::GetArrayByteCount(
+        scalars);
+    if (!byteCount
+        || *byteCount > std::numeric_limits<std::uint64_t>::max()) {
+        return false;
+    }
+    const auto resolvedMetadata =
+        BaseDataManager::Impl::GetResolvedMetadata(
+            std::move(metadata),
+            ImageSourceKind::Memory,
+            static_cast<std::uint64_t>(*byteCount));
+    if (!resolvedMetadata) return false;
+    return SetLoadImage(std::move(imageCopy), {}, {}, *resolvedMetadata);
 }
 
 TiffVolumeDataManager::TiffVolumeDataManager()
@@ -2169,34 +2288,45 @@ bool TiffVolumeDataManager::SetDataLoaded(
         return false;
     }
 
+    if (layout.GetMetadata().source.kind
+        != ImageSourceKind::TiffSeries) {
+        return false;
+    }
+    std::uint64_t sourceByteSize = 0;
     auto image = m_impl->LoadImage(
-        inputPath, layout, stopToken);
+        inputPath, layout, stopToken, sourceByteSize);
     if (!image) return false;
-    double range[2] = { 0.0, 0.0 };
-    image->GetScalarRange(range);
-    const auto& dimensions = layout.GetDimensions();
-    double spacing[3] = { 1.0, 1.0, 1.0 };
-    double origin[3] = { 0.0, 0.0, 0.0 };
-    image->GetSpacing(spacing);
-    image->GetOrigin(origin);
+    const auto metadata = BaseDataManager::Impl::GetResolvedMetadata(
+        layout, ImageSourceKind::TiffSeries, sourceByteSize);
+    if (!metadata) return false;
     if (stopToken.GetIsStopped()) return false;
-    return SetLoadImage(std::move(image));
+    return SetLoadImage(std::move(image), {}, {}, *metadata);
 }
 
 vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     const std::string& inputPath,
     const VolumeLayout& layout,
-    const TaskStopToken& stopToken) {
+    const TaskStopToken& stopToken,
+    std::uint64_t& sourceByteSize) {
+    sourceByteSize = 0;
     // 路径检查
     const std::filesystem::path pathObj = PlatformPath::GetNativePath(inputPath);
+    std::error_code pathError;
     if (stopToken.GetIsStopped()
-        || !std::filesystem::exists(pathObj)) {
+        || !std::filesystem::exists(pathObj, pathError)
+        || pathError) {
         std::cerr << "[Error] Path does not exist: " << inputPath << std::endl;
         return nullptr;
     }
 
     vtkSmartPointer<vtkImageData> decodedImage;
-    if (std::filesystem::is_directory(pathObj)) {
+    pathError.clear();
+    const bool isDirectory = std::filesystem::is_directory(
+        pathObj, pathError);
+    if (pathError) {
+        return nullptr;
+    }
+    if (isDirectory) {
         //
         std::cout << "[Info] Loading TIFF series from folder: " << inputPath << std::endl;
 
@@ -2212,6 +2342,17 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
                         [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 
                     if (ext == ".tif" || ext == ".tiff") {
+                        std::error_code sizeError;
+                        const auto fileSize = entry.file_size(sizeError);
+                        if (sizeError
+                            || fileSize == 0
+                            || fileSize
+                                > std::numeric_limits<std::uint64_t>::max()
+                                    - sourceByteSize) {
+                            return nullptr;
+                        }
+                        sourceByteSize +=
+                            static_cast<std::uint64_t>(fileSize);
                         fileList.push_back(PlatformPath::GetUtf8Path(entry.path()));
                     }
                 }
@@ -2349,6 +2490,14 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     else {
         // 单文件
         std::cout << "[Info] Loading single TIFF file: " << inputPath << std::endl;
+        std::error_code sizeError;
+        const auto fileSize = std::filesystem::file_size(
+            pathObj, sizeError);
+        if (sizeError || fileSize == 0
+            || fileSize > std::numeric_limits<std::uint64_t>::max()) {
+            return nullptr;
+        }
+        sourceByteSize = static_cast<std::uint64_t>(fileSize);
         auto reader = vtkSmartPointer<vtkTIFFReader>::New();
         const std::string vtkInputPath = PlatformPath::GetUtf8Path(pathObj);
         reader->SetFileName(vtkInputPath.c_str());
@@ -2395,10 +2544,12 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
     const auto& origin = layout.GetOrigin();
     lpsImage->SetSpacing(spacing[0], spacing[1], spacing[2]);
     lpsImage->SetOrigin(origin[0], origin[1], origin[2]);
+    BaseDataManager::Impl::SetDirection(
+        *lpsImage, layout.GetDirection());
 
     auto newImage = vtkSmartPointer<vtkImageData>::New();
     if (!SetLpsRasImage(
-            lpsImage, newImage, stopToken)) {
+            lpsImage, newImage, layout, stopToken)) {
         return nullptr;
     }
 
@@ -2412,6 +2563,7 @@ vtkSmartPointer<vtkImageData> TiffVolumeDataManager::Impl::LoadImage(
 bool TiffVolumeDataManager::Impl::SetLpsRasImage(
     vtkImageData* source,
     vtkImageData* target,
+    const VolumeLayout& layout,
     const TaskStopToken& stopToken) const
 {
     if (!source || !target || stopToken.GetIsStopped()) {
@@ -2424,31 +2576,34 @@ bool TiffVolumeDataManager::Impl::SetLpsRasImage(
         return false;
     }
 
-    double spacingRaw[3] = { 1.0, 1.0, 1.0 };
-    double originRaw[3] = { 0.0, 0.0, 0.0 };
-    source->GetSpacing(spacingRaw);
-    source->GetOrigin(originRaw);
-
-    const std::array<double, 3> imageSpacing = {
-        spacingRaw[0], spacingRaw[1], spacingRaw[2]
-    };
-    const std::array<double, 3> lpsOrigin = {
-        originRaw[0], originRaw[1], originRaw[2]
-    };
-    const std::array<double, 3> rasOrigin = BaseDataManager::Impl::GetRasOrigin(lpsOrigin, dims, imageSpacing);
+    const auto rasGeometry =
+        BaseDataManager::Impl::GetRasGeometry(layout);
 
     target->SetDimensions(dims[0], dims[1], dims[2]);
-    target->SetSpacing(imageSpacing[0], imageSpacing[1], imageSpacing[2]);
-    target->SetOrigin(rasOrigin[0], rasOrigin[1], rasOrigin[2]);
+    target->SetSpacing(rasGeometry.spacing.data());
+    target->SetOrigin(rasGeometry.origin.data());
+    BaseDataManager::Impl::SetDirection(
+        *target, rasGeometry.direction);
     target->AllocateScalars(source->GetScalarType(), source->GetNumberOfScalarComponents());
 
     const int componentCount = source->GetNumberOfScalarComponents();
     const int scalarSize = source->GetScalarSize();
-    const size_t pixelBytes = static_cast<size_t>(componentCount) * static_cast<size_t>(scalarSize);
+    std::size_t pixelBytes = 0;
     const size_t nx = static_cast<size_t>(dims[0]);
     const size_t ny = static_cast<size_t>(dims[1]);
-    const size_t rowBytes = nx * pixelBytes;
-    const size_t sliceBytes = ny * rowBytes;
+    std::size_t rowBytes = 0;
+    std::size_t sliceBytes = 0;
+    if (componentCount <= 0 || scalarSize <= 0
+        || !BaseDataManager::Impl::GetCheckedProduct(
+            static_cast<std::size_t>(componentCount),
+            static_cast<std::size_t>(scalarSize),
+            pixelBytes)
+        || !BaseDataManager::Impl::GetCheckedProduct(
+            nx, pixelBytes, rowBytes)
+        || !BaseDataManager::Impl::GetCheckedProduct(
+            ny, rowBytes, sliceBytes)) {
+        return false;
+    }
 
     const char* srcBase = static_cast<const char*>(source->GetScalarPointer());
     char* dstBase = static_cast<char*>(target->GetScalarPointer());

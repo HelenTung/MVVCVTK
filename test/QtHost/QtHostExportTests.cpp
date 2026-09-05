@@ -23,6 +23,9 @@ int GetExportFailCount()
     HostReloadRequest reload;
     reload.voxels.assign(8, 1.0f);
     reload.geometry = { { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
+    reload.metadata.identity.datasetId = "qt-host-export";
+    reload.metadata.source.kind = ImageSourceKind::Memory;
+    reload.metadata.source.uri = "memory://qt-host-export";
     const auto unicodeDir = std::filesystem::temp_directory_path()
         / std::filesystem::u8path(u8"MVVCVTK_导出_é");
     std::error_code createError;
