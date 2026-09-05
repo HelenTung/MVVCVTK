@@ -242,6 +242,29 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         snapshot && snapshot->resultRevision == 1
             && snapshot->sourceRevision == testHost.data->GetPrimaryImage()->data->self,
         "successful request publishes immutable generation");
+    if (snapshot) {
+        const auto graph = testHost.data->GetDataGraph();
+        const auto data = graph.view->GetData(snapshot->meshRevision);
+        const auto mesh = data
+            ? std::dynamic_pointer_cast<const SurfaceMeshPayload>(data->payload)
+            : nullptr;
+        checks.Get(mesh && mesh->GetPointAttributes().size() == 5,
+            "generic mesh publishes measurement quality attributes");
+        if (mesh && mesh->GetPointAttributes().size() == 5) {
+            const auto& attributes = mesh->GetPointAttributes();
+            checks.Get(attributes[0].name == "measurement.valid"
+                && attributes[0].values.size() == snapshot->points->size()
+                && attributes[4].componentCount == 3
+                && attributes[4].values.size() == snapshot->points->size() * 3,
+                "quality schema aligns with exact measurement vertices");
+            for (std::size_t index = 0; index < snapshot->points->size(); ++index) {
+                if (attributes[0].values[index] != 1.0) continue;
+                checks.Get(attributes[1].values[index] == (*snapshot->points)[index].fitResidual
+                    && attributes[2].values[index] == (*snapshot->points)[index].validSupportRatio,
+                    "valid quality values retain producer measurements");
+            }
+        }
+    }
     checks.Get(
         testHost.views->overlay->overlays.size() == 1
             && testHost.host->activeViews.size() == 1,

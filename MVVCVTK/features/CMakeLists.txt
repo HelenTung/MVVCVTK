@@ -25,3 +25,7 @@ endif()
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_subdirectory(SurfaceDetermination)
 endif()
+
+if(MVVCVTK_BUILD_METROLOGY_ALIGNMENT)
+    add_subdirectory(MetrologyAlignment)
+endif()
