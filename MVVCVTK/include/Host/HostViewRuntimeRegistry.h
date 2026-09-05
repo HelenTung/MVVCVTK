@@ -42,6 +42,7 @@ struct HostViewRoute final {
 struct HostInputRoute final {
     std::string id;
     HostRenderViewRole role = HostRenderViewRole::Auxiliary;
+    HostInputMode inputMode = HostInputMode::NativeInteractor;
     std::weak_ptr<AbstractViewContext> context;
 };
 

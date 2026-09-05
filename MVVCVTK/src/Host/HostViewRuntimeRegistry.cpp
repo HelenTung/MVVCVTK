@@ -481,6 +481,15 @@ bool HostViewRuntimeRegistry::Impl::SetViewWindow(
     vtkSmartPointer<vtkRenderWindow> renderWindow)
 {
     if (!view.context || !view.renderBind) return false;
+    const bool hasActiveFeature = std::any_of(
+        m_featureViews.begin(), m_featureViews.end(),
+        [&view](const auto& featureViews) {
+            return std::find(
+                featureViews.second.begin(),
+                featureViews.second.end(),
+                view.app.feature) != featureViews.second.end();
+        });
+    if (hasActiveFeature) return false;
     if (!renderWindow) {
         renderWindow = view.context->GetRenderWindow();
     }
@@ -557,7 +566,8 @@ HostViewRuntimeRegistry::Impl::BuildView(
     }
 
     auto context = CreateViewContext(
-        ports.interaction);
+        ports.interaction,
+        config.inputMode == HostInputMode::HostInjected);
     if (!context) return std::nullopt;
 
     HostRenderViewRuntime view;
@@ -1186,6 +1196,7 @@ HostViewRuntimeRegistry::Impl::GetInputRouteValues(
         HostInputRoute route;
         route.id = view->config.id;
         route.role = view->config.role;
+        route.inputMode = view->config.inputMode;
         route.context = view->context;
         routes.push_back(std::move(route));
     }

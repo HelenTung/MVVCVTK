@@ -5,6 +5,7 @@
 #include "Host/HostFeature.h"
 #include "Host/HostFrameCoordinator.h"
 #include "Host/HostHotkeyRouter.h"
+#include "Host/HostInputRegistry.h"
 #include "Host/HostViewRuntimeRegistry.h"
 
 #include "App/AppState.h"
@@ -137,6 +138,25 @@ public:
         // attached Feature 属于 Session aggregate；只有 Detach/Stop 成功后才释放，
         // 从而保证 Feature 内的 VTK 绑定始终在 owner thread 上确定性清理。
         std::shared_ptr<HostFeature> feature;
+        // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
+        bool isHostDetached = false;
+    };
+
+    class InputEndpoint final : public HostInputEndpoint {
+    public:
+        explicit InputEndpoint(Impl& owner) noexcept
+            : m_owner(owner)
+        {
+        }
+
+        HostInputResult SendInput(
+            const HostInputEvent& event) override
+        {
+            return m_owner.SendInput(event);
+        }
+
+    private:
+        Impl& m_owner;
     };
 
     struct OwnerCompleteState final {
@@ -501,6 +521,7 @@ public:
 
     explicit Impl(HostSessionConfig sessionConfig)
         : config(std::move(sessionConfig))
+        , inputEndpoint(*this)
         , ownerCompleteState(
             std::make_shared<OwnerCompleteState>())
     {
@@ -515,6 +536,7 @@ public:
     bool SendRequestResult(
         HostRequest&& request,
         HostResultCallback onComplete);
+    HostInputResult SendInput(const HostInputEvent& event);
     std::optional<HostRenderViewState> GetRenderViewState(
         const HostViewTarget& target);
     std::vector<HostRenderViewState> GetRenderViewStates();
@@ -549,7 +571,9 @@ public:
     std::shared_ptr<HostFrameCoordinator> frameCoordinator;
     std::shared_ptr<HostCommandRouter> commandRouter;
     std::vector<HostRenderViewEndpoint> endpoints;
+    std::unique_ptr<HostInputRegistry> inputRegistry;
     std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
+    InputEndpoint inputEndpoint;
     std::vector<FeatureEntry> features;
     // 保存实际已安装 handler 的目标；补偿失败时允许暂存双绑定并由后续请求重试收敛。
     std::vector<HostViewTarget> timerTargets;
@@ -681,7 +705,17 @@ bool VtkAppHostSession::Impl::BuildSession()
             if (frameCoordinator) frameCoordinator->Stop();
             if (featureBridge) (void)featureBridge->StopOwner();
             endpoints.clear();
+            const bool isHotkeyStopped =
+                !hotkeyRouter || hotkeyRouter->ClearHotkeys();
+            const bool isInputStopped =
+                isHotkeyStopped
+                && (!inputRegistry || inputRegistry->Stop());
+            if (!isInputStopped) {
+                stopState = HostStopState::StopPending;
+                return false;
+            }
             hotkeyRouter.reset();
+            inputRegistry.reset();
             commandRouter.reset();
             isStopped = renderViews.StopLease();
             if (isStopped) frameCoordinator.reset();
@@ -769,9 +803,20 @@ bool VtkAppHostSession::Impl::BuildSession()
             (void)clearBuild();
             return false;
         }
+        inputRegistry = std::make_unique<HostInputRegistry>(
+            viewDirectory);
+        HostViewTargets allViews;
+        allViews.viewIds.reserve(config.renderViews.size());
+        for (const auto& view : config.renderViews) {
+            allViews.viewIds.push_back(view.id);
+        }
+        if (!inputRegistry
+            || !inputRegistry->Start(std::move(allViews))) {
+            (void)clearBuild();
+            return false;
+        }
         hotkeyRouter = std::make_unique<HostHotkeyRouter>(
-            viewDirectory,
-            commandRouter);
+            *inputRegistry, commandRouter);
         if (!hotkeyRouter) {
             (void)clearBuild();
             return false;
@@ -781,7 +826,7 @@ bool VtkAppHostSession::Impl::BuildSession()
         }
         if (!featureBridge->StartOwner(
                 renderViews,
-                hotkeyRouter->GetInputPort(),
+                inputRegistry->GetFeaturePort(),
                 frameCoordinator,
                 ownerThread)) {
             (void)clearBuild();
@@ -896,6 +941,32 @@ bool VtkAppHostSession::Impl::SendRequestResult(
     sendResult({ false, HostErrorCode::RequestRejected,
         "The host request was rejected before execution." });
     return false;
+}
+
+HostInputResult VtkAppHostSession::Impl::SendInput(
+    const HostInputEvent& event)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread != std::thread::id{}
+        && ownerThread != std::this_thread::get_id()) {
+        return {
+            false,
+            false,
+            false,
+            HostErrorCode::WrongThread,
+            "Host input must run on the session owner thread." };
+    }
+    // endpoint 从不惰性构建 Session，避免未绑定时由任意调用线程篡取 owner。
+    if (!isBuilt || stopState.load() != HostStopState::Running
+        || !inputRegistry) {
+        return {
+            false,
+            false,
+            false,
+            HostErrorCode::SessionNotReady,
+            "Host session is not ready for input." };
+    }
+    return inputRegistry->SendInput(event);
 }
 
 std::optional<ImageReadState>
@@ -1174,6 +1245,8 @@ void VtkAppHostSession::Impl::SendFeatureTicks() noexcept
         const auto& feature = input->feature;
         if (!feature) continue;
         *output++ = *input;
+        // 已脱离的条目只保留给输入清理重试，不再驱动 Feature 业务。
+        if (input->isHostDetached) continue;
         try {
             (void)feature->OnHostTick();
         }
@@ -1267,7 +1340,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
     if (!isBuilt
         || ownerThread != std::this_thread::get_id()
         || !feature
-        || !hotkeyRouter) {
+        || !inputRegistry) {
         return false;
     }
 
@@ -1314,7 +1387,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         catch (...) {
         }
         try {
-            (void)hotkeyRouter->GetInputPort().DetachInput(id);
+            (void)inputRegistry->GetFeaturePort().DetachInput(id);
         }
         catch (...) {
         }
@@ -1335,7 +1408,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
             [](const FeatureEntry& entry, const std::string& value) {
                 return entry.id < value;
             });
-        features.insert(insertAt, FeatureEntry{ id, feature });
+        features.insert(insertAt, FeatureEntry{ id, feature, false });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1362,29 +1435,32 @@ bool VtkAppHostSession::Impl::DetachFeature(
     if (entry == features.end()) {
         return false;
     }
-    // 先由组合根收回跨视图状态，再允许 Feature 丢弃宿主回调；
-    // DetachHost 拒绝时恢复精确旧绑定，避免 attached Feature 留在半解绑状态。
-    const auto oldViewIds =
-        renderViews.GetFeatureViewIds(entry->id);
-    if (!renderViews.SetFeatureViews(
-            entry->id, {})) {
-        return false;
-    }
-    bool isDetached = false;
-    try {
-        isDetached = const_cast<HostFeature&>(feature).DetachHost();
-    }
-    catch (...) {
-        isDetached = false;
-    }
-    if (!isDetached) {
-        if (!renderViews.SetFeatureViews(
-                entry->id,
-                oldViewIds)) {
-            std::cerr
-                << "[Host] Feature detach rollback did not restore all views.\n";
-            stopState = HostStopState::StopPending;
+    if (!entry->isHostDetached) {
+        // 先由组合根收回跨视图状态，再允许 Feature 丢弃宿主回调。
+        const auto oldViewIds =
+            renderViews.GetFeatureViewIds(entry->id);
+        if (!renderViews.SetFeatureViews(entry->id, {})) {
+            return false;
         }
+        bool isDetached = false;
+        try {
+            isDetached = const_cast<HostFeature&>(feature).DetachHost();
+        }
+        catch (...) {
+            isDetached = false;
+        }
+        if (!isDetached) {
+            if (!renderViews.SetFeatureViews(entry->id, oldViewIds)) {
+                std::cerr
+                    << "[Host] Feature detach rollback did not restore all views.\n";
+                stopState = HostStopState::StopPending;
+            }
+            return false;
+        }
+        entry->isHostDetached = true;
+    }
+    if (!inputRegistry
+        || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
         return false;
     }
     features.erase(entry);
@@ -1395,18 +1471,24 @@ bool VtkAppHostSession::Impl::DetachFeatures()
 {
     while (!features.empty()) {
         auto& entry = features.back();
-        if (!renderViews.SetFeatureViews(
-                entry.id, {})) {
-            return false;
-        }
-        const auto& feature = entry.feature;
-        if (!feature) return false;
-        try {
-            if (!feature->DetachHost()) {
+        if (!entry.isHostDetached) {
+            if (!renderViews.SetFeatureViews(entry.id, {})) {
                 return false;
             }
+            const auto& feature = entry.feature;
+            if (!feature) return false;
+            try {
+                if (!feature->DetachHost()) {
+                    return false;
+                }
+            }
+            catch (...) {
+                return false;
+            }
+            entry.isHostDetached = true;
         }
-        catch (...) {
+        if (!inputRegistry
+            || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {
             return false;
         }
         features.pop_back();
@@ -1436,6 +1518,14 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             stopState = HostStopState::StopPending;
             return false;
         }
+        if (hotkeyRouter && !hotkeyRouter->ClearHotkeys()) {
+            stopState = HostStopState::StopPending;
+            return false;
+        }
+        if (inputRegistry && !inputRegistry->Stop()) {
+            stopState = HostStopState::StopPending;
+            return false;
+        }
         if (!renderViews.StopLease()) {
             stopState = HostStopState::StopPending;
             return false;
@@ -1447,10 +1537,6 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         endpoints.clear();
         timerTargets.clear();
         if (featureBridge) (void)featureBridge->StopOwner();
-        if (hotkeyRouter && !hotkeyRouter->ClearHotkeys()) {
-            stopState = HostStopState::StopPending;
-            return false;
-        }
 
         if (ownerCompleteState) {
             const std::lock_guard<std::mutex> lock(
@@ -1460,6 +1546,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
             ownerCompleteState->imageRead.reset();
         }
         hotkeyRouter.reset();
+        inputRegistry.reset();
         commandRouter.reset();
         frameCoordinator.reset();
         core = {};
@@ -1484,6 +1571,7 @@ bool VtkAppHostSession::Impl::GetIsStopped() const noexcept
         && endpoints.empty()
         && !frameCoordinator
         && !hotkeyRouter
+        && !inputRegistry
         && features.empty();
 }
 
@@ -1841,6 +1929,11 @@ VtkAppHostSession::GetPrimaryEndpoint()
     }
     return m_impl->endpoints.empty()
         ? nullptr : &m_impl->endpoints.front();
+}
+
+HostInputEndpoint* VtkAppHostSession::GetInputEndpoint() noexcept
+{
+    return m_impl ? &m_impl->inputEndpoint : nullptr;
 }
 
 bool VtkAppHostSession::Stop() noexcept

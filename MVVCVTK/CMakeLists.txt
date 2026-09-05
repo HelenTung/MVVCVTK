@@ -408,9 +408,11 @@ set(MVVCVTK_HOST_SOURCES
     include/Host/HostCoreServices.h
     include/Host/HostFrameCoordinator.h
     include/Host/HostHotkeyRouter.h
+    include/Host/HostInputRegistry.h
     include/Host/HostViewRuntimeRegistry.h
     include/Host/LoadCommitCoordinator.h
     include/Interaction/AbstractViewContext.h
+    include/Interaction/DefaultNavigationPolicy.h
     include/Interaction/IInteractionHandler.h
     include/Interaction/InputCallbackHandler.h
     include/Interaction/InteractionPorts.h
@@ -444,10 +446,12 @@ set(MVVCVTK_HOST_SOURCES
     src/Host/HostCommandRouter.cpp
     src/Host/HostFrameCoordinator.cpp
     src/Host/HostHotkeyRouter.cpp
+    src/Host/HostInputRegistry.cpp
     src/Host/HostViewRuntimeRegistry.cpp
     src/Host/LoadCommitCoordinator.cpp
     src/Host/VtkAppHostSession.cpp
     src/Interaction/AbstractViewContext.cpp
+    src/Interaction/DefaultNavigationPolicy.cpp
     src/Interaction/InputCallbackHandler.cpp
     src/Interaction/InteractionRouter.cpp
     src/Interaction/TimeUpdateHandler.cpp

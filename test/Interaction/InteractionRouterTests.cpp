@@ -1,18 +1,25 @@
 #include "InputCallbackHandler.h"
 #include "InteractionRouter.h"
 #include "Interaction/AbstractViewContext.h"
+#include "Interaction/DefaultNavigationPolicy.h"
 #include "Interaction/InteractionPorts.h"
 #include "Interaction/ViewContextFactory.h"
 #include "Viewer2DHandler.h"
 #include "AppStateTests.h"
 #include "HostCommandRouterTests.h"
 #include "HostHotkeyRouterTests.h"
+#include "HostInputRegistryTests.h"
 
 #include <array>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <thread>
 #include <vector>
+
+#include <vtkCommand.h>
+#include <vtkInteractorStyle.h>
+#include <vtkRenderWindowInteractor.h>
 
 namespace {
 
@@ -21,17 +28,34 @@ public:
     bool SendUpdates() override { return true; }
     bool SendPendingUpdates() override { return true; }
     void SendCompletions() override {}
-    bool SetRenderNeeded() override { return true; }
+    bool SetRenderNeeded() override
+    {
+        ++renderNeededCount;
+        return isRenderNeededAccepted;
+    }
     bool ResetRenderNeeded() override { return false; }
+
+    bool isRenderNeededAccepted = true;
+    int renderNeededCount = 0;
 };
 
 class TestStatePort final : public InteractionStatePort {
 public:
     bool SetInteracting(
-        const InteractionSource&, bool) override
+        const InteractionSource&, bool isInteracting) override
     {
-        return true;
+        if (isInteracting) {
+            ++startCount;
+            return isStartAccepted;
+        }
+        ++stopCount;
+        return isStopAccepted;
     }
+
+    bool isStartAccepted = true;
+    bool isStopAccepted = true;
+    int startCount = 0;
+    int stopCount = 0;
 };
 
 class TestSlicePort final : public SliceInputPort {
@@ -77,6 +101,51 @@ public:
     {
         return true;
     }
+};
+
+class TestCapture final : public IInteractionCapture {
+public:
+    using Callback =
+        std::function<InteractionResult(const InteractionEvent&)>;
+
+    TestCapture(
+        InteractionCaptureKey key,
+        InteractionEventKind releaseKind,
+        Callback callback,
+        int* destroyCount = nullptr)
+        : m_key(key)
+        , m_releaseKind(releaseKind)
+        , m_callback(std::move(callback))
+        , m_destroyCount(destroyCount)
+    {
+    }
+
+    ~TestCapture() override
+    {
+        if (m_destroyCount) ++*m_destroyCount;
+    }
+
+    InteractionCaptureKey GetKey() const noexcept override
+    {
+        return m_key;
+    }
+
+    InteractionEventKind GetReleaseKind() const noexcept override
+    {
+        return m_releaseKind;
+    }
+
+    InteractionResult Send(const InteractionEvent& event) override
+    {
+        return m_callback ? m_callback(event) : InteractionResult{};
+    }
+
+private:
+    InteractionCaptureKey m_key;
+    InteractionEventKind m_releaseKind =
+        InteractionEventKind::PrimaryRelease;
+    Callback m_callback;
+    int* m_destroyCount = nullptr;
 };
 
 } // namespace
@@ -297,6 +366,374 @@ void StartFailureCase(int& failureCount)
         failureCount);
 }
 
+void StartCaptureCase(int& failureCount)
+{
+    InteractionRouter router;
+    int pressCount = 0;
+    int capturedPointerCount = 0;
+    int fallbackMoveCount = 0;
+    const InteractionCaptureKey key{ 7, 11 };
+
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        InputCallbackHandler::RoutedCallback{
+            [&](const InteractionEvent& event) {
+                InteractionDispatch routed;
+                if (event.eventKind != InteractionEventKind::PrimaryPress) {
+                    return routed;
+                }
+                auto capture = std::make_unique<TestCapture>(
+                    key,
+                    InteractionEventKind::PrimaryRelease,
+                    [&](const InteractionEvent&) {
+                        ++capturedPointerCount;
+                        return InteractionResult{};
+                    });
+                ++pressCount;
+                routed.result = { true, false };
+                routed.capture = std::move(capture);
+                return routed;
+            } },
+        std::vector<InteractionEventKind>{}));
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        [&fallbackMoveCount](const InteractionEvent& event) {
+            if (event.eventKind == InteractionEventKind::PointerMove) {
+                ++fallbackMoveCount;
+                return InteractionResult{ true, false };
+            }
+            return InteractionResult{};
+        },
+        std::vector<InteractionEventKind>{}));
+
+    const auto press = router.Dispatch(
+        BuildEvent(InteractionEventKind::PrimaryPress));
+    const bool wasAttachAccepted = router.AttachHandler(
+        std::make_unique<InputCallbackHandler>(
+            [](const InteractionEvent&) {
+                return InteractionResult{};
+            },
+            std::vector<InteractionEventKind>{}));
+    const bool wasClearAccepted = router.ClearHandlers();
+    router.Dispatch(BuildEvent(InteractionEventKind::SecondaryPress));
+    router.Dispatch(BuildEvent(InteractionEventKind::PointerMove));
+    router.Dispatch(BuildEvent(InteractionEventKind::PrimaryRelease));
+    router.Dispatch(BuildEvent(InteractionEventKind::PointerMove));
+
+    SetExpect(
+        press.isHandled && pressCount == 1
+            && !wasAttachAccepted && !wasClearAccepted
+            && capturedPointerCount == 3 && fallbackMoveCount == 1,
+        "Pointer capture should exclusively route pointer events until release.",
+        failureCount);
+}
+
+void StartCaptureRetryCase(int& failureCount)
+{
+    InteractionRouter router;
+    int releaseCount = 0;
+    int capturedMoveCount = 0;
+    int fallbackMoveCount = 0;
+    const InteractionCaptureKey key{ 8, 12 };
+
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        InputCallbackHandler::RoutedCallback{
+            [&](const InteractionEvent& event) {
+                if (event.eventKind != InteractionEventKind::SecondaryPress) {
+                    return InteractionDispatch{};
+                }
+                InteractionDispatch routed;
+                routed.result = { true, true };
+                routed.capture = std::make_unique<TestCapture>(
+                    key,
+                    InteractionEventKind::SecondaryRelease,
+                    [&](const InteractionEvent& captured) {
+                        if (captured.eventKind
+                            == InteractionEventKind::PointerMove) {
+                            ++capturedMoveCount;
+                            return InteractionResult{
+                                false,
+                                false,
+                                false,
+                                InteractionFailureReason::StateRejected };
+                        }
+                        if (captured.eventKind
+                            == InteractionEventKind::SecondaryRelease) {
+                            ++releaseCount;
+                            if (releaseCount == 1) {
+                                return InteractionResult{
+                                    true,
+                                    true,
+                                    false,
+                                    InteractionFailureReason::CleanupRejected };
+                            }
+                        }
+                        return InteractionResult{ true, true };
+                    });
+                return routed;
+            } },
+        std::vector<InteractionEventKind>{}));
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        [&fallbackMoveCount](const InteractionEvent& event) {
+            if (event.eventKind == InteractionEventKind::PointerMove) {
+                ++fallbackMoveCount;
+                return InteractionResult{ true, false };
+            }
+            return InteractionResult{};
+        },
+        std::vector<InteractionEventKind>{}));
+
+    router.Dispatch(BuildEvent(InteractionEventKind::SecondaryPress));
+    router.Dispatch(BuildEvent(InteractionEventKind::PointerMove));
+    router.Dispatch(BuildEvent(InteractionEventKind::PrimaryRelease));
+    const auto firstRelease = router.Dispatch(
+        BuildEvent(InteractionEventKind::SecondaryRelease));
+    const auto retryRelease = router.Dispatch(
+        BuildEvent(InteractionEventKind::SecondaryRelease));
+    router.Dispatch(BuildEvent(InteractionEventKind::PointerMove));
+
+    SetExpect(
+        capturedMoveCount == 1 && fallbackMoveCount == 1
+            && releaseCount == 2 && !firstRelease.isSucceeded
+            && retryRelease.isSucceeded,
+        "A failed matching release should retain capture for one retry.",
+        failureCount);
+}
+
+void StartCancelCase(int& failureCount)
+{
+    InteractionRouter router;
+    int captureCancelCount = 0;
+    int parentCancelCount = 0;
+    int trailingCancelCount = 0;
+    bool isCaptureCancelFailing = true;
+    bool isTrailingCancelFailing = true;
+    const InteractionCaptureKey key{ 9, 13 };
+
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        InputCallbackHandler::RoutedCallback{
+            [&](const InteractionEvent& event) {
+                if (event.eventKind == InteractionEventKind::Cancel) {
+                    ++parentCancelCount;
+                    return InteractionDispatch{
+                        InteractionResult{},
+                        nullptr };
+                }
+                if (event.eventKind != InteractionEventKind::PrimaryPress) {
+                    return InteractionDispatch{};
+                }
+                InteractionDispatch routed;
+                routed.result = { true, true };
+                routed.capture = std::make_unique<TestCapture>(
+                    key,
+                    InteractionEventKind::PrimaryRelease,
+                    [&](const InteractionEvent& captured) {
+                        if (captured.eventKind == InteractionEventKind::Cancel) {
+                            ++captureCancelCount;
+                        }
+                        return InteractionResult{
+                            true,
+                            true,
+                            !isCaptureCancelFailing,
+                            isCaptureCancelFailing
+                                ? InteractionFailureReason::CleanupRejected
+                                : InteractionFailureReason::None };
+                    });
+                return routed;
+            } },
+        std::vector<InteractionEventKind>{}));
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        [&trailingCancelCount, &isTrailingCancelFailing](
+            const InteractionEvent& event) {
+            if (event.eventKind != InteractionEventKind::Cancel) {
+                return InteractionResult{};
+            }
+            ++trailingCancelCount;
+            return InteractionResult{
+                false,
+                false,
+                !isTrailingCancelFailing,
+                isTrailingCancelFailing
+                    ? InteractionFailureReason::CleanupRejected
+                    : InteractionFailureReason::None };
+        },
+        std::vector<InteractionEventKind>{}));
+
+    router.Dispatch(BuildEvent(InteractionEventKind::PrimaryPress));
+    const auto missing = router.CancelCapture(
+        InteractionCaptureKey{ key.domain, key.generation + 1 },
+        BuildEvent(InteractionEventKind::Cancel));
+    const auto first = router.CancelCapture(
+        key, BuildEvent(InteractionEventKind::Cancel));
+    isCaptureCancelFailing = false;
+    const auto second = router.SendCancel(
+        BuildEvent(InteractionEventKind::Cancel));
+    isTrailingCancelFailing = false;
+    const auto third = router.SendCancel(
+        BuildEvent(InteractionEventKind::Cancel));
+
+    SetExpect(
+        missing.isSucceeded && !missing.isHandled
+            && !first.isSucceeded && second.isHandled
+            && !second.isSucceeded && third.isSucceeded
+            && captureCancelCount == 2 && parentCancelCount == 1
+            && trailingCancelCount == 2,
+        "Cancel should retain only failed work and never replay a cleared capture.",
+        failureCount);
+}
+
+void StartCaptureNonPointerCase(int& failureCount)
+{
+    InteractionRouter router;
+    int keyCount = 0;
+    int timerCount = 0;
+    const InteractionCaptureKey key{ 10, 14 };
+
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        InputCallbackHandler::RoutedCallback{
+            [&](const InteractionEvent& event) {
+                if (event.eventKind == InteractionEventKind::KeyPress) {
+                    ++keyCount;
+                    return InteractionDispatch{
+                        InteractionResult{ true, false }, nullptr };
+                }
+                if (event.eventKind == InteractionEventKind::Timer) {
+                    ++timerCount;
+                    return InteractionDispatch{};
+                }
+                if (event.eventKind != InteractionEventKind::PrimaryPress) {
+                    return InteractionDispatch{};
+                }
+                InteractionDispatch routed;
+                routed.result = { true, true };
+                routed.capture = std::make_unique<TestCapture>(
+                    key,
+                    InteractionEventKind::PrimaryRelease,
+                    [](const InteractionEvent&) {
+                        return InteractionResult{ true, true };
+                    });
+                return routed;
+            } },
+        std::vector<InteractionEventKind>{}));
+
+    router.Dispatch(BuildEvent(InteractionEventKind::PrimaryPress));
+    router.Dispatch(BuildEvent(InteractionEventKind::KeyPress));
+    router.Dispatch(
+        BuildEvent(InteractionEventKind::Timer),
+        RouterDispatchMode::Broadcast);
+    router.Dispatch(BuildEvent(InteractionEventKind::PrimaryRelease));
+
+    SetExpect(
+        keyCount == 1 && timerCount == 1,
+        "Keyboard and timer events should bypass pointer capture.",
+        failureCount);
+}
+
+void StartCaptureReentrancyCase(int& failureCount)
+{
+    InteractionRouter router;
+    InteractionResult nested;
+    bool wasAttachAccepted = true;
+    bool wasClearAccepted = true;
+    router.AttachHandler(std::make_unique<InputCallbackHandler>(
+        [&](const InteractionEvent&) {
+            nested = router.Dispatch(
+                BuildEvent(InteractionEventKind::PointerMove));
+            wasAttachAccepted = router.AttachHandler(
+                std::make_unique<InputCallbackHandler>(
+                    [](const InteractionEvent&) {
+                        return InteractionResult{};
+                    },
+                    std::vector<InteractionEventKind>{}));
+            wasClearAccepted = router.ClearHandlers();
+            return InteractionResult{ true, true };
+        },
+        std::vector<InteractionEventKind>{ InteractionEventKind::KeyPress }));
+
+    const auto outer = router.Dispatch(
+        BuildEvent(InteractionEventKind::KeyPress));
+    SetExpect(
+        outer.isHandled && !nested.isSucceeded
+            && nested.failureReason == InteractionFailureReason::StateRejected
+            && !wasAttachAccepted && !wasClearAccepted,
+        "Router mutations and nested dispatch should be rejected in callbacks.",
+        failureCount);
+}
+
+void StartAtomicCaptureCase(int& failureCount)
+{
+    int destroyCount = 0;
+    {
+        InteractionRouter router;
+        router.AttachHandler(std::make_unique<InputCallbackHandler>(
+            InputCallbackHandler::RoutedCallback{
+                [&](const InteractionEvent&) {
+                    InteractionDispatch routed;
+                    routed.result = {
+                        true,
+                        true,
+                        false,
+                        InteractionFailureReason::StateRejected };
+                    routed.capture = std::make_unique<TestCapture>(
+                        InteractionCaptureKey{ 11, 15 },
+                        InteractionEventKind::PrimaryRelease,
+                        [](const InteractionEvent&) {
+                            return InteractionResult{};
+                        },
+                        &destroyCount);
+                    return routed;
+                } },
+            std::vector<InteractionEventKind>{
+                InteractionEventKind::PrimaryPress }));
+        router.Dispatch(BuildEvent(InteractionEventKind::PrimaryPress));
+        SetExpect(
+            destroyCount == 1 && router.ClearHandlers(),
+            "A failed handled press should destroy its uncommitted continuation.",
+            failureCount);
+    }
+}
+
+void StartDefaultNavigationPolicyCase(int& failureCount)
+{
+    TestStatePort state;
+    TestSlicePort slice;
+    TestModelPort model;
+    TestUpdatePort update;
+    InteractionRouter router;
+    SetExpect(
+        router.AttachHandler(std::make_unique<DefaultNavigationPolicy>(
+            &state, &slice, &model, &update, nullptr, nullptr)),
+        "Default navigation policy should attach as one router stage.",
+        failureCount);
+
+    auto press = BuildEvent(InteractionEventKind::PrimaryPress);
+    press.vizMode = VizMode::SliceTop_down;
+    const auto pressed = router.Dispatch(press);
+    state.isStopAccepted = false;
+    const auto firstCancel = router.SendCancel(
+        BuildEvent(InteractionEventKind::Cancel));
+    state.isStopAccepted = true;
+    const auto retryCancel = router.SendCancel(
+        BuildEvent(InteractionEventKind::Cancel));
+    const int stoppedAfterRetry = state.stopCount;
+    const auto inactiveCancel = router.SendCancel(
+        BuildEvent(InteractionEventKind::Cancel));
+
+    SetExpect(
+        pressed.isHandled && state.startCount == 1
+            && !firstCancel.isSucceeded && retryCancel.isSucceeded
+            && retryCancel.isHandled && inactiveCancel.isSucceeded
+            && state.stopCount == stoppedAfterRetry,
+        "Default navigation cancel should retry once and become an inactive no-op.",
+        failureCount);
+
+    auto wheel = BuildEvent(InteractionEventKind::WheelForward);
+    wheel.vizMode = VizMode::SliceFront_back;
+    const auto wheelResult = router.Dispatch(wheel);
+    SetExpect(
+        wheelResult.isHandled && slice.scrollCount == 1,
+        "Default navigation should preserve 2D FirstMatch behavior.",
+        failureCount);
+}
+
 void StartContextThreadCase(int& failureCount)
 {
     InteractionPorts ports;
@@ -336,6 +773,50 @@ void StartContextThreadCase(int& failureCount)
         failureCount);
 }
 
+void StartContextStyleCancelRetryCase(int& failureCount)
+{
+    auto update = std::make_shared<TestUpdatePort>();
+    auto state = std::make_shared<TestStatePort>();
+    InteractionPorts ports;
+    ports.update = update;
+    ports.state = state;
+    ports.slice = std::make_shared<TestSlicePort>();
+    ports.model = std::make_shared<TestModelPort>();
+    const auto context = CreateViewContext(std::move(ports));
+    if (!context || !context->SetInteractorReady()
+        || !context->SetInputEnabled(true)) {
+        SetExpect(false,
+            "Style cancel retry fixture should initialize a context.",
+            failureCount);
+        return;
+    }
+    auto* style = vtkInteractorStyle::SafeDownCast(
+        context->GetInteractor()->GetInteractorStyle());
+    if (!style) {
+        SetExpect(false,
+            "Style cancel retry fixture should expose an interactor style.",
+            failureCount);
+        return;
+    }
+    const int baselineStopCount = state->stopCount;
+    style->InvokeEvent(vtkCommand::StartInteractionEvent);
+    update->isRenderNeededAccepted = false;
+    const bool first = context->SetToolMode(ToolMode::ModelTransform);
+    const int stopCountAfterFailure = state->stopCount;
+    update->isRenderNeededAccepted = true;
+    const bool retry = context->SetToolMode(ToolMode::ModelTransform);
+
+    SetExpect(
+        !first && retry
+            && stopCountAfterFailure == baselineStopCount + 1
+            && state->stopCount == stopCountAfterFailure
+            && context->GetToolMode() == ToolMode::ModelTransform,
+        "Style Cancel should retry only its failed render doorbell stage.",
+        failureCount);
+    SetExpect(context->StopInput(),
+        "Style cancel retry context should stop cleanly.", failureCount);
+}
+
     int GetFailCount()
     {
         int failureCount = 0;
@@ -346,7 +827,15 @@ void StartContextThreadCase(int& failureCount)
         StartIndependentResultCase(failureCount);
         StartHandledNoStopCase(failureCount);
         StartFailureCase(failureCount);
+        StartCaptureCase(failureCount);
+        StartCaptureRetryCase(failureCount);
+        StartCancelCase(failureCount);
+        StartCaptureNonPointerCase(failureCount);
+        StartCaptureReentrancyCase(failureCount);
+        StartAtomicCaptureCase(failureCount);
+        StartDefaultNavigationPolicyCase(failureCount);
         StartContextThreadCase(failureCount);
+        StartContextStyleCancelRetryCase(failureCount);
         return failureCount;
     }
 };
@@ -356,6 +845,7 @@ int main()
     int failureCount = InteractionCases().GetFailCount();
     failureCount += HostRouterSuite().GetFailCount();
     failureCount += HostHotkeySuite().GetFailCount();
+    failureCount += HostInputRegistrySuite().GetFailCount();
     failureCount += AppStateSuite().GetFailCount();
 
     if (failureCount == 0) {

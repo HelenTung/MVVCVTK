@@ -1,61 +1,31 @@
 #include "Host/HostHotkeyRouter.h"
 
 #include "Host/HostCommandRouter.h"
-#include "Host/HostFeature.h"
-#include "Host/HostViewRuntimeRegistry.h"
+#include "Host/HostInputRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
-#include "Interaction/AbstractViewContext.h"
 
 #include <algorithm>
 #include <array>
-#include <exception>
+#include <cstddef>
 #include <iostream>
-#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
-#include <vector>
 
-class HostHotkeyRouter::Impl final {
+class HostHotkeyRouter::Impl final
+    : public std::enable_shared_from_this<HostHotkeyRouter::Impl>
+{
 public:
-    class InputPort final : public HostInputPort {
-    public:
-        explicit InputPort(Impl& owner)
-            : m_owner(owner)
-        {
-        }
-
-        bool AttachInput(HostInputBinding binding) override
-        {
-            return m_owner.AttachInput(std::move(binding));
-        }
-
-        bool DetachInput(const std::string_view featureId) override
-        {
-            return m_owner.DetachInput(featureId);
-        }
-
-    private:
-        Impl& m_owner;
-    };
-
     Impl(
-        std::weak_ptr<IHostViewDirectory> directory,
+        HostInputRegistry& inputRegistry,
         std::weak_ptr<HostCommandRouter> commandRouter)
-        : m_directory(std::move(directory))
+        : m_inputRegistry(inputRegistry)
         , m_commandRouter(std::move(commandRouter))
-        , m_inputPort(*this)
     {
-    }
-
-    ~Impl()
-    {
-        // 外壳仅在 ClearHotkeys 成功后删除 Impl。
     }
 
     bool AttachHotkeys(const HostHotkeyConfig& config);
     bool ClearHotkeys();
-    HostInputPort& GetInputPort() { return m_inputPort; }
 
 private:
     enum class HotkeyAction {
@@ -67,55 +37,32 @@ private:
         Count
     };
 
-    bool AttachInput(HostInputBinding binding);
-    bool DetachInput(std::string_view featureId);
-    bool AttachContexts();
-    bool ClearContexts();
     InteractionResult OnInput(
         const InteractionEvent& event,
         const std::string& viewId,
-        HostRenderViewRole role,
-        bool hasCommand,
-        bool hasContext);
-    InteractionResult SendFeatureInput(
-        const InteractionEvent& event,
-        const std::string& viewId,
         HostRenderViewRole role);
-    HotkeyAction GetHotkeyAction(
-        const InteractionEvent& event) const;
-    bool SendRequest(
-        HotkeyAction action,
-        HostRenderViewRole role) const;
-    bool GetCharMatched(
-        const InteractionEvent& event,
-        char key) const;
+    HotkeyAction GetHotkeyAction(const InteractionEvent& event) const;
+    bool SendRequest(HotkeyAction action, HostRenderViewRole role) const;
+    bool GetCharMatched(const InteractionEvent& event, char key) const;
     bool GetTargetMatched(
         const HostViewTargets& targets,
         const std::string& viewId,
         HostRenderViewRole role) const;
-    bool GetRouteFound(
-        const std::vector<HostInputRoute>& routes,
-        const HostInputRoute& route) const;
     bool SetActionDown(HotkeyAction action, bool isDown);
+    static HostViewTargets GetTargets(const HostHotkeyConfig& config);
 
-    std::weak_ptr<IHostViewDirectory> m_directory;
+    HostInputRegistry& m_inputRegistry;
     std::weak_ptr<HostCommandRouter> m_commandRouter;
-    std::vector<HostInputBinding> m_inputBindings;
-    std::vector<std::weak_ptr<AbstractViewContext>> m_contexts;
     HostHotkeyConfig m_config;
-    InputPort m_inputPort;
     std::array<bool, static_cast<std::size_t>(HotkeyAction::Count)>
         m_isDown{};
-    bool m_isConfigured = false;
 };
 
 bool HostHotkeyRouter::Impl::GetCharMatched(
     const InteractionEvent& event,
     const char key) const
 {
-    if (key == 0) {
-        return false;
-    }
+    if (key == 0) return false;
     const char upper = key >= 'a' && key <= 'z'
         ? static_cast<char>(key - 'a' + 'A')
         : key;
@@ -131,27 +78,36 @@ bool HostHotkeyRouter::Impl::GetTargetMatched(
     const HostRenderViewRole role) const
 {
     return std::find(
-        targets.viewIds.begin(),
-        targets.viewIds.end(),
-        viewId) != targets.viewIds.end()
+        targets.viewIds.begin(), targets.viewIds.end(), viewId)
+            != targets.viewIds.end()
         || std::find(
-            targets.viewRoles.begin(),
-            targets.viewRoles.end(),
-            role) != targets.viewRoles.end();
+            targets.viewRoles.begin(), targets.viewRoles.end(), role)
+            != targets.viewRoles.end();
 }
 
-bool HostHotkeyRouter::Impl::GetRouteFound(
-    const std::vector<HostInputRoute>& routes,
-    const HostInputRoute& route) const
+HostViewTargets HostHotkeyRouter::Impl::GetTargets(
+    const HostHotkeyConfig& config)
 {
-    return std::find_if(
-        routes.begin(), routes.end(),
-        [&route](const HostInputRoute& current) {
-            const auto currentContext = current.context.lock();
-            const auto routeContext = route.context.lock();
-            return currentContext
-                && currentContext == routeContext;
-        }) != routes.end();
+    HostViewTargets targets;
+    const auto append = [&targets](const HostViewTargets& source) {
+        for (const auto& id : source.viewIds) {
+            if (std::find(
+                    targets.viewIds.begin(), targets.viewIds.end(), id)
+                == targets.viewIds.end()) {
+                targets.viewIds.push_back(id);
+            }
+        }
+        for (const auto role : source.viewRoles) {
+            if (std::find(
+                    targets.viewRoles.begin(), targets.viewRoles.end(), role)
+                == targets.viewRoles.end()) {
+                targets.viewRoles.push_back(role);
+            }
+        }
+    };
+    if (config.isContextInputEnabled) append(config.contextInputViews);
+    if (config.isCommandInputEnabled) append(config.commandInputViews);
+    return targets;
 }
 
 HostHotkeyRouter::Impl::HotkeyAction
@@ -192,9 +148,7 @@ bool HostHotkeyRouter::Impl::SendRequest(
     const HostRenderViewRole role) const
 {
     const auto router = m_commandRouter.lock();
-    if (!router) {
-        return false;
-    }
+    if (!router) return false;
 
     switch (action) {
     case HotkeyAction::Model: {
@@ -208,7 +162,6 @@ bool HostHotkeyRouter::Impl::SendRequest(
             ? "." : m_config.dataExportPath;
         request.format = m_config.dataExportFormat;
         request.sourceView = m_config.dataSourceView;
-        // 显式格式已经决定底层 writer；只有缺省格式才需要触发窗口参与模式推断。
         if (!request.format
             && request.sourceView.viewId.empty()
             && !request.sourceView.isViewRoleUsed) {
@@ -241,61 +194,20 @@ bool HostHotkeyRouter::Impl::SendRequest(
     return false;
 }
 
-InteractionResult HostHotkeyRouter::Impl::SendFeatureInput(
+InteractionResult HostHotkeyRouter::Impl::OnInput(
     const InteractionEvent& event,
     const std::string& viewId,
     const HostRenderViewRole role)
 {
-    InteractionResult result;
-    for (const auto& binding : m_inputBindings) {
-        if (!binding.onInput
-            || !GetTargetMatched(
-                binding.targetViews, viewId, role)) {
-            continue;
-        }
-        InteractionResult current;
-        try {
-            current = binding.onInput(event);
-        }
-        catch (...) {
-            std::cerr
-                << "[Host] Feature input failed: "
-                << binding.featureId << '\n';
-            continue;
-        }
-        result.isHandled = result.isHandled || current.isHandled;
-        result.isPropagationStopped =
-            result.isPropagationStopped
-            || current.isPropagationStopped;
-        if (result.isPropagationStopped) {
-            break;
-        }
-    }
-    return result;
-}
-
-InteractionResult HostHotkeyRouter::Impl::OnInput(
-    const InteractionEvent& event,
-    const std::string& viewId,
-    const HostRenderViewRole role,
-    const bool hasCommand,
-    const bool hasContext)
-{
-    const auto featureResult = SendFeatureInput(
-        event, viewId, role);
-    if (featureResult.isPropagationStopped) {
-        return featureResult;
-    }
-
     const auto action = GetHotkeyAction(event);
-    if (action == HotkeyAction::None) {
-        return featureResult;
-    }
+    if (action == HotkeyAction::None) return {};
     const bool hasPermission = action == HotkeyAction::Model
-        ? hasContext : hasCommand;
-    if (!hasPermission) {
-        return featureResult;
-    }
+        ? m_config.isContextInputEnabled
+            && GetTargetMatched(m_config.contextInputViews, viewId, role)
+        : m_config.isCommandInputEnabled
+            && GetTargetMatched(m_config.commandInputViews, viewId, role);
+    if (!hasPermission) return {};
+
     if (event.eventKind == InteractionEventKind::KeyRelease) {
         (void)SetActionDown(action, false);
         return { true, true };
@@ -304,7 +216,7 @@ InteractionResult HostHotkeyRouter::Impl::OnInput(
         return { true, true };
     }
     if (event.eventKind != InteractionEventKind::KeyPress) {
-        return featureResult;
+        return {};
     }
     if (!SetActionDown(action, true)) {
         return { true, true };
@@ -313,173 +225,60 @@ InteractionResult HostHotkeyRouter::Impl::OnInput(
     return { true, true };
 }
 
-bool HostHotkeyRouter::Impl::AttachInput(HostInputBinding binding)
+bool HostHotkeyRouter::Impl::AttachHotkeys(
+    const HostHotkeyConfig& config)
 {
-    if (binding.featureId.empty()
-        || !binding.onInput
-        || (binding.targetViews.viewIds.empty()
-            && binding.targetViews.viewRoles.empty())) {
+    HostHotkeyConfig nextConfig;
+    HostViewTargets targets;
+    try {
+        nextConfig = config;
+        targets = GetTargets(nextConfig);
+    }
+    catch (...) {
         return false;
     }
-    const auto duplicate = std::find_if(
-        m_inputBindings.begin(),
-        m_inputBindings.end(),
-        [&binding](const HostInputBinding& current) {
-            return current.featureId == binding.featureId;
-        });
-    if (duplicate != m_inputBindings.end()) {
-        return false;
-    }
-    m_inputBindings.push_back(std::move(binding));
-    if (!m_isConfigured || AttachContexts()) {
+
+    const bool hasInput = nextConfig.isContextInputEnabled
+        || nextConfig.isCommandInputEnabled;
+    if (!hasInput) {
+        if (!m_inputRegistry.ClearHostInput()) return false;
+        m_config = std::move(nextConfig);
+        m_isDown.fill(false);
         return true;
     }
-    m_inputBindings.pop_back();
-    (void)AttachContexts();
-    return false;
-}
 
-bool HostHotkeyRouter::Impl::DetachInput(
-    const std::string_view featureId)
-{
-    const auto binding = std::find_if(
-        m_inputBindings.begin(),
-        m_inputBindings.end(),
-        [featureId](const HostInputBinding& current) {
-            return current.featureId == featureId;
-        });
-    if (binding == m_inputBindings.end()) {
+    const std::weak_ptr<Impl> weakOwner = shared_from_this();
+    if (!m_inputRegistry.SetHostInput(
+            std::move(targets),
+            [weakOwner](
+                const InteractionEvent& event,
+                const std::string& viewId,
+                const HostRenderViewRole role) {
+                const auto owner = weakOwner.lock();
+                return owner
+                    ? owner->OnInput(event, viewId, role)
+                    : InteractionResult{};
+            })) {
         return false;
     }
-    const auto bindingIndex = std::distance(
-        m_inputBindings.begin(), binding);
-    auto removed = std::move(*binding);
-    m_inputBindings.erase(binding);
-    if (!m_isConfigured || AttachContexts()) {
-        return true;
-    }
-    m_inputBindings.insert(
-        m_inputBindings.begin() + bindingIndex,
-        std::move(removed));
-    (void)AttachContexts();
-    return false;
-}
-
-bool HostHotkeyRouter::Impl::ClearContexts()
-{
-    bool isCleared = true;
-    for (const auto& context : m_contexts) {
-        if (const auto value = context.lock()) {
-            if (!value->ClearInputHandler()) {
-                isCleared = false;
-            }
-        }
-    }
-    // 任一 context 拒绝时保留完整弱集合供 owner thread 重试。
-    if (!isCleared) {
-        return false;
-    }
-    m_contexts.clear();
+    m_config = std::move(nextConfig);
     m_isDown.fill(false);
     return true;
 }
 
-bool HostHotkeyRouter::Impl::AttachContexts()
-{
-    if (!ClearContexts()) {
-        return false;
-    }
-    const auto directory = m_directory.lock();
-    if (!directory) {
-        return false;
-    }
-    const auto commandViews = m_config.isCommandInputEnabled
-        ? directory->GetInputRoutes(m_config.commandInputViews)
-        : std::vector<HostInputRoute>{};
-    const auto contextViews = m_config.isContextInputEnabled
-        ? directory->GetInputRoutes(m_config.contextInputViews)
-        : std::vector<HostInputRoute>{};
-    std::vector<HostInputRoute> views = commandViews;
-    for (const auto& view : contextViews) {
-        if (!GetRouteFound(views, view)) {
-            views.push_back(view);
-        }
-    }
-    for (const auto& binding : m_inputBindings) {
-        for (const auto& view :
-            directory->GetInputRoutes(binding.targetViews)) {
-            if (!GetRouteFound(views, view)) {
-                views.push_back(view);
-            }
-        }
-    }
-    if (views.empty()) {
-        return !m_config.isCommandInputEnabled
-            && !m_config.isContextInputEnabled
-            && m_inputBindings.empty();
-    }
-
-    for (const auto& view : views) {
-        const auto context = view.context.lock();
-        if (!context) continue;
-        const bool hasCommand = GetRouteFound(commandViews, view);
-        const bool hasContext = GetRouteFound(contextViews, view);
-        const auto viewId = view.id;
-        const auto role = view.role;
-        if (!context->SetInputHandler(
-            [this, viewId, role, hasCommand, hasContext](
-                const InteractionEvent& event) {
-                return OnInput(
-                    event,
-                    viewId,
-                    role,
-                    hasCommand,
-                    hasContext);
-            },
-            { InteractionEventKind::KeyPress,
-              InteractionEventKind::KeyRelease,
-              InteractionEventKind::TextInput })) {
-            (void)ClearContexts();
-            return false;
-        }
-        m_contexts.push_back(context);
-    }
-    return !m_contexts.empty();
-}
-
-bool HostHotkeyRouter::Impl::AttachHotkeys(
-    const HostHotkeyConfig& config)
-{
-    const auto oldConfig = m_config;
-    const bool wasConfigured = m_isConfigured;
-    m_config = config;
-    m_isConfigured = true;
-    if (AttachContexts()) {
-        return true;
-    }
-
-    m_config = oldConfig;
-    m_isConfigured = wasConfigured;
-    (void)AttachContexts();
-    return false;
-}
-
 bool HostHotkeyRouter::Impl::ClearHotkeys()
 {
-    if (!ClearContexts()) {
-        return false;
-    }
-    m_isConfigured = false;
+    if (!m_inputRegistry.ClearHostInput()) return false;
     m_config = {};
+    m_isDown.fill(false);
     return true;
 }
 
 HostHotkeyRouter::HostHotkeyRouter(
-    std::weak_ptr<IHostViewDirectory> directory,
+    HostInputRegistry& inputRegistry,
     std::weak_ptr<HostCommandRouter> commandRouter)
-    : m_impl(std::make_unique<Impl>(
-        std::move(directory),
-        std::move(commandRouter)))
+    : m_impl(std::make_shared<Impl>(
+        inputRegistry, std::move(commandRouter)))
 {
 }
 
@@ -500,9 +299,4 @@ bool HostHotkeyRouter::AttachHotkeys(
 bool HostHotkeyRouter::ClearHotkeys()
 {
     return m_impl && m_impl->ClearHotkeys();
-}
-
-HostInputPort& HostHotkeyRouter::GetInputPort()
-{
-    return m_impl->GetInputPort();
 }

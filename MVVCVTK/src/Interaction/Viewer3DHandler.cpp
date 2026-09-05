@@ -50,27 +50,33 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         return result;
     };
 
+    // 模式切换不能吞掉已开始拖拽的 Release/Cancel。
+    const bool isCleanup =
+        eve.eventKind == InteractionEventKind::PrimaryRelease
+        || eve.eventKind == InteractionEventKind::Cancel;
+    if (isCleanup && m_isDragging) {
+        if (!m_statePort
+            || !m_statePort->SetInteracting(m_source, false)) {
+            return getResult(
+                false, InteractionFailureReason::CleanupRejected);
+        }
+        if (!m_updatePort || !m_updatePort->SetRenderNeeded()) {
+            return getResult(
+                false, InteractionFailureReason::RenderRejected);
+        }
+        m_isDragging = false;
+        m_dragAxis = -1;
+        return getResult(true, InteractionFailureReason::None);
+    }
+    if (eve.eventKind == InteractionEventKind::Cancel) {
+        return {};
+    }
+
     if (!m_statePort
         || !m_slicePort
         || !m_modelPort
         || !m_updatePort) {
         return {};
-    }
-
-    // 模式切换不能吞掉一次已开始拖拽的释放，否则聚合 source 会永久保持 active。
-    if (eve.eventKind == InteractionEventKind::PrimaryRelease
-        && m_isDragging) {
-        const bool isInteractionSet =
-            m_statePort->SetInteracting(m_source, false);
-        const bool isRenderSet =
-            m_updatePort->SetRenderNeeded();
-        m_isDragging = false;
-        m_dragAxis = -1;
-        return getResult(
-            isInteractionSet && isRenderSet,
-            isInteractionSet
-                ? InteractionFailureReason::RenderRejected
-                : InteractionFailureReason::CleanupRejected);
     }
 
     if (eve.toolMode == ToolMode::ModelTransform
@@ -146,15 +152,17 @@ InteractionResult Viewer3DHandler::Send(const InteractionEvent& eve)
         if (m_isDragging) {
             const bool isInteractionSet =
                 m_statePort->SetInteracting(m_source, false);
-            const bool isRenderSet =
-                m_updatePort->SetRenderNeeded();
-            m_isDragging = false;
-            m_dragAxis = -1;
+            if (!isInteractionSet) {
+                return getResult(
+                    false, InteractionFailureReason::CleanupRejected);
+            }
+            const bool isRenderSet = m_updatePort->SetRenderNeeded();
+            if (isRenderSet) {
+                m_isDragging = false;
+                m_dragAxis = -1;
+            }
             return getResult(
-                isInteractionSet && isRenderSet,
-                isInteractionSet
-                    ? InteractionFailureReason::RenderRejected
-                    : InteractionFailureReason::CleanupRejected);
+                isRenderSet, InteractionFailureReason::RenderRejected);
         }
         return {};
     }

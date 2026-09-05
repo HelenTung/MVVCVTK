@@ -20,13 +20,15 @@ public:
     bool CreateView(
         std::string id,
         const HostRenderViewRole role,
-        std::shared_ptr<ViewContextStub> context)
+        std::shared_ptr<ViewContextStub> context,
+        const HostInputMode inputMode = HostInputMode::NativeInteractor)
     {
         if (id.empty() || !context) return false;
 
         View view;
         view.id = std::move(id);
         view.role = role;
+        view.inputMode = inputMode;
         view.state = std::make_shared<AppPortState>();
         view.data = std::make_shared<DataPortStub>(view.state);
         view.view = std::make_shared<ViewPortStub>(view.state);
@@ -97,7 +99,8 @@ public:
                 targets.viewRoles.end(),
                 view.role) != targets.viewRoles.end();
             if (isIdSelected || isRoleSelected) {
-                selected.push_back({ view.id, view.role, view.context });
+                selected.push_back({
+                    view.id, view.role, view.inputMode, view.context });
             }
         }
         return selected;
@@ -143,6 +146,7 @@ private:
     struct View final {
         std::string id;
         HostRenderViewRole role = HostRenderViewRole::Auxiliary;
+        HostInputMode inputMode = HostInputMode::NativeInteractor;
         std::shared_ptr<AppPortState> state;
         std::shared_ptr<AppDataPort> data;
         std::shared_ptr<AppViewPort> view;
