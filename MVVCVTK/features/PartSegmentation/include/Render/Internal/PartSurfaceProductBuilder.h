@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,8 @@ struct PartSurfaceBuildRequest final {
         0.0, 0.0, 1.0
     };
     std::shared_ptr<const std::vector<std::uint32_t>> labels;
+    // 已验证目录中所有非背景部件的并集；提取时再扩展一体素背景边界。
+    std::optional<std::array<int, 6>> foregroundExtent;
     std::uint32_t partCount = 0;
     std::size_t maxWorkingBytes = 0;
 };

@@ -15,7 +15,9 @@
 enum class SurfaceDeterminationMethod : std::uint8_t {
     GlobalIsoPreview,
     LocalAdaptiveIso50,
-    GradientPeak
+    GradientPeak,
+    // 仅估计空气/单材料双峰 ISO50，不构造测量网格。
+    AutomaticIso50
 };
 
 enum class SurfaceComponentSelection : std::uint8_t {
@@ -112,6 +114,13 @@ struct SurfaceObjectRecord final {
     std::optional<double> volumeModelUnit3;
 };
 
+struct SurfaceIsoEstimate final {
+    double isoValue = 0.0;
+    double backgroundValue = 0.0;
+    double materialValue = 0.0;
+    std::uint64_t sampleCount = 0;
+};
+
 struct SurfaceGenerationSnapshot final {
     DataRevisionRef dataRevision;
     DataRevisionRef meshRevision;
@@ -124,6 +133,7 @@ struct SurfaceGenerationSnapshot final {
     std::shared_ptr<const std::vector<SurfacePointRecord>> points;
     std::shared_ptr<const std::vector<std::uint32_t>> triangleIndices;
     std::shared_ptr<const std::vector<SurfaceObjectRecord>> objects;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
 };
 
 struct SurfaceDeterminationStartParams final {
@@ -224,6 +234,7 @@ struct SurfaceDeterminationResult final {
     std::uint64_t pointCount = 0;
     std::uint32_t objectCount = 0;
     std::string message;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
 };
 
 // Accepted 且 callback 非空时在 Host owner thread 恰好调用一次。

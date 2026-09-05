@@ -4,6 +4,7 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCommand.h>
 #include <vtkDiscreteMarchingCubes.h>
+#include <vtkExtractVOI.h>
 #include <vtkImageData.h>
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
@@ -131,8 +132,44 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             1);
         image->GetPointData()->SetScalars(scalars);
 
+        std::size_t inputBytes = labelBytes;
+        auto crop = vtkSmartPointer<vtkExtractVOI>::New();
+        bool hasCrop = false;
+        if (request.foregroundExtent) {
+            auto extent = *request.foregroundExtent;
+            std::array<int, 3> dimensions{};
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                const auto low = axis * 2;
+                const auto high = low + 1;
+                if (extent[low] < request.extent[low] || extent[high] > request.extent[high]
+                    || extent[low] > extent[high]) {
+                    return GetFailure(PartFailureReason::InvalidGeometry, labelBytes,
+                        "Part foreground bounds are outside the source extent.");
+                }
+                if (extent[low] > request.extent[low]) --extent[low];
+                if (extent[high] < request.extent[high]) ++extent[high];
+                dimensions[axis] = extent[high] - extent[low] + 1;
+            }
+            std::size_t cropVoxels = 0;
+            if (!GetVoxelCount(dimensions, cropVoxels)) {
+                return GetFailure(PartFailureReason::InvalidGeometry, labelBytes,
+                    "Part foreground bounds are invalid.");
+            }
+            // 范围接近全卷时，避免为了微小收益额外复制一个大体积。
+            if (cropVoxels <= voxelCount - voxelCount / 4U) {
+                if (!GetAddValid(labelBytes, cropVoxels * sizeof(std::uint32_t), inputBytes)
+                    || inputBytes > request.maxWorkingBytes) {
+                    return GetFailure(PartFailureReason::BudgetExceeded, inputBytes,
+                        "Part bounded surface input exceeds the working-set budget.");
+                }
+                crop->SetInputData(image);
+                crop->SetVOI(extent.data());
+                hasCrop = true;
+            }
+        }
         auto contour = vtkSmartPointer<vtkDiscreteMarchingCubes>::New();
-        contour->SetInputData(image);
+        if (hasCrop) contour->SetInputConnection(crop->GetOutputPort());
+        else contour->SetInputData(image);
         contour->SetNumberOfContours(
             static_cast<int>(request.partCount));
         for (std::uint32_t partId = 1;
@@ -176,7 +213,11 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             vtkCommand::ErrorEvent, callback);
         const unsigned long progressTag = contour->AddObserver(
             vtkCommand::ProgressEvent, callback);
+        const auto cropErrorTag = crop->AddObserver(vtkCommand::ErrorEvent, callback);
+        const auto cropProgressTag = crop->AddObserver(vtkCommand::ProgressEvent, callback);
         contour->Update();
+        crop->RemoveObserver(cropErrorTag);
+        crop->RemoveObserver(cropProgressTag);
         contour->RemoveObserver(errorTag);
         contour->RemoveObserver(progressTag);
         callback->SetClientData(nullptr);
@@ -201,7 +242,7 @@ PartSurfaceBuildResult PartSurfaceProductBuilder::BuildProduct(
             ? kibibytes * bytesPerKib
             : (std::numeric_limits<std::size_t>::max)();
         std::size_t requiredBytes = 0;
-        if (!GetAddValid(labelBytes, actualBytes, requiredBytes)
+        if (!GetAddValid(inputBytes, actualBytes, requiredBytes)
             || requiredBytes > request.maxWorkingBytes) {
             return GetFailure(
                 PartFailureReason::BudgetExceeded,

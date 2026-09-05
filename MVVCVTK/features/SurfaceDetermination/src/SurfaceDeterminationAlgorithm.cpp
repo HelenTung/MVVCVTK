@@ -128,6 +128,7 @@ struct ResolvedParams final {
         SurfaceComponentSelection::Largest;
     double initialIsoValue = 0.0;
     bool isAutomaticIso = false;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
     std::optional<Point3> seedModelPoint;
     std::optional<std::array<double, 6>> roiModelBounds;
     double profileHalfLengthModel = 0.0;
@@ -833,24 +834,31 @@ SurfaceFailureReason GetAutomaticIso(
     const ResolvedParams& params,
     const SurfaceCancelCheck& getCancelled,
     double& isoValue,
-    std::string& message)
+    std::string& message,
+    std::optional<SurfaceIsoEstimate>& estimate)
 {
     double minimum = std::numeric_limits<double>::max();
     double maximum = std::numeric_limits<double>::lowest();
     std::uint64_t validCount = 0;
     const auto& extent = volume.geometry.extent;
-    for (std::int64_t zValue = extent[4];
-        zValue <= static_cast<std::int64_t>(extent[5]); ++zValue) {
+    std::array<std::int64_t, 3> sampleSteps{1, 1, 1};
+    if (params.method == SurfaceDeterminationMethod::AutomaticIso50) {
+        // 最多 128^3 个原始标量样本；两遍共享同一采样格，内存与体积无关。
+        for (std::size_t axis = 0; axis < sampleSteps.size(); ++axis)
+            sampleSteps[axis] = (static_cast<std::int64_t>(volume.geometry.dimensions[axis]) + 127) / 128;
+    }
+    for (std::int64_t zValue = extent[4] + sampleSteps[2] / 2;
+        zValue <= static_cast<std::int64_t>(extent[5]); zValue += sampleSteps[2]) {
         const int z = static_cast<int>(zValue);
         if (GetCancelled(getCancelled)) {
             message = "Surface threshold estimation was cancelled.";
             return SurfaceFailureReason::Cancelled;
         }
-        for (std::int64_t yValue = extent[2];
-            yValue <= static_cast<std::int64_t>(extent[3]); ++yValue) {
+        for (std::int64_t yValue = extent[2] + sampleSteps[1] / 2;
+            yValue <= static_cast<std::int64_t>(extent[3]); yValue += sampleSteps[1]) {
             const int y = static_cast<int>(yValue);
-            for (std::int64_t xValue = extent[0];
-                xValue <= static_cast<std::int64_t>(extent[1]); ++xValue) {
+            for (std::int64_t xValue = extent[0] + sampleSteps[0] / 2;
+                xValue <= static_cast<std::int64_t>(extent[1]); xValue += sampleSteps[0]) {
                 const int x = static_cast<int>(xValue);
                 const std::size_t tupleIndex = GetTupleIndex(
                     volume.geometry, x, y, z);
@@ -877,18 +885,18 @@ SurfaceFailureReason GetAutomaticIso(
     std::array<std::uint64_t, histogramBinCount> histogram{};
     const double scale = static_cast<double>(histogramBinCount - 1)
         / (maximum - minimum);
-    for (std::int64_t zValue = extent[4];
-        zValue <= static_cast<std::int64_t>(extent[5]); ++zValue) {
+    for (std::int64_t zValue = extent[4] + sampleSteps[2] / 2;
+        zValue <= static_cast<std::int64_t>(extent[5]); zValue += sampleSteps[2]) {
         const int z = static_cast<int>(zValue);
         if (GetCancelled(getCancelled)) {
             message = "Surface threshold estimation was cancelled.";
             return SurfaceFailureReason::Cancelled;
         }
-        for (std::int64_t yValue = extent[2];
-            yValue <= static_cast<std::int64_t>(extent[3]); ++yValue) {
+        for (std::int64_t yValue = extent[2] + sampleSteps[1] / 2;
+            yValue <= static_cast<std::int64_t>(extent[3]); yValue += sampleSteps[1]) {
             const int y = static_cast<int>(yValue);
-            for (std::int64_t xValue = extent[0];
-                xValue <= static_cast<std::int64_t>(extent[1]); ++xValue) {
+            for (std::int64_t xValue = extent[0] + sampleSteps[0] / 2;
+                xValue <= static_cast<std::int64_t>(extent[1]); xValue += sampleSteps[0]) {
                 const int x = static_cast<int>(xValue);
                 const std::size_t tupleIndex = GetTupleIndex(
                     volume.geometry, x, y, z);
@@ -928,6 +936,7 @@ SurfaceFailureReason GetAutomaticIso(
         double height = 0.0;
     };
     std::vector<Peak> peaks;
+    peaks.reserve(histogramBinCount);
     for (std::size_t index = 0; index < histogramBinCount; ++index) {
         const double left = index == 0 ? -1.0 : smooth[index - 1];
         const double right = index + 1 == histogramBinCount
@@ -954,6 +963,10 @@ SurfaceFailureReason GetAutomaticIso(
             Peak low = peaks[first];
             Peak high = peaks[second];
             if (low.index > high.index) std::swap(low, high);
+            // 快速空气/单材料估计使用占主导的空气峰及其右侧材料峰。
+            // 不允许两个次要伪影峰绕过真实背景峰而产生看似可靠的阈值。
+            if (params.method == SurfaceDeterminationMethod::AutomaticIso50
+                && low.index != peaks.front().index) continue;
             if (high.index - low.index < minimumSeparation
                 || low.height < minimumPeakHeight
                 || high.height < minimumPeakHeight) {
@@ -991,6 +1004,7 @@ SurfaceFailureReason GetAutomaticIso(
         message = "Surface automatic ISO50 produced an invalid threshold.";
         return SurfaceFailureReason::ThresholdUnreliable;
     }
+    estimate = SurfaceIsoEstimate{isoValue, background, material, validCount};
     return SurfaceFailureReason::None;
 }
 
@@ -1130,7 +1144,7 @@ SurfaceFailureReason ResolveParams(
         return SurfaceFailureReason::None;
     }
     return GetAutomaticIso(
-        volume, params, getCancelled, params.initialIsoValue, message);
+        volume, params, getCancelled, params.initialIsoValue, message, params.isoEstimate);
 }
 
 bool GetBudgetEstimate(
@@ -2161,8 +2175,11 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
         source, volume, result.message);
     if (result.failureReason != SurfaceFailureReason::None) return result;
 
+    const bool isThresholdOnly = inputParams.method == SurfaceDeterminationMethod::AutomaticIso50;
+    // 直方图、平滑值和峰候选均有固定上限，不套用完整网格的每体素预算。
+    if (isThresholdOnly) result.requiredBytes = 64U * 1024U;
     if (maxWorkingBytes == 0
-        || !GetBudgetEstimate(volume, result.requiredBytes)) {
+        || (!isThresholdOnly && !GetBudgetEstimate(volume, result.requiredBytes))) {
         result.failureReason = SurfaceFailureReason::BudgetExceeded;
         result.message = "Surface working-set estimate overflows.";
         return result;
@@ -2187,7 +2204,24 @@ SurfaceAlgorithmResult BuildSurfaceImpl(
         return result;
     }
     result.initialIsoValue = params.initialIsoValue;
+    result.isoEstimate = params.isoEstimate;
     result.parameterFingerprint = GetFingerprint(params);
+    if (isThresholdOnly) {
+        if (!result.isoEstimate) {
+            result.failureReason = SurfaceFailureReason::ThresholdUnreliable;
+            result.message = "Automatic ISO50 requires automatic threshold estimation.";
+            return result;
+        }
+        result.status = SurfaceResultStatus::Succeeded;
+        result.failureReason = SurfaceFailureReason::None;
+        result.message = "Automatic ISO50 succeeded: iso=" + std::to_string(result.initialIsoValue)
+            + ", background=" + std::to_string(result.isoEstimate->backgroundValue)
+            + ", material=" + std::to_string(result.isoEstimate->materialValue)
+            + ", samples=" + std::to_string(result.isoEstimate->sampleCount)
+            + ", workingBytes=" + std::to_string(result.requiredBytes) + ".";
+        SendProgress(onProgress, SurfaceDeterminationStage::ThresholdEstimation, 1.0);
+        return result;
+    }
 
     SendProgress(
         onProgress, SurfaceDeterminationStage::SeedExtraction, 0.20);

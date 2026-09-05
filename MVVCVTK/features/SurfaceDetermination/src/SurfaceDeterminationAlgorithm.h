@@ -27,6 +27,7 @@ struct SurfaceAlgorithmResult final {
     SurfaceDeterminationMethod method =
         SurfaceDeterminationMethod::LocalAdaptiveIso50;
     double initialIsoValue = 0.0;
+    std::optional<SurfaceIsoEstimate> isoEstimate;
     std::size_t requiredBytes = 0;
     std::vector<SurfacePointRecord> points;
     std::vector<std::uint32_t> triangleIndices;

@@ -41,6 +41,10 @@ if(MVVCVTK_BUILD_PART_SEGMENTATION)
         PRIVATE MVVCVTK::PartSegmentation
     )
 endif()
+if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
+    target_compile_definitions(MVVCVTKStandalone PRIVATE MVVCVTK_HAS_SURFACE_DETERMINATION=1)
+    target_link_libraries(MVVCVTKStandalone PRIVATE MVVCVTK::SurfaceDetermination)
+endif()
 SetTargetDefaults(MVVCVTKStandalone)
 vtk_module_autoinit(
     TARGETS MVVCVTKStandalone

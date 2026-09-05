@@ -118,6 +118,36 @@ void TestAutomaticIsoAndPeakMode(Checks& checks)
             == SurfaceFailureReason::ThresholdUnreliable,
         "automatic ISO50 rejects a single flat peak");
 
+    auto threshold = GetParams(SurfaceDeterminationMethod::AutomaticIso50);
+    threshold.initialIsoValue.reset();
+    // 大于旧网格预检预算的体积仍能用固定空间估计阈值；低值伪影不得取代主空气峰。
+    const auto artifact = BuildSnapshot(
+        {129, 129, 129}, {1.0, 1.0, 1.0}, {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}, VTK_FLOAT,
+        [](const Point3& point) { return point[0] < -8.0 ? -900.0
+            : point[0] > 90.0 ? 1000.0 : 0.0; }, {}, 1, {-10, -10, -10});
+    const auto estimate = Build(artifact, threshold, 64U * 1024U);
+    const auto repeated = Build(artifact, threshold, 64U * 1024U);
+    checks.Get(estimate.status == SurfaceResultStatus::Succeeded
+        && estimate.isoEstimate && estimate.isoEstimate->isoValue > 450.0
+        && estimate.isoEstimate->isoValue < 550.0
+        && estimate.isoEstimate->sampleCount <= 128U * 128U * 128U
+        && estimate.requiredBytes <= 64U * 1024U
+        && estimate.points.empty() && estimate.triangleIndices.empty(),
+        "bounded threshold mode excludes a low artifact and allocates no mesh");
+    checks.Get(estimate.isoEstimate && repeated.isoEstimate
+        && estimate.isoEstimate->isoValue == repeated.isoEstimate->isoValue
+        && estimate.parameterFingerprint == repeated.parameterFingerprint,
+        "threshold sampling is deterministic with nonzero negative extents");
+    checks.Get(Build(flat, threshold).failureReason == SurfaceFailureReason::ThresholdUnreliable,
+        "threshold-only mode refuses degenerate data instead of fabricating an iso");
+    checks.Get(Build(artifact, threshold, 1024U).failureReason == SurfaceFailureReason::BudgetExceeded,
+        "threshold workspace budget is enforced independently of mesh budget");
+    const auto cancelled = SurfaceDeterminationAlgorithm::BuildSurface(artifact, threshold,
+        64U * 1024U, [] { return true; }, {});
+    checks.Get(cancelled.status == SurfaceResultStatus::Cancelled && !cancelled.isoEstimate,
+        "threshold cancellation publishes no estimate");
+
     constexpr double boundary = 15.35;
     auto peakParams = GetParams(SurfaceDeterminationMethod::GradientPeak);
     const auto peakResult = Build(BuildPlane(VTK_FLOAT, boundary), peakParams);

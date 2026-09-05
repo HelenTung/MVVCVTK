@@ -56,6 +56,7 @@ bool GetMethodValid(const SurfaceDeterminationMethod method)
     case SurfaceDeterminationMethod::GlobalIsoPreview:
     case SurfaceDeterminationMethod::LocalAdaptiveIso50:
     case SurfaceDeterminationMethod::GradientPeak:
+    case SurfaceDeterminationMethod::AutomaticIso50:
         return true;
     default:
         return false;
@@ -81,7 +82,8 @@ bool GetOptionalPositive(const std::optional<double>& value)
 
 bool GetStartValid(const SurfaceDeterminationStartParams& params)
 {
-    if (!GetTargetsUsed(params.targetViews)
+    if ((params.method == SurfaceDeterminationMethod::AutomaticIso50 && params.initialIsoValue)
+        || !GetTargetsUsed(params.targetViews)
         || !GetMethodValid(params.method)
         || !GetSelectionValid(params.componentSelection)
         || params.minimumObjectVoxels == 0
@@ -916,17 +918,15 @@ void SurfaceDeterminationHostFeature::Impl::SetRequestComplete(
         callbackStatus = SurfaceResultStatus::Succeeded;
         callbackReason = SurfaceFailureReason::None;
     }
-    SendComplete(
-        std::move(request.onComplete),
-        BuildResult(
-            complete.requestId,
-            callbackStatus,
-            callbackReason,
-            request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
-            state.resultRevision,
-            state.pointCount,
-            state.objectCount,
-            std::move(callbackMessage)));
+    auto callbackResult = BuildResult(
+        complete.requestId, callbackStatus, callbackReason,
+        request.source && request.source->data ? request.source->data->self : DataRevisionRef{},
+        state.resultRevision, state.pointCount, state.objectCount, std::move(callbackMessage));
+    if (didCommit) {
+        const auto generation = m_store.GetGeneration();
+        if (generation) callbackResult.isoEstimate = generation->isoEstimate;
+    }
+    SendComplete(std::move(request.onComplete), std::move(callbackResult));
 }
 
 void SurfaceDeterminationHostFeature::Impl::SetRequestFailed(
@@ -956,19 +956,21 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     SurfaceAlgorithmResult result,
     const std::uint64_t requestId)
 {
+    const bool isThresholdOnly = result.method == SurfaceDeterminationMethod::AutomaticIso50;
     if (!GetSourceSame(request.source)
-        || result.points.empty()
-        || result.triangleIndices.empty()
-        || result.objects.empty()
+        || (isThresholdOnly && (!result.isoEstimate || !std::isfinite(result.isoEstimate->isoValue)))
+        || (!isThresholdOnly && (result.points.empty()
+            || result.triangleIndices.empty() || result.objects.empty()))
         || m_resultRevision == std::numeric_limits<std::uint64_t>::max()) {
         return false;
     }
-    auto displayData = BuildDisplayData(
-        result.points, result.triangleIndices);
-    if (!displayData) return false;
+    auto displayData = isThresholdOnly ? vtkSmartPointer<vtkPolyData>{}
+        : BuildDisplayData(result.points, result.triangleIndices);
+    if (!isThresholdOnly && !displayData) return false;
 
     SurfaceGenerationSnapshot generation;
-    const DataRevisionRef meshRef{ m_data->CreateDataEntityId(), 1 };
+    const DataRevisionRef meshRef = isThresholdOnly ? DataRevisionRef{}
+        : DataRevisionRef{ m_data->CreateDataEntityId(), 1 };
     const DataRevisionRef generationRef{ m_data->CreateDataEntityId(), 1 };
     generation.dataRevision = generationRef;
     generation.meshRevision = meshRef;
@@ -977,6 +979,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     generation.parameterFingerprint = result.parameterFingerprint;
     generation.algorithmRevision = result.algorithmRevision;
     generation.method = result.method;
+    generation.isoEstimate = result.isoEstimate;
     generation.points =
         std::make_shared<const std::vector<SurfacePointRecord>>(
             std::move(result.points));
@@ -999,7 +1002,7 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
         stagedGeneration->triangleIndices->end());
     const auto mesh = std::make_shared<const SurfaceMeshPayload>(
         std::move(vertices), std::move(triangles));
-    if (!mesh->GetValid()) return false;
+    if (!isThresholdOnly && !mesh->GetValid()) return false;
     const auto expected = m_data->GetDataBinding(request.source->graph, surfaceResultBinding)
         .value_or(DataBinding{ std::string(surfaceResultBinding), {}, 0 });
     DataExpectation sourceExpected;
@@ -1014,15 +1017,19 @@ bool SurfaceDeterminationHostFeature::Impl::SetRequestSucceeded(
     const DataProvenance provenance{ std::string(featureId), "determine-surface",
         std::to_string(stagedGeneration->algorithmRevision),
         std::to_string(stagedGeneration->parameterFingerprint) };
-    transaction.outputs = {
-        { meshRef.entityId, 0, DataTypes::surfaceMesh, { sourceInput }, mesh, provenance },
-        { generationRef.entityId, 0, surfaceGenerationType,
-            { sourceInput, { "mesh", meshRef } },
-            std::make_shared<const SurfaceGenerationPayload>(stagedGeneration), provenance } };
+    std::vector<DataInputRef> generationInputs{sourceInput};
+    if (!isThresholdOnly) {
+        transaction.outputs.push_back({meshRef.entityId, 0, DataTypes::surfaceMesh,
+            {sourceInput}, mesh, provenance});
+        generationInputs.push_back({"mesh", meshRef});
+    }
+    transaction.outputs.push_back({generationRef.entityId, 0, surfaceGenerationType,
+        std::move(generationInputs),
+        std::make_shared<const SurfaceGenerationPayload>(stagedGeneration), provenance});
     transaction.bindings.push_back({ std::string(surfaceResultBinding),
         expected.revision, true, expected.target, generationRef });
 
-    const bool isVisible = GetState().isOverlayVisible;
+    const bool isVisible = !isThresholdOnly && GetState().isOverlayVisible;
     std::vector<OverlayBinding> nextBindings;
     if (isVisible
         && !BuildBindings(

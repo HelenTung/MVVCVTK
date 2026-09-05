@@ -8,6 +8,7 @@
 #include <vtkCommand.h>
 #include <vtkImageData.h>
 #include <vtkNew.h>
+#include <vtkPNGWriter.h>
 #include <vtkProp.h>
 #include <vtkPropCollection.h>
 #include <vtkRenderWindow.h>
@@ -23,14 +24,20 @@
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
 #include "Host/PartSegmentationHostFeature.h"
 #endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+#include "Host/SurfaceDeterminationHostFeature.h"
+#endif
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -341,14 +348,13 @@ namespace {
             && event.isShiftDown == chord.isShiftDown;
     }
 
-#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-    HostReloadRequest BuildPartReload()
+    HostReloadRequest BuildDemoReload(bool hasVoid = false)
     {
         constexpr int side = 32;
         HostReloadRequest reload;
-        reload.metadata.identity.datasetId = "standalone-part-synthetic";
+        reload.metadata.identity.datasetId = hasVoid ? "standalone-integrated-demo" : "standalone-part-synthetic";
         reload.metadata.source.kind = ImageSourceKind::Memory;
-        reload.metadata.source.uri = "memory://standalone-part-synthetic";
+        reload.metadata.source.uri = "memory://" + reload.metadata.identity.datasetId;
         reload.voxels.resize(
             static_cast<std::size_t>(side) * side * side, 0.0F);
         for (int z = 0; z < side; ++z) {
@@ -364,7 +370,8 @@ namespace {
                     if (!isFirst && !isSecond) continue;
                     const auto index = static_cast<std::size_t>(
                         x + side * (y + side * z));
-                    reload.voxels[index] = 1.0F;
+                    reload.voxels[index] = hasVoid && isSecond
+                        && x >= 15 && x < 18 && y >= 15 && y < 18 && z >= 15 && z < 18 ? 0.0F : 1.0F;
                 }
             }
         }
@@ -374,6 +381,7 @@ namespace {
         return reload;
     }
 
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     PartSegmentationConfig GetPartConfig()
     {
         PartSegmentationConfig config;
@@ -385,8 +393,16 @@ namespace {
         };
         config.defaultStart.threshold = 0.5;
         config.defaultStart.minPartVoxels = 8;
-        config.maxWorkingBytes =
-            std::size_t{ 20 } * 1024U * 1024U * 1024U;
+        constexpr std::size_t gibibyte = std::size_t{1} << 30U;
+        config.maxWorkingBytes = 32U * gibibyte;
+#if defined(_WIN32)
+        MEMORYSTATUSEX memory{};
+        memory.dwLength = sizeof(memory);
+        if (GlobalMemoryStatusEx(&memory))
+            config.maxWorkingBytes = static_cast<std::size_t>(std::min<ULONGLONG>(
+                48U * gibibyte, memory.ullAvailPhys / 2U));
+#endif
+        std::cout << "[Part] working budget bytes=" << config.maxWorkingBytes << '\n';
         return config;
     }
 
@@ -509,6 +525,38 @@ namespace {
     }
 #endif
 
+    std::string GetRevisionText(const DataRevisionRef& revision)
+    {
+        if (!GetDataRevisionRefValid(revision)) return "none";
+        std::ostringstream text;
+        text << std::hex << std::setfill('0');
+        for (const auto value : revision.entityId.bytes) text << std::setw(2) << static_cast<unsigned int>(value);
+        text << ':' << std::dec << revision.generation;
+        return text.str();
+    }
+
+    void PrintDemoHelp()
+    {
+        std::cout << "\n=== Integrated feature demo (focus any viewer) ===\n"
+            << "F1 help | F2 image descriptor + DataGraph | F3 label maps + sample values | F4 scene/frame state | F5 fit views\n"
+            << "Crop: O box, P plane, 1 keep inside, 2 remove inside; drag widget before building\n"
+            << "      Ctrl+7 build result, Ctrl+8 display result, Ctrl+9 restore source, 4/5 undo/redo\n"
+            << "Gap: G analyze, J hide/show\n"
+            << "Rendering: L/Shift+L volume quality, I/Shift+I iso quality, C/Shift+C color, V/Shift+V opacity\n";
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        std::cout << "Parts: B analyze, Shift+B hide/show all, Ctrl+B clear, Alt+B cancel\n"
+            << "       N/Shift+N select next/previous, Ctrl+H hide/show selected, Ctrl+R mark reviewed\n";
+#endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        std::cout << "Surface: U estimate ISO50 and apply isovalue, Ctrl+U clear estimate, Alt+U cancel\n";
+#endif
+        std::cout << "M view mode | S export data | T export slices | Escape leave active tool / exit\n"
+            << "--demo: small two-object volume for interactive exploration\n"
+            << "--demo-audit: exercise the same shortcut routes and exit\n"
+            << "--real-audit: run U then B on the main real-data input, measure owner responsiveness\n"
+            << "Results/progress appear in window titles; F2/F3/F4 print details here.\n" << std::flush;
+    }
+
     class MainControlFeature final
         : public HostFeature,
         public std::enable_shared_from_this<MainControlFeature> {
@@ -540,7 +588,15 @@ namespace {
                 HostKeyChord{ 'g' },
                 HostKeyChord{ '7', {}, true },
                 HostKeyChord{ '8', {}, true },
-                HostKeyChord{ '9', {}, true }
+                HostKeyChord{ '9', {}, true },
+                HostKeyChord{ 0, "F1" },
+                HostKeyChord{ 0, "F2" },
+                HostKeyChord{ 0, "F3" },
+                HostKeyChord{ 0, "F4" },
+                HostKeyChord{ 0, "F5" },
+                HostKeyChord{ 'u' },
+                HostKeyChord{ 'u', {}, true },
+                HostKeyChord{ 'u', {}, false, true }
             }
         {
         }
@@ -557,6 +613,7 @@ namespace {
             if (weakOwner.expired()) return false;
 
             m_host = context.host;
+            m_data = context.data;
             HostInputBinding binding;
             binding.featureId = std::string(featureId);
             binding.targetViews = m_inputViews;
@@ -584,14 +641,39 @@ namespace {
             }
             m_isKeyDown.fill(false);
             m_host.reset();
+            m_data.reset();
             m_isAttached = false;
             return true;
         }
 
         bool OnHostTick() override
         {
+            if (m_isDemoFitPending && m_host) {
+                const auto* endpoint = m_session.GetRenderViewEndpoint(m_isoTarget.viewId);
+                double bounds[6]{};
+                if (endpoint && endpoint->renderer) {
+                    endpoint->renderer->ComputeVisiblePropBounds(bounds);
+                    // 异步等值面提交前没有有效 bounds，此时 ResetCamera 不会适配新数据。
+                    if (bounds[0] <= bounds[1] && bounds[2] <= bounds[3] && bounds[4] <= bounds[5]) {
+                        const auto weak = weak_from_this();
+                        if (m_host->SendOwnerComplete([weak] {
+                            if (const auto owner = weak.lock()) (void)owner->SendControl(ControlAction::FitViews);
+                        })) m_isDemoFitPending = false;
+                    }
+                }
+            }
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+            SendSurfaceProgress();
+#endif
             return SendQualityAudit();
         }
+
+        void StartDemoFit() { m_isDemoFitPending = true; }
+
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        void SetSurfaceFeature(std::weak_ptr<SurfaceDeterminationHostFeature> feature)
+        { m_surfaceFeature = std::move(feature); }
+#endif
 
         bool StartQualityAudit()
         {
@@ -624,6 +706,8 @@ namespace {
             BuildCropResult,
             SetCropPrimary,
             RestoreCropSource,
+            Help, Data, Labels, Scenes, FitViews,
+            SurfaceStart, SurfaceClear, SurfaceStop,
             Count
         };
 
@@ -919,7 +1003,7 @@ namespace {
             return true;
         }
 
-        bool SetGapStatus(const std::string& status)
+        bool SetDemoStatus(const std::string& status)
         {
             if (!m_host || m_volumeTarget.viewId.empty()) {
                 return false;
@@ -935,7 +1019,7 @@ namespace {
         {
             const auto gapFeature = m_gapFeature.lock();
             if (!gapFeature) {
-                (void)SetGapStatus("Gap: unavailable");
+                (void)SetDemoStatus("Gap: unavailable");
                 std::cerr
                     << "[GapAnalysis] G request rejected: feature unavailable\n"
                     << std::flush;
@@ -969,7 +1053,7 @@ namespace {
                             << statistics.porosityRatio;
                     }
                     if (const auto owner = controlOwner.lock()) {
-                        (void)owner->SetGapStatus(status.str());
+                        (void)owner->SetDemoStatus(status.str());
                     }
                     std::cerr << "[GapAnalysis] "
                         << status.str()
@@ -991,7 +1075,7 @@ namespace {
             const std::string requestStatus = isAccepted
                 ? "Gap: running"
                 : "Gap: rejected";
-            (void)SetGapStatus(requestStatus);
+            (void)SetDemoStatus(requestStatus);
             std::cerr << "[GapAnalysis] G request "
                 << (isAccepted ? "accepted; calculation started"
                     : "rejected; calculation did not start")
@@ -1056,6 +1140,187 @@ namespace {
         }
 
     private:
+        bool PrintData()
+        {
+            const auto descriptor = m_session.GetImageDescriptor();
+            if (!descriptor || !m_data) {
+                (void)SetDemoStatus("Demo: waiting for image");
+                return false;
+            }
+            const auto graph = m_data->GetDataGraph();
+            if (!graph.view) return false;
+            std::cout << "[Image] dataset=" << descriptor->metadata.identity.datasetId
+                << " dims=" << descriptor->dims[0] << 'x' << descriptor->dims[1] << 'x' << descriptor->dims[2]
+                << " spacing=" << descriptor->spacing[0] << ',' << descriptor->spacing[1] << ',' << descriptor->spacing[2]
+                << " range=" << descriptor->scalarRange[0] << ',' << descriptor->scalarRange[1]
+                << " quantity=" << descriptor->metadata.scalar.quantity << " unit=" << descriptor->metadata.scalar.unit
+                << " source=" << descriptor->metadata.source.uri
+                << " revision=" << GetRevisionText(descriptor->dataRevision) << '\n';
+            const auto bindings = graph.view->GetDataBindings();
+            std::cout << "[DataGraph] commit=" << graph.commitId << " bindings=" << bindings.size() << '\n';
+            for (const auto& binding : bindings) {
+                if (!binding.target) continue;
+                const auto data = graph.view->GetData(*binding.target);
+                std::cout << "  " << binding.name << " -> " << GetRevisionText(*binding.target)
+                    << " binding_revision=" << binding.revision;
+                if (data) {
+                    std::cout << " type=" << data->type.name;
+                    for (const auto& input : data->inputs)
+                        std::cout << " | " << input.role << "=" << GetRevisionText(input.source);
+                }
+                std::cout << '\n';
+            }
+            std::ostringstream status;
+            status << descriptor->metadata.identity.datasetId << " | " << descriptor->dims[0] << 'x'
+                << descriptor->dims[1] << 'x' << descriptor->dims[2] << " | graph=" << graph.commitId;
+            (void)SetDemoStatus(status.str());
+            return true;
+        }
+
+        bool PrintLabels()
+        {
+            const auto labels = m_session.GetLabelMapDescriptors();
+            std::cout << "[LabelMap] active=" << labels.size() << " (run B or G first)\n";
+            bool isPassed = true;
+            for (const auto& label : labels) {
+                LabelMapReadRequest request;
+                request.id = label.id;
+                request.expectedRevision = label.dataRevision;
+                request.maxBytes = 8 * label.componentBytes;
+                const auto chunk = m_session.GetLabelMapReadChunk(request, 0);
+                std::cout << "  " << label.id << " dataset=" << label.datasetId
+                    << " source=" << GetRevisionText(label.sourceRevision)
+                    << " revision=" << GetRevisionText(label.dataRevision) << " samples=";
+                const auto printValues = [&](auto value) {
+                    using Value = decltype(value);
+                    if (!chunk.state || !chunk.state->values) return;
+                    const auto& bytes = *chunk.state->values;
+                    for (std::size_t offset = 0; offset + sizeof(Value) <= bytes.size(); offset += sizeof(Value)) {
+                        Value sample{};
+                        std::memcpy(&sample, bytes.data() + offset, sizeof(Value));
+                        std::cout << +sample << ' ';
+                    }
+                };
+                switch (label.valueType) {
+                case ImageValueType::Int8: printValues(std::int8_t{}); break;
+                case ImageValueType::UInt8: printValues(std::uint8_t{}); break;
+                case ImageValueType::Int16: printValues(std::int16_t{}); break;
+                case ImageValueType::UInt16: printValues(std::uint16_t{}); break;
+                case ImageValueType::Int32: printValues(std::int32_t{}); break;
+                case ImageValueType::UInt32: printValues(std::uint32_t{}); break;
+                case ImageValueType::Int64: printValues(std::int64_t{}); break;
+                case ImageValueType::UInt64: printValues(std::uint64_t{}); break;
+                default: break;
+                }
+                isPassed = isPassed && chunk.error == LabelMapError::None;
+                std::cout << "read_status=" << static_cast<int>(chunk.error) << '\n';
+            }
+            (void)SetDemoStatus("Label maps: " + std::to_string(labels.size()) + " | details in console (F3)");
+            return isPassed;
+        }
+
+        bool PrintScenes()
+        {
+            const auto scenes = m_session.GetSceneViewStates();
+            for (const auto& scene : scenes) {
+                std::cout << "[Scene] " << scene.id << " committed=" << scene.sceneEpoch
+                    << " rendered=" << scene.renderedEpoch << " features=";
+                for (const auto& id : scene.activeFeatureIds) std::cout << id << ' ';
+                if (scene.presentation) std::cout << " quality=" << static_cast<int>(scene.presentation->volumeQuality)
+                    << " interacting=" << scene.presentation->isInteracting
+                    << " input=" << GetRevisionText(scene.presentation->dataRevision);
+                std::cout << '\n';
+            }
+            (void)SetDemoStatus("Scene/frame snapshots: " + std::to_string(scenes.size()) + " views | details in console (F4)");
+            return !scenes.empty();
+        }
+
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        static std::string_view GetMethodName(SurfaceDeterminationMethod method)
+        {
+            switch (method) {
+            case SurfaceDeterminationMethod::GlobalIsoPreview: return "GlobalIsoPreview";
+            case SurfaceDeterminationMethod::LocalAdaptiveIso50: return "LocalAdaptiveIso50";
+            case SurfaceDeterminationMethod::GradientPeak: return "GradientPeak";
+            case SurfaceDeterminationMethod::AutomaticIso50: return "AutomaticIso50";
+            }
+            return "Unknown";
+        }
+
+        bool SendSurface(ControlAction action)
+        {
+            const auto feature = m_surfaceFeature.lock();
+            if (!feature) return false;
+            SurfaceDeterminationRequest request;
+            if (action == ControlAction::SurfaceStart) {
+                const auto image = m_session.GetImageDescriptor();
+                if (!image) return false;
+                SurfaceDeterminationStartParams start;
+                start.targetViews.viewIds = { m_isoTarget.viewId };
+                start.method = m_surfaceMethod;
+                start.componentSelection = SurfaceComponentSelection::All;
+                start.initialIsoValue.reset();
+                request.action = SurfaceDeterminationAction::Start;
+                request.start = start;
+            }
+            else if (action == ControlAction::SurfaceClear) request.action = SurfaceDeterminationAction::Clear;
+            else request.action = SurfaceDeterminationAction::Stop;
+            const auto weakOwner = weak_from_this();
+            const auto admission = feature->SendRequest(std::move(request), [weakOwner, action](SurfaceDeterminationResult result) {
+                if (const auto owner = weakOwner.lock()) {
+                    std::ostringstream text;
+                    const auto feature = owner->m_surfaceFeature.lock();
+                    const auto outcome = result.status != SurfaceResultStatus::Succeeded
+                        ? (result.status == SurfaceResultStatus::Cancelled ? "cancelled" : "failed")
+                        : action == ControlAction::SurfaceClear ? "cleared"
+                        : "ready";
+                    text << "Surface: " << outcome;
+                    if (action == ControlAction::SurfaceStart && result.status == SurfaceResultStatus::Succeeded
+                        && result.isoEstimate) {
+                        const auto image = owner->m_session.GetImageDescriptor();
+                        HostViewSetRequest request;
+                        request.targetView = owner->m_isoTarget;
+                        request.iso = result.isoEstimate->isoValue;
+                        const bool isApplied = image && image->dataRevision == result.sourceRevision
+                            && owner->m_session.SendRequest(std::move(request));
+                        text << " | isovalue=" << result.isoEstimate->isoValue
+                            << (isApplied ? " applied" : " apply rejected")
+                            << " | samples=" << result.isoEstimate->sampleCount;
+                    }
+                    (void)owner->SetDemoStatus(text.str());
+                    std::cout << "[Surface] " << text.str() << " | reason=" << static_cast<int>(result.failureReason)
+                        << " | " << result.message << '\n' << std::flush;
+                }
+            });
+            if (admission.status != SurfaceAdmissionStatus::Accepted) {
+                (void)SetDemoStatus("Surface request rejected: " + std::to_string(static_cast<int>(admission.status)));
+                return false;
+            }
+            if (action == ControlAction::SurfaceStart) m_surfaceRunningMethod = m_surfaceMethod;
+            return true;
+        }
+
+        void SendSurfaceProgress()
+        {
+            const auto feature = m_surfaceFeature.lock();
+            if (!feature) return;
+            const auto state = feature->GetState();
+            const int progress = static_cast<int>(state.progress01 * 100.0);
+            if (state.requestId == 0 || (m_surfaceStage == state.stage && m_surfaceProgress == progress)) return;
+            m_surfaceStage = state.stage;
+            m_surfaceProgress = progress;
+            std::ostringstream status;
+            status << "Surface: " << GetMethodName(m_surfaceRunningMethod) << " | " << progress << "%";
+            const auto generation = feature->GetSurfaceSnapshot();
+            if (generation && generation->isoEstimate)
+                status << " | isovalue=" << generation->isoEstimate->isoValue;
+            else if (m_surfaceRunningMethod != SurfaceDeterminationMethod::AutomaticIso50)
+                status << " | points=" << state.pointCount << " | objects=" << state.objectCount;
+            if (!state.errorMessage.empty()) status << " | " << state.errorMessage;
+            (void)SetDemoStatus(status.str());
+        }
+#endif
+
         bool SendControl(const ControlAction action)
         {
             switch (action) {
@@ -1072,6 +1337,31 @@ namespace {
                 return SwitchQuality(m_isoTarget, 1);
             case ControlAction::IsoQualityPrevious:
                 return SwitchQuality(m_isoTarget, -1);
+            case ControlAction::Help:
+                PrintDemoHelp();
+                (void)SetDemoStatus("F1 help | F2 data | F3 labels | F4 frames | F5 fit | U surface | B parts | G gap");
+                return true;
+            case ControlAction::Data: return PrintData();
+            case ControlAction::Labels: return PrintLabels();
+            case ControlAction::Scenes: return PrintScenes();
+            case ControlAction::FitViews: {
+                bool isSucceeded = true;
+                for (const auto& view : m_session.GetRenderViewStates()) {
+                    HostViewResetRequest request;
+                    request.targetView.viewId = view.id;
+                    isSucceeded = m_session.SendRequest(std::move(request)) && isSucceeded;
+                }
+                return isSucceeded;
+            }
+            case ControlAction::SurfaceStart:
+            case ControlAction::SurfaceClear:
+            case ControlAction::SurfaceStop:
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+                return SendSurface(action);
+#else
+                (void)SetDemoStatus("SurfaceDetermination is not enabled in this build");
+                return false;
+#endif
             case ControlAction::StartGap:
                 return StartGap();
             case ControlAction::BuildCropResult:
@@ -1088,18 +1378,21 @@ namespace {
         InteractionResult OnInput(
             const InteractionEvent& event)
         {
+            if (event.eventKind == InteractionEventKind::KeyRelease) {
+                bool wasDown = false;
+                for (std::size_t index = 0; index < m_keys.size(); ++index) {
+                    if (GetKeyMatched(event, m_keys[index].keyCode)
+                        || (!m_keys[index].keySym.empty() && event.keySym == m_keys[index].keySym)) {
+                        wasDown = wasDown || m_isKeyDown[index];
+                        m_isKeyDown[index] = false;
+                    }
+                }
+                return wasDown ? InteractionResult{true, true} : InteractionResult{};
+            }
             const auto action = GetAction(event);
             if (!action) return {};
             const auto index = static_cast<std::size_t>(*action);
 
-            if (event.eventKind
-                == InteractionEventKind::KeyRelease) {
-                const bool wasDown = m_isKeyDown[index];
-                m_isKeyDown[index] = false;
-                return wasDown
-                    ? InteractionResult{ true, true }
-                : InteractionResult{};
-            }
             if (event.eventKind
                 == InteractionEventKind::TextInput) {
                 return m_isKeyDown[index]
@@ -1129,6 +1422,7 @@ namespace {
         VtkAppHostSession& m_session;
         HostViewTarget m_volumeTarget;
         HostViewTarget m_isoTarget;
+        bool m_isDemoFitPending = false;
         HostViewTargets m_inputViews;
         std::weak_ptr<CropHostFeature> m_cropFeature;
         std::weak_ptr<GapHostFeature> m_gapFeature;
@@ -1136,6 +1430,14 @@ namespace {
         std::array<HostKeyChord, actionCount> m_keys;
         std::array<bool, actionCount> m_isKeyDown{};
         std::shared_ptr<FeatureHostControl> m_host;
+        std::shared_ptr<TrustedDataReadPort> m_data;
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        std::weak_ptr<SurfaceDeterminationHostFeature> m_surfaceFeature;
+        SurfaceDeterminationMethod m_surfaceMethod = SurfaceDeterminationMethod::AutomaticIso50;
+        SurfaceDeterminationMethod m_surfaceRunningMethod = SurfaceDeterminationMethod::AutomaticIso50;
+        SurfaceDeterminationStage m_surfaceStage = SurfaceDeterminationStage::Idle;
+        int m_surfaceProgress = -1;
+#endif
         bool m_isAttached = false;
         QualityAuditPhase m_qualityAuditPhase = QualityAuditPhase::None;
         std::chrono::steady_clock::time_point m_qualityAuditDeadline{};
@@ -1151,20 +1453,39 @@ namespace {
         public std::enable_shared_from_this<PartControlFeature> {
     public:
         PartControlFeature(
+            VtkAppHostSession& session,
             HostViewTarget statusTarget,
             HostViewTargets inputViews,
             std::weak_ptr<PartSegmentationHostFeature> partFeature,
             PartSegmentationStartParams partStart)
-            : m_statusTarget(std::move(statusTarget)),
+            : m_session(session), m_statusTarget(std::move(statusTarget)),
             m_inputViews(std::move(inputViews)),
             m_partFeature(std::move(partFeature)),
             m_partStart(std::move(partStart)),
             m_keys{
                 HostKeyChord{ 'b' },
                 HostKeyChord{ 'b', {}, false, false, true },
-                HostKeyChord{ 'b', {}, true }
+                HostKeyChord{ 'b', {}, true },
+                HostKeyChord{ 'b', {}, false, true },
+                HostKeyChord{ 'n' },
+                HostKeyChord{ 'n', {}, false, false, true },
+                HostKeyChord{ 'h', {}, true },
+                HostKeyChord{ 'r', {}, true }
             }
         {
+        }
+
+        bool OnHostTick() override
+        {
+            const auto feature = m_partFeature.lock();
+            if (!feature) return true;
+            const auto state = feature->GetState();
+            const int progress = static_cast<int>(state.progress * 100.0);
+            if (state.status == PartSegmentationStatus::Running && progress != m_progress) {
+                m_progress = progress;
+                (void)SetPartStatus("Part: " + std::to_string(progress) + "% | Alt+B cancels");
+            }
+            return true;
         }
 
         std::string_view GetFeatureId() const noexcept override
@@ -1208,13 +1529,11 @@ namespace {
             return true;
         }
 
-        bool OnHostTick() override { return true; }
-
     private:
         enum class ControlAction : std::uint8_t {
             Start,
             Toggle,
-            Clear,
+            Clear, Stop, Next, Previous, TogglePart, Review,
             Count
         };
 
@@ -1247,7 +1566,7 @@ namespace {
             if (action == ControlAction::Toggle) {
                 return "Part: visibility updating";
             }
-            return "Part: clearing";
+            return action == ControlAction::Stop ? "Part: cancelling" : "Part: clearing";
         }
 
         bool SendPartRequest(
@@ -1290,8 +1609,11 @@ namespace {
                                     ? "visible" : "hidden");
                             }
                             else {
-                                status << "cleared";
+                                status << (action == ControlAction::Stop ? "cancellation requested" : "cleared");
                             }
+                        }
+                        else if (result.status == PartResultStatus::SucceededWithDisplayFailure) {
+                            status << "data ready; display failed | parts=" << result.partCount;
                         }
                         else {
                             status
@@ -1335,12 +1657,87 @@ namespace {
             return isAccepted;
         }
 
+        bool SetPartSelection(ControlAction action)
+        {
+            const auto feature = m_partFeature.lock();
+            const auto snapshot = feature ? feature->GetPartSetSnapshot() : nullptr;
+            if (!snapshot || snapshot->isStale || snapshot->parts.empty()) {
+                (void)SetPartStatus("Part: press B to create a current result first");
+                return false;
+            }
+            const auto selected = std::find_if(snapshot->parts.begin(), snapshot->parts.end(),
+                [](const PartSnapshot& part) { return part.presentation.isSelected; });
+            std::size_t index = selected == snapshot->parts.end() ? 0 :
+                static_cast<std::size_t>(selected - snapshot->parts.begin());
+            if (action == ControlAction::Next && selected != snapshot->parts.end())
+                index = (index + 1) % snapshot->parts.size();
+            const auto& part = snapshot->parts[index];
+            PartStatePatch patch;
+            if (action == ControlAction::TogglePart) patch.isVisible = !part.presentation.isVisible;
+            else if (action == ControlAction::Review) patch.isReviewed = !part.userState.isReviewed;
+            else patch.isSelected = true;
+            const auto result = action == ControlAction::Previous
+                ? feature->SetPreviousPart(snapshot->catalogRevision)
+                : feature->SetPartState(part.binding, patch, snapshot->catalogRevision);
+            if (result.status != PartMutationStatus::Succeeded) {
+                (void)SetPartStatus("Part edit rejected: " + std::to_string(static_cast<int>(result.status)));
+                return false;
+            }
+            const auto current = feature->GetPartSetSnapshot();
+            if (!current) return false;
+            const auto updated = std::find_if(current->parts.begin(), current->parts.end(),
+                [&part, action](const PartSnapshot& value) {
+                    return action == ControlAction::Previous
+                        ? value.presentation.isSelected : value.binding == part.binding;
+                });
+            if (updated == current->parts.end()) return false;
+            std::ostringstream status;
+            status << "Part " << updated->labelId << " | selected=" << updated->presentation.isSelected
+                << " visible=" << updated->presentation.isVisible << " reviewed=" << updated->userState.isReviewed
+                << " volume=" << updated->metrics.physicalVolumeMM3;
+            (void)SetPartStatus(status.str());
+            std::cout << "[Part] " << status.str() << " | stable_id="
+                << updated->binding.object.objectId.high << ':' << updated->binding.object.objectId.low
+                << " | catalog=" << current->catalogRevision << '\n';
+            return true;
+        }
+
         bool SendControl(const ControlAction action)
         {
+            if (action == ControlAction::Next || action == ControlAction::Previous
+                || action == ControlAction::TogglePart || action == ControlAction::Review) return SetPartSelection(action);
             PartSegmentationRequest request;
+            if (action == ControlAction::Stop) {
+                request.action = PartSegmentationAction::Stop;
+                return SendPartRequest(std::move(request), action);
+            }
             if (action == ControlAction::Start) {
                 request.action = PartSegmentationAction::Start;
-                request.start = m_partStart;
+                auto start = m_partStart;
+                const auto view = m_session.GetRenderViewState({"primary-3d"});
+                if (!view) return false;
+                start.threshold = view->isoThreshold;
+#if defined(_WIN32)
+                const auto image = m_session.GetImageDescriptor();
+                MEMORYSTATUSEX memory{};
+                memory.dwLength = sizeof(memory);
+                if (image && GlobalMemoryStatusEx(&memory)) {
+                    std::uint64_t voxelCount = 1;
+                    for (const auto dimension : image->dims) voxelCount *= static_cast<std::uint64_t>(dimension);
+                    const auto newLabelBytes = voxelCount * (2U * sizeof(std::uint32_t));
+                    const auto reserveBytes = std::min<ULONGLONG>(std::uint64_t{8} << 30U,
+                        memory.ullTotalPhys / 8U);
+                    if (memory.ullAvailPhys < newLabelBytes + reserveBytes) {
+                        (void)SetPartStatus("Part: insufficient available RAM for another full-resolution result");
+                        std::cerr << "[Part] memory admission rejected: newLabelBytes=" << newLabelBytes
+                            << " availableBytes=" << memory.ullAvailPhys << '\n';
+                        return false;
+                    }
+                }
+#endif
+                m_progress = -1;
+                request.start = start;
+                std::cout << "[Part] using current isovalue=" << start.threshold << '\n' << std::flush;
                 return SendPartRequest(std::move(request), action);
             }
             if (action == ControlAction::Toggle) {
@@ -1362,15 +1759,15 @@ namespace {
 
         InteractionResult OnInput(const InteractionEvent& event)
         {
-            if (event.eventKind == InteractionEventKind::KeyRelease
-                && GetKeyMatched(event, 'b')) {
-                const bool wasDown = std::any_of(
-                    m_isKeyDown.begin(), m_isKeyDown.end(),
-                    [](const bool isDown) { return isDown; });
-                m_isKeyDown.fill(false);
-                return wasDown
-                    ? InteractionResult{ true, true }
-                : InteractionResult{};
+            if (event.eventKind == InteractionEventKind::KeyRelease) {
+                bool wasDown = false;
+                for (std::size_t index = 0; index < m_keys.size(); ++index) {
+                    if (GetKeyMatched(event, m_keys[index].keyCode)) {
+                        wasDown = wasDown || m_isKeyDown[index];
+                        m_isKeyDown[index] = false;
+                    }
+                }
+                return wasDown ? InteractionResult{true, true} : InteractionResult{};
             }
 
             const auto action = GetAction(event);
@@ -1404,6 +1801,8 @@ namespace {
         HostViewTarget m_statusTarget;
         HostViewTargets m_inputViews;
         std::weak_ptr<PartSegmentationHostFeature> m_partFeature;
+        VtkAppHostSession& m_session;
+        int m_progress = -1;
         PartSegmentationStartParams m_partStart;
         std::array<HostKeyChord, actionCount> m_keys;
         std::array<bool, actionCount> m_isKeyDown{};
@@ -1411,6 +1810,142 @@ namespace {
         bool m_isAttached = false;
     };
 #endif
+
+    // 通过与手动演示相同的 Host 输入路径验证快捷键，不直接调用业务动作。
+    class DemoAuditFeature final : public HostFeature,
+        public std::enable_shared_from_this<DemoAuditFeature> {
+    public:
+        explicit DemoAuditFeature(VtkAppHostSession& session) : m_session(session) {}
+        std::string_view GetFeatureId() const noexcept override { return "main.demo-audit"; }
+        bool AttachHost(const HostFeatureContext& context) override { m_host = context.host; return m_host != nullptr; }
+        bool DetachHost() override { m_isActive = false; m_host.reset(); return true; }
+        void Start() { m_isActive = true; m_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300); }
+        bool GetPassed() const { return m_isDone && m_isPassed; }
+        bool OnHostTick() override
+        {
+            if (!m_isActive) return true;
+            const auto now = std::chrono::steady_clock::now();
+            if (m_lastTick != std::chrono::steady_clock::time_point{})
+                m_tickGapsMs.push_back(std::chrono::duration<double, std::milli>(now - m_lastTick).count());
+            m_lastTick = now;
+            if (m_isQueued) return true;
+            const auto weak = weak_from_this();
+            m_isQueued = true;
+            return m_host && m_host->SendOwnerComplete([weak] {
+                if (const auto owner = weak.lock()) {
+                    owner->m_isQueued = false;
+                    if (owner->m_isActive) owner->SendStep();
+                }
+            });
+        }
+        void SetFailureCheck(std::function<std::string()> getFailure) { m_getFailure = std::move(getFailure); }
+        void AddStep(std::string name, HostKeyChord key, std::function<bool()> ready)
+        { m_steps.push_back({std::move(name), std::move(key), std::move(ready)}); }
+    private:
+        struct Step { std::string name; HostKeyChord key; std::function<bool()> ready; };
+        bool SendKey(const HostKeyChord& key)
+        {
+            auto* input = m_session.GetInputEndpoint();
+            if (!input) return false;
+            HostInputEvent event;
+            event.viewId = "primary-3d";
+            event.keyCode = key.keyCode;
+            event.keySym = key.keySym.empty() ? std::string(1, key.keyCode) : key.keySym;
+            event.isCtrlDown = key.isCtrlDown;
+            event.isAltDown = key.isAltDown;
+            event.isShiftDown = key.isShiftDown;
+            event.kind = HostInputKind::KeyPress;
+            const auto first = input->SendInput(event);
+            const auto repeated = input->SendInput(event);
+            event.kind = HostInputKind::KeyRelease;
+            // 覆盖先松修饰键、后松字符键的真实键序列。
+            event.isCtrlDown = false;
+            event.isAltDown = false;
+            event.isShiftDown = false;
+            const auto released = input->SendInput(event);
+            return first.isHandled && first.isSucceeded && repeated.isHandled && released.isHandled;
+        }
+        void Finish(bool passed)
+        {
+            m_isPassed = passed;
+            m_isDone = true;
+            m_isActive = false;
+            if (!m_tickGapsMs.empty()) {
+                std::sort(m_tickGapsMs.begin(), m_tickGapsMs.end());
+                std::cout << "[DemoAudit] owner_tick_p95_ms=" << m_tickGapsMs[m_tickGapsMs.size() * 95 / 100]
+                    << " owner_tick_max_ms=" << m_tickGapsMs.back() << " samples=" << m_tickGapsMs.size() << '\n';
+            }
+            std::cout << "AUDIT_DEMO: passed=" << passed << " completed=" << m_index
+                << '/' << m_steps.size() << '\n' << std::flush;
+            (void)StopEventLoop(m_session);
+        }
+        bool SaveView(const std::string& name)
+        {
+            const auto* endpoint = m_session.GetRenderViewEndpoint("primary-3d");
+            if (!endpoint || !endpoint->renderWindow) return false;
+            std::error_code error;
+            std::filesystem::create_directories("out/build", error);
+            if (error) return false;
+            endpoint->renderWindow->Render();
+            endpoint->renderWindow->WaitForCompletion();
+            vtkNew<vtkWindowToImageFilter> capture;
+            capture->SetInput(endpoint->renderWindow);
+            capture->ReadFrontBufferOff();
+            capture->SetInputBufferTypeToRGB();
+            capture->ShouldRerenderOff();
+            vtkNew<vtkPNGWriter> writer;
+            const auto path = "out/build/demo-" + name + ".png";
+            writer->SetFileName(path.c_str());
+            writer->SetInputConnection(capture->GetOutputPort());
+            writer->Write();
+            return writer->GetErrorCode() == 0;
+        }
+        void SendStep()
+        {
+            if (m_index == m_steps.size()) { Finish(true); return; }
+            if (m_getFailure) {
+                const auto failure = m_getFailure();
+                if (!failure.empty()) {
+                    std::cerr << "[DemoAudit] " << failure << '\n';
+                    Finish(false);
+                    return;
+                }
+            }
+            auto& step = m_steps[m_index];
+            if (!m_isSent) {
+                std::cout << "[DemoAudit] " << step.name << '\n' << std::flush;
+                m_stepStarted = std::chrono::steady_clock::now();
+                if (!SendKey(step.key)) { Finish(false); return; }
+                m_isSent = true;
+                m_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+                return;
+            }
+            if (!step.ready || step.ready()) {
+                std::cout << "[DemoAudit] completed=" << step.name << " elapsed_ms="
+                    << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_stepStarted).count() << '\n';
+                if ((step.name == "part select" || step.name == "surface threshold")
+                    && !SaveView(step.name == "part select" ? "parts" : "surface")) { Finish(false); return; }
+                ++m_index;
+                m_isSent = false;
+                return;
+            }
+            if (std::chrono::steady_clock::now() > m_deadline) Finish(false);
+        }
+        VtkAppHostSession& m_session;
+        std::shared_ptr<FeatureHostControl> m_host;
+        std::vector<Step> m_steps;
+        std::function<std::string()> m_getFailure;
+        std::size_t m_index = 0;
+        std::chrono::steady_clock::time_point m_lastTick{};
+        std::chrono::steady_clock::time_point m_stepStarted{};
+        std::vector<double> m_tickGapsMs;
+        std::chrono::steady_clock::time_point m_deadline{};
+        bool m_isActive = false;
+        bool m_isQueued = false;
+        bool m_isSent = false;
+        bool m_isDone = false;
+        bool m_isPassed = false;
+    };
 
     HostRenderViewConfig BuildView(
         std::string id,
@@ -1592,6 +2127,9 @@ namespace {
 
 int main(int argc, char* argv[])
 {
+    const bool isDemo = GetArgFound(argc, argv, "--demo");
+    const bool isDemoAudit = GetArgFound(argc, argv, "--demo-audit");
+    const bool isRealAudit = GetArgFound(argc, argv, "--real-audit");
     // 后端切换和初始化都不是线程安全 API；必须在任何 Feature worker 启动前完成。
     // 构建若未包含 STDThread，则显式回退 Sequential，保持功能可用。
     const bool isThreaded =
@@ -1599,9 +2137,23 @@ int main(int argc, char* argv[])
     if (!isThreaded) {
         (void)vtkSMPTools::SetBackend("Sequential");
     }
-    vtkSMPTools::Initialize();
+    vtkSMPTools::Initialize(std::max(1, std::min(8, vtkSMPTools::GetEstimatedDefaultNumberOfThreads() / 2)));
 
     auto renderViews = BuildViews();
+    if (isDemo || isDemoAudit) {
+        for (auto& view : renderViews) {
+            view.window.viewInit.hasIso = true;
+            view.window.viewInit.isoThreshold = 0.5;
+            view.window.viewInit.hasVolumeTransferFunction = true;
+            view.window.viewInit.volumeTransferFunction = {
+                {{0.0, 0.0, 0.0, 0.0}, {1.0, 0.85, 0.85, 0.9}},
+                {{0.0, 0.0}, {1.0, 0.8}}
+            };
+        }
+    }
+    if (isDemoAudit || isRealAudit) {
+        for (auto& view : renderViews) view.inputMode = HostInputMode::HostInjected;
+    }
     const HostViewTargets allViews =
         GetAllViews(renderViews);
     HostSessionConfig sessionConfig;
@@ -1629,15 +2181,16 @@ int main(int argc, char* argv[])
     planeVisibility.isPlanes3DVisible = false;
     HostViewSetRequest primaryRequest;
     primaryRequest.targetView = primaryTarget;
-    primaryRequest.volumeQuality = HostVolumeQuality::Auto;
+    primaryRequest.volumeQuality = isDemoAudit ? HostVolumeQuality::Low : HostVolumeQuality::Auto;
     primaryRequest.visibility = planeVisibility;
+    primaryRequest.iso = 0.5; // 本例初始值；U 将用当前原始数据的自动 ISO50 更新它。
     if (!session.SendRequest(std::move(primaryRequest))) {
         return 1;
     }
 
     HostViewSetRequest volumeRequest;
     volumeRequest.targetView = volumeTarget;
-    volumeRequest.volumeQuality = HostVolumeQuality::Auto;
+    volumeRequest.volumeQuality = isDemoAudit ? HostVolumeQuality::Low : HostVolumeQuality::Auto;
     volumeRequest.visibility = planeVisibility;
     if (!session.SendRequest(std::move(volumeRequest))) {
         return 1;
@@ -1665,6 +2218,11 @@ int main(int argc, char* argv[])
         BuildCrop(allViews));
     features.push_back(cropFeature);
     auto gapConfig = GetGapConfig(allViews);
+    if (isDemo || isDemoAudit) {
+        gapConfig.defaultStart.surface.absoluteIsoValue = 0.5;
+        gapConfig.defaultStart.surface.backgroundMean = 0.0F;
+        gapConfig.defaultStart.surface.materialMean = 1.0F;
+    }
     auto gapStart = gapConfig.defaultStart;
     auto gapFeature = std::make_shared<GapHostFeature>(
         std::move(gapConfig));
@@ -1677,11 +2235,20 @@ int main(int argc, char* argv[])
     features.push_back(partFeature);
     auto partControlViews = allViews;
     auto partControlFeature = std::make_shared<PartControlFeature>(
+        session,
         volumeTarget,
         std::move(partControlViews),
         partFeature,
         std::move(partStart));
     features.push_back(partControlFeature);
+#endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+    SurfaceDeterminationConfig surfaceConfig;
+    surfaceConfig.defaultStart.targetViews.viewIds = { primaryTarget.viewId };
+    surfaceConfig.defaultStart.method = SurfaceDeterminationMethod::AutomaticIso50;
+    surfaceConfig.maxWorkingBytes = 64U * 1024U * 1024U;
+    auto surfaceFeature = std::make_shared<SurfaceDeterminationHostFeature>(surfaceConfig);
+    features.push_back(surfaceFeature);
 #endif
     // G 应在任一 MVVCVTK 窗口获得焦点时都能启动；状态统一显示在 composite-volume 标题栏。
     auto controlViews = allViews;
@@ -1693,7 +2260,133 @@ int main(int argc, char* argv[])
         cropFeature,
         gapFeature,
         std::move(gapStart));
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+    controlFeature->SetSurfaceFeature(surfaceFeature);
+#endif
     features.push_back(controlFeature);
+    auto demoAudit = std::make_shared<DemoAuditFeature>(session);
+    demoAudit->SetFailureCheck([&]() -> std::string {
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        if (surfaceFeature->GetState().stage == SurfaceDeterminationStage::Failed)
+            return surfaceFeature->GetState().errorMessage;
+#endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        if (partFeature->GetState().status == PartSegmentationStatus::Failed)
+            return "Part failed; see callback reason and message.";
+#endif
+        return {};
+    });
+    if (isDemoAudit) {
+        const auto ready = [] { return true; };
+        demoAudit->AddStep("help", {0, "F1"}, ready);
+        demoAudit->AddStep("image and graph", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
+        demoAudit->AddStep("frame snapshot", {0, "F4"}, [&session] { return session.GetSceneViewStates().size() == 5; });
+        demoAudit->AddStep("volume quality", {'l'}, [&session, volumeTarget] {
+            const auto state = session.GetRenderViewState(volumeTarget);
+            return state && state->volumeQuality == HostVolumeQuality::High;
+        });
+        demoAudit->AddStep("iso quality", {'i'}, [&session, primaryTarget] {
+            const auto state = session.GetRenderViewState(primaryTarget);
+            return state && state->volumeQuality == HostVolumeQuality::High;
+        });
+        demoAudit->AddStep("fit views", {0, "F5"}, [&session, primaryTarget] {
+            const auto scene = session.GetSceneViewState(primaryTarget);
+            return scene && scene->camera && scene->camera->parallelScale > 1.0;
+        });
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        demoAudit->AddStep("part start", {'b'}, [partFeature] {
+            const auto state = partFeature->GetState();
+            return state.status == PartSegmentationStatus::Succeeded && state.partCount == 2;
+        });
+        const auto selectedPart = [partFeature]() -> std::optional<PartSnapshot> {
+            const auto set = partFeature->GetPartSetSnapshot();
+            if (!set) return {};
+            const auto found = std::find_if(set->parts.begin(), set->parts.end(),
+                [](const PartSnapshot& part) { return part.presentation.isSelected; });
+            return found == set->parts.end() ? std::nullopt : std::optional<PartSnapshot>{*found};
+        };
+        demoAudit->AddStep("part select", {'n'}, [selectedPart] { return selectedPart().has_value(); });
+        demoAudit->AddStep("part previous wraps", {'n', {}, false, false, true}, [selectedPart] {
+            const auto part = selectedPart(); return part && part->labelId == 2;
+        });
+        demoAudit->AddStep("part previous", {'n', {}, false, false, true}, [selectedPart] {
+            const auto part = selectedPart(); return part && part->labelId == 1;
+        });
+        demoAudit->AddStep("part review", {'r', {}, true}, [selectedPart] {
+            const auto part = selectedPart(); return part && part->userState.isReviewed;
+        });
+        demoAudit->AddStep("part hide", {'h', {}, true}, [selectedPart] {
+            const auto part = selectedPart(); return part && !part->presentation.isVisible;
+        });
+        demoAudit->AddStep("part show", {'h', {}, true}, [selectedPart] {
+            const auto part = selectedPart(); return part && part->presentation.isVisible;
+        });
+        demoAudit->AddStep("part hide all", {'b', {}, false, false, true}, [partFeature] { return !partFeature->GetState().isOverlayVisible; });
+        demoAudit->AddStep("part show all", {'b', {}, false, false, true}, [partFeature] { return partFeature->GetState().isOverlayVisible; });
+#endif
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        demoAudit->AddStep("surface threshold", {'u'}, [surfaceFeature, &session, primaryTarget] {
+            const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
+            const auto view = session.GetRenderViewState(primaryTarget);
+            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
+                && snapshot && snapshot->isoEstimate && view
+                && view->isoThreshold == snapshot->isoEstimate->isoValue;
+        });
+        demoAudit->AddStep("surface clear", {'u', {}, true}, [surfaceFeature] { return !surfaceFeature->GetSurfaceSnapshot(); });
+#endif
+        demoAudit->AddStep("gap start", {'g'}, [gapFeature] {
+            const auto state = gapFeature->GetState();
+            return state.analysisState == GapAnalysisState::Succeeded && GetDataRevisionRefValid(state.labelMap);
+        });
+        demoAudit->AddStep("label maps", {0, "F3"}, [&session] {
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+            return session.GetLabelMapDescriptors().size() == 2;
+#else
+            return session.GetLabelMapDescriptors().size() == 1;
+#endif
+        });
+        demoAudit->AddStep("crop box", {'o'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("crop plane", {'p'}, [cropFeature] { return cropFeature->GetState().isActive; });
+        demoAudit->AddStep("final graph", {0, "F2"}, ready);
+        features.push_back(demoAudit);
+    }
+
+    if (isRealAudit) {
+        demoAudit->AddStep("real image", {0, "F2"}, [&session] { return session.GetImageDescriptor().has_value(); });
+#if defined(MVVCVTK_HAS_SURFACE_DETERMINATION)
+        demoAudit->AddStep("surface threshold", {'u'}, [surfaceFeature, &session, primaryTarget] {
+            const auto snapshot = surfaceFeature->GetSurfaceSnapshot();
+            const auto view = session.GetRenderViewState(primaryTarget);
+            return surfaceFeature->GetState().stage == SurfaceDeterminationStage::Ready
+                && snapshot && snapshot->isoEstimate && view
+                && view->isoThreshold == snapshot->isoEstimate->isoValue;
+        });
+#endif
+#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
+        demoAudit->AddStep("part start", {'b'}, [partFeature] {
+            return partFeature->GetState().status == PartSegmentationStatus::Succeeded
+                && partFeature->GetState().partCount > 0;
+        });
+        demoAudit->AddStep("part select", {'n'}, [partFeature] {
+            const auto snapshot = partFeature->GetPartSetSnapshot();
+            return snapshot && std::any_of(snapshot->parts.begin(), snapshot->parts.end(),
+                [](const PartSnapshot& part) { return part.presentation.isSelected; });
+        });
+        demoAudit->AddStep("real labels", {0, "F3"}, [&session] { return !session.GetLabelMapDescriptors().empty(); });
+        demoAudit->AddStep("part restart", {'b'}, [partFeature] {
+            return partFeature->GetState().status == PartSegmentationStatus::Running;
+        });
+        demoAudit->AddStep("part cancel preserves result", {'b', {}, false, true}, [partFeature] {
+            const auto state = partFeature->GetState();
+            return state.status == PartSegmentationStatus::Succeeded && state.resultRevision == 1
+                && partFeature->GetPartSetSnapshot() && state.partCount > 0;
+        });
+#endif
+        demoAudit->AddStep("real frames", {0, "F4"}, [] { return true; });
+        features.push_back(demoAudit);
+    }
+
+
     std::size_t attachedCount = 0;
     bool isTimerAttached = false;
     bool isHotkeyAttached = false;
@@ -1774,11 +2467,12 @@ int main(int argc, char* argv[])
         + static_cast<int>(isGapAuto)
         + static_cast<int>(isPartAuto)
         + static_cast<int>(isPartManual)
-        + static_cast<int>(isPartProfile);
+        + static_cast<int>(isPartProfile)
+        + static_cast<int>(isDemo) + static_cast<int>(isDemoAudit) + static_cast<int>(isRealAudit);
     if (runModeCount > 1) {
         std::cerr
             << "--drag-audit, --quality-audit, --gap-auto and "
-            "PartSegmentation run modes "
+            "PartSegmentation / demo run modes "
             "are mutually exclusive\n";
         if (!clearAttached()) return 25;
         features.clear();
@@ -1799,9 +2493,22 @@ int main(int argc, char* argv[])
     bool isPartComplete = false;
     bool isPartPassed = false;
     bool isPartManualReady = false;
+    bool isDemoReady = false;
 
     HostResultCallback onDataReady =
         [&](HostResult result) {
+        if (result.isSucceeded) controlFeature->StartDemoFit();
+        if (isDemo || isDemoAudit || isRealAudit) {
+            if (!result.isSucceeded) {
+                std::cerr << "[Demo] data load failed: " << result.message << '\n';
+                (void)StopEventLoop(session);
+                return;
+            }
+            std::cout << "[Demo] data ready. Press B / G / U to show features; F1 for all keys.\n" << std::flush;
+            isDemoReady = true;
+            if (isDemoAudit || isRealAudit) demoAudit->Start();
+            return;
+        }
         if (isDragAudit) {
             isAuditPassed = result.isSucceeded
                 && DragAudit{}.Start(session);
@@ -1882,14 +2589,12 @@ int main(int argc, char* argv[])
         };
 
     bool isDataAccepted = false;
-#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-    if (isPartAuto || isPartManual) {
-        auto reload = BuildPartReload();
+    if (isDemo || isDemoAudit || isPartAuto || isPartManual) {
+        auto reload = BuildDemoReload(isDemo || isDemoAudit);
         isDataAccepted = session.SendRequestResult(
             std::move(reload), onDataReady);
     }
     else
-#endif
     {
         HostLoadRequest load;
         load.filePath = "F:\\data\\ct\\1536x1536x1536_1440.raw";
@@ -1911,43 +2616,14 @@ int main(int argc, char* argv[])
         return 5;
     }
 
-    std::cout
-        << "TF/quality controls:\n"
-        << "  C / Shift+C: color red +/- 0.05\n"
-        << "  V / Shift+V: opacity +/- 0.05\n"
-        << "  L / Shift+L: composite-volume quality next / previous\n"
-        << "  I / Shift+I: CompositeIsoSurface quality next / previous\n"
-        << "GapAnalysis controls:\n"
-        << "  G: analyze and show the result in Window A (3D) "
-        "and Window B (slice)\n"
-        << "  J: start if inactive; otherwise hide/show Gap overlays\n"
-        << "  --gap-auto: start Gap automatically after data loading\n"
-        << "  Result statistics are shown in the composite-volume title\n"
-        << "OrthogonalCrop data controls:\n"
-        << "  Ctrl+7: atomically publish Crop recipe + derived output\n"
-        << "  Ctrl+8: promote the active Crop output to the primary Binding\n"
-        << "  Ctrl+9: restore the Crop source through a Binding-only transaction\n"
-        << "  Each action prints commit and formal revision generations\n";
-#if defined(MVVCVTK_HAS_PART_SEGMENTATION)
-    std::cout
-        << "PartSegmentation controls (Window A-D overlays, "
-        "Window E status):\n"
-        << "  B: start Part segmentation\n"
-        << "  Shift+B: hide/show Part overlays\n"
-        << "  Ctrl+B: clear Part result\n"
-        << "  --part-manual: load the small synthetic volume and "
-        "keep the windows open\n"
-        << "  --part-auto: reload a small in-memory volume, submit Start, "
-        "read the final state and exit\n"
-        << "  --part-profile: load the configured real RAW, submit Start, "
-        "print resource diagnostics and exit\n";
-#endif
+    PrintDemoHelp();
 
     const bool isStarted = session.Start();
     if (isQualityAudit) {
         isAuditComplete = controlFeature->GetQualityAuditDone();
         isAuditPassed = controlFeature->GetQualityAuditPassed();
     }
+    const bool isDemoPassed = !(isDemoAudit || isRealAudit) || demoAudit->GetPassed();
     const bool isCleared = clearAttached();
     if (!isCleared) {
         return 24;
@@ -1965,5 +2641,7 @@ int main(int argc, char* argv[])
         return 9;
     }
     if (isPartManual && !isPartManualReady) return 10;
+    if (!isDemoPassed) return 11;
+    if (isDemo && !isDemoReady) return 12;
     return 0;
 }

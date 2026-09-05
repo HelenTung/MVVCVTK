@@ -284,6 +284,45 @@ void TestSuccessVisibilityAndClear(Checks& checks)
     checks.Get(feature->DetachHost(), "success test detaches");
 }
 
+void TestThresholdPublication(Checks& checks)
+{
+    TestHost testHost(BuildSphere());
+    auto config = GetConfig();
+    config.maxWorkingBytes = 64U * 1024U;
+    auto feature = std::make_shared<SurfaceDeterminationHostFeature>(config);
+    checks.Get(feature->AttachHost(testHost.context), "threshold feature attaches");
+    auto request = GetStartRequest(SurfaceDeterminationMethod::AutomaticIso50);
+    request.start->initialIsoValue.reset();
+    std::optional<SurfaceDeterminationResult> completed;
+    checks.Get(feature->SendRequest(request, [&](SurfaceDeterminationResult result) {
+        completed = std::move(result);
+    }).status == SurfaceAdmissionStatus::Accepted, "threshold request admitted");
+    checks.Get(WaitUntil(*feature, [&] { return completed.has_value(); }), "threshold callback arrives");
+    const auto generation = feature->GetSurfaceSnapshot();
+    const auto graph = testHost.data->GetDataGraph();
+    const auto binding = testHost.data->GetDataBinding(graph, "analysis.surface-determination.active");
+    checks.Get(completed && completed->status == SurfaceResultStatus::Succeeded
+        && completed->isoEstimate && generation && generation->isoEstimate
+        && completed->isoEstimate->isoValue == generation->isoEstimate->isoValue
+        && binding && binding->target == std::optional<DataRevisionRef>{generation->dataRevision}
+        && !GetDataRevisionRefValid(generation->meshRevision)
+        && testHost.views->overlay->overlays.empty(),
+        "threshold is a committed DataGraph result and does not attach a mesh overlay");
+    // 可靠估计之后的新估计失败，不得替换上一正式修订。
+    testHost.data->SetCurrent(BuildSnapshot({16,16,16}, {1,1,1}, {0,0,0},
+        {1,0,0,0,1,0,0,0,1}, VTK_FLOAT, [](const Point3&) { return 1.0; }));
+    (void)feature->OnHostTick();
+    completed.reset();
+    checks.Get(feature->SendRequest(request, [&](SurfaceDeterminationResult result) {
+        completed = std::move(result);
+    }).status == SurfaceAdmissionStatus::Accepted, "flat replacement is admitted for validation");
+    checks.Get(WaitUntil(*feature, [&] { return completed.has_value(); })
+        && completed && completed->failureReason == SurfaceFailureReason::ThresholdUnreliable
+        && !completed->isoEstimate && !feature->GetSurfaceSnapshot(),
+        "source replacement clears stale threshold and failed estimation yields no value");
+    checks.Get(feature->DetachHost(), "threshold feature detaches without mesh bindings");
+}
+
 void TestCancelAndSupersede(Checks& checks)
 {
     TestHost cancelHost(BuildSphere());
@@ -551,6 +590,7 @@ int GetSurfaceLifecycleFailCount()
     Checks checks;
     TestAttachAndOwnerThread(checks);
     TestSuccessVisibilityAndClear(checks);
+    TestThresholdPublication(checks);
     TestCancelAndSupersede(checks);
     TestSourceStaleAndRollback(checks);
     TestCompletionCapacity(checks);

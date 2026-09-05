@@ -2,6 +2,7 @@
 
 #include "Algorithms/ClassicalPartSegmenter.h"
 #include "Host/TrustedDataPort.h"
+#include "Data/DataPayloads.h"
 #include "Host/PartSegmentationHostTypes.h"
 #include "Model/PartLineageMatcher.h"
 #include "Render/Internal/PartSurfaceProductBuilder.h"
@@ -35,7 +36,10 @@ struct PartLabelCandidate final {
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0
     };
-    std::shared_ptr<std::vector<PartLabelId>> labels;
+    std::shared_ptr<const std::vector<PartLabelId>> labels;
+    // worker 已完成目录校验与标签冻结；owner 只做版本 CAS 和轻量显示挂载。
+    std::shared_ptr<const LabelMap3DPayload> labelPayload;
+    vtkSmartPointer<vtkImageData> labelImage;
     std::shared_ptr<const PartCatalog> catalog;
     std::uint64_t expectedResultRevision = 0;
     std::uint64_t expectedCatalogRevision = 0;

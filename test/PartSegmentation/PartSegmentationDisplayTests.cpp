@@ -237,6 +237,47 @@ int GetPartDisplayFailCount()
         "Cancelled surface extraction publishes no partial product")
         ? 0 : 1;
 
+    // 用旋转方向、非零 extent 和两个离散标签核验边界裁取不改变表面。
+    PartSurfaceBuildRequest boundedRequest;
+    boundedRequest.extent = {10,33,-8,15,1,24};
+    boundedRequest.dimensions = {24,24,24};
+    boundedRequest.spacing = {0.5,0.75,1.25};
+    boundedRequest.origin = {7.0,8.0,9.0};
+    boundedRequest.direction = {0,-1,0,1,0,0,0,0,1};
+    auto boundedLabels = std::make_shared<std::vector<std::uint32_t>>(24U*24U*24U, 0U);
+    for (int label = 1; label <= 2; ++label) {
+        const int begin = label == 1 ? 6 : 14;
+        for (int z = begin; z < begin + 4; ++z)
+            for (int y = begin; y < begin + 4; ++y)
+                for (int x = begin; x < begin + 4; ++x)
+                    (*boundedLabels)[x + 24 * (y + 24 * z)] = static_cast<std::uint32_t>(label);
+    }
+    boundedRequest.labels = boundedLabels;
+    boundedRequest.partCount = 2;
+    boundedRequest.maxWorkingBytes = 4U*1024U*1024U;
+    const auto fullSurface = PartSurfaceProductBuilder::BuildProduct(boundedRequest, {}, {});
+    boundedRequest.foregroundExtent = std::array<int,6>{16,27,-2,9,7,18};
+    const auto boundedSurface = PartSurfaceProductBuilder::BuildProduct(boundedRequest, {}, {});
+    bool isSameSurface = fullSurface.product && boundedSurface.product;
+    if (isSameSurface) {
+        auto* full = fullSurface.product->surface.GetPointer();
+        auto* bounded = boundedSurface.product->surface.GetPointer();
+        isSameSurface = full->GetNumberOfPoints() == bounded->GetNumberOfPoints()
+            && full->GetNumberOfCells() == bounded->GetNumberOfCells();
+        for (vtkIdType index = 0; isSameSurface && index < full->GetNumberOfPoints(); ++index) {
+            double first[3]{}, second[3]{};
+            full->GetPoint(index, first); bounded->GetPoint(index, second);
+            for (int axis = 0; axis < 3; ++axis)
+                isSameSurface = isSameSurface && std::abs(first[axis] - second[axis]) < 1e-9;
+        }
+    }
+    failureCount += GetCaseResult(isSameSurface,
+        "Bounded extraction preserves full-resolution surface geometry and voxel halo") ? 0 : 1;
+    boundedRequest.maxWorkingBytes = boundedLabels->size() * sizeof(std::uint32_t);
+    const auto boundedBudget = PartSurfaceProductBuilder::BuildProduct(boundedRequest, {}, {});
+    failureCount += GetCaseResult(boundedBudget.failureReason == PartFailureReason::BudgetExceeded
+        && !boundedBudget.product, "Bounded extraction reserves its temporary cropped labels") ? 0 : 1;
+
     constexpr std::array<Orientation, 3> orientations{
         Orientation::Top_down,
         Orientation::Front_back,

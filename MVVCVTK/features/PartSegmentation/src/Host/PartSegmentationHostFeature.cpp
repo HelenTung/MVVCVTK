@@ -137,16 +137,6 @@ PartOverlayCandidate CreateOverlay(
     return {};
 }
 
-GridGeometry3D GetLabelGeometry(const PartLabelCandidate& candidate)
-{
-    GridGeometry3D geometry;
-    geometry.extent = candidate.extent;
-    geometry.dimensions = candidate.dimensions;
-    geometry.spacing = candidate.spacing;
-    geometry.origin = candidate.origin;
-    geometry.direction = candidate.direction;
-    return geometry;
-}
 
 std::shared_ptr<const RecordTablePayload> CreatePartTable(
     const PartCatalog& catalog)
@@ -250,6 +240,7 @@ public:
         const PartBindingRef& part,
         const PartStatePatch& patch,
         std::uint64_t expectedCatalogRevision);
+    PartMutationResult SetPreviousPart(std::uint64_t expectedCatalogRevision);
 
 private:
     struct OverlayBinding final {
@@ -627,6 +618,37 @@ PartSegmentationHostFeature::Impl::GetPartSetSnapshot() const
 {
     const std::lock_guard<std::mutex> lock(m_stateMutex);
     return m_publicSnapshot;
+}
+
+PartMutationResult PartSegmentationHostFeature::Impl::SetPreviousPart(
+    const std::uint64_t expectedCatalogRevision)
+{
+    if (!m_isAttached || !GetIsOwnerThread() || !m_service) {
+        return { PartMutationStatus::Unavailable, 0 };
+    }
+    const auto state = GetState();
+    if (m_service->GetIsBusy() || m_activeRequestId != 0) {
+        return { PartMutationStatus::Busy, state.catalogRevision };
+    }
+    const auto snapshot = GetPartSetSnapshot();
+    if (state.status == PartSegmentationStatus::Stale
+        || (snapshot && snapshot->isStale)) {
+        return { PartMutationStatus::StaleReference, state.catalogRevision };
+    }
+    if (!snapshot) return { PartMutationStatus::Unavailable, 0 };
+    if (snapshot->catalogRevision != expectedCatalogRevision) {
+        return { PartMutationStatus::RevisionConflict, snapshot->catalogRevision };
+    }
+    if (snapshot->parts.empty()) {
+        return { PartMutationStatus::NotFound, snapshot->catalogRevision };
+    }
+    const auto selected = std::find_if(snapshot->parts.begin(), snapshot->parts.end(),
+        [](const PartSnapshot& part) { return part.presentation.isSelected; });
+    const auto previous = selected == snapshot->parts.end() || selected == snapshot->parts.begin()
+        ? snapshot->parts.end() - 1 : selected - 1;
+    PartStatePatch patch;
+    patch.isSelected = true;
+    return SetPartState(previous->binding, patch, expectedCatalogRevision);
 }
 
 PartMutationResult PartSegmentationHostFeature::Impl::SetPartState(
@@ -1281,11 +1303,13 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                 : !m_catalogView;
             if (!isExpected || !candidate.catalog || !candidate.labels
                 || !candidate.surface || !candidate.surface->surface
-                || !GetPartCatalogValid(*candidate.catalog, *candidate.labels)) {
+                || !candidate.labelPayload || !candidate.labelPayload->GetValid()
+                || !candidate.labelImage
+                || candidate.labelPayload->GetLabels() != candidate.labels) {
                 throw std::runtime_error("Part candidate is invalid.");
             }
-            // 算法峰值之外，提交阶段还会冻结标签、目录和表格，并建立 VTK 标签视图。
-            // 按两阶段峰值之和保守预留，拒绝时尚未分配这些副本或写入图。
+            // worker 已将标签冻结并建立只读显示壳，owner 不扫描或复制整幅标签。
+            // 提交阶段只额外预留小型目录、表格和图修订。
             std::size_t requiredBytes = candidate.requiredBytes;
             const auto addBytes = [&requiredBytes](std::size_t count, std::size_t width) {
                 const auto limit = std::numeric_limits<std::size_t>::max();
@@ -1303,8 +1327,6 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                 + 9U * sizeof(double) + 2U * sizeof(std::uint8_t))
                 + sizeof(PartSnapshot) + sizeof(PartRenderState);
             const bool hasBudget = GetPartCatalogStorageBytes(*candidate.catalog, catalogBytes)
-                && addBytes(candidate.labels->size(), 2U * sizeof(PartLabelId))
-                && addBytes(m_labelValues ? m_labelValues->size() : 0U, sizeof(PartLabelId))
                 && addBytes(2U, catalogBytes)
                 && addBytes(candidate.catalog->partsByLabel.size(), rowBytes)
                 && addBytes(1U, 9U * sizeof(RecordColumn)
@@ -1321,10 +1343,7 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             const auto publicSnapshot = BuildPartSetSnapshot(
                 *candidate.catalog, m_requestSource->data->self, false);
             const auto renderStates = BuildPartRenderStateTable(*candidate.catalog);
-            const auto labels = std::make_shared<const LabelMap3DPayload>(
-                GetLabelGeometry(candidate),
-                LabelMapValues{ std::shared_ptr<const std::vector<std::uint32_t>>(candidate.labels) },
-                std::vector<LabelDefinition>{}, "PartSegmentation.labels", "Part segmentation");
+            const auto labels = candidate.labelPayload;
             if (!publicSnapshot || !renderStates
                 || !SetCatalogCommit(*candidate.catalog, m_requestSource,
                     m_requestResultBinding, labels, nextState)) {
@@ -1351,7 +1370,10 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
             const auto labelPayload = labelData
                 ? std::dynamic_pointer_cast<const LabelMap3DPayload>(labelData->payload)
                 : nullptr;
-            auto labelView = m_data->GetLabelMap(graph, nextState.labelMap);
+            // 将准备好的显示壳绑定到实际发布的图修订，始终由图中标签拥有数组。
+            auto labelView = labelPayload && labelPayload->GetLabels() == candidate.labels
+                ? std::make_shared<const VtkLabelMapView>(VtkLabelMapView{
+                    labelData, std::move(candidate.labelImage)}) : nullptr;
             RemoveBindings(m_bindings);
             m_labelImage = nullptr;
             m_labelValues = labelPayload ? labelPayload->GetLabels() : nullptr;
@@ -1517,5 +1539,12 @@ PartMutationResult PartSegmentationHostFeature::SetPartState(
 {
     return m_impl
         ? m_impl->SetPartState(part, patch, expectedCatalogRevision)
+        : PartMutationResult{ PartMutationStatus::Unavailable, 0 };
+}
+
+PartMutationResult PartSegmentationHostFeature::SetPreviousPart(
+    const std::uint64_t expectedCatalogRevision)
+{
+    return m_impl ? m_impl->SetPreviousPart(expectedCatalogRevision)
         : PartMutationResult{ PartMutationStatus::Unavailable, 0 };
 }

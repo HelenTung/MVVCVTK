@@ -5,6 +5,7 @@
 #include <vtkMatrix3x3.h>
 #include <vtkPointData.h>
 #include <vtkType.h>
+#include <vtkUnsignedIntArray.h>
 
 #include <algorithm>
 #include <cmath>
@@ -494,6 +495,11 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         params.minPartVoxels = job.params.minPartVoxels;
         params.maxPartCount = maxOverlayPartCount;
         params.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
+        const auto started = std::chrono::steady_clock::now();
+        const auto elapsedMs = [](const auto& since) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - since).count();
+        };
         auto result = ClassicalPartSegmenter::BuildLabels(
             volume,
             params,
@@ -503,6 +509,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             [this, requestId = job.requestId](const double progress) {
                 SetProgress(requestId, progress * 0.9);
             });
+        const auto labelMs = elapsedMs(started);
         candidate.requiredBytes = result.requiredBytes
             > std::numeric_limits<std::size_t>::max() - historyBytes
             ? std::numeric_limits<std::size_t>::max()
@@ -547,12 +554,14 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             ? 1 : job.expectedResultRevision + 1U;
         lineageRequest.maxWorkingBytes =
             job.maxWorkingBytes - job.retainedSurfaceBytes;
+        const auto lineageStarted = std::chrono::steady_clock::now();
         auto lineage = PartLineageMatcher::BuildCatalog(
             std::move(lineageRequest),
             m_identities,
             [this] {
                 return m_cancelRequested.load(std::memory_order_acquire);
             });
+        const auto lineageMs = elapsedMs(lineageStarted);
         const auto lineageRequiredBytes = lineage.requiredBytes
             > std::numeric_limits<std::size_t>::max() - job.retainedSurfaceBytes
             ? std::numeric_limits<std::size_t>::max()
@@ -612,7 +621,17 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         surfaceRequest.labels = candidate.labels;
         surfaceRequest.partCount = static_cast<std::uint32_t>(
             candidate.catalog->partsByLabel.size() - 1U);
+        for (std::size_t index = 1; index < candidate.catalog->partsByLabel.size(); ++index) {
+            const auto& extent = candidate.catalog->partsByLabel[index].metrics.voxelExtent;
+            if (!surfaceRequest.foregroundExtent) surfaceRequest.foregroundExtent = extent;
+            else for (std::size_t axis = 0; axis < 3; ++axis) {
+                auto& bounds = *surfaceRequest.foregroundExtent;
+                bounds[axis * 2] = std::min(bounds[axis * 2], extent[axis * 2]);
+                bounds[axis * 2 + 1] = std::max(bounds[axis * 2 + 1], extent[axis * 2 + 1]);
+            }
+        }
         surfaceRequest.maxWorkingBytes = job.maxWorkingBytes - retainedBytes;
+        const auto surfaceStarted = std::chrono::steady_clock::now();
         auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
             surfaceRequest,
             [this] {
@@ -621,6 +640,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             [this, requestId = job.requestId](const double progress) {
                 SetProgress(requestId, 0.9 + progress * 0.1);
             });
+        const auto surfaceMs = elapsedMs(surfaceStarted);
         const auto systemPeakBytes = surfaceResult.requiredBytes
             > std::numeric_limits<std::size_t>::max() - retainedBytes
             ? std::numeric_limits<std::size_t>::max()
@@ -655,13 +675,70 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         }
         candidate.surface = std::move(surfaceResult.product);
         candidate.surfaceBytes = candidate.surface->actualBytes;
+        // 冻结期间只有源标签和一个不可变副本共存；VTK 私有显示视图借用冻结数组。
+        std::size_t freezeBytes = retainedBytes;
+        std::size_t labelBytes = 0;
+        const auto limit = std::numeric_limits<std::size_t>::max();
+        if (!GetProduct(candidate.labels->size(), sizeof(PartLabelId), labelBytes)
+            || labelBytes > (limit - freezeBytes) / 2U
+            || candidate.surfaceBytes > limit - freezeBytes - labelBytes * 2U) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.message = "Part label publication size overflows.";
+            return candidate;
+        }
+        freezeBytes += labelBytes * 2U + candidate.surfaceBytes;
+        candidate.requiredBytes = std::max(candidate.requiredBytes, freezeBytes);
+        if (candidate.requiredBytes > job.maxWorkingBytes) {
+            candidate.failureReason = PartFailureReason::BudgetExceeded;
+            candidate.message = BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes);
+            return candidate;
+        }
+        if (m_cancelRequested.load(std::memory_order_acquire)) {
+            candidate.status = PartResultStatus::Cancelled;
+            candidate.failureReason = PartFailureReason::Cancelled;
+            return candidate;
+        }
+        const auto freezeStarted = std::chrono::steady_clock::now();
+        GridGeometry3D geometry;
+        geometry.extent = candidate.extent;
+        geometry.dimensions = candidate.dimensions;
+        geometry.spacing = candidate.spacing;
+        geometry.origin = candidate.origin;
+        geometry.direction = candidate.direction;
+        candidate.labelPayload = std::make_shared<const LabelMap3DPayload>(
+            geometry, LabelMapValues{candidate.labels}, std::vector<LabelDefinition>{},
+            "PartSegmentation.labels", "Part segmentation");
+        candidate.labels = candidate.labelPayload->GetLabels();
+        surfaceRequest.labels.reset();
+        candidate.labelImage = vtkSmartPointer<vtkImageData>::New();
+        candidate.labelImage->SetExtent(candidate.extent.data());
+        candidate.labelImage->SetSpacing(candidate.spacing.data());
+        candidate.labelImage->SetOrigin(candidate.origin.data());
+        auto direction = vtkSmartPointer<vtkMatrix3x3>::New();
+        direction->DeepCopy(candidate.direction.data());
+        candidate.labelImage->SetDirectionMatrix(direction);
+        auto labelScalars = vtkSmartPointer<vtkUnsignedIntArray>::New();
+        // 数组由 DataGraph payload 管理；此 VTK 壳只供 Feature 私有 mapper 只读使用。
+        labelScalars->SetArray(const_cast<unsigned int*>(candidate.labels->data()),
+            static_cast<vtkIdType>(candidate.labels->size()), 1);
+        candidate.labelImage->GetPointData()->SetScalars(labelScalars);
+        if (m_cancelRequested.load(std::memory_order_acquire)) {
+            candidate.status = PartResultStatus::Cancelled;
+            candidate.failureReason = PartFailureReason::Cancelled;
+            candidate.message = "Part request was cancelled before publication.";
+            return candidate;
+        }
         candidate.metrics.peakWorkingBytes = std::max(
             candidate.metrics.peakWorkingBytes, candidate.requiredBytes);
         candidate.status = PartResultStatus::Succeeded;
         candidate.failureReason = PartFailureReason::None;
         candidate.message = BuildSuccessMessage(candidate.metrics)
             + " surfaceBytes="
-            + std::to_string(candidate.surfaceBytes) + ".";
+            + std::to_string(candidate.surfaceBytes) + "."
+            + " labelsMs=" + std::to_string(labelMs)
+            + " lineageMs=" + std::to_string(lineageMs)
+            + " surfaceMs=" + std::to_string(surfaceMs)
+            + " freezeMs=" + std::to_string(elapsedMs(freezeStarted)) + ".";
         SetProgress(job.requestId, 1.0);
         return candidate;
     }

@@ -480,6 +480,117 @@ struct TestHost final {
     std::shared_ptr<PartSegmentationHostFeature> feature;
 };
 
+int GetPreviousPartFailCount()
+{
+    int failureCount = 0;
+    const auto check = [&](bool condition, const char* name) {
+        failureCount += GetCaseResult(condition, name) ? 0 : 1;
+    };
+    TestHost test;
+    check(test.feature->SetPreviousPart(0).status == PartMutationStatus::Unavailable,
+        "Previous part rejects an unattached Feature");
+    check(test.Attach(), "Previous part fixture attaches");
+    check(test.feature->SetPreviousPart(0).status == PartMutationStatus::Unavailable,
+        "Previous part rejects a missing result");
+    std::optional<PartSegmentationResult> completed;
+    const auto start = test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+        [&](PartSegmentationResult result) { completed = std::move(result); });
+    const bool didComplete = SendTicks(*test.feature, [&] { return completed.has_value(); });
+    const auto initial = test.feature->GetPartSetSnapshot();
+    check(start.status == PartAdmissionStatus::Accepted && didComplete && initial
+        && initial->parts.size() == 2, "Previous part fixture produces two parts");
+    if (!initial || initial->parts.size() != 2) {
+        (void)test.feature->DetachHost();
+        return failureCount;
+    }
+    const auto initialLabels = test.feature->GetState().labelMap;
+    PartMutationResult wrongThread;
+    std::thread caller([&] { wrongThread = test.feature->SetPreviousPart(initial->catalogRevision); });
+    caller.join();
+    check(wrongThread.status == PartMutationStatus::Unavailable,
+        "Previous part rejects non-owner calls");
+    PartStatePatch hidden;
+    hidden.isVisible = false;
+    check(test.feature->SetPartState(initial->parts.back().binding, hidden,
+        initial->catalogRevision).status == PartMutationStatus::Succeeded,
+        "Previous part fixture hides the last part");
+    const auto hiddenSnapshot = test.feature->GetPartSetSnapshot();
+    const auto first = test.feature->SetPreviousPart(hiddenSnapshot->catalogRevision);
+    const auto selectedLast = test.feature->GetPartSetSnapshot();
+    check(first.status == PartMutationStatus::Succeeded
+        && selectedLast->parts.back().presentation.isSelected
+        && !selectedLast->parts.back().presentation.isVisible
+        && !selectedLast->parts.front().presentation.isSelected
+        && !initial->parts.back().presentation.isSelected
+        && test.feature->GetState().labelMap == initialLabels
+        && test.feature->GetState().resultRevision == initial->resultRevision,
+        "Previous selects the last unselected part, preserving visibility, labels and old snapshots");
+    check(test.feature->SetPreviousPart(selectedLast->catalogRevision).status == PartMutationStatus::Succeeded
+        && test.feature->GetPartSetSnapshot()->parts.front().presentation.isSelected,
+        "Previous advances toward the first part");
+    const auto selectedFirst = test.feature->GetPartSetSnapshot();
+    check(test.feature->SetPreviousPart(selectedFirst->catalogRevision).status == PartMutationStatus::Succeeded
+        && test.feature->GetPartSetSnapshot()->parts.back().presentation.isSelected,
+        "Previous wraps from the first part to the last");
+    const auto beforeRejected = test.feature->GetPartSetSnapshot();
+    check(test.feature->SetPreviousPart(initial->catalogRevision).status == PartMutationStatus::RevisionConflict
+        && test.feature->GetPartSetSnapshot() == beforeRejected,
+        "Previous rejects a stale catalog revision without mutation");
+    test.host->SetSceneRejected(true);
+    check(test.feature->SetPreviousPart(beforeRejected->catalogRevision).status == PartMutationStatus::DisplayFailed
+        && test.feature->GetPartSetSnapshot() == beforeRejected,
+        "Previous rolls back when the frame intent is rejected");
+    test.host->SetSceneRejected(false);
+    completed.reset();
+    check(test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+        [&](PartSegmentationResult result) { completed = std::move(result); }).status == PartAdmissionStatus::Accepted,
+        "Previous busy fixture starts replacement");
+    check(test.feature->SetPreviousPart(beforeRejected->catalogRevision).status == PartMutationStatus::Busy,
+        "Previous rejects selection during replacement");
+    (void)test.feature->SendRequest(GetRequest(PartSegmentationAction::Stop));
+    check(SendTicks(*test.feature, [&] { return completed.has_value(); }), "Previous busy fixture stops");
+    (void)test.data->SetPrimaryImage(BuildImage(8));
+    (void)test.feature->OnHostTick();
+    check(test.feature->SetPreviousPart(beforeRejected->catalogRevision).status == PartMutationStatus::StaleReference,
+        "Previous rejects an outdated source");
+    check(test.feature->DetachHost(), "Previous part fixture detaches");
+
+    for (const bool hasPart : {false, true}) {
+        TestHost single;
+        auto image = BuildImage(8);
+        auto* values = static_cast<float*>(image->GetScalarPointer());
+        std::fill(values, values + 512, 0.0F);
+        if (hasPart) for (int z = 1; z <= 2; ++z)
+            for (int y = 1; y <= 2; ++y) for (int x = 1; x <= 2; ++x)
+                values[x + 8 * (y + 8 * z)] = 1.0F;
+        (void)single.data->SetPrimaryImage(image);
+        check(single.Attach(), "Single/empty previous fixture attaches");
+        completed.reset();
+        (void)single.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) { completed = std::move(result); });
+        const bool isComplete = SendTicks(*single.feature, [&] { return completed.has_value(); });
+        const auto snapshot = single.feature->GetPartSetSnapshot();
+        check(isComplete && snapshot && snapshot->parts.size() == (hasPart ? 1U : 0U),
+            "Single/empty previous fixture publishes expected count");
+        if (snapshot) {
+            const auto result = single.feature->SetPreviousPart(snapshot->catalogRevision);
+            if (hasPart) {
+                const auto selected = single.feature->GetPartSetSnapshot();
+                const auto repeated = single.feature->SetPreviousPart(selected->catalogRevision);
+                check(result.status == PartMutationStatus::Succeeded && selected->parts[0].presentation.isSelected
+                    && repeated.status == PartMutationStatus::Succeeded
+                    && repeated.catalogRevision == selected->catalogRevision,
+                    "Single-part previous selection is idempotent");
+            }
+            else check(result.status == PartMutationStatus::NotFound
+                && single.feature->GetPartSetSnapshot() == snapshot,
+                "Empty previous selection returns NotFound without mutation");
+        }
+        check(single.feature->DetachHost(), "Single/empty previous fixture detaches");
+    }
+    return failureCount;
+}
+
 bool GetSurfaceRetentionValid()
 {
     const auto config = GetConfig();
@@ -500,7 +611,10 @@ bool GetSurfaceRetentionValid()
         != PartAdmissionStatus::Accepted) return false;
     const auto first = getComplete();
     if (!first || first->status != PartResultStatus::Succeeded
-        || !first->catalog || first->surfaceBytes == 0) return false;
+        || !first->catalog || first->surfaceBytes == 0
+        || !first->labelPayload || !first->labelImage
+        || first->labelPayload->GetLabels() != first->labels
+        || first->labelImage->GetScalarPointer() != first->labels->data()) return false;
     // 测出只保留历史标签/目录时足够的预算，再让真实 Feature 保留旧表面重算。
     if (probe.Start(source, config.defaultStart, config.maxWorkingBytes, 2,
             { first->labels, first->catalog },
@@ -510,7 +624,7 @@ bool GetSurfaceRetentionValid()
     if (!baseline || baseline->status != PartResultStatus::Succeeded
         || baseline->requiredBytes < first->requiredBytes) return false;
 
-    // 实际 Host 还必须为图冻结与 VTK 视图预留空间；先取得首次完整发布的预算。
+    // Host 仍须为目录、表格和图修订预留空间；首次发布不再复制整幅标签。
     TestHost publicationProbe;
     if (!publicationProbe.Attach()) return false;
     std::optional<PartSegmentationResult> publication;
@@ -556,7 +670,7 @@ bool GetSurfaceRetentionValid()
 
 int GetPartLifecycleFailCount()
 {
-    int failureCount = 0;
+    int failureCount = GetPreviousPartFailCount();
     failureCount += GetCaseResult(
         GetSurfaceRetentionValid(),
         "Retained surface consumes recompute budget while preserving the active Part result")
