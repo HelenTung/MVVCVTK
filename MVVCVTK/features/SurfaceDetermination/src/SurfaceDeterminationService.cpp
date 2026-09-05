@@ -18,8 +18,9 @@ std::vector<SurfaceJobComplete> BuildCompletionQueue()
 
 } // namespace
 
-SurfaceDeterminationService::SurfaceDeterminationService()
-    : m_complete(BuildCompletionQueue())
+SurfaceDeterminationService::SurfaceDeterminationService(std::function<void()> onWorkAvailable)
+    : m_onWorkAvailable(std::move(onWorkAvailable))
+    , m_complete(BuildCompletionQueue())
     , m_worker([this] { WorkerLoop(); })
 {
     // completion 槽在 worker 启动前一次性分配；运行期间不再扩容。
@@ -264,6 +265,9 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
             m_activeRequestId = 0;
             m_activeCancel.reset();
         }
+        // completion 已发布；通知只排队，业务仍由 owner tick 消费。
+        try { if (m_onWorkAvailable) m_onWorkAvailable(); }
+        catch (...) {}
     }
 
     {

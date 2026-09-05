@@ -73,12 +73,15 @@ public:
 
     // 只允许构造 Coordinator 的 Session owner thread 调用。
     FlushStatus FlushOnOwnerTick(bool isFeatureTick);
+    // 宿主驱动只提交状态与完成通知；未完成绘制不阻塞下一次更新。
+    FlushStatus SendUpdates();
     void Stop() noexcept;
 
     std::uint64_t GetCommittedEpoch() const noexcept;
     std::uint64_t GetSessionGeneration() const noexcept;
 
 private:
+    FlushStatus SendFrame(bool isFeatureTick, bool isRenderEnabled);
     void FreezeIntents(std::vector<HostFrameIntent>& intents);
     void RestoreIntents(std::vector<HostFrameIntent> intents) noexcept;
     void AdvancePendingBaseEpoch(

@@ -16,10 +16,11 @@ public:
     virtual bool SendUpdates() = 0;
     // Session freeze 后只应用当前线程已经产生的 pending，不领取新 worker。
     virtual bool SendPendingUpdates() = 0;
-    // Frame pump 只在所需 Render 完成后调用；实现必须在内部锁外执行 callback。
+    // Native 在所需 Render 后调用，HostDriven 在提交后调用；内部锁外执行 callback。
     virtual void SendCompletions() = 0;
     virtual bool SetRenderNeeded() = 0;
     virtual bool ResetRenderNeeded() = 0;
+    virtual bool GetRenderNeeded() const { return false; }
     virtual bool SetInteractionPhase() { return true; }
     virtual void SetRenderComplete(std::uint64_t) noexcept {}
 };

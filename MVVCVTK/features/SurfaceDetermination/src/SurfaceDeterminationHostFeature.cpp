@@ -373,7 +373,11 @@ bool SurfaceDeterminationHostFeature::Impl::AttachHost(
                     && generation->objects && GetDataRevisionRefValid(generation->sourceRevision);
             } }))) return false;
     try {
-        m_service = std::make_unique<SurfaceDeterminationService>();
+        m_service = std::make_unique<SurfaceDeterminationService>(
+            [weakHost = std::weak_ptr<FeatureHostControl>(context.host)] {
+                if (const auto host = weakHost.lock())
+                    (void)host->SendWorkAvailable();
+            });
     }
     catch (...) {
         return false;

@@ -3,6 +3,7 @@
 #include "SurfaceDeterminationAlgorithm.h"
 
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -25,7 +26,7 @@ struct SurfaceJobComplete final {
 
 class SurfaceDeterminationService final {
 public:
-    SurfaceDeterminationService();
+    explicit SurfaceDeterminationService(std::function<void()> onWorkAvailable = {});
     ~SurfaceDeterminationService() noexcept;
 
     SurfaceDeterminationService(
@@ -61,6 +62,7 @@ private:
         SurfaceDeterminationStage stage,
         double progress) noexcept;
 
+    const std::function<void()> m_onWorkAvailable;
     mutable std::mutex m_mutex;
     std::condition_variable m_workReady;
     std::condition_variable m_workerExited;

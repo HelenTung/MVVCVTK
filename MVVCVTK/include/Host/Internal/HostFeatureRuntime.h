@@ -8,6 +8,7 @@ class AbstractDataManager;
 class SharedInteractionState;
 class HostViewRuntimeRegistry;
 class HostFrameCoordinator;
+class HostWorkSignal;
 
 // Session 独占；只接收挂载所需能力，不回调整个 Session。
 class HostFeatureRuntime final {
@@ -18,6 +19,7 @@ public:
         std::weak_ptr<AbstractDataManager> data;
         std::weak_ptr<SharedInteractionState> state;
         std::shared_ptr<HostFrameCoordinator> frames;
+        std::weak_ptr<HostWorkSignal> workSignal;
         std::thread::id ownerThread;
         // 仅将完成项加入 Session 队列；不得同步调用完成项或任何用户回调。
         std::function<bool(std::function<void()>)> onOwnerComplete;

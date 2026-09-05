@@ -352,6 +352,7 @@ private:
     vtkSmartPointer<vtkRenderWindow> m_renderWindow;
     // 状态合并、外部请求或主线程管线操作均可置位；Timer 在 SendUpdates() 后取走并清零。
     std::atomic<bool> m_isDirty{ false };
+    const std::function<void()> m_onWorkAvailable;
     // 普通状态事件、overlay 挂接与管线重建置位；主线程 SetStrategyState() 用 CAS 领取。
     std::atomic<bool> m_hasSyncNeed{ false };
     // 状态事件与 overlay 挂接以按位 OR 合并；主线程 exchange(0)，加载失败清场也会清零。
@@ -444,8 +445,10 @@ class AppTaskExecutor final {
         TaskLane(
             std::size_t workerCount,
             std::size_t taskLimit,
-            const AppWorkerStart& workerStart)
+            const AppWorkerStart& workerStart,
+            std::function<void()> onWorkAvailable)
             : m_taskLimit(taskLimit)
+            , m_onWorkAvailable(std::move(onWorkAvailable))
             , m_workerStart(workerStart)
         {
             if (workerCount == 0 || taskLimit == 0
@@ -621,10 +624,14 @@ class AppTaskExecutor final {
                     const std::lock_guard<std::mutex> lock(m_mutex);
                     m_stopSources.erase(task.id);
                 }
+                // future 已 ready，lane 容量已释放；解锁后才发纯工作门铃。
+                try { if (m_onWorkAvailable) m_onWorkAvailable(); }
+                catch (...) {}
             }
         }
 
         const std::size_t m_taskLimit;
+        const std::function<void()> m_onWorkAvailable;
         AppWorkerStart m_workerStart;
         std::mutex m_mutex;
         std::condition_variable m_ready;
@@ -641,11 +648,12 @@ class AppTaskExecutor final {
     };
 
 public:
-    explicit AppTaskExecutor(AppWorkerStart workerStart)
+    explicit AppTaskExecutor(AppWorkerStart workerStart,
+        std::function<void()> onWorkAvailable)
         : m_workerStart(GetWorkerStart(std::move(workerStart)))
-        , m_loadLane(1, 1, m_workerStart)
-        , m_exportLane(2, 2, m_workerStart)
-        , m_renderLane(1, 1, m_workerStart)
+        , m_loadLane(1, 1, m_workerStart, onWorkAvailable)
+        , m_exportLane(2, 2, m_workerStart, onWorkAvailable)
+        , m_renderLane(1, 1, m_workerStart, std::move(onWorkAvailable))
     {
     }
 
@@ -698,10 +706,10 @@ private:
 };
 
 std::shared_ptr<AppTaskExecutor> CreateAppTaskExecutor(
-    AppWorkerStart workerStart)
+    AppWorkerStart workerStart, std::function<void()> onWorkAvailable)
 {
     return std::make_shared<AppTaskExecutor>(
-        std::move(workerStart));
+        std::move(workerStart), std::move(onWorkAvailable));
 }
 
 TaskAdmissionResult SendReadTask(
@@ -735,10 +743,11 @@ AppRuntime::AppRuntime(AppServiceArgs args)
     , m_viewState(std::make_shared<ViewPresentationState>(m_observerGate))
     , m_setLoadCommit(std::move(args.setLoadCommit))
     , m_setLoadCancelled(std::move(args.setLoadCancelled))
+    , m_onWorkAvailable(std::move(args.onWorkAvailable))
 {
     m_taskExecutor = args.taskExecutor
         ? std::move(args.taskExecutor)
-        : CreateAppTaskExecutor(std::move(args.workerStart));
+        : CreateAppTaskExecutor(std::move(args.workerStart), m_onWorkAvailable);
     m_renderServices = std::move(args.renderServices);
     if (!m_renderServices) {
         const std::weak_ptr<AppTaskExecutor> weakExecutor =
@@ -908,8 +917,10 @@ bool AppRuntime::GetDirty() const
 
 void AppRuntime::SetDirty()
 {
-    // 外部显式请求只置门铃，实际 Render 仍由 Timer 决定。
-    m_isDirty = true;
+    // 先发布 dirty，再通知宿主；这里只排队，不执行更新或绘制。
+    m_isDirty.store(true);
+    try { if (m_onWorkAvailable) m_onWorkAvailable(); }
+    catch (...) {}
 }
 
 bool AppRuntime::ResetDirty()
@@ -934,19 +945,19 @@ bool AppRuntime::SetInteractionPhase()
         ? m_renderWindow->GetDesiredUpdateRate() : 0.0;
     const bool isInteracting = m_sharedState
         && m_sharedState->GetIsInteracting();
-    if (m_renderWindow) {
+    if (m_renderWindow && !m_renderServices->isHostDriven) {
         m_renderWindow->SetDesiredUpdateRate(
             GetRenderRate(isInteracting));
     }
     const auto params = GetRenderParams(UpdateFlags::RenderRate);
     if (!m_currentStrategy->SetVisualState(
             params, UpdateFlags::RenderRate)) {
-        if (m_renderWindow) {
+        if (m_renderWindow && !m_renderServices->isHostDriven) {
             m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
         }
         return false;
     }
-    m_isDirty = true;
+    SetDirty();
     return true;
 }
 
@@ -964,7 +975,7 @@ void AppRuntime::SetSyncNeeded()
 {
     // 这里只声明“下一帧需要把状态推给 Strategy”，不直接同步，保持所有渲染改动都经由 Timer 主循环收口。
     m_hasSyncNeed = true;
-    m_isDirty = true;
+    SetDirty();
 }
 
 AppRuntime::CameraState AppRuntime::GetCameraState() const
@@ -1145,7 +1156,7 @@ void AppRuntime::SetCurrentStrategy(
             else {
                 m_renderer->GetActiveCamera()->ParallelProjectionOff();
             }
-            m_isDirty = true;
+            SetDirty();
         }
         if (isCameraSet) {
             m_currentMode = mode;
@@ -1193,7 +1204,7 @@ void AppRuntime::SetCurrentStrategy(
     else {
         m_currentMode.reset();
     }
-    m_isDirty = true;
+    SetDirty();
 }
 
 bool AppRuntime::AttachOverlay(
@@ -1229,7 +1240,7 @@ bool AppRuntime::AttachOverlay(
 
     m_pendingFlags.fetch_or(static_cast<int>(UpdateFlags::All));
     m_hasSyncNeed = true;
-    m_isDirty = true;
+    SetDirty();
     return true;
 }
 
@@ -1257,7 +1268,7 @@ void AppRuntime::RemoveOverlay(
         }
     }
     m_overlays.erase(it);
-    m_isDirty = true;
+    SetDirty();
 }
 
 void AppRuntime::ClearOverlays() noexcept
@@ -1269,7 +1280,7 @@ void AppRuntime::ClearOverlays() noexcept
         }
     }
     m_overlays.clear();
-    m_isDirty = true;
+    SetDirty();
 }
 
 RenderInputStamp AppRuntime::GetRenderInputStamp() const
@@ -1297,7 +1308,7 @@ bool AppRuntime::AttachRenderEffect(
         m_renderEffect.reset();
         return false;
     }
-    m_isDirty = true;
+    SetDirty();
     return true;
 }
 
@@ -1312,7 +1323,7 @@ bool AppRuntime::DetachRenderEffect(const RenderEffect* effect)
         return false;
     }
     m_renderEffect.reset();
-    m_isDirty = true;
+    SetDirty();
     return true;
 }
 
@@ -1420,7 +1431,7 @@ bool AppRuntime::SetRenderBinding(
                     "Renderer rebind mode camera initialization failed.");
             }
         }
-        m_isDirty = true;
+        SetDirty();
         return true;
     }
     catch (...) {
@@ -1583,7 +1594,7 @@ void AppRuntime::SetVizMode(VizMode mode)
         m_hasTransitionFailure = false;
     }
     m_hasDataRefreshNeed = true;
-    m_isDirty = true;
+    SetDirty();
 }
 
 VizMode AppRuntime::GetVizMode() const
@@ -3324,7 +3335,7 @@ bool AppRuntime::ResetViewStage(
         isReset = false;
     }
     stage.isCommitted = false;
-    m_isDirty = true;
+    SetDirty();
     return isReset;
 }
 
@@ -3518,7 +3529,7 @@ bool AppRuntime::SetStrategyState()
         ? m_renderWindow->GetDesiredUpdateRate() : 0.0;
     if ((flags & (UpdateFlags::RenderRate | UpdateFlags::Quality))
             != UpdateFlags::None
-        && m_renderWindow) {
+        && m_renderWindow && !m_renderServices->isHostDriven) {
         const bool isInteracting = m_sharedState->GetIsInteracting();
         m_renderWindow->SetDesiredUpdateRate(
             GetRenderRate(isInteracting));
@@ -3551,7 +3562,7 @@ bool AppRuntime::SetStrategyState()
         }
     }
     if (!isVisualSet) {
-        if (m_renderWindow) {
+        if (m_renderWindow && !m_renderServices->isHostDriven) {
             m_renderWindow->SetDesiredUpdateRate(oldDesiredRate);
         }
         bool hasNewQuality = false;
@@ -3613,7 +3624,7 @@ bool AppRuntime::SetStrategyState()
     }
 
     // Strategy 已消费本次快照，发布本帧 Render 请求；Timer 随后用 ResetDirty() 领取。
-    m_isDirty = true;
+    SetDirty();
     return true;
 }
 
@@ -3634,7 +3645,7 @@ bool AppRuntime::SetProductState()
             != transition.stats.activeRevision) {
             m_renderNeededProductRevision =
                 transition.stats.activeRevision;
-            m_isDirty = true;
+            SetDirty();
         }
         std::lock_guard<std::mutex> lock(m_viewConfigMutex);
         m_appliedQuality = transition.appliedQuality;
@@ -3652,7 +3663,7 @@ bool AppRuntime::SetProductState()
         && m_renderNeededProductRevision
             != transition.stats.activeRevision) {
         m_renderNeededProductRevision = transition.stats.activeRevision;
-        m_isDirty = true;
+        SetDirty();
     }
 
     if (transition.status == RenderProductStatus::Failed
@@ -3672,7 +3683,7 @@ void AppRuntime::ClearLoadFail(LoadEventKind loadEventKind)
         && m_sharedState
         && m_sharedState->GetDataTrustedState() == LoadState::Succeeded) {
         // Reload 失败不替换 current；保留旧 snapshot/strategy/overlay，使可信数据继续可见。
-        m_isDirty = true;
+        SetDirty();
         return;
     }
 
@@ -3687,7 +3698,7 @@ void AppRuntime::ClearLoadFail(LoadEventKind loadEventKind)
     m_pendingFlags = 0;
 
     // 标脏使渲染器刷新空场景
-    m_isDirty = true;
+    SetDirty();
 }
 
 RenderParams AppRuntime::GetRenderParams(UpdateFlags flags) const
@@ -4329,6 +4340,11 @@ public:
     bool ResetRenderNeeded() override
     {
         return m_service && m_service->ResetDirty();
+    }
+
+    bool GetRenderNeeded() const override
+    {
+        return m_service && m_service->GetDirty();
     }
 
     bool SetInteractionPhase() override

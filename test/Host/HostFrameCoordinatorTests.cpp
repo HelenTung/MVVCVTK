@@ -1,4 +1,5 @@
 #include "Host/HostFrameCoordinator.h"
+#include "Host/HostWorkSignal.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <thread>
 
 namespace {
 
@@ -524,6 +526,53 @@ bool GetCallbackStopValid()
     return true;
 }
 
+bool GetUpdateOnlyValid()
+{
+    FrameProbe probe;
+    probe.isRenderPending = true;
+    probe.isRenderSent = false;
+    HostFrameCoordinator coordinator(1, probe.GetCallbacks());
+    for (std::uint64_t epoch = 1; epoch <= 3; ++epoch) {
+        if (coordinator.SendUpdates()
+                != HostFrameCoordinator::FlushStatus::Completed
+            || coordinator.GetCommittedEpoch() != epoch
+            || probe.completionCount != epoch
+            || probe.renderAttemptCount != 0) return false;
+    }
+    coordinator.Stop();
+    return coordinator.SendUpdates()
+        == HostFrameCoordinator::FlushStatus::Stopped;
+}
+
+bool GetWorkSignalValid()
+{
+    std::atomic<int> notifications{0};
+    HostWorkSignal signal([&notifications] { ++notifications; });
+    std::vector<std::thread> workers;
+    for (int index = 0; index < 8; ++index) {
+        workers.emplace_back([&signal] {
+            for (int count = 0; count < 100; ++count)
+                (void)signal.SendWorkAvailable();
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    if (notifications != 1) return false;
+    signal.SendUpdates();
+    if (!signal.SendWorkAvailable() || notifications != 2) return false;
+    signal.Stop();
+    signal.SendUpdates();
+    if (signal.SendWorkAvailable() || notifications != 2) return false;
+    int attempts = 0;
+    HostWorkSignal throwing([&attempts] {
+        ++attempts;
+        throw std::runtime_error("notification failure");
+    });
+    if (!throwing.SendWorkAvailable() || !throwing.SendWorkAvailable()
+        || attempts != 1) return false;
+    throwing.SendUpdates();
+    return throwing.SendWorkAvailable() && attempts == 2;
+}
+
 bool GetInputValidationValid()
 {
     FrameProbe probe;
@@ -734,6 +783,8 @@ int main()
         && GetUnchangedCompletionValid()
         && GetRenderRetryValid()
         && GetStopPreemptionValid()
+        && GetUpdateOnlyValid()
+        && GetWorkSignalValid()
         && GetCallbackStopValid()
         && GetInputValidationValid()
         && GetDisplayBatchValid()

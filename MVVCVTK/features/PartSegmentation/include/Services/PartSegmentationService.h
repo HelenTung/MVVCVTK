@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -51,7 +52,7 @@ struct PartLabelCandidate final {
 
 class PartSegmentationService final {
 public:
-    PartSegmentationService();
+    explicit PartSegmentationService(std::function<void()> onWorkAvailable = {});
     ~PartSegmentationService() noexcept;
 
     PartSegmentationService(const PartSegmentationService&) = delete;
@@ -92,6 +93,7 @@ private:
         std::uint64_t requestId,
         double progress) noexcept;
 
+    const std::function<void()> m_onWorkAvailable;
     mutable std::mutex m_mutex;
     std::condition_variable m_workReady;
     std::condition_variable m_workerExited;

@@ -1,6 +1,7 @@
 #include "Host/Internal/HostFeatureRuntime.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/HostFrameCoordinator.h"
+#include "Host/HostWorkSignal.h"
 #include "App/Services/PrimaryDataActivation.h"
 #include "App/AppState.h"
 #include "Data/DataService.h"
@@ -480,11 +481,13 @@ public:
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
             std::function<bool(std::function<void()>)> onOwnerComplete,
-            std::shared_ptr<FeatureLifetime> lifetime)
+            std::shared_ptr<FeatureLifetime> lifetime,
+            std::weak_ptr<HostWorkSignal> workSignal)
             : m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_onOwnerComplete(std::move(onOwnerComplete))
             , m_lifetime(std::move(lifetime))
+            , m_workSignal(std::move(workSignal))
         {
         }
 
@@ -511,9 +514,10 @@ public:
         {
             if (!m_lifetime->isActive.load()) return false;
             const auto bridge = m_bridge.lock();
-            return bridge
-                && bridge->SendSceneDelta(
-                    m_featureId, std::move(delta));
+            const bool isSent = bridge
+                && bridge->SendSceneDelta(m_featureId, std::move(delta));
+            if (isSent) (void)SendWorkAvailable();
+            return isSent;
         }
 
         bool AttachInput(HostInputBinding binding) override
@@ -549,14 +553,27 @@ public:
             std::function<void()> guarded = [lifetime, entry]() {
                 if (lifetime->isActive.load()) entry->Send();
             };
-            // 私有投递器只入队，不执行用户代码；与 Stop 原子决定本挂载的接纳。
-            const std::lock_guard<std::mutex> lock(lifetime->completeMutex);
-            if (!lifetime->isActive.load()) return false;
-            auto& pending = lifetime->completes;
-            pending.erase(std::remove_if(pending.begin(), pending.end(),
-                [](const auto& value) { return value.expired(); }), pending.end());
-            pending.push_back(entry);
-            return m_onOwnerComplete(std::move(guarded));
+            bool isSent = false;
+            {
+                // 私有投递器只入队；完成项接纳与本挂载 Stop 原子决定。
+                const std::lock_guard<std::mutex> lock(lifetime->completeMutex);
+                if (!lifetime->isActive.load()) return false;
+                auto& pending = lifetime->completes;
+                pending.erase(std::remove_if(pending.begin(), pending.end(),
+                    [](const auto& value) { return value.expired(); }), pending.end());
+                pending.push_back(entry);
+                isSent = m_onOwnerComplete(std::move(guarded));
+            }
+            // 宿主工作通知可能执行外部代码，必须在完成队列锁外发出。
+            if (isSent) (void)SendWorkAvailable();
+            return isSent;
+        }
+
+        bool SendWorkAvailable() override
+        {
+            if (!m_lifetime->isActive.load()) return false;
+            const auto signal = m_workSignal.lock();
+            return signal && signal->SendWorkAvailable();
         }
 
     private:
@@ -564,6 +581,7 @@ public:
         std::string m_featureId;
         std::function<bool(std::function<void()>)> m_onOwnerComplete;
         std::shared_ptr<FeatureLifetime> m_lifetime;
+        std::weak_ptr<HostWorkSignal> m_workSignal;
     };
 
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
@@ -652,7 +670,7 @@ bool HostFeatureRuntime::Impl::AttachFeature(
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            m_ports.onOwnerComplete, lifetime);
+            m_ports.onOwnerComplete, lifetime, m_ports.workSignal);
     }
     catch (...) {
         return false;

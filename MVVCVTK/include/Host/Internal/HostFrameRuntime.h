@@ -13,6 +13,7 @@ public:
         const std::shared_ptr<FeatureViewLease>& lease,
         std::function<std::vector<std::string>(const HostRenderViewRuntime&)> onFeatureIds);
     void BuildSceneStates();
+    void SetDriveMode(HostDriveMode mode) noexcept;
     bool GetIsBusy() const noexcept { return m_executionDepth != 0; }
     void Clear() noexcept;
     void SetViewUnavailable(std::size_t index) noexcept;
@@ -26,10 +27,15 @@ public:
     HostFrameStageStatus BuildFrameStage(std::uint64_t nextEpoch);
     void SetFrameCommit(std::uint64_t epoch) noexcept;
     bool SendFrameRender(std::uint64_t epoch);
+    HostRenderResult SendFrameRender(const HostRenderRequest& request,
+        const std::function<bool()>& getIsRunning);
+    std::vector<std::string> GetRenderViewIds() const;
     bool GetFrameRenderPending() const noexcept;
     void SendFrameCompletions() noexcept;
     void ClearFrameStage() noexcept;
 private:
+    class RenderObserver;
+    bool m_isHostDriven = false;
     // 同线程 callback 可重入 Stop；阶段执行期间资源拓扑必须保留。
     class PhaseGuard final {
     public:
@@ -46,6 +52,7 @@ private:
         std::vector<HostSceneViewState> sceneStates;
         std::vector<std::size_t> renderOrder;
         std::vector<bool> renderNeeded;
+        std::vector<std::size_t> dirtyIndices;
     };
     std::optional<std::size_t> GetViewIndexById(std::string_view viewId) const;
     static int GetRenderPriority(const HostSceneViewState& state) noexcept;

@@ -32,6 +32,7 @@ struct GapViewRequest final {
 class GapAnalysisService {
 public:
     GapAnalysisService();
+    void SetWorkAvailable(std::function<void()> onWorkAvailable);
     // 活动显示会话必须先在绑定宿主线程调用 ExitView；退出后可在任意线程释放最后 owner。
     ~GapAnalysisService();
 

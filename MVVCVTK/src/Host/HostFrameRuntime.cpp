@@ -1,8 +1,30 @@
 #include "App/Services/FeatureViewService.h"
 #include "Host/Internal/HostFrameRuntime.h"
+#include "Interaction/AbstractViewContext.h"
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkCommand.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkRenderWindow.h>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <exception>
 #include <utility>
+
+class HostFrameRuntime::RenderObserver final : public vtkCommand {
+public:
+    static RenderObserver* New() { return new RenderObserver; }
+    void Execute(vtkObject*, unsigned long eventId, void*) override
+    {
+        isComplete = eventId == vtkCommand::EndEvent;
+    }
+    bool isComplete = false;
+};
+
+void HostFrameRuntime::SetDriveMode(const HostDriveMode mode) noexcept
+{
+    m_isHostDriven = mode == HostDriveMode::HostDriven;
+}
 
 HostFrameRuntime::HostFrameRuntime(std::vector<HostRenderViewRuntime>& views,
     const std::shared_ptr<FeatureViewLease>& lease,
@@ -137,7 +159,7 @@ bool HostFrameRuntime::CollectFrameUpdates()
 {
     if (!m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
+        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
         return false;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -154,7 +176,7 @@ bool HostFrameRuntime::ApplyFrameUpdates()
 {
     if (!m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
+        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
         return false;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -170,7 +192,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
     if (nextEpoch == 0 || nextEpoch != m_committedEpoch + 1
         || !m_lease || !m_lease->GetIsActive()
         || !m_lease->GetIsOwnerThread()
-        || m_frameStage || GetFrameRenderPending()) {
+        || m_frameStage || (!m_isHostDriven && GetFrameRenderPending())) {
         return HostFrameStageStatus::Failed;
     }
     const PhaseGuard phase(m_executionDepth);
@@ -259,7 +281,17 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
         FrameStage stage;
         stage.epoch = nextEpoch;
         stage.renderNeeded = std::move(renderNeeded);
+        stage.dirtyIndices = dirtyIndices;
         stage.renderOrder = dirtyIndices;
+        // 新提交继承尚未绘制的 View，回滚仍只恢复本轮领取的 dirty。
+        if (m_isHostDriven) {
+            for (std::size_t index = 0; index < m_views.size(); ++index) {
+                if (m_views[index].pendingRenderEpoch != 0 && !stage.renderNeeded[index]) {
+                    stage.renderNeeded[index] = true;
+                    stage.renderOrder.push_back(index);
+                }
+            }
+        }
         stage.sceneStates.reserve(m_views.size());
 
         std::optional<DataRevisionRef> dataRevision;
@@ -282,7 +314,7 @@ HostFrameStageStatus HostFrameRuntime::BuildFrameStage(
                 }
             }
             state.sceneEpoch = nextEpoch;
-            state.renderedEpoch = stage.renderNeeded[index]
+            state.renderedEpoch = (m_isHostDriven || stage.renderNeeded[index])
                 ? m_views[index].renderedEpoch : nextEpoch;
             stage.sceneStates.push_back(std::move(state));
         }
@@ -319,7 +351,7 @@ void HostFrameRuntime::SetFrameCommit(
         }
         else {
             view.pendingRenderEpoch = 0;
-            view.renderedEpoch = epoch;
+            if (!m_isHostDriven) view.renderedEpoch = epoch;
         }
     }
     m_sceneStates.swap(m_frameStage->sceneStates);
@@ -355,6 +387,108 @@ bool HostFrameRuntime::SendFrameRender(
     return true;
 }
 
+std::vector<std::string>
+HostFrameRuntime::GetRenderViewIds() const
+{
+    std::vector<std::string> ids;
+    if (!m_lease || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread()) return ids;
+    for (const auto& view : m_views) {
+        if (view.pendingRenderEpoch != 0) ids.push_back(view.config.id);
+    }
+    return ids;
+}
+
+HostRenderResult HostFrameRuntime::SendFrameRender(
+    const HostRenderRequest& request,
+    const std::function<bool()>& getIsRunning)
+{
+    HostRenderResult result;
+    if (!m_isHostDriven || !m_lease || !m_lease->GetIsActive()
+        || !m_lease->GetIsOwnerThread() || m_frameStage
+        || !std::isfinite(request.desiredUpdateRate)
+        || request.desiredUpdateRate <= 0.0) return result;
+
+    const PhaseGuard phase(m_executionDepth);
+    std::vector<std::size_t> indices;
+    for (const auto& id : request.viewIds) {
+        const auto index = GetViewIndexById(id);
+        if (!index || std::find(indices.begin(), indices.end(), *index)
+                != indices.end()) return result;
+        indices.push_back(*index);
+    }
+    result.status = HostRenderStatus::Unchanged;
+    result.views.reserve(indices.size());
+    const auto epoch = m_committedEpoch;
+    // 任一 View 存在尚未提交的更改时，不绘制混合状态。
+    const bool hasUncommitted = std::any_of(m_views.begin(), m_views.end(),
+        [](const HostRenderViewRuntime& view) {
+            return view.isAvailable && view.interaction.update
+                && view.interaction.update->GetRenderNeeded();
+        });
+    for (const auto index : indices) {
+        auto& view = m_views[index];
+        HostViewRenderResult output;
+        output.viewId = view.config.id;
+        output.sceneEpoch = epoch;
+        output.status = HostRenderStatus::Unchanged;
+        auto* window = view.context ? view.context->GetRenderWindow() : nullptr;
+        auto* generic = vtkGenericOpenGLRenderWindow::SafeDownCast(window);
+        if (getIsRunning && !getIsRunning()) {
+            output.status = HostRenderStatus::Stopped;
+        }
+        else if (!view.isAvailable || !window) {
+            output.status = HostRenderStatus::Failed;
+        }
+        else if (hasUncommitted || (generic && !generic->GetReadyForRendering())) {
+            output.status = HostRenderStatus::Deferred;
+        }
+        else if (view.pendingRenderEpoch != 0) {
+            // 状态由 VTK observer 自身拥有；异常路径不留下指向调用栈的 clientData。
+            auto observer = vtkSmartPointer<RenderObserver>::New();
+            const auto tag = window->AddObserver(vtkCommand::EndEvent, observer);
+            try {
+                window->SetDesiredUpdateRate(request.desiredUpdateRate);
+                // VTK style 自身也写预算；把两个 style 源同步到当前宿主值。
+                if (auto* interactor = window->GetInteractor()) {
+                    interactor->SetDesiredUpdateRate(request.desiredUpdateRate);
+                    interactor->SetStillUpdateRate(request.desiredUpdateRate);
+                }
+                const auto start = std::chrono::steady_clock::now();
+                const bool isSent = tag != 0 && view.context->SendRender();
+                output.durationUs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now() - start).count());
+                output.status = isSent && observer->isComplete
+                    ? HostRenderStatus::Rendered : HostRenderStatus::Deferred;
+            }
+            catch (...) { output.status = HostRenderStatus::Failed; }
+            if (tag != 0) window->RemoveObserver(tag);
+            if (output.status == HostRenderStatus::Rendered) {
+                view.pendingRenderEpoch = 0;
+                view.renderedEpoch = epoch;
+                m_sceneStates[index].renderedEpoch = epoch;
+                if (view.interaction.update) view.interaction.update->SetRenderComplete(
+                    std::max<std::uint64_t>(1, output.durationUs));
+            }
+        }
+        if (output.status == HostRenderStatus::Stopped)
+            result.status = HostRenderStatus::Stopped;
+        else if (output.status == HostRenderStatus::Failed
+            && result.status != HostRenderStatus::Stopped)
+            result.status = HostRenderStatus::Failed;
+        else if (output.status == HostRenderStatus::Deferred
+            && result.status != HostRenderStatus::Failed
+            && result.status != HostRenderStatus::Stopped)
+            result.status = HostRenderStatus::Deferred;
+        else if (output.status == HostRenderStatus::Rendered
+            && result.status == HostRenderStatus::Unchanged)
+            result.status = HostRenderStatus::Rendered;
+        result.views.push_back(std::move(output));
+    }
+    return result;
+}
+
 bool HostFrameRuntime::GetFrameRenderPending() const noexcept
 {
     return std::any_of(
@@ -375,7 +509,7 @@ void HostFrameRuntime::ClearFrameStage() noexcept
 {
     m_frameIntents.clear();
     if (!m_frameStage) return;
-    for (const auto index : m_frameStage->renderOrder) {
+    for (const auto index : m_frameStage->dirtyIndices) {
         try {
             if (index < m_views.size()
                 && m_views[index].interaction.update) {

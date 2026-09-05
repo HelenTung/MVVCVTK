@@ -349,7 +349,11 @@ bool PartSegmentationHostFeature::Impl::AttachHost(
         return false;
     }
     try {
-        m_service = std::make_unique<PartSegmentationService>();
+        m_service = std::make_unique<PartSegmentationService>(
+            [weakHost = std::weak_ptr<FeatureHostControl>(context.host)] {
+                if (const auto host = weakHost.lock())
+                    (void)host->SendWorkAvailable();
+            });
     }
     catch (...) {
         m_data.reset();

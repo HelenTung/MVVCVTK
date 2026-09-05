@@ -28,10 +28,17 @@ public:
 
     // 幂等构建；首次成功后复用既有服务和窗口，空 renderViews 或任一构建步骤失败返回 false。
     bool BuildSession();
+    // 仅 Running/HostDriven/owner thread。只提交，不绘制；业务 callback
+    // 在提交完成阶段兑现，不再等待窗口绘制。重入返回 Deferred。
+    HostUpdateResult SendUpdates();
+    // 绘制选中视图的最新提交，不隐式 SendUpdates、不派发业务 callback。
+    // Rendered 表示 VTK 绘制结束，不承诺 GPU fence 或显示器呈现。
+    HostRenderResult SendRender(const HostRenderRequest& request);
     // 把主线程 TimerEvent pump 绑定到指定视图；重复调用会替换旧 timer handler。
     bool AttachTimer(const HostTimerConfig& config);
     // 替换 standalone 按键 observer；主体热键直接进入统一请求路由。
     bool AttachHotkeys(const HostHotkeyConfig& config);
+    // HostDriven 的更新/绘制回调期间拒绝 Attach/Detach，避免改变正在遍历的拓扑。
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
     // 仅用于 standalone VTK 事件循环；Qt host 已有外部事件循环时不调用。
@@ -87,7 +94,7 @@ public:
     ImageReadChunkResult GetImageReadChunk(
         const ImageReadRequest& request,
         std::size_t voxelOffset);
-    // worker 只复制不可变快照；结果在 owner timer 上回调。一次会话只接纳一个未回调读取。
+    // worker 只复制不可变快照；结果在 owner frame/SendUpdates 回调。一次会话只接纳一个未回调读取。
     ImageReadAdmission StartImageRead(
         ImageReadRequest request,
         ImageReadCallback onComplete);

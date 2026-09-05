@@ -27,7 +27,8 @@ class AppTaskExecutor;
 
 // Host 为整组 View 注入同一个 executor；独立 App 可省略并由工厂创建私有实例。
 std::shared_ptr<AppTaskExecutor> CreateAppTaskExecutor(
-    AppWorkerStart workerStart = {});
+    AppWorkerStart workerStart = {},
+    std::function<void()> onWorkAvailable = {});
 // Image read 复用固定 export lane，但不暴露 executor 实现或任务队列。
 TaskAdmissionResult SendReadTask(
     const std::shared_ptr<AppTaskExecutor>& executor,
@@ -38,6 +39,7 @@ bool SendRenderTask(
     RenderLaneWork work);
 
 struct AppServiceArgs final {
+    std::function<void()> onWorkAvailable;
     std::shared_ptr<AbstractDataManager> dataManager;
     std::shared_ptr<SharedInteractionState> interactionState;
     std::shared_ptr<IStateEventSource> eventSource;

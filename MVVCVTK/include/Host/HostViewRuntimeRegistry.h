@@ -132,6 +132,9 @@ public:
     HostFrameStageStatus BuildFrameStage(std::uint64_t nextEpoch);
     void SetFrameCommit(std::uint64_t epoch) noexcept;
     bool SendFrameRender(std::uint64_t epoch);
+    HostRenderResult SendFrameRender(const HostRenderRequest& request,
+        const std::function<bool()>& getIsRunning);
+    std::vector<std::string> GetRenderViewIds() const;
     bool GetFrameRenderPending() const noexcept;
     void SendFrameCompletions() noexcept;
     void ClearFrameStage() noexcept;

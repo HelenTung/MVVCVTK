@@ -82,6 +82,7 @@ vtkStandardNewMacro(KernelOwnedIntArray);
 // 宿主 view 线程通过独立状态机消费终态、创建 overlay。分析状态、显示阶段和 overlay 可见意图互不推导。
 class GapAnalysisService::Impl final {
 public:
+    std::function<void()> onWorkAvailable;
     Impl() = default;
     ~Impl();
 
@@ -785,10 +786,11 @@ bool GapAnalysisService::Impl::StartAsync(std::function<void(bool isSuccess)> on
     // 否则服务会留下一个永远没有 worker 的假运行状态。
     try {
         m_workerThread = std::thread(
-            &GapAnalysisService::Impl::StartWorker,
-            this,
-            std::move(inputSnapshot),
-            GetParamSnapshot());
+            [this, input = std::move(inputSnapshot),
+                params = GetParamSnapshot(), onWork = onWorkAvailable]() mutable {
+                StartWorker(std::move(input), std::move(params));
+                try { if (onWork) onWork(); } catch (...) {}
+            });
     }
     catch (...) {
         SetAnalysisState(GapAnalysisState::Failed);
@@ -980,10 +982,10 @@ bool GapAnalysisService::Impl::StartView(
 
         try {
             m_workerThread = std::thread(
-                &GapAnalysisService::Impl::StartWorker,
-                this,
-                inputSnapshot,
-                params);
+                [this, inputSnapshot, params, onWork = onWorkAvailable]() {
+                    StartWorker(inputSnapshot, params);
+                    try { if (onWork) onWork(); } catch (...) {}
+                });
         }
         catch (...) {
             {
@@ -2736,4 +2738,9 @@ std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateStatis
             { "porosity-ratio",
               std::vector<double>{ statistics.porosityRatio } } });
     return table->GetValid() ? table : nullptr;
+}
+
+void GapAnalysisService::SetWorkAvailable(std::function<void()> onWorkAvailable)
+{
+    m_impl->onWorkAvailable = std::move(onWorkAvailable);
 }

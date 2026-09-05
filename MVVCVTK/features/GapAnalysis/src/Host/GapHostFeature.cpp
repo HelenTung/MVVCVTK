@@ -479,6 +479,11 @@ bool GapHostFeature::Impl::AttachHost(
     m_views = context.views;
     m_data = context.data;
     m_host = context.host;
+    m_service->SetWorkAvailable(
+        [weakHost = std::weak_ptr<FeatureHostControl>(context.host)] {
+            if (const auto host = weakHost.lock())
+                (void)host->SendWorkAvailable();
+        });
     m_ownerThread = std::this_thread::get_id();
     if (!SetDataTypes()) {
         ClearBorrowed();

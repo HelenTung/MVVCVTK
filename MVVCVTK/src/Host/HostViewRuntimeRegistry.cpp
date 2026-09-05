@@ -31,6 +31,7 @@
 #include <utility>
 
 class HostViewRuntimeRegistry::Impl final {
+    bool m_isHostDriven = false;
 public:
     Impl();
     ~Impl();
@@ -103,6 +104,9 @@ public:
     HostFrameStageStatus BuildFrameStage(std::uint64_t nextEpoch);
     void SetFrameCommit(std::uint64_t epoch) noexcept;
     bool SendFrameRender(std::uint64_t epoch);
+    HostRenderResult SendFrameRender(const HostRenderRequest& request,
+        const std::function<bool()>& getIsRunning);
+    std::vector<std::string> GetRenderViewIds() const;
     bool GetFrameRenderPending() const noexcept;
     void SendFrameCompletions() noexcept;
     void ClearFrameStage() noexcept;
@@ -542,6 +546,7 @@ HostViewRuntimeRegistry::Impl::BuildView(
 
     AppServiceArgs args;
     args.dataManager = core.sharedDataMgr;
+    args.onWorkAvailable = core.onWorkAvailable;
     args.interactionState = core.sharedState;
     args.eventSource = core.sharedStateBroadcaster;
     args.taskExecutor = taskExecutor;
@@ -580,7 +585,7 @@ HostViewRuntimeRegistry::Impl::BuildView(
 
     auto context = CreateViewContext(
         ports.interaction,
-        config.inputMode == HostInputMode::HostInjected);
+        config.inputMode == HostInputMode::HostInjected, core.isHostDriven);
     if (!context) return std::nullopt;
 
     HostRenderViewRuntime view;
@@ -597,13 +602,12 @@ HostViewRuntimeRegistry::Impl::BuildView(
     // 首次绑定与后续 Qt rebind 共享同一事务入口。
     if (!SetViewWindow(view, view.config.renderWindow)
         || !view.app.view->SetViewConfig(*appInit)
-        || !view.context->SetWindowTitle(view.config.window.title)
-        || !view.context->SetWindowSize(
-            view.config.window.width,
-            view.config.window.height)
-        || !view.context->SetWindowPosition(
-            view.config.window.posX,
-            view.config.window.posY)
+        || (!(core.isHostDriven && view.config.renderWindow)
+            && (!view.context->SetWindowTitle(view.config.window.title)
+                || !view.context->SetWindowSize(
+                    view.config.window.width, view.config.window.height)
+                || !view.context->SetWindowPosition(
+                    view.config.window.posX, view.config.window.posY)))
         || !view.context->SetCameraStyle(appInit->vizMode)
         || !view.context->SetOrientationAxesVisible(
             view.config.window.isAxesVisible)) {
@@ -743,12 +747,13 @@ bool HostViewRuntimeRegistry::Impl::Build(
     std::shared_ptr<RenderStrategyServices> nextRenderServices;
     try {
         if (!configs.empty()) {
-            nextTaskExecutor = CreateAppTaskExecutor();
+            nextTaskExecutor = CreateAppTaskExecutor({}, core.onWorkAvailable);
             nextHistogram = std::make_shared<HistogramConverter>();
             const std::weak_ptr<AppTaskExecutor> weakExecutor =
                 nextTaskExecutor;
             nextRenderServices =
                 std::make_shared<RenderStrategyServices>();
+            nextRenderServices->isHostDriven = core.isHostDriven;
             nextRenderServices->resources =
                 std::make_shared<RenderResourceCoordinator>(
                     [weakExecutor](RenderLaneWork work) {
@@ -791,6 +796,9 @@ bool HostViewRuntimeRegistry::Impl::Build(
     m_leasePorts = std::move(nextLeasePorts);
     m_lease = std::move(nextLease);
     m_taskExecutor = std::move(nextTaskExecutor);
+    m_isHostDriven = core.isHostDriven;
+    m_frameRuntime->SetDriveMode(core.isHostDriven
+        ? HostDriveMode::HostDriven : HostDriveMode::Native);
     m_renderServices = std::move(nextRenderServices);
     if (m_renderServices && m_renderServices->resources) {
         (void)m_renderServices->resources->AdvanceTopologyRevision();
@@ -1382,6 +1390,7 @@ bool HostViewRuntimeRegistry::Impl::SetViewStatus(
         }
     }
     for (const auto* view : views) {
+        if (m_isHostDriven && view->config.renderWindow) continue;
         std::string title = view->config.window.title;
         if (!status.empty()) {
             if (!title.empty()) title += " | ";
@@ -1543,6 +1552,20 @@ void HostViewRuntimeRegistry::Impl::SetFrameCommit(std::uint64_t epoch) noexcept
 bool HostViewRuntimeRegistry::Impl::SendFrameRender(std::uint64_t epoch)
 {
     return m_frameRuntime->SendFrameRender(epoch);
+}
+
+
+std::vector<std::string>
+HostViewRuntimeRegistry::Impl::GetRenderViewIds() const
+{
+    return m_frameRuntime->GetRenderViewIds();
+}
+
+HostRenderResult HostViewRuntimeRegistry::Impl::SendFrameRender(
+    const HostRenderRequest& request,
+    const std::function<bool()>& getIsRunning)
+{
+    return m_frameRuntime->SendFrameRender(request, getIsRunning);
 }
 
 bool HostViewRuntimeRegistry::Impl::GetFrameRenderPending() const noexcept
@@ -2071,4 +2094,16 @@ bool HostViewRuntimeRegistry::GetRoleIsSliceView(
     const HostRenderViewRole role) const
 {
     return m_impl && m_impl->GetRoleIsSliceView(role);
+}
+
+HostRenderResult HostViewRuntimeRegistry::SendFrameRender(
+    const HostRenderRequest& request,
+    const std::function<bool()>& getIsRunning)
+{
+    return m_impl ? m_impl->SendFrameRender(request, getIsRunning) : HostRenderResult{};
+}
+
+std::vector<std::string> HostViewRuntimeRegistry::GetRenderViewIds() const
+{
+    return m_impl ? m_impl->GetRenderViewIds() : std::vector<std::string>{};
 }

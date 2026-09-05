@@ -50,6 +50,7 @@ public:
     };
 
     CropBridge();
+    void SetWorkAvailable(std::function<void()> onWorkAvailable);
     ~CropBridge();
 
     CropBridge(const CropBridge&) = delete;

@@ -121,6 +121,9 @@ public:
         const std::string& status) = 0;
     virtual bool SendSceneDelta(FeatureSceneDelta delta) = 0;
     virtual bool SendOwnerComplete(std::function<void()> complete) = 0;
+    // worker 可以通知 owner 有待消费工作；不执行业务 callback、不触碰 VTK。
+    // Session/Feature 失效后拒绝；独立测试端口可明确不支持通知。
+    virtual bool SendWorkAvailable() { return false; }
 };
 
 struct HostFeatureContext final {

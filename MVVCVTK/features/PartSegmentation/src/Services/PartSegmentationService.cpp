@@ -214,8 +214,9 @@ bool GetHistoryBytes(
 
 } // namespace
 
-PartSegmentationService::PartSegmentationService()
-    : m_worker([this] { WorkerLoop(); })
+PartSegmentationService::PartSegmentationService(std::function<void()> onWorkAvailable)
+    : m_onWorkAvailable(std::move(onWorkAvailable))
+    , m_worker([this] { WorkerLoop(); })
 {
 }
 
@@ -380,6 +381,9 @@ void PartSegmentationService::WorkerLoop() noexcept
             m_isBusy = false;
             m_complete = std::move(candidate);
         }
+        // completion 已发布；通知只排队，业务仍由 owner tick 消费。
+        try { if (m_onWorkAvailable) m_onWorkAvailable(); }
+        catch (...) {}
     }
 
     {
