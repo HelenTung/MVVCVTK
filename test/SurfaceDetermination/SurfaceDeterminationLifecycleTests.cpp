@@ -2,6 +2,7 @@
 
 #include "Host/SurfaceDeterminationHostFeature.h"
 #include "SurfaceDeterminationService.h"
+#include "SurfaceGenerationStore.h"
 #include "SurfaceDeterminationTestSupport.h"
 
 #include "App/Services/FeatureViewService.h"
@@ -126,7 +127,8 @@ public:
 
     bool SendSceneDelta(FeatureSceneDelta delta) override
     {
-        return delta.requestId != 0 && !delta.viewIds.empty();
+        ++sceneCount;
+        return !isSceneRejected && delta.requestId != 0 && !delta.viewIds.empty();
     }
 
     bool SendOwnerComplete(std::function<void()> complete) override
@@ -138,6 +140,8 @@ public:
 
     std::vector<std::string> activeViews;
     bool isActiveViewsRejected = false;
+    bool isSceneRejected = false;
+    int sceneCount = 0;
 };
 
 struct TestHost final {
@@ -500,20 +504,181 @@ void TestSourceStaleAndRollback(Checks& checks)
             [&] { return failureCount.load() == 1; }),
         "display failure completes");
     checks.Get(
-        failed.failureReason == SurfaceFailureReason::DisplayFailed
-            && rollbackFeature->GetSurfaceSnapshot().get() == baseline.get()
+        failed.status == SurfaceResultStatus::Succeeded
+            && failed.failureReason == SurfaceFailureReason::DisplayFailed
+            && rollbackFeature->GetSurfaceSnapshot()
+            && rollbackFeature->GetSurfaceSnapshot()->resultRevision == baseline->resultRevision + 1
             && rollbackFeature->GetState().stage
                 == SurfaceDeterminationStage::Ready
-            && rollbackHost.views->overlay->overlays.size() == 1
-            && rollbackHost.host->activeViews.size() == 1,
-        "display failure preserves prior active generation reason="
-            + std::to_string(static_cast<int>(failed.failureReason))
-            + " same=" + std::to_string(
-                rollbackFeature->GetSurfaceSnapshot().get() == baseline.get())
-            + " stage=" + std::to_string(static_cast<int>(
-                rollbackFeature->GetState().stage)));
+            && rollbackHost.views->overlay->overlays.empty(),
+        "display failure keeps new formal data and retires old display");
+    const auto committedId = rollbackHost.data->GetDataGraph().commitId;
     rollbackHost.views->overlay->isAttachRejected = false;
+    checks.Get(rollbackFeature->OnHostTick()
+            && rollbackHost.views->overlay->overlays.size() == 1
+            && rollbackFeature->GetState().failureReason == SurfaceFailureReason::None
+            && rollbackHost.data->GetDataGraph().commitId == committedId
+            && failureCount == 1 && baseline->resultRevision == 1,
+        "display retry uses committed data once and preserves historical snapshot");
     checks.Get(rollbackFeature->DetachHost(), "rollback test detaches");
+}
+
+bool SetBinding(TestDataPort& data, std::string_view name,
+    std::optional<DataRevisionRef> target)
+{
+    const auto binding = data.GetDataBinding(data.GetDataGraph(), name)
+        .value_or(DataBinding{ std::string(name), {}, 0 });
+    DataTransaction transaction;
+    transaction.bindings.push_back({ std::string(name), binding.revision, true, binding.target, target });
+    return data.SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
+}
+
+void TestBindingProjection(Checks& checks)
+{
+    TestHost testHost(BuildSphere());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(testHost.context), "binding test attaches");
+    int completed = 0;
+    const auto start = [&] {
+        return feature.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult) { ++completed; }).status
+            == SurfaceAdmissionStatus::Accepted;
+    };
+    checks.Get(start() && WaitUntil(feature, [&] { return completed == 1; }), "binding A publishes");
+    const auto first = feature.GetSurfaceSnapshot();
+    const auto firstState = feature.GetState();
+    checks.Get(start() && WaitUntil(feature, [&] { return completed == 2; }), "binding B publishes");
+    const auto second = feature.GetSurfaceSnapshot();
+    if (!first || !second) { checks.Get(false, "binding fixtures have results"); return; }
+    checks.Get(SetBinding(*testHost.data, surfaceResultBinding, first->dataRevision), "activate historical A");
+    checks.Get(feature.GetSurfaceSnapshot().get() == first.get(), "current query follows binding before tick without mutation");
+    const auto commitId = testHost.data->GetDataGraph().commitId;
+    checks.Get(feature.OnHostTick() && feature.GetState().resultRevision == first->resultRevision
+            && feature.GetState().acceptedPointCount == firstState.acceptedPointCount
+            && feature.GetState().truncatedPointCount == firstState.truncatedPointCount
+            && testHost.views->overlay->overlays.size() == 1
+            && testHost.data->GetDataGraph().commitId == commitId,
+        "owner projection follows A without publishing a new version");
+    checks.Get(SetBinding(*testHost.data, surfaceResultBinding, second->dataRevision)
+            && SetBinding(*testHost.data, surfaceResultBinding, first->dataRevision)
+            && feature.OnHostTick() && testHost.views->overlay->overlays.size() == 1,
+        "result binding ABA rebuilds one projection");
+    checks.Get(SetBinding(*testHost.data, surfaceResultBinding, {})
+            && !feature.GetSurfaceSnapshot() && feature.OnHostTick()
+            && testHost.views->overlay->overlays.empty()
+            && feature.GetState().stage == SurfaceDeterminationStage::Idle
+            && first->points && !first->points->empty(),
+        "clear binding retires current projection but preserves fixed history");
+    checks.Get(feature.DetachHost(), "binding test detaches");
+}
+
+void TestBindingAbaAndDisplayRetry(Checks& checks)
+{
+    TestHost testHost(BuildSphere());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(testHost.context), "ABA test attaches");
+    int completed = 0;
+    SurfaceDeterminationResult result;
+    const auto start = [&] {
+        return feature.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult value) {
+            result = std::move(value); ++completed;
+        }).status == SurfaceAdmissionStatus::Accepted;
+    };
+    testHost.host->isSceneRejected = true;
+    checks.Get(start() && WaitUntil(feature, [&] { return completed == 1; }), "rejected scene still completes data request");
+    const auto first = feature.GetSurfaceSnapshot();
+    checks.Get(first && result.status == SurfaceResultStatus::Succeeded
+            && result.failureReason == SurfaceFailureReason::DisplayFailed,
+        "scene rejection is separate from data success");
+    const auto commitId = testHost.data->GetDataGraph().commitId;
+    for (int index = 0; index < 5; ++index) checks.Get(feature.OnHostTick(), "rejected scene retry tick");
+    checks.Get(testHost.data->GetDataGraph().commitId == commitId
+            && testHost.views->overlay->overlays.size() == 1 && completed == 1,
+        "rejected scene retries neither append history nor duplicate overlays/completion");
+    testHost.host->isSceneRejected = false;
+    checks.Get(feature.OnHostTick() && feature.GetState().failureReason == SurfaceFailureReason::None,
+        "scene admission recovers");
+    if (!first) return;
+    checks.Get(start() && SetBinding(*testHost.data, surfaceResultBinding, {})
+            && SetBinding(*testHost.data, surfaceResultBinding, first->dataRevision)
+            && WaitUntil(feature, [&] { return completed == 2; })
+            && result.status == SurfaceResultStatus::Cancelled
+            && feature.GetSurfaceSnapshot().get() == first.get(),
+        "result binding ABA cancels late request despite identical target");
+    checks.Get(start() && SetBinding(*testHost.data, surfaceResultBinding, {})
+            && WaitUntil(feature, [&] { return completed == 3; })
+            && result.status == SurfaceResultStatus::Cancelled
+            && !feature.GetSurfaceSnapshot() && feature.GetState().pointCount == 0,
+        "cleared binding cannot be restored by an old task cancellation");
+    const auto source = testHost.data->GetPrimaryImage();
+    checks.Get(start() && SetBinding(*testHost.data, primaryVolumeBinding, {})
+            && SetBinding(*testHost.data, primaryVolumeBinding, source->data->self)
+            && WaitUntil(feature, [&] { return completed == 4; })
+            && result.failureReason == SurfaceFailureReason::SourceChanged,
+        "primary binding ABA rejects late result");
+    checks.Get(feature.DetachHost(), "ABA test detaches");
+}
+
+void TestCommitObserverReentry(Checks& checks)
+{
+    TestHost host(BuildSphere());
+    SurfaceDeterminationHostFeature feature(GetConfig());
+    checks.Get(feature.AttachHost(host.context), "observer test attaches");
+    int count = 0;
+    checks.Get(feature.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult) { ++count; }).status
+            == SurfaceAdmissionStatus::Accepted && WaitUntil(feature, [&] { return count == 1; }),
+        "observer baseline publishes");
+    const auto first = feature.GetSurfaceSnapshot();
+    if (!first) return;
+    bool hasReentered = false;
+    bool hasPreservedNext = false;
+    SurfaceDeterminationAdmission next;
+    SurfaceDeterminationResult secondResult;
+    SurfaceDeterminationResult nextResult;
+    const auto observer = host.data->AttachDataChange([&](const DataChangeSet& change) {
+        if (hasReentered || change.published.empty()) return;
+        hasReentered = true;
+        checks.Get(SetBinding(*host.data, surfaceResultBinding, first->dataRevision),
+            "observer activates historical result");
+        next = feature.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult value) {
+            nextResult = std::move(value); ++count;
+        });
+    });
+    const auto second = feature.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult value) {
+        secondResult = std::move(value); ++count;
+        const auto state = feature.GetState();
+        hasPreservedNext = state.requestId == next.requestId
+            && state.stage == SurfaceDeterminationStage::Preparing;
+    });
+    checks.Get(second.status == SurfaceAdmissionStatus::Accepted
+            && WaitUntil(feature, [&] { return count == 3; }) && hasReentered && hasPreservedNext
+            && next.status == SurfaceAdmissionStatus::Accepted
+            && secondResult.requestId == second.requestId && secondResult.resultRevision == 2
+            && nextResult.requestId == next.requestId && nextResult.resultRevision == 3,
+        "observer reentry preserves each result identity and the next request state");
+    checks.Get(host.data->DetachDataChange(observer) && feature.DetachHost(), "observer test detaches");
+
+    TestHost detachHost(BuildSphere());
+    SurfaceDeterminationHostFeature detached(GetConfig());
+    checks.Get(detached.AttachHost(detachHost.context), "observer detach fixture attaches");
+    bool didDetach = false;
+    int detachedCount = 0;
+    SurfaceDeterminationResult detachedResult;
+    const auto detachObserver = detachHost.data->AttachDataChange([&](const DataChangeSet& change) {
+        if (didDetach || change.published.empty()) return;
+        didDetach = detached.DetachHost();
+    });
+    checks.Get(detached.SendRequest(GetStartRequest(), [&](SurfaceDeterminationResult value) {
+        detachedResult = std::move(value); ++detachedCount;
+    }).status == SurfaceAdmissionStatus::Accepted, "observer detach request admitted");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (!didDetach && std::chrono::steady_clock::now() < deadline) {
+        (void)detached.OnHostTick();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    checks.Get(didDetach && detachedCount == 1 && detachedResult.resultRevision == 1
+            && detachedResult.status == SurfaceResultStatus::Cancelled,
+        "observer detach cancels callback once without losing committed result identity");
+    checks.Get(detachHost.data->DetachDataChange(detachObserver), "observer detach removes observer");
 }
 
 void TestCompletionCapacity(Checks& checks)
@@ -593,6 +758,9 @@ int GetSurfaceLifecycleFailCount()
     TestThresholdPublication(checks);
     TestCancelAndSupersede(checks);
     TestSourceStaleAndRollback(checks);
+    TestBindingProjection(checks);
+    TestBindingAbaAndDisplayRetry(checks);
+    TestCommitObserverReentry(checks);
     TestCompletionCapacity(checks);
     return checks.failureCount;
 }

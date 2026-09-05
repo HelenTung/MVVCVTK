@@ -729,6 +729,27 @@ int GetGapFailCount()
             && session.GetLabelMapDescriptors().size() == 1,
         "Gap 热键与显式请求必须进入同一 Feature 动作链") ? 0 : 1;
 
+    const auto gapBinding = contextProbe->m_data->GetDataBinding(
+        contextProbe->m_data->GetDataGraph(), "analysis.gaps.active");
+    const auto setGapBinding = [&](std::optional<DataRevisionRef> target) {
+        const auto current = contextProbe->m_data->GetDataBinding(
+            contextProbe->m_data->GetDataGraph(), "analysis.gaps.active");
+        if (!current) return false;
+        DataTransaction transaction;
+        transaction.bindings.push_back({ current->name, current->revision, true, current->target, target });
+        return contextProbe->m_data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
+    };
+    const bool hasExternalAba = gapBinding && setGapBinding({}) && setGapBinding(gapBinding->target);
+    const auto externalCommit = contextProbe->m_data->GetDataGraph().commitId;
+    SendTicks(*endpoint, 3);
+    const auto reboundState = feature->GetState();
+    failureCount += GetCaseResult(hasExternalAba
+            && reboundState.analysisState == GapAnalysisState::Stale && !reboundState.isViewActive
+            && contextProbe->m_data->GetDataGraph().commitId == externalCommit
+            && contextProbe->m_data->GetData(contextProbe->m_data->GetDataGraph(), reboundState.resultSet),
+        "Gap result binding ABA retires display without clearing external binding/history") ? 0 : 1;
+    failureCount += GetCaseResult(setGapBinding({}), "External owner can clear the retired Gap role") ? 0 : 1;
+
     const bool isNextReloadReady =
         GetReloadReady(session, *endpoint);
     SendTicks(*endpoint, 2);
@@ -798,5 +819,25 @@ int GetGapFailCount()
         detachedCallbackCount == 1
             && !isDetachedCallbackSucceeded,
         "Gap detach cancels an accepted callback exactly once") ? 0 : 1;
+    auto abaFeature = std::make_shared<GapHostFeature>(GetGapConfig());
+    int abaCount = 0;
+    std::optional<GapHostResult> abaResult;
+    const bool isAbaStarted = session.AttachFeature(abaFeature)
+        && abaFeature->SendRequest(GetStartRequest(start), [&](GapHostResult result) {
+            abaResult = std::move(result); ++abaCount;
+        });
+    const bool hasRequestAba = isAbaStarted && gapBinding
+        && setGapBinding(gapBinding->target) && setGapBinding({});
+    const auto abaCommit = contextProbe->m_data->GetDataGraph().commitId;
+    for (int poll = 0; abaCount == 0 && poll < 500; ++poll) {
+        SendTicks(*endpoint, 1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    SendTicks(*endpoint, 2);
+    failureCount += GetCaseResult(hasRequestAba && abaCount == 1 && abaResult
+            && abaResult->status == GapResultStatus::Failed
+            && contextProbe->m_data->GetDataGraph().commitId == abaCommit,
+        "Gap in-flight result binding ABA rejects publication and completes once") ? 0 : 1;
+    failureCount += GetCaseResult(session.DetachFeature(*abaFeature), "Gap ABA fixture detaches") ? 0 : 1;
     return failureCount;
 }

@@ -4162,6 +4162,19 @@ private:
             && m_service->m_renderSnapshot->binding
             ? m_service->m_renderSnapshot->binding->revision : 0;
         state.revision = m_revision;
+        if (m_service->m_currentStrategy) {
+            const auto transition = m_service->m_currentStrategy->GetTransitionState();
+            state.hasPresentationFailed = !m_isAvailable
+                || transition.status == RenderProductStatus::Failed
+                || transition.status == RenderProductStatus::Cancelled;
+            state.isPresentationPending = m_service->m_hasDataRefreshNeed.load()
+                || m_service->m_hasSyncNeed.load()
+                || transition.status == RenderProductStatus::Preparing
+                || transition.status == RenderProductStatus::Ready
+                || (transition.status == RenderProductStatus::Active
+                    && (transition.stats.isPreview
+                        || transition.stats.activeRevision != transition.stats.requestRevision));
+        }
         return state;
     }
 

@@ -874,6 +874,42 @@ void StartContextCases(int& failureCount)
         failureCount);
 }
 
+void StartDisplayCases(int& failureCount)
+{
+    Fixture fixture;
+    HostCommandRouter::DisplayCheck getApplied;
+    HostCompleteCallback complete;
+    int callbackCount = 0;
+    HostViewSetRequest request;
+    request.targetView.viewId = "primary";
+    request.volumeQuality = HostVolumeQuality::High;
+    const auto admitted = fixture.router->Dispatch(std::move(request), [&](bool) { ++callbackCount; },
+        [&](HostCommandRouter::DisplayCheck check, HostCompleteCallback callback) {
+            getApplied = std::move(check); complete = std::move(callback); return true;
+        });
+    SetExpect(admitted && getApplied && complete && callbackCount == 0,
+        "显示完成必须交给帧门禁。", failureCount);
+    if (!getApplied) return;
+    const auto state = fixture.GetService();
+    state->SetPresentationPending(true);
+    SetExpect(!getApplied().has_value(), "Preparing 不能按目标质量值提前完成。", failureCount);
+    state->SetPresentationPending(false);
+    state->SetPresentationFailed(true);
+    SetExpect(getApplied() == std::optional<bool>{ false }, "失败产物不能报告显示成功。", failureCount);
+    state->SetPresentationFailed(false);
+    state->SetAppliedQuality(VolumeQuality::Low);
+    SetExpect(getApplied() == std::optional<bool>{ false }, "保留旧质量不等于请求成功。", failureCount);
+    state->SetAppliedQuality(VolumeQuality::High);
+    SetExpect(getApplied() == std::optional<bool>{ true }, "目标已应用后才能允许 Render 完成。", failureCount);
+    HostViewSetRequest newer;
+    newer.targetView.viewId = "primary";
+    newer.background = HostBackgroundColor{0.3, 0.2, 0.1};
+    SetExpect(fixture.Send(std::move(newer)) && getApplied() == std::optional<bool>{ false },
+        "后续展示事务替代旧 revision，质量相同也不复活旧请求。", failureCount);
+    complete(false);
+    SetExpect(callbackCount == 1, "帧终态回传原 callback。", failureCount);
+}
+
 } // namespace
 
 int HostRouterSuite::GetFailCount() const
@@ -884,5 +920,6 @@ int HostRouterSuite::GetFailCount() const
     StartTransferCases(failureCount);
     StartToolCases(failureCount);
     StartContextCases(failureCount);
+    StartDisplayCases(failureCount);
     return failureCount;
 }

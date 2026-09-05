@@ -86,6 +86,9 @@ public:
     std::uint64_t GetRevision() const { return m_revision; }
     bool GetIsAvailable() const { return m_isViewAvailable; }
     bool GetIsDirty() const { return m_isDirty; }
+    void SetPresentationPending(bool value) { m_isPresentationPending = value; }
+    void SetPresentationFailed(bool value) { m_hasPresentationFailed = value; }
+    void SetAppliedQuality(VolumeQuality value) { m_volumeQuality = value; }
     bool StopView()
     {
         m_isViewAvailable = false;
@@ -169,6 +172,8 @@ private:
     std::optional<VolumeLayout> m_loadLayout;
     std::optional<VolumeBuffer> m_reloadBuffer;
     std::uint64_t m_revision = 0;
+    bool m_isPresentationPending = false;
+    bool m_hasPresentationFailed = false;
 };
 
 class DataPortStub final : public AppDataPort {
@@ -373,6 +378,8 @@ public:
             m_state->m_cursorAxis);
         state.visibilityMask = m_state->m_visibilityMask;
         state.revision = m_state->m_revision;
+        state.isPresentationPending = m_state->m_isPresentationPending;
+        state.hasPresentationFailed = m_state->m_hasPresentationFailed;
         return state;
     }
 

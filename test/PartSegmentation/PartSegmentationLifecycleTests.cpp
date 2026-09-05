@@ -671,6 +671,52 @@ bool GetSurfaceRetentionValid()
 int GetPartLifecycleFailCount()
 {
     int failureCount = GetPreviousPartFailCount();
+    {
+        TestHost test;
+        bool isValid = test.Attach();
+        std::optional<PartSegmentationResult> result;
+        isValid = isValid && test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) { result = std::move(value); }).status == PartAdmissionStatus::Accepted;
+        isValid = isValid && SendTicks(*test.feature, [&] { return result.has_value(); });
+        const auto fixed = test.feature->GetPartSetSnapshot();
+        const auto original = test.data->GetDataBinding(test.data->GetDataGraph(), "analysis.parts.active");
+        const auto setBinding = [&](std::optional<DataRevisionRef> target) {
+            const auto binding = test.data->GetDataBinding(test.data->GetDataGraph(), "analysis.parts.active");
+            if (!binding) return false;
+            DataTransaction transaction;
+            transaction.bindings.push_back({ binding->name, binding->revision, true, binding->target, target });
+            return test.data->SetDataCommit(std::move(transaction)).status == DataCommitStatus::Succeeded;
+        };
+        isValid = isValid && fixed && original && setBinding({}) && setBinding(original->target);
+        const auto external = test.data->GetDataGraph();
+        isValid = isValid && test.feature->OnHostTick();
+        const auto stale = test.feature->GetPartSetSnapshot();
+        isValid = isValid && stale && stale->isStale && !fixed->isStale
+            && test.feature->GetState().status == PartSegmentationStatus::Stale
+            && test.views->GetOverlayCount() == 0
+            && test.data->GetDataGraph().commitId == external.commitId;
+        result.reset();
+        isValid = isValid && test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) { result = std::move(value); }).status == PartAdmissionStatus::Accepted;
+        isValid = isValid && SendTicks(*test.feature, [&] { return result.has_value(); })
+            && result && result->status == PartResultStatus::Succeeded;
+        result.reset();
+        int cancelledCount = 0;
+        isValid = isValid && test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) { result = std::move(value); ++cancelledCount; }).status
+                == PartAdmissionStatus::Accepted;
+        isValid = isValid && setBinding({}) && setBinding(original->target);
+        const auto changedCommit = test.data->GetDataGraph().commitId;
+        isValid = isValid && SendTicks(*test.feature, [&] { return result.has_value(); })
+            && result && result->status == PartResultStatus::Cancelled && cancelledCount == 1
+            && test.feature->GetState().status == PartSegmentationStatus::Stale
+            && test.data->GetDataGraph().commitId == changedCommit;
+        isValid = test.feature->DetachHost() && isValid;
+        const auto retained = test.data->GetDataBinding(test.data->GetDataGraph(), "analysis.parts.active");
+        isValid = isValid && retained && original && retained->target == original->target;
+        failureCount += GetCaseResult(isValid,
+            "Part result binding ABA retires display and preserves external binding/history") ? 0 : 1;
+    }
     failureCount += GetCaseResult(
         GetSurfaceRetentionValid(),
         "Retained surface consumes recompute budget while preserving the active Part result")
