@@ -7,6 +7,7 @@
 #include "App/ViewTypes.h"
 #include "GapAnalysisTypes.h"
 #include "Host/TrustedDataPort.h"
+#include "Host/Types/HostViewTypes.h"
 
 #include <functional>
 #include <memory>
@@ -57,6 +58,8 @@ public:
     void SendCallback();
 
     GapAnalysisState GetAnalysisState() const;
+    FeatureOperationState GetExecutionState() const;
+    bool GetDisplayOn() const;
     std::vector<VoidRegion> GetVoidRegions() const;
     GapStatistics GetStatistics() const;
 

@@ -92,6 +92,7 @@ SurfaceAdmissionStatus SurfaceDeterminationService::Start(
         std::memory_order_relaxed);
     m_progressRequestId.store(requestId, std::memory_order_release);
     m_workReady.notify_one();
+    ++m_executionRevision;
     return SurfaceAdmissionStatus::Accepted;
 }
 
@@ -110,7 +111,34 @@ bool SurfaceDeterminationService::StopRequest(
             true, std::memory_order_release);
         didStop = true;
     }
+    if (didStop) ++m_executionRevision;
     return didStop;
+}
+
+FeatureOperationState SurfaceDeterminationService::GetExecutionState(const std::uint64_t requestId) const
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    FeatureOperationState state;
+    state.operation.requestId = requestId;
+    state.stateRevision = m_executionRevision;
+    if (m_progressRequestId.load() == requestId)
+        state.progress = static_cast<double>(m_progressPermille.load()) / 1000.0;
+    const auto complete = std::find_if(m_complete.begin(), m_complete.end(),
+        [requestId](const auto& value) { return value.requestId == requestId; });
+    if (complete != m_complete.end()) {
+        state.status = complete->result.status == SurfaceResultStatus::Succeeded ? FeatureRunStatus::Ready
+            : complete->result.status == SurfaceResultStatus::Cancelled ? FeatureRunStatus::Cancelled
+            : FeatureRunStatus::Failed;
+    }
+    else if (m_activeRequestId == requestId) {
+        state.status = m_activeCancel && m_activeCancel->load()
+            ? FeatureRunStatus::Stopping : FeatureRunStatus::Running;
+    }
+    else if (m_pendingJob && m_pendingJob->requestId == requestId) {
+        state.status = m_pendingJob->isCancelled->load()
+            ? FeatureRunStatus::Stopping : FeatureRunStatus::Preparing;
+    }
+    return state;
 }
 
 std::optional<SurfaceJobComplete>
@@ -120,6 +148,7 @@ SurfaceDeterminationService::GetComplete()
     if (m_complete.empty()) return std::nullopt;
     SurfaceJobComplete complete = std::move(m_complete.front());
     m_complete.erase(m_complete.begin());
+    ++m_executionRevision;
     return complete;
 }
 
@@ -156,6 +185,7 @@ bool SurfaceDeterminationService::Stop(
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
         m_isStopping = true;
+        ++m_executionRevision;
         if (m_activeCancel) {
             m_activeCancel->store(true, std::memory_order_release);
         }
@@ -194,10 +224,12 @@ void SurfaceDeterminationService::SetProgress(
     const SurfaceDeterminationStage stage,
     const double progress) noexcept
 {
+    const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_progressRequestId.load(std::memory_order_acquire)
         != requestId) {
         return;
     }
+    const auto previousStage = m_progressStage.load();
     m_progressStage.store(
         static_cast<std::uint8_t>(stage),
         std::memory_order_release);
@@ -213,6 +245,7 @@ void SurfaceDeterminationService::SetProgress(
             std::memory_order_release,
             std::memory_order_relaxed)) {
     }
+    if (current < target || previousStage != static_cast<std::uint8_t>(stage)) ++m_executionRevision;
 }
 
 void SurfaceDeterminationService::WorkerLoop() noexcept
@@ -229,6 +262,7 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
             m_pendingJob.reset();
             m_activeRequestId = job.requestId;
             m_activeCancel = job.isCancelled;
+            ++m_executionRevision;
         }
 
         SurfaceJobComplete complete;
@@ -263,6 +297,7 @@ void SurfaceDeterminationService::WorkerLoop() noexcept
             m_complete.push_back(std::move(complete));
             m_activeRequestId = 0;
             m_activeCancel.reset();
+            ++m_executionRevision;
         }
     }
 

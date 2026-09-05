@@ -3,6 +3,7 @@
 #include "OrthogonalCropTypes.h"
 #include "Algorithms/CropAlgorithm.h"
 #include "App/Services/FeatureViewService.h"
+#include "Host/Types/HostViewTypes.h"
 
 #include <cstddef>
 #include <functional>
@@ -89,6 +90,7 @@ public:
         CropInputSnapshot rootInput,
         CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
+    FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();
 
 private:

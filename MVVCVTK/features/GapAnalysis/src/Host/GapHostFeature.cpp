@@ -22,6 +22,9 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <iomanip>
+#include <locale>
 #include <string>
 #include <thread>
 #include <utility>
@@ -320,6 +323,7 @@ public:
         std::vector<std::string> activeViewIds;
         VtkImageGridSnapshot source;
         DataBinding resultBinding;
+        std::string canonicalParameters;
     };
 
     explicit Impl(GapHostConfig config)
@@ -337,6 +341,7 @@ public:
         GapHostRequest request,
         GapHostCallback onComplete);
     GapHostState GetState() const;
+    std::vector<FeatureOperationState> GetOperationStates() const;
 
     static constexpr std::string_view FeatureId =
         "GapAnalysis";
@@ -395,6 +400,9 @@ private:
     VtkImageGridSnapshot m_requestSource;
     DataBinding m_requestResultBinding;
     GapHostState m_state;
+    FeatureOperationState m_operation;
+    std::string m_requestParameters;
+    bool m_hasScenePending = false;
     std::thread::id m_ownerThread;
     std::uint64_t m_nextSceneRequestId = 1;
     std::uint64_t m_activeRequestId = 0;
@@ -633,7 +641,18 @@ bool GapHostFeature::Impl::SendSceneDelta(
     delta.requestId = GetNextSceneRequestId();
     delta.priority = priority;
     delta.scope = FeatureSceneScope::RequiredAllViews;
-    return m_host->SendSceneDelta(std::move(delta));
+    delta.hasDisplayUpdate = true;
+    if (GetDataRevisionRefValid(m_state.sourceRevision))
+        delta.inputs = { { "source-volume", m_state.sourceRevision } };
+    if (m_service->GetDisplayOn() && GetDataRevisionRefValid(m_state.resultSet)) {
+        delta.inputs.push_back({ "labels", m_state.labelMap });
+        delta.inputs.push_back({ "void-surface", m_state.voidMesh });
+        for (const auto& viewId : m_activeViewIds)
+            delta.displays.push_back({ viewId, std::string(featureId), "gaps",
+                m_state.resultSet, m_operation.operation });
+    }
+    m_hasScenePending = !m_host->SendSceneDelta(std::move(delta));
+    return !m_hasScenePending;
 }
 
 std::uint64_t GapHostFeature::Impl::GetNextSceneRequestId() noexcept
@@ -672,6 +691,14 @@ GapHostFeature::Impl::GetViewCandidate(
     }
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
+    std::ostringstream parameters;
+    parameters.imbue(std::locale::classic());
+    parameters << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << "isoMode=" << static_cast<int>(start.surface.isoMode)
+        << ";ratio=" << start.surface.dataRangeRatio << ";absoluteIso=" << start.surface.absoluteIsoValue
+        << ";background=" << start.surface.backgroundMean << ";material=" << start.surface.materialMean
+        << ";filter=" << start.voidParams.isFilterEnabled << ";minVolumeMM3=" << start.voidParams.minVolumeMM3;
+    candidate.canonicalParameters = parameters.str();
 
     for (const auto& view : views) {
         const auto port = m_views->GetOverlayPort(view.id);
@@ -755,6 +782,8 @@ bool GapHostFeature::Impl::AttachHost(
     m_isExitPending = false;
     m_isRequestPending = false;
     m_state = {};
+    m_operation = {};
+    m_hasScenePending = false;
     return true;
 }
 
@@ -818,6 +847,7 @@ bool GapHostFeature::Impl::OnHostTick()
     if (m_service->GetDisplayTickNeeded()) {
         m_service->OnDisplayTick(nullptr);
     }
+    if (m_hasScenePending) (void)SendSceneDelta(FeatureScenePriority::Overlay);
 
     if (m_isRequestPending) {
         const auto analysisState = m_service->GetAnalysisState();
@@ -913,6 +943,20 @@ GapHostState GapHostFeature::Impl::GetState() const
     return state;
 }
 
+std::vector<FeatureOperationState> GapHostFeature::Impl::GetOperationStates() const
+{
+    if (!m_isAttached || !GetOwnerThread() || !m_service
+        || m_operation.operation.requestId == 0) return {};
+    auto state = m_operation;
+    if (m_isRequestPending) {
+        const auto execution = m_service->GetExecutionState();
+        state.status = execution.status;
+        state.progress = execution.progress;
+        state.stateRevision = execution.stateRevision + 1;
+    }
+    return { std::move(state) };
+}
+
 bool GapHostFeature::Impl::StartView(
     const GapHostStartParams& start,
     GapHostCallback onComplete)
@@ -947,11 +991,19 @@ bool GapHostFeature::Impl::StartView(
     m_activeRequestId = GetNextSceneRequestId();
     m_requestSource = std::move(candidate->source);
     m_requestResultBinding = std::move(candidate->resultBinding);
+    m_requestParameters = std::move(candidate->canonicalParameters);
     m_state = {};
     m_state.analysisState = GapAnalysisState::Running;
     m_state.sourceRevision = m_requestSource->data->self;
+    m_operation = {};
+    m_operation.operation = { std::string(featureId), m_host->GetAttachmentId(), m_activeRequestId };
+    m_operation.inputs = { { "source-volume", m_state.sourceRevision } };
+    m_operation.status = FeatureRunStatus::Preparing;
+    m_operation.stateRevision = m_service->GetExecutionState().stateRevision + 1;
     m_isRequestPending = true;
     m_isExitPending = false;
+    // StartView 已卸载上一轮资源；本次尚未发布结果，提交空展示描述。
+    (void)SendSceneDelta(FeatureScenePriority::Overlay);
     return true;
 }
 
@@ -979,6 +1031,8 @@ bool GapHostFeature::Impl::ExitView()
         SetFailedResult(
             GapResultStatus::Failed,
             "Gap analysis was cancelled before publication.");
+        m_operation.status = FeatureRunStatus::Cancelled;
+        ++m_operation.stateRevision;
     }
     const bool isDeltaSent = SendSceneDelta(
         FeatureScenePriority::Overlay);
@@ -1096,21 +1150,21 @@ bool GapHostFeature::Impl::SetCompletedResult(
             { DataInputRef{ "source-volume", sourceRef } },
             std::move(labels),
             DataProvenance{
-                std::string(featureId), "analyze-labels", "1", "{}" } },
+                std::string(featureId), "analyze-labels", "1", m_requestParameters } },
         DataRevisionDraft{
             voidEntity, 0, gapVoidTableType,
             { DataInputRef{ "source-volume", sourceRef },
               DataInputRef{ "labels", labelRef } },
             std::move(voids),
             DataProvenance{
-                std::string(featureId), "project-void-regions", "1", "{}" } },
+                std::string(featureId), "project-void-regions", "1", m_requestParameters } },
         DataRevisionDraft{
             meshEntity, 0, DataTypes::surfaceMesh,
             { DataInputRef{ "source-volume", sourceRef },
               DataInputRef{ "labels", labelRef } },
             std::move(mesh),
             DataProvenance{
-                std::string(featureId), "extract-void-surface", "1", "{}" } },
+                std::string(featureId), "extract-void-surface", "1", m_requestParameters } },
         DataRevisionDraft{
             statisticsEntity, 0, gapStatisticsType,
             { DataInputRef{ "source-volume", sourceRef },
@@ -1118,7 +1172,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
               DataInputRef{ "void-regions", voidRef } },
             std::move(statistics),
             DataProvenance{
-                std::string(featureId), "project-statistics", "1", "{}" } },
+                std::string(featureId), "project-statistics", "1", m_requestParameters } },
         DataRevisionDraft{
             resultEntity, 0, gapResultSetType,
             { DataInputRef{ "source-volume", sourceRef },
@@ -1128,7 +1182,7 @@ bool GapHostFeature::Impl::SetCompletedResult(
               DataInputRef{ "statistics", statisticsRef } },
             std::move(resultSet),
             DataProvenance{
-                std::string(featureId), "collect-results", "1", "{}" } }
+                std::string(featureId), "collect-results", "1", m_requestParameters } }
     };
     transaction.bindings.push_back(DataBindingUpdate{
         std::string(gapResultBinding),
@@ -1160,13 +1214,18 @@ bool GapHostFeature::Impl::SetCompletedResult(
     state.statisticsData = statisticsRef;
     state.resultSet = resultRef;
     m_state = state;
+    m_operation.status = FeatureRunStatus::Succeeded;
+    m_operation.progress = 1.0;
+    m_operation.stateRevision = m_service->GetExecutionState().stateRevision + 2;
+    m_operation.outputs = { labelRef, voidRef, meshRef, statisticsRef, resultRef };
 
     const auto graph = m_data->GetDataGraph();
     auto labelView = m_data->GetLabelMap(graph, labelRef);
     auto meshView = m_data->GetSurfaceMesh(graph, meshRef);
     bool isDisplayed = m_service->SetCommittedView(
         std::move(labelView), std::move(meshView));
-    if (isDisplayed) isDisplayed = SendSceneDelta(FeatureScenePriority::Overlay);
+    const bool isDeltaSent = SendSceneDelta(FeatureScenePriority::Overlay);
+    isDisplayed = isDisplayed && isDeltaSent;
     const auto callback = m_completeItem;
     m_isRequestPending = false;
     m_requestSource.reset();
@@ -1212,6 +1271,11 @@ void GapHostFeature::Impl::SetFailedResult(
     std::string message)
 {
     if (!m_isRequestPending) return;
+    const auto execution = m_service->GetExecutionState();
+    m_operation.status = execution.status == FeatureRunStatus::Cancelled
+        ? FeatureRunStatus::Cancelled : FeatureRunStatus::Failed;
+    m_operation.stateRevision = execution.stateRevision + 2;
+    m_operation.outputs.clear();
     m_state.analysisState = status == GapResultStatus::SourceChanged
         ? GapAnalysisState::Stale
         : GapAnalysisState::Failed;
@@ -1419,4 +1483,9 @@ bool GapHostFeature::SendRequest(
 GapHostState GapHostFeature::GetState() const
 {
     return m_impl ? m_impl->GetState() : GapHostState{};
+}
+
+std::vector<FeatureOperationState> GapHostFeature::GetOperationStates() const
+{
+    return m_impl ? m_impl->GetOperationStates() : std::vector<FeatureOperationState>{};
 }

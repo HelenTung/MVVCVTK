@@ -1,6 +1,10 @@
 #include "Render/Strategies/PartOverlayStrategies.h"
 
 #include <vtkActor.h>
+#include <vtkCellPicker.h>
+#include <vtkCellData.h>
+#include <vtkProp3D.h>
+#include <vtkRenderer.h>
 #include <vtkDataArray.h>
 #include <vtkDataSet.h>
 #include <vtkImageData.h>
@@ -24,6 +28,36 @@
 namespace {
 
 constexpr std::uint32_t maxOverlayPartCount = 4096;
+
+std::optional<PartLabelId> GetPickedLabel(vtkProp3D& prop, vtkDataSet* data,
+    vtkLookupTable& table, const int x, const int y, vtkRenderer* renderer)
+{
+    if (!renderer || !data || !prop.GetVisibility()) return std::nullopt;
+    // picker 只观察本 Feature 的临时 prop 壳，不遍历 renderer，也不改原 prop 的可拾取状态。
+    vtkSmartPointer<vtkProp3D> candidate;
+    candidate.TakeReference(prop.NewInstance());
+    candidate->ShallowCopy(&prop);
+    candidate->PickableOn();
+    auto picker = vtkSmartPointer<vtkCellPicker>::New();
+    picker->PickFromListOn();
+    picker->AddPickList(candidate);
+    if (!picker->Pick(x, y, 0.0, renderer)) return std::nullopt;
+    auto elementId = picker->GetPointId();
+    auto* points = data->GetPointData();
+    auto* scalars = points ? points->GetScalars() : nullptr;
+    // 离散等值面把零件标签放在 cell 上；二维标签图使用 point scalars。
+    if (!scalars && data->GetCellData()) {
+        scalars = data->GetCellData()->GetScalars();
+        elementId = picker->GetCellId();
+    }
+    if (!scalars || elementId < 0 || elementId >= scalars->GetNumberOfTuples())
+        return std::nullopt;
+    const auto value = scalars->GetComponent(elementId, 0);
+    if (!std::isfinite(value) || value < 1.0 || value != std::floor(value)
+        || value >= static_cast<double>(table.GetNumberOfTableValues())) return std::nullopt;
+    const auto label = static_cast<PartLabelId>(value);
+    return table.GetTableValue(label)[3] > 0.0 ? std::optional<PartLabelId>(label) : std::nullopt;
+}
 
 std::array<double, 3> GetImageNormal(
     vtkImageData& image,
@@ -203,6 +237,12 @@ bool PartSurfaceOverlayStrategy::SetPartStates(
     }
 }
 
+std::optional<PartLabelId> PartSurfaceOverlayStrategy::GetPickedLabel(
+    const int x, const int y, vtkRenderer* renderer) const
+{
+    return ::GetPickedLabel(*m_actor, m_mapper->GetInput(), *m_lut, x, y, renderer);
+}
+
 PartSliceOverlayStrategy::PartSliceOverlayStrategy(
     const Orientation orientation)
     : m_slice(vtkSmartPointer<vtkImageSlice>::New())
@@ -260,4 +300,10 @@ bool PartSliceOverlayStrategy::SetPartStates(
     catch (...) {
         return false;
     }
+}
+
+std::optional<PartLabelId> PartSliceOverlayStrategy::GetPickedLabel(
+    const int x, const int y, vtkRenderer* renderer) const
+{
+    return ::GetPickedLabel(*m_slice, m_mapper->GetInput(), *m_lut, x, y, renderer);
 }

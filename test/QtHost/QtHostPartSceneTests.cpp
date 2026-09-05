@@ -3,10 +3,14 @@
 #include "Host/PartSegmentationHostFeature.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "Host/VtkAppHostSession.h"
+#include "App/Services/FeatureViewService.h"
 
 #include <vtkCommand.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkRenderer.h>
+#include <vtkWin32OpenGLRenderWindow.h>
+#include <vtkObjectFactory.h>
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +19,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -26,6 +31,28 @@ namespace {
 constexpr auto featureId = "PartSegmentation";
 constexpr auto primaryViewId = "part-scene-primary";
 constexpr auto timerViewId = "part-scene-timer";
+
+class PartRenderWindow final : public vtkWin32OpenGLRenderWindow {
+public:
+    static PartRenderWindow* New();
+    vtkTypeMacro(PartRenderWindow, vtkWin32OpenGLRenderWindow);
+    void Render() override
+    {
+        if (isFailing) throw std::runtime_error("Part render retry probe");
+        vtkWin32OpenGLRenderWindow::Render();
+    }
+    bool isFailing = false;
+};
+vtkStandardNewMacro(PartRenderWindow);
+
+class PartViewProbe final : public HostFeature {
+public:
+    std::string_view GetFeatureId() const noexcept override { return "PartViewProbe"; }
+    bool AttachHost(const HostFeatureContext& context) override { views = context.views; return true; }
+    bool DetachHost() override { views.reset(); return true; }
+    bool OnHostTick() override { return true; }
+    std::shared_ptr<FeatureViewDirectory> views;
+};
 
 struct TestPartNode final {
     PartObjectId objectId;
@@ -59,6 +86,8 @@ HostSessionConfig GetSessionConfig()
     primary.window.viewInit.viewMode = HostRenderMode::CompositeIsoSurface;
     primary.window.viewInit.hasIso = true;
     primary.window.viewInit.isoThreshold = 0.5;
+    primary.inputMode = HostInputMode::HostInjected;
+    primary.renderWindow = vtkSmartPointer<PartRenderWindow>::New();
     config.renderViews.push_back(std::move(primary));
 
     HostRenderViewConfig timer;
@@ -72,6 +101,7 @@ HostSessionConfig GetSessionConfig()
 PartSegmentationConfig GetPartConfig()
 {
     PartSegmentationConfig config;
+    config.isSelectionEnabled = true;
     config.defaultStart.targetViews.viewIds = { primaryViewId };
     config.defaultStart.threshold = 0.5;
     config.defaultStart.minPartVoxels = 1;
@@ -284,8 +314,9 @@ int GetPartSceneFailCount()
     VtkAppHostSession session(GetSessionConfig());
     auto feature = std::make_shared<PartSegmentationHostFeature>(
         GetPartConfig());
+    auto viewProbe = std::make_shared<PartViewProbe>();
     const bool isBuilt = session.BuildSession();
-    const bool isAttached = isBuilt && session.AttachFeature(feature);
+    const bool isAttached = isBuilt && session.AttachFeature(feature) && session.AttachFeature(viewProbe);
     const auto* primary = session.GetRenderViewEndpoint(primaryViewId);
     const auto* timer = session.GetRenderViewEndpoint(timerViewId);
     if (!isAttached || !primary || !timer
@@ -313,7 +344,7 @@ int GetPartSceneFailCount()
     const auto firstResult = isLoaded
         ? StartPart(*feature, *primary, *timer)
         : std::nullopt;
-    const auto firstSnapshot = feature->GetPartSetSnapshot();
+    auto firstSnapshot = feature->GetPartSetSnapshot();
     const auto scenes = session.GetSceneViewStates();
     const auto primaryScene = session.GetSceneViewState({
         primaryViewId, false, HostRenderViewRole::Primary3D });
@@ -353,6 +384,78 @@ int GetPartSceneFailCount()
         return failureCount;
     }
 
+    const auto joined = session.GetStateSnapshot();
+    bool hasWrongThreadSnapshot = true;
+    std::thread reader([&] { hasWrongThreadSnapshot = session.GetStateSnapshot().has_value(); });
+    reader.join();
+    failureCount += GetCaseResult(joined && !hasWrongThreadSnapshot
+        && joined->sessionGeneration != 0 && joined->operations.size() == 1
+        && joined->operations.front().status == FeatureRunStatus::Succeeded
+        && joined->operations.front().outputs.size() == 3
+        && primaryScene->displays.size() == 1
+        && primaryScene->displays.front().operation == joined->operations.front().operation,
+        "Combined snapshot correlates published operations and displays on owner thread") ? 0 : 1;
+
+    HostSemanticTarget oldTarget;
+    if (!primaryScene->displays.empty()) oldTarget.display = primaryScene->displays.front();
+    oldTarget.sceneEpoch = primaryScene->sceneEpoch;
+    oldTarget.resultRevision = firstSnapshot->resultRevision;
+    constexpr char digits[] = "0123456789abcdef";
+    oldTarget.objectId.assign(32, '0');
+    const auto objectId = firstSnapshot->parts.front().binding.object.objectId;
+    for (std::size_t index = 0; index < 16; ++index) {
+        oldTarget.objectId[15 - index] = digits[(objectId.high >> (index * 4)) & 15U];
+        oldTarget.objectId[31 - index] = digits[(objectId.low >> (index * 4)) & 15U];
+    }
+    auto* renderer = primary->renderer;
+    const auto point = firstSnapshot->parts.front().metrics.centroidInputPhysical;
+    const auto port = viewProbe->views->GetFeaturePort(primaryViewId);
+    const auto modelToWorld = port->GetModelToWorld();
+    std::array<double, 3> world = point;
+    if (modelToWorld) {
+        for (std::size_t row = 0; row < 3; ++row) {
+            world[row] = (*modelToWorld)[row * 4 + 3];
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                world[row] += (*modelToWorld)[row * 4 + axis] * point[axis];
+        }
+    }
+    renderer->SetWorldPoint(world[0], world[1], world[2], 1.0);
+    renderer->WorldToDisplay();
+    const auto* pixel = renderer->GetDisplayPoint();
+    const int x = static_cast<int>(pixel[0]);
+    const int y = static_cast<int>(pixel[1]);
+    const auto sendPointer = [&](const HostInputKind kind) {
+        return session.GetInputEndpoint()->SendInput({ primaryViewId, kind, x, y });
+    };
+    const auto cancelledPress = sendPointer(HostInputKind::PrimaryPress);
+    const auto cancel = sendPointer(HostInputKind::Cancel);
+    const auto cancelled = session.GetStateSnapshot();
+    failureCount += GetCaseResult(cancelledPress.isHandled && cancel.isSucceeded && cancelled
+        && joined && cancelled->graphCommitId == joined->graphCommitId
+        && feature->GetPartSetSnapshot()->catalogRevision == firstSnapshot->catalogRevision,
+        "Cancel discards the real Part preview without publishing a data revision") ? 0 : 1;
+    (void)sendPointer(HostInputKind::PrimaryPress);
+    for (int move = 0; move < 4; ++move) (void)sendPointer(HostInputKind::PointerMove);
+    const auto preview = session.GetStateSnapshot();
+    const auto previewCatalog = feature->GetPartSetSnapshot();
+    (void)sendPointer(HostInputKind::PrimaryRelease);
+    const auto selected = feature->GetPartSetSnapshot();
+    if (!selected || selected->catalogRevision == firstSnapshot->catalogRevision) {
+        std::cerr << "Semantic pick diagnostic: pixel=" << x << ',' << y
+            << " world=" << point[0] << ',' << point[1] << ',' << point[2]
+            << " display=" << primaryScene->displays.size()
+            << " epoch=" << primaryScene->sceneEpoch << '/' << primaryScene->renderedEpoch
+            << " previewGraph=" << (preview ? preview->graphCommitId : 0)
+            << " beforeGraph=" << (joined ? joined->graphCommitId : 0) << '\n';
+    }
+    failureCount += GetCaseResult(joined && preview && previewCatalog && selected
+        && preview->graphCommitId == joined->graphCommitId
+        && previewCatalog->catalogRevision == firstSnapshot->catalogRevision
+        && selected->catalogRevision == firstSnapshot->catalogRevision + 1
+        && selected->parts.front().presentation.isSelected,
+        "Real Part picking keeps drag preview transient and commits one selection on Release") ? 0 : 1;
+    firstSnapshot = selected;
+    (void)SendTimer(timer->interactor);
     const auto firstTree = BuildTree(firstSnapshot);
     failureCount += GetCaseResult(
         firstTree.partSet
@@ -407,10 +510,47 @@ int GetPartSceneFailCount()
             && renderedMutation->renderedEpoch == renderedMutation->sceneEpoch,
         "Part presentation mutation renders through the owner frame") ? 0 : 1;
 
-    const auto replacementResult = StartPart(*feature, *primary, *timer);
+    auto* renderProbe = PartRenderWindow::SafeDownCast(primary->renderWindow);
+    renderProbe->isFailing = true;
+    HostViewSetRequest appearance;
+    appearance.targetView = { primaryViewId, false, HostRenderViewRole::Primary3D };
+    appearance.background = HostBackgroundColor{ 0.13, 0.17, 0.21 };
+    (void)session.SendRequest(std::move(appearance));
+    (void)SendTimer(timer->interactor);
+    auto replacement = std::make_shared<std::optional<PartSegmentationResult>>();
+    PartSegmentationRequest replacementRequest;
+    replacementRequest.action = PartSegmentationAction::Start;
+    const auto replacementAdmission = feature->SendRequest(replacementRequest,
+        [replacement](PartSegmentationResult value) { *replacement = std::move(value); });
+    const auto oldScene = session.GetSceneViewState({ primaryViewId, false, HostRenderViewRole::Primary3D });
+    std::optional<HostStateSnapshot> ready;
+    for (int poll = 0; poll < 5000; ++poll) {
+        ready = session.GetStateSnapshot();
+        if (ready && std::any_of(ready->operations.begin(), ready->operations.end(),
+            [&](const auto& value) { return value.operation.requestId == replacementAdmission.requestId
+                && value.status == FeatureRunStatus::Ready; })) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto sameReady = session.GetStateSnapshot();
+    failureCount += GetCaseResult(ready && sameReady && ready->operations.size() == 2
+        && ready->operations.front().status == FeatureRunStatus::Ready
+        && ready->operations.front().outputs.empty()
+        && ready->operations.front().stateRevision == sameReady->operations.front().stateRevision
+        && oldScene && ready->scenes.front().sceneEpoch == oldScene->sceneEpoch
+        && oldScene->renderedEpoch < oldScene->sceneEpoch
+        && ready->scenes.front().displays == oldScene->displays && !replacement->has_value(),
+        "Worker Ready advances during RenderPending while the committed old display remains") ? 0 : 1;
+    renderProbe->isFailing = false;
+    const bool replacementPumped = replacementAdmission.status == PartAdmissionStatus::Accepted
+        && PumpUntil(*primary, *timer, [replacement] { return replacement->has_value(); });
+    const auto replacementResult = replacementPumped ? *replacement : std::nullopt;
     const auto replacementSnapshot = feature->GetPartSetSnapshot();
     const auto* replacementPart = replacementSnapshot
         ? GetPartByObject(*replacementSnapshot, firstObject) : nullptr;
+    failureCount += GetCaseResult(replacementSnapshot
+        && feature->SetPartState(oldTarget, PartStatePatch{}, replacementSnapshot->catalogRevision).status
+            == PartMutationStatus::StaleReference,
+        "Semantic target from result A cannot mutate replacement B with the same stable object") ? 0 : 1;
     failureCount += GetCaseResult(
         replacementResult
             && replacementResult->status == PartResultStatus::Succeeded

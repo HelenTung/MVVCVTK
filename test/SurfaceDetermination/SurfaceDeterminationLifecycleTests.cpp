@@ -126,7 +126,9 @@ public:
 
     bool SendSceneDelta(FeatureSceneDelta delta) override
     {
-        return delta.requestId != 0 && !delta.viewIds.empty();
+        if (delta.requestId == 0 || delta.viewIds.empty()) return false;
+        lastDelta = std::move(delta);
+        return true;
     }
 
     bool SendOwnerComplete(std::function<void()> complete) override
@@ -137,6 +139,7 @@ public:
     }
 
     std::vector<std::string> activeViews;
+    FeatureSceneDelta lastDelta;
     bool isActiveViewsRejected = false;
 };
 
@@ -234,6 +237,16 @@ void TestSuccessVisibilityAndClear(Checks& checks)
         "start completes on owner tick");
     const auto state = feature->GetState();
     const auto snapshot = feature->GetSurfaceSnapshot();
+    const auto operations = feature->GetOperationStates();
+    const auto repeated = feature->GetOperationStates();
+    checks.Get(operations.size() == 1 && repeated.size() == 1
+        && operations.front().operation.requestId == admission.requestId
+        && operations.front().status == FeatureRunStatus::Succeeded
+        && operations.front().stateRevision == repeated.front().stateRevision
+        && operations.front().inputs.size() == 1 && operations.front().outputs.size() == 2
+        && testHost.host->lastDelta.hasDisplayUpdate && testHost.host->lastDelta.displays.size() == 1
+        && testHost.host->lastDelta.displays.front().operation == operations.front().operation,
+        "Surface operation and adopted mesh share a stable execution identity");
     checks.Get(
         completed.status == SurfaceResultStatus::Succeeded
             && state.stage == SurfaceDeterminationStage::Ready,

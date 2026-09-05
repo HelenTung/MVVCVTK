@@ -230,6 +230,7 @@ public:
         CropHostRequest request,
         CropBuildCallback onComplete);
     CropHostState GetState() const;
+    std::vector<FeatureOperationState> GetOperationStates() const;
 
 private:
     bool StartCrop(const CropHostTarget& target);
@@ -294,6 +295,9 @@ private:
     std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     CropHostState m_dataState;
+    FeatureOperationState m_operation;
+    FeatureOperationState m_resultOperation;
+    bool m_isBuildPending = false;
     std::optional<CropHostTarget> m_activeTarget;
     std::vector<std::string> m_activeViewIds;
     std::optional<CropHistoryState> m_status;
@@ -330,6 +334,9 @@ bool CropHostFeature::Impl::AttachHost(
     m_ownerThread = std::this_thread::get_id();
     m_dataState = {};
 
+    m_operation = {};
+    m_resultOperation = {};
+    m_isBuildPending = false;
     if (!m_config.inputViews.viewIds.empty()
         || !m_config.inputViews.viewRoles.empty()) {
         std::weak_ptr<CropHostFeature> weakOwner =
@@ -1023,6 +1030,18 @@ bool CropHostFeature::Impl::SendSceneDelta(
     delta.requestId = GetNextSceneRequestId();
     delta.priority = priority;
     delta.scope = FeatureSceneScope::RequiredAllViews;
+    delta.hasDisplayUpdate = true;
+    // shader 预览使用已采用主体；只有正式派生体真正成为主体时才报告结果展示。
+    delta.inputs = { { "source-volume", inputStamp->dataRevision } };
+    if (inputStamp->dataRevision == m_dataState.outputRevision
+        && m_resultOperation.operation.requestId != 0) {
+        delta.inputs = m_resultOperation.inputs;
+        delta.inputs.push_back({ "crop-recipe", m_dataState.recipeRevision });
+        delta.inputs.push_back({ "derived-image", m_dataState.outputRevision });
+        for (const auto& viewId : m_activeViewIds)
+            delta.displays.push_back({ viewId, std::string(kFeatureId), "crop-result",
+                m_dataState.outputRevision, m_resultOperation.operation });
+    }
     return m_host->SendSceneDelta(std::move(delta));
 }
 
@@ -1177,6 +1196,14 @@ bool CropHostFeature::Impl::BuildCropResult(
 
     const std::weak_ptr<CompleteState> weakState = state;
     const std::weak_ptr<CompleteItem> weakItem = item;
+    const auto previousOperation = m_operation;
+    const bool wasBuildPending = m_isBuildPending;
+    m_operation = {};
+    m_operation.operation = { std::string(kFeatureId), m_host->GetAttachmentId(), GetNextSceneRequestId() };
+    m_operation.stateRevision = 1;
+    m_operation.status = FeatureRunStatus::Preparing;
+    m_operation.inputs = { { source->image ? "source-volume" : "source-mesh", source->data->self } };
+    m_isBuildPending = true;
     auto onResult =
         [this, source = *source, resultBinding,
             weakState, weakItem](
@@ -1185,6 +1212,14 @@ bool CropHostFeature::Impl::BuildCropResult(
             const auto item = weakItem.lock();
             auto result = SetBuildResult(
                 source, resultBinding, std::move(candidate));
+            m_isBuildPending = false;
+            m_operation.status = result.isSucceeded ? FeatureRunStatus::Succeeded : FeatureRunStatus::Failed;
+            m_operation.stateRevision = 4;
+            m_operation.progress = result.isSucceeded ? 1.0 : 0.0;
+            if (result.isSucceeded) {
+                m_operation.outputs = { result.recipeRevision, result.outputRevision };
+                m_resultOperation = m_operation;
+            }
             if (!Impl::SetCompleteResult(
                     state,
                     item,
@@ -1199,6 +1234,8 @@ bool CropHostFeature::Impl::BuildCropResult(
         // Bridge 可以在同步校验失败时先回传内部结果；入口返回 false 时必须丢弃，
         // 保证未接纳请求的外部 callback 永远不会在后续 tick 泄漏。
         (void)RemoveComplete(state, item);
+        m_operation = previousOperation;
+        m_isBuildPending = wasBuildPending;
     }
     return isAccepted;
 }
@@ -1329,6 +1366,28 @@ CropHostState CropHostFeature::Impl::GetState() const
         && m_bridge->GetCropActive();
     state.isPublishing = m_isPublishing;
     return state;
+}
+
+std::vector<FeatureOperationState> CropHostFeature::Impl::GetOperationStates() const
+{
+    if (!m_isAttached || m_ownerThread != std::this_thread::get_id()) return {};
+    std::vector<FeatureOperationState> states;
+    if (m_operation.operation.requestId != 0) {
+        auto state = m_operation;
+        if (m_isBuildPending && m_bridge) {
+            const auto execution = m_bridge->GetExecutionState();
+            if (execution.status != FeatureRunStatus::Idle) {
+                state.status = execution.status;
+                state.progress = execution.progress;
+                state.stateRevision = execution.stateRevision;
+            }
+        }
+        states.push_back(std::move(state));
+    }
+    if (m_resultOperation.operation.requestId != 0
+        && m_resultOperation.operation.requestId != m_operation.operation.requestId)
+        states.push_back(m_resultOperation);
+    return states;
 }
 
 std::optional<std::size_t>
@@ -1686,4 +1745,9 @@ bool CropHostFeature::SendRequest(
 CropHostState CropHostFeature::GetState() const
 {
     return m_impl ? m_impl->GetState() : CropHostState{};
+}
+
+std::vector<FeatureOperationState> CropHostFeature::GetOperationStates() const
+{
+    return m_impl ? m_impl->GetOperationStates() : std::vector<FeatureOperationState>{};
 }

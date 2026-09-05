@@ -277,12 +277,35 @@ PartAdmissionStatus PartSegmentationService::Start(
         retainedSurfaceBytes
     };
     m_workReady.notify_one();
+    ++m_executionRevision;
     return PartAdmissionStatus::Accepted;
 }
 
 void PartSegmentationService::StopRequest() noexcept
 {
+    const std::lock_guard<std::mutex> lock(m_mutex);
     m_cancelRequested.store(true, std::memory_order_release);
+    ++m_executionRevision;
+}
+
+std::optional<FeatureOperationState> PartSegmentationService::GetExecutionState(
+    const std::uint64_t requestId) const
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (requestId == 0 || m_progressRequestId.load() != requestId) return std::nullopt;
+    FeatureOperationState state;
+    state.operation.requestId = requestId;
+    state.stateRevision = m_executionRevision;
+    state.progress = static_cast<double>(m_progressPermille.load()) / 1000.0;
+    if (m_complete) {
+        state.status = m_complete->status == PartResultStatus::Succeeded ? FeatureRunStatus::Ready
+            : m_complete->status == PartResultStatus::Cancelled ? FeatureRunStatus::Cancelled
+            : FeatureRunStatus::Failed;
+    }
+    else if (m_cancelRequested.load() && (m_job || m_isBusy)) state.status = FeatureRunStatus::Stopping;
+    else if (m_isBusy) state.status = FeatureRunStatus::Running;
+    else if (m_job) state.status = FeatureRunStatus::Preparing;
+    return state;
 }
 
 std::optional<PartLabelCandidate>
@@ -291,6 +314,7 @@ PartSegmentationService::GetComplete()
     const std::lock_guard<std::mutex> lock(m_mutex);
     auto complete = std::move(m_complete);
     m_complete.reset();
+    if (complete) ++m_executionRevision;
     return complete;
 }
 
@@ -341,6 +365,7 @@ void PartSegmentationService::SetProgress(
     const std::uint64_t requestId,
     const double progress) noexcept
 {
+    const std::lock_guard<std::mutex> lock(m_mutex);
     if (m_progressRequestId.load(std::memory_order_acquire)
         != requestId) {
         return;
@@ -357,6 +382,7 @@ void PartSegmentationService::SetProgress(
             std::memory_order_release,
             std::memory_order_relaxed)) {
     }
+    if (current < target) ++m_executionRevision;
 }
 
 void PartSegmentationService::WorkerLoop() noexcept
@@ -372,6 +398,7 @@ void PartSegmentationService::WorkerLoop() noexcept
             job = std::move(*m_job);
             m_job.reset();
             m_isBusy = true;
+            ++m_executionRevision;
         }
 
         PartLabelCandidate candidate = BuildCandidate(job);
@@ -379,6 +406,7 @@ void PartSegmentationService::WorkerLoop() noexcept
             const std::lock_guard<std::mutex> lock(m_mutex);
             m_isBusy = false;
             m_complete = std::move(candidate);
+            ++m_executionRevision;
         }
     }
 

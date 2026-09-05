@@ -136,6 +136,9 @@ public:
         std::string featureId;
         HostViewTargets targets;
         HostCallback callback;
+        std::function<std::optional<HostSemanticTarget>(const InteractionEvent&)> getTarget;
+        std::function<InteractionResult(const InteractionEvent&,
+            const HostSemanticTarget&)> onTargetInput;
         InputPhase phase = InputPhase::FeatureTool;
     };
 
@@ -172,12 +175,14 @@ public:
             std::shared_ptr<Binding> binding,
             std::string viewId,
             HostRenderViewRole role,
-            InteractionEventKind releaseKind)
+            InteractionEventKind releaseKind,
+            std::optional<HostSemanticTarget> target)
             : m_owner(std::move(owner))
             , m_binding(std::move(binding))
             , m_viewId(std::move(viewId))
             , m_role(role)
             , m_releaseKind(releaseKind)
+            , m_target(std::move(target))
         {
         }
 
@@ -199,7 +204,7 @@ public:
             const auto owner = m_owner.lock();
             return owner && m_binding
                 ? owner->SendCaptured(
-                    *m_binding, event, m_viewId, m_role)
+                    *m_binding, event, m_viewId, m_role, m_target)
                 : GetRouteFailure(event.eventKind);
         }
 
@@ -210,6 +215,7 @@ public:
         HostRenderViewRole m_role = HostRenderViewRole::Auxiliary;
         InteractionEventKind m_releaseKind =
             InteractionEventKind::PrimaryRelease;
+        std::optional<HostSemanticTarget> m_target;
     };
 
     explicit Impl(std::weak_ptr<IHostViewDirectory> directory)
@@ -256,12 +262,14 @@ private:
         const Binding& binding,
         const InteractionEvent& event,
         const std::string& viewId,
-        HostRenderViewRole role);
+        HostRenderViewRole role,
+        const std::optional<HostSemanticTarget>& target);
     InteractionResult SendBinding(
         const Binding& binding,
         const InteractionEvent& event,
         const std::string& viewId,
-        HostRenderViewRole role);
+        HostRenderViewRole role,
+        const std::optional<HostSemanticTarget>& target = {});
 
     std::weak_ptr<IHostViewDirectory> m_directory;
     const std::uint64_t m_domain;
@@ -367,7 +375,9 @@ bool HostInputRegistry::Impl::Start(const HostViewTargets& allViews)
 bool HostInputRegistry::Impl::AttachInput(HostInputBinding binding)
 {
     if (!m_isStarted || m_dispatchDepth != 0
-        || binding.featureId.empty() || !binding.onInput
+        || binding.featureId.empty()
+        || (!binding.onInput && !binding.onTargetInput)
+        || static_cast<bool>(binding.getTarget) != static_cast<bool>(binding.onTargetInput)
         || !GetTargetsValid(binding.targetViews)) {
         return false;
     }
@@ -384,11 +394,13 @@ bool HostInputRegistry::Impl::AttachInput(HostInputBinding binding)
         value->featureId = std::move(binding.featureId);
         value->targets = std::move(binding.targetViews);
         value->phase = InputPhase::FeatureTool;
+        value->getTarget = std::move(binding.getTarget);
+        value->onTargetInput = std::move(binding.onTargetInput);
         value->callback = [callback = std::move(binding.onInput)](
             const InteractionEvent& event,
             const std::string&,
             HostRenderViewRole) {
-            return callback(event);
+            return callback ? callback(event) : InteractionResult{};
         };
         m_featureBindings.push_back(std::move(value));
         return true;
@@ -471,10 +483,12 @@ InteractionResult HostInputRegistry::Impl::SendBinding(
     const Binding& binding,
     const InteractionEvent& event,
     const std::string& viewId,
-    const HostRenderViewRole role)
+    const HostRenderViewRole role,
+    const std::optional<HostSemanticTarget>& target)
 {
     if (!binding.callback) return {};
     try {
+        if (target && binding.onTargetInput) return binding.onTargetInput(event, *target);
         return binding.callback(event, viewId, role);
     }
     catch (...) {
@@ -488,7 +502,8 @@ InteractionResult HostInputRegistry::Impl::SendCaptured(
     const Binding& binding,
     const InteractionEvent& event,
     const std::string& viewId,
-    const HostRenderViewRole role)
+    const HostRenderViewRole role,
+    const std::optional<HostSemanticTarget>& target)
 {
     if (m_dispatchDepth != 0) {
         return GetRouteFailure(event.eventKind);
@@ -496,7 +511,7 @@ InteractionResult HostInputRegistry::Impl::SendCaptured(
     DispatchGuard guard(m_dispatchDepth);
     auto routedEvent = event;
     routedEvent.viewId = viewId;
-    return SendBinding(binding, routedEvent, viewId, role);
+    return SendBinding(binding, routedEvent, viewId, role, target);
 }
 
 InteractionDispatch HostInputRegistry::Impl::Route(
@@ -538,14 +553,24 @@ InteractionDispatch HostInputRegistry::Impl::Route(
     const std::weak_ptr<Impl> weakOwner = shared_from_this();
     for (const auto& binding : candidates) {
         std::unique_ptr<IInteractionCapture> capture;
+        std::optional<HostSemanticTarget> target;
         if (isPress) {
             try {
+                if (binding->getTarget) {
+                    target = binding->getTarget(routedEvent);
+                    if (target && (target->display.viewId != viewId
+                        || target->display.featureId != binding->featureId
+                        || target->objectId.empty() || target->sceneEpoch == 0)) {
+                        MergeResult(aggregate, GetRouteFailure(event.eventKind));
+                        return { aggregate, nullptr };
+                    }
+                }
                 capture = std::make_unique<BindingCapture>(
                     weakOwner,
                     binding,
                     viewId,
                     role,
-                    GetReleaseKind(event.eventKind));
+                    GetReleaseKind(event.eventKind), target);
             }
             catch (...) {
                 MergeResult(aggregate, GetRouteFailure(event.eventKind));
@@ -554,7 +579,7 @@ InteractionDispatch HostInputRegistry::Impl::Route(
         }
 
         const auto current = SendBinding(
-            *binding, routedEvent, viewId, role);
+            *binding, routedEvent, viewId, role, target);
         MergeResult(aggregate, current);
         if (isPress && current.isHandled) {
             return {

@@ -21,6 +21,8 @@
 #include <functional>
 #include <iostream>
 #include <list>
+#include <limits>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -90,6 +92,11 @@ public:
 
     struct PendingStopEntry;
 
+    struct FeatureLifetime final {
+        std::uint64_t id = 0;
+        std::atomic<bool> isActive{ true };
+    };
+
     struct FeatureEntry final {
         std::string id;
         // attached Feature 属于 Session aggregate；只有 Detach/Stop 成功后才释放，
@@ -97,6 +104,7 @@ public:
         std::shared_ptr<HostFeature> feature;
         // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
         bool isHostDetached = false;
+        std::shared_ptr<FeatureLifetime> lifetime;
     };
 
     class InputEndpoint final : public HostInputEndpoint {
@@ -216,7 +224,8 @@ public:
 
         bool SendSceneDelta(
             const std::string& featureId,
-            FeatureSceneDelta delta)
+            FeatureSceneDelta delta,
+            const std::shared_ptr<FeatureLifetime>& lifetime)
         {
             std::shared_ptr<HostFrameCoordinator> frames;
             {
@@ -225,7 +234,16 @@ public:
                 frames = m_frames.lock();
             }
             return frames
-                && frames->Enqueue(featureId, std::move(delta));
+                && lifetime && lifetime->isActive.load()
+                && frames->Enqueue(featureId, std::move(delta), lifetime->id,
+                    std::shared_ptr<const std::atomic<bool>>(lifetime, &lifetime->isActive));
+        }
+
+        std::optional<HostSceneViewState> GetSceneViewState(const std::string& viewId) const
+        {
+            const auto ports = GetOwnerPorts();
+            return ports.views ? ports.views->GetSceneViewState(
+                { viewId, false, HostRenderViewRole::Auxiliary }) : std::nullopt;
         }
 
         bool AttachInput(HostInputBinding binding)
@@ -544,16 +562,19 @@ public:
         FeatureHostControlPort(
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
-            std::weak_ptr<OwnerCompleteState> completeState)
+            std::weak_ptr<OwnerCompleteState> completeState,
+            std::shared_ptr<FeatureLifetime> lifetime)
             : m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_completeState(std::move(completeState))
+            , m_lifetime(std::move(lifetime))
         {
         }
 
         bool SetActiveViews(
             const std::vector<std::string>& viewIds) override
         {
+            if (GetAttachmentId() == 0) return false;
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SetActiveViews(m_featureId, viewIds);
@@ -563,6 +584,7 @@ public:
             const std::vector<std::string>& viewIds,
             const std::string& status) override
         {
+            if (GetAttachmentId() == 0) return false;
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SetViewStatus(viewIds, status);
@@ -570,16 +592,69 @@ public:
 
         bool SendSceneDelta(FeatureSceneDelta delta) override
         {
+            if (!m_lifetime || !m_lifetime->isActive.load()) return false;
+            for (auto& display : delta.displays) {
+                if ((!display.featureId.empty() && display.featureId != m_featureId)
+                    || (!display.operation.featureId.empty()
+                        && display.operation.featureId != m_featureId)
+                    || (display.operation.attachmentId != 0
+                        && display.operation.attachmentId != m_lifetime->id)) return false;
+                display.featureId = m_featureId;
+                display.operation.featureId = m_featureId;
+                display.operation.attachmentId = m_lifetime->id;
+            }
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SendSceneDelta(
-                    m_featureId, std::move(delta));
+                    m_featureId, std::move(delta), m_lifetime);
+        }
+
+        std::uint64_t GetAttachmentId() const noexcept override
+        {
+            return m_lifetime && m_lifetime->isActive.load() ? m_lifetime->id : 0;
+        }
+
+        std::optional<HostSemanticTarget> GetDisplayTarget(
+            const std::string& viewId, const std::string& localId) const override
+        {
+            const auto bridge = m_bridge.lock();
+            const auto scene = GetAttachmentId() != 0 && bridge
+                ? bridge->GetSceneViewState(viewId) : std::nullopt;
+            if (!scene || !scene->isAvailable || scene->sceneEpoch == 0
+                || scene->renderedEpoch < scene->sceneEpoch) return std::nullopt;
+            for (const auto& display : scene->displays) {
+                if (display.featureId == m_featureId && display.localId == localId
+                    && display.operation.attachmentId == GetAttachmentId()) {
+                    return HostSemanticTarget{ display, {}, scene->sceneEpoch, 0 };
+                }
+            }
+            return std::nullopt;
+        }
+
+        bool GetSemanticTargetValid(const HostSemanticTarget& target) const override
+        {
+            return GetTargetValid(m_bridge, m_lifetime, m_featureId, target);
         }
 
         bool AttachInput(HostInputBinding binding) override
         {
-            if (binding.featureId != m_featureId) {
+            if (GetAttachmentId() == 0 || binding.featureId != m_featureId) {
                 return false;
+            }
+            if (binding.getTarget && binding.onTargetInput) {
+                binding.onTargetInput = [callback = std::move(binding.onTargetInput),
+                    bridge = m_bridge, lifetime = m_lifetime, id = m_featureId](
+                    const InteractionEvent& event, const HostSemanticTarget& target) {
+                    if (event.eventKind == InteractionEventKind::Cancel)
+                        return callback(event, target);
+                    if (!GetTargetValid(bridge, lifetime, id, target)) {
+                        auto cancel = event;
+                        cancel.eventKind = InteractionEventKind::Cancel;
+                        (void)callback(cancel, target);
+                        return InteractionResult{ true, true, false, InteractionFailureReason::StateRejected };
+                    }
+                    return callback(event, target);
+                };
             }
             const auto bridge = m_bridge.lock();
             return bridge
@@ -589,7 +664,7 @@ public:
         bool DetachInput(
             const std::string_view featureId) override
         {
-            if (featureId != std::string_view(m_featureId)) {
+            if (GetAttachmentId() == 0 || featureId != std::string_view(m_featureId)) {
                 return false;
             }
             const auto bridge = m_bridge.lock();
@@ -601,7 +676,7 @@ public:
             std::function<void()> complete) override
         {
             const auto state = m_completeState.lock();
-            if (!state || !complete) {
+            if (!state || !complete || GetAttachmentId() == 0) {
                 return false;
             }
             const std::lock_guard<std::mutex> lock(state->mutex);
@@ -613,9 +688,23 @@ public:
         }
 
     private:
+        static bool GetTargetValid(const std::weak_ptr<FeatureHostBridge>& weakBridge,
+            const std::shared_ptr<FeatureLifetime>& lifetime, const std::string& id,
+            const HostSemanticTarget& target)
+        {
+            if (!lifetime || !lifetime->isActive.load() || target.display.featureId != id
+                || target.sceneEpoch == 0 || target.objectId.empty() || target.resultRevision == 0
+                || target.display.operation.attachmentId != lifetime->id) return false;
+            const auto bridge = weakBridge.lock();
+            const auto scene = bridge ? bridge->GetSceneViewState(target.display.viewId) : std::nullopt;
+            return scene && scene->isAvailable && target.sceneEpoch <= scene->sceneEpoch
+                && std::find(scene->displays.begin(), scene->displays.end(), target.display)
+                    != scene->displays.end();
+        }
         std::weak_ptr<FeatureHostBridge> m_bridge;
         std::string m_featureId;
         std::weak_ptr<OwnerCompleteState> m_completeState;
+        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     explicit Impl(HostSessionConfig sessionConfig)
@@ -642,6 +731,7 @@ public:
     std::optional<HostSceneViewState> GetSceneViewState(
         const HostViewTarget& target);
     std::vector<HostSceneViewState> GetSceneViewStates();
+    std::optional<HostStateSnapshot> GetStateSnapshot() const;
     std::optional<ImageDescriptor> GetImageDescriptor();
     std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
     std::optional<LabelMapDescriptor> GetLabelMapDescriptor(const std::string& id);
@@ -713,6 +803,7 @@ private:
     static std::list<std::unique_ptr<PendingStopEntry>>
         s_pendingStops;
     static std::atomic<StopToken> s_nextStopToken;
+    static std::atomic<std::uint64_t> s_nextAttachmentId;
 };
 
 struct VtkAppHostSession::Impl::PendingStopEntry final {
@@ -726,6 +817,7 @@ std::list<std::unique_ptr<VtkAppHostSession::Impl::PendingStopEntry>>
 VtkAppHostSession::Impl::s_pendingStops;
 std::atomic<VtkAppHostSession::Impl::StopToken>
 VtkAppHostSession::Impl::s_nextStopToken{ 1 };
+std::atomic<std::uint64_t> VtkAppHostSession::Impl::s_nextAttachmentId{ 1 };
 
 HostCoreServices VtkAppHostSession::Impl::BuildCore()
 {
@@ -1293,6 +1385,64 @@ VtkAppHostSession::Impl::GetSceneViewStates()
     return renderViews.GetSceneViewStates();
 }
 
+std::optional<HostStateSnapshot> VtkAppHostSession::Impl::GetStateSnapshot() const
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!isBuilt || ownerThread != std::this_thread::get_id()
+        || stopState.load() != HostStopState::Running || !frameCoordinator
+        || !core.sharedDataMgr) return std::nullopt;
+    try {
+        HostStateSnapshot snapshot;
+        snapshot.sessionGeneration = frameCoordinator->GetSessionGeneration();
+        // 保留本次挂载的 owner，避免不遵守纯查询契约的 Feature 重入使迭代器悬空。
+        const auto entries = features;
+        for (const auto& entry : entries) {
+            if (entry.isHostDetached || !entry.feature || !entry.lifetime
+                || !entry.lifetime->isActive.load()) continue;
+            auto operations = entry.feature->GetOperationStates();
+            if (!entry.lifetime->isActive.load() || !isBuilt
+                || stopState.load() != HostStopState::Running) return std::nullopt;
+            std::vector<std::uint64_t> requestIds;
+            for (auto& state : operations) {
+                if (state.operation.requestId == 0 || state.stateRevision == 0
+                    || static_cast<unsigned>(state.status) > static_cast<unsigned>(FeatureRunStatus::Stopping)
+                    || (!state.operation.featureId.empty() && state.operation.featureId != entry.id)
+                    || (state.operation.attachmentId != 0
+                        && state.operation.attachmentId != entry.lifetime->id)
+                    || !std::isfinite(state.progress) || state.progress < 0.0 || state.progress > 1.0
+                    || std::find(requestIds.begin(), requestIds.end(), state.operation.requestId)
+                        != requestIds.end()) return std::nullopt;
+                std::vector<std::string> roles;
+                for (const auto& input : state.inputs) {
+                    if (input.role.empty() || !GetDataRevisionRefValid(input.source)
+                        || std::find(roles.begin(), roles.end(), input.role) != roles.end()) return std::nullopt;
+                    roles.push_back(input.role);
+                }
+                if (std::any_of(state.outputs.begin(), state.outputs.end(),
+                    [](const auto& output) { return !GetDataRevisionRefValid(output); })) return std::nullopt;
+                requestIds.push_back(state.operation.requestId);
+                state.operation.featureId = entry.id;
+                state.operation.attachmentId = entry.lifetime->id;
+                snapshot.operations.push_back(std::move(state));
+            }
+        }
+        if (features.size() != entries.size()) return std::nullopt;
+        snapshot.scenes = renderViews.GetSceneViewStates();
+        const auto graph = core.sharedDataMgr->GetDataGraph();
+        snapshot.graphCommitId = graph.commitId;
+        for (const auto& operation : snapshot.operations) {
+            for (const auto& output : operation.outputs) {
+                const auto data = graph.view ? graph.view->GetData(output) : nullptr;
+                if (!data || data->self != output) return std::nullopt;
+            }
+        }
+        return snapshot;
+    }
+    catch (...) {
+        return std::nullopt;
+    }
+}
+
 bool VtkAppHostSession::Impl::DetachTimer()
 {
     bool isCleared = true;
@@ -1505,7 +1655,14 @@ bool VtkAppHostSession::Impl::AttachFeature(
     const std::weak_ptr<FeatureHostBridge> weakBridge =
         featureBridge;
     HostFeatureContext context;
+    std::shared_ptr<FeatureLifetime> lifetime;
+    auto attachmentId = s_nextAttachmentId.load();
+    do {
+        if (attachmentId == std::numeric_limits<std::uint64_t>::max()) return false;
+    } while (!s_nextAttachmentId.compare_exchange_weak(attachmentId, attachmentId + 1));
     try {
+        lifetime = std::make_shared<FeatureLifetime>();
+        lifetime->id = attachmentId;
         context.views =
             std::make_shared<FeatureViewDirectoryPort>(weakBridge);
         context.read = std::make_shared<FeatureReadPort>(core);
@@ -1513,7 +1670,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            ownerCompleteState);
+            ownerCompleteState, lifetime);
     }
     catch (...) {
         return false;
@@ -1525,6 +1682,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         }
         catch (...) {
         }
+        lifetime->isActive = false;
         try {
             (void)inputRegistry->GetFeaturePort().DetachInput(id);
         }
@@ -1547,7 +1705,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
             [](const FeatureEntry& entry, const std::string& value) {
                 return entry.id < value;
             });
-        features.insert(insertAt, FeatureEntry{ id, feature, false });
+        features.insert(insertAt, FeatureEntry{ id, feature, false, lifetime });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1597,6 +1755,7 @@ bool VtkAppHostSession::Impl::DetachFeature(
             return false;
         }
         entry->isHostDetached = true;
+        if (entry->lifetime) entry->lifetime->isActive = false;
     }
     if (!inputRegistry
         || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
@@ -1625,6 +1784,7 @@ bool VtkAppHostSession::Impl::DetachFeatures()
                 return false;
             }
             entry.isHostDetached = true;
+            if (entry.lifetime) entry.lifetime->isActive = false;
         }
         if (!inputRegistry
             || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {
@@ -2133,6 +2293,11 @@ VtkAppHostSession::GetSceneViewStates()
     return m_impl
         ? m_impl->GetSceneViewStates()
         : std::vector<HostSceneViewState>{};
+}
+
+std::optional<HostStateSnapshot> VtkAppHostSession::GetStateSnapshot() const
+{
+    return m_impl ? m_impl->GetStateSnapshot() : std::nullopt;
 }
 
 std::optional<ImageReadState>

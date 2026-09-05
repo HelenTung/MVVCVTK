@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -84,10 +85,11 @@ public:
     };
 
     struct BuildTask final {
-        std::future<CropMaterializationCandidate> result;
+        std::shared_future<CropMaterializationCandidate> result;
         std::thread worker;
         CropCandidateCallback callback;
         CropBuildParams params;
+        std::shared_ptr<std::atomic<std::uint64_t>> phase;
     };
 
     Impl();
@@ -120,6 +122,7 @@ public:
         CropInputSnapshot rootInput,
         CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
+    FeatureOperationState GetExecutionState() const;
     bool SendBuildResult();
     bool GetLeaseReady() const;
 
@@ -1514,11 +1517,16 @@ bool CropBridge::Impl::BuildCropResult(
     }
 
     BuildTask active;
-    active.result = task->get_future();
+    active.result = task->get_future().share();
     active.callback = std::move(onComplete);
     active.params = std::move(params);
+    active.phase = std::make_shared<std::atomic<std::uint64_t>>(1);
     try {
-        active.worker = std::thread(std::move(*task));
+        active.worker = std::thread([task = std::move(*task), phase = active.phase]() mutable {
+            phase->store(2, std::memory_order_release);
+            task();
+            phase->store(3, std::memory_order_release);
+        });
     }
     catch (...) {
         active.callback(BuildResultFailure(
@@ -1555,6 +1563,28 @@ bool CropBridge::Impl::GetBuildTickNeeded() const
     return m_buildTask
         && m_buildTask->result.valid()
         && m_buildTask->result.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+}
+
+FeatureOperationState CropBridge::Impl::GetExecutionState() const
+{
+    FeatureOperationState state;
+    if (!m_buildTask || !m_buildTask->phase) return state;
+    state.stateRevision = m_buildTask->phase->load(std::memory_order_acquire);
+    state.status = state.stateRevision == 1 ? FeatureRunStatus::Preparing
+        : state.stateRevision == 2 ? FeatureRunStatus::Running : FeatureRunStatus::Ready;
+    if (state.status == FeatureRunStatus::Ready) {
+        try {
+            if (!m_buildTask->result.get().isSucceeded) state.status = FeatureRunStatus::Failed;
+        }
+        catch (...) { state.status = FeatureRunStatus::Failed; }
+    }
+    state.progress = state.status == FeatureRunStatus::Ready ? 1.0 : 0.0;
+    return state;
+}
+
+FeatureOperationState CropBridge::GetExecutionState() const
+{
+    return m_impl ? m_impl->GetExecutionState() : FeatureOperationState{};
 }
 
 bool CropBridge::Impl::SendBuildResult()

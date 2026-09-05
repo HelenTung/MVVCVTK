@@ -671,6 +671,7 @@ int GetGapFailCount()
                 callbackThread = std::this_thread::get_id();
             });
     const auto acceptedState = feature->GetState();
+    const auto acceptedOperations = feature->GetOperationStates();
     bool hasRejectedCallback = false;
     const bool isSecondRejected =
         !feature->SendRequest(
@@ -702,6 +703,18 @@ int GetGapFailCount()
             && callbackThread == ownerThread
             && !hasRejectedCallback,
         "Gap Start callback runs once on the owner thread") ? 0 : 1;
+    const auto gapOperations = feature->GetOperationStates();
+    const auto gapSnapshot = session.GetStateSnapshot();
+    failureCount += GetCaseResult(acceptedOperations.size() == 1 && gapOperations.size() == 1
+        && gapOperations.front().operation == acceptedOperations.front().operation
+        && gapOperations.front().status == FeatureRunStatus::Succeeded
+        && gapOperations.front().stateRevision > acceptedOperations.front().stateRevision
+        && gapOperations.front().inputs.size() == 1 && gapOperations.front().outputs.size() == 5
+        && gapSnapshot && std::any_of(gapSnapshot->scenes.begin(), gapSnapshot->scenes.end(),
+            [&](const auto& scene) { return std::any_of(scene.displays.begin(), scene.displays.end(),
+                [&](const auto& display) { return display.operation == gapOperations.front().operation
+                    && display.data == feature->GetState().resultSet; }); }),
+        "Gap snapshot joins worker outcome, published result set and actual displays") ? 0 : 1;
     failureCount += GetCaseResult(
         feature->GetState().statistics.voidVoxelCount > 0
             && feature->GetState().statistics.objectVoxelCount
