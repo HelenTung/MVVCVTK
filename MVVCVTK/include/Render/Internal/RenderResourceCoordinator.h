@@ -81,6 +81,9 @@ public:
     RenderTaskToken() = default;
     bool GetIsStopped() const noexcept;
     bool SetActualBytes(std::uint64_t actualBytes) const;
+    // 产品读者在取消/退役后仍存活时继续计费；不取得业务数据或渲染对象所有权。
+    bool SetProductOwner(const std::shared_ptr<const void>& product,
+        std::uint64_t actualBytes) const;
 
 private:
     class Impl;

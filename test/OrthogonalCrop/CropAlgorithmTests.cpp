@@ -12,6 +12,7 @@
 #include <vtkSmartPointer.h>
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <iostream>
@@ -539,6 +540,31 @@ bool StartImageBuildCase()
     return isPassed;
 }
 
+bool StartCancelledBuildCase()
+{
+    auto image = vtkSmartPointer<vtkImageData>::New();
+    image->SetDimensions(128, 32, 8);
+    image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
+    image->GetPointData()->GetScalars()->FillComponent(0, 7);
+    auto operation = BuildPlane(1);
+    operation.planeCenterInInputModel = {-1, 0, 0};
+    operation.planeNormalInInputModel = {1, 0, 0};
+    const auto params = BuildParams(operation);
+    const auto payload = BuildPayload(params.operations, params.nodeCount);
+    const auto before = CropAlgorithm::GetResult(
+        image, nullptr, params, payload, 0, [] { return true; });
+    std::atomic<int> checks{0};
+    const auto during = CropAlgorithm::GetResult(image, nullptr, params, payload, 0,
+        [&] { return checks.fetch_add(1) >= 8; });
+    const auto after = CropAlgorithm::GetResult(image, nullptr, params, payload);
+    return SetExpect(before.isCancelled && !before.isSucceeded && !before.maskImage
+        && during.isCancelled && !during.isSucceeded && !during.maskImage
+        && !during.imageData && checks.load() >= 9
+        && after.isSucceeded && after.maskImage
+        && image->GetPointData()->GetScalars()->GetComponent(0, 0) == 7,
+        "Cancellation before/during SMP publishes no partial mask and leaves input reusable.");
+}
+
 bool StartPolyBuildCase()
 {
     vtkNew<vtkCubeSource> cube;
@@ -552,12 +578,14 @@ bool StartPolyBuildCase()
         cube->GetOutput(),
         params,
         BuildPayload(params.operations, params.nodeCount));
+    const auto cancelled = CropAlgorithm::GetResult(cube->GetOutput(), params,
+        BuildPayload(params.operations, params.nodeCount), [] { return true; });
     double bounds[6] = {};
     if (result.polyData) {
         result.polyData->GetBounds(bounds);
     }
     return SetExpect(
-        result.isSucceeded
+        result.isSucceeded && cancelled.isCancelled && !cancelled.polyData
             && result.polyData
             && result.polyData.GetPointer() != cube->GetOutput()
             && result.polyData->GetNumberOfPoints() > 0
@@ -627,6 +655,7 @@ int CropAlgorithmSuite::GetFailCount() const
     failureCount += StartPrefixCase() ? 0 : 1;
     failureCount += StartSnapshotCase() ? 0 : 1;
     failureCount += StartImageBuildCase() ? 0 : 1;
+    failureCount += StartCancelledBuildCase() ? 0 : 1;
     failureCount += StartPolyBuildCase() ? 0 : 1;
     failureCount += StartRouterTaskCase() ? 0 : 1;
     return failureCount;

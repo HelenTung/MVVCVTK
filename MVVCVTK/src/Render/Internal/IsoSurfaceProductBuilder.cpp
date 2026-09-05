@@ -1,6 +1,7 @@
 #include "Render/Internal/IsoSurfaceProductBuilder.h"
 
 #include "Data/ImageProcessor.h"
+#include "Render/Internal/RenderWorkBudget.h"
 
 #include <vtkAlgorithm.h>
 #include <vtkCallbackCommand.h>
@@ -203,7 +204,82 @@ IsoSurfaceBuildResult GetFailure(
     return result;
 }
 
+template<typename Scalar>
+std::optional<std::uint64_t> GetActiveCells(vtkImageData* image,
+    const double isoValue, const RenderTaskToken& stopToken)
+{
+    const auto* values = static_cast<const Scalar*>(image->GetScalarPointer());
+    if (!values) return {};
+    const int* dims = image->GetDimensions();
+    vtkIdType inc[3]{};
+    image->GetIncrements(inc);
+    const std::array<vtkIdType, 8> corners{0, inc[0], inc[1], inc[1] + inc[0],
+        inc[2], inc[2] + inc[0], inc[2] + inc[1], inc[2] + inc[1] + inc[0]};
+    std::uint64_t count = 0;
+    for (int z = 0; z < dims[2] - 1; ++z) {
+        for (int y = 0; y < dims[1] - 1; ++y) {
+            for (int x = 0; x < dims[0] - 1; ++x) {
+                if (x % 4096 == 0 && stopToken.GetIsStopped()) return {};
+                const auto* cell = values + z * inc[2] + y * inc[1] + x * inc[0];
+                // 与 VTK 9.4.2 ProcessXEdge 相同：先转 double，再比较 >= iso。
+                const bool firstAbove = static_cast<double>(*cell) >= isoValue;
+                for (std::size_t corner = 1; corner < corners.size(); ++corner) {
+                    if ((static_cast<double>(cell[corners[corner]]) >= isoValue) != firstAbove) {
+                        ++count;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return count;
+}
+
+std::optional<std::uint64_t> GetMeshBytes(vtkImageData* image,
+    const double isoValue, const bool hasMask, const std::uint64_t imageBytes,
+    const RenderTaskToken& stopToken)
+{
+    std::optional<std::uint64_t> cells;
+    switch (image->GetScalarType()) {
+        vtkTemplateMacro(cells = GetActiveCells<VTK_TT>(image, isoValue, stopToken));
+    default: return {};
+    }
+    if (!cells || *cells > (std::numeric_limits<std::uint64_t>::max)() / 5) return {};
+    const auto triangles = *cells * 5; // 一个 MC cell 至多五个三角面。
+    const auto scalarBytes = static_cast<std::uint64_t>(image->GetScalarSize());
+    RenderWorkBudget budget;
+    budget.Add(1, imageBytes);
+    // 不依赖点去重：每三角形三点，float 坐标/scalar + connectivity/offset。
+    budget.Add(triangles, 3 * (3 * sizeof(float) + scalarBytes) + 4 * sizeof(vtkIdType));
+    budget.Add(1, sizeof(vtkIdType));
+    if (hasMask && triangles != 0) {
+        // 三角形 clip 最多形成四边形（两个三角形）；同时保留 FE 输出、
+        // clip scalar、点定位表和三个预分配 cell array，按不共享新点保守计入。
+        budget.Add(triangles, 6 * (3 * sizeof(double) + scalarBytes
+            + sizeof(float) + 4 * sizeof(vtkIdType)) + 16 * sizeof(vtkIdType));
+        budget.Add(1, 2ULL * 1024 * 1024); // 默认 merge-points 桶和小量容器余量。
+    }
+    return budget.GetBytes();
+}
+
 } // namespace
+
+std::optional<std::uint64_t> IsoSurfaceProductBuilder::GetEstimatedBytes(
+    const IsoSurfaceBuildRequest& request)
+{
+    if (!request.input) return {};
+    const auto& dims = request.key.outputDimensions;
+    const auto count = RenderWorkBudget::GetVoxelCount(dims);
+    if (!count) return {};
+    RenderWorkBudget budget;
+    budget.AddGrid(request.input, dims);
+    budget.AddGrid(request.mask, dims);
+    // FlyingEdges 的 XCases 字节数组和每条 X row 的六个 vtkIdType 元数据。
+    budget.Add(*count, 1);
+    budget.Add(static_cast<std::uint64_t>(dims[1]) * dims[2], 6 * sizeof(vtkIdType));
+    budget.Add(1, 4096);
+    return budget.GetBytes();
+}
 
 IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
     const IsoSurfaceBuildRequest& request,
@@ -254,6 +330,11 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
             "The iso-surface mask geometry is invalid.");
     }
 
+    const auto estimate = GetEstimatedBytes(request);
+    if (!estimate || !stopToken.SetActualBytes(*estimate)) {
+        return GetFailure(RenderProductFailure::ResourceRejected,
+            "The iso image working set was rejected before allocation.");
+    }
     try {
         auto isoFilter = vtkSmartPointer<vtkFlyingEdges3D>::New();
         isoFilter->ComputeNormalsOff();
@@ -284,6 +365,26 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         VtkObserverSet observers(stopToken);
         observers.Add(imageResample);
         observers.Add(isoFilter);
+        vtkImageData* builtImage = request.input;
+        if (imageResample) {
+            imageResample->Update();
+            builtImage = imageResample->GetOutput();
+        }
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso count was cancelled.");
+        }
+        if (observers.GetError() || !builtImage) {
+            return GetFailure(RenderProductFailure::BuildFailed, "The iso image preparation failed.");
+        }
+        const auto meshBytes = GetMeshBytes(builtImage, request.key.isoValue,
+            request.mask != nullptr, *estimate, stopToken);
+        if (stopToken.GetIsStopped()) {
+            return GetFailure(RenderProductFailure::Cancelled, "The iso count was cancelled.");
+        }
+        if (!meshBytes || !stopToken.SetActualBytes(*meshBytes)) {
+            return GetFailure(RenderProductFailure::ResourceRejected,
+                "The iso mesh working set was rejected before extraction.");
+        }
         if (request.mask) {
             vtkImageData* builtMask = request.mask;
             if (request.key.outputDimensions != sourceSize) {
@@ -362,6 +463,10 @@ IsoSurfaceBuildResult IsoSurfaceProductBuilder::BuildProduct(
         product->actualBytes = actualBytes;
         product->isPreview = request.isPreview;
 
+        if (!stopToken.SetProductOwner(product, actualBytes)) {
+            return GetFailure(RenderProductFailure::ResourceRejected,
+                "The product allocation lease was rejected.");
+        }
         IsoSurfaceBuildResult result;
         result.product = std::move(product);
         return result;

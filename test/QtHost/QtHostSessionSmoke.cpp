@@ -91,6 +91,8 @@ public:
     {
         ++m_renderCount;
         if (m_isRenderRejected) throw std::runtime_error("Injected render failure");
+        this->InvokeEvent(vtkCommand::StartEvent);
+        this->InvokeEvent(vtkCommand::EndEvent);
     }
 
     void SetRenderRejected(bool isRejected) { m_isRenderRejected = isRejected; }
@@ -109,6 +111,7 @@ protected:
     RenderProbeWindow()
     {
         this->Mapped = 1;
+        this->SetReadyForRendering(true);
     }
     ~RenderProbeWindow() override = default;
 

@@ -11,6 +11,14 @@
 #include "Render/Strategies/CompositeStrategy.h"
 #include "Render/Strategies/SliceStrategy.h"
 #include "App/Services/AppServiceFactory.h"
+#include "App/AppState.h"
+#include "App/AppStateEvents.h"
+#include "Data/DataManager.h"
+#include "Interaction/ViewContextFactory.h"
+#include "Render/Internal/RenderWorkBudget.h"
+#include <vtkGenericOpenGLRenderWindow.h>
+#include <vtkCommand.h>
+#include <stdexcept>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,6 +43,155 @@
 #include <vtkVolume.h>
 
 namespace {
+
+class TransitionData final : public RawVolumeDataManager {
+public:
+    using BaseDataManager::SetOwnedImage;
+};
+
+class TransitionProbe final : public BaseVisualStrategy {
+public:
+    bool isDelayed = false;
+    int attachCount = 0;
+    void SetInputData(vtkSmartPointer<vtkDataObject>) override {}
+    bool SetProductCommit() override { return true; }
+    RenderTransitionState GetTransitionState() const override
+    {
+        RenderTransitionState state;
+        state.status = isDelayed ? RenderProductStatus::Preparing : RenderProductStatus::Idle;
+        return state;
+    }
+    void AttachRenderer(vtkSmartPointer<vtkRenderer> renderer) override
+    {
+        ++attachCount;
+        BaseVisualStrategy::AttachRenderer(std::move(renderer));
+    }
+};
+
+class RenderWindowProbe final : public vtkGenericOpenGLRenderWindow {
+public:
+    static RenderWindowProbe* New() { return new RenderWindowProbe; }
+    vtkTypeMacro(RenderWindowProbe, vtkGenericOpenGLRenderWindow);
+    bool isSkipped = false;
+    bool hasError = false;
+    bool isThrowing = false;
+    int renderCount = 0;
+    void Render() override
+    {
+        ++renderCount;
+        if (isThrowing) throw std::runtime_error("injected Render failure");
+        if (hasError) InvokeEvent(vtkCommand::ErrorEvent);
+        if (!isSkipped) InvokeEvent(vtkCommand::EndEvent);
+    }
+};
+
+int GetLatestTransitionFailCount()
+{
+    int failureCount = 0;
+    for (const auto finalMode : {VizMode::Volume, VizMode::SliceTop_down}) {
+        auto data = std::make_shared<TransitionData>();
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(3, 3, 3);
+        image->AllocateScalars(VTK_FLOAT, 1);
+        image->GetPointData()->GetScalars()->FillComponent(0, 1);
+        const bool isSeeded = data->SetOwnedImage(image);
+        auto events = std::make_shared<SharedStateBroadcaster>();
+        auto sharedState = std::make_shared<SharedInteractionState>(events);
+        std::shared_ptr<TransitionProbe> delayed;
+        int failureAttempts = 0;
+        AppServiceArgs args;
+        args.dataManager = data;
+        args.interactionState = sharedState;
+        args.eventSource = events;
+        args.strategyCreate = [&](VizMode mode) -> std::shared_ptr<AbstractVisualStrategy> {
+            if (mode == VizMode::CompositeIsoSurface) { ++failureAttempts; return {}; }
+            auto probe = std::make_shared<TransitionProbe>();
+            if (mode == VizMode::IsoSurface) { probe->isDelayed = true; delayed = probe; }
+            return probe;
+        };
+        auto ports = CreateAppPorts(std::move(args));
+        auto window = vtkSmartPointer<vtkRenderWindow>::New();
+        auto renderer = vtkSmartPointer<vtkRenderer>::New();
+        const bool isBound = ports.renderBind->SetRenderTarget(window, renderer);
+        AppViewUpdate initial;
+        initial.mode = VizMode::SliceTop_down;
+        const bool isInitial = ports.app.view->SendViewUpdate(initial)
+            && ports.interaction.update->SendUpdates()
+            && ports.app.view->GetViewState().mode == *initial.mode;
+        AppViewUpdate next;
+        next.mode = VizMode::IsoSurface;
+        const bool isPreparing = ports.app.view->SendViewUpdate(next)
+            && ports.interaction.update->SendUpdates() && delayed
+            && delayed->attachCount == 0;
+        auto stale = delayed;
+        next.mode = finalMode;
+        const bool isLatest = ports.app.view->SendViewUpdate(next);
+        if (stale) stale->isDelayed = false;
+        for (int tick = 0; tick < 4; ++tick) (void)ports.interaction.update->SendUpdates();
+        failureCount += GetCaseResult(isSeeded && isBound && isInitial && isPreparing
+            && isLatest && stale && stale->attachCount == 0
+            && ports.app.view->GetViewState().mode == finalMode,
+            "A-B-C and A-B-A discard stale candidates before renderer attachment") ? 0 : 1;
+        next.mode = VizMode::CompositeIsoSurface;
+        (void)ports.app.view->SendViewUpdate(next);
+        for (int tick = 0; tick < 8; ++tick) (void)ports.interaction.update->SendUpdates();
+        const bool isTerminal = failureAttempts == 1;
+        (void)ports.app.view->SendViewUpdate(next);
+        (void)ports.interaction.update->SendUpdates();
+        failureCount += GetCaseResult(isTerminal && failureAttempts == 2
+            && ports.app.view->GetViewState().mode == finalMode,
+            "Terminal mode failure stops polling builds and explicit same-mode request retries") ? 0 : 1;
+
+        // 正式 load 的候选仍用相同事务号；普通 refresh 无权代为提交。
+        next.mode = VizMode::IsoSurface;
+        (void)ports.app.view->SendViewUpdate(next);
+        constexpr std::uint64_t transaction = 73;
+        const auto snapshot = data->GetPrimaryImage();
+        const auto started = ports.dataStage->StartDataStage(snapshot, transaction);
+        next.mode = VizMode::SliceLeft_right;
+        (void)ports.app.view->SendViewUpdate(next);
+        (void)ports.interaction.update->SendPendingUpdates();
+        const bool isOwned = ports.dataStage->GetDataStageStatus(transaction) == DataStageStatus::Preparing;
+        (void)ports.dataStage->SetDataStageReady(snapshot, transaction);
+        const auto ready = ports.dataStage->SetDataStageReady(snapshot, transaction);
+        const bool isCommitted = ready == DataStageStatus::Ready
+            && ports.dataStage->SetViewStage(snapshot, transaction);
+        const bool isNewMode = ports.app.view->GetViewState().mode == VizMode::SliceLeft_right;
+        bool isFinalizeReady = false;
+        if (isCommitted) {
+            next.mode = VizMode::SliceFront_back;
+            (void)ports.app.view->SendViewUpdate(next);
+            isFinalizeReady = ports.dataStage->SetDataStageReady(snapshot, transaction) == DataStageStatus::Ready;
+            ports.dataStage->SetDataStageComplete(transaction);
+            (void)ports.interaction.update->SendUpdates();
+        }
+        else (void)ports.dataStage->ClearDataStage(transaction);
+        failureCount += GetCaseResult(started == DataStageStatus::Preparing && isOwned && isCommitted
+            && isNewMode && isFinalizeReady
+            && ports.app.view->GetViewState().mode == VizMode::SliceFront_back,
+            "Display supersession preserves load revision and lets already committed stages finalize") ? 0 : 1;
+
+        const auto context = CreateViewContext(ports.interaction, true);
+        auto probeWindow = vtkSmartPointer<RenderWindowProbe>::New();
+        probeWindow->SetReadyForRendering(false);
+        const bool isWindowSet = context && context->SetRenderWindow(probeWindow);
+        const bool isDeferred = isWindowSet && !context->SendRender() && probeWindow->renderCount == 0;
+        probeWindow->SetReadyForRendering(true);
+        probeWindow->isSkipped = true;
+        const bool isSkipped = !context->SendRender();
+        probeWindow->isSkipped = false;
+        probeWindow->hasError = true;
+        const bool isError = !context->SendRender();
+        probeWindow->hasError = false;
+        probeWindow->isThrowing = true;
+        bool isCaught = false;
+        try { (void)context->SendRender(); } catch (...) { isCaught = true; }
+        probeWindow->isThrowing = false;
+        failureCount += GetCaseResult(isDeferred && isSkipped && isError && isCaught && context->SendRender(),
+            "Render completion requires readiness and EndEvent; error/exception observers are cleaned") ? 0 : 1;
+    }
+    return failureCount;
+}
 
 int GetTransitionValueFailCount()
 {
@@ -921,6 +1079,89 @@ int GetSharedCacheAndGpuFailCount()
     return failureCount;
 }
 
+int GetWorkingSetFailCount()
+{
+    int failures = 0;
+    auto image = BuildIsoImage();
+    auto lane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator resources([lane](RenderLaneWork work) { return lane->Start(std::move(work)); });
+    auto volume = VolumeLodBuildRequest{};
+    volume.input = image;
+    volume.requestRevision = 1;
+    volume.key.outputDimensions = {2, 2, 2};
+    const auto plainBytes = VolumeLodProductBuilder::GetEstimatedBytes(volume);
+    volume.key.isDenoiseOn = true;
+    const auto denoiseBytes = VolumeLodProductBuilder::GetEstimatedBytes(volume);
+    auto channel = resources.CreateTaskChannel(RenderProductKind::VolumeLod);
+    (void)resources.SetCpuBudgetBytes(*plainBytes + 1);
+    VolumeLodBuildResult result;
+    RenderTaskRequest task;
+    task.requestRevision = 1;
+    task.estimatedBytes = *plainBytes;
+    task.work = [&](RenderTaskToken token) { result = VolumeLodProductBuilder().BuildProduct(volume, token); };
+    const bool isStarted = channel->StartTask(std::move(task)) == RenderTaskAdmission::Accepted;
+    (void)lane->SendOne();
+    failures += GetCaseResult(denoiseBytes && *denoiseBytes > *plainBytes && isStarted
+        && result.failureReason == RenderProductFailure::ResourceRejected && !result.product,
+        "Low LOD admission still reserves full-resolution double diffusion workspace before Update") ? 0 : 1;
+
+    auto isoLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator isoResources([isoLane](RenderLaneWork work) { return isoLane->Start(std::move(work)); });
+    const auto isoRequest = GetIsoRequest(image, 1, VolumeQuality::Ultra, 0);
+    const auto imageBytes = IsoSurfaceProductBuilder::GetEstimatedBytes(isoRequest);
+    (void)isoResources.SetCpuBudgetBytes(*imageBytes);
+    auto isoChannel = isoResources.CreateTaskChannel(RenderProductKind::IsoSurface);
+    IsoSurfaceBuildResult isoResult;
+    task = {};
+    task.requestRevision = 1;
+    task.estimatedBytes = *imageBytes;
+    task.work = [&](RenderTaskToken token) { isoResult = IsoSurfaceProductBuilder().BuildProduct(isoRequest, token); };
+    const bool isIsoStarted = isoChannel->StartTask(std::move(task)) == RenderTaskAdmission::Accepted;
+    (void)isoLane->SendOne();
+    failures += GetCaseResult(isIsoStarted && !isoResult.product
+        && isoResult.failureReason == RenderProductFailure::ResourceRejected,
+        "Iso counting reserves mesh and coexisting workspace before FlyingEdges allocation") ? 0 : 1;
+
+    auto holdLane = std::make_shared<ManualRenderLane>();
+    RenderResourceCoordinator holdResources([holdLane](RenderLaneWork work) { return holdLane->Start(std::move(work)); });
+    (void)holdResources.SetCpuBudgetBytes(1000);
+    auto holdChannel = holdResources.CreateTaskChannel(RenderProductKind::VolumeLod);
+    std::shared_ptr<const int> product;
+    bool hasPeak = false;
+    bool hasDestructorPeak = false;
+    struct Capture final {
+        RenderResourceCoordinator* resources;
+        bool* observed;
+        ~Capture() { *observed = resources->GetResourceState().runningBytes == 800; }
+    };
+    auto capture = std::make_shared<Capture>();
+    capture->resources = &holdResources;
+    capture->observed = &hasDestructorPeak;
+    task = {};
+    task.requestRevision = 1;
+    task.estimatedBytes = 800;
+    task.work = [&, capture](RenderTaskToken token) {
+        (void)token.SetActualBytes(16);
+        product = std::make_shared<const int>(1);
+        (void)token.SetProductOwner(product, 16);
+        hasPeak = holdResources.GetResourceState().runningBytes == 800;
+        (void)holdChannel->Stop();
+    };
+    capture.reset();
+    (void)holdChannel->StartTask(std::move(task));
+    (void)holdLane->SendOne();
+    const auto held = holdResources.GetResourceState();
+    product.reset();
+    const auto released = holdResources.GetResourceState();
+    failures += GetCaseResult(hasPeak && hasDestructorPeak && held.runningBytes == 0
+        && held.pendingBytes == 16 && released.pendingBytes == 0,
+        "Peak survives callable destruction and cancelled product stays charged until last reader exits") ? 0 : 1;
+    RenderWorkBudget overflow;
+    failures += GetCaseResult(!overflow.Add((std::numeric_limits<std::uint64_t>::max)(), 2)
+        && !overflow.GetBytes(), "Working-set arithmetic rejects overflow") ? 0 : 1;
+    return failures;
+}
+
 class CompositeMainProbe final : public BaseVisualStrategy {
 public:
     void SetInputData(vtkSmartPointer<vtkDataObject> data) override
@@ -1141,7 +1382,9 @@ int GetSliceAndPlaneCacheFailCount()
 
 int GetRenderProductFailCount()
 {
-    return GetTransitionValueFailCount()
+    return GetLatestTransitionFailCount()
+        + GetWorkingSetFailCount()
+        + GetTransitionValueFailCount()
         + GetDefaultStrategyFailCount()
         + GetRenderLaneFailCount()
         + GetRenderStopFailCount()

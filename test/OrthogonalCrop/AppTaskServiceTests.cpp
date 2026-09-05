@@ -2205,6 +2205,7 @@ void StartInputSwap(int& failureCount)
         vtkSmartPointer<vtkImageData>::New();
     firstImage->SetDimensions(4, 4, 4);
     firstImage->AllocateScalars(VTK_FLOAT, 1);
+    firstImage->GetPointData()->GetScalars()->FillComponent(0, 1);
     SetExpect(dataManager->SetInitial(firstImage),
         "render input swap needs an initial image",
         failureCount);
@@ -2243,6 +2244,9 @@ void StartInputSwap(int& failureCount)
             && ports.interaction.update->SendUpdates(),
         "initial render pipeline should build",
         failureCount);
+    SetExpect(SendUpdatesUntil(ports.interaction.update, [&] {
+        return ports.interaction.model->GetMainProp() != nullptr;
+    }), "initial asynchronous strategy should finish before observing its prop", failureCount);
     auto* firstProp = ports.interaction.model->GetMainProp();
     bool isWrongThreadAccepted = true;
     std::thread wrongThread([&] {
@@ -2276,7 +2280,9 @@ void StartInputSwap(int& failureCount)
         AppViewUpdate update;
         update.mode = mode;
         return ports.app.view->SendViewUpdate(update)
-            && ports.interaction.update->SendUpdates();
+            && SendUpdatesUntil(ports.interaction.update, [&] {
+                return ports.app.view->GetViewState().mode == mode;
+            });
     };
     vtkWeakPointer<vtkProp3D> retiredVolumeProp = firstProp;
     SetExpect(setMode(VizMode::IsoSurface)

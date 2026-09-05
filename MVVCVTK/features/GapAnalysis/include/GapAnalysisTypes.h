@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 // ── 表面参数（外部手动传入 isoValue，不在此自动估算）───────────────
@@ -57,8 +58,21 @@ struct VoidRegion {
     float defectProbability = 0.0f;
 };
 
+class LabelMap3DPayload;
+class SurfaceMeshPayload;
+class RecordTablePayload;
+
+struct GapResultPayloads final {
+    std::shared_ptr<const LabelMap3DPayload> labels;
+    std::shared_ptr<const SurfaceMeshPayload> mesh;
+    std::shared_ptr<const RecordTablePayload> voids;
+    std::shared_ptr<const RecordTablePayload> statistics;
+};
+
 // ── 完整分析结果（GapAnalysisService 填充，主线程消费）──────────────
 struct GapAnalysisResult {
+    // worker 完成所有首次转换；Host 仍遵守 DataGraph 的防御性 snapshot/校验。
+    std::shared_ptr<const GapResultPayloads> payloads;
     // 私有内核完成筛选后的原始区域集合。
     std::vector<VoidRegion> voids;
     // 此 VTK_INT 图借用并持有私有内核原始标签 owner；不二值化、重编号或复制第二份整卷。

@@ -69,11 +69,19 @@ struct GpuContextEntry final {
     std::vector<GpuReservation> reservations;
 };
 
+struct RenderProductLease final {
+    std::weak_ptr<const void> owner;
+    const void* identity = nullptr;
+    std::uint64_t bytes = 0;
+};
+
 struct RenderRunningTask final {
     std::shared_ptr<RenderChannelState> channel;
     std::shared_ptr<std::atomic<bool>> isCancelled;
     std::uint64_t requestRevision = 0;
     std::uint64_t accountedBytes = 0;
+    std::uint64_t retainedBytes = 0;
+    const void* productIdentity = nullptr;
 };
 
 struct RenderCoordinatorState final {
@@ -90,6 +98,7 @@ struct RenderCoordinatorState final {
     std::optional<RenderRunningTask> running;
     std::vector<VolumeCacheEntry> volumeCache;
     std::vector<IsoCacheEntry> isoCache;
+    std::vector<RenderProductLease> productLeases;
     std::vector<GpuContextEntry> gpuContexts;
     std::uint64_t cacheBytes = 0;
     std::uint64_t cacheUseStamp = 0;
@@ -149,6 +158,7 @@ struct RenderChannelState final {
     std::uint64_t retiringBytes = 0;
     const void* retiringProductIdentity = nullptr;
     std::uint64_t runningRevision = 0;
+    const void* candidateIdentity = nullptr;
     bool isQueued = false;
     bool isStopped = false;
 };
@@ -247,6 +257,19 @@ RenderResourceState GetResourceStateLocked(
             addCacheBytes(entry.bytes);
         }
     }
+    // 迟到/取消的 mailbox 仍可能持有完整产品；弱 allocation 记录只在最后读者退出后失效。
+    for (const auto& lease : state.productLeases) {
+        if (lease.owner.expired()) continue;
+        const auto* identity = lease.identity;
+        const bool isKnown = (state.running && state.running->productIdentity == identity)
+            || std::any_of(activeAllocations.begin(), activeAllocations.end(),
+                [identity](const auto& item) { return item.identity == identity; })
+            || std::any_of(state.volumeCache.begin(), state.volumeCache.end(),
+                [identity](const auto& item) { return item.product.get() == identity; })
+            || std::any_of(state.isoCache.begin(), state.isoCache.end(),
+                [identity](const auto& item) { return item.product.get() == identity; });
+        if (!isKnown) addBytes(result.pendingBytes, lease.bytes);
+    }
     if (state.running) {
         result.runningBytes = state.running->accountedBytes;
     }
@@ -265,6 +288,7 @@ RenderResourceState GetResourceStateLocked(
         }
         const std::uint64_t readyBytes =
             channel->transition.status == RenderProductStatus::Ready
+                && !channel->candidateIdentity
             ? channel->transition.stats.candidateBytes : 0;
         if (readyBytes
             <= (std::numeric_limits<std::uint64_t>::max)()
@@ -315,7 +339,7 @@ bool GetAdmissionValidLocked(
         if (replacedBytes > total) return false;
         total -= replacedBytes;
     }
-    if (replacedChannel
+    if (replacedChannel && !replacedChannel->candidateIdentity
         && replacedChannel->transition.status
             == RenderProductStatus::Ready) {
         const auto replacedBytes =
@@ -491,7 +515,7 @@ void SetTaskComplete(
             channel->transition.failureReason = RenderProductFailure::None;
             channel->transition.message.clear();
             channel->transition.stats.candidateBytes =
-                state->running->accountedBytes;
+                state->running->retainedBytes;
         }
     }
     channel->runningRevision = 0;
@@ -561,6 +585,7 @@ public:
                 channel,
                 isCancelled,
                 request.requestRevision,
+                request.estimatedBytes,
                 request.estimatedBytes
             };
         }
@@ -590,6 +615,8 @@ public:
                         isSucceeded = false;
                     }
                 }
+                // 未释放的 callable 捕获可能含输入或临时 owner；先在锁外销毁，再退役预留。
+                request.work = {};
                 SetTaskComplete(
                     coordinator,
                     taskChannel,
@@ -711,8 +738,29 @@ bool RenderTaskToken::SetActualBytes(
             "The actual render product size exceeds the CPU budget.");
         return false;
     }
-    state.running->accountedBytes = actualBytes;
+    state.running->accountedBytes = std::max(previousBytes, actualBytes);
+    state.running->retainedBytes = actualBytes;
     m_impl->channel->transition.stats.candidateBytes = actualBytes;
+    return true;
+}
+
+bool RenderTaskToken::SetProductOwner(
+    const std::shared_ptr<const void>& product, const std::uint64_t actualBytes) const
+{
+    if (!product || !SetActualBytes(actualBytes)) return false;
+    if (!m_impl) return true;
+    std::lock_guard<std::mutex> lock(m_impl->state->mutex);
+    auto& state = *m_impl->state;
+    if (!state.running || state.running->requestRevision != m_impl->requestRevision
+        || state.running->channel != m_impl->channel
+        || state.isStopping || m_impl->channel->isStopped
+        || m_impl->isCancelled->load(std::memory_order_acquire)) return false;
+    state.productLeases.erase(std::remove_if(state.productLeases.begin(),
+        state.productLeases.end(), [](const auto& lease) { return lease.owner.expired(); }),
+        state.productLeases.end());
+    state.productLeases.push_back({product, product.get(), actualBytes});
+    state.running->productIdentity = product.get();
+    m_impl->channel->candidateIdentity = product.get();
     return true;
 }
 
@@ -773,6 +821,7 @@ RenderTaskAdmission RenderTaskChannel::StartTask(
                 true, std::memory_order_release);
         }
         channel.pending = std::move(request);
+        channel.candidateIdentity = nullptr;
         channel.transition.status = RenderProductStatus::Preparing;
         channel.transition.failureReason = RenderProductFailure::None;
         channel.transition.message.clear();
@@ -1171,8 +1220,12 @@ bool RenderResourceCoordinator::SetVolumeProduct(
     while (state.volumeCache.size() >= maxVolumeCacheEntries) {
         if (!TryEvictOldestVolumeLocked(state)) return false;
     }
+    const bool hasLease = std::any_of(state.productLeases.begin(), state.productLeases.end(),
+        [&product](const auto& lease) {
+            return !lease.owner.expired() && lease.identity == product.get();
+        });
     const std::uint64_t addedBytes = GetProductActiveLocked(
-        state, product.get()) ? 0 : product->actualBytes;
+        state, product.get()) || hasLease ? 0 : product->actualBytes;
     if (!TryMakeCacheSpaceLocked(state, addedBytes)
         || product->actualBytes
             > (std::numeric_limits<std::uint64_t>::max)()
@@ -1233,8 +1286,12 @@ bool RenderResourceCoordinator::SetIsoSurfaceProduct(
         existing->lastUse = ++state.cacheUseStamp;
         return true;
     }
+    const bool hasLease = std::any_of(state.productLeases.begin(), state.productLeases.end(),
+        [&product](const auto& lease) {
+            return !lease.owner.expired() && lease.identity == product.get();
+        });
     const std::uint64_t addedBytes = GetProductActiveLocked(
-        state, product.get()) ? 0 : product->actualBytes;
+        state, product.get()) || hasLease ? 0 : product->actualBytes;
     if (!TryMakeCacheSpaceLocked(state, addedBytes)
         || product->actualBytes
             > (std::numeric_limits<std::uint64_t>::max)()

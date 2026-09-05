@@ -212,6 +212,8 @@ private:
         bool hasDefaultTransfer = false;
         bool isCommitted = false;
         std::uint64_t transactionRevision = 0;
+        std::uint64_t transitionRevision = 0;
+        bool isRefresh = false;
         DataStageStatus status = DataStageStatus::Idle;
     };
 
@@ -283,7 +285,8 @@ private:
     bool SetPreparingLoadReplaced(
         LoadEventKind loadEventKind,
         bool& isReplaced);
-    bool BuildPipeline();
+    DataStageStatus BuildPipeline();
+    bool GetStageCurrent(const DataStage& stage) const;
     static bool GetSameInput(
         const VtkImageGridSnapshot& left,
         const VtkImageGridSnapshot& right)
@@ -397,6 +400,11 @@ private:
         std::uint64_t,
         LoadCommitFailure)> m_setLoadCancelled;
     std::optional<DataStage> m_dataStage;
+    // 显示请求代数独立于 LoadCommitCoordinator 的事务号；模式 ABA 也会失效。
+    mutable std::mutex m_transitionMutex;
+    std::uint64_t m_transitionRevision = 0;
+    bool m_hasVisualConfig = false;
+    std::atomic<bool> m_hasTransitionFailure{false};
     std::optional<PendingLoadCommit> m_pendingLoadCommit;
     std::uint64_t m_nextLoadTransactionRevision = 0;
     // Host 多 View 全部清除已提交 stage 后，load owner 取走同版本候选并做一次共享提交。
@@ -1563,11 +1571,15 @@ void AppRuntime::SendStateFlags(UpdateFlags flags)
 void AppRuntime::SetVizMode(VizMode mode)
 {
     const int nextMode = static_cast<int>(mode);
-    // 模式快照保留最新值且不清零；同值写入不产生重复重建请求。
-    if (m_pendingVizModeInt.exchange(nextMode) == nextMode) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (m_pendingVizModeInt.load() == nextMode
+            && !m_hasTransitionFailure.load()) return;
+        if (m_transitionRevision == (std::numeric_limits<std::uint64_t>::max)()) return;
+        m_pendingVizModeInt.store(nextMode);
+        ++m_transitionRevision;
+        m_hasTransitionFailure = false;
     }
-    // 模式变化会更换 Strategy 或输入方向，因此进入结构重建路径并请求下一帧 Render。
     m_hasDataRefreshNeed = true;
     m_isDirty = true;
 }
@@ -1716,6 +1728,7 @@ bool AppRuntime::GetTransferAuto() const
 
 void AppRuntime::SetIsoThreshold(double val)
 {
+    std::lock_guard<std::mutex> transitionLock(m_transitionMutex);
     m_viewState->SetIsoValue(val);
 }
 
@@ -1804,9 +1817,21 @@ WindowLevelMode AppRuntime::GetWindowLevelMode() const
 
 void AppRuntime::SetVisualConfig(const PreInitConfig& cfg)
 {
-    // 先更新供 BuildPipeline/交互读取的模式快照，再提交当前 View 独占的展示配置。
-    m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
+    std::lock_guard<std::mutex> lock(m_transitionMutex);
+    const bool hasModeChanged = m_pendingVizModeInt.load() != static_cast<int>(cfg.vizMode);
+    if (hasModeChanged) {
+        if (m_transitionRevision == (std::numeric_limits<std::uint64_t>::max)()) return;
+        m_pendingVizModeInt.store(static_cast<int>(cfg.vizMode));
+        ++m_transitionRevision;
+    }
     m_viewState->SetPreInitConfig(cfg);
+    // 首次配置保留原有 bootstrap 语义，由数据事件/加载事务驱动首个候选。
+    if (m_hasVisualConfig && (hasModeChanged || m_hasTransitionFailure.load())) {
+        m_hasTransitionFailure = false;
+        m_hasDataRefreshNeed = true;
+        m_isDirty = true;
+    }
+    m_hasVisualConfig = true;
 }
 
 PreInitConfig AppRuntime::GetVisualConfig() const
@@ -1840,6 +1865,7 @@ std::array<double, 2> AppRuntime::GetScalarRange() const
 
 bool AppRuntime::SetVolumeQuality(const VolumeQuality quality)
 {
+    std::lock_guard<std::mutex> transitionLock(m_transitionMutex);
     switch (quality) {
     case VolumeQuality::Auto:
     case VolumeQuality::Low:
@@ -1943,6 +1969,7 @@ AppRuntime::GetGradientOpacity() const
 
 bool AppRuntime::SetDenoiseOn(bool isDenoiseOn)
 {
+    std::lock_guard<std::mutex> transitionLock(m_transitionMutex);
     {
         std::lock_guard<std::mutex> lock(m_viewConfigMutex);
         if (m_isDenoiseOn == isDenoiseOn) return true;
@@ -2138,7 +2165,7 @@ TaskAdmissionResult AppRuntime::ExportSlicesAsync(
     std::optional<double> rotationAngleDeg,
     std::function<void(bool isSuccess)> onComplete)
 {
-    const VizMode currentMode = static_cast<VizMode>(m_pendingVizModeInt.load());
+    const VizMode currentMode = GetVizMode();
     auto task = m_dataExportTaskService
         ? m_dataExportTaskService->BuildSlicesTask(
             path, rotationAngleDeg, currentMode) : std::nullopt;
@@ -2160,7 +2187,7 @@ void AppRuntime::SetSliceScroll(int delta)
     if (!m_sharedState) return;
     auto img = m_renderSnapshot ? m_renderSnapshot->image : nullptr;
     if (!img) return;
-    const VizMode mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+    const VizMode mode = GetVizMode();
     const int axis = InteractionComputeService::GetSliceAxis(mode); // 当前切片滚动应推进的模型坐标轴
     if (axis < 0)
 		return;
@@ -2485,8 +2512,14 @@ bool AppRuntime::SendPendingUpdates()
                 const auto current = m_dataManager
                     ? m_dataManager->GetPrimaryImage()
                     : VtkImageGridSnapshot{};
-                if (!GetSameInput(current, m_renderSnapshot)
-                    && !BuildPipeline()) {
+                const auto status = GetSameInput(current, m_renderSnapshot)
+                    ? DataStageStatus::Ready : BuildPipeline();
+                if (status == DataStageStatus::Preparing) {
+                    // 仍在准备的显示不是 load 失败；保留 admission 和原终态通知。
+                    CreateLoadNotice(loadNotice.kind, true, false);
+                    break;
+                }
+                if (status != DataStageStatus::Ready) {
                     loadNotice.isSucceeded = false;
                     ClearLoadFail(loadNotice.kind);
                 }
@@ -2513,7 +2546,18 @@ bool AppRuntime::SendPendingUpdates()
 
     // spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
     if (m_hasDataRefreshNeed.exchange(false)) {
-        if (!BuildPipeline()) m_hasDataRefreshNeed = true;
+        std::uint64_t requestRevision = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_transitionMutex);
+            requestRevision = m_transitionRevision;
+        }
+        const auto status = BuildPipeline();
+        if (status == DataStageStatus::Preparing) m_hasDataRefreshNeed = true;
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        if (requestRevision == m_transitionRevision) {
+            m_hasTransitionFailure = status == DataStageStatus::Failed
+                || status == DataStageStatus::Cancelled;
+        }
     }
     const bool isStrategySet = SetStrategyState();
 
@@ -2527,7 +2571,7 @@ bool AppRuntime::SendReloadUpdate()
         return false;
     }
     SetPendingFlags(UpdateFlags::All);
-    return BuildPipeline();
+    return BuildPipeline() == DataStageStatus::Ready;
 }
 
 void AppRuntime::SendTasks()
@@ -2913,35 +2957,46 @@ void AppRuntime::SetDataRefresh()
 // ─────────────────────────────────────────────────────────────────────
 // 私有辅助
 // ─────────────────────────────────────────────────────────────────────
-bool AppRuntime::BuildPipeline()
+bool AppRuntime::GetStageCurrent(const DataStage& stage) const
 {
-    if (!GetIsOwnerThread() || !m_dataManager) return false;
+    std::lock_guard<std::mutex> lock(m_transitionMutex);
+    if (stage.transitionRevision != m_transitionRevision
+        || stage.mode != static_cast<VizMode>(m_pendingVizModeInt.load())) return false;
+    // 只比较候选实际依赖的生产参数；颜色、游标等增量不会取消 CPU 产品。
+    return stage.nextParams.volumeQuality == GetTargetQuality()
+        && stage.nextParams.isDenoiseOn == GetDenoiseOn()
+        && stage.nextParams.isoValue == GetIsoThreshold();
+}
+
+DataStageStatus AppRuntime::BuildPipeline()
+{
+    if (!GetIsOwnerThread() || !m_dataManager) return DataStageStatus::Failed;
+    // 跨 View load 事务只能由它自己的 coordinator 准备/提交；普通刷新等待它结束。
+    if (m_dataStage && !m_dataStage->isRefresh) return DataStageStatus::Preparing;
     const auto snapshot = m_dataManager->GetPrimaryImage();
-    if (!snapshot) return false;
-    std::uint64_t revision = m_dataStage
-        ? m_dataStage->transactionRevision : 0;
+    if (!snapshot) return DataStageStatus::Idle;
+    if (m_dataStage && (!GetSameInput(m_dataStage->nextSnapshot, snapshot)
+            || !GetStageCurrent(*m_dataStage))) {
+        if (!ClearDataStage(m_dataStage->transactionRevision)) return DataStageStatus::Failed;
+    }
+    std::uint64_t revision = m_dataStage ? m_dataStage->transactionRevision : 0;
     if (!m_dataStage) {
-        if (m_nextLoadTransactionRevision
-            == (std::numeric_limits<std::uint64_t>::max)()) {
-            return false;
+        if (m_nextLoadTransactionRevision == (std::numeric_limits<std::uint64_t>::max)()) {
+            return DataStageStatus::Failed;
         }
         revision = ++m_nextLoadTransactionRevision;
         const auto started = StartDataStage(snapshot, revision);
-        if (started == DataStageStatus::Failed
-            || started == DataStageStatus::Cancelled
-            || started == DataStageStatus::Idle) {
-            return false;
-        }
+        if (!m_dataStage) return started;
+        m_dataStage->isRefresh = true;
     }
     const auto ready = SetDataStageReady(snapshot, revision);
-    if (ready == DataStageStatus::Preparing) return false;
-    if (ready != DataStageStatus::Ready
-        || !SetViewStage(snapshot, revision)) {
+    if (ready == DataStageStatus::Preparing) return ready;
+    if (ready != DataStageStatus::Ready || !SetViewStage(snapshot, revision)) {
         (void)ClearDataStage(revision);
-        return false;
+        return ready == DataStageStatus::Cancelled ? ready : DataStageStatus::Failed;
     }
     SetDataStageComplete(revision);
-    return true;
+    return DataStageStatus::Ready;
 }
 
 DataStageStatus AppRuntime::StartDataStage(
@@ -2952,6 +3007,11 @@ DataStageStatus AppRuntime::StartDataStage(
         || !snapshot || !snapshot->image || !snapshot->data
         || !m_sharedState || !m_viewState || !m_renderer) {
         return DataStageStatus::Failed;
+    }
+    if (m_dataStage && m_dataStage->isRefresh && !m_dataStage->isCommitted
+        && (m_dataStage->transactionRevision != transactionRevision
+            || !GetSameInput(m_dataStage->nextSnapshot, snapshot))) {
+        if (!ClearDataStage(m_dataStage->transactionRevision)) return DataStageStatus::Failed;
     }
     if (m_dataStage) {
         return m_dataStage->transactionRevision == transactionRevision
@@ -2972,14 +3032,18 @@ DataStageStatus AppRuntime::StartDataStage(
     stage.oldStrategy = m_currentStrategy;
     stage.oldMode = m_currentMode;
     stage.oldCamera = GetCameraState();
-    stage.mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+    {
+        std::lock_guard<std::mutex> lock(m_transitionMutex);
+        stage.mode = static_cast<VizMode>(m_pendingVizModeInt.load());
+        stage.transitionRevision = m_transitionRevision;
+        stage.nextParams = GetRenderParams(UpdateFlags::All);
+    }
     stage.transactionRevision = transactionRevision;
     stage.status = DataStageStatus::Preparing;
     if (!stage.oldCamera.isValid
         || !GetDataReadyState(snapshot, stage.readyState)) {
         return DataStageStatus::Failed;
     }
-    stage.nextParams = GetRenderParams(UpdateFlags::All);
     stage.nextParams.scalarRange[0] = stage.readyState.scalarRange[0];
     stage.nextParams.scalarRange[1] = stage.readyState.scalarRange[1];
     stage.nextParams.cursor = stage.readyState.cursorWorld;
@@ -3021,7 +3085,8 @@ DataStageStatus AppRuntime::StartDataStage(
             stage.oldStrategy->GetRenderEffectState();
         if (effectState.status == RenderEffectStatus::Staged
             || effectState.status == RenderEffectStatus::Ready) {
-            return DataStageStatus::Failed;
+            // 旧输入上的正式 effect 事务尚未结束，只能等待，不能冻结为永久失败。
+            return DataStageStatus::Preparing;
         }
     }
 
@@ -3080,6 +3145,16 @@ DataStageStatus AppRuntime::SetDataStageReady(
         || !GetSameInput(m_dataStage->nextSnapshot, snapshot)) {
         return DataStageStatus::Failed;
     }
+    // 已提交候选属于事务收尾；之后到达的意图必须等待 Complete 后再生效。
+    if (m_dataStage->isCommitted) return m_dataStage->status;
+    if (!GetStageCurrent(*m_dataStage)) {
+        const bool isRefresh = m_dataStage->isRefresh;
+        if (!ClearDataStage(transactionRevision)) return DataStageStatus::Failed;
+        // Load 只替换显示候选，保留原事务号/输入和最终 callback。
+        const auto status = StartDataStage(snapshot, transactionRevision);
+        if (m_dataStage) m_dataStage->isRefresh = isRefresh;
+        return status;
+    }
     auto& stage = *m_dataStage;
     if (stage.status != DataStageStatus::Preparing) {
         return stage.status;
@@ -3088,6 +3163,7 @@ DataStageStatus AppRuntime::SetDataStageReady(
         stage.status = DataStageStatus::Failed;
         return stage.status;
     }
+    if (!GetStageCurrent(stage)) return DataStageStatus::Preparing;
     const auto productState =
         stage.nextStrategy->GetTransitionState();
     if (productState.status == RenderProductStatus::Preparing
@@ -3180,6 +3256,7 @@ bool AppRuntime::SetViewStage(
     if (!GetIsOwnerThread() || !m_dataStage || !snapshot
         || !snapshot->image || m_dataStage->isCommitted
         || m_dataStage->status != DataStageStatus::Ready
+        || !GetStageCurrent(*m_dataStage)
         || m_dataStage->transactionRevision != transactionRevision
         || !GetSameInput(m_dataStage->nextSnapshot, snapshot)) {
         return false;

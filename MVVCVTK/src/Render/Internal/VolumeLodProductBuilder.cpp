@@ -1,6 +1,7 @@
 #include "Render/Internal/VolumeLodProductBuilder.h"
 
 #include "Data/ImageProcessor.h"
+#include "Render/Internal/RenderWorkBudget.h"
 
 #include <vtkAlgorithm.h>
 #include <vtkCallbackCommand.h>
@@ -20,6 +21,8 @@
 namespace {
 
 constexpr int denoiseIterations = 5;
+// 只固定此任务的 native 分块；SMP 的并发 piece 粒度无法在准入前界定 halo。
+constexpr int denoiseThreads = 8;
 constexpr double denoiseFactor = 0.125;
 
 bool GetGeometryNear(const double left, const double right) noexcept
@@ -170,6 +173,47 @@ vtkSmartPointer<vtkImageData> GetMaterializedOutput(
 
 } // namespace
 
+std::optional<std::uint64_t> VolumeLodProductBuilder::GetEstimatedBytes(
+    const VolumeLodBuildRequest& request)
+{
+    if (!request.input) return {};
+    RenderWorkBudget budget;
+    budget.AddGrid(request.input, request.key.outputDimensions);
+    budget.AddGrid(request.mask, request.key.outputDimensions);
+    budget.Add(1, 4096); // image 数组 KiB 取整及小量管线元数据余量。
+    if (request.key.isDenoiseOn) {
+        int extent[6]{};
+        request.input->GetExtent(extent);
+        const int* dimensions = request.input->GetDimensions();
+        budget.AddGrid(request.input, {dimensions[0], dimensions[1], dimensions[2]});
+        auto splitter = vtkSmartPointer<vtkImageAnisotropicDiffusion3D>::New();
+        splitter->SetEnableSMP(false);
+        splitter->SetNumberOfThreads(denoiseThreads);
+        for (int piece = 0; piece < denoiseThreads; ++piece) {
+            int split[6]{};
+            const int pieces = splitter->SplitExtent(split, extent, piece, denoiseThreads);
+            if (piece >= pieces) break;
+            std::uint64_t count = 1;
+            for (int axis = 0; axis < 3; ++axis) {
+                // 分配的是 InternalRequestUpdateExtent 的完整 halo（KernelMiddle=5），
+                // 不是最后一次迭代使用的缩小 extent。
+                const auto first = std::max<std::int64_t>(extent[2 * axis],
+                    static_cast<std::int64_t>(split[2 * axis]) - denoiseIterations);
+                const auto last = std::min<std::int64_t>(extent[2 * axis + 1],
+                    static_cast<std::int64_t>(split[2 * axis + 1]) + denoiseIterations);
+                const auto size = last - first + 1;
+                if (size <= 0 || count > (std::numeric_limits<std::uint64_t>::max)()
+                    / static_cast<std::uint64_t>(size)) return {};
+                count *= static_cast<std::uint64_t>(size);
+            }
+            const int components = request.input->GetNumberOfScalarComponents();
+            if (components <= 0) return {};
+            budget.Add(count, 2ULL * sizeof(double) * components);
+        }
+    }
+    return budget.GetBytes();
+}
+
 VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
     const VolumeLodBuildRequest& request,
     const RenderTaskToken& stopToken) const
@@ -220,6 +264,11 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             "The volume LOD mask geometry is invalid.");
     }
 
+    const auto estimate = GetEstimatedBytes(request);
+    if (!estimate || !stopToken.SetActualBytes(*estimate)) {
+        return GetFailure(RenderProductFailure::ResourceRejected,
+            "The volume CPU working set was rejected before allocation.");
+    }
     try {
         const bool hasNativeDimensions =
             request.key.outputDimensions == sourceSize;
@@ -238,6 +287,8 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
             if (request.key.isDenoiseOn) {
                 denoise = vtkSmartPointer<
                     vtkImageAnisotropicDiffusion3D>::New();
+                denoise->SetEnableSMP(false);
+                denoise->SetNumberOfThreads(denoiseThreads);
                 denoise->SetInputData(request.input);
                 denoise->SetNumberOfIterations(denoiseIterations);
                 denoise->SetDiffusionFactor(denoiseFactor);
@@ -334,6 +385,10 @@ VolumeLodBuildResult VolumeLodProductBuilder::BuildProduct(
         product->mask = std::move(mask);
         product->actualBytes = actualBytes;
 
+        if (!stopToken.SetProductOwner(product, actualBytes)) {
+            return GetFailure(RenderProductFailure::ResourceRejected,
+                "The product allocation lease was rejected.");
+        }
         VolumeLodBuildResult result;
         result.product = std::move(product);
         return result;

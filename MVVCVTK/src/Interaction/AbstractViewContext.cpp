@@ -1,6 +1,9 @@
 #include "Interaction/AbstractViewContext.h"
 
 #include <vtkCamera.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
+#include <vtkGenericOpenGLRenderWindow.h>
 #include <vtkRenderer.h>
 #include <vtkRenderWindow.h>
 
@@ -54,8 +57,41 @@ bool AbstractViewContext::SetRenderWindow(
 bool AbstractViewContext::SendRender()
 {
     if (!GetIsOwnerThread() || !m_renderWindow) return false;
-    m_renderWindow->Render();
-    return true;
+    // Generic 窗口由宿主建立上下文；原生窗口首次 Render 可以自行初始化。
+    auto window = m_renderWindow;
+    auto* genericWindow = vtkGenericOpenGLRenderWindow::SafeDownCast(window);
+    if (genericWindow && !genericWindow->GetReadyForRendering()) return false;
+
+    struct RenderWatch final {
+        vtkSmartPointer<vtkRenderWindow> window;
+        vtkSmartPointer<vtkCallbackCommand> callback;
+        unsigned long endTag = 0;
+        unsigned long errorTag = 0;
+        bool hasEnded = false;
+        bool hasError = false;
+
+        ~RenderWatch()
+        {
+            window->RemoveObserver(endTag);
+            window->RemoveObserver(errorTag);
+            callback->SetClientData(nullptr);
+        }
+    };
+    RenderWatch watch;
+    watch.window = window;
+    watch.callback = vtkSmartPointer<vtkCallbackCommand>::New();
+    watch.callback->SetClientData(&watch);
+    watch.callback->SetCallback([](vtkObject*, unsigned long eventId,
+        void* clientData, void*) {
+        auto& state = *static_cast<RenderWatch*>(clientData);
+        if (eventId == vtkCommand::EndEvent) state.hasEnded = true;
+        if (eventId == vtkCommand::ErrorEvent) state.hasError = true;
+    });
+    watch.endTag = window->AddObserver(vtkCommand::EndEvent, watch.callback);
+    watch.errorTag = window->AddObserver(vtkCommand::ErrorEvent, watch.callback);
+    window->Render();
+    // EndEvent 只证明 VTK 绘制结束，不代表 GPU fence 或屏幕呈现。
+    return watch.hasEnded && !watch.hasError;
 }
 
 bool AbstractViewContext::ResetCamera()
