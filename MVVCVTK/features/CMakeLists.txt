@@ -21,3 +21,7 @@ if(MVVCVTK_BUILD_PART_SEGMENTATION)
 else()
     ResetSdkStage("${MVVCVTK_PART_SOURCE_API_INCLUDE_DIR}")
 endif()
+
+if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
+    add_subdirectory(SurfaceDetermination)
+endif()

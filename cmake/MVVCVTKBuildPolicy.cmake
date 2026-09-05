@@ -13,6 +13,11 @@ option(
     "Build repository-only PartSegmentation feature"
     OFF
 )
+option(
+    MVVCVTK_BUILD_SURFACE_DETERMINATION
+    "Build repository-only SurfaceDetermination feature"
+    OFF
+)
 option(MVVCVTK_BUILD_STANDALONE "Build the full standalone example" ON)
 option(MVVCVTK_ENABLE_AVX2 "Enable AVX2 for Release builds" ON)
 
