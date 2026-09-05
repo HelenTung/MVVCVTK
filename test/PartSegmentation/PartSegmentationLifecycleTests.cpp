@@ -1,5 +1,6 @@
 #include "PartSegmentationTestCases.h"
 
+#include "App/Services/FeatureViewService.h"
 #include "Host/PartSegmentationHostFeature.h"
 #include "Render/Contracts/OverlayService.h"
 
@@ -14,6 +15,7 @@
 #include <vtkSmartPointer.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -100,6 +102,50 @@ private:
     bool m_failNextAttach = false;
 };
 
+class FeatureViewStub final : public FeatureViewService {
+public:
+    bool SetInteracting(const InteractionSource&, bool) override
+    {
+        return true;
+    }
+
+    std::optional<std::array<double, 16>> GetModelToWorld() const override
+    {
+        return std::nullopt;
+    }
+
+    std::optional<std::array<double, 3>> GetWorldPosition(
+        const std::array<double, 3>&) const override
+    {
+        return std::nullopt;
+    }
+
+    std::optional<RenderInputStamp> GetRenderInputStamp() const override
+    {
+        return m_stamp;
+    }
+
+    bool AttachRenderEffect(std::shared_ptr<RenderEffect>) override
+    {
+        return true;
+    }
+
+    bool DetachRenderEffect(const RenderEffect*) override
+    {
+        return true;
+    }
+
+    bool SetRenderNeeded() override { return true; }
+
+    void SetInputStamp(const RenderInputStamp stamp) noexcept
+    {
+        m_stamp = stamp;
+    }
+
+private:
+    std::optional<RenderInputStamp> m_stamp;
+};
+
 class ViewDirectoryStub final : public FeatureViewDirectory {
 public:
     ViewDirectoryStub()
@@ -113,6 +159,8 @@ public:
         for (const auto& view : m_views) {
             m_overlays.emplace(
                 view.id, std::make_shared<OverlayStub>());
+            m_featureViews.emplace(
+                view.id, std::make_shared<FeatureViewStub>());
         }
     }
 
@@ -133,9 +181,10 @@ public:
     }
 
     std::shared_ptr<FeatureViewService> GetFeaturePort(
-        const std::string&) const override
+        const std::string& viewId) const override
     {
-        return {};
+        const auto found = m_featureViews.find(viewId);
+        return found != m_featureViews.end() ? found->second : nullptr;
     }
 
     std::shared_ptr<OverlayService> GetOverlayPort(
@@ -166,9 +215,23 @@ public:
         return count;
     }
 
+    void SetInputStamp(const RenderInputStamp stamp) const
+    {
+        for (const auto& item : m_featureViews) {
+            item.second->SetInputStamp(stamp);
+        }
+    }
+
+    void ClearFeaturePort(const std::string& viewId)
+    {
+        m_featureViews.erase(viewId);
+    }
+
 private:
     std::vector<HostFeatureView> m_views;
     std::unordered_map<std::string, std::shared_ptr<OverlayStub>> m_overlays;
+    std::unordered_map<std::string, std::shared_ptr<FeatureViewStub>>
+        m_featureViews;
 };
 
 class DataPortStub final : public TrustedFeatureDataPort {
@@ -225,12 +288,24 @@ public:
         return true;
     }
 
+    bool SendSceneDelta(FeatureSceneDelta delta) override
+    {
+        if (delta.requestId == 0 || delta.viewIds.empty()) return false;
+        m_sceneDeltas.push_back(std::move(delta));
+        return true;
+    }
+
     bool SendOwnerComplete(
         std::function<void()> complete) override
     {
         if (!complete) return false;
         ++m_ownerCompleteCount;
-        complete();
+        if (m_deferOwnerCompletes) {
+            m_ownerCompletes.push_back(std::move(complete));
+        }
+        else {
+            complete();
+        }
         return true;
     }
 
@@ -249,11 +324,31 @@ public:
         return m_ownerCompleteCount;
     }
 
+    void SetDeferOwnerCompletes(const bool defer) noexcept
+    {
+        m_deferOwnerCompletes = defer;
+    }
+
+    std::size_t GetPendingOwnerCompleteCount() const noexcept
+    {
+        return m_ownerCompletes.size();
+    }
+
+    void SendOwnerCompletions()
+    {
+        auto completes = std::move(m_ownerCompletes);
+        m_ownerCompletes.clear();
+        for (auto& complete : completes) complete();
+    }
+
 private:
     std::vector<std::string> m_activeViews;
+    std::vector<FeatureSceneDelta> m_sceneDeltas;
     int m_setActiveCount = 0;
     int m_ownerCompleteCount = 0;
     bool m_failSetActiveViews = false;
+    bool m_deferOwnerCompletes = false;
+    std::vector<std::function<void()>> m_ownerCompletes;
 };
 
 TrustedImageSnapshot BuildSnapshot(
@@ -405,6 +500,11 @@ struct TestHost final {
         , feature(std::make_shared<PartSegmentationHostFeature>(
             GetConfig(maxWorkingBytes)))
     {
+        const auto snapshot = data->GetImageSnapshot();
+        if (snapshot) {
+            views->SetInputStamp({
+                snapshot->image.GetPointer(), snapshot->version });
+        }
     }
 
     bool Attach()
@@ -900,6 +1000,38 @@ int GetPartLifecycleFailCount()
         failureCount += GetCaseResult(
             test.feature->DetachHost(),
             "Cancelled lifecycle detaches successfully") ? 0 : 1;
+    }
+
+    {
+        TestHost test;
+        const bool isAttached = test.Attach();
+        test.host->SetDeferOwnerCompletes(true);
+        std::optional<PartSegmentationResult> result;
+        int callbackCount = 0;
+        const auto admission = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult value) {
+                ++callbackCount;
+                result = std::move(value);
+            });
+        const bool didQueue = SendTicks(
+            *test.feature,
+            [&] {
+                return test.host->GetPendingOwnerCompleteCount() == 1;
+            });
+        test.views->ClearFeaturePort("part-top");
+        test.host->SendOwnerCompletions();
+        failureCount += GetCaseResult(
+            isAttached
+                && admission.status == PartAdmissionStatus::Accepted
+                && didQueue && callbackCount == 1 && result
+                && result->status == PartResultStatus::Failed
+                && result->failureReason
+                    == PartFailureReason::DisplayFailed,
+            "Rendered completion rejects a detached target View") ? 0 : 1;
+        failureCount += GetCaseResult(
+            test.feature->DetachHost(),
+            "View-stale completion remains detachable") ? 0 : 1;
     }
 
     {

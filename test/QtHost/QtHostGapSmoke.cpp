@@ -5,6 +5,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QStringList>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -269,6 +271,19 @@ int main(int argc, char* argv[])
         timer.targetView.viewId = viewId;
         if (!session->AttachTimer(timer)) {
             sendExit(false, "AttachTimer");
+            return;
+        }
+        widget.makeCurrent();
+        if (auto* context = QOpenGLContext::currentContext()) {
+            auto* functions = context->functions();
+            while (functions
+                && functions->glGetError() != GL_NO_ERROR) {
+            }
+        }
+        const bool isStarted = session->Start();
+        widget.doneCurrent();
+        if (!isStarted) {
+            sendExit(false, "Start");
             return;
         }
 

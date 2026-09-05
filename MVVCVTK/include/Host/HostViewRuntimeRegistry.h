@@ -2,6 +2,7 @@
 
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
+#include "Host/HostFrameCoordinator.h"
 #include "Host/Types/HostSessionTypes.h"
 
 #include <array>
@@ -120,6 +121,19 @@ public:
         const HostViewTarget& target,
         std::function<void()> handler) const;
     bool ClearTimerHandler(const HostViewTarget& target) const;
+    bool SetFrameHandlers(std::function<void()> handler) const;
+    bool SetInputsEnabled(bool isEnabled) const;
+    bool SetFrameGeneration(std::uint64_t sessionGeneration);
+    bool SetFrameIntents(
+        const std::vector<HostFrameIntent>& intents);
+    bool CollectFrameUpdates();
+    bool ApplyFrameUpdates();
+    HostFrameStageStatus BuildFrameStage(std::uint64_t nextEpoch);
+    void SetFrameCommit(std::uint64_t epoch) noexcept;
+    bool SendFrameRender(std::uint64_t epoch);
+    bool GetFrameRenderPending() const noexcept;
+    void SendFrameCompletions() noexcept;
+    void ClearFrameStage() noexcept;
     bool SetModelMatrix(
         const HostViewTarget& target,
         const std::array<double, 16>& modelToWorld) const;

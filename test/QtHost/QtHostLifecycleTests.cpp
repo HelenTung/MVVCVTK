@@ -667,8 +667,11 @@ int GetLifecycleFailCount()
         !session->GetSceneViewState(unbuiltTarget)
             && session->GetSceneViewStates().empty(),
         "Scene getters reject an unbuilt Session") ? 0 : 1;
+    const bool isLifecycleBuilt = session->BuildSession();
+    const bool isLifecycleStarted =
+        isLifecycleBuilt && session->Start();
     failureCount += GetCaseResult(
-        session->BuildSession(),
+        isLifecycleBuilt && isLifecycleStarted,
         "Lifecycle fixture builds a Session") ? 0 : 1;
 
     auto rejectedAttach =
@@ -724,30 +727,40 @@ int GetLifecycleFailCount()
         && sceneFeatureZ->SetActiveViews(activeViews);
     const HostViewTarget sceneTarget{
         "lifecycle", false, HostRenderViewRole::Primary3D };
+    const auto* sceneEndpoint = session->GetPrimaryEndpoint();
+    const bool isActiveSceneFlushed = sceneEndpoint
+        && SendTimer(sceneEndpoint->interactor);
     const auto activeScene = session->GetSceneViewState(sceneTarget);
     const std::vector<std::string> expectedSceneFeatureIds{
         "a-scene-feature", "z-scene-feature" };
     sceneFeatureZ->isDetachFailing = true;
     const bool isSceneDetachRejected =
         !session->DetachFeature(*sceneFeatureZ);
+    const bool isRejectedSceneFlushed = sceneEndpoint
+        && SendTimer(sceneEndpoint->interactor);
     const auto rejectedScene = session->GetSceneViewState(sceneTarget);
     sceneFeatureZ->isDetachFailing = false;
     const bool isSceneFeatureZDetached =
         session->DetachFeature(*sceneFeatureZ);
+    const bool isDetachedSceneFlushed = sceneEndpoint
+        && SendTimer(sceneEndpoint->interactor);
     const auto detachedScene = session->GetSceneViewState(sceneTarget);
     const bool isSceneFeatureADetached =
         session->DetachFeature(*sceneFeatureA);
     failureCount += GetCaseResult(
         isSceneFeatureASet
             && isSceneFeatureZSet
+            && isActiveSceneFlushed
             // feature-a 仍只保留 AttachInput；清空 active views 后不得进入场景投影。
             && feature->isAttached
             && activeScene
             && activeScene->activeFeatureIds == expectedSceneFeatureIds
             && isSceneDetachRejected
+            && isRejectedSceneFlushed
             && rejectedScene
             && rejectedScene->activeFeatureIds == expectedSceneFeatureIds
             && isSceneFeatureZDetached
+            && isDetachedSceneFlushed
             && detachedScene
             && detachedScene->activeFeatureIds
                 == std::vector<std::string>{ "a-scene-feature" }
@@ -809,6 +822,7 @@ int GetLifecycleFailCount()
     std::thread::id completeThread;
     bool isComplete = false;
     bool isQueued = false;
+    feature->tickCount = 0;
     std::thread worker([&]() {
         isQueued = feature->SendOwnerComplete([&]() {
             completeThread = std::this_thread::get_id();

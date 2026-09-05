@@ -4,8 +4,10 @@
 #include "Data/TrustedImageState.h"
 #include "Host/Types/HostViewTypes.h"
 #include "Interaction/InteractionTypes.h"
+#include "Render/Contracts/RenderEffect.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -93,6 +95,29 @@ public:
         std::size_t voxelOffset) const = 0;
 };
 
+// Feature 只提交已经准备完成的场景变化意图；Host 在 owner frame 中重新校验
+// 输入戳、统一置脏并决定提交与渲染时机。priority 只决定本轮处理资格，
+// 不改变 Host 固定的 Geometry -> Camera -> Overlay 依赖顺序。
+enum class FeatureScenePriority : std::uint8_t {
+    Scene,
+    Overlay,
+    Refinement
+};
+
+enum class FeatureSceneScope : std::uint8_t {
+    RequiredAllViews,
+    TargetViewOnly,
+    BestEffort
+};
+
+struct FeatureSceneDelta final {
+    std::vector<std::string> viewIds;
+    RenderInputStamp inputStamp;
+    std::uint64_t requestId = 0;
+    FeatureScenePriority priority = FeatureScenePriority::Scene;
+    FeatureSceneScope scope = FeatureSceneScope::RequiredAllViews;
+};
+
 class FeatureHostControl : public HostInputPort {
 public:
     ~FeatureHostControl() noexcept override = default;
@@ -104,6 +129,7 @@ public:
     virtual bool SetViewStatus(
         const std::vector<std::string>& viewIds,
         const std::string& status) = 0;
+    virtual bool SendSceneDelta(FeatureSceneDelta delta) = 0;
     virtual bool SendOwnerComplete(std::function<void()> complete) = 0;
 };
 

@@ -437,6 +437,10 @@ public:
 
     bool SendUpdates() override { return m_state != nullptr; }
 
+    bool SendPendingUpdates() override { return m_state != nullptr; }
+
+    void SendCompletions() override {}
+
     bool SetRenderNeeded() override
     {
         if (!m_state || !m_state->m_isDirtyAccepted) return false;

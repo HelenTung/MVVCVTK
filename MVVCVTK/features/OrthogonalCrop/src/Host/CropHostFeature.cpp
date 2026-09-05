@@ -1,5 +1,6 @@
 #include "Host/CropHostFeature.h"
 
+#include "App/Services/FeatureViewService.h"
 #include "Interaction/CropBridge.h"
 
 #include <vtkImageData.h>
@@ -72,6 +73,7 @@ public:
         CropBuildCallback onComplete;
         std::optional<CropBuildResult> result;
         std::optional<RenderInputStamp> waitInput;
+        std::vector<std::string> waitViewIds;
         bool isQueued = false;
     };
 
@@ -141,11 +143,18 @@ private:
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item,
         CropBuildResult result,
-        std::optional<RenderInputStamp> waitInput);
+        std::optional<RenderInputStamp> waitInput,
+        std::vector<std::string> waitViewIds);
     static bool SendComplete(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item);
+    void CancelCompletes();
     bool SendReadyCompletes();
+    std::optional<RenderInputStamp> GetActiveInputStamp() const;
+    bool SendSceneDelta(
+        FeatureScenePriority priority,
+        std::optional<RenderInputStamp> inputStamp = {});
+    std::uint64_t GetNextSceneRequestId() noexcept;
     InteractionResult OnInput(const InteractionEvent& event);
     std::optional<std::size_t> GetKeyIndex(
         const InteractionEvent& event) const;
@@ -177,6 +186,7 @@ private:
     std::optional<CropHistoryState> m_status;
     std::shared_ptr<CompleteState> m_completeState;
     std::thread::id m_ownerThread;
+    std::uint64_t m_nextSceneRequestId = 1;
     std::array<bool,
         kCommandKeyCount + kNodeKeyCount> m_isDown{};
     bool m_isPublishing = false;
@@ -253,12 +263,7 @@ bool CropHostFeature::Impl::DetachHost()
 
     // 输入解绑失败时 Feature 仍留在 Session 注册表等待重试，但可见状态和质量来源必须先退休，
     // 避免宿主关闭流程因一个输入端口异常而长期保持 Crop/Quality。
-    if (m_completeState) {
-        const std::lock_guard<std::mutex> lock(
-            m_completeState->mutex);
-        m_completeState->isActive = false;
-        m_completeState->items.clear();
-    }
+    CancelCompletes();
     if (m_bridge) {
         if (m_bridge->GetCropActive()) {
             (void)m_bridge->ExitCrop();
@@ -286,12 +291,6 @@ void CropHostFeature::Impl::ClearBorrowed()
     m_data.reset();
     m_host.reset();
     m_ownerThread = {};
-    if (m_completeState) {
-        const std::lock_guard<std::mutex> lock(
-            m_completeState->mutex);
-        m_completeState->isActive = false;
-        m_completeState->items.clear();
-    }
     m_completeState.reset();
     m_rootImage.reset();
     m_lastImage.reset();
@@ -677,6 +676,14 @@ bool CropHostFeature::Impl::SetImageResult(
     }
     m_lastImage = std::move(publishedSnapshot);
     (void)m_bridge->SendCropCommit();
+    if (!SendSceneDelta(
+            FeatureScenePriority::Scene,
+            RenderInputStamp{
+                m_lastImage->image.GetPointer(),
+                m_lastImage->version })) {
+        std::cerr
+            << "[Crop][Materialize] committed input delta was rejected.\n";
+    }
     const auto historyAfter =
         m_bridge->GetCropHistory();
     std::cout << "[Crop][Materialize] baseline complete"
@@ -805,6 +812,14 @@ bool CropHostFeature::Impl::ResetOriginal()
     }
     m_lastImage = std::move(publishedSnapshot);
     (void)m_bridge->SendCropCommit();
+    if (!SendSceneDelta(
+            FeatureScenePriority::Scene,
+            RenderInputStamp{
+                m_lastImage->image.GetPointer(),
+                m_lastImage->version })) {
+        std::cerr
+            << "[Crop][History] committed root delta was rejected.\n";
+    }
     std::cout << "[Crop][History] root baseline complete"
         << " publishedVersion=" << m_lastImage->version
         << " publishedImage="
@@ -841,7 +856,8 @@ bool CropHostFeature::Impl::SetCompleteResult(
     const std::shared_ptr<CompleteState>& state,
     const std::shared_ptr<CompleteItem>& item,
     CropBuildResult result,
-    std::optional<RenderInputStamp> waitInput)
+    std::optional<RenderInputStamp> waitInput,
+    std::vector<std::string> waitViewIds)
 {
     if (!state || !item) {
         return false;
@@ -856,6 +872,8 @@ bool CropHostFeature::Impl::SetCompleteResult(
     }
     item->result = std::move(result);
     item->waitInput = waitInput;
+    item->waitViewIds = waitInput
+        ? std::move(waitViewIds) : std::vector<std::string>{};
     return true;
 }
 
@@ -883,8 +901,82 @@ bool CropHostFeature::Impl::SendComplete(
         result = std::move(item->result.value());
         state->items.erase(current);
     }
-    onComplete(std::move(result));
+    try { onComplete(std::move(result)); }
+    catch (...) {}
     return true;
+}
+
+void CropHostFeature::Impl::CancelCompletes()
+{
+    if (!m_completeState) return;
+    const auto state = m_completeState;
+    std::vector<std::shared_ptr<CompleteItem>> toQueue;
+    {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        for (const auto& item : state->items) {
+            if (!item || !item->onComplete) continue;
+            if (!item->result) item->result = CropBuildResult{};
+            item->result->isSucceeded = false;
+            item->result->failureReason = CropFailure::VersionMismatch;
+            item->result->message =
+                "Crop request was cancelled while detaching.";
+            item->waitInput.reset();
+            item->waitViewIds.clear();
+            if (!item->isQueued) {
+                item->isQueued = true;
+                toQueue.push_back(item);
+            }
+        }
+    }
+    for (const auto& item : toQueue) {
+        const auto send = [state, item]() {
+            (void)Impl::SendComplete(state, item);
+        };
+        if (!m_host || !m_host->SendOwnerComplete(send)) send();
+    }
+}
+
+std::optional<RenderInputStamp>
+CropHostFeature::Impl::GetActiveInputStamp() const
+{
+    if (!m_views || m_activeViewIds.empty()) return std::nullopt;
+    std::optional<RenderInputStamp> common;
+    for (const auto& viewId : m_activeViewIds) {
+        const auto port = m_views->GetFeaturePort(viewId);
+        const auto stamp = port
+            ? port->GetRenderInputStamp()
+            : std::optional<RenderInputStamp>{};
+        if (!stamp || !stamp->identity || stamp->version == 0
+            || (common && *common != *stamp)) {
+            return std::nullopt;
+        }
+        common = *stamp;
+    }
+    return common;
+}
+
+bool CropHostFeature::Impl::SendSceneDelta(
+    const FeatureScenePriority priority,
+    std::optional<RenderInputStamp> inputStamp)
+{
+    if (!inputStamp) inputStamp = GetActiveInputStamp();
+    if (!m_host || !inputStamp || m_activeViewIds.empty()) {
+        return false;
+    }
+    FeatureSceneDelta delta;
+    delta.viewIds = m_activeViewIds;
+    delta.inputStamp = *inputStamp;
+    delta.requestId = GetNextSceneRequestId();
+    delta.priority = priority;
+    delta.scope = FeatureSceneScope::RequiredAllViews;
+    return m_host->SendSceneDelta(std::move(delta));
+}
+
+std::uint64_t CropHostFeature::Impl::GetNextSceneRequestId() noexcept
+{
+    const std::uint64_t requestId = m_nextSceneRequestId++;
+    if (m_nextSceneRequestId == 0) m_nextSceneRequestId = 1;
+    return requestId == 0 ? GetNextSceneRequestId() : requestId;
 }
 
 bool CropHostFeature::Impl::SendReadyCompletes()
@@ -910,16 +1002,13 @@ bool CropHostFeature::Impl::SendReadyCompletes()
             }
             bool isReady = !item->waitInput.has_value();
             if (item->waitInput) {
-                HostViewTargets targets;
-                targets.viewIds = m_activeViewIds;
-                const auto views = m_views->GetViews(targets);
-                isReady = !views.empty()
+                isReady = !item->waitViewIds.empty()
                     && std::all_of(
-                        views.begin(),
-                        views.end(),
-                        [this, &item](const auto& view) {
+                        item->waitViewIds.begin(),
+                        item->waitViewIds.end(),
+                        [this, &item](const auto& viewId) {
                             const auto port =
-                                m_views->GetFeaturePort(view.id);
+                                m_views->GetFeaturePort(viewId);
                             if (!port) {
                                 return false;
                             }
@@ -948,20 +1037,55 @@ bool CropHostFeature::Impl::SendReadyCompletes()
                     item->waitInput->identity)
                 << '\n';
         }
-        const std::weak_ptr<CompleteState> weakState =
-            state;
-        const std::weak_ptr<CompleteItem> weakItem =
-            item;
+        const std::weak_ptr<FeatureViewDirectory> weakViews = m_views;
+        const auto waitInput = item->waitInput;
+        const auto waitViewIds = item->waitViewIds;
         if (m_host->SendOwnerComplete(
-                [weakState, weakItem]() {
-                    (void)Impl::SendComplete(
-                        weakState.lock(),
-                        weakItem.lock());
+                [state, item, weakViews,
+                    waitInput, waitViewIds]() {
+                    if (waitInput) {
+                        const auto views = weakViews.lock();
+                        const bool isCurrent = views
+                            && !waitViewIds.empty()
+                            && std::all_of(
+                                waitViewIds.begin(),
+                                waitViewIds.end(),
+                                [&views, &waitInput](const auto& viewId) {
+                                    const auto port =
+                                        views->GetFeaturePort(viewId);
+                                    const auto stamp = port
+                                        ? port->GetRenderInputStamp()
+                                        : std::optional<RenderInputStamp>{};
+                                    return stamp && *stamp == *waitInput;
+                                });
+                        if (!isCurrent) {
+                            const std::lock_guard<std::mutex> lock(
+                                state->mutex);
+                            if (item->result) {
+                                item->result->isSucceeded = false;
+                                item->result->failureReason =
+                                    CropFailure::VersionMismatch;
+                                item->result->message =
+                                    "Crop input changed before rendered completion.";
+                            }
+                        }
+                    }
+                    (void)Impl::SendComplete(state, item);
                 })) {
             isSent = true;
         }
         else {
-            (void)RemoveComplete(state, item);
+            {
+                const std::lock_guard<std::mutex> lock(state->mutex);
+                if (item->result) {
+                    item->result->isSucceeded = false;
+                    item->result->failureReason =
+                        CropFailure::VersionMismatch;
+                    item->result->message =
+                        "Crop completion was cancelled while stopping.";
+                }
+            }
+            (void)SendComplete(state, item);
         }
     }
     return isSent;
@@ -1030,6 +1154,7 @@ bool CropHostFeature::Impl::BuildCropResult(
     const auto state = m_completeState;
     const auto item = std::make_shared<CompleteItem>();
     item->onComplete = std::move(onComplete);
+    const auto waitViewIds = m_activeViewIds;
     {
         const std::lock_guard<std::mutex> lock(state->mutex);
         if (!state->isActive) {
@@ -1042,7 +1167,7 @@ bool CropHostFeature::Impl::BuildCropResult(
     const std::weak_ptr<CompleteItem> weakItem = item;
     auto onResult =
         [this, sourceSnapshot, expectedSnapshot,
-            weakState, weakItem](
+            weakState, weakItem, waitViewIds](
             CropBuildResult result) mutable {
             const auto state = weakState.lock();
             const auto item = weakItem.lock();
@@ -1070,7 +1195,8 @@ bool CropHostFeature::Impl::BuildCropResult(
                     state,
                     item,
                     std::move(result),
-                    waitInput)) {
+                    waitInput,
+                    waitViewIds)) {
                 return;
             }
         };
@@ -1367,6 +1493,10 @@ bool CropHostFeature::Impl::OnHostTick()
     }
     if (m_bridge->GetShaderTickNeeded()
         && m_bridge->SendShaderCommit()) {
+        if (!SendSceneDelta(FeatureScenePriority::Scene)) {
+            std::cerr
+                << "[Crop][History] committed shader delta was rejected.\n";
+        }
         std::cout
             << "[Crop][History] shader commit"
             << " | " << GetHistoryText(

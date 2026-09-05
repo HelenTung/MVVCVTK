@@ -33,7 +33,7 @@ enum class LoadState {
     Failed      // 加载失败
 };
 
-// --- 加载事件来源枚举（用于区分文件流加载和重载加载的失败事件）--- 
+// --- 加载事件来源枚举（用于区分文件流加载和重载加载的失败事件）---
 enum class LoadEventKind {
     None,
     File,

@@ -117,11 +117,21 @@ public:
         return true;
     }
 
+    bool SendSceneDelta(FeatureSceneDelta delta) override
+    {
+        if (delta.requestId == 0 || delta.viewIds.empty()) return false;
+        m_sceneDeltas.push_back(std::move(delta));
+        return true;
+    }
+
     bool SendOwnerComplete(
         std::function<void()>) override
     {
         return true;
     }
+
+private:
+    std::vector<FeatureSceneDelta> m_sceneDeltas;
 };
 
 class ViewPortProbe final : public FeatureViewDirectory {
@@ -427,7 +437,6 @@ void SendTicks(
 {
     for (int tick = 0; tick < tickCount; ++tick) {
         (void)SendTimer(endpoint.interactor);
-        endpoint.renderWindow->Render();
     }
 }
 
@@ -451,7 +460,8 @@ void SendHostTick(
     const HostRenderViewEndpoint& primary,
     const HostRenderViewEndpoint& timer)
 {
-    primary.renderWindow->Render();
+    (void)primary;
+    (void)SendTimer(timer.interactor);
     (void)SendTimer(timer.interactor);
 }
 
@@ -628,6 +638,7 @@ int GetCropFailCount()
         "crop-timer", false,
         HostRenderViewRole::Auxiliary };
     const bool isTimerAttached = session.AttachTimer(timer);
+    const bool isSessionStarted = isTimerAttached && session.Start();
     bool isReloadComplete = false;
     bool isReloadSucceeded = false;
     const bool isReloadSent = SendReload(
@@ -635,7 +646,7 @@ int GetCropFailCount()
     for (int poll = 0;
         isReloadSent && !isReloadComplete && poll < 500;
         ++poll) {
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
@@ -644,6 +655,7 @@ int GetCropFailCount()
             && !initialState.isPublishing
             && initialState.history.operationCount == 0
             && isTimerAttached
+            && isSessionStarted
             && isReloadSent
             && isReloadComplete
             && isReloadSucceeded,
@@ -679,7 +691,7 @@ int GetCropFailCount()
     // 让主视图消费 probe 发布的新 snapshot；主视图不承载 Host timer，
     // 因此不会提前推进后续 Feature worker。
 #ifdef MVVCVTK_HAS_GAP_ANALYSIS
-    SendTicks(*endpoint, 2);
+    SendTicks(*timerEndpoint, 2);
 
     const bool isInitialNodeRejected =
         !feature->SendRequest(GetNodeRequest(0));
@@ -1014,7 +1026,7 @@ int GetCropFailCount()
         ++poll) {
         // 主视图没有 Session timer handler，因此这里只允许 AppService
         // 先提交 Reload，不消费 Crop worker。
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
@@ -1054,7 +1066,7 @@ int GetCropFailCount()
             && !staleState.history.hasEditableOp,
         "Reload-first order rejects delayed Crop CAS without partial commit") ? 0 : 1;
 
-    SendTicks(*endpoint, 2);
+    SendTicks(*timerEndpoint, 2);
     const bool isRestarted = feature->SendRequest(
         GetTargetRequest(CropHostAction::Start, target));
     const bool isRestartModeSet = feature->SendRequest(
@@ -1151,7 +1163,7 @@ int GetCropFailCount()
         ++poll) {
         // Gap 已按新 DataVersion 退休；此后才让主视图消费 Crop
         // 批次并由 Session 投递 Crop 成功 callback。
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         SendHostTick(*endpoint, *timerEndpoint);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
@@ -1191,7 +1203,7 @@ int GetCropFailCount()
             && postCropGapCompleteCount == 0
             && poll < 500;
         ++poll) {
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         SendHostTick(*endpoint, *timerEndpoint);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
@@ -1238,7 +1250,7 @@ int GetCropFailCount()
             && exportCompleteCount == 0
             && poll < 500;
         ++poll) {
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         SendHostTick(*endpoint, *timerEndpoint);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
@@ -1381,7 +1393,7 @@ int GetCropFailCount()
         secondCompleteCount == 0
             && poll < 500;
         ++poll) {
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         SendHostTick(*endpoint, *timerEndpoint);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
@@ -1399,7 +1411,7 @@ int GetCropFailCount()
             && !isFinalReloadComplete
             && poll < 500;
         ++poll) {
-        SendTicks(*endpoint, 1);
+        SendTicks(*timerEndpoint, 1);
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
@@ -1441,7 +1453,8 @@ int GetCropFailCount()
                 == secondSnapshot->version + 1
             && finalSnapshot != secondSnapshot
             && isGapDetached
-            && staleGapCount == 0,
+            && staleGapCount == 1
+            && !isStaleGapSucceeded,
         "Repeated Crop build fuses the absolute root prefix before a later legal Reload") ? 0 : 1;
 #endif
 

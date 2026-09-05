@@ -3,6 +3,7 @@
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostFeature.h"
+#include "Host/HostFrameCoordinator.h"
 #include "Host/HostHotkeyRouter.h"
 #include "Host/HostViewRuntimeRegistry.h"
 
@@ -158,12 +159,14 @@ public:
         bool StartOwner(
             HostViewRuntimeRegistry& views,
             HostInputPort& input,
+            const std::shared_ptr<HostFrameCoordinator>& frames,
             const std::thread::id ownerThread)
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_isActive) return false;
+            if (m_isActive || !frames) return false;
             m_views = &views;
             m_input = &input;
+            m_frames = frames;
             m_ownerThread = ownerThread;
             m_isActive = true;
             return true;
@@ -179,6 +182,7 @@ public:
             m_isActive = false;
             m_views = nullptr;
             m_input = nullptr;
+            m_frames.reset();
             m_ownerThread = {};
             return true;
         }
@@ -233,6 +237,20 @@ public:
                 && ports.views->SetViewStatus(viewIds, status);
         }
 
+        bool SendSceneDelta(
+            const std::string& featureId,
+            FeatureSceneDelta delta)
+        {
+            std::shared_ptr<HostFrameCoordinator> frames;
+            {
+                const std::lock_guard<std::mutex> lock(m_mutex);
+                if (!m_isActive) return false;
+                frames = m_frames.lock();
+            }
+            return frames
+                && frames->Enqueue(featureId, std::move(delta));
+        }
+
         bool AttachInput(HostInputBinding binding)
         {
             const OwnerPorts ports = GetOwnerPorts();
@@ -270,6 +288,7 @@ public:
         mutable std::mutex m_mutex;
         HostViewRuntimeRegistry* m_views = nullptr;
         HostInputPort* m_input = nullptr;
+        std::weak_ptr<HostFrameCoordinator> m_frames;
         std::thread::id m_ownerThread;
         bool m_isActive = false;
     };
@@ -430,6 +449,14 @@ public:
                 && bridge->SetViewStatus(viewIds, status);
         }
 
+        bool SendSceneDelta(FeatureSceneDelta delta) override
+        {
+            const auto bridge = m_bridge.lock();
+            return bridge
+                && bridge->SendSceneDelta(
+                    m_featureId, std::move(delta));
+        }
+
         bool AttachInput(HostInputBinding binding) override
         {
             if (binding.featureId != m_featureId) {
@@ -519,6 +546,7 @@ public:
     HostSessionConfig config;
     HostCoreServices core;
     HostViewRuntimeRegistry renderViews;
+    std::shared_ptr<HostFrameCoordinator> frameCoordinator;
     std::shared_ptr<HostCommandRouter> commandRouter;
     std::vector<HostRenderViewEndpoint> endpoints;
     std::unique_ptr<HostHotkeyRouter> hotkeyRouter;
@@ -528,6 +556,7 @@ public:
     std::shared_ptr<OwnerCompleteState> ownerCompleteState;
     std::shared_ptr<FeatureHostBridge> featureBridge;
     std::thread::id ownerThread;
+    std::uint64_t nextSessionGeneration = 1;
     bool isBuilt = false;
     bool isStarted = false;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
@@ -540,8 +569,14 @@ private:
     static bool SendPendingStop(StopToken token) noexcept;
     static StopToken GetStopToken() noexcept;
     static HostCoreServices BuildCore();
+    static bool SetOwnerComplete(
+        const std::shared_ptr<OwnerCompleteState>& state,
+        std::function<void()> complete);
     void SendDiagnostic(const std::string& message) const noexcept;
     void SendImageReadComplete(bool isStopping) noexcept;
+    void SendFeatureTicks() noexcept;
+    void SendOwnerCompletions() noexcept;
+    void OnViewTimer();
     void OnHostTimer();
     bool DetachTimer();
     bool DetachFeatures();
@@ -575,6 +610,22 @@ HostCoreServices VtkAppHostSession::Impl::BuildCore()
         std::make_shared<SharedInteractionState>(
             value.sharedStateBroadcaster);
     return value;
+}
+
+bool VtkAppHostSession::Impl::SetOwnerComplete(
+    const std::shared_ptr<OwnerCompleteState>& state,
+    std::function<void()> complete)
+{
+    if (!state || !complete) return false;
+    try {
+        const std::lock_guard<std::mutex> lock(state->mutex);
+        if (!state->isActive) return false;
+        state->completes.push_back(std::move(complete));
+    }
+    catch (...) {
+        return false;
+    }
+    return true;
 }
 
 VtkAppHostSession::Impl::~Impl()
@@ -627,11 +678,13 @@ bool VtkAppHostSession::Impl::BuildSession()
     const auto clearBuild = [this]() noexcept {
         bool isStopped = false;
         try {
+            if (frameCoordinator) frameCoordinator->Stop();
             if (featureBridge) (void)featureBridge->StopOwner();
             endpoints.clear();
             hotkeyRouter.reset();
             commandRouter.reset();
             isStopped = renderViews.StopLease();
+            if (isStopped) frameCoordinator.reset();
         }
         catch (...) {
             isStopped = false;
@@ -655,7 +708,58 @@ bool VtkAppHostSession::Impl::BuildSession()
         }
         const auto viewDirectory = renderViews.GetViewDirectory();
         commandRouter = std::make_shared<HostCommandRouter>(viewDirectory);
-        if (!renderViews.SetInitialVisibility()
+        if (!renderViews.SetInitialVisibility()) {
+            (void)clearBuild();
+            return false;
+        }
+
+        std::uint64_t sessionGeneration = nextSessionGeneration++;
+        if (sessionGeneration == 0) {
+            sessionGeneration = nextSessionGeneration++;
+        }
+        if (nextSessionGeneration == 0) nextSessionGeneration = 1;
+        HostFrameCoordinator::Callbacks frameCallbacks;
+        frameCallbacks.collectUpdates = [this]() {
+            return renderViews.CollectFrameUpdates();
+        };
+        frameCallbacks.sendFeatureTicks = [this]() {
+            SendFeatureTicks();
+        };
+        frameCallbacks.setIntents = [this](
+            const std::vector<HostFrameIntent>& intents) {
+            return renderViews.SetFrameIntents(intents);
+        };
+        frameCallbacks.applyFeatureUpdates = [this]() {
+            return renderViews.ApplyFrameUpdates();
+        };
+        frameCallbacks.buildStage = [this](
+            const std::uint64_t epoch) {
+            return renderViews.BuildFrameStage(epoch);
+        };
+        frameCallbacks.setCommit = [this](const std::uint64_t epoch) {
+            renderViews.SetFrameCommit(epoch);
+        };
+        frameCallbacks.sendRender = [this](const std::uint64_t epoch) {
+            return renderViews.SendFrameRender(epoch);
+        };
+        frameCallbacks.getRenderPending = [this]() {
+            return renderViews.GetFrameRenderPending();
+        };
+        frameCallbacks.sendCompletions = [this]() {
+            renderViews.SendFrameCompletions();
+            SendOwnerCompletions();
+            SendImageReadComplete(false);
+        };
+        frameCallbacks.clearStage = [this]() {
+            renderViews.ClearFrameStage();
+        };
+        frameCoordinator = std::make_shared<HostFrameCoordinator>(
+            sessionGeneration, std::move(frameCallbacks));
+        if (!frameCoordinator
+            || !renderViews.SetFrameGeneration(sessionGeneration)
+            || !renderViews.SetFrameHandlers(
+                [this]() { OnViewTimer(); })
+            || !renderViews.SetInputsEnabled(false)
             || !renderViews.SetInteractorsReady()) {
             (void)clearBuild();
             return false;
@@ -678,6 +782,7 @@ bool VtkAppHostSession::Impl::BuildSession()
         if (!featureBridge->StartOwner(
                 renderViews,
                 hotkeyRouter->GetInputPort(),
+                frameCoordinator,
                 ownerThread)) {
             (void)clearBuild();
             return false;
@@ -706,9 +811,33 @@ bool VtkAppHostSession::Impl::SendRequest(
         || !commandRouter) {
         return false;
     }
+
+    HostCompleteCallback renderedComplete;
+    if (onComplete) {
+        auto callback = std::make_shared<HostCompleteCallback>(
+            std::move(onComplete));
+        auto isQueued = std::make_shared<std::atomic<bool>>(false);
+        const std::weak_ptr<OwnerCompleteState> weakState =
+            ownerCompleteState;
+        renderedComplete = [callback, isQueued, weakState](
+            const bool isSucceeded) noexcept {
+            if (isQueued->exchange(true, std::memory_order_acq_rel)) {
+                return;
+            }
+            const auto send = [callback, isSucceeded]() noexcept {
+                try { (*callback)(isSucceeded); }
+                catch (...) {}
+            };
+            if (!Impl::SetOwnerComplete(weakState.lock(), send)) {
+                // 已接纳 callback 不能丢失；排队失败以失败终态同步收口。
+                try { (*callback)(false); }
+                catch (...) {}
+            }
+        };
+    }
     return commandRouter->Dispatch(
         std::move(request),
-        std::move(onComplete));
+        std::move(renderedComplete));
 }
 
 bool VtkAppHostSession::Impl::SendRequestResult(
@@ -752,9 +881,9 @@ bool VtkAppHostSession::Impl::SendRequestResult(
                     : HostErrorCode::OperationFailed,
                 isSucceeded ? std::string{}
                     : "The accepted host operation failed." });
-        };
+    };
     try {
-        if (commandRouter->Dispatch(
+        if (SendRequest(
                 std::move(request), legacyComplete)) {
             return true;
         }
@@ -959,7 +1088,8 @@ bool VtkAppHostSession::Impl::DetachTimer()
     bool isCleared = true;
     auto target = timerTargets.begin();
     while (target != timerTargets.end()) {
-        if (renderViews.ClearTimerHandler(*target)) {
+        if (renderViews.SetTimerHandler(
+                *target, [this]() { OnViewTimer(); })) {
             target = timerTargets.erase(target);
         }
         else {
@@ -1018,9 +1148,11 @@ bool VtkAppHostSession::Impl::AttachTimer(
     timerTargets.push_back(std::move(nextTarget));
     if (!hadOldTarget) return true;
 
-    if (!renderViews.ClearTimerHandler(oldTarget)) {
+    if (!renderViews.SetTimerHandler(
+            oldTarget, [this]() { OnViewTimer(); })) {
         // 只有新 handler 的补偿清理确实成功，才能从实际绑定记录中移除它。
-        if (renderViews.ClearTimerHandler(timerTargets.back())) {
+        if (renderViews.SetTimerHandler(
+                timerTargets.back(), [this]() { OnViewTimer(); })) {
             timerTargets.pop_back();
         }
         else {
@@ -1034,13 +1166,8 @@ bool VtkAppHostSession::Impl::AttachTimer(
     return true;
 }
 
-void VtkAppHostSession::Impl::OnHostTimer()
+void VtkAppHostSession::Impl::SendFeatureTicks() noexcept
 {
-    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
-    if (ownerThread != std::this_thread::get_id()) {
-        return;
-    }
-
     auto output = features.begin();
     for (auto input = features.begin();
         input != features.end(); ++input) {
@@ -1057,7 +1184,10 @@ void VtkAppHostSession::Impl::OnHostTimer()
         }
     }
     features.erase(output, features.end());
+}
 
+void VtkAppHostSession::Impl::SendOwnerCompletions() noexcept
+{
     std::vector<std::function<void()>> completes;
     if (ownerCompleteState) {
         const std::lock_guard<std::mutex> lock(
@@ -1073,7 +1203,26 @@ void VtkAppHostSession::Impl::OnHostTimer()
         catch (...) {
         }
     }
-    SendImageReadComplete(false);
+}
+
+void VtkAppHostSession::Impl::OnViewTimer()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread != std::this_thread::get_id()
+        || !frameCoordinator || !timerTargets.empty()) {
+        return;
+    }
+    (void)frameCoordinator->FlushOnOwnerTick(true);
+}
+
+void VtkAppHostSession::Impl::OnHostTimer()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (ownerThread != std::this_thread::get_id()
+        || !frameCoordinator) {
+        return;
+    }
+    (void)frameCoordinator->FlushOnOwnerTick(true);
 }
 
 void VtkAppHostSession::Impl::SendImageReadComplete(
@@ -1181,8 +1330,12 @@ bool VtkAppHostSession::Impl::AttachFeature(
             clearRejectedAttach();
             return false;
         }
-        features.push_back(
-            FeatureEntry{ id, feature });
+        const auto insertAt = std::lower_bound(
+            features.begin(), features.end(), id,
+            [](const FeatureEntry& entry, const std::string& value) {
+                return entry.id < value;
+            });
+        features.insert(insertAt, FeatureEntry{ id, feature });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1272,8 +1425,13 @@ bool VtkAppHostSession::Impl::Stop() noexcept
 
     stopState = HostStopState::Stopping;
     try {
-        // timer/hotkey handler 随 context 一起停止；因此在 StopLease 失败时仍保留，
-        // owner 修复底层 timer 后可以继续交互并重试。
+        // P0 首先关闭普通 frame admission 与输入 gate；清理失败时保持
+        // StopPending，但不再恢复可交互状态。
+        if (frameCoordinator) frameCoordinator->Stop();
+        if (isBuilt && !renderViews.SetInputsEnabled(false)) {
+            stopState = HostStopState::StopPending;
+            return false;
+        }
         if (!DetachFeatures()) {
             stopState = HostStopState::StopPending;
             return false;
@@ -1285,6 +1443,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         // StopLease 成功后 timer 与 executor 都已停止；必须在任何后续可失败清理前，
         // 由当前 owner thread 兑现已接纳图像读取的唯一终态回调。
         SendImageReadComplete(true);
+        SendOwnerCompletions();
         endpoints.clear();
         timerTargets.clear();
         if (featureBridge) (void)featureBridge->StopOwner();
@@ -1302,6 +1461,7 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         }
         hotkeyRouter.reset();
         commandRouter.reset();
+        frameCoordinator.reset();
         core = {};
         isBuilt = false;
         isStarted = false;
@@ -1322,6 +1482,7 @@ bool VtkAppHostSession::Impl::GetIsStopped() const noexcept
         && stopState.load() == HostStopState::Stopped
         && ownerThread == std::thread::id{}
         && endpoints.empty()
+        && !frameCoordinator
         && !hotkeyRouter
         && features.empty();
 }
@@ -1580,11 +1741,18 @@ bool VtkAppHostSession::Start()
     if (!BuildSession() || m_impl->isStarted) {
         return false;
     }
-    if (!m_impl->renderViews.SendRenderAll()) {
+    if (!m_impl->frameCoordinator) return false;
+    const auto frameStatus =
+        m_impl->frameCoordinator->FlushOnOwnerTick(true);
+    if (frameStatus
+            != HostFrameCoordinator::FlushStatus::Completed
+        || !m_impl->renderViews.SetInputsEnabled(true)) {
+        (void)m_impl->renderViews.SetInputsEnabled(false);
         return false;
     }
     m_impl->isStarted = true;
     if (!m_impl->renderViews.StartStandaloneView()) {
+        (void)m_impl->renderViews.SetInputsEnabled(false);
         m_impl->isStarted = false;
         return false;
     }

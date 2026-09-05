@@ -5,6 +5,7 @@
 #include "Host/Types/HostRequestTypes.h"
 #include "App/AppState.h"
 #include "App/AppStateEvents.h"
+#include "App/Services/FeatureViewService.h"
 #include "Data/DataManager.h"
 #include "Interaction/TimeUpdateHandler.h"
 #include "VolumeStrategy.h"
@@ -12,6 +13,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QOpenGLWidget>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QStringList>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -50,6 +53,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -171,12 +175,141 @@ bool SendTimer(
     return true;
 }
 
+bool SendFrame(
+    HostViewRuntimeRegistry& views,
+    std::uint64_t& committedEpoch)
+{
+    if (views.GetFrameRenderPending()) {
+        if (!views.SendFrameRender(committedEpoch)) return false;
+        views.SendFrameCompletions();
+        return true;
+    }
+    if (!views.CollectFrameUpdates()) return false;
+    const auto status = views.BuildFrameStage(committedEpoch + 1);
+    if (status == HostFrameStageStatus::Failed) return false;
+    if (status == HostFrameStageStatus::Unchanged) {
+        views.SendFrameCompletions();
+        return true;
+    }
+    ++committedEpoch;
+    views.SetFrameCommit(committedEpoch);
+    if (!views.SendFrameRender(committedEpoch)) return false;
+    views.SendFrameCompletions();
+    return true;
+}
+
+class FrameProtocolFeature final : public HostFeature {
+public:
+    FrameProtocolFeature(
+        std::string id,
+        std::string targetViewId,
+        std::vector<std::string>& tickOrder,
+        const bool handlesInput)
+        : m_id(std::move(id))
+        , m_targetViewId(std::move(targetViewId))
+        , m_tickOrder(tickOrder)
+        , m_handlesInput(handlesInput)
+    {
+    }
+
+    std::string_view GetFeatureId() const noexcept override
+    {
+        return m_id;
+    }
+
+    bool AttachHost(const HostFeatureContext& context) override
+    {
+        if (m_host || !context.host || !context.views) return false;
+        m_host = context.host;
+        m_views = context.views;
+        HostInputBinding binding;
+        binding.featureId = m_id;
+        binding.targetViews.viewIds = { m_targetViewId };
+        binding.onInput = [this](const InteractionEvent& event) {
+            if (!m_handlesInput
+                || event.eventKind != InteractionEventKind::KeyPress) {
+                return InteractionResult{};
+            }
+            ++m_inputCount;
+            return InteractionResult{ true, true };
+        };
+        if (!m_host->AttachInput(std::move(binding))) {
+            m_views.reset();
+            m_host.reset();
+            return false;
+        }
+        return true;
+    }
+
+    bool DetachHost() override
+    {
+        if (!m_host) return true;
+        const bool isViewsCleared = m_host->SetActiveViews({});
+        const bool isInputDetached = m_host->DetachInput(m_id);
+        if (!isViewsCleared || !isInputDetached) return false;
+        m_views.reset();
+        m_host.reset();
+        return true;
+    }
+
+    bool OnHostTick() override
+    {
+        m_tickOrder.push_back(m_id);
+        if (m_isActivated) return true;
+        const auto port = m_views
+            ? m_views->GetFeaturePort(m_targetViewId) : nullptr;
+        if (!port || !m_host
+            || !m_host->SetActiveViews({ m_targetViewId })
+            || !port->SetRenderNeeded()) {
+            return false;
+        }
+        FeatureSceneDelta delta;
+        delta.viewIds = { m_targetViewId };
+        delta.requestId = 1;
+        delta.priority = FeatureScenePriority::Scene;
+        delta.scope = FeatureSceneScope::RequiredAllViews;
+        const auto stamp = port->GetRenderInputStamp();
+        if (stamp) delta.inputStamp = *stamp;
+        m_isActivated = m_host->SendSceneDelta(std::move(delta));
+        return m_isActivated;
+    }
+
+    bool QueueComplete(std::function<void()> complete)
+    {
+        return m_host
+            && m_host->SendOwnerComplete(std::move(complete));
+    }
+
+    int GetInputCount() const noexcept { return m_inputCount; }
+
+private:
+    std::string m_id;
+    std::string m_targetViewId;
+    std::vector<std::string>& m_tickOrder;
+    std::shared_ptr<FeatureHostControl> m_host;
+    std::shared_ptr<FeatureViewDirectory> m_views;
+    int m_inputCount = 0;
+    bool m_handlesInput = false;
+    bool m_isActivated = false;
+};
+
 class TimerProbePort final : public RenderUpdatePort {
 public:
     bool SendUpdates() override
     {
         ++m_updateCount;
         return true;
+    }
+
+    bool SendPendingUpdates() override
+    {
+        ++m_updateCount;
+        return true;
+    }
+
+    void SendCompletions() override
+    {
+        ++m_completionCount;
     }
 
     bool SetRenderNeeded() override
@@ -197,14 +330,21 @@ public:
         return m_updateCount;
     }
 
+    std::size_t GetCompletionCount() const
+    {
+        return m_completionCount;
+    }
+
     void ResetCount()
     {
         m_updateCount = 0;
+        m_completionCount = 0;
         m_isDirty = false;
     }
 
 private:
     std::size_t m_updateCount{0};
+    std::size_t m_completionCount{0};
     bool m_isDirty{false};
 };
 
@@ -365,13 +505,14 @@ bool BuildRenderSourceTest()
     HostRenderViewConfig startView;
     startView.id = "context-start-source";
     startView.role = HostRenderViewRole::Primary3D;
+    startView.isEventLoopEnabled = true;
     startView.renderWindow = startWindow;
     HostViewRuntimeRegistry startViews;
     const bool isStartBuilt = startViews.Build(
         core, std::vector<HostRenderViewConfig>{ startView });
     const bool hasStartRender = isStartBuilt
         && startViews.StartStandaloneView()
-        && startWindow->GetRenderCount() == 1
+        && startWindow->GetRenderCount() == 0
         && startInteractor->GetStartCount() == 1;
 
     auto sessionWindow =
@@ -391,8 +532,8 @@ bool BuildRenderSourceTest()
         std::move(sessionConfig));
     const bool hasSessionStart =
         session.Start()
-        && sessionWindow->GetRenderCount() == 2
-        && sessionInteractor->GetStartCount() == 1;
+        && sessionWindow->GetRenderCount() == 1
+        && sessionInteractor->GetStartCount() == 0;
 
     std::cout
         << "DIAG_RENDER_SOURCE: send_all="
@@ -406,6 +547,182 @@ bool BuildRenderSourceTest()
     return hasViewSetRender
         && hasStartRender
         && hasSessionStart;
+}
+
+bool BuildCoordinatedFrameProtocolTest()
+{
+    auto primaryWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto primaryInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    primaryWindow->SetInteractor(primaryInteractor);
+    primaryInteractor->SetRenderWindow(primaryWindow);
+
+    auto peerWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto peerInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    peerWindow->SetInteractor(peerInteractor);
+    peerInteractor->SetRenderWindow(peerWindow);
+
+    HostRenderViewConfig primary;
+    primary.id = "frame-primary";
+    primary.role = HostRenderViewRole::Primary3D;
+    primary.renderWindow = primaryWindow;
+    HostRenderViewConfig peer;
+    peer.id = "frame-peer";
+    peer.role = HostRenderViewRole::Composite3D;
+    peer.renderWindow = peerWindow;
+    HostSessionConfig config;
+    config.renderViews = { primary, peer };
+
+    VtkAppHostSession session(std::move(config));
+    std::vector<std::string> tickOrder;
+    auto featureZ = std::make_shared<FrameProtocolFeature>(
+        "frame.z", "frame-primary", tickOrder, false);
+    auto featureA = std::make_shared<FrameProtocolFeature>(
+        "frame.a", "frame-primary", tickOrder, true);
+    if (!session.BuildSession()
+        || !session.AttachFeature(featureZ)
+        || !session.AttachFeature(featureA)
+        || !session.AttachHotkeys({})) {
+        return false;
+    }
+    const auto* primaryEndpoint =
+        session.GetRenderViewEndpoint("frame-primary");
+    const auto* peerEndpoint =
+        session.GetRenderViewEndpoint("frame-peer");
+    if (!primaryEndpoint || !peerEndpoint
+        || !primaryEndpoint->interactor || !peerEndpoint->interactor) {
+        return false;
+    }
+
+    primaryEndpoint->interactor->SetKeyEventInformation(
+        0, 0, 'x', 0, "x");
+    primaryEndpoint->interactor->InvokeEvent(vtkCommand::KeyPressEvent);
+    const bool wasInputClosed = featureA->GetInputCount() == 0;
+
+    HostTimerConfig timer;
+    timer.isTimerEnabled = true;
+    timer.targetView.viewId = "frame-peer";
+    if (!session.AttachTimer(timer) || !session.Start()) return false;
+
+    const auto initialScenes = session.GetSceneViewStates();
+    const bool isAttachOrderStable = tickOrder.size() >= 2
+        && tickOrder[0] == "frame.a"
+        && tickOrder[1] == "frame.z";
+    const bool isFeatureVisibleInFirstFrame = initialScenes.size() == 2
+        && initialScenes[0].activeFeatureIds
+            == std::vector<std::string>{ "frame.a", "frame.z" }
+        && initialScenes[0].sceneEpoch != 0
+        && initialScenes[0].renderedEpoch
+            == initialScenes[0].sceneEpoch
+        && initialScenes[1].sceneEpoch == initialScenes[0].sceneEpoch
+        && initialScenes[1].renderedEpoch
+            == initialScenes[1].sceneEpoch
+        && primaryWindow->GetRenderCount() == 1
+        && peerWindow->GetRenderCount() == 1;
+
+    primaryEndpoint->interactor->InvokeEvent(vtkCommand::KeyPressEvent);
+    const bool isInputOpen = featureA->GetInputCount() == 1;
+
+    int callbackCount = 0;
+    bool wasCallbackAfterRender = false;
+    HostSessionSetRequest request;
+    request.cursor = HostCursorParams{
+        { 0.25, 0.5, 0.75 }, -1 };
+    const bool isRequestAccepted = session.SendRequest(
+        std::move(request),
+        [&](const bool isSucceeded) {
+            ++callbackCount;
+            const auto states = session.GetSceneViewStates();
+            wasCallbackAfterRender = isSucceeded
+                && states.size() == 2
+                && states[0].sceneEpoch == states[1].sceneEpoch
+                && states[0].renderedEpoch == states[0].sceneEpoch
+                && states[1].renderedEpoch == states[1].sceneEpoch
+                && primaryWindow->GetRenderCount() == 2
+                && peerWindow->GetRenderCount() == 2;
+        });
+
+    std::vector<vtkRenderWindowInteractor*> timers;
+    for (int index = 0; index < 32; ++index) {
+        timers.push_back(index % 3 == 0
+            ? peerEndpoint->interactor
+            : primaryEndpoint->interactor);
+    }
+    std::mt19937 random(0x5EEDu);
+    std::shuffle(timers.begin(), timers.end(), random);
+    bool isRandomInterleavingValid = true;
+    const std::uint64_t initialEpoch = initialScenes.empty()
+        ? 0 : initialScenes.front().sceneEpoch;
+    std::uint64_t observedEpoch = initialEpoch;
+    for (auto* interactor : timers) {
+        (void)SendTimer(interactor);
+        const auto states = session.GetSceneViewStates();
+        if (states.size() != 2
+            || states[0].sceneEpoch != states[1].sceneEpoch
+            || states[0].renderedEpoch != states[0].sceneEpoch
+            || states[1].renderedEpoch != states[1].sceneEpoch
+            || states[0].sceneEpoch < observedEpoch
+            || states[0].sceneEpoch > initialEpoch + 1
+            || primaryWindow->GetRenderCount() > 2
+            || peerWindow->GetRenderCount() > 2) {
+            isRandomInterleavingValid = false;
+        }
+        observedEpoch = states.empty()
+            ? observedEpoch : states.front().sceneEpoch;
+    }
+
+    const auto finalScenes = session.GetSceneViewStates();
+    const bool isSnapshotSingleEpoch = initialScenes.size() == 2
+        && finalScenes.size() == 2
+        && finalScenes[0].sceneEpoch == finalScenes[1].sceneEpoch
+        && finalScenes[0].renderedEpoch == finalScenes[0].sceneEpoch
+        && finalScenes[1].renderedEpoch == finalScenes[1].sceneEpoch
+        && finalScenes[0].sceneEpoch == initialScenes[0].sceneEpoch + 1;
+    const bool isExactlyOneRenderPerEpoch =
+        isRandomInterleavingValid
+        && primaryWindow->GetRenderCount() == 2
+        && peerWindow->GetRenderCount() == 2;
+
+    int stopCompletionCount = 0;
+    const bool isStopCompletionQueued = featureA->QueueComplete(
+        [&stopCompletionCount]() { ++stopCompletionCount; });
+    const bool isStopped = session.Stop();
+    const bool isStopIdempotent = session.Stop();
+    const bool isValid = wasInputClosed
+        && isInputOpen
+        && isAttachOrderStable
+        && isFeatureVisibleInFirstFrame
+        && isRequestAccepted
+        && callbackCount == 1
+        && wasCallbackAfterRender
+        && isSnapshotSingleEpoch
+        && isExactlyOneRenderPerEpoch
+        && isStopCompletionQueued
+        && isStopped
+        && isStopIdempotent
+        && stopCompletionCount == 1;
+    if (!isValid) {
+        std::cerr << "DIAG_FRAME_PROTOCOL: input_closed=" << wasInputClosed
+            << " input_open=" << isInputOpen
+            << " order=" << isAttachOrderStable
+            << " first_frame=" << isFeatureVisibleInFirstFrame
+            << " request=" << isRequestAccepted
+            << " callbacks=" << callbackCount
+            << " after_render=" << wasCallbackAfterRender
+            << " single_epoch=" << isSnapshotSingleEpoch
+            << " one_render=" << isExactlyOneRenderPerEpoch
+            << " random=" << isRandomInterleavingValid
+            << " stop_queued=" << isStopCompletionQueued
+            << " stopped=" << isStopped
+            << " idempotent=" << isStopIdempotent
+            << " stop_callbacks=" << stopCompletionCount
+            << " ticks=" << tickOrder.size()
+            << " renders=" << primaryWindow->GetRenderCount()
+            << ',' << peerWindow->GetRenderCount()
+            << '\n';
+    }
+    return isValid;
 }
 
 bool BuildStyleQualityTest()
@@ -480,10 +797,10 @@ bool BuildStyleQualityTest()
     if (!views.SendViewUpdates(target)) {
         return false;
     }
-    // 交互首帧 rate 镜像只允许在已绑定 owner Timer 的 context 中启用；
-    // 这里用同线程 no-op handler 建立与真实 HostTimer 相同的线程门。
-    if (!views.SetTimerHandler(target, [] {})
-        || !views.SetInteractorsReady()
+    // 本用例验证非 Session 的单 View TransientLocal 路径；不安装 Session
+    // frame handler，显式打开 gate 后 Timer 仍由 TimeUpdateHandler 收口。
+    if (!views.SetInteractorsReady()
+        || !views.SetInputsEnabled(true)
         || !setMode(HostRenderMode::Volume)) {
         return false;
     }
@@ -674,7 +991,8 @@ bool BuildStyleQualityTest()
     if (!setMode(HostRenderMode::Volume)) {
         return false;
     }
-    if (!views.SetInteractorsReady()) {
+    if (!views.SetInteractorsReady()
+        || !views.SetInputsEnabled(true)) {
         return false;
     }
     const bool isInteractorReplaceClear =
@@ -905,10 +1223,10 @@ bool BuildSceneCameraTest()
     const HostViewTarget peerTarget{
         "scene-camera-peer", false, HostRenderViewRole::Composite3D };
     core.sharedStateBroadcaster->SendFlags(UpdateFlags::All);
-    if (!views.SendViewUpdates(target)
-        || !views.SendViewUpdates(peerTarget)
-        || !views.SetFeatureViews(
-            "scene-camera-feature", { "scene-camera" })) {
+    std::uint64_t committedEpoch = 0;
+    if (!views.SetFeatureViews(
+            "scene-camera-feature", { "scene-camera" })
+        || !SendFrame(views, committedEpoch)) {
         return false;
     }
 
@@ -967,6 +1285,12 @@ bool BuildSceneCameraTest()
     camera->SetViewAngle(expectedCamera.viewAngle);
     camera->SetParallelProjection(expectedCamera.isParallel ? 1 : 0);
 
+    const auto cameraPort = views.GetFeaturePort("scene-camera");
+    if (!cameraPort || !cameraPort->SetRenderNeeded()
+        || !SendFrame(views, committedEpoch)) {
+        return false;
+    }
+
     const auto sceneBeforeRebind = views.GetSceneViewState(target);
     const auto peerAfterCamera = views.GetSceneViewState(peerTarget);
     const bool isCameraProjectionValid = sceneBeforeRebind
@@ -987,6 +1311,8 @@ bool BuildSceneCameraTest()
     const std::size_t errorsBeforeRebind = vtkErrorCount;
     const bool isWindowRebound = replacementErrorTag != 0
         && views.SetViewWindow("scene-camera", replacementWindow);
+    const bool isRebindFrameSent = isWindowRebound
+        && SendFrame(views, committedEpoch);
     const auto sceneAfterRebind = views.GetSceneViewState(target);
     const auto peerAfterRebind = views.GetSceneViewState(peerTarget);
     const auto reboundEndpoints = views.BuildEndpoints();
@@ -1006,7 +1332,7 @@ bool BuildSceneCameraTest()
             reboundClipping.size(),
             reboundClipping.begin());
     }
-    const bool isSceneIdentityStable = isWindowRebound
+    const bool isSceneIdentityStable = isRebindFrameSent
         && sceneBeforeRebind && sceneAfterRebind
         && sceneBeforeRebind->id == sceneAfterRebind->id
         && sceneBeforeRebind->role == sceneAfterRebind->role
@@ -1082,11 +1408,15 @@ bool BuildSceneCameraTest()
         && !stoppedPeerInList->isAvailable
         && !stoppedPeerInList->presentation
         && !stoppedPeerInList->camera;
+    const bool isUnavailableGateClosed = views.SetInputsEnabled(false);
+    const bool isLeaseStopped = views.StopLease();
 
     const bool isValid = isCameraProjectionValid
         && isRebindStable
         && isFeatureCleared
-        && isUnavailableTopologyValid;
+        && isUnavailableTopologyValid
+        && isUnavailableGateClosed
+        && isLeaseStopped;
     if (!isValid) {
         std::cerr
             << "DIAG_SCENE_CAMERA: projection="
@@ -1098,6 +1428,8 @@ bool BuildSceneCameraTest()
             << " endpoint=" << isEndpointRebound
             << " no_error=" << hasNoRebindError
             << " unavailable=" << isUnavailableTopologyValid
+            << " gate_closed=" << isUnavailableGateClosed
+            << " lease_stopped=" << isLeaseStopped
             << " errors=" << vtkErrorCount
             << " clip_before="
             << (sceneBeforeRebind && sceneBeforeRebind->camera
@@ -1142,6 +1474,8 @@ bool BuildStyleDestroyTest()
         view.renderWindow = renderWindow;
         HostViewRuntimeRegistry views;
         if (!views.Build(core, { view })
+            || !views.SetInteractorsReady()
+            || !views.SetInputsEnabled(true)
             || views.BuildEndpoints().empty()) {
             return false;
         }
@@ -1193,7 +1527,8 @@ bool BuildLeaseRetryTest()
     view.renderWindow = renderWindow;
     HostViewRuntimeRegistry views;
     if (!views.Build(core, { view })
-        || !views.SetInteractorsReady()) {
+        || !views.SetInteractorsReady()
+        || !views.SetInputsEnabled(true)) {
         return false;
     }
 
@@ -1212,8 +1547,8 @@ bool BuildLeaseRetryTest()
     if (style) {
         style->InvokeEvent(vtkCommand::StartInteractionEvent);
     }
-    const bool isInteractionRetained = style
-        && core.sharedState->GetIsInteracting();
+    const bool isInputClosed = style
+        && !core.sharedState->GetIsInteracting();
     if (style) {
         style->InvokeEvent(vtkCommand::EndInteractionEvent);
     }
@@ -1222,13 +1557,13 @@ bool BuildLeaseRetryTest()
     std::cout
         << "DIAG_LEASE_RETRY: first=" << isFirstRejected
         << " retained=" << isRuntimeRetained
-        << " interaction=" << isInteractionRetained
+        << " input_closed=" << isInputClosed
         << " retry=" << isRetryAccepted
         << " empty=" << views.BuildEndpoints().empty()
         << '\n';
     return isFirstRejected
         && isRuntimeRetained
-        && isInteractionRetained
+        && isInputClosed
         && isRetryAccepted
         && isIdempotent
         && views.BuildEndpoints().empty();
@@ -1260,9 +1595,11 @@ bool BuildDefaultRenderTest()
     timer.targetView = {
         "render-probe", false, HostRenderViewRole::Primary3D
     };
-    if (!session.AttachTimer(timer)) {
+    if (!session.AttachTimer(timer) || !session.Start()) {
         return false;
     }
+    const std::size_t startedRenderCount =
+        renderWindow->GetRenderCount();
 
     HostVolumeTransferFunction function;
     function.colorNodes = {
@@ -1281,7 +1618,7 @@ bool BuildDefaultRenderTest()
         return false;
     }
     (void)SendTimer(interactor);
-    if (renderWindow->GetRenderCount() != renderCount + 1) {
+    if (renderWindow->GetRenderCount() != startedRenderCount + 1) {
         return false;
     }
 
@@ -1323,7 +1660,7 @@ bool BuildZoomRenderTest()
     timer.targetView = {
         "zoom-probe", false, HostRenderViewRole::TopDownSlice
     };
-    if (!session.AttachTimer(timer)) {
+    if (!session.AttachTimer(timer) || !session.Start()) {
         return false;
     }
     const auto* endpoint =
@@ -1333,8 +1670,7 @@ bool BuildZoomRenderTest()
         return false;
     }
 
-    // 清空 BuildSession 留下的历史 dirty，再单独测右键缩放的 render 来源。
-    (void)SendTimer(endpoint->interactor);
+    // Start 已完成并领取首帧 dirty，后续只观察右键缩放的 render 来源。
     const std::size_t renderCount = renderWindow->GetRenderCount();
     auto* camera = endpoint->renderer->GetActiveCamera();
     const double startScale = camera->GetParallelScale();
@@ -1430,7 +1766,19 @@ public:
         timer.isTimerEnabled = true;
         timer.targetView = { "primary-3d", false, HostRenderViewRole::Primary3D };
         const bool isTimerAttached = m_session->AttachTimer(timer);
-        const bool hasInitialRender = m_renderStartCount != renderStartCount;
+        const bool hasNoRenderBeforeStart =
+            m_renderStartCount == renderStartCount;
+        m_widget->makeCurrent();
+        if (auto* context = QOpenGLContext::currentContext()) {
+            auto* functions = context->functions();
+            while (functions
+                && functions->glGetError() != GL_NO_ERROR) {
+            }
+        }
+        const bool isStarted = isTimerAttached && m_session->Start();
+        m_widget->doneCurrent();
+        const bool hasInitialRender =
+            m_renderStartCount != renderStartCount;
 
         const auto& endpoints = m_session->GetRenderViewEndpoints();
         const auto* endpoint = m_session->GetRenderViewEndpoint("primary-3d");
@@ -1454,7 +1802,8 @@ public:
             << " p95_ms=" << GetRenderTimeMs(0.95)
             << " max_ms=" << GetRenderTimeMs(1.00)
             << '\n';
-        return isBuilt && isTimerAttached && !hasInitialRender
+        return isBuilt && isTimerAttached && isStarted
+            && hasNoRenderBeforeStart && hasInitialRender
             && m_vtkErrorCount == 0
             && hasRenderStats
             && endpoints.size() == 1
@@ -3060,6 +3409,11 @@ int main(int argc, char* argv[])
         std::cerr
             << "FAIL: Render sources were not isolated\n";
         return 4;
+    }
+    if (!BuildCoordinatedFrameProtocolTest()) {
+        std::cerr
+            << "FAIL: Coordinated Session frame protocol changed\n";
+        return 11;
     }
     if (!BuildStyleQualityTest()) {
         std::cerr

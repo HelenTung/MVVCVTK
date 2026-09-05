@@ -103,7 +103,7 @@ public:
     void ClearView();
     bool GetViewOn() const;
     bool GetDisplayTickNeeded() const;
-    void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+    bool OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
     class KernelModule final {
@@ -636,9 +636,9 @@ bool GapAnalysisService::GetDisplayTickNeeded() const
     return m_impl->GetDisplayTickNeeded();
 }
 
-void GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
+bool GapAnalysisService::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage)
 {
-    m_impl->OnDisplayTick(std::move(inputImage));
+    return m_impl->OnDisplayTick(std::move(inputImage));
 }
 
 bool GapAnalysisService::Impl::SetGapInput(vtkSmartPointer<vtkImageData> image) {
@@ -1081,25 +1081,25 @@ void GapAnalysisService::Impl::ClearView()
     }
 }
 
-void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
+bool GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage) {
     (void)inputImage;
     if (!GetViewThread()) {
-        return;
+        return false;
     }
     if (m_viewPhase.load() == GapViewPhase::Idle) {
-        return;
+        return false;
     }
 
     // 1. Consumed 只阻止重复挂载；退出请求仍必须经过下方 join 与状态清理。
     if (m_viewPhase.load() == GapViewPhase::Consumed
         && !m_isExitPending) {
-        return;
+        return false;
     }
 
     // 2. 显示线程先用原子执行状态判断是否到达终态；Idle/Running 均没有可消费的终态结果。
     const GapAnalysisState state = GetAnalysisState();
     if (state == GapAnalysisState::Running) {
-        return;
+        return false;
     }
     StopWorker();
 
@@ -1113,7 +1113,7 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         ClearDisplayState();
         ClearViewThread();
         if (callback) { try { callback(false); } catch (...) {} }
-        return;
+        return false;
     }
 
     // 3A. 失败只记一次日志并关闭本次消费，不挂载任何 overlay。
@@ -1121,13 +1121,15 @@ void GapAnalysisService::Impl::OnDisplayTick(vtkSmartPointer<vtkImageData> input
         std::cerr << "[GapAnalysis] Analysis failed; overlay will not be attached." << std::endl;
         m_viewPhase.store(GapViewPhase::Consumed);
         if (callback) { try { callback(false); } catch (...) {} }
-        return;
+        return false;
     }
 
     // 3B. 成功结果在当前 tick 缓存并按 overlay 可见意图挂载；无论目标是否可显示都不重复消费。
     const bool isDisplayed = SetDisplayView();
+    const bool hasVisibleDelta = !m_displayOverlayBindings.empty();
     m_viewPhase.store(GapViewPhase::Consumed);
     if (callback) { try { callback(isDisplayed); } catch (...) {} }
+    return hasVisibleDelta;
 }
 
 GapAnalysisService::Impl::InputSnapshot GapAnalysisService::Impl::GetInputSnapshot() const {

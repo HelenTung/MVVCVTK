@@ -135,6 +135,8 @@ public:
     void GetModelPositionFromWorld(const double w[3], double m[3]) const;
     void GetWorldPositionFromModel(const double m[3], double w[3]) const;
     bool SendUpdates();
+    bool SendPendingUpdates();
+    void SendCompletions();
     bool SendReloadUpdate();
     bool GetDirty() const;
     void SetDirty();
@@ -241,7 +243,6 @@ private:
     void SetStateObserver();
     void SendStateFlags(UpdateFlags flags);
     void SendTasks();
-    void SendCompletions();
     void SetTaskResult(ActiveTask task, bool isSuccess);
     void SetLoadResult(ActiveTask task, bool isSuccess);
     void SetCompletion(bool isSuccess, std::function<void(bool)> callback);
@@ -716,7 +717,69 @@ bool AppRuntime::StopTasks(
     const std::chrono::steady_clock::time_point deadline)
 {
     (void)SetTaskStopping();
-    return !m_taskExecutor || m_taskExecutor->Stop(deadline);
+    if (m_taskExecutor && !m_taskExecutor->Stop(deadline)) {
+        return false;
+    }
+
+    // executor 已停止并 join，之后不会再有 worker 写入 pending 或 future。
+    // Stop 不经过普通 frame/render barrier；所有尚未派发的已接纳请求必须在
+    // runtime 释放前降级为取消终态，不能把未呈现的成功结果泄漏给调用方。
+    std::list<ActiveTask> activeTasks;
+    {
+        const std::lock_guard<std::mutex> lock(m_activeTaskMutex);
+        activeTasks.splice(activeTasks.end(), m_activeTasks);
+    }
+    std::deque<Completion> completions;
+    {
+        const std::lock_guard<std::mutex> lock(m_completionMutex);
+        completions.swap(m_completions);
+    }
+    auto ownedCallback = std::move(m_ownedCallback);
+
+    for (auto& task : activeTasks) {
+        if (task.result.valid()) {
+            try { (void)task.result.get(); }
+            catch (...) {}
+        }
+    }
+
+    const auto ownedLoadKind = static_cast<LoadEventKind>(
+        m_ownedLoadKind.exchange(static_cast<int>(LoadEventKind::None)));
+    if (ownedLoadKind != LoadEventKind::None) {
+        if (m_dataManager) m_dataManager->ClearPending();
+        m_readyState.reset();
+        if (m_sharedState) {
+            if (ownedLoadKind == LoadEventKind::Reload
+                && m_sharedState->GetReloadLoadState()
+                    == LoadState::Loading) {
+                m_sharedState->SetReloadLoadFailed();
+            }
+            else if (ownedLoadKind == LoadEventKind::File
+                && m_sharedState->GetFileLoadState()
+                    == LoadState::Loading) {
+                m_sharedState->SetFileLoadFailed();
+            }
+            (void)m_sharedState->ResetLoad(ownedLoadKind);
+        }
+    }
+    {
+        const std::lock_guard<std::mutex> lock(m_loadNoticeMutex);
+        m_loadNotices.clear();
+    }
+
+    const auto sendCancelled = [](std::function<void(bool)> callback) noexcept {
+        if (!callback) return;
+        try { callback(false); }
+        catch (...) {}
+    };
+    for (auto& task : activeTasks) {
+        sendCancelled(std::move(task.callback));
+    }
+    for (auto& completion : completions) {
+        sendCancelled(std::move(completion.callback));
+    }
+    sendCancelled(std::move(ownedCallback));
+    return true;
 }
 
 bool AppRuntime::GetDirty() const
@@ -2212,7 +2275,15 @@ bool AppRuntime::SendUpdates()
     // 1. 先领取所有 ready 任务并 join worker，load 的 pending 只由 owner 提交。
     SendTasks();
 
-    // 2. load 终态按完整 payload 顺序消费；队列锁只覆盖弹出，VTK 与 callback 始终在锁外。
+    return SendPendingUpdates();
+}
+
+bool AppRuntime::SendPendingUpdates()
+{
+    if (!GetIsOwnerThread()) return false;
+
+    // load 终态按完整 payload 顺序消费；Session freeze 后调用本入口时
+    // 不再领取新 worker，只应用 Feature/共享状态已经产生的 pending。
     LoadNotice loadNotice;
     while (RemoveLoadNotice(loadNotice)) {
         if (!loadNotice.isStateSet) {
@@ -2246,14 +2317,13 @@ bool AppRuntime::SendUpdates()
         SetCompletion(loadNotice.isSucceeded, std::move(m_ownedCallback));
     }
 
-    // 3. spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
+    // spacing / mode 等非 load 结构变化继续使用独立门铃，不与 load 终态混槽。
     if (m_hasDataRefreshNeed.exchange(false)) {
         if (!BuildPipeline()) m_hasDataRefreshNeed = true;
     }
     const bool isStrategySet = SetStrategyState();
 
-    // 4. owner 已释放 admission 后再执行回调，允许业务方安全重入下一次 load。
-    SendCompletions();
+    // completion 只排入 owner 槽；具体 frame pump 在所需 Render 返回后派发。
     return isStrategySet;
 }
 
@@ -3747,6 +3817,16 @@ public:
     bool SendUpdates() override
     {
         return m_service && m_service->SendUpdates();
+    }
+
+    bool SendPendingUpdates() override
+    {
+        return m_service && m_service->SendPendingUpdates();
+    }
+
+    void SendCompletions() override
+    {
+        if (m_service) m_service->SendCompletions();
     }
 
     bool SetRenderNeeded() override

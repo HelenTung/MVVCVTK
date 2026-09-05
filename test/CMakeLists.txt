@@ -42,6 +42,7 @@ set_target_properties(
 )
 unset(MVVCVTK_HOST_TEST_INCLUDE_DIRS)
 
+add_subdirectory(Host)
 if(MVVCVTK_BUILD_ORTHOGONAL_CROP)
     add_subdirectory(OrthogonalCrop)
 endif()

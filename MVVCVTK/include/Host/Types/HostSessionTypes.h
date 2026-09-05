@@ -114,6 +114,10 @@ struct HostSceneViewState final {
     // 仅表示 App presentation 事务，不覆盖 Camera、Feature 或 Overlay。
     std::uint64_t presentationRevision = 0;
     std::vector<std::string> activeFeatureIds;
+    // sceneEpoch 是该值快照的 Session 逻辑提交；renderedEpoch 表示该 View
+    // 已完成 Render() 的最近提交。后者较小时，状态已提交但帧仍待重试。
+    std::uint64_t sceneEpoch = 0;
+    std::uint64_t renderedEpoch = 0;
 };
 
 struct HostRenderViewEndpoint {

@@ -45,6 +45,7 @@ public:
         AbstractViewContext* context) noexcept;
 
     bool SetInteractorReady() override;
+    bool SetInputEnabled(bool isEnabled) override;
     bool Start() override;
     bool StopInput() override;
     bool SetCameraStyle(VizMode mode) override;
@@ -110,6 +111,7 @@ private:
     unsigned long m_timerObserverTag = 0;
     int m_timerId = 0;
     bool m_isInteractorReady = false;
+    bool m_isInputEnabled = false;
     std::function<InteractionResult(const InteractionEvent&)>
         m_inputHandler;
     std::vector<InteractionEventKind> m_inputEventKinds;
@@ -371,6 +373,16 @@ bool StdViewContext::SetInteractorReady()
     return isReady;
 }
 
+bool StdViewContext::SetInputEnabled(const bool isEnabled)
+{
+    if (!GetIsOwnerThread()
+        || (isEnabled && !m_isInteractorReady)) {
+        return false;
+    }
+    m_isInputEnabled = isEnabled;
+    return true;
+}
+
 bool StdViewContext::BuildInteractionRouter()
 {
     m_interactionRouter.ClearHandlers();
@@ -485,7 +497,7 @@ bool StdViewContext::Start()
     }
     if (!m_isInteractorReady && !SetInteractorReady()) return false;
 
-    m_renderWindow->Render();
+    m_isInputEnabled = true;
     m_interactor->Start();
     return true;
 }
@@ -493,11 +505,13 @@ bool StdViewContext::Start()
 bool StdViewContext::StopInput()
 {
     if (!GetIsOwnerThread()) return false;
-    if (!RemoveTimer()) return false;
+    // P0 先关闭业务 admission；底层 timer/observer 清理失败也不得继续接收输入。
+    m_isInputEnabled = false;
+    const bool isTimerStopped = RemoveTimer();
     const bool isObserverStopped = RemoveObservers();
     m_interactionRouter.ClearHandlers();
     m_isInteractorReady = false;
-    return isObserverStopped;
+    return isTimerStopped && isObserverStopped;
 }
 
 bool StdViewContext::SetCameraStyle(const VizMode mode)
@@ -684,6 +698,15 @@ void StdViewContext::OnVTKEvent(
             return;
         }
     }
+    if (!m_isInputEnabled) return;
+
+    // Session 为每个 View 安装唯一 frame handler。存在该 handler 时，
+    // Timer 不再进入单 View TimeUpdateHandler，避免同一心跳重复 apply/render。
+    if (eventId == vtkCommand::TimerEvent && m_timerHandler) {
+        try { m_timerHandler(); }
+        catch (...) {}
+        return;
+    }
 
     auto* style = vtkInteractorStyle::SafeDownCast(caller);
     const bool isStyleBoundary = style
@@ -747,10 +770,6 @@ void StdViewContext::OnVTKEvent(
     const auto result =
         m_interactionRouter.Dispatch(event, dispatchMode);
 
-    if (eventKind == InteractionEventKind::Timer
-        && m_timerHandler) {
-        m_timerHandler();
-    }
     if (result.isPropagationStopped && m_eventCallback) {
         m_eventCallback->SetAbortFlag(1);
     }

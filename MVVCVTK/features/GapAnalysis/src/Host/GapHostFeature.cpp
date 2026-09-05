@@ -1,9 +1,11 @@
 #include "Host/GapHostFeature.h"
 
+#include "App/Services/FeatureViewService.h"
 #include "Services/GapAnalysisService.h"
 
 #include <vtkImageData.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -19,7 +21,9 @@ public:
     struct CompleteItem final {
         std::mutex mutex;
         GapHostCallback onComplete;
+        std::optional<bool> result;
         bool isActive = true;
+        bool isQueued = false;
         bool isSent = false;
     };
 
@@ -66,6 +70,10 @@ private:
     static bool SendComplete(
         const std::shared_ptr<CompleteItem>& item,
         bool isSuccess);
+    bool QueueComplete(
+        const std::shared_ptr<CompleteItem>& item);
+    bool SendSceneDelta(FeatureScenePriority priority);
+    std::uint64_t GetNextSceneRequestId() noexcept;
 
     std::optional<ViewCandidate> GetViewCandidate(
         const GapHostStartParams& start) const;
@@ -89,7 +97,11 @@ private:
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<CompleteItem> m_completeItem;
     std::optional<DataVersion> m_activeVersion;
+    std::optional<RenderInputStamp> m_activeInput;
+    std::vector<std::string> m_activeViewIds;
     std::thread::id m_ownerThread;
+    std::uint64_t m_nextSceneRequestId = 1;
+    std::uint64_t m_activeRequestId = 0;
     bool m_isSwitchDown = false;
     bool m_isExitDown = false;
     bool m_isExitPending = false;
@@ -255,6 +267,89 @@ bool GapHostFeature::Impl::SendComplete(
     return true;
 }
 
+bool GapHostFeature::Impl::QueueComplete(
+    const std::shared_ptr<CompleteItem>& item)
+{
+    if (!item) return false;
+    bool result = false;
+    bool hasCallback = false;
+    {
+        const std::lock_guard<std::mutex> lock(item->mutex);
+        if (!item->isActive || item->isQueued
+            || item->isSent || !item->result) {
+            return false;
+        }
+        result = *item->result;
+        hasCallback = static_cast<bool>(item->onComplete);
+        item->isQueued = true;
+    }
+    if (!hasCallback) {
+        return SendComplete(item, result);
+    }
+
+    const auto expectedInput = m_activeInput;
+    const auto expectedViewIds = m_activeViewIds;
+    const std::weak_ptr<TrustedFeatureDataPort> weakData = m_data;
+    const std::weak_ptr<FeatureViewDirectory> weakViews = m_views;
+    const auto send = [item, expectedInput, expectedViewIds,
+        weakData, weakViews]() noexcept {
+        bool finalResult = false;
+        {
+            const std::lock_guard<std::mutex> lock(item->mutex);
+            if (item->result) finalResult = *item->result;
+        }
+        if (finalResult && expectedInput) {
+            const auto data = weakData.lock();
+            const auto current = data
+                ? data->GetImageSnapshot() : TrustedImageSnapshot{};
+            finalResult = current
+                && current->image.GetPointer() == expectedInput->identity
+                && current->version == expectedInput->version;
+            const auto views = weakViews.lock();
+            finalResult = finalResult && views
+                && !expectedViewIds.empty()
+                && std::all_of(
+                    expectedViewIds.begin(), expectedViewIds.end(),
+                    [&views, &expectedInput](const auto& viewId) {
+                        const auto port = views->GetFeaturePort(viewId);
+                        const auto stamp = port
+                            ? port->GetRenderInputStamp()
+                            : std::optional<RenderInputStamp>{};
+                        return stamp && *stamp == *expectedInput;
+                    });
+        }
+        (void)SendComplete(item, finalResult);
+    };
+    if (!m_host || !m_host->SendOwnerComplete(send)) {
+        (void)SendComplete(item, false);
+        return false;
+    }
+    return true;
+}
+
+bool GapHostFeature::Impl::SendSceneDelta(
+    const FeatureScenePriority priority)
+{
+    if (!m_host || !m_activeInput || m_activeRequestId == 0
+        || m_activeViewIds.empty()) {
+        return false;
+    }
+    FeatureSceneDelta delta;
+    delta.viewIds = m_activeViewIds;
+    delta.inputStamp = *m_activeInput;
+    delta.requestId = GetNextSceneRequestId();
+    delta.priority = priority;
+    delta.scope = FeatureSceneScope::RequiredAllViews;
+    return m_host->SendSceneDelta(std::move(delta));
+}
+
+std::uint64_t GapHostFeature::Impl::GetNextSceneRequestId() noexcept
+{
+    const std::uint64_t requestId = m_nextSceneRequestId++;
+    if (m_nextSceneRequestId == 0) m_nextSceneRequestId = 1;
+    return requestId == 0 ? GetNextSceneRequestId() : requestId;
+}
+
 std::optional<GapHostFeature::Impl::ViewCandidate>
 GapHostFeature::Impl::GetViewCandidate(
     const GapHostStartParams& start) const
@@ -415,8 +510,10 @@ bool GapHostFeature::Impl::OnHostTick()
     if (m_activeVersion && !m_isExitPending) {
         const auto snapshot = m_data
             ? m_data->GetImageSnapshot() : TrustedImageSnapshot{};
-        if (!snapshot
-            || snapshot->version != *m_activeVersion) {
+        if (!snapshot || !m_activeInput
+            || snapshot->image.GetPointer() != m_activeInput->identity
+            || snapshot->version != *m_activeVersion
+            || snapshot->version != m_activeInput->version) {
             ClearComplete();
             if (m_service->ExitView()) {
                 m_isExitPending = true;
@@ -425,12 +522,25 @@ bool GapHostFeature::Impl::OnHostTick()
     }
 
     if (m_service->GetDisplayTickNeeded()) {
-        m_service->OnDisplayTick(nullptr);
+        const bool hasVisibleDelta =
+            m_service->OnDisplayTick(nullptr);
+        if (hasVisibleDelta && !SendSceneDelta(
+                FeatureScenePriority::Overlay)) {
+            if (m_completeItem) {
+                const std::lock_guard<std::mutex> lock(
+                    m_completeItem->mutex);
+                m_completeItem->result = false;
+            }
+        }
+        (void)QueueComplete(m_completeItem);
     }
     if (m_isExitPending
         && !m_service->GetDisplayTickNeeded()) {
         if (SetActiveViews({})) {
             m_activeVersion.reset();
+            m_activeInput.reset();
+            m_activeViewIds.clear();
+            m_activeRequestId = 0;
             m_isExitPending = false;
             ClearComplete();
         }
@@ -503,11 +613,17 @@ bool GapHostFeature::Impl::StartView(
     completeItem->onComplete = std::move(onComplete);
     const std::weak_ptr<CompleteItem> weakItem =
         completeItem;
+    const RenderInputStamp inputStamp{
+        candidate->request.trustedInput->image.GetPointer(),
+        candidate->request.trustedInput->version };
     const bool isAccepted = m_service->StartView(
         std::move(candidate->request),
         [weakItem](bool isSuccess) {
             if (const auto item = weakItem.lock()) {
-                (void)SendComplete(item, isSuccess);
+                const std::lock_guard<std::mutex> lock(item->mutex);
+                if (item->isActive && !item->isSent) {
+                    item->result = isSuccess;
+                }
             }
         });
     if (!isAccepted) {
@@ -524,16 +640,21 @@ bool GapHostFeature::Impl::StartView(
     ClearComplete();
     m_completeItem = std::move(completeItem);
     m_activeVersion = candidate->version;
+    m_activeInput = inputStamp;
+    m_activeViewIds = std::move(candidate->activeViewIds);
+    m_activeRequestId = GetNextSceneRequestId();
     m_isExitPending = false;
     return true;
 }
 
 bool GapHostFeature::Impl::SwitchOverlay()
 {
-    return !m_isExitPending
+    const bool isSwitched = !m_isExitPending
         && m_service
         && m_service->GetViewOn()
         && m_service->SwitchOverlay();
+    return isSwitched
+        && SendSceneDelta(FeatureScenePriority::Overlay);
 }
 
 bool GapHostFeature::Impl::ExitView()
@@ -544,10 +665,11 @@ bool GapHostFeature::Impl::ExitView()
         || !m_service->ExitView()) {
         return false;
     }
+    const bool isDeltaSent = SendSceneDelta(
+        FeatureScenePriority::Overlay);
     ClearComplete();
-    m_activeVersion.reset();
     m_isExitPending = true;
-    return true;
+    return isDeltaSent;
 }
 
 InteractionResult GapHostFeature::Impl::OnInput(
@@ -632,18 +754,18 @@ bool GapHostFeature::Impl::ClearComplete()
     if (!m_completeItem) {
         return true;
     }
+    const auto item = std::move(m_completeItem);
     {
-        const std::lock_guard<std::mutex> lock(
-            m_completeItem->mutex);
-        m_completeItem->isActive = false;
-        m_completeItem->onComplete = nullptr;
+        const std::lock_guard<std::mutex> lock(item->mutex);
+        if (!item->isSent) item->result = false;
     }
-    m_completeItem.reset();
+    (void)QueueComplete(item);
     return true;
 }
 
 bool GapHostFeature::Impl::ClearBorrowed()
 {
+    ClearComplete();
     if (m_host) {
         (void)m_host->SetActiveViews({});
     }
@@ -652,7 +774,9 @@ bool GapHostFeature::Impl::ClearBorrowed()
     m_host.reset();
     m_ownerThread = {};
     m_isInputAttached = false;
-    ClearComplete();
+    m_activeInput.reset();
+    m_activeViewIds.clear();
+    m_activeRequestId = 0;
     return true;
 }
 

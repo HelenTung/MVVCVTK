@@ -608,8 +608,8 @@ void StartBoundedTasks(int& failureCount)
             && third == TaskAdmissionResult::QueueFull
             && isStopStarted && isStopped
             && afterStop == TaskAdmissionResult::Stopping
-            && callbackCount.load() == 0,
-        "fixed workers must bound admission and cooperatively stop",
+            && callbackCount.load() == 2,
+        "fixed workers bound admission and cancel accepted callbacks on stop",
         failureCount);
 
     auto blockedData = std::make_shared<DataStub>();

@@ -80,7 +80,9 @@ public:
     bool GetDisplayTickNeeded() const;
     // 宿主主线程 tick 只消费已接纳 worker 的终态；inputImage 保留为兼容形参，不再延迟启动任务。
     // 非绑定线程调用会被拒绝，不读取或修改 VTK/overlay 会话状态。
-    void OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
+    // 返回 true 表示本次 tick 已挂接新的可见 overlay；Host 据此提交
+    // coordinated scene delta。失败/隐藏结果仍会消费终态 callback。
+    bool OnDisplayTick(vtkSmartPointer<vtkImageData> inputImage);
 
 private:
     class Impl;

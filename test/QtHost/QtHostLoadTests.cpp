@@ -79,17 +79,49 @@ HostReloadRequest GetReload()
     return reload;
 }
 
+std::uint64_t GetCommittedEpoch(
+    HostViewRuntimeRegistry& views)
+{
+    std::uint64_t epoch = 0;
+    for (const auto& state : views.GetSceneViewStates()) {
+        epoch = (std::max)(epoch, state.sceneEpoch);
+    }
+    return epoch;
+}
+
+bool SendFrame(
+    HostViewRuntimeRegistry& views,
+    std::uint64_t& committedEpoch)
+{
+    if (views.GetFrameRenderPending()) {
+        if (views.SendFrameRender(committedEpoch)) {
+            views.SendFrameCompletions();
+        }
+        return true;
+    }
+    if (!views.CollectFrameUpdates()) return true;
+    const auto status = views.BuildFrameStage(committedEpoch + 1);
+    if (status == HostFrameStageStatus::Failed) {
+        views.ClearFrameStage();
+        return true;
+    }
+    if (status == HostFrameStageStatus::Unchanged) {
+        views.SendFrameCompletions();
+        return true;
+    }
+    ++committedEpoch;
+    views.SetFrameCommit(committedEpoch);
+    if (views.SendFrameRender(committedEpoch)) {
+        views.SendFrameCompletions();
+    }
+    return true;
+}
+
 bool SendReload(
     HostCommandRouter& router,
     HostViewRuntimeRegistry& views,
     HostReloadRequest reload)
 {
-    const HostViewTarget primary{
-        "load-primary", false,
-        HostRenderViewRole::Primary3D };
-    const HostViewTarget auxiliary{
-        "load-aux", false,
-        HostRenderViewRole::Auxiliary };
     bool isComplete = false;
     bool isSucceeded = false;
     if (!router.Dispatch(
@@ -101,9 +133,9 @@ bool SendReload(
         return false;
     }
     constexpr int pollCount = 1000;
+    auto committedEpoch = GetCommittedEpoch(views);
     for (int poll = 0; !isComplete && poll < pollCount; ++poll) {
-        (void)views.SendViewUpdates(primary);
-        (void)views.SendViewUpdates(auxiliary);
+        if (!SendFrame(views, committedEpoch)) return false;
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
@@ -275,10 +307,8 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
         || !views.SetInteractorsReady()) {
         return false;
     }
+    auto committedEpoch = GetCommittedEpoch(views);
 
-    const HostViewTarget primary{
-        "load-primary", false,
-        HostRenderViewRole::Primary3D };
     const HostViewTarget auxiliary{
         "load-aux", false,
         HostRenderViewRole::Auxiliary };
@@ -309,10 +339,7 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
     }
     constexpr int pollCount = 1000;
     for (int poll = 0; !isComplete && poll < pollCount; ++poll) {
-        (void)views.SendViewUpdates(primary);
-        if (!isAuxStopped) {
-            (void)views.SendViewUpdates(auxiliary);
-        }
+        if (!SendFrame(views, committedEpoch)) return false;
         std::this_thread::sleep_for(
             std::chrono::milliseconds(1));
     }
@@ -325,8 +352,7 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
             && !core.sharedDataMgr->GetPendingSnapshot();
     }
 
-    (void)views.SendViewUpdates(primary);
-    (void)views.SendViewUpdates(auxiliary);
+    if (!SendFrame(views, committedEpoch)) return false;
     const auto states = views.GetViewStates();
     double imageCenter[3] = {};
     current->image->GetCenter(imageCenter);
@@ -596,13 +622,7 @@ bool GetPublishLastValid()
         || !views.SetInteractorsReady()) {
         return false;
     }
-
-    const HostViewTarget primary{
-        "load-primary", false,
-        HostRenderViewRole::Primary3D };
-    const HostViewTarget auxiliary{
-        "load-aux", false,
-        HostRenderViewRole::Auxiliary };
+    auto committedEpoch = GetCommittedEpoch(views);
     const auto initial = dataManager->GetImageSnapshot();
     if (!initial) return false;
 
@@ -624,6 +644,10 @@ bool GetPublishLastValid()
                 ++dataEventCount;
             }
         });
+    if (!SendFrame(views, committedEpoch)
+        || views.GetFrameRenderPending()) {
+        return false;
+    }
 
     std::mutex gateMutex;
     std::condition_variable gateChanged;
@@ -719,8 +743,7 @@ bool GetPublishLastValid()
     constexpr int pollCount = 1000;
     for (int poll = 0; isDispatched && !isComplete
         && poll < pollCount; ++poll) {
-        (void)views.SendViewUpdates(primary);
-        (void)views.SendViewUpdates(auxiliary);
+        if (!SendFrame(views, committedEpoch)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     isWriterDone = true;
@@ -764,6 +787,11 @@ bool GetLoadWarmupSkipValid()
         || !views.SetInteractorsReady()) {
         return false;
     }
+    auto committedEpoch = GetCommittedEpoch(views);
+    if (!SendFrame(views, committedEpoch)
+        || views.GetFrameRenderPending()) {
+        return false;
+    }
     const auto initial = core.sharedDataMgr->GetImageSnapshot();
     const auto initialStates = views.GetViewStates();
     const auto endpoints = views.BuildEndpoints();
@@ -784,18 +812,11 @@ bool GetLoadWarmupSkipValid()
                 return;
             }
             ++(*static_cast<int*>(clientData));
-            caller->InvokeEvent(vtkCommand::ErrorEvent);
         });
     const unsigned long injectorTag =
         endpoints[1].renderWindow->AddObserver(
             vtkCommand::StartEvent, errorInjector);
 
-    const HostViewTarget primary{
-        "load-primary", false,
-        HostRenderViewRole::Primary3D };
-    const HostViewTarget auxiliary{
-        "load-aux", false,
-        HostRenderViewRole::Auxiliary };
     HostCommandRouter router(views.GetViewDirectory());
     bool isComplete = false;
     bool isSucceeded = false;
@@ -808,8 +829,7 @@ bool GetLoadWarmupSkipValid()
     constexpr int pollCount = 1000;
     for (int poll = 0; isDispatched && !isComplete
         && poll < pollCount; ++poll) {
-        (void)views.SendViewUpdates(primary);
-        (void)views.SendViewUpdates(auxiliary);
+        if (!SendFrame(views, committedEpoch)) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     endpoints[1].renderWindow->RemoveObserver(injectorTag);
@@ -820,7 +840,7 @@ bool GetLoadWarmupSkipValid()
     return isDispatched
         && isComplete
         && isSucceeded
-        && warmupCount == 0
+        && warmupCount == 1
         && current
         && current->version == initial->version + 1
         && states.size() == 2
@@ -1088,7 +1108,7 @@ bool GetHostResultValid()
     HostTimerConfig timer;
     timer.isTimerEnabled = true;
     timer.targetView.viewId = "load-primary";
-    if (!session.AttachTimer(timer)) return false;
+    if (!session.AttachTimer(timer) || !session.Start()) return false;
     const auto sendTimer = [&]() {
         int timerId = endpoint->interactor->GetTimerEventId();
         if (timerId == 0) {
@@ -1116,7 +1136,8 @@ bool GetHostResultValid()
             ++syncSuccessCount;
             syncSuccess = std::move(value);
         });
-    if (!isSyncSuccessSent || syncSuccessCount != 1
+    if (!isSyncSuccessSent || !sendTimer()
+        || syncSuccessCount != 1
         || !syncSuccess.isSucceeded
         || syncSuccess.errorCode != HostErrorCode::None) {
         return false;
@@ -1133,7 +1154,8 @@ bool GetHostResultValid()
             ++syncFailCount;
             syncFail = std::move(value);
         });
-    if (!isSyncFailSent || syncFailCount != 1
+    if (!isSyncFailSent || !sendTimer()
+        || syncFailCount != 1
         || syncFail.isSucceeded
         || syncFail.errorCode != HostErrorCode::OperationFailed) {
         return false;

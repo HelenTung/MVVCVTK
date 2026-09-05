@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QStringList>
 #include <QSurfaceFormat>
 #include <QTimer>
@@ -283,6 +285,19 @@ int main(int argc, char* argv[])
             sendExit(false, "AttachTimer");
             return;
         }
+        widget.makeCurrent();
+        if (auto* context = QOpenGLContext::currentContext()) {
+            auto* functions = context->functions();
+            while (functions
+                && functions->glGetError() != GL_NO_ERROR) {
+            }
+        }
+        const bool isStarted = session->Start();
+        widget.doneCurrent();
+        if (!isStarted) {
+            sendExit(false, "Start");
+            return;
+        }
 
         HostReloadRequest reload;
         constexpr int sideLength = 8;
@@ -316,44 +331,51 @@ int main(int argc, char* argv[])
                     viewRequest.mode = HostRenderMode::Volume;
                     viewRequest.opacity = 0.7;
                     viewRequest.isAxesVisible = true;
-                    int viewResultCount = 0;
-                    HostResult viewResult;
+                    auto viewResultCount = std::make_shared<int>(0);
                     const bool isViewAccepted =
                         session->SendRequestResult(
                             std::move(viewRequest),
-                            [&viewResultCount, &viewResult](
-                                HostResult value) {
-                                ++viewResultCount;
-                                viewResult = std::move(value);
-                            });
-                    if (!isViewAccepted
-                        || viewResultCount != 1
-                        || !viewResult.isSucceeded
-                        || viewResult.errorCode
-                            != HostErrorCode::None) {
-                        sendExit(false, "view command");
-                        return;
-                    }
+                            [&, viewResultCount](HostResult viewResult) {
+                                ++(*viewResultCount);
+                                QTimer::singleShot(
+                                    0,
+                                    &widget,
+                                    [&, viewResultCount,
+                                        viewResult = std::move(viewResult)]() {
+                                        if (*viewResultCount != 1
+                                            || !viewResult.isSucceeded
+                                            || viewResult.errorCode
+                                                != HostErrorCode::None) {
+                                            sendExit(false, "view command");
+                                            return;
+                                        }
 
-                    const auto state = session->GetRenderViewState(
-                        HostViewTarget{
-                            "clean-room-primary",
-                            false,
-                            HostRenderViewRole::Primary3D
-                        });
-                    const auto* endpoint = session->GetPrimaryEndpoint();
-                    const bool hasCommittedData = state
-                        && state->scalarRange[0] == 0.0
-                        && state->scalarRange[1] == 511.0;
-                    if (!endpoint || !endpoint->renderWindow
-                        || !hasCommittedData
-                        || !feature
-                        || !feature->GetPortsValid()) {
-                        sendExit(false, "committed state");
-                        return;
+                                        const auto state =
+                                            session->GetRenderViewState(
+                                                HostViewTarget{
+                                                    "clean-room-primary",
+                                                    false,
+                                                    HostRenderViewRole::Primary3D
+                                                });
+                                        const auto* endpoint =
+                                            session->GetPrimaryEndpoint();
+                                        const bool hasCommittedData = state
+                                            && state->scalarRange[0] == 0.0
+                                            && state->scalarRange[1] == 511.0;
+                                        if (!endpoint
+                                            || !endpoint->renderWindow
+                                            || !hasCommittedData
+                                            || !feature
+                                            || !feature->GetPortsValid()) {
+                                            sendExit(false, "committed state");
+                                            return;
+                                        }
+                                        sendExit(true, "ok");
+                                    });
+                            });
+                    if (!isViewAccepted) {
+                        sendExit(false, "view command admission");
                     }
-                    endpoint->renderWindow->Render();
-                    sendExit(true, "ok");
                 });
             });
         if (!isAccepted) sendExit(false, "reload admission");

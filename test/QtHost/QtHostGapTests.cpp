@@ -77,6 +77,13 @@ public:
         return true;
     }
 
+    bool SendSceneDelta(FeatureSceneDelta delta) override
+    {
+        if (delta.requestId == 0 || delta.viewIds.empty()) return false;
+        m_sceneDeltas.push_back(std::move(delta));
+        return true;
+    }
+
     bool SendOwnerComplete(
         std::function<void()> complete) override
     {
@@ -87,6 +94,7 @@ public:
 
 private:
     std::string m_featureId;
+    std::vector<FeatureSceneDelta> m_sceneDeltas;
     int m_attachCount = 0;
     int m_detachCount = 0;
     bool m_isAttached = false;
@@ -243,7 +251,6 @@ void SendTicks(
     for (int tick = 0; tick < tickCount; ++tick) {
         endpoint.interactor->InvokeEvent(
             vtkCommand::TimerEvent, &timerId);
-        endpoint.renderWindow->Render();
     }
 }
 
@@ -391,6 +398,7 @@ int GetGapFailCount()
         HostRenderViewRole::Primary3D };
     const bool isTimerAttached =
         session.AttachTimer(timer);
+    const bool isStarted = isTimerAttached && session.Start();
     const bool isReloadReady =
         GetReloadReady(session, *endpoint);
     const auto primaryBasePropCount =
@@ -403,6 +411,7 @@ int GetGapFailCount()
         GetPropCount<vtkImageSlice>(sliceEndpoint->renderer);
     failureCount += GetCaseResult(
         isTimerAttached
+            && isStarted
             && isReloadReady
             && isUnattachedRejected
             && unattachedCallbackCount == 0
@@ -614,12 +623,15 @@ int GetGapFailCount()
         pendingFeature.use_count();
     const bool isPendingAttached =
         session.AttachFeature(pendingFeature);
-    bool hasDetachedCallback = false;
+    int detachedCallbackCount = 0;
+    bool isDetachedCallbackSucceeded = true;
     const bool isPendingAccepted =
         pendingFeature->SendRequest(
             GetStartRequest(start),
-            [&hasDetachedCallback](bool) {
-                hasDetachedCallback = true;
+            [&detachedCallbackCount,
+                &isDetachedCallbackSucceeded](const bool isSucceeded) {
+                ++detachedCallbackCount;
+                isDetachedCallbackSucceeded = isSucceeded;
             });
     const bool isDetached =
         session.DetachFeature(*pendingFeature);
@@ -651,7 +663,8 @@ int GetGapFailCount()
         pendingFeature.use_count() == pendingUseCount,
         "Gap detach keeps the upper owner alive") ? 0 : 1;
     failureCount += GetCaseResult(
-        !hasDetachedCallback,
-        "Gap detach blocks stale callbacks") ? 0 : 1;
+        detachedCallbackCount == 1
+            && !isDetachedCallbackSucceeded,
+        "Gap detach cancels an accepted callback exactly once") ? 0 : 1;
     return failureCount;
 }
