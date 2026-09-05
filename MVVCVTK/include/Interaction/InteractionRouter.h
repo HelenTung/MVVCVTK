@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <memory>
 #include <vector>
 #include "IInteractionHandler.h"
@@ -32,10 +33,18 @@ class InteractionRouter
 {
 public:
     // 挂接一个 Handler（按挂接顺序分发，先挂接的优先级高）
-    void AttachHandler(std::unique_ptr<IInteractionHandler> handler);
+    bool AttachHandler(std::unique_ptr<IInteractionHandler> handler);
 
     // 清空所有 Handler（通常在重新 BuildRouter 时调用）
-    void ClearHandlers();
+    bool ClearHandlers();
+
+    // 取消当前精确 capture generation；不匹配时成功 no-op。
+    InteractionResult CancelCapture(
+        const InteractionCaptureKey& key,
+        const InteractionEvent& eve);
+
+    // 先收口 active capture，再对其余 Handler 广播 Cancel。
+    InteractionResult SendCancel(const InteractionEvent& eve);
 
     // 分发事件
     // - FirstMatch：第一个 isHandled=true 后停止，返回其结果（传播停止状态聚合）
@@ -46,4 +55,9 @@ public:
 private:
     // Router 独占 Handler，vector 顺序即 FirstMatch 优先级；ClearHandlers/析构会销毁全部实例。
     std::vector<std::unique_ptr<IInteractionHandler>> m_handlers;
+    // Router 是每个 Context 的唯一 capture owner。
+    std::unique_ptr<IInteractionCapture> m_capture;
+    // 仅用于 full Cancel 跳过已由 continuation 成功取消的父 Handler。
+    IInteractionHandler* m_captureHandler = nullptr;
+    std::size_t m_dispatchDepth = 0;
 };

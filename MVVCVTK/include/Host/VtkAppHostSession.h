@@ -60,6 +60,8 @@ public:
     const std::vector<HostRenderViewEndpoint>& GetRenderViewEndpoints();
     const HostRenderViewEndpoint* GetRenderViewEndpoint(const std::string& viewId);
     const HostRenderViewEndpoint* GetPrimaryEndpoint();
+    // 返回 Session 拥有的值语义输入端点；Session move 后必须从目标对象重新获取。
+    HostInputEndpoint* GetInputEndpoint() noexcept;
     // 返回指定视图的独立状态快照；查询失败返回空，不改变既有 SendRequest 流程。
     std::optional<HostRenderViewState> GetRenderViewState(
         const HostViewTarget& target);

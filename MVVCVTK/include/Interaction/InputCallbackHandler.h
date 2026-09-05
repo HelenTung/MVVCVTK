@@ -10,18 +10,24 @@
 class InputCallbackHandler final : public IInteractionHandler {
 public:
     using Callback = std::function<InteractionResult(const InteractionEvent&)>;
+    using RoutedCallback =
+        std::function<InteractionDispatch(const InteractionEvent&)>;
 
     InputCallbackHandler(
         Callback callback,
         std::vector<InteractionEventKind> eventKinds);
+    InputCallbackHandler(
+        RoutedCallback callback,
+        std::vector<InteractionEventKind> eventKinds);
 
     InteractionResult Send(const InteractionEvent& eve) override;
+    InteractionDispatch Route(const InteractionEvent& eve) override;
 
 private:
     bool GetEventMatched(InteractionEventKind eventKind) const;
 
     // Handler 按值拥有外部适配 callback；仅命中 eventKinds 后同步调用，捕获对象生命周期由 callback 决定。
-    Callback m_callback;
+    RoutedCallback m_callback;
     // 语义事件白名单；空数组表示匹配所有送达本 Handler 的事件。
     std::vector<InteractionEventKind> m_eventKinds;
 };

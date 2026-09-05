@@ -1,10 +1,9 @@
 #include "Interaction/ViewContextFactory.h"
 
+#include "Interaction/DefaultNavigationPolicy.h"
 #include "Interaction/InputCallbackHandler.h"
 #include "Interaction/InteractionRouter.h"
 #include "Interaction/TimeUpdateHandler.h"
-#include "Interaction/Viewer2DHandler.h"
-#include "Interaction/Viewer3DHandler.h"
 
 #include <vtkAxesActor.h>
 #include <vtkCallbackCommand.h>
@@ -31,15 +30,53 @@
 namespace {
 
 constexpr double kObserverPriority = 0.5;
+constexpr double kHostInjectedObserverPriority = 1.0;
 // 这里只提高同一次 TimerEvent 内的 callback 顺序，不保证跨事件顺序。
 constexpr double kTimerPriority = 1.0;
 constexpr int kTimerIntervalMs = 33;
+
+bool GetIsRoutedInputEvent(InteractionEventKind kind) noexcept
+{
+    switch (kind) {
+    case InteractionEventKind::WheelForward:
+    case InteractionEventKind::WheelBackward:
+    case InteractionEventKind::PrimaryPress:
+    case InteractionEventKind::PrimaryRelease:
+    case InteractionEventKind::SecondaryPress:
+    case InteractionEventKind::SecondaryRelease:
+    case InteractionEventKind::PointerMove:
+    case InteractionEventKind::KeyPress:
+    case InteractionEventKind::KeyRelease:
+    case InteractionEventKind::TextInput:
+        return true;
+    default:
+        return false;
+    }
+}
+
+class BooleanGuard final
+{
+public:
+    explicit BooleanGuard(bool& value) noexcept
+        : m_value(value)
+    {
+        m_value = true;
+    }
+
+    ~BooleanGuard()
+    {
+        m_value = false;
+    }
+
+private:
+    bool& m_value;
+};
 
 } // namespace
 
 class StdViewContext final : public AbstractViewContext {
 public:
-    explicit StdViewContext(InteractionPorts ports);
+    StdViewContext(InteractionPorts ports, bool isHostInjected);
     ~StdViewContext() override;
     static void RemoveContext(
         AbstractViewContext* context) noexcept;
@@ -62,9 +99,13 @@ public:
             ? m_toolMode : ToolMode::Navigation;
     }
     bool SetInputHandler(
-        std::function<InteractionResult(const InteractionEvent&)> handler,
+        InteractionRouteCallback handler,
         std::vector<InteractionEventKind> eventKinds) override;
     bool ClearInputHandler() override;
+    InteractionResult SendInput(
+        const InteractionEvent& event) override;
+    InteractionResult CancelInput(
+        const InteractionCaptureKey& key) override;
     bool SetTimerHandler(std::function<void()> handler) override;
     bool ClearTimerHandler() override;
     vtkRenderWindowInteractor* GetInteractor() const override
@@ -91,6 +132,10 @@ private:
     bool AttachTimer();
     bool RemoveTimer();
     bool BuildInteractionRouter();
+    bool RebuildInteractionRouter(
+        const InteractionRouteCallback& inputHandler,
+        const std::vector<InteractionEventKind>& eventKinds);
+    InteractionResult SendCancel(const InteractionEvent& event);
     bool SetInputStyle();
     double GetRenderRate(bool isInteracting) const noexcept;
     InteractionEventKind GetEventKind(unsigned long eventId) const;
@@ -110,32 +155,43 @@ private:
     unsigned long m_timerObserverTag = 0;
     int m_timerId = 0;
     bool m_isInteractorReady = false;
-    std::function<InteractionResult(const InteractionEvent&)>
-        m_inputHandler;
+    InteractionRouteCallback m_inputHandler;
     std::vector<InteractionEventKind> m_inputEventKinds;
     std::function<void()> m_timerHandler;
     vtkSmartPointer<vtkOrientationMarkerWidget> m_axesWidget;
     bool m_isAxesVisible = false;
     bool m_isCreated = false;
     bool m_isStyleInteracting = false;
+    bool m_isStyleStateCleared = false;
+    bool m_isStyleStopped = false;
+    bool m_isStyleRateRestored = false;
+    bool m_isCancellingStyle = false;
+    const bool m_isHostInjected = false;
+    bool m_isSendingInput = false;
+    bool m_hasInjectedResult = false;
+    InteractionResult m_injectedResult;
 };
 
 std::shared_ptr<AbstractViewContext> CreateViewContext(
-    InteractionPorts ports)
+    InteractionPorts ports,
+    const bool isHostInjected)
 {
     if (!ports.update || !ports.state
         || !ports.slice || !ports.model) {
         return nullptr;
     }
     std::shared_ptr<AbstractViewContext> context(
-        new StdViewContext(std::move(ports)),
+        new StdViewContext(std::move(ports), isHostInjected),
         &StdViewContext::RemoveContext);
     const auto* value = static_cast<StdViewContext*>(context.get());
     return value->GetIsCreated() ? std::move(context) : nullptr;
 }
 
-StdViewContext::StdViewContext(InteractionPorts ports)
+StdViewContext::StdViewContext(
+    InteractionPorts ports,
+    const bool isHostInjected)
     : m_ports(std::move(ports))
+    , m_isHostInjected(isHostInjected)
 {
     if (m_renderWindow) {
         // 叠加层和透明材质都依赖稳定的 alpha/depth 行为。
@@ -181,12 +237,18 @@ bool StdViewContext::AttachInteractor(
 
     // 1. 所有 tag、timer 和 handler 都属于旧绑定，先完整卸载。
     const bool wasReady = m_isInteractorReady;
+    if (m_interactor) {
+        InteractionEvent cancel;
+        cancel.vizMode = m_currentMode;
+        cancel.toolMode = m_toolMode;
+        if (!SendCancel(cancel).isSucceeded) return false;
+    }
     if (!RemoveTimer()) return false;
     if (!RemoveObservers()) {
         if (wasReady) (void)AttachTimer();
         return false;
     }
-    m_interactionRouter.ClearHandlers();
+    if (!m_interactionRouter.ClearHandlers()) return false;
     m_isInteractorReady = false;
 
     // 2. 修复 window/interactor 双向关系，再恢复 style、pickable 与 axes。
@@ -230,9 +292,11 @@ bool StdViewContext::AttachObservers()
         };
 
         m_observerTags.reserve(events.size());
+        const double inputPriority = m_isHostInjected
+            ? kHostInjectedObserverPriority : kObserverPriority;
         for (const auto eventId : events) {
             const auto tag = m_interactor->AddObserver(
-                eventId, m_eventCallback, kObserverPriority);
+                eventId, m_eventCallback, inputPriority);
             if (tag == 0) {
                 (void)RemoveObservers();
                 return false;
@@ -265,17 +329,8 @@ bool StdViewContext::AttachObservers()
 
 bool StdViewContext::RemoveObservers()
 {
-    if (m_ports.state) {
-        const InteractionSource source{
-            "ViewContext", "CameraStyle"
-        };
-        // 业务状态通知不决定物理 observer 是否已经移除。
-        try {
-            (void)m_ports.state->SetInteracting(source, false);
-        }
-        catch (...) {
-        }
-    }
+    // 调用方必须先通过 SendCancel 完成可重试的业务清理。
+    if (m_isStyleInteracting) return false;
 
     if (m_interactor) {
         auto* style = m_interactor->GetInteractorStyle();
@@ -290,7 +345,6 @@ bool StdViewContext::RemoveObservers()
         }
     }
     m_observerTags.clear();
-    m_isStyleInteracting = false;
     if (m_renderWindow) {
         m_renderWindow->SetDesiredUpdateRate(
             GetRenderRate(false));
@@ -373,40 +427,54 @@ bool StdViewContext::SetInteractorReady()
 
 bool StdViewContext::BuildInteractionRouter()
 {
-    m_interactionRouter.ClearHandlers();
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
+    return RebuildInteractionRouter(m_inputHandler, m_inputEventKinds);
+}
+
+bool StdViewContext::RebuildInteractionRouter(
+    const InteractionRouteCallback& inputHandler,
+    const std::vector<InteractionEventKind>& eventKinds)
+{
     if (!m_ports.update || !m_ports.state
         || !m_ports.slice || !m_ports.model) {
         return false;
     }
 
-    // 顺序就是 FirstMatch 优先级；Timer 使用 Broadcast 单独处理。
-    m_interactionRouter.AttachHandler(
-        std::make_unique<TimeUpdateHandler>(
-            m_ports.update.get(), m_renderWindow.GetPointer()));
+    try {
+        InteractionRouter candidate;
+        // 顺序就是 FirstMatch 优先级；Timer 使用 Broadcast 单独处理。
+        if (!candidate.AttachHandler(
+                std::make_unique<TimeUpdateHandler>(
+                    m_ports.update.get(), m_renderWindow.GetPointer()))) {
+            return false;
+        }
 
-    if (m_inputHandler) {
-        m_interactionRouter.AttachHandler(
-            std::make_unique<InputCallbackHandler>(
-                m_inputHandler, m_inputEventKinds));
+        if (inputHandler
+            && !candidate.AttachHandler(
+                std::make_unique<InputCallbackHandler>(
+                    inputHandler, eventKinds))) {
+            return false;
+        }
+
+        if (!candidate.AttachHandler(
+                std::make_unique<DefaultNavigationPolicy>(
+                    m_ports.state.get(),
+                    m_ports.slice.get(),
+                    m_ports.model.get(),
+                    m_ports.update.get(),
+                    m_picker.GetPointer(),
+                    m_renderer.GetPointer()))) {
+            return false;
+        }
+        m_interactionRouter = std::move(candidate);
+        return true;
     }
-
-    m_interactionRouter.AttachHandler(
-        std::make_unique<Viewer2DHandler>(
-            m_ports.state.get(),
-            m_ports.slice.get(),
-            m_ports.model.get(),
-            m_ports.update.get(),
-            m_picker.GetPointer(),
-            m_renderer.GetPointer()));
-    m_interactionRouter.AttachHandler(
-        std::make_unique<Viewer3DHandler>(
-            m_ports.state.get(),
-            m_ports.slice.get(),
-            m_ports.model.get(),
-            m_ports.update.get(),
-            m_picker.GetPointer(),
-            m_renderer.GetPointer()));
-    return true;
+    catch (...) {
+        return false;
+    }
 }
 
 bool StdViewContext::SetInputStyle()
@@ -445,6 +513,13 @@ bool StdViewContext::SetRenderWindow(
     vtkSmartPointer<vtkRenderWindow> renderWindow)
 {
     if (!GetIsOwnerThread() || !renderWindow) return false;
+    if (renderWindow.GetPointer() == m_renderWindow.GetPointer()) {
+        return true;
+    }
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
     const auto oldWindow = m_renderWindow;
     const auto oldInteractor = m_interactor;
     const bool wasReady = m_isInteractorReady;
@@ -493,16 +568,24 @@ bool StdViewContext::Start()
 bool StdViewContext::StopInput()
 {
     if (!GetIsOwnerThread()) return false;
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
     if (!RemoveTimer()) return false;
-    const bool isObserverStopped = RemoveObservers();
-    m_interactionRouter.ClearHandlers();
+    if (!RemoveObservers()) return false;
+    if (!m_interactionRouter.ClearHandlers()) return false;
     m_isInteractorReady = false;
-    return isObserverStopped;
+    return true;
 }
 
 bool StdViewContext::SetCameraStyle(const VizMode mode)
 {
     if (!GetIsOwnerThread() || !m_interactor) return false;
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
     const VizMode oldMode = m_currentMode;
     const bool isObserverRemoved = RemoveObservers();
     if (!isObserverRemoved) {
@@ -556,6 +639,10 @@ bool StdViewContext::SetToolMode(const ToolMode mode)
         || !m_interactor || !m_ports.update) {
         return false;
     }
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
 
     const ToolMode oldMode = m_toolMode;
     const bool isObserverRemoved = RemoveObservers();
@@ -581,21 +668,199 @@ bool StdViewContext::SetToolMode(const ToolMode mode)
 }
 
 bool StdViewContext::SetInputHandler(
-    std::function<InteractionResult(const InteractionEvent&)> handler,
+    InteractionRouteCallback handler,
     std::vector<InteractionEventKind> eventKinds)
 {
     if (!GetIsOwnerThread() || !handler) return false;
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded
+        || !RebuildInteractionRouter(handler, eventKinds)) {
+        return false;
+    }
     m_inputHandler = std::move(handler);
     m_inputEventKinds = std::move(eventKinds);
-    return BuildInteractionRouter();
+    return true;
+}
+
+InteractionResult StdViewContext::SendCancel(
+    const InteractionEvent& event)
+{
+    InteractionResult result;
+    try {
+        result = m_interactionRouter.SendCancel(event);
+    }
+    catch (...) {
+        return {
+            true,
+            true,
+            false,
+            InteractionFailureReason::CleanupRejected };
+    }
+    if (!result.isSucceeded || !m_isStyleInteracting) {
+        return result;
+    }
+
+    const InteractionSource source{ "ViewContext", "CameraStyle" };
+    try {
+        if (!m_isStyleStateCleared) {
+            if (!m_ports.state
+                || !m_ports.state->SetInteracting(source, false)) {
+                result.isHandled = true;
+                result.isSucceeded = false;
+                result.failureReason =
+                    InteractionFailureReason::CleanupRejected;
+                return result;
+            }
+            m_isStyleStateCleared = true;
+        }
+        if (!m_isStyleStopped) {
+            auto* style = m_interactor
+                ? vtkInteractorStyle::SafeDownCast(
+                    m_interactor->GetInteractorStyle())
+                : nullptr;
+            if (style) {
+                BooleanGuard guard(m_isCancellingStyle);
+                style->StopState();
+            }
+            m_isStyleStopped = true;
+        }
+        if (!m_isStyleRateRestored) {
+            if (m_renderWindow) {
+                m_renderWindow->SetDesiredUpdateRate(GetRenderRate(false));
+            }
+            m_isStyleRateRestored = true;
+        }
+        if (!m_ports.update || !m_ports.update->SetRenderNeeded()) {
+            result.isHandled = true;
+            result.isSucceeded = false;
+            result.failureReason =
+                InteractionFailureReason::RenderRejected;
+            return result;
+        }
+    }
+    catch (...) {
+        result.isHandled = true;
+        result.isSucceeded = false;
+        result.failureReason =
+            InteractionFailureReason::CleanupRejected;
+        return result;
+    }
+    m_isStyleInteracting = false;
+    m_isStyleStateCleared = false;
+    m_isStyleStopped = false;
+    m_isStyleRateRestored = false;
+    result.isHandled = true;
+    return result;
+}
+
+InteractionResult StdViewContext::SendInput(
+    const InteractionEvent& event)
+{
+    const auto getFailure = []() {
+        return InteractionResult{
+            true,
+            true,
+            false,
+            InteractionFailureReason::StateRejected };
+    };
+    if (!GetIsOwnerThread() || !m_isHostInjected
+        || !m_isInteractorReady || !m_interactor
+        || m_isSendingInput) {
+        return getFailure();
+    }
+    if (event.eventKind == InteractionEventKind::Cancel) {
+        return SendCancel(event);
+    }
+
+    m_interactor->SetEventInformation(
+        event.x,
+        event.y,
+        event.isCtrlDown ? 1 : 0,
+        event.isShiftDown ? 1 : 0,
+        event.keyCode,
+        0,
+        event.keySym.c_str());
+    m_interactor->SetAltKey(event.isAltDown ? 1 : 0);
+    m_hasInjectedResult = false;
+    m_injectedResult = {};
+
+    try {
+        BooleanGuard guard(m_isSendingInput);
+        switch (event.eventKind) {
+        case InteractionEventKind::WheelForward:
+            m_interactor->MouseWheelForwardEvent();
+            break;
+        case InteractionEventKind::WheelBackward:
+            m_interactor->MouseWheelBackwardEvent();
+            break;
+        case InteractionEventKind::PrimaryPress:
+            m_interactor->LeftButtonPressEvent();
+            break;
+        case InteractionEventKind::PrimaryRelease:
+            m_interactor->LeftButtonReleaseEvent();
+            break;
+        case InteractionEventKind::SecondaryPress:
+            m_interactor->RightButtonPressEvent();
+            break;
+        case InteractionEventKind::SecondaryRelease:
+            m_interactor->RightButtonReleaseEvent();
+            break;
+        case InteractionEventKind::PointerMove:
+            m_interactor->MouseMoveEvent();
+            break;
+        case InteractionEventKind::KeyPress:
+            m_interactor->KeyPressEvent();
+            break;
+        case InteractionEventKind::KeyRelease:
+            m_interactor->KeyReleaseEvent();
+            break;
+        case InteractionEventKind::TextInput:
+            m_interactor->CharEvent();
+            break;
+        default:
+            return getFailure();
+        }
+    }
+    catch (...) {
+        return getFailure();
+    }
+    return m_hasInjectedResult ? m_injectedResult : getFailure();
+}
+
+InteractionResult StdViewContext::CancelInput(
+    const InteractionCaptureKey& key)
+{
+    if (!GetIsOwnerThread()) {
+        return {
+            true,
+            true,
+            false,
+            InteractionFailureReason::StateRejected };
+    }
+    InteractionEvent event;
+    event.eventKind = InteractionEventKind::Cancel;
+    event.vizMode = m_currentMode;
+    event.toolMode = m_toolMode;
+    return m_interactionRouter.CancelCapture(key, event);
 }
 
 bool StdViewContext::ClearInputHandler()
 {
     if (!GetIsOwnerThread()) return false;
+    InteractionEvent cancel;
+    cancel.vizMode = m_currentMode;
+    cancel.toolMode = m_toolMode;
+    if (!SendCancel(cancel).isSucceeded) return false;
+    const InteractionRouteCallback emptyHandler;
+    const std::vector<InteractionEventKind> emptyKinds;
+    if (!RebuildInteractionRouter(emptyHandler, emptyKinds)) {
+        return false;
+    }
     m_inputHandler = nullptr;
     m_inputEventKinds.clear();
-    return BuildInteractionRouter();
+    return true;
 }
 
 bool StdViewContext::SetTimerHandler(std::function<void()> handler)
@@ -690,6 +955,7 @@ void StdViewContext::OnVTKEvent(
         && (eventId == vtkCommand::StartInteractionEvent
             || eventId == vtkCommand::EndInteractionEvent);
     if (isStyleBoundary) {
+        if (m_isCancellingStyle) return;
         if (!m_ports.state || !m_ports.update || !m_interactor
             || style != m_interactor->GetInteractorStyle()) {
             return;
@@ -704,6 +970,9 @@ void StdViewContext::OnVTKEvent(
             if (m_isStyleInteracting) return;
             if (!m_ports.state->SetInteracting(source, true)) return;
             m_isStyleInteracting = true;
+            m_isStyleStateCleared = false;
+            m_isStyleStopped = false;
+            m_isStyleRateRestored = false;
             if (m_renderWindow) {
                 m_renderWindow->SetDesiredUpdateRate(
                     GetRenderRate(true));
@@ -713,21 +982,35 @@ void StdViewContext::OnVTKEvent(
         }
         if (eventId == vtkCommand::EndInteractionEvent) {
             if (!m_isStyleInteracting) return;
-            if (m_ports.state->SetInteracting(source, false)) {
-                m_isStyleInteracting = false;
+            if (!m_isStyleStateCleared) {
+                if (!m_ports.state->SetInteracting(source, false)) return;
+                m_isStyleStateCleared = true;
+            }
+            if (!m_isStyleRateRestored) {
                 if (m_renderWindow) {
                     m_renderWindow->SetDesiredUpdateRate(
                         GetRenderRate(false));
                 }
-                // 最终静止质量仍由一次 heartbeat 收口；拖动过程不再按
-                // MouseMove 重复置脏或等待 Timer 才显示。
-                (void)m_ports.update->SetRenderNeeded();
+                m_isStyleRateRestored = true;
+            }
+            // 最终静止质量仍由一次 heartbeat 收口；拖动过程不再按
+            // MouseMove 重复置脏或等待 Timer 才显示。
+            if (m_ports.update->SetRenderNeeded()) {
+                m_isStyleInteracting = false;
+                m_isStyleStateCleared = false;
+                m_isStyleStopped = false;
+                m_isStyleRateRestored = false;
             }
             return;
         }
     }
 
     const auto eventKind = GetEventKind(eventId);
+    if (m_isHostInjected && !m_isSendingInput
+        && GetIsRoutedInputEvent(eventKind)) {
+        if (m_eventCallback) m_eventCallback->SetAbortFlag(1);
+        return;
+    }
     if (eventKind == InteractionEventKind::Exit) {
         (void)StopInput();
         return;
@@ -744,8 +1027,21 @@ void StdViewContext::OnVTKEvent(
         eventKind == InteractionEventKind::Timer
         ? RouterDispatchMode::Broadcast
         : RouterDispatchMode::FirstMatch;
-    const auto result =
-        m_interactionRouter.Dispatch(event, dispatchMode);
+    InteractionResult result;
+    try {
+        result = m_interactionRouter.Dispatch(event, dispatchMode);
+    }
+    catch (...) {
+        result = {
+            true,
+            true,
+            false,
+            InteractionFailureReason::StateRejected };
+    }
+    if (m_isSendingInput) {
+        m_injectedResult = result;
+        m_hasInjectedResult = true;
+    }
 
     if (eventKind == InteractionEventKind::Timer
         && m_timerHandler) {

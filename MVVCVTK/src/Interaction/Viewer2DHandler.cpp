@@ -50,26 +50,37 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
         return result;
     };
 
-    // 模式可在按下与释放之间切换；释放必须先于模式门控清理本 Handler 的 source。
-    if (m_statePort
-        && eve.eventKind == InteractionEventKind::PrimaryRelease
-        && (m_isDragCrosshair
-            || m_isDragSlice
-            || m_isDragWindowLevel)) {
+    // 模式可在按下与释放之间切换；Release/Cancel 必须先于模式门控清理 source。
+    const bool isPrimaryActive = m_isDragCrosshair
+        || m_isDragSlice || m_isDragWindowLevel;
+    const bool isPrimaryCleanup =
+        eve.eventKind == InteractionEventKind::PrimaryRelease
+        || eve.eventKind == InteractionEventKind::Cancel;
+    if (isPrimaryCleanup && isPrimaryActive) {
+        if (!m_statePort
+            || !m_statePort->SetInteracting(m_source, false)) {
+            return getResult(
+                false, InteractionFailureReason::CleanupRejected);
+        }
         m_isDragCrosshair = false;
         m_isDragSlice = false;
         m_isDragWindowLevel = false;
-        return getResult(
-            m_statePort->SetInteracting(m_source, false),
-            InteractionFailureReason::CleanupRejected);
+        return getResult(true, InteractionFailureReason::None);
     }
-    if (m_statePort
-        && eve.eventKind == InteractionEventKind::SecondaryRelease
-        && m_isRightZoom) {
+    const bool isSecondaryCleanup =
+        eve.eventKind == InteractionEventKind::SecondaryRelease
+        || eve.eventKind == InteractionEventKind::Cancel;
+    if (isSecondaryCleanup && m_isRightZoom) {
+        if (!m_statePort
+            || !m_statePort->SetInteracting(m_source, false)) {
+            return getResult(
+                false, InteractionFailureReason::CleanupRejected);
+        }
         m_isRightZoom = false;
-        return getResult(
-            m_statePort->SetInteracting(m_source, false),
-            InteractionFailureReason::CleanupRejected);
+        return getResult(true, InteractionFailureReason::None);
+    }
+    if (eve.eventKind == InteractionEventKind::Cancel) {
+        return {};
     }
 
     const bool isSliceMode =
@@ -140,23 +151,26 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     if (eve.eventKind == InteractionEventKind::PrimaryRelease)
     {
         if (m_isDragCrosshair) {
-            m_isDragCrosshair = false;
+            const bool isStopped =
+                m_statePort->SetInteracting(m_source, false);
+            if (isStopped) m_isDragCrosshair = false;
             return getResult(
-                m_statePort->SetInteracting(m_source, false),
-                InteractionFailureReason::CleanupRejected);
+                isStopped, InteractionFailureReason::CleanupRejected);
         }
         if (m_isDragSlice)
         {
-            m_isDragSlice = false;
+            const bool isStopped =
+                m_statePort->SetInteracting(m_source, false);
+            if (isStopped) m_isDragSlice = false;
 			return getResult(
-                m_statePort->SetInteracting(m_source, false),
-                InteractionFailureReason::CleanupRejected);
+                isStopped, InteractionFailureReason::CleanupRejected);
         }
         if (m_isDragWindowLevel) {
-            m_isDragWindowLevel = false;
+            const bool isStopped =
+                m_statePort->SetInteracting(m_source, false);
+            if (isStopped) m_isDragWindowLevel = false;
             return getResult(
-                m_statePort->SetInteracting(m_source, false),
-                InteractionFailureReason::CleanupRejected);
+                isStopped, InteractionFailureReason::CleanupRejected);
         }
         return { true, true };
     }
@@ -184,10 +198,11 @@ InteractionResult Viewer2DHandler::Send(const InteractionEvent& eve)
     if (eve.eventKind == InteractionEventKind::SecondaryRelease)
     {
         if (m_isRightZoom) {
-            m_isRightZoom = false;
+            const bool isStopped =
+                m_statePort->SetInteracting(m_source, false);
+            if (isStopped) m_isRightZoom = false;
             return getResult(
-                m_statePort->SetInteracting(m_source, false),
-                InteractionFailureReason::CleanupRejected);
+                isStopped, InteractionFailureReason::CleanupRejected);
         }
         return {};
     }

@@ -1,11 +1,13 @@
 #include "Host/VtkAppHostSession.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostCommandRouter.h"
+#include "Host/HostFeature.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "App/AppState.h"
 #include "App/AppStateEvents.h"
 #include "Data/DataManager.h"
+#include "Interaction/AbstractViewContext.h"
 #include "Interaction/TimeUpdateHandler.h"
 #include "VolumeStrategy.h"
 
@@ -148,6 +150,137 @@ private:
 
 vtkStandardNewMacro(RenderProbeInteractor);
 
+class InputCaptureProbe final : public IInteractionCapture {
+public:
+    using Callback =
+        std::function<InteractionResult(const InteractionEvent&)>;
+
+    InputCaptureProbe(
+        InteractionCaptureKey key,
+        InteractionEventKind releaseKind,
+        Callback callback)
+        : m_key(key)
+        , m_releaseKind(releaseKind)
+        , m_callback(std::move(callback))
+    {
+    }
+
+    InteractionCaptureKey GetKey() const noexcept override
+    {
+        return m_key;
+    }
+
+    InteractionEventKind GetReleaseKind() const noexcept override
+    {
+        return m_releaseKind;
+    }
+
+    InteractionResult Send(const InteractionEvent& event) override
+    {
+        return m_callback ? m_callback(event) : InteractionResult{};
+    }
+
+private:
+    InteractionCaptureKey m_key;
+    InteractionEventKind m_releaseKind;
+    Callback m_callback;
+};
+
+class SessionInputFeatureProbe final : public HostFeature {
+public:
+    explicit SessionInputFeatureProbe(
+        const bool detachInputInFeature = true) noexcept
+        : m_detachInputInFeature(detachInputInFeature)
+    {
+    }
+
+    std::string_view GetFeatureId() const noexcept override
+    {
+        return "session.input.probe";
+    }
+
+    bool AttachHost(const HostFeatureContext& context) override
+    {
+        if (!context.host || m_host) return false;
+        HostInputBinding binding;
+        binding.featureId = std::string(GetFeatureId());
+        binding.targetViews.viewIds = { "session-injected" };
+        binding.onInput = [this](const InteractionEvent& event) {
+            m_events.push_back(event);
+            if (event.eventKind == InteractionEventKind::PrimaryPress) {
+                return InteractionResult{ true, true };
+            }
+            if (event.eventKind == InteractionEventKind::PrimaryRelease) {
+                return InteractionResult{ true, true };
+            }
+            if (event.eventKind == InteractionEventKind::Cancel) {
+                ++m_cancelCount;
+                return InteractionResult{
+                    true,
+                    true,
+                    !m_isCancelFailing,
+                    m_isCancelFailing
+                        ? InteractionFailureReason::CleanupRejected
+                        : InteractionFailureReason::None };
+            }
+            return InteractionResult{};
+        };
+        if (!context.host->AttachInput(std::move(binding))
+            || !context.host->SetActiveViews({ "session-injected" })) {
+            (void)context.host->DetachInput(GetFeatureId());
+            return false;
+        }
+        m_host = context.host;
+        return true;
+    }
+
+    bool DetachHost() override
+    {
+        ++m_detachCount;
+        if (!m_host) return true;
+        if (!m_detachInputInFeature) {
+            m_host.reset();
+            return true;
+        }
+        if (!m_host->DetachInput(GetFeatureId())
+            || !m_host->SetActiveViews({})) {
+            return false;
+        }
+        m_host.reset();
+        return true;
+    }
+
+    bool OnHostTick() override { return true; }
+
+    void SetCancelFailing(const bool isFailing) noexcept
+    {
+        m_isCancelFailing = isFailing;
+    }
+
+    const std::vector<InteractionEvent>& GetEvents() const noexcept
+    {
+        return m_events;
+    }
+
+    int GetCancelCount() const noexcept { return m_cancelCount; }
+    int GetDetachCount() const noexcept { return m_detachCount; }
+
+private:
+    std::shared_ptr<FeatureHostControl> m_host;
+    std::vector<InteractionEvent> m_events;
+    int m_cancelCount = 0;
+    int m_detachCount = 0;
+    bool m_isCancelFailing = false;
+    bool m_detachInputInFeature = true;
+};
+
+void CountInputEvent(
+    vtkObject*, unsigned long, void* clientData, void*)
+{
+    auto* count = static_cast<int*>(clientData);
+    if (count) ++*count;
+}
+
 bool SendTimer(
     vtkRenderWindowInteractor* interactor,
     const int idOffset = 0)
@@ -169,6 +302,399 @@ bool SendTimer(
     timerId += idOffset;
     interactor->InvokeEvent(vtkCommand::TimerEvent, &timerId);
     return true;
+}
+
+bool BuildInjectedInputContextTest()
+{
+    HostCoreServices core;
+    core.sharedDataMgr = std::make_shared<RawVolumeDataManager>();
+    core.sharedStateBroadcaster =
+        std::make_shared<SharedStateBroadcaster>();
+    core.sharedState = std::make_shared<SharedInteractionState>(
+        core.sharedStateBroadcaster);
+
+    auto nativeWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto nativeInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    nativeWindow->SetInteractor(nativeInteractor);
+    nativeInteractor->SetRenderWindow(nativeWindow);
+    HostRenderViewConfig nativeView;
+    nativeView.id = "native-input";
+    nativeView.role = HostRenderViewRole::Primary3D;
+    nativeView.renderWindow = nativeWindow;
+
+    auto injectedWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto injectedInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    injectedWindow->SetInteractor(injectedInteractor);
+    injectedInteractor->SetRenderWindow(injectedWindow);
+    HostRenderViewConfig injectedView;
+    injectedView.id = "injected-input";
+    injectedView.role = HostRenderViewRole::Composite3D;
+    injectedView.renderWindow = injectedWindow;
+    injectedView.inputMode = HostInputMode::HostInjected;
+
+    HostViewRuntimeRegistry views;
+    if (!views.Build(core, { nativeView, injectedView })
+        || !views.SetInteractorsReady()) {
+        return false;
+    }
+    const auto directory = views.GetViewDirectory().lock();
+    if (!directory) return false;
+    HostViewTargets nativeTarget;
+    nativeTarget.viewIds = { "native-input" };
+    HostViewTargets injectedTarget;
+    injectedTarget.viewIds = { "injected-input" };
+    const auto nativeRoutes = directory->GetInputRoutes(nativeTarget);
+    const auto injectedRoutes = directory->GetInputRoutes(injectedTarget);
+    if (nativeRoutes.size() != 1 || injectedRoutes.size() != 1) {
+        return false;
+    }
+    const auto nativeContext = nativeRoutes.front().context.lock();
+    const auto injectedContext = injectedRoutes.front().context.lock();
+    if (!nativeContext || !injectedContext
+        || nativeRoutes.front().inputMode != HostInputMode::NativeInteractor
+        || injectedRoutes.front().inputMode != HostInputMode::HostInjected) {
+        return false;
+    }
+
+    int nativeCallbackCount = 0;
+    int injectedCallbackCount = 0;
+    InteractionEvent observed;
+    bool isInjectedSuppressed = false;
+    const std::vector<InteractionEventKind> keyKinds{
+        InteractionEventKind::KeyPress,
+        InteractionEventKind::KeyRelease,
+        InteractionEventKind::TextInput,
+        InteractionEventKind::PrimaryPress,
+        InteractionEventKind::PrimaryRelease
+    };
+    if (!nativeContext->SetInputHandler(
+            [&](const InteractionEvent&) {
+                ++nativeCallbackCount;
+                return InteractionDispatch{
+                    InteractionResult{ true, false }, nullptr };
+            },
+            keyKinds)
+        || !injectedContext->SetInputHandler(
+            [&](const InteractionEvent& event) {
+                ++injectedCallbackCount;
+                observed = event;
+                return InteractionDispatch{
+                    InteractionResult{ true, isInjectedSuppressed },
+                    nullptr };
+            },
+            keyKinds)) {
+        return false;
+    }
+
+    int nativeLowPriorityCount = 0;
+    int injectedLowPriorityCount = 0;
+    auto nativeObserver = vtkSmartPointer<vtkCallbackCommand>::New();
+    nativeObserver->SetClientData(&nativeLowPriorityCount);
+    nativeObserver->SetCallback(CountInputEvent);
+    auto injectedObserver = vtkSmartPointer<vtkCallbackCommand>::New();
+    injectedObserver->SetClientData(&injectedLowPriorityCount);
+    injectedObserver->SetCallback(CountInputEvent);
+    const auto nativeTag = nativeInteractor->AddObserver(
+        vtkCommand::KeyPressEvent, nativeObserver, 0.0);
+    const auto injectedTag = injectedInteractor->AddObserver(
+        vtkCommand::KeyPressEvent, injectedObserver, 0.0);
+    if (nativeTag == 0 || injectedTag == 0) return false;
+
+    InteractionEvent event;
+    event.eventKind = InteractionEventKind::KeyPress;
+    event.x = 17;
+    event.y = 29;
+    event.isCtrlDown = true;
+    event.isShiftDown = true;
+    event.isAltDown = true;
+    event.keyCode = 'K';
+    event.keySym = "K";
+    const auto injected = injectedContext->SendInput(event);
+    const bool isSynchronous = injected.isSucceeded
+        && injected.isHandled && !injected.isPropagationStopped
+        && injectedCallbackCount == 1
+        && injectedLowPriorityCount == 1
+        && observed.x == event.x && observed.y == event.y
+        && observed.isCtrlDown && observed.isShiftDown
+        && observed.isAltDown && observed.keyCode == event.keyCode
+        && observed.keySym == event.keySym;
+
+    injectedInteractor->SetEventInformation(3, 4, 0, 0, 'R', 0, "R");
+    injectedInteractor->KeyPressEvent();
+    const bool isNativeDuplicateBlocked = injectedCallbackCount == 1
+        && injectedLowPriorityCount == 1;
+
+    isInjectedSuppressed = true;
+    const auto suppressed = injectedContext->SendInput(event);
+    const bool isSuppressionPropagated = suppressed.isSucceeded
+        && suppressed.isPropagationStopped
+        && injectedCallbackCount == 2
+        && injectedLowPriorityCount == 1;
+
+    const auto rejectedNativeInjection = nativeContext->SendInput(event);
+    nativeInteractor->SetEventInformation(5, 6, 0, 0, 'N', 0, "N");
+    nativeInteractor->KeyPressEvent();
+    const bool isNativeModePreserved = !rejectedNativeInjection.isSucceeded
+        && nativeCallbackCount == 1 && nativeLowPriorityCount == 1;
+
+    InteractionResult wrongThread;
+    std::thread worker([&]() {
+        wrongThread = injectedContext->SendInput(event);
+    });
+    worker.join();
+    const bool isOwnerGatePreserved = !wrongThread.isSucceeded
+        && injectedCallbackCount == 2;
+
+    bool isCancelFailing = true;
+    int cancelCount = 0;
+    const InteractionCaptureKey captureKey{ 71, 91 };
+    if (!injectedContext->SetInputHandler(
+            [&](const InteractionEvent& current) {
+                InteractionDispatch routed;
+                if (current.eventKind
+                    != InteractionEventKind::PrimaryPress) {
+                    return routed;
+                }
+                routed.result = { true, true };
+                routed.capture = std::make_unique<InputCaptureProbe>(
+                    captureKey,
+                    InteractionEventKind::PrimaryRelease,
+                    [&](const InteractionEvent& captured) {
+                        if (captured.eventKind == InteractionEventKind::Cancel) {
+                            ++cancelCount;
+                        }
+                        return InteractionResult{
+                            true,
+                            true,
+                            !isCancelFailing,
+                            isCancelFailing
+                                ? InteractionFailureReason::CleanupRejected
+                                : InteractionFailureReason::None };
+                    });
+                return routed;
+            },
+            { InteractionEventKind::PrimaryPress,
+              InteractionEventKind::PrimaryRelease,
+              InteractionEventKind::Cancel })) {
+        return false;
+    }
+    InteractionEvent press;
+    press.eventKind = InteractionEventKind::PrimaryPress;
+    const auto capturedPress = injectedContext->SendInput(press);
+    const auto oldTool = injectedContext->GetToolMode();
+    const bool firstToolChange =
+        injectedContext->SetToolMode(ToolMode::ModelTransform);
+    const auto toolAfterFirstChange = injectedContext->GetToolMode();
+    isCancelFailing = false;
+    const bool retryToolChange =
+        injectedContext->SetToolMode(ToolMode::ModelTransform);
+    const bool isLifecycleRetryable = capturedPress.isSucceeded
+        && capturedPress.isHandled && !firstToolChange
+        && toolAfterFirstChange == ToolMode::Navigation
+        && injectedContext->GetToolMode() == ToolMode::ModelTransform
+        && oldTool == ToolMode::Navigation
+        && retryToolChange && cancelCount == 2;
+
+    nativeInteractor->RemoveObserver(nativeTag);
+    injectedInteractor->RemoveObserver(injectedTag);
+    const bool isStopped = views.StopLease();
+    return isSynchronous && isNativeDuplicateBlocked
+        && isSuppressionPropagated && isNativeModePreserved
+        && isOwnerGatePreserved && isLifecycleRetryable && isStopped;
+}
+
+bool BuildSessionInputEndpointTest()
+{
+    auto nativeWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto nativeInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    nativeWindow->SetInteractor(nativeInteractor);
+    nativeInteractor->SetRenderWindow(nativeWindow);
+    HostRenderViewConfig nativeView;
+    nativeView.id = "session-native";
+    nativeView.role = HostRenderViewRole::Primary3D;
+    nativeView.renderWindow = nativeWindow;
+
+    auto injectedWindow = vtkSmartPointer<RenderProbeWindow>::New();
+    auto injectedInteractor =
+        vtkSmartPointer<RenderProbeInteractor>::New();
+    injectedWindow->SetInteractor(injectedInteractor);
+    injectedInteractor->SetRenderWindow(injectedWindow);
+    HostRenderViewConfig injectedView;
+    injectedView.id = "session-injected";
+    injectedView.role = HostRenderViewRole::Composite3D;
+    injectedView.renderWindow = injectedWindow;
+    injectedView.inputMode = HostInputMode::HostInjected;
+
+    HostSessionConfig config;
+    config.renderViews = { nativeView, injectedView };
+    VtkAppHostSession coldSession(config);
+    auto* coldEndpoint = coldSession.GetInputEndpoint();
+    HostInputEvent coldEvent;
+    coldEvent.viewId = "session-injected";
+    coldEvent.kind = HostInputKind::KeyPress;
+    HostInputResult coldResult;
+    std::thread coldCaller([&]() {
+        if (coldEndpoint) coldResult = coldEndpoint->SendInput(coldEvent);
+    });
+    coldCaller.join();
+    const bool isColdEndpointPassive = coldEndpoint
+        && !coldResult.isSucceeded
+        && coldResult.errorCode == HostErrorCode::SessionNotReady
+        && coldSession.GetIsStopped() && coldSession.Stop();
+
+    VtkAppHostSession session(std::move(config));
+    auto* endpoint = session.GetInputEndpoint();
+    auto feature = std::make_shared<SessionInputFeatureProbe>();
+    if (!endpoint || !session.BuildSession()
+        || !session.AttachFeature(feature)) {
+        return false;
+    }
+
+    HostInputEvent invalid;
+    const auto invalidResult = endpoint->SendInput(invalid);
+    invalid.viewId = "missing";
+    invalid.kind = HostInputKind::KeyPress;
+    const auto missingResult = endpoint->SendInput(invalid);
+    invalid.viewId = "session-native";
+    const auto nativeResult = endpoint->SendInput(invalid);
+    const bool areInvalidInputsRejected =
+        !invalidResult.isSucceeded
+        && invalidResult.errorCode == HostErrorCode::RequestRejected
+        && !missingResult.isSucceeded
+        && missingResult.errorCode == HostErrorCode::RequestRejected
+        && !nativeResult.isSucceeded
+        && nativeResult.errorCode == HostErrorCode::RequestRejected;
+
+    HostInputEvent key;
+    key.viewId = "session-injected";
+    key.kind = HostInputKind::KeyPress;
+    key.x = 23;
+    key.y = 37;
+    key.isShiftDown = true;
+    key.isCtrlDown = true;
+    key.isAltDown = true;
+    key.keyCode = 'I';
+    key.keySym = "I";
+    const auto keyResult = endpoint->SendInput(key);
+    const auto keyEventCount = feature->GetEvents().size();
+    injectedInteractor->SetEventInformation(1, 2, 0, 0, 'R', 0, "R");
+    injectedInteractor->KeyPressEvent();
+    const bool isNativeDuplicateBlocked =
+        feature->GetEvents().size() == keyEventCount;
+
+    HostInputEvent press = key;
+    press.kind = HostInputKind::PrimaryPress;
+    HostInputEvent move = key;
+    move.kind = HostInputKind::PointerMove;
+    move.x = 31;
+    move.y = 47;
+    HostInputEvent release = move;
+    release.kind = HostInputKind::PrimaryRelease;
+    const auto pressResult = endpoint->SendInput(press);
+    const auto moveResult = endpoint->SendInput(move);
+    const auto releaseResult = endpoint->SendInput(release);
+    const auto& events = feature->GetEvents();
+    const bool isFeatureRouteValid = keyResult.isSucceeded
+        && pressResult.isSucceeded && pressResult.isHandled
+        && pressResult.isDefaultSuppressed
+        && moveResult.isSucceeded && releaseResult.isSucceeded
+        && events.size() >= 4
+        && events[0].viewId == "session-injected"
+        && events[0].x == key.x && events[0].y == key.y
+        && events[0].isShiftDown && events[0].isCtrlDown
+        && events[0].isAltDown && events[0].keyCode == key.keyCode
+        && events[0].keySym == key.keySym
+        && events[events.size() - 3].eventKind
+            == InteractionEventKind::PrimaryPress
+        && events[events.size() - 2].eventKind
+            == InteractionEventKind::PointerMove
+        && events.back().eventKind
+            == InteractionEventKind::PrimaryRelease;
+
+    feature->SetCancelFailing(true);
+    endpoint->SendInput(press);
+    HostInputEvent cancel = press;
+    cancel.kind = HostInputKind::Cancel;
+    const auto firstPublicCancel = endpoint->SendInput(cancel);
+    feature->SetCancelFailing(false);
+    const auto retryPublicCancel = endpoint->SendInput(cancel);
+    const bool isPublicCancelRetryable = !firstPublicCancel.isSucceeded
+        && firstPublicCancel.errorCode == HostErrorCode::OperationFailed
+        && retryPublicCancel.isSucceeded
+        && feature->GetCancelCount() == 2;
+
+    HostInputResult wrongThread;
+    std::thread worker([&]() {
+        wrongThread = endpoint->SendInput(key);
+    });
+    worker.join();
+    const bool isWrongThreadRejected = !wrongThread.isSucceeded
+        && wrongThread.errorCode == HostErrorCode::WrongThread;
+
+    feature->SetCancelFailing(true);
+    endpoint->SendInput(press);
+    const bool firstDetach = session.DetachFeature(*feature);
+    feature->SetCancelFailing(false);
+    const bool retryDetach = session.DetachFeature(*feature);
+    const bool isDetachRetryable = !firstDetach && retryDetach
+        && feature->GetCancelCount() == 4
+        && feature->GetDetachCount() == 2;
+
+    auto postconditionFeature =
+        std::make_shared<SessionInputFeatureProbe>(false);
+    const bool isPostconditionFeatureAttached =
+        session.AttachFeature(postconditionFeature);
+    postconditionFeature->SetCancelFailing(true);
+    const auto postconditionPress = isPostconditionFeatureAttached
+        ? endpoint->SendInput(press) : HostInputResult{};
+    const bool firstPostconditionDetach =
+        isPostconditionFeatureAttached && postconditionPress.isSucceeded
+        ? session.DetachFeature(*postconditionFeature) : true;
+    postconditionFeature->SetCancelFailing(false);
+    const bool retryPostconditionDetach =
+        session.DetachFeature(*postconditionFeature);
+    const bool isPostconditionRetryable =
+        !firstPostconditionDetach && retryPostconditionDetach
+        && postconditionFeature->GetDetachCount() == 1
+        && postconditionFeature->GetCancelCount() == 2;
+
+    const bool firstStop = session.Stop();
+    const auto stoppedResult = endpoint->SendInput(key);
+    const bool isStoppedEndpointRejected = firstStop
+        && !stoppedResult.isSucceeded
+        && stoppedResult.errorCode == HostErrorCode::SessionNotReady;
+    const bool isRebuilt = session.BuildSession();
+    auto* rebuiltEndpoint = session.GetInputEndpoint();
+    auto stopFeature = std::make_shared<SessionInputFeatureProbe>();
+    const bool isStopFeatureAttached = isRebuilt && rebuiltEndpoint
+        && session.AttachFeature(stopFeature);
+    const auto stopPress = isStopFeatureAttached
+        ? rebuiltEndpoint->SendInput(press) : HostInputResult{};
+    const bool secondStop = isStopFeatureAttached
+        && stopPress.isSucceeded && session.Stop();
+    const bool isActiveCaptureStopped = secondStop
+        && stopFeature->GetCancelCount() == 1
+        && stopFeature->GetDetachCount() == 1;
+
+    VtkAppHostSession moved(std::move(session));
+    const bool isMoveContractVisible =
+        session.GetInputEndpoint() == nullptr
+        && moved.GetInputEndpoint() != nullptr;
+    const bool isRepeatedStopIdempotent = moved.Stop()
+        && stopFeature->GetCancelCount() == 1
+        && stopFeature->GetDetachCount() == 1;
+
+    return isColdEndpointPassive
+        && areInvalidInputsRejected && isNativeDuplicateBlocked
+        && isFeatureRouteValid && isWrongThreadRejected
+        && isPublicCancelRetryable && isDetachRetryable
+        && isPostconditionRetryable
+        && isStoppedEndpointRejected
+        && isActiveCaptureStopped && isMoveContractVisible
+        && isRepeatedStopIdempotent;
 }
 
 class TimerProbePort final : public RenderUpdatePort {
@@ -985,7 +1511,24 @@ bool BuildSceneCameraTest()
     const unsigned long replacementErrorTag = replacementWindow->AddObserver(
         vtkCommand::ErrorEvent, errorCallback);
     const std::size_t errorsBeforeRebind = vtkErrorCount;
-    const bool isWindowRebound = replacementErrorTag != 0
+    const bool isActiveRebindRejected = replacementErrorTag != 0
+        && !views.SetViewWindow("scene-camera", replacementWindow);
+    const auto endpointsAfterRejectedRebind = views.BuildEndpoints();
+    const auto endpointAfterRejectedRebind = std::find_if(
+        endpointsAfterRejectedRebind.begin(),
+        endpointsAfterRejectedRebind.end(),
+        [](const HostRenderViewEndpoint& current) {
+            return current.id == "scene-camera";
+        });
+    const bool isRejectedWindowStable =
+        endpointAfterRejectedRebind != endpointsAfterRejectedRebind.end()
+        && endpointAfterRejectedRebind->renderWindow
+            == renderWindow.GetPointer()
+        && endpointAfterRejectedRebind->interactor
+            == interactor.GetPointer();
+    const bool isFeatureCleared = views.SetFeatureViews(
+        "scene-camera-feature", {});
+    const bool isWindowRebound = isFeatureCleared
         && views.SetViewWindow("scene-camera", replacementWindow);
     const auto sceneAfterRebind = views.GetSceneViewState(target);
     const auto peerAfterRebind = views.GetSceneViewState(peerTarget);
@@ -1017,8 +1560,7 @@ bool BuildSceneCameraTest()
             == sceneAfterRebind->presentationRevision
         && sceneBeforeRebind->activeFeatureIds
             == std::vector<std::string>{ "scene-camera-feature" }
-        && sceneBeforeRebind->activeFeatureIds
-            == sceneAfterRebind->activeFeatureIds;
+        && sceneAfterRebind->activeFeatureIds.empty();
     const bool isCameraRebindStable = sceneBeforeRebind
         && sceneBeforeRebind->camera
         && sceneAfterRebind
@@ -1048,13 +1590,13 @@ bool BuildSceneCameraTest()
         && reboundEndpoint->interactor == replacementInteractor.GetPointer();
     const bool hasNoRebindError = vtkErrorCount == errorsBeforeRebind;
     const bool isRebindStable = isSceneIdentityStable
+        && isActiveRebindRejected
+        && isRejectedWindowStable
         && isCameraRebindStable
         && isPeerRebindStable
         && isEndpointRebound
         && hasNoRebindError;
 
-    const bool isFeatureCleared = views.SetFeatureViews(
-        "scene-camera-feature", {});
     const auto directory = views.GetViewDirectory().lock();
     const bool isPeerStopped = directory
         && directory->StopView("scene-camera-peer");
@@ -3060,6 +3602,16 @@ int main(int argc, char* argv[])
         std::cerr
             << "FAIL: Render sources were not isolated\n";
         return 4;
+    }
+    if (!BuildInjectedInputContextTest()) {
+        std::cerr
+            << "FAIL: HostInjected input routing was not exclusive or synchronous\n";
+        return 18;
+    }
+    if (!BuildSessionInputEndpointTest()) {
+        std::cerr
+            << "FAIL: Session input endpoint lifecycle or Feature routing changed\n";
+        return 19;
     }
     if (!BuildStyleQualityTest()) {
         std::cerr

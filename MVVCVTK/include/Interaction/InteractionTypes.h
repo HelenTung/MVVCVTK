@@ -20,7 +20,8 @@ enum class InteractionEventKind
     KeyRelease,
     TextInput,
     ViewInteraction,
-    Exit
+    Exit,
+    Cancel
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -35,6 +36,8 @@ enum class InteractionEventKind
 // ─────────────────────────────────────────────────────────────────────
 struct InteractionEvent
 {
+    // Host 跨 View/Feature 分发时填写；Context 内部默认导航可留空。
+    std::string viewId;
     InteractionEventKind eventKind = InteractionEventKind::None;
 
     // ── 鼠标屏幕坐标（像素，左下角为原点，与 VTK 约定一致） ───────────

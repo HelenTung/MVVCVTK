@@ -1,7 +1,7 @@
 #pragma once
 
 #include "App/AppTypes.h"
-#include "Interaction/InteractionTypes.h"
+#include "Interaction/IInteractionHandler.h"
 
 #include <vtkSmartPointer.h>
 
@@ -26,6 +26,9 @@ struct ViewCameraState final {
     double viewAngle = 30.0;
     bool isParallel = false;
 };
+
+using InteractionRouteCallback =
+    std::function<InteractionDispatch(const InteractionEvent&)>;
 
 // 单视图 VTK 生命周期契约；不保存 App service，也不执行跨端口 RTTI。
 class AbstractViewContext {
@@ -56,9 +59,13 @@ public:
     virtual bool SetToolMode(ToolMode mode) = 0;
     virtual ToolMode GetToolMode() const = 0;
     virtual bool SetInputHandler(
-        std::function<InteractionResult(const InteractionEvent&)> handler,
+        InteractionRouteCallback handler,
         std::vector<InteractionEventKind> eventKinds) = 0;
     virtual bool ClearInputHandler() = 0;
+    virtual InteractionResult SendInput(
+        const InteractionEvent& event) = 0;
+    virtual InteractionResult CancelInput(
+        const InteractionCaptureKey& key) = 0;
     virtual bool SetTimerHandler(std::function<void()> handler) = 0;
     virtual bool ClearTimerHandler() = 0;
     virtual vtkRenderWindowInteractor* GetInteractor() const = 0;

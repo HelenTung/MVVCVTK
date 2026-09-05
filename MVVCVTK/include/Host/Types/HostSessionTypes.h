@@ -63,12 +63,18 @@ struct HostWindowConfig {
     HostViewInitConfig viewInit;
 };
 
+enum class HostInputMode : std::uint8_t {
+    NativeInteractor,
+    HostInjected
+};
+
 struct HostRenderViewConfig {
     std::string id; // 会话内唯一稳定标识；HostViewTarget 优先按此值查找。
     HostRenderViewRole role = HostRenderViewRole::Auxiliary; // 允许同 role 多窗口，集合查询按拓扑顺序返回。
     HostWindowConfig window; // 窗口尺寸、位置与初始渲染状态。
     vtkSmartPointer<vtkRenderWindow> renderWindow; // 可选外部窗口；为空时 session 自建并拥有窗口。
     bool isEventLoopEnabled = false; // standalone Start 候选；一个会话必须能解析出唯一启动窗口。
+    HostInputMode inputMode = HostInputMode::NativeInteractor; // 构建时冻结；默认由 VTK interactor 接收原生输入。
 };
 
 // 上位机读取单视图当前状态的值快照；所有容器均为独立副本，不暴露 VizService/SharedState。

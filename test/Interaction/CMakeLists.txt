@@ -13,6 +13,8 @@ add_executable(
     HostCommandRouterTests.h
     HostHotkeyRouterTests.cpp
     HostHotkeyRouterTests.h
+    HostInputRegistryTests.cpp
+    HostInputRegistryTests.h
     InteractionRouterTests.cpp
 )
 

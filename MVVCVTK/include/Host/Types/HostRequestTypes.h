@@ -4,6 +4,7 @@
 #include "Host/Types/HostViewTypes.h"
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -21,6 +22,48 @@ struct HostResult final {
     bool isSucceeded = false;
     HostErrorCode errorCode = HostErrorCode::OperationFailed;
     std::string message;
+};
+
+enum class HostInputKind : std::uint8_t {
+    None,
+    WheelForward,
+    WheelBackward,
+    PrimaryPress,
+    PrimaryRelease,
+    SecondaryPress,
+    SecondaryRelease,
+    PointerMove,
+    KeyPress,
+    KeyRelease,
+    TextInput,
+    Cancel
+};
+
+// 上位机注入的值语义输入；坐标使用 VTK 左下角原点的 display 像素坐标。
+struct HostInputEvent final {
+    std::string viewId;
+    HostInputKind kind = HostInputKind::None;
+    int x = 0;
+    int y = 0;
+    bool isShiftDown = false;
+    bool isCtrlDown = false;
+    bool isAltDown = false;
+    char keyCode = 0;
+    std::string keySym;
+};
+
+struct HostInputResult final {
+    bool isSucceeded = false;
+    bool isHandled = false;
+    bool isDefaultSuppressed = false;
+    HostErrorCode errorCode = HostErrorCode::OperationFailed;
+    std::string message;
+};
+
+class HostInputEndpoint {
+public:
+    virtual ~HostInputEndpoint() noexcept = default;
+    virtual HostInputResult SendInput(const HostInputEvent& event) = 0;
 };
 
 using HostCompleteCallback =

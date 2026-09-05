@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Interaction/AbstractViewContext.h"
+#include "Interaction/InputCallbackHandler.h"
+#include "Interaction/InteractionRouter.h"
 
 #include <algorithm>
 #include <functional>
@@ -9,6 +11,12 @@
 
 class ViewContextStub final : public AbstractViewContext {
 public:
+    explicit ViewContextStub(
+        const bool isHostInjected = false) noexcept
+        : m_isHostInjected(isHostInjected)
+    {
+    }
+
     bool SetCameraStyle(const VizMode mode) override
     {
         ++m_cameraStyleSetCount;
@@ -74,33 +82,62 @@ public:
     int GetToolModeSetCount() const { return m_toolModeSetCount; }
 
     bool SetInputHandler(
-        std::function<InteractionResult(const InteractionEvent&)> handler,
+        InteractionRouteCallback handler,
         std::vector<InteractionEventKind> eventKinds) override
     {
-        m_inputHandler = std::move(handler);
-        m_inputEventKinds = std::move(eventKinds);
-        return true;
+        ++m_inputSetCount;
+        if (m_inputSetFailCount > 0) {
+            --m_inputSetFailCount;
+            return false;
+        }
+        if (!handler || !m_inputRouter.SendCancel({}).isSucceeded
+            || !m_inputRouter.ClearHandlers()) {
+            return false;
+        }
+        return m_inputRouter.AttachHandler(
+            std::make_unique<InputCallbackHandler>(
+                std::move(handler), std::move(eventKinds)));
     }
 
     bool ClearInputHandler() override
     {
-        m_inputHandler = nullptr;
-        m_inputEventKinds.clear();
-        return true;
+        ++m_inputClearCount;
+        if (m_inputClearFailCount > 0) {
+            --m_inputClearFailCount;
+            return false;
+        }
+        return m_inputRouter.SendCancel({}).isSucceeded
+            && m_inputRouter.ClearHandlers();
+    }
+
+    InteractionResult CancelInput(
+        const InteractionCaptureKey& key) override
+    {
+        return m_inputRouter.CancelCapture(key, {});
+    }
+
+    InteractionResult SendInput(
+        const InteractionEvent& event) override
+    {
+        if (!m_isHostInjected) {
+            return {
+                true,
+                true,
+                false,
+                InteractionFailureReason::StateRejected };
+        }
+        return OnInput(event);
     }
 
     InteractionResult OnInput(const InteractionEvent& event)
     {
-        if (!m_inputHandler
-            || (!m_inputEventKinds.empty()
-                && std::find(
-                    m_inputEventKinds.begin(),
-                    m_inputEventKinds.end(),
-                    event.eventKind) == m_inputEventKinds.end())) {
-            return {};
-        }
-        return m_inputHandler(event);
+        return m_inputRouter.Dispatch(event);
     }
+
+    void SetInputSetFailCount(int count) { m_inputSetFailCount = count; }
+    void SetInputClearFailCount(int count) { m_inputClearFailCount = count; }
+    int GetInputSetCount() const { return m_inputSetCount; }
+    int GetInputClearCount() const { return m_inputClearCount; }
 
     bool SetInteractorReady() override { return true; }
     bool Start() override { return true; }
@@ -136,7 +173,11 @@ private:
     int m_axesFailCount = 0;
     ToolMode m_toolMode = ToolMode::Navigation;
     int m_toolModeSetCount = 0;
-    std::function<InteractionResult(const InteractionEvent&)> m_inputHandler;
-    std::vector<InteractionEventKind> m_inputEventKinds;
+    InteractionRouter m_inputRouter;
+    bool m_isHostInjected = false;
+    int m_inputSetCount = 0;
+    int m_inputClearCount = 0;
+    int m_inputSetFailCount = 0;
+    int m_inputClearFailCount = 0;
     std::function<void()> m_timerHandler;
 };

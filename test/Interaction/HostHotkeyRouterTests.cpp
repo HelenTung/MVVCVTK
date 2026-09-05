@@ -3,6 +3,7 @@
 #include "Host/HostCommandRouter.h"
 #include "Host/HostFeature.h"
 #include "Host/HostHotkeyRouter.h"
+#include "Host/HostInputRegistry.h"
 #include "Host/HostRoutes.h"
 #include "Host/Types/HostRequestTypes.h"
 #include "ViewContext.h"
@@ -46,6 +47,13 @@ void StartHotkeyCases(int& failureCount)
     auto sliceService = views->GetState("slice");
     auto commandRouter =
         std::make_shared<HostCommandRouter>(views->GetViewDirectory());
+    HostInputRegistry inputRegistry(views->GetViewDirectory());
+    HostViewTargets allViews;
+    allViews.viewIds = { "primary", "slice" };
+    SetExpect(
+        inputRegistry.Start(allViews),
+        "Host input registry should install one stable callback per view.",
+        failureCount);
     HostHotkeyConfig config;
     config.isContextInputEnabled = true;
     config.contextInputViews.viewIds = { "primary" };
@@ -60,7 +68,7 @@ void StartHotkeyCases(int& failureCount)
 
     {
         HostHotkeyRouter hotkeys(
-            views->GetViewDirectory(), commandRouter);
+            inputRegistry, commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(config),
             "合法 hotkey 配置应完成绑定。",
@@ -180,7 +188,7 @@ void StartHotkeyCases(int& failureCount)
                 throw 1;
             };
         SetExpect(
-            hotkeys.GetInputPort().AttachInput(
+            inputRegistry.GetFeaturePort().AttachInput(
                 std::move(throwingInput)),
             "Feature 输入异常隔离测试应完成绑定。",
             failureCount);
@@ -195,7 +203,7 @@ void StartHotkeyCases(int& failureCount)
                 return InteractionResult{ true, false };
             };
         SetExpect(
-            hotkeys.GetInputPort().AttachInput(std::move(featureInput)),
+            inputRegistry.GetFeaturePort().AttachInput(std::move(featureInput)),
             "feature input 应通过通用 HostInputPort 注册。",
             failureCount);
 
@@ -205,7 +213,7 @@ void StartHotkeyCases(int& failureCount)
         duplicateInput.onInput =
             [](const InteractionEvent&) { return InteractionResult{}; };
         SetExpect(
-            !hotkeys.GetInputPort().AttachInput(std::move(duplicateInput)),
+            !inputRegistry.GetFeaturePort().AttachInput(std::move(duplicateInput)),
             "重复 feature id 的 input binding 必须被拒绝。",
             failureCount);
 
@@ -221,7 +229,7 @@ void StartHotkeyCases(int& failureCount)
                     event.eventKind == InteractionEventKind::KeyPress };
             };
         SetExpect(
-            hotkeys.GetInputPort().AttachInput(std::move(stopInput)),
+            inputRegistry.GetFeaturePort().AttachInput(std::move(stopInput)),
             "多个 feature input 应能绑定到同一目标视图。",
             failureCount);
 
@@ -235,7 +243,7 @@ void StartHotkeyCases(int& failureCount)
                 return InteractionResult{ true, false };
             };
         SetExpect(
-            hotkeys.GetInputPort().AttachInput(std::move(sliceInput)),
+            inputRegistry.GetFeaturePort().AttachInput(std::move(sliceInput)),
             "feature input 应支持独立目标视图。",
             failureCount);
 
@@ -265,13 +273,13 @@ void StartHotkeyCases(int& failureCount)
             failureCount);
 
         SetExpect(
-            hotkeys.GetInputPort().DetachInput("feature.input"),
+            inputRegistry.GetFeaturePort().DetachInput("feature.input"),
             "feature input 应支持按 id 对称卸载。",
             failureCount);
         SetExpect(
-            hotkeys.GetInputPort().DetachInput("feature.stop")
-                && hotkeys.GetInputPort().DetachInput("feature.slice")
-                && hotkeys.GetInputPort().DetachInput("feature.throw"),
+            inputRegistry.GetFeaturePort().DetachInput("feature.stop")
+                && inputRegistry.GetFeaturePort().DetachInput("feature.slice")
+                && inputRegistry.GetFeaturePort().DetachInput("feature.throw"),
             "多个 feature input 应能对称卸载。",
             failureCount);
         context->OnInput(BuildKey(InteractionEventKind::KeyPress, 'x'));
@@ -333,7 +341,7 @@ void StartHotkeyCases(int& failureCount)
             "slice", false, HostRenderViewRole::Auxiliary };
         specifiedConfig.sliceAngleDeg = 12.5;
         HostHotkeyRouter hotkeys(
-            views->GetViewDirectory(), commandRouter);
+            inputRegistry, commandRouter);
         SetExpect(
             hotkeys.AttachHotkeys(specifiedConfig),
             "显式导出默认值的 hotkey 配置应完成绑定。",
@@ -374,7 +382,11 @@ void StartHotkeyCases(int& failureCount)
     SetExpect(
         !detached.isHandled && !detached.isPropagationStopped
             && context->GetToolModeSetCount() == modelCount,
-        "HostHotkeyRouter 析构后必须清除 context callback。",
+        "HostHotkeyRouter 析构后必须清除 HostExtension binding。",
+        failureCount);
+    SetExpect(
+        inputRegistry.Stop(),
+        "Host input registry should clear stable callbacks after adapters stop.",
         failureCount);
 }
 
