@@ -90,6 +90,64 @@ public:
 
     struct PendingStopEntry;
 
+    class FeatureCallScope final {
+    public:
+        explicit FeatureCallScope(bool& isCalling) noexcept
+            : m_isCalling(isCalling) { m_isCalling = true; }
+        ~FeatureCallScope() noexcept { m_isCalling = false; }
+        FeatureCallScope(const FeatureCallScope&) = delete;
+        FeatureCallScope& operator=(const FeatureCallScope&) = delete;
+    private:
+        bool& m_isCalling;
+    };
+
+    struct FeatureCompleteEntry final {
+        std::function<void()> complete;
+
+        void Send() noexcept
+        {
+            // 仅 owner thread 消费；先取走终态，重入/本批旧槽位不能重放。
+            auto callback = std::exchange(complete, {});
+            if (!callback) return;
+            try { callback(); }
+            catch (...) {}
+        }
+    };
+
+    struct FeatureLifetime final {
+        std::atomic<bool> isActive{ true };
+        std::weak_ptr<AbstractDataManager> data;
+        // 仅 owner thread 修改；完成队列可跨线程读取 isActive。
+        std::vector<DataObserverId> observers;
+        std::mutex completeMutex;
+        std::vector<std::weak_ptr<FeatureCompleteEntry>> completes;
+
+        void Stop(const bool shouldComplete)
+        {
+            std::vector<std::weak_ptr<FeatureCompleteEntry>> pendingCompletes;
+            {
+                const std::lock_guard<std::mutex> lock(completeMutex);
+                isActive.store(false);
+                pendingCompletes.swap(completes);
+            }
+            const auto manager = data.lock();
+            auto pending = std::move(observers);
+            observers.clear();
+            if (manager) {
+                for (const auto observer : pending) {
+                    // 具体 DataGraphStore 的 false 仅表示该订阅已不存在。
+                    (void)manager->DetachDataChange(observer);
+                }
+            }
+            for (const auto& pendingComplete : pendingCompletes) {
+                const auto entry = pendingComplete.lock();
+                if (!entry) continue;
+                if (shouldComplete) entry->Send();
+                else entry->complete = {};
+            }
+        }
+    };
+
     struct FeatureEntry final {
         std::string id;
         // attached Feature 属于 Session aggregate；只有 Detach/Stop 成功后才释放，
@@ -97,6 +155,7 @@ public:
         std::shared_ptr<HostFeature> feature;
         // DetachHost 成功后单调置位；后置 input 门禁失败时不重放 Feature teardown。
         bool isHostDetached = false;
+        std::shared_ptr<FeatureLifetime> lifetime;
     };
 
     class InputEndpoint final : public HostInputEndpoint {
@@ -274,15 +333,17 @@ public:
         : public FeatureViewDirectory {
     public:
         explicit FeatureViewDirectoryPort(
-            std::weak_ptr<FeatureHostBridge> bridge)
+            std::weak_ptr<FeatureHostBridge> bridge,
+            std::shared_ptr<FeatureLifetime> lifetime)
             : m_bridge(std::move(bridge))
+            , m_lifetime(std::move(lifetime))
         {
         }
 
         std::vector<HostFeatureView> GetViews(
             const HostViewTargets& targets) const override
         {
-            const auto bridge = m_bridge.lock();
+            const auto bridge = GetBridge();
             return bridge
                 ? bridge->GetViews(targets)
                 : std::vector<HostFeatureView>{};
@@ -291,7 +352,7 @@ public:
         std::shared_ptr<FeatureViewService> GetFeaturePort(
             const std::string& viewId) const override
         {
-            const auto bridge = m_bridge.lock();
+            const auto bridge = GetBridge();
             return bridge
                 ? bridge->GetFeaturePort(viewId)
                 : std::shared_ptr<FeatureViewService>{};
@@ -300,7 +361,7 @@ public:
         std::shared_ptr<OverlayService> GetOverlayPort(
             const std::string& viewId) const override
         {
-            const auto bridge = m_bridge.lock();
+            const auto bridge = GetBridge();
             return bridge
                 ? bridge->GetOverlayPort(viewId)
                 : std::shared_ptr<OverlayService>{};
@@ -309,14 +370,20 @@ public:
         std::optional<HostInputView> GetInputView(
             const HostViewTarget& target) const override
         {
-            const auto bridge = m_bridge.lock();
+            const auto bridge = GetBridge();
             return bridge
                 ? bridge->GetInputView(target)
                 : std::optional<HostInputView>{};
         }
 
     private:
+        std::shared_ptr<FeatureHostBridge> GetBridge() const
+        {
+            return m_lifetime->isActive.load() ? m_bridge.lock() : nullptr;
+        }
+
         std::weak_ptr<FeatureHostBridge> m_bridge;
+        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     class FeatureDataPort final
@@ -324,16 +391,18 @@ public:
     public:
         FeatureDataPort(
             const HostCoreServices& core,
-            const std::thread::id ownerThread)
+            const std::thread::id ownerThread,
+            std::shared_ptr<FeatureLifetime> lifetime)
             : m_data(core.sharedDataMgr)
             , m_state(core.sharedState)
             , m_ownerThread(ownerThread)
+            , m_lifetime(std::move(lifetime))
         {
         }
 
         DataGraphSnapshot GetDataGraph() const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetDataGraph() : DataGraphSnapshot{};
         }
 
@@ -341,7 +410,7 @@ public:
             const DataGraphSnapshot& graph,
             const DataRevisionRef& ref) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetData(graph, ref) : DataSnapshot{};
         }
 
@@ -349,7 +418,7 @@ public:
             const DataGraphSnapshot& graph,
             const DataQuery& query) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data
                 ? data->GetDataQuery(graph, query) : DataQueryResult{};
         }
@@ -358,7 +427,7 @@ public:
             const DataGraphSnapshot& graph,
             const std::string_view name) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data
                 ? data->GetDataBinding(graph, name)
                 : std::optional<DataBinding>{};
@@ -366,7 +435,7 @@ public:
 
         ProjectDataSnapshot GetProjectData() const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetProjectData() : ProjectDataSnapshot{};
         }
 
@@ -376,7 +445,7 @@ public:
             const std::string_view inputRole,
             const std::string_view binding) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data
                 ? data->GetDataRelation(graph, ref, inputRole, binding)
                 : DataRelationStatus::Unknown;
@@ -386,13 +455,13 @@ public:
             const DataGraphSnapshot& graph,
             const DataRevisionRef& ref) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetImageGrid(graph, ref) : nullptr;
         }
 
         VtkImageGridSnapshot GetPrimaryImage() const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetPrimaryImage() : nullptr;
         }
 
@@ -400,7 +469,7 @@ public:
             const DataGraphSnapshot& graph,
             const DataRevisionRef& ref) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetLabelMap(graph, ref) : nullptr;
         }
 
@@ -408,7 +477,7 @@ public:
             const DataGraphSnapshot& graph,
             const DataRevisionRef& ref) const override
         {
-            const auto data = m_data.lock();
+            const auto data = GetReadData();
             return data ? data->GetSurfaceMesh(graph, ref) : nullptr;
         }
 
@@ -464,49 +533,79 @@ public:
             DataChangeCallback callback) override
         {
             const auto data = GetWriteData();
-            return data
-                ? data->AttachDataChange(std::move(callback)) : 0;
+            if (!data || !callback) return 0;
+            const std::weak_ptr<FeatureLifetime> weakLifetime = m_lifetime;
+            const auto observer = data->AttachDataChange(
+                [weakLifetime, callback = std::move(callback)](
+                    const DataChangeSet& change) {
+                    const auto lifetime = weakLifetime.lock();
+                    if (lifetime && lifetime->isActive.load()) callback(change);
+                });
+            if (observer == 0) return 0;
+            try {
+                m_lifetime->observers.push_back(observer);
+            }
+            catch (...) {
+                data->DetachDataChange(observer);
+                return 0;
+            }
+            return observer;
         }
 
         bool DetachDataChange(const DataObserverId observerId) override
         {
             const auto data = GetWriteData();
-            return data && data->DetachDataChange(observerId);
+            if (!data) return false;
+            const auto found = std::find(m_lifetime->observers.begin(),
+                m_lifetime->observers.end(), observerId);
+            if (found == m_lifetime->observers.end()) return false;
+            // 先移除本地记录，闭包析构重入 Detach 时不会重复操作该 ID。
+            m_lifetime->observers.erase(found);
+            return data->DetachDataChange(observerId);
         }
 
     private:
+        std::shared_ptr<AbstractDataManager> GetReadData() const
+        {
+            return m_lifetime->isActive.load() ? m_data.lock() : nullptr;
+        }
+
         std::shared_ptr<AbstractDataManager> GetWriteData() const
         {
             if (m_ownerThread == std::thread::id{}
                 || m_ownerThread != std::this_thread::get_id()) {
                 return {};
             }
-            return m_data.lock();
+            return GetReadData();
         }
 
         std::weak_ptr<AbstractDataManager> m_data;
         std::weak_ptr<SharedInteractionState> m_state;
         std::thread::id m_ownerThread;
+        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     class FeatureReadPort final : public ImageReadPort {
     public:
-        explicit FeatureReadPort(const HostCoreServices& core)
+        FeatureReadPort(const HostCoreServices& core,
+            std::shared_ptr<FeatureLifetime> lifetime)
             : m_getDescriptor(core.GetImageDescriptor())
             , m_getReadState(core.GetImageReadState())
             , m_getReadResult(core.GetImageReadResult())
             , m_getReadChunk(core.GetImageReadChunk())
+            , m_lifetime(std::move(lifetime))
         {
         }
 
         std::optional<ImageDescriptor> GetImageDescriptor() const override
         {
-            return m_getDescriptor ? m_getDescriptor() : std::optional<ImageDescriptor>{};
+            return m_lifetime->isActive.load() && m_getDescriptor
+                ? m_getDescriptor() : std::optional<ImageDescriptor>{};
         }
 
         std::optional<ImageReadState> GetImageReadState() const override
         {
-            return m_getReadState
+            return m_lifetime->isActive.load() && m_getReadState
                 ? m_getReadState()
                 : std::optional<ImageReadState>{};
         }
@@ -514,7 +613,7 @@ public:
         ImageReadResult GetImageReadResult(
             const ImageReadRequest& request) const override
         {
-            return m_getReadResult
+            return m_lifetime->isActive.load() && m_getReadResult
                 ? m_getReadResult(request)
                 : ImageReadResult{};
         }
@@ -523,7 +622,7 @@ public:
             const ImageReadRequest& request,
             const std::size_t voxelOffset) const override
         {
-            return m_getReadChunk
+            return m_lifetime->isActive.load() && m_getReadChunk
                 ? m_getReadChunk(request, voxelOffset)
                 : ImageReadChunkResult{};
         }
@@ -536,6 +635,7 @@ public:
         std::function<ImageReadChunkResult(
             const ImageReadRequest&,
             std::size_t)> m_getReadChunk;
+        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     class FeatureHostControlPort final
@@ -544,16 +644,19 @@ public:
         FeatureHostControlPort(
             std::weak_ptr<FeatureHostBridge> bridge,
             std::string featureId,
-            std::weak_ptr<OwnerCompleteState> completeState)
+            std::weak_ptr<OwnerCompleteState> completeState,
+            std::shared_ptr<FeatureLifetime> lifetime)
             : m_bridge(std::move(bridge))
             , m_featureId(std::move(featureId))
             , m_completeState(std::move(completeState))
+            , m_lifetime(std::move(lifetime))
         {
         }
 
         bool SetActiveViews(
             const std::vector<std::string>& viewIds) override
         {
+            if (!m_lifetime->isActive.load()) return false;
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SetActiveViews(m_featureId, viewIds);
@@ -563,6 +666,7 @@ public:
             const std::vector<std::string>& viewIds,
             const std::string& status) override
         {
+            if (!m_lifetime->isActive.load()) return false;
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SetViewStatus(viewIds, status);
@@ -570,6 +674,7 @@ public:
 
         bool SendSceneDelta(FeatureSceneDelta delta) override
         {
+            if (!m_lifetime->isActive.load()) return false;
             const auto bridge = m_bridge.lock();
             return bridge
                 && bridge->SendSceneDelta(
@@ -578,6 +683,7 @@ public:
 
         bool AttachInput(HostInputBinding binding) override
         {
+            if (!m_lifetime->isActive.load()) return false;
             if (binding.featureId != m_featureId) {
                 return false;
             }
@@ -589,6 +695,7 @@ public:
         bool DetachInput(
             const std::string_view featureId) override
         {
+            if (!m_lifetime->isActive.load()) return false;
             if (featureId != std::string_view(m_featureId)) {
                 return false;
             }
@@ -601,14 +708,27 @@ public:
             std::function<void()> complete) override
         {
             const auto state = m_completeState.lock();
-            if (!state || !complete) {
+            if (!state || !complete || !m_lifetime->isActive.load()) {
                 return false;
             }
+            const auto lifetime = m_lifetime;
+            const auto entry = std::make_shared<FeatureCompleteEntry>();
+            entry->complete = std::move(complete);
+            std::function<void()> guarded =
+                [lifetime, entry]() {
+                    if (lifetime->isActive.load()) entry->Send();
+                };
             const std::lock_guard<std::mutex> lock(state->mutex);
             if (!state->isActive) {
                 return false;
             }
-            state->completes.push_back(std::move(complete));
+            const std::lock_guard<std::mutex> completeLock(lifetime->completeMutex);
+            if (!lifetime->isActive.load()) return false;
+            auto& pending = lifetime->completes;
+            pending.erase(std::remove_if(pending.begin(), pending.end(),
+                [](const auto& value) { return value.expired(); }), pending.end());
+            pending.push_back(entry);
+            state->completes.push_back(std::move(guarded));
             return true;
         }
 
@@ -616,6 +736,7 @@ public:
         std::weak_ptr<FeatureHostBridge> m_bridge;
         std::string m_featureId;
         std::weak_ptr<OwnerCompleteState> m_completeState;
+        std::shared_ptr<FeatureLifetime> m_lifetime;
     };
 
     explicit Impl(HostSessionConfig sessionConfig)
@@ -687,6 +808,7 @@ public:
     std::uint64_t nextSessionGeneration = 1;
     bool isBuilt = false;
     bool isStarted = false;
+    bool isFeatureCalling = false;
     std::atomic<HostStopState> stopState{ HostStopState::Stopped };
     mutable std::recursive_mutex m_sessionMutex;
 
@@ -1378,6 +1500,8 @@ bool VtkAppHostSession::Impl::AttachTimer(
 
 void VtkAppHostSession::Impl::SendFeatureTicks() noexcept
 {
+    if (isFeatureCalling) return;
+    const FeatureCallScope scope(isFeatureCalling);
     auto output = features.begin();
     for (auto input = features.begin();
         input != features.end(); ++input) {
@@ -1479,9 +1603,10 @@ bool VtkAppHostSession::Impl::AttachFeature(
     if (!isBuilt
         || ownerThread != std::this_thread::get_id()
         || !feature
-        || !inputRegistry) {
+        || !inputRegistry || isFeatureCalling) {
         return false;
     }
+    const FeatureCallScope scope(isFeatureCalling);
 
     std::string id;
     try {
@@ -1505,15 +1630,19 @@ bool VtkAppHostSession::Impl::AttachFeature(
     const std::weak_ptr<FeatureHostBridge> weakBridge =
         featureBridge;
     HostFeatureContext context;
+    std::shared_ptr<FeatureLifetime> lifetime;
     try {
+        lifetime = std::make_shared<FeatureLifetime>();
+        lifetime->data = core.sharedDataMgr;
         context.views =
-            std::make_shared<FeatureViewDirectoryPort>(weakBridge);
-        context.read = std::make_shared<FeatureReadPort>(core);
-        context.data = std::make_shared<FeatureDataPort>(core, ownerThread);
+            std::make_shared<FeatureViewDirectoryPort>(weakBridge, lifetime);
+        context.read = std::make_shared<FeatureReadPort>(core, lifetime);
+        context.data = std::make_shared<FeatureDataPort>(core, ownerThread, lifetime);
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
-            ownerCompleteState);
+            ownerCompleteState,
+            lifetime);
     }
     catch (...) {
         return false;
@@ -1525,6 +1654,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         }
         catch (...) {
         }
+        lifetime->Stop(false);
         try {
             (void)inputRegistry->GetFeaturePort().DetachInput(id);
         }
@@ -1547,7 +1677,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
             [](const FeatureEntry& entry, const std::string& value) {
                 return entry.id < value;
             });
-        features.insert(insertAt, FeatureEntry{ id, feature, false });
+        features.insert(insertAt, FeatureEntry{ id, feature, false, lifetime });
     }
     catch (...) {
         clearRejectedAttach();
@@ -1561,9 +1691,13 @@ bool VtkAppHostSession::Impl::DetachFeature(
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
     if (!isBuilt
-        || ownerThread != std::this_thread::get_id()) {
+        || ownerThread != std::this_thread::get_id()
+        || isFeatureCalling) {
         return false;
     }
+    // teardown 和闭包析构可以调用用户代码；拒绝重入 registry 修改，
+    // 防止当前 vector 迭代器在清理中失效。普通完成回调不在此 scope 中。
+    const FeatureCallScope scope(isFeatureCalling);
     const auto entry = std::find_if(
         features.begin(),
         features.end(),
@@ -1597,6 +1731,7 @@ bool VtkAppHostSession::Impl::DetachFeature(
             return false;
         }
         entry->isHostDetached = true;
+        entry->lifetime->Stop(true);
     }
     if (!inputRegistry
         || !inputRegistry->GetFeaturePort().DetachInput(entry->id)) {
@@ -1608,6 +1743,8 @@ bool VtkAppHostSession::Impl::DetachFeature(
 
 bool VtkAppHostSession::Impl::DetachFeatures()
 {
+    if (isFeatureCalling) return false;
+    const FeatureCallScope scope(isFeatureCalling);
     while (!features.empty()) {
         auto& entry = features.back();
         if (!entry.isHostDetached) {
@@ -1625,6 +1762,7 @@ bool VtkAppHostSession::Impl::DetachFeatures()
                 return false;
             }
             entry.isHostDetached = true;
+            entry.lifetime->Stop(true);
         }
         if (!inputRegistry
             || !inputRegistry->GetFeaturePort().DetachInput(entry.id)) {
@@ -1638,6 +1776,7 @@ bool VtkAppHostSession::Impl::DetachFeatures()
 bool VtkAppHostSession::Impl::Stop() noexcept
 {
     const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (isFeatureCalling) return false;
     if (ownerThread != std::thread::id{}
         && ownerThread != std::this_thread::get_id()) {
         stopState = HostStopState::StopRequested;

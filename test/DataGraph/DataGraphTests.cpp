@@ -489,6 +489,80 @@ bool GetNotificationValid()
         "observer exception, detach, or committed-state reentry failed");
 }
 
+bool GetObserverDetachValid()
+{
+    DataGraphStore store;
+    std::vector<int> observed;
+    DataObserverId later = 0;
+    DataObserverId added = 0;
+    bool isDetached = false;
+    store.AttachDataChange([&](const DataChangeSet& change) {
+        observed.push_back(static_cast<int>(change.commitId) * 10 + 1);
+        if (change.commitId != 1) return;
+        isDetached = store.DetachDataChange(later);
+        added = store.AttachDataChange([&](const DataChangeSet& next) {
+            observed.push_back(static_cast<int>(next.commitId) * 10 + 3);
+        });
+        DataTransaction nested;
+        nested.outputs.push_back(BuildImageDraft(
+            store.CreateDataEntityId(), 0, 2.0F));
+        store.SetDataCommit(std::move(nested));
+    });
+    later = store.AttachDataChange([&](const DataChangeSet& change) {
+        observed.push_back(static_cast<int>(change.commitId) * 10 + 2);
+    });
+    DataTransaction transaction;
+    transaction.outputs.push_back(BuildImageDraft(
+        store.CreateDataEntityId(), 0, 1.0F));
+    const auto result = store.SetDataCommit(std::move(transaction));
+    return Check(result.status == DataCommitStatus::Succeeded
+        && isDetached && added != 0
+        && observed == std::vector<int>{ 11, 21, 23 }
+        && store.GetDataGraph().commitId == 2,
+        "same-batch detach or nested notification order failed");
+}
+
+bool GetObserverStateValid()
+{
+    DataGraphStore store;
+    std::vector<int> observed;
+    store.AttachDataChange([count = 0, &observed](const DataChangeSet&) mutable {
+        observed.push_back(++count);
+    });
+    for (int index = 0; index < 2; ++index) {
+        DataTransaction transaction;
+        transaction.outputs.push_back(BuildImageDraft(
+            store.CreateDataEntityId(), 0, 1.0F));
+        store.SetDataCommit(std::move(transaction));
+    }
+    return Check(observed == std::vector<int>{ 1, 2 },
+        "notification copied and reset mutable callback state");
+}
+
+bool GetObserverReleaseValid()
+{
+    DataGraphStore store;
+    bool isReleased = false;
+    struct ObserverOwner final {
+        DataGraphStore& store;
+        bool& isReleased;
+        ObserverOwner(DataGraphStore& dataStore, bool& released)
+            : store(dataStore), isReleased(released) {}
+        ~ObserverOwner()
+        {
+            // 闭包最后一个 owner 的析构允许重入 observer registry。
+            const auto id = store.AttachDataChange([](const DataChangeSet&) {});
+            isReleased = store.DetachDataChange(id);
+        }
+    };
+    auto owner = std::make_shared<ObserverOwner>(store, isReleased);
+    const auto id = store.AttachDataChange(
+        [owner](const DataChangeSet&) { (void)owner; });
+    owner.reset();
+    return Check(store.DetachDataChange(id) && isReleased,
+        "observer callback owner was not released outside the registry lock");
+}
+
 bool GetConcurrentCasValid()
 {
     DataGraphStore store;
@@ -542,6 +616,9 @@ int main()
         && GetSnapshotStable()
         && GetPayloadFrozen()
         && GetNotificationValid()
+        && GetObserverDetachValid()
+        && GetObserverStateValid()
+        && GetObserverReleaseValid()
         && GetConcurrentCasValid();
     return isSucceeded ? 0 : 1;
 }

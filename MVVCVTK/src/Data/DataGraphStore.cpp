@@ -234,6 +234,10 @@ bool GetGraphAcyclic(
 
 class DataGraphStore::Impl final {
 public:
+    struct ObserverEntry final {
+        DataChangeCallback callback;
+    };
+
     Impl()
     {
         auto initial = std::make_shared<GraphState>();
@@ -273,20 +277,31 @@ public:
                 m_changes.pop_front();
             }
 
-            std::vector<DataChangeCallback> callbacks;
+            std::vector<std::pair<DataObserverId,
+                std::shared_ptr<ObserverEntry>>> callbacks;
             try {
                 std::lock_guard<std::mutex> lock(m_observerMutex);
                 callbacks.reserve(m_observers.size());
                 for (const auto& observer : m_observers) {
-                    callbacks.push_back(observer.second);
+                    callbacks.push_back(observer);
                 }
             }
             catch (...) {
                 continue;
             }
             for (const auto& callback : callbacks) {
+                {
+                    const std::lock_guard<std::mutex> lock(m_observerMutex);
+                    const auto found = m_observers.find(callback.first);
+                    if (found == m_observers.end()
+                        || found->second != callback.second) {
+                        continue;
+                    }
+                }
                 try {
-                    if (callback) callback(change);
+                    // 同批 A 可退订 B；复用原闭包也保留 mutable callback 的状态。
+                    // 锁外调用不承诺等待另一线程中已经开始的 callback 退出。
+                    if (callback.second->callback) callback.second->callback(change);
                 }
                 catch (...) {
                     // 通知发生在正式 commit 之后；单个 observer 失败不能回滚数据，
@@ -304,7 +319,7 @@ public:
     std::uint64_t m_nextEntity = 1;
 
     std::mutex m_observerMutex;
-    std::map<DataObserverId, DataChangeCallback> m_observers;
+    std::map<DataObserverId, std::shared_ptr<ObserverEntry>> m_observers;
     DataObserverId m_nextObserver = 1;
 
     std::mutex m_changeMutex;
@@ -686,10 +701,12 @@ DataObserverId DataGraphStore::AttachDataChange(
 {
     if (!callback) return 0;
     try {
+        const auto entry = std::make_shared<Impl::ObserverEntry>();
+        entry->callback = std::move(callback);
         std::lock_guard<std::mutex> lock(m_impl->m_observerMutex);
         if (m_impl->m_nextObserver == 0) return 0;
         const auto observerId = m_impl->m_nextObserver++;
-        m_impl->m_observers.emplace(observerId, std::move(callback));
+        m_impl->m_observers.emplace(observerId, entry);
         return observerId;
     }
     catch (...) {
@@ -700,6 +717,14 @@ DataObserverId DataGraphStore::AttachDataChange(
 bool DataGraphStore::DetachDataChange(const DataObserverId observerId)
 {
     if (observerId == 0) return false;
-    std::lock_guard<std::mutex> lock(m_impl->m_observerMutex);
-    return m_impl->m_observers.erase(observerId) == 1;
+    std::shared_ptr<Impl::ObserverEntry> removed;
+    {
+        const std::lock_guard<std::mutex> lock(m_impl->m_observerMutex);
+        const auto found = m_impl->m_observers.find(observerId);
+        if (found == m_impl->m_observers.end()) return false;
+        removed = std::move(found->second);
+        m_impl->m_observers.erase(found);
+    }
+    // 用户闭包的最后一个 owner 析构也可能重入 registry。
+    return true;
 }
