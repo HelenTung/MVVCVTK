@@ -429,8 +429,11 @@ namespace {
                             ? result.partCount == *expectedPartCount
                             : result.partCount > 0)
                         && state.status == PartSegmentationStatus::Succeeded
-                        && state.parts.size() == result.partCount
-                        && state.resultRevision == result.resultRevision;
+                        && state.resultSet == result.resultSet
+                        && state.labelMap == result.labelMap
+                        && state.partTable == result.partTable
+                        && GetDataRevisionRefValid(state.labelMap)
+                        && GetDataRevisionRefValid(state.partTable);
                     if (!expectedPartCount && isPassed) {
                         const auto renderStart = std::chrono::steady_clock::now();
                         isPassed = RenderPartViews(session);
@@ -449,8 +452,15 @@ namespace {
                         << "QT_PART_RESULT: request=" << result.requestId
                         << " status=" << static_cast<int>(result.status)
                         << " failure=" << static_cast<int>(result.failureReason)
-                        << " source=" << result.sourceVersion
-                        << " revision=" << result.resultRevision
+                        << " source_generation="
+                        << result.sourceRevision.generation
+                        << " label_generation="
+                        << result.labelMap.generation
+                        << " table_generation="
+                        << result.partTable.generation
+                        << " result_generation="
+                        << result.resultSet.generation
+                        << " commit=" << result.commitId
                         << " parts=" << result.partCount
                         << " message=" << result.message
                         << " passed=" << isPassed
@@ -483,12 +493,14 @@ namespace {
             HostViewTarget volumeTarget,
             HostViewTarget isoTarget,
             HostViewTargets inputViews,
+            std::weak_ptr<CropHostFeature> cropFeature,
             std::weak_ptr<GapHostFeature> gapFeature,
             GapHostStartParams gapStart)
             : m_session(session),
             m_volumeTarget(std::move(volumeTarget)),
             m_isoTarget(std::move(isoTarget)),
             m_inputViews(std::move(inputViews)),
+            m_cropFeature(std::move(cropFeature)),
             m_gapFeature(std::move(gapFeature)),
             m_gapStart(std::move(gapStart)),
             m_keys{
@@ -500,7 +512,10 @@ namespace {
                 HostKeyChord{ 'l', {}, false, false, true },
                 HostKeyChord{ 'i' },
                 HostKeyChord{ 'i', {}, false, false, true },
-                HostKeyChord{ 'g' }
+                HostKeyChord{ 'g' },
+                HostKeyChord{ '7', {}, true },
+                HostKeyChord{ '8', {}, true },
+                HostKeyChord{ '9', {}, true }
             }
         {
         }
@@ -582,6 +597,9 @@ namespace {
             IsoQualityNext,
             IsoQualityPrevious,
             StartGap,
+            BuildCropResult,
+            SetCropPrimary,
+            RestoreCropSource,
             Count
         };
 
@@ -923,7 +941,11 @@ namespace {
             const auto controlOwner = weak_from_this();
             const bool isAccepted = gapFeature->SendRequest(
                 std::move(request),
-                [gapOwner, controlOwner](const bool isSuccess) {
+                [gapOwner, controlOwner](GapHostResult result) {
+                    const bool isSuccess = result.status
+                            == GapResultStatus::Succeeded
+                        || result.status
+                            == GapResultStatus::SucceededWithDisplayFailure;
                     const auto completedFeature = gapOwner.lock();
                     std::ostringstream status;
                     status << "Gap: "
@@ -942,7 +964,21 @@ namespace {
                         (void)owner->SetGapStatus(status.str());
                     }
                     std::cerr << "[GapAnalysis] "
-                        << status.str() << '\n' << std::flush;
+                        << status.str()
+                        << " | commit=" << result.commitId
+                        << " | source_generation="
+                        << result.sourceRevision.generation
+                        << " | label_generation="
+                        << result.labelMap.generation
+                        << " | void_table_generation="
+                        << result.voidTable.generation
+                        << " | mesh_generation="
+                        << result.voidMesh.generation
+                        << " | statistics_generation="
+                        << result.statisticsData.generation
+                        << " | result_generation="
+                        << result.resultSet.generation
+                        << '\n' << std::flush;
                 });
             const std::string requestStatus = isAccepted
                 ? "Gap: running"
@@ -952,6 +988,62 @@ namespace {
                 << (isAccepted ? "accepted; calculation started"
                     : "rejected; calculation did not start")
                 << '\n' << std::flush;
+            return isAccepted;
+        }
+
+        bool SendCrop(const CropHostAction action)
+        {
+            const auto cropFeature = m_cropFeature.lock();
+            if (!cropFeature) {
+                std::cerr
+                    << "[OrthogonalCrop] request rejected: feature unavailable\n"
+                    << std::flush;
+                return false;
+            }
+
+            CropHostRequest request;
+            request.action = action;
+            if (action == CropHostAction::BuildResult) {
+                const bool isAccepted = cropFeature->SendRequest(
+                    std::move(request),
+                    [](CropBuildResult result) {
+                        std::cerr
+                            << "[OrthogonalCrop] BuildResult"
+                            << " | succeeded=" << result.isSucceeded
+                            << " | failure="
+                            << static_cast<int>(result.failureReason)
+                            << " | commit=" << result.commitId
+                            << " | source_generation="
+                            << result.sourceRevision.generation
+                            << " | recipe_generation="
+                            << result.recipeRevision.generation
+                            << " | output_generation="
+                            << result.outputRevision.generation
+                            << " | message=" << result.message << '\n'
+                            << std::flush;
+                    });
+                std::cerr
+                    << "[OrthogonalCrop] BuildResult request "
+                    << (isAccepted ? "accepted" : "rejected") << '\n'
+                    << std::flush;
+                return isAccepted;
+            }
+
+            const bool isAccepted = cropFeature->SendRequest(
+                std::move(request));
+            const auto state = cropFeature->GetState();
+            std::cerr
+                << "[OrthogonalCrop] action="
+                << static_cast<int>(action)
+                << " | accepted=" << isAccepted
+                << " | commit=" << state.commitId
+                << " | source_generation="
+                << state.sourceRevision.generation
+                << " | recipe_generation="
+                << state.recipeRevision.generation
+                << " | output_generation="
+                << state.outputRevision.generation << '\n'
+                << std::flush;
             return isAccepted;
         }
 
@@ -974,6 +1066,12 @@ namespace {
                 return SwitchQuality(m_isoTarget, -1);
             case ControlAction::StartGap:
                 return StartGap();
+            case ControlAction::BuildCropResult:
+                return SendCrop(CropHostAction::BuildResult);
+            case ControlAction::SetCropPrimary:
+                return SendCrop(CropHostAction::SetPrimaryResult);
+            case ControlAction::RestoreCropSource:
+                return SendCrop(CropHostAction::RestoreOriginal);
             default:
                 return false;
             }
@@ -1024,6 +1122,7 @@ namespace {
         HostViewTarget m_volumeTarget;
         HostViewTarget m_isoTarget;
         HostViewTargets m_inputViews;
+        std::weak_ptr<CropHostFeature> m_cropFeature;
         std::weak_ptr<GapHostFeature> m_gapFeature;
         GapHostStartParams m_gapStart;
         std::array<HostKeyChord, actionCount> m_keys;
@@ -1174,7 +1273,9 @@ namespace {
                                     ? completedFeature->GetState()
                                     : PartSegmentationState{};
                                 status << "succeeded | parts=" << result.partCount
-                                    << " | revision=" << result.resultRevision
+                                    << " | result_generation="
+                                    << result.resultSet.generation
+                                    << " | commit=" << result.commitId
                                     << " | visible=" << state.isOverlayVisible;
                             }
                             else if (action == ControlAction::Toggle) {
@@ -1197,8 +1298,15 @@ namespace {
                         }
                         std::cerr
                             << "[PartSegmentation] " << status.str()
-                            << " | source=" << result.sourceVersion
-                            << " | revision=" << result.resultRevision
+                            << " | source_generation="
+                            << result.sourceRevision.generation
+                            << " | label_generation="
+                            << result.labelMap.generation
+                            << " | table_generation="
+                            << result.partTable.generation
+                            << " | result_generation="
+                            << result.resultSet.generation
+                            << " | commit=" << result.commitId
                             << " | parts=" << result.partCount
                             << " | message=" << result.message << '\n'
                             << std::flush;
@@ -1546,9 +1654,9 @@ int main(int argc, char* argv[])
     }
 
     std::vector<std::shared_ptr<HostFeature>> features;
-    features.push_back(
-        std::make_shared<CropHostFeature>(
-            BuildCrop(allViews)));
+    auto cropFeature = std::make_shared<CropHostFeature>(
+        BuildCrop(allViews));
+    features.push_back(cropFeature);
     auto gapConfig = GetGapConfig(allViews);
     auto gapStart = gapConfig.defaultStart;
     auto gapFeature = std::make_shared<GapHostFeature>(
@@ -1575,6 +1683,7 @@ int main(int argc, char* argv[])
         volumeTarget,
         primaryTarget,
         std::move(controlViews),
+        cropFeature,
         gapFeature,
         std::move(gapStart));
     features.push_back(controlFeature);
@@ -1802,7 +1911,12 @@ int main(int argc, char* argv[])
         "and Window B (slice)\n"
         << "  J: start if inactive; otherwise hide/show Gap overlays\n"
         << "  --gap-auto: start Gap automatically after data loading\n"
-        << "  Result statistics are shown in the composite-volume title\n";
+        << "  Result statistics are shown in the composite-volume title\n"
+        << "OrthogonalCrop data controls:\n"
+        << "  Ctrl+7: atomically publish Crop recipe + derived output\n"
+        << "  Ctrl+8: promote the active Crop output to the primary Binding\n"
+        << "  Ctrl+9: restore the Crop source through a Binding-only transaction\n"
+        << "  Each action prints commit and formal revision generations\n";
 #if defined(MVVCVTK_HAS_PART_SEGMENTATION)
     std::cout
         << "PartSegmentation controls (Window A-D overlays, "

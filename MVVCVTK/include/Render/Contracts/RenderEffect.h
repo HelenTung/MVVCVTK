@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/DataVersion.h"
+#include "Data/DataGraphTypes.h"
 
 #include <array>
 #include <cstdint>
@@ -11,18 +11,16 @@ class vtkObject;
 class vtkRenderer;
 class vtkShaderProperty;
 
-// 渲染输入身份与版本必须成对比较；identity 只作非拥有身份标记，
-// version 由宿主数据真源提供，二者任一变化都代表旧 effect 不可重放。
+// 渲染输入只引用确定数据修订；Presentation revision 仍使用独立时钟。
 struct RenderInputStamp final {
-    const void* identity = nullptr;
-    DataVersion version = 0;
+    DataRevisionRef dataRevision;
 };
 
 inline bool operator==(
     const RenderInputStamp& left,
     const RenderInputStamp& right) noexcept
 {
-    return left.identity == right.identity && left.version == right.version;
+    return left.dataRevision == right.dataRevision;
 }
 
 inline bool operator!=(

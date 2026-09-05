@@ -14,11 +14,6 @@
 
 class vtkPolyData;
 
-enum class CropHostSource {
-    CurrentImage,
-    RegisteredPolyData
-};
-
 enum class CropHostAction {
     None,
     Start,
@@ -29,6 +24,7 @@ enum class CropHostAction {
     Next,
     Node,
     BuildResult,
+    SetPrimaryResult,
     SetPolyData,
     ClearPolyData,
     RestoreOriginal,
@@ -41,7 +37,6 @@ struct CropHostTarget {
     HostViewTargets targetViews;
     bool isTargetViewsUsed = false;
     bool isStatusVisible = false;
-    CropHostSource source = CropHostSource::CurrentImage;
 };
 
 struct CropHostRequest {
@@ -50,7 +45,6 @@ struct CropHostRequest {
     std::optional<CropRemovalMode> removalMode;
     std::optional<std::size_t> nodeCount;
     vtkSmartPointer<vtkPolyData> polyData;
-    std::optional<std::uint64_t> sourceVersion;
 };
 
 struct CropHostKeys {
@@ -78,6 +72,10 @@ using CropBuildCallback =
 
 struct CropHostState final {
     CropHistoryState history;
+    DataCommitId commitId = 0;
+    DataRevisionRef sourceRevision;
+    DataRevisionRef recipeRevision;
+    DataRevisionRef outputRevision;
     bool isActive = false;
     bool isPublishing = false;
 };
@@ -95,6 +93,7 @@ public:
     CropHostFeature& operator=(CropHostFeature&&) = delete;
 
     std::string_view GetFeatureId() const noexcept override;
+    FeatureDataContract GetDataContract() const override;
     bool AttachHost(const HostFeatureContext& context) override;
     bool DetachHost() override;
     bool OnHostTick() override;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "Algorithms/ClassicalPartSegmenter.h"
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 #include "Host/PartSegmentationHostTypes.h"
 
 #include <array>
@@ -19,7 +19,8 @@
 
 struct PartLabelCandidate final {
     std::uint64_t requestId = 0;
-    DataVersion sourceVersion = 0;
+    DataRevisionRef sourceRevision;
+    DataBindingRevision sourceBindingRevision = 0;
     PartResultStatus status = PartResultStatus::Failed;
     PartFailureReason failureReason = PartFailureReason::InternalError;
     std::string message;
@@ -48,7 +49,7 @@ public:
         const PartSegmentationService&) = delete;
 
     PartAdmissionStatus Start(
-        TrustedImageSnapshot source,
+        VtkImageGridSnapshot source,
         PartSegmentationStartParams params,
         std::size_t maxWorkingBytes,
         std::uint64_t requestId);
@@ -61,7 +62,7 @@ public:
 
 private:
     struct Job final {
-        TrustedImageSnapshot source;
+        VtkImageGridSnapshot source;
         PartSegmentationStartParams params;
         std::size_t maxWorkingBytes = 0;
         std::uint64_t requestId = 0;

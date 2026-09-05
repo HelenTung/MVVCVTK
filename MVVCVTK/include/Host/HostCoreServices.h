@@ -21,8 +21,6 @@ struct HostCoreServices {
     // 会话共享状态真源；render view 和 feature 只读/更新这里，不各自缓存加载状态。
     std::shared_ptr<SharedInteractionState> sharedState;
 
-    // 返回只弱观察数据真源的冻结快照读取能力；core 销毁后返回空快照。
-    std::function<TrustedImageSnapshot()> GetImageReader() const;
     // 返回不含 VTK identity 的默认预算深拷贝只读值，供 Qt 普通读取者使用。
     std::function<std::optional<ImageReadState>()>
         GetImageReadState() const;
@@ -32,9 +30,4 @@ struct HostCoreServices {
     std::function<ImageReadChunkResult(
         const ImageReadRequest&,
         std::size_t)> GetImageReadChunk() const;
-    // 返回 expected snapshot CAS 发布能力；只弱观察数据真源与共享交互状态。
-    std::function<bool(
-        TrustedImageState,
-        const TrustedImageSnapshot&,
-        TrustedImageSnapshot&)> GetImageWriter() const;
 };

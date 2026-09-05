@@ -399,14 +399,14 @@ bool VolumeStrategy::SetVolumeInput(
     const auto oldMaskExtent = m_maskExtent;
     const auto oldInputSpacing = m_inputSpacing;
     const auto oldMaskSpacing = m_maskSpacing;
-    const std::uint64_t oldDataVersion = m_dataVersion;
+    const std::uint64_t oldInputEpoch = m_inputEpoch;
     const std::uint64_t oldMaskVersion = m_maskVersion;
     const std::uint64_t oldPlanCount = m_lodPlanCount;
     const VolumeLodController oldController = *m_lodController;
 
     m_lastInput = std::move(data);
     m_lastMask = std::move(validityMask);
-    if (hasInputChanged) ++m_dataVersion;
+    if (hasInputChanged) ++m_inputEpoch;
     if (hasMaskChanged) ++m_maskVersion;
     bool isPipelineSet = false;
     try {
@@ -440,7 +440,7 @@ bool VolumeStrategy::SetVolumeInput(
         m_maskExtent = oldMaskExtent;
         m_inputSpacing = oldInputSpacing;
         m_maskSpacing = oldMaskSpacing;
-        m_dataVersion = oldDataVersion;
+        m_inputEpoch = oldInputEpoch;
         m_maskVersion = oldMaskVersion;
         m_lodPlanCount = oldPlanCount;
         *m_lodController = oldController;
@@ -854,7 +854,7 @@ bool VolumeStrategy::GetProducersReady() const
             : m_mapper->GetInput() == lod->volume.GetPointer())
         && m_mapper->GetMaskInput() == lod->mask.GetPointer();
     return lod && lod->volume && isMapperSet
-        && lod->dataVersion == m_dataVersion
+        && lod->dataVersion == m_inputEpoch
         && lod->maskVersion == m_maskVersion
         && m_lodController
         && lod->outputDimensions
@@ -1084,7 +1084,7 @@ bool VolumeStrategy::BuildPendingLod(
     entry->volumeFilter = std::move(volumeFilter);
     entry->mask = std::move(mask);
     entry->maskFilter = std::move(maskFilter);
-    entry->dataVersion = m_dataVersion;
+    entry->dataVersion = m_inputEpoch;
     entry->maskVersion = m_maskVersion;
     entry->outputDimensions = outputDimensions;
     entry->outputSpacing = outputSpacing;
@@ -1127,7 +1127,7 @@ VolumeStrategy::LodEntry* VolumeStrategy::GetCachedLod(
         [&](const auto& cached) {
             return cached
                 && cached->volume
-                && cached->dataVersion == m_dataVersion
+                && cached->dataVersion == m_inputEpoch
                 && cached->maskVersion == m_maskVersion
                 && cached->outputDimensions == outputDimensions
                 && std::abs(
@@ -1383,7 +1383,7 @@ bool VolumeStrategy::RemoveUnusedLods()
             [&](const auto& cached) {
                 return !cached
                     || (cached.get() != m_activeLod
-                        && (cached->dataVersion != m_dataVersion
+                        && (cached->dataVersion != m_inputEpoch
                             || cached->maskVersion != m_maskVersion
                             || cached->isDenoiseOn
                                 != m_isDenoiseOn));

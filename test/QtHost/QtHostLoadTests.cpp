@@ -3,6 +3,7 @@
 #include "App/AppState.h"
 #include "App/Services/AppPorts.h"
 #include "Data/DataManager.h"
+#include "Data/VtkDataBridge.h"
 #include "Host/HostCommandRouter.h"
 #include "Host/HostCoreServices.h"
 #include "Host/HostViewRuntimeRegistry.h"
@@ -77,6 +78,56 @@ HostReloadRequest GetReload()
     reload.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     return reload;
+}
+
+bool SetPrimaryBaseline(AbstractDataManager& dataManager)
+{
+    const auto layout = VolumeLayout::Create(
+        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {});
+    auto buffer = layout
+        ? VolumeBuffer::Create(
+            std::vector<float>{
+                -8.0f, -7.0f, -6.0f, -5.0f,
+                -4.0f, -3.0f, -2.0f, -1.0f },
+            *layout)
+        : std::optional<VolumeBuffer>{};
+    if (!buffer || !dataManager.SetFromBuffer(*buffer)) return false;
+
+    const auto stage = dataManager.GetLoadStage();
+    VtkImageGridSnapshot published;
+    return stage
+        && dataManager.SetLoadCommit(stage, published)
+        && published
+        && published->binding
+        && published->data;
+}
+
+bool SetPrimaryBaseline(HostCoreServices& core)
+{
+    if (!core.sharedDataMgr || !core.sharedState
+        || !SetPrimaryBaseline(*core.sharedDataMgr)) {
+        return false;
+    }
+    const auto current = core.sharedDataMgr->GetPrimaryImage();
+    if (!current || !current->image || !current->binding
+        || !current->data) {
+        return false;
+    }
+
+    double scalarRange[2] = {};
+    double spacing[3] = {};
+    double center[3] = {};
+    current->image->GetScalarRange(scalarRange);
+    current->image->GetSpacing(spacing);
+    current->image->GetCenter(center);
+    DataReadyState ready;
+    ready.dataRevision = current->data->self;
+    ready.bindingRevision = current->binding->revision;
+    std::copy_n(scalarRange, 2, ready.scalarRange.begin());
+    std::copy_n(spacing, 3, ready.spacing.begin());
+    std::copy_n(center, 3, ready.cursorWorld.begin());
+    core.sharedState->SetDataReady(ready);
+    return true;
 }
 
 bool SendReload(
@@ -174,7 +225,7 @@ bool GetStageFinalizeValid()
         {
         }
 
-        bool BuildDataStage(const TrustedImageSnapshot& snapshot) override
+        bool BuildDataStage(const VtkImageGridSnapshot& snapshot) override
         {
             if (m_isBuilt || !snapshot) return false;
             m_snapshot = snapshot;
@@ -182,7 +233,7 @@ bool GetStageFinalizeValid()
             return true;
         }
 
-        bool SetViewStage(const TrustedImageSnapshot& snapshot) override
+        bool SetViewStage(const VtkImageGridSnapshot& snapshot) override
         {
             if (!m_isBuilt || m_isCommitted
                 || snapshot != m_snapshot) {
@@ -209,7 +260,9 @@ bool GetStageFinalizeValid()
         {
             ++m_completeCount;
             m_hasPublished = m_data
-                && m_data->GetImageSnapshot() == m_snapshot;
+                && m_data->GetPrimaryImage()
+                && m_data->GetPrimaryImage()->data->self
+                    == m_snapshot->data->self;
             m_isCommitted = false;
             m_isBuilt = false;
             m_snapshot.reset();
@@ -227,7 +280,7 @@ bool GetStageFinalizeValid()
 
     private:
         std::shared_ptr<AbstractDataManager> m_data;
-        TrustedImageSnapshot m_snapshot;
+        VtkImageGridSnapshot m_snapshot;
         int m_completeCount = 0;
         int m_clearCount = 0;
         int m_resetCount = 0;
@@ -237,7 +290,8 @@ bool GetStageFinalizeValid()
     };
 
     auto data = std::make_shared<RawVolumeDataManager>();
-    const auto initial = data->GetImageSnapshot();
+    if (!SetPrimaryBaseline(*data)) return false;
+    const auto initial = data->GetPrimaryImage();
     const auto layout = VolumeLayout::Create(
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {});
     auto buffer = layout
@@ -258,11 +312,12 @@ bool GetStageFinalizeValid()
     request.stages = { first, second };
     LoadCommitCoordinator coordinator(data);
     const bool isCommitted = coordinator.SetLoadCommit(request);
-    const auto current = data->GetImageSnapshot();
+    const auto current = data->GetPrimaryImage();
     return isCommitted
         && current
-        && current != initial
-        && current->version == initial->version + 1
+        && current->data->self != initial->data->self
+        && current->binding->revision
+            == initial->binding->revision + 1
         && first->GetIsComplete()
         && second->GetIsComplete();
 }
@@ -270,6 +325,7 @@ bool GetStageFinalizeValid()
 bool GetMultiViewLoadValid(const bool isAuxStopped)
 {
     auto core = GetLoadCore();
+    if (!SetPrimaryBaseline(core)) return false;
     HostViewRuntimeRegistry views;
     if (!views.Build(core, GetLoadViews())
         || !views.SetInteractorsReady()) {
@@ -282,7 +338,7 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
     const HostViewTarget auxiliary{
         "load-aux", false,
         HostRenderViewRole::Auxiliary };
-    const auto initial = core.sharedDataMgr->GetImageSnapshot();
+    const auto initial = core.sharedDataMgr->GetPrimaryImage();
     if (!initial) return false;
 
     const auto directory = views.GetViewDirectory();
@@ -317,12 +373,12 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
             std::chrono::milliseconds(1));
     }
 
-    const auto current = core.sharedDataMgr->GetImageSnapshot();
+    const auto current = core.sharedDataMgr->GetPrimaryImage();
     if (isAuxStopped) {
         return isComplete
             && !isSucceeded
-            && current == initial
-            && !core.sharedDataMgr->GetPendingSnapshot();
+            && current && current->data->self == initial->data->self
+            && !core.sharedDataMgr->GetLoadStage();
     }
 
     (void)views.SendViewUpdates(primary);
@@ -335,7 +391,9 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
     return isComplete
         && isSucceeded
         && current
-        && current->version == initial->version + 1
+        && current->data->self != initial->data->self
+        && current->binding->revision
+            == initial->binding->revision + 1
         && states.size() == 2
         && states[0].scalarRange
             == std::array<double, 2>{ 0.0, 7.0 }
@@ -345,7 +403,9 @@ bool GetMultiViewLoadValid(const bool isAuxStopped)
         && states[0].windowLevel.windowCenter == 3.5
         && states[1].windowLevel.windowWidth == 7.0
         && states[1].windowLevel.windowCenter == 3.5
-        && core.sharedState->GetDataVersion() == current->version
+        && core.sharedState->GetDataRevision() == current->data->self
+        && core.sharedState->GetDataBindingRevision()
+            == current->binding->revision
         && core.sharedState->GetCursorWorld() == expectedCursor
         && core.sharedState->GetCursorRawWorld() == expectedCursor
         && core.sharedState->GetCursorAxis() == -1;
@@ -470,7 +530,7 @@ bool GetTransferIntentValid()
     if (!SendReload(router, views, std::move(autoNext))) return false;
     const auto autoState = views.GetViewState(primary);
     if (!autoState
-        || autoState->dataVersion <= initialState->dataVersion
+        || autoState->bindingRevision <= initialState->bindingRevision
         || autoState->volumeTransferFunction.colorNodes.size() != 4
         || autoState->volumeTransferFunction.opacityNodes.size() != 4
         || autoState->volumeTransferFunction.colorNodes.front().scalar
@@ -533,8 +593,8 @@ bool GetTransferIntentValid()
     if (!SendReload(router, views, std::move(next))) return false;
     const auto reloadedState = views.GetViewState(primary);
     if (!reloadedState
-        || reloadedState->dataVersion
-            <= explicitState->dataVersion
+        || reloadedState->bindingRevision
+            <= explicitState->bindingRevision
         || !GetTransferEqual(
             reloadedState->volumeTransferFunction,
             explicitFunction)) {
@@ -564,7 +624,8 @@ bool GetTransferIntentValid()
     const auto afterMismatch = views.GetViewState(primary);
     return beforeMismatch
         && afterMismatch
-        && afterMismatch->dataVersion == beforeMismatch->dataVersion
+        && afterMismatch->bindingRevision
+            == beforeMismatch->bindingRevision
         && GetTransferEqual(
             afterMismatch->volumeTransferFunction,
             currentFunction);
@@ -576,21 +637,22 @@ bool GetPublishLastValid()
     public:
         std::function<bool()> beforePublish;
 
-        bool SetCurrentFromPending(
-            const TrustedImageSnapshot& expectedPending,
-            TrustedImageSnapshot& publishedSnapshot) override
+        bool SetLoadCommit(
+            const DataLoadStageSnapshot& expectedStage,
+            VtkImageGridSnapshot& publishedSnapshot) override
         {
             if (beforePublish && !beforePublish()) {
                 publishedSnapshot.reset();
                 return false;
             }
-            return BaseDataManager::SetCurrentFromPending(
-                expectedPending, publishedSnapshot);
+            return BaseDataManager::SetLoadCommit(
+                expectedStage, publishedSnapshot);
         }
     };
 
     auto dataManager = std::make_shared<GateDataManager>();
     auto core = GetLoadCore(dataManager);
+    if (!SetPrimaryBaseline(core)) return false;
     HostViewRuntimeRegistry views;
     if (!views.Build(core, GetLoadViews())
         || !views.SetInteractorsReady()) {
@@ -603,8 +665,9 @@ bool GetPublishLastValid()
     const HostViewTarget auxiliary{
         "load-aux", false,
         HostRenderViewRole::Auxiliary };
-    const auto initial = dataManager->GetImageSnapshot();
-    if (!initial) return false;
+    const auto initial = dataManager->GetPrimaryImage();
+    const auto initialViewStates = views.GetViewStates();
+    if (!initial || initialViewStates.size() != 2) return false;
 
     const std::array<double, 3> oldCursor = { 11.0, 12.0, 13.0 };
     core.sharedState->SetCursorRawWorld(
@@ -612,8 +675,8 @@ bool GetPublishLastValid()
     core.sharedState->SetCursorAxis(2);
     core.sharedState->SetCursorWorld(
         oldCursor[0], oldCursor[1], oldCursor[2]);
-    const DataVersion oldSharedVersion =
-        core.sharedState->GetDataVersion();
+    const DataBindingRevision oldSharedRevision =
+        core.sharedState->GetDataBindingRevision();
     auto eventOwner = std::make_shared<int>(0);
     int dataEventCount = 0;
     core.sharedStateBroadcaster->SetObserver(
@@ -633,9 +696,9 @@ bool GetPublishLastValid()
     bool hasNoGpuWarmup = false;
     bool hasSharedUnchangedAtGate = false;
     std::atomic<bool> isWriterDone = false;
-    DataVersion minVersion = initial->version;
-    DataVersion maxVersion = initial->version;
-    bool hasVersionDrop = false;
+    DataBindingRevision minRevision = initial->binding->revision;
+    DataBindingRevision maxRevision = initial->binding->revision;
+    bool hasRevisionDrop = false;
 
     int warmupCount = 0;
     auto warmupObserver = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -666,11 +729,14 @@ bool GetPublishLastValid()
         }
         const auto states = views.GetViewStates();
         hasViewsCommitted = states.size() == 2
-            && states[0].dataVersion == initial->version + 1
-            && states[1].dataVersion == initial->version + 1;
+            && states[0].bindingRevision
+                == initial->binding->revision + 1
+            && states[1].bindingRevision
+                == initial->binding->revision + 1;
         hasNoGpuWarmup = warmupCount == 0;
         hasSharedUnchangedAtGate =
-            core.sharedState->GetDataVersion() == oldSharedVersion
+            core.sharedState->GetDataBindingRevision()
+                == oldSharedRevision
             && core.sharedState->GetCursorWorld() == oldCursor
             && core.sharedState->GetCursorRawWorld() == oldCursor
             && core.sharedState->GetCursorAxis() == 2
@@ -689,14 +755,15 @@ bool GetPublishLastValid()
             if (!hasPublishGate) return;
         }
 
-        DataVersion lastVersion = initial->version;
+        DataBindingRevision lastRevision = initial->binding->revision;
         bool isFirstSample = true;
         do {
-            const DataVersion version = dataManager->GetDataVersion();
-            minVersion = std::min(minVersion, version);
-            maxVersion = std::max(maxVersion, version);
-            hasVersionDrop = hasVersionDrop || version < lastVersion;
-            lastVersion = version;
+            const DataBindingRevision revision =
+                dataManager->GetPrimaryBindingRevision();
+            minRevision = std::min(minRevision, revision);
+            maxRevision = std::max(maxRevision, revision);
+            hasRevisionDrop = hasRevisionDrop || revision < lastRevision;
+            lastRevision = revision;
             if (isFirstSample) {
                 std::lock_guard<std::mutex> lock(gateMutex);
                 hasReaderSample = true;
@@ -731,11 +798,17 @@ bool GetPublishLastValid()
     }
     warmupObserver->SetClientData(nullptr);
 
-    const auto current = dataManager->GetImageSnapshot();
+    const auto current = dataManager->GetPrimaryImage();
     const auto states = views.GetViewStates();
     const bool hasViewsReset = states.size() == 2
-        && states[0].dataVersion == initial->version
-        && states[1].dataVersion == initial->version;
+        && states[0].dataRevision
+            == initialViewStates[0].dataRevision
+        && states[0].bindingRevision
+            == initialViewStates[0].bindingRevision
+        && states[1].dataRevision
+            == initialViewStates[1].dataRevision
+        && states[1].bindingRevision
+            == initialViewStates[1].bindingRevision;
     return isDispatched
         && isComplete
         && !isSucceeded
@@ -744,27 +817,29 @@ bool GetPublishLastValid()
         && hasNoGpuWarmup
         && hasSharedUnchangedAtGate
         && hasViewsReset
-        && current == initial
-        && core.sharedState->GetDataVersion() == oldSharedVersion
+        && current && current->data->self == initial->data->self
+        && core.sharedState->GetDataBindingRevision()
+            == oldSharedRevision
         && core.sharedState->GetCursorWorld() == oldCursor
         && core.sharedState->GetCursorRawWorld() == oldCursor
         && core.sharedState->GetCursorAxis() == 2
         && dataEventCount == 0
-        && minVersion == initial->version
-        && maxVersion == initial->version
-        && !hasVersionDrop
-        && !dataManager->GetPendingSnapshot();
+        && minRevision == initial->binding->revision
+        && maxRevision == initial->binding->revision
+        && !hasRevisionDrop
+        && !dataManager->GetLoadStage();
 }
 
 bool GetLoadWarmupSkipValid()
 {
     auto core = GetLoadCore();
+    if (!SetPrimaryBaseline(core)) return false;
     HostViewRuntimeRegistry views;
     if (!views.Build(core, GetLoadViews())
         || !views.SetInteractorsReady()) {
         return false;
     }
-    const auto initial = core.sharedDataMgr->GetImageSnapshot();
+    const auto initial = core.sharedDataMgr->GetPrimaryImage();
     const auto initialStates = views.GetViewStates();
     const auto endpoints = views.BuildEndpoints();
     if (!initial || initialStates.size() != 2
@@ -815,18 +890,19 @@ bool GetLoadWarmupSkipValid()
     endpoints[1].renderWindow->RemoveObserver(injectorTag);
     errorInjector->SetClientData(nullptr);
 
-    const auto current = core.sharedDataMgr->GetImageSnapshot();
+    const auto current = core.sharedDataMgr->GetPrimaryImage();
     const auto states = views.GetViewStates();
     return isDispatched
         && isComplete
         && isSucceeded
         && warmupCount == 0
         && current
-        && current->version == initial->version + 1
+        && current->binding->revision
+            == initial->binding->revision + 1
         && states.size() == 2
-        && states[0].dataVersion == current->version
-        && states[1].dataVersion == current->version
-        && !core.sharedDataMgr->GetPendingSnapshot();
+        && states[0].dataRevision == current->data->self
+        && states[1].dataRevision == current->data->self
+        && !core.sharedDataMgr->GetLoadStage();
 }
 
 bool GetImageReadStateValid()
@@ -851,10 +927,11 @@ bool GetImageReadStateValid()
         sizeof(source));
 
     RawVolumeDataManager dataManager;
-    bool hasPending = false;
+    VtkImageGridSnapshot published;
     if (!dataManager.SetImageSnapshot(image)
-        || !dataManager.SetCurrentFromPending(hasPending)
-        || !hasPending) {
+        || !dataManager.GetLoadStage()
+        || !dataManager.SetLoadCommit(
+            dataManager.GetLoadStage(), published)) {
         return false;
     }
     const auto first = dataManager.GetImageReadState();
@@ -889,14 +966,23 @@ bool GetImageReadStateValid()
         mask->GetScalarPointer(),
         maskValues.data(),
         maskValues.size());
-    const auto expectedSnapshot = dataManager.GetImageSnapshot();
-    TrustedImageState maskedState = *expectedSnapshot;
-    maskedState.validityMask = mask;
-    TrustedImageSnapshot maskedSnapshot;
-    if (!dataManager.SetCurrentData(
-            std::move(maskedState),
-            expectedSnapshot,
-            maskedSnapshot)) {
+    const auto expectedSnapshot = dataManager.GetPrimaryImage();
+    VtkDataBridge bridge;
+    auto maskedPayload = bridge.CreateImagePayload(image, mask);
+    const auto maskedEntity = dataManager.CreateDataEntityId();
+    const DataRevisionRef maskedRef{ maskedEntity, 1 };
+    DataTransaction maskedTransaction;
+    maskedTransaction.outputs.push_back(DataRevisionDraft{
+        maskedEntity, 0, DataTypes::imageGrid3D, {},
+        std::move(maskedPayload), {} });
+    maskedTransaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        expectedSnapshot->binding->revision,
+        true,
+        expectedSnapshot->binding->target,
+        maskedRef });
+    if (dataManager.SetDataCommit(std::move(maskedTransaction)).status
+        != DataCommitStatus::Succeeded) {
         return false;
     }
     constexpr std::size_t maskBytes = 8;
@@ -1040,16 +1126,17 @@ bool GetImageReadStateValid()
         replacement->GetScalarPointer(),
         replacementValues.data(),
         sizeof(replacementValues));
-    hasPending = false;
     if (!dataManager.SetImageSnapshot(replacement)
-        || !dataManager.SetCurrentFromPending(hasPending)
-        || !hasPending) {
+        || !dataManager.GetLoadStage()
+        || !dataManager.SetLoadCommit(
+            dataManager.GetLoadStage(), published)) {
         return false;
     }
     const auto second = dataManager.GetImageReadState();
     return second
         && second->values
-        && second->version > first->version
+        && second->bindingRevision > first->bindingRevision
+        && second->dataRevision != first->dataRevision
         && std::memcmp(
             first->values->data(), source.data(), sizeof(source)) == 0
         && std::memcmp(

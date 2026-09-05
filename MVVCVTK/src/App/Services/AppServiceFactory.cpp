@@ -17,6 +17,7 @@
 #include <vtkCallbackCommand.h>
 #include <vtkCamera.h>
 #include <vtkCommand.h>
+#include <vtkImageData.h>
 #include <vtkMatrix4x4.h>
 #include <vtkProp3D.h>
 #include <vtkRenderer.h>
@@ -150,8 +151,8 @@ public:
     RenderInputStamp GetRenderInputStamp() const;
     bool AttachRenderEffect(std::shared_ptr<RenderEffect> effect);
     bool DetachRenderEffect(const RenderEffect* effect);
-    bool BuildDataStage(const TrustedImageSnapshot& snapshot);
-    bool SetViewStage(const TrustedImageSnapshot& snapshot);
+    bool BuildDataStage(const VtkImageGridSnapshot& snapshot);
+    bool SetViewStage(const VtkImageGridSnapshot& snapshot);
     bool ResetViewStage();
     bool ClearDataStage();
     void SetDataStageComplete() noexcept;
@@ -181,8 +182,8 @@ private:
     };
 
     struct DataStage final {
-        TrustedImageSnapshot oldSnapshot;
-        TrustedImageSnapshot nextSnapshot;
+        VtkImageGridSnapshot oldSnapshot;
+        VtkImageGridSnapshot nextSnapshot;
         std::shared_ptr<AbstractVisualStrategy> oldStrategy;
         std::shared_ptr<AbstractVisualStrategy> nextStrategy;
         std::optional<VizMode> oldMode;
@@ -255,7 +256,7 @@ private:
     bool ResetOwnedLoad(LoadEventKind loadEventKind);
     bool BuildPipeline();
     std::optional<VolumeTransferFunction> GetDefaultVolumeTransfer(
-        const TrustedImageSnapshot& snapshot);
+        const VtkImageGridSnapshot& snapshot);
     bool GetVolumeTransferValid(
         const VolumeTransferFunction& function) const;
     bool GetTransferRangeValid(
@@ -269,14 +270,14 @@ private:
     std::shared_ptr<AbstractVisualStrategy> CreateStrategy(VizMode mode);
     CameraState GetCameraState() const;
     bool SetCameraState(const CameraState& state);
-    bool SetModeCamera(VizMode mode, const TrustedImageSnapshot& snapshot);
+    bool SetModeCamera(VizMode mode, const VtkImageGridSnapshot& snapshot);
     bool SetCameraCenter(
         const std::array<double, 16>& modelToWorld,
-        const TrustedImageSnapshot& snapshot);
+        const VtkImageGridSnapshot& snapshot);
     void SetRendererBg();
     void ClearStrategies();
     bool GetDataReadyState(
-        const TrustedImageSnapshot& snapshot,
+        const VtkImageGridSnapshot& snapshot,
         DataReadyState& state) const;
     std::optional<WindowLevelParams> GetAutoWindowLevel(
         const std::array<double, 2>& scalarRange) const;
@@ -315,7 +316,7 @@ private:
     // 构造期冻结 Strategy 创建入口；生产默认进入 Render 层唯一工厂，测试可注入失败路径。
     StrategyCreate m_strategyCreate;
     // 本 service 持有 DataManager 当前批次 owner；各 view 共享只读 image/scalars，旧批次随最后一个 owner 释放。
-    TrustedImageSnapshot m_renderSnapshot;
+    VtkImageGridSnapshot m_renderSnapshot;
     // observer 把 kind/result 作为一个完整终态 payload 入队；锁只保护队列，不覆盖 VTK 或 callback 调用。
     std::deque<LoadNotice> m_loadNotices;
     mutable std::mutex m_loadNoticeMutex;
@@ -691,7 +692,7 @@ AppRuntime::~AppRuntime()
     if (m_sharedState && ownedLoadKind != LoadEventKind::None) {
         // Reload worker 可能已发布 pending、但 Timer 尚未提交；先销毁 payload，再发布失败终态，
         // 防止共享 DataManager 在下一事务中提交旧批次。
-        if (m_dataManager) m_dataManager->ClearPending();
+        if (m_dataManager) m_dataManager->ClearLoadStage();
         if (ownedLoadKind == LoadEventKind::Reload) {
             if (m_sharedState->GetReloadLoadState() == LoadState::Loading) {
                 m_sharedState->SetReloadLoadFailed();
@@ -808,7 +809,7 @@ bool AppRuntime::SetCameraState(const CameraState& state)
 
 bool AppRuntime::SetModeCamera(
     const VizMode mode,
-    const TrustedImageSnapshot& snapshot)
+    const VtkImageGridSnapshot& snapshot)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()) {
         return false;
@@ -863,7 +864,7 @@ bool AppRuntime::SetModeCamera(
 
 bool AppRuntime::SetCameraCenter(
     const std::array<double, 16>& modelToWorld,
-    const TrustedImageSnapshot& snapshot)
+    const VtkImageGridSnapshot& snapshot)
 {
     if (!m_renderer || !m_renderer->GetActiveCamera()
         || !snapshot || !snapshot->image) {
@@ -1060,9 +1061,8 @@ void AppRuntime::ClearOverlays() noexcept
 RenderInputStamp AppRuntime::GetRenderInputStamp() const
 {
     RenderInputStamp stamp;
-    if (m_renderSnapshot) {
-        stamp.identity = m_renderSnapshot->image.GetPointer();
-        stamp.version = m_renderSnapshot->version;
+    if (m_renderSnapshot && m_renderSnapshot->data) {
+        stamp.dataRevision = m_renderSnapshot->data->self;
     }
     return stamp;
 }
@@ -1541,7 +1541,22 @@ bool AppRuntime::SetSpacing(double sx, double sy, double sz)
         { sx, sy, sz },
         [weakData](const std::array<double, 3>& spacing) {
             const auto data = weakData.lock();
-            return !data || data->SetSpacing(spacing);
+            DataReadyState committed;
+            committed.spacing = spacing;
+            if (!data) {
+                return std::optional<DataReadyState>{ std::move(committed) };
+            }
+            if (!data->SetSpacing(spacing)) {
+                return std::optional<DataReadyState>{};
+            }
+            const auto primary = data->GetPrimaryImage();
+            if (primary && primary->data && primary->binding) {
+                committed.dataRevision = primary->data->self;
+                committed.bindingRevision = primary->binding->revision;
+                committed.scalarRange = data->GetScalarRange();
+                committed.spacing = data->GetSpacing();
+            }
+            return std::optional<DataReadyState>{ std::move(committed) };
         });
 }
 
@@ -1814,9 +1829,9 @@ TaskAdmissionResult AppRuntime::LoadFileAsync(
     if (!m_sharedState->StartLoad(LoadEventKind::File)) {
         return TaskAdmissionResult::Busy;
     }
-    if (!m_dataManager || !m_dataManager->ClearPending()
+    if (!m_dataManager || !m_dataManager->ClearLoadStage()
         || !SetOwnedLoad(LoadEventKind::File)) {
-        if (m_dataManager) m_dataManager->ClearPending();
+        if (m_dataManager) m_dataManager->ClearLoadStage();
         m_sharedState->SetFileLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::File);
         ResetOwnedLoad(LoadEventKind::File);
@@ -1827,7 +1842,7 @@ TaskAdmissionResult AppRuntime::LoadFileAsync(
         LoadEventKind::File,
         std::move(onComplete));
     if (admission != TaskAdmissionResult::Accepted) {
-        m_dataManager->ClearPending();
+        m_dataManager->ClearLoadStage();
         m_sharedState->SetFileLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::File);
         ResetOwnedLoad(LoadEventKind::File);
@@ -1849,9 +1864,9 @@ TaskAdmissionResult AppRuntime::ReloadFromBufferAsync(
     if (!m_sharedState->StartLoad(LoadEventKind::Reload)) {
         return TaskAdmissionResult::Busy;
     }
-    if (!m_dataManager || !m_dataManager->ClearPending()
+    if (!m_dataManager || !m_dataManager->ClearLoadStage()
         || !SetOwnedLoad(LoadEventKind::Reload)) {
-        if (m_dataManager) m_dataManager->ClearPending();
+        if (m_dataManager) m_dataManager->ClearLoadStage();
         m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         ResetOwnedLoad(LoadEventKind::Reload);
@@ -1862,7 +1877,7 @@ TaskAdmissionResult AppRuntime::ReloadFromBufferAsync(
         LoadEventKind::Reload,
         std::move(onComplete));
     if (admission != TaskAdmissionResult::Accepted) {
-        m_dataManager->ClearPending();
+        m_dataManager->ClearLoadStage();
         m_sharedState->SetReloadLoadFailed();
         m_sharedState->ResetLoad(LoadEventKind::Reload);
         ResetOwnedLoad(LoadEventKind::Reload);
@@ -2135,10 +2150,11 @@ void AppRuntime::GetWorldPositionFromModel(const double m[3], double w[3]) const
 }
 
 bool AppRuntime::GetDataReadyState(
-    const TrustedImageSnapshot& snapshot,
+    const VtkImageGridSnapshot& snapshot,
     DataReadyState& state) const
 {
-    if (!snapshot || !snapshot->image || snapshot->version == 0) {
+    if (!snapshot || !snapshot->image || !snapshot->data
+        || !snapshot->binding || snapshot->binding->revision == 0) {
         return false;
     }
 
@@ -2160,7 +2176,8 @@ bool AppRuntime::GetDataReadyState(
         return false;
     }
 
-    state.version = snapshot->version;
+    state.dataRevision = snapshot->data->self;
+    state.bindingRevision = snapshot->binding->revision;
     std::copy_n(imageRange, state.scalarRange.size(), state.scalarRange.begin());
     std::copy_n(imageSpacing, state.spacing.size(), state.spacing.begin());
     std::copy_n(centerWorld, state.cursorWorld.size(), state.cursorWorld.begin());
@@ -2218,8 +2235,8 @@ bool AppRuntime::SendUpdates()
         if (!loadNotice.isStateSet) {
             if (loadNotice.isSucceeded) {
                 const auto current = m_dataManager
-                    ? m_dataManager->GetImageSnapshot()
-                    : TrustedImageSnapshot{};
+                    ? m_dataManager->GetPrimaryImage()
+                    : VtkImageGridSnapshot{};
                 if (current != m_renderSnapshot
                     && !BuildPipeline()) {
                     loadNotice.isSucceeded = false;
@@ -2306,33 +2323,41 @@ void AppRuntime::SetLoadResult(ActiveTask task, bool isSuccess)
 {
     // worker 成功只表示 pending 已准备；Host 注入时由跨视图候选事务统一提交，
     // 独立 AppRuntime 则保留原有单视图提交路径。
-    bool hasPending = false;
     if (isSuccess && m_dataManager) {
         if (m_setLoadCommit) {
             isSuccess = m_setLoadCommit(task.loadKind);
         }
         else {
-            isSuccess = m_dataManager->SetCurrentFromPending(hasPending)
-                && hasPending;
+            const auto stage = m_dataManager->GetLoadStage();
+            VtkImageGridSnapshot published;
+            isSuccess = stage
+                && m_dataManager->SetLoadCommit(stage, published)
+                && published;
         }
     }
-    if (!isSuccess && m_dataManager) m_dataManager->ClearPending();
+    if (!isSuccess && m_dataManager) m_dataManager->ClearLoadStage();
 
     // callback 暂存到 owner 槽，待共享终态广播、各视图管线同步和 admission 释放后再执行。
     m_ownedCallback = std::move(task.callback);
     if (!m_sharedState || !m_dataManager) return;
     if (isSuccess) {
-        const auto current = m_dataManager->GetImageSnapshot();
+        const auto current = m_dataManager->GetPrimaryImage();
         DataReadyState readyState;
         const bool hasStagedState = m_readyState
             && current
-            && m_readyState->version == current->version;
+            && current->data && current->binding
+            && m_readyState->dataRevision == current->data->self
+            && m_readyState->bindingRevision
+                == current->binding->revision;
         if (hasStagedState) {
             readyState = *m_readyState;
         }
         else if (!GetDataReadyState(current, readyState)) {
             // current 已完成不可逆发布；此兜底只处理损坏实现，不能把成功 CAS 伪装成失败。
-            readyState.version = m_dataManager->GetDataVersion();
+            readyState.dataRevision = current && current->data
+                ? current->data->self : DataRevisionRef{};
+            readyState.bindingRevision =
+                m_dataManager->GetPrimaryBindingRevision();
             readyState.scalarRange = m_dataManager->GetScalarRange();
             readyState.spacing = m_dataManager->GetSpacing();
             readyState.cursorWorld = m_sharedState->GetCursorWorld();
@@ -2548,7 +2573,7 @@ void AppRuntime::SetDataRefresh()
 bool AppRuntime::BuildPipeline()
 {
     if (!GetIsOwnerThread() || !m_dataManager) return false;
-    const auto snapshot = m_dataManager->GetImageSnapshot();
+    const auto snapshot = m_dataManager->GetPrimaryImage();
     if (!BuildDataStage(snapshot)) return false;
     if (!SetViewStage(snapshot)) {
         (void)ClearDataStage();
@@ -2558,7 +2583,7 @@ bool AppRuntime::BuildPipeline()
     return true;
 }
 
-bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
+bool AppRuntime::BuildDataStage(const VtkImageGridSnapshot& snapshot)
 {
     if (!GetIsOwnerThread() || m_dataStage
         || !snapshot || !snapshot->image
@@ -2676,7 +2701,7 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
                 "Candidate rejected the render input data.");
         }
         if (!stage.nextStrategy->SetRenderInputStamp({
-                snapshot->image.GetPointer(), snapshot->version })) {
+                snapshot->data->self })) {
             throw std::runtime_error(
                 "Candidate rejected the render input stamp.");
         }
@@ -2804,19 +2829,18 @@ bool AppRuntime::BuildDataStage(const TrustedImageSnapshot& snapshot)
     return false;
 }
 
-bool AppRuntime::SetViewStage(const TrustedImageSnapshot& snapshot)
+bool AppRuntime::SetViewStage(const VtkImageGridSnapshot& snapshot)
 {
     if (!GetIsOwnerThread() || !m_dataStage || !snapshot
         || !snapshot->image || m_dataStage->isCommitted
-        || m_dataStage->nextSnapshot->image.GetPointer()
-            != snapshot->image.GetPointer()
-        || m_dataStage->nextSnapshot->version != snapshot->version) {
+        || !m_dataStage->nextSnapshot->data || !snapshot->data
+        || m_dataStage->nextSnapshot->data->self != snapshot->data->self) {
         return false;
     }
 
     try {
         if (!m_dataStage->nextStrategy->SetRenderInputStamp({
-                snapshot->image.GetPointer(), snapshot->version })) {
+                snapshot->data->self })) {
             throw std::runtime_error(
                 "Committed input stamp was rejected.");
         }
@@ -2955,14 +2979,16 @@ void AppRuntime::SetDataStageComplete() noexcept
 
 std::optional<VolumeTransferFunction>
 AppRuntime::GetDefaultVolumeTransfer(
-    const TrustedImageSnapshot& snapshot)
+    const VtkImageGridSnapshot& snapshot)
 {
-    if (!snapshot || !snapshot->image || snapshot->version == 0) {
+    if (!snapshot || !snapshot->image || !snapshot->data) {
         return std::nullopt;
     }
 
-    const double rangeMin = snapshot->scalarRange[0];
-    const double rangeMax = snapshot->scalarRange[1];
+    double scalarRange[2] = {};
+    snapshot->image->GetScalarRange(scalarRange);
+    const double rangeMin = scalarRange[0];
+    const double rangeMax = scalarRange[1];
     const double rangeWidth = rangeMax - rangeMin;
     if (!std::isfinite(rangeWidth) || rangeWidth < 0.0) {
         return std::nullopt;
@@ -3318,12 +3344,12 @@ public:
     {
     }
 
-    bool BuildDataStage(const TrustedImageSnapshot& snapshot) override
+    bool BuildDataStage(const VtkImageGridSnapshot& snapshot) override
     {
         return m_service && m_service->BuildDataStage(snapshot);
     }
 
-    bool SetViewStage(const TrustedImageSnapshot& snapshot) override
+    bool SetViewStage(const VtkImageGridSnapshot& snapshot) override
     {
         return m_service && m_service->SetViewStage(snapshot);
     }
@@ -3688,7 +3714,10 @@ private:
         state.cursorWorld = m_service->GetCursorWorld();
         state.cursorAxis = m_service->GetCursorAxis();
         state.visibilityMask = m_service->GetVisibilityMask();
-        state.dataVersion = m_service->GetRenderInputStamp().version;
+        state.dataRevision = m_service->GetRenderInputStamp().dataRevision;
+        state.bindingRevision = m_service->m_renderSnapshot
+            && m_service->m_renderSnapshot->binding
+            ? m_service->m_renderSnapshot->binding->revision : 0;
         state.revision = m_revision;
         return state;
     }

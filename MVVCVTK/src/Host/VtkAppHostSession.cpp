@@ -9,6 +9,7 @@
 #include "App/AppState.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
+#include "Data/DataPayloads.h"
 
 #include <algorithm>
 #include <atomic>
@@ -23,19 +24,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-std::function<TrustedImageSnapshot()>
-HostCoreServices::GetImageReader() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData =
-        sharedDataMgr;
-    return [weakData]() {
-        const auto data = weakData.lock();
-        return data
-            ? data->GetImageSnapshot()
-            : TrustedImageSnapshot{};
-    };
-}
 
 std::function<std::optional<ImageReadState>()>
 HostCoreServices::GetImageReadState() const
@@ -81,47 +69,6 @@ HostCoreServices::GetImageReadChunk() const
                 request, voxelOffset, TaskStopToken{});
         }
         return ImageReadChunkResult{};
-    };
-}
-
-std::function<bool(
-    TrustedImageState,
-    const TrustedImageSnapshot&,
-    TrustedImageSnapshot&)>
-HostCoreServices::GetImageWriter() const
-{
-    const std::weak_ptr<AbstractDataManager> weakData =
-        sharedDataMgr;
-    const std::weak_ptr<SharedInteractionState> weakState =
-        sharedState;
-    return [weakData, weakState](
-        TrustedImageState state,
-        const TrustedImageSnapshot& expectedSnapshot,
-        TrustedImageSnapshot& publishedSnapshot) {
-        publishedSnapshot.reset();
-        const auto data = weakData.lock();
-        const auto sharedState = weakState.lock();
-        if (!data
-            || !sharedState
-            || !expectedSnapshot
-            || !state.image
-            || !data->SetCurrentData(
-                std::move(state),
-                expectedSnapshot,
-                publishedSnapshot)) {
-            return false;
-        }
-
-        // current 已发布；观察者异常不能把成功的 CAS 事务改报为失败。
-        try {
-            (void)sharedState->SetImageDataReady(
-                publishedSnapshot->scalarRange[0],
-                publishedSnapshot->scalarRange[1],
-                publishedSnapshot->spacing);
-        }
-        catch (...) {
-        }
-        return true;
     };
 }
 
@@ -324,38 +271,173 @@ public:
     };
 
     class FeatureDataPort final
-        : public TrustedFeatureDataPort {
+        : public TrustedDataPort {
     public:
-        explicit FeatureDataPort(const HostCoreServices& core)
-            : m_getSnapshot(core.GetImageReader())
-            , m_setImageState(core.GetImageWriter())
+        FeatureDataPort(
+            const HostCoreServices& core,
+            const std::thread::id ownerThread)
+            : m_data(core.sharedDataMgr)
+            , m_state(core.sharedState)
+            , m_ownerThread(ownerThread)
         {
         }
 
-        TrustedImageSnapshot GetImageSnapshot() const override
+        DataGraphSnapshot GetDataGraph() const override
         {
-            return m_getSnapshot
-                ? m_getSnapshot() : TrustedImageSnapshot{};
+            const auto data = m_data.lock();
+            return data ? data->GetDataGraph() : DataGraphSnapshot{};
         }
 
-        bool SetImageState(
-            TrustedImageState imageState,
-            const TrustedImageSnapshot& expected,
-            TrustedImageSnapshot& published) override
+        DataSnapshot GetData(
+            const DataGraphSnapshot& graph,
+            const DataRevisionRef& ref) const override
         {
-            return m_setImageState
-                && m_setImageState(
-                    std::move(imageState),
-                    expected,
-                    published);
+            const auto data = m_data.lock();
+            return data ? data->GetData(graph, ref) : DataSnapshot{};
+        }
+
+        DataQueryResult GetDataQuery(
+            const DataGraphSnapshot& graph,
+            const DataQuery& query) const override
+        {
+            const auto data = m_data.lock();
+            return data
+                ? data->GetDataQuery(graph, query) : DataQueryResult{};
+        }
+
+        std::optional<DataBinding> GetDataBinding(
+            const DataGraphSnapshot& graph,
+            const std::string_view name) const override
+        {
+            const auto data = m_data.lock();
+            return data
+                ? data->GetDataBinding(graph, name)
+                : std::optional<DataBinding>{};
+        }
+
+        ProjectDataSnapshot GetProjectData() const override
+        {
+            const auto data = m_data.lock();
+            return data ? data->GetProjectData() : ProjectDataSnapshot{};
+        }
+
+        DataRelationStatus GetDataRelation(
+            const DataGraphSnapshot& graph,
+            const DataRevisionRef& ref,
+            const std::string_view inputRole,
+            const std::string_view binding) const override
+        {
+            const auto data = m_data.lock();
+            return data
+                ? data->GetDataRelation(graph, ref, inputRole, binding)
+                : DataRelationStatus::Unknown;
+        }
+
+        VtkImageGridSnapshot GetImageGrid(
+            const DataGraphSnapshot& graph,
+            const DataRevisionRef& ref) const override
+        {
+            const auto data = m_data.lock();
+            return data ? data->GetImageGrid(graph, ref) : nullptr;
+        }
+
+        VtkImageGridSnapshot GetPrimaryImage() const override
+        {
+            const auto data = m_data.lock();
+            return data ? data->GetPrimaryImage() : nullptr;
+        }
+
+        VtkLabelMapSnapshot GetLabelMap(
+            const DataGraphSnapshot& graph,
+            const DataRevisionRef& ref) const override
+        {
+            const auto data = m_data.lock();
+            return data ? data->GetLabelMap(graph, ref) : nullptr;
+        }
+
+        VtkSurfaceMeshSnapshot GetSurfaceMesh(
+            const DataGraphSnapshot& graph,
+            const DataRevisionRef& ref) const override
+        {
+            const auto data = m_data.lock();
+            return data ? data->GetSurfaceMesh(graph, ref) : nullptr;
+        }
+
+        DataEntityId CreateDataEntityId() override
+        {
+            const auto data = GetWriteData();
+            return data ? data->CreateDataEntityId() : DataEntityId{};
+        }
+
+        bool SetDataType(DataTypeDescriptor descriptor) override
+        {
+            const auto data = GetWriteData();
+            return data && data->SetDataType(std::move(descriptor));
+        }
+
+        DataCommitResult SetDataCommit(DataTransaction transaction) override
+        {
+            const bool hasPrimary = std::any_of(
+                transaction.bindings.begin(), transaction.bindings.end(),
+                [](const DataBindingUpdate& update) {
+                    return update.binding == primaryVolumeBinding;
+                });
+            const auto data = GetWriteData();
+            if (!data) {
+                DataCommitResult result;
+                result.message = "Data write requires the Session owner thread.";
+                return result;
+            }
+            auto result = data->SetDataCommit(std::move(transaction));
+            if (!hasPrimary || !result.isActivated
+                || result.status == DataCommitStatus::Rejected) {
+                return result;
+            }
+            const auto state = m_state.lock();
+            const auto primary = data->GetPrimaryImage();
+            const auto* payload = primary && primary->data
+                ? dynamic_cast<const ImageGrid3DPayload*>(
+                    primary->data->payload.get())
+                : nullptr;
+            if (state && primary && primary->binding && payload) {
+                DataReadyState ready;
+                ready.dataRevision = primary->data->self;
+                ready.bindingRevision = primary->binding->revision;
+                ready.scalarRange = payload->GetScalarRange();
+                ready.spacing = payload->GetGeometry().spacing;
+                ready.cursorWorld = state->GetCursorWorld();
+                state->SetDataReady(ready);
+            }
+            return result;
+        }
+
+        DataObserverId AttachDataChange(
+            DataChangeCallback callback) override
+        {
+            const auto data = GetWriteData();
+            return data
+                ? data->AttachDataChange(std::move(callback)) : 0;
+        }
+
+        bool DetachDataChange(const DataObserverId observerId) override
+        {
+            const auto data = GetWriteData();
+            return data && data->DetachDataChange(observerId);
         }
 
     private:
-        std::function<TrustedImageSnapshot()> m_getSnapshot;
-        std::function<bool(
-            TrustedImageState,
-            const TrustedImageSnapshot&,
-            TrustedImageSnapshot&)> m_setImageState;
+        std::shared_ptr<AbstractDataManager> GetWriteData() const
+        {
+            if (m_ownerThread == std::thread::id{}
+                || m_ownerThread != std::this_thread::get_id()) {
+                return {};
+            }
+            return m_data.lock();
+        }
+
+        std::weak_ptr<AbstractDataManager> m_data;
+        std::weak_ptr<SharedInteractionState> m_state;
+        std::thread::id m_ownerThread;
     };
 
     class FeatureReadPort final : public ImageReadPort {
@@ -1148,7 +1230,7 @@ bool VtkAppHostSession::Impl::AttachFeature(
         context.views =
             std::make_shared<FeatureViewDirectoryPort>(weakBridge);
         context.read = std::make_shared<FeatureReadPort>(core);
-        context.data = std::make_shared<FeatureDataPort>(core);
+        context.data = std::make_shared<FeatureDataPort>(core, ownerThread);
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,

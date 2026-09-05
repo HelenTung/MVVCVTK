@@ -1,12 +1,20 @@
 #include "Host/CropHostFeature.h"
 
+#include "Data/DataPayloads.h"
 #include "Interaction/CropBridge.h"
 
+#include <vtkCellArray.h>
+#include <vtkDataArray.h>
+#include <vtkIdList.h>
 #include <vtkImageData.h>
+#include <vtkPointData.h>
+#include <vtkPoints.h>
 #include <vtkPolyData.h>
+#include <vtkTriangleFilter.h>
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <exception>
 #include <iostream>
 #include <mutex>
@@ -20,9 +28,117 @@
 
 namespace {
 constexpr std::string_view kFeatureId = "OrthogonalCrop";
+constexpr std::string_view cropResultBinding =
+    "analysis.crop.active";
+constexpr std::string_view cropInputBinding =
+    "feature.crop.input";
 constexpr std::size_t kCommandKeyCount = 10;
 constexpr std::size_t kNodeKeyCount =
     std::tuple_size_v<decltype(CropHostKeys::nodes)>;
+
+bool GetFacetUsed(
+    const DataGraphSnapshot& graph,
+    const DataTypeId& type,
+    const DataFacetId& facet)
+{
+    if (!graph.view) return false;
+    const auto facets = graph.view->GetDataFacets(type);
+    return std::find(facets.begin(), facets.end(), facet)
+        != facets.end();
+}
+
+std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
+    vtkPolyData* mesh)
+{
+    if (!mesh) return {};
+    auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
+    triangles->SetInputData(mesh);
+    triangles->PassLinesOff();
+    triangles->PassVertsOff();
+    triangles->Update();
+    auto* output = triangles->GetOutput();
+    if (!output) return {};
+
+    std::vector<double> vertices;
+    if (auto* points = output->GetPoints()) {
+        vertices.resize(
+            static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
+        for (vtkIdType index = 0;
+            index < points->GetNumberOfPoints(); ++index) {
+            points->GetPoint(
+                index,
+                vertices.data() + static_cast<std::size_t>(index) * 3);
+        }
+    }
+    else if (output->GetNumberOfPoints() != 0) {
+        return {};
+    }
+    std::vector<std::uint64_t> cells;
+    if (auto* polys = output->GetPolys()) {
+        auto ids = vtkSmartPointer<vtkIdList>::New();
+        polys->InitTraversal();
+        while (polys->GetNextCell(ids)) {
+            if (ids->GetNumberOfIds() != 3) return {};
+            for (vtkIdType index = 0; index < 3; ++index) {
+                const auto value = ids->GetId(index);
+                if (value < 0) return {};
+                cells.push_back(static_cast<std::uint64_t>(value));
+            }
+        }
+    }
+    else if (output->GetNumberOfCells() != 0) {
+        return {};
+    }
+    auto payload = std::make_shared<const SurfaceMeshPayload>(
+        std::move(vertices), std::move(cells));
+    return payload->GetValid() ? payload : nullptr;
+}
+
+DataBytes CreateMaskBytes(vtkImageData* mask)
+{
+    auto* scalars = mask && mask->GetPointData()
+        ? mask->GetPointData()->GetScalars() : nullptr;
+    const auto count = mask ? mask->GetNumberOfPoints() : 0;
+    if (!scalars || count <= 0
+        || scalars->GetDataType() != VTK_UNSIGNED_CHAR
+        || scalars->GetNumberOfComponents() != 1
+        || !scalars->GetVoidPointer(0)) {
+        return {};
+    }
+    const auto byteCount = static_cast<std::size_t>(count);
+    auto values = std::make_shared<std::vector<std::uint8_t>>(byteCount);
+    std::memcpy(values->data(), scalars->GetVoidPointer(0), byteCount);
+    return values;
+}
+
+std::shared_ptr<const RoiGeometryPayload> CreateRecipePayload(
+    const std::vector<CropOpItem>& operations)
+{
+    std::vector<RoiPrimitive> primitives;
+    primitives.reserve(operations.size());
+    for (const auto& operation : operations) {
+        RoiPrimitive primitive;
+        primitive.operation = operation.removalMode
+            == CropRemovalMode::KeepInside
+            ? "keep-inside" : "remove-inside";
+        if (operation.geometryType == CropShape::Box) {
+            primitive.shape = RoiShape::Box;
+            primitive.localToSource = operation.boxToInputModelMatrix;
+        }
+        else if (operation.geometryType == CropShape::Plane) {
+            primitive.shape = RoiShape::Plane;
+            primitive.origin = operation.planeCenterInInputModel;
+            primitive.normal = operation.planeNormalInInputModel;
+        }
+        else {
+            return {};
+        }
+        primitives.push_back(std::move(primitive));
+    }
+    auto payload = std::make_shared<const RoiGeometryPayload>(
+        std::move(primitives));
+    return payload->GetValid() ? payload : nullptr;
+}
 
 bool GetImageReady(vtkImageData* image)
 {
@@ -71,7 +187,6 @@ public:
     struct CompleteItem final {
         CropBuildCallback onComplete;
         std::optional<CropBuildResult> result;
-        std::optional<RenderInputStamp> waitInput;
         bool isQueued = false;
     };
 
@@ -122,15 +237,15 @@ private:
     bool SetActiveViews(
         const std::vector<std::string>& viewIds) const;
     bool SetCropInput(const CropHostTarget& target);
-    bool SetPolyData(
-        vtkSmartPointer<vtkPolyData> polyData,
-        std::uint64_t sourceVersion);
+    bool SetPolyData(vtkSmartPointer<vtkPolyData> polyData);
     bool ClearPolyData();
     bool ResetOriginal();
-    bool SetImageResult(
-        const TrustedImageSnapshot& sourceSnapshot,
-        const TrustedImageSnapshot& expectedSnapshot,
-        CropBuildResult& result);
+    bool SetPrimaryResult();
+    CropBuildResult SetBuildResult(
+        const CropInputSnapshot& source,
+        const DataBinding& resultBinding,
+        CropMaterializationCandidate candidate);
+    bool ClearResultBinding();
     bool BuildCropResult(
         const CropHostTarget& target,
         CropBuildCallback onComplete);
@@ -140,8 +255,7 @@ private:
     static bool SetCompleteResult(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item,
-        CropBuildResult result,
-        std::optional<RenderInputStamp> waitInput);
+        CropBuildResult result);
     static bool SendComplete(
         const std::shared_ptr<CompleteState>& state,
         const std::shared_ptr<CompleteItem>& item);
@@ -166,12 +280,9 @@ private:
     CropHostConfig m_config;
     std::unique_ptr<CropBridge> m_bridge;
     std::shared_ptr<FeatureViewDirectory> m_views;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
-    vtkSmartPointer<vtkPolyData> m_polyData;
-    std::uint64_t m_sourceVersion = 0;
-    TrustedImageSnapshot m_rootImage;
-    TrustedImageSnapshot m_lastImage;
+    CropHostState m_dataState;
     std::optional<CropHostTarget> m_activeTarget;
     std::vector<std::string> m_activeViewIds;
     std::optional<CropHistoryState> m_status;
@@ -205,6 +316,7 @@ bool CropHostFeature::Impl::AttachHost(
     m_host = context.host;
     m_completeState = std::make_shared<CompleteState>();
     m_ownerThread = std::this_thread::get_id();
+    m_dataState = {};
 
     if (!m_config.inputViews.viewIds.empty()
         || !m_config.inputViews.viewRoles.empty()) {
@@ -265,9 +377,11 @@ bool CropHostFeature::Impl::DetachHost()
         }
         (void)m_bridge->ClearBindings();
     }
+    (void)ClearResultBinding();
     m_activeTarget.reset();
     m_activeViewIds.clear();
     m_status.reset();
+    m_dataState = {};
     m_isDown.fill(false);
     if (!isInputDetached) {
         return false;
@@ -293,8 +407,7 @@ void CropHostFeature::Impl::ClearBorrowed()
         m_completeState->items.clear();
     }
     m_completeState.reset();
-    m_rootImage.reset();
-    m_lastImage.reset();
+    m_dataState = {};
 }
 
 bool CropHostFeature::Impl::SetCropInput(
@@ -305,52 +418,50 @@ bool CropHostFeature::Impl::SetCropInput(
         return false;
     }
 
-    const bool hasNewLineage =
-        target.source == CropHostSource::CurrentImage
-        && m_lastImage
-        && (m_lastImage->version != input->inputVersion
-            || m_lastImage->image.GetPointer()
-                != input->imageData.GetPointer());
-    if (!m_bridge->SetCropInput(std::move(*input))) {
-        return false;
-    }
-    if (hasNewLineage) {
-        // 外部 File/Reload 已提交新 current；只有 Bridge 接受新输入后才退休旧物化 lineage。
-        m_rootImage.reset();
-        m_lastImage.reset();
-    }
-    return true;
+    return m_bridge->SetCropInput(std::move(*input));
 }
 
 std::optional<CropInputSnapshot>
 CropHostFeature::Impl::GetCropInput(
     const CropHostTarget& target) const
 {
+    (void)target;
+    if (!m_data) return std::nullopt;
+    const auto graph = m_data->GetDataGraph();
+    if (!graph.view) return std::nullopt;
+
+    auto binding = m_data->GetDataBinding(graph, cropInputBinding);
+    if (!binding || !binding->target) {
+        binding = m_data->GetDataBinding(graph, primaryVolumeBinding);
+    }
+    if (!binding || !binding->target) return std::nullopt;
+    const auto data = m_data->GetData(graph, *binding->target);
+    if (!data) return std::nullopt;
+
     CropInputSnapshot input;
-    if (target.source == CropHostSource::CurrentImage) {
-        const auto imageState = m_data
-            ? m_data->GetImageSnapshot() : TrustedImageSnapshot{};
-        if (!imageState || !GetImageReady(imageState->image)) {
+    input.graph = graph;
+    input.binding = binding;
+    input.data = data;
+    if (GetFacetUsed(
+            graph, data->type, DataFacets::scalarGrid3D)) {
+        input.image = m_data->GetImageGrid(graph, data->self);
+        if (!input.image || !GetImageReady(input.image->image)) {
             return std::nullopt;
         }
-        input.dataSource =
-            OrthogonalCropDataSource::ImageData;
-        input.inputVersion = imageState->version;
-        input.imageData = imageState->image;
-        input.validityMask = imageState->validityMask;
-        input.imageData->GetBounds(
+        input.image->image->GetBounds(
+            input.inputModelBounds.data());
+    }
+    else if (GetFacetUsed(
+            graph, data->type, DataFacets::surfaceMesh)) {
+        input.mesh = m_data->GetSurfaceMesh(graph, data->self);
+        if (!input.mesh || !input.mesh->mesh) {
+            return std::nullopt;
+        }
+        input.mesh->mesh->GetBounds(
             input.inputModelBounds.data());
     }
     else {
-        if (!m_polyData || m_sourceVersion == 0) {
-            return std::nullopt;
-        }
-        input.dataSource =
-            OrthogonalCropDataSource::PolyData;
-        input.inputVersion = m_sourceVersion;
-        input.polyData = m_polyData;
-        input.polyData->GetBounds(
-            input.inputModelBounds.data());
+        return std::nullopt;
     }
     return input;
 }
@@ -457,12 +568,6 @@ bool CropHostFeature::Impl::StartCrop(
             == activeViewIds.end()) {
         activeViewIds.push_back(referenceView->view.id);
     }
-    const bool hasNewLineage =
-        target.source == CropHostSource::CurrentImage
-        && m_lastImage
-        && (m_lastImage->version != input->inputVersion
-            || m_lastImage->image.GetPointer()
-                != input->imageData.GetPointer());
     const bool isStarted = m_bridge->StartView(
         request, std::move(*input));
     if (isStarted) {
@@ -470,10 +575,6 @@ bool CropHostFeature::Impl::StartCrop(
             (void)m_bridge->ExitCrop();
             (void)m_bridge->ClearBindings();
             return false;
-        }
-        if (hasNewLineage) {
-            m_rootImage.reset();
-            m_lastImage.reset();
         }
         m_activeTarget = target;
         m_activeViewIds = std::move(activeViewIds);
@@ -483,341 +584,300 @@ bool CropHostFeature::Impl::StartCrop(
 }
 
 bool CropHostFeature::Impl::SetPolyData(
-    vtkSmartPointer<vtkPolyData> polyData,
-    const std::uint64_t sourceVersion)
+    vtkSmartPointer<vtkPolyData> polyData)
 {
-    if (!polyData
-        || sourceVersion == 0
-        || (m_sourceVersion != 0
-            && sourceVersion <= m_sourceVersion)
-        || polyData.GetPointer()
-            == m_polyData.GetPointer()) {
-        return false;
+    if (!m_data || !polyData || m_isPublishing) return false;
+    auto payload = CreateMeshPayload(polyData);
+    if (!payload || payload->GetVertices().empty()) return false;
+
+    const auto graph = m_data->GetDataGraph();
+    DataBinding inputBinding;
+    inputBinding.name = std::string(cropInputBinding);
+    if (const auto current = m_data->GetDataBinding(
+            graph, cropInputBinding)) {
+        inputBinding = *current;
     }
-    if (m_bridge) {
-        (void)m_bridge->ClearBindings();
+    const auto entity = m_data->CreateDataEntityId();
+    const DataRevisionRef inputRef{ entity, 1 };
+    DataTransaction transaction;
+    transaction.outputs.push_back(DataRevisionDraft{
+        entity, 0, DataTypes::surfaceMesh, {}, std::move(payload),
+        DataProvenance{
+            std::string(kFeatureId), "register-mesh-input", "1", "{}" } });
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(cropInputBinding),
+        inputBinding.revision,
+        true,
+        inputBinding.target,
+        inputRef });
+    if (const auto resultBinding = m_data->GetDataBinding(
+            graph, cropResultBinding);
+        resultBinding && resultBinding->target
+        && GetDataRevisionRefValid(m_dataState.outputRevision)
+        && *resultBinding->target == m_dataState.outputRevision) {
+        transaction.bindings.push_back(DataBindingUpdate{
+            std::string(cropResultBinding),
+            resultBinding->revision,
+            true,
+            resultBinding->target,
+            {} });
     }
-    if (!SetActiveViews({})) {
-        return false;
-    }
-    m_polyData = std::move(polyData);
-    m_sourceVersion = sourceVersion;
+    const PublishGuard guard(m_isPublishing);
+    const auto commit = m_data->SetDataCommit(std::move(transaction));
+    if (commit.status != DataCommitStatus::Succeeded) return false;
+
+    if (m_bridge) (void)m_bridge->ClearBindings();
+    (void)SetActiveViews({});
     m_activeTarget.reset();
     m_activeViewIds.clear();
     m_status.reset();
+    m_dataState = {};
     return true;
 }
 
 bool CropHostFeature::Impl::ClearPolyData()
 {
-    if (m_bridge) {
-        (void)m_bridge->ClearBindings();
+    if (!m_data || m_isPublishing) return false;
+    const auto graph = m_data->GetDataGraph();
+    const auto inputBinding = m_data->GetDataBinding(
+        graph, cropInputBinding);
+    DataTransaction transaction;
+    if (inputBinding && inputBinding->target) {
+        transaction.bindings.push_back(DataBindingUpdate{
+            std::string(cropInputBinding),
+            inputBinding->revision,
+            true,
+            inputBinding->target,
+            {} });
     }
-    if (!SetActiveViews({})) {
-        return false;
+    if (const auto resultBinding = m_data->GetDataBinding(
+            graph, cropResultBinding);
+        resultBinding && resultBinding->target
+        && GetDataRevisionRefValid(m_dataState.outputRevision)
+        && *resultBinding->target == m_dataState.outputRevision) {
+        transaction.bindings.push_back(DataBindingUpdate{
+            std::string(cropResultBinding),
+            resultBinding->revision,
+            true,
+            resultBinding->target,
+            {} });
     }
-    m_polyData = nullptr;
-    m_sourceVersion = 0;
+    if (!transaction.bindings.empty()) {
+        const PublishGuard guard(m_isPublishing);
+        if (m_data->SetDataCommit(std::move(transaction)).status
+            != DataCommitStatus::Succeeded) {
+            return false;
+        }
+    }
+    if (m_bridge) (void)m_bridge->ClearBindings();
+    (void)SetActiveViews({});
     m_activeTarget.reset();
     m_activeViewIds.clear();
     m_status.reset();
+    m_dataState = {};
     return true;
 }
 
-bool CropHostFeature::Impl::SetImageResult(
-    const TrustedImageSnapshot& sourceSnapshot,
-    const TrustedImageSnapshot& expectedSnapshot,
-    CropBuildResult& result)
+CropBuildResult CropHostFeature::Impl::SetBuildResult(
+    const CropInputSnapshot& source,
+    const DataBinding& resultBinding,
+    CropMaterializationCandidate candidate)
 {
-    if (!result.isSucceeded
-        || result.resolvedDataSource
-            != OrthogonalCropDataSource::ImageData
-        || !result.imageData
-        || !result.maskImage
-        || !sourceSnapshot
-        || !expectedSnapshot
-        || !m_data
-        || m_isPublishing) {
-        std::cout
-            << "[Crop][Materialize] reject invalid result or host state"
-            << " succeeded=" << result.isSucceeded
-            << " source="
-            << static_cast<int>(result.resolvedDataSource)
-            << " hasImage=" << static_cast<bool>(result.imageData)
-            << " hasMask=" << static_cast<bool>(result.maskImage)
-            << " hasSource=" << static_cast<bool>(sourceSnapshot)
-            << " hasExpected=" << static_cast<bool>(expectedSnapshot)
-            << " isPublishing=" << m_isPublishing << '\n';
-        return false;
+    CropBuildResult result;
+    result.failureReason = candidate.failureReason;
+    result.failureOperationIndex = candidate.failureOperationIndex;
+    result.nodeCount = candidate.nodeCount;
+    result.sourceRevision = candidate.sourceRevision;
+    result.message = std::move(candidate.message);
+    if (!candidate.isSucceeded || !m_data || m_isPublishing
+        || !source.data
+        || candidate.sourceRevision != source.data->self
+        || candidate.operations.size() != candidate.nodeCount
+        || !source.binding) {
+        if (result.failureReason == CropFailure::None) {
+            result.failureReason = CropFailure::BadInput;
+        }
+        result.message = "Crop result candidate is invalid.";
+        return result;
     }
 
-    const auto historyBefore =
-        m_bridge->GetCropHistory();
-    std::cout << "[Crop][Materialize] result"
-        << " resultVersion=" << result.inputVersion
-        << " sourceVersion=" << sourceSnapshot->version
-        << " expectedVersion=" << expectedSnapshot->version
-        << " prefixNodes=" << result.nodeCount
-        << " prefixOps=" << result.operations.size()
-        << " | " << GetHistoryText(historyBefore)
-        << '\n';
-    const std::size_t absoluteNodeCount =
-        historyBefore.baseNodeCount
-        + historyBefore.nodeCount;
-    if (result.inputVersion != sourceSnapshot->version
-        || result.nodeCount != absoluteNodeCount
-        || result.operations.size() != result.nodeCount) {
-        result.isSucceeded = false;
-        result.failureReason =
-            CropFailure::VersionMismatch;
-        result.message =
-            "Crop history changed while materialization was running.";
-        result.imageData = nullptr;
-        result.maskImage = nullptr;
-        std::cout
-            << "[Crop][Materialize] reject snapshot/history mismatch"
-            << " | " << GetHistoryText(historyBefore)
-            << '\n';
-        return false;
+    auto recipe = CreateRecipePayload(candidate.operations);
+    std::shared_ptr<const IDataPayload> output;
+    DataTypeId outputType;
+    if (source.image && candidate.imageData && candidate.maskImage) {
+        const auto* sourcePayload = dynamic_cast<const ImageGrid3DPayload*>(
+            source.data->payload.get());
+        const auto mask = CreateMaskBytes(candidate.maskImage);
+        auto image = sourcePayload
+            ? sourcePayload->CreateMaskSnapshot(mask) : nullptr;
+        if (image && image->GetValid()) {
+            output = std::move(image);
+            outputType = DataTypes::imageGrid3D;
+        }
     }
-
-    CropInputSnapshot input;
-    input.dataSource =
-        OrthogonalCropDataSource::ImageData;
-    input.inputVersion =
-        expectedSnapshot->version + 1;
-    input.imageData = result.imageData;
-    input.validityMask = result.maskImage;
-    input.imageData->GetBounds(
-        input.inputModelBounds.data());
-    auto preparedCommit = m_bridge->BuildCropCommit(
-        std::move(input), absoluteNodeCount);
-    if (!preparedCommit) {
-        result.isSucceeded = false;
+    else if (source.mesh && candidate.polyData) {
+        auto mesh = CreateMeshPayload(candidate.polyData);
+        if (mesh && mesh->GetValid()) {
+            output = std::move(mesh);
+            outputType = DataTypes::surfaceMesh;
+        }
+    }
+    if (!recipe || !output || !GetDataTypeIdValid(outputType)) {
         result.failureReason = CropFailure::BadInput;
-        result.message =
-            "Crop history could not prepare the materialized baseline.";
-        std::cout
-            << "[Crop][Materialize] reject commit preparation"
-            << " | " << GetHistoryText(
-                m_bridge->GetCropHistory())
-            << '\n';
-        return false;
+        result.message = "Crop formal payload construction failed.";
+        return result;
     }
-    std::cout << "[Crop][Materialize] baseline staged"
-        << " nextVersion=" << expectedSnapshot->version + 1
-        << " nextBase="
-        << absoluteNodeCount
-        << " nextActiveOps="
-        << historyBefore.operationCount
-            - historyBefore.nodeCount
-        << '\n';
+
+    const auto recipeEntity = m_data->CreateDataEntityId();
+    const auto outputEntity = m_data->CreateDataEntityId();
+    const DataRevisionRef recipeRef{ recipeEntity, 1 };
+    const DataRevisionRef outputRef{ outputEntity, 1 };
+    DataExpectation sourceExpectation;
+    sourceExpectation.kind = DataExpectationKind::Binding;
+    sourceExpectation.binding = source.binding->name;
+    sourceExpectation.expectedBindingRevision = source.binding->revision;
+    sourceExpectation.isTargetChecked = true;
+    sourceExpectation.expectedTarget = source.data->self;
+
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(sourceExpectation));
+    transaction.outputs = {
+        DataRevisionDraft{
+            recipeEntity, 0, DataTypes::roiGeometry,
+            { DataInputRef{ "source-data", source.data->self } },
+            std::move(recipe),
+            DataProvenance{
+                std::string(kFeatureId), "capture-recipe", "1", "{}" } },
+        DataRevisionDraft{
+            outputEntity, 0, outputType,
+            { DataInputRef{ "source-data", source.data->self },
+              DataInputRef{ "crop-recipe", recipeRef } },
+            std::move(output),
+            DataProvenance{
+                std::string(kFeatureId), "materialize-crop", "1", "{}" } }
+    };
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(cropResultBinding),
+        resultBinding.revision,
+        true,
+        resultBinding.target,
+        outputRef });
 
     const PublishGuard publishGuard(m_isPublishing);
-    TrustedImageState candidate = *expectedSnapshot;
-    candidate.image = result.imageData;
-    candidate.validityMask = result.maskImage;
-    bool isPublished = false;
-    TrustedImageSnapshot publishedSnapshot;
-    try {
-        isPublished = m_data->SetImageState(
-            std::move(candidate),
-            expectedSnapshot,
-            publishedSnapshot);
-    }
-    catch (...) {
-        isPublished = false;
-    }
-    if (!isPublished) {
-        result.isSucceeded = false;
-        result.failureReason =
-            CropFailure::VersionMismatch;
+    const auto commit = m_data->SetDataCommit(std::move(transaction));
+    if (commit.status != DataCommitStatus::Succeeded) {
+        result.failureReason = CropFailure::VersionMismatch;
         result.message =
-            "Crop image snapshot changed before materialization.";
-        result.imageData = nullptr;
-        result.maskImage = nullptr;
-        std::cout
-            << "[Crop][Materialize] CAS publish rejected"
-            << " expectedVersion=" << expectedSnapshot->version
-            << " | " << GetHistoryText(
-                m_bridge->GetCropHistory())
-            << '\n';
-        return false;
+            "Crop source or active result binding changed before publication.";
+        return result;
     }
-
-    // TrustedFeatureDataPort 保证 true 与同一 published owner 不可分割；
-    // 从这里开始只接管 move-only 准备令牌，禁止再把已发布事务降级成普通失败。
-    m_bridge->SetCropCommit(std::move(*preparedCommit));
-
-    if (!m_rootImage) {
-        m_rootImage = sourceSnapshot;
-        std::cout
-            << "[Crop][Materialize] root captured"
-            << " rootVersion=" << m_rootImage->version
-            << " rootImage="
-            << static_cast<const void*>(
-                m_rootImage->image.GetPointer())
-            << " rootMask="
-            << static_cast<const void*>(
-                m_rootImage->validityMask.GetPointer())
-            << '\n';
-    }
-    if (m_lastImage) {
-        std::cout
-            << "[Crop][Materialize] retire previous"
-            << " version=" << m_lastImage->version
-            << " image="
-            << static_cast<const void*>(
-                m_lastImage->image.GetPointer())
-            << " mask="
-            << static_cast<const void*>(
-                m_lastImage->validityMask.GetPointer())
-            << '\n';
-        m_lastImage.reset();
-    }
-    m_lastImage = std::move(publishedSnapshot);
-    (void)m_bridge->SendCropCommit();
-    const auto historyAfter =
-        m_bridge->GetCropHistory();
-    std::cout << "[Crop][Materialize] baseline complete"
-        << " publishedVersion=" << m_lastImage->version
-        << " image="
-        << static_cast<const void*>(
-            m_lastImage->image.GetPointer())
-        << " mask="
-        << static_cast<const void*>(
-            m_lastImage->validityMask.GetPointer())
-        << " | " << GetHistoryText(historyAfter)
-        << '\n';
-    // 重基准不会产生新的 shader revision，因此不能依赖 shader tick 间接刷新
-    // 标题；此处直接发布 active node 0 和两条历史链的最新状态。
+    result.isSucceeded = true;
+    result.failureReason = CropFailure::None;
+    result.commitId = commit.commitId;
+    result.recipeRevision = recipeRef;
+    result.outputRevision = outputRef;
+    result.message = "Crop recipe and derived output committed.";
+    m_dataState.commitId = commit.commitId;
+    m_dataState.sourceRevision = source.data->self;
+    m_dataState.recipeRevision = recipeRef;
+    m_dataState.outputRevision = outputRef;
     SendStatus();
-    return true;
+    return result;
 }
 
 bool CropHostFeature::Impl::ResetOriginal()
 {
-    if (!m_rootImage
-        || !m_bridge
-        || !m_data
-        || m_isPublishing) {
-        std::cout
-            << "[Crop][History] reject root baseline"
-            << " hasRoot=" << static_cast<bool>(m_rootImage)
-            << " hasBridge=" << static_cast<bool>(m_bridge)
-            << " hasPublisher="
-            << static_cast<bool>(m_data)
-            << " hasSnapshotReader="
-            << static_cast<bool>(m_data)
-            << " isPublishing=" << m_isPublishing
-            << '\n';
+    if (!m_data || m_isPublishing
+        || !GetDataRevisionRefValid(m_dataState.outputRevision)) {
         return false;
     }
-    const auto expectedSnapshot =
-        m_data->GetImageSnapshot();
-    if (!expectedSnapshot
-        || (m_lastImage
-            && expectedSnapshot != m_lastImage)) {
-        std::cout
-            << "[Crop][History] reject root snapshot mismatch"
-            << " hasExpected="
-            << static_cast<bool>(expectedSnapshot)
-            << " hasLast=" << static_cast<bool>(m_lastImage)
-            << " expectedVersion="
-            << (expectedSnapshot
-                ? expectedSnapshot->version : 0)
-            << " lastVersion="
-            << (m_lastImage ? m_lastImage->version : 0)
-            << '\n';
+    const auto graph = m_data->GetDataGraph();
+    const auto output = m_data->GetData(
+        graph, m_dataState.outputRevision);
+    if (!output) return false;
+    const auto source = std::find_if(
+        output->inputs.begin(), output->inputs.end(),
+        [](const DataInputRef& input) {
+            return input.role == "source-data";
+        });
+    if (source == output->inputs.end()) return false;
+    const auto sourceData = m_data->GetData(graph, source->source);
+    const auto primary = m_data->GetDataBinding(
+        graph, primaryVolumeBinding);
+    if (!sourceData || !primary
+        || !GetFacetUsed(
+            graph, sourceData->type, DataFacets::scalarGrid3D)) {
         return false;
     }
-    const auto history = m_bridge->GetCropHistory();
-    std::cout << "[Crop][History] explicit root restore"
-        << " expectedVersion=" << expectedSnapshot->version
-        << " currentImage="
-        << static_cast<const void*>(
-            expectedSnapshot->image.GetPointer())
-        << " rootVersion=" << m_rootImage->version
-        << " rootImage="
-        << static_cast<const void*>(
-            m_rootImage->image.GetPointer())
-        << " rootMask="
-        << static_cast<const void*>(
-            m_rootImage->validityMask.GetPointer())
-        << " | " << GetHistoryText(history)
-        << '\n';
+    DataTransaction transaction;
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        primary->revision,
+        true,
+        primary->target,
+        source->source });
+    const PublishGuard guard(m_isPublishing);
+    return m_data->SetDataCommit(std::move(transaction)).status
+        == DataCommitStatus::Succeeded;
+}
 
-    CropInputSnapshot input;
-    input.dataSource =
-        OrthogonalCropDataSource::ImageData;
-    input.inputVersion =
-        expectedSnapshot->version + 1;
-    input.imageData = m_rootImage->image;
-    input.validityMask = m_rootImage->validityMask;
-    input.imageData->GetBounds(
-        input.inputModelBounds.data());
-    auto preparedCommit = m_bridge->BuildCropCommit(
-        std::move(input), 0);
-    if (!preparedCommit) {
-        std::cout
-            << "[Crop][History] reject root commit preparation"
-            << " | " << GetHistoryText(
-                m_bridge->GetCropHistory())
-            << '\n';
+bool CropHostFeature::Impl::SetPrimaryResult()
+{
+    if (!m_data || m_isPublishing
+        || !GetDataRevisionRefValid(m_dataState.outputRevision)) {
         return false;
     }
+    const auto graph = m_data->GetDataGraph();
+    const auto output = m_data->GetData(
+        graph, m_dataState.outputRevision);
+    const auto primary = m_data->GetDataBinding(
+        graph, primaryVolumeBinding);
+    const auto active = m_data->GetDataBinding(
+        graph, cropResultBinding);
+    if (!output || !primary || !active || !active->target
+        || *active->target != m_dataState.outputRevision
+        || !GetFacetUsed(
+            graph, output->type, DataFacets::scalarGrid3D)) {
+        return false;
+    }
+    DataExpectation activeExpectation;
+    activeExpectation.kind = DataExpectationKind::Binding;
+    activeExpectation.binding = std::string(cropResultBinding);
+    activeExpectation.expectedBindingRevision = active->revision;
+    activeExpectation.isTargetChecked = true;
+    activeExpectation.expectedTarget = active->target;
+    DataTransaction transaction;
+    transaction.expectations.push_back(std::move(activeExpectation));
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(primaryVolumeBinding),
+        primary->revision,
+        true,
+        primary->target,
+        m_dataState.outputRevision });
+    const PublishGuard guard(m_isPublishing);
+    return m_data->SetDataCommit(std::move(transaction)).status
+        == DataCommitStatus::Succeeded;
+}
 
-    const PublishGuard publishGuard(m_isPublishing);
-    TrustedImageState candidate = *m_rootImage;
-    bool isPublished = false;
-    TrustedImageSnapshot publishedSnapshot;
-    try {
-        isPublished = m_data->SetImageState(
-            std::move(candidate),
-            expectedSnapshot,
-            publishedSnapshot);
+bool CropHostFeature::Impl::ClearResultBinding()
+{
+    if (!m_data) return false;
+    const auto graph = m_data->GetDataGraph();
+    const auto binding = m_data->GetDataBinding(graph, cropResultBinding);
+    if (!binding || !binding->target) return true;
+    if (!GetDataRevisionRefValid(m_dataState.outputRevision)
+        || *binding->target != m_dataState.outputRevision) {
+        return true;
     }
-    catch (...) {
-        isPublished = false;
-    }
-    if (!isPublished) {
-        std::cout
-            << "[Crop][History] root CAS publish rejected"
-            << " expectedVersion=" << expectedSnapshot->version
-            << " | " << GetHistoryText(
-                m_bridge->GetCropHistory())
-            << '\n';
-        return false;
-    }
-    m_bridge->SetCropCommit(std::move(*preparedCommit));
-    if (m_lastImage) {
-        std::cout
-            << "[Crop][History] retire materialized"
-            << " version=" << m_lastImage->version
-            << " image="
-            << static_cast<const void*>(
-                m_lastImage->image.GetPointer())
-            << " mask="
-            << static_cast<const void*>(
-                m_lastImage->validityMask.GetPointer())
-            << '\n';
-        m_lastImage.reset();
-    }
-    m_lastImage = std::move(publishedSnapshot);
-    (void)m_bridge->SendCropCommit();
-    std::cout << "[Crop][History] root baseline complete"
-        << " publishedVersion=" << m_lastImage->version
-        << " publishedImage="
-        << static_cast<const void*>(
-            m_lastImage->image.GetPointer())
-        << " publishedMask="
-        << static_cast<const void*>(
-            m_lastImage->validityMask.GetPointer())
-        << " | " << GetHistoryText(
-            m_bridge->GetCropHistory())
-        << '\n';
-    SendStatus();
-    return true;
+    DataTransaction transaction;
+    transaction.bindings.push_back(DataBindingUpdate{
+        std::string(cropResultBinding),
+        binding->revision,
+        true,
+        binding->target,
+        {} });
+    return m_data->SetDataCommit(std::move(transaction)).status
+        == DataCommitStatus::Succeeded;
 }
 
 bool CropHostFeature::Impl::RemoveComplete(
@@ -840,8 +900,7 @@ bool CropHostFeature::Impl::RemoveComplete(
 bool CropHostFeature::Impl::SetCompleteResult(
     const std::shared_ptr<CompleteState>& state,
     const std::shared_ptr<CompleteItem>& item,
-    CropBuildResult result,
-    std::optional<RenderInputStamp> waitInput)
+    CropBuildResult result)
 {
     if (!state || !item) {
         return false;
@@ -855,7 +914,6 @@ bool CropHostFeature::Impl::SetCompleteResult(
         return false;
     }
     item->result = std::move(result);
-    item->waitInput = waitInput;
     return true;
 }
 
@@ -908,46 +966,14 @@ bool CropHostFeature::Impl::SendReadyCompletes()
                 || item->isQueued) {
                 continue;
             }
-            bool isReady = !item->waitInput.has_value();
-            if (item->waitInput) {
-                HostViewTargets targets;
-                targets.viewIds = m_activeViewIds;
-                const auto views = m_views->GetViews(targets);
-                isReady = !views.empty()
-                    && std::all_of(
-                        views.begin(),
-                        views.end(),
-                        [this, &item](const auto& view) {
-                            const auto port =
-                                m_views->GetFeaturePort(view.id);
-                            if (!port) {
-                                return false;
-                            }
-                            const auto stamp =
-                                port->GetRenderInputStamp();
-                            return stamp
-                                && *stamp == *item->waitInput;
-                        });
-            }
-            if (isReady) {
-                item->isQueued = true;
-                readyItems.push_back(item);
-            }
+            item->isQueued = true;
+            readyItems.push_back(item);
         }
     }
 
     const auto state = m_completeState;
     bool isSent = false;
     for (const auto& item : readyItems) {
-        if (item->waitInput) {
-            std::cout
-                << "[Crop][Materialize] render convergence complete"
-                << " version=" << item->waitInput->version
-                << " image="
-                << static_cast<const void*>(
-                    item->waitInput->identity)
-                << '\n';
-        }
         const std::weak_ptr<CompleteState> weakState =
             state;
         const std::weak_ptr<CompleteItem> weakItem =
@@ -973,58 +999,26 @@ bool CropHostFeature::Impl::BuildCropResult(
 {
     if (!onComplete
         || !m_bridge
-        || !SetCropInput(target)
         || !m_completeState
-        || !m_host) {
+        || !m_host
+        || !m_data) {
         return false;
     }
-
-    const auto expectedSnapshot =
-        target.source == CropHostSource::CurrentImage
-        && m_data
-        ? m_data->GetImageSnapshot()
-        : TrustedImageSnapshot{};
-    if (target.source == CropHostSource::CurrentImage
-        && !expectedSnapshot) {
+    auto source = GetCropInput(target);
+    if (!source || !source->binding || !source->data
+        || !m_bridge->SetCropInput(*source)) {
         return false;
     }
-    const TrustedImageSnapshot sourceSnapshot =
-        target.source == CropHostSource::CurrentImage
-        ? (m_rootImage
-            ? m_rootImage
-            : expectedSnapshot)
-        : TrustedImageSnapshot{};
-    CropInputSnapshot rootInput;
-    if (sourceSnapshot) {
-        rootInput.dataSource =
-            OrthogonalCropDataSource::ImageData;
-        rootInput.inputVersion =
-            sourceSnapshot->version;
-        rootInput.imageData =
-            sourceSnapshot->image;
-        rootInput.validityMask =
-            sourceSnapshot->validityMask;
-        if (!GetImageReady(rootInput.imageData)) {
-            return false;
-        }
-        rootInput.imageData->GetBounds(
-            rootInput.inputModelBounds.data());
-    }
-    else {
-        auto polyRoot = GetCropInput(target);
-        if (!polyRoot) {
-            return false;
-        }
-        rootInput = std::move(*polyRoot);
+    DataBinding resultBinding;
+    resultBinding.name = std::string(cropResultBinding);
+    if (const auto current = m_data->GetDataBinding(
+            source->graph, cropResultBinding)) {
+        resultBinding = *current;
     }
     const auto history = m_bridge->GetCropHistory();
     std::cout << "[Crop][Materialize] request"
-        << " expectedVersion="
-        << (expectedSnapshot
-            ? expectedSnapshot->version : 0)
-        << " sourceVersion="
-        << (sourceSnapshot
-            ? sourceSnapshot->version : 0)
+        << " sourceGeneration="
+        << source->data->self.generation
         << " | " << GetHistoryText(history)
         << '\n';
     const auto state = m_completeState;
@@ -1041,41 +1035,22 @@ bool CropHostFeature::Impl::BuildCropResult(
     const std::weak_ptr<CompleteState> weakState = state;
     const std::weak_ptr<CompleteItem> weakItem = item;
     auto onResult =
-        [this, sourceSnapshot, expectedSnapshot,
+        [this, source = *source, resultBinding,
             weakState, weakItem](
-            CropBuildResult result) mutable {
+            CropMaterializationCandidate candidate) mutable {
             const auto state = weakState.lock();
             const auto item = weakItem.lock();
-            std::optional<RenderInputStamp> waitInput;
-            if (result.isSucceeded
-                && result.resolvedDataSource
-                    == OrthogonalCropDataSource::ImageData) {
-                if (SetImageResult(
-                        sourceSnapshot,
-                        expectedSnapshot, result)) {
-                    waitInput = RenderInputStamp{
-                        result.imageData.GetPointer(),
-                        expectedSnapshot->version + 1
-                    };
-                    std::cout
-                        << "[Crop][Materialize] waiting render convergence"
-                        << " version=" << waitInput->version
-                        << " image="
-                        << static_cast<const void*>(
-                            waitInput->identity)
-                        << '\n';
-                }
-            }
+            auto result = SetBuildResult(
+                source, resultBinding, std::move(candidate));
             if (!Impl::SetCompleteResult(
                     state,
                     item,
-                    std::move(result),
-                    waitInput)) {
+                    std::move(result))) {
                 return;
             }
         };
     const bool isAccepted = m_bridge->BuildCropResult(
-        std::move(rootInput),
+        std::move(*source),
         std::move(onResult));
     if (!isAccepted) {
         // Bridge 可以在同步校验失败时先回传内部结果；入口返回 false 时必须丢弃，
@@ -1164,11 +1139,12 @@ bool CropHostFeature::Impl::SendRequest(
                 *request.target, std::move(onComplete));
         }
         return false;
+    case CropHostAction::SetPrimaryResult:
+        return SendActionLog(
+            "SetPrimaryResult", SetPrimaryResult());
     case CropHostAction::SetPolyData:
-        if (request.polyData && request.sourceVersion) {
-            return SetPolyData(
-                std::move(request.polyData),
-                *request.sourceVersion);
+        if (request.polyData) {
+            return SetPolyData(std::move(request.polyData));
         }
         return false;
     case CropHostAction::ClearPolyData:
@@ -1180,11 +1156,14 @@ bool CropHostFeature::Impl::SendRequest(
     case CropHostAction::Exit:
         m_status.reset();
         {
+            const bool isResultCleared = ClearResultBinding();
             const bool isExited = m_bridge->ExitCrop();
             const bool isQualityRestored =
                 !isExited || SetActiveViews({});
+            if (isResultCleared) m_dataState = {};
             return SendActionLog(
-                "Exit", isExited && isQualityRestored);
+                "Exit",
+                isResultCleared && isExited && isQualityRestored);
         }
     case CropHostAction::None:
         return false;
@@ -1194,7 +1173,7 @@ bool CropHostFeature::Impl::SendRequest(
 
 CropHostState CropHostFeature::Impl::GetState() const
 {
-    CropHostState state;
+    CropHostState state = m_dataState;
     if (!m_isAttached
         || !m_bridge
         || m_ownerThread != std::this_thread::get_id()) {
@@ -1322,11 +1301,12 @@ InteractionResult CropHostFeature::Impl::OnInput(
                 << " succeeded=" << result.isSucceeded
                 << " failure="
                 << static_cast<int>(result.failureReason)
-                << " inputVersion=" << result.inputVersion
+                << " sourceGeneration="
+                << result.sourceRevision.generation
                 << " materializedPrefix="
                 << result.nodeCount
-                << " operationCount="
-                << result.operations.size()
+                << " outputGeneration="
+                << result.outputRevision.generation
                 << " message=\"" << result.message
                 << "\"\n";
         };
@@ -1409,6 +1389,8 @@ const char* CropHostFeature::Impl::GetActionText(
     case CropHostAction::Next: return "Next";
     case CropHostAction::Node: return "Node";
     case CropHostAction::BuildResult: return "BuildResult";
+    case CropHostAction::SetPrimaryResult:
+        return "SetPrimaryResult";
     case CropHostAction::SetPolyData: return "SetPolyData";
     case CropHostAction::ClearPolyData: return "ClearPolyData";
     case CropHostAction::RestoreOriginal:
@@ -1505,6 +1487,28 @@ CropHostFeature::~CropHostFeature() noexcept = default;
 std::string_view CropHostFeature::GetFeatureId() const noexcept
 {
     return kFeatureId;
+}
+
+FeatureDataContract CropHostFeature::GetDataContract() const
+{
+    return FeatureDataContract{
+        {
+            DataInputSpec{
+                "source-image", DataFacets::scalarGrid3D, false },
+            DataInputSpec{
+                "source-mesh", DataFacets::surfaceMesh, false }
+        },
+        {
+            DataOutputSpec{
+                "crop-recipe", DataTypes::roiGeometry,
+                { DataFacets::roiGeometry } },
+            DataOutputSpec{
+                "derived-image", DataTypes::imageGrid3D,
+                { DataFacets::scalarGrid3D } },
+            DataOutputSpec{
+                "derived-mesh", DataTypes::surfaceMesh,
+                { DataFacets::surfaceMesh } }
+        } };
 }
 
 bool CropHostFeature::AttachHost(

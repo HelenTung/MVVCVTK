@@ -32,6 +32,7 @@ function(BuildGapTests target outputName projectLabel)
         ${target}
         PRIVATE
             mvvcvtk_host_test_internal
+            MVVCVTK::Host
             MVVCVTK::GapAnalysis
             ${MVVCVTK_VTK_TARGETS}
     )

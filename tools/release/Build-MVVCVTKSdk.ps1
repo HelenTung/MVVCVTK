@@ -2,6 +2,7 @@
 param(
     [string]$Preset = 'vs2026-x64',
     [string]$PackageRevision,
+    [string]$DepsRoot,
     [string]$DefXRoot,
     [switch]$SkipTests,
     [switch]$SkipCleanRoom
@@ -710,7 +711,14 @@ if ([IO.Path]::GetFullPath($verifyBase).StartsWith(
     throw 'Clean-room verification must run outside the source repository.'
 }
 $packageRoot = Join-Path $repoRoot 'out\packages'
-$depsRoot = Join-Path $repoRoot 'deps\official'
+if ([string]::IsNullOrWhiteSpace($DepsRoot)) {
+    $DepsRoot = Join-Path $repoRoot 'deps\official'
+}
+$dependenciesRoot = [IO.Path]::GetFullPath($DepsRoot)
+if (-not [IO.Directory]::Exists($dependenciesRoot)) {
+    throw "Dependency root is missing: $dependenciesRoot"
+}
+Get-SafeAncestors $dependenciesRoot
 if ([string]::IsNullOrWhiteSpace($DefXRoot)) {
     $DefXRoot = Join-Path $repoRoot 'deps\third_party\defx'
 }
@@ -763,7 +771,7 @@ try {
     Start-Command $script:cmakePath @(
         '--preset', $Preset,
         '-B', $buildRoot,
-        "-DMVVCVTK_DEPS_ROOT=$depsRoot",
+        "-DMVVCVTK_DEPS_ROOT=$dependenciesRoot",
         "-DMVVCVTK_DEFX_ROOT=$defxRootPath"
     )
     $null = Get-BuildInfo $buildRoot
@@ -806,7 +814,7 @@ try {
             '--prefix', $stage
         )
     }
-    Build-SdkDependencies $depsRoot (Join-Path $stage 'deps\official')
+    Build-SdkDependencies $dependenciesRoot (Join-Path $stage 'deps\official')
 
     Start-Command $powerShellPath @(
         '-NoProfile',

@@ -42,11 +42,9 @@ bool GetBoundsValid(const CropBoundsDouble6Array& bounds)
 RenderInputStamp GetInputStamp(const CropInputSnapshot& input)
 {
     RenderInputStamp stamp;
-    stamp.version = input.inputVersion;
-    stamp.identity = input.dataSource
-        == OrthogonalCropDataSource::ImageData
-        ? static_cast<const void*>(input.imageData.GetPointer())
-        : static_cast<const void*>(input.polyData.GetPointer());
+    if (input.data) {
+        stamp.dataRevision = input.data->self;
+    }
     return stamp;
 }
 }
@@ -86,9 +84,9 @@ public:
     };
 
     struct BuildTask final {
-        std::future<CropBuildResult> result;
+        std::future<CropMaterializationCandidate> result;
         std::thread worker;
-        CropBuildCallback callback;
+        CropCandidateCallback callback;
         CropBuildParams params;
     };
 
@@ -120,7 +118,7 @@ public:
     bool SendShaderCommit();
     bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropBuildCallback onComplete);
+        CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
     bool SendBuildResult();
     bool GetLeaseReady() const;
@@ -157,7 +155,7 @@ private:
     void ClearShaderStage();
     void ClearShader();
     void ClearTargets();
-    CropBuildResult BuildResultFailure(
+    CropMaterializationCandidate BuildResultFailure(
         const CropBuildParams& params,
         CropFailure failureReason,
         const char* message) const;
@@ -509,7 +507,8 @@ CropBridge::Impl::BuildCropCommit(
         || !m_pendingOps.empty()
         || m_hasBaseShader
         || !CropAlgorithm::GetInputValid(input)
-        || input.dataSource != m_input.dataSource
+        || static_cast<bool>(input.image)
+            != static_cast<bool>(m_input.image)
         || !GetTargetsReady()
         || m_cursor > m_history.size()
         || baseNodeCount > m_allHistory.size()) {
@@ -841,7 +840,8 @@ bool CropBridge::Impl::SetCandidate(CropOpItem operation)
             std::cout
                 << "[Crop][Shader] operation queued"
                 << " pendingOps=" << m_pendingOps.size()
-                << " inputVersion=" << m_input.inputVersion
+                << " sourceGeneration="
+                << (m_input.data ? m_input.data->self.generation : 0)
                 << '\n';
         }
         return true;
@@ -1418,15 +1418,14 @@ CropMatrixDouble16Array CropBridge::Impl::GetWorldToInput() const
     return values;
 }
 
-CropBuildResult CropBridge::Impl::BuildResultFailure(
+CropMaterializationCandidate CropBridge::Impl::BuildResultFailure(
     const CropBuildParams& params,
     const CropFailure failureReason,
     const char* message) const
 {
-    CropBuildResult result;
-    result.resolvedDataSource = params.dataSource;
+    CropMaterializationCandidate result;
     result.failureReason = failureReason;
-    result.inputVersion = params.inputVersion;
+    result.sourceRevision = params.sourceRevision;
     result.nodeCount = params.nodeCount;
     result.operations = params.operations;
     result.message = message;
@@ -1435,15 +1434,16 @@ CropBuildResult CropBridge::Impl::BuildResultFailure(
 
 bool CropBridge::Impl::BuildCropResult(
     CropInputSnapshot input,
-    CropBuildCallback onComplete)
+    CropCandidateCallback onComplete)
 {
     if (!onComplete) {
         return false;
     }
 
     CropBuildParams params;
-    params.dataSource = input.dataSource;
-    params.inputVersion = input.inputVersion;
+    if (input.data) {
+        params.sourceRevision = input.data->self;
+    }
     const std::size_t absoluteNodeCount =
         m_baseNodeCount + m_cursor;
     params.nodeCount = absoluteNodeCount;
@@ -1468,7 +1468,8 @@ bool CropBridge::Impl::BuildCropResult(
         || params.operations.size() != params.nodeCount
         || m_baseNodeCount + m_history.size()
             != m_allHistory.size()
-        || input.dataSource != m_input.dataSource
+        || static_cast<bool>(input.image)
+            != static_cast<bool>(m_input.image)
         || input.inputModelBounds != m_input.inputModelBounds
         || !CropAlgorithm::GetInputValid(input)
         || !CropAlgorithm::GetInputValid(m_input)
@@ -1543,8 +1544,8 @@ bool CropBridge::Impl::BuildCropResult(
         << "[Crop][Materialize] widget frozen"
         << " shape=" << static_cast<int>(m_geometryType)
         << " node=" << m_buildTask->params.nodeCount
-        << " sourceVersion="
-        << m_buildTask->params.inputVersion
+        << " sourceGeneration="
+        << m_buildTask->params.sourceRevision.generation
         << '\n';
     return true;
 }
@@ -1563,7 +1564,7 @@ bool CropBridge::Impl::SendBuildResult()
     }
     auto active = std::move(*m_buildTask);
     m_buildTask.reset();
-    CropBuildResult result;
+    CropMaterializationCandidate result;
     try {
         result = active.result.get();
     }
@@ -1635,8 +1636,7 @@ bool CropBridge::Impl::GetTargetsReady() const
     }
     const RenderInputStamp inputStamp =
         GetInputStamp(m_input);
-    return inputStamp.identity
-        && inputStamp.version != 0
+    return GetDataRevisionRefValid(inputStamp.dataRevision)
         && std::all_of(
             m_targets.begin(),
             m_targets.end(),
@@ -1677,7 +1677,8 @@ bool CropBridge::Impl::ClearBaseShader()
     }
     std::cout
         << "[Crop][Materialize] retired shader cleared"
-        << " inputVersion=" << m_input.inputVersion
+        << " sourceGeneration="
+        << (m_input.data ? m_input.data->self.generation : 0)
         << " baseNode=" << m_baseNodeCount
         << " activeNode=" << m_cursor
         << '\n';
@@ -1970,7 +1971,7 @@ bool CropBridge::SendShaderCommit()
 }
 bool CropBridge::BuildCropResult(
     CropInputSnapshot rootInput,
-    CropBuildCallback onComplete)
+    CropCandidateCallback onComplete)
 {
     return m_impl->GetLeaseReady()
         && m_impl->BuildCropResult(

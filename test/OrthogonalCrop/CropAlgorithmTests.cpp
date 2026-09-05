@@ -1,6 +1,7 @@
 #include "Algorithms/CropAlgorithm.h"
 #include "PlanarTestSuites.h"
 #include "Routing/CropRouter.h"
+#include "../TestDataPort.h"
 
 #include <vtkCubeSource.h>
 #include <vtkDataArray.h>
@@ -15,10 +16,19 @@
 #include <cstddef>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace {
-int inputIdentity = 0;
+
+DataRevisionRef GetSourceRevision(
+    const std::uint64_t generation = 7,
+    const std::uint8_t entityKey = 1)
+{
+    DataEntityId entity;
+    entity.bytes[0] = entityKey;
+    return { entity, generation };
+}
 
 bool SetExpect(const bool isExpected, const char* message)
 {
@@ -51,14 +61,14 @@ CropShaderPayload BuildPayload(
     const std::vector<CropOpItem>& operations,
     const std::size_t nodeCount,
     const std::uint64_t revision = 1,
-    const std::uint64_t inputVersion = 7)
+    const DataRevisionRef sourceRevision = GetSourceRevision())
 {
     const auto tableResult = CropAlgorithm::BuildPredicateTable(
         operations,
         operations.size());
     CropShaderPayload payload;
     payload.revision = revision;
-    payload.sourceStamp = { &inputIdentity, inputVersion };
+    payload.sourceStamp = { sourceRevision };
     payload.nodeCount = nodeCount;
     payload.predicateTable = tableResult.predicateTable;
     return payload;
@@ -229,52 +239,59 @@ bool StartSnapshotCase()
     image->SetDimensions(2, 2, 2);
     image->AllocateScalars(VTK_UNSIGNED_CHAR, 1);
 
+    TestDataPort data;
+    const auto imageView = data.SetPrimaryImage(image);
     CropInputSnapshot input;
-    input.dataSource = OrthogonalCropDataSource::ImageData;
-    input.inputVersion = 1;
+    input.graph = imageView->graph;
+    input.binding = imageView->binding;
+    input.data = imageView->data;
     input.inputModelBounds = { 0.0, 1.0, 0.0, 1.0, 0.0, 1.0 };
-    input.imageData = image;
+    input.image = imageView;
 
     bool isPassed = SetExpect(
         CropAlgorithm::GetInputValid(input),
-        "A versioned image snapshot with finite bounds should be valid.");
+        "A graph image snapshot with finite bounds should be valid.");
     const auto same = input;
     isPassed = SetExpect(
         CropAlgorithm::GetInputSame(input, same),
-        "An unchanged source/version/pointer/bounds snapshot should compare equal.") && isPassed;
+        "An unchanged revision and bounds snapshot should compare equal.") && isPassed;
 
+    const auto changedView = data.SetPrimaryImage(image);
     auto changed = input;
-    changed.inputVersion = 2;
+    changed.graph = changedView->graph;
+    changed.binding = changedView->binding;
+    changed.data = changedView->data;
+    changed.image = changedView;
     isPassed = SetExpect(
         !CropAlgorithm::GetInputSame(input, changed),
-        "Input version changes should invalidate snapshot identity.") && isPassed;
+        "A different source revision should invalidate snapshot identity.") && isPassed;
     changed = input;
     changed.inputModelBounds[1] = 2.0;
     isPassed = SetExpect(
         !CropAlgorithm::GetInputSame(input, changed),
         "Input bounds changes should invalidate snapshot identity.") && isPassed;
     changed = input;
-    changed.inputVersion = 0;
+    changed.data.reset();
+    changed.image.reset();
     isPassed = SetExpect(
         !CropAlgorithm::GetInputValid(changed),
-        "Zero input versions should be rejected.") && isPassed;
+        "A missing source revision should be rejected.") && isPassed;
     changed = input;
-    changed.polyData = vtkSmartPointer<vtkPolyData>::New();
+    changed.mesh = std::make_shared<const VtkSurfaceMeshView>(
+        VtkSurfaceMeshView{
+            input.data, vtkSmartPointer<vtkPolyData>::New() });
     isPassed = SetExpect(
         !CropAlgorithm::GetInputValid(changed),
         "Image snapshots should reject a simultaneous PolyData payload.") && isPassed;
     return isPassed;
 }
 
-CropBuildParams BuildParams(
-    const OrthogonalCropDataSource dataSource,
-    const CropOpItem& operation)
+CropBuildParams BuildParams(const CropOpItem& operation)
 {
     CropBuildParams params;
-    params.dataSource = dataSource;
+    params.sourceRevision = GetSourceRevision();
     params.operations = { operation };
     params.nodeCount = 1;
-    params.inputVersion = 7;
     params.availableRamBytes = 64ULL * 1024ULL * 1024ULL;
     return params;
 }
@@ -299,9 +316,7 @@ bool StartImageBuildCase()
 
     auto operation = BuildPlane(1);
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    const auto params = BuildParams(
-        OrthogonalCropDataSource::ImageData,
-        operation);
+    const auto params = BuildParams(operation);
     const auto result = CropAlgorithm::GetResult(
         image,
         nullptr,
@@ -311,7 +326,7 @@ bool StartImageBuildCase()
     bool isPassed = SetExpect(
         result.isSucceeded
             && result.failureReason == CropFailure::None
-            && result.inputVersion == 7
+            && result.sourceRevision == params.sourceRevision
             && result.nodeCount == 1
             && result.operations.size() == 1
             && result.imageData
@@ -513,7 +528,7 @@ bool StartImageBuildCase()
     const auto emptyResult = CropAlgorithm::GetResult(
         image,
         nullptr,
-        BuildParams(OrthogonalCropDataSource::ImageData, removeAll),
+        BuildParams(removeAll),
         BuildPayload({ removeAll }, 1));
     isPassed = SetExpect(
         !emptyResult.isSucceeded
@@ -532,9 +547,7 @@ bool StartPolyBuildCase()
 
     auto operation = BuildPlane(1);
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    const auto params = BuildParams(
-        OrthogonalCropDataSource::PolyData,
-        operation);
+    const auto params = BuildParams(operation);
     const auto result = CropAlgorithm::GetResult(
         cube->GetOutput(),
         params,
@@ -564,18 +577,23 @@ bool StartRouterTaskCase()
     values[0] = 1;
     values[1] = 2;
 
+    TestDataPort data;
+    const auto imageView = data.SetPrimaryImage(image);
     CropInputSnapshot input;
-    input.dataSource = OrthogonalCropDataSource::ImageData;
-    input.inputVersion = 7;
+    input.graph = imageView->graph;
+    input.binding = imageView->binding;
+    input.data = imageView->data;
     input.inputModelBounds = { 0.0, 1.0, -0.5, 0.5, -0.5, 0.5 };
-    input.imageData = image;
+    input.image = imageView;
 
     auto operation = BuildPlane(1);
     operation.planeCenterInInputModel = { -1.0, 0.0, 0.0 };
     operation.planeNormalInInputModel = { 1.0, 0.0, 0.0 };
-    auto params = BuildParams(OrthogonalCropDataSource::ImageData, operation);
+    auto params = BuildParams(operation);
+    params.sourceRevision = imageView->data->self;
     CropRouter router;
-    const auto payload = BuildPayload(params.operations, params.nodeCount);
+    const auto payload = BuildPayload(
+        params.operations, params.nodeCount, 1, params.sourceRevision);
     auto task = router.BuildResultTask(input, params, payload);
     bool isPassed = SetExpect(
         task.has_value(),
@@ -587,13 +605,15 @@ bool StartRouterTaskCase()
     (*task)();
     const auto result = future.get();
     isPassed = SetExpect(
-        result.isSucceeded && result.inputVersion == 7 && result.nodeCount == 1,
-        "Router build task should return the captured input version and prefix.") && isPassed;
+        result.isSucceeded
+            && result.sourceRevision == imageView->data->self
+            && result.nodeCount == 1,
+        "Router build task should return the captured source revision and prefix.") && isPassed;
 
-    params.inputVersion = 8;
+    params.sourceRevision = GetSourceRevision(8, 2);
     isPassed = SetExpect(
         !router.BuildResultTask(input, params, payload).has_value(),
-        "Router should reject params/snapshot version mismatch before worker creation.") && isPassed;
+        "Router should reject params/snapshot revision mismatch before worker creation.") && isPassed;
     return isPassed;
 }
 }

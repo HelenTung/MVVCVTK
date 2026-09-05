@@ -211,7 +211,7 @@ PartSegmentationService::~PartSegmentationService() noexcept
 }
 
 PartAdmissionStatus PartSegmentationService::Start(
-    TrustedImageSnapshot source,
+    VtkImageGridSnapshot source,
     PartSegmentationStartParams params,
     const std::size_t maxWorkingBytes,
     const std::uint64_t requestId)
@@ -349,7 +349,10 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
 {
     PartLabelCandidate candidate;
     candidate.requestId = job.requestId;
-    candidate.sourceVersion = job.source ? job.source->version : 0;
+    candidate.sourceRevision = job.source && job.source->data
+        ? job.source->data->self : DataRevisionRef{};
+    candidate.sourceBindingRevision = job.source && job.source->binding
+        ? job.source->binding->revision : 0;
     candidate.failureReason = PartFailureReason::InvalidSource;
     candidate.message = "Part source is unavailable.";
     if (!job.source || !job.source->image) return candidate;
@@ -362,11 +365,6 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         if (!image || !GetImageGeometry(*image, volume)) {
             candidate.failureReason = PartFailureReason::InvalidGeometry;
             candidate.message = "Part source geometry is invalid.";
-            return candidate;
-        }
-        if (volume.dimensions != job.source->dims) {
-            candidate.failureReason = PartFailureReason::InvalidGeometry;
-            candidate.message = "Part source dimensions are inconsistent.";
             return candidate;
         }
 

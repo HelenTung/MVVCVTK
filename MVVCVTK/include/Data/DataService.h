@@ -2,21 +2,30 @@
 
 #include "App/AppTypes.h"
 #include "Data/ImageReadTypes.h"
-#include "Data/TrustedImageState.h"
 #include "Data/VolumeTypes.h"
+#include "Host/TrustedDataPort.h"
 #include "Platform/TaskStopToken.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 
-class AbstractDataManager {
-public:
-    virtual ~AbstractDataManager() = default;
+struct DataLoadStage final {
+    DataGraphSnapshot baseGraph;
+    DataBinding expectedPrimary;
+    DataRevisionDraft output;
+    DataRevisionRef outputRef;
+    VtkImageGridSnapshot image;
+};
 
-    virtual TrustedImageSnapshot GetImageSnapshot() const = 0;
+using DataLoadStageSnapshot = std::shared_ptr<const DataLoadStage>;
+
+class AbstractDataManager : public TrustedDataPort {
+public:
+    ~AbstractDataManager() noexcept override = default;
+
     virtual vtkSmartPointer<vtkImageData> GetVtkImage() const = 0;
-    virtual TrustedImageState GetImageState() const = 0;
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;
     virtual ImageReadResult GetImageReadResult(
         std::size_t maxReadBytes = imageReadLimit) const = 0;
@@ -27,14 +36,11 @@ public:
         const ImageReadRequest& request,
         std::size_t voxelOffset,
         const TaskStopToken& stopToken) const = 0;
-    virtual bool SetCurrentData(
-        TrustedImageState state,
-        const TrustedImageSnapshot& expectedSnapshot,
-        TrustedImageSnapshot& publishedSnapshot) = 0;
     virtual std::array<double, 2> GetScalarRange() const = 0;
     virtual std::array<double, 3> GetSpacing() const = 0;
     virtual bool SetSpacing(const std::array<double, 3>& spacing) = 0;
-    virtual DataVersion GetDataVersion() const = 0;
+    virtual DataBindingRevision GetPrimaryBindingRevision() const = 0;
+
     virtual bool SetDataLoaded(
         const std::string& filePath,
         const VolumeLayout& layout) = 0;
@@ -56,24 +62,19 @@ public:
             && SetFromBuffer(buffer)
             && !stopToken.GetIsStopped();
     }
-    virtual bool SetCurrentFromPending(bool& hasPending) = 0;
-    virtual TrustedImageSnapshot GetPendingSnapshot() const { return {}; }
-    // 成功时必须把 expectedPending 的同一个 owner 发布为 current，并返回该 owner。
-    virtual bool SetCurrentFromPending(
-        const TrustedImageSnapshot& expectedPending,
-        TrustedImageSnapshot& publishedSnapshot)
-    {
-        (void)expectedPending;
-        publishedSnapshot.reset();
-        return false;
-    }
-    virtual bool ClearPending() = 0;
+
+    virtual DataLoadStageSnapshot GetLoadStage() const = 0;
+    virtual bool SetLoadCommit(
+        const DataLoadStageSnapshot& expectedStage,
+        VtkImageGridSnapshot& published) = 0;
+    virtual bool ClearLoadStage() = 0;
+
     virtual bool ExportData(
-        const TrustedImageSnapshot& imageSnapshot,
+        const VtkImageGridSnapshot& imageSnapshot,
         const std::string& outputDir,
         const DataExportParams& params) = 0;
     virtual bool ExportData(
-        const TrustedImageSnapshot& imageSnapshot,
+        const VtkImageGridSnapshot& imageSnapshot,
         const std::string& outputDir,
         const DataExportParams& params,
         const TaskStopToken& stopToken)

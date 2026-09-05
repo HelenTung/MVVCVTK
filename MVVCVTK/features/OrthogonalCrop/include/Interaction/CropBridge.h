@@ -1,6 +1,7 @@
 #pragma once
 
 #include "OrthogonalCropTypes.h"
+#include "Algorithms/CropAlgorithm.h"
 #include "App/Services/FeatureViewService.h"
 
 #include <cstddef>
@@ -20,7 +21,8 @@ struct CropViewRequest final {
     std::vector<std::shared_ptr<FeatureViewService>> targetServices;
 };
 
-using CropBuildCallback = std::function<void(CropBuildResult)>;
+using CropCandidateCallback =
+    std::function<void(CropMaterializationCandidate)>;
 
 class CropBridge final {
 private:
@@ -85,7 +87,7 @@ public:
     // 从 rootInput 对完整 allHistory 前缀做一次融合物化，不生成节点级中间 mask。
     bool BuildCropResult(
         CropInputSnapshot rootInput,
-        CropBuildCallback onComplete);
+        CropCandidateCallback onComplete);
     bool GetBuildTickNeeded() const;
     bool SendBuildResult();
 

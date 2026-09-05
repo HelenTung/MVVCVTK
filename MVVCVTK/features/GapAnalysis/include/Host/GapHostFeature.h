@@ -37,7 +37,7 @@ struct GapHostConfig {
 };
 
 using GapHostCallback =
-    std::function<void(bool isSuccess)>;
+    std::function<void(GapHostResult result)>;
 
 class GapHostFeature final
     : public HostFeature
@@ -52,6 +52,7 @@ public:
     GapHostFeature& operator=(GapHostFeature&&) = delete;
 
     std::string_view GetFeatureId() const noexcept override;
+    FeatureDataContract GetDataContract() const override;
     bool AttachHost(const HostFeatureContext& context) override;
     bool DetachHost() override;
     bool OnHostTick() override;

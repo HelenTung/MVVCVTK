@@ -13,7 +13,7 @@
 #include "App/FeatureTypes.h"
 #include "App/VolumePresentationTypes.h"
 #include "App/ViewTypes.h"
-#include "Data/DataVersion.h"
+#include "Data/DataGraphTypes.h"
 
 #include <algorithm>
 #include <array>

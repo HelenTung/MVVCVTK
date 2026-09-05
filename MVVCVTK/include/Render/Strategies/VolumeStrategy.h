@@ -158,7 +158,7 @@ private:
     std::array<int, 6> m_maskExtent{};
     std::array<double, 3> m_inputSpacing{};
     std::array<double, 3> m_maskSpacing{};
-    std::uint64_t m_dataVersion = 0;
+    std::uint64_t m_inputEpoch = 0;
     std::uint64_t m_maskVersion = 0;
     VolumeQuality m_quality = VolumeQuality::Auto;
     bool m_isDenoiseOn = false;

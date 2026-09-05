@@ -1,5 +1,7 @@
 #include "QtHostMethodCases.h"
+#include "../TestDataPort.h"
 
+#include "Data/DataPayloads.h"
 #include "Host/GapHostFeature.h"
 #include "Host/HostViewRuntimeRegistry.h"
 #include "Host/Types/HostRequestTypes.h"
@@ -13,6 +15,8 @@
 #include <vtkRenderWindowInteractor.h>
 #include <vtkRenderer.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -119,21 +123,35 @@ public:
     }
 };
 
-class DataPortStub final : public TrustedFeatureDataPort {
+class ContextProbeFeature final : public HostFeature {
 public:
-    TrustedImageSnapshot GetImageSnapshot() const override
+    std::string_view GetFeatureId() const noexcept override
     {
-        return {};
+        return "gap.context.probe";
     }
 
-    bool SetImageState(
-        TrustedImageState,
-        const TrustedImageSnapshot&,
-        TrustedImageSnapshot&) override
+    bool AttachHost(const HostFeatureContext& context) override
     {
-        return false;
+        if (!context.data) return false;
+        m_data = context.data;
+        return true;
     }
+
+    bool DetachHost() override
+    {
+        m_data.reset();
+        return true;
+    }
+
+    bool OnHostTick() override
+    {
+        return true;
+    }
+
+    std::shared_ptr<TrustedDataPort> m_data;
 };
+
+using DataPortStub = TestDataPort;
 
 HostSessionConfig GetGapSessionConfig()
 {
@@ -301,6 +319,72 @@ int GetPropCount(vtkRenderer* renderer)
     return count;
 }
 
+bool GetFormalGapResultValid(
+    const TrustedDataPort& data,
+    const GapHostState& state)
+{
+    const auto graph = data.GetDataGraph();
+    const auto labels = data.GetData(graph, state.labelMap);
+    const auto voids = data.GetData(graph, state.voidTable);
+    const auto mesh = data.GetData(graph, state.voidMesh);
+    const auto statistics = data.GetData(graph, state.statisticsData);
+    const auto result = data.GetData(graph, state.resultSet);
+    const auto* voidTable = voids
+        ? dynamic_cast<const RecordTablePayload*>(voids->payload.get())
+        : nullptr;
+    const auto* statisticsTable = statistics
+        ? dynamic_cast<const RecordTablePayload*>(statistics->payload.get())
+        : nullptr;
+    const auto* resultSet = result
+        ? dynamic_cast<const DataCollectionPayload*>(result->payload.get())
+        : nullptr;
+    if (!labels || !voidTable || !mesh || !statisticsTable || !resultSet
+        || !voidTable->GetValid() || !statisticsTable->GetValid()
+        || !resultSet->GetValid()) {
+        return false;
+    }
+
+    constexpr std::array<std::string_view, 27> voidColumns = {
+        "void-id", "voxel-count", "volume-mm3",
+        "equivalent-diameter-mm", "radius-mm", "diameter-mm",
+        "center-mm", "centroid-mm", "voxel-bbox", "seed-voxel",
+        "gray-min", "gray-max", "gray-mean",
+        "gray-standard-deviation", "gray-deviation", "gap-mm",
+        "compactness", "surface-area-mm2", "sphericity",
+        "pca-deviation", "pca-maximum-deviation-ratio",
+        "pca-minimum-deviation-ratio", "projected-area-x-mm2",
+        "projected-area-y-mm2", "projected-area-z-mm2",
+        "projected-size-voxel", "defect-probability"
+    };
+    const auto& columns = voidTable->GetColumns();
+    const bool hasEveryVoidColumn = columns.size() == voidColumns.size()
+        && std::all_of(
+            voidColumns.begin(), voidColumns.end(),
+            [&columns](const std::string_view name) {
+                return std::any_of(
+                    columns.begin(), columns.end(),
+                    [name](const RecordColumn& column) {
+                        return column.name == name;
+                    });
+            });
+    const auto hasResultItem = [resultSet](
+        const std::string_view role,
+        const DataRevisionRef& ref) {
+        return std::any_of(
+            resultSet->GetItems().begin(), resultSet->GetItems().end(),
+            [role, &ref](const DataCollectionEntry& item) {
+                return item.role == role && item.data == ref;
+            });
+    };
+    return hasEveryVoidColumn
+        && statisticsTable->GetColumns().size() == 5
+        && resultSet->GetItems().size() == 4
+        && hasResultItem("labels", state.labelMap)
+        && hasResultItem("void-regions", state.voidTable)
+        && hasResultItem("void-surface", state.voidMesh)
+        && hasResultItem("statistics", state.statisticsData);
+}
+
 } // namespace
 
 int GetGapFailCount()
@@ -358,18 +442,23 @@ int GetGapFailCount()
     const bool isUnattachedRejected =
         !feature->SendRequest(
             GetStartRequest(start),
-            [&unattachedCallbackCount](bool) {
+            [&unattachedCallbackCount](GapHostResult) {
                 ++unattachedCallbackCount;
             });
     const auto beforeUseCount = feature.use_count();
     const bool isBuilt = session.BuildSession();
-    const bool isAttached = session.AttachFeature(feature);
+    auto contextProbe = std::make_shared<ContextProbeFeature>();
+    const bool isProbeAttached =
+        isBuilt && session.AttachFeature(contextProbe);
+    const bool isAttached =
+        isProbeAttached && session.AttachFeature(feature);
     const bool isInputAttached =
         session.AttachHotkeys({});
     const auto* endpoint = session.GetPrimaryEndpoint();
     const auto* sliceEndpoint =
         session.GetRenderViewEndpoint("gap-slice");
     if (!isBuilt || !isAttached || !isInputAttached
+        || !contextProbe->m_data
         || !endpoint
         || !endpoint->renderer
         || !endpoint->interactor
@@ -420,7 +509,7 @@ int GetGapFailCount()
             GapHostAction::Start))
         && !feature->SendRequest(
             GetStartRequest(missingTarget),
-            [&invalidStartCallbackCount](bool) {
+            [&invalidStartCallbackCount](GapHostResult) {
                 ++invalidStartCallbackCount;
             })
         && !feature->SendRequest(GetGapRequest(
@@ -429,13 +518,13 @@ int GetGapFailCount()
             GapHostAction::Exit))
         && !feature->SendRequest(
             GetGapRequest(GapHostAction::Overlay),
-            [](bool) {});
+            [](GapHostResult) {});
     bool isWrongThreadAccepted = true;
     int wrongThreadCallbackCount = 0;
     std::thread wrongThread([&] {
         isWrongThreadAccepted = feature->SendRequest(
             GetStartRequest(start),
-            [&wrongThreadCallbackCount](bool) {
+            [&wrongThreadCallbackCount](GapHostResult) {
                 ++wrongThreadCallbackCount;
             });
     });
@@ -462,6 +551,8 @@ int GetGapFailCount()
     }
     SendTicks(*endpoint, 1);
     const auto hotkeyStartState = feature->GetState();
+    const bool hasFormalGapResult = GetFormalGapResultValid(
+        *contextProbe->m_data, hotkeyStartState);
     const auto hotkeyPrimaryPropCount =
         endpoint->renderer->GetViewProps()->GetNumberOfItems();
     const auto hotkeySlicePropCount =
@@ -495,6 +586,7 @@ int GetGapFailCount()
             && hotkeyStartState.analysisState
                 == GapAnalysisState::Succeeded
             && hotkeyStartState.isViewActive
+            && hasFormalGapResult
             && hotkeyPrimaryPropCount
                 == primaryBasePropCount + 1
             && hotkeySlicePropCount
@@ -505,7 +597,21 @@ int GetGapFailCount()
                 == sliceBaseImageCount + 1
             && isExitKeyHandled
             && hotkeyExitState.analysisState
-                == GapAnalysisState::Idle
+                == GapAnalysisState::Succeeded
+            && hotkeyExitState.commitId
+                == hotkeyStartState.commitId
+            && hotkeyExitState.sourceRevision
+                == hotkeyStartState.sourceRevision
+            && hotkeyExitState.labelMap
+                == hotkeyStartState.labelMap
+            && hotkeyExitState.voidTable
+                == hotkeyStartState.voidTable
+            && hotkeyExitState.voidMesh
+                == hotkeyStartState.voidMesh
+            && hotkeyExitState.statisticsData
+                == hotkeyStartState.statisticsData
+            && hotkeyExitState.resultSet
+                == hotkeyStartState.resultSet
             && !hotkeyExitState.isViewActive
             && !hotkeyExitState.isExitPending
             && hotkeyExitPrimaryPropCount
@@ -527,9 +633,12 @@ int GetGapFailCount()
             GetStartRequest(start),
             [&firstCompleteCount, &isFirstSucceeded,
                 &callbackThread](
-                const bool isSuccess) {
+                GapHostResult result) {
                 ++firstCompleteCount;
-                isFirstSucceeded = isSuccess;
+                isFirstSucceeded = result.status
+                        == GapResultStatus::Succeeded
+                    || result.status
+                        == GapResultStatus::SucceededWithDisplayFailure;
                 callbackThread = std::this_thread::get_id();
             });
     const auto acceptedState = feature->GetState();
@@ -537,7 +646,7 @@ int GetGapFailCount()
     const bool isSecondRejected =
         !feature->SendRequest(
             GetStartRequest(start),
-            [&hasRejectedCallback](bool) {
+            [&hasRejectedCallback](GapHostResult) {
                 hasRejectedCallback = true;
             });
     for (int poll = 0;
@@ -599,11 +708,11 @@ int GetGapFailCount()
     failureCount += GetCaseResult(
         isNextReloadReady
             && isStaleOverlayRejected
-            && staleState.analysisState == GapAnalysisState::Idle
-            && staleState.statistics.objectVoxelCount == 0
+            && staleState.analysisState == GapAnalysisState::Stale
+            && staleState.statistics.objectVoxelCount > 0
             && !staleState.isViewActive
             && !staleState.isExitPending,
-        "DataVersion change exits the stale Gap view") ? 0 : 1;
+        "Primary Binding change exits the stale Gap view without deleting history") ? 0 : 1;
 
     const bool isFirstDetached =
         session.DetachFeature(*feature);
@@ -618,7 +727,7 @@ int GetGapFailCount()
     const bool isPendingAccepted =
         pendingFeature->SendRequest(
             GetStartRequest(start),
-            [&hasDetachedCallback](bool) {
+            [&hasDetachedCallback](GapHostResult) {
                 hasDetachedCallback = true;
             });
     const bool isDetached =
@@ -629,7 +738,7 @@ int GetGapFailCount()
     const bool isDetachedRequestRejected =
         !pendingFeature->SendRequest(
             GetStartRequest(start),
-            [&detachedSendCount](bool) {
+            [&detachedSendCount](GapHostResult) {
                 ++detachedSendCount;
             });
     failureCount += GetCaseResult(

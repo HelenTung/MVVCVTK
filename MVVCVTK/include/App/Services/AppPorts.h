@@ -1,7 +1,7 @@
 #pragma once
 
 #include "App/AppTypes.h"
-#include "Data/TrustedImageState.h"
+#include "Host/TrustedDataPort.h"
 #include "Data/VolumeTypes.h"
 
 #include <array>
@@ -105,7 +105,8 @@ struct AppViewState final {
     AppCursorAxis cursorAxis = AppCursorAxis::Free;
     std::uint32_t visibilityMask = 0;
     // 当前 View 已提交 Strategy 使用的数据版本；允许 Host 诊断发布顺序，不暴露 Strategy 对象。
-    DataVersion dataVersion = 0;
+    DataRevisionRef dataRevision;
+    DataBindingRevision bindingRevision = 0;
     // 每次成功提交完整 View 事务后单调递增，用于拒绝陈旧补偿。
     std::uint64_t revision = 0;
 };
@@ -153,8 +154,8 @@ public:
 
     // 强顺序协议：1. Build 候选；2. Set 到 View；
     // 3A. 失败时 Reset View 后 Clear 候选；3B. 数据发布后以 noexcept 完成状态接管。
-    virtual bool BuildDataStage(const TrustedImageSnapshot& snapshot) = 0;
-    virtual bool SetViewStage(const TrustedImageSnapshot& snapshot) = 0;
+    virtual bool BuildDataStage(const VtkImageGridSnapshot& snapshot) = 0;
+    virtual bool SetViewStage(const VtkImageGridSnapshot& snapshot) = 0;
     virtual bool ResetViewStage() = 0;
     virtual bool ClearDataStage() = 0;
     virtual void SetDataStageComplete() noexcept = 0;

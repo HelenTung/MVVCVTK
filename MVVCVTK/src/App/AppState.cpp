@@ -1,6 +1,7 @@
 #include "App/AppState.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <thread>
@@ -24,6 +25,33 @@ public:
         std::array<double, 3> cursorWorld = { 0.0, 0.0, 0.0 };
         std::array<double, 3> cursorRawWorld = { 0.0, 0.0, 0.0 };
         int cursorAxis = -1;
+    };
+
+    class SpacingDataWriteGuard final {
+    public:
+        explicit SpacingDataWriteGuard(std::atomic_flag& active) noexcept
+            : m_active(active)
+            , m_isAcquired(
+                !m_active.test_and_set(std::memory_order_acquire))
+        {
+        }
+
+        ~SpacingDataWriteGuard()
+        {
+            if (m_isAcquired) {
+                m_active.clear(std::memory_order_release);
+            }
+        }
+
+        SpacingDataWriteGuard(const SpacingDataWriteGuard&) = delete;
+        SpacingDataWriteGuard& operator=(
+            const SpacingDataWriteGuard&) = delete;
+
+        explicit operator bool() const noexcept { return m_isAcquired; }
+
+    private:
+        std::atomic_flag& m_active;
+        bool m_isAcquired = false;
     };
 
     explicit Impl(std::shared_ptr<IStateEventSink> eventSink)
@@ -236,7 +264,8 @@ public:
     }
 
     mutable std::mutex m_mutex;
-    std::mutex m_spacingMutex; // 串行 DataManager spacing 副作用与共享状态提交。
+    // Data callback 不在锁内执行；同一时刻只准一个不可回滚的数据写入在途。
+    std::atomic_flag m_spacingDataWriteActive = ATOMIC_FLAG_INIT;
     std::shared_ptr<IStateEventSink> m_eventSink;
     LoadState m_dataTrustedState = LoadState::Idle; // 当前可供渲染的数据是否可信；Reload 期间可继续为 Succeeded。
     LoadState m_fileLoadState = LoadState::Idle;    // 文件加载通道的最近状态。
@@ -253,7 +282,8 @@ public:
     std::uint64_t m_viewBaseRevision = 0; // owner shadow 创建时对应的 committed 版本。
     ViewValues m_viewValues; // worker 与非事务调用只写 committed。
     ViewValues m_viewShadow; // owner View 事务只写 shadow，失败时直接丢弃。
-    DataVersion m_dataVersion = 0; // 与已完成全局共享提交的数据批次一致。
+    DataRevisionRef m_dataRevision; // 当前 primary Binding 指向的确定数据修订。
+    DataBindingRevision m_bindingRevision = 0; // 当前 primary Binding 的 ABA-safe 时钟。
     std::array<double, 2> m_dataRange = { 0.0, 255.0 }; // 当前标量 min/max，供 TF、ISO 与默认窗宽窗位使用。
     std::vector<InteractionSource> m_activeSources; // 非空时使用交互刷新率；来源独立退出互不覆盖。
     std::array<double, 16> m_modelMatrix = { // 行主序 4x4 modelToWorld affine。
@@ -520,7 +550,8 @@ void SharedInteractionState::SetDataReady(
         m_impl->m_isLoadPublishing =
             loadKind == LoadEventKind::File
             || loadKind == LoadEventKind::Reload;
-        m_impl->m_dataVersion = state.version;
+        m_impl->m_dataRevision = state.dataRevision;
+        m_impl->m_bindingRevision = state.bindingRevision;
         m_impl->m_dataRange = state.scalarRange;
         auto& view = m_impl->m_viewValues;
         const bool hasSpacingChanged = Impl::SetArray(
@@ -564,10 +595,16 @@ void SharedInteractionState::SetDataReady(
     }
 }
 
-DataVersion SharedInteractionState::GetDataVersion() const
+DataRevisionRef SharedInteractionState::GetDataRevision() const
 {
     std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-    return m_impl->m_dataVersion;
+    return m_impl->m_dataRevision;
+}
+
+DataBindingRevision SharedInteractionState::GetDataBindingRevision() const
+{
+    std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+    return m_impl->m_bindingRevision;
 }
 
 bool SharedInteractionState::SetFileLoadFailed()
@@ -843,16 +880,20 @@ void SharedInteractionState::SetSpacing(
 
 bool SharedInteractionState::SetSpacingData(
     const std::array<double, 3>& spacing,
-    const std::function<bool(
+    const std::function<std::optional<DataReadyState>(
         const std::array<double, 3>&)>& setData)
 {
-    const std::lock_guard<std::mutex> spacingLock(
-        m_impl->m_spacingMutex);
+    Impl::SpacingDataWriteGuard dataWrite(
+        m_impl->m_spacingDataWriteActive);
+    if (!dataWrite) return false;
+
     bool hasChanged = false;
     bool hasExternalSpacing = false;
+    DataRevisionRef expectedDataRevision;
+    DataBindingRevision expectedBindingRevision = 0;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
-        auto& view = m_impl->GetViewValues();
+        const auto& view = m_impl->GetViewValues();
         hasChanged = !std::equal(
             view.spacing.begin(), view.spacing.end(),
             spacing.begin(),
@@ -860,23 +901,61 @@ bool SharedInteractionState::SetSpacingData(
                 return std::abs(current - next) <= 1e-6;
             });
         if (!hasChanged) return true;
-
         hasExternalSpacing = m_impl->GetIsViewOwner()
             && (m_impl->m_externalValueFlags & UpdateFlags::Spacing)
                 != UpdateFlags::None;
+        expectedDataRevision = m_impl->m_dataRevision;
+        expectedBindingRevision = m_impl->m_bindingRevision;
     }
-    if (!hasExternalSpacing
-        && setData && !setData(spacing)) {
-        return false;
+
+    std::optional<DataReadyState> committedData;
+    bool hasCommittedDataIdentity = false;
+    if (!hasExternalSpacing && setData) {
+        committedData = setData(spacing);
+        const bool hasExpectedSpacing = committedData
+            && std::equal(
+                committedData->spacing.begin(), committedData->spacing.end(),
+                spacing.begin(),
+                [](const double current, const double expected) {
+                    return std::abs(current - expected) <= 1e-6;
+                });
+        hasCommittedDataIdentity = committedData
+            && GetDataRevisionRefValid(committedData->dataRevision)
+            && committedData->bindingRevision != 0;
+        const bool hasNoDataIdentity = committedData
+            && !GetDataRevisionRefValid(committedData->dataRevision)
+            && committedData->bindingRevision == 0;
+        if (!committedData
+            || (!hasCommittedDataIdentity && !hasNoDataIdentity)
+            || !hasExpectedSpacing) {
+            return false;
+        }
     }
+
+    bool hasDataIdentityChanged = false;
     {
         std::lock_guard<std::mutex> lock(m_impl->m_mutex);
+        if (m_impl->m_dataRevision != expectedDataRevision
+            || m_impl->m_bindingRevision != expectedBindingRevision) {
+            return false;
+        }
+        if (hasCommittedDataIdentity) {
+            hasDataIdentityChanged =
+                m_impl->m_dataRevision != committedData->dataRevision
+                || m_impl->m_bindingRevision
+                    != committedData->bindingRevision;
+            m_impl->m_dataRevision = committedData->dataRevision;
+            m_impl->m_bindingRevision = committedData->bindingRevision;
+            m_impl->m_dataRange = committedData->scalarRange;
+        }
         auto& view = m_impl->GetViewValues();
         hasChanged = Impl::SetArray(view.spacing, spacing);
-        if (!hasChanged) return true;
-        m_impl->SetViewChanged(UpdateFlags::Spacing, true);
+        if (!hasChanged && !hasDataIdentityChanged) return true;
+        m_impl->SetViewChanged(UpdateFlags::Spacing, hasChanged);
     }
-    m_impl->SendFlags(UpdateFlags::Spacing);
+    UpdateFlags flags = UpdateFlags::Spacing;
+    if (hasDataIdentityChanged) flags |= UpdateFlags::DataReady;
+    m_impl->SendFlags(flags);
     return true;
 }
 

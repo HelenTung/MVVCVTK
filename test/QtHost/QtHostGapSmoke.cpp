@@ -138,6 +138,8 @@ int main(int argc, char* argv[])
     stopPoll.setInterval(5);
     int callbackCount = 0;
     bool isCallbackOnOwner = false;
+    DataCommitId completedCommit = 0;
+    DataRevisionRef completedResultSet;
     bool isFinishing = false;
     bool finishSucceeded = false;
     std::string finishReason;
@@ -232,7 +234,9 @@ int main(int argc, char* argv[])
                 return;
             }
             const GapHostState state = gap->GetState();
-            if (state.analysisState == GapAnalysisState::Idle
+            if (state.analysisState == GapAnalysisState::Succeeded
+                && state.commitId == completedCommit
+                && state.resultSet == completedResultSet
                 && !state.isViewActive
                 && !state.isExitPending) {
                 exitPoll.stop();
@@ -300,7 +304,7 @@ int main(int argc, char* argv[])
                     request.start = gapStart;
                     const bool isGapAccepted = gap->SendRequest(
                         std::move(request),
-                        [&](const bool isDisplayed) {
+                        [&](GapHostResult result) {
                             ++callbackCount;
                             if (callbackCount != 1) {
                                 sendExit(false, "duplicate Gap callback");
@@ -308,13 +312,26 @@ int main(int argc, char* argv[])
                             }
                             isCallbackOnOwner =
                                 std::this_thread::get_id() == ownerThread;
+                            const bool isCommitted =
+                                result.status == GapResultStatus::Succeeded
+                                || result.status
+                                    == GapResultStatus::SucceededWithDisplayFailure;
                             const GapHostState state = gap
                                 ? gap->GetState() : GapHostState{};
-                            if (!isDisplayed
+                            completedCommit = result.commitId;
+                            completedResultSet = result.resultSet;
+                            if (!isCommitted
                                 || state.analysisState
                                     != GapAnalysisState::Succeeded
                                 || !state.isViewActive
-                                || state.statistics.voidVoxelCount == 0) {
+                                || state.statistics.voidVoxelCount == 0
+                                || state.resultSet != result.resultSet
+                                || !GetDataRevisionRefValid(result.labelMap)
+                                || !GetDataRevisionRefValid(result.voidTable)
+                                || !GetDataRevisionRefValid(result.voidMesh)
+                                || !GetDataRevisionRefValid(
+                                    result.statisticsData)
+                                || !GetDataRevisionRefValid(result.resultSet)) {
                                 sendExit(false, "Gap result");
                                 return;
                             }

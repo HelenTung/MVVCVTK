@@ -1,5 +1,7 @@
 #include "Algorithms/CropAlgorithm.h"
 
+#include "Data/DataPayloads.h"
+
 #include <vtkClipPolyData.h>
 #include <vtkImageData.h>
 #include <vtkImplicitFunction.h>
@@ -174,17 +176,16 @@ bool BuildPlaneRows(const CropOpItem& operation, float* values)
     return true;
 }
 
-CropBuildResult BuildResultFailure(
+CropMaterializationCandidate BuildResultFailure(
     const CropBuildParams& params,
     const CropFailure failureReason,
     const std::string& message,
     const std::uint64_t failureOperationIndex = 0)
 {
-    CropBuildResult result;
-    result.resolvedDataSource = params.dataSource;
+    CropMaterializationCandidate result;
     result.failureReason = failureReason;
     result.failureOperationIndex = failureOperationIndex;
-    result.inputVersion = params.inputVersion;
+    result.sourceRevision = params.sourceRevision;
     result.nodeCount = std::min(params.nodeCount, params.operations.size());
     result.operations.assign(
         params.operations.begin(),
@@ -193,11 +194,10 @@ CropBuildResult BuildResultFailure(
     return result;
 }
 
-CropBuildResult BuildResultBase(const CropBuildParams& params)
+CropMaterializationCandidate BuildResultBase(const CropBuildParams& params)
 {
-    CropBuildResult result;
-    result.resolvedDataSource = params.dataSource;
-    result.inputVersion = params.inputVersion;
+    CropMaterializationCandidate result;
+    result.sourceRevision = params.sourceRevision;
     result.nodeCount = params.nodeCount;
     result.operations = params.operations;
     return result;
@@ -381,11 +381,11 @@ bool GetPayloadValid(
         && CropPredicatePlan(
             *payload.predicateTable,
             payload.nodeCount).GetValid();
-    return params.inputVersion != 0
+    return GetDataRevisionRefValid(params.sourceRevision)
         && params.operations.size() == params.nodeCount
         && params.nodeCount != 0
         && payload.revision != 0
-        && payload.sourceStamp.version == params.inputVersion
+        && payload.sourceStamp.dataRevision == params.sourceRevision
         && payload.nodeCount == params.nodeCount
         && hasPlan;
 }
@@ -589,38 +589,46 @@ bool CropAlgorithm::GetPointKept(
 
 bool CropAlgorithm::GetInputValid(const CropInputSnapshot& input)
 {
-    if (input.inputVersion == 0 || !GetBoundsValid(input.inputModelBounds)) {
+    if (!input.graph.view || !input.data
+        || !GetDataRevisionRefValid(input.data->self)
+        || !GetBoundsValid(input.inputModelBounds)
+        || (input.binding
+            && (!input.binding->target
+                || *input.binding->target != input.data->self))) {
         return false;
     }
-    switch (input.dataSource) {
-    case OrthogonalCropDataSource::ImageData:
-        return input.imageData != nullptr
-            && input.polyData == nullptr
+    const auto facets = input.graph.view->GetDataFacets(input.data->type);
+    const auto hasFacet = [&facets](const DataFacetId& facet) {
+        return std::find(facets.begin(), facets.end(), facet)
+            != facets.end();
+    };
+    const bool isImage = hasFacet(DataFacets::scalarGrid3D);
+    const bool isMesh = hasFacet(DataFacets::surfaceMesh);
+    if (isImage == isMesh) return false;
+    if (isImage) {
+        return input.image && input.image->data
+            && input.image->data->self == input.data->self
+            && !input.mesh
             && GetMaskValid(
-                input.imageData, input.validityMask);
-    case OrthogonalCropDataSource::PolyData:
-        return input.polyData != nullptr
-            && input.imageData == nullptr
-            && input.validityMask == nullptr;
-    default:
-        return false;
+                input.image->image, input.image->validityMask);
     }
+    return input.mesh && input.mesh->data
+        && input.mesh->data->self == input.data->self
+        && input.mesh->mesh && !input.image;
 }
 
 bool CropAlgorithm::GetInputSame(
     const CropInputSnapshot& left,
     const CropInputSnapshot& right)
 {
-    return left.dataSource == right.dataSource
-        && left.inputVersion == right.inputVersion
+    return left.data && right.data
+        && left.data->self == right.data->self
         && left.inputModelBounds == right.inputModelBounds
-        && left.imageData.GetPointer() == right.imageData.GetPointer()
-        && left.validityMask.GetPointer()
-            == right.validityMask.GetPointer()
-        && left.polyData.GetPointer() == right.polyData.GetPointer();
+        && static_cast<bool>(left.image) == static_cast<bool>(right.image)
+        && static_cast<bool>(left.mesh) == static_cast<bool>(right.mesh);
 }
 
-CropBuildResult CropAlgorithm::GetResult(
+CropMaterializationCandidate CropAlgorithm::GetResult(
     vtkImageData* image,
     vtkImageData* validityMask,
     const CropBuildParams& params,
@@ -634,8 +642,6 @@ CropBuildResult CropAlgorithm::GetResult(
             "Crop result build requires image scalars.");
     }
     if (!GetMaskValid(image, validityMask)
-        || params.dataSource
-            != OrthogonalCropDataSource::ImageData
         || !GetPayloadValid(params, payload)) {
         return BuildResultFailure(
             params,
@@ -860,7 +866,7 @@ CropBuildResult CropAlgorithm::GetResult(
     return result;
 }
 
-CropBuildResult CropAlgorithm::GetResult(
+CropMaterializationCandidate CropAlgorithm::GetResult(
     vtkPolyData* polyData,
     const CropBuildParams& params,
     const CropShaderPayload& payload)
@@ -871,8 +877,7 @@ CropBuildResult CropAlgorithm::GetResult(
             CropFailure::NoPolyData,
             "Crop result build requires PolyData input.");
     }
-    if (params.dataSource != OrthogonalCropDataSource::PolyData
-        || !GetPayloadValid(params, payload)) {
+    if (!GetPayloadValid(params, payload)) {
         return BuildResultFailure(
             params,
             CropFailure::BadInput,

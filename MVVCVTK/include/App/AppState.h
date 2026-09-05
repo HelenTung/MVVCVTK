@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 // 单个 AppRuntime 独占的展示状态；不同 View 不共享材质、TF、背景、窗宽窗位或显隐。
@@ -99,9 +100,10 @@ public:
         double rangeMax,
         const std::array<double, 3>& spacing);
     // DataManager current 已最终发布后的无失败入口；一次锁内同步提交
-    // version/range/spacing/cursor/load state，锁外仅广播一个聚合事件。
+    // data ref/binding revision/range/spacing/cursor/load state，锁外仅广播一个聚合事件。
     void SetDataReady(const DataReadyState& state) noexcept;
-    DataVersion GetDataVersion() const;
+    DataRevisionRef GetDataRevision() const;
+    DataBindingRevision GetDataBindingRevision() const;
     bool SetFileLoadFailed();
     bool SetReloadLoadFailed();
     void SetPreInitConfig(const PreInitConfig& config);
@@ -122,10 +124,12 @@ public:
     BackgroundColor GetBackground() const;
     void SetSpacing(double spacingX, double spacingY, double spacingZ);
     // spacing 同时属于 DataManager 物理元信息与 Session 共享状态；
-    // 数据写入在状态锁内完成，避免 View 补偿覆盖并发 Session 写入。
+    // callback 返回已提交的数据身份，随后以原 primary 身份/Binding 做 CAS；
+    // 空 optional 表示失败，无 primary 时以零身份的 ready state 表示纯状态成功；
+    // 重入的数据写入会被拒绝，普通状态写线性化在最终数据提交之前，callback 不持锁。
     bool SetSpacingData(
         const std::array<double, 3>& spacing,
-        const std::function<bool(
+        const std::function<std::optional<DataReadyState>(
             const std::array<double, 3>&)>& setData);
     std::array<double, 3> GetSpacing() const;
     void SetWindowLevel(double windowWidth, double windowCenter);

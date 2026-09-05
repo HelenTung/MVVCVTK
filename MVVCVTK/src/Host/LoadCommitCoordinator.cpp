@@ -3,6 +3,8 @@
 #include "App/Services/AppPorts.h"
 #include "Data/DataManager.h"
 
+#include <vtkImageData.h>
+
 #include <iostream>
 #include <utility>
 
@@ -21,16 +23,17 @@ bool LoadCommitCoordinator::SetLoadCommit(
         return false;
     }
 
-    const TrustedImageSnapshot pending = m_dataManager->GetPendingSnapshot();
-    if (!pending || !pending->image
-        || !m_dataManager->GetImageSnapshot()) {
+    const auto loadStage = m_dataManager->GetLoadStage();
+    if (!loadStage || !loadStage->image || !loadStage->image->image) {
+        std::cerr << "[Host] Load commit has no valid graph stage.\n";
         return false;
     }
 
     std::vector<std::shared_ptr<AppDataStagePort>> stages;
     stages.reserve(request.stages.size());
     for (const auto& stage : request.stages) {
-        if (!stage || !stage->BuildDataStage(pending)) {
+        if (!stage || !stage->BuildDataStage(loadStage->image)) {
+            std::cerr << "[Host] Load candidate build was rejected.\n";
             for (auto current = stages.rbegin();
                 current != stages.rend(); ++current) {
                 (void)(*current)->ClearDataStage();
@@ -42,10 +45,11 @@ bool LoadCommitCoordinator::SetLoadCommit(
 
     std::size_t committedCount = 0;
     for (const auto& stage : stages) {
-        if (!stage->SetViewStage(pending)) break;
+        if (!stage->SetViewStage(loadStage->image)) break;
         ++committedCount;
     }
     if (committedCount != stages.size()) {
+        std::cerr << "[Host] Load candidate view commit was rejected.\n";
         bool isReset = true;
         for (std::size_t index = committedCount; index > 0; --index) {
             isReset = stages[index - 1]->ResetViewStage() && isReset;
@@ -62,9 +66,10 @@ bool LoadCommitCoordinator::SetLoadCommit(
         return false;
     }
 
-    TrustedImageSnapshot published;
-    if (!m_dataManager->SetCurrentFromPending(pending, published)
+    VtkImageGridSnapshot published;
+    if (!m_dataManager->SetLoadCommit(loadStage, published)
         || !published) {
+        std::cerr << "[Host] Load graph transaction was rejected.\n";
         bool isReset = true;
         for (auto stage = stages.rbegin();
             stage != stages.rend(); ++stage) {

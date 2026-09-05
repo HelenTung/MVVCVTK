@@ -104,7 +104,7 @@ public:
     {
         if (!m_views || !m_read || !m_data || !m_host
             || !m_feature || !m_overlay
-            || !m_data->GetImageSnapshot()) {
+            || !m_data->GetPrimaryImage()) {
             return false;
         }
         ImageReadRequest request;
@@ -127,7 +127,7 @@ public:
 private:
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<ImageReadPort> m_read;
-    std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedDataPort> m_data;
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<FeatureViewService> m_feature;
     std::shared_ptr<OverlayService> m_overlay;

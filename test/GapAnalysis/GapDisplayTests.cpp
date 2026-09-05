@@ -1,4 +1,5 @@
 #include "GapDisplayTests.h"
+#include "../TestDataPort.h"
 
 #include "Services/GapAnalysisService.h"
 #include "Render/Contracts/FeatureOverlay.h"
@@ -132,33 +133,24 @@ vtkSmartPointer<vtkImageData> GetMask(
     return mask;
 }
 
-TrustedImageSnapshot BuildTrustedInput(
+VtkImageGridSnapshot BuildGraphInput(
     const vtkSmartPointer<vtkImageData>& image,
     vtkSmartPointer<vtkImageData> validityMask = nullptr)
 {
-    if (!image || !image->GetPointData()
-        || !image->GetPointData()->GetScalars()) {
-        return {};
-    }
+    auto data = std::make_shared<TestDataPort>();
+    return data->SetPrimaryImage(image, validityMask);
+}
 
-    auto snapshot = std::make_shared<TrustedImageState>();
-    snapshot->image = image;
-    snapshot->validityMask = std::move(validityMask);
-    int dims[3] = {};
-    double spacing[3] = {};
-    double origin[3] = {};
-    double scalarRange[2] = {};
-    image->GetDimensions(dims);
-    image->GetSpacing(spacing);
-    image->GetOrigin(origin);
-    image->GetScalarRange(scalarRange);
-    snapshot->dims = { dims[0], dims[1], dims[2] };
-    snapshot->spacing = { spacing[0], spacing[1], spacing[2] };
-    snapshot->origin = { origin[0], origin[1], origin[2] };
-    snapshot->scalarRange = {
-        scalarRange[0], scalarRange[1] };
-    snapshot->version = 1;
-    return snapshot;
+bool CommitDisplayResult(GapAnalysisService& service)
+{
+    GapAnalysisResult candidate;
+    if (!service.GetCompletedResult(candidate)) return false;
+    TestDataPort committedData;
+    auto views = committedData.SetLabelAndMesh(
+        candidate.labelImage, candidate.voidMesh);
+    return views.first && views.second
+        && service.SetCommittedView(
+            std::move(views.first), std::move(views.second));
 }
 
 bool StartDisplay(
@@ -184,6 +176,9 @@ bool StartDisplay(
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     service.OnDisplayTick(image);
+    if (service.GetAnalysisState() == GapAnalysisState::Succeeded) {
+        (void)CommitDisplayResult(service);
+    }
     return service.GetAnalysisState() == GapAnalysisState::Succeeded
         && isCompleted && isSucceeded;
 }
@@ -250,6 +245,8 @@ int GapDisplaySuite::GetFailCount() const
         "Gap result should retain the kernel label owner without a second full-volume copy.");
 
     service.OnDisplayTick(image);
+    expect(CommitDisplayResult(service),
+        "Committed Gap views should be accepted before display attach.");
     auto* firstSliceInput = overlay->GetInput(0);
     auto* firstMeshInput = meshOverlay->GetInput(0);
     expect(overlay->GetAttachCount() == 1
@@ -404,7 +401,7 @@ int GapDisplaySuite::GetFailCount() const
     static_cast<unsigned char*>(
         trustedMask->GetScalarPointer())[0] = 0;
     trustedMask->Modified();
-    auto trustedInput = BuildTrustedInput(image, trustedMask);
+    auto trustedInput = BuildGraphInput(image, trustedMask);
     auto* trustedScalars = image->GetPointData()->GetScalars();
     const auto trustedVoxelCount = static_cast<std::size_t>(
         image->GetNumberOfPoints());
@@ -416,7 +413,7 @@ int GapDisplaySuite::GetFailCount() const
     const int scalarOwners = trustedScalars->GetReferenceCount();
     GapAnalysisService trustedService;
     GapViewRequest trustedRequest;
-    trustedRequest.trustedInput = trustedInput;
+    trustedRequest.graphInput = trustedInput;
     trustedRequest.surface = surfaceConfig;
     trustedRequest.voidParams = voidParams;
     trustedRequest.sliceTargets.emplace_back(
@@ -426,13 +423,13 @@ int GapDisplaySuite::GetFailCount() const
             trustedService,
             std::move(trustedRequest),
             image)
-            && trustedScalars->GetReferenceCount() > scalarOwners,
-        "Trusted Gap input with a validity mask should share the Host scalar array.");
+            && trustedScalars->GetReferenceCount() == scalarOwners,
+        "Graph Gap input is isolated from the caller-owned scalar array.");
     expect(trustedService.ExitView(),
         "Trusted Gap view should exit cleanly.");
     trustedService.OnDisplayTick(nullptr);
     expect(trustedScalars->GetReferenceCount() == scalarOwners,
-        "Trusted Gap input should release its scalar owner after exit.");
+        "Graph Gap input does not retain the caller-owned scalar array.");
     const auto* releasedVoxels = static_cast<const float*>(
         image->GetScalarPointer());
     expect(releasedVoxels
@@ -440,18 +437,18 @@ int GapDisplaySuite::GetFailCount() const
                 trustedValues.begin(),
                 trustedValues.end(),
                 releasedVoxels),
-        "Trusted Gap analysis must not modify the shared Host scalars.");
+        "Graph Gap analysis must not modify caller-owned scalars.");
 
     GapAnalysisService mixedInputService;
     GapViewRequest mixedInputRequest;
-    mixedInputRequest.trustedInput = trustedInput;
+    mixedInputRequest.graphInput = trustedInput;
     mixedInputRequest.inputImage = image;
     mixedInputRequest.surface = surfaceConfig;
     mixedInputRequest.voidParams = voidParams;
     mixedInputRequest.sliceTargets = sliceTargets;
     expect(!mixedInputService.StartView(
             std::move(mixedInputRequest)),
-        "Gap view should reject ambiguous trusted and mutable inputs.");
+        "Gap view should reject ambiguous graph and mutable inputs.");
 
     auto meshOnlyOverlay = std::make_shared<OverlayStub>();
     GapAnalysisService meshOnlyService;

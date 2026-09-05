@@ -1,4 +1,6 @@
 #include "AppDataExportTaskService.h"
+
+#include <vtkImageData.h>
 #include "InteractionComputeService.h"
 
 #include <exception>
@@ -25,7 +27,7 @@ AppDataExportTaskService::BuildDataTask(
         return std::nullopt;
     }
     const auto imageSnapshot =
-        m_dataManager->GetImageSnapshot();
+        m_dataManager->GetPrimaryImage();
     if (!imageSnapshot || !imageSnapshot->image
         || imageSnapshot->image->GetNumberOfPoints() == 0) {
         return std::nullopt;

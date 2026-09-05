@@ -200,8 +200,7 @@ bool CropShaderController::Impl::SetShaderTarget(
 bool CropShaderController::Impl::SetCropParams(CropShaderPayload payload)
 {
     if (payload.revision == 0
-        || !payload.sourceStamp.identity
-        || payload.sourceStamp.version == 0
+        || !GetDataRevisionRefValid(payload.sourceStamp.dataRevision)
         || !payload.predicateTable
         || payload.nodeCount > payload.predicateTable->operationCount
         || payload.predicateTable->rgbaValues.size()
@@ -785,8 +784,7 @@ CropShaderEffect::Impl::GetStagedBindings() const
 bool CropShaderEffect::Impl::SetCropParams(CropShaderPayload payload)
 {
     if (payload.revision == 0
-        || !payload.sourceStamp.identity
-        || payload.sourceStamp.version == 0
+        || !GetDataRevisionRefValid(payload.sourceStamp.dataRevision)
         || !payload.predicateTable
         || m_commitRevision != 0
         || m_staged.revision != 0
@@ -1083,8 +1081,7 @@ CropShaderEffect::Impl::BuildEffectBinding(
     if (target.targetKind == RenderTargetKind::Unknown
         || !target.mapper
         || !target.shaderProperty
-        || !target.inputStamp.identity
-        || target.inputStamp.version == 0) {
+        || !GetDataRevisionRefValid(target.inputStamp.dataRevision)) {
         return {};
     }
     auto binding = std::make_shared<CropEffectBinding>(

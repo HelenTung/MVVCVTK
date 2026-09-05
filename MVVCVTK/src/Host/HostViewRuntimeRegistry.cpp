@@ -658,7 +658,8 @@ HostRenderViewState HostViewRuntimeRegistry::Impl::BuildViewState(
     state.isInteracting = appState.isInteracting;
     state.cursorWorld = appState.cursorWorld;
     state.visibilityMask = appState.visibilityMask;
-    state.dataVersion = appState.dataVersion;
+    state.dataRevision = appState.dataRevision;
+    state.bindingRevision = appState.bindingRevision;
     state.isAxesVisible = view.context
         && view.context->GetOrientationAxesVisible();
     return state;
