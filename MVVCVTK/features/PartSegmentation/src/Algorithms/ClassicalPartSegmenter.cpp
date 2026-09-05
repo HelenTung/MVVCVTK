@@ -633,6 +633,46 @@ bool GetMetricsValid(const PartMetrics& metrics)
 
 } // namespace
 
+std::optional<std::vector<PartMetrics>> ClassicalPartSegmenter::BuildLabelMetrics(
+    const PartVolumeView& volume,
+    const std::vector<PartLabelId>& labels,
+    const std::uint32_t partCount,
+    const std::function<bool()>& getStopRequested)
+{
+    std::size_t count = 1;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        if (volume.dimensions[axis] <= 0
+            || static_cast<std::int64_t>(volume.extent[axis * 2 + 1])
+                - volume.extent[axis * 2] + 1 != volume.dimensions[axis]
+            || !GetProduct(count, static_cast<std::size_t>(volume.dimensions[axis]), count)) {
+            return {};
+        }
+    }
+    if (labels.size() != count || partCount > 4096) return {};
+    std::vector<PartStats> stats(static_cast<std::size_t>(partCount) + 1U);
+    std::vector<std::size_t> counts(stats.size(), 0);
+    const auto width = static_cast<std::size_t>(volume.dimensions[0]);
+    const auto height = static_cast<std::size_t>(volume.dimensions[1]);
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index % cancelBatch == 0 && GetStopped(getStopRequested)) return {};
+        const auto label = labels[index];
+        if (label > partCount) return {};
+        if (label == 0) continue;
+        ++counts[label];
+        SetStats(stats[label], {
+            static_cast<int>(index % width) + volume.extent[0],
+            static_cast<int>((index / width) % height) + volume.extent[2],
+            static_cast<int>(index / (width * height)) + volume.extent[4] });
+    }
+    std::vector<PartMetrics> result(stats.size());
+    for (std::size_t label = 1; label < stats.size(); ++label) {
+        if (counts[label] == 0) return {};
+        result[label] = BuildMetrics(volume, counts[label], stats[label]);
+        if (!GetMetricsValid(result[label])) return {};
+    }
+    return result;
+}
+
 PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
     const PartVolumeView& volume,
     const PartAlgorithmParams& params,

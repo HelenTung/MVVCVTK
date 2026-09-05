@@ -566,6 +566,60 @@ int GetPartSceneFailCount()
             && !replacementPart->presentation.isVisible,
         "Exact replacement preserves PartSet and Part object identity") ? 0 : 1;
 
+    {
+        const auto beforeEdit = feature->GetState();
+        const auto beforeScene = session.GetSceneViewState({primaryViewId});
+        PartEditRequest edit;
+        edit.expectedLabelMap = beforeEdit.labelMap;
+        edit.expectedCatalogRevision = beforeEdit.catalogRevision;
+        PartMergeEdit merge;
+        if (replacementSnapshot) for (const auto& part : replacementSnapshot->parts)
+            merge.parts.push_back(part.binding);
+        edit.operation = std::move(merge);
+        std::optional<PartSegmentationResult> previewResult;
+        const auto previewAdmission = feature->SendEditRequest(std::move(edit),
+            [&](PartSegmentationResult result) { previewResult = std::move(result); });
+        const bool previewReady = previewAdmission.status == PartAdmissionStatus::Accepted
+            && PumpUntil(*primary, *timer, [&] { return previewResult.has_value(); });
+        const auto preview = feature->GetEditPreview();
+        const auto previewState = session.GetStateSnapshot();
+        const auto previewScene = session.GetSceneViewState({primaryViewId});
+        const bool operationReady = previewState && std::any_of(previewState->operations.begin(),
+            previewState->operations.end(), [&](const auto& value) {
+                return value.operation.requestId == previewAdmission.requestId
+                    && value.status == FeatureRunStatus::Ready && value.outputs.empty();
+            });
+        failureCount += GetCaseResult(previewReady && preview
+            && previewResult->status == PartResultStatus::PreviewReady && operationReady
+            && feature->GetState().labelMap == beforeEdit.labelMap
+            && beforeScene && previewScene && beforeScene->displays == previewScene->displays,
+            "Real Host edit preview retains old display and exposes a separate Ready operation") ? 0 : 1;
+        std::optional<PartSegmentationResult> committedEdit;
+        const auto commitAdmission = preview ? feature->SetEditCommit(preview->previewId,
+            [&](PartSegmentationResult result) { committedEdit = std::move(result); }) : PartSegmentationAdmission{};
+        const bool committedReady = commitAdmission.status == PartAdmissionStatus::Accepted
+            && PumpUntil(*primary, *timer, [&] { return committedEdit.has_value(); });
+        (void)SendTimer(timer->interactor);
+        const auto afterEdit = feature->GetState();
+        const auto afterScene = session.GetSceneViewState({primaryViewId});
+        const auto afterState = session.GetStateSnapshot();
+        const auto afterParts = feature->GetPartSetSnapshot();
+        const bool operationJoined = afterState && afterScene && afterScene->displays.size() == 1
+            && std::any_of(afterState->operations.begin(), afterState->operations.end(), [&](const auto& value) {
+                return value.operation.requestId == commitAdmission.requestId
+                    && value.operation == afterScene->displays.front().operation
+                    && value.status == FeatureRunStatus::Succeeded
+                    && std::find(value.outputs.begin(), value.outputs.end(), afterEdit.labelMap) != value.outputs.end()
+                    && std::find(value.outputs.begin(), value.outputs.end(), afterEdit.resultSet) != value.outputs.end();
+            });
+        failureCount += GetCaseResult(committedReady && committedEdit->status == PartResultStatus::Succeeded
+            && commitAdmission.requestId != previewAdmission.requestId && operationJoined
+            && afterScene->displays.front().data == afterEdit.labelMap
+            && afterScene->renderedEpoch == afterScene->sceneEpoch
+            && afterEdit.labelMap != beforeEdit.labelMap && afterParts && afterParts->parts.size() == 1,
+            "Real Host edit commit joins new labels, display and operation after rendering") ? 0 : 1;
+    }
+
     const bool isReloaded = Reload(
         session, *primary, *timer, GetReload(true));
     const bool isStaleObserved = isReloaded

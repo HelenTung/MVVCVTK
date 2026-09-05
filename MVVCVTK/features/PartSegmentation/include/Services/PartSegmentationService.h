@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Algorithms/ClassicalPartSegmenter.h"
+#include "Algorithms/PartLabelEditor.h"
 #include "Host/TrustedDataPort.h"
 #include "Data/DataPayloads.h"
 #include "Host/PartSegmentationHostTypes.h"
@@ -50,6 +51,20 @@ struct PartLabelCandidate final {
     PartAlgorithmMetrics metrics;
 };
 
+struct PartEditJob final {
+    VtkImageGridSnapshot source;
+    PartHistorySnapshot previous;
+    PartEditRequest request;
+    std::shared_ptr<const LabelMap3DPayload> roiMask;
+    std::shared_ptr<const LabelMap3DPayload> protectionMask;
+    PartHistorySnapshot restored;
+    std::shared_ptr<const LabelMap3DPayload> restoredPayload;
+    std::size_t maxWorkingBytes = 0;
+    std::size_t retainedBytes = 0;
+    std::uint64_t requestId = 0;
+    std::uint64_t timeoutMs = 30000;
+};
+
 class PartSegmentationService final {
 public:
     explicit PartSegmentationService(std::function<void()> onWorkAvailable = {});
@@ -68,6 +83,7 @@ public:
         std::uint64_t expectedResultRevision = 0,
         std::uint64_t expectedCatalogRevision = 0,
         std::size_t retainedSurfaceBytes = 0);
+    PartAdmissionStatus StartEdit(PartEditJob edit);
     void StopRequest() noexcept;
     std::optional<PartLabelCandidate> GetComplete();
     std::optional<double> GetProgress(
@@ -86,6 +102,7 @@ private:
         std::uint64_t expectedResultRevision = 0;
         std::uint64_t expectedCatalogRevision = 0;
         std::size_t retainedSurfaceBytes = 0;
+        std::optional<PartEditJob> edit;
     };
 
     void WorkerLoop() noexcept;

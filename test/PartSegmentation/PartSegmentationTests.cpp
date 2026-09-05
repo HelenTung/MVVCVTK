@@ -13,13 +13,15 @@ int GetSuiteFailCount(const std::string_view suite)
     if (suite == "lineage") return GetPartLineageFailCount();
     if (suite == "display") return GetPartDisplayFailCount();
     if (suite == "scale") return GetPartScaleFailCount();
+    if (suite == "edit") return GetPartEditFailCount();
     if (suite == "all") {
         return GetPartAlgorithmFailCount()
             + GetPartCatalogFailCount()
             + GetPartLifecycleFailCount()
             + GetPartLineageFailCount()
             + GetPartDisplayFailCount()
-            + GetPartScaleFailCount();
+            + GetPartScaleFailCount()
+            + GetPartEditFailCount();
     }
     return 1;
 }

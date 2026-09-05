@@ -282,6 +282,35 @@ PartAdmissionStatus PartSegmentationService::Start(
     return PartAdmissionStatus::Accepted;
 }
 
+PartAdmissionStatus PartSegmentationService::StartEdit(PartEditJob edit)
+{
+    const std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_isStopping) return PartAdmissionStatus::Stopping;
+    if (m_isBusy || m_job || m_complete) return PartAdmissionStatus::Busy;
+    if (!GetPartEditBytes(edit.request)) return PartAdmissionStatus::BudgetExceeded;
+    if (!edit.source || !edit.source->image || !edit.previous.labels
+        || !edit.previous.catalog || edit.requestId == 0 || edit.maxWorkingBytes == 0
+        || edit.timeoutMs == 0 || edit.timeoutMs > 86400000
+        || edit.previous.catalog->catalogRevision != edit.request.expectedCatalogRevision) {
+        return PartAdmissionStatus::InvalidRequest;
+    }
+    Job job;
+    job.source = std::move(edit.source);
+    job.previous = std::move(edit.previous);
+    job.requestId = edit.requestId;
+    job.maxWorkingBytes = edit.maxWorkingBytes;
+    job.expectedResultRevision = job.previous.catalog->resultRevision;
+    job.expectedCatalogRevision = job.previous.catalog->catalogRevision;
+    job.retainedSurfaceBytes = edit.retainedBytes;
+    job.edit = std::move(edit);
+    m_cancelRequested.store(false, std::memory_order_release);
+    m_progressPermille.store(0, std::memory_order_relaxed);
+    m_progressRequestId.store(job.requestId, std::memory_order_release);
+    m_job = std::move(job);
+    m_workReady.notify_one();
+    return PartAdmissionStatus::Accepted;
+}
+
 void PartSegmentationService::StopRequest() noexcept
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
@@ -402,7 +431,15 @@ void PartSegmentationService::WorkerLoop() noexcept
             ++m_executionRevision;
         }
 
+        const auto started = std::chrono::steady_clock::now();
         PartLabelCandidate candidate = BuildCandidate(job);
+        if (job.edit && candidate.failureReason == PartFailureReason::Cancelled
+            && !m_cancelRequested.load(std::memory_order_acquire)
+            && std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(job.edit->timeoutMs)) {
+            candidate.status = PartResultStatus::Failed;
+            candidate.failureReason = PartFailureReason::TimedOut;
+            candidate.message = "Part edit deadline was exceeded.";
+        }
         {
             const std::lock_guard<std::mutex> lock(m_mutex);
             m_isBusy = false;
@@ -435,6 +472,14 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
     candidate.failureReason = PartFailureReason::InvalidSource;
     candidate.message = "Part source is unavailable.";
     if (!job.source || !job.source->image) return candidate;
+
+    const auto deadline = job.edit
+        ? std::chrono::steady_clock::now() + std::chrono::milliseconds(job.edit->timeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+    const auto getStopped = [this, deadline] {
+        return m_cancelRequested.load(std::memory_order_acquire)
+            || std::chrono::steady_clock::now() >= deadline;
+    };
 
     try {
         // snapshot 是 worker 读取期间唯一的 source owner。这里只建立只读
@@ -532,16 +577,50 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - since).count();
         };
+        std::int64_t labelMs = 0;
+        std::int64_t lineageMs = 0;
+        if (job.edit) {
+            PartEditBuildResult edited;
+            if (std::holds_alternative<PartHistoryEdit>(job.edit->request.operation)) {
+                edited = PartLabelEditor::BuildRestore(job.previous, job.edit->restored,
+                    job.maxWorkingBytes - historyBytes, getStopped);
+            }
+            else {
+                PartEditInput editInput;
+                editInput.volume = volume;
+                const auto sourcePayload = job.source->data
+                    ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
+                if (sourcePayload) editInput.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
+                editInput.previous = job.previous;
+                editInput.request = job.edit->request;
+                editInput.roiMask = job.edit->roiMask;
+                editInput.protectionMask = job.edit->protectionMask;
+                editInput.maxWorkingBytes = job.maxWorkingBytes - historyBytes;
+                edited = PartLabelEditor::BuildLabels(editInput, m_identities, getStopped);
+            }
+            candidate.requiredBytes = edited.requiredBytes > std::numeric_limits<std::size_t>::max() - historyBytes
+                ? std::numeric_limits<std::size_t>::max() : edited.requiredBytes + historyBytes;
+            if (edited.failureReason != PartFailureReason::None || !edited.labels || !edited.catalog) {
+                candidate.failureReason = edited.failureReason;
+                candidate.status = edited.failureReason == PartFailureReason::Cancelled
+                    ? PartResultStatus::Cancelled : PartResultStatus::Failed;
+                candidate.message = edited.message;
+                return candidate;
+            }
+            candidate.labels = std::move(edited.labels);
+            candidate.catalog = std::move(edited.catalog);
+            labelMs = elapsedMs(started);
+            SetProgress(job.requestId, 0.9);
+        }
+        else {
         auto result = ClassicalPartSegmenter::BuildLabels(
             volume,
             params,
-            [this] {
-                return m_cancelRequested.load(std::memory_order_acquire);
-            },
+            getStopped,
             [this, requestId = job.requestId](const double progress) {
                 SetProgress(requestId, progress * 0.9);
             });
-        const auto labelMs = elapsedMs(started);
+        labelMs = elapsedMs(started);
         candidate.requiredBytes = result.requiredBytes
             > std::numeric_limits<std::size_t>::max() - historyBytes
             ? std::numeric_limits<std::size_t>::max()
@@ -590,10 +669,8 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         auto lineage = PartLineageMatcher::BuildCatalog(
             std::move(lineageRequest),
             m_identities,
-            [this] {
-                return m_cancelRequested.load(std::memory_order_acquire);
-            });
-        const auto lineageMs = elapsedMs(lineageStarted);
+            getStopped);
+        lineageMs = elapsedMs(lineageStarted);
         const auto lineageRequiredBytes = lineage.requiredBytes
             > std::numeric_limits<std::size_t>::max() - job.retainedSurfaceBytes
             ? std::numeric_limits<std::size_t>::max()
@@ -616,6 +693,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             return candidate;
         }
         candidate.catalog = std::move(lineage.catalog);
+        }
         candidate.extent = volume.extent;
         candidate.dimensions = volume.dimensions;
         candidate.spacing = volume.spacing;
@@ -666,9 +744,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         const auto surfaceStarted = std::chrono::steady_clock::now();
         auto surfaceResult = PartSurfaceProductBuilder::BuildProduct(
             surfaceRequest,
-            [this] {
-                return m_cancelRequested.load(std::memory_order_acquire);
-            },
+            getStopped,
             [this, requestId = job.requestId](const double progress) {
                 SetProgress(requestId, 0.9 + progress * 0.1);
             });
@@ -725,7 +801,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
             candidate.message = BuildBudgetMessage(candidate.requiredBytes, job.maxWorkingBytes);
             return candidate;
         }
-        if (m_cancelRequested.load(std::memory_order_acquire)) {
+        if (getStopped()) {
             candidate.status = PartResultStatus::Cancelled;
             candidate.failureReason = PartFailureReason::Cancelled;
             return candidate;
@@ -737,9 +813,14 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         geometry.spacing = candidate.spacing;
         geometry.origin = candidate.origin;
         geometry.direction = candidate.direction;
-        candidate.labelPayload = std::make_shared<const LabelMap3DPayload>(
-            geometry, LabelMapValues{candidate.labels}, std::vector<LabelDefinition>{},
-            "PartSegmentation.labels", "Part segmentation");
+        const auto sourcePayload = job.source->data
+            ? std::dynamic_pointer_cast<const ImageGrid3DPayload>(job.source->data->payload) : nullptr;
+        if (sourcePayload) geometry.coordinateFrame = sourcePayload->GetGeometry().coordinateFrame;
+        candidate.labelPayload = job.edit && job.edit->restoredPayload
+            ? job.edit->restoredPayload
+            : std::make_shared<const LabelMap3DPayload>(
+                geometry, LabelMapValues{candidate.labels}, std::vector<LabelDefinition>{},
+                "PartSegmentation.labels", "Part segmentation");
         candidate.labels = candidate.labelPayload->GetLabels();
         surfaceRequest.labels.reset();
         candidate.labelImage = vtkSmartPointer<vtkImageData>::New();
@@ -754,7 +835,7 @@ PartLabelCandidate PartSegmentationService::BuildCandidate(
         labelScalars->SetArray(const_cast<unsigned int*>(candidate.labels->data()),
             static_cast<vtkIdType>(candidate.labels->size()), 1);
         candidate.labelImage->GetPointData()->SetScalars(labelScalars);
-        if (m_cancelRequested.load(std::memory_order_acquire)) {
+        if (getStopped()) {
             candidate.status = PartResultStatus::Cancelled;
             candidate.failureReason = PartFailureReason::Cancelled;
             candidate.message = "Part request was cancelled before publication.";

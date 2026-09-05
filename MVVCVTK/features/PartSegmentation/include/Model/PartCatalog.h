@@ -20,6 +20,7 @@ struct PartEntry final {
     PartMetrics metrics;
     PartUserState userState;
     PartPresentation presentation;
+    bool isEdited = false;
 };
 
 struct PartCatalog final {

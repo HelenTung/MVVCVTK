@@ -80,6 +80,11 @@ struct PartAlgorithmResult final {
 
 class ClassicalPartSegmenter final {
 public:
+    static std::optional<std::vector<PartMetrics>> BuildLabelMetrics(
+        const PartVolumeView& volume,
+        const std::vector<PartLabelId>& labels,
+        std::uint32_t partCount,
+        const std::function<bool()>& getStopRequested = nullptr);
     static PartAlgorithmResult BuildLabels(
         const PartVolumeView& volume,
         const PartAlgorithmParams& params,

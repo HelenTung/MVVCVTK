@@ -668,6 +668,354 @@ bool GetSurfaceRetentionValid()
     return test.feature->DetachHost() && isRetained;
 }
 
+int GetEditLifecycleFailCount()
+{
+    int failures = 0;
+    const auto check = [&](bool passed, const char* text) { failures += GetCaseResult(passed, text) ? 0 : 1; };
+    const auto start = [&](TestHost& test) {
+        if (!test.Attach()) return false;
+        std::optional<PartSegmentationResult> done;
+        const auto admission = test.feature->SendRequest(GetRequest(PartSegmentationAction::Start),
+            [&](auto result) { done = std::move(result); });
+        return admission.status == PartAdmissionStatus::Accepted
+            && SendTicks(*test.feature, [&] { return done.has_value(); })
+            && done->status == PartResultStatus::Succeeded;
+    };
+    const auto mergeRequest = [](const TestHost& test) {
+        const auto state = test.feature->GetState();
+        PartEditRequest request;
+        request.expectedLabelMap = state.labelMap;
+        request.expectedCatalogRevision = state.catalogRevision;
+        PartMergeEdit merge;
+        for (const auto& part : test.feature->GetPartSetSnapshot()->parts) merge.parts.push_back(part.binding);
+        request.operation = std::move(merge);
+        return request;
+    };
+    const auto preview = [&](TestHost& test, PartEditRequest request) {
+        std::optional<PartSegmentationResult> done;
+        int callbackCount = 0;
+        const auto admission = test.feature->SendEditRequest(std::move(request), [&](auto result) {
+            done = std::move(result); ++callbackCount;
+        });
+        const bool completed = admission.status == PartAdmissionStatus::Accepted
+            && SendTicks(*test.feature, [&] { return done.has_value(); });
+        check(completed && callbackCount == 1 && done->status == PartResultStatus::PreviewReady,
+            "Edit request completes once with a preview");
+        const auto operations = test.feature->GetOperationStates();
+        const auto operation = std::find_if(operations.begin(), operations.end(), [&](const auto& value) {
+            return value.operation.requestId == admission.requestId;
+        });
+        check(operation != operations.end() && operation->status == FeatureRunStatus::Ready
+            && operation->outputs.empty(), "Preview operation is Ready without formal outputs");
+        return completed && done->status == PartResultStatus::PreviewReady ? test.feature->GetEditPreview() : nullptr;
+    };
+    const auto commit = [&](TestHost& test, std::uint64_t id) {
+        std::optional<PartSegmentationResult> done;
+        int count = 0;
+        const auto admission = test.feature->SetEditCommit(id, [&](auto result) { done = std::move(result); ++count; });
+        const bool completed = admission.status == PartAdmissionStatus::Accepted
+            && SendTicks(*test.feature, [&] { return done.has_value(); });
+        check(completed && count == 1, "Edit confirmation completes exactly once");
+        const auto operations = test.feature->GetOperationStates();
+        const auto operation = std::find_if(operations.begin(), operations.end(), [&](const auto& value) {
+            return value.operation.requestId == admission.requestId;
+        });
+        const bool published = done && (done->status == PartResultStatus::Succeeded
+            || done->status == PartResultStatus::SucceededWithDisplayFailure);
+        const auto state = test.feature->GetState();
+        check(admission.requestId != id && operation != operations.end()
+            && (!published || (operation->status == FeatureRunStatus::Succeeded
+                && std::find(operation->outputs.begin(), operation->outputs.end(), state.labelMap) != operation->outputs.end()
+                && std::find(operation->outputs.begin(), operation->outputs.end(), state.resultSet) != operation->outputs.end())),
+            "Edit confirmation has its own operation and matching formal outputs");
+        return done;
+    };
+    const auto historyRequest = [](const TestHost& test, bool isRedo) {
+        const auto state = test.feature->GetState();
+        PartEditRequest request;
+        request.expectedLabelMap = state.labelMap;
+        request.expectedCatalogRevision = state.catalogRevision;
+        request.operation = PartHistoryEdit{ isRedo };
+        return request;
+    };
+
+    TestHost test;
+    check(start(test), "Editing fixture publishes real DataGraph segmentation");
+    const auto initial = test.feature->GetPartSetSnapshot();
+    if (!initial || initial->parts.size() != 2) { (void)test.feature->DetachHost(); return failures + 1; }
+    const auto initialState = test.feature->GetState();
+    const auto initialData = test.data->GetData(test.data->GetDataGraph(), initialState.labelMap);
+    const auto originalLabels = std::dynamic_pointer_cast<const LabelMap3DPayload>(initialData->payload)->GetLabels();
+    const auto request = mergeRequest(test);
+    const auto first = preview(test, request);
+    check(first && test.feature->GetState().labelMap == initialState.labelMap
+        && test.feature->GetPartSetSnapshot() == initial,
+        "Preview does not publish formal labels or catalog");
+    if (first) {
+        check(test.feature->SendEditRequest(request).status == PartAdmissionStatus::Busy,
+            "An unconfirmed edit blocks another edit");
+        check(test.feature->SetPartState(initial->parts[0].binding, PartStatePatch{std::string("blocked")},
+            initial->catalogRevision).status == PartMutationStatus::Busy,
+            "An unconfirmed edit blocks catalog mutations");
+        check(test.feature->ClearEditPreview(first->previewId).status == PartMutationStatus::Succeeded
+            && test.feature->GetState().labelMap == initialState.labelMap,
+            "Cancelling a preview preserves formal data");
+        const auto cancelledOperations = test.feature->GetOperationStates();
+        check(std::any_of(cancelledOperations.begin(), cancelledOperations.end(), [&](const auto& value) {
+            return value.operation.requestId == first->previewId && value.status == FeatureRunStatus::Cancelled
+                && value.outputs.empty();
+        }), "Cleared edit preview reports cancellation without formal outputs");
+        check(test.feature->SetEditCommit(first->previewId).status == PartAdmissionStatus::InvalidRequest,
+            "Cancelled preview token cannot commit");
+    }
+    const auto candidate = preview(test, request);
+    bool sawCommitting = false, nestedBusy = false, detachRejected = false, oldProjection = false;
+    const auto observer = test.data->AttachDataChange([&](const auto&) {
+        sawCommitting = test.feature->GetState().status == PartSegmentationStatus::Committing;
+        oldProjection = test.feature->GetState().labelMap == initialState.labelMap
+            && test.feature->GetPartSetSnapshot()->resultRevision == initial->resultRevision;
+        nestedBusy = test.feature->SendEditRequest(request).status == PartAdmissionStatus::Busy;
+        detachRejected = !test.feature->DetachHost();
+    });
+    auto committed = candidate ? commit(test, candidate->previewId) : std::nullopt;
+    (void)test.data->DetachDataChange(observer);
+    check(committed && committed->status == PartResultStatus::Succeeded
+        && sawCommitting && oldProjection && nestedBusy && detachRejected,
+        "DataGraph observer sees documented committing projection and cannot reenter mutation/detach");
+    const auto merged = test.feature->GetPartSetSnapshot();
+    check(merged && merged->parts.size() == 1 && merged->retiredFromPrevious.size() == 2
+        && test.feature->GetState().labelMap != initialState.labelMap,
+        "Confirmation atomically publishes merged labels and identity catalog");
+    if (!merged || merged->parts.size() != 1) { (void)test.feature->DetachHost(); return failures + 1; }
+    const auto mergedId = merged->parts[0].binding.object.objectId;
+    const auto mergedData = test.data->GetData(test.data->GetDataGraph(), test.feature->GetState().labelMap);
+    check(mergedData->provenance && mergedData->provenance->operationId == "merge"
+        && std::any_of(mergedData->inputs.begin(), mergedData->inputs.end(),
+            [&](const auto& edge) { return edge.role == "base-labels" && edge.source == initialState.labelMap; }),
+        "Published edits retain exact source-label dependency and operation provenance");
+    auto undoPreview = preview(test, historyRequest(test, false));
+    if (undoPreview) (void)test.feature->SendRequest(GetRequest(PartSegmentationAction::Stop));
+    undoPreview = preview(test, historyRequest(test, false));
+    const auto undone = undoPreview ? commit(test, undoPreview->previewId) : std::nullopt;
+    const auto restored = test.feature->GetPartSetSnapshot();
+    const auto restoredData = test.data->GetData(test.data->GetDataGraph(), test.feature->GetState().labelMap);
+    check(undone && undone->status == PartResultStatus::Succeeded && restored && restored->parts.size() == 2
+        && restored->parts[0].binding.object == initial->parts[0].binding.object
+        && restored->parts[1].binding.object == initial->parts[1].binding.object
+        && restored->resultRevision > merged->resultRevision
+        && *std::dynamic_pointer_cast<const LabelMap3DPayload>(restoredData->payload)->GetLabels() == *originalLabels,
+        "Undo after cancelled preview restores original IDs/labels in a new revision");
+    const auto redoPreview = preview(test, historyRequest(test, true));
+    const auto redone = redoPreview ? commit(test, redoPreview->previewId) : std::nullopt;
+    check(redone && redone->status == PartResultStatus::Succeeded
+        && test.feature->GetPartSetSnapshot()->parts[0].binding.object.objectId == mergedId,
+        "Redo restores the same merged ID through the formal publication chain");
+    check(candidate && first && *candidate->labels == *first->labels,
+        "Old externally held previews remain immutable after commit and history operations");
+    const auto displayPreview = preview(test, historyRequest(test, false));
+    test.host->SetSceneRejected(true);
+    const auto displayed = displayPreview ? commit(test, displayPreview->previewId) : std::nullopt;
+    test.host->SetSceneRejected(false);
+    check(displayed && displayed->status == PartResultStatus::SucceededWithDisplayFailure
+        && test.feature->GetPartSetSnapshot()->parts.size() == 2,
+        "Display failure preserves the successfully committed edit");
+    check(test.feature->DetachHost(), "Edited Feature detaches without retained overlays");
+
+    for (const int changedInput : { 0, 1, 2, 3, 4, 5 }) {
+        TestHost stale;
+        check(start(stale), "Stale edit fixture starts");
+        const auto before = stale.feature->GetState();
+        auto editRequest = mergeRequest(stale);
+        DataRevisionRef changedRef = changedInput == 5 ? before.sourceRevision : before.labelMap;
+        if (changedInput == 2) {
+            const auto resultData = stale.data->GetData(stale.data->GetDataGraph(), before.resultSet);
+            const auto collection = std::dynamic_pointer_cast<const DataCollectionPayload>(resultData->payload);
+            for (const auto& item : collection->GetItems()) if (item.role == "catalog") changedRef = item.data;
+        }
+        if (changedInput == 3 || changedInput == 4) {
+            const auto source = stale.data->GetData(stale.data->GetDataGraph(), before.sourceRevision);
+            const auto grid = std::dynamic_pointer_cast<const ImageGrid3DPayload>(source->payload)->GetGeometry();
+            auto values = std::make_shared<const std::vector<std::uint8_t>>(*GetGridVoxelCount(grid),
+                static_cast<std::uint8_t>(changedInput == 3 ? 1 : 0));
+            DataTransaction mask;
+            changedRef = { stale.data->CreateDataEntityId(), 1 };
+            mask.outputs.push_back({ changedRef.entityId, 0, DataTypes::labelMap3D,
+                { { "source-volume", before.sourceRevision } },
+                std::make_shared<const LabelMap3DPayload>(grid, LabelMapValues{values}),
+                DataProvenance{"external-test", "mask", "1", "{}"} });
+            check(stale.data->SetDataCommit(std::move(mask)).status == DataCommitStatus::Succeeded,
+                "Formal typed mask is available for the edit");
+            if (changedInput == 3) editRequest.scope.roiMask = changedRef;
+            else editRequest.scope.protectionMask = changedRef;
+        }
+        const auto pending = preview(stale, editRequest);
+        const auto graph = stale.data->GetDataGraph();
+        if (changedInput != 0) {
+            const auto label = stale.data->GetData(graph, changedRef);
+            DataTransaction external;
+            external.outputs.push_back({ label->self.entityId, label->self.generation,
+                label->type, label->inputs, label->payload, DataProvenance{"external-test", "head-change", "1", "{}"} });
+            check(stale.data->SetDataCommit(std::move(external)).status == DataCommitStatus::Succeeded,
+                "An edit input entity head changes without changing the active binding");
+        }
+        else {
+            const auto binding = stale.data->GetDataBinding(graph, "analysis.parts.active");
+            DataTransaction clear;
+            clear.bindings.push_back({ binding->name, binding->revision, true, binding->target, {} });
+            auto cleared = stale.data->SetDataCommit(std::move(clear));
+            DataTransaction reset;
+            reset.bindings.push_back({ binding->name, cleared.bindings[0].revision, true, {}, binding->target });
+            check(stale.data->SetDataCommit(std::move(reset)).status == DataCommitStatus::Succeeded,
+                "Result binding undergoes ABA with the same target restored");
+        }
+        const auto failed = pending ? commit(stale, pending->previewId) : std::nullopt;
+        check(failed && failed->status == PartResultStatus::Failed
+            && failed->failureReason == PartFailureReason::RevisionConflict
+            && stale.feature->GetState().labelMap == before.labelMap,
+            changedInput != 0 ? "Entity-head CAS rejects stale source/label/catalog/mask input" : "Binding revision CAS rejects ABA preview");
+        check(stale.feature->SendEditRequest(historyRequest(stale, false)).status == PartAdmissionStatus::Unavailable,
+            "Rejected confirmation creates no Undo entry");
+        (void)stale.feature->DetachHost();
+    }
+
+    TestHost deferred;
+    check(start(deferred), "Deferred preview fixture starts");
+    deferred.host->SetDeferOwnerCompletes(true);
+    int callbackCount = 0;
+    std::optional<PartSegmentationResult> result;
+    (void)deferred.feature->SendEditRequest(mergeRequest(deferred), [&](auto value) { result = std::move(value); ++callbackCount; });
+    check(SendTicks(*deferred.feature, [&] { return deferred.feature->GetEditPreview() != nullptr; }),
+        "Preview can be ready before queued completion delivery");
+    const auto pending = deferred.feature->GetEditPreview();
+    if (pending) (void)deferred.feature->ClearEditPreview(pending->previewId);
+    deferred.host->SendOwnerCompletions();
+    check(result && result->status == PartResultStatus::Cancelled && callbackCount == 1,
+        "Cancelled preview cannot later deliver a stale PreviewReady callback");
+    (void)deferred.feature->DetachHost();
+
+    TestHost timeout(48);
+    auto shortConfig = GetConfig();
+    shortConfig.editTimeoutMs = 1;
+    timeout.feature = std::make_shared<PartSegmentationHostFeature>(shortConfig);
+    check(start(timeout), "Edit deadline fixture starts");
+    const auto timedState = timeout.feature->GetState();
+    PartEditRequest timedRequest;
+    timedRequest.expectedLabelMap = timedState.labelMap;
+    timedRequest.expectedCatalogRevision = timedState.catalogRevision;
+    PartBrushEdit stroke;
+    stroke.target = timeout.feature->GetPartSetSnapshot()->parts[0].binding;
+    stroke.radiusMM = 0.01;
+    stroke.sourcePoints.resize(5000, { -1000, -1000, -1000 });
+    timedRequest.operation = std::move(stroke);
+    result.reset(); callbackCount = 0;
+    check(timeout.feature->SendEditRequest(std::move(timedRequest), [&](auto value) {
+        result = std::move(value); ++callbackCount;
+    }).status == PartAdmissionStatus::Accepted, "Bounded edit task is admitted with an absolute deadline");
+    check(SendTicks(*timeout.feature, [&] { return result.has_value(); })
+        && callbackCount == 1 && result->failureReason == PartFailureReason::TimedOut
+        && timeout.feature->GetState().labelMap == timedState.labelMap
+        && !timeout.feature->GetEditPreview(),
+        "Deadline failure preserves formal labels and finishes exactly once");
+    (void)timeout.feature->DetachHost();
+
+    TestHost budget;
+    auto budgetConfig = GetConfig();
+    budgetConfig.maxHistoryBytes = 1;
+    budgetConfig.maxUndoSteps = 1;
+    budget.feature = std::make_shared<PartSegmentationHostFeature>(budgetConfig);
+    check(start(budget), "History budget fixture starts with existing formal data");
+    const auto budgetLabels = budget.feature->GetState().labelMap;
+    check(budget.feature->SendEditRequest(mergeRequest(budget)).status == PartAdmissionStatus::BudgetExceeded
+        && budget.feature->GetState().labelMap == budgetLabels,
+        "Retained DataGraph history is charged before edit admission");
+    (void)budget.feature->SendRequest(GetRequest(PartSegmentationAction::Clear));
+    (void)budget.feature->DetachHost();
+    check(start(budget), "History budget fixture reattaches and creates a new active result");
+    check(budget.feature->SendEditRequest(mergeRequest(budget)).status == PartAdmissionStatus::BudgetExceeded,
+        "Clear and reattach do not refund retained DataGraph history");
+    (void)budget.feature->DetachHost();
+
+    TestHost late;
+    check(start(late), "Committed deferred notification fixture starts");
+    const auto latePreview = preview(late, mergeRequest(late));
+    late.host->SetDeferOwnerCompletes(true);
+    result.reset(); callbackCount = 0;
+    if (latePreview) (void)late.feature->SetEditCommit(latePreview->previewId, [&](auto value) { result = std::move(value); ++callbackCount; });
+    const auto publishedLabel = late.feature->GetState().labelMap;
+    (void)late.feature->DetachHost();
+    late.host->SendOwnerCompletions();
+    check(result && callbackCount == 1 && result->status == PartResultStatus::SucceededWithDisplayFailure
+        && late.data->GetData(late.data->GetDataGraph(), publishedLabel) != nullptr,
+        "Detach after data commit cannot turn a successful edit into a cancelled transaction");
+
+    TestHost retained;
+    auto retainedConfig = GetConfig();
+    retainedConfig.maxHistoryBytes = 64U * 1024U;
+    retained.feature = std::make_shared<PartSegmentationHostFeature>(retainedConfig);
+    check(start(retained), "Retained preview budget fixture starts");
+    std::vector<std::shared_ptr<const std::vector<PartLabelId>>> externalLabels;
+    bool wasBudgetRejected = false;
+    for (int i = 0; i < 64; ++i) {
+        result.reset();
+        const auto admitted = retained.feature->SendEditRequest(mergeRequest(retained), [&](auto value) { result = std::move(value); });
+        if (admitted.status == PartAdmissionStatus::BudgetExceeded) { wasBudgetRejected = true; break; }
+        if (admitted.status != PartAdmissionStatus::Accepted
+            || !SendTicks(*retained.feature, [&] { return result.has_value(); })) break;
+        if (result->failureReason == PartFailureReason::BudgetExceeded) { wasBudgetRejected = true; break; }
+        const auto item = retained.feature->GetEditPreview();
+        if (!item) break;
+        externalLabels.push_back(item->labels);
+        (void)retained.feature->ClearEditPreview(item->previewId);
+    }
+    check(wasBudgetRejected && !externalLabels.empty()
+        && retained.feature->GetPartSetSnapshot()->parts.size() == 2,
+        "Externally retained cancelled previews remain charged and cannot grow without bound");
+    externalLabels.clear();
+    result.reset();
+    const auto retry = retained.feature->SendEditRequest(mergeRequest(retained), [&](auto value) { result = std::move(value); });
+    check(retry.status == PartAdmissionStatus::Accepted
+        && SendTicks(*retained.feature, [&] { return result.has_value(); })
+        && result->status == PartResultStatus::PreviewReady,
+        "Releasing external preview owners permits retry without discarding formal history");
+    (void)retained.feature->DetachHost();
+
+    TestHost callbackHost;
+    check(start(callbackHost), "Reentrant completion fixture starts");
+    bool previewQueriesMatch = false, commitQueriesMatch = false;
+    result.reset();
+    const auto reentrantAdmission = callbackHost.feature->SendEditRequest(mergeRequest(callbackHost), [&](auto ready) {
+        const auto item = callbackHost.feature->GetEditPreview();
+        previewQueriesMatch = ready.status == PartResultStatus::PreviewReady && item
+            && item->previewId == ready.requestId
+            && callbackHost.feature->GetState().labelMap == item->baseLabels;
+        if (item) (void)callbackHost.feature->SetEditCommit(item->previewId, [&](auto complete) {
+            result = std::move(complete);
+            commitQueriesMatch = callbackHost.feature->GetState().status == PartSegmentationStatus::Succeeded
+                && callbackHost.feature->GetState().labelMap == result->labelMap
+                && callbackHost.feature->GetPartSetSnapshot()->parts.size() == 1;
+        });
+    });
+    check(reentrantAdmission.status == PartAdmissionStatus::Accepted
+        && SendTicks(*callbackHost.feature, [&] { return result.has_value(); })
+        && previewQueriesMatch && commitQueriesMatch && result->status == PartResultStatus::Succeeded,
+        "Preview callback can query and confirm; confirmation callback sees completed state");
+    (void)callbackHost.feature->DetachHost();
+
+    TestHost released;
+    check(start(released), "Callback-owned lifetime fixture starts");
+    const auto releasePreview = preview(released, mergeRequest(released));
+    bool wasReleased = false;
+    if (releasePreview) (void)released.feature->SetEditCommit(releasePreview->previewId, [&](auto complete) {
+        if (complete.status == PartResultStatus::Succeeded) {
+            wasReleased = released.feature->DetachHost();
+            released.feature.reset();
+        }
+    });
+    check(wasReleased && !released.feature && released.views->GetOverlayCount() == 0,
+        "Completion can detach and release the last caller owner without invalidating the current call");
+    return failures;
+}
+
 } // namespace
 
 int GetPartLifecycleFailCount()
@@ -703,7 +1051,7 @@ int GetPartLifecycleFailCount()
         return isOldDisplayRetained && test.feature->GetOperationStates().size() == 1
             && test.feature->DetachHost();
     };
-    int failureCount = GetPreviousPartFailCount();
+    int failureCount = GetPreviousPartFailCount() + GetEditLifecycleFailCount();
     {
         TestHost test;
         bool isValid = test.Attach();
