@@ -19,6 +19,7 @@ option(
     OFF
 )
 option(MVVCVTK_BUILD_STANDALONE "Build the full standalone example" ON)
+option(MVVCVTK_BUILD_ARTIFACT_REDUCTION "Build repository-only ArtifactReduction feature" OFF)
 option(MVVCVTK_ENABLE_AVX2 "Enable AVX2 for Release builds" ON)
 
 if(MVVCVTK_BUILD_QT_TESTING AND NOT MVVCVTK_BUILD_TESTING)

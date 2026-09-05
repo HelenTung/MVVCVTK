@@ -25,3 +25,7 @@ endif()
 if(MVVCVTK_BUILD_SURFACE_DETERMINATION)
     add_subdirectory(SurfaceDetermination)
 endif()
+
+if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
+    add_subdirectory(ArtifactReduction)
+endif()

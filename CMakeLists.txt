@@ -17,6 +17,9 @@ list(APPEND CMAKE_MODULE_PATH
 )
 
 include(MVVCVTKBuildPolicy)
+if(MVVCVTK_BUILD_ARTIFACT_REDUCTION)
+    enable_language(C)
+endif()
 include(MVVCVTKDependencies)
 
 if(MVVCVTK_ENABLE_AVX2)
