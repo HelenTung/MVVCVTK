@@ -14,10 +14,13 @@
 #include <vector>
 
 class OverlayService;
+class TrustedLabelMapPort;
 
 struct GapViewRequest final {
     // GapHost 从 TrustedFeatureDataPort 取得的不可变 owner；存在时只共享 scalar，不复制整卷。
     TrustedImageSnapshot trustedInput;
+    // Host 显示路径必须提供 Feature-scoped Store 端口；直接算法入口不经过本字段。
+    std::shared_ptr<TrustedLabelMapPort> labelMaps;
     // 低层直接调用使用的可变输入；StartView 同步 DeepCopy 后才接纳 worker。
     vtkSmartPointer<vtkImageData> inputImage;
     // 当前私有内核没有有效域接口；仅允许为空，非空请求会被明确拒绝且不会触发本地补算。

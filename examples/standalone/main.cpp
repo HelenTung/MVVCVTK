@@ -551,6 +551,11 @@ HostReloadRequest BuildPartReload()
     reload.geometry.dimensions = { side, side, side };
     reload.geometry.spacing = { 0.5F, 0.5F, 0.5F };
     reload.geometry.origin = { 0.0F, 0.0F, 0.0F };
+    reload.metadata.identity.datasetId =
+        "standalone-part-segmentation-synthetic";
+    reload.metadata.source.kind = ImageSourceKind::Memory;
+    reload.metadata.source.uri =
+        "memory://standalone-part-segmentation-synthetic";
     return reload;
 }
 
@@ -1967,6 +1972,10 @@ int main(int argc, char* argv[])
         load.geometry.spacing = {
             0.1537f, 0.1537f, 0.1537f };
         load.geometry.origin = { 0.0f, 0.0f, 0.0f };
+        load.metadata.identity.datasetId =
+            "standalone-ct-1536x1536x1536";
+        load.metadata.source.kind = ImageSourceKind::RawFile;
+        load.metadata.source.uri = load.filePath;
         isDataAccepted = session.SendRequestResult(
             std::move(load), onDataReady);
     }

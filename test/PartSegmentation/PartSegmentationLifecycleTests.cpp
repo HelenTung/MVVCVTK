@@ -204,6 +204,167 @@ private:
     int m_setCount = 0;
 };
 
+class LabelMapPortStub final : public TrustedLabelMapPort {
+public:
+    std::vector<LabelMapDescriptor>
+        GetLabelMapDescriptors() const override
+    {
+        return m_published
+            ? std::vector<LabelMapDescriptor>{
+                m_published->descriptor }
+            : std::vector<LabelMapDescriptor>{};
+    }
+
+    std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+        const std::string_view id) const override
+    {
+        return m_published && m_published->descriptor.id == id
+            ? std::optional<LabelMapDescriptor>{
+                m_published->descriptor }
+            : std::optional<LabelMapDescriptor>{};
+    }
+
+    LabelMapReadResult GetLabelMapReadResult(
+        const LabelMapReadRequest&) const override
+    {
+        return {};
+    }
+
+    LabelMapReadChunkResult GetLabelMapReadChunk(
+        const LabelMapReadRequest&,
+        std::size_t) const override
+    {
+        return {};
+    }
+
+    TrustedLabelMapSnapshot GetLabelMapSnapshot(
+        const std::string_view id) const override
+    {
+        return m_published && m_published->descriptor.id == id
+            ? m_published : TrustedLabelMapSnapshot{};
+    }
+
+    TrustedLabelMapStageResult StageLabelMap(
+        TrustedLabelMapCandidate candidate) override
+    {
+        TrustedLabelMapStageResult result;
+        if (m_failStage || !candidate.image || m_staged) {
+            result.error = m_staged
+                ? LabelMapError::Busy : LabelMapError::CopyFailed;
+            return result;
+        }
+        if (m_published
+            && (!candidate.expectedVersion
+                || *candidate.expectedVersion
+                    != m_published->descriptor.version)) {
+            result.error = LabelMapError::VersionMismatch;
+            return result;
+        }
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->DeepCopy(candidate.image);
+        auto state = std::make_shared<TrustedLabelMapState>();
+        state->descriptor.id = std::move(candidate.id);
+        state->descriptor.displayName =
+            std::move(candidate.displayName);
+        state->descriptor.producerFeatureId = "PartSegmentation";
+        state->descriptor.datasetId = std::move(candidate.datasetId);
+        state->descriptor.sourceVersion = candidate.sourceVersion;
+        state->descriptor.version = m_nextVersion++;
+        image->GetExtent(state->descriptor.extent.data());
+        image->GetDimensions(state->descriptor.dims.data());
+        image->GetSpacing(state->descriptor.spacing.data());
+        image->GetOrigin(state->descriptor.origin.data());
+        image->GetScalarRange(state->descriptor.scalarRange.data());
+        state->descriptor.valueType = ImageValueType::UInt32;
+        state->descriptor.componentBytes = sizeof(std::uint32_t);
+        state->descriptor.componentCount = 1;
+        state->descriptor.voxelCount = static_cast<std::size_t>(
+            image->GetNumberOfPoints());
+        state->image = std::move(image);
+        m_staged = state;
+        m_stageToken = m_nextToken++;
+        result.error = LabelMapError::None;
+        result.token = m_stageToken;
+        result.candidate = std::move(state);
+        ++m_stageCount;
+        return result;
+    }
+
+    TrustedLabelMapCommitResult CommitLabelMap(
+        const LabelMapStageToken token) override
+    {
+        TrustedLabelMapCommitResult result;
+        if (m_failCommit) {
+            result.error = LabelMapError::CopyFailed;
+            return result;
+        }
+        if (!m_staged || token != m_stageToken) {
+            result.error = LabelMapError::NotFound;
+            return result;
+        }
+        m_published = std::move(m_staged);
+        m_stageToken = 0;
+        result.error = LabelMapError::None;
+        result.published = m_published;
+        ++m_commitCount;
+        return result;
+    }
+
+    bool DiscardLabelMapStage(
+        const LabelMapStageToken token) noexcept override
+    {
+        if (!m_staged || token != m_stageToken) return false;
+        m_staged.reset();
+        m_stageToken = 0;
+        ++m_discardCount;
+        return true;
+    }
+
+    TrustedLabelMapRemoveResult RemoveLabelMap(
+        const std::string_view id,
+        const std::optional<LabelMapVersion> expectedVersion) override
+    {
+        TrustedLabelMapRemoveResult result;
+        if (!m_published || m_published->descriptor.id != id) {
+            result.error = LabelMapError::NotFound;
+            return result;
+        }
+        if (expectedVersion
+            && *expectedVersion != m_published->descriptor.version) {
+            result.error = LabelMapError::VersionMismatch;
+            return result;
+        }
+        result.error = LabelMapError::None;
+        result.isRemoved = true;
+        result.removedVersion = m_published->descriptor.version;
+        m_published.reset();
+        ++m_removeCount;
+        return result;
+    }
+
+    TrustedLabelMapSnapshot GetPublished() const noexcept
+    {
+        return m_published;
+    }
+
+    int GetCommitCount() const noexcept { return m_commitCount; }
+    int GetRemoveCount() const noexcept { return m_removeCount; }
+    void SetFailCommit(const bool value) noexcept { m_failCommit = value; }
+
+private:
+    TrustedLabelMapSnapshot m_staged;
+    TrustedLabelMapSnapshot m_published;
+    LabelMapVersion m_nextVersion = 1;
+    LabelMapStageToken m_nextToken = 1;
+    LabelMapStageToken m_stageToken = 0;
+    int m_stageCount = 0;
+    int m_commitCount = 0;
+    int m_discardCount = 0;
+    int m_removeCount = 0;
+    bool m_failStage = false;
+    bool m_failCommit = false;
+};
+
 class HostControlStub final : public FeatureHostControl {
 public:
     bool AttachInput(HostInputBinding) override { return true; }
@@ -293,6 +454,10 @@ TrustedImageSnapshot BuildSnapshot(
     state->spacing = { 0.5, 0.75, 1.25 };
     state->origin = { 1.0, 2.0, 3.0 };
     state->scalarRange = { 0.0, 1.0 };
+    state->metadata.identity.datasetId = "part-test-dataset";
+    state->metadata.source.kind = ImageSourceKind::Memory;
+    state->metadata.source.uri = "memory://part-test-dataset";
+    state->metadata.source.byteSize = voxelCount * sizeof(float);
     state->version = version;
     return state;
 }
@@ -401,6 +566,7 @@ struct TestHost final {
         const std::size_t maxWorkingBytes = 512U * 1024U * 1024U)
         : views(std::make_shared<ViewDirectoryStub>())
         , data(std::make_shared<DataPortStub>(BuildSnapshot(side, version)))
+        , labelMaps(std::make_shared<LabelMapPortStub>())
         , host(std::make_shared<HostControlStub>())
         , feature(std::make_shared<PartSegmentationHostFeature>(
             GetConfig(maxWorkingBytes)))
@@ -412,12 +578,14 @@ struct TestHost final {
         HostFeatureContext context;
         context.views = views;
         context.data = data;
+        context.labelMaps = labelMaps;
         context.host = host;
         return feature->AttachHost(context);
     }
 
     std::shared_ptr<ViewDirectoryStub> views;
     std::shared_ptr<DataPortStub> data;
+    std::shared_ptr<LabelMapPortStub> labelMaps;
     std::shared_ptr<HostControlStub> host;
     std::shared_ptr<PartSegmentationHostFeature> feature;
 };
@@ -456,6 +624,7 @@ int GetPartLifecycleFailCount()
         const auto state = test.feature->GetState();
         const void* const firstLabel =
             test.views->GetOverlay("part-top")->GetLabelPointer();
+        const auto firstMap = test.labelMaps->GetPublished();
 
         failureCount += GetCaseResult(
             isAttached
@@ -484,6 +653,16 @@ int GetPartLifecycleFailCount()
                 && state.parts.size() == 2
                 && state.resultRevision == 1
                 && firstLabel != nullptr
+                && firstMap
+                && firstMap->descriptor.id
+                    == "PartSegmentation.labels"
+                && firstMap->descriptor.datasetId
+                    == "part-test-dataset"
+                && firstMap->descriptor.sourceVersion == 1
+                && firstMap->descriptor.valueType
+                    == ImageValueType::UInt32
+                && firstMap->image->GetScalarPointer() == firstLabel
+                && test.labelMaps->GetCommitCount() == 1
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
             "Successful commit publishes one overlay per supported View") ? 0 : 1;
@@ -513,9 +692,38 @@ int GetPartLifecycleFailCount()
                 && restored.resultRevision == 1
                 && restored.parts.size() == 2
                 && restoredLabel == firstLabel
+                && test.labelMaps->GetPublished() == firstMap
+                && test.labelMaps->GetCommitCount() == 1
                 && test.views->GetOverlayCount() == 4
                 && test.host->GetActiveViews().size() == 4,
             "Failed replacement preserves the committed result") ? 0 : 1;
+
+        test.labelMaps->SetFailCommit(true);
+        std::optional<PartSegmentationResult> storeFailResult;
+        const auto storeFail = test.feature->SendRequest(
+            GetRequest(PartSegmentationAction::Start),
+            [&](PartSegmentationResult result) {
+                storeFailResult = std::move(result);
+            });
+        const bool didStoreFail = SendTicks(
+            *test.feature,
+            [&] { return storeFailResult.has_value(); });
+        test.labelMaps->SetFailCommit(false);
+        failureCount += GetCaseResult(
+            storeFail.status == PartAdmissionStatus::Accepted
+                && didStoreFail
+                && storeFailResult
+                && storeFailResult->status == PartResultStatus::Failed
+                && storeFailResult->failureReason
+                    == PartFailureReason::DisplayFailed
+                && test.feature->GetState().resultRevision == 1
+                && test.labelMaps->GetPublished() == firstMap
+                && test.labelMaps->GetCommitCount() == 1
+                && test.views->GetOverlay("part-top")
+                    ->GetLabelPointer() == firstLabel
+                && test.views->GetOverlayCount() == 4,
+            "LabelMap commit failure restores the previous generation")
+            ? 0 : 1;
 
         auto hide = GetRequest(PartSegmentationAction::SetVisibility);
         hide.isVisible = false;
@@ -533,6 +741,7 @@ int GetPartLifecycleFailCount()
                 && hideResult.status == PartResultStatus::Succeeded
                 && test.views->GetOverlayCount() == 0
                 && test.host->GetActiveViews().empty()
+                && test.labelMaps->GetPublished() == firstMap
                 && !test.feature->GetState().isOverlayVisible,
             "Visibility off removes all Part overlays") ? 0 : 1;
 
@@ -564,13 +773,19 @@ int GetPartLifecycleFailCount()
             *test.feature, [&] { return nextResult.has_value(); });
         const void* const nextLabel =
             test.views->GetOverlay("part-top")->GetLabelPointer();
+        const auto nextMap = test.labelMaps->GetPublished();
         failureCount += GetCaseResult(
             next.status == PartAdmissionStatus::Accepted
                 && didCommitNext && nextResult
                 && nextResult->status == PartResultStatus::Succeeded
                 && nextResult->resultRevision == 2
                 && nextLabel != nullptr
-                && nextLabel != firstLabel,
+                && nextLabel != firstLabel
+                && nextMap
+                && nextMap != firstMap
+                && nextMap->descriptor.version
+                    > firstMap->descriptor.version
+                && nextMap->image->GetScalarPointer() == nextLabel,
             "Successful replacement atomically swaps the label generation")
             ? 0 : 1;
 
@@ -587,7 +802,9 @@ int GetPartLifecycleFailCount()
                 && cleared.status == PartSegmentationStatus::Idle
                 && cleared.parts.empty()
                 && test.views->GetOverlayCount() == 0
-                && test.host->GetActiveViews().empty(),
+                && test.host->GetActiveViews().empty()
+                && !test.labelMaps->GetPublished()
+                && test.labelMaps->GetRemoveCount() == 1,
             "Clear retires the catalog and display") ? 0 : 1;
         failureCount += GetCaseResult(
             test.feature->DetachHost(),

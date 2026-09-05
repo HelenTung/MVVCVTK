@@ -15,6 +15,7 @@
 #include <vtkImageData.h>
 #include <vtkRenderWindow.h>
 #include <vtkRenderWindowInteractor.h>
+#include <vtkTIFFWriter.h>
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,8 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <memory>
@@ -34,6 +37,18 @@
 #include <vector>
 
 namespace {
+
+ImageMetadata GetLoadMetadata(
+    const ImageSourceKind kind = ImageSourceKind::Memory)
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "qt-host-load-dataset";
+    metadata.source.kind = kind;
+    metadata.source.uri = kind == ImageSourceKind::Memory
+        ? "memory://qt-host-load-dataset"
+        : "file://qt-host-load-dataset";
+    return metadata;
+}
 
 HostCoreServices GetLoadCore(
     std::shared_ptr<RawVolumeDataManager> dataManager = {})
@@ -76,6 +91,7 @@ HostReloadRequest GetReload()
     };
     reload.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
+    reload.metadata = GetLoadMetadata();
     return reload;
 }
 
@@ -239,7 +255,14 @@ bool GetStageFinalizeValid()
     auto data = std::make_shared<RawVolumeDataManager>();
     const auto initial = data->GetImageSnapshot();
     const auto layout = VolumeLayout::Create(
-        { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {});
+        { 2, 2, 2 },
+        { 1.0f, 1.0f, 1.0f },
+        {},
+        std::array<double, 9>{
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0 },
+        GetLoadMetadata());
     auto buffer = layout
         ? VolumeBuffer::Create(
             std::vector<float>{
@@ -850,9 +873,18 @@ bool GetImageReadStateValid()
         source.data(),
         sizeof(source));
 
+    RawVolumeDataManager invalidMetadataManager;
+    auto invalidSnapshotMetadata = GetLoadMetadata();
+    invalidSnapshotMetadata.scalar.slope = 0.0;
+    if (invalidMetadataManager.SetImageSnapshot(
+            image, std::move(invalidSnapshotMetadata))
+        || invalidMetadataManager.GetPendingSnapshot()) {
+        return false;
+    }
+
     RawVolumeDataManager dataManager;
     bool hasPending = false;
-    if (!dataManager.SetImageSnapshot(image)
+    if (!dataManager.SetImageSnapshot(image, GetLoadMetadata())
         || !dataManager.SetCurrentFromPending(hasPending)
         || !hasPending) {
         return false;
@@ -890,6 +922,27 @@ bool GetImageReadStateValid()
         maskValues.data(),
         maskValues.size());
     const auto expectedSnapshot = dataManager.GetImageSnapshot();
+    TrustedImageState invalidGeometry = *expectedSnapshot;
+    invalidGeometry.origin[0] += 1.0;
+    TrustedImageSnapshot invalidPublished;
+    if (dataManager.SetCurrentData(
+            std::move(invalidGeometry),
+            expectedSnapshot,
+            invalidPublished)
+        || invalidPublished
+        || dataManager.GetImageSnapshot() != expectedSnapshot) {
+        return false;
+    }
+    TrustedImageState invalidMetadata = *expectedSnapshot;
+    invalidMetadata.metadata.identity.datasetId = "other-dataset";
+    if (dataManager.SetCurrentData(
+            std::move(invalidMetadata),
+            expectedSnapshot,
+            invalidPublished)
+        || invalidPublished
+        || dataManager.GetImageSnapshot() != expectedSnapshot) {
+        return false;
+    }
     TrustedImageState maskedState = *expectedSnapshot;
     maskedState.validityMask = mask;
     TrustedImageSnapshot maskedSnapshot;
@@ -1041,7 +1094,8 @@ bool GetImageReadStateValid()
         replacementValues.data(),
         sizeof(replacementValues));
     hasPending = false;
-    if (!dataManager.SetImageSnapshot(replacement)
+    if (!dataManager.SetImageSnapshot(
+            replacement, GetLoadMetadata())
         || !dataManager.SetCurrentFromPending(hasPending)
         || !hasPending) {
         return false;
@@ -1058,6 +1112,322 @@ bool GetImageReadStateValid()
             sizeof(replacementValues)) == 0;
 }
 
+bool GetImageDescriptorValid()
+{
+    RawVolumeDataManager dataManager;
+    if (dataManager.GetImageDescriptor()) return false;
+
+    ImageMetadata metadata = GetLoadMetadata();
+    metadata.identity.inspectionId = "inspection-17";
+    metadata.identity.objectId = "object-9";
+    metadata.identity.batchId = "batch-3";
+    metadata.source.digest = "sha256:0123456789abcdef";
+    metadata.scalar.slope = 2.0;
+    metadata.scalar.intercept = -1.0;
+    metadata.scalar.noData = -1024.0;
+    metadata.attributes = {
+        { "isCalibrated", true },
+        { "frameCount", std::uint64_t{ 1 } },
+        { "temperature", 21.5 },
+        { "operator", std::string{ "A" } }
+    };
+    const std::array<double, 9> lpsDirection = {
+        0.0, -1.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    const auto layout = VolumeLayout::Create(
+        { 2, 3, 1 },
+        { 2.0f, 3.0f, 4.0f },
+        { 10.0f, 20.0f, 30.0f },
+        lpsDirection,
+        metadata);
+    auto buffer = layout
+        ? VolumeBuffer::Create(
+            { 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f },
+            *layout)
+        : std::optional<VolumeBuffer>{};
+    if (!buffer || !dataManager.SetFromBuffer(*buffer)
+        || dataManager.GetImageDescriptor()) {
+        return false;
+    }
+
+    bool hasPending = false;
+    if (!dataManager.SetCurrentFromPending(hasPending)
+        || !hasPending) {
+        return false;
+    }
+    const auto descriptor = dataManager.GetImageDescriptor();
+    const auto read = dataManager.GetImageReadState();
+    const std::array<float, 6> expectedValues = {
+        5.0f, 4.0f, 3.0f, 2.0f, 1.0f, 0.0f
+    };
+    if (!descriptor || !read || !read->values
+        || descriptor->metadata.identity.datasetId
+            != "qt-host-load-dataset"
+        || descriptor->metadata.identity.inspectionId
+            != std::optional<std::string>{ "inspection-17" }
+        || descriptor->metadata.source.kind
+            != ImageSourceKind::Memory
+        || descriptor->metadata.source.byteSize
+            != expectedValues.size() * sizeof(float)
+        || descriptor->metadata.source.digest != metadata.source.digest
+        || descriptor->metadata.scalar.slope != 2.0
+        || descriptor->metadata.scalar.intercept != -1.0
+        || descriptor->metadata.scalar.noData
+            != std::optional<double>{ -1024.0 }
+        || descriptor->metadata.attributes.size() != 4
+        || std::get<bool>(
+            descriptor->metadata.attributes[0].value) != true
+        || std::get<std::uint64_t>(
+            descriptor->metadata.attributes[1].value) != 1
+        || std::get<double>(
+            descriptor->metadata.attributes[2].value) != 21.5
+        || std::get<std::string>(
+            descriptor->metadata.attributes[3].value) != "A"
+        || descriptor->dims != std::array<int, 3>{ 2, 3, 1 }
+        || descriptor->spacing
+            != std::array<double, 3>{ 2.0, 3.0, 4.0 }
+        || descriptor->origin
+            != std::array<double, 3>{ -4.0, -22.0, 30.0 }
+        || descriptor->direction != lpsDirection
+        || descriptor->valueType != ImageValueType::Float32
+        || descriptor->componentBytes != sizeof(float)
+        || descriptor->componentCount != 1
+        || descriptor->version == 0
+        || read->version != descriptor->version
+        || read->origin != descriptor->origin
+        || read->direction != descriptor->direction
+        || read->values->size() != sizeof(expectedValues)
+        || std::memcmp(
+            read->values->data(),
+            expectedValues.data(),
+            sizeof(expectedValues)) != 0) {
+        return false;
+    }
+
+    ImageMetadata generalMetadata = GetLoadMetadata();
+    generalMetadata.identity.datasetId = "general-direction-dataset";
+    generalMetadata.source.uri =
+        "memory://general-direction-dataset";
+    const std::array<double, 9> outOfPlaneLpsDirection = {
+        0.0, 0.0, 1.0,
+        0.0, 1.0, 0.0,
+        -1.0, 0.0, 0.0
+    };
+    const std::array<double, 9> expectedRasDirection = {
+        0.0, 0.0, -1.0,
+        0.0, 1.0, 0.0,
+        1.0, 0.0, 0.0
+    };
+    const auto generalLayout = VolumeLayout::Create(
+        { 2, 2, 3 },
+        { 2.0f, 3.0f, 4.0f },
+        { 10.0f, 20.0f, 30.0f },
+        outOfPlaneLpsDirection,
+        std::move(generalMetadata));
+    const std::vector<float> generalValues = {
+        0.0f, 1.0f, 2.0f, 3.0f,
+        4.0f, 5.0f, 6.0f, 7.0f,
+        8.0f, 9.0f, 10.0f, 11.0f
+    };
+    const std::array<float, 12> expectedGeneralValues = {
+        3.0f, 2.0f, 1.0f, 0.0f,
+        7.0f, 6.0f, 5.0f, 4.0f,
+        11.0f, 10.0f, 9.0f, 8.0f
+    };
+    const auto generalBuffer = generalLayout
+        ? VolumeBuffer::Create(generalValues, *generalLayout)
+        : std::optional<VolumeBuffer>{};
+    RawVolumeDataManager generalManager;
+    hasPending = false;
+    if (!generalBuffer
+        || !generalManager.SetFromBuffer(*generalBuffer)
+        || !generalManager.SetCurrentFromPending(hasPending)
+        || !hasPending) {
+        return false;
+    }
+    const auto generalDescriptor =
+        generalManager.GetImageDescriptor();
+    const auto generalRead = generalManager.GetImageReadState();
+    if (!generalDescriptor || !generalRead || !generalRead->values
+        || generalDescriptor->origin
+            != std::array<double, 3>{ -10.0, -23.0, 28.0 }
+        || generalDescriptor->direction != expectedRasDirection
+        || generalRead->direction != expectedRasDirection
+        || generalRead->values->size()
+            != sizeof(expectedGeneralValues)
+        || std::memcmp(
+            generalRead->values->data(),
+            expectedGeneralValues.data(),
+            sizeof(expectedGeneralValues)) != 0) {
+        return false;
+    }
+
+    ImageMetadata wrongBytes = metadata;
+    wrongBytes.source.byteSize = 1;
+    const auto invalidLayout = VolumeLayout::Create(
+        { 2, 3, 1 },
+        { 2.0f, 3.0f, 4.0f },
+        { 10.0f, 20.0f, 30.0f },
+        lpsDirection,
+        std::move(wrongBytes));
+    const auto invalidBuffer = invalidLayout
+        ? VolumeBuffer::Create(
+            std::vector<float>(6, 0.0f), *invalidLayout)
+        : std::optional<VolumeBuffer>{};
+    return invalidBuffer
+        && !dataManager.SetFromBuffer(*invalidBuffer)
+        && !dataManager.GetPendingSnapshot()
+        && dataManager.GetImageDescriptor()->version
+            == descriptor->version;
+}
+
+bool GetTiffDescriptorValid()
+{
+    const auto suffix = std::to_string(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto directory = std::filesystem::temp_directory_path()
+        / std::filesystem::u8path(
+            std::string{ "MVVCVTK_TiffDescriptor_" } + suffix);
+    struct Cleanup final {
+        std::filesystem::path path;
+        ~Cleanup()
+        {
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+        }
+    } cleanup{ directory };
+
+    std::error_code error;
+    if (!std::filesystem::create_directories(directory, error)
+        || error) {
+        return false;
+    }
+    const auto writeSlice = [](
+        const std::filesystem::path& path,
+        const unsigned short value) {
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->SetDimensions(2, 2, 1);
+        image->AllocateScalars(VTK_UNSIGNED_SHORT, 1);
+        auto* values = static_cast<unsigned short*>(
+            image->GetScalarPointer());
+        if (!values) return false;
+        std::fill(values, values + 4, value);
+        auto writer = vtkSmartPointer<vtkTIFFWriter>::New();
+        const std::string pathText = path.u8string();
+        writer->SetFileName(pathText.c_str());
+        writer->SetInputData(image);
+        writer->Write();
+        return writer->GetErrorCode() == 0
+            && std::filesystem::is_regular_file(path);
+    };
+
+    const auto firstPath = directory / "slice1.tif";
+    const auto secondPath = directory / "slice2.TIFF";
+    const auto tenthPath = directory / "slice10.tif";
+    if (!writeSlice(firstPath, 1)
+        || !writeSlice(secondPath, 2)
+        || !writeSlice(tenthPath, 10)) {
+        return false;
+    }
+    {
+        std::ofstream ignored(directory / "ignored.txt");
+        ignored << "not a TIFF";
+    }
+    const std::uint64_t expectedSourceBytes =
+        static_cast<std::uint64_t>(
+            std::filesystem::file_size(firstPath))
+        + static_cast<std::uint64_t>(
+            std::filesystem::file_size(secondPath))
+        + static_cast<std::uint64_t>(
+            std::filesystem::file_size(tenthPath));
+
+    ImageMetadata metadata =
+        GetLoadMetadata(ImageSourceKind::TiffSeries);
+    metadata.identity.datasetId = "tiff-series-dataset";
+    metadata.source.uri = directory.u8string();
+    const std::array<double, 9> lpsDirection = {
+        0.0, -1.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    const auto layout = VolumeLayout::Create(
+        { 2, 2, 3 },
+        { 2.0f, 3.0f, 4.0f },
+        { 10.0f, 20.0f, 30.0f },
+        lpsDirection,
+        metadata);
+    RawVolumeDataManager seriesManager;
+    bool hasPending = false;
+    if (!layout
+        || !seriesManager.SetDataLoaded(directory.u8string(), *layout)
+        || !seriesManager.SetCurrentFromPending(hasPending)
+        || !hasPending) {
+        return false;
+    }
+    const auto descriptor = seriesManager.GetImageDescriptor();
+    const auto read = seriesManager.GetImageReadState();
+    const std::array<unsigned short, 12> expectedValues = {
+        1, 1, 1, 1,
+        2, 2, 2, 2,
+        10, 10, 10, 10
+    };
+    if (!descriptor || !read || !read->values
+        || descriptor->metadata.identity.datasetId
+            != "tiff-series-dataset"
+        || descriptor->metadata.source.byteSize != expectedSourceBytes
+        || descriptor->dims != std::array<int, 3>{ 2, 2, 3 }
+        || descriptor->origin
+            != std::array<double, 3>{ -7.0, -22.0, 30.0 }
+        || descriptor->direction != lpsDirection
+        || descriptor->valueType != ImageValueType::UInt16
+        || read->values->size() != sizeof(expectedValues)
+        || std::memcmp(
+            read->values->data(),
+            expectedValues.data(),
+            sizeof(expectedValues)) != 0) {
+        return false;
+    }
+
+    ImageMetadata wrongBytes = metadata;
+    wrongBytes.source.byteSize = expectedSourceBytes + 1;
+    const auto wrongLayout = VolumeLayout::Create(
+        { 2, 2, 3 },
+        { 2.0f, 3.0f, 4.0f },
+        { 10.0f, 20.0f, 30.0f },
+        lpsDirection,
+        std::move(wrongBytes));
+    if (!wrongLayout
+        || seriesManager.SetDataLoaded(
+            directory.u8string(), *wrongLayout)
+        || seriesManager.GetPendingSnapshot()) {
+        return false;
+    }
+
+    ImageMetadata singleMetadata = metadata;
+    singleMetadata.identity.datasetId = "tiff-single-dataset";
+    singleMetadata.source.uri = firstPath.u8string();
+    const auto singleLayout = VolumeLayout::Create(
+        { 2, 2, 1 },
+        { 1.0f, 1.0f, 1.0f },
+        {},
+        std::array<double, 9>{
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0 },
+        std::move(singleMetadata));
+    RawVolumeDataManager singleManager;
+    hasPending = false;
+    return singleLayout
+        && singleManager.SetDataLoaded(firstPath.u8string(), *singleLayout)
+        && singleManager.SetCurrentFromPending(hasPending)
+        && hasPending
+        && singleManager.GetImageDescriptor()
+        && singleManager.GetImageDescriptor()->metadata.source.byteSize
+            == std::filesystem::file_size(firstPath);
+}
+
 bool GetHostResultValid()
 {
     VtkAppHostSession emptySession(HostSessionConfig{});
@@ -1072,6 +1442,7 @@ bool GetHostResultValid()
     if (isEmptySent || emptyCount != 1
         || emptyResult.isSucceeded
         || emptyResult.errorCode != HostErrorCode::SessionNotReady
+        || emptySession.GetImageDescriptor()
         || emptySession.GetImageReadState()) {
         return false;
     }
@@ -1176,6 +1547,19 @@ bool GetHostResultValid()
         || asyncSuccess.errorCode != HostErrorCode::None) {
         return false;
     }
+    const auto sessionDescriptor = session.GetImageDescriptor();
+    if (!sessionDescriptor
+        || sessionDescriptor->metadata.identity.datasetId
+            != "qt-host-load-dataset"
+        || sessionDescriptor->metadata.source.kind
+            != ImageSourceKind::Memory
+        || sessionDescriptor->metadata.source.byteSize
+            != 8 * sizeof(float)
+        || sessionDescriptor->dims
+            != std::array<int, 3>{ 2, 2, 2 }
+        || sessionDescriptor->version == 0) {
+        return false;
+    }
 
     int imageReadCount = 0;
     ImageReadResult imageRead;
@@ -1219,6 +1603,7 @@ bool GetHostResultValid()
     missingLoad.filePath = "missing-result.raw";
     missingLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
+    missingLoad.metadata = GetLoadMetadata(ImageSourceKind::RawFile);
     const bool isAsyncFailSent = session.SendRequestResult(
         std::move(missingLoad),
         [&asyncFailCount, &asyncFail](HostResult value) {
@@ -1269,6 +1654,7 @@ int GetLoadFailCount()
     unicodeLoad.geometry = {
         { 2, 2, 2 }, { 1.0f, 1.0f, 1.0f }, {} };
     unicodeLoad.filePath = u8"不存在/体数据 é.raw";
+    unicodeLoad.metadata = GetLoadMetadata(ImageSourceKind::RawFile);
     failureCount += GetCaseResult(
         !session.SendRequest(
             HostLoadRequest(unicodeLoad)),
@@ -1317,6 +1703,12 @@ int GetLoadFailCount()
     failureCount += GetCaseResult(
         GetImageReadStateValid(),
         "Read image contract owns immutable bytes without VTK identity") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetImageDescriptorValid(),
+        "Image descriptor publishes metadata and general RAS geometry atomically") ? 0 : 1;
+    failureCount += GetCaseResult(
+        GetTiffDescriptorValid(),
+        "TIFF file and natural-order series publish one descriptor transaction") ? 0 : 1;
     failureCount += GetCaseResult(
         GetHostResultValid(),
         "Typed host result reports one stable failure reason") ? 0 : 1;

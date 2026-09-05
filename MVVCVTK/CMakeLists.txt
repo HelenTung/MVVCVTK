@@ -402,6 +402,7 @@ set(MVVCVTK_HOST_SOURCES
     include/Data/DataManager.h
     include/Data/DataService.h
     include/Data/ImageProcessor.h
+    include/Data/LabelMapStore.h
     include/Data/VolumeTypes.h
     include/Geometry/InteractionComputeService.h
     include/Host/HostCommandRouter.h
@@ -437,6 +438,7 @@ set(MVVCVTK_HOST_SOURCES
     src/Data/DataConverters.cpp
     src/Data/DataManager.cpp
     src/Data/ImageProcessor.cpp
+    src/Data/LabelMapStore.cpp
     src/Data/VolumeTypes.cpp
     src/Host/HostTransferCodec.cpp
     include/Host/Internal/HostTransferCodec.h

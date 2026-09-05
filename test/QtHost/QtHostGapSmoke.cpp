@@ -281,6 +281,9 @@ int main(int argc, char* argv[])
         };
         reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
         reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+        reload.metadata.identity.datasetId = "qt-host-gap-smoke";
+        reload.metadata.source.kind = ImageSourceKind::Memory;
+        reload.metadata.source.uri = "memory://qt-host-gap-smoke";
         reload.voxels.assign(voxelCount, 100.0f);
         reload.voxels[2 + sideLength * (2 + sideLength * 2)] = 0.0f;
 

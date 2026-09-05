@@ -41,6 +41,15 @@
 
 namespace {
 
+ImageMetadata GetCropTestMetadata()
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "qt-host-crop-dataset";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://qt-host-crop-dataset";
+    return metadata;
+}
+
 class ContextProbeFeature final : public HostFeature {
 public:
     std::string_view GetFeatureId() const noexcept override
@@ -212,7 +221,12 @@ bool GetCoreWriterContract()
         const auto layout = VolumeLayout::Create(
             { 2, 2, 2 },
             { 1.0f, 1.0f, 1.0f },
-            { 0.0f, 0.0f, 0.0f });
+            { 0.0f, 0.0f, 0.0f },
+            std::array<double, 9>{
+                1.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 0.0, 1.0 },
+            GetCropTestMetadata());
         const auto buffer = layout
             ? VolumeBuffer::Create(
                 std::vector<float>(8, 1.0f),
@@ -395,6 +409,7 @@ bool SendReload(
     reload.geometry.dimensions = { 4, 4, 4 };
     reload.geometry.spacing = { 1.0f, 1.0f, 1.0f };
     reload.geometry.origin = { 0.0f, 0.0f, 0.0f };
+    reload.metadata = GetCropTestMetadata();
     return session.SendRequest(
         std::move(reload),
         [&isComplete, &isSucceeded](const bool value) {

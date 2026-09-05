@@ -9,6 +9,7 @@
 #include "App/AppState.h"
 #include "App/Services/AppServiceFactory.h"
 #include "Data/DataManager.h"
+#include "Data/LabelMapStore.h"
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -47,6 +49,19 @@ HostCoreServices::GetImageReadState() const
         return data
             ? data->GetImageReadState()
             : std::optional<ImageReadState>{};
+    };
+}
+
+std::function<std::optional<ImageDescriptor>()>
+HostCoreServices::GetImageDescriptor() const
+{
+    const std::weak_ptr<AbstractDataManager> weakData =
+        sharedDataMgr;
+    return [weakData]() {
+        const auto data = weakData.lock();
+        return data
+            ? data->GetImageDescriptor()
+            : std::optional<ImageDescriptor>{};
     };
 }
 
@@ -361,10 +376,18 @@ public:
     class FeatureReadPort final : public ImageReadPort {
     public:
         explicit FeatureReadPort(const HostCoreServices& core)
-            : m_getReadState(core.GetImageReadState())
+            : m_getDescriptor(core.GetImageDescriptor())
+            , m_getReadState(core.GetImageReadState())
             , m_getReadResult(core.GetImageReadResult())
             , m_getReadChunk(core.GetImageReadChunk())
         {
+        }
+
+        std::optional<ImageDescriptor> GetImageDescriptor() const override
+        {
+            return m_getDescriptor
+                ? m_getDescriptor()
+                : std::optional<ImageDescriptor>{};
         }
 
         std::optional<ImageReadState> GetImageReadState() const override
@@ -392,12 +415,118 @@ public:
         }
 
     private:
+        std::function<std::optional<ImageDescriptor>()>
+            m_getDescriptor;
         std::function<std::optional<ImageReadState>()> m_getReadState;
         std::function<ImageReadResult(const ImageReadRequest&)>
             m_getReadResult;
         std::function<ImageReadChunkResult(
             const ImageReadRequest&,
             std::size_t)> m_getReadChunk;
+    };
+
+    class FeatureLabelMapPort final : public TrustedLabelMapPort {
+    public:
+        FeatureLabelMapPort(
+            std::weak_ptr<LabelMapStore> store,
+            std::string featureId)
+            : m_store(std::move(store))
+            , m_featureId(std::move(featureId))
+        {
+        }
+
+        std::vector<LabelMapDescriptor>
+            GetLabelMapDescriptors() const override
+        {
+            const auto store = m_store.lock();
+            return store
+                ? store->GetDescriptors()
+                : std::vector<LabelMapDescriptor>{};
+        }
+
+        std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+            const std::string_view id) const override
+        {
+            const auto store = m_store.lock();
+            return store
+                ? store->GetDescriptor(id)
+                : std::optional<LabelMapDescriptor>{};
+        }
+
+        LabelMapReadResult GetLabelMapReadResult(
+            const LabelMapReadRequest& request) const override
+        {
+            const auto store = m_store.lock();
+            if (store) return store->GetReadResult(request);
+            LabelMapReadResult result;
+            result.error = LabelMapError::Unavailable;
+            return result;
+        }
+
+        LabelMapReadChunkResult GetLabelMapReadChunk(
+            const LabelMapReadRequest& request,
+            const std::size_t voxelOffset) const override
+        {
+            const auto store = m_store.lock();
+            if (store) return store->GetReadChunk(
+                request, voxelOffset);
+            LabelMapReadChunkResult result;
+            result.error = LabelMapError::Unavailable;
+            return result;
+        }
+
+        TrustedLabelMapSnapshot GetLabelMapSnapshot(
+            const std::string_view id) const override
+        {
+            const auto store = m_store.lock();
+            return store
+                ? store->GetSnapshot(id)
+                : TrustedLabelMapSnapshot{};
+        }
+
+        TrustedLabelMapStageResult StageLabelMap(
+            TrustedLabelMapCandidate candidate) override
+        {
+            const auto store = m_store.lock();
+            if (store) {
+                return store->Stage(
+                    m_featureId, std::move(candidate));
+            }
+            return {};
+        }
+
+        TrustedLabelMapCommitResult CommitLabelMap(
+            const LabelMapStageToken token) override
+        {
+            const auto store = m_store.lock();
+            return store
+                ? store->Commit(m_featureId, token)
+                : TrustedLabelMapCommitResult{};
+        }
+
+        bool DiscardLabelMapStage(
+            const LabelMapStageToken token) noexcept override
+        {
+            const auto store = m_store.lock();
+            return store
+                && store->Discard(m_featureId, token);
+        }
+
+        TrustedLabelMapRemoveResult RemoveLabelMap(
+            const std::string_view id,
+            const std::optional<LabelMapVersion>
+                expectedVersion) override
+        {
+            const auto store = m_store.lock();
+            return store
+                ? store->Remove(
+                    m_featureId, id, expectedVersion)
+                : TrustedLabelMapRemoveResult{};
+        }
+
+    private:
+        std::weak_ptr<LabelMapStore> m_store;
+        std::string m_featureId;
     };
 
     class FeatureHostControlPort final
@@ -494,6 +623,7 @@ public:
     std::optional<HostSceneViewState> GetSceneViewState(
         const HostViewTarget& target);
     std::vector<HostSceneViewState> GetSceneViewStates();
+    std::optional<ImageDescriptor> GetImageDescriptor();
     std::optional<ImageReadState> GetImageReadState();
     ImageReadResult GetImageReadResult(std::size_t maxReadBytes);
     ImageReadResult GetImageReadResult(
@@ -504,6 +634,14 @@ public:
     ImageReadAdmission StartImageRead(
         ImageReadRequest request,
         ImageReadCallback onComplete);
+    std::vector<LabelMapDescriptor> GetLabelMapDescriptors();
+    std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+        const std::string& id);
+    LabelMapReadResult GetLabelMapReadResult(
+        const LabelMapReadRequest& request);
+    LabelMapReadChunkResult GetLabelMapReadChunk(
+        const LabelMapReadRequest& request,
+        std::size_t voxelOffset);
     bool AttachTimer(const HostTimerConfig& timerConfig);
     bool AttachFeature(const std::shared_ptr<HostFeature>& feature);
     bool DetachFeature(const HostFeature& feature);
@@ -539,7 +677,7 @@ private:
         StopToken token) noexcept;
     static bool SendPendingStop(StopToken token) noexcept;
     static StopToken GetStopToken() noexcept;
-    static HostCoreServices BuildCore();
+    static HostCoreServices BuildCore(std::thread::id ownerThread);
     void SendDiagnostic(const std::string& message) const noexcept;
     void SendImageReadComplete(bool isStopping) noexcept;
     void OnHostTimer();
@@ -564,11 +702,14 @@ VtkAppHostSession::Impl::s_pendingStops;
 std::atomic<VtkAppHostSession::Impl::StopToken>
 VtkAppHostSession::Impl::s_nextStopToken{ 1 };
 
-HostCoreServices VtkAppHostSession::Impl::BuildCore()
+HostCoreServices VtkAppHostSession::Impl::BuildCore(
+    const std::thread::id ownerThread)
 {
     HostCoreServices value;
     value.sharedDataMgr =
         std::make_shared<RawVolumeDataManager>();
+    value.sharedLabelMaps = std::make_shared<LabelMapStore>(
+        value.sharedDataMgr, ownerThread);
     value.sharedStateBroadcaster =
         std::make_shared<SharedStateBroadcaster>();
     value.sharedState =
@@ -648,7 +789,7 @@ bool VtkAppHostSession::Impl::BuildSession()
         return true;
     };
     try {
-        core = BuildCore();
+        core = BuildCore(ownerThread);
         if (!renderViews.Build(core, config.renderViews)) {
             (void)clearBuild();
             return false;
@@ -779,6 +920,16 @@ VtkAppHostSession::Impl::GetImageReadState()
     return core.sharedDataMgr->GetImageReadState();
 }
 
+std::optional<ImageDescriptor>
+VtkAppHostSession::Impl::GetImageDescriptor()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (!GetIsReady() || !core.sharedDataMgr) {
+        return std::nullopt;
+    }
+    return core.sharedDataMgr->GetImageDescriptor();
+}
+
 ImageReadResult VtkAppHostSession::Impl::GetImageReadResult(
     const std::size_t maxReadBytes)
 {
@@ -808,6 +959,51 @@ ImageReadChunkResult VtkAppHostSession::Impl::GetImageReadChunk(
     }
     return core.sharedDataMgr->GetImageReadChunk(
         request, voxelOffset, TaskStopToken{});
+}
+
+std::vector<LabelMapDescriptor>
+VtkAppHostSession::Impl::GetLabelMapDescriptors()
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    return GetIsReady() && core.sharedLabelMaps
+        ? core.sharedLabelMaps->GetDescriptors()
+        : std::vector<LabelMapDescriptor>{};
+}
+
+std::optional<LabelMapDescriptor>
+VtkAppHostSession::Impl::GetLabelMapDescriptor(
+    const std::string& id)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    return GetIsReady() && core.sharedLabelMaps
+        ? core.sharedLabelMaps->GetDescriptor(id)
+        : std::optional<LabelMapDescriptor>{};
+}
+
+LabelMapReadResult VtkAppHostSession::Impl::GetLabelMapReadResult(
+    const LabelMapReadRequest& request)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (GetIsReady() && core.sharedLabelMaps) {
+        return core.sharedLabelMaps->GetReadResult(request);
+    }
+    LabelMapReadResult result;
+    result.error = LabelMapError::Unavailable;
+    return result;
+}
+
+LabelMapReadChunkResult VtkAppHostSession::Impl::GetLabelMapReadChunk(
+    const LabelMapReadRequest& request,
+    const std::size_t voxelOffset)
+{
+    const std::lock_guard<std::recursive_mutex> lock(m_sessionMutex);
+    if (GetIsReady() && core.sharedLabelMaps) {
+        return core.sharedLabelMaps->GetReadChunk(
+            request, voxelOffset);
+    }
+    LabelMapReadChunkResult result;
+    result.error = LabelMapError::Unavailable;
+    return result;
 }
 
 ImageReadAdmission VtkAppHostSession::Impl::StartImageRead(
@@ -1149,6 +1345,8 @@ bool VtkAppHostSession::Impl::AttachFeature(
             std::make_shared<FeatureViewDirectoryPort>(weakBridge);
         context.read = std::make_shared<FeatureReadPort>(core);
         context.data = std::make_shared<FeatureDataPort>(core);
+        context.labelMaps = std::make_shared<FeatureLabelMapPort>(
+            core.sharedLabelMaps, id);
         context.host = std::make_shared<FeatureHostControlPort>(
             weakBridge,
             id,
@@ -1174,6 +1372,9 @@ bool VtkAppHostSession::Impl::AttachFeature(
                 id, {});
         }
         catch (...) {
+        }
+        if (core.sharedLabelMaps) {
+            core.sharedLabelMaps->RemoveOwner(id);
         }
     };
     try {
@@ -1234,6 +1435,9 @@ bool VtkAppHostSession::Impl::DetachFeature(
         }
         return false;
     }
+    if (core.sharedLabelMaps) {
+        core.sharedLabelMaps->RemoveOwner(entry->id);
+    }
     features.erase(entry);
     return true;
 }
@@ -1255,6 +1459,9 @@ bool VtkAppHostSession::Impl::DetachFeatures()
         }
         catch (...) {
             return false;
+        }
+        if (core.sharedLabelMaps) {
+            core.sharedLabelMaps->RemoveOwner(entry.id);
         }
         features.pop_back();
     }
@@ -1302,6 +1509,9 @@ bool VtkAppHostSession::Impl::Stop() noexcept
         }
         hotkeyRouter.reset();
         commandRouter.reset();
+        if (core.sharedLabelMaps) {
+            core.sharedLabelMaps->Clear();
+        }
         core = {};
         isBuilt = false;
         isStarted = false;
@@ -1743,6 +1953,14 @@ VtkAppHostSession::GetImageReadState()
         : std::optional<ImageReadState>{};
 }
 
+std::optional<ImageDescriptor>
+VtkAppHostSession::GetImageDescriptor()
+{
+    return m_impl
+        ? m_impl->GetImageDescriptor()
+        : std::optional<ImageDescriptor>{};
+}
+
 ImageReadResult VtkAppHostSession::GetImageReadResult(
     const std::size_t maxReadBytes)
 {
@@ -1776,4 +1994,43 @@ ImageReadAdmission VtkAppHostSession::StartImageRead(
         ? m_impl->StartImageRead(
             std::move(request), std::move(onComplete))
         : ImageReadAdmission::Unavailable;
+}
+
+std::vector<LabelMapDescriptor>
+VtkAppHostSession::GetLabelMapDescriptors()
+{
+    return m_impl
+        ? m_impl->GetLabelMapDescriptors()
+        : std::vector<LabelMapDescriptor>{};
+}
+
+std::optional<LabelMapDescriptor>
+VtkAppHostSession::GetLabelMapDescriptor(
+    const std::string& id)
+{
+    return m_impl
+        ? m_impl->GetLabelMapDescriptor(id)
+        : std::optional<LabelMapDescriptor>{};
+}
+
+LabelMapReadResult VtkAppHostSession::GetLabelMapReadResult(
+    const LabelMapReadRequest& request)
+{
+    if (m_impl) return m_impl->GetLabelMapReadResult(request);
+    LabelMapReadResult result;
+    result.error = LabelMapError::Unavailable;
+    return result;
+}
+
+LabelMapReadChunkResult VtkAppHostSession::GetLabelMapReadChunk(
+    const LabelMapReadRequest& request,
+    const std::size_t voxelOffset)
+{
+    if (m_impl) {
+        return m_impl->GetLabelMapReadChunk(
+            request, voxelOffset);
+    }
+    LabelMapReadChunkResult result;
+    result.error = LabelMapError::Unavailable;
+    return result;
 }

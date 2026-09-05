@@ -12,7 +12,9 @@ protected:
     std::unique_ptr<Impl> m_impl;
 
     // 提交由派生类独占构造的 image，避免 TIFF 读取完成后再次复制整卷体素。
-    bool SetOwnedImage(vtkSmartPointer<vtkImageData> image);
+    bool SetOwnedImage(
+        vtkSmartPointer<vtkImageData> image,
+        ImageMetadata metadata);
     bool SetPendingImage(TrustedImageState image);
 public:
     BaseDataManager();
@@ -33,6 +35,7 @@ public:
     bool SetSpacing(const std::array<double, 3>& spacing) override;
     DataVersion GetDataVersion() const override;
     TrustedImageState GetImageState() const override;
+    std::optional<ImageDescriptor> GetImageDescriptor() const override;
     std::optional<ImageReadState> GetImageReadState() const override;
     ImageReadResult GetImageReadResult(
         std::size_t maxReadBytes = imageReadLimit) const override;
@@ -90,7 +93,9 @@ public:
         const VolumeBuffer& buffer,
         const TaskStopToken& stopToken) override;
     // 深拷贝调用方 image 为 pending 隔离批次，不直接提交 current。
-    bool SetImageSnapshot(vtkSmartPointer<vtkImageData> image);
+    bool SetImageSnapshot(
+        vtkSmartPointer<vtkImageData> image,
+        ImageMetadata metadata);
     // owner 线程在所有 View 候选提交后，将同一个 pending owner 原子发布为 current。
     bool SetCurrentFromPending(bool& hasPending) override;
     bool ClearPending() override;

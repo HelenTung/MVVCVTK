@@ -1,6 +1,7 @@
 set(MVVCVTK_HOST_METHOD_SOURCES
     QtHostExportTests.cpp
     QtHostLifecycleTests.cpp
+    QtHostLabelMapTests.cpp
     QtHostLoadTests.cpp
     QtHostMethodCases.h
     QtHostMethodTests.cpp

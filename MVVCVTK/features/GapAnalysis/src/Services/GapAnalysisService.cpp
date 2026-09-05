@@ -2,6 +2,7 @@
 
 #include "GapInputBuffer.h"
 #include "GapKernelBridge.h"
+#include "Host/HostFeature.h"
 #include "Render/Contracts/OverlayService.h"
 #include "Render/Strategies/GapOverlayStrategies.h"
 
@@ -34,10 +35,17 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+namespace {
+
+constexpr std::string_view labelMapId = "GapAnalysis.labels";
+
+} // namespace
 
 // GapAnalysis 的并发与显示编排边界：后台 worker 只消费不可变体素/参数快照并一次性提交结果；
 // 宿主 view 线程通过独立状态机消费终态、创建 overlay。分析状态、显示阶段和 overlay 可见意图互不推导。
@@ -199,8 +207,10 @@ private:
         bool isMeshNeeded);
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
+    void RetireFailedDisplayResult();
 
     bool SetDisplayView();
+    bool RemoveLabelMap() noexcept;
     bool SetOverlayOff() noexcept;
     bool SetStoredView();
     bool ExitViewState();
@@ -266,6 +276,9 @@ private:
     vtkSmartPointer<vtkPolyData> m_displayVoidMesh;
     // 成功结果中 2D label image 的只读强引用；完整继承输入快照几何，生命周期和 mesh 缓存一致。
     vtkSmartPointer<vtkImageData> m_displayLabelImage;
+    // Host 显示路径只保留 Store 已提交 owner；直接 service 输入没有 Session Store。
+    std::shared_ptr<TrustedLabelMapPort> m_labelMaps;
+    TrustedLabelMapSnapshot m_labelMap;
     // StartView 保存的 ISO 来源配方；接纳 worker 前用冻结输入的 min/max 解析，结束会话时清空。
     GapSurfaceConfig m_displaySurfaceConfig;
     // StartView 保存的 void 参数值副本；接纳 worker 时同步写入参数槽，结束会话时清空。
@@ -476,7 +489,9 @@ GapAnalysisService::Impl::~Impl()
 {
     if (GetViewOn()) {
         if (GetViewThread()) {
-            ExitViewState();
+            if (!ExitViewState()) {
+                SetOverlayOff();
+            }
         }
         else {
             std::cerr << "[GapAnalysis] Active view must exit on its bound host thread before destruction."
@@ -758,6 +773,9 @@ vtkSmartPointer<vtkImageData> GapAnalysisService::Impl::BuildLabelImage() const 
     vtkSmartPointer<vtkImageData> labelImage;
     {
         std::lock_guard<std::mutex> lk(m_resultMutex);
+        if (!m_result.isSucceeded) {
+            return nullptr;
+        }
         labelImage = m_result.labelImage;
     }
     if (!labelImage) {
@@ -808,6 +826,9 @@ bool GapAnalysisService::Impl::StartView(
 
     InputSnapshot inputSnapshot;
     const bool hasTrustedInput = request.trustedInput != nullptr;
+    if (hasTrustedInput && !request.labelMaps) {
+        return false;
+    }
     if ((hasTrustedInput
             && (request.inputImage || request.validityMask))
         || !(hasTrustedInput
@@ -915,6 +936,7 @@ bool GapAnalysisService::Impl::StartView(
     }
     m_meshTargets = std::move(meshTargets);
     m_sliceTargets = std::move(sliceTargets);
+    m_labelMaps = std::move(request.labelMaps);
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
     m_displaySurfaceConfig = request.surface;
@@ -951,7 +973,14 @@ bool GapAnalysisService::Impl::SwitchOverlay() {
         return true;
     }
 
-    return SetStoredView();
+    try {
+        return SetStoredView();
+    }
+    catch (...) {
+        SetOverlayOff();
+        m_isOverlayOn = false;
+        return false;
+    }
 }
 
 bool GapAnalysisService::Impl::ExitView() {
@@ -964,7 +993,9 @@ bool GapAnalysisService::Impl::ExitView() {
 bool GapAnalysisService::Impl::ExitViewState() {
     const bool isActive = m_viewPhase.load() != GapViewPhase::Idle;
     const bool hasCachedResult = m_displayVoidMesh != nullptr || m_displayLabelImage != nullptr;
-    // 1. overlay 必须先从各目标卸载，避免 ClearDisplayState 丢失 binding 后无法移除。
+    // 1. Store 真源先按版本退休；失败时保留完整会话供 owner 重试。
+    if (!RemoveLabelMap()) return false;
+    // 2. overlay 必须先从各目标卸载，避免 ClearDisplayState 丢失 binding 后无法移除。
     const bool hasRemoved = SetOverlayOff();
     if (isActive) {
         m_isOverlayOn = false;
@@ -996,6 +1027,11 @@ void GapAnalysisService::Impl::ClearView()
     // 输入快照、显示缓存和 view 线程绑定。调用方必须在已绑定的宿主线程协调活动显示会话。
     StopAsync();
     StopWorker();
+    if (!RemoveLabelMap()) {
+        std::cerr
+            << "[GapAnalysis] LabelMap cleanup failed; Session owner cleanup is required."
+            << std::endl;
+    }
     SetOverlayOff();
     m_viewCallback = nullptr;
     {
@@ -1176,20 +1212,107 @@ void GapAnalysisService::Impl::SetAnalysisState(GapAnalysisState state) {
     m_analysisState.store(static_cast<int>(state));
 }
 
+void GapAnalysisService::Impl::RetireFailedDisplayResult()
+{
+    {
+        std::lock_guard<std::mutex> resultLock(m_resultMutex);
+        m_result = {};
+    }
+    SetAnalysisState(GapAnalysisState::Failed);
+}
+
 bool GapAnalysisService::Impl::SetDisplayView() {
     if (m_viewPhase.load() == GapViewPhase::Idle) {
         return false;
     }
 
-    // owner tick 只接管 worker 已完整发布的只读显示产物，不执行整卷 mesh 提取或标签 DeepCopy。
+    vtkSmartPointer<vtkPolyData> voidMesh;
+    vtkSmartPointer<vtkImageData> labelImage;
     {
         std::lock_guard<std::mutex> resultLock(m_resultMutex);
         if (!m_result.isSucceeded || !m_result.labelImage) {
             return false;
         }
-        m_displayVoidMesh = m_result.voidMesh;
-        m_displayLabelImage = m_result.labelImage;
+        voidMesh = m_result.voidMesh;
+        labelImage = m_result.labelImage;
     }
+
+    // Host 路径先把 worker 候选深拷贝进 Session Store；commit 成功后同一个
+    // immutable image owner 才能成为结果与 overlay 的共同输入。
+    if (m_labelMaps) {
+        const auto input = GetInputSnapshot();
+        if (!input || !input->trustedOwner) {
+            RetireFailedDisplayResult();
+            return false;
+        }
+        TrustedLabelMapCandidate candidate;
+        candidate.id = labelMapId;
+        candidate.displayName = "Gap analysis void labels";
+        candidate.datasetId =
+            input->trustedOwner->metadata.identity.datasetId;
+        candidate.sourceVersion = input->trustedOwner->version;
+        if (m_labelMap) {
+            candidate.expectedVersion =
+                m_labelMap->descriptor.version;
+        }
+        candidate.image = labelImage;
+        const auto staged = m_labelMaps->StageLabelMap(
+            std::move(candidate));
+        if (staged.error != LabelMapError::None
+            || staged.token == 0
+            || !staged.candidate) {
+            RetireFailedDisplayResult();
+            return false;
+        }
+
+        // overlay 只消费 Store 已深拷贝的 staged owner；先完成可见候选，
+        // 再把同一个 immutable snapshot 原子提交为 Session 真源。
+        m_displayVoidMesh = voidMesh;
+        m_displayLabelImage = staged.candidate->image;
+        bool isDisplayReady = true;
+        if (m_isOverlayOn) {
+            try {
+                isDisplayReady = SetStoredView();
+            }
+            catch (...) {
+                SetOverlayOff();
+                isDisplayReady = false;
+            }
+        }
+        if (!isDisplayReady) {
+            SetOverlayOff();
+            m_displayVoidMesh = nullptr;
+            m_displayLabelImage = nullptr;
+            (void)m_labelMaps->DiscardLabelMapStage(staged.token);
+            RetireFailedDisplayResult();
+            return false;
+        }
+
+        const auto committed = m_labelMaps->CommitLabelMap(
+            staged.token);
+        if (committed.error != LabelMapError::None
+            || committed.published != staged.candidate) {
+            SetOverlayOff();
+            m_displayVoidMesh = nullptr;
+            m_displayLabelImage = nullptr;
+            (void)m_labelMaps->DiscardLabelMapStage(staged.token);
+            RetireFailedDisplayResult();
+            return false;
+        }
+        m_labelMap = committed.published;
+        labelImage = committed.published->image;
+        m_displayLabelImage = labelImage;
+        {
+            std::lock_guard<std::mutex> resultLock(m_resultMutex);
+            m_result.labelImage = labelImage;
+        }
+        if (!m_isOverlayOn) {
+            std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay switch command to show them again." << std::endl;
+        }
+        return true;
+    }
+    m_displayVoidMesh = std::move(voidMesh);
+    m_displayLabelImage = std::move(labelImage);
     SetOverlayOff();
     if (!m_isOverlayOn) {
         std::cout << "[GapAnalysis] Analysis completed, but overlays are hidden. Use the host overlay switch command to show them." << std::endl;
@@ -1201,6 +1324,25 @@ bool GapAnalysisService::Impl::SetDisplayView() {
     }
     catch (...) {
         SetOverlayOff();
+        return false;
+    }
+}
+
+bool GapAnalysisService::Impl::RemoveLabelMap() noexcept
+{
+    if (!m_labelMap) return true;
+    if (!m_labelMaps) return false;
+    try {
+        const auto removed = m_labelMaps->RemoveLabelMap(
+            labelMapId, m_labelMap->descriptor.version);
+        if (removed.error != LabelMapError::None
+            && removed.error != LabelMapError::NotFound) {
+            return false;
+        }
+        m_labelMap.reset();
+        return true;
+    }
+    catch (...) {
         return false;
     }
 }
@@ -1284,6 +1426,8 @@ void GapAnalysisService::Impl::ClearDisplayState() {
     m_sliceTargets.clear();
     m_displayVoidMesh = nullptr;
     m_displayLabelImage = nullptr;
+    m_labelMap.reset();
+    m_labelMaps.reset();
     m_displaySurfaceConfig = {};
     m_displayVoidParams = {};
     m_viewCallback = nullptr;

@@ -3,6 +3,7 @@
 #include "Services/GapAnalysisService.h"
 
 #include <vtkImageData.h>
+#include <vtkMatrix3x3.h>
 
 #include <cmath>
 #include <iostream>
@@ -86,6 +87,7 @@ private:
     std::unique_ptr<GapAnalysisService> m_service;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedLabelMapPort> m_labelMaps;
     std::shared_ptr<FeatureHostControl> m_host;
     std::shared_ptr<CompleteItem> m_completeItem;
     std::optional<DataVersion> m_activeVersion;
@@ -189,9 +191,20 @@ bool GapHostFeature::Impl::GetStartValid(
 bool GapHostFeature::Impl::GetSnapshotValid(
     const TrustedImageSnapshot& snapshot)
 {
-    if (!snapshot
-        || snapshot->version == 0
+    if (!snapshot) {
+        return false;
+    }
+    const auto& metadata = snapshot->metadata;
+    if (snapshot->version == 0
         || !GetImageReady(snapshot->image)
+        || metadata.identity.datasetId.empty()
+        || metadata.source.uri.empty()
+        || metadata.source.byteSize == 0
+        || metadata.scalar.quantity.empty()
+        || metadata.scalar.unit.empty()
+        || !std::isfinite(metadata.scalar.slope)
+        || metadata.scalar.slope == 0.0
+        || !std::isfinite(metadata.scalar.intercept)
         || !std::isfinite(snapshot->scalarRange[0])
         || !std::isfinite(snapshot->scalarRange[1])
         || snapshot->scalarRange[0]
@@ -199,13 +212,53 @@ bool GapHostFeature::Impl::GetSnapshotValid(
         return false;
     }
 
+    switch (metadata.source.kind) {
+    case ImageSourceKind::RawFile:
+    case ImageSourceKind::TiffSeries:
+    case ImageSourceKind::Memory:
+        break;
+    default:
+        return false;
+    }
+
     int dimensions[3] = {};
+    double spacing[3] = {};
+    double origin[3] = {};
+    double scalarRange[2] = {};
     snapshot->image->GetDimensions(dimensions);
+    snapshot->image->GetSpacing(spacing);
+    snapshot->image->GetOrigin(origin);
+    snapshot->image->GetScalarRange(scalarRange);
+    const auto* direction = snapshot->image->GetDirectionMatrix();
+    if (!direction) {
+        return false;
+    }
+    const auto getMatched = [](const double left, const double right) {
+        const double scale = 1.0 + std::abs(left) + std::abs(right);
+        return std::isfinite(left) && std::isfinite(right)
+            && std::abs(left - right) <= 1.0e-9 * scale;
+    };
     for (int axis = 0; axis < 3; ++axis) {
         if (dimensions[axis] != snapshot->dims[axis]
-            || !std::isfinite(snapshot->spacing[axis])
+            || !getMatched(spacing[axis], snapshot->spacing[axis])
             || snapshot->spacing[axis] <= 0.0
-            || !std::isfinite(snapshot->origin[axis])) {
+            || !getMatched(origin[axis], snapshot->origin[axis])) {
+            return false;
+        }
+    }
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            if (!getMatched(
+                    direction->GetElement(row, column),
+                    snapshot->direction[static_cast<std::size_t>(
+                        row * 3 + column)])) {
+                return false;
+            }
+        }
+    }
+    for (int index = 0; index < 2; ++index) {
+        if (!getMatched(
+                scalarRange[index], snapshot->scalarRange[index])) {
             return false;
         }
     }
@@ -261,6 +314,7 @@ GapHostFeature::Impl::GetViewCandidate(
 {
     if (!m_views
         || !m_data
+        || !m_labelMaps
         || !GetStartValid(start)) {
         return std::nullopt;
     }
@@ -282,6 +336,7 @@ GapHostFeature::Impl::GetViewCandidate(
     ViewCandidate candidate;
     candidate.version = snapshot->version;
     candidate.request.trustedInput = snapshot;
+    candidate.request.labelMaps = m_labelMaps;
     candidate.request.surface = start.surface;
     candidate.request.voidParams = start.voidParams;
 
@@ -322,6 +377,7 @@ bool GapHostFeature::Impl::AttachHost(
     }
     if (!context.views
         || !context.data
+        || !context.labelMaps
         || !context.host
         || (m_config.inputViews.viewIds.empty()
             && m_config.inputViews.viewRoles.empty())
@@ -338,6 +394,7 @@ bool GapHostFeature::Impl::AttachHost(
 
     m_views = context.views;
     m_data = context.data;
+    m_labelMaps = context.labelMaps;
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
 
@@ -396,6 +453,7 @@ bool GapHostFeature::Impl::DetachHost()
     m_activeVersion.reset();
     m_views.reset();
     m_data.reset();
+    m_labelMaps.reset();
     m_isSwitchDown = false;
     m_isExitDown = false;
     m_isExitPending = false;
@@ -654,6 +712,7 @@ bool GapHostFeature::Impl::ClearBorrowed()
     }
     m_views.reset();
     m_data.reset();
+    m_labelMaps.reset();
     m_host.reset();
     m_ownerThread = {};
     m_isInputAttached = false;

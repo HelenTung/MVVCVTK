@@ -85,12 +85,74 @@ class ImageReadPort {
 public:
     virtual ~ImageReadPort() noexcept = default;
 
+    virtual std::optional<ImageDescriptor> GetImageDescriptor() const = 0;
     virtual std::optional<ImageReadState> GetImageReadState() const = 0;
     virtual ImageReadResult GetImageReadResult(
         const ImageReadRequest& request) const = 0;
     virtual ImageReadChunkResult GetImageReadChunk(
         const ImageReadRequest& request,
         std::size_t voxelOffset) const = 0;
+};
+
+struct TrustedLabelMapCandidate final {
+    std::string id;
+    std::string displayName;
+    std::string datasetId;
+    DataVersion sourceVersion = 0;
+    std::optional<LabelMapVersion> expectedVersion;
+    vtkSmartPointer<vtkImageData> image;
+};
+
+struct TrustedLabelMapState final {
+    LabelMapDescriptor descriptor;
+    // 只在可信 SPI 内按不可变快照使用；普通 Host 读取永不获得该 VTK identity。
+    vtkSmartPointer<vtkImageData> image;
+};
+
+using TrustedLabelMapSnapshot =
+    std::shared_ptr<const TrustedLabelMapState>;
+
+struct TrustedLabelMapStageResult final {
+    LabelMapError error = LabelMapError::Unavailable;
+    LabelMapStageToken token = 0;
+    TrustedLabelMapSnapshot candidate;
+};
+
+struct TrustedLabelMapCommitResult final {
+    LabelMapError error = LabelMapError::Unavailable;
+    TrustedLabelMapSnapshot published;
+};
+
+struct TrustedLabelMapRemoveResult final {
+    LabelMapError error = LabelMapError::Unavailable;
+    bool isRemoved = false;
+    LabelMapVersion removedVersion = 0;
+};
+
+// 每个 AttachHost 获得绑定自身 Feature ID 的端口；写操作只允许 session owner thread。
+class TrustedLabelMapPort {
+public:
+    virtual ~TrustedLabelMapPort() noexcept = default;
+
+    virtual std::vector<LabelMapDescriptor> GetLabelMapDescriptors() const = 0;
+    virtual std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+        std::string_view id) const = 0;
+    virtual LabelMapReadResult GetLabelMapReadResult(
+        const LabelMapReadRequest& request) const = 0;
+    virtual LabelMapReadChunkResult GetLabelMapReadChunk(
+        const LabelMapReadRequest& request,
+        std::size_t voxelOffset) const = 0;
+    virtual TrustedLabelMapSnapshot GetLabelMapSnapshot(
+        std::string_view id) const = 0;
+    virtual TrustedLabelMapStageResult StageLabelMap(
+        TrustedLabelMapCandidate candidate) = 0;
+    virtual TrustedLabelMapCommitResult CommitLabelMap(
+        LabelMapStageToken token) = 0;
+    virtual bool DiscardLabelMapStage(
+        LabelMapStageToken token) noexcept = 0;
+    virtual TrustedLabelMapRemoveResult RemoveLabelMap(
+        std::string_view id,
+        std::optional<LabelMapVersion> expectedVersion) = 0;
 };
 
 class FeatureHostControl : public HostInputPort {
@@ -111,6 +173,7 @@ struct HostFeatureContext final {
     std::shared_ptr<FeatureViewDirectory> views;
     std::shared_ptr<ImageReadPort> read;
     std::shared_ptr<TrustedFeatureDataPort> data;
+    std::shared_ptr<TrustedLabelMapPort> labelMaps;
     std::shared_ptr<FeatureHostControl> host;
 };
 

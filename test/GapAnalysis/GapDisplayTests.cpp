@@ -1,5 +1,6 @@
 #include "GapDisplayTests.h"
 
+#include "Host/HostFeature.h"
 #include "Services/GapAnalysisService.h"
 #include "Render/Contracts/FeatureOverlay.h"
 #include "Render/Contracts/OverlayService.h"
@@ -21,8 +22,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -39,7 +44,10 @@ public:
     bool AttachOverlay(
         std::shared_ptr<FeatureOverlay> overlay) override
     {
-        if (!overlay) {
+        if (m_isAttachThrowing) {
+            throw std::runtime_error("injected overlay attach failure");
+        }
+        if (!overlay || !m_isAttachAllowed) {
             return false;
         }
         m_overlay = std::move(overlay);
@@ -70,6 +78,14 @@ public:
 
     int GetAttachCount() const { return m_attachCount; }
     int GetRemoveCount() const { return m_removeCount; }
+    void SetAttachAllowed(const bool value) noexcept
+    {
+        m_isAttachAllowed = value;
+    }
+    void SetAttachThrowing(const bool value) noexcept
+    {
+        m_isAttachThrowing = value;
+    }
     std::shared_ptr<FeatureOverlay> GetOverlay() const { return m_overlay; }
     vtkDataObject* GetInput(const std::size_t index) const
     {
@@ -107,6 +123,177 @@ private:
     std::vector<vtkDataObject*> m_inputs;
     int m_attachCount = 0;
     int m_removeCount = 0;
+    bool m_isAttachAllowed = true;
+    bool m_isAttachThrowing = false;
+};
+
+class LabelMapPortStub final : public TrustedLabelMapPort {
+public:
+    std::vector<LabelMapDescriptor>
+        GetLabelMapDescriptors() const override
+    {
+        return m_published
+            ? std::vector<LabelMapDescriptor>{
+                m_published->descriptor }
+            : std::vector<LabelMapDescriptor>{};
+    }
+
+    std::optional<LabelMapDescriptor> GetLabelMapDescriptor(
+        const std::string_view id) const override
+    {
+        return m_published && m_published->descriptor.id == id
+            ? std::optional<LabelMapDescriptor>{
+                m_published->descriptor }
+            : std::optional<LabelMapDescriptor>{};
+    }
+
+    LabelMapReadResult GetLabelMapReadResult(
+        const LabelMapReadRequest&) const override
+    {
+        return {};
+    }
+
+    LabelMapReadChunkResult GetLabelMapReadChunk(
+        const LabelMapReadRequest&,
+        std::size_t) const override
+    {
+        return {};
+    }
+
+    TrustedLabelMapSnapshot GetLabelMapSnapshot(
+        const std::string_view id) const override
+    {
+        return m_published && m_published->descriptor.id == id
+            ? m_published : TrustedLabelMapSnapshot{};
+    }
+
+    TrustedLabelMapStageResult StageLabelMap(
+        TrustedLabelMapCandidate candidate) override
+    {
+        TrustedLabelMapStageResult result;
+        if (!candidate.image || m_staged) {
+            result.error = m_staged
+                ? LabelMapError::Busy : LabelMapError::CopyFailed;
+            return result;
+        }
+        if (m_published
+            && (!candidate.expectedVersion
+                || *candidate.expectedVersion
+                    != m_published->descriptor.version)) {
+            result.error = LabelMapError::VersionMismatch;
+            return result;
+        }
+
+        auto image = vtkSmartPointer<vtkImageData>::New();
+        image->DeepCopy(candidate.image);
+        auto state = std::make_shared<TrustedLabelMapState>();
+        state->descriptor.id = std::move(candidate.id);
+        state->descriptor.displayName =
+            std::move(candidate.displayName);
+        state->descriptor.producerFeatureId = "GapAnalysis";
+        state->descriptor.datasetId = std::move(candidate.datasetId);
+        state->descriptor.sourceVersion = candidate.sourceVersion;
+        state->descriptor.version = m_nextVersion++;
+        image->GetExtent(state->descriptor.extent.data());
+        image->GetDimensions(state->descriptor.dims.data());
+        image->GetSpacing(state->descriptor.spacing.data());
+        image->GetOrigin(state->descriptor.origin.data());
+        image->GetScalarRange(state->descriptor.scalarRange.data());
+        state->descriptor.valueType = ImageValueType::Int32;
+        state->descriptor.componentBytes = sizeof(std::int32_t);
+        state->descriptor.componentCount = 1;
+        state->descriptor.voxelCount = static_cast<std::size_t>(
+            image->GetNumberOfPoints());
+        state->image = std::move(image);
+        m_staged = state;
+        m_stageToken = m_nextToken++;
+        result.error = LabelMapError::None;
+        result.token = m_stageToken;
+        result.candidate = std::move(state);
+        return result;
+    }
+
+    TrustedLabelMapCommitResult CommitLabelMap(
+        const LabelMapStageToken token) override
+    {
+        TrustedLabelMapCommitResult result;
+        ++m_commitAttemptCount;
+        if (m_failCommit) {
+            result.error = LabelMapError::CopyFailed;
+            return result;
+        }
+        if (!m_staged || token != m_stageToken) {
+            result.error = LabelMapError::NotFound;
+            return result;
+        }
+        m_published = std::move(m_staged);
+        m_stageToken = 0;
+        result.error = LabelMapError::None;
+        result.published = m_published;
+        ++m_commitCount;
+        return result;
+    }
+
+    bool DiscardLabelMapStage(
+        const LabelMapStageToken token) noexcept override
+    {
+        if (!m_staged || token != m_stageToken) return false;
+        m_staged.reset();
+        m_stageToken = 0;
+        ++m_discardCount;
+        return true;
+    }
+
+    TrustedLabelMapRemoveResult RemoveLabelMap(
+        const std::string_view id,
+        const std::optional<LabelMapVersion> expectedVersion) override
+    {
+        TrustedLabelMapRemoveResult result;
+        if (!m_published || m_published->descriptor.id != id) {
+            result.error = LabelMapError::NotFound;
+            return result;
+        }
+        if (expectedVersion
+            && *expectedVersion != m_published->descriptor.version) {
+            result.error = LabelMapError::VersionMismatch;
+            return result;
+        }
+        result.error = LabelMapError::None;
+        result.isRemoved = true;
+        result.removedVersion = m_published->descriptor.version;
+        m_published.reset();
+        ++m_removeCount;
+        return result;
+    }
+
+    TrustedLabelMapSnapshot GetPublished() const noexcept
+    {
+        return m_published;
+    }
+
+    int GetCommitAttemptCount() const noexcept
+    {
+        return m_commitAttemptCount;
+    }
+    int GetCommitCount() const noexcept { return m_commitCount; }
+    int GetDiscardCount() const noexcept { return m_discardCount; }
+    int GetRemoveCount() const noexcept { return m_removeCount; }
+    void SetFailCommit(const bool value) noexcept
+    {
+        m_failCommit = value;
+    }
+
+private:
+    TrustedLabelMapSnapshot m_staged;
+    TrustedLabelMapSnapshot m_published;
+    LabelMapVersion m_nextVersion = 1;
+    LabelMapStageToken m_nextToken = 1;
+    LabelMapStageToken m_stageToken = 0;
+    int m_commitAttemptCount = 0;
+    int m_commitCount = 0;
+    int m_discardCount = 0;
+    int m_removeCount = 0;
+    bool m_failCommit = false;
 };
 
 vtkSmartPointer<vtkImageData> GetMask(
@@ -152,6 +339,16 @@ TrustedImageSnapshot BuildTrustedInput(
     snapshot->origin = { origin[0], origin[1], origin[2] };
     snapshot->scalarRange = {
         scalarRange[0], scalarRange[1] };
+    snapshot->metadata.identity.datasetId =
+        "gap-display-dataset";
+    snapshot->metadata.source.kind = ImageSourceKind::Memory;
+    snapshot->metadata.source.uri =
+        "memory://gap-display-dataset";
+    snapshot->metadata.source.byteSize =
+        static_cast<std::uint64_t>(image->GetNumberOfPoints())
+        * static_cast<std::uint64_t>(image->GetScalarSize())
+        * static_cast<std::uint64_t>(
+            image->GetNumberOfScalarComponents());
     snapshot->version = 1;
     return snapshot;
 }
@@ -371,23 +568,45 @@ int GapDisplaySuite::GetFailCount() const
         trustedVoxels,
         trustedVoxels + trustedVoxelCount);
     const int scalarOwners = trustedScalars->GetReferenceCount();
+    auto trustedLabelMaps = std::make_shared<LabelMapPortStub>();
     GapAnalysisService trustedService;
     GapViewRequest trustedRequest;
     trustedRequest.trustedInput = trustedInput;
+    trustedRequest.labelMaps = trustedLabelMaps;
     trustedRequest.surface = surfaceConfig;
     trustedRequest.voidParams = voidParams;
     trustedRequest.sliceTargets.emplace_back(
         Orientation::Top_down,
         trustedOverlay);
-    expect(StartDisplay(
-            trustedService,
-            std::move(trustedRequest),
-            image)
+    const bool isTrustedDisplayed = StartDisplay(
+        trustedService,
+        std::move(trustedRequest),
+        image);
+    const auto publishedLabelMap = trustedLabelMaps->GetPublished();
+    expect(isTrustedDisplayed
             && trustedScalars->GetReferenceCount() > scalarOwners,
         "Trusted Gap input should share the Host scalar array.");
+    expect(publishedLabelMap
+            && publishedLabelMap->descriptor.id
+                == "GapAnalysis.labels"
+            && publishedLabelMap->descriptor.producerFeatureId
+                == "GapAnalysis"
+            && publishedLabelMap->descriptor.datasetId
+                == "gap-display-dataset"
+            && publishedLabelMap->descriptor.sourceVersion == 1
+            && publishedLabelMap->descriptor.valueType
+                == ImageValueType::Int32
+            && trustedLabelMaps->GetCommitAttemptCount() == 1
+            && trustedLabelMaps->GetCommitCount() == 1
+            && trustedOverlay->GetInput(0)
+                == publishedLabelMap->image.GetPointer(),
+        "Trusted Gap display should consume the committed Store image.");
     expect(trustedService.ExitView(),
         "Trusted Gap view should exit cleanly.");
     trustedService.OnDisplayTick(nullptr);
+    expect(!trustedLabelMaps->GetPublished()
+            && trustedLabelMaps->GetRemoveCount() == 1,
+        "Trusted Gap exit should retire the published LabelMap.");
     expect(trustedScalars->GetReferenceCount() == scalarOwners,
         "Trusted Gap input should release its scalar owner after exit.");
     const auto* releasedVoxels = static_cast<const float*>(
@@ -402,6 +621,7 @@ int GapDisplaySuite::GetFailCount() const
     GapAnalysisService mixedInputService;
     GapViewRequest mixedInputRequest;
     mixedInputRequest.trustedInput = trustedInput;
+    mixedInputRequest.labelMaps = trustedLabelMaps;
     mixedInputRequest.inputImage = image;
     mixedInputRequest.surface = surfaceConfig;
     mixedInputRequest.voidParams = voidParams;
@@ -409,6 +629,130 @@ int GapDisplaySuite::GetFailCount() const
     expect(!mixedInputService.StartView(
             std::move(mixedInputRequest)),
         "Gap view should reject ambiguous trusted and mutable inputs.");
+
+    auto failingLabelMaps = std::make_shared<LabelMapPortStub>();
+    failingLabelMaps->SetFailCommit(true);
+    auto failingOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService failingStoreService;
+    GapViewRequest failingStoreRequest;
+    failingStoreRequest.trustedInput = trustedInput;
+    failingStoreRequest.labelMaps = failingLabelMaps;
+    failingStoreRequest.surface = surfaceConfig;
+    failingStoreRequest.voidParams = voidParams;
+    failingStoreRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        failingOverlay);
+    bool isFailingStoreCompleted = false;
+    bool isFailingStoreSucceeded = true;
+    const bool isFailingStoreAccepted = failingStoreService.StartView(
+        std::move(failingStoreRequest),
+        [&](const bool isSuccess) {
+            isFailingStoreCompleted = true;
+            isFailingStoreSucceeded = isSuccess;
+        });
+    const auto failingStoreDeadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds(5);
+    while (failingStoreService.GetAnalysisState()
+            == GapAnalysisState::Running
+        && std::chrono::steady_clock::now() < failingStoreDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    failingStoreService.OnDisplayTick(image);
+    expect(isFailingStoreAccepted
+            && isFailingStoreCompleted
+            && !isFailingStoreSucceeded
+            && failingStoreService.GetAnalysisState()
+                == GapAnalysisState::Failed
+            && !failingStoreService.BuildLabelImage()
+            && !failingStoreService.BuildVoidMesh()
+            && !failingLabelMaps->GetPublished()
+            && failingLabelMaps->GetCommitAttemptCount() == 1
+            && failingLabelMaps->GetCommitCount() == 0
+            && failingLabelMaps->GetDiscardCount() == 1
+            && failingOverlay->GetAttachCount() == 1
+            && failingOverlay->GetRemoveCount() == 1
+            && !failingOverlay->GetOverlay(),
+        "LabelMap commit failure should retire the candidate and fail display.");
+    expect(failingStoreService.ExitView(),
+        "Failed trusted Gap view should still exit cleanly.");
+    failingStoreService.OnDisplayTick(nullptr);
+
+    auto rejectedDisplayMaps = std::make_shared<LabelMapPortStub>();
+    auto rejectedDisplayOverlay = std::make_shared<OverlayStub>();
+    rejectedDisplayOverlay->SetAttachAllowed(false);
+    GapAnalysisService rejectedDisplayService;
+    GapViewRequest rejectedDisplayRequest;
+    rejectedDisplayRequest.trustedInput = trustedInput;
+    rejectedDisplayRequest.labelMaps = rejectedDisplayMaps;
+    rejectedDisplayRequest.surface = surfaceConfig;
+    rejectedDisplayRequest.voidParams = voidParams;
+    rejectedDisplayRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        rejectedDisplayOverlay);
+    bool isRejectedDisplayCompleted = false;
+    bool isRejectedDisplaySucceeded = true;
+    const bool isRejectedDisplayAccepted = rejectedDisplayService.StartView(
+        std::move(rejectedDisplayRequest),
+        [&](const bool isSuccess) {
+            isRejectedDisplayCompleted = true;
+            isRejectedDisplaySucceeded = isSuccess;
+        });
+    const auto rejectedDisplayDeadline = std::chrono::steady_clock::now()
+        + std::chrono::seconds(5);
+    while (rejectedDisplayService.GetAnalysisState()
+            == GapAnalysisState::Running
+        && std::chrono::steady_clock::now() < rejectedDisplayDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    rejectedDisplayService.OnDisplayTick(image);
+    expect(isRejectedDisplayAccepted
+            && isRejectedDisplayCompleted
+            && !isRejectedDisplaySucceeded
+            && rejectedDisplayService.GetAnalysisState()
+                == GapAnalysisState::Failed
+            && !rejectedDisplayService.BuildLabelImage()
+            && !rejectedDisplayMaps->GetPublished()
+            && rejectedDisplayMaps->GetCommitAttemptCount() == 0
+            && rejectedDisplayMaps->GetDiscardCount() == 1
+            && rejectedDisplayOverlay->GetAttachCount() == 0,
+        "Overlay rejection should discard the staged LabelMap before commit.");
+    expect(rejectedDisplayService.ExitView(),
+        "Rejected trusted Gap display should still exit cleanly.");
+    rejectedDisplayService.OnDisplayTick(nullptr);
+
+    auto throwingOverlay = std::make_shared<OverlayStub>();
+    GapAnalysisService throwingOverlayService;
+    GapViewRequest throwingOverlayRequest;
+    throwingOverlayRequest.inputImage = image;
+    throwingOverlayRequest.surface = surfaceConfig;
+    throwingOverlayRequest.voidParams = voidParams;
+    throwingOverlayRequest.sliceTargets.emplace_back(
+        Orientation::Top_down,
+        throwingOverlay);
+    const bool isThrowingOverlayDisplayed = StartDisplay(
+        throwingOverlayService,
+        std::move(throwingOverlayRequest),
+        image);
+    const bool isThrowingOverlayHidden =
+        throwingOverlayService.SwitchOverlay();
+    throwingOverlay->SetAttachThrowing(true);
+    const bool isThrowingOverlayRejected =
+        throwingOverlayService.SwitchOverlay();
+    throwingOverlay->SetAttachThrowing(false);
+    const bool isThrowingOverlayRestored =
+        throwingOverlayService.SwitchOverlay();
+    expect(isThrowingOverlayDisplayed
+            && isThrowingOverlayHidden
+            && !isThrowingOverlayRejected
+            && isThrowingOverlayRestored
+            && throwingOverlayService.GetViewOn()
+            && throwingOverlay->GetAttachCount() == 2
+            && throwingOverlay->GetRemoveCount() == 1
+            && throwingOverlay->GetOverlay(),
+        "Overlay reattach exception should roll back to a retryable hidden state.");
+    expect(throwingOverlayService.ExitView(),
+        "Recovered throwing overlay view should exit cleanly.");
+    throwingOverlayService.OnDisplayTick(nullptr);
 
     auto meshOnlyOverlay = std::make_shared<OverlayStub>();
     GapAnalysisService meshOnlyService;

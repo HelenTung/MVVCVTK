@@ -96,7 +96,30 @@ public:
 
 HostVolumeGeometry BuildGeometry()
 {
-    return { { 2, 2, 1 }, { 1.0f, 2.0f, 3.0f }, { 4.0f, 5.0f, 6.0f } };
+    HostVolumeGeometry geometry;
+    geometry.dimensions = { 2, 2, 1 };
+    geometry.spacing = { 1.0f, 2.0f, 3.0f };
+    geometry.origin = { 4.0f, 5.0f, 6.0f };
+    geometry.direction = {
+        0.0, -1.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    return geometry;
+}
+
+ImageMetadata BuildMetadata(const ImageSourceKind sourceKind)
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "dataset-001";
+    metadata.identity.inspectionId = "inspection-001";
+    metadata.source.kind = sourceKind;
+    metadata.source.uri = sourceKind == ImageSourceKind::Memory
+        ? "memory://dataset-001" : "file://dataset-001";
+    metadata.scalar.quantity = "gray";
+    metadata.scalar.unit = "1";
+    metadata.attributes.push_back({ "modality", std::string{ "CT" } });
+    return metadata;
 }
 
 HostVolumeTransferFunction GetVolumeTransferFunction();
@@ -130,6 +153,7 @@ HostLoadRequest GetLoadRequest(
     HostLoadRequest request;
     request.filePath = std::move(filePath);
     request.geometry = std::move(geometry);
+    request.metadata = BuildMetadata(ImageSourceKind::TiffSeries);
     return request;
 }
 
@@ -140,6 +164,7 @@ HostReloadRequest GetReloadReq(
     HostReloadRequest request;
     request.voxels = std::move(voxels);
     request.geometry = std::move(geometry);
+    request.metadata = BuildMetadata(ImageSourceKind::Memory);
     return request;
 }
 
@@ -514,6 +539,14 @@ void StartDataCases(int& failureCount)
         "加载应保留布局并完成回调。", failureCount);
     SetExpect(service->GetLoadLayout().GetDimensions() == std::array<int, 3>{ 2, 2, 1 },
         "加载布局维度应完整传递。", failureCount);
+    SetExpect(
+        service->GetLoadLayout().GetDirection() == BuildGeometry().direction
+            && service->GetLoadLayout().GetMetadata().identity.datasetId
+                == "dataset-001"
+            && service->GetLoadLayout().GetMetadata().source.kind
+                == ImageSourceKind::TiffSeries,
+        "加载必须把一般 LPS direction 与 descriptor metadata 放进同一布局快照。",
+        failureCount);
 
     const std::string unicodeLoadPath = u8"C:/体数据 é/输入.tiff";
     SetExpect(
@@ -608,17 +641,59 @@ void StartDataCases(int& failureCount)
 
     HostLoadRequest rawRequest =
         GetLoadRequest("scan_3x4x5.raw", BuildGeometry());
+    rawRequest.metadata.source.kind = ImageSourceKind::RawFile;
     rawRequest.geometry.dimensions = { 0, 0, 0 };
     SetExpect(SendData(fixture, std::move(rawRequest)),
         "全零 raw 维度应仅从锚定后缀推断。", failureCount);
     SetExpect(service->GetLoadLayout().GetDimensions() == std::array<int, 3>{ 3, 4, 5 },
         "raw 后缀维度应正确解析。", failureCount);
 
+    HostLoadRequest tiffWithoutDimensions =
+        GetLoadRequest("scan_3x4x5.raw", BuildGeometry());
+    tiffWithoutDimensions.geometry.dimensions = { 0, 0, 0 };
+    SetExpect(!SendData(fixture, std::move(tiffWithoutDimensions)),
+        "TIFF 来源不得借 RAW 文件名后缀推断维度。", failureCount);
+
     HostLoadRequest partial =
         GetLoadRequest("scan.raw", BuildGeometry());
+    partial.metadata.source.kind = ImageSourceKind::RawFile;
     partial.geometry.dimensions = { 2, 0, 1 };
     SetExpect(!SendData(fixture, std::move(partial)),
         "部分零维度必须被拒绝。", failureCount);
+
+    HostLoadRequest missingIdentity =
+        GetLoadRequest("scan.raw", BuildGeometry());
+    missingIdentity.metadata.source.kind = ImageSourceKind::RawFile;
+    missingIdentity.metadata.identity.datasetId.clear();
+    SetExpect(!SendData(fixture, std::move(missingIdentity)),
+        "缺失 datasetId 的加载必须在 Host admission 边界被拒绝。",
+        failureCount);
+
+    HostLoadRequest wrongFileSource =
+        GetLoadRequest("scan.raw", BuildGeometry());
+    wrongFileSource.metadata.source.kind = ImageSourceKind::Memory;
+    SetExpect(!SendData(fixture, std::move(wrongFileSource)),
+        "文件加载不得接收 Memory source kind。", failureCount);
+
+    HostReloadRequest wrongMemorySource =
+        GetReloadReq(std::vector<float>(4, 1.0f), BuildGeometry());
+    wrongMemorySource.metadata.source.kind = ImageSourceKind::RawFile;
+    SetExpect(!SendData(fixture, std::move(wrongMemorySource)),
+        "内存 reload 必须显式声明 Memory source kind。", failureCount);
+
+    HostReloadRequest singularDirection =
+        GetReloadReq(std::vector<float>(4, 1.0f), BuildGeometry());
+    singularDirection.geometry.direction.fill(0.0);
+    SetExpect(!SendData(fixture, std::move(singularDirection)),
+        "奇异 direction 必须在分配与异步 admission 前被拒绝。",
+        failureCount);
+
+    HostReloadRequest duplicateAttribute =
+        GetReloadReq(std::vector<float>(4, 1.0f), BuildGeometry());
+    duplicateAttribute.metadata.attributes.push_back(
+        { "modality", std::int64_t{ 7 } });
+    SetExpect(!SendData(fixture, std::move(duplicateAttribute)),
+        "重复 metadata attribute key 必须整笔拒绝。", failureCount);
 
     std::vector<float> voxels{ 1.0f, 2.0f, 3.0f, 4.0f };
     SetExpect(SendData(
@@ -628,6 +703,13 @@ void StartDataCases(int& failureCount)
     SetExpect(service->GetReloadBuffer().GetVoxels()
             == std::vector<float>{ 1.0f, 2.0f, 3.0f, 4.0f },
         "reload 必须持有体素快照。", failureCount);
+    SetExpect(
+        service->GetReloadBuffer().GetLayout().GetMetadata().source.kind
+                == ImageSourceKind::Memory
+            && service->GetReloadBuffer().GetLayout().GetMetadata()
+                .identity.datasetId == "dataset-001",
+        "reload 必须把 Memory descriptor metadata 与 voxel owner 一起传递。",
+        failureCount);
     SetExpect(!SendData(
         fixture,
         GetReloadReq(std::vector<float>{ 1.0f }, BuildGeometry())),

@@ -60,6 +60,15 @@ VTK_MODULE_INIT(vtkRenderingVolumeOpenGL2);
 
 namespace {
 
+ImageMetadata GetSessionSmokeMetadata()
+{
+    ImageMetadata metadata;
+    metadata.identity.datasetId = "qt-session-smoke-dataset";
+    metadata.source.kind = ImageSourceKind::Memory;
+    metadata.source.uri = "memory://qt-session-smoke-dataset";
+    return metadata;
+}
+
 double GetRenderRate(const bool isInteracting) noexcept
 {
     return isInteracting ? 15.0 : 0.001;
@@ -266,7 +275,8 @@ bool BuildTransferReturnTest()
     }
     image->Modified();
     bool hasPending = false;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(
+            image, GetSessionSmokeMetadata())
         || !dataManager->SetCurrentFromPending(hasPending)
         || !hasPending) {
         return false;
@@ -429,7 +439,8 @@ bool BuildStyleQualityTest()
         static_cast<unsigned char>(128));
     image->Modified();
     bool hasPending = false;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(
+            image, GetSessionSmokeMetadata())
         || !dataManager->SetCurrentFromPending(hasPending)
         || !hasPending) {
         return false;
@@ -868,7 +879,8 @@ bool BuildSceneCameraTest()
         static_cast<unsigned char>(128));
     image->Modified();
     bool hasPending = false;
-    if (!dataManager->SetImageSnapshot(image)
+    if (!dataManager->SetImageSnapshot(
+            image, GetSessionSmokeMetadata())
         || !dataManager->SetCurrentFromPending(hasPending)
         || !hasPending) {
         return false;
@@ -1706,6 +1718,7 @@ public:
         reload.geometry.origin = {
             0.0f, 0.0f, 0.0f
         };
+        reload.metadata = GetSessionSmokeMetadata();
         bool isReloadComplete = false;
         bool isReloadSucceeded = false;
         if (!m_session->SendRequest(

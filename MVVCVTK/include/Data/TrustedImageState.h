@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Data/DataVersion.h"
+#include "Data/ImageReadTypes.h"
 
 #include <vtkImageData.h>
 #include <vtkSmartPointer.h>
@@ -15,7 +15,13 @@ struct TrustedImageState final {
     std::array<int, 3> dims = { 0, 0, 0 };
     std::array<double, 3> spacing = { 1.0, 1.0, 1.0 };
     std::array<double, 3> origin = { 0.0, 0.0, 0.0 };
+    std::array<double, 9> direction = {
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    };
     std::array<double, 2> scalarRange = { 0.0, 0.0 };
+    ImageMetadata metadata;
     DataVersion version = 0;
 };
 

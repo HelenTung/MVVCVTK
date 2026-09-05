@@ -28,6 +28,8 @@
 namespace {
 
 constexpr std::string_view featureId = "PartSegmentation";
+constexpr std::string_view labelMapId =
+    "PartSegmentation.labels";
 
 bool GetTargetsUsed(const HostViewTargets& targets)
 {
@@ -198,6 +200,7 @@ private:
     static void RemoveBindings(
         std::vector<OverlayBinding>& bindings) noexcept;
     bool SetVisibility(bool isVisible);
+    bool RemoveLabelMap();
     bool ClearResult();
     void SetSourceStale();
     void SetRequestComplete(PartLabelCandidate candidate);
@@ -209,13 +212,12 @@ private:
     StateBackup m_stateBeforeRequest;
     std::shared_ptr<FeatureViewDirectory> m_views;
     std::shared_ptr<TrustedFeatureDataPort> m_data;
+    std::shared_ptr<TrustedLabelMapPort> m_labelMaps;
     std::shared_ptr<FeatureHostControl> m_host;
     std::unique_ptr<PartSegmentationService> m_service;
     TrustedImageSnapshot m_requestSource;
     TrustedImageSnapshot m_activeSource;
-    // m_labelImage 借用该 vector；声明顺序保证 image 先析构。
-    std::shared_ptr<std::vector<std::uint32_t>> m_labelValues;
-    vtkSmartPointer<vtkImageData> m_labelImage;
+    TrustedLabelMapSnapshot m_labelMap;
     std::vector<HostFeatureView> m_requestViews;
     std::vector<HostFeatureView> m_activeViews;
     std::vector<OverlayBinding> m_bindings;
@@ -232,7 +234,8 @@ private:
 bool PartSegmentationHostFeature::Impl::AttachHost(
     const HostFeatureContext& context)
 {
-    if (m_isAttached || !context.views || !context.data || !context.host
+    if (m_isAttached || !context.views || !context.data
+        || !context.labelMaps || !context.host
         || m_config.maxWorkingBytes == 0
         || !std::isfinite(m_config.defaultStart.threshold)
         || m_config.defaultStart.minPartVoxels == 0) {
@@ -246,6 +249,7 @@ bool PartSegmentationHostFeature::Impl::AttachHost(
     }
     m_views = context.views;
     m_data = context.data;
+    m_labelMaps = context.labelMaps;
     m_host = context.host;
     m_ownerThread = std::this_thread::get_id();
     m_isAttached = true;
@@ -280,13 +284,12 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
                 state.parts.size(),
                 "Part request was cancelled by detach."));
     }
-    if (!RemoveDisplay()) return false;
+    if (!RemoveDisplay() || !RemoveLabelMap()) return false;
 
     m_service.reset();
     m_requestSource.reset();
     m_activeSource.reset();
-    m_labelImage = nullptr;
-    m_labelValues.reset();
+    m_labelMap.reset();
     m_requestViews.clear();
     m_activeViews.clear();
     m_startCallback = nullptr;
@@ -295,6 +298,7 @@ bool PartSegmentationHostFeature::Impl::DetachHost()
     m_isStopRequested = false;
     m_views.reset();
     m_data.reset();
+    m_labelMaps.reset();
     m_host.reset();
     m_ownerThread = {};
     m_isAttached = false;
@@ -603,13 +607,14 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
         SetState(state);
         return true;
     }
-    if (!m_labelValues || !m_labelImage || m_activeViews.empty()) {
+    if (!m_labelMap || !m_labelMap->image || m_activeViews.empty()) {
         state.isOverlayVisible = true;
         SetState(state);
         return true;
     }
     std::vector<OverlayBinding> nextBindings;
-    if (!AttachDisplay(m_labelImage, m_activeViews, nextBindings)) {
+    if (!AttachDisplay(
+            m_labelMap->image, m_activeViews, nextBindings)) {
         return false;
     }
     RemoveBindings(m_bindings);
@@ -619,11 +624,23 @@ bool PartSegmentationHostFeature::Impl::SetVisibility(
     return true;
 }
 
+bool PartSegmentationHostFeature::Impl::RemoveLabelMap()
+{
+    if (!m_labelMap) return true;
+    if (!m_labelMaps) return false;
+    const auto removed = m_labelMaps->RemoveLabelMap(
+        labelMapId, m_labelMap->descriptor.version);
+    if (removed.error != LabelMapError::None
+        && removed.error != LabelMapError::NotFound) {
+        return false;
+    }
+    m_labelMap.reset();
+    return true;
+}
+
 bool PartSegmentationHostFeature::Impl::ClearResult()
 {
-    if (!RemoveDisplay()) return false;
-    m_labelImage = nullptr;
-    m_labelValues.reset();
+    if (!RemoveDisplay() || !RemoveLabelMap()) return false;
     m_activeSource.reset();
     m_activeViews.clear();
     PartSegmentationState state;
@@ -643,9 +660,8 @@ void PartSegmentationHostFeature::Impl::SetSourceStale()
     // Stale 先表达 source 已失效；显示清理失败时保留完整 generation，
     // 下一次 owner tick 会重试，避免悬空或半清理。
     if (!RemoveDisplay()) return;
+    if (!RemoveLabelMap()) return;
     m_activeSource.reset();
-    m_labelImage = nullptr;
-    m_labelValues.reset();
     m_activeViews.clear();
 }
 
@@ -700,18 +716,45 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
     }
     else {
         auto labelView = BuildLabelView(candidate);
+        TrustedLabelMapStageResult staged;
+        if (labelView.labels && labelView.image
+            && m_labelMaps && m_requestSource) {
+            TrustedLabelMapCandidate mapCandidate;
+            mapCandidate.id = labelMapId;
+            mapCandidate.displayName =
+                "Part segmentation labels";
+            mapCandidate.datasetId =
+                m_requestSource->metadata.identity.datasetId;
+            mapCandidate.sourceVersion = m_requestSource->version;
+            if (m_labelMap) {
+                mapCandidate.expectedVersion =
+                    m_labelMap->descriptor.version;
+            }
+            mapCandidate.image = labelView.image;
+            staged = m_labelMaps->StageLabelMap(
+                std::move(mapCandidate));
+        }
         std::vector<OverlayBinding> nextBindings;
         const bool isVisible = GetState().isOverlayVisible;
-        bool isDisplayReady = true;
-        if (isVisible) {
+        bool isDisplayReady = staged.error == LabelMapError::None
+            && staged.token != 0
+            && staged.candidate
+            && staged.candidate->image;
+        if (isDisplayReady && isVisible) {
             isDisplayReady = AttachDisplay(
-                labelView.image, m_requestViews, nextBindings);
+                staged.candidate->image,
+                m_requestViews,
+                nextBindings);
         }
-        else if (m_host) {
+        else if (isDisplayReady && m_host) {
             isDisplayReady = m_host->SetActiveViews({});
         }
-        if (!labelView.labels || !labelView.image || !isDisplayReady) {
+        if (!isDisplayReady) {
             RemoveBindings(nextBindings);
+            if (staged.token != 0 && m_labelMaps) {
+                (void)m_labelMaps->DiscardLabelMapStage(
+                    staged.token);
+            }
             SetRequestFailed(PartFailureReason::DisplayFailed);
             SendComplete(
                 std::move(callback),
@@ -725,36 +768,64 @@ void PartSegmentationHostFeature::Impl::SetRequestComplete(
                     "Part display candidate failed."));
         }
         else {
-            RemoveBindings(m_bindings);
-            m_labelImage = nullptr;
-            m_labelValues.reset();
-            m_bindings = std::move(nextBindings);
-            m_labelValues = std::move(labelView.labels);
-            m_labelImage = std::move(labelView.image);
-            m_activeViews = std::move(m_requestViews);
-            m_activeSource = m_requestSource;
-            ++m_resultRevision;
-            PartSegmentationState state;
-            state.status = PartSegmentationStatus::Succeeded;
-            state.failureReason = PartFailureReason::None;
-            state.requestId = requestId;
-            state.sourceVersion = sourceVersion;
-            state.resultRevision = m_resultRevision;
-            state.progress = 1.0;
-            state.isOverlayVisible = isVisible;
-            state.parts = std::move(candidate.parts);
-            const std::size_t partCount = state.parts.size();
-            SetState(std::move(state));
-            SendComplete(
-                std::move(callback),
-                BuildResult(
-                    requestId,
-                    PartResultStatus::Succeeded,
-                    PartFailureReason::None,
-                    sourceVersion,
-                    m_resultRevision,
-                    partCount,
-                    candidate.message));
+            const auto committed = m_labelMaps->CommitLabelMap(
+                staged.token);
+            if (committed.error != LabelMapError::None
+                || committed.published != staged.candidate) {
+                RemoveBindings(nextBindings);
+                if (m_host) {
+                    std::vector<std::string> oldViewIds;
+                    if (GetState().isOverlayVisible) {
+                        oldViewIds.reserve(m_activeViews.size());
+                        for (const auto& view : m_activeViews) {
+                            oldViewIds.push_back(view.id);
+                        }
+                    }
+                    (void)m_host->SetActiveViews(oldViewIds);
+                }
+                (void)m_labelMaps->DiscardLabelMapStage(
+                    staged.token);
+                SetRequestFailed(PartFailureReason::DisplayFailed);
+                SendComplete(
+                    std::move(callback),
+                    BuildResult(
+                        requestId,
+                        PartResultStatus::Failed,
+                        PartFailureReason::DisplayFailed,
+                        sourceVersion,
+                        m_resultRevision,
+                        GetState().parts.size(),
+                        "Part LabelMap commit failed."));
+            }
+            else {
+                RemoveBindings(m_bindings);
+                m_bindings = std::move(nextBindings);
+                m_labelMap = committed.published;
+                m_activeViews = std::move(m_requestViews);
+                m_activeSource = m_requestSource;
+                ++m_resultRevision;
+                PartSegmentationState state;
+                state.status = PartSegmentationStatus::Succeeded;
+                state.failureReason = PartFailureReason::None;
+                state.requestId = requestId;
+                state.sourceVersion = sourceVersion;
+                state.resultRevision = m_resultRevision;
+                state.progress = 1.0;
+                state.isOverlayVisible = isVisible;
+                state.parts = std::move(candidate.parts);
+                const std::size_t partCount = state.parts.size();
+                SetState(std::move(state));
+                SendComplete(
+                    std::move(callback),
+                    BuildResult(
+                        requestId,
+                        PartResultStatus::Succeeded,
+                        PartFailureReason::None,
+                        sourceVersion,
+                        m_resultRevision,
+                        partCount,
+                        candidate.message));
+            }
         }
     }
 
