@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 struct VolumeLodKey final {
@@ -50,6 +51,8 @@ struct VolumeLodBuildResult final {
 
 class VolumeLodProductBuilder final {
 public:
+    static std::optional<std::uint64_t> GetEstimatedBytes(
+        const VolumeLodBuildRequest& request);
     VolumeLodBuildResult BuildProduct(
         const VolumeLodBuildRequest& request,
         const RenderTaskToken& stopToken) const;

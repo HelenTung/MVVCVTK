@@ -391,55 +391,31 @@ Scalar GetScalarValue(
     return value;
 }
 
-template<typename Scalar>
+template<typename Scalar, typename Mask = void>
 bool SetValueLabels(
-    const PartScalarView& values,
-    const double threshold,
-    std::vector<PartLabelId>& labels,
-    const std::function<bool()>& getStopRequested,
-    const PartProgressCallback& sendProgress,
-    const double endProgress)
-{
-    for (std::size_t index = 0; index < values.valueCount; ++index) {
-        if (index % cancelBatch == 0
-            && GetStopped(getStopRequested)) {
-            return false;
-        }
-        labels[index] = GetForeground(
-            GetScalarValue<Scalar>(values, index), threshold)
-            ? unvisitedLabel : 0U;
-        if (index % progressBatch == 0) {
-            SendProgress(
-                sendProgress,
-                endProgress * static_cast<double>(index)
-                    / static_cast<double>(values.valueCount));
-        }
-    }
-    SendProgress(sendProgress, endProgress);
-    return true;
-}
-
-template<typename Scalar>
-bool SetMaskLabels(
-    const PartScalarView& validity,
+    const PartVolumeView& volume,
+    const PartAlgorithmParams& params,
     std::vector<PartLabelId>& labels,
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
-    for (std::size_t index = 0; index < validity.valueCount; ++index) {
-        if (index % cancelBatch == 0
-            && GetStopped(getStopRequested)) {
+    // 标量与有效域一次顺序读取，保留各自的原始类型和未对齐访问语义。
+    for (std::size_t index = 0; index < volume.values.valueCount; ++index) {
+        if (index % cancelBatch == 0 && GetStopped(getStopRequested)) {
             return false;
         }
-        if (!GetMaskValid(
-                GetScalarValue<Scalar>(validity, index))) {
-            labels[index] = 0U;
+        bool isValid = true;
+        if constexpr (!std::is_void_v<Mask>) {
+            isValid = GetMaskValid(
+                GetScalarValue<Mask>(*volume.validity, index));
         }
+        labels[index] = isValid && GetForeground(
+            GetScalarValue<Scalar>(volume.values, index), params.threshold)
+            ? unvisitedLabel : 0U;
         if (index % progressBatch == 0) {
-            SendProgress(
-                sendProgress,
-                0.15 + 0.15 * static_cast<double>(index)
-                    / static_cast<double>(validity.valueCount));
+            SendProgress(sendProgress,
+                0.30 * static_cast<double>(index)
+                    / static_cast<double>(volume.values.valueCount));
         }
     }
     SendProgress(sendProgress, 0.30);
@@ -454,13 +430,43 @@ bool SetTypedValues(
     const std::function<bool()>& getStopRequested,
     const PartProgressCallback& sendProgress)
 {
-    return SetValueLabels<Scalar>(
-        volume.values,
-        params.threshold,
-        labels,
-        getStopRequested,
-        sendProgress,
-        volume.validity ? 0.15 : 0.30);
+    if (!volume.validity) {
+        return SetValueLabels<Scalar>(
+            volume, params, labels, getStopRequested, sendProgress);
+    }
+    switch (volume.validity->scalarType) {
+    case PartScalarType::Int8:
+        return SetValueLabels<Scalar, std::int8_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt8:
+        return SetValueLabels<Scalar, std::uint8_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int16:
+        return SetValueLabels<Scalar, std::int16_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt16:
+        return SetValueLabels<Scalar, std::uint16_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int32:
+        return SetValueLabels<Scalar, std::int32_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt32:
+        return SetValueLabels<Scalar, std::uint32_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Int64:
+        return SetValueLabels<Scalar, std::int64_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::UInt64:
+        return SetValueLabels<Scalar, std::uint64_t>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float32:
+        return SetValueLabels<Scalar, float>(
+            volume, params, labels, getStopRequested, sendProgress);
+    case PartScalarType::Float64:
+        return SetValueLabels<Scalar, double>(
+            volume, params, labels, getStopRequested, sendProgress);
+    }
+    return false;
 }
 
 bool SetTypedValues(
@@ -501,61 +507,6 @@ bool SetTypedValues(
     case PartScalarType::Float64:
         return SetTypedValues<double>(
             volume, params, labels, getStopRequested, sendProgress);
-    }
-    return false;
-}
-
-template<typename Scalar>
-bool SetTypedMask(
-    const PartScalarView& validity,
-    std::vector<PartLabelId>& labels,
-    const std::function<bool()>& getStopRequested,
-    const PartProgressCallback& sendProgress)
-{
-    return SetMaskLabels<Scalar>(
-        validity,
-        labels,
-        getStopRequested,
-        sendProgress);
-}
-
-bool SetTypedMask(
-    const PartScalarView& validity,
-    std::vector<PartLabelId>& labels,
-    const std::function<bool()>& getStopRequested,
-    const PartProgressCallback& sendProgress)
-{
-    switch (validity.scalarType) {
-    case PartScalarType::Int8:
-        return SetTypedMask<std::int8_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::UInt8:
-        return SetTypedMask<std::uint8_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::Int16:
-        return SetTypedMask<std::int16_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::UInt16:
-        return SetTypedMask<std::uint16_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::Int32:
-        return SetTypedMask<std::int32_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::UInt32:
-        return SetTypedMask<std::uint32_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::Int64:
-        return SetTypedMask<std::int64_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::UInt64:
-        return SetTypedMask<std::uint64_t>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::Float32:
-        return SetTypedMask<float>(
-            validity, labels, getStopRequested, sendProgress);
-    case PartScalarType::Float64:
-        return SetTypedMask<double>(
-            validity, labels, getStopRequested, sendProgress);
     }
     return false;
 }
@@ -757,13 +708,7 @@ PartAlgorithmResult ClassicalPartSegmenter::BuildLabels(
                 params,
                 result.labels,
                 getStopRequested,
-                sendProgress)
-            || (volume.validity
-                && !SetTypedMask(
-                    *volume.validity,
-                    result.labels,
-                    getStopRequested,
-                    sendProgress))) {
+                sendProgress)) {
             SetFailure(result, PartAlgorithmError::Cancelled, budget);
             return result;
         }

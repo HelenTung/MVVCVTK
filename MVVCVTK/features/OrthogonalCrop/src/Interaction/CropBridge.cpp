@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -88,6 +89,7 @@ public:
         std::thread worker;
         CropCandidateCallback callback;
         CropBuildParams params;
+        std::shared_ptr<std::atomic<bool>> isCancelled;
     };
 
     Impl();
@@ -224,6 +226,7 @@ CropBridge::Impl::~Impl()
         ClearTargets();
     }
     if (m_buildTask) {
+        m_buildTask->isCancelled->store(true, std::memory_order_release);
         if (m_buildTask->worker.joinable()) {
             m_buildTask->worker.join();
         }
@@ -447,6 +450,9 @@ bool CropBridge::Impl::ClearBindings()
     if (!lease || !lease->GetIsOwnerThread()) {
         return false;
     }
+    if (m_buildTask) {
+        m_buildTask->isCancelled->store(true, std::memory_order_release);
+    }
     // VTK Off 可能在拖拽中同步补发 EndInteraction；先关闭业务 gate，
     // 避免清理过程把未完成交互误写成新的 staged/history 操作。
     m_isActive = false;
@@ -480,6 +486,9 @@ bool CropBridge::Impl::SetCropInput(CropInputSnapshot input)
     }
     if (CropAlgorithm::GetInputSame(m_input, input)) {
         return true;
+    }
+    if (m_buildTask) {
+        m_buildTask->isCancelled->store(true, std::memory_order_release);
     }
 
     (void)ClearInteractions();
@@ -1501,10 +1510,12 @@ bool CropBridge::Impl::BuildCropResult(
     payload.nodeCount = params.nodeCount;
     payload.predicateTable =
         tableResult.predicateTable;
+    auto isCancelled = std::make_shared<std::atomic<bool>>(false);
     auto task = m_buildRouter.BuildResultTask(
         input,
         params,
-        std::move(payload));
+        std::move(payload),
+        [isCancelled] { return isCancelled->load(std::memory_order_acquire); });
     if (!task) {
         onComplete(BuildResultFailure(
             params,
@@ -1514,6 +1525,7 @@ bool CropBridge::Impl::BuildCropResult(
     }
 
     BuildTask active;
+    active.isCancelled = std::move(isCancelled);
     active.result = task->get_future();
     active.callback = std::move(onComplete);
     active.params = std::move(params);
@@ -1582,6 +1594,12 @@ bool CropBridge::Impl::SendBuildResult()
     }
     if (active.worker.joinable()) {
         active.worker.join();
+    }
+    // 取消后即使 worker 刚好完成，也不能把该候选发布给已失效输入。
+    if (active.isCancelled->load(std::memory_order_acquire)) {
+        result = BuildResultFailure(active.params, CropFailure::VersionMismatch,
+            "The crop build input or owner is no longer active.");
+        result.isCancelled = true;
     }
     if (active.callback) {
         active.callback(std::move(result));

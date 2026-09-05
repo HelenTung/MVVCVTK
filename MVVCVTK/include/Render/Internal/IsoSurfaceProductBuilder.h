@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 struct IsoSurfaceKey final {
@@ -52,6 +53,9 @@ struct IsoSurfaceBuildResult final {
 
 class IsoSurfaceProductBuilder final {
 public:
+    // 首段只准入图像/计数工作区；worker 计数后、提取网格前追加网格预留。
+    static std::optional<std::uint64_t> GetEstimatedBytes(
+        const IsoSurfaceBuildRequest& request);
     IsoSurfaceBuildResult BuildProduct(
         const IsoSurfaceBuildRequest& request,
         const RenderTaskToken& stopToken) const;

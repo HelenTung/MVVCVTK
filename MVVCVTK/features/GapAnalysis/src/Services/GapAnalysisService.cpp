@@ -14,6 +14,10 @@
 #endif
 #include <Windows.h>
 
+#include <vtkCellArray.h>
+#include <vtkIdList.h>
+#include <vtkPoints.h>
+#include <vtkTriangleFilter.h>
 #include <vtkDataArray.h>
 #include <vtkFlyingEdges3D.h>
 #include <vtkImageData.h>
@@ -41,6 +45,8 @@
 #include <utility>
 
 namespace {
+const DataTypeId gapVoidTableType{"org.mvvcvtk.gap-analysis.void-table", 1};
+const DataTypeId gapStatisticsType{"org.mvvcvtk.gap-analysis.statistics", 1};
 class KernelOwnedIntArray final : public vtkIntArray {
 public:
     static KernelOwnedIntArray* New();
@@ -246,6 +252,14 @@ private:
     void StartWorker(
         InputSnapshot inputSnapshot,
         GapParamSnapshot params);
+    static std::shared_ptr<const LabelMap3DPayload> CreateLabelPayload(
+        vtkImageData*, const GridGeometry3D&, const std::atomic<bool>&);
+    static std::shared_ptr<const SurfaceMeshPayload> CreateMeshPayload(
+        vtkPolyData*, const std::atomic<bool>&);
+    static std::shared_ptr<const RecordTablePayload> CreateVoidTable(
+        const std::vector<VoidRegion>&, const std::atomic<bool>&);
+    static std::shared_ptr<const RecordTablePayload> CreateStatisticsTable(
+        const GapStatistics&);
     void StopWorker();
     void SetAnalysisState(GapAnalysisState state);
 
@@ -1167,7 +1181,18 @@ bool GapAnalysisService::Impl::GetCompletedResult(
     if (!m_result.isSucceeded || !m_result.labelImage || !m_result.voidMesh) {
         return false;
     }
-    result = m_result;
+    if (m_result.payloads) {
+        // Host 发布只领取强 owner 和小量状态，不再复制原始区域数组。
+        result = {};
+        result.labelImage = m_result.labelImage;
+        result.voidMesh = m_result.voidMesh;
+        result.payloads = m_result.payloads;
+        result.statistics = m_result.statistics;
+        result.isSucceeded = true;
+    }
+    else {
+        result = m_result;
+    }
     return true;
 }
 
@@ -1291,7 +1316,27 @@ void GapAnalysisService::Impl::StartWorker(
             catch (...) {
                 result.voidMesh = nullptr;
             }
-            if (!m_isStopping.load() && result.voidMesh) {
+            bool isPrepared = !m_isStopping.load() && result.voidMesh;
+            if (isPrepared && inputSnapshot->graphOwner) {
+                const auto* source = dynamic_cast<const ImageGrid3DPayload*>(
+                    inputSnapshot->graphOwner->data->payload.get());
+                auto payloads = std::make_shared<GapResultPayloads>();
+                if (source && source->GetValid()) {
+                    payloads->labels = CreateLabelPayload(result.labelImage,
+                        source->GetGeometry(), m_isStopping);
+                    if (payloads->labels && !m_isStopping.load()) {
+                        payloads->mesh = CreateMeshPayload(result.voidMesh, m_isStopping);
+                    }
+                    if (payloads->mesh && !m_isStopping.load()) {
+                        payloads->voids = CreateVoidTable(result.voids, m_isStopping);
+                        payloads->statistics = CreateStatisticsTable(result.statistics);
+                    }
+                }
+                isPrepared = payloads->labels && payloads->mesh
+                    && payloads->voids && payloads->statistics && !m_isStopping.load();
+                if (isPrepared) result.payloads = std::move(payloads);
+            }
+            if (isPrepared && !m_isStopping.load()) {
                 result.isSucceeded = true;
                 isSuccess = true;
             }
@@ -2429,4 +2474,263 @@ vtkSmartPointer<vtkPolyData> GapAnalysisService::Impl::BuildVoidMesh(
     filter->ComputeNormalsOff();
     filter->Update();
     return filter->GetOutput();
+}
+
+std::shared_ptr<const LabelMap3DPayload> GapAnalysisService::Impl::CreateLabelPayload(
+    vtkImageData* labels,
+    const GridGeometry3D& geometry,
+    const std::atomic<bool>& isStopping)
+{
+    const auto voxelCount = GetGridVoxelCount(geometry);
+    auto* scalars = labels && labels->GetPointData()
+        ? labels->GetPointData()->GetScalars() : nullptr;
+    if (!voxelCount || !scalars
+        || scalars->GetDataType() != VTK_INT
+        || !scalars->GetVoidPointer(0)
+        || scalars->GetNumberOfComponents() != 1
+        || scalars->GetNumberOfTuples()
+            != static_cast<vtkIdType>(*voxelCount)) {
+        return {};
+    }
+    if (*voxelCount > std::numeric_limits<std::size_t>::max() / sizeof(std::int32_t)) return {};
+    auto values = std::make_shared<std::vector<std::int32_t>>(*voxelCount);
+    const auto* source = static_cast<const std::int32_t*>(scalars->GetVoidPointer(0));
+    constexpr std::size_t copyBatch = 65536;
+    for (std::size_t offset = 0; offset < values->size(); offset += copyBatch) {
+        if (isStopping.load()) return {};
+        std::copy_n(source + offset, std::min(copyBatch, values->size() - offset),
+            values->data() + offset);
+    }
+    if (isStopping.load()) return {};
+    auto payload = std::make_shared<const LabelMap3DPayload>(
+        geometry, LabelMapValues{ std::shared_ptr<const std::vector<std::int32_t>>(std::move(values)) },
+        std::vector<LabelDefinition>{}, "GapAnalysis.labels", "Gap analysis");
+    return payload->GetValid() ? payload : nullptr;
+}
+
+std::shared_ptr<const SurfaceMeshPayload> GapAnalysisService::Impl::CreateMeshPayload(
+    vtkPolyData* mesh,
+    const std::atomic<bool>& isStopping)
+{
+    if (!mesh || isStopping.load()) return {};
+    auto triangles = vtkSmartPointer<vtkTriangleFilter>::New();
+    triangles->SetInputData(mesh);
+    triangles->PassLinesOff();
+    triangles->PassVertsOff();
+    triangles->Update();
+    if (isStopping.load()) return {};
+    auto* output = triangles->GetOutput();
+    if (!output) return {};
+
+    std::vector<double> vertices;
+    if (auto* points = output->GetPoints()) {
+        if (points->GetNumberOfPoints() < 0
+            || static_cast<std::uint64_t>(points->GetNumberOfPoints())
+                > std::numeric_limits<std::size_t>::max() / (3 * sizeof(double))) return {};
+        vertices.resize(
+            static_cast<std::size_t>(points->GetNumberOfPoints()) * 3);
+        for (vtkIdType index = 0;
+            index < points->GetNumberOfPoints(); ++index) {
+            if (index % 4096 == 0 && isStopping.load()) return {};
+            points->GetPoint(
+                index,
+                vertices.data() + static_cast<std::size_t>(index) * 3);
+        }
+    }
+    else if (output->GetNumberOfPoints() != 0) {
+        return {};
+    }
+
+    std::vector<std::uint64_t> cells;
+    if (auto* polys = output->GetPolys()) {
+        auto ids = vtkSmartPointer<vtkIdList>::New();
+        polys->InitTraversal();
+        while (polys->GetNextCell(ids)) {
+            if (cells.size() % 12288 == 0 && isStopping.load()) return {};
+            if (ids->GetNumberOfIds() != 3) return {};
+            for (vtkIdType index = 0; index < 3; ++index) {
+                const auto value = ids->GetId(index);
+                if (value < 0) return {};
+                cells.push_back(static_cast<std::uint64_t>(value));
+            }
+        }
+    }
+    else if (output->GetNumberOfCells() != 0) {
+        return {};
+    }
+    auto payload = std::make_shared<const SurfaceMeshPayload>(
+        std::move(vertices), std::move(cells));
+    return payload->GetValid() ? payload : nullptr;
+}
+
+std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateVoidTable(
+    const std::vector<VoidRegion>& regions,
+    const std::atomic<bool>& isStopping)
+{
+    std::vector<std::int64_t> ids;
+    std::vector<std::int64_t> voxelCounts;
+    std::vector<double> volumes;
+    std::vector<double> equivalentDiameters;
+    std::vector<double> radii;
+    std::vector<double> diameters;
+    std::vector<std::array<double, 3>> centers;
+    std::vector<std::array<std::int64_t, 3>> centroids;
+    std::vector<std::array<std::int64_t, 6>> boxes;
+    std::vector<std::array<std::int64_t, 3>> seeds;
+    std::vector<double> minimumGrayValues;
+    std::vector<double> maximumGrayValues;
+    std::vector<double> meanGrayValues;
+    std::vector<double> grayStandardDeviations;
+    std::vector<double> grayDeviations;
+    std::vector<double> gaps;
+    std::vector<double> compactnessValues;
+    std::vector<double> surfaceAreas;
+    std::vector<double> sphericityValues;
+    std::vector<std::array<double, 3>> pcaDeviations;
+    std::vector<double> pcaMaximumDeviationRatios;
+    std::vector<double> pcaMinimumDeviationRatios;
+    std::vector<double> projectedAreasX;
+    std::vector<double> projectedAreasY;
+    std::vector<double> projectedAreasZ;
+    std::vector<std::array<double, 3>> projectedSizes;
+    std::vector<double> probabilities;
+    ids.reserve(regions.size());
+    voxelCounts.reserve(regions.size());
+    volumes.reserve(regions.size());
+    equivalentDiameters.reserve(regions.size());
+    radii.reserve(regions.size());
+    diameters.reserve(regions.size());
+    centers.reserve(regions.size());
+    centroids.reserve(regions.size());
+    boxes.reserve(regions.size());
+    seeds.reserve(regions.size());
+    minimumGrayValues.reserve(regions.size());
+    maximumGrayValues.reserve(regions.size());
+    meanGrayValues.reserve(regions.size());
+    grayStandardDeviations.reserve(regions.size());
+    grayDeviations.reserve(regions.size());
+    gaps.reserve(regions.size());
+    compactnessValues.reserve(regions.size());
+    surfaceAreas.reserve(regions.size());
+    sphericityValues.reserve(regions.size());
+    pcaDeviations.reserve(regions.size());
+    pcaMaximumDeviationRatios.reserve(regions.size());
+    pcaMinimumDeviationRatios.reserve(regions.size());
+    projectedAreasX.reserve(regions.size());
+    projectedAreasY.reserve(regions.size());
+    projectedAreasZ.reserve(regions.size());
+    projectedSizes.reserve(regions.size());
+    probabilities.reserve(regions.size());
+    for (const auto& region : regions) {
+        if (isStopping.load()) return {};
+        ids.push_back(region.id);
+        voxelCounts.push_back(region.voxelCount);
+        volumes.push_back(region.volumeMM3);
+        equivalentDiameters.push_back(region.equivalentDiameterMM);
+        radii.push_back(region.radiusMM);
+        diameters.push_back(region.diameterMM);
+        centers.push_back(region.centerMM);
+        std::array<std::int64_t, 3> centroid{};
+        std::transform(
+            region.centroidMM.begin(), region.centroidMM.end(),
+            centroid.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        centroids.push_back(centroid);
+        std::array<std::int64_t, 6> box{};
+        std::transform(
+            region.bbox.begin(), region.bbox.end(), box.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        boxes.push_back(box);
+        std::array<std::int64_t, 3> seed{};
+        std::transform(
+            region.seedVoxel.begin(), region.seedVoxel.end(), seed.begin(),
+            [](const std::int32_t value) {
+                return static_cast<std::int64_t>(value);
+            });
+        seeds.push_back(seed);
+        minimumGrayValues.push_back(region.minGray);
+        maximumGrayValues.push_back(region.maxGray);
+        meanGrayValues.push_back(region.meanGray);
+        grayStandardDeviations.push_back(region.stdDevGray);
+        grayDeviations.push_back(region.grayDeviation);
+        gaps.push_back(region.gapMM);
+        compactnessValues.push_back(region.compactness);
+        surfaceAreas.push_back(region.surfaceAreaMM2);
+        sphericityValues.push_back(region.sphericity);
+        pcaDeviations.push_back({
+            static_cast<double>(region.pcaDeviation[0]),
+            static_cast<double>(region.pcaDeviation[1]),
+            static_cast<double>(region.pcaDeviation[2]) });
+        pcaMaximumDeviationRatios.push_back(
+            region.pcaMaxDeviationRatio);
+        pcaMinimumDeviationRatios.push_back(
+            region.pcaMinDeviationRatio);
+        projectedAreasX.push_back(region.projectedAreaXMM2);
+        projectedAreasY.push_back(region.projectedAreaYMM2);
+        projectedAreasZ.push_back(region.projectedAreaZMM2);
+        projectedSizes.push_back({
+            static_cast<double>(region.projectedSize[0]),
+            static_cast<double>(region.projectedSize[1]),
+            static_cast<double>(region.projectedSize[2]) });
+        probabilities.push_back(region.defectProbability);
+    }
+    auto table = std::make_shared<const RecordTablePayload>(
+        gapVoidTableType,
+        "gap-analysis.void-regions",
+        std::vector<RecordColumn>{
+            { "void-id", std::move(ids) },
+            { "voxel-count", std::move(voxelCounts) },
+            { "volume-mm3", std::move(volumes) },
+            { "equivalent-diameter-mm", std::move(equivalentDiameters) },
+            { "radius-mm", std::move(radii) },
+            { "diameter-mm", std::move(diameters) },
+            { "center-mm", std::move(centers) },
+            { "centroid-mm", std::move(centroids) },
+            { "voxel-bbox", std::move(boxes) },
+            { "seed-voxel", std::move(seeds) },
+            { "gray-min", std::move(minimumGrayValues) },
+            { "gray-max", std::move(maximumGrayValues) },
+            { "gray-mean", std::move(meanGrayValues) },
+            { "gray-standard-deviation",
+              std::move(grayStandardDeviations) },
+            { "gray-deviation", std::move(grayDeviations) },
+            { "gap-mm", std::move(gaps) },
+            { "compactness", std::move(compactnessValues) },
+            { "surface-area-mm2", std::move(surfaceAreas) },
+            { "sphericity", std::move(sphericityValues) },
+            { "pca-deviation", std::move(pcaDeviations) },
+            { "pca-maximum-deviation-ratio",
+              std::move(pcaMaximumDeviationRatios) },
+            { "pca-minimum-deviation-ratio",
+              std::move(pcaMinimumDeviationRatios) },
+            { "projected-area-x-mm2", std::move(projectedAreasX) },
+            { "projected-area-y-mm2", std::move(projectedAreasY) },
+            { "projected-area-z-mm2", std::move(projectedAreasZ) },
+            { "projected-size-voxel", std::move(projectedSizes) },
+            { "defect-probability", std::move(probabilities) } });
+    return table->GetValid() ? table : nullptr;
+}
+
+std::shared_ptr<const RecordTablePayload> GapAnalysisService::Impl::CreateStatisticsTable(
+    const GapStatistics& statistics)
+{
+    auto table = std::make_shared<const RecordTablePayload>(
+        gapStatisticsType,
+        "gap-analysis.statistics",
+        std::vector<RecordColumn>{
+            { "object-voxel-count",
+              std::vector<std::uint64_t>{ statistics.objectVoxelCount } },
+            { "void-voxel-count",
+              std::vector<std::uint64_t>{ statistics.voidVoxelCount } },
+            { "object-volume-mm3",
+              std::vector<double>{ statistics.objectVolumeMM3 } },
+            { "void-volume-mm3",
+              std::vector<double>{ statistics.voidVolumeMM3 } },
+            { "porosity-ratio",
+              std::vector<double>{ statistics.porosityRatio } } });
+    return table->GetValid() ? table : nullptr;
 }

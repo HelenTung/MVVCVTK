@@ -89,6 +89,8 @@ public:
     void Render() override
     {
         ++m_renderCount;
+        this->InvokeEvent(vtkCommand::StartEvent);
+        this->InvokeEvent(vtkCommand::EndEvent);
     }
 
     std::size_t GetRenderCount() const
@@ -105,6 +107,7 @@ protected:
     RenderProbeWindow()
     {
         this->Mapped = 1;
+        this->SetReadyForRendering(true);
     }
     ~RenderProbeWindow() override = default;
 

@@ -402,5 +402,38 @@ int GetPartAlgorithmFailCount()
         "Bad pointer count and geometry are rejected before allocation")
         ? 0 : 1;
 
+    // 融合路径必须逐种 validity 类型保持有限且非零的定义。
+    const auto getMaskedPass = [&](const auto& mask, PartScalarType type) {
+        const std::vector<std::int64_t> values{ -1, 2, 2, 3 };
+        auto volume = BuildVolume({ 4, 1, 1 }, values, PartScalarType::Int64);
+        volume.validity = PartScalarView{mask.data(), mask.size(), type};
+        auto thresholdParams = params;
+        thresholdParams.threshold = 1.5;
+        const auto result = ClassicalPartSegmenter::BuildLabels(volume, thresholdParams);
+        return result.error == PartAlgorithmError::None
+            && result.labels == std::vector<PartLabelId>{0, 1, 0, 2};
+    };
+    failureCount += GetCaseResult(
+        getMaskedPass(std::vector<std::int8_t>{1, -1, 0, 1}, PartScalarType::Int8)
+        && getMaskedPass(std::vector<std::uint8_t>{1, 255, 0, 1}, PartScalarType::UInt8)
+        && getMaskedPass(std::vector<std::int16_t>{1, -1, 0, 1}, PartScalarType::Int16)
+        && getMaskedPass(std::vector<std::uint16_t>{1, 256, 0, 1}, PartScalarType::UInt16)
+        && getMaskedPass(std::vector<std::int32_t>{1, -1, 0, 1}, PartScalarType::Int32)
+        && getMaskedPass(std::vector<std::uint32_t>{1, 256, 0, 1}, PartScalarType::UInt32)
+        && getMaskedPass(std::vector<std::int64_t>{1, -1, 0, 1}, PartScalarType::Int64)
+        && getMaskedPass(std::vector<std::uint64_t>{1, 256, 0, 1}, PartScalarType::UInt64)
+        && getMaskedPass(std::vector<float>{1, -1, 0, 1}, PartScalarType::Float32)
+        && getMaskedPass(std::vector<double>{1, -1, 0, 1}, PartScalarType::Float64),
+        "Fused initialization dispatches every mask type and preserves integer ceil") ? 0 : 1;
+    const std::vector<double> finiteValues(5, 1.0);
+    const std::vector<double> finiteMask{1, std::numeric_limits<double>::quiet_NaN(),
+        1, std::numeric_limits<double>::infinity(), -1};
+    auto finiteVolume = BuildVolume({5, 1, 1}, finiteValues, PartScalarType::Float64);
+    finiteVolume.validity = PartScalarView{finiteMask.data(), finiteMask.size(), PartScalarType::Float64};
+    const auto finiteResult = ClassicalPartSegmenter::BuildLabels(finiteVolume, params);
+    failureCount += GetCaseResult(finiteResult.error == PartAlgorithmError::None
+        && finiteResult.labels == std::vector<PartLabelId>{1, 0, 2, 0, 3},
+        "Nonfinite validity never becomes foreground in the fused path") ? 0 : 1;
+
     return failureCount;
 }

@@ -26,38 +26,6 @@
 #include <windows.h>
 #endif
 
-namespace {
-
-std::optional<std::uint64_t> GetEstimatedImageBytes(
-    vtkImageData* image,
-    const std::array<int, 3>& dimensions) noexcept
-{
-    if (!image) return std::uint64_t{ 0 };
-    std::uint64_t voxelCount = 1;
-    for (const int dimension : dimensions) {
-        if (dimension <= 0
-            || static_cast<std::uint64_t>(dimension)
-                > (std::numeric_limits<std::uint64_t>::max)()
-                    / voxelCount) {
-            return std::nullopt;
-        }
-        voxelCount *= static_cast<std::uint64_t>(dimension);
-    }
-    const int componentCount = image->GetNumberOfScalarComponents();
-    const int scalarSize = image->GetScalarSize();
-    if (componentCount <= 0 || scalarSize <= 0) return std::nullopt;
-    const auto bytesPerVoxel = static_cast<std::uint64_t>(componentCount)
-        * static_cast<std::uint64_t>(scalarSize);
-    if (bytesPerVoxel == 0
-        || voxelCount
-            > (std::numeric_limits<std::uint64_t>::max)()
-                / bytesPerVoxel) {
-        return std::nullopt;
-    }
-    return voxelCount * bytesPerVoxel;
-}
-
-} // namespace
 
 class IsoSurfaceStrategy::Mapper final : public vtkOpenGLPolyDataMapper {
 public:
@@ -360,19 +328,14 @@ bool IsoSurfaceStrategy::StartProduct(
     }
     if (!m_taskChannel) return false;
 
-    const auto inputEstimate = GetEstimatedImageBytes(
-        request.input, request.key.outputDimensions);
-    const auto maskEstimate = GetEstimatedImageBytes(
-        request.mask, request.key.outputDimensions);
-    if (!inputEstimate || !maskEstimate) return false;
-    std::uint64_t estimatedBytes = *inputEstimate;
-    const std::uint64_t maskBytes = *maskEstimate;
-    if (maskBytes
-        > (std::numeric_limits<std::uint64_t>::max)()
-            - estimatedBytes) {
+    const auto estimate = IsoSurfaceProductBuilder::GetEstimatedBytes(request);
+    if (!estimate) {
+        m_transition.status = RenderProductStatus::Failed;
+        m_transition.failureReason = RenderProductFailure::ResourceRejected;
+        m_transition.message = "The CPU working-set estimate overflowed.";
         return false;
     }
-    estimatedBytes += maskBytes;
+    const std::uint64_t estimatedBytes = *estimate;
     const auto asyncState = m_asyncState;
     RenderTaskRequest task;
     task.requestRevision = request.requestRevision;

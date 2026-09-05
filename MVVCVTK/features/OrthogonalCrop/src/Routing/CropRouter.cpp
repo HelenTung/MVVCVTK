@@ -33,7 +33,8 @@ std::optional<std::packaged_task<CropMaterializationCandidate()>>
 CropRouter::BuildResultTask(
     CropInputSnapshot input,
     CropBuildParams params,
-    CropShaderPayload payload) const
+    CropShaderPayload payload,
+    std::function<bool()> getStopRequested) const
 {
     if (!CropAlgorithm::GetInputValid(input)
         || !input.data
@@ -53,17 +54,18 @@ CropRouter::BuildResultTask(
 
     return std::packaged_task<CropMaterializationCandidate()>(
         [input = std::move(input), params = std::move(params),
-            payload = std::move(payload)]() mutable {
+            payload = std::move(payload),
+            getStopRequested = std::move(getStopRequested)]() mutable {
             if (input.image) {
                 return CropAlgorithm::GetResult(
                     input.image->image,
                     input.image->validityMask,
                     params,
-                    payload);
+                    payload, 0, getStopRequested);
             }
             return CropAlgorithm::GetResult(
                 input.mesh ? input.mesh->mesh.GetPointer() : nullptr,
                 params,
-                payload);
+                payload, getStopRequested);
         });
 }

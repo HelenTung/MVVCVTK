@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -29,6 +30,7 @@ struct CropTableResult final {
 // worker-only 候选；只有 Host 的 DataTransaction 成功后才产生公开 CropBuildResult。
 struct CropMaterializationCandidate final {
     bool isSucceeded = false;
+    bool isCancelled = false;
     CropFailure failureReason = CropFailure::None;
     std::uint64_t failureOperationIndex = 0;
     std::vector<CropOpItem> operations;
@@ -72,10 +74,12 @@ public:
         vtkImageData* validityMask,
         const CropBuildParams& params,
         const CropShaderPayload& payload,
-        std::size_t fallbackAvailableRamBytes = 0);
+        std::size_t fallbackAvailableRamBytes = 0,
+        const std::function<bool()>& getStopRequested = {});
 
     static CropMaterializationCandidate GetResult(
         vtkPolyData* polyData,
         const CropBuildParams& params,
-        const CropShaderPayload& payload);
+        const CropShaderPayload& payload,
+        const std::function<bool()>& getStopRequested = {});
 };

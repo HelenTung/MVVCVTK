@@ -11,5 +11,6 @@ public:
     std::optional<std::packaged_task<CropMaterializationCandidate()>> BuildResultTask(
         CropInputSnapshot input,
         CropBuildParams params,
-        CropShaderPayload payload) const;
+        CropShaderPayload payload,
+        std::function<bool()> getStopRequested = {}) const;
 };

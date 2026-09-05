@@ -3,6 +3,8 @@
 #include "Data/DataPayloads.h"
 
 #include <vtkClipPolyData.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCommand.h>
 #include <vtkImageData.h>
 #include <vtkImplicitFunction.h>
 #include <vtkMath.h>
@@ -17,6 +19,7 @@
 #include <vtkType.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -633,8 +636,28 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     vtkImageData* validityMask,
     const CropBuildParams& params,
     const CropShaderPayload& payload,
-    const std::size_t fallbackAvailableRamBytes)
+    const std::size_t fallbackAvailableRamBytes,
+    const std::function<bool()>& getStopRequested)
 {
+    std::atomic<bool> isCancelled{ false };
+    const auto getStopped = [&]() noexcept {
+        if (isCancelled.load(std::memory_order_relaxed)) return true;
+        try {
+            if (!getStopRequested || !getStopRequested()) return false;
+        }
+        catch (...) {
+            // SMP 工作体不传播未知回调异常；失败作为取消并丢弃完整候选。
+        }
+        isCancelled.store(true, std::memory_order_relaxed);
+        return true;
+    };
+    const auto getCancelled = [&] {
+        auto result = BuildResultFailure(params, CropFailure::VersionMismatch,
+            "The crop build input or owner is no longer active.");
+        result.isCancelled = true;
+        return result;
+    };
+    if (getStopped()) return getCancelled();
     if (!image || !image->GetPointData() || !image->GetPointData()->GetScalars()) {
         return BuildResultFailure(
             params,
@@ -733,6 +756,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
             "Crop image build exceeds available RAM.");
     }
 
+    if (getStopped()) return getCancelled();
     auto outputImage = vtkSmartPointer<vtkImageData>::New();
     // scalar 真源不可变；新快照只创建 VTK 外壳并共享 scalar storage，
     // 真实裁切域由独立 mask 表达，避免复制整卷 float 数据。
@@ -806,6 +830,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
                     for (vtkIdType xOffset = 0;
                         xOffset < xCount;
                         ++xOffset) {
+                        if (xOffset % 4096 == 0 && getStopped()) return;
                         const double indexI =
                             static_cast<double>(extent[0])
                             + static_cast<double>(xOffset);
@@ -846,6 +871,7 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
                     sliceCount;
             }
         });
+    if (getStopped()) return getCancelled();
     const std::size_t keptCount =
         std::accumulate(
             keptBySlice.begin(),
@@ -869,8 +895,16 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
 CropMaterializationCandidate CropAlgorithm::GetResult(
     vtkPolyData* polyData,
     const CropBuildParams& params,
-    const CropShaderPayload& payload)
+    const CropShaderPayload& payload,
+    const std::function<bool()>& getStopRequested)
 {
+    const auto getCancelled = [&] {
+        auto result = BuildResultFailure(params, CropFailure::VersionMismatch,
+            "The crop build input or owner is no longer active.");
+        result.isCancelled = true;
+        return result;
+    };
+    if (getStopRequested && getStopRequested()) return getCancelled();
     if (!polyData) {
         return BuildResultFailure(
             params,
@@ -897,10 +931,24 @@ CropMaterializationCandidate CropAlgorithm::GetResult(
     clip->SetValue(0.0);
     clip->InsideOutOff();
     clip->GenerateClippedOutputOff();
+    auto cancelObserver = vtkSmartPointer<vtkCallbackCommand>::New();
+    cancelObserver->SetClientData(const_cast<std::function<bool()>*>(&getStopRequested));
+    cancelObserver->SetCallback([](vtkObject* caller, unsigned long, void* clientData, void*) {
+        const auto& getStopped = *static_cast<const std::function<bool()>*>(clientData);
+        bool isStopped = false;
+        try { isStopped = getStopped && getStopped(); }
+        catch (...) { isStopped = true; }
+        if (isStopped) vtkClipPolyData::SafeDownCast(caller)->SetAbortExecuteAndUpdateTime();
+    });
+    const auto cancelTag = clip->AddObserver(vtkCommand::ProgressEvent, cancelObserver);
     clip->Update();
+    clip->RemoveObserver(cancelTag);
+    cancelObserver->SetClientData(nullptr);
+    if (clip->GetAbortExecute() || (getStopRequested && getStopRequested())) return getCancelled();
 
     auto output = vtkSmartPointer<vtkPolyData>::New();
     output->DeepCopy(clip->GetOutput());
+    if (getStopRequested && getStopRequested()) return getCancelled();
     if (output->GetNumberOfPoints() == 0 || output->GetNumberOfCells() == 0) {
         return BuildResultFailure(
             params,
